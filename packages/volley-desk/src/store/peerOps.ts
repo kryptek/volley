@@ -152,3 +152,33 @@ export function createPeerOps(
     },
   };
 }
+
+/**
+ * How often a Desk signed in as an admin tells volleyd it is in use: an `account_list`, which
+ * volleyd counts as the account's `last_seen`. Well inside Settings › Broker accounts' stale limit
+ * (a day), so a Desk that only watches is never offered for revoking.
+ */
+export const ADMIN_SEEN_EVERY_MS = 3_600_000;
+
+/**
+ * Check in with volleyd now and every `ADMIN_SEEN_EVERY_MS` while this Desk is an admin (an
+ * unknown role is asked once, and that ask counts). Returns the stop function.
+ */
+export function keepAdminSeen(
+  peer: PeerOps,
+  auth: AuthOps,
+  timers: {
+    setInterval: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
+    clearInterval: (t: ReturnType<typeof setInterval>) => void;
+  } = globalThis,
+): () => void {
+  const checkIn = () => {
+    const known = peer.known();
+    if (known === "admin") {
+      void auth.request("account_list", {}, { timeoutMs: ADMIN_PROBE_TIMEOUT_MS }).catch(() => {});
+    } else if (known === null) void peer.admin();
+  };
+  checkIn();
+  const t = timers.setInterval(checkIn, ADMIN_SEEN_EVERY_MS);
+  return () => timers.clearInterval(t);
+}

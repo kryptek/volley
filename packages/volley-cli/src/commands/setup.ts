@@ -336,6 +336,13 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout${fromRecord && layoutFlag === undefined ? " (from the last volley setup)" : ""}, auth dir ${auth.dir}\n`,
   );
   const yes = ctx.yes;
+  // A run that stops once the Services step has checked cmux (often at the cmux change itself:
+  // the runs where its mode matters most) still records the mode it found, and replaces an
+  // earlier run's.
+  const stopped = () => {
+    if (ctx.cmuxSocketMode !== undefined) writeSetupInstall(ctx);
+    return EXIT.ERROR;
+  };
   const skipped: string[] = [];
   for (const [i, [name, planner]] of STEPS.entries()) {
     if (only.length > 0 && !only.includes(name)) continue;
@@ -345,14 +352,14 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     } catch (e) {
       journal(name, "failed", e instanceof Error ? e.message : String(e));
       io.stderr(`volley setup: ${name}: ${e instanceof Error ? e.message : String(e)}\n`);
-      return EXIT.ERROR;
+      return stopped();
     }
     io.stdout(`\n[${i + 1}/${STEPS.length}] ${plan.title}\n`);
     for (const f of plan.found) io.stdout(`  · ${f}\n`);
     if (plan.blocked !== undefined) {
       journal(name, "blocked", plan.blocked.split("\n")[0]);
       io.stdout(`  ✗ Blocked: ${plan.blocked}\n`);
-      return EXIT.ERROR;
+      return stopped();
     }
     if (plan.skipped !== undefined) {
       journal(name, "skipped", plan.skipped);
@@ -378,7 +385,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       io.stdout(
         `  Nothing was changed. Rerun \`volley setup\` to continue${deps.interactive ? "" : " (not a terminal: pass --yes to apply)"}.\n`,
       );
-      return EXIT.ERROR;
+      return stopped();
     }
     for (const c of plan.changes) {
       try {
@@ -390,7 +397,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
         const msg = e instanceof Error ? e.message : String(e);
         journal(name, "failed", `${c.summary}: ${msg}`);
         io.stderr(`volley setup: ${plan.title}: ${c.summary}: ${msg}\n`);
-        return EXIT.ERROR;
+        return stopped();
       }
     }
     const problems = (await plan.verify?.()) ?? [];
@@ -399,7 +406,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       io.stderr(
         `volley setup: ${plan.title}: after the changes:\n${problems.map((p) => `  - ${p}\n`).join("")}`,
       );
-      return EXIT.ERROR;
+      return stopped();
     }
     for (const line of plan.verified ?? []) io.stdout(`  ✓ ${line}\n`);
     journal(name, "verified");

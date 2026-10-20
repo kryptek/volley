@@ -320,7 +320,11 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     const inner = m.exec;
     m.exec = async (argv, opts) => {
       if (argv[0] === "sh" && argv[2] === CMUX_CHECK_SCRIPT) {
-        writeFileSync(argv[4] as string, `${said}\nvolley-cmux-exit=${code}\n`);
+        // `cmux capabilities --json` and `cmux list-workspaces` both answer `said`.
+        writeFileSync(
+          argv[4] as string,
+          `${said}\nvolley-cmux-caps=${code}\n${said}\nvolley-cmux-exit=${code}\n`,
+        );
         return { code: 0, stdout: "", stderr: "", timedOut: false };
       }
       return inner(argv, opts);
@@ -692,7 +696,7 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
         .filter((a) => a[1] !== "print")
         .map((a) => a.join(" ")),
     ).toEqual([
-      "launchctl bootout gui/501/systems.volley.desk",
+      // Not loaded yet: nothing to boot out.
       `launchctl bootstrap gui/501 ${join(m.home, "Library", "LaunchAgents", "systems.volley.desk.plist")}`,
     ]);
     expect(existsSync(join(m.home, ".claude", "settings.json"))).toBe(true);
@@ -724,6 +728,38 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
         { auth: { layout: LAYOUTS["brew-arm64"] } } as unknown as SetupContext,
       )?.command,
     ).toBe("volley setup --step services");
+  });
+
+  it("services: the Desk shows cmux's socket mode, and its Services run records it in setup.json", async () => {
+    // An earlier terminal run recorded Automation mode; cmux has since been put in Password mode.
+    mkdirSync(m.volleydHome, { recursive: true });
+    const file = join(m.volleydHome, "setup.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        layout: "brew-arm64",
+        config: m.layout.config,
+        state_file: m.layout.stateFile,
+        auth_dir: m.layout.authDir,
+        cmux_socket_mode: "automation",
+      }),
+    );
+    cmuxSays(1, "ERROR: Invalid password");
+    await start();
+    const services = step((await plan()).steps, "services");
+    expect(services.found.join("\n")).toContain("(cmux's socket control mode: Password mode)");
+    // Planning changes nothing on the machine.
+    expect(JSON.parse(readFileSync(file, "utf-8")).cmux_socket_mode).toBe("automation");
+    const r = await apply("services", services.plan_id);
+    expect(r?.ok, r?.error).toBe(true);
+    expect(JSON.parse(readFileSync(file, "utf-8")).cmux_socket_mode).toBe("password");
+  });
+
+  it("services: cmux in Automation mode shows as such in the Desk's found lines", async () => {
+    cmuxSays(0, '{"access_mode":"automation"}');
+    await start();
+    const services = step((await plan()).steps, "services");
+    expect(services.found.join("\n")).toContain("(cmux's socket control mode: Automation mode)");
   });
 
   it("a sudo layout's security changes are listed for a terminal, with the command, and never run", async () => {
@@ -953,7 +989,10 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
     ).toBe(true);
     rmSync(join(m.volleydHome, "broker.json"));
     await collect();
-    // cmux refusing volleyd's service, then not answering: the password, then the recheck.
+    // cmux refusing volleyd's service (in Password mode, then in its default mode), then not
+    // answering: the password, then the rechecks.
+    cmuxSays(1, "ERROR: Invalid password");
+    await collect();
     cmuxSays(1, "Access denied - only processes started inside cmux can connect");
     await collect();
     cmuxSays(1, "Failed to connect to /tmp/cmux.sock: Connection refused");

@@ -252,13 +252,21 @@ describe("the daemon sweeps at start and on the interval", () => {
   });
 
   it("sweeps once at start: a login left from before is gone before any interval", async () => {
-    const creds = memoryCredentials();
+    // The daemon's clock is virtual: the start sweep (armed for 0 ms in start) runs when the
+    // test moves time, after the wave is up. On the real clock it ran on a timer racing the
+    // whole setup, and the test timed out now and then on CI.
+    const clock = fakeClock(Date.now());
+    const creds = memoryCredentials(() => clock.now());
     creds.logins.add("w0-t1-implementer-1");
     creds.mintedAt.set("w0-t1-implementer-1", 0);
-    const s = await makeSupervisedEnv({ creds, daemon: { credentialSweepMs: 3_600_000 } });
+    const s = await makeSupervisedEnv({ creds, daemon: { credentialSweepMs: 3_600_000, clock } });
     try {
+      expect(creds.revoked).toEqual([]);
+      await clock.advance(1); // the start sweep's timer, an hour before the interval's
       await s.event("credentials_swept", 1, "_system");
-      expect(creds.revoked).toContain("w0-t1-implementer-1");
+      expect(creds.revoked).toEqual(["w0-t1-implementer-1"]);
+      // The implementer minted for the wave is live: spared.
+      expect(creds.logins.has("w1-t1-implementer-1")).toBe(true);
     } finally {
       await s.cleanup();
     }

@@ -166,6 +166,7 @@ import {
   spawnsUsed,
 } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
+import { lastOutput, lastOutputNote } from "./screens";
 import { SETUP_OPS, SetupOps, type SetupOpsOptions, type SetupOutcome } from "./setup-ops";
 import type {
   AgentMcp,
@@ -3394,8 +3395,8 @@ export class Daemon {
             task,
             question:
               x.kind === "hooks_silent"
-                ? `Needs you: no hook signal from ${agentId} for ${min} min while its screen keeps changing: hooks may be broken by a harness update. Look at its terminal?`
-                : `Needs you: no hook signal from ${agentId} for ${min} min and its screen is not changing. Look at its terminal?`,
+                ? `Needs you: no hook signal from ${agentId} for ${min} min while its screen keeps changing: hooks may be broken by a harness update.${lastOutputNote(lastOutput(x.screen), false)} Look at its terminal?`
+                : `Needs you: no hook signal from ${agentId} for ${min} min and its screen is not changing.${lastOutputNote(lastOutput(x.screen), false)} Look at its terminal?`,
             options: ["keep running", STOP_ANSWER],
             pointers: { screen },
           },
@@ -4582,7 +4583,13 @@ export class Daemon {
             .pop();
         out = PEER_ADMIN_OPS.has(payload.op as string)
           ? await this.peerAdminOp(exec, sender, payload)
-          : await accountOp(exec, sender, payload, lastSeen);
+          : await accountOp(
+              exec,
+              sender,
+              payload,
+              lastSeen,
+              new Date(this.startedAt).toISOString(),
+            );
       }
     } catch (e) {
       const op = typeof payload.op === "string" ? payload.op : "";

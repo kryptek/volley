@@ -3,7 +3,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { reloadLaunchd } from "volley-cli/setup/launchd";
 import { stableServicePath } from "volley-cli/setup/service-path";
+import { type Clock, systemClock } from "../clock";
 import { volleydHome } from "../config-store";
 import { resolveTarget } from "../control";
 import { type ExecFn, exec as realExec } from "../exec";
@@ -84,20 +86,40 @@ export function renderPlist(
 export const plistPath = (launchAgentsDir: string) =>
   join(launchAgentsDir, `${SERVICE_LABEL}.plist`);
 
-/** Write the plist and (re)load it: bootout any previous instance, then bootstrap. */
+/**
+ * Write the plist and (re)load it: bootout a loaded instance, wait until launchd has let it go,
+ * then bootstrap (retrying launchd's EIO meanwhile: volley-cli's setup/launchd.ts). A plist that
+ * will not load is replaced by the previous one, loaded again, so a rerun never leaves volleyd down.
+ */
 export async function installService(
   p: ServicePaths,
   io: IO,
   run: ExecFn = realExec,
+  // real clock: `volleyd install` is a one-shot command waiting on launchd, not the daemon
+  clock: Clock = systemClock,
 ): Promise<ExitCode> {
   mkdirSync(p.home, { recursive: true });
   mkdirSync(p.launchAgentsDir, { recursive: true });
   const file = plistPath(p.launchAgentsDir);
-  writeFileSync(file, renderPlist(p));
-  await run(["launchctl", "bootout", `gui/${p.uid}/${SERVICE_LABEL}`]); // not loaded yet is fine
-  const r = await run(["launchctl", "bootstrap", `gui/${p.uid}`, file]);
-  if (r.code !== 0) {
-    io.stderr(`volleyd install: launchctl bootstrap failed (${r.code}): ${r.stderr.trim()}\n`);
+  const before = existsSync(file) ? readFileSync(file, "utf-8") : "";
+  const text = renderPlist(p);
+  writeFileSync(file, text);
+  const d = {
+    exec: (argv: string[]) => run(argv),
+    sleep: (ms: number) => new Promise<void>((resolve) => clock.setTimeout(resolve, ms)),
+  };
+  const domain = `gui/${p.uid}`;
+  const r = await reloadLaunchd(d, domain, SERVICE_LABEL, file);
+  if (!r.ok) {
+    let state = `volleyd is not loaded: launchctl bootstrap ${domain} ${file}`;
+    if (before !== "" && before !== text) {
+      writeFileSync(file, before);
+      const back = await reloadLaunchd(d, domain, SERVICE_LABEL, file);
+      state = back.ok
+        ? "restored the previous plist and loaded it again: volleyd runs as before"
+        : `restored the previous plist, but it did not load either (${back.error}): ${state}`;
+    }
+    io.stderr(`volleyd install: ${r.error}; ${state}\n`);
     return EXIT.ERROR;
   }
   io.stdout(`installed ${file}\nlogs: ${join(p.home, "volleyd.log")}\n`);

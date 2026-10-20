@@ -13,6 +13,7 @@ import {
 } from "../auth/roles";
 import { EXIT, type ExitCode } from "../exit-codes";
 import { readSetupInstall } from "../setup/journal";
+import { encodeQr, renderQr } from "../setup/qr";
 import {
   DEFAULT_KIND,
   KINDS,
@@ -212,6 +213,31 @@ function deskOf(ctx: AuthContext): { url: string; host?: string } {
   };
 }
 
+/**
+ * A sign-in token as what the device opens: the link to the Desk on the LAN address `volley setup`
+ * recorded (`#signin=<token>`, which the Desk redeems), and its QR code, like setup's phone step.
+ */
+function signinLines(desk: { url: string; host?: string }, token: string): string[] {
+  const port = new URL(desk.url).port || "80";
+  const host =
+    desk.host?.includes(":") && !desk.host.startsWith("[") ? `[${desk.host}]` : desk.host;
+  const url =
+    host !== undefined ? `http://${host}:${port}/#signin=${token}` : `${desk.url}#signin=${token}`;
+  return [
+    "Open this link on the device (or scan it) to open the Desk, signed in:",
+    "",
+    renderQr(encodeQr(url)),
+    `  ${url}`,
+    "",
+    ...(host === undefined
+      ? [
+          "(this link names localhost: on another device use this machine's address instead, or run `volley setup` so links name it)",
+          "",
+        ]
+      : []),
+  ];
+}
+
 /** Issue a one-time token: hash in tokens.json, a login named by its id whose password it is. */
 async function issueToken(
   ctx: AuthContext,
@@ -274,7 +300,7 @@ async function issueToken(
                   : "(from another device, use this machine's address instead of localhost)",
                 "",
               ]
-            : []),
+            : signinLines(desk, token)),
           `It expires in ${minutes} (${expiresAt}). Only its hash is stored.`,
           "",
         ].join("\n"),
@@ -484,6 +510,7 @@ export async function accountVerb(
           ttl as number,
           flags.label,
           flags.json,
+          deskOf(ctx),
         );
       case "redeem":
         return redeem(ctx, link, now, flags.label as string, flags.json);
