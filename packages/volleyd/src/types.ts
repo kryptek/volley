@@ -148,6 +148,8 @@ export interface AutopilotConfig {
   respawn_max: number;
   /** Re-reviews of one task (a moved head, a stale review at the gate). */
   rereview_max: number;
+  /** CI fixups (a ci_failed answered `fixup`) of one task. */
+  ci_fixup_max: number;
   /** Agent questions answered for one run. */
   question_max: number;
   /** Multiplier of the derived spawn budget that `raise by <n>` answers may reach. */

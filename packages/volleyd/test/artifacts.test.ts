@@ -9,6 +9,7 @@ import {
   probeMovedHead,
   verifyArtifacts,
 } from "../src/artifacts";
+import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { type FakeExec, fakeExec } from "./helpers/fake-exec";
 import { FIXTURES } from "./helpers/fake-host";
 
@@ -110,6 +111,44 @@ describe("artifact verification", () => {
     expect(out.decision.question).toContain("CI / test");
     expect(out.decision.question).not.toMatch(/status page/);
     expect(out.data).toMatchObject({ head_sha: HEAD, run_urls: [expect.stringContaining("502")] });
+  });
+
+  it("CI red: the failed runs' logs are read once each; ci_failed carries failing_tests, log and offers fixup first", async () => {
+    const fake = allGood()
+      .on(["gh", "run", "list"], { stdout: fx("gh-run-list-red.json") })
+      .on(["gh", "run", "view"], { stdout: fx("gh-run-view-failed.json") })
+      .on(["gh", "run", "view", "502", "--log-failed"], { stdout: fx("gh-run-log-failed.txt") });
+    const report = await verifyArtifacts(fake.exec, SPEC);
+    expect(fake.argvs(["gh", "run", "view", "502", "--log-failed"])).toHaveLength(1);
+    const out = artifactOutcome("T1", "implementer", report);
+    expect(out.kind).toBe("ci_failed");
+    if (out.kind !== "ci_failed") return;
+    expect(out.decision.options).toEqual(["fixup", "re-verify", "cancel"]);
+    expect(out.decision.question).toMatch(/fixup: a fixup agent/);
+    expect(out.data.failing_tests).toEqual([
+      "test/pipeline.test.ts > pipeline: the default sequence > implement then merge_ready",
+      "test/clock.test.ts > sleep > resolves on abort",
+    ]);
+    expect(out.data.log).toContain("AssertionError: expected 1 to be 2");
+    expect(out.data.ci_runs).toEqual(report.kind === "ok" ? report.ci.runs : []);
+  });
+
+  it("a red report's log is clipped to its tail; a green report reads no log and is unchanged", async () => {
+    const long = `${"x".repeat(DAEMON_DEFAULTS.ci_log_max_chars)}\nthe last line\n`;
+    const red = allGood()
+      .on(["gh", "run", "list"], { stdout: fx("gh-run-list-red.json") })
+      .on(["gh", "run", "view"], { stdout: fx("gh-run-view-failed.json") })
+      .on(["gh", "run", "view", "502", "--log-failed"], { stdout: long });
+    const out = artifactOutcome("T1", "implementer", await verifyArtifacts(red.exec, SPEC));
+    const log = out.kind === "ci_failed" ? String(out.data.log) : "";
+    expect(log.length).toBeLessThanOrEqual(DAEMON_DEFAULTS.ci_log_max_chars);
+    expect(log).toMatch(/the last line$/);
+
+    const green = allGood();
+    const report = await verifyArtifacts(green.exec, SPEC);
+    expect(green.argvs(["gh", "run", "view"])).toEqual([]);
+    expect(report.kind === "ok" && report.ci).not.toHaveProperty("log");
+    expect(report.kind === "ok" && report.ci).not.toHaveProperty("failing_tests");
   });
 
   it("an infra-shaped failure says to check the hosting provider's status page first", async () => {
@@ -249,7 +288,7 @@ describe("superseded runs (latest run per workflow and trigger event wins)", () 
     expect(out.kind).toBe("ci_failed");
     if (out.kind !== "ci_failed") return;
     expect(out.decision.question).toContain(
-      "Run https://github.com/example/repo/actions/runs/601 was cancelled and nothing replaced it: re-run it (or push again). volleyd never re-runs CI; fix or re-run it, then answer re-verify (or cancel).",
+      "Run https://github.com/example/repo/actions/runs/601 was cancelled and nothing replaced it: re-run it (or push again). volleyd never re-runs CI. fixup: a fixup agent at",
     );
     expect(out.decision.question).not.toMatch(/status page/);
     expect(out.data).toMatchObject({ infra: true, infra_reason: "cancelled" });

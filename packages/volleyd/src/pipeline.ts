@@ -198,9 +198,13 @@ export interface MovedHead {
   asked?: boolean;
 }
 
-/** A moved head's fixup directive (kept on the pr_head_moved decision as `directive`). */
+/**
+ * A fixup's directive: a moved head's (kept on the pr_head_moved decision as `directive`), or CI
+ * failed on the pipeline's own head (`from` absent; journaled on the fixup's `stage_entered`).
+ */
 export interface Directive {
-  from: string;
+  /** The head the move started from; absent for a CI failure on the role's own head. */
+  from?: string;
   to: string;
   ci: CiState;
   failed_jobs: string[];
@@ -238,6 +242,7 @@ export type SteerReason = "artifacts" | "result" | "merge_nudge";
 export interface PipelineMarker {
   on:
     | "verify"
+    | "liveness"
     | "ci_failed"
     | "ci_none"
     | "review_result"
@@ -329,6 +334,7 @@ export function reducePipeline(
         p.branch_update = p.rebasing && d.branch_update === "merge" ? "merge" : undefined;
         p.rereview = [];
         if (typeof d.review_round === "number") p.round = d.review_round;
+        if (typeof d.directive === "object" && d.directive !== null) ciFixupEntered(p, d);
         for (const r of p.roles) delete p.runs[r];
       } else if (d.stage === "implement") {
         // Journaled by the spawn itself, after its agent_spawned: keep that run.
@@ -543,6 +549,35 @@ export function reducePipeline(
     }
   }
   return p;
+}
+
+/**
+ * A CI fixup's `stage_entered` (`directive`, `red`: the role whose head CI failed and where its
+ * run started): the red head becomes the task's head, and a fixup or rebase head is chained like
+ * an accepted one, so the reviews the red head descends from still hold (mergeReadyCheck).
+ */
+function ciFixupEntered(p: TaskPipeline, d: Record<string, unknown>): void {
+  const dir = d.directive as Directive;
+  const red = d.red as { role?: unknown; from?: unknown; touched?: unknown } | undefined;
+  const from = typeof red?.from === "string" ? red.from : undefined;
+  if (from !== undefined && red?.role === "fixup") {
+    const result = p.runs.fixup?.result;
+    p.fixups.push({
+      round: p.round,
+      from,
+      to: dir.to,
+      ...(result !== undefined ? { result } : {}),
+      ...(p.runs.fixup?.worktree !== undefined ? { worktree: p.runs.fixup.worktree } : {}),
+    });
+  } else if (from !== undefined && red?.role === "rebase") {
+    const touched = Array.isArray(red.touched) ? (red.touched as string[]) : [];
+    p.rebases.push({ from, to: dir.to, touched });
+  }
+  p.directive = dir;
+  p.head = dir.to;
+  const pr = d.pr as { number?: unknown; url?: unknown } | undefined;
+  if (p.pr === undefined && typeof pr?.number === "number" && typeof pr.url === "string")
+    p.pr = { number: pr.number, url: pr.url };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1389,12 +1424,12 @@ function onVerified(
         ...retireIfLive(run),
         {
           kind: "decide",
-          marker: { on: "verify", role: ev.role },
+          marker: { on: "verify", role: ev.role, agent_id: run.agent_id },
           decision: {
             kind: "agent_blocked",
             task: v.task,
-            question: `${roleLabel(v.p, ev.role)} ${run.agent_id} reported done, but its ${out.missing} is missing (${out.detail}). Fix it by hand and answer re-verify, or cancel the task.`,
-            options: ["re-verify", "cancel"],
+            question: `${roleLabel(v.p, ev.role)} ${run.agent_id} reported done, but its ${out.missing} is missing (${out.detail}). respawn: a fresh ${roleLabel(v.p, ev.role)} continues the work (an implementer, its pushed branch and PR); re-verify: you fixed it by hand; or cancel the task?`,
+            options: ["respawn", "re-verify", "cancel"],
           },
         },
       ];
@@ -1646,7 +1681,18 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
   ];
   switch (m.on) {
     case "verify":
+      if (role !== undefined && isRespawnAnswer(answer, d.options))
+        return respawnRun(v, role, m.agent_id ?? run?.agent_id);
+      // Anything but cancel re-verifies: the non-destructive default.
+      return role !== undefined ? [{ kind: "verify", role }] : [];
+    case "liveness":
+      // A stalled agent: respawn replaces it; any other answer is the daemon's (it steers it).
+      return role !== undefined && isRespawnAnswer(answer, d.options)
+        ? respawnRun(v, role, m.agent_id)
+        : [];
     case "ci_failed":
+      if (role !== undefined && isAnswer(answer, "fixup") && (d.options ?? []).includes("fixup"))
+        return ciFixup(v, d, m);
       // Anything but cancel re-verifies: the non-destructive default.
       return role !== undefined ? [{ kind: "verify", role }] : [];
     case "ci_none":
@@ -1706,13 +1752,9 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       const agent = (d as { agent_id?: unknown }).agent_id;
       if (role === undefined || typeof agent !== "string") return [];
       if (isAnswer(answer, "respawn")) {
-        // It went on and was accepted before the answer (steered by hand): keep that work.
-        if (run !== undefined && run.agent_id === agent)
-          return run.accepted || run.retired !== undefined
-            ? []
-            : [{ kind: "relaunch", role, agent_id: agent }];
-        // A newer run of the role already replaced it: only make sure the old agent is gone.
-        return [{ kind: "retire", agent_id: agent, status: "relaunched" }];
+        // Ended meanwhile (its status is handled as usual): nothing to replace.
+        if (run !== undefined && run.agent_id === agent && run.retired !== undefined) return [];
+        return respawnRun(v, role, agent);
       }
       return reask();
     }
@@ -1779,6 +1821,64 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       return i >= 0 ? enterStep(v, i, roles) : [];
     }
   }
+}
+
+/**
+ * Replace `agent`'s run of `role` (its session is stopped first: the relaunch's retire): the next
+ * advance spawns the role at the next attempt. Work accepted before the answer (it went on, or was
+ * steered by hand) is kept; a newer run already in its place only needs the old agent gone.
+ */
+function respawnRun(v: PipelineView, role: Role, agent: string | undefined): PipelineAction[] {
+  const run = v.p.runs[role];
+  if (agent === undefined) return [];
+  if (run !== undefined && run.agent_id === agent)
+    return run.accepted ? [] : [{ kind: "relaunch", role, agent_id: agent }];
+  return [{ kind: "retire", agent_id: agent, status: "relaunched" }];
+}
+
+/**
+ * A ci_failed answered `fixup`: a fixup at the red head, with the CI result as its only job
+ * (`Directive`, `only`). The step is the current one, so the stage groups go on from where the red
+ * head's role was: CI red on the implementer's first head reaches the reviews after the fixup;
+ * on a fixup's or rebase's head, the gate (their reviews hold: ciFixupEntered).
+ */
+function ciFixup(v: PipelineView, d: DecisionRecord, m: PipelineMarker): PipelineAction[] {
+  const x = d as unknown as Record<string, unknown>;
+  const role = m.role;
+  const head = m.head;
+  // Verified meanwhile (a re-run turned it green): the red head is no longer the task's.
+  if (role === undefined || head === undefined || v.p.runs[role]?.accepted === true) return [];
+  const strings = (k: string): string[] =>
+    Array.isArray(x[k])
+      ? (x[k] as unknown[]).filter((s): s is string => typeof s === "string")
+      : [];
+  const directive: Directive = {
+    to: head,
+    ci: "red",
+    failed_jobs: strings("failed_jobs"),
+    failing_tests: strings("failing_tests"),
+    log: typeof x.log === "string" ? x.log : "",
+    diffstat: "",
+    runs: Array.isArray(x.ci_runs) ? (x.ci_runs as CiRun[]) : [],
+    only: true,
+  };
+  const start = role !== "implementer" ? v.p.runs[role]?.start : undefined;
+  const touched = Array.isArray(x.touched) ? (x.touched as string[]) : undefined;
+  const red = {
+    role,
+    ...(start !== undefined ? { from: start } : {}),
+    ...(touched !== undefined ? { touched } : {}),
+  };
+  const pr = x.pr as { number: number; url: string } | undefined;
+  const after: PipelineView = {
+    ...v,
+    p: { ...v.p, head, directive, ...(v.p.pr === undefined && pr !== undefined ? { pr } : {}) },
+  };
+  return enterStep(after, Math.max(v.p.step, 0), ["fixup"], {
+    directive,
+    red,
+    ...(pr !== undefined ? { pr } : {}),
+  });
 }
 
 /**
@@ -2056,7 +2156,12 @@ function enter(v: PipelineView, i: number): PipelineAction[] {
   return enterStep(v, i, roles);
 }
 
-function enterStep(v: PipelineView, i: number, roles: Role[]): PipelineAction[] {
+function enterStep(
+  v: PipelineView,
+  i: number,
+  roles: Role[],
+  extra: Record<string, unknown> = {},
+): PipelineAction[] {
   const reviewing = roles.some(isReviewerRole);
   const stage = ROLE_STAGE[roles[0] as Role];
   // spawnFor reads the round the step starts (fixup: the round it fixes).
@@ -2073,6 +2178,7 @@ function enterStep(v: PipelineView, i: number, roles: Role[]): PipelineAction[] 
           roles,
           ...(roles.length > 1 ? { group: roles.map((r) => ROLE_STAGE[r]) } : {}),
           ...(reviewing ? { review_round: after.p.round } : {}),
+          ...extra,
         },
       },
     },
@@ -2110,23 +2216,19 @@ function enterRebase(v: PipelineView): PipelineAction[] {
  */
 function renderDirectiveMd(d: Directive): string {
   const short = (x: string) => x.slice(0, 12);
+  if (d.ci === "red" && d.from === undefined) return renderCiDirectiveMd(d);
+  const from = d.from ?? "";
   const lines = [
     "# Directive: the PR head moved",
     "",
-    `The PR head moved from \`${short(d.from)}\` to \`${short(d.to)}\` outside the pipeline, after a gate (\`${short(d.from)}..${short(d.to)}\`). This worktree starts at the new head. This directive is your first job.`,
+    `The PR head moved from \`${short(from)}\` to \`${short(d.to)}\` outside the pipeline, after a gate (\`${short(from)}..${short(d.to)}\`). This worktree starts at the new head. This directive is your first job.`,
     "",
     `## CI on ${short(d.to)}: ${d.ci}`,
     "",
   ];
   if (d.ci === "red") {
-    lines.push("Failed jobs:", "", ...d.failed_jobs.map((j) => `- ${j}`), "");
+    lines.push(...failureMd(d));
     lines.push(
-      "Failing tests:",
-      "",
-      ...(d.failing_tests.length > 0
-        ? d.failing_tests.map((t) => `- \`${t}\``)
-        : ["- (none found in the logs: read the failed jobs)"]),
-      "",
       'Make CI green on this head without undoing what the new commits intend. Publish your result with `{ "finding": "CI", "how": "…" }` among `resolved`.',
       "",
     );
@@ -2137,7 +2239,7 @@ function renderDirectiveMd(d: Directive): string {
     );
   }
   lines.push(
-    `## What changed ${short(d.from)}..${short(d.to)}`,
+    `## What changed ${short(from)}..${short(d.to)}`,
     "",
     "```",
     d.log || "(no log)",
@@ -2148,6 +2250,51 @@ function renderDirectiveMd(d: Directive): string {
     "",
   );
   return lines.join("\n");
+}
+
+/** A red directive's failed jobs and failing tests. */
+function failureMd(d: Directive): string[] {
+  return [
+    "Failed jobs:",
+    "",
+    ...(d.failed_jobs.length > 0
+      ? d.failed_jobs.map((j) => `- ${j}`)
+      : ["- (no job details: open the runs)"]),
+    "",
+    "Failing tests:",
+    "",
+    ...(d.failing_tests.length > 0
+      ? d.failing_tests.map((t) => `- \`${t}\``)
+      : ["- (none found in the logs: read the failed jobs)"]),
+    "",
+  ];
+}
+
+/** The directive section for CI red on the pipeline's own head (a ci_failed answered `fixup`). */
+function renderCiDirectiveMd(d: Directive): string {
+  const at = d.to.slice(0, 12);
+  return [
+    "# Directive: CI failed on your head",
+    "",
+    `CI failed on \`${at}\`, the PR head the pipeline pushed. This worktree starts at that head. Making CI green on it is your only job: the reviews' findings were handled before (or are reviewed after you).`,
+    "",
+    `## CI on ${at}: red`,
+    "",
+    ...d.runs
+      .filter((r) => r.status === "completed" && r.conclusion !== "success")
+      .map((r) => `- ${r.name}: ${r.conclusion ?? r.status} (${r.url})`),
+    ...(d.runs.length > 0 ? [""] : []),
+    ...failureMd(d),
+    "## The failed runs' log (its tail)",
+    "",
+    "```",
+    d.log || "(no log: read the runs with `gh run view <id> --log-failed`)",
+    "```",
+    "",
+    'Fix the cause without undoing what the PR intends, run the repository\'s gates, push to the PR branch, and publish your result with `{ "finding": "CI", "how": "…" }` among `resolved`.',
+    "",
+    "",
+  ].join("\n");
 }
 
 interface BriefCtx {

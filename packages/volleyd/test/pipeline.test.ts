@@ -186,7 +186,7 @@ describe("pipeline: artifacts and CI", () => {
     await h.finish("implementer", { head: H1 });
     expect(h.steers).toHaveLength(1);
     const [d] = h.openDecisions();
-    expect(d).toMatchObject({ kind: "agent_blocked", options: ["re-verify", "cancel"] });
+    expect(d).toMatchObject({ kind: "agent_blocked", options: ["respawn", "re-verify", "cancel"] });
     // The owner opens the PR by hand and answers re-verify.
     h.openPr(H1);
     h.world.ci[H1] = "green";
@@ -1074,5 +1074,139 @@ describe("roleSpawnHold (what the daemon checks before a role spawn)", () => {
       /admission closed: memory pressure/,
     );
     expect(roleSpawnHold({ ...ok, used: 4 })).toMatch(/spawn budget exhausted \(4\/4\)/);
+  });
+});
+
+describe("pipeline: remediations (respawn an unverifiable agent, fixup a red head)", () => {
+  const fixture = (name: string) => readFileSync(join(FIXTURES, name), "utf-8");
+  const redOn = (head: string) => {
+    h.world.ci[head] = "red";
+    h.world.runLog = fixture("gh-run-log-failed.txt");
+  };
+  const ciFailed = () => h.openDecisions().find((d) => d.kind === "ci_failed");
+
+  it("CI red on the implementer's first head: fixup with the CI directive, then the reviews", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "red" });
+    redOn(H1);
+    // The verification ran before the log was set: re-verify reads it now.
+    const first = ciFailed();
+    await h.resolve(first?.decision_id as string, "re-verify");
+    const d = ciFailed();
+    expect(d?.options?.[0]).toBe("fixup");
+    const x = d as unknown as Record<string, unknown>;
+    expect(x.failing_tests).toEqual([
+      "test/pipeline.test.ts > pipeline: the default sequence > implement then merge_ready",
+      "test/clock.test.ts > sleep > resolves on abort",
+    ]);
+    expect(String(x.log)).toContain("AssertionError");
+
+    await h.resolve(d?.decision_id as string, "fixup");
+    const entered = h.events.filter((e) => e.type === "stage_entered").at(-1);
+    expect(entered?.data).toMatchObject({
+      stage: "fixup",
+      roles: ["fixup"],
+      directive: { ci: "red", to: H1, only: true, failed_jobs: ["CI / test"] },
+    });
+    const fixup = h.spawns.find((s) => s.role === "fixup");
+    expect(fixup?.start).toEqual({ ref: H1, detach: false });
+    const md = fixup?.files["findings.md"] ?? "";
+    expect(md.startsWith("# Directive: CI failed on your head")).toBe(true);
+    expect(md).toContain("- CI / test");
+    expect(md).toContain("`test/clock.test.ts > sleep > resolves on abort`");
+    expect(md).toContain("AssertionError: expected 1 to be 2");
+    expect(JSON.parse(fixup?.files["findings.json"] ?? "null")).toEqual([]);
+    expect(stage()).toBe("fixup");
+    expect(h.task()?.stage_label).toBe("fixup (CI directive)");
+
+    // Green: no review exists yet, so the reviews run at the fixup's head.
+    await h.finish("fixup", {
+      head: H2,
+      ci: "green",
+      result: { resolved: [{ finding: "CI", how: "fixed the off-by-one" }] },
+    });
+    expect(stage()).toBe("spec_review");
+    expect(h.task()?.stage_label).toBe("review (spec + quality)");
+    const reviewers = h.spawns.filter((s) => s.role === "spec_reviewer");
+    expect(reviewers.map((s) => s.start)).toEqual([{ ref: H2, detach: true }]);
+    expect(h.record().pipeline.T1?.directive).toBeUndefined();
+  });
+
+  it("CI red on a fixup's head after the reviews: a CI fixup, and its green head goes to the gate", async () => {
+    await reviewed();
+    redOn(H2);
+    await h.finish("fixup", { head: H2, ci: "red", result: result("fixup-resolved") });
+    const d = ciFailed();
+    expect(d?.options).toEqual(["fixup", "re-verify", "cancel"]);
+    await h.resolve(d?.decision_id as string, "fixup");
+    const fixups = h.spawns.filter((s) => s.role === "fixup");
+    expect(fixups).toHaveLength(2);
+    expect(fixups[1]?.start).toEqual({ ref: H2, detach: false });
+    expect(fixups[1]?.files["findings.md"]).toMatch(/^# Directive: CI failed on your head/);
+    // only: the review findings were the first fixup's job.
+    expect(fixups[1]?.files["findings.md"]).not.toContain("Empty batches reach the API");
+
+    await h.finish("fixup", {
+      head: H3,
+      ci: "green",
+      result: { resolved: [{ finding: "CI", how: "fixed the test" }] },
+    });
+    // The reviews of H1 hold at H3: H3 ← CI fixup ← H2 ← fixup ← H1.
+    expect(stage()).toBe("merge_ready");
+    expect(h.task()?.pr).toMatchObject({ head_sha: H3, ci: "green" });
+    expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
+  });
+
+  it("CI red answered re-verify still re-verifies; cancel cancels", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "red" });
+    h.world.ci[H1] = "green";
+    await h.resolve(ciFailed()?.decision_id as string, "re-verify");
+    expect(h.spawns.map((s) => s.role)).toContain("spec_reviewer");
+    expect(h.spawns.some((s) => s.role === "fixup")).toBe(false);
+  });
+
+  it("an unverifiable done answered respawn: relaunched at the next attempt, the implementer again", async () => {
+    h = pipelineHarness();
+    await h.start();
+    const first = h.run("implementer")?.agent_id as string;
+    await h.finish("implementer", { head: H1, push: false });
+    await h.finish("implementer", { head: H1, push: false });
+    const [d] = h.openDecisions();
+    expect(d).toMatchObject({ kind: "agent_blocked", options: ["respawn", "re-verify", "cancel"] });
+    expect((d as unknown as { pipeline: unknown }).pipeline).toMatchObject({
+      on: "verify",
+      role: "implementer",
+      agent_id: first,
+    });
+    await h.resolve(d?.decision_id as string, "respawn");
+    expect(h.events.find((e) => e.type === "relaunched")?.data).toMatchObject({
+      from_agent: first,
+      to_agent: "w1-t1-implementer-2",
+      role: "implementer",
+      attempt: 2,
+    });
+    const impl = h.spawns.filter((s) => s.role === "implementer");
+    expect(impl).toHaveLength(2);
+    // No start: the daemon's spawn continues the pushed branch (continueBranch).
+    expect(impl[1]?.start).toBeUndefined();
+    expect(h.run("implementer")?.agent_id).toBe("w1-t1-implementer-2");
+    expect(h.retired).toContainEqual({ agent_id: first, status: "relaunched" });
+  });
+
+  it("an unverifiable done answered re-verify re-verifies (no respawn)", async () => {
+    h = pipelineHarness();
+    await h.start();
+    await h.finish("implementer", { head: H1, push: false });
+    await h.finish("implementer", { head: H1 }); // pushed, still no PR
+    h.openPr(H1);
+    h.world.ci[H1] = "green";
+    await h.resolve(h.openDecisions()[0]?.decision_id as string, "re-verify");
+    expect(h.events.some((e) => e.type === "relaunched")).toBe(false);
+    expect(stage()).toBe("spec_review");
   });
 });
