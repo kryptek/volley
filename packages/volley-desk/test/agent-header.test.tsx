@@ -182,9 +182,18 @@ describe("agent window header: the stylesheet holds the no-overlap rules", () =>
     [desk, ".win-bar .chip", /text-overflow: ellipsis/],
     [desk, ".win-bar .chip", /max-width: \d+px/],
     [desk, ".win--compact .acct-pick", /(^|[ ;])width: \d+px/],
-    [agent, ".t-name", /-webkit-line-clamp: 2/],
-    [agent, ".t-name", /text-wrap: balance/],
+    [agent, ".win-sub .t-name", /-webkit-line-clamp: 2/],
+    [agent, ".win-sub .t-name", /text-wrap: balance/],
   ])("%#: a rule declares it", (sheet, selector, re) => {
     expect(decls(sheet, selector)).toMatch(re);
+  });
+
+  it("the two-line clamp is scoped to the agent header: other windows' titles stay on one line", () => {
+    // agent.css is global once an agent window loads; the wave, coordinators, settings and
+    // setup titles share .t-name and must not wrap.
+    expect(decls(agent, ".t-name")).toBe("");
+    expect(decls(desk, ".t-name")).toMatch(/white-space: nowrap/);
+    expect(decls(agent, ".win-sub .t-name")).toMatch(/white-space: normal/);
+    expect(decls(agent, ".win-sub .t-name--open")).toMatch(/-webkit-line-clamp: unset/);
   });
 });

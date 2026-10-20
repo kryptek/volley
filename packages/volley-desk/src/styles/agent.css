@@ -262,7 +262,8 @@
   flex: 1 1 200px;
   min-width: 0;
 }
-.t-name {
+/* Scoped to row 2: the other windows' titles share .t-name and stay on one line. */
+.win-sub .t-name {
   white-space: normal;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -270,8 +271,6 @@
   overflow: hidden;
   overflow-wrap: anywhere;
   text-wrap: balance;
-}
-.win-sub .t-name {
   flex: 0 1 auto;
   min-width: 0;
   padding: 0;
@@ -281,7 +280,7 @@
   text-align: left;
   cursor: pointer;
 }
-.t-name--open {
+.win-sub .t-name--open {
   display: block;
   -webkit-line-clamp: unset;
 }

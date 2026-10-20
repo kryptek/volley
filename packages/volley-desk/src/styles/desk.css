@@ -231,6 +231,7 @@ code {
   font-weight: 600;
   font-size: 15px;
   letter-spacing: -0.01em;
+  white-space: nowrap;
 }
 /* The buttons stay on row 1 and never shrink. */
 .win-actions {
