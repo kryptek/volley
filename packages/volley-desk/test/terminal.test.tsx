@@ -119,4 +119,18 @@ describe("Terminal", () => {
       expect(el.scrollTop).toBe(1200);
     });
   });
+
+  it("adds a given className and style to its root (the popout's)", () => {
+    const { container } = render(
+      <Terminal
+        screen={shot(["$ ls"])}
+        stale={false}
+        className="term--popout"
+        style={{ fontSize: "14px" }}
+      />,
+    );
+    const root = container.firstElementChild as HTMLElement;
+    expect(root).toHaveClass("term", "recessed", "term--popout");
+    expect(root.style.fontSize).toBe("14px");
+  });
 });
