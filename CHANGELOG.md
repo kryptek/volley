@@ -35,6 +35,22 @@ All workspace packages share one version. Dates are release-tag dates.
 
 ### Added
 
+- **volleyd: archive ended waves.** `volleyd archive <wave> [--yes]` retires a stopped or
+  complete wave: its open decisions close as `archived`, `wave_archived { by, reason,
+  closed_decisions }` is journaled, its state is published once with `status: "archived"` and
+  then cleared, and it leaves the live set (`volleyd status`, `decisions`, ticks, restarts) while
+  its journal and evidence stay on disk. `volleyd status --all` still lists it; `run` refuses its
+  id. An admin may archive any ended wave through its account-op topic. New tunables
+  `archive_ended_after_h` (default 24; 0: never) and `archive_on_ack` (default true) archive
+  ended waves automatically. A retained index, `volley/_waves/_archive` (`archive.schema.json`),
+  lists archived waves (SPEC §4.6.16). (#192)
+- **Desk: archived waves leave every Desk.** The coordinators window and the canvas drop an
+  archived wave for every client, not just the browser that dismissed it, and the window's footer
+  counts `N archived (volleyd archive)` from the index. Dismiss stays for ended waves not archived
+  yet. (#192)
+- volleyd: `volleyd run` warns when the wave it submits has no owner (nobody can answer its
+  decisions), and `volleyd validate` notes that `run` needs one. (#192)
+
 - volley-desk: the agent window's title bar is two rows that never bunch: the status mark, the
   wave, role, stage and machine chips and the actions on the first; the headline in full (at
   most two lines), its issue and PR links and the account picker on the second. Under 420 px the

@@ -105,3 +105,7 @@
 # fleet:
 #   local_name: null             # its machine record's name; null: the host name's first label,
 #                                # lowercased. Never a hosts.<name> key.
+
+# --- Archiving (README "Archiving") ---
+# archive_ended_after_h: 24      # archive a stopped / complete wave this many hours after it ended; 0: never
+# archive_on_ack: true           # archive a complete wave as soon as its wave_complete decision is answered
