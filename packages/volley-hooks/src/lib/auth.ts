@@ -78,18 +78,24 @@ export function isAuthFailed(e: unknown): e is VolleyError {
   return e instanceof VolleyError && e.code === "AUTH_FAILED";
 }
 
-/** `<stateDir>/hooks-error.json`: the last refused connect, for the supervisor to find. */
+/**
+ * `<stateDir>/hooks-error.json`: the last refused connect, for the supervisor to find (or the
+ * one-line note that the agent is retired).
+ */
 export const HOOKS_ERROR_FILE = "hooks-error.json";
 
-export interface HooksError {
-  code: "AUTH_FAILED";
-  at: string;
-  hook_event: string;
-  /** The username the broker refused; null for an anonymous connect or unusable credentials. */
-  username: string | null;
-  /** Why no credentials could be sent (a `CredentialsError`); absent for a refused CONNACK. */
-  detail?: string;
-}
+export type HooksError =
+  | {
+      code: "AUTH_FAILED";
+      at: string;
+      hook_event: string;
+      /** The username the broker refused; null for an anonymous connect or unusable credentials. */
+      username: string | null;
+      /** Why no credentials could be sent (a `CredentialsError`); absent for a refused CONNACK. */
+      detail?: string;
+    }
+  /** volleyd retired this agent (`.volley/retired.json`): the hooks stopped connecting, on purpose. */
+  | { code: "RETIRED"; at: string; hook_event: string; agent_id: string };
 
 export function writeHooksError(stateDir: string, err: HooksError): void {
   writeFileAtomic(join(stateDir, HOOKS_ERROR_FILE), `${JSON.stringify(err)}\n`);

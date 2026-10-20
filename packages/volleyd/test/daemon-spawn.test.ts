@@ -271,7 +271,11 @@ describe("daemon spawn loop", () => {
     expect(await cleanupWave(env.home, "w1", { yes: true, force: false, exec: fx.exec }, io)).toBe(
       0,
     );
-    expect(fx.argvs()).toEqual([["git", "-C", repo, "worktree", "remove", worktree]]);
+    expect(fx.argvs()).toEqual([
+      ["git", "-C", repo, "worktree", "remove", worktree],
+      // The wave's leftover claude processes are looked for (none here).
+      ["ps", "-axo", "pid=,command="],
+    ]);
   });
 
   it("a failed release-branch fetch refuses with BASE_STALE, backs off like any spawn failure, and the retry records base_sha", async () => {

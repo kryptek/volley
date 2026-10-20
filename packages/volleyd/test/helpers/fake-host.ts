@@ -25,6 +25,10 @@ export interface FakeHost extends Host {
   texts: { workspace: string; text: string }[];
   /** Workspaces closed (retire, cleanup). */
   closed: string[];
+  /** Sessions ended (retire): the workspace (null: unknown) and worktree it was asked about. */
+  sessionsEnded: { workspace: string | null; worktree: string | null }[];
+  /** What findWorkspace answers for these titles (any other: `found`). */
+  workspaceTitles: Record<string, string>;
   /** Screens returned by successive readScreen calls (the last one repeats); null = unreadable. */
   screens: (string | null)[];
   /** Called after each launch, e.g. to publish the hook signals a real agent would. */
@@ -57,6 +61,8 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     keys: [],
     texts: [],
     closed: [],
+    sessionsEnded: [],
+    workspaceTitles: {},
     screens: [],
     launchOutcome: "ok",
     found: null,
@@ -93,7 +99,7 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     async findWorkspace(name, candidate) {
       host.finds.push({ name, ...(candidate !== undefined ? { candidate } : {}) });
       if (host.found instanceof Error) throw host.found;
-      return host.found;
+      return host.workspaceTitles[name] ?? host.found;
     },
     async readScreen(workspace, lines) {
       host.screenReads.push({ workspace, lines });
@@ -108,6 +114,12 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     },
     async close(workspace: string, _consent: ConsentToken) {
       host.closed.push(workspace);
+    },
+    async endSession(workspace, worktree, consent) {
+      host.sessionsEnded.push({ workspace, worktree });
+      if (workspace === null) return { closed: false, pids: [], how: "none" };
+      await host.close(workspace, consent);
+      return { closed: true, pids: [], how: "close-workspace" };
     },
   };
   return host;

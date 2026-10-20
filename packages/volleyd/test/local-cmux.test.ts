@@ -250,6 +250,59 @@ describe("LocalCmuxHost", () => {
     expect(fake.argvs()).toEqual([["cmux", "close-workspace", "--workspace", "workspace:4"]]);
   });
 
+  it("close is bounded by workspace_close_timeout_ms; a timed-out or failed close rejects", async () => {
+    const consent = mintConsentToken("retire w1-t1-implementer-1");
+    const fake = fakeExec();
+    await new LocalCmuxHost(fake.exec).close("workspace:4", consent);
+    expect(fake.calls[0]?.opts.timeoutMs).toBe(DAEMON_DEFAULTS.workspace_close_timeout_ms);
+    const slow = fakeExec().on(["cmux", "close-workspace"], { timedOut: true, code: 143 });
+    await expect(new LocalCmuxHost(slow.exec).close("workspace:4", consent)).rejects.toThrow(
+      /timed out/,
+    );
+    const gone = fakeExec().on(["cmux", "close-workspace"], { code: 1, stderr: "not found" });
+    await expect(new LocalCmuxHost(gone.exec).close("workspace:4", consent)).rejects.toThrow(
+      /not found/,
+    );
+  });
+
+  it("endSession closes the workspace, then lists processes under the worktree (fenced ps)", async () => {
+    const consent = mintConsentToken("retire w1-t1-implementer-1");
+    const fake = fakeExec().on(["ps"], {
+      stdout:
+        "  1 /sbin/launchd\n 99999999 claude --mcp-config=/nowhere/w9/T1-x/.volley/mcp.json\n",
+    });
+    const end = await new LocalCmuxHost(fake.exec).endSession("workspace:4", "/wt/w1/T1", consent);
+    expect(end).toEqual({ closed: true, pids: [], how: "close-workspace" });
+    expect(fake.argvs()).toEqual([
+      ["cmux", "close-workspace", "--workspace", "workspace:4"],
+      ["ps", "-axo", "pid=,command="],
+    ]);
+    // An unknown ref: nothing is closed, the processes are still looked for.
+    const f2 = fakeExec().on(["cmux", "close-workspace"], { timedOut: true });
+    const end2 = await new LocalCmuxHost(f2.exec).endSession(null, "/wt/w1/T1", consent);
+    expect(end2).toEqual({ closed: false, pids: [], how: "none" });
+    expect(f2.argvs()).toEqual([["ps", "-axo", "pid=,command="]]);
+  });
+
+  it("findWorkspace answers the one workspace with exactly that title", async () => {
+    const list = [
+      "  workspace:12  w1 T1 implementer",
+      "* workspace:3  ✳ the owner's session  [selected]",
+      "  workspace:13  w1 T1 implementer-x",
+      "  workspace:14  w1 T2 fixup",
+      "  workspace:15  w1 T2 fixup",
+    ].join("\n");
+    const fake = fakeExec().on(["cmux", "list-workspaces"], { stdout: list });
+    const host = new LocalCmuxHost(fake.exec);
+    expect(await host.findWorkspace("w1 T1 implementer")).toBe("workspace:12");
+    // Two with one title: neither is trusted.
+    await expect(host.findWorkspace("w1 T2 fixup")).rejects.toThrow(/2 workspaces/);
+    expect(await host.findWorkspace("w1 T3 implementer")).toBeNull();
+    expect(parseWorkspaceList(list, "✳ the owner's session")).toBe("workspace:3");
+    const down = fakeExec().on(["cmux", "list-workspaces"], { code: 1 });
+    await expect(new LocalCmuxHost(down.exec).findWorkspace("w1 T1 implementer")).rejects.toThrow();
+  });
+
   it("writeFile creates parents and applies the mode", async () => {
     const dir = tempDir("volleyd-host-");
     const host = new LocalCmuxHost(fakeExec().exec);

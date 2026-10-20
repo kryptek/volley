@@ -16,7 +16,14 @@ import { SpawnError } from "../spawn-error";
 import { withTrust } from "../trust";
 import type { RemoteHostConfig } from "../types";
 import { EXCLUDE_LINES, firstLine, freshBaseFix } from "../worktree";
-import type { Host, LaunchSpec, TypedTextTokens, WorktreeResult, WorktreeSpec } from "./host";
+import type {
+  Host,
+  LaunchSpec,
+  SessionEnd,
+  TypedTextTokens,
+  WorktreeResult,
+  WorktreeSpec,
+} from "./host";
 
 /** A remote host with every key resolved (config `hosts.<name>` ← the task's inline `host:`). */
 export interface RemoteHostSpec {
@@ -459,6 +466,22 @@ export class SshTmuxHost implements RemoteHost {
 
   async close(workspace: string, consent: ConsentToken): Promise<void> {
     await this.run([{ argv: ["tmux", "kill-session", "-t", `=${workspace}`] }], { consent });
+  }
+
+  /** `kill-session`: tmux ends the pane's process group, so no process is signalled here. */
+  async endSession(
+    workspace: string | null,
+    _worktree: string | null,
+    consent: ConsentToken,
+  ): Promise<SessionEnd> {
+    if (workspace === null) return { closed: false, pids: [], how: "none" };
+    const closed = await this.run([{ argv: ["tmux", "kill-session", "-t", `=${workspace}`] }], {
+      consent,
+    }).then(
+      (r) => r.code === 0 && !r.timedOut,
+      () => false,
+    );
+    return { closed, pids: [], how: closed ? "kill-session" : "none" };
   }
 
   /** A transient refusal for an ssh failure: the spawn backs off, no decision is opened. */

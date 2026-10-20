@@ -66,6 +66,8 @@ import { AGENT_BRANCH } from "./worktree";
  *     <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work)
  *   (agent logins are minted and deleted over volleyd's own Dynamic Security control
  *   connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
+ *   ps -axo pid=,command=   (exactly: lists processes for procs.ts, which stops a retired
+ *     agent's claude by `process.kill`, never by a spawned `kill`)
  *   mosquitto -h   (exactly: it prints the binary's version, the fallback when the broker
  *     retains no $SYS/broker/version)
  *   volley auth list --json · rotate <agent_id> --json · revoke <agent_id>
@@ -882,6 +884,9 @@ const DOCKER_DENY = new Set([
   "volume prune",
 ]);
 
+/** The one process listing (procs.ts): read-only; signals are sent with `process.kill`, never a child. */
+export const PS_ARGV: readonly string[] = ["ps", "-axo", "pid=,command="];
+
 /** Read-only pressure-sampler commands (src/pressure/*), allowed as these exact argvs only. */
 const PRESSURE_READS: readonly (readonly string[])[] = [
   ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
@@ -952,6 +957,8 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
       return args.length === 1 && args[0] === "-h" ? ALLOW : deny("mosquitto (only -h)");
     case "launchctl":
       return launchctl(args);
+    case "ps":
+      return exactly(argv, [PS_ARGV]);
     case "sysctl":
     case "memory_pressure":
       return exactly(argv, PRESSURE_READS);

@@ -1,5 +1,7 @@
+import { join } from "node:path";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
+import type { SessionEnd } from "./hosts/host";
 import { type AgentCredentials, revokeCredentials } from "./identity";
 import { TERMINAL_STATUS, readLock } from "./locks";
 import { SpawnError } from "./spawn-error";
@@ -154,18 +156,36 @@ export interface RetireRequest {
   result?: unknown;
   /** The agent's workspace (cmux locally, its tmux session on an ssh host), closed on retire. */
   workspace?: string;
+  /** The agent's worktree: where the retired marker goes, and whose processes are stopped. */
+  worktree?: string;
 }
+
+/** `<worktree>/.volley/retired.json`: tells the agent's hooks that volleyd retired it (SPEC §4.6.4). */
+export const retiredMarkerPath = (worktree: string): string =>
+  join(worktree, ".volley", "retired.json");
 
 export interface RetireDeps extends ReapDeps {
   /** Remove the lock file at `path` (only called when it names this agent). */
   releaseLock: (path: string) => void;
   /**
-   * Close the retired agent's own workspace (through the fence, with its retire consent). `null`:
-   * the ref cannot be trusted to still name it, so it is left for `volleyd cleanup --yes`
-   * (journaled `workspace_closed: false`).
+   * Write the retired marker (`{ agent_id, status }`, the caller adds `at`) at
+   * retiredMarkerPath, on the agent's host, before its login is deleted.
    */
-  closeWorkspace?: ((workspace: string) => Promise<void>) | null;
+  writeMarker?: (worktree: string, marker: { agent_id: string; status: string }) => Promise<void>;
+  /**
+   * End the retired agent's session (through the fence, with its retire consent): close its
+   * workspace and stop its processes. `workspace` in the answer: the ref actually closed, when it
+   * is not the journaled one (re-found by name after a restart). `null`: the session is kept
+   * (`retire_close_session: false`), journaled `workspace_closed: false`.
+   */
+  endSession?: SessionEnder | null;
 }
+
+/** Ends a retired agent's session: see RetireDeps.endSession. */
+export type SessionEnder = (
+  workspace: string | null,
+  worktree: string | null,
+) => Promise<SessionEnd & { workspace?: string | null }>;
 
 const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
@@ -184,9 +204,10 @@ export function closableAfterRestart(ref: string, session: string): boolean {
  * Retire one agent after the daemon has consumed its terminal status: delete its broker login
  * through reapAndRevoke (or, for an agent with none, just clear its retained records), release
  * its worktree lock, journal `agent_retired`. Only this wave's own agents, only terminal (or
- * DAEMON_ENDED) ones. Its workspace is closed (`closeWorkspace`, the retire's own consent); the
- * worktree and branch stay: removing them is
- * `volleyd cleanup <wave> --yes`.
+ * DAEMON_ENDED) ones. The retired marker is written first, so the agent's hooks stay quiet once
+ * its login is gone; then its session is ended (`endSession`, the retire's own consent),
+ * journaled `agent_session_closed` before `agent_retired`. The worktree and branch stay: removing
+ * them is `volleyd cleanup <wave> --yes`.
  */
 export async function retireAgent(req: RetireRequest, deps: RetireDeps): Promise<void> {
   if (!req.waveAgents.has(req.agentId)) {
@@ -201,6 +222,12 @@ export async function retireAgent(req: RetireRequest, deps: RetireDeps): Promise
       { agent_id: req.agentId, status: req.status },
     );
   }
+  // Before the login goes: from here on a refused hook is the agent being retired, not broken.
+  if (req.worktree !== undefined && deps.writeMarker !== undefined) {
+    await deps
+      .writeMarker(req.worktree, { agent_id: req.agentId, status: req.status })
+      .catch(() => {});
+  }
   let revoked: boolean | null = null;
   if (req.minted) {
     revoked = await reapAndRevoke(req.agentId, req.namespace, deps, req.task);
@@ -212,18 +239,25 @@ export async function retireAgent(req: RetireRequest, deps: RetireDeps): Promise
     deps.releaseLock(req.lockPath);
     released = true;
   }
-  // Its session is over: close its workspace too (the worktree and branch stay for cleanup).
+  // Its session is over: close its workspace and stop its process (the worktree and branch stay).
+  const workspace = req.workspace !== undefined && req.workspace !== "" ? req.workspace : null;
   let closed: boolean | null = null;
-  if (req.workspace !== undefined && req.workspace !== "" && deps.closeWorkspace !== undefined) {
-    try {
-      if (deps.closeWorkspace === null) closed = false;
-      else {
-        await deps.closeWorkspace(req.workspace);
-        closed = true;
-      }
-    } catch {
-      closed = false;
-    }
+  if (deps.endSession === null) closed = workspace !== null ? false : null;
+  else if (deps.endSession !== undefined && (workspace !== null || req.worktree !== undefined)) {
+    const end: SessionEnd & { workspace?: string | null } = await deps
+      .endSession(workspace, req.worktree ?? null)
+      .catch(() => ({ closed: false, pids: [], how: "none" }));
+    if (workspace !== null) closed = end.closed;
+    await deps.journal({
+      type: "agent_session_closed",
+      task: req.task,
+      data: {
+        agent_id: req.agentId,
+        workspace: end.workspace !== undefined ? end.workspace : workspace,
+        how: end.how,
+        pids: end.pids,
+      },
+    });
   }
   await deps.journal({
     type: "agent_retired",
