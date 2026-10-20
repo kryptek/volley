@@ -126,3 +126,4 @@
 #                                # fence; merged_by_supervisor) or manual (a human merges)
 #   merge_retry_max: 2           # merges GitHub may refuse at one gated head before volleyd asks
 #                                # (decision merge_refused: retry, manual or cancel)
+#   delete_branch: false         # autopilot merges also delete the PR's head branch

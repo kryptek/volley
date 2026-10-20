@@ -151,6 +151,7 @@ export function formatWave(
     ap !== undefined
       ? `  autopilot: ${ap.enabled ? "on" : "off"} · ${ap.auto_resolved} auto-resolved · ${ap.escalated} escalated\n`
       : "";
+  const queue = s.merge_queue !== undefined ? `  ${formatMergeQueue(s.merge_queue)}\n` : "";
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {
     const why = t.why_waiting !== undefined ? `  ${t.why_waiting}` : "";
@@ -168,7 +169,21 @@ export function formatWave(
   const decisions = (ctx.decisions ?? [])
     .filter((d) => d.wave === s.wave && s.open_decisions.includes(d.decision_id))
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
-  return header + autopilot + preface + hygiene + rows.join("") + decisions.join("");
+  return header + queue + autopilot + preface + hygiene + rows.join("") + decisions.join("");
+}
+
+/**
+ * `merge queue: T3 merging · T5 updating · T7, T9 queued` (SPEC §4.6.17): the queue in merge
+ * order, neighbours in the same state named together.
+ */
+export function formatMergeQueue(q: NonNullable<WaveState["merge_queue"]>): string {
+  const runs: { state: string; tasks: string[] }[] = [];
+  for (const e of q) {
+    const last = runs.at(-1);
+    if (last?.state === e.state) last.tasks.push(e.task);
+    else runs.push({ state: e.state, tasks: [e.task] });
+  }
+  return `merge queue: ${runs.map((r) => `${r.tasks.join(", ")} ${r.state}`).join(" · ")}`;
 }
 
 /**

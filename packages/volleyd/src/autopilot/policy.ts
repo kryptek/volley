@@ -279,8 +279,17 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
       "a CI fixup and the flake route need pipeline work; a repository without workflows is the owner's",
   },
   {
+    policy: "merge_conflict/respawn",
+    kinds: ["merge_conflict"],
+    condition: "within respawn_max per task/role",
+    answer: "respawn",
+    budget: { name: "respawn_max", per: "task_role" },
+    rationale:
+      "a fresh rebase (or merge) agent retries the update; a conflict it cannot resolve either is the owner's",
+  },
+  {
     policy: "pr/owner",
-    kinds: ["pr_closed", "remote_repo_missing", "merge_conflict"],
+    kinds: ["pr_closed", "remote_repo_missing"],
     condition: "always",
     answer: null,
     rationale: "where the work went, or a clone that is missing, is the owner's call",

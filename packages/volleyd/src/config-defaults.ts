@@ -69,6 +69,7 @@ export const CONFIG_DEFAULTS: Tunables = {
     budget_raise_max: 2,
     merge: "auto",
     merge_retry_max: 2,
+    delete_branch: false,
   },
 };
 

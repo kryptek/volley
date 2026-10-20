@@ -1,4 +1,5 @@
 import { type AutopilotRecord, emptyAutopilot, foldAutoResolved } from "./autopilot/budgets";
+import { queueOf } from "./autopilot/merge-queue";
 import type { Budget, EscalateWhy } from "./autopilot/policy";
 import { type DecisionRecord, parksTask } from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
@@ -591,6 +592,8 @@ function derive(state: WaveState, rec: WaveRecord): void {
     return { ...t, waiting_on: pending, why_waiting: why };
   });
   state.gates = state.tasks.filter((t) => t.stage === "merge_ready").map((t) => t.id);
+  const queue = queueOf(rec).map(({ task, state, since }) => ({ task, state, since }));
+  state.merge_queue = queue.length > 0 ? queue : undefined;
   // Autopilot's tally, once it has done anything (the daemon sets `enabled` from the effective
   // config when it publishes).
   const a = rec.autopilot;
