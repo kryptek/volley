@@ -59,6 +59,11 @@ export interface WaveRecord {
   spawnFailures: Record<TaskId, Record<string, SpawnFailure>>;
   /** Spawns added to the wave's budget by `raise by N` answers (spawn_budget_exhausted). */
   budget_raised?: number;
+  /**
+   * The agent last journaled as bound to the wave's coordinator-name owner (`owner_reconnected`),
+   * so a daemon restart replaying the registry does not journal the same reconnect again.
+   */
+  owner_agent?: string;
 }
 
 /** A steer journaled while its task had no live agent: delivered to the next one to register. */
@@ -431,6 +436,10 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     }
     case "owner_claimed":
       state.owner = (ev.data.owner as string | null | undefined) ?? null;
+      delete next.owner_agent;
+      break;
+    case "owner_reconnected":
+      next.owner_agent = ev.data.agent_id as string;
       break;
     default: {
       const status = WAVE_STATUS[ev.type];

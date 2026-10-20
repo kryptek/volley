@@ -396,6 +396,20 @@
               "description": "The name the supervisor's own machine record is published under (volley/_system/machines/<name>); null: derived from the machine's host name (spec section 4.6.15). Never a hosts.<name> key. The retained effective config carries the resolved name, never null."
             }
           }
+        },
+        "autopilot": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Waves owned by a stable coordinator name (spec sections 4.6.1 and 6.2). Optional in the retained payload: a supervisor that predates it omits it.",
+          "properties": {
+            "reconnect_grace_s": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400,
+              "default": 900,
+              "description": "How long a wave whose owner is a coordinator name shows coordinator.state reconnecting after the agent bound to the name went away (terminal status or LWT) with no other agent binding to it; then gone."
+            }
+          }
         }
       }
     },

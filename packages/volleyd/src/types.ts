@@ -128,6 +128,16 @@ export interface Tunables {
   placement: PlacementConfig;
   /** The supervisor's own machine (SPEC §4.6.15). */
   fleet: FleetConfig;
+  /** Wave owners named by a stable coordinator name (SPEC §4.6.1). */
+  autopilot: AutopilotConfig;
+}
+
+/**
+ * Config `autopilot`: `reconnect_grace_s`, how long a coordinator name whose bound agent went
+ * away shows `reconnecting` (waiting for the session to come back) before `gone`.
+ */
+export interface AutopilotConfig {
+  reconnect_grace_s: number;
 }
 
 /** Config `fleet`: `local_name` null derives the supervisor's machine name from its host name. */
@@ -337,10 +347,14 @@ export interface WaveState {
   updated_at: string;
 }
 
-/** wave-state `coordinator` (SPEC §4.6.1): the owning coordinator's attention state. */
+/**
+ * wave-state `coordinator` (SPEC §4.6.1): the owning coordinator's attention state. For an owner
+ * that is a coordinator name, `agent_id` is the agent bound to it, and `reconnecting` means that
+ * agent went away less than `autopilot.reconnect_grace_s` ago.
+ */
 export interface CoordinatorAttention {
   agent_id: string;
-  state: "working" | "awaiting_input" | "gone";
+  state: "working" | "awaiting_input" | "reconnecting" | "gone";
   question?: string;
   session_url?: string;
   workspace?: string;
@@ -360,6 +374,7 @@ export const WAVE_EVENT_TYPES = [
   "wave_stopped",
   "wave_complete",
   "owner_claimed",
+  "owner_reconnected",
   "task_queued",
   "task_admitted",
   "task_cancelled",

@@ -57,6 +57,8 @@ export const CONFIG_DEFAULTS: Tunables = {
   },
   // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
   fleet: { local_name: null },
+  // --- A coordinator name's bound agent away this long: `reconnecting`, then `gone` (SPEC §4.6.1) ---
+  autopilot: { reconnect_grace_s: 900 },
 };
 
 /**
