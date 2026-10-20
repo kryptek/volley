@@ -71,6 +71,10 @@ export interface Tunables {
   claim_after_s: number;
   heartbeat_alarm_s: number;
   idle_grace_s: number;
+  /** Longest idle (from its start) that any own-work evidence (`background_wait`, lease, shells, worktree writes) holds off the nudge. */
+  background_wait_max_s: number;
+  /** Cap on the doubling gap between `agent_stalled` decisions of one idle cycle. */
+  stall_backoff_max_s: number;
   fallback_model: string | null;
   mailbox: { session_expiry_s: number };
   worktree_root: string;
@@ -101,11 +105,25 @@ export interface Tunables {
    * the user's own servers (plugins, connectors) too, with volleyd's `volley` taking that name.
    */
   agent_mcp: AgentMcp;
+  /**
+   * What the reviewers flag as public hygiene: `auto` (P1 for a public repository or one whose
+   * visibility could not be read, P3 for a private one), `on` (always P1), `off` (never).
+   */
+  public_hygiene: PublicHygiene;
   hosts: Record<string, RemoteHostConfig>;
 }
 
 export type BranchUpdate = "rebase" | "merge";
 export type AgentMcp = "strict" | "inherit";
+export type PublicHygiene = "auto" | "on" | "off";
+/** `gh repo view --json visibility`, lowercased; `unknown` when it could not be read. */
+export type RepoVisibility = "public" | "private" | "internal" | "unknown";
+
+/**
+ * How the reviewers treat public hygiene: `p1` (every hit blocks the merge, the result's
+ * `hygiene` block is required), `p3` (hits are non-blocking notes, the block optional) or `off`.
+ */
+export type HygieneLevel = "p1" | "p3" | "off";
 
 /** A partial tunables object: a wave file's `config:` block, a config_set patch, a config.yaml. */
 export type TunablesPatch = {
@@ -207,6 +225,8 @@ export interface TaskState {
     agent_id?: string;
     state: "pending" | "running" | "done" | "retired";
   }[];
+  /** Steers held for the task's next agent (none live when they were sent); absent when 0. */
+  queued_steers?: number;
   /** Alarms on the task that still hold (e.g. merged_unverified_head), with a human line each. */
   alarms?: { alarm: string; message: string }[];
   evidence_path?: string;
@@ -244,6 +264,10 @@ export interface WaveState {
   effective_config?: TunablesPatch;
   /** The brief preface the current plan version's agents get (null: none). */
   brief_preface?: { path: string; sha256: string; bytes: number } | null;
+  /** The repository's visibility as journaled for this version (null: set by config, not read). */
+  repo_visibility?: RepoVisibility | null;
+  /** How the reviewers treat public hygiene for this version (reviews.ts hygieneLevel). */
+  hygiene_level?: HygieneLevel;
   updated_at: string;
 }
 
@@ -282,6 +306,9 @@ export const WAVE_EVENT_TYPES = [
   "stage_entered",
   "artifact_verified",
   "steering_sent",
+  // A steer to a task with no live agent: held for its next agent (or role), or dropped with it.
+  "steering_queued",
+  "steering_dropped",
   "decision_opened",
   "decision_resolved",
   "lease_requested",
@@ -330,6 +357,8 @@ export const WAVE_EVENT_TYPES = [
   "peer_invited",
   "peer_joined",
   "peer_removed",
+  // Public hygiene (reviews.ts): the repository's visibility, read once per wave version.
+  "repo_visibility_detected",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

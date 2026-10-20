@@ -124,21 +124,32 @@ export function formatWave(
     `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${open}${needs}  alarms: ${alarms}\n`;
   // Which rules the agents got (absent: a state from before the field).
   const preface = s.brief_preface !== undefined ? `  ${formatBriefPreface(s.brief_preface)}\n` : "";
+  const hygiene = s.hygiene_level !== undefined ? `  ${formatHygiene(s)}\n` : "";
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {
     const why = t.why_waiting !== undefined ? `  ${t.why_waiting}` : "";
     const pr = t.pr !== undefined ? `  PR #${t.pr.number}` : "";
     const skipped = t.reviews_skipped_by_plan === true ? "  reviews skipped by plan" : "";
+    const queued = t.queued_steers !== undefined ? `  steer queued (${t.queued_steers})` : "";
     const stage = t.stage_label ?? t.stage;
     // A parallel stage group: every role of it, with its agent and state.
     const group = (t.stage_group ?? [])
       .map((g) => `    ${g.role} ${g.agent_id ?? "-"} (${g.state})\n`)
       .join("");
     const alarms = (t.alarms ?? []).map((a) => `    ! ${a.alarm}: ${a.message}\n`).join("");
-    return `  ${t.id.padEnd(idW)}  #${String(t.issue).padEnd(5)} ${stage.padEnd(14)}${pr}${skipped}${why}\n${group}${alarms}`;
+    return `  ${t.id.padEnd(idW)}  #${String(t.issue).padEnd(5)} ${stage.padEnd(14)}${pr}${skipped}${queued}${why}\n${group}${alarms}`;
   });
   const decisions = (ctx.decisions ?? [])
     .filter((d) => d.wave === s.wave && s.open_decisions.includes(d.decision_id))
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
-  return header + preface + rows.join("") + decisions.join("");
+  return header + preface + hygiene + rows.join("") + decisions.join("");
+}
+
+/**
+ * `hygiene: P1 (public)`, `P3 (private)`, `P1 (unknown)` (the visibility could not be read),
+ * `P1 (forced)` (`public_hygiene: on`) or `off`: what the wave's reviewers flag.
+ */
+function formatHygiene(s: WaveState): string {
+  if (s.hygiene_level === "off") return "hygiene: off";
+  return `hygiene: ${s.hygiene_level === "p3" ? "P3" : "P1"} (${s.repo_visibility ?? "forced"})`;
 }

@@ -37,6 +37,8 @@
 # claim_after_s: 1800
 # heartbeat_alarm_s: 600        # no heartbeat this long while working -> screen check
 # idle_grace_s: 180             # turn ended without a terminal status -> one steer, then a decision
+# background_wait_max_s: 7200   # an idle agent showing its own work (background task, lease, shells, writes) is left alone this long
+# stall_backoff_max_s: 1800     # cap on the doubling gap between agent_stalled decisions
 # fallback_model: null
 # mailbox: { session_expiry_s: 604800 }
 # worktree_root: ~/.volley/worktrees  # default $VOLLEYD_HOME/worktrees when VOLLEYD_HOME is set
@@ -69,6 +71,12 @@
 # volleyd gives it, a reproducible and minimal agent) or inherit (your own servers too, such as
 # plugin servers and connectors).
 # agent_mcp: strict
+
+# What the reviewers flag as public hygiene (person names, local usernames, machine paths,
+# private hostnames or IPs): auto (read the repository's visibility once per wave version: P1
+# for a public repository or one whose visibility cannot be read, a non-blocking P3 for a
+# private or internal one), on (always P1) or off (no hygiene check).
+# public_hygiene: auto
 
 # Remote hosts a wave task may name with `host: <name>`: its agents run in tmux on that machine
 # over ssh and reach the broker through a reverse tunnel. Paths are on the remote machine and

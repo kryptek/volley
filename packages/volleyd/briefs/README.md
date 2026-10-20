@@ -20,6 +20,7 @@ that itself contains `{{…}}`, is never expanded again). An unknown placeholder
 | `model` | the task's model |
 | `repo`, `release_branch`, `branch`, `worktree` | the repo root, the base branch, the agent's branch and worktree |
 | `extra` | repo-specific notes (below), or empty |
+| `hygiene_rule`, `hygiene_contract` | reviewer briefs: the hygiene check line and its result-contract bullet for the wave's hygiene level (`reviews.ts` `hygieneText`: P1 for a public repository, P3 for a private one, empty under `public_hygiene: off`) |
 
 ## The protocol block
 
@@ -44,12 +45,15 @@ Pipeline roles get their inputs as files the spawn writes into `.volley/` before
 rule and the push line), `rebase.md` (rebase: the commands and the one lease-guarded push;
 under `branch_update: merge`, the merge and its normal push).
 Reviewers and the fixup publish a retained `result` before `done` — `type: "review"` with
-`{ findings, verdict, hygiene: { checked: true, findings } }`, `type: "fixup"` with
+`{ findings, verdict, hygiene?: { checked: true, findings } }`, `type: "fixup"` with
 `{ resolved: [{ finding, how }] }` (`spec/schemas/review-result.schema.json`); the templates
-spell out that contract. Both reviewer templates carry the fixed public-hygiene line (person
-names, local usernames, machine paths, private hostnames or IPs in the diff, commit messages or
-PR text are P1s) whatever the repo's preface says; `reviews.ts` `HYGIENE_CHECK` is that line and
-`test/reviews.test.ts` holds the templates to it. Keep it in both when you edit one.
+spell out that contract. Both reviewer templates carry the hygiene check through
+`{{hygiene_rule}}` / `{{hygiene_contract}}`, whatever the repo's preface says: for a public
+repository (or one whose visibility could not be read) the P1 line (`reviews.ts`
+`HYGIENE_CHECK`: person names, local usernames, machine paths, private hostnames or IPs in the
+diff, commit messages or PR text are P1s, the `hygiene` block required); for a private one a
+non-blocking P3 note; nothing under `public_hygiene: off`. `test/reviews.test.ts` holds both
+templates to it. Keep the placeholders in both when you edit one.
 
 ## Repo preface, extras and the brief gate
 

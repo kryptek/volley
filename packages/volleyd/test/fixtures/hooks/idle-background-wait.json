@@ -1,0 +1,16 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "w1-t1-implementer-1",
+  "parent_id": "volleyd",
+  "wall_time": "2026-10-18T12:04:00.000Z",
+  "channel": "progress",
+  "type": "idle",
+  "payload": {
+    "text": "The integration tests are running in the background; I will check the result when they finish.",
+    "background_wait": true,
+    "source": "harness-hook",
+    "seq": 6,
+    "hook_event": "Stop"
+  },
+  "correlation_id": null
+}

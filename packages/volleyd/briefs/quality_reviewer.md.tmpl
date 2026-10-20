@@ -4,18 +4,18 @@ Review the diff named in `.volley/review.md` — the diff only, independently of
 
 Report each finding with file and line. Your `done` summary says `approve` or `changes requested`.
 
-Public hygiene: flag as P1 any person name, local username, machine path (home directories, temp paths), private hostname or IP in the diff, commit messages or PR text.
+{{hygiene_rule}}
 
 ## Result contract
 
 Read `.volley/review.md` first: it names the PR, the exact head this detached worktree is at, and the diff to review. Before your `done`, publish your review as one retained result — volleyd reads it, and a `done` without it is sent back to you once:
 
-    vol_publish(channel="result", type="review", payload={ "findings": [{ "severity": "P1", "file": "src/x.ts", "line": 42, "text": "<what is wrong and why>" }], "verdict": "changes_requested", "hygiene": { "checked": true, "findings": [] } })
+    vol_publish(channel="result", type="review", payload={ "findings": [{ "severity": "P1", "file": "src/x.ts", "line": 42, "text": "<what is wrong and why>" }], "verdict": "changes_requested" })
 
 - `severity`: `P1` blocks the merge, `P2` should be fixed, `P3` is a nit (also use `P3` for a hunk you checked and consider fine, with that as the text).
 - `file` is repo-relative; `line` is optional; `verdict` is `approve` or `changes_requested`.
 - No findings: `"findings": []` with `"verdict": "approve"`.
-- `hygiene` is required: `"checked": true` once you have checked the diff, every commit message (`git log origin/{{release_branch}}..HEAD`) and the PR title and body for the public-hygiene line above; `findings` lists each hit as a P1 (same shape; `file` is `COMMIT` or `PR` for a commit message or the PR text). A result without it is not accepted.
+{{hygiene_contract}}
 
 ## Rules
 
