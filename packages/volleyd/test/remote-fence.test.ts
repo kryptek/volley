@@ -682,8 +682,14 @@ describe("Fleet steps (F2): the PATH probe and the doctor on a paired machine", 
     }
   });
 
-  it("allows `volley peer doctor --json` with exactly --fix --yes and --clone after it", () => {
-    for (const extra of [[], ["--fix", "--yes"], ["--fix", "--yes", "--clone"]]) {
+  it("allows `volley peer doctor --json` with exactly --fix --yes, then --clone --origin <https URL>", () => {
+    const CLONE = ["--fix", "--yes", "--clone", "--origin"];
+    for (const extra of [
+      [],
+      ["--fix", "--yes"],
+      [...CLONE, "https://github.com/example-org/example-repo"],
+      [...CLONE, "https://git.example.com/team/sub.group/repo_1"],
+    ]) {
       expect(allowed({ argv: [...DOCTOR, "--json", ...extra], cwd: VOLLEY_DIR })).not.toThrow();
     }
   });
@@ -695,6 +701,27 @@ describe("Fleet steps (F2): the PATH probe and the doctor on a paired machine", 
       [...DOCTOR, "--json", "--clone"],
       [...DOCTOR, "--json", "--fix", "--yes", "--clone", "--repo", "/"],
       [...DOCTOR, "--json", "--origin", "ext::sh -c id"],
+      // --clone clones only from --origin: never one without the other, never a URL alone.
+      [...DOCTOR, "--json", "--fix", "--yes", "--clone"],
+      [...DOCTOR, "--json", "--fix", "--yes", "--origin", "https://github.com/o/r"],
+      [...DOCTOR, "--json", "--clone", "--origin", "https://github.com/o/r"],
+      ...[
+        "ext::sh -c id",
+        "-uhttps://github.com/o/r",
+        "--upload-pack=touch /tmp/x",
+        "file:///srv/repo",
+        "/srv/repo",
+        "http://github.com/o/r",
+        "git@github.com:o/r.git",
+        "https://user:token@github.com/o/r",
+        "https://github.com/o/r --upload-pack=x",
+        "https://github.com/../r",
+        "https://github.com/o/r\nid",
+        "https://github.com",
+        "https://github.com/",
+        "",
+      ].map((url) => [...DOCTOR, "--json", "--fix", "--yes", "--clone", "--origin", url]),
+      [...DOCTOR, "--json", "--fix", "--yes", "--clone", "--origin", "https://github.com/o/r", "x"],
       [...DOCTOR],
       ["volley", "peer", "remove", "box-a"],
       ["volley", "peer", "join", "ABCD-EFGH"],

@@ -10,7 +10,7 @@ import { ControlClient } from "../src/control";
 import { Daemon } from "../src/daemon";
 import { readJournalFile } from "../src/journal";
 import type { MachineRecord } from "../src/machines";
-import { PeerService, isPairingCode, normalizeCode } from "../src/peers";
+import { PeerService, cloneUrl, isPairingCode, normalizeCode } from "../src/peers";
 import type { NewEvent, RemoteHostConfig } from "../src/types";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { eventually } from "./helpers/broker-wait";
@@ -677,6 +677,27 @@ describe("peer admin ops on the account-op topic (SPEC §4.6.14)", () => {
     ).toBeNull();
     expect(auth.accounts.get("box-a")).toBe("peer");
     expect(auth.argvs(["volley", "auth", "revoke"])).toEqual([]);
+  });
+});
+
+describe("cloneUrl (what Repair's clone passes the box's doctor as --origin)", () => {
+  it("is the https URL of a normalised origin the fence admits; null for anything else", () => {
+    expect(cloneUrl("github.com/example-org/example-repo")).toBe(
+      "https://github.com/example-org/example-repo",
+    );
+    expect(cloneUrl("git.example.com/team/sub.group/repo_1")).toBe(
+      "https://git.example.com/team/sub.group/repo_1",
+    );
+    // A port says nothing about the scheme (ssh or https): not guessed.
+    for (const o of [
+      null,
+      undefined,
+      "git.example.com:2222/o/r",
+      "github.com",
+      "github.com/../r",
+    ]) {
+      expect(cloneUrl(o), String(o)).toBeNull();
+    }
   });
 });
 

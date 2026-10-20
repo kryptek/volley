@@ -3924,8 +3924,7 @@ export class Daemon {
               Object.hasOwn(this.peers.removals(), name),
           },
       hostVersion: this.version,
-      hostOrigin:
-        typeof this.localDoctorRepo === "string" ? (this.localReport?.repo?.origin ?? null) : null,
+      hostOrigin: this.waveOrigin(),
       ...(isLocal && this.localDoctorRepo === null ? { noRepo: true } : {}),
       probe: isLocal ? (this.opts.fleet?.localPath ?? pathProbe)() : (probe?.path ?? null),
       ...(!isLocal && probe?.error !== undefined ? { probeError: probe.error } : {}),
@@ -3956,6 +3955,17 @@ export class Daemon {
       ...extra,
       checkedAt: dateOf(this.time),
     };
+  }
+
+  /**
+   * The running wave's repo's origin (normalised), as the own doctor's last run on that clone
+   * read it: what a peer's clone is compared with, and what Repair's clone clones. Null while no
+   * wave runs, or no run has checked its clone yet.
+   */
+  private waveOrigin(): string | null {
+    return typeof this.localDoctorRepo === "string"
+      ? (this.localReport?.repo?.origin ?? null)
+      : null;
   }
 
   /**
@@ -4050,7 +4060,7 @@ export class Daemon {
    * PATH is probed again, and `peer_doctor_run` is journaled.
    */
   private peerDoctor(p: Record<string, unknown>, sender: string): AuthOutcome | DeferredAuth {
-    const req = this.peers.doctorRequest(p);
+    const req = this.peers.doctorRequest(p, this.waveOrigin());
     if (!("host" in req)) return { reply: authReply("peer_doctor", req) };
     if (this.doctoring.has(req.name)) {
       return {

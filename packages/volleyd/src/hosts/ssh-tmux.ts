@@ -95,10 +95,11 @@ export interface RemoteHost extends Host {
    */
   probePath(): Promise<PathProbe>;
   /**
-   * `volley peer doctor --json [--fix --yes] [--clone]` on the box, in its volley checkout: the
-   * parsed report. Throws when ssh fails or the doctor printed no report.
+   * `volley peer doctor --json [--fix --yes [--clone --origin <clone>]]` on the box, in its volley
+   * checkout: the parsed report. `clone` (with `fix`) is the wave repo's URL the doctor clones
+   * where the box's clone is missing. Throws when ssh fails or the doctor printed no report.
    */
-  runDoctor(opts: { fix: boolean; clone: boolean }): Promise<DoctorReport>;
+  runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport>;
 }
 
 /** The fence tokens and bound a `run` may carry. */
@@ -460,14 +461,14 @@ export class SshTmuxHost implements RemoteHost {
     return parsePathProbe(r.stdout);
   }
 
-  async runDoctor(opts: { fix: boolean; clone: boolean }): Promise<DoctorReport> {
+  async runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport> {
     const argv = [
       "volley",
       "peer",
       "doctor",
       "--json",
       ...(opts.fix ? ["--fix", "--yes"] : []),
-      ...(opts.fix && opts.clone ? ["--clone"] : []),
+      ...(opts.fix && opts.clone !== undefined ? ["--clone", "--origin", opts.clone] : []),
     ];
     // Through run, not exec: `volley` is otherwise a local program (LOCAL_PROGRAMS).
     const r = await this.run([{ argv, cwd: this.spec.volley_dir }], {

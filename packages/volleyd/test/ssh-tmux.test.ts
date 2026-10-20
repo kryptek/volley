@@ -593,12 +593,22 @@ describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
 
   it("runDoctor runs volley peer doctor --json in the box's volley checkout and parses it", async () => {
     const r = remote(() => ({ code: 1, stdout: JSON.stringify(REPORT) }));
-    expect(await r.host.runDoctor({ fix: false, clone: false })).toEqual(REPORT);
-    expect(await r.host.runDoctor({ fix: true, clone: true })).toEqual(REPORT);
+    expect(await r.host.runDoctor({ fix: false })).toEqual(REPORT);
+    expect(await r.host.runDoctor({ fix: true, clone: "https://github.com/o/r" })).toEqual(REPORT);
     expect(r.steps()).toEqual([
       { argv: ["volley", "peer", "doctor", "--json"], cwd: SPEC.volley_dir },
       {
-        argv: ["volley", "peer", "doctor", "--json", "--fix", "--yes", "--clone"],
+        argv: [
+          "volley",
+          "peer",
+          "doctor",
+          "--json",
+          "--fix",
+          "--yes",
+          "--clone",
+          "--origin",
+          "https://github.com/o/r",
+        ],
         cwd: SPEC.volley_dir,
       },
     ]);
@@ -606,11 +616,11 @@ describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
 
   it("runDoctor throws with ssh's reason, or when the doctor printed no report", async () => {
     const down = remote(() => ({ code: 255, stderr: "Permission denied (publickey)" }));
-    await expect(down.host.runDoctor({ fix: false, clone: false })).rejects.toThrow(
+    await expect(down.host.runDoctor({ fix: false })).rejects.toThrow(
       /ssh to dev@box failed.*Permission denied/,
     );
     const none = remote(() => ({ code: 127, stderr: "bash: volley: command not found" }));
-    await expect(none.host.runDoctor({ fix: false, clone: false })).rejects.toThrow(
+    await expect(none.host.runDoctor({ fix: false })).rejects.toThrow(
       /printed no report: bash: volley: command not found/,
     );
   });

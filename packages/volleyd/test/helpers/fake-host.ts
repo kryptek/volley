@@ -270,7 +270,7 @@ export type FakeRemoteHost = FakeHost &
   RemoteHost & {
     answers: FakeRemoteAnswers;
     probes: number;
-    doctorRuns: { fix: boolean; clone: boolean }[];
+    doctorRuns: { fix: boolean; clone?: string }[];
   };
 
 /** A doctor report with every check passing. */
@@ -319,7 +319,7 @@ export function fakeRemoteHost(
       if (a instanceof Error) throw a;
       return a;
     },
-    runDoctor: async (opts: { fix: boolean; clone: boolean }) => {
+    runDoctor: async (opts: { fix: boolean; clone?: string }) => {
       h.doctorRuns.push(opts);
       const a = h.answers.doctor ?? GREEN_DOCTOR;
       if (a instanceof Error) throw a;

@@ -26,6 +26,7 @@ Owner smoke: [`SMOKE.md`](SMOKE.md) Plan 12.
   machine (`volley/_system/machines/<name>/readiness`): ready or not in plain words, eligible
   for placement or not, from the doctor and its own probe of the ssh PATH an agent gets.
   `hosts.<name>.max_agents` and `hosts.<name>.drain`; the admin op `peer_doctor` (Repair). (#116)
+  Repair's clone clones from the running wave's origin (`--clone --origin <https URL>`). (#188)
 - **Placement:** `placement: auto` in a wave file (or `host: auto` on a task) places each task
   at admission on the best eligible machine, scored from CPU, slots, memory and usage headroom,
   with `placement_prefer` / `placement_avoid` and `heavy: true`. Every candidate gets a "why
@@ -47,11 +48,6 @@ Owner smoke: [`SMOKE.md`](SMOKE.md) Plan 12.
   Code's own `claude auth login` on the machine in tmux and forwards its localhost callback for
   the length of the sign-in (one fenced, transient `ssh -L`), with a phone fallback that types
   the code into a terminal, never into Volley. (#122)
-
-### Known issues
-
-- Repair's **Also clone the wave repo** cannot clone yet: volleyd runs the doctor with `--clone`
-  but no `--origin`. Clone the repo on the machine by hand until it is fixed. (#188)
 
 ## 0.3.1 — 2026-10-20
 

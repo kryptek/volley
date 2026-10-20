@@ -527,11 +527,18 @@ describe("peer_doctor (the doctor on a paired machine, for an admin)", () => {
       },
       { id: "gh.auth", severity: "warn", detail: "gh signed out", fix: "gh auth login" },
     ]);
-    expect(box?.doctorRuns).toEqual([{ fix: false, clone: false }]);
+    expect(box?.doctorRuns).toEqual([{ fix: false }]);
 
-    const fixed = await op("admin-1", { op: "peer_doctor", name: "box-a", fix: true, clone: true });
+    const fixed = await op("admin-1", { op: "peer_doctor", name: "box-a", fix: true });
     expect(fixed).toMatchObject({ ok: true, result: { name: "box-a", fix: true } });
-    expect(box?.doctorRuns.at(-1)).toEqual({ fix: true, clone: true });
+    expect(box?.doctorRuns.at(-1)).toEqual({ fix: true });
+  });
+
+  it("clone with no wave running: refused before ssh (the doctor clones only from the wave repo's origin)", async () => {
+    const r = await op("admin-1", { op: "peer_doctor", name: "box-a", fix: true, clone: true });
+    expect(r).toMatchObject({ ok: false, op: "peer_doctor" });
+    expect(r.error).toMatch(/origin.*not known/);
+    expect(box?.doctorRuns ?? []).toEqual([]);
   });
 
   it("from a non-admin, or on the mailbox: refused, and nothing runs on the box", async () => {
@@ -582,9 +589,10 @@ describe("peer_doctor (the doctor on a paired machine, for an admin)", () => {
       await client.close();
     }
     await daemon.tick();
-    expect(
-      await op("admin-1", { op: "peer_doctor", name: "box-a", fix: true, clone: true }),
-    ).toMatchObject({ ok: false, error: 'a doctor run on "box-a" is already in progress' });
+    expect(await op("admin-1", { op: "peer_doctor", name: "box-a", fix: true })).toMatchObject({
+      ok: false,
+      error: 'a doctor run on "box-a" is already in progress',
+    });
     expect(box?.doctorRuns).toHaveLength(1);
 
     release(REPORT);

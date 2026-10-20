@@ -158,8 +158,9 @@ import { AGENT_BRANCH } from "./worktree";
  *     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
  *     login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
  *   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
- *   volley peer doctor --json [--fix --yes [--clone]] — the machine's doctor (RemoteHost.runDoctor,
- *     the `peer_doctor` op); no other volley argv runs on a box
+ *   volley peer doctor --json [--fix --yes [--clone --origin <https URL>]] — the machine's doctor
+ *     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
+ *     credentials or port, isCloneUrl); no other volley argv runs on a box
  *   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
  *     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
  *     mv -f .claude.json.volleyd.tmp .claude.json
@@ -1340,8 +1341,17 @@ export const PATH_PROBE_TOOLS = ["claude", "bun"] as const;
 const REMOTE_DOCTOR: readonly (readonly string[])[] = [
   ["peer", "doctor", "--json"],
   ["peer", "doctor", "--json", "--fix", "--yes"],
-  ["peer", "doctor", "--json", "--fix", "--yes", "--clone"],
 ];
+/** … and with `--clone`, the URL it clones from (`--origin`, a CLONE_URL). */
+const REMOTE_DOCTOR_CLONE = ["peer", "doctor", "--json", "--fix", "--yes", "--clone", "--origin"];
+/**
+ * What a box's doctor may clone (`--origin`): `https://<host>/<path>`, the form `cloneUrl`
+ * (peers.ts) makes from a normalised origin. No credentials, port, query, `..` segment, space or
+ * control character, so git reads it as nothing but a URL.
+ */
+const CLONE_URL = /^https:\/\/[a-z0-9.-]+(?:\/[A-Za-z0-9._~-]+)+$/;
+export const isCloneUrl = (url: string): boolean =>
+  CLONE_URL.test(url) && !url.split("/").some((seg) => seg === "." || seg === "..");
 
 const remoteDeny = (v: Verdict): Verdict =>
   v.kind === "allow" ? v : { ...v, verb: `remote ${v.verb}` };
@@ -1639,10 +1649,13 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
         : deny(`command (only -v ${PATH_PROBE_TOOLS.join(" ")})`);
     case "volley":
       // The one remote volley step: elsewhere volley is a local program (`volley auth`).
-      return REMOTE_DOCTOR.some((shape) => sameArgv(args, shape))
+      return REMOTE_DOCTOR.some((shape) => sameArgv(args, shape)) ||
+        (args.length === REMOTE_DOCTOR_CLONE.length + 1 &&
+          sameArgv(args.slice(0, -1), REMOTE_DOCTOR_CLONE) &&
+          isCloneUrl(args.at(-1) ?? ""))
         ? ALLOW
         : deny(
-            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--fix --yes [--clone]])`,
+            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--fix --yes [--clone --origin <https URL>]])`,
           );
     default: {
       // Locally allowed programs (cmux, volley, launchctl) have no business on a remote host.

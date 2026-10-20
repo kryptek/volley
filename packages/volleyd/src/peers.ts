@@ -6,6 +6,7 @@ import { listAccounts, replyKey, seal, volleyAuth } from "./accounts";
 import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import type { PatchResult } from "./config-store";
 import type { ExecFn } from "./exec";
+import { isCloneUrl } from "./fence";
 import type { RemoteHost } from "./hosts/ssh-tmux";
 import type { DoctorReport, MachineRecord } from "./machines";
 import type { PathError } from "./schemas";
@@ -36,10 +37,12 @@ import type { NewEvent, RemoteHostConfig } from "./types";
  *     `{name, now: true}` likewise, but the daemon stops those agents (`stop_grace_s`) and opens
  *     their respawn decisions first. With no live agent either removes at once.
  *   - `peers` → the paired machines' records and names.
- *   - `peer_doctor {name, fix?, clone?}` → runs `volley peer doctor --json [--fix --yes]
- *     [--clone]` on the configured host `name` over ssh (the Desk's Repair) and answers with the
- *     doctor's report; without `fix`, also its `plan` (each failing check with its fix), so the
- *     sheet shows what a fix would do before anyone runs it.
+ *   - `peer_doctor {name, fix?, clone?}` → runs `volley peer doctor --json [--fix --yes
+ *     [--clone --origin <url>]]` on the configured host `name` over ssh (the Desk's Repair) and
+ *     answers with the doctor's report; without `fix`, also its `plan` (each failing check with
+ *     its fix), so the sheet shows what a fix would do before anyone runs it. `<url>` is the
+ *     running wave's origin as the supervisor's own clone reports it (`cloneUrl`); with none
+ *     known, `clone` is refused.
  *
  * `peer_invite`, `peer_remove` and `peer_doctor` are admin ops: the daemon answers them only on the account-op
  * topic, after the same admin check as the account ops (accounts.ts `adminRefusal`). The code is
@@ -402,9 +405,10 @@ export class PeerService {
   /**
    * `peer_doctor`'s request, checked before anything runs: the host to run it on, or the refusal.
    * The run itself (`runDoctor`) is an ssh round-trip of up to `peer_doctor_timeout_ms`, so the
-   * daemon awaits it outside its queue.
+   * daemon awaits it outside its queue. `origin` is the wave repo's normalised origin
+   * (`<host>/<path>`) the box's doctor clones from with `clone`; null when none is known.
    */
-  doctorRequest(p: Fields): PeerReply | DoctorRun {
+  doctorRequest(p: Fields, origin: string | null): PeerReply | DoctorRun {
     const name = p.name;
     if (typeof name !== "string" || !isValidAgentId(name)) {
       return refuse("name must match [a-z0-9][a-z0-9_-]{0,62}");
@@ -419,16 +423,22 @@ export class PeerService {
     if (clone && !fix) return refuse("clone needs fix: true (the doctor clones only as a fix)");
     if (!Object.hasOwn(this.deps.hosts(), name))
       return refuse(`no configured host named "${name}"`);
+    const url = clone ? cloneUrl(origin) : null;
+    if (clone && url === null) {
+      return refuse(
+        `the wave repo's origin is not known (${origin === null ? "no running wave's clone reports one" : `${origin} is no https URL`}): clone it on "${name}" by hand, or repair while the wave runs`,
+      );
+    }
     const host = this.deps.remote?.(name) ?? "remote hosts are not available";
     if (typeof host === "string") return refuse(host);
-    return { name, fix, clone, host };
+    return { name, fix, clone, host, ...(url !== null ? { origin: url } : {}) };
   }
 
   /** Run a checked `peer_doctor` on its box: the report (and the plan without `fix`), or why not. */
-  async runDoctor({ name, fix, clone, host }: DoctorRun): Promise<PeerReply> {
+  async runDoctor({ name, fix, host, origin }: DoctorRun): Promise<PeerReply> {
     let report: DoctorReport;
     try {
-      report = await host.runDoctor({ fix, clone });
+      report = await host.runDoctor({ fix, ...(origin !== undefined ? { clone: origin } : {}) });
     } catch (e) {
       return refuse(e instanceof Error ? e.message : String(e));
     }
@@ -540,6 +550,20 @@ export interface DoctorRun {
   fix: boolean;
   clone: boolean;
   host: RemoteHost;
+  /** With `clone`: the URL the doctor clones from (`--origin`). */
+  origin?: string;
+}
+
+/**
+ * The URL a box's doctor clones the wave repo from: `https://` + a normalised origin
+ * (`<host>/<path>`, volley-cli's `normalizeOrigin`), which `gh auth setup-git` signs git in to.
+ * Null when there is none, or it has a port (ssh or https cannot be told apart), or the fence
+ * would refuse it.
+ */
+export function cloneUrl(origin: string | null | undefined): string | null {
+  if (origin === null || origin === undefined || /^[^/]*:/.test(origin)) return null;
+  const url = `https://${origin}`;
+  return isCloneUrl(url) ? url : null;
 }
 
 /** What a fix would change: each failing check with its fix text, in the doctor's order. */

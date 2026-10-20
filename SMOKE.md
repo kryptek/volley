@@ -71,19 +71,21 @@ lease_pools:
   looks like to the doctor) and `mv <clone> <clone>.bak`. On the next heartbeat `volley.installed` and `repo.clone` are ✗.
   **Repair…** opens the plan sheet: "This will:" lists `bun install --frozen-lockfile` in the
   volley checkout; "You run on box-a:" lists the rest (the Claude sign-in). Turn on **Also clone
-  the wave repo**, **Apply**.
+  the wave repo**, **Apply** with no wave running.
+  **Pass:** refused before anything runs on `box-a`: `the wave repo's origin is not known (no
+  running wave's clone reports one) …` (the clone comes from the running wave's origin).
+  Now start a wave of the test repo on the Mac (Plan 11's `smoke.yaml` with a new `wave:` id and
+  `host: local` on its task: `volleyd run <file>`), wait until the Mac's card shows the repo's
+  `repo.origin` ✓, then **Repair…**, **Also clone the wave repo**, **Apply** again.
   **Pass:** the sheet waits (a doctor run may take minutes), then the rows re-render:
   `volley.installed` ✓, `repo.clone` / `repo.origin` ✓ (a fresh clone at the path), nothing new
   red; `volleyd events _system | tail` has
-  `peer_doctor_run { … fix: true, clone: true, ok: true }`.
+  `peer_doctor_run { … fix: true, clone: true, ok: true }`; on `box-a`,
+  `git -C <clone> remote get-url origin` is `https://<the test repo's host/path>` (volleyd
+  passes the running wave's origin as `--clone --origin <https URL>`, #188).
   Time it. Remove `<clone>.bak`.
-  **Expected red, read from source before the run:** volleyd's `peer_doctor` passes `--clone`
-  but no `--origin`, and the doctor clones only from `--origin`, so the switch cannot clone yet:
-  `repo.clone` stays ✗ with the manual `git clone <the wave repo's URL> …` line. Filed as
-  [#188](https://github.com/kryptek/volley/issues/188); fix it in its own PR (volleyd passes the
-  running wave's origin, or the doctor takes it from the supervisor's readiness requirements),
-  then re-run this step.
-- [ ] **Repair…** again and **Apply**. **Pass:** every fix says "already done".
+- [ ] **Repair…** again and **Apply**. **Pass:** every fix says "already done". Then
+  `volleyd stop <wave>` the wave you started.
 
 ### (b) Provisioning rows
 
@@ -198,7 +200,7 @@ One of T1 / T2 is running on `box-a` and T3 is pinned there, waiting behind its 
 OWNER RESULTS (<date>, release head <sha>, box-a: <os/arch, cores>):
   setup: smoke-heavy pool shown (0/2, 1 per machine):
   (a) join refused on the PATH: / paired, rows in step 3 (time __): / PATH broken: not ready + claude_on_path row, Check again green (time __):
-      Repair: bun install + clone applied (time __); second Repair all "already done":
+      Repair: clone refused with no wave: / bun install + clone applied (time __); second Repair all "already done":
   (b) skills / hooks / mcp / sharing green: / /volley list on box-a:
   (c) GUI sign-in (time __), card green with plan: / forward gone (ps, tmux ls): / audit (~/.volley, journal, broker):
   (d) phone fallback (time __), no input in the sheet, card green:
