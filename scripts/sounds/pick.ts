@@ -145,9 +145,11 @@ export function readManifest(dir: string, theme: string, label: string): Manifes
 }
 
 export function writeManifest(dir: string, m: Manifest): void {
-  const clips = Object.fromEntries(
-    SOUND_EVENT_IDS.filter((id) => m.clips[id]).map((id) => [id, m.clips[id]]),
-  );
+  const clips: Record<string, ClipEntry> = {};
+  for (const id of SOUND_EVENT_IDS) {
+    const clip = m.clips[id];
+    if (clip) clips[id] = clip;
+  }
   const out: Manifest = {
     theme: m.theme,
     label: m.label,
