@@ -3960,10 +3960,11 @@ export class Daemon {
   /**
    * The running wave's repo's origin (normalised), as the own doctor's last run on that clone
    * read it: what a peer's clone is compared with, and what Repair's clone clones. Null while no
-   * wave runs, or no run has checked its clone yet.
+   * wave runs, or no run has checked its clone yet (a failed run keeps an earlier wave's report).
    */
   private waveOrigin(): string | null {
-    return typeof this.localDoctorRepo === "string"
+    const repo = this.localDoctorRepo;
+    return typeof repo === "string" && repo === this.waveRepo()
       ? (this.localReport?.repo?.origin ?? null)
       : null;
   }

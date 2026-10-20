@@ -426,7 +426,7 @@ export class PeerService {
     const url = clone ? cloneUrl(origin) : null;
     if (clone && url === null) {
       return refuse(
-        `the wave repo's origin is not known (${origin === null ? "no running wave's clone reports one" : `${origin} is no https URL`}): clone it on "${name}" by hand, or repair while the wave runs`,
+        `the wave repo's origin is not known (${origin === null ? "no running wave's clone reports one" : `${origin} cannot be cloned over https`}): clone it on "${name}" by hand, or repair while the wave runs`,
       );
     }
     const host = this.deps.remote?.(name) ?? "remote hosts are not available";

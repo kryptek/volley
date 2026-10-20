@@ -247,6 +247,8 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
   let beats: number;
   /** Every argv the supervisor's own doctor ran (each passed the fence first). */
   let doctorArgv: string[][];
+  /** When set, the supervisor's own doctor fails (the last report stays). */
+  let doctorFails: boolean;
 
   const verdict = async (name: string) =>
     (await env.retained(`${machineTopic(name)}/readiness`)) as {
@@ -319,10 +321,12 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
     );
     clock = fakeClock(1_000_000);
     doctorArgv = [];
+    doctorFails = false;
     // The production doctor (realLocalDoctor) over an exec that answers like the real CLI.
     const doctorExec = async (argv: readonly string[]) => {
       assertAllowed(argv);
       doctorArgv.push([...argv]);
+      if (doctorFails) throw new Error("doctor unavailable");
       const at = argv.indexOf("--repo");
       const report = at === -1 ? noRepoReport() : repoReport(argv[at + 1] as string);
       return {
@@ -560,6 +564,22 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
     // Without clone, no --origin: the fence admits it only beside --clone.
     expect(await repair({ fix: true })).toMatchObject({ ok: true });
     expect(box?.doctorRuns.at(-1)).toEqual({ fix: true });
+
+    // The wave ends and the own doctor's next run fails: its last report is of the ended wave's
+    // clone, so its origin is no longer the wave repo's and nothing is cloned from it.
+    doctorFails = true;
+    expect((await runCli(["stop", "w1", "--by", "tester"], env.env)).exitCode).toBe(0);
+    const runs = doctorArgv.length;
+    await eventually(async () => {
+      await tick();
+      return doctorArgv.slice(runs).some((a) => !a.includes("--repo"));
+    });
+    const cloned = box?.doctorRuns.length;
+    expect(await repair({ fix: true, clone: true })).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/origin.*not known/),
+    });
+    expect(box?.doctorRuns).toHaveLength(cloned ?? 0);
   });
 
   it("the own machine's verdict counts every live supervised agent, on any machine, against hard_ceiling", async () => {
