@@ -78,6 +78,8 @@ export interface MachinesProps {
   focus?: string | undefined;
   /** Bumped on every chip click, so a second click on the same machine scrolls to it again. */
   focusSeq?: number | undefined;
+  /** Open a Settings › Supervisor row by its config path (the local agents chip). */
+  onOpenSetting?: ((path: string) => void) | undefined;
 }
 
 const FINISHED: ReadonlySet<string> = new Set(["done", "cancelled"]);
@@ -577,6 +579,9 @@ export function Machines(p: MachinesProps) {
       onRemoved={setNotice}
       signIn={self ? undefined : p.signIn?.(m.name)}
       onCountdown={onCountdown}
+      onOpenLocalAgents={
+        self && p.onOpenSetting ? () => p.onOpenSetting?.("fleet.local_agents") : undefined
+      }
     />
   );
 

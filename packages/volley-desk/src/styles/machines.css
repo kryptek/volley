@@ -43,6 +43,24 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The supervisor's own machine's fleet.local_agents mode; a button that opens the setting. */
+.m-local {
+  background: none;
+  font: inherit;
+  font-size: 11.5px;
+}
+button.m-local {
+  cursor: pointer;
+}
+button.m-local:hover,
+button.m-local:focus-visible {
+  color: var(--ink);
+  border-color: rgba(110, 231, 249, 0.5);
+}
+.m-local--active {
+  color: #ffd27a;
+  border-color: rgba(255, 210, 122, 0.45);
+}
 .m-stats {
   display: flex;
   flex-wrap: wrap;

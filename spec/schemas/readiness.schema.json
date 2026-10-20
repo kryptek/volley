@@ -104,7 +104,7 @@
             },
             "heavy": {
               "type": "object",
-              "description": "Per lease pool that sets per_machine: the leases the machine's holders hold, and the pool's per-machine cap (spec section 4.6.5).",
+              "description": "Per lease pool that sets per_machine (or a per_machine_overrides entry for this machine): the leases the machine's holders hold, and the pool's per-machine cap (spec section 4.6.5).",
               "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
               "maxProperties": 32,
               "additionalProperties": {
@@ -114,7 +114,10 @@
                 "properties": {
                   "held": { "type": "integer", "minimum": 0 },
                   "per_machine": {
-                    "$ref": "config.schema.json#/$defs/leasePool/properties/per_machine"
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 64,
+                    "description": "The cap in force on this machine: the pool's per_machine_overrides entry for it, else its per_machine. 0: no slot there."
                   }
                 }
               }
@@ -145,6 +148,17 @@
               "minLength": 1,
               "maxLength": 200,
               "description": "Why eligible is false, in one line: the same text as the machine's placement candidate line without its 'ineligible: ' prefix. Required then, absent otherwise."
+            },
+            "local_agents": {
+              "type": "object",
+              "required": ["mode", "active"],
+              "additionalProperties": false,
+              "description": "On the supervisor's own machine only: its local_agents mode, whether the fallback profile is in force now (no paired machine eligible), and the closest peer's reason (spec section 4.6.15).",
+              "properties": {
+                "mode": { "enum": ["always", "fallback", "never"] },
+                "active": { "type": "boolean" },
+                "why": { "type": "string", "maxLength": 200 }
+              }
             },
             "checked_at": {
               "type": "string",

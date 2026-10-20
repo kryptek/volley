@@ -20,6 +20,10 @@
               "$ref": "config.schema.json#/$defs/leasePool/properties/per_machine",
               "description": "The pool's per-machine cap, when its config sets one; at most capacity."
             },
+            "per_machine_overrides": {
+              "$ref": "config.schema.json#/$defs/leasePool/properties/per_machine_overrides",
+              "description": "Per machine name, the cap in force there in place of per_machine (the supervisor's own machine under its fleet.local_name), when the pool's config sets any."
+            },
             "held": {
               "type": "array",
               "items": {

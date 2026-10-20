@@ -1,6 +1,6 @@
 import { LOCAL_HOST } from "./fleet-name";
 import type { MachineRecord } from "./machines";
-import type { PlacementConfig, Wave, WaveTask } from "./types";
+import type { FallbackProfile, LocalAgentsMode, PlacementConfig, Wave, WaveTask } from "./types";
 
 /**
  * Placement (SPEC §4.6.15), as a pure function: where a task that does not name its host starts.
@@ -38,6 +38,13 @@ export interface MachineView {
    * supervisor's own machine counts every one, wherever it runs (`hard_ceiling` caps the total).
    */
   agents: number;
+  /**
+   * The supervisor's own machine: the agents on it alone (live, plus reservations for it), which
+   * its fallback profile counts against `fleet.fallback.max_agents`. Unset: `agents`.
+   */
+  local_agents?: number;
+  /** A peer the supervisor marked down: since when (its own clock, epoch ms). */
+  down_since?: number;
   /** Each lease pool that sets `per_machine`: its holders' leases on this machine. */
   heavy: Record<string, { held: number; per_machine: number }>;
   /** Its account's 5-hour usage percentage; null: unknown. */
@@ -58,8 +65,14 @@ export interface Snapshot {
   heavyReserved?: Record<string, Record<string, number>>;
 }
 
-/** The machine filter's options: placement's thresholds and the usage warning level. */
-export type FilterOptions = Pick<PlaceOptions, "placement" | "warn_at_pct">;
+/**
+ * The machine filter's options: placement's thresholds, the usage warning level, and how the
+ * supervisor's own machine takes auto-placed tasks.
+ */
+export type FilterOptions = Pick<
+  PlaceOptions,
+  "placement" | "warn_at_pct" | "local_agents" | "fallback" | "now" | "down_grace_ms" | "exclude"
+>;
 
 export interface PlaceOptions {
   placement: Pick<
@@ -75,6 +88,17 @@ export interface PlaceOptions {
    * answer): never chosen, shown as ineligible.
    */
   exclude?: string[];
+  /** `fleet.local_agents`, resolved (SPEC §4.6.15); unset: `always`. */
+  local_agents?: LocalAgentsMode;
+  /** `fleet.fallback`: the own machine's profile while it is the fallback. */
+  fallback?: FallbackProfile;
+  /** Now (epoch ms), against which a down peer's `down_since` is judged. */
+  now?: number;
+  /**
+   * `placement.down_decision_after_s` in ms: a peer down for less is not yet ineligible for the
+   * fallback's purposes (it may be back), so the own machine stays closed to auto placement.
+   */
+  down_grace_ms?: number;
 }
 
 /** One `tasks[].placement.candidates[]` entry (wave-state.schema.json). */
@@ -149,6 +173,89 @@ function placed(m: MachineView, snap: Snapshot): number {
   return m.agents + reserved;
 }
 
+/** The own machine's role in auto placement now (`localRole`). */
+export interface LocalRole {
+  mode: LocalAgentsMode;
+  /** The fallback profile is in force: `fallback`, and no paired machine eligible or maybe back. */
+  active: boolean;
+  /** Why the mode keeps the own machine from auto placement now (its first ineligible reason). */
+  blocked?: string;
+  /** The eligible peer (`box-a eligible`), the peer that may be back, or the closest peer's reason. */
+  why?: string;
+  /** Held back only for a down peer still within the grace: the reason a waiting task shows. */
+  back?: true;
+}
+
+const seconds = (ms: number) => Math.max(0, Math.round(ms / 1000));
+
+/**
+ * The own machine's role under `fleet.local_agents` (SPEC §4.6.15). `always`: a candidate like
+ * any peer. `never`: none. `fallback`: none while any peer is eligible, or a down peer is still
+ * within `down_grace_ms` of going down (a tunnel blip never pulls work onto it); otherwise the
+ * fallback profile is in force. A peer's eligibility is task-agnostic (`machineIneligible`), so a
+ * peer with its heavy slots full still keeps the own machine closed to a heavy task. Readiness
+ * and placement both read it, so they agree.
+ */
+export function localRole(snap: Snapshot, o: FilterOptions): LocalRole {
+  const mode = o.local_agents ?? "always";
+  if (mode === "always") return { mode, active: false };
+  if (mode === "never") return { mode, active: false, blocked: "local_agents: never" };
+  const peers = snap.machines
+    .filter((m) => !m.local)
+    .map((m) => ({
+      m,
+      why: [
+        ...(o.exclude?.includes(m.name) === true ? [EXCLUDED] : []),
+        ...machineIneligible(m, snap, o),
+      ],
+    }));
+  const eligible = peers.find((p) => p.why.length === 0);
+  if (eligible !== undefined) {
+    const name = eligible.m.name;
+    return {
+      mode,
+      active: false,
+      blocked: `fallback: ${name} is eligible`,
+      why: `${name} eligible`,
+    };
+  }
+  const now = o.now ?? 0;
+  const grace = o.down_grace_ms ?? 0;
+  const back = peers.find((p) => p.m.down_since !== undefined && now - p.m.down_since < grace);
+  if (back !== undefined) {
+    const why = `${back.m.name} may be back (down ${seconds(now - (back.m.down_since ?? now))} s, grace ${seconds(grace)} s)`;
+    return { mode, active: false, blocked: `fallback: ${why}`, why, back: true };
+  }
+  const closest = [...peers].sort(
+    (a, b) => a.why.length - b.why.length || byName(a.m.name, b.m.name),
+  )[0];
+  return {
+    mode,
+    active: true,
+    why: closest !== undefined ? `${closest.m.name}: ${closest.why[0]}` : "no paired machine",
+  };
+}
+
+/**
+ * The agents counted against `m`'s cap and the cap: under the own machine's fallback profile,
+ * its own agents alone against `fleet.fallback.max_agents` (`hard_ceiling` still caps the total
+ * through admission); otherwise `placed` against `max_agents`.
+ */
+function slots(
+  m: MachineView,
+  snap: Snapshot,
+  o: FilterOptions,
+): { n: number; max: number; fallback: boolean } {
+  if (m.local && o.fallback !== undefined && localRole(snap, o).active) {
+    return {
+      n: (m.local_agents ?? m.agents) + (snap.reservations[m.name] ?? 0),
+      max: Math.min(m.max_agents, o.fallback.max_agents),
+      fallback: true,
+    };
+  }
+  return { n: placed(m, snap), max: m.max_agents, fallback: false };
+}
+
 /**
  * The heavy pools the task needs a per-machine slot in, as `[pool, held, per_machine]`: `held`
  * counts the leases held there plus this tick's heavy reservations.
@@ -158,14 +265,20 @@ function heavySlots(
   task: WaveTask,
   wave: Wave,
   snap: Snapshot,
+  o: FilterOptions,
 ): [string, number, number][] {
   if (task.heavy !== true) return [];
   const reserved = snap.heavyReserved?.[m.name] ?? {};
+  // Under the fallback profile, each pool's slot there is `fleet.fallback.per_machine.<pool>`
+  // (default 1), never more than the pool's own cap.
+  const fallback = m.local && o.fallback !== undefined && localRole(snap, o).active;
   return wave.heavy_pools.flatMap((pool) => {
     const h = m.heavy[pool];
-    return h === undefined
-      ? []
-      : [[pool, h.held + (reserved[pool] ?? 0), h.per_machine] as [string, number, number]];
+    if (h === undefined) return [];
+    const cap = fallback
+      ? Math.min(h.per_machine, o.fallback?.per_machine[pool] ?? 1)
+      : h.per_machine;
+    return [[pool, h.held + (reserved[pool] ?? 0), cap] as [string, number, number]];
   });
 }
 
@@ -176,6 +289,12 @@ function heavySlots(
  */
 export function machineIneligible(m: MachineView, snap: Snapshot, o: FilterOptions): string[] {
   const out: string[] = [];
+  // The own machine's mode first: under `never`, or `fallback` while a peer is eligible, it
+  // takes no auto-placed task whatever else holds.
+  if (m.local) {
+    const blocked = localRole(snap, o).blocked;
+    if (blocked !== undefined) out.push(blocked);
+  }
   // Every readiness blocker counts (a machine that needs several fixes is farther away); the
   // line names the first.
   if (!m.ready) {
@@ -183,8 +302,8 @@ export function machineIneligible(m: MachineView, snap: Snapshot, o: FilterOptio
     out.push(`${first} (readiness)`, ...more.map((reason) => `${reason} (readiness)`));
   }
   if (m.drain) out.push("draining");
-  const n = placed(m, snap);
-  if (n >= m.max_agents) out.push(`${n}/${m.max_agents} agents (max_agents)`);
+  const { n, max, fallback } = slots(m, snap, o);
+  if (n >= max) out.push(`${n}/${max} agents (${fallback ? "fallback max_agents" : "max_agents"})`);
   out.push(...m.held);
   const r = m.record;
   if (r !== undefined) {
@@ -223,7 +342,7 @@ function ineligible(
     ...(o.exclude?.includes(m.name) === true ? [EXCLUDED] : []),
     ...machineIneligible(m, snap, o),
   ];
-  for (const [pool, held, per] of heavySlots(m, task, wave, snap)) {
+  for (const [pool, held, per] of heavySlots(m, task, wave, snap, o)) {
     if (held >= per) out.push(`heavy slots ${Math.max(0, per - held)}/${per} free (${pool})`);
   }
   return out;
@@ -242,10 +361,10 @@ function score(
 ): { score: number | null; line: string } {
   const r = m.record as MachineRecord;
   const w = o.placement.weights;
-  const n = placed(m, snap);
+  const { n, max } = slots(m, snap, o);
   const parts: [number, number | null][] = [
     [w.cpu, Math.max(0, 1 - r.load[0] / r.cores / o.placement.load_per_core_max)],
-    [w.slots, m.max_agents > 0 ? Math.max(0, (m.max_agents - n) / m.max_agents) : 0],
+    [w.slots, max > 0 ? Math.max(0, (max - n) / max) : 0],
     [w.mem, r.memory !== undefined ? r.memory.available_pct / 100 : null],
     [w.usage, m.usage_pct !== null ? 1 - m.usage_pct / 100 : null],
   ];
@@ -257,10 +376,10 @@ function score(
       : null;
   const bits = [
     `load ${r.load[0].toFixed(1)} on ${r.cores} cores`,
-    `${n}/${m.max_agents} agents`,
+    `${n}/${max} agents`,
     r.memory !== undefined ? `${pct(r.memory.available_pct)} mem` : "mem unknown",
     m.usage_pct !== null ? `usage ${pct(m.usage_pct)}` : "usage unknown",
-    ...heavySlots(m, task, wave, snap).map(
+    ...heavySlots(m, task, wave, snap, o).map(
       ([pool, held, per]) => `heavy slots ${Math.max(0, per - held)}/${per} free (${pool})`,
     ),
   ];
@@ -294,6 +413,7 @@ export function place(
   }
   const prefer = wave.placement_prefer ?? [];
   const avoid = wave.placement_avoid ?? [];
+  const role = localRole(snap, o);
   const rows = snap.machines
     .filter((m) => m.record !== undefined)
     .map((m) => {
@@ -311,8 +431,14 @@ export function place(
         score: s.score ?? 0,
         // Prefer first; avoid only when nothing else is eligible.
         group: prefer.includes(m.name) ? 0 : avoid.includes(m.name) ? 2 : 1,
-        placed: placed(m, snap),
-        line: line(why.length > 0 ? `ineligible: ${why[0]}` : `${s.line}${tag}`),
+        placed: slots(m, snap, o).n,
+        line: line(
+          why.length > 0
+            ? `ineligible: ${why[0]}`
+            : m.local && role.active
+              ? `local (fallback: no peer eligible: ${role.why}) · ${s.line}${tag}`
+              : `${s.line}${tag}`,
+        ),
       };
     });
   const eligible = rows
@@ -332,7 +458,8 @@ export function place(
   }));
   const best = eligible[0];
   if (best === undefined) {
-    const closest = rest[0];
+    // The own machine held back for a peer that may be back says so before any peer's reason.
+    const closest = (role.back === true ? rest.find((r) => r.m.local) : undefined) ?? rest[0];
     return {
       host: null,
       why: line(

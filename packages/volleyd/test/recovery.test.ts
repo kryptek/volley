@@ -677,3 +677,33 @@ describe("daemon: credit exhaustion → approval-gated model switch", () => {
     expect(s.host.texts).toEqual([]);
   });
 });
+
+describe("daemon: a task on the own machine under fallback, while a peer is eligible", () => {
+  let f: Fleet;
+  beforeEach(async () => {
+    f = await makeFleet({ localAgents: "fallback" });
+  });
+  afterEach(async () => {
+    await f.close();
+  });
+
+  it("offers plain respawn only: the fallback is a placement preference, not trouble on the machine", async () => {
+    await f.submit("w1", "", "  T1: { issue: 42, host: local }\n");
+    await f.tick();
+    const first = f.agentOf("w1", "T1");
+    await f.supervised(first);
+    expect((await f.verdict("control"))?.eligible).toBe(false);
+    await f.finish(first, "failed");
+    const opened = () =>
+      f.journal("w1").find((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked");
+    await eventually(async () => {
+      await f.tick(0);
+      return opened() !== undefined;
+    });
+    const d = await f.decision("w1", opened()?.data.decision_id as string);
+    expect((await f.verdict("box"))?.eligible).toBe(true);
+    expect((await f.verdict("control"))?.eligible).toBe(false);
+    expect(d?.options).toEqual(["respawn", "cancel"]);
+    expect(d?.question).not.toContain("Where: ");
+  });
+});
