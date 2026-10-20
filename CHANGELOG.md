@@ -6,6 +6,12 @@ All workspace packages share one version. Dates are release-tag dates.
 
 ### Fixed
 
+- An agent that ends its turn to wait on its own background work (a long test run, `gh run watch`) is no longer nudged or
+  reported as stalled. volleyd reads the hooks' `background_wait` flag, a lease the agent holds, the running shells in its
+  terminal footer, and recent writes under its worktree; `volleyd status` says `idle N min: <reason>`. A real stall's
+  repeated `agent_stalled` decisions of one idle back off (each waits twice as long, capped by the new
+  `stall_backoff_max_s`); the new `background_wait_max_s` bounds how long any of that evidence holds off the nudge, counted
+  from the start of the idle (SPEC §4.3, §4.6.4). (#177)
 - **CI gate stuck red on a superseded run:** volleyd judges CI on a head by the latest run per workflow and trigger event. A run
   cancelled by `concurrency: cancel-in-progress` and replaced by a newer run on the same head no longer opens `ci_failed`
   (re-verify looped on it forever), and restart reconciliation ignores its cancelled check. A cancelled run that nothing

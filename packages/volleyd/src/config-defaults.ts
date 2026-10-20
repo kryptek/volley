@@ -23,6 +23,8 @@ export const CONFIG_DEFAULTS: Tunables = {
   claim_after_s: 1800,
   heartbeat_alarm_s: 600,
   idle_grace_s: 180,
+  background_wait_max_s: 7200,
+  stall_backoff_max_s: 1800,
   fallback_model: null,
   mailbox: { session_expiry_s: 604800 },
   worktree_root: "~/.volley/worktrees",
@@ -180,6 +182,8 @@ export const DAEMON_DEFAULTS = {
   screen_capture_lines: 60,
   /** Lines kept in a published screen tail (screen.schema.json maxItems). */
   screen_tail_lines: 40,
+  /** Entries an idle agent's worktree walk visits before it gives up (activity-evidence.ts). */
+  worktree_scan_max_entries: 2000,
   /** A capture slower than this backs the agent off and marks its screen stale. */
   screen_slow_ms: 2_000,
   /** Hard bound on one screen read; a read still pending then counts as failed (and slow). */

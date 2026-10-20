@@ -136,6 +136,20 @@
           "default": 180,
           "description": "Seconds an agent may sit idle (its turn ended, no terminal status) before it is nudged once; still idle another grace later opens an agent_stalled decision."
         },
+        "background_wait_max_s": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400,
+          "default": 7200,
+          "description": "Seconds, counted from the start of the idle, that evidence of an idle agent's own work (background_wait, a lease, running shells, a fresh worktree write) holds off the idle nudge; past it the nudge path resumes."
+        },
+        "stall_backoff_max_s": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400,
+          "default": 1800,
+          "description": "Cap on the gap before a re-opened agent_stalled decision: the n-th re-open waits idle_grace_s × 2^n after the answer, at most this long."
+        },
         "fallback_model": {
           "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 128 }, { "type": "null" }],
           "description": "Model offered in a model_switch decision on credit exhaustion; null disables the offer."

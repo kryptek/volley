@@ -93,6 +93,29 @@ describe("ConfigStore layering", () => {
     ).toEqual([]);
   });
 
+  it("background_wait_max_s and stall_backoff_max_s: bounded, per-wave, in the effective config", () => {
+    expect(CONFIG_DEFAULTS).toMatchObject({
+      background_wait_max_s: 7200,
+      stall_backoff_max_s: 1800,
+    });
+    const c = open();
+    for (const bad of [{ background_wait_max_s: 59 }, { stall_backoff_max_s: 86401 }]) {
+      const r = c.applyPatch(bad as never, "x");
+      expect(r.applied).toBe(false);
+      expect(r.rejected?.[0]?.path).toBe(Object.keys(bad)[0]);
+    }
+    expect(c.applyPatch({ stall_backoff_max_s: 3600 }, "x").applied).toBe(true);
+    c.setWaveOverrides("w1", { background_wait_max_s: 600 });
+    expect(c.effective("w1")).toMatchObject({
+      background_wait_max_s: 600,
+      stall_backoff_max_s: 3600,
+    });
+    expect(c.effective("w2").background_wait_max_s).toBe(7200);
+    expect(
+      schemaErrors("config.schema.json", envelope("_waves/_config", "config", c.retainedPayload())),
+    ).toEqual([]);
+  });
+
   it("public_hygiene: auto | on | off, default auto, per-wave override, in the retained payload", () => {
     writeFileSync(join(home, "config.yaml"), "public_hygiene: on\n");
     const c = open();
