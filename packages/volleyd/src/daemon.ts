@@ -61,6 +61,14 @@ import {
   machineReasons,
   summaryPayload,
 } from "./admission";
+import { budgetUsed } from "./autopilot/budgets";
+import {
+  type Budget,
+  type EscalateWhy,
+  POLICY_TABLE,
+  evaluate,
+  renderPolicyTable,
+} from "./autopilot/policy";
 import { authFields } from "./broker-auth";
 import { accountMoves, moveAgentAccount, moveRespawn } from "./claude/move";
 import { ClaudeAccountError, type SelectedAccount, claudeRoot } from "./claude/profiles";
@@ -5052,10 +5060,11 @@ export class Daemon {
       data: Record<string, unknown>,
     ): Promise<void> => {
       try {
-        note(
-          slot,
-          (await this.openDecisionNow(wave, input, { agent_id: agentId, ...data })).decision_id,
-        );
+        const d = await this.openDecisionNow(wave, input, { agent_id: agentId, ...data });
+        note(slot, d.decision_id);
+        // Answered by autopilot before the slot was noted: free it as onRecoveryResolved would.
+        if (d.resolved !== undefined)
+          a.liveness = noteResolved(a.liveness, d.decision_id, this.now());
       } catch (e) {
         note(slot, null);
         throw e;
@@ -5880,6 +5889,13 @@ export class Daemon {
     if (rec?.state == null) return null;
     const state = structuredClone(rec.state);
     state.effective_config = this.config.effective(wave);
+    const ap = rec.autopilot ?? { resolved: 0, escalated: 0, budgets: {} };
+    state.autopilot = {
+      enabled: state.effective_config.autopilot?.enabled ?? true,
+      auto_resolved: ap.resolved,
+      escalated: ap.escalated,
+      budgets: structuredClone(ap.budgets),
+    };
     const held = this.heldBack.get(wave) ?? [];
     const candidates = new Set(admissible(rec));
     for (const t of state.tasks) {
@@ -5998,16 +6014,89 @@ export class Daemon {
     );
     if ("error" in r) throw new Error(r.error);
     await this.append(wave, { ...r.event, data: { ...extra, ...r.event.data } });
+    this.log(`opened ${describeDecision(log.record.decisions[r.id] as DecisionRecord)}`);
+    // Autopilot answers it in this same turn (resolveNow publishes and clears its topic), or
+    // journals why it is the owner's; only a decision still open is published and rings.
+    if (!(await this.autopilot(wave, log.record.decisions[r.id] as DecisionRecord)))
+      return log.record.decisions[r.id] as DecisionRecord;
     const d = log.record.decisions[r.id] as DecisionRecord;
     await this.publishDecision(wave, d);
     // SPEC §4.1: progress is QoS 0, not retained.
     await this.broker.publish(
       buildTopic(this.opts.namespace, DAEMON_AGENT_ID, "progress"),
-      JSON.stringify(this.envelope("progress", "blocked", attentionPayload(d))),
+      JSON.stringify(this.envelope("progress", "blocked", attentionPayload(decisionPayload(d)))),
       { qos: 0, retain: false },
     );
-    this.log(`opened ${describeDecision(d)}`);
     return d;
+  }
+
+  /**
+   * Autopilot (SPEC §4.6.16): answer a just-opened decision from the policy table (journal
+   * `decision_auto_resolved`, then resolve it as volleyd), or journal `decision_escalated` with
+   * why it is the owner's. Returns whether the decision is still open. Disabled for the wave:
+   * nothing is journaled and the decision waits, as before autopilot. A decision a resolution
+   * opens (a re-ask) comes back through here, bounded by its budget.
+   */
+  private async autopilot(wave: WaveId, d: DecisionRecord): Promise<boolean> {
+    const rec = this.waves.get(wave)?.record;
+    if (rec === undefined || d.resolved !== undefined) return d.resolved === undefined;
+    const eff = this.config.effective(wave);
+    const v = evaluate(d, {
+      autopilot: eff.autopilot,
+      used: (key) => budgetUsed(rec, key),
+      task: d.task !== null ? rec.state?.tasks.find((t) => t.id === d.task) : undefined,
+      derived_budget:
+        rec.wave != null ? spawnBudget(rec.wave, eff.spawn_budget_multiplier, 0) : undefined,
+    });
+    if ("off" in v) return true;
+    if ("escalate" in v) return this.escalate(wave, d, v.escalate, v.budget);
+    await this.append(wave, {
+      type: "decision_auto_resolved",
+      ...(d.task !== null ? { task: d.task } : {}),
+      data: {
+        decision_id: d.decision_id,
+        kind: d.kind,
+        policy: v.policy,
+        answer: v.answer,
+        rationale: v.rationale,
+        evidence: v.evidence,
+        ...(v.budget !== undefined ? { budget: v.budget } : {}),
+      },
+    });
+    try {
+      await this.resolveNow(wave, d.decision_id, {
+        answer: v.answer,
+        by: DAEMON_AGENT_ID,
+        rationale: `autopilot ${v.policy}: ${v.rationale}`,
+      });
+    } catch (e) {
+      // The answer was refused (an account that cannot take the wave, …): the owner's, now.
+      this.log(`autopilot ${d.decision_id}: ${e instanceof Error ? e.message : String(e)}`);
+      return this.escalate(wave, d, "unattended_safety", v.budget);
+    }
+    this.log(`autopilot answered ${d.decision_id} (${v.policy}): ${v.answer}`);
+    return false;
+  }
+
+  /** Journal `decision_escalated`: the decision stays open, its question says why. */
+  private async escalate(
+    wave: WaveId,
+    d: DecisionRecord,
+    why: EscalateWhy,
+    budget: Budget | undefined,
+  ): Promise<boolean> {
+    await this.append(wave, {
+      type: "decision_escalated",
+      ...(d.task !== null ? { task: d.task } : {}),
+      data: {
+        decision_id: d.decision_id,
+        kind: d.kind,
+        why,
+        ...(budget !== undefined ? { budget } : {}),
+      },
+    });
+    this.log(`autopilot left ${d.decision_id} (${d.kind}) for the owner: ${why}`);
+    return true;
   }
 
   /** Resolve a decision (no ownership check — the control op does that). Idempotent. */
@@ -6538,6 +6627,8 @@ export class Daemon {
     switch (op) {
       case "decisions":
         return this.listDecisions(p);
+      case "policy":
+        return this.policyOp(p);
       case "resolve":
         return this.resolveOp(p, by);
       case "claim":
@@ -6965,6 +7056,22 @@ export class Daemon {
       )
       .map(decisionPayload);
     return { ok: true, result: { decisions } };
+  }
+
+  /** `policy`: autopilot's effective table, for the global config or one wave's (SPEC §4.6.16). */
+  private policyOp(p: Record<string, unknown>): HandlerResult {
+    const wave = typeof p.wave === "string" ? p.wave : undefined;
+    if (wave !== undefined && !this.waves.has(wave))
+      return { ok: false, error: `unknown wave '${wave}'` };
+    const config = this.config.effective(wave).autopilot;
+    return {
+      ok: true,
+      result: {
+        ...(wave !== undefined ? { wave } : {}),
+        config,
+        rules: renderPolicyTable(POLICY_TABLE, config),
+      },
+    };
   }
 
   /** `resolve`: owner-only; finds the decision's wave when none is given. */

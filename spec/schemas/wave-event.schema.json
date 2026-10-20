@@ -79,7 +79,9 @@
             "merge_nudge_sent",
             "peer_doctor_run",
             "peer_drain_started",
-            "repo_visibility_detected"
+            "repo_visibility_detected",
+            "decision_auto_resolved",
+            "decision_escalated"
           ]
         },
         "payload": {
@@ -188,6 +190,84 @@
                         "type": "array",
                         "items": { "type": "string", "minLength": 1 },
                         "description": "The merged PR's files that overlap the task's; empty under nudge_on_merge: all."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "decision_auto_resolved" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": [
+                      "decision_id",
+                      "kind",
+                      "policy",
+                      "answer",
+                      "rationale",
+                      "evidence"
+                    ],
+                    "properties": {
+                      "decision_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                      "kind": { "type": "string", "minLength": 1 },
+                      "policy": { "type": "string", "minLength": 1 },
+                      "answer": { "type": "string", "minLength": 1 },
+                      "rationale": { "type": "string" },
+                      "evidence": { "type": "object" },
+                      "budget": {
+                        "type": "object",
+                        "required": ["key", "used", "max"],
+                        "properties": {
+                          "key": { "type": "string", "minLength": 1 },
+                          "used": { "type": "number", "minimum": 0 },
+                          "max": { "type": "number", "minimum": 0 }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "decision_escalated" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["decision_id", "kind", "why"],
+                    "properties": {
+                      "decision_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                      "kind": { "type": "string", "minLength": 1 },
+                      "why": {
+                        "enum": ["owner_only", "no_policy", "budget_exhausted", "unattended_safety"]
+                      },
+                      "budget": {
+                        "type": "object",
+                        "required": ["key", "used", "max"],
+                        "properties": {
+                          "key": { "type": "string", "minLength": 1 },
+                          "used": { "type": "number", "minimum": 0 },
+                          "max": { "type": "number", "minimum": 0 }
+                        }
                       }
                     }
                   }

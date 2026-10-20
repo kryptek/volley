@@ -1,0 +1,335 @@
+import { describe, expect, it } from "vitest";
+import {
+  POLICY_TABLE,
+  type PolicyContext,
+  QUESTION_ANSWER,
+  evaluate,
+  renderPolicyTable,
+} from "../src/autopilot/policy";
+import { CONFIG_DEFAULTS } from "../src/config-defaults";
+import type { DecisionKind, DecisionRecord } from "../src/decisions";
+import type { AutopilotConfig, TaskState } from "../src/types";
+
+const AP: AutopilotConfig = CONFIG_DEFAULTS.autopilot;
+
+/** A decision record as the reducer keeps it, with the daemon's extra facts. */
+function rec(
+  kind: DecisionKind,
+  options: string[] | undefined,
+  extra: Record<string, unknown> = {},
+): DecisionRecord {
+  return {
+    decision_id: `${kind.replaceAll("_", "-")}-1`,
+    wave: "w1",
+    task: "T1",
+    kind,
+    question: "?",
+    pointers: {},
+    opened_at: "2026-10-20T00:00:00.000Z",
+    ...(options !== undefined ? { options } : {}),
+    ...extra,
+  } as DecisionRecord;
+}
+
+const TASK: TaskState = {
+  id: "T1",
+  issue: 1,
+  stage: "awaiting_decision",
+  agents: { implementer: "w1-t1-implementer-1", spec_reviewer: "w1-t1-spec-reviewer-1" },
+};
+
+function ctx(over: Partial<PolicyContext> = {}, used: Record<string, number> = {}): PolicyContext {
+  return { autopilot: AP, used: (k) => used[k] ?? 0, task: TASK, ...over };
+}
+
+const answerOf = (v: ReturnType<typeof evaluate>) => ("answer" in v ? v.answer : undefined);
+const whyOf = (v: ReturnType<typeof evaluate>) => ("escalate" in v ? v.escalate : undefined);
+
+describe("evaluate: the policy table, row by row", () => {
+  it("spawn_failed while the daemon still retries: retry now, no budget", () => {
+    const d = rec("spawn_failed", ["retry now", "stop task"], {
+      pipeline: { on: "spawn_failed", role: "implementer" },
+    });
+    const v = evaluate(d, ctx({ task: { ...TASK, next_retry_at: "2026-10-20T00:01:00.000Z" } }));
+    expect(answerOf(v)).toBe("retry now");
+    expect("budget" in v ? v.budget : undefined).toBeUndefined();
+  });
+
+  it("spawn_failed with retries stopped: escalates budget_exhausted", () => {
+    const d = rec("spawn_failed", ["retry now", "stop task"], { stopped: true });
+    expect(whyOf(evaluate(d, ctx({ task: { ...TASK, next_retry_at: null } })))).toBe(
+      "budget_exhausted",
+    );
+  });
+
+  for (const kind of ["hooks_auth_failed", "mcp_not_registered", "unknown_screen"] as const) {
+    it(`${kind} with a relaunch marker: relaunch, under relaunch_max per task/role`, () => {
+      const d = rec(kind, ["relaunch", "cancel"], {
+        pipeline: { on: "relaunch", role: "implementer", attempt: 1 },
+      });
+      const v = evaluate(d, ctx());
+      expect(answerOf(v)).toBe("relaunch");
+      expect("budget" in v && v.budget).toEqual({
+        key: "relaunch_max:T1/implementer",
+        used: 1,
+        max: 1,
+      });
+      // The second relaunch of the same task/role is the owner's.
+      const again = evaluate(d, ctx({}, { "relaunch_max:T1/implementer": 1 }));
+      expect(whyOf(again)).toBe("budget_exhausted");
+      expect("budget" in again && again.budget).toEqual({
+        key: "relaunch_max:T1/implementer",
+        used: 1,
+        max: 1,
+      });
+    });
+  }
+
+  for (const cls of ["hooks_silent", "screen_static"]) {
+    it(`unknown_screen of class ${cls}: keep running`, () => {
+      const d = rec("unknown_screen", ["keep running", "stop task"], {
+        class: cls,
+        agent_id: "w1-t1-implementer-1",
+      });
+      expect(answerOf(evaluate(d, ctx()))).toBe("keep running");
+    });
+  }
+
+  it("reviewers_disagree: blocker", () => {
+    const d = rec("reviewers_disagree", ["blocker", "fine"], {
+      pipeline: { on: "reviewers_disagree" },
+    });
+    expect(answerOf(evaluate(d, ctx()))).toBe("blocker");
+  });
+
+  it("agent_stalled asked once: nudge again, under nudge_max per run", () => {
+    const d = rec("agent_stalled", ["nudge again", "stop task"], {
+      class: "agent_stalled",
+      asked: 1,
+      agent_id: "w1-t1-implementer-1",
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("nudge again");
+    expect("budget" in v && v.budget).toEqual({
+      key: "nudge_max:T1/implementer/w1-t1-implementer-1",
+      used: 1,
+      max: 1,
+    });
+    expect(whyOf(evaluate(d, ctx({}, { "nudge_max:T1/implementer/w1-t1-implementer-1": 1 })))).toBe(
+      "budget_exhausted",
+    );
+  });
+
+  it("agent_stalled asked again: respawn is not offered yet (A2), so no_policy", () => {
+    const d = rec("agent_stalled", ["nudge again", "stop task"], {
+      class: "agent_stalled",
+      asked: 2,
+      agent_id: "w1-t1-implementer-1",
+    });
+    expect(whyOf(evaluate(d, ctx()))).toBe("no_policy");
+  });
+
+  it("agent_blocked by a failed agent: respawn, under respawn_max per task/role", () => {
+    const d = rec("agent_blocked", ["respawn", "cancel"], {
+      pipeline: { on: "agent_failed", role: "implementer" },
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("respawn");
+    expect("budget" in v && v.budget).toEqual({
+      key: "respawn_max:T1/implementer",
+      used: 1,
+      max: 1,
+    });
+    expect(whyOf(evaluate(d, ctx({}, { "respawn_max:T1/implementer": 1 })))).toBe(
+      "budget_exhausted",
+    );
+  });
+
+  it("agent_blocked of class respawn_needed (gone after a restart): respawn", () => {
+    const d = rec("agent_blocked", ["respawn", "stop task"], {
+      class: "respawn_needed",
+      agent_id: "w1-t1-implementer-1",
+      role: "implementer",
+    });
+    expect(answerOf(evaluate(d, ctx()))).toBe("respawn");
+  });
+
+  for (const on of ["review_result", "fixup_result"]) {
+    it(`agent_blocked on ${on}: respawn (never skip a review)`, () => {
+      const opts = on === "review_result" ? ["respawn", "skip"] : ["skip", "respawn", "cancel"];
+      const d = rec("agent_blocked", opts, { pipeline: { on, role: "spec_reviewer" } });
+      const v = evaluate(d, ctx());
+      expect(answerOf(v)).toBe("respawn");
+      expect("budget" in v && v.budget && v.budget.key).toBe("respawn_max:T1/spec_reviewer");
+    });
+  }
+
+  it("agent_blocked on merge_ready_invariant: rereview, under rereview_max per task", () => {
+    const d = rec("agent_blocked", ["rereview", "cancel"], {
+      pipeline: { on: "merge_ready_invariant", head: "abc" },
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("rereview");
+    expect("budget" in v && v.budget).toEqual({ key: "rereview_max:T1", used: 1, max: 2 });
+    expect(whyOf(evaluate(d, ctx({}, { "rereview_max:T1": 2 })))).toBe("budget_exhausted");
+  });
+
+  it("agent_blocked by an agent's own blocked status: no_policy (the owner reads the reason)", () => {
+    const d = rec("agent_blocked", ["continue", "respawn", "cancel"], {
+      pipeline: { on: "agent_blocked", role: "implementer" },
+    });
+    expect(whyOf(evaluate(d, ctx()))).toBe("no_policy");
+  });
+
+  it("agent_question, first ask of the run: the unattended answer, under question_max", () => {
+    const d = rec("agent_question", undefined, {
+      class: "agent_question",
+      agent_id: "w1-t1-implementer-1",
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe(QUESTION_ANSWER);
+    expect(QUESTION_ANSWER).toMatch(/^Proceed with your best judgement/);
+    expect("budget" in v && v.budget && v.budget.key).toBe(
+      "question_max:T1/implementer/w1-t1-implementer-1",
+    );
+    expect(
+      whyOf(evaluate(d, ctx({}, { "question_max:T1/implementer/w1-t1-implementer-1": 1 }))),
+    ).toBe("budget_exhausted");
+  });
+
+  it("spawn_budget_exhausted within budget_raise_max × the derived budget: raise by n", () => {
+    const d = rec("spawn_budget_exhausted", ["raise by 3", "cancel"], { used: 12, budget: 12 });
+    const v = evaluate(d, ctx({ derived_budget: 12 }));
+    expect(answerOf(v)).toBe("raise by 3");
+    expect("budget" in v && v.budget).toEqual({ key: "budget_raise_max", used: 15, max: 24 });
+  });
+
+  it("spawn_budget_exhausted past budget_raise_max × the derived budget: budget_exhausted", () => {
+    const d = rec("spawn_budget_exhausted", ["raise by 3", "cancel"], { used: 23, budget: 23 });
+    const v = evaluate(d, ctx({ derived_budget: 12 }));
+    expect(whyOf(v)).toBe("budget_exhausted");
+    expect("budget" in v && v.budget).toEqual({ key: "budget_raise_max", used: 23, max: 24 });
+  });
+
+  it("machine_down offering re-place: re-place queued tasks", () => {
+    const d = rec("machine_down", ["wait", "re-place queued tasks", "cancel"], { task: null });
+    expect(answerOf(evaluate({ ...d, task: null }, ctx({ task: undefined })))).toBe(
+      "re-place queued tasks",
+    );
+  });
+
+  it("account_limit with a suggested account: move the wave there", () => {
+    const d = rec("account_limit", ["move wave w1 to work", "not now"], {
+      acct: "primary",
+      suggested: "work",
+    });
+    expect(answerOf(evaluate({ ...d, task: null }, ctx({ task: undefined })))).toBe(
+      "move wave w1 to work",
+    );
+  });
+
+  it("account_limit with no suggestion: wait (the decision's `not now`)", () => {
+    const d = rec("account_limit", ["not now"], { acct: "primary", suggested: null });
+    expect(answerOf(evaluate({ ...d, task: null }, ctx({ task: undefined })))).toBe("not now");
+  });
+
+  it("pr_head_moved by a green release-only merge: accept", () => {
+    const d = rec("pr_head_moved", ["rereview", "fixup", "accept", "cancel"], {
+      pipeline: { on: "pr_head_moved", head: "b", from: "a" },
+      ci: "green",
+      directive: { ci: "green", release_merge: { only_release: true, moved_files: [] } },
+    });
+    expect(answerOf(evaluate(d, ctx()))).toBe("accept");
+  });
+
+  it("pr_head_moved otherwise: rereview, under rereview_max per task", () => {
+    const d = rec("pr_head_moved", ["rereview", "fixup", "cancel"], {
+      pipeline: { on: "pr_head_moved", head: "b", from: "a" },
+      ci: "red",
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("rereview");
+    expect("budget" in v && v.budget && v.budget.key).toBe("rereview_max:T1");
+  });
+
+  it("pr_head_moved without rereview offered: no_policy", () => {
+    const d = rec("pr_head_moved", ["fixup", "cancel"], {
+      pipeline: { on: "pr_head_moved", head: "b", from: "a" },
+      ci: "red",
+    });
+    expect(whyOf(evaluate(d, ctx()))).toBe("no_policy");
+  });
+
+  it("wave_complete: acknowledged", () => {
+    const d = rec("wave_complete", ["acknowledged"]);
+    expect(answerOf(evaluate({ ...d, task: null }, ctx({ task: undefined })))).toBe("acknowledged");
+  });
+
+  for (const kind of ["ci_failed", "pr_closed", "remote_repo_missing", "merge_conflict"] as const) {
+    it(`${kind}: no_policy`, () => {
+      expect(whyOf(evaluate(rec(kind, ["accept", "cancel"]), ctx()))).toBe("no_policy");
+    });
+  }
+});
+
+describe("evaluate: guards", () => {
+  it("never gives an answer the decision does not offer", () => {
+    const d = rec("reviewers_disagree", ["fine"]);
+    expect(whyOf(evaluate(d, ctx()))).toBe("no_policy");
+  });
+
+  it("owner_only wins over any rule", () => {
+    const d = rec("reviewers_disagree", ["blocker", "fine"]);
+    const v = evaluate(
+      d,
+      ctx({ autopilot: { ...AP, owner_only: [...AP.owner_only, "reviewers_disagree"] } }),
+    );
+    expect(whyOf(v)).toBe("owner_only");
+    for (const kind of ["plan_change", "repo_untrusted", "model_switch"] as const) {
+      expect(whyOf(evaluate(rec(kind, ["keep", "cancel"]), ctx()))).toBe("owner_only");
+    }
+  });
+
+  it("disabled: answers nothing and escalates nothing", () => {
+    const v = evaluate(rec("reviewers_disagree", ["blocker", "fine"]), {
+      ...ctx(),
+      autopilot: { ...AP, enabled: false },
+    });
+    expect(v).toEqual({ off: true });
+  });
+
+  it("an answer carries its policy, rationale and evidence", () => {
+    const d = rec("agent_blocked", ["respawn", "cancel"], {
+      pipeline: { on: "agent_failed", role: "implementer" },
+    });
+    const v = evaluate(d, ctx());
+    expect(v).toMatchObject({
+      policy: "agent_blocked/respawn-failed",
+      evidence: { pipeline: { on: "agent_failed", role: "implementer" } },
+    });
+    expect("rationale" in v && v.rationale.length).toBeGreaterThan(0);
+  });
+
+  it("every rule has a unique policy id", () => {
+    const ids = POLICY_TABLE.map((r) => r.policy);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe("renderPolicyTable", () => {
+  it("one row per rule (after the owner_only row), with the effective budgets", () => {
+    const rows = renderPolicyTable(POLICY_TABLE, { ...AP, relaunch_max: 3 });
+    expect(rows).toHaveLength(POLICY_TABLE.length + 1);
+    expect(rows[0]).toMatchObject({ policy: "owner_only", answer: "escalate owner_only" });
+    const relaunch = rows.find((r) => r.policy === "relaunch/bad-launch");
+    expect(relaunch).toMatchObject({
+      kind: "hooks_auth_failed, mcp_not_registered, unknown_screen",
+      answer: "relaunch",
+      budget: "relaunch_max per <task>/<role>",
+      max: 3,
+    });
+    const raise = rows.find((r) => r.policy === "spawn_budget_exhausted/raise");
+    expect(raise?.max).toBe(2);
+    expect(rows.find((r) => r.policy === "reviewers_disagree/blocker")?.max).toBeNull();
+  });
+});

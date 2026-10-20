@@ -105,3 +105,16 @@
 # fleet:
 #   local_name: null             # its machine record's name; null: the host name's first label,
 #                                # lowercased. Never a hosts.<name> key.
+
+# --- Autopilot: decisions volleyd answers itself (README "Autopilot", `volleyd policy`) ---
+# autopilot:
+#   enabled: true                # false: every decision waits for the owner (next decision on)
+#   owner_only: [plan_change, repo_untrusted, model_switch, release_go, stage_go]
+#                                # kinds only the owner answers: always escalated
+#   relaunch_max: 1              # relaunches of one <task>/<role> after a bad launch
+#   nudge_max: 1                 # extra nudges of one stalled run (<task>/<role>/<attempt>)
+#   respawn_max: 1               # respawns of one <task>/<role>
+#   rereview_max: 2              # re-reviews of one task (moved head, stale review at the gate)
+#   question_max: 1              # agent questions answered for one run
+#   budget_raise_max: 2          # raise by <n> answers may take the spawn budget to this
+#                                # multiple of the wave's derived budget
