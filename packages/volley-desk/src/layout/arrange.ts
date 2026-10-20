@@ -17,8 +17,14 @@
  * instead start the second row, under the first wave; the scale decides. A
  * side cluster packs its agents in a near-square block (⌈√n⌉ columns)
  * whatever the waves use, which bounds its tethers.
+ *
+ * Pinned windows (C12, `pins.ts`) are skipped: a window pinned in place keeps
+ * its position and the rest are laid out clear of it (moved right, or down on
+ * a portrait fit area, past any it would cover); a pinned wave window's agents
+ * still pack as its cluster. The fit area may be narrowed to leave room for
+ * windows anchored to the screen (`avoidAnchored`).
  */
-import { FIT_MIN_SCALE, type View } from "../canvas/useViewport";
+import { FIT_MIN_SCALE, type Rect, type View } from "../canvas/useViewport";
 
 /** Gap between windows inside a cluster. */
 export const GAP = 36;
@@ -74,22 +80,24 @@ export function layoutCluster(
   c: number,
 ): { at: Record<string, Pos>; w: number; h: number } {
   const cols = Math.max(1, Math.min(c, cl.kids.length));
+  // A pinned wave window (zero-sized, see `unpinned`) leaves no column of its own.
+  const lead = cl.main.w > 0 ? cl.main.w + GAP : 0;
   const colH: number[] = Array(cols).fill(0);
   const kidW = Math.max(0, ...cl.kids.map((k) => k.w));
   const at: Record<string, Pos> = { [cl.main.id]: { x: 0, y: 0 } };
   for (const k of cl.kids) {
     const i = colH.indexOf(Math.min(...colH));
-    at[k.id] = { x: cl.main.w + GAP + i * (kidW + GAP), y: colH[i] ?? 0 };
+    at[k.id] = { x: lead + i * (kidW + GAP), y: colH[i] ?? 0 };
     colH[i] = (colH[i] ?? 0) + k.h + GAP;
   }
-  const w = cl.main.w + (cl.kids.length ? GAP + cols * kidW + (cols - 1) * GAP : 0);
+  const w = cl.kids.length ? lead + cols * kidW + (cols - 1) * GAP : cl.main.w;
   const h = Math.max(cl.main.h, ...colH.map((x) => x - GAP));
   return { at, w, h };
 }
 
 /** The fit area: the screen less 24 px side gutters, the top bar (64) and the dock band (110). */
-function fitArea(screen: Screen) {
-  return { vw: screen.width - 48, vh: screen.height - 64 - 110 };
+export function fitArea(screen: Screen): Rect {
+  return { x: 24, y: 64, w: screen.width - 48, h: screen.height - 64 - 110 };
 }
 
 type Laid = ReturnType<typeof layoutCluster>;
@@ -110,8 +118,12 @@ function block(lays: readonly Laid[], across: boolean): Laid {
 }
 
 /** Every placement arrange considers, in the order it considers them. */
-export function candidates(clusters: readonly Cluster[], screen: Screen): Candidate[] {
-  const { vw, vh } = fitArea(screen);
+export function candidates(
+  clusters: readonly Cluster[],
+  screen: Screen,
+  area: Rect = fitArea(screen),
+): Candidate[] {
+  const { w: vw, h: vh } = area;
   const out: Candidate[] = [];
   const waves = clusters.filter((cl) => !cl.side);
   const sides = clusters
@@ -158,15 +170,75 @@ export function candidates(clusters: readonly Cluster[], screen: Screen): Candid
   return out;
 }
 
-/** The zoom-maximising placement and the view centring it below the top bar; null when empty. */
-export function arrange(clusters: readonly Cluster[], screen: Screen): Arrangement | null {
+/**
+ * The clusters without the pinned windows: a pinned agent leaves its cluster,
+ * a pinned wave window becomes a zero-sized head (its agents still pack, from
+ * the cluster's left edge), and a cluster with nothing left goes.
+ */
+function unpinned(clusters: readonly Cluster[], pinned: ReadonlySet<string>): Cluster[] {
+  return clusters.flatMap((cl) => {
+    const kids = cl.kids.filter((k) => !pinned.has(k.id));
+    if (!pinned.has(cl.main.id)) return [{ ...cl, kids }];
+    if (kids.length === 0) return [];
+    return [{ ...cl, main: { id: cl.main.id, w: 0, h: 0 }, kids }];
+  });
+}
+
+const overlaps = (a: Rect, b: Rect) =>
+  a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+/** Where a W × H block starts so it covers none of `pinned`: moved right (`across`) or down past each. */
+function clearOf(W: number, H: number, pinned: readonly Rect[], across: boolean): Pos {
+  const at = { x: 0, y: 0 };
+  for (let hit = true; hit; ) {
+    hit = false;
+    for (const r of pinned) {
+      if (!overlaps({ ...at, w: W + CGAP, h: H + CGAP }, { ...r, w: r.w + CGAP, h: r.h + CGAP })) {
+        continue;
+      }
+      if (across) at.x = r.x + r.w + CGAP;
+      else at.y = r.y + r.h + CGAP;
+      hit = true;
+    }
+  }
+  return at;
+}
+
+export interface ArrangeOptions {
+  /** The screen area to fit into (default `fitArea`): less any windows anchored to the screen. */
+  area?: Rect;
+  /** Windows pinned in place, by id, at their world rects: skipped and kept clear of. */
+  pinned?: Readonly<Record<string, Rect>>;
+  /** Windows off the canvas (anchored to the screen): skipped. */
+  skip?: ReadonlySet<string>;
+}
+
+/** The zoom-maximising placement and the view centring it in the fit area; null when empty. */
+export function arrange(
+  clusters: readonly Cluster[],
+  screen: Screen,
+  opts: ArrangeOptions = {},
+): Arrangement | null {
+  const area = opts.area ?? fitArea(screen);
+  const pinned = opts.pinned ?? {};
+  const ids = new Set([...Object.keys(pinned), ...(opts.skip ?? [])]);
   let best: Candidate | null = null;
-  for (const c of candidates(clusters, screen)) if (!best || c.s > best.s + EPS) best = c;
+  for (const c of candidates(unpinned(clusters, ids), screen, area)) {
+    if (!best || c.s > best.s + EPS) best = c;
+  }
   if (!best) return null;
-  const { vw, vh } = fitArea(screen);
   const s = Math.max(ARRANGE_MIN_SCALE, best.s);
+  const off = clearOf(best.W, best.H, Object.values(pinned), area.w >= area.h);
+  const place: Record<string, Pos> = {};
+  for (const [id, p] of Object.entries(best.place)) {
+    if (!ids.has(id)) place[id] = { x: off.x + p.x, y: off.y + p.y };
+  }
   return {
-    place: best.place,
-    view: { s, x: 24 + (vw - best.W * s) / 2, y: 64 + (vh - best.H * s) / 2 },
+    place,
+    view: {
+      s,
+      x: area.x + (area.w - best.W * s) / 2 - off.x * s,
+      y: area.y + (area.h - best.H * s) / 2 - off.y * s,
+    },
   };
 }

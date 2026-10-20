@@ -3,7 +3,8 @@
  * empty space to pan (pointer capture), wheel to pan, ⌘/Ctrl-wheel (and
  * trackpad pinch, which browsers report as ctrl-wheel) to zoom around the
  * cursor, scale clamped to [0.3, 1.6], and `fitTo(rects)` to frame a set of
- * world rectangles below the top bar. A fit may go below the wheel minimum
+ * world rectangles below the top bar (or inside a given screen area, C12:
+ * leaving room for windows anchored to the screen). A fit may go below the wheel minimum
  * (down to `FIT_MIN_SCALE`) so everything shows; from there the wheel zooms
  * back in smoothly and never further out. Touch (D8): one finger on empty canvas
  * pans, two fingers pinch-zoom around their midpoint, on empty canvas or on a
@@ -47,6 +48,11 @@ const NO_WHEEL = ".feed, .term, .yaml, .dag-scroll, .look, .modal";
 
 /** Below this viewport width the Desk is in its phone layout. */
 export const NARROW_PX = 700;
+/** The screen area `fitTo` frames into by default: below the top bar, above the dock band. */
+export function fitToArea(screen: { width: number; height: number }): Rect {
+  return { x: 0, y: 70, w: screen.width, h: screen.height - 170 };
+}
+
 /** The widest a window gets on a phone (the agent window's width). */
 const PHONE_WIN_MAX = 460;
 
@@ -63,6 +69,27 @@ export function useViewportWidth(): number {
     return () => window.removeEventListener("resize", on);
   }, []);
   return w;
+}
+
+/** The viewport size; follows resizes and rotation. */
+const readScreen = () =>
+  typeof window === "undefined"
+    ? { width: 1024, height: 768 }
+    : { width: window.innerWidth, height: window.innerHeight };
+
+export function useScreenSize(): { width: number; height: number } {
+  const [size, setSize] = useState(readScreen);
+  useEffect(() => {
+    const on = () =>
+      setSize((s) => {
+        const n = readScreen();
+        return n.width === s.width && n.height === s.height ? s : n;
+      });
+    on();
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, []);
+  return size;
 }
 
 /** The widest a window gets on a phone of width `vw`: `min(460, 100vw - 24)`. */
@@ -101,22 +128,21 @@ export function useViewport(opts: { initial?: View } = {}) {
     [],
   );
 
-  const fitTo = useCallback((rects: readonly Rect[]) => {
+  const fitTo = useCallback((rects: readonly Rect[], area?: Rect) => {
     if (!rects.length) return;
+    const a = area ?? fitToArea({ width: window.innerWidth, height: window.innerHeight });
     const minX = Math.min(...rects.map((r) => r.x));
     const minY = Math.min(...rects.map((r) => r.y));
     const maxX = Math.max(...rects.map((r) => r.x + r.w));
     const maxY = Math.max(...rects.map((r) => r.y + r.h));
-    const W = window.innerWidth;
-    const H = window.innerHeight - 170;
     const s = Math.min(
       FIT_MAX_SCALE,
-      Math.max(FIT_MIN_SCALE, Math.min(W / (maxX - minX + 80), H / (maxY - minY + 80))),
+      Math.max(FIT_MIN_SCALE, Math.min(a.w / (maxX - minX + 80), a.h / (maxY - minY + 80))),
     );
     setView({
       s,
-      x: (W - (maxX - minX) * s) / 2 - minX * s,
-      y: 70 + (H - (maxY - minY) * s) / 2 - minY * s,
+      x: a.x + (a.w - (maxX - minX) * s) / 2 - minX * s,
+      y: a.y + (a.h - (maxY - minY) * s) / 2 - minY * s,
     });
   }, []);
 
