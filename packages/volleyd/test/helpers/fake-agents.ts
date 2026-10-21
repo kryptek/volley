@@ -243,7 +243,11 @@ export function fakeFleet(o: FleetOptions) {
         return;
       }
       case "fixup": {
-        const h = w.commit(head(a), { [ROLE_FILE(a.task)]: `${a.task}-fixup-${a.attempt}` }, "fix: review findings");
+        const h = w.commit(
+          head(a),
+          { [ROLE_FILE(a.task)]: `${a.task}-fixup-${a.attempt}` },
+          "fix: review findings",
+        );
         w.local[a.cwd] = h;
         w.push(prOf(a.task), h);
         const findings = existsSync(join(a.cwd, ".volley", "findings.json"))
@@ -291,7 +295,11 @@ export function fakeFleet(o: FleetOptions) {
       case "stall":
         return;
       case "fail":
-        await pub(a.agent_id, "status", "failed", { reason: b.reason, worktree: a.cwd, msg: b.reason });
+        await pub(a.agent_id, "status", "failed", {
+          reason: b.reason,
+          worktree: a.cwd,
+          msg: b.reason,
+        });
         return;
       case "unparseable":
         await pub(a.agent_id, "result", "review", { verdict: "looks good to me" });

@@ -59,10 +59,21 @@ export interface SoakEnv {
   logs: string[];
   /** One turn: the fleet acts, the daemon consumes it, `ms` of time pass, the daemon ticks. */
   step: (ms?: number) => Promise<void>;
+  /**
+   * Step until `pred` holds (checked before each step); after `maxSteps` steps, throws with the
+   * journal tail and the open decisions (what a failing soak prints).
+   */
+  until: (pred: () => boolean, what: string, maxSteps?: number, ms?: number) => Promise<number>;
+  /** The journal's last `n` events and the open decisions, one line each. */
+  report: (n?: number) => string;
   /** Everything published so far consumed and the daemon idle (bounded: never deadlocks on a timer). */
   consumed: () => Promise<void>;
   /** The owner's coordinator session (its current agent id). */
-  owner: { agentId: string; drop: () => Promise<void>; reconnect: (agentId: string) => Promise<void> };
+  owner: {
+    agentId: string;
+    drop: () => Promise<void>;
+    reconnect: (agentId: string) => Promise<void>;
+  };
   /** Answer an open decision as the owner. */
   resolve: (decisionId: string, answer: string) => Promise<void>;
   cleanup: () => Promise<void>;
@@ -219,6 +230,37 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
   if (!run.ok) throw new Error(`run: ${run.error}`);
   await consumed();
 
+  const step = async (ms = 5_000) => {
+    await fleet.step();
+    await consumed();
+    await fleet.heartbeats();
+    await clock.advance(ms);
+    await d.tick();
+    void d.tickScreens();
+    await consumed();
+  };
+  const report = (n = 40) => {
+    const j = d.journalEvents(WAVE);
+    const rec = d.record(WAVE);
+    const open = (rec?.state?.open_decisions ?? []).map((id) => {
+      const x = rec?.decisions[id];
+      return `  ${id} ${x?.kind} [${x?.task ?? "-"}] ${x?.question?.slice(0, 200)}`;
+    });
+    return [
+      `journal tail (${j.length} events):`,
+      ...j
+        .slice(-n)
+        .map((e) => `  ${e.seq} ${e.type} ${e.task ?? ""} ${JSON.stringify(e.data).slice(0, 240)}`),
+      `open decisions (${open.length}):`,
+      ...open,
+      `tasks: ${(rec?.state?.tasks ?? []).map((t) => `${t.id}:${t.stage}`).join(" ")}`,
+      `unknown argvs: ${world.unknown
+        .slice(0, 10)
+        .map((a) => a.join(" "))
+        .join(" | ")}`,
+    ].join("\n");
+  };
+
   return {
     env,
     daemon: d,
@@ -231,14 +273,15 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
     journal: () => d.journalEvents(WAVE),
     logs,
     consumed,
-    async step(ms = 5_000) {
-      await fleet.step();
-      await consumed();
-      await fleet.heartbeats();
-      await clock.advance(ms);
-      await d.tick();
-      void d.tickScreens();
-      await consumed();
+    step,
+    report,
+    async until(pred, what, maxSteps = 200, ms = 5_000) {
+      for (let i = 0; i < maxSteps; i++) {
+        if (pred()) return i;
+        await step(ms);
+      }
+      if (pred()) return maxSteps;
+      throw new Error(`soak: ${what} not reached in ${maxSteps} steps\n${report()}`);
     },
     owner,
     async resolve(decisionId, answer) {
