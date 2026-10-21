@@ -40,6 +40,7 @@ describe("validate-brief.sh", () => {
       "quality_reviewer.md.tmpl",
       "rebase-merge.md.tmpl",
       "rebase.md.tmpl",
+      "release.md.tmpl",
       "spec_reviewer.md.tmpl",
     ]);
   });

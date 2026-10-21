@@ -860,14 +860,16 @@ stages:
   journals `release_started { done, cancelled, playbook: { path, sha256, stages } }` instead of
   `wave_complete`, and the wave's `status` is `releasing`. The wave state carries `release: {
   stage, stages: [{ name, state }] }`, `state` being `pending`, `awaiting_go`, `running`,
-  `verified` or `failed`; `volleyd status` prints `release: <stage> (k/N verified)`. No
+  `verified`, `failed` or `skipped`; `volleyd status` prints `release: <stage> <state> (k/N
+  verified)` (`release: smoke running (2/4 verified)`, `release: deploy awaiting go (1/3
+  verified)`). No
   `wave_complete` decision opens for it. A releasing wave admits no tasks and takes no new
   version; it can be paused (and resumes releasing) or stopped.
   The playbook is read from the repo's working tree (whatever is checked out there) when the
   wave is submitted and again when it settles; `release_started` records the path and sha256 of
   the file used. A wave whose repo is not on volleyd's machine has no playbook to read, so it
   completes without a train.
-- **The end is always yours**: once every stage is `verified`, volleyd opens `release_go`
+- **The end is always yours**: once every stage is `verified` (or `skipped`), volleyd opens `release_go`
   (wave-level, options `go` and `hold`, with each stage's evidence in `stages`). It is
   owner-only (`autopilot.owner_only`), so it rings. `go` journals `release_done { by,
   decision_id }` and the wave is `complete`; `hold` (or any other answer) keeps it `releasing`
@@ -878,9 +880,52 @@ stages:
   `wave_complete` decision is auto-acknowledged under autopilot. A playbook that stopped
   validating since the wave was submitted is not run; the `wave_complete` question says why.
 
-Running the stages (the `release` role, its brief, `verify` and stage evidence, opening `stage_go`
-before a `gate: owner` stage) arrives with the next part of the train; until then a stage moves
-only when its `release_stage_*` events are journaled.
+#### Release stages
+
+volleyd runs no stage command itself (the fence allows it no deploy, build or test command):
+each stage runs in a supervised agent's shell, under the same brief, verification and evidence
+rules as any pipeline role. The stages run **serially**, in playbook order:
+
+- **The agent**: role `release`, one per stage, spawned through the normal spawn path (lock,
+  launch, registration check, screen tail, liveness) under the pseudo task `_release` (no wave
+  file task can be named that). It is `<wave>-release-<stage>-<n>`, on the branch
+  `<wave>/release-<stage>-<n>`, in a worktree cut from the **release branch's tip** (a fresh
+  fetch; `require_fresh_base` applies). A stage agent counts toward `hard_ceiling` like a task's,
+  and its spawn waits on the kill switch and the pressure verdict; the spawn budget does not
+  apply (a stage runs again only on the owner's `respawn`). `volleyd spawn` refuses the role.
+  A spawn that fails backs off and asks `spawn_failed` as a task's does, but wave-level: `retry
+  now` spawns at once, `stop task` fails the stage (the `agent_blocked` decision below).
+- **The brief** (`briefs/release.md.tmpl`, and `.volley/stage.md` beside it): the stage's
+  `brief`, its `run` lines verbatim as the commands to run in order (stopping at the first that
+  exits non-zero), the `verify` facts it must leave true, and the result contract. A `heavy`
+  stage's brief says `volley lease acquire --pool <pool>` first. Any push goes to the release
+  branch as a fast-forward, `git push origin HEAD:<release>`: that is the agent's push, never
+  volleyd's.
+- **The result contract**: before its `done` the agent publishes
+  `vol_publish(channel="result", type="stage", payload={ stage, commands: [{ argv, code, seconds
+  }], notes, artifacts: { tag?, files?, urls? } })` (`review-result.schema.json`).
+- **What is verified** after the `done`, read-only and beside the queue (each call under
+  `pipeline_io_ms`): every `run` line reported, in order, with exit code 0;
+  `commits_on_release` (`git fetch` + `rev-parse` + `merge-base --is-ancestor`: the tip moved
+  past the stage's start, the recorded `base_sha` (unknown: the fact does not hold), and the
+  agent's HEAD is on it);
+  `tag` (`gh api repos/{owner}/{repo}/git/matching-refs/tags/<prefix>`, a GET: a matching tag at
+  the tip); `files` (`git show origin/<release>:<path>` exits 0); `result` (each field with its
+  value). Verified: `$VOLLEYD_HOME/waves/<wave>/release/<stage>.md` and `.json` (the commands
+  and exit codes, the artifacts, each fact with its evidence line), `release_stage_verified {
+  stage, head, evidence }`, the agent retired, and the next stage starts (or `release_go` opens,
+  its `stages` pointing at every evidence file).
+- **When it is not**: a missing result or fact gets the agent one steer; after that, or on a
+  `failed` or `blocked` status, `release_stage_failed { stage, reason }` and a wave-level
+  `agent_blocked` decision (`pipeline: { on: "stage" }`): `respawn` (a fresh agent, attempt
+  n+1), `skip` (`release_stage_skipped`) or `cancel` (`release_cancelled`: the train stops and
+  the wave is `complete` without its release).
+- **Owner-gated stages**: before a `gate: owner` stage, `stage_go { stage }` opens (owner-only):
+  `go` runs it, `skip` marks it `skipped`, `hold` asks again (`class: held`).
+- **A stage agent's own questions** (a permission prompt, a stall, gone after a restart) are
+  wave-level decisions like any supervised agent's: an answer is steered to it; `stop task`
+  stops it and fails the stage (the owner is asked as above); `respawn` runs the stage again at
+  the next attempt.
 
 ---
 

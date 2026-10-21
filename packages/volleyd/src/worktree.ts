@@ -25,13 +25,19 @@ export function branchName(wave: string, task: string, role: string, attempt: nu
   return `${wave}/${task}-${role}-${attempt}`;
 }
 
+/** `<wave>/release-<stage>-<attempt>` — a release stage agent's branch (SPEC §4.6.19). */
+export function releaseBranchName(wave: string, stage: string, attempt: number): string {
+  return `${wave}/release-${stage}-${attempt}`;
+}
+
 /**
- * The shape of every branch `branchName` mints: the wave-file id grammars for the wave and task,
- * a role volleyd spawns (brief.ts ROLES — not imported: brief.ts imports the fence, which uses
- * this), and an attempt from 1. The fence lets `worktree add -B` re-create only such a branch.
+ * The shape of every branch `branchName` (or `releaseBranchName`) mints: the wave-file id
+ * grammars for the wave and task, a role volleyd spawns (brief.ts ROLES — not imported: brief.ts
+ * imports the fence, which uses this) or `release-<stage>` (a stage name is id-shaped), and an
+ * attempt from 1. The fence lets `worktree add -B` re-create only such a branch.
  */
 export const AGENT_BRANCH =
-  /^[a-z0-9][a-z0-9_-]{0,62}\/[A-Za-z0-9][A-Za-z0-9_-]{0,62}-(implementer|spec_reviewer|quality_reviewer|fixup|rebase)-[1-9][0-9]*$/;
+  /^[a-z0-9][a-z0-9_-]{0,62}\/([A-Za-z0-9][A-Za-z0-9_-]{0,62}-(implementer|spec_reviewer|quality_reviewer|fixup|rebase)|release-[a-z0-9][a-z0-9_-]{0,62})-[1-9][0-9]*$/;
 
 /**
  * Lines volleyd keeps out of every agent's `git status` (and `git add -A`): the supervisor's

@@ -230,6 +230,7 @@ const WAVE_STATUS: Partial<Record<JournalEvent["type"], WaveStatus>> = {
   wave_complete: "complete",
   release_started: "releasing",
   release_done: "complete",
+  release_cancelled: "complete",
 };
 
 /**

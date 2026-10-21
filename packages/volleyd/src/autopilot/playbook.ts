@@ -175,9 +175,11 @@ export function stepRelease(prev: ReleaseState | null, ev: JournalEvent): Releas
         ? "verified"
         : ev.type === "release_stage_failed"
           ? "failed"
-          : ev.type === "decision_opened" && ev.data.kind === "stage_go"
-            ? "awaiting_go"
-            : undefined;
+          : ev.type === "release_stage_skipped"
+            ? "skipped"
+            : ev.type === "decision_opened" && ev.data.kind === "stage_go"
+              ? "awaiting_go"
+              : undefined;
   const name = ev.data.stage;
   if (to === undefined || typeof name !== "string") return prev;
   const stages = prev.stages.map((s) => (s.name === name ? { ...s, state: to } : s));
@@ -192,9 +194,9 @@ export function trainState(events: Iterable<JournalEvent>): ReleaseState | null 
   return s;
 }
 
-/** Whether every stage of the train is verified (the `release_go` question may be asked). */
+/** Whether every stage of the train is verified or skipped (the `release_go` question may be asked). */
 export const allVerified = (r: ReleaseState): boolean =>
-  r.stages.length > 0 && r.stages.every((s) => s.state === "verified");
+  r.stages.length > 0 && r.stages.every((s) => s.state === "verified" || s.state === "skipped");
 
 /** A `release_go` decision's answers: `go` completes the wave; `hold` keeps it releasing. */
 export const RELEASE_GO_OPTIONS = ["go", "hold"];
@@ -213,7 +215,9 @@ export function releaseGoInput(
     const e = evidence.get(s.name);
     return { name: s.name, ...(e !== undefined ? { evidence: e } : {}) };
   });
-  const question = `Wave ${wave}'s release train is verified: ${r.stages.map((s) => s.name).join(", ")}. Release it? go: the wave is complete (volleyd deploys nothing itself); hold: it stays releasing and this question is asked again.`;
+  const skipped = r.stages.filter((s) => s.state === "skipped").map((s) => s.name);
+  const verified = r.stages.filter((s) => s.state !== "skipped").map((s) => s.name);
+  const question = `Wave ${wave}'s release train is verified: ${verified.join(", ") || "no stage"}${skipped.length > 0 ? ` (skipped: ${skipped.join(", ")})` : ""}. Release it? go: the wave is complete (volleyd deploys nothing itself); hold: it stays releasing and this question is asked again.`;
   return {
     input: { kind: "release_go", task: null, question, options: [...RELEASE_GO_OPTIONS] },
     stages,

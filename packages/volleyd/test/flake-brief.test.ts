@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { flakeIssue, renderFlakeBrief } from "../src/autopilot/flake-brief";
-import { type BriefVars, loadTemplate, renderBrief } from "../src/brief";
+import { type BriefVars, NO_STAGE, loadTemplate, renderBrief } from "../src/brief";
 import { hygieneText } from "../src/reviews";
 import type { FixerRemediation } from "../src/types";
 
@@ -77,6 +77,7 @@ describe("the flake fixer brief template", () => {
     extra: "",
     hygiene_rule: hygieneText("p1").rule,
     hygiene_contract: hygieneText("p1").contract,
+    ...NO_STAGE,
   };
 
   it('loadTemplate("implementer", dir, "flake") loads flake-fixer.md.tmpl', () => {
