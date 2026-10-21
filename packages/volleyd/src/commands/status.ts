@@ -211,6 +211,13 @@ export function formatWave(
       .map((g) => `    ${g.role} ${g.agent_id ?? "-"} (${g.state})\n`)
       .join("");
     const alarms = (t.alarms ?? []).map((a) => `    ! ${a.alarm}: ${a.message}\n`).join("");
+    // A flake's fixer (SPEC §4.6.16): no issue (its column blank, so the stages line up); what it
+    // fixes and for whom.
+    const r = t.remediation;
+    if (t.synthetic === true && r !== undefined) {
+      const closed = r.outcome !== undefined ? ` [${r.outcome}]` : "";
+      return `  ${t.id.padEnd(idW)}  ${"".padEnd(7)}${stage.padEnd(14)}fixer for ${(r.for ?? []).join(", ") || "-"} (flake: ${r.test})${closed}${pr}${queued}${why}\n${group}${alarms}${formatPlacement(t)}`;
+    }
     return `  ${t.id.padEnd(idW)}  #${String(t.issue).padEnd(5)} ${stage.padEnd(14)}${pr}${skipped}${queued}${why}\n${group}${alarms}${formatPlacement(t)}`;
   });
   const decisions = (ctx.decisions ?? [])

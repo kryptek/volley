@@ -1,6 +1,7 @@
 import type { DecisionKind, DecisionRecord } from "../decisions";
 import type { AutopilotConfig, TaskState } from "../types";
 import { budgetKey, markerOf } from "./budgets";
+import type { FixerVerdict } from "./remediation";
 
 /**
  * The autopilot policy table (SPEC §4.6.16): the routine decisions volleyd answers itself, as
@@ -42,6 +43,8 @@ export interface PolicyContext {
   task?: TaskState | undefined;
   /** spawn_budget_exhausted: the wave's derived spawn budget, before any raise. */
   derived_budget?: number | undefined;
+  /** A flake's red head: what a fix_flake request gets (remediation.ts fixerFor). */
+  fixer?: FixerVerdict | undefined;
 }
 
 export type Verdict =
@@ -75,8 +78,10 @@ export interface PolicyRule {
   /** What a rule with no answer escalates as (default `no_policy`). */
   escalate?: EscalateWhy;
   budget?: { name: CountedBudget; per: BudgetScope };
-  /** A rule that checks its own budget (spawn_budget_exhausted's raise). */
+  /** A rule that checks its own budget (spawn_budget_exhausted's raise, a flake's fixers). */
   decide?: (d: Facts, ctx: PolicyContext, answer: string) => Outcome;
+  /** The budget a `decide` rule checks, as `volleyd policy` prints it, and its tunable. */
+  decide_budget?: { label: string; name: "budget_raise_max" | "fix_flake_max" };
   rationale: string;
 }
 
@@ -232,6 +237,7 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
         ? { answer, budget: { key: RAISE_BUDGET_KEY, used: used + n, max } }
         : { escalate: "budget_exhausted", budget: { key: RAISE_BUDGET_KEY, used, max } };
     },
+    decide_budget: { label: `${RAISE_BUDGET_KEY} (× derived budget)`, name: "budget_raise_max" },
     rationale: "retries are the normal cost of a long wave",
   },
   {
@@ -300,9 +306,19 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
   {
     policy: "ci_failed/fix-flake",
     kinds: ["ci_failed", "agent_blocked"],
-    condition: 'pipeline.on === "ci_failed" or "agent_blocked_ci", and classification: flake',
+    condition:
+      'pipeline.on === "ci_failed" or "agent_blocked_ci", and classification: flake (no fixer can take it: escalate)',
     when: (d) => onRedHead(d) && d.classification === "flake",
     answer: "fix flake",
+    // No fixer can take it (autopilot.fix_flake_max reached, its fixer closed): the owner's.
+    decide: (_d, ctx, answer) => {
+      const f = ctx.fixer;
+      if (f !== undefined && "over_budget" in f)
+        return { escalate: "budget_exhausted", budget: f.over_budget };
+      if (f !== undefined && "refuse" in f) return { escalate: "unattended_safety" };
+      return { answer };
+    },
+    decide_budget: { label: "fix_flake_max per <wave> (fixers)", name: "fix_flake_max" },
     rationale:
       "a test the PR does not touch gets a dedicated fixer, never a re-run or a wider scope",
   },
@@ -443,7 +459,7 @@ export function renderPolicyTable(rules: readonly PolicyRule[], cfg: AutopilotCo
   return [
     owner,
     ...rules.map((r): PolicyRow => {
-      const raise = r.decide !== undefined;
+      const own = r.decide_budget;
       return {
         policy: r.policy,
         kind: r.kinds.join(", "),
@@ -454,12 +470,13 @@ export function renderPolicyTable(rules: readonly PolicyRule[], cfg: AutopilotCo
             : typeof r.answer === "string"
               ? r.answer
               : (r.answer_label ?? r.policy),
-        budget: raise
-          ? `${RAISE_BUDGET_KEY} (× derived budget)`
-          : r.budget !== undefined
-            ? `${r.budget.name} per ${SCOPE_LABEL[r.budget.per]}`
-            : null,
-        max: raise ? cfg.budget_raise_max : r.budget !== undefined ? cfg[r.budget.name] : null,
+        budget:
+          own !== undefined
+            ? own.label
+            : r.budget !== undefined
+              ? `${r.budget.name} per ${SCOPE_LABEL[r.budget.per]}`
+              : null,
+        max: own !== undefined ? cfg[own.name] : r.budget !== undefined ? cfg[r.budget.name] : null,
         rationale: r.rationale,
       };
     }),

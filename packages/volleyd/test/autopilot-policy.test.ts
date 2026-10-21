@@ -193,6 +193,24 @@ describe("evaluate: the policy table, row by row", () => {
     expect(whyOf(evaluate(none, ctx()))).toBe("no_policy");
   });
 
+  it("ci_failed classified flake: `fix flake`, unless no fixer can take it (SPEC §4.6.16)", () => {
+    const d = rec("ci_failed", ["fix flake", "fixup", "re-verify", "cancel"], {
+      pipeline: { on: "ci_failed", role: "implementer", head: "a".repeat(40) },
+      classification: "flake",
+    });
+    expect(answerOf(evaluate(d, ctx()))).toBe("fix flake");
+    expect(answerOf(evaluate(d, ctx({ fixer: { reuse: "fix-x" } })))).toBe("fix flake");
+    const over = evaluate(
+      d,
+      ctx({ fixer: { over_budget: { key: "fix_flake_max", used: 3, max: 3 } } }),
+    );
+    expect(whyOf(over)).toBe("budget_exhausted");
+    expect("budget" in over && over.budget).toEqual({ key: "fix_flake_max", used: 3, max: 3 });
+    expect(whyOf(evaluate(d, ctx({ fixer: { refuse: "its fixer closed" } })))).toBe(
+      "unattended_safety",
+    );
+  });
+
   it("agent_blocked_ci classified infra_incident: no row answers it, the owner decides", () => {
     const d = rec("agent_blocked", ["continue", "respawn", "cancel"], {
       pipeline: { on: "agent_blocked_ci", role: "implementer", head: "a".repeat(40) },

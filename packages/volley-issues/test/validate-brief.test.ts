@@ -35,6 +35,7 @@ describe("validate-brief.sh", () => {
   it("finds volleyd's role templates", () => {
     expect(templates.sort()).toEqual([
       "fixup.md.tmpl",
+      "flake-fixer.md.tmpl",
       "implementer.md.tmpl",
       "quality_reviewer.md.tmpl",
       "rebase-merge.md.tmpl",

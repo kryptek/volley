@@ -1,0 +1,29 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T10:44:03.000Z",
+  "channel": "_waves/events",
+  "type": "task_queued",
+  "payload": {
+    "wave": "w1",
+    "seq": 89,
+    "at": "2026-10-20T10:44:03.000Z",
+    "task": "fix-test-clock-test-ts-sleep-resolves-on-abo",
+    "data": {
+      "issue": 0,
+      "synthetic": true,
+      "title": "Fix flaky test test/clock.test.ts > sleep > resolves on abort",
+      "remediation": {
+        "kind": "fix_flake",
+        "test": "test/clock.test.ts > sleep > resolves on abort",
+        "test_file": "test/clock.test.ts",
+        "run_urls": [
+          "https://github.com/example-org/example-repo/actions/runs/812"
+        ],
+        "for": [
+          "T1"
+        ]
+      }
+    }
+  }
+}

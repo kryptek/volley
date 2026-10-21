@@ -212,6 +212,11 @@ export interface TaskPipeline {
   merge_inflight?: boolean | undefined;
   /** A remediation requested for the task's red head (a flake's fixer), until the head moves on. */
   remediation?: Remediation | undefined;
+  /**
+   * A branch update that takes a landed flake fix (`stage_entered { fix_landed }`): `next`, the
+   * flake stopped a step that still has steps after it; `gate`, it stopped a pre-gate update.
+   */
+  fix_resume?: "next" | "gate" | undefined;
 }
 
 /** A `remediation_requested` that still holds: a flake on `role`'s red `head` awaits its fixer. */
@@ -222,6 +227,8 @@ export interface Remediation {
   head: string;
   role: Role;
   since: string;
+  /** Its fixer merged (`remediation_closed { outcome: landed }`): the next advance takes the fix. */
+  landed?: true;
 }
 
 export interface MovedHead {
@@ -369,6 +376,10 @@ export function reducePipeline(
     case "stage_entered":
       p.why = typeof d.why === "string" ? d.why : undefined;
       if (Array.isArray(d.roles)) {
+        // A flake's fix taken (landedFix): where the pipeline goes on once the update is verified.
+        // Read before p.rebasing is overwritten below: a parked pre-gate update resumes at the gate.
+        p.fix_resume =
+          typeof d.fix_landed === "string" ? (p.rebasing ? "gate" : "next") : undefined;
         p.step = d.step as number;
         p.roles = (d.roles as unknown[]).filter(isRole);
         p.rebasing = d.rebase === true;
@@ -823,7 +834,12 @@ export type PipelineEvent =
    */
   | { kind: "supervisor_merged"; sha: string | null; head: string; by?: string }
   /** Autopilot merging: `gh pr merge` exited non-zero for `head` (moved, checks, protection). */
-  | { kind: "merge_refused"; stderr: string; head: string };
+  | { kind: "merge_refused"; stderr: string; head: string }
+  /**
+   * Self-healing CI (SPEC §4.6.16): the fixer of the flake `test` merged and released the task
+   * (`remediation_closed`): it takes the fix from the release branch and is verified again.
+   */
+  | { kind: "fix_landed"; test: string };
 
 /** CI on a merged head that is not the gated one; `unknown` when it could not be read. */
 export type MergedCi = CiState | "unknown";
@@ -946,6 +962,9 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
       return onSupervisorMerged(v, ev);
     case "merge_refused":
       return onMergeRefused(v, ev);
+    case "fix_landed":
+      // Its parked flake is this test's: the next advance takes the fix (landedFix).
+      return v.p.remediation?.test === ev.test ? advance(v) : [];
   }
 }
 
@@ -1870,6 +1889,9 @@ function holdFor(
 /** The answer that takes a flake's dedicated fixer: never a re-run. */
 export const FIX_FLAKE = "fix flake";
 
+/** volleyd's answer to a red head's open decision once its flake's fixer merged (SPEC §4.6.16). */
+export const FIX_LANDED = "fix landed";
+
 /**
  * A red head classified (SPEC §4.6.16). `own_change`: the ci_failed decision (fixup first). `flake`:
  * `remediation_requested { kind: fix_flake }`, then ci_failed offering `fix flake` first.
@@ -2290,6 +2312,8 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
         return ciFixup(v, d, m);
       // The flake's fixer was requested (remediation_requested): the task waits for it.
       if (isAnswer(answer, FIX_FLAKE) && (d.options ?? []).includes(FIX_FLAKE)) return [];
+      // volleyd's answer once the fixer merged: the fix_landed step updates the branch.
+      if (isAnswer(answer, FIX_LANDED)) return [];
       // Anything but cancel re-verifies: the non-destructive default.
       return role !== undefined ? [{ kind: "verify", role }] : [];
     case "ci_none":
@@ -2349,7 +2373,11 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       const offered = d.options ?? [];
       const agent = (d as { agent_id?: unknown }).agent_id;
       const live = run !== undefined && run.agent_id === agent && run.retired === undefined;
-      if (isAnswer(answer, FIX_FLAKE) && offered.includes(FIX_FLAKE))
+      // `fix landed` (volleyd, once the flake's fixer merged): stopped, then the branch update.
+      if (
+        (isAnswer(answer, FIX_FLAKE) && offered.includes(FIX_FLAKE)) ||
+        isAnswer(answer, FIX_LANDED)
+      )
         return live ? [{ kind: "retire" as const, agent_id: run.agent_id, status: "stopped" }] : [];
       if (role !== undefined && isAnswer(answer, "fixup") && offered.includes("fixup")) {
         const fix = ciFixup(v, d, m);
@@ -2762,6 +2790,8 @@ function advance(v: PipelineView): PipelineAction[] {
   if (v.stage === "merge_ready" && p.pr !== undefined)
     return [...autoMerge(v), { kind: "check_merged" }];
   if (IDLE.has(v.stage) || p.step < 0) return [];
+  // The flake's fixer merged: update the branch from the release branch first.
+  if (p.remediation?.landed === true) return landedFix(v, p.remediation);
   // While reviews run at the verified head, a push to the PR outside the pipeline is watched for.
   const watch: PipelineAction[] =
     WATCHED.has(v.stage) && !p.rebasing && p.pr !== undefined && p.head !== undefined
@@ -2791,9 +2821,27 @@ function advance(v: PipelineView): PipelineAction[] {
       );
       if (i >= 0) return enterStep(v, i, p.rereview);
     }
-    return toGate(v);
+    // A flake's fix taken mid-pipeline: on from the step it stopped (its reviews still to run).
+    return p.fix_resume === "next" ? enter(v, p.step + 1) : toGate(v);
   }
   return enter(v, p.step + 1);
+}
+
+/**
+ * The flake's fix landed on the release branch (SPEC §4.6.16): the branch-update step, started
+ * at the red head the flake parked (never verified, so not `p.head`), takes it under the wave's
+ * `branch_update`; its head is then verified (CI) like any rebase.
+ */
+function landedFix(v: PipelineView, r: Remediation): PipelineAction[] {
+  const [entered, spawn] = enterRebase({ ...v, p: { ...v.p, head: r.head } });
+  if (entered?.kind !== "journal" || spawn === undefined) return [];
+  return [
+    {
+      ...entered,
+      event: { ...entered.event, data: { ...entered.event.data, fix_landed: r.test } },
+    },
+    spawn,
+  ];
 }
 
 /** Enter stage group `i` (skipping what has nothing to do); the end of the pipeline is the gate. */

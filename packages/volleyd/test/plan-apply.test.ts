@@ -117,6 +117,29 @@ describe("applyPlan", () => {
     expect(after.wave?.tasks.T5).toBeUndefined();
   });
 
+  it("a synthetic task (a flake's fixer) is in no file: a new version keeps it, unasked", () => {
+    for (const started of [false, true]) {
+      const j = midFlight();
+      j.push({
+        type: "task_queued",
+        task: "fix-a",
+        data: {
+          issue: 0,
+          synthetic: true,
+          title: "Fix flaky test a",
+          remediation: { kind: "fix_flake", test: "a", test_file: null, run_urls: [], for: ["T3"] },
+        },
+      });
+      if (started) j.start("fix-a", 0);
+      const { res, after } = applyTo(j, V2);
+      expect(res.events.filter((e) => e.task === "fix-a")).toEqual([]);
+      expect(after.wave?.tasks["fix-a"]?.synthetic).toBe(true);
+      expect(after.wave?.task_order.at(-1)).toBe("fix-a");
+      expect(taskOf(after, "fix-a")?.stage).toBe(started ? "implement" : "queued");
+      expect(res.diff.removed).not.toContain("fix-a");
+    }
+  });
+
   it("removed in-flight task → plan_change decision, task untouched", () => {
     const { before, res, after } = applyTo(midFlight(), V2);
     expect(res.events.filter((e) => e.task === "T3").map((e) => e.type)).toEqual([
