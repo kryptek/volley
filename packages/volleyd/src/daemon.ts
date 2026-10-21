@@ -7561,20 +7561,12 @@ export class Daemon {
       const error = e instanceof Error ? e.message : String(e);
       const path = decisionsFilePath(dir);
       this.log(`resolved ${id}, but writing ${path}: ${error}`);
-      const journaled = log.journal
-        .readAll()
-        .some(
-          (x) =>
-            x.type === "alarm_raised" &&
-            x.data.alarm === "decisions_file_unwritten" &&
-            x.data.decision_id === id,
-        );
-      if (!journaled)
-        await this.append(wave, {
-          type: "alarm_raised",
-          task: d.task,
-          data: { alarm: "decisions_file_unwritten", decision_id: id, path, error },
-        });
+      // Once per decision: a second resolve returns `already_resolved` before it gets here.
+      await this.append(wave, {
+        type: "alarm_raised",
+        task: d.task,
+        data: { alarm: "decisions_file_unwritten", decision_id: id, path, error },
+      });
       return { decision: d, already_resolved: false };
     }
   }

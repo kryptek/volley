@@ -691,7 +691,7 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     expect(res.result).toMatchObject({ already_resolved: false });
     expect(res.result).not.toHaveProperty("brief");
     expect(daemon.record("w7")?.state?.open_decisions).toEqual([]);
-    // A second resolve of the same decision is a no-op: no second alarm.
+    // A second resolve of the same decision returns already_resolved before the write: no second alarm.
     await client.request("resolve", { decision_id: d.decision_id, answer: "no", by: "tester" });
     const alarms = journal("w7").filter(
       (e) => e.type === "alarm_raised" && e.data.alarm === "decisions_file_unwritten",

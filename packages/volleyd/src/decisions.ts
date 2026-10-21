@@ -450,7 +450,8 @@ export const LOCAL_FILES: Pick<Host, "writeFile"> = {
 /**
  * Write `<dir>/.volley/decisions.md` through `files` (the task's host: a remote task's worktree
  * is on its machine); returns its path. The mode makes the local adapter write a temp file and
- * rename it, so a reader never sees half a file.
+ * rename it, so a reader never sees half a file; the ssh adapter writes in place, which is fine
+ * because the file is read at the next stage's brief, not while it is written.
  */
 export async function writeDecisionsFile(
   files: Pick<Host, "writeFile">,
