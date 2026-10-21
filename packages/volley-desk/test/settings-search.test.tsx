@@ -10,13 +10,15 @@ describe("matchSections", () => {
   it("matches labels and keywords, ignoring case and spaces around the query", () => {
     expect(keys("tunnel")).toEqual(["machines"]);
     expect(keys("ceiling")).toEqual(["supervisor"]);
-    expect(keys("  Background ")).toEqual(["appearance"]);
+    // Supervisor's rows are searched too: Other › Background wait max.
+    expect(keys("  Background ")).toEqual(["appearance", "supervisor"]);
     expect(keys("ABOUT")).toEqual(["about"]);
     expect(keys("")).toHaveLength(10);
   });
 
   it("finds Sound by its words; 'theme' still finds Appearance too", () => {
     expect(keys("quiet")).toEqual(["sound"]);
+    expect(keys("rationale")).toEqual(["autopilot"]);
     expect(keys("vibrate")).toEqual(["sound"]);
     expect(keys("audition")).toEqual(["sound"]);
     expect(keys("theme")).toEqual(["sound", "appearance"]);

@@ -166,7 +166,7 @@ describe("SettingsWindow", () => {
     expect(heading()).toHaveTextContent("Machines");
   });
 
-  it("the machine card's local agents chip opens Supervisor at the fleet.local_agents row", () => {
+  it("the machine card's local agents chip opens Supervisor › Admission at the fleet.local_agents row", () => {
     const spy = vi.fn();
     Object.defineProperty(Element.prototype, "scrollIntoView", { value: spy, configurable: true });
     try {
@@ -187,7 +187,8 @@ describe("SettingsWindow", () => {
         />,
       );
       fireEvent.click(screen.getByRole("button", { name: "Local agents: fallback" }));
-      expect(heading()).toHaveTextContent("Supervisor");
+      expect(heading()).toHaveTextContent("Admission");
+      expect(screen.getByRole("button", { name: "Back to Supervisor" })).toBeInTheDocument();
       const select = screen.getByRole("combobox", { name: "Fleet local agents" });
       expect(spy.mock.contexts.at(-1)).toBe(select.closest(".cfg-row"));
       expect(select).toHaveFocus();
@@ -358,9 +359,10 @@ describe("SettingsWindow", () => {
   describe("Supervisor", () => {
     it("renders the schema rows with the global values, read-only without credentials", () => {
       render(<Harness initial="supervisor" />);
-      for (const h of ["Admission", "Leases", "Attention", "Recovery"]) {
-        expect(screen.getByRole("heading", { name: h })).toBeInTheDocument();
+      for (const g of ["Lease pools", "Admission", "Attention", "Recovery", "Other"]) {
+        expect(screen.getByRole("button", { name: g })).toBeInTheDocument();
       }
+      fireEvent.click(screen.getByRole("button", { name: "Admission" }));
       expect(screen.getByRole("slider", { name: "Hard ceiling" })).toHaveAttribute(
         "aria-valuenow",
         "12",
@@ -386,6 +388,7 @@ describe("SettingsWindow", () => {
           transport={createConfigTransport(client, { identity: "desk" })}
         />,
       );
+      fireEvent.click(screen.getByRole("button", { name: "Recovery" }));
       const box = screen.getByRole("textbox", { name: "Fallback model" });
       fireEvent.change(box, { target: { value: "claude-haiku-5-5" } });
       fireEvent.keyDown(box, { key: "Enter" });
@@ -476,7 +479,10 @@ describe("SettingsWindow", () => {
     expect(heading()).toHaveTextContent("Claude accounts & usage");
     const body = within(dialog());
     expect(body.queryByText(/Coming with Onboarding/)).toBeNull();
+    fireEvent.click(body.getByRole("button", { name: "Accounts" }));
     expect(body.getByRole("button", { name: "+ Add Claude account" })).toBeDisabled();
+    fireEvent.click(body.getByRole("button", { name: "Back to Claude accounts & usage" }));
+    fireEvent.click(body.getByRole("button", { name: "Defaults" }));
     expect(body.getByText("Warn me at")).toBeInTheDocument();
   });
 

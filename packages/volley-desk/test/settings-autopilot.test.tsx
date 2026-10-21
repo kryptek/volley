@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Autopilot, POLICY_COLUMNS, PolicyTable } from "../src/settings/Autopilot";
 import type { ConfigTransport } from "../src/settings/configTransport";
 import { CONFIG_SCHEMA, schemaRows } from "../src/settings/schemaRows";
-import { matchSections } from "../src/settings/sections";
+import { matchGroups, matchSections } from "../src/settings/sections";
 import type { ControlReply } from "../src/steer/transport";
 import type { ConfigPayload } from "../src/store/types";
 
@@ -76,11 +76,13 @@ describe("Settings › Autopilot", () => {
   it("is a Settings section the sidebar search finds", () => {
     expect(matchSections("policy").map((s) => s.key)).toContain("autopilot");
     expect(matchSections("owner only").map((s) => s.key)).toContain("autopilot");
+    expect(matchGroups("owner only")).toEqual([{ section: "autopilot", group: "tunables" }]);
+    expect(matchGroups("rationale")).toEqual([{ section: "autopilot", group: "policy" }]);
   });
 
   it("renders a row for every autopilot.* tunable, with its bounds", () => {
     const { transport, control } = fakes();
-    render(<Autopilot config={config} transport={transport} control={control} />);
+    render(<Autopilot config={config} transport={transport} control={control} group="tunables" />);
     const keys = Object.keys(config.autopilot ?? {});
     const rows = schemaRows(CONFIG_SCHEMA, config).filter((r) => r.path.startsWith("autopilot."));
     expect(rows.map((r) => r.path.slice("autopilot.".length)).sort()).toEqual([...keys].sort());
@@ -99,7 +101,7 @@ describe("Settings › Autopilot", () => {
 
   it("owner_only is a multi-select of the decision kinds", () => {
     const { transport, control } = fakes();
-    render(<Autopilot config={config} transport={transport} control={control} />);
+    render(<Autopilot config={config} transport={transport} control={control} group="tunables" />);
     const group = within(rowOf("Owner only")).getByRole("group", { name: "Owner only" });
     const boxes = within(group).getAllByRole("checkbox");
     expect(boxes.length).toBeGreaterThanOrEqual(23);
@@ -125,7 +127,7 @@ describe("Settings › Autopilot", () => {
 
   it("changing autopilot.enabled sends config_set in the global scope (no wave)", async () => {
     const { transport, control } = fakes();
-    render(<Autopilot config={config} transport={transport} control={control} />);
+    render(<Autopilot config={config} transport={transport} control={control} group="tunables" />);
     fireEvent.click(within(rowOf("Enabled")).getByRole("switch"));
     expect(transport.send).toHaveBeenCalledTimes(1);
     const [patch, opts] = (transport.send as ReturnType<typeof vi.fn>).mock.calls[0] ?? [];
@@ -142,6 +144,7 @@ describe("Settings › Autopilot", () => {
         transport={transport}
         control={control}
         wave="w1"
+        group="tunables"
         values={{ autopilot: { ...config.autopilot, enabled: false } }}
       />,
     );
@@ -155,7 +158,7 @@ describe("Settings › Autopilot", () => {
 
   it("renders the policy op's rows as a read-only table", async () => {
     const { transport, control } = fakes();
-    render(<Autopilot config={config} transport={transport} control={control} />);
+    render(<Autopilot config={config} transport={transport} control={control} group="policy" />);
     const table = await screen.findByRole("table", { name: "Autopilot policy" });
     expect(control).toHaveBeenCalledWith("policy", {}, expect.any(String));
     const heads = within(table)
@@ -186,11 +189,13 @@ describe("Settings › Autopilot", () => {
 
   it("says why there is no table when the Desk cannot ask or volleyd refuses", async () => {
     const { transport } = fakes();
-    const { unmount } = render(<Autopilot config={config} transport={transport} control={null} />);
+    const { unmount } = render(
+      <Autopilot config={config} transport={transport} control={null} group="policy" />,
+    );
     expect(screen.getByText(/volleyd policy/)).toBeInTheDocument();
     unmount();
     const { control } = fakes({ ok: false, error: "unknown op 'policy'" });
-    render(<Autopilot config={config} transport={transport} control={control} />);
+    render(<Autopilot config={config} transport={transport} control={control} group="policy" />);
     expect(await screen.findByText(/unknown op 'policy'/)).toBeInTheDocument();
   });
 });
