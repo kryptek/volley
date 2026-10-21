@@ -192,6 +192,8 @@ export interface TaskPipeline {
   ci_hold?: CiHold | undefined;
   /** The PR head moved after a gate (`pr_head_moved`), until the owner's answer. */
   moved?: MovedHead | undefined;
+  /** A moved head answered `accept`, until the accept's verification moves the task's head there. */
+  accepting?: string | undefined;
   /** Every head the task was gated at (evidence head history). */
   gated: string[];
   /** What the next fixup must do about a moved head (the CI failure, the diff), until it is verified. */
@@ -452,7 +454,12 @@ export function reducePipeline(
         run.accepted = true;
         if (PUBLISHING_ROLES.has(role) && typeof d.head_sha === "string") run.head = d.head_sha;
       }
-      if (typeof d.head_sha === "string") p.head = d.head_sha;
+      // A review of a head an accepted release merge already moved on from holds at the moved head
+      // (reviewHolds): it does not take the task's head back (#270).
+      if (typeof d.head_sha === "string" && !(isReviewerRole(role) && acceptedFrom(p, d.head_sha)))
+        p.head = d.head_sha;
+      // The accepted head reached, or the head went elsewhere first: either way the wait is over.
+      if (p.head !== from) p.accepting = undefined;
       const pr = d.pr as { number: number; url: string; ci?: string } | undefined;
       // The merge record describes the commit that merged (its own CI): not the pipeline's head.
       if (pr !== undefined && d.role !== "merged") {
@@ -579,6 +586,7 @@ export function reducePipeline(
       p.ci_hold = undefined;
       if (ev.type === "task_cancelled") {
         p.moved = undefined;
+        p.accepting = undefined;
         p.remediation = undefined;
         p.merge_inflight = undefined;
       }
@@ -651,12 +659,12 @@ export function reducePipeline(
             p.ci_superseded = dir.superseded;
           }
           p.moved = undefined;
-        } else if (
-          isAnswer(answer, "cancel") ||
-          (isAnswer(answer, "accept") && (ctx.decision?.options ?? []).includes("accept"))
-        )
+        } else if (isAnswer(answer, "cancel")) p.moved = undefined;
+        else if (isAnswer(answer, "accept") && (ctx.decision?.options ?? []).includes("accept")) {
           // accept: the head moves with the artifact_verified onResolved journals next.
+          p.accepting = p.moved.to;
           p.moved = undefined;
+        }
       }
       break;
     }
@@ -1020,6 +1028,21 @@ function reviewHolds(p: TaskPipeline, rv: StoredReview): boolean {
   return false;
 }
 
+/** Did the current head get here from `sha` through moves accepted as release merges only? */
+function acceptedFrom(p: TaskPipeline, sha: string): boolean {
+  const seen = new Set<string>();
+  let head = p.head;
+  while (head !== undefined && !seen.has(head)) {
+    seen.add(head);
+    const to = head;
+    head = p.moves.find(
+      (m) => m.to === to && m.how === "release_merge" && m.accepted_by !== undefined,
+    )?.from;
+    if (head === sha) return true;
+  }
+  return false;
+}
+
 /**
  * A merge_ready invariant violation: an alarm, and a decision for the owner (`rereview` runs the
  * missing / stale reviewers at the current head; `cancel`). Never a gate: volleyd never gates
@@ -1103,7 +1126,12 @@ function onHeadMoved(
 ): PipelineAction[] {
   const role = headRole(v.p);
   if (v.stage === "cancelled" || v.stage === "merge_ready" || ev.expected !== v.p.head) return [];
-  if (role === undefined) return [];
+  // The gate's head check saw this move first (pr_head_moved): its decision, asked or answered
+  // `accept`, handles it. A plain re-verify here would land before the accept's and record the
+  // move as one that voids the reviews (#271).
+  // An accept whose verification never lands leaves `accepting` set; the merge check's own
+  // p.head comparison still sees that head, so nothing is lost.
+  if (role === undefined || v.p.moved !== undefined || v.p.accepting === ev.actual) return [];
   return [
     {
       kind: "journal",
@@ -3199,6 +3227,14 @@ export function roleSpawnHold(o: {
 /** The merge-nudge re-check's rate-limit key: outside `<task>/`, so `forget` keeps it. */
 const nudgeKey = (task: TaskId) => `merge_nudge:${task}`;
 
+/**
+ * A decision asked once until its answer is handled (PipelineDriver.asking): a merge_ready
+ * invariant breach, per head (its alarm's key).
+ */
+function askKey(task: TaskId, m: PipelineMarker | undefined): string | undefined {
+  return m?.on === "merge_ready_invariant" ? `${task}/merge_ready_invariant/${m.head}` : undefined;
+}
+
 /** Executes the interpreter's actions for one wave. Call it from one serial queue. */
 export class PipelineDriver {
   /** Last level-triggered re-check per `<task>/<what>` (verify, check_rebase, check_merged). */
@@ -3237,6 +3273,13 @@ export class PipelineDriver {
   private readonly lock: ReleaseLock;
   /** Tasks whose `gh pr merge` this driver runs (from `merge_started` until its outcome is in). */
   private readonly merging = new Set<TaskId>();
+  /**
+   * The merge_ready invariant decisions this driver asked (`askKey`) whose answer it has not
+   * handled yet. Autopilot answers one inside `decide`, but the answer reaches the pipeline later,
+   * on the queue: until then the task is not parked, and the advances after the decide would ask
+   * again for the same head, spending a re-review each (#269).
+   */
+  private readonly asking = new Set<string>();
 
   constructor(
     private readonly wave: WaveId,
@@ -3252,7 +3295,11 @@ export class PipelineDriver {
 
   /** The task's fenced exec with the pipeline's hard timeout; a timeout throws `IoTimeout`. */
   private io(task: TaskId): ExecFn {
-    const exec = this.deps.execFor?.(task) ?? this.deps.exec;
+    return this.timed(this.deps.execFor?.(task) ?? this.deps.exec);
+  }
+
+  /** `exec` with the pipeline's hard timeout: a call past it throws `IoTimeout`. */
+  private timed(exec: ExecFn): ExecFn {
     return async (argv, opts: ExecOptions = {}): Promise<ExecResult> => {
       const r = await exec(argv, { timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms, ...opts });
       if (r.timedOut) throw new IoTimeout(`${argv.slice(0, 3).join(" ")} timed out`);
@@ -3296,6 +3343,11 @@ export class PipelineDriver {
   async handle(task: TaskId, ev: PipelineEvent): Promise<void> {
     const v = this.view(task);
     if (v === null) return;
+    // Its answer is handled now: a re-ask, or a later breach, asks again.
+    if (ev.kind === "decision_resolved") {
+      const key = askKey(task, (ev.decision as { pipeline?: PipelineMarker }).pipeline);
+      if (key !== undefined) this.asking.delete(key);
+    }
     await this.run(task, next(v, ev), ev.kind !== "advance");
     // Each round of actions changes the record; a step's last acceptance enters the next step.
     for (let i = 0; i < DAEMON_DEFAULTS.pipeline_max_advances; i++) {
@@ -3546,6 +3598,7 @@ export class PipelineDriver {
     this.mergeTokens.delete(task);
     for (const m of [this.lastCheck, this.noCiSince])
       for (const k of m.keys()) if (k.startsWith(`${task}/`)) m.delete(k);
+    for (const k of this.asking) if (k.startsWith(`${task}/`)) this.asking.delete(k);
   }
 
   private async alarmError(task: TaskId, what: string, e: unknown): Promise<void> {
@@ -3636,10 +3689,14 @@ export class PipelineDriver {
           progressed = true;
           break;
         }
-        case "decide":
+        case "decide": {
+          const key = askKey(task, a.marker);
+          if (key !== undefined && this.asking.has(key)) break;
           await this.deps.decide(a.decision, { ...(a.data ?? {}), pipeline: a.marker });
+          if (key !== undefined) this.asking.add(key);
           progressed = true;
           break;
+        }
         case "retire":
           await this.deps.retire(a.agent_id, a.status);
           progressed = true;
@@ -4311,8 +4368,24 @@ export class PipelineDriver {
     token: MergeToken,
     by?: string,
   ): Promise<PipelineEvent | null> {
-    const cwd = this.headWorktree(v.p);
-    const r = await mergePr(this.io(v.task), token, cwd, this.deps.deleteBranch?.() ?? false);
+    // A merge is the supervisor's act (its gh login, its MergeToken): it runs here, in the wave's
+    // repo, whatever machine the task's agents ran on. A paired machine's fence never holds a
+    // MergeToken, so a merge sent there would always be refused.
+    const repo = this.deps.record().state?.repo;
+    const r =
+      repo != null
+        ? await mergePr(
+            this.timed(this.deps.exec),
+            token,
+            repo,
+            this.deps.deleteBranch?.() ?? false,
+          )
+        : await mergePr(
+            this.io(v.task),
+            token,
+            this.headWorktree(v.p),
+            this.deps.deleteBranch?.() ?? false,
+          );
     return r.ok
       ? {
           kind: "supervisor_merged",

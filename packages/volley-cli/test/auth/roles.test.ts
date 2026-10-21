@@ -121,9 +121,21 @@ describe("what each role may do (Dynamic Security semantics, %u substituted)", (
     expect(fake.canPublish("steer-test", `volley/ns/${X}/mailbox`)).toBe(true);
     expect(fake.canPublish("admin-test", "volley/_system/auth/ops/admin-test")).toBe(true);
     expect(fake.canPublish("admin-test", "volley/_system/auth/ops/steer-test")).toBe(false);
-    expect(fake.canPublish("steer-test", "volley/_system/auth/ops/steer-test")).toBe(false);
     expect(fake.canPublish("peer-test", "volley/_system/machines/peer-test")).toBe(true);
     expect(fake.canPublish("peer-test", "volley/_system/machines/other")).toBe(false);
+  });
+
+  it("a Desk login writes its own account-op topic, nobody else's (SPEC §4.6.18 answers)", () => {
+    expect(fake.canPublish("steer-test", "volley/_system/auth/ops/steer-test")).toBe(true);
+    expect(fake.canPublish("steer-test", "volley/_system/auth/ops/admin-test")).toBe(false);
+    expect(fake.canPublish("desk", "volley/_system/auth/ops/desk")).toBe(true);
+    expect(fake.canPublish("desk", "volley/_system/auth/ops/steer-test")).toBe(false);
+    for (const u of ["watch-test", "peer-test", "coordinator", X]) {
+      expect(fake.canPublish(u, `volley/_system/auth/ops/${u}`)).toBe(false);
+    }
+    expect(fake.canPublish("supervisor-test", "volley/_system/auth/ops/supervisor-test")).toBe(
+      false,
+    );
   });
 
   it("readiness: no account writes a verdict, its own or another's; the supervisors do (SPEC §4.6.15)", () => {
@@ -166,7 +178,9 @@ describe("what each role may do (Dynamic Security semantics, %u substituted)", (
     expect(fake.canPublish(X, "volley/_inbox/d-w1-d-abc")).toBe(false);
     expect(fake.canPublish("supervisor-test", "volley/_inbox/d-w1-d-abc")).toBe(true);
     expect(fake.canPublish("volleyd", "volley/_inbox/d-w1-d-abc")).toBe(true);
-    // An answer goes to volleyd's mailbox (inbox_answer): any login that may steer.
+    // A Desk login's answer (inbox_answer) goes on its own account-op topic, where the broker
+    // names the sender; the mailbox still carries the owner's (and its bound session's) answers.
+    expect(fake.canPublish("steer-test", "volley/_system/auth/ops/steer-test")).toBe(true);
     expect(fake.canPublish("steer-test", "volley/ns/volleyd/mailbox")).toBe(true);
     expect(fake.canPublish("watch-test", "volley/ns/volleyd/mailbox")).toBe(false);
   });

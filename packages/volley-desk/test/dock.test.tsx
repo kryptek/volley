@@ -20,7 +20,7 @@ const renderApp = () =>
 const dock = () => within(screen.getByRole("toolbar", { name: "Dock" }));
 
 describe("the dock", () => {
-  it("has exactly seven items, in order", () => {
+  it("has exactly eight items, in order", () => {
     renderApp();
     expect(
       dock()
@@ -29,6 +29,7 @@ describe("the dock", () => {
     ).toEqual([
       "Wave coordinators",
       "Needs you",
+      "Machines",
       "Hide tethers",
       "Arrange & fit",
       "Zoom in",

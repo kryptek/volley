@@ -320,6 +320,10 @@ describe("remote allow-list (ssh … bash -s)", () => {
     expect(() =>
       assertAllowed(SSH, remote(write(renderLaunchScript({ ...vars, model: "sonnet" })))),
     ).not.toThrow();
+    // The auto-compact window, before the tunnel's env block.
+    expect(() =>
+      assertAllowed(SSH, remote(write(renderLaunchScript({ ...vars, autoCompactWindow: 170000 })))),
+    ).not.toThrow();
     // Provider-qualified model ids a wave file may name (P2: one grammar with the schema).
     const bedrock = "us.anthropic.claude-opus-4-1-20250805-v1:0";
     expect(() =>
@@ -374,6 +378,14 @@ describe("remote allow-list (ssh … bash -s)", () => {
       "an extra VOLLEY_ export": renderLaunchScript({
         ...vars,
         env: { ...vars.env, VOLLEY_AUTH_PASSWORD: "x" },
+      }),
+      "the compact window in the env block": renderLaunchScript({
+        ...vars,
+        env: { ...vars.env, CLAUDE_CODE_AUTO_COMPACT_WINDOW: "170000" },
+      }),
+      "a compact window below the minimum": renderLaunchScript({
+        ...vars,
+        autoCompactWindow: 99999,
       }),
       "a partial env block": renderLaunchScript({
         ...vars,

@@ -267,6 +267,13 @@
           "default": "strict",
           "description": "The MCP servers a launched agent loads (spec section 4.6.4): strict (only the supervisor's own volley server: a reproducible, minimal agent) or inherit (the user's own servers too, such as plugin servers and connectors, beside the supervisor's volley server, which takes over a user-scope server of the same name). Optional in the retained payload: a supervisor that predates it omits it."
         },
+        "agent_auto_compact_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 85,
+          "description": "The share of a launched agent's context window at which Claude Code compacts its conversation (spec section 4.6.4): the supervisor exports CLAUDE_CODE_AUTO_COMPACT_WINDOW = this percentage of the model's window, in tokens, clamped to Claude Code's 100000..1000000. 0: the variable is not set and Claude Code's own default applies. Optional in the retained payload: a supervisor that predates it omits it."
+        },
         "public_hygiene": {
           "type": "string",
           "enum": ["auto", "on", "off"],

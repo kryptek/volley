@@ -111,7 +111,7 @@ live, so the file holds only live agents, the fixed identities and the accounts 
 |---|---|---|
 | `agent` (`volley-agent`) | each dispatched agent (username = agent id) | its own `status`, `progress`, `result`, `capability`, `usage`, `control`, `_user/*` and registry entry (`%u`), lease requests, and the mailboxes of `volleyd` and `desk` (acks) |
 | `account` | the Desk, coordinators, every account | its own channels, registry entry and machine record `volley/_system/machines/%u` (nothing under it, so no account writes a machine's readiness verdict), lease requests |
-| `desk` | the Desk, `steer` accounts | any agent's `mailbox` (steering; control requests to the daemon); reads `volley/_system/desk-probe/%c` (the Desk's resume probe, its own client id) |
+| `desk` | the Desk, `steer` accounts | any agent's `mailbox` (steering; control requests to the daemon); its own `volley/_system/auth/ops/%u` (Needs-you answers, where the broker names the sender); reads `volley/_system/desk-probe/%c` (the Desk's resume probe, its own client id) |
 | `coordinator` | coordinator sessions | any agent's `mailbox`, standard channels and registry entry |
 | `admin` | `admin` accounts | what `coordinator` may, plus `volley/_system/auth/ops/%u` |
 | `supervisor` | `supervisor` accounts (another volleyd) | the whole tree except the account-op and answer topics |

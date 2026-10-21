@@ -333,7 +333,7 @@ that the scheduler applies on top of the hard ceiling and spawn budget:
 | `volley/_system/leases/<pool>/requests` | no | Agents' `acquire` / `release` / `renew` (any agent may publish). |
 | `volley/_system/admission` | yes | The spawn admission verdict after every pressure sample. |
 | `volley/<ns>/<agent>/screen` | yes | Tail of a supervised agent's terminal (`screen_tail`, see [Screen tails](#screen-tails)). |
-| `volley/_system/auth/ops/<username>` | no | An admin account's account ops (see [Accounts and one-time tokens](#accounts-and-one-time-tokens)). |
+| `volley/_system/auth/ops/<username>` | no | An admin account's account ops (see [Accounts and one-time tokens](#accounts-and-one-time-tokens)); a Desk login's Needs-you answers (`inbox_answer`, `resolve`; see [Needs-you inbox](#needs-you-inbox)). |
 | `volley/_system/auth/replies/<correlation_id>` | no | The daemon's answer to an account op; secrets sealed to the requester's `reply_key`. |
 | `volley-auth/redeem/<token id>` | no | A one-time token's redemption request, from that token's own login. |
 | `volley-auth/redeem/<token id>/reply` | no | The daemon's answer to it: the one topic that login may read. |
@@ -392,9 +392,11 @@ The Desk manages broker accounts through the daemon, never by creating logins it
 **Account ops** are not mailbox ops: anyone who may steer can write the daemon's mailbox, so the
 mailbox cannot say who sent a request (the daemon refuses them there with a pointer). An admin
 publishes `{ op, ..., reply_key }` (envelope `channel: "_system/auth"`, `type: "query"`, a fresh
-`correlation_id`) on `volley/_system/auth/ops/<its username>`. The broker's admin role grants that
-topic only to admin accounts and only for their own username (`%u`), so the topic names the sender; the daemon
-then checks that account's role with `volley auth list --json` and refuses anything but `admin`.
+`correlation_id`) on `volley/_system/auth/ops/<its username>`. The broker's admin and desk roles
+grant that topic, each only for its own username (`%u`), so the topic names the sender; the daemon
+then checks that account's role with `volley auth list --json`, per op: account, setup and peer
+ops and `archive` need `admin`; a Desk login's Needs-you answers (`inbox_answer`, `resolve`) need
+a `steer` or `admin` account or the fixed `desk` identity.
 `account_list`'s `last_seen` is the newest of the account's last auth request to this daemon
 process and the `wall_time` of a retained registry entry or retained `status` (where the LWT lands)
 under its name. Requests are never retained: the daemon clears a request topic's retained message
@@ -1010,8 +1012,15 @@ pointers, opened_at, source, answered? }`. Kinds and their ids:
 | `handoff` | `h-<agent_id>-<seq>` | a coordinator turn that ends on a question (the Stop hook's `awaiting_input { question }`) |
 | `release` | `r-<wave>-<stage\|go>` | a release stage or its go/no-go (`openInboxItem`) |
 
-**volleyd is the referee.** An answer is the mailbox op `inbox_answer { id, version, answer,
-where }`, from any login that may steer. It is accepted only at the item's current `version`
+**volleyd is the referee.** An answer is `inbox_answer { id, version, answer, where }`. On the
+mailbox it is the owner's: a wave's item is answered by the wave's owner or the session bound to
+its coordinator name, a coordinator session's own item by that session. A Desk login (a `steer`
+or `admin` account, or the fixed `desk` identity) sends it on its own account-op topic
+`volley/_system/auth/ops/<username>`, where the broker names the sender, and volleyd treats it as
+the owner answering from another screen: `by` is that login, and no ownership check applies (a
+`resolve` sent there likewise). Every `steer` account, a sign-in link's included, thus carries
+the owner's power over every wave's Needs-you items: issue them only for the owner's own devices.
+It is accepted only at the item's current `version`
 (compare-and-set): the first accepted answer bumps the version, sets `answered { answer, by,
 where, at }`, journals `inbox_answered { id, kind, answer, by, where, version }` (in the item's
 wave, else `_system`) and acts on it. A later answer is refused with `already answered on
@@ -1323,6 +1332,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `autopilot.merge_retry_max` | the next refused merge ([autopilot merging](#autopilot-merging)) | refusals already counted stand |
 | `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
 | `agent_mcp` | spawns after the change | running agents keep the MCP servers they launched with |
+| `agent_auto_compact_pct` | spawns after the change | running agents keep the window they launched with |
 | `public_hygiene` | the next wave version (`run` of a new wave, or a new version of a live one) | the level journaled for the current version holds for its reviewers and their results |
 | `archive_ended_after_h`, `archive_on_ack` | the next tick (and the next `wave_complete` answer) | archived waves stay archived ([Archiving](#archiving)) |
 
@@ -1420,8 +1430,10 @@ Every refused spawn — the daemon's automatic ones (implementers, pipeline role
 Automatic retries back off: 30 s, doubling per failure, capped at `spawn_retry_max_s`. After
 `spawn_retry_max` failures in a row they stop: `next_retry_at` is `null`, `why_waiting` says
 `retries stopped after <k> attempts`, and the open decision is superseded (resolved
-`retries_stopped`) by one whose question says the retries stopped. Answering `retry now` spawns
-at the next tick whatever the backoff said; `stop task` cancels the task.
+`retries_stopped`) by one whose question says the retries stopped. A refusal that can never
+succeed as is (an agent id that cannot be formed) is not retried at all: its first failure stops
+the retries and opens the decision that says so, which the autopilot policy escalates. Answering
+`retry now` spawns at the next tick whatever the backoff said; `stop task` cancels the task.
 
 A spawn that launches after failures journals `spawn_recovered { role, agent_id,
 after_failures, attempt }`, clears `last_error` / `why_waiting`, resolves the open decision
@@ -1464,9 +1476,11 @@ straight away. Launches are serialized per host: one `cmux new-workspace` (or re
 `tmux new-session`) is in flight at a time, so a slow cmux does not stack them.
 
 **Identity.** The agent id is `<wave>-<task>-<role>-<attempt>`, lowercased (a long wave id is
-shortened with a hash). `.volley/agent.json` carries `agent_id`, `namespace`, `parent_id` (the
-wave owner, else `volleyd`), `wave`, `task`, `role`, `broker_url` and the minted `broker`
-block; the MCP server and the hooks both read it, so no flag or env carries identity.
+shortened with a hash; a task id too long for the role's tail, like a flake fixer's
+`fix-<test>` under `quality_reviewer`, is cut too, with a hash of the whole task id).
+`.volley/agent.json` carries `agent_id`, `namespace`, `parent_id` (the wave owner, else
+`volleyd`), `wave`, `task`, `role`, `broker_url` and the minted `broker` block; the MCP server
+and the hooks both read it, so no flag or env carries identity.
 `volleyd daemon --no-mint` skips minting for an anonymous broker (no `broker` block).
 
 **Broker logins** (mosquitto ≥ 2.1, Dynamic Security; [`examples/mosquitto-auth/`](../../examples/mosquitto-auth/README.md),
@@ -1485,7 +1499,8 @@ is involved: the agent role already lets an agent ack volleyd and the Desk (an a
 random-suffixed coordinator is dropped, SPEC §4.4).
 
 **Launch script.** `launch.sh` runs under bash (`#!/usr/bin/env bash`; login shells may be zsh),
-exports `VOLLEY_HOOKS_DIR=<checkout>/packages/volley-hooks` and execs
+exports `VOLLEY_HOOKS_DIR=<checkout>/packages/volley-hooks` and
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW=<tokens>` (`agent_auto_compact_pct`, below) and execs
 `claude --dangerously-skip-permissions --model <model> --settings <hooks settings template> --strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json --name <id> -- "$(cat .volley/brief.md)"`
 (without `--strict-mcp-config` under `agent_mcp: inherit`, below).
 The hooks come in through `--settings`. Just before the exec it checks `claude` is on the
@@ -1524,6 +1539,28 @@ vanished agent keeps the servers it launched with. The cmux command starts with 
 from prompts that eat the first character. Nothing else is typed into the pane, with two
 exceptions: the Enter that answers an update prompt and the relaunch after it (below), and the
 Escape that `volleyd stop` sends. The brief never appears in an argv.
+
+**Auto-compaction: `agent_auto_compact_pct`** (a tunable, 0..100, default 85; per wave through
+`config:`). Every launch, for every role and host, exports `CLAUDE_CODE_AUTO_COMPACT_WINDOW`: the
+context size, in tokens, at which Claude Code compacts the conversation. It is this percentage
+of the model's context window, rounded and clamped to the 100000..1000000 Claude Code accepts.
+The window comes from a small table on the model id (`src/claude/context-window.ts`), since
+Claude Code reports it only after the first response: a `[1m]` suffix, the native-1M families
+(fable, sonnet 5 and later, haiku 5.5 and later, opus 4.7 and later) and the bare aliases
+(`fable`, `opus`, `sonnet`, `haiku`) are 1M; anything else, including an id it cannot read (an
+ARN, a gateway name), is 200K. Provider-qualified ids are matched on their
+`claude-<family>-<major>[-<minor>]` part. A wrong row only moves the compaction point (Claude
+Code caps the window at the model's own). So at 85, `claude-opus-5-5` compacts at 850000 tokens
+and `claude-opus-4-6` at 170000: where the Desk's context meter turns red, after its 70% pulse
+has warned. `0` exports nothing and Claude Code's own default applies. The line sits right after
+the profile block; the fence accepts it there only, as an integer in range, and
+`agent_spawned` records `auto_compact_window`. The Desk meter keeps measuring the full window
+(`used_percentage`), so it does not show the compaction point. A compaction summarises the
+conversation and can lose detail an agent deep in a change had (a finding's wording, a file it
+meant to revisit); the brief, `ISSUE.md` and the review files stay on disk for it to re-read,
+and the default leaves the last 15% for the wrap-up (gates, push, status). Compacting is still
+better than the alternative: an agent that hits the limit stops answering and is reaped as
+stalled. A wave whose agents run long can set it lower.
 
 **Brief gate and extras.** If `$VOLLEYD_HOME/brief-gate` exists and is executable, it runs as
 `brief-gate <worktree>/.volley/brief.md` in the worktree; a non-zero exit is
@@ -3090,7 +3127,9 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     config, HEAD, gitfile or hook, or a case variant of launch.sh), an absolute path ending in
     `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh`
     (what the tmux session runs) is written whole, never appended, and its content must be
-    exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS); a
+    exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS: a
+    `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the profile block, an
+    integer in 100000..1000000, never in the env block); a
     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG); and
     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):

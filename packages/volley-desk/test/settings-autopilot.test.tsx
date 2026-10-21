@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { Autopilot, POLICY_COLUMNS } from "../src/settings/Autopilot";
+import { Autopilot, POLICY_COLUMNS, PolicyTable } from "../src/settings/Autopilot";
 import type { ConfigTransport } from "../src/settings/configTransport";
 import { CONFIG_SCHEMA, schemaRows } from "../src/settings/schemaRows";
 import { matchSections } from "../src/settings/sections";
@@ -190,5 +192,105 @@ describe("Settings › Autopilot", () => {
     const { control } = fakes({ ok: false, error: "unknown op 'policy'" });
     render(<Autopilot config={config} transport={transport} control={control} />);
     expect(await screen.findByText(/unknown op 'policy'/)).toBeInTheDocument();
+  });
+});
+
+/** settings.css, whitespace collapsed. */
+const settingsCss = readFileSync(join(__dirname, "../src/styles/settings.css"), "utf8").replace(
+  /\s+/g,
+  " ",
+);
+
+/** The body of the first rule whose selector list is exactly `selector`, in `css`. */
+const ruleFor = (css: string, selector: string) => {
+  const at = css.indexOf(`${selector} {`);
+  expect(at, selector).toBeGreaterThanOrEqual(0);
+  return css.slice(at, css.indexOf("}", at));
+};
+
+/** The phone `@media (max-width: 699.98px)` block that holds the policy table's rules. */
+function phonePolicyCss(): string {
+  // Each block's body ends at its first `} }` (the last rule's brace, then the block's).
+  const blocks = settingsCss
+    .split("@media (max-width: 699.98px)")
+    .slice(1)
+    .map((b) => b.slice(0, b.indexOf("} }") + 1));
+  const block = blocks.find((b) => b.includes(".policy-"));
+  expect(block, "a phone block for the policy table").toBeDefined();
+  return block as string;
+}
+
+const WIDE_RULES = [
+  ...RULES,
+  {
+    policy: "ci_failed/fixup",
+    kind: "ci_failed,ci_flaky,ci_timeout",
+    condition: 'pipeline.on === "relaunch"',
+    answer: "fixup",
+    budget: "ci_fixup_max per <task>/<role>",
+    max: 2,
+    rationale: "a red check is usually the implementer's to fix",
+  },
+];
+
+describe("Settings › Autopilot policy table fits the pane (#278)", () => {
+  it("sits in a horizontally scrollable container, so a narrow pane scrolls rather than clips", () => {
+    const { container } = render(<PolicyTable rules={WIDE_RULES} />);
+    const scroll = container.querySelector(".policy-scroll");
+    expect(scroll).not.toBeNull();
+    expect(scroll?.querySelector("table.policy-table")).not.toBeNull();
+    expect(ruleFor(settingsCss, ".policy-scroll")).toContain("overflow-x: auto");
+  });
+
+  it("wraps its cells in fixed columns that give rationale the most room; nothing is nowrap", () => {
+    const { container } = render(<PolicyTable rules={WIDE_RULES} />);
+    const table = ruleFor(settingsCss, ".policy-table");
+    expect(table).toContain("table-layout: fixed");
+    const cells = [...container.querySelectorAll("table.policy-table td")];
+    expect(cells.length).toBe(WIDE_RULES.length * 5);
+    for (const td of cells) expect(td.classList.contains("policy-wrap"), td.outerHTML).toBe(true);
+    expect(ruleFor(settingsCss, ".policy-wrap")).toContain("overflow-wrap: anywhere");
+    const policyRules = settingsCss.match(/\.policy-[^{]*\{[^}]*\}/g) ?? [];
+    for (const r of policyRules) expect(r).not.toContain("nowrap");
+    const cols = [...container.querySelectorAll("table.policy-table col")].map((c) =>
+      Number.parseFloat((c as HTMLElement).style.width),
+    );
+    expect(cols).toHaveLength(5);
+    expect(cols.reduce((a, b) => a + b, 0)).toBe(100);
+    expect(Math.max(...cols)).toBe(cols[4]);
+  });
+
+  it("breaks a comma-joined kind list after its commas", () => {
+    const { container } = render(<PolicyTable rules={WIDE_RULES} />);
+    const kind = container.querySelector("tbody tr:last-child td") as HTMLElement;
+    expect(kind.textContent).toBe("ci_failed,ci_flaky,ci_timeout");
+    expect(kind.querySelectorAll("wbr")).toHaveLength(2);
+  });
+
+  it("at phone width renders one stacked block per rule with all five facts", () => {
+    const { container } = render(<PolicyTable rules={WIDE_RULES} />);
+    const blocks = [...container.querySelectorAll(".policy-stack > .policy-rule")];
+    expect(blocks).toHaveLength(WIDE_RULES.length);
+    const last = blocks[2] as HTMLElement;
+    expect(last.querySelector(".policy-rule-kind")?.textContent).toBe(
+      "ci_failed,ci_flaky,ci_timeout",
+    );
+    const facts = Object.fromEntries(
+      [...last.querySelectorAll("dt")].map((dt) => [
+        dt.textContent,
+        dt.nextElementSibling?.textContent,
+      ]),
+    );
+    expect(facts).toEqual({
+      condition: 'pipeline.on === "relaunch"',
+      answer: "fixup",
+      budget: "ci_fixup_max per <task>/<role> · max 2",
+      rationale: "a red check is usually the implementer's to fix",
+    });
+    // Wide: the table shows and the stack hides; phone: the other way round.
+    expect(ruleFor(settingsCss, ".policy-stack")).toContain("display: none");
+    const phone = phonePolicyCss();
+    expect(ruleFor(phone, ".policy-scroll")).toContain("display: none");
+    expect(ruleFor(phone, ".policy-stack")).toContain("display: block");
   });
 });

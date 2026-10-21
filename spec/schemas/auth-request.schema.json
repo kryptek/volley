@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/auth-request.schema.json",
   "title": "Volley Account / Token Request",
-  "description": "A request on volley/_system/auth/ops/<username> (account, setup, peer_doctor and archive ops, admin accounts only) or volley-auth/redeem/<token_id> (token_redeem, published by that token's own login). The supervisor answers on volley/_system/auth/replies/<correlation_id> with an ack whose secret, if any, is sealed to reply_key. See spec section 4.6.10.",
+  "description": "A request on volley/_system/auth/ops/<username> (account, setup, peer_doctor and archive ops from admin accounts; inbox_answer and resolve from a Desk login, the owner answering a Needs-you item from any screen, spec section 4.6.18) or volley-auth/redeem/<token_id> (token_redeem, published by that token's own login). The supervisor answers on volley/_system/auth/replies/<correlation_id> with an ack whose secret, if any, is sealed to reply_key. See spec section 4.6.10.",
   "allOf": [
     {
       "$ref": "envelope.schema.json"
@@ -38,13 +38,46 @@
                 "admin_token",
                 "desk_password",
                 "peer_doctor",
-                "archive"
+                "archive",
+                "inbox_answer",
+                "resolve"
               ]
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "inbox_answer: the Needs-you item answered (volley/_inbox/<id>)."
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "inbox_answer: the item's version the answer was given at; the supervisor refuses a stale one."
+            },
+            "answer": {
+              "type": "string",
+              "minLength": 1,
+              "description": "inbox_answer / resolve: the answer."
+            },
+            "where": {
+              "anyOf": [
+                { "$ref": "inbox-item.schema.json#/$defs/where" },
+                { "type": "string", "minLength": 1 }
+              ],
+              "description": "inbox_answer / resolve: where the answer was given (a Desk login: kind desk). resolve also takes the label form (`desk·phone`, `mbp·terminal`, `cli`); inbox_answer takes the object only."
+            },
+            "decision_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "resolve: the decision resolved."
+            },
+            "rationale": {
+              "type": "string",
+              "description": "resolve: why, journaled with the answer."
             },
             "wave": {
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
-              "description": "archive: the ended wave an admin archives (spec section 4.6.20)."
+              "description": "archive: the ended wave an admin archives (spec section 4.6.20); resolve: the decision's wave (optional, found when omitted)."
             },
             "dry_run": {
               "type": "boolean",
@@ -241,6 +274,36 @@
               },
               "then": {
                 "required": ["op", "wave"],
+                "properties": {}
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "const": "inbox_answer"
+                  }
+                }
+              },
+              "then": {
+                "required": ["op", "id", "version", "answer", "where"],
+                "properties": {
+                  "where": {
+                    "type": "object"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "const": "resolve"
+                  }
+                }
+              },
+              "then": {
+                "required": ["op", "decision_id", "answer"],
                 "properties": {}
               }
             },

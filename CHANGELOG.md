@@ -243,6 +243,20 @@ owner's guide is [`docs/AUTOPILOT.md`](docs/AUTOPILOT.md) (#213). Owner smoke:
   machine's share of a pool (0 allowed, `local` names the supervisor's own), enforced by the lease
   book and shown in the pool state, `volley lease status` and the Desk's lease pools; the Desk's
   supervisor card shows the mode as a chip. (#233)
+- **volley-desk: the context meter pulses from 70% and faster once red.** The agent window's (and
+  a session's) `ctx` meter pulses its bar from 70% and faster from 85%; under
+  `prefers-reduced-motion` it only changes colour. (#289)
+- **volleyd: agents compact before they hit the context wall.** Every launch exports
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` as `agent_auto_compact_pct` (default 85, 0 to leave Claude
+  Code's default; per wave through `config:`) of the model's context window in tokens;
+  `agent_spawned` records it and the fence pins it. (#289)
+- **volley-desk: a Machines window with load and memory sparklines per machine.** The dock's new
+  Machines tile (badged with the machines that are down) opens one row per machine in the pool,
+  this machine first: the health dot, `load <1-min>/<cores>`, `mem <used %>`, `<n>/<max> agents`,
+  cores and memory, and two sparklines over the last 10 minutes (load per core in teal, memory
+  used in coral) that turn amber at 70 % and red at 90 %. A down machine reads
+  `down · last seen 6m ago` with flat grey lines; a click opens Settings › Machines at its card.
+  The Desk keeps each machine's readings from the records it already receives. (#290)
 
 ### Changed
 
@@ -313,6 +327,45 @@ owner's guide is [`docs/AUTOPILOT.md`](docs/AUTOPILOT.md) (#213). Owner smoke:
   read-only `gh` verbs a reviewer's verification needs (never `gh api`, merges or workflow runs),
   and a remote worktree for a PR head sha is created at that commit instead of an
   `origin/<sha>` ref that does not exist. (#223)
+- **volleyd: a flake fixer for a long test id spawns its reviewers.** An agent id whose task part
+  leaves no room for its role (a fixer's `fix-<test>` under `spec_reviewer` or
+  `quality_reviewer`) now has that task part cut and replaced by a short hash, so every role of
+  every task gets a valid, unique id; ids that already fit are unchanged. A spawn refused because
+  its agent id cannot be formed is no longer retried with backoff forever: it fails once and its
+  decision says the retries stopped, which the autopilot escalates. (#268)
+- **volleyd: one merge_ready invariant breach opens one decision.** When a PR head moved while
+  the reviewers worked, the invariant asked the same `rereview` question three times in one
+  instant: autopilot answered the first two, which spent `rereview_max` and started two review
+  rounds, and escalated the third to the owner. The question for a head is now asked once until
+  its answer is handled, so one `rereview` starts one round and the wave goes on unattended. (#269)
+- **volleyd: a release-only head move accepted while the reviewers still run no longer strands the
+  task in review.** When a PR takes an "Update branch" during `spec_review` and autopilot (or the
+  owner) answers `accept`, the reviews that arrive afterwards for the old head count at the new one:
+  the task's head stays at the moved head, the move is not reported a second time, and the task goes
+  on to the gate there instead of sitting in `spec_review` for good. (#270)
+- **volleyd: a queued PR's head move seen by two checks on one tick is handled once.** When the
+  merge check and the turn's gate check both see a queued PR's head move (an "Update branch"), the
+  gate check no longer raises its own `pr_head_moved` alarm and re-verifies the implementer while
+  the `pr_head_moved` decision is open or its `accept` is still being recorded: the accept keeps the
+  reviews and the PR merges without a re-review, instead of the move voiding both reviews and the
+  task escalating `budget_exhausted`. (#271)
+- **volleyd, volley-desk, volley-cli: a Desk login answers a wave's Needs-you items from any
+  screen.** The Desk sends `inbox_answer` and `resolve` on its own account-op topic, where the
+  broker names the sender, and volleyd treats a Desk login's answer (a `steer` or `admin`
+  account, or the fixed `desk` identity) as the owner's; a mailbox answer still needs the owner.
+  The `desk` role gains its own `volley/_system/auth/ops/%u`: an existing broker reports the role
+  as drifted, and `volley auth migrate --roles --yes` applies it (its holders reconnect); until
+  then the broker drops a Desk answer, and the Desk's "did not answer" names that step to a steer
+  or admin login. (#274)
+- **volley-desk: Settings › Autopilot's policy table fits the pane.** Its columns are fixed widths
+  (rationale gets the most room) and long monospace strings wrap, comma-joined kind lists after
+  their commas, so the rationale column is no longer cut off; a pane narrower than the table
+  scrolls it sideways instead of clipping it, and at phone width each rule is a stacked block. (#278)
+- **volleyd: autopilot merges a task whose agents ran on a paired machine.** The merge (`gh pr
+  merge --squash --match-head-commit`) went through the task's own exec, so for a task placed
+  on a paired machine it ran there, where the fence never holds a MergeToken, and was refused
+  (`FENCE_DENIED: remote gh pr merge`). A merge is the supervisor's act: it now always runs on
+  the supervisor, in the wave's repo.
 
 ### Docs
 

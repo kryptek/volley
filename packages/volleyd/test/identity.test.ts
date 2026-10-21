@@ -1,6 +1,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { slugOf } from "../src/autopilot/remediation";
 import { agentIdFor, mintCredentials, releaseAgentId } from "../src/identity";
 import { retireAgent } from "../src/retire";
 import { spawnAgent } from "../src/spawn";
@@ -24,6 +25,46 @@ describe("agentIdFor", () => {
     expect(a).toMatch(/^[a-z0-9][a-z0-9_-]{0,62}$/);
     expect(a.endsWith("-t1-quality_reviewer-1")).toBe(true);
     expect(a).not.toBe(b);
+  });
+
+  it("forms every role's id for a flake fixer's longest task id (44 characters), each unique", () => {
+    const fixer = slugOf("test/clock.test.ts > sleep > resolves on abort");
+    expect(fixer).toHaveLength(44);
+    const roles = ["implementer", "spec_reviewer", "quality_reviewer", "rebase"];
+    for (const wave of ["soak", "2026-10-21-autopilot-fixes"]) {
+      const ids = roles.map((role) => agentIdFor(wave, fixer, role, 1));
+      for (const [i, id] of ids.entries()) {
+        expect(id).toMatch(/^[a-z0-9][a-z0-9_-]{0,62}$/);
+        expect(id.endsWith(`-${roles[i]}-1`)).toBe(true);
+      }
+      expect(new Set(ids).size).toBe(roles.length);
+      expect(agentIdFor(wave, fixer, "quality_reviewer", 2)).not.toBe(ids[2]);
+    }
+    // Two long task ids sharing a long prefix keep distinct ids.
+    const other = `${fixer.slice(0, -1)}x`;
+    expect(agentIdFor("soak", other, "quality_reviewer", 1)).not.toBe(
+      agentIdFor("soak", fixer, "quality_reviewer", 1),
+    );
+    // An id that fits is unchanged.
+    expect(agentIdFor("soak", fixer, "implementer", 1)).toBe(`soak-${fixer}-implementer-1`);
+  });
+
+  it("an id that cannot be formed is a permanent refusal (never retried)", () => {
+    const err = (() => {
+      try {
+        return agentIdFor("w1", "T1", "implementer!", 1);
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(err).toBeInstanceOf(SpawnError);
+    expect((err as SpawnError).permanent).toBe(true);
+  });
+
+  it("a role tail that leaves no room for any of the task keeps only its hash", () => {
+    const id = agentIdFor("w1", "fix-test-clock-test-ts-sleep", "r".repeat(50), 1);
+    expect(id.length).toBeLessThanOrEqual(63);
+    expect(id).toMatch(/^w1-[0-9a-f]{6}-r{50}-1$/);
   });
 });
 
@@ -62,6 +103,25 @@ describe("spawn identity", () => {
     // Not every case builds an env ("retire calls …" does not): shuffled order runs it first.
     await env?.cleanup();
     env = undefined;
+  });
+
+  it("a flake fixer with a 44-character task id spawns its spec and quality reviewers", async () => {
+    env = await makeSpawnEnv();
+    const fixer = slugOf("test/clock.test.ts > sleep > resolves on abort");
+    const base = env.request().wave;
+    const t1 = base.tasks.T1 as (typeof base.tasks)[string];
+    const wave = {
+      ...base,
+      tasks: { ...base.tasks, [fixer]: { ...t1, id: fixer } },
+      task_order: [...base.task_order, fixer],
+    };
+    for (const role of ["spec_reviewer", "quality_reviewer"] as const) {
+      const out = await spawnAgent(env.request({ wave, task: fixer, role }), env.deps);
+      expect(out).toMatchObject({
+        kind: "launched",
+        agentId: agentIdFor(wave.wave, fixer, role, 1),
+      });
+    }
   });
 
   it("agent.json has id/namespace/parent/role/broker_url and the minted broker block, mode 0600", async () => {

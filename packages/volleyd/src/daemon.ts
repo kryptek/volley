@@ -35,11 +35,13 @@ import {
   AUTH_OPS_FILTER,
   type AuthOutcome,
   type AuthReply,
+  DESK_OPS,
   TOKEN_REDEEM_FILTER,
   accountOp,
   adminRefusal,
   authReply,
   authReplyTopic,
+  deskRefusal,
   isValidCorrelationId,
   listAccounts,
   redeemToken,
@@ -3786,7 +3788,9 @@ export class Daemon {
       (prevAttempt === spawnAttempt || this.burnedAttempts(wave, task, role).includes(prevAttempt))
         ? prev.attempt + 1
         : 1;
-    const stopped = n >= eff.spawn_retry_max;
+    // A refusal that can never succeed as is stops the retries at its first failure.
+    const permanent = e instanceof SpawnError && e.permanent;
+    const stopped = permanent || n >= eff.spawn_retry_max;
     const wait = Math.min(
       DAEMON_DEFAULTS.spawn_retry_base_ms * 2 ** (n - 1),
       secondsMs(eff.spawn_retry_max_s),
@@ -3817,9 +3821,11 @@ export class Daemon {
     if (open !== undefined && (!stopped || open.stopped === true)) return;
     try {
       if (open !== undefined) await this.resolveNow(wave, open.decision_id, SPAWN_RETRIES_STOPPED);
-      const question = stopped
-        ? `Needs you: ${task}'s ${role} could not be spawned after ${n} attempts (${code}: ${message}); volleyd's automatic retries stopped. Fix the cause, then retry now — or stop the task?`
-        : `Needs you: ${task}'s ${role} could not be spawned (${code}: ${message}). volleyd retries on its own (next in ${wait / 1000}s, attempt ${n} of ${eff.spawn_retry_max}). Retry now, or stop the task?`;
+      const question = permanent
+        ? `Needs you: ${task}'s ${role} could not be spawned (${code}: ${message}); a retry can never succeed as is, so volleyd does not retry it. Fix the cause, then retry now — or stop the task?`
+        : stopped
+          ? `Needs you: ${task}'s ${role} could not be spawned after ${n} attempts (${code}: ${message}); volleyd's automatic retries stopped. Fix the cause, then retry now — or stop the task?`
+          : `Needs you: ${task}'s ${role} could not be spawned (${code}: ${message}). volleyd retries on its own (next in ${wait / 1000}s, attempt ${n} of ${eff.spawn_retry_max}). Retry now, or stop the task?`;
       const base = spawnFailedDecisionId(wave, task, role);
       let id = base;
       for (let k = 2; rec.decisions[id] !== undefined; k++) id = `${base}-${k}`;
@@ -7711,10 +7717,13 @@ export class Daemon {
       const decision = item.source.decision_id;
       if (wave === undefined || typeof decision !== "string" || !this.waves.has(wave))
         return { refused: `inbox item '${id}' names no open decision` };
-      // The owner check `resolve` applies: the inbox is no way around it.
+      // The owner check `resolve` applies: the inbox is no way around it. A Desk login is the
+      // owner on another screen: the broker named it on its own account-op topic.
       const state = this.waves.get(wave)?.record.state;
       const refused =
-        state != null ? guardMutation(state, req.by, "inbox_answer", this.bindings) : null;
+        state != null && req.desk_login !== true
+          ? guardMutation(state, req.by, "inbox_answer", this.bindings)
+          : null;
       if (refused !== null) return { refused };
       const r = await this.answerDecision(wave, decision, req);
       if ("refused" in r) return r;
@@ -7728,13 +7737,17 @@ export class Daemon {
         };
       }
     } else {
-      const refused = this.guardSessionAnswer(item, req.by);
-      if (refused !== null) return { refused };
-      // Keys in a wave agent's session steer it: the owner check `steer` applies.
-      const state = item.wave !== undefined ? this.waves.get(item.wave)?.record.state : undefined;
-      const notOwner =
-        state != null ? guardMutation(state, req.by, "inbox_answer", this.bindings) : null;
-      if (notOwner !== null) return { refused: notOwner };
+      // Keys in a wave agent's session steer it: the owner check `steer` applies. A Desk login
+      // is the owner on another screen (the broker named it on its own account-op topic): the
+      // screen-carry rules still apply to it, the ownership checks do not.
+      if (req.desk_login !== true) {
+        const refused = this.guardSessionAnswer(item, req.by);
+        if (refused !== null) return { refused };
+        const state = item.wave !== undefined ? this.waves.get(item.wave)?.record.state : undefined;
+        const notOwner =
+          state != null ? guardMutation(state, req.by, "inbox_answer", this.bindings) : null;
+        if (notOwner !== null) return { refused: notOwner };
+      }
       const handler = this.inboxHandlers.get(item.kind);
       if (handler === undefined) this.log(`inbox ${id}: no handler for ${item.kind} answers`);
       else {
@@ -8015,8 +8028,16 @@ export class Daemon {
     return { ok: true, result: { items, now: dateOf(this.time).toISOString() } };
   }
 
-  /** `inbox_answer { id, version, answer, where }`: any login that may steer. */
-  private async inboxAnswerOp(p: Record<string, unknown>, by: string): Promise<HandlerResult> {
+  /**
+   * `inbox_answer { id, version, answer, where }`: on the mailbox, the owner (or its bound
+   * session); on a Desk login's own account-op topic, that login (`opts.desk_login`, never read
+   * from the payload).
+   */
+  private async inboxAnswerOp(
+    p: Record<string, unknown>,
+    by: string,
+    opts: { desk_login?: true } = {},
+  ): Promise<HandlerResult> {
     if (typeof p.id !== "string" || p.id === "")
       return { ok: false, error: "inbox_answer requires payload.id" };
     if (typeof p.version !== "number" || !Number.isInteger(p.version))
@@ -8034,6 +8055,7 @@ export class Daemon {
       answer: p.answer,
       by,
       where,
+      ...(opts.desk_login === true ? { desk_login: true as const } : {}),
     });
     return "refused" in r ? { ok: false, error: r.refused } : { ok: true, result: r.item };
   }
@@ -8160,8 +8182,9 @@ export class Daemon {
    * An account op (`volley/_system/auth/ops/<username>`, answered on
    * `volley/_system/auth/replies/<correlation_id>`) or a token redemption
    * (`volley-auth/redeem/<id>`, answered on `volley-auth/redeem/<id>/reply`, the one topic that
-   * token's login may read). The broker ACL lets only an admin account write its own ops topic,
-   * so the topic names the sender; accounts.ts checks that account's role again.
+   * token's login may read). The broker ACL lets only an admin account or a Desk login write its
+   * own ops topic, so the topic names the sender; accounts.ts checks that account's role again,
+   * per op.
    */
   private async onAuthRequest(topic: string, raw: string): Promise<void> {
     if (raw === "") return; // our own clear (below), or anyone's
@@ -8229,15 +8252,17 @@ export class Daemon {
             .filter((t): t is string => t !== undefined)
             .sort()
             .pop();
-        out = PEER_ADMIN_OPS.has(payload.op as string)
-          ? await this.peerAdminOp(exec, sender, payload)
-          : await accountOp(
-              exec,
-              sender,
-              payload,
-              lastSeen,
-              new Date(this.startedAt).toISOString(),
-            );
+        out = DESK_OPS.has(payload.op as string)
+          ? await this.deskOp(exec, sender, payload)
+          : PEER_ADMIN_OPS.has(payload.op as string)
+            ? await this.peerAdminOp(exec, sender, payload)
+            : await accountOp(
+                exec,
+                sender,
+                payload,
+                lastSeen,
+                new Date(this.startedAt).toISOString(),
+              );
       }
     } catch (e) {
       out = failed(e);
@@ -8310,6 +8335,30 @@ export class Daemon {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * A Desk login's Needs-you answer (`inbox_answer`, `resolve`; SPEC §4.6.18) from `sender`, the
+   * username the account-op topic names: refused unless it is a Desk login, then answered as the
+   * owner's, `by` the sender, with no ownership check.
+   */
+  private async deskOp(
+    exec: ExecFn,
+    sender: string,
+    p: Record<string, unknown>,
+  ): Promise<AuthOutcome> {
+    const op = p.op as string;
+    // The fixed `desk` identity has no account entry: no lookup, so a failing tool cannot refuse it.
+    if (sender !== "desk") {
+      const accounts = await listAccounts(exec);
+      const why = typeof accounts === "string" ? accounts : deskRefusal(accounts, sender);
+      if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
+    }
+    const r =
+      op === "inbox_answer"
+        ? await this.inboxAnswerOp(p, sender, { desk_login: true })
+        : await this.resolveOp(p, sender, { desk_login: true });
+    return { reply: authReply(op, r) };
   }
 
   /**
@@ -8850,8 +8899,15 @@ export class Daemon {
     };
   }
 
-  /** `resolve`: owner-only; finds the decision's wave when none is given. */
-  private async resolveOp(p: Record<string, unknown>, by: string): Promise<HandlerResult> {
+  /**
+   * `resolve`: owner-only (a Desk login on its own account-op topic is the owner: `desk_login`,
+   * never read from the payload); finds the decision's wave when none is given.
+   */
+  private async resolveOp(
+    p: Record<string, unknown>,
+    by: string,
+    opts: { desk_login?: true } = {},
+  ): Promise<HandlerResult> {
     const id = p.decision_id;
     if (typeof id !== "string") return { ok: false, error: "resolve requires payload.decision_id" };
     if (typeof p.answer !== "string" || p.answer.trim() === "")
@@ -8866,7 +8922,8 @@ export class Daemon {
         ok: false,
         error: `unknown decision '${id}'${wave !== undefined ? ` in wave '${wave}'` : ""}`,
       };
-    const refused = guardMutation(state, by, "resolve", this.bindings);
+    const refused =
+      opts.desk_login === true ? null : guardMutation(state, by, "resolve", this.bindings);
     if (refused !== null) return { ok: false, error: refused };
     let where: InboxWhere = { kind: "cli" };
     if (p.where !== undefined) {

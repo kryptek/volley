@@ -5,6 +5,8 @@
  * (SPEC §3.3).
  */
 
+import type { MachineSample } from "./machineHistory";
+
 /** SPEC §3 envelope. */
 export interface Envelope {
   schema_version: string;
@@ -313,6 +315,8 @@ export interface Tunables {
   screen_tail_interval_s?: number;
   /** Claude account profiles (SPEC §4.6.11); absent from a supervisor that predates them. */
   claude?: { default_account?: string | null; warn_at_pct?: number };
+  /** The share of an agent's context window at which it compacts (SPEC §4.6.4). */
+  agent_auto_compact_pct?: number;
   /** Remote hosts (SPEC §4.6.4); the Desk reads their names and caps. */
   hosts?: Record<string, { max_agents?: number; drain?: boolean; [key: string]: unknown }>;
   /** Autopilot (SPEC §4.6.16–17); absent from a supervisor that predates it. */
@@ -741,6 +745,11 @@ export interface DeskState {
   machines?: Record<string, MachinePayload>;
   /** volleyd's readiness verdicts, by machine name. */
   readiness?: Record<string, ReadinessPayload>;
+  /**
+   * Each machine's readings over the last 10 minutes (the Machines window's sparklines), by
+   * machine name, oldest first; kept across a resync (the replay's copy is deduplicated).
+   */
+  machineHistory?: Record<string, MachineSample[]>;
   /** The needs-you inbox (SPEC §4.6.18): volleyd's retained items, by item id. */
   inbox?: Record<string, InboxItem>;
   /** Each wave's retained morning digest (SPEC §4.6.16), by wave. */

@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "steer-1a2b3c4d",
+  "wall_time": "2026-10-21T12:05:00.000Z",
+  "channel": "_system/auth",
+  "type": "query",
+  "correlation_id": "8a1d4c2e-5b6f-4e71-9a0c-3d2e1f4b5a6c",
+  "payload": {
+    "op": "inbox_answer",
+    "id": "d-w1-d-abc",
+    "answer": "fine",
+    "where": {
+      "kind": "desk",
+      "device": "phone"
+    }
+  }
+}

@@ -5,6 +5,7 @@ import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { type InboxItem, inboxTopic, pickerItemId } from "../src/autopilot/inbox";
 import { ControlClient } from "../src/control";
 import { NS } from "./helpers/daemon-env";
+import { deskAccounts, deskAnswer } from "./helpers/desk-answer";
 import { schemaErrors } from "./helpers/schema";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
 
@@ -341,6 +342,25 @@ describe("needs-you inbox: Claude pickers (SPEC §4.6.18)", () => {
     await s.until(() => s.daemon.bindingOf("boss") === "boss-session");
     const bound = await as("boss-session");
     expect(bound?.error).toBeUndefined();
+  });
+
+  it("a Desk login on its own account-op topic answers a wave agent's picker as the owner", async () => {
+    s = await makeSupervisedEnv({ owner: "boss", daemon: { authExec: deskAccounts().exec } });
+    const item = await opened("toolu_01Fruit", [FRUIT]);
+    s.host.screens = [screen("picker-single")];
+    client ??= await ControlClient.connect(s.env.broker.url, NS);
+    const fields = { id: item.id, version: 1, answer: "Banana", where: phone };
+    const mailbox = await client.request("inbox_answer", { ...fields, by: "a-teammate" });
+    expect(mailbox.error).toContain("is owned by boss");
+    expect(s.host.keys).toEqual([]);
+    const r = await deskAnswer(s.env.broker.url, "steer-1", fields);
+    expect(r.error).toBeUndefined();
+    expect(s.host.keys.length).toBeGreaterThan(0);
+    expect(s.daemon.inboxItem(item.id)?.answered).toMatchObject({
+      answer: "Banana",
+      by: "steer-1",
+      where: phone,
+    });
   });
 
   it("the wave's owner by name answers its agent's picker", async () => {
