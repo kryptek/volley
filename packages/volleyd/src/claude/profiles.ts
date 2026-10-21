@@ -114,7 +114,10 @@ function writeRegistry(root: string, reg: ClaudeRegistry): void {
   renameSync(tmp, path);
 }
 
-/** Create the profile directory and its registry entry. Sign-in is a separate step. */
+/**
+ * Create the profile directory (on this machine; a paired machine's is made there by its
+ * sign-in) and its registry entry. Sign-in is a separate step.
+ */
 export function addAccount(
   root: string,
   input: { label: string; machine?: string },
@@ -130,9 +133,12 @@ export function addAccount(
   if (reg.accounts.some((a) => a.id === id))
     throw new ClaudeAccountError(`Claude account '${id}' already exists`);
   const dir = profileDir(root, id);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  chmodSync(dir, 0o700);
-  const acct: ClaudeAccount = { id, label, machine: input.machine ?? LOCAL_MACHINE, created: now };
+  const machine = input.machine ?? LOCAL_MACHINE;
+  if (machine === LOCAL_MACHINE) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+  }
+  const acct: ClaudeAccount = { id, label, machine, created: now };
   writeRegistry(root, { version: 1, accounts: [...reg.accounts, acct] });
   return acct;
 }

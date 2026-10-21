@@ -427,6 +427,8 @@ export interface SigninBoxOptions {
   home?: string;
   /** Runs while a `claude auth status` is in flight, before it answers. */
   onAuthStatus?: (box: { session: boolean }) => void;
+  /** Files already on the box, by absolute path (a profile's `.claude.json`). */
+  files?: Record<string, string>;
 }
 
 /**
@@ -437,11 +439,18 @@ export interface SigninBoxOptions {
 export function fakeSigninBox(o: SigninBoxOptions = {}) {
   const fx = fakeExec();
   const home = o.home ?? "/home/dev";
-  const box = { files: new Map<string, string>(), session: false, starts: 0, polls: 0 };
+  const box = {
+    files: new Map<string, string>(Object.entries(o.files ?? {})),
+    session: false,
+    starts: 0,
+    polls: 0,
+  };
   const scripts: string[][][] = [];
+  const all: RemoteStep[] = [];
   fx.on(["ssh", "-T"], (_argv, opts) => {
     const steps = opts.remote?.steps ?? [];
     scripts.push(steps.map((s) => s.argv));
+    all.push(...steps);
     let out = "";
     for (const s of steps) {
       const [p, ...a] = s.argv;
@@ -465,7 +474,8 @@ export function fakeSigninBox(o: SigninBoxOptions = {}) {
         if (!box.session) return { code: 1 };
         out += SIGNIN_TRANSCRIPT;
       } else if (p === "cat") {
-        const f = box.files.get(a[0] as string);
+        const path = a[0] as string;
+        const f = box.files.get(s.cwd !== undefined ? `${s.cwd}/${path}` : path);
         if (f === undefined) return { code: 1 };
         out += f;
       } else if (p === "claude") {
@@ -499,5 +509,7 @@ export function fakeSigninBox(o: SigninBoxOptions = {}) {
   const steps = () => scripts.flat();
   const ran = (...prefix: string[]) =>
     steps().filter((argv) => prefix.every((p, i) => argv[i] === p));
-  return { exec, fake: fx, box, forwards, steps, ran };
+  /** Every remote step whole (env, cwd), in order. */
+  const remoteSteps = () => [...all];
+  return { exec, fake: fx, box, forwards, steps, ran, remoteSteps };
 }
