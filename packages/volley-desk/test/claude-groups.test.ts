@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accountChoices, accountGroups, accountList, useForAccount } from "../src/store/claude";
+import { accountChoices, accountGroups, accountList, moveTargetOf } from "../src/store/claude";
 import type { ClaudeAccountPayload, MachinePayload } from "../src/store/types";
 
 const EMAIL = "owner@example.com";
@@ -155,16 +155,45 @@ describe("accountGroups", () => {
     expect(out[0]?.members.map((m) => m.machine)).toEqual(["local"]);
   });
 
-  it("the label falls back to the e-mail's local part when no member has a profile label", () => {
+  it("the label falls back to the masked e-mail when no member has a profile label", () => {
     const [g] = groups({ "primary@peer-a": peer });
-    expect(g?.label).toBe("owner");
+    expect(g?.label).toBe("O•••@Example.com");
+  });
+
+  it("a member with no reading between two sampled ones never counts as the freshest", () => {
+    const a = { ...work, account: "a", label: "A", sampled_at: "2026-10-18T10:00:00.000Z" };
+    const b = {
+      ...work,
+      account: "b",
+      label: "B",
+      five_hour: { pct: 50, resets_at: work.five_hour?.resets_at ?? null },
+      sampled_at: "2026-10-18T11:00:00.000Z",
+    };
+    // A registry profile with no usage record yet, listed between the two sampled logins.
+    const [ra, rb, rn] = accountList({ a, b }, [
+      { id: "n", label: "N", machine: "local", email: EMAIL },
+    ]);
+    const [g] = accountGroups(
+      [ra, rn, rb].filter((x) => x !== undefined),
+      machines,
+      "hub",
+    );
+    expect(g?.fiveHour?.pct).toBe(50);
+    expect(g?.freshest).toEqual({ machine: "local", sampledAt: b.sampled_at });
+    expect(g?.label).toBe("B");
+  });
+
+  it("the e-mail keeps its reported spelling; the key is normalised", () => {
+    const [g] = groups({ work: { ...work, email: " Owner@Example.com " } });
+    expect(g?.key).toBe(EMAIL);
+    expect(g?.email).toBe("Owner@Example.com");
   });
 
   it("Use for is the group's local member; a remote-only group has none", () => {
     const [g] = groups({ work, "primary@peer-a": peer });
-    expect(g && useForAccount(g)).toBe("work");
+    expect(g && moveTargetOf(g)).toBe("work");
     const [r] = groups({ "primary@peer-a": peer });
-    expect(r && useForAccount(r)).toBeNull();
+    expect(r && moveTargetOf(r)).toBeNull();
   });
 
   it("pickers keep listing every account id once", () => {

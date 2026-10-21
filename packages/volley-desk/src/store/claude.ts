@@ -7,7 +7,7 @@
  * reported usage) and, when the Desk can ask, the registry (`claude_accounts`
  * control op: profiles that have not reported yet, with their machine).
  */
-import { normalizeEmail } from "../lib/email";
+import { maskEmail, normalizeEmail } from "../lib/email";
 import type {
   ClaudeAccountPayload,
   DecisionPayload,
@@ -158,6 +158,7 @@ export interface StaleReading {
 export interface AccountGroup {
   /** The normalised e-mail, else the lone account's id (its e-mail is not reported yet). */
   key: string;
+  /** The address as first reported (the key is its normalised form). */
   email: string | null;
   org: string | null;
   label: string;
@@ -174,8 +175,13 @@ export interface AccountGroup {
 /** Two readings of one window agree within a point when their resets agree too. */
 const STALE_PCT = 1;
 
-const newestFirst = (a: AccountInfo, b: AccountInfo) =>
-  Date.parse(b.sampledAt ?? "") - Date.parse(a.sampledAt ?? "") || 0;
+/** A record's sample time; one with no (or an unreadable) sample sorts as the oldest. */
+const sampledAt = (a: AccountInfo) => {
+  const t = Date.parse(a.sampledAt ?? "");
+  return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t;
+};
+
+const newestFirst = (a: AccountInfo, b: AccountInfo) => sampledAt(b) - sampledAt(a) || 0;
 
 /**
  * Per window, the member whose record was sampled last among those carrying it (volleyd's
@@ -254,7 +260,7 @@ export function accountGroups(
   }
 
   return [...byKey].map(([key, list]) => {
-    const email = list.some((a) => a.email) ? key : null;
+    const email = list.find((a) => a.email)?.email?.trim() ?? null;
     const newest = [...list].sort(newestFirst);
     const five = pickWindow(list, "five_hour");
     const week = pickWindow(list, "weekly");
@@ -285,7 +291,7 @@ export function accountGroups(
       label:
         profile?.label ??
         localPrimary?.label ??
-        (email ? email.slice(0, email.indexOf("@")) || email : (newest[0]?.label ?? key)),
+        (email ? maskEmail(email) : (newest[0]?.label ?? key)),
       plan: newest.find((a) => a.plan)?.plan ?? null,
       fiveHour: five.w,
       weekly: week.w,
@@ -299,7 +305,7 @@ export function accountGroups(
 }
 
 /** The account a group's Use-for answers with: its login on volleyd's own machine, if any. */
-export function useForAccount(g: AccountGroup): string | null {
+export function moveTargetOf(g: AccountGroup): string | null {
   return (
     g.members.find((m) => m.machine === LOCAL_MACHINE && !m.account.includes("@"))?.account ?? null
   );

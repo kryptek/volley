@@ -35,11 +35,11 @@ import {
   accountList,
   fiveHourLabel,
   moveAnswer,
+  moveTargetOf,
   notNowAnswer,
   openLimitDecisions,
   resetsIn,
   resolveFields,
-  useForAccount,
 } from "../store/claude";
 import type {
   ClaudeAccountPayload,
@@ -625,7 +625,7 @@ export function ClaudeAccounts({
       )}
       <div className="claude-cards">
         {groups.map((g) => {
-          const to = useForAccount(g);
+          const to = moveTargetOf(g);
           return (
             <AccountCard
               key={g.key}
