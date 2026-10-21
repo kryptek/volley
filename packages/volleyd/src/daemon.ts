@@ -5524,7 +5524,8 @@ export class Daemon {
         if (t === undefined || t.host === "local")
           return lockFetches(this.host.exec, LOCAL_HOST, expandHome(w.repo));
         const remote = this.remoteHost(wave, t);
-        return lockFetches(remote.exec, remote.name, remote.spec.repo);
+        // Keyed like spawn's fetches into the same clone (spawn.ts: `expandHome(req.wave.repo)`).
+        return lockFetches(remote.exec, remote.name, expandHome(remote.spec.repo));
       },
       home: this.opts.home,
       record: () => log.record,
@@ -5794,7 +5795,12 @@ export class Daemon {
     if (d !== undefined) return d;
     const log = this.waves.get(wave) as WaveLog;
     d = new ReleaseTrain(wave, {
-      exec: this.host.exec,
+      // A stage is verified in a worktree of the wave's clone: its fetch takes the clone's lock.
+      exec: (argv, opts) => {
+        const repo = log.record.wave?.repo;
+        if (repo == null) return this.host.exec(argv, opts);
+        return lockFetches(this.host.exec, LOCAL_HOST, expandHome(repo))(argv, opts);
+      },
       home: this.opts.home,
       view: () => {
         const st = log.record.state;

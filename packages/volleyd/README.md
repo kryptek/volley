@@ -1386,9 +1386,10 @@ volleyd runs `git -C <repo> fetch origin <release_branch>`, then picks the base:
 
 `git fetch` is bounded (30 s) and never prompts for credentials; a timeout counts as a failed
 fetch. Fetches into one clone run one at a time: every fetch volleyd runs (a spawn's, on either
-host, a continued branch's check, the pipeline's artifact probes) holds a lock keyed by the
-machine (`local`, or the host's name) and the clone's path, so tasks admitted on the same tick do
-not race each other's ref updates. A fetch that loses a ref-lock race to another git process
+host, a continued branch's check, the pipeline's artifact probes, the release train's stage
+check) holds a lock keyed by the machine (`local`, or the host's name) and the clone's path, so
+tasks admitted on the same tick do not race each other's ref updates. A fetch's timeout starts
+once it holds the lock, so a fetch queued behind others can wait longer than one timeout. A fetch that loses a ref-lock race to another git process
 (`incorrect old value provided`, `cannot lock ref`, `Unable to create '….lock'`) is retried once
 after 500 ms before anything is decided; when the retry succeeds the spawn goes on and the wave
 journals `alarm_raised { alarm: "fetch_retried", role, attempt, host, fetch_error }`. A fetch that
