@@ -16,6 +16,7 @@ If you can write a bash one-liner, you can be a Volley agent. The subcommands co
 - [The subcommands](#the-subcommands)
 - [`volley setup`](#volley-setup)
 - [`volley desk serve`](#volley-desk-serve)
+- [`volley deploy`](#volley-deploy)
 - [`volley dash`](#volley-dash)
 - [`volley notify`](#volley-notify)
 - [`volley auth`](#volley-auth)
@@ -66,6 +67,7 @@ volley --help
 | `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (doctor, account, tunnel service, trust check, host entry), `doctor` (check this machine, `--fix` the safe things), `run` (the service). See [`volley peer`](#volley-peer) below and the volleyd README's "Paired machines". |
 | `volley setup`  | First-run / repair wizard: broker, accounts, services, phone sign-in QR. See [`volley setup`](#volley-setup) below. |
 | `volley desk serve` | Serve the built Desk from a small static server (the service `volley setup` installs). See [`volley desk serve`](#volley-desk-serve) below. |
+| `volley deploy` | Take this machine's volleyd and Desk services to a release tag: build the Desk, restart, health-check, roll back on failure. See [`volley deploy`](#volley-deploy) below. |
 
 Each has its own `--help`:
 
@@ -115,6 +117,73 @@ volley desk serve --port 8080 --root /path/to/dist
 ```
 
 A small static server for the built Desk (`bun run --cwd packages/volley-desk build`): hashed assets are cached for good, the index never, every unknown path gets the index, and nothing outside the build directory is served. It holds no credentials: the page signs in to the broker itself (port 9001 on the host the page came from).
+
+At start it warns on stderr, and still serves, when the build looks stale. Each line is printed only when it holds:
+
+```text
+warning: the Desk build is stale (built from <stamp or "unknown">, the checkout is <stamp>); run volley deploy or volley setup --repair
+warning: the Desk bundle is <v>, this volley is <v>
+```
+
+The first compares `dist/.volley-build` (the stamp `volley setup` and `volley deploy` write after a build: a hash of the Desk's sources and `bun.lock`) with the checkout's current sources; the second compares the bundle's `dist/version.json` (written by the Desk's Vite build) with this CLI's version. `--quiet` (`-q`) prints neither.
+
+---
+
+## `volley deploy`
+
+```sh
+volley deploy v0.5.0              # from any directory, on the supervisor's machine
+volley deploy --latest            # the newest v* tag by version order (0.5.0 without the v works too)
+volley deploy v0.5.0 --dry-run    # print every step and command; change nothing
+```
+
+One command for the update the supervisor's machine needs after a release is tagged. It works on the **services checkout**: the checkout volleyd's installed service runs (`ProgramArguments` in `~/Library/LaunchAgents/systems.volley.volleyd.plist` on macOS, `ExecStart` in `~/.config/systemd/user/volleyd.service` on Linux). With no service installed it uses the checkout this `volley` runs from and says so; `--repo <dir>` names another checkout explicitly. Then, one summary line per step:
+
+1. **Local changes refuse the deploy** (exit 3), listing `git status --porcelain`. `--force-clean` stashes them first (`git stash push -u -m volley-deploy-<time>`) and prints the stash name; the deploy never runs `checkout -- .`, `reset` or `clean`.
+2. `git fetch --tags origin`, then the tag is resolved (`--latest`: the newest `v*` tag, a prerelease below its release). Tag names are checked against `^v?\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$` before any git call.
+3. `git checkout --detach <tag>`, `bun install --frozen-lockfile`, and the Desk build (`bun run build` in `packages/volley-desk`, without any `VITE_VOLLEY_BROKER_*` in its environment), after which it writes `dist/.volley-build` exactly as `volley setup` does.
+4. **Self-check**: `volley --version` from the checkout is the tag's version, `volleyd validate` passes on its example wave file, and `dist/index.html` and `dist/version.json` (with the tag's version) exist.
+5. **Restart** both services (`launchctl kickstart -k gui/<uid>/systems.volley.volleyd` and `…/systems.volley.desk`, or `systemctl --user restart volleyd.service volley-desk.service` one at a time). volleyd gets no control op: running waves continue, since volleyd reconciles its journal on start.
+6. **Health check** (up to 30 s, every second): volleyd's retained status on the broker is `working` and was published after the restart (the new process got through its start, past `spawning` and `registered`), and the Desk answers `GET /` with 200 and `GET /version.json` with the tag's version, on the port setup recorded (`--desk-port` overrides; default 5199).
+
+It ends with `deployed v0.5.0 (was v0.4.0); waves continue (volleyd reconciles on start)`.
+
+**Rollback.** Any failure after the checkout repeats the checkout, install, build, restarts and health check at the previous ref (HEAD's branch, so a checkout on `main` stays on `main`; on a detached HEAD the release tag it was exactly at, else its commit); a rollback never stashes or fetches. The deploy reports what failed and `rolled back to v0.4.0`, and exits 1. When the rollback fails too, the checkout is left as it is and the exact commands to run by hand are printed. A failure before the checkout (the fetch, an unknown tag, the checkout itself) changes nothing.
+
+Every command goes through one fence of exact argv shapes on the services checkout (the git commands above, the bun install and build, the self-check, the two restarts); anything else (`git push`, `git reset --hard`, a tag starting with `-`) is refused before it runs. macOS and Linux only: elsewhere it exits 2, `no service manager known here`. The broker connection for the health check is resolved as for `volley list` (`--broker-url`, `--namespace`, `--username`/`--password`, or the coordinator login setup saved).
+
+```text
+$ volley deploy v0.5.0 --dry-run
+services checkout: <repo> (from ~/Library/LaunchAgents/systems.volley.volleyd.plist)
+current: v0.4.0
+target: v0.5.0
+dry run: would run, in order:
+  1. fetch tags
+       $ git -C <repo> fetch --tags origin
+  2. checkout v0.5.0 (detached)
+       $ git -C <repo> checkout --detach v0.5.0
+  3. bun install --frozen-lockfile
+       $ cd <repo> && <bun> install --frozen-lockfile
+  4. build the Desk
+       $ cd <repo>/packages/volley-desk && <bun> run build
+       (then record the checkout's Desk stamp in dist/.volley-build)
+  5. self-check
+       $ <bun> <repo>/packages/volley-cli/src/cli.ts --version
+       $ <bun> <repo>/packages/volleyd/src/cli.ts validate <repo>/packages/volleyd/test/fixtures/example.yaml
+       (volley --version is the release's; dist/index.html and dist/version.json carry it)
+  6. restart systems.volley.volleyd
+       $ launchctl kickstart -k gui/<uid>/systems.volley.volleyd
+  7. restart systems.volley.desk
+       $ launchctl kickstart -k gui/<uid>/systems.volley.desk
+  8. health-check
+       (volleyd's retained status is fresh; http://127.0.0.1:5199/ and /version.json answer)
+On a failure after the checkout it repeats the checkout, install, build, restarts and health-check at v0.4.0.
+dry run: nothing changed
+```
+
+A dry run runs only `git status --porcelain`, the current-ref lookup (`git describe --tags --exact-match HEAD`, then `git rev-parse`) and `git tag --list 'v*'`; it never fetches, so a tag not fetched yet is shown as such.
+
+Exit codes: `0` deployed, `1` failed (rolled back, or the by-hand commands printed), `2` usage (including no service manager, or `--repo` without a `bun.lock`), `3` local changes in the services checkout.
 
 ---
 
@@ -513,6 +582,7 @@ Standardized across subcommands so shell scripts can branch cleanly:
 | `0` | success — operation completed |
 | `1` | broker error or unexpected runtime failure |
 | `2` | invalid usage (bad flags, missing required args) |
+| `3` | `deploy`: the services checkout has local changes (no `--force-clean`) |
 | `124` | `wait`/`sub` timeout elapsed before the desired condition |
 
 `124` matches GNU `timeout(1)`'s exit-code convention so `wait` composes naturally with shell tools that already know about it.

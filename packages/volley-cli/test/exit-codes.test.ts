@@ -6,6 +6,7 @@ describe("EXIT constants", () => {
     expect(EXIT.OK).toBe(0);
     expect(EXIT.ERROR).toBe(1);
     expect(EXIT.USAGE).toBe(2);
+    expect(EXIT.DIRTY).toBe(3);
     expect(EXIT.TIMEOUT).toBe(124);
   });
 });

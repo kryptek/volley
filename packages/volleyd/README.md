@@ -2976,7 +2976,7 @@ merging](#autopilot-merging)); under `merge: manual` it stops at merge-ready and
 ```sh
 volleyd install               # writes the plist and (re)loads it; safe to rerun
 volleyd install --dry-run     # print the plist instead
-launchctl kickstart -k gui/$UID/systems.volley.volleyd   # restart
+launchctl kickstart -k gui/$UID/systems.volley.volleyd   # restart, or `volley deploy <tag>` to move the services to a release
 volleyd uninstall             # unload + remove the plist
 ```
 

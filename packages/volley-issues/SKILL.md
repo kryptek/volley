@@ -534,6 +534,7 @@ When the user says to deploy after merging:
    - Minor bump for features; patch bump for bug-fix-only releases.
    - Update `APP_VERSION` in `frontend-admin/src/changelog.js` to match; add changelog entries; commit + push.
    - `git tag v<X.Y.Z> -m "Release v<X.Y.Z> — <summary>" && git push origin v<X.Y.Z>`.
+7. **Only when the repo is Volley itself** (kryptek/volley), deploy to the supervisor's machine: `volley deploy v<X.Y.Z>`; it rebuilds the Desk, restarts both services (volleyd and the Desk) and rolls back on failure. Run `volley deploy v<X.Y.Z> --dry-run` first to see the steps; a checkout with local changes is refused until they are committed or `--force-clean` stashes them.
 
 ### Rollback
 
