@@ -13,7 +13,9 @@ export interface LoginIdentity {
 }
 
 // Kept byte-identical with volley-cli's copy (src/peer/checks/claude.ts), which cannot import it.
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// The schemas' `format: email` (ajv-formats' full mode), so no address kept here fails them.
+const EMAIL =
+  /^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
 
 /** `{ email?, org? }` from a parsed `.claude.json`; a field that is not well-formed is left out. */
 export function loginIdentity(json: Record<string, unknown> | null): LoginIdentity {

@@ -20,7 +20,9 @@ export interface LoginIdentity {
  * and `oauthAccount.organizationName`, nothing else of the file. Identity, never a credential.
  */
 // Kept byte-identical with volleyd's copy (src/claude/identity.ts): volley-cli cannot import it.
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// The schemas' `format: email` (ajv-formats' full mode), so no address kept here fails them.
+const EMAIL =
+  /^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
 
 /** `{ email?, org? }` from a parsed `.claude.json`; a field that is not well-formed is left out. */
 export function loginIdentity(json: Record<string, unknown> | null): LoginIdentity {

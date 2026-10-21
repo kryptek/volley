@@ -1,8 +1,16 @@
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loginIdentity, readLoginIdentity } from "../../src/claude/identity";
+import { validator } from "../../src/schemas";
 import { tempDir } from "../helpers/tmp";
+
+const example = (f: string) =>
+  JSON.parse(
+    readFileSync(new URL(`../../../../spec/examples/valid/${f}`, import.meta.url), "utf-8"),
+  );
+const MACHINE = example("machine-peer-doctor.json");
+const ACCOUNT = example("claudeaccount-work.json");
 
 /** A profile's `.claude.json` as Claude Code writes it: identity beside much that is not. */
 const CLAUDE_JSON = {
@@ -42,6 +50,40 @@ describe("loginIdentity: the login's e-mail and org, nothing else", () => {
     expect(loginIdentity({ oauthAccount: { organizationName: "o".repeat(128) } })).toEqual({
       org: "o".repeat(128),
     });
+  });
+
+  it("drops an address the schemas' format: email rejects", () => {
+    for (const emailAddress of ["ü@x.co", "a..b@x.co", "a(b@x.co", "a@-x.co", "a@x_y.co"])
+      expect(loginIdentity({ oauthAccount: { emailAddress } })).toEqual({});
+  });
+
+  it("every address it keeps validates against machine.schema.json and claude-account.schema.json", () => {
+    const machine = validator("machine.schema.json");
+    const account = validator("claude-account.schema.json");
+    const tries = [
+      "owner@example.com",
+      "First.Last+tag@sub.example.co.uk",
+      "o'neil@x-y.io",
+      "ü@x.co",
+      "a..b@x.co",
+      "a(b@x.co",
+      "a@-x.co",
+      "a@x_y.co",
+      "a@b.c",
+    ];
+    let kept = 0;
+    for (const emailAddress of tries) {
+      const { email } = loginIdentity({ oauthAccount: { emailAddress } });
+      if (email === undefined) continue;
+      kept++;
+      const rec = structuredClone(MACHINE);
+      rec.payload.auth.claude_email = email;
+      const usage = structuredClone(ACCOUNT);
+      usage.payload.email = email;
+      expect(machine(rec), `${email}: ${JSON.stringify(machine.errors)}`).toBe(true);
+      expect(account(usage), `${email}: ${JSON.stringify(account.errors)}`).toBe(true);
+    }
+    expect(kept).toBeGreaterThanOrEqual(3);
   });
 
   it("lower-cases the e-mail", () => {
