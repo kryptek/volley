@@ -678,6 +678,12 @@ function spawnFailedWhy(f: SpawnFailure, now: number): string {
 /** A `spawn_failed` decision's answers: retry at once (no backoff), or cancel the task. */
 const SPAWN_FAILED_OPTIONS = ["retry now", "stop task"];
 const SPAWN_STOP_ANSWER = "stop task";
+/** The task a `spawn_failed` decision is about (a release stage's is wave-level: `_release`). */
+function spawnFailedTask(d: DecisionRecord): TaskId | null {
+  const on = (d as { pipeline?: { on?: unknown; task?: unknown } }).pipeline;
+  return d.task ?? (on?.on === "spawn_failed" && on.task === RELEASE_TASK ? RELEASE_TASK : null);
+}
+
 /**
  * The id of a role's `spawn_failed` decision: hashed over its wave, task and role, so two waves
  * with the same task never share one (a `-<n>` suffix keeps a wave's later ones apart).
@@ -3612,7 +3618,7 @@ export class Daemon {
     }
   }
 
-  /** The open `spawn_failed` decision on a task, if any. */
+  /** The open `spawn_failed` decision on a task (`_release`'s is wave-level), if any. */
   private openSpawnFailedDecision(
     wave: WaveId,
     task: TaskId,
@@ -3620,7 +3626,7 @@ export class Daemon {
     const rec = this.waves.get(wave)?.record;
     return (rec?.state?.open_decisions ?? [])
       .map((id) => rec?.decisions[id])
-      .find((d) => d?.kind === "spawn_failed" && d.task === task);
+      .find((d) => d?.kind === "spawn_failed" && spawnFailedTask(d) === task);
   }
 
   /**
@@ -5982,7 +5988,8 @@ export class Daemon {
       const a = answer.trim().toLowerCase();
       if (task === RELEASE_TASK) {
         const respawn = isRespawnAnswer(answer, d.options);
-        if (a !== STOP_ANSWER && !respawn) return;
+        // The train acts only with a spawner: without one the agent stays, its stage recorded.
+        if ((a !== STOP_ANSWER && !respawn) || this.opts.spawner === undefined) return;
         await this.retireGone(wave, task, agentId, x);
         return this.releaseRecovery(wave, agentId, respawn ? "respawn" : "stop", why);
       }
@@ -6957,19 +6964,30 @@ export class Daemon {
       }
       // `raise by N` is folded into the budget by the reducer; the next tick spawns.
     }
-    if (d.kind === "spawn_failed" && d.task !== null && r.by !== DAEMON_AGENT_ID) {
-      if (r.answer.trim().toLowerCase() === SPAWN_STOP_ANSWER) {
+    const failedTask = d.kind === "spawn_failed" ? spawnFailedTask(d) : null;
+    if (failedTask !== null && r.by !== DAEMON_AGENT_ID) {
+      // Either answer lifts the backoff (or a stop): a retry spawns now, a respawn after a stop too.
+      for (const key of this.refused.keys()) {
+        if (key.startsWith(`${wave}/${failedTask}/`)) this.refused.delete(key);
+      }
+      const stop = r.answer.trim().toLowerCase() === SPAWN_STOP_ANSWER;
+      if (failedTask === RELEASE_TASK) {
+        // A stage's spawn is the train's: stop fails the stage (the owner is asked what next).
+        const why = `${r.by} stopped the stage's spawn retries (decision ${id})`;
+        if (this.opts.spawner !== undefined)
+          void this.enqueue(() =>
+            stop
+              ? this.releaseFor(wave).handle({ kind: "spawn_stopped", why })
+              : this.releaseAdvance(wave),
+          );
+      } else if (stop) {
         await this.append(wave, {
           type: "task_cancelled",
-          task: d.task,
+          task: failedTask,
           data: { by: r.by, why: `spawn failed (decision ${id})` },
         });
-      } else {
-        // "retry now": the next tick spawns it, whatever the backoff (or a stop) said.
-        for (const key of this.refused.keys()) {
-          if (key.startsWith(`${wave}/${d.task}/`)) this.refused.delete(key);
-        }
       }
+      // "retry now" on a task: the next tick spawns it.
     }
     // A release stage's question (stage_go, a failed stage's agent_blocked): the train's answer.
     if (stageOf(d) !== undefined && this.opts.spawner !== undefined)

@@ -368,7 +368,9 @@ export type ReleaseEvent =
    * The answer to a recovery decision about a stage agent (its question, a stall, gone after a
    * restart): `stop` fails the stage (the owner is asked what next); `respawn` runs it again.
    */
-  | { kind: "agent_recovery"; agent_id: string; answer: "stop" | "respawn"; why: string };
+  | { kind: "agent_recovery"; agent_id: string; answer: "stop" | "respawn"; why: string }
+  /** The owner stopped the retries of a stage's spawn that keeps failing: the stage fails. */
+  | { kind: "spawn_stopped"; why: string };
 
 export type ReleaseAction =
   | { kind: "journal"; event: NewEvent }
@@ -417,23 +419,32 @@ function askGo(v: ReleaseView, stage: PlaybookStage): ReleaseAction {
   };
 }
 
-/** A stage that cannot go on: journal it failed and ask the owner what next. */
-function failStage(v: ReleaseView, stage: string, run: StageRun, reason: string): ReleaseAction[] {
+/**
+ * A stage that cannot go on: journal it failed and ask the owner what next. `run` without an
+ * agent: its spawn never happened (the owner stopped its retries).
+ */
+function failStage(
+  v: ReleaseView,
+  stage: string,
+  run: { agent_id?: string; attempt: number },
+  reason: string,
+): ReleaseAction[] {
+  const agent = run.agent_id !== undefined ? { agent_id: run.agent_id } : {};
   return [
-    journal("release_stage_failed", { stage, reason, agent_id: run.agent_id }),
+    journal("release_stage_failed", { stage, reason, ...agent }),
     {
       kind: "decide",
       decision: {
         kind: "agent_blocked",
         task: null,
         id: waveDecisionId("agent_blocked", v.wave, RELEASE_TASK, stage, String(run.attempt)),
-        question: `Wave ${v.wave}'s release stage ${stage} failed (${run.agent_id}): ${reason}. respawn: a fresh agent runs the stage again; skip: the stage is skipped; cancel: the train stops and the wave completes without its release.`,
+        question: `Wave ${v.wave}'s release stage ${stage} failed (${run.agent_id ?? "no agent spawned"}): ${reason}. respawn: a fresh agent runs the stage again; skip: the stage is skipped; cancel: the train stops and the wave completes without its release.`,
         options: [...STAGE_FAILED_OPTIONS],
       },
       data: {
         stage,
-        agent_id: run.agent_id,
-        pipeline: { on: "stage", stage, agent_id: run.agent_id, attempt: run.attempt },
+        ...agent,
+        pipeline: { on: "stage", stage, ...agent, attempt: run.attempt },
       },
     },
   ];
@@ -582,6 +593,17 @@ function onRecovery(
   ];
 }
 
+function onSpawnStopped(
+  v: ReleaseView,
+  ev: Extract<ReleaseEvent, { kind: "spawn_stopped" }>,
+): ReleaseAction[] {
+  if (!(v.releasing || v.paused)) return [];
+  // The running stage whose agent never spawned (one with a run is the agent's to end).
+  const s = v.train.stages.find((x) => x.state === "running");
+  if (s === undefined || v.runs[s.name] !== undefined) return [];
+  return failStage(v, s.name, { attempt: v.attempt[s.name] ?? 1 }, ev.why);
+}
+
 /** The pure interpreter: what to do about `ev` given the train's view. */
 export function nextRelease(v: ReleaseView, ev: ReleaseEvent): ReleaseAction[] {
   switch (ev.kind) {
@@ -595,6 +617,8 @@ export function nextRelease(v: ReleaseView, ev: ReleaseEvent): ReleaseAction[] {
       return onResolved(v, ev.decision);
     case "agent_recovery":
       return onRecovery(v, ev);
+    case "spawn_stopped":
+      return onSpawnStopped(v, ev);
   }
 }
 

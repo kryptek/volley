@@ -5,6 +5,7 @@ import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { RELEASE_TASK } from "../src/autopilot/release-train";
 import { ControlClient } from "../src/control";
+import { SpawnError } from "../src/spawn-error";
 import type { JournalEvent } from "../src/types";
 import { AUTOPILOT_ON, NS } from "./helpers/daemon-env";
 import { runCli } from "./helpers/run-cli";
@@ -41,6 +42,8 @@ interface Stages {
   launched: Map<string, string>;
   /** Publish the stage result (retained) and `done` as agent `id`. */
   finish: (id: string, result: Record<string, unknown> | null) => Promise<void>;
+  /** While true, a release-branch cut fails (WORKTREE_FAILED). */
+  failCut: { on: boolean };
   /** Publish on `channel` as agent `id`. */
   as: (
     id: string,
@@ -51,8 +54,11 @@ interface Stages {
   ) => Promise<unknown>;
 }
 
-async function start(): Promise<Stages> {
-  s = await makeSupervisedEnv({ daemon: AUTOPILOT_ON });
+async function start(config?: string): Promise<Stages> {
+  s = await makeSupervisedEnv({
+    daemon: AUTOPILOT_ON,
+    ...(config !== undefined ? { config } : {}),
+  });
   mkdirSync(join(s.repo, ".volley"), { recursive: true });
   writeFileSync(join(s.repo, ".volley", "release.yaml"), PLAYBOOK);
   const pubAs = (id: string, channel: string, type: string, payload: unknown, retain = true) =>
@@ -65,13 +71,21 @@ async function start(): Promise<Stages> {
       { qos: 1, retain },
     );
   // A release-branch cut records its base, as the real host's does (the stage's start).
+  const failCut = { on: false };
   const prepare = s.host.prepareWorktree.bind(s.host);
-  s.host.prepareWorktree = async (spec) => ({
-    ...(await prepare(spec)),
-    ...(spec.releaseBase === true
-      ? { base: { ref: "origin/release/w1", sha: START, fresh: true } }
-      : {}),
-  });
+  s.host.prepareWorktree = async (spec) => {
+    if (failCut.on && spec.releaseBase === true)
+      throw new SpawnError("WORKTREE_FAILED", "git worktree add failed: fatal: disk full", {
+        path: spec.path,
+        branch: spec.branch,
+      });
+    return {
+      ...(await prepare(spec)),
+      ...(spec.releaseBase === true
+        ? { base: { ref: "origin/release/w1", sha: START, fresh: true } }
+        : {}),
+    };
+  };
   const launched = new Map<string, string>();
   const prev = s.host.onLaunch;
   s.host.onLaunch = (spec, ws) => {
@@ -119,7 +133,7 @@ async function start(): Promise<Stages> {
     if (result !== null) await pubAs(id, "result", "stage", result);
     await pubAs(id, "status", "done", { summary: "ok" });
   };
-  return { launched, finish, as: pubAs };
+  return { launched, finish, failCut, as: pubAs };
 }
 
 const registered = (id: string) => (e: JournalEvent) =>
@@ -365,6 +379,64 @@ describe("release stages (SPEC §4.6.19)", () => {
         "stopped",
       );
       expect(ofType("task_cancelled")).toEqual([]);
+    },
+  );
+
+  it(
+    "a stage spawn that fails asks one wave-level spawn_failed: retry now spawns at once, stop task fails the stage",
+    { timeout: 30_000 },
+    async () => {
+      // Every failure stops the retries: the decision is the owner's, not autopilot's.
+      const st = await start("spawn_retry_max: 1");
+      st.failCut.on = true;
+      await settleTasks();
+      await s.event((e) => e.type === "decision_opened" && e.data.kind === "spawn_failed");
+      await s.settled();
+      const failed = () => ofType("decision_opened").filter((e) => e.data.kind === "spawn_failed");
+      expect(failed()).toHaveLength(1);
+      expect(failed()[0]?.task).toBeUndefined();
+      // retry now: the spawn is tried at once; it fails again and asks again.
+      ctl = await ControlClient.connect(s.env.broker.url, NS);
+      const retry = await ctl.request("resolve", {
+        decision_id: failed()[0]?.data.decision_id,
+        answer: "retry now",
+        by: "owner",
+      });
+      expect(retry.error).toBeUndefined();
+      await s.event((e) => e.type === "spawn_failed" && e.task === RELEASE_TASK, 2);
+      await s.settled();
+      expect(failed()).toHaveLength(2);
+      expect(s.daemon.record("w1")?.state?.open_decisions).toHaveLength(1);
+
+      // stop task: the stage fails and the owner is asked what next; no task is cancelled.
+      const r = await ctl.request("resolve", {
+        decision_id: failed()[1]?.data.decision_id,
+        answer: "stop task",
+        by: "owner",
+      });
+      expect(r.error).toBeUndefined();
+      await s.event((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked");
+      expect(ofType("release_stage_failed")[0]?.data).toMatchObject({ stage: "bump" });
+      expect(ofType("task_cancelled")).toEqual([]);
+      const d = ofType("decision_opened").find((e) => e.data.kind === "agent_blocked");
+      expect(d?.data).toMatchObject({ pipeline: { on: "stage", stage: "bump" } });
+
+      // respawn, the cut fixed: the stage runs again at once, whatever the backoff said.
+      st.failCut.on = false;
+      const again = await ctl.request("resolve", {
+        decision_id: d?.data.decision_id,
+        answer: "respawn",
+        by: "owner",
+      });
+      expect(again.error).toBeUndefined();
+      await s.event(
+        (e) =>
+          e.type === "agent_registered" && String(e.data.agent_id).startsWith("w1-release-bump-"),
+      );
+      expect(ofType("release_stage_entered").map((e) => e.data)).toEqual([
+        { stage: "bump", attempt: 1 },
+        { stage: "bump", attempt: 2 },
+      ]);
     },
   );
 });

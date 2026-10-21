@@ -398,6 +398,20 @@ describe("nextRelease (SPEC §4.6.19)", () => {
     // Stopped (neither releasing nor paused): nothing.
     expect(nextRelease({ ...t.view(), releasing: false, paused: false }, ev)).toEqual([]);
   });
+
+  it("spawn_stopped fails the running stage whose agent never spawned; one with a run is the agent's", () => {
+    const t = train();
+    t.step({ kind: "advance" });
+    const ev = { kind: "spawn_stopped" as const, why: "owner stopped the stage's spawn retries" };
+    expect(kinds(t.step(ev))).toEqual(["release_stage_failed bump", "decide agent_blocked bump"]);
+    expect(t.events.at(-2)?.data).toEqual({ stage: "bump", reason: ev.why });
+    expect(t.view().train.stages[0]?.state).toBe("failed");
+
+    const u = train();
+    u.step({ kind: "advance" });
+    u.spawned("bump", 1);
+    expect(u.step(ev)).toEqual([]);
+  });
 });
 
 describe("releaseGoInput", () => {

@@ -847,11 +847,14 @@ rules as any pipeline role. The stages run **serially**, in playbook order:
   fetch; `require_fresh_base` applies). A stage agent counts toward `hard_ceiling` like a task's,
   and its spawn waits on the kill switch and the pressure verdict; the spawn budget does not
   apply (a stage runs again only on the owner's `respawn`). `volleyd spawn` refuses the role.
+  A spawn that fails backs off and asks `spawn_failed` as a task's does, but wave-level: `retry
+  now` spawns at once, `stop task` fails the stage (the `agent_blocked` decision below).
 - **The brief** (`briefs/release.md.tmpl`, and `.volley/stage.md` beside it): the stage's
   `brief`, its `run` lines verbatim as the commands to run in order (stopping at the first that
   exits non-zero), the `verify` facts it must leave true, and the result contract. A `heavy`
-  stage's brief says `volley lease acquire <pool>` first. Any push goes to the release branch as
-  a fast-forward, `git push origin HEAD:<release>`: that is the agent's push, never volleyd's.
+  stage's brief says `volley lease acquire --pool <pool>` first. Any push goes to the release
+  branch as a fast-forward, `git push origin HEAD:<release>`: that is the agent's push, never
+  volleyd's.
 - **The result contract**: before its `done` the agent publishes
   `vol_publish(channel="result", type="stage", payload={ stage, commands: [{ argv, code, seconds
   }], notes, artifacts: { tag?, files?, urls? } })` (`review-result.schema.json`).
