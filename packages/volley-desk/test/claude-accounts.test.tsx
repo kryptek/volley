@@ -896,12 +896,57 @@ describe("ClaudeAccounts › Add on any machine", () => {
     setup([], fleet);
     const card = within(screen.getByRole("article", { name: "Work" }));
     fireEvent.click(card.getByRole("button", { name: "Add to another machine…" }));
-    expect(screen.getByRole("textbox", { name: "Account label" })).toHaveValue("Work");
+    // volleyd's ids are unique across machines, so the prefill names the machine too.
+    expect(screen.getByRole("textbox", { name: "Account label" })).toHaveValue("Work (peer-a)");
+    expect(screen.getByText(/needs its own label/)).toBeInTheDocument();
     expect(radio(/^this machine/)).toBeDisabled();
     expect(radio(/^this machine/).closest("label")).toHaveTextContent("already holds this account");
     expect(radio(/^peer-a/)).toBeEnabled();
     expect(radio(/^peer-a/)).toBeChecked();
     expect(screen.getByRole("button", { name: "Sign in on peer-a" })).toBeEnabled();
+  });
+
+  it("Add to another machine… sends the label volleyd accepts, and keeps one the owner typed", async () => {
+    const { control } = setup([], {
+      ...fleet,
+      machines: {
+        ...machines,
+        "peer-b": { ...machines["peer-a"], name: "peer-b" },
+      } as typeof machines,
+    });
+    control.mockResolvedValue({ ok: false });
+    const card = within(screen.getByRole("article", { name: "Work" }));
+    fireEvent.click(card.getByRole("button", { name: "Add to another machine…" }));
+    const field = screen.getByRole("textbox", { name: "Account label" });
+    fireEvent.click(radio(/^peer-b/));
+    expect(field).toHaveValue("Work (peer-b)");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in on peer-b" }));
+    });
+    expect(control).toHaveBeenLastCalledWith(
+      "claude_account_add",
+      { label: "Work (peer-b)", machine: "peer-b" },
+      expect.any(String),
+      expect.any(Number),
+    );
+    fireEvent.change(field, { target: { value: "Office" } });
+    fireEvent.click(radio(/^peer-a/));
+    expect(field).toHaveValue("Office");
+  });
+
+  it("Add to another machine… on the primary's card starts with an empty label", () => {
+    setup([], fleet);
+    const card = within(screen.getByRole("article", { name: "This machine's Claude login" }));
+    fireEvent.click(card.getByRole("button", { name: "Add to another machine…" }));
+    expect(screen.getByRole("textbox", { name: "Account label" })).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Sign in on peer-a" })).toBeDisabled();
+  });
+
+  it("a paired host with no machine record yet is offered, and says so", () => {
+    setup([], { ...fleet, hosts: ["peer-a", "peer-c"] });
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    expect(radio(/^peer-c/)).toBeEnabled();
+    expect(radio(/^peer-c/).closest("label")).toHaveTextContent("no record yet");
   });
 
   it("read-only: no Add to another machine…", () => {

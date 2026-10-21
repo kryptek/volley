@@ -370,6 +370,8 @@ export interface AddMachine {
   op: string;
   /** Its tunnel is up (this machine always is). */
   up: boolean;
+  /** A paired host that has published no machine record yet: offered, but its state is unknown. */
+  unknown?: boolean;
   /** It already holds the account being added (Add to another machine…). */
   holds: boolean;
 }
@@ -384,27 +386,37 @@ interface Started {
 
 type Adding =
   | { phase: "pick"; error?: string }
-  | { phase: "waiting"; machine: string; acct?: string; r?: Started };
+  | { phase: "waiting"; machine: string; label: string; acct?: string; r?: Started };
 
 /** The add-account Stepper: label and machine → Anthropic's sign-in page → done. */
 function AddAccount({
   machines,
-  initialLabel = "",
+  baseLabel = "",
   signins,
   control,
   onClose,
 }: {
   /** This machine first, then each paired host. */
   machines: AddMachine[];
-  initialLabel?: string;
+  /**
+   * Add to another machine…: the account's profile label. volleyd's ids are unique across
+   * machines, so the field starts as `<label> (<machine>)` and follows the picked machine
+   * until the owner types their own.
+   */
+  baseLabel?: string;
   signins: Record<string, ClaudeSignin>;
   control: ControlFn;
   onClose: () => void;
 }) {
   const [s, setS] = useState<Adding>({ phase: "pick" });
-  const [label, setLabel] = useState(initialLabel);
+  /** What the owner typed; null while the field still follows the suggestion. */
+  const [typed, setTyped] = useState<string | null>(null);
   const [pick, setPick] = useState(() => machines.find((m) => m.up && !m.holds)?.op);
   const chosen = machines.find((m) => m.op === pick && m.up && !m.holds);
+  const label =
+    s.phase === "waiting"
+      ? s.label
+      : (typed ?? (baseLabel && chosen ? `${baseLabel} (${chosen.name})` : baseLabel));
   const signin = s.phase === "waiting" && s.acct ? signins[s.acct] : undefined;
   const done = signin?.state === "done";
   const r = s.phase === "waiting" ? (s.r ?? {}) : {};
@@ -415,7 +427,7 @@ function AddAccount({
   const start = async (machine: string) => {
     const name = label.trim();
     if (!name) return;
-    setS({ phase: "waiting", machine });
+    setS({ phase: "waiting", machine, label: name });
     const r = await control(
       "claude_account_add",
       { label: name, machine },
@@ -465,12 +477,19 @@ function AddAccount({
             aria-label="Account label"
             placeholder="Label, e.g. Work"
             value={label}
-            onChange={(e) => setLabel(e.target.value)}
+            onChange={(e) => setTyped(e.target.value)}
           />
+          {baseLabel && (
+            <p className="s-hint">
+              Each machine’s profile needs its own label: volleyd names a profile once across
+              machines.
+            </p>
+          )}
           <fieldset className="claude-add-machines">
             <legend>Machine</legend>
             {machines.map((m) => {
               const why = m.holds ? "already holds this account" : m.up ? null : "tunnel down";
+              const note = why ?? (m.unknown ? "no record yet" : null);
               return (
                 <label
                   key={m.op}
@@ -485,7 +504,7 @@ function AddAccount({
                     onChange={() => setPick(m.op)}
                   />
                   <span>{m.name}</span>
-                  {why && <span className="s-hint">{why}</span>}
+                  {note && <span className="s-hint">{note}</span>}
                 </label>
               );
             })}
@@ -523,6 +542,7 @@ function AddAccount({
                 flow={signin?.flow ?? r.flow}
                 attach={signin?.attach ?? r.attach}
                 manualUrl={signin?.manual_url ?? r.manual_url}
+                lead={`Sign in on Anthropic’s own page; the profile lives on ${machine}.`}
               />
             ) : (
               <p className="dim">
@@ -583,7 +603,7 @@ export function ClaudeAccounts({
   localName,
   hosts = [],
 }: ClaudeAccountsProps) {
-  /** The Add dialog: the label it starts with and the machines already holding that account. */
+  /** The Add dialog: the account's profile label and the machines already holding it. */
   const [adding, setAdding] = useState<{ label: string; holds: string[] } | null>(null);
   const [closed, setClosed] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -609,7 +629,12 @@ export function ClaudeAccounts({
       { name: machineName(LOCAL_MACHINE), op: LOCAL_MACHINE, up: true },
       ...hosts
         .filter((h) => h !== localName)
-        .map((h) => ({ name: h, op: h, up: machines?.[h]?.tunnel !== "down" })),
+        .map((h) => ({
+          name: h,
+          op: h,
+          up: machines?.[h]?.tunnel !== "down",
+          ...(machines?.[h] === undefined ? { unknown: true } : {}),
+        })),
     ].map((m) => ({ ...m, holds: holds.includes(m.op) }));
 
   const answer = async (d: DecisionPayload, text: string) => {
@@ -725,7 +750,12 @@ export function ClaudeAccounts({
               }
               onAdd={
                 control
-                  ? () => setAdding({ label: g.label, holds: g.members.map((m) => m.machine) })
+                  ? () =>
+                      setAdding({
+                        // A real profile label only: never the card's e-mail or the primary's name.
+                        label: g.members.find((m) => !m.isPrimary)?.label ?? "",
+                        holds: g.members.map((m) => m.machine),
+                      })
                   : null
               }
               now={now}
@@ -744,7 +774,7 @@ export function ClaudeAccounts({
       {adding && control && (
         <AddAccount
           machines={addMachines(adding.holds)}
-          initialLabel={adding.label}
+          baseLabel={adding.label}
           signins={signins}
           control={control}
           onClose={() => {

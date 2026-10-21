@@ -137,9 +137,12 @@ export function SigninLink({
   flow,
   attach,
   manualUrl,
+  lead = `Sign in with the Claude account ${machine}’s agents should use, on Anthropic’s own page.`,
 }: {
   machine: string;
   url: string;
+  /** The first sentence: what the sign-in is for (the machine's default login by default). */
+  lead?: string;
   flow?: string | undefined;
   attach?: string | undefined;
   manualUrl?: string | undefined;
@@ -147,7 +150,7 @@ export function SigninLink({
   return (
     <>
       <p className="dim">
-        Sign in with the Claude account {machine}’s agents should use, on Anthropic’s own page.
+        {lead}
         {flow === "browser_callback"
           ? ` It hands the sign-in straight back to Claude Code on ${machine} through this computer, so open it in a browser on this computer.`
           : " The page then shows a code: type it into the sign-in terminal below."}
