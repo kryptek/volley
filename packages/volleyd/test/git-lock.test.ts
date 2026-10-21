@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import type { ExecFn, ExecResult } from "../src/exec";
 import { fetchFailure, lockFetches, lockedFetch, withRepoLock } from "../src/git-lock";
 
@@ -118,5 +119,44 @@ describe("lockFetches", () => {
       b(["git", "-C", "/wt/2", "rev-parse", "HEAD"]),
     ]);
     expect(log.slice(0, 2)).toEqual(["start /wt/1 rev-parse HEAD", "start /wt/2 rev-parse HEAD"]);
+  });
+});
+
+describe("lockFetches bounds a fetch the caller left unbounded", () => {
+  it("defaults the fetch's timeout and turns off git's credential prompt; a caller's own options win", async () => {
+    const seen: Parameters<ExecFn>[1][] = [];
+    const exec: ExecFn = async (_argv, opts) => {
+      seen.push(opts);
+      return ok;
+    };
+    const locked = lockFetches(exec, "box-a", "/bounded");
+    await locked(["git", "-C", "/wt/1", "fetch", "origin", "x"]);
+    await locked(["git", "-C", "/wt/1", "fetch", "origin", "x"], {
+      timeoutMs: 5,
+      env: { ONLY: "mine" },
+    });
+    await locked(["git", "-C", "/wt/1", "rev-parse", "HEAD"]);
+    expect(seen[0]?.timeoutMs).toBe(DAEMON_DEFAULTS.git_fetch_timeout_ms);
+    expect(seen[0]?.env?.GIT_TERMINAL_PROMPT).toBe("0");
+    expect(seen[1]?.timeoutMs).toBe(5);
+    expect(seen[1]?.env).toEqual({ ONLY: "mine" });
+    expect(seen[2]).toBeUndefined();
+  });
+
+  it("a fetch that hangs until its timeout does not hold the clone's lock forever", async () => {
+    let calls = 0;
+    const exec: ExecFn = (_argv, opts) => {
+      calls++;
+      if (calls > 1) return Promise.resolve(ok);
+      // Stands in for exec's timeout firing: without one, the fetch would never settle.
+      return opts?.timeoutMs !== undefined
+        ? Promise.resolve({ ...failed(""), timedOut: true })
+        : new Promise<ExecResult>(() => {});
+    };
+    const locked = lockFetches(exec, "box-a", "/hung");
+    const hung = locked(["git", "-C", "/wt/1", "fetch", "origin", "x"]);
+    const next = locked(["git", "-C", "/wt/2", "fetch", "origin", "y"]);
+    expect((await hung).timedOut).toBe(true);
+    expect(await next).toEqual(ok);
   });
 });
