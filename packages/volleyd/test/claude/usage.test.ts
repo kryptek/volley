@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  type ProbeLogin,
+  type ProbeState,
   type UsageBook,
   type UsagePayload,
   accountRecords,
   bookState,
   emptyBook,
+  foldProbe,
   foldUsage,
   forgetAgent,
   limitDecisions,
@@ -17,6 +20,7 @@ import {
   waveAccountMoves,
 } from "../../src/claude/usage";
 import type { JournalEvent } from "../../src/types";
+import { envelope, schemaErrors } from "../helpers/schema";
 
 const RESETS = "2026-10-18T18:10:00.000Z";
 const NOW = Date.parse("2026-10-18T14:00:00.000Z");
@@ -369,5 +373,114 @@ describe("wave moves", () => {
     ]);
     expect(waveAccount("work", moves)).toBe("primary");
     expect(waveAccount("other", moves)).toBe("other");
+  });
+});
+
+describe("the usage probe (foldProbe)", () => {
+  const T = (min: number) => new Date(NOW + min * 60_000).toISOString();
+  const w = (pct: number) => ({ pct, resets_at: RESETS });
+  const login = (
+    min: number,
+    reading: { five_hour?: number; weekly?: number; fable?: number } | null,
+    state: ProbeState = "ok",
+  ): ProbeLogin => ({
+    profile: "work",
+    state,
+    attempted_at: T(min),
+    ...(reading !== null
+      ? {
+          reading: {
+            read_at: T(min),
+            ...(reading.five_hour !== undefined ? { five_hour: w(reading.five_hour) } : {}),
+            ...(reading.weekly !== undefined ? { weekly: w(reading.weekly) } : {}),
+            ...(reading.fable !== undefined ? { model_weekly: { fable: w(reading.fable) } } : {}),
+          },
+        }
+      : {}),
+  });
+  const probe = (book: UsageBook, l: ProbeLogin) =>
+    foldProbe(book, { account: "work@peer-a", machine: "peer-a", login: l });
+  const sampleAt = (book: UsageBook, pct: number, min: number) =>
+    fold(book, "a1", "w1", sample("work@peer-a", pct, T(min)));
+
+  it("the freshest 5-hour window wins between a statusLine sample and a reading, both ways", () => {
+    const older = probe(sampleAt(emptyBook(), 10, 0), login(1, { five_hour: 30 }));
+    expect(accountRecords(older)["work@peer-a"]?.five_hour?.pct).toBe(30);
+    const newer = probe(sampleAt(emptyBook(), 10, 2), login(1, { five_hour: 30 }));
+    expect(accountRecords(newer)["work@peer-a"]?.five_hour?.pct).toBe(10);
+    const then = sampleAt(probe(emptyBook(), login(1, { five_hour: 30 })), 10, 2);
+    expect(accountRecords(then)["work@peer-a"]).toMatchObject({
+      five_hour: { pct: 10 },
+      sampled_at: T(2),
+      sampled_by: "a1",
+    });
+  });
+
+  it("fills model_weekly.fable and keeps it when a later reading lacks it", () => {
+    let b = probe(emptyBook(), login(0, { five_hour: 5, fable: 12 }));
+    expect(accountRecords(b)["work@peer-a"]?.model_weekly).toEqual({ fable: w(12) });
+    b = probe(b, login(6, { five_hour: 6 }));
+    expect(accountRecords(b)["work@peer-a"]).toMatchObject({
+      five_hour: { pct: 6 },
+      model_weekly: { fable: { pct: 12 } },
+      sampled_at: T(6),
+    });
+  });
+
+  it("probe is the newest attempt, even a failed one; the reading's age stays", () => {
+    let b = probe(emptyBook(), login(0, { five_hour: 5, fable: 12 }));
+    const { reading } = login(0, { five_hour: 5 });
+    b = probe(b, {
+      ...login(10, null, "rate_limited"),
+      ...(reading !== undefined ? { reading } : {}),
+    });
+    expect(accountRecords(b)["work@peer-a"]?.probe).toEqual({
+      machine: "peer-a",
+      state: "rate_limited",
+      attempted_at: T(10),
+      read_at: T(0),
+    });
+    // An older attempt arriving late never replaces it.
+    b = probe(b, login(5, null, "error"));
+    expect(accountRecords(b)["work@peer-a"]?.probe?.state).toBe("rate_limited");
+    // A login that never read: probe without read_at, and no windows.
+    const never = accountRecords(probe(emptyBook(), login(0, null, "expired")))["work@peer-a"];
+    expect(never).toMatchObject({ five_hour: null, weekly: null, sampled_at: T(0) });
+    expect(never?.probe).toEqual({ machine: "peer-a", state: "expired", attempted_at: T(0) });
+    expect(never).not.toHaveProperty("model_weekly");
+    expect(never).not.toHaveProperty("sampled_by");
+  });
+
+  it("accountRecords emits model_weekly and probe only when known", () => {
+    const r = accountRecords(sampleAt(emptyBook(), 10, 0))["work@peer-a"];
+    expect(r).not.toHaveProperty("model_weekly");
+    expect(r).not.toHaveProperty("probe");
+  });
+
+  it("bookState / restoreBook round-trip model_weekly, probe and an absent sampled_by", () => {
+    let b = probe(emptyBook(), login(0, { five_hour: 5, weekly: 7, fable: 12 }));
+    b = sampleAt(b, 3, 1);
+    b = foldProbe(b, { account: "primary", machine: "box", login: login(2, null, "expired") });
+    const back = restoreBook(bookState(b));
+    expect(accountRecords(back)).toEqual(
+      Object.fromEntries(
+        Object.entries(accountRecords(b)).map(([k, v]) => [k, { ...v, agents: [], waves: [] }]),
+      ),
+    );
+    expect(accountRecords(back).primary).not.toHaveProperty("sampled_by");
+  });
+
+  it("a record from a reading alone (no sampled_by) validates", () => {
+    const rec = accountRecords(probe(emptyBook(), login(0, { five_hour: 5, fable: 12 })))[
+      "work@peer-a"
+    ];
+    const env = envelope("_system/claude-accounts", "claude_account", rec);
+    expect(schemaErrors("claude-account.schema.json", env)).toEqual([]);
+    expect(
+      schemaErrors("claude-account.schema.json", {
+        ...env,
+        payload: { ...rec, model_weekly: { gpt: w(1) } },
+      }),
+    ).not.toEqual([]);
   });
 });

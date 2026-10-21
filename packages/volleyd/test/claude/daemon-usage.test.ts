@@ -382,3 +382,123 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
     expect(s.journal().filter(limitOpened)).toEqual([]);
   }, 20_000);
 });
+
+describe("usage probe readings in machine records (daemon)", () => {
+  const probes: ReconcileProbes = {
+    branch: async (_repo, branch) => ({ name: branch, exists: true, head: "abc123" }),
+    pr: async () => null,
+  };
+  const READ = new Date(T0).toISOString();
+  const login = (profile: string, fable: number) => ({
+    profile,
+    state: "ok" as const,
+    attempted_at: READ,
+    reading: {
+      read_at: READ,
+      five_hour: { pct: 37, resets_at: RESETS },
+      weekly: { pct: 56, resets_at: RESETS },
+      model_weekly: { fable: { pct: fable, resets_at: RESETS } },
+    },
+  });
+
+  it("a paired machine's logins meter as primary@<name> and <id>@<name>; one the registry lacks is skipped", async () => {
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+    // `work` is a profile the registry has on peer-a; `stray` is unknown there.
+    const reg = JSON.parse(readFileSync(join(root, "accounts.json"), "utf-8"));
+    reg.accounts.push({
+      id: "work",
+      label: "Work",
+      machine: "peer-a",
+      created: "2026-10-18T12:00:00.000Z",
+      signed_in_at: "2026-10-18T12:00:00.000Z",
+    });
+    writeFileSync(join(root, "accounts.json"), JSON.stringify(reg));
+    s = await makeSupervisedEnv({
+      daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
+    });
+    await s.daemon.stop();
+    writeFileSync(
+      join(s.env.home, "config.yaml"),
+      "hosts:\n  peer-a:\n    target: dev@peer-a\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n",
+    );
+    await s.agent.publish(
+      machineTopic("peer-a"),
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "peer-a",
+          parentId: null,
+          channel: MACHINE_CHANNEL,
+          type: "machine",
+          payload: {
+            name: "peer-a",
+            os: "linux",
+            cores: 8,
+            tunnel: "up",
+            load: [0.1, 0.1, 0.1],
+            agents: 0,
+            claude_logins: [login("default", 20), login("work", 70), login("stray", 5)],
+            last_seen: READ,
+          },
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    const second = await s.restart({ reconcile: probes });
+    await second.reconciled();
+
+    const probe = { machine: "peer-a", state: "ok", attempted_at: READ, read_at: READ };
+    expect(await recordWhen("primary@peer-a", (r) => r.probe !== undefined)).toMatchObject({
+      account: "primary@peer-a",
+      five_hour: { pct: 37 },
+      weekly: { pct: 56 },
+      model_weekly: { fable: { pct: 20 } },
+      probe,
+    });
+    expect(await recordWhen("work@peer-a", (r) => r.probe !== undefined)).toMatchObject({
+      account: "work@peer-a",
+      label: "Work",
+      model_weekly: { fable: { pct: 70 } },
+      probe,
+    });
+    for (const acct of ["primary@peer-a", "work@peer-a"]) {
+      const env = await accountEnvelope(acct);
+      expect(schemaErrors("claude-account.schema.json", env)).toEqual([]);
+      expect((env as { payload: object }).payload).not.toHaveProperty("sampled_by");
+    }
+    await s.consumed();
+    for (const acct of ["stray@peer-a", "stray", "work", "primary"]) {
+      expect(await accountRecord(acct)).toBeNull();
+    }
+  }, 20_000);
+
+  it("the supervisor's own record: its default login is primary", async () => {
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+    s = await makeSupervisedEnv({
+      daemon: {
+        claude: { root, primaryDir: primary },
+        clock: fakeClock(T0),
+        fleet: {
+          version: "0.5.0",
+          localDoctor: async () => ({
+            checks: [],
+            claude_logins: [login("default", 33), login("spare", 44)],
+            doctor_at: READ,
+          }),
+          localPath: () => ({ claude: true, bun: true }),
+        },
+      },
+    });
+    expect(await recordWhen("primary", (r) => r.probe !== undefined)).toMatchObject({
+      account: "primary",
+      model_weekly: { fable: { pct: 33 } },
+      probe: { state: "ok", read_at: READ },
+    });
+    expect(await recordWhen("spare", (r) => r.probe !== undefined)).toMatchObject({
+      account: "spare",
+      model_weekly: { fable: { pct: 44 } },
+    });
+    expect(schemaErrors("claude-account.schema.json", await accountEnvelope("primary"))).toEqual(
+      [],
+    );
+  }, 20_000);
+});

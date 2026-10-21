@@ -40,6 +40,7 @@ import {
 import { EXIT } from "../../src/exit-codes";
 import { makeBufferIO } from "../../src/io";
 import { type TestBroker, startTestBroker } from "../helpers/aedes-broker";
+import { FAKE_TOKEN, storeLogins, usageEndpoint } from "../helpers/fake-logins";
 import { type FakePeerMachine, fakePeerMachine } from "../helpers/fake-peer-machine";
 import { tempDir } from "../helpers/tmp";
 
@@ -1272,6 +1273,7 @@ describe("volley peer run (the service)", () => {
   async function heartbeats(
     beats: number,
     f: { exec: PeerExec; calls: Call[] } = fakeExec(() => undefined),
+    over: Partial<PeerDeps> = {},
   ) {
     const start = Date.parse("2026-10-19T09:00:00.000Z");
     let t = start;
@@ -1287,6 +1289,7 @@ describe("volley peer run (the service)", () => {
         if (last) stop.abort();
         else t += ms;
       },
+      ...over,
     });
     const reader = new VolleyBroker();
     await reader.connect({ url: tb.url, agentId: "reader" });
@@ -1356,6 +1359,29 @@ describe("volley peer run (the service)", () => {
     const later = up.at(-1) as Record<string, unknown>;
     expect(later.doctor_at).toBe(p.doctor_at);
     expect(later.last_seen).toBe("2026-10-19T09:01:00.000Z");
+  });
+
+  it("heartbeats carry the last doctor run's claude_logins, and none before it", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", {});
+    storeLogins(box.home, { default: Date.parse("2026-10-20T09:00:00.000Z") });
+    const api = usageEndpoint();
+    const { records } = await heartbeats(
+      3,
+      fakeExec(() => undefined),
+      { fetch: api.fetch },
+    );
+    const up = records
+      .map((r) => parseEnvelope(r)?.payload as Record<string, unknown>)
+      .filter((p) => p?.tunnel === "up");
+    for (const raw of records) expectValidRecord(raw);
+    for (const p of up.filter((p) => p.doctor_at === undefined)) {
+      expect(p).not.toHaveProperty("claude_logins");
+    }
+    expect(up.at(-1)?.claude_logins).toMatchObject([
+      { profile: "default", state: "ok", reading: { five_hour: { pct: 37 } } },
+    ]);
+    for (const r of records) expect(r).not.toContain(FAKE_TOKEN);
   });
 
   it("a doctor that hangs never holds up a heartbeat, and never runs twice at once", async () => {

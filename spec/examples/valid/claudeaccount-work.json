@@ -12,6 +12,13 @@
     "org": "Example Org",
     "five_hour": { "pct": 91, "resets_at": "2026-10-18T18:10:00.000Z" },
     "weekly": { "pct": 43, "resets_at": "2026-10-21T09:00:00.000Z" },
+    "model_weekly": { "fable": { "pct": 64, "resets_at": "2026-10-21T09:00:00.000Z" } },
+    "probe": {
+      "machine": "supervisor",
+      "state": "ok",
+      "attempted_at": "2026-10-18T14:05:00.000Z",
+      "read_at": "2026-10-18T14:05:00.000Z"
+    },
     "agents": ["w1-t1-implementer-1", "w1-t2-implementer-1"],
     "waves": ["w1"],
     "sampled_at": "2026-10-18T14:06:00.000Z",

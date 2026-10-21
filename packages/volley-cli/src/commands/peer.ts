@@ -40,6 +40,7 @@ import {
   runDoctor,
 } from "../peer/doctor";
 import { DEFAULT_SHARING, type ProfileTarget } from "../peer/provision";
+import { PROBE_DEFAULTS, realUsageFetch } from "../peer/usage-probe";
 import { isLoaded, reloadLaunchd, unloadLaunchd } from "../setup/launchd";
 import { readAccounts } from "./auth-accounts";
 import { authOpsTopic } from "./auth-roles";
@@ -194,6 +195,10 @@ export const PEER_DEFAULTS = {
   doctor_timeout_ms: 300_000,
   /** How long the doctor waits for the supervisor's retained readiness verdict (its requirements). */
   readiness_wait_ms: 1_000,
+  /** The doctor's Claude usage probe: one call per login at most this often, its backoff cap and timeout. */
+  usage_probe_min_interval_s: PROBE_DEFAULTS.usage_probe_min_interval_s,
+  usage_probe_backoff_max_s: PROBE_DEFAULTS.usage_probe_backoff_max_s,
+  usage_probe_timeout_ms: PROBE_DEFAULTS.usage_probe_timeout_ms,
 } as const;
 
 export const SYSTEMD_UNIT = "volley-peer.service";
@@ -1175,7 +1180,7 @@ async function agentCount(deps: PeerDeps): Promise<number> {
 /**
  * The Fleet fields of the record (SPEC §4.6.15): `kind`, `memory`, `disk` and `uptime_s` every
  * heartbeat (no command runs), and the last doctor run's `versions`, `auth`, `repo`, `checks`
- * (without fix text) and `doctor_at`.
+ * (without fix text), `claude_logins` and `doctor_at`.
  */
 function fleetFields(deps: PeerDeps, cfg: PeerConfig, d: DoctorReport | null) {
   const root = worktreeRoot(cfg.repo ?? null, deps.home);
@@ -1200,6 +1205,7 @@ function fleetFields(deps: PeerDeps, cfg: PeerConfig, d: DoctorReport | null) {
           auth: d.auth,
           ...(d.repo !== undefined ? { repo: d.repo } : {}),
           checks: recordChecks(d),
+          ...(d.claude_logins !== undefined ? { claude_logins: d.claude_logins } : {}),
           doctor_at: d.doctor_at,
         }
       : {}),
@@ -1682,6 +1688,8 @@ function realDeps(): PeerDeps {
         rl.close();
       }
     },
+    fetch: realUsageFetch,
+    env: process.env,
     connect: async (url, auth, will) => {
       const { VolleyBroker } = await import("volley-mcp/broker");
       const b = new VolleyBroker();
