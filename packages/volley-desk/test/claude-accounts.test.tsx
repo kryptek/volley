@@ -110,6 +110,7 @@ function setup(extra: DeskMessage[] = [], props: Partial<ClaudeAccountsProps> = 
       control={control}
       configTransport={null}
       now={NOW}
+      group="accounts"
       {...props}
       {...more}
     />
@@ -309,7 +310,7 @@ describe("ClaudeAccounts", () => {
 
   it("Defaults shows the account for new waves and the warn-at threshold from config", async () => {
     const send = vi.fn(async () => ({ applied: true, rejected: [] }));
-    setup([], { configTransport: { identity: "desk", send } });
+    setup([], { configTransport: { identity: "desk", send }, group: "defaults" });
     const group = screen.getByRole("radiogroup", { name: "Account for new waves" });
     expect(within(group).getByRole("radio", { name: "Most headroom" })).toHaveAttribute(
       "aria-checked",
@@ -324,9 +325,13 @@ describe("ClaudeAccounts", () => {
   });
 
   it("read-only without credentials: no add, no answers, the default as text", () => {
-    setup([], { control: null, waves: { w1: wave({ [limit.decision_id]: limit }) } });
+    const { rerender, view } = setup([], {
+      control: null,
+      waves: { w1: wave({ [limit.decision_id]: limit }) },
+    });
     expect(screen.getByRole("button", { name: "+ Add Claude account" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Move to Personal" })).toBeNull();
+    rerender(view(undefined, { group: "defaults" }));
     expect(screen.queryByRole("radiogroup")).toBeNull();
     expect(screen.getByText("Most headroom")).toBeInTheDocument();
   });
@@ -345,7 +350,7 @@ describe("ClaudeAccounts review fixes", () => {
       applied: false,
       rejected: [{ path: "claude.default_account", reason: "unknown account" }],
     }));
-    setup([], { configTransport: { identity: "desk", send } });
+    setup([], { configTransport: { identity: "desk", send }, group: "defaults" });
     const group = screen.getByRole("radiogroup", { name: "Account for new waves" });
     await act(async () => {
       fireEvent.click(within(group).getByRole("radio", { name: "Work" }));
@@ -362,7 +367,7 @@ describe("ClaudeAccounts review fixes", () => {
       error: "volleyd did not answer",
       unanswered: true as const,
     }));
-    setup([], { configTransport: { identity: "desk", send } });
+    setup([], { configTransport: { identity: "desk", send }, group: "defaults" });
     const group = screen.getByRole("radiogroup", { name: "Account for new waves" });
     await act(async () => {
       fireEvent.click(within(group).getByRole("radio", { name: "Work" }));
@@ -419,6 +424,7 @@ describe("ClaudeAccounts review fixes", () => {
       const state = reduceAll(initialState(), [accountMsg(work)]);
       const { container } = render(
         <ClaudeAccounts
+          group="accounts"
           accounts={state.claudeAccounts ?? {}}
           signins={{}}
           waves={{}}
@@ -473,6 +479,7 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
   it("shows a primary card from the start, before any usage, next to a newly added profile", async () => {
     render(
       <ClaudeAccounts
+        group="accounts"
         accounts={{}}
         signins={{}}
         waves={{}}
@@ -501,6 +508,7 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
   it("before any usage, the primary card shows the plan claude_accounts reports for it", async () => {
     render(
       <ClaudeAccounts
+        group="accounts"
         accounts={{}}
         signins={{}}
         waves={{}}
@@ -522,6 +530,7 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     const control = registry([{ id: "team", label: "Team", machine: "local", plan: "pro" }]);
     render(
       <ClaudeAccounts
+        group="accounts"
         accounts={{}}
         signins={{}}
         waves={{}}
@@ -539,6 +548,7 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
   it("read-only, with nothing reported, still shows the primary card", () => {
     render(
       <ClaudeAccounts
+        group="accounts"
         accounts={{}}
         signins={{}}
         waves={{}}
@@ -555,6 +565,7 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     const state = reduceAll(initialState(), [accountMsg(work), accountMsg(primary)]);
     render(
       <ClaudeAccounts
+        group="accounts"
         accounts={state.claudeAccounts ?? {}}
         signins={{}}
         waves={{}}
@@ -579,6 +590,7 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     const state = reduceAll(initialState(), [accountMsg({ ...primary, account: "primary@box" })]);
     render(
       <ClaudeAccounts
+        group="accounts"
         accounts={state.claudeAccounts ?? {}}
         signins={{}}
         waves={{}}
@@ -596,7 +608,7 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
 
   it("Defaults still names the primary plainly", () => {
     const send = vi.fn(async () => ({ applied: true, rejected: [] }));
-    setup([], { configTransport: { identity: "desk", send } });
+    setup([], { configTransport: { identity: "desk", send }, group: "defaults" });
     const group = screen.getByRole("radiogroup", { name: "Account for new waves" });
     expect(within(group).getByRole("radio", { name: "Primary" })).toBeInTheDocument();
   });
@@ -724,6 +736,7 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
         configTransport={null}
         machines={machines}
         localName="hub"
+        group="accounts"
         now={NOW}
       />
     </main>
@@ -808,6 +821,7 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
         configTransport={null}
         machines={machines}
         localName="hub"
+        group="accounts"
         now={NOW}
       />,
     );

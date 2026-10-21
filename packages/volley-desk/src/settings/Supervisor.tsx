@@ -4,14 +4,64 @@
  * that wave's effective config and links back here. Above them, the lease
  * pools (`volley/_system/leases/+`, SPEC §4.6.5): each pool's holders grouped
  * by the machine they run on, its `per_machine` cap and the queue's reasons.
+ *
+ * The section drills into groups (`GroupList`): Lease pools (the pools and
+ * their capacity rows), Admission, Attention, Recovery and Other, one page each.
  */
+import { plural } from "../lib/plural";
 import type { ConfigPayload, LeasePoolPayload } from "../store/types";
 import { ConfigRows } from "./ConfigRows";
+import { GroupList } from "./GroupNav";
 import type { ConfigTransport } from "./configTransport";
-import { SECTIONS } from "./schemaRows";
+import { CONFIG_SCHEMA, type Section, schemaRows } from "./schemaRows";
+import { sectionDef } from "./sections";
 
-/** Every config group but autopilot's, which has its own section (Settings › Autopilot). */
-const SUPERVISOR_SECTIONS = SECTIONS.filter((s) => s !== "Autopilot");
+/** Each group's page: the config rows (`schemaRows` section) it shows. */
+const PAGE_ROWS: Record<string, Section> = {
+  leases: "Leases",
+  admission: "Admission",
+  attention: "Attention",
+  recovery: "Recovery",
+  other: "Other",
+};
+
+/** A config row's group (a deep link into `fleet.local_agents` opens Admission). */
+export function supervisorGroupOf(section: Section): string {
+  return Object.entries(PAGE_ROWS).find(([, s]) => s === section)?.[0] ?? "other";
+}
+
+/** `1800` → `30 min`; a time that is not whole minutes stays in seconds. */
+const duration = (s: number | undefined) =>
+  s === undefined ? "—" : s >= 60 && s % 60 === 0 ? `${s / 60} min` : `${s} s`;
+
+/** The group list's one-line summaries, from the retained config and lease pools. */
+export function supervisorSummaries({
+  config,
+  leases,
+}: {
+  config: ConfigPayload | null;
+  leases: Record<string, LeasePoolPayload>;
+}): Record<string, string> {
+  const pools = Object.values(leases);
+  const held = pools.reduce((n, p) => n + p.held.length, 0);
+  const capacity = pools.reduce((n, p) => n + p.capacity, 0);
+  const other = schemaRows(CONFIG_SCHEMA, config).filter((r) => r.section === "Other").length;
+  return {
+    leases: pools.length
+      ? `${plural(pools.length, "pool")} · ${held}/${capacity} held`
+      : "No pools",
+    admission: config
+      ? `ceiling ${config.hard_ceiling ?? "—"} · budget ${config.spawn_budget_multiplier ?? "—"}×`
+      : "",
+    attention: config
+      ? `claim ${duration(config.claim_after_s)} · heartbeat ${duration(config.heartbeat_alarm_s)}`
+      : "",
+    recovery: config
+      ? `${config.fallback_model ?? "no fallback model"} · spawn ${duration(config.spawn_timeout_s)}`
+      : "",
+    other: plural(other, "setting"),
+  };
+}
 
 /** The prototype's macOS accent for the Supervisor sliders. */
 const ACCENT = "#0a84ff";
@@ -44,8 +94,8 @@ export function LeasePools({ leases }: { leases: Record<string, LeasePoolPayload
   const pools = Object.values(leases).sort((a, b) => a.pool.localeCompare(b.pool));
   if (pools.length === 0) return null;
   return (
-    <section className="s-group lease-pools" aria-labelledby="lease-pools-h">
-      <h3 id="lease-pools-h">Lease pools</h3>
+    // The page title is already "Lease pools": the region keeps the name, not a second heading.
+    <section className="s-group lease-pools" aria-label="Lease pools">
       {pools.map((p) => (
         <article key={p.pool} className="lease-pool" aria-label={p.pool}>
           <div className="lease-head">
@@ -97,6 +147,9 @@ export function Supervisor({
   leases = {},
   focus,
   focusSeq,
+  group,
+  onOpenGroup = () => {},
+  hit,
 }: {
   /** The retained `volley/_waves/_config` payload. */
   config: ConfigPayload | null;
@@ -108,10 +161,26 @@ export function Supervisor({
   focus?: string | undefined;
   /** Bumped on every such click, so a second one brings the row back into view. */
   focusSeq?: number | undefined;
+  /** The open group's page, or null for the group list. */
+  group: string | null;
+  onOpenGroup?: (group: string) => void;
+  /** The group a sidebar search hit. */
+  hit?: string | undefined;
 }) {
+  const rows = group !== null && Object.hasOwn(PAGE_ROWS, group) ? PAGE_ROWS[group] : undefined;
+  if (rows === undefined) {
+    return (
+      <GroupList
+        section={sectionDef("supervisor")}
+        summaries={supervisorSummaries({ config, leases })}
+        onOpen={onOpenGroup}
+        hit={hit}
+      />
+    );
+  }
   return (
     <>
-      <LeasePools leases={leases} />
+      {group === "leases" && <LeasePools leases={leases} />}
       {!transport && (
         <p className="s-note">
           Read-only: the Desk has no broker credentials. Pick a new value, then copy its command and
@@ -120,7 +189,8 @@ export function Supervisor({
       )}
       <ConfigRows
         scope="global"
-        sections={SUPERVISOR_SECTIONS}
+        sections={[rows]}
+        untitled={group !== "leases"}
         values={config}
         transport={transport}
         accent={ACCENT}

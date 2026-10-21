@@ -62,6 +62,11 @@ const SECTION_OF: Record<string, Section> = {
   autopilot: "Autopilot",
 };
 
+/** The section a config row's dotted path sits in (`fleet.local_agents` → Admission). */
+export function sectionOfPath(path: string): Section {
+  return SECTION_OF[path.split(".")[0] ?? ""] ?? "Other";
+}
+
 export type RowControl =
   | { kind: "slider"; min: number; max: number; step: number }
   | { kind: "toggle" }

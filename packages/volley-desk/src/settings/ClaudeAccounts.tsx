@@ -18,6 +18,9 @@
  * from the `claude_signin_url` event, waiting until `claude_signin_done`. The Desk shows only the provider's sign-in link, never
  * a credential. Defaults: the account for new waves (`claude.default_account`,
  * through config_set) and the warn-at threshold from config.
+ *
+ * The section drills into two groups (`GroupList`): Accounts (the banners,
+ * the cards and Add) and Defaults.
  */
 import { EyeIcon, ViewOffIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -51,8 +54,10 @@ import type {
   WaveView,
 } from "../store/types";
 import { AckLine, type RowState } from "./ConfigRows";
+import { GroupList } from "./GroupNav";
 import type { ConfigTransport } from "./configTransport";
 import { Group, Row, Seg } from "./primitives";
+import { sectionDef } from "./sections";
 
 /** A volleyd control request (the steering transport's `control`). */
 export type ControlFn = (
@@ -144,6 +149,31 @@ export interface ClaudeAccountsProps {
   machines?: Record<string, MachinePayload>;
   /** The supervisor's own machine record's name (`_config` `fleet.local_name`). */
   localName?: string | undefined;
+  /** The open group's page (`accounts`, `defaults`), or null for the group list. */
+  group: string | null;
+  onOpenGroup?: (group: string) => void;
+  /** The group a sidebar search hit. */
+  hit?: string | undefined;
+}
+
+/** The group list's one-line summaries. */
+export function claudeSummaries({
+  accounts,
+  needsYou,
+  defaultLabel,
+  warnAt,
+}: {
+  accounts: number;
+  /** Open `account_limit` decisions. */
+  needsYou: number;
+  /** How the account for new waves reads (`Most headroom`). */
+  defaultLabel: string;
+  warnAt: number;
+}): Record<string, string> {
+  return {
+    accounts: `${plural(accounts, "account")}${needsYou ? ` · ${needsYou} needs you` : ""}`,
+    defaults: `${defaultLabel} · warn at ${warnAt}%`,
+  };
 }
 
 const machineName = (m: string) => (m === LOCAL_MACHINE ? "this machine" : m);
@@ -480,7 +510,7 @@ function AddAccount({
           <p className="dim">
             {signin?.plan ? `${signin.plan} · ` : ""}signed in on{" "}
             {machineName(s.phase === "waiting" ? s.machine : LOCAL_MACHINE)}. Pick it for new waves
-            below, or let them take the account with the most headroom.
+            under Defaults, or let them take the account with the most headroom.
           </p>
           <button type="button" className="btn" onClick={onClose}>
             Done
@@ -502,6 +532,9 @@ export function ClaudeAccounts({
   onRegistry,
   machines,
   localName,
+  group,
+  onOpenGroup = () => {},
+  hit,
 }: ClaudeAccountsProps) {
   const [adding, setAdding] = useState(false);
   const [closed, setClosed] = useState(0);
@@ -553,7 +586,50 @@ export function ClaudeAccounts({
       .map((a): [string, string] => [a.id, a.label]),
   ];
   if (!defaults.some(([k]) => k === current)) defaults.push([current, current]);
+  const currentLabel = defaults.find(([k]) => k === current)?.[1] ?? current;
 
+  if (group === "defaults") {
+    return (
+      <Group>
+        <Row label="Account for new waves" hint="A wave file's account: overrides it">
+          {configTransport ? (
+            <>
+              <Seg
+                label="Account for new waves"
+                options={defaults}
+                value={current}
+                onPick={setDefault}
+              />
+              <AckLine s={ack} />
+            </>
+          ) : (
+            <span className="mono s-hint">{currentLabel}</span>
+          )}
+        </Row>
+        <Row
+          label="Warn me at"
+          hint="Raises a Needs-you to move waves; nothing switches on its own"
+        >
+          <span className="mono s-hint">{warnAt}% of the 5-hour window</span>
+        </Row>
+      </Group>
+    );
+  }
+  if (group !== "accounts") {
+    return (
+      <GroupList
+        section={sectionDef("claude")}
+        summaries={claudeSummaries({
+          accounts: groups.length,
+          needsYou: decisions.length,
+          defaultLabel: currentLabel,
+          warnAt,
+        })}
+        onOpen={onOpenGroup}
+        hit={hit}
+      />
+    );
+  }
   return (
     <>
       {!control && (
@@ -660,29 +736,6 @@ export function ClaudeAccounts({
           }}
         />
       )}
-      <Group title="Defaults">
-        <Row label="Account for new waves" hint="A wave file's account: overrides it">
-          {configTransport ? (
-            <>
-              <Seg
-                label="Account for new waves"
-                options={defaults}
-                value={current}
-                onPick={setDefault}
-              />
-              <AckLine s={ack} />
-            </>
-          ) : (
-            <span className="mono s-hint">{defaults.find(([k]) => k === current)?.[1]}</span>
-          )}
-        </Row>
-        <Row
-          label="Warn me at"
-          hint="Raises a Needs-you to move waves; nothing switches on its own"
-        >
-          <span className="mono s-hint">{warnAt}% of the 5-hour window</span>
-        </Row>
-      </Group>
     </>
   );
 }
