@@ -270,10 +270,10 @@ describe("volleyd archive (control op)", () => {
 describe("auto-archive", () => {
   it("archive_ended_after_h: a stopped wave is archived 24 h after its stop, by volleyd", async () => {
     await stopWithDecision();
-    await clock.advance(23 * H);
+    clock.sleepHost(23 * H);
     await daemon.tick();
     expect(types()).not.toContain("wave_archived");
-    await clock.advance(H);
+    clock.sleepHost(H);
     await daemon.tick();
     const last = daemon.journalEvents(WAVE).at(-1);
     expect(last).toMatchObject({ type: "wave_archived", data: { by: "volleyd" } });
@@ -289,7 +289,7 @@ describe("auto-archive", () => {
     });
     expect(set.ok).toBe(true);
     await stopWithDecision();
-    await clock.advance(48 * H);
+    clock.sleepHost(48 * H);
     await daemon.tick();
     expect(types()).not.toContain("wave_archived");
   });
@@ -325,7 +325,7 @@ describe("auto-archive", () => {
     await daemon.tick();
     expect(types()).not.toContain("wave_archived");
     expect(daemon.record(WAVE)?.state?.status).toBe("complete");
-    await clock.advance(24 * H);
+    clock.sleepHost(24 * H);
     await daemon.tick();
     expect(types()).toContain("wave_archived");
   });
@@ -342,7 +342,7 @@ describe("auto-archive", () => {
     await req("resolve", { wave: WAVE, decision_id: id, answer: "acknowledged", by: OWNER });
     await daemon.tick();
     expect(types()).not.toContain("wave_archived");
-    await clock.advance(24 * H);
+    clock.sleepHost(24 * H);
     await daemon.tick();
     expect(types()).toContain("wave_archived");
   });
