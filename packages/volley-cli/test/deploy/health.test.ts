@@ -124,6 +124,20 @@ describe("volleydHealthy", () => {
     expect(await check(since)).toBeNull();
   });
 
+  it("a deadline that has all but run out still reports the real reason, not a dead broker", async () => {
+    const since = new Date();
+    await retain("registered", new Date(since.getTime() - 60_000));
+    const r = await volleydHealthy({
+      brokerUrl: broker.url,
+      auth: null,
+      namespace: "default",
+      since,
+      timeoutMs: 1,
+      pollMs: 25,
+    });
+    expect(r).toMatch(/not re-registered since the restart/);
+  });
+
   it("says the broker is unreachable", async () => {
     const r = await volleydHealthy({
       brokerUrl: "mqtt://127.0.0.1:1",
