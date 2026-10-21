@@ -602,6 +602,10 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
     workdir: ctx.volleydHome,
   };
   const on = `0.0.0.0:${ctx.deskPort}`;
+  // The Desk's release evidence route stays off: setup only names the choice (no behaviour change).
+  plan.found.push(
+    `Release evidence: off (the Needs you window shows release screenshots and logs once the Desk serves them: add \`volley desk serve --evidence ${ctx.volleydHome}\`; anyone on your LAN who can load the Desk can read them without signing in, the same trust as \`--lan\`)`,
+  );
   const conflict = await deskPortConflict(ctx, platform, plan.found);
   if (conflict !== null) {
     plan.blocked = conflict;

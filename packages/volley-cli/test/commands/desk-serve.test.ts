@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -209,5 +209,133 @@ describe("volley desk serve: the stale-build warnings", () => {
     expect(code).toBe(0);
     expect(io.readStdout()).toContain("Serving the Desk from");
     expect(io.readStderr()).toBe("");
+  });
+});
+
+describe("volley desk serve --evidence: the release evidence route", () => {
+  let root: string;
+  let home: string;
+  let server: DeskServer | null = null;
+  beforeEach(() => {
+    const base = tempDir("volley-desk-evidence-");
+    root = join(base, "dist");
+    home = join(base, "volleyd");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "index.html"), "<!doctype html><title>Desk</title>");
+    const rel = join(home, "waves", "w1", "release");
+    mkdirSync(join(rel, "sub"), { recursive: true });
+    writeFileSync(join(rel, "smoke.png"), "PNGDATA");
+    writeFileSync(join(rel, "shot.jpg"), "JPGDATA");
+    writeFileSync(join(rel, "shot.webp"), "WEBPDATA");
+    writeFileSync(join(rel, "smoke.log"), "log line");
+    writeFileSync(join(rel, "notes.txt"), "notes");
+    writeFileSync(join(rel, "tag.md"), "# Release stage");
+    writeFileSync(join(rel, "tag.json"), '{"stage":"tag"}');
+    writeFileSync(join(rel, "evil.html"), "<script>alert(1)</script>");
+    writeFileSync(join(rel, "evil.svg"), "<svg onload=alert(1)/>");
+    writeFileSync(join(rel, "sub", "deep.png"), "DEEP");
+    writeFileSync(join(rel, ".hidden.png"), "HIDDEN");
+    writeFileSync(join(home, "outside.png"), "SECRETCONFIG");
+    symlinkSync(join(home, "outside.png"), join(rel, "link.png"));
+    symlinkSync(join(rel, "evil.html"), join(rel, "alias.png"));
+    symlinkSync(join(rel, "sub", "deep.png"), join(rel, "nested.png"));
+    writeFileSync(join(home, "waves", "w1", "journal.jsonl"), "JOURNAL");
+    writeFileSync(join(home, "config.yaml"), "SECRETCONFIG");
+  });
+  afterEach(async () => {
+    await server?.close();
+    server = null;
+  });
+
+  const serve = async (evidence?: string) => {
+    server = await startDeskServer({
+      root,
+      host: "127.0.0.1",
+      port: 0,
+      ...(evidence !== undefined ? { evidence } : {}),
+    });
+    return server.url;
+  };
+
+  it("is off by default: the path is the Desk's index, never the file", async () => {
+    const url = await serve();
+    const r = await fetch(`${url}/evidence/w1/release/smoke.png`);
+    expect(await r.text()).toContain("<title>Desk</title>");
+  });
+
+  it("serves the allowed types directly under waves/<wave>/release/, read-only", async () => {
+    const url = await serve(home);
+    const cases: [string, string, string][] = [
+      ["smoke.png", "image/png", "PNGDATA"],
+      ["shot.jpg", "image/jpeg", "JPGDATA"],
+      ["shot.webp", "image/webp", "WEBPDATA"],
+      ["smoke.log", "text/plain; charset=utf-8", "log line"],
+      ["notes.txt", "text/plain; charset=utf-8", "notes"],
+      ["tag.md", "text/plain; charset=utf-8", "# Release stage"],
+      ["tag.json", "application/json; charset=utf-8", '{"stage":"tag"}'],
+    ];
+    for (const [file, type, body] of cases) {
+      const r = await fetch(`${url}/evidence/w1/release/${file}`);
+      expect(r.status, file).toBe(200);
+      expect(r.headers.get("content-type"), file).toBe(type);
+      expect(r.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(r.headers.get("content-security-policy")).toContain("sandbox");
+      expect(await r.text(), file).toBe(body);
+    }
+    expect((await fetch(`${url}/evidence/w1/release/smoke.png`, { method: "POST" })).status).toBe(
+      405,
+    );
+  });
+
+  it("refuses every other type, a missing file, a subfolder and any traversal with a 404", async () => {
+    const url = await serve(home);
+    for (const path of [
+      "/evidence/w1/release/evil.html",
+      "/evidence/w1/release/evil.svg",
+      "/evidence/w1/release/missing.png",
+      "/evidence/w1/release/sub/deep.png",
+      "/evidence/w1/release/sub%2fdeep.png",
+      "/evidence/w1/release/../journal.jsonl",
+      "/evidence/w1/release/..%2fjournal.jsonl",
+      "/evidence/w1/release/%2e%2e%2f%2e%2e%2f..%2fconfig.yaml",
+      "/evidence/w1/release/..%5c..%5cconfig.yaml",
+      "/evidence/../config.yaml",
+      "/evidence/%2e%2e/release/smoke.png",
+      "/evidence/W1!/release/smoke.png",
+      "/evidence/w1/release/",
+      "/evidence/w1/release/.hidden.png",
+      "/evidence/w1/release/%252ehidden.png",
+      "/evidence/w1/release/sub%252fdeep.png",
+      "/evidence/w1/release/link.png",
+      "/evidence/w1/release/alias.png",
+      "/evidence/w1/release/nested.png",
+      "/evidence/w1/journal.jsonl",
+    ]) {
+      const r = await fetch(`${url}${path}`);
+      const text = await r.text();
+      // fetch normalises dot segments: one that leaves /evidence/ is the Desk's index, not a file.
+      if (new URL(path, url).pathname.startsWith("/evidence/")) expect(r.status, path).toBe(404);
+      expect(text, path).not.toContain("JOURNAL");
+      expect(text, path).not.toContain("SECRETCONFIG");
+      expect(text, path).not.toContain("DEEP");
+      expect(text, path).not.toContain("<script>");
+      expect(text, path).not.toContain("DEEP");
+      expect(text, path).not.toContain("HIDDEN");
+    }
+  });
+
+  it("--evidence is a flag of desk serve, and a missing folder refuses to start", async () => {
+    const io = makeBufferIO();
+    const code = await desk({
+      argv: ["serve", "--root", root, "--evidence", join(home, "nope")],
+      env: {},
+      io,
+    });
+    expect(code).toBe(1);
+    expect(io.readStderr()).toContain("--evidence");
+    const help = makeBufferIO();
+    await desk({ argv: ["serve", "--help"], env: {}, io: help });
+    expect(help.readStdout()).toContain("--evidence <dir>");
+    expect(help.readStdout()).toMatch(/LAN/);
   });
 });

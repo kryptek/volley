@@ -12,6 +12,7 @@ import type {
   DeskMessage,
   DeskState,
   Envelope,
+  InboxItem,
   Role,
   Stage,
   WaveCoordinator,
@@ -1055,6 +1056,107 @@ export function demoAutopilot(now = Date.now()): DeskMessage[] {
       decision_id: "autopilot-stage_go-1",
       kind: "stage_go",
       why: "owner_only",
+    }),
+  ];
+}
+
+/**
+ * The needs-you inbox (SPEC §4.6.18): one item of each kind as volleyd publishes them on
+ * `volley/_inbox/<id>`. The release item is owner-only, for the `autopilot` wave's `publish` stage
+ * (`demoAutopilot`), and points at its stage evidence on disk.
+ */
+export const INBOX_RELEASE_EVIDENCE = {
+  wave: "autopilot",
+  stage: "tag",
+  artifacts: {
+    tag: "v0.5.0",
+    changelog_entries: [
+      "**Needs you** window: one row per open item, with `Only you` filter.",
+      "- Phone layout with 48 px targets\n- Owner-only items push to the phone",
+    ],
+    screenshots: ["smoke-desk.png", "smoke-phone.webp"],
+    release_pr: "https://github.com/example-org/example-repo/pull/300",
+    ci_runs: ["https://github.com/example-org/example-repo/actions/runs/77"],
+    smoke_log: "smoke.log",
+    guide_url: "https://guide.example.com/releasing",
+  },
+};
+
+export function demoInbox(now = Date.now()): DeskMessage[] {
+  const item = (p: InboxItem): DeskMessage => ({
+    topic: `volley/_inbox/${p.id}`,
+    envelope: env(SUPERVISOR, "_inbox", p.answered ? "inbox_answered" : "inbox_item", p, now),
+    receivedAt: now,
+    retained: true,
+  });
+  return [
+    item({
+      id: "d-autopilot-d-rv7",
+      kind: "decision",
+      version: 2,
+      owner_only: false,
+      wave: "autopilot",
+      task: "T7",
+      agent_id: "autopilot-t7-implementer-1",
+      title: "Reviewers disagree · autopilot/T7",
+      question: "The spec reviewer calls the missing retry a P1; the quality reviewer says fine.",
+      options: [{ label: "blocker" }, { label: "fine" }],
+      allow_other: true,
+      pointers: { pr: "https://github.com/example-org/example-repo/pull/213" },
+      opened_at: iso(now - 4 * 60_000),
+      source: { decision_id: "d-rv7", decision_kind: "reviewers_disagree" },
+    }),
+    item({
+      id: "p-coord-a1b2c3-toolu_01AbCdEf",
+      kind: "picker",
+      version: 1,
+      owner_only: false,
+      agent_id: "coord-a1b2c3",
+      title: "Pick a storage backend",
+      question: "Which backend should the cache use?",
+      options: [
+        { label: "SQLite", description: "One file, no server" },
+        { label: "Redis", description: "Shared across machines" },
+      ],
+      allow_other: true,
+      multi: false,
+      pointers: {},
+      opened_at: iso(now - 3 * 60_000),
+      source: { tool_use_id: "toolu_01AbCdEf", machine: "laptop" },
+    }),
+    item({
+      id: "h-sess-9f2-12",
+      kind: "handoff",
+      version: 1,
+      owner_only: false,
+      agent_id: "sess-9f2",
+      title: "Session sess-9f2 is waiting",
+      question: "Should I also migrate the old rows?",
+      allow_other: true,
+      pointers: {},
+      opened_at: iso(now - 2 * 60_000),
+      source: { seq: 12 },
+    }),
+    item({
+      id: "r-autopilot-publish",
+      kind: "release",
+      version: 1,
+      owner_only: true,
+      wave: "autopilot",
+      agent_id: SUPERVISOR,
+      title: "Run stage publish · autopilot",
+      question: "Stage tag is verified. Run publish?",
+      options: [{ label: "go" }, { label: "skip" }, { label: "hold" }],
+      pointers: {},
+      opened_at: iso(now - 60_000),
+      source: {
+        wave: "autopilot",
+        stage: "publish",
+        evidence: {
+          md: "~/.volleyd/waves/autopilot/release/tag.md",
+          json: "~/.volleyd/waves/autopilot/release/tag.json",
+        },
+      },
     }),
   ];
 }
