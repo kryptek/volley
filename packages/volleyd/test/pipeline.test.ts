@@ -1084,6 +1084,10 @@ describe("pipeline: remediations (respawn an unverifiable agent, fixup a red hea
   const redOn = (head: string) => {
     h.world.ci[head] = "red";
     h.world.runLog = fixture("gh-run-log-failed.txt");
+    // The PR touches the failing tests: the red head is its own change (A3's classification).
+    h.world.prFiles[7] = JSON.stringify({
+      files: [{ path: "test/pipeline.test.ts" }, { path: "test/clock.test.ts" }],
+    });
   };
   const ciFailed = () => h.openDecisions().find((d) => d.kind === "ci_failed");
 

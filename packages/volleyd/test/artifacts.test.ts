@@ -6,7 +6,9 @@ import {
   artifactOutcome,
   checkRebase,
   isInfraFailure,
+  prFiles,
   probeMovedHead,
+  probeReleaseCi,
   verifyArtifacts,
 } from "../src/artifacts";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
@@ -437,5 +439,52 @@ describe("moved head: a merge of the release branch only", () => {
       { stdout: `${MB} ${X}\n` },
     );
     expect((await probe(other)).release_merge).toBeUndefined();
+  });
+});
+
+describe("probeReleaseCi", () => {
+  const RELEASE = { cwd: WT, release_branch: "release/w1" };
+
+  it("the latest run per workflow on the release branch is red: its failing tests", async () => {
+    const fake = fakeExec()
+      .on(["gh", "run", "list"], { stdout: fx("gh-run-list-release-red.json") })
+      .on(["gh", "run", "view"], { stdout: fx("gh-run-log-failed-flake.txt") });
+    expect(await probeReleaseCi(fake.exec, RELEASE)).toEqual({
+      state: "red",
+      failing_tests: ["test/clock.test.ts > sleep > resolves on abort"],
+    });
+    expect(fake.argvs(["gh", "run", "list"])[0]?.slice(0, 7)).toEqual([
+      "gh",
+      "run",
+      "list",
+      "--branch",
+      "release/w1",
+      "--limit",
+      "20",
+    ]);
+    // Only the latest CI run's log is read (the older green one and Docs are not red).
+    expect(fake.argvs(["gh", "run", "view"])).toEqual([
+      ["gh", "run", "view", "812", "--log-failed"],
+    ]);
+  });
+
+  it("green, and unreadable", async () => {
+    const green = fakeExec().on(["gh", "run", "list"], { stdout: fx("gh-run-list-green.json") });
+    expect(await probeReleaseCi(green.exec, RELEASE)).toEqual({
+      state: "green",
+      failing_tests: [],
+    });
+    const broken = fakeExec().on(["gh", "run", "list"], { code: 1, stderr: "HTTP 502" });
+    expect(await probeReleaseCi(broken.exec, RELEASE)).toEqual({
+      state: "unknown",
+      failing_tests: [],
+    });
+  });
+
+  it("prFiles: the PR's changed files, null when gh fails", async () => {
+    const ok = fakeExec().on(["gh", "pr", "view"], { stdout: fx("gh-pr-view-files.json") });
+    expect(await prFiles(ok.exec, WT, 7)).toContain("packages/volleyd/src/pipeline.ts");
+    const broken = fakeExec().on(["gh", "pr", "view"], { code: 1 });
+    expect(await prFiles(broken.exec, WT, 7)).toBeNull();
   });
 });

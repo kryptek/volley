@@ -1,0 +1,24 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T10:44:02.000Z",
+  "channel": "_waves/events",
+  "type": "remediation_requested",
+  "payload": {
+    "wave": "w1",
+    "seq": 88,
+    "at": "2026-10-20T10:44:02.000Z",
+    "task": "T1",
+    "data": {
+      "kind": "fix_flake",
+      "test": "test/clock.test.ts > sleep > resolves on abort",
+      "test_file": "test/clock.test.ts",
+      "tests": ["test/clock.test.ts > sleep > resolves on abort"],
+      "head": "9fd33a4c1b2e",
+      "run_urls": ["https://github.com/example-org/example-repo/actions/runs/812"],
+      "for": "T1",
+      "role": "implementer",
+      "release_ci": "red"
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { GithubStatus } from "../../src/autopilot/github-status";
 import type { Role } from "../../src/brief";
 import {
   type DecisionInput,
@@ -76,6 +77,10 @@ export interface World {
   runJobs?: string;
   /** `gh run view <id> --log-failed`. */
   runLog: string;
+  /** `gh run view <id> --log-failed` per run id (overrides `runLog`). */
+  runLogs: Record<number, string>;
+  /** `gh run list --branch <release>`: the release branch's runs, as JSON (default none). */
+  releaseRuns: string;
   /** Called with every argv before it is answered (a test may change the world mid-run). */
   before?: ((argv: string[]) => void) | undefined;
   /** An argv this returns a promise for is answered only once it resolves. */
@@ -131,6 +136,10 @@ export interface HarnessOptions {
   merge?: "auto" | "manual";
   /** `autopilot.merge_retry_max` the driver reads (default: the config default). */
   mergeRetryMax?: number;
+  /** GitHub's status page as the driver reads it (default: none read, i.e. unknown). */
+  statusPage?: GithubStatus;
+  /** `autopilot.incident_wait_max_s` the driver reads (default: the config default). */
+  incidentWaitMaxS?: number;
   /** `autopilot.delete_branch` the driver reads (default: absent, i.e. false). */
   deleteBranch?: boolean;
   /** The release-branch lock the driver merges under (default: the driver's own). */
@@ -186,6 +195,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     prView: {},
     prFiles: {},
     runLog: "",
+    runLogs: {},
+    releaseRuns: "[]",
     mergeCommit: {},
   };
   const calls: string[][] = [];
@@ -282,6 +293,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         }),
       );
     }
+    if (a[0] === "gh" && a[1] === "run" && a[2] === "list" && a.includes("--branch"))
+      return out(world.releaseRuns);
     if (a[0] === "gh" && a[1] === "run" && a[2] === "list") {
       const head = a[a.indexOf("--commit") + 1] as string;
       const many = world.ciRuns[head];
@@ -317,7 +330,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       );
     }
     if (a[0] === "gh" && a[1] === "run" && a[2] === "view") {
-      if (a.includes("--log-failed")) return out(world.runLog);
+      if (a.includes("--log-failed")) return out(world.runLogs[Number(a[3])] ?? world.runLog);
       if (world.runJobs !== undefined) return out(world.runJobs);
       return out(
         JSON.stringify({
@@ -407,6 +420,10 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     ...(o.hygiene !== undefined ? { hygiene: () => o.hygiene as HygieneLevel } : {}),
     ...(o.merge !== undefined ? { mergeMode: () => o.merge as "auto" | "manual" } : {}),
     ...(o.mergeRetryMax !== undefined ? { mergeRetryMax: () => o.mergeRetryMax as number } : {}),
+    ...(o.statusPage !== undefined ? { statusPage: async () => o.statusPage as GithubStatus } : {}),
+    ...(o.incidentWaitMaxS !== undefined
+      ? { incidentWaitMaxS: () => o.incidentWaitMaxS as number }
+      : {}),
     ...(o.deleteBranch !== undefined ? { deleteBranch: () => o.deleteBranch as boolean } : {}),
     ...(o.releaseLock !== undefined ? { releaseLock: o.releaseLock } : {}),
     // One serial queue, like the daemon's: pipeline I/O folds its results back in through it.
