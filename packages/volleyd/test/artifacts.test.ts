@@ -11,6 +11,7 @@ import {
   probeMovedHead,
   probeReleaseCi,
   verifyArtifacts,
+  verifyOperatorMerge,
 } from "../src/artifacts";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { type FakeExec, fakeExec } from "./helpers/fake-exec";
@@ -406,6 +407,30 @@ describe("probes from the repo root (the head worktree is gone)", () => {
       HEAD,
       "origin/release/w1",
     ]);
+  });
+
+  it("a failed PR-head fetch is named as such, not left to the next step's error", async () => {
+    const failing = () =>
+      fakeExec().on(["git", "-C", ROOT, "fetch", "origin", "refs/pull/7/head"], {
+        code: 128,
+        stderr: "fatal: couldn't find remote ref refs/pull/7/head\n",
+      });
+    const why =
+      "git fetch origin refs/pull/7/head failed (128): fatal: couldn't find remote ref refs/pull/7/head";
+    await expect(
+      checkRebase(failing().exec, { ...at, head: HEAD, release_branch: "release/w1" }),
+    ).rejects.toThrow(why);
+    await expect(
+      probeLanded(failing().exec, { ...at, head: HEAD, release_branch: "release/w1", pr: 7 }),
+    ).rejects.toThrow(why);
+    expect(
+      await verifyOperatorMerge(failing().exec, {
+        ...at,
+        head: HEAD,
+        sha: TIP,
+        release_branch: "release/w1",
+      }),
+    ).toEqual({ ok: false, error: why });
   });
 });
 

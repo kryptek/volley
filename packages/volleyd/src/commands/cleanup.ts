@@ -23,7 +23,9 @@ Without --yes, only prints what would be removed. Only worktrees whose every age
 (journaled agent_retired) are touched; live agents are listed and skipped. Branches are kept.
 A worktree with uncommitted changes is skipped unless --force is given. Only tasks that are done
 or cancelled are touched: an unfinished task (e.g. merge_ready, its agents retired while the
-merge waits) is listed and skipped unless --all is given.
+merge waits) is listed and skipped unless --all is given. The pipeline falls back to the repo
+root for a local task's removed worktree, not for a remote task's: --all on an unfinished remote
+task leaves its git checks failing until it is resolved by hand.
 Reads $VOLLEYD_HOME directly; works while the daemon is down.
 `;
 

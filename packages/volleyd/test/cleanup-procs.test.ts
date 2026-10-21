@@ -189,7 +189,7 @@ describe("cleanup skips unfinished tasks", () => {
     expect(all.held).toEqual([]);
   });
 
-  it("prints `skip T2: merge_ready` and removes only the done task's worktree; --all removes both", async () => {
+  it("prints `skip T2: merge_ready` and touches only the done task's worktree; --all plans both", async () => {
     const { home, wt } = setup();
     const removed = (argvs: string[][]) =>
       argvs.filter((a) => a.includes("worktree") && a.includes("remove")).map((a) => a.at(-1));

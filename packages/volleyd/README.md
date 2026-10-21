@@ -1829,7 +1829,9 @@ retired, or one the daemon is launching and has not journaled yet) (`stopped <pi
 id>)`; the dry run prints `would stop …`). Worktrees of agents not yet retired are skipped, and branches are never
 deleted. Only tasks that are `done` or `cancelled` are cleaned up: an unfinished task (a
 `merge_ready` task's agents are all retired while its merge waits) prints `skip <task>: <stage>`
-and keeps its worktrees, unless `--all` is given. The pipeline does not depend on them anyway:
+and keeps its worktrees, unless `--all` is given (on an unfinished task that runs on a remote
+host, `--all` leaves its git checks failing: the repo-root fallback below is the supervisor's
+machine only). The pipeline does not depend on them anyway:
 its GitHub reads (`gh pr view`, `gh pr list`, `gh run list|view`) run on the supervisor's
 machine from the wave's repo root, with `--repo <owner/repo>` once the repository was read; its
 git checks (the gate's rebase check, a closed PR's landed probe, a moved head's diff,

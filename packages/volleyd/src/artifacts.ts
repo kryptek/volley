@@ -449,9 +449,12 @@ export interface GitAt {
   fetch?: string;
 }
 
-/** Fetch `o.fetch` (the PR head into a repo root), when given; a failure shows in what follows. */
-async function fetchHead(git: (...a: string[]) => Promise<unknown>, o: GitAt): Promise<void> {
-  if (o.fetch !== undefined) await git("fetch", "origin", o.fetch);
+/** Fetch `o.fetch` (the PR head into a repo root), when given; throws, naming it, on a failure. */
+async function fetchHead(git: (...a: string[]) => Promise<ExecResult>, o: GitAt): Promise<void> {
+  if (o.fetch === undefined) return;
+  const r = await git("fetch", "origin", o.fetch);
+  if (r.code !== 0)
+    throw new Error(`git fetch origin ${o.fetch} failed (${r.code}): ${line(r.stderr)}`);
 }
 
 /** Has the release branch moved past where `head` branched from it? */
@@ -606,7 +609,11 @@ export async function verifyOperatorMerge(
 ): Promise<OperatorMergeCheck> {
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
   const release = `origin/${o.release_branch}`;
-  await fetchHead(git, o);
+  try {
+    await fetchHead(git, o);
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
   await git("fetch", "origin", o.release_branch);
   // A short sha is the same commit as its full one: compare (and record) the full sha.
   const full = await git("rev-parse", "--verify", "--quiet", `${o.sha}^{commit}`);
