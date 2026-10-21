@@ -48,8 +48,8 @@ function expectedLeaves(s: Record<string, JsonSchema>, prefix = ""): string[] {
   return Object.entries(s).flatMap(([k, v]) => {
     const p = `${prefix}${k}`;
     if (isRecordMap(v)) return [];
-    // A list (`autopilot.owner_only`) has no row.
-    if (v.type === "array") return [];
+    // A list of an enum (`autopilot.owner_only`) is a multi-select; any other list has no row.
+    if (v.type === "array") return (v.items as JsonSchema | undefined)?.enum ? [p] : [];
     if (v.properties) return expectedLeaves(v.properties as Record<string, JsonSchema>, `${p}.`);
     if (v.additionalProperties) {
       // A top-level map is `lease_pools` (a capacity row per pool); a nested map of integers
@@ -229,13 +229,17 @@ describe("schemaRows", () => {
     expect(schemaRows(schema, null).some((r) => r.path.startsWith("hosts"))).toBe(false);
   });
 
-  it("gives autopilot a row per bounded leaf and none for its owner_only list", () => {
+  it("gives autopilot a row per leaf, its owner_only list a multi-select of decision kinds", () => {
     expect(at.get("autopilot.enabled")).toMatchObject({ control: { kind: "toggle" } });
     expect(at.get("autopilot.relaunch_max")).toMatchObject({
       control: { kind: "slider", min: 0, max: 10, step: 1 },
     });
     expect(at.get("autopilot.budget_raise_max")?.control).toMatchObject({ kind: "slider", min: 1 });
-    expect(at.has("autopilot.owner_only")).toBe(false);
+    const owner = at.get("autopilot.owner_only");
+    expect(owner?.section).toBe("Autopilot");
+    expect(owner?.control).toMatchObject({ kind: "multi" });
+    expect(owner?.control.kind === "multi" && owner.control.options).toContain("release_go");
+    expect(at.get("autopilot.enabled")?.section).toBe("Autopilot");
   });
 
   it("has no lease rows when no pools are configured", () => {

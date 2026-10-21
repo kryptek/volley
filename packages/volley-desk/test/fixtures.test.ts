@@ -3,17 +3,25 @@ import path from "node:path";
 import addFormats from "ajv-formats";
 import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
+import { coordinatorFor, waveAttention } from "../src/attention";
 import {
   DEMO_AGENTS_MAX,
   NARRATION_POOL,
   demoAgentCount,
+  demoAutopilot,
   demoMessages,
   demoReviewer,
   demoState,
   isDemoMode,
   tick,
 } from "../src/store/fixtures";
-import { UNASSIGNED, agentsByWave, reduceAll, routeTopic } from "../src/store/reducer";
+import {
+  UNASSIGNED,
+  agentsByWave,
+  initialState,
+  reduceAll,
+  routeTopic,
+} from "../src/store/reducer";
 
 const NOW = Date.parse("2026-10-18T15:00:00.000Z");
 
@@ -157,6 +165,8 @@ describe("fixtures — schema validity", () => {
         return `${route.channel}.schema.json`;
       case "wave":
         return "wave-state.schema.json";
+      case "waveEvent":
+        return "wave-event.schema.json";
       case "decision":
         return "decision.schema.json";
       case "config":
@@ -170,7 +180,7 @@ describe("fixtures — schema validity", () => {
 
   it("every demo envelope validates against its T1 schema", () => {
     const failures: string[] = [];
-    for (const m of [...demoMessages(NOW), ...demoReviewer(NOW)]) {
+    for (const m of [...demoMessages(NOW), ...demoReviewer(NOW), ...demoAutopilot(NOW)]) {
       const schema = schemaFor(m.topic);
       if (schema === null || m.envelope === null) continue;
       const validate = ajv.getSchema(schema);
@@ -178,5 +188,32 @@ describe("fixtures — schema validity", () => {
       if (!validate(m.envelope)) failures.push(`${m.topic}: ${ajv.errorsText(validate.errors)}`);
     }
     expect(failures).toEqual([]);
+  });
+});
+
+describe("fixtures — autopilot", () => {
+  const s = reduceAll(initialState(), demoAutopilot(NOW));
+
+  it("has a wave whose coordinator is reconnecting, which needs nobody", () => {
+    const w = s.waves.relaunch;
+    expect(w).toBeDefined();
+    const ctx = { now: NOW, me: null, config: null, coordinators: s.coordinators, agents: {} };
+    expect(coordinatorFor(w as NonNullable<typeof w>, ctx).state).toBe("reconnecting");
+    expect(waveAttention(w as NonNullable<typeof w>, ctx)).toEqual({
+      tier: "info",
+      reason: "Coordinator reconnecting · 3m",
+    });
+  });
+
+  it("has a releasing wave with a merge queue, a train, a fixer and both autopilot events", () => {
+    const st = s.waves.autopilot?.state;
+    expect(st?.status).toBe("releasing");
+    expect(st?.merge_queue).toHaveLength(4);
+    expect(st?.release?.stages).toHaveLength(3);
+    expect(st?.tasks.some((t) => t.synthetic)).toBe(true);
+    expect(s.waveFeed?.autopilot?.map((e) => e.envelope.type)).toEqual([
+      "decision_auto_resolved",
+      "decision_escalated",
+    ]);
   });
 });

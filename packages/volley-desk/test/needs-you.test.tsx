@@ -271,3 +271,17 @@ describe("MachineDown (a machine_down decision)", () => {
     expect(screen.queryByRole("button", { name: "Answer" })).toBeNull();
   });
 });
+
+describe("NeedsYou (coordinator reconnecting)", () => {
+  it("shows no banner: the session is coming back, there is nothing to claim", () => {
+    const { container } = render(
+      <NeedsYou
+        wave="status-chip"
+        coordinator={{ id: "lead", state: "reconnecting", since: NOW - 60_000 }}
+        openDecisions={2}
+        now={NOW}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+});
