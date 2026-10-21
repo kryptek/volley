@@ -27,7 +27,14 @@
       "tmux": "3.4",
       "claude": "2.4.1"
     },
-    "auth": { "gh": "ok", "claude": "signed_in", "trust": "ok", "claude_plan": "max" },
+    "auth": {
+      "gh": "ok",
+      "claude": "signed_in",
+      "trust": "ok",
+      "claude_plan": "max",
+      "claude_email": "owner@example.com",
+      "claude_org": "Example Org"
+    },
     "repo": {
       "path": "/srv/src/app",
       "exists": true,
