@@ -238,6 +238,7 @@ describe("volley desk serve --evidence: the release evidence route", () => {
     writeFileSync(join(home, "outside.png"), "SECRETCONFIG");
     symlinkSync(join(home, "outside.png"), join(rel, "link.png"));
     symlinkSync(join(rel, "evil.html"), join(rel, "alias.png"));
+    symlinkSync(join(rel, "sub", "deep.png"), join(rel, "nested.png"));
     writeFileSync(join(home, "waves", "w1", "journal.jsonl"), "JOURNAL");
     writeFileSync(join(home, "config.yaml"), "SECRETCONFIG");
   });
@@ -307,6 +308,7 @@ describe("volley desk serve --evidence: the release evidence route", () => {
       "/evidence/w1/release/sub%252fdeep.png",
       "/evidence/w1/release/link.png",
       "/evidence/w1/release/alias.png",
+      "/evidence/w1/release/nested.png",
       "/evidence/w1/journal.jsonl",
     ]) {
       const r = await fetch(`${url}${path}`);
@@ -315,6 +317,7 @@ describe("volley desk serve --evidence: the release evidence route", () => {
       if (new URL(path, url).pathname.startsWith("/evidence/")) expect(r.status, path).toBe(404);
       expect(text, path).not.toContain("JOURNAL");
       expect(text, path).not.toContain("SECRETCONFIG");
+      expect(text, path).not.toContain("DEEP");
       expect(text, path).not.toContain("<script>");
       expect(text, path).not.toContain("DEEP");
       expect(text, path).not.toContain("HIDDEN");

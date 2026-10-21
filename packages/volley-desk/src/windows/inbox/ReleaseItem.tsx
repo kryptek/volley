@@ -92,14 +92,16 @@ export function ReleaseItem(p: ReleaseItemProps) {
   const md = source.evidence?.md;
   const jsonUrl =
     typeof json === "string" && wave !== undefined ? evidenceUrl(origin, wave, json) : null;
-  const [loaded, setLoaded] = useState<unknown>(typeof json === "object" ? json : null);
+  // Inline evidence is read from props on every render; state holds only what was fetched.
+  const [fetched, setFetched] = useState<unknown>(null);
+  const loaded = typeof json === "object" && json !== null ? json : fetched;
   const load = p.loadEvidence ?? fetchJson;
   useEffect(() => {
     if (jsonUrl === null) return;
     let live = true;
     load(jsonUrl)
       .then((e) => {
-        if (live) setLoaded(e);
+        if (live) setFetched(e);
       })
       .catch(() => {});
     return () => {

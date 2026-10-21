@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { type Server, type ServerResponse, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { extname, join, resolve, sep } from "node:path";
+import { dirname, extname, join, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import pkg from "../../package.json";
 import { EXIT, type ExitCode } from "../exit-codes";
@@ -63,7 +63,7 @@ const WAVE_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 /**
  * The evidence file `urlPath` names under `home` (`/evidence/<wave>/release/<file>`), or null:
  * not that shape, a wave id that is not one, a file name with a separator or a leading dot, a
- * type not allowed, missing, or a symlink whose target is outside the folder. The name is decoded
+ * type not allowed, missing, or a symlink whose target is not directly in the folder. The name is decoded
  * exactly once: it is joined to the folder as validated, never handed to a second decoder.
  */
 export function resolveEvidenceFile(home: string, urlPath: string): string | null {
@@ -84,7 +84,7 @@ export function resolveEvidenceFile(home: string, urlPath: string): string | nul
   try {
     const dir = realpathSync(join(home, "waves", wave, "release"));
     const real = realpathSync(join(dir, file));
-    if (!real.startsWith(dir + sep) || EVIDENCE_TYPES[extname(real).toLowerCase()] === undefined)
+    if (dirname(real) !== dir || EVIDENCE_TYPES[extname(real).toLowerCase()] === undefined)
       return null;
     if (!statSync(real).isFile()) return null;
     return real;

@@ -1153,8 +1153,8 @@ export function demoInbox(now = Date.now()): DeskMessage[] {
         wave: "autopilot",
         stage: "publish",
         evidence: {
-          md: "/home/owner/.volleyd/waves/autopilot/release/tag.md",
-          json: "/home/owner/.volleyd/waves/autopilot/release/tag.json",
+          md: "~/.volleyd/waves/autopilot/release/tag.md",
+          json: "~/.volleyd/waves/autopilot/release/tag.json",
         },
       },
     }),

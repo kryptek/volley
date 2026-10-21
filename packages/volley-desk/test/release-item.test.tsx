@@ -8,7 +8,7 @@ import { ReleaseItem, evidenceUrl, releaseArtifacts } from "../src/windows/inbox
 const NOW = Date.parse("2026-10-21T12:00:00.000Z");
 const STATE = reduceAll(initialState(), [...demoAutopilot(NOW), ...demoInbox(NOW)]);
 const ITEM = STATE.inbox?.["r-autopilot-publish"] as InboxItem;
-const ORIGIN = "http://desk.lan:5199";
+const ORIGIN = "http://desk.example:5199";
 
 async function setup(evidence: unknown = INBOX_RELEASE_EVIDENCE, item: InboxItem = ITEM) {
   const loadEvidence = vi.fn(async () => evidence);
@@ -108,6 +108,39 @@ describe("a release item", () => {
     const { loadEvidence } = await setup(null, inline);
     expect(loadEvidence).not.toHaveBeenCalled();
     expect(await screen.findByRole("link", { name: "Release PR" })).toBeInTheDocument();
+  });
+
+  it("follows a retained update that replaces the inline evidence", async () => {
+    const withPr = (pr: string) =>
+      ({
+        ...ITEM,
+        source: {
+          wave: "autopilot",
+          evidence: {
+            json: {
+              ...INBOX_RELEASE_EVIDENCE,
+              artifacts: { ...INBOX_RELEASE_EVIDENCE.artifacts, release_pr: pr },
+            },
+          },
+        },
+      }) as InboxItem;
+    const { rerender } = await setup(null, withPr("https://example.com/pull/1"));
+    expect(screen.getByRole("link", { name: "Release PR" })).toHaveAttribute(
+      "href",
+      "https://example.com/pull/1",
+    );
+    rerender(
+      <ReleaseItem
+        item={withPr("https://example.com/pull/2")}
+        wave={STATE.waves.autopilot}
+        origin={ORIGIN}
+        loadEvidence={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("link", { name: "Release PR" })).toHaveAttribute(
+      "href",
+      "https://example.com/pull/2",
+    );
   });
 
   it("with no evidence the train still shows and nothing else", async () => {
