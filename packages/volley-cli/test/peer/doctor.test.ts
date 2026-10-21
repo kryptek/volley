@@ -521,6 +521,42 @@ describe("volley peer doctor: GitHub and Claude", () => {
     expect((await report(machine({ claudeStatus: "something else" }))).auth.claude).toBe("unknown");
   });
 
+  it("a signed-in profile's identity comes from ~/.claude.json: claude_email and claude_org only", async () => {
+    const claudeJson = {
+      userID: "c0ffee",
+      oauthAccount: {
+        accountUuid: "11111111-2222-3333-4444-555555555555",
+        emailAddress: "Owner@Example.com",
+        organizationName: "Example Org",
+      },
+    };
+    const m = machine({ claudeStatus: { loggedIn: true, subscriptionType: "max" }, claudeJson });
+    const r = await report(m);
+    // scrub leaves an e-mail alone; nothing else of the file travels.
+    expect(r.auth).toMatchObject({
+      claude: "signed_in",
+      claude_email: "owner@example.com",
+      claude_org: "Example Org",
+    });
+    const text = JSON.stringify(r);
+    for (const key of ["c0ffee", "11111111-2222"]) expect(text).not.toContain(key);
+    box?.cleanup();
+    const out = await report(
+      machine({ claudeStatus: { loggedIn: false }, claudeCode: 1, claudeJson }),
+    );
+    expect(out.auth.claude_email).toBeUndefined();
+    expect(out.auth.claude_org).toBeUndefined();
+    box?.cleanup();
+    const bad = await report(
+      machine({
+        claudeStatus: { loggedIn: true },
+        claudeJson: { oauthAccount: { emailAddress: 42, organizationName: "" } },
+      }),
+    );
+    expect(bad.auth).not.toHaveProperty("claude_email");
+    expect(bad.auth).not.toHaveProperty("claude_org");
+  });
+
   it("folder trust comes from the box's ~/.claude.json; a parent folder counts", async () => {
     const untrusted = await report(machine());
     expect(untrusted.auth.trust).toBe("missing");

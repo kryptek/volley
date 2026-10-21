@@ -1303,6 +1303,16 @@ describe("volley peer run (the service)", () => {
 
   it("embeds the doctor in every heartbeat; the record validates against machine.schema.json", async () => {
     writeCfg({ repo: box.repoPath });
+    // The default profile's login, as Claude Code records it beside the trust table.
+    const claudeJsonFile = join(box.home, ".claude.json");
+    const claudeJson = JSON.parse(readFileSync(claudeJsonFile, "utf-8")) as Record<string, unknown>;
+    writeFileSync(
+      claudeJsonFile,
+      JSON.stringify({
+        ...claudeJson,
+        oauthAccount: { emailAddress: "owner@example.com", organizationName: "Example Org" },
+      }),
+    );
     // The supervisor's verdict names the version it requires (only volleyd's is believed).
     await readiness("volleyd", { requirements: { volley: "0.5.0" } });
     const { code, records } = await heartbeats(3);
@@ -1326,7 +1336,14 @@ describe("volley peer run (the service)", () => {
       disk: { free_gb: 500, free_pct: 50 },
       uptime_s: 86_400,
       versions: { peer: "0.4.0", volley: "0.4.0", bun: "1.3.2", git: "2.43.0" },
-      auth: { gh: "ok", claude: "signed_in", trust: "ok", claude_plan: "max" },
+      auth: {
+        gh: "ok",
+        claude: "signed_in",
+        trust: "ok",
+        claude_plan: "max",
+        claude_email: "owner@example.com",
+        claude_org: "Example Org",
+      },
       repo: { path: box.repoPath, exists: true, origin: "github.com/example-org/example-repo" },
     });
     // When the doctor finished: the first beat's time, or the next one's.

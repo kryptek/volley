@@ -4,7 +4,10 @@ import { type Clock, dateOf, sleep, systemClock } from "../clock";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn } from "../exec";
 import type { RemoteHost } from "../hosts/ssh-tmux";
+import type { MachineRecord } from "../machines";
+import { readClaudeJson } from "../trust";
 import type { NewEvent } from "../types";
+import { type LoginIdentity, loginIdentity, readLoginIdentity } from "./identity";
 import {
   type ClaudeAccount,
   ClaudeAccountError,
@@ -64,7 +67,10 @@ export interface ClaudeServiceDeps {
    * `most_headroom`; null when no candidate has usage data.
    */
   headroom?: (candidates: readonly string[]) => string | null;
-  /** The primary's plan changed (`claude_accounts` asked): its usage record is out of date. */
+  /**
+   * The primary's plan or sign-in state changed (`claude_accounts` asked): its usage record is
+   * out of date.
+   */
   onPrimaryPlan?: () => void;
   /** A paired machine by name, or why it cannot be reached: `primary@<name>` sign-ins. */
   remote?: (name: string) => RemoteHost | string;
@@ -72,6 +78,10 @@ export interface ClaudeServiceDeps {
   reservedPorts?: () => number[];
   /** How long a sign-in forward must stay up before its URL is published (tests). */
   forwardSettleMs?: number;
+  /** A machine record's default-profile identity (`auth.claude_email/claude_org`), by name. */
+  machineIdentity?: (name: string) => LoginIdentity;
+  /** Every machine record (the supervisor's own and each paired machine's): `claude_accounts`. */
+  machines?: () => MachineRecord[];
 }
 
 /** What a sign-in run gets from the service: its stop signal, timers and publisher. */
@@ -99,6 +109,8 @@ export class ClaudeService {
   private readonly clock: Clock;
   /** The primary's plan as `claude auth status` last said it; undefined: not known. */
   private primaryPlan: string | undefined;
+  /** False once `claude auth status` said the primary is signed out: it then has no identity. */
+  private primarySignedIn: boolean | undefined;
   private primaryAsk: Promise<void> | undefined;
   constructor(private readonly d: ClaudeServiceDeps) {
     // real clock: the default when the daemon injects no clock
@@ -134,13 +146,46 @@ export class ClaudeService {
     return this.registry().find((a) => profileDir(this.d.root, a.id) === canonical)?.id ?? null;
   }
 
-  /** A registry account's label and plan, or the primary's plan once known, for its usage record. */
-  describe(acct: string): { label?: string; plan?: string } {
-    if (acct === PRIMARY_ACCOUNT)
-      return this.primaryPlan !== undefined ? { plan: this.primaryPlan } : {};
+  /**
+   * An account's usage-record facts: a registry account's label, plan and identity; the primary's
+   * plan once known and its identity; a paired machine's (`primary@<name>`) identity from its
+   * machine record.
+   */
+  describe(acct: string): { label?: string; plan?: string } & LoginIdentity {
+    if (acct === PRIMARY_ACCOUNT) return this.primaryFacts();
+    const machine = remoteAccountHost(acct);
+    if (machine !== null) return this.d.machineIdentity?.(machine) ?? {};
     const a = this.registry().find((x) => x.id === acct);
     if (a === undefined) return {};
-    return { label: a.label, ...(a.plan !== undefined ? { plan: a.plan } : {}) };
+    return {
+      label: a.label,
+      ...(a.plan !== undefined ? { plan: a.plan } : {}),
+      ...this.identityOf(a),
+    };
+  }
+
+  /** The primary's plan and identity: none of it once `claude auth status` said it is signed out. */
+  private primaryFacts(): { plan?: string } & LoginIdentity {
+    if (this.primarySignedIn === false) return {};
+    return {
+      ...(this.primaryPlan !== undefined ? { plan: this.primaryPlan } : {}),
+      ...readLoginIdentity(this.d.primaryJson),
+    };
+  }
+
+  /**
+   * A registry account's identity: its profile's `.claude.json` when readable (the file wins: it
+   * is what Claude Code says now), else what the registry recorded at sign-in. A profile not
+   * signed in has none.
+   */
+  private identityOf(a: ClaudeAccount): LoginIdentity {
+    if (a.signed_in_at === undefined) return {};
+    const json = readClaudeJson(join(profileDir(this.d.root, a.id), ".claude.json"));
+    if (json !== null) return loginIdentity(json);
+    return {
+      ...(a.email !== undefined ? { email: a.email } : {}),
+      ...(a.org !== undefined ? { org: a.org } : {}),
+    };
   }
 
   /** The registry, or none when it cannot be read (usage metering never fails on it). */
@@ -176,6 +221,7 @@ export class ClaudeService {
         Object.entries(process.env).filter(([k]) => k !== "CLAUDE_CONFIG_DIR"),
       );
       let plan: string | undefined;
+      let signedIn: boolean | undefined;
       try {
         const r = await this.d.exec(["claude", "auth", "status"], {
           env,
@@ -183,11 +229,14 @@ export class ClaudeService {
         });
         const status = parseAuthStatus(r.stdout);
         plan = status?.loggedIn === true ? status.plan : undefined;
+        signedIn = status?.loggedIn;
       } catch {
         plan = undefined; // no `claude` here
       }
-      if (plan === this.primaryPlan) return;
+      // Signing out drops the identity too: the usage record changes even when the plan did not.
+      if (plan === this.primaryPlan && signedIn === this.primarySignedIn) return;
       this.primaryPlan = plan;
+      this.primarySignedIn = signedIn;
       this.d.onPrimaryPlan?.();
     })().finally(() => {
       this.primaryAsk = undefined;
@@ -196,8 +245,9 @@ export class ClaudeService {
   }
 
   /**
-   * `claude_accounts`: the registry, each account's running sign-in, the sharing modes, and the
-   * primary (`{ plan? }`: Claude Code's default profile, never in the registry).
+   * `claude_accounts`: the registry, each account's running sign-in, the sharing modes, the
+   * primary (`{ plan?, email?, org? }`: Claude Code's default profile, never in the registry), and
+   * every machine record's Claude login (`machines`).
    */
   async list(): Promise<Reply> {
     await this.askPrimary();
@@ -208,7 +258,8 @@ export class ClaudeService {
         result: {
           root: this.d.root,
           accounts,
-          primary: this.primaryPlan !== undefined ? { plan: this.primaryPlan } : {},
+          primary: this.primaryFacts(),
+          machines: (this.d.machines?.() ?? []).map(machineLogin),
           remote_signins: this.remoteSignins(),
           sharing: readSharing(this.d.root),
         },
@@ -228,7 +279,8 @@ export class ClaudeService {
           ? { state: "signed_in" }
           : { state: "signed_out" }
         : pendingSignin(p);
-    return { ...a, dir: profileDir(this.d.root, a.id), signin };
+    const { email: _e, org: _o, ...rest } = a;
+    return { ...rest, ...this.identityOf(a), dir: profileDir(this.d.root, a.id), signin };
   }
 
   /** Paired machines' sign-ins still waiting (`primary@<name>`: not in the registry). */
@@ -385,7 +437,8 @@ export class ClaudeService {
       .then(async (e) => {
         first(e);
         if (this.signins.get(acct) === pending) this.signins.delete(acct);
-        const { type, ...data } = e;
+        // The login's identity stays out of the journal: the registry and the records carry it.
+        const { type, ...data } = e.type === "claude_signin_done" ? withoutIdentity(e) : e;
         if (type !== "claude_signin_url") await this.d.journal({ type, data });
         this.d.log(`claude sign-in ${acct}: ${type}`);
         return e;
@@ -440,6 +493,26 @@ const urlFields = (e: UrlEvent) => ({
   attach: e.attach,
   ...(e.manual_url !== undefined ? { manual_url: e.manual_url } : {}),
 });
+
+/** A done event without the login's identity: as the journal records it. */
+function withoutIdentity(e: Extract<SigninEvent, { type: "claude_signin_done" }>) {
+  const { email: _email, org: _org, ...rest } = e;
+  return rest;
+}
+
+/** A machine record's Claude login as `claude_accounts` shows it: state, plan and identity. */
+function machineLogin(r: MachineRecord) {
+  const a = r.auth;
+  return {
+    name: r.name,
+    ...(r.kind !== undefined ? { kind: r.kind } : {}),
+    claude: a?.claude ?? "unknown",
+    ...(typeof a?.claude_plan === "string" ? { plan: a.claude_plan } : {}),
+    ...(a?.claude_email !== undefined ? { email: a.claude_email } : {}),
+    ...(a?.claude_org !== undefined ? { org: a.claude_org } : {}),
+    tunnel: r.tunnel,
+  };
+}
 
 /** A running sign-in as `claude_accounts` shows it: pending, with its URL once known. */
 const pendingSignin = (p: Pending) => ({

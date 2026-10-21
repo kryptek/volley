@@ -126,6 +126,18 @@
                     { "type": "null" }
                   ],
                   "description": "The plan label Claude Code reports for the profile (e.g. max), when signed in."
+                },
+                "claude_email": {
+                  "type": "string",
+                  "format": "email",
+                  "maxLength": 254,
+                  "description": "The default profile's login e-mail as Claude Code's own configuration records it, only while it is signed in; identity, never a credential."
+                },
+                "claude_org": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "description": "The default profile's organisation name as Claude Code's own configuration records it, only while it is signed in; identity, never a credential."
                 }
               }
             },

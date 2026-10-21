@@ -5,10 +5,12 @@ import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
 import { usageAccountTopic } from "../../src/claude/usage";
 import { Journal } from "../../src/journal";
+import { MACHINE_CHANNEL, machineTopic } from "../../src/machines";
 import type { ReconcileProbes } from "../../src/reconcile";
 import { eventually } from "../helpers/broker-wait";
 import { NS } from "../helpers/daemon-env";
 import { type FakeClock, fakeClock } from "../helpers/fake-clock";
+import { schemaErrors } from "../helpers/schema";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervised-env";
 import { tempDir } from "../helpers/tmp";
 import { stubEnv } from "../helpers/with-env";
@@ -55,6 +57,11 @@ async function publishUsage(agent: string, payload: unknown): Promise<void> {
   );
 }
 
+async function accountEnvelope(acct: string): Promise<unknown> {
+  const raw = await s.agent.queryRetained(usageAccountTopic(acct), 300);
+  return raw === null || raw === "" ? null : JSON.parse(raw);
+}
+
 async function accountRecord(acct: string): Promise<Record<string, unknown> | null> {
   const raw = await s.agent.queryRetained(usageAccountTopic(acct), 300);
   return raw === null || raw === ""
@@ -95,6 +102,8 @@ function spareProfile(base: string): { root: string; primary: string; spare: str
           machine: "local",
           created: "2026-10-18T12:00:00.000Z",
           plan: "max",
+          email: "spare@example.com",
+          org: "Example Org",
           signed_in_at: "2026-10-18T12:00:00.000Z",
         },
       ],
@@ -259,6 +268,26 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
     });
   }, 20_000);
 
+  it("a registry account's record carries its login's email and org; it validates", async () => {
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+    s = await makeSupervisedEnv({
+      daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
+    });
+    await publishUsage("other-agent", {
+      ...usage("spare", 10),
+      account: null,
+      config_dir: join(root, "spare"),
+    });
+    expect(await recordWhen("spare", () => true)).toMatchObject({
+      account: "spare",
+      label: "Spare",
+      plan: "max",
+      email: "spare@example.com",
+      org: "Example Org",
+    });
+    expect(schemaErrors("claude-account.schema.json", await accountEnvelope("spare"))).toEqual([]);
+  }, 20_000);
+
   it("a sample retained while the daemon was down opens account_limit on restart, with no new sample", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
@@ -295,6 +324,39 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
       },
       new Date(T0),
     );
+    // gpu-box is a paired machine whose record names its default profile's login.
+    writeFileSync(
+      join(s.env.home, "config.yaml"),
+      "hosts:\n  gpu-box:\n    target: dev@gpu-box\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n",
+    );
+    await s.agent.publish(
+      machineTopic("gpu-box"),
+      JSON.stringify({
+        ...buildEnvelope({
+          agentId: "gpu-box",
+          parentId: null,
+          channel: MACHINE_CHANNEL,
+          type: "machine",
+          payload: {
+            name: "gpu-box",
+            os: "linux",
+            cores: 8,
+            tunnel: "up",
+            load: [0.1, 0.1, 0.1],
+            agents: 1,
+            auth: {
+              gh: "ok",
+              claude: "signed_in",
+              trust: "ok",
+              claude_email: "gpu@example.com",
+              claude_org: "Example Org",
+            },
+            last_seen: new Date(T0).toISOString(),
+          },
+        }),
+      }),
+      { qos: 1, retain: true },
+    );
     const second = await s.restart({ reconcile: probes });
     await second.reconciled();
 
@@ -302,7 +364,16 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
     await publishUsage(AGENT, usage("primary", 20));
     expect(
       await recordWhen("primary@gpu-box", (r) => (r.five_hour as { pct: number }).pct === 95),
-    ).toMatchObject({ account: "primary@gpu-box", agents: [remote], waves: ["w1"] });
+    ).toMatchObject({
+      account: "primary@gpu-box",
+      email: "gpu@example.com",
+      org: "Example Org",
+      agents: [remote],
+      waves: ["w1"],
+    });
+    expect(
+      schemaErrors("claude-account.schema.json", await accountEnvelope("primary@gpu-box")),
+    ).toEqual([]);
     expect(
       await recordWhen("primary", (r) => (r.five_hour as { pct: number }).pct === 20),
     ).toMatchObject({ agents: [AGENT], five_hour: { pct: 20 } });

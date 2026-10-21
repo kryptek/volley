@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import type { PeerExec } from "../commands/peer";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
-import { claudeChecks, isRepoTrusted, parseClaudeStatus } from "./checks/claude";
+import { claudeChecks, isRepoTrusted, loginIdentity, parseClaudeStatus } from "./checks/claude";
 import { ghPermission, ghState, ghUser, githubChecks } from "./checks/github";
 import {
   diskOf,
@@ -165,7 +165,14 @@ export interface Facts {
     slug: string | null;
     permission: string | null;
   };
-  claude: { state: AuthClaude; plan: string | null; trust: AuthTrust };
+  claude: {
+    state: AuthClaude;
+    plan: string | null;
+    trust: AuthTrust;
+    /** The default profile's login identity (checks/claude.ts loginIdentity). */
+    email: string | null;
+    org: string | null;
+  };
   machine: {
     memory: Memory;
     disk: Disk | null;
@@ -246,7 +253,14 @@ export interface DoctorReport {
   checks: (RecordCheck & { fix?: string })[];
   versions: Record<"peer" | "volley" | "bun" | "git", string | null> &
     Partial<Record<"gh" | "tmux" | "claude", string | null>>;
-  auth: { gh: AuthGh; claude: AuthClaude; trust: AuthTrust; claude_plan?: string };
+  auth: {
+    gh: AuthGh;
+    claude: AuthClaude;
+    trust: AuthTrust;
+    claude_plan?: string;
+    claude_email?: string;
+    claude_org?: string;
+  };
   repo?: {
     path: string;
     exists: boolean;
@@ -431,15 +445,21 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     const r = await sh([claudeBin, "auth", "status"]);
     claude = parseClaudeStatus(r.code, r.stdout);
   }
+  // One parse of ~/.claude.json: the trust table and the login's identity, nothing else of it.
+  const claudeJsonFile = join(deps.home, ".claude.json");
+  const claudeJson = existsSync(claudeJsonFile) ? readJson(claudeJsonFile) : undefined;
   let trust: AuthTrust = "unknown";
   if (path !== null) {
-    const file = join(deps.home, ".claude.json");
-    if (!existsSync(file)) trust = "missing";
-    else {
-      const j = readJson(file);
-      trust = j === undefined ? "unknown" : isRepoTrusted(j, path) ? "ok" : "missing";
-    }
+    if (!existsSync(claudeJsonFile)) trust = "missing";
+    else
+      trust =
+        claudeJson === undefined ? "unknown" : isRepoTrusted(claudeJson, path) ? "ok" : "missing";
   }
+  const identity = loginIdentity(
+    typeof claudeJson === "object" && claudeJson !== null && !Array.isArray(claudeJson)
+      ? (claudeJson as Record<string, unknown>)
+      : null,
+  );
 
   // The machine: memory (macOS: vm_stat's reclaimable pages, as free pages under-count) and the
   // worktrees' disk.
@@ -484,7 +504,7 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       fetchedAt,
     },
     github: { present: ghPresent, signedIn, user, slug, permission },
-    claude: { ...claude, trust },
+    claude: { ...claude, trust, email: identity.email ?? null, org: identity.org ?? null },
     machine: {
       memory: memoryOf(deps.totalmem(), deps.freemem(), available),
       disk: st !== null ? diskOf(root, st) : null,
@@ -538,6 +558,13 @@ export function reportOf(f: Facts, checks: Check[], at: Date): DoctorReport {
       trust: f.claude.trust,
       ...(f.claude.state === "signed_in" && f.claude.plan !== null
         ? { claude_plan: f.claude.plan }
+        : {}),
+      // The login's identity only while it is signed in.
+      ...(f.claude.state === "signed_in" && f.claude.email !== null
+        ? { claude_email: f.claude.email }
+        : {}),
+      ...(f.claude.state === "signed_in" && f.claude.org !== null
+        ? { claude_org: f.claude.org }
         : {}),
     },
     ...(r.path !== null
