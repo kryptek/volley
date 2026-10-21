@@ -12,7 +12,18 @@ import type { SteerTransport } from "./transport";
 
 type Control = SteerTransport["control"];
 
-/** The ops a Desk login answers as the owner, on its own account-op topic. */
+/**
+ * Why an unanswered Needs-you answer may have gone nowhere: a broker whose `desk` role predates
+ * the account-op grant drops the publish without a word.
+ */
+const MIGRATE_HINT =
+  "; if this broker's roles predate Desk answers, run `volley auth migrate --roles --yes`";
+
+/**
+ * The ops a Desk login answers as the owner, on its own account-op topic. Keep it equal to
+ * volleyd's `DESK_OPS` (packages/volleyd/src/accounts.ts): an op only one list names is sent
+ * to the mailbox and refused there, or to the ops topic and answered `unknown op`.
+ */
 export const DESK_LOGIN_OPS: readonly string[] = ["inbox_answer", "resolve"];
 
 /**
@@ -27,7 +38,7 @@ export function routeDeskControl(mailbox: Control | null, authOps: AuthOps | nul
     const a = await authOps.request(op, fields, timeoutMs !== undefined ? { timeoutMs } : {});
     return {
       ok: a.ok,
-      ...(a.error !== undefined ? { error: a.error } : {}),
+      ...(a.error !== undefined ? { error: a.unanswered ? a.error + MIGRATE_HINT : a.error } : {}),
       ...(a.result !== undefined ? { result: a.result } : {}),
       ...(a.unsent ? { unsent: true as const } : {}),
     };

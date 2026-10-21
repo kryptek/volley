@@ -93,6 +93,15 @@ describe("routeDeskControl: Needs-you answers travel the Desk's own account-op t
     expect(mailbox).not.toHaveBeenCalled();
   });
 
+  it("an unanswered Needs-you answer names the role migration a broker may still need", async () => {
+    const { mailbox, control } = setup();
+    const r = await control?.("inbox_answer", answer, undefined, 20);
+    expect(r?.ok).toBe(false);
+    expect(r?.error).toMatch(/^volleyd did not answer within 0\.02s/);
+    expect(r?.error).toContain("volley auth migrate --roles --yes");
+    expect(mailbox).not.toHaveBeenCalled();
+  });
+
   it("every other op still goes to volleyd's mailbox", async () => {
     const { m, mailbox, control } = setup();
     expect(await control?.("claim", { wave: "w1" }, "volleyd claim w1")).toEqual({

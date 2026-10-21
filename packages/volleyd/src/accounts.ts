@@ -196,7 +196,10 @@ export function adminRefusal(accounts: Account[], sender: string): string | unde
   return undefined;
 }
 
-/** A Desk login's Needs-you answers (SPEC §4.6.18), the owner's on any screen. */
+/**
+ * A Desk login's Needs-you answers (SPEC §4.6.18), the owner's on any screen. The Desk routes
+ * the same list (`DESK_LOGIN_OPS`, packages/volley-desk/src/steer/deskControl.ts); keep the two equal.
+ */
 export const DESK_OPS: ReadonlySet<string> = new Set(["inbox_answer", "resolve"]);
 
 /**
