@@ -67,6 +67,27 @@ describe("desktop surface", () => {
     ]);
   });
 
+  it("uses payload.msg as the body when the envelope carries one (the digest push)", async () => {
+    const io = makeBufferIO();
+    const spawn = vi.fn<DesktopSpawnFn>();
+    const which = vi.fn<DesktopWhichFn>().mockReturnValue("/usr/local/bin/terminal-notifier");
+    const s = createDesktopSurface({ io, spawn, which });
+    await s.fire({
+      topic: "volley/default/volleyd/progress",
+      envelope: buildEnvelope({
+        agentId: "volleyd",
+        parentId: null,
+        channel: "progress",
+        type: "digest",
+        payload: { msg: "w1 complete: 27 shipped, 1 waiting for you (release_go)" },
+      }),
+    });
+    const [, args] = spawn.mock.calls[0] ?? [];
+    expect(args?.[args.indexOf("-message") + 1]).toBe(
+      "w1 complete: 27 shipped, 1 waiting for you (release_go)",
+    );
+  });
+
   it("custom sound overrides the default 'Glass'", async () => {
     const io = makeBufferIO();
     const spawn = vi.fn<DesktopSpawnFn>();

@@ -52,7 +52,7 @@ export interface NotifyArgs {
   shutdownSignal?: Promise<void>;
 }
 
-const DEFAULT_ON = "blocked,failed,reaped";
+const DEFAULT_ON = "blocked,failed,reaped,digest";
 const DEFAULT_SURFACES = "bell";
 
 const PRODUCTION_FACTORIES: Required<NotifySurfaceFactories> = {
@@ -243,7 +243,8 @@ Required:
 
 Optional:
   --on <csv>               Comma-separated lifecycle types (default: ${DEFAULT_ON})
-                           Valid: spawning, working, done, blocked, failed, reaped, registered
+                           Valid: spawning, working, done, blocked, failed, reaped, registered,
+                           digest (volleyd's one push per wave digest)
                            (env: VOLLEY_NOTIFY_ON)
   --surface <csv>          Comma-separated surfaces (default: ${DEFAULT_SURFACES})
                            Valid: bell, desktop, webhook

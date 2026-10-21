@@ -108,7 +108,7 @@ describe("parseLifecycleEventCsv", () => {
   it("throws on unknown type, listing the valid types in the message", () => {
     expect(() => parseLifecycleEventCsv("garbage")).toThrow(/unknown lifecycle type "garbage"/);
     expect(() => parseLifecycleEventCsv("blocked,bogus")).toThrow(
-      /spawning,working,done,blocked,failed,reaped,registered/,
+      /spawning,working,done,blocked,failed,reaped,registered,digest/,
     );
   });
 });

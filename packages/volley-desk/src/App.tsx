@@ -114,7 +114,7 @@ import {
   supervisorNamespace,
   unclassifiedAgents,
 } from "./store/reducer";
-import type { AgentView, DeskState, InboxItem } from "./store/types";
+import type { AgentView, DeskState, DigestPayload, InboxItem } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
 import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
 import { TerminalPopout } from "./windows/agent/TerminalPopout";
@@ -129,6 +129,7 @@ import {
 } from "./windows/coordinators/CoordinatorsWindow";
 import { INBOX_ID, INBOX_W, NeedsYouWindow } from "./windows/inbox/NeedsYouWindow";
 import { inboxSources, liveLine, needsPerson, sourceWindow } from "./windows/inbox/inboxFilters";
+import { DigestCard, showDigest } from "./windows/wave/DigestCard";
 import { AttentionLine, MachineDown, NeedsYou } from "./windows/wave/NeedsYou";
 import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
@@ -1099,6 +1100,13 @@ export default function App() {
                 steerOpen={steerOpen === id}
                 banner={
                   <>
+                    {showDigest(wave, state.digests?.[id]) && (
+                      <DigestCard
+                        digest={state.digests?.[id] as DigestPayload}
+                        // A digest's decision is answered in the Needs you window.
+                        onOpenDecision={() => goToInbox()}
+                      />
+                    )}
                     {needsYou && coordinator && (
                       <NeedsYou
                         wave={id}

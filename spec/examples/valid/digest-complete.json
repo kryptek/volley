@@ -1,0 +1,55 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-21T07:00:00.000Z",
+  "channel": "_waves/digest",
+  "type": "digest",
+  "payload": {
+    "wave": "2026-10-20-example",
+    "release_branch": "release/2026-10-20-example",
+    "generated_at": "2026-10-21T07:00:00.000Z",
+    "trigger": "release_go",
+    "shipped": [
+      {
+        "task": "T1",
+        "issue": 101,
+        "title": "Morning digest",
+        "pr": { "number": 210, "url": "https://github.com/example-org/example-repo/pull/210" },
+        "merge_sha": "9f2c1e0a7b3d4c5e6f708192a3b4c5d6e7f80912",
+        "merged_by": "supervisor"
+      },
+      {
+        "task": "fix-checkout-flake",
+        "issue": 0,
+        "title": "Fix flaky test checkout flake",
+        "pr": { "number": 211, "url": "https://github.com/example-org/example-repo/pull/211" },
+        "merge_sha": null,
+        "merged_by": "github"
+      }
+    ],
+    "auto": {
+      "decisions_resolved": 4,
+      "flakes_fixed": [{ "test": "checkout flake", "fixer": "fix-checkout-flake", "prs_released": 1 }],
+      "conflicts_resolved": 2,
+      "retries": 1,
+      "merges": 1
+    },
+    "waiting": [
+      {
+        "id": "release-go-2026-10-20-example",
+        "kind": "release_go",
+        "question": "Every release stage verified. go: release it?",
+        "since": "2026-10-21T06:58:00.000Z",
+        "owner_only": true
+      }
+    ],
+    "release": {
+      "stage": "tag",
+      "stages": [
+        { "name": "smoke", "state": "verified" },
+        { "name": "tag", "state": "awaiting_go" }
+      ]
+    },
+    "failures": []
+  }
+}
