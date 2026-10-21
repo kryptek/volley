@@ -219,6 +219,8 @@ export const DAEMON_DEFAULTS = {
   /** Retry headroom of the derived spawn budget: this share of the wave's pipeline roles, at least `spawn_budget_retry_min`. */
   spawn_budget_retry_headroom: 0.5,
   spawn_budget_retry_min: 2,
+  /** The smallest `raise by <n>` a spawn_budget_exhausted decision offers: this share of the derived budget. */
+  spawn_budget_raise_min_share: 0.25,
   /** Two review findings in one file at most this many lines apart are on the same hunk. */
   review_hunk_lines: 10,
   /** How often the pipeline re-checks CI on a head whose runs are still pending. */

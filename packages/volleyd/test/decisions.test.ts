@@ -7,11 +7,13 @@ import type { Daemon } from "../src/daemon";
 import {
   type DecisionRecord,
   MACHINE_DOWN_OPTIONS,
+  checkAnswer,
   decisionPayload,
   decisionTopic,
   describeDecision,
   machineDownInput,
   renderDecisionsMd,
+  validateAnswer,
   waveDecisionId,
 } from "../src/decisions";
 import { ready } from "../src/scheduler";
@@ -510,5 +512,54 @@ describe("renderDecisionsMd", () => {
     expect(md).toContain("## d-1 — plan_change");
     expect(md).toContain("**Q:** Split the PR?");
     expect(md).toContain("**A:** yes");
+  });
+});
+
+describe("validateAnswer (#315)", () => {
+  const raise = ["raise by 3", "cancel"];
+  it("spawn_budget_exhausted: raise N and raise by N (any N ≥ 1) are a raise, journaled as raise by N", () => {
+    expect(validateAnswer("spawn_budget_exhausted", raise, "raise 120")).toEqual({
+      answer: "raise by 120",
+    });
+    expect(validateAnswer("spawn_budget_exhausted", raise, "Raise  By 12")).toEqual({
+      answer: "raise by 12",
+    });
+    expect(validateAnswer("spawn_budget_exhausted", raise, " cancel ")).toEqual({
+      answer: "cancel",
+    });
+  });
+  it("refuses an answer it cannot apply, saying what to write", () => {
+    expect(validateAnswer("spawn_budget_exhausted", raise, "raise")).toEqual({
+      refused: '"raise" is not one of raise by 3 / cancel (write "raise by <n>")',
+    });
+    expect(validateAnswer("spawn_budget_exhausted", raise, "raise 0")).toEqual({
+      refused: '"raise 0" is not one of raise by 3 / cancel (write "raise by <n>")',
+    });
+    expect(validateAnswer("spawn_budget_exhausted", raise, "more please 120")).toEqual({
+      refused: '"more please 120" is not one of raise by 3 / cancel (write "raise by 120")',
+    });
+  });
+  it("machine_down and repo_untrusted take only what they offer", () => {
+    const md = ["wait", "re-place queued tasks", "cancel"];
+    expect(validateAnswer("machine_down", md, "Re-place queued tasks")).toEqual({
+      answer: "re-place queued tasks",
+    });
+    expect(validateAnswer("machine_down", md, "replace")).toEqual({
+      refused: '"replace" is not one of wait / re-place queued tasks / cancel',
+    });
+    expect(validateAnswer("repo_untrusted", ["trust", "cancel"], "yes")).toHaveProperty("refused");
+  });
+  it("other kinds, and decisions with no options, stay free-form", () => {
+    expect(validateAnswer("agent_question", ["continue"], "use the v2 api")).toEqual({
+      answer: "use the v2 api",
+    });
+    expect(validateAnswer("spawn_budget_exhausted", undefined, "whatever")).toEqual({
+      answer: "whatever",
+    });
+  });
+  it("a pipeline-marked decision is the pipeline's to re-ask: not checked here", () => {
+    const d = { kind: "spawn_budget_exhausted" as const, options: raise, pipeline: { on: "x" } };
+    expect(checkAnswer(d, "raise")).toEqual({ answer: "raise" });
+    expect(checkAnswer({ ...d, pipeline: undefined }, "raise")).toHaveProperty("refused");
   });
 });

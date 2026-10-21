@@ -657,6 +657,19 @@ disagree, a merge conflict, an agent blocked, a plan change. It is a journal eve
   worktree (from its `agent_spawned`), or `$VOLLEYD_HOME/waves/<wave>/tasks/<task>/` before the
   task has one or when spawning is off. A failed write is logged and the answer omits `brief`; the
   resolution itself stands. Resolving an unknown id is an error; resolving twice is a no-op.
+- **Answers it cannot apply are refused.** An answer is one of the decision's options (case and
+  spacing aside) or free-form text, except for the kinds the supervisor carries out itself, where
+  an answer it cannot apply is refused with code `BAD_ANSWER` (`volleyd resolve` and `volleyd
+  inbox answer` exit 3) and nothing is journaled; the Desk's inbox gets the same refusal:
+
+  | kind | answers |
+  | --- | --- |
+  | `spawn_budget_exhausted` | `raise by <n>` (any n ≥ 1; `raise <n>` is read as `raise by <n>` and journaled so), `cancel` |
+  | `machine_down` | its options only: `wait`, `re-place queued tasks`, `cancel` |
+  | `repo_untrusted` | `trust`, `cancel` |
+
+  For example `volleyd resolve <id> raise` is refused with `"raise" is not one of raise by 12 /
+  cancel (write "raise by <n>")`. A pipeline's own decisions keep asking again themselves.
 
 Open decisions survive a restart (they are re-published from the journal), and a restart clears
 the retained topic of every resolved one, in case the daemon died between the two.
@@ -1771,9 +1784,14 @@ is enough to finish with no retry at all plus headroom: the roles of every task'
 least 2), or `spawn_budget_multiplier` × task count when that is more. A wave file's
 `spawn_budget:` overrides both. Exhaustion is never silent: a spawn the budget holds opens one
 `spawn_budget_exhausted` decision (`raise by <n>` | `cancel`; on a task it parks the task, so its
-`why_waiting` names the decision). `raise by <n>` adds n spawns to the wave's budget (journaled
-with the answer, so it survives a restart) and the next tick spawns; `cancel` cancels the task (a
-wave-level one stops the wave).
+`why_waiting` names the decision). The offered n is sized for the wave, not the one spawn: the
+spawns its unfinished tasks still need to finish their pipelines (each implement and review stage
+not spawned yet, plus one fixup allowance per task), at least a quarter of the derived budget,
+and no more than `autopilot.budget_raise_max` × the derived budget allows (while that leaves room
+for one), so one raise lets every held spawn through. `raise by <n>` (or `raise <n>`, any n ≥ 1)
+adds n spawns to the wave's budget (journaled with the answer, so it survives a restart) and the
+next tick spawns; `cancel` cancels the task (a wave-level one stops the wave); any other answer
+is refused (`BAD_ANSWER`).
 
 ### Retire and cleanup
 

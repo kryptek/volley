@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { nextSteer } from "../src/controls";
-import { apply, emptyRecord, reduce, replay } from "../src/reducer";
+import { apply, emptyRecord, raiseBy, reduce, replay } from "../src/reducer";
 import type { JournalEvent } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
 import { envelope, schemaErrors } from "./helpers/schema";
@@ -498,5 +498,16 @@ describe("the release train (SPEC §4.6.19)", () => {
     const rec = replay([started, entered], snap);
     expect(rec.state?.release?.stage).toBe("smoke");
     expect(replay([entered], rec)).toEqual(rec);
+  });
+});
+
+describe("raiseBy (#315)", () => {
+  it("reads raise by N and raise N (N ≥ 1); anything else is no raise", () => {
+    expect(raiseBy("raise 12")).toBe(12);
+    expect(raiseBy("raise by 12")).toBe(12);
+    expect(raiseBy(" RAISE BY 3 ")).toBe(3);
+    expect(raiseBy("raise")).toBeNull();
+    expect(raiseBy("raise by 0")).toBeNull();
+    expect(raiseBy("raise by 3 please")).toBeNull();
   });
 });

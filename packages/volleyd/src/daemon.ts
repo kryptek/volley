@@ -89,6 +89,7 @@ import {
   type InboxWhere,
   type SessionSurface,
   answerEvent,
+  decisionAnswerRefusal,
   decisionItemId,
   foldInbox,
   inboxEnvelopeType,
@@ -168,6 +169,7 @@ import { ConfigStore } from "./config-store";
 import {
   ADMISSION_TOPIC,
   ARCHIVE_TOPIC,
+  BAD_ANSWER,
   CONFIG_TOPIC,
   type ControlResponse,
   DAEMON_AGENT_ID,
@@ -200,6 +202,7 @@ import {
   MACHINE_DOWN_REPLACE,
   MACHINE_DOWN_WAIT,
   attentionPayload,
+  checkAnswer,
   decisionPayload,
   decisionTopic,
   describeDecision,
@@ -303,8 +306,9 @@ import {
   activeTasks,
   admit,
   admitPlacing,
-  pipelineRoles,
+  budgetRaise,
   spawnBudget,
+  spawnsOutstanding,
   spawnsUsed,
 } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
@@ -5728,13 +5732,16 @@ export class Daemon {
       rec.budget_raised ?? 0,
     );
     const used = spawnsUsed(rec);
-    const n = Math.max(
-      1,
-      task !== null
-        ? pipelineRoles(rec.wave, task) -
-            Object.keys(rec.state.tasks.find((t) => t.id === task)?.agents ?? {}).length
-        : 1,
-    );
+    // A hold queued behind a raise that already covers it (the same tick's other held spawns).
+    if (used < budget) return;
+    // Sized for the wave, not this one spawn: one raise lets every held spawn through.
+    const eff = this.config.effective(wave);
+    const n = budgetRaise({
+      outstanding: spawnsOutstanding(rec.wave, rec),
+      derived: spawnBudget(rec.wave, eff.spawn_budget_multiplier, 0),
+      used,
+      raiseMax: eff.autopilot.budget_raise_max,
+    });
     const what = task !== null ? `${task}'s ${role ?? "next role"}` : "the next ready task";
     const base = waveDecisionId("spawn_budget_exhausted", wave);
     let id = base;
@@ -7707,9 +7714,12 @@ export class Daemon {
   private async answerInboxItemNow(
     id: string,
     req: InboxAnswerRequest,
-  ): Promise<{ item: InboxItem } | { refused: string }> {
+  ): Promise<{ item: InboxItem } | { refused: string; code?: typeof BAD_ANSWER }> {
     const item = this.inbox.get(id);
     if (item === undefined) return { refused: `unknown inbox item '${id}'` };
+    // An answer its decision cannot apply is refused before the compare-and-set (#315).
+    const bad = item.answered === undefined ? decisionAnswerRefusal(item, req.answer) : null;
+    if (bad !== null) return { refused: bad, code: BAD_ANSWER };
     const check = answerEvent(item, req, dateOf(this.time));
     if ("refused" in check) return check;
     if (item.kind === "decision") {
@@ -7783,10 +7793,19 @@ export class Daemon {
   private async answerDecision(
     wave: WaveId,
     id: string,
-    r: { answer: string; by: string; rationale?: string; where?: InboxWhere },
+    given: { answer: string; by: string; rationale?: string; where?: InboxWhere },
   ): Promise<
-    { refused: string } | { decision: DecisionRecord; already_resolved: boolean; brief?: string }
+    | { refused: string; code?: typeof BAD_ANSWER }
+    | { decision: DecisionRecord; already_resolved: boolean; brief?: string }
   > {
+    // An answer the decision cannot apply is refused, and nothing is journaled (#315).
+    const asked = this.waves.get(wave)?.record.decisions[id];
+    const checked =
+      asked !== undefined && asked.resolved === undefined
+        ? checkAnswer(asked, given.answer)
+        : { answer: given.answer };
+    if ("refused" in checked) return { refused: checked.refused, code: BAD_ANSWER };
+    const r = { ...given, answer: checked.answer };
     const trust = await this.trustAnswer(wave, id, r.answer);
     if (trust !== null) return { refused: trust };
     const res = await this.resolveNow(wave, id, r);
@@ -8057,7 +8076,13 @@ export class Daemon {
       where,
       ...(opts.desk_login === true ? { desk_login: true as const } : {}),
     });
-    return "refused" in r ? { ok: false, error: r.refused } : { ok: true, result: r.item };
+    if ("refused" in r)
+      return {
+        ok: false,
+        error: r.refused,
+        ...("code" in r && r.code !== undefined ? { code: r.code } : {}),
+      };
+    return { ok: true, result: r.item };
   }
 
   private async publishDecision(wave: WaveId, d: DecisionRecord): Promise<void> {
@@ -8938,7 +8963,8 @@ export class Daemon {
       where,
       ...(typeof p.rationale === "string" ? { rationale: p.rationale } : {}),
     });
-    if ("refused" in r) return { ok: false, error: r.refused };
+    if ("refused" in r)
+      return { ok: false, error: r.refused, ...(r.code !== undefined ? { code: r.code } : {}) };
     // Resolving twice stays a no-op; the answer says where the first one was given.
     const first = this.inbox.get(decisionItemId(wave, id))?.answered;
     return {

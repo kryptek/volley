@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
 import { type Clock, systemClock } from "./clock";
 import {
+  BAD_ANSWER,
   type ControlOp,
   type ControlResponse,
   type ControlTarget,
@@ -298,7 +299,7 @@ export function opCommand(spec: OpCommand): Command {
             ? "\n(no caller identity: pass --by <name|agent-id> or set VOLLEY_COORDINATOR or VOLLEY_AGENT_ID)"
             : "";
         io.stderr(`volleyd ${spec.name}: ${res.error ?? "rejected"}${hint}\n`);
-        return EXIT.ERROR;
+        return res.code === BAD_ANSWER ? EXIT.BAD_ANSWER : EXIT.ERROR;
       }
       io.stdout(
         parsed.values.json === true

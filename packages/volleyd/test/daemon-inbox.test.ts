@@ -337,6 +337,68 @@ describe("the needs-you inbox in the daemon (SPEC §4.6.18)", () => {
   });
 });
 
+describe("an answer a decision cannot apply is refused (#315)", () => {
+  const budget = {
+    kind: "spawn_budget_exhausted" as const,
+    task: null,
+    question: "Raise the spawn budget?",
+    options: ["raise by 3", "cancel"],
+  };
+  const resolvedEvents = () => s.journal().filter((e) => e.type === "decision_resolved");
+
+  it("volleyd resolve: refused with BAD_ANSWER (exit 3), nothing journaled", async () => {
+    s = await makeSupervisedEnv();
+    const d = await s.daemon.openDecision("w1", budget);
+    const r = await runCli(
+      ["resolve", d.decision_id, "raise", "--wave", "w1", "--by", "t"],
+      s.env.env,
+    );
+    expect(r.exitCode).toBe(3);
+    expect(r.stderr).toContain('"raise" is not one of raise by 3 / cancel (write "raise by <n>")');
+    expect(resolvedEvents()).toHaveLength(0);
+    expect(s.journal().filter((e) => e.type === "inbox_answered")).toHaveLength(0);
+    const ack = await (await control()).request("resolve", {
+      decision_id: d.decision_id,
+      answer: "raise",
+      by: "t",
+    });
+    expect(ack).toMatchObject({ ok: false, code: "BAD_ANSWER" });
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.resolved).toBeUndefined();
+  });
+
+  it("raise N is a raise: journaled as raise by N", async () => {
+    s = await makeSupervisedEnv();
+    const d = await s.daemon.openDecision("w1", budget);
+    const r = await runCli(
+      ["resolve", d.decision_id, "raise", "120", "--wave", "w1", "--by", "t"],
+      s.env.env,
+    );
+    expect(r.exitCode, r.stderr).toBe(0);
+    expect(resolvedEvents()[0]?.data.answer).toBe("raise by 120");
+    expect(s.daemon.record("w1")?.budget_raised).toBe(120);
+  });
+
+  it("inbox_answer: refused the same way, before the version check", async () => {
+    s = await makeSupervisedEnv();
+    const d = await s.daemon.openDecision("w1", budget);
+    const id = decisionItemId("w1", d.decision_id);
+    const r = await (await control()).request("inbox_answer", {
+      id,
+      version: 99,
+      answer: "raise",
+      where: phone,
+      by: "t",
+    });
+    expect(r).toMatchObject({
+      ok: false,
+      code: "BAD_ANSWER",
+      error: '"raise" is not one of raise by 3 / cancel (write "raise by <n>")',
+    });
+    expect(s.daemon.inboxItem(id)?.version).toBe(1);
+    expect(resolvedEvents()).toHaveLength(0);
+  });
+});
+
 describe("a Desk login answers on its own account-op topic (the owner on any screen)", () => {
   const owned = async () => {
     s = await makeSupervisedEnv({ daemon: { authExec: deskAccounts().exec } });

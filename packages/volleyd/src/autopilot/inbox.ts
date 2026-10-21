@@ -1,5 +1,5 @@
 import { DAEMON_AGENT_ID } from "../control";
-import type { DecisionPayload } from "../decisions";
+import { type DecisionKind, type DecisionPayload, validateAnswer } from "../decisions";
 import type { AutopilotConfig, JournalEvent, NewEvent, TaskId, WaveId } from "../types";
 
 /**
@@ -194,6 +194,22 @@ export function answerEvent(
     },
     item: { ...item, version, answered },
   };
+}
+
+/**
+ * A person's answer to a decision item that its decision cannot apply (decisions.ts
+ * `validateAnswer`), or null. The referee asks before the compare-and-set: a refused answer
+ * changes nothing, whatever version it names.
+ */
+export function decisionAnswerRefusal(item: InboxItem, answer: string): string | null {
+  const kind = item.source.decision_kind;
+  if (item.kind !== "decision" || typeof kind !== "string") return null;
+  const r = validateAnswer(
+    kind as DecisionKind,
+    item.options?.map((o) => o.label),
+    answer,
+  );
+  return "refused" in r ? r.refused : null;
 }
 
 /** An answered item whose `ttlS` has passed since its answer: its retained record is cleared. */

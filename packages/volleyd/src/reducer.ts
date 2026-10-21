@@ -3,7 +3,9 @@ import { queueOf } from "./autopilot/merge-queue";
 import { stepRelease } from "./autopilot/playbook";
 import type { Budget, EscalateWhy } from "./autopilot/policy";
 import { fixerOf } from "./autopilot/remediation";
-import { ARCHIVED_ANSWER, type DecisionRecord, parksTask } from "./decisions";
+import { ARCHIVED_ANSWER, type DecisionRecord, parksTask, raiseBy } from "./decisions";
+
+export { raiseBy };
 import { LOCAL_HOST } from "./fleet-name";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
 import { AUTO_HOST } from "./placement";
@@ -789,13 +791,6 @@ function derive(state: WaveState, rec: WaveRecord): void {
       budgets: structuredClone(a.budgets),
     };
   }
-}
-
-/** A `spawn_budget_exhausted` answer `raise by N` (N ≥ 1), or null. */
-export function raiseBy(answer: string): number | null {
-  const m = /^raise by (\d+)$/.exec(answer.trim().toLowerCase());
-  const n = m !== null ? Number(m[1]) : 0;
-  return n >= 1 ? n : null;
 }
 
 /**

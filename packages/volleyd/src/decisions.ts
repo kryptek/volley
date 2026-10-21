@@ -215,6 +215,62 @@ export function resolveEvent(
   };
 }
 
+/** A `spawn_budget_exhausted` answer `raise by N` or `raise N` (N ≥ 1), or null. */
+export function raiseBy(answer: string): number | null {
+  const m = /^raise\s+(?:by\s+)?(\d+)$/.exec(answer.trim().toLowerCase());
+  const n = m !== null ? Number(m[1]) : 0;
+  return n >= 1 ? n : null;
+}
+
+const norm = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+
+/**
+ * Decision kinds whose answer the supervisor carries out itself (its options, or a parsed
+ * free-form answer): an answer it cannot apply is refused rather than journaled and ignored.
+ * Every other kind's answer stays free-form (a brief, an agent's reply).
+ */
+const CHECKED_KINDS: ReadonlySet<DecisionKind> = new Set([
+  "spawn_budget_exhausted",
+  "machine_down",
+  "repo_untrusted",
+]);
+
+/**
+ * An answer to a decision of `kind` offering `options`, as it is journaled (an offered option's
+ * own text; `raise N` as `raise by N`), or why it is refused. Lenient on the input (case,
+ * spacing), strict on the meaning. Pure.
+ */
+export function validateAnswer(
+  kind: DecisionKind,
+  options: readonly string[] | undefined,
+  answer: string,
+): { answer: string } | { refused: string } {
+  if (!CHECKED_KINDS.has(kind) || options === undefined || options.length === 0) return { answer };
+  const offered = options.find((o) => norm(o) === norm(answer));
+  if (offered !== undefined) return { answer: offered };
+  if (kind === "spawn_budget_exhausted") {
+    const n = raiseBy(answer);
+    if (n !== null) return { answer: `raise by ${n}` };
+  }
+  const digits = /\d+/.exec(answer)?.[0];
+  const hint =
+    kind !== "spawn_budget_exhausted"
+      ? ""
+      : ` (write "raise by ${digits !== undefined && Number(digits) >= 1 ? Number(digits) : "<n>"}")`;
+  return { refused: `"${answer.trim()}" is not one of ${options.join(" / ")}${hint}` };
+}
+
+/**
+ * `validateAnswer` for an open decision. A pipeline-marked one is the pipeline's: it asks again
+ * itself (`reask`), so any answer passes here.
+ */
+export function checkAnswer(
+  d: Pick<DecisionRecord, "kind" | "options"> & { pipeline?: unknown },
+  answer: string,
+): { answer: string } | { refused: string } {
+  return d.pipeline !== undefined ? { answer } : validateAnswer(d.kind, d.options, answer);
+}
+
 /** What an escalated decision's retained question starts with (SPEC §4.6.16). */
 export const escalatedPrefix = (why: string): string =>
   `Autopilot could not resolve this (${why}): `;
