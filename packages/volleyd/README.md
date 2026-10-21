@@ -2201,10 +2201,11 @@ refused (`a doctor run on "<name>" is already in progress`). Each run is journal
 as `peer_doctor_run { by, name, fix, clone, ok }`. The run's report is folded into the box's
 retained machine record before the answer goes back (its `checks` without fix text, `versions`,
 `auth`, `repo`, `doctor_at`; republished as volleyd) and the box's readiness verdict re-computed,
-so the Desk and placement follow the run without waiting for the box's next heartbeat. After a
-Repair the box's PATH is probed again on the next re-compute. Repair runs the bare `volley` of the box's non-interactive ssh PATH: on a
-box whose PATH probe finds no `bun` (and so no `volley`), fix the PATH first, or Repair answers
-only `volley: command not found`.
+so the Desk and placement follow the run without waiting for the box's next heartbeat; a
+heartbeat whose `doctor_at` is older than the record's keeps the newer run's doctor fields. After
+a Repair the box's PATH is probed again on the next re-compute. Repair runs the bare `volley` of
+the box's non-interactive ssh PATH: on a box whose PATH probe finds no `bun` (and so no
+`volley`), fix the PATH first, or Repair answers only `volley: command not found`.
 
 ---
 

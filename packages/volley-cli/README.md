@@ -406,16 +406,17 @@ a `bun install`; a stat per beat), or `~/.volley/peer-doctor-ran`, which every `
 doctor` on a paired machine writes. Each run re-reads the versions it reports, so readiness
 follows the machine, never the service's uptime. `volley peer doctor --fix` then reads the
 record back through the tunnel and prints `readiness republished` once it carries a run from
-after the fix, or, when the service did not pick it up (or its tunnel is down), the command
-that restarts it (`systemctl --user restart volley-peer.service`, `launchctl kickstart -k
-gui/<uid>/systems.volley.peer`). It runs beside the heartbeat, never in its way: a beat never waits for it, a run is given up after
-`PEER_DEFAULTS.doctor_timeout_ms`, and the record is republished as soon as a run finishes. Every
-heartbeat carries the last finished run's result (`versions`, `auth`, `repo`, `checks` without fix
-text, `doctor_at`), with `kind: peer`, `disk` and `uptime_s` read fresh each time, and `memory`
-too except on macOS, whose `available_pct` is the last doctor run's `vm_stat` figure. Available memory
-has one definition on every machine, the supervisor's own included, so placement can compare them
-(SPEC §4.6.15): memory the kernel can hand out without paging anything active out, over total
-memory (Linux: `MemAvailable`; macOS: free + inactive + speculative + purgeable pages).
+after the fix, or, when the service has not picked it up yet (or its tunnel is down), the
+command that restarts it (`systemctl --user restart volley-peer.service`, `launchctl kickstart
+-k gui/<uid>/systems.volley.peer`). It runs beside the heartbeat, never in its way: a beat never
+waits for it, a run is given up after `PEER_DEFAULTS.doctor_timeout_ms`, and the record is
+republished as soon as a run finishes. Every heartbeat carries the last finished run's result
+(`versions`, `auth`, `repo`, `checks` without fix text, `doctor_at`), with `kind: peer`, `disk`
+and `uptime_s` read fresh each time, and `memory` too except on macOS, whose `available_pct` is
+the last doctor run's `vm_stat` figure. Available memory has one definition on every machine,
+the supervisor's own included, so placement can compare them (SPEC §4.6.15): memory the kernel
+can hand out without paging anything active out, over total memory (Linux: `MemAvailable`;
+macOS: free + inactive + speculative + purgeable pages).
 
 ---
 

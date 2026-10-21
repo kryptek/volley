@@ -117,6 +117,21 @@ interface Entry {
   downAt?: number;
 }
 
+/** `incoming`, with `prior`'s doctor fields when `prior` holds a newer doctor run. */
+function keepNewerDoctor(incoming: MachineRecord, prior: MachineRecord | undefined): MachineRecord {
+  if (prior?.doctor_at === undefined || incoming.doctor_at === undefined) return incoming;
+  if (incoming.doctor_at >= prior.doctor_at) return incoming;
+  const { versions, auth, repo, checks, doctor_at } = prior;
+  return {
+    ...incoming,
+    ...(versions !== undefined ? { versions } : {}),
+    ...(auth !== undefined ? { auth } : {}),
+    ...(repo !== undefined ? { repo } : {}),
+    ...(checks !== undefined ? { checks } : {}),
+    doctor_at,
+  };
+}
+
 export class MachineHealth {
   private readonly machines = new Map<string, Entry>();
   constructor(private readonly deps: MachineHealthDeps) {}
@@ -124,7 +139,9 @@ export class MachineHealth {
   /**
    * Fold in a record from the broker. A down record after an up one keeps the last heartbeat's
    * values: the machine's LWT was built when it connected, so its `last_seen`, `load` and
-   * `agents` may be hours old.
+   * `agents` may be hours old. An up record whose doctor run is older than the one held (a
+   * supervisor-run doctor folded in before the box's service re-ran its own) keeps the newer
+   * run's fields.
    */
   observe(incoming: MachineRecord): void {
     const prior = this.machines.get(incoming.name);
@@ -140,7 +157,7 @@ export class MachineHealth {
                 ? incoming.last_seen
                 : prior.record.last_seen,
           }
-        : incoming;
+        : keepNewerDoctor(incoming, prior?.record);
     const heardAt = status === "up" ? this.deps.now() : (prior?.heardAt ?? this.deps.now());
     const downAt =
       status === "up" ? undefined : prior?.status === "down" ? prior.downAt : this.deps.now();

@@ -137,6 +137,31 @@ describe("MachineHealth", () => {
     );
   });
 
+  it("a heartbeat carrying an older doctor run than the record's keeps the newer doctor fields (a Repair's fold)", () => {
+    const stale: Partial<MachineRecord> = {
+      versions: { peer: "0.4.0", volley: "0.4.0", bun: "1.3.0", git: "2.47.0" },
+      auth: { gh: "ok", claude: "signed_in", trust: "ok" },
+      checks: [{ id: "volley.installed", ok: false, severity: "block", detail: "stale" }],
+      doctor_at: "2026-10-19T08:00:00.000Z",
+    };
+    const fresh: Partial<MachineRecord> = {
+      versions: { peer: "0.5.0", volley: "0.5.0", bun: "1.3.0", git: "2.47.0" },
+      auth: { gh: "ok", claude: "signed_in", trust: "ok" },
+      checks: [{ id: "volley.installed", ok: true, severity: "block", detail: "ok" }],
+      doctor_at: "2026-10-19T09:00:05.000Z",
+    };
+    // The supervisor folded a Repair's report; the box's next beat still carries its old run.
+    health.observe(record(fresh));
+    health.observe(record({ ...stale, load: [2, 1, 0.5], last_seen: "2026-10-19T09:00:30.000Z" }));
+    expect(health.record("box")).toEqual(
+      record({ ...fresh, load: [2, 1, 0.5], last_seen: "2026-10-19T09:00:30.000Z" }),
+    );
+    // The service's own newer run replaces it.
+    const later = { ...stale, doctor_at: "2026-10-19T09:01:00.000Z" };
+    health.observe(record(later));
+    expect(health.record("box")).toEqual(record(later));
+  });
+
   it("says why with its own heartbeat timeout", () => {
     health = new MachineHealth({ now: () => now, onChange: () => {}, downAfterMs: 30_000 });
     health.observe(record());

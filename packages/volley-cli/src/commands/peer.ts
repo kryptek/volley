@@ -1662,8 +1662,15 @@ async function awaitRepublish(
       await b.disconnect().catch(() => {});
     }
   }
-  const waited = (PEER_DEFAULTS.republish_polls * PEER_DEFAULTS.republish_poll_ms) / 1000;
-  return `\nReadiness not republished: the peer service did not run the doctor again within ${waited} s, so the supervisor may still see its last run. Restart it: \`${restartHint(deps)}\`\n`;
+  // Each poll waits for the retained record, then sleeps.
+  const waited = Math.round(
+    (PEER_DEFAULTS.republish_polls *
+      (PEER_DEFAULTS.readiness_wait_ms + PEER_DEFAULTS.republish_poll_ms)) /
+      1000,
+  );
+  // A run already under way when the stamp was written re-runs only after it ends (up to
+  // doctor_timeout_ms), so a healthy service can still be late: "not yet", not "failed".
+  return `\nReadiness not republished yet: the peer service did not run the doctor again within about ${waited} s, so the supervisor may still see its last run. If it has not caught up within a few minutes, restart it: \`${restartHint(deps)}\`\n`;
 }
 
 // ---------------------------------------------------------------------------------------------
