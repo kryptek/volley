@@ -7,7 +7,14 @@
  * reported usage) and, when the Desk can ask, the registry (`claude_accounts`
  * control op: profiles that have not reported yet, with their machine).
  */
-import type { ClaudeAccountPayload, DecisionPayload, UsageWindow, WaveView } from "./types";
+import { normalizeEmail } from "../lib/email";
+import type {
+  ClaudeAccountPayload,
+  DecisionPayload,
+  MachinePayload,
+  UsageWindow,
+  WaveView,
+} from "./types";
 
 /** volleyd's own machine (`LOCAL_MACHINE` in its profiles). */
 export const LOCAL_MACHINE = "local";
@@ -18,6 +25,8 @@ export interface RegistryAccount {
   label: string;
   machine: string;
   plan?: string;
+  email?: string;
+  org?: string;
   signed_in_at?: string;
   signin?: { state: string; url?: string };
 }
@@ -29,8 +38,14 @@ export interface AccountInfo {
   /** `local` (volleyd's machine) or a remote host. */
   machine: string;
   plan: string | null;
+  /** The login's e-mail and organisation, as volleyd reported them; `null` while not known. */
+  email: string | null;
+  org: string | null;
   fiveHour: UsageWindow | null;
   weekly: UsageWindow | null;
+  /** When its usage record was sampled; `null` for a profile that has not reported. */
+  sampledAt: string | null;
+  signedIn: boolean;
   agents: string[];
   waves: string[];
 }
@@ -79,8 +94,13 @@ export function accountList(
       label: r.label ?? row?.label ?? r.account,
       machine: row?.machine ?? hostOf(r.account),
       plan: r.plan ?? row?.plan ?? null,
+      email: r.email ?? row?.email ?? null,
+      org: r.org ?? row?.org ?? null,
       fiveHour: r.five_hour,
       weekly: r.weekly,
+      sampledAt: r.sampled_at,
+      // Its agents are using it.
+      signedIn: true,
       agents: r.agents,
       waves: r.waves,
     };
@@ -92,13 +112,197 @@ export function accountList(
       label: row.label,
       machine: row.machine,
       plan: row.plan ?? null,
+      email: row.email ?? null,
+      org: row.org ?? null,
       fiveHour: null,
       weekly: null,
+      sampledAt: null,
+      signedIn: row.signed_in_at !== undefined,
       agents: [],
       waves: [],
     });
   }
   return out;
+}
+
+/** volleyd's id for Claude Code's default profile on its own machine (`primary@<host>` on a peer). */
+const PRIMARY = "primary";
+const isPrimary = (id: string) => id === PRIMARY || id.startsWith(`${PRIMARY}@`);
+/** How a machine row names a machine's default profile. */
+export const DEFAULT_LOGIN = "default login";
+
+/** One machine's login in an account group. */
+export interface Member {
+  account: string;
+  /** `local` (volleyd's machine) or a remote host. */
+  machine: string;
+  /** The profile's label there: `default login` for a machine's primary. */
+  label: string;
+  signedIn: boolean;
+  agents: string[];
+  waves: string[];
+  isPrimary: boolean;
+}
+
+type WindowKey = "five_hour" | "weekly";
+
+/** A member's reading not chosen for a window, because a fresher one disagrees with it. */
+export interface StaleReading {
+  machine: string;
+  window: WindowKey;
+  pct: number;
+  sampledAt: string;
+}
+
+/** One Anthropic account: every login on it, on every machine, merged by e-mail. */
+export interface AccountGroup {
+  /** The normalised e-mail, else the lone account's id (its e-mail is not reported yet). */
+  key: string;
+  email: string | null;
+  org: string | null;
+  label: string;
+  plan: string | null;
+  fiveHour: UsageWindow | null;
+  weekly: UsageWindow | null;
+  freshest: { machine: string; sampledAt: string } | null;
+  members: Member[];
+  stale: StaleReading[];
+  agents: string[];
+  waves: string[];
+}
+
+/** Two readings of one window agree within a point when their resets agree too. */
+const STALE_PCT = 1;
+
+const newestFirst = (a: AccountInfo, b: AccountInfo) =>
+  Date.parse(b.sampledAt ?? "") - Date.parse(a.sampledAt ?? "") || 0;
+
+/**
+ * Per window, the member whose record was sampled last among those carrying it (volleyd's
+ * `foldUsage` rule); a tie goes to the one with a known reset. The others that disagree with it
+ * are stale.
+ */
+function pickWindow(accounts: AccountInfo[], key: WindowKey) {
+  const of = (a: AccountInfo) => (key === "five_hour" ? a.fiveHour : a.weekly);
+  const carrying = accounts.filter((a) => of(a) !== null && a.sampledAt !== null);
+  const best = [...carrying].sort(
+    (a, b) =>
+      newestFirst(a, b) || Number(of(b)?.resets_at != null) - Number(of(a)?.resets_at != null),
+  )[0];
+  const w = best ? of(best) : null;
+  const stale: StaleReading[] = [];
+  for (const a of carrying) {
+    const r = of(a);
+    if (a === best || r === null || w === null) continue;
+    if (Math.abs(r.pct - w.pct) > STALE_PCT || r.resets_at !== w.resets_at)
+      stale.push({ machine: a.machine, window: key, pct: r.pct, sampledAt: a.sampledAt as string });
+  }
+  return { w, stale };
+}
+
+const union = (xs: string[][]) => [...new Set(xs.flat())];
+
+/**
+ * The accounts as Anthropic sees them: one group per login e-mail (an account whose e-mail is not
+ * reported yet keeps its own group, keyed by its id). A peer's default login takes its e-mail from
+ * its machine record (`auth.claude_email`); a peer signed in there with no usage record yet joins
+ * as a member with no readings. `localName` is the supervisor's own machine record, never a peer.
+ */
+export function accountGroups(
+  accounts: AccountInfo[],
+  machines: Record<string, MachinePayload> = {},
+  localName?: string,
+): AccountGroup[] {
+  const known = new Set(accounts.map((a) => a.id));
+  const peers: AccountInfo[] = Object.values(machines)
+    .filter(
+      (m) =>
+        m.name !== localName &&
+        m.kind !== "supervisor" &&
+        m.auth?.claude === "signed_in" &&
+        !known.has(`${PRIMARY}@${m.name}`),
+    )
+    .map((m) => ({
+      id: `${PRIMARY}@${m.name}`,
+      label: `${PRIMARY}@${m.name}`,
+      machine: m.name,
+      plan: m.auth?.claude_plan ?? null,
+      email: null,
+      org: null,
+      fiveHour: null,
+      weekly: null,
+      sampledAt: null,
+      signedIn: true,
+      agents: [],
+      waves: [],
+    }));
+  const own = (machine: string) =>
+    machine === LOCAL_MACHINE ? (localName ? machines[localName] : undefined) : machines[machine];
+
+  const byKey = new Map<string, AccountInfo[]>();
+  for (const a0 of [...accounts, ...peers]) {
+    const rec = isPrimary(a0.id) ? own(a0.machine) : undefined;
+    const email = a0.email ?? rec?.auth?.claude_email ?? null;
+    const a: AccountInfo = {
+      ...a0,
+      email,
+      org: a0.org ?? (rec?.auth?.claude_email ? (rec.auth.claude_org ?? null) : null),
+      signedIn: rec?.auth ? rec.auth.claude === "signed_in" : a0.signedIn,
+    };
+    const key = email ? normalizeEmail(email) : a.id;
+    byKey.set(key, [...(byKey.get(key) ?? []), a]);
+  }
+
+  return [...byKey].map(([key, list]) => {
+    const email = list.some((a) => a.email) ? key : null;
+    const newest = [...list].sort(newestFirst);
+    const five = pickWindow(list, "five_hour");
+    const week = pickWindow(list, "weekly");
+    const fresh = newest.find((a) => a.sampledAt !== null);
+    const profile = newest.find((a) => !isPrimary(a.id) && a.label !== a.id);
+    const localPrimary = list.find((a) => a.id === PRIMARY);
+    const members = [...list]
+      .sort(
+        (a, b) =>
+          Number(b.machine === LOCAL_MACHINE) - Number(a.machine === LOCAL_MACHINE) ||
+          a.machine.localeCompare(b.machine),
+      )
+      .map(
+        (a): Member => ({
+          account: a.id,
+          machine: a.machine,
+          label: isPrimary(a.id) ? DEFAULT_LOGIN : a.label,
+          signedIn: a.signedIn,
+          agents: a.agents,
+          waves: a.waves,
+          isPrimary: isPrimary(a.id),
+        }),
+      );
+    return {
+      key,
+      email,
+      org: newest.find((a) => a.org)?.org ?? null,
+      label:
+        profile?.label ??
+        localPrimary?.label ??
+        (email ? email.slice(0, email.indexOf("@")) || email : (newest[0]?.label ?? key)),
+      plan: newest.find((a) => a.plan)?.plan ?? null,
+      fiveHour: five.w,
+      weekly: week.w,
+      freshest: fresh ? { machine: fresh.machine, sampledAt: fresh.sampledAt as string } : null,
+      members,
+      stale: [...five.stale, ...week.stale],
+      agents: union(list.map((a) => a.agents)),
+      waves: union(list.map((a) => a.waves)),
+    };
+  });
+}
+
+/** The account a group's Use-for answers with: its login on volleyd's own machine, if any. */
+export function useForAccount(g: AccountGroup): string | null {
+  return (
+    g.members.find((m) => m.machine === LOCAL_MACHINE && !m.account.includes("@"))?.account ?? null
+  );
 }
 
 export function accountChoices(accounts: readonly AccountInfo[]): AccountChoice[] {
