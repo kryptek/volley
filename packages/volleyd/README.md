@@ -1421,8 +1421,10 @@ Every refused spawn — the daemon's automatic ones (implementers, pipeline role
 Automatic retries back off: 30 s, doubling per failure, capped at `spawn_retry_max_s`. After
 `spawn_retry_max` failures in a row they stop: `next_retry_at` is `null`, `why_waiting` says
 `retries stopped after <k> attempts`, and the open decision is superseded (resolved
-`retries_stopped`) by one whose question says the retries stopped. Answering `retry now` spawns
-at the next tick whatever the backoff said; `stop task` cancels the task.
+`retries_stopped`) by one whose question says the retries stopped. A refusal that can never
+succeed as is (an agent id that cannot be formed) is not retried at all: its first failure stops
+the retries and opens the decision that says so, which the autopilot policy escalates. Answering
+`retry now` spawns at the next tick whatever the backoff said; `stop task` cancels the task.
 
 A spawn that launches after failures journals `spawn_recovered { role, agent_id,
 after_failures, attempt }`, clears `last_error` / `why_waiting`, resolves the open decision
@@ -1465,9 +1467,11 @@ straight away. Launches are serialized per host: one `cmux new-workspace` (or re
 `tmux new-session`) is in flight at a time, so a slow cmux does not stack them.
 
 **Identity.** The agent id is `<wave>-<task>-<role>-<attempt>`, lowercased (a long wave id is
-shortened with a hash). `.volley/agent.json` carries `agent_id`, `namespace`, `parent_id` (the
-wave owner, else `volleyd`), `wave`, `task`, `role`, `broker_url` and the minted `broker`
-block; the MCP server and the hooks both read it, so no flag or env carries identity.
+shortened with a hash; a task id too long for the role's tail, like a flake fixer's
+`fix-<test>` under `quality_reviewer`, is cut too, with a hash of the whole task id).
+`.volley/agent.json` carries `agent_id`, `namespace`, `parent_id` (the wave owner, else
+`volleyd`), `wave`, `task`, `role`, `broker_url` and the minted `broker` block; the MCP server
+and the hooks both read it, so no flag or env carries identity.
 `volleyd daemon --no-mint` skips minting for an anonymous broker (no `broker` block).
 
 **Broker logins** (mosquitto ≥ 2.1, Dynamic Security; [`examples/mosquitto-auth/`](../../examples/mosquitto-auth/README.md),
