@@ -1,5 +1,5 @@
-import { DAEMON_AGENT_ID } from "./control";
-import { openDecisions, resolveEvent, waveDecisionId } from "./decisions";
+import { DAEMON_AGENT_ID } from "./daemon-id";
+import { ARCHIVED_ANSWER, openDecisions, resolveEvent, waveDecisionId } from "./decisions";
 import type { WaveRecord } from "./reducer";
 import type { JournalEvent, NewEvent, Tunables, WaveId, WaveStatus } from "./types";
 
@@ -8,8 +8,7 @@ import type { JournalEvent, NewEvent, Tunables, WaveId, WaveStatus } from "./typ
  * effective config, and journals what this returns.
  */
 
-/** The answer an archive closes every open decision with. */
-export const ARCHIVED_ANSWER = "archived";
+export { ARCHIVED_ANSWER };
 /** A manual archive's reason. */
 export const MANUAL_REASON = "volleyd archive";
 /** The reason when an admin archives through the account-op topic. */

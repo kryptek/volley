@@ -297,9 +297,12 @@ export class ConfigStore {
     this.waves.delete(wave);
   }
 
-  /** The global tunables with `overrides` applied (an archived wave's, no longer registered). */
+  /**
+   * The global tunables with `overrides` applied (an archived wave's, no longer registered),
+   * resolved as `effective()` resolves them.
+   */
   effectiveWith(overrides: TunablesPatch): Tunables {
-    return merge(this.global, overrides);
+    return resolved(merge(this.global, overrides), this.localName());
   }
 
   /**

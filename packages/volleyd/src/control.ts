@@ -7,6 +7,7 @@ import { randomSuffix } from "volley-mcp/util";
 import { authFields, controlAuth } from "./broker-auth";
 import { type TimerHandle, systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
+import { DAEMON_AGENT_ID } from "./daemon-id";
 import type { DecisionPayload } from "./decisions";
 import { EXIT, type ExitCode, type IO } from "./io";
 import type { PlanDiff } from "./plan-diff";
@@ -19,8 +20,8 @@ import type { PathError } from "./schemas";
  * envelope carrying the same `correlation_id` and `payload: { text, acked_type, op, ok, ... }`.
  */
 
-/** The daemon's literal agent id — it is a supervisor, not an MCP session, so no suffix. */
-export const DAEMON_AGENT_ID = "volleyd";
+// Lives in a constants-only module so pure modules can name the daemon without loading mqtt.
+export { DAEMON_AGENT_ID };
 
 export const CONFIG_TOPIC = "volley/_waves/_config";
 /** The retained index of archived waves (SPEC §4.6.20); `_` keeps it out of the wave id space. */
