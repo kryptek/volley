@@ -60,7 +60,9 @@
   .win-attn-pulse,
   .caret,
   .spinner,
-  .win--born {
+  .win--born,
+  .ctx--pulse-slow .ctx-bar > span,
+  .ctx--pulse-fast .ctx-bar > span {
     animation: none !important;
   }
   .meter-bar > span,

@@ -125,6 +125,12 @@ export interface Tunables {
    */
   agent_mcp: AgentMcp;
   /**
+   * The share of a launched agent's context window at which Claude Code compacts: the launch
+   * exports `CLAUDE_CODE_AUTO_COMPACT_WINDOW` as that share of the model's window in tokens
+   * (src/claude/context-window.ts); 0 exports nothing (Claude Code's own default).
+   */
+  agent_auto_compact_pct: number;
+  /**
    * What the reviewers flag as public hygiene: `auto` (P1 for a public repository or one whose
    * visibility could not be read, P3 for a private one), `on` (always P1), `off` (never).
    */

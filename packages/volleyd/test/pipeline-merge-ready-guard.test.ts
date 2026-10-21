@@ -6,6 +6,7 @@ import {
   emptyPipeline,
   mergeReadyCheck,
   next,
+  reducePipeline,
 } from "../src/pipeline";
 import { type WaveRecord, apply } from "../src/reducer";
 import type { ReviewResult } from "../src/reviews";
@@ -329,5 +330,48 @@ describe("merge_ready invariant: never without both reviews for the current head
       data: { alarm: "reviews_skipped_by_plan" },
     });
     expect(rec.state?.tasks[0]?.reviews_skipped_by_plan).toBe(true);
+  });
+});
+
+describe("a gate's head move is handled by one detector (#271)", () => {
+  const implemented = at(H1, { runs: { implementer: { ...accepted, head: H1 } } });
+  const moved = (p: TaskPipeline) =>
+    next(view(p), { kind: "head_moved", expected: H1, actual: H2 });
+
+  it("a move nobody else saw: the alarm and a re-verify at the new head", () => {
+    expect(kinds(moved(implemented))).toEqual(["journal", "verify"]);
+    expect(alarmOf(moved(implemented))).toMatchObject({ alarm: "pr_head_moved", expected: H1 });
+  });
+
+  it("the gate's head check saw it first (its decision pending): nothing", () => {
+    expect(moved({ ...implemented, moved: { from: H1, to: H2, during: "merge_ready" } })).toEqual(
+      [],
+    );
+  });
+
+  it("its decision answered accept, the accept's verification still to come: nothing", () => {
+    expect(moved({ ...implemented, accepting: H2 })).toEqual([]);
+    // Another head than the one accepted is a move of its own.
+    expect(kinds(moved({ ...implemented, accepting: H3 }))).toEqual(["journal", "verify"]);
+  });
+
+  it("a verification that moves the head anywhere ends the accept's wait", () => {
+    const verified = (p: TaskPipeline, head: string) =>
+      reducePipeline(
+        structuredClone(p),
+        {
+          seq: 9,
+          at: "2026-10-18T12:00:09.000Z",
+          type: "artifact_verified",
+          task: "T1",
+          data: { role: "implementer", agent_id: "a1", head_sha: head },
+        },
+        { stages: DEFAULT },
+      );
+    expect(verified({ ...implemented, accepting: H2 }, H2).accepting).toBeUndefined();
+    // Elsewhere first: a later real move back to H2 is not swallowed.
+    expect(verified({ ...implemented, accepting: H2 }, H3).accepting).toBeUndefined();
+    // Re-verified at the same head: the accept's verification is still to come.
+    expect(verified({ ...implemented, accepting: H2 }, H1).accepting).toBe(H2);
   });
 });

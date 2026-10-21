@@ -1323,6 +1323,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `autopilot.merge_retry_max` | the next refused merge ([autopilot merging](#autopilot-merging)) | refusals already counted stand |
 | `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
 | `agent_mcp` | spawns after the change | running agents keep the MCP servers they launched with |
+| `agent_auto_compact_pct` | spawns after the change | running agents keep the window they launched with |
 | `public_hygiene` | the next wave version (`run` of a new wave, or a new version of a live one) | the level journaled for the current version holds for its reviewers and their results |
 | `archive_ended_after_h`, `archive_on_ack` | the next tick (and the next `wave_complete` answer) | archived waves stay archived ([Archiving](#archiving)) |
 
@@ -1489,7 +1490,8 @@ is involved: the agent role already lets an agent ack volleyd and the Desk (an a
 random-suffixed coordinator is dropped, SPEC §4.4).
 
 **Launch script.** `launch.sh` runs under bash (`#!/usr/bin/env bash`; login shells may be zsh),
-exports `VOLLEY_HOOKS_DIR=<checkout>/packages/volley-hooks` and execs
+exports `VOLLEY_HOOKS_DIR=<checkout>/packages/volley-hooks` and
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW=<tokens>` (`agent_auto_compact_pct`, below) and execs
 `claude --dangerously-skip-permissions --model <model> --settings <hooks settings template> --strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json --name <id> -- "$(cat .volley/brief.md)"`
 (without `--strict-mcp-config` under `agent_mcp: inherit`, below).
 The hooks come in through `--settings`. Just before the exec it checks `claude` is on the
@@ -1528,6 +1530,28 @@ vanished agent keeps the servers it launched with. The cmux command starts with 
 from prompts that eat the first character. Nothing else is typed into the pane, with two
 exceptions: the Enter that answers an update prompt and the relaunch after it (below), and the
 Escape that `volleyd stop` sends. The brief never appears in an argv.
+
+**Auto-compaction: `agent_auto_compact_pct`** (a tunable, 0..100, default 85; per wave through
+`config:`). Every launch, for every role and host, exports `CLAUDE_CODE_AUTO_COMPACT_WINDOW`: the
+context size, in tokens, at which Claude Code compacts the conversation. It is this percentage
+of the model's context window, rounded and clamped to the 100000..1000000 Claude Code accepts.
+The window comes from a small table on the model id (`src/claude/context-window.ts`), since
+Claude Code reports it only after the first response: a `[1m]` suffix, the native-1M families
+(fable, sonnet 5 and later, haiku 5.5 and later, opus 4.7 and later) and the bare aliases
+(`fable`, `opus`, `sonnet`, `haiku`) are 1M; anything else, including an id it cannot read (an
+ARN, a gateway name), is 200K. Provider-qualified ids are matched on their
+`claude-<family>-<major>[-<minor>]` part. A wrong row only moves the compaction point (Claude
+Code caps the window at the model's own). So at 85, `claude-opus-5-5` compacts at 850000 tokens
+and `claude-opus-4-6` at 170000: where the Desk's context meter turns red, after its 70% pulse
+has warned. `0` exports nothing and Claude Code's own default applies. The line sits right after
+the profile block; the fence accepts it there only, as an integer in range, and
+`agent_spawned` records `auto_compact_window`. The Desk meter keeps measuring the full window
+(`used_percentage`), so it does not show the compaction point. A compaction summarises the
+conversation and can lose detail an agent deep in a change had (a finding's wording, a file it
+meant to revisit); the brief, `ISSUE.md` and the review files stay on disk for it to re-read,
+and the default leaves the last 15% for the wrap-up (gates, push, status). Compacting is still
+better than the alternative: an agent that hits the limit stops answering and is reaped as
+stalled. A wave whose agents run long can set it lower.
 
 **Brief gate and extras.** If `$VOLLEYD_HOME/brief-gate` exists and is executable, it runs as
 `brief-gate <worktree>/.volley/brief.md` in the worktree; a non-zero exit is
@@ -3094,7 +3118,9 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     config, HEAD, gitfile or hook, or a case variant of launch.sh), an absolute path ending in
     `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh`
     (what the tmux session runs) is written whole, never appended, and its content must be
-    exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS); a
+    exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS: a
+    `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the profile block, an
+    integer in 100000..1000000, never in the env block); a
     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG); and
     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
