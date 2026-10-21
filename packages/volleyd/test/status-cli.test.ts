@@ -584,7 +584,7 @@ describe("volleyd status: agent logins", () => {
     const env = await makeDaemonEnv();
     try {
       await env.start();
-      expect((await runCli(["status"], env.env)).stdout).toBe("no waves\n");
+      expect((await runCli(["status"], env.env)).stdout).toBe("hard ceiling: 0/12\nno waves\n");
     } finally {
       await env.cleanup();
     }
