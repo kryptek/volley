@@ -111,7 +111,12 @@ function notMergeable(
 export function refusalReason(stderr: string): RefusalReason {
   if (/head branch was modified|head is \S+, not the gated|match-head-commit/i.test(stderr))
     return "head_moved";
-  if (/out of date|not up to date|behind|conflict|cannot be cleanly created/i.test(stderr))
+  // "Base branch was modified": the release branch moved during the merge.
+  if (
+    /base branch was modified|out of date|not up to date|behind|conflict|cannot be cleanly created/i.test(
+      stderr,
+    )
+  )
     return "behind";
   if (/already merged|is closed|is MERGED|is CLOSED/.test(stderr)) return "closed";
   if (/check|protect|review|approv/i.test(stderr)) return "checks";

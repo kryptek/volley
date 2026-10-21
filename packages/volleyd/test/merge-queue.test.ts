@@ -142,6 +142,22 @@ describe("nextToMerge", () => {
     expect(nextToMerge(onlyRefused, new Set())?.task).toBe("T1");
   });
 
+  it("a checks refusal keeps its queue place; a behind refusal waits behind the rest (#311)", () => {
+    const refusal = (reason?: string) =>
+      queued(1, {
+        merge_refusals: 1,
+        alarms: { merge_refused: { alarm: "merge_refused", ...(reason ? { reason } : {}) } },
+      });
+    for (const reason of ["checks", "unknown"]) {
+      const rec = record("w1", { T1: { p: refusal(reason) }, T2: { p: queued(2) } });
+      expect(nextToMerge({ b: queueOf(rec) }, new Set())?.task).toBe("T1");
+    }
+    for (const reason of ["behind", "head_moved", undefined]) {
+      const rec = record("w1", { T1: { p: refusal(reason) }, T2: { p: queued(2) } });
+      expect(nextToMerge({ b: queueOf(rec) }, new Set())?.task).toBe("T2");
+    }
+  });
+
   it("two waves on one release branch share it: one merge in flight", () => {
     const a = queueOf(record("wa", { T1: { p: queued(2) } }));
     const b = queueOf(record("wb", { T1: { p: queued(1) } }));

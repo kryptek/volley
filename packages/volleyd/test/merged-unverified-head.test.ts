@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { formatWave } from "../src/commands/status";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import { type PipelineView, emptyPipeline, next } from "../src/pipeline";
 import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
 
 /**
@@ -139,5 +140,26 @@ describe("merged_unverified_head", () => {
     expect(m?.data).toMatchObject({ via: "operator", head_sha: B, pr: { head_sha: B } });
     expect(m?.data.merged_head_sha).toBeUndefined();
     expect(h.retired).toContainEqual({ agent_id: update?.agent_id, status: "superseded" });
+  });
+
+  it("only the current gated head counts: a merge at an older gated head still alarms (#311)", () => {
+    const B = sha(0xb2);
+    const view = (head: string): PipelineView => ({
+      task: "T1",
+      stages: [["implement"], ["merge_ready"]],
+      stage: "fixup",
+      release_branch: "release/w",
+      p: { ...emptyPipeline(), pr: { url: "u", number: 7 } as never, head, gated: [A, B] },
+    });
+    const ev = (head: string) => ({
+      kind: "merge_checked" as const,
+      view: { state: "MERGED", baseRefName: "release/w", headRefOid: head },
+    });
+    const alarmed = (head: string) =>
+      next(view(head), ev(head)).some(
+        (a) => a.kind === "journal" && a.event.data?.alarm === "merged_unverified_head",
+      );
+    expect(alarmed(B)).toBe(false);
+    expect(alarmed(A)).toBe(true);
   });
 });

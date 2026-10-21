@@ -85,6 +85,14 @@ describe("autopilot merge classifies a refusal (#311)", () => {
     ])
       expect(await refused(stderr)).toMatchObject({ ok: false, reason: "behind" });
   });
+  it("the base branch moved during the merge → behind", async () => {
+    const stderr = "GraphQL: Base branch was modified. Review and try the merge again.";
+    expect(await refused(stderr)).toEqual({ ok: false, reason: "behind", stderr });
+  });
+  it("--match-head-commit refused → head_moved", async () => {
+    const stderr = "GraphQL: Head sha didn't match expected head sha (match-head-commit)";
+    expect(await refused(stderr)).toEqual({ ok: false, reason: "head_moved", stderr });
+  });
   it("anything else → unknown", async () => {
     expect(await refused("GraphQL: something odd")).toMatchObject({ reason: "unknown" });
   });

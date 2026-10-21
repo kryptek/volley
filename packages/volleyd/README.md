@@ -2807,9 +2807,10 @@ gated one, or before the task was ever gated at that head → also `alarm_raised
 `unknown` when it cannot be read), never the gated head's CI carried over; the task's `pr` names
 that head. The alarm is published in the wave state (`alarms: [{ alarm, message }]` and
 `why_waiting: "merged with an unverified head: gated <a>, merged <c>"`) and listed by
-`volleyd status`; the task still completes. A merge at a head the task was gated at, during a
+`volleyd status`; the task still completes. A merge at the task's current gated head, during a
 later step (a branch update or fixup that has not pushed yet), is the gated head: no alarm; the
-record says `via: "operator"`, and the running update or fixup agent is retired as `superseded`.
+record says `via: "operator"` and carries that head's CI as volleyd last read it (red, when a CI
+fixup was running), and the running update or fixup agent is retired as `superseded`.
 
 **The merge nudge.** volleyd never rebases anyone. When a task's PR merges (any of the ways
 above), each running implementer of the same wave whose task's wave-file `files` hints overlap
@@ -2909,7 +2910,7 @@ In an unattended wave the gate is where work stalls: every merge waited for a pe
   head the task leaves the gate (`blocked`) and decision `merge_refused` asks `retry` (one more
   attempt, at the task's next turn in the merge queue), `manual` (this task goes back to the
   gate and a human merges it) or `cancel`. A new gated head starts the count again. `reason` is
-  what the refusal says: `behind` (out of date with or conflicting with the release branch),
+  what the refusal says: `behind` (out of date with or conflicting with the release branch, or the release branch moved during the merge),
   `head_moved`, `retargeted`, `closed`, `checks` (required checks, branch protection, reviews) or
   `unknown`. Only `behind` and `head_moved` give up the merge turn; any other keeps the turn and
   the gated head, and the merge is tried again at the next up-to-date check. No refusal enters a

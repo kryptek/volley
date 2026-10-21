@@ -1158,10 +1158,10 @@ function onMergeChecked(
   // A human merged the PR, in whatever stage the task is (its open decisions were closed first).
   if (view.state === "MERGED" && view.baseRefName === v.release_branch) {
     const merged = typeof view.headRefOid === "string" ? view.headRefOid : undefined;
-    // Not through the gate: merged at another head, or before the task was ever gated. A merge at
-    // the gated head while a later step runs (a branch update) is the gated head, verified (#311).
+    // Not through the gate: merged at another head, or before the task was gated at it. A merge at
+    // the current gated head while a later step runs (a branch update) is verified (#311).
     const other = merged !== undefined && merged !== head;
-    const atGated = head !== undefined && v.p.gated.includes(head);
+    const atGated = head !== undefined && v.p.gated.at(-1) === head;
     const unverified = other || (v.stage !== "merge_ready" && !atGated);
     return [
       ...(unverified
@@ -1284,7 +1284,8 @@ function onMergeRefused(
           pr: pr.url,
           head: ev.head,
           stderr: ev.stderr,
-          reason: ev.reason ?? "unknown",
+          // Absent: refusalEndsTurn reads it as `behind`, like a refusal journaled before reasons.
+          ...(ev.reason !== undefined ? { reason: ev.reason } : {}),
           attempt: (v.p.merge_refusals ?? 0) + 1,
         },
       },
