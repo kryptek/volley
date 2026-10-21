@@ -145,7 +145,21 @@ describe("needs-you inbox: coordinator handoffs (SPEC §4.6.18)", () => {
     s.host.screens = [asked()];
     const r = await answer(item.id, "!git push");
     expect(r.ok).toBe(false);
-    expect(r.error).toMatch(/slash command or shell line/);
+    expect(r.error).toBe(
+      "a reply must be one line of plain text, not a slash command or shell line",
+    );
+    expect(s.host.texts).toEqual([]);
+  });
+
+  it("refuses a multi-line reply in plain words, before reading the screen", async () => {
+    s = await makeSupervisedEnv();
+    const item = await handoff();
+    s.host.screens = [asked()];
+    const r = await answer(item.id, "go\nthen stop");
+    expect(r).toMatchObject({
+      ok: false,
+      error: "a reply must be one line of plain text, not a control character or a second line",
+    });
     expect(s.host.texts).toEqual([]);
   });
 

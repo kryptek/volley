@@ -1,5 +1,5 @@
 import { DAEMON_DEFAULTS } from "../config-defaults";
-import { mintHandoffToken, mintPickerToken } from "../fence";
+import { answerTextRefusal, mintHandoffToken, mintPickerToken } from "../fence";
 import type { Host } from "../hosts/host";
 import type { InboxItem } from "./inbox";
 import {
@@ -86,6 +86,9 @@ export async function carryHandoff(
   item: InboxItem,
   answer: string,
 ): Promise<string | null> {
+  // The fence refuses these too; checked first so the Desk gets plain words, not fence wording.
+  const why = answerTextRefusal(answer);
+  if (why !== null) return `a reply must be one line of plain text, not ${why}`;
   const screen = await d.readScreen(d.workspace);
   if (!promptIdle(screen)) return "prompt not idle";
   if (!questionOnScreen(screen, item.question)) return "the question is not on screen";
