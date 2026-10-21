@@ -1111,6 +1111,8 @@ function onHeadMoved(
   // The gate's head check saw this move first (pr_head_moved): its decision, asked or answered
   // `accept`, handles it. A plain re-verify here would land before the accept's and record the
   // move as one that voids the reviews (#271).
+  // An accept whose verification never lands leaves `accepting` set; the merge check's own
+  // p.head comparison still sees that head, so nothing is lost.
   if (role === undefined || v.p.moved !== undefined || v.p.accepting === ev.actual) return [];
   return [
     {
