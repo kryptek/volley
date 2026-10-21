@@ -12,8 +12,8 @@
 const ONE_MILLION = 1_000_000;
 const TWO_HUNDRED_K = 200_000;
 /** The auto-compact window Claude Code accepts, in tokens; outside it, it clamps with a warning. */
-const COMPACT_MIN = 100_000;
-const COMPACT_MAX = 1_000_000;
+export const COMPACT_MIN = 100_000;
+export const COMPACT_MAX = 1_000_000;
 
 const ALIASES = new Set(["fable", "opus", "sonnet", "haiku"]);
 /** `claude-<family>-<major>[-<minor>]` anywhere in a provider-qualified id. */

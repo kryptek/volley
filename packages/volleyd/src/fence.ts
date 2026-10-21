@@ -2,6 +2,7 @@ import { lstatSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { DYNSEC_ADMIN_USER } from "volley-cli/auth/roles";
+import { COMPACT_MAX, COMPACT_MIN } from "./claude/context-window";
 import { canonicalRoot, claudeRoot, profileDir, readRegistry } from "./claude/profiles";
 import {
   BROWSER_HELPER,
@@ -1623,9 +1624,6 @@ const LAUNCH_HOOKS = new RegExp(`^export VOLLEY_HOOKS_DIR=(${SHQ})$`);
 const LAUNCH_PROFILE = new RegExp(`^export CLAUDE_CONFIG_DIR=(${SHQ})$`);
 /** The auto-compact window: a plain token count, never suffixed (`850k`) or signed. */
 const LAUNCH_COMPACT = /^export CLAUDE_CODE_AUTO_COMPACT_WINDOW='([1-9][0-9]{5,6})'$/;
-/** The window Claude Code accepts, in tokens (src/claude/context-window.ts clamps to it). */
-const COMPACT_WINDOW_MIN = 100_000;
-const COMPACT_WINDOW_MAX = 1_000_000;
 const LAUNCH_EXEC = new RegExp(
   `^exec claude .* --model (${SHQ}) --settings ${SHQ}( --strict-mcp-config)? --mcp-config=(${SHQ}) --name (${SHQ}) -- `,
 );
@@ -1738,7 +1736,7 @@ function isLaunchScript(content: string, worktree: string): boolean {
   return (
     (claudeConfigDir === undefined || profileDirAllowed(claudeConfigDir, worktree)) &&
     (autoCompactWindow === undefined ||
-      (autoCompactWindow >= COMPACT_WINDOW_MIN && autoCompactWindow <= COMPACT_WINDOW_MAX)) &&
+      (autoCompactWindow >= COMPACT_MIN && autoCompactWindow <= COMPACT_MAX)) &&
     outsideVolley(vars.hooksDir) &&
     MODEL_ID.test(vars.model) &&
     AGENT_ID.test(vars.agentId) &&

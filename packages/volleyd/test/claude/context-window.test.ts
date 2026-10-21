@@ -1,5 +1,11 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { autoCompactWindowTokens, contextWindowTokens } from "../../src/claude/context-window";
+import {
+  COMPACT_MAX,
+  COMPACT_MIN,
+  autoCompactWindowTokens,
+  contextWindowTokens,
+} from "../../src/claude/context-window";
 
 describe("contextWindowTokens", () => {
   it.each([
@@ -59,5 +65,14 @@ describe("autoCompactWindowTokens", () => {
       }
     }
     expect(Number.isInteger(autoCompactWindowTokens("claude-opus-4-6", 77.7))).toBe(true);
+  });
+});
+
+describe("the auto-compact range has one source", () => {
+  it("is 100000..1000000, and the fence imports it rather than repeating the literals", () => {
+    expect([COMPACT_MIN, COMPACT_MAX]).toEqual([100_000, 1_000_000]);
+    const fence = readFileSync(new URL("../../src/fence.ts", import.meta.url), "utf-8");
+    expect(fence).toMatch(/import \{[^}]*COMPACT_MAX[^}]*\} from "\.\/claude\/context-window"/);
+    expect(fence).not.toMatch(/COMPACT_WINDOW_M(IN|AX) = /);
   });
 });
