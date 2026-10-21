@@ -144,6 +144,12 @@ export interface HarnessOptions {
   deleteBranch?: boolean;
   /** The release-branch lock the driver merges under (default: the driver's own). */
   releaseLock?: ConstructorParameters<typeof PipelineDriver>[1]["releaseLock"];
+  /**
+   * Autopilot (the daemon's settleDecision): answers a just-opened decision at once (undefined:
+   * left open for the owner). The resolution is journaled inside the `decide`, and the pipeline
+   * hears of it later, on the queue, as the daemon's resolveNow hands it back.
+   */
+  autopilot?: (d: DecisionRecord) => string | undefined;
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -399,6 +405,18 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     return agent_id;
   };
 
+  /** Autopilot answers not yet handed back to the pipeline (`settle` waits for them). */
+  const handBacks = new Set<Promise<unknown>>();
+  /** The driver's I/O and every autopilot hand-back, until none is left. */
+  const settle = async () => {
+    for (;;) {
+      await driver.settled();
+      if (handBacks.size === 0) return;
+      const all = [...handBacks];
+      handBacks.clear();
+      await Promise.all(all);
+    }
+  };
   let clock = Date.parse("2026-10-18T12:00:00.000Z");
   let queue: Promise<unknown> = Promise.resolve();
   const deps: ConstructorParameters<typeof PipelineDriver>[1] = {
@@ -452,6 +470,20 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       const r = openEvent(rec, o.decideWith?.(input, extra) ?? input, new Date());
       if ("error" in r) throw new Error(r.error);
       await journal({ ...r.event, data: { ...extra, ...r.event.data } });
+      const answer = o.autopilot?.(rec.decisions[r.id] as DecisionRecord);
+      if (answer === undefined) return;
+      const res = resolveEvent(rec, r.id, { answer, by: "volleyd" }, new Date());
+      if (!("event" in res)) throw new Error(`cannot resolve ${r.id}`);
+      await journal(res.event);
+      const d = rec.decisions[r.id] as DecisionRecord;
+      // After the observation being handled (the daemon's queue runs it next): a macrotask.
+      handBacks.add(
+        new Promise<void>((done) => setTimeout(done, 0)).then(() =>
+          deps.enqueue(() =>
+            driver.handle(d.task ?? "T1", { kind: "decision_resolved", decision: d }),
+          ),
+        ),
+      );
     },
     // The daemon's resolveNow: journaled; a done task acts on no answer, so no hand-back here.
     resolveOpen: async (task, answer, rationale) => {
@@ -527,7 +559,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     /** One level-triggered tick, then wait for the pipeline I/O it started to fold back in. */
     async tick() {
       await driver.tick();
-      await driver.settled();
+      await settle();
     },
     run,
     journal,
@@ -615,7 +647,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       };
       if (o.result !== undefined) lastResult[r.agent_id] = o.result;
       await driver.handle(task, ev);
-      await driver.settled();
+      await settle();
     },
     /** A role's current run publishes `blocked` with `reason` (the agent stays alive). */
     async block(role: Role, reason: string, task = "T1") {
@@ -639,7 +671,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         kind: "decision_resolved",
         decision: rec.decisions[id] as DecisionRecord,
       });
-      await driver.settled();
+      await settle();
     },
     openDecisions: () =>
       (rec.state?.open_decisions ?? []).map((id) => rec.decisions[id] as DecisionRecord),
