@@ -440,6 +440,8 @@ describe("placement at admission (SPEC §4.6.15)", () => {
   let repo: string;
   /** Whether the supervisor's own agents' PATH has claude and bun (false: it is not ready). */
   let localClaude: boolean;
+  /** The daemon's log lines. */
+  let logs: string[];
 
   const journal = (wave: string): JournalEvent[] =>
     readJournalFile(join(env.home, "waves", wave, "journal.jsonl"));
@@ -545,8 +547,10 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       `fleet:\n  local_name: control\n${o.localAgents !== undefined ? `  local_agents: ${o.localAgents}\n` : ""}hosts:\n  box:\n    target: dev@box\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n${o.drain === true ? "    drain: true\n" : ""}${o.extraConfig ?? ""}`,
     );
     clock = fakeClock(1_000_000);
+    logs = [];
     daemon = await env.start({
       clock,
+      log: (line) => logs.push(line),
       fleet: {
         os: o.os ?? CALM_OS,
         version: VERSION,
@@ -627,6 +631,83 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     });
     expect(box?.launches).toHaveLength(2);
     expect(local.launches).toHaveLength(0);
+  });
+
+  /** T1 placed on the box and its implementer spawned there; the box's writeFile replaced by `write`. */
+  const spawnOnBox = async (write: (path: string, content: string) => Promise<void>) => {
+    localClaude = false;
+    await setup();
+    await submit("w7", "", "  T1: { issue: 42, host: box }\n");
+    await tick();
+    await eventually(async () => journal("w7").some((e) => e.type === "agent_spawned"));
+    const spawned = journal("w7").find((e) => e.type === "agent_spawned");
+    expect(spawned?.data).toMatchObject({ host: "box" });
+    if (box !== undefined) box.writeFile = write;
+    return spawned?.data.worktree as string;
+  };
+  const askOnT1 = () =>
+    daemon.openDecision("w7", {
+      kind: "agent_question",
+      task: "T1",
+      question: "Keep the v1 endpoint?",
+      options: ["yes", "no"],
+      pointers: {},
+    });
+
+  it("resolving a remote task's decision writes its decisions.md through the box, not the local disk", async () => {
+    const writes: { path: string; content: string }[] = [];
+    const worktree = await spawnOnBox(async (path, content) => {
+      writes.push({ path, content });
+    });
+    const d = await askOnT1();
+    const res = await client.request("resolve", {
+      decision_id: d.decision_id,
+      answer: "no",
+      by: "tester",
+    });
+    expect(res.error).toBeUndefined();
+    const brief = join(worktree, ".volley", "decisions.md");
+    expect(res.result).toMatchObject({ already_resolved: false, brief });
+    expect(writes.map((w) => w.path)).toEqual([brief]);
+    expect(writes[0]?.content).toContain("Keep the v1 endpoint?");
+    expect(existsSync(brief)).toBe(false);
+    expect(logs.filter((l) => l.includes("but writing"))).toEqual([]);
+    expect(
+      journal("w7").some(
+        (e) => e.type === "alarm_raised" && e.data.alarm === "decisions_file_unwritten",
+      ),
+    ).toBe(false);
+  });
+
+  it("a failed write on the box journals decisions_file_unwritten once, and the decision is still resolved", async () => {
+    const worktree = await spawnOnBox(async () => {
+      throw new Error("ssh: connect to host box port 22: Connection refused");
+    });
+    const d = await askOnT1();
+    const res = await client.request("resolve", {
+      decision_id: d.decision_id,
+      answer: "no",
+      by: "tester",
+    });
+    expect(res.error).toBeUndefined();
+    expect(res.result).toMatchObject({ already_resolved: false });
+    expect(res.result).not.toHaveProperty("brief");
+    expect(daemon.record("w7")?.state?.open_decisions).toEqual([]);
+    // A second resolve of the same decision returns already_resolved before the write: no second alarm.
+    await client.request("resolve", { decision_id: d.decision_id, answer: "no", by: "tester" });
+    const alarms = journal("w7").filter(
+      (e) => e.type === "alarm_raised" && e.data.alarm === "decisions_file_unwritten",
+    );
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0]).toMatchObject({
+      task: "T1",
+      data: {
+        alarm: "decisions_file_unwritten",
+        decision_id: d.decision_id,
+        path: join(worktree, ".volley", "decisions.md"),
+        error: "ssh: connect to host box port 22: Connection refused",
+      },
+    });
   });
 
   it("no eligible machine: the task stays queued with the closest machine's reason, and is placed once one is", async () => {
