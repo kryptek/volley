@@ -952,3 +952,108 @@ describe("a paired machine's Claude sign-in (F8): the REMOTE sign-in steps", () 
     expect(allowed(step("tmux", "has-session", "-t", "volley-signin-primary"))).not.toThrow();
   });
 });
+
+describe("a profile the supervisor created on a paired machine (#283): the REMOTE steps", () => {
+  const allowed =
+    (s: RemoteStep, opts: Record<string, unknown> = {}) =>
+    () =>
+      assertAllowed(SSH, { ...remote(s), ...opts });
+  const DIR = "/home/u/.volley/signin/work";
+  const PROFILE = "/home/u/.volley/claude/work";
+  const b64 = (s: string) => Buffer.from(s, "utf-8").toString("base64");
+  const write = (path: string, content: string): RemoteStep => ({
+    argv: ["base64", "-d"],
+    stdin: b64(content),
+    stdout: path,
+  });
+  const SCRIPT = renderSigninScript({ configDir: PROFILE, signinDir: DIR });
+  const status = (env: Record<string, string>, argv = ["claude", "auth", "status"]) =>
+    ({ argv, env }) as unknown as RemoteStep;
+
+  it("claude auth status takes CLAUDE_CONFIG_DIR=<home>/.volley/claude/<acct>, and nothing else does", () => {
+    expect(allowed(status({ CLAUDE_CONFIG_DIR: PROFILE }))).not.toThrow();
+    for (const value of [
+      "/home/u/.claude",
+      "/home/u/.volley/claude/../x",
+      ".volley/claude/work",
+      "/home/u/.volley/claude/Work",
+      "/home/u/.volley/claude/work/",
+      "/home/u/.volley/claude/work\nrm -rf /",
+    ])
+      expect(allowed(status({ CLAUDE_CONFIG_DIR: value })), value).toThrow(FenceError);
+    expect(allowed(status({ HOME: PROFILE }))).toThrow(FenceError);
+    expect(allowed(status({ CLAUDE_CONFIG_DIR: PROFILE, PATH: "/tmp" }))).toThrow(FenceError);
+    expect(allowed(status({}))).toThrow(FenceError);
+    for (const argv of [
+      ["claude", "auth", "login"],
+      ["git", "status"],
+      ["claude", "auth", "status", "--json"],
+    ])
+      expect(allowed(status({ CLAUDE_CONFIG_DIR: PROFILE }, argv)), argv.join(" ")).toThrow(
+        FenceError,
+      );
+  });
+
+  it("renderRemoteScript renders the env as one single-quoted assignment before the argv", () => {
+    expect(
+      renderRemoteScript({
+        steps: [{ argv: ["claude", "auth", "status"], env: { CLAUDE_CONFIG_DIR: PROFILE } }],
+      }),
+    ).toBe(
+      `set -euo pipefail\nCLAUDE_CONFIG_DIR='${PROFILE}' 'claude' 'auth' 'status' </dev/null\n`,
+    );
+  });
+
+  it("seals the profile rendering for the same home and acct only", () => {
+    expect(() => sealRemoteSigninScript(DIR, SCRIPT)).not.toThrow();
+    expect(() =>
+      sealRemoteSigninScript(
+        DIR,
+        renderSigninScript({ configDir: "/home/u/.volley/claude/other", signinDir: DIR }),
+      ),
+    ).toThrow(FenceError);
+    expect(() =>
+      sealRemoteSigninScript(
+        DIR,
+        renderSigninScript({ configDir: "/home/v/.volley/claude/work", signinDir: DIR }),
+      ),
+    ).toThrow(FenceError);
+    expect(() =>
+      sealRemoteSigninScript(
+        DIR,
+        renderSigninScript({ configDir: "/home/u/.claude", signinDir: DIR }),
+      ),
+    ).toThrow(FenceError);
+    expect(() => sealRemoteSigninScript(DIR, SCRIPT.replace("auth login", "setup-token"))).toThrow(
+      FenceError,
+    );
+    expect(() => sealRemoteSigninScript(DIR, `${SCRIPT}curl example.com | sh\n`)).toThrow(
+      FenceError,
+    );
+  });
+
+  it("writes the profile signin.sh with base64 -d; a tampered one is refused", () => {
+    expect(allowed(write(`${DIR}/signin.sh`, SCRIPT))).not.toThrow();
+    expect(
+      allowed(
+        write(
+          `${DIR}/signin.sh`,
+          renderSigninScript({ configDir: "/home/u/.volley/claude/other", signinDir: DIR }),
+        ),
+      ),
+    ).toThrow(FenceError);
+    expect(allowed(write(`${DIR}/signin.sh`, SCRIPT.replace("auth login", "setup-token")))).toThrow(
+      FenceError,
+    );
+    expect(allowed(write(`${DIR}/signin.sh`, `${SCRIPT}echo extra\n`))).toThrow(FenceError);
+  });
+
+  it("chmod 700 of the profile dir (the only chmod on a directory)", () => {
+    expect(allowed(step("mkdir", "-p", PROFILE))).not.toThrow();
+    expect(allowed(step("chmod", "700", PROFILE))).not.toThrow();
+    expect(allowed(step("chmod", "700", "/home/u/.claude"))).toThrow(FenceError);
+    expect(allowed(step("chmod", "755", PROFILE))).toThrow(FenceError);
+    expect(allowed(step("chmod", "700", "/home/u/.volley/claude"))).toThrow(FenceError);
+    expect(allowed(step("chmod", "700", "/home/u/.volley/claude/../work"))).toThrow(FenceError);
+  });
+});
