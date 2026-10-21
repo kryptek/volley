@@ -1,12 +1,14 @@
 /**
- * The dock, ported from the prototype `App.tsx`: a React Bits `Dock` with seven
+ * The dock, ported from the prototype `App.tsx`: a React Bits `Dock` with eight
  * items — the coordinators window (badge: what needs you), the Needs you window
- * (badge: the inbox items only a person answers), tethers, arrange &
+ * (badge: the inbox items only a person answers), the Machines window (badge:
+ * the machines that are down), tethers, arrange &
  * fit, zoom in / out and the Settings window (appearance and auto-arrange
  * live there). Its panel is lifted and lit like the Desk's windows (D10,
  * `.dock-wrap .dock` in look.css).
  */
 import {
+  ComputerIcon,
   FullScreenIcon,
   InboxIcon,
   Link02Icon,
@@ -33,6 +35,10 @@ export interface DeskDockProps {
   onToggleInbox: () => void;
   /** The Needs you tile's badge: open inbox items that need a person (owner-only + `you`). */
   inboxNeedsYou: number;
+  machinesOpen: boolean;
+  onToggleMachines: () => void;
+  /** The Machines tile's badge: the machines that are down. */
+  machinesDown: number;
   tethers: boolean;
   onToggleTethers: () => void;
   onArrange: () => void;
@@ -56,6 +62,13 @@ export function dockItems(p: DeskDockProps): DockItemData[] {
       onClick: p.onToggleInbox,
       active: p.inboxOpen,
       ...(p.inboxNeedsYou > 0 ? { badge: p.inboxNeedsYou } : {}),
+    },
+    {
+      icon: icon(ComputerIcon),
+      label: "Machines",
+      onClick: p.onToggleMachines,
+      active: p.machinesOpen,
+      ...(p.machinesDown > 0 ? { badge: p.machinesDown } : {}),
     },
     {
       icon: icon(Link02Icon),
