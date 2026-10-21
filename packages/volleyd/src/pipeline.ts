@@ -1035,7 +1035,9 @@ function acceptedFrom(p: TaskPipeline, sha: string): boolean {
   while (head !== undefined && !seen.has(head)) {
     seen.add(head);
     const to = head;
-    head = p.moves.find((m) => m.to === to && m.how === "release_merge" && m.accepted_by)?.from;
+    head = p.moves.find(
+      (m) => m.to === to && m.how === "release_merge" && m.accepted_by !== undefined,
+    )?.from;
     if (head === sha) return true;
   }
   return false;
