@@ -2,10 +2,13 @@ import { constants, generateKeyPairSync, privateDecrypt } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   ACCOUNT_ROLES,
+  type Account,
+  DESK_OPS,
   SIGNIN_ROLES,
   accountOp,
   authOpsTopic,
   deskBase,
+  deskRefusal,
   isValidLabel,
   replyKey,
   seal,
@@ -195,5 +198,35 @@ describe("shared with volley-cli's auth-roles.ts", () => {
     expect(tokenRedeemTopic("0000abcd")).toBe("volley-auth/redeem/0000abcd");
     expect(tokenReplyTopic("0000abcd")).toBe("volley-auth/redeem/0000abcd/reply");
     expect(cli.authOpsTopic("admin-1")).toBe(authOpsTopic("admin-1"));
+  });
+});
+
+describe("deskRefusal (a Desk login's Needs-you answers, SPEC §4.6.18)", () => {
+  const at = "2026-10-19T09:00:00.000Z";
+  const accounts: Account[] = ["admin", "steer", "watch", "supervisor", "peer"].map((role) => ({
+    name: `${role}-1`,
+    role,
+    kind: "device",
+    created: at,
+  }));
+
+  it("passes the fixed desk identity, a steer and an admin account", () => {
+    expect(deskRefusal(accounts, "desk")).toBeUndefined();
+    expect(deskRefusal(accounts, "steer-1")).toBeUndefined();
+    expect(deskRefusal(accounts, "admin-1")).toBeUndefined();
+  });
+
+  it("refuses watch, supervisor, peer and an unknown name, with a reason", () => {
+    for (const role of ["watch", "supervisor", "peer"])
+      expect(deskRefusal(accounts, `${role}-1`)).toBe(
+        `"${role}-1" has role ${role}; Desk ops need the steer or admin role`,
+      );
+    expect(deskRefusal(accounts, "agent-a1")).toBe(
+      '"agent-a1" has no account; Desk ops need the steer or admin role',
+    );
+  });
+
+  it("covers inbox_answer and resolve only", () => {
+    expect([...DESK_OPS].sort()).toEqual(["inbox_answer", "resolve"]);
   });
 });

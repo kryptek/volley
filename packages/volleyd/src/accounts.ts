@@ -16,9 +16,10 @@ import type { ExecFn } from "./exec";
  * `accounts.json` / `tokens.json`); the daemon only runs it through the fenced exec.
  *
  * Two kinds of request topic, both outside the mailbox so the broker ACL names the sender:
- *   - `volley/_system/auth/ops/<username>`: account ops. Only the admin role grants it, and
+ *   - `volley/_system/auth/ops/<username>`: account ops. The admin and desk roles grant it, each
  *     only for its own username (`%u`), so the topic identifies the sender; the daemon
- *     also checks that username's role in the registry. Answered on
+ *     also checks that username's role in the registry, per op (`adminRefusal` for the account,
+ *     setup and peer ops, `deskRefusal` for a Desk login's Needs-you answers). Answered on
  *     `volley/_system/auth/replies/<correlation_id>`.
  *   - `volley-auth/redeem/<id>`: `token_redeem`, published by one-time token `<id>`'s own
  *     short-lived broker login (username `<id>`), answered on `volley-auth/redeem/<id>/reply`.
@@ -192,6 +193,23 @@ export function adminRefusal(accounts: Account[], sender: string): string | unde
   if (me === undefined) return `"${sender}" has no account; account ops need the admin role`;
   if (me.role !== "admin")
     return `"${sender}" has role ${me.role}; account ops need the admin role`;
+  return undefined;
+}
+
+/** A Desk login's Needs-you answers (SPEC §4.6.18), the owner's on any screen. */
+export const DESK_OPS: ReadonlySet<string> = new Set(["inbox_answer", "resolve"]);
+
+/**
+ * Why `sender` (the username an ops topic names) may not send a Desk op, or undefined when it is
+ * a Desk login: the fixed `desk` identity (it has no account entry) or a `steer` or `admin`
+ * account.
+ */
+export function deskRefusal(accounts: Account[], sender: string): string | undefined {
+  if (sender === "desk") return undefined;
+  const me = accounts.find((a) => a.name === sender);
+  if (me === undefined) return `"${sender}" has no account; Desk ops need the steer or admin role`;
+  if (me.role !== "steer" && me.role !== "admin")
+    return `"${sender}" has role ${me.role}; Desk ops need the steer or admin role`;
   return undefined;
 }
 

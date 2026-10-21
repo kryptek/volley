@@ -5,6 +5,7 @@ import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { type InboxItem, handoffItemId, inboxTopic, pickerItemId } from "../src/autopilot/inbox";
 import { ControlClient } from "../src/control";
 import { NS } from "./helpers/daemon-env";
+import { deskAccounts, deskAnswer } from "./helpers/desk-answer";
 import { schemaErrors } from "./helpers/schema";
 import { type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
 
@@ -201,6 +202,25 @@ describe("needs-you inbox: coordinator handoffs (SPEC §4.6.18)", () => {
     expect(s.daemon.inboxItem(item.id)?.answered?.by).toBe("owner");
   });
 
+  it("owner_only: a Desk login on its own account-op topic is the owner on another screen", async () => {
+    s = await makeSupervisedEnv({ daemon: { authExec: deskAccounts().exec } });
+    const item = await handoff();
+    s.host.screens = [asked()];
+    const fields = { id: item.id, version: 1, answer: "dispatch T2 now", where: phone };
+    // The mailbox still names no sender: a self-reported Desk login is refused there.
+    expect((await answer(item.id, "dispatch T2 now", "steer-1")).error).toContain(
+      "only its owner answers",
+    );
+    const watch = await deskAnswer(s.env.broker.url, "watch-1", fields);
+    expect(watch.error).toMatch(/Desk ops need the steer or admin role/);
+    expect(s.host.texts).toEqual([]);
+    const r = await deskAnswer(s.env.broker.url, "steer-1", fields);
+    expect(r.error).toBeUndefined();
+    expect(r.ok).toBe(true);
+    expect(s.host.texts.length).toBeGreaterThan(0);
+    expect(s.daemon.inboxItem(item.id)?.answered).toMatchObject({ by: "steer-1", where: phone });
+  });
+
   it("only the Stop hook's question opens a handoff, not a Notification's awaiting_input", async () => {
     s = await makeSupervisedEnv();
     await coord("awaiting_input", 30, "Notification", {
@@ -250,6 +270,39 @@ describe("needs-you inbox: coordinator handoffs (SPEC §4.6.18)", () => {
       { workspace: "workspace:7", key: "Enter" },
     ]);
     expect(s.daemon.inboxItem(id)?.answered).toMatchObject({ by: COORD, where: phone });
+  });
+
+  it("a coordinator's own picker is answered by a Desk login on its own account-op topic", async () => {
+    s = await makeSupervisedEnv({ daemon: { authExec: deskAccounts().exec } });
+    await coord("picker_opened", 40, "PreToolUse", {
+      tool_use_id: "toolu_01Coord",
+      questions: [
+        {
+          question: "Which fruit do you want?",
+          header: "Fruit",
+          options: [
+            { label: "Apple", description: "red" },
+            { label: "Banana", description: "yellow" },
+            { label: "Cherry", description: "small" },
+          ],
+          multiSelect: false,
+        },
+      ],
+      workspace: "workspace:7",
+    });
+    const id = pickerItemId(COORD, "toolu_01Coord");
+    await s.until(() => s.daemon.inboxItem(id) !== undefined);
+    s.host.screens = [screen("picker-single")];
+    expect((await answer(id, "Banana", "someone-else")).error).toContain("only its owner answers");
+    const r = await deskAnswer(s.env.broker.url, "steer-1", {
+      id,
+      version: 1,
+      answer: "Banana",
+      where: phone,
+    });
+    expect(r.error).toBeUndefined();
+    expect(s.host.keys.length).toBeGreaterThan(0);
+    expect(s.daemon.inboxItem(id)?.answered).toMatchObject({ by: "steer-1", where: phone });
   });
 
   it("refuses a workspace that is a supervised agent's screen: nothing is typed there", async () => {

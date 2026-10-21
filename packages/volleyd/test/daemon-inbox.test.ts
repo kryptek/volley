@@ -5,6 +5,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { type InboxItem, decisionItemId, inboxTopic } from "../src/autopilot/inbox";
 import { ControlClient } from "../src/control";
 import { AUTOPILOT_ON, NS } from "./helpers/daemon-env";
+import { deskAccounts, deskAnswer } from "./helpers/desk-answer";
 import { runCli } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
 import { type SupervisedEnv, makeSupervisedEnv, systemJournal } from "./helpers/supervised-env";
@@ -332,5 +333,123 @@ describe("the needs-you inbox in the daemon (SPEC §4.6.18)", () => {
       error: "where.kind must be desk, terminal, cli or autopilot",
     });
     expect(s.daemon.record("w1")?.decisions[d.decision_id]?.resolved).toBeUndefined();
+  });
+});
+
+describe("a Desk login answers on its own account-op topic (the owner on any screen)", () => {
+  const owned = async () => {
+    s = await makeSupervisedEnv({ daemon: { authExec: deskAccounts().exec } });
+    const c = await control();
+    expect((await c.request("claim", { wave: "w1", by: "coord-main" })).ok).toBe(true);
+  };
+  const answerFrom = (user: string, id: string, op = "inbox_answer") =>
+    deskAnswer(s.env.broker.url, user, { id, version: 1, answer: "fine", where: phone }, op);
+
+  it("a steer login answers the decision of a wave coord-main owns, as itself", async () => {
+    await owned();
+    const d = await s.daemon.openDecision("w1", disagree);
+    const id = decisionItemId("w1", d.decision_id);
+    const r = await answerFrom("steer-1", id);
+    expect(r.error).toBeUndefined();
+    expect(r).toMatchObject({ ok: true, op: "inbox_answer" });
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.resolved).toMatchObject({
+      answer: "fine",
+      by: "steer-1",
+    });
+    const answered = s.journal().filter((e) => e.type === "inbox_answered");
+    expect(answered).toHaveLength(1);
+    expect(answered[0]?.data).toMatchObject({ by: "steer-1", where: phone });
+    expect((await retainedItem(id))?.type).toBe("inbox_answered");
+    // The referee's compare-and-set is unchanged: a second Desk answer is late.
+    const late = await answerFrom("admin-1", id);
+    expect(late).toMatchObject({ ok: false, error: "already answered on desk·phone" });
+  });
+
+  it("the fixed desk identity and an admin login answer too", async () => {
+    await owned();
+    const a = await s.daemon.openDecision("w1", disagree);
+    const b = await s.daemon.openDecision("w1", { ...disagree, task: null });
+    expect(await answerFrom("desk", decisionItemId("w1", a.decision_id))).toMatchObject({
+      ok: true,
+    });
+    expect(await answerFrom("admin-1", decisionItemId("w1", b.decision_id))).toMatchObject({
+      ok: true,
+    });
+  });
+
+  it("a watch login or a name with no account is refused by role, with no claim hint", async () => {
+    await owned();
+    const d = await s.daemon.openDecision("w1", disagree);
+    const id = decisionItemId("w1", d.decision_id);
+    const watch = await answerFrom("watch-1", id);
+    expect(watch.ok).toBe(false);
+    expect(watch.error).toMatch(/Desk ops need the steer or admin role/);
+    expect(watch.error).not.toMatch(/claim it/);
+    const agent = await answerFrom("agent-a1", id);
+    expect(agent.ok).toBe(false);
+    expect(agent.error).toContain("has no account");
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.resolved).toBeUndefined();
+    expect(s.daemon.inboxItem(id)?.answered).toBeUndefined();
+  });
+
+  it("an owner_only decision kind is answered by a Desk login (a human is the owner)", async () => {
+    await owned();
+    const d = await s.daemon.openDecision("w1", {
+      kind: "plan_change",
+      task: null,
+      question: "Add a task T2?",
+      options: ["apply", "cancel"],
+    });
+    const r = await deskAnswer(s.env.broker.url, "steer-1", {
+      id: decisionItemId("w1", d.decision_id),
+      version: 1,
+      answer: "cancel",
+      where: phone,
+    });
+    expect(r.error).toBeUndefined();
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.resolved?.by).toBe("steer-1");
+  });
+
+  it("resolve on the topic resolves a decision as the Desk login", async () => {
+    await owned();
+    const d = await s.daemon.openDecision("w1", disagree);
+    const r = await deskAnswer(
+      s.env.broker.url,
+      "steer-1",
+      { decision_id: d.decision_id, answer: "fine" },
+      "resolve",
+    );
+    expect(r.error).toBeUndefined();
+    expect(r).toMatchObject({ ok: true, op: "resolve", result: { wave: "w1" } });
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.resolved?.by).toBe("steer-1");
+    const watch = await deskAnswer(
+      s.env.broker.url,
+      "watch-1",
+      { decision_id: d.decision_id, answer: "fine" },
+      "resolve",
+    );
+    expect(watch.error).toMatch(/Desk ops need the steer or admin role/);
+  });
+
+  it("the mailbox is unchanged: a self-reported Desk login (or a smuggled flag) is refused", async () => {
+    await owned();
+    const d = await s.daemon.openDecision("w1", disagree);
+    const id = decisionItemId("w1", d.decision_id);
+    const c = await control();
+    const fields = { id, version: 1, answer: "fine", where: phone, by: "steer-1" };
+    const r = await c.request("inbox_answer", fields);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("is owned by coord-main");
+    const smuggled = await c.request("inbox_answer", { ...fields, desk_login: true });
+    expect(smuggled.ok).toBe(false);
+    expect(smuggled.error).toContain("is owned by coord-main");
+    const resolve = await c.request("resolve", {
+      decision_id: d.decision_id,
+      answer: "fine",
+      by: "steer-1",
+      desk_login: true,
+    });
+    expect(resolve.error).toContain("is owned by coord-main");
+    expect(s.daemon.inboxItem(id)?.answered).toBeUndefined();
   });
 });
