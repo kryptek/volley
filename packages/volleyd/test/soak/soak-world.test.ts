@@ -40,6 +40,18 @@ function pr(w: ReturnType<typeof world>["w"], task: string) {
 }
 
 describe("the soak world", () => {
+  it("names every git argv it does not model in unknown (fetch stays a silent no-op)", async () => {
+    // Straight to the world: whatever verb the daemon starts relying on, past the fence.
+    const { w } = world({ rate: 0 });
+    w.exec(["git", "-C", REPO, "fetch", "origin"]);
+    w.exec(["git", "-C", REPO, "cherry", "-v", w.tip()]);
+    w.exec(["git", "-C", REPO, "show", "--stat", w.tip()]);
+    expect(w.unknown).toEqual([
+      ["git", "-C", REPO, "cherry", "-v", w.tip()],
+      ["git", "-C", REPO, "show", "--stat", w.tip()],
+    ]);
+  });
+
   it("a merge moves the release tip and makes the other PR heads behind it", async () => {
     const { w, run, mergeAt } = world({ rate: 0 });
     const a = pr(w, "A");

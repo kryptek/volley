@@ -31,8 +31,9 @@ const SEED = Number(process.env.SOAK_SEED ?? 1);
 const BUDGET_MS = 20 * 60_000;
 /** Steps per task before the soak gives up (each step is 5 s of the wave's clock). */
 const STEPS_PER_TASK = 60;
+/** The screen publisher's slow-read bound (ms of the fake clock). */
+const SCREEN_SLOW_MS = 2_000;
 
-const sc = scenario(SEED, TASKS);
 const applied: Applied = {
   moved: [],
   ownerDropped: false,
@@ -68,10 +69,13 @@ const of = (j: JournalEvent[], type: string) => j.filter((e) => e.type === type)
 describe.skipIf(process.env.VOLLEYD_SOAK !== "1")(`the soak (${TASKS} tasks, seed ${SEED})`, () => {
   it(
     "finishes unattended: everything merged, the flake fixed, only stage_go and release_go asked",
-    { timeout: BUDGET_MS },
+    // Above the budget: the soak's own deadline throws first, so a slow run still explains itself.
+    { timeout: BUDGET_MS + 2 * 60_000 },
     async () => {
       // real process: the soak's own budget is wall time, the whole run.
       const started = Date.now();
+      // Here, not at module load: a skipped soak never builds a scenario (SOAK_TASKS < 8 throws).
+      const sc = scenario(SEED, TASKS);
       try {
         s = await makeSoakEnv({
           tasks: sc.tasks,
@@ -81,7 +85,8 @@ describe.skipIf(process.env.VOLLEYD_SOAK !== "1")(`the soak (${TASKS} tasks, see
           behaviour: behaviour(sc, () => s?.journal() ?? []),
           playbook: PLAYBOOK,
           config: `spawn_timeout_s: ${SPAWN_TIMEOUT_S}, idle_grace_s: ${IDLE_GRACE_S}`,
-          screenSlowMs: 2_000,
+          screenSlowMs: SCREEN_SLOW_MS,
+          deadline: started + BUDGET_MS,
           prepare: (host) => slowLaunches(sc, host),
         });
         const env = s;
@@ -162,7 +167,10 @@ describe.skipIf(process.env.VOLLEYD_SOAK !== "1")(`the soak (${TASKS} tasks, see
             `${task} ${role} respawned`,
           ).toBe(2);
         expect(env.fleet.launches.filter((a) => a.behaviour.kind === "conflict")).toHaveLength(1);
-        expect(env.host.screenReads.length).toBeGreaterThan(0);
+        expect(
+          env.host.screenReads.filter((r) => (r.delayMs ?? 0) > SCREEN_SLOW_MS).length,
+          "screen reads over screen_slow_ms",
+        ).toBeGreaterThan(0);
 
         // No retired agent's workspace stays open (#194).
         for (const e of of(j, "agent_retired")) {

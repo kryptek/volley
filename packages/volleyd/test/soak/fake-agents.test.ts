@@ -84,3 +84,13 @@ describe("the fake fleet (one task)", () => {
     },
   );
 });
+
+describe("the soak env's wall-clock budget", () => {
+  it("until() past the deadline throws with the report, before vitest's timeout can", async () => {
+    s = await makeSoakEnv({ tasks: ["T1"], deadline: Date.now() });
+    await expect(s.until(() => false, "never", 1_000)).rejects.toThrow(
+      /soak: never not reached within the wall-clock budget[\s\S]*journal tail/,
+    );
+    expect(s.steps()).toBe(0);
+  });
+});

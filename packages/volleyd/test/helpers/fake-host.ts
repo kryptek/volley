@@ -20,7 +20,8 @@ export interface FakeHost extends Host {
   fake: FakeExec;
   worktrees: WorktreeSpec[];
   launches: LaunchSpec[];
-  screenReads: { workspace: string; lines: number }[];
+  /** Every screen read; `delayMs` when it was a slow one (readScreenDelayMs). */
+  screenReads: { workspace: string; lines: number; delayMs?: number }[];
   keys: { workspace: string; key: string }[];
   texts: { workspace: string; text: string }[];
   /** Workspaces closed (retire, cleanup). */
@@ -120,8 +121,9 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
       return host.workspaceTitles[name] ?? host.found;
     },
     async readScreen(workspace, lines) {
-      host.screenReads.push({ workspace, lines });
-      if (host.readScreenDelayMs > 0) await host.sleep(host.readScreenDelayMs);
+      const delayMs = host.readScreenDelayMs;
+      host.screenReads.push({ workspace, lines, ...(delayMs > 0 ? { delayMs } : {}) });
+      if (delayMs > 0) await host.sleep(delayMs);
       const s = host.screens.length > 1 ? host.screens.shift() : host.screens[0];
       return s ?? null;
     },

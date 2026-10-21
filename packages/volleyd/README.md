@@ -3201,7 +3201,8 @@ stage owner-gated). Its acceptance: the wave reaches `releasing`, then `release_
 `done` with `merged_by_supervisor`; the flake's fixer merged and `remediation_closed` released
 every task it blocked; the only `decision_escalated` are `stage_go` and `release_go`
 (`owner_only`); no agent id was spawned twice and every retired agent's workspace was closed;
-`volleyd status` and the digest agree. The run must finish within 20 minutes of wall time. `bun
+`volleyd status` and the digest agree. The run must finish within 20 minutes of wall time (past
+that, the next step throws with the failure report). `bun
 run test` runs the soak's helper tests (`test/soak/soak-world.test.ts`,
 `test/soak/fake-agents.test.ts`: one task through every role, release train included), not the
 soak itself.
@@ -3231,18 +3232,20 @@ The pieces, all under `test/`:
   check and the accepted move ends in an escalation.
 
 Reading a failure: the test prints the journal's last 120 events, the open decisions (what is
-waiting and why) and every argv the world did not know. `SOAK_DUMP=<file>` also writes the whole
+waiting and why), any error a step swallowed, and every argv the world did not know (a git read or
+a `gh` call it does not model answers empty and is named there). `SOAK_DUMP=<file>` also writes the whole
 journal there, one event per line; `SOAK_SEED=<n>` replays a run, `SOAK_TASKS=8` (the least
 the faults need) makes it quick:
 
 ```sh
 cd packages/volleyd
-SOAK_TASKS=8 SOAK_SEED=3 SOAK_DUMP=/tmp/soak.jsonl bun run test:soak
+SOAK_TASKS=8 SOAK_SEED=3 SOAK_DUMP=soak.jsonl bun run test:soak
 ```
 
 Known open: #269 (one merge_ready invariant breach opening three decisions and spending
-`rereview_max`) can leave one task of a 32-task run escalated, so CI's `soak` job reports without
-gating until it is fixed; an 8-task run passes.
+`rereview_max`) can leave one task of a 32-task run escalated. Until it is fixed, CI's `soak` job
+gates on an 8-task run (every fault but the moved heads) and runs the 32-task size after it as a
+reported, non-gating step.
 
 A bug the soak finds in the daemon is fixed in the daemon, under its own issue; the soak itself
 only changes when the harness (timing, the world's fidelity) is what is wrong.

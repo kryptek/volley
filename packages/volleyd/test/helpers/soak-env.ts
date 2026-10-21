@@ -47,6 +47,8 @@ export interface SoakEnvOptions {
   prepare?: (host: FakeHost, world: SoakWorld) => void;
   /** The screen publisher's slow-read bound (ms of the fake clock). */
   screenSlowMs?: number;
+  /** Wall-clock deadline (epoch ms): `until` throws with the report once it passes. */
+  deadline?: number;
 }
 
 export interface SoakEnv {
@@ -63,8 +65,9 @@ export interface SoakEnv {
   /** One turn: the fleet acts, the daemon consumes it, `ms` of time pass, the daemon ticks. */
   step: (ms?: number) => Promise<void>;
   /**
-   * Step until `pred` holds (checked before each step); after `maxSteps` steps, throws with the
-   * journal tail and the open decisions (what a failing soak prints).
+   * Step until `pred` holds (checked before each step); after `maxSteps` steps, or once the
+   * wall-clock `deadline` passes, throws with the journal tail and the open decisions (what a
+   * failing soak prints).
    */
   until: (pred: () => boolean, what: string, maxSteps?: number, ms?: number) => Promise<number>;
   /** Run `fn` at the start of every step (a scenario's world events). */
@@ -218,7 +221,8 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
       if (!r.ok) throw new Error(`status: ${r.error}`);
       await d.settled();
     })();
-    caughtUp.catch(() => {});
+    // Lost to the timer race, a failure here would vanish: log it for the report.
+    caughtUp.catch((e) => logs.push(`soak: consume: ${String(e)}`));
     await Promise.race([
       caughtUp,
       // broker round-trip: what a fake-clock timer holds is released by the next step.
@@ -256,7 +260,8 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
     await fleet.heartbeats();
     await clock.advance(ms);
     await d.tick();
-    void d.tickScreens();
+    // Not awaited (a slow read holds it on the fake clock); a rejection goes into the logs.
+    d.tickScreens().catch((e) => logs.push(`soak: tickScreens: ${String(e)}`));
     await consumed();
   };
   const report = (n = 40) => {
@@ -274,6 +279,7 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
       `open decisions (${open.length}):`,
       ...open,
       `tasks: ${(rec?.state?.tasks ?? []).map((t) => `${t.id}:${t.stage}`).join(" ")}`,
+      `soak errors: ${logs.filter((l) => l.startsWith("soak: ")).join(" | ")}`,
       `unknown argvs: ${world.unknown
         .slice(0, 10)
         .map((a) => a.join(" "))
@@ -302,6 +308,9 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
     async until(pred, what, maxSteps = 200, ms = 5_000) {
       for (let i = 0; i < maxSteps; i++) {
         if (pred()) return i;
+        // real process: the deadline is wall time.
+        if (o.deadline !== undefined && Date.now() >= o.deadline)
+          throw new Error(`soak: ${what} not reached within the wall-clock budget\n${report()}`);
         await step(ms);
       }
       if (pred()) return maxSteps;

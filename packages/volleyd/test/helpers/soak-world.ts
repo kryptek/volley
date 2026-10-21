@@ -305,6 +305,11 @@ export function soakWorld(o: SoakWorldOptions) {
   const git = (cwd: string, args: string[]): Partial<ExecResult> => {
     const [verb, ...rest] = args;
     const last = rest.at(-1) as string;
+    // A read the world does not model answers empty, and the failure report names it.
+    const miss = () => {
+      unknown.push(["git", "-C", cwd, ...args]);
+      return out("");
+    };
     switch (verb) {
       case "rev-parse": {
         if (rest[0] === "--show-toplevel") return out(`${cwd}\n`);
@@ -319,7 +324,10 @@ export function soakWorld(o: SoakWorldOptions) {
         const s = resolve(last);
         return s !== null ? out(`${s}\n`) : out("", 1);
       }
+      // Writes the world has no use for: silent no-ops.
       case "fetch":
+      case "worktree":
+      case "branch":
         return out("");
       case "merge-base": {
         if (rest[0] === "--is-ancestor") {
@@ -357,7 +365,7 @@ export function soakWorld(o: SoakWorldOptions) {
           const s = resolve(rev as string);
           return s !== null && get(s).files[file as string] !== undefined ? out("") : out("", 128);
         }
-        return out("");
+        return miss();
       }
       case "log": {
         if (rest.includes("--cherry-pick")) {
@@ -390,7 +398,7 @@ export function soakWorld(o: SoakWorldOptions) {
         return out(cs.map((c) => `${c.sha.slice(0, 7)} ${c.subject}\n`).join(""));
       }
       default:
-        return out("");
+        return miss();
     }
   };
 

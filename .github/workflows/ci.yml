@@ -115,23 +115,30 @@ jobs:
         working-directory: packages/volleyd
 
   soak:
-    # The simulated soak (packages/volleyd/test/soak/): 32 tasks through the real daemon with every
-    # injected fault, finishing with only stage_go and release_go asked. Slow by design: it is the
-    # autopilot epic's acceptance gate, not a fast check. A failure prints the journal tail and the
-    # open decisions; re-run it locally with the same SOAK_SEED.
-    name: Soak (simulated, 32 tasks)
+    # The simulated soak (packages/volleyd/test/soak/): a whole wave through the real daemon with
+    # every injected fault, finishing with only stage_go and release_go asked. Slow by design: it is
+    # the autopilot epic's acceptance gate, not a fast check. A failure prints the journal tail and
+    # the open decisions; re-run it locally with the same SOAK_TASKS and SOAK_SEED.
+    name: Soak (simulated)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Reported, not gating, until #269 (the merge_ready invariant opening its decision three times
-    # and spending rereview_max) is fixed: on some runs it leaves one task escalated. Drop this then.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.3"
       - run: bun install --frozen-lockfile
-      - run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:soak
+      - name: Soak, 8 tasks (gating)
+        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:soak
+        working-directory: packages/volleyd
+        env:
+          SOAK_TASKS: "8"
+      # Reported, not gating, until #269 (the merge_ready invariant opening its decision three
+      # times and spending rereview_max) is fixed: on some runs it leaves one task escalated. Drop
+      # continue-on-error then.
+      - name: Soak, 32 tasks (reported until #269)
+        continue-on-error: true
+        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:soak
         working-directory: packages/volleyd
 
   react-bits:
