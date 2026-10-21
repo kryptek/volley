@@ -129,210 +129,228 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
     return spec.releaseBase === true ? { ...r, base: { sha: base, fresh: true } } : r;
   };
 
-  const broker = new VolleyBroker();
-  await broker.connect({ url: env.broker.url, agentId: "soak-fleet" });
-  const fleet = fakeFleet({
-    broker,
-    namespace: NS,
-    host,
-    world,
-    release_branch: RELEASE,
-    ...(o.behaviour !== undefined ? { behaviour: o.behaviour } : {}),
-    ...(o.flake !== undefined ? { flakeFile: o.flake.file } : {}),
-    now: () => clock.now(),
-  });
-
-  const d = await env.start({
-    spawner: {
+  // A throw before the env is handed back (a refused `run`, say) would leave the caller nothing
+  // to clean up: undo what is up so far (env.cleanup() stops the daemon and the broker), then
+  // rethrow.
+  const undo: (() => unknown)[] = [];
+  try {
+    const broker = new VolleyBroker();
+    await broker.connect({ url: env.broker.url, agentId: "soak-fleet" });
+    undo.push(() => broker.disconnect());
+    const fleet = fakeFleet({
+      broker,
+      namespace: NS,
       host,
-      claudeJsonPath: claudeJson,
-      hooksDir: "/opt/volley-hooks",
-      reapGraceMs: 300,
-      credentials: memoryCredentials(),
-    },
-    configDefaults: CONFIG_DEFAULTS,
-    clock,
-    log: (line) => logs.push(line),
-    ...(o.screenSlowMs !== undefined ? { screenTimeouts: { slowMs: o.screenSlowMs } } : {}),
-  });
-  const offJournal = d.onJournal((_wave, e) => fleet.observe(e));
-  const control = await ControlClient.connect(env.broker.url, NS);
-
-  // The owner: a coordinator session registered under its name (SPEC §6.2).
-  const owner = {
-    agentId: "coord-soak-a1",
-    async register(agentId: string) {
-      await broker.publish(
-        registryTopic(agentId),
-        JSON.stringify({
-          ...buildEnvelope({
-            now: () => new Date(clock.now()),
-            agentId,
-            parentId: null,
-            channel: "_system/registry",
-            type: "registered",
-            payload: {
-              capabilities: [],
-              cwd: repo,
-              coordinator: OWNER,
-              started_at: new Date(clock.now()).toISOString(),
-            },
-          }),
-          namespace: NS,
-        }),
-        { qos: 1, retain: true },
-      );
-      await this.status(agentId, "working");
-    },
-    async status(agentId: string, type: string) {
-      await broker.publish(
-        buildTopic(NS, agentId, "status"),
-        JSON.stringify(
-          buildEnvelope({
-            now: () => new Date(clock.now()),
-            agentId,
-            parentId: null,
-            channel: "status",
-            type,
-            payload: {},
-          }),
-        ),
-        { qos: 1, retain: true },
-      );
-    },
-    /** Its MCP server goes away: the registry entry's LWT, `reaped`. */
-    async drop() {
-      await this.status(this.agentId, "reaped");
-    },
-    /** It comes back under a new agent id, the same coordinator name. */
-    async reconnect(agentId: string) {
-      this.agentId = agentId;
-      await this.register(agentId);
-    },
-  };
-  await owner.register(owner.agentId);
-
-  const consumed = async () => {
-    await fleet.idle();
-    // A control round-trip behind what was published, then the daemon idle. Bounded: a spawn
-    // waiting out a fake-clock timer (a slow launch) holds both until the next step moves time.
-    const caughtUp = (async () => {
-      const r = await control.request("status", {});
-      if (!r.ok) throw new Error(`status: ${r.error}`);
-      await d.settled();
-    })();
-    // Lost to the timer race, a failure here would vanish: log it for the report.
-    caughtUp.catch((e) => logs.push(`soak: consume: ${String(e)}`));
-    await Promise.race([
-      caughtUp,
-      // broker round-trip: what a fake-clock timer holds is released by the next step.
-      new Promise((r) => setTimeout(r, SETTLE_MS)),
-    ]);
-    await flushMicrotasks();
-  };
-
-  const tasks = o.tasks.map((t, i) => `  ${t}: { issue: ${300 + i} }`).join("\n");
-  const yaml = [
-    `wave: ${WAVE}`,
-    `repo: ${repo}`,
-    `release_branch: ${RELEASE}`,
-    "model: claude-opus-5-5",
-    `pipeline: ${o.pipeline ?? SOAK_PIPELINE}`,
-    "merge: auto",
-    ...(o.waveExtra !== undefined ? [o.waveExtra] : []),
-    "tasks:",
-    tasks,
-    `config: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }`,
-    "",
-  ].join("\n");
-  o.prepare?.(host, world);
-  const run = await control.request("run", { wave_yaml: yaml, owner: OWNER });
-  if (!run.ok) throw new Error(`run: ${run.error}`);
-  await consumed();
-
-  const hooks: (() => void | Promise<void>)[] = [];
-  let steps = 0;
-  const step = async (ms = 5_000) => {
-    steps++;
-    for (const h of hooks) await h();
-    await fleet.step();
-    await consumed();
-    await fleet.heartbeats();
-    await clock.advance(ms);
-    await d.tick();
-    // Not awaited (a slow read holds it on the fake clock); a rejection goes into the logs.
-    d.tickScreens().catch((e) => logs.push(`soak: tickScreens: ${String(e)}`));
-    await consumed();
-  };
-  const report = (n = 40) => {
-    const j = readJournalFile(join(env.home, "waves", WAVE, "journal.jsonl"));
-    const rec = d.record(WAVE);
-    const open = (rec?.state?.open_decisions ?? []).map((id) => {
-      const x = rec?.decisions[id];
-      return `  ${id} ${x?.kind} [${x?.task ?? "-"}] ${x?.question?.slice(0, 200)}`;
+      world,
+      release_branch: RELEASE,
+      ...(o.behaviour !== undefined ? { behaviour: o.behaviour } : {}),
+      ...(o.flake !== undefined ? { flakeFile: o.flake.file } : {}),
+      now: () => clock.now(),
     });
-    return [
-      `journal tail (${j.length} events):`,
-      ...j
-        .slice(-n)
-        .map((e) => `  ${e.seq} ${e.type} ${e.task ?? ""} ${JSON.stringify(e.data).slice(0, 240)}`),
-      `open decisions (${open.length}):`,
-      ...open,
-      `tasks: ${(rec?.state?.tasks ?? []).map((t) => `${t.id}:${t.stage}`).join(" ")}`,
-      `soak errors: ${logs.filter((l) => l.startsWith("soak: ")).join(" | ")}`,
-      `unknown argvs: ${world.unknown
-        .slice(0, 10)
-        .map((a) => a.join(" "))
-        .join(" | ")}`,
-    ].join("\n");
-  };
 
-  return {
-    env,
-    daemon: d,
-    host,
-    world,
-    fleet,
-    clock,
-    repo,
-    control,
-    journal: () => readJournalFile(join(env.home, "waves", WAVE, "journal.jsonl")),
-    logs,
-    consumed,
-    step,
-    report,
-    onStep: (fn) => {
-      hooks.push(fn);
-    },
-    steps: () => steps,
-    async until(pred, what, maxSteps = 200, ms = 5_000) {
-      for (let i = 0; i < maxSteps; i++) {
-        if (pred()) return i;
-        // real process: the deadline is wall time.
-        if (o.deadline !== undefined && Date.now() >= o.deadline)
-          throw new Error(`soak: ${what} not reached within the wall-clock budget\n${report()}`);
-        await step(ms);
-      }
-      if (pred()) return maxSteps;
-      throw new Error(`soak: ${what} not reached in ${maxSteps} steps\n${report()}`);
-    },
-    owner,
-    async resolve(decisionId, answer) {
-      const r = await control.request("resolve", {
-        wave: WAVE,
-        decision_id: decisionId,
-        answer,
-        by: owner.agentId,
-      });
-      if (!r.ok) throw new Error(`resolve ${decisionId}: ${r.error}`);
-      await consumed();
-    },
-    async cleanup() {
-      offJournal();
+    const d = await env.start({
+      spawner: {
+        host,
+        claudeJsonPath: claudeJson,
+        hooksDir: "/opt/volley-hooks",
+        reapGraceMs: 300,
+        credentials: memoryCredentials(),
+      },
+      configDefaults: CONFIG_DEFAULTS,
+      clock,
+      log: (line) => logs.push(line),
+      ...(o.screenSlowMs !== undefined ? { screenTimeouts: { slowMs: o.screenSlowMs } } : {}),
+    });
+    const offJournal = d.onJournal((_wave, e) => fleet.observe(e));
+    undo.push(offJournal);
+    const control = await ControlClient.connect(env.broker.url, NS);
+    undo.push(() => control.close());
+
+    // The owner: a coordinator session registered under its name (SPEC §6.2).
+    const owner = {
+      agentId: "coord-soak-a1",
+      async register(agentId: string) {
+        await broker.publish(
+          registryTopic(agentId),
+          JSON.stringify({
+            ...buildEnvelope({
+              now: () => new Date(clock.now()),
+              agentId,
+              parentId: null,
+              channel: "_system/registry",
+              type: "registered",
+              payload: {
+                capabilities: [],
+                cwd: repo,
+                coordinator: OWNER,
+                started_at: new Date(clock.now()).toISOString(),
+              },
+            }),
+            namespace: NS,
+          }),
+          { qos: 1, retain: true },
+        );
+        await this.status(agentId, "working");
+      },
+      async status(agentId: string, type: string) {
+        await broker.publish(
+          buildTopic(NS, agentId, "status"),
+          JSON.stringify(
+            buildEnvelope({
+              now: () => new Date(clock.now()),
+              agentId,
+              parentId: null,
+              channel: "status",
+              type,
+              payload: {},
+            }),
+          ),
+          { qos: 1, retain: true },
+        );
+      },
+      /** Its MCP server goes away: the registry entry's LWT, `reaped`. */
+      async drop() {
+        await this.status(this.agentId, "reaped");
+      },
+      /** It comes back under a new agent id, the same coordinator name. */
+      async reconnect(agentId: string) {
+        this.agentId = agentId;
+        await this.register(agentId);
+      },
+    };
+    await owner.register(owner.agentId);
+
+    const consumed = async () => {
       await fleet.idle();
-      await control.close();
-      await broker.disconnect();
-      await env.cleanup();
-    },
-  };
+      // A control round-trip behind what was published, then the daemon idle. Bounded: a spawn
+      // waiting out a fake-clock timer (a slow launch) holds both until the next step moves time.
+      const caughtUp = (async () => {
+        const r = await control.request("status", {});
+        if (!r.ok) throw new Error(`status: ${r.error}`);
+        await d.settled();
+      })();
+      // Lost to the timer race, a failure here would vanish: log it for the report.
+      caughtUp.catch((e) => logs.push(`soak: consume: ${String(e)}`));
+      await Promise.race([
+        caughtUp,
+        // broker round-trip: what a fake-clock timer holds is released by the next step.
+        new Promise((r) => setTimeout(r, SETTLE_MS)),
+      ]);
+      await flushMicrotasks();
+    };
+
+    const tasks = o.tasks.map((t, i) => `  ${t}: { issue: ${300 + i} }`).join("\n");
+    const yaml = [
+      `wave: ${WAVE}`,
+      `repo: ${repo}`,
+      `release_branch: ${RELEASE}`,
+      "model: claude-opus-5-5",
+      `pipeline: ${o.pipeline ?? SOAK_PIPELINE}`,
+      "merge: auto",
+      ...(o.waveExtra !== undefined ? [o.waveExtra] : []),
+      "tasks:",
+      tasks,
+      `config: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }`,
+      "",
+    ].join("\n");
+    o.prepare?.(host, world);
+    const run = await control.request("run", { wave_yaml: yaml, owner: OWNER });
+    if (!run.ok) throw new Error(`run: ${run.error}`);
+    await consumed();
+
+    const hooks: (() => void | Promise<void>)[] = [];
+    let steps = 0;
+    const step = async (ms = 5_000) => {
+      steps++;
+      for (const h of hooks) await h();
+      await fleet.step();
+      await consumed();
+      await fleet.heartbeats();
+      await clock.advance(ms);
+      await d.tick();
+      // Not awaited (a slow read holds it on the fake clock); a rejection goes into the logs.
+      d.tickScreens().catch((e) => logs.push(`soak: tickScreens: ${String(e)}`));
+      await consumed();
+    };
+    const report = (n = 40) => {
+      const j = readJournalFile(join(env.home, "waves", WAVE, "journal.jsonl"));
+      const rec = d.record(WAVE);
+      const open = (rec?.state?.open_decisions ?? []).map((id) => {
+        const x = rec?.decisions[id];
+        return `  ${id} ${x?.kind} [${x?.task ?? "-"}] ${x?.question?.slice(0, 200)}`;
+      });
+      return [
+        `journal tail (${j.length} events):`,
+        ...j
+          .slice(-n)
+          .map(
+            (e) => `  ${e.seq} ${e.type} ${e.task ?? ""} ${JSON.stringify(e.data).slice(0, 240)}`,
+          ),
+        `open decisions (${open.length}):`,
+        ...open,
+        `tasks: ${(rec?.state?.tasks ?? []).map((t) => `${t.id}:${t.stage}`).join(" ")}`,
+        `soak errors: ${logs.filter((l) => l.startsWith("soak: ")).join(" | ")}`,
+        `unknown argvs: ${world.unknown
+          .slice(0, 10)
+          .map((a) => a.join(" "))
+          .join(" | ")}`,
+      ].join("\n");
+    };
+
+    return {
+      env,
+      daemon: d,
+      host,
+      world,
+      fleet,
+      clock,
+      repo,
+      control,
+      journal: () => readJournalFile(join(env.home, "waves", WAVE, "journal.jsonl")),
+      logs,
+      consumed,
+      step,
+      report,
+      onStep: (fn) => {
+        hooks.push(fn);
+      },
+      steps: () => steps,
+      async until(pred, what, maxSteps = 200, ms = 5_000) {
+        for (let i = 0; i < maxSteps; i++) {
+          if (pred()) return i;
+          // real process: the deadline is wall time.
+          if (o.deadline !== undefined && Date.now() >= o.deadline)
+            throw new Error(`soak: ${what} not reached within the wall-clock budget\n${report()}`);
+          await step(ms);
+        }
+        if (pred()) return maxSteps;
+        throw new Error(`soak: ${what} not reached in ${maxSteps} steps\n${report()}`);
+      },
+      owner,
+      async resolve(decisionId, answer) {
+        const r = await control.request("resolve", {
+          wave: WAVE,
+          decision_id: decisionId,
+          answer,
+          by: owner.agentId,
+        });
+        if (!r.ok) throw new Error(`resolve ${decisionId}: ${r.error}`);
+        await consumed();
+      },
+      async cleanup() {
+        offJournal();
+        await fleet.idle();
+        await control.close();
+        await broker.disconnect();
+        await env.cleanup();
+      },
+    };
+  } catch (e) {
+    for (const u of undo.reverse())
+      await Promise.resolve()
+        .then(u)
+        .catch(() => {});
+    await env.cleanup().catch(() => {});
+    throw e;
+  }
 }

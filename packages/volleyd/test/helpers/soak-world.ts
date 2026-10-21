@@ -344,6 +344,8 @@ export function soakWorld(o: SoakWorldOptions) {
       case "diff": {
         const flags = rest.filter((x) => x.startsWith("-"));
         const revs = rest.filter((x) => !x.startsWith("-"));
+        // Only `diff <a> <b>`: a three-dot range or a pathspec is a read it does not model.
+        if (revs.length !== 2 || revs.some((r) => r.includes(".."))) return miss();
         const a = resolve(revs[0] as string);
         const b = resolve(revs[1] as string);
         if (a === null || b === null) return out("", 128, "fatal: bad revision");
@@ -404,7 +406,8 @@ export function soakWorld(o: SoakWorldOptions) {
 
   const gh = (args: string[]): Partial<ExecResult> | null => {
     const [noun, verb, ...rest] = args;
-    const flag = (f: string) => rest[rest.indexOf(f) + 1] as string;
+    // Absent flag: undefined, and the call falls through to `unknown`.
+    const flag = (f: string) => (rest.includes(f) ? rest[rest.indexOf(f) + 1] : undefined);
     if (noun === "repo" && verb === "view")
       return out(
         JSON.stringify({
@@ -427,6 +430,7 @@ export function soakWorld(o: SoakWorldOptions) {
     }
     if (noun === "pr" && verb === "list") {
       const branch = flag("--head");
+      if (branch === undefined) return null;
       return out(
         JSON.stringify(
           prs
@@ -481,7 +485,9 @@ export function soakWorld(o: SoakWorldOptions) {
     }
     if (noun === "run" && verb === "list") {
       if (rest.includes("--branch")) return out(JSON.stringify(ciOf(tip(), "push").map(runJson)));
-      return out(JSON.stringify(ciOf(flag("--commit"), "pull_request").map(runJson)));
+      const commit = flag("--commit");
+      if (commit === undefined) return null;
+      return out(JSON.stringify(ciOf(commit, "pull_request").map(runJson)));
     }
     if (noun === "run" && verb === "view") {
       const run = runs.find((r) => r.id === Number(rest[0]));

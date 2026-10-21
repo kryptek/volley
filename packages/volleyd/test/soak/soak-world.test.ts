@@ -52,6 +52,19 @@ describe("the soak world", () => {
     ]);
   });
 
+  it("a git diff or gh call in a shape it does not model lands in unknown, not a throw", async () => {
+    const { w } = world({ rate: 0 });
+    const t = w.tip();
+    expect(w.exec(["git", "-C", REPO, "diff", "--name-only", `${t}...${t}`]).code).toBe(0);
+    expect(w.exec(["gh", "run", "list", "--json", "databaseId"]).code).toBe(0);
+    expect(w.exec(["gh", "pr", "list", "--json", "number"]).code).toBe(0);
+    expect(w.unknown).toEqual([
+      ["git", "-C", REPO, "diff", "--name-only", `${t}...${t}`],
+      ["gh", "run", "list", "--json", "databaseId"],
+      ["gh", "pr", "list", "--json", "number"],
+    ]);
+  });
+
   it("a merge moves the release tip and makes the other PR heads behind it", async () => {
     const { w, run, mergeAt } = world({ rate: 0 });
     const a = pr(w, "A");
