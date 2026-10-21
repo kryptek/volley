@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { VolleyBroker } from "volley-mcp/broker";
 import { CONFIG_DEFAULTS } from "../../src/config-defaults";
 import { Daemon, type DaemonOptions, type PressureSource } from "../../src/daemon";
@@ -22,6 +23,13 @@ export const OWNER_DECIDES = {
   autopilot: { ...CONFIG_DEFAULTS.autopilot, enabled: false },
 };
 export const AUTOPILOT_ON: Partial<DaemonOptions> = { configDefaults: CONFIG_DEFAULTS };
+
+/** A `DaemonOptions.fetch` that answers GitHub's status page with a fixture. */
+export const statusPageFetch = (fixture: string): typeof fetch =>
+  (async () =>
+    new Response(
+      readFileSync(new URL(`../fixtures/${fixture}`, import.meta.url), "utf-8"),
+    )) as unknown as typeof fetch;
 
 /** An Aedes broker, a temp $VOLLEYD_HOME, and helpers to start daemons and read topics. */
 export interface DaemonEnv {
@@ -57,6 +65,8 @@ export async function makeDaemonEnv(): Promise<DaemonEnv> {
     protocolVersion: 4,
     pressure: NO_PRESSURE,
     configDefaults: OWNER_DECIDES,
+    // GitHub's status page all operational: a red head's classification never reads the network.
+    fetch: statusPageFetch("githubstatus-ok.json"),
     ...extra,
     // The own machine's record never reads the load or memory of the machine running the test.
     fleet: { os: CALM_OS, ...extra.fleet },

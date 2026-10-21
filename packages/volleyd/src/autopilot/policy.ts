@@ -93,6 +93,9 @@ const onOneOf =
   (d: Facts): boolean =>
     ons.includes(String(on(d)));
 
+/** A red head's decision: a ci_failed, or a blocked agent's on a red PR head (`agent_blocked_ci`). */
+const onRedHead = onOneOf("ci_failed", "agent_blocked_ci");
+
 /** spawn_failed: the daemon's automatic retries have stopped (`spawn_retry_max`). */
 const retriesStopped = (d: Facts, ctx: PolicyContext): boolean =>
   d.stopped === true || ctx.task?.next_retry_at === null;
@@ -283,23 +286,42 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
   },
   {
     policy: "ci_failed/fixup-own-change",
-    kinds: ["ci_failed"],
+    kinds: ["ci_failed", "agent_blocked"],
     condition:
-      'pipeline.on === "ci_failed" and classification: own_change (unclassified: infra === false)',
-    // Nothing sets classification until A3 classifies red heads: until then this is `infra === false`.
+      'pipeline.on === "ci_failed" or "agent_blocked_ci", and classification: own_change (unclassified ci_failed: infra === false)',
     when: (d) =>
-      on(d) === "ci_failed" &&
-      (d.classification === "own_change" || (d.classification === undefined && d.infra === false)),
+      onRedHead(d) &&
+      (d.classification === "own_change" ||
+        (on(d) === "ci_failed" && d.classification === undefined && d.infra === false)),
     answer: "fixup",
     budget: { name: "ci_fixup_max", per: "task" },
     rationale: "a fixup agent with the CI result as its directive is what a person would do",
+  },
+  {
+    policy: "ci_failed/fix-flake",
+    kinds: ["ci_failed", "agent_blocked"],
+    condition: 'pipeline.on === "ci_failed" or "agent_blocked_ci", and classification: flake',
+    when: (d) => onRedHead(d) && d.classification === "flake",
+    answer: "fix flake",
+    rationale:
+      "a test the PR does not touch gets a dedicated fixer, never a re-run or a wider scope",
+  },
+  {
+    policy: "ci_failed/infra-incident",
+    kinds: ["ci_failed"],
+    condition:
+      "classification: infra_incident (asked only once autopilot.incident_wait_max_s passed)",
+    when: (d) => on(d) === "ci_failed" && d.classification === "infra_incident",
+    answer: null,
+    escalate: "budget_exhausted",
+    rationale: "the incident outlasted the wait: the owner decides; volleyd never re-runs CI",
   },
   {
     policy: "ci_failed/owner",
     kinds: ["ci_failed"],
     condition: "otherwise (ci_none included)",
     answer: null,
-    rationale: "an infra-shaped red head and a repository without workflows are the owner's",
+    rationale: "a red head no rule routes and a repository without workflows are the owner's",
   },
   {
     policy: "merge_conflict/respawn",

@@ -63,6 +63,7 @@ import {
 } from "./admission";
 import { budgetUsed } from "./autopilot/budgets";
 import { carryHandoff, carryPicker } from "./autopilot/carry";
+import { type GithubStatus, githubStatusCache } from "./autopilot/github-status";
 import {
   INBOX_CHANNEL,
   INBOX_ID,
@@ -470,6 +471,11 @@ export interface DaemonOptions {
    * one (test/helpers/fake-clock.ts) and move time by hand.
    */
   clock?: Clock;
+  /**
+   * The HTTP fetch for GitHub's status page, read when a red head is classified (SPEC §4.6.16).
+   * Default `globalThis.fetch`; tests pass a fake.
+   */
+  fetch?: typeof fetch;
   /** Wall clock override on top of `clock` (tests that only fix the time). */
   now?: () => number;
   /** The config's bottom layer (default CONFIG_DEFAULTS; `volleyd daemon`: `defaultsFor` env). */
@@ -919,6 +925,8 @@ export class Daemon {
   /** The namespace each swept candidate's records live in (found while judging liveness). */
   private readonly sweepNamespaces = new Map<string, string>();
   private readonly waves = new Map<WaveId, WaveLog>();
+  /** GitHub's status page reader (githubStatus), made on first use. */
+  private statusPageRead: (() => Promise<GithubStatus>) | undefined;
   /** The needs-you inbox (SPEC §4.6.18), by item id: rebuilt from the journals on start. */
   private readonly inbox = new Map<string, InboxItem>();
   /**
@@ -5018,6 +5026,14 @@ export class Daemon {
   // Pipeline (T6): every role's `done` is verified before the next stage; volleyd merges only under `merge: auto` (SPEC §4.6.17).
   // -------------------------------------------------------------------------------------------
 
+  /** GitHub's status page through `DaemonOptions.fetch`, cached; one reader for every wave. */
+  private githubStatus(): () => Promise<GithubStatus> {
+    this.statusPageRead ??= githubStatusCache(this.opts.fetch ?? globalThis.fetch, () =>
+      this.now(),
+    );
+    return this.statusPageRead;
+  }
+
   /** The pipeline driver of a wave, on this daemon's journal, spawner, steering and decisions. */
   private pipelineFor(wave: WaveId): PipelineDriver {
     let d = this.pipelines.get(wave);
@@ -5071,6 +5087,9 @@ export class Daemon {
       mergeMode: () =>
         log.record.wave?.merge ?? (this.config.get("autopilot.merge", wave) as MergeMode),
       mergeRetryMax: () => this.config.get("autopilot.merge_retry_max", wave) as number,
+      // --- Self-healing CI (SPEC §4.6.16): an infra incident's wait, GitHub's status page. ---
+      incidentWaitMaxS: () => this.config.get("autopilot.incident_wait_max_s", wave) as number,
+      statusPage: this.githubStatus(),
       deleteBranch: () => this.config.get("autopilot.delete_branch", wave) as boolean,
       releaseLock: releaseLockOn(this.releaseLocks),
       retire: async (agentId, status) => {
