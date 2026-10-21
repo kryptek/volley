@@ -253,6 +253,15 @@ describe("applyDeploy", () => {
     expect(lines).toContain("FAILED  rollback: restart systems.volley.volleyd: launchctl failed");
   });
 
+  it("shell-quotes the by-hand commands, so a path with a space pastes and runs", async () => {
+    const { f, run } = setup({ head: { tag: "v0.4.0" }, bun: "/opt/my bun/bun" });
+    f.fail("launchctl kickstart -k gui/501/systems.volley.volleyd");
+    const r = await run();
+    expect(r.rollbackFailed?.byHand[1]).toBe(
+      `cd ${f.repo} && '/opt/my bun/bun' install --frozen-lockfile`,
+    );
+  });
+
   it("turns an exec that throws (the fence refusing) into a failed step, so the by-hand path is reached", async () => {
     const { f, deps, lines, run } = setup({ head: { tag: "v0.4.0" } });
     f.fail("launchctl kickstart -k gui/501/systems.volley.desk");

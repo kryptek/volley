@@ -64,7 +64,10 @@ export interface DeployResult {
 const lastLine = (r: { stdout: string; stderr: string }, argv: readonly string[]) =>
   (r.stderr.trim() || r.stdout.trim()).split("\n").at(-1)?.trim() || `\`${argv.join(" ")}\` failed`;
 
-const shell = (c: Command) => `${c.cwd !== undefined ? `cd ${c.cwd} && ` : ""}${c.argv.join(" ")}`;
+/** A word as a POSIX shell reads it back: bare when it is safe, else single-quoted. */
+const q = (w: string) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(w) ? w : `'${w.replace(/'/g, "'\\''")}'`);
+const shell = (c: Command) =>
+  `${c.cwd !== undefined ? `cd ${q(c.cwd)} && ` : ""}${c.argv.map(q).join(" ")}`;
 
 /** A failed step as the result reports it. */
 const failure = ({ step, why }: { step: string; why: string }) => ({ step, why });

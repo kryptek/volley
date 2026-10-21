@@ -6,7 +6,7 @@ import type { BrokerAuth } from "volley-mcp/config";
 import { resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
 import { volleydHome } from "../auth/context";
 import { applyDeploy } from "../deploy/apply";
-import { deployFence } from "../deploy/fence";
+import { deployFence, isRollbackBranch } from "../deploy/fence";
 import { deskHealthy, volleydHealthy } from "../deploy/health";
 import {
   DEPLOY,
@@ -321,14 +321,14 @@ export async function deploy({ argv, env, io, deps: given }: DeployArgs): Promis
 }
 
 /**
- * The release tag HEAD is exactly at, else its branch, else the commit. Another tag on HEAD
- * (`smoke-ok`) is passed over: the rollback may check out only a release tag.
+ * What HEAD is, for the rollback: its branch first (so it keeps the branch), then the release tag
+ * it is exactly at, else the commit. A branch the fence would not check out again (`fix+x`) and a
+ * non-release tag (`smoke-ok`) are passed over.
  */
-/** What HEAD is, for the rollback: a branch first (so it keeps the branch), then a release tag. */
 async function currentRef(exec: SetupExec, repo: string): Promise<Ref | null> {
   const branch = await exec(git(repo, "rev-parse", "--abbrev-ref", "HEAD"));
   const b = branch.stdout.trim();
-  if (branch.code === 0 && b !== "" && b !== "HEAD") return { kind: "branch", name: b };
+  if (branch.code === 0 && b !== "HEAD" && isRollbackBranch(b)) return { kind: "branch", name: b };
   const tag = await exec(git(repo, "describe", "--tags", "--exact-match", "HEAD"));
   const t = tag.stdout.trim();
   if (tag.code === 0 && TAG_RE.test(t)) return { kind: "tag", name: t };

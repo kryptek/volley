@@ -251,6 +251,14 @@ describe("volley deploy", () => {
     expect(m.f.state.head).toEqual({ branch: "main" });
   });
 
+  it("passes over a branch the fence would refuse to check out again, so the rollback uses the tag", async () => {
+    const m = machine({ head: { tag: "v0.4.0", branch: "fix+x" } });
+    m.health.volleyd.push("volleyd's status is failed");
+    expect(await m.run(["v0.5.0"])).toBe(1);
+    expect(m.io.readStderr().trim().split("\n").at(-1)).toMatch(/rolled back to v0.4.0$/);
+    expect(m.f.lines()).toContain(`git -C ${m.f.repo} checkout --detach v0.4.0`);
+  });
+
   it("--force-clean stashes first and names the stash", async () => {
     const m = machine({ head: { tag: "v0.4.0" }, dirty: " M a.ts\n" });
     expect(await m.run(["--latest", "--force-clean"])).toBe(0);

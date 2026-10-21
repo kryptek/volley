@@ -13,6 +13,7 @@ export interface DeployFenceInputs {
 
 /** A branch name the rollback may check out again (never an option, never a path spec). */
 const BRANCH_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+export const isRollbackBranch = (name: string) => BRANCH_RE.test(name) && !name.includes("..");
 const SHA_RE = /^[0-9a-f]{40}$/;
 const STASH_RE = new RegExp(`^${DEPLOY.stash_prefix}\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}Z$`);
 
@@ -41,7 +42,7 @@ export function deployFence({ repo, bun, services }: DeployFenceInputs) {
       gis("rev-parse", "HEAD") ||
       gis("describe", "--tags", "--exact-match", "HEAD") ||
       (gis("checkout", "--detach", arg(2)) && (TAG_RE.test(arg(2)) || SHA_RE.test(arg(2)))) ||
-      (gis("checkout", arg(1), "--") && BRANCH_RE.test(arg(1)) && !arg(1).includes("..")) ||
+      (gis("checkout", arg(1), "--") && isRollbackBranch(arg(1))) ||
       (gis("stash", "push", "-u", "-m", arg(4)) && STASH_RE.test(arg(4))) ||
       (is(bun, "install", "--frozen-lockfile") && opts?.cwd === repo) ||
       (is(bun, "run", "build") && opts?.cwd === deskDir(repo)) ||
