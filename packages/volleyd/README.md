@@ -333,7 +333,7 @@ that the scheduler applies on top of the hard ceiling and spawn budget:
 | `volley/_system/leases/<pool>/requests` | no | Agents' `acquire` / `release` / `renew` (any agent may publish). |
 | `volley/_system/admission` | yes | The spawn admission verdict after every pressure sample. |
 | `volley/<ns>/<agent>/screen` | yes | Tail of a supervised agent's terminal (`screen_tail`, see [Screen tails](#screen-tails)). |
-| `volley/_system/auth/ops/<username>` | no | An admin account's account ops (see [Accounts and one-time tokens](#accounts-and-one-time-tokens)). |
+| `volley/_system/auth/ops/<username>` | no | An admin account's account ops (see [Accounts and one-time tokens](#accounts-and-one-time-tokens)); a Desk login's Needs-you answers (`inbox_answer`, `resolve`; see [Needs-you inbox](#needs-you-inbox)). |
 | `volley/_system/auth/replies/<correlation_id>` | no | The daemon's answer to an account op; secrets sealed to the requester's `reply_key`. |
 | `volley-auth/redeem/<token id>` | no | A one-time token's redemption request, from that token's own login. |
 | `volley-auth/redeem/<token id>/reply` | no | The daemon's answer to it: the one topic that login may read. |
@@ -392,9 +392,11 @@ The Desk manages broker accounts through the daemon, never by creating logins it
 **Account ops** are not mailbox ops: anyone who may steer can write the daemon's mailbox, so the
 mailbox cannot say who sent a request (the daemon refuses them there with a pointer). An admin
 publishes `{ op, ..., reply_key }` (envelope `channel: "_system/auth"`, `type: "query"`, a fresh
-`correlation_id`) on `volley/_system/auth/ops/<its username>`. The broker's admin role grants that
-topic only to admin accounts and only for their own username (`%u`), so the topic names the sender; the daemon
-then checks that account's role with `volley auth list --json` and refuses anything but `admin`.
+`correlation_id`) on `volley/_system/auth/ops/<its username>`. The broker's admin and desk roles
+grant that topic, each only for its own username (`%u`), so the topic names the sender; the daemon
+then checks that account's role with `volley auth list --json`, per op: account, setup and peer
+ops and `archive` need `admin`; a Desk login's Needs-you answers (`inbox_answer`, `resolve`) need
+a `steer` or `admin` account or the fixed `desk` identity.
 `account_list`'s `last_seen` is the newest of the account's last auth request to this daemon
 process and the `wall_time` of a retained registry entry or retained `status` (where the LWT lands)
 under its name. Requests are never retained: the daemon clears a request topic's retained message
@@ -1010,8 +1012,13 @@ pointers, opened_at, source, answered? }`. Kinds and their ids:
 | `handoff` | `h-<agent_id>-<seq>` | a coordinator turn that ends on a question (the Stop hook's `awaiting_input { question }`) |
 | `release` | `r-<wave>-<stage\|go>` | a release stage or its go/no-go (`openInboxItem`) |
 
-**volleyd is the referee.** An answer is the mailbox op `inbox_answer { id, version, answer,
-where }`, from any login that may steer. It is accepted only at the item's current `version`
+**volleyd is the referee.** An answer is `inbox_answer { id, version, answer, where }`. On the
+mailbox it is the owner's: a wave's item is answered by the wave's owner or the session bound to
+its coordinator name, a coordinator session's own item by that session. A Desk login (a `steer`
+or `admin` account, or the fixed `desk` identity) sends it on its own account-op topic
+`volley/_system/auth/ops/<username>`, where the broker names the sender, and volleyd treats it as
+the owner answering from another screen: `by` is that login, and no ownership check applies (a
+`resolve` sent there likewise). It is accepted only at the item's current `version`
 (compare-and-set): the first accepted answer bumps the version, sets `answered { answer, by,
 where, at }`, journals `inbox_answered { id, kind, answer, by, where, version }` (in the item's
 wave, else `_system`) and acts on it. A later answer is refused with `already answered on
