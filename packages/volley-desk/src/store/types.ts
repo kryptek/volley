@@ -160,6 +160,14 @@ export interface WaveCoordinator {
   last_seen: string;
 }
 
+/** wave-state `github` (SPEC §4.6.1): the repository on GitHub, as the supervisor read it. */
+export interface GitHubRepo {
+  /** `owner/repo`. */
+  slug: string;
+  /** The repository's canonical URL. */
+  url: string;
+}
+
 /** wave-state `autopilot` (SPEC §4.6.16): on or off for the wave, and what it did. */
 export interface WaveAutopilot {
   enabled: boolean;
@@ -202,6 +210,8 @@ export interface WaveStatePayload {
   spec?: WaveSpec;
   coordinator?: WaveCoordinator;
   effective_config?: Tunables;
+  /** Absent from an older supervisor or when the read failed: nothing then links. */
+  github?: GitHubRepo;
   /** Absent from a supervisor that predates autopilot. */
   autopilot?: WaveAutopilot;
   /** Absent while the queue is empty. */

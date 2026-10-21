@@ -173,6 +173,75 @@ describe("CoordinatorsWindow supervisor row", () => {
   });
 });
 
+describe("CoordinatorsWindow repo chips", () => {
+  const gh = (slug: string) => ({ slug, url: `https://github.com/${slug}` });
+  const on = (w: WaveView, slug: string, status?: "complete"): WaveView => ({
+    ...w,
+    state: w.state && { ...w.state, github: gh(slug), ...(status ? { status } : {}) },
+  });
+  const sup = {
+    id: "volleyd",
+    namespace: "default",
+    registry: null,
+    status: "working",
+    lastHeartbeat: Date.parse("2026-10-18T12:00:00.000Z"),
+    wavesOwned: 3,
+  };
+  const supRow = () => screen.getByRole("listitem", { name: "Supervisor volleyd" });
+
+  it("a wave row with github has the chip; one without has none", () => {
+    setup({ waves: [on(WAVES[0] as WaveView, "example-org/example-repo"), WAVES[1] as WaveView] });
+    const chip = within(row("status-chip")).getByRole("link", {
+      name: "example-org/example-repo on GitHub",
+    });
+    expect(chip).toHaveAttribute("href", "https://github.com/example-org/example-repo");
+    expect(within(row("ci-speed")).queryByRole("link")).toBeNull();
+  });
+
+  it("the Supervisor row: one chip per distinct repository of the active waves", () => {
+    setup({
+      supervisors: [sup],
+      now: Date.parse("2026-10-18T12:00:00.000Z"),
+      waves: [
+        on(WAVES[0] as WaveView, "example-org/a"),
+        on(WAVES[1] as WaveView, "example-org/b"),
+        on(WAVES[2] as WaveView, "example-org/a"),
+        on(wave("old", "coord-9"), "example-org/c", "complete"),
+      ],
+    });
+    const links = within(supRow()).getAllByRole("link");
+    expect(links.map((a) => a.getAttribute("aria-label"))).toEqual([
+      "example-org/a on GitHub",
+      "example-org/b on GitHub",
+    ]);
+  });
+
+  it("the Supervisor row: more than two repositories read `N repositories`, listed in its title", () => {
+    setup({
+      supervisors: [sup],
+      now: Date.parse("2026-10-18T12:00:00.000Z"),
+      waves: [
+        on(WAVES[0] as WaveView, "example-org/a"),
+        on(WAVES[1] as WaveView, "example-org/b"),
+        on(WAVES[2] as WaveView, "example-org/c"),
+      ],
+    });
+    expect(within(supRow()).queryByRole("link")).toBeNull();
+    const many = within(supRow()).getByText("3 repositories");
+    expect(many).toHaveAttribute("title", "example-org/a\nexample-org/b\nexample-org/c");
+    expect(many).toHaveAttribute(
+      "aria-label",
+      "3 repositories: example-org/a, example-org/b, example-org/c",
+    );
+  });
+
+  it("the Supervisor row has no chips when no wave has github", () => {
+    setup({ supervisors: [sup], now: Date.parse("2026-10-18T12:00:00.000Z") });
+    expect(within(supRow()).queryByRole("link")).toBeNull();
+    expect(within(supRow()).queryByText(/repositories/)).toBeNull();
+  });
+});
+
 describe("CoordinatorsWindow status chips and the Ended group", () => {
   const ended = (id: string, status: "complete" | "stopped"): WaveView => {
     const w = wave(id, "coord-9");

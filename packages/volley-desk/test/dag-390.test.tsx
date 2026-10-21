@@ -103,7 +103,7 @@ describe("dependency graph at 390 px", () => {
         }}
       />,
     );
-    const svg = screen.getByRole("img", { name: "Task dependency graph" });
+    const svg = screen.getByRole("group", { name: "Task dependency graph" });
     const width = Number(svg.getAttribute("width"));
     expect(width).toBeLessThanOrEqual(PHONE);
     for (const g of container.querySelectorAll<SVGGElement>(".dag-node")) {

@@ -6,6 +6,7 @@ import { ARCHIVED_ANSWER, type DecisionRecord, parksTask } from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
 import { AUTO_HOST } from "./placement";
+import { asGitHubRepo } from "./repo-visibility";
 import { hygieneLevel } from "./reviews";
 import type {
   JournalEvent,
@@ -470,6 +471,9 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         (ev.data.public_hygiene as PublicHygiene | undefined) ?? "auto",
         visibility,
       );
+      const github = asGitHubRepo(ev.data.github);
+      if (github !== undefined) state.github = github;
+      else Reflect.deleteProperty(state, "github");
       break;
     }
     case "owner_claimed":

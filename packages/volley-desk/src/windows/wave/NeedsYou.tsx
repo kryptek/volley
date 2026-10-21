@@ -21,7 +21,8 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useState } from "react";
 import type { Attn, EffectiveCoordinator } from "../../attention";
-import type { DecisionPayload } from "../../store/types";
+import { issueHref, issueLabel } from "../../lib/github";
+import type { DecisionPayload, GitHubRepo } from "../../store/types";
 import "../../styles/attention.css";
 
 const Icon = ({ i, s }: { i: typeof Alert02Icon; s: number }) => (
@@ -168,10 +169,16 @@ const MACHINE_STATE: Record<string, string> = {
 export function MachineDown({
   decision: d,
   onAnswer,
+  github,
+  issues = {},
 }: {
   decision: DecisionPayload;
   /** Sends the answer (volleyd `resolve`); absent when the Desk is read-only. */
   onAnswer?: ((answer: string) => Promise<{ ok: boolean; error?: string }>) | undefined;
+  /** The wave state's `github`: each listed task's issue links there. */
+  github?: GitHubRepo | undefined;
+  /** The wave's issue number per task id. */
+  issues?: Record<string, number>;
 }) {
   const options = d.options ?? [];
   const [choice, setChoice] = useState(
@@ -198,9 +205,29 @@ export function MachineDown({
       <p className="ny-q">{d.question}</p>
       {d.tasks && d.tasks.length > 0 && (
         <ul className="ny-tasks mono" aria-label={`Tasks on ${host}`}>
-          {d.tasks.map((t) => (
-            <li key={t}>{t}</li>
-          ))}
+          {d.tasks.map((t) => {
+            const n = issues[t];
+            const href = n !== undefined ? issueHref(github, n) : null;
+            return (
+              <li key={t}>
+                {t}
+                {href !== null && n !== undefined && (
+                  <>
+                    {" "}
+                    <a
+                      className="a-link"
+                      href={href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={issueLabel(n)}
+                    >
+                      #{n}
+                    </a>
+                  </>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
       <fieldset className="ny-options" aria-label={`Answer for ${host}`}>
