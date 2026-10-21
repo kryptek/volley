@@ -3,9 +3,7 @@ import { queueOf } from "./autopilot/merge-queue";
 import { stepRelease } from "./autopilot/playbook";
 import type { Budget, EscalateWhy } from "./autopilot/policy";
 import { fixerOf } from "./autopilot/remediation";
-import { ARCHIVED_ANSWER, type DecisionRecord, parksTask, raiseBy } from "./decisions";
-
-export { raiseBy };
+import { ARCHIVED_ANSWER, type DecisionRecord, parksTask } from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
 import { AUTO_HOST } from "./placement";
@@ -491,7 +489,8 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
           at: (ev.data.at as string | undefined) ?? ev.at,
         };
         if (typeof ev.data.rationale === "string") d.rationale = ev.data.rationale;
-        const raise = d.kind === "spawn_budget_exhausted" ? raiseBy(String(ev.data.answer)) : null;
+        const raise =
+          d.kind === "spawn_budget_exhausted" ? journaledRaise(String(ev.data.answer)) : null;
         if (raise !== null) next.budget_raised = (next.budget_raised ?? 0) + raise;
         // Only a parking decision keeps the task parked (one opened with `park: false` never does).
         const stillOpen = state.open_decisions.some((o) => {
@@ -791,6 +790,17 @@ function derive(state: WaveState, rec: WaveRecord): void {
       budgets: structuredClone(a.budgets),
     };
   }
+}
+
+/**
+ * A journaled `spawn_budget_exhausted` answer `raise by N` (N ≥ 1), or null. Strict: answers are
+ * normalised to `raise by N` before they are journaled, and a `raise N` journaled before that
+ * (#315) was ignored then, so a replay ignores it too.
+ */
+function journaledRaise(answer: string): number | null {
+  const m = /^raise by (\d+)$/.exec(answer.trim().toLowerCase());
+  const n = m !== null ? Number(m[1]) : 0;
+  return n >= 1 ? n : null;
 }
 
 /**

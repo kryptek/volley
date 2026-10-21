@@ -397,6 +397,22 @@ describe("an answer a decision cannot apply is refused (#315)", () => {
     expect(s.daemon.inboxItem(id)?.version).toBe(1);
     expect(resolvedEvents()).toHaveLength(0);
   });
+
+  it("inbox_answer: raise N is recorded as raise by N on the item and the decision alike", async () => {
+    s = await makeSupervisedEnv();
+    const d = await s.daemon.openDecision("w1", budget);
+    const id = decisionItemId("w1", d.decision_id);
+    const r = await (await control()).request("inbox_answer", {
+      id,
+      version: 1,
+      answer: "raise 120",
+      where: phone,
+      by: "t",
+    });
+    expect(r.error).toBeUndefined();
+    expect(resolvedEvents()[0]?.data.answer).toBe("raise by 120");
+    expect(s.daemon.inboxItem(id)?.answered?.answer).toBe("raise by 120");
+  });
 });
 
 describe("a Desk login answers on its own account-op topic (the owner on any screen)", () => {

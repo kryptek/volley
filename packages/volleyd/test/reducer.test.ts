@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { nextSteer } from "../src/controls";
-import { apply, emptyRecord, raiseBy, reduce, replay } from "../src/reducer";
+import { raiseBy } from "../src/decisions";
+import { apply, emptyRecord, reduce, replay } from "../src/reducer";
 import type { JournalEvent } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
 import { envelope, schemaErrors } from "./helpers/schema";
@@ -509,5 +510,34 @@ describe("raiseBy (#315)", () => {
     expect(raiseBy("raise")).toBeNull();
     expect(raiseBy("raise by 0")).toBeNull();
     expect(raiseBy("raise by 3 please")).toBeNull();
+  });
+
+  it("a journaled `raise N` replays as no raise: only the normalised `raise by N` counts", () => {
+    // Before #315 `raise 120` was journaled and ignored; a replay must not start applying it.
+    const at = "2026-10-20T09:20:00.000Z";
+    const opened = (seq: number, id: string) =>
+      ({
+        seq,
+        at,
+        type: "decision_opened",
+        data: {
+          decision_id: id,
+          kind: "spawn_budget_exhausted",
+          question: "budget?",
+          options: ["raise by 1", "cancel"],
+        },
+      }) as JournalEvent;
+    const resolved = (seq: number, id: string, answer: string) =>
+      ({
+        seq,
+        at,
+        type: "decision_resolved",
+        data: { decision_id: id, answer, by: "owner" },
+      }) as JournalEvent;
+    const base = events.slice(0, 11);
+    const legacy = replay([...base, opened(12, "b1"), resolved(13, "b1", "raise 120")]);
+    expect(legacy.budget_raised ?? 0).toBe(0);
+    const raised = replay([...base, opened(12, "b1"), resolved(13, "b1", "raise by 120")]);
+    expect(raised.budget_raised).toBe(120);
   });
 });
