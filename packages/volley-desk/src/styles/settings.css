@@ -902,7 +902,6 @@
 /* Long monospace strings (`relaunch_max per <task>/<role>`, `pipeline.on === "relaunch"`) wrap in their column. */
 .policy-wrap {
   overflow-wrap: anywhere;
-  word-break: normal;
 }
 /* Phone only: one block per rule (kind, then condition · answer · budget · rationale). */
 .policy-stack {

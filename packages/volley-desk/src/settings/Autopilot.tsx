@@ -70,7 +70,13 @@ const budgetCell = (r: PolicyRow) =>
   r.budget === null ? "—" : `${r.budget}${r.max !== null ? ` · max ${r.max}` : ""}`;
 
 /** Column widths (%): rationale gets the most room; every cell wraps within its column. */
-const POLICY_WIDTHS = [22, 22, 14, 14, 28] as const;
+const POLICY_WIDTHS: Record<(typeof POLICY_COLUMNS)[number], number> = {
+  kind: 22,
+  condition: 22,
+  answer: 14,
+  budget: 14,
+  rationale: 28,
+};
 
 /** A comma-joined kind list may break after each comma (`<wbr>`); its text is unchanged. */
 function breakAfterCommas(s: string) {
@@ -124,8 +130,8 @@ function PolicyGrid({ rules }: { rules: readonly PolicyRow[] }) {
   return (
     <table className="policy-table" aria-label="Autopilot policy">
       <colgroup>
-        {POLICY_WIDTHS.map((w, i) => (
-          <col key={POLICY_COLUMNS[i]} style={{ width: `${w}%` }} />
+        {POLICY_COLUMNS.map((c) => (
+          <col key={c} style={{ width: `${POLICY_WIDTHS[c]}%` }} />
         ))}
       </colgroup>
       <thead>
