@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
-import { Background } from "../src/look/Background";
+import { Background, SURFACE_LITE_NOTE, degradeLook } from "../src/look/Background";
 import {
   BACKGROUNDS,
   type BackgroundDef,
@@ -11,7 +11,7 @@ import {
   REACT_BITS_BACKGROUNDS,
   isLazyBackground,
 } from "../src/look/backgrounds";
-import { LOOK_STORAGE_KEY, type Look, useLook } from "../src/look/useLook";
+import { LOOK0, LOOK_STORAGE_KEY, type Look, useLook } from "../src/look/useLook";
 import { Appearance } from "../src/settings/Appearance";
 import { General } from "../src/settings/General";
 import { DeskStoreProvider } from "../src/store/context";
@@ -277,5 +277,30 @@ describe("App look (demo mode)", () => {
     });
     fireEvent.click(settings.getByRole("button", { name: "Close settings" }));
     expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+  });
+});
+
+describe("Appearance on the lite surface (touch screen)", () => {
+  it("does not offer Liquid glass and says why", () => {
+    render(<Appearance look={LOOK0} setLook={() => {}} lite />);
+    const style = within(screen.getByRole("radiogroup", { name: "Window style" }));
+    expect(style.queryByRole("radio", { name: "Liquid glass" })).toBeNull();
+    expect(style.getByRole("radio", { name: "Frosted glass" })).toBeInTheDocument();
+    expect(screen.getByText(SURFACE_LITE_NOTE)).toBeInTheDocument();
+  });
+
+  it("offers Liquid glass and no note off the lite surface", () => {
+    render(<Appearance look={LOOK0} setLook={() => {}} />);
+    const style = within(screen.getByRole("radiogroup", { name: "Window style" }));
+    expect(style.getByRole("radio", { name: "Liquid glass" })).toBeInTheDocument();
+    expect(screen.queryByText(SURFACE_LITE_NOTE)).toBeNull();
+  });
+
+  it("degradeLook renders liquid as glass when lite, even with WebGL", () => {
+    const liquid: Look = { ...LOOK0, chrome: "liquid" };
+    expect(degradeLook(liquid, true, true).chrome).toBe("glass");
+    expect(degradeLook(liquid, true, false)).toBe(liquid);
+    const solid: Look = { ...LOOK0, chrome: "solid" };
+    expect(degradeLook(solid, true, true)).toBe(solid);
   });
 });

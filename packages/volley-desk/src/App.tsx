@@ -29,6 +29,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useDeskKeys } from "./a11y/keys";
+import { useLiteSurface } from "./a11y/surface";
 import {
   type Attn,
   type NeedsYouTarget,
@@ -302,7 +303,16 @@ function useDismissedWaves() {
 export default function App() {
   const { state, connection, demo, settling, offline, syncing, writer, identity, brokerUrl } =
     useDesk();
-  const { view, setView, zoomAt, panBy, fitTo: fitView, stageRef, stageHandlers } = useViewport();
+  const {
+    view,
+    setView,
+    zoomAt,
+    panBy,
+    fitTo: fitView,
+    stageRef,
+    worldRef,
+    stageHandlers,
+  } = useViewport();
   const screenSize = useScreenSize();
   const vw = screenSize.width;
   const narrow = vw < NARROW_PX;
@@ -374,8 +384,9 @@ export default function App() {
   // ------------------------------------------------------------ look (D7)
   const [saved, setLook] = useLook();
   const webgl = useWebGL();
+  const lite = useLiteSurface();
   // What this browser can render; the saved look keeps the owner's picks for one that has WebGL.
-  const look = degradeLook(saved, webgl);
+  const look = degradeLook(saved, webgl, lite);
   useFlipSound(saved.tethers, "tethers_on", "tethers_off", emitSound);
   /** The Settings window's section while it is open; setup once after an admin token sign-in. */
   const [deskSettings, setDeskSettings] = useState<SectionKey | null>(() =>
@@ -1046,7 +1057,7 @@ export default function App() {
         role="region"
         aria-label="Desk canvas: arrow keys pan, + and − zoom, f arranges and fits"
       >
-        <World view={view} animating={animating}>
+        <World view={view} animating={animating} ref={worldRef}>
           <Tethers on={look.tethers} tethers={tethers} dragging={dragging} />
           {coordsShown && (
             <CoordinatorsWindow
@@ -1373,6 +1384,7 @@ export default function App() {
             canVibrate: sounds.player.canVibrate(),
           }}
           webgl={webgl}
+          lite={lite}
           identity={identity}
           demo={demo}
           config={state.config}
