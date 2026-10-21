@@ -358,6 +358,40 @@ describe("task_placed (SPEC §4.6.15)", () => {
     expect(rec.wave?.tasks.T1?.host).toBe("box-a");
     expect(rec.wave?.tasks.T2?.host).toBe("auto");
   });
+
+  it("a task spawned before placement keeps the host it runs on across a plan version (#323)", () => {
+    const v1 = parseWaveFile(
+      "wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n  T2: { issue: 2 }\n",
+    );
+    let rec = replay([
+      { seq: 1, at: AT, type: "wave_submitted", data: { wave: v1 } },
+      ...base.slice(1),
+      {
+        seq: 4,
+        at: AT,
+        type: "agent_spawned",
+        task: "T1",
+        data: { role: "implementer", agent_id: "w1-t1-implementer-1", host: "local" },
+      },
+    ]);
+    expect(rec.state?.tasks.find((t) => t.id === "T1")?.host_actual).toBe("local");
+    const v2 = { ...wave, version: 2 }; // placement: auto: both tasks say `auto`
+    rec = apply(rec, { seq: 5, at: AT, type: "wave_versioned", data: { wave: v2, plan: v2 } });
+    const t1 = rec.state?.tasks.find((t) => t.id === "T1");
+    expect(rec.wave?.tasks.T1?.host).toBe("local");
+    expect(t1).toMatchObject({ host_actual: "local", host_planned: "auto" });
+    // The unstarted task is left to placement.
+    expect(rec.wave?.tasks.T2?.host).toBe("auto");
+    expect(rec.state?.tasks.find((t) => t.id === "T2")?.host_planned).toBeUndefined();
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", rec.state)),
+    ).toEqual([]);
+    // A later version that agrees with where it runs clears host_planned.
+    const v3 = { ...v1, version: 3 };
+    rec = apply(rec, { seq: 6, at: AT, type: "wave_versioned", data: { wave: v3, plan: v3 } });
+    expect(rec.state?.tasks.find((t) => t.id === "T1")?.host_planned).toBeUndefined();
+    expect(rec.wave?.tasks.T1?.host).toBe("local");
+  });
 });
 
 describe("repo_visibility_detected github (SPEC §4.6.1)", () => {

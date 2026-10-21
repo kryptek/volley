@@ -953,4 +953,42 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     expect(journal("w3").some((e) => e.type === "task_placed")).toBe(false);
     expect(box?.launches ?? []).toHaveLength(0);
   });
+
+  it("switching a running wave to placement: auto: a task running locally keeps its host, the unstarted one is placed (#323)", async () => {
+    localClaude = true;
+    await setup();
+    await submit("w8", "", "  T1: { issue: 42 }\n");
+    await tick();
+    await eventually(async () => journal("w8").some((e) => e.type === "agent_spawned"));
+    expect(journal("w8").find((e) => e.type === "agent_spawned")?.data.host).toBe("local");
+
+    const file = join(env.home, "w8.yaml");
+    writeFileSync(
+      file,
+      `wave: w8\nrepo: ${repo}\nrelease_branch: release/w8\nmodel: claude-opus-5-5\npipeline: [implement, spec_review]\nplacement: auto\nplacement_prefer: [box]\ntasks:\n  T1: { issue: 42 }\n  T2: { issue: 42 }\n`,
+    );
+    const r = await runCli(["run", file], env.env);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("T1: host kept local (already running; new plan says auto)");
+    await tick();
+    await eventually(async () => journal("w8").some((e) => e.type === "task_placed"));
+    const placed = journal("w8").filter((e) => e.type === "task_placed");
+    expect(placed.map((e) => e.task)).toEqual(["T2"]);
+    expect(placed[0]?.data).toMatchObject({ host: "box" });
+
+    // T1's checks (verify, check_merged) run on the supervisor's exec; T2's on the box.
+    const d = daemon as unknown as {
+      pipelineFor(w: string): { deps: { execFor(task: string): unknown } };
+    };
+    const { execFor } = d.pipelineFor("w8").deps;
+    expect(execFor("T1")).toBe(local.exec);
+    expect(execFor("T2")).toBe(box?.exec);
+    const t1 = (await state("w8")).tasks.find((t) => t.id === "T1");
+    expect(t1?.host).toBeUndefined();
+    expect(t1).toMatchObject({ host_actual: "local", host_planned: "auto" });
+    expect(journal("w8").some((e) => JSON.stringify(e.data).includes("'auto'"))).toBe(false);
+    expect(
+      schemaErrors("wave-state.schema.json", await env.retained("volley/_waves/w8/state")),
+    ).toEqual([]);
+  });
 });

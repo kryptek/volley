@@ -5,8 +5,8 @@ import {
   resolveEvent,
   waveDecisionId,
 } from "./decisions";
-import { type PlanDiff, diffPlans } from "./plan-diff";
-import type { WaveRecord } from "./reducer";
+import { type HostKept, type PlanDiff, diffPlans } from "./plan-diff";
+import { type WaveRecord, startedHost } from "./reducer";
 import type { JournalEvent, NewEvent, TaskId, TaskState, Wave, WaveTask } from "./types";
 
 /**
@@ -20,6 +20,7 @@ import type { JournalEvent, NewEvent, TaskId, TaskState, Wave, WaveTask } from "
  *   issue changed, queued    → applies
  *   issue changed, in flight → the agents keep the old issue; decision plan_change "restart / let finish"
  *   pipeline / model changed → applies to stages not yet started (running agents keep theirs)
+ *   host changed, started   → the task keeps the host it runs on (`diff.hosts_kept` says so)
  *
  * "Queued" means not started: still `queued` with no agent spawned and no spawn under way (an
  * admitted task waiting for its spawn slot is still queued, and gives its admission back).
@@ -248,6 +249,7 @@ export function applyPlan(rec: WaveRecord, submitted: Wave, ctx: PlanContext): P
   );
 
   const tasks: Record<TaskId, WaveTask> = {};
+  const hostsKept: HostKept[] = [];
   for (const id of plan.task_order) {
     const t = plan.tasks[id] as WaveTask;
     const cur = current.tasks[id];
@@ -255,6 +257,15 @@ export function applyPlan(rec: WaveRecord, submitted: Wave, ctx: PlanContext): P
     const keepIssue =
       cur !== undefined && cur.issue !== t.issue && (p === "in_flight" || p === "settled");
     tasks[id] = keepIssue ? { ...t, issue: cur.issue } : t;
+    // A started task runs where it was spawned: a new `host:` (say `auto`) never moves it.
+    const st = taskState.get(id);
+    const ran = st !== undefined ? startedHost(st, cur) : undefined;
+    if (ran !== undefined && ran !== t.host) {
+      const { host_spec: _s, ...rest } = tasks[id] as WaveTask;
+      const spec = cur?.host === ran ? cur.host_spec : undefined;
+      tasks[id] = { ...rest, host: ran, ...(spec !== undefined ? { host_spec: spec } : {}) };
+      hostsKept.push({ task: id, kept: ran, planned: t.host, running: p === "in_flight" });
+    }
 
     const issueD = latestPlanDecision(rec, id, "issue");
     if (p === "in_flight" && keepIssue) {
@@ -322,6 +333,7 @@ export function applyPlan(rec: WaveRecord, submitted: Wave, ctx: PlanContext): P
     }
   }
 
+  if (hostsKept.length > 0) diff.hosts_kept = hostsKept;
   const effective: Wave = { ...plan, tasks, task_order: order };
   const versioned: NewEvent = {
     type: "wave_versioned",

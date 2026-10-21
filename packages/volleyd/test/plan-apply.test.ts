@@ -12,6 +12,7 @@ import {
   planDecisionId,
   taskActivity,
 } from "../src/plan-apply";
+import { formatDiff } from "../src/plan-diff";
 import { type WaveRecord, replay } from "../src/reducer";
 import { spawnAgent } from "../src/spawn";
 import type { JournalEvent, NewEvent, TaskState, Wave } from "../src/types";
@@ -106,6 +107,26 @@ describe("applyPlan", () => {
     expect(
       schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", after.state)),
     ).toEqual([]);
+  });
+
+  it("switching to placement: auto keeps a started task's host and says so (#323)", () => {
+    const auto = parseWaveFile(`${text("v1.yaml")}placement: auto\n`);
+    const { res, after } = applyTo(midFlight(), auto);
+    // T3 and T4 implement on the supervisor's machine, T1 is done there: their host stays.
+    expect(res.diff.hosts_kept).toEqual([
+      { task: "T1", kept: "local", planned: "auto", running: false },
+      { task: "T3", kept: "local", planned: "auto", running: true },
+      { task: "T4", kept: "local", planned: "auto", running: true },
+    ]);
+    expect(formatDiff(res.diff)).toContain(
+      "T3: host kept local (already running; new plan says auto)",
+    );
+    expect(after.wave?.tasks.T3?.host).toBe("local");
+    expect(taskOf(after, "T3")?.host_planned).toBe("auto");
+    // T2 and T5 never started: placement places them.
+    expect(after.wave?.tasks.T2?.host).toBe("auto");
+    expect(after.wave?.tasks.T5?.host).toBe("auto");
+    expect(after.plan?.tasks.T3?.host).toBe("auto"); // the file as submitted
   });
 
   it("removed queued task → cancelled", () => {
