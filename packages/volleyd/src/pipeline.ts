@@ -3199,6 +3199,14 @@ export function roleSpawnHold(o: {
 /** The merge-nudge re-check's rate-limit key: outside `<task>/`, so `forget` keeps it. */
 const nudgeKey = (task: TaskId) => `merge_nudge:${task}`;
 
+/**
+ * A decision asked once until its answer is handled (PipelineDriver.asking): a merge_ready
+ * invariant breach, per head (its alarm's key).
+ */
+function askKey(task: TaskId, m: PipelineMarker | undefined): string | undefined {
+  return m?.on === "merge_ready_invariant" ? `${task}/merge_ready_invariant/${m.head}` : undefined;
+}
+
 /** Executes the interpreter's actions for one wave. Call it from one serial queue. */
 export class PipelineDriver {
   /** Last level-triggered re-check per `<task>/<what>` (verify, check_rebase, check_merged). */
@@ -3237,6 +3245,13 @@ export class PipelineDriver {
   private readonly lock: ReleaseLock;
   /** Tasks whose `gh pr merge` this driver runs (from `merge_started` until its outcome is in). */
   private readonly merging = new Set<TaskId>();
+  /**
+   * The merge_ready invariant decisions this driver asked (`askKey`) whose answer it has not
+   * handled yet. Autopilot answers one inside `decide`, but the answer reaches the pipeline later,
+   * on the queue: until then the task is not parked, and the advances after the decide would ask
+   * again for the same head, spending a re-review each (#269).
+   */
+  private readonly asking = new Set<string>();
 
   constructor(
     private readonly wave: WaveId,
@@ -3296,6 +3311,11 @@ export class PipelineDriver {
   async handle(task: TaskId, ev: PipelineEvent): Promise<void> {
     const v = this.view(task);
     if (v === null) return;
+    // Its answer is handled now: a re-ask, or a later breach, asks again.
+    if (ev.kind === "decision_resolved") {
+      const key = askKey(task, (ev.decision as { pipeline?: PipelineMarker }).pipeline);
+      if (key !== undefined) this.asking.delete(key);
+    }
     await this.run(task, next(v, ev), ev.kind !== "advance");
     // Each round of actions changes the record; a step's last acceptance enters the next step.
     for (let i = 0; i < DAEMON_DEFAULTS.pipeline_max_advances; i++) {
@@ -3546,6 +3566,7 @@ export class PipelineDriver {
     this.mergeTokens.delete(task);
     for (const m of [this.lastCheck, this.noCiSince])
       for (const k of m.keys()) if (k.startsWith(`${task}/`)) m.delete(k);
+    for (const k of this.asking) if (k.startsWith(`${task}/`)) this.asking.delete(k);
   }
 
   private async alarmError(task: TaskId, what: string, e: unknown): Promise<void> {
@@ -3636,10 +3657,14 @@ export class PipelineDriver {
           progressed = true;
           break;
         }
-        case "decide":
+        case "decide": {
+          const key = askKey(task, a.marker);
+          if (key !== undefined && this.asking.has(key)) break;
           await this.deps.decide(a.decision, { ...(a.data ?? {}), pipeline: a.marker });
+          if (key !== undefined) this.asking.add(key);
           progressed = true;
           break;
+        }
         case "retire":
           await this.deps.retire(a.agent_id, a.status);
           progressed = true;

@@ -1,14 +1,18 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
 import type { DecisionRecord } from "../src/decisions";
 import type { EvidenceJson } from "../src/evidence";
 import { roleSpawnHold } from "../src/pipeline";
-import type { HygieneLevel } from "../src/reviews";
 import { eventually } from "./helpers/broker-wait";
 import { FIXTURES } from "./helpers/fake-host";
-import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
+import {
+  type Harness,
+  type HarnessOptions,
+  pipelineHarness,
+  sha,
+} from "./helpers/pipeline-harness";
 
 const result = (name: string): unknown =>
   JSON.parse(readFileSync(join(FIXTURES, "review-results", `${name}.json`), "utf-8"));
@@ -25,7 +29,7 @@ const types = () => h.events.map((e) => e.type);
 const stage = () => h.task()?.stage;
 
 /** Implementer done with its PR open and CI green on H1. */
-async function implemented(o: { pipeline?: string; hygiene?: HygieneLevel } = {}) {
+async function implemented(o: HarnessOptions = {}) {
   h = pipelineHarness(o);
   await h.start();
   h.openPr(H1);
@@ -33,8 +37,8 @@ async function implemented(o: { pipeline?: string; hygiene?: HygieneLevel } = {}
 }
 
 /** Through both reviews (spec P1 + P2; quality P1 + P3 elsewhere) to a spawned fixup. */
-async function reviewed() {
-  await implemented();
+async function reviewed(o: HarnessOptions = {}) {
+  await implemented(o);
   await h.finish("spec_reviewer", { result: result("spec-p1") });
   await h.finish("quality_reviewer", { result: result("quality-p1-elsewhere") });
 }
@@ -976,6 +980,96 @@ describe("pipeline: the PR head at the gate and at the merge", () => {
       head_sha: H1,
       merged_head_sha: H2,
     });
+  });
+});
+
+describe("pipeline: the merge_ready invariant under autopilot", () => {
+  /** Autopilot's agent_blocked/rereview-stale within rereview_max (2), then the owner's. */
+  const rereviewMax = () => {
+    let used = 0;
+    return (d: DecisionRecord) =>
+      (d as { pipeline?: { on?: string } }).pipeline?.on === "merge_ready_invariant" &&
+      used++ < CONFIG_DEFAULTS.autopilot.rereview_max
+        ? "rereview"
+        : undefined;
+  };
+  const invariantDecisions = () =>
+    h.events.filter(
+      (e) =>
+        e.type === "decision_opened" &&
+        (e.data.pipeline as { on?: string } | undefined)?.on === "merge_ready_invariant",
+    );
+  const rounds = () =>
+    h.events.filter((e) => e.type === "stage_entered" && e.data.stage === "spec_review");
+
+  it("the head moves while both reviewers work: one decision, one rereview, one round, no escalation", async () => {
+    h = pipelineHarness({ autopilot: rereviewMax() });
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(rounds()).toHaveLength(1);
+    // An "Update branch" push to the PR while the reviewers work: they approve H1.
+    h.world.origin[h.PR_BRANCH] = H2;
+    (h.world.prs[0] as { headRefOid: string }).headRefOid = H2;
+    h.world.ci[H2] = "green";
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    // The second reviewer's done is the observation that finds the head moved.
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    expect(h.events.find((e) => e.data.alarm === "merge_ready_invariant")?.data).toMatchObject({
+      head: H2,
+      stale: ["spec_reviewer", "quality_reviewer"],
+    });
+    expect(invariantDecisions()).toHaveLength(1);
+    expect(h.openDecisions()).toEqual([]);
+    // One re-review round at H2, and its approvals gate the task.
+    expect(rounds()).toHaveLength(2);
+    const again = h.spawns.filter((s) => s.role !== "implementer" && s.start?.ref === H2);
+    expect(again.map((s) => s.role)).toEqual(["spec_reviewer", "quality_reviewer"]);
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    expect(stage()).toBe("merge_ready");
+    expect(h.openDecisions()).toEqual([]);
+  });
+
+  it("a push after the fixup is verified: one decision answered rereview starts one round", async () => {
+    await reviewed({ autopilot: rereviewMax() });
+    h.world.before = (a) => {
+      if (a[1] !== "pr" || a[2] !== "view") return;
+      h.world.before = undefined;
+      h.world.origin[h.PR_BRANCH] = H3;
+      (h.world.prs[0] as { headRefOid: string }).headRefOid = H3;
+      h.world.ci[H3] = "green";
+    };
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(invariantDecisions()).toHaveLength(1);
+    expect(h.openDecisions()).toEqual([]);
+    expect(rounds()).toHaveLength(2);
+    expect(h.spawns.filter((s) => s.start?.ref === H3).map((s) => s.role)).toEqual([
+      "spec_reviewer",
+      "quality_reviewer",
+    ]);
+  });
+
+  it("an answer that is not an option is asked again once, and its rereview starts one round", async () => {
+    const answers = ["later", "rereview"];
+    await reviewed({ autopilot: () => answers.shift() });
+    h.world.before = (a) => {
+      if (a[1] !== "pr" || a[2] !== "view") return;
+      h.world.before = undefined;
+      h.world.origin[h.PR_BRANCH] = H3;
+      (h.world.prs[0] as { headRefOid: string }).headRefOid = H3;
+      h.world.ci[H3] = "green";
+    };
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    const asked = invariantDecisions();
+    expect(asked).toHaveLength(2);
+    expect(asked[1]?.data.question).toMatch(/"later" is not one of rereview \/ cancel/);
+    expect(h.openDecisions()).toEqual([]);
+    expect(rounds()).toHaveLength(2);
   });
 });
 
