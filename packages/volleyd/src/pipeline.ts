@@ -192,6 +192,8 @@ export interface TaskPipeline {
   ci_hold?: CiHold | undefined;
   /** The PR head moved after a gate (`pr_head_moved`), until the owner's answer. */
   moved?: MovedHead | undefined;
+  /** A moved head answered `accept`, until the accept's verification moves the task's head there. */
+  accepting?: string | undefined;
   /** Every head the task was gated at (evidence head history). */
   gated: string[];
   /** What the next fixup must do about a moved head (the CI failure, the diff), until it is verified. */
@@ -452,7 +454,12 @@ export function reducePipeline(
         run.accepted = true;
         if (PUBLISHING_ROLES.has(role) && typeof d.head_sha === "string") run.head = d.head_sha;
       }
-      if (typeof d.head_sha === "string") p.head = d.head_sha;
+      // A review of a head an accepted release merge already moved on from holds at the moved head
+      // (reviewHolds): it does not take the task's head back (#270).
+      if (typeof d.head_sha === "string" && !(isReviewerRole(role) && acceptedFrom(p, d.head_sha)))
+        p.head = d.head_sha;
+      // The accepted head reached, or the head went elsewhere first: either way the wait is over.
+      if (p.head !== from) p.accepting = undefined;
       const pr = d.pr as { number: number; url: string; ci?: string } | undefined;
       // The merge record describes the commit that merged (its own CI): not the pipeline's head.
       if (pr !== undefined && d.role !== "merged") {
@@ -579,6 +586,7 @@ export function reducePipeline(
       p.ci_hold = undefined;
       if (ev.type === "task_cancelled") {
         p.moved = undefined;
+        p.accepting = undefined;
         p.remediation = undefined;
         p.merge_inflight = undefined;
       }
@@ -651,12 +659,12 @@ export function reducePipeline(
             p.ci_superseded = dir.superseded;
           }
           p.moved = undefined;
-        } else if (
-          isAnswer(answer, "cancel") ||
-          (isAnswer(answer, "accept") && (ctx.decision?.options ?? []).includes("accept"))
-        )
+        } else if (isAnswer(answer, "cancel")) p.moved = undefined;
+        else if (isAnswer(answer, "accept") && (ctx.decision?.options ?? []).includes("accept")) {
           // accept: the head moves with the artifact_verified onResolved journals next.
+          p.accepting = p.moved.to;
           p.moved = undefined;
+        }
       }
       break;
     }
@@ -1020,6 +1028,21 @@ function reviewHolds(p: TaskPipeline, rv: StoredReview): boolean {
   return false;
 }
 
+/** Did the current head get here from `sha` through moves accepted as release merges only? */
+function acceptedFrom(p: TaskPipeline, sha: string): boolean {
+  const seen = new Set<string>();
+  let head = p.head;
+  while (head !== undefined && !seen.has(head)) {
+    seen.add(head);
+    const to = head;
+    head = p.moves.find(
+      (m) => m.to === to && m.how === "release_merge" && m.accepted_by !== undefined,
+    )?.from;
+    if (head === sha) return true;
+  }
+  return false;
+}
+
 /**
  * A merge_ready invariant violation: an alarm, and a decision for the owner (`rereview` runs the
  * missing / stale reviewers at the current head; `cancel`). Never a gate: volleyd never gates
@@ -1103,7 +1126,12 @@ function onHeadMoved(
 ): PipelineAction[] {
   const role = headRole(v.p);
   if (v.stage === "cancelled" || v.stage === "merge_ready" || ev.expected !== v.p.head) return [];
-  if (role === undefined) return [];
+  // The gate's head check saw this move first (pr_head_moved): its decision, asked or answered
+  // `accept`, handles it. A plain re-verify here would land before the accept's and record the
+  // move as one that voids the reviews (#271).
+  // An accept whose verification never lands leaves `accepting` set; the merge check's own
+  // p.head comparison still sees that head, so nothing is lost.
+  if (role === undefined || v.p.moved !== undefined || v.p.accepting === ev.actual) return [];
   return [
     {
       kind: "journal",

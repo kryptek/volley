@@ -130,6 +130,12 @@ import {
 } from "./windows/coordinators/CoordinatorsWindow";
 import { INBOX_ID, INBOX_W, NeedsYouWindow } from "./windows/inbox/NeedsYouWindow";
 import { inboxSources, liveLine, needsPerson, sourceWindow } from "./windows/inbox/inboxFilters";
+import {
+  MACHINES_ID,
+  MACHINES_W,
+  MachinesWindow,
+  machineRows,
+} from "./windows/machines/MachinesWindow";
 import { DigestCard, showDigest } from "./windows/wave/DigestCard";
 import { AttentionLine, MachineDown, NeedsYou } from "./windows/wave/NeedsYou";
 import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
@@ -186,6 +192,10 @@ type Pos = { x: number; y: number };
 const coordsH = (rows: number) => 150 + 66 * rows;
 /** Rough Needs you window height for the initial fit: header and tabs + one card per item. */
 const inboxH = (rows: number) => 130 + 150 * rows;
+/** Rough Machines window height for the initial fit: header + one two-line row per machine. */
+const machinesH = (rows: number) => 80 + 76 * Math.max(1, rows);
+/** How often the Machines window's clock ticks while it is open (sparklines and `last seen`). */
+const MACHINES_TICK_MS = 15_000;
 
 /**
  * Placeholder layout: one row per wave, its agents in two columns to the
@@ -211,8 +221,9 @@ function placeholderLayout(
     y += Math.max(WAVE_H, Math.ceil(kids.length / 2) * (AGENT_H + GAP) - GAP) + CGAP;
   }
   at[COORDS_ID] = { x: 0, y };
-  // Beside the coordinators window.
+  // Beside the coordinators window, then the Machines window beside the inbox.
   at[INBOX_ID] = { x: clampW(COORDS_W) + GAP, y };
+  at[MACHINES_ID] = { x: clampW(COORDS_W) + GAP + clampW(INBOX_W) + GAP, y };
   return at;
 }
 
@@ -316,6 +327,7 @@ export default function App() {
   const fitPending = useRef<string | null>(null);
   const [coordsOpen, setCoordsOpen] = useState(true);
   const [inboxOpen, setInboxOpen] = useState(true);
+  const [machinesOpen, setMachinesOpen] = useState(false);
   const [notify, setNotify] = useNotifySettings();
   // Sound themes: the manager plays what the store and the Desk's controls do.
   const [sound, setSound] = useSoundSettings();
@@ -540,7 +552,7 @@ export default function App() {
 
   // ------------------------------------------------------------ pinning (C12)
   const keys = windowKeys(
-    [COORDS_ID, INBOX_ID],
+    [COORDS_ID, INBOX_ID, MACHINES_ID],
     waveIds,
     Object.values(state.agents).map((a) => ({
       id: a.id,
@@ -567,14 +579,17 @@ export default function App() {
       ? { w: COORDS_W, h: coordsH(coordsRows) }
       : id === INBOX_ID
         ? { w: INBOX_W, h: inboxH(inboxItems.length) }
-        : waveIds.includes(id)
-          ? { w: WAVE_W, h: WAVE_H }
-          : { w: AGENT_W, h: AGENT_H };
-  /** Every window shown: the visible waves and their agents, then the coordinators and Needs you windows. */
+        : id === MACHINES_ID
+          ? { w: MACHINES_W, h: machinesH(machines.length) }
+          : waveIds.includes(id)
+            ? { w: WAVE_W, h: WAVE_H }
+            : { w: AGENT_W, h: AGENT_H };
+  /** Every window shown: the visible waves and their agents, then the coordinators, Needs you and Machines windows. */
   const shownIds = () => [
     ...visible.flatMap((w) => [w, ...(groups[w] ?? []).map((a) => a.id)]),
     ...(coordsShown ? [COORDS_ID] : []),
     ...(inboxShown ? [INBOX_ID] : []),
+    ...(machinesShown ? [MACHINES_ID] : []),
   ];
   const bounds = hudBounds(screenSize, narrow);
   /** An anchored window's rect on screen (its measured size, or its default). */
@@ -652,6 +667,13 @@ export default function App() {
     a.opened_at.localeCompare(b.opened_at),
   );
   const inboxShown = inboxOpen && inboxItems.length > 0;
+  // The Machines window: the pool's rows (the demo has no volleyd, so its own machine reads live).
+  const machines = machineRows(
+    state,
+    demo || !supervisorHealth(state.supervisors[DAEMON_AGENT_ID]).down,
+  );
+  const machinesShown = machinesOpen;
+  const machinesNow = useNow(machinesShown ? MACHINES_TICK_MS : null);
   // The first fit frames the canvas: every shown window but the anchored ones.
   const rects: Rect[] = shownIds()
     .filter((id) => !anchored(id))
@@ -673,7 +695,13 @@ export default function App() {
   const arrange = () => {
     // Forget the sizes of windows that have left the store.
     for (const id of Object.keys(sizes.current)) {
-      if (id !== COORDS_ID && id !== INBOX_ID && !state.agents[id] && !waveIds.includes(id))
+      if (
+        id !== COORDS_ID &&
+        id !== INBOX_ID &&
+        id !== MACHINES_ID &&
+        !state.agents[id] &&
+        !waveIds.includes(id)
+      )
         delete sizes.current[id];
     }
     // The waves, then the unassigned group and the coordinators window as side
@@ -689,6 +717,15 @@ export default function App() {
         : []),
       ...(inboxShown
         ? [{ main: sizeOf(INBOX_ID, INBOX_W, inboxH(inboxItems.length)), kids: [], side: true }]
+        : []),
+      ...(machinesShown
+        ? [
+            {
+              main: sizeOf(MACHINES_ID, MACHINES_W, machinesH(machines.length)),
+              kids: [],
+              side: true,
+            },
+          ]
         : []),
     ];
     // Pinned windows are skipped: one pinned in place is kept clear of, and the fit
@@ -730,6 +767,7 @@ export default function App() {
   const layoutKey = [
     coordsShown ? "c" : "",
     inboxShown ? "i" : "",
+    machinesShown ? "m" : "",
     ...visible,
     ...visible.flatMap((id) => (groups[id] ?? []).map((a) => a.id)),
     ...shownIds()
@@ -1065,6 +1103,16 @@ export default function App() {
               }}
             />
           )}
+          {machinesShown && (
+            <MachinesWindow
+              rows={machines}
+              now={machinesNow}
+              narrow={narrow}
+              frame={place(MACHINES_ID)}
+              onOpen={openMachine}
+              onClose={() => setMachinesOpen(false)}
+            />
+          )}
           {visible.map((id) => {
             const wave = state.waves[id];
             if (!wave) {
@@ -1296,6 +1344,9 @@ export default function App() {
         inboxOpen={inboxOpen}
         onToggleInbox={() => setInboxOpen((o) => !o)}
         inboxNeedsYou={inboxNeedsYou}
+        machinesOpen={machinesOpen}
+        onToggleMachines={() => setMachinesOpen((o) => !o)}
+        machinesDown={machines.filter((m) => m.dot === "down").length}
         tethers={look.tethers}
         onToggleTethers={() => setLook({ tethers: !look.tethers })}
         onArrange={arrange}

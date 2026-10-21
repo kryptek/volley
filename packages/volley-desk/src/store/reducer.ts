@@ -37,6 +37,7 @@
  * wave and in the feeds of the event's task's agents.
  */
 import { AUTOPILOT_EVENTS } from "./autopilot";
+import { pushRecord } from "./machineHistory";
 import {
   type AgentAttention,
   type AgentView,
@@ -279,14 +280,21 @@ function reduceReadiness(state: DeskState, name: string, m: DeskMessage): DeskSt
 /**
  * A machine record: kept when the machine itself or volleyd (its down record)
  * published it for this topic's machine; a cleared topic (`peer_remove`)
- * forgets the machine. Anything else leaves the slice as it was. A down
+ * forgets the machine (and its sparkline history). Anything else leaves the slice as it was. A down
  * record that replaces an up one keeps the up one's load, agents and the
  * later `last_seen`, as volleyd's `MachineHealth.observe` does: the LWT is
- * built when the machine connects, so its values may be hours old.
+ * built when the machine connects, so its values may be hours old. An up or
+ * local record's reading joins the machine's ring (`machineHistory.ts`).
  */
 function reduceMachine(state: DeskState, name: string, m: DeskMessage): DeskState {
   const env = m.envelope;
-  if (env === null) return { ...state, machines: keyed(state.machines, name, undefined) };
+  if (env === null) {
+    return {
+      ...state,
+      machines: keyed(state.machines, name, undefined),
+      machineHistory: keyed(state.machineHistory, name, undefined),
+    };
+  }
   const p = env.payload as Partial<MachinePayload> | undefined;
   if (
     env.type !== "machine" ||
@@ -309,7 +317,15 @@ function reduceMachine(state: DeskState, name: string, m: DeskMessage): DeskStat
               : prior.last_seen,
         }
       : next;
-  return { ...state, machines: keyed(state.machines, name, rec) };
+  return {
+    ...state,
+    machines: keyed(state.machines, name, rec),
+    machineHistory: keyed(
+      state.machineHistory,
+      name,
+      pushRecord(state.machineHistory?.[name], next),
+    ),
+  };
 }
 
 /** `map` with `key` set to `value`, or removed when `value` is undefined (a cleared topic). */
@@ -355,7 +371,8 @@ function reduceSignin(state: DeskState, acct: string, m: DeskMessage): DeskState
  * admission, Claude account records and usage samples, machine records, each agent's
  * registry, status and screen, and each supervisor's registry and status.
  * Live-only parts — feed, narration, progress, heartbeat, attention, a
- * supervisor's namespace — are kept. Agents and supervisors that were
+ * supervisor's namespace, the machines' sparkline rings (machineHistory; the
+ * replayed record is deduplicated by last_seen) — are kept. Agents and supervisors that were
  * registered become `unconfirmed` until their registry entry is replayed.
  */
 export function resync(state: DeskState): DeskState {
@@ -400,7 +417,10 @@ export function resync(state: DeskState): DeskState {
   };
 }
 
-/** Drop agents and supervisors still `unconfirmed` once the post-reconnect replay has settled. */
+/**
+ * Drop agents and supervisors still `unconfirmed` once the post-reconnect replay has settled, and
+ * the sparkline ring of any machine whose record was not replayed (removed while disconnected).
+ */
 export function pruneUnconfirmed(state: DeskState): DeskState {
   if (state.unconfirmed === undefined) return state;
   const { unconfirmed, ...rest } = state;
@@ -410,7 +430,13 @@ export function pruneUnconfirmed(state: DeskState): DeskState {
     if (agents[id] && !agents[id].registered) delete agents[id];
     if (supervisors[id] && !supervisors[id].registry) delete supervisors[id];
   }
-  return withCoordinators({ ...rest, agents, supervisors });
+  const pruned = { ...rest, agents, supervisors };
+  if (state.machineHistory !== undefined) {
+    pruned.machineHistory = Object.fromEntries(
+      Object.entries(state.machineHistory).filter(([name]) => state.machines?.[name] !== undefined),
+    );
+  }
+  return withCoordinators(pruned);
 }
 
 // ------------------------------------------------------------------ agents
