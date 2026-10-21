@@ -455,7 +455,8 @@ export function reducePipeline(
         if (PUBLISHING_ROLES.has(role) && typeof d.head_sha === "string") run.head = d.head_sha;
       }
       if (typeof d.head_sha === "string") p.head = d.head_sha;
-      if (p.accepting === p.head) p.accepting = undefined;
+      // The accepted head reached, or the head went elsewhere first: either way the wait is over.
+      if (p.head !== from) p.accepting = undefined;
       const pr = d.pr as { number: number; url: string; ci?: string } | undefined;
       // The merge record describes the commit that merged (its own CI): not the pipeline's head.
       if (pr !== undefined && d.role !== "merged") {

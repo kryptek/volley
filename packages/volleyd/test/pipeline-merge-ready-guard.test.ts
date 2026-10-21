@@ -6,6 +6,7 @@ import {
   emptyPipeline,
   mergeReadyCheck,
   next,
+  reducePipeline,
 } from "../src/pipeline";
 import { type WaveRecord, apply } from "../src/reducer";
 import type { ReviewResult } from "../src/reviews";
@@ -352,5 +353,25 @@ describe("a gate's head move is handled by one detector (#271)", () => {
     expect(moved({ ...implemented, accepting: H2 })).toEqual([]);
     // Another head than the one accepted is a move of its own.
     expect(kinds(moved({ ...implemented, accepting: H3 }))).toEqual(["journal", "verify"]);
+  });
+
+  it("a verification that moves the head anywhere ends the accept's wait", () => {
+    const verified = (p: TaskPipeline, head: string) =>
+      reducePipeline(
+        structuredClone(p),
+        {
+          seq: 9,
+          at: "2026-10-18T12:00:09.000Z",
+          type: "artifact_verified",
+          task: "T1",
+          data: { role: "implementer", agent_id: "a1", head_sha: head },
+        },
+        { stages: DEFAULT },
+      );
+    expect(verified({ ...implemented, accepting: H2 }, H2).accepting).toBeUndefined();
+    // Elsewhere first: a later real move back to H2 is not swallowed.
+    expect(verified({ ...implemented, accepting: H2 }, H3).accepting).toBeUndefined();
+    // Re-verified at the same head: the accept's verification is still to come.
+    expect(verified({ ...implemented, accepting: H2 }, H1).accepting).toBe(H2);
   });
 });
