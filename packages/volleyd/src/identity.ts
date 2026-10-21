@@ -32,13 +32,29 @@ export interface AgentIdentityFile {
 
 const MAX_ID = 63;
 
+const HASH = 6;
+/** The shortest head a shortened id keeps: one wave character, `-` and the hash. */
+const MIN_HEAD = 1 + 1 + HASH;
+
+const shortHash = (s: string): string =>
+  createHash("sha256").update(s).digest("hex").slice(0, HASH);
+
 /**
  * `<wave>-<task>-<role>-<attempt>`, lowercased (agent ids are `[a-z0-9][a-z0-9_-]{0,62}`). An
  * id that would be too long keeps its tail and replaces the overflow of the wave id with a short
- * hash, so it stays unique and recognisable.
+ * hash, so it stays unique and recognisable. A task id so long that the tail alone leaves no room
+ * (a flake fixer's `fix-<test>` under a reviewer's role) is cut too, its overflow replaced by a
+ * hash of the whole task id.
  */
 export function agentIdFor(wave: string, task: string, role: string, attempt: number): string {
-  return idWithTail(wave, `-${task}-${role}-${attempt}`, task);
+  const rest = `-${role}-${attempt}`;
+  let t = task.toLowerCase();
+  // Only an id that could not be formed otherwise is cut here: every other one keeps its shape.
+  const room = MAX_ID - MIN_HEAD - rest.length - 1;
+  if (wave.length + 1 + t.length + rest.length > MAX_ID && t.length > room) {
+    t = `${t.slice(0, room - HASH - 1).replace(/-+$/, "")}-${shortHash(t)}`;
+  }
+  return idWithTail(wave, `-${t}${rest}`, task);
 }
 
 /**
@@ -53,14 +69,18 @@ function idWithTail(wave: string, rawTail: string, what: string): string {
   const tail = rawTail.toLowerCase();
   let id = `${wave}${tail}`.toLowerCase();
   if (id.length > MAX_ID) {
-    const hash = createHash("sha256").update(id).digest("hex").slice(0, 6);
+    const hash = shortHash(id);
     const room = Math.max(1, MAX_ID - tail.length - hash.length - 1);
     id = `${wave.slice(0, room)}-${hash}${tail}`.toLowerCase();
   }
   if (!isValidAgentId(id)) {
-    throw new SpawnError("CREDENTIALS_FAILED", `cannot form an agent id from ${wave}/${what}`, {
-      agent_id: id,
-    });
+    // The same parts never form one: retrying cannot help.
+    throw new SpawnError(
+      "CREDENTIALS_FAILED",
+      `cannot form an agent id from ${wave}/${what}`,
+      { agent_id: id },
+      { permanent: true },
+    );
   }
   return id;
 }
