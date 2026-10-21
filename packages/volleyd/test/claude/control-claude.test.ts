@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
+import { addAccount } from "../../src/claude/profiles";
 import { signinDir } from "../../src/claude/signin";
 import { usageAccountTopic } from "../../src/claude/usage";
 import { ControlClient } from "../../src/control";
@@ -644,6 +645,41 @@ describe("claude_account_add on a paired machine (<acct>@<name>)", () => {
       expect(other).toMatchObject({ ok: false, error: expect.stringMatching(/home/) });
       const wrongBox = await t.client.request("claude_signin", { acct: "work@peer-b" });
       expect(wrongBox.ok).toBe(false);
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("claude_signin of a signed-in work@peer-a is refused with the remote logout remedy", async () => {
+    const t = await peerSetup({ signInAfter: 3 });
+    try {
+      const done = t.waits.event("_system", "claude_signin_done");
+      await t.client.request("claude_account_add", { label: "Work", machine: "peer-a" });
+      await done;
+      const before = t.b.box.starts;
+      const again = await t.client.request("claude_signin", { acct: "work@peer-a" });
+      expect(again.ok).toBe(false);
+      expect(again.error).toMatch(/already signed in/);
+      expect(again.error).toContain(
+        `ssh dev@peer-a CLAUDE_CONFIG_DIR=${PROFILE} claude auth logout`,
+      );
+      expect(t.b.box.starts).toBe(before);
+      const status = t.b.remoteSteps().filter((s) => s.argv[0] === "claude");
+      expect(status.at(-1)).toMatchObject({ env: { CLAUDE_CONFIG_DIR: PROFILE } });
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("a remote profile's row omits dir until the peer's HOME is known", async () => {
+    const t = await peerSetup();
+    try {
+      // A profile recorded before this daemon learned the peer's HOME (a restart).
+      addAccount(t.root, { label: "Work", machine: "peer-a" }, "2026-10-21T00:00:00.000Z");
+      const row = (await t.accounts()).accounts.find((a) => a.id === "work");
+      expect(row).toMatchObject({ id: "work", machine: "peer-a" });
+      expect(row).not.toHaveProperty("dir");
+      expect(t.b.steps()).toEqual([]);
     } finally {
       await t.close();
     }

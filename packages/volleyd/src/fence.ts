@@ -478,11 +478,14 @@ export function sealSigninScript(dir: string, content: string): SigninToken {
   return token;
 }
 
+/** `<home>/.volley/<segment>/<acct>` on a paired machine, `<acct>` in the §2.1 id grammar. */
+const remoteVolleyDir = (segment: string) =>
+  new RegExp(`^/(?:.*/)?\\.volley/${segment}/[a-z0-9][a-z0-9_-]{0,62}$`);
 /** A paired machine's sign-in dir: `<home>/.volley/signin/<acct>` (remote-signin.ts). */
-const REMOTE_SIGNIN_DIR = /^\/(?:.*\/)?\.volley\/signin\/[a-z0-9][a-z0-9_-]{0,62}$/;
+const REMOTE_SIGNIN_DIR = remoteVolleyDir("signin");
 const isRemoteSigninDir = (dir: string) => absPath(dir) && REMOTE_SIGNIN_DIR.test(dir);
 /** A profile the supervisor created on a paired machine: `<home>/.volley/claude/<acct>`. */
-const REMOTE_PROFILE_DIR = new RegExp(REMOTE_SIGNIN_DIR.source.replace("signin", "claude"));
+const REMOTE_PROFILE_DIR = remoteVolleyDir("claude");
 const isRemoteProfileDir = (dir: string) => absPath(dir) && REMOTE_PROFILE_DIR.test(dir);
 
 /**

@@ -358,6 +358,29 @@ export class ClaudeService {
       if (a === undefined) return { ok: false, error: `unknown Claude account '${acct}'` };
       const host = this.d.remote?.(remote.name) ?? `no paired machine '${remote.name}'`;
       if (typeof host === "string") return { ok: false, error: host };
+      // As here: a signed-in profile would end the new sign-in at its first poll.
+      const home =
+        this.homes.get(remote.name) ??
+        (await host
+          .run([{ argv: ["printenv", "HOME"] }], {
+            timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms,
+          })
+          .then((r) => (r.code === 0 ? r.stdout.trim() : ""))
+          .catch(() => ""));
+      if (home.startsWith("/") && !home.includes("\n")) {
+        this.homes.set(remote.name, home);
+        const dir = remoteProfileDir(home, a.id);
+        const status = await host
+          .run([{ argv: ["claude", "auth", "status"], env: { CLAUDE_CONFIG_DIR: dir } }], {
+            timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms,
+          })
+          .catch(() => null);
+        if (parseAuthStatus(status?.stdout ?? "")?.loggedIn === true)
+          return {
+            ok: false,
+            error: `Claude account '${acct}' is already signed in; to sign it in as another Claude account, run \`ssh ${host.spec.target} CLAUDE_CONFIG_DIR=${dir} claude auth logout\` first`,
+          };
+      }
       return this.remoteProfileSignin(a, host, by, {});
     }
     if (!accounts.some((a) => a.id === acct && a.machine === LOCAL_MACHINE))
