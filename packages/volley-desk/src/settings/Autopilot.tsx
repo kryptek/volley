@@ -69,9 +69,65 @@ function usePolicy(control: ControlFn | null, wave: string | undefined): PolicyS
 const budgetCell = (r: PolicyRow) =>
   r.budget === null ? "—" : `${r.budget}${r.max !== null ? ` · max ${r.max}` : ""}`;
 
+/** Column widths (%): rationale gets the most room; every cell wraps within its column. */
+const POLICY_WIDTHS = [22, 22, 14, 14, 28] as const;
+
+/** A comma-joined kind list may break after each comma (`<wbr>`); its text is unchanged. */
+function breakAfterCommas(s: string) {
+  const parts = s.split(",");
+  return parts.map((p, i) => (
+    // biome-ignore lint/suspicious/noArrayIndexKey: the parts of one fixed string, never reordered
+    <span key={i}>
+      {p}
+      {i < parts.length - 1 && (
+        <>
+          ,<wbr />
+        </>
+      )}
+    </span>
+  ));
+}
+
+/**
+ * The table fits the pane at the Settings window's default size (fixed columns,
+ * wrapping cells) and scrolls inside `.policy-scroll` if the pane is narrower;
+ * at phone width CSS swaps it for `.policy-stack`, one block per rule.
+ */
 export function PolicyTable({ rules }: { rules: readonly PolicyRow[] }) {
   return (
+    <>
+      <div className="policy-scroll">
+        <PolicyGrid rules={rules} />
+      </div>
+      <div className="policy-stack">
+        {rules.map((r) => (
+          <section key={r.policy} className="policy-rule" title={r.policy}>
+            <h4 className="policy-rule-kind mono policy-wrap">{breakAfterCommas(r.kind)}</h4>
+            <dl>
+              <dt>condition</dt>
+              <dd className="policy-wrap">{r.condition}</dd>
+              <dt>answer</dt>
+              <dd className="mono policy-wrap">{r.answer}</dd>
+              <dt>budget</dt>
+              <dd className="mono dim policy-wrap">{budgetCell(r)}</dd>
+              <dt>rationale</dt>
+              <dd className="policy-wrap">{r.rationale}</dd>
+            </dl>
+          </section>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function PolicyGrid({ rules }: { rules: readonly PolicyRow[] }) {
+  return (
     <table className="policy-table" aria-label="Autopilot policy">
+      <colgroup>
+        {POLICY_WIDTHS.map((w, i) => (
+          <col key={POLICY_COLUMNS[i]} style={{ width: `${w}%` }} />
+        ))}
+      </colgroup>
       <thead>
         <tr>
           {POLICY_COLUMNS.map((c) => (
@@ -84,11 +140,11 @@ export function PolicyTable({ rules }: { rules: readonly PolicyRow[] }) {
       <tbody>
         {rules.map((r) => (
           <tr key={r.policy} title={r.policy}>
-            <td className="mono">{r.kind}</td>
-            <td>{r.condition}</td>
-            <td className="mono">{r.answer}</td>
-            <td className="mono dim">{budgetCell(r)}</td>
-            <td>{r.rationale}</td>
+            <td className="mono policy-wrap">{breakAfterCommas(r.kind)}</td>
+            <td className="policy-wrap">{r.condition}</td>
+            <td className="mono policy-wrap">{r.answer}</td>
+            <td className="mono dim policy-wrap">{budgetCell(r)}</td>
+            <td className="policy-wrap">{r.rationale}</td>
           </tr>
         ))}
       </tbody>

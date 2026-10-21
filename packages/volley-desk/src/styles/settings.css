@@ -876,8 +876,15 @@
   align-items: center;
   gap: 4px;
 }
+/* The pane never scrolls sideways: a pane narrower than the table's floor scrolls the table here. */
+.policy-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
 .policy-table {
   width: 100%;
+  min-width: 520px;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 12px;
 }
@@ -891,4 +898,43 @@
   padding: 6px 8px 6px 0;
   border-bottom: 1px solid var(--line);
   vertical-align: top;
+}
+/* Long monospace strings (`relaunch_max per <task>/<role>`, `pipeline.on === "relaunch"`) wrap in their column. */
+.policy-wrap {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+/* Phone only: one block per rule (kind, then condition · answer · budget · rationale). */
+.policy-stack {
+  display: none;
+}
+.policy-rule {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.policy-rule-kind {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+.policy-rule dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 10px;
+  margin: 0;
+}
+.policy-rule dt {
+  color: var(--mute);
+}
+.policy-rule dd {
+  margin: 0;
+  min-width: 0;
+}
+@media (max-width: 699.98px) {
+  .policy-scroll {
+    display: none;
+  }
+  .policy-stack {
+    display: block;
+  }
 }
