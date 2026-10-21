@@ -4,7 +4,7 @@ This file collects feature-level smoke recipes that span multiple packages — t
 
 **Next release:** deploy the tag to the supervisor's machine with `volley deploy v<X.Y.Z>` (after a `--dry-run`), then confirm the Desk shows the new version in Settings › About, `volley desk serve`'s log has no stale-build warning, and `volleyd status` answers. See [`volley deploy`](#deploying-a-release-volley-deploy) below.
 
-**v0.4.0** (the Fleet: pairing from the Desk, doctor and Repair, signing a paired machine in to Claude, automatic placement, a machine going down, overloaded and removed) is [Plan 12](#plan-12--fleet-v040) below. **v0.3.0** (onboarding: `volley setup`, the Desk's setup wizard and sign-in links, pairing, Claude accounts) is [Plan 11](#plan-11--onboarding-v030) below. **v0.2.0** (volleyd, volley-hooks, broker auth, the Desk) has its own owner smoke path: [`docs/SMOKE-v0.2.md`](docs/SMOKE-v0.2.md).
+**v0.5.0** (Autopilot: an unattended night against a scratch repository, merges by the supervisor, a planted flake fixed, the release train, the digest and the Needs you window on the phone) is [Plan 13](#plan-13--autopilot-v050) below. **v0.4.0** (the Fleet: pairing from the Desk, doctor and Repair, signing a paired machine in to Claude, automatic placement, a machine going down, overloaded and removed) is [Plan 12](#plan-12--fleet-v040) below. **v0.3.0** (onboarding: `volley setup`, the Desk's setup wizard and sign-in links, pairing, Claude accounts) is [Plan 11](#plan-11--onboarding-v030) below. **v0.2.0** (volleyd, volley-hooks, broker auth, the Desk) has its own owner smoke path: [`docs/SMOKE-v0.2.md`](docs/SMOKE-v0.2.md).
 
 ---
 
@@ -21,6 +21,170 @@ Owner checklist on the supervisor's machine, once per release tag (about 5 minut
 4. `volleyd status` answers; a wave that was running before the deploy is still running.
 5. Optional, rollback: in a scratch clone, break the Desk build of a test tag and deploy it with
    `--repo <clone>`: the deploy reports the failed step and `rolled back to <previous>`.
+
+---
+
+## Plan 13 — Autopilot (v0.5.0)
+
+**Done means:** the owner dispatches ten or more small issues at night against a scratch
+repository, goes to bed, and in the morning finds them merged by the supervisor, the planted
+flake fixed by its own fixer task, and the release train waiting on the owner's go, with
+everything that needed a person answered from the phone or the terminal, without reading
+source. The simulated soak (`bun run test:soak`, CI's `soak` job) is the acceptance gate for the
+code; this plan is the owner's real run on real GitHub. Every step is a checkbox with what a
+pass looks like. A red item is a bug: file it, fix it in its own PR, re-run the step, and tag
+`v0.5.0` only once every box is ticked. The owner runs this plan and tags; production is always
+the owner's.
+
+The owner's guide to what is being exercised is [`docs/AUTOPILOT.md`](docs/AUTOPILOT.md).
+
+**You need:**
+
+- **Plan 12's machine** (the Mac with volleyd and the Desk running this release head: the
+  services' checkout on the release branch, volleyd and the Desk restarted), and optionally the
+  paired second machine; the phone from Plan 11 with the Desk open once and notifications
+  allowed.
+- **`VOLLEY_COORDINATOR`** set (e.g. `coord-main`) in the volley MCP registration's `env` and in
+  your shell profile, as in the root README's Quickstart step 4. `volleyd status` lists waves
+  owned by that name after a submit.
+- **A scratch repository**: a throwaway **public** GitHub repository you create for this run
+  (nothing else lives there), cloned on the supervisor's machine, with CI on pull requests and
+  on pushes to `release/**`, a test suite, and:
+  - **a flaky test planted on purpose**: one test, in a file no issue touches, that fails about
+    one run in three (e.g. it asserts a random draw is above 0.33). Push it to `main` and check
+    CI goes red on it at least once in a few re-runs;
+  - **ten or more small open issues** (one function, one file, one test each; two of them
+    touching the same file so the merge queue has a conflict to update; three with
+    `Depends on: #<n>` lines so the order matters);
+  - **a release playbook**, `.volley/release.yaml` on `main`, with a version bump, a changelog,
+    a smoke stage and **one owner-gated stage**:
+
+    ```yaml
+    version: 1
+    stages:
+      - name: bump
+        brief: Bump the version to the release version and commit it to the release branch.
+        run:
+          - [bun, run, bump, --version, 0.1.0]
+        verify: { commits_on_release: true }
+      - name: changelog
+        brief: Write CHANGELOG.md's 0.1.0 section from the merged PRs and commit it.
+        verify: { commits_on_release: true, files: [CHANGELOG.md] }
+      - name: smoke
+        brief: Run the smoke script against the release branch and report the result.
+        run:
+          - [bun, run, smoke]
+        verify: { result: { smoke: passed } }
+      - name: tag
+        brief: Tag the release branch's tip v0.1.0 and push the tag.
+        gate: owner
+        verify: { tag: "v0.1.*" }
+    ```
+
+    Use whatever commands the scratch repository has; what matters is two plain stages, a stage
+    that reports a result, and one `gate: owner` stage. `volleyd validate` on the wave file
+    prints `release playbook: .volley/release.yaml (4 stages, 1 owner-gated)`.
+- A pushed release branch `release/<yyyy-mm-dd>-autopilot-smoke` cut from `main`.
+- A notebook for the metrics below; note the wall-clock time of each step.
+
+**Before you start:** `volleyd policy` prints the table with `autopilot: on`; `volleyd config
+get` shows `autopilot.merge: auto`; the Desk's Settings › Autopilot shows the same table. Clear
+the inbox: `volleyd inbox` lists nothing open.
+
+### (a) Dispatch at night and leave
+
+- [ ] In a Claude Code session in the scratch clone (the coordinator), run `/volley-issues` with
+  every issue number and the release branch. The skill writes the wave file with `merge: auto`
+  and `branch_update: merge`, asks go / hold / cancel with an `AskUserQuestion` picker, and
+  submits with `--owner "$VOLLEY_COORDINATOR"`.
+  **Pass:** the picker is also a row in the Desk's Needs you window (kind `picker`); answer
+  `go` **in the terminal**. The Desk row flips to `answered on <machine>·terminal` and fades; the
+  session submits, prints the wave id and where to watch it, and does not start a per-event
+  loop.
+- [ ] End the coordinator session (`/exit`). **Pass:** `volleyd status <wave>` still names the
+  coordinator name as owner; the Desk shows the coordinator as reconnecting, then gone, and the
+  wave keeps running (no `claim it` needed). Note the time: this is the start of the run.
+- [ ] Go to bed. Leave the Mac awake and on the network; leave the phone where it can ring.
+
+### (b) Overnight, without you (check in the morning)
+
+- [ ] **Merges by the supervisor.** `volleyd events <wave> | grep merged_by_supervisor` has one
+  line per merged task; on GitHub each PR is squash-merged, at the head its evidence package
+  names.
+- [ ] **The flake.** The planted test went red on some PR's head: `volleyd events <wave>` has
+  `remediation_requested { kind: fix_flake }` for it, a `fix-<slug>` task ran, its PR fixed the
+  root cause (no skip, no retry wrapper, no quarantine) and merged, and the PRs that waited on it
+  merged after it.
+- [ ] **The conflict.** The two issues touching one file: the second was brought up to date by a
+  merge of the release branch (a normal push, no force-push), re-checked by CI and merged.
+- [ ] **Answers given by autopilot** are in `volleyd events <wave> | grep decision_auto_resolved`
+  (each with its policy and rationale); nothing it answered rang the phone.
+- [ ] **What rang.** The phone got at most one digest push plus one per genuine escalation. Each
+  escalation's question starts `Autopilot could not resolve this (<why>): `.
+
+### (c) The morning: digest and Needs you on the phone
+
+- [ ] **The digest.** Read the push on the phone first, then `volleyd digest <wave>` and the
+  Desk's digest card. **Pass:** the three agree: shipped (each task with its PR, merge sha and
+  `merged_by: supervisor`), handled by autopilot (decisions, the flake with its fixer and the
+  PRs it released, the conflict, retries, merges), waiting for you (the release train's
+  `stage_go` for `tag`, or `release_go`, owner-only).
+- [ ] **Needs you on the phone.** Open the Desk on the phone and the Needs you window (Dock tile).
+  **Pass:** stacked full-width cards, buttons at least thumb size; the release item shows the
+  stages with their evidence.
+- [ ] **`stage_go` from the phone.** The train stops before the owner-gated `tag` stage. Answer
+  its `stage_go` **go** from the phone. **Pass:** the row reads `answered on desk·<device> · go`;
+  `volleyd events <wave>` has its `inbox_answered` with the Desk as `where`; the `tag` stage's agent runs
+  and the tag `v0.1.0` exists on GitHub at the release branch's tip.
+- [ ] **`release_go` from the phone.** Every stage verified; `release_go` opens (one more push).
+  Answer **go** from the phone. **Pass:** `release_done`, the wave is `complete`, and a second
+  answer of the same item from `volleyd inbox answer <id> go` is refused `already answered on
+  desk·<device>`.
+
+### (d) One picker from the Desk, one from the terminal
+
+- [ ] Start a coordinator session again (same `VOLLEY_COORDINATOR`). Ask it for something that
+  ends on an `AskUserQuestion` picker (e.g. "ask me with AskUserQuestion which issue to look at
+  next"). Answer it **from the Desk's Needs you window**. **Pass:** the session's picker moves
+  to the chosen option and continues within a few seconds; the row reads `answered on desk·…`;
+  the item is gone from `volleyd inbox` and from the phone's Needs you window.
+- [ ] Ask for a second picker and answer it **in the terminal**. **Pass:** the Desk and the
+  phone flip the row to `answered on <machine>·terminal` and drop it; `volleyd inbox` lists
+  nothing open; a Desk click on the stale row (if still shown) is refused with that line.
+
+### Metrics for the tag annotation
+
+Record these in the `v0.5.0` tag's annotation (`git tag -a v0.5.0`), one per line:
+
+```
+tasks: <n> (issues <n>, fixer tasks <n>)
+merged by supervisor: <n> / <n> (merged by anyone else: <n>)
+flakes fixed: <n>
+merge conflicts updated: <n>
+decisions auto-resolved: <n>
+escalations: <n> (<kinds>)
+owner decisions answered: <n> (desk·phone <n>, desk·desktop <n>, terminal <n>, cli <n>)
+pushes received on the phone: <n>
+wall time: submit <hh:mm> → last merge <hh:mm> → release_go <hh:mm> (<h> h <m> m)
+```
+
+### Run history
+
+| Date | Release head | Tasks | Merged by supervisor | Flakes fixed | Escalations | Owner decisions (where) | Wall time | Result |
+|---|---|---|---|---|---|---|---|---|
+
+### Results
+
+```
+OWNER RESULTS (<date>, release head <sha>, scratch repository created for the run):
+  before: policy table shown (CLI, Desk); inbox empty:
+  (a) picker in terminal + Desk row flipped: / session ended, wave kept running, reconnecting → gone:
+  (b) merges by supervisor __/__: / flake fixer task merged, waiting PRs released: / conflict updated by merge, no force-push:
+      auto-resolved __, none rang: / pushes overnight __:
+  (c) digest = push = card: / phone layout: / stage_go from the phone, tag pushed: / release_go from the phone, late answer refused:
+  (d) Desk picker answered, closed everywhere: / terminal picker answered, closed everywhere:
+  Red items (issue, fix PR, step re-run):
+```
 
 ---
 

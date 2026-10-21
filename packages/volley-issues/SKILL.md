@@ -535,6 +535,8 @@ If a `claude` CLI agent dies (OOM, kill -9, segfault, SIGSEGV), MQTT keepalive e
 
 ## Release branch merge
 
+Under autopilot, when the repository has a release playbook (`.volley/release.yaml`), volleyd's release train runs these steps as playbook stages once every task is merged, and the owner answers each owner-gated `stage_go` and the final `release_go` (see **What still reaches the owner** above). Without a playbook, or with `--autopilot off`, the coordinator runs them by hand:
+
 Once every dispatched agent has reached `done` AND its PR is merged into the release branch:
 
 1. **Deploy the release branch to staging** for end-to-end testing:

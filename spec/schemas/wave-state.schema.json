@@ -54,7 +54,7 @@
             "gates": {
               "type": "array",
               "items": { "$ref": "#/$defs/taskId" },
-              "description": "Task ids that are merge-ready and await a human merge."
+              "description": "Task ids that are merge-ready and await their merge: the supervisor's merge queue under merge: auto (spec section 4.6.17), a human under merge: manual."
             },
             "spec": { "$ref": "#/$defs/spec" },
             "coordinator": { "$ref": "#/$defs/coordinator" },
