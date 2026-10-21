@@ -37,6 +37,8 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
   let waits: JournalWait;
   /** While true, every worktree add fails as in the owner's smoke. */
   let failing = true;
+  /** While true, the failure is one that can never succeed (a SpawnError marked permanent). */
+  let permanent = false;
   /** A launched session comes up (its MCP status, then the hooks) once this resolves. */
   let sessionGate: Promise<void> = Promise.resolve();
   /** While false, the launched session's MCP server never publishes its own status. */
@@ -68,6 +70,8 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     config: string,
     o: {
       failing?: boolean;
+      /** Fail with a refusal marked permanent instead (default false). */
+      permanent?: boolean;
       /** Hold launched sessions until this resolves (default: they come up at once). */
       sessionGate?: Promise<void>;
       mcpStatus?: boolean;
@@ -84,6 +88,7 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     clock = fakeClock(T0);
     failing = o.failing ?? true;
+    permanent = o.permanent ?? false;
     sessionGate = o.sessionGate ?? Promise.resolve();
     mcpStatus = o.mcpStatus ?? true;
     closing = false;
@@ -144,6 +149,14 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     if (o.found !== undefined) host.found = o.found;
     const prepare = host.prepareWorktree.bind(host);
     host.prepareWorktree = async (spec) => {
+      if (permanent) {
+        throw new SpawnError(
+          "CREDENTIALS_FAILED",
+          "cannot form an agent id from w1/T1",
+          { agent_id: "w1-t1-implementer-1" },
+          { permanent: true },
+        );
+      }
       if (failing) {
         throw new SpawnError(
           "WORKTREE_FAILED",
@@ -348,6 +361,28 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     expect(r.stderr).toBe("");
     await daemon.tick();
     expect((await event("spawn_recovered")).data).toMatchObject({ after_failures: 2, attempt: 3 });
+  });
+
+  it("a refusal that can never succeed is not retried: it fails once and is escalated", async () => {
+    await setup("spawn_retry_max: 5", { permanent: true });
+    expect((await event("spawn_failed")).data).toMatchObject({
+      code: "CREDENTIALS_FAILED",
+      attempt: 1,
+      next_retry_at: null,
+    });
+    const opened = await event("decision_opened");
+    await settle();
+    expect(opened?.data.question).toContain("can never succeed");
+    // One decision, already marked stopped: the autopilot policy escalates it, never "retry now".
+    expect(daemon.snapshot("w1")?.open_decisions).toEqual([opened?.data.decision_id]);
+    expect(daemon.record("w1")?.decisions[opened?.data.decision_id as string]).toMatchObject({
+      stopped: true,
+    });
+    expect(task().next_retry_at).toBeNull();
+    await clock.advance(2 * CONFIG_DEFAULTS.spawn_retry_max_s * 1000);
+    await daemon.tick();
+    await settle();
+    expect(of("spawn_failed")).toHaveLength(1);
   });
 
   describe("a launch whose outcome is unknown", () => {

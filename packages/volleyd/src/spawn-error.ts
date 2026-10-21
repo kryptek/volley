@@ -18,14 +18,24 @@ export type SpawnErrorCode =
   | "CLAUDE_ACCOUNT_UNAVAILABLE"
   | "CLAUDE_ACCOUNT_PREPARE_FAILED";
 
-/** A spawn (or retire) step refused. `detail` is journaled with the refusal. */
+/**
+ * A spawn (or retire) step refused. `detail` is journaled with the refusal. A `permanent` refusal
+ * can never succeed as is (an agent id that cannot be formed): volleyd does not retry it.
+ */
 export class SpawnError extends Error {
   readonly code: SpawnErrorCode;
   readonly detail: Record<string, unknown>;
-  constructor(code: SpawnErrorCode, message: string, detail: Record<string, unknown> = {}) {
+  readonly permanent: boolean;
+  constructor(
+    code: SpawnErrorCode,
+    message: string,
+    detail: Record<string, unknown> = {},
+    opts: { permanent?: boolean } = {},
+  ) {
     super(`${code}: ${message}`);
     this.name = "SpawnError";
     this.code = code;
     this.detail = detail;
+    this.permanent = opts.permanent ?? false;
   }
 }
