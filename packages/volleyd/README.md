@@ -848,8 +848,8 @@ pointers, opened_at, source, answered? }`. Kinds and their ids:
 | Kind | Id | Opened by |
 |---|---|---|
 | `decision` | `d-<wave>-<decision_id>` | every decision volleyd opens (mirrored here) |
-| `picker` | `p-<agent_id>-<tool_use_id>` | a Claude Code picker in a session (`openInboxItem`) |
-| `handoff` | `h-<agent_id>-<seq>` | a coordinator turn that ends on a question (`openInboxItem`) |
+| `picker` | `p-<agent_id>-<tool_use_id>` | a Claude Code picker in any session (the hooks' `picker_opened`) |
+| `handoff` | `h-<agent_id>-<seq>` | a coordinator turn that ends on a question (the Stop hook's `awaiting_input { question }`) |
 | `release` | `r-<wave>-<stage\|go>` | a release stage or its go/no-go (`openInboxItem`) |
 
 **volleyd is the referee.** An answer is the mailbox op `inbox_answer { id, version, answer,
@@ -866,7 +866,8 @@ through the same referee, so every answer is journaled:
   apply as for `resolve`); resolving it again with `volleyd resolve` is still a no-op, and says
   `already answered on <where>`;
 - an answer to any other kind goes to the handler its subsystem registered
-  (`daemon.inboxHandlers.set(kind, fn)`).
+  (`daemon.inboxHandlers.set(kind, fn)`), before it is recorded: a reason the handler returns
+  refuses the answer and the item stays open. Pickers and handoffs register theirs below.
 
 `owner_only` comes from `autopilot.owner_only` for decisions: autopilot never answers those, and
 the Desk notifies the owner's phone. An answered item stays retained with `answered` for
@@ -882,6 +883,66 @@ answered d-w1-d-3k9x2m7q (cli): blocker
 $ volleyd inbox answer d-w1-d-3k9x2m7q fine
 volleyd inbox answer: already answered on cli
 ```
+
+### Pickers and handoffs
+
+Two kinds of "needs a person" happen inside Claude Code sessions. The volley hooks report both
+(volley-hooks README), and volleyd turns them into items from any session, supervised agents and
+coordinator sessions alike:
+
+- **Pickers.** `AskUserQuestion`'s PreToolUse hook publishes `progress/picker_opened {
+  tool_use_id, questions }` (the tool input, verbatim): volleyd opens `p-<agent_id>-<tool_use_id>`
+  with the question, its options (labels and descriptions), `allow_other` and `multi`. The
+  PostToolUse hook publishes `picker_answered { tool_use_id, answers }`, whoever picked and
+  wherever: it closes the item with `where: { kind: "terminal", machine }` (the machine the
+  session runs on), unless the inbox answered it first, which it then confirms. A turn that ends
+  (`idle`) with the item still open (the picker was dismissed) closes it the same way.
+- **Handoffs.** A coordinator turn that ends on a question (the Stop hook's `awaiting_input {
+  question }`, from a session volleyd does not supervise; a wave agent's question is a decision)
+  opens `h-<agent_id>-<seq>`. The session's next prompt (`activity` `prompt received`, or that
+  prompt's `resumed`) closes it with `where: terminal` when nobody answered through the inbox.
+
+An inbox answer to either is carried out on the session's screen (`src/autopilot/carry.ts`),
+through its host adapter (cmux on this machine, tmux on a paired one), **before** it is accepted:
+
+- *picker*: read the screen; refuse `picker not on screen` unless it shows that same picker (the
+  question's first line and every option label, in order); then press the keys that select the
+  answer from the highlighted row (`src/autopilot/picker.ts`): `Down`/`Up` × k then `Enter`; for
+  free text, the Other row and the text typed straight in, then `Enter`; for multi-select, `Space`
+  on each row to toggle, the `Submit` row and `Enter`, then `Enter` again on the review screen
+  that opens. A multi-select answer is the labels joined with `, `, as Claude Code reports them.
+- *handoff*: read the screen; refuse `prompt not idle` unless it shows the empty input box with no
+  turn running, and `the question is not on screen` unless the question's last line shows above
+  that prompt (compared on letters and digits, so wrapping and rendered markdown do not matter: an
+  idle prompt that is another session's is not typed into); then type the reply and press `Enter`. The input box must be empty: when Claude
+  Code shows placeholder or suggestion text after `❯`, the answer is refused `prompt not idle`
+  (fail safe; answer in the terminal).
+
+`Up`, `Down`, `Space` and the typed text pass the fence only with a `PickerToken` /
+`HandoffToken` minted for exactly that item version and answer (the text is typed once, one line,
+never starting with `/` or `!`). A refused answer leaves the item open, still answerable in the
+terminal, whose hook event then closes it. A picker with several questions, and a session whose
+workspace volleyd does not know, are answered in their terminal. A session volleyd does not
+supervise is typed into only in its own workspace: one that is a supervised agent's, or that
+another live session's registry entry names, is refused. Neither the registry nor the hooks say
+which machine a session volleyd does not supervise runs on, so such a session is labelled and
+carried on this machine: a coordinator on a paired machine shows this machine's name, and its
+workspace ref is read on the local cmux, where the screen checks above refuse to type into a
+session that is not showing its picker or question.
+
+The carry runs on the daemon's serial queue, like every other answer: reading the screen, pressing
+the keys and recording the answer are one step, so a terminal pick (`picker_answered`) or the next
+prompt can only confirm it, never race it. The cost is that a slow carry (a multi-select on a paired
+machine, one ssh round trip per key) holds the queue for its duration, bounded by the screen-read
+timeout and `picker_review_reads`.
+
+**What the screen looks like** (the spike against Claude Code 2.1, driven by hand in tmux;
+`scripts/spike-picker.ts` is the re-runnable cmux version; the captures are
+`test/fixtures/screens/picker-*.txt`): the highlighted row starts with `❯`, the
+others with a space; the prompt echoed above the picker starts with `❯` too, so only rows below the
+picker's header chip count. `Down` does not wrap. Keys sent back to back all land. Coordinators ask
+their go/no-go with `AskUserQuestion` (options `go`, `hold`, `cancel`: the volley-issues skill), so
+a gate is a picker item with buttons.
 
 ---
 
@@ -2710,7 +2771,8 @@ ALLOW (program by bare name only — never a path):
     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
       with the LaunchToken of the `.volley/launch.sh` volleyd sealed in exactly <dir>
     send --workspace <ref> <text>   text: TYPED_TEXT only
-    send-key --workspace <ref> Enter|Escape · read-screen --workspace <ref> [--lines <n>]
+    send-key --workspace <ref> Enter|Escape | Up|Down|Space (PICKER below) ·
+      read-screen --workspace <ref> [--lines <n>]
     list-workspaces · ping
   claude — volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript), which the
     launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS), including
@@ -2772,6 +2834,15 @@ TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal
     `/model <id>`    with the ModelSwitchToken naming exactly <id> (`mintModelSwitchToken`,
                      minted when an approved model_switch decision is acted on); <id> is a
                      MODEL_ID, the wave-file schema's `model` pattern
+    an inbox answer  with the PickerToken (a picker's Other text) or HandoffToken (a
+                     coordinator handoff's reply) carrying exactly that text, typed once per
+                     token; minted only for one line with no control character that does not
+                     start with `/` or `!` (never a slash command or bash-mode line)
+
+PICKER (needs-you inbox pickers, SPEC §4.6.18): `cmux send-key … Up|Down|Space` and
+  `tmux send-keys -t <t> Up|Down|Space` only with a PickerToken (`mintPickerToken`, minted for
+  one item version after the screen showed its picker) naming that key; `Enter` and `Escape`
+  need no token. No other key name is ever sent.
 
 SSH (remote hosts, src/hosts/ssh-tmux.ts) — three forms only:
   ssh -T [-o <Opt>=<v>]… <target> bash -s   with a fenced RemoteScript (FenceOptions.remote):
@@ -2794,7 +2865,7 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     the LaunchToken sealed for <dir>) | new-session -d -s volley-signin-<acct> -c <dir>
     'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
     `sealRemoteSigninScript`) | capture-pane | has-session |
-    send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> |
+    send-keys -t <t> Enter|Escape (Up|Down|Space: PICKER) | send-keys -t <t> -l -- <TYPED_TEXT> |
     show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
     PATH, from printenv, then the server's own dirs) —
     kill-session -t volley-signin-<acct> (no consent: a sign-in session holds no agent's

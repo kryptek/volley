@@ -49,9 +49,9 @@ describe("scripts/install.sh", () => {
     expect(merged.hooks.Stop?.[0]?.hooks[0]?.command).toBe("say done");
     const stop = merged.hooks.Stop?.[1]?.hooks[0]?.command;
     expect(stop).toBe(`VOLLEY_HOOKS_COORDINATOR=1 bun run "${PACKAGE_ROOT}/src/hooks/stop.ts"`);
-    expect(merged.hooks.PostToolUse?.[0]?.matcher).toBe("");
-    // PreToolUse: the Bash lease hook, then the activity hook on every tool.
-    expect(merged.hooks.PreToolUse?.map((g) => g.matcher)).toEqual(["Bash", ""]);
+    expect(merged.hooks.PostToolUse?.map((g) => g.matcher)).toEqual(["", "AskUserQuestion"]);
+    // PreToolUse: the Bash lease hook, the activity hook on every tool, then the picker hook.
+    expect(merged.hooks.PreToolUse?.map((g) => g.matcher)).toEqual(["Bash", "", "AskUserQuestion"]);
     expect(merged.hooks.PreToolUse?.[1]?.hooks[0]?.command).toBe(
       `VOLLEY_HOOKS_COORDINATOR=1 bun run "${PACKAGE_ROOT}/src/hooks/pre-tool-use.ts"`,
     );

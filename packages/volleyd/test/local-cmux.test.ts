@@ -3,7 +3,14 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { writeCmuxPassword } from "volley-cli/setup/cmux";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
-import { FenceError, mintConsentToken, mintModelSwitchToken, sealLaunchScript } from "../src/fence";
+import {
+  FenceError,
+  mintConsentToken,
+  mintHandoffToken,
+  mintModelSwitchToken,
+  mintPickerToken,
+  sealLaunchScript,
+} from "../src/fence";
 import { LocalCmuxHost, parseWorkspaceList, parseWorkspaceRef } from "../src/hosts/local-cmux";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
 import type { SpawnError } from "../src/spawn-error";
@@ -62,6 +69,22 @@ describe("LocalCmuxHost", () => {
     expect(fake.argvs()).toEqual([
       ["cmux", "send-key", "--workspace", "workspace:3", "Enter"],
       ["cmux", "send", "--workspace", "workspace:3", "/model claude-sonnet-5-5"],
+    ]);
+  });
+
+  it("picker keys and a handoff reply: cmux send-key Up|Down|Space and send, each with its token", async () => {
+    const fake = fakeExec();
+    const host = new LocalCmuxHost(fake.exec);
+    await expect(host.sendKeys("workspace:3", "Down")).rejects.toThrow(FenceError);
+    const picker = mintPickerToken({ item_id: "p-a1-t1", version: 1, keys: ["Down", "Space"] });
+    await host.sendKeys("workspace:3", "Down", { picker });
+    await host.sendKeys("workspace:3", "Space", { picker });
+    const handoff = mintHandoffToken({ item_id: "h-a1-3", version: 1, text: "go" });
+    await host.sendText("workspace:3", "go", { handoff });
+    expect(fake.argvs()).toEqual([
+      ["cmux", "send-key", "--workspace", "workspace:3", "Down"],
+      ["cmux", "send-key", "--workspace", "workspace:3", "Space"],
+      ["cmux", "send", "--workspace", "workspace:3", "go"],
     ]);
   });
 

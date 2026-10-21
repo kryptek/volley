@@ -50,9 +50,10 @@ VOLLEY_HOOKS_DIR=/path/to/volley/packages/volley-hooks \
 
 The template's commands are `bun run "$VOLLEY_HOOKS_DIR/src/hooks/<hook>.ts"`, so either export
 `VOLLEY_HOOKS_DIR` for the session or substitute the path into a copy of the template. CI checks that
-every command in the template resolves to a file (`bun run check:template`). `PreToolUse` has two
-entries: the lease hook (matcher `Bash`) and the work-log hook `pre-tool-use.ts` (matcher `""`,
-every tool); `PostToolUse` runs on every tool.
+every command in the template resolves to a file (`bun run check:template`). `PreToolUse` has three
+entries: the lease hook (matcher `Bash`), the work-log hook `pre-tool-use.ts` (matcher `""`,
+every tool) and the picker hook `picker-pre.ts` (matcher `AskUserQuestion`); `PostToolUse` runs
+on every tool, and `picker-post.ts` on `AskUserQuestion` besides.
 
 **Coordinator sessions** (your own interactive sessions):
 
@@ -146,8 +147,8 @@ runs unleased on an auth error.
 ## What each hook publishes
 
 All `progress` events carry `source: "harness-hook"`, a per-agent monotonic `seq` and the
-`hook_event` that fired (SPEC §4.3). Every hook except the two `PreToolUse` hooks ends with
-`progress/heartbeat` (`PostToolUse` heartbeats after every tool call anyway).
+`hook_event` that fired (SPEC §4.3). Every hook except the `PreToolUse` hooks and the picker
+hooks ends with `progress/heartbeat` (`PostToolUse` heartbeats after every tool call anyway).
 
 | Hook | Publishes | Injects |
 |---|---|---|
@@ -160,6 +161,8 @@ All `progress` events carry `source: "harness-hook"`, a per-agent monotonic `seq
 | `PreCompact` | — (copies STEERING.md to `.volley/steering.snapshot.md`) | — |
 | `PreToolUse` (all tools) | `activity` tick with a one-line summary of the call and `tool_calls`, at most once per 5 s per session; the newest line in a window is published at the next slot ([work log](#work-log-activity-ticks)) | — |
 | `PreToolUse` (`Bash`) | — (rewrites the command: see [Heavy-operation leases](#heavy-operation-leases)) | `command queued for a <pool> lease` when it wraps |
+| `PreToolUse` (`AskUserQuestion`) | `picker_opened { tool_use_id, questions }`, the tool input's questions verbatim (a coordinator's also `session_url` / `workspace`): volleyd opens a needs-you inbox item for the picker, answerable from the Desk (volleyd selects the answer on the session's screen by keystroke) | — |
+| `PostToolUse` (`AskUserQuestion`) | `picker_answered { tool_use_id, answers }` (the tool response's question → answer map), whoever picked and wherever: volleyd closes the item, `where: terminal` unless it was answered through the inbox | — |
 
 Hooks never publish `steering_applied` or `steering_acked`. **A hook ack is not compliance**: the
 `ack` on the sender's mailbox means the message reached the session. The injected text asks the

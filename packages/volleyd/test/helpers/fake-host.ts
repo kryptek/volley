@@ -106,10 +106,15 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
       const s = host.screens.length > 1 ? host.screens.shift() : host.screens[0];
       return s ?? null;
     },
-    async sendKeys(workspace, key) {
+    async sendKeys(workspace, key, tokens = {}) {
+      // The real fence checks picker keys (Up/Down/Space need the item's token).
+      if (key !== "Enter" && key !== "Escape")
+        assertAllowed(["cmux", "send-key", "--workspace", workspace, key], tokens);
       host.keys.push({ workspace, key });
     },
-    async sendText(workspace, text) {
+    async sendText(workspace, text, tokens = {}) {
+      if (tokens.picker !== undefined || tokens.handoff !== undefined)
+        assertAllowed(["cmux", "send", "--workspace", workspace, text], tokens);
       host.texts.push({ workspace, text });
     },
     async close(workspace: string, _consent: ConsentToken) {

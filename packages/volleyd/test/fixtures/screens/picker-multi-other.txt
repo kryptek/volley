@@ -1,0 +1,19 @@
+❯ Use the AskUserQuestion tool exactly once with question "Which toppings do you want?" header "Toppings", multiSelect
+  true, options Cheese (melty), Olives (salty), Peppers (hot). Then reply with only the answer.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Toppings  ✔ Submit  →
+
+Which toppings do you want?
+
+  1. [✔] Cheese
+         Melty
+  2. [ ] Olives
+         Salty
+  3. [ ] Peppers
+         Hot
+❯ 4. [✔] anchovies
+     Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel

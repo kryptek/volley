@@ -265,35 +265,49 @@ describe("the needs-you inbox in the daemon (SPEC §4.6.18)", () => {
 
   it("other kinds: openInboxItem + a registered handler; journaled in _system without a wave", async () => {
     s = await makeSupervisedEnv();
-    const seen: { answer: string; by: string }[] = [];
-    s.daemon.inboxHandlers.set("picker", async (item) => {
-      seen.push({ answer: item.answered?.answer ?? "", by: item.answered?.by ?? "" });
+    const seen: { answer: string; by: string; open: boolean }[] = [];
+    let refuse: string | null = "not ready yet";
+    s.daemon.inboxHandlers.set("release", async (item, req) => {
+      seen.push({ answer: req.answer, by: req.by, open: item.answered === undefined });
+      return refuse;
     });
     const item = await s.daemon.openInboxItem({
-      id: "p-coord-1-toolu_01Ab",
-      kind: "picker",
-      owner_only: false,
+      id: "r-w9-go",
+      kind: "release",
+      owner_only: true,
       agent_id: "coord-1",
-      title: "Pick a backend",
-      question: "Which backend?",
-      options: [{ label: "SQLite" }, { label: "Redis" }],
+      title: "Release go/no-go",
+      question: "Ship w9?",
+      options: [{ label: "go" }, { label: "hold" }],
       pointers: {},
-      source: { tool_use_id: "toolu_01Ab" },
+      source: { stage: "go" },
     });
     expect(item.version).toBe(1);
     expect((await retainedItem(item.id))?.type).toBe("inbox_item");
-    const res = await (await control()).request("inbox_answer", {
-      id: item.id,
-      version: 1,
-      answer: "Redis",
-      where: phone,
-      by: "owner-desk",
-    });
+    const answer = () =>
+      control().then((c) =>
+        c.request("inbox_answer", {
+          id: item.id,
+          version: 1,
+          answer: "go",
+          where: phone,
+          by: "owner-desk",
+        }),
+      );
+    // The handler runs before the answer is recorded: a reason it returns refuses it.
+    expect(await answer()).toMatchObject({ ok: false, error: "not ready yet" });
+    expect(s.daemon.inboxItem(item.id)?.answered).toBeUndefined();
+    refuse = null;
+    const res = await answer();
     expect(res.error).toBeUndefined();
-    expect(seen).toEqual([{ answer: "Redis", by: "owner-desk" }]);
+    expect(s.daemon.inboxItem(item.id)?.answered?.answer).toBe("go");
+    expect(seen).toEqual([
+      { answer: "go", by: "owner-desk", open: true },
+      { answer: "go", by: "owner-desk", open: true },
+    ]);
     const sys = systemJournal(s.env).map((e) => e.type);
     expect(sys).toContain("inbox_opened");
-    expect(sys).toContain("inbox_answered");
+    expect(sys.filter((t) => t === "inbox_answered")).toHaveLength(1);
   });
 
   it("refuses an unknown item and a bad where", async () => {
