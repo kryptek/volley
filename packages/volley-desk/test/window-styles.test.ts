@@ -41,3 +41,26 @@ describe("Border glow draws on the border ring only", () => {
     expect(glow).toMatch(/mask-composite: intersect, exclude, add;/);
   });
 });
+
+// #327: the wave header's autopilot chip ellipsized mid-word (`4 auto · 1 escalat…`).
+describe("the autopilot chip never truncates mid-word", () => {
+  const desk = readFileSync(path.resolve(__dirname, "../src/styles/desk.css"), "utf8");
+  const deskRule = (selector: string) => {
+    const at = desk.indexOf(`${selector} {`);
+    expect(at, `${selector} is styled`).toBeGreaterThanOrEqual(0);
+    return desk.slice(at, desk.indexOf("}\n", at));
+  };
+
+  it("lifts the title-bar chip width cap", () => {
+    expect(deskRule(".win-bar .chip--autopilot")).toMatch(/max-width: none;/);
+  });
+
+  it("shows the full sentence, and only the tokens in a compact window", () => {
+    expect(desk).toMatch(
+      /\.chip--autopilot \.ap-short,\n\.win--compact \.win-bar \.chip--autopilot \.ap-full \{\n {2}display: none;/,
+    );
+    expect(deskRule(".win--compact .win-bar .chip--autopilot .ap-short")).toMatch(
+      /display: inline;/,
+    );
+  });
+});

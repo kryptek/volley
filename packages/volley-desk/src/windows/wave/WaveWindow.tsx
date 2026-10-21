@@ -189,6 +189,11 @@ export function autopilotChip(a: NonNullable<WaveStatePayload["autopilot"]>): st
     : "autopilot off";
 }
 
+/** The chip in a compact window: `⚙ 4 · ↑ 1` (auto-resolved, escalated), or `⚙ off`. */
+export function autopilotTokens(a: NonNullable<WaveStatePayload["autopilot"]>): string {
+  return a.enabled ? `⚙ ${a.auto_resolved} · ↑ ${a.escalated}` : "⚙ off";
+}
+
 /** The release train's stages as plain rows (the inbox's release item draws the Stepper). */
 function TrainRows({ release }: { release: WaveRelease }) {
   return (
@@ -234,15 +239,26 @@ export function WaveWindow(p: WaveWindowProps) {
       <Clawd waiting={waiting} />
       <span className="t-name">{id}</span>
       {s && (
-        <span className={`chip${mine ? " chip--mine" : ""}`}>
+        <span
+          className={`chip${mine ? " chip--mine" : ""}`}
+          title={`owner: ${s.owner ?? "none"}`}
+        >
           {mine ? "★ yours" : (s.owner ?? "no owner")}
         </span>
       )}
       <RepoChip github={s?.github} />
       {ended && <span className="chip chip--ended">{ended}</span>}
       {s?.autopilot && (
-        <span className={`chip chip--autopilot${s.autopilot.enabled ? "" : " chip--off"}`}>
-          {autopilotChip(s.autopilot)}
+        // Never ellipsized: the full sentence, or its tokens in a compact window (desk.css).
+        <span
+          className={`chip chip--autopilot${s.autopilot.enabled ? "" : " chip--off"}`}
+          title={autopilotChip(s.autopilot)}
+          aria-label={autopilotChip(s.autopilot)}
+        >
+          <span className="ap-full">{autopilotChip(s.autopilot)}</span>
+          <span className="ap-short" aria-hidden="true">
+            {autopilotTokens(s.autopilot)}
+          </span>
         </span>
       )}
       {!ended && ci.length > 0 && (
