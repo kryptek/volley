@@ -96,7 +96,8 @@
             "release_done",
             "inbox_opened",
             "inbox_answered",
-            "remediation_requested"
+            "remediation_requested",
+            "remediation_closed"
           ]
         },
         "payload": {
@@ -383,6 +384,76 @@
                       "role": { "type": "string" },
                       "release_ci": { "enum": ["green", "red", "running", "none", "unknown"] }
                     }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": { "const": "task_queued" },
+              "payload": {
+                "properties": { "data": { "required": ["synthetic"] } },
+                "required": ["data"]
+              }
+            },
+            "required": ["type", "payload"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "task": {
+                    "type": "string",
+                    "pattern": "^fix-[a-z0-9-]{1,50}$",
+                    "description": "A flake's fixer: fix-<slug of its test> (spec section 4.6.16)."
+                  },
+                  "data": {
+                    "type": "object",
+                    "required": ["issue", "synthetic", "title", "remediation"],
+                    "description": "A synthetic task (spec section 4.6.16): added by the supervisor, never by a wave file; issue 0, the wave's pipeline, no after.",
+                    "properties": {
+                      "issue": { "const": 0 },
+                      "synthetic": { "const": true },
+                      "title": { "type": "string", "minLength": 1 },
+                      "remediation": { "$ref": "wave-state.schema.json#/$defs/fixerRemediation" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "remediation_closed" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["kind", "test", "task", "outcome", "released"],
+                    "description": "A flake's fixer settled (spec section 4.6.16): landed (done: merged) releases the tasks still parked on its test, which update from the release branch and are verified again; failed (cancelled, blocked, escalated) puts each blocked task's red head back to the owner, escalated unattended_safety.",
+                    "properties": {
+                      "kind": { "enum": ["fix_flake"] },
+                      "test": { "type": "string", "minLength": 1 },
+                      "task": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+                      "outcome": { "enum": ["landed", "failed"] },
+                      "why": { "type": "string", "minLength": 1 },
+                      "released": {
+                        "type": "array",
+                        "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" }
+                      }
+                    },
+                    "if": { "properties": { "outcome": { "const": "failed" } } },
+                    "then": { "required": ["why"], "properties": { "released": { "maxItems": 0 } } }
                   }
                 }
               }

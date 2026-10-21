@@ -1,0 +1,20 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T10:44:03.000Z",
+  "channel": "_waves/events",
+  "type": "remediation_closed",
+  "payload": {
+    "wave": "w1",
+    "seq": 141,
+    "at": "2026-10-20T10:44:03.000Z",
+    "task": "fix-test-clock-test-ts-sleep-resolves-on-abo",
+    "data": {
+      "kind": "fix_flake",
+      "test": "test/clock.test.ts > sleep > resolves on abort",
+      "task": "fix-test-clock-test-ts-sleep-resolves-on-abo",
+      "outcome": "failed",
+      "released": []
+    }
+  }
+}

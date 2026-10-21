@@ -350,3 +350,81 @@ describe("a parked flake's remediation", () => {
     expect(p.remediation).toBeUndefined();
   });
 });
+
+describe("the flake's fix landed (SPEC §4.6.16: the fixer task merged)", () => {
+  const H2 = sha(0x4002);
+  const FIXER = "fix-test-clock-test-ts-sleep-resolves-on-abort";
+
+  /** The fixer merged: volleyd journals remediation_closed releasing T1, then tells the pipeline. */
+  async function landed() {
+    await h.journal({
+      type: "remediation_closed",
+      task: FIXER,
+      data: { kind: "fix_flake", test: FLAKE, outcome: "landed", released: ["T1"] },
+    });
+    await h.driver.handle("T1", { kind: "fix_landed", test: FLAKE });
+    await h.driver.settled();
+  }
+
+  it("a parked flake enters the branch-update step at the red head, then re-verifies and continues to the reviews", async () => {
+    h = pipelineHarness();
+    await redHead();
+    await h.resolve(ciFailed()?.decision_id as string, "fix flake");
+    await landed();
+    const entered = events("stage_entered").at(-1);
+    expect(entered?.data).toMatchObject({
+      stage: "fixup",
+      roles: ["rebase"],
+      rebase: true,
+      fix_landed: FLAKE,
+    });
+    const rebase = h.spawns.at(-1);
+    expect(rebase?.role).toBe("rebase");
+    expect(rebase?.start).toEqual({ ref: H1, detach: false });
+    // No longer waiting on a fixer.
+    expect(h.task()?.remediation).toBeUndefined();
+    expect(h.task()?.why_waiting).toBeUndefined();
+    // The updated head is verified (CI on it) and the pipeline goes on where the flake stopped it.
+    await h.finish("rebase", { head: H2, ci: "green" });
+    expect(h.run("rebase")?.accepted).toBe(true);
+    expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
+    expect(h.spawns.find((s) => s.role === "spec_reviewer")?.start).toEqual({
+      ref: H2,
+      detach: true,
+    });
+  });
+
+  it("an open ci_failed resolved `fix landed`: nothing re-verifies; the fix_landed step updates the branch", async () => {
+    h = pipelineHarness();
+    await redHead();
+    const d = ciFailed();
+    const lists = h.calls.length;
+    await h.journal({
+      type: "remediation_closed",
+      task: FIXER,
+      data: { kind: "fix_flake", test: FLAKE, outcome: "landed", released: ["T1"] },
+    });
+    // While the decision is open the task stays parked.
+    await h.driver.handle("T1", { kind: "fix_landed", test: FLAKE });
+    expect(events("stage_entered").some((e) => e.data.rebase === true)).toBe(false);
+    await h.resolve(d?.decision_id as string, "fix landed", "volleyd");
+    await h.driver.handle("T1", { kind: "fix_landed", test: FLAKE });
+    await h.driver.settled();
+    expect(
+      h.calls
+        .slice(lists)
+        .some((c) => c[1] === "run" && c[2] === "list" && !c.includes("--branch")),
+    ).toBe(false);
+    expect(events("stage_entered").at(-1)?.data).toMatchObject({ rebase: true, fix_landed: FLAKE });
+  });
+
+  it("a fix for another test, or a remediation not released, changes nothing", async () => {
+    h = pipelineHarness();
+    await redHead();
+    await h.resolve(ciFailed()?.decision_id as string, "fix flake");
+    await h.driver.handle("T1", { kind: "fix_landed", test: "other.test.ts > x" });
+    await h.driver.settled();
+    expect(events("stage_entered").some((e) => e.data.rebase === true)).toBe(false);
+    expect(h.task()?.remediation).toMatchObject({ test: FLAKE });
+  });
+});

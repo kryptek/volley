@@ -738,7 +738,7 @@ autopilot: on
     wave_complete/acknowledge: the end of a wave needs no answer; the owner reads its outcome
   ci_failed, agent_blocked · pipeline.on === "ci_failed" or "agent_blocked_ci", and classification: own_change (unclassified ci_failed: infra === false) · fixup · ci_fixup_max per <task> · max 2
     ci_failed/fixup-own-change: a fixup agent with the CI result as its directive is what a person would do
-  ci_failed, agent_blocked · pipeline.on === "ci_failed" or "agent_blocked_ci", and classification: flake · fix flake · no budget
+  ci_failed, agent_blocked · pipeline.on === "ci_failed" or "agent_blocked_ci", and classification: flake (no fixer can take it: escalate) · fix flake · fix_flake_max per <wave> (fixers) · max 3
     ci_failed/fix-flake: a test the PR does not touch gets a dedicated fixer, never a re-run or a wider scope
   ci_failed · classification: infra_incident (asked only once autopilot.incident_wait_max_s passed) · escalate budget_exhausted · no budget
     ci_failed/infra-incident: the incident outlasted the wait: the owner decides; volleyd never re-runs CI
@@ -771,6 +771,47 @@ or CI while its PR head is red gets the same treatment: its `agent_blocked` deci
 `pipeline.on: agent_blocked_ci`, carries the classification and offers `fixup` (the blocked agent
 is stopped and a CI fixup starts at the red head) or `fix flake`, which autopilot answers like a
 `ci_failed`. Nothing re-runs CI, for any classification: the fence denies `gh run rerun`.
+
+### The fixer task
+
+A flake gets a dedicated fixer: a **synthetic task** volleyd adds to the wave itself
+(`src/autopilot/remediation.ts`, pure). On `remediation_requested { kind: fix_flake }` (or a
+`fix flake` answer) it journals `task_queued { synthetic: true, issue: 0, title: "Fix flaky test
+<test>", remediation: { kind, test, test_file, run_urls, for } }` for task `fix-<slug>` (the test
+lowercased, other characters one dash, at most 40 of them, `-2` when taken). The fixer has no
+`after`, runs the wave's pipeline, is scheduled first (`criticalPaths` gives it one more than the
+longest chain) and is placed and admitted like any task. It never appears in the wave file's
+`spec`, and a plan version keeps it.
+
+- **Dedupe and budget.** One fixer per distinct test per wave: a second request for the same
+  test joins its `for`. At most `autopilot.fix_flake_max` (default 3, 0..20) fixers per wave;
+  past it, the blocked task's `ci_failed` is escalated `budget_exhausted` (`{ key:
+  "fix_flake_max", used, max }`), and autopilot does not answer it `fix flake`. A request for a
+  test whose fixer already closed, or from the fixer's own head, is the owner's
+  (`unattended_safety`).
+- **The brief.** Its agents get `ISSUE.md` from the root-cause brief
+  (`src/autopilot/flake-brief.ts`: the test, its file, the failing runs, the blocked tasks)
+  instead of `gh issue view`; the implementer's brief is `briefs/flake-fixer.md.tmpl`:
+  reproduce it locally (alone, in the suite, under load), look for shared state, timing, ports,
+  the clock, temp dirs and retained broker state, fix the cause test-first, never re-run CI,
+  never `skip`, `.only`, retry wrappers or quarantine (if that is the only fix: `blocked`, the
+  owner decides). It branches from the release branch and opens a PR against it; reviews,
+  fixup and the gate run as usual.
+- **The unblock cascade.** When the fixer reaches `done` (merged by the merge queue or by
+  hand), volleyd journals `remediation_closed { kind, test, task, outcome: landed, released }`
+  for the tasks still parked on that test, resolves each one's open red-head decision `fix
+  landed`, and each enters the branch-update step (`stage_entered { stage: fixup, rebase: true,
+  fix_landed: <test> }`, under the wave's `branch_update`) at its red head. Its new head is
+  verified (CI) and the pipeline goes on from where the flake stopped it (the reviews, or the
+  gate).
+- **A fixer that fails.** Cancelled, `blocked`, or one of its decisions escalated:
+  `remediation_closed { outcome: failed, why, released: [] }`, and each blocked task's red head
+  goes back to the owner once, escalated `unattended_safety`: its open decision is escalated, or
+  an answered one is asked again (without `fix flake`) with the fixer's PR and agents.
+
+`volleyd status` shows a fixer as `fix-<slug>  <stage>  fixer for T3, T7 (flake: <test>)`; the
+wave state carries `tasks[].synthetic: true` and `tasks[].remediation` (with `test_file`,
+`run_urls`, `for` and, once closed, `outcome`).
 
 ### The release train
 

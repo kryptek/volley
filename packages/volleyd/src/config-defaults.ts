@@ -75,6 +75,7 @@ export const CONFIG_DEFAULTS: Tunables = {
     delete_branch: false,
     reconnect_grace_s: 900,
     incident_wait_max_s: 14_400,
+    fix_flake_max: 3,
   },
 };
 

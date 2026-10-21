@@ -558,6 +558,13 @@
               "maximum": 86400,
               "default": 14400,
               "description": "How long a red head classified as an infra incident (an infra-shaped run, or GitHub's status page reporting an Actions or API incident) is held in CI and re-checked every poll before the supervisor opens its ci_failed decision, escalated budget_exhausted."
+            },
+            "fix_flake_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 20,
+              "default": 3,
+              "description": "Flake fixers (synthetic fix-<slug> tasks, one per distinct failing test) the supervisor adds to one wave; a fix_flake request past it escalates the blocked task's ci_failed decision budget_exhausted."
             }
           }
         }

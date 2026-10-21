@@ -144,6 +144,22 @@
     }
   ],
   "$defs": {
+    "fixerRemediation": {
+      "type": "object",
+      "required": ["kind", "test", "test_file", "run_urls", "for"],
+      "description": "A flake fixer's remediation (spec section 4.6.16), as its task_queued carries it: the failing test, its file, the runs it failed in and the tasks it blocks.",
+      "properties": {
+        "kind": { "enum": ["fix_flake"] },
+        "test": { "type": "string", "minLength": 1 },
+        "test_file": { "type": ["string", "null"] },
+        "run_urls": { "type": "array", "items": { "type": "string" } },
+        "for": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" }
+        }
+      }
+    },
     "agentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
     "waveId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
     "decisionId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
@@ -169,9 +185,22 @@
     "task": {
       "type": "object",
       "required": ["id", "issue", "stage", "agents"],
+      "if": { "required": ["synthetic"] },
+      "then": {
+        "required": ["remediation"],
+        "properties": {
+          "issue": { "const": 0 },
+          "remediation": { "required": ["test_file", "run_urls", "for"] }
+        }
+      },
+      "else": { "properties": { "issue": { "minimum": 1 } } },
       "properties": {
         "id": { "$ref": "#/$defs/taskId" },
-        "issue": { "type": "integer", "minimum": 1 },
+        "issue": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The task's GitHub issue; 0 only for a synthetic task (spec section 4.6.16), which has none."
+        },
         "stage": { "$ref": "#/$defs/stage" },
         "agents": {
           "type": "object",
@@ -267,12 +296,23 @@
           "type": "object",
           "required": ["kind", "test", "since"],
           "additionalProperties": false,
-          "description": "A remediation requested for the task's red head that still holds (spec section 4.6.16): fix_flake, a failing test the PR does not touch awaiting its dedicated fixer. Gone once the head is verified, a new step starts, or the task is cancelled.",
+          "description": "A remediation requested for the task's red head that still holds (spec section 4.6.16): fix_flake, a failing test the PR does not touch awaiting its dedicated fixer. Gone once the head is verified, a new step starts, its fixer's fix landed, or the task is cancelled. On a synthetic task (synthetic: true) it is the fixer's own: test_file, run_urls, for (the tasks it blocks) and, once closed, outcome.",
           "properties": {
             "kind": { "enum": ["fix_flake"] },
             "test": { "type": "string", "minLength": 1 },
-            "since": { "type": "string", "format": "date-time" }
+            "since": { "type": "string", "format": "date-time" },
+            "test_file": { "type": ["string", "null"] },
+            "run_urls": { "type": "array", "items": { "type": "string" } },
+            "for": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" }
+            },
+            "outcome": { "enum": ["landed", "failed"] }
           }
+        },
+        "synthetic": {
+          "const": true,
+          "description": "A task the supervisor added itself, never from the wave file (spec section 4.6.16): a flake's fixer, fix-<slug>, issue 0, with its remediation. Journal-only: absent from spec."
         },
         "evidence_path": { "type": "string", "minLength": 1 },
         "last_error": {

@@ -45,13 +45,17 @@ export interface BriefVars {
 
 /**
  * `<role>.md.tmpl`, or `<role>-<variant>.md.tmpl` (the rebase role's `merge` brief, under
- * `branch_update: merge`).
+ * `branch_update: merge`); the implementer's `flake` variant is `flake-fixer.md.tmpl` (a flake's
+ * fixer, SPEC §4.6.16).
  */
-export function loadTemplate(role: Role, dir: string = BRIEFS_DIR, variant?: "merge"): string {
-  return readFileSync(
-    join(dir, `${role}${variant !== undefined ? `-${variant}` : ""}.md.tmpl`),
-    "utf-8",
-  );
+export function loadTemplate(
+  role: Role,
+  dir: string = BRIEFS_DIR,
+  variant?: "merge" | "flake",
+): string {
+  const name =
+    variant === "flake" ? "flake-fixer" : `${role}${variant !== undefined ? `-${variant}` : ""}`;
+  return readFileSync(join(dir, `${name}.md.tmpl`), "utf-8");
 }
 
 /**

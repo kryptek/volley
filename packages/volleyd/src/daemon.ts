@@ -61,7 +61,7 @@ import {
   machineReasons,
   summaryPayload,
 } from "./admission";
-import { budgetUsed } from "./autopilot/budgets";
+import { budgetUsed, markerOf } from "./autopilot/budgets";
 import { type GithubStatus, githubStatusCache } from "./autopilot/github-status";
 import {
   INBOX_CHANNEL,
@@ -97,6 +97,14 @@ import {
   evaluate,
   renderPolicyTable,
 } from "./autopilot/policy";
+import {
+  type FixRequest,
+  type FixerVerdict,
+  fixerFor,
+  fixers,
+  releasedBy,
+  requestOf,
+} from "./autopilot/remediation";
 import { authFields } from "./broker-auth";
 import { accountMoves, moveAgentAccount, moveRespawn } from "./claude/move";
 import { ClaudeAccountError, type SelectedAccount, claudeRoot } from "./claude/profiles";
@@ -290,10 +298,13 @@ import { SYSTEM_WAVE } from "./types";
 import { WaveFileError, parseWaveFile } from "./wave-file";
 
 import {
+  FIX_FLAKE,
+  FIX_LANDED,
   PipelineDriver,
   SUPERSEDED_BY_MERGE,
   type SpawnStart,
   blockedReason,
+  isAnswer,
   releaseLockOn,
   roleSpawnHold,
 } from "./pipeline";
@@ -2340,6 +2351,7 @@ export class Daemon {
     await this.monitor();
     await this.watchTerminals();
     for (const wave of this.waves.keys()) {
+      await this.settleFixers(wave);
       await this.completeIfSettled(wave);
       await this.releaseGoIfVerified(wave);
     }
@@ -4998,6 +5010,217 @@ export class Daemon {
   // Pipeline (T6): every role's `done` is verified before the next stage; volleyd merges only under `merge: auto` (SPEC §4.6.17).
   // -------------------------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------------------------
+  // Self-healing CI (2), SPEC §4.6.16: a flake's fixer is a synthetic task of the wave; its merge
+  // releases every task it blocked, and its failure goes back to the owner once.
+  // -------------------------------------------------------------------------------------------
+
+  /** An append that asks for, joins, lands or fails a flake's fixer: handled on the queue. */
+  private noteRemediation(wave: WaveId, e: JournalEvent): void {
+    const rec = this.waves.get(wave)?.record;
+    if (rec === undefined || e.task === undefined) return;
+    if (e.type === "remediation_requested") {
+      const req = requestOf(e);
+      if (req !== null) void this.enqueue(() => this.requestFixer(wave, req));
+      return;
+    }
+    if (e.type === "decision_resolved" && isAnswer(String(e.data.answer ?? ""), FIX_FLAKE)) {
+      // The owner's `fix flake` (or autopilot's): the fixer is requested, if it is not yet.
+      const req = this.parkedRequest(rec, e.task, e.data.decision_id as string);
+      if (req !== null) void this.enqueue(() => this.requestFixer(wave, req));
+      return;
+    }
+    const fixer = rec.wave?.tasks[e.task];
+    if (fixer?.synthetic !== true || fixer.remediation?.outcome !== undefined) return;
+    const id = fixer.id;
+    if (e.type === "stage_entered" && e.data.stage === "done")
+      void this.enqueue(() => this.closeFixer(wave, id, null));
+    const why = fixerFailure(e);
+    if (why !== null) void this.enqueue(() => this.closeFixer(wave, id, why));
+  }
+
+  /**
+   * Level-triggered backstop for noteRemediation (a restart between a fixer's end and its
+   * `remediation_closed`): every fixer that is done or cancelled is closed.
+   */
+  private async settleFixers(wave: WaveId): Promise<void> {
+    const rec = this.waves.get(wave)?.record;
+    for (const f of rec !== undefined ? fixers(rec) : []) {
+      if (f.remediation?.outcome !== undefined) continue;
+      const stage = rec?.state?.tasks.find((t) => t.id === f.id)?.stage;
+      if (stage === "done") await this.closeFixer(wave, f.id, null);
+      else if (stage === "cancelled") await this.closeFixer(wave, f.id, "cancelled");
+    }
+  }
+
+  /** The fix_flake request a task parked on a flake stands for (null: it is not parked on one). */
+  private parkedRequest(rec: WaveRecord, task: TaskId, decisionId: string): FixRequest | null {
+    const r = rec.pipeline[task]?.remediation;
+    if (r === undefined || r.landed === true) return null;
+    const urls = (rec.decisions[decisionId] as { run_urls?: unknown } | undefined)?.run_urls;
+    return {
+      task,
+      test: r.test,
+      test_file: r.test_file,
+      run_urls: Array.isArray(urls) ? urls.filter((u): u is string => typeof u === "string") : [],
+      head: r.head,
+    };
+  }
+
+  /** What autopilot's `fix flake` would get for a red head's decision (undefined: not a flake). */
+  private fixerVerdict(wave: WaveId, d: DecisionRecord): FixerVerdict | undefined {
+    const rec = this.waves.get(wave)?.record;
+    if (rec === undefined || d.task === null || !isRedHead(d)) return undefined;
+    const req = this.parkedRequest(rec, d.task, d.decision_id);
+    if (req === null) return undefined;
+    return fixerFor(rec, req, this.config.get("autopilot.fix_flake_max", wave) as number);
+  }
+
+  /** A fix_flake request: add its fixer (and admit it), join one, or leave the red head to the owner. */
+  private async requestFixer(wave: WaveId, req: FixRequest): Promise<void> {
+    const rec = this.waves.get(wave)?.record;
+    const stage = rec?.state?.tasks.find((t) => t.id === req.task)?.stage;
+    if (rec === undefined || stage === undefined || stage === "done" || stage === "cancelled")
+      return;
+    const max = this.config.get("autopilot.fix_flake_max", wave) as number;
+    const v = fixerFor(rec, req, max);
+    if ("reuse" in v) {
+      this.log(`${wave}/${req.task}: flake ${req.test} waits for its fixer ${v.reuse}`);
+      return;
+    }
+    if ("add" in v) {
+      await this.append(wave, v.add);
+      this.log(`${wave}: added ${v.add.task} to fix the flake ${req.test} (for ${req.task})`);
+      this.evaluate();
+      await this.tickNow();
+      return;
+    }
+    if ("over_budget" in v) {
+      await this.escalateRedHead(
+        wave,
+        req.task,
+        "budget_exhausted",
+        v.over_budget,
+        `No fixer for the flake ${req.test}: ${wave} has autopilot.fix_flake_max (${max}) fixers already.`,
+      );
+      return;
+    }
+    await this.escalateRedHead(
+      wave,
+      req.task,
+      "unattended_safety",
+      undefined,
+      `No fixer for the flake ${req.test}: ${v.refuse}.`,
+    );
+  }
+
+  /**
+   * A fixer settled. Merged (`why` null): `remediation_closed` releases the tasks still parked on
+   * its test; their open red-head decisions are resolved `fix landed`, and each takes the fix from
+   * the release branch (pipeline `fix_landed`). Failed: `remediation_closed { outcome: failed }`
+   * and each blocked task's red head goes back to the owner, escalated, once.
+   */
+  private async closeFixer(wave: WaveId, fixer: TaskId, why: string | null): Promise<void> {
+    const rec = this.waves.get(wave)?.record;
+    const r = rec?.wave?.tasks[fixer]?.remediation;
+    if (rec === undefined || r === undefined || r.outcome !== undefined) return;
+    const blocked = releasedBy(rec, fixer);
+    const base = { kind: r.kind, test: r.test, task: fixer };
+    if (why === null) {
+      await this.append(wave, {
+        type: "remediation_closed",
+        task: fixer,
+        data: { ...base, outcome: "landed", released: blocked },
+      });
+      this.log(
+        `${wave}: ${fixer} landed the fix for ${r.test}; released ${blocked.join(", ") || "-"}`,
+      );
+      for (const task of blocked) {
+        const now = this.waves.get(wave)?.record ?? rec;
+        for (const d of openDecisions(now)) {
+          if (d.task !== task || !isRedHead(d)) continue;
+          await this.resolveNow(wave, d.decision_id, {
+            answer: FIX_LANDED,
+            by: DAEMON_AGENT_ID,
+            rationale: `${fixer} merged the fix for ${r.test}`,
+          });
+        }
+        if (this.opts.spawner !== undefined)
+          void this.enqueue(() =>
+            this.pipelineFor(wave).handle(task, { kind: "fix_landed", test: r.test }),
+          );
+      }
+      return;
+    }
+    await this.append(wave, {
+      type: "remediation_closed",
+      task: fixer,
+      data: { ...base, outcome: "failed", why, released: [] },
+    });
+    this.log(`${wave}: ${fixer} did not land the fix for ${r.test} (${why})`);
+    const t = rec.state?.tasks.find((x) => x.id === fixer);
+    const evidence = [
+      ...(t?.pr !== undefined ? [`PR ${t.pr.url}`] : []),
+      ...Object.values(t?.agents ?? {}).filter((a): a is string => a !== undefined),
+    ];
+    for (const task of blocked)
+      await this.escalateRedHead(
+        wave,
+        task,
+        "unattended_safety",
+        undefined,
+        `The flake's fixer ${fixer} did not land a fix for ${r.test} (${why}${evidence.length > 0 ? `; ${evidence.join(", ")}` : ""}).`,
+      );
+  }
+
+  /**
+   * Put a task's red head to the owner, escalated (`why`): its open ci_failed / agent_blocked_ci
+   * decision is escalated, or, once answered (`fix flake`), asked again — `note` first, without
+   * `fix flake` — and escalated. A decision escalated for the same reason already stays as it is.
+   */
+  private async escalateRedHead(
+    wave: WaveId,
+    task: TaskId,
+    why: EscalateWhy,
+    budget: Budget | undefined,
+    note: string,
+  ): Promise<void> {
+    const rec = this.waves.get(wave)?.record;
+    const d = Object.values(rec?.decisions ?? {})
+      .filter((x) => x.task === task && isRedHead(x))
+      .at(-1);
+    if (rec === undefined || d === undefined) {
+      this.log(`${wave}/${task}: ${note} (no red-head decision to escalate)`);
+      return;
+    }
+    // Each append replaces the record: the decision is read back from the current one.
+    const current = (id: string) => this.waves.get(wave)?.record.decisions[id] as DecisionRecord;
+    if (d.resolved === undefined) {
+      if (d.escalated?.why === why) return;
+      await this.escalate(wave, d, why, budget);
+      await this.ringDecision(wave, current(d.decision_id));
+      return;
+    }
+    const facts = Object.fromEntries(
+      Object.entries(d).filter(([k]) => !DECISION_RECORD_KEYS.has(k)),
+    );
+    const again = await this.openDecisionNow(
+      wave,
+      {
+        kind: d.kind,
+        task,
+        question: `${note} ${d.question}`,
+        options: (d.options ?? []).filter((o) => !isAnswer(o, FIX_FLAKE)),
+        pointers: d.pointers,
+      },
+      facts,
+      false,
+    );
+    await this.openDecisionItem(wave, again);
+    await this.escalate(wave, again, why, budget);
+    await this.ringDecision(wave, current(again.decision_id));
+  }
+
   /** GitHub's status page through `DaemonOptions.fetch`, cached; one reader for every wave. */
   private githubStatus(): () => Promise<GithubStatus> {
     this.statusPageRead ??= githubStatusCache(this.opts.fetch ?? globalThis.fetch, () =>
@@ -6334,6 +6557,7 @@ export class Daemon {
     const named = namedAgent(event);
     if (named !== undefined) this.lastNamed.set(named, event.seq);
     const published = this.track(this.publishAppended(wave, event));
+    this.noteRemediation(wave, event);
     // A task that ends (cancelled, done) or a wave that stops drops the steers held for it.
     const ended =
       event.type === "wave_stopped"
@@ -6534,7 +6758,11 @@ export class Daemon {
     // Its inbox item first (SPEC §4.6.18): an autopilot answer closes it like any other.
     if (opened.resolved === undefined) await this.openDecisionItem(wave, opened);
     if (!(await this.autopilot(wave, opened))) return;
-    const d = log.record.decisions[id] as DecisionRecord;
+    await this.ringDecision(wave, log.record.decisions[id] as DecisionRecord);
+  }
+
+  /** Publish an open decision retained and ring the notify bridge (its attention envelope). */
+  private async ringDecision(wave: WaveId, d: DecisionRecord): Promise<void> {
     await this.publishDecision(wave, d);
     // SPEC §4.1: progress is QoS 0, not retained.
     await this.broker.publish(
@@ -6561,6 +6789,7 @@ export class Daemon {
       task: d.task !== null ? rec.state?.tasks.find((t) => t.id === d.task) : undefined,
       derived_budget:
         rec.wave != null ? spawnBudget(rec.wave, eff.spawn_budget_multiplier, 0) : undefined,
+      fixer: this.fixerVerdict(wave, d),
     });
     if ("off" in v) return true;
     if ("escalate" in v) return this.escalate(wave, d, v.escalate, v.budget);
@@ -8654,4 +8883,41 @@ function brokerAddress(url: string): { host: string; port: number } {
     host: u.hostname,
     port: u.port !== "" ? Number(u.port) : DAEMON_DEFAULTS.mqtt_default_port,
   };
+}
+
+/** A red head's decision: a ci_failed, or a blocked agent's on a red PR head. */
+const isRedHead = (d: DecisionRecord): boolean => {
+  const on = markerOf(d)?.on;
+  return on === "ci_failed" || on === "agent_blocked_ci";
+};
+
+/** A decision record's own fields: the rest are the facts a re-ask carries over. */
+const DECISION_RECORD_KEYS: ReadonlySet<string> = new Set([
+  "decision_id",
+  "wave",
+  "task",
+  "kind",
+  "question",
+  "options",
+  "pointers",
+  "opened_at",
+  "resolved",
+  "escalated",
+  "resume_stage",
+  "parks",
+  "rationale",
+]);
+
+/**
+ * Why a fixer task's event means it will not land its fix (SPEC §4.6.16): cancelled, blocked, or
+ * one of its decisions escalated. null: it does not.
+ */
+function fixerFailure(e: JournalEvent): string | null {
+  if (e.type === "task_cancelled")
+    return typeof e.data.by === "string" ? `cancelled by ${e.data.by}` : "cancelled";
+  if (e.type === "stage_entered" && e.data.stage === "blocked")
+    return typeof e.data.why === "string" ? `blocked: ${e.data.why}` : "blocked";
+  if (e.type === "decision_escalated")
+    return `its ${String(e.data.kind)} decision escalated (${String(e.data.why)})`;
+  return null;
 }

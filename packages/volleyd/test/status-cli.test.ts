@@ -177,6 +177,54 @@ describe("volleyd status formatting", () => {
     );
   });
 
+  it("a synthetic task reads `fixer for <tasks> (flake: <test>)` (SPEC §4.6.16)", () => {
+    const out = formatWave({
+      wave: "w1",
+      version: 1,
+      owner: null,
+      repo: "r",
+      release_branch: "release/w1",
+      status: "running",
+      tasks: [
+        {
+          id: "T3",
+          issue: 103,
+          stage: "implement",
+          agents: {},
+          remediation: {
+            kind: "fix_flake",
+            test: "a.test.ts > x",
+            since: "2026-10-18T12:00:00.000Z",
+          },
+          why_waiting: "CI flake in a.test.ts > x: fixer pending",
+        },
+        {
+          id: "fix-a-test-ts-x",
+          issue: 0,
+          stage: "implement",
+          agents: {},
+          synthetic: true,
+          pr: { number: 9, url: "https://x/9" },
+          remediation: {
+            kind: "fix_flake",
+            test: "a.test.ts > x",
+            since: "2026-10-18T12:00:00.000Z",
+            test_file: "a.test.ts",
+            run_urls: [],
+            for: ["T3", "T7"],
+          },
+        },
+      ],
+      open_decisions: [],
+      gates: [],
+      updated_at: "2026-10-18T12:00:00.000Z",
+    });
+    expect(out.split("\n").slice(1, 3)).toEqual([
+      "  T3               #103   implement       CI flake in a.test.ts > x: fixer pending",
+      "  fix-a-test-ts-x  implement  fixer for T3, T7 (flake: a.test.ts > x)  PR #9",
+    ]);
+  });
+
   it("counts the open alarms (tasks whose spawn failed) in the header", () => {
     const out = formatWave({
       wave: "w1",
