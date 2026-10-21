@@ -83,6 +83,8 @@ export interface World {
   releaseRuns: string;
   /** Called with every argv before it is answered (a test may change the world mid-run). */
   before?: ((argv: string[]) => void) | undefined;
+  /** An argv this returns a promise for is answered only once it resolves. */
+  gate?: ((argv: string[]) => Promise<void> | undefined) | undefined;
   /** An argv this answers true for never returns (a hung network call). */
   hang?: ((argv: string[]) => boolean) | undefined;
   /** An argv this answers true for comes back `timedOut` (exec's hard timeout fired). */
@@ -99,6 +101,7 @@ export interface World {
 }
 
 export interface Spawned {
+  task: string;
   role: Role;
   agent_id: string;
   worktree: string;
@@ -137,6 +140,10 @@ export interface HarnessOptions {
   statusPage?: GithubStatus;
   /** `autopilot.incident_wait_max_s` the driver reads (default: the config default). */
   incidentWaitMaxS?: number;
+  /** `autopilot.delete_branch` the driver reads (default: absent, i.e. false). */
+  deleteBranch?: boolean;
+  /** The release-branch lock the driver merges under (default: the driver's own). */
+  releaseLock?: ConstructorParameters<typeof PipelineDriver>[1]["releaseLock"];
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -207,6 +214,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     callOpts.push(opts);
     const a = [...argv];
     world.before?.(a);
+    const gate = world.gate?.(a);
+    if (gate !== undefined) await gate;
     if (world.hang?.(a)) return new Promise<ExecResult>(() => {});
     if (world.timeout?.(a)) return { ...out(""), code: 124, timedOut: true };
     if (world.fail?.(a)) throw new Error(`spawn ${a[0]} ENOENT`);
@@ -353,13 +362,17 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     start?: SpawnStart,
     files: Record<string, string> = {},
     update?: BranchUpdate,
+    task = "T1",
   ) => {
-    const attempt = (attempts[role] ?? 0) + 1;
-    attempts[role] = attempt;
-    const agent_id = agentIdFor("w1", "T1", role, attempt);
-    const worktree = `/wt/w1/T1-${role}-${attempt}`;
-    const branch = start?.detach ? "HEAD" : branchName("w1", "T1", role, attempt);
+    const key = task === "T1" ? role : `${task}/${role}`;
+    const attempt = (attempts[key] ?? 0) + 1;
+    attempts[key] = attempt;
+    const agent_id = agentIdFor("w1", task, role, attempt);
+    const worktree =
+      task === "T1" ? `/wt/w1/T1-${role}-${attempt}` : `/wt/w1/${task}-${role}-${attempt}`;
+    const branch = start?.detach ? "HEAD" : branchName("w1", task, role, attempt);
     spawns.push({
+      task,
       role,
       agent_id,
       worktree,
@@ -370,7 +383,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     if (start !== undefined) world.local[worktree] = start.ref;
     await journal({
       type: "agent_spawned",
-      task: "T1",
+      task,
       data: {
         agent_id,
         role,
@@ -382,7 +395,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       },
     });
     if (role === "implementer" && attempt === 1)
-      await journal({ type: "stage_entered", task: "T1", data: { stage: "implement" } });
+      await journal({ type: "stage_entered", task, data: { stage: "implement" } });
     return agent_id;
   };
 
@@ -401,8 +414,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     home,
     record: () => rec,
     journal,
-    spawn: async (_task, role, req) =>
-      holdSpawns ? null : spawnAgent(role, req.start, req.files, req.branch_update),
+    spawn: async (task, role, req) =>
+      holdSpawns ? null : spawnAgent(role, req.start, req.files, req.branch_update, task),
     branchUpdate: () => branchUpdate ?? "rebase",
     ...(o.hygiene !== undefined ? { hygiene: () => o.hygiene as HygieneLevel } : {}),
     ...(o.merge !== undefined ? { mergeMode: () => o.merge as "auto" | "manual" } : {}),
@@ -411,6 +424,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     ...(o.incidentWaitMaxS !== undefined
       ? { incidentWaitMaxS: () => o.incidentWaitMaxS as number }
       : {}),
+    ...(o.deleteBranch !== undefined ? { deleteBranch: () => o.deleteBranch as boolean } : {}),
+    ...(o.releaseLock !== undefined ? { releaseLock: o.releaseLock } : {}),
     // One serial queue, like the daemon's: pipeline I/O folds its results back in through it.
     enqueue: (fn) => {
       const p = queue.then(fn);
@@ -446,18 +461,25 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         if ("event" in r) await journal(r.event);
       }
     },
-    nextAgent: (_task, role) => {
-      const attempt = (attempts[role] ?? 0) + 1;
-      return { agent_id: agentIdFor("w1", "T1", role, attempt), attempt };
+    nextAgent: (task, role) => {
+      const attempt = (attempts[task === "T1" ? role : `${task}/${role}`] ?? 0) + 1;
+      return { agent_id: agentIdFor("w1", task, role, attempt), attempt };
     },
     retire: async (agentId, status = "done") => {
       retired.push({ agent_id: agentId, status });
-      const role = Object.entries(rec.pipeline.T1?.runs ?? {}).find(
-        ([, run]) => run?.agent_id === agentId,
-      )?.[0];
+      let task = "T1";
+      let role: string | undefined;
+      for (const [id, p] of Object.entries(rec.pipeline)) {
+        const r = Object.entries(p.runs).find(([, run]) => run?.agent_id === agentId)?.[0];
+        if (r !== undefined) {
+          task = id;
+          role = r;
+          break;
+        }
+      }
       await journal({
         type: "agent_retired",
-        task: "T1",
+        task,
         data: {
           agent_id: agentId,
           role,
@@ -469,8 +491,9 @@ export function pipelineHarness(o: HarnessOptions = {}) {
   };
   let driver = new PipelineDriver("w1", deps);
 
-  const run = (role: Role) => rec.pipeline.T1?.runs[role];
+  const run = (role: Role, task = "T1") => rec.pipeline[task]?.runs[role];
   const PR_BRANCH = branchName("w1", "T1", "implementer", 1);
+  const prBranch = (task: string) => branchName("w1", task, "implementer", 1);
 
   const h = {
     home,
@@ -496,7 +519,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     elapse(ms: number) {
       clock += ms;
     },
-    task: () => rec.state?.tasks.find((t) => t.id === "T1"),
+    task: (id = "T1") => rec.state?.tasks.find((t) => t.id === id),
     /** While true, role spawns are held (the daemon refused them); the next tick retries. */
     holdSpawns(v: boolean) {
       holdSpawns = v;
@@ -519,6 +542,11 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         await journal({ type: "task_queued", task: id, data: { issue: 60 + i } });
       return spawnAgent("implementer");
     },
+    /** A sibling task (`siblings`) is admitted and its implementer starts as the pipeline spawns it. */
+    async startTask(id: string) {
+      await journal({ type: "task_admitted", task: id, data: {} });
+      return spawnAgent("implementer", undefined, {}, undefined, id);
+    },
     /** A sibling task (`siblings`) is admitted and its implementer starts. */
     async startSibling(id: string) {
       await journal({ type: "task_admitted", task: id, data: {} });
@@ -539,11 +567,11 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       return agent_id;
     },
     /** The implementer opens its PR once (the first push). */
-    openPr(head: string) {
+    openPr(head: string, task = "T1", number = 7) {
       world.prs.push({
-        number: 7,
-        url: "https://github.com/example/repo/pull/7",
-        headRefName: PR_BRANCH,
+        number,
+        url: `https://github.com/example/repo/pull/${number}`,
+        headRefName: prBranch(task),
         baseRefName: wave.release_branch,
         headRefOid: head,
       });
@@ -564,15 +592,17 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         ci?: "green" | "red" | "running";
         result?: unknown;
         status?: "done" | "failed";
+        task?: string;
       } = {},
     ) {
-      const r = run(role);
+      const task = o.task ?? "T1";
+      const r = run(role, task);
       if (r === undefined) throw new Error(`no ${role} run`);
       if (o.head !== undefined) {
         world.local[r.worktree as string] = o.head;
         if (o.push !== false) {
-          world.origin[PR_BRANCH] = o.head;
-          for (const pr of world.prs) if (pr.headRefName === PR_BRANCH) pr.headRefOid = o.head;
+          world.origin[prBranch(task)] = o.head;
+          for (const pr of world.prs) if (pr.headRefName === prBranch(task)) pr.headRefOid = o.head;
         }
         if (o.ci !== undefined) world.ci[o.head] = o.ci;
       }
@@ -584,14 +614,14 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         ...(o.result !== undefined ? { result: o.result } : {}),
       };
       if (o.result !== undefined) lastResult[r.agent_id] = o.result;
-      await driver.handle("T1", ev);
+      await driver.handle(task, ev);
       await driver.settled();
     },
     /** A role's current run publishes `blocked` with `reason` (the agent stays alive). */
-    async block(role: Role, reason: string) {
-      const r = run(role);
+    async block(role: Role, reason: string, task = "T1") {
+      const r = run(role, task);
       if (r === undefined) throw new Error(`no ${role} run`);
-      await driver.handle("T1", {
+      await driver.handle(task, {
         kind: "agent_blocked",
         role,
         agent_id: r.agent_id,
@@ -605,7 +635,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       const r = resolveEvent(rec, id, { answer, by }, new Date());
       if (!("event" in r)) throw new Error(`cannot resolve ${id}`);
       await journal(r.event);
-      await driver.handle("T1", {
+      await driver.handle(rec.decisions[id]?.task ?? "T1", {
         kind: "decision_resolved",
         decision: rec.decisions[id] as DecisionRecord,
       });

@@ -72,6 +72,7 @@ export const CONFIG_DEFAULTS: Tunables = {
     inbox_answered_ttl_s: 600,
     merge: "auto",
     merge_retry_max: 2,
+    delete_branch: false,
     reconnect_grace_s: 900,
     incident_wait_max_s: 14_400,
   },
@@ -216,6 +217,8 @@ export const DAEMON_DEFAULTS = {
   ci_poll_ms: 60_000,
   /** How long a head may have no CI run at all before the pipeline asks the owner. */
   ci_none_grace_ms: 900_000,
+  /** Failed checks in a row after which the merge turn's holder passes the turn on (SPEC §4.6.17). */
+  merge_turn_check_failures_max: 3,
   /** Bound on the advance rounds one pipeline observation may trigger (a guard, never reached). */
   pipeline_max_advances: 8,
   /** A blocked agent's reason is clipped to this many characters in its decision's question. */

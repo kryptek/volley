@@ -237,6 +237,25 @@ describe("volleyd status formatting", () => {
     expect(formatWave(plain).split("\n")[1]).toMatch(/^ {2}T1 /);
   });
 
+  it("shows the merge queue under the header, grouped by state in queue order", () => {
+    const since = "2026-10-18T12:00:00.000Z";
+    const out = formatWave({
+      ...plain,
+      merge_queue: [
+        { task: "T3", state: "merging", since },
+        { task: "T5", state: "updating", since },
+        { task: "T7", state: "queued", since },
+        { task: "T9", state: "queued", since },
+        { task: "T2", state: "refused", since },
+      ],
+    });
+    expect(out.split("\n")[1]).toBe(
+      "  merge queue: T3 merging · T5 updating · T7, T9 queued · T2 refused",
+    );
+    // No queue: no line.
+    expect(formatWave(plain).split("\n")[1]).toMatch(/^ {2}T1 /);
+  });
+
   it("a releasing wave shows its release train: the current stage and how many are verified", () => {
     const out = formatWave({
       ...plain,

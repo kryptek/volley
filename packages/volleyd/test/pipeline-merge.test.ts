@@ -12,7 +12,8 @@ import {
 /**
  * Autopilot merging (A5, SPEC §4.6.17): under `merge: auto` the gate mints a MergeToken and the
  * pipeline merges exactly the gated head (`gh pr merge <n> --squash --match-head-commit <head>`),
- * journaled as merged_by_supervisor. Under `merge: manual` nothing changes: a human merges.
+ * journaled as merged_by_supervisor, when the merge queue gives the task its turn (the tick).
+ * Under `merge: manual` nothing changes: a human merges.
  */
 
 const H = sha(0x1001);
@@ -35,6 +36,7 @@ async function gated(o: HarnessOptions = {}) {
   h.openPr(H);
   h.world.mergeCommit[7] = MERGE_SHA;
   await h.finish("implementer", { head: H, ci: "green" });
+  await h.tick();
 }
 
 async function due() {
@@ -84,6 +86,8 @@ describe("merge: auto", () => {
     await h.start();
     h.openPr(H);
     await h.finish("implementer", { head: H, ci: "green" });
+    expect(mergeCalls()).toHaveLength(0);
+    await h.tick();
     expect(mergeCalls()).toHaveLength(1);
     expect(refusals()).toHaveLength(1);
     expect(refusals()[0]?.data).toMatchObject({
@@ -114,9 +118,11 @@ describe("merge: auto", () => {
     expect(d?.options).toEqual(["retry", "manual", "cancel"]);
     expect(h.task()?.stage).toBe("awaiting_decision");
 
-    // retry: one more attempt at once; it merges this time.
+    // retry: one more attempt at the task's next merge turn; it merges this time.
     h.world.mergeRefuse = undefined;
     await h.resolve(d?.decision_id as string, "retry");
+    expect(h.task()?.stage).toBe("merge_ready");
+    await due();
     expect(mergeCalls()).toHaveLength(3);
     expect(h.task()?.stage).toBe("done");
     expect(h.events.some((e) => e.type === "merged_by_supervisor")).toBe(true);
@@ -128,9 +134,11 @@ describe("merge: auto", () => {
     await h.start();
     h.openPr(H);
     await h.finish("implementer", { head: H, ci: "green" });
+    await h.tick();
     const [d] = h.openDecisions();
     expect(d?.kind).toBe("merge_refused");
     await h.resolve(d?.decision_id as string, "retry");
+    await due();
     expect(mergeCalls()).toHaveLength(2);
     expect(h.openDecisions().map((x) => x.kind)).toEqual(["merge_refused"]);
   });
@@ -141,6 +149,7 @@ describe("merge: auto", () => {
     await h.start();
     h.openPr(H);
     await h.finish("implementer", { head: H, ci: "green" });
+    await due();
     await due();
     const [d] = h.openDecisions();
     await h.resolve(d?.decision_id as string, "manual");
@@ -163,6 +172,7 @@ describe("merge: auto", () => {
     await h.start();
     h.openPr(H);
     await h.finish("implementer", { head: H, ci: "green" });
+    await h.tick();
     const [d] = h.openDecisions();
     await h.resolve(d?.decision_id as string, "cancel");
     expect(h.task()?.stage).toBe("cancelled");
@@ -174,6 +184,7 @@ describe("merge: auto", () => {
     await h.start();
     h.openPr(H);
     await h.finish("implementer", { head: H, ci: "green" });
+    await h.tick();
     expect(mergeCalls()).toHaveLength(1);
     h.restart();
     h.world.mergeRefuse = undefined;
@@ -198,6 +209,7 @@ describe("merge: auto", () => {
     await h.start();
     h.openPr(H);
     await h.finish("implementer", { head: H, ci: "green" });
+    await h.tick();
     expect(mergeCalls()).toHaveLength(1);
     h.restart();
     h.world.mergeRefuse = undefined;
@@ -234,20 +246,40 @@ describe("merge: auto", () => {
     expect(h.task()?.stage).not.toBe("done");
   });
 
-  it("a PR retargeted after the gate is refused before gh pr merge runs", async () => {
+  it("a PR retargeted after the gate is never merged: its turn's gate check refuses it", async () => {
     h = pipelineHarness({ pipeline: "[implement, merge_ready]", merge: "auto" });
     h.world.mergeRefuse = "required checks pending";
     await h.start();
     h.openPr(H);
     await h.finish("implementer", { head: H, ci: "green" });
+    await h.tick();
     expect(mergeCalls()).toHaveLength(1);
     h.world.mergeRefuse = undefined;
     h.world.prView[7] = { baseRefName: "main" };
     await due();
+    await due();
     expect(mergeCalls()).toHaveLength(1);
-    expect(refusals()).toHaveLength(2);
-    expect(String(refusals()[1]?.data.stderr)).toContain("main");
+    const alarm = h.events.find(
+      (e) => e.type === "alarm_raised" && String(e.data.message).includes("targets main"),
+    );
+    expect(alarm).toBeDefined();
     expect(h.events.some((e) => e.type === "merged_by_supervisor")).toBe(false);
+  });
+
+  it("mergePr itself refuses a retargeted PR before gh pr merge runs", async () => {
+    h = pipelineHarness({ pipeline: "[implement, merge_ready]", merge: "auto" });
+    await h.start();
+    h.openPr(H);
+    await h.finish("implementer", { head: H, ci: "green" });
+    // Retargeted between the turn's gate check and the merge.
+    h.world.before = (a) => {
+      if (a[1] === "pr" && a[2] === "view" && a.includes("baseRefName,headRefOid,state"))
+        h.world.prView[7] = { baseRefName: "main" };
+    };
+    await h.tick();
+    expect(mergeCalls()).toEqual([]);
+    expect(refusals()).toHaveLength(1);
+    expect(String(refusals()[0]?.data.stderr)).toContain("main");
   });
 
   it("a head the fence cannot match exactly is left to a human, without re-gating every tick", async () => {
@@ -267,10 +299,15 @@ describe("merge: auto", () => {
     expect(md).toContain("volleyd never merges");
   });
 
-  it("a wave with more than one task is not merged here (A6's queue decides)", async () => {
-    await gated({ merge: "auto", dependents: { T2: ["T1"] } });
+  it("nothing merges at the gate itself: the merge queue's tick gives the turn", async () => {
+    h = pipelineHarness({ pipeline: "[implement, merge_ready]", merge: "auto" });
+    await h.start();
+    h.openPr(H);
+    await h.finish("implementer", { head: H, ci: "green" });
     expect(mergeCalls()).toEqual([]);
     expect(h.task()?.stage).toBe("merge_ready");
+    await h.tick();
+    expect(mergeCalls()).toHaveLength(1);
   });
 });
 

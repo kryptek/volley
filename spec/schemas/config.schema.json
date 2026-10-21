@@ -540,6 +540,11 @@
               "default": 2,
               "description": "Merges GitHub may refuse at one gated head (the head moved, checks required, branch protection) before the supervisor opens a merge_refused decision."
             },
+            "delete_branch": {
+              "type": "boolean",
+              "default": false,
+              "description": "Autopilot merges also delete the PR's head branch (gh pr merge --delete-branch)."
+            },
             "reconnect_grace_s": {
               "type": "integer",
               "minimum": 60,
