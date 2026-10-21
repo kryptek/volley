@@ -88,6 +88,45 @@ describe("volley claude", () => {
     await v.b.disconnect();
   });
 
+  it("add --machine <peer> sends the machine; the forwarded URL is opened on this computer", async () => {
+    const v = await fakeVolleyd(tb.url, () => ({
+      ok: true,
+      result: {
+        account: { id: "work", label: "Work", machine: "peer-a" },
+        acct: "work@peer-a",
+        url: URL_CB,
+        flow: "browser_callback",
+        attach: "ssh dev@peer-a -t tmux attach -t volley-signin-work",
+      },
+    }));
+    const r = await run(["add", "Work", "--machine", "peer-a"]);
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    expect(v.seen[0]).toMatchObject({ op: "claude_account_add", label: "Work", machine: "peer-a" });
+    expect(r.stdout).toContain("Claude account work added.");
+    expect(r.stdout).toContain("Sign in to Claude for work@peer-a");
+    expect(r.stdout).toMatch(/open this URL in a browser on this computer/);
+    expect(r.stdout).toContain(URL_CB);
+    await v.b.disconnect();
+  });
+
+  it("a paired machine's manual-code URL names the ssh attach to its sign-in terminal", async () => {
+    const v = await fakeVolleyd(tb.url, () => ({
+      ok: true,
+      result: {
+        acct: "work@peer-a",
+        url: URL_CB,
+        flow: "manual_code",
+        attach: "ssh dev@peer-a -t tmux attach -t volley-signin-work",
+      },
+    }));
+    const r = await run(["signin", "work@peer-a"]);
+    expect(r.stdout).toContain(
+      "paste the code it shows into the sign-in terminal on peer-a (ssh dev@peer-a -t tmux attach -t volley-signin-work)",
+    );
+    await v.b.disconnect();
+  });
+
   it("a manual-code URL names the terminal to paste the code into", async () => {
     const v = await fakeVolleyd(tb.url, () => ({
       ok: true,

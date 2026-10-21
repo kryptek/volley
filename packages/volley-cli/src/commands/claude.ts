@@ -36,7 +36,8 @@ manual-code kind, paste the code into the terminal it names (tmux attach -t voll
 never anywhere else. --wait blocks until the sign-in finishes.
 
 Options:
-  --machine <name>       The machine the profile lives on (default: the supervisor's own)
+  --machine <name>       add: a paired machine: the profile is created and signed in there
+                         (default: the supervisor's own machine)
   --wait                 add / signin: wait for the sign-in to finish (exit 1 if it fails,
                          124 if it has not ended within --timeout, default 960)
   --timeout <seconds>    How long to wait for volleyd's answer (default 60; move: 180)
@@ -268,14 +269,19 @@ function printSignin(io: IO, r: SigninResult): void {
     io.stdout(`${r.acct} is signed in.\n`);
     return;
   }
+  // `<acct>@<name>`: a profile on a paired machine, its callback forwarded to the supervisor.
+  const machine = r.acct.includes("@") ? r.acct.slice(r.acct.indexOf("@") + 1) : null;
   if (r.flow === "manual_code") {
+    const where = machine !== null ? ` on ${machine}` : "";
     io.stdout(
-      `Sign in to Claude for ${r.acct}: open this URL in a browser, then paste the code it shows into the sign-in terminal (${r.attach}):\n  ${r.url}\n`,
+      `Sign in to Claude for ${r.acct}: open this URL in a browser, then paste the code it shows into the sign-in terminal${where} (${r.attach}):\n  ${r.url}\n`,
     );
     return;
   }
   io.stdout(
-    `Sign in to Claude for ${r.acct}: open this URL in a browser on the supervisor's machine:\n  ${r.url}\n`,
+    machine !== null
+      ? `Sign in to Claude for ${r.acct}: open this URL in a browser on this computer (the supervisor's machine: the sign-in on ${machine} is forwarded here):\n  ${r.url}\n`
+      : `Sign in to Claude for ${r.acct}: open this URL in a browser on the supervisor's machine:\n  ${r.url}\n`,
   );
 }
 
@@ -330,7 +336,8 @@ interface ListResult {
     label: string;
     machine: string;
     plan?: string;
-    dir: string;
+    /** Absent for a profile on a paired machine until a sign-in there learned its HOME. */
+    dir?: string;
     signin: { state: string; url?: string };
   }[];
   sharing: Record<string, string>;
@@ -340,7 +347,7 @@ function printList(io: IO, r: ListResult): void {
   if (r.accounts.length === 0) io.stdout(`no Claude account profiles under ${r.root}\n`);
   for (const a of r.accounts) {
     const plan = a.plan !== undefined ? ` ${a.plan}` : "";
-    io.stdout(`${a.id}\t${a.signin.state}${plan}\t${a.machine}\t${a.label}\t${a.dir}\n`);
+    io.stdout(`${a.id}\t${a.signin.state}${plan}\t${a.machine}\t${a.label}\t${a.dir ?? "-"}\n`);
     if (a.signin.url !== undefined) io.stdout(`  sign in: ${a.signin.url}\n`);
   }
   io.stdout(

@@ -368,9 +368,9 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
 | `admission` | — | the retained admission summary (null before the first sample) |
 | `spawn` | `wave`, `task`, `role?` (default `implementer`) | `{ kind: "launched", agent_id, workspace, worktree }`, or the spawn's decision `{ kind, decision, decision_id }`; outside admission. A failure carries `{ code, lock }` |
-| `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, email?, org?, dir, signin: { state, url?, flow?, attach? } }], primary: { plan?, email?, org? }, machines: [{ name, kind?, claude, plan?, email?, org?, tunnel }], remote_signins, sharing }` |
-| `claude_account_add` | `label`, `machine?`, `by` | answered once the sign-in URL is known: `{ account, acct, topic, url, flow, attach }` |
-| `claude_signin` | `acct`, `by` | the same, for an existing profile |
+| `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, email?, org?, dir?, signin: { state, url?, flow?, attach? } }], primary: { plan?, email?, org? }, machines: [{ name, kind?, claude, plan?, email?, org?, tunnel }], remote_signins, sharing }` |
+| `claude_account_add` | `label`, `machine?` (a paired machine: the profile is created and signed in there, as `<acct>@<machine>`), `by` | answered once the sign-in URL is known: `{ account, acct, topic, url, flow, attach }` |
+| `claude_signin` | `acct` (a registry account, `primary@<name>` or `<acct>@<name>`), `by` | the same, for an existing profile |
 | `claude_sync` | `acct?`, `by` | `{ synced: [{ acct, shared, mcp_servers? }] }` |
 | `agent_move_account` | `agent`, `acct`, `by` | answered after the respawn: `{ agent_id, decision?, from, to }` |
 
@@ -504,6 +504,7 @@ evidence behind each choice below.
 ```sh
 volley claude add "Work"            # profile + background sign-in; prints the sign-in URL
 volley claude add "Work" --wait     # … and waits until the sign-in finishes
+volley claude add "Work" --machine peer-a  # a profile on a paired machine, signed in there
 volley claude signin work           # sign an existing profile in again
 volley claude list                  # profiles, sign-in state, plan, sharing modes
 volley claude sync [work]           # re-apply sharing.yaml, re-sync the MCP servers
@@ -554,6 +555,22 @@ at once and nothing more of it is published. A machine whose `claude auth status
 `loggedIn` is refused (log it out with `ssh <target> claude auth logout` first). While it waits,
 `claude_accounts` lists it under `remote_signins: [{ acct, state: "pending", url?, flow?, attach?,
 manual_url? }]` for a late client.
+
+**A profile on a paired machine.** `claude_account_add { label, machine: "<name>" }` (`volley
+claude add <label> --machine <name>`) for a configured paired machine records `{ id, machine:
+"<name>" }` in the registry (nothing is created here) and signs the profile in there the same way,
+as the account `<id>@<name>`: the first step also makes `~/.volley/claude/<id>` on the box
+(`mkdir -p`, `chmod 700`), the sealed `signin.sh` exports it as `CLAUDE_CONFIG_DIR`, the session is
+`volley-signin-<id>` (the attach line names it), and the poll is `CLAUDE_CONFIG_DIR=<that dir>
+claude auth status` (the only remote step the fence lets carry an env). On done volleyd reads the
+login's identity with `cat .claude.json` in that dir (only `email` and `org` of it, as above) and
+records `signed_in_at`, the plan and the identity in the registry before it publishes
+`claude_signin_done { acct: "<id>@<name>", plan?, email?, org? }`. `claude_signin { acct:
+"<id>@<name>" }` signs it in again. An unknown machine is refused with the host's error, before
+any registry entry. Its `claude_accounts` row carries `dir` (the dir on the box) once a sign-in
+there has read the box's `$HOME`, and none before. No token ever crosses the fence, and nothing
+(`sharing.yaml`, MCP servers) is copied to the box's profile. A profile on a paired machine is
+signed in and shown, not yet used by placement: a local spawn naming it is refused.
 
 **Selection.** An agent runs under its task's `account:`, else the wave's, else
 `claude.default_account` (a tunable; `null` = primary), else the primary. `most_headroom` is the
@@ -3128,9 +3145,12 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     kill-session -t volley-signin-<acct> (no consent: a sign-in session holds no agent's
     work) — any other kill-session = CONSENT; no other tmux global option
   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
-    nc -z 127.0.0.1 <port> · printenv PATH | HOME
+    chmod 700 <home>/.volley/claude/<acct> (a remote profile dir: the only chmod on a
+    directory) · nc -z 127.0.0.1 <port> · printenv PATH | HOME
   claude auth status (exactly: the box's login state and plan, never a credential; a login
-    runs only from a sealed signin.sh)
+    runs only from a sealed signin.sh) — the one step with an env: `env.CLAUDE_CONFIG_DIR`
+    only, only `<abs>/.volley/claude/<acct>` (a profile the supervisor created there),
+    rendered as one single-quoted `CLAUDE_CONFIG_DIR=…` before the argv
   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
     `/info/exclude`, `<dir>/.volley/<name>` for a VOLLEY_READS name, or a sign-in dir's `url`
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
@@ -3146,8 +3166,9 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG); and
     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
-    `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
-    login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
+    `signin.sh` exactly `renderSigninScript` for that dir with no profile dir, or with the
+    profile dir `<same abs>/.volley/claude/<same acct>` (`claude auth login`, never
+    `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
   volley peer doctor --json [--fix --yes [--clone --origin <https URL>]] — the machine's doctor
     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no

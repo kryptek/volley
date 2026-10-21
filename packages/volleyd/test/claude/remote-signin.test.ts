@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { forwardArgv } from "../../src/claude/forward";
 import {
   callbackPort,
+  remoteAccount,
   remoteAccountHost,
+  remoteProfileDir,
   remoteSigninDir,
   runRemoteSignin,
 } from "../../src/claude/remote-signin";
@@ -23,7 +25,7 @@ import {
 
 const PRINTED = parseSigninUrl(TRANSCRIPT) as string;
 const TARGET = "dev@box-a";
-const DIR = remoteSigninDir("/home/dev");
+const DIR = remoteSigninDir("/home/dev", "primary");
 const SPEC = {
   name: "box-a",
   target: TARGET,
@@ -34,7 +36,9 @@ const SPEC = {
 };
 
 /** The sign-in against a fake box behind a real SshTmuxHost (every script passes the fence). */
-function world(o: SigninBoxOptions & { reserved?: number[] } = {}) {
+function world(
+  o: SigninBoxOptions & { reserved?: number[]; acct?: string; profile?: boolean } = {},
+) {
   const b = fakeSigninBox(o);
   const host = new SshTmuxHost(SPEC, b.exec);
   const events: SigninEvent[] = [];
@@ -57,17 +61,31 @@ function world(o: SigninBoxOptions & { reserved?: number[] } = {}) {
       timeoutMs: 200,
       settleMs: 5,
       reservedPorts: o.reserved ?? [18830, 1883],
+      ...(o.acct !== undefined ? { acct: o.acct } : {}),
+      ...(o.profile === true ? { profile: true as const } : {}),
       ...(signal !== undefined ? { signal } : {}),
     });
   return { ...b, events, run };
 }
 
 describe("remote sign-in helpers", () => {
-  it("primary@<name> names a paired machine's own login", () => {
-    expect(remoteAccountHost("primary@box-a")).toBe("box-a");
+  it("<acct>@<name> names a profile on a paired machine (primary@<name>: its own login)", () => {
+    expect(remoteAccount("primary", "box-a")).toBe("primary@box-a");
+    expect(remoteAccount("work", "box-a")).toBe("work@box-a");
+    expect(remoteAccountHost("primary@box-a")).toEqual({ acct: "primary", name: "box-a" });
+    expect(remoteAccountHost("work@peer-a")).toEqual({ acct: "work", name: "peer-a" });
     expect(remoteAccountHost("primary")).toBeNull();
     expect(remoteAccountHost("primary@")).toBeNull();
+    expect(remoteAccountHost("@box-a")).toBeNull();
     expect(remoteAccountHost("work")).toBeNull();
+    expect(remoteAccountHost("Work@box-a")).toBeNull();
+    expect(remoteAccountHost("work@box a")).toBeNull();
+    expect(remoteAccountHost("a@b@c")).toBeNull();
+  });
+
+  it("the sign-in and profile dirs on the box", () => {
+    expect(remoteSigninDir("/home/u", "work")).toBe("/home/u/.volley/signin/work");
+    expect(remoteProfileDir("/home/u", "work")).toBe("/home/u/.volley/claude/work");
   });
 
   it("the forwarded port is the callback URL's redirect port", () => {
@@ -248,5 +266,89 @@ describe("runRemoteSignin", () => {
     expect(last).toMatchObject({ reason: "the supervisor stopped" });
     expect(w.box.session).toBe(false);
     expect(w.forwards[0]?.stopped).toBe(true);
+  });
+});
+
+describe("runRemoteSignin of a profile the supervisor created there (profile: true)", () => {
+  const HOME = "/home/dev";
+  const WDIR = remoteSigninDir(HOME, "work");
+  const PROFILE = remoteProfileDir(HOME, "work");
+  const CLAUDE_JSON = JSON.stringify({
+    oauthAccount: {
+      emailAddress: "Owner@Example.com",
+      organizationName: "Example Org",
+      accountUuid: "secret-uuid",
+    },
+    userID: "user-id-never-seen",
+    primaryApiKey: "never-seen",
+  });
+  const profileWorld = (o: SigninBoxOptions = {}) =>
+    world({
+      ...o,
+      acct: "work",
+      profile: true,
+      files: { [`${PROFILE}/.claude.json`]: CLAUDE_JSON, ...o.files },
+    });
+
+  it("makes the profile dir 700, writes the sealed profile script, starts volley-signin-work", async () => {
+    const w = profileWorld({ signInAfter: 3 });
+    await w.run();
+    expect(w.ran("mkdir")).toEqual([["mkdir", "-p", WDIR, PROFILE]]);
+    expect(w.ran("chmod", "700", PROFILE)).toEqual([["chmod", "700", PROFILE]]);
+    expect(w.box.files.get(`${WDIR}/signin.sh`)).toBe(
+      renderSigninScript({ configDir: PROFILE, signinDir: WDIR }),
+    );
+    expect(w.box.files.get(`${WDIR}/browser.sh`)).toBe(renderBrowserHelper(WDIR));
+    expect(w.ran("tmux", "new-session")).toEqual([
+      ["tmux", "new-session", "-d", "-s", "volley-signin-work", "-c", WDIR, "bash signin.sh"],
+    ]);
+  });
+
+  it("publishes the URL under work@<name> with the attach naming volley-signin-work", async () => {
+    const w = profileWorld({ signInAfter: 3 });
+    await w.run();
+    expect(w.events.filter((e) => e.type === "claude_signin_url")).toEqual([
+      {
+        type: "claude_signin_url",
+        acct: "work@box-a",
+        url: CALLBACK,
+        flow: "browser_callback",
+        manual_url: PRINTED,
+        attach: "ssh dev@box-a -t tmux attach -t volley-signin-work",
+      },
+    ]);
+  });
+
+  it("polls `claude auth status` under the profile; done carries only plan, email and org", async () => {
+    const w = profileWorld({ signInAfter: 3 });
+    const last = await w.run();
+    const polls = w.remoteSteps().filter((s) => s.argv[0] === "claude");
+    expect(polls.length).toBeGreaterThan(0);
+    for (const s of polls) expect(s.env).toEqual({ CLAUDE_CONFIG_DIR: PROFILE });
+    expect(w.remoteSteps()).toContainEqual({ argv: ["cat", ".claude.json"], cwd: PROFILE });
+    expect(last).toEqual({
+      type: "claude_signin_done",
+      acct: "work@box-a",
+      plan: "max",
+      email: "owner@example.com",
+      org: "Example Org",
+    });
+    expect(w.events.at(-1)).toEqual(last);
+    const text = JSON.stringify(w.events);
+    for (const secret of ["secret-uuid", "user-id-never-seen", "never-seen"])
+      expect(text).not.toContain(secret);
+    expect(w.steps().at(-1)).toEqual(["tmux", "kill-session", "-t", "volley-signin-work"]);
+  });
+
+  it("an unreadable .claude.json: done with the plan alone", async () => {
+    const w = world({ acct: "work", profile: true, signInAfter: 2 });
+    expect(await w.run()).toEqual({ type: "claude_signin_done", acct: "work@box-a", plan: "max" });
+  });
+
+  it("the box's default profile (no profile flag) is untouched: no env, no cat of .claude.json", async () => {
+    const w = world({ signInAfter: 3 });
+    await w.run();
+    expect(w.remoteSteps().every((s) => s.env === undefined)).toBe(true);
+    expect(w.ran("cat", ".claude.json")).toEqual([]);
   });
 });
