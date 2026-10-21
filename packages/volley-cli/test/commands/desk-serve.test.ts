@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -234,6 +234,10 @@ describe("volley desk serve --evidence: the release evidence route", () => {
     writeFileSync(join(rel, "evil.html"), "<script>alert(1)</script>");
     writeFileSync(join(rel, "evil.svg"), "<svg onload=alert(1)/>");
     writeFileSync(join(rel, "sub", "deep.png"), "DEEP");
+    writeFileSync(join(rel, ".hidden.png"), "HIDDEN");
+    writeFileSync(join(home, "outside.png"), "SECRETCONFIG");
+    symlinkSync(join(home, "outside.png"), join(rel, "link.png"));
+    symlinkSync(join(rel, "evil.html"), join(rel, "alias.png"));
     writeFileSync(join(home, "waves", "w1", "journal.jsonl"), "JOURNAL");
     writeFileSync(join(home, "config.yaml"), "SECRETCONFIG");
   });
@@ -299,6 +303,10 @@ describe("volley desk serve --evidence: the release evidence route", () => {
       "/evidence/W1!/release/smoke.png",
       "/evidence/w1/release/",
       "/evidence/w1/release/.hidden.png",
+      "/evidence/w1/release/%252ehidden.png",
+      "/evidence/w1/release/sub%252fdeep.png",
+      "/evidence/w1/release/link.png",
+      "/evidence/w1/release/alias.png",
       "/evidence/w1/journal.jsonl",
     ]) {
       const r = await fetch(`${url}${path}`);
@@ -308,6 +316,8 @@ describe("volley desk serve --evidence: the release evidence route", () => {
       expect(text, path).not.toContain("JOURNAL");
       expect(text, path).not.toContain("SECRETCONFIG");
       expect(text, path).not.toContain("<script>");
+      expect(text, path).not.toContain("DEEP");
+      expect(text, path).not.toContain("HIDDEN");
     }
   });
 

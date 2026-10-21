@@ -18,7 +18,7 @@ import SpecularButton from "../../rb/SpecularButton/SpecularButton";
 import SpotlightCard from "../../rb/SpotlightCard/SpotlightCard";
 import StarBorder from "../../rb/StarBorder/StarBorder";
 import StatusMark from "../../rb/StatusMark/StatusMark";
-import type { SteerTransport } from "../../steer/transport";
+import { type SteerTransport, shellQuote } from "../../steer/transport";
 import type { InboxItem, WaveView } from "../../store/types";
 import { IconBtn } from "../wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "../wave/accent";
@@ -29,7 +29,7 @@ const REFUSED_ANSWERED = /^already answered on (.+)$/;
 
 /** The CLI fallback for a Desk without broker credentials (D4's copyable-command pattern). */
 export function answerCommand(id: string, answer: string): string {
-  return `volleyd inbox answer ${id} "${answer.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+  return `volleyd inbox answer ${shellQuote(id)} ${shellQuote(answer)}`;
 }
 
 export interface InboxRowProps {
@@ -107,9 +107,9 @@ export function InboxRow(p: InboxRowProps) {
     ) : (
       <>
         <fieldset className="inbox-options" aria-label="Answers">
-          {(item.options ?? []).map((o) => (
+          {(item.options ?? []).map((o, i) => (
             <SpecularButton
-              key={o.label}
+              key={`${i}:${o.label}`}
               size="sm"
               className={btn}
               disabled={busy}

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { type Server, type ServerResponse, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { extname, join, resolve, sep } from "node:path";
@@ -63,7 +63,8 @@ const WAVE_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 /**
  * The evidence file `urlPath` names under `home` (`/evidence/<wave>/release/<file>`), or null:
  * not that shape, a wave id that is not one, a file name with a separator or a leading dot, a
- * type not allowed, or missing. The folder is resolved with `resolveDeskFile`'s traversal rule.
+ * type not allowed, missing, or a symlink whose target is outside the folder. The name is decoded
+ * exactly once: it is joined to the folder as validated, never handed to a second decoder.
  */
 export function resolveEvidenceFile(home: string, urlPath: string): string | null {
   const parts = (urlPath.split("?")[0]?.split("#")[0] ?? "").split("/");
@@ -80,7 +81,16 @@ export function resolveEvidenceFile(home: string, urlPath: string): string | nul
   if (!WAVE_ID.test(wave)) return null;
   if (file === "" || file.startsWith(".") || /[/\\\0]/.test(file)) return null;
   if (EVIDENCE_TYPES[extname(file).toLowerCase()] === undefined) return null;
-  return resolveDeskFile(join(home, "waves", wave, "release"), `/${file}`);
+  try {
+    const dir = realpathSync(join(home, "waves", wave, "release"));
+    const real = realpathSync(join(dir, file));
+    if (!real.startsWith(dir + sep) || EVIDENCE_TYPES[extname(real).toLowerCase()] === undefined)
+      return null;
+    if (!statSync(real).isFile()) return null;
+    return real;
+  } catch {
+    return null;
+  }
 }
 
 /** packages/volley-desk/dist in this checkout, or null when the repo root is not found. */

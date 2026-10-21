@@ -12,6 +12,7 @@ import { demoAutopilot, demoInbox } from "../src/store/fixtures";
 import { initialState, reduceAll } from "../src/store/reducer";
 import type { AgentView, DeskState, InboxItem } from "../src/store/types";
 import { COORDS_ID } from "../src/windows/coordinators/CoordinatorsWindow";
+import { answerCommand } from "../src/windows/inbox/InboxRow";
 import { NeedsYouWindow, type NeedsYouWindowProps } from "../src/windows/inbox/NeedsYouWindow";
 import {
   INBOX_FILTERS,
@@ -198,7 +199,7 @@ describe("the Needs you window", () => {
         answer: "blocker",
         where: { kind: "desk", device: "phone" },
       },
-      `volleyd inbox answer ${DECISION} "blocker"`,
+      `volleyd inbox answer '${DECISION}' 'blocker'`,
     );
   });
 
@@ -284,11 +285,26 @@ describe("the Needs you window", () => {
     expect(screen.queryByRole("listitem", { name: new RegExp(PICKER) })).toBeNull();
   });
 
+  it("a fading row still clears when a store update hands over a new array mid-fade", () => {
+    vi.useFakeTimers();
+    const { props, rerender } = setup();
+    const rest = ITEMS.filter((i) => i.id !== PICKER);
+    rerender(<NeedsYouWindow {...props} items={rest} />);
+    act(() => {
+      vi.advanceTimersByTime(100);
+    });
+    rerender(<NeedsYouWindow {...props} items={[...rest]} />);
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(screen.queryByRole("listitem", { name: new RegExp(PICKER) })).toBeNull();
+  });
+
   it("without broker credentials an option offers the copyable volleyd command", () => {
     setup({ control: null });
     fireEvent.click(within(row(DECISION)).getByRole("button", { name: "blocker" }));
     expect(
-      within(row(DECISION)).getByText(`volleyd inbox answer ${DECISION} "blocker"`),
+      within(row(DECISION)).getByText(`volleyd inbox answer '${DECISION}' 'blocker'`),
     ).toBeInTheDocument();
     expect(within(row(DECISION)).getByRole("button", { name: "Copy command" })).toBeInTheDocument();
   });
@@ -347,5 +363,13 @@ describe("the device an answer names", () => {
     expect(deskDevice(true)).toBe("kitchen-ipad");
     writeDeviceLabel("");
     expect(deskDevice(true)).toBe("phone");
+  });
+});
+
+describe("answerCommand", () => {
+  it("single-quotes the answer so a pasted command never expands $(…), backticks or $VAR", () => {
+    expect(answerCommand("inbox-1", "$(curl x|sh) `id` $HOME it's")).toBe(
+      "volleyd inbox answer 'inbox-1' '$(curl x|sh) `id` $HOME it'\\''s'",
+    );
   });
 });

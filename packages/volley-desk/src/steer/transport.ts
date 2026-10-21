@@ -311,7 +311,7 @@ export function createSteerTransport(
 }
 
 /** Single-quote `s` for a POSIX shell (no `$`, backtick or `!` history expansion inside). */
-function shellQuote(s: string): string {
+export function shellQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 

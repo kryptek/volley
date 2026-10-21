@@ -63,21 +63,40 @@ export interface NeedsYouWindowProps {
 function useLeaving(items: readonly InboxItem[]): InboxItem[] {
   const prev = useRef<readonly InboxItem[]>(items);
   const [leaving, setLeaving] = useState<InboxItem[]>([]);
+  // One timer per leaving id, outliving re-renders: `items` is a fresh array on every
+  // store update, so an effect-scoped timer would be cleared before it ever fired.
+  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   useEffect(() => {
     const ids = new Set(items.map((i) => i.id));
     const gone = prev.current.filter((i) => !ids.has(i.id));
     prev.current = items;
-    if (gone.length === 0) {
-      setLeaving((l) => (l.some((i) => ids.has(i.id)) ? l.filter((i) => !ids.has(i.id)) : l));
-      return;
+    for (const id of ids) {
+      const t = timers.current.get(id);
+      if (t !== undefined) {
+        clearTimeout(t);
+        timers.current.delete(id);
+      }
     }
-    setLeaving((l) => [...l.filter((i) => !ids.has(i.id)), ...gone]);
-    const t = setTimeout(
-      () => setLeaving((l) => l.filter((i) => !gone.some((g) => g.id === i.id))),
-      LEAVE_MS,
-    );
-    return () => clearTimeout(t);
+    setLeaving((l) => {
+      const kept = l.filter((i) => !ids.has(i.id));
+      return gone.length === 0 && kept.length === l.length ? l : [...kept, ...gone];
+    });
+    for (const g of gone) {
+      timers.current.set(
+        g.id,
+        setTimeout(() => {
+          timers.current.delete(g.id);
+          setLeaving((l) => l.filter((i) => i.id !== g.id));
+        }, LEAVE_MS),
+      );
+    }
   }, [items]);
+  useEffect(() => {
+    const map = timers.current;
+    return () => {
+      for (const t of map.values()) clearTimeout(t);
+    };
+  }, []);
   return leaving;
 }
 
