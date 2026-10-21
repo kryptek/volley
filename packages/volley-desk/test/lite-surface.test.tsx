@@ -21,12 +21,16 @@ function liteMedia(on: boolean) {
     },
     media: query,
     onchange: null,
-    addEventListener: (_: string, f: () => void) => state.listeners.add(f),
-    removeEventListener: (_: string, f: () => void) => state.listeners.delete(f),
+    addEventListener: (_: string, f: () => void) => {
+      state.listeners.add(f);
+    },
+    removeEventListener: (_: string, f: () => void) => {
+      state.listeners.delete(f);
+    },
     addListener: () => {},
     removeListener: () => {},
     dispatchEvent: () => false,
-  })) as typeof window.matchMedia;
+  })) as unknown as typeof window.matchMedia;
   return {
     set(next: boolean) {
       state.on = next;
@@ -117,9 +121,7 @@ describe("lite.css", () => {
     expect(media).toHaveLength(1);
     expect(media[0]?.[0].replace(/\s+/g, " ")).toBe(`@media ${LITE_SURFACE_QUERY}`);
     // Keyframes may sit beside it; no other rule does.
-    expect(top.filter(([p]) => !p.startsWith("@media") && !p.startsWith("@keyframes"))).toEqual(
-      [],
-    );
+    expect(top.filter(([p]) => !p.startsWith("@media") && !p.startsWith("@keyframes"))).toEqual([]);
   });
 
   it("sets every backdrop filter it names to none", () => {

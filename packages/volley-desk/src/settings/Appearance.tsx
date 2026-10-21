@@ -4,10 +4,12 @@
  * slider, the window style, the Needs-you effect and the tethers. Every
  * control writes the look (`useLook`), which persists per browser. Without
  * WebGL (`webgl={false}`) the WebGL backgrounds and the liquid chrome are not
- * offered, with a note, and `look` is the degraded look the Desk renders.
+ * offered, with a note, and `look` is the degraded look the Desk renders. On
+ * the lite surface (`lite`, a touch screen) the liquid chrome is not offered
+ * either, with a note under the window style.
  */
 import { useState } from "react";
-import { BG_NO_WEBGL_NOTE, needsWebGL } from "../look/Background";
+import { BG_NO_WEBGL_NOTE, SURFACE_LITE_NOTE, needsWebGL } from "../look/Background";
 import { BACKGROUNDS, REACT_BITS_BACKGROUNDS } from "../look/backgrounds";
 import { ATTN_LABEL, CHROME_LABEL } from "../look/options";
 import { DIM_MAX, type Look } from "../look/useLook";
@@ -18,11 +20,14 @@ export function Appearance({
   look,
   setLook,
   webgl = true,
+  lite = false,
 }: {
   look: Look;
   setLook: (change: Partial<Look>) => void;
   /** Whether this browser has WebGL (`useWebGL`). */
   webgl?: boolean;
+  /** Whether the Desk draws the lite surface (`useLiteSurface`). */
+  lite?: boolean;
 }) {
   const [q, setQ] = useState("");
   const needle = q.trim().toLowerCase();
@@ -34,7 +39,7 @@ export function Appearance({
       b.key.toLowerCase().includes(needle) ||
       b.key === look.bg,
   );
-  const chromes = webgl ? CHROME_LABEL : CHROME_LABEL.filter(([k]) => k !== "liquid");
+  const chromes = webgl && !lite ? CHROME_LABEL : CHROME_LABEL.filter(([k]) => k !== "liquid");
   const current = BACKGROUNDS.find((b) => b.key === look.bg);
   return (
     <>
@@ -97,6 +102,11 @@ export function Appearance({
             onPick={(chrome) => setLook({ chrome })}
           />
         </Row>
+        {lite && (
+          <div className="s-pad">
+            <p className="s-hint">{SURFACE_LITE_NOTE}</p>
+          </div>
+        )}
         <Row label="“Needs you” effect">
           <Seg
             label="Needs you effect"
