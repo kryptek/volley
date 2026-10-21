@@ -55,6 +55,8 @@ const FIXTURE_FOR: Record<string, string> = {
   "pre-compact": "pre-compact.json",
   "pre-tool-use-lease": "pre-tool-use-bash.json",
   "pre-tool-use": "pre-tool-use-bash.json",
+  "picker-pre": "pre-tool-use-ask.json",
+  "picker-post": "post-tool-use-ask.json",
 };
 
 describe("no .volley/agent.json → silent no-op", () => {

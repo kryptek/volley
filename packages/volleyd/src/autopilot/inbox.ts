@@ -63,6 +63,12 @@ export interface InboxAnswerRequest {
   where: InboxWhere;
 }
 
+/**
+ * Carries out an answer to an item that is not a decision, before it is recorded: a reason
+ * returned refuses it (the item stays open).
+ */
+export type InboxHandler = (item: InboxItem, req: InboxAnswerRequest) => Promise<string | null>;
+
 export const INBOX_CHANNEL = "_inbox";
 export const INBOX_FILTER = "volley/_inbox/+";
 export const inboxTopic = (id: string) => `volley/_inbox/${id}`;
@@ -211,4 +217,146 @@ export function foldInbox(map: Map<string, InboxItem>, events: readonly JournalE
     }
   }
   return map;
+}
+
+/** An item id (inbox-item.schema.json `id`): a tool use id is mixed-case. */
+export const INBOX_ID = /^[dphr]-[A-Za-z0-9_-]{1,200}$/;
+
+/** The id of the item for picker `toolUseId` in `agentId`'s session. */
+export const pickerItemId = (agentId: string, toolUseId: string) => `p-${agentId}-${toolUseId}`;
+
+/** The id of the item for the handoff `agentId`'s hook published as progress `seq`. */
+export const handoffItemId = (agentId: string, seq: number) => `h-${agentId}-${seq}`;
+
+/** One `AskUserQuestion` question, as the PreToolUse hook publishes it (`picker_opened`). */
+export interface PickerQuestion {
+  question: string;
+  header?: string;
+  options: InboxOption[];
+  multiSelect?: boolean;
+}
+
+/** `picker_opened.questions`, or null when it is not a non-empty list of questions. */
+export function parsePickerQuestions(v: unknown): PickerQuestion[] | null {
+  if (!Array.isArray(v) || v.length === 0) return null;
+  const out: PickerQuestion[] = [];
+  for (const q of v) {
+    if (typeof q !== "object" || q === null) return null;
+    const o = q as Record<string, unknown>;
+    if (typeof o.question !== "string" || o.question.trim() === "" || !Array.isArray(o.options))
+      return null;
+    const options: InboxOption[] = [];
+    for (const opt of o.options) {
+      const label = (opt as { label?: unknown } | null)?.label;
+      if (typeof label !== "string" || label === "") return null;
+      const description = (opt as { description?: unknown }).description;
+      options.push({ label, ...(typeof description === "string" ? { description } : {}) });
+    }
+    out.push({
+      question: o.question,
+      ...(typeof o.header === "string" && o.header !== "" ? { header: o.header } : {}),
+      options,
+      ...(typeof o.multiSelect === "boolean" ? { multiSelect: o.multiSelect } : {}),
+    });
+  }
+  return out;
+}
+
+/** Where a session's screen is, so an answer can be carried out on it. */
+export interface SessionSurface {
+  wave?: WaveId;
+  task?: TaskId;
+  /** The terminal workspace (cmux ref, tmux session); absent when volleyd cannot see it. */
+  workspace?: string;
+  /** The host's name in the wave file (`local`, or a paired machine's). */
+  host?: string;
+  /** The machine its terminal is on, for `where: { kind: "terminal", machine }`. */
+  machine: string;
+  /** volleyd supervises it (a wave's agent), rather than an interactive (coordinator) session. */
+  supervised: boolean;
+}
+
+const surfaceFields = (s: SessionSurface) => ({
+  ...(s.wave !== undefined ? { wave: s.wave } : {}),
+  ...(s.task !== undefined ? { task: s.task } : {}),
+});
+
+const surfaceSource = (s: SessionSurface) => ({
+  ...(s.workspace !== undefined ? { workspace: s.workspace } : {}),
+  ...(s.host !== undefined ? { host: s.host } : {}),
+  machine: s.machine,
+});
+
+/** `w1/T1`, or the agent id of a session no wave task names. */
+const whoseLabel = (agentId: string, s: SessionSurface) =>
+  s.wave !== undefined && s.task !== undefined ? `${s.wave}/${s.task}` : agentId;
+
+/**
+ * The item for a picker: one question's text and options (any number of questions is answered
+ * in its terminal, so their item lists them all, without options). A coordinator's own question
+ * is the owner's (`owner_only`); a wave agent's is anyone's who may steer.
+ */
+export function itemForPicker(
+  agentId: string,
+  toolUseId: string,
+  questions: PickerQuestion[],
+  surface: SessionSurface,
+  openedAt: string,
+): InboxItem {
+  const [first] = questions as [PickerQuestion];
+  const one = questions.length === 1;
+  return {
+    id: pickerItemId(agentId, toolUseId),
+    kind: "picker",
+    version: 1,
+    owner_only: !surface.supervised,
+    ...surfaceFields(surface),
+    agent_id: agentId,
+    title: `${one ? (first.header ?? "Question") : `${questions.length} questions`} · ${whoseLabel(agentId, surface)}`,
+    question: one ? first.question : questions.map((q) => q.question).join("\n"),
+    ...(one
+      ? { options: first.options, allow_other: true, multi: first.multiSelect === true }
+      : {}),
+    pointers: {},
+    opened_at: openedAt,
+    source: { tool_use_id: toolUseId, questions, ...surfaceSource(surface) },
+  };
+}
+
+/** The item for a coordinator turn that ended on `question` (Stop hook `awaiting_input`). */
+export function itemForHandoff(
+  agentId: string,
+  seq: number,
+  question: string,
+  surface: SessionSurface,
+  openedAt: string,
+): InboxItem {
+  return {
+    id: handoffItemId(agentId, seq),
+    kind: "handoff",
+    version: 1,
+    owner_only: !surface.supervised,
+    ...surfaceFields(surface),
+    agent_id: agentId,
+    title: `Handoff · ${whoseLabel(agentId, surface)}`,
+    question,
+    allow_other: true,
+    pointers: {},
+    opened_at: openedAt,
+    source: { seq, ...surfaceSource(surface) },
+  };
+}
+
+/**
+ * What a `picker_answered`'s `answers` (question → answer) say, as one answer: the answer itself
+ * for one question, `question → answer` lines for several. Null when there is none.
+ */
+export function pickerAnswerText(answers: unknown): string | null {
+  if (typeof answers !== "object" || answers === null) return null;
+  const entries = Object.entries(answers as Record<string, unknown>).filter(
+    (e): e is [string, string] => typeof e[1] === "string" && e[1] !== "",
+  );
+  if (entries.length === 0) return null;
+  if (entries.length === 1) return (entries[0] as [string, string])[1];
+  return entries.map(([q, a]) => `${q} → ${a}`).join("\n");
 }

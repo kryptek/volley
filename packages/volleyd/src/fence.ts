@@ -59,7 +59,8 @@ import { AGENT_BRANCH } from "./worktree";
  *     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
  *       with the LaunchToken of the `.volley/launch.sh` volleyd sealed in exactly <dir>
  *     send --workspace <ref> <text>   text: TYPED_TEXT only
- *     send-key --workspace <ref> Enter|Escape · read-screen --workspace <ref> [--lines <n>]
+ *     send-key --workspace <ref> Enter|Escape | Up|Down|Space (PICKER below) ·
+ *       read-screen --workspace <ref> [--lines <n>]
  *     list-workspaces · ping
  *   claude — volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript), which the
  *     launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS), including
@@ -121,6 +122,15 @@ import { AGENT_BRANCH } from "./worktree";
  *     `/model <id>`    with the ModelSwitchToken naming exactly <id> (`mintModelSwitchToken`,
  *                      minted when an approved model_switch decision is acted on); <id> is a
  *                      MODEL_ID, the wave-file schema's `model` pattern
+ *     an inbox answer  with the PickerToken (a picker's Other text) or HandoffToken (a
+ *                      coordinator handoff's reply) carrying exactly that text, typed once per
+ *                      token; minted only for one line with no control character that does not
+ *                      start with `/` or `!` (never a slash command or bash-mode line)
+ *
+ * PICKER (needs-you inbox pickers, SPEC §4.6.18): `cmux send-key … Up|Down|Space` and
+ *   `tmux send-keys -t <t> Up|Down|Space` only with a PickerToken (`mintPickerToken`, minted for
+ *   one item version after the screen showed its picker) naming that key; `Enter` and `Escape`
+ *   need no token. No other key name is ever sent.
  *
  * SSH (remote hosts, src/hosts/ssh-tmux.ts) — three forms only:
  *   ssh -T [-o <Opt>=<v>]… <target> bash -s   with a fenced RemoteScript (FenceOptions.remote):
@@ -143,7 +153,7 @@ import { AGENT_BRANCH } from "./worktree";
  *     the LaunchToken sealed for <dir>) | new-session -d -s volley-signin-<acct> -c <dir>
  *     'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
  *     `sealRemoteSigninScript`) | capture-pane | has-session |
- *     send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> |
+ *     send-keys -t <t> Enter|Escape (Up|Down|Space: PICKER) | send-keys -t <t> -l -- <TYPED_TEXT> |
  *     show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
  *     PATH, from printenv, then the server's own dirs) —
  *     kill-session -t volley-signin-<acct> (no consent: a sign-in session holds no agent's
@@ -297,6 +307,109 @@ export function mintModelSwitchToken(model: string, decisionId: string): ModelSw
   const token = Object.freeze({ model, decision_id: decisionId });
   switches.add(token);
   return token;
+}
+
+const pickers = new WeakSet<object>();
+const handoffs = new WeakSet<object>();
+/** Tokens whose `text` was typed already: an answer's text is typed once. */
+const spentText = new WeakSet<object>();
+
+/** The navigation keys a PickerToken may unlock (`Enter`, `Escape` need no token). */
+export const PICKER_KEYS = ["Up", "Down", "Space"] as const;
+export type PickerKey = (typeof PICKER_KEYS)[number];
+
+/**
+ * Text an inbox answer may type into a Claude Code session: one line, no control character, and
+ * not a slash command (`/…`) or bash-mode line (`!…`) should it land in the prompt.
+ */
+export function answerTextRefusal(text: string): string | null {
+  if (text.trim() === "") return "empty text";
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(text))
+    return "a control character or a second line";
+  if (/^\s*[/!]/.test(text)) return "a slash command or shell line";
+  return null;
+}
+
+/**
+ * Selecting an answer in a Claude Code picker for one inbox item (SPEC §4.6.18): `Up`, `Down`
+ * and `Space` are pressed into an agent's terminal only with the token naming them, and its
+ * Other text typed once. Only `mintPickerToken` creates one (checked by identity).
+ */
+export interface PickerToken {
+  readonly item_id: string;
+  readonly version: number;
+  readonly keys: readonly PickerKey[];
+  readonly text?: string;
+}
+
+/** Callers: the daemon, carrying out an accepted picker answer after verifying the screen. */
+export function mintPickerToken(t: {
+  item_id: string;
+  version: number;
+  keys: readonly string[];
+  text?: string;
+}): PickerToken {
+  const bad = t.keys.find(
+    (k) => !(PICKER_KEYS as readonly string[]).includes(k) && !NAMED_KEYS.has(k),
+  );
+  if (bad !== undefined)
+    throw new FenceError(`picker key ${JSON.stringify(bad)}`, "not a picker key");
+  const why = t.text !== undefined ? answerTextRefusal(t.text) : null;
+  if (why !== null) throw new FenceError(`picker text ${JSON.stringify(t.text)}`, why);
+  const token = Object.freeze({
+    item_id: t.item_id,
+    version: t.version,
+    keys: Object.freeze(
+      [...new Set(t.keys)].filter((k): k is PickerKey =>
+        (PICKER_KEYS as readonly string[]).includes(k),
+      ),
+    ),
+    ...(t.text !== undefined ? { text: t.text } : {}),
+  });
+  pickers.add(token);
+  return token;
+}
+
+/**
+ * A coordinator handoff's reply (SPEC §4.6.18): typed into the session's idle prompt once, then
+ * submitted with `Enter`. Only `mintHandoffToken` creates one (checked by identity).
+ */
+export interface HandoffToken {
+  readonly item_id: string;
+  readonly version: number;
+  readonly text: string;
+}
+
+/** Callers: the daemon, carrying out an accepted handoff answer at an idle prompt. */
+export function mintHandoffToken(t: {
+  item_id: string;
+  version: number;
+  text: string;
+}): HandoffToken {
+  const why = answerTextRefusal(t.text);
+  if (why !== null) throw new FenceError(`handoff text ${JSON.stringify(t.text)}`, why);
+  const token = Object.freeze({ item_id: t.item_id, version: t.version, text: t.text });
+  handoffs.add(token);
+  return token;
+}
+
+/** The answer token whose exact text `text` is and that has not typed it yet, or null. */
+function answerTextToken(text: string, opts: FenceOptions): object | null {
+  for (const [t, set] of [
+    [opts.picker, pickers],
+    [opts.handoff, handoffs],
+  ] as const) {
+    if (t !== undefined && set.has(t) && t.text === text) return t;
+  }
+  return null;
+}
+
+/** A named key volleyd may press: Enter or Escape, or one the picker token names. */
+function keyAllowed(key: string, opts: FenceOptions): boolean {
+  if (NAMED_KEYS.has(key)) return true;
+  const t = opts.picker;
+  return t !== undefined && pickers.has(t) && (t.keys as readonly string[]).includes(key);
 }
 
 const launches = new WeakSet<object>();
@@ -551,6 +664,10 @@ export interface FenceOptions {
   merge?: MergeToken;
   /** For typing `/model <id>`: the approved switch. */
   modelSwitch?: ModelSwitchToken;
+  /** For Up/Down/Space and a picker's Other text: the inbox item's picker answer. */
+  picker?: PickerToken;
+  /** For typing a coordinator handoff's reply: the inbox item's answer. */
+  handoff?: HandoffToken;
   /** For starting a sign-in tmux session: the sealed sign-in script. */
   signin?: SigninToken;
   /** For the sign-in forward (`ssh -N -L`): the token a remote sign-in minted. */
@@ -928,6 +1045,12 @@ function typedTextRefusal(text: string, opts: FenceOptions): string | null {
       ? null
       : "/model without the token of an approved model_switch decision";
   }
+  const answer = answerTextToken(text, opts);
+  if (answer !== null) {
+    if (spentText.has(answer)) return "an inbox answer's text is typed once";
+    spentText.add(answer);
+    return null;
+  }
   return "text volleyd never types";
 }
 
@@ -1191,7 +1314,7 @@ function cmux(args: string[], opts: FenceOptions): Verdict {
       case "new-workspace":
         return newWorkspaceAllowed(rest, opts);
       case "send-key":
-        return ws && rest.length === 3 && NAMED_KEYS.has(rest[2] ?? "");
+        return ws && rest.length === 3 && keyAllowed(rest[2] ?? "", opts);
       case "read-screen":
         return (
           ws &&
@@ -1789,7 +1912,7 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
     // TYPED_TEXT. (Without -l, tmux types any argument that is not a key name as text.)
     const [t, target, ...tail] = rest;
     if (t !== "-t" || target === undefined || target.startsWith("-")) return deny("tmux send-keys");
-    if (tail.length === 1 && NAMED_KEYS.has(tail[0] ?? "")) return ALLOW;
+    if (tail.length === 1 && keyAllowed(tail[0] ?? "", opts)) return ALLOW;
     if (tail.length !== 3 || tail[0] !== "-l" || tail[1] !== "--") return deny("tmux send-keys");
     const why = typedTextRefusal(tail[2] ?? "", opts);
     return why === null ? ALLOW : deny(`tmux send-keys (${why})`);
