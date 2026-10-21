@@ -1,0 +1,168 @@
+/*
+ * The Machines window (windows/machines): one dense row per machine, the figures in tabular
+ * numbers, two sparklines (load per core in the Desk's teal, memory used in coral) that turn
+ * amber at 70 % and red at 90 %, a down machine's flat grey lines. Below 700 px (the JS
+ * `NARROW_PX`; `.machines-win--phone` is the same switch from JS) each row stacks: the name line,
+ * then the two sparklines full width.
+ */
+.machines-win {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mrows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mrow-item {
+  position: relative;
+}
+.machines-empty {
+  margin: 8px 0;
+}
+.mrow {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 4px 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(214, 224, 255, 0.03);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.mrow:hover,
+.mrow:focus-visible {
+  border-color: rgba(110, 231, 249, 0.45);
+  background: rgba(110, 231, 249, 0.06);
+}
+.mrow-line {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.mrow-line .m-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--mute);
+}
+.mrow-line .m-dot--up {
+  background: var(--ok);
+}
+.mrow-line .m-dot--overloaded {
+  background: var(--amber);
+}
+.mrow-name {
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mrow-load,
+.mrow-mem,
+.mrow-down {
+  color: var(--mute);
+}
+.mrow-agents {
+  margin-left: auto;
+}
+.lvl--warn {
+  color: var(--amber);
+}
+.lvl--bad {
+  color: var(--bad);
+}
+.mrow-specs {
+  font-size: 11.5px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.mrow-sparks {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* --------------------------------------------------------------- sparklines */
+.spark {
+  display: block;
+  width: 100%;
+  height: 24px;
+  overflow: visible;
+}
+.spark polyline,
+.spark line {
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.spark--load {
+  --spark: #6ee7f9;
+}
+.spark--mem {
+  --spark: var(--hot);
+}
+.spark--warn {
+  --spark: var(--amber);
+}
+.spark--bad {
+  --spark: var(--bad);
+}
+.spark polyline {
+  stroke: var(--spark);
+}
+.spark circle {
+  fill: var(--spark);
+}
+.spark--down line.spark-base {
+  stroke: var(--mute);
+  stroke-dasharray: 3 3;
+  opacity: 0.6;
+}
+
+/* Read by screen readers, not drawn: the row's figures and state in words. */
+.mrow-summary {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ------------------------------------------------------------------ phone */
+.machines-win--phone .mrow {
+  grid-template-columns: 1fr;
+  min-height: 48px;
+}
+.machines-win--phone .mrow-sparks {
+  grid-template-columns: 1fr;
+}
+@media (max-width: 699px) {
+  .mrow {
+    grid-template-columns: 1fr;
+    min-height: 48px;
+  }
+  .mrow-sparks {
+    grid-template-columns: 1fr;
+  }
+}
