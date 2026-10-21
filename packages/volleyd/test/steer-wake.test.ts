@@ -105,6 +105,37 @@ describe("steer wakes an idle agent", () => {
     ).toBeUndefined();
   });
 
+  it("a woken message's late ack clears the unacked mark although a newer message was sent since", async () => {
+    await setup();
+    await idle();
+    const a = await steer();
+    await clock.advance(WAKE_MS);
+    await s.event("agent_woken");
+    const b = await steer({ text: "and rebase first" });
+    await ack(a.message_id);
+    await ack(b.message_id);
+    await s.event("steering_received");
+    await s.consumed();
+    expect(
+      s.daemon.snapshot("w1")?.tasks.find((t) => t.id === "T1")?.steer_unacked,
+    ).toBeUndefined();
+  });
+
+  it("a woken message's ack after a daemon restart clears the unacked mark", async () => {
+    await setup();
+    await idle();
+    const sent = await steer();
+    await clock.advance(WAKE_MS);
+    await s.event("agent_woken");
+    await s.daemon.stop();
+    const d = await s.restart();
+    await s.event("reconciled");
+    await s.settled();
+    await ack(sent.message_id);
+    await s.event("steering_received");
+    expect(d.snapshot("w1")?.tasks.find((t) => t.id === "T1")?.steer_unacked).toBeUndefined();
+  });
+
   it("a working agent is never typed into", async () => {
     await setup();
     await steer();

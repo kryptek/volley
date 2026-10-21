@@ -6,7 +6,8 @@ const HELP = `Usage: volleyd steer <wave> <task> <text...> [--role <role>] [--wa
 
 Send mailbox steering to the task's live agent, whatever its role (owner only; --role one of
 implementer, spec_reviewer, quality_reviewer, fixup, rebase, release; task _release for the
-release train's stage agent). Each steer carries a per-task seq and supersedes the previous one.
+release train's stage agent; when two reviewers run together, the newest spawned is steered
+unless --role names one). Each steer carries a per-task seq and supersedes the previous one.
 Waits up to --wait-ack-ms (default 30000; 0 = don't wait) for the agent's steering_acked and
 reports \`delivered (acked)\`, \`delivered (received)\` (mailbox ack only),
 \`delivered · woke the agent\` (an idle agent whose hooks did not ack within

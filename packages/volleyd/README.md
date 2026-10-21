@@ -1233,7 +1233,9 @@ The daemon archives on its own, as `volleyd`:
 agent: its newest spawned agent that is not retired, whatever its role (a rebase agent runs in the
 `fixup` stage). `--role` picks the newest live agent of one role (`implementer`, `spec_reviewer`,
 `quality_reviewer`, `fixup`, `rebase` or `release`); the task `_release` names the release
-train's stage agent. Its `correlation_id`
+train's stage agent. When a stage runs two agents at once (`spec_reviewer` and
+`quality_reviewer`), a steer without `--role` reaches the one spawned last: name the role to pick.
+Its `correlation_id`
 is the message id; `payload.seq` counts steers to that task (1, 2, …) and `payload.supersedes`
 names the previous steer, so the recipient can drop stale guidance (a [merge
 nudge](#the-pipeline-and-the-merge-ready-gate) is additive: it supersedes nothing, and the next

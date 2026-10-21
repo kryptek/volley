@@ -9441,20 +9441,28 @@ export class Daemon {
     this.wakes.set(messageId, { agent: agentId, wave, task, timer, woken: false });
   }
 
-  /** `by` acked `messageId`: no wake; one that was woken is journaled as received at last. */
+  /**
+   * `by` acked `messageId`: no wake; one that was woken is journaled as received at last. The
+   * journal's `woken` mark decides, not the timer map: a newer message, or a restart, drops the
+   * woken message's entry there before its ack comes.
+   */
   private mailboxHeard(messageId: string, by: string): void {
     const w = this.wakes.get(messageId);
-    if (w === undefined || w.agent !== by) return;
-    this.time.clearTimeout(w.timer);
-    this.wakes.delete(messageId);
-    if (!w.woken || !this.waves.has(w.wave)) return;
-    void this.enqueue(() =>
-      this.append(w.wave, {
-        type: "steering_received",
-        task: w.task,
-        data: { agent_id: by, message_id: messageId },
-      }),
-    );
+    if (w !== undefined && w.agent === by) {
+      this.time.clearTimeout(w.timer);
+      this.wakes.delete(messageId);
+    }
+    // In the queue: a wake being typed journals its agent_woken first.
+    void this.enqueue(async () => {
+      for (const [wave, log] of this.waves)
+        for (const [task, m] of Object.entries(log.record.woken ?? {}))
+          if (m.message_id === messageId && m.agent_id === by)
+            await this.append(wave, {
+              type: "steering_received",
+              task,
+              data: { agent_id: by, message_id: messageId },
+            });
+    });
   }
 
   /**
