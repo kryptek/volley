@@ -175,6 +175,7 @@ export function formatWave(
   // Which rules the agents got (absent: a state from before the field).
   const preface = s.brief_preface !== undefined ? `  ${formatBriefPreface(s.brief_preface)}\n` : "";
   const hygiene = s.hygiene_level !== undefined ? `  ${formatHygiene(s)}\n` : "";
+  const github = s.github !== undefined ? `  github: ${s.github.slug}\n` : "";
   // What autopilot did in the wave (absent: a state from before autopilot).
   const ap = s.autopilot;
   const autopilot =
@@ -206,7 +207,15 @@ export function formatWave(
     .filter((d) => d.wave === s.wave && s.open_decisions.includes(d.decision_id))
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
   return (
-    header + queue + release + autopilot + preface + hygiene + rows.join("") + decisions.join("")
+    header +
+    queue +
+    release +
+    autopilot +
+    preface +
+    hygiene +
+    github +
+    rows.join("") +
+    decisions.join("")
   );
 }
 

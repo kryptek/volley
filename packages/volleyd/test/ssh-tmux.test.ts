@@ -2,7 +2,14 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ExecOptions, ExecResult } from "../src/exec";
-import { type RemoteStep, mintConsentToken, mintScriptToken, sealLaunchScript } from "../src/fence";
+import {
+  type RemoteStep,
+  mintConsentToken,
+  mintHandoffToken,
+  mintPickerToken,
+  mintScriptToken,
+  sealLaunchScript,
+} from "../src/fence";
 import { type RemoteHostSpec, SshTmuxHost, resolveRemoteHost } from "../src/hosts/ssh-tmux";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
 import type { SpawnError } from "../src/spawn-error";
@@ -379,6 +386,21 @@ describe("SshTmuxHost", () => {
     expect(r.steps().map((s) => s.argv)).toEqual([
       ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "Enter"],
       ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", LAUNCH_COMMAND],
+    ]);
+  });
+
+  it("picker keys and a handoff reply map to tmux send-keys, with their tokens", async () => {
+    const r = remote();
+    const picker = mintPickerToken({ item_id: "p-a1-t1", version: 1, keys: ["Up"] });
+    await r.host.sendKeys("w1-T1-implementer", "Up", { picker });
+    const handoff = mintHandoffToken({ item_id: "h-a1-3", version: 1, text: "hold" });
+    await r.host.sendText("w1-T1-implementer", "hold", { handoff });
+    await expect(r.host.sendKeys("w1-T1-implementer", "Down", { picker })).rejects.toThrow(
+      /FENCE_DENIED/,
+    );
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "Up"],
+      ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", "hold"],
     ]);
   });
 

@@ -1,5 +1,5 @@
-import { render } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import { Dag, type DagNode, layoutDag } from "../src/windows/wave/Dag";
 
 // The epic's example wave file: T0 → T1, T2 → T3.
@@ -57,5 +57,41 @@ describe("Dag", () => {
     const [t0, t1, t2, t3] = layoutDag(EXAMPLE).nodes.map((n) => n.y);
     expect(t0).toBe(((t1 ?? 0) + (t2 ?? 0)) / 2);
     expect(t3).toBe(t0);
+  });
+});
+
+describe("Dag issue links", () => {
+  const HREF = "https://github.com/example-org/example-repo/issues/101";
+  const linked: DagNode[] = [
+    { id: "T0", issue: 101, after: [], stage: "merged", issueHref: HREF },
+    { id: "T1", issue: 102, after: ["T0"], stage: "queued" },
+  ];
+
+  it("a node with issueHref links its corner label; one without keeps the bare text", () => {
+    const { container } = render(<Dag tasks={linked} accent="#6ee7f9" />);
+    const a = screen.getByRole("link", { name: "Issue #101 on GitHub" });
+    expect(a).toHaveClass("dag-issue-link");
+    expect(a).toHaveAttribute("href", HREF);
+    expect(a).toHaveAttribute("target", "_blank");
+    expect(a.getAttribute("rel")).toContain("noopener");
+    expect(a.querySelector("text.dag-issue")).toHaveTextContent("#101");
+    expect(Number(a.getAttribute("tabindex") ?? "0")).toBeGreaterThanOrEqual(0);
+    const t1 = container.querySelector('.dag-node[data-id="T1"]') as Element;
+    expect(t1.querySelector("a")).toBeNull();
+    expect(t1.querySelector("text.dag-issue")).toHaveTextContent("#102");
+  });
+
+  it("a click on the link never reaches a click handler around the node", () => {
+    const onClick = vi.fn();
+    render(
+      // biome-ignore lint/a11y/useKeyWithClickEvents: a test probe for click propagation
+      <div onClick={onClick}>
+        <Dag tasks={linked} accent="#6ee7f9" />
+      </div>,
+    );
+    fireEvent.click(screen.getByRole("link", { name: "Issue #101 on GitHub" }));
+    expect(onClick).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("#102"));
+    expect(onClick).toHaveBeenCalledTimes(1);
   });
 });

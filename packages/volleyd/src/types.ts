@@ -234,6 +234,14 @@ export type PublicHygiene = "auto" | "on" | "off";
 /** `gh repo view --json visibility`, lowercased; `unknown` when it could not be read. */
 export type RepoVisibility = "public" | "private" | "internal" | "unknown";
 
+/** wave-state `github` (SPEC §4.6.1): the repository on GitHub, as `gh repo view` read it. */
+export interface GitHubRepo {
+  /** `owner/repo` (gh's `nameWithOwner`). */
+  slug: string;
+  /** The repository's canonical URL (gh's `url`; a GitHub Enterprise host as-is). */
+  url: string;
+}
+
 /**
  * How the reviewers treat public hygiene: `p1` (every hit blocks the merge, the result's
  * `hygiene` block is required), `p3` (hits are non-blocking notes, the block optional) or `off`.
@@ -413,6 +421,11 @@ export interface WaveState {
   repo_visibility?: RepoVisibility | null;
   /** How the reviewers treat public hygiene for this version (reviews.ts hygieneLevel). */
   hygiene_level?: HygieneLevel;
+  /**
+   * The repository on GitHub as read for this version (SPEC §4.6.1): absent when it could not
+   * be read, never derived from `repo` or a remote.
+   */
+  github?: GitHubRepo;
   /** What autopilot answered and escalated in this wave (SPEC §4.6.16). */
   autopilot?: AutopilotState;
   /** The merge queue in merge order (SPEC §4.6.17); absent while it is empty. */

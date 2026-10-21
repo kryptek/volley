@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-ab12",
+  "parent_id": null,
+  "wall_time": "2026-10-20T14:06:10.000Z",
+  "channel": "progress",
+  "type": "picker_answered",
+  "payload": {
+    "tool_use_id": "toolu_01LV3L22tMmNCxfPc68am4Sn",
+    "answers": { "Dispatch wave w2 now?": "go" },
+    "seq": 45,
+    "source": "harness-hook",
+    "hook_event": "PostToolUse"
+  }
+}

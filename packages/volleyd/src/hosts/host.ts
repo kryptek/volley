@@ -1,8 +1,11 @@
 import type { ExecFn } from "../exec";
 import type { ConsentToken, FenceOptions, LaunchToken } from "../fence";
 
-/** The fence tokens typed text needs (src/fence.ts TYPED_TEXT): a sealed launch, a switch. */
-export type TypedTextTokens = Pick<FenceOptions, "launch" | "modelSwitch">;
+/**
+ * The fence tokens typed text and keys need (src/fence.ts TYPED_TEXT, PICKER): a sealed launch, a
+ * switch, an inbox picker's or handoff's answer.
+ */
+export type TypedTextTokens = Pick<FenceOptions, "launch" | "modelSwitch" | "picker" | "handoff">;
 
 /** Where and how one agent's worktree is cut. */
 export interface WorktreeSpec {
@@ -88,8 +91,8 @@ export interface Host {
   findWorkspace(name: string, candidate?: string): Promise<string | null>;
   /** The last `lines` lines of the workspace's screen, or null when it cannot be read. */
   readScreen(workspace: string, lines: number): Promise<string | null>;
-  /** Press one key (e.g. `Enter`, `Escape`) in the workspace. */
-  sendKeys(workspace: string, key: string): Promise<void>;
+  /** Press one key (`Enter`, `Escape`; `Up`, `Down`, `Space` with a picker token) in the workspace. */
+  sendKeys(workspace: string, key: string, tokens?: TypedTextTokens): Promise<void>;
   /** Type text into the workspace (no trailing Enter), with the token the fence needs for it. */
   sendText(workspace: string, text: string, tokens?: TypedTextTokens): Promise<void>;
   /**
