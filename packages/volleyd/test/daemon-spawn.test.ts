@@ -7,7 +7,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { cleanupWave } from "../src/commands/cleanup";
-import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
 import { ControlClient } from "../src/control";
 import type { Daemon } from "../src/daemon";
 import { decisionTopic } from "../src/decisions";
@@ -32,7 +32,7 @@ import {
   fakeRemoteHost,
 } from "./helpers/fake-host";
 import { type EventMatch, type JournalWait, journalWait } from "./helpers/journal-wait";
-import { runCli } from "./helpers/run-cli";
+import { runCli, withoutOwnerWarning } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
 
 const ID = "w1-t1-implementer-1";
@@ -128,7 +128,9 @@ describe("daemon spawn loop", () => {
           },
         ]),
       })
-      .on(["gh", "pr", "view"], { stdout: JSON.stringify({ state: "OPEN" }) });
+      .on(["gh", "pr", "view"], {
+        stdout: JSON.stringify({ state: "OPEN", baseRefName: "release/w1" }),
+      });
     fake.on(["git", "-C", repo, "fetch"], () =>
       fetchFails ? { code: 128, stderr: "fatal: unable to access origin" } : {},
     );
@@ -271,7 +273,11 @@ describe("daemon spawn loop", () => {
     expect(await cleanupWave(env.home, "w1", { yes: true, force: false, exec: fx.exec }, io)).toBe(
       0,
     );
-    expect(fx.argvs()).toEqual([["git", "-C", repo, "worktree", "remove", worktree]]);
+    expect(fx.argvs()).toEqual([
+      ["git", "-C", repo, "worktree", "remove", worktree],
+      // The wave's leftover claude processes are looked for (none here).
+      ["ps", "-axo", "pid=,command="],
+    ]);
   });
 
   it("a failed release-branch fetch refuses with BASE_STALE, backs off like any spawn failure, and the retry records base_sha", async () => {
@@ -500,7 +506,7 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       `wave: ${wave}\nrepo: ${repo}\nrelease_branch: release/${wave}\nmodel: claude-opus-5-5\npipeline: [implement, spec_review]\n${head}tasks:\n${tasks}`,
     );
     const r = await runCli(["run", file], env.env);
-    expect(r.stderr).toBe("");
+    expect(withoutOwnerWarning(r.stderr)).toBe("");
     expect(r.exitCode).toBe(0);
   };
 
@@ -508,6 +514,8 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     o: {
       drain?: boolean;
       extraConfig?: string;
+      /** `fleet.local_agents` (unset: derived, so `fallback` with box configured). */
+      localAgents?: "always" | "fallback" | "never";
       os?: typeof CALM_OS;
       doctor?: Partial<typeof GREEN_DOCTOR>;
     } = {},
@@ -532,7 +540,7 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     );
     writeFileSync(
       join(env.home, "config.yaml"),
-      `fleet:\n  local_name: control\nhosts:\n  box:\n    target: dev@box\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n${o.drain === true ? "    drain: true\n" : ""}${o.extraConfig ?? ""}`,
+      `fleet:\n  local_name: control\n${o.localAgents !== undefined ? `  local_agents: ${o.localAgents}\n` : ""}hosts:\n  box:\n    target: dev@box\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n${o.drain === true ? "    drain: true\n" : ""}${o.extraConfig ?? ""}`,
     );
     clock = fakeClock(1_000_000);
     daemon = await env.start({
@@ -755,11 +763,71 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     );
   });
 
+  it("fallback (the default with a peer): the box takes the work while eligible; down past the grace, the own machine does; back, the box again", async () => {
+    localClaude = true;
+    await setup();
+    const placedIn = (wave: string) => journal(wave).find((e) => e.type === "task_placed")?.data;
+    // The box is eligible: the idle own machine is not a candidate.
+    await submit("w1", "placement: auto\n", "  T1: { issue: 42 }\n");
+    await tick();
+    expect(placedIn("w1")).toMatchObject({ host: "box", by: "auto" });
+    const ownLine = (placedIn("w1")?.candidates as { host: string; line: string }[]).find(
+      (c) => c.host === "control",
+    )?.line;
+    expect(ownLine).toBe("ineligible: fallback: box is eligible");
+    expect((await verdict("control"))?.payload.local_agents).toEqual({
+      mode: "fallback",
+      active: false,
+      why: "box eligible",
+    });
+    // `volleyd status` says so in its header.
+    expect((await runCli(["status"], env.env)).stdout).toContain(
+      "local agents: fallback (idle: box eligible)\n",
+    );
+
+    // The box goes silent: down after machine_down_after_ms, but within the grace it may be back.
+    await tick(DAEMON_DEFAULTS.machine_down_after_ms);
+    await submit("w2", "placement: auto\n", "  T1: { issue: 42 }\n");
+    await tick();
+    expect(journal("w2").some((e) => e.type === "task_placed")).toBe(false);
+    expect((await state("w2")).tasks.find((t) => t.id === "T1")?.why_waiting).toMatch(
+      /^no eligible machine: control: fallback: box may be back \(down \d+ s, grace 300 s\)$/,
+    );
+
+    // Past placement.down_decision_after_s: the own machine is the fallback.
+    await tick(CONFIG_DEFAULTS.placement.down_decision_after_s * 1000);
+    await eventually(async () => {
+      await tick();
+      return placedIn("w2") !== undefined;
+    });
+    expect(placedIn("w2")).toMatchObject({ host: "control", local: true, by: "auto" });
+    const chosen = (placedIn("w2")?.candidates as { host: string; line: string }[])[0];
+    expect(chosen?.host).toBe("control");
+    expect(chosen?.line).toMatch(/^local \(fallback: no peer eligible: box: tunnel down to box/);
+    await eventually(async () => {
+      await tick(0);
+      return (await verdict("control"))?.payload.local_agents?.active === true;
+    });
+
+    // The box is back: the next task goes to it; the own machine's task stays where it is.
+    await beat();
+    await submit("w3", "placement: auto\n", "  T1: { issue: 42 }\n");
+    await eventually(async () => {
+      await tick();
+      return placedIn("w3") !== undefined;
+    });
+    expect(placedIn("w3")).toMatchObject({ host: "box", by: "auto" });
+    expect(journal("w2").filter((e) => e.type === "task_placed")).toHaveLength(1);
+    expect((await state("w2")).tasks.find((t) => t.id === "T1")?.placement?.host).toBe("control");
+  });
+
   it("macOS: the own machine's memory is the doctor's vm_stat figure, so a Mac in normal use is eligible", async () => {
     localClaude = true;
     const available = vmStatAvailablePct(VM_STAT_MAC_16GB, MAC_16GB_BYTES);
     expect(available).toBe(45);
     await setup({
+      // A candidate like the box: the eligibility under test is the memory figure's.
+      localAgents: "always",
       // Free pages alone: 3% (what os.freemem() reports on a Mac in normal use).
       os: {
         ...CALM_OS,

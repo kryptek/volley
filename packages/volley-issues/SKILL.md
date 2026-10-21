@@ -2,7 +2,7 @@
 name: volley-issues
 description: Dispatch GitHub issues to autonomous Claude agents, each in its own git worktree and cmux workspace, coordinated via Volley. By default emits a wave file and submits it to the volleyd supervisor; the hand-launched legacy path remains. Replaces the claude-peers/ScheduleWakeup polling loop with sub-5s volley wait notifications. Use when the user asks to dispatch issues, work on issues, or launch agents for issues.
 user_invocable: true
-version: 0.4
+version: 0.5
 ---
 
 # /volley-issues
@@ -15,15 +15,17 @@ There are two dispatch paths (see **Choosing a dispatch path**): the **volleyd p
 
 Before invoking `/volley-issues`:
 
-**This skill is current.** This file declares `version: 0.4` in its frontmatter. From the volley checkout, `bash packages/volley-issues/scripts/install.sh --check` prints the installed and repo versions and exits 1 when `~/.claude/skills/volley-issues` is missing or older (a v0.1 copy knows only the legacy path). Then run `bash packages/volley-issues/scripts/install.sh` (it re-points the skill at the checkout), and restart Claude Code.
+**This skill is current.** This file declares `version: 0.5` in its frontmatter. From the volley checkout, `bash packages/volley-issues/scripts/install.sh --check` prints the installed and repo versions and exits 1 when `~/.claude/skills/volley-issues` is missing or older (a v0.1 copy knows only the legacy path). Then run `bash packages/volley-issues/scripts/install.sh` (it re-points the skill at the checkout), and restart Claude Code.
 
 1. **Mosquitto running.** `brew services start mosquitto`. If any tool call returns `{ code: "BROKER_DOWN" }`, follow the cross-cutting rule from `/volley`'s SKILL.md: print the install hint, stop, do not retry.
 
 2. **volley-mcp registered in this session.** Claude Code stores MCP servers separately from `settings.json` and manages them via the `claude mcp` CLI (`mcpServers` is NOT a valid top-level `settings.json` field). Register the server at user scope with `env.VOLLEY_AGENT_ID` set to the coordinator's role prefix (e.g. `coordinator`) and `env.VOLLEY_NAMESPACE=example-dispatch`:
 
    ```sh
-   claude mcp add-json -s user volley '{"command":"bun","args":["run","<volley-repo>/packages/volley-mcp/src/index.ts"],"env":{"VOLLEY_AGENT_ID":"coordinator","VOLLEY_NAMESPACE":"example-dispatch","VOLLEY_AUTH_USERNAME":"coordinator","VOLLEY_AUTH_PASSWORD":"<coordinator password>"}}'
+   claude mcp add-json -s user volley '{"command":"bun","args":["run","<volley-repo>/packages/volley-mcp/src/index.ts"],"env":{"VOLLEY_AGENT_ID":"coordinator","VOLLEY_COORDINATOR":"coord-main","VOLLEY_NAMESPACE":"example-dispatch","VOLLEY_AUTH_USERNAME":"coordinator","VOLLEY_AUTH_PASSWORD":"<coordinator password>"}}'
    ```
+
+   Also set `VOLLEY_COORDINATOR` there (the autopilot flow needs it): a stable **coordinator name** you choose once (agent-id grammar `[a-z0-9][a-z0-9_-]{0,62}`, e.g. `coord-main`). Waves submitted with `--owner "$VOLLEY_COORDINATOR"` are owned by the name, not by the per-restart agent id, so this session keeps resolving, steering, pausing and stopping them after its MCP server restarts (volleyd journals `owner_reconnected`; nothing needs claiming). It is what lets the autopilot flow's coordinator session end after submitting (Step 5): a later session with the same name picks the wave up. Export the same value in your shell profile (`export VOLLEY_COORDINATOR=coord-main`, next to the credentials below): `volleyd` commands then identify you by it without `--by`.
 
    Then quit Claude Code (Cmd-Q) and reopen. Verify with `claude mcp list` — expect `volley: ... ✓ Connected`. Run `bash packages/volley-issues/scripts/install.sh` to get a ready-to-paste command with the absolute path baked in. If `vol_list_agents`, `vol_subscribe`, etc. are missing from the available MCP tools after the restart, the server isn't registered — stop.
 
@@ -48,7 +50,7 @@ Before invoking `/volley-issues`:
 
 3. **gh + claude + cmux on PATH.** Run `command -v gh claude cmux` and confirm all three resolve. If any is missing, tell the user how to install (`brew install gh`; the `claude` CLI ships with Claude Code; cmux install instructions live in the `cmux` repo).
 
-4. **Coordinator registered as a Volley agent.** Before dispatching anything, call `vol_register({ capabilities: ["coordinator", "dispatch-issues"], cwd: <your-repo-root>, model: "claude-opus-4-7", title: "coordinator — dispatching <what this batch is>", links: { repo: "<owner/name>" } })`. `title` is one line (1–120 characters, no newline) naming what this session is doing — the Desk shows it as the window's name; keep it generic (`coordinator — dispatching #22, #23`), never paste an issue title into it unsanitised. `<owner/name>` is `gh repo view --json nameWithOwner -q .nameWithOwner`. For `<your-repo-root>`, use the absolute path of the downstream repo you're dispatching from — the output of `pwd` in this Claude Code session. The response is `{ agent_id, namespace }`. The `agent_id` is the
+4. **Coordinator registered as a Volley agent.** Before dispatching anything, call `vol_register({ capabilities: ["coordinator", "dispatch-issues"], cwd: <your-repo-root>, model: "claude-opus-4-7", title: "coordinator — dispatching <what this batch is>", links: { repo: "<owner/name>" } })`. `title` is one line (1–120 characters, no newline) naming what this session is doing — the Desk shows it as the window's name; keep it generic (`coordinator — dispatching #22, #23`), never paste an issue title into it unsanitised. `<owner/name>` is `gh repo view --json nameWithOwner -q .nameWithOwner`. For `<your-repo-root>`, use the absolute path of the downstream repo you're dispatching from — the output of `pwd` in this Claude Code session. The response is `{ agent_id, namespace, coordinator }` (`coordinator` only when `VOLLEY_COORDINATOR` is set; on the volleyd path check it is there, since it is the name the wave's owner is). The `agent_id` is the
    auto-suffixed value `coordinator-XXXX` (NOT the literal env prefix);
    this is the value to embed in dispatched children's spawn brief as
    their `parent_id`.
@@ -70,20 +72,20 @@ If neither a `#N` nor a `--flag` is supplied, print the usage shapes above and s
 
 Run `volleyd status` before dispatching anything:
 
-- **Exit 0** (the daemon answered): use the **Volleyd path** below. This is the default.
+- **Exit 0** (the daemon answered): use the **Volleyd path** below, in its **autopilot flow** (submit and leave). This is the default. With `autopilot: off` for the wave (the user asks to drive it themselves), follow **Driving a wave by hand** instead of Step 5.
 - **Anything else** (daemon not installed, not running, or unreachable): tell the user, then use the **Legacy path**. Do not start a daemon on the user's behalf; `volleyd install` (macOS) or `volleyd daemon` is theirs to run.
 
 The user can force the legacy path ("dispatch the old way", `--legacy`). Never mix the two for one wave: an agent volleyd spawned is volleyd's to steer, retire and clean up.
 
 ## Volleyd path
 
-The `volleyd` supervisor owns everything the legacy path does by hand: worktrees, ISSUE.md, cmux workspaces, spawn briefs, registration checks, the implement → review → fixup pipeline, retries, and retiring agents (including clearing their retained records). This skill is the front door: it turns the issues into a wave file, submits it, and then waits on **decisions** and **merge-ready gates**, not on per-agent terminal statuses.
+The `volleyd` supervisor owns everything the legacy path does by hand: worktrees, ISSUE.md, cmux workspaces, spawn briefs, registration checks, the implement → review → fixup pipeline, retries, and retiring agents (including clearing their retained records). This skill is the front door: it turns the issues into a wave file and submits it. Under **autopilot** (the default) volleyd also answers the routine decisions itself, merges each gated PR (`merge: auto`), keeps branches current and fixes flaky CI, so the coordinator session **submits and leaves**: what still needs the owner reaches them through the Desk's Needs-you window, a phone push and the morning digest (Step 5). With `autopilot: off`, the session waits on **decisions** and **merge-ready gates** itself (**Driving a wave by hand**); never on per-agent terminal statuses.
 
 `volleyd` and `volley` below mean the CLIs on `PATH`; without them, substitute `bun run <volley-repo>/packages/volleyd/src/cli.ts` and `bun run <volley-repo>/packages/volley-cli/src/cli.ts`.
 
 ### Volleyd prerequisites
 
-- Prerequisites 1–4 above (broker, volley-mcp, shell credentials, coordinator registered). The coordinator's auto-suffixed `agent_id` from Prerequisites step 4 becomes the wave's **owner**.
+- Prerequisites 1–4 above (broker, volley-mcp, shell credentials, coordinator registered). The coordinator name (`$VOLLEY_COORDINATOR`, Prerequisites step 2: in the MCP registration's `env` and exported in the shell) becomes the wave's **owner**; without one, the auto-suffixed `agent_id` from Prerequisites step 4 does, and is lost when the MCP server restarts: then the session cannot leave (Step 5), so set the name before submitting.
 - `volleyd status` exits 0 (see Choosing a dispatch path). Use the same `VOLLEY_BROKER_URL` / `--namespace` the daemon uses, and run on the daemon's host with the daemon's `VOLLEYD_HOME`: `volleyd events` and `volleyd ack` read the journal there directly, not over the broker.
 - A release branch the wave's PRs target: create or reuse one exactly as in **Batch setup** step 1, after the **Global open-PR check**. A wave always has a release branch, even for one issue.
 - Repo-specific brief extras live in the repo, not in this skill: put the **Migration number reservation** block (or any other per-repo notes) in `<repo>/.volley/brief-extra.md` (kept out of git); volleyd appends it to every brief it renders. Run the migration counter init (**Batch setup** step 2) yourself before submitting if the repo uses it. volleyd's briefs already carry the narration contract. To enforce it anyway (say, against a customised template), install the skill's gate as volleyd's brief gate: `ln -s <skill-dir>/scripts/validate-brief.sh "${VOLLEYD_HOME:-$HOME/.volley/volleyd}/brief-gate"`. volleyd refuses to launch an agent whose brief fails it. The gate accepts volleyd's own briefs: their session hooks register the agent, so the brief's "already registered" line stands in for the legacy `vol_register` step (volleyd briefs must never ask the agent to register). Do not "fix" a refused volleyd brief by appending `brief/NARRATION_BLOCK.txt`: its step 1 is `vol_register`.
@@ -101,7 +103,7 @@ gh issue list --state open --label enhancement --limit 200 --json number,title,b
 
 ### Step 2: derive dependencies
 
-Each issue becomes a task named by the task tag its title starts with (`O0: …`, `T3b — …`, `D10 - …` give `O0`, `T3b`, `D10`: one to three capitals, one to three digits, an optional lower-case letter, then `:`, a dash or `—`), or `i<N>` when the title has none. A product or format name that fits the pattern (`S3:`, `EC2 -`, `K8s:`, `UTF8 -`) is not read as a tag. When two issues would get the same id (two `O1:` titles, or ids that differ only in case), the tagged ones fall back to `i<N>` and the helper prints a warning naming them: retitle one if you want the tag ids. A `Depends on: #101, #102` or `deps: #101` line in an issue body (markdown emphasis and parentheticals allowed, e.g. `**Depends on:** #5 (T3)`) becomes `after:` with those issues' task ids (`after: [i101, i102]`, or `after: [O0, T4]` for tagged titles): that task starts only once its dependencies are `done` (see the gate note in Step 5). `Depends on: none` (or `n/a`) declares no dependencies. An empty `Depends on:` label reads the `- #N` list items under it. `owner/repo#N` and issue URLs are accepted when `--repo-slug` names this repository; any other repository is an error.
+Each issue becomes a task named by the task tag its title starts with (`O0: …`, `T3b — …`, `D10 - …` give `O0`, `T3b`, `D10`: one to three capitals, one to three digits, an optional lower-case letter, then `:`, a dash or `—`), or `i<N>` when the title has none. A product or format name that fits the pattern (`S3:`, `EC2 -`, `K8s:`, `UTF8 -`) is not read as a tag. When two issues would get the same id (two `O1:` titles, or ids that differ only in case), the tagged ones fall back to `i<N>` and the helper prints a warning naming them: retitle one if you want the tag ids. A `Depends on: #101, #102` or `deps: #101` line in an issue body (markdown emphasis and parentheticals allowed, e.g. `**Depends on:** #5 (T3)`) becomes `after:` with those issues' task ids (`after: [i101, i102]`, or `after: [O0, T4]` for tagged titles): that task starts only once its dependencies are `done` (merged; see **Merges and dependents**). `Depends on: none` (or `n/a`) declares no dependencies. An empty `Depends on:` label reads the `- #N` list items under it. `owner/repo#N` and issue URLs are accepted when `--repo-slug` names this repository; any other repository is an error.
 
 - A dependency line the helper cannot read (`Depends on: T3`, free text next to the references) is an error naming the issue, never a silently dropped dependency. Rewrite the line as `#N` references (or `none`) in the issue, or fix the JSON, and re-run.
 - A dependency on an issue **outside** the set is an error that names it. Either add that issue to the set, or, if it is already merged (`gh issue view <N> --json state` is `CLOSED` and its PR is in the release branch), pass it with `--satisfied <N,...>` so it is dropped.
@@ -122,10 +124,26 @@ bun run <skill-dir>/scripts/wave-from-issues.ts /tmp/wave-issues.json \
   --repo-slug "$(gh repo view --json nameWithOwner -q .nameWithOwner)" \
   [--satisfied 5,6] [--namespace example-dispatch] \
   [--pipeline '["implement",["spec_review","quality_review"],"fixup","merge_ready"]'] \
+  --merge auto --autopilot on --branch-update merge \
   --out .volley/waves/$WAVE.yaml
 ```
 
-The default pipeline is `[implement, [spec_review, quality_review], fixup, merge_ready]` (the nested array runs both reviewers in parallel). A pipeline without the review group (`["implement","merge_ready"]`) is honoured only because the file says so: volleyd marks each such task `reviews skipped by plan`, and otherwise never gates a task without both reviews for its current head. Exit 1 means a dependency or issue problem (the message names the issue; an issue both in the set and in `--satisfied` is one); exit 2 is a usage error (including a `--pipeline` that is not a JSON array). Show the user the generated file.
+The three autopilot settings, written into the wave file:
+
+- `--merge auto|manual` writes `merge:`. `auto` (the default, also when the flag is left out) lets volleyd squash-merge each gated PR at exactly the head that passed the gate, through its merge queue; `manual` leaves every merge to a person (pass it when the user asks to merge themselves).
+- `--autopilot on|off` writes `config: { autopilot: { enabled } }` for this wave. `on` lets volleyd answer the routine decisions from its policy table (`volleyd policy` prints it); `off` makes every decision wait for the owner, as before autopilot, and the wave is driven by hand (**Driving a wave by hand**). Left out, the wave follows the supervisor's `autopilot.enabled` (on by default). Ask the user only when they have said they want to steer this wave themselves.
+- `--branch-update merge|rebase` writes `config: { branch_update }`. `merge` is the recommended setting for autopilot waves: volleyd brings a PR branch up to date by merging the release branch in and pushing normally (no force-push of any kind), so nobody's head is rewritten while the wave runs unattended. Left out, the supervisor's `branch_update` applies (`rebase` by default).
+
+The helper's last stderr lines are the submit command and the owner it names:
+
+```text
+submit: volleyd run .volley/waves/<wave>.yaml --owner "$VOLLEY_COORDINATOR"
+owner: coord-main (VOLLEY_COORDINATOR)
+```
+
+`owner: VOLLEY_COORDINATOR is unset: …` means this shell has no coordinator name: export it (Prerequisites step 2) before Step 4.
+
+The default pipeline is `[implement, [spec_review, quality_review], fixup, merge_ready]` (the nested array runs both reviewers in parallel). A pipeline without the review group (`["implement","merge_ready"]`) is honoured only because the file says so: volleyd marks each such task `reviews skipped by plan`, and otherwise never gates a task without both reviews for its current head. Exit 1 means a dependency or issue problem (the message names the issue; an issue both in the set and in `--satisfied` is one); exit 2 is a usage error (including a `--pipeline` that is not a JSON array, or a `--merge`, `--autopilot` or `--branch-update` value it does not know). Show the user the generated file.
 
 **The brief preface: public-repo hygiene rules go here.** The wave file carries `brief_preface: ".volley/brief-preface.md"` (`--brief-preface <path>` names another file, relative to the repo or absolute). volleyd puts that file, byte for byte, at the top of **every** brief it writes — implementer, both reviewers, fixup, rebase — above the role's own template. It is the only way to give volleyd-spawned agents the rules you would otherwise put in a hand-written brief, so rules like "this repository is public: no person names, no local usernames, no machine paths, no private hostnames or IPs" belong in it. When the repo is on this machine and the file does not exist, the helper writes it from `templates/brief-preface.md` and says so on stderr (`wrote <path> from the template`); an existing preface is never changed (`brief preface: <path> (kept)`). Show it to the user and add the repository's own rules under its `## Repository rules` heading:
 
@@ -159,14 +177,58 @@ The preface is copied verbatim (no `{{placeholder}}` expansion) and is capped at
 volleyd validate .volley/waves/$WAVE.yaml
 # ok: wave <wave> v1 — <n> task(s), critical path <k>, release branch release/<wave>
 # brief preface: <repo>/.volley/brief-preface.md (<bytes> B, sha256 <12 hex>)
-volleyd run .volley/waves/$WAVE.yaml --owner <COORDINATOR-AGENT-ID>
+volleyd run .volley/waves/$WAVE.yaml --owner "$VOLLEY_COORDINATOR"
 ```
 
-`volleyd validate` needs no daemon and reports path-qualified errors (unknown `after:` target, cycle, bad id); fix the file and re-run until it prints `ok`. Check its `brief preface:` line: `brief preface: none (no <path>)` means the agents get no repo rules — write the preface first (above). `volleyd status "$WAVE"` shows the same line under its header for the running wave, with the sha256 of the file the agents got. `volleyd run` validates again, submits, and returns as soon as the daemon has journaled the wave; it prints any overlap warnings with other running waves (advisory). `--owner` is the coordinator's auto-suffixed id: only the owner may resolve, pause, stop or steer the wave. Those commands identify the caller by `--by`, else `VOLLEY_AGENT_ID`, else the session registered for this directory; if the shell's `VOLLEY_AGENT_ID` is not the suffixed id, export it (`export VOLLEY_AGENT_ID=<COORDINATOR-AGENT-ID>`) or pass `--by <COORDINATOR-AGENT-ID>`.
+Ask the user's go-ahead for the submit with the go/no-go picker (**Asking the user**, below) after showing them the wave file and the `volleyd validate` output.
 
-### Step 5: volleyd coordinator loop
+`volleyd validate` needs no daemon and reports path-qualified errors (unknown `after:` target, cycle, bad id); fix the file and re-run until it prints `ok`. Check its `brief preface:` line: `brief preface: none (no <path>)` means the agents get no repo rules — write the preface first (above). `volleyd status "$WAVE"` shows the same line under its header for the running wave, with the sha256 of the file the agents got. `volleyd run` validates again, submits, and returns as soon as the daemon has journaled the wave; it prints any overlap warnings with other running waves (advisory). `--owner` is the coordinator name (`$VOLLEY_COORDINATOR`; without one, the coordinator's auto-suffixed id): only the owner — or the session currently bound to the name — may resolve, pause, stop or steer the wave. Those commands identify the caller by `--by`, else `VOLLEY_AGENT_ID`, else the session registered for this directory (its coordinator name when it has one), else `VOLLEY_COORDINATOR`; without a coordinator name, if the shell's `VOLLEY_AGENT_ID` is not the suffixed id, export it (`export VOLLEY_AGENT_ID=<COORDINATOR-AGENT-ID>`) or pass `--by <COORDINATOR-AGENT-ID>`.
 
-**You are done when every task is merged, not when `volleyd run` returns.** The loop waits on the wave's event stream and acts on two things: **decisions** and **merge-ready gates**. Do not background `volley wait` per agent; volleyd watches the agents.
+### Step 5: submit and leave (autopilot)
+
+**Under autopilot the coordinator session does not babysit the wave.** Once `volleyd run` has returned, tell the user the wave is submitted and where to watch it (the Desk, `volleyd status "$WAVE"`), then end the session or go on to plan another wave. volleyd acts on every event itself: it spawns, reviews, answers the decisions its policy table covers (within per-wave budgets), merges each gated PR (`merge: auto`) in dependency order, brings branches up to date (`branch_update: merge`), fixes flaky CI, starts dependents once their dependencies are merged and runs the repository's release train, if it has one. The Desk and the morning digest show everything it did. Do **not** start a per-event loop, and do not background `volley wait` per agent.
+
+**What still reaches the owner.** Only what autopilot must not, or could not, answer:
+
+- **Owner-only decision kinds** (`autopilot.owner_only`, by default `plan_change`, `repo_untrusted`, `model_switch`, `release_go` and `stage_go`): never answered automatically.
+- **Escalations**: a decision no policy rule answers (`no_policy`), one whose remediation budget is spent (`budget_exhausted`) or whose answer could not be applied (`unattended_safety`). Its question starts with `Autopilot could not resolve this (<why>): `.
+- **`release_go`**: when the repository has a release playbook (`.volley/release.yaml`), the release train's final go/no-go once every stage has verified (`go` completes the wave, `hold` asks again), and each owner-gated stage's `stage_go` before it runs. volleyd never deploys to production on its own.
+- With `merge: manual`, every gated PR's merge: the owner merges each `merge_ready` gate by hand (as in **Driving a wave by hand**), and volleyd admits dependents once it sees the merge.
+
+Each decision is a needs-you inbox item and rings the owner's phone once. Answer it wherever is closest; the first answer wins and later ones are refused with where it was given:
+
+- **The Desk's Needs-you window**: each item with its question, options and evidence; one click answers it.
+- **The CLI**: `volleyd inbox` lists what waits; `volleyd inbox answer <id> <answer>` answers one, or `volleyd resolve <decision-id> <answer...> --wave "$WAVE" --rationale "<why>"` resolves a decision by id (`volleyd decisions "$WAVE"` lists them).
+- **The terminal**: a later coordinator session (any session whose MCP server sets the same `VOLLEY_COORDINATOR`) owns the wave by name and answers like the CLI; a go/no-go picker in it is mirrored to the inbox (**Asking the user**, below).
+
+**Optional: wait on the digest, not on events.** When the user wants this session to stay until the wave reports back, wait on the wave's **morning digest**, which volleyd publishes retained on `volley/_waves/<wave>/digest` when the wave completes, its release goes out, it is stopped, a `release_go` opens, or it first needs its owner (an escalation); at most once per `autopilot.digest_min_interval_s` per trigger. One subscription, not a loop:
+
+```bash
+# Wakes on the next digest (0), or after 4 h (124). The topic is retained: a digest published
+# earlier is delivered first, so when `volleyd digest "$WAVE"` already prints one, use --max-messages 2.
+volley sub --pattern "volley/_waves/$WAVE/digest" --max-messages 1 --timeout 14400 &
+```
+
+On the wake, `volleyd digest "$WAVE"` prints it: `## Shipped` (each merged task and PR), `## Autopilot handled` (decisions answered, flakes fixed, conflicts resolved, retries, merges), `## Waiting for you` (open decisions, the release train) and `## Failed`. Relay it to the user, help them answer what waits (above), and either leave again or re-arm the sub for the next digest. Each digest also sends one push (a `progress` envelope of type `digest` on volleyd's own topic, which `volley notify` rings for), so a user away from the terminal hears it anyway. `volley wait` is not the tool for this: it watches one agent's `status` channel, not volleyd's `progress`. Exit `124` is the fallback heartbeat (re-arm, or check `volleyd status "$WAVE"`); exit `1` is an error (broker down, or `AUTH_FAILED`: the shell lacks `VOLLEY_AUTH_*`), not a wake.
+
+When the digest reports the wave complete (or `volleyd status "$WAVE"` shows every task `done` or `cancelled`), go to Step 6; the release branch's merge to main follows **Release branch merge** or the repository's release playbook.
+
+**Asking the user: go/no-go through `AskUserQuestion`.** This is the convention for every coordinator, under autopilot or not. Whenever the run needs the user's go-ahead (before `volleyd run`, before merging a gate or the release branch by hand, a decision that is theirs, a `release_go` the user answers in this session), ask it with the `AskUserQuestion` tool, never as a question at the end of your turn: one question, options `go`, `hold`, `cancel` (each with a one-line description of what happens), `multiSelect: false`. The volley hooks publish the picker, and volleyd opens it as a needs-you inbox item the user can answer from the Desk or a phone as well as in this terminal: volleyd selects the answer on this session's screen, and whichever answer comes first wins. A question left at the end of a turn becomes a handoff item instead, whose reply is typed into your prompt; keep those for questions that need words, not buttons. Act on `go`; on `hold`, wait and ask again when the user says so; on `cancel`, stop (`volleyd stop "$WAVE"` once a wave is running) and say what you stopped.
+
+### Step 6: volleyd cleanup
+
+After the last gate is merged (by volleyd under `merge: auto`, by the user otherwise) and the release branch, per **Release branch merge** or the repository's release playbook:
+
+```bash
+volleyd cleanup "$WAVE"        # dry run: lists the retired agents' worktrees and workspaces
+volleyd cleanup "$WAVE" --yes  # removes them; live agents and dirty worktrees are skipped
+```
+
+volleyd already cleared each retired agent's retained records when it retired it, so the retained-record sweep in **Cleanup** is only needed for agents the legacy path launched. Branches are kept; delete them per **Cleanup** once merged.
+
+### Driving a wave by hand (autopilot off)
+
+For a wave submitted with `--autopilot off` (or under a supervisor whose `autopilot.enabled` is false), volleyd answers nothing itself, and the session drives the wave: **you are done when every task is merged, not when `volleyd run` returns.** The rules here also hold for an autopilot wave you choose to watch closely. The loop waits on the wave's event stream and acts on two things: **decisions** and **merge-ready gates**. Do not background `volley wait` per agent; volleyd watches the agents.
 
 `volley/_waves/<wave>/events` is a live, non-retained mirror of the wave's journal, so it is only the **wake signal**. The record is the journal, read with a named cursor that you advance only after acting. Arm the wake first, let it subscribe, then catch up, so nothing published in between is missed:
 
@@ -184,18 +246,18 @@ The 5-minute heartbeat bounds the cost of a slow subscribe: an event that slippe
 
 For each event printed, by `type`:
 
-- **`decision_opened`**: `volleyd decisions "$WAVE"` lists the open ones (id, task, kind, question, options, evidence pointers). Read the evidence. Answer what is within the coordinator's authority; ask the user for anything else (`repo_untrusted`, `model_switch`, `plan_change` and `wave_complete` are always the user's). Then:
+- **`decision_opened`**: `volleyd decisions "$WAVE"` lists the open ones (id, task, kind, question, options, evidence pointers). Read the evidence. Answer what is within the coordinator's authority; ask the user for anything else (`repo_untrusted`, `model_switch`, `plan_change` and `wave_complete` are always the user's; ask through `AskUserQuestion`, below). Then:
   ```bash
   volleyd resolve <decision-id> <answer...> --wave "$WAVE" --rationale "<why>"
   ```
   The task resumes and the answer reaches its next stage.
-- **`stage_entered` with `data.stage` = `merge_ready`**: a gate. volleyd never merges. Read the task's evidence package (`volleyd status "$WAVE" --json` → `tasks[].evidence_path`, and `pr`): PR url, head sha, CI on that exact head, both reviews' findings and how each P1 was resolved, and whether the branch is current with the release branch. If it holds up, merge the PR into the release branch by hand (`gh pr merge <pr-number> --squash`), or hand it to the user if they merge themselves. If it does not, `volleyd steer "$WAVE" <task> "<what to fix>"`. Then see **Merges and dependents** below.
+- **`stage_entered` with `data.stage` = `merge_ready`**: a gate. With `merge: manual` volleyd never merges (with `merge: auto` it merges the gate itself, and this is informational). Read the task's evidence package (`volleyd status "$WAVE" --json` → `tasks[].evidence_path`, and `pr`): PR url, head sha, CI on that exact head, both reviews' findings and how each P1 was resolved, and whether the branch is current with the release branch. A PR that touches `packages/` or `spec/` adds a `changes/` fragment and leaves `CHANGELOG.md` alone (CI's Changelog fragment job checks it; see `changes/README.md`). If it holds up, merge the PR into the release branch by hand (`gh pr merge <pr-number> --squash`), or hand it to the user if they merge themselves. If it does not, `volleyd steer "$WAVE" <task> "<what to fix>"`. Then see **Merges and dependents** below.
 - **`alarm_raised`**, **`task_cancelled`**, **`wave_stopped`**: tell the user what happened and where to look (`volleyd status "$WAVE"`). Skip `alarm_raised { alarm: "reviews_skipped_by_plan" }`: it marks a gate the wave file asked for (a pipeline without reviews), not a fault. A `merge_ready_invariant` alarm comes with an `agent_blocked` decision (`rereview` / `cancel`): a head nobody reviewed (usually a push outside the pipeline) must be reviewed again before the gate.
 - **`stage_entered` with `data.stage` = `done`** (`data.merged: true`): volleyd saw the task's PR merged into the release branch. Informational; its dependents are admitted on their own (see **Merges and dependents**).
 - **`wave_complete`**: every task is settled; go to Step 6. Before acting on it (and if it never arrives), confirm with your own check: every task is `done` or `cancelled` in `volleyd status "$WAVE"`, and every PR is merged (`gh pr view <pr> --json state`).
 - Anything else (spawns, stage changes, leases): informational.
 
-**Merges and dependents.** volleyd never merges, but it checks every `merge_ready` task's PR about once a minute. When the PR is merged into the release branch the task moves to `done` (`stage_entered {stage: "done", merged: true}`), and every queued task whose `after:` dependencies are now all `done` is admitted and spawned by volleyd itself, through normal admission. **Do not start dependents yourself**: `volleyd spawn "$WAVE" <task>` bypasses admission and would race volleyd's own spawn of the same task. A PR closed unmerged raises a `pr_closed_unmerged` alarm, and one merged at a different head than the gate saw still counts but raises `merged_unverified_head`; a PR merged into some other branch does not count. `volleyd spawn` is only for a task you deliberately want to start outside admission (say, to retry one volleyd has given up on); check `volleyd status "$WAVE"` first that nothing is already running for it.
+**Merges and dependents.** With `merge: manual` volleyd never merges, but it checks every `merge_ready` task's PR about once a minute. When the PR is merged into the release branch the task moves to `done` (`stage_entered {stage: "done", merged: true}`), and every queued task whose `after:` dependencies are now all `done` is admitted and spawned by volleyd itself, through normal admission. **Do not start dependents yourself**: `volleyd spawn "$WAVE" <task>` bypasses admission and would race volleyd's own spawn of the same task. A PR closed unmerged raises a `pr_closed_unmerged` alarm, and one merged at a different head than the gate saw still counts but raises `merged_unverified_head`; a PR merged into some other branch does not count. `volleyd spawn` is only for a task you deliberately want to start outside admission (say, to retry one volleyd has given up on); check `volleyd status "$WAVE"` first that nothing is already running for it.
 
 After acting on everything printed, advance the cursor to the last `seq` you handled, then loop back to 1 when the backgrounded `volley sub` exits:
 
@@ -204,17 +266,6 @@ volleyd ack "$WAVE" --cursor coordinator --seq <last-seq>
 ```
 
 `volley sub` exit `124` is the fallback heartbeat: re-arm and run the catch-up anyway. Exit `1` is an error (broker down, or `AUTH_FAILED`: the shell lacks `VOLLEY_AUTH_*`), not a wake; fix it before re-arming. `volleyd status "$WAVE"` is the human-readable view at any time ("are they done?"); `volleyd pause "$WAVE"` / `volleyd stop "$WAVE"` stop admitting or cancel the wave.
-
-### Step 6: volleyd cleanup
-
-After the user has merged the last gate (and the release branch, per **Release branch merge**):
-
-```bash
-volleyd cleanup "$WAVE"        # dry run: lists the retired agents' worktrees and workspaces
-volleyd cleanup "$WAVE" --yes  # removes them; live agents and dirty worktrees are skipped
-```
-
-volleyd already cleared each retired agent's retained records when it retired it, so the retained-record sweep in **Cleanup** is only needed for agents the legacy path launched. Branches are kept; delete them per **Cleanup** once merged.
 
 ## Legacy path
 
@@ -451,6 +502,7 @@ The exit corresponds to ONE agent reaching terminal. For that agent:
    - `cd` to the agent's worktree (`/private/tmp/example-issue-<N>`).
    - `git status && git diff` to inspect the changes.
    - Read the agent's `DEPLOY.md` (do not commit it).
+   - Changelog: when the diff touches `packages/` or `spec/` it must add a fragment, `changes/<N>.<added|changed|fixed|removed|docs>.md` (see `changes/README.md`); if the agent wrote none, add one from its summary. Never edit `CHANGELOG.md` (CI rejects a non-release commit that does).
    - If the diff looks good: `git add -A && git commit -m "feat: implement <issue-title>"` then `git push origin issue-<N>-<slug>` and `gh pr create --base <release-branch-or-main> --title "feat: <issue-title>" --body "<...>"`, where `<issue-title>` is `gh issue view <N> --json title -q .title | bun <skill-dir>/scripts/brief-title.ts <N>` (no role: `#<N> <issue title>`, shell-safe like `<brief-title>`). Embed the `DEPLOY.md` contents in the PR body under a `## Deployment Requirements` section.
 
 3. **If `blocked`**:
@@ -483,6 +535,8 @@ If a `claude` CLI agent dies (OOM, kill -9, segfault, SIGSEGV), MQTT keepalive e
 
 ## Release branch merge
 
+Under autopilot, when the repository has a release playbook (`.volley/release.yaml`), volleyd's release train runs these steps as playbook stages once every task is merged, and the owner answers each owner-gated `stage_go` and the final `release_go` (see **What still reaches the owner** above). Without a playbook, or with `--autopilot off`, the coordinator runs them by hand:
+
 Once every dispatched agent has reached `done` AND its PR is merged into the release branch:
 
 1. **Deploy the release branch to staging** for end-to-end testing:
@@ -492,19 +546,25 @@ Once every dispatched agent has reached `done` AND its PR is merged into the rel
    gh workflow run deploy-admin-frontend.yml --ref release/<date>-<theme> -f environment=staging
    ```
 
-2. **After staging verification**, squash-merge the release branch into main:
+2. **Assemble the changelog** on the release branch, before the version bump commit:
+   ```bash
+   bun run changelog --version <v> --date <YYYY-MM-DD> --commit
+   ```
+   It turns every `changes/` fragment into the `## <v> — <date>` section of `CHANGELOG.md` and commits `release: changelog for <v>`; then bump the `package.json` versions in the same release PR. The volley-cli version test checks that the newest section matches the root version.
+
+3. **After staging verification**, squash-merge the release branch into main:
    ```bash
    gh pr create --base main --head release/<date>-<theme> --title "Release: <date> — <theme>"
    gh pr merge --squash
    ```
 
-3. **Delete the release branch** after merge:
+4. **Delete the release branch** after merge:
    ```bash
    git branch -D release/<date>-<theme>
    git push origin --delete release/<date>-<theme>
    ```
 
-4. **Remove the migration counter** (cleanup):
+5. **Remove the migration counter** (cleanup):
    ```bash
    rm -f /tmp/example-next-migration.txt /tmp/example-next-migration.txt.lock.d
    ```
@@ -523,6 +583,7 @@ When the user says to deploy after merging:
    - Minor bump for features; patch bump for bug-fix-only releases.
    - Update `APP_VERSION` in `frontend-admin/src/changelog.js` to match; add changelog entries; commit + push.
    - `git tag v<X.Y.Z> -m "Release v<X.Y.Z> — <summary>" && git push origin v<X.Y.Z>`.
+7. **Only when the repo is Volley itself** (kryptek/volley), deploy to the supervisor's machine: `volley deploy v<X.Y.Z>`; it rebuilds the Desk, restarts both services (volleyd and the Desk) and rolls back on failure. Run `volley deploy v<X.Y.Z> --dry-run` first to see the steps; a checkout with local changes is refused until they are committed or `--force-clean` stashes them.
 
 ### Rollback
 

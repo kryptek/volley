@@ -106,6 +106,16 @@ export class CredentialSweeper {
 
   private refreshing: Promise<void> | null = null;
   private again = false;
+  /** Each login read is numbered; `counts.live` keeps the newest read's count, never an older one. */
+  private reads = 0;
+  private counted = 0;
+
+  private setLive(read: number, live: number): boolean {
+    if (read < this.counted) return false;
+    this.counted = read;
+    this.counts.live = live;
+    return true;
+  }
 
   /**
    * Re-count the agent logins in the background (one paged listClients; overlapping calls share
@@ -121,7 +131,8 @@ export class CredentialSweeper {
       do {
         this.again = false;
         try {
-          this.counts.live = (await this.d.credentials.agentLogins()).length;
+          const read = ++this.reads;
+          this.setLive(read, (await this.d.credentials.agentLogins()).length);
         } catch {}
       } while (this.again);
     })().finally(() => {
@@ -143,6 +154,7 @@ export class CredentialSweeper {
   }
 
   private async once(): Promise<string[]> {
+    const read = ++this.reads;
     const logins = await this.d.credentials.agentLogins();
     const live = await this.d.live(logins);
     const plan = planSweep({
@@ -162,7 +174,9 @@ export class CredentialSweeper {
     if (swept.length > 0) {
       await this.d.journal({ type: "credentials_swept", data: { agent_ids: swept } });
     }
-    this.counts.live = logins.length - swept.length;
+    // A recount that read the logins after this sweep did wins; it may predate the reaps, so
+    // count again.
+    if (!this.setLive(read, logins.length - swept.length) && swept.length > 0) this.refreshSoon();
     this.counts.swept += swept.length;
     return swept;
   }

@@ -1,5 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -10,14 +18,17 @@ import {
   MODEL_ID,
   assertAllowed,
   mintConsentToken,
+  mintHandoffToken,
+  mintMergeToken,
   mintModelSwitchToken,
+  mintPickerToken,
   mintScriptToken,
   mintSetupToken,
   mintSigninForwardToken,
   sealLaunchScript,
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
-import { tempDirForAll } from "./helpers/tmp";
+import { tempDir, tempDirForAll } from "./helpers/tmp";
 import { withEnvSync } from "./helpers/with-env";
 
 /** Where `volleyd install` writes the service plist (install.ts: `$HOME/Library/LaunchAgents`). */
@@ -29,6 +40,11 @@ const PLIST = join(
 );
 
 const DENIED: string[][] = [
+  // procs.ts lists processes with exactly one argv; signals are never a spawned `kill`.
+  ["ps", "aux"],
+  ["ps", "-axo", "pid=,command=", "-u", "root"],
+  ["kill", "-9", "1234"],
+  ["pkill", "claude"],
   // git: history rewriting, publishing, destructive
   ["git", "merge", "release/w1"],
   ["git", "push", "origin", "HEAD"],
@@ -52,6 +68,19 @@ const DENIED: string[][] = [
   ["git", "worktree", "add", "-B", "w1/T1-implementer-0", "/tmp/wt", "release/w1"],
   ["git", "worktree", "add", "-B", "w1/T1-implementer-1/x", "/tmp/wt", "release/w1"],
   ["git", "worktree", "add", "-B", "W1/T1-implementer-1", "/tmp/wt", "release/w1"],
+  // a release stage's branch is `<wave>/release-<stage>-<n>` (SPEC §4.6.19), nothing looser
+  ["git", "worktree", "add", "-B", "w1/release-Bump-1", "/tmp/wt", "release/w1"],
+  ["git", "worktree", "add", "-B", "w1/release-bump-0", "/tmp/wt", "release/w1"],
+  ["git", "worktree", "add", "-B", "w1/release-1", "/tmp/wt", "release/w1"],
+  // a stage's `files` fact reads `<ref>:<path>`; an option in its place is still an option
+  [
+    "git",
+    "-C",
+    "/tmp/repo",
+    "show",
+    "--output=/tmp/x",
+    "refs/remotes/origin/release/w1:CHANGELOG.md",
+  ],
   // a tracking branch only as `branch --track <b> origin/<b>` (spawn's release base)
   ["git", "branch", "--track", "release/x", "origin/release/y"],
   ["git", "branch", "--track", "release/x", "release/x"],
@@ -119,6 +148,11 @@ const DENIED: string[][] = [
   ["gh", "api", "-F", "x=@/etc/passwd", "repos/o/r"],
   ["gh", "api", "--field", "x=@/etc/passwd", "repos/o/r"],
   ["gh", "run", "watch", "123", "--bogus"],
+  // A red head's classification reads the release branch's runs: a branch name, nothing else.
+  ["gh", "run", "list", "--branch", "-x", "--json", "status"],
+  ["gh", "run", "list", "--branch", "a b", "--json", "status"],
+  ["gh", "run", "list", "--branch=-x", "--json", "status"],
+  ["gh", "run", "list", "-b", "a;b"],
   ["gh", "pr", "list", "--app", "x"],
   ["gh", "--repo", "o/r", "pr", "view"],
   ["gh", "-R", "o/r", "pr", "merge", "1"],
@@ -312,6 +346,7 @@ const DENIED: string[][] = [
 ];
 
 const ALLOWED: string[][] = [
+  ["ps", "-axo", "pid=,command="],
   ["mosquitto", "-h"],
   ["volley", "auth", "list", "--json"],
   ["volley", "auth", "add", "phone", "--role", "steer", "--json"],
@@ -359,6 +394,13 @@ const ALLOWED: string[][] = [
     "release/w1",
   ],
   ["git", "worktree", "add", "-Bw1/T-1_x-spec_reviewer-12", "/tmp/wt", "origin/release/w1"],
+  // the release stage agent's branch (SPEC §4.6.19)
+  ["git", "worktree", "add", "-B", "w1/release-deploy-staging-2", "/tmp/wt", "origin/release/w1"],
+  // release stage verification (SPEC §4.6.19): a file on the release branch, the tag as a GET
+  ["git", "-C", "/tmp/wt", "show", "--quiet", "refs/remotes/origin/release/w1:CHANGELOG.md"],
+  ["gh", "api", "repos/{owner}/{repo}/git/matching-refs/tags/v0."],
+  ["gh", "api", "repos/{owner}/{repo}/git/matching-refs/tags/v", "--paginate", "--slurp"],
+  ["gh", "api", "repos/{owner}/{repo}/git/tags/0123456789abcdef0123456789abcdef01234567"],
   ["git", "-C", "/tmp/repo", "branch", "--track", "release/w1", "origin/release/w1"],
   ["git", "-C", "/tmp/repo", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/release/w1"],
   ["git", "-C", "/tmp/repo", "merge-base", "--is-ancestor", "a1b2c3", "d4e5f6"],
@@ -397,12 +439,25 @@ const ALLOWED: string[][] = [
   ["gh", "pr", "list", "--state", "open", "--base", "release/w1", "--limit", "50"],
   ["gh", "pr", "checks", "12", "--required"],
   ["gh", "run", "list", "--branch", "issue-5", "-L", "5", "--json", "status"],
+  [
+    "gh",
+    "run",
+    "list",
+    "--branch",
+    "release/2026-10-20-autopilot",
+    "--limit",
+    "20",
+    "--json",
+    "databaseId,name,workflowName,status,conclusion,url,headSha,event,createdAt,workflowDatabaseId",
+  ],
+  ["gh", "run", "list", "--branch=release/x", "--limit", "20"],
   ["gh", "run", "view", "123", "--log-failed"],
   ["gh", "run", "watch", "123", "--exit-status"],
   ["gh", "api", "--paginate", "repos/o/r/pulls"],
   ["gh", "issue", "view", "5", "--json", "title,body"],
   ["gh", "repo", "view", "example-org/example-repo", "--json", "visibility"],
   ["gh", "repo", "view", "--json", "visibility"],
+  ["gh", "repo", "view", "--json", "nameWithOwner,url,visibility"],
   ["gh", "pr", "view", "12"],
   ["gh", "pr", "list", "--head", "issue-5"],
   ["gh", "pr", "checks", "12"],
@@ -841,6 +896,31 @@ describe("exec", () => {
     // real process: exec's kill of a real child, on the real clock.
     expect(Date.now() - started).toBeLessThan(3000);
   });
+
+  it("with group, an abort kills the child's own children too", async () => {
+    const marks = tempDir("volleyd-exec-group-");
+    const abort = new AbortController();
+    // The grandchild (git's ssh transport) marks that it runs, then writes again a moment later.
+    const run = exec(["git", "fetch", "ssh://example.invalid/x"], {
+      cwd: repo,
+      env: {
+        ...process.env,
+        GIT_SSH_COMMAND: `sh -c 'touch "${marks}/up"; sleep 0.3; touch "${marks}/late"' --`,
+      },
+      signal: abort.signal,
+      group: true,
+    });
+    for (let i = 0; i < 100 && !existsSync(join(marks, "up")); i++) {
+      // real process: waiting for git to start its transport.
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(existsSync(join(marks, "up"))).toBe(true);
+    abort.abort();
+    await run;
+    // real process: past the grandchild's own write, had it survived.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(existsSync(join(marks, "late"))).toBe(false);
+  });
 });
 
 describe("the README quotes the fence policy", () => {
@@ -1117,6 +1197,149 @@ describe("the sign-in forward (F8): `ssh -N -L` only with the token a remote sig
     const forward = mintSigninForwardToken(TARGET, 51051, []);
     expect(() => assertAllowed(["git", "push"], { forward })).toThrow(FenceError);
     expect(() => assertAllowed(["ssh", "-T", TARGET, "bash", "-s"], { forward })).toThrow(
+      FenceError,
+    );
+  });
+});
+
+describe("merge token (autopilot merging)", () => {
+  const H = "a".repeat(40);
+  const H2 = "b".repeat(40);
+  const token = (pr = 7, head = H) =>
+    mintMergeToken({ wave: "w", task: "T1", pr, head, release_branch: "release/x" });
+  const MERGE = ["gh", "pr", "merge", "7", "--squash", "--match-head-commit", H];
+
+  it("gh pr merge is denied without a token", () => {
+    expect(() => assertAllowed(MERGE)).toThrow(/FENCE_DENIED: gh pr merge/);
+  });
+
+  it("allows exactly the gated PR at exactly the gated head, with --delete-branch optional", () => {
+    const merge = token();
+    expect(() => assertAllowed(MERGE, { merge })).not.toThrow();
+    expect(() => assertAllowed([...MERGE, "--delete-branch"], { merge })).not.toThrow();
+  });
+
+  it("denies another PR, another head, other strategies, admin/auto and loose shapes", () => {
+    expect(() => assertAllowed(MERGE, { merge: token(8) })).toThrow(FenceError);
+    expect(() => assertAllowed(MERGE, { merge: token(7, H2) })).toThrow(FenceError);
+    const merge = token();
+    const variants: string[][] = [
+      ["gh", "pr", "merge", "7", "--merge", "--match-head-commit", H],
+      ["gh", "pr", "merge", "7", "--rebase", "--match-head-commit", H],
+      [...MERGE, "--admin"],
+      [...MERGE, "--auto"],
+      [...MERGE, "--merge"],
+      ["gh", "pr", "merge", "7", "--squash"],
+      ["gh", "pr", "merge", "7", "--squash", "--match-head-commit", H.slice(0, 7)],
+      ["gh", "pr", "merge", "7", "--squash", `--match-head-commit=${H}`],
+      ["gh", "pr", "merge", "--squash", "--match-head-commit", H, "7"],
+      ["gh", "pr", "merge", "07", "--squash", "--match-head-commit", H],
+      [...MERGE, "--delete-branch", "--delete-branch"],
+      [...MERGE, "--body", "x"],
+    ];
+    for (const argv of variants) {
+      expect(() => assertAllowed(argv, { merge }), argv.join(" ")).toThrow(FenceError);
+    }
+  });
+
+  it("a merge token unlocks nothing else", () => {
+    const merge = token();
+    expect(() => assertAllowed(["git", "merge", "x"], { merge })).toThrow(FenceError);
+    expect(() => assertAllowed(["git", "push"], { merge })).toThrow(FenceError);
+    expect(() => assertAllowed(["git", "rebase", "main"], { merge })).toThrow(FenceError);
+    expect(() => assertAllowed(["gh", "workflow", "run", "ci"], { merge })).toThrow(FenceError);
+  });
+
+  it("is checked by identity: a look-alike token is rejected", () => {
+    const forged = {
+      wave: "w",
+      task: "T1",
+      pr: 7,
+      head: H,
+      release_branch: "release/x",
+    } as unknown as ReturnType<typeof mintMergeToken>;
+    expect(() => assertAllowed(MERGE, { merge: forged })).toThrow(FenceError);
+  });
+
+  it("exec passes the token through to the fence", async () => {
+    // A forged token is refused at the fence, before anything spawns.
+    const forged = { pr: 7, head: H } as unknown as ReturnType<typeof mintMergeToken>;
+    await expect(exec(MERGE, { merge: forged })).rejects.toThrow(FenceError);
+    await expect(exec(MERGE)).rejects.toThrow(FenceError);
+  });
+
+  it("refuses to mint over a short head or a non-positive PR", () => {
+    expect(() => token(7, "abc1234")).toThrow(FenceError);
+    expect(() => token(0)).toThrow(FenceError);
+  });
+});
+
+describe("pickers and handoffs: Up/Down/Space and typed answers need the inbox item's token", () => {
+  const key = (k: string, ws = "workspace:3") => ["cmux", "send-key", "--workspace", ws, k];
+  const send = (text: string, ws = "workspace:3") => ["cmux", "send", "--workspace", ws, text];
+
+  it("Up, Down and Space are denied bare; Enter and Escape need nothing", () => {
+    for (const k of ["Up", "Down", "Space"])
+      expect(() => assertAllowed(key(k)), k).toThrow(FenceError);
+    for (const k of ["Enter", "Escape"]) expect(() => assertAllowed(key(k)), k).not.toThrow();
+  });
+
+  it("a PickerToken allows exactly the keys it names, checked by identity", () => {
+    const t = mintPickerToken({ item_id: "p-a1-toolu_1", version: 1, keys: ["Down", "Enter"] });
+    expect(() => assertAllowed(key("Down"), { picker: t })).not.toThrow();
+    expect(() => assertAllowed(key("Up"), { picker: t })).toThrow(FenceError);
+    expect(() => assertAllowed(key("Space"), { picker: t })).toThrow(FenceError);
+    const forged = { item_id: "p-a1-toolu_1", version: 1, keys: ["Down"] } as ReturnType<
+      typeof mintPickerToken
+    >;
+    expect(() => assertAllowed(key("Down"), { picker: forged })).toThrow(FenceError);
+  });
+
+  it("a picker's typed Other text: only the token's exact text, and only once", () => {
+    const t = mintPickerToken({
+      item_id: "p-a1-toolu_1",
+      version: 1,
+      keys: ["Down", "Enter"],
+      text: "yes please",
+    });
+    expect(() => assertAllowed(send("yes please! rm"), { picker: t })).toThrow(FenceError);
+    expect(() => assertAllowed(send("yes please"))).toThrow(FenceError);
+    expect(() => assertAllowed(send("yes please"), { picker: t })).not.toThrow();
+    expect(() => assertAllowed(send("yes please"), { picker: t })).toThrow(/once/);
+  });
+
+  it("a HandoffToken types exactly its reply, once; it unlocks no navigation key", () => {
+    const t = mintHandoffToken({ item_id: "h-a1-7", version: 1, text: "go ahead with T2" });
+    expect(() => assertAllowed(send("go ahead with T2"), { handoff: t })).not.toThrow();
+    expect(() => assertAllowed(send("go ahead with T2"), { handoff: t })).toThrow(FenceError);
+    expect(() => assertAllowed(key("Down"), { handoff: t })).toThrow(FenceError);
+    const forged = { item_id: "h-a1-7", version: 1, text: "x" } as ReturnType<
+      typeof mintHandoffToken
+    >;
+    expect(() => assertAllowed(send("x"), { handoff: forged })).toThrow(FenceError);
+  });
+
+  it("refuses to mint a token for text that would be a command or more than one line", () => {
+    for (const text of [
+      "!rm -rf ~",
+      "/model opus",
+      "two\nlines",
+      "tab\there",
+      "",
+      "esc\u001b[A",
+      "csi\u009b2J",
+      "line\u2028sep",
+      "para\u2029sep",
+    ]) {
+      expect(() => mintHandoffToken({ item_id: "h-a1-7", version: 1, text }), text).toThrow(
+        FenceError,
+      );
+      expect(
+        () => mintPickerToken({ item_id: "p-a1-t", version: 1, keys: [], text }),
+        text,
+      ).toThrow(FenceError);
+    }
+    expect(() => mintPickerToken({ item_id: "p-a1-t", version: 1, keys: ["Tab" as "Up"] })).toThrow(
       FenceError,
     );
   });

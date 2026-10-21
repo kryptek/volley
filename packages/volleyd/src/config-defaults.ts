@@ -44,6 +44,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   hosts: {},
   // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
   require_fresh_base: true,
+  retire_close_session: true,
   placement: {
     nudge_on_merge: "files",
     // --- Fleet: placement engine (placement.ts, SPEC §4.6.15) ---
@@ -55,7 +56,31 @@ export const CONFIG_DEFAULTS: Tunables = {
     down_decision_after_s: 300,
   },
   // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
-  fleet: { local_name: null },
+  // local_agents null: fallback once any hosts.<name> is configured, else always.
+  fleet: { local_name: null, local_agents: null, fallback: { max_agents: 3, per_machine: {} } },
+  // --- Autopilot: decisions volleyd answers itself (SPEC §4.6.16); merging (SPEC §4.6.17) ---
+  autopilot: {
+    enabled: true,
+    owner_only: ["plan_change", "repo_untrusted", "model_switch", "release_go", "stage_go"],
+    relaunch_max: 1,
+    nudge_max: 1,
+    respawn_max: 1,
+    rereview_max: 2,
+    ci_fixup_max: 2,
+    question_max: 1,
+    budget_raise_max: 2,
+    inbox_answered_ttl_s: 600,
+    merge: "auto",
+    merge_retry_max: 2,
+    delete_branch: false,
+    reconnect_grace_s: 900,
+    incident_wait_max_s: 14_400,
+    fix_flake_max: 3,
+    digest_min_interval_s: 1800,
+  },
+  // --- Archiving (SPEC §4.6.20) ---
+  archive_ended_after_h: 24,
+  archive_on_ack: true,
 };
 
 /**
@@ -111,6 +136,8 @@ export const DAEMON_DEFAULTS = {
   mailbox_idle_ms: 30_000,
   /** Recently answered control requests remembered for QoS 1 redelivery dedupe. */
   dedupe_max: 256,
+  /** Entries the retained `volley/_waves/_archive` index keeps (newest first). */
+  archive_index_max: 200,
   /** After an exec timeout's SIGTERM, wait this long before SIGKILL. */
   exec_kill_grace_ms: 5_000,
   /** Cap on captured stdout and stderr per exec (each), in bytes. */
@@ -142,6 +169,13 @@ export const DAEMON_DEFAULTS = {
   /** First retry delay of an automatic spawn that was refused; doubles per refusal, up to the
    * `spawn_retry_max_s` tunable. */
   spawn_retry_base_ms: 30_000,
+  /** Bound on one `cmux new-workspace`: a launch still pending then has an unknown outcome. */
+  launch_timeout_ms: 60_000,
+  /** After a launch with an unknown outcome: how long to wait for the agent's registration
+   * signals before deciding it never started (spawn.ts reconcileLaunch). */
+  launch_reconcile_ms: 30_000,
+  /** Bound on one workspace lookup (`cmux list-workspaces`); a lookup still pending then fails. */
+  workspace_lookup_timeout_ms: 10_000,
   /** How long a spawn's (or `run`'s) `git fetch origin <release branch>` may take before it is
    * treated as failed (an ssh remote with no agent, a credential prompt). */
   git_fetch_timeout_ms: 30_000,
@@ -190,14 +224,22 @@ export const DAEMON_DEFAULTS = {
   ci_poll_ms: 60_000,
   /** How long a head may have no CI run at all before the pipeline asks the owner. */
   ci_none_grace_ms: 900_000,
+  /** Failed checks in a row after which the merge turn's holder passes the turn on (SPEC §4.6.17). */
+  merge_turn_check_failures_max: 3,
   /** Bound on the advance rounds one pipeline observation may trigger (a guard, never reached). */
   pipeline_max_advances: 8,
   /** A blocked agent's reason is clipped to this many characters in its decision's question. */
   blocked_reason_max_chars: 500,
   /** A terminal status (done / blocked / failed) nothing in the journal names for this long alarms. */
   terminal_unjournaled_alarm_ms: 60_000,
+  /** The tail of a red head's failed-run logs kept on its ci_failed decision (a CI fixup's directive). */
+  ci_log_max_chars: 4_000,
   /** Hard bound on each git / gh call of the pipeline; a timeout is "not verified yet". */
   pipeline_io_ms: 30_000,
+  /** Hard bound on one read of GitHub's status page (a red head's classification). */
+  status_page_timeout_ms: 5_000,
+  /** How long one read of GitHub's status page is reused. */
+  status_page_cache_ms: 60_000,
   /** How often the screen publisher checks which agents are due a capture. */
   screen_tick_ms: 1_000,
   /** Lines read per screen-tail capture (`cmux read-screen --lines`), before the chrome is cut. */
@@ -208,8 +250,20 @@ export const DAEMON_DEFAULTS = {
   worktree_scan_max_entries: 2000,
   /** A capture slower than this backs the agent off and marks its screen stale. */
   screen_slow_ms: 2_000,
+  /** Hard bound on one `cmux close-workspace` (a retire's, or cleanup's). */
+  workspace_close_timeout_ms: 15_000,
+  /** Between SIGTERM and SIGKILL when volleyd stops a retired agent's process (procs.ts). */
+  proc_kill_grace_ms: 5_000,
+  /** Hard bound on the `ps` that lists processes (procs.ts). */
+  ps_timeout_ms: 10_000,
   /** Hard bound on one screen read; a read still pending then counts as failed (and slow). */
   screen_read_timeout_ms: 5_000,
+  /**
+   * A multi-select picker answered from the inbox: screen reads (this many, this far apart) that
+   * wait for the review screen its Submit opens (autopilot/carry.ts).
+   */
+  picker_review_reads: 5,
+  picker_review_gap_ms: 200,
   /** Consecutive failed captures that back the agent off and mark its screen stale. */
   screen_max_failures: 3,
   /** Capture interval while an agent is backed off. */

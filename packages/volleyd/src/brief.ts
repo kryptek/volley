@@ -14,6 +14,7 @@ export const ROLES = [
   "quality_reviewer",
   "fixup",
   "rebase",
+  "release",
 ] as const;
 export type Role = (typeof ROLES)[number];
 
@@ -41,17 +42,34 @@ export interface BriefVars {
   /** Reviewer briefs: the hygiene check line and its contract bullet (reviews.ts hygieneText). */
   hygiene_rule: string;
   hygiene_contract: string;
+  /** The release role (autopilot/release-train.ts stageBriefVars): its playbook stage; else "". */
+  stage: string;
+  stage_brief: string;
+  stage_commands: string;
+  stage_verify: string;
 }
+
+/** The stage placeholders of a brief that is not a release stage's: all empty. */
+export const NO_STAGE = {
+  stage: "",
+  stage_brief: "",
+  stage_commands: "",
+  stage_verify: "",
+} as const;
 
 /**
  * `<role>.md.tmpl`, or `<role>-<variant>.md.tmpl` (the rebase role's `merge` brief, under
- * `branch_update: merge`).
+ * `branch_update: merge`); the implementer's `flake` variant is `flake-fixer.md.tmpl` (a flake's
+ * fixer, SPEC §4.6.16).
  */
-export function loadTemplate(role: Role, dir: string = BRIEFS_DIR, variant?: "merge"): string {
-  return readFileSync(
-    join(dir, `${role}${variant !== undefined ? `-${variant}` : ""}.md.tmpl`),
-    "utf-8",
-  );
+export function loadTemplate(
+  role: Role,
+  dir: string = BRIEFS_DIR,
+  variant?: "merge" | "flake",
+): string {
+  const name =
+    variant === "flake" ? "flake-fixer" : `${role}${variant !== undefined ? `-${variant}` : ""}`;
+  return readFileSync(join(dir, `${name}.md.tmpl`), "utf-8");
 }
 
 /**

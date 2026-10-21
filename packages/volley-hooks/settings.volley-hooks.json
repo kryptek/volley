@@ -58,6 +58,16 @@
             "timeout": 15
           }
         ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run \"$VOLLEY_HOOKS_DIR/src/hooks/picker-pre.ts\"",
+            "timeout": 15
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -67,6 +77,16 @@
           {
             "type": "command",
             "command": "bun run \"$VOLLEY_HOOKS_DIR/src/hooks/post-tool-use.ts\"",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run \"$VOLLEY_HOOKS_DIR/src/hooks/picker-post.ts\"",
             "timeout": 15
           }
         ]

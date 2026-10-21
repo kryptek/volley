@@ -1,0 +1,50 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T02:14:09.000Z",
+  "channel": "_waves/events",
+  "type": "release_started",
+  "payload": {
+    "wave": "w1",
+    "seq": 57,
+    "at": "2026-10-20T02:14:09.000Z",
+    "data": {
+      "done": [
+        "T1"
+      ],
+      "cancelled": [],
+      "playbook": {
+        "path": "/srv/repos/example/.volley/release.yaml",
+        "sha256": "9f2c000000000000000000000000000000000000000000000000000000000000",
+        "stages": [
+          {
+            "name": "bump",
+            "brief": "Bump the version and assemble the changelog.",
+            "run": [
+              [
+                "bun",
+                "run",
+                "changelog",
+                "--version",
+                "0.5.0",
+                "--date",
+                "2026-10-20",
+                "--commit"
+              ]
+            ],
+            "gate": "auto"
+          },
+          {
+            "name": "notes",
+            "brief": "Draft the release notes and tag the release.",
+            "run": [],
+            "gate": "owner",
+            "verify": {
+              "tag": "v*"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

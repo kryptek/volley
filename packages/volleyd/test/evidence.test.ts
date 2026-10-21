@@ -135,6 +135,7 @@ describe("merge-ready evidence package", () => {
       fixups: [],
       rebases: [],
       release: { release_sha: sha(9), merge_base: sha(8), behind: 3 },
+      merge: "manual",
       generated_at: "2026-10-18T12:00:00.000Z",
     });
     expect(j.unresolved_p1).toEqual(["S1"]);
@@ -161,11 +162,46 @@ describe("merge-ready evidence package", () => {
       rebases: [],
       base_sha: base,
       release: { release_sha: sha(9), merge_base: sha(8), behind: 2 },
+      merge: "manual",
       generated_at: "2026-10-18T12:00:00.000Z",
     });
     expect(j).toMatchObject({ base_sha: base, behind_by: 2, current_with_release_branch: false });
     expect(renderEvidenceMd(j)).toContain(
       "Branch current with release branch: no — cut from 4b825dc, 2 behind",
+    );
+  });
+
+  it("a move the owner accepted as a merge of the release branch only says so", () => {
+    const j = evidenceJson({
+      wave: "w1",
+      task: "T1",
+      issue: 42,
+      pr: { number: 7, url: "https://github.com/example/repo/pull/7" },
+      head: H2,
+      branch: "w1/T1-implementer-1",
+      release_branch: "release/w1",
+      ci: "green",
+      ci_runs: [],
+      reviews: {},
+      fixups: [],
+      rebases: [],
+      moves: [
+        {
+          from: H1,
+          to: H2,
+          touched: ["CHANGELOG.md"],
+          accepted_by: "owner",
+          how: "release_merge",
+          parent: sha(9),
+        },
+      ],
+      release: { release_sha: sha(9), merge_base: sha(9), behind: 0 },
+      merge: "manual",
+      generated_at: "2026-10-18T12:00:00.000Z",
+    });
+    expect(j.moves[0]).toMatchObject({ how: "release_merge", accepted_by: "owner" });
+    expect(renderEvidenceMd(j)).toContain(
+      "Accepted by owner: a merge of the release branch only (touched: CHANGELOG.md; they may carry content resolved by hand, which no reviewer saw).",
     );
   });
 

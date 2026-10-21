@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { initialState, reduceAll } from "../src/store/reducer";
 import type { WaveTask } from "../src/store/types";
 import { AgentWindow } from "../src/windows/agent/AgentWindow";
+import { machineFor } from "../src/windows/agent/machine";
 import { WaveWindow, type WaveWindowProps } from "../src/windows/wave/WaveWindow";
 import {
   NOW,
@@ -96,7 +97,7 @@ describe("task host chip and why here", () => {
     expect(screen.getByText("re-placed by owner on 2026-10-18")).toBeInTheDocument();
   });
 
-  it("the agent window footer reads on <host>", () => {
+  it("the agent window's machine chip reads box-a; the footer no longer says on <host>", () => {
     const s = reduceAll(initialState(), [
       waveMsg(state),
       registry("impl-1", NOW),
@@ -105,8 +106,18 @@ describe("task host chip and why here", () => {
     const agent = s.agents["impl-1"];
     if (!agent) throw new Error("no impl-1");
     const { container } = render(
-      <AgentWindow agent={agent} wave={s.waves.w1} accent="#c4b5fd" frame={frame} now={NOW} />,
+      <AgentWindow
+        agent={agent}
+        wave={s.waves.w1}
+        accent="#c4b5fd"
+        frame={frame}
+        now={NOW}
+        machine={machineFor(agent, s.waves.w1, s)}
+      />,
     );
-    expect(container.querySelector(".agent-foot")).toHaveTextContent("on box-a");
+    expect(screen.getByRole("button", { name: "Runs on box-a: why here" })).toHaveTextContent(
+      "box-a",
+    );
+    expect(container.querySelector(".agent-foot")).not.toHaveTextContent("on box-a");
   });
 });

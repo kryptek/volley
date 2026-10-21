@@ -16,6 +16,8 @@
 #     capacity: 3
 #     ttl_s: 3600               # lease expiry unless renewed (default 3600)
 #     match: ["mvn .*verify", "mvn .*test", "gradle .*integrationTest"]
+#     per_machine_overrides: { local: 1 }  # per machine name (local: the supervisor's own),
+#                                # the cap there in place of per_machine (0..capacity)
 #   build:
 #     capacity: 2
 #     match: ["npm run build", "vite build"]
@@ -97,6 +99,9 @@
 # require_fresh_base: true       # a failed `git fetch origin <release>` refuses the spawn (BASE_STALE,
 #                                # retried with the usual backoff); false: cut from the host's last
 #                                # copy and journal a BASE_STALE warning
+# retire_close_session: true     # a retire also ends the agent's session: closes its workspace and
+#                                # stops its claude process (agent_session_closed); false: finished
+#                                # sessions stay open for inspection (README "Retire and cleanup")
 # placement:
 #   nudge_on_merge: files        # when a wave's PR merges, steer its running implementers once:
 #                                # files (their task's files hints overlap the PR's), all, or off
@@ -105,3 +110,38 @@
 # fleet:
 #   local_name: null             # its machine record's name; null: the host name's first label,
 #                                # lowercased. Never a hosts.<name> key.
+#   local_agents: null           # how it takes auto-placed tasks: always (a candidate like any
+#                                # peer), fallback (only while no paired machine is eligible, under
+#                                # fallback: below), never; null: fallback once any hosts.<name> is
+#                                # configured, else always
+#   fallback:                    # its profile while it is the fallback
+#     max_agents: 3              # agents on it at most (hard_ceiling still caps the total)
+#     per_machine: {}            # per heavy pool, its slots, e.g. { js-suite: 1, backend-it: 0 };
+#                                # a pool not named gets 1 when it sets per_machine
+
+# --- Autopilot: decisions volleyd answers itself, and merging (README "Autopilot") ---
+# autopilot:
+#   enabled: true                # false: every decision waits for the owner (next decision on)
+#   owner_only: [plan_change, repo_untrusted, model_switch, release_go, stage_go]
+#                                # kinds only the owner answers: always escalated
+#   relaunch_max: 1              # relaunches of one <task>/<role> after a bad launch
+#   nudge_max: 1                 # extra nudges of one stalled run (<task>/<role>/<attempt>)
+#   respawn_max: 1               # respawns of one <task>/<role>
+#   rereview_max: 2              # re-reviews of one task (moved head, stale review at the gate)
+#   ci_fixup_max: 2              # CI fixups of one task (CI red on its own change)
+#   question_max: 1              # agent questions answered for one run
+#   budget_raise_max: 2          # raise by <n> answers may take the spawn budget to this
+#                                # multiple of the wave's derived budget
+#   inbox_answered_ttl_s: 600    # an answered needs-you inbox item stays retained this long
+#   merge: auto                  # who merges a gated PR when the wave file has no merge: key:
+#                                # auto (volleyd squash-merges exactly the gated head, behind the
+#                                # fence; merged_by_supervisor) or manual (a human merges)
+#   merge_retry_max: 2           # merges GitHub may refuse at one gated head before volleyd asks
+#                                # (decision merge_refused: retry, manual or cancel)
+#   delete_branch: false         # autopilot merges also delete the PR's head branch
+#   reconnect_grace_s: 900       # a wave owned by a coordinator name whose session went away reads
+#                                # coordinator.state "reconnecting" this long (60..86400), then "gone"
+
+# --- Archiving (README "Archiving") ---
+# archive_ended_after_h: 24      # archive a stopped / complete wave this many hours after it ended; 0: never
+# archive_on_ack: true           # archive a complete wave as soon as its wave_complete decision is answered

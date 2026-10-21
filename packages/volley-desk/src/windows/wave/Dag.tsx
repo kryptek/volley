@@ -17,6 +17,7 @@
  * and why (SPEC §4.6.15 `tasks[].placement`).
  */
 import { useState } from "react";
+import { issueLabel } from "../../lib/github";
 import type { TaskPlacement, WaveTask } from "../../store/types";
 import { type DeskStage, STAGE_LABEL } from "./stages";
 
@@ -28,6 +29,20 @@ export interface DagNode {
   stage: DeskStage;
   /** Cancelled by a plan change: drawn faded, labelled `cancelled`, kept out of progress. */
   cancelled?: boolean;
+  /** The issue on GitHub (the wave state's `github`): the corner label links there. */
+  issueHref?: string;
+  /** A synthetic fixer task (SPEC §4.6.16): the tasks it fixes; drawn with a wrench. */
+  fixerFor?: string[];
+}
+
+/** `fixer for T3, T7` (just `fixer` when the supervisor names no task). */
+export const fixerLabel = (fixes: readonly string[]) =>
+  fixes.length ? `fixer for ${fixes.join(", ")}` : "fixer";
+
+/** A node's tooltip: its title, or what a fixer fixes. */
+function nodeTip(t: DagNode): string | undefined {
+  if (t.fixerFor) return `${t.id} · ${fixerLabel(t.fixerFor)}`;
+  return t.title ? `${t.id} · ${t.title}` : undefined;
 }
 
 export interface DagLayout {
@@ -167,12 +182,14 @@ export function Dag({
   const l = layoutDag(tasks, maxWidth);
   return (
     <div className="dag-scroll">
+      {/* A group, not an img: an img's children are presentational, and the issue labels are links. */}
       <svg
         className={`dag${ended ? " dag--ended" : ""}`}
         width={l.width}
         height={l.height}
         viewBox={`0 0 ${l.width} ${l.height}`}
-        role="img"
+        // biome-ignore lint/a11y/useSemanticElements: an <svg> cannot be a <fieldset>
+        role="group"
         aria-label="Task dependency graph"
       >
         {l.edges.map((e) => (
@@ -186,17 +203,37 @@ export function Dag({
             data-col={t.col}
             data-id={t.id}
           >
-            {t.title && <title>{`${t.id} · ${t.title}`}</title>}
+            {nodeTip(t) && <title>{nodeTip(t)}</title>}
             <rect width={W} height={H} rx="9" />
+            {t.fixerFor && (
+              <text x={W - 10} y="34" textAnchor="end" className="dag-fixer">
+                🔧
+              </text>
+            )}
             <text x="10" y="18" className="dag-id" fill={accent}>
               {t.id}
             </text>
             <text x="10" y="34" className="dag-stage">
               {t.cancelled ? "cancelled" : (labels[t.id] ?? STAGE_LABEL[t.stage])}
             </text>
-            <text x={W - 10} y="18" textAnchor="end" className="dag-issue">
-              #{t.issue}
-            </text>
+            {t.issueHref ? (
+              <a
+                href={t.issueHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label={issueLabel(t.issue)}
+                className="dag-issue-link"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <text x={W - 10} y="18" textAnchor="end" className="dag-issue">
+                  #{t.issue}
+                </text>
+              </a>
+            ) : (
+              <text x={W - 10} y="18" textAnchor="end" className="dag-issue">
+                #{t.issue}
+              </text>
+            )}
           </g>
         ))}
       </svg>

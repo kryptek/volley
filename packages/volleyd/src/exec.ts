@@ -11,6 +11,13 @@ export interface ExecOptions extends FenceOptions {
   /** Kills the child (SIGTERM, then SIGKILL after the grace) when aborted: long-lived children. */
   signal?: AbortSignal;
   /**
+   * Spawn the child as its own process group's leader and send every kill (abort, timeout) to the
+   * whole group, so the processes it started die with it instead of outliving it. The child
+   * leaves volleyd's own group, so a Ctrl-C or SIGHUP to a foreground `volleyd daemon` no longer
+   * reaches it: only an abort (stop()) or the timeout ends it.
+   */
+  group?: true;
+  /**
    * Kill the child after this many ms: SIGTERM, then after `killGraceMs` SIGKILL, and resolve
    * with the output so far even if a grandchild still holds the pipes open. The result then has
    * `timedOut: true`.
@@ -46,7 +53,10 @@ export const exec: ExecFn = async (argv, opts = {}) => {
     ...(opts.script !== undefined ? { script: opts.script } : {}),
     ...(opts.remote !== undefined ? { remote: opts.remote } : {}),
     ...(opts.launch !== undefined ? { launch: opts.launch } : {}),
+    ...(opts.merge !== undefined ? { merge: opts.merge } : {}),
     ...(opts.modelSwitch !== undefined ? { modelSwitch: opts.modelSwitch } : {}),
+    ...(opts.picker !== undefined ? { picker: opts.picker } : {}),
+    ...(opts.handoff !== undefined ? { handoff: opts.handoff } : {}),
     ...(opts.signin !== undefined ? { signin: opts.signin } : {}),
     ...(opts.forward !== undefined ? { forward: opts.forward } : {}),
     ...(opts.setup !== undefined ? { setup: opts.setup } : {}),
@@ -63,6 +73,7 @@ export const exec: ExecFn = async (argv, opts = {}) => {
       cwd: opts.cwd,
       env: opts.env ?? process.env,
       shell: false,
+      detached: opts.group === true,
       // No input → no stdin pipe at all, so nothing can EPIPE.
       stdio: [input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
     });
@@ -81,6 +92,17 @@ export const exec: ExecFn = async (argv, opts = {}) => {
       if (chunk.length < d.length) truncated = true;
       out[which].push(chunk);
       size[which] += chunk.length;
+    };
+    const kill = (sig: NodeJS.Signals) => {
+      if (opts.group === true && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, sig);
+          return;
+        } catch {
+          // The group is gone already (or never formed): signal the child alone.
+        }
+      }
+      child.kill(sig);
     };
     child.stdout?.on("data", collect("stdout"));
     child.stderr?.on("data", collect("stderr"));
@@ -107,9 +129,9 @@ export const exec: ExecFn = async (argv, opts = {}) => {
       opts.timeoutMs !== undefined
         ? clock.setTimeout(() => {
             timedOut = true;
-            child.kill("SIGTERM");
+            kill("SIGTERM");
             killer = clock.setTimeout(() => {
-              child.kill("SIGKILL");
+              kill("SIGKILL");
               child.stdout?.destroy();
               child.stderr?.destroy();
               settle(child.exitCode ?? 1);
@@ -117,9 +139,9 @@ export const exec: ExecFn = async (argv, opts = {}) => {
           }, opts.timeoutMs)
         : undefined;
     const abort = () => {
-      child.kill("SIGTERM");
+      kill("SIGTERM");
       killer ??= clock.setTimeout(() => {
-        child.kill("SIGKILL");
+        kill("SIGKILL");
         child.stdout?.destroy();
         child.stderr?.destroy();
         settle(child.exitCode ?? 1);

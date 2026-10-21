@@ -1,0 +1,20 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T12:05:00.000Z",
+  "channel": "_waves/events",
+  "type": "merged_by_supervisor",
+  "payload": {
+    "wave": "w1",
+    "seq": 42,
+    "at": "2026-10-20T12:05:00.000Z",
+    "task": "T1",
+    "data": {
+      "task": "T1",
+      "pr": 7,
+      "head": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+      "merge_sha": "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e",
+      "by": "volleyd"
+    }
+  }
+}

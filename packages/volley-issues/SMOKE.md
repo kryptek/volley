@@ -45,6 +45,17 @@ These steps verify the volley-issues skill against a real downstream repo + live
 - [ ] As each agent terminates, the coordinator processes them independently (one PR each, both targeting the release branch).
 - [ ] When both are done + merged, the coordinator prompts you to deploy the release branch to staging.
 
+## Autopilot dispatch (volleyd path)
+
+The sections above exercise the legacy path. With `volleyd status` exiting 0 and `VOLLEY_COORDINATOR` set in the MCP registration's `env` and exported in the shell:
+
+- [ ] `/volley-issues #<N1>,#<N2>`: the generated wave file carries `merge: "auto"` and, as passed, `config: {"autopilot":{"enabled":true},"branch_update":"merge"}`; the helper's last stderr lines are `submit: volleyd run <file> --owner "$VOLLEY_COORDINATOR"` and `owner: <your coordinator name> (VOLLEY_COORDINATOR)`.
+- [ ] The skill asks the go-ahead with an `AskUserQuestion` go/no-go picker (`go`, `hold`, `cancel`), which also shows in the Desk's Needs-you window; answer it there and confirm the session acts on it.
+- [ ] After `volleyd run`, the skill says the wave is submitted and leaves: no per-event loop, no `volley wait` per agent. Ending the session does not stop the wave.
+- [ ] Anything owner-only (or an escalation) shows in the Desk's Needs-you window and in `volleyd inbox`; answering it with `volleyd inbox answer <id> <answer>` resolves it.
+- [ ] Asked to wait, the skill arms one `volley sub --pattern "volley/_waves/<wave>/digest"` and, on the wake, relays `volleyd digest <wave>`.
+- [ ] Re-run with `--autopilot off`: the wave file carries `config: {"autopilot":{"enabled":false}}`, and the skill follows **Driving a wave by hand** (decisions and merge-ready gates).
+
 ## Tear-down
 
 - [ ] After verification: clean up retained agent registry entries. Substitute `<child-A-id>` and `<child-B-id>` with the `coordinator-XXXX` ids you recorded across the Single-issue dispatch and Crash detection sections above (the auto-suffixed ids the child MCPs picked at startup — discovered post-dispatch via `vol_list_agents`):

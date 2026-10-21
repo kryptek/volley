@@ -1,12 +1,13 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import axe from "axe-core";
 import { describe, expect, it, vi } from "vitest";
 import { Machines, type MachinesProps, agentsOnMachines } from "../src/settings/Machines";
 import { PeerSignin } from "../src/settings/PeerSigninSheet";
 import type { ConfigTransport } from "../src/settings/configTransport";
 import { fixFor } from "../src/settings/machineFixes";
-import type { ClaudeAccountPayload, MachinePayload } from "../src/store/types";
+import type { ClaudeAccountPayload, MachinePayload, ReadinessPayload } from "../src/store/types";
 import { NOW, S, machineRecord, placement, readiness, waveState } from "./helpers/desk-msgs";
 import { fakePeerOps } from "./helpers/peer-ops";
 
@@ -54,8 +55,10 @@ function setup(props: Partial<MachinesProps> = {}) {
     now: NOW,
     ...props,
   };
-  render(<Machines {...base} />);
-  return { ops: (props.ops as typeof ops | undefined) ?? ops, config };
+  const view = render(<Machines {...base} />);
+  const rerender = (next: Partial<MachinesProps>) =>
+    view.rerender(<Machines {...base} {...next} />);
+  return { ops: (props.ops as typeof ops | undefined) ?? ops, config, rerender };
 }
 
 const card = (name: string) => within(screen.getByRole("article", { name }));
@@ -414,5 +417,119 @@ describe("phone width (390 px)", () => {
     expect(phone).toMatch(/\.machines\s*\{[^}]*grid-template-columns:\s*1fr/);
     expect(css).toMatch(/\.m-check\s*\{[^}]*flex-wrap:\s*wrap/);
     expect(phone).toMatch(/\.m-sheet\s*\{[^}]*inset:\s*0/);
+  });
+});
+
+describe("Machines focus (the agent window's machine chip)", () => {
+  it("scrolls the focused machine's card into view once, on mount", () => {
+    const seen: Element[] = [];
+    const spy = vi.fn(function (this: Element) {
+      seen.push(this);
+    });
+    // jsdom has no scrollIntoView.
+    Object.defineProperty(Element.prototype, "scrollIntoView", { value: spy, configurable: true });
+    try {
+      setup({
+        machines: { "box-a": machineRecord(), "box-b": machineRecord({ name: "box-b" }) },
+        hosts: ["box-a", "box-b"],
+        focus: "box-b",
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(seen[0]).toBe(screen.getByRole("article", { name: "box-b" }));
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
+  });
+
+  it("a second click on the same machine's chip (a new focusSeq) scrolls to its card again", () => {
+    const spy = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", { value: spy, configurable: true });
+    try {
+      const { rerender } = setup({ focus: "box-a", focusSeq: 1 });
+      expect(spy).toHaveBeenCalledTimes(1);
+      rerender({ focus: "box-a", focusSeq: 1 });
+      expect(spy).toHaveBeenCalledTimes(1);
+      rerender({ focus: "box-a", focusSeq: 2 });
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
+  });
+
+  it("the supervisor's own machine scrolls to its card (the hub card until it has a record)", () => {
+    const spy = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", { value: spy, configurable: true });
+    try {
+      setup({ localName: "studio", focus: "studio" });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.contexts[0]).toBe(screen.getByRole("article", { name: "This machine" }));
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
+  });
+});
+
+describe("the local agents chip (the supervisor's own card)", () => {
+  const hub = machineRecord({ name: "hub", kind: "supervisor", tunnel: "local" });
+  const withLocal = (local_agents?: ReadinessPayload["local_agents"]) =>
+    setup({
+      machines: { hub, "box-a": machineRecord() },
+      readiness: {
+        hub: readiness({ name: "hub", ...(local_agents ? { local_agents } : {}) }),
+        // A peer's verdict never carries it; even if one did, a peer card shows no chip.
+        "box-a": readiness({ local_agents: { mode: "always", active: false } }),
+      },
+      localName: "hub",
+      onOpenSetting: vi.fn(),
+    });
+  const chip = () => card("hub").queryByRole("button", { name: /^Local agents:/ });
+
+  it.each([
+    [{ mode: "fallback", active: false }, "fallback"],
+    [{ mode: "fallback", active: true }, "fallback · active"],
+    [{ mode: "always", active: false }, "always"],
+    [{ mode: "never", active: false }, "never"],
+  ] as const)("reads %j as %s", async (local, text) => {
+    withLocal(local);
+    await act(flush);
+    expect(chip()).toHaveTextContent(text);
+    expect(chip()).toHaveAccessibleName(`Local agents: ${text}`);
+  });
+
+  it("titles the chip with volleyd's why", async () => {
+    withLocal({ mode: "fallback", active: true, why: "box-a: tunnel down (readiness)" });
+    await act(flush);
+    expect(chip()).toHaveAttribute("title", "box-a: tunnel down (readiness)");
+  });
+
+  it("is absent from an older supervisor's verdict and never on a peer card", async () => {
+    withLocal(undefined);
+    await act(flush);
+    expect(chip()).toBeNull();
+    expect(card("box-a").queryByRole("button", { name: /^Local agents:/ })).toBeNull();
+  });
+
+  it("a click asks for the fleet.local_agents setting", async () => {
+    const onOpenSetting = vi.fn();
+    setup({
+      machines: { hub },
+      readiness: {
+        hub: readiness({ name: "hub", local_agents: { mode: "always", active: false } }),
+      },
+      localName: "hub",
+      onOpenSetting,
+    });
+    await act(flush);
+    fireEvent.click(card("hub").getByRole("button", { name: "Local agents: always" }));
+    expect(onOpenSetting).toHaveBeenCalledWith("fleet.local_agents");
+  });
+
+  it("passes axe", async () => {
+    withLocal({ mode: "fallback", active: true, why: "box-a eligible" });
+    await act(flush);
+    const results = await axe.run(screen.getByRole("article", { name: "hub" }), {
+      rules: { "color-contrast": { enabled: false } },
+    });
+    expect(results.violations.map((v) => v.id)).toEqual([]);
   });
 });

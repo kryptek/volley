@@ -15,6 +15,7 @@ import { type ConfigClient, createConfigTransport } from "../src/settings/config
 import { SETTINGS_SECTIONS, type SectionKey } from "../src/settings/sections";
 import { DeskStoreProvider } from "../src/store/context";
 import type { ConfigPayload, DeskMessage, Envelope } from "../src/store/types";
+import { machineRecord, readiness } from "./helpers/desk-msgs";
 
 const config: ConfigPayload = {
   version: 7,
@@ -108,7 +109,7 @@ beforeEach(() => {
 });
 
 describe("SettingsWindow", () => {
-  it("lists eight sections in three groups, General first", () => {
+  it("lists ten sections in three groups, General first", () => {
     render(<Harness />);
     const lists = sidebar().getAllByRole("list");
     expect(lists).toHaveLength(3);
@@ -120,10 +121,10 @@ describe("SettingsWindow", () => {
       ),
     ).toEqual([
       ["General", "Sound", "Appearance"],
-      ["Supervisor", "Claude accounts & usage", "Broker accounts", "Machines"],
+      ["Supervisor", "Autopilot", "Claude accounts & usage", "Broker accounts", "Machines"],
       ["Setup & Security", "About Volley"],
     ]);
-    expect(SETTINGS_SECTIONS).toHaveLength(9);
+    expect(SETTINGS_SECTIONS).toHaveLength(10);
     expect(heading()).toHaveTextContent("General");
     expect(sidebar().getByRole("button", { name: "General" })).toHaveAttribute(
       "aria-current",
@@ -140,6 +141,59 @@ describe("SettingsWindow", () => {
       "aria-current",
       "page",
     );
+  });
+
+  it("an open window follows a new section it is given (a machine chip asks for Machines)", () => {
+    const { rerender } = render(<Harness initial="general" />);
+    open("About Volley");
+    rerender(
+      <Harness
+        initial="machines"
+        machines={{ machines: {}, hubUp: true, ops: null, focus: "box-a" }}
+      />,
+    );
+    expect(heading()).toHaveTextContent("Machines");
+  });
+
+  it("a second click on the same machine's chip (a new focusSeq) brings Machines back", () => {
+    const machines = { machines: {}, hubUp: true, ops: null, focus: "box-a" };
+    const { rerender } = render(
+      <Harness initial="machines" machines={{ ...machines, focusSeq: 1 }} />,
+    );
+    open("About Volley");
+    expect(heading()).toHaveTextContent("About Volley");
+    rerender(<Harness initial="machines" machines={{ ...machines, focusSeq: 2 }} />);
+    expect(heading()).toHaveTextContent("Machines");
+  });
+
+  it("the machine card's local agents chip opens Supervisor at the fleet.local_agents row", () => {
+    const spy = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", { value: spy, configurable: true });
+    try {
+      const hub = machineRecord({ name: "hub", kind: "supervisor", tunnel: "local" });
+      render(
+        <Harness
+          initial="machines"
+          config={{ ...config, fleet: { local_name: "hub", local_agents: "fallback" } }}
+          machines={{
+            machines: { hub },
+            readiness: {
+              hub: readiness({ name: "hub", local_agents: { mode: "fallback", active: false } }),
+            },
+            localName: "hub",
+            hubUp: true,
+            ops: null,
+          }}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Local agents: fallback" }));
+      expect(heading()).toHaveTextContent("Supervisor");
+      const select = screen.getByRole("combobox", { name: "Fleet local agents" });
+      expect(spy.mock.contexts.at(-1)).toBe(select.closest(".cfg-row"));
+      expect(select).toHaveFocus();
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
   });
 
   it("closes on Escape, the close button and a scrim click", () => {

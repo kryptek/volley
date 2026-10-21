@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T15:20:00.000Z",
+  "channel": "_waves/decisions",
+  "type": "decision_opened",
+  "payload": {
+    "decision_id": "stage_go-0c1d2e3f4a5b",
+    "wave": "w1",
+    "task": null,
+    "kind": "stage_go",
+    "question": "Release stage notes of wave w1 is owner-gated. Run it?",
+    "options": [
+      "go",
+      "hold"
+    ],
+    "pointers": {},
+    "opened_at": "2026-10-18T15:20:00.000Z",
+    "stage": "notes"
+  }
+}

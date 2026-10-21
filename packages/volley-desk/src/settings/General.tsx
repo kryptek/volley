@@ -4,7 +4,8 @@
  * finished agents shown or hidden and the grace before they leave), the
  * notifications (the attention sound, a pointer to Settings › Sound where
  * the rest of the sounds live, and the browser notifications: the same
- * settings as the top bar's toggles) and the agent windows' narration effect. The
+ * settings as the top bar's toggles), this device's name in the answers it gives
+ * the Needs you window (`where.device`, kept in this browser) and the agent windows' narration effect. The
  * look's keys persist through `useLook`, the notification ones through
  * `useNotifySettings` (sound is `notify.sound` in `volley-dash:notify`, shared
  * with the top bar, not a look key); the switch is `useNotifyToggle`.
@@ -14,6 +15,7 @@ import { NARR_LABEL } from "../look/options";
 import { FINISHED_GRACE_MAX_MIN, type Look, isGraceMin } from "../look/useLook";
 import type { NotifyOptions, SetNotify } from "../notify/use-notify-settings";
 import { useNotifyToggle } from "../notify/use-notify-toggle";
+import { readDeviceLabel, writeDeviceLabel } from "../steer/transport";
 import { Group, Row, Seg, Toggle } from "./primitives";
 import "../styles/look.css";
 
@@ -43,6 +45,26 @@ function GraceInput({ value, onCommit }: { value: number; onCommit: (min: number
       onBlur={commit}
       onKeyDown={(e) => {
         if (e.key === "Enter") commit();
+      }}
+    />
+  );
+}
+
+/** This device's name for inbox answers; saved on blur or Enter. */
+function DeviceInput() {
+  const [value, setValue] = useState(readDeviceLabel);
+  return (
+    <input
+      id="inbox-device-label"
+      className="look-num recessed"
+      type="text"
+      maxLength={40}
+      placeholder="phone, laptop…"
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={() => writeDeviceLabel(value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") writeDeviceLabel(value);
       }}
     />
   );
@@ -146,6 +168,15 @@ export function General({
           }
         >
           <Toggle label="Browser notifications" on={notify.enabled} onChange={toggleNotify} />
+        </Row>
+      </Group>
+      <Group title="Needs you">
+        <Row
+          label="This device's name"
+          hint="Shown with the answers you give here (answered on desk·<name>)"
+          htmlFor="inbox-device-label"
+        >
+          <DeviceInput />
         </Row>
       </Group>
       <Group title="Agent windows">

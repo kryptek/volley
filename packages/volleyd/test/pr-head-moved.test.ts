@@ -375,3 +375,123 @@ describe("PR head moved: answers that must not go wrong", () => {
     expect(ready(h.record())).toEqual(["T2"]);
   });
 });
+
+describe("PR head moved by a merge of the release branch only", () => {
+  const X = sha(0x1005); // a commit on the release branch
+  const MB = sha(0x1006); // where the PR branched from the release branch
+
+  /** B merges X into A; the move touches `moved`, the release branch changed CHANGELOG + src/x.ts. */
+  function releaseMergeB(moved: string[], ci: "green" | "red" = "green") {
+    h.world.parents[B] = [A, X];
+    h.world.ancestor[`${X}..${h.world.releaseTip}`] = true;
+    h.world.mergeBase[A] = MB;
+    h.world.diffNames[`${A}..${B}`] = moved;
+    h.world.diffNames[`${MB}..${X}`] = ["CHANGELOG.md", "src/x.ts"];
+    pushB(ci);
+  }
+
+  it("CI green and only release files touched → accept is offered; accept gates at B with the reviews of A", async () => {
+    await gatedAtA();
+    releaseMergeB(["CHANGELOG.md"]);
+    await poll();
+    await poll();
+    const [d] = h.openDecisions();
+    expect(d?.options).toEqual(["rereview", "fixup", "accept", "cancel"]);
+    expect(d?.question).toContain("a merge of release/w1 only");
+    expect(d?.question).toContain("CHANGELOG.md");
+    expect(d?.question).toContain("may carry content resolved by hand");
+    await h.resolve(d?.decision_id as string, "accept", "owner");
+    const verified = h.events
+      .filter((e) => e.type === "artifact_verified" && e.data.adopted)
+      .at(-1);
+    expect(verified?.data).toMatchObject({
+      head_sha: B,
+      adopted: true,
+      accepted_by: "owner",
+      move: { from: A, to: B, how: "release_merge", parent: X, touched: ["CHANGELOG.md"] },
+    });
+    // No re-review, no fixup: straight to the gate at B.
+    expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
+    expect(h.spawns.filter((s) => s.role === "fixup")).toHaveLength(1);
+    expect(h.task()?.stage).toBe("merge_ready");
+    const ev = evidence();
+    expect(ev.head_sha).toBe(B);
+    expect(ev.stale).toBeUndefined();
+    expect(ev.moves).toEqual([
+      expect.objectContaining({
+        from: A,
+        to: B,
+        how: "release_merge",
+        accepted_by: "owner",
+        touched: ["CHANGELOG.md"],
+      }),
+    ]);
+  });
+
+  it("a file of the PR's own in the move → no accept; answering accept re-asks", async () => {
+    await gatedAtA();
+    releaseMergeB(["CHANGELOG.md", "src/mine.ts"]);
+    await poll();
+    await poll();
+    const [d] = h.openDecisions();
+    expect(d?.options).toEqual(["rereview", "fixup", "cancel"]);
+    await h.resolve(d?.decision_id as string, "accept", "owner");
+    const [again] = h.openDecisions();
+    expect(again?.decision_id).not.toBe(d?.decision_id);
+    expect(again?.question).toMatch(/^"accept" is not one of rereview \/ fixup \/ cancel\./);
+    expect(h.task()?.stage).not.toBe("merge_ready");
+  });
+
+  it("red CI on a release-only merge → no accept", async () => {
+    await gatedAtA();
+    releaseMergeB(["CHANGELOG.md"], "red");
+    await poll();
+    await poll();
+    const [d] = h.openDecisions();
+    expect(d?.options).toEqual(["rereview", "fixup", "cancel"]);
+  });
+});
+
+describe("PR merged on GitHub while not at merge_ready", () => {
+  it("merged while its pr_head_moved decision is open → superseded_by_merge, done, dependents admitted", async () => {
+    await gatedAtA();
+    pushB("green");
+    await poll();
+    await poll();
+    const [d] = h.openDecisions();
+    expect(d?.kind).toBe("pr_head_moved");
+    h.world.prState[7] = "MERGED";
+    await poll();
+    const types = h.events.map((e) => e.type);
+    const resolved = h.events.findIndex(
+      (e) => e.type === "decision_resolved" && e.data.decision_id === d?.decision_id,
+    );
+    expect(h.events[resolved]?.data).toMatchObject({
+      answer: "superseded_by_merge",
+      by: "volleyd",
+    });
+    const merged = h.events.findIndex(
+      (e) => e.type === "artifact_verified" && e.data.role === "merged",
+    );
+    const done = h.events.findIndex(
+      (e) => e.type === "stage_entered" && e.data.stage === "done" && e.data.merged === true,
+    );
+    expect(resolved).toBeGreaterThan(-1);
+    expect(resolved).toBeLessThan(merged);
+    expect(merged).toBeLessThan(done);
+    expect(types).toContain("alarm_raised");
+    expect(
+      h.events.find((e) => e.type === "alarm_raised" && e.data.alarm === "merged_unverified_head")
+        ?.data,
+    ).toMatchObject({ gated: A, merged: B });
+    expect(h.task()?.stage).toBe("done");
+    expect(h.openDecisions()).toEqual([]);
+    expect(ready(h.record())).toEqual(["T2"]);
+    // The answer reaching the pipeline afterwards does nothing (a done task acts on no answer).
+    await h.driver.handle("T1", {
+      kind: "decision_resolved",
+      decision: h.record().decisions[d?.decision_id as string] as never,
+    });
+    expect(h.openDecisions()).toEqual([]);
+  });
+});

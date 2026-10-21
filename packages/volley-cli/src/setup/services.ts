@@ -1,24 +1,24 @@
-import { createHash } from "node:crypto";
 import {
   existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   readlinkSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, join } from "node:path";
 import { backupPath, writeConfig } from "../auth/config";
 import { planCmux } from "./cmux";
+import { DESK_STAMP, deskStamp, writeDeskStamp } from "./desk-build";
 import { deskPortListeners, portConflict } from "./desk-port";
 import { type LaunchdDeps, reloadLaunchd } from "./launchd";
 import { stableServicePath } from "./service-path";
 import type { Change, SetupContext, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
+
+export { DESK_STAMP, deskStamp } from "./desk-build";
 
 /**
  * Step 4 of `volley setup`: the `volley` and `volleyd` commands linked into ~/.volley/bin (on the
@@ -386,43 +386,6 @@ function commandsChange(
 const STATUS_LINE_NOTE =
   "Your Claude Code status line keeps working: Volley runs it after its own (same input, 2 s timeout).";
 
-/** Where a Desk build records what it was built from (`deskStamp` of its checkout). */
-export const DESK_STAMP = ".volley-build";
-
-/** The Desk's sources a build depends on, besides bun.lock at the repo root. */
-const DESK_INPUTS = [
-  "src",
-  "public",
-  "index.html",
-  "package.json",
-  "vite.config.ts",
-  "tsconfig.json",
-];
-
-/**
- * A hash of the Desk's sources and the lockfile: a build whose recorded stamp differs is stale
- * (an update since, or a build made outside setup).
- */
-export function deskStamp(repo: string): string {
-  const desk = join(repo, "packages", "volley-desk");
-  const files: string[] = [];
-  const walk = (p: string) => {
-    if (!existsSync(p)) return;
-    if (statSync(p).isDirectory()) {
-      for (const e of readdirSync(p).sort()) walk(join(p, e));
-    } else files.push(p);
-  };
-  for (const i of DESK_INPUTS) walk(join(desk, i));
-  files.push(join(repo, "bun.lock"));
-  const h = createHash("sha256");
-  for (const f of files) {
-    h.update(`${relative(repo, f)}\0`);
-    h.update(existsSync(f) ? readFileSync(f) : "");
-    h.update("\0");
-  }
-  return h.digest("hex").slice(0, 16);
-}
-
 /** Vite's env files for a production build (gitignored: a developer's own). */
 const VITE_ENV_FILES = [".env", ".env.local", ".env.production", ".env.production.local"];
 
@@ -615,7 +578,7 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
           ...buildEnv
         } = ctx.auth.env;
         await must(ctx, [bun, "run", "build"], { cwd: deskDir, env: buildEnv });
-        writeFileSync(join(dist, DESK_STAMP), `${stamp}\n`);
+        writeDeskStamp(dist, stamp);
         return [`Built the Desk into ${dist} (${stamp}).`];
       },
     });
@@ -639,6 +602,10 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
     workdir: ctx.volleydHome,
   };
   const on = `0.0.0.0:${ctx.deskPort}`;
+  // The Desk's release evidence route stays off: setup only names the choice (no behaviour change).
+  plan.found.push(
+    `Release evidence: off (the Needs you window shows release screenshots and logs once the Desk serves them: add \`volley desk serve --evidence ${ctx.volleydHome}\`; anyone on your LAN who can load the Desk can read them without signing in, the same trust as \`--lan\`)`,
+  );
   const conflict = await deskPortConflict(ctx, platform, plan.found);
   if (conflict !== null) {
     plan.blocked = conflict;

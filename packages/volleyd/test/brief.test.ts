@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   type BriefVars,
+  NO_STAGE,
   ROLES,
   briefExtra,
   briefGatePath,
@@ -32,6 +33,7 @@ const VARS: BriefVars = {
   extra: "",
   hygiene_rule: hygieneText("p1").rule,
   hygiene_contract: hygieneText("p1").contract,
+  ...NO_STAGE,
 };
 
 describe("brief templates", () => {
@@ -53,7 +55,8 @@ describe("brief templates", () => {
       for (const t of ['type="done"', 'type="blocked"', 'type="failed"'])
         expect(brief).toContain(t);
       expect(brief).toContain("w1-t1-implementer-1");
-      expect(brief).toContain("#42");
+      // A release stage is no issue's: its brief is the playbook stage's.
+      if (role !== "release") expect(brief).toContain("#42");
     },
   );
 
@@ -69,6 +72,15 @@ describe("brief templates", () => {
     expect(render("fixup")).toContain('vol_publish(channel="result", type="fixup"');
     expect(render("fixup")).toContain(".volley/findings.md");
     expect(render("rebase")).toContain(".volley/rebase.md");
+  });
+
+  it("the implementer and the fixup record the change as a changes/ fragment, never in CHANGELOG.md", () => {
+    const impl = renderBrief(loadTemplate("implementer"), VARS);
+    expect(impl).toContain("`changes/42.<added|changed|fixed|removed|docs>.md`");
+    expect(impl).toContain("never edit `CHANGELOG.md`");
+    const fixup = renderBrief(loadTemplate("fixup"), { ...VARS, role: "fixup" });
+    expect(fixup).toContain("`changes/42.");
+    expect(fixup).toContain("never edit `CHANGELOG.md`");
   });
 
   it("the quality reviewer reviews the diff only; pipeline roles say what their worktree is cut from", () => {

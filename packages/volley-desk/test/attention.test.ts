@@ -10,7 +10,7 @@ import {
   tierFor,
   waveAttention,
 } from "../src/attention";
-import { UNASSIGNED } from "../src/store/reducer";
+import { UNASSIGNED, initialState, reduceAll } from "../src/store/reducer";
 import type {
   AgentView,
   ConfigPayload,
@@ -399,6 +399,7 @@ describe("needsYouTargets", () => {
       },
       supervisors: {},
       config: null,
+      archive: null,
       leases: {},
       admission: null,
     };
@@ -408,3 +409,92 @@ describe("needsYouTargets", () => {
     ]);
   });
 });
+
+describe("a coordinator reconnecting (SPEC §4.6.1: the bound agent went away, inside the grace)", () => {
+  const away = NOW - 3 * MIN;
+  const reconnecting = (over: Partial<WaveStatePayload> = {}) =>
+    wave({
+      owner: "lead",
+      coordinator: { agent_id: "lead-a1", state: "reconnecting", last_seen: iso(away) },
+      effective_config: { autopilot: { reconnect_grace_s: 900 } },
+      ...over,
+    });
+  /** The store's view: what `withCoordinators` makes of the same wave state. */
+  const viewOf = (w: WaveView, agents: Record<string, AgentView> = {}) => {
+    const s = reduceAll(initialState(), [
+      { topic: `volley/_waves/${w.id}/state`, envelope: waveEnvelope(w), receivedAt: NOW },
+    ]);
+    return { ...s, agents: { ...s.agents, ...agents } };
+  };
+
+  it("is tier info with `Coordinator reconnecting · 3m`, never `No coordinator`", () => {
+    const w = reconnecting();
+    const s = viewOf(w);
+    const c = ctx({ coordinators: s.coordinators, agents: {} });
+    expect(coordinatorFor(w, c)).toMatchObject({ id: "lead", state: "reconnecting", since: away });
+    expect(waveAttention(w, c)).toEqual({ tier: "info", reason: "Coordinator reconnecting · 3m" });
+  });
+
+  it("never downgrades an open decision on a wave this browser owns (it is still Needs you)", () => {
+    // autopilot escalates an owner_only kind (stage_go) to the owner: the grace must not hide it.
+    const w = reconnecting();
+    const owned = wave(w.state ?? {}, [decision({ kind: "stage_go", question: "Proceed?" })]);
+    const c = ctx({ me: "lead", coordinators: viewOf(w).coordinators, agents: {} });
+    expect(waveAttention(owned, c)).toEqual({ tier: "you", reason: "Decision: Proceed?" });
+  });
+
+  it("the store keeps reconnecting even though the bound agent's status is terminal", () => {
+    const w = reconnecting({ owner: "lead-a1" });
+    const status = (type: string) => ({
+      topic: "volley/default/lead-a1/status",
+      receivedAt: NOW,
+      envelope: {
+        schema_version: "0.1",
+        agent_id: "lead-a1",
+        channel: "status",
+        type,
+        wall_time: iso(away),
+        payload: {},
+      },
+    });
+    const s = reduceAll(initialState(), [
+      status("reaped"),
+      { topic: `volley/_waves/${w.id}/state`, envelope: waveEnvelope(w), receivedAt: NOW },
+    ]);
+    expect(s.agents["lead-a1"]?.status?.type).toBe("reaped");
+    expect(s.coordinators["lead-a1"]?.state).toBe("reconnecting");
+    const c = ctx({ coordinators: s.coordinators, agents: s.agents });
+    expect(coordinatorFor(w, c).state).toBe("reconnecting");
+  });
+
+  it("the Desk never flips it to gone itself; it follows the supervisor's gone", () => {
+    const w = reconnecting();
+    // Long past reconnect_grace_s and claim_after_s: still reconnecting until volleyd says so.
+    const late = ctx({ now: NOW + 60 * MIN, coordinators: viewOf(w).coordinators, agents: {} });
+    expect(coordinatorFor(w, late).state).toBe("reconnecting");
+    expect(waveAttention(w, late).tier).toBe("info");
+    const flipped = reconnecting({
+      coordinator: { agent_id: "lead-a1", state: "gone", last_seen: iso(away) },
+    });
+    const c = ctx({ now: NOW + 60 * MIN, coordinators: viewOf(flipped).coordinators, agents: {} });
+    expect(coordinatorFor(flipped, c).state).toBe("gone");
+    expect(waveAttention(flipped, c).tier).toBe("you");
+  });
+
+  it("an agent of the wave that is stuck is the coordinator's, as with a live one", () => {
+    const w = reconnecting();
+    const stuck = agent("impl-1", { status: { type: "blocked", payload: {}, at: NOW - MIN } });
+    const c = ctx({ coordinators: viewOf(w).coordinators, agents: { "impl-1": stuck } });
+    expect(agentAttention(stuck, w, c).tier).toBe("coordinator");
+  });
+});
+
+function waveEnvelope(w: WaveView) {
+  return {
+    schema_version: "0.1",
+    agent_id: "volleyd",
+    channel: "_waves/state",
+    type: "wave_state",
+    payload: w.state,
+  };
+}

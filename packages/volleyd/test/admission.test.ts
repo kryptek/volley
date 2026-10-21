@@ -23,7 +23,7 @@ import { admit } from "../src/scheduler";
 import type { AdmissionConfig, WaveState } from "../src/types";
 import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
-import { runCli } from "./helpers/run-cli";
+import { runCli, withoutOwnerWarning } from "./helpers/run-cli";
 import { envelope, schemaErrors } from "./helpers/schema";
 
 const CFG: AdmissionConfig = { ...CONFIG_DEFAULTS.admission, hysteresis_samples: 3 };
@@ -406,7 +406,7 @@ describe("volleyd daemon: pressure-based admission", () => {
       `${readFileSync(PARALLEL, "utf-8")}config: { admission: { container_max: 30 } }\n`,
     );
     const r = await runCli(["run", v2], t.env);
-    expect(r.stderr).toBe("");
+    expect(withoutOwnerWarning(r.stderr)).toBe("");
     expect(r.exitCode).toBe(0);
     // No daemon.tick(): resubmit itself re-decides the last sample with the wave's overrides.
     expect((await state()).tasks[0]?.why_waiting).toBe("admitted: awaiting spawn");

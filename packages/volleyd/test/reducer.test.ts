@@ -62,6 +62,42 @@ describe("reduce", () => {
     ).toEqual([]);
   });
 
+  it("a task parked on a decision stays parked on stage_entered done until the decision is resolved", () => {
+    // Why the pipeline closes a merged task's open decisions before it journals `done`.
+    const base = events.slice(0, 11); // T0 at merge_ready
+    const at = "2026-10-20T09:20:00.000Z";
+    const parked = [
+      ...base,
+      {
+        seq: 12,
+        at,
+        type: "decision_opened",
+        task: "T0",
+        data: {
+          decision_id: "d9",
+          kind: "pr_head_moved",
+          question: "moved?",
+          options: ["rereview", "fixup", "cancel"],
+        },
+      },
+      { seq: 13, at, type: "stage_entered", task: "T0", data: { stage: "done", merged: true } },
+    ] as JournalEvent[];
+    const rec = replay(parked);
+    expect(rec.state?.tasks.find((t) => t.id === "T0")?.stage).toBe("awaiting_decision");
+    expect(rec.decisions.d9?.resume_stage).toBe("done");
+    const resolved = replay([
+      ...parked,
+      {
+        seq: 14,
+        at,
+        type: "decision_resolved",
+        task: "T0",
+        data: { decision_id: "d9", answer: "superseded_by_merge", by: "volleyd" },
+      } as JournalEvent,
+    ]);
+    expect(resolved.state?.tasks.find((t) => t.id === "T0")?.stage).toBe("done");
+  });
+
   it("is idempotent: re-applying an already-applied seq is a no-op", () => {
     const rec = replay(events);
     for (const e of events) {
@@ -321,5 +357,146 @@ describe("task_placed (SPEC §4.6.15)", () => {
     rec = apply(rec, { seq: 5, at: AT, type: "wave_versioned", data: { wave: v2, plan: v2 } });
     expect(rec.wave?.tasks.T1?.host).toBe("box-a");
     expect(rec.wave?.tasks.T2?.host).toBe("auto");
+  });
+});
+
+describe("repo_visibility_detected github (SPEC §4.6.1)", () => {
+  const wave = parseWaveFile(
+    "wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n",
+  );
+  const AT = "2026-10-19T10:00:00.000Z";
+  const GITHUB = {
+    slug: "example-org/example-repo",
+    url: "https://github.com/example-org/example-repo",
+  };
+  const detected = (seq: number, github?: unknown): JournalEvent => ({
+    seq,
+    at: AT,
+    type: "repo_visibility_detected",
+    data: {
+      visibility: "public",
+      source: "gh",
+      public_hygiene: "auto",
+      ...(github !== undefined ? { github } : {}),
+    },
+  });
+  const submitted: JournalEvent = { seq: 1, at: AT, type: "wave_submitted", data: { wave } };
+
+  it("sets state.github, schema-valid", () => {
+    const state = reduce([submitted, detected(2, GITHUB)]);
+    expect(state.github).toEqual(GITHUB);
+    expect(state.repo).toBe("/srv/repo");
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", state)),
+    ).toEqual([]);
+  });
+
+  it("an any-case scheme url (asGitHubRepo accepts it) is schema-valid too", () => {
+    const upper = { ...GITHUB, url: "HTTPS://github.com/example-org/example-repo" };
+    const state = reduce([submitted, detected(2, upper)]);
+    expect(state.github).toEqual(upper);
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", state)),
+    ).toEqual([]);
+  });
+
+  it("a later read without github removes the key", () => {
+    const state = reduce([submitted, detected(2, GITHUB), detected(3)]);
+    expect(state).not.toHaveProperty("github");
+  });
+
+  it("a malformed slug or url leaves it unset", () => {
+    expect(reduce([submitted, detected(2, { ...GITHUB, slug: "owner" })])).not.toHaveProperty(
+      "github",
+    );
+    expect(
+      reduce([submitted, detected(2, { ...GITHUB, url: "ftp://example.com/x" })]),
+    ).not.toHaveProperty("github");
+    expect(reduce([submitted, detected(2, "example-org/example-repo")])).not.toHaveProperty(
+      "github",
+    );
+  });
+});
+
+describe("the release train (SPEC §4.6.19)", () => {
+  const last = events.at(-1) as JournalEvent;
+  let seq = last.seq;
+  const ev = (type: string, data: Record<string, unknown> = {}): JournalEvent =>
+    ({ seq: ++seq, at: last.at, type, data }) as JournalEvent;
+  const started = ev("release_started", {
+    done: ["T0"],
+    cancelled: [],
+    playbook: {
+      path: "/r/.volley/release.yaml",
+      sha256: "a".repeat(64),
+      stages: [
+        { name: "smoke", brief: "Run the smoke.", run: [], gate: "auto" },
+        { name: "deploy", brief: "Deploy.", run: [], gate: "owner" },
+      ],
+    },
+  });
+  const valid = (s: unknown) =>
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", s)),
+    ).toEqual([]);
+
+  it("release_started → status releasing, every stage pending; schema-valid", () => {
+    const s = reduce([...events, started]);
+    expect(s.status).toBe("releasing");
+    expect(s.release).toEqual({
+      stage: null,
+      stages: [
+        { name: "smoke", state: "pending" },
+        { name: "deploy", state: "pending" },
+      ],
+    });
+    valid(s);
+  });
+
+  it("stages move as they are entered and verified; release_done → complete", () => {
+    const run = [
+      ...events,
+      started,
+      ev("release_stage_entered", { stage: "smoke" }),
+      ev("release_stage_verified", { stage: "smoke" }),
+      ev("release_stage_entered", { stage: "deploy" }),
+    ];
+    const mid = reduce(run);
+    expect(mid.release?.stage).toBe("deploy");
+    expect(mid.release?.stages.map((x) => x.state)).toEqual(["verified", "running"]);
+    valid(mid);
+    const done = reduce([
+      ...run,
+      ev("release_stage_verified", { stage: "deploy" }),
+      ev("release_done", { by: "coord-a", decision_id: "release_go-1" }),
+    ]);
+    expect(done.status).toBe("complete");
+    expect(done.release).toEqual({
+      stage: null,
+      stages: [
+        { name: "smoke", state: "verified" },
+        { name: "deploy", state: "verified" },
+      ],
+    });
+    valid(done);
+  });
+
+  it("a paused releasing wave resumes releasing, not running", () => {
+    const s = reduce([
+      ...events,
+      started,
+      ev("wave_paused", { by: "coord-a" }),
+      ev("wave_resumed", { by: "coord-a" }),
+    ]);
+    expect(s.status).toBe("releasing");
+  });
+
+  it("a snapshot taken mid-release continues where it was (and replaying again is a no-op)", () => {
+    const first = replay([...events, started]);
+    const snap = JSON.parse(JSON.stringify(first));
+    const entered = ev("release_stage_entered", { stage: "smoke" });
+    const rec = replay([started, entered], snap);
+    expect(rec.state?.release?.stage).toBe("smoke");
+    expect(replay([entered], rec)).toEqual(rec);
   });
 });

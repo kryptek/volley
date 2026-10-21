@@ -1,0 +1,83 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T12:00:00.000Z",
+  "channel": "_waves/_config",
+  "type": "config",
+  "payload": {
+    "version": 3,
+    "updated_at": "2026-10-18T12:00:00.000Z",
+    "updated_by": "coordinator-ab12",
+    "hard_ceiling": 12,
+    "spawn_budget_multiplier": 3,
+    "lease_pools": {
+      "backend-it": {
+        "capacity": 3,
+        "ttl_s": 3600,
+        "match": [
+          "mvn .*verify",
+          "mvn .*test"
+        ]
+      },
+      "build": {
+        "capacity": 2,
+        "ttl_s": 1800,
+        "match": [
+          "npm run build",
+          "vite build"
+        ]
+      },
+      "browser": {
+        "capacity": 2,
+        "ttl_s": 1800,
+        "match": [
+          "playwright"
+        ]
+      }
+    },
+    "admission": {
+      "memory_pressure_max_level": 2,
+      "cmux_ping_max_ms": 2000,
+      "container_max": 20,
+      "api_overload_window_s": 300,
+      "api_overload_max": 3,
+      "ci_queue_max": 10,
+      "hysteresis_samples": 3
+    },
+    "claim_after_s": 1800,
+    "heartbeat_alarm_s": 600,
+    "idle_grace_s": 180,
+    "background_wait_max_s": 7200,
+    "stall_backoff_max_s": 1800,
+    "fallback_model": null,
+    "mailbox": {
+      "session_expiry_s": 604800
+    },
+    "worktree_root": "~/.volley/worktrees",
+    "spawn_timeout_s": 120,
+    "spawn_retry_max_s": 900,
+    "spawn_retry_max": 8,
+    "brief_preface_max_bytes": 16384,
+    "wake_grace_s": 60,
+    "screen_tail_interval_s": 5,
+    "hosts": {},
+    "autopilot": {
+      "enabled": true,
+      "owner_only": [
+        "plan_change",
+        "repo_untrusted",
+        "model_switch",
+        "release_go",
+        "stage_go"
+      ],
+      "relaunch_max": 1,
+      "nudge_max": 1,
+      "respawn_max": 1,
+      "rereview_max": 2,
+      "ci_fixup_max": 2,
+      "question_max": 1,
+      "budget_raise_max": 2,
+      "inbox_answered_ttl_s": 600
+    }
+  }
+}

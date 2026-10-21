@@ -122,6 +122,13 @@
   color: var(--mute);
   margin-top: 2px;
 }
+.coord-repos {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
 .st-awaiting_input .coord-state,
 .st-gone .coord-state {
   color: #ffb4a1;
@@ -202,6 +209,12 @@
   border-color: rgba(255, 122, 89, 0.5);
   background: rgba(255, 122, 89, 0.12);
 }
+/* Neutral: the coordinator's session is coming back (SPEC §4.6.1); nothing to claim. */
+.st-chip--reconnecting {
+  color: var(--mute);
+  border-color: rgba(163, 171, 192, 0.45);
+  background: rgba(163, 171, 192, 0.1);
+}
 .st-chip--completed {
   color: #8ee6a8;
   border-color: rgba(92, 214, 128, 0.45);
@@ -211,6 +224,11 @@
   color: var(--mute);
   border-color: rgba(163, 171, 192, 0.4);
   background: rgba(163, 171, 192, 0.08);
+}
+.st-chip--archived {
+  color: var(--dim);
+  border-color: rgba(163, 171, 192, 0.3);
+  background: transparent;
 }
 .st-chip--failed {
   color: #ff9a9a;
@@ -261,7 +279,8 @@
 .coord-btn:focus-visible {
   background: rgba(255, 255, 255, 0.1);
 }
-.coord-dismissed {
+.coord-dismissed,
+.coord-archived {
   font-size: 12px;
   color: var(--dim);
   padding: 0 4px;

@@ -74,6 +74,12 @@ export interface MachinesProps {
   agentsOn?: Record<string, string[]>;
   /** The remote Claude sign-in's button for a machine, when the Desk has one. */
   signIn?: (machine: string) => ReactNode;
+  /** A machine to scroll into view on open (the agent window's machine chip). */
+  focus?: string | undefined;
+  /** Bumped on every chip click, so a second click on the same machine scrolls to it again. */
+  focusSeq?: number | undefined;
+  /** Open a Settings › Supervisor row by its config path (the local agents chip). */
+  onOpenSetting?: ((path: string) => void) | undefined;
 }
 
 const FINISHED: ReadonlySet<string> = new Set(["done", "cancelled"]);
@@ -534,6 +540,20 @@ export function Machines(p: MachinesProps) {
     if (admin !== null) onAdmin?.(admin);
   }, [admin, onAdmin]);
   const [notice, setNotice] = useState<string | null>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const { focus, focusSeq, localName } = p;
+  // On open (and on every chip click): the focused machine's card (this machine's is the hub card
+  // until it has a record).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new focusSeq is a new chip click
+  useEffect(() => {
+    if (!focus) return;
+    const cards = [...(list.current?.querySelectorAll("article.machine") ?? [])];
+    const label = (el: Element) => el.getAttribute("aria-label");
+    const el =
+      cards.find((c) => label(c) === focus) ??
+      (focus === localName ? cards.find((c) => c.classList.contains("machine--hub")) : undefined);
+    el?.scrollIntoView({ block: "nearest" });
+  }, [focus, focusSeq, localName]);
   const shown = useMemo(() => {
     const hosts = new Set(p.hosts ?? []);
     return Object.fromEntries(Object.entries(p.machines).filter(([n]) => hosts.has(n)));
@@ -559,6 +579,9 @@ export function Machines(p: MachinesProps) {
       onRemoved={setNotice}
       signIn={self ? undefined : p.signIn?.(m.name)}
       onCountdown={onCountdown}
+      onOpenLocalAgents={
+        self && p.onOpenSetting ? () => p.onOpenSetting?.("fleet.local_agents") : undefined
+      }
     />
   );
 
@@ -569,7 +592,7 @@ export function Machines(p: MachinesProps) {
         private tunnel.
       </p>
       {notice && <output className="s-hint m-notice">{notice}</output>}
-      <div className="machines">
+      <div className="machines" ref={list}>
         {own ? card(own, true) : <HubCard up={p.hubUp} agents={p.hubAgents ?? 0} />}
         {machines.map((m) => card(m))}
         {canPair && !adding && (

@@ -83,10 +83,9 @@ describe("purpose line", () => {
     const bar = container.querySelector(".win-bar") as HTMLElement;
     expect(bar.querySelector(".t-name")).toHaveTextContent("T1 · Chip mapper + null-case handling");
     expect(within(bar).getByText("fixup")).toHaveClass("chip--role");
-    expect(container.querySelector(".a-purpose-text")).toHaveTextContent(
-      "T1 · Chip mapper + null-case handling",
-    );
-    const issue = screen.getByRole("link", { name: "#102" });
+    // Shown once: the headline row, no purpose line in the body.
+    expect(container.querySelector(".a-purpose")).toBeNull();
+    const issue = within(bar).getByRole("link", { name: "Issue #102 on GitHub" });
     expect(issue).toHaveAttribute("target", "_blank");
     expect(issue.getAttribute("href")).toMatch(
       /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/102$/,
@@ -99,8 +98,8 @@ describe("purpose line", () => {
     const id = "coordinator-8fb2";
     const title = "#155 C13 parity — spec review";
     const { container } = renderAgent(stateWith(...adhoc(id, { title })), id);
-    expect(container.querySelector(".a-purpose-text")).toHaveTextContent(title);
-    expect(container.querySelector(".win-bar .t-name")).toHaveTextContent(title);
+    expect(container.querySelector(".a-purpose")).toBeNull();
+    expect(container.querySelector(".win-sub .t-name")).toHaveTextContent(title);
     expect(container.querySelector(".a-id")).toHaveTextContent(id);
     expect(screen.getAllByText(id)).toHaveLength(1);
     expect(screen.getByRole("region", { name: title })).toBeInTheDocument();
@@ -118,19 +117,32 @@ describe("purpose line", () => {
     expect(screen.getAllByText(id)).toHaveLength(1);
   });
 
-  it("a long title is one ellipsised line with the whole text on hover; a tap unwraps it", () => {
+  it("a long title is clamped to two lines with the whole text on hover; a tap unclamps it", () => {
     const id = "coordinator-8fb2";
     const title = `Long ${"purpose ".repeat(24)}end`.slice(0, 120);
     const { container } = renderAgent(stateWith(...adhoc(id, { title })), id);
-    const text = container.querySelector(".a-purpose-text") as HTMLElement;
-    expect(text).toHaveClass("ell");
+    const text = container.querySelector(".win-sub .t-name") as HTMLElement;
+    expect(text).not.toHaveClass("ell");
+    expect(text).toHaveTextContent(title);
     expect(text).toHaveAttribute("title", title);
     expect(text).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(text);
-    expect(container.querySelector(".a-purpose")).toHaveClass("a-purpose--open");
+    expect(text).toHaveClass("t-name--open");
     expect(text).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(text);
-    expect(container.querySelector(".a-purpose")).not.toHaveClass("a-purpose--open");
+    expect(text).not.toHaveClass("t-name--open");
+  });
+
+  it("a cwd-basename purpose under an id headline keeps its body line, ellipsised, a tap unwraps it", () => {
+    const id = "coordinator-8fb2";
+    const { container } = renderAgent(
+      stateWith(...adhoc(id, { cwd: "/some/where/vly-review-167-spec" })),
+      id,
+    );
+    const text = container.querySelector(".a-purpose-text") as HTMLElement;
+    expect(text).toHaveClass("ell");
+    fireEvent.click(text);
+    expect(container.querySelector(".a-purpose")).toHaveClass("a-purpose--open");
   });
 
   it("links.issue and links.pr open GitHub in a new tab", () => {
@@ -144,13 +156,13 @@ describe("purpose line", () => {
       ),
       id,
     );
-    const issue = screen.getByRole("link", { name: "#155" });
-    const pr = screen.getByRole("link", { name: "PR #167" });
+    const issue = screen.getByRole("link", { name: "Issue #155 on GitHub" });
+    const pr = screen.getByRole("link", { name: "PR #167 on GitHub" });
     expect(issue).toHaveAttribute("href", "https://github.com/example-org/example-repo/issues/155");
     expect(pr).toHaveAttribute("href", "https://github.com/example-org/example-repo/pull/167");
     for (const a of [issue, pr]) {
       expect(a).toHaveAttribute("target", "_blank");
-      expect(a).toHaveAttribute("rel", "noreferrer");
+      expect(a).toHaveAttribute("rel", "noopener noreferrer");
     }
   });
 });

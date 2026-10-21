@@ -1,0 +1,24 @@
+
+ ▐▛███▛█   Claude Code v2.1.305
+▝▜██████▀  Haiku 5.5 · Claude Max
+
+❯ Use the AskUserQuestion tool exactly once, with one question "Which toppings do you want?" header "Toppings",
+  multiSelect true, options: Cheese (description: melty), Olives (description: salty), Peppers (description: hot). Do
+  nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Toppings  ✔ Submit  →
+
+Which toppings do you want?
+
+❯ 1. [ ] Cheese
+         melty
+  2. [ ] Olives
+         salty
+  3. [ ] Peppers
+         hot
+  4. [ ] Type something
+     Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

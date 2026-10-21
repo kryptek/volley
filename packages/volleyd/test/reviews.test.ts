@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { BRIEFS_DIR, ROLES, loadTemplate, renderBrief } from "../src/brief";
+import { BRIEFS_DIR, NO_STAGE, ROLES, loadTemplate, renderBrief } from "../src/brief";
 import {
   HYGIENE_CHECK,
   type HygieneLevel,
@@ -153,6 +153,7 @@ describe("public hygiene (reviewer backstop)", () => {
     branch: "b",
     worktree: "/wt",
     extra: "",
+    ...NO_STAGE,
   };
 
   const P3_RULE =

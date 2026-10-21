@@ -1,0 +1,294 @@
+import { describe, expect, it } from "vitest";
+import { type Digest, digestOf, renderDigestMd, summaryLine } from "../src/autopilot/digest";
+import { reduce } from "../src/reducer";
+import type { JournalEvent, NewEvent } from "../src/types";
+import { parseWaveFile } from "../src/wave-file";
+import { envelope, schemaErrors } from "./helpers/schema";
+
+const T0 = "2026-10-20T22:00:00.000Z";
+const NOW = "2026-10-21T07:00:00.000Z";
+
+const wave = parseWaveFile(`wave: w1
+repo: example-org/example-repo
+release_branch: release/w1
+model: claude-opus-5-5
+pipeline: [implement, merge_ready]
+tasks:
+  A: { issue: 11, title: "Add the digest" }
+  B: { issue: 12 }
+  C: { issue: 13 }
+  D: { issue: 14 }
+  E: { issue: 15 }
+`);
+
+/** Hand-written events, numbered and stamped `T0 + i minutes`. */
+function journal(...evs: NewEvent[]): JournalEvent[] {
+  return evs.map((e, i) => ({
+    seq: i + 1,
+    at: new Date(Date.parse(T0) + i * 60_000).toISOString(),
+    ...e,
+  }));
+}
+
+const pr = (n: number) => ({
+  number: n,
+  url: `https://github.com/example-org/example-repo/pull/${n}`,
+});
+const merged = (task: string, n: number, extra: Record<string, unknown>): NewEvent[] => [
+  { type: "artifact_verified", task, data: { role: "merged", pr: pr(n), ...extra } },
+  { type: "stage_entered", task, data: { stage: "done", merged: true } },
+];
+
+const events = journal(
+  { type: "wave_submitted", data: { wave, owner: "coord-a" } },
+  ...["A", "B", "C", "D", "E"].map(
+    (t): NewEvent => ({ type: "task_queued", task: t, data: { issue: wave.tasks[t]?.issue } }),
+  ),
+  // A: merged by volleyd (autopilot merging), after a rebase that verified.
+  { type: "artifact_verified", task: "A", data: { role: "rebase", head_sha: "a2" } },
+  {
+    type: "merged_by_supervisor",
+    task: "A",
+    data: { task: "A", pr: 21, head: "a2", merge_sha: "m-a", by: "volleyd" },
+  },
+  ...merged("A", 21, { via: "supervisor", merge_sha: "m-a" }),
+  // B: the owner's `volleyd merged`.
+  { type: "merged_by_operator", task: "B", data: { by: "coord-a", sha: "m-b", head: "b1" } },
+  ...merged("B", 22, { via: "operator", sha: "m-b", by: "coord-a" }),
+  // C: GitHub's merge button; two relaunches and a recovered spawn on the way.
+  { type: "relaunched", task: "C", data: { role: "implementer" } },
+  { type: "relaunched", task: "C", data: { role: "implementer" } },
+  { type: "spawn_recovered", task: "C", data: { role: "implementer" } },
+  ...merged("C", 23, { merge_sha: "m-c", merged_at: T0 }),
+  // A flake's fixer landed, releasing D; D cancelled anyway.
+  {
+    type: "task_queued",
+    task: "fix-flaky-test",
+    data: {
+      issue: 0,
+      synthetic: true,
+      title: "Fix flaky test flaky test",
+      remediation: {
+        kind: "fix_flake",
+        test: "flaky test",
+        test_file: null,
+        run_urls: [],
+        for: ["D"],
+      },
+    },
+  },
+  ...merged("fix-flaky-test", 24, { via: "supervisor", merge_sha: "m-f" }),
+  {
+    type: "remediation_closed",
+    task: "fix-flaky-test",
+    data: {
+      kind: "fix_flake",
+      test: "flaky test",
+      task: "fix-flaky-test",
+      outcome: "landed",
+      released: ["D"],
+    },
+  },
+  { type: "task_cancelled", task: "D", data: { by: "coord-a", why: "superseded by #99" } },
+  // Two decisions autopilot answered, one escalated (still open), one resolved by the owner.
+  {
+    type: "decision_opened",
+    task: "E",
+    data: {
+      decision_id: "d-1",
+      kind: "reviewers_disagree",
+      question: "Blocker?",
+      options: ["blocker", "fine"],
+    },
+  },
+  {
+    type: "decision_auto_resolved",
+    task: "E",
+    data: { decision_id: "d-1", kind: "reviewers_disagree" },
+  },
+  {
+    type: "decision_resolved",
+    task: "E",
+    data: { decision_id: "d-1", answer: "blocker", by: "volleyd" },
+  },
+  {
+    type: "decision_opened",
+    task: "E",
+    data: { decision_id: "d-2", kind: "agent_question", question: "Which?", options: [] },
+  },
+  {
+    type: "decision_auto_resolved",
+    task: "E",
+    data: { decision_id: "d-2", kind: "agent_question" },
+  },
+  {
+    type: "decision_resolved",
+    task: "E",
+    data: { decision_id: "d-2", answer: "x", by: "volleyd" },
+  },
+  {
+    type: "decision_opened",
+    data: { decision_id: "d-3", kind: "plan_change", question: "Add a task?", options: ["apply"] },
+  },
+  {
+    type: "decision_escalated",
+    data: { decision_id: "d-3", kind: "plan_change", why: "owner_only" },
+  },
+  {
+    type: "decision_opened",
+    task: "E",
+    data: { decision_id: "d-4", kind: "agent_blocked", question: "Stuck?", options: ["retry"] },
+  },
+  {
+    type: "decision_escalated",
+    task: "E",
+    data: { decision_id: "d-4", kind: "agent_blocked", why: "no_policy" },
+  },
+);
+
+const state = reduce(events);
+const digest = digestOf(events, state, NOW, "escalation");
+
+describe("digestOf", () => {
+  it("lists shipped tasks with their PR, merge sha and who merged them", () => {
+    expect(digest.shipped).toEqual([
+      {
+        task: "A",
+        issue: 11,
+        title: "Add the digest",
+        pr: pr(21),
+        merge_sha: "m-a",
+        merged_by: "supervisor",
+      },
+      { task: "B", issue: 12, pr: pr(22), merge_sha: "m-b", merged_by: "operator" },
+      { task: "C", issue: 13, pr: pr(23), merge_sha: "m-c", merged_by: "github" },
+      {
+        task: "fix-flaky-test",
+        issue: 0,
+        title: "Fix flaky test flaky test",
+        pr: pr(24),
+        merge_sha: "m-f",
+        merged_by: "supervisor",
+      },
+    ]);
+  });
+
+  it("counts what autopilot handled", () => {
+    expect(digest.auto).toEqual({
+      decisions_resolved: 2,
+      flakes_fixed: [{ test: "flaky test", fixer: "fix-flaky-test", prs_released: 1 }],
+      conflicts_resolved: 1,
+      retries: 3,
+      merges: 2,
+    });
+  });
+
+  it("lists open decisions as waiting, owner_only for an owner_only escalation", () => {
+    expect(digest.waiting).toEqual([
+      {
+        id: "d-3",
+        kind: "plan_change",
+        question: "Add a task?",
+        since: events.find((e) => e.data.decision_id === "d-3")?.at,
+        owner_only: true,
+      },
+      {
+        id: "d-4",
+        kind: "agent_blocked",
+        task: "E",
+        question: "Stuck?",
+        since: events.find((e) => e.data.decision_id === "d-4")?.at,
+        owner_only: false,
+      },
+    ]);
+  });
+
+  it("lists cancelled tasks as failures with why", () => {
+    expect(digest.failures).toEqual([{ task: "D", why: "superseded by #99" }]);
+  });
+
+  it("carries the wave, its release branch, when and why", () => {
+    expect(digest).toMatchObject({
+      wave: "w1",
+      release_branch: "release/w1",
+      generated_at: NOW,
+      trigger: "escalation",
+    });
+    expect(digest.release).toBeUndefined();
+  });
+
+  it("validates against digest.schema.json", () => {
+    expect(schemaErrors("digest.schema.json", envelope("_waves/digest", "digest", digest))).toEqual(
+      [],
+    );
+  });
+});
+
+describe("summaryLine", () => {
+  const base: Digest = {
+    wave: "w1",
+    release_branch: "release/w1",
+    generated_at: NOW,
+    trigger: "wave_complete",
+    shipped: Array.from({ length: 27 }, (_, i) => ({
+      task: `T${i}`,
+      issue: i + 1,
+      pr: pr(i + 1),
+      merge_sha: null,
+      merged_by: "supervisor" as const,
+    })),
+    auto: {
+      decisions_resolved: 0,
+      flakes_fixed: [1, 2, 3].map((i) => ({ test: `t${i}`, fixer: `fix-t${i}`, prs_released: 1 })),
+      conflicts_resolved: 2,
+      retries: 0,
+      merges: 27,
+    },
+    waiting: [{ id: "d-go", kind: "release_go", question: "Go?", since: NOW, owner_only: true }],
+    failures: [],
+  };
+
+  it("matches the issue's example", () => {
+    expect(summaryLine(base)).toBe(
+      "w1 complete: 27 shipped, 3 flakes fixed, 2 conflicts resolved, 1 waiting for you (release_go)",
+    );
+  });
+
+  it("says why it was sent, and leaves out what is zero", () => {
+    expect(summaryLine(digest)).toBe(
+      "w1 needs you: 4 shipped, 1 flake fixed, 1 conflict resolved, 3 retries, 2 decisions answered, 1 failed, 2 waiting for you (plan_change, agent_blocked)",
+    );
+    expect(
+      summaryLine({
+        ...base,
+        trigger: "stopped",
+        auto: { ...base.auto, flakes_fixed: [], conflicts_resolved: 0 },
+        waiting: [],
+      }),
+    ).toBe("w1 stopped: 27 shipped");
+  });
+});
+
+describe("renderDigestMd", () => {
+  it("has the three sections, with PR links and decision ids", () => {
+    const md = renderDigestMd(digest);
+    expect(md.split("\n")[0]).toBe(`# ${summaryLine(digest)}`);
+    for (const h of ["## Shipped", "## Autopilot handled", "## Waiting for you"])
+      expect(md).toContain(h);
+    expect(md.indexOf("## Shipped")).toBeLessThan(md.indexOf("## Autopilot handled"));
+    expect(md.indexOf("## Autopilot handled")).toBeLessThan(md.indexOf("## Waiting for you"));
+    expect(md).toContain(`- A (#11) Add the digest: PR #21 ${pr(21).url} (merged by supervisor)`);
+    expect(md).toContain("- flaky test: fixed by fix-flaky-test, 1 task released");
+    expect(md).toContain("- d-3 plan_change (owner only): Add a task?");
+    expect(md).toContain("- d-4 agent_blocked on E: Stuck?");
+    expect(md).toContain("## Failed");
+    expect(md).toContain("- D: superseded by #99");
+  });
+
+  it("says none for an empty section", () => {
+    const md = renderDigestMd({ ...digest, shipped: [], waiting: [], failures: [] });
+    expect(md).toContain("## Shipped\n\nNothing shipped.");
+    expect(md).toContain("## Waiting for you\n\nNothing is waiting for you.");
+    expect(md).not.toContain("## Failed");
+  });
+});

@@ -25,11 +25,19 @@ import { AGENT_BRANCH } from "./worktree";
  *
  * DENY (never, consent or not):
  *   git merge | push | rebase | reset --hard | branch -D/-d/--delete/-m/-M/-c/-C/--force
- *   gh pr merge | gh workflow run | gh repo delete | gh api with any method other than GET
+ *   gh pr merge (except MERGE below) | gh workflow run | gh repo delete | gh api with any method
+ *     other than GET
  *   infrastructure CLIs: terraform, terragrunt, kubectl, helm, aws, gcloud, gsutil, az, pulumi,
  *     ansible, ansible-playbook, eksctl, doctl, flyctl
  *   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
  *   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force)
+ *
+ * MERGE (only with a MergeToken, `mintMergeToken`, minted by the pipeline's gate after the
+ *   evidence package is written, checked by identity like consent tokens): exactly
+ *     gh pr merge <n> --squash --match-head-commit <sha40> [--delete-branch]
+ *   with <n> the token's PR and <sha40> its gated head (GitHub refuses the merge if the head
+ *   moved since the gate). Never --admin, --auto, --merge or --rebase; the token unlocks nothing
+ *   else (git merge, push and rebase stay denied).
  *
  * CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
  * retire for the retired agent's own workspace only):
@@ -51,7 +59,8 @@ import { AGENT_BRANCH } from "./worktree";
  *     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
  *       with the LaunchToken of the `.volley/launch.sh` volleyd sealed in exactly <dir>
  *     send --workspace <ref> <text>   text: TYPED_TEXT only
- *     send-key --workspace <ref> Enter|Escape · read-screen --workspace <ref> [--lines <n>]
+ *     send-key --workspace <ref> Enter|Escape | Up|Down|Space (PICKER below) ·
+ *       read-screen --workspace <ref> [--lines <n>]
  *     list-workspaces · ping
  *   claude — volleyd starts claude only from `.volley/launch.sh` (renderLaunchScript), which the
  *     launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS), including
@@ -66,6 +75,8 @@ import { AGENT_BRANCH } from "./worktree";
  *     <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work)
  *   (agent logins are minted and deleted over volleyd's own Dynamic Security control
  *   connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
+ *   ps -axo pid=,command=   (exactly: lists processes for procs.ts, which stops a retired
+ *     agent's claude by `process.kill`, never by a spawned `kill`)
  *   mosquitto -h   (exactly: it prints the binary's version, the fallback when the broker
  *     retains no $SYS/broker/version)
  *   volley auth list --json · rotate <agent_id> --json · revoke <agent_id>
@@ -111,6 +122,15 @@ import { AGENT_BRANCH } from "./worktree";
  *     `/model <id>`    with the ModelSwitchToken naming exactly <id> (`mintModelSwitchToken`,
  *                      minted when an approved model_switch decision is acted on); <id> is a
  *                      MODEL_ID, the wave-file schema's `model` pattern
+ *     an inbox answer  with the PickerToken (a picker's Other text) or HandoffToken (a
+ *                      coordinator handoff's reply) carrying exactly that text, typed once per
+ *                      token; minted only for one line with no control character that does not
+ *                      start with `/` or `!` (never a slash command or bash-mode line)
+ *
+ * PICKER (needs-you inbox pickers, SPEC §4.6.18): `cmux send-key … Up|Down|Space` and
+ *   `tmux send-keys -t <t> Up|Down|Space` only with a PickerToken (`mintPickerToken`, minted for
+ *   one item version after the screen showed its picker) naming that key; `Enter` and `Escape`
+ *   need no token. No other key name is ever sent.
  *
  * SSH (remote hosts, src/hosts/ssh-tmux.ts) — three forms only:
  *   ssh -T [-o <Opt>=<v>]… <target> bash -s   with a fenced RemoteScript (FenceOptions.remote):
@@ -133,7 +153,7 @@ import { AGENT_BRANCH } from "./worktree";
  *     the LaunchToken sealed for <dir>) | new-session -d -s volley-signin-<acct> -c <dir>
  *     'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
  *     `sealRemoteSigninScript`) | capture-pane | has-session |
- *     send-keys -t <t> Enter|Escape | send-keys -t <t> -l -- <TYPED_TEXT> |
+ *     send-keys -t <t> Enter|Escape (Up|Down|Space: PICKER) | send-keys -t <t> -l -- <TYPED_TEXT> |
  *     show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
  *     PATH, from printenv, then the server's own dirs) —
  *     kill-session -t volley-signin-<acct> (no consent: a sign-in session holds no agent's
@@ -198,9 +218,10 @@ export interface ConsentToken {
 }
 
 /**
- * Mint a consent token. Callers: `volleyd cleanup --yes`, and a retire closing the retired
- * agent's own workspace (daemon.ts: its session is over, its login already deleted; the worktree
- * and branch stay for cleanup).
+ * Mint a consent token. Callers: `volleyd cleanup --yes`; a retire closing the retired agent's
+ * own workspace (daemon.ts: its session is over, its login already deleted; the worktree and
+ * branch stay for cleanup); and a launch reconcile closing a workspace volleyd itself just opened
+ * and no agent registered in (spawn.ts reconcileLaunch).
  */
 export function mintConsentToken(reason: string): ConsentToken {
   const token = Object.freeze({ reason });
@@ -224,6 +245,50 @@ export function mintScriptToken(path: string): ScriptToken {
   return token;
 }
 
+const merges = new WeakSet<object>();
+
+/**
+ * Permission to merge one gated PR at exactly its gated head (autopilot merging, SPEC §4.6.17).
+ * Only `mintMergeToken` creates one (checked by identity).
+ */
+export interface MergeToken {
+  readonly wave: string;
+  readonly task: string;
+  readonly pr: number;
+  readonly head: string;
+  readonly release_branch: string;
+}
+
+const SHA40 = /^[0-9a-f]{40}$/;
+
+/** Callers: the pipeline's gate (PipelineDriver.gate), after the evidence package is written. */
+export function mintMergeToken(t: MergeToken): MergeToken {
+  if (!Number.isSafeInteger(t.pr) || t.pr <= 0)
+    throw new FenceError(`gh pr merge ${t.pr}`, "not a PR number");
+  if (!SHA40.test(t.head))
+    throw new FenceError(`gh pr merge --match-head-commit ${t.head}`, "not a full commit sha");
+  const token = Object.freeze({
+    wave: t.wave,
+    task: t.task,
+    pr: t.pr,
+    head: t.head,
+    release_branch: t.release_branch,
+  });
+  merges.add(token);
+  return token;
+}
+
+/** `gh pr merge <n> --squash --match-head-commit <head> [--delete-branch]`, exactly, for the token's n and head. */
+function mergeVerdict(args: readonly string[], token: MergeToken | undefined): Verdict {
+  if (token === undefined || !merges.has(token)) return deny("gh pr merge");
+  const exact = ["pr", "merge", String(token.pr), "--squash", "--match-head-commit", token.head];
+  const ok =
+    (args.length === exact.length ||
+      (args.length === exact.length + 1 && args[exact.length] === "--delete-branch")) &&
+    exact.every((a, i) => args[i] === a);
+  return ok ? ALLOW : deny("gh pr merge (not the gated PR at its gated head)");
+}
+
 const switches = new WeakSet<object>();
 
 /**
@@ -242,6 +307,109 @@ export function mintModelSwitchToken(model: string, decisionId: string): ModelSw
   const token = Object.freeze({ model, decision_id: decisionId });
   switches.add(token);
   return token;
+}
+
+const pickers = new WeakSet<object>();
+const handoffs = new WeakSet<object>();
+/** Tokens whose `text` was typed already: an answer's text is typed once. */
+const spentText = new WeakSet<object>();
+
+/** The navigation keys a PickerToken may unlock (`Enter`, `Escape` need no token). */
+export const PICKER_KEYS = ["Up", "Down", "Space"] as const;
+export type PickerKey = (typeof PICKER_KEYS)[number];
+
+/**
+ * Text an inbox answer may type into a Claude Code session: one line, no control character, and
+ * not a slash command (`/…`) or bash-mode line (`!…`) should it land in the prompt.
+ */
+export function answerTextRefusal(text: string): string | null {
+  if (text.trim() === "") return "empty text";
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(text))
+    return "a control character or a second line";
+  if (/^\s*[/!]/.test(text)) return "a slash command or shell line";
+  return null;
+}
+
+/**
+ * Selecting an answer in a Claude Code picker for one inbox item (SPEC §4.6.18): `Up`, `Down`
+ * and `Space` are pressed into an agent's terminal only with the token naming them, and its
+ * Other text typed once. Only `mintPickerToken` creates one (checked by identity).
+ */
+export interface PickerToken {
+  readonly item_id: string;
+  readonly version: number;
+  readonly keys: readonly PickerKey[];
+  readonly text?: string;
+}
+
+/** Callers: the daemon, carrying out an accepted picker answer after verifying the screen. */
+export function mintPickerToken(t: {
+  item_id: string;
+  version: number;
+  keys: readonly string[];
+  text?: string;
+}): PickerToken {
+  const bad = t.keys.find(
+    (k) => !(PICKER_KEYS as readonly string[]).includes(k) && !NAMED_KEYS.has(k),
+  );
+  if (bad !== undefined)
+    throw new FenceError(`picker key ${JSON.stringify(bad)}`, "not a picker key");
+  const why = t.text !== undefined ? answerTextRefusal(t.text) : null;
+  if (why !== null) throw new FenceError(`picker text ${JSON.stringify(t.text)}`, why);
+  const token = Object.freeze({
+    item_id: t.item_id,
+    version: t.version,
+    keys: Object.freeze(
+      [...new Set(t.keys)].filter((k): k is PickerKey =>
+        (PICKER_KEYS as readonly string[]).includes(k),
+      ),
+    ),
+    ...(t.text !== undefined ? { text: t.text } : {}),
+  });
+  pickers.add(token);
+  return token;
+}
+
+/**
+ * A coordinator handoff's reply (SPEC §4.6.18): typed into the session's idle prompt once, then
+ * submitted with `Enter`. Only `mintHandoffToken` creates one (checked by identity).
+ */
+export interface HandoffToken {
+  readonly item_id: string;
+  readonly version: number;
+  readonly text: string;
+}
+
+/** Callers: the daemon, carrying out an accepted handoff answer at an idle prompt. */
+export function mintHandoffToken(t: {
+  item_id: string;
+  version: number;
+  text: string;
+}): HandoffToken {
+  const why = answerTextRefusal(t.text);
+  if (why !== null) throw new FenceError(`handoff text ${JSON.stringify(t.text)}`, why);
+  const token = Object.freeze({ item_id: t.item_id, version: t.version, text: t.text });
+  handoffs.add(token);
+  return token;
+}
+
+/** The answer token whose exact text `text` is and that has not typed it yet, or null. */
+function answerTextToken(text: string, opts: FenceOptions): object | null {
+  for (const [t, set] of [
+    [opts.picker, pickers],
+    [opts.handoff, handoffs],
+  ] as const) {
+    if (t !== undefined && set.has(t) && t.text === text) return t;
+  }
+  return null;
+}
+
+/** A named key volleyd may press: Enter or Escape, or one the picker token names. */
+function keyAllowed(key: string, opts: FenceOptions): boolean {
+  if (NAMED_KEYS.has(key)) return true;
+  const t = opts.picker;
+  return t !== undefined && pickers.has(t) && (t.keys as readonly string[]).includes(key);
 }
 
 const launches = new WeakSet<object>();
@@ -492,8 +660,14 @@ export interface FenceOptions {
   remote?: RemoteScript;
   /** For starting or typing LAUNCH_COMMAND: the sealed launch script. */
   launch?: LaunchToken;
+  /** For `gh pr merge`: the gate's token for exactly that PR and head. */
+  merge?: MergeToken;
   /** For typing `/model <id>`: the approved switch. */
   modelSwitch?: ModelSwitchToken;
+  /** For Up/Down/Space and a picker's Other text: the inbox item's picker answer. */
+  picker?: PickerToken;
+  /** For typing a coordinator handoff's reply: the inbox item's answer. */
+  handoff?: HandoffToken;
   /** For starting a sign-in tmux session: the sealed sign-in script. */
   signin?: SigninToken;
   /** For the sign-in forward (`ssh -N -L`): the token a remote sign-in minted. */
@@ -541,6 +715,7 @@ const INFRA = new Set([
  *   numeric  — `-<n>` is accepted (git log -5)
  *   pathspecs — `--` ends the options; everything after it is a path
  *   positional — extra check for every non-option argument
+ *   values   — extra check for a valued option's value, by option (either form)
  */
 interface OptSpec {
   flags?: readonly string[];
@@ -549,6 +724,7 @@ interface OptSpec {
   numeric?: boolean;
   pathspecs?: boolean;
   positional?: (arg: string) => boolean;
+  values?: Readonly<Record<string, (value: string) => boolean>>;
 }
 
 const DIFF_OUTPUT = [
@@ -775,6 +951,10 @@ const GIT_BRANCH_MUTATORS = new Set([
   "--edit-description",
 ]);
 
+/** A git branch name as `gh run list --branch` takes it: never an option, no space or shell syntax. */
+const isBranchName = (v: string): boolean =>
+  /^[A-Za-z0-9._/-]+$/.test(v) && !v.startsWith("-") && !v.includes("..");
+
 /** Options every gh read verb that prints JSON accepts. */
 const GH_OUTPUT = ["--json", "--jq", "-q", "--template", "-t", "--repo", "-R"];
 
@@ -822,6 +1002,8 @@ const GH_SPECS: Record<string, OptSpec> = {
       "--event",
       "-e",
     ],
+    // A branch name (a red head's classification reads the release branch's runs), never an option.
+    values: { "--branch": isBranchName, "-b": isBranchName },
   },
   "run view": {
     flags: ["--log", "--log-failed", "--verbose", "-v", "--exit-status"],
@@ -863,6 +1045,12 @@ function typedTextRefusal(text: string, opts: FenceOptions): string | null {
       ? null
       : "/model without the token of an approved model_switch decision";
   }
+  const answer = answerTextToken(text, opts);
+  if (answer !== null) {
+    if (spentText.has(answer)) return "an inbox answer's text is typed once";
+    spentText.add(answer);
+    return null;
+  }
   return "text volleyd never types";
 }
 
@@ -880,6 +1068,9 @@ const DOCKER_DENY = new Set([
   "image prune",
   "volume prune",
 ]);
+
+/** The one process listing (procs.ts): read-only; signals are sent with `process.kill`, never a child. */
+export const PS_ARGV: readonly string[] = ["ps", "-axo", "pid=,command="];
 
 /** Read-only pressure-sampler commands (src/pressure/*), allowed as these exact argvs only. */
 const PRESSURE_READS: readonly (readonly string[])[] = [
@@ -934,7 +1125,7 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
     case "git":
       return git(args);
     case "gh":
-      return gh(args);
+      return gh(args, opts);
     case "cmux":
       return cmux(args, opts);
     case "claude":
@@ -951,6 +1142,8 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
       return args.length === 1 && args[0] === "-h" ? ALLOW : deny("mosquitto (only -h)");
     case "launchctl":
       return launchctl(args);
+    case "ps":
+      return exactly(argv, [PS_ARGV]);
     case "sysctl":
     case "memory_pressure":
       return exactly(argv, PRESSURE_READS);
@@ -968,6 +1161,10 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
       return deny(args[0] !== undefined ? `${prog} ${args[0]}` : prog);
   }
 }
+
+/** A valued option's value passes the spec's check for that option (none: any value). */
+const valueOk = (spec: OptSpec, option: string, value: string): boolean =>
+  spec.values?.[option]?.(value) ?? true;
 
 /**
  * Check every argument after an allowed subcommand against its `OptSpec`. Returns the denial for
@@ -987,10 +1184,14 @@ function checkArgs(verb: string, args: readonly string[], spec: OptSpec): Verdic
     if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       const name = eq === -1 ? a : a.slice(0, eq);
-      if (eq !== -1 && (has(spec.valued, name) || has(spec.optional, name))) continue;
+      if (eq !== -1 && (has(spec.valued, name) || has(spec.optional, name))) {
+        if (!valueOk(spec, name, a.slice(eq + 1))) return deny(`${verb} ${a}`);
+        continue;
+      }
       if (eq === -1 && has(spec.valued, a)) {
         const v = args[i + 1];
         if (v === undefined || v.startsWith("-")) return deny(`${verb} ${a} (missing value)`);
+        if (!valueOk(spec, a, v)) return deny(`${verb} ${a} ${v}`);
         i++;
         continue;
       }
@@ -1000,9 +1201,13 @@ function checkArgs(verb: string, args: readonly string[], spec: OptSpec): Verdic
     // flags (`-uq`) are not accepted: one of them could be a value-taking option.
     const short = a.slice(0, 2);
     if (has(spec.valued, short)) {
-      if (a.length > 2) continue;
+      if (a.length > 2) {
+        if (!valueOk(spec, short, a.slice(2))) return deny(`${verb} ${a}`);
+        continue;
+      }
       const v = args[i + 1];
       if (v === undefined || v.startsWith("-")) return deny(`${verb} ${a} (missing value)`);
+      if (!valueOk(spec, short, v)) return deny(`${verb} ${a} ${v}`);
       i++;
       continue;
     }
@@ -1053,10 +1258,10 @@ function git(args: string[]): Verdict {
   return v.kind === "allow" && sub === "fetch" ? fetchPositionals(rest) : v;
 }
 
-function gh(args: string[]): Verdict {
+function gh(args: string[], opts: FenceOptions): Verdict {
   const two = args.slice(0, 2).join(" ");
-  if (two === "pr merge" || two === "workflow run" || two === "repo delete")
-    return deny(`gh ${two}`);
+  if (two === "pr merge") return mergeVerdict(args, opts.merge);
+  if (two === "workflow run" || two === "repo delete") return deny(`gh ${two}`);
   if (args[0] === "api") {
     const v = checkArgs("gh api", args.slice(1), {
       ...(GH_SPECS.api as OptSpec),
@@ -1109,7 +1314,7 @@ function cmux(args: string[], opts: FenceOptions): Verdict {
       case "new-workspace":
         return newWorkspaceAllowed(rest, opts);
       case "send-key":
-        return ws && rest.length === 3 && NAMED_KEYS.has(rest[2] ?? "");
+        return ws && rest.length === 3 && keyAllowed(rest[2] ?? "", opts);
       case "read-screen":
         return (
           ws &&
@@ -1503,8 +1708,8 @@ function isLaunchScript(content: string, worktree: string): boolean {
   // `agent_mcp: inherit` (the user's MCP servers load too) renders no --strict-mcp-config.
   const strict = run[2] !== undefined;
   const env: Record<string, string> = {};
-  // The exports end before launch.sh's claude check (the line before the exec).
-  for (const line of lines.slice(profile !== null ? 7 : 5, -3)) {
+  // The exports end before launch.sh's `unset VOLLEY_COORDINATOR` and claude check.
+  for (const line of lines.slice(profile !== null ? 7 : 5, -4)) {
     const m = LAUNCH_EXPORT.exec(line);
     if (m === null || Object.hasOwn(env, m[1] ?? "")) return false;
     env[m[1] as string] = unshq(m[2] as string);
@@ -1706,7 +1911,7 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
     // TYPED_TEXT. (Without -l, tmux types any argument that is not a key name as text.)
     const [t, target, ...tail] = rest;
     if (t !== "-t" || target === undefined || target.startsWith("-")) return deny("tmux send-keys");
-    if (tail.length === 1 && NAMED_KEYS.has(tail[0] ?? "")) return ALLOW;
+    if (tail.length === 1 && keyAllowed(tail[0] ?? "", opts)) return ALLOW;
     if (tail.length !== 3 || tail[0] !== "-l" || tail[1] !== "--") return deny("tmux send-keys");
     const why = typedTextRefusal(tail[2] ?? "", opts);
     return why === null ? ALLOW : deny(`tmux send-keys (${why})`);

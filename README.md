@@ -200,6 +200,7 @@ claude mcp add-json -s user volley '{
   "args": ["run", "<absolute-path-to-this-repo>/packages/volley-mcp/src/index.ts"],
   "env": {
     "VOLLEY_AGENT_ID": "coordinator",
+    "VOLLEY_COORDINATOR": "coord-main",
     "VOLLEY_NAMESPACE": "default",
     "VOLLEY_AUTH_USERNAME": "coordinator",
     "VOLLEY_AUTH_PASSWORD": "<coordinator password from step 2>"
@@ -213,6 +214,8 @@ The `env` block reaches only the MCP server, **not** the session's Bash tool, an
 export VOLLEY_AUTH_USERNAME=coordinator
 export VOLLEY_AUTH_PASSWORD='<coordinator password from step 2>'
 ```
+
+`VOLLEY_COORDINATOR` is your **coordinator name**: a stable id you choose once (`[a-z0-9][a-z0-9_-]{0,62}`). Export it in your shell profile too (`export VOLLEY_COORDINATOR=coord-main`) and submit waves with `volleyd run <wave.yaml> --owner "$VOLLEY_COORDINATOR"`: the wave is then owned by the name, not by the session's per-restart agent id, so the session keeps steering, resolving, pausing and stopping its waves after its MCP server restarts (volleyd journals `owner_reconnected`; nothing needs claiming). It is also what lets an autopilot wave run without a session: what needs you reaches the Desk's **Needs-you** window and your phone, owned by the name, and any later session with the same `VOLLEY_COORDINATOR` answers for it.
 
 `VOLLEY_AGENT_ID` is a **prefix**: the server appends a fresh `-xxxx` at every start, so this session registers as `coordinator-xxxx` (and two sessions sharing the registration still get distinct ids). Leave it set: without it the id is named after the session's working directory (`volley-xxxx` in this checkout), which reads as just another agent, while the `--owner` a wave is submitted with, the Desk's owner chip and `★ yours`, and the [v0.2 owner smoke](docs/SMOKE-v0.2.md) all expect the `coordinator-` id. For a separate registry (a smoke run, say), change `VOLLEY_NAMESPACE` instead.
 
@@ -287,21 +290,19 @@ See [`packages/volley-cli/README.md#volley-dash`](packages/volley-cli/README.md#
 
 ### 1. Dispatch long-running work to autonomous agents
 
-You point `/volley-issues` at ten GitHub issue numbers and walk away.
+You point `/volley-issues` at ten GitHub issue numbers, say go, and walk away. The session that submitted the wave can end: the wave belongs to your coordinator name (`VOLLEY_COORDINATOR`), not to the session.
 
-What happens next is fully automated:
+What happens next is automated, by the `volleyd` supervisor under **autopilot**:
 
-- A release branch is created off `main` (only when more than one issue is in flight; single-issue dispatches just branch from main).
-- Ten git worktrees are spun up under `/private/tmp/`, each on its own branch off the release branch.
-- Ten cmux workspaces launch in parallel, each running a real `claude --dangerously-skip-permissions` process in its worktree, each with an issue-specific spawn brief.
-- Each child auto-registers as a Volley agent, declares its capabilities, transitions through `working → done` (or `blocked` / `failed`), and publishes a one-line summary on completion.
-- The coordinator backgrounds one `volley wait` per child. The moment any child publishes terminal status, that wait exits, the coordinator wakes, reads the child's diff, commits it, opens a PR against the release branch, and goes back to sleep waiting on the others.
-- When all ten finish and their PRs merge into the release branch, the coordinator prompts you to deploy the release branch to staging.
-- If any child crashes hard (OOM, `kill -9`), the broker's LWT fires within ~60s and that child's status flips to `reaped` — the coordinator wakes the same way it does for `done`, opens the workspace so you can see what happened, and **does not auto-restart**. Crash recovery is a human decision; crash *detection* is free.
+- The skill turns the issues into a wave file (`Depends on: #N` lines become task order), with `merge: auto` and `branch_update: merge`, and submits it with `volleyd run <wave.yaml> --owner "$VOLLEY_COORDINATOR"` on a release branch.
+- volleyd gives each task its own git worktree and Claude Code session, runs the implement → two reviews → fixup pipeline, and gates each PR on CI at exactly the reviewed head.
+- It answers the routine decisions itself (a relaunch, a disputed P1, a spawn-budget raise) from a policy table, within per-wave budgets; fixes flaky CI; keeps branches current by merging the release branch in (no force-push); squash-merges each gated PR in dependency order; and starts dependents once what they depend on is merged.
+- When every task is merged and the repository has a release playbook (`.volley/release.yaml`), the release train runs its stages (version bump, changelog, staging, smoke) one at a time; production and the final go/no-go stay yours.
+- If a session crashes hard (OOM, `kill -9`), the broker's LWT fires within ~60s; volleyd sees the agent go and relaunches it once.
+- What it must not or could not answer (owner-only decisions such as a plan change or the release's go/no-go, and escalations whose budget is spent) waits in the Desk's **Needs-you** window and rings your phone once. Answer it there, from the phone, with `volleyd inbox answer`, or in a terminal; the first answer wins.
+- In the morning, one **digest** per wave (one push; `volleyd digest <wave>`, the Desk's digest card) says what shipped, what autopilot handled and what is waiting for you.
 
-End-to-end wake latency in production: **~1.5 seconds** between a child publishing `done` and the coordinator beginning to act on it. Compare to the legacy poll-loop's 4-second median.
-
-You go from "ten issues sitting in the backlog" to "ten merged PRs on a release branch ready for staging" with a single command and a few approvals along the way.
+You go from "ten issues sitting in the backlog" to "ten merged PRs on a release branch ready for release" with a single command and a few answers along the way. The owner's guide, [`docs/AUTOPILOT.md`](docs/AUTOPILOT.md), says what runs unattended, what still asks you, how to opt a wave out and how to read the digest; the owner's real unattended run is [`SMOKE.md`](SMOKE.md) Plan 13. Want to drive a wave yourself? `--autopilot off` makes every decision wait for you, and the skill's hand-driven loop takes over; without volleyd, the skill's legacy path launches each agent from the session and wakes on each one's terminal status.
 
 ### 2. One pane of glass across machines
 
@@ -362,10 +363,10 @@ The [`/wait`](packages/volley-wait/SKILL.md) skill and the [bridge pattern](exam
 
 v0.1.3 adds two surfaces for surfacing agent state transitions to the human, on whichever channel you're already paying attention to:
 
-- **[`volley notify`](packages/volley-cli/README.md#volley-notify)** — a long-lived CLI subscriber that fires the terminal bell + macOS desktop banners + arbitrary HTTP webhooks on matching agent transitions. Default trigger set is "attention-needed only" (`blocked,failed,reaped`). Run one per terminal tab; pipe its JSON output to `jq` for live tail. Webhook lets you bridge to ntfy.sh, Slack, Discord, or anything else that takes a POST.
+- **[`volley notify`](packages/volley-cli/README.md#volley-notify)** — a long-lived CLI subscriber that fires the terminal bell + macOS desktop banners + arbitrary HTTP webhooks on matching agent transitions. Default trigger set is "attention-needed only" (`blocked,failed,reaped,digest`, `digest` being volleyd's one push per wave digest). Run one per terminal tab; pipe its JSON output to `jq` for live tail. Webhook lets you bridge to ntfy.sh, Slack, Discord, or anything else that takes a POST.
 - **[Dashboard "Browser notifications"](packages/volley-dash/README.md#browser-notifications)** — a bell-icon Settings popover in the [`volley dash`](packages/volley-cli/README.md#volley-dash) top bar that fires the browser Notification API + a short bundled chime for the same trigger events. Respects `prefers-reduced-motion`. Per-origin localStorage. The Desk goes further: twelve [sound themes](packages/volley-desk/README.md#sounds) for 28 events, with per-event switches, quiet hours and an audition row per theme in Settings › Sound.
 
-Both surfaces are pure clients of the existing `status` channel — no new envelope fields, no new topics, no new MCP tools. They observe the same protocol any other Volley client does; the protocol is unaffected by their presence.
+Both surfaces are pure clients of the existing `status` channel (and, for `digest`, volleyd's `progress` channel: `--pattern 'volley/+/volleyd/progress'`) — no new envelope fields, no new topics, no new MCP tools. They observe the same protocol any other Volley client does; the protocol is unaffected by their presence.
 
 ---
 
@@ -389,7 +390,8 @@ packages/volley-issues/   The /volley-issues dispatch skill.
 packages/volley-hooks/    Claude Code hooks: real model in the registry, mailbox drain + inject + ack, idle / awaiting-input, heartbeats.
 packages/volleyd/         Wave supervisor daemon (pre-release): wave files, durable journal, DAG scheduler,
                           authority fence, runtime-tunable config, launchd / systemd service, paired machines,
-                          several Claude accounts, the Desk's setup wizard. `volleyd --help`.
+                          several Claude accounts, the Desk's setup wizard, autopilot (policy table, self-healing
+                          CI, merge queue, release train, needs-you inbox, morning digest). `volleyd --help`.
 
 examples/bridges/         Adapters that publish external events (CI, webhooks, ...) onto Volley topics.
   github-actions/         GitHub Actions → mosquitto bridge script.

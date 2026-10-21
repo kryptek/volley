@@ -24,6 +24,9 @@
  * never remounts it (its state is kept) and the focus is restored after the
  * move; `collapsed` shows only the title bar, and a tap on
  * the bar (or the Expand button) calls `onCollapse`.
+ * Two rows: a `subtitle` is a full-width `.win-sub` row at the bottom of the
+ * bar (it drags the window too and stays shown when collapsed). Under
+ * `COMPACT_PX` of effective width the window gets `win--compact`.
  */
 import type React from "react";
 import "../styles/attention.css";
@@ -66,6 +69,8 @@ const HOT = "#ff7a59";
 export const BORN_MS = 4000;
 /** A title-bar press that moves less than this (px) is a tap. */
 const TAP_PX = 5;
+/** Under this effective width (px) the window is `win--compact`. */
+export const COMPACT_PX = 420;
 /** The most a window tilts toward the pointer, in degrees. */
 export const TILT_MAX_DEG = 2;
 
@@ -140,6 +145,8 @@ export function hexToHsl(hex: string): string {
 export interface FrameProps {
   id: string;
   title: ReactNode;
+  /** The bar's second, full-width row (`.win-sub`). */
+  subtitle?: ReactNode;
   /** Accessible name for the window; defaults to `title` when that is a string. */
   label?: string;
   accent: string;
@@ -224,7 +231,7 @@ export function Frame(p: FrameProps) {
   };
 
   const down = (e: React.PointerEvent) => {
-    if ((e.target as Element).closest("button")) return;
+    if ((e.target as Element).closest("button, a, select, input, textarea")) return;
     untilt();
     hovered.current = null;
     last.current = { x: e.clientX, y: e.clientY };
@@ -334,6 +341,7 @@ export function Frame(p: FrameProps) {
             </button>
           )}
         </div>
+        {p.subtitle && <div className="win-sub">{p.subtitle}</div>}
       </header>
       <div className="win-body" hidden={p.collapsed}>
         {p.children}
@@ -369,18 +377,19 @@ export function Frame(p: FrameProps) {
     );
   }
   const wrap = p.wrapAttention ?? attentionEffect(p.attnStyle ?? "pulse");
+  const width = p.maxWidth === undefined ? p.width : Math.min(p.width, p.maxWidth);
 
   const section = (
     <section
       ref={box}
       className={`win${born ? " win--born" : ""}${p.attn ? ` win--attn-${p.attn}` : ""}${
         p.pin?.mode === "screen" ? " win--anchored" : ""
-      }${p.collapsed ? " win--collapsed" : ""}`}
+      }${p.collapsed ? " win--collapsed" : ""}${width < COMPACT_PX ? " win--compact" : ""}`}
       style={
         {
           left: p.pos.x,
           top: p.pos.y,
-          width: p.maxWidth === undefined ? p.width : Math.min(p.width, p.maxWidth),
+          width,
           zIndex: p.z,
           "--acc": p.accent,
         } as CSSProperties

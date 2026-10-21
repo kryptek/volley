@@ -5,6 +5,7 @@ import {
   FEED_LIMIT,
   UNASSIGNED,
   agentsByWave,
+  endedWaves,
   finishedAgents,
   initialState,
   pruneUnconfirmed,
@@ -14,7 +15,13 @@ import {
   routeTopic,
 } from "../src/store/reducer";
 import { type DeskMessage, type DeskState, type Envelope, ROLES } from "../src/store/types";
-import { machineMsg, machineRecord, readiness, readinessMsg } from "./helpers/desk-msgs";
+import {
+  archiveMsg,
+  machineMsg,
+  machineRecord,
+  readiness,
+  readinessMsg,
+} from "./helpers/desk-msgs";
 
 const EXAMPLES = path.resolve(__dirname, "../../../spec/examples/valid");
 
@@ -502,5 +509,43 @@ describe("reducer — Fleet readiness (SPEC §4.6.15)", () => {
   it("a resync forgets every verdict until the replay brings them back", () => {
     const s = resync(apply(readinessMsg(readiness())));
     expect(s.readiness).toEqual({});
+  });
+});
+
+describe("reducer — archived waves (SPEC §4.6.20)", () => {
+  const archived = () => {
+    const e = example("wave-state-running");
+    return msg("volley/_waves/w1/state", {
+      ...e,
+      payload: { ...(e.payload as object), status: "archived", open_decisions: [] },
+    });
+  };
+
+  it("an archived state is an ended wave", () => {
+    expect(endedWaves(apply(WAVE, archived()))).toEqual(new Set(["w1"]));
+  });
+
+  it("a cleared state drops the wave's agents whose records are gone; one with a record stays unassigned", () => {
+    const kept = "w1-t1-implementer-1";
+    const gone = "w1-t1-spec_reviewer-1";
+    const s = apply(
+      WAVE,
+      registryFor(kept),
+      registryFor(gone),
+      msg(`volley/_system/registry/${gone}`, null),
+      archived(),
+      msg("volley/_waves/w1/state", null),
+    );
+    expect(s.waves.w1).toBeUndefined();
+    expect(s.agents[gone]).toBeUndefined();
+    expect(s.agents[kept]?.wave).toBe(UNASSIGNED);
+  });
+
+  it("the _archive index sets state.archive; a clear and a resync empty it", () => {
+    const s = apply(archiveMsg(["a", "b"]));
+    expect(s.archive?.archived.map((e) => e.wave)).toEqual(["a", "b"]);
+    expect(apply(archiveMsg(["a"]), archiveMsg(null)).archive).toBeNull();
+    expect(resync(s).archive).toBeNull();
+    expect(routeTopic("volley/_waves/_archive")).toEqual({ kind: "archive" });
   });
 });

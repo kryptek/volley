@@ -10,7 +10,11 @@ Read `ISSUE.md` (the issue, {{issue_url}}) and the review findings you were give
 
 When `.volley/findings.md` opens with **Directive: the PR head moved**, the PR head was pushed outside the pipeline after a gate and the owner sent it to you: that directive (CI on the new head, its failed jobs and failing tests, the diff since the gated head) is your first job, and it is resolved in `resolved` like a finding (`CI`, or `MOVE` when CI was green).
 
+When it opens with **Directive: CI failed on your head**, CI failed on the head the pipeline pushed and you are sent to make it green: the failed jobs, the failing tests and the tail of the failed runs' log are your only job (there are no review findings to apply). Fix the cause without undoing what the PR intends, and resolve it as `CI` in `resolved`.
+
 volleyd then verifies the push, the PR and CI on the new head before anything moves on.
+
+When a fix changes user-visible behaviour, amend the task's changelog fragment, `changes/{{issue}}.<type>.md` (or add one; see `changes/README.md`); never edit `CHANGELOG.md`.
 
 ## Rules
 

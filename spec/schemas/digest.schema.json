@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/digest.schema.json",
+  "title": "Volley Wave Digest",
+  "description": "Retained morning digest of one wave, published by a supervisor to volley/_waves/<wave>/digest when the wave completes, releases, stops or first needs its owner: what shipped, what autopilot handled on its own, and what is waiting for the owner. See spec section 4.6.16.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_waves/digest" },
+        "type": { "const": "digest" },
+        "payload": { "$ref": "#/$defs/digest" }
+      },
+      "required": ["channel", "type", "payload"]
+    }
+  ],
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wave",
+        "release_branch",
+        "generated_at",
+        "trigger",
+        "shipped",
+        "auto",
+        "waiting",
+        "failures"
+      ],
+      "properties": {
+        "wave": { "$ref": "wave-state.schema.json#/$defs/waveId" },
+        "release_branch": { "type": "string", "minLength": 1 },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "trigger": {
+          "enum": ["wave_complete", "release_go", "escalation", "stopped"],
+          "description": "Why it was published: the wave completed (or its release was done), its release_go opened, its first escalation since the last digest, or it was stopped."
+        },
+        "shipped": {
+          "type": "array",
+          "description": "Tasks whose PR merged, in merge order.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["task", "issue", "pr", "merge_sha", "merged_by"],
+            "properties": {
+              "task": { "$ref": "wave-state.schema.json#/$defs/taskId" },
+              "issue": { "type": "integer", "minimum": 0 },
+              "title": { "type": "string" },
+              "pr": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["number", "url"],
+                "properties": {
+                  "number": { "type": "integer", "minimum": 0 },
+                  "url": { "type": "string" }
+                }
+              },
+              "merge_sha": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+              "merged_by": {
+                "enum": ["supervisor", "operator", "github"],
+                "description": "supervisor: autopilot merging; operator: a merge the owner made outside GitHub's merge button; github: GitHub's merge button."
+              }
+            }
+          }
+        },
+        "auto": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "decisions_resolved",
+            "flakes_fixed",
+            "conflicts_resolved",
+            "retries",
+            "merges"
+          ],
+          "properties": {
+            "decisions_resolved": { "$ref": "#/$defs/count" },
+            "flakes_fixed": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["test", "fixer", "prs_released"],
+                "properties": {
+                  "test": { "type": "string" },
+                  "fixer": { "$ref": "wave-state.schema.json#/$defs/taskId" },
+                  "prs_released": { "$ref": "#/$defs/count" }
+                }
+              }
+            },
+            "conflicts_resolved": {
+              "$ref": "#/$defs/count",
+              "description": "Branch-update (rebase) steps that verified."
+            },
+            "retries": {
+              "$ref": "#/$defs/count",
+              "description": "Recovered spawns and relaunches."
+            },
+            "merges": { "$ref": "#/$defs/count", "description": "PRs the supervisor merged." }
+          }
+        },
+        "waiting": {
+          "type": "array",
+          "description": "The wave's open decisions.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "kind", "question", "since", "owner_only"],
+            "properties": {
+              "id": { "$ref": "wave-state.schema.json#/$defs/decisionId" },
+              "kind": { "type": "string" },
+              "task": { "$ref": "wave-state.schema.json#/$defs/taskId" },
+              "question": { "type": "string" },
+              "since": { "type": "string", "format": "date-time" },
+              "owner_only": {
+                "type": "boolean",
+                "description": "Escalated because its kind is in autopilot.owner_only."
+              }
+            }
+          }
+        },
+        "release": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stage", "stages"],
+          "properties": {
+            "stage": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+            "stages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "state"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "state": { "enum": ["pending", "awaiting_go", "running", "verified", "failed"] }
+                }
+              }
+            }
+          }
+        },
+        "failures": {
+          "type": "array",
+          "description": "Cancelled tasks and why.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["task", "why"],
+            "properties": {
+              "task": { "$ref": "wave-state.schema.json#/$defs/taskId" },
+              "why": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

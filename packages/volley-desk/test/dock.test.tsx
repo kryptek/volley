@@ -20,7 +20,7 @@ const renderApp = () =>
 const dock = () => within(screen.getByRole("toolbar", { name: "Dock" }));
 
 describe("the dock", () => {
-  it("has exactly six items, in order", () => {
+  it("has exactly seven items, in order", () => {
     renderApp();
     expect(
       dock()
@@ -28,6 +28,7 @@ describe("the dock", () => {
         .map((b) => b.getAttribute("aria-label")),
     ).toEqual([
       "Wave coordinators",
+      "Needs you",
       "Hide tethers",
       "Arrange & fit",
       "Zoom in",

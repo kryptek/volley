@@ -1,6 +1,6 @@
 {
   "name": "volleyd",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "volleyd — durable wave supervisor daemon: wave files, journal, DAG scheduler, authority fence",
   "license": "Apache-2.0",
@@ -11,6 +11,7 @@
   },
   "scripts": {
     "test": "vitest run",
+    "test:soak": "vitest run --config vitest.soak.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

@@ -17,11 +17,19 @@ export interface TestBroker {
  * code 4, like `allow_anonymous false` in mosquitto). With `canPublish`, a PUBLISH the predicate
  * refuses for the client's username never reaches a subscriber, like a mosquitto ACL denial
  * (Aedes also closes the publisher's connection; mosquitto drops the message silently).
+ *
+ * With `overlapSafe`, Aedes's in-memory persistence tolerates a QoS 1 packet a persistent
+ * (`clean: false`) client receives once per overlapping subscription (the daemon's
+ * `volley/+/+/status` beside an agent's own status topic): Aedes tracks both copies under one
+ * queue entry, and when they interleave with the client's acks it cannot find the entry to update
+ * ("no such packet") and closes the client. Mosquitto delivers such copies fine; the soak (many
+ * agents launched at once) needs this.
  */
 export async function startTestBroker(
   opts: {
     users?: Record<string, string>;
     canPublish?: (username: string | undefined, topic: string) => boolean;
+    overlapSafe?: boolean;
   } = {},
 ): Promise<TestBroker> {
   const { users, canPublish } = opts;
@@ -56,6 +64,16 @@ export async function startTestBroker(
           },
         }),
   });
+  if (opts.overlapSafe === true) {
+    // Aedes's typings omit its persistence; the callback is (err, client, packet).
+    type Cb = (err: Error | null, client: unknown, packet: unknown) => void;
+    const p = (aedes as unknown as { persistence: Record<string, unknown> }).persistence;
+    const update = (p.outgoingUpdate as (c: unknown, pk: unknown, cb: Cb) => void).bind(p);
+    p.outgoingUpdate = (client: unknown, packet: unknown, cb: Cb) =>
+      update(client, packet, (err, c, pk) =>
+        cb(err?.message === "no such packet" ? null : err, c, pk),
+      );
+  }
   const subs = new Map<string, Set<string>>();
   aedes.on("subscribe", (subscriptions, client) => {
     const set = subs.get(client.id) ?? new Set<string>();

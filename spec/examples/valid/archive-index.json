@@ -1,0 +1,26 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-21T10:00:00.000Z",
+  "channel": "_waves/_archive",
+  "type": "archive",
+  "payload": {
+    "archived": [
+      {
+        "wave": "2026-10-20-example",
+        "status": "complete",
+        "archived_at": "2026-10-21T10:00:00.000Z",
+        "by": "volleyd",
+        "reason": "wave_complete acknowledged (archive_on_ack)"
+      },
+      {
+        "wave": "2026-10-19-smoke",
+        "status": "stopped",
+        "archived_at": "2026-10-20T18:00:00.000Z",
+        "by": "coordinator-ab12",
+        "reason": "volleyd archive"
+      }
+    ],
+    "updated_at": "2026-10-21T10:00:00.000Z"
+  }
+}

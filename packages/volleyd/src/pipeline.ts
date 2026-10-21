@@ -1,4 +1,5 @@
 import {
+  type ArtifactOutcome,
   type ArtifactReport,
   type CiRun,
   type CiState,
@@ -6,22 +7,32 @@ import {
   type MovedHeadFacts,
   type OperatorMergeCheck,
   type RebaseCheck,
+  type ReleaseMerge,
   type SupersededRun,
   artifactOutcome,
   checkRebase,
   ciStateOf,
+  failedRuns,
   landed,
+  prFiles,
   probeLanded,
   probeMovedHead,
+  probeReleaseCi,
+  redHeadCi,
   verifyArtifacts,
   verifyOperatorMerge,
 } from "./artifacts";
+import { type ClassifyResult, classify } from "./autopilot/ci-classify";
+import { type GithubStatus, STATUS_UNKNOWN } from "./autopilot/github-status";
+import { mergePr } from "./autopilot/merge";
+import { type QueueEntry, nextToMerge, queueOf } from "./autopilot/merge-queue";
 import type { Role } from "./brief";
 import { systemClock } from "./clock";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "./config-defaults";
 import type { DecisionInput, DecisionRecord } from "./decisions";
 import { type EvidenceInput, markEvidenceStale, writeEvidence } from "./evidence";
 import type { ExecFn, ExecOptions, ExecResult } from "./exec";
+import { type MergeToken, mintMergeToken } from "./fence";
 import { type RunningImplementer, nudgeTargets, nudgeText, parsePrFiles } from "./overlap";
 import { isRespawnAnswer } from "./recovery";
 import type { WaveRecord } from "./reducer";
@@ -68,8 +79,10 @@ import type {
  *     results come back as events through `deps.enqueue`, so a hung network call never holds up
  *     control ops or shutdown.
  *
- * volleyd never merges: no action merges, pushes or re-runs CI, and the only commands the
- * driver runs are the read-only verbs of artifacts.ts (test/no-merge.test.ts holds this).
+ * volleyd never pushes or re-runs CI, and merges only under autopilot merging (`merge: auto`,
+ * SPEC §4.6.17): the one `merge` action, with the gate's MergeToken, runs exactly
+ * `gh pr merge <n> --squash --match-head-commit <gated head>` (src/autopilot/merge.ts). Every
+ * other command the driver runs is a read-only verb of artifacts.ts (test/no-merge.test.ts).
  */
 
 /** Stage → the role that runs it. */
@@ -87,6 +100,8 @@ const ROLE_STAGE: Record<Role, TaskStage> = {
   fixup: "fixup",
   // The rebase is a fix-up of the branch; the closed stage enum has no stage of its own for it.
   rebase: "fixup",
+  // The release train's role (SPEC §4.6.19): never in a task's pipeline (isRole excludes it).
+  release: "done",
 };
 
 /** Roles whose `done` claims pushed commits on the PR branch (checked by artifacts.ts). */
@@ -153,9 +168,18 @@ export interface TaskPipeline {
   rebases: { from?: string; to: string; touched: string[] }[];
   /**
    * Heads pushed to the PR outside the pipeline after a verification. `accepted_by`: the owner
-   * answered a pr_head_moved decision with `fixup`, so the reviews of `from` still hold for `to`.
+   * answered a pr_head_moved decision with `fixup`, or with `accept` for a merge of the release
+   * branch only (`how: release_merge`, `parent`: the release commit merged), so the reviews of
+   * `from` still hold for `to`.
    */
-  moves: { from: string; to: string; touched: string[]; accepted_by?: string }[];
+  moves: {
+    from: string;
+    to: string;
+    touched: string[];
+    accepted_by?: string;
+    how?: "release_merge";
+    parent?: string;
+  }[];
   /** Reviewers to re-run because the last rebase touched files they flagged. */
   rereview: ReviewerRole[];
   /** The owner's answer to a `reviewers_disagree` decision, for the round it was asked in. */
@@ -178,6 +202,35 @@ export interface TaskPipeline {
   merged_seq?: number;
   /** Merge nudges this task's implementers got, as `<agent_id>#<merged PR>` (one each). */
   nudged?: string[];
+  /** Autopilot merges GitHub refused at the current gated head (`merge_refused` alarms). */
+  merge_refusals?: number;
+  /** Extra attempts the owner granted (`merge_refused` answered `retry`). */
+  merge_retries?: number;
+  /** The owner answered a `merge_refused` decision `manual`: a human merges this task. */
+  merge_manual?: boolean;
+  /** When the task entered the merge queue (`merge_queued`), until it left it (`merge_dequeued`). */
+  queued_at?: string | undefined;
+  /** volleyd's `gh pr merge` for the task is running (`merge_started`, until its outcome). */
+  merge_inflight?: boolean | undefined;
+  /** A remediation requested for the task's red head (a flake's fixer), until the head moves on. */
+  remediation?: Remediation | undefined;
+  /**
+   * A branch update that takes a landed flake fix (`stage_entered { fix_landed }`): `next`, the
+   * flake stopped a step that still has steps after it; `gate`, it stopped a pre-gate update.
+   */
+  fix_resume?: "next" | "gate" | undefined;
+}
+
+/** A `remediation_requested` that still holds: a flake on `role`'s red `head` awaits its fixer. */
+export interface Remediation {
+  kind: "fix_flake";
+  test: string;
+  test_file: string | null;
+  head: string;
+  role: Role;
+  since: string;
+  /** Its fixer merged (`remediation_closed { outcome: landed }`): the next advance takes the fix. */
+  landed?: true;
 }
 
 export interface MovedHead {
@@ -188,9 +241,13 @@ export interface MovedHead {
   asked?: boolean;
 }
 
-/** A moved head's fixup directive (kept on the pr_head_moved decision as `directive`). */
+/**
+ * A fixup's directive: a moved head's (kept on the pr_head_moved decision as `directive`), or CI
+ * failed on the pipeline's own head (`from` absent; journaled on the fixup's `stage_entered`).
+ */
 export interface Directive {
-  from: string;
+  /** The head the move started from; absent for a CI failure on the role's own head. */
+  from?: string;
   to: string;
   ci: CiState;
   failed_jobs: string[];
@@ -202,6 +259,8 @@ export interface Directive {
   superseded?: SupersededRun[];
   /** The owner chose `fixup`: the fixup works from this directive only (no review findings). */
   only?: boolean;
+  /** The move merges a release-branch commit into `from` (probeMovedHead). */
+  release_merge?: ReleaseMerge;
 }
 
 /** A `ci_pending` event's facts: whose head, how far its runs are, when it is checked again. */
@@ -212,6 +271,10 @@ export interface CiHold {
   checks: { done: number; total: number };
   next_poll_at: string;
   pr?: { number: number; url: string };
+  /** An infra incident hold (a red head classified `infra_incident`): what it is and since when. */
+  reason?: "infra_incident";
+  incident?: string;
+  since?: string;
 }
 
 export type SteerReason = "artifacts" | "result" | "merge_nudge";
@@ -226,18 +289,22 @@ export type SteerReason = "artifacts" | "result" | "merge_nudge";
 export interface PipelineMarker {
   on:
     | "verify"
+    | "liveness"
     | "ci_failed"
     | "ci_none"
     | "review_result"
     | "fixup_result"
     | "agent_failed"
     | "agent_blocked"
+    | "agent_blocked_ci"
     | "reviewers_disagree"
     | "merge_ready_invariant"
     | "relaunch"
     | "spawn_failed"
     | "pr_closed"
-    | "pr_head_moved";
+    | "pr_head_moved"
+    | "merge_refused"
+    | "merge_conflict";
   role?: Role;
   head?: string;
   /** ci_none on a rebase: the files it changed, for the re-review rule if the head is accepted. */
@@ -259,6 +326,9 @@ const RESPAWNABLE: ReadonlySet<PipelineMarker["on"]> = new Set([
 ]);
 
 /** Answers are free text: only an exact option (case and surrounding space aside) counts. */
+/** The answer volleyd closes a task's open decisions with when its PR is seen merged. */
+export const SUPERSEDED_BY_MERGE = "superseded_by_merge";
+
 export const isAnswer = (answer: string, option: string): boolean =>
   answer.trim().toLowerCase() === option;
 
@@ -278,7 +348,8 @@ export const emptyPipeline = (): TaskPipeline => ({
   gated: [],
 });
 
-const isRole = (r: unknown): r is Role => typeof r === "string" && r in ROLE_STAGE;
+const isRole = (r: unknown): r is Role =>
+  typeof r === "string" && r !== "release" && r in ROLE_STAGE;
 
 /**
  * Fold one journal event into a task's pipeline. Pure; mutates and returns `p` (the reducer
@@ -308,13 +379,19 @@ export function reducePipeline(
     case "stage_entered":
       p.why = typeof d.why === "string" ? d.why : undefined;
       if (Array.isArray(d.roles)) {
+        // A flake's fix taken (landedFix): where the pipeline goes on once the update is verified.
+        // Read before p.rebasing is overwritten below: a parked pre-gate update resumes at the gate.
+        p.fix_resume =
+          typeof d.fix_landed === "string" ? (p.rebasing ? "gate" : "next") : undefined;
         p.step = d.step as number;
         p.roles = (d.roles as unknown[]).filter(isRole);
         p.rebasing = d.rebase === true;
         p.branch_update = p.rebasing && d.branch_update === "merge" ? "merge" : undefined;
         p.rereview = [];
         if (typeof d.review_round === "number") p.round = d.review_round;
+        if (typeof d.directive === "object" && d.directive !== null) ciFixupEntered(p, d);
         for (const r of p.roles) delete p.runs[r];
+        p.remediation = undefined;
       } else if (d.stage === "implement") {
         // Journaled by the spawn itself, after its agent_spawned: keep that run.
         const i = ctx.stages.findIndex((g) => g.includes("implement"));
@@ -323,6 +400,19 @@ export function reducePipeline(
         p.rebasing = false;
         p.branch_update = undefined;
       }
+      break;
+    case "merge_queued":
+      p.queued_at = ev.at;
+      break;
+    case "merge_dequeued":
+      p.queued_at = undefined;
+      break;
+    case "merge_started":
+      p.merge_inflight = true;
+      break;
+    case "merged_by_supervisor":
+    case "merge_ended":
+      p.merge_inflight = undefined;
       break;
     case "merge_nudge_sent":
       if (typeof d.agent_id === "string" && typeof d.merged_pr === "number")
@@ -338,6 +428,7 @@ export function reducePipeline(
     }
     case "artifact_verified": {
       if (p.ci_hold?.role === role) p.ci_hold = undefined;
+      if (p.remediation?.role === role) p.remediation = undefined;
       if (role === "merged") {
         // Where the release branch moved to; never the PR head (a squash or rebase merge is not it).
         const sha = [d.merge_sha, d.sha].find((x) => typeof x === "string");
@@ -346,7 +437,12 @@ export function reducePipeline(
       }
       if (role === "gate" && typeof d.head_sha === "string") {
         p.gated = p.gated ?? [];
-        if (p.gated.at(-1) !== d.head_sha) p.gated.push(d.head_sha);
+        if (p.gated.at(-1) !== d.head_sha) {
+          p.gated.push(d.head_sha);
+          // A new gated head: GitHub's refusals of the old one say nothing about it.
+          p.merge_refusals = 0;
+          p.merge_retries = 0;
+        }
       }
       if (role === "fixup") p.directive = undefined;
       if (!isRole(role)) break;
@@ -373,7 +469,21 @@ export function reducePipeline(
         if (run !== undefined) run.adopt = false;
         if (from !== undefined && typeof d.head_sha === "string") {
           const touched = Array.isArray(d.touched) ? (d.touched as string[]) : [];
-          p.moves.push({ from, to: d.head_sha, touched });
+          // A pr_head_moved answered `accept`: the owner took a merge of the release branch.
+          const mv = d.move as { how?: string; parent?: string; touched?: string[] } | undefined;
+          const accepted = mv?.how === "release_merge" && typeof d.accepted_by === "string";
+          p.moves.push({
+            from,
+            to: d.head_sha,
+            touched: accepted ? (mv.touched ?? []) : touched,
+            ...(accepted
+              ? {
+                  accepted_by: d.accepted_by as string,
+                  how: "release_merge" as const,
+                  ...(typeof mv.parent === "string" ? { parent: mv.parent } : {}),
+                }
+              : {}),
+          });
         }
       } else if (isReviewerRole(role) && d.review !== undefined) {
         const result = d.review as ReviewResult;
@@ -423,12 +533,18 @@ export function reducePipeline(
       if (isRole(role) && p.runs[role]?.agent_id === d.from_agent) delete p.runs[role];
       break;
     case "pr_head_moved":
-      if (typeof d.from === "string" && typeof d.to === "string")
+      if (typeof d.from === "string" && typeof d.to === "string") {
         p.moved = { from: d.from, to: d.to, during: d.during as TaskStage };
+        // The flake was on the old head: the new one is verified on its own.
+        if (p.remediation?.head === d.from) p.remediation = undefined;
+      }
       if (p.pr === undefined && typeof d.pr === "string" && typeof d.pr_number === "number")
         p.pr = { number: d.pr_number, url: d.pr };
       break;
     case "ci_pending":
+      // CI is running (or held) again for the role: its head is not a parked flake any more, and
+      // the hold's re-polls must not be skipped for a fixer.
+      if (p.remediation?.role === role) p.remediation = undefined;
       if ((isRole(role) || role === "moved") && typeof d.sha === "string")
         p.ci_hold = {
           role,
@@ -436,6 +552,24 @@ export function reducePipeline(
           checks: d.checks as CiHold["checks"],
           next_poll_at: String(d.next_poll_at),
           ...(d.pr !== undefined ? { pr: d.pr as NonNullable<CiHold["pr"]> } : {}),
+          ...(d.reason === "infra_incident"
+            ? {
+                reason: "infra_incident" as const,
+                ...(typeof d.incident === "string" ? { incident: d.incident } : {}),
+                ...(typeof d.since === "string" ? { since: d.since } : {}),
+              }
+            : {}),
+        };
+      break;
+    case "remediation_requested":
+      if (d.kind === "fix_flake" && isRole(role) && typeof d.head === "string")
+        p.remediation = {
+          kind: "fix_flake",
+          test: String(d.test),
+          test_file: typeof d.test_file === "string" ? d.test_file : null,
+          head: d.head,
+          role,
+          since: ev.at,
         };
       break;
     case "ci_green":
@@ -443,7 +577,11 @@ export function reducePipeline(
     case "task_cancelled":
       // Settled, or someone is asked about it: the hold is over.
       p.ci_hold = undefined;
-      if (ev.type === "task_cancelled") p.moved = undefined;
+      if (ev.type === "task_cancelled") {
+        p.moved = undefined;
+        p.remediation = undefined;
+        p.merge_inflight = undefined;
+      }
       if (
         ev.type === "decision_opened" &&
         p.moved !== undefined &&
@@ -456,6 +594,12 @@ export function reducePipeline(
       break;
     case "alarm_raised": {
       if (typeof d.alarm === "string") p.alarms = { ...p.alarms, [d.alarm]: d };
+      // Only a refusal of the current gated head counts: a late one for an older head says nothing.
+      if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1))
+        p.merge_refusals = (p.merge_refusals ?? 0) + 1;
+      // volleyd's merge ended without merging (refused, or `gh` could not run).
+      if (d.alarm === "merge_refused" || (d.alarm === "pipeline_error" && d.check === "merge"))
+        p.merge_inflight = undefined;
       // The PR is no longer at the verified head: that role's acceptance no longer holds.
       const run = d.alarm === "pr_head_moved" && isRole(role) ? p.runs[role] : undefined;
       if (run !== undefined) {
@@ -467,6 +611,10 @@ export function reducePipeline(
     case "decision_resolved": {
       const m = (ctx.decision as { pipeline?: PipelineMarker } | undefined)?.pipeline;
       const answer = String(d.answer ?? "");
+      if (m?.on === "merge_refused" && isAnswer(answer, "retry"))
+        p.merge_retries = (p.merge_retries ?? 0) + 1;
+      if ((m?.on === "merge_refused" || m?.on === "merge_conflict") && isAnswer(answer, "manual"))
+        p.merge_manual = true;
       if (m?.on === "reviewers_disagree")
         p.disagreement = {
           round: p.round,
@@ -503,12 +651,46 @@ export function reducePipeline(
             p.ci_superseded = dir.superseded;
           }
           p.moved = undefined;
-        } else if (isAnswer(answer, "cancel")) p.moved = undefined;
+        } else if (
+          isAnswer(answer, "cancel") ||
+          (isAnswer(answer, "accept") && (ctx.decision?.options ?? []).includes("accept"))
+        )
+          // accept: the head moves with the artifact_verified onResolved journals next.
+          p.moved = undefined;
       }
       break;
     }
   }
   return p;
+}
+
+/**
+ * A CI fixup's `stage_entered` (`directive`, `red`: the role whose head CI failed and where its
+ * run started): the red head becomes the task's head, and a fixup or rebase head is chained like
+ * an accepted one, so the reviews the red head descends from still hold (mergeReadyCheck).
+ */
+function ciFixupEntered(p: TaskPipeline, d: Record<string, unknown>): void {
+  const dir = d.directive as Directive;
+  const red = d.red as { role?: unknown; from?: unknown; touched?: unknown } | undefined;
+  const from = typeof red?.from === "string" ? red.from : undefined;
+  if (from !== undefined && red?.role === "fixup") {
+    const result = p.runs.fixup?.result;
+    p.fixups.push({
+      round: p.round,
+      from,
+      to: dir.to,
+      ...(result !== undefined ? { result } : {}),
+      ...(p.runs.fixup?.worktree !== undefined ? { worktree: p.runs.fixup.worktree } : {}),
+    });
+  } else if (from !== undefined && red?.role === "rebase") {
+    const touched = Array.isArray(red.touched) ? (red.touched as string[]) : [];
+    p.rebases.push({ from, to: dir.to, touched });
+  }
+  p.directive = dir;
+  p.head = dir.to;
+  const pr = d.pr as { number?: unknown; url?: unknown } | undefined;
+  if (p.pr === undefined && typeof pr?.number === "number" && typeof pr.url === "string")
+    p.pr = { number: pr.number, url: pr.url };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -525,7 +707,32 @@ export interface PipelineView {
   branch_update?: BranchUpdate;
   /** How review results treat public hygiene (absent: p1): reviews.ts parseReviewResult. */
   hygiene?: HygieneLevel;
+  /** The wave's effective merge mode for this task (absent: manual, a human merges). */
+  merge?: "auto" | "manual";
+  /** The gate's MergeToken for the current head (process-local: kept on the driver). */
+  merge_token?: MergeToken;
+  /** `autopilot.merge_retry_max`: refusals before the owner is asked (absent: the default). */
+  merge_retry_max?: number;
+  /** `autopilot.incident_wait_max_s`: how long an infra incident is waited out (absent: the default). */
+  incident_wait_max_s?: number;
+  /**
+   * The task holds its release branch's merge turn (the merge queue, driver-local): `check` while
+   * it is checked against (or brought up to date with) the release branch, `go` once it is gated
+   * up to date with a MergeToken. Only `go` merges.
+   */
+  merge_turn?: "check" | "go";
 }
+
+/** A blocked agent's status, while its red PR head is classified (onBlocked). */
+export interface BlockedStatus {
+  reason: string;
+  payload: unknown;
+  /** The status envelope's `wall_time`. */
+  status_at?: string;
+}
+
+/** A verification report that found the PR (`ok`). */
+export type OkReport = Extract<ArtifactReport, { kind: "ok" }>;
 
 export type PipelineEvent =
   /** Re-evaluate: a step's roles may all be accepted, a spawn may need retrying. */
@@ -596,13 +803,46 @@ export type PipelineEvent =
   /** A pipeline git / gh check failed (`timed_out`: the hard timeout fired). */
   | {
       kind: "io_failed";
-      what: "verify" | "check_rebase" | "check_merged" | "watch_head" | "check_landed" | "moved_ci";
+      what:
+        | "verify"
+        | "check_rebase"
+        | "check_merged"
+        | "watch_head"
+        | "check_landed"
+        | "moved_ci"
+        | "merge"
+        | "classify";
       role?: Role;
       agent_id?: string;
       message: string;
       timed_out: boolean;
     }
-  | { kind: "decision_resolved"; decision: DecisionRecord };
+  | { kind: "decision_resolved"; decision: DecisionRecord }
+  /**
+   * A red head classified (ci-classify.ts): `report` is the red head's (null: a blocked agent's PR
+   * head is not red, or has no PR, and `result` is null too); `blocked`, for a blocked agent's.
+   */
+  | {
+      kind: "ci_classified";
+      role: Role;
+      agent_id: string;
+      report: OkReport | null;
+      result: ClassifyResult | null;
+      at: number;
+      blocked?: BlockedStatus;
+    }
+  /**
+   * Autopilot merging: GitHub merged `head` (the token's) as `sha` (null: not read back); `by`:
+   * the owner who asked for it (`volleyd merge`), absent for the merge queue's own merge.
+   */
+  | { kind: "supervisor_merged"; sha: string | null; head: string; by?: string }
+  /** Autopilot merging: `gh pr merge` exited non-zero for `head` (moved, checks, protection). */
+  | { kind: "merge_refused"; stderr: string; head: string }
+  /**
+   * Self-healing CI (SPEC §4.6.16): the fixer of the flake `test` merged and released the task
+   * (`remediation_closed`): it takes the fix from the release branch and is verified again.
+   */
+  | { kind: "fix_landed"; test: string };
 
 /** CI on a merged head that is not the gated one; `unknown` when it could not be read. */
 export type MergedCi = CiState | "unknown";
@@ -632,6 +872,18 @@ export type PipelineAction =
       branch_update?: "merge";
     }
   | { kind: "verify"; role: Role; result?: FixupResult }
+  /**
+   * Classify a red head before anyone is asked: the PR's files, the release branch's CI, GitHub's
+   * status page (`report`: the red verification; `blocked`: a blocked agent's, whose PR head the
+   * driver reads itself).
+   */
+  | {
+      kind: "classify_ci";
+      role: Role;
+      agent_id: string;
+      report?: OkReport;
+      blocked?: BlockedStatus;
+    }
   /** Journal an alarm once per driver (`key`): repeats of the same condition stay quiet. */
   | { kind: "alarm"; key: string; event: NewEvent }
   | { kind: "steer"; role: Role; agent_id: string; reason: SteerReason; text: string }
@@ -646,8 +898,10 @@ export type PipelineAction =
   /** Replace `agent_id` (a spawn decision's run): retire it, journal `relaunched`. */
   | { kind: "relaunch"; role: Role; agent_id: string }
   | { kind: "check_rebase" }
-  /** At the gate: has a human merged the PR? (volleyd only ever reads this.) */
+  /** At the gate: has the PR merged (by a human, or GitHub after a refused autopilot merge)? */
   | { kind: "check_merged" }
+  /** Autopilot merging: merge the gated PR at exactly the token's head (src/autopilot/merge.ts). */
+  | { kind: "merge"; token: MergeToken }
   /** The PR closed unmerged: look for its head on the release branch (read-only git). */
   | { kind: "check_landed" }
   /** At a review gate: read the PR's head (rate-limited to ci_poll_ms). */
@@ -682,7 +936,12 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
     case "verified":
       return onVerified(v, ev);
     case "rebase_checked":
-      if (v.stage === "cancelled" || v.stage === "merge_ready" || ev.head !== v.p.head) return [];
+      // Merged meanwhile (`volleyd merge` during the merge turn's check): nothing to update.
+      if (v.stage === "cancelled" || v.stage === "done" || ev.head !== v.p.head) return [];
+      // Gated already: only the task holding the merge turn is checked again, so it merges up to
+      // date with the release branch (re-gated, which re-mints a token a restart lost), or is
+      // brought up to date first (a release branch that moved is rebased onto).
+      if (v.stage === "merge_ready" && v.merge_turn === undefined) return [];
       return ev.check.behind === 0 ? guardedGate(v, ev) : enterRebase(v);
     case "head_moved":
       return onHeadMoved(v, ev);
@@ -700,6 +959,15 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
       return onIoFailed(v, ev);
     case "decision_resolved":
       return onResolved(v, ev.decision);
+    case "ci_classified":
+      return onClassified(v, ev);
+    case "supervisor_merged":
+      return onSupervisorMerged(v, ev);
+    case "merge_refused":
+      return onMergeRefused(v, ev);
+    case "fix_landed":
+      // Its parked flake is this test's: the next advance takes the fix (landedFix).
+      return v.p.remediation?.test === ev.test ? advance(v) : [];
   }
 }
 
@@ -713,9 +981,10 @@ export type MergeReadyCheck =
  * a verdict that holds for the current head — a review of the head itself, or of a head the
  * current one descends from only through fixups that worked from that review's round or later
  * (they ran after it), rebases, and heads pushed outside the pipeline that the owner accepted
- * without a re-review (a `pr_head_moved` answered `fixup`: `moves[].accepted_by`, kept in the
- * evidence; SPEC §4.6.8). Any other outside push (`moves`) was reviewed by nobody. A pipeline
- * without review stages passes, as `skippedByPlan`: the wave file said so.
+ * without a re-review (a `pr_head_moved` answered `fixup`, or `accept` for a merge of the release
+ * branch only: `moves[].accepted_by`, kept in the evidence; SPEC §4.6.8). Any other outside
+ * push (`moves`) was reviewed by nobody. A pipeline without review stages passes, as
+ * `skippedByPlan`: the wave file said so.
  */
 export function mergeReadyCheck(stages: PipelineStage[][], p: TaskPipeline): MergeReadyCheck {
   const planned = REVIEWER_ROLES.filter((r) =>
@@ -744,7 +1013,8 @@ function reviewHolds(p: TaskPipeline, rv: StoredReview): boolean {
     head =
       fixup?.from ??
       p.rebases.find((r) => r.to === to)?.from ??
-      // A head moved outside the pipeline that the owner sent straight to a fixup.
+      // A head moved outside the pipeline that the owner sent straight to a fixup, or accepted as
+      // a merge of the release branch only (SPEC §4.6.8: a merge of it keeps the reviews).
       p.moves.find((m) => m.to === to && m.accepted_by !== undefined)?.from;
   }
   return false;
@@ -853,10 +1123,13 @@ function onMergeChecked(
 ): PipelineAction[] {
   const { view } = ev;
   const { pr, head } = v.p;
-  if (v.stage !== "merge_ready" || pr === undefined) return [];
+  if (v.stage === "done" || v.stage === "cancelled" || pr === undefined) return [];
+  // A human merged the PR, in whatever stage the task is (its open decisions were closed first).
   if (view.state === "MERGED" && view.baseRefName === v.release_branch) {
     const merged = typeof view.headRefOid === "string" ? view.headRefOid : undefined;
-    const unverified = merged !== undefined && merged !== head;
+    // Not through the gate: merged at another head, or before the task reached merge_ready.
+    const other = merged !== undefined && merged !== head;
+    const unverified = other || v.stage !== "merge_ready";
     return [
       ...(unverified
         ? [
@@ -865,7 +1138,12 @@ function onMergeChecked(
               event: {
                 type: "alarm_raised" as const,
                 task: v.task,
-                data: { alarm: "merged_unverified_head", pr: pr.url, gated: head, merged },
+                data: {
+                  alarm: "merged_unverified_head",
+                  pr: pr.url,
+                  gated: head ?? null,
+                  merged,
+                },
               },
             },
           ]
@@ -873,16 +1151,137 @@ function onMergeChecked(
       ...mergedActions(
         v,
         { merge_sha: view.mergeCommit?.oid ?? null, merged_at: view.mergedAt ?? null },
-        unverified ? { sha: merged, ci: ev.merged_ci ?? "unknown" } : undefined,
+        other ? { sha: merged, ci: ev.merged_ci ?? "unknown" } : undefined,
       ),
     ];
   }
+  if (v.stage !== "merge_ready") return [];
   // Closed unmerged on GitHub — but a local squash + push closes it that way too.
   if (view.state === "CLOSED") return [{ kind: "check_landed" }];
   // Still open, at another head than the gate saw (e.g. the release branch merged into it).
   if (typeof view.headRefOid === "string" && head !== undefined && view.headRefOid !== head)
     return headMovedAtGate(v, view.headRefOid);
-  return [];
+  // Open at the gated head, and GitHub refused every autopilot merge allowed: the owner decides.
+  return mergeExhausted(v) ? mergeRefusedDecision(v) : [];
+}
+
+// --- Autopilot merging (SPEC §4.6.17) ---
+
+/** volleyd merges this task itself: `merge: auto` and the owner did not take it back. */
+const autoMergeOn = (v: PipelineView): boolean =>
+  v.merge === "auto" && v.p.merge_manual !== true && v.p.head !== undefined;
+
+/** Refusals allowed at this gated head before the owner is asked (retries add one each). */
+const mergeAttempts = (v: PipelineView): number =>
+  (v.merge_retry_max ?? CONFIG_DEFAULTS.autopilot.merge_retry_max) + (v.p.merge_retries ?? 0);
+
+const mergeExhausted = (v: PipelineView): boolean =>
+  autoMergeOn(v) && (v.p.merge_refusals ?? 0) >= mergeAttempts(v);
+
+/** At merge_ready under `merge: auto` with no MergeToken for the head: the gate re-mints it. */
+function remintWanted(v: PipelineView): boolean {
+  const t = v.merge_token;
+  return (
+    autoMergeOn(v) &&
+    !mergeExhausted(v) &&
+    (t === undefined || t.head !== v.p.head || t.pr !== v.p.pr?.number)
+  );
+}
+
+/**
+ * The merge verb at the gate: only for the task the merge queue gave the turn, once its turn's
+ * rebase check found it up to date and the gate (re-)minted its token.
+ */
+function autoMerge(v: PipelineView): PipelineAction[] {
+  if (v.merge_turn !== "go" || !autoMergeOn(v) || mergeExhausted(v) || remintWanted(v)) return [];
+  return [{ kind: "merge", token: v.merge_token as MergeToken }];
+}
+
+/** GitHub merged the gated head for volleyd: journaled as merged_by_supervisor, then merged. */
+function onSupervisorMerged(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "supervisor_merged" }>,
+): PipelineAction[] {
+  const { pr, head } = v.p;
+  if (v.stage === "done" || v.stage === "cancelled" || pr === undefined || ev.head !== head)
+    return [];
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "merged_by_supervisor",
+        task: v.task,
+        data: {
+          task: v.task,
+          pr: pr.number,
+          head,
+          merge_sha: ev.sha,
+          by: "volleyd",
+          ...(ev.by !== undefined ? { requested_by: ev.by } : {}),
+        },
+      },
+    },
+    ...mergedActions(v, { via: "supervisor", merge_sha: ev.sha }),
+  ];
+}
+
+/**
+ * GitHub refused the merge (`gh` exit ≠ 0): alarmed, and the PR read at once as today (someone
+ * else may have merged it, or its head moved); that read asks the owner once the refusals reach
+ * `autopilot.merge_retry_max` (onMergeChecked). Never forced.
+ */
+function onMergeRefused(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "merge_refused" }>,
+): PipelineAction[] {
+  const pr = v.p.pr;
+  if (v.stage === "done" || v.stage === "cancelled" || pr === undefined) return [];
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "alarm_raised",
+        task: v.task,
+        data: {
+          alarm: "merge_refused",
+          pr: pr.url,
+          head: ev.head,
+          stderr: ev.stderr,
+          attempt: (v.p.merge_refusals ?? 0) + 1,
+        },
+      },
+    },
+    { kind: "check_merged" },
+  ];
+}
+
+function mergeRefusedDecision(v: PipelineView): PipelineAction[] {
+  const pr = v.p.pr;
+  const head = v.p.head;
+  if (pr === undefined || head === undefined) return [];
+  const last = String(v.p.alarms?.merge_refused?.stderr ?? "").slice(
+    0,
+    DAEMON_DEFAULTS.decision_output_chars,
+  );
+  const why = `GitHub refused to merge PR #${pr.number} at ${head.slice(0, 12)} ${v.p.merge_refusals ?? 0} time(s)${last !== "" ? ` (last: ${last})` : ""}`;
+  return [
+    // Escalated: the task leaves the gate (a decision cannot park a gated task) until answered.
+    {
+      kind: "journal",
+      event: { type: "stage_entered", task: v.task, data: { stage: "blocked", why } },
+    },
+    {
+      kind: "decide",
+      marker: { on: "merge_refused", head },
+      decision: {
+        kind: "merge_refused",
+        task: v.task,
+        question: `${why}. retry: try the merge once more; manual: a human merges this PR (volleyd waits at the gate); or cancel the task?`,
+        pointers: { pr: pr.url },
+        options: ["retry", "manual", "cancel"],
+      },
+    },
+  ];
 }
 
 /** Stages in which the PR head is watched for pushes outside the pipeline (merge_ready aside). */
@@ -979,6 +1378,9 @@ function onMovedCi(
   // A red head only reaches the gate through a fixup: rereview needs a fixup stage after it.
   const hasFixup = v.stages.some((g) => g.includes("fixup"));
   const review = ci.state === "red" && !hasFixup ? null : reviewStep(v.stages);
+  const merge = ev.facts.release_merge;
+  // A green merge of the release branch only keeps the reviews: the owner may take it as it is.
+  const acceptable = ci.state === "green" && merge?.only_release === true;
   const directive: Directive = {
     from: m.from,
     to: m.to,
@@ -989,7 +1391,11 @@ function onMovedCi(
     diffstat: ev.facts.diffstat,
     runs: ci.runs,
     ...(ci.superseded.length > 0 ? { superseded: ci.superseded } : {}),
+    ...(merge !== undefined ? { release_merge: merge } : {}),
   };
+  const accept = acceptable
+    ? `accept: the move is a merge of ${v.release_branch} only (files: ${merge.moved_files.join(", ") || "none"}; they may carry content resolved by hand, which no reviewer saw), so the reviews of ${at(m.from)} hold; the gate again at ${at(m.to)}; `
+    : "";
   return [
     {
       kind: "decide",
@@ -997,9 +1403,14 @@ function onMovedCi(
       decision: {
         kind: "pr_head_moved",
         task: v.task,
-        question: `PR #${ev.pr.number}'s head moved from ${at(m.from)} to ${at(m.to)} outside the pipeline (during ${m.during}); CI on ${at(m.to)} is ${ci.state}${failure}. The reviews saw ${at(m.from)}. ${review !== null ? "rereview: the reviewers again on the new head, then the fixup and the gate; " : ""}fixup: a fixup agent on ${at(m.to)} with the CI result and the ${at(m.from)}..${at(m.to)} diff as its directive, then the gate; or cancel?`,
+        question: `PR #${ev.pr.number}'s head moved from ${at(m.from)} to ${at(m.to)} outside the pipeline (during ${m.during}); CI on ${at(m.to)} is ${ci.state}${failure}. The reviews saw ${at(m.from)}. ${review !== null ? "rereview: the reviewers again on the new head, then the fixup and the gate; " : ""}fixup: a fixup agent on ${at(m.to)} with the CI result and the ${at(m.from)}..${at(m.to)} diff as its directive, then the gate; ${accept}or cancel?`,
         pointers: { pr: ev.pr.url },
-        options: [...(review !== null ? ["rereview"] : []), "fixup", "cancel"],
+        options: [
+          ...(review !== null ? ["rereview"] : []),
+          "fixup",
+          ...(acceptable ? ["accept"] : []),
+          "cancel",
+        ],
       },
       data: {
         from: m.from,
@@ -1069,6 +1480,8 @@ function mergedActions(
         },
       },
     },
+    // Merged mid-pipeline: whoever is still at work on it stops.
+    ...Object.values(v.p.runs).flatMap(retireIfLive),
     {
       kind: "journal",
       event: { type: "stage_entered", task: v.task, data: { stage: "done", merged: true } },
@@ -1148,6 +1561,16 @@ function onIoFailed(
     // Not verified yet. The agent's claim stands; a later tick re-checks it.
     out.push(...retireIfLive(run));
   }
+  // volleyd's merge ended without an outcome (a timeout, or `gh` could not run): not in flight.
+  if (ev.what === "merge" && v.p.merge_inflight === true)
+    out.push({
+      kind: "journal",
+      event: {
+        type: "merge_ended",
+        task: v.task,
+        data: { task: v.task, why: ev.timed_out ? "timed_out" : "failed" },
+      },
+    });
   // A timeout is the network's problem and resolves itself; anything else is worth one alarm.
   if (!ev.timed_out) {
     out.push({
@@ -1187,6 +1610,11 @@ function onDone(
   ) {
     return [{ kind: "retire", agent_id: ev.agent_id }];
   }
+  if (ev.status === "failed" && mergeConflict(v, ev.role))
+    return [
+      { kind: "retire", agent_id: ev.agent_id },
+      mergeConflictDecision(v, ev.agent_id, ev.why ?? "failed"),
+    ];
   if (ev.status === "failed") {
     return [
       { kind: "retire", agent_id: ev.agent_id },
@@ -1330,24 +1758,26 @@ function onVerified(
         ...retireIfLive(run),
         {
           kind: "decide",
-          marker: { on: "verify", role: ev.role },
+          marker: { on: "verify", role: ev.role, agent_id: run.agent_id },
           decision: {
             kind: "agent_blocked",
             task: v.task,
-            question: `${roleLabel(v.p, ev.role)} ${run.agent_id} reported done, but its ${out.missing} is missing (${out.detail}). Fix it by hand and answer re-verify, or cancel the task.`,
-            options: ["re-verify", "cancel"],
+            question: `${roleLabel(v.p, ev.role)} ${run.agent_id} reported done, but its ${out.missing} is missing (${out.detail}). respawn: a fresh ${roleLabel(v.p, ev.role)} continues the work (an implementer, its pushed branch and PR); re-verify: you fixed it by hand; or cancel the task?`,
+            options: ["respawn", "re-verify", "cancel"],
           },
         },
       ];
     }
     case "ci_failed":
+      // Classified before anyone is asked (onClassified): own change, flake or infra incident.
+      // artifactOutcome yields ci_failed only for an ok report (a missing artifact is `missing`).
       return [
         ...retireIfLive(run),
         {
-          kind: "decide",
-          marker: { on: "ci_failed", role: ev.role, ...(head !== undefined ? { head } : {}) },
-          decision: out.decision,
-          data: out.data,
+          kind: "classify_ci" as const,
+          role: ev.role,
+          agent_id: run.agent_id,
+          report: ev.report as OkReport,
         },
       ];
     case "ci_pending": {
@@ -1434,6 +1864,7 @@ function holdFor(
   if (
     hold?.role === role &&
     hold.sha === head &&
+    hold.reason === undefined &&
     hold.checks.done === checks.done &&
     hold.checks.total === checks.total
   )
@@ -1453,6 +1884,220 @@ function holdFor(
             : {}),
           pr,
         },
+      },
+    },
+  ];
+}
+
+/** The answer that takes a flake's dedicated fixer: never a re-run. */
+export const FIX_FLAKE = "fix flake";
+
+/** volleyd's answer to a red head's open decision once its flake's fixer merged (SPEC §4.6.16). */
+export const FIX_LANDED = "fix landed";
+
+/**
+ * A red head classified (SPEC §4.6.16). `own_change`: the ci_failed decision (fixup first). `flake`:
+ * `remediation_requested { kind: fix_flake }`, then ci_failed offering `fix flake` first.
+ * `infra_incident`: a CI hold (`ci_pending { reason: infra_incident }`) re-checked every
+ * ci_poll_ms, until `autopilot.incident_wait_max_s` has passed: then ci_failed. A blocked agent's
+ * red PR head is routed the same way (`agent_blocked_ci`).
+ */
+function onClassified(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "ci_classified" }>,
+): PipelineAction[] {
+  const run = v.p.runs[ev.role];
+  if (run === undefined || run.agent_id !== ev.agent_id || run.accepted) return [];
+  if (v.stage === "cancelled" || v.stage === "done") return [];
+  if (ev.blocked !== undefined) {
+    // It ended meanwhile: its status is handled as usual.
+    if (run.retired !== undefined) return [];
+    return ev.report === null || ev.result === null
+      ? blockedDecision(v, ev.role, ev.agent_id, ev.blocked)
+      : blockedCi(v, ev.role, ev.agent_id, ev.blocked, ev.report, ev.result);
+  }
+  // Someone is asked about the task already: a later re-check classifies the head again.
+  if (v.stage === "awaiting_decision" || ev.report === null || ev.result === null) return [];
+  const out = artifactOutcome(v.task, ev.role, ev.report);
+  if (out.kind !== "ci_failed") return [];
+  const r = ev.result;
+  const head = ev.report.head;
+  const marker: PipelineMarker = { on: "ci_failed", role: ev.role, agent_id: ev.agent_id, head };
+  const data = { ...out.data, classification: r.classification, evidence: r.evidence };
+  switch (r.classification) {
+    case "own_change":
+      return [{ kind: "decide", marker, decision: out.decision, data }];
+    case "flake":
+      return [
+        ...flakeRequest(v, ev.role, head, r, out.data),
+        {
+          kind: "decide",
+          marker,
+          decision: {
+            ...out.decision,
+            question: flakeQuestion(v, ev.report, r, out.data),
+            options: [FIX_FLAKE, "fixup", "re-verify", "cancel"],
+          },
+          data,
+        },
+      ];
+    case "infra_incident":
+      return infraHold(v, ev, ev.report, r, out, marker, data);
+  }
+}
+
+/** Run URLs on a ci_failed decision's facts. */
+const runUrls = (data: Record<string, unknown>): string[] =>
+  Array.isArray(data.run_urls) ? (data.run_urls as string[]) : [];
+
+/** Journal `remediation_requested { kind: fix_flake }` for a flake (once per head and test). */
+function flakeRequest(
+  v: PipelineView,
+  role: Role,
+  head: string,
+  r: ClassifyResult,
+  data: Record<string, unknown>,
+): PipelineAction[] {
+  const f = r.flake;
+  if (f === undefined) return [];
+  const had = v.p.remediation;
+  if (had?.head === head && had.test === f.test) return [];
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "remediation_requested",
+        task: v.task,
+        data: {
+          kind: "fix_flake",
+          test: f.test,
+          test_file: f.test_file,
+          tests: f.tests,
+          head,
+          run_urls: runUrls(data),
+          for: v.task,
+          role,
+          release_ci: r.evidence.release_ci.state,
+        },
+      },
+    },
+  ];
+}
+
+function flakeQuestion(
+  v: PipelineView,
+  report: OkReport,
+  r: ClassifyResult,
+  data: Record<string, unknown>,
+): string {
+  const at = report.head.slice(0, 12);
+  const test = r.flake?.test ?? "a test";
+  const file = r.flake?.test_file ?? "its file";
+  const release =
+    r.evidence.release_ci.state === "red" ? `; ${v.release_branch} is red on it too` : "";
+  return `CI failed on ${at} (PR #${report.pr.number}): ${runUrls(data).join(" ")} — ${test} fails, and the PR does not touch ${file}${release}: a flake. volleyd never re-runs CI. fix flake: a dedicated fixer for the test (requested); fixup: a fixup agent at ${at} with the CI result as its directive; re-verify: you fixed it; or cancel?`;
+}
+
+/** An infra incident: hold the task in CI and re-check; past the wait budget, ask. */
+function infraHold(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "ci_classified" }>,
+  report: OkReport,
+  r: ClassifyResult,
+  out: Extract<ArtifactOutcome, { kind: "ci_failed" }>,
+  marker: PipelineMarker,
+  data: Record<string, unknown>,
+): PipelineAction[] {
+  const head = report.head;
+  const hold = v.p.ci_hold;
+  const same = hold?.reason === "infra_incident" && hold.role === ev.role && hold.sha === head;
+  const since = same && hold.since !== undefined ? hold.since : new Date(ev.at).toISOString();
+  const maxS = v.incident_wait_max_s ?? CONFIG_DEFAULTS.autopilot.incident_wait_max_s;
+  const waited = ev.at - Date.parse(since);
+  const incident = r.incident ?? "infra-shaped failure";
+  if (waited >= maxS * 1000) {
+    const at = head.slice(0, 12);
+    return [
+      {
+        kind: "decide",
+        marker,
+        decision: {
+          ...out.decision,
+          question: `CI on ${at} (PR #${report.pr.number}) has been red with an infra incident (${incident}) for ${Math.round(waited / 60_000)} min: ${runUrls(out.data).join(" ")}. volleyd never re-runs CI. fixup: a fixup agent at ${at} with the CI result as its directive; re-verify: it cleared, or you re-ran it; or cancel?`,
+          options: ["fixup", "re-verify", "cancel"],
+        },
+        data: { ...data, incident, incident_since: since },
+      },
+    ];
+  }
+  if (same && hold.incident === incident) return [];
+  const runs = report.ci.runs;
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "ci_pending",
+        task: v.task,
+        data: {
+          role: ev.role,
+          sha: head,
+          checks: {
+            done: runs.filter((x) => x.status === "completed").length,
+            total: runs.length,
+          },
+          next_poll_at: new Date(ev.at + DAEMON_DEFAULTS.ci_poll_ms).toISOString(),
+          pr: { number: report.pr.number, url: report.pr.url },
+          reason: "infra_incident",
+          incident,
+          since,
+        },
+      },
+    },
+  ];
+}
+
+/** A blocked agent whose PR head is red: its decision, routed like a ci_failed (`agent_blocked_ci`). */
+function blockedCi(
+  v: PipelineView,
+  role: Role,
+  agentId: string,
+  b: BlockedStatus,
+  report: OkReport,
+  r: ClassifyResult,
+): PipelineAction[] {
+  const out = artifactOutcome(v.task, role, report);
+  if (out.kind !== "ci_failed") return blockedDecision(v, role, agentId, b);
+  const label = roleLabel(v.p, role);
+  const at = report.head.slice(0, 12);
+  const flake = r.classification === "flake";
+  const what =
+    r.classification === "own_change"
+      ? "the PR's own change (fixup: a fixup agent at the red head, this agent stopped)"
+      : flake
+        ? `a flake in ${r.flake?.test ?? "a test"} the PR does not touch (fix flake: a dedicated fixer, requested)`
+        : `an infra incident (${r.incident ?? "infra-shaped failure"}): wait for it to clear`;
+  const options = flake
+    ? [FIX_FLAKE, "fixup", "continue", "respawn", "cancel"]
+    : r.classification === "own_change"
+      ? ["fixup", "continue", "respawn", "cancel"]
+      : ["continue", "respawn", "cancel"];
+  return [
+    ...(flake ? flakeRequest(v, role, report.head, r, out.data) : []),
+    {
+      kind: "decide",
+      marker: { on: "agent_blocked_ci", role, head: report.head, agent_id: agentId },
+      decision: {
+        kind: "agent_blocked",
+        task: v.task,
+        question: `${agentId} (${label}) is blocked: ${clipReason(b.reason)}. CI on its PR head ${at} (PR #${report.pr.number}) is red: ${runUrls(out.data).join(" ")} — ${what}. volleyd never re-runs CI. continue: you steered it and it goes on; respawn the ${label}; or cancel the task?`,
+        pointers: { pr: report.pr.url },
+        options,
+      },
+      data: {
+        ...out.data,
+        classification: r.classification,
+        evidence: r.evidence,
+        ...blockedFacts(agentId, b),
       },
     },
   ];
@@ -1510,29 +2155,91 @@ function onBlocked(
   const run = v.p.runs[ev.role];
   if (run === undefined || run.agent_id !== ev.agent_id || run.accepted || v.stage === "cancelled")
     return [];
-  const label = roleLabel(v.p, ev.role);
-  const max = DAEMON_DEFAULTS.blocked_reason_max_chars;
-  // By code point, so a clip never splits a surrogate pair.
-  const chars = Array.from(ev.reason);
-  const reason = chars.length > max ? `${chars.slice(0, max).join("")}…` : ev.reason;
+  const blocked: BlockedStatus = {
+    reason: ev.reason,
+    payload: ev.payload,
+    ...(ev.at !== undefined ? { status_at: ev.at } : {}),
+  };
+  if (mergeConflict(v, ev.role))
+    return [
+      {
+        ...mergeConflictDecision(v, ev.agent_id, `is blocked: ${clipReason(ev.reason)}`),
+        data: blockedFacts(ev.agent_id, blocked),
+      },
+    ];
+  // About a failing test, with a PR branch to look at: is its head red, and whose is it?
+  if (CI_REASON.test(ev.reason) && v.p.branch !== undefined)
+    return [{ kind: "classify_ci", role: ev.role, agent_id: ev.agent_id, blocked }];
+  return blockedDecision(v, ev.role, ev.agent_id, blocked);
+}
+
+/** A blocked agent's reason that is about a failing test or CI (its PR head is classified first). */
+const CI_REASON = /\b(tests?|specs?)\b|\.(test|spec)\.[cm]?[jt]sx?\b|\bCI\b|\bflak(e|y)\b/i;
+
+/** The plain `agent_blocked` decision: continue, respawn or cancel. */
+function blockedDecision(
+  v: PipelineView,
+  role: Role,
+  agentId: string,
+  b: BlockedStatus,
+): PipelineAction[] {
+  const label = roleLabel(v.p, role);
   return [
     {
       kind: "decide",
-      marker: { on: "agent_blocked", role: ev.role },
+      marker: { on: "agent_blocked", role },
       decision: {
         kind: "agent_blocked",
         task: v.task,
-        question: `${ev.agent_id} (${label}) is blocked: ${reason}. continue: you steered it and it goes on; respawn the ${label}; or cancel the task?`,
+        question: `${agentId} (${label}) is blocked: ${clipReason(b.reason)}. continue: you steered it and it goes on; respawn the ${label}; or cancel the task?`,
         options: ["continue", "respawn", "cancel"],
       },
-      data: {
-        agent_id: ev.agent_id,
-        reason: ev.reason,
-        payload: ev.payload,
-        ...(ev.at !== undefined ? { status_at: ev.at } : {}),
-      },
+      data: blockedFacts(agentId, b),
     },
   ];
+}
+
+/** A blocked agent's reason clipped for a question, by code point (never splits a surrogate pair). */
+function clipReason(reason: string): string {
+  const max = DAEMON_DEFAULTS.blocked_reason_max_chars;
+  const chars = Array.from(reason);
+  return chars.length > max ? `${chars.slice(0, max).join("")}…` : reason;
+}
+
+/** What a blocked agent's decision keeps (`status_at`: a re-delivered status is not re-asked). */
+const blockedFacts = (agentId: string, b: BlockedStatus): Record<string, unknown> => ({
+  agent_id: agentId,
+  reason: b.reason,
+  payload: b.payload,
+  ...(b.status_at !== undefined ? { status_at: b.status_at } : {}),
+});
+
+/**
+ * Under autopilot merging, a rebase (or merge) agent that cannot bring a queued task's branch up
+ * to date — it publishes `blocked`, or fails — is a merge conflict (SPEC §4.6.17). A rebase
+ * before the gate (the task was never queued) is an ordinary blocked agent.
+ */
+const mergeConflict = (v: PipelineView, role: Role): boolean =>
+  role === "rebase" && v.p.rebasing && v.merge === "auto" && v.p.queued_at !== undefined;
+
+function mergeConflictDecision(
+  v: PipelineView,
+  agentId: string,
+  what: string,
+): Extract<PipelineAction, { kind: "decide" }> {
+  const label = roleLabel(v.p, "rebase");
+  return {
+    kind: "decide",
+    marker: { on: "merge_conflict", role: "rebase" },
+    decision: {
+      kind: "merge_conflict",
+      task: v.task,
+      question: `${agentId} (${label}) ${what}: the branch could not be brought up to date with ${v.release_branch}. respawn: a fresh ${label} agent; manual: a person resolves and merges this PR (it leaves the merge queue and waits at the gate); or cancel the task?`,
+      ...(v.p.pr !== undefined ? { pointers: { pr: v.p.pr.url } } : {}),
+      options: ["respawn", "manual", "cancel"],
+    },
+    data: { agent_id: agentId },
+  };
 }
 
 /** A role as the owner reads it: the rebase role of a merge-mode step is the merge it runs. */
@@ -1549,9 +2256,15 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
   // Merged meanwhile (`volleyd merged`, GitHub): no answer brings a done task back.
   if (v.stage === "done") return [];
   if (m.on === "relaunch") return onRelaunchResolved(v, d, m, answer);
-  if (isAnswer(answer, "cancel")) {
+  // A stall's answers other than respawn are the daemon's: it stops the task on `stop task` and
+  // types anything else (a free-text `cancel` too) to the agent, which stays live.
+  if (isAnswer(answer, "cancel") && m.on !== "liveness") {
     // A blocked agent is still live (SPEC §5.2): it is stopped with the task.
-    const blocked = m.on === "agent_blocked" && m.role !== undefined ? v.p.runs[m.role] : undefined;
+    const blocked =
+      (m.on === "agent_blocked" || m.on === "agent_blocked_ci" || m.on === "merge_conflict") &&
+      m.role !== undefined
+        ? v.p.runs[m.role]
+        : undefined;
     const agent = (d as { agent_id?: unknown }).agent_id;
     return [
       ...(blocked !== undefined && blocked.agent_id === agent && blocked.retired === undefined
@@ -1587,7 +2300,23 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
   ];
   switch (m.on) {
     case "verify":
+      if (role !== undefined && isRespawnAnswer(answer, d.options))
+        return respawnRun(v, role, m.agent_id ?? run?.agent_id);
+      // Anything but cancel re-verifies: the non-destructive default.
+      return role !== undefined ? [{ kind: "verify", role }] : [];
+    case "liveness":
+      // A stalled agent: respawn replaces it; any other answer is the daemon's (it steers it).
+      if (role === undefined || !isRespawnAnswer(answer, d.options)) return [];
+      // Ended meanwhile (its status is handled as usual): nothing to replace.
+      if (run !== undefined && run.agent_id === m.agent_id && run.retired !== undefined) return [];
+      return respawnRun(v, role, m.agent_id);
     case "ci_failed":
+      if (role !== undefined && isAnswer(answer, "fixup") && (d.options ?? []).includes("fixup"))
+        return ciFixup(v, d, m);
+      // The flake's fixer was requested (remediation_requested): the task waits for it.
+      if (isAnswer(answer, FIX_FLAKE) && (d.options ?? []).includes(FIX_FLAKE)) return [];
+      // volleyd's answer once the fixer merged: the fix_landed step updates the branch.
+      if (isAnswer(answer, FIX_LANDED)) return [];
       // Anything but cancel re-verifies: the non-destructive default.
       return role !== undefined ? [{ kind: "verify", role }] : [];
     case "ci_none":
@@ -1641,22 +2370,30 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       return isAnswer(answer, "skip") ? [{ kind: "verify", role }] : reask();
     case "agent_failed":
       return isRespawnAnswer(answer, d.options) ? [] : reask();
-    case "agent_blocked": {
-      // continue: the owner steered it by hand; its next status is handled as usual.
-      if (isAnswer(answer, "continue")) return [];
+    case "agent_blocked_ci": {
+      // Routed like a ci_failed: a CI fixup at the red head, or the flake's fixer (the task parks
+      // for it); either way the blocked agent is stopped. continue / respawn as for any blocked agent.
+      const offered = d.options ?? [];
       const agent = (d as { agent_id?: unknown }).agent_id;
-      if (role === undefined || typeof agent !== "string") return [];
-      if (isAnswer(answer, "respawn")) {
-        // It went on and was accepted before the answer (steered by hand): keep that work.
-        if (run !== undefined && run.agent_id === agent)
-          return run.accepted || run.retired !== undefined
-            ? []
-            : [{ kind: "relaunch", role, agent_id: agent }];
-        // A newer run of the role already replaced it: only make sure the old agent is gone.
-        return [{ kind: "retire", agent_id: agent, status: "relaunched" }];
+      const live = run !== undefined && run.agent_id === agent && run.retired === undefined;
+      // `fix landed` (volleyd, once the flake's fixer merged): stopped, then the branch update.
+      if (
+        (isAnswer(answer, FIX_FLAKE) && offered.includes(FIX_FLAKE)) ||
+        isAnswer(answer, FIX_LANDED)
+      )
+        return live ? [{ kind: "retire" as const, agent_id: run.agent_id, status: "stopped" }] : [];
+      if (role !== undefined && isAnswer(answer, "fixup") && offered.includes("fixup")) {
+        const fix = ciFixup(v, d, m);
+        if (fix.length === 0) return [];
+        return [
+          ...(live ? [{ kind: "retire" as const, agent_id: run.agent_id, status: "stopped" }] : []),
+          ...fix,
+        ];
       }
-      return reask();
+      return blockedAnswer(v, d, role, run, answer, reask);
     }
+    case "agent_blocked":
+      return blockedAnswer(v, d, role, run, answer, reask);
     case "pr_head_moved": {
       // The reducer moved the task's head to the new one and kept the directive.
       const live = REVIEWER_ROLES.flatMap((r) => {
@@ -1667,6 +2404,8 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
         const i = v.stages.findIndex((g) => g.includes("fixup"));
         return [...live, ...enterStep(v, i >= 0 ? i : Math.max(v.p.step, 0), ["fixup"])];
       }
+      if (isAnswer(answer, "accept") && (d.options ?? []).includes("accept"))
+        return acceptReleaseMerge(v, d, m);
       const review = reviewStep(v.stages);
       // Offered only when the decision listed it (a red head needs a fixup stage after it).
       if (isAnswer(answer, "rereview") && review !== null && (d.options ?? []).includes("rereview"))
@@ -1706,6 +2445,35 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
     case "spawn_failed":
       // spawn_failed: the daemon's resolveNow acts on it (retry now / stop task).
       return [];
+    case "merge_refused":
+      // Back to the gate; retry: one more attempt at the task's next merge turn (the reducer
+      // granted it), manual: a human merges it (the reducer took it out of autopilot merging).
+      if (!isAnswer(answer, "retry") && !isAnswer(answer, "manual")) return reask();
+      return [
+        {
+          kind: "journal",
+          event: { type: "stage_entered", task: v.task, data: { stage: "merge_ready" } },
+        },
+      ];
+    case "merge_conflict": {
+      const agent = (d as { agent_id?: unknown }).agent_id;
+      const live = run !== undefined && run.agent_id === agent && !run.accepted;
+      // respawn: a fresh rebase (or merge) agent at the next attempt.
+      if (isRespawnAnswer(answer, d.options))
+        return live ? [{ kind: "relaunch", role: "rebase", agent_id: run.agent_id }] : [];
+      if (!isAnswer(answer, "manual")) return reask();
+      // manual: a person merges the PR; the task waits at the gate (the reducer took it out of
+      // the merge queue) and its update stops.
+      return [
+        ...(live && run.retired === undefined
+          ? [{ kind: "retire" as const, agent_id: run.agent_id, status: "stopped" }]
+          : []),
+        {
+          kind: "journal",
+          event: { type: "stage_entered", task: v.task, data: { stage: "merge_ready" } },
+        },
+      ];
+    }
     case "merge_ready_invariant": {
       if (!isAnswer(answer, "rereview")) return reask();
       const c = mergeReadyCheck(v.stages, v.p);
@@ -1718,6 +2486,152 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
       return i >= 0 ? enterStep(v, i, roles) : [];
     }
   }
+}
+
+/** A blocked agent's decision answered: continue (steered by hand), respawn, else asked again. */
+function blockedAnswer(
+  v: PipelineView,
+  d: DecisionRecord,
+  role: Role | undefined,
+  run: RoleRun | undefined,
+  answer: string,
+  reask: () => PipelineAction[],
+): PipelineAction[] {
+  // continue: the owner steered it by hand; its next status is handled as usual.
+  if (isAnswer(answer, "continue")) return [];
+  const agent = (d as { agent_id?: unknown }).agent_id;
+  if (role === undefined || typeof agent !== "string") return [];
+  if (isAnswer(answer, "respawn")) {
+    // Ended meanwhile (its status is handled as usual): nothing to replace.
+    if (run !== undefined && run.agent_id === agent && run.retired !== undefined) return [];
+    return respawnRun(v, role, agent);
+  }
+  return reask();
+}
+
+/**
+ * Replace `agent`'s run of `role` (its session is stopped first: the relaunch's retire): the next
+ * advance spawns the role at the next attempt. Work accepted before the answer (it went on, or was
+ * steered by hand) is kept; a newer run already in its place only needs the old agent gone.
+ */
+function respawnRun(v: PipelineView, role: Role, agent: string | undefined): PipelineAction[] {
+  const run = v.p.runs[role];
+  if (agent === undefined) return [];
+  if (run !== undefined && run.agent_id === agent)
+    return run.accepted ? [] : [{ kind: "relaunch", role, agent_id: agent }];
+  return [{ kind: "retire", agent_id: agent, status: "relaunched" }];
+}
+
+/**
+ * A ci_failed answered `fixup`: a fixup at the red head, with the CI result as its only job
+ * (`Directive`, `only`). The step is the current one, so the stage groups go on from where the red
+ * head's role was: CI red on the implementer's first head reaches the reviews after the fixup;
+ * on a fixup's or rebase's head, the gate (their reviews hold: ciFixupEntered).
+ */
+function ciFixup(v: PipelineView, d: DecisionRecord, m: PipelineMarker): PipelineAction[] {
+  const x = d as unknown as Record<string, unknown>;
+  const role = m.role;
+  const head = m.head;
+  const run = role !== undefined ? v.p.runs[role] : undefined;
+  // Verified meanwhile (a re-run turned it green), or the role relaunched (a new run): the red
+  // head is no longer the task's.
+  if (role === undefined || head === undefined || run?.accepted === true) return [];
+  if (m.agent_id !== undefined && run?.agent_id !== m.agent_id) return [];
+  const strings = (k: string): string[] =>
+    Array.isArray(x[k])
+      ? (x[k] as unknown[]).filter((s): s is string => typeof s === "string")
+      : [];
+  const directive: Directive = {
+    to: head,
+    ci: "red",
+    failed_jobs: strings("failed_jobs"),
+    failing_tests: strings("failing_tests"),
+    log: typeof x.log === "string" ? x.log : "",
+    // No move to summarise: the red head is the role's own (renderCiDirectiveMd omits it).
+    diffstat: "",
+    runs: Array.isArray(x.ci_runs) ? (x.ci_runs as CiRun[]) : [],
+    only: true,
+  };
+  const start = role !== "implementer" ? v.p.runs[role]?.start : undefined;
+  const touched = Array.isArray(x.touched) ? (x.touched as string[]) : undefined;
+  const red = {
+    role,
+    ...(start !== undefined ? { from: start } : {}),
+    ...(touched !== undefined ? { touched } : {}),
+  };
+  const pr = x.pr as { number: number; url: string } | undefined;
+  const after: PipelineView = {
+    ...v,
+    p: { ...v.p, head, directive, ...(v.p.pr === undefined && pr !== undefined ? { pr } : {}) },
+  };
+  return enterStep(after, Math.max(v.p.step, 0), ["fixup"], {
+    directive,
+    red,
+    ...(pr !== undefined ? { pr } : {}),
+  });
+}
+
+/**
+ * A pr_head_moved answered `accept` (offered only for a green merge of the release branch only):
+ * the role whose head the gate saw is verified again at the moved head, with the move and who
+ * accepted it; the reviews of `from` hold at `to` (mergeReadyCheck), so the next advance goes on
+ * to the rebase check and the gate at `to`.
+ */
+function acceptReleaseMerge(
+  v: PipelineView,
+  d: DecisionRecord,
+  m: PipelineMarker,
+): PipelineAction[] {
+  const dir = (d as { directive?: Directive }).directive;
+  const merge = dir?.release_merge;
+  const from = m.from ?? dir?.from;
+  const to = m.head ?? dir?.to;
+  const role = headRole(v.p) ?? lastPublisher(v.p);
+  const run = role !== undefined ? v.p.runs[role] : undefined;
+  // Without who accepted, the reducer would record a move that voids the reviews at the gate.
+  const by = d.resolved?.by;
+  if (
+    merge === undefined ||
+    from === undefined ||
+    to === undefined ||
+    run === undefined ||
+    by === undefined
+  )
+    return [];
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "artifact_verified",
+        task: v.task,
+        data: {
+          role,
+          agent_id: run.agent_id,
+          head_sha: to,
+          branch: v.p.branch,
+          ...(v.p.pr !== undefined ? { pr: { ...v.p.pr, head_sha: to, ci: "green" } } : {}),
+          ci_runs: dir?.runs ?? [],
+          ...(dir?.superseded !== undefined ? { ci_superseded: dir.superseded } : {}),
+          adopted: true,
+          accepted_by: by,
+          move: {
+            from,
+            to,
+            how: "release_merge",
+            parent: merge.parent,
+            touched: merge.moved_files,
+          },
+        },
+      },
+    },
+  ];
+}
+
+/** The publishing role whose run started last (a moved head with no verified role to carry it). */
+function lastPublisher(p: TaskPipeline): Role | undefined {
+  return [...PUBLISHING_ROLES]
+    .filter((r) => p.runs[r] !== undefined)
+    .sort((a, b) => (p.runs[b]?.spawned_seq ?? 0) - (p.runs[a]?.spawned_seq ?? 0))[0];
 }
 
 /** Facts kept on a decision beside its payload (decisions.ts decisionPayload drops them). */
@@ -1874,9 +2788,13 @@ function advance(v: PipelineView): PipelineAction[] {
   // The PR head moved after a gate: nothing moves on until its CI and the owner's answer.
   if (p.moved !== undefined && v.stage !== "cancelled" && v.stage !== "done")
     return movedAdvance(v);
-  // volleyd never merges; a gated task becomes done once a human has merged its PR.
-  if (v.stage === "merge_ready" && p.pr !== undefined) return [{ kind: "check_merged" }];
+  // A gated task becomes done once its PR merged: by volleyd under `merge: auto` (at its merge
+  // turn), else a human.
+  if (v.stage === "merge_ready" && p.pr !== undefined)
+    return [...autoMerge(v), { kind: "check_merged" }];
   if (IDLE.has(v.stage) || p.step < 0) return [];
+  // The flake's fixer merged: update the branch from the release branch first.
+  if (p.remediation?.landed === true) return landedFix(v, p.remediation);
   // While reviews run at the verified head, a push to the PR outside the pipeline is watched for.
   const watch: PipelineAction[] =
     WATCHED.has(v.stage) && !p.rebasing && p.pr !== undefined && p.head !== undefined
@@ -1887,8 +2805,14 @@ function advance(v: PipelineView): PipelineAction[] {
     const run = p.runs[r];
     // A spawn that has not happened yet (budget, admission, a refused launch): retry it.
     if (run === undefined) pending.push(spawnFor(v, r));
-    // Retired without being accepted: its CI was pending. Re-check (the driver rate-limits).
-    else if (!run.accepted && run.retired === "done" && PUBLISHING_ROLES.has(r))
+    // Retired without being accepted: its CI was pending. Re-check (the driver rate-limits);
+    // a red head awaiting its flake's fixer is the fixer's, not a re-check's.
+    else if (
+      !run.accepted &&
+      run.retired === "done" &&
+      PUBLISHING_ROLES.has(r) &&
+      p.remediation?.role !== r
+    )
       pending.push({ kind: "verify", role: r });
   }
   if (pending.length > 0 || p.roles.some((r) => p.runs[r]?.accepted !== true))
@@ -1900,9 +2824,27 @@ function advance(v: PipelineView): PipelineAction[] {
       );
       if (i >= 0) return enterStep(v, i, p.rereview);
     }
-    return toGate(v);
+    // A flake's fix taken mid-pipeline: on from the step it stopped (its reviews still to run).
+    return p.fix_resume === "next" ? enter(v, p.step + 1) : toGate(v);
   }
   return enter(v, p.step + 1);
+}
+
+/**
+ * The flake's fix landed on the release branch (SPEC §4.6.16): the branch-update step, started
+ * at the red head the flake parked (never verified, so not `p.head`), takes it under the wave's
+ * `branch_update`; its head is then verified (CI) like any rebase.
+ */
+function landedFix(v: PipelineView, r: Remediation): PipelineAction[] {
+  const [entered, spawn] = enterRebase({ ...v, p: { ...v.p, head: r.head } });
+  if (entered?.kind !== "journal" || spawn === undefined) return [];
+  return [
+    {
+      ...entered,
+      event: { ...entered.event, data: { ...entered.event.data, fix_landed: r.test } },
+    },
+    spawn,
+  ];
 }
 
 /** Enter stage group `i` (skipping what has nothing to do); the end of the pipeline is the gate. */
@@ -1932,7 +2874,12 @@ function enter(v: PipelineView, i: number): PipelineAction[] {
   return enterStep(v, i, roles);
 }
 
-function enterStep(v: PipelineView, i: number, roles: Role[]): PipelineAction[] {
+function enterStep(
+  v: PipelineView,
+  i: number,
+  roles: Role[],
+  extra: Record<string, unknown> = {},
+): PipelineAction[] {
   const reviewing = roles.some(isReviewerRole);
   const stage = ROLE_STAGE[roles[0] as Role];
   // spawnFor reads the round the step starts (fixup: the round it fixes).
@@ -1949,6 +2896,7 @@ function enterStep(v: PipelineView, i: number, roles: Role[]): PipelineAction[] 
           roles,
           ...(roles.length > 1 ? { group: roles.map((r) => ROLE_STAGE[r]) } : {}),
           ...(reviewing ? { review_round: after.p.round } : {}),
+          ...extra,
         },
       },
     },
@@ -1986,23 +2934,19 @@ function enterRebase(v: PipelineView): PipelineAction[] {
  */
 function renderDirectiveMd(d: Directive): string {
   const short = (x: string) => x.slice(0, 12);
+  if (d.ci === "red" && d.from === undefined) return renderCiDirectiveMd(d);
+  const from = d.from ?? "";
   const lines = [
     "# Directive: the PR head moved",
     "",
-    `The PR head moved from \`${short(d.from)}\` to \`${short(d.to)}\` outside the pipeline, after a gate (\`${short(d.from)}..${short(d.to)}\`). This worktree starts at the new head. This directive is your first job.`,
+    `The PR head moved from \`${short(from)}\` to \`${short(d.to)}\` outside the pipeline, after a gate (\`${short(from)}..${short(d.to)}\`). This worktree starts at the new head. This directive is your first job.`,
     "",
     `## CI on ${short(d.to)}: ${d.ci}`,
     "",
   ];
   if (d.ci === "red") {
-    lines.push("Failed jobs:", "", ...d.failed_jobs.map((j) => `- ${j}`), "");
+    lines.push(...failureMd(d));
     lines.push(
-      "Failing tests:",
-      "",
-      ...(d.failing_tests.length > 0
-        ? d.failing_tests.map((t) => `- \`${t}\``)
-        : ["- (none found in the logs: read the failed jobs)"]),
-      "",
       'Make CI green on this head without undoing what the new commits intend. Publish your result with `{ "finding": "CI", "how": "…" }` among `resolved`.',
       "",
     );
@@ -2013,7 +2957,7 @@ function renderDirectiveMd(d: Directive): string {
     );
   }
   lines.push(
-    `## What changed ${short(d.from)}..${short(d.to)}`,
+    `## What changed ${short(from)}..${short(d.to)}`,
     "",
     "```",
     d.log || "(no log)",
@@ -2024,6 +2968,49 @@ function renderDirectiveMd(d: Directive): string {
     "",
   );
   return lines.join("\n");
+}
+
+/** A red directive's failed jobs and failing tests. */
+function failureMd(d: Directive): string[] {
+  return [
+    "Failed jobs:",
+    "",
+    ...(d.failed_jobs.length > 0
+      ? d.failed_jobs.map((j) => `- ${j}`)
+      : ["- (no job details: open the runs)"]),
+    "",
+    "Failing tests:",
+    "",
+    ...(d.failing_tests.length > 0
+      ? d.failing_tests.map((t) => `- \`${t}\``)
+      : ["- (none found in the logs: read the failed jobs)"]),
+    "",
+  ];
+}
+
+/** The directive section for CI red on the pipeline's own head (a ci_failed answered `fixup`). */
+function renderCiDirectiveMd(d: Directive): string {
+  const at = d.to.slice(0, 12);
+  return [
+    "# Directive: CI failed on your head",
+    "",
+    `CI failed on \`${at}\`, the PR head the pipeline pushed. This worktree starts at that head. Making CI green on it is your only job: the reviews' findings were handled before (or are reviewed after you).`,
+    "",
+    `## CI on ${at}: red`,
+    "",
+    ...failedRuns(d.runs).map((r) => `- ${r.name}: ${r.conclusion ?? r.status} (${r.url})`),
+    ...(failedRuns(d.runs).length > 0 ? [""] : []),
+    ...failureMd(d),
+    "## The failed runs' log (its tail)",
+    "",
+    "```",
+    d.log || "(no log: read the runs with `gh run view <id> --log-failed`)",
+    "```",
+    "",
+    'Fix the cause without undoing what the PR intends, run the repository\'s gates, push to the PR branch, and publish your result with `{ "finding": "CI", "how": "…" }` among `resolved`.',
+    "",
+    "",
+  ].join("\n");
 }
 
 interface BriefCtx {
@@ -2067,6 +3054,8 @@ function renderRebaseMd(c: BriefCtx): string {
     "",
     `That lease-guarded push to \`${c.pr_branch}\` is the one force-push this role may do. PR: ${c.pr_url}.`,
     "",
+    "A conflict you cannot resolve without changing what the PR does: push nothing, and publish `blocked` with the conflicting files in `reason` (the owner decides).",
+    "",
   ].join("\n");
 }
 
@@ -2086,6 +3075,8 @@ function renderMergeMd(c: BriefCtx): string {
     `    git push origin HEAD:${c.pr_branch}`,
     "",
     `That push moves \`${c.pr_branch}\` forward: its new head must descend from \`${c.head}\`. Never rewrite the branch's history. PR: ${c.pr_url}.`,
+    "",
+    "A conflict you cannot resolve without changing what the PR does: push nothing, and publish `blocked` with the conflicting files in `reason` (the owner decides).",
     "",
   ].join("\n");
 }
@@ -2119,6 +3110,11 @@ export interface PipelineDeps {
   ) => Promise<unknown>;
   /** Open a decision; `extra` facts (the `pipeline` marker) are kept on it. */
   decide: (input: DecisionInput, extra: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * Resolve every open decision of `task` with `answer` (by volleyd), on the queue: a PR merged
+   * on GitHub closes them before the task leaves for `done` (a parked task stays parked else).
+   */
+  resolveOpen: (task: TaskId, answer: string, rationale: string) => Promise<unknown>;
   /** Retire an agent (`status`: a DAEMON_ENDED one when it never ended itself; default done). */
   retire: (agentId: string, status?: string) => Promise<unknown>;
   /** The agent id and attempt the next spawn of `role` on `task` takes. */
@@ -2134,8 +3130,47 @@ export interface PipelineDeps {
   branchUpdate?: () => BranchUpdate;
   /** The wave's hygiene level (default: p1). */
   hygiene?: () => HygieneLevel;
+  /** The wave's effective `merge` mode (wave file, else `autopilot.merge`); default manual. */
+  mergeMode?: () => "auto" | "manual";
+  /** The wave's `autopilot.merge_retry_max` (default: the config default). */
+  mergeRetryMax?: () => number;
+  /** The wave's `autopilot.incident_wait_max_s` (default: the config default). */
+  incidentWaitMaxS?: () => number;
+  /** GitHub's status page, cached (github-status.ts); absent: not read (unknown, never an incident). */
+  statusPage?: () => Promise<GithubStatus>;
+  /** The wave's `autopilot.delete_branch` (default: false). */
+  deleteBranch?: () => boolean;
+  /**
+   * The merge turn of a release branch (`<repo>#<release_branch>`), shared by every wave on this
+   * daemon: `acquire` succeeds when the branch is free or already held by `key`
+   * (`<wave>/<task>`). Default: a lock of this driver's own.
+   */
+  releaseLock?: ReleaseLock;
   now?: () => number;
   log?: (line: string) => void;
+}
+
+export interface ReleaseLock {
+  acquire(branch: string, key: string): boolean;
+  release(branch: string, key: string): void;
+  /** Who holds the branch now (`<wave>/<task>`), if anyone. */
+  holder?(branch: string): string | undefined;
+}
+
+/** A release lock over one map (the daemon's, or a driver's own). */
+export function releaseLockOn(held: Map<string, string>): ReleaseLock {
+  return {
+    acquire: (branch, key) => {
+      const k = held.get(branch);
+      if (k !== undefined && k !== key) return false;
+      held.set(branch, key);
+      return true;
+    },
+    release: (branch, key) => {
+      if (held.get(branch) === key) held.delete(branch);
+    },
+    holder: (branch) => held.get(branch),
+  };
 }
 
 /** A pipeline git / gh call that hit its hard timeout: "not verified yet", never an alarm. */
@@ -2178,11 +3213,37 @@ export class PipelineDriver {
   private readonly chains = new Set<Promise<void>>();
   /** Merged `<task>#<pr>` whose nudges this process has sent (or found none left to send). */
   private readonly nudgesDone = new Set<string>();
+  /**
+   * The MergeToken each gated task's gate minted (process-local: a restart re-runs the gate's
+   * checks to mint it again). Only `gate()` adds one.
+   */
+  private readonly mergeTokens = new Map<TaskId, MergeToken>();
+  /** The head a MergeToken could not be minted for, per task: that head is a human's to merge. */
+  private readonly mintFailed = new Map<TaskId, string>();
+  /**
+   * The merge queue's turn in this wave (SPEC §4.6.17): the task holding its release branch's
+   * lock, the refusals it had when it took the turn, and whether its rebase check found it up to
+   * date (then the gate re-minted its token and it may merge), and its turn checks that failed
+   * in a row.
+   */
+  private turn:
+    | { task: TaskId; branch: string; refusals: number; fresh: boolean; failures: number }
+    | undefined;
+  /**
+   * Tasks that gave up the turn after `merge_turn_check_failures_max` failed turn checks: passed
+   * over (with the tasks after them) while another queued task can take the turn.
+   */
+  private readonly passedOver = new Set<TaskId>();
+  private readonly lock: ReleaseLock;
+  /** Tasks whose `gh pr merge` this driver runs (from `merge_started` until its outcome is in). */
+  private readonly merging = new Set<TaskId>();
 
   constructor(
     private readonly wave: WaveId,
     private readonly deps: PipelineDeps,
-  ) {}
+  ) {
+    this.lock = deps.releaseLock ?? releaseLockOn(new Map());
+  }
 
   private now(): number {
     // real clock: the default when the daemon injects no clock
@@ -2205,6 +3266,7 @@ export class PipelineDriver {
     const t = rec.state?.tasks.find((x) => x.id === task);
     const wt = rec.wave?.tasks[task];
     if (rec.state == null || t === undefined || wt === undefined) return null;
+    const token = this.mergeTokens.get(task);
     return {
       task,
       stages: wt.stages,
@@ -2213,7 +3275,21 @@ export class PipelineDriver {
       p: rec.pipeline[task] ?? emptyPipeline(),
       ...(this.deps.branchUpdate !== undefined ? { branch_update: this.deps.branchUpdate() } : {}),
       ...(this.deps.hygiene !== undefined ? { hygiene: this.deps.hygiene() } : {}),
+      merge: this.mintFailed.get(task) === rec.pipeline[task]?.head ? "manual" : this.mergeMode(),
+      ...(token !== undefined ? { merge_token: token } : {}),
+      ...(this.deps.mergeRetryMax !== undefined
+        ? { merge_retry_max: this.deps.mergeRetryMax() }
+        : {}),
+      ...(this.deps.incidentWaitMaxS !== undefined
+        ? { incident_wait_max_s: this.deps.incidentWaitMaxS() }
+        : {}),
+      ...(this.turn?.task === task ? { merge_turn: this.turn.fresh ? "go" : "check" } : {}),
     };
+  }
+
+  /** The merge mode the pipeline acts on: the wave file's `merge:`, else `autopilot.merge`. */
+  private mergeMode(): "auto" | "manual" {
+    return this.deps.mergeMode?.() ?? "manual";
   }
 
   /** Handle one observation, then advance until the task settles. */
@@ -2246,10 +3322,218 @@ export class PipelineDriver {
       }
       try {
         await this.handle(t.id, { kind: "advance" });
+        // A human may merge the PR in any stage (merge_ready's advance asks for this too).
+        const w = this.view(t.id);
+        if (w !== null && w.p.pr !== undefined && w.stage !== "done" && w.stage !== "cancelled")
+          await this.run(t.id, [{ kind: "check_merged" }], false);
       } catch (e) {
         await this.alarmError(t.id, "tick", e);
       }
     }
+    await this.mergeNext().catch((e: unknown) =>
+      this.deps.log?.(`pipeline ${this.wave} merge queue: ${String(e)}`),
+    );
+  }
+
+  // --- The merge queue (SPEC §4.6.17) ---
+
+  /** The release branch's lock name: `<repo>#<release_branch>`. */
+  private branchKey(): string | null {
+    const s = this.deps.record().state;
+    return s == null ? null : `${s.repo}#${s.release_branch}`;
+  }
+
+  /**
+   * One step of the merge queue, from the tick: tasks that are gated under `merge: auto` enter
+   * the queue, tasks that merged, were cancelled or went to a human leave it; then the turn
+   * holder keeps the release branch until it merged (or was refused, or waits for an answer),
+   * and the next task takes the turn: an event-driven rebase check, so it is brought up to date
+   * with the release branch first if it is behind, then merged once it gates again.
+   */
+  async mergeNext(): Promise<void> {
+    const branch = this.branchKey();
+    if (branch === null) return;
+    // A merge journaled as started that no driver here runs (the daemon restarted): it ended.
+    for (const t of this.deps.record().state?.tasks ?? []) {
+      if (this.view(t.id)?.p.merge_inflight !== true || this.merging.has(t.id)) continue;
+      await this.deps.journal({
+        type: "merge_ended",
+        task: t.id,
+        data: { task: t.id, why: "interrupted" },
+      });
+    }
+    for (const t of this.deps.record().state?.tasks ?? []) {
+      const v = this.view(t.id);
+      if (v === null || v.p.queued_at === undefined) continue;
+      const why =
+        t.stage === "done"
+          ? "merged"
+          : t.stage === "cancelled"
+            ? "cancelled"
+            : v.merge !== "auto" || v.p.merge_manual === true
+              ? "manual"
+              : null;
+      if (why !== null)
+        await this.deps.journal({ type: "merge_dequeued", task: t.id, data: { task: t.id, why } });
+    }
+    for (const t of this.deps.record().state?.tasks ?? []) {
+      const v = this.view(t.id);
+      if (v === null || t.stage !== "merge_ready" || v.p.queued_at !== undefined) continue;
+      if (!autoMergeOn(v) || v.p.pr === undefined) continue;
+      // Its place, as the newest entry: "~" sorts after every ISO time (code-unit order).
+      const rec = this.deps.record();
+      const hyp = { ...rec, pipeline: { ...rec.pipeline, [t.id]: { ...v.p, queued_at: "~" } } };
+      const position = queueOf(hyp).findIndex((e) => e.task === t.id) + 1;
+      await this.deps.journal({
+        type: "merge_queued",
+        task: t.id,
+        data: { task: t.id, position },
+      });
+    }
+    const queue = queueOf(this.deps.record());
+    const turn = this.turn;
+    if (turn !== undefined) {
+      const key = `${this.wave}/${turn.task}`;
+      const v = this.view(turn.task);
+      const stuck = turn.failures >= DAEMON_DEFAULTS.merge_turn_check_failures_max;
+      const holds =
+        v !== null &&
+        queue.some((e) => e.task === turn.task) &&
+        (v.p.merge_refusals ?? 0) <= turn.refusals &&
+        v.stage !== "awaiting_decision" &&
+        v.stage !== "blocked" &&
+        turn.branch === branch &&
+        !stuck;
+      // acquire is idempotent for the holder: it only re-asserts the lock.
+      if (holds && this.lock.acquire(branch, key)) {
+        // The turn's rebase check did not come back usable (an error, a head that moved): again.
+        if (v.stage === "merge_ready" && !turn.fresh && !this.merging.has(turn.task))
+          await this.run(turn.task, [{ kind: "check_rebase" }], false);
+        return;
+      }
+      this.lock.release(turn.branch, key);
+      this.turn = undefined;
+      if (stuck) this.passedOver.add(turn.task);
+    }
+    for (const t of this.passedOver)
+      if (!queue.some((e) => e.task === t)) this.passedOver.delete(t);
+    const n =
+      nextToMerge({ [branch]: this.withoutPassedOver(queue) }, new Set()) ??
+      nextToMerge({ [branch]: queue }, new Set());
+    if (n === null || !this.lock.acquire(branch, `${this.wave}/${n.task}`)) return;
+    const refusals = this.view(n.task)?.p.merge_refusals ?? 0;
+    this.passedOver.delete(n.task);
+    this.turn = { task: n.task, branch, refusals, fresh: false, failures: 0 };
+    await this.run(n.task, [{ kind: "check_rebase" }], true);
+  }
+
+  /** The queue without the passed-over tasks and the tasks after them (they never go first). */
+  private withoutPassedOver(queue: QueueEntry[]): QueueEntry[] {
+    if (this.passedOver.size === 0) return queue;
+    const wave = this.deps.record().wave;
+    const skip = new Set(this.passedOver);
+    // Queue order puts a task after the ones it comes after, so one pass is transitive.
+    return queue.filter((e) => {
+      if (wave?.tasks[e.task]?.after.some((d) => skip.has(d))) skip.add(e.task);
+      return !skip.has(e.task);
+    });
+  }
+
+  /**
+   * The owner's `volleyd merge` (SPEC §4.6.17): merge one gated task now through the merge verb,
+   * under `merge: manual` too, holding its release branch for the merge (refused while another
+   * task holds it). The checks and the outcome run on the queue (`deps.enqueue`); the merge
+   * itself beside it. Call it off the queue.
+   */
+  async mergeNow(
+    task: TaskId,
+    by: string,
+  ): Promise<{ ok: true; merge_sha: string | null } | { ok: false; error: string }> {
+    // undefined only when the queue dropped the check (the daemon stopped)
+    const prep = (await this.onQueue(() => this.mergeNowPrep(task))) ?? "volleyd is stopping";
+    if (typeof prep === "string") return { ok: false, error: prep };
+    const { v, token, branch, own } = prep;
+    let ev: PipelineEvent;
+    try {
+      ev = (await this.merge(v, token, by)) as PipelineEvent;
+    } catch (e) {
+      ev = {
+        kind: "io_failed",
+        what: "merge",
+        message: e instanceof Error ? e.message : String(e),
+        timed_out: e instanceof IoTimeout,
+      };
+    }
+    await this.deps.enqueue(async () => {
+      this.merging.delete(task);
+      await this.supersedeOnMerge(task, ev);
+      await this.handle(task, ev);
+      if (!own) this.lock.release(branch, `${this.wave}/${task}`);
+    });
+    if (ev.kind === "supervisor_merged") return { ok: true, merge_sha: ev.sha };
+    return {
+      ok: false,
+      error: `not merged: ${ev.kind === "merge_refused" ? ev.stderr : ev.kind === "io_failed" ? ev.message : ev.kind}`,
+    };
+  }
+
+  /** Run `fn` on the queue and hand back its value (undefined when the queue dropped it). */
+  private async onQueue<T>(fn: () => Promise<T>): Promise<T | undefined> {
+    let out: T | undefined;
+    await this.deps.enqueue(async () => {
+      out = await fn();
+    });
+    return out;
+  }
+
+  /** mergeNow's checks, on the queue: the task, its gate, the release branch and the token. */
+  private async mergeNowPrep(
+    task: TaskId,
+  ): Promise<{ v: PipelineView; token: MergeToken; branch: string; own: boolean } | string> {
+    const v = this.view(task);
+    if (v === null) return `unknown task '${task}'`;
+    const { pr, head } = v.p;
+    if (
+      v.stage !== "merge_ready" ||
+      pr === undefined ||
+      head === undefined ||
+      v.p.gated.at(-1) !== head
+    )
+      return `task '${task}' is not merge_ready`;
+    if (this.merging.has(task)) return `a merge of task '${task}' is already running`;
+    const branch = this.branchKey();
+    if (branch === null) return `unknown task '${task}'`;
+    const own = this.turn?.task === task;
+    if (!this.lock.acquire(branch, `${this.wave}/${task}`))
+      return `${this.lock.holder?.(branch) ?? "another task"} holds ${v.release_branch} (its merge-queue turn: it is brought up to date if it is behind, then merged); try again once it has merged or given up the turn`;
+    const held = this.mergeTokens.get(task);
+    const token =
+      held !== undefined && held.head === head && held.pr === pr.number
+        ? held
+        : this.mintFor(task, pr.number, head, v);
+    if (token === undefined) {
+      if (!own) this.lock.release(branch, `${this.wave}/${task}`);
+      return `no merge token can be minted for head ${head} (volleyd merges only an exact 40-hex head)`;
+    }
+    if (own && this.turn !== undefined) this.turn.fresh = false;
+    this.merging.add(task);
+    await this.deps.journal({
+      type: "merge_started",
+      task,
+      data: { task, pr: token.pr, head: token.head },
+    });
+    return { v, token, branch, own };
+  }
+
+  /**
+   * Give up this wave's merge turn (the wave stopped): the release branch is free again, once
+   * no merge of this wave runs (the daemon calls it again on its next tick).
+   */
+  releaseTurn(): void {
+    if (this.merging.size > 0) return;
+    if (this.turn !== undefined)
+      this.lock.release(this.turn.branch, `${this.wave}/${this.turn.task}`);
+    this.turn = undefined;
   }
 
   /** Resolves once no check is running beside the queue (tests; a graceful stop). */
@@ -2259,6 +3543,7 @@ export class PipelineDriver {
 
   /** Drop a finished task's rate-limit and no-CI bookkeeping (the maps stay bounded). */
   private forget(task: TaskId): void {
+    this.mergeTokens.delete(task);
     for (const m of [this.lastCheck, this.noCiSince])
       for (const k of m.keys()) if (k.startsWith(`${task}/`)) m.delete(k);
   }
@@ -2287,6 +3572,8 @@ export class PipelineDriver {
     key: string,
     fail: Omit<Extract<PipelineEvent, { kind: "io_failed" }>, "kind" | "message" | "timed_out">,
     check: () => Promise<PipelineEvent | null>,
+    /** Run on the queue before the result is handled. */
+    prelude?: (ev: PipelineEvent) => Promise<void>,
   ): void {
     if (this.inflight.has(key)) return;
     this.inflight.add(key);
@@ -2306,6 +3593,7 @@ export class PipelineDriver {
         if (ev === null) return;
         await this.deps.enqueue(async () => {
           try {
+            await prelude?.(ev);
             await this.handle(task, ev);
           } catch (e) {
             await this.alarmError(task, fail.what, e);
@@ -2385,19 +3673,82 @@ export class PipelineDriver {
           );
           break;
         }
+        case "classify_ci": {
+          // Event-driven (a verification or a blocked status just found it): one per task for a
+          // red head, one per blocked agent (never dropped behind another).
+          const key =
+            a.blocked !== undefined ? `${task}/classify/blocked/${a.agent_id}` : `${task}/classify`;
+          this.beside(task, key, { what: "classify", role: a.role, agent_id: a.agent_id }, () =>
+            this.classifyCi(task, a),
+          );
+          break;
+        }
         case "check_rebase": {
           const v = this.view(task);
           const key = `${task}/check_rebase`;
           if (v?.p.head === undefined || this.inflight.has(key)) break;
           if (!eventDriven && !this.due(`${task}/check_rebase/${v.p.head}`)) break;
-          this.beside(task, key, { what: "check_rebase" }, () => this.gateCheck(v));
+          this.beside(
+            task,
+            key,
+            { what: "check_rebase" },
+            () => this.gateCheck(v),
+            async (ev) => {
+              // The merge turn's check: failures in a row pass the turn on (mergeNext).
+              if (this.turn?.task === task)
+                this.turn.failures = ev.kind === "io_failed" ? this.turn.failures + 1 : 0;
+            },
+          );
           break;
         }
         case "check_merged": {
           const v = this.view(task);
           const key = `${task}/check_merged`;
-          if (v?.p.pr === undefined || this.inflight.has(key) || !this.due(key)) break;
-          this.beside(task, key, { what: "check_merged" }, () => this.mergeCheck(v));
+          // While volleyd's own merge runs, its result says what happened (merged or refused).
+          if (v?.p.pr === undefined || this.inflight.has(key) || this.inflight.has(`${task}/merge`))
+            break;
+          // Event-driven (a refused merge): read the PR now; else at most once per ci_poll_ms.
+          if (!eventDriven && !this.due(key)) break;
+          if (eventDriven) this.lastCheck.set(key, this.now());
+          this.beside(
+            task,
+            key,
+            { what: "check_merged" },
+            () => this.mergeCheck(v),
+            (ev) => this.supersedeOnMerge(task, ev),
+          );
+          break;
+        }
+        case "merge": {
+          // Beside the queue like every pipeline call; one attempt per ci_poll_ms (an answered
+          // `retry` is event-driven: at once).
+          const key = `${task}/merge`;
+          if (this.inflight.has(key) || this.inflight.has(`${task}/check_merged`)) break;
+          // The owner's `volleyd merge` of it is running (mergeNow): one `gh pr merge` at a time.
+          if (this.merging.has(task)) break;
+          if (!eventDriven && !this.due(key)) break;
+          if (eventDriven) this.lastCheck.set(key, this.now());
+          const v = this.view(task);
+          if (v === null) break;
+          // One attempt per up-to-date check: another needs the turn's rebase check again.
+          if (this.turn?.task === task) this.turn.fresh = false;
+          this.merging.add(task);
+          await this.deps.journal({
+            type: "merge_started",
+            task,
+            data: { task, pr: a.token.pr, head: a.token.head },
+          });
+          progressed = true;
+          this.beside(
+            task,
+            key,
+            { what: "merge" },
+            () => this.merge(v, a.token),
+            (ev) => {
+              this.merging.delete(task);
+              return this.supersedeOnMerge(task, ev);
+            },
+          );
           break;
         }
         case "watch_head": {
@@ -2525,6 +3876,103 @@ export class PipelineDriver {
   }
 
   /**
+   * Beside the queue: classify a red head (ci-classify.ts) from the PR's changed files, the release
+   * branch's latest CI and GitHub's status page. A blocked agent's PR head is read here first (its
+   * open PR, CI on its head): not red, or no PR, comes back with a null result.
+   */
+  private async classifyCi(
+    task: TaskId,
+    a: Extract<PipelineAction, { kind: "classify_ci" }>,
+  ): Promise<PipelineEvent | null> {
+    const v = this.view(task);
+    if (v === null) return null;
+    const exec = this.io(task);
+    const cwd = v.p.runs[a.role]?.worktree ?? this.headCwd(task);
+    const base = { kind: "ci_classified" as const, role: a.role, agent_id: a.agent_id };
+    const blocked = a.blocked !== undefined ? { blocked: a.blocked } : {};
+    const unclassified = (): PipelineEvent => ({
+      ...base,
+      report: null,
+      result: null,
+      at: this.now(),
+      ...blocked,
+    });
+    // A blocked agent is asked about whatever happens here: no worktree to read from, or a failed
+    // read, is the plain question. A verified red head with no worktree is asked about nothing on
+    // this pass: its run stays retired-done and unaccepted, so advance re-verifies it (a retry).
+    if (cwd === undefined) return a.blocked !== undefined ? unclassified() : null;
+    if (a.blocked !== undefined)
+      return this.classifyRed(exec, cwd, v, base, a.report ?? null, blocked).catch(unclassified);
+    return this.classifyRed(exec, cwd, v, base, a.report ?? null, blocked);
+  }
+
+  private async classifyRed(
+    exec: ExecFn,
+    cwd: string,
+    v: PipelineView,
+    base: { kind: "ci_classified"; role: Role; agent_id: string },
+    given: OkReport | null,
+    blocked: { blocked?: BlockedStatus },
+  ): Promise<PipelineEvent> {
+    const report = given ?? (await this.blockedHead(exec, cwd, v));
+    if (report === null || report.ci.state !== "red")
+      return { ...base, report: null, result: null, at: this.now(), ...blocked };
+    const files = await prFiles(exec, cwd, report.pr.number);
+    const release = await probeReleaseCi(exec, { cwd, release_branch: v.release_branch });
+    const status = (await this.deps.statusPage?.()) ?? STATUS_UNKNOWN;
+    const result = classify({
+      failing_tests: report.ci.failing_tests ?? [],
+      pr_files: files,
+      release,
+      infra: report.ci.infra,
+      status_page: status,
+    });
+    return { ...base, report, result, at: this.now(), ...blocked };
+  }
+
+  /** A blocked agent's PR (the task's open PR from its branch) and CI on its head, read-only. */
+  private async blockedHead(exec: ExecFn, cwd: string, v: PipelineView): Promise<OkReport | null> {
+    const branch = v.p.branch;
+    if (branch === undefined) return null;
+    const r = await exec(
+      [
+        "gh",
+        "pr",
+        "list",
+        "--head",
+        branch,
+        "--state",
+        "open",
+        "--json",
+        "number,url,headRefName,baseRefName,headRefOid",
+      ],
+      { cwd },
+    );
+    let list: { number: number; url: string; headRefName: string; headRefOid: string }[] = [];
+    try {
+      const parsed: unknown = r.code === 0 ? JSON.parse(r.stdout) : [];
+      if (Array.isArray(parsed)) list = parsed;
+    } catch {}
+    const pr = list.find((p) => p.headRefName === branch);
+    if (
+      pr === undefined ||
+      typeof pr.number !== "number" ||
+      typeof pr.url !== "string" ||
+      typeof pr.headRefOid !== "string" ||
+      pr.headRefOid === ""
+    )
+      return null;
+    const ci = await redHeadCi(exec, cwd, pr.headRefOid);
+    return {
+      kind: "ok",
+      head: pr.headRefOid,
+      branch,
+      pr: { number: pr.number, url: pr.url, head_sha: pr.headRefOid, base: v.release_branch },
+      ci,
+    };
+  }
+
+  /**
    * Beside the queue, before the gate: the PR is still at the verified head (`gh pr view`), and
    * the release branch has not moved past it; plus each fixup's diffstat for the evidence.
    */
@@ -2543,6 +3991,11 @@ export class PipelineDriver {
       if (pr === null) throw new Error(`gh pr view ${p.pr.number} failed: ${r.stderr.trim()}`);
       if (typeof pr.headRefOid === "string" && pr.headRefOid !== head)
         return { kind: "head_moved", expected: head, actual: pr.headRefOid };
+      // `gh pr merge` merges into whatever the PR targets now: a retargeted PR never gates.
+      if (pr.baseRefName !== v.release_branch)
+        throw new Error(
+          `PR #${p.pr.number} targets ${String(pr.baseRefName)}, not ${v.release_branch}`,
+        );
     }
     const check = await checkRebase(io, {
       cwd,
@@ -2561,7 +4014,7 @@ export class PipelineDriver {
     return { kind: "rebase_checked", head, check, diffstats };
   }
 
-  /** Beside the queue, at the gate: the PR as GitHub has it now (read-only; volleyd never merges). */
+  /** Beside the queue, at the gate: the PR as GitHub has it now (read-only; only autopilot merging merges, src/autopilot/merge.ts). */
   private async mergeCheck(v: PipelineView): Promise<PipelineEvent | null> {
     const pr = v.p.pr;
     if (pr === undefined) return null;
@@ -2583,6 +4036,29 @@ export class PipelineDriver {
     if (view.state === "MERGED" && typeof merged === "string" && merged !== v.p.head)
       return { kind: "merge_checked", view, merged_ci: await this.ciOf(v.task, cwd, merged) };
     return { kind: "merge_checked", view };
+  }
+
+  /**
+   * On the queue, before a merged PR is handled: close the task's open decisions as
+   * `superseded_by_merge` (the reducer keeps a parked task parked on a stage change).
+   */
+  private async supersedeOnMerge(task: TaskId, ev: PipelineEvent): Promise<void> {
+    const v = this.view(task);
+    if (v === null || v.p.pr === undefined) return;
+    if (v.stage === "done" || v.stage === "cancelled") return;
+    let at: string;
+    if (ev.kind === "supervisor_merged") {
+      if (ev.head !== v.p.head) return;
+      at = ev.sha?.slice(0, 7) ?? "an unknown commit";
+    } else if (ev.kind === "merge_checked") {
+      if (ev.view.state !== "MERGED" || ev.view.baseRefName !== v.release_branch) return;
+      at = ev.view.mergeCommit?.oid?.slice(0, 7) ?? "an unknown commit";
+    } else return;
+    await this.deps.resolveOpen(
+      task,
+      SUPERSEDED_BY_MERGE,
+      `PR #${v.p.pr.number} merged into ${v.release_branch} at ${at}`,
+    );
   }
 
   // --- Merge nudge (SPEC §4.6.15): volleyd never rebases; it tells the implementers. ---
@@ -2752,6 +4228,7 @@ export class PipelineDriver {
       branch,
       from: moved.from,
       to: moved.to,
+      release_branch: v.release_branch,
     });
     const key = `${v.task}/${moved.to}`;
     let waited = 0;
@@ -2814,7 +4291,43 @@ export class PipelineDriver {
     return this.view(task)?.p.head;
   }
 
-  /** Write the evidence package and enter merge_ready. volleyd never merges. */
+  /** The gate's MergeToken; none (a human merges) for a head the fence cannot match exactly. */
+  private mintFor(task: TaskId, pr: number, head: string, v: PipelineView): MergeToken | undefined {
+    try {
+      return mintMergeToken({ wave: this.wave, task, pr, head, release_branch: v.release_branch });
+    } catch (e) {
+      this.deps.log?.(`pipeline ${this.wave}/${task} merge token: ${String(e)}`);
+      this.mintFailed.set(task, head);
+      return undefined;
+    }
+  }
+
+  /**
+   * Autopilot merging: `gh pr merge` the token's PR at exactly its head (src/autopilot/merge.ts),
+   * fenced by the token. Merged → `supervisor_merged`; refused → `merge_refused`.
+   */
+  private async merge(
+    v: PipelineView,
+    token: MergeToken,
+    by?: string,
+  ): Promise<PipelineEvent | null> {
+    const cwd = this.headWorktree(v.p);
+    const r = await mergePr(this.io(v.task), token, cwd, this.deps.deleteBranch?.() ?? false);
+    return r.ok
+      ? {
+          kind: "supervisor_merged",
+          sha: r.merge_sha,
+          head: token.head,
+          ...(by !== undefined ? { by } : {}),
+        }
+      : { kind: "merge_refused", stderr: r.stderr, head: token.head };
+  }
+
+  /**
+   * Write the evidence package and enter merge_ready; under `merge: auto` mint the MergeToken
+   * for exactly this PR and head (the only place one is minted). Re-run at merge_ready (a
+   * restart lost the token), it rewrites the evidence and mints again without re-entering.
+   */
   private async gate(
     task: TaskId,
     check: RebaseCheck,
@@ -2838,6 +4351,7 @@ export class PipelineDriver {
         ? findDisagreements(reviewsOfRound(p, ruled.round))
         : [];
     const baseSha = rec.state?.tasks.find((t) => t.id === task)?.base_sha;
+    const token = v.merge === "auto" ? this.mintFor(task, pr.number, head, v) : undefined;
     const input: EvidenceInput = {
       wave: this.wave,
       task,
@@ -2859,9 +4373,15 @@ export class PipelineDriver {
         : {}),
       ...(baseSha !== undefined ? { base_sha: baseSha } : {}),
       release: check,
+      merge: token !== undefined ? "auto" : "manual",
       generated_at: new Date(this.now()).toISOString(),
     };
     const paths = writeEvidence(this.deps.home, input);
+    // Usable only once the evidence that describes its head is written.
+    if (token !== undefined) this.mergeTokens.set(task, token);
+    // The merge turn's task, gated up to date with the release branch: it may merge now.
+    if (token !== undefined && this.turn?.task === task) this.turn.fresh = true;
+    if (v.stage === "merge_ready" && p.gated.at(-1) === head) return;
     await this.deps.journal({
       type: "artifact_verified",
       task,

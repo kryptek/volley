@@ -2,8 +2,12 @@ import { createHash } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomSuffix } from "volley-mcp/util";
+import type { Budget, EscalateWhy } from "./autopilot/policy";
 import type { WaveRecord } from "./reducer";
 import type { NewEvent, TaskId, TaskStage, WaveId } from "./types";
+
+/** The answer an archive closes every open decision with. */
+export const ARCHIVED_ANSWER = "archived";
 
 /**
  * Decisions: questions only a human (or the owning coordinator) can answer, as first-class
@@ -33,6 +37,9 @@ export const DECISION_KINDS = [
   "spawn_budget_exhausted",
   "account_limit",
   "machine_down",
+  "merge_refused",
+  "release_go",
+  "stage_go",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
@@ -71,6 +78,10 @@ export interface DecisionPayload {
   tasks?: TaskId[];
   /** machine_down: what is wrong with `host` (absent: down). */
   machine?: MachineTrouble;
+  /** stage_go: the release playbook stage that runs only on go (SPEC §4.6.19). */
+  stage?: string;
+  /** release_go: every release stage, verified, with where its evidence lives. */
+  stages?: { name: string; evidence?: string }[];
 }
 
 /** What the reducer keeps per decision: the payload plus what resolving needs. */
@@ -80,6 +91,8 @@ export interface DecisionRecord extends DecisionPayload {
   /** `false`: opened with `park: false`, the task keeps running while it is open. */
   parks?: boolean;
   rationale?: string;
+  /** Autopilot left it for the owner (`decision_escalated`, SPEC §4.6.16): why. */
+  escalated?: { why: EscalateWhy; budget?: Budget };
 }
 
 /** What a caller (T6 reviewers, T8 recovery, a coordinator) supplies to open a decision. */
@@ -202,6 +215,10 @@ export function resolveEvent(
   };
 }
 
+/** What an escalated decision's retained question starts with (SPEC §4.6.16). */
+export const escalatedPrefix = (why: string): string =>
+  `Autopilot could not resolve this (${why}): `;
+
 /**
  * The retained topic payload (decision.schema.json) for a decision record: the schema's fields
  * only. Facts the daemon keeps on the record for itself (agent_id, class, role, pipeline,
@@ -233,12 +250,19 @@ export function decisionPayload(d: DecisionRecord): DecisionPayload {
           ...(typeof d.machine === "string" ? { machine: d.machine } : {}),
         }
       : {};
+  const release = {
+    ...(d.kind === "stage_go" && typeof d.stage === "string" ? { stage: d.stage } : {}),
+    ...(d.kind === "release_go" && Array.isArray(d.stages) ? { stages: d.stages } : {}),
+  };
   return {
     decision_id: d.decision_id,
     wave: d.wave,
     task: d.task,
     kind: d.kind,
-    question: d.question,
+    question:
+      d.escalated !== undefined && d.resolved === undefined
+        ? `${escalatedPrefix(d.escalated.why)}${d.question}`
+        : d.question,
     ...(d.options !== undefined ? { options: d.options } : {}),
     pointers: d.pointers,
     opened_at: d.opened_at,
@@ -250,6 +274,7 @@ export function decisionPayload(d: DecisionRecord): DecisionPayload {
     ...str("acct"),
     ...limit,
     ...down,
+    ...release,
   };
 }
 

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/review-result.schema.json",
   "title": "Volley Pipeline Result",
-  "description": "The retained result a supervised pipeline role publishes before its done status: a reviewer's findings (type review) or a fix-up's resolutions (type fixup). See spec section 4.6.8.",
+  "description": "The retained result a supervised pipeline role publishes before its done status: a reviewer's findings (type review), a fix-up's resolutions (type fixup) or a release stage's report (type stage, spec section 4.6.19). See spec section 4.6.8.",
   "allOf": [
     { "$ref": "result.schema.json" },
     {
@@ -22,11 +22,48 @@
             "payload": { "$ref": "#/$defs/fixup" }
           },
           "required": ["type", "payload"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "const": "stage" },
+            "payload": { "$ref": "#/$defs/stage" }
+          },
+          "required": ["type", "payload"]
         }
       ]
     }
   ],
   "$defs": {
+    "stage": {
+      "type": "object",
+      "description": "A release stage agent's report (spec section 4.6.19): the stage it ran, every command with its exit code and wall seconds, in the order run, and what it produced.",
+      "required": ["stage", "commands"],
+      "properties": {
+        "stage": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["argv", "code", "seconds"],
+            "properties": {
+              "argv": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+              "code": { "type": "integer" },
+              "seconds": { "type": "number", "minimum": 0 }
+            }
+          }
+        },
+        "notes": { "type": "string" },
+        "artifacts": {
+          "type": "object",
+          "properties": {
+            "tag": { "type": "string", "minLength": 1 },
+            "files": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "urls": { "type": "array", "items": { "type": "string", "format": "uri" } }
+          }
+        }
+      }
+    },
     "severity": {
       "enum": ["P1", "P2", "P3"],
       "description": "P1 blocks the merge; P2 should be fixed; P3 is a nit."

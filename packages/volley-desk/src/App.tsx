@@ -26,7 +26,7 @@
  * leave room for it; collapsed to its title bar at phone width), saved per
  * window key and device class; Settings, General, Reset layout clears them.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useDeskKeys } from "./a11y/keys";
 import {
@@ -35,6 +35,7 @@ import {
   agentAttention,
   coordinatorFor,
   ctxFrom,
+  inboxAttention,
   needsYouTargets,
   noSignalFor,
   openDecisions,
@@ -92,6 +93,7 @@ import { emitSound } from "./sounds/emit";
 import { useNotifyMirror, useSoundSettings } from "./sounds/settings";
 import { useFlipSound, useSoundManager } from "./sounds/useSoundManager";
 import { ClaimButton } from "./steer/SteerPanel";
+import { deskDevice } from "./steer/transport";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { type RegistryAccount, accountChoices, accountList, resolveFields } from "./store/claude";
 import { useDesk } from "./store/context";
@@ -112,10 +114,11 @@ import {
   supervisorNamespace,
   unclassifiedAgents,
 } from "./store/reducer";
-import type { AgentView, DeskState } from "./store/types";
+import type { AgentView, DeskState, DigestPayload, InboxItem } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
 import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
 import { TerminalPopout } from "./windows/agent/TerminalPopout";
+import { machineFor } from "./windows/agent/machine";
 import { headlineOf, purposeOf } from "./windows/agent/purpose";
 import { useTerminalPopouts } from "./windows/agent/useTerminalPopouts";
 import {
@@ -124,6 +127,9 @@ import {
   CoordinatorsWindow,
   ENDED_LABEL,
 } from "./windows/coordinators/CoordinatorsWindow";
+import { INBOX_ID, INBOX_W, NeedsYouWindow } from "./windows/inbox/NeedsYouWindow";
+import { inboxSources, liveLine, needsPerson, sourceWindow } from "./windows/inbox/inboxFilters";
+import { DigestCard, showDigest } from "./windows/wave/DigestCard";
 import { AttentionLine, MachineDown, NeedsYou } from "./windows/wave/NeedsYou";
 import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
@@ -177,6 +183,8 @@ type Pos = { x: number; y: number };
 
 /** Rough coordinators window height for the initial fit: header + one row per wave and supervisor + note. */
 const coordsH = (rows: number) => 150 + 66 * rows;
+/** Rough Needs you window height for the initial fit: header and tabs + one card per item. */
+const inboxH = (rows: number) => 130 + 150 * rows;
 
 /**
  * Placeholder layout: one row per wave, its agents in two columns to the
@@ -202,6 +210,8 @@ function placeholderLayout(
     y += Math.max(WAVE_H, Math.ceil(kids.length / 2) * (AGENT_H + GAP) - GAP) + CGAP;
   }
   at[COORDS_ID] = { x: 0, y };
+  // Beside the coordinators window.
+  at[INBOX_ID] = { x: clampW(COORDS_W) + GAP, y };
   return at;
 }
 
@@ -304,6 +314,7 @@ export default function App() {
   /** An ended wave just shown: the viewport fits to it once it has a place on the canvas. */
   const fitPending = useRef<string | null>(null);
   const [coordsOpen, setCoordsOpen] = useState(true);
+  const [inboxOpen, setInboxOpen] = useState(true);
   const [notify, setNotify] = useNotifySettings();
   // Sound themes: the manager plays what the store and the Desk's controls do.
   const [sound, setSound] = useSoundSettings();
@@ -359,6 +370,16 @@ export default function App() {
   const [deskSettings, setDeskSettings] = useState<SectionKey | null>(() =>
     takeFirstRun() ? "setup" : null,
   );
+  /** The machine an agent window's machine chip asked Settings › Machines to show. */
+  const [focusMachine, setFocusMachine] = useState<{ name: string; seq: number } | null>(null);
+  const openMachine = useCallback((name: string) => {
+    // A new seq per click: clicking the same machine's chip again re-opens and re-scrolls it.
+    setFocusMachine((f) => ({ name, seq: (f?.seq ?? 0) + 1 }));
+    setDeskSettings("machines");
+  }, []);
+  useEffect(() => {
+    if (deskSettings === null) setFocusMachine(null);
+  }, [deskSettings]);
   /** volleyd's admin channel (account and setup ops); the Desk's own account must be an admin. */
   const authOps = useMemo(
     () => (writer && identity && !demo ? createAuthOps(writer, { identity }) : null),
@@ -509,7 +530,7 @@ export default function App() {
 
   // ------------------------------------------------------------ pinning (C12)
   const keys = windowKeys(
-    [COORDS_ID],
+    [COORDS_ID, INBOX_ID],
     waveIds,
     Object.values(state.agents).map((a) => ({
       id: a.id,
@@ -530,17 +551,20 @@ export default function App() {
     const pin = pinOf(id);
     return pin?.mode === "place" ? { x: pin.x, y: pin.y } : moved[id];
   };
-  /** A window's default size: the coordinators window, a wave window or an agent window. */
+  /** A window's default size: the coordinators or Needs you window, a wave window or an agent window. */
   const dims = (id: string) =>
     id === COORDS_ID
       ? { w: COORDS_W, h: coordsH(coordsRows) }
-      : waveIds.includes(id)
-        ? { w: WAVE_W, h: WAVE_H }
-        : { w: AGENT_W, h: AGENT_H };
-  /** Every window shown: the visible waves and their agents, then the coordinators window. */
+      : id === INBOX_ID
+        ? { w: INBOX_W, h: inboxH(inboxItems.length) }
+        : waveIds.includes(id)
+          ? { w: WAVE_W, h: WAVE_H }
+          : { w: AGENT_W, h: AGENT_H };
+  /** Every window shown: the visible waves and their agents, then the coordinators and Needs you windows. */
   const shownIds = () => [
     ...visible.flatMap((w) => [w, ...(groups[w] ?? []).map((a) => a.id)]),
     ...(coordsShown ? [COORDS_ID] : []),
+    ...(inboxShown ? [INBOX_ID] : []),
   ];
   const bounds = hudBounds(screenSize, narrow);
   /** An anchored window's rect on screen (its measured size, or its default). */
@@ -613,9 +637,14 @@ export default function App() {
   const coordsRows = waveList.length + (supervisors ? Math.max(1, supervisors.length) : 0);
   // Also shown with no wave while there are finished agents, so the toggle stays reachable.
   const coordsShown = coordsOpen && (waveList.length > 0 || finishedCount > 0);
-  // The first fit frames only the unpinned windows.
+  // The needs-you inbox (SPEC §4.6.18): shown while it holds items, oldest first.
+  const inboxItems = Object.values(state.inbox ?? {}).sort((a, b) =>
+    a.opened_at.localeCompare(b.opened_at),
+  );
+  const inboxShown = inboxOpen && inboxItems.length > 0;
+  // The first fit frames the canvas: every shown window but the anchored ones.
   const rects: Rect[] = shownIds()
-    .filter((id) => pinOf(id) === undefined)
+    .filter((id) => !anchored(id))
     .map((id) => rectOf(id, dims(id).w, dims(id).h));
   const fitted = useRef(false);
   useEffect(() => {
@@ -634,7 +663,8 @@ export default function App() {
   const arrange = () => {
     // Forget the sizes of windows that have left the store.
     for (const id of Object.keys(sizes.current)) {
-      if (id !== COORDS_ID && !state.agents[id] && !waveIds.includes(id)) delete sizes.current[id];
+      if (id !== COORDS_ID && id !== INBOX_ID && !state.agents[id] && !waveIds.includes(id))
+        delete sizes.current[id];
     }
     // The waves, then the unassigned group and the coordinators window as side
     // clusters: arrange closes the waves' first row with them.
@@ -646,6 +676,9 @@ export default function App() {
       })),
       ...(coordsShown
         ? [{ main: sizeOf(COORDS_ID, COORDS_W, coordsH(coordsRows)), kids: [], side: true }]
+        : []),
+      ...(inboxShown
+        ? [{ main: sizeOf(INBOX_ID, INBOX_W, inboxH(inboxItems.length)), kids: [], side: true }]
         : []),
     ];
     // Pinned windows are skipped: one pinned in place is kept clear of, and the fit
@@ -686,6 +719,7 @@ export default function App() {
   // A window anchored to the screen leaves the canvas (or comes back): that re-arranges too.
   const layoutKey = [
     coordsShown ? "c" : "",
+    inboxShown ? "i" : "",
     ...visible,
     ...visible.flatMap((id) => (groups[id] ?? []).map((a) => a.id)),
     ...shownIds()
@@ -804,13 +838,20 @@ export default function App() {
     agentAttn[a.id] = agentAttention(a, state.waves[a.wave], ctx);
   }
   const targets = needsYouTargets(state, ctxOpts, { waves: waveAttn, agents: agentAttn });
+  const inboxTiers = Object.fromEntries(
+    inboxItems.map((i) => [i.id, inboxAttention(i, state, ctx).tier]),
+  );
+  /** The dock tile's badge: open inbox items only a person answers. */
+  const inboxNeedsYou = inboxItems.filter((i) => needsPerson(i, inboxTiers[i.id] ?? "none")).length;
   const coordinators = Object.fromEntries(
     Object.values(state.waves).map((w) => [w.id, coordinatorFor(w, ctx)]),
   );
-  // The coordinators window's chip, as in the prototype: live waves whose coordinator is not working.
-  const notWorking = waveList.filter(
-    (w) => !ENDED_LABEL[w.state?.status ?? ""] && coordinators[w.id]?.state !== "working",
-  ).length;
+  // The coordinators window's chip, as in the prototype: live waves whose coordinator is not
+  // working (a reconnecting one is coming back by itself: not counted).
+  const notWorking = waveList.filter((w) => {
+    const c = coordinators[w.id]?.state;
+    return !ENDED_LABEL[w.state?.status ?? ""] && c !== "working" && c !== "reconnecting";
+  }).length;
 
   const show = (wave: string) =>
     setHidden((h) => {
@@ -825,7 +866,34 @@ export default function App() {
       if (!next.delete(wave)) next.add(wave);
       return next;
     });
+  /** Fit to a window: a wave with its agents, else the window alone. */
+  const fitWindow = (id: string) => {
+    if (anchored(id)) {
+      // Already on screen: open it if it is collapsed.
+      if (narrow) setExpanded((e) => new Set(e).add(id));
+    } else {
+      fitTo(waveIds.includes(id) ? clusterOf(id) : [rectOf(id, dims(id).w, dims(id).h)]);
+    }
+    focus(id);
+  };
+  /** The pill's go-to for an inbox item: the Needs you window. */
+  const goToInbox = () => {
+    setInboxOpen(true);
+    fitWindow(INBOX_ID);
+  };
+  /** A row's go-to: its source window (a wave, an agent or the coordinators window). */
+  const goToSource = (item: InboxItem) => {
+    const src = sourceWindow(item, state);
+    if (src === null) return;
+    if (src === COORDS_ID) setCoordsOpen(true);
+    if (item.wave !== undefined) show(item.wave);
+    fitWindow(src);
+  };
   const goTo = (t: NeedsYouTarget) => {
+    if (t.kind === "inbox") {
+      goToInbox();
+      return;
+    }
     show(t.wave);
     if (anchored(t.id)) {
       // Already on screen: open it if it is collapsed.
@@ -854,6 +922,13 @@ export default function App() {
         title: `${purposeOf(a, state.waves[a.wave]).label} needs you`,
         body: agentAttn[a.id]?.reason ?? "",
       })),
+    // Owner-only inbox items push to the phone: only the owner answers them.
+    ...inboxItems.map((i) => ({
+      key: `inbox:${i.id}`,
+      tier: i.owner_only && i.answered === undefined ? ("you" as const) : ("none" as const),
+      title: `Needs you · ${i.title}`,
+      body: i.question,
+    })),
   ];
   useNotifyOnAttention(notify, items, { quiet: settling });
 
@@ -875,6 +950,21 @@ export default function App() {
           beat: progressBeat(a.feed),
         })),
     );
+  // Each Needs you row's source window (wave, agent or coordinators) → the Needs you window.
+  if (inboxShown && !anchored(INBOX_ID)) {
+    const shown = new Set(shownIds());
+    for (const s of inboxSources(inboxItems, state)) {
+      if (!shown.has(s.source) || anchored(s.source)) continue;
+      const item = state.inbox?.[s.id.slice("inbox:".length)];
+      tethers.push({
+        id: s.id,
+        waveId: s.source,
+        wave: rectOf(s.source, dims(s.source).w, dims(s.source).h),
+        agent: pos(INBOX_ID),
+        accent: item?.wave !== undefined ? accentOf(item.wave) : NEUTRAL_ACCENT,
+      });
+    }
+  }
   useDeskKeys({
     stageRef,
     panBy,
@@ -934,6 +1024,7 @@ export default function App() {
                 onRestore: () =>
                   setDismissed(new Set([...dismissed].filter((id) => !ended.has(id)))),
               }}
+              archived={state.archive?.archived.length ?? 0}
               {...(supervisors ? { supervisors } : {})}
               now={supNow}
               finished={{
@@ -942,6 +1033,25 @@ export default function App() {
                 shown: look.showFinished,
                 graceMin: look.finishedGraceMin,
                 onToggle: () => setLook({ showFinished: !look.showFinished }),
+              }}
+            />
+          )}
+          {inboxShown && (
+            <NeedsYouWindow
+              items={inboxItems}
+              tiers={inboxTiers}
+              live={Object.fromEntries(inboxItems.map((i) => [i.id, liveLine(i, state)]))}
+              waves={state.waves}
+              control={control}
+              device={deskDevice(narrow)}
+              narrow={narrow}
+              frame={place(INBOX_ID)}
+              onClose={() => setInboxOpen(false)}
+              onGoTo={goToSource}
+              onShow={(i) => {
+                if (i.wave === undefined) return;
+                if (ended.has(i.wave)) showEnded(i.wave);
+                else show(i.wave);
               }}
             />
           )}
@@ -983,12 +1093,20 @@ export default function App() {
                 me={me}
                 identity={identity}
                 coordinatorState={coordinator?.state}
+                autopilotFeed={state.waveFeed?.[id]}
                 startedAt={startedAt(id)}
                 frame={place(id, frameAttn(waveAttn[id] ?? { tier: "none" }))}
                 onChat={toggleSteer}
                 steerOpen={steerOpen === id}
                 banner={
                   <>
+                    {showDigest(wave, state.digests?.[id]) && (
+                      <DigestCard
+                        digest={state.digests?.[id] as DigestPayload}
+                        // A digest's decision is answered in the Needs you window.
+                        onOpenDecision={() => goToInbox()}
+                      />
+                    )}
                     {needsYou && coordinator && (
                       <NeedsYou
                         wave={id}
@@ -1004,6 +1122,10 @@ export default function App() {
                         <MachineDown
                           key={d.decision_id}
                           decision={d}
+                          github={wave.state?.github}
+                          issues={Object.fromEntries(
+                            (wave.state?.tasks ?? []).map((t) => [t.id, t.issue]),
+                          )}
                           onAnswer={
                             control
                               ? (answer) =>
@@ -1058,6 +1180,8 @@ export default function App() {
                   stageChip={a.task ? stageChip(state, a.wave, a.task) : null}
                   usage={state.usage?.[a.id] ?? null}
                   accounts={choices}
+                  machine={machineFor(a, state.waves[a.wave], state)}
+                  onOpenMachine={openMachine}
                   {...(control
                     ? {
                         onMoveAccount: (acct: string) =>
@@ -1158,7 +1282,10 @@ export default function App() {
       <DeskDock
         coordsOpen={coordsOpen}
         onToggleCoords={() => setCoordsOpen((o) => !o)}
-        needsYou={targets.length}
+        needsYou={targets.filter((t) => t.kind !== "inbox").length}
+        inboxOpen={inboxOpen}
+        onToggleInbox={() => setInboxOpen((o) => !o)}
+        inboxNeedsYou={inboxNeedsYou}
         tethers={look.tethers}
         onToggleTethers={() => setLook({ tethers: !look.tethers })}
         onArrange={arrange}
@@ -1205,6 +1332,8 @@ export default function App() {
             host: sshHost(brokerUrl),
             readiness: state.readiness ?? {},
             localName: state.config?.fleet?.local_name,
+            focus: focusMachine?.name,
+            focusSeq: focusMachine?.seq,
             configTransport,
             accounts: state.claudeAccounts ?? {},
             agentsOn: agentsOnMachines(
