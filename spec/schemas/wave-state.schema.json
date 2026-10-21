@@ -76,6 +76,16 @@
               "enum": ["p1", "p3", "off"],
               "description": "How the reviewers treat public hygiene for the current plan version (spec section 4.6.8): p1 (every hit blocks the merge; public, or visibility unknown), p3 (non-blocking notes; private or internal) or off. Absent: not recorded, which a supervisor treats as p1."
             },
+            "github": {
+              "type": "object",
+              "required": ["slug", "url"],
+              "additionalProperties": false,
+              "properties": {
+                "slug": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
+                "url": { "type": "string", "format": "uri", "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://" }
+              },
+              "description": "The repository on GitHub as the supervisor read it for the current plan version (spec section 4.6.1): slug is owner/repo, url its canonical URL, so a client links issue n as <url>/issues/<n>. Absent when it could not be read; never derived from repo or a remote."
+            },
             "autopilot": {
               "type": "object",
               "additionalProperties": false,

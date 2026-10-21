@@ -54,6 +54,25 @@
   font: 11px var(--f-mono);
   fill: var(--dim);
 }
+.dag-issue-link {
+  cursor: pointer;
+}
+.dag-issue-link:hover text,
+.dag-issue-link:focus-visible text {
+  fill: var(--ink);
+  text-decoration: underline;
+}
+.dag-issue-link:focus-visible {
+  outline: none;
+}
+/* Safari draws no outline on SVG <text>: the accent stroke keeps keyboard focus visible there. */
+.dag-issue-link:focus-visible text {
+  outline: 2px solid var(--acc, currentColor);
+  outline-offset: 2px;
+  stroke: var(--acc, currentColor);
+  stroke-width: 0.6px;
+  paint-order: stroke;
+}
 .dag-node.st-merged rect {
   fill: rgba(74, 222, 128, 0.1);
   stroke: rgba(74, 222, 128, 0.45);

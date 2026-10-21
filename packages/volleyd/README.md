@@ -2506,15 +2506,20 @@ preface says, at the wave's hygiene level:
 
 volleyd folds the hits into the review's findings, so the fixup gets them. **`public_hygiene:
 auto | on | off`** (a tunable: `config.yaml`, `config_set` or a wave file's `config:`; default
-`auto`) picks the level. Under `auto` the daemon reads the repository's visibility once per wave
-version, at `run` (off the serial queue, beside the issue fetches), with `gh repo view --json
-visibility` in the repo (bounded by `repo_visibility_ms`), and journals `repo_visibility_detected
-{ visibility: public|private|internal|unknown, source: "gh", public_hygiene }`; `on` and `off`
-skip `gh` and journal `visibility: null, source: "config"`. A failed or timed-out read is
-`unknown` plus `alarm_raised { alarm: "repo_visibility_unknown" }`, and is treated as public. The
-wave state carries `repo_visibility` and `hygiene_level`, and `volleyd status` prints
-`hygiene: P1 (public)`, `P3 (private)`, `P1 (unknown)`, `P1 (forced)` or `off` under the
-header. A daemon that spawns no agents reads and journals nothing (the level is then P1). A
+`auto`) picks the level. The daemon reads the repository once per wave version, at `run` (off
+the serial queue, beside the issue fetches), with `gh repo view --json nameWithOwner,url,visibility`
+in the repo (bounded by `repo_visibility_ms`), whatever the level, and journals
+`repo_visibility_detected { visibility, source, public_hygiene, github? }`. Under `auto` that is
+`visibility: public|private|internal|unknown, source: "gh"`; `on` and `off` ignore what gh says
+about visibility and journal `visibility: null, source: "config"`. A failed or timed-out read is
+`unknown` plus `alarm_raised { alarm: "repo_visibility_unknown" }` (under `auto`), and is treated
+as public. The wave state carries `repo_visibility` and `hygiene_level`, and `volleyd status`
+prints `hygiene: P1 (public)`, `P3 (private)`, `P1 (unknown)`, `P1 (forced)` or `off` under the
+header. The same read gives the repository's GitHub name and URL: the wave state carries
+`github: { slug: "owner/repo", url }` (the Desk's repo chip and issue links) and `volleyd status`
+prints `github: owner/repo` under the hygiene line; with no valid `nameWithOwner` and http(s)
+`url` (a failed read included) `github` is absent, never guessed from a remote or the path. A
+daemon that spawns no agents reads and journals nothing (the level is then P1). A
 `done` without a parseable result (at that level) is steered once with the level's contract,
 then `agent_blocked` (`respawn` / `skip`). The spec reviewer gets `ISSUE.md` and the diff; the quality reviewer gets the diff only (no
 `ISSUE.md` in its worktree). A P1 from

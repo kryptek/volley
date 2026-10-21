@@ -388,6 +388,18 @@ input.recessed:focus {
   border-color: color-mix(in srgb, var(--acc) 45%, transparent);
   background: color-mix(in srgb, var(--acc) 10%, transparent);
 }
+.chip--repo {
+  gap: 4px;
+  color: var(--ink);
+  text-decoration: none;
+}
+.chip--repo:hover,
+.chip--repo:focus-visible {
+  text-decoration: underline;
+}
+.gh-mark {
+  flex: none;
+}
 .chip--hot {
   color: #ffb4a1;
   border-color: rgba(255, 122, 89, 0.5);

@@ -1,1 +1,5 @@
-{ "visibility": "PRIVATE" }
+{
+  "nameWithOwner": "example-org/example-repo",
+  "url": "https://github.com/example-org/example-repo",
+  "visibility": "PRIVATE"
+}

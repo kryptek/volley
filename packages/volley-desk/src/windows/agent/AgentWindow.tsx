@@ -400,7 +400,14 @@ export function AgentWindow({
         </button>
         {purpose.links.map((l) =>
           l.href ? (
-            <a key={l.text} className="a-link" href={l.href} target="_blank" rel="noreferrer">
+            <a
+              key={l.text}
+              className="a-link"
+              href={l.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={l.label}
+            >
               {l.text}
             </a>
           ) : (
