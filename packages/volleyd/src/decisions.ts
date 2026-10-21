@@ -156,8 +156,10 @@ export function openEvent(
   if (input.task !== null) {
     const task = rec.state?.tasks.find((t) => t.id === input.task);
     if (task === undefined) return { error: `unknown task '${input.task}' in wave '${wave}'` };
-    // Parking a finished task would re-park dependents it has already released.
-    if (SETTLED.has(task.stage))
+    // Parking a finished task would re-park dependents it has already released. A blocked agent
+    // on one is still asked about, by a decision that does not park it.
+    const blockedAside = input.kind === "agent_blocked" && input.park === false;
+    if (SETTLED.has(task.stage) && !blockedAside)
       return {
         error: `task '${input.task}' is ${task.stage}; open a wave-level decision (task: null) instead`,
       };

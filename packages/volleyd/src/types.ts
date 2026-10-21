@@ -94,6 +94,8 @@ export interface Tunables {
   background_wait_max_s: number;
   /** Cap on the doubling gap between `agent_stalled` decisions of one idle cycle. */
   stall_backoff_max_s: number;
+  /** A `blocked` agent with no open decision this long is stalled (`agent_stalled`). */
+  blocked_undecided_stall_ms: number;
   fallback_model: string | null;
   mailbox: { session_expiry_s: number };
   worktree_root: string;

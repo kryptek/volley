@@ -439,9 +439,11 @@ import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, recordRepoTrust } from "./trust";
 import { type AgentWatch, type ProgressFeed, watchAgent } from "./verify";
 import {
+  BLOCKED_ALARM,
   TERMINAL_ALARM,
   type TerminalSeen,
   WATCHED_STATUS,
+  decidedAgent,
   journaledSince,
   namedAgent,
   unjournaledTerminals,
@@ -664,6 +666,12 @@ interface Supervised {
   finalSeen?: string | undefined;
   /** `wall_time` of the `blocked` status last handed to the pipeline (a re-delivery is ignored). */
   blockedSeen?: string | undefined;
+  /** When that `blocked` was handed over (the invariant sweep asks itself a window later). */
+  blockedAt?: number | undefined;
+  /** `wall_time` of the `blocked` the daemon itself asked about (or tried to): asked once. */
+  blockedAsked?: string | undefined;
+  /** Blocked with no open decision naming it since (liveness: an undecided block stalls). */
+  undecidedSince?: number | undefined;
   /** The latest status other than `reaped` (what liveness checks while a reap is suppressed). */
   liveStatus?: string | undefined;
   /** The hook-signal activity model (liveness.ts). */
@@ -842,6 +850,10 @@ const retiredAgents = (log: WaveLog): Set<string> =>
 
 /** Task stages a steer is refused in: nothing will ever read it. */
 const UNSTEERABLE: ReadonlySet<TaskStage> = new Set(["done", "cancelled", "blocked"]);
+/** Stages whose task the pipeline no longer asks about: a blocked agent there is the daemon's. */
+const SETTLED_STAGES: ReadonlySet<TaskStage> = new Set(["done", "merge_ready", "cancelled"]);
+/** The daemon's own `agent_blocked` (blockedFallback): a block the pipeline could not own. */
+const BLOCKED_CLASS = "blocked_unhandled";
 
 export const daemonClientId = (namespace: string) =>
   `volley-${DAEMON_AGENT_ID}-daemon-${namespace}`;
@@ -1090,6 +1102,8 @@ export class Daemon {
   private readonly terminals = new Map<string, TerminalSeen & { wave: WaveId }>();
   /** Per agent: the seq of the latest wave journal event naming it (watchdog.ts namedAgent). */
   private readonly lastNamed = new Map<string, number>();
+  /** Per agent: the seq of the latest decision, retire or relaunch naming it (decidedAgent). */
+  private readonly lastDecided = new Map<string, number>();
   /** `<agent>@<wall_time>` of each terminal status the watchdog has alarmed on. */
   private readonly terminalAlarmed = new Set<string>();
   /** Answered control requests by `<sender>/<correlation_id>`, for QoS 1 redelivery. */
@@ -2447,6 +2461,7 @@ export class Daemon {
     await this.fleetTick();
     await this.runLeases({ kind: "tick" });
     await this.monitor();
+    await this.blockedInvariant();
     await this.watchTerminals();
     for (const wave of this.waves.keys()) {
       await this.settleFixers(wave);
@@ -5044,11 +5059,11 @@ export class Daemon {
       this.scheduleReap(agentId, a);
     };
     this.trackScreen(agentId, a);
-    const check = (type: string, live = true) => {
+    const check = (type: string) => {
       if (this.supervised.get(agentId) !== a) return;
-      // A status that arrived while supervised: the watchdog checks something is journaled
-      // about it (one already retained at re-attach was handled, or is re-handled below).
-      if (live) this.noteTerminal(agentId, a);
+      // The watchdog checks the status gets handled, whether it arrived live or was already
+      // retained when the watch attached (a fast agent, every agent after a restart).
+      this.noteTerminal(agentId, a);
       if (type === "reaped") {
         // A re-delivery (same wall_time) of a reap a heartbeat already suppressed changes nothing.
         if (a.watch.state.status?.wall_time === a.suppressedReap) return;
@@ -5067,6 +5082,7 @@ export class Daemon {
         const at = a.watch.state.status?.wall_time;
         if (at !== undefined && at === a.blockedSeen) return;
         a.blockedSeen = at;
+        a.blockedAt = this.now();
         void this.enqueue(() => this.onBlocked(agentId));
         return;
       }
@@ -5079,7 +5095,7 @@ export class Daemon {
       void this.enqueue(() => this.onFinal(agentId, type));
     };
     watch.onStatus((type) => check(type));
-    if (watch.state.status !== null) check(watch.state.status.type, false);
+    if (watch.state.status !== null) check(watch.state.status.type);
     if (outcome.kind === "registered")
       void this.enqueue(() => this.deliverQueued(wave, task, role, agentId));
   }
@@ -5617,19 +5633,15 @@ export class Daemon {
   /**
    * A supervised agent's `blocked` status: the pipeline opens its `agent_blocked` decision. The
    * agent is not retired. A status a decision already names (a re-delivery after a restart) is
-   * not asked about twice. Nothing is journaled while the agent is moving (or, in the pipeline,
-   * for an accepted or stale run): the terminal-status watchdog's alarm is the intended backstop.
+   * not asked about twice. Nothing is asked while the agent is moving (the sweep asks after).
+   * Where the pipeline cannot own it (a settled task, a stale or accepted run, an error) the
+   * daemon journals `blocked_unhandled` and asks itself (`blockedFallback`): never silent.
    */
   private async onBlocked(agentId: string): Promise<void> {
     const a = this.supervised.get(agentId);
     const status = a?.watch.state.status;
     if (a === undefined || status?.type !== "blocked" || this.moving.has(agentId)) return;
-    const rec = this.waves.get(a.wave)?.record;
-    const asked = Object.values(rec?.decisions ?? {}).some((d) => {
-      const x = d as unknown as Record<string, unknown>;
-      return x.agent_id === agentId && x.status_at === status.wall_time;
-    });
-    if (asked) return;
+    if (this.blockedDecided(a.wave, agentId, status.wall_time)) return;
     if (a.task === RELEASE_TASK) {
       await this.releaseFor(a.wave).handle({
         kind: "agent_done",
@@ -5639,20 +5651,148 @@ export class Daemon {
       });
       return;
     }
-    await this.pipelineFor(a.wave).handle(a.task, {
-      kind: "agent_blocked",
-      role: a.role,
-      agent_id: agentId,
-      reason: blockedReason(status.payload),
-      payload: status.payload,
-      at: status.wall_time,
+    const log = this.waves.get(a.wave);
+    if (log === undefined) return;
+    const stage = log.record.state?.tasks.find((t) => t.id === a.task)?.stage;
+    if (stage === undefined || SETTLED_STAGES.has(stage))
+      return this.blockedFallback(
+        agentId,
+        a,
+        stage === undefined ? "the task is not in the wave" : `the task is ${stage}`,
+      );
+    const before = log.record.seq;
+    try {
+      await this.pipelineFor(a.wave).handle(a.task, {
+        kind: "agent_blocked",
+        role: a.role,
+        agent_id: agentId,
+        reason: blockedReason(status.payload),
+        payload: status.payload,
+        at: status.wall_time,
+      });
+    } catch (e) {
+      return this.blockedFallback(
+        agentId,
+        a,
+        `the pipeline failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    if (this.blockedDecided(a.wave, agentId, status.wall_time)) return;
+    // The pipeline said why it asks nothing: the daemon asks. Otherwise (a red head being
+    // classified first) the sweep asks if no decision comes within the window.
+    const dropped = this.journalEvents(a.wave).some(
+      (e) =>
+        e.seq > before &&
+        e.type === "alarm_raised" &&
+        e.data.alarm === BLOCKED_ALARM &&
+        e.data.agent_id === agentId,
+    );
+    if (dropped) await this.blockedFallback(agentId, a, null);
+  }
+
+  /** Whether any decision (open or answered) names the agent and its status `at` (status_at). */
+  private blockedDecided(wave: WaveId, agentId: string, at: string): boolean {
+    const rec = this.waves.get(wave)?.record;
+    return Object.values(rec?.decisions ?? {}).some((d) => {
+      const x = d as unknown as Record<string, unknown>;
+      return x.agent_id === agentId && x.status_at === at;
     });
+  }
+
+  /**
+   * The daemon's own `agent_blocked` for a block the pipeline cannot own: `respawn | cancel`, or
+   * `manual | cancel` (not parking it) for a settled task. `why` journals `blocked_unhandled`
+   * first (null: the pipeline already did). Asked once per status.
+   */
+  private async blockedFallback(agentId: string, a: Supervised, why: string | null): Promise<void> {
+    const status = a.watch.state.status;
+    if (status?.type !== "blocked" || a.blockedAsked === status.wall_time) return;
+    if (this.blockedDecided(a.wave, agentId, status.wall_time)) return;
+    a.blockedAsked = status.wall_time;
+    const rec = this.waves.get(a.wave)?.record;
+    const stage = rec?.state?.tasks.find((t) => t.id === a.task)?.stage;
+    const reason = blockedReason(status.payload);
+    if (why !== null) {
+      this.log(`blocked_unhandled ${agentId}: ${why}`);
+      await this.append(a.wave, {
+        type: "alarm_raised",
+        ...(stage !== undefined ? { task: a.task } : {}),
+        data: {
+          alarm: BLOCKED_ALARM,
+          agent_id: agentId,
+          role: a.role,
+          why,
+          status_at: status.wall_time,
+        },
+      });
+    }
+    const settled = stage === undefined || SETTLED_STAGES.has(stage);
+    const respawn = !settled && this.opts.spawner !== undefined;
+    const options = settled ? ["manual", "cancel"] : respawn ? ["respawn", "cancel"] : ["cancel"];
+    const what = settled
+      ? `manual: you handle it yourself; or cancel: stop the agent (the task stays ${stage ?? "as it is"})`
+      : `${respawn ? `respawn: stop it and start the ${a.role} again; or ` : ""}cancel the task`;
+    try {
+      await this.openDecisionNow(
+        a.wave,
+        {
+          kind: "agent_blocked",
+          task: stage !== undefined ? a.task : null,
+          id: waveDecisionId("agent_blocked", a.wave, agentId, status.wall_time),
+          question: `Needs you: ${agentId} (${a.task}) is blocked: ${clipText(reason)}. ${what}?`,
+          options,
+          ...(settled && stage !== undefined ? { park: false } : {}),
+        },
+        {
+          class: BLOCKED_CLASS,
+          agent_id: agentId,
+          role: a.role,
+          reason,
+          payload: status.payload,
+          status_at: status.wall_time,
+          minted: a.minted,
+        },
+      );
+    } catch (e) {
+      this.log(`blocked ${agentId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /**
+   * The invariant, every tick: a supervised agent whose retained status is `blocked` has a
+   * decision naming it and that status. One never handed over is handed over now; one handed
+   * over a `terminal_unjournaled_alarm_ms` ago with still no decision, the daemon asks itself.
+   */
+  private async blockedInvariant(): Promise<void> {
+    const now = this.now();
+    for (const [agentId, a] of [...this.supervised]) {
+      const st = a.watch.state.status;
+      if (st?.type !== "blocked" || a.task === RELEASE_TASK || this.moving.has(agentId)) continue;
+      const state = this.waves.get(a.wave)?.record.state;
+      if (state == null || state.status === "stopped") continue;
+      if (this.blockedDecided(a.wave, agentId, st.wall_time)) continue;
+      if (a.blockedSeen !== st.wall_time) {
+        a.blockedSeen = st.wall_time;
+        a.blockedAt = now;
+        await this.onBlocked(agentId);
+        continue;
+      }
+      const waited = now - (a.blockedAt ?? now);
+      if (waited < DAEMON_DEFAULTS.terminal_unjournaled_alarm_ms) continue;
+      await this.blockedFallback(
+        agentId,
+        a,
+        `no decision ${Math.round(waited / 1000)}s after the status was handed to the pipeline`,
+      );
+    }
   }
 
   /** Arm the watchdog for the agent's current status if it is a new terminal one. */
   private noteTerminal(agentId: string, a: Supervised): void {
     const st = a.watch.state.status;
     if (st === null || !WATCHED_STATUS.has(st.type)) return;
+    // Decided before this watch attached (a restart): handled already.
+    if (st.type === "blocked" && this.blockedDecided(a.wave, agentId, st.wall_time)) return;
     const prev = this.terminals.get(agentId);
     if (prev !== undefined && prev.wall_time === st.wall_time) return;
     this.terminals.set(agentId, {
@@ -5675,7 +5815,7 @@ export class Daemon {
   private async watchTerminals(): Promise<void> {
     const seen = [...this.terminals.values()];
     for (const t of seen) {
-      if (!journaledSince(t, this.lastNamed)) continue;
+      if (!journaledSince(t, this.lastNamed, this.lastDecided)) continue;
       this.terminals.delete(t.agent_id);
       const key = `${t.agent_id}@${t.wall_time}`;
       if (!this.terminalAlarmed.delete(key) || !this.waves.has(t.wave)) continue;
@@ -5690,6 +5830,7 @@ export class Daemon {
       this.lastNamed,
       this.now(),
       DAEMON_DEFAULTS.terminal_unjournaled_alarm_ms,
+      this.lastDecided,
     );
     for (const u of late) {
       const t = this.terminals.get(u.agent_id);
@@ -6096,6 +6237,10 @@ export class Daemon {
           ? await this.evidence(a, now)
           : undefined;
       if (this.supervised.get(agentId) !== a) continue; // retired during the worktree walk
+      // Blocked: since when no open decision names it (an undecided block is a stall).
+      if (status !== "blocked") a.undecidedSince = undefined;
+      else if (this.openNaming(a.wave, agentId)) a.undecidedSince = undefined;
+      else a.undecidedSince ??= now;
       await this.applyLiveness(
         agentId,
         a,
@@ -6104,9 +6249,18 @@ export class Daemon {
           status,
           tunables: eff,
           ...(evidence !== undefined ? { evidence } : {}),
+          ...(status === "blocked" ? { undecided_since: a.undecidedSince ?? null } : {}),
         }),
       );
     }
+  }
+
+  /** Whether an open decision of the wave names the agent. */
+  private openNaming(wave: WaveId, agentId: string): boolean {
+    const rec = this.waves.get(wave)?.record;
+    return (rec !== undefined ? openDecisions(rec) : []).some(
+      (d) => (d as unknown as Record<string, unknown>).agent_id === agentId,
+    );
   }
 
   /**
@@ -6216,10 +6370,18 @@ export class Daemon {
           {
             kind: "agent_stalled",
             task,
-            question: `Needs you: ${agentId} ended its turn without publishing done/blocked/failed and is still idle ${Math.floor(x.idle_s / 60)} min later, after a nudge.${x.last_text !== null ? ` Last message: ${clipText(x.last_text)}` : ""} Answer to steer it${respawn ? `, respawn: stop it and start the ${a.role} again (${a.role === "implementer" ? "on the branch it pushed" : "from the head, with the same inputs"})` : ""}, or stop the task.${x.asked > 1 ? ` (Asked ${x.asked} times; next in ${Math.round(x.next_s / 60)} min.)` : ""}`,
-            options: respawn
-              ? ["nudge again", "respawn", STOP_ANSWER]
-              : ["nudge again", STOP_ANSWER],
+            question:
+              x.blocked === true
+                ? `Needs you: ${agentId} is blocked and nobody has been asked about it for ${Math.floor(x.idle_s / 60)} min.${x.last_text !== null ? ` Last message: ${clipText(x.last_text)}` : ""} ${respawn ? `respawn: stop it and start the ${a.role} again; or ` : ""}stop the task?`
+                : `Needs you: ${agentId} ended its turn without publishing done/blocked/failed and is still idle ${Math.floor(x.idle_s / 60)} min later, after a nudge.${x.last_text !== null ? ` Last message: ${clipText(x.last_text)}` : ""} Answer to steer it${respawn ? `, respawn: stop it and start the ${a.role} again (${a.role === "implementer" ? "on the branch it pushed" : "from the head, with the same inputs"})` : ""}, or stop the task.${x.asked > 1 ? ` (Asked ${x.asked} times; next in ${Math.round(x.next_s / 60)} min.)` : ""}`,
+            options:
+              x.blocked === true
+                ? respawn
+                  ? ["respawn", STOP_ANSWER]
+                  : [STOP_ANSWER]
+                : respawn
+                  ? ["nudge again", "respawn", STOP_ANSWER]
+                  : ["nudge again", STOP_ANSWER],
             pointers: { screen: buildTopic(a.namespace, agentId, "screen") },
           },
           {
@@ -6450,22 +6612,28 @@ export class Daemon {
         await this.append(wave, { type: "task_cancelled", task, data: { by, why } });
         return;
       }
-      // Approved by the owner: a fresh spawn (its own lock check still applies). A pipeline role
-      // continues where the vanished agent was, as it was launched: its start point, worktree
-      // and `.volley/` inputs, a merge-mode rebase step's merge brief, its MCP servers.
-      const role = String(x.role) as Role;
-      const spawned = this.spawnedRecord((e) => e.data.agent_id === agentId, wave);
-      this.refused.delete(`${wave}/${task}/${role}`);
-      const pipeline = moveRespawn(spawned);
-      // Its machine takes no new agents: it starts once the task is re-placed.
-      if (this.parkClosed(wave, task)) {
-        this.heldRespawn.set(`${wave}/${task}`, { role, pipeline });
+      return this.respawnRole(wave, task, agentId, String(x.role) as Role);
+    }
+    if (cls === BLOCKED_CLASS) {
+      // The daemon's own agent_blocked (blockedFallback): manual is the owner's, nothing to do.
+      const ans = answer.trim().toLowerCase();
+      const stage = this.waves.get(wave)?.record.state?.tasks.find((t) => t.id === task)?.stage;
+      const settled = stage === undefined || SETTLED_STAGES.has(stage);
+      if (ans === "cancel") {
+        if (!settled) return this.cancelTask(wave, task, agentId, why);
+        // A settled task stays as it is: only the blocked agent is stopped.
+        if (a !== undefined) await this.retireRole(wave, agentId, "stopped");
         return;
       }
-      void this.startSpawn(wave, task, role, pipeline).catch((e: unknown) =>
-        this.log(`respawn ${wave}/${task}: ${e instanceof Error ? e.message : String(e)}`),
-      );
-      return;
+      const respawn =
+        !settled &&
+        isRespawnAnswer(answer, d.options) &&
+        isRole(String(x.role)) &&
+        this.opts.spawner !== undefined;
+      if (!respawn) return;
+      if (a !== undefined) await this.retireRole(wave, agentId, "relaunched");
+      else await this.retireGone(wave, task, agentId, x);
+      return this.respawnRole(wave, task, agentId, String(x.role) as Role);
     }
     if (a === undefined) return;
     if (answer.trim().toLowerCase() === STOP_ANSWER)
@@ -6515,6 +6683,25 @@ export class Daemon {
     if (this.opts.spawner === undefined) return;
     void this.enqueue(() =>
       this.releaseFor(wave).handle({ kind: "agent_recovery", agent_id: agentId, answer, why }),
+    );
+  }
+
+  /**
+   * Approved by the owner: a fresh spawn of `role` after `agentId` (its own lock check still
+   * applies). A pipeline role continues where the old agent was, as it was launched: its start
+   * point, worktree and `.volley/` inputs, a merge-mode rebase step's merge brief, its MCP servers.
+   */
+  private respawnRole(wave: WaveId, task: TaskId, agentId: string, role: Role): void {
+    const spawned = this.spawnedRecord((e) => e.data.agent_id === agentId, wave);
+    this.refused.delete(`${wave}/${task}/${role}`);
+    const pipeline = moveRespawn(spawned);
+    // Its machine takes no new agents: it starts once the task is re-placed.
+    if (this.parkClosed(wave, task)) {
+      this.heldRespawn.set(`${wave}/${task}`, { role, pipeline });
+      return;
+    }
+    void this.startSpawn(wave, task, role, pipeline).catch((e: unknown) =>
+      this.log(`respawn ${wave}/${task}: ${e instanceof Error ? e.message : String(e)}`),
     );
   }
 
@@ -7010,6 +7197,8 @@ export class Daemon {
     const event = log.append(ev, dateOf(this.time));
     const named = namedAgent(event);
     if (named !== undefined) this.lastNamed.set(named, event.seq);
+    const decided = decidedAgent(event);
+    if (decided !== undefined) this.lastDecided.set(decided, event.seq);
     const published = this.track(this.publishAppended(wave, event));
     this.noteRemediation(wave, event);
     // A task that ends (cancelled, done) or a wave that stops drops the steers held for it.

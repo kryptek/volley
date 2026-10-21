@@ -33,6 +33,7 @@ const TUNABLES = {
   heartbeat_alarm_s: 600,
   background_wait_max_s: 7200,
   stall_backoff_max_s: 1800,
+  blocked_undecided_stall_ms: 300_000,
 };
 
 const hook = (name: string, at: number): HookSignal => {
@@ -162,6 +163,29 @@ describe("liveness: questions (awaiting_input permission_prompt / agent_needs_in
       expect(r.state.activity).toBe("awaiting_input");
       expect(r.state.decisions[slot]).toBe("d-1");
     }
+  });
+});
+
+describe("liveness: a blocked agent nobody has decided on is a stall", () => {
+  const blocked = (at: number, undecided_since: number | null) => (s: AgentLiveness) =>
+    checkLiveness(s, { now: at, status: "blocked", tunables: TUNABLES, undecided_since });
+  const idle = () => run(fresh(), [signal("idle-stop.json", T0)]).state;
+
+  it("undecided for blocked_undecided_stall_ms → agent_stalled (blocked), once", () => {
+    expect(run(idle(), [blocked(T0 + 4 * MIN, T0)]).actions).toEqual([]);
+    const r = run(idle(), [blocked(T0 + 5 * MIN, T0), blocked(T0 + 6 * MIN, T0)]);
+    expect(kinds(r.actions)).toEqual(["agent_stalled"]);
+    expect(r.actions[0]).toMatchObject({ blocked: true, idle_s: 300, asked: 1 });
+    expect(r.state.decisions.stalled).toBe("pending");
+  });
+
+  it("with an open decision naming it (undecided_since null) → never stalled, never steered", () => {
+    expect(run(idle(), [blocked(T0 + 60 * MIN, null)]).actions).toEqual([]);
+  });
+
+  it("an agent whose hooks still say working is not stalled", () => {
+    const working = run(fresh(), [signal("heartbeat.json", T0)]).state;
+    expect(run(working, [blocked(T0 + 60 * MIN, T0)]).actions).toEqual([]);
   });
 });
 

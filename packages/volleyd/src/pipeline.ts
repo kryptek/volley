@@ -63,6 +63,7 @@ import type {
   TaskStage,
   WaveId,
 } from "./types";
+import { BLOCKED_ALARM } from "./watchdog";
 
 /**
  * The pipeline: drives a task through its stage groups — implement → [spec_review ∥
@@ -2181,8 +2182,33 @@ function onBlocked(
   ev: Extract<PipelineEvent, { kind: "agent_blocked" }>,
 ): PipelineAction[] {
   const run = v.p.runs[ev.role];
-  if (run === undefined || run.agent_id !== ev.agent_id || run.accepted || v.stage === "cancelled")
-    return [];
+  const why =
+    run === undefined || run.agent_id !== ev.agent_id
+      ? `not the ${ev.role}'s current run`
+      : run.accepted
+        ? `the ${ev.role}'s run is already accepted`
+        : v.stage === "cancelled"
+          ? "the task is cancelled"
+          : undefined;
+  // Never silent: the alarm says why the pipeline asks nothing (the daemon asks instead).
+  if (why !== undefined)
+    return [
+      {
+        kind: "alarm",
+        key: `${BLOCKED_ALARM}/${ev.agent_id}/${ev.at ?? ""}`,
+        event: {
+          type: "alarm_raised",
+          task: v.task,
+          data: {
+            alarm: BLOCKED_ALARM,
+            agent_id: ev.agent_id,
+            role: ev.role,
+            why,
+            ...(ev.at !== undefined ? { status_at: ev.at } : {}),
+          },
+        },
+      },
+    ];
   const blocked: BlockedStatus = {
     reason: ev.reason,
     payload: ev.payload,
