@@ -58,6 +58,8 @@ const VALID_LIFECYCLE_TYPES = [
   "failed",
   "reaped",
   "registered",
+  // volleyd's morning digest push (SPEC §4.6.16): a `progress` envelope, one per digest.
+  "digest",
 ] as const;
 const VALID_LIFECYCLE_SET = new Set<string>(VALID_LIFECYCLE_TYPES);
 

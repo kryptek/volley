@@ -198,6 +198,8 @@ export interface AutopilotConfig {
    * blocked task's `ci_failed` as `budget_exhausted`.
    */
   fix_flake_max: number;
+  /** The shortest gap (s) between two digests of one wave with the same trigger. */
+  digest_min_interval_s: number;
 }
 
 /** How the supervisor's own machine takes auto-placed tasks (config `fleet.local_agents`). */
@@ -654,6 +656,8 @@ export const WAVE_EVENT_TYPES = [
   // Self-healing CI (SPEC §4.6.16): a remediation for a classified red head (a flake's fixer).
   "remediation_requested",
   "remediation_closed",
+  // The morning digest (SPEC §4.6.16): published retained, with its one push.
+  "digest_published",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

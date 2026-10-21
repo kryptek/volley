@@ -28,6 +28,8 @@ export const CONFIG_TOPIC = "volley/_waves/_config";
 export const ARCHIVE_TOPIC = "volley/_waves/_archive";
 export const waveStateTopic = (wave: string) => `volley/_waves/${wave}/state`;
 export const waveEventsTopic = (wave: string) => `volley/_waves/${wave}/events`;
+/** The wave's retained morning digest (SPEC §4.6.16, autopilot/digest.ts). */
+export const waveDigestTopic = (wave: string) => `volley/_waves/${wave}/digest`;
 export const ADMISSION_TOPIC = "volley/_system/admission";
 export const leasePoolTopic = (pool: string) => `volley/_system/leases/${pool}`;
 export const LEASE_REQUESTS_FILTER = "volley/_system/leases/+/requests";
@@ -47,6 +49,8 @@ export type ControlOp =
   | "inbox_answer"
   // Autopilot's effective policy table (autopilot/policy.ts).
   | "policy"
+  // The wave's morning digest, as last published (autopilot/digest.ts).
+  | "digest"
   | "claim"
   | "pause"
   | "resume"

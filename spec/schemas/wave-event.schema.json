@@ -100,7 +100,8 @@
             "inbox_opened",
             "inbox_answered",
             "remediation_requested",
-            "remediation_closed"
+            "remediation_closed",
+            "digest_published"
           ]
         },
         "payload": {
@@ -490,6 +491,31 @@
                     },
                     "if": { "properties": { "outcome": { "const": "failed" } } },
                     "then": { "required": ["why"], "properties": { "released": { "maxItems": 0 } } }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "digest_published" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["trigger"],
+                    "description": "The supervisor published the wave's digest on volley/_waves/<wave>/digest and pushed its one-line summary (spec section 4.6.16).",
+                    "properties": {
+                      "trigger": {
+                        "enum": ["wave_complete", "release_go", "escalation", "stopped"]
+                      }
+                    }
                   }
                 }
               }

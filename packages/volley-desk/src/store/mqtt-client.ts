@@ -81,6 +81,8 @@ export const DESK_SUBSCRIPTIONS = [
   "volley/_waves/+/state",
   "volley/_waves/+/events",
   "volley/_waves/+/decisions/+",
+  // Each wave's morning digest (SPEC §4.6.16): the wave window's digest card.
+  "volley/_waves/+/digest",
   "volley/_waves/_config",
   // The index of archived waves (SPEC §4.6.20): the coordinators window counts it.
   "volley/_waves/_archive",

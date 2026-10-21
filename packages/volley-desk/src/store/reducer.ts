@@ -48,6 +48,7 @@ import {
   type DecisionPayload,
   type DeskMessage,
   type DeskState,
+  type DigestPayload,
   type Envelope,
   type InboxItem,
   type LeasePoolPayload,
@@ -100,6 +101,7 @@ export type Route =
   | { kind: "wave"; wave: string }
   | { kind: "waveEvent"; wave: string }
   | { kind: "decision"; wave: string; decisionId: string }
+  | { kind: "digest"; wave: string }
   | { kind: "config" }
   | { kind: "archive" }
   | { kind: "lease"; pool: string }
@@ -134,6 +136,7 @@ export function routeTopic(topic: string): Route | null {
     if (p.length === 3 && b === "_archive") return { kind: "archive" };
     if (p.length === 4 && b && c === "state") return { kind: "wave", wave: b };
     if (p.length === 4 && b && c === "events") return { kind: "waveEvent", wave: b };
+    if (p.length === 4 && b && c === "digest") return { kind: "digest", wave: b };
     if (p.length === 5 && b && c === "decisions" && d) {
       return { kind: "decision", wave: b, decisionId: d };
     }
@@ -193,6 +196,8 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
       return reduceWaveEvent(state, route.wave, m);
     case "decision":
       return reduceDecision(state, route.wave, route.decisionId, m);
+    case "digest":
+      return reduceDigest(state, route.wave, m);
     case "config":
       return { ...state, config: (m.envelope?.payload as ConfigPayload | undefined) ?? null };
     case "archive":
@@ -231,6 +236,18 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
     case "inbox":
       return reduceInbox(state, route.id, m);
   }
+}
+
+/**
+ * A wave's morning digest (SPEC §4.6.16): taken only from volleyd and only when it names its
+ * topic's wave; a cleared topic (the wave archived) forgets it.
+ */
+function reduceDigest(state: DeskState, wave: string, m: DeskMessage): DeskState {
+  const env = m.envelope;
+  if (env === null) return { ...state, digests: keyed(state.digests, wave, undefined) };
+  const p = env.payload as Partial<DigestPayload> | undefined;
+  if (env.agent_id !== "volleyd" || p?.wave !== wave) return state;
+  return { ...state, digests: keyed(state.digests, wave, p as DigestPayload) };
 }
 
 /**
@@ -378,6 +395,7 @@ export function resync(state: DeskState): DeskState {
     machines: {},
     readiness: {},
     inbox: {},
+    digests: {},
     unconfirmed: [...unconfirmed],
   };
 }

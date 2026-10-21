@@ -25,6 +25,7 @@ Commands:
   resolve     Answer a decision (owner only)
   inbox       The needs-you inbox: what waits for a person; inbox answer <id> <answer>
   policy      Show autopilot's policy table: the decisions volleyd answers itself
+  digest      A wave's morning digest: what shipped, what autopilot handled, what waits for you
   claim       Take over a wave whose owner is gone
   pause       Stop admitting new tasks in a wave
   resume      Resume a wave, or release the kill switch (--all)
@@ -63,6 +64,7 @@ const COMMANDS: Record<string, () => Promise<Command>> = {
   resolve: async () => (await import("./commands/resolve")).resolve,
   inbox: async () => (await import("./commands/inbox")).inbox,
   policy: async () => (await import("./commands/policy")).policy,
+  digest: async () => (await import("./commands/digest")).digest,
   claim: async () => (await import("./commands/claim")).claim,
   pause: async () => (await import("./commands/pause")).pause,
   resume: async () => (await import("./commands/resume")).resume,

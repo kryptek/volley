@@ -577,6 +577,13 @@
               "maximum": 20,
               "default": 3,
               "description": "Flake fixers (synthetic fix-<slug> tasks, one per distinct failing test) the supervisor adds to one wave; a fix_flake request past it escalates the blocked task's ci_failed decision budget_exhausted."
+            },
+            "digest_min_interval_s": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 86400,
+              "default": 1800,
+              "description": "The shortest gap between two digests of one wave with the same trigger (spec section 4.6.16): a second escalation inside it publishes no new digest and sends no push."
             }
           }
         }

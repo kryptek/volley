@@ -75,6 +75,7 @@ import {
 } from "./archive";
 import { budgetUsed, markerOf } from "./autopilot/budgets";
 import { carryHandoff, carryPicker } from "./autopilot/carry";
+import { type Digest, type DigestTrigger, digestOf, summaryLine } from "./autopilot/digest";
 import { type GithubStatus, githubStatusCache } from "./autopilot/github-status";
 import {
   INBOX_CHANNEL,
@@ -170,6 +171,7 @@ import {
   DAEMON_AGENT_ID,
   LEASE_REQUESTS_FILTER,
   leasePoolTopic,
+  waveDigestTopic,
   waveEventsTopic,
   waveStateTopic,
 } from "./control";
@@ -1203,6 +1205,8 @@ export class Daemon {
   private readonly moving = new Set<string>();
   /** Sleep/wake detection (T8): the last clock sample and the latest wake. */
   private clock: ClockState = initialClock();
+  /** Each wave's digest as last published (SPEC §4.6.16); the retained topic after a restart. */
+  private readonly digests = new Map<WaveId, Digest>();
   /** `onJournal` listeners. */
   private readonly journalListeners = new Set<(wave: WaveId, event: JournalEvent) => void>();
   /** Every timer and wall-clock read (DaemonOptions.clock). */
@@ -1607,6 +1611,7 @@ export class Daemon {
     // and clearing them (a clear is not a re-publish, SPEC §4.6.20).
     for (const [wave, log] of this.archived) {
       await this.clearRetained(waveStateTopic(wave));
+      await this.clearRetained(waveDigestTopic(wave));
       for (const id of Object.keys(log.record.decisions))
         await this.clearRetained(decisionTopic(wave, id));
       for (const id of foldInbox(new Map(), log.journal.readAll()).keys())
@@ -3476,6 +3481,8 @@ export class Daemon {
       await this.clearRetained(inboxTopic(item.id));
     }
     await this.clearRetained(waveStateTopic(wave));
+    await this.clearRetained(waveDigestTopic(wave));
+    this.digests.delete(wave);
     this.time.clearTimeout(this.stopGrace.get(wave));
     this.stopGrace.delete(wave);
     this.waves.delete(wave);
@@ -7015,6 +7022,9 @@ export class Daemon {
       this.log(
         `wave ${wave}: release train cancelled at ${String(event.data.stage)} by ${String(event.data.by)}`,
       );
+    // The morning digest (SPEC §4.6.16): the wave ended, its release_go opened, or it needs its owner.
+    const trigger = this.digestTrigger(wave, event);
+    if (trigger !== null) await this.publishDigest(wave, trigger);
     for (const task of ended) {
       const ids = (queued[task] ?? []).map((q) => q.message_id);
       if (ids.length === 0) continue;
@@ -7029,6 +7039,91 @@ export class Daemon {
       });
     }
     return published;
+  }
+
+  /**
+   * The digest an appended event publishes (SPEC §4.6.16), or null: none for it, or one with the
+   * same trigger went out less than `autopilot.digest_min_interval_s` ago. A release_go's own
+   * escalation is the release_go digest's, not another.
+   */
+  private digestTrigger(wave: WaveId, event: JournalEvent): DigestTrigger | null {
+    const trigger: DigestTrigger | null =
+      event.type === "wave_complete" || event.type === "release_done"
+        ? "wave_complete"
+        : event.type === "wave_stopped"
+          ? "stopped"
+          : event.type === "decision_opened" && event.data.kind === "release_go"
+            ? "release_go"
+            : event.type === "decision_escalated" && event.data.kind !== "release_go"
+              ? "escalation"
+              : null;
+    if (trigger === null) return null;
+    const last = this.journalEvents(wave)
+      .filter((e) => e.type === "digest_published" && e.data.trigger === trigger)
+      .at(-1);
+    const minMs = secondsMs(this.config.get("autopilot.digest_min_interval_s", wave) as number);
+    return last !== undefined && this.now() - Date.parse(last.at) < minMs ? null : trigger;
+  }
+
+  /**
+   * Publish the wave's digest retained on `volley/_waves/<wave>/digest`, journal
+   * `digest_published { trigger }`, and push its summary line once: a `progress` envelope of
+   * type `digest` on volleyd's own topic (the notify bridge rings for it). Never fails the append
+   * that triggered it.
+   */
+  private async publishDigest(wave: WaveId, trigger: DigestTrigger): Promise<void> {
+    try {
+      const state = this.snapshot(wave);
+      if (state === null) return;
+      const digest = digestOf(
+        this.journalEvents(wave),
+        state,
+        dateOf(this.time).toISOString(),
+        trigger,
+      );
+      const msg = summaryLine(digest);
+      await this.publish(
+        waveDigestTopic(wave),
+        this.envelope("_waves/digest", "digest", digest),
+        true,
+      );
+      this.digests.set(wave, digest);
+      await this.append(wave, { type: "digest_published", data: { trigger } });
+      // SPEC §4.1: progress is QoS 0, not retained.
+      await this.broker.publish(
+        buildTopic(this.opts.namespace, DAEMON_AGENT_ID, "progress"),
+        JSON.stringify(this.envelope("progress", "digest", { msg, wave, trigger })),
+        { qos: 0, retain: false },
+      );
+      this.log(`digest ${wave} (${trigger}): ${msg}`);
+    } catch (e) {
+      this.log(
+        `digest ${wave} (${trigger}) not published: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  /** `digest`: the wave's digest as last published (SPEC §4.6.16). */
+  private async digestOp(p: Record<string, unknown>): Promise<HandlerResult> {
+    const wave = typeof p.wave === "string" ? p.wave : "";
+    // Archiving clears the retained digest, so an archived wave has none to answer with.
+    if (this.archived.has(wave))
+      return { ok: false, error: `wave '${wave}' is archived; its digest was cleared` };
+    if (!this.waves.has(wave)) return { ok: false, error: `unknown wave '${wave}'` };
+    const cached = this.digests.get(wave);
+    if (cached !== undefined) return { ok: true, result: cached };
+    const raw = await this.broker.queryRetained(waveDigestTopic(wave), DAEMON_DEFAULTS.probe_ms);
+    let env: { payload?: Digest } | null = null;
+    try {
+      env = raw !== null && raw !== "" ? (JSON.parse(raw) as { payload?: Digest }) : null;
+    } catch {
+      return { ok: false, error: `wave '${wave}' has a malformed retained digest` };
+    }
+    if (env?.payload !== undefined) return { ok: true, result: env.payload };
+    return {
+      ok: false,
+      error: `wave '${wave}' has no digest yet (one is published when it completes, releases, stops or first needs its owner)`,
+    };
   }
 
   /** An appended event's `/events` mirror, then the wave state it changed. */
@@ -8260,6 +8355,8 @@ export class Daemon {
         return this.listDecisions(p);
       case "policy":
         return this.policyOp(p);
+      case "digest":
+        return this.digestOp(p);
       case "resolve":
         return this.resolveOp(p, by);
       case "inbox":

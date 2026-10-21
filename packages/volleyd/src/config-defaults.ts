@@ -76,6 +76,7 @@ export const CONFIG_DEFAULTS: Tunables = {
     reconnect_grace_s: 900,
     incident_wait_max_s: 14_400,
     fix_flake_max: 3,
+    digest_min_interval_s: 1800,
   },
   // --- Archiving (SPEC §4.6.20) ---
   archive_ended_after_h: 24,

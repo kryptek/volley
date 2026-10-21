@@ -32,6 +32,7 @@
  *   - `machine-*.json` -> machine.schema.json
  *   - `readiness-*.json` -> readiness.schema.json
  *   - `archive-*.json` -> archive.schema.json
+ *   - `digest-*.json` -> digest.schema.json
  *   - `setupplan-*.json` -> setup-result.schema.json `$defs/plan` (a result, not an envelope)
  *   - `setupapply-*.json` -> setup-result.schema.json `$defs/applied` (a result, not an envelope)
  *   - `release-playbook-*.json` -> release-playbook.schema.json (a file, not an envelope)
@@ -74,6 +75,7 @@ const PREFIX_TO_SCHEMA: Record<string, string> = {
   machine: "machine.schema.json",
   readiness: "readiness.schema.json",
   archive: "archive.schema.json",
+  digest: "digest.schema.json",
   setupplan: "setup-result.schema.json#/$defs/plan",
   setupapply: "setup-result.schema.json#/$defs/applied",
   release: "release-playbook.schema.json",
