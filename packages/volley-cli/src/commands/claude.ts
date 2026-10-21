@@ -5,6 +5,7 @@ import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
+import { type ListResult, type UsageRecord, groupAccounts, renderGroups } from "../claude/groups";
 import { connectAsClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
@@ -19,6 +20,7 @@ export interface ClaudeArgs {
  * `volley claude`: Claude account profiles on the volleyd supervisor. Each verb is one control
  * query on volleyd's mailbox (`claude_accounts`, `claude_account_add`, `claude_signin`,
  * `claude_sync`, `agent_move_account`), answered with an `ack` on this client's own mailbox.
+ * `list` also reads every account's retained usage record, to show each Anthropic account once.
  * Signing in happens in the browser, through Claude Code's own flow: this command prints the
  * sign-in URL volleyd got from `claude auth login` and never sees a code or a token.
  */
@@ -26,7 +28,7 @@ export interface ClaudeArgs {
 const HELP = `Usage:
   volley claude add <label> [--machine <name>] [--wait]   Add a profile and start its sign-in
   volley claude signin <acct> [--wait]                    Sign an existing profile in again
-  volley claude list [--json]                             Profiles, sign-in state, sharing
+  volley claude list [--json] [--show-email]              Accounts grouped by e-mail, their machines, usage, sharing
   volley claude sync [<acct>]                             Re-apply sharing.yaml, re-sync MCP servers
   volley claude move <agent-id> <acct>                    Stop an agent and respawn it under <acct>
 
@@ -41,7 +43,8 @@ Options:
   --wait                 add / signin: wait for the sign-in to finish (exit 1 if it fails,
                          124 if it has not ended within --timeout, default 960)
   --timeout <seconds>    How long to wait for volleyd's answer (default 60; move: 180)
-  --json                 list: print the raw result
+  --json                 list: print the raw result, with the usage records as "records"
+  --show-email           list: show each account's e-mail (masked by default)
   --broker-url <url>     MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --namespace <ns>       volleyd's namespace (env: VOLLEY_NAMESPACE; default: default)
   --username <user>      Broker username (env: VOLLEY_AUTH_USERNAME)
@@ -53,6 +56,7 @@ const OPTIONS = {
   wait: { type: "boolean" },
   timeout: { type: "string" },
   json: { type: "boolean" },
+  "show-email": { type: "boolean" },
   "broker-url": { type: "string" },
   namespace: { type: "string" },
   username: { type: "string" },
@@ -70,6 +74,8 @@ const PROBE_MS = 1_000;
 const LIVE = new Set(["spawning", "registered", "working"]);
 /** Every account's sign-in topic: subscribed before the request, so no end can be missed. */
 const SIGNIN_FILTER = "volley/_system/claude/+/signin";
+/** Every account's retained usage record (SPEC §4.6.12). */
+const ACCOUNTS_FILTER = "volley/_system/claude-accounts/+";
 
 interface Answer {
   ok: boolean;
@@ -109,6 +115,7 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
     io.stderr(`volley claude ${verb}: ${msg}\n`);
     return EXIT.USAGE;
   };
+  if (v["show-email"] === true && verb !== "list") return usage("--show-email is for list only");
   let op: string;
   let fields: Record<string, unknown>;
   switch (verb) {
@@ -194,8 +201,10 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
       return EXIT.OK;
     }
     if (verb === "list") {
-      if (v.json === true) io.stdout(`${JSON.stringify(answer.result, null, 2)}\n`);
-      else printList(io, answer.result as ListResult);
+      const result = answer.result as ListResult;
+      const records = await usageRecords(broker);
+      if (v.json === true) io.stdout(`${JSON.stringify({ ...result, records }, null, 2)}\n`);
+      else printList(io, result, records, v["show-email"] === true);
       return EXIT.OK;
     }
     if (verb === "move") {
@@ -329,27 +338,22 @@ function reportEnd(io: IO, acct: string, end: SigninEnd): ExitCode {
   return EXIT.ERROR;
 }
 
-interface ListResult {
-  root: string;
-  accounts: {
-    id: string;
-    label: string;
-    machine: string;
-    plan?: string;
-    /** Absent for a profile on a paired machine until a sign-in there learned its HOME. */
-    dir?: string;
-    signin: { state: string; url?: string };
-  }[];
-  sharing: Record<string, string>;
+/** The retained `claude_account` records volleyd publishes, read for PROBE_MS. */
+async function usageRecords(broker: VolleyBroker): Promise<UsageRecord[]> {
+  const msgs = await broker.subscribeCollect(ACCOUNTS_FILTER, Number.POSITIVE_INFINITY, PROBE_MS);
+  return msgs.flatMap(({ payload }) => {
+    const e = parseEnvelope(payload);
+    // Only volleyd's records count (SPEC §4.4: the topic is anyone's to write).
+    return e?.type === "claude_account" && e.agent_id === "volleyd"
+      ? [e.payload as UsageRecord]
+      : [];
+  });
 }
 
-function printList(io: IO, r: ListResult): void {
-  if (r.accounts.length === 0) io.stdout(`no Claude account profiles under ${r.root}\n`);
-  for (const a of r.accounts) {
-    const plan = a.plan !== undefined ? ` ${a.plan}` : "";
-    io.stdout(`${a.id}\t${a.signin.state}${plan}\t${a.machine}\t${a.label}\t${a.dir ?? "-"}\n`);
-    if (a.signin.url !== undefined) io.stdout(`  sign in: ${a.signin.url}\n`);
-  }
+function printList(io: IO, r: ListResult, records: UsageRecord[], showEmail: boolean): void {
+  const groups = groupAccounts(r, records);
+  if (groups.length === 0) io.stdout(`no Claude account profiles under ${r.root}\n`);
+  io.stdout(renderGroups(groups, { now: Date.now(), showEmail }));
   io.stdout(
     `sharing: ${Object.entries(r.sharing)
       .map(([item, mode]) => `${item}=${mode}`)
