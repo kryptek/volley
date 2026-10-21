@@ -818,10 +818,12 @@ export default function App() {
   const coordinators = Object.fromEntries(
     Object.values(state.waves).map((w) => [w.id, coordinatorFor(w, ctx)]),
   );
-  // The coordinators window's chip, as in the prototype: live waves whose coordinator is not working.
-  const notWorking = waveList.filter(
-    (w) => !ENDED_LABEL[w.state?.status ?? ""] && coordinators[w.id]?.state !== "working",
-  ).length;
+  // The coordinators window's chip, as in the prototype: live waves whose coordinator is not
+  // working (a reconnecting one is coming back by itself: not counted).
+  const notWorking = waveList.filter((w) => {
+    const c = coordinators[w.id]?.state;
+    return !ENDED_LABEL[w.state?.status ?? ""] && c !== "working" && c !== "reconnecting";
+  }).length;
 
   const show = (wave: string) =>
     setHidden((h) => {
@@ -995,6 +997,7 @@ export default function App() {
                 me={me}
                 identity={identity}
                 coordinatorState={coordinator?.state}
+                autopilotFeed={state.waveFeed?.[id]}
                 startedAt={startedAt(id)}
                 frame={place(id, frameAttn(waveAttn[id] ?? { tier: "none" }))}
                 onChat={toggleSteer}

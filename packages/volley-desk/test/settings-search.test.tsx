@@ -12,7 +12,7 @@ describe("matchSections", () => {
     expect(keys("ceiling")).toEqual(["supervisor"]);
     expect(keys("  Background ")).toEqual(["appearance"]);
     expect(keys("ABOUT")).toEqual(["about"]);
-    expect(keys("")).toHaveLength(9);
+    expect(keys("")).toHaveLength(10);
   });
 
   it("finds Sound by its words; 'theme' still finds Appearance too", () => {
@@ -60,7 +60,7 @@ describe("the sidebar search", () => {
     fireEvent.change(search(), { target: { value: "ceiling" } });
     expect(listed()).toEqual(["Supervisor"]);
     fireEvent.change(search(), { target: { value: "" } });
-    expect(listed()).toHaveLength(9);
+    expect(listed()).toHaveLength(10);
   });
 
   it("says so when nothing matches, and keeps the open section on screen", () => {

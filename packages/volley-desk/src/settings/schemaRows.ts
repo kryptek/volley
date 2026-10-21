@@ -3,9 +3,13 @@
  * (`spec/schemas/config.schema.json`, bundled at build time) — there is no
  * hand-maintained list of tunables. Each leaf of `$defs/tunableProperties`
  * becomes one row: a bounded number is a stepped slider, a boolean a switch, a
- * string enum a choice, a string (or string-or-null) a text field, a nested
- * object one row per leaf (a list leaf none), and the `lease_pools` map gets one capacity row per
- * configured pool. Labels and units come from the key, hints from the
+ * string enum a choice, a list of an enum (`autopilot.owner_only`) a
+ * multi-select, a string (or string-or-null) a text field, a nested
+ * object one row per leaf (any other list leaf none), and the `lease_pools` map gets one capacity row per
+ * configured pool. A string enum that may also be null (`fleet.local_agents`,
+ * which the retained config carries resolved) is a choice of its strings, and a
+ * nested map of integers (`fleet.fallback.per_machine`) gets one stepped row per
+ * heavy pool (one that sets `per_machine`). Labels and units come from the key, hints from the
  * schema `description` (else the bounds). Only the grouping into the modal's
  * sections is listed here; a tunable it does not know lands under "Other".
  */
@@ -31,7 +35,14 @@ export interface JsonSchema {
 
 export const CONFIG_SCHEMA = configSchema as JsonSchema;
 
-export const SECTIONS = ["Admission", "Leases", "Attention", "Recovery", "Other"] as const;
+export const SECTIONS = [
+  "Admission",
+  "Leases",
+  "Attention",
+  "Recovery",
+  "Autopilot",
+  "Other",
+] as const;
 export type Section = (typeof SECTIONS)[number];
 
 /** Top-level tunable → section, after the prototype's grouping. */
@@ -43,16 +54,20 @@ const SECTION_OF: Record<string, Section> = {
   claim_after_s: "Attention",
   heartbeat_alarm_s: "Attention",
   mailbox: "Attention",
+  fleet: "Admission",
   fallback_model: "Recovery",
   spawn_timeout_s: "Recovery",
   wake_grace_s: "Recovery",
   worktree_root: "Recovery",
+  autopilot: "Autopilot",
 };
 
 export type RowControl =
   | { kind: "slider"; min: number; max: number; step: number }
   | { kind: "toggle" }
   | { kind: "choice"; options: string[] }
+  /** A list of distinct enum values (`autopilot.owner_only`): one checkbox per option. */
+  | { kind: "multi"; options: string[] }
   | { kind: "text"; nullable: boolean; minLength?: number; maxLength?: number };
 
 export interface SchemaRow {
@@ -63,7 +78,12 @@ export interface SchemaRow {
   unit: string;
   hint: string;
   control: RowControl;
+  /** The value in force when the config omits the path (a fallback per-machine cap: 1). */
+  default?: unknown;
 }
+
+/** SPEC §4.6.15: a heavy pool not named in `fleet.fallback.per_machine` gets this cap. */
+const FALLBACK_PER_MACHINE_DEFAULT = 1;
 
 const UNITS: [suffix: string, unit: string][] = [
   ["_ms", "ms"],
@@ -105,10 +125,19 @@ function controlFor(path: string, s: JsonSchema): RowControl {
     return { kind: "slider", min: s.minimum, max: s.maximum, step: s.type === "integer" ? 1 : 0.1 };
   }
   if (s.type === "boolean") return { kind: "toggle" };
-  if (s.enum && s.enum.length > 0 && s.enum.every((v) => typeof v === "string")) {
-    return { kind: "choice", options: s.enum as string[] };
+  const items = s.items as JsonSchema | undefined;
+  if (s.type === "array" && items?.enum?.every((e) => typeof e === "string")) {
+    return { kind: "multi", options: items.enum as string[] };
   }
+  const isChoice = (v: JsonSchema) =>
+    v.enum !== undefined && v.enum.length > 0 && v.enum.every((e) => typeof e === "string");
+  if (isChoice(s)) return { kind: "choice", options: s.enum as string[] };
   const variants = s.oneOf ?? [s];
+  // An enum or null: the retained config carries the resolved value, so offer the strings.
+  const choice = variants.find(isChoice);
+  if (choice && variants.every((v) => v === choice || v.type === "null")) {
+    return { kind: "choice", options: choice.enum as string[] };
+  }
   const str = variants.find((v) => v.type === "string");
   if (str && variants.every((v) => v.type === "string" || v.type === "null")) {
     return {
@@ -152,6 +181,10 @@ function row(
  */
 export function schemaRows(schema: JsonSchema, values: Tunables | null | undefined): SchemaRow[] {
   const props = schema.$defs?.tunableProperties?.properties ?? {};
+  const heavyPools = Object.entries(values?.lease_pools ?? {})
+    .filter(([, p]) => p.per_machine !== undefined)
+    .map(([pool]) => pool)
+    .sort();
   return Object.entries(props).flatMap(([key, raw]) => {
     const def = resolve(schema, raw);
     const section = SECTION_OF[key] ?? "Other";
@@ -163,8 +196,24 @@ export function schemaRows(schema: JsonSchema, values: Tunables | null | undefin
           const leaf = resolve(schema, leafRaw);
           const w = wordsAndUnit(sub);
           if (leaf.properties) return leaves(`${path}.${sub}`, `${words}${w.words} `, leaf);
-          // A list (`autopilot.owner_only`) has no row control: set it in config.yaml.
-          if (leaf.type === "array") return [];
+          // A list of anything but an enum has no row control: set it in config.yaml.
+          if (leaf.type === "array" && !(leaf.items as JsonSchema | undefined)?.enum) return [];
+          if (typeof leaf.additionalProperties === "object") {
+            // A nested map of per-pool caps (`fleet.fallback.per_machine`): a row per heavy pool.
+            const entry = resolve(schema, leaf.additionalProperties);
+            const last = words.trim().split(" ").at(-1) ?? "";
+            return heavyPools.map((pool) => ({
+              ...row(
+                `${path}.${sub}.${pool}`,
+                section,
+                `${pool} ${last} ${w.words}`,
+                w.unit,
+                entry,
+                leaf.description,
+              ),
+              default: FALLBACK_PER_MACHINE_DEFAULT,
+            }));
+          }
           return [row(`${path}.${sub}`, section, sentence(words + w.words), w.unit, leaf)];
         });
       return leaves(key, prefix, def);

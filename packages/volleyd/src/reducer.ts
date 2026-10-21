@@ -1,5 +1,7 @@
 import { ARCHIVED_ANSWER } from "./archive";
 import { type AutopilotRecord, emptyAutopilot, foldAutoResolved } from "./autopilot/budgets";
+import { queueOf } from "./autopilot/merge-queue";
+import { stepRelease } from "./autopilot/playbook";
 import type { Budget, EscalateWhy } from "./autopilot/policy";
 import { type DecisionRecord, parksTask } from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
@@ -62,6 +64,12 @@ export interface WaveRecord {
   spawnFailures: Record<TaskId, Record<string, SpawnFailure>>;
   /** Spawns added to the wave's budget by `raise by N` answers (spawn_budget_exhausted). */
   budget_raised?: number;
+  /**
+   * The agent last journaled as bound to the wave's coordinator-name owner (`owner_reconnected`),
+   * so a daemon restart replaying the registry does not journal the same reconnect again; null
+   * once a claim gave the wave another owner.
+   */
+  owner_agent?: string | null;
   /** What autopilot answered and escalated (SPEC §4.6.16); absent in older snapshots. */
   autopilot?: AutopilotRecord;
   /** When the wave last ended (`wave_stopped` / `wave_complete`); null after a resume. */
@@ -165,6 +173,8 @@ const WAVE_STATUS: Partial<Record<JournalEvent["type"], WaveStatus>> = {
   wave_resumed: "running",
   wave_stopped: "stopped",
   wave_complete: "complete",
+  release_started: "releasing",
+  release_done: "complete",
 };
 
 /**
@@ -387,7 +397,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
           return x !== undefined && x.task === d.task && parksTask(x);
         });
         const parked = task !== undefined && task.stage === "awaiting_decision";
-        // An archive's close (SPEC §4.6.18) leaves the task parked: its wave has ended for good.
+        // An archive's close (SPEC §4.6.20) leaves the task parked: its wave has ended for good.
         const archiveClose =
           d.resolved.answer === ARCHIVED_ANSWER &&
           (state.status === "stopped" || state.status === "complete");
@@ -465,6 +475,10 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     }
     case "owner_claimed":
       state.owner = (ev.data.owner as string | null | undefined) ?? null;
+      next.owner_agent = null;
+      break;
+    case "owner_reconnected":
+      next.owner_agent = ev.data.agent_id as string;
       break;
     case "wave_archived":
       next.archived = {
@@ -477,10 +491,19 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       break;
     default: {
       const status = WAVE_STATUS[ev.type];
-      if (status !== undefined) state.status = status;
+      // A releasing wave that was paused resumes releasing (SPEC §4.6.19).
+      if (status !== undefined)
+        state.status =
+          status === "running" && state.release !== undefined && ev.type === "wave_resumed"
+            ? "releasing"
+            : status;
       if (ev.type === "wave_stopped" || ev.type === "wave_complete") next.ended_at = ev.at;
       if (ev.type === "wave_resumed") next.ended_at = null;
     }
+  }
+  if (state.release !== undefined || ev.type === "release_started") {
+    const release = stepRelease(state.release ?? null, ev);
+    if (release !== null) state.release = release;
   }
 
   if (ev.task !== undefined && next.wave?.tasks[ev.task] !== undefined) {
@@ -555,6 +578,12 @@ function derive(state: WaveState, rec: WaveRecord): void {
   state.tasks = state.tasks.map(({ stage_label: _l, stage_group: _g, ...t }) =>
     withStageGroup(t, rec.pipeline[t.id]),
   );
+  state.tasks = state.tasks.map(({ remediation: _r, ...t }) => {
+    const r = rec.pipeline[t.id]?.remediation;
+    return r === undefined
+      ? t
+      : { ...t, remediation: { kind: r.kind, test: r.test, since: r.since } };
+  });
   state.tasks = state.tasks.map(({ waiting_on: _w, why_waiting: _y, alarms: _a, ...t }) => {
     if (t.stage === "awaiting_decision") {
       const ids = openOn(t.id);
@@ -569,8 +598,10 @@ function derive(state: WaveState, rec: WaveRecord): void {
     const hold = rec.pipeline[t.id]?.ci_hold;
     if (hold !== undefined && t.stage !== "done" && t.stage !== "cancelled") {
       const at = hold.sha.slice(0, 7);
-      const why =
-        hold.checks.total === 0
+      const infra = hold.reason === "infra_incident";
+      const why = infra
+        ? `CI infra incident: ${hold.incident ?? "infra-shaped failure"}; re-checking`
+        : hold.checks.total === 0
           ? `CI pending on ${at} (no run yet)`
           : `CI pending on ${at} (${hold.checks.done}/${hold.checks.total} checks)`;
       const pr = hold.pr ?? t.pr;
@@ -583,13 +614,20 @@ function derive(state: WaveState, rec: WaveRecord): void {
                 number: pr.number,
                 url: pr.url,
                 head_sha: hold.sha,
-                ci: hold.checks.total === 0 ? ("none" as const) : ("running" as const),
+                ci: infra
+                  ? ("red" as const)
+                  : hold.checks.total === 0
+                    ? ("none" as const)
+                    : ("running" as const),
                 checks: hold.checks,
               },
             }
           : {}),
       };
     }
+    // A red head awaiting its flake's fixer: say which test.
+    if (t.remediation !== undefined && t.stage !== "done" && t.stage !== "cancelled")
+      return { ...t, why_waiting: `CI flake in ${t.remediation.test}: fixer pending` };
     const pending =
       t.stage === "queued"
         ? (rec.wave?.tasks[t.id]?.after ?? []).filter((d) => stageOf.get(d) !== "done")
@@ -611,6 +649,8 @@ function derive(state: WaveState, rec: WaveRecord): void {
     return { ...t, waiting_on: pending, why_waiting: why };
   });
   state.gates = state.tasks.filter((t) => t.stage === "merge_ready").map((t) => t.id);
+  const queue = queueOf(rec).map(({ task, state, since }) => ({ task, state, since }));
+  state.merge_queue = queue.length > 0 ? queue : undefined;
   // Autopilot's tally, once it has done anything (the daemon sets `enabled` from the effective
   // config when it publishes).
   const a = rec.autopilot;
@@ -664,6 +704,10 @@ const GROUP_NAME: Record<string, string> = {
  * closed stage enum is unchanged: `stage` is the group's first stage.
  */
 function withStageGroup(t: TaskState, p: TaskPipeline | undefined): TaskState {
+  // A fixup whose only job is CI red on the pipeline's own head (a ci_failed answered `fixup`).
+  const ci = p?.directive?.ci === "red" && p.directive.from === undefined;
+  if (ci && t.stage === "fixup" && p?.roles.length === 1 && p.roles[0] === "fixup")
+    return { ...t, stage_label: "fixup (CI directive)" };
   if (p === undefined || p.roles.length < 2 || p.rebasing) return t;
   const groupStages = new Set(["spec_review", "quality_review", "fixup", "implement"]);
   if (!groupStages.has(t.stage)) return t;

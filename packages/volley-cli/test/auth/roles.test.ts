@@ -157,6 +157,20 @@ describe("what each role may do (Dynamic Security semantics, %u substituted)", (
     expect(fake.canPublish("desk", "volley/_system/desk-probe/desk-ab12", "desk-ab12")).toBe(false);
   });
 
+  it("the needs-you inbox (SPEC §4.6.18): steer, watch and admin read it; only the supervisors write it", () => {
+    for (const u of ["steer-test", "watch-test", "admin-test", "desk"]) {
+      expect(fake.canSubscribe(u, "volley/_inbox/+")).toBe(true);
+      expect(fake.canPublish(u, "volley/_inbox/d-w1-d-abc")).toBe(false);
+    }
+    expect(fake.canPublish("coordinator", "volley/_inbox/d-w1-d-abc")).toBe(false);
+    expect(fake.canPublish(X, "volley/_inbox/d-w1-d-abc")).toBe(false);
+    expect(fake.canPublish("supervisor-test", "volley/_inbox/d-w1-d-abc")).toBe(true);
+    expect(fake.canPublish("volleyd", "volley/_inbox/d-w1-d-abc")).toBe(true);
+    // An answer goes to volleyd's mailbox (inbox_answer): any login that may steer.
+    expect(fake.canPublish("steer-test", "volley/ns/volleyd/mailbox")).toBe(true);
+    expect(fake.canPublish("watch-test", "volley/ns/volleyd/mailbox")).toBe(false);
+  });
+
   it("supervisor writes the tree but not the account-op or answer topics", () => {
     expect(fake.canPublish("supervisor-test", "volley/_waves/w1/state")).toBe(true);
     expect(fake.canPublish("supervisor-test", "volley/_system/auth/ops/admin-test")).toBe(false);

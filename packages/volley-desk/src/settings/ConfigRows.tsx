@@ -24,6 +24,7 @@ import {
   CONFIG_SCHEMA,
   SECTIONS,
   type SchemaRow,
+  type Section,
   patchFor,
   schemaRows,
   valueAt,
@@ -40,10 +41,17 @@ const COPY_RESET_MS = 1500;
 /** Units written right after the value, as the prototype does ("3×"). */
 const UNSPACED_UNITS = new Set(["×"]);
 
+/** Equal values: the same scalar, or lists with the same items in the same order. */
+export function same(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  return Array.isArray(a) && Array.isArray(b) && JSON.stringify(a) === JSON.stringify(b);
+}
+
 function display(value: unknown, unit: string): string {
   if (value === undefined) return "—";
   if (value === null) return "none";
   if (typeof value === "boolean") return value ? "on" : "off";
+  if (Array.isArray(value)) return `${value.length} selected`;
   const gap = unit && !UNSPACED_UNITS.has(unit) ? " " : "";
   return `${String(value)}${gap}${unit}`;
 }
@@ -148,6 +156,35 @@ function TextControl(p: {
   );
 }
 
+/** A list of enum values as one checkbox per option; a change sends the whole new list. */
+function MultiControl(p: {
+  row: SchemaRow;
+  options: readonly string[];
+  value: unknown;
+  disabled: boolean;
+  onCommit: (v: string[]) => void;
+}) {
+  const chosen = Array.isArray(p.value)
+    ? p.value.filter((v): v is string => typeof v === "string")
+    : [];
+  return (
+    <fieldset className="cfg-multi" aria-label={p.row.label} disabled={p.disabled}>
+      {p.options.map((o) => (
+        <label key={o} className="cfg-multi-opt mono">
+          <input
+            type="checkbox"
+            checked={chosen.includes(o)}
+            onChange={(e) =>
+              p.onCommit(e.target.checked ? [...chosen, o] : chosen.filter((x) => x !== o))
+            }
+          />
+          {o}
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
 export interface ConfigRowsProps {
   scope: ConfigScope;
   /** The values shown: the retained `_config` (global) or the wave's `effective_config`. */
@@ -158,9 +195,24 @@ export interface ConfigRowsProps {
   accent: string;
   /** Under the section groups (the global scope's save note). */
   foot?: string;
+  /** A row to scroll into view and focus on open, by its path (`fleet.local_agents`). */
+  focus?: string | undefined;
+  /** Bumped on every request, so the same row is brought back again. */
+  focusSeq?: number | undefined;
+  /** Only these sections' groups (Settings › Autopilot's own); all of them by default. */
+  sections?: readonly Section[];
 }
 
-export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRowsProps) {
+export function ConfigRows({
+  scope,
+  values,
+  transport,
+  accent,
+  foot,
+  focus,
+  focusSeq,
+  sections = SECTIONS,
+}: ConfigRowsProps) {
   const [drafts, setDrafts] = useState<Record<string, unknown>>({});
   const [acks, setAcks] = useState<Record<string, RowState>>({});
   /** Numbers each user change; `latest` holds the newest per path. */
@@ -176,6 +228,18 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
   /** Paths whose slider is moving and not let go yet. */
   const editing = useRef(new Set<string>());
   const writable = transport !== null && scope === "global";
+  const root = useRef<HTMLDivElement>(null);
+  // A deep link into a row (a machine card's chip): scroll to it and focus its control.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new focusSeq is a new request
+  useEffect(() => {
+    if (!focus) return;
+    const rowEl = [
+      ...(root.current?.querySelectorAll<HTMLElement>(".cfg-row[data-path]") ?? []),
+    ].find((el) => el.dataset.path === focus);
+    if (!rowEl) return;
+    rowEl.scrollIntoView({ block: "center" });
+    rowEl.querySelector<HTMLElement>("select, input, button, [role='slider'], [tabindex]")?.focus();
+  }, [focus, focusSeq]);
   /** No transport: a global row drafts a value for its copyable command instead of sending. */
   const draftOnly = transport === null && scope === "global";
   const rows = schemaRows(CONFIG_SCHEMA, values);
@@ -208,10 +272,10 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
     setDrafts((d) => {
       const keep = Object.entries(d).filter(([path, draft]) => {
         const now = valueAt(values, path);
-        if (Object.is(draft, now)) return false;
+        if (same(draft, now)) return false;
         const busy =
           editing.current.has(path) || path in queued.current || path in inFlight.current;
-        return busy || Object.is(valueAt(before, path), now);
+        return busy || same(valueAt(before, path), now);
       });
       return keep.length === Object.keys(d).length ? d : Object.fromEntries(keep);
     });
@@ -236,7 +300,7 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
   const commit = (row: SchemaRow, value: unknown, delay: number) => {
     if (draftOnly) {
       editing.current.delete(row.path);
-      if (Object.is(value, valueAt(values, row.path))) dropDraft(row.path);
+      if (same(value, valueAt(values, row.path) ?? row.default)) dropDraft(row.path);
       else setDrafts((d) => ({ ...d, [row.path]: value }));
       return;
     }
@@ -246,7 +310,7 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
     unqueue(path);
     const flying = inFlight.current[path];
     // Compare with what is in flight, not the retained value: a revert must still go out.
-    if (Object.is(value, flying ? flying.value : valueAt(values, path))) {
+    if (same(value, flying ? flying.value : (valueAt(values, path) ?? row.default))) {
       if (flying) latest.current[path] = flying.n;
       else dropDraft(path);
       return;
@@ -267,11 +331,11 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
   };
 
   const renderRow = (row: SchemaRow) => {
-    const current = valueAt(values, row.path);
+    const current = valueAt(values, row.path) ?? row.default;
     const shown = Object.hasOwn(drafts, row.path) ? drafts[row.path] : current;
     const c = row.control;
     return (
-      <div className="cfg-row" key={row.path}>
+      <div className="cfg-row" key={row.path} data-path={row.path}>
         <div className="cfg-lbl">
           <span>{row.label}</span>
           <span className="mono">{display(shown, row.unit)}</span>
@@ -298,6 +362,14 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
               </option>
             ))}
           </select>
+        ) : c.kind === "multi" ? (
+          <MultiControl
+            row={row}
+            options={c.options}
+            value={shown}
+            disabled={!(writable || draftOnly) || current === undefined}
+            onCommit={(v) => commit(row, v, 0)}
+          />
         ) : c.kind === "slider" ? (
           <ElasticSlider
             value={typeof shown === "number" ? shown : c.min}
@@ -332,7 +404,7 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
         ) : (
           draftOnly &&
           current !== undefined &&
-          (Object.hasOwn(drafts, row.path) && !Object.is(shown, current) ? (
+          (Object.hasOwn(drafts, row.path) && !same(shown, current) ? (
             <CopyLine command={copyCommand(row.path, shown)} />
           ) : (
             <div className="cfg-hint">Pick a new value to copy its command.</div>
@@ -351,13 +423,13 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
       </p>
     );
   }
-  const groups = SECTIONS.flatMap((section) => {
+  const groups = sections.flatMap((section) => {
     const inSection = rows.filter((r) => r.section === section);
     if (section !== "Leases" && inSection.length === 0) return [];
     return [[section, inSection] as const];
   });
   return (
-    <>
+    <div className="cfg-rows" ref={root}>
       {groups.map(([section, inSection], i) => (
         <Group key={section} title={section} {...(foot && i === groups.length - 1 ? { foot } : {})}>
           {inSection.length === 0 ? (
@@ -367,6 +439,6 @@ export function ConfigRows({ scope, values, transport, accent, foot }: ConfigRow
           )}
         </Group>
       ))}
-    </>
+    </div>
   );
 }

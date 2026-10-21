@@ -585,6 +585,96 @@ describe("volley lease status on a machine-aware pool", () => {
   });
 });
 
+describe("volley lease status with per-machine overrides", () => {
+  let tb: TestBroker;
+  const since = "2026-10-19T12:00:00.000Z";
+  const at = `since ${since}`;
+  const held = (lease_id: string, holder: string, host: string) => ({
+    lease_id,
+    holder,
+    host,
+    since,
+    ttl_s: 3600,
+  });
+  const publishPool = async (payload: Record<string, unknown>) => {
+    const b = new VolleyBroker();
+    await b.connect({ url: tb.url, agentId: "volleyd" });
+    await b.publish(
+      `volley/_system/leases/${payload.pool as string}`,
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "volleyd",
+          parentId: null,
+          channel: "_system/leases",
+          type: "lease_pool",
+          payload,
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    await b.disconnect();
+  };
+  beforeEach(async () => {
+    tb = await startTestBroker();
+  });
+  afterEach(async () => {
+    await tb.close();
+  });
+
+  it("shows each host's cap in force (override, else per_machine), hosts with a cap entry included", async () => {
+    await publishPool({
+      pool: "js-suite",
+      capacity: 4,
+      per_machine: 2,
+      per_machine_overrides: { "box-a": 3, laptop: 1, "box-c": 0 },
+      held: [
+        held("l-1", "agent-a", "box-a"),
+        held("l-2", "agent-b", "laptop"),
+        held("l-3", "agent-c", "box-a"),
+      ],
+      queue: [{ lease_id: "l-4", holder: "agent-d", host: "box-b", since }],
+      reasons: [],
+    });
+    const r = await runCli({ argv: ["lease", "status", "--broker-url", tb.url] });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe(
+      [
+        "js-suite  3/4 held  max 2 per machine (box-a 3, box-c 0, laptop 1)  1 queued",
+        "  box-a  2/3 held",
+        `    held    l-1  agent-a  ${at}`,
+        `    held    l-3  agent-c  ${at}`,
+        "  box-b  0/2 held",
+        `    queued  l-4  agent-d  ${at}`,
+        "  box-c  0/0 held",
+        "  laptop  1/1 held",
+        `    held    l-2  agent-b  ${at}`,
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("overrides without per_machine: a host with no override has no cap and shows only its count", async () => {
+    await publishPool({
+      pool: "js-suite",
+      capacity: 4,
+      per_machine_overrides: { laptop: 1 },
+      held: [held("l-1", "agent-a", "box-a")],
+      queue: [],
+      reasons: [],
+    });
+    const r = await runCli({ argv: ["lease", "status", "--broker-url", tb.url] });
+    expect(r.stdout).toBe(
+      [
+        "js-suite  1/4 held  max per machine: laptop 1  0 queued",
+        "  box-a  1 held",
+        `    held    l-1  agent-a  ${at}`,
+        "  laptop  0/1 held",
+        "",
+      ].join("\n"),
+    );
+  });
+});
+
 describe("volley lease with a supervisor that never answers", () => {
   it("run: gives up after three unanswered re-sends and runs unleased", async () => {
     const tb = await startTestBroker();

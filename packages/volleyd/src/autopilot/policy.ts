@@ -28,7 +28,8 @@ export type CountedBudget =
   | "nudge_max"
   | "respawn_max"
   | "rereview_max"
-  | "question_max";
+  | "question_max"
+  | "ci_fixup_max";
 
 /** What a counted budget is per: the task, one role of it, or one run (`<task>/<role>/<attempt>`). */
 export type BudgetScope = "task" | "task_role" | "run";
@@ -91,6 +92,9 @@ const onOneOf =
   (...ons: string[]) =>
   (d: Facts): boolean =>
     ons.includes(String(on(d)));
+
+/** A red head's decision: a ci_failed, or a blocked agent's on a red PR head (`agent_blocked_ci`). */
+const onRedHead = onOneOf("ci_failed", "agent_blocked_ci");
 
 /** spawn_failed: the daemon's automatic retries have stopped (`spawn_retry_max`). */
 const retriesStopped = (d: Facts, ctx: PolicyContext): boolean =>
@@ -164,7 +168,7 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     answer: "respawn",
     budget: { name: "respawn_max", per: "task_role" },
     rationale:
-      "a second stall needs a fresh agent (escalated no_policy while the decision does not offer respawn)",
+      "a second stall needs a fresh agent: an implementer continues its pushed branch and PR",
   },
   {
     policy: "agent_blocked/respawn-failed",
@@ -174,6 +178,16 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     answer: "respawn",
     budget: { name: "respawn_max", per: "task_role" },
     rationale: "a fresh agent picks the work up where the failed one left it",
+  },
+  {
+    policy: "agent_blocked/respawn-unverifiable",
+    kinds: ["agent_blocked"],
+    condition: 'pipeline.on === "verify"',
+    when: onOneOf("verify"),
+    answer: "respawn",
+    budget: { name: "respawn_max", per: "task_role" },
+    rationale:
+      "re-verifying a retired agent's missing work fails the same way; a fresh one finishes it",
   },
   {
     policy: "agent_blocked/respawn-result",
@@ -271,16 +285,56 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     rationale: "the end of a wave needs no answer; the owner reads its outcome",
   },
   {
+    policy: "ci_failed/fixup-own-change",
+    kinds: ["ci_failed", "agent_blocked"],
+    condition:
+      'pipeline.on === "ci_failed" or "agent_blocked_ci", and classification: own_change (unclassified ci_failed: infra === false)',
+    when: (d) =>
+      onRedHead(d) &&
+      (d.classification === "own_change" ||
+        (on(d) === "ci_failed" && d.classification === undefined && d.infra === false)),
+    answer: "fixup",
+    budget: { name: "ci_fixup_max", per: "task" },
+    rationale: "a fixup agent with the CI result as its directive is what a person would do",
+  },
+  {
+    policy: "ci_failed/fix-flake",
+    kinds: ["ci_failed", "agent_blocked"],
+    condition: 'pipeline.on === "ci_failed" or "agent_blocked_ci", and classification: flake',
+    when: (d) => onRedHead(d) && d.classification === "flake",
+    answer: "fix flake",
+    rationale:
+      "a test the PR does not touch gets a dedicated fixer, never a re-run or a wider scope",
+  },
+  {
+    policy: "ci_failed/infra-incident",
+    kinds: ["ci_failed"],
+    condition:
+      "classification: infra_incident (asked only once autopilot.incident_wait_max_s passed)",
+    when: (d) => on(d) === "ci_failed" && d.classification === "infra_incident",
+    answer: null,
+    escalate: "budget_exhausted",
+    rationale: "the incident outlasted the wait: the owner decides; volleyd never re-runs CI",
+  },
+  {
     policy: "ci_failed/owner",
     kinds: ["ci_failed"],
-    condition: "always (ci_none included)",
+    condition: "otherwise (ci_none included)",
     answer: null,
+    rationale: "a red head no rule routes and a repository without workflows are the owner's",
+  },
+  {
+    policy: "merge_conflict/respawn",
+    kinds: ["merge_conflict"],
+    condition: "within respawn_max per task/role",
+    answer: "respawn",
+    budget: { name: "respawn_max", per: "task_role" },
     rationale:
-      "a CI fixup and the flake route need pipeline work; a repository without workflows is the owner's",
+      "a fresh rebase (or merge) agent retries the update; a conflict it cannot resolve either is the owner's",
   },
   {
     policy: "pr/owner",
-    kinds: ["pr_closed", "remote_repo_missing", "merge_conflict"],
+    kinds: ["pr_closed", "remote_repo_missing"],
     condition: "always",
     answer: null,
     rationale: "where the work went, or a clone that is missing, is the owner's call",
@@ -299,6 +353,8 @@ const EVIDENCE = [
   "acct",
   "pct",
   "ci",
+  "infra",
+  "classification",
   "used",
   "budget",
   "host",

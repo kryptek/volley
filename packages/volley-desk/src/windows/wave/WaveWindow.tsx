@@ -17,6 +17,12 @@
  * agent window is needed for it. On a phone the graph wraps to the window's
  * width (`dagWidthFor`). Under the graph each placed task has a host chip
  * whose popover says why it runs there (`HostChips`).
+ *
+ * Autopilot (SPEC §4.6.16–19): the title's `autopilot on · N auto · M escalated`
+ * (or `autopilot off`) chip from `state.autopilot`; under the graph the merge
+ * queue as one line (`merging T3 · updating T5 · queued T7, T9`), the release
+ * train's stages while the wave is `releasing`, the synthetic fixer tasks (a
+ * wrench, `fixer for T3, T7`) and the wave's autopilot events as a feed.
  */
 import { BubbleChatIcon, Settings02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -24,9 +30,17 @@ import { type ReactNode, useEffect, useState } from "react";
 import { ciPending } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
 import { plural } from "../../lib/plural";
-import type { CoordinatorState, WaveStatePayload, WaveView } from "../../store/types";
+import { fixerFor, mergeQueueLine } from "../../store/autopilot";
+import type {
+  CoordinatorState,
+  FeedEntry,
+  WaveRelease,
+  WaveStatePayload,
+  WaveView,
+} from "../../store/types";
+import { Feed } from "../agent/Feed";
 import { Clawd } from "./Clawd";
-import { Dag, type DagNode, HostChips } from "./Dag";
+import { Dag, type DagNode, HostChips, fixerLabel } from "./Dag";
 import { WaveYaml, taskOrder } from "./WaveYaml";
 import { accentFor } from "./accent";
 import { STAGE_LABEL, STAGE_WEIGHT, deskStage, wavePct } from "./stages";
@@ -65,6 +79,8 @@ export interface WaveWindowProps {
   >;
   /** Needs-you / claim banners, shown above the graph. */
   banner?: ReactNode;
+  /** The wave's autopilot events (`waveFeed`), shown as a feed under the graph. */
+  autopilotFeed?: readonly FeedEntry[] | undefined;
   /** Children after the wave file (the steering panel). */
   children?: ReactNode;
   /** Highlights the chat glyph while the steering panel is open. */
@@ -134,7 +150,16 @@ export function dagNodes(s: WaveStatePayload): DagNode[] {
     const sp = spec[id];
     if (!sp) {
       if (!t || t.stage === "cancelled") return [];
-      return [{ id, issue: t.issue, after: [], stage: deskStage(t.stage) }];
+      const fixes = fixerFor(t);
+      return [
+        {
+          id,
+          issue: t.issue,
+          after: [],
+          stage: deskStage(t.stage),
+          ...(fixes ? { fixerFor: fixes } : {}),
+        },
+      ];
     }
     return [
       {
@@ -147,6 +172,30 @@ export function dagNodes(s: WaveStatePayload): DagNode[] {
       },
     ];
   });
+}
+
+/** The header chip: `autopilot on · 4 auto · 1 escalated`, or `autopilot off`. */
+export function autopilotChip(a: NonNullable<WaveStatePayload["autopilot"]>): string {
+  return a.enabled
+    ? `autopilot on · ${a.auto_resolved} auto · ${a.escalated} escalated`
+    : "autopilot off";
+}
+
+/** The release train's stages as plain rows (the inbox's release item draws the Stepper). */
+function TrainRows({ release }: { release: WaveRelease }) {
+  return (
+    <ul className="wave-train" aria-label="Release train">
+      {release.stages.map((st) => (
+        <li
+          key={st.name}
+          className={`train-${st.state}`}
+          {...(st.name === release.stage ? { "aria-current": "step" as const } : {})}
+        >
+          <span className="mono">{st.name}</span> · {st.state.replaceAll("_", " ")}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 export function WaveWindow(p: WaveWindowProps) {
@@ -169,6 +218,8 @@ export function WaveWindow(p: WaveWindowProps) {
   const endedAt = Date.parse(s?.updated_at ?? "");
   const ci = s?.tasks.filter(ciPending) ?? [];
   const ciLabels = Object.fromEntries(ci.map((t) => [t.id, "waiting for CI"]));
+  const fixers = tasks.filter((t) => t.fixerFor && !t.cancelled);
+  const queue = s?.merge_queue ?? [];
 
   const title = (
     <>
@@ -180,6 +231,11 @@ export function WaveWindow(p: WaveWindowProps) {
         </span>
       )}
       {ended && <span className="chip chip--ended">{ended}</span>}
+      {s?.autopilot && (
+        <span className={`chip chip--autopilot${s.autopilot.enabled ? "" : " chip--off"}`}>
+          {autopilotChip(s.autopilot)}
+        </span>
+      )}
       {!ended && ci.length > 0 && (
         <span
           className="chip chip--ci"
@@ -269,6 +325,28 @@ export function WaveWindow(p: WaveWindowProps) {
               maxWidth={p.frame.maxWidth === undefined ? undefined : dagWidthFor(p.frame.maxWidth)}
             />
             <HostChips tasks={s.tasks} />
+            {!ended && queue.length > 0 && (
+              <p className="wave-queue" aria-label="Merge queue">
+                <span className="dim">merge queue</span> {mergeQueueLine(queue)}
+              </p>
+            )}
+            {s.status === "releasing" && s.release && <TrainRows release={s.release} />}
+            {fixers.length > 0 && (
+              <ul className="wave-fixers" aria-label="Fixer tasks">
+                {fixers.map((t) => (
+                  <li key={t.id}>
+                    <span aria-hidden="true">🔧</span> <span className="mono">{t.id}</span>{" "}
+                    <span className="dim">{fixerLabel(t.fixerFor ?? [])}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {p.autopilotFeed && p.autopilotFeed.length > 0 && (
+              <>
+                <div className="lbl">Autopilot</div>
+                <Feed feed={p.autopilotFeed} />
+              </>
+            )}
             {!ended && ci.length > 0 && (
               <ul className="wave-ci">
                 {ci.map((t) => (

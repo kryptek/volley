@@ -312,7 +312,9 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
     writeFileSync(claudeJson, `${JSON.stringify({ projects: {} })}\n`);
     writeFileSync(
       join(env.home, "config.yaml"),
-      `fleet:\n  local_name: control\nhosts:\n  box:\n    target: dev@box\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n`,
+      // The own machine a candidate like any peer (fleet.local_agents: always): these tests are
+      // about health and decisions, not the fallback.
+      `fleet:\n  local_name: control\n  local_agents: always\nhosts:\n  box:\n    target: dev@box\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n`,
     );
     // Paired with `volley peer join` (peers.ts): `peers` lists it.
     writeFileSync(
@@ -667,7 +669,7 @@ describe("the supervisor's own record and readiness verdicts (SPEC §4.6.15)", (
     box = undefined;
     writeFileSync(
       join(env.home, "config.yaml"),
-      `fleet:\n  local_name: ${LOCAL}\nhosts:\n  box:\n    target: dev@box\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n`,
+      `fleet:\n  local_name: ${LOCAL}\n  local_agents: always\nhosts:\n  box:\n    target: dev@box\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n`,
     );
     writeFileSync(
       join(env.home, "peers.json"),

@@ -5,15 +5,18 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { parseEnvelope } from "volley-mcp/envelope";
 import { randomSuffix } from "volley-mcp/util";
 import { parse } from "yaml";
+import { formatPlaybook, wavePlaybook } from "../autopilot/playbook";
 import { briefPrefacePath, formatBriefPreface, readBriefPreface } from "../brief";
 import { authFields } from "../broker-auth";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../config-defaults";
 import { ALL_ZERO_WEIGHTS, volleydHome } from "../config-store";
 import { CONFIG_TOPIC, type ControlTarget, resolveControlTarget } from "../control";
 import { exec } from "../exec";
+import { LOCAL_HOST } from "../fleet-name";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { MACHINES_FILTER, type MachineRecord, parseMachine } from "../machines";
 import {
+  AUTO_HOST,
   type VerdictView,
   needsPlacement,
   preview as placementPreview,
@@ -42,6 +45,11 @@ It also prints the brief preface every agent of the wave would get — its path,
 prefix, or "none" — and fails with BRIEF_PREFACE_TOO_LARGE when the file is over
 brief_preface_max_bytes (the wave's config: value, else $VOLLEYD_HOME/config.yaml's, else the
 default; \`run\` re-checks it against the running daemon's config).
+
+And the release playbook (\`playbook:\`, else .volley/release.yaml in the repo): "release
+playbook: <path> (N stages, M owner-gated)", or "none" (\`playbook: none\`, or no file at the
+default path); an invalid one, or a configured one that does not exist, fails with
+RELEASE_PLAYBOOK_INVALID and its path-qualified errors.
 `;
 
 /**
@@ -65,6 +73,35 @@ function globalTunable<K extends "brief_preface_max_bytes" | "require_fresh_base
   }
 }
 
+/**
+ * `warning: T1 pins host: local while fleet.local_agents is never …`, one line per task of a
+ * `placement: auto` wave that names the own machine while the wave's `config:` or config.yaml
+ * sets `never` (SPEC §4.6.15): the wave file is explicit, so the task still runs there. Empty
+ * otherwise.
+ */
+export function localPinWarnings(wave: Wave, env: CommandArgs["env"]): string {
+  if (wave.placement !== AUTO_HOST) return "";
+  const file = join(volleydHome(env), "config.yaml");
+  // The wave's own `config:` layer wins over config.yaml, as it does in effective config.
+  let mode: unknown = (wave.config as { fleet?: { local_agents?: unknown } }).fleet?.local_agents;
+  try {
+    mode ??= existsSync(file)
+      ? (parse(readFileSync(file, "utf-8")) as { fleet?: { local_agents?: unknown } } | null)?.fleet
+          ?.local_agents
+      : undefined;
+  } catch {
+    return "";
+  }
+  if (mode !== "never") return "";
+  return wave.task_order
+    .filter((id) => wave.tasks[id]?.host === LOCAL_HOST)
+    .map(
+      (id) =>
+        `warning: ${id} pins host: local while fleet.local_agents is never; it still runs there (the wave file is explicit)\n`,
+    )
+    .join("");
+}
+
 /** `config.yaml`'s `placement.weights` (none: {}), for the merged all-zero check `run` makes. */
 function globalWeights(env: CommandArgs["env"]): Partial<PlacementConfig["weights"]> {
   const file = join(volleydHome(env), "config.yaml");
@@ -81,10 +118,10 @@ function globalWeights(env: CommandArgs["env"]): Partial<PlacementConfig["weight
 
 /**
  * `volleyd run` needs an owner to answer its decisions (an ownerless wave only auto-archives).
- * Shown unless VOLLEY_AGENT_ID names the caller (validate is offline: the registry is not read).
+ * Shown unless VOLLEY_AGENT_ID or VOLLEY_COORDINATOR names the caller (validate is offline: the registry is not read).
  */
 const OWNER_NOTE =
-  "note: `volleyd run` needs an owner (--owner, VOLLEY_AGENT_ID or a registered session): an ownerless wave's decisions go unanswered\n";
+  "note: `volleyd run` needs an owner (--owner, VOLLEY_AGENT_ID, a registered session or VOLLEY_COORDINATOR): an ownerless wave's decisions go unanswered\n";
 
 export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   let parsed: ReturnType<typeof parseArgs>;
@@ -156,6 +193,8 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
       preface === null
         ? `${formatBriefPreface(null)} (no ${prefacePath})`
         : formatBriefPreface(preface);
+    const playbook = wavePlaybook(wave);
+    const playbookLine = formatPlaybook(playbook?.display ?? null, playbook?.playbook ?? null);
     const cp = criticalPaths(wave);
     const longest = Math.max(...Object.values(cp));
     let placement = "";
@@ -168,7 +207,9 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
     }
     io.stdout(
       `ok: wave ${wave.wave} v${wave.version} — ${wave.task_order.length} task(s), ` +
-        `critical path ${longest}, release branch ${wave.release_branch}\n${env.VOLLEY_AGENT_ID ? "" : OWNER_NOTE}${note}${prefaceLine}\n${placement}`,
+        `critical path ${longest}, release branch ${wave.release_branch}\n` +
+        `${env.VOLLEY_AGENT_ID || env.VOLLEY_COORDINATOR ? "" : OWNER_NOTE}` +
+        `${note}${localPinWarnings(wave, env)}${prefaceLine}\n${playbookLine}\n${placement}`,
     );
     return EXIT.OK;
   } catch (e) {
@@ -245,6 +286,9 @@ export async function previewPlacement(wave: Wave, target: ControlTarget): Promi
         cfg.claude?.warn_at_pct ??
         CONFIG_DEFAULTS.claude.warn_at_pct,
       localName,
+      // The retained config carries the resolved mode; a supervisor that predates it: always.
+      local_agents: cfg.fleet?.local_agents ?? "always",
+      fallback: cfg.fleet?.fallback ?? CONFIG_DEFAULTS.fleet.fallback,
     });
     return line === null
       ? ""

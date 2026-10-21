@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { authOpsTopic, authReplyTopic } from "../src/accounts";
+import { decisionItemId, inboxTopic } from "../src/autopilot/inbox";
 import { ARCHIVE_TOPIC, ControlClient, waveEventsTopic, waveStateTopic } from "../src/control";
 import type { Daemon } from "../src/daemon";
 import { decisionTopic, waveDecisionId } from "../src/decisions";
@@ -216,6 +217,39 @@ describe("volleyd archive (control op)", () => {
     daemon = await start();
     client = await ControlClient.connect(t.broker.url, NS);
     expect(await cfgOf()).toBe(48);
+  });
+
+  it("closes the needs-you inbox items of the decisions it closes, and clears them", async () => {
+    const id = await stopWithDecision();
+    const item = decisionItemId(WAVE, id);
+    expect(daemon.inboxItem(item)?.answered).toBeUndefined();
+    expect(await t.retained(inboxTopic(item))).not.toBeNull();
+    expect((await req("archive", { wave: WAVE, by: OWNER })).ok).toBe(true);
+    expect(daemon.journalEvents(WAVE)).toContainEqual(
+      expect.objectContaining({
+        type: "inbox_answered",
+        data: expect.objectContaining({ id: item, answer: "archived", by: OWNER }),
+      }),
+    );
+    expect(daemon.inboxItem(item)).toBeUndefined();
+    expect(await t.retained(inboxTopic(item))).toBeNull();
+    // A crash before the clear: a restart clears it again.
+    await client.close();
+    await daemon.stop();
+    const tap = new VolleyBroker();
+    await tap.connect({ url: t.broker.url, agentId: "test-tap" });
+    try {
+      await tap.publish(inboxTopic(item), JSON.stringify({ stale: true }), {
+        qos: 1,
+        retain: true,
+      });
+    } finally {
+      await tap.disconnect();
+    }
+    daemon = await start();
+    client = await ControlClient.connect(t.broker.url, NS);
+    expect(daemon.inboxItem(item)).toBeUndefined();
+    expect(await t.retained(inboxTopic(item))).toBeNull();
   });
 
   it("refuses a stopped wave whose agents are still in their stop grace", async () => {

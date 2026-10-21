@@ -23,6 +23,7 @@ Commands:
   cleanup     Remove a wave's retired worktrees and workspaces (--yes)
   decisions   List open decisions
   resolve     Answer a decision (owner only)
+  inbox       The needs-you inbox: what waits for a person; inbox answer <id> <answer>
   policy      Show autopilot's policy table: the decisions volleyd answers itself
   claim       Take over a wave whose owner is gone
   pause       Stop admitting new tasks in a wave
@@ -30,6 +31,7 @@ Commands:
   stop        Stop a wave and cancel its agents; --all is the kill switch
   archive     Retire an ended wave: close its decisions, drop it from status (--yes)
   steer       Send mailbox steering to a task's agent and report the ack
+  merge       Merge one gated task now, at its gated head (owner only)
   merged      Record a gated task merged outside GitHub's merge button (verified; owner only)
 
 Global flags (daemon/install/run/diff/status/config and the wave controls):
@@ -59,6 +61,7 @@ const COMMANDS: Record<string, () => Promise<Command>> = {
   cleanup: async () => (await import("./commands/cleanup")).cleanup,
   decisions: async () => (await import("./commands/decisions")).decisions,
   resolve: async () => (await import("./commands/resolve")).resolve,
+  inbox: async () => (await import("./commands/inbox")).inbox,
   policy: async () => (await import("./commands/policy")).policy,
   claim: async () => (await import("./commands/claim")).claim,
   pause: async () => (await import("./commands/pause")).pause,
@@ -66,6 +69,7 @@ const COMMANDS: Record<string, () => Promise<Command>> = {
   stop: async () => (await import("./commands/stop")).stop,
   archive: async () => (await import("./commands/archive")).archive,
   steer: async () => (await import("./commands/steer")).steer,
+  merge: async () => (await import("./commands/merge")).merge,
   merged: async () => (await import("./commands/merged")).merged,
 };
 
