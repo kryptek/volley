@@ -442,6 +442,40 @@ describe("PR head moved by a merge of the release branch only", () => {
     expect(h.task()?.stage).not.toBe("merge_ready");
   });
 
+  it("accepted while the reviewers still run: their reviews of H1 hold at B, one pr_head_moved, the gate at B (#270)", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(h.task()?.stage).toBe("spec_review");
+    // B merges X into H1 (an "Update branch") before either reviewer reports.
+    h.world.parents[B] = [H1, X];
+    h.world.ancestor[`${X}..${h.world.releaseTip}`] = true;
+    h.world.mergeBase[H1] = MB;
+    h.world.diffNames[`${H1}..${B}`] = ["CHANGELOG.md"];
+    h.world.diffNames[`${MB}..${X}`] = ["CHANGELOG.md"];
+    pushB("green");
+    await poll();
+    await poll();
+    const [d] = h.openDecisions();
+    expect(d?.options).toContain("accept");
+    await h.resolve(d?.decision_id as string, "accept", "volleyd");
+
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await poll();
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    for (let i = 0; i < 3; i++) await poll();
+
+    expect(h.events.filter((e) => e.type === "pr_head_moved")).toHaveLength(1);
+    expect(h.events.filter((e) => e.type === "decision_opened")).toHaveLength(1);
+    expect(h.events.map((e) => e.data.alarm)).not.toContain("merge_ready_invariant");
+    expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
+    expect(h.task()?.stage).toBe("merge_ready");
+    const ev = evidence();
+    expect(ev.head_sha).toBe(B);
+    expect(ev.stale).toBeUndefined();
+  });
+
   it("red CI on a release-only merge → no accept", async () => {
     await gatedAtA();
     releaseMergeB(["CHANGELOG.md"], "red");

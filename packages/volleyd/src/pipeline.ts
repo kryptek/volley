@@ -454,7 +454,10 @@ export function reducePipeline(
         run.accepted = true;
         if (PUBLISHING_ROLES.has(role) && typeof d.head_sha === "string") run.head = d.head_sha;
       }
-      if (typeof d.head_sha === "string") p.head = d.head_sha;
+      // A review of a head an accepted release merge already moved on from holds at the moved head
+      // (reviewHolds): it does not take the task's head back (#270).
+      if (typeof d.head_sha === "string" && !(isReviewerRole(role) && acceptedFrom(p, d.head_sha)))
+        p.head = d.head_sha;
       // The accepted head reached, or the head went elsewhere first: either way the wait is over.
       if (p.head !== from) p.accepting = undefined;
       const pr = d.pr as { number: number; url: string; ci?: string } | undefined;
@@ -1021,6 +1024,19 @@ function reviewHolds(p: TaskPipeline, rv: StoredReview): boolean {
       // A head moved outside the pipeline that the owner sent straight to a fixup, or accepted as
       // a merge of the release branch only (SPEC §4.6.8: a merge of it keeps the reviews).
       p.moves.find((m) => m.to === to && m.accepted_by !== undefined)?.from;
+  }
+  return false;
+}
+
+/** Did the current head get here from `sha` through moves accepted as release merges only? */
+function acceptedFrom(p: TaskPipeline, sha: string): boolean {
+  const seen = new Set<string>();
+  let head = p.head;
+  while (head !== undefined && !seen.has(head)) {
+    seen.add(head);
+    const to = head;
+    head = p.moves.find((m) => m.to === to && m.how === "release_merge" && m.accepted_by)?.from;
+    if (head === sha) return true;
   }
   return false;
 }
