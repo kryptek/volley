@@ -102,6 +102,11 @@ describe("pre-tool-use-lease hook", () => {
     expect(await hook("ls -la && git status")).toBeNull();
   });
 
+  it("a command that only mentions a heavy one (heredoc, message) → empty output", async () => {
+    expect(await hook("cat <<'EOF' > notes.md\nrun mvn -q verify later\nEOF")).toBeNull();
+    expect(await hook('git commit -m "fix: mvn verify flake"')).toBeNull();
+  });
+
   it("ignores tools other than Bash", async () => {
     expect(await hook("mvn verify", { tool_name: "Read" })).toBeNull();
   });
@@ -206,6 +211,17 @@ describe("leaseFor / wrapCommand", () => {
     expect(leaseFor("./mvnw -q -Pit verify", pools)).toBeNull();
     expect(leaseFor("mvn -q verify", pools)).toBe("backend-it");
     expect(leaseFor("echo hi", pools)).toBeNull();
+  });
+
+  it("matches the commands the shell would execute, not heredoc, comment or message text", () => {
+    const pools = { "js-tests": { match: ["bun run test", "vitest"] } };
+    expect(leaseFor("cat <<'EOF' > notes.md\nrun bun run test later\nEOF", pools)).toBeNull();
+    expect(leaseFor('git commit -m "fix: bun run test flake"', pools)).toBeNull();
+    expect(leaseFor("# bun run test", pools)).toBeNull();
+    expect(leaseFor('echo "then bun run test"', pools)).toBeNull();
+    expect(leaseFor("bun run test && echo done", pools)).toBe("js-tests");
+    expect(leaseFor("cd packages/x && bunx vitest run", pools)).toBe("js-tests");
+    expect(leaseFor('bash -c "bun run test"', pools)).toBe("js-tests");
   });
 });
 
