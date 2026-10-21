@@ -75,8 +75,8 @@ bun packages/volleyd/src/cli.ts validate wave.yaml
 # Run the daemon in the foreground (or `volleyd install` for launchd)
 bun packages/volleyd/src/cli.ts daemon
 
-# In another terminal: submit and watch
-bun packages/volleyd/src/cli.ts run wave.yaml
+# In another terminal: submit (owned by your stable coordinator name) and watch
+bun packages/volleyd/src/cli.ts run wave.yaml --owner "$VOLLEY_COORDINATOR"
 bun packages/volleyd/src/cli.ts status
 ```
 
