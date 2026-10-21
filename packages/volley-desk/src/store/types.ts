@@ -397,6 +397,10 @@ export interface ClaudeAccountPayload {
   account: string;
   label?: string;
   plan?: string;
+  /** The login's e-mail (identity, never a credential); absent while not known. */
+  email?: string;
+  /** The login's organisation name; absent while not known. */
+  org?: string;
   five_hour: UsageWindow | null;
   weekly: UsageWindow | null;
   agents: string[];
@@ -465,6 +469,9 @@ export interface MachinePayload {
     claude: "signed_in" | "not_signed_in" | "missing" | "unknown";
     trust: "ok" | "missing" | "unknown";
     claude_plan?: string;
+    /** The default profile's login e-mail, only while it is signed in. */
+    claude_email?: string;
+    claude_org?: string;
   };
   repo?: {
     path: string;
