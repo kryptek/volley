@@ -4,6 +4,7 @@
  * and the extra words the sidebar search matches.
  */
 import {
+  AiBrain01Icon,
   ComputerIcon,
   DashboardSpeed01Icon,
   InformationCircleIcon,
@@ -20,6 +21,7 @@ export type SectionKey =
   | "sound"
   | "appearance"
   | "supervisor"
+  | "autopilot"
   | "claude"
   | "accounts"
   | "machines"
@@ -71,6 +73,15 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     group: 1,
     keywords:
       "ceiling leases lease pools per machine admission memory escalate heartbeat claim model",
+  },
+  {
+    key: "autopilot",
+    label: "Autopilot",
+    icon: AiBrain01Icon,
+    tint: "#bf5af2",
+    group: 1,
+    keywords:
+      "autopilot policy table owner only budgets relaunch nudge respawn rereview ci fixup merge queue reconnect grace",
   },
   {
     key: "claude",
