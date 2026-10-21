@@ -4808,7 +4808,8 @@ export class Daemon {
    * `peer_doctor` (admin, peers.ts), checked inside the queue; its run (an ssh round-trip of up to
    * `peer_doctor_timeout_ms`) is awaited outside it, so ticks, control ops and record folds go on.
    * One run per host at a time: two `--fix` runs never overlap on one box. After a run the box's
-   * PATH is probed again, and `peer_doctor_run` is journaled.
+   * PATH is probed again, its report is folded into the box's machine record (`foldDoctor`), and
+   * `peer_doctor_run` is journaled.
    */
   private peerDoctor(p: Record<string, unknown>, sender: string): AuthOutcome | DeferredAuth {
     const req = this.peers.doctorRequest(p, this.waveOrigin());
@@ -4825,15 +4826,18 @@ export class Daemon {
     const run: DoctorRun = req;
     return {
       later: async () => {
-        let r: PeerReply;
+        let r: PeerReply & { report?: DoctorReport };
         try {
           r = await this.peers.runDoctor(run);
         } finally {
           this.doctoring.delete(run.name);
         }
+        const { report, ...reply } = r;
         if (r.ok) this.probes.delete(run.name);
+        // Through the queue (record folds and verdicts are its), before the answer goes back.
+        if (report !== undefined) await this.enqueue(() => this.foldDoctor(run.name, report));
         return {
-          reply: authReply("peer_doctor", r),
+          reply: authReply("peer_doctor", reply),
           journal: {
             type: "peer_doctor_run",
             data: { by: sender, name: run.name, fix: run.fix, clone: run.clone, ok: r.ok },
@@ -4841,6 +4845,26 @@ export class Daemon {
         };
       },
     };
+  }
+
+  /**
+   * A doctor run the supervisor started on a paired box: its report replaces the doctor fields of
+   * the box's retained record (republished as volleyd, as the sweep does) and its verdict is
+   * recomputed, so the Desk and readiness follow the run without waiting for the box's next
+   * heartbeat (whose service re-runs its own doctor too). A box that never published a record
+   * has nothing to fold into.
+   */
+  private async foldDoctor(name: string, report: DoctorReport): Promise<void> {
+    const prior = this.machines.record(name);
+    if (!this.running || prior === undefined || prior.tunnel === "local") return;
+    const record: MachineRecord = { ...prior, ...doctorFields(report) };
+    if (!validator("machine.schema.json")(this.envelope(MACHINE_CHANNEL, "machine", record))) {
+      this.log(`${name}'s doctor report does not fit machine.schema.json: record left as it was`);
+      return;
+    }
+    this.machines.observe(record);
+    await this.publish(machineTopic(name), this.envelope(MACHINE_CHANNEL, "machine", record), true);
+    await this.publishReadiness(name);
   }
 
   /**

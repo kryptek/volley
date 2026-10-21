@@ -11,7 +11,7 @@ import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { CONFIG_TOPIC, ControlClient, waveEventsTopic, waveStateTopic } from "../src/control";
 import { Daemon, daemonClientId } from "../src/daemon";
 import { readJournalFile } from "../src/journal";
-import type { DoctorReport } from "../src/machines";
+import { type DoctorReport, machineTopic } from "../src/machines";
 import { SYSTEM_WAVE } from "../src/types";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { eventually } from "./helpers/broker-wait";
@@ -611,6 +611,84 @@ describe("peer_doctor (the doctor on a paired machine, for an admin)", () => {
     answers.doctor = REPORT;
     expect(await op("admin-1", { op: "peer_doctor", name: "box-a" })).toMatchObject({ ok: true });
     expect(runs().map((e) => e.data.ok)).toEqual([true, true]);
+  });
+
+  it("folds the run's report into the box's retained record at once, as the peer would publish it", async () => {
+    const c = new VolleyBroker();
+    await c.connect({
+      url: broker.url,
+      agentId: "box-a",
+      username: "volleyd",
+      password: pw("volleyd"),
+    });
+    clients.push(c);
+    /** box-a's retained machine record, as the Desk and readiness read it. */
+    const record = async () => {
+      const raw = await c.queryRetained(machineTopic("box-a"), 500);
+      return raw === null ? null : parseEnvelope(raw);
+    };
+    // The peer's last heartbeat: a stale doctor run from an hour ago.
+    const beat = {
+      name: "box-a",
+      os: "linux",
+      arch: "x64",
+      cores: 8,
+      tunnel: "up",
+      load: [0.5, 0.25, 0.125],
+      agents: 0,
+      remote_port: 21883,
+      kind: "peer",
+      checks: [{ id: "volley.installed", ok: false, severity: "block", detail: "stale install" }],
+      doctor_at: "2026-10-19T08:00:00.000Z",
+      last_seen: "2026-10-19T09:00:00.000Z",
+    };
+    await c.publish(
+      machineTopic("box-a"),
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "box-a",
+          parentId: null,
+          channel: "_system/machines",
+          type: "machine",
+          payload: beat,
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    await eventually(async () => (await record())?.agent_id === "box-a");
+    await eventually(async () => {
+      await daemon.tick();
+      return (await c.queryRetained(`${machineTopic("box-a")}/readiness`, 200)) !== null;
+    });
+
+    answers.doctor = { ...REPORT, doctor_at: "2026-10-19T09:00:05.000Z" };
+    expect(await op("admin-1", { op: "peer_doctor", name: "box-a", fix: true })).toMatchObject({
+      ok: true,
+    });
+    const after = await record();
+    expect(after?.agent_id).toBe("volleyd");
+    expect(after?.payload).toMatchObject({
+      ...beat,
+      // The report's checks, without their fix text (a record never carries it).
+      checks: REPORT.checks.map(({ id, ok, severity, detail }) => ({ id, ok, severity, detail })),
+      versions: REPORT.versions,
+      auth: REPORT.auth,
+      doctor_at: "2026-10-19T09:00:05.000Z",
+    });
+    expect(JSON.stringify(after?.payload)).not.toContain("gh auth login");
+  });
+
+  it("a run on a box that never published a record publishes none", async () => {
+    expect(await op("admin-1", { op: "peer_doctor", name: "box-a" })).toMatchObject({ ok: true });
+    const c = new VolleyBroker();
+    await c.connect({
+      url: broker.url,
+      agentId: "reader",
+      username: "volleyd",
+      password: pw("volleyd"),
+    });
+    clients.push(c);
+    expect(await c.queryRetained(machineTopic("box-a"), 300)).toBeNull();
   });
 
   it("refuses an unknown host and --clone without --fix before ssh", async () => {

@@ -2032,7 +2032,9 @@ record with `tunnel: down` (built when it connected: volleyd keeps the last hear
 too (on macOS, `available_pct` is the last doctor run's `vm_stat` figure), and the last
 finished doctor run's `versions`, `auth` (states only: `gh`, `claude`, `trust`, `claude_plan`),
 `repo`, `checks` (no fix text) and `doctor_at`. The service re-runs the doctor every 600 s
-(`PEER_DEFAULTS.doctor_interval_s`) beside the heartbeat, so a slow network probe never delays a
+(`PEER_DEFAULTS.doctor_interval_s`), and on the next heartbeat after the checkout's
+`package.json`, `bun.lock` or install marker changes or `volley peer doctor` runs, beside the
+heartbeat, so a slow network probe never delays a
 beat past `machine_down_after_ms`; the version it compares the checkout against is the
 supervisor's readiness verdict's `requirements.volley`. The service file carries the `PATH` the
 join ran with (launchd's own has no Homebrew or `~/.bun/bin`). volleyd only counts records for a configured host, and marks a
@@ -2196,8 +2198,11 @@ do before anyone runs it. An ssh failure answers `ok: false` with ssh's reason. 
 `peer_doctor_timeout_ms`, 15 min, for a `--fix`) happens outside volleyd's serial queue, so ticks
 and control ops go on meanwhile; a second `peer_doctor` for the same host while one runs is
 refused (`a doctor run on "<name>" is already in progress`). Each run is journaled in `_system`
-as `peer_doctor_run { by, name, fix, clone, ok }`. After a Repair the box's PATH is probed again
-on the next re-compute. Repair runs the bare `volley` of the box's non-interactive ssh PATH: on a
+as `peer_doctor_run { by, name, fix, clone, ok }`. The run's report is folded into the box's
+retained machine record before the answer goes back (its `checks` without fix text, `versions`,
+`auth`, `repo`, `doctor_at`; republished as volleyd) and the box's readiness verdict re-computed,
+so the Desk and placement follow the run without waiting for the box's next heartbeat. After a
+Repair the box's PATH is probed again on the next re-compute. Repair runs the bare `volley` of the box's non-interactive ssh PATH: on a
 box whose PATH probe finds no `bun` (and so no `volley`), fix the PATH first, or Repair answers
 only `volley: command not found`.
 

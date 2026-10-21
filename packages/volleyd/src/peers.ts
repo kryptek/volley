@@ -434,8 +434,16 @@ export class PeerService {
     return { name, fix, clone, host, ...(url !== null ? { origin: url } : {}) };
   }
 
-  /** Run a checked `peer_doctor` on its box: the report (and the plan without `fix`), or why not. */
-  async runDoctor({ name, fix, host, origin }: DoctorRun): Promise<PeerReply> {
+  /**
+   * Run a checked `peer_doctor` on its box: the report (and the plan without `fix`), or why not.
+   * `report` is the run's own, for the supervisor to fold into the box's machine record.
+   */
+  async runDoctor({
+    name,
+    fix,
+    host,
+    origin,
+  }: DoctorRun): Promise<PeerReply & { report?: DoctorReport }> {
     let report: DoctorReport;
     try {
       report = await host.runDoctor({ fix, ...(origin !== undefined ? { clone: origin } : {}) });
@@ -445,6 +453,7 @@ export class PeerService {
     return {
       ok: true,
       result: { name, fix, ...report, ...(fix ? {} : { plan: doctorPlan(report) }) },
+      report,
     };
   }
 

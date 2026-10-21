@@ -186,6 +186,17 @@ export function lockHash(dir: string): string | null {
   }
 }
 
+/**
+ * The files of the volley checkout `dir` whose change can change a doctor run's result: its
+ * version, its lockfile and the marker of the doctor's last install from it. `volley peer run`
+ * re-runs its doctor as soon as one of them changes.
+ */
+export const doctorInputs = (dir: string): string[] => [
+  join(dir, "package.json"),
+  join(dir, "bun.lock"),
+  join(dir, "node_modules", LOCK_MARKER),
+];
+
 /** After the doctor's own install: remember the bun.lock it installed from. */
 function markInstalled(dir: string): void {
   const h = lockHash(dir);

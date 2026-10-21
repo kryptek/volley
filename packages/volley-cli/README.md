@@ -399,8 +399,16 @@ refuses a URL with a password or token in it.
 pairing code is used, so the code stays valid while you fix things (it prints the exact
 `volley peer doctor --fix --repo …` to run); `warn` checks, the ssh `PATH` estimate among them,
 are printed and the join goes on. `volley peer run` (whose service file carries the `PATH` the
-join ran with) runs it every `PEER_DEFAULTS.doctor_interval_s` (600 s, on a monotonic clock)
-beside the heartbeat, never in its way: a beat never waits for it, a run is given up after
+join ran with) runs it every `PEER_DEFAULTS.doctor_interval_s` (600 s, on a monotonic clock),
+and at once on the next heartbeat when something the result depends on changed: the volley
+checkout's `package.json`, `bun.lock` or `node_modules/.volley-lock-sha256` (a checkout update,
+a `bun install`; a stat per beat), or `~/.volley/peer-doctor-ran`, which every `volley peer
+doctor` on a paired machine writes. Each run re-reads the versions it reports, so readiness
+follows the machine, never the service's uptime. `volley peer doctor --fix` then reads the
+record back through the tunnel and prints `readiness republished` once it carries a run from
+after the fix, or, when the service did not pick it up (or its tunnel is down), the command
+that restarts it (`systemctl --user restart volley-peer.service`, `launchctl kickstart -k
+gui/<uid>/systems.volley.peer`). It runs beside the heartbeat, never in its way: a beat never waits for it, a run is given up after
 `PEER_DEFAULTS.doctor_timeout_ms`, and the record is republished as soon as a run finishes. Every
 heartbeat carries the last finished run's result (`versions`, `auth`, `repo`, `checks` without fix
 text, `doctor_at`), with `kind: peer`, `disk` and `uptime_s` read fresh each time, and `memory`

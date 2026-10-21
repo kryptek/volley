@@ -31,6 +31,7 @@ import {
   hostKeyHint,
   localNotAdmin,
   machineTopic,
+  peerDoctorStamp,
   peerFile,
   redeemScript,
   runPeer,
@@ -39,6 +40,7 @@ import {
 } from "../../src/commands/peer";
 import { EXIT } from "../../src/exit-codes";
 import { makeBufferIO } from "../../src/io";
+import { lockHash } from "../../src/peer/doctor";
 import { type TestBroker, startTestBroker } from "../helpers/aedes-broker";
 import { type FakePeerMachine, fakePeerMachine } from "../helpers/fake-peer-machine";
 import { tempDir } from "../helpers/tmp";
@@ -1272,6 +1274,7 @@ describe("volley peer run (the service)", () => {
   async function heartbeats(
     beats: number,
     f: { exec: PeerExec; calls: Call[] } = fakeExec(() => undefined),
+    opts: { between?: (beat: number) => void; deps?: (d: PeerDeps) => void } = {},
   ) {
     const start = Date.parse("2026-10-19T09:00:00.000Z");
     let t = start;
@@ -1285,9 +1288,13 @@ describe("volley peer run (the service)", () => {
         const last = ++n >= beats;
         await new Promise((r) => setTimeout(r, last ? 300 : 30));
         if (last) stop.abort();
-        else t += ms;
+        else {
+          opts.between?.(n);
+          t += ms;
+        }
       },
     });
+    opts.deps?.(d);
     const reader = new VolleyBroker();
     await reader.connect({ url: tb.url, agentId: "reader" });
     const records: string[] = [];
@@ -1392,6 +1399,80 @@ describe("volley peer run (the service)", () => {
       after.records.filter((r) => r.includes('"tunnel":"up"')).at(-1) ?? "",
     )?.payload as { doctor_at?: string };
     expect(last.doctor_at).toBe("2026-10-19T09:10:00.000Z");
+  });
+
+  const doctorRuns = (f: { calls: Call[] }) =>
+    f.calls.filter((c) => basename(c.argv[0] ?? "") === "claude" && c.argv[1] === "auth").length;
+  const lastUp = (records: string[]) =>
+    parseEnvelope(records.filter((r) => r.includes('"tunnel":"up"')).at(-1) ?? "")?.payload as {
+      doctor_at?: string;
+      versions?: { peer: string; volley: string };
+      checks?: { id: string; ok: boolean; detail: string }[];
+    };
+
+  it("a checkout update between heartbeats re-runs the doctor at once and re-reads both versions", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", {});
+    let cliVersion = "0.4.0";
+    const f = fakeExec(() => undefined);
+    const { records } = await heartbeats(4, f, {
+      // After the first beat: the checkout moves to 0.5.0 (package.json, bun.lock), and the
+      // doctor's own install of it rewrites the lock marker.
+      between: (beat) => {
+        if (beat !== 1) return;
+        writeFileSync(
+          join(box.volleyDir, "package.json"),
+          JSON.stringify({ name: "volley", version: "0.5.0" }),
+        );
+        writeFileSync(
+          join(box.volleyDir, "bun.lock"),
+          '{ "lockfileVersion": 1, "for": "0.5.0" }\n',
+        );
+        writeFileSync(
+          join(box.volleyDir, "node_modules", ".volley-lock-sha256"),
+          `${lockHash(box.volleyDir)}\n`,
+        );
+        cliVersion = "0.5.0";
+      },
+      // The CLI's own version follows its checkout's package.json (realDeps reads it per run).
+      deps: (d) => Object.defineProperty(d, "version", { get: () => cliVersion }),
+    });
+    expect(doctorRuns(f)).toBe(2);
+    const last = lastUp(records);
+    expect(last.versions).toMatchObject({ peer: "0.5.0", volley: "0.5.0" });
+    expect(last.doctor_at).not.toBe("2026-10-19T09:00:00.000Z");
+    expect(last.checks?.find((c) => c.id === "volley.installed")).toMatchObject({ ok: true });
+  });
+
+  it("only the lock marker changing (bun install by hand) re-runs the doctor on the next beat", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", {});
+    const f = fakeExec(() => undefined);
+    await heartbeats(4, f, {
+      between: (beat) => {
+        if (beat === 1)
+          writeFileSync(join(box.volleyDir, "node_modules", ".volley-lock-sha256"), "0".repeat(64));
+      },
+    });
+    expect(doctorRuns(f)).toBe(2);
+  });
+
+  it("the doctor verb's stamp (a run of volley peer doctor) re-runs the service's doctor on its next beat", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", {});
+    const f = fakeExec(() => undefined);
+    let stamp = "";
+    await heartbeats(4, f, {
+      between: (beat) => {
+        if (beat !== 1) return;
+        // What `volley peer doctor` leaves behind, written by a real run of the verb.
+        stamp = peerDoctorStamp(home);
+        mkdirSync(dirname(stamp), { recursive: true });
+        writeFileSync(stamp, "2026-10-19T09:00:30.000Z\n");
+      },
+    });
+    expect(stamp).not.toBe("");
+    expect(doctorRuns(f)).toBe(2);
   });
 
   it("keeps the -L tunnel up and heartbeats the record; a clean stop leaves it tunnel: down", async () => {
@@ -1550,6 +1631,67 @@ describe("volley peer doctor (the verb)", () => {
     });
     expect(r.exitCode).toBe(0);
     expect(check(r.report, "volley.version")?.detail).toContain("not known here");
+  });
+
+  it("every run on a paired machine leaves the stamp the service watches", async () => {
+    writeCfg({ repo: box.repoPath });
+    expect(existsSync(peerDoctorStamp(home))).toBe(false);
+    await doctorJson([]);
+    expect(readFileSync(peerDoctorStamp(home), "utf-8").trim()).toBe("2026-10-19T09:00:00.000Z");
+  });
+
+  /** The service's retained record for box-a, carrying a doctor run from `doctorAt`. */
+  const serviceRecord = async (doctorAt: string) => {
+    const b = new VolleyBroker();
+    await b.connect({ url: tb.url, agentId: "box-a" });
+    await b.publish(
+      machineTopic("box-a"),
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "box-a",
+          parentId: null,
+          channel: "_system/machines",
+          type: "machine",
+          payload: { name: "box-a", tunnel: "up", checks: [], doctor_at: doctorAt },
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    await b.disconnect();
+  };
+
+  it("--fix: says readiness was republished once the service's record carries a run after it", async () => {
+    writeCfg({ repo: box.repoPath });
+    await serviceRecord("2026-10-19T09:00:00.000Z");
+    const f = fakeExec(() => undefined);
+    const r = await run(["doctor", "--fix", "--yes"], deps(f.exec));
+    expect(r.stdout).toContain("readiness republished");
+  });
+
+  it("--fix: a service that never picks the run up is named, with how to restart it", async () => {
+    writeCfg({ repo: box.repoPath });
+    await serviceRecord("2026-10-19T08:50:00.000Z");
+    const f = fakeExec(() => undefined);
+    const r = await run(["doctor", "--fix", "--yes"], deps(f.exec));
+    expect(r.stdout).not.toContain("readiness republished");
+    expect(r.stdout).toContain(`systemctl --user restart ${SYSTEMD_UNIT}`);
+    const mac = await run(["doctor", "--fix", "--yes"], deps(f.exec, { platform: "darwin" }));
+    expect(mac.stdout).toContain(`launchctl kickstart -k gui/501/${LAUNCHD_LABEL}`);
+  });
+
+  it("--fix with the tunnel down says the service is not running, at once", async () => {
+    writeCfg({ repo: box.repoPath });
+    const f = fakeExec(() => undefined);
+    const r = await run(
+      ["doctor", "--fix", "--yes"],
+      deps(f.exec, {
+        connect: async () => {
+          throw new Error("connect ECONNREFUSED 127.0.0.1:21883");
+        },
+      }),
+    );
+    expect(r.stdout).toContain("the peer service is not connected");
+    expect(r.stdout).toContain(`systemctl --user restart ${SYSTEMD_UNIT}`);
   });
 
   it("--volley-dir checks that checkout instead of the running one", async () => {
