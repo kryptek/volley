@@ -1,7 +1,7 @@
 # Agent briefs
 
 One template per role volleyd spawns: `implementer`, `spec_reviewer`, `quality_reviewer`,
-`fixup`, `rebase`, plus `rebase-merge.md.tmpl`, the rebase role's brief when its step runs under
+`fixup`, `rebase`, `release` (a release playbook stage's agent, SPEC §4.6.19), plus `rebase-merge.md.tmpl`, the rebase role's brief when its step runs under
 `branch_update: merge` (merge the release branch in, a normal push, never a force-push). At
 spawn, `src/brief.ts` renders `<role>.md.tmpl` (or that variant) into the agent's
 `.volley/brief.md`, below the repo's brief preface (if any); `launch.sh` passes that file to
@@ -21,10 +21,11 @@ that itself contains `{{…}}`, is never expanded again). An unknown placeholder
 | `repo`, `release_branch`, `branch`, `worktree` | the repo root, the base branch, the agent's branch and worktree |
 | `extra` | repo-specific notes (below), or empty |
 | `hygiene_rule`, `hygiene_contract` | reviewer briefs: the hygiene check line and its result-contract bullet for the wave's hygiene level (`reviews.ts` `hygieneText`: P1 for a public repository, P3 for a private one, empty under `public_hygiene: off`) |
+| `stage`, `stage_brief`, `stage_commands`, `stage_verify` | the release brief: the playbook stage's name, its `brief`, its `run` lines (and a heavy stage's lease) and its `verify` facts in prose (`autopilot/release-train.ts` `stageBriefVars`); empty for every other role |
 
 ## The protocol block
 
-Every template ends with the same protocol block. Keep it in all six when you edit one:
+Every template ends with the same protocol block. Keep it in all seven when you edit one:
 
 - **No registration step.** The session hooks register the agent (with its model), send
   heartbeats and deliver mailbox mail; the brief must never ask the agent to call `vol_register`.

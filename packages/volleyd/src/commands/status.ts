@@ -181,11 +181,19 @@ export function formatWave(
     ap !== undefined
       ? `  autopilot: ${ap.enabled ? "on" : "off"} · ${ap.auto_resolved} auto-resolved · ${ap.escalated} escalated\n`
       : "";
-  // The release train (SPEC §4.6.19): the stage running or awaiting its go, and how far it is.
+  // The release train (SPEC §4.6.19): the stage running, awaiting its go or failed, and how far
+  // the train is (`release: smoke running (2/4 verified)`).
   const r = s.release;
+  const cur = r?.stages.find(
+    (x) => x.state === "running" || x.state === "awaiting_go" || x.state === "failed",
+  );
+  const where =
+    cur !== undefined
+      ? `${cur.name} ${cur.state === "awaiting_go" ? "awaiting go" : cur.state}`
+      : "-";
   const release =
     r !== undefined
-      ? `  release: ${r.stage ?? "-"} (${r.stages.filter((x) => x.state === "verified").length}/${r.stages.length} verified)\n`
+      ? `  release: ${where} (${r.stages.filter((x) => x.state === "verified").length}/${r.stages.length} verified)\n`
       : "";
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {

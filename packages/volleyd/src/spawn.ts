@@ -1,7 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { PlaybookStage } from "./autopilot/playbook";
+import { releaseWaveTask, stageBriefVars } from "./autopilot/release-train";
 import {
   BriefPrefaceTooLarge,
+  NO_STAGE,
   type Role,
   briefExtra,
   briefExtraFrom,
@@ -23,6 +26,7 @@ import {
   type BrokerCredentials,
   agentIdFor,
   mintCredentials,
+  releaseAgentId,
   revokeCredentials,
   writeAgentJson,
 } from "./identity";
@@ -57,7 +61,7 @@ import {
   hookSignalsArrived,
   verifyRegistration,
 } from "./verify";
-import { branchName, expandHome, worktreePath } from "./worktree";
+import { branchName, expandHome, releaseBranchName, worktreePath } from "./worktree";
 
 /**
  * One spawn, end to end: repo trust → lock → worktree (cut from the release branch as origin
@@ -115,6 +119,12 @@ export interface SpawnRequest {
    * fresh one: an account move of a pipeline role (claude/move.ts moveRespawn).
    */
   worktreeAttempt?: number;
+  /**
+   * The release role's playbook stage (SPEC §4.6.19): its agent runs under the pseudo task
+   * `_release` with no issue, as `<wave>-release-<stage>-<n>` on `<wave>/release-<stage>-<n>`,
+   * cut from the release branch's tip; its brief is the stage's.
+   */
+  stage?: PlaybookStage;
   /**
    * An implementer respawn (F6): the branch an earlier attempt of the role was cut on. When
    * origin has it, this attempt continues on it (cut from origin's copy, the same name) and its
@@ -284,8 +294,23 @@ interface Ctx {
 }
 
 /** Run the launch half of a spawn; `verified` carries the rest. Throws SpawnError on refusal. */
+/** The agent id of `req`'s attempt: a release stage's own shape, else the task role's. */
+const agentIdOf = (req: SpawnRequest, attempt: number) =>
+  req.stage !== undefined
+    ? releaseAgentId(req.wave.wave, req.stage.name, attempt)
+    : agentIdFor(req.wave.wave, req.task, req.role, attempt);
+
+/** What a release stage has in place of an issue (no ISSUE.md is written for it). */
+const stageIssue = (stage: PlaybookStage): IssueData => ({
+  number: 0,
+  title: `release stage ${stage.name}`,
+  body: "",
+  url: "",
+});
+
 export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<SpawnResult> {
-  const task = req.wave.tasks[req.task];
+  const task =
+    req.wave.tasks[req.task] ?? (req.stage !== undefined ? releaseWaveTask(req.wave) : undefined);
   if (task === undefined) throw new Error(`unknown task '${req.task}' in wave ${req.wave.wave}`);
   const repo = expandHome(req.wave.repo);
   const ctx: Ctx = {
@@ -299,7 +324,11 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
       deps.tunables.worktree_root,
       req.wave.wave,
       req.task,
-      req.start !== undefined ? `${req.role}-${req.worktreeAttempt ?? req.attempt}` : req.role,
+      req.stage !== undefined
+        ? `${req.role}-${req.stage.name}-${req.attempt}`
+        : req.start !== undefined
+          ? `${req.role}-${req.worktreeAttempt ?? req.attempt}`
+          : req.role,
     ),
   };
   try {
@@ -325,7 +354,7 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
     if (open !== undefined) await resolveDecision(ctx, open, "trusted", "claude-trust-dialog");
 
     // 1. Lock first.
-    const agentId = agentIdFor(req.wave.wave, req.task, req.role, req.attempt);
+    const agentId = agentIdOf(req, req.attempt);
     ctx.lock = await acquireLock(
       lockPath(deps.lockHome ?? deps.home, ctx.worktree),
       {
@@ -342,7 +371,10 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
     );
 
     // 2–5. Worktree, issue, brief, identity, launch.
-    const issue = await fetchIssue(deps.host.exec, ctx.root, task.issue);
+    const issue =
+      req.stage !== undefined
+        ? stageIssue(req.stage)
+        : await fetchIssue(deps.host.exec, ctx.root, task.issue);
     const launched = await launchAttempt(ctx, req.attempt, agentId, issue);
     const lock = ctx.lock;
     return {
@@ -462,7 +494,11 @@ async function launchAttempt(
     req.start === undefined && req.continueBranch !== undefined
       ? await pushedBranch(host.exec, ctx.repo, req.continueBranch)
       : null;
-  const branch = carried?.branch ?? branchName(req.wave.wave, req.task, req.role, attempt);
+  const branch =
+    carried?.branch ??
+    (req.stage !== undefined
+      ? releaseBranchName(req.wave.wave, req.stage.name, attempt)
+      : branchName(req.wave.wave, req.task, req.role, attempt));
   const cut = await host.prepareWorktree({
     repo: ctx.repo,
     path: ctx.worktree,
@@ -495,8 +531,9 @@ async function launchAttempt(
     });
   }
 
-  // The quality reviewer reviews the diff only: it gets no copy of the issue and its plan.
-  if (req.role !== "quality_reviewer")
+  // The quality reviewer reviews the diff only: it gets no copy of the issue and its plan. A
+  // release stage is no issue's.
+  if (req.role !== "quality_reviewer" && req.stage === undefined)
     await host.writeFile(join(ctx.worktree, "ISSUE.md"), renderIssueMd(issue));
   for (const [name, content] of Object.entries(req.files ?? {})) {
     await host.writeFile(join(ctx.worktree, ".volley", name), content);
@@ -529,6 +566,7 @@ async function launchAttempt(
         : briefExtra(ctx.root),
     hygiene_rule: hygiene.rule,
     hygiene_contract: hygiene.contract,
+    ...(req.stage !== undefined ? stageBriefVars(req.stage, req.wave.release_branch) : NO_STAGE),
   });
   const brief = withPreface(preface, rendered);
   const notes = [
@@ -630,6 +668,7 @@ async function launchAttempt(
       data: {
         agent_id: agentId,
         role: req.role,
+        ...(req.stage !== undefined ? { stage: req.stage.name } : {}),
         attempt,
         host: host.name,
         workspace,
@@ -723,7 +762,13 @@ async function reconcileLaunch(
     await deps.journal({
       type: "spawn_identity_burned",
       task: req.task,
-      data: { agent_id: agentId, role: req.role, attempt, why },
+      data: {
+        agent_id: agentId,
+        role: req.role,
+        ...(req.stage !== undefined ? { stage: req.stage.name } : {}),
+        attempt,
+        why,
+      },
     });
     return null;
   };
@@ -750,7 +795,7 @@ async function reconcileLaunch(
  * never finds the workspace an earlier attempt left open.
  */
 const launchName = (req: SpawnRequest, attempt: number) =>
-  `${req.wave.wave} ${req.task} ${req.role}${attempt > 1 ? ` ${attempt}` : ""}`;
+  `${req.wave.wave} ${req.stage !== undefined ? `release ${req.stage.name}` : `${req.task} ${req.role}`}${attempt > 1 ? ` ${attempt}` : ""}`;
 
 /**
  * Step 6: verify through the hook signals. On an update prompt: press Enter, and relaunch once
@@ -920,7 +965,7 @@ async function relaunch(ctx: Ctx, prev: Launched, issue: IssueData): Promise<Lau
     }
   }
   const attempt = prev.attempt + 1;
-  const agentId = agentIdFor(req.wave.wave, req.task, req.role, attempt);
+  const agentId = agentIdOf(req, attempt);
   await deps.journal({
     type: "agent_retired",
     task: req.task,

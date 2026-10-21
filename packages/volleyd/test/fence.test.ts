@@ -66,6 +66,19 @@ const DENIED: string[][] = [
   ["git", "worktree", "add", "-B", "w1/T1-implementer-0", "/tmp/wt", "release/w1"],
   ["git", "worktree", "add", "-B", "w1/T1-implementer-1/x", "/tmp/wt", "release/w1"],
   ["git", "worktree", "add", "-B", "W1/T1-implementer-1", "/tmp/wt", "release/w1"],
+  // a release stage's branch is `<wave>/release-<stage>-<n>` (SPEC §4.6.19), nothing looser
+  ["git", "worktree", "add", "-B", "w1/release-Bump-1", "/tmp/wt", "release/w1"],
+  ["git", "worktree", "add", "-B", "w1/release-bump-0", "/tmp/wt", "release/w1"],
+  ["git", "worktree", "add", "-B", "w1/release-1", "/tmp/wt", "release/w1"],
+  // a stage's `files` fact reads `<ref>:<path>`; an option in its place is still an option
+  [
+    "git",
+    "-C",
+    "/tmp/repo",
+    "show",
+    "--output=/tmp/x",
+    "refs/remotes/origin/release/w1:CHANGELOG.md",
+  ],
   // a tracking branch only as `branch --track <b> origin/<b>` (spawn's release base)
   ["git", "branch", "--track", "release/x", "origin/release/y"],
   ["git", "branch", "--track", "release/x", "release/x"],
@@ -374,6 +387,12 @@ const ALLOWED: string[][] = [
     "release/w1",
   ],
   ["git", "worktree", "add", "-Bw1/T-1_x-spec_reviewer-12", "/tmp/wt", "origin/release/w1"],
+  // the release stage agent's branch (SPEC §4.6.19)
+  ["git", "worktree", "add", "-B", "w1/release-deploy-staging-2", "/tmp/wt", "origin/release/w1"],
+  // release stage verification (SPEC §4.6.19): a file on the release branch, the tag as a GET
+  ["git", "-C", "/tmp/wt", "show", "--quiet", "refs/remotes/origin/release/w1:CHANGELOG.md"],
+  ["gh", "api", "repos/{owner}/{repo}/git/matching-refs/tags/v0."],
+  ["gh", "api", "repos/{owner}/{repo}/git/tags/0123456789abcdef0123456789abcdef01234567"],
   ["git", "-C", "/tmp/repo", "branch", "--track", "release/w1", "origin/release/w1"],
   ["git", "-C", "/tmp/repo", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/release/w1"],
   ["git", "-C", "/tmp/repo", "merge-base", "--is-ancestor", "a1b2c3", "d4e5f6"],

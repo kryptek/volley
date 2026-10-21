@@ -83,6 +83,7 @@ import {
 import {
   DEFAULT_PLAYBOOK,
   PlaybookError,
+  type PlaybookStage,
   type WavePlaybook,
   allVerified,
   playbookPath,
@@ -96,6 +97,15 @@ import {
   evaluate,
   renderPolicyTable,
 } from "./autopilot/policy";
+import {
+  RELEASE_TASK,
+  ReleaseTrain,
+  STAGE_STEER_REASON,
+  releaseView,
+  releaseWaveTask,
+  renderStageMd,
+  stageOf,
+} from "./autopilot/release-train";
 import { authFields } from "./broker-auth";
 import { accountMoves, moveAgentAccount, moveRespawn } from "./claude/move";
 import { ClaudeAccountError, type SelectedAccount, claudeRoot } from "./claude/profiles";
@@ -567,6 +577,8 @@ interface VisibilityFacts {
 /** How the pipeline (or an account move) starts a spawn (startSpawn). */
 interface SpawnPipelineOptions {
   start?: SpawnStart;
+  /** The release role's playbook stage (SPEC §4.6.19): spawned under the `_release` pseudo task. */
+  stage?: PlaybookStage;
   files?: Record<string, string>;
   /** A merge-mode rebase step (`branch_update: merge`): the role gets the merge brief. */
   branch_update?: "merge";
@@ -988,6 +1000,8 @@ export class Daemon {
   private readonly refused = new Map<string, { n: number; until: number }>();
   /** Each wave's pipeline driver (T6), created on first use. */
   private readonly pipelines = new Map<WaveId, PipelineDriver>();
+  /** The release train's stage driver per releasing wave (SPEC §4.6.19). */
+  private readonly releases = new Map<WaveId, ReleaseTrain>();
   /** Live spawned agents by agent id. */
   private readonly supervised = new Map<string, Supervised>();
   /** Terminal statuses received and not yet journaled about (watchdog.ts), by agent. */
@@ -2328,7 +2342,8 @@ export class Daemon {
       await this.completeIfSettled(wave);
       await this.releaseGoIfVerified(wave);
     }
-    let live = 0;
+    // A release stage's agent counts toward the hard ceiling like a task's.
+    let live = this.releaseAgentsLive();
     for (const log of this.waves.values()) live += activeTasks(log.record).length;
     for (const [wave, log] of this.waves) {
       const rec = log.record;
@@ -2379,6 +2394,7 @@ export class Daemon {
       for (const wave of this.waves.keys()) this.spawnAdmitted(wave);
       // Level-triggered pipeline work: retry held role spawns, re-check pending CI, see merges.
       // Its git / gh checks run beside the queue; one wave's error never skips the others.
+      for (const wave of this.waves.keys()) await this.releaseAdvance(wave);
       for (const wave of this.waves.keys()) {
         if (this.waves.get(wave)?.record.state?.status !== "running") continue;
         try {
@@ -3212,6 +3228,7 @@ export class Daemon {
         data: { done, cancelled, playbook: { path, sha256, stages: playbook.stages } },
       });
       this.log(`wave ${wave} releasing: ${playbook.stages.map((s) => s.name).join(", ")}`);
+      await this.releaseAdvance(wave);
       return;
     }
     // The decision first: once wave_complete is journaled the wave is no longer `running` and no
@@ -3357,7 +3374,7 @@ export class Daemon {
     const log = this.waves.get(wave);
     const w = log?.record.wave;
     if (log === undefined || w == null) throw new Error(`unknown wave '${wave}'`);
-    const t = w.tasks[task];
+    const t = w.tasks[task] ?? (task === RELEASE_TASK ? releaseWaveTask(w) : undefined);
     if (t === undefined) throw new Error(`unknown task '${task}' in wave ${wave}`);
     const key = `${wave}/${task}/${role}`;
     // Its machine takes no new agents (draining, being removed, removed): it waits for the
@@ -3401,7 +3418,7 @@ export class Daemon {
     }
     this.spawning.add(key);
     try {
-      const attempt = this.agentAttempt(wave, task, role);
+      const attempt = this.agentAttempt(wave, task, role, pipeline.stage?.name);
       // agent_spawned clears the role's failures: what spawn_recovered reports is read first.
       const prior = log.record.spawnFailures[task]?.[role];
       const deps = this.spawnDeps(wave);
@@ -3600,8 +3617,11 @@ export class Daemon {
     return typeof spawned === "string" && AGENT_BRANCH.test(spawned) ? spawned : undefined;
   }
 
-  /** The attempt number the next agent spawned for a task's role gets (its branch's `-<n>`). */
-  private agentAttempt(wave: WaveId, task: TaskId, role: Role): number {
+  /**
+   * The attempt number the next agent spawned for a task's role gets (its branch's `-<n>`); a
+   * release stage's (`stage`) counts that stage's agents only.
+   */
+  private agentAttempt(wave: WaveId, task: TaskId, role: Role, stage?: string): number {
     const journal = this.waves.get(wave)?.journal;
     if (journal === undefined) return 1;
     // A burned attempt (a launch whose outcome could not be decided) may still have a live
@@ -3613,7 +3633,8 @@ export class Daemon {
           (e) =>
             (e.type === "agent_spawned" || e.type === "spawn_identity_burned") &&
             e.task === task &&
-            e.data.role === role,
+            e.data.role === role &&
+            (stage === undefined || e.data.stage === stage),
         ).length + 1
     );
   }
@@ -5032,24 +5053,7 @@ export class Daemon {
       mergeMode: () =>
         log.record.wave?.merge ?? (this.config.get("autopilot.merge", wave) as MergeMode),
       mergeRetryMax: () => this.config.get("autopilot.merge_retry_max", wave) as number,
-      retire: async (agentId, status) => {
-        // Replaced or cancelled without having ended itself: stop its session first, so it does
-        // nothing next to (or instead of) the new attempt.
-        const a = this.supervised.get(agentId);
-        if (a !== undefined && (status === "relaunched" || status === "stopped"))
-          await this.cancelAgent(
-            wave,
-            { task: a.task, role: a.role, agent_id: agentId },
-            DAEMON_AGENT_ID,
-            {
-              text: `volleyd: ${agentId} is being ${status === "relaunched" ? "replaced by a relaunch" : "stopped"}. Stop work now: do not push, open or merge anything further, and exit.`,
-              from_agent_id: DAEMON_AGENT_ID,
-              wave,
-              task: a.task,
-            },
-          );
-        await this.retireAny(wave, agentId, status ?? "done");
-      },
+      retire: (agentId, status) => this.retireRole(wave, agentId, status),
       nextAgent: (task, role) => {
         const attempt = this.agentAttempt(wave, task, role);
         return { agent_id: agentIdFor(wave, task, role, attempt), attempt };
@@ -5078,6 +5082,16 @@ export class Daemon {
       .queryRetained(buildTopic(a.namespace, agentId, "result"), DAEMON_DEFAULTS.probe_ms)
       .catch(() => null);
     const result = raw !== null && raw !== "" ? parseEnvelope(raw)?.payload : undefined;
+    if (a.task === RELEASE_TASK) {
+      await this.releaseFor(a.wave).handle({
+        kind: "agent_done",
+        agent_id: agentId,
+        status: type === "done" ? "done" : "failed",
+        ...(result !== undefined ? { result } : {}),
+        ...(why !== undefined ? { why } : {}),
+      });
+      return;
+    }
     await this.pipelineFor(a.wave).handle(a.task, {
       kind: "agent_done",
       role: a.role,
@@ -5104,6 +5118,15 @@ export class Daemon {
       return x.agent_id === agentId && x.status_at === status.wall_time;
     });
     if (asked) return;
+    if (a.task === RELEASE_TASK) {
+      await this.releaseFor(a.wave).handle({
+        kind: "agent_done",
+        agent_id: agentId,
+        status: "blocked",
+        why: `blocked: ${blockedReason(status.payload)}`,
+      });
+      return;
+    }
     await this.pipelineFor(a.wave).handle(a.task, {
       kind: "agent_blocked",
       role: a.role,
@@ -5219,6 +5242,143 @@ export class Daemon {
     } catch (e) {
       this.log(`spawn budget ${wave}: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+
+  /**
+   * Retire a pipeline (or release stage) agent. Replaced or cancelled without having ended itself
+   * (`relaunched`, `stopped`): its session is stopped first, so it does nothing next to (or
+   * instead of) the new attempt.
+   */
+  private async retireRole(wave: WaveId, agentId: string, status?: string): Promise<void> {
+    const a = this.supervised.get(agentId);
+    if (a !== undefined && (status === "relaunched" || status === "stopped"))
+      await this.cancelAgent(
+        wave,
+        { task: a.task, role: a.role, agent_id: agentId },
+        DAEMON_AGENT_ID,
+        {
+          text: `volleyd: ${agentId} is being ${status === "relaunched" ? "replaced by a relaunch" : "stopped"}. Stop work now: do not push, open or merge anything further, and exit.`,
+          from_agent_id: DAEMON_AGENT_ID,
+          wave,
+          task: a.task,
+        },
+      );
+    await this.retireAny(wave, agentId, status ?? "done");
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Release train stages (SPEC §4.6.19): one `release` agent per stage, serially; volleyd only
+  // verifies (read-only) and writes the evidence. The interpreter is autopilot/release-train.ts.
+  // -------------------------------------------------------------------------------------------
+
+  /** The release train driver of a wave, on this daemon's journal, spawner, steering and decisions. */
+  private releaseFor(wave: WaveId): ReleaseTrain {
+    let d = this.releases.get(wave);
+    if (d !== undefined) return d;
+    const log = this.waves.get(wave) as WaveLog;
+    d = new ReleaseTrain(wave, {
+      exec: this.host.exec,
+      home: this.opts.home,
+      view: () => {
+        const st = log.record.state;
+        if (st == null) return null;
+        return releaseView({
+          wave,
+          release_branch: st.release_branch,
+          status: st.status,
+          train: st.release,
+          events: log.journal.readAll(),
+          decisions: log.record.decisions,
+        });
+      },
+      journal: (ev) => this.append(wave, ev),
+      spawn: (stage) => this.releaseSpawn(wave, stage),
+      steer: (agentId, text) =>
+        this.deliverSteer(
+          wave,
+          RELEASE_TASK,
+          {
+            role: "release",
+            agent_id: agentId,
+            namespace:
+              this.supervised.get(agentId)?.namespace ?? this.agentNamespace(wave, agentId),
+          },
+          text,
+          DAEMON_AGENT_ID,
+          randomUUID(),
+          { reason: STAGE_STEER_REASON },
+        ),
+      decide: (input, extra) => this.openDecisionNow(wave, input, extra),
+      retire: (agentId, status) => this.retireRole(wave, agentId, status),
+      enqueue: async (fn) => {
+        if (this.running) await this.enqueue(fn);
+      },
+      now: this.now,
+      log: (line) => this.log(line),
+    });
+    this.releases.set(wave, d);
+    return d;
+  }
+
+  /** Level-triggered: a releasing wave's train enters its next stage, or retries a held spawn. */
+  private async releaseAdvance(wave: WaveId): Promise<void> {
+    if (this.opts.spawner === undefined) return;
+    if (this.waves.get(wave)?.record.state?.status !== "releasing") return;
+    try {
+      await this.releaseFor(wave).handle({ kind: "advance" });
+    } catch (e) {
+      this.log(`release ${wave}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /** Release stage agents live in any wave: supervised, being verified, or spawning. */
+  private releaseAgentsLive(): number {
+    let n = 0;
+    for (const a of this.supervised.values()) if (a.task === RELEASE_TASK) n++;
+    for (const a of this.launching.values()) if (a.task === RELEASE_TASK) n++;
+    for (const key of this.spawning) if (key.split("/")[1] === RELEASE_TASK) n++;
+    return n;
+  }
+
+  /**
+   * A release stage's spawn, through the same lock, launch and verification as any role's, while
+   * the wave is releasing, under the kill switch, T5's pressure verdict and the hard ceiling (a
+   * stage agent counts like a task). Not the spawn budget: a stage runs again only on the
+   * owner's `respawn`. A hold is silent: the next tick asks again.
+   */
+  private releaseSpawn(wave: WaveId, stage: PlaybookStage): void {
+    const rec = this.waves.get(wave)?.record;
+    if (this.opts.spawner === undefined || rec?.wave == null || rec.state == null) return;
+    const key = `${wave}/${RELEASE_TASK}/release`;
+    if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) return;
+    if (this.taskLive(wave, RELEASE_TASK)) return;
+    let live = this.releaseAgentsLive();
+    for (const log of this.waves.values()) live += activeTasks(log.record).length;
+    const pressure = this.pressure(wave);
+    const hold = this.killSwitch
+      ? "kill switch engaged"
+      : rec.state.status !== "releasing"
+        ? "wave not releasing"
+        : pressure.allow < 1
+          ? `admission closed: ${(pressure.reasons ?? []).join(", ") || "no capacity"}`
+          : live >= this.config.effective(wave).hard_ceiling
+            ? `hard ceiling reached (${live})`
+            : null;
+    if (hold !== null) {
+      this.log(`spawn ${key} (${stage.name}): held, ${hold}`);
+      return;
+    }
+    const attempt = this.agentAttempt(wave, RELEASE_TASK, "release", stage.name);
+    const files = {
+      "stage.md": renderStageMd(stage, {
+        wave,
+        release_branch: rec.state.release_branch,
+        attempt,
+      }),
+    };
+    void this.startSpawn(wave, RELEASE_TASK, "release", { stage, files }).catch((e: unknown) => {
+      this.log(`spawn ${key} (${stage.name}): ${e instanceof Error ? e.message : String(e)}`);
+    });
   }
 
   /**
@@ -6146,6 +6306,9 @@ export class Daemon {
     if (this.waves.get(wave)?.record.wave?.tasks[task] === undefined)
       return { ok: false, error: `unknown task '${task}' in wave ${wave}` };
     if (!isRole(role)) return { ok: false, error: `unknown role '${role}'` };
+    // A release stage's agent is the release train's to spawn (SPEC §4.6.19), never a task's.
+    if (role === "release")
+      return { ok: false, error: "role 'release' is spawned by the release train only" };
     if (this.waves.get(wave)?.record.wave?.tasks[task]?.host === AUTO_HOST)
       return {
         ok: false,
@@ -6312,7 +6475,12 @@ export class Daemon {
           ? [event.task]
           : [];
     // The last stage of the release train verified: the owner's release_go (SPEC §4.6.19).
-    if (event.type === "release_stage_verified") await this.releaseGoIfVerified(wave);
+    if (event.type === "release_stage_verified" || event.type === "release_stage_skipped")
+      await this.releaseGoIfVerified(wave);
+    if (event.type === "release_cancelled")
+      this.log(
+        `wave ${wave}: release train cancelled at ${String(event.data.stage)} by ${String(event.data.by)}`,
+      );
     for (const task of ended) {
       const ids = (queued[task] ?? []).map((q) => q.message_id);
       if (ids.length === 0) continue;
@@ -6479,9 +6647,11 @@ export class Daemon {
   ): Promise<DecisionRecord> {
     const log = this.waves.get(wave);
     if (log === undefined) throw new Error(`unknown wave '${wave}'`);
+    // A release stage agent's question (liveness, a spawn's) is wave-level: `_release` is no task.
+    const asked = input.task === RELEASE_TASK ? { ...input, task: null } : input;
     const r = openEvent(
       log.record,
-      this.withRespawnElsewhere(wave, input, extra),
+      this.withRespawnElsewhere(wave, asked, extra),
       dateOf(this.time),
     );
     if ("error" in r) throw new Error(r.error);
@@ -6708,6 +6878,11 @@ export class Daemon {
         }
       }
     }
+    // A release stage's question (stage_go, a failed stage's agent_blocked): the train's answer.
+    if (stageOf(d) !== undefined && this.opts.spawner !== undefined)
+      void this.enqueue(() =>
+        this.releaseFor(wave).handle({ kind: "decision_resolved", decision: d }),
+      );
     if (d.task === null) return { decision: d, already_resolved: false };
     if ((d as { pipeline?: unknown }).pipeline !== undefined && this.opts.spawner !== undefined) {
       const task = d.task;

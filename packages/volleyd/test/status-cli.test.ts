@@ -252,7 +252,21 @@ describe("volleyd status formatting", () => {
       },
     });
     expect(out.split("\n")[0]).toContain("w1  releasing  plan v1");
-    expect(out.split("\n")[1]).toBe("  release: staging (1/3 verified)");
+    expect(out.split("\n")[1]).toBe("  release: staging running (1/3 verified)");
+    const gated = formatWave({
+      ...plain,
+      status: "releasing",
+      gates: [],
+      release: {
+        stage: "deploy-staging",
+        stages: [
+          { name: "bump", state: "verified" },
+          { name: "deploy-staging", state: "awaiting_go" },
+          { name: "smoke", state: "pending" },
+        ],
+      },
+    });
+    expect(gated.split("\n")[1]).toBe("  release: deploy-staging awaiting go (1/3 verified)");
     const idle = formatWave({
       ...plain,
       release: { stage: null, stages: [{ name: "bump", state: "verified" }] },

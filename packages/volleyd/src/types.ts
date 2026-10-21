@@ -316,6 +316,8 @@ export interface TaskAgents {
   fixup?: string;
   /** The pipeline's rebase agent, when the release branch moved before the gate. */
   rebase?: string;
+  /** A release stage's agent (the `_release` pseudo task's; never a wave task's). */
+  release?: string;
 }
 
 export interface TaskState {
@@ -412,7 +414,13 @@ export interface WaveState {
 }
 
 /** One release stage's state in the wave state (SPEC §4.6.1, §4.6.19). */
-export type ReleaseStageState = "pending" | "awaiting_go" | "running" | "verified" | "failed";
+export type ReleaseStageState =
+  | "pending"
+  | "awaiting_go"
+  | "running"
+  | "verified"
+  | "failed"
+  | "skipped";
 
 /** wave-state `release`: the stage running or awaiting its go (else null), and every stage. */
 export interface ReleaseState {
@@ -550,6 +558,8 @@ export const WAVE_EVENT_TYPES = [
   "release_stage_entered",
   "release_stage_verified",
   "release_stage_failed",
+  "release_stage_skipped",
+  "release_cancelled",
   "release_done",
   // The needs-you inbox (SPEC §4.6.18): an item opened, and the answer its referee accepted.
   "inbox_opened",

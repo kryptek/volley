@@ -10,7 +10,7 @@ Ask the daemon to spawn one agent for a task of a submitted wave now, outside ad
 trust check, worktree lock, worktree, ISSUE.md, brief + gate, identity, launch. Returns once the
 agent is launched (or refused); the daemon then verifies it through the hook signals.
 
-  --role <role>   ${ROLES.join(" | ")} (default implementer)
+  --role <role>   ${ROLES.filter((r) => r !== "release").join(" | ")} (default implementer)
 
 Refusals print their code: SPAWN_LOCKED (the worktree's agent is still live),
 SPAWN_BRIEF_REJECTED, ISSUE_MISMATCH, CREDENTIALS_FAILED, … Exit 1 on a refusal.

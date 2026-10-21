@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   type BriefVars,
+  NO_STAGE,
   ROLES,
   briefExtra,
   briefGatePath,
@@ -32,6 +33,7 @@ const VARS: BriefVars = {
   extra: "",
   hygiene_rule: hygieneText("p1").rule,
   hygiene_contract: hygieneText("p1").contract,
+  ...NO_STAGE,
 };
 
 describe("brief templates", () => {
@@ -53,7 +55,8 @@ describe("brief templates", () => {
       for (const t of ['type="done"', 'type="blocked"', 'type="failed"'])
         expect(brief).toContain(t);
       expect(brief).toContain("w1-t1-implementer-1");
-      expect(brief).toContain("#42");
+      // A release stage is no issue's: its brief is the playbook stage's.
+      if (role !== "release") expect(brief).toContain("#42");
     },
   );
 
