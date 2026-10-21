@@ -85,7 +85,7 @@ describe("purpose line", () => {
     expect(within(bar).getByText("fixup")).toHaveClass("chip--role");
     // Shown once: the headline row, no purpose line in the body.
     expect(container.querySelector(".a-purpose")).toBeNull();
-    const issue = within(bar).getByRole("link", { name: "#102" });
+    const issue = within(bar).getByRole("link", { name: "Issue #102 on GitHub" });
     expect(issue).toHaveAttribute("target", "_blank");
     expect(issue.getAttribute("href")).toMatch(
       /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/102$/,
@@ -156,13 +156,13 @@ describe("purpose line", () => {
       ),
       id,
     );
-    const issue = screen.getByRole("link", { name: "#155" });
-    const pr = screen.getByRole("link", { name: "PR #167" });
+    const issue = screen.getByRole("link", { name: "Issue #155 on GitHub" });
+    const pr = screen.getByRole("link", { name: "PR #167 on GitHub" });
     expect(issue).toHaveAttribute("href", "https://github.com/example-org/example-repo/issues/155");
     expect(pr).toHaveAttribute("href", "https://github.com/example-org/example-repo/pull/167");
     for (const a of [issue, pr]) {
       expect(a).toHaveAttribute("target", "_blank");
-      expect(a).toHaveAttribute("rel", "noreferrer");
+      expect(a).toHaveAttribute("rel", "noopener noreferrer");
     }
   });
 });

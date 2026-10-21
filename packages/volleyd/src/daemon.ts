@@ -262,7 +262,7 @@ import {
   readinessTopic,
 } from "./readiness";
 import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure } from "./reducer";
-import { readRepoVisibility } from "./repo-visibility";
+import { readRepoView } from "./repo-visibility";
 import {
   type Admission,
   activeTasks,
@@ -278,6 +278,7 @@ import { SETUP_OPS, SetupOps, type SetupOpsOptions, type SetupOutcome } from "./
 import type {
   AgentMcp,
   CoordinatorAttention,
+  GitHubRepo,
   JournalEvent,
   MergeMode,
   NewEvent,
@@ -573,11 +574,15 @@ export interface SpawnerOptions {
   remoteExec?: ExecFn;
 }
 
-/** `repo_visibility_detected` data: the repo's visibility for a wave version, and why. */
+/**
+ * `repo_visibility_detected` data: the repo's visibility for a wave version, and why, plus its
+ * GitHub name and URL when `gh repo view` read them.
+ */
 interface VisibilityFacts {
   visibility: RepoVisibility | null;
   source: "gh" | "config";
   public_hygiene: PublicHygiene;
+  github?: GitHubRepo;
 }
 
 /** How the pipeline (or an account move) starts a spawn (startSpawn). */
@@ -7739,7 +7744,7 @@ export class Daemon {
     if (missing !== null) return { ok: false, error: missing };
     const text = p.wave_yaml as string;
     const fetchFiles = first.existing === undefined && this.opts.issueBody !== undefined;
-    if (!fetchFiles && !this.readsVisibility(first.wave)) {
+    if (!fetchFiles && !this.readsRepo()) {
       const visibility = await this.repoVisibility(first.wave);
       return first.existing !== undefined
         ? this.resubmit(first.existing, first.wave, text, preface, visibility)
@@ -7774,24 +7779,27 @@ export class Daemon {
   }
 
   /**
-   * Whether submitting `wave` runs `gh repo view`: under `public_hygiene: auto`, on a daemon that
-   * spawns agents (one that spawns none writes no reviewer briefs).
+   * Whether submitting a wave runs `gh repo view`: on a daemon that spawns agents (one that
+   * spawns none writes no reviewer briefs and links nothing).
    */
-  private readsVisibility(wave: Wave): boolean {
-    return this.opts.spawner !== undefined && this.publicHygiene(wave) === "auto";
+  private readsRepo(): boolean {
+    return this.opts.spawner !== undefined;
   }
 
   /**
-   * The `repo_visibility_detected` facts for a wave version: under `auto` read with `gh repo
-   * view` (`unknown` on any failure), under `on` / `off` from config. Null: not recorded (a
-   * daemon without a spawner); the wave's hygiene level is then p1.
+   * The `repo_visibility_detected` facts for a wave version, read with `gh repo view`: under
+   * `auto` the visibility (`unknown` on any failure), under `on` / `off` the visibility from
+   * config; in every mode the repository's `github` name and URL when gh gave them. Null: not
+   * recorded (a daemon without a spawner); the wave's hygiene level is then p1.
    */
   private async repoVisibility(wave: Wave): Promise<VisibilityFacts | null> {
-    if (this.opts.spawner === undefined) return null;
+    if (!this.readsRepo()) return null;
     const mode = this.publicHygiene(wave);
-    if (mode !== "auto") return { visibility: null, source: "config", public_hygiene: mode };
-    const visibility = await readRepoVisibility(this.host.exec, expandHome(wave.repo));
-    return { visibility, source: "gh", public_hygiene: mode };
+    const view = await readRepoView(this.host.exec, expandHome(wave.repo));
+    const github = view.github !== undefined ? { github: view.github } : {};
+    if (mode !== "auto")
+      return { visibility: null, source: "config", public_hygiene: mode, ...github };
+    return { visibility: view.visibility, source: "gh", public_hygiene: mode, ...github };
   }
 
   /** Journal a wave version's visibility, and the alarm when it could not be read. */

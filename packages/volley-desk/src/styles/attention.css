@@ -122,6 +122,13 @@
   color: var(--mute);
   margin-top: 2px;
 }
+.coord-repos {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
 .st-awaiting_input .coord-state,
 .st-gone .coord-state {
   color: #ffb4a1;

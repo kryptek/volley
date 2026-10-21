@@ -437,6 +437,7 @@ const ALLOWED: string[][] = [
   ["gh", "issue", "view", "5", "--json", "title,body"],
   ["gh", "repo", "view", "example-org/example-repo", "--json", "visibility"],
   ["gh", "repo", "view", "--json", "visibility"],
+  ["gh", "repo", "view", "--json", "nameWithOwner,url,visibility"],
   ["gh", "pr", "view", "12"],
   ["gh", "pr", "list", "--head", "issue-5"],
   ["gh", "pr", "checks", "12"],
