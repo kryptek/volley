@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
+import { EXIT } from "../../src/exit-codes";
 import { type TestBroker, startTestBroker } from "../helpers/aedes-broker";
 import { runCli } from "../helpers/run-cli";
 
@@ -178,28 +179,110 @@ describe("volley claude", () => {
     await v.b.disconnect();
   });
 
-  it("list prints each profile's sign-in state and the sharing modes", async () => {
-    const v = await fakeVolleyd(tb.url, () => ({
-      ok: true,
-      result: {
-        root: "/srv/claude",
-        accounts: [
-          {
-            id: "work",
-            label: "Work",
-            machine: "local",
-            plan: "max",
-            dir: "/srv/claude/work",
-            signin: { state: "signed_in" },
-          },
-        ],
-        sharing: { "settings.json": "copy", mcp: "copy" },
+  /** T0's answer: a profile on this machine, a paired machine signed in with the same e-mail. */
+  const LIST_RESULT = {
+    root: "/srv/claude",
+    accounts: [
+      {
+        id: "work",
+        label: "Work",
+        machine: "local",
+        plan: "max",
+        email: "owner@example.com",
+        org: "Example Org",
+        dir: "/srv/claude/work",
+        signin: { state: "signed_in" },
       },
-    }));
+    ],
+    primary: {},
+    machines: [{ name: "peer-a", kind: "peer", claude: "signed_in", email: "owner@example.com" }],
+    sharing: { "settings.json": "copy", mcp: "copy" },
+  };
+
+  const now = Date.now();
+  const iso = (msAgo: number) => new Date(now - msAgo).toISOString();
+  const RECORDS = [
+    {
+      account: "work",
+      label: "Work",
+      email: "owner@example.com",
+      five_hour: { pct: 37, resets_at: new Date(now + 2 * 3_600_000).toISOString() },
+      weekly: { pct: 56, resets_at: null },
+      agents: ["w1-t1-implementer-1"],
+      waves: ["w1"],
+      sampled_at: iso(2 * 60_000),
+    },
+    {
+      account: "primary@peer-a",
+      five_hour: { pct: 41, resets_at: null },
+      weekly: { pct: 56, resets_at: null },
+      agents: [],
+      waves: ["w2"],
+      sampled_at: iso(3 * 3_600_000),
+    },
+  ];
+
+  /** A fake volleyd answering T0's shape, with the account records already retained. */
+  async function listVolleyd() {
+    const v = await fakeVolleyd(tb.url, () => ({ ok: true, result: LIST_RESULT }));
+    for (const rec of RECORDS)
+      await v.b.publish(
+        `volley/_system/claude-accounts/${rec.account}`,
+        v.env("_system/claude-accounts", "claude_account", rec),
+        { qos: 1, retain: true },
+      );
+    return v;
+  }
+
+  it("list groups the accounts by e-mail, masked, with machines, usage and the sharing modes", async () => {
+    const v = await listVolleyd();
     const r = await run(["list"]);
-    expect(r.stdout).toContain("work\tsigned_in max\tlocal\tWork\t/srv/claude/work");
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Work · max · Example Org · o•••@example.com");
+    expect(r.stdout).not.toContain("owner@example.com");
+    expect(r.stdout).toMatch(/5-hour 37% \(resets in 1h 59m, from this machine 2 m ago\)/);
+    expect(r.stdout).toMatch(/this machine +work +signed in +waves: w1/);
+    expect(r.stdout).toMatch(
+      /peer-a +default login +signed in +waves: w2 +5-hour 41% 3 h old \(stale\)/,
+    );
     expect(r.stdout).toContain("sharing: settings.json=copy mcp=copy");
     await v.b.disconnect();
+  });
+
+  it("list --show-email shows the address", async () => {
+    const v = await listVolleyd();
+    const r = await run(["list", "--show-email"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Work · max · Example Org · owner@example.com");
+    await v.b.disconnect();
+  });
+
+  it("list --json prints the raw answer with the records", async () => {
+    const v = await listVolleyd();
+    const r = await run(["list", "--json"]);
+    expect(r.exitCode).toBe(0);
+    const out = JSON.parse(r.stdout) as { records: { account: string }[] };
+    expect({ ...out, records: undefined }).toEqual({ ...LIST_RESULT, records: undefined });
+    expect(out.records.map((x) => x.account).sort()).toEqual(["primary@peer-a", "work"]);
+    await v.b.disconnect();
+  });
+
+  it("an empty registry still prints the sharing line", async () => {
+    const v = await fakeVolleyd(tb.url, () => ({
+      ok: true,
+      result: { root: "/srv/claude", accounts: [], sharing: { mcp: "copy" } },
+    }));
+    const r = await run(["list"]);
+    expect(r.stdout).toContain("no Claude account profiles under /srv/claude");
+    expect(r.stdout).toContain("sharing: mcp=copy");
+    await v.b.disconnect();
+  });
+
+  it("--show-email with any other verb is a usage error", async () => {
+    const r = await run(["sync", "--show-email"]);
+    expect(r.exitCode).toBe(EXIT.USAGE);
+    expect(r.stderr).toContain("--show-email");
   });
 
   it("move sends agent_move_account; a refusal is exit 1 with volleyd's reason", async () => {

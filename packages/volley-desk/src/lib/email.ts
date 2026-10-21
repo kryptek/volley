@@ -1,6 +1,7 @@
 /**
  * A Claude login's e-mail as the Desk shows it: masked until the owner asks to see it, and one
- * spelling per address so two machines' reports of the same login group together.
+ * spelling per address so two machines' reports of the same login group together. The CLI's
+ * `volley-mcp/mask` (`packages/volley-mcp/src/mask.ts`) applies the same rules; change both together.
  */
 
 const BULLETS = "•••";
