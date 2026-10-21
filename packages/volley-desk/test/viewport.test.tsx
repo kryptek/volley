@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { World } from "../src/canvas/World";
 import {
   FIT_MIN_SCALE,
@@ -8,6 +8,7 @@ import {
   type Rect,
   type View,
   useViewport,
+  worldTransform,
 } from "../src/canvas/useViewport";
 
 let api: ReturnType<typeof useViewport>;
@@ -16,7 +17,7 @@ function Harness({ initial }: { initial: View }) {
   api = useViewport({ initial });
   return (
     <div data-testid="stage" ref={api.stageRef} {...api.stageHandlers}>
-      <World view={api.view}>
+      <World view={api.view} ref={api.worldRef}>
         <section className="win" data-testid="win">
           <div className="feed" data-testid="feed" />
         </section>
@@ -97,6 +98,87 @@ describe("useViewport — pointer pan", () => {
     fireEvent.pointerDown(screen.getByTestId("win"), { clientX: 10, clientY: 10 });
     fireEvent.pointerMove(screen.getByTestId("stage"), { clientX: 40, clientY: 30 });
     expect(view()).toEqual({ x: 0, y: 0, s: 1 });
+  });
+});
+
+describe("useViewport — gesture pan", () => {
+  /** Animation frames run only when `frame()` is called. */
+  let frames: FrameRequestCallback[] = [];
+  const frame = () =>
+    act(() => {
+      const due = frames;
+      frames = [];
+      for (const f of due) f(performance.now());
+    });
+  beforeEach(() => {
+    frames = [];
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((f) => {
+      frames.push(f);
+      return frames.length;
+    });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const world = () => document.querySelector(".world") as HTMLElement;
+  const t = (pointerId: number, clientX: number, clientY: number) => ({
+    pointerId,
+    pointerType: "touch",
+    clientX,
+    clientY,
+  });
+
+  it("moves the world element per frame and commits the view on release", () => {
+    const initial = { x: 10, y: 20, s: 0.5 };
+    render(<Harness initial={initial} />);
+    const stage = screen.getByTestId("stage");
+    fireEvent.pointerDown(stage, t(1, 100, 100));
+    fireEvent.pointerMove(stage, t(1, 130, 110));
+    fireEvent.pointerMove(stage, t(1, 150, 125));
+    frame();
+    expect(world().style.transform).toBe("translate(60px, 45px) scale(0.5)");
+    expect(view()).toEqual(initial);
+    fireEvent.pointerUp(stage, t(1, 150, 125));
+    expect(view()).toEqual({ x: 60, y: 45, s: 0.5 });
+    expect(world().style.transform).toBe(worldTransform(view()));
+  });
+
+  it("a two-finger pinch commits its scale and midpoint on release", () => {
+    render(<Harness initial={{ x: 0, y: 0, s: 0.5 }} />);
+    const stage = screen.getByTestId("stage");
+    fireEvent.pointerDown(stage, t(1, 100, 100));
+    fireEvent.pointerDown(stage, t(2, 200, 100));
+    fireEvent.pointerMove(stage, t(2, 300, 100));
+    frame();
+    expect(view()).toEqual({ x: 0, y: 0, s: 0.5 });
+    expect(world().style.transform).toMatch(/scale\(1\)$/);
+    fireEvent.pointerUp(stage, t(2, 300, 100));
+    fireEvent.pointerUp(stage, t(1, 100, 100));
+    expect(view().s).toBeCloseTo(1);
+    expect((200 - view().x) / view().s).toBeCloseTo(150 / 0.5);
+    expect((100 - view().y) / view().s).toBeCloseTo(100 / 0.5);
+  });
+
+  it("a cancelled pointer commits too", () => {
+    render(<Harness initial={{ x: 0, y: 0, s: 1 }} />);
+    const stage = screen.getByTestId("stage");
+    fireEvent.pointerDown(stage, t(1, 0, 0));
+    fireEvent.pointerMove(stage, t(1, 25, -5));
+    expect(view()).toEqual({ x: 0, y: 0, s: 1 });
+    fireEvent.pointerCancel(stage, t(1, 25, -5));
+    expect(view()).toEqual({ x: 25, y: -5, s: 1 });
+  });
+
+  it("a render mid-gesture keeps the moved transform", () => {
+    const { rerender } = render(<Harness initial={{ x: 0, y: 0, s: 1 }} />);
+    const stage = screen.getByTestId("stage");
+    fireEvent.pointerDown(stage, t(1, 0, 0));
+    fireEvent.pointerMove(stage, t(1, 30, 40));
+    frame();
+    rerender(<Harness initial={{ x: 0, y: 0, s: 1 }} />);
+    expect(world().style.transform).toBe("translate(30px, 40px) scale(1)");
+    fireEvent.pointerUp(stage, t(1, 30, 40));
+    expect(view()).toEqual({ x: 30, y: 40, s: 1 });
   });
 });
 
