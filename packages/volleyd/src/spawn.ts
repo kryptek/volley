@@ -22,6 +22,7 @@ import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { waveDecisionId } from "./decisions";
 import { mintConsentToken, sealLaunchScript } from "./fence";
+import { lockFetches } from "./git-lock";
 import type { Host, WorktreeResult } from "./hosts/host";
 import {
   type AgentCredentials,
@@ -499,7 +500,11 @@ async function launchAttempt(
   const { host } = deps;
   const carried =
     req.start === undefined && req.continueBranch !== undefined
-      ? await pushedBranch(host.exec, ctx.repo, req.continueBranch)
+      ? await pushedBranch(
+          lockFetches(host.exec, host.name, ctx.repo),
+          ctx.repo,
+          req.continueBranch,
+        )
       : null;
   const branch =
     carried?.branch ??
@@ -520,6 +525,20 @@ async function launchAttempt(
   // A carried branch's tip is not the task's base: the first attempt's base_sha stands.
   const { base: _tip, ...carriedCut } = cut;
   const wt: WorktreeResult = carried !== null ? carriedCut : cut;
+  // The fetch lost a ref-lock race to another git process and its retry went through.
+  if (cut.fetch_retried !== undefined) {
+    await deps.journal({
+      type: "alarm_raised",
+      task: req.task,
+      data: {
+        alarm: "fetch_retried",
+        role: req.role,
+        attempt,
+        host: host.name,
+        fetch_error: cut.fetch_retried,
+      },
+    });
+  }
   // require_fresh_base off and the fetch failed: cut from the host's last copy, said out loud.
   if (wt.base !== undefined && !wt.base.fresh) {
     await deps.journal({

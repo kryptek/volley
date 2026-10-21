@@ -3,6 +3,7 @@ import { mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { exec } from "../src/exec";
+import { LocalCmuxHost } from "../src/hosts/local-cmux";
 import { SpawnError } from "../src/spawn-error";
 import { addWorktree, checkReleaseBranch, resolveReleaseBase } from "../src/worktree";
 import { fakeExec } from "./helpers/fake-exec";
@@ -133,7 +134,7 @@ describe("release base resolution", () => {
       .on(["git", "-C", REPO, "fetch"], {
         code: 128,
         stderr:
-          "\nfatal: unable to access 'https://example.com/repo.git/': Could not resolve host\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
+          "\nfatal: unable to access 'https://example.com/repo.git/': The requested URL returned error: 403\n\nPlease make sure you have the correct access rights\nand the repository exists.\n",
       })
       .on(LOCAL, { stdout: `${SHA_A}\n` });
     const err = (await resolveReleaseBase(fake.exec, REPO, B).catch(
@@ -142,13 +143,13 @@ describe("release base resolution", () => {
     expect(err.code).toBe("BASE_STALE");
     expect(err.message).not.toContain("\n");
     expect(err.message).not.toContain("access rights");
-    expect(err.message).toContain("Could not resolve host");
+    expect(err.message).toContain("error: 403");
     expect(err.message).toContain(
       `Fix: check that origin is reachable and has ${B}, or work from the local copy: \`volleyd config set require_fresh_base false\``,
     );
     expect(err.detail).toMatchObject({
       fetch_error:
-        "fatal: unable to access 'https://example.com/repo.git/': Could not resolve host",
+        "fatal: unable to access 'https://example.com/repo.git/': The requested URL returned error: 403",
     });
   });
 
@@ -265,6 +266,80 @@ describe("addWorktree", () => {
     const r = await addWorktree(fake.exec, { ...spec, requireFresh: false });
     expect(r.base).toEqual({ sha: SHA_A, fresh: false, fetch_error: "fatal: unable to access" });
     expect(fake.argvs(["git", "-C", repo, "worktree", "add"])).toHaveLength(1);
+  });
+
+  it("a fetch that lost a ref-lock race is retried once; the spawn goes on and reports it", async () => {
+    const repo = join(dir, "repo");
+    const race =
+      "error: fetching ref refs/remotes/origin/release/x failed: incorrect old value provided";
+    let fetches = 0;
+    const fake = fakeExec()
+      .on(["git", "-C", repo, "fetch"], () => (fetches++ === 0 ? { code: 1, stderr: race } : {}))
+      .on(["git", "-C", repo, "rev-parse", "--verify", "--quiet", `refs/heads/${B}`], {
+        stdout: `${SHA_A}\n`,
+      })
+      .on(["git", "-C", repo, "rev-parse", "--verify", "--quiet", `refs/remotes/origin/${B}`], {
+        stdout: `${SHA_A}\n`,
+      });
+    const r = await addWorktree(fake.exec, {
+      repo,
+      path: join(dir, "wt", "T1-implementer"),
+      branch: "w1/T1-implementer-1",
+      base: B,
+      releaseBase: true,
+    });
+    expect(fetches).toBe(2);
+    expect(r.base).toEqual({ sha: SHA_A, fresh: true });
+    expect(r.fetch_retried).toBe(race);
+  });
+
+  it("a fetch that never reached origin is BASE_UNREACHABLE (retried), not BASE_STALE", async () => {
+    const repo = join(dir, "repo");
+    const fake = fakeExec().on(["git", "-C", repo, "fetch"], {
+      code: 128,
+      stderr:
+        "fatal: unable to access 'https://example.com/r/': Could not resolve host: example.com",
+    });
+    const err = (await addWorktree(fake.exec, {
+      repo,
+      path: join(dir, "wt", "T1-implementer"),
+      branch: "w1/T1-implementer-1",
+      base: B,
+      releaseBase: true,
+    }).catch((e: unknown) => e)) as SpawnError;
+    expect(err).toMatchObject({ code: "BASE_UNREACHABLE", permanent: false });
+    expect(err.message).toContain("Could not resolve host");
+    expect(err.message).not.toContain("require_fresh_base false");
+  });
+
+  it("concurrent spawns into one clone fetch one at a time", async () => {
+    const repo = join(dir, "repo");
+    const log: string[] = [];
+    let n = 0;
+    const fake = fakeExec().on(["git", "-C", repo, "fetch"], async () => {
+      const i = n++;
+      log.push(`start ${i}`);
+      // Yield long enough for an unlocked second fetch to start.
+      for (let k = 0; k < 20; k++) await Promise.resolve();
+      log.push(`end ${i}`);
+      return {};
+    });
+    fake.on(["git", "-C", repo, "rev-parse", "--verify", "--quiet", `refs/heads/${B}`], {
+      stdout: `${SHA_A}\n`,
+    });
+    const host = new LocalCmuxHost(fake.exec);
+    await Promise.all(
+      ["T1", "T2"].map((t) =>
+        host.prepareWorktree({
+          repo,
+          path: join(dir, "wt", `${t}-implementer`),
+          branch: `w1/${t}-implementer-1`,
+          base: B,
+          releaseBase: true,
+        }),
+      ),
+    );
+    expect(log).toEqual(["start 0", "end 0", "start 1", "end 1"]);
   });
 
   it("a pipeline start ref (not the release branch) is used as given: no fetch", async () => {

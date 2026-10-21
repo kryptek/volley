@@ -1358,7 +1358,7 @@ lists every key with its default and example pools, commented out.
 |---|---|---|---|
 | 0 | **Repo trust**: is the repo root trusted in `~/.claude.json` (`projects[<root>].hasTrustDialogAccepted`, or a parent's)? | `trust.ts` | untrusted → decision `repo_untrusted` ("Needs you: trust `<repo>` for dispatch?"), the wave's spawns park on it |
 | 1 | **Lock** `$VOLLEYD_HOME/locks/<worktree-hash>.lock`, `O_EXCL` | `locks.ts` | `SPAWN_LOCKED` |
-| 2 | **Worktree** `git -C <repo> worktree add <worktree_root>/<wave>/<task>-<role> -b <wave>/<task>-<role>-<attempt> <base>`, `<base>` the release branch as origin has it ([base ref](#base-ref)); `.volley/` and `/ISSUE.md` appended to the repo's `info/exclude` once | `worktree.ts` | `BASE_STALE`, `RELEASE_BRANCH_MISSING`, `WORKTREE_FAILED` |
+| 2 | **Worktree** `git -C <repo> worktree add <worktree_root>/<wave>/<task>-<role> -b <wave>/<task>-<role>-<attempt> <base>`, `<base>` the release branch as origin has it ([base ref](#base-ref)); `.volley/` and `/ISSUE.md` appended to the repo's `info/exclude` once | `worktree.ts` | `BASE_STALE`, `BASE_UNREACHABLE`, `RELEASE_BRANCH_MISSING`, `WORKTREE_FAILED` |
 | 3 | **ISSUE.md** from `gh issue view <n> --json number,title,body,url`, `<n>` from the wave file only | `issue.ts` | `ISSUE_MISMATCH`, `ISSUE_FETCH_FAILED` |
 | 4 | **Brief** the [brief preface](#brief-preface), then `briefs/<role>.md.tmpl` → `.volley/brief.md`, then the brief gate | `brief.ts` | `BRIEF_PREFACE_TOO_LARGE`, `SPAWN_BRIEF_REJECTED` |
 | 5 | **Identity** one Dynamic Security `createClient` (username = agent id, role `volley-agent`), batched with the wave's other mints → `.volley/agent.json` (mode 0600) | `identity.ts`, `dynsec.ts` | `CREDENTIALS_FAILED` |
@@ -1385,7 +1385,17 @@ volleyd runs `git -C <repo> fetch origin <release_branch>`, then picks the base:
 | neither | refused: `RELEASE_BRANCH_MISSING: <repo> has neither <b> nor origin/<b> — push it first` |
 
 `git fetch` is bounded (30 s) and never prompts for credentials; a timeout counts as a failed
-fetch. A failed fetch (offline, no remote, a timeout) refuses the spawn while
+fetch. Fetches into one clone run one at a time: every fetch volleyd runs (a spawn's, on either
+host, a continued branch's check, the pipeline's artifact probes) holds a lock keyed by the
+machine (`local`, or the host's name) and the clone's path, so tasks admitted on the same tick do
+not race each other's ref updates. A fetch that loses a ref-lock race to another git process
+(`incorrect old value provided`, `cannot lock ref`, `Unable to create '….lock'`) is retried once
+after 500 ms before anything is decided; when the retry succeeds the spawn goes on and the wave
+journals `alarm_raised { alarm: "fetch_retried", role, attempt, host, fetch_error }`. A fetch that
+never reached origin (`Could not resolve host`, `Connection timed out`, `Connection refused`,
+`Network is unreachable`) refuses the spawn with `BASE_UNREACHABLE` while `require_fresh_base` is
+on, a transient [spawn failure](#spawn-failures-and-retries) retried with the usual backoff. Any
+other failed fetch (no remote, a timeout, a ref origin lacks) refuses the spawn while
 `require_fresh_base` is on (the default, on every host): `BASE_STALE: git fetch origin <b> failed
 in <repo> (<git's first line>); … Fix: …`, a [spawn failure](#spawn-failures-and-retries) like any
 other, retried with the usual backoff, so no agent starts from a stale copy of the release branch.
@@ -1909,7 +1919,7 @@ through `base64 -d`. The spawn steps are those of the local host, with these dif
 |---|---|
 | Repo trust | the box's own `~/.claude.json`, read at every spawn (only the trust bits); an untrusted repo opens `repo_untrusted` with `host` and `target` (see below) |
 | Lock | `$VOLLEYD_HOME/hosts/<target>/locks/` — keyed by target and worktree path |
-| Worktree | `git -C <repo> fetch origin <release_branch>`, then `worktree add … origin/<release_branch>` on the box; no clone at `repo` → decision `remote_repo_missing` naming the path (an ssh failure is not "no clone": the spawn is refused with `LAUNCH_FAILED` and retried with backoff) |
+| Worktree | `git -C <repo> fetch origin <release_branch>` (one fetch into the box's clone at a time, the same lock and ref-lock retry as on this machine: [base ref](#base-ref)), then `worktree add … origin/<release_branch>` on the box; no clone at `repo` → decision `remote_repo_missing` naming the path (an ssh failure is not "no clone": the spawn is refused with `LAUNCH_FAILED` and retried with backoff) |
 | Brief | `.volley/brief-extra.md` is read from the box's clone; the [brief preface](#brief-preface) on volleyd's host |
 | Identity | minted on the daemon's machine; `agent.json` carries `broker_url: mqtt://127.0.0.1:<remote_port>` |
 | Launch | `launch.sh` exports `VOLLEY_HOOKS_DIR=<volley_dir>/packages/volley-hooks` and, for tooling that reads env, `VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE`, `VOLLEY_AGENT_ID` (the identity file still wins); started with `tmux new-session -d -s <wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'`. Never `--mcp-config` |

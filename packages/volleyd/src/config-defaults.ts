@@ -180,6 +180,9 @@ export const DAEMON_DEFAULTS = {
   /** How long a spawn's (or `run`'s) `git fetch origin <release branch>` may take before it is
    * treated as failed (an ssh remote with no agent, a credential prompt). */
   git_fetch_timeout_ms: 30_000,
+  /** After a fetch that lost a ref-lock race (another git process updating the same ref): how
+   * long to wait before its one retry (git-lock.ts lockedFetch). */
+  git_fetch_race_retry_ms: 500,
   /** Read-modify-write attempts on `~/.claude.json` while Claude Code keeps rewriting it. */
   trust_write_attempts: 5,
   /** How long `steer` waits for the recipient's `steering_acked` before reporting `delivered`. */

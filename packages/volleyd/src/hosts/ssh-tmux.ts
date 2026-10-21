@@ -10,6 +10,7 @@ import {
   type RemoteStep,
   TMUX_LAUNCH_COMMAND,
 } from "../fence";
+import { fetchFailure, lockedFetch } from "../git-lock";
 import { type DoctorReport, parseDoctorReport } from "../machines";
 import { PATH_TOOLS, type PathProbe, parsePathProbe } from "../readiness";
 import { SpawnError } from "../spawn-error";
@@ -292,16 +293,32 @@ export class SshTmuxHost implements RemoteHost {
     // The box's clone must have the release branch as it is now: fetch it, cut from origin's.
     // A failed fetch refuses the spawn unless require_fresh_base is off (then: the box's copy);
     // for a start ref (a reviewer's head), it is a plain worktree failure, as it always was.
-    const fetch = await git("-C", spec.repo, "fetch", "--quiet", "origin", spec.base);
+    // One fetch into the box's clone at a time (git-lock.ts); a lost ref-lock race is retried.
+    const { result: fetch, retried } = await lockedFetch(this.name, spec.repo, () =>
+      git("-C", spec.repo, "fetch", "--quiet", "origin", spec.base),
+    );
     const fetchError = fetch.code === 0 ? null : firstLine(fetch.stderr, `exit ${fetch.code}`);
+    const retriedNote = retried !== undefined ? { fetch_retried: retried } : {};
     // A start commit (a reviewer's or fixup's PR head, by sha) is used as it is, like on this
     // machine: never `origin/<sha>`. The box may already hold it (its own agent pushed it).
-    if (isCommitSha(spec.base)) return this.worktreeAtCommit(spec, fetchError);
+    if (isCommitSha(spec.base))
+      return { ...(await this.worktreeAtCommit(spec, fetchError)), ...retriedNote };
     if (fetchError !== null && spec.releaseBase !== true) {
       throw new SpawnError(
         "WORKTREE_FAILED",
         `git fetch origin ${spec.base} failed on ${this.spec.target}: ${fetchError}`,
         { host: this.name, repo: spec.repo },
+      );
+    }
+    if (
+      fetchError !== null &&
+      spec.requireFresh !== false &&
+      fetchFailure(fetchError) === "unreachable"
+    ) {
+      throw new SpawnError(
+        "BASE_UNREACHABLE",
+        `git fetch origin ${spec.base} failed on ${this.spec.target}: ${fetchError}; origin was not reached, so no worktree is cut from the box's copy. The spawn is retried with the usual backoff.`,
+        { host: this.name, repo: spec.repo, branch: spec.base, fetch_error: fetchError },
       );
     }
     if (fetchError !== null && spec.requireFresh !== false) {
@@ -346,6 +363,7 @@ export class SshTmuxHost implements RemoteHost {
       path: spec.path,
       branch: spec.branch,
       reused: false,
+      ...retriedNote,
       ...(sha !== ""
         ? {
             base: {

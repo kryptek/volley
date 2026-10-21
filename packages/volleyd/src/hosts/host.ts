@@ -41,6 +41,8 @@ export interface WorktreeResult {
    * fetch before it succeeded (`fetch_error`: why not, when it did not).
    */
   base?: { sha: string; fresh: boolean; fetch_error?: string };
+  /** The fetch lost a ref-lock race and was retried (git-lock.ts lockedFetch): the first error. */
+  fetch_retried?: string;
 }
 
 /** One terminal to open: the command is run by the pane's shell, nothing else is typed. */

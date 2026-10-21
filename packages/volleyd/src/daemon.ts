@@ -215,6 +215,7 @@ import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
 import { mintConsentToken, mintModelSwitchToken } from "./fence";
 import { LOCAL_HOST } from "./fleet-name";
+import { lockFetches } from "./git-lock";
 import type { Host } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import {
@@ -5515,11 +5516,15 @@ export class Daemon {
     d = new PipelineDriver(wave, {
       exec: this.host.exec,
       // A task on a remote host (T15): its worktrees, and so its git / gh checks, are on the box.
+      // The artifact probes fetch in worktrees of the task's clone: one fetch into it at a time.
       execFor: (task) => {
-        const t = log.record.wave?.tasks[task];
-        return t === undefined || t.host === "local"
-          ? this.host.exec
-          : this.remoteHost(wave, t).exec;
+        const w = log.record.wave;
+        if (w == null) return this.host.exec;
+        const t = w.tasks[task];
+        if (t === undefined || t.host === "local")
+          return lockFetches(this.host.exec, LOCAL_HOST, expandHome(w.repo));
+        const remote = this.remoteHost(wave, t);
+        return lockFetches(remote.exec, remote.name, remote.spec.repo);
       },
       home: this.opts.home,
       record: () => log.record,
