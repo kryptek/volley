@@ -213,4 +213,25 @@ describe("renderGroups", () => {
     expect(text).toContain("spare (e-mail not reported yet)");
     expect(text).toContain("    sign in: https://x");
   });
+
+  it("a group of default logins only is headed `default login`, its e-mail still masked", () => {
+    const r = result({
+      accounts: [],
+      primary: { email: "Owner@Example.com", plan: "max" },
+      machines: [{ name: "peer-a", kind: "peer", claude: "signed_in", email: EMAIL }],
+    });
+    const text = renderGroups(groupAccounts(r, []), { now: NOW, showEmail: false });
+    expect(text.toLowerCase()).not.toContain(EMAIL);
+    expect(text).toContain("default login · max · O•••@Example.com\n");
+  });
+
+  it("a reading whose sampled_at does not parse prints `? ago`, never NaN", () => {
+    const bad = { ...work, sampled_at: "not a time" };
+    const text = renderGroups(groupAccounts(result({ machines: [] }), [bad]), {
+      now: NOW,
+      showEmail: false,
+    });
+    expect(text).not.toContain("NaN");
+    expect(text).toContain("from this machine ? ago");
+  });
 });

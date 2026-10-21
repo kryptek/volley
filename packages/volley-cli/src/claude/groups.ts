@@ -221,7 +221,10 @@ export function groupAccounts(r: ListResult, records: UsageRecord[]): AccountGro
       key,
       email,
       org: newest.find((l) => l.org !== undefined)?.org ?? null,
-      label: newest.find((l) => l.profileLabel !== undefined)?.profileLabel ?? key,
+      // Never the key: for a group of default logins it is the e-mail, which must stay masked.
+      label:
+        newest.find((l) => l.profileLabel !== undefined)?.profileLabel ??
+        (email !== null ? DEFAULT_LOGIN : key),
       plan: newest.find((l) => l.plan !== undefined)?.plan ?? null,
       fiveHour: five.w,
       weekly: week.w,
@@ -246,9 +249,11 @@ export function resetsIn(resetsAt: string | null, now: number): string | null {
   return `${m}m`;
 }
 
-/** `2 m`, `3 h`, `1 d`: how long ago a reading was sampled. */
+/** `2 m`, `3 h`, `1 d`: how long ago a reading was sampled; `?` when it does not parse. */
 function age(sampledAt: string, now: number): string {
-  const m = Math.max(0, Math.floor((now - Date.parse(sampledAt)) / 60_000));
+  const t = Date.parse(sampledAt);
+  if (Number.isNaN(t)) return "?";
+  const m = Math.max(0, Math.floor((now - t) / 60_000));
   if (m < 60) return `${m} m`;
   if (m < 1440) return `${Math.floor(m / 60)} h`;
   return `${Math.floor(m / 1440)} d`;
