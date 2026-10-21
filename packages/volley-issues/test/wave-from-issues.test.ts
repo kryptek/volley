@@ -11,6 +11,7 @@ import {
   type WaveOptions,
   ensureBriefPreface,
   parseDependsOn,
+  submitLines as submitLinesFor,
   taskIdFor,
   waveFromIssues,
 } from "../scripts/wave-from-issues";
@@ -49,6 +50,36 @@ function volleydValidate(yaml: string): { code: number | null; out: string } {
   });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
+
+/** The environment without a coordinator name. */
+const noCoordinator = Object.fromEntries(
+  Object.entries(process.env).filter(([k]) => k !== "VOLLEY_COORDINATOR"),
+);
+
+/** What the CLI prints after a clean run with VOLLEY_COORDINATOR unset. */
+const submitLines = (file: string) =>
+  [
+    `submit: volleyd run ${file} --owner "$VOLLEY_COORDINATOR"`,
+    "owner: VOLLEY_COORDINATOR is unset: export it in this shell (and set it in the volley MCP server's env), a stable name like coord-main, before submitting",
+    "",
+  ].join("\n");
+
+describe("submitLines", () => {
+  it("leaves a plain path and the <wave.yaml> placeholder bare", () => {
+    expect(submitLinesFor(".volley/waves/w.yaml", "c")[0]).toBe(
+      'submit: volleyd run .volley/waves/w.yaml --owner "$VOLLEY_COORDINATOR"',
+    );
+    expect(submitLinesFor("<wave.yaml>", "c")[0]).toBe(
+      'submit: volleyd run <wave.yaml> --owner "$VOLLEY_COORDINATOR"',
+    );
+  });
+
+  it("single-quotes a path the shell would split or expand", () => {
+    expect(submitLinesFor("/tmp/my waves/it's.yaml", "c")[0]).toBe(
+      `submit: volleyd run '/tmp/my waves/it'\\''s.yaml' --owner "$VOLLEY_COORDINATOR"`,
+    );
+  });
+});
 
 describe("parseDependsOn", () => {
   it("reads 'Depends on:' and 'deps:' lines, markdown emphasis included", () => {
@@ -179,6 +210,29 @@ describe("waveFromIssues", () => {
     expect(yaml).toContain('pipeline: ["implement","merge_ready"]\n');
     expect(yaml).toContain('namespace: "example-dispatch"\n');
     expect(volleydValidate(yaml).code).toBe(0);
+  });
+
+  it("writes merge: auto by default, and merge: manual on request", () => {
+    const auto = waveFromIssues(THREE, OPTS).yaml;
+    expect(auto).toContain('merge: "auto"\n');
+    expect(auto).not.toContain("config:");
+    expect(volleydValidate(auto).code).toBe(0);
+    const manual = waveFromIssues(THREE, { ...OPTS, merge: "manual" }).yaml;
+    expect(manual).toContain('merge: "manual"\n');
+    expect(volleydValidate(manual).code).toBe(0);
+  });
+
+  it("writes autopilot on/off and branch_update into the wave's config", () => {
+    const off = waveFromIssues(THREE, { ...OPTS, autopilot: false }).yaml;
+    expect(off).toContain('config: {"autopilot":{"enabled":false}}\n');
+    expect(volleydValidate(off).code).toBe(0);
+    const on = waveFromIssues(THREE, { ...OPTS, autopilot: true }).yaml;
+    expect(on).toContain('config: {"autopilot":{"enabled":true}}\n');
+    const merge = waveFromIssues(THREE, { ...OPTS, branchUpdate: "merge" }).yaml;
+    expect(merge).toContain('config: {"branch_update":"merge"}\n');
+    const both = waveFromIssues(THREE, { ...OPTS, autopilot: true, branchUpdate: "merge" }).yaml;
+    expect(both).toContain('config: {"autopilot":{"enabled":true},"branch_update":"merge"}\n');
+    expect(volleydValidate(both).code).toBe(0);
   });
 
   it("rejects an invalid wave id before emitting anything", () => {
@@ -374,12 +428,105 @@ describe("wave-from-issues CLI", () => {
         "--out",
         out,
       ],
-      { encoding: "utf-8" },
+      { encoding: "utf-8", env: noCoordinator },
     );
-    expect(r.stderr).toBe("");
+    expect(r.stderr).toBe(submitLines(out));
     expect(r.status).toBe(0);
     const v = spawnSync("bun", [VOLLEYD_CLI, "validate", out], { encoding: "utf-8" });
     expect(v.status).toBe(0);
+  });
+
+  it("writes --merge, --autopilot and --branch-update into the wave file", () => {
+    const input = join(tmp(), "flags.json");
+    const out = join(tmp(), "flags-wave.yaml");
+    writeFileSync(input, JSON.stringify(THREE));
+    const r = spawnSync(
+      "bun",
+      [
+        HELPER_CLI,
+        input,
+        "--wave",
+        OPTS.wave,
+        "--repo",
+        OPTS.repo,
+        "--release-branch",
+        OPTS.releaseBranch,
+        "--model",
+        OPTS.model,
+        "--merge",
+        "manual",
+        "--autopilot",
+        "off",
+        "--branch-update",
+        "merge",
+        "--out",
+        out,
+      ],
+      { encoding: "utf-8", env: noCoordinator },
+    );
+    expect(r.stderr).toBe(submitLines(out));
+    expect(r.status).toBe(0);
+    const yaml = readFileSync(out, "utf-8");
+    expect(yaml).toContain('merge: "manual"\n');
+    expect(yaml).toContain('config: {"autopilot":{"enabled":false},"branch_update":"merge"}\n');
+    expect(spawnSync("bun", [VOLLEYD_CLI, "validate", out], { encoding: "utf-8" }).status).toBe(0);
+  });
+
+  it("prints the submit line with the coordinator's name as the owner", () => {
+    const input = join(tmp(), "owner.json");
+    writeFileSync(input, JSON.stringify(THREE));
+    const r = spawnSync(
+      "bun",
+      [
+        HELPER_CLI,
+        input,
+        "--wave",
+        OPTS.wave,
+        "--repo",
+        OPTS.repo,
+        "--release-branch",
+        OPTS.releaseBranch,
+        "--model",
+        OPTS.model,
+      ],
+      { encoding: "utf-8", env: { ...noCoordinator, VOLLEY_COORDINATOR: "coord-main" } },
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('merge: "auto"\n');
+    expect(r.stderr).toBe(
+      'submit: volleyd run <wave.yaml> --owner "$VOLLEY_COORDINATOR"\nowner: coord-main (VOLLEY_COORDINATOR)\n',
+    );
+  });
+
+  it("exits 2 on a --merge, --autopilot or --branch-update value it does not know", () => {
+    const input = join(tmp(), "badflag.json");
+    writeFileSync(input, JSON.stringify([{ number: 7, title: "x", body: "deps: none" }]));
+    for (const [flag, value] of [
+      ["--merge", "yes"],
+      ["--autopilot", "true"],
+      ["--branch-update", "squash"],
+    ] as const) {
+      const r = spawnSync(
+        "bun",
+        [
+          HELPER_CLI,
+          input,
+          "--wave",
+          "w",
+          "--repo",
+          "/r",
+          "--release-branch",
+          "b",
+          "--model",
+          "m",
+          flag,
+          value,
+        ],
+        { encoding: "utf-8" },
+      );
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain(`${flag} must be`);
+    }
   });
 
   it("exits 1 naming the outside dependency", () => {
@@ -446,9 +593,9 @@ describe("wave-from-issues CLI", () => {
         "--repo-slug",
         "owner/repo",
       ],
-      { encoding: "utf-8" },
+      { encoding: "utf-8", env: noCoordinator },
     );
-    expect(r.stderr).toBe("");
+    expect(r.stderr).toBe(submitLines("<wave.yaml>"));
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("after: [i7]");
   });

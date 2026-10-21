@@ -114,6 +114,7 @@ A rerun plans nothing for what is in place and reports each step as already done
 volley desk serve                       # http://127.0.0.1:5199, from packages/volley-desk/dist
 volley desk serve --host 0.0.0.0        # for a phone on the LAN (what the setup service runs)
 volley desk serve --port 8080 --root /path/to/dist
+volley desk serve --host 0.0.0.0 --evidence ~/.volleyd   # also serve release evidence (below)
 ```
 
 A small static server for the built Desk (`bun run --cwd packages/volley-desk build`): hashed assets are cached for good, the index never, every unknown path gets the index, and nothing outside the build directory is served. It holds no credentials: the page signs in to the broker itself (port 9001 on the host the page came from).
@@ -126,6 +127,8 @@ warning: the Desk bundle is <v>, this volley is <v>
 ```
 
 The first compares `dist/.volley-build` (the stamp `volley setup` and `volley deploy` write after a build: a hash of the Desk's sources and `bun.lock`) with the checkout's current sources; the second compares the bundle's `dist/version.json` (written by the Desk's Vite build) with this CLI's version. `--quiet` (`-q`) prints neither.
+
+`--evidence <volleyd home>` (off by default) also serves a release train's evidence read-only, for the Desk's Needs you window: `GET /evidence/<wave>/release/<file>` returns a `.png`, `.jpg`, `.webp`, `.txt`, `.log`, `.md` or `.json` file directly under `<home>/waves/<wave>/release/`, and nothing else. Text is served as plain text (never rendered), under `nosniff` and a sandboxing CSP. Any other path under `/evidence/` is a 404: another type, a subfolder, a dot-file, a symlink that leaves the folder, a wave id that is not one, or any traversal (the name is decoded once, never twice). The Desk reads the stage evidence JSON from it (changelog entries, screenshot names, links) and shows the screenshots. Anyone who can load the Desk can read those files without signing in. That is a LAN-trust choice like `volley setup --lan`, which is why `volley setup` leaves it off and its services step only names the flag.
 
 ---
 

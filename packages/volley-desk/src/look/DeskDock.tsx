@@ -1,12 +1,14 @@
 /**
- * The dock, ported from the prototype `App.tsx`: a React Bits `Dock` with six
- * items — the coordinators window (badge: what needs you), tethers, arrange &
+ * The dock, ported from the prototype `App.tsx`: a React Bits `Dock` with seven
+ * items — the coordinators window (badge: what needs you), the Needs you window
+ * (badge: the inbox items only a person answers), tethers, arrange &
  * fit, zoom in / out and the Settings window (appearance and auto-arrange
  * live there). Its panel is lifted and lit like the Desk's windows (D10,
  * `.dock-wrap .dock` in look.css).
  */
 import {
   FullScreenIcon,
+  InboxIcon,
   Link02Icon,
   Settings02Icon,
   UserGroupIcon,
@@ -27,6 +29,10 @@ export interface DeskDockProps {
   onToggleCoords: () => void;
   /** The dock badge: the "N need you" count. */
   needsYou: number;
+  inboxOpen: boolean;
+  onToggleInbox: () => void;
+  /** The Needs you tile's badge: open inbox items that need a person (owner-only + `you`). */
+  inboxNeedsYou: number;
   tethers: boolean;
   onToggleTethers: () => void;
   onArrange: () => void;
@@ -43,6 +49,13 @@ export function dockItems(p: DeskDockProps): DockItemData[] {
       onClick: p.onToggleCoords,
       active: p.coordsOpen,
       ...(p.needsYou > 0 ? { badge: p.needsYou } : {}),
+    },
+    {
+      icon: icon(InboxIcon),
+      label: "Needs you",
+      onClick: p.onToggleInbox,
+      active: p.inboxOpen,
+      ...(p.inboxNeedsYou > 0 ? { badge: p.inboxNeedsYou } : {}),
     },
     {
       icon: icon(Link02Icon),

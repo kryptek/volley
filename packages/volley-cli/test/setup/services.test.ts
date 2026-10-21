@@ -82,6 +82,17 @@ describe("setup: services", () => {
       expect(existsSync(m.deskDist)).toBe(false);
     });
 
+    it("says release evidence stays off, and how to serve it (a LAN-trust choice)", async () => {
+      const p = await planServices(m.ctx);
+      const line = p.found.find((l) => l.includes("--evidence"));
+      expect(line).toBeDefined();
+      expect(line).toContain(`volley desk serve --evidence ${m.ctx.volleydHome}`);
+      expect(line).toMatch(/off/);
+      expect(line).toMatch(/LAN/);
+      // Planner text only: the service is installed without the flag.
+      expect(p.changes[4]?.detail).not.toContain("--evidence");
+    });
+
     it("applies, and a second plan finds every service in place", async () => {
       await applyAll(await planServices(m.ctx));
       expect(readFileSync(m.settingsFile, "utf-8")).toBe(HOOKED_SETTINGS);

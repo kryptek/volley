@@ -63,6 +63,7 @@ import type {
   CoordinatorView,
   DecisionPayload,
   DeskState,
+  InboxItem,
   LeasePoolPayload,
   RegistryPayload,
   Tunables,
@@ -554,9 +555,38 @@ export function ctxFrom(state: DeskState, opts: CtxOpts): AttentionCtx {
 }
 
 export interface NeedsYouTarget {
-  kind: "wave" | "agent";
+  kind: "wave" | "agent" | "inbox";
+  /** The wave, agent or inbox item id. */
   id: string;
+  /** The item's wave; `""` for an inbox item of a session in no wave. */
   wave: string;
+}
+
+/**
+ * A needs-you inbox item's tier (SPEC §4.6.18). Answered: nobody. Owner-only: you, always.
+ * An item of a session in no wave: you (no coordinator stands between it and the person). An
+ * item of a wave: you when the wave is yours (or claimed here) or its coordinator is gone or
+ * itself waiting on you; else its coordinator's, escalated to you after `escalate_after_min`.
+ */
+export function inboxAttention(item: InboxItem, state: DeskState, ctx: AttentionCtx): Attn {
+  if (item.answered !== undefined) return NONE;
+  const reason = item.title;
+  if (item.owner_only) return { tier: "you", reason };
+  const w = item.wave !== undefined ? state.waves[item.wave] : undefined;
+  if (!w?.state) return { tier: "you", reason };
+  if ((ctx.me && w.state.owner === ctx.me) || claimedHere(w, ctx)) return { tier: "you", reason };
+  const c = coordinatorFor(w, ctx);
+  if (c.state === "gone" || c.state === "awaiting_input") return { tier: "you", reason };
+  return handled(reason, parseTime(item.opened_at), w, ctx);
+}
+
+/** The open inbox items a person must answer: owner-only, or at tier `you`. Oldest first. */
+export function inboxNeedsYou(state: DeskState, opts: CtxOpts): InboxItem[] {
+  const ctx = ctxFrom(state, opts);
+  return Object.values(state.inbox ?? {})
+    .filter((i) => i.answered === undefined)
+    .filter((i) => i.owner_only || inboxAttention(i, state, ctx).tier === "you")
+    .sort((a, b) => a.opened_at.localeCompare(b.opened_at));
 }
 
 /** Tiers already computed by the caller, so `needsYouTargets` need not recompute them. */
@@ -567,7 +597,8 @@ export interface ComputedAttention {
 
 /**
  * Everything at tier `you`: waves first, then agents whose wave is not already
- * listed. Its length is the top-bar pill and the dock badge count.
+ * listed, then the inbox's items that need a person (`inboxNeedsYou`) and are not
+ * already covered. Its length is the top-bar pill and the dock badge count.
  */
 export function needsYouTargets(
   state: DeskState,
@@ -586,5 +617,12 @@ export function needsYouTargets(
     .filter((a) => !listed.has(a.wave) && !state.coordinators[a.id])
     .filter((a) => agentTier(a) === "you")
     .map((a): NeedsYouTarget => ({ kind: "agent", id: a.id, wave: a.wave }));
-  return [...waves, ...agents];
+  // The inbox's items, but for one a wave or agent target already covers: a decision of a wave
+  // at tier you, a session's question of an agent at tier you.
+  const agentIds = new Set(agents.map((t) => t.id));
+  const inbox = inboxNeedsYou(state, opts)
+    .filter((i) => !(i.kind === "decision" && i.wave !== undefined && listed.has(i.wave)))
+    .filter((i) => i.kind === "decision" || i.kind === "release" || !agentIds.has(i.agent_id))
+    .map((i): NeedsYouTarget => ({ kind: "inbox", id: i.id, wave: i.wave ?? "" }));
+  return [...waves, ...agents, ...inbox];
 }
