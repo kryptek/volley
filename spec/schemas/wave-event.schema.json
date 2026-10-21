@@ -38,6 +38,8 @@
             "steering_sent",
             "steering_queued",
             "steering_dropped",
+            "steering_received",
+            "agent_woken",
             "decision_opened",
             "decision_resolved",
             "lease_requested",

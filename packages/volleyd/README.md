@@ -169,7 +169,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd stop <wave>` | Stop a wave (owner only): no admissions, `cancel` to every running agent. |
 | `volleyd stop --all` / `resume --all` | Engage / release the kill switch (anyone). |
 | `volleyd archive <wave> [--yes]` | Retire an ended (stopped or complete) wave (owner only; anyone for an ownerless wave): close its open decisions, drop it from `status` and the Desk ([Archiving](#archiving)). Without `--yes` only prints what it would close. |
-| `volleyd steer <wave> <task> <text> [--role <r>] [--wait-ack-ms <ms>]` | Mailbox steering to the task's live agent; reports `acked`, `received` or `delivered`, or `queued` for the task's next agent when none is live. |
+| `volleyd steer <wave> <task> <text> [--role <r>] [--wait-ack-ms <ms>]` | Mailbox steering to the task's live agent of any role; reports `delivered (acked)`, `received`, `delivered · woke the agent` (an idle agent was typed the wake line) or `delivered (no ack yet)`, or `queued (no live agent)` for the task's next agent when none is live. |
 | `volleyd events <wave> --cursor <name>` | Print (JSONL) every journal event after the named cursor. Does not move it. |
 | `volleyd ack <wave> --cursor <name> --seq <N>` | Advance the cursor to `N`. Ack **after** acting, so a crash replays. |
 | `volleyd config get [path] [--wave <id>] [--json]` | Effective config (or one dotted path), optionally with a wave's overrides. |
@@ -365,7 +365,7 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `pause` / `resume` | `wave` (or `all: true` for `resume`), `by` | `{ wave, status, changed }` / `{ kill_switch }` |
 | `stop` | `wave` or `all: true`, `by` | `{ wave, status, changed, cancelled }` / `{ kill_switch, stopped }` |
 | `archive` | `wave`, `by`, `dry_run?` | `{ wave, status: "archived", closed }`; with `dry_run`: `{ wave, status, would_close }` |
-| `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
+| `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, woke?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
 | `admission` | — | the retained admission summary (null before the first sample) |
 | `spawn` | `wave`, `task`, `role?` (default `implementer`) | `{ kind: "launched", agent_id, workspace, worktree }`, or the spawn's decision `{ kind, decision, decision_id }`; outside admission. A failure carries `{ code, lock }` |
 | `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, dir, signin: { state, url?, flow?, attach? } }], primary: { plan? }, sharing }` |
@@ -1229,30 +1229,54 @@ The daemon archives on its own, as `volleyd`:
 
 ## Steering
 
-`volleyd steer <wave> <task> "<text>"` sends a mailbox `steering` envelope to the task's current
-agent (the current stage's role, else the implementer; `--role` picks one). Its `correlation_id`
+`volleyd steer <wave> <task> "<text>"` sends a mailbox `steering` envelope to the task's live
+agent: its newest spawned agent that is not retired, whatever its role (a rebase agent runs in the
+`fixup` stage). `--role` picks the newest live agent of one role (`implementer`, `spec_reviewer`,
+`quality_reviewer`, `fixup`, `rebase` or `release`); the task `_release` names the release
+train's stage agent. Its `correlation_id`
 is the message id; `payload.seq` counts steers to that task (1, 2, …) and `payload.supersedes`
 names the previous steer, so the recipient can drop stale guidance (a [merge
 nudge](#the-pipeline-and-the-merge-ready-gate) is additive: it supersedes nothing, and the next
 steer supersedes the one before the nudge). The steer is journaled as
 `steering_sent`. The command then waits up to `--wait-ack-ms` (default 30000) and reports:
 
-- `acked by <agent>`: the recipient published `type: "steering_acked"` on its own `progress`
-  channel with `correlation_id` = the steer's message id (SPEC §4.3) — the model acted on it;
-- `received`: only its SPEC §4.4 mailbox `ack` (to `volley/<ns>/volleyd/mailbox`) arrived;
-- `delivered`: neither arrived in time.
+- `delivered (acked by <agent>)`: the recipient published `type: "steering_acked"` on its own
+  `progress` channel with `correlation_id` = the steer's message id (SPEC §4.3) — the model acted
+  on it;
+- `delivered (received, …)`: only its SPEC §4.4 mailbox `ack` (to `volley/<ns>/volleyd/mailbox`)
+  arrived;
+- `delivered · woke the agent`: no ack came in `mailbox_wake_after_ms`, and volleyd woke the
+  idle agent (below);
+- `delivered (no ack yet)`: neither arrived in time.
 
 Only the steered agent's acks count (the progress topic or the ack envelope must name it).
+
+**Waking an idle agent.** The hooks drain the mailbox at SessionStart, UserPromptSubmit and
+PostToolUse, never while the session waits at its prompt. So after every mailbox steering volleyd
+sends (a steer, the liveness nudge, an `agent_question` answer, `nudge again`) it waits
+`mailbox_wake_after_ms` (a tunable, default 20 000) for the hooks' `ack`. When none came and the
+agent is idle at its prompt, it types the fixed line `Check your Volley
+mailbox.` and `Enter` into the agent's session through the host (`cmux send`, `tmux send-keys
+-l`, under a `WakeToken`: the fence types exactly that constant with it, nothing else), journals
+`agent_woken { agent_id, reason: "mailbox", message_id }`, and the UserPromptSubmit drain delivers
+the message. A `working` agent is never typed into (it reads the mailbox at its next tool call), nor one
+`awaiting_input`: a question, permission or credit picker is open there, and the Enter would
+answer it.
+There is at most one wake per message: until its ack arrives (journaled `steering_received`) the
+wave state's `tasks[].steer_unacked` names the agent and `volleyd status` prints
+`steer unacked (<agent>)`.
 
 A steer never goes to a retired agent (`task.agents` keeps the last agent per role after it is
 retired, and nobody drains its mailbox). When the task has no live agent, between stages or before
 its next agent is up (with `--role`, none in that role), the steer is **queued**: journaled as
 `steering_queued` (same `seq` / `supersedes` numbering), answered at once with
-`delivery: "queued"` and `queued_for` (the role, else `next agent`), with no ack wait. The wave
+`delivery: "queued"` and `queued_for` (the role, else `next agent`), with no ack wait; the CLI
+prints `queued (no live agent)`. The wave
 state's `tasks[].queued_steers` counts them and `volleyd status` prints `steer queued (n)`. The
 next agent of the task to register (of that role, when one was named) gets every matching queued
 steer in order, with the id and `seq` it was queued with, journaled as `steering_sent` with
-`queued: true`. A steer sent after the next agent is spawned but before it registers goes to it
+`queued: true`; an agent of the task already up when a steer was queued (a restart re-attached
+it) gets it at its next hook signal or `working` / `idle` status. A steer sent after the next agent is spawned but before it registers goes to it
 directly, so it can arrive ahead of the queued ones; its `seq` is still the higher one, so order
 by `seq`. A task that is cancelled or done, or a wave that stops, drops its queue
 (`steering_dropped { message_ids, reason }`); the journal keeps it across a restart. `urgent` /
@@ -1309,6 +1333,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `admission.*` | next admission tick | never preempted |
 | `lease_pools` | next lease grant | a pool shrunk below its holders stops granting until holders release; no holder is preempted |
 | `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `background_wait_max_s`, `stall_backoff_max_s`, `wake_grace_s` | next monitor tick | — |
+| `mailbox_wake_after_ms` | mailbox messages sent after the change | a wake already armed keeps its window |
 | `fallback_model` | decisions opened after the change | open decisions keep their offer |
 | `mailbox.session_expiry_s` | new connections only | existing sessions keep their expiry until they reconnect |
 | `worktree_root` | spawns after the change | existing worktrees untouched |
@@ -1536,9 +1561,10 @@ more tools, but an agent whose tool set depends on the machine and on servers th
 fail to connect or slow its start. The fence accepts both forms and nothing else;
 `agent_spawned` records `agent_mcp: "inherit"` when it applies, and a respawn of a moved or
 vanished agent keeps the servers it launched with. The cmux command starts with two spaces, which keeps it out of shell history and away
-from prompts that eat the first character. Nothing else is typed into the pane, with two
-exceptions: the Enter that answers an update prompt and the relaunch after it (below), and the
-Escape that `volleyd stop` sends. The brief never appears in an argv.
+from prompts that eat the first character. Nothing else is typed into the pane, with three
+exceptions: the Enter that answers an update prompt and the relaunch after it (below), the
+Escape that `volleyd stop` sends, and the wake line `Check your Volley mailbox.` + Enter for an
+idle agent that did not ack a mailbox message ([Steering](#steering)). The brief never appears in an argv.
 
 **Auto-compaction: `agent_auto_compact_pct`** (a tunable, 0..100, default 85; per wave through
 `config:`). Every launch, for every role and host, exports `CLAUDE_CODE_AUTO_COMPACT_WINDOW`: the
@@ -3082,6 +3108,8 @@ TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal
                      coordinator handoff's reply) carrying exactly that text, typed once per
                      token; minted only for one line with no control character that does not
                      start with `/` or `!` (never a slash command or bash-mode line)
+    WAKE_TEXT        with a WakeToken (`mintWakeToken`, minted when an idle agent did not ack
+                     a mailbox message in time), typed once per token; nothing else with it
 
 PICKER (needs-you inbox pickers, SPEC §4.6.18): `cmux send-key … Up|Down|Space` and
   `tmux send-keys -t <t> Up|Down|Space` only with a PickerToken (`mintPickerToken`, minted for

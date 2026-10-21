@@ -94,6 +94,8 @@ export interface Tunables {
   background_wait_max_s: number;
   /** Cap on the doubling gap between `agent_stalled` decisions of one idle cycle. */
   stall_backoff_max_s: number;
+  /** How long a mailbox steer waits for the hooks' ack before an idle agent is woken (WAKE_TEXT). */
+  mailbox_wake_after_ms: number;
   fallback_model: string | null;
   mailbox: { session_expiry_s: number };
   worktree_root: string;
@@ -408,6 +410,8 @@ export interface TaskState {
   }[];
   /** Steers held for the task's next agent (none live when they were sent); absent when 0. */
   queued_steers?: number;
+  /** The task's agent woken for a mailbox message it has not acked yet (`agent_woken`). */
+  steer_unacked?: string;
   /** Alarms on the task that still hold (e.g. merged_unverified_head), with a human line each. */
   alarms?: { alarm: string; message: string }[];
   /** A remediation requested for the task's red head that still holds (a flake awaiting its fixer). */
@@ -576,6 +580,8 @@ export const WAVE_EVENT_TYPES = [
   // A steer to a task with no live agent: held for its next agent (or role), or dropped with it.
   "steering_queued",
   "steering_dropped",
+  "steering_received",
+  "agent_woken",
   "decision_opened",
   "decision_resolved",
   "lease_requested",

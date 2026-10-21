@@ -155,6 +155,26 @@ describe("steer with no live agent", () => {
     expect(queuedOf()).toBeUndefined();
   });
 
+  it("a steer queued while an agent was already up is delivered when that agent goes idle", async () => {
+    s = await makeSupervisedEnv();
+    client = await ControlClient.connect(s.env.broker.url, NS);
+    const got = await mailbox(AGENT);
+    // Queued with no live agent in sight (an older daemon, or one that restarted): the agent
+    // registered before it, so no registration will deliver it.
+    await s.daemon.recordEvent("w1", {
+      type: "steering_queued",
+      task: "T1",
+      data: { message_id: "q-1", seq: 1, text: "use the shared table", by: "coord-a" },
+    });
+    expect(queuedOf()).toBe(1);
+    await s.hook("idle-stop.json");
+    const sent = await s.event((e) => e.type === "steering_sent" && e.data.message_id === "q-1");
+    expect(sent.data).toMatchObject({ agent_id: AGENT, queued: true, seq: 1 });
+    await s.until(() => got.length === 1);
+    expect(got[0]?.id).toBe("q-1");
+    expect(queuedOf()).toBeUndefined();
+  });
+
   it("a cancelled task drops its queue (journaled) and delivers it to nobody", async () => {
     const decision = await retiredImplementer();
     const queued = await steer({ text: "never mind" });

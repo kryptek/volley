@@ -11,11 +11,13 @@ import {
   mintHandoffToken,
   mintModelSwitchToken,
   mintPickerToken,
+  mintWakeToken,
   renderRemoteScript,
   sealLaunchScript,
   sealRemoteSigninScript,
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript, renderMcpConfig } from "../src/launch";
+import { WAKE_TEXT } from "../src/liveness";
 import { tempDirForAll } from "./helpers/tmp";
 
 /** The one local argv a remote command runs as. */
@@ -570,6 +572,17 @@ describe("remote allow-list (ssh … bash -s)", () => {
     expect(() => assertAllowed(SSH, { ...remote(text("ship it now")), handoff })).toThrow(
       FenceError,
     );
+  });
+
+  it("tmux send-keys -l types the wake line only with a WakeToken, and nothing else with it", () => {
+    const text = (t: string) =>
+      step("tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", t);
+    expect(() => assertAllowed(SSH, remote(text(WAKE_TEXT)))).toThrow(/text volleyd never types/);
+    const wake = mintWakeToken();
+    expect(() => assertAllowed(SSH, { ...remote(text("rm -rf ~")), wake })).toThrow(
+      /text volleyd never types/,
+    );
+    expect(() => assertAllowed(SSH, { ...remote(text(WAKE_TEXT)), wake })).not.toThrow();
   });
 
   it("the trust write: compare the file as read (base64 stdin), write beside it, swap it in", () => {

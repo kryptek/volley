@@ -6,6 +6,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { ControlClient } from "../src/control";
 import {
+  TASK_ROLES,
   admissionFor,
   candidates,
   killSwitchEngaged,
@@ -694,12 +695,12 @@ describe("steer", () => {
 });
 
 describe("controls (pure)", () => {
-  it("steerTarget follows the stage; nextSteer numbers from the journaled steers", () => {
+  it("steerTarget names the task's live agent; nextSteer numbers from the journaled steers", () => {
     const rec = daemon.record(WAVE);
     if (rec === undefined) throw new Error("no record");
-    const none = new Set<string>();
-    expect(steerTarget(rec, "A", none)).toEqual({ role: "implementer", agent_id: "agent-a1" });
-    expect(steerTarget(rec, "B", none)).toBeNull();
+    const journal = daemon.journalEvents(WAVE);
+    expect(steerTarget(rec, "A", journal)).toEqual({ role: "implementer", agent_id: "agent-a1" });
+    expect(steerTarget(rec, "B", journal)).toBeNull();
     expect(nextSteer(rec, "A")).toEqual({ seq: 1 });
   });
 
@@ -710,12 +711,11 @@ describe("controls (pure)", () => {
       data: { agent_id: "agent-a1", status: "done" },
     });
     await daemon.recordEvent(WAVE, { type: "stage_entered", task: "A", data: { stage: "fixup" } });
-    const retired = new Set(["agent-a1"]);
     const between = daemon.record(WAVE);
     if (between === undefined) throw new Error("no record");
-    // Between stages: no fixup agent yet, and the implementer fallback is retired.
-    expect(steerTarget(between, "A", retired)).toBeNull();
-    expect(steerTarget(between, "A", retired, "implementer")).toBeNull();
+    // Between stages: no fixup agent yet, and the implementer is retired.
+    expect(steerTarget(between, "A", daemon.journalEvents(WAVE))).toBeNull();
+    expect(steerTarget(between, "A", daemon.journalEvents(WAVE), "implementer")).toBeNull();
     await daemon.recordEvent(WAVE, {
       type: "agent_spawned",
       task: "A",
@@ -723,8 +723,62 @@ describe("controls (pure)", () => {
     });
     const live = daemon.record(WAVE);
     if (live === undefined) throw new Error("no record");
-    expect(steerTarget(live, "A", retired)).toEqual({ role: "fixup", agent_id: "agent-f1" });
-    expect(steerTarget(live, "A", retired, "implementer")).toBeNull();
+    const journal = daemon.journalEvents(WAVE);
+    expect(steerTarget(live, "A", journal)).toEqual({ role: "fixup", agent_id: "agent-f1" });
+    expect(steerTarget(live, "A", journal, "implementer")).toBeNull();
+  });
+
+  it("steerTarget finds a live rebase agent in the fixup stage (its stage name), by role too", async () => {
+    await daemon.recordEvent(WAVE, {
+      type: "agent_retired",
+      task: "A",
+      data: { agent_id: "agent-a1", status: "done" },
+    });
+    await daemon.recordEvent(WAVE, { type: "stage_entered", task: "A", data: { stage: "fixup" } });
+    await daemon.recordEvent(WAVE, {
+      type: "agent_spawned",
+      task: "A",
+      data: { role: "fixup", agent_id: `${WAVE}-a-fixup-1` },
+    });
+    await daemon.recordEvent(WAVE, {
+      type: "agent_retired",
+      task: "A",
+      data: { agent_id: `${WAVE}-a-fixup-1`, status: "done" },
+    });
+    await daemon.recordEvent(WAVE, {
+      type: "agent_spawned",
+      task: "A",
+      data: { role: "rebase", agent_id: `${WAVE}-a-rebase-2` },
+    });
+    const rec = daemon.record(WAVE);
+    if (rec === undefined) throw new Error("no record");
+    const journal = daemon.journalEvents(WAVE);
+    const rebase = { role: "rebase", agent_id: `${WAVE}-a-rebase-2` };
+    expect(steerTarget(rec, "A", journal)).toEqual(rebase);
+    expect(steerTarget(rec, "A", journal, "rebase")).toEqual(rebase);
+    expect(steerTarget(rec, "A", journal, "fixup")).toBeNull();
+  });
+
+  it("steerTarget resolves a release stage's agent (the _release pseudo task) by --role release", async () => {
+    await daemon.recordEvent(WAVE, {
+      type: "agent_spawned",
+      task: "_release",
+      data: { role: "release", agent_id: `${WAVE}-release-tag-1`, stage: "tag" },
+    });
+    const rec = daemon.record(WAVE);
+    if (rec === undefined) throw new Error("no record");
+    const journal = daemon.journalEvents(WAVE);
+    const release = { role: "release", agent_id: `${WAVE}-release-tag-1` };
+    expect(steerTarget(rec, "_release", journal, "release")).toEqual(release);
+    expect(steerTarget(rec, "_release", journal)).toEqual(release);
+    expect(TASK_ROLES).toEqual([
+      "implementer",
+      "spec_reviewer",
+      "quality_reviewer",
+      "fixup",
+      "rebase",
+      "release",
+    ]);
   });
 
   it("killSwitchEngaged reads the last all-waves stop/resume in the system journal", () => {
@@ -803,7 +857,7 @@ describe("CLI", () => {
       as("coord-a"),
     );
     expect(steer.stderr).toBe("");
-    expect(steer.stdout).toContain("steer #1 → agent-a1 (implementer): delivered");
+    expect(steer.stdout).toContain("steer #1 → agent-a1 (implementer): delivered (no ack yet)");
   });
 
   it("steer with no live agent prints that it is queued", async () => {
@@ -815,10 +869,12 @@ describe("CLI", () => {
     const steer = await runCli(["steer", WAVE, "A", "use", "the", "table"], as("coord-a"));
     expect(steer.stderr).toBe("");
     expect(steer.stdout).toMatch(
-      /^steer #1 \(A\): queued for the next agent of the task\nmessage [0-9a-f-]+\n$/,
+      /^steer #1 \(A\): queued \(no live agent\) for the next agent of the task\nmessage [0-9a-f-]+\n$/,
     );
     const role = await runCli(["steer", WAVE, "A", "x", "--role", "fixup"], as("coord-a"));
-    expect(role.stdout).toContain("steer #2 (A): queued for the next fixup of the task\n");
+    expect(role.stdout).toContain(
+      "steer #2 (A): queued (no live agent) for the next fixup of the task\n",
+    );
     expect(role.stdout).toContain("(supersedes ");
     const status = await runCli(["status", WAVE], env());
     expect(status.stdout).toContain("steer queued (2)");

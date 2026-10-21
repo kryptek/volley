@@ -150,6 +150,13 @@
           "default": 1800,
           "description": "Cap on the gap before a re-opened agent_stalled decision: the n-th re-open waits idle_grace_s × 2^n after the answer, at most this long."
         },
+        "mailbox_wake_after_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 600000,
+          "default": 20000,
+          "description": "Milliseconds the supervisor waits for an agent's hooks to ack a mailbox message it sent (a steer, a nudge, an answer) before it types the fixed wake line into the agent's session; only an agent idle at its prompt is woken, once per message."
+        },
         "fallback_model": {
           "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 128 }, { "type": "null" }],
           "description": "Model offered in a model_switch decision on credit exhaustion; null disables the offer."

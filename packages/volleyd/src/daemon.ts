@@ -213,7 +213,7 @@ import {
 } from "./decisions";
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
-import { mintConsentToken, mintModelSwitchToken } from "./fence";
+import { mintConsentToken, mintModelSwitchToken, mintWakeToken } from "./fence";
 import { LOCAL_HOST } from "./fleet-name";
 import type { Host } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
@@ -379,6 +379,7 @@ import {
   type DecisionSlot,
   type LivenessAction,
   type Step,
+  WAKE_TEXT,
   checkLiveness,
   noteCapture,
   noteDecision,
@@ -1012,6 +1013,14 @@ export class Daemon {
   /** `stop --all` engaged: every wave admits nothing and `run` is refused until `resume --all`. */
   private killSwitch: boolean;
   private readonly acks: AckTracker;
+  /**
+   * Mailbox messages volleyd sent whose ack it waits for before waking an idle addressee, by
+   * message id: armed by deliverSteer, dropped on the ack; `woken` once the wake line was typed.
+   */
+  private readonly wakes = new Map<
+    string,
+    { agent: string; wave: WaveId; task: TaskId; timer: TimerHandle; woken: boolean }
+  >();
   /** Restart reconciliation, started by `start()` beside the queue (see `reconciled()`). */
   private reconciling: Promise<void> = Promise.resolve();
   /** Epoch ms of the last progress message seen per agent id (heartbeats, for `claim`). */
@@ -1731,6 +1740,7 @@ export class Daemon {
     // The topic names the sender (and is what broker ACLs authorise), so it identifies the acker.
     if (env?.type === "steering_acked" && env.correlation_id !== null) {
       this.acks.acked(env.correlation_id, agent);
+      this.mailboxHeard(env.correlation_id, agent);
     }
   }
 
@@ -2129,6 +2139,8 @@ export class Daemon {
       await this.dynsec?.close();
     }
     this.acks.clear();
+    for (const w of this.wakes.values()) this.time.clearTimeout(w.timer);
+    this.wakes.clear();
     // The mailbox subscription is kept: it lives in the persistent session, so requests sent
     // while the daemon is down are queued for the next start. Only the progress watch goes.
     if (this.broker.connected) {
@@ -5070,7 +5082,12 @@ export class Daemon {
         void this.enqueue(() => this.onBlocked(agentId));
         return;
       }
-      if (!FINAL_STATUS.has(type)) return;
+      if (!FINAL_STATUS.has(type)) {
+        // An agent already up when a steer was queued: its next working/idle status delivers it.
+        if (live && (type === "working" || type === "idle"))
+          void this.enqueue(() => this.deliverQueued(wave, task, role, agentId));
+        return;
+      }
       // A re-delivery (same wall_time) of a final status already handed over is not a new claim.
       const at = a.watch.state.status?.wall_time;
       if (at !== undefined && at === a.finalSeen) return;
@@ -6056,6 +6073,10 @@ export class Daemon {
     void this.enqueue(async () => {
       if (this.supervised.get(agentId) !== a) return;
       await this.applyLiveness(agentId, a, observeSignal(a.liveness, sig));
+      // An agent already up when a steer was queued (no registration will deliver it): its next
+      // hook signal does.
+      if (this.supervised.get(agentId) === a)
+        await this.deliverQueued(a.wave, a.task, a.role, agentId);
     });
   }
 
@@ -8086,7 +8107,10 @@ export class Daemon {
     // A SPEC §4.4 ack of a message the daemon sent (steer): the recipient received it, in
     // whichever namespace its wave put it.
     if (req.type === "ack") {
-      if (req.correlation_id !== null) this.acks.received(req.correlation_id, req.agent_id);
+      if (req.correlation_id !== null) {
+        this.acks.received(req.correlation_id, req.agent_id);
+        this.mailboxHeard(req.correlation_id, req.agent_id);
+      }
       return;
     }
     // Control queries only from our own namespace: another daemon on this broker answers its own.
@@ -9398,6 +9422,69 @@ export class Daemon {
         ...extra,
       },
     });
+    this.armWake(wave, task, target.agent_id, messageId);
+  }
+
+  /**
+   * Wake `agentId` for `messageId` if its hooks do not ack it within `mailbox_wake_after_ms`: the
+   * hooks drain the mailbox only at a hook, never while the session waits at its prompt.
+   */
+  private armWake(wave: WaveId, task: TaskId, agentId: string, messageId: string): void {
+    if (!this.supervised.has(agentId)) return;
+    // One message per agent is watched after its wake: a newer one supersedes it.
+    for (const [id, w] of this.wakes) if (w.agent === agentId && w.woken) this.wakes.delete(id);
+    const ms = this.config.effective(wave).mailbox_wake_after_ms;
+    const timer = this.time.setTimeout(
+      () => void this.enqueue(() => this.wakeIfUnacked(messageId)),
+      ms,
+    );
+    this.wakes.set(messageId, { agent: agentId, wave, task, timer, woken: false });
+  }
+
+  /** `by` acked `messageId`: no wake; one that was woken is journaled as received at last. */
+  private mailboxHeard(messageId: string, by: string): void {
+    const w = this.wakes.get(messageId);
+    if (w === undefined || w.agent !== by) return;
+    this.time.clearTimeout(w.timer);
+    this.wakes.delete(messageId);
+    if (!w.woken || !this.waves.has(w.wave)) return;
+    void this.enqueue(() =>
+      this.append(w.wave, {
+        type: "steering_received",
+        task: w.task,
+        data: { agent_id: by, message_id: messageId },
+      }),
+    );
+  }
+
+  /**
+   * The wake window ended with no ack: an idle agent gets WAKE_TEXT and Enter (its
+   * UserPromptSubmit hook drains the mailbox), once; a working one reads it at its next hook. An
+   * agent awaiting input has a picker open (a question, a permission, credit) that the Enter
+   * would answer: never typed into either.
+   */
+  private async wakeIfUnacked(messageId: string): Promise<void> {
+    const w = this.wakes.get(messageId);
+    if (w === undefined || w.woken) return;
+    const a = this.supervised.get(w.agent);
+    if (a === undefined || a.liveness.activity !== "idle") {
+      this.wakes.delete(messageId);
+      return;
+    }
+    try {
+      await a.host.sendText(a.workspace, WAKE_TEXT, { wake: mintWakeToken() });
+      await a.host.sendKeys(a.workspace, "Enter");
+    } catch (e) {
+      this.log(`wake ${w.agent}: ${e instanceof Error ? e.message : String(e)}`);
+      this.wakes.delete(messageId);
+      return;
+    }
+    w.woken = true;
+    await this.append(w.wave, {
+      type: "agent_woken",
+      task: w.task,
+      data: { agent_id: w.agent, reason: "mailbox", message_id: messageId },
+    });
   }
 
   /** Journal a steer for `task`'s next agent (of `role`, when given); the steer op's answer. */
@@ -9438,8 +9525,9 @@ export class Daemon {
   }
 
   /**
-   * A new agent of `task` registered (its hooks drain the mailbox): every steer queued for the
-   * task's next agent, or for its role, goes to it in order, with the id and seq it was queued with.
+   * An agent of `task` registered, or one already up sent a hook signal (its hooks drain the
+   * mailbox): every steer queued for the task's next agent, or for its role, goes to it in order,
+   * with the id and seq it was queued with.
    */
   private async deliverQueued(wave: WaveId, task: TaskId, role: Role, agentId: string) {
     const a = this.supervised.get(agentId);
@@ -9482,10 +9570,12 @@ export class Daemon {
       };
     const role = p.role;
     const t = w.log.record.state?.tasks.find((x) => x.id === p.task);
-    if (t === undefined)
+    // `_release`: the release train's stage agents (steer _release --role release).
+    if (t === undefined && p.task !== RELEASE_TASK)
       return { ok: false, error: `unknown task '${p.task}' in wave '${w.wave}'` };
-    if (UNSTEERABLE.has(t.stage)) return { ok: false, error: `task '${p.task}' is ${t.stage}` };
-    const target = steerTarget(w.log.record, p.task, retiredAgents(w.log), role);
+    if (t !== undefined && UNSTEERABLE.has(t.stage))
+      return { ok: false, error: `task '${p.task}' is ${t.stage}` };
+    const target = steerTarget(w.log.record, p.task, w.log.journal.readAll(), role);
     if (target === null) {
       // No live agent (between stages, or not spawned yet): held for the task's next one.
       if (urgent) return { ok: false, error: "no live agent to interrupt" };
@@ -9535,18 +9625,25 @@ export class Daemon {
       ...(interrupted !== undefined ? { interrupted } : {}),
     };
     if (heard === null) return { ok: true, result };
+    const wave = w.wave;
     return {
       ok: true,
-      defer: heard.then(({ received, acked }) => ({
-        ok: true,
-        result: {
-          ...result,
-          delivery: acked ? "acked" : received ? "received" : "delivered",
-          received,
-          acked,
-          ...(acked ? { acked_by: target.agent_id } : {}),
-        },
-      })),
+      defer: heard.then(({ received, acked }) => {
+        const woke = (this.waves.get(wave)?.journal.readAll() ?? []).some(
+          (e) => e.type === "agent_woken" && e.data.message_id === messageId,
+        );
+        return {
+          ok: true,
+          result: {
+            ...result,
+            delivery: acked ? "acked" : received ? "received" : "delivered",
+            received,
+            acked,
+            ...(acked ? { acked_by: target.agent_id } : {}),
+            ...(woke ? { woke: true } : {}),
+          },
+        };
+      }),
     };
   }
 
