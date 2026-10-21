@@ -155,7 +155,7 @@
           "minimum": 10000,
           "maximum": 86400000,
           "default": 300000,
-          "description": "Milliseconds an agent whose retained status is blocked may go with no open decision naming it before it is stalled (an agent_stalled decision: respawn | stop task). Optional in the retained payload: a supervisor that predates it omits it."
+          "description": "Milliseconds an agent whose retained status is blocked may go with no decision naming it (open, or answered for that status) before it is stalled (an agent_stalled decision: respawn | stop task). Optional in the retained payload: a supervisor that predates it omits it."
         },
         "fallback_model": {
           "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 128 }, { "type": "null" }],

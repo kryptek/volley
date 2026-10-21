@@ -2510,11 +2510,11 @@ daemon-level `agent_blocked` with `class: "blocked_unhandled"`:
 
 | Why the pipeline cannot own it | Options |
 |---|---|
-| the agent is not the role's current run, the run is already accepted, the task is cancelled, the pipeline failed, or no decision came `terminal_unjournaled_alarm_ms` after the hand-over | `respawn` (the agent is retired `relaunched` and its role spawns again), `cancel` (the task is cancelled) |
-| the task is `done` or `merge_ready` (settled: its dependents moved on) | `manual` (yours; nothing is done), `cancel` (the agent is stopped; the task stays where it is). The decision does not park the task |
+| the agent is not the role's current run, the run is already accepted, the pipeline failed, or no decision came `terminal_unjournaled_alarm_ms` after the hand-over | `respawn` (the agent is retired `relaunched` and its role spawns again), `cancel` (the task is cancelled) |
+| the task is `done`, `merge_ready` or `cancelled` (settled: its dependents moved on), or not in the wave | `manual` (yours; nothing is done), `cancel` (the agent is stopped; the task stays where it is). The decision does not park the task |
 
-Should even that be lost, liveness counts a blocked agent no open decision names for
-`blocked_undecided_stall_ms` as stalled (above).
+Should even that be lost, liveness counts a blocked agent no decision names (open, or answered
+for that status) for `blocked_undecided_stall_ms` as stalled (above).
 
 Every recovery decision carries `class` and `agent_id` (on the journal event and the retained
 topic) and answers `stop task` the same way: a `cancel` to the agent, an interrupt (Escape), and

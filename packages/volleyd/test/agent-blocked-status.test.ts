@@ -267,6 +267,63 @@ describe("daemon: a retained blocked always has a decision (the invariant)", () 
     expect(stalled[0]?.data).toMatchObject({ agent_id: AGENT, options: ["respawn", "stop task"] });
     expect(String(stalled[0]?.data.question)).toContain("blocked");
   });
+
+  it("a blocked the owner answered (continue) is not asked about again as a stall", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    await s.hook("idle-stop.json");
+    await s.status("blocked", { reason: "stuck" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    // Answered; the agent has not published a new status yet (still blocked, same status_at).
+    await resolve(opened.data.decision_id as string, "continue");
+    for (let i = 0; i < 3; i++) {
+      await s.daemon.tick();
+      await clock.advance(CONFIG_DEFAULTS.blocked_undecided_stall_ms + 1_000);
+    }
+    await s.daemon.tick();
+    await s.settled();
+    expect(
+      s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === "agent_stalled"),
+    ).toHaveLength(0);
+  });
+
+  it("a blocked that arrives during an account move is the pipeline's once the move ends", async () => {
+    s = await makeSupervisedEnv();
+    const moving = (s.daemon as unknown as { moving: Set<string> }).moving;
+    moving.add(AGENT);
+    await s.status("blocked", { reason: "stuck" });
+    await s.consumed();
+    await s.settled();
+    expect(blockedOpened()).toHaveLength(0);
+    moving.delete(AGENT);
+    await s.daemon.tick();
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    expect(opened.data).toMatchObject({ options: ["continue", "respawn", "cancel"] });
+    expect(unhandled()).toHaveLength(0);
+  });
+
+  it("cancel on a blocked whose task is not in the wave stops the agent", async () => {
+    s = await makeSupervisedEnv();
+    const sup = (s.daemon as unknown as { supervised: Map<string, { task: string }> }).supervised;
+    const a = sup.get(AGENT);
+    if (a === undefined) throw new Error("not supervised");
+    a.task = "T-gone";
+    await s.status("blocked", { reason: "stuck" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    expect(opened.task ?? null).toBeNull();
+    expect(opened.data).toMatchObject({
+      class: "blocked_unhandled",
+      options: ["manual", "cancel"],
+    });
+    await resolve(opened.data.decision_id as string, "cancel");
+    await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+  });
 });
 
 describe("daemon: the terminal-status watchdog", () => {

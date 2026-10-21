@@ -670,7 +670,7 @@ interface Supervised {
   blockedAt?: number | undefined;
   /** `wall_time` of the `blocked` the daemon itself asked about (or tried to): asked once. */
   blockedAsked?: string | undefined;
-  /** Blocked with no open decision naming it since (liveness: an undecided block stalls). */
+  /** Blocked with no decision naming it since (liveness: an undecided block stalls). */
   undecidedSince?: number | undefined;
   /** The latest status other than `reaped` (what liveness checks while a reap is suppressed). */
   liveStatus?: string | undefined;
@@ -5640,7 +5640,12 @@ export class Daemon {
   private async onBlocked(agentId: string): Promise<void> {
     const a = this.supervised.get(agentId);
     const status = a?.watch.state.status;
-    if (a === undefined || status?.type !== "blocked" || this.moving.has(agentId)) return;
+    if (a === undefined || status?.type !== "blocked") return;
+    if (this.moving.has(agentId)) {
+      // Not handed over: the sweep hands it over once the move ends.
+      a.blockedSeen = undefined;
+      return;
+    }
     if (this.blockedDecided(a.wave, agentId, status.wall_time)) return;
     if (a.task === RELEASE_TASK) {
       await this.releaseFor(a.wave).handle({
@@ -6237,9 +6242,14 @@ export class Daemon {
           ? await this.evidence(a, now)
           : undefined;
       if (this.supervised.get(agentId) !== a) continue; // retired during the worktree walk
-      // Blocked: since when no open decision names it (an undecided block is a stall).
+      // Blocked: since when no decision names it (an undecided block is a stall). One open, or
+      // one answered for this very status (`manual` leaves it blocked), is a decision.
       if (status !== "blocked") a.undecidedSince = undefined;
-      else if (this.openNaming(a.wave, agentId)) a.undecidedSince = undefined;
+      else if (
+        this.openNaming(a.wave, agentId) ||
+        (retained !== null && this.blockedDecided(a.wave, agentId, retained.wall_time))
+      )
+        a.undecidedSince = undefined;
       else a.undecidedSince ??= now;
       await this.applyLiveness(
         agentId,
@@ -6584,8 +6594,15 @@ export class Daemon {
     const cls = typeof x.class === "string" ? x.class : undefined;
     const a = agentId !== undefined ? this.supervised.get(agentId) : undefined;
     const task = d.task ?? (a?.task === RELEASE_TASK || x.role === "release" ? RELEASE_TASK : null);
-    if (agentId === undefined || cls === undefined || d.resolved === undefined || task === null)
+    if (agentId === undefined || cls === undefined || d.resolved === undefined) return;
+    if (task === null) {
+      // The daemon's agent_blocked for a task not in the wave: cancel stops the agent.
+      if (cls !== BLOCKED_CLASS || a === undefined) return;
+      a.liveness = noteResolved(a.liveness, d.decision_id, this.now());
+      if (d.resolved.answer.trim().toLowerCase() === "cancel")
+        await this.retireRole(wave, agentId, "stopped");
       return;
+    }
     if (a !== undefined) a.liveness = noteResolved(a.liveness, d.decision_id, this.now());
     const { answer, by } = d.resolved;
     if (by === agentId) return;

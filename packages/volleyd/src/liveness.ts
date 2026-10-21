@@ -20,8 +20,8 @@ import type { TaskId } from "./types";
  *   idle while waiting on its own work (activity-evidence.ts: the hooks' `background_wait`, a
  *     lease, running shells in the footer, a fresh worktree write) → no steer, no agent_stalled
  *   awaiting_input class credit                          → credit_exhausted
- *   status `blocked` with no open decision naming the agent for blocked_undecided_stall_ms, its
- *     hooks not working → agent_stalled (a block nobody was asked about is a stall)
+ *   status `blocked` with no decision (open, or answered for that status) naming the agent for
+ *     blocked_undecided_stall_ms, its hooks not working → agent_stalled (a block nobody was asked about is a stall)
  *   no hook signal for heartbeat_alarm_s while the status is `working` → read the screen:
  *     the credit prompt → credit_exhausted · changing → hooks_silent · unchanged on a second read
  *     → screen_static · unreadable → crash_candidate (alarm only: wait for the LWT, never kill)
@@ -286,7 +286,7 @@ export function checkLiveness(
     status: string | null;
     tunables: LivenessTunables;
     evidence?: ActivityEvidence;
-    /** A `blocked` agent: since when no open decision names it (null: one does). */
+    /** A `blocked` agent: since when no decision names it (null: one does). */
     undecided_since?: number | null;
   },
 ): Step {
@@ -350,7 +350,7 @@ export function checkLiveness(
 }
 
 /**
- * A `blocked` agent waits on purpose, but only on a decision: undecided (no open decision names
+ * A `blocked` agent waits on purpose, but only on a decision: undecided (no decision names
  * it) for `blocked_undecided_stall_ms`, with its hooks not working, it is an `agent_stalled`.
  */
 function blockedStall(
