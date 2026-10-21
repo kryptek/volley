@@ -215,7 +215,9 @@ export function releaseGoInput(
     const e = evidence.get(s.name);
     return { name: s.name, ...(e !== undefined ? { evidence: e } : {}) };
   });
-  const question = `Wave ${wave}'s release train is verified: ${r.stages.map((s) => s.name).join(", ")}. Release it? go: the wave is complete (volleyd deploys nothing itself); hold: it stays releasing and this question is asked again.`;
+  const skipped = r.stages.filter((s) => s.state === "skipped").map((s) => s.name);
+  const verified = r.stages.filter((s) => s.state !== "skipped").map((s) => s.name);
+  const question = `Wave ${wave}'s release train is verified: ${verified.join(", ") || "no stage"}${skipped.length > 0 ? ` (skipped: ${skipped.join(", ")})` : ""}. Release it? go: the wave is complete (volleyd deploys nothing itself); hold: it stays releasing and this question is asked again.`;
   return {
     input: { kind: "release_go", task: null, question, options: [...RELEASE_GO_OPTIONS] },
     stages,

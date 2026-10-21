@@ -827,8 +827,10 @@ rules as any pipeline role. The stages run **serially**, in playbook order:
   `vol_publish(channel="result", type="stage", payload={ stage, commands: [{ argv, code, seconds
   }], notes, artifacts: { tag?, files?, urls? } })` (`review-result.schema.json`).
 - **What is verified** after the `done`, read-only and beside the queue (each call under
-  `pipeline_io_ms`): every `run` line reported with exit code 0; `commits_on_release` (`git
-  fetch` + `rev-parse`: the tip moved past the stage's start and the agent's HEAD is on it);
+  `pipeline_io_ms`): every `run` line reported, in order, with exit code 0;
+  `commits_on_release` (`git fetch` + `rev-parse` + `merge-base --is-ancestor`: the tip moved
+  past the stage's start, the recorded `base_sha` (unknown: the fact does not hold), and the
+  agent's HEAD is on it);
   `tag` (`gh api repos/{owner}/{repo}/git/matching-refs/tags/<prefix>`, a GET: a matching tag at
   the tip); `files` (`git show origin/<release>:<path>` exits 0); `result` (each field with its
   value). Verified: `$VOLLEYD_HOME/waves/<wave>/release/<stage>.md` and `.json` (the commands
@@ -842,6 +844,10 @@ rules as any pipeline role. The stages run **serially**, in playbook order:
   the wave is `complete` without its release).
 - **Owner-gated stages**: before a `gate: owner` stage, `stage_go { stage }` opens (owner-only):
   `go` runs it, `skip` marks it `skipped`, `hold` asks again (`class: held`).
+- **A stage agent's own questions** (a permission prompt, a stall, gone after a restart) are
+  wave-level decisions like any supervised agent's: an answer is steered to it; `stop task`
+  stops it and fails the stage (the owner is asked as above); `respawn` runs the stage again at
+  the next attempt.
 
 ---
 

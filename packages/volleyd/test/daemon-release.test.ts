@@ -26,6 +26,7 @@ stages:
   - { name: smoke, brief: Run the smoke. }
 `;
 const TIP = "c".repeat(40);
+const START = "a".repeat(40);
 
 let s: SupervisedEnv;
 let ctl: ControlClient | undefined;
@@ -40,6 +41,14 @@ interface Stages {
   launched: Map<string, string>;
   /** Publish the stage result (retained) and `done` as agent `id`. */
   finish: (id: string, result: Record<string, unknown> | null) => Promise<void>;
+  /** Publish on `channel` as agent `id`. */
+  as: (
+    id: string,
+    channel: string,
+    type: string,
+    payload: unknown,
+    retain?: boolean,
+  ) => Promise<unknown>;
 }
 
 async function start(): Promise<Stages> {
@@ -55,6 +64,14 @@ async function start(): Promise<Stages> {
       }),
       { qos: 1, retain },
     );
+  // A release-branch cut records its base, as the real host's does (the stage's start).
+  const prepare = s.host.prepareWorktree.bind(s.host);
+  s.host.prepareWorktree = async (spec) => ({
+    ...(await prepare(spec)),
+    ...(spec.releaseBase === true
+      ? { base: { ref: "origin/release/w1", sha: START, fresh: true } }
+      : {}),
+  });
   const launched = new Map<string, string>();
   const prev = s.host.onLaunch;
   s.host.onLaunch = (spec, ws) => {
@@ -102,7 +119,7 @@ async function start(): Promise<Stages> {
     if (result !== null) await pubAs(id, "result", "stage", result);
     await pubAs(id, "status", "done", { summary: "ok" });
   };
-  return { launched, finish };
+  return { launched, finish, as: pubAs };
 }
 
 const registered = (id: string) => (e: JournalEvent) =>
@@ -125,6 +142,7 @@ describe("release stages (SPEC §4.6.19)", () => {
       await s.settled();
       const spawned = ofType("agent_spawned").find((e) => e.task === RELEASE_TASK);
       expect(spawned?.data).toMatchObject({
+        base_sha: START,
         agent_id: "w1-release-bump-1",
         role: "release",
         stage: "bump",
@@ -280,6 +298,69 @@ describe("release stages (SPEC §4.6.19)", () => {
         { stage: "bump", attempt: 1 },
         { stage: "bump", attempt: 2 },
       ]);
+    },
+  );
+  it(
+    "a stage agent's question is answered by steering it; stop task fails the stage",
+    { timeout: 30_000 },
+    async () => {
+      const st = await start();
+      await settleTasks();
+      const id = "w1-release-bump-1";
+      await s.event(registered(id));
+      await s.settled();
+      const ask = (seq: number) =>
+        st.as(
+          id,
+          "progress",
+          "awaiting_input",
+          {
+            notification_type: "permission_prompt",
+            text: "May I push the bump?",
+            source: "harness-hook",
+            seq,
+            hook_event: "Notification",
+          },
+          false,
+        );
+      const questions = () =>
+        ofType("decision_opened").filter((e) => e.data.kind === "agent_question");
+      // The first question: autopilot answers it (question_max 1), and the answer reaches the agent.
+      await ask(10);
+      await s.event((e) => e.type === "decision_opened" && e.data.kind === "agent_question");
+      expect(questions()[0]?.data).toMatchObject({ agent_id: id, class: "agent_question" });
+      const answered = await s.event(
+        (e) => e.type === "steering_sent" && e.data.reason === "answer",
+      );
+      expect(answered).toMatchObject({ task: RELEASE_TASK, data: { agent_id: id } });
+      await s.settled();
+
+      // The second is the owner's: stop task stops the agent and fails the stage.
+      await ask(11);
+      await s.event((e) => e.type === "decision_opened" && e.data.kind === "agent_question", 2);
+      await s.settled();
+      const q = questions()[1];
+      expect(
+        s.daemon.record("w1")?.decisions[String(q?.data.decision_id)]?.resolved,
+      ).toBeUndefined();
+      ctl = await ControlClient.connect(s.env.broker.url, NS);
+      const r = await ctl.request("resolve", {
+        decision_id: q?.data.decision_id,
+        answer: "stop task",
+        by: "owner",
+      });
+      expect(r.error).toBeUndefined();
+      await s.event((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked");
+      expect(ofType("release_stage_failed")[0]?.data).toMatchObject({
+        stage: "bump",
+        agent_id: id,
+      });
+      expect(String(ofType("release_stage_failed")[0]?.data.reason)).toContain("owner stopped");
+      await s.event((e) => e.type === "agent_retired" && e.data.agent_id === id);
+      expect(ofType("agent_retired").find((e) => e.data.agent_id === id)?.data.status).toBe(
+        "stopped",
+      );
+      expect(ofType("task_cancelled")).toEqual([]);
     },
   );
 });

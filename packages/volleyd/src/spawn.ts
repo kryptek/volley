@@ -293,7 +293,6 @@ interface Ctx {
   lock?: WorktreeLock;
 }
 
-/** Run the launch half of a spawn; `verified` carries the rest. Throws SpawnError on refusal. */
 /** The agent id of `req`'s attempt: a release stage's own shape, else the task role's. */
 const agentIdOf = (req: SpawnRequest, attempt: number) =>
   req.stage !== undefined
@@ -308,6 +307,7 @@ const stageIssue = (stage: PlaybookStage): IssueData => ({
   url: "",
 });
 
+/** Run the launch half of a spawn; `verified` carries the rest. Throws SpawnError on refusal. */
 export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<SpawnResult> {
   const task =
     req.wave.tasks[req.task] ?? (req.stage !== undefined ? releaseWaveTask(req.wave) : undefined);

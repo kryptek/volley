@@ -344,7 +344,12 @@ export type ReleaseEvent =
       report: StageReport;
       evidence?: string;
     }
-  | { kind: "decision_resolved"; decision: DecisionRecord };
+  | { kind: "decision_resolved"; decision: DecisionRecord }
+  /**
+   * The answer to a recovery decision about a stage agent (its question, a stall, gone after a
+   * restart): `stop` fails the stage (the owner is asked what next); `respawn` runs it again.
+   */
+  | { kind: "agent_recovery"; agent_id: string; answer: "stop" | "respawn"; why: string };
 
 export type ReleaseAction =
   | { kind: "journal"; event: NewEvent }
@@ -527,6 +532,25 @@ function onResolved(v: ReleaseView, d: DecisionRecord): ReleaseAction[] {
   return [];
 }
 
+function onRecovery(
+  v: ReleaseView,
+  ev: Extract<ReleaseEvent, { kind: "agent_recovery" }>,
+): ReleaseAction[] {
+  const stage = stageOfAgent(v, ev.agent_id);
+  if (stage === undefined || stateOf(v, stage) !== "running" || !v.releasing) return [];
+  const run = v.runs[stage] as StageRun;
+  if (ev.answer === "stop")
+    return [
+      { kind: "retire", agent_id: ev.agent_id, status: "stopped" },
+      ...failStage(v, stage, run, ev.why),
+    ];
+  return [
+    { kind: "retire", agent_id: ev.agent_id, status: "relaunched" },
+    journal("release_stage_failed", { stage, reason: ev.why, agent_id: run.agent_id }),
+    ...enter(stage, (v.attempt[stage] ?? 1) + 1),
+  ];
+}
+
 /** The pure interpreter: what to do about `ev` given the train's view. */
 export function nextRelease(v: ReleaseView, ev: ReleaseEvent): ReleaseAction[] {
   switch (ev.kind) {
@@ -538,6 +562,8 @@ export function nextRelease(v: ReleaseView, ev: ReleaseEvent): ReleaseAction[] {
       return onChecked(v, ev);
     case "decision_resolved":
       return onResolved(v, ev.decision);
+    case "agent_recovery":
+      return onRecovery(v, ev);
   }
 }
 
@@ -603,12 +629,16 @@ export async function verifyStage(
   const head = headR.code === 0 ? out(headR) : undefined;
   const fetchNote =
     fetched.code === 0 ? "" : ` (fetch failed: ${fetched.stderr.trim() || fetched.code})`;
-  // Every run line, in order, reported with exit code 0.
-  const ran = o.stage.run.map((argv) =>
-    o.result.commands.find(
-      (c) => c.argv.length === argv.length && c.argv.every((w, i) => w === argv[i]),
-    ),
-  );
+  // Every run line, in order, reported with exit code 0 (each reported command matches one line).
+  let from = 0;
+  const ran = o.stage.run.map((argv) => {
+    const i = o.result.commands.findIndex(
+      (c, j) => j >= from && c.argv.length === argv.length && c.argv.every((w, k) => w === argv[k]),
+    );
+    if (i < 0) return undefined;
+    from = i + 1;
+    return o.result.commands[i];
+  });
   const failedCmd = ran.findIndex((c) => c === undefined || c.code !== 0);
   if (o.stage.run.length > 0)
     fact(
@@ -620,12 +650,18 @@ export async function verifyStage(
     );
   const v = o.stage.verify ?? {};
   if (v.commits_on_release === true) {
-    let ok = tip !== undefined && head !== undefined && tip !== o.start;
+    // The tip moved past the stage's start (an unknown start is unverifiable), HEAD on it.
+    const start = o.start;
+    let ok = start !== undefined && tip !== undefined && head !== undefined && tip !== start;
+    if (ok)
+      ok = (await git("merge-base", "--is-ancestor", start as string, tip as string)).code === 0;
     if (ok) ok = (await git("merge-base", "--is-ancestor", head as string, remote)).code === 0;
     fact(
       "commits_on_release",
       ok,
-      `origin/${o.release_branch} ${o.start?.slice(0, 7) ?? "?"}..${tip?.slice(0, 7) ?? "?"}, HEAD ${head?.slice(0, 7) ?? "?"}${ok ? " on it" : ""}${fetchNote}`,
+      start === undefined
+        ? `start unknown (no base_sha recorded), origin/${o.release_branch} at ${tip?.slice(0, 7) ?? "?"}${fetchNote}`
+        : `origin/${o.release_branch} ${start.slice(0, 7)}..${tip?.slice(0, 7) ?? "?"}, HEAD ${head?.slice(0, 7) ?? "?"}${ok ? " on it" : ""}${fetchNote}`,
     );
   }
   if (v.tag !== undefined) {
@@ -923,7 +959,12 @@ export class ReleaseTrain {
           report,
           at: new Date(this.deps.now()).toISOString(),
         });
-        evidence = writeStageEvidence(this.deps.home, this.wave, stageName, j).md;
+        try {
+          evidence = writeStageEvidence(this.deps.home, this.wave, stageName, j).md;
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          report = { ...report, ok: false, missing: [`evidence (${message})`] };
+        }
       }
       return {
         kind: "stage_checked",

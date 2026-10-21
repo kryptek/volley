@@ -5899,14 +5899,17 @@ export class Daemon {
    * A recovery decision was resolved: free the agent's liveness slot, then act on the answer.
    * The agent closing its own decision (`resumed`) needs nothing more. A question's answer is
    * steered to the agent; `stop task` cancels it; a model switch is only typed here, on approval.
+   * A release stage agent's decision is wave-level (no task): answered the same, except that
+   * stopping or respawning it is the train's (the stage fails, or runs again).
    */
   private async onRecoveryResolved(wave: WaveId, d: DecisionRecord): Promise<void> {
     const x = d as unknown as Record<string, unknown>;
     const agentId = typeof x.agent_id === "string" ? x.agent_id : undefined;
     const cls = typeof x.class === "string" ? x.class : undefined;
-    if (agentId === undefined || cls === undefined || d.resolved === undefined || d.task === null)
+    const a = agentId !== undefined ? this.supervised.get(agentId) : undefined;
+    const task = d.task ?? (a?.task === RELEASE_TASK || x.role === "release" ? RELEASE_TASK : null);
+    if (agentId === undefined || cls === undefined || d.resolved === undefined || task === null)
       return;
-    const a = this.supervised.get(agentId);
     if (a !== undefined) a.liveness = noteResolved(a.liveness, d.decision_id, this.now());
     const { answer, by } = d.resolved;
     if (by === agentId) return;
@@ -5915,22 +5918,27 @@ export class Daemon {
     const why = `${by} stopped the task (decision ${d.decision_id})`;
     if (cls === "respawn_needed") {
       const a = answer.trim().toLowerCase();
+      if (task === RELEASE_TASK) {
+        const respawn = isRespawnAnswer(answer, d.options);
+        if (a !== STOP_ANSWER && !respawn) return;
+        await this.retireGone(wave, task, agentId, x);
+        return this.releaseRecovery(wave, agentId, respawn ? "respawn" : "stop", why);
+      }
       const respawn =
         isRespawnAnswer(answer, d.options) &&
         isRole(String(x.role)) &&
         this.opts.spawner !== undefined;
       if (a !== STOP_ANSWER && !respawn) return;
       // Either way the vanished agent is done with: retired, so no later restart reconciles it.
-      await this.retireGone(wave, d.task, agentId, x);
+      await this.retireGone(wave, task, agentId, x);
       if (!respawn) {
-        await this.append(wave, { type: "task_cancelled", task: d.task, data: { by, why } });
+        await this.append(wave, { type: "task_cancelled", task, data: { by, why } });
         return;
       }
       // Approved by the owner: a fresh spawn (its own lock check still applies). A pipeline role
       // continues where the vanished agent was, as it was launched: its start point, worktree
       // and `.volley/` inputs, a merge-mode rebase step's merge brief, its MCP servers.
       const role = String(x.role) as Role;
-      const task = d.task;
       const spawned = this.spawnedRecord((e) => e.data.agent_id === agentId, wave);
       this.refused.delete(`${wave}/${task}/${role}`);
       const pipeline = moveRespawn(spawned);
@@ -5946,7 +5954,9 @@ export class Daemon {
     }
     if (a === undefined) return;
     if (answer.trim().toLowerCase() === STOP_ANSWER)
-      return this.cancelTask(wave, d.task, agentId, why);
+      return task === RELEASE_TASK
+        ? this.releaseRecovery(wave, agentId, "stop", why)
+        : this.cancelTask(wave, task, agentId, why);
     switch (cls) {
       case "agent_question":
         return this.steerAgent(agentId, a, answer, {
@@ -5954,8 +5964,16 @@ export class Daemon {
           decision_id: d.decision_id,
         });
       case "agent_stalled":
-        // respawn: the pipeline relaunches the role (its liveness marker); nothing is typed.
-        if (isRespawnAnswer(answer, d.options)) return;
+        // respawn: the pipeline relaunches the role (its liveness marker), a stage's the train.
+        if (isRespawnAnswer(answer, d.options))
+          return task === RELEASE_TASK
+            ? this.releaseRecovery(
+                wave,
+                agentId,
+                "respawn",
+                `${by} asked for a respawn (decision ${d.decision_id})`,
+              )
+            : undefined;
         return this.steerAgent(
           agentId,
           a,
@@ -5970,6 +5988,19 @@ export class Daemon {
         return;
       }
     }
+  }
+
+  /** The train acts on a recovery answer about a stage agent, after the current op (its queue). */
+  private releaseRecovery(
+    wave: WaveId,
+    agentId: string,
+    answer: "stop" | "respawn",
+    why: string,
+  ): void {
+    if (this.opts.spawner === undefined) return;
+    void this.enqueue(() =>
+      this.releaseFor(wave).handle({ kind: "agent_recovery", agent_id: agentId, answer, why }),
+    );
   }
 
   /** Journal `agent_retired` for an agent reconciliation found gone (its credentials revoked). */

@@ -1,11 +1,17 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { type PlaybookStage, parsePlaybook, trainState } from "../src/autopilot/playbook";
+import {
+  type PlaybookStage,
+  parsePlaybook,
+  releaseGoInput,
+  trainState,
+} from "../src/autopilot/playbook";
 import {
   RELEASE_TASK,
   type ReleaseAction,
   type ReleaseEvent,
+  ReleaseTrain,
   STAGE_STEER_REASON,
   globPrefix,
   globRegex,
@@ -18,6 +24,7 @@ import type { DecisionRecord } from "../src/decisions";
 import type { ExecFn } from "../src/exec";
 import type { JournalEvent } from "../src/types";
 import { schemaErrors } from "./helpers/schema";
+import { tempDir } from "./helpers/tmp";
 
 // The release train's stages (SPEC §4.6.19), pure: the interpreter over a scripted playbook with
 // an owner-gated stage, and verification on a fake exec.
@@ -290,6 +297,111 @@ describe("nextRelease (SPEC §4.6.19)", () => {
       t.step({ kind: "stage_checked", stage: "bump", agent_id: "w1-release-bump-9", report: OK }),
     ).toEqual([]);
   });
+
+  it("a recovery answer about the stage agent: stop fails the stage; respawn runs it again at attempt 2", () => {
+    const t = train();
+    t.step({ kind: "advance" });
+    t.spawned("bump", 1);
+    const stop = {
+      kind: "agent_recovery" as const,
+      agent_id: "w1-release-bump-1",
+      answer: "stop" as const,
+      why: "owner stopped the task (decision d1)",
+    };
+    expect(kinds(t.step({ ...stop, agent_id: "w1-release-bump-9" }))).toEqual([]);
+    expect(kinds(t.step(stop))).toEqual([
+      "retire w1-release-bump-1 stopped",
+      "release_stage_failed bump",
+      "decide agent_blocked bump",
+    ]);
+    expect(t.events.at(-2)?.data).toMatchObject({ reason: stop.why });
+
+    const u = train();
+    u.step({ kind: "advance" });
+    u.spawned("bump", 1);
+    expect(kinds(u.step({ ...stop, answer: "respawn" }))).toEqual([
+      "retire w1-release-bump-1 relaunched",
+      "release_stage_failed bump",
+      "release_stage_entered bump",
+      "spawn bump 2",
+    ]);
+    expect(u.view().train.stages[0]?.state).toBe("running");
+    expect(u.view().attempt.bump).toBe(2);
+  });
+});
+
+describe("releaseGoInput", () => {
+  it("names the skipped stages apart from the verified ones", () => {
+    const { input } = releaseGoInput(
+      WAVE,
+      {
+        stage: null,
+        stages: [
+          { name: "bump", state: "verified" },
+          { name: "deploy-staging", state: "skipped" },
+          { name: "smoke", state: "verified" },
+        ],
+      },
+      new Map(),
+    );
+    expect(input.question).toContain("verified: bump, smoke (skipped: deploy-staging).");
+  });
+});
+
+describe("ReleaseTrain", () => {
+  /** A driver over a scripted train whose verification passes; steers are recorded. */
+  function driver(home: string, exec?: ExecFn) {
+    const t = train();
+    t.step({ kind: "advance" });
+    t.spawned("bump", 1);
+    const steers: string[] = [];
+    const ok: ExecFn = async (argv) => {
+      const a = argv.join(" ");
+      const out = a.includes("rev-parse") ? `${"c".repeat(40)}\n` : "";
+      return { code: 0, stdout: out, stderr: "", timedOut: false };
+    };
+    const d = new ReleaseTrain(WAVE, {
+      exec: exec ?? ok,
+      home,
+      view: t.view,
+      journal: async () => {},
+      spawn: () => {},
+      steer: async (_id, text) => {
+        steers.push(text);
+      },
+      decide: async () => {},
+      retire: async () => {},
+      enqueue: (fn) => fn(),
+      now: () => 0,
+    });
+    const done = {
+      kind: "agent_done" as const,
+      agent_id: "w1-release-bump-1",
+      status: "done" as const,
+      result: RESULT("bump"),
+    };
+    return { d, steers, done };
+  }
+
+  it("evidence that cannot be written is a missing fact, not a silent hang", async () => {
+    const home = join(tempDir("volleyd-release-"), "home");
+    // A file where the evidence directory goes: mkdir fails.
+    writeFileSync(home, "");
+    const { d, steers, done } = driver(home);
+    await d.handle(done);
+    await d.settled();
+    expect(steers).toHaveLength(1);
+    expect(steers[0]).toMatch(/these facts do not hold: evidence \(/);
+  });
+
+  it("a verification that throws is a missing fact", async () => {
+    const { d, steers, done } = driver(tempDir("volleyd-release-"), async () => {
+      throw new Error("exec exploded");
+    });
+    await d.handle(done);
+    await d.settled();
+    expect(steers[0]).toContain("verification (exec exploded)");
+  });
 });
 
 describe("the stage result (review-result.schema.json)", () => {
@@ -354,6 +466,8 @@ describe("verifyStage", () => {
     ancestor?: boolean;
     files?: string[];
     tags?: unknown[];
+    startAncestor?: boolean;
+    tagObjects?: Record<string, string>;
   }) => {
     const calls: string[][] = [];
     const exec: ExecFn = async (argv) => {
@@ -364,11 +478,16 @@ describe("verifyStage", () => {
       if (a.includes("rev-parse --verify --quiet refs/remotes/origin/release/w1"))
         return r(`${o.tip ?? TIP}\n`);
       if (a.endsWith("rev-parse HEAD")) return r(`${o.head ?? TIP}\n`);
+      if (a.includes(`merge-base --is-ancestor ${START} `))
+        return r("", o.startAncestor === false ? 1 : 0);
       if (a.includes("merge-base --is-ancestor")) return r("", o.ancestor === false ? 1 : 0);
       if (argv[3] === "show") {
         const path = String(argv.at(-1)).split(":")[1];
         return r("", (o.files ?? []).includes(path as string) ? 0 : 128);
       }
+      const obj = argv[0] === "gh" ? /git\/tags\/([0-9a-f]+)$/.exec(String(argv[2])) : null;
+      if (obj !== null)
+        return r(JSON.stringify({ object: { sha: o.tagObjects?.[obj[1] as string] } }));
       if (argv[0] === "gh" && a.includes("matching-refs/tags/v0."))
         return r(JSON.stringify(o.tags ?? []));
       return r("", 1);
@@ -433,6 +552,60 @@ describe("verifyStage", () => {
       "file NOTES.md",
       "result smoke",
     ]);
+  });
+
+  it("commits_on_release needs the stage's start, and the tip past it", async () => {
+    const commits = stage({ commits_on_release: true });
+    const unknown = await verifyStage(fake({}).exec, { ...base, start: undefined, stage: commits });
+    expect(unknown.missing).toEqual(["commits_on_release"]);
+    expect(unknown.facts[1]?.evidence).toContain("start unknown");
+    // A tip that moved, but not from the stage's start (start is no ancestor of it).
+    const f = fake({ startAncestor: false });
+    const elsewhere = await verifyStage(f.exec, { ...base, stage: commits });
+    expect(elsewhere.missing).toEqual(["commits_on_release"]);
+    expect(f.calls.some((c) => c.join(" ").includes(`--is-ancestor ${START} ${TIP}`))).toBe(true);
+  });
+
+  it("the run lines must be reported in order, each once", async () => {
+    const two: PlaybookStage = {
+      ...stage(undefined),
+      run: [
+        ["git", "tag", "v0.5.0"],
+        ["git", "push", "origin", "v0.5.0"],
+      ],
+    };
+    const c = (argv: string[]) => ({ argv, code: 0, seconds: 1 });
+    const swapped = await verifyStage(fake({}).exec, {
+      ...base,
+      stage: two,
+      result: {
+        ...result,
+        commands: [c(["git", "push", "origin", "v0.5.0"]), c(["git", "tag", "v0.5.0"])],
+      },
+    });
+    expect(swapped.missing).toEqual(["commands"]);
+    const twice = await verifyStage(fake({}).exec, {
+      ...base,
+      stage: {
+        ...two,
+        run: [
+          ["git", "tag", "v0.5.0"],
+          ["git", "tag", "v0.5.0"],
+        ],
+      },
+    });
+    expect(twice.missing).toEqual(["commands"]);
+  });
+
+  it("an annotated tag is read through its tag object", async () => {
+    const OBJ = "d".repeat(40);
+    const f = fake({
+      tags: [{ ref: "refs/tags/v0.5.0", object: { sha: OBJ, type: "tag" } }],
+      tagObjects: { [OBJ]: TIP },
+    });
+    const r = await verifyStage(f.exec, { ...base, stage: stage({ tag: "v0.5.0" }) });
+    expect(r).toMatchObject({ ok: true, missing: [] });
+    expect(f.calls.some((c) => c[2]?.endsWith(`git/tags/${OBJ}`))).toBe(true);
   });
 
   it("a missing tag alone: { ok: false, missing: ['tag v0.5.0'] }", async () => {
