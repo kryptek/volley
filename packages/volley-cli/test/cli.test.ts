@@ -14,6 +14,7 @@ describe("cli", () => {
     expect(r.stderr).toContain("sub");
     expect(r.stderr).toContain("wait");
     expect(r.stderr).toContain("list");
+    expect(r.stderr).toMatch(/^ {2}deploy {3}Deploy a release tag/m);
     expect(r.stdout).toBe("");
   });
 
