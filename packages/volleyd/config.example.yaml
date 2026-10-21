@@ -149,3 +149,6 @@
 # --- Archiving (README "Archiving") ---
 # archive_ended_after_h: 24      # archive a stopped / complete wave this many hours after it ended; 0: never
 # archive_on_ack: true           # archive a complete wave as soon as its wave_complete decision is answered
+
+# --- CI reads (README "CI verification") ---
+# ci_rate_limit_backoff_ms: 300000  # after GitHub rate-limits a CI read (HTTP 403 / 429), no CI call to the repo for this long (or Retry-After, if longer)

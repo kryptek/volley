@@ -5,7 +5,7 @@ import type { GithubStatus } from "../src/autopilot/github-status";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
 import { emptyPipeline, reducePipeline } from "../src/pipeline";
 import { FIXTURES } from "./helpers/fake-host";
-import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
+import { type Harness, isHeadRunsRead, pipelineHarness, sha } from "./helpers/pipeline-harness";
 
 /**
  * Self-healing CI (SPEC §4.6.16): a red head is classified before anyone is asked. The PR's own
@@ -95,7 +95,9 @@ describe("a red head is classified before anyone is asked", () => {
     const lists = h.calls.length;
     h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
     await h.tick();
-    expect(h.calls.slice(lists).some((c) => c[1] === "run" && c[2] === "list")).toBe(false);
+    expect(h.calls.slice(lists).some((c) => isHeadRunsRead(c) || c.includes("--branch"))).toBe(
+      false,
+    );
     expect(h.openDecisions()).toEqual([]);
     expect(events("remediation_requested")).toHaveLength(1);
   });
@@ -129,7 +131,7 @@ describe("a red head is classified before anyone is asked", () => {
     expect(h.task()?.why_waiting).toMatch(/^CI infra incident: .+; re-checking$/);
 
     // Not re-checked before ci_poll_ms; re-checked after it, still held (no second event).
-    const runLists = () => h.calls.filter((c) => c[1] === "run" && c[2] === "list").length;
+    const runLists = () => h.calls.filter(isHeadRunsRead).length;
     const before = runLists();
     await h.tick();
     expect(runLists()).toBe(before);
@@ -410,11 +412,7 @@ describe("the flake's fix landed (SPEC §4.6.16: the fixer task merged)", () => 
     await h.resolve(d?.decision_id as string, "fix landed", "volleyd");
     await h.driver.handle("T1", { kind: "fix_landed", test: FLAKE });
     await h.driver.settled();
-    expect(
-      h.calls
-        .slice(lists)
-        .some((c) => c[1] === "run" && c[2] === "list" && !c.includes("--branch")),
-    ).toBe(false);
+    expect(h.calls.slice(lists).some(isHeadRunsRead)).toBe(false);
     expect(events("stage_entered").at(-1)?.data).toMatchObject({ rebase: true, fix_landed: FLAKE });
   });
 

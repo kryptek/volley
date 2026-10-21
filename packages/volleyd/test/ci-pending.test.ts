@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { formatWave } from "../src/commands/status";
-import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
 import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
 
 /**
@@ -122,5 +122,78 @@ describe("CI pending is visible", () => {
     expect(h.events.some((e) => e.type === "ci_green")).toBe(false);
     expect(h.task()?.pr).toMatchObject({ number: 7, ci: "red" });
     expect(h.task()?.why_waiting).toContain("awaiting decision");
+  });
+});
+
+describe("unreadable CI (a rate limit) is not `no CI` (#310)", () => {
+  const RATE = "HTTP 403: API rate limit exceeded for user ID 1.";
+  const probes = () => h.calls.filter((c) => c[0] === "gh" && c[1] === "api").length;
+  const rateAlarms = () =>
+    h.events.filter((e) => e.type === "alarm_raised" && e.data.alarm === "github_rate_limited");
+
+  it("403 on every probe past ci_none_grace_ms: no decision, one alarm, backoff; green after it verifies", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    h.world.ciError = RATE;
+    await h.finish("implementer", { head: H1 });
+    const until = DAEMON_DEFAULTS.ci_none_grace_ms + DAEMON_DEFAULTS.ci_poll_ms;
+    for (let t = 0; t <= until; t += DAEMON_DEFAULTS.ci_poll_ms) await recheck();
+
+    expect(h.openDecisions()).toEqual([]);
+    expect(rateAlarms()).toHaveLength(1);
+    const backoff = CONFIG_DEFAULTS.ci_rate_limit_backoff_ms;
+    expect(rateAlarms()[0]?.data).toMatchObject({
+      alarm: "github_rate_limited",
+      retry_at: new Date(Date.parse("2026-10-18T12:00:00.000Z") + backoff).toISOString(),
+    });
+    // No CI call before retry_at: one probe per backoff, not one per poll.
+    expect(probes()).toBeLessThanOrEqual(
+      Math.ceil((until + DAEMON_DEFAULTS.ci_poll_ms) / backoff) + 1,
+    );
+    expect(h.task()?.why_waiting).toBe(`CI unreadable (${RATE}), retrying`);
+    expect(h.task()?.stage).toBe("implement");
+
+    // GitHub answers again: the head is green.
+    h.world.ciError = undefined;
+    h.world.ci[H1] = "green";
+    h.elapse(backoff);
+    await h.tick();
+    expect(h.events.find((e) => e.type === "artifact_verified")?.data).toMatchObject({
+      head_sha: H1,
+    });
+    expect(
+      h.events.find((e) => e.type === "alarm_cleared" && e.data.alarm === "github_rate_limited"),
+    ).toBeDefined();
+    expect(h.openDecisions()).toEqual([]);
+  });
+
+  it("a Retry-After longer than the backoff is honoured", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    h.world.ciError = "HTTP 429: Too Many Requests\nRetry-After: 900";
+    await h.finish("implementer", { head: H1 });
+    expect(rateAlarms()[0]?.data.retry_at).toBe(
+      new Date(Date.parse("2026-10-18T12:00:00.000Z") + 900_000).toISOString(),
+    );
+    const before = probes();
+    h.elapse(CONFIG_DEFAULTS.ci_rate_limit_backoff_ms);
+    await h.tick();
+    expect(probes()).toBe(before);
+  });
+
+  it("a non-rate-limit failure (HTTP 502) is a hold re-polled every ci_poll_ms, never a decision", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    h.world.ciError = "HTTP 502: Bad Gateway";
+    await h.finish("implementer", { head: H1 });
+    const until = DAEMON_DEFAULTS.ci_none_grace_ms + DAEMON_DEFAULTS.ci_poll_ms;
+    for (let t = 0; t <= until; t += DAEMON_DEFAULTS.ci_poll_ms) await recheck();
+    expect(h.openDecisions()).toEqual([]);
+    expect(rateAlarms()).toEqual([]);
+    expect(probes()).toBeGreaterThan(until / DAEMON_DEFAULTS.ci_poll_ms);
+    expect(h.task()?.why_waiting).toBe("CI unreadable (HTTP 502: Bad Gateway), retrying");
   });
 });

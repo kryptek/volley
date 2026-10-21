@@ -82,6 +82,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   // --- Archiving (SPEC §4.6.20) ---
   archive_ended_after_h: 24,
   archive_on_ack: true,
+  ci_rate_limit_backoff_ms: 300_000,
 };
 
 /**

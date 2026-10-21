@@ -6,12 +6,14 @@ import {
   type Landed,
   type MovedHeadFacts,
   type OperatorMergeCheck,
+  type RateLimited,
   type RebaseCheck,
   type ReleaseMerge,
+  type RunsVia,
   type SupersededRun,
   artifactOutcome,
   checkRebase,
-  ciStateOf,
+  ciReport,
   failedRuns,
   landed,
   prFiles,
@@ -273,10 +275,14 @@ export interface CiHold {
   checks: { done: number; total: number };
   next_poll_at: string;
   pr?: { number: number; url: string };
-  /** An infra incident hold (a red head classified `infra_incident`): what it is and since when. */
-  reason?: "infra_incident";
+  /**
+   * An infra incident hold (a red head classified `infra_incident`): what it is and since when.
+   * `ci_unreadable`: GitHub's answer about the head's runs could not be read (`error`).
+   */
+  reason?: "infra_incident" | "ci_unreadable";
   incident?: string;
   since?: string;
+  error?: string;
 }
 
 export type SteerReason = "artifacts" | "result" | "merge_nudge";
@@ -566,6 +572,9 @@ export function reducePipeline(
                 ...(typeof d.since === "string" ? { since: d.since } : {}),
               }
             : {}),
+          ...(d.reason === "ci_unreadable"
+            ? { reason: "ci_unreadable" as const, error: String(d.error ?? "") }
+            : {}),
         };
       break;
     case "remediation_requested":
@@ -853,7 +862,7 @@ export type PipelineEvent =
   | { kind: "fix_landed"; test: string };
 
 /** CI on a merged head that is not the gated one; `unknown` when it could not be read. */
-export type MergedCi = CiState | "unknown";
+export type MergedCi = CiState;
 
 export interface PrView {
   state?: string;
@@ -1394,10 +1403,21 @@ function onMovedCi(
   const m = v.p.moved;
   if (m === undefined || m.to !== ev.to || m.asked === true) return [];
   const ci = ev.facts.ci;
+  // Unreadable CI (`unknown`) is re-polled like running CI: never a decision.
   const waiting =
     ci.state === "running" ||
+    ci.state === "unknown" ||
     (ci.state === "none" && ev.waited_ms < DAEMON_DEFAULTS.ci_none_grace_ms);
-  if (waiting) return holdFor(v, "moved", ev.to, ci.runs, ev.pr, ev.at);
+  if (waiting)
+    return holdFor(
+      v,
+      "moved",
+      ev.to,
+      ci.runs,
+      ev.pr,
+      ev.at,
+      ci.state === "unknown" ? (ci.error ?? "") : undefined,
+    );
   const at = (x: string) => x.slice(0, 7);
   const failure =
     ci.state === "red"
@@ -1875,10 +1895,15 @@ function ciPending(
 ): PipelineAction[] {
   if (ev.report.kind !== "ok") return [];
   const { number, url } = ev.report.pr;
-  return holdFor(v, ev.role, head, ev.report.ci.runs, { number, url }, ev.at);
+  const ci = ev.report.ci;
+  const unreadable = ci.state === "unknown" ? (ci.error ?? "") : undefined;
+  return holdFor(v, ev.role, head, ci.runs, { number, url }, ev.at, unreadable);
 }
 
-/** Journal `ci_pending` for `role`'s head (once per change of head or counts). */
+/**
+ * Journal `ci_pending` for `role`'s head (once per change of head, counts or readability).
+ * `unreadable`: the runs could not be read (why): the hold says `reason: ci_unreadable`.
+ */
 function holdFor(
   v: PipelineView,
   role: Role | "moved",
@@ -1886,15 +1911,18 @@ function holdFor(
   runs: CiRun[],
   pr: { number: number; url: string },
   at: number | undefined,
+  unreadable?: string,
 ): PipelineAction[] {
   const checks = { done: runs.filter((r) => r.status === "completed").length, total: runs.length };
   const hold = v.p.ci_hold;
+  const reason = unreadable !== undefined ? "ci_unreadable" : undefined;
   if (
     hold?.role === role &&
     hold.sha === head &&
-    hold.reason === undefined &&
-    hold.checks.done === checks.done &&
-    hold.checks.total === checks.total
+    hold.reason === reason &&
+    hold.error === unreadable &&
+    (unreadable !== undefined ||
+      (hold.checks.done === checks.done && hold.checks.total === checks.total))
   )
     return [];
   return [
@@ -1911,6 +1939,7 @@ function holdFor(
             ? { next_poll_at: new Date(at + DAEMON_DEFAULTS.ci_poll_ms).toISOString() }
             : {}),
           pr,
+          ...(unreadable !== undefined ? { reason: "ci_unreadable", error: unreadable } : {}),
         },
       },
     },
@@ -3164,6 +3193,8 @@ export interface PipelineDeps {
   mergeRetryMax?: () => number;
   /** The wave's `autopilot.incident_wait_max_s` (default: the config default). */
   incidentWaitMaxS?: () => number;
+  /** The wave's `ci_rate_limit_backoff_ms` (default: the config default). */
+  ciRateLimitBackoffMs?: () => number;
   /** GitHub's status page, cached (github-status.ts); absent: not read (unknown, never an incident). */
   statusPage?: () => Promise<GithubStatus>;
   /** The wave's `autopilot.delete_branch` (default: false). */
@@ -3243,6 +3274,11 @@ export class PipelineDriver {
   private readonly alarmed = new Set<string>();
   /** When each `<task>/<head>` was first seen with no CI run at all. */
   private readonly noCiSince = new Map<string, number>();
+  /**
+   * GitHub's rate limit per repo (the wave repo): no CI call before `retry_at`. `task`: the one
+   * whose probe met it, which carries the `github_rate_limited` alarm until a probe succeeds.
+   */
+  private readonly ciBackoff = new Map<string, { retry_at: number; task: TaskId }>();
   /** Checks whose I/O is running beside the queue, by `<task>/<what>[/<agent>]`; one per key. */
   private readonly inflight = new Set<string>();
   /** Every check until its result has been folded back in (what `settled` waits for). */
@@ -3723,7 +3759,9 @@ export class PipelineDriver {
           if (agent === undefined) break;
           // Rate-limit per agent: a new run of the role is checked at once.
           const key = `${task}/verify/${agent}`;
-          if (this.inflight.has(key) || (!eventDriven && !this.due(key))) break;
+          // Rate-limited: no CI call before retry_at, event-driven or not (a later tick verifies).
+          if (this.inflight.has(key) || this.ciBackedOff()) break;
+          if (!eventDriven && !this.due(key)) break;
           this.lastCheck.set(key, this.now());
           this.beside(task, key, { what: "verify", role: a.role, agent_id: agent }, () =>
             this.verify(task, a.role, agent, a.result),
@@ -3818,7 +3856,7 @@ export class PipelineDriver {
         case "check_moved_ci": {
           const v = this.view(task);
           const key = `${task}/moved_ci`;
-          if (v?.p.moved === undefined || this.inflight.has(key)) break;
+          if (v?.p.moved === undefined || this.inflight.has(key) || this.ciBackedOff()) break;
           if (!this.due(`${key}/${v.p.moved.to}`)) break;
           this.beside(task, key, { what: "moved_ci" }, () => this.movedCheck(v));
           break;
@@ -3851,6 +3889,66 @@ export class PipelineDriver {
     return progressed;
   }
 
+  /** The wave repo: what the rate-limit backoff is kept per. */
+  private repoKey(): string {
+    return this.deps.record().state?.repo ?? ".";
+  }
+
+  /**
+   * Where a head's runs are read: the supervisor's own exec in the wave repo (one `gh api
+   * …/actions/runs?head_sha=` GET, never sent to a paired machine); without a wave repo, the
+   * task's `gh run list --commit`.
+   */
+  private runsVia(): RunsVia | undefined {
+    const repo = this.deps.record().state?.repo;
+    return repo != null ? { exec: this.timed(this.deps.exec), cwd: repo } : undefined;
+  }
+
+  /** GitHub rate-limited the wave repo's last CI read and its backoff has not passed. */
+  private ciBackedOff(): boolean {
+    const b = this.ciBackoff.get(this.repoKey());
+    return b !== undefined && this.now() < b.retry_at;
+  }
+
+  /**
+   * Fold a CI read into the rate-limit backoff: a rate-limited answer backs the repo off for
+   * max(`Retry-After`, `ci_rate_limit_backoff_ms`), journaling `github_rate_limited` once; a
+   * readable answer ends it and clears the alarm. Another unreadable answer changes nothing.
+   */
+  private async noteCi(
+    task: TaskId,
+    ci: { state: CiState; error?: string; rate_limited?: RateLimited },
+  ): Promise<void> {
+    const repo = this.repoKey();
+    const b = this.ciBackoff.get(repo);
+    if (ci.rate_limited !== undefined) {
+      const wait = Math.max(
+        ci.rate_limited.retry_after_ms ?? 0,
+        this.deps.ciRateLimitBackoffMs?.() ?? CONFIG_DEFAULTS.ci_rate_limit_backoff_ms,
+      );
+      const retryAt = this.now() + wait;
+      this.ciBackoff.set(repo, { retry_at: retryAt, task: b?.task ?? task });
+      if (b !== undefined) return;
+      await this.deps.journal({
+        type: "alarm_raised",
+        task,
+        data: {
+          alarm: "github_rate_limited",
+          retry_at: new Date(retryAt).toISOString(),
+          message: `GitHub rate-limited CI reads (${ci.error ?? "rate limit"}); no CI call before ${new Date(retryAt).toISOString()}`,
+        },
+      });
+      return;
+    }
+    if (ci.state === "unknown" || b === undefined) return;
+    this.ciBackoff.delete(repo);
+    await this.deps.journal({
+      type: "alarm_cleared",
+      task: b.task,
+      data: { alarm: "github_rate_limited", why: "a CI read succeeded" },
+    });
+  }
+
   /** Level-triggered checks run at most once per `ci_poll_ms`. */
   private due(key: string): boolean {
     const now = this.now();
@@ -3878,13 +3976,16 @@ export class PipelineDriver {
     if (v === null || run?.agent_id !== agentId || run.worktree === undefined) return null;
     if (v.p.branch === undefined) return null;
     const since = run.adopt === true ? v.p.head : role === "rebase" ? run.start : undefined;
+    const via = this.runsVia();
     let report = await verifyArtifacts(this.io(task), {
       cwd: run.worktree,
       branch: v.p.branch,
       release_branch: v.release_branch,
       ...(since !== undefined ? { since } : {}),
       ...(run.adopt === true ? { adopt: true } : {}),
+      ...(via !== undefined ? { runs_via: via } : {}),
     });
+    if (report.kind === "ok") await this.noteCi(task, report.ci);
     // A merge-mode update moves the branch forward: a head that does not descend from the step's
     // start was force-pushed (a rebase), which `branch_update: merge` forbids.
     if (
@@ -4019,7 +4120,8 @@ export class PipelineDriver {
       pr.headRefOid === ""
     )
       return null;
-    const ci = await redHeadCi(exec, cwd, pr.headRefOid);
+    const ci = await redHeadCi(exec, cwd, pr.headRefOid, this.runsVia());
+    await this.noteCi(v.task, ci);
     return {
       kind: "ok",
       head: pr.headRefOid,
@@ -4280,13 +4382,16 @@ export class PipelineDriver {
     if (moved === undefined || pr === undefined) return null;
     if (branch === undefined || cwd === undefined)
       throw new Error("no PR branch / worktree to check the moved head from");
+    const via = this.runsVia();
     const facts = await probeMovedHead(this.io(v.task), {
       cwd,
       branch,
       from: moved.from,
       to: moved.to,
       release_branch: v.release_branch,
+      ...(via !== undefined ? { runs_via: via } : {}),
     });
+    await this.noteCi(v.task, facts.ci);
     const key = `${v.task}/${moved.to}`;
     let waited = 0;
     if (facts.ci.state === "none") {
@@ -4306,8 +4411,11 @@ export class PipelineDriver {
 
   /** CI on a merged commit other than the gated head; `unknown` when it cannot be read. */
   async ciOf(task: TaskId, cwd: string | undefined, sha: string): Promise<MergedCi> {
+    if (this.ciBackedOff()) return "unknown";
     try {
-      return await ciStateOf(this.io(task), cwd ?? ".", sha);
+      const ci = await ciReport(this.io(task), cwd ?? ".", sha, this.runsVia());
+      await this.noteCi(task, ci);
+      return ci.state;
     } catch {
       return "unknown";
     }

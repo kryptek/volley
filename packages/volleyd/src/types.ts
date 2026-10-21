@@ -154,6 +154,11 @@ export interface Tunables {
   archive_ended_after_h: number;
   /** A complete wave is archived as soon as its `wave_complete` decision is answered. */
   archive_on_ack: boolean;
+  /**
+   * After a rate-limited GitHub answer, the pipeline makes no CI call to that repo for this long
+   * (or the answer's `Retry-After`, if longer).
+   */
+  ci_rate_limit_backoff_ms: number;
 }
 
 /** Who merges a gated PR: volleyd itself (`auto`) or a human (`manual`). */
