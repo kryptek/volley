@@ -59,8 +59,11 @@
               "description": "inbox_answer / resolve: the answer."
             },
             "where": {
-              "$ref": "inbox-item.schema.json#/$defs/where",
-              "description": "inbox_answer / resolve: where the answer was given (a Desk login: kind desk)."
+              "anyOf": [
+                { "$ref": "inbox-item.schema.json#/$defs/where" },
+                { "type": "string", "minLength": 1 }
+              ],
+              "description": "inbox_answer / resolve: where the answer was given (a Desk login: kind desk). resolve also takes the label form (`desk·phone`, `mbp·terminal`, `cli`); inbox_answer takes the object only."
             },
             "decision_id": {
               "type": "string",
@@ -284,7 +287,11 @@
               },
               "then": {
                 "required": ["op", "id", "version", "answer", "where"],
-                "properties": {}
+                "properties": {
+                  "where": {
+                    "type": "object"
+                  }
+                }
               }
             },
             {

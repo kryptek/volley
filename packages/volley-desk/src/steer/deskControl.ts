@@ -14,10 +14,14 @@ type Control = SteerTransport["control"];
 
 /**
  * Why an unanswered Needs-you answer may have gone nowhere: a broker whose `desk` role predates
- * the account-op grant drops the publish without a word.
+ * the account-op grant drops the publish without a word. Only a login that holds the grant once
+ * migrated (steer, admin, or the fixed desk with no stored role) is told to migrate.
  */
 const MIGRATE_HINT =
   "; if this broker's roles predate Desk answers, run `volley auth migrate --roles --yes`";
+
+/** Roles the account-op grant comes with; `null` is a session whose role the Desk never learnt. */
+const DESK_ANSWER_ROLES: readonly (string | null)[] = ["steer", "admin", null];
 
 /**
  * The ops a Desk login answers as the owner, on its own account-op topic. Keep it equal to
@@ -29,16 +33,22 @@ export const DESK_LOGIN_OPS: readonly string[] = ["inbox_answer", "resolve"];
 /**
  * The Desk's `control()`: the Needs-you ops through `authOps`, the rest through the mailbox.
  * Without the admin channel (read-only, demo) every op goes to the mailbox, as before; without
- * the mailbox there is no control at all.
+ * the mailbox there is no control at all. `role` is the session's (`readSessionRole`): it decides
+ * only whether an unanswered request carries the migration hint.
  */
-export function routeDeskControl(mailbox: Control | null, authOps: AuthOps | null): Control | null {
+export function routeDeskControl(
+  mailbox: Control | null,
+  authOps: AuthOps | null,
+  role: string | null = null,
+): Control | null {
   if (authOps === null || mailbox === null) return mailbox;
+  const hint = DESK_ANSWER_ROLES.includes(role) ? MIGRATE_HINT : "";
   return async (op, fields, text, timeoutMs) => {
     if (!DESK_LOGIN_OPS.includes(op)) return mailbox(op, fields, text, timeoutMs);
     const a = await authOps.request(op, fields, timeoutMs !== undefined ? { timeoutMs } : {});
     return {
       ok: a.ok,
-      ...(a.error !== undefined ? { error: a.unanswered ? a.error + MIGRATE_HINT : a.error } : {}),
+      ...(a.error !== undefined ? { error: a.unanswered ? a.error + hint : a.error } : {}),
       ...(a.result !== undefined ? { result: a.result } : {}),
       ...(a.unsent ? { unsent: true as const } : {}),
     };

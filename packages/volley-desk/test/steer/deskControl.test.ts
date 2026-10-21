@@ -43,11 +43,11 @@ function mockClient() {
 
 const answer = { id: "d-w1-d-abc", version: 1, answer: "fine", where: { kind: "desk" } };
 
-function setup() {
+function setup(role: string | null = null) {
   const m = mockClient();
   const authOps = createAuthOps(m.client, { identity: "steer-1", replyKey: plainKey });
   const mailbox = vi.fn<SteerTransport["control"]>(async () => ({ ok: true, result: "mailbox" }));
-  return { m, mailbox, control: routeDeskControl(mailbox, authOps) };
+  return { m, mailbox, control: routeDeskControl(mailbox, authOps, role) };
 }
 
 /** The first published request, once it is out. */
@@ -100,6 +100,22 @@ describe("routeDeskControl: Needs-you answers travel the Desk's own account-op t
     expect(r?.error).toMatch(/^volleyd did not answer within 0\.02s/);
     expect(r?.error).toContain("volley auth migrate --roles --yes");
     expect(mailbox).not.toHaveBeenCalled();
+  });
+
+  it("a login whose role grants no Desk answers (watch) gets no migration hint", async () => {
+    const { control } = setup("watch");
+    const r = await control?.("inbox_answer", answer, undefined, 20);
+    expect(r?.ok).toBe(false);
+    expect(r?.error).toMatch(/^volleyd did not answer within 0\.02s/);
+    expect(r?.error).not.toContain("volley auth migrate");
+  });
+
+  it("a steer or admin login keeps the migration hint", async () => {
+    for (const role of ["steer", "admin"]) {
+      const { control } = setup(role);
+      const r = await control?.("inbox_answer", answer, undefined, 20);
+      expect(r?.error).toContain("volley auth migrate --roles --yes");
+    }
   });
 
   it("every other op still goes to volleyd's mailbox", async () => {

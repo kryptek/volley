@@ -404,7 +404,8 @@ export default function App() {
   // volleyd knows it is the owner answering from another screen (SPEC §4.6.18).
   const mailboxControl = demo ? null : (steering.transport?.control ?? null);
   const control = useMemo(
-    () => routeDeskControl(mailboxControl, authOps),
+    () =>
+      routeDeskControl(mailboxControl, authOps, authOps ? readSessionRole(authOps.identity) : null),
     [mailboxControl, authOps],
   );
   // Settings › Machines: the pairing ops ride the same admin channel (and its reply key).
