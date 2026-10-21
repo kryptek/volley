@@ -11,7 +11,7 @@ a code-level authority fence, and publishes the live wave state to Volley topics
 panes and coordinators can render it. It runs as a launchd service, so it outlives any
 coordinator session.
 
-> **Status: pre-release (v0.4.0).** This package has the wave file, journal, reducer, scheduler,
+> **Status: pre-release (v0.5.0).** This package has the wave file, journal, reducer, scheduler,
 > fence, config store, daemon, CLI and service (launchd on macOS; `volley setup` installs a
 > systemd user unit on Linux), plus decisions, wave ownership, pause/stop
 > and the kill switch, steering and overlap warnings, heavy-operation leases and load-aware spawn
@@ -23,7 +23,11 @@ coordinator session.
 > sign-in links and admin tokens), pairs machines (`volley peer`) and runs agents under several
 > Claude accounts (`volley claude`). Since v0.4.0 (the Fleet) it judges which machines can run
 > an agent, places tasks across them with a "why here" line, and asks before re-placing anything
-> when a machine goes down, gets busy or leaves (see Fleet below).
+> when a machine goes down, gets busy or leaves (see Fleet below). Since v0.5.0 (Autopilot) it
+> runs a wave unattended: it answers routine decisions from a policy table, heals red CI, merges gated PRs
+> itself under `merge: auto` through a merge queue, runs the repository's release train, refers
+> everything that needs a person to one needs-you inbox and sums the night up in one digest (see
+> Autopilot below; the owner's guide is [`docs/AUTOPILOT.md`](../../docs/AUTOPILOT.md)).
 
 ---
 
@@ -40,7 +44,15 @@ coordinator session.
 - [Claude accounts](#claude-accounts)
 - [Decisions](#decisions)
 - [Autopilot](#autopilot)
+  - [The policy table](#the-policy-table)
+  - [Self-healing CI](#self-healing-ci) and [the fixer task](#the-fixer-task)
+  - [Autopilot merging](#autopilot-merging) and [the merge queue](#the-merge-queue)
+  - [The release train](#the-release-train)
+  - [The needs-you inbox](#needs-you-inbox)
+  - [The morning digest](#the-morning-digest)
+  - [The soak](#testing-the-simulated-soak)
 - [Needs-you inbox](#needs-you-inbox)
+  - [Pickers and handoffs](#pickers-and-handoffs)
 - [Ownership and claim](#ownership-and-claim)
 - [Pause, stop and the kill switch](#pause-stop-and-the-kill-switch)
 - [Archiving](#archiving)
@@ -59,6 +71,7 @@ coordinator session.
 - [Running as a service (launchd)](#running-as-a-service-launchd)
 - [Exit codes](#exit-codes)
 - [Testing: the clock contract](#testing-the-clock-contract)
+- [Testing: the simulated soak](#testing-the-simulated-soak)
 
 ---
 
@@ -662,6 +675,26 @@ waiting for mailbox guidance, so it keeps its lock and login. The decision carri
 about twice.
 
 ## Autopilot
+
+Autopilot is everything that lets a wave run while nobody watches. The pieces, in the order a
+wave meets them (the owner's one-page guide is [`docs/AUTOPILOT.md`](../../docs/AUTOPILOT.md)):
+
+| Piece | What it does | Where |
+|---|---|---|
+| The policy table | answers routine decisions within per-wave budgets; escalates the rest | [below](#the-policy-table), SPEC §4.6.16 |
+| Self-healing CI | classifies a red head (own change, flake, infra incident) and routes it; a flake gets a fixer task | [Self-healing CI](#self-healing-ci), [the fixer task](#the-fixer-task) |
+| Autopilot merging | under `merge: auto`, squash-merges each gated PR at exactly its gated head | [Autopilot merging](#autopilot-merging), SPEC §4.6.17 |
+| The merge queue | one merge in flight per release branch, in dependency order, each branch brought up to date first | [The merge queue](#the-merge-queue) |
+| The release train | runs the repository's `.volley/release.yaml` stages once every task is merged; ends on the owner's `release_go` | [The release train](#the-release-train), SPEC §4.6.19 |
+| The needs-you inbox | one retained item per thing a person must answer, from any surface; volleyd referees | [Needs-you inbox](#needs-you-inbox), SPEC §4.6.18 |
+| The morning digest | one retained digest and one push per wave: shipped, handled, waiting | [The morning digest](#the-morning-digest) |
+| Stable coordinator identity | a wave owned by `VOLLEY_COORDINATOR` survives its session; reconnects reclaim it | [Ownership and claim](#ownership-and-claim) |
+| The soak | one whole simulated wave, unattended, in CI | [Testing: the simulated soak](#testing-the-simulated-soak) |
+
+Under `merge: manual` volleyd merges nothing and a person merges each gated PR; with
+`autopilot.enabled: false` every decision waits for a person. Either is per wave or global.
+
+### The policy table
 
 Most decisions have one obvious answer: retry, relaunch once, treat a disputed P1 as a blocker,
 nudge once more, raise the spawn budget by what the wave needs. volleyd gives those answers itself
