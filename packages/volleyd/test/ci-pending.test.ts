@@ -11,6 +11,7 @@ import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
  */
 
 const H1 = sha(0x1001);
+const H2 = sha(0x1002);
 let h: Harness;
 afterEach(() => h?.cleanup());
 
@@ -168,6 +169,23 @@ describe("a CONFLICTING PR enters the branch-update step (no CI will run on it)"
     expect(h.openDecisions()).toEqual([]);
     expect(h.events.filter((e) => e.type === "pr_conflicting")).toHaveLength(1);
     expect(h.spawns.filter((s) => s.role === "rebase")).toHaveLength(1);
+  });
+
+  it("the update step's own head still CONFLICTING: no second update, the owner is asked after the grace", async () => {
+    await conflicting();
+    h.world.ancestor[`${H1}..${H2}`] = true;
+    await h.finish("rebase", { head: H2 });
+    expect(h.spawns.filter((s) => s.role === "rebase")).toHaveLength(1);
+    expect(h.events.filter((e) => e.type === "pr_conflicting")).toHaveLength(1);
+    expect(h.openDecisions()).toEqual([]);
+    // Its head waits under the no-CI clock like any other; past the grace, one decision opens.
+    h.elapse(DAEMON_DEFAULTS.ci_none_grace_ms + DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    const open = h.openDecisions();
+    expect(open).toHaveLength(1);
+    expect(open[0]?.question).toContain("still conflicts with release/w1");
+    expect(h.spawns.filter((s) => s.role === "rebase")).toHaveLength(1);
+    expect(h.events.filter((e) => e.type === "pr_conflicting")).toHaveLength(1);
   });
 
   it("under branch_update: rebase the step's .volley/rebase.md says the PR conflicts too", async () => {

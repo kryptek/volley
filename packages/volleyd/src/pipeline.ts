@@ -1908,6 +1908,12 @@ function noCiYet(
   const grace = ev.waited_ms !== undefined && ev.waited_ms >= DAEMON_DEFAULTS.ci_none_grace_ms;
   if (state === "none" && grace) {
     const touched = ev.report.kind === "ok" ? ev.report.touched : undefined;
+    const minutes = Math.round((ev.waited_ms ?? 0) / 60_000);
+    // Only an update step's own head gets here conflicting: that, not the workflows, is the cause.
+    const question =
+      ev.report.kind === "ok" && ev.report.pr.mergeable === "CONFLICTING"
+        ? `The PR still conflicts with ${v.release_branch} at ${head.slice(0, 12)} after its branch-update step, so no CI has run for ${minutes} min. Resolve the conflict and push, then accept the head without CI, or cancel?`
+        : `No CI run exists for ${head.slice(0, 12)} after ${minutes} min. Check the repository's workflows (and the hosting provider's status page). Accept the head without CI, or cancel?`;
     return [
       ...retireIfLive(run),
       {
@@ -1921,7 +1927,7 @@ function noCiYet(
         decision: {
           kind: "ci_failed",
           task: v.task,
-          question: `No CI run exists for ${head.slice(0, 12)} after ${Math.round((ev.waited_ms ?? 0) / 60_000)} min. Check the repository's workflows (and the hosting provider's status page). Accept the head without CI, or cancel?`,
+          question,
           ...(ev.report.kind === "ok" ? { pointers: { pr: ev.report.pr.url } } : {}),
           options: ["accept", "cancel"],
         },

@@ -2679,7 +2679,8 @@ branch-update step at that head at once (`stage_entered { rebase: true, conflict
 under the wave's `branch_update`), its `.volley/rebase.md` saying the PR conflicts; `why_waiting`
 reads `PR conflicts with <release>, updating`. Once the update's head is verified the pipeline
 goes on from where it stopped (the implementer's work still gets its reviews). An update step's
-own head that still conflicts waits like any head with no CI. `mergeable: UNKNOWN` (GitHub still
+own head that still conflicts waits like any head with no CI (past the grace the question says
+the PR still conflicts with the release branch). `mergeable: UNKNOWN` (GitHub still
 computing) counts as running: re-polled, no clock. The hold is visible: entering it (and
 every change of head or counts) journals `ci_pending { role, sha, checks: { done, total },
 next_poll_at, pr }`, the task's `why_waiting` reads `CI pending on <sha7> (n/m checks)` and its
