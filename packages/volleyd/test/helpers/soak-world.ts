@@ -462,7 +462,7 @@ export function soakWorld(o: SoakWorldOptions) {
     if (noun === "pr" && verb === "merge") {
       const pr = prs.find((p) => p.number === Number(rest[0]));
       if (pr === undefined || pr.state !== "OPEN")
-        return out("", 1, `GraphQL: Pull request is not open (mergePullRequest)`);
+        return out("", 1, "GraphQL: Pull request is not open (mergePullRequest)");
       if (rest.includes("--match-head-commit") && flag("--match-head-commit") !== pr.headRefOid)
         return out("", 1, HEAD_MOVED_STDERR);
       squash(pr);

@@ -53,8 +53,10 @@ export interface DaemonEnv {
   cleanup: () => Promise<void>;
 }
 
-export async function makeDaemonEnv(): Promise<DaemonEnv> {
-  const broker = await startTestBroker();
+export async function makeDaemonEnv(
+  o: { broker?: Parameters<typeof startTestBroker>[0] } = {},
+): Promise<DaemonEnv> {
+  const broker = await startTestBroker(o.broker);
   const home = tempDir("volleyd-home-");
   const daemons: Daemon[] = [];
   const options = (extra: Partial<DaemonOptions> = {}): DaemonOptions => ({

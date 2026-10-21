@@ -43,6 +43,16 @@ export interface FakeHost extends Host {
   found: string | null | Error;
   /** findWorkspace calls, in order. */
   finds: { name: string; candidate?: string }[];
+  /**
+   * A slow cmux: a launch that takes this long (per launch; 0: at once) starts the session
+   * (onLaunch runs, the workspace answers findWorkspace by its title) and then throws
+   * LAUNCH_FAILED `outcome: "unknown"`, as a cmux whose own timeout fired does (the #193 shape).
+   */
+  launchDelayMs: number | ((spec: LaunchSpec) => number);
+  /** A slow screen read: readScreen answers after this long (0: at once). */
+  readScreenDelayMs: number;
+  /** How the knobs above wait (default: real timers; a soak passes its fake clock's). */
+  sleep: (ms: number) => Promise<void>;
 }
 
 /**
@@ -67,6 +77,10 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     launchOutcome: "ok",
     found: null,
     finds: [],
+    launchDelayMs: 0,
+    readScreenDelayMs: 0,
+    // real process: a host's own latency, only when a test sets a delay knob without a clock.
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     async prepareWorktree(spec): Promise<WorktreeResult> {
       host.worktrees.push(spec);
       mkdirSync(spec.path, { recursive: true });
@@ -84,8 +98,12 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
         throw new SpawnError("LAUNCH_FAILED", "cmux refused", { outcome: "refused" });
       }
       const workspace = `workspace:${++n}`;
+      const delay =
+        typeof host.launchDelayMs === "function" ? host.launchDelayMs(spec) : host.launchDelayMs;
+      if (delay > 0) host.workspaceTitles[spec.name] = workspace;
       await host.onLaunch?.(spec, workspace);
-      if (host.launchOutcome === "unknown") {
+      if (delay > 0) await host.sleep(delay);
+      if (host.launchOutcome === "unknown" || delay > 0) {
         throw new SpawnError(
           "LAUNCH_FAILED",
           "cmux new-workspace failed: Error: Command timed out",
@@ -103,6 +121,7 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     },
     async readScreen(workspace, lines) {
       host.screenReads.push({ workspace, lines });
+      if (host.readScreenDelayMs > 0) await host.sleep(host.readScreenDelayMs);
       const s = host.screens.length > 1 ? host.screens.shift() : host.screens[0];
       return s ?? null;
     },
