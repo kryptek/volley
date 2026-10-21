@@ -329,7 +329,19 @@ describe("evaluate: the policy table, row by row", () => {
     expect(answerOf(evaluate({ ...d, task: null }, ctx({ task: undefined })))).toBe("acknowledged");
   });
 
-  for (const kind of ["ci_failed", "pr_closed", "remote_repo_missing", "merge_conflict"] as const) {
+  it("merge_conflict: a fresh rebase agent, under respawn_max per task/role, then the owner", () => {
+    const d = rec("merge_conflict", ["respawn", "manual", "cancel"], {
+      pipeline: { on: "merge_conflict", role: "rebase" },
+      agent_id: "w1-t1-rebase-1",
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("respawn");
+    expect("policy" in v && v.policy).toBe("merge_conflict/respawn");
+    expect("budget" in v && v.budget).toEqual({ key: "respawn_max:T1/rebase", used: 1, max: 1 });
+    expect(whyOf(evaluate(d, ctx({}, { "respawn_max:T1/rebase": 1 })))).toBe("budget_exhausted");
+  });
+
+  for (const kind of ["ci_failed", "pr_closed", "remote_repo_missing"] as const) {
     it(`${kind}: no_policy`, () => {
       expect(whyOf(evaluate(rec(kind, ["accept", "cancel"]), ctx()))).toBe("no_policy");
     });

@@ -30,6 +30,7 @@ Commands:
   resume      Resume a wave, or release the kill switch (--all)
   stop        Stop a wave and cancel its agents; --all is the kill switch
   steer       Send mailbox steering to a task's agent and report the ack
+  merge       Merge one gated task now, at its gated head (owner only)
   merged      Record a gated task merged outside GitHub's merge button (verified; owner only)
 
 Global flags (daemon/install/run/diff/status/config and the wave controls):
@@ -66,6 +67,7 @@ const COMMANDS: Record<string, () => Promise<Command>> = {
   resume: async () => (await import("./commands/resume")).resume,
   stop: async () => (await import("./commands/stop")).stop,
   steer: async () => (await import("./commands/steer")).steer,
+  merge: async () => (await import("./commands/merge")).merge,
   merged: async () => (await import("./commands/merged")).merged,
 };
 

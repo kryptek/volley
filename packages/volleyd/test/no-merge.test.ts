@@ -132,6 +132,7 @@ describe("volleyd merges only behind the fence", () => {
 
   it("merge: auto — the same pipeline merges exactly once, exactly the gated head, and nothing else", async () => {
     const H3 = await fullPipeline("auto");
+    await h.tick(); // the merge queue's turn
     expect(h.task()?.stage).toBe("done");
     h.elapse(60 * 60 * 1000);
     await h.tick();
