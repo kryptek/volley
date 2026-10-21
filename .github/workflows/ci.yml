@@ -114,6 +114,35 @@ jobs:
       - run: bun ../../scripts/check-tmp-leaks.ts -- bun test --timeout 15000
         working-directory: packages/volleyd
 
+  soak:
+    # The simulated soak (packages/volleyd/test/soak/): a whole wave through the real daemon with
+    # every injected fault, finishing with only stage_go and release_go asked. Slow by design: it is
+    # the autopilot epic's acceptance gate, not a fast check. A failure prints the journal tail and
+    # the open decisions; re-run it locally with the same SOAK_TASKS and SOAK_SEED.
+    name: Soak (simulated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - name: Soak, 8 tasks (gating)
+        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:soak
+        working-directory: packages/volleyd
+        env:
+          SOAK_TASKS: "8"
+      # Reported, not gating, until #269 (the merge_ready invariant opening its decision three
+      # times and spending rereview_max) is fixed: on some runs it leaves one task escalated. Drop
+      # continue-on-error then. Its own timeout (vitest allows 22 min) keeps a slow run inside the
+      # job's, so it cannot time out (and fail) the job the 8-task step gates.
+      - name: Soak, 32 tasks (reported until #269)
+        continue-on-error: true
+        timeout-minutes: 23
+        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:soak
+        working-directory: packages/volleyd
+
   react-bits:
     name: React Bits allow-list (volley-desk)
     runs-on: ubuntu-latest

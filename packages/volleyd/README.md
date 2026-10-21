@@ -3191,3 +3191,61 @@ await clock.advance(30_000);
 await daemon.tick();
 expect((await waits.event("w1", "spawn_failed", 2)).data).toMatchObject({ attempt: 2 });
 ```
+
+## Testing: the simulated soak
+
+`bun run test:soak` (its own `vitest.soak.config.ts`; CI's `soak` job) runs one whole wave
+unattended: `SOAK_TASKS` tasks (default 32) through the real `Daemon` on Aedes, autopilot on and
+merging automatically, on a fake clock, with the wave's own two-stage release playbook (the second
+stage owner-gated). Its acceptance: the wave reaches `releasing`, then `release_go`; every task is
+`done` with `merged_by_supervisor`; the flake's fixer merged and `remediation_closed` released
+every task it blocked; the only `decision_escalated` are `stage_go` and `release_go`
+(`owner_only`); no agent id was spawned twice and every retired agent's workspace was closed;
+`volleyd status` and the digest agree. The run must finish within 20 minutes of wall time (past
+that, the next step throws with the failure report). `bun
+run test` runs the soak's helper tests (`test/soak/soak-world.test.ts`,
+`test/soak/fake-agents.test.ts`: one task through every role, release train included), not the
+soak itself.
+
+The pieces, all under `test/`:
+
+- `helpers/soak-world.ts`: git and GitHub as a commit graph. Each commit is a tree (file → content
+  id) and its parents, so merge-bases, ancestry, diffs, cherry-pick marks and squash checks agree
+  with each other. PRs, a release branch whose tip moves on every `gh pr merge --squash`
+  (refused when `--match-head-commit` no longer matches), CI per head computed once, release-branch
+  runs, failed-run logs naming the failing test. The flake fails a seeded share of the heads that
+  do not touch its file, and the release branch, until a merged commit fixes the file.
+- `helpers/fake-agents.ts`: the fleet. Every launch on the fake host registers the way the MCP
+  server and the hooks do; on the next step it narrates, plays its role in the world (implementer:
+  pushes and opens the PR, the flake's fixer fixes the file; reviewers: the review result; fixup:
+  pushes; rebase: pushes the rebased head; release: the stage result) and publishes `done`.
+- `helpers/soak-env.ts`: the daemon, host, world, fleet and owner (a coordinator name), and
+  `step()`: the fleet acts, the daemon consumes it, 5 s of wave time pass, the daemon ticks.
+- `soak/scenario.ts`: the faults, as data picked from `SOAK_SEED`: the flake, one stalled
+  reviewer (nudged, then respawned), one failed implementer, one reviewer whose result does not
+  parse (steered, then respawned), the merge queue's first branch update hitting a conflict
+  (`merge_conflict` → `respawn`), two launches that outlast `spawn_timeout_s` while their agents
+  start (adopted, never relaunched), the owner's MCP server dropping and coming back under a new
+  agent id, slow screen reads, and (with `SOAK_MOVED_HEADS=2`) two PRs waiting in the merge
+  queue taking a release-only merge (`pr_head_moved` → `accept`). That last fault is off by
+  default until #269 and #271 are fixed: on some ticks the merge check races the gate's head
+  check and the accepted move ends in an escalation.
+
+Reading a failure: the test prints the journal's last 120 events, the open decisions (what is
+waiting and why), any error a step swallowed, and every argv the world did not know (a git read or
+a `gh` call it does not model answers empty and is named there). `SOAK_DUMP=<file>` also writes the whole
+journal there, one event per line; `SOAK_SEED=<n>` replays a run, `SOAK_TASKS=8` (the least
+the faults need) makes it quick:
+
+```sh
+cd packages/volleyd
+SOAK_TASKS=8 SOAK_SEED=3 SOAK_DUMP=soak.jsonl bun run test:soak
+```
+
+Known open: #269 (one merge_ready invariant breach opening three decisions and spending
+`rereview_max`) can leave one task of a 32-task run escalated. Until it is fixed, CI's `soak` job
+gates on an 8-task run (every fault but the moved heads) and runs the 32-task size after it as a
+reported, non-gating step.
+
+A bug the soak finds in the daemon is fixed in the daemon, under its own issue; the soak itself
+only changes when the harness (timing, the world's fidelity) is what is wrong.
