@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/wave-event.schema.json",
   "title": "Volley Wave Event",
-  "description": "Non-retained live mirror of one supervisor journal event, published to volley/_waves/<wave>/events. The envelope type is the journal event type. Event data is free-form except for the event types constrained below. See spec sections 4.6.3 and 4.6.15.",
+  "description": "Non-retained live mirror of one supervisor journal event, published to volley/_waves/<wave>/events. The envelope type is the journal event type. Event data is free-form except for the event types constrained below. See spec sections 4.6.3, 4.6.15 and 4.6.16.",
   "allOf": [
     { "$ref": "envelope.schema.json" },
     {
@@ -17,15 +17,21 @@
             "wave_resumed",
             "wave_stopped",
             "wave_complete",
+            "wave_archived",
             "owner_claimed",
+            "owner_reconnected",
             "task_queued",
             "task_admitted",
             "task_cancelled",
             "agent_spawned",
             "agent_registered",
             "agent_retired",
+            "agent_session_closed",
             "spawn_failed",
             "spawn_recovered",
+            "spawn_adopted",
+            "launch_orphan_closed",
+            "spawn_identity_burned",
             "verify_failed",
             "stage_entered",
             "artifact_verified",
@@ -62,6 +68,11 @@
             "ci_green",
             "pr_head_moved",
             "merged_by_operator",
+            "merged_by_supervisor",
+            "merge_queued",
+            "merge_dequeued",
+            "merge_started",
+            "merge_ended",
             "agent_force_retired",
             "alarm_cleared",
             "wave_account_moved",
@@ -76,7 +87,21 @@
             "merge_nudge_sent",
             "peer_doctor_run",
             "peer_drain_started",
-            "repo_visibility_detected"
+            "repo_visibility_detected",
+            "decision_auto_resolved",
+            "decision_escalated",
+            "release_started",
+            "release_stage_entered",
+            "release_stage_verified",
+            "release_stage_failed",
+            "release_stage_skipped",
+            "release_cancelled",
+            "release_done",
+            "inbox_opened",
+            "inbox_answered",
+            "remediation_requested",
+            "remediation_closed",
+            "digest_published"
           ]
         },
         "payload": {
@@ -94,7 +119,11 @@
               "description": "Journal sequence number, monotonic per wave."
             },
             "at": { "type": "string", "format": "date-time" },
-            "task": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+            "task": {
+              "type": "string",
+              "pattern": "^([A-Za-z0-9][A-Za-z0-9_-]{0,62}|_release)$",
+              "description": "A wave-file task id, or _release: the release train's pseudo task (spec section 4.6.19)."
+            },
             "data": { "type": "object", "description": "Event-type-specific detail." }
           }
         }
@@ -168,6 +197,62 @@
           }
         },
         {
+          "if": {
+            "properties": { "type": { "const": "owner_reconnected" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["owner", "agent_id", "previous_agent_id"],
+                    "properties": {
+                      "owner": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                      "agent_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                      "previous_agent_id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "wave_archived" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["by", "reason", "closed_decisions"],
+                    "properties": {
+                      "by": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Who archived the wave: the owner or caller, an admin, or the supervisor (auto-archive)."
+                      },
+                      "reason": { "type": "string" },
+                      "closed_decisions": {
+                        "type": "array",
+                        "items": { "$ref": "wave-state.schema.json#/$defs/decisionId" },
+                        "description": "The decisions the archive closed with answer archived (each journaled before as decision_resolved)."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
           "if": { "properties": { "type": { "const": "merge_nudge_sent" } }, "required": ["type"] },
           "then": {
             "properties": {
@@ -185,6 +270,250 @@
                         "type": "array",
                         "items": { "type": "string", "minLength": 1 },
                         "description": "The merged PR's files that overlap the task's; empty under nudge_on_merge: all."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "decision_auto_resolved" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": [
+                      "decision_id",
+                      "kind",
+                      "policy",
+                      "answer",
+                      "rationale",
+                      "evidence"
+                    ],
+                    "properties": {
+                      "decision_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                      "kind": { "type": "string", "minLength": 1 },
+                      "policy": { "type": "string", "minLength": 1 },
+                      "answer": { "type": "string", "minLength": 1 },
+                      "rationale": { "type": "string" },
+                      "evidence": { "type": "object" },
+                      "budget": {
+                        "type": "object",
+                        "required": ["key", "used", "max"],
+                        "properties": {
+                          "key": { "type": "string", "minLength": 1 },
+                          "used": { "type": "number", "minimum": 0 },
+                          "max": { "type": "number", "minimum": 0 }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "decision_escalated" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["decision_id", "kind", "why"],
+                    "properties": {
+                      "decision_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                      "kind": { "type": "string", "minLength": 1 },
+                      "why": {
+                        "enum": ["owner_only", "no_policy", "budget_exhausted", "unattended_safety"]
+                      },
+                      "budget": {
+                        "type": "object",
+                        "required": ["key", "used", "max"],
+                        "properties": {
+                          "key": { "type": "string", "minLength": 1 },
+                          "used": { "type": "number", "minimum": 0 },
+                          "max": { "type": "number", "minimum": 0 }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "inbox_answered" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["id", "kind", "answer", "by", "where", "version"],
+                    "properties": {
+                      "id": { "type": "string", "pattern": "^[dphr]-[A-Za-z0-9_-]{1,200}$" },
+                      "kind": { "enum": ["decision", "picker", "handoff", "release"] },
+                      "answer": { "type": "string", "minLength": 1 },
+                      "by": { "type": "string", "minLength": 1 },
+                      "where": { "$ref": "inbox-item.schema.json#/$defs/where" },
+                      "version": { "type": "integer", "minimum": 2 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "remediation_requested" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["kind", "test", "test_file", "head", "run_urls", "for"],
+                    "properties": {
+                      "kind": {
+                        "enum": ["fix_flake"],
+                        "description": "fix_flake: a red head's failing test the PR does not touch (spec section 4.6.16); a dedicated fixer is requested, never a re-run."
+                      },
+                      "test": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The failing test id the fixer is for (its dedupe key)."
+                      },
+                      "test_file": {
+                        "type": ["string", "null"],
+                        "description": "The test's file, null when its id names none."
+                      },
+                      "tests": { "type": "array", "items": { "type": "string" } },
+                      "head": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+                      "run_urls": { "type": "array", "items": { "type": "string" } },
+                      "for": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$",
+                        "description": "The task whose red head it is."
+                      },
+                      "role": { "type": "string" },
+                      "release_ci": { "enum": ["green", "red", "running", "none", "unknown"] }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": { "const": "task_queued" },
+              "payload": {
+                "properties": { "data": { "required": ["synthetic"] } },
+                "required": ["data"]
+              }
+            },
+            "required": ["type", "payload"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "task": {
+                    "type": "string",
+                    "pattern": "^fix-[a-z0-9-]{1,50}$",
+                    "description": "A flake's fixer: fix-<slug of its test> (spec section 4.6.16)."
+                  },
+                  "data": {
+                    "type": "object",
+                    "required": ["issue", "synthetic", "title", "remediation"],
+                    "description": "A synthetic task (spec section 4.6.16): added by the supervisor, never by a wave file; issue 0, the wave's pipeline, no after.",
+                    "properties": {
+                      "issue": { "const": 0 },
+                      "synthetic": { "const": true },
+                      "title": { "type": "string", "minLength": 1 },
+                      "remediation": { "$ref": "wave-state.schema.json#/$defs/fixerRemediation" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "remediation_closed" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["kind", "test", "task", "outcome", "released"],
+                    "description": "A flake's fixer settled (spec section 4.6.16): landed (done: merged) releases the tasks still parked on its test, which update from the release branch and are verified again; failed (cancelled, blocked, escalated) puts each blocked task's red head back to the owner, escalated unattended_safety.",
+                    "properties": {
+                      "kind": { "enum": ["fix_flake"] },
+                      "test": { "type": "string", "minLength": 1 },
+                      "task": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+                      "outcome": { "enum": ["landed", "failed"] },
+                      "why": { "type": "string", "minLength": 1 },
+                      "released": {
+                        "type": "array",
+                        "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" }
+                      }
+                    },
+                    "if": { "properties": { "outcome": { "const": "failed" } } },
+                    "then": { "required": ["why"], "properties": { "released": { "maxItems": 0 } } }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "digest_published" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["trigger"],
+                    "description": "The supervisor published the wave's digest on volley/_waves/<wave>/digest and pushed its one-line summary (spec section 4.6.16).",
+                    "properties": {
+                      "trigger": {
+                        "enum": ["wave_complete", "release_go", "escalation", "stopped"]
                       }
                     }
                   }

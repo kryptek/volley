@@ -78,6 +78,51 @@ function envelopePayload(type: string): string {
   );
 }
 
+/** volleyd's morning digest push (SPEC §4.6.16): a `progress` envelope of type `digest`. */
+const digestPayload = JSON.stringify(
+  buildEnvelope({
+    agentId: "volleyd",
+    parentId: null,
+    channel: "progress",
+    type: "digest",
+    payload: { msg: "w1 complete: 2 shipped", wave: "w1", trigger: "wave_complete" },
+  }),
+);
+
+/** Run notify with a spy bell, deliver one digest push, return how often the bell fired. */
+async function bellsForDigest(argv: string[]): Promise<number> {
+  const handle = makeFakeBroker();
+  const bell = spySurface("bell");
+  let resolveShutdown: () => void = () => {};
+  const shutdownSignal = new Promise<void>((resolve) => {
+    resolveShutdown = resolve;
+  });
+  const running = notify({
+    argv: ["--pattern", "volley/+/volleyd/progress", ...argv],
+    env: {},
+    io: makeBufferIO(),
+    surfaceFactories: { bell: () => bell.surface },
+    connectFn: handle.connectFn,
+    shutdownSignal,
+  });
+  const onMessage = await handle.whenSubscribed;
+  onMessage({ topic: "volley/default/volleyd/progress", payload: digestPayload });
+  await new Promise((r) => setTimeout(r, 10));
+  resolveShutdown();
+  expect(await running).toBe(0);
+  return bell.calls.length;
+}
+
+describe("volley notify — the digest push", () => {
+  it("a digest envelope rings by default", async () => {
+    expect(await bellsForDigest([])).toBe(1);
+  });
+
+  it("--on blocked leaves it out", async () => {
+    expect(await bellsForDigest(["--on", "blocked"])).toBe(0);
+  });
+});
+
 describe("volley notify — argv + validation", () => {
   it("exits 2 with a --pattern hint when --pattern is missing", async () => {
     const io = makeBufferIO();
@@ -124,7 +169,9 @@ describe("volley notify — argv + validation", () => {
       connectFn: refusingConnectFn,
     });
     expect(code).toBe(2);
-    expect(io.readStderr()).toContain("spawning,working,done,blocked,failed,reaped,registered");
+    expect(io.readStderr()).toContain(
+      "spawning,working,done,blocked,failed,reaped,registered,digest",
+    );
   });
 
   it("exits 2 when --surface webhook is selected but no --webhook-url is provided", async () => {

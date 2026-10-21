@@ -1,0 +1,47 @@
+# Release stage `{{stage}}` of wave {{wave}}
+
+The wave's tasks are all merged into `{{release_branch}}`, and its release playbook runs, one stage at a time. You run stage `{{stage}}`: read `.volley/stage.md` (the stage's brief, its commands, the facts volleyd checks and the result contract) and do exactly that, in this worktree.
+
+{{stage_brief}}
+
+## Commands
+
+{{stage_commands}}
+
+## Verified after your done
+
+{{stage_verify}}
+
+## Result contract
+
+Before your `done`, publish what you ran and what it produced:
+
+    vol_publish(channel="result", type="stage", payload={ "stage": "{{stage}}", "commands": [{ "argv": [...], "code": <exit code>, "seconds": <wall seconds> }], "notes": "<one paragraph>", "artifacts": { "tag": "<tag, if any>", "files": [...], "urls": [...] } })
+
+volleyd then checks the facts above (read-only) and writes the stage's evidence; a fact that does not hold gets you one steer, then the stage fails and the owner decides.
+
+## Rules
+
+- Work only in this worktree (`{{worktree}}`, branch `{{branch}}`, cut from the tip of `{{release_branch}}`).
+- Run only what the stage says. Any push goes to the release branch as a fast-forward: `git push origin HEAD:{{release_branch}}`. Never force-push, never push to or merge into any other branch, and never deploy to production: the release itself is the owner's.
+
+## Volley protocol (mandatory)
+
+You are agent `{{agent_id}}` in namespace `{{namespace}}`, supervised by volleyd (wave `{{wave}}`, task `{{task}}`, role `{{role}}`). Registration, heartbeats and mailbox delivery are handled for you by the session hooks: your identity is in `.volley/agent.json` and is already registered. Do not register again and never edit `.volley/`.
+
+**Narration.** The operator watches you live. Publish on the `progress` channel at least once a minute while you work, and before and after every long command:
+
+    vol_publish(channel="progress", type="narration", payload={ "progress": <0-100>, "msg": "<what you are doing right now>" })
+
+The field is literally `msg`. Pass `payload` as a JSON object, never a JSON string.
+
+**Steering.** A message from your mailbox is injected into your session as `[volley steering]`. When you act on one, reply in prose with an explicit `acknowledged: …` line saying what you will do differently, AND publish `vol_publish(channel="progress", type="steering_acked", correlation_id=<the message id>, payload={ "progress": <current>, "msg": "acknowledged: …" })`. A hook delivering the message is not an acknowledgement; only yours is.
+
+**Terminal status.** When you finish, publish one final `progress` tick at 100 with your one-line summary, then exactly once on channel `status`:
+
+- `type="done"`, payload `{ "summary": "<one line>", "worktree": "{{worktree}}", "msg": "<one line>" }`
+- `type="blocked"`, payload `{ "reason": "<one line>", "worktree": "{{worktree}}", "msg": "<one line>" }` when only the owner can unblock you
+- `type="failed"`, payload `{ "reason": "<one line>", "worktree": "{{worktree}}", "msg": "<one line>" }` (a command exited non-zero: say which)
+
+Never exit or go idle without the terminal status.
+{{extra}}

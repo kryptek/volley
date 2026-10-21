@@ -38,7 +38,19 @@ const MAX_ID = 63;
  * hash, so it stays unique and recognisable.
  */
 export function agentIdFor(wave: string, task: string, role: string, attempt: number): string {
-  const tail = `-${task}-${role}-${attempt}`.toLowerCase();
+  return idWithTail(wave, `-${task}-${role}-${attempt}`, task);
+}
+
+/**
+ * A release stage's agent (SPEC §4.6.19): `<wave>-release-<stage>-<attempt>` (stage names are
+ * agent-id-shaped), shortened like `agentIdFor`.
+ */
+export function releaseAgentId(wave: string, stage: string, attempt: number): string {
+  return idWithTail(wave, `-release-${stage}-${attempt}`, `release stage ${stage}`);
+}
+
+function idWithTail(wave: string, rawTail: string, what: string): string {
+  const tail = rawTail.toLowerCase();
   let id = `${wave}${tail}`.toLowerCase();
   if (id.length > MAX_ID) {
     const hash = createHash("sha256").update(id).digest("hex").slice(0, 6);
@@ -46,7 +58,7 @@ export function agentIdFor(wave: string, task: string, role: string, attempt: nu
     id = `${wave.slice(0, room)}-${hash}${tail}`.toLowerCase();
   }
   if (!isValidAgentId(id)) {
-    throw new SpawnError("CREDENTIALS_FAILED", `cannot form an agent id from ${wave}/${task}`, {
+    throw new SpawnError("CREDENTIALS_FAILED", `cannot form an agent id from ${wave}/${what}`, {
       agent_id: id,
     });
   }

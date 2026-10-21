@@ -14,6 +14,7 @@ describe("cli", () => {
     expect(r.stderr).toContain("sub");
     expect(r.stderr).toContain("wait");
     expect(r.stderr).toContain("list");
+    expect(r.stderr).toMatch(/^ {2}deploy {3}Deploy a release tag/m);
     expect(r.stdout).toBe("");
   });
 
@@ -47,6 +48,7 @@ describe("cli", () => {
   it("the CHANGELOG's newest section and bun.lock's workspaces carry that version", () => {
     const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
     const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf-8");
+    // Unreleased changes wait as fragments in changes/; `bun run changelog` writes the section.
     expect(changelog.match(/^## (\S+)/m)?.[1]).toBe(pkg.version);
     const lock = readFileSync(join(root, "bun.lock"), "utf-8");
     const workspaces = [

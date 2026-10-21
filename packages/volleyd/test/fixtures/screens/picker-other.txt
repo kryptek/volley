@@ -1,0 +1,16 @@
+❯ Use the AskUserQuestion tool exactly once to ask me "Pick a color" with header "Color", single-select, options: Red
+  (description: warm), Blue (description: cool). Do nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Color
+
+Pick a color
+
+  1. Red
+     warm
+  2. Blue
+     cool
+❯ 3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel

@@ -1,0 +1,25 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-21T07:00:00.000Z",
+  "channel": "_waves/digest",
+  "type": "digest",
+  "payload": {
+    "wave": "2026-10-20-example",
+    "release_branch": "release/2026-10-20-example",
+    "generated_at": "2026-10-21T07:00:00.000Z",
+    "trigger": "wave_complete",
+    "shipped": [
+      {
+        "task": "T1",
+        "issue": 101,
+        "pr": { "number": 210, "url": "https://github.com/example-org/example-repo/pull/210" },
+        "merge_sha": null,
+        "merged_by": "somebody"
+      }
+    ],
+    "auto": { "decisions_resolved": 0, "flakes_fixed": [], "conflicts_resolved": 0, "retries": 0, "merges": 0 },
+    "waiting": [],
+    "failures": []
+  }
+}

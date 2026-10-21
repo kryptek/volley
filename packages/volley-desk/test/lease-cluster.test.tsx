@@ -52,6 +52,54 @@ describe("Supervisor › Lease pools", () => {
     expect(pool.getByRole("group", { name: "(unknown host)" })).toBeInTheDocument();
   });
 
+  it("shows each host's held count against the cap in force there (override, else per_machine)", () => {
+    const jsSuite: LeasePoolPayload = {
+      pool: "js-suite",
+      capacity: 4,
+      per_machine: 2,
+      per_machine_overrides: { "box-a": 3, laptop: 1, "box-c": 0 },
+      held: [
+        { lease_id: "j-1", holder: "impl-1", host: "box-a", since: at, ttl_s: 600 },
+        { lease_id: "j-2", holder: "impl-2", host: "box-a", since: at, ttl_s: 600 },
+        { lease_id: "j-3", holder: "impl-3", host: "laptop", since: at, ttl_s: 600 },
+        { lease_id: "j-4", holder: "impl-4", host: "box-b", since: at, ttl_s: 600 },
+        { lease_id: "j-5", holder: "hand-1", host: null, since: at, ttl_s: 600 },
+      ],
+      queue: [],
+      reasons: [],
+    };
+    render(<LeasePools leases={{ "js-suite": jsSuite }} />);
+    const pool = within(screen.getByRole("article", { name: "js-suite" }));
+    // An overridden machine shows even before it holds anything.
+    const hosts = pool.getAllByRole("group").map((g) => g.getAttribute("aria-label"));
+    expect(hosts).toEqual(["box-a", "box-b", "box-c", "laptop", "(unknown host)"]);
+    const count = (host: string) =>
+      pool.getByRole("group", { name: host }).querySelector(".lease-host-count")?.textContent;
+    expect(count("box-a")).toBe("2/3");
+    expect(count("box-b")).toBe("1/2");
+    expect(count("box-c")).toBe("0/0");
+    expect(count("laptop")).toBe("1/1");
+    // No cap applies to a holder volleyd did not place.
+    expect(count("(unknown host)")).toBe("1");
+  });
+
+  it("a host with no cap in force (no per_machine, no override) shows only its held count", () => {
+    const pool: LeasePoolPayload = {
+      pool: "build",
+      capacity: 3,
+      per_machine_overrides: { laptop: 1 },
+      held: [{ lease_id: "b-1", holder: "impl-1", host: "box-a", since: at, ttl_s: 600 }],
+      queue: [],
+      reasons: [],
+    };
+    render(<LeasePools leases={{ build: pool }} />);
+    const card = within(screen.getByRole("article", { name: "build" }));
+    const count = (host: string) =>
+      card.getByRole("group", { name: host }).querySelector(".lease-host-count")?.textContent;
+    expect(count("box-a")).toBe("1");
+    expect(count("laptop")).toBe("0/1");
+  });
+
   it("Settings › Supervisor shows the card above the config rows when pools exist", () => {
     render(<Supervisor config={null} transport={null} leases={{ "backend-it": backendIt }} />);
     expect(screen.getByRole("heading", { name: "Lease pools" })).toBeInTheDocument();

@@ -16,7 +16,14 @@ import { SpawnError } from "../spawn-error";
 import { withTrust } from "../trust";
 import type { RemoteHostConfig } from "../types";
 import { EXCLUDE_LINES, firstLine, freshBaseFix } from "../worktree";
-import type { Host, LaunchSpec, TypedTextTokens, WorktreeResult, WorktreeSpec } from "./host";
+import type {
+  Host,
+  LaunchSpec,
+  SessionEnd,
+  TypedTextTokens,
+  WorktreeResult,
+  WorktreeSpec,
+} from "./host";
 
 /** A remote host with every key resolved (config `hosts.<name>` ← the task's inline `host:`). */
 export interface RemoteHostSpec {
@@ -105,7 +112,7 @@ export interface RemoteHost extends Host {
 /** The fence tokens and bound a `run` may carry. */
 export type RemoteRunOptions = Pick<
   ExecOptions,
-  "consent" | "timeoutMs" | "launch" | "modelSwitch" | "signin"
+  "consent" | "timeoutMs" | "launch" | "modelSwitch" | "signin" | "picker" | "handoff"
 >;
 
 /** ssh's own failure (unreachable, auth, host key, timeout), as opposed to the remote command's. */
@@ -183,6 +190,8 @@ export class SshTmuxHost implements RemoteHost {
         ...(opts.consent !== undefined ? { consent: opts.consent } : {}),
         ...(opts.launch !== undefined ? { launch: opts.launch } : {}),
         ...(opts.modelSwitch !== undefined ? { modelSwitch: opts.modelSwitch } : {}),
+        ...(opts.picker !== undefined ? { picker: opts.picker } : {}),
+        ...(opts.handoff !== undefined ? { handoff: opts.handoff } : {}),
         ...(opts.signin !== undefined ? { signin: opts.signin } : {}),
       },
     );
@@ -223,6 +232,53 @@ export class SshTmuxHost implements RemoteHost {
     return r;
   }
 
+  /** A worktree at an exact commit: detached (a reviewer) or on a new branch (a fixup). */
+  private async worktreeAtCommit(
+    spec: WorktreeSpec,
+    fetchError: string | null,
+  ): Promise<WorktreeResult> {
+    const git = (...args: string[]) => this.run([{ argv: ["git", ...args] }]);
+    if (fetchError !== null) {
+      const has = await git(
+        "-C",
+        spec.repo,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        `${spec.base}^{commit}`,
+      );
+      if (has.code !== 0) {
+        throw new SpawnError(
+          "WORKTREE_FAILED",
+          `git fetch origin ${spec.base} failed on ${this.spec.target}: ${fetchError}`,
+          { host: this.name, repo: spec.repo },
+        );
+      }
+    }
+    const add = await git(
+      "-C",
+      spec.repo,
+      "worktree",
+      "add",
+      ...(spec.detach === true
+        ? ["--detach", spec.path, spec.base]
+        : ["--no-track", spec.path, "-b", spec.branch, spec.base]),
+    );
+    if (add.code !== 0) {
+      throw new SpawnError(
+        "WORKTREE_FAILED",
+        `git worktree add failed on ${this.spec.target}: ${add.stderr.trim()}`,
+        { host: this.name, path: spec.path, branch: spec.branch },
+      );
+    }
+    await this.excludeVolleyFiles(spec.repo);
+    return {
+      path: spec.path,
+      branch: spec.detach === true ? `HEAD (detached at ${spec.base})` : spec.branch,
+      reused: false,
+    };
+  }
+
   async prepareWorktree(spec: WorktreeSpec): Promise<WorktreeResult> {
     const git = (...args: string[]) => this.run([{ argv: ["git", ...args] }]);
     const inside = await git("-C", spec.path, "rev-parse", "--is-inside-work-tree");
@@ -238,6 +294,9 @@ export class SshTmuxHost implements RemoteHost {
     // for a start ref (a reviewer's head), it is a plain worktree failure, as it always was.
     const fetch = await git("-C", spec.repo, "fetch", "--quiet", "origin", spec.base);
     const fetchError = fetch.code === 0 ? null : firstLine(fetch.stderr, `exit ${fetch.code}`);
+    // A start commit (a reviewer's or fixup's PR head, by sha) is used as it is, like on this
+    // machine: never `origin/<sha>`. The box may already hold it (its own agent pushed it).
+    if (isCommitSha(spec.base)) return this.worktreeAtCommit(spec, fetchError);
     if (fetchError !== null && spec.releaseBase !== true) {
       throw new SpawnError(
         "WORKTREE_FAILED",
@@ -340,28 +399,56 @@ export class SshTmuxHost implements RemoteHost {
     );
   }
 
-  async launch(spec: LaunchSpec): Promise<{ workspace: string }> {
+  /** The launch chain: each launch starts after the one before it settles. */
+  private launches: Promise<unknown> = Promise.resolve();
+
+  /** Open a tmux session. Serialized: one `new-session` in flight at a time on this host. */
+  launch(spec: LaunchSpec): Promise<{ workspace: string }> {
+    const run = this.launches.then(() => this.launchNow(spec));
+    this.launches = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * A failed launch's `detail.outcome` is `unknown` when `new-session` was sent and ssh failed
+   * (the command may have run), else `refused`; `detail.candidate` is the session name tried.
+   */
+  private async launchNow(spec: LaunchSpec): Promise<{ workspace: string }> {
     const fail = (msg: string, detail: Record<string, unknown> = {}) =>
-      new SpawnError("LAUNCH_FAILED", msg, { host: this.name, ...detail });
+      new SpawnError("LAUNCH_FAILED", msg, { host: this.name, outcome: "refused", ...detail });
     if (spec.command.trim() !== TMUX_LAUNCH_COMMAND) {
       throw fail(`a remote session runs only '${TMUX_LAUNCH_COMMAND}'`);
     }
     const session = await this.freeSession(sessionName(spec.name)).catch((e: unknown) => {
-      throw fail(`tmux on ${this.spec.target}: ${e instanceof Error ? e.message : String(e)}`);
+      throw fail(`tmux on ${this.spec.target}: ${e instanceof Error ? e.message : String(e)}`, {
+        candidate: sessionName(spec.name),
+      });
     });
     await this.syncTmuxPath();
     const r = await this.run(
       [{ argv: ["tmux", "new-session", "-d", "-s", session, "-c", spec.cwd, TMUX_LAUNCH_COMMAND] }],
       spec.launch !== undefined ? { launch: spec.launch } : {},
     ).catch((e: unknown) => {
-      throw fail(`tmux new-session: ${e instanceof Error ? e.message : String(e)}`);
+      throw fail(`tmux new-session: ${e instanceof Error ? e.message : String(e)}`, {
+        candidate: session,
+        outcome: "unknown",
+      });
     });
     if (r.code !== 0) {
-      throw fail(`tmux new-session failed on ${this.spec.target}: ${r.stderr.trim()}`, {
-        exit: r.code,
-      });
+      const lost = transportFailed(r);
+      throw fail(
+        `tmux new-session failed on ${this.spec.target}: ${lost && r.timedOut ? "timed out" : r.stderr.trim()}`,
+        { exit: r.code, candidate: session, outcome: lost ? "unknown" : "refused" },
+      );
     }
     return { workspace: session };
+  }
+
+  async findWorkspace(name: string, candidate?: string): Promise<string | null> {
+    const session = candidate ?? sessionName(name);
+    const r = await this.run([{ argv: ["tmux", "has-session", "-t", `=${session}`] }]);
+    if (transportFailed(r)) throw this.sshFailed("has-session", r);
+    return r.code === 0 ? session : null;
   }
 
   /**
@@ -391,11 +478,16 @@ export class SshTmuxHost implements RemoteHost {
     );
   }
 
-  /** `base`, or `base-2`, `base-3`, … — the first name no tmux session has. */
+  /**
+   * `base`, or `base-2`, `base-3`, … — the first name no tmux session has. A fallback can equal
+   * a later attempt's base (`w1-T1-role-2` is also attempt 2's `sessionName`); that is harmless,
+   * since a reconcile looks up the exact candidate the launch tried, not the base.
+   */
   private async freeSession(base: string): Promise<string> {
     for (let i = 1; i <= DAEMON_DEFAULTS.tmux_session_attempts; i++) {
       const name = i === 1 ? base : `${base}-${i}`;
       const r = await this.run([{ argv: ["tmux", "has-session", "-t", `=${name}`] }]);
+      if (transportFailed(r)) throw this.sshFailed("has-session", r);
       if (r.code !== 0) return name;
     }
     throw new Error(`no free session name for ${base}`);
@@ -413,8 +505,8 @@ export class SshTmuxHost implements RemoteHost {
     return rows.slice(-lines).join("\n");
   }
 
-  async sendKeys(workspace: string, key: string): Promise<void> {
-    await this.run([{ argv: ["tmux", "send-keys", "-t", pane(workspace), key] }]);
+  async sendKeys(workspace: string, key: string, tokens: TypedTextTokens = {}): Promise<void> {
+    await this.run([{ argv: ["tmux", "send-keys", "-t", pane(workspace), key] }], tokens);
   }
 
   async sendText(workspace: string, text: string, tokens: TypedTextTokens = {}): Promise<void> {
@@ -426,6 +518,22 @@ export class SshTmuxHost implements RemoteHost {
 
   async close(workspace: string, consent: ConsentToken): Promise<void> {
     await this.run([{ argv: ["tmux", "kill-session", "-t", `=${workspace}`] }], { consent });
+  }
+
+  /** `kill-session`: tmux ends the pane's process group, so no process is signalled here. */
+  async endSession(
+    workspace: string | null,
+    _worktree: string | null,
+    consent: ConsentToken,
+  ): Promise<SessionEnd> {
+    if (workspace === null) return { closed: false, pids: [], how: "none" };
+    const closed = await this.run([{ argv: ["tmux", "kill-session", "-t", `=${workspace}`] }], {
+      consent,
+    }).then(
+      (r) => r.code === 0 && !r.timedOut,
+      () => false,
+    );
+    return { closed, pids: [], how: closed ? "kill-session" : "none" };
   }
 
   /** A transient refusal for an ssh failure: the spawn backs off, no decision is opened. */
@@ -575,3 +683,8 @@ export function sessionName(title: string): string {
 
 /** The session's current pane, matched exactly (`=` stops tmux's prefix matching). */
 const pane = (session: string) => `=${session}:`;
+
+/** A full commit id (what a reviewer or fixup starts from), not a branch name. */
+function isCommitSha(ref: string): boolean {
+  return /^[0-9a-f]{40}$/.test(ref);
+}

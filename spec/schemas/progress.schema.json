@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/progress.schema.json",
   "title": "Volley Progress Channel Message",
-  "description": "Fire-and-forget progress event published on the progress channel. See spec section 4. The type stays an open string; the hook activity types (heartbeat, idle, awaiting_input, resumed, activity; steering_applied is reserved, the reference hooks never publish it) and steering_acked are documented in spec section 4.3.",
+  "description": "Fire-and-forget progress event published on the progress channel. See spec section 4. The type stays an open string; the hook activity types (heartbeat, idle, awaiting_input, resumed, activity, picker_opened, picker_answered; steering_applied is reserved, the reference hooks never publish it) and steering_acked are documented in spec section 4.3.",
   "allOf": [
     { "$ref": "envelope.schema.json" },
     {
@@ -12,13 +12,15 @@
         "type": {
           "type": "string",
           "minLength": 1,
-          "description": "Free-form progress event tag (e.g. tests-green, mvn-verify-done, diff-ready). Documented types: heartbeat, idle, awaiting_input, resumed, activity (hook activity, payload.source = harness-hook; steering_applied is reserved and never published by the reference hooks) and steering_acked (correlation_id names the acknowledged mailbox message).",
+          "description": "Free-form progress event tag (e.g. tests-green, mvn-verify-done, diff-ready). Documented types: heartbeat, idle, awaiting_input, resumed, activity, picker_opened, picker_answered (hook activity, payload.source = harness-hook; steering_applied is reserved and never published by the reference hooks) and steering_acked (correlation_id names the acknowledged mailbox message).",
           "examples": [
             "tests-green",
             "heartbeat",
             "idle",
             "awaiting_input",
             "resumed",
+            "picker_opened",
+            "picker_answered",
             "steering_applied",
             "steering_acked"
           ]
@@ -82,6 +84,41 @@
             "workspace": {
               "type": "string",
               "description": "awaiting_input: terminal workspace hosting the session, when known."
+            },
+            "tool_use_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "picker_opened / picker_answered: the harness's id of the picker's tool call."
+            },
+            "questions": {
+              "type": "array",
+              "minItems": 1,
+              "description": "picker_opened: the picker's questions, as the tool input has them (spec section 4.3).",
+              "items": {
+                "type": "object",
+                "required": ["question", "options"],
+                "properties": {
+                  "question": { "type": "string", "minLength": 1 },
+                  "header": { "type": "string" },
+                  "options": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["label"],
+                      "properties": {
+                        "label": { "type": "string", "minLength": 1 },
+                        "description": { "type": "string" }
+                      }
+                    }
+                  },
+                  "multiSelect": { "type": "boolean" }
+                }
+              }
+            },
+            "answers": {
+              "type": "object",
+              "additionalProperties": { "type": "string" },
+              "description": "picker_answered: question → answer, as the harness reports it (a multi-select's labels joined with ', ')."
             },
             "tool_calls": {
               "type": "integer",

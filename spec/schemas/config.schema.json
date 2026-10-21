@@ -288,6 +288,11 @@
           "default": true,
           "description": "Before cutting an agent's worktree on any host, the supervisor fetches the release branch there; true: a fetch that fails fails the spawn, so no agent starts on a stale base (spec section 4.6.15). false: the host's last fetched copy is used. Optional in the retained payload: a supervisor that predates it omits it."
         },
+        "retire_close_session": {
+          "type": "boolean",
+          "default": true,
+          "description": "true: retiring an agent also ends its session (its workspace closed, its claude process stopped on the supervisor's own machine), journaled agent_session_closed (spec section 4.6.4). false: finished sessions stay open for inspection. Optional in the retained payload: a supervisor that predates it omits it."
+        },
         "placement": {
           "type": "object",
           "additionalProperties": false,
@@ -373,6 +378,18 @@
             }
           }
         },
+        "archive_ended_after_h": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8760,
+          "default": 24,
+          "description": "Hours after its wave_stopped or wave_complete that the supervisor archives an ended wave (spec section 4.6.20); 0: never. Optional in the retained payload: a supervisor that predates it omits it."
+        },
+        "archive_on_ack": {
+          "type": "boolean",
+          "default": true,
+          "description": "true: a complete wave is archived as soon as its wave_complete decision is answered (spec section 4.6.20). Optional in the retained payload: a supervisor that predates it omits it."
+        },
         "fleet": {
           "type": "object",
           "additionalProperties": false,
@@ -389,6 +406,184 @@
               ],
               "default": null,
               "description": "The name the supervisor's own machine record is published under (volley/_system/machines/<name>); null: derived from the machine's host name (spec section 4.6.15). Never a hosts.<name> key. The retained effective config carries the resolved name, never null."
+            },
+            "local_agents": {
+              "oneOf": [{ "enum": ["always", "fallback", "never"] }, { "type": "null" }],
+              "default": null,
+              "description": "How the supervisor's own machine takes auto-placed tasks (spec section 4.6.15). always: a candidate like any peer. fallback: only while no paired machine is eligible, under fleet.fallback. never: not a candidate (a task pinned to local still runs there). null: fallback when any hosts.<name> is configured, else always; the retained effective config carries the resolved value. A value chosen in the Desk is set explicitly; volleyd config set fleet.local_agents null derives it again."
+            },
+            "fallback": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "The profile the supervisor's own machine runs under while it is the fallback (local_agents: fallback, no paired machine eligible; spec section 4.6.15).",
+              "properties": {
+                "max_agents": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100,
+                  "default": 3,
+                  "description": "Under local_agents: fallback, the most supervised agents the supervisor's own machine runs while it is the fallback; hard_ceiling still caps the total."
+                },
+                "per_machine": {
+                  "type": "object",
+                  "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                  "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 64 },
+                  "description": "Per heavy pool, the leases holders on the supervisor's own machine may hold while it is the fallback; a pool not named here gets 1 when it has a per-machine cap there (per_machine or a per_machine_overrides entry). 0 keeps heavy tasks off it. The Desk offers a row for each pool that sets per_machine; name any other pool in config.yaml."
+                }
+              }
+            }
+          }
+        },
+        "autopilot": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Decisions the supervisor answers itself from its policy table, and its remediation budgets (spec section 4.6.16), and who merges a gated PR (spec section 4.6.17). Each maximum counts automatic answers per wave under one budget key. Optional in the retained payload: a supervisor that predates it omits it.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "false: every decision waits for the owner, as before autopilot; takes effect at the next decision."
+            },
+            "owner_only": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "reviewers_disagree",
+                  "merge_conflict",
+                  "agent_blocked",
+                  "agent_question",
+                  "agent_stalled",
+                  "unknown_screen",
+                  "hooks_auth_failed",
+                  "mcp_not_registered",
+                  "spawn_failed",
+                  "model_switch",
+                  "repo_untrusted",
+                  "remote_repo_missing",
+                  "ci_failed",
+                  "wave_complete",
+                  "plan_change",
+                  "pr_closed",
+                  "pr_head_moved",
+                  "spawn_budget_exhausted",
+                  "account_limit",
+                  "machine_down",
+                  "merge_refused",
+                  "release_go",
+                  "stage_go"
+                ]
+              },
+              "default": [
+                "plan_change",
+                "repo_untrusted",
+                "model_switch",
+                "release_go",
+                "stage_go"
+              ],
+              "description": "Decision kinds the supervisor never answers itself: it escalates them to the owner (owner_only)."
+            },
+            "relaunch_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 1,
+              "description": "Automatic relaunches of one task's role after a bad launch (hooks_auth_failed, mcp_not_registered, unknown_screen)."
+            },
+            "nudge_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 1,
+              "description": "Automatic extra nudges of one stalled run (agent_stalled)."
+            },
+            "respawn_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 1,
+              "description": "Automatic respawns of one task's role (agent_blocked, agent_stalled)."
+            },
+            "rereview_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 2,
+              "description": "Automatic re-reviews of one task (pr_head_moved, a stale review at the gate)."
+            },
+            "ci_fixup_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 2,
+              "description": "Automatic CI fixups of one task (ci_failed on the change's own head answered fixup)."
+            },
+            "question_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 1,
+              "description": "Agent questions answered automatically for one run (agent_question)."
+            },
+            "budget_raise_max": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 2,
+              "description": "spawn_budget_exhausted: automatic raise by <n> answers may take the wave's spawn budget up to this multiple of its derived budget."
+            },
+            "inbox_answered_ttl_s": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 86400,
+              "default": 600,
+              "description": "How long an answered needs-you inbox item stays retained with its answered record before the supervisor clears it (spec section 4.6.18)."
+            },
+            "merge": {
+              "type": "string",
+              "enum": ["auto", "manual"],
+              "default": "auto",
+              "description": "Who merges a gated PR when the wave file has no merge: key: auto (the supervisor squash-merges exactly the gated head, journaled merged_by_supervisor) or manual (a human merges; the supervisor only observes the merge)."
+            },
+            "merge_retry_max": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 2,
+              "description": "Merges GitHub may refuse at one gated head (the head moved, checks required, branch protection) before the supervisor opens a merge_refused decision."
+            },
+            "delete_branch": {
+              "type": "boolean",
+              "default": false,
+              "description": "Autopilot merges also delete the PR's head branch (gh pr merge --delete-branch)."
+            },
+            "reconnect_grace_s": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400,
+              "default": 900,
+              "description": "How long a wave whose owner is a coordinator name shows coordinator.state reconnecting after the agent bound to the name went away (terminal status or LWT) with no other agent binding to it; then gone."
+            },
+            "incident_wait_max_s": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400,
+              "default": 14400,
+              "description": "How long a red head classified as an infra incident (an infra-shaped run, or GitHub's status page reporting an Actions or API incident) is held in CI and re-checked every poll before the supervisor opens its ci_failed decision, escalated budget_exhausted."
+            },
+            "fix_flake_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 20,
+              "default": 3,
+              "description": "Flake fixers (synthetic fix-<slug> tasks, one per distinct failing test) the supervisor adds to one wave; a fix_flake request past it escalates the blocked task's ci_failed decision budget_exhausted."
+            },
+            "digest_min_interval_s": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 86400,
+              "default": 1800,
+              "description": "The shortest gap between two digests of one wave with the same trigger (spec section 4.6.16): a second escalation inside it publishes no new digest and sends no push."
             }
           }
         }
@@ -473,6 +668,12 @@
           "minimum": 1,
           "maximum": 64,
           "description": "The most leases of this pool that holders on one machine may hold at once, at most capacity (spec section 4.6.5). Unset: capacity."
+        },
+        "per_machine_overrides": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$" },
+          "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 64 },
+          "description": "Per machine name (a hosts.<name> key, the supervisor's fleet.local_name, or local), the most leases of this pool its holders may hold, in place of per_machine; at most capacity (checked by the supervisor). 0: none on that machine (spec section 4.6.5)."
         },
         "ttl_s": { "type": "integer", "minimum": 60, "maximum": 86400 },
         "match": {

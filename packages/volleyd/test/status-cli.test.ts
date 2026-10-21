@@ -15,7 +15,7 @@ import {
   renderPlist,
   uninstallService,
 } from "../src/commands/install";
-import { formatLogins, formatWave } from "../src/commands/status";
+import { formatLocalAgents, formatLogins, formatWave } from "../src/commands/status";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import type { ExecFn } from "../src/exec";
 import { makeBufferIO } from "../src/io";
@@ -177,6 +177,54 @@ describe("volleyd status formatting", () => {
     );
   });
 
+  it("a synthetic task reads `fixer for <tasks> (flake: <test>)` (SPEC §4.6.16)", () => {
+    const out = formatWave({
+      wave: "w1",
+      version: 1,
+      owner: null,
+      repo: "r",
+      release_branch: "release/w1",
+      status: "running",
+      tasks: [
+        {
+          id: "T3",
+          issue: 103,
+          stage: "implement",
+          agents: {},
+          remediation: {
+            kind: "fix_flake",
+            test: "a.test.ts > x",
+            since: "2026-10-18T12:00:00.000Z",
+          },
+          why_waiting: "CI flake in a.test.ts > x: fixer pending",
+        },
+        {
+          id: "fix-a-test-ts-x",
+          issue: 0,
+          stage: "implement",
+          agents: {},
+          synthetic: true,
+          pr: { number: 9, url: "https://x/9" },
+          remediation: {
+            kind: "fix_flake",
+            test: "a.test.ts > x",
+            since: "2026-10-18T12:00:00.000Z",
+            test_file: "a.test.ts",
+            run_urls: [],
+            for: ["T3", "T7"],
+          },
+        },
+      ],
+      open_decisions: [],
+      gates: [],
+      updated_at: "2026-10-18T12:00:00.000Z",
+    });
+    expect(out.split("\n").slice(1, 3)).toEqual([
+      "  T3               #103   implement       CI flake in a.test.ts > x: fixer pending",
+      "  fix-a-test-ts-x         implement     fixer for T3, T7 (flake: a.test.ts > x)  PR #9",
+    ]);
+  });
+
   it("counts the open alarms (tasks whose spawn failed) in the header", () => {
     const out = formatWave({
       wave: "w1",
@@ -237,6 +285,87 @@ describe("volleyd status formatting", () => {
     expect(formatWave(plain).split("\n")[1]).toMatch(/^ {2}T1 /);
   });
 
+  it("shows the merge queue under the header, grouped by state in queue order", () => {
+    const since = "2026-10-18T12:00:00.000Z";
+    const out = formatWave({
+      ...plain,
+      merge_queue: [
+        { task: "T3", state: "merging", since },
+        { task: "T5", state: "updating", since },
+        { task: "T7", state: "queued", since },
+        { task: "T9", state: "queued", since },
+        { task: "T2", state: "refused", since },
+      ],
+    });
+    expect(out.split("\n")[1]).toBe(
+      "  merge queue: T3 merging · T5 updating · T7, T9 queued · T2 refused",
+    );
+    // No queue: no line.
+    expect(formatWave(plain).split("\n")[1]).toMatch(/^ {2}T1 /);
+  });
+
+  it("a releasing wave shows its release train: the current stage and how many are verified", () => {
+    const out = formatWave({
+      ...plain,
+      status: "releasing",
+      gates: [],
+      release: {
+        stage: "staging",
+        stages: [
+          { name: "bump", state: "verified" },
+          { name: "staging", state: "running" },
+          { name: "notes", state: "pending" },
+        ],
+      },
+    });
+    expect(out.split("\n")[0]).toContain("w1  releasing  plan v1");
+    expect(out.split("\n")[1]).toBe("  release: staging running (1/3 verified)");
+    const gated = formatWave({
+      ...plain,
+      status: "releasing",
+      gates: [],
+      release: {
+        stage: "deploy-staging",
+        stages: [
+          { name: "bump", state: "verified" },
+          { name: "deploy-staging", state: "awaiting_go" },
+          { name: "smoke", state: "pending" },
+        ],
+      },
+    });
+    expect(gated.split("\n")[1]).toBe("  release: deploy-staging awaiting go (1/3 verified)");
+    const idle = formatWave({
+      ...plain,
+      release: { stage: null, stages: [{ name: "bump", state: "verified" }] },
+    });
+    expect(idle.split("\n")[1]).toBe("  release: - (1/1 verified)");
+  });
+
+  it("names the agent a coordinator-name owner acts through; it needs you when you are that agent", () => {
+    const named = {
+      ...plain,
+      owner: "coord-main",
+      open_decisions: ["d1"],
+      coordinator: {
+        agent_id: "coordinator-c7d9",
+        state: "working" as const,
+        last_seen: "2026-10-18T12:00:00.000Z",
+      },
+    };
+    const header = formatWave(named, { caller: "coordinator-c7d9" }).split("\n")[0];
+    expect(header).toContain("owner: coord-main (via coordinator-c7d9)  tasks:");
+    expect(header).toContain("needs you: 1");
+    expect(formatWave(named, { caller: "coord-main" }).split("\n")[0]).toContain("needs you: 1");
+    expect(
+      formatWave({ ...named, coordinator: { ...named.coordinator, state: "reconnecting" } }).split(
+        "\n",
+      )[0],
+    ).toContain("owner: coord-main (via coordinator-c7d9, reconnecting)");
+    // An agent-id owner reads as before.
+    const own = { ...named, owner: "coordinator-c7d9" };
+    expect(formatWave(own).split("\n")[0]).toContain("owner: coordinator-c7d9  tasks:");
+  });
+
   it("shows a task's queued steers", () => {
     const out = formatWave({
       ...plain,
@@ -281,6 +410,118 @@ describe("volleyd status formatting", () => {
     } finally {
       await env.cleanup();
     }
+  });
+});
+
+describe("volleyd run: the release playbook (SPEC §4.6.19)", () => {
+  it("prints the playbook line; an invalid playbook fails before the daemon is asked", async () => {
+    const env = await makeDaemonEnv();
+    try {
+      await env.start();
+      const repo = join(env.home, "repo");
+      mkdirSync(join(repo, ".volley"), { recursive: true });
+      const playbook = join(repo, ".volley", "release.yaml");
+      writeFileSync(playbook, "version: 1\nstages:\n  - { name: smoke, brief: Run it. }\n");
+      const file = join(env.home, "w1.yaml");
+      const yaml = (wave: string) =>
+        `wave: ${wave}\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n`;
+      writeFileSync(file, yaml("w1"));
+      const ok = await runCli(["run", file], env.env);
+      expect(ok.exitCode).toBe(0);
+      expect(ok.stdout).toContain(
+        "release playbook: .volley/release.yaml (1 stage, 0 owner-gated)\n",
+      );
+      writeFileSync(playbook, "version: 1\nstages: []\n");
+      writeFileSync(file, yaml("w2"));
+      const bad = await runCli(["run", file], env.env);
+      expect(bad.exitCode).toBe(1);
+      expect(bad.stderr).toContain(
+        `RELEASE_PLAYBOOK_INVALID: ${playbook}: invalid release playbook:`,
+      );
+    } finally {
+      await env.cleanup();
+    }
+  });
+});
+
+describe("volleyd archive and status --all", () => {
+  const archivedState = {
+    wave: "w-old",
+    version: 1,
+    owner: null,
+    repo: "example-org/example-repo",
+    release_branch: "release/x",
+    status: "archived" as const,
+    tasks: [],
+    open_decisions: [],
+    gates: [],
+    archived: { at: "2026-10-21T10:00:00.000Z", by: "volleyd", reason: "volleyd archive" },
+    updated_at: "2026-10-21T10:00:00.000Z",
+  };
+
+  it("formats an archived wave with when, by whom and why", () => {
+    const out = formatWave(archivedState);
+    expect(out.split("\n")[0]).toContain("w-old  archived");
+    expect(out).toContain("archived 2026-10-21T10:00:00.000Z by volleyd: volleyd archive");
+  });
+
+  it("status and archive name their flags in --help; the CLI lists archive", async () => {
+    expect((await runCli(["status", "--help"])).stdout).toContain("--all");
+    expect((await runCli(["archive", "--help"])).stdout).toContain("--yes");
+    expect((await runCli(["--help"])).stdout).toContain("archive");
+    expect((await runCli(["archive"])).exitCode).toBe(2);
+  });
+
+  it("against a daemon: run warns about no owner; archive dry-runs, then --yes archives; status --all shows it", async () => {
+    const t = await makeDaemonEnv();
+    try {
+      await t.start();
+      const file = join(home, "w.yaml");
+      writeFileSync(
+        file,
+        "wave: w-old\nrepo: example-org/example-repo\nrelease_branch: release/x\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n",
+      );
+      const env = { ...t.env, VOLLEY_AGENT_ID: undefined };
+      const run = await runCli(["run", file], env);
+      expect(run.exitCode).toBe(0);
+      expect(run.stderr).toContain(
+        "warning: wave w-old has no owner: nobody can answer its decisions",
+      );
+      expect((await runCli(["stop", "w-old"], env)).exitCode).toBe(0);
+
+      const dry = await runCli(["archive", "w-old"], env);
+      expect(dry.exitCode).toBe(0);
+      expect(dry.stdout).toBe(
+        "would archive w-old: close 0 open decision(s)\n(pass --yes to archive it)\n",
+      );
+      expect((await runCli(["status"], env)).stdout).toContain("w-old  stopped");
+
+      const yes = await runCli(["archive", "w-old", "--yes"], env);
+      expect(yes.exitCode).toBe(0);
+      expect(yes.stdout).toBe("archived w-old (closed 0 decision(s))\n");
+      expect((await runCli(["status"], env)).stdout).not.toContain("w-old");
+      const all = await runCli(["status", "--all"], env);
+      expect(all.stdout).toContain("w-old  archived");
+      expect(all.stdout).toMatch(/archived \S+ by \S+: volleyd archive/);
+    } finally {
+      await t.cleanup();
+    }
+  });
+});
+
+describe("volleyd status: local agents (SPEC §4.6.15)", () => {
+  it("prints the own machine's mode and whether the fallback is active", () => {
+    expect(formatLocalAgents({ mode: "fallback", active: false, why: "box-a eligible" })).toBe(
+      "local agents: fallback (idle: box-a eligible)",
+    );
+    expect(formatLocalAgents({ mode: "fallback", active: true, why: "box-a: tunnel down" })).toBe(
+      "local agents: fallback (active: box-a: tunnel down)",
+    );
+    expect(formatLocalAgents({ mode: "fallback", active: true })).toBe(
+      "local agents: fallback (active)",
+    );
+    expect(formatLocalAgents({ mode: "always", active: false })).toBe("local agents: always");
+    expect(formatLocalAgents({ mode: "never", active: false })).toBe("local agents: never");
   });
 });
 

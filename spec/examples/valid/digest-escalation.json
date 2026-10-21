@@ -1,0 +1,32 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-21T02:14:00.000Z",
+  "channel": "_waves/digest",
+  "type": "digest",
+  "payload": {
+    "wave": "2026-10-20-example",
+    "release_branch": "release/2026-10-20-example",
+    "generated_at": "2026-10-21T02:14:00.000Z",
+    "trigger": "escalation",
+    "shipped": [],
+    "auto": {
+      "decisions_resolved": 1,
+      "flakes_fixed": [],
+      "conflicts_resolved": 0,
+      "retries": 2,
+      "merges": 0
+    },
+    "waiting": [
+      {
+        "id": "d-7f3a9c21",
+        "kind": "agent_blocked",
+        "task": "T2",
+        "question": "The implementer is blocked: the migration needs a credential only the owner has.",
+        "since": "2026-10-21T02:13:40.000Z",
+        "owner_only": false
+      }
+    ],
+    "failures": [{ "task": "T3", "why": "superseded by #212" }]
+  }
+}

@@ -7,6 +7,7 @@ import { randomSuffix } from "volley-mcp/util";
 import { authFields, controlAuth } from "./broker-auth";
 import { type TimerHandle, systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
+import { DAEMON_AGENT_ID } from "./daemon-id";
 import type { DecisionPayload } from "./decisions";
 import { EXIT, type ExitCode, type IO } from "./io";
 import type { PlanDiff } from "./plan-diff";
@@ -19,12 +20,16 @@ import type { PathError } from "./schemas";
  * envelope carrying the same `correlation_id` and `payload: { text, acked_type, op, ok, ... }`.
  */
 
-/** The daemon's literal agent id — it is a supervisor, not an MCP session, so no suffix. */
-export const DAEMON_AGENT_ID = "volleyd";
+// Lives in a constants-only module so pure modules can name the daemon without loading mqtt.
+export { DAEMON_AGENT_ID };
 
 export const CONFIG_TOPIC = "volley/_waves/_config";
+/** The retained index of archived waves (SPEC §4.6.20); `_` keeps it out of the wave id space. */
+export const ARCHIVE_TOPIC = "volley/_waves/_archive";
 export const waveStateTopic = (wave: string) => `volley/_waves/${wave}/state`;
 export const waveEventsTopic = (wave: string) => `volley/_waves/${wave}/events`;
+/** The wave's retained morning digest (SPEC §4.6.16, autopilot/digest.ts). */
+export const waveDigestTopic = (wave: string) => `volley/_waves/${wave}/digest`;
 export const ADMISSION_TOPIC = "volley/_system/admission";
 export const leasePoolTopic = (pool: string) => `volley/_system/leases/${pool}`;
 export const LEASE_REQUESTS_FILTER = "volley/_system/leases/+/requests";
@@ -39,13 +44,24 @@ export type ControlOp =
   // Decisions, ownership and operator controls (decisions.ts, ownership.ts, controls.ts).
   | "decisions"
   | "resolve"
+  // The needs-you inbox: list its open items, answer one through the referee (autopilot/inbox.ts).
+  | "inbox"
+  | "inbox_answer"
+  // Autopilot's effective policy table (autopilot/policy.ts).
+  | "policy"
+  // The wave's morning digest, as last published (autopilot/digest.ts).
+  | "digest"
   | "claim"
   | "pause"
   | "resume"
   | "stop"
+  // Retire an ended wave (archive.ts); also an admin op on the account-op topic.
+  | "archive"
   | "steer"
   // The owner's merge outside GitHub's merge button, verified (pipeline.ts verifyMerge).
   | "merged"
+  // The owner merges one gated task now, through the merge queue's verb (pipeline.ts mergeNow).
+  | "merge"
   // Heavy-operation leases and spawn admission (leases.ts, admission.ts).
   | "admission"
   // Spawn one task's agent now (spawn.ts).

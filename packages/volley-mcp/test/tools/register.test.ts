@@ -56,6 +56,31 @@ describe("vol_register", () => {
     expect(JSON.parse(got ?? "{}").payload.claude_account).toBe("work");
   });
 
+  it("carries the coordinator name from VOLLEY_COORDINATOR and returns it", async () => {
+    state.config.coordinator = "coord-main";
+    const result = await volRegister(state, { capabilities: [] });
+    expect(result).toEqual({ agent_id: "reg-aaaa", namespace: "test", coordinator: "coord-main" });
+    const got = await state.broker.queryRetained("volley/_system/registry/reg-aaaa", 1000);
+    const env = JSON.parse(got ?? "{}");
+    expect(env.payload.coordinator).toBe("coord-main");
+  });
+
+  it("without VOLLEY_COORDINATOR the entry has no coordinator field", async () => {
+    const result = await volRegister(state, { capabilities: [] });
+    expect(result).not.toHaveProperty("coordinator");
+    const got = await state.broker.queryRetained("volley/_system/registry/reg-aaaa", 1000);
+    const env = JSON.parse(got ?? "{}");
+    expect(env.payload).not.toHaveProperty("coordinator");
+  });
+
+  it("an invalid VOLLEY_COORDINATOR fails vol_register naming the variable", async () => {
+    state.config.coordinator = "Coord Main";
+    await expect(volRegister(state, { capabilities: [] })).rejects.toMatchObject({
+      code: "INVALID_AGENT_ID",
+      message: expect.stringMatching(/VOLLEY_COORDINATOR "Coord Main"/),
+    });
+  });
+
   it("title and links round-trip into the retained registry payload", async () => {
     const links = {
       repo: "example-org/example-repo",

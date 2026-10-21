@@ -311,7 +311,7 @@ export function createSteerTransport(
 }
 
 /** Single-quote `s` for a POSIX shell (no `$`, backtick or `!` history expansion inside). */
-function shellQuote(s: string): string {
+export function shellQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
@@ -319,4 +319,39 @@ function shellQuote(s: string): string {
 export function copySteerCommand(wave: string, task: string, text: string, role?: string): string {
   const to = role !== undefined ? ` --role ${role}` : "";
   return `volleyd steer ${wave} ${task} ${shellQuote(text)}${to}`;
+}
+
+/** localStorage key for this device's name in an inbox answer's `where.device` (Settings › General). */
+export const INBOX_DEVICE_KEY = "inbox_device_label";
+
+/** The name the person gave this device in Settings › General, or "" (blocked storage: ""). */
+export function readDeviceLabel(): string {
+  try {
+    return localStorage.getItem(INBOX_DEVICE_KEY)?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function writeDeviceLabel(label: string): void {
+  try {
+    if (label.trim() === "") localStorage.removeItem(INBOX_DEVICE_KEY);
+    else localStorage.setItem(INBOX_DEVICE_KEY, label.trim());
+  } catch {
+    // A blocked localStorage only forgets the name on reload.
+  }
+}
+
+/**
+ * This device, for an inbox answer's `where: { kind: "desk", device }`: the name set in
+ * Settings › General, else the browser's platform (`navigator.userAgentData.platform`), else
+ * `phone` at phone width and `desktop` otherwise.
+ */
+export function deskDevice(narrow: boolean): string {
+  const label = readDeviceLabel();
+  if (label !== "") return label;
+  const platform = (navigator as { userAgentData?: { platform?: unknown } }).userAgentData
+    ?.platform;
+  if (typeof platform === "string" && platform.trim() !== "") return platform.trim();
+  return narrow ? "phone" : "desktop";
 }

@@ -87,7 +87,9 @@ export interface Fleet {
   close: () => Promise<void>;
 }
 
-export async function makeFleet(o: { extraConfig?: string } = {}): Promise<Fleet> {
+export async function makeFleet(
+  o: { extraConfig?: string; localAgents?: "always" | "fallback" | "never" } = {},
+): Promise<Fleet> {
   const env = await makeDaemonEnv();
   const dir = realpathSync(env.home);
   const repo = join(dir, "repo");
@@ -128,7 +130,9 @@ export async function makeFleet(o: { extraConfig?: string } = {}): Promise<Fleet
   );
   writeFileSync(
     join(env.home, "config.yaml"),
-    `fleet:\n  local_name: ${LOCAL}\nhosts:\n  ${PEER}:\n    target: dev@${PEER}\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n${o.extraConfig ?? ""}`,
+    // The own machine a candidate like the peer (local_agents: always, unless `localAgents`): the
+    // fallback has its own tests.
+    `fleet:\n  local_name: ${LOCAL}\n  local_agents: ${o.localAgents ?? "always"}\nhosts:\n  ${PEER}:\n    target: dev@${PEER}\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n${o.extraConfig ?? ""}`,
   );
   writeFileSync(
     join(env.home, "peers.json"),

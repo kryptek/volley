@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BORN_MS, Frame, type FrameProps, useFocusOrder } from "../src/canvas/Frame";
+import { BORN_MS, COMPACT_PX, Frame, type FrameProps, useFocusOrder } from "../src/canvas/Frame";
 
 const base: Omit<FrameProps, "children"> = {
   id: "w",
@@ -159,5 +159,51 @@ describe("Frame", () => {
     expect(el.querySelector(".win-inner")).toHaveClass("chrome-solid");
     expect(screen.getByTestId("attn")).toContainElement(screen.getByText("body"));
     expect(screen.getByText("foot").closest("footer")).toHaveClass("win-foot");
+  });
+
+  it("a subtitle is a full-width second row of the bar, after the actions", () => {
+    render(
+      <Frame {...base} actions={<button type="button">act</button>} subtitle={<span>sub</span>}>
+        body
+      </Frame>,
+    );
+    const bar = titleBar("wave-1");
+    const sub = bar.querySelector(":scope > .win-sub");
+    expect(sub).toHaveTextContent("sub");
+    expect(bar.lastElementChild).toBe(sub);
+    expect(sub?.previousElementSibling).toHaveClass("win-actions");
+  });
+
+  it("has no subtitle row without a subtitle", () => {
+    render(<Frame {...base}>body</Frame>);
+    expect(titleBar("wave-1").querySelector(".win-sub")).toBeNull();
+  });
+
+  it("is compact when its effective width is under COMPACT_PX", () => {
+    expect(COMPACT_PX).toBe(420);
+    const { unmount } = render(
+      <Frame {...base} maxWidth={380}>
+        body
+      </Frame>,
+    );
+    expect(section("wave-1")).toHaveClass("win--compact");
+    unmount();
+    render(<Frame {...base}>body</Frame>);
+    expect(section("wave-1")).not.toHaveClass("win--compact");
+  });
+
+  it("drags by the subtitle row too", () => {
+    const onDrag = vi.fn();
+    const onMove = vi.fn();
+    render(
+      <Frame {...base} onDrag={onDrag} onMove={onMove} subtitle={<span>sub</span>}>
+        body
+      </Frame>,
+    );
+    const sub = titleBar("wave-1").querySelector(".win-sub") as HTMLElement;
+    fireEvent.pointerDown(sub, { clientX: 100, clientY: 100 });
+    expect(onDrag).toHaveBeenCalledWith(true);
+    fireEvent.pointerMove(sub, { clientX: 120, clientY: 100 });
+    expect(onMove).toHaveBeenCalledWith(20, 0);
   });
 });

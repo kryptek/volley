@@ -34,6 +34,18 @@
         "match": [
           "playwright"
         ]
+      },
+      "js-suite": {
+        "capacity": 4,
+        "per_machine": 2,
+        "per_machine_overrides": {
+          "box-a": 3,
+          "studio": 1
+        },
+        "ttl_s": 1800,
+        "match": [
+          "bun run test"
+        ]
       }
     },
     "admission": {
@@ -93,8 +105,17 @@
       "nudge_on_merge": "files"
     },
     "require_fresh_base": true,
+    "retire_close_session": true,
     "fleet": {
-      "local_name": "studio"
+      "local_name": "studio",
+      "local_agents": "fallback",
+      "fallback": {
+        "max_agents": 3,
+        "per_machine": {
+          "js-suite": 1,
+          "backend-it": 0
+        }
+      }
     }
   }
 }

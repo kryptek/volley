@@ -16,7 +16,11 @@
       "oneOf": [{ "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }, { "type": "null" }]
     },
     "wave": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
-    "task": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+    "task": {
+      "type": "string",
+      "pattern": "^([A-Za-z0-9][A-Za-z0-9_-]{0,62}|_release)$",
+      "description": "A wave-file task id, or _release: the release train's pseudo task (spec section 4.6.19)."
+    },
     "role": {
       "type": "string",
       "minLength": 1,

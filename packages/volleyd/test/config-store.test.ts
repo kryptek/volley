@@ -48,7 +48,11 @@ describe("worktree_root under VOLLEYD_HOME", () => {
 describe("ConfigStore layering", () => {
   it("uses built-in defaults when there is no config.yaml", () => {
     const c = open();
-    expect(c.effective()).toEqual(CONFIG_DEFAULTS);
+    // `fleet.local_agents: null` is resolved: no hosts, so `always`.
+    expect(c.effective()).toEqual({
+      ...CONFIG_DEFAULTS,
+      fleet: { ...CONFIG_DEFAULTS.fleet, local_agents: "always" },
+    });
     expect(c.get("hard_ceiling")).toBe(12);
   });
 
@@ -450,6 +454,160 @@ describe("Fleet keys: hosts.<name>.max_agents / drain, fleet.local_name (SPEC §
     ).toEqual([]);
     c.applyPatch({ fleet: { local_name: "control" } }, "admin-1");
     expect(c.retainedPayload().fleet.local_name).toBe("control");
+  });
+});
+
+describe("fleet.local_agents and lease_pools.<pool>.per_machine_overrides (SPEC §4.6.15, §4.6.5)", () => {
+  const BOX = "hosts:\n  box-a:\n    target: dev@box-a\n    volley_dir: /opt/volley\n";
+  const openAs = (hostname: string) =>
+    ConfigStore.load({
+      home,
+      system: Journal.open(join(home, "waves", SYSTEM_WAVE)),
+      now,
+      hostname,
+    });
+  const journal = () => readJournalFile(join(home, "waves", SYSTEM_WAVE, "journal.jsonl"));
+
+  it("refuses an override over the pool's capacity, naming the path and the bound", () => {
+    const c = openAs("laptop");
+    const r = c.applyPatch(
+      { lease_pools: { js: { capacity: 3, per_machine_overrides: { "box-a": 5 } } } },
+      "admin-1",
+    );
+    expect(r.applied).toBe(false);
+    expect(r.rejected).toEqual([
+      {
+        path: "lease_pools.js.per_machine_overrides.box-a",
+        reason: "5 is over capacity 3",
+      },
+    ]);
+    // 0 is allowed: none on that machine.
+    expect(
+      c.applyPatch(
+        { lease_pools: { js: { capacity: 3, per_machine_overrides: { "box-a": 0 } } } },
+        "admin-1",
+      ).applied,
+    ).toBe(true);
+  });
+
+  it("an over-capacity override in config.yaml is refused at load", () => {
+    writeFileSync(
+      join(home, "config.yaml"),
+      "lease_pools:\n  js:\n    capacity: 2\n    per_machine_overrides: { box-a: 3 }\n",
+    );
+    expect(() => openAs("laptop")).toThrow(/per_machine_overrides\.box-a: 3 is over capacity 2/);
+  });
+
+  it("resolves `local` to the supervisor's machine name in the effective config", () => {
+    const c = openAs("laptop");
+    expect(
+      c.applyPatch(
+        { lease_pools: { js: { capacity: 3, per_machine_overrides: { local: 1, "box-a": 3 } } } },
+        "admin-1",
+      ).applied,
+    ).toBe(true);
+    expect(c.effective().lease_pools.js?.per_machine_overrides).toEqual({ laptop: 1, "box-a": 3 });
+    expect(c.retainedPayload().lease_pools.js?.per_machine_overrides).toEqual({
+      laptop: 1,
+      "box-a": 3,
+    });
+  });
+
+  it("the supervisor's machine name set explicitly wins over `local` (what the Desk shows is in force)", () => {
+    writeFileSync(
+      join(home, "config.yaml"),
+      "lease_pools:\n  js:\n    capacity: 4\n    per_machine_overrides: { local: 2 }\n",
+    );
+    const c = openAs("laptop");
+    expect(c.effective().lease_pools.js?.per_machine_overrides).toEqual({ laptop: 2 });
+    // The Desk writes the resolved name.
+    expect(
+      c.applyPatch(
+        { lease_pools: { js: { capacity: 4, per_machine_overrides: { laptop: 3 } } } },
+        "admin-1",
+      ).applied,
+    ).toBe(true);
+    expect(c.effective().lease_pools.js?.per_machine_overrides).toEqual({ laptop: 3 });
+  });
+
+  it("effectiveWith (an archived wave's config) resolves like effective(wave) does", () => {
+    writeFileSync(
+      join(home, "config.yaml"),
+      "lease_pools:\n  js:\n    capacity: 4\n    per_machine_overrides: { local: 2 }\n",
+    );
+    const c = openAs("laptop");
+    const eff = c.effectiveWith({ admission: { container_max: 7 } });
+    expect(eff.lease_pools.js?.per_machine_overrides).toEqual({ laptop: 2 });
+    expect(eff.fleet.local_agents).toBe("always");
+    expect(eff.admission.container_max).toBe(7);
+  });
+
+  it("local_agents null resolves to always with no hosts and fallback once a host exists", () => {
+    const c = openAs("laptop");
+    expect(c.effective().fleet.local_agents).toBe("always");
+    expect(c.retainedPayload().fleet.local_agents).toBe("always");
+    c.applyPatch(
+      { hosts: { "box-a": { target: "dev@box-a", volley_dir: "/opt/volley" } } },
+      "admin-1",
+    );
+    expect(c.effective().fleet.local_agents).toBe("fallback");
+    expect(c.retainedPayload().fleet.local_agents).toBe("fallback");
+    // The flip is journaled as the defaults' own change, so clients see it.
+    const flip = journal()
+      .filter((e) => e.type === "config_changed")
+      .at(-1);
+    expect(flip?.data).toMatchObject({
+      by: DEFAULTS_AUTHOR,
+      patch: { fleet: { local_agents: "fallback" } },
+      previous: { fleet: { local_agents: "always" } },
+    });
+    expect(c.retainedPayload().updated_by).toBe(DEFAULTS_AUTHOR);
+    expect(
+      schemaErrors("config.schema.json", envelope("_waves/_config", "config", c.retainedPayload())),
+    ).toEqual([]);
+  });
+
+  it("an explicit mode is kept with or without hosts", () => {
+    const c = openAs("laptop");
+    c.applyPatch({ fleet: { local_agents: "never" } }, "admin-1");
+    expect(c.effective().fleet.local_agents).toBe("never");
+    const before = journal().length;
+    c.applyPatch(
+      { hosts: { "box-a": { target: "dev@box-a", volley_dir: "/opt/volley" } } },
+      "admin-1",
+    );
+    expect(c.effective().fleet.local_agents).toBe("never");
+    // No derived flip to journal.
+    expect(journal().length).toBe(before + 1);
+    writeFileSync(join(home, "config.yaml"), `${BOX}fleet:\n  local_agents: always\n`);
+    expect(openAs("laptop").effective().fleet.local_agents).toBe("always");
+  });
+
+  it("an explicit local_agents patch, or clearing it, journals exactly one change", () => {
+    const changes = () => journal().filter((e) => e.type === "config_changed");
+    const c = openAs("laptop");
+    const v0 = c.retainedPayload().version;
+    c.applyPatch({ fleet: { local_agents: "never" } }, "admin-1");
+    expect(changes()).toHaveLength(1);
+    expect(changes().at(-1)?.data).toMatchObject({ by: "admin-1" });
+    expect(c.retainedPayload()).toMatchObject({ version: v0 + 1, updated_by: "admin-1" });
+    c.applyPatch({ fleet: { local_agents: null } }, "admin-1");
+    expect(c.effective().fleet.local_agents).toBe("always");
+    expect(changes()).toHaveLength(2);
+    expect(c.retainedPayload()).toMatchObject({ version: v0 + 2, updated_by: "admin-1" });
+  });
+
+  it("refuses an unknown mode and a fallback max_agents of 0", () => {
+    const c = openAs("laptop");
+    for (const [patch, path] of [
+      [{ fleet: { local_agents: "sometimes" } }, "fleet.local_agents"],
+      [{ fleet: { fallback: { max_agents: 0 } } }, "fleet.fallback.max_agents"],
+      [{ fleet: { fallback: { per_machine: { js: 65 } } } }, "fleet.fallback.per_machine.js"],
+    ] as const) {
+      const r = c.applyPatch(patch as never, "admin-1");
+      expect(r.applied, JSON.stringify(patch)).toBe(false);
+      expect(r.rejected.map((e) => e.path)).toContain(path);
+    }
   });
 });
 

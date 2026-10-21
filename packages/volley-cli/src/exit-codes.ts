@@ -6,6 +6,8 @@ export const EXIT = {
   OK: 0,
   ERROR: 1,
   USAGE: 2,
+  /** `volley deploy`: the services checkout has local changes (and no --force-clean). */
+  DIRTY: 3,
   TIMEOUT: 124,
 } as const;
 

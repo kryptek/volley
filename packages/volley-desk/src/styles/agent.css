@@ -121,7 +121,7 @@
 }
 .term {
   padding: 8px 10px;
-  font: 11.5px / 1.55 var(--f-mono);
+  font: 11.5px / 1.55 var(--f-term);
   color: #c9d1e4;
   white-space: pre-wrap;
   word-break: break-word;
@@ -253,7 +253,85 @@
   grid-column: 3 / -1;
 }
 
-/* Claude account picker (title) and context meter (footer), SPEC §4.6.12. */
+/* Row 2 of the title bar: the headline (at most two lines; a tap opens it), its links, the picker. */
+.t-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  flex: 1 1 200px;
+  min-width: 0;
+}
+/* Scoped to row 2: the other windows' titles share .t-name and stay on one line. */
+.win-sub .t-name {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+.win-sub .t-name--open {
+  display: block;
+  -webkit-line-clamp: unset;
+}
+.win-sub .acct-pick {
+  margin-left: auto;
+}
+
+/* The machine chip: where the agent runs, its dot, and why here on hover / focus. */
+.m-chip-wrap {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+.m-chip {
+  font: inherit;
+  font-size: 11.5px;
+  background: transparent;
+  cursor: pointer;
+}
+.m-chip:hover,
+.m-chip:focus-visible {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--acc) 45%, transparent);
+}
+.m-dot {
+  flex: none;
+}
+.chip .m-dot--up {
+  background: var(--ok);
+}
+.chip .m-dot--down {
+  background: var(--mute);
+}
+.chip .m-dot--overloaded {
+  background: var(--amber);
+}
+.m-tip {
+  display: none;
+  cursor: default;
+  white-space: normal;
+  color: var(--ink);
+}
+.m-tip .host-lines {
+  margin: 0;
+}
+.m-chip-wrap:hover .m-tip,
+.m-chip-wrap:focus-within .m-tip {
+  display: block;
+}
+
+/* Claude account picker (title, row 2) and context meter (footer), SPEC §4.6.12. */
 .acct-pick {
   font: inherit;
   font-size: 11px;
@@ -361,4 +439,16 @@ a.a-link:hover {
 }
 .work-state--idle {
   color: var(--mute);
+}
+
+/* The Terminal tab's ⤢ (opens the popout): a slim strip above the screen. */
+.term-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+.term-tools .icon-btn {
+  width: 24px;
+  height: 24px;
+  font-size: 14px;
 }

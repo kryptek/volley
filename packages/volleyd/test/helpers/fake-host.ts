@@ -8,6 +8,7 @@ import type { RemoteHost, RemoteHostSpec, RemoteRunOptions } from "../../src/hos
 import type { DoctorReport } from "../../src/machines";
 import type { PathProbe } from "../../src/readiness";
 import type { SpawnDeps, SpawnRequest } from "../../src/spawn";
+import { SpawnError } from "../../src/spawn-error";
 import type { NewEvent, Wave } from "../../src/types";
 import type { AgentWatch, SignalState } from "../../src/verify";
 import { parseWaveFile } from "../../src/wave-file";
@@ -19,15 +20,40 @@ export interface FakeHost extends Host {
   fake: FakeExec;
   worktrees: WorktreeSpec[];
   launches: LaunchSpec[];
-  screenReads: { workspace: string; lines: number }[];
+  /** Every screen read; `delayMs` when it was a slow one (readScreenDelayMs). */
+  screenReads: { workspace: string; lines: number; delayMs?: number }[];
   keys: { workspace: string; key: string }[];
   texts: { workspace: string; text: string }[];
   /** Workspaces closed (retire, cleanup). */
   closed: string[];
+  /** Sessions ended (retire): the workspace (null: unknown) and worktree it was asked about. */
+  sessionsEnded: { workspace: string | null; worktree: string | null }[];
+  /** What findWorkspace answers for these titles (any other: `found`). */
+  workspaceTitles: Record<string, string>;
   /** Screens returned by successive readScreen calls (the last one repeats); null = unreadable. */
   screens: (string | null)[];
   /** Called after each launch, e.g. to publish the hook signals a real agent would. */
   onLaunch?: (spec: LaunchSpec, workspace: string) => void | Promise<void>;
+  /**
+   * How launches end: `ok` (default); `unknown`, the session starts (onLaunch runs) but launch
+   * throws LAUNCH_FAILED with `outcome: "unknown"`, as a timed-out cmux does; `refused`, launch
+   * throws `outcome: "refused"` and nothing starts.
+   */
+  launchOutcome: "ok" | "unknown" | "refused";
+  /** What findWorkspace answers (an Error: it rejects, the host cannot be asked). */
+  found: string | null | Error;
+  /** findWorkspace calls, in order. */
+  finds: { name: string; candidate?: string }[];
+  /**
+   * A slow cmux: a launch that takes this long (per launch; 0: at once) starts the session
+   * (onLaunch runs, the workspace answers findWorkspace by its title) and then throws
+   * LAUNCH_FAILED `outcome: "unknown"`, as a cmux whose own timeout fired does (the #193 shape).
+   */
+  launchDelayMs: number | ((spec: LaunchSpec) => number);
+  /** A slow screen read: readScreen answers after this long (0: at once). */
+  readScreenDelayMs: number;
+  /** How the knobs above wait (default: real timers; a soak passes its fake clock's). */
+  sleep: (ms: number) => Promise<void>;
 }
 
 /**
@@ -46,7 +72,16 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     keys: [],
     texts: [],
     closed: [],
+    sessionsEnded: [],
+    workspaceTitles: {},
     screens: [],
+    launchOutcome: "ok",
+    found: null,
+    finds: [],
+    launchDelayMs: 0,
+    readScreenDelayMs: 0,
+    // real process: a host's own latency, only when a test sets a delay knob without a clock.
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     async prepareWorktree(spec): Promise<WorktreeResult> {
       host.worktrees.push(spec);
       mkdirSync(spec.path, { recursive: true });
@@ -60,23 +95,57 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     },
     async launch(spec) {
       host.launches.push(spec);
+      if (host.launchOutcome === "refused") {
+        throw new SpawnError("LAUNCH_FAILED", "cmux refused", { outcome: "refused" });
+      }
       const workspace = `workspace:${++n}`;
+      const delay =
+        typeof host.launchDelayMs === "function" ? host.launchDelayMs(spec) : host.launchDelayMs;
+      if (delay > 0) host.workspaceTitles[spec.name] = workspace;
       await host.onLaunch?.(spec, workspace);
+      if (delay > 0) await host.sleep(delay);
+      if (host.launchOutcome === "unknown" || delay > 0) {
+        throw new SpawnError(
+          "LAUNCH_FAILED",
+          "cmux new-workspace failed: Error: Command timed out",
+          {
+            outcome: "unknown",
+          },
+        );
+      }
       return { workspace };
     },
+    async findWorkspace(name, candidate) {
+      host.finds.push({ name, ...(candidate !== undefined ? { candidate } : {}) });
+      if (host.found instanceof Error) throw host.found;
+      return host.workspaceTitles[name] ?? host.found;
+    },
     async readScreen(workspace, lines) {
-      host.screenReads.push({ workspace, lines });
+      const delayMs = host.readScreenDelayMs;
+      host.screenReads.push({ workspace, lines, ...(delayMs > 0 ? { delayMs } : {}) });
+      if (delayMs > 0) await host.sleep(delayMs);
       const s = host.screens.length > 1 ? host.screens.shift() : host.screens[0];
       return s ?? null;
     },
-    async sendKeys(workspace, key) {
+    async sendKeys(workspace, key, tokens = {}) {
+      // The real fence checks picker keys (Up/Down/Space need the item's token).
+      if (key !== "Enter" && key !== "Escape")
+        assertAllowed(["cmux", "send-key", "--workspace", workspace, key], tokens);
       host.keys.push({ workspace, key });
     },
-    async sendText(workspace, text) {
+    async sendText(workspace, text, tokens = {}) {
+      if (tokens.picker !== undefined || tokens.handoff !== undefined)
+        assertAllowed(["cmux", "send", "--workspace", workspace, text], tokens);
       host.texts.push({ workspace, text });
     },
     async close(workspace: string, _consent: ConsentToken) {
       host.closed.push(workspace);
+    },
+    async endSession(workspace, worktree, consent) {
+      host.sessionsEnded.push({ workspace, worktree });
+      if (workspace === null) return { closed: false, pids: [], how: "none" };
+      await host.close(workspace, consent);
+      return { closed: true, pids: [], how: "close-workspace" };
     },
   };
   return host;

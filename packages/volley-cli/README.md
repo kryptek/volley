@@ -16,6 +16,7 @@ If you can write a bash one-liner, you can be a Volley agent. The subcommands co
 - [The subcommands](#the-subcommands)
 - [`volley setup`](#volley-setup)
 - [`volley desk serve`](#volley-desk-serve)
+- [`volley deploy`](#volley-deploy)
 - [`volley dash`](#volley-dash)
 - [`volley notify`](#volley-notify)
 - [`volley auth`](#volley-auth)
@@ -66,6 +67,7 @@ volley --help
 | `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (doctor, account, tunnel service, trust check, host entry), `doctor` (check this machine, `--fix` the safe things), `run` (the service). See [`volley peer`](#volley-peer) below and the volleyd README's "Paired machines". |
 | `volley setup`  | First-run / repair wizard: broker, accounts, services, phone sign-in QR. See [`volley setup`](#volley-setup) below. |
 | `volley desk serve` | Serve the built Desk from a small static server (the service `volley setup` installs). See [`volley desk serve`](#volley-desk-serve) below. |
+| `volley deploy` | Take this machine's volleyd and Desk services to a release tag: build the Desk, restart, health-check, roll back on failure. See [`volley deploy`](#volley-deploy) below. |
 
 Each has its own `--help`:
 
@@ -112,9 +114,79 @@ A rerun plans nothing for what is in place and reports each step as already done
 volley desk serve                       # http://127.0.0.1:5199, from packages/volley-desk/dist
 volley desk serve --host 0.0.0.0        # for a phone on the LAN (what the setup service runs)
 volley desk serve --port 8080 --root /path/to/dist
+volley desk serve --host 0.0.0.0 --evidence ~/.volleyd   # also serve release evidence (below)
 ```
 
 A small static server for the built Desk (`bun run --cwd packages/volley-desk build`): hashed assets are cached for good, the index never, every unknown path gets the index, and nothing outside the build directory is served. It holds no credentials: the page signs in to the broker itself (port 9001 on the host the page came from).
+
+At start it warns on stderr, and still serves, when the build looks stale. Each line is printed only when it holds:
+
+```text
+warning: the Desk build is stale (built from <stamp or "unknown">, the checkout is <stamp>); run volley deploy or volley setup --repair
+warning: the Desk bundle is <v>, this volley is <v>
+```
+
+The first compares `dist/.volley-build` (the stamp `volley setup` and `volley deploy` write after a build: a hash of the Desk's sources and `bun.lock`) with the checkout's current sources; the second compares the bundle's `dist/version.json` (written by the Desk's Vite build) with this CLI's version. `--quiet` (`-q`) prints neither.
+
+`--evidence <volleyd home>` (off by default) also serves a release train's evidence read-only, for the Desk's Needs you window: `GET /evidence/<wave>/release/<file>` returns a `.png`, `.jpg`, `.webp`, `.txt`, `.log`, `.md` or `.json` file directly under `<home>/waves/<wave>/release/`, and nothing else. Text is served as plain text (never rendered), under `nosniff` and a sandboxing CSP. Any other path under `/evidence/` is a 404: another type, a subfolder, a dot-file, a symlink that leaves the folder, a wave id that is not one, or any traversal (the name is decoded once, never twice). The Desk reads the stage evidence JSON from it (changelog entries, screenshot names, links) and shows the screenshots. Anyone who can load the Desk can read those files without signing in. That is a LAN-trust choice like `volley setup --lan`, which is why `volley setup` leaves it off and its services step only names the flag.
+
+---
+
+## `volley deploy`
+
+```sh
+volley deploy v0.5.0              # from any directory, on the supervisor's machine
+volley deploy --latest            # the newest v* tag by version order (0.5.0 without the v works too)
+volley deploy v0.5.0 --dry-run    # print every step and command; change nothing
+```
+
+One command for the update the supervisor's machine needs after a release is tagged. It works on the **services checkout**: the checkout volleyd's installed service runs (`ProgramArguments` in `~/Library/LaunchAgents/systems.volley.volleyd.plist` on macOS, `ExecStart` in `~/.config/systemd/user/volleyd.service` on Linux). With no service installed it uses the checkout this `volley` runs from and says so; `--repo <dir>` names another checkout explicitly. Then, one summary line per step:
+
+1. **Local changes refuse the deploy** (exit 3), listing `git status --porcelain`. `--force-clean` stashes them first (`git stash push -u -m volley-deploy-<time>`) and prints the stash name; the deploy never runs `checkout -- .`, `reset` or `clean`.
+2. `git fetch --tags origin`, then the tag is resolved (`--latest`: the newest `v*` tag, a prerelease below its release). Tag names are checked against `^v?\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$` before any git call.
+3. `git checkout --detach <tag>`, `bun install --frozen-lockfile`, and the Desk build (`bun run build` in `packages/volley-desk`, without any `VITE_VOLLEY_BROKER_*` in its environment), after which it writes `dist/.volley-build` exactly as `volley setup` does.
+4. **Self-check**: `volley --version` from the checkout is the tag's version, `volleyd validate` passes on its example wave file, and `dist/index.html` and `dist/version.json` (with the tag's version) exist.
+5. **Restart** both services (`launchctl kickstart -k gui/<uid>/systems.volley.volleyd` and `…/systems.volley.desk`, or `systemctl --user restart volleyd.service volley-desk.service` one at a time). volleyd gets no control op: running waves continue, since volleyd reconciles its journal on start.
+6. **Health check** (up to 30 s, every second): volleyd's retained status on the broker is `working` and was published after the restart (the new process got through its start, past `spawning` and `registered`), and the Desk answers `GET /` with 200 and `GET /version.json` with the tag's version, on the port setup recorded (`--desk-port` overrides; default 5199).
+
+It ends with `deployed v0.5.0 (was v0.4.0); waves continue (volleyd reconciles on start)`.
+
+**Rollback.** Any failure after the checkout repeats the checkout, install, build, restarts and health check at the previous ref (HEAD's branch, so a checkout on `main` stays on `main`; on a detached HEAD the release tag it was exactly at, else its commit); a rollback never stashes or fetches. The deploy reports what failed and `rolled back to v0.4.0`, and exits 1. When the rollback fails too, the checkout is left as it is and the exact commands to run by hand are printed. A failure before the checkout (the fetch, an unknown tag, the checkout itself) changes nothing.
+
+Every command goes through one fence of exact argv shapes on the services checkout (the git commands above, the bun install and build, the self-check, the two restarts); anything else (`git push`, `git reset --hard`, a tag starting with `-`) is refused before it runs. macOS and Linux only: elsewhere it exits 2, `no service manager known here`. The broker connection for the health check is resolved as for `volley list` (`--broker-url`, `--namespace`, `--username`/`--password`, or the coordinator login setup saved).
+
+```text
+$ volley deploy v0.5.0 --dry-run
+services checkout: <repo> (from ~/Library/LaunchAgents/systems.volley.volleyd.plist)
+current: v0.4.0
+target: v0.5.0
+dry run: would run, in order:
+  1. fetch tags
+       $ git -C <repo> fetch --tags origin
+  2. checkout v0.5.0 (detached)
+       $ git -C <repo> checkout --detach v0.5.0
+  3. bun install --frozen-lockfile
+       $ cd <repo> && <bun> install --frozen-lockfile
+  4. build the Desk
+       $ cd <repo>/packages/volley-desk && <bun> run build
+       (then record the checkout's Desk stamp in dist/.volley-build)
+  5. self-check
+       $ <bun> <repo>/packages/volley-cli/src/cli.ts --version
+       $ <bun> <repo>/packages/volleyd/src/cli.ts validate <repo>/packages/volleyd/test/fixtures/example.yaml
+       (volley --version is the release's; dist/index.html and dist/version.json carry it)
+  6. restart systems.volley.volleyd
+       $ launchctl kickstart -k gui/<uid>/systems.volley.volleyd
+  7. restart systems.volley.desk
+       $ launchctl kickstart -k gui/<uid>/systems.volley.desk
+  8. health-check
+       (volleyd's retained status is fresh; http://127.0.0.1:5199/ and /version.json answer)
+On a failure after the checkout it repeats the checkout, install, build, restarts and health-check at v0.4.0.
+dry run: nothing changed
+```
+
+A dry run runs only `git status --porcelain`, the current-ref lookup (`git describe --tags --exact-match HEAD`, then `git rev-parse`) and `git tag --list 'v*'`; it never fetches, so a tag not fetched yet is shown as such.
+
+Exit codes: `0` deployed, `1` failed (rolled back, or the by-hand commands printed), `2` usage (including no service manager, or `--repo` without a `bun.lock`), `3` local changes in the services checkout.
 
 ---
 
@@ -141,7 +213,7 @@ On first load the Desk asks for broker credentials: sign in as the `desk` identi
 
 ## `volley notify`
 
-Long-lived subscriber that bridges agent state transitions to the human-visible surfaces you're already paying attention to: the terminal bell in the shell you're in, macOS desktop banners, or arbitrary HTTP webhooks. Runs until SIGINT/SIGTERM. Default trigger set is `blocked,failed,reaped` (attention-needed only — `done` is expected and would create noise during dispatch loops).
+Long-lived subscriber that bridges agent state transitions to the human-visible surfaces you're already paying attention to: the terminal bell in the shell you're in, macOS desktop banners, or arbitrary HTTP webhooks. Runs until SIGINT/SIGTERM. Default trigger set is `blocked,failed,reaped,digest` (attention-needed only — `done` is expected and would create noise during dispatch loops). `digest` is volleyd's morning digest push: one `progress` envelope per published wave digest (on `volley/<ns>/volleyd/progress`), whose `payload.msg` is the one-line summary, e.g. `w1 complete: 27 shipped, 3 flakes fixed, 2 conflicts resolved, 1 waiting for you (release_go)`.
 
 ```sh
 # Bell-only, watch every status transition on the default namespace
@@ -151,6 +223,9 @@ volley notify --pattern 'volley/+/+/status'
 volley notify --pattern 'volley/+/+/status' \
   --surface bell,desktop,webhook \
   --webhook-url https://ntfy.sh/your-private-topic
+
+# volleyd's pushes: one per decision left for you, and one per wave digest
+volley notify --pattern 'volley/+/volleyd/progress' --surface bell,desktop
 ```
 
 The surfaces fire concurrently; one surface erroring (e.g. webhook returns non-2xx) never aborts the loop. Each fired notification emits one JSON line on stdout (`{topic, type, agent_id, surfaces}`) so you can pipe to `jq` for live-tail.
@@ -158,7 +233,7 @@ The surfaces fire concurrently; one surface erroring (e.g. webhook returns non-2
 | Flag | Env | Default | Description |
 |---|---|---|---|
 | `--pattern <filter>` | — | (required) | MQTT topic filter, e.g. `volley/+/+/status` for a whole namespace |
-| `--on <csv>` | `VOLLEY_NOTIFY_ON` | `blocked,failed,reaped` | Lifecycle types that fire (`spawning,working,done,blocked,failed,reaped,registered`) |
+| `--on <csv>` | `VOLLEY_NOTIFY_ON` | `blocked,failed,reaped,digest` | Lifecycle types that fire (`spawning,working,done,blocked,failed,reaped,registered,digest`) |
 | `--surface <csv>` | `VOLLEY_NOTIFY_SURFACES` | `bell` | Comma-separated surfaces: `bell`, `desktop`, `webhook` |
 | `--webhook-url <url>` | `VOLLEY_NOTIFY_WEBHOOK_URL` | — | Required only when `webhook ∈ --surface`. Must be `http(s)://` |
 | `--namespace <ns>` | `VOLLEY_NAMESPACE` | `default` | Informational (the pattern already encodes the namespace) |
@@ -167,7 +242,7 @@ The surfaces fire concurrently; one surface erroring (e.g. webhook returns non-2
 | `--broker-url <url>` | `VOLLEY_BROKER_URL` | `mqtt://localhost:1883` | MQTT broker |
 | `--help` / `-h` | — | — | Print usage and exit |
 
-**Desktop surface (macOS only)** shells out to [`terminal-notifier`](https://github.com/julienXX/terminal-notifier) — install via `brew install terminal-notifier`. If absent, the desktop surface logs a one-time warning to stderr and degrades to no-op for the rest of the process; the other surfaces continue to fire. Sound configurable via `VOLLEY_NOTIFY_SOUND` (default `Glass`).
+**Desktop surface (macOS only)** shells out to [`terminal-notifier`](https://github.com/julienXX/terminal-notifier) — install via `brew install terminal-notifier`. If absent, the desktop surface logs a one-time warning to stderr and degrades to no-op for the rest of the process; the other surfaces continue to fire. Sound configurable via `VOLLEY_NOTIFY_SOUND` (default `Glass`). The banner's body is the envelope's `payload.msg` when it carries one (the digest's summary line), else its type.
 
 **Webhook surface** POSTs `{topic, envelope}` JSON with a 5s timeout. Non-2xx responses are logged but not retried — notification, not delivery.
 
@@ -369,6 +444,18 @@ backend-it  3/4 held  max 1 per machine  1 queued  queued l-4: 1/1 backend-it le
     held    l-1  hand-1  since 2026-10-19T12:00:00.000Z
 ```
 
+A pool with `per_machine_overrides` (a machine's cap in force in place of `per_machine`, set with
+`lease_pools.<pool>.per_machine_overrides` in the supervisor's config) lists them in the header,
+and every overridden machine gets a line, even before it holds a lease. A machine with no cap in
+force shows only its count:
+
+```text
+js-suite  3/4 held  max 2 per machine (box-a 3, laptop 1)  1 queued
+  box-a  2/3 held
+  box-b  0/2 held
+  laptop  1/1 held
+```
+
 - **Holder** = `--holder`, else the `agent_id` in `<--project-dir or cwd>/.volley/agent.json`, else a
   random `lease-xxxxxx` (`acquire` prints it so `release` can name it). The supervisor only accepts
   requests whose holder is the sender, and frees a holder's leases when its `status` turns
@@ -501,6 +588,7 @@ Standardized across subcommands so shell scripts can branch cleanly:
 | `0` | success — operation completed |
 | `1` | broker error or unexpected runtime failure |
 | `2` | invalid usage (bad flags, missing required args) |
+| `3` | `deploy`: the services checkout has local changes (no `--force-clean`) |
 | `124` | `wait`/`sub` timeout elapsed before the desired condition |
 
 `124` matches GNU `timeout(1)`'s exit-code convention so `wait` composes naturally with shell tools that already know about it.
@@ -613,7 +701,7 @@ Required:
   --pattern <filter>       MQTT topic filter, e.g. "volley/+/+/status"
 
 Optional:
-  --on <csv>               Lifecycle types that fire (default: blocked,failed,reaped)
+  --on <csv>               Lifecycle types that fire (default: blocked,failed,reaped,digest)
   --surface <csv>          Surfaces to fire (default: bell)
                            Valid: bell, desktop, webhook
   --webhook-url <url>      Required when webhook ∈ --surface; must be http(s)://

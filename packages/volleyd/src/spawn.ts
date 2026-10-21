@@ -1,7 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { flakeIssue } from "./autopilot/flake-brief";
+import type { PlaybookStage } from "./autopilot/playbook";
+import { releaseWaveTask, stageBriefVars } from "./autopilot/release-train";
 import {
   BriefPrefaceTooLarge,
+  NO_STAGE,
   type Role,
   briefExtra,
   briefExtraFrom,
@@ -16,13 +20,14 @@ import {
 import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { waveDecisionId } from "./decisions";
-import { sealLaunchScript } from "./fence";
+import { mintConsentToken, sealLaunchScript } from "./fence";
 import type { Host, WorktreeResult } from "./hosts/host";
 import {
   type AgentCredentials,
   type BrokerCredentials,
   agentIdFor,
   mintCredentials,
+  releaseAgentId,
   revokeCredentials,
   writeAgentJson,
 } from "./identity";
@@ -57,7 +62,7 @@ import {
   hookSignalsArrived,
   verifyRegistration,
 } from "./verify";
-import { branchName, expandHome, worktreePath } from "./worktree";
+import { branchName, expandHome, releaseBranchName, worktreePath } from "./worktree";
 
 /**
  * One spawn, end to end: repo trust → lock → worktree (cut from the release branch as origin
@@ -69,6 +74,8 @@ import { branchName, expandHome, worktreePath } from "./worktree";
  * The journal's event types are the closed wave-event enum, so the steps map onto it:
  *   refusals (SPAWN_LOCKED, SPAWN_BRIEF_REJECTED, ISSUE_MISMATCH, …) → alarm_raised { code }
  *   a launch (worktree, issue, credentials, workspace)            → agent_spawned
+ *   a launch whose outcome is unknown (reconcileLaunch)            → spawn_adopted, then
+ *     agent_spawned { adopted }; or launch_orphan_closed / spawn_identity_burned, then the refusal
  *   the one relaunch after an update prompt (spawn_recovered)      → agent_retired { superseded }
  *     for the first attempt, then agent_spawned { recovered_from } (typed into the same workspace)
  *   hook signals verified                                           → agent_registered
@@ -113,6 +120,12 @@ export interface SpawnRequest {
    * fresh one: an account move of a pipeline role (claude/move.ts moveRespawn).
    */
   worktreeAttempt?: number;
+  /**
+   * The release role's playbook stage (SPEC §4.6.19): its agent runs under the pseudo task
+   * `_release` with no issue, as `<wave>-release-<stage>-<n>` on `<wave>/release-<stage>-<n>`,
+   * cut from the release branch's tip; its brief is the stage's.
+   */
+  stage?: PlaybookStage;
   /**
    * An implementer respawn (F6): the branch an earlier attempt of the role was cut on. When
    * origin has it, this attempt continues on it (cut from origin's copy, the same name) and its
@@ -180,6 +193,8 @@ export interface SpawnDeps {
   resolveDecision?: (id: string, answer: string, by: string) => Promise<void>;
   /** After Enter on an update prompt, how long the original launch may take to continue. */
   relaunchSettleMs?: number;
+  /** After a launch with an unknown outcome, how long its agent may take to register. */
+  launchReconcileMs?: number;
   /**
    * Bring a Claude account profile in line before its agent launches (sharing.yaml, the MCP
    * servers sync). A rejection refuses the spawn (CLAUDE_ACCOUNT_PREPARE_FAILED).
@@ -279,9 +294,24 @@ interface Ctx {
   lock?: WorktreeLock;
 }
 
+/** The agent id of `req`'s attempt: a release stage's own shape, else the task role's. */
+const agentIdOf = (req: SpawnRequest, attempt: number) =>
+  req.stage !== undefined
+    ? releaseAgentId(req.wave.wave, req.stage.name, attempt)
+    : agentIdFor(req.wave.wave, req.task, req.role, attempt);
+
+/** What a release stage has in place of an issue (no ISSUE.md is written for it). */
+const stageIssue = (stage: PlaybookStage): IssueData => ({
+  number: 0,
+  title: `release stage ${stage.name}`,
+  body: "",
+  url: "",
+});
+
 /** Run the launch half of a spawn; `verified` carries the rest. Throws SpawnError on refusal. */
 export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<SpawnResult> {
-  const task = req.wave.tasks[req.task];
+  const task =
+    req.wave.tasks[req.task] ?? (req.stage !== undefined ? releaseWaveTask(req.wave) : undefined);
   if (task === undefined) throw new Error(`unknown task '${req.task}' in wave ${req.wave.wave}`);
   const repo = expandHome(req.wave.repo);
   const ctx: Ctx = {
@@ -295,7 +325,11 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
       deps.tunables.worktree_root,
       req.wave.wave,
       req.task,
-      req.start !== undefined ? `${req.role}-${req.worktreeAttempt ?? req.attempt}` : req.role,
+      req.stage !== undefined
+        ? `${req.role}-${req.stage.name}-${req.attempt}`
+        : req.start !== undefined
+          ? `${req.role}-${req.worktreeAttempt ?? req.attempt}`
+          : req.role,
     ),
   };
   try {
@@ -321,7 +355,7 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
     if (open !== undefined) await resolveDecision(ctx, open, "trusted", "claude-trust-dialog");
 
     // 1. Lock first.
-    const agentId = agentIdFor(req.wave.wave, req.task, req.role, req.attempt);
+    const agentId = agentIdOf(req, req.attempt);
     ctx.lock = await acquireLock(
       lockPath(deps.lockHome ?? deps.home, ctx.worktree),
       {
@@ -338,7 +372,14 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
     );
 
     // 2–5. Worktree, issue, brief, identity, launch.
-    const issue = await fetchIssue(deps.host.exec, ctx.root, task.issue);
+    // A release stage is no issue's; a flake's fixer (SPEC §4.6.16) has none either: its
+    // root-cause brief takes ISSUE.md's place.
+    const issue =
+      req.stage !== undefined
+        ? stageIssue(req.stage)
+        : task.synthetic === true && task.remediation !== undefined
+          ? flakeIssue(task.remediation, task.id)
+          : await fetchIssue(deps.host.exec, ctx.root, task.issue);
     const launched = await launchAttempt(ctx, req.attempt, agentId, issue);
     const lock = ctx.lock;
     return {
@@ -458,7 +499,11 @@ async function launchAttempt(
     req.start === undefined && req.continueBranch !== undefined
       ? await pushedBranch(host.exec, ctx.repo, req.continueBranch)
       : null;
-  const branch = carried?.branch ?? branchName(req.wave.wave, req.task, req.role, attempt);
+  const branch =
+    carried?.branch ??
+    (req.stage !== undefined
+      ? releaseBranchName(req.wave.wave, req.stage.name, attempt)
+      : branchName(req.wave.wave, req.task, req.role, attempt));
   const cut = await host.prepareWorktree({
     repo: ctx.repo,
     path: ctx.worktree,
@@ -491,9 +536,13 @@ async function launchAttempt(
     });
   }
 
-  // The quality reviewer reviews the diff only: it gets no copy of the issue and its plan.
-  if (req.role !== "quality_reviewer")
-    await host.writeFile(join(ctx.worktree, "ISSUE.md"), renderIssueMd(issue));
+  // The quality reviewer reviews the diff only: it gets no copy of the issue and its plan. A
+  // release stage is no issue's.
+  if (req.role !== "quality_reviewer" && req.stage === undefined)
+    await host.writeFile(
+      join(ctx.worktree, "ISSUE.md"),
+      task.synthetic === true ? issue.body : renderIssueMd(issue),
+    );
   for (const [name, content] of Object.entries(req.files ?? {})) {
     await host.writeFile(join(ctx.worktree, ".volley", name), content);
   }
@@ -503,7 +552,12 @@ async function launchAttempt(
 
   const briefPath = join(ctx.worktree, ".volley", "brief.md");
   const preface = loadPreface(req.wave, deps);
-  const variant = req.role === "rebase" && req.branch_update === "merge" ? "merge" : undefined;
+  const variant =
+    req.role === "rebase" && req.branch_update === "merge"
+      ? "merge"
+      : req.role === "implementer" && task.synthetic === true
+        ? "flake"
+        : undefined;
   const hygiene = hygieneText(req.hygiene ?? "p1", req.wave.release_branch);
   const rendered = renderBrief(loadTemplate(req.role, deps.briefsDir, variant), {
     agent_id: agentId,
@@ -525,6 +579,7 @@ async function launchAttempt(
         : briefExtra(ctx.root),
     hygiene_rule: hygiene.rule,
     hygiene_contract: hygiene.contract,
+    ...(req.stage !== undefined ? stageBriefVars(req.stage, req.wave.release_branch) : NO_STAGE),
   });
   const brief = withPreface(preface, rendered);
   const notes = [
@@ -592,6 +647,7 @@ async function launchAttempt(
     // real clock: the hooks process stamps its error file with its own.
     const launchedAt = systemClock.now();
     let workspace: string;
+    let adopted = false;
     try {
       if (recovered !== undefined) {
         // The relaunch reuses the workspace (never a second session in one worktree): its shell
@@ -602,14 +658,22 @@ async function launchAttempt(
       } else {
         ({ workspace } = await host.launch({
           cwd: ctx.worktree,
-          name: `${req.wave.wave} ${req.task} ${req.role}`,
+          name: launchName(req, attempt),
           command: LAUNCH_COMMAND,
           launch,
         }));
       }
     } catch (e) {
-      await watch.close();
-      throw e;
+      const found =
+        recovered === undefined && launchOutcomeUnknown(e)
+          ? await reconcileLaunch(ctx, { agentId, attempt, watch, error: e })
+          : null;
+      if (found === null) {
+        await watch.close();
+        throw e;
+      }
+      workspace = found.workspace;
+      adopted = true;
     }
     await deps.journal({
       type: "agent_spawned",
@@ -617,6 +681,7 @@ async function launchAttempt(
       data: {
         agent_id: agentId,
         role: req.role,
+        ...(req.stage !== undefined ? { stage: req.stage.name } : {}),
         attempt,
         host: host.name,
         workspace,
@@ -635,6 +700,7 @@ async function launchAttempt(
         ...(recovered !== undefined
           ? { recovered_from: recovered.from, recovery: recovered.reason }
           : {}),
+        ...(adopted ? { adopted: true } : {}),
       },
     });
     if (req.role === "implementer" && attempt === 1) {
@@ -649,6 +715,100 @@ async function launchAttempt(
     throw e;
   }
 }
+
+/** A launch that failed without saying nothing was created: the workspace may exist. */
+const launchOutcomeUnknown = (e: unknown) =>
+  e instanceof SpawnError && e.code === "LAUNCH_FAILED" && e.detail.outcome === "unknown";
+
+/**
+ * A launch whose outcome is unknown (a timed-out cmux may still have opened the workspace and
+ * started the agent): reconcile before anything retries it, so no second session ever runs under
+ * the same agent id. Look the workspace up by the name volleyd gave it, and wait (on the watch
+ * subscribed before the launch) for the agent's hook signals:
+ * - they arrived: adopt it (`spawn_adopted`) and resolve with its workspace, so the launch
+ *   continues exactly like a normal one;
+ * - none, and a workspace was found: close it (`launch_orphan_closed`) and resolve null (the
+ *   launch fails; its retry may reuse the identity: that session is known gone);
+ * - none, nothing found: resolve null;
+ * - none, and the host could not be asked or the workspace not closed: `spawn_identity_burned`
+ *   and resolve null; the retry takes the next attempt (daemon.ts agentAttempt).
+ */
+async function reconcileLaunch(
+  ctx: Ctx,
+  launch: { agentId: string; attempt: number; watch: AgentWatch; error: unknown },
+): Promise<{ workspace: string } | null> {
+  const { req, deps } = ctx;
+  const { host } = deps;
+  const { agentId, attempt, watch } = launch;
+  const name = launchName(req, attempt);
+  const candidate = launch.error instanceof SpawnError ? launch.error.detail.candidate : undefined;
+  const find = () =>
+    host.findWorkspace(name, typeof candidate === "string" ? candidate : undefined).then(
+      (ws) => ({ ws }),
+      (e: unknown) => ({ ws: null, error: e instanceof Error ? e.message : String(e) }),
+    );
+  const now = nowOf(deps);
+  const started = now();
+  const first = await find();
+  const registered = await watch.waitFor(
+    hookSignalsArrived,
+    deps.launchReconcileMs ?? DAEMON_DEFAULTS.launch_reconcile_ms,
+  );
+  const last = first.ws === null ? await find() : first;
+  const ws = last.ws ?? first.ws;
+  if (registered) {
+    await deps.journal({
+      type: "spawn_adopted",
+      task: req.task,
+      data: {
+        agent_id: agentId,
+        role: req.role,
+        attempt,
+        workspace: ws ?? "unknown",
+        after: "launch_unknown",
+        waited_ms: now() - started,
+      },
+    });
+    return { workspace: ws ?? "" };
+  }
+  const burn = async (why: string) => {
+    await deps.journal({
+      type: "spawn_identity_burned",
+      task: req.task,
+      data: {
+        agent_id: agentId,
+        role: req.role,
+        ...(req.stage !== undefined ? { stage: req.stage.name } : {}),
+        attempt,
+        why,
+      },
+    });
+    return null;
+  };
+  if (ws === null) {
+    return "error" in last ? burn(`workspace lookup failed: ${last.error}`) : null;
+  }
+  try {
+    // volleyd opened this workspace itself and no agent registered in it.
+    await host.close(ws, mintConsentToken(`reconcile ${agentId}`));
+  } catch (e) {
+    return burn(`closing ${ws} failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  await deps.journal({
+    type: "launch_orphan_closed",
+    task: req.task,
+    data: { agent_id: agentId, role: req.role, attempt, workspace: ws },
+  });
+  return null;
+}
+
+/**
+ * The workspace title a launch gives its terminal: `<wave> <task> <role>`, with the attempt
+ * appended after the first (`… fixup 2`). One title per agent id, so a reconcile looking it up
+ * never finds the workspace an earlier attempt left open.
+ */
+const launchName = (req: SpawnRequest, attempt: number) =>
+  `${req.wave.wave} ${req.stage !== undefined ? `release ${req.stage.name}` : `${req.task} ${req.role}`}${attempt > 1 ? ` ${attempt}` : ""}`;
 
 /**
  * Step 6: verify through the hook signals. On an update prompt: press Enter, and relaunch once
@@ -818,7 +978,7 @@ async function relaunch(ctx: Ctx, prev: Launched, issue: IssueData): Promise<Lau
     }
   }
   const attempt = prev.attempt + 1;
-  const agentId = agentIdFor(req.wave.wave, req.task, req.role, attempt);
+  const agentId = agentIdOf(req, attempt);
   await deps.journal({
     type: "agent_retired",
     task: req.task,

@@ -843,6 +843,10 @@
   min-width: 96px;
   color: var(--mute);
 }
+.lease-host-count {
+  min-width: 32px;
+  font-variant-numeric: tabular-nums;
+}
 .lease-holder + .lease-holder::before {
   content: " · ";
   color: var(--dim);
@@ -850,4 +854,41 @@
 .lease-reason {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+/* ConfigRows' wrapper: a lookup root for deep links, no box of its own. */
+.cfg-rows {
+  display: contents;
+}
+
+/* Settings › Autopilot: owner_only's decision kinds, and the read-only policy table. */
+.cfg-multi {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 4px 0 0;
+  padding: 0;
+  border: 0;
+  font-size: 11.5px;
+}
+.cfg-multi-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.policy-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.policy-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--mute);
+}
+.policy-table th,
+.policy-table td {
+  padding: 6px 8px 6px 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
 }

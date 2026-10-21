@@ -169,7 +169,7 @@ describe("Frame attention wrapper", () => {
     title: "w",
     accent: "#fff",
     pos: { x: 0, y: 0 },
-    width: 100,
+    width: 460,
     z: 1,
     scale: 1,
     chrome: "glass" as const,
@@ -221,6 +221,31 @@ describe("MachineDown (a machine_down decision)", () => {
     tasks: ["T3", "T4"],
   };
 
+  it("links each task's issue when the wave has github", () => {
+    render(
+      <MachineDown
+        decision={{ ...down, tasks: ["T3"] }}
+        github={{
+          slug: "example-org/example-repo",
+          url: "https://github.com/example-org/example-repo",
+        }}
+        issues={{ T3: 101 }}
+      />,
+    );
+    const list = screen.getByRole("list", { name: "Tasks on box-b" });
+    expect(list).toHaveTextContent("T3");
+    const a = screen.getByRole("link", { name: "Issue #101 on GitHub" });
+    expect(list.contains(a)).toBe(true);
+    expect(a).toHaveAttribute("href", "https://github.com/example-org/example-repo/issues/101");
+    expect(a.getAttribute("rel")).toContain("noopener");
+  });
+
+  it("without github the task list is unlinked", () => {
+    render(<MachineDown decision={down} issues={{ T3: 101 }} />);
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.getByText("T3")).toBeInTheDocument();
+  });
+
   it("pre-selects re-place queued tasks and names the tasks", () => {
     render(<MachineDown decision={down} onAnswer={vi.fn()} />);
     const banner = screen.getByRole("status");
@@ -269,5 +294,19 @@ describe("MachineDown (a machine_down decision)", () => {
     unmount();
     render(<MachineDown decision={down} />);
     expect(screen.queryByRole("button", { name: "Answer" })).toBeNull();
+  });
+});
+
+describe("NeedsYou (coordinator reconnecting)", () => {
+  it("shows no banner: the session is coming back, there is nothing to claim", () => {
+    const { container } = render(
+      <NeedsYou
+        wave="status-chip"
+        coordinator={{ id: "lead", state: "reconnecting", since: NOW - 60_000 }}
+        openDecisions={2}
+        now={NOW}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
   });
 });

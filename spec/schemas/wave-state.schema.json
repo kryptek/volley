@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/wave-state.schema.json",
   "title": "Volley Wave State",
-  "description": "Retained full wave snapshot published by a supervisor to volley/_waves/<wave>/state. See spec section 4.6.1.",
+  "description": "Retained full wave snapshot published by a supervisor to volley/_waves/<wave>/state. An archived wave (status archived) is published once and then its retained state is cleared. See spec sections 4.6.1 and 4.6.20.",
   "allOf": [
     { "$ref": "envelope.schema.json" },
     {
@@ -37,13 +37,24 @@
             },
             "repo": { "type": "string", "minLength": 1 },
             "release_branch": { "type": "string", "minLength": 1 },
-            "status": { "enum": ["running", "paused", "awaiting_decision", "complete", "stopped"] },
+            "status": {
+              "enum": [
+                "running",
+                "paused",
+                "awaiting_decision",
+                "releasing",
+                "complete",
+                "stopped",
+                "archived"
+              ],
+              "description": "releasing: every task is settled and the release train (spec section 4.6.19) runs; complete once the owner answers release_go go (or, without a train, once every task is settled)."
+            },
             "tasks": { "type": "array", "items": { "$ref": "#/$defs/task" } },
             "open_decisions": { "type": "array", "items": { "$ref": "#/$defs/decisionId" } },
             "gates": {
               "type": "array",
               "items": { "$ref": "#/$defs/taskId" },
-              "description": "Task ids that are merge-ready and await a human merge."
+              "description": "Task ids that are merge-ready and await their merge: the supervisor's merge queue under merge: auto (spec section 4.6.17), a human under merge: manual."
             },
             "spec": { "$ref": "#/$defs/spec" },
             "coordinator": { "$ref": "#/$defs/coordinator" },
@@ -66,14 +77,126 @@
               "enum": ["p1", "p3", "off"],
               "description": "How the reviewers treat public hygiene for the current plan version (spec section 4.6.8): p1 (every hit blocks the merge; public, or visibility unknown), p3 (non-blocking notes; private or internal) or off. Absent: not recorded, which a supervisor treats as p1."
             },
+            "github": {
+              "type": "object",
+              "required": ["slug", "url"],
+              "additionalProperties": false,
+              "properties": {
+                "slug": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
+                "url": { "type": "string", "format": "uri", "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://" }
+              },
+              "description": "The repository on GitHub as the supervisor read it for the current plan version (spec section 4.6.1): slug is owner/repo, url its canonical URL, so a client links issue n as <url>/issues/<n>. Absent when it could not be read; never derived from repo or a remote."
+            },
+            "autopilot": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled", "auto_resolved", "escalated", "budgets"],
+              "description": "What the supervisor's autopilot did in this wave (spec section 4.6.16): whether it is on for the wave, the decisions it answered itself and those it left for the owner, and each remediation budget it answered under. Absent: a supervisor that predates autopilot.",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "auto_resolved": { "type": "integer", "minimum": 0 },
+                "escalated": { "type": "integer", "minimum": 0 },
+                "budgets": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["used", "max"],
+                    "properties": {
+                      "used": { "type": "number", "minimum": 0 },
+                      "max": { "type": "number", "minimum": 0 }
+                    }
+                  }
+                }
+              }
+            },
+            "archived": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["at", "by", "reason"],
+              "properties": {
+                "at": { "type": "string", "format": "date-time" },
+                "by": { "type": "string", "minLength": 1 },
+                "reason": { "type": "string" }
+              },
+              "description": "When, by whom and why the wave was archived (spec section 4.6.20). Only on an archived wave; a supervisor's status listing carries it, the retained topic need not."
+            },
+            "merge_queue": {
+              "type": "array",
+              "description": "The merge queue (spec section 4.6.17), in merge order: the wave's gated tasks the supervisor merges itself, one per release branch at a time. merging: its merge is running; updating: it is being brought up to date with the release branch before its merge; queued: waiting for its turn; refused: GitHub refused its last merge, and it goes after the tasks still queued. since: when the task entered the queue. Absent while the queue is empty.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["task", "state", "since"],
+                "properties": {
+                  "task": { "type": "string" },
+                  "state": { "enum": ["merging", "updating", "queued", "refused"] },
+                  "since": { "type": "string", "format": "date-time" }
+                }
+              }
+            },
+            "release": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["stage", "stages"],
+              "description": "The release train (spec section 4.6.19), from release_started on: the stage running or awaiting its go (null when none is), and every playbook stage in order with its state. Absent for a wave without a train.",
+              "properties": {
+                "stage": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+                "stages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "state"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "state": {
+                        "enum": [
+                          "pending",
+                          "awaiting_go",
+                          "running",
+                          "verified",
+                          "failed",
+                          "skipped"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
             "updated_at": { "type": "string", "format": "date-time" }
           }
         }
       },
       "required": ["channel", "type", "payload"]
+    },
+    {
+      "if": {
+        "properties": { "payload": { "properties": { "status": { "const": "archived" } } } }
+      },
+      "then": {
+        "properties": { "payload": { "properties": { "open_decisions": { "maxItems": 0 } } } }
+      }
     }
   ],
   "$defs": {
+    "fixerRemediation": {
+      "type": "object",
+      "required": ["kind", "test", "test_file", "run_urls", "for"],
+      "description": "A flake fixer's remediation (spec section 4.6.16), as its task_queued carries it: the failing test, its file, the runs it failed in and the tasks it blocks.",
+      "properties": {
+        "kind": { "enum": ["fix_flake"] },
+        "test": { "type": "string", "minLength": 1 },
+        "test_file": { "type": ["string", "null"] },
+        "run_urls": { "type": "array", "items": { "type": "string" } },
+        "for": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" }
+        }
+      }
+    },
     "agentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
     "waveId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
     "decisionId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
@@ -99,9 +222,22 @@
     "task": {
       "type": "object",
       "required": ["id", "issue", "stage", "agents"],
+      "if": { "required": ["synthetic"] },
+      "then": {
+        "required": ["remediation"],
+        "properties": {
+          "issue": { "const": 0 },
+          "remediation": { "required": ["test_file", "run_urls", "for"] }
+        }
+      },
+      "else": { "properties": { "issue": { "minimum": 1 } } },
       "properties": {
         "id": { "$ref": "#/$defs/taskId" },
-        "issue": { "type": "integer", "minimum": 1 },
+        "issue": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The task's GitHub issue; 0 only for a synthetic task (spec section 4.6.16), which has none."
+        },
         "stage": { "$ref": "#/$defs/stage" },
         "agents": {
           "type": "object",
@@ -192,6 +328,28 @@
               "message": { "type": "string" }
             }
           }
+        },
+        "remediation": {
+          "type": "object",
+          "required": ["kind", "test", "since"],
+          "additionalProperties": false,
+          "description": "A remediation requested for the task's red head that still holds (spec section 4.6.16): fix_flake, a failing test the PR does not touch awaiting its dedicated fixer. Gone once the head is verified, a new step starts, its fixer's fix landed, or the task is cancelled. On a synthetic task (synthetic: true) it is the fixer's own: test_file, run_urls, for (the tasks it blocks) and, once closed, outcome.",
+          "properties": {
+            "kind": { "enum": ["fix_flake"] },
+            "test": { "type": "string", "minLength": 1 },
+            "since": { "type": "string", "format": "date-time" },
+            "test_file": { "type": ["string", "null"] },
+            "run_urls": { "type": "array", "items": { "type": "string" } },
+            "for": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" }
+            },
+            "outcome": { "enum": ["landed", "failed"] }
+          }
+        },
+        "synthetic": {
+          "const": true,
+          "description": "A task the supervisor added itself, never from the wave file (spec section 4.6.16): a flake's fixer, fix-<slug>, issue 0, with its remediation. Journal-only: absent from spec."
         },
         "evidence_path": { "type": "string", "minLength": 1 },
         "last_error": {
@@ -312,11 +470,11 @@
     },
     "coordinator": {
       "type": "object",
-      "description": "Owner coordinator attention state, maintained by the supervisor from the owner's registry and progress topics.",
+      "description": "Owner coordinator attention state, maintained by the supervisor from the owner's registry and progress topics. For an owner that is a coordinator name (spec section 6.2), agent_id is the agent bound to it and reconnecting means that agent went away less than autopilot.reconnect_grace_s ago.",
       "required": ["agent_id", "state", "last_seen"],
       "properties": {
         "agent_id": { "$ref": "#/$defs/agentId" },
-        "state": { "enum": ["working", "awaiting_input", "gone"] },
+        "state": { "enum": ["working", "awaiting_input", "reconnecting", "gone"] },
         "question": { "type": "string" },
         "session_url": { "type": "string", "format": "uri" },
         "workspace": { "type": "string" },

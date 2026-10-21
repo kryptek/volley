@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
+import { formatPlaybook, wavePlaybook } from "../autopilot/playbook";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
@@ -10,13 +11,16 @@ import { parseWaveFile } from "../wave-file";
 import { formatWave } from "./status";
 import { places, previewPlacement } from "./validate";
 
-const HELP = `Usage: volleyd run <wave.yaml> [--owner <agent-id>] [--json] [--broker-url <url>] [--namespace <ns>]
+const HELP = `Usage: volleyd run <wave.yaml> [--owner <name|agent-id>] [--json] [--broker-url <url>] [--namespace <ns>]
 
 Validate a wave file locally, then submit it to the running daemon. Returns as soon as the
 daemon has journaled the wave; tasks start as the scheduler admits them.
 
 The wave's owner (the one coordinator allowed to resolve, pause, stop and steer it) is --owner,
-else VOLLEY_AGENT_ID, else the session registered for this directory (printed as "(auto)").
+else VOLLEY_AGENT_ID, else the session registered for this directory, else VOLLEY_COORDINATOR
+(printed as "(auto)"); a session whose MCP server sets VOLLEY_COORDINATOR owns it by that name,
+so the session keeps its waves when its MCP server restarts under a new agent id.
+With none of them the wave has no owner: run warns, since nobody can answer its decisions.
 Paths a task shares with a running wave's task are printed as overlap warnings (advisory).
 If the daemon already runs a wave with this id, the file is that wave's next plan version: the
 daemon stores it as $VOLLEYD_HOME/waves/<wave>/v<N>.yaml, journals the structural diff and applies
@@ -25,6 +29,10 @@ Preview the diff with \`volleyd diff <wave> <wave.yaml>\`.
 A wave that places tasks (\`placement: auto\`, or a task's \`host: auto\`) also prints where its
 tasks would go if admitted now (as \`volleyd validate\` does); each is placed at admission.
 `;
+
+/** Printed when `run` submits a wave with no owner (SPEC §4.6.20). */
+export const noOwnerWarning = (wave: string) =>
+  `wave ${wave} has no owner: nobody can answer its decisions (pass --owner, set VOLLEY_AGENT_ID or VOLLEY_COORDINATOR, or run from a registered session); it is archived automatically once ended (archive_ended_after_h)`;
 
 export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   let parsed: ReturnType<typeof parseRun>;
@@ -49,9 +57,13 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   // Validate locally first: a bad file fails fast, with or without a daemon.
   let text: string;
   let wave: ReturnType<typeof parseWaveFile>;
+  let playbookLine: string;
   try {
     text = await readFile(file, "utf-8");
     wave = parseWaveFile(text, file);
+    // The release playbook as read here (the daemon reads it again and is authoritative).
+    const playbook = wavePlaybook(wave);
+    playbookLine = `${formatPlaybook(playbook?.display ?? null, playbook?.playbook ?? null)}\n`;
   } catch (e) {
     io.stderr(`volleyd run: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
@@ -60,6 +72,7 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   return withClient(target, io, "volleyd run", async (client) => {
     const owner = await resolveCaller(client, parsed.values.owner, env);
     if (owner.warning !== undefined) io.stderr(`warning: ${owner.warning}\n`);
+    if (owner.id === null) io.stderr(`warning: ${noOwnerWarning(wave.wave)}\n`);
     const res = await client.request(
       "run",
       { wave_yaml: text, source: file, ...(owner.id !== null ? { owner: owner.id } : {}) },
@@ -83,12 +96,12 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
       io.stderr(warnings);
     } else if (res.plan !== undefined) {
       io.stdout(
-        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${warnings}${placement}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
+        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${warnings}${playbookLine}${placement}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
       );
     } else {
       const auto = owner.auto ? " (auto)" : "";
       io.stdout(
-        `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${warnings}${placement}${formatWave(state)}`,
+        `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${warnings}${playbookLine}${placement}${formatWave(state)}`,
       );
     }
     return EXIT.OK;

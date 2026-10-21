@@ -2,7 +2,14 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ExecOptions, ExecResult } from "../src/exec";
-import { type RemoteStep, mintConsentToken, mintScriptToken, sealLaunchScript } from "../src/fence";
+import {
+  type RemoteStep,
+  mintConsentToken,
+  mintHandoffToken,
+  mintPickerToken,
+  mintScriptToken,
+  sealLaunchScript,
+} from "../src/fence";
 import { type RemoteHostSpec, SshTmuxHost, resolveRemoteHost } from "../src/hosts/ssh-tmux";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
 import type { SpawnError } from "../src/spawn-error";
@@ -228,6 +235,98 @@ describe("SshTmuxHost", () => {
     expect((err as Error).message).toContain("tmux: command not found");
   });
 
+  it("classifies a failed launch: unknown once new-session was sent over a failing ssh, else refused", async () => {
+    const launch = (reply: StepReply): Promise<SpawnError> =>
+      remote(reply)
+        .host.launch({
+          cwd: "/wt",
+          name: "w1 T1 implementer",
+          command: LAUNCH_COMMAND,
+          launch: sealed("/wt"),
+        })
+        .then(
+          () => {
+            throw new Error("launched");
+          },
+          (e: unknown) => e as SpawnError,
+        );
+    const noSession = (s: RemoteStep) =>
+      argvIs("tmux", "has-session")(s) ? { code: 1 } : undefined;
+    // tmux answered and refused: nothing was created.
+    const refused = await launch(
+      (s) => noSession(s) ?? (argvIs("tmux", "new-session")(s) ? { code: 1 } : undefined),
+    );
+    expect(refused.detail).toMatchObject({ outcome: "refused", candidate: "w1-T1-implementer" });
+    // ssh failed after new-session was sent: the session may be running.
+    const dropped = await launch(
+      (s) => noSession(s) ?? (argvIs("tmux", "new-session")(s) ? { code: 255 } : undefined),
+    );
+    expect(dropped.detail).toMatchObject({ outcome: "unknown", candidate: "w1-T1-implementer" });
+    const timedOut = await launch(
+      (s) =>
+        noSession(s) ??
+        (argvIs("tmux", "new-session")(s) ? { code: 1, timedOut: true } : undefined),
+    );
+    expect(timedOut.detail).toMatchObject({ outcome: "unknown" });
+    // ssh never got as far as new-session.
+    const unreachable = await launch((s) =>
+      argvIs("tmux", "has-session")(s) ? { code: 255 } : undefined,
+    );
+    expect(unreachable.detail).toMatchObject({ outcome: "refused" });
+  });
+
+  it("serializes launches: one new-session in flight at a time", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let sent = 0;
+    const fake = fakeExec().on(["ssh"], async (_argv, opts: ExecOptions) => {
+      const step = opts.remote?.steps[0];
+      if (step === undefined) return {};
+      if (argvIs("tmux", "has-session")(step)) return { code: 1 };
+      if (argvIs("tmux", "new-session")(step)) {
+        sent += 1;
+        if (sent === 1) await gate;
+      }
+      return {};
+    });
+    const host = new SshTmuxHost(SPEC, fake.exec);
+    const spec = (n: string) => ({
+      cwd: "/wt",
+      name: n,
+      command: LAUNCH_COMMAND,
+      launch: sealed("/wt"),
+    });
+    const first = host.launch(spec("w1 T1 implementer"));
+    const second = host.launch(spec("w1 T2 implementer"));
+    // Let every pending step run: the second launch must still be waiting on the first.
+    for (let i = 0; i < 200; i++) await Promise.resolve();
+    expect(sent).toBe(1);
+    release();
+    expect(await first).toEqual({ workspace: "w1-T1-implementer" });
+    expect(await second).toEqual({ workspace: "w1-T2-implementer" });
+  });
+
+  it("findWorkspace asks tmux has-session for the exact candidate session", async () => {
+    const live = new Set(["=w1-T1-implementer-2"]);
+    const r = remote((s) =>
+      argvIs("tmux", "has-session")(s) ? { code: live.has(s.argv[3] ?? "") ? 0 : 1 } : undefined,
+    );
+    expect(await r.host.findWorkspace("w1 T1 implementer", "w1-T1-implementer-2")).toBe(
+      "w1-T1-implementer-2",
+    );
+    // Without a candidate: the session name the title maps to.
+    expect(await r.host.findWorkspace("w1 T1 implementer")).toBeNull();
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      ["tmux", "has-session", "-t", "=w1-T1-implementer-2"],
+      ["tmux", "has-session", "-t", "=w1-T1-implementer"],
+    ]);
+    // ssh failing is undecidable.
+    const down = remote((s) => (argvIs("tmux", "has-session")(s) ? { code: 255 } : undefined));
+    await expect(down.host.findWorkspace("w1 T1 implementer")).rejects.toThrow();
+  });
+
   it("launch.sh for a remote host: the box's mcp.json, the remote hooks dir, env exports for tooling", () => {
     const host = new SshTmuxHost(SPEC, fakeExec().exec);
     // The box's own volley checkout runs the agent's MCP server.
@@ -290,6 +389,21 @@ describe("SshTmuxHost", () => {
     ]);
   });
 
+  it("picker keys and a handoff reply map to tmux send-keys, with their tokens", async () => {
+    const r = remote();
+    const picker = mintPickerToken({ item_id: "p-a1-t1", version: 1, keys: ["Up"] });
+    await r.host.sendKeys("w1-T1-implementer", "Up", { picker });
+    const handoff = mintHandoffToken({ item_id: "h-a1-3", version: 1, text: "hold" });
+    await r.host.sendText("w1-T1-implementer", "hold", { handoff });
+    await expect(r.host.sendKeys("w1-T1-implementer", "Down", { picker })).rejects.toThrow(
+      /FENCE_DENIED/,
+    );
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "Up"],
+      ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", "hold"],
+    ]);
+  });
+
   it("close kills the tmux session, only with consent", async () => {
     const r = remote();
     await expect(r.host.close("w1-T1-implementer", { reason: "forged" } as never)).rejects.toThrow(
@@ -299,6 +413,26 @@ describe("SshTmuxHost", () => {
     expect(r.steps().map((s) => s.argv)).toEqual([
       ["tmux", "kill-session", "-t", "=w1-T1-implementer"],
     ]);
+  });
+
+  it("endSession is kill-session (tmux ends the pane's processes); no ref, nothing run", async () => {
+    const r = remote();
+    const consent = mintConsentToken("retire w1-t1-implementer-1");
+    expect(await r.host.endSession("w1-T1-implementer", "/wt/w1/T1-implementer", consent)).toEqual({
+      closed: true,
+      pids: [],
+      how: "kill-session",
+    });
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      ["tmux", "kill-session", "-t", "=w1-T1-implementer"],
+    ]);
+    const r2 = remote();
+    expect(await r2.host.endSession(null, "/wt/w1/T1-implementer", consent)).toEqual({
+      closed: false,
+      pids: [],
+      how: "none",
+    });
+    expect(r2.steps()).toEqual([]);
   });
 
   it("prepareWorktree fetches the release branch, then cuts the worktree from it, no tracking", async () => {
@@ -342,6 +476,96 @@ describe("SshTmuxHost", () => {
     expect(Buffer.from(append?.stdin ?? "", "base64").toString()).toBe(
       "# volleyd (agent worktrees)\n/ISSUE.md\n",
     );
+  });
+
+  it("prepareWorktree at a PR head sha: a reviewer gets it detached, a fixup a branch from it, never origin/<sha>", async () => {
+    const sha = "c173b8450164fc5107b1fba7d4b5e3b218636c12";
+    const wt = "/home/dev/wt/w1/T1-quality_reviewer-1";
+    const mk = () =>
+      remote((s) =>
+        argvIs("git", "-C", wt, "rev-parse")(s) ||
+        argvIs("git", "-C", "/home/dev/wt/w1/T1-fixup-1", "rev-parse")(s)
+          ? { code: 128, stderr: "not a git repository" }
+          : argvIs("git", "-C", SPEC.repo, "rev-parse", "--git-common-dir")(s)
+            ? { stdout: ".git\n" }
+            : argvIs("cat")(s)
+              ? { stdout: "# existing\n.volley/\n/ISSUE.md\n" }
+              : undefined,
+      );
+    const rev = mk();
+    const res = await rev.host.prepareWorktree({
+      repo: SPEC.repo,
+      path: wt,
+      branch: "unused",
+      base: sha,
+      detach: true,
+    });
+    expect(res).toEqual({ path: wt, branch: `HEAD (detached at ${sha})`, reused: false });
+    expect(rev.steps().map((s) => s.argv)).toContainEqual([
+      "git",
+      "-C",
+      SPEC.repo,
+      "worktree",
+      "add",
+      "--detach",
+      wt,
+      sha,
+    ]);
+    expect(rev.steps().some((s) => s.argv.includes(`origin/${sha}`))).toBe(false);
+
+    const fix = mk();
+    const fwt = "/home/dev/wt/w1/T1-fixup-1";
+    await fix.host.prepareWorktree({
+      repo: SPEC.repo,
+      path: fwt,
+      branch: "w1/T1-fixup-1",
+      base: sha,
+    });
+    expect(fix.steps().map((s) => s.argv)).toContainEqual([
+      "git",
+      "-C",
+      SPEC.repo,
+      "worktree",
+      "add",
+      "--no-track",
+      fwt,
+      "-b",
+      "w1/T1-fixup-1",
+      sha,
+    ]);
+  });
+
+  it("prepareWorktree at a sha the box already holds: a failed fetch is fine", async () => {
+    const sha = "c173b8450164fc5107b1fba7d4b5e3b218636c12";
+    const wt = "/home/dev/wt/w1/T1-spec_reviewer-1";
+    const r = remote((s) =>
+      argvIs("git", "-C", wt, "rev-parse")(s)
+        ? { code: 128, stderr: "not a git repository" }
+        : argvIs("git", "-C", SPEC.repo, "fetch")(s)
+          ? { code: 1, stderr: "fatal: couldn't find remote ref" }
+          : argvIs("git", "-C", SPEC.repo, "rev-parse", "--git-common-dir")(s)
+            ? { stdout: ".git\n" }
+            : argvIs("cat")(s)
+              ? { stdout: "# existing\n.volley/\n/ISSUE.md\n" }
+              : undefined,
+    );
+    const res = await r.host.prepareWorktree({
+      repo: SPEC.repo,
+      path: wt,
+      branch: "x",
+      base: sha,
+      detach: true,
+    });
+    expect(res.reused).toBe(false);
+    expect(r.steps().map((s) => s.argv)).toContainEqual([
+      "git",
+      "-C",
+      SPEC.repo,
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `${sha}^{commit}`,
+    ]);
   });
 
   it("prepareWorktree reuses an existing remote worktree and reports its branch", async () => {

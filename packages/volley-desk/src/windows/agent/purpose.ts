@@ -4,7 +4,7 @@
  * every window leads with a purpose, picked from the first source that applies:
  *
  * 1. `wave` — a wave task's title (`spec.tasks.<id>.title`): `<task> · <title>`,
- *    its issue (and open PR) linked through the wave state's `repo`.
+ *    its issue linked through the wave state's `github`, its PR through `pr.url`.
  * 2. `registered` — the `title` the agent registered (SPEC §6.2), with its
  *    `links` (`#N` / `PR #N` in `links.repo`, or an http(s) URL).
  * 3. `session` — an interactive session (`isSession`): its terminal workspace
@@ -17,6 +17,7 @@
  * The window, the steering panel, the unassigned / sessions cards and the
  * Needs-you notification all use the same `label`.
  */
+import { isIssueNumber, issueHref, issueLabel, prHref, prLabel } from "../../lib/github";
 import { isSession } from "../../store/reducer";
 import type { AgentView, WaveView } from "../../store/types";
 
@@ -26,6 +27,8 @@ export interface PurposeLink {
   text: string;
   /** Opens in a new tab; `null` for a bare number with no repo to resolve it in. */
   href: string | null;
+  /** The accessible name (`Issue #42 on GitHub`, `PR #7 on <host>`; `Issue #42` unlinked). */
+  label: string;
 }
 
 export interface Purpose {
@@ -49,19 +52,42 @@ function repoOf(v: unknown): string | null {
   return typeof v === "string" && REPO.test(v) ? v : null;
 }
 
+/**
+ * A purpose link's accessible name. One rule for every purpose link: `on GitHub` when the
+ * link is known to open on GitHub, else `on <host>`; bare when unlinked. A wave's links are
+ * known to be GitHub (`onGitHub`: the supervisor read the repository with gh, an Enterprise host included);
+ * a registered URL is known to be GitHub only on github.com, so any other host is named.
+ */
+function labelOf(
+  kind: "issue" | "pr",
+  n: string | null,
+  href: string | null,
+  onGitHub = false,
+): string {
+  const what = kind === "pr" ? "PR" : "Issue";
+  const name = n ? `${what} #${n}` : what;
+  if (href === null) return name;
+  const host = new URL(href).hostname;
+  if (onGitHub || host === "github.com" || host.endsWith(".github.com"))
+    return n ? (kind === "pr" ? prLabel(n) : issueLabel(n)) : `${name} on GitHub`;
+  return `${name} on ${host}`;
+}
+
 /** `#42` / `PR #57` for a number (linked when `repo` is known), the URL's own number for a URL. */
 function link(kind: "issue" | "pr", ref: unknown, repo: string | null): PurposeLink | null {
   const prefix = kind === "pr" ? "PR #" : "#";
-  if (typeof ref === "number" && Number.isSafeInteger(ref) && ref > 0) {
+  if (isIssueNumber(ref)) {
     const path = kind === "pr" ? "pull" : "issues";
-    return {
-      text: `${prefix}${ref}`,
-      href: repo ? `https://github.com/${repo}/${path}/${ref}` : null,
-    };
+    const href = repo ? `https://github.com/${repo}/${path}/${ref}` : null;
+    return { text: `${prefix}${ref}`, href, label: labelOf(kind, String(ref), href) };
   }
   if (typeof ref === "string" && /^https?:\/\//i.test(ref) && URL.canParse(ref)) {
-    const n = /\/(\d+)\/?(?:[?#].*)?$/.exec(ref)?.[1];
-    return { text: n ? `${prefix}${n}` : kind === "pr" ? "PR" : "issue", href: ref };
+    const n = /\/(\d+)\/?(?:[?#].*)?$/.exec(ref)?.[1] ?? null;
+    return {
+      text: n ? `${prefix}${n}` : kind === "pr" ? "PR" : "issue",
+      href: ref,
+      label: labelOf(kind, n, ref),
+    };
   }
   return null;
 }
@@ -99,12 +125,21 @@ export function purposeOf(a: AgentView, wave: WaveView | undefined): Purpose {
     const title = oneLine(s.spec?.tasks[a.task]?.title);
     if (title) {
       const task = s.tasks.find((t) => t.id === a.task);
-      const repo = repoOf(s.repo);
       const issue = task?.issue ?? s.spec?.tasks[a.task]?.issue;
+      const links: PurposeLink[] = [];
+      if (isIssueNumber(issue)) {
+        const href = issueHref(s.github, issue);
+        // The wave's own repository is on GitHub (an Enterprise host included).
+        links.push({ text: `#${issue}`, href, label: labelOf("issue", String(issue), href, true) });
+      }
       const pr = task?.pr?.number;
-      const links = [link("issue", issue, repo), link("pr", pr, repo)].filter(
-        (l): l is PurposeLink => l !== null,
-      );
+      const prUrl = prHref(task);
+      if (isIssueNumber(pr))
+        links.push({
+          text: `PR #${pr}`,
+          href: prUrl,
+          label: labelOf("pr", String(pr), prUrl, true),
+        });
       return make(`${a.task} · ${title}`, "wave", links);
     }
   }

@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { agentIdFor, mintCredentials } from "../src/identity";
+import { agentIdFor, mintCredentials, releaseAgentId } from "../src/identity";
 import { retireAgent } from "../src/retire";
 import { spawnAgent } from "../src/spawn";
 import { SpawnError } from "../src/spawn-error";
@@ -24,6 +24,15 @@ describe("agentIdFor", () => {
     expect(a).toMatch(/^[a-z0-9][a-z0-9_-]{0,62}$/);
     expect(a.endsWith("-t1-quality_reviewer-1")).toBe(true);
     expect(a).not.toBe(b);
+  });
+});
+
+describe("releaseAgentId", () => {
+  it("is <wave>-release-<stage>-<attempt> (SPEC §4.6.19), shortened like any id", () => {
+    expect(releaseAgentId("w1", "bump", 1)).toBe("w1-release-bump-1");
+    const long = releaseAgentId("a".repeat(60), "deploy-staging", 2);
+    expect(long).toMatch(/^[a-z0-9][a-z0-9_-]{0,62}$/);
+    expect(long.endsWith("-release-deploy-staging-2")).toBe(true);
   });
 });
 

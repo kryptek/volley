@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/inbox-item.schema.json",
+  "title": "Volley Needs-you Inbox Item",
+  "description": "One thing waiting for a person, published retained to volley/_inbox/<id> by the supervisor only. The supervisor is the referee: the first answer at the item's current version wins, and the answered record is kept for autopilot.inbox_answered_ttl_s, then cleared with an empty retained payload. See spec section 4.6.18.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_inbox" },
+        "type": { "enum": ["inbox_item", "inbox_answered"] },
+        "payload": {
+          "type": "object",
+          "required": [
+            "id",
+            "kind",
+            "version",
+            "owner_only",
+            "agent_id",
+            "title",
+            "question",
+            "pointers",
+            "opened_at",
+            "source"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[dphr]-[A-Za-z0-9_-]{1,200}$",
+              "description": "d-<wave>-<decision_id>, p-<agent_id>-<tool_use_id>, h-<agent_id>-<seq> or r-<wave>-<stage|go>, by kind."
+            },
+            "kind": { "enum": ["decision", "picker", "handoff", "release"] },
+            "version": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Bumped by every accepted change; an answer names the version it answers (compare-and-set)."
+            },
+            "owner_only": {
+              "type": "boolean",
+              "description": "Only the owner answers it: autopilot never does, and a client notifies the owner's phone."
+            },
+            "wave": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+            "task": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+            "agent_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+              "description": "The agent the item is about (the supervisor's own id for a wave-level decision)."
+            },
+            "title": { "type": "string", "minLength": 1 },
+            "question": { "type": "string", "minLength": 1 },
+            "options": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["label"],
+                "additionalProperties": false,
+                "properties": {
+                  "label": { "type": "string", "minLength": 1 },
+                  "description": { "type": "string" }
+                }
+              }
+            },
+            "allow_other": {
+              "type": "boolean",
+              "description": "A free-text answer is accepted besides the options."
+            },
+            "multi": { "type": "boolean", "description": "More than one option may be chosen." },
+            "pointers": {
+              "type": "object",
+              "additionalProperties": { "type": "string", "minLength": 1 },
+              "description": "Where the evidence lives (diff, transcript, screen, pr, …)."
+            },
+            "opened_at": { "type": "string", "format": "date-time" },
+            "source": {
+              "type": "object",
+              "description": "What the item mirrors: for a decision, { decision_id, decision_kind }."
+            },
+            "answered": { "$ref": "#/$defs/answered" }
+          }
+        }
+      },
+      "required": ["channel", "type", "payload"],
+      "if": { "properties": { "type": { "const": "inbox_answered" } } },
+      "then": { "properties": { "payload": { "required": ["answered"] } } },
+      "else": { "properties": { "payload": { "not": { "required": ["answered"] } } } }
+    }
+  ],
+  "$defs": {
+    "where": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["desk", "terminal", "cli", "autopilot"] },
+        "device": {
+          "type": "string",
+          "minLength": 1,
+          "description": "desk: the device (phone, …)."
+        },
+        "machine": {
+          "type": "string",
+          "minLength": 1,
+          "description": "terminal: the machine whose terminal answered."
+        }
+      }
+    },
+    "answered": {
+      "type": "object",
+      "required": ["answer", "by", "where", "at"],
+      "additionalProperties": false,
+      "properties": {
+        "answer": { "type": "string", "minLength": 1 },
+        "by": { "type": "string", "minLength": 1 },
+        "where": { "$ref": "#/$defs/where" },
+        "at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

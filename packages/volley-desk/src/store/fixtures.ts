@@ -12,6 +12,7 @@ import type {
   DeskMessage,
   DeskState,
   Envelope,
+  InboxItem,
   Role,
   Stage,
   WaveCoordinator,
@@ -186,6 +187,29 @@ const WAVES: WaveDef[] = [
 
 /** Where the demo's placed tasks run, and why (SPEC §4.6.15 `tasks[].placement`). */
 function placed(wave: string, task: string, now: number) {
+  // An agent window's machine chip: a running task placed on the supervisor's own machine.
+  if (wave === "ci-speed" && task === "T3b") {
+    return {
+      placement: {
+        host: LOCAL_MACHINE,
+        by: "auto" as const,
+        score: 0.66,
+        decided_at: iso(now - 40 * 60_000),
+        candidates: [
+          {
+            host: LOCAL_MACHINE,
+            score: 0.66,
+            line: `${LOCAL_MACHINE}: 0.66 (cpu 0.7, slots 0.67, mem 0.6, usage 0.58)`,
+          },
+          {
+            host: "box-a",
+            score: 0.52,
+            line: "box-a: 0.52 (cpu 0.83, slots 0.17, mem 0.71, usage 0.58)",
+          },
+        ],
+      },
+    };
+  }
   if (wave !== "ci-speed" || task !== "T6") return {};
   return {
     host: "box-a",
@@ -212,6 +236,12 @@ function placed(wave: string, task: string, now: number) {
   };
 }
 
+/** The demo waves' repository on GitHub (SPEC §4.6.1), so the demo shows chips and links. */
+const DEMO_GITHUB = {
+  slug: "example-org/example-repo",
+  url: "https://github.com/example-org/example-repo",
+};
+
 const decisionId = (w: WaveDef) =>
   `${w.id}-${w.decision?.task.toLowerCase()}-${w.decision?.kind}-1`;
 
@@ -221,8 +251,9 @@ function waveState(w: WaveDef, now: number, tasks: TaskDef[] = w.tasks): DeskMes
     wave: w.id,
     version: 1,
     owner: w.owner,
-    repo: "example-org/example-repo",
+    repo: "/srv/work/example-repo",
     release_branch: w.releaseBranch,
+    github: DEMO_GITHUB,
     status: w.status,
     tasks: tasks.map((t) => ({
       id: t.id,
@@ -907,5 +938,225 @@ export function demoReviewer(now = Date.now()): DeskMessage[] {
       ["⏺ Read(ISSUE.md)", "⏺ Bash(git diff origin/release/2026-10-20-status-chip...HEAD --stat)"],
       now,
     ),
+  ];
+}
+
+/**
+ * Autopilot's surfaces (SPEC §4.6.16–19), as two more waves a supervisor would publish: one whose
+ * coordinator is reconnecting (its session's MCP restarted), and one autopilot runs that is
+ * releasing, with a merge queue, a release train, a synthetic fixer task and both journal events.
+ */
+export function demoAutopilot(now = Date.now()): DeskMessage[] {
+  const base = (wave: string, over: Partial<WaveStatePayload>): WaveStatePayload => ({
+    wave,
+    version: 1,
+    owner: "lead",
+    repo: "example-org/example-repo",
+    release_branch: `release/2026-10-20-${wave}`,
+    status: "running",
+    tasks: [],
+    open_decisions: [],
+    gates: [],
+    updated_at: iso(now),
+    ...over,
+  });
+  const state = (p: WaveStatePayload): DeskMessage => ({
+    topic: `volley/_waves/${p.wave}/state`,
+    envelope: env(SUPERVISOR, "_waves/state", "wave_state", p, now),
+    receivedAt: now,
+  });
+  const task = (id: string, issue: number, stage: Stage) => ({ id, issue, stage, agents: {} });
+  const reconnecting = base("relaunch", {
+    tasks: [task("T1", 201, "implement")],
+    spec: { version: 1, tasks: { T1: { issue: 201, title: "Grace window", after: [] } } },
+    coordinator: { agent_id: "lead-a7", state: "reconnecting", last_seen: iso(now - 3 * 60_000) },
+    autopilot: { enabled: true, auto_resolved: 0, escalated: 0, budgets: {} },
+  });
+  const train = base("autopilot", {
+    status: "releasing",
+    tasks: [
+      task("T3", 211, "merge_ready"),
+      task("T5", 212, "merge_ready"),
+      task("T7", 213, "merge_ready"),
+      task("T9", 214, "merge_ready"),
+      {
+        ...task("fix-queue-order-flake", 0, "fixup"),
+        synthetic: true,
+        remediation: {
+          kind: "fix_flake",
+          test: "merge queue > orders by dependents",
+          since: iso(now - 6 * 60_000),
+          test_file: "packages/volleyd/test/merge-queue.test.ts",
+          run_urls: ["https://github.com/example/repo/actions/runs/1"],
+          for: ["T3", "T7"],
+        },
+      },
+    ],
+    gates: ["T3", "T5", "T7", "T9"],
+    spec: {
+      version: 1,
+      tasks: {
+        T3: { issue: 211, title: "Queue order", after: [] },
+        T5: { issue: 212, title: "Update before merge", after: [] },
+        T7: { issue: 213, title: "Refused merges", after: ["T3"] },
+        T9: { issue: 214, title: "Train stages", after: ["T5"] },
+      },
+    },
+    coordinator: { agent_id: "lead", state: "working", last_seen: iso(now) },
+    autopilot: {
+      enabled: true,
+      auto_resolved: 4,
+      escalated: 1,
+      budgets: { "relaunch_max:T3/implementer": { used: 1, max: 1 } },
+    },
+    merge_queue: [
+      { task: "T3", state: "merging", since: iso(now - 4 * 60_000) },
+      { task: "T5", state: "updating", since: iso(now - 3 * 60_000) },
+      { task: "T7", state: "queued", since: iso(now - 2 * 60_000) },
+      { task: "T9", state: "queued", since: iso(now - 60_000) },
+    ],
+    release: {
+      stage: "publish",
+      stages: [
+        { name: "tag", state: "verified" },
+        { name: "publish", state: "awaiting_go" },
+        { name: "announce", state: "pending" },
+      ],
+    },
+  });
+  const event = (type: string, seq: number, data: Record<string, unknown>, t?: string) => ({
+    topic: "volley/_waves/autopilot/events",
+    envelope: env(
+      SUPERVISOR,
+      "_waves/events",
+      type,
+      { wave: "autopilot", seq, at: iso(now), ...(t ? { task: t } : {}), data },
+      now,
+    ),
+    receivedAt: now,
+  });
+  return [
+    state(reconnecting),
+    state(train),
+    event(
+      "decision_auto_resolved",
+      41,
+      {
+        decision_id: "autopilot-t3-hooks_auth_failed-1",
+        kind: "hooks_auth_failed",
+        policy: "hooks_auth_failed/relaunch",
+        answer: "relaunch",
+        rationale: "a bad launch is cheaper to retry than to read",
+        evidence: { screen_hash: "9c41e0aa", attempt: 1 },
+        budget: { key: "relaunch_max:T3/implementer", used: 1, max: 1 },
+      },
+      "T3",
+    ),
+    event("decision_escalated", 42, {
+      decision_id: "autopilot-stage_go-1",
+      kind: "stage_go",
+      why: "owner_only",
+    }),
+  ];
+}
+
+/**
+ * The needs-you inbox (SPEC §4.6.18): one item of each kind as volleyd publishes them on
+ * `volley/_inbox/<id>`. The release item is owner-only, for the `autopilot` wave's `publish` stage
+ * (`demoAutopilot`), and points at its stage evidence on disk.
+ */
+export const INBOX_RELEASE_EVIDENCE = {
+  wave: "autopilot",
+  stage: "tag",
+  artifacts: {
+    tag: "v0.5.0",
+    changelog_entries: [
+      "**Needs you** window: one row per open item, with `Only you` filter.",
+      "- Phone layout with 48 px targets\n- Owner-only items push to the phone",
+    ],
+    screenshots: ["smoke-desk.png", "smoke-phone.webp"],
+    release_pr: "https://github.com/example-org/example-repo/pull/300",
+    ci_runs: ["https://github.com/example-org/example-repo/actions/runs/77"],
+    smoke_log: "smoke.log",
+    guide_url: "https://guide.example.com/releasing",
+  },
+};
+
+export function demoInbox(now = Date.now()): DeskMessage[] {
+  const item = (p: InboxItem): DeskMessage => ({
+    topic: `volley/_inbox/${p.id}`,
+    envelope: env(SUPERVISOR, "_inbox", p.answered ? "inbox_answered" : "inbox_item", p, now),
+    receivedAt: now,
+    retained: true,
+  });
+  return [
+    item({
+      id: "d-autopilot-d-rv7",
+      kind: "decision",
+      version: 2,
+      owner_only: false,
+      wave: "autopilot",
+      task: "T7",
+      agent_id: "autopilot-t7-implementer-1",
+      title: "Reviewers disagree · autopilot/T7",
+      question: "The spec reviewer calls the missing retry a P1; the quality reviewer says fine.",
+      options: [{ label: "blocker" }, { label: "fine" }],
+      allow_other: true,
+      pointers: { pr: "https://github.com/example-org/example-repo/pull/213" },
+      opened_at: iso(now - 4 * 60_000),
+      source: { decision_id: "d-rv7", decision_kind: "reviewers_disagree" },
+    }),
+    item({
+      id: "p-coord-a1b2c3-toolu_01AbCdEf",
+      kind: "picker",
+      version: 1,
+      owner_only: false,
+      agent_id: "coord-a1b2c3",
+      title: "Pick a storage backend",
+      question: "Which backend should the cache use?",
+      options: [
+        { label: "SQLite", description: "One file, no server" },
+        { label: "Redis", description: "Shared across machines" },
+      ],
+      allow_other: true,
+      multi: false,
+      pointers: {},
+      opened_at: iso(now - 3 * 60_000),
+      source: { tool_use_id: "toolu_01AbCdEf", machine: "laptop" },
+    }),
+    item({
+      id: "h-sess-9f2-12",
+      kind: "handoff",
+      version: 1,
+      owner_only: false,
+      agent_id: "sess-9f2",
+      title: "Session sess-9f2 is waiting",
+      question: "Should I also migrate the old rows?",
+      allow_other: true,
+      pointers: {},
+      opened_at: iso(now - 2 * 60_000),
+      source: { seq: 12 },
+    }),
+    item({
+      id: "r-autopilot-publish",
+      kind: "release",
+      version: 1,
+      owner_only: true,
+      wave: "autopilot",
+      agent_id: SUPERVISOR,
+      title: "Run stage publish · autopilot",
+      question: "Stage tag is verified. Run publish?",
+      options: [{ label: "go" }, { label: "skip" }, { label: "hold" }],
+      pointers: {},
+      opened_at: iso(now - 60_000),
+      source: {
+        wave: "autopilot",
+        stage: "publish",
+        evidence: {
+          md: "~/.volleyd/waves/autopilot/release/tag.md",
+          json: "~/.volleyd/waves/autopilot/release/tag.json",
+        },
+      },
+    }),
   ];
 }

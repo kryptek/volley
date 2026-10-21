@@ -79,8 +79,13 @@ export const DESK_SUBSCRIPTIONS = [
   "volley/+/+/mailbox",
   "volley/+/+/screen",
   "volley/_waves/+/state",
+  "volley/_waves/+/events",
   "volley/_waves/+/decisions/+",
+  // Each wave's morning digest (SPEC §4.6.16): the wave window's digest card.
+  "volley/_waves/+/digest",
   "volley/_waves/_config",
+  // The index of archived waves (SPEC §4.6.20): the coordinators window counts it.
+  "volley/_waves/_archive",
   "volley/_system/leases/+",
   "volley/_system/admission",
   "volley/+/+/usage",
@@ -88,6 +93,8 @@ export const DESK_SUBSCRIPTIONS = [
   "volley/_system/claude/+/signin",
   // Each machine's record and, under it, volleyd's readiness verdict (SPEC §4.6.15).
   "volley/_system/machines/#",
+  // The needs-you inbox: one retained record per thing waiting for a person (SPEC §4.6.18).
+  "volley/_inbox/+",
   // volleyd's answers to account ops (SPEC §4.6.10); secrets in them are sealed to the requester.
   "volley/_system/auth/replies/+",
 ] as const;

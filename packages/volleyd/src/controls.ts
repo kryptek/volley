@@ -25,6 +25,8 @@ export function holdReason(rec: WaveRecord, killSwitch: boolean): string | null 
   const status = rec.state?.status;
   if (status === "paused") return "wave paused";
   if (status === "stopped") return "wave stopped";
+  // Every task is settled; the release train runs stages, never tasks (SPEC §4.6.19).
+  if (status === "releasing") return "wave releasing";
   return killSwitch ? KILL_SWITCH_REASON : null;
 }
 
@@ -276,7 +278,7 @@ export function opCommand(spec: OpCommand): Command {
       if (spec.takesOwnership === true) {
         if (caller === null) {
           io.stderr(
-            `volleyd ${spec.name}: ${spec.name} needs an identity: pass --by <agent-id> or set VOLLEY_AGENT_ID\n`,
+            `volleyd ${spec.name}: ${spec.name} needs an identity: pass --by <name|agent-id> or set VOLLEY_COORDINATOR or VOLLEY_AGENT_ID\n`,
           );
           return EXIT.ERROR;
         }
@@ -293,7 +295,7 @@ export function opCommand(spec: OpCommand): Command {
       if (!res.ok) {
         const hint =
           caller === null && /owned by/.test(res.error ?? "")
-            ? "\n(no caller identity: pass --by <agent-id> or set VOLLEY_AGENT_ID)"
+            ? "\n(no caller identity: pass --by <name|agent-id> or set VOLLEY_COORDINATOR or VOLLEY_AGENT_ID)"
             : "";
         io.stderr(`volleyd ${spec.name}: ${res.error ?? "rejected"}${hint}\n`);
         return EXIT.ERROR;

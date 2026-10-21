@@ -1,9 +1,9 @@
 /**
  * The coordinators window, ported from the prototype `CoordinatorsWindow`: one
  * row per wave with its coordinator's state (`Working` / `Waiting for your
- * answer` / `No coordinator · claim it`), the wave's progress, go-to (fit the
+ * answer` / `Coordinator reconnecting · 4m` / `No coordinator · claim it`), the wave's progress, go-to (fit the
  * viewport to the wave and its agents) and show/hide. Every row carries a status
- * chip (`working`, `needs you`, `completed`, `stopped`), apart from its left
+ * chip (`working`, `needs you`, a neutral `reconnecting`, `completed`, `stopped`), apart from its left
  * bar, which is the wave's identity colour (the supervisor row's bar is neutral
  * and its health is a chip too, red when down), so a colour never means two things.
  * Active waves come first; ended ones (their coordinator is gone because the
@@ -11,7 +11,8 @@
  * bottom. With its agents an ended wave folds off the canvas under "Show
  * finished" like finished agents; its row offers Show (put its window back on
  * the canvas and fit to it) and Dismiss (drop it from this Desk: Desk-side
- * state only, the wave and its journal are untouched). A
+ * state only, the wave and its journal are untouched). A wave archived by the
+ * supervisor (`volleyd archive`) leaves every Desk; a footer line counts them. A
  * coordinator idle with a background wait armed reads `Working · waiting on
  * events`: it wakes on the wave's events, nobody has to answer. Hidden waves keep
  * running and still count towards the top-bar pill and notifications. The
@@ -28,13 +29,15 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useState } from "react";
-import type { EffectiveCoordinator } from "../../attention";
+import { type EffectiveCoordinator, reconnectingLabel } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
 import type { Rect } from "../../canvas/useViewport";
+import { githubOf } from "../../lib/github";
 import { noun, plural } from "../../lib/plural";
+import { RepoChip } from "../../look/RepoChip";
 import { usePanelSound } from "../../sounds/usePanelSound";
 import { supervisorHealth } from "../../store/reducer";
-import type { CoordinatorState, SupervisorView, WaveView } from "../../store/types";
+import type { CoordinatorState, GitHubRepo, SupervisorView, WaveView } from "../../store/types";
 import { age } from "../agent/AgentWindow";
 import { Clawd } from "../wave/Clawd";
 import { IconBtn, dagNodes, isMine } from "../wave/WaveWindow";
@@ -48,6 +51,7 @@ export const COORDS_W = 430;
 export const STATE_LABEL: Record<CoordinatorState, string> = {
   working: "Working",
   awaiting_input: "Waiting for your answer",
+  reconnecting: "Coordinator reconnecting",
   gone: "No coordinator · claim it",
 };
 
@@ -58,30 +62,45 @@ export const WAITING_ON_EVENTS_LABEL = "Working · waiting on events";
 export const ENDED_LABEL: Partial<Record<string, string>> = {
   complete: "Complete",
   stopped: "Stopped",
+  // Seen only in the one publish before an archived wave's state is cleared (SPEC §4.6.20).
+  archived: "Archived",
 };
 
 const Icon = ({ i }: { i: typeof Cancel01Icon }) => (
   <HugeiconsIcon icon={i} size={13} strokeWidth={1.8} />
 );
 
-export type StatusChip = "working" | "needs" | "completed" | "stopped" | "failed";
+export type StatusChip =
+  | "working"
+  | "needs"
+  | "reconnecting"
+  | "completed"
+  | "stopped"
+  | "archived"
+  | "failed";
 
 const ENDED_CHIP: Partial<Record<string, StatusChip>> = {
   complete: "completed",
   stopped: "stopped",
+  archived: "archived",
 };
 
 export const CHIP_LABEL: Record<StatusChip, string> = {
   working: "working",
   needs: "needs you",
+  reconnecting: "reconnecting",
   completed: "completed",
   stopped: "stopped",
+  archived: "archived",
   failed: "failed",
 };
 
 /** A wave row's status chip: its end state once ended, else whether its coordinator needs you. */
 export function waveChip(w: WaveView, c: EffectiveCoordinator): StatusChip {
-  return ENDED_CHIP[w.state?.status ?? ""] ?? (c.state === "working" ? "working" : "needs");
+  const ended = ENDED_CHIP[w.state?.status ?? ""];
+  if (ended) return ended;
+  if (c.state === "reconnecting") return "reconnecting";
+  return c.state === "working" ? "working" : "needs";
 }
 
 export function Chip({ kind, label }: { kind: StatusChip; label?: string }) {
@@ -129,13 +148,57 @@ export interface CoordinatorsWindowProps {
   onDismiss?: (wave: string) => void;
   /** How many ended waves are dismissed, and how to bring them back. */
   dismissed?: { count: number; onRestore: () => void };
+  /** How many waves the supervisor archived (its `_archive` index): gone from every Desk. */
+  archived?: number;
   /** The supervisors for the first row; `[]` says volleyd is absent, omitted shows no row (demo). */
   supervisors?: readonly SupervisorView[];
   /** Clock for the supervisor's age (the App's attention tick). */
   now?: number;
 }
 
-function SupervisorRow({ sup, now }: { sup: SupervisorView | undefined; now: number }) {
+/** The distinct repositories (`github`, by slug, in wave order) of these waves. */
+function reposOf(waves: readonly WaveView[]): GitHubRepo[] {
+  const seen = new Map<string, GitHubRepo>();
+  for (const w of waves) {
+    const gh = githubOf(w.state?.github);
+    if (gh && !seen.has(gh.slug)) seen.set(gh.slug, gh);
+  }
+  return [...seen.values()];
+}
+
+/** Up to two repo chips; more read `N repositories`, the slugs in its tooltip and accessible name. */
+function RepoChips({ repos }: { repos: readonly GitHubRepo[] }) {
+  if (repos.length === 0) return null;
+  if (repos.length > 2)
+    return (
+      <span
+        className="chip"
+        role="note"
+        title={repos.map((r) => r.slug).join("\n")}
+        aria-label={`${repos.length} repositories: ${repos.map((r) => r.slug).join(", ")}`}
+      >
+        {repos.length} repositories
+      </span>
+    );
+  return (
+    <>
+      {repos.map((r) => (
+        <RepoChip key={r.slug} github={r} />
+      ))}
+    </>
+  );
+}
+
+function SupervisorRow({
+  sup,
+  now,
+  repos,
+}: {
+  sup: SupervisorView | undefined;
+  now: number;
+  /** The distinct repositories across the non-ended waves. */
+  repos: readonly GitHubRepo[];
+}) {
   const id = sup?.id ?? "volleyd";
   const h = supervisorHealth(sup);
   const parts = [id, h.label, ...(h.since === null ? [] : [age(now - h.since)])];
@@ -154,6 +217,11 @@ function SupervisorRow({ sup, now }: { sup: SupervisorView | undefined; now: num
         <div className="coord-sub">
           <span className="coord-state">{parts.join(" · ")}</span>
           {sup?.version && <span className="dim"> · v{sup.version}</span>}
+          {repos.length > 0 && (
+            <span className="coord-repos">
+              <RepoChips repos={repos} />
+            </span>
+          )}
         </div>
       </div>
     </li>
@@ -187,6 +255,7 @@ function WaveRow({
   const accent = accentFor(w.id);
   const mine = isMine(w.state?.owner, p.me, p.identity);
   const ended = ENDED_LABEL[w.state?.status ?? ""];
+  const github = githubOf(w.state?.github);
   return (
     <li
       aria-label={w.id}
@@ -205,9 +274,16 @@ function WaveRow({
             {ended ??
               (c.state === "working" && c.waitingOnEvents
                 ? WAITING_ON_EVENTS_LABEL
-                : STATE_LABEL[c.state])}
+                : c.state === "reconnecting"
+                  ? reconnectingLabel(c, p.now ?? Date.now())
+                  : STATE_LABEL[c.state])}
           </span>
           {ended && hidden && <span className="dim"> · hidden</span>}
+          {github && (
+            <span className="coord-repos">
+              <RepoChip github={github} />
+            </span>
+          )}
         </div>
         <div className="coord-bar">
           <span style={{ width: `${pctOf(w)}%`, background: accent }} />
@@ -224,6 +300,7 @@ export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
   const isEnded = (w: WaveView) => ENDED_LABEL[w.state?.status ?? ""] !== undefined;
   const active = p.waves.filter((w) => !isEnded(w));
   const ended = p.waves.filter(isEnded);
+  const repos = reposOf(active);
   const goTo = (id: string) => {
     const rects = p.clusterOf?.(id) ?? [];
     if (rects.length) p.fitTo?.(rects);
@@ -251,10 +328,10 @@ export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
     >
       <ul className="coord-list">
         {p.supervisors && p.supervisors.length === 0 && (
-          <SupervisorRow sup={undefined} now={p.now ?? Date.now()} />
+          <SupervisorRow sup={undefined} now={p.now ?? Date.now()} repos={repos} />
         )}
         {p.supervisors?.map((s) => (
-          <SupervisorRow key={s.id} sup={s} now={p.now ?? Date.now()} />
+          <SupervisorRow key={s.id} sup={s} now={p.now ?? Date.now()} repos={repos} />
         ))}
         {active.map((w) => {
           const c = p.coordinators[w.id] ?? { id: null, state: "gone" as const };
@@ -318,6 +395,11 @@ export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
                 )}
               </ul>
             )}
+          </li>
+        )}
+        {(p.archived ?? 0) > 0 && (
+          <li className="coord-archived">
+            {p.archived} archived (<code>volleyd archive</code>)
           </li>
         )}
       </ul>

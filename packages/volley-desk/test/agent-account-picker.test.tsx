@@ -55,6 +55,9 @@ describe("agent window account picker", () => {
   it("lists the accounts with their 5-hour usage, the agent's own selected", () => {
     renderPicker({ onMoveAccount: vi.fn() });
     const pick = screen.getByRole("combobox", { name: "Claude account for T1" });
+    // Row 2 of the title bar, beside the headline; the actions keep only buttons.
+    expect(pick.closest(".win-sub")).toBeTruthy();
+    expect(pick.closest(".win-actions")).toBeNull();
     expect(pick).toHaveValue("work");
     const names = [...pick.querySelectorAll("option")].map((o) => o.textContent);
     expect(names).toEqual([

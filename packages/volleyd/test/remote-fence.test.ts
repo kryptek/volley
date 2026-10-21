@@ -8,7 +8,9 @@ import {
   type RemoteStep,
   assertAllowed,
   mintConsentToken,
+  mintHandoffToken,
   mintModelSwitchToken,
+  mintPickerToken,
   renderRemoteScript,
   sealLaunchScript,
   sealRemoteSigninScript,
@@ -121,6 +123,19 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ],
     ["git", "-C", "/wt/x", "rev-parse", "--is-inside-work-tree"],
     ["gh", "issue", "view", "42", "--json", "number,title,body,url"],
+    // Verifying a PR on a paired machine: the same read-only gh policy as locally.
+    [
+      "gh",
+      "pr",
+      "list",
+      "--head",
+      "w1/T1-implementer-1",
+      "--state",
+      "open",
+      "--json",
+      "number,url,headRefName",
+    ],
+    ["gh", "pr", "checks", "7", "--json", "name,state"],
     ["tmux", "capture-pane", "-p", "-t", "=w1-T1-implementer:", "-S-60"],
     ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "Enter"],
     ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "Escape"],
@@ -168,6 +183,17 @@ describe("remote allow-list (ssh … bash -s)", () => {
     expect(ok("tmux", "show-environment", "-g", "SSH_AUTH_SOCK")).toBe("deny");
     expect(ok("tmux", "set-environment", "PATH", "/usr/bin")).toBe("deny");
     expect(ok("tmux", "set-environment", "-g", "PATH", "/usr/bin", "x")).toBe("deny");
+  });
+
+  it("remote gh keeps the local read-only policy: merges and workflow runs stay refused", () => {
+    for (const argv of [
+      ["gh", "pr", "merge", "7", "--squash"],
+      ["gh", "workflow", "run", "ci.yml"],
+      ["gh", "api", "-X", "POST", "repos/o/r/issues"],
+      ["gh", "repo", "delete", "o/r", "--yes"],
+    ]) {
+      expect(() => assertAllowed(SSH, remote({ argv }))).toThrow(FenceError);
+    }
   });
 
   it("names the refused remote verb", () => {
@@ -510,6 +536,28 @@ describe("remote allow-list (ssh … bash -s)", () => {
         launch,
       }),
     ).toThrow(FenceError);
+  });
+
+  it("tmux send-keys Up|Down|Space and a picker's or handoff's text only with their tokens", () => {
+    const key = (k: string) => step("tmux", "send-keys", "-t", "=w1-T1-implementer:", k);
+    const text = (t: string) =>
+      step("tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", t);
+    for (const k of ["Up", "Down", "Space"])
+      expect(() => assertAllowed(SSH, remote(key(k))), k).toThrow(FenceError);
+    const picker = mintPickerToken({
+      item_id: "p-a1-toolu_1",
+      version: 1,
+      keys: ["Down", "Space"],
+      text: "anchovies",
+    });
+    expect(() => assertAllowed(SSH, { ...remote(key("Down")), picker })).not.toThrow();
+    expect(() => assertAllowed(SSH, { ...remote(key("Up")), picker })).toThrow(FenceError);
+    expect(() => assertAllowed(SSH, { ...remote(text("anchovies")), picker })).not.toThrow();
+    const handoff = mintHandoffToken({ item_id: "h-a1-7", version: 1, text: "ship it" });
+    expect(() => assertAllowed(SSH, { ...remote(text("ship it")), handoff })).not.toThrow();
+    expect(() => assertAllowed(SSH, { ...remote(text("ship it now")), handoff })).toThrow(
+      FenceError,
+    );
   });
 
   it("the trust write: compare the file as read (base64 stdin), write beside it, swap it in", () => {

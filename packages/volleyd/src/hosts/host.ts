@@ -1,8 +1,11 @@
 import type { ExecFn } from "../exec";
 import type { ConsentToken, FenceOptions, LaunchToken } from "../fence";
 
-/** The fence tokens typed text needs (src/fence.ts TYPED_TEXT): a sealed launch, a switch. */
-export type TypedTextTokens = Pick<FenceOptions, "launch" | "modelSwitch">;
+/**
+ * The fence tokens typed text and keys need (src/fence.ts TYPED_TEXT, PICKER): a sealed launch, a
+ * switch, an inbox picker's or handoff's answer.
+ */
+export type TypedTextTokens = Pick<FenceOptions, "launch" | "modelSwitch" | "picker" | "handoff">;
 
 /** Where and how one agent's worktree is cut. */
 export interface WorktreeSpec {
@@ -50,6 +53,15 @@ export interface LaunchSpec {
   launch?: LaunchToken;
 }
 
+/** What ending a retired agent's session did (SPEC §4.6.4, journaled `agent_session_closed`). */
+export interface SessionEnd {
+  /** The workspace was closed. */
+  closed: boolean;
+  /** Processes still running under the agent's worktree that were stopped (local host only). */
+  pids: number[];
+  how: "close-workspace" | "kill-session" | "signal" | "none";
+}
+
 /**
  * A machine agents run on. `local-cmux` (this package) runs them in cmux workspaces on the
  * daemon's own host; a remote host (ssh + tmux) implements the same interface. Every child
@@ -64,12 +76,23 @@ export interface Host {
   prepareWorktree(spec: WorktreeSpec): Promise<WorktreeResult>;
   /** Write a file on the host, creating parent directories. */
   writeFile(path: string, content: string, mode?: number): Promise<void>;
-  /** Open a terminal running `spec.command`; resolves with the workspace ref. */
+  /**
+   * Open a terminal running `spec.command`; resolves with the workspace ref. A failure is a
+   * `SpawnError` LAUNCH_FAILED whose `detail.outcome` is `refused` (nothing was created) or
+   * `unknown` (the workspace may exist and its agent be starting: spawn.ts reconciles before any
+   * retry); a remote host's also carries `detail.candidate`, the session name it tried.
+   */
   launch(spec: LaunchSpec): Promise<{ workspace: string }>;
+  /**
+   * The ref of the workspace volleyd titled `name` (`candidate`: the session name a failed
+   * launch tried, for hosts that name sessions themselves), or null when there is none. Rejects
+   * when the host cannot be asked: the caller treats that as undecidable.
+   */
+  findWorkspace(name: string, candidate?: string): Promise<string | null>;
   /** The last `lines` lines of the workspace's screen, or null when it cannot be read. */
   readScreen(workspace: string, lines: number): Promise<string | null>;
-  /** Press one key (e.g. `Enter`, `Escape`) in the workspace. */
-  sendKeys(workspace: string, key: string): Promise<void>;
+  /** Press one key (`Enter`, `Escape`; `Up`, `Down`, `Space` with a picker token) in the workspace. */
+  sendKeys(workspace: string, key: string, tokens?: TypedTextTokens): Promise<void>;
   /** Type text into the workspace (no trailing Enter), with the token the fence needs for it. */
   sendText(workspace: string, text: string, tokens?: TypedTextTokens): Promise<void>;
   /**
@@ -77,6 +100,16 @@ export interface Host {
    * retire's for the retired agent's own workspace.
    */
   close(workspace: string, consent: ConsentToken): Promise<void>;
+  /**
+   * End a retired agent's session (a retire's own consent): close its workspace (null: its ref
+   * is not known) and, on the local host, stop the processes still running under `worktree`
+   * (procs.ts). Never rejects: what did not happen is reported as not done.
+   */
+  endSession(
+    workspace: string | null,
+    worktree: string | null,
+    consent: ConsentToken,
+  ): Promise<SessionEnd>;
   /** The screen channel's `source` for this host's captures (default `cmux`). */
   readonly screenSource?: string;
   /**

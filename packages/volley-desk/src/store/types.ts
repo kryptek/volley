@@ -107,6 +107,13 @@ export interface WaveTask {
   placement?: TaskPlacement;
   /** The release-branch commit the task's current worktree was cut from. */
   base_sha?: string;
+  /**
+   * A task the supervisor added itself (a fixer), not one from the wave file: `true`, or
+   * `{ for }` naming the tasks it fixes. Read with `fixerFor` (also takes `remediation.for`).
+   */
+  synthetic?: boolean | { for?: string[]; [key: string]: unknown };
+  /** What a synthetic task remediates; `for` names the tasks it fixes. */
+  remediation?: { for?: string[]; [key: string]: unknown };
   [key: string]: unknown;
 }
 
@@ -138,7 +145,11 @@ export interface WaveSpec {
   tasks: Record<string, { issue: number; title?: string; after: string[] }>;
 }
 
-export type CoordinatorState = "working" | "awaiting_input" | "gone";
+/**
+ * `reconnecting`: the agent bound to a coordinator-name owner went away less than
+ * `autopilot.reconnect_grace_s` ago (SPEC §4.6.1); the supervisor flips it to `gone`.
+ */
+export type CoordinatorState = "working" | "awaiting_input" | "reconnecting" | "gone";
 
 export interface WaveCoordinator {
   agent_id: string;
@@ -149,19 +160,64 @@ export interface WaveCoordinator {
   last_seen: string;
 }
 
+/** wave-state `github` (SPEC §4.6.1): the repository on GitHub, as the supervisor read it. */
+export interface GitHubRepo {
+  /** `owner/repo`. */
+  slug: string;
+  /** The repository's canonical URL. */
+  url: string;
+}
+
+/** wave-state `autopilot` (SPEC §4.6.16): on or off for the wave, and what it did. */
+export interface WaveAutopilot {
+  enabled: boolean;
+  auto_resolved: number;
+  escalated: number;
+  budgets: Record<string, { used: number; max: number }>;
+}
+
+/** wave-state `merge_queue[]` (SPEC §4.6.17), in merge order. */
+export interface MergeQueueEntry {
+  task: string;
+  state: "merging" | "updating" | "queued" | "refused";
+  since: string;
+}
+
+/** wave-state `release` (SPEC §4.6.19): the train's stage in play and every stage's state. */
+export interface WaveRelease {
+  stage: string | null;
+  stages: { name: string; state: "pending" | "awaiting_go" | "running" | "verified" | "failed" }[];
+}
+
 export interface WaveStatePayload {
   wave: string;
   version: number;
   owner: string | null;
   repo: string;
   release_branch: string;
-  status: "running" | "paused" | "awaiting_decision" | "complete" | "stopped";
+  /** `archived` is published once, just before the topic is cleared (SPEC §4.6.20). */
+  status:
+    | "running"
+    | "paused"
+    | "awaiting_decision"
+    | "releasing"
+    | "complete"
+    | "stopped"
+    | "archived";
   tasks: WaveTask[];
   open_decisions: string[];
   gates: string[];
   spec?: WaveSpec;
   coordinator?: WaveCoordinator;
   effective_config?: Tunables;
+  /** Absent from an older supervisor or when the read failed: nothing then links. */
+  github?: GitHubRepo;
+  /** Absent from a supervisor that predates autopilot. */
+  autopilot?: WaveAutopilot;
+  /** Absent while the queue is empty. */
+  merge_queue?: MergeQueueEntry[];
+  /** Absent for a wave without a release train. */
+  release?: WaveRelease;
   updated_at: string;
   [key: string]: unknown;
 }
@@ -188,6 +244,9 @@ export const DECISION_KINDS = [
   "spawn_budget_exhausted",
   "account_limit",
   "machine_down",
+  "merge_refused",
+  "release_go",
+  "stage_go",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
@@ -217,14 +276,24 @@ export interface DecisionPayload {
 
 // ------------------------------------------------------- config and leases
 
+/** How the supervisor's own machine takes auto-placed tasks (`fleet.local_agents`). */
+export type LocalAgentsMode = "always" | "fallback" | "never";
+
+/** config.schema.json `$defs/leasePool`: one configured lease pool. */
+export interface LeasePoolConfig {
+  capacity: number;
+  per_machine?: number;
+  /** The per-machine cap in force on a named machine in place of `per_machine`. */
+  per_machine_overrides?: Record<string, number>;
+  ttl_s?: number;
+  match?: string[];
+}
+
 /** config.schema.json `$defs/tunables` (all optional: per-wave overrides share it). */
 export interface Tunables {
   hard_ceiling?: number;
   spawn_budget_multiplier?: number;
-  lease_pools?: Record<
-    string,
-    { capacity: number; per_machine?: number; ttl_s?: number; match?: string[] }
-  >;
+  lease_pools?: Record<string, LeasePoolConfig>;
   admission?: {
     memory_pressure_max_level?: number;
     cmux_ping_max_ms?: number;
@@ -246,9 +315,38 @@ export interface Tunables {
   claude?: { default_account?: string | null; warn_at_pct?: number };
   /** Remote hosts (SPEC §4.6.4); the Desk reads their names and caps. */
   hosts?: Record<string, { max_agents?: number; drain?: boolean; [key: string]: unknown }>;
-  /** The Fleet's names (SPEC §4.6.15): `local_name` is the supervisor's own machine. */
-  fleet?: { local_name?: string | null };
+  /** Autopilot (SPEC §4.6.16–17); absent from a supervisor that predates it. */
+  autopilot?: {
+    enabled?: boolean;
+    owner_only?: string[];
+    merge?: "auto" | "manual";
+    delete_branch?: boolean;
+    reconnect_grace_s?: number;
+    [key: string]: unknown;
+  };
+  /**
+   * The Fleet (SPEC §4.6.15): `local_name` is the supervisor's own machine; `local_agents` how it
+   * takes auto-placed tasks (the retained config carries it resolved; null only in a config file);
+   * `fallback` the profile it runs under while it is the fallback (no paired machine eligible).
+   */
+  fleet?: {
+    local_name?: string | null;
+    local_agents?: LocalAgentsMode | null;
+    fallback?: { max_agents?: number; per_machine?: Record<string, number> };
+  };
   [key: string]: unknown;
+}
+
+/** Retained `volley/_waves/_archive` payload (archive.schema.json): archived waves, newest first. */
+export interface ArchivePayload {
+  archived: {
+    wave: string;
+    status: "stopped" | "complete";
+    archived_at: string;
+    by: string;
+    reason: string;
+  }[];
+  updated_at: string;
 }
 
 /** Retained `volley/_waves/_config` payload. */
@@ -264,6 +362,8 @@ export interface LeasePoolPayload {
   capacity: number;
   /** The cap per machine (SPEC §4.6.5); absent means `capacity`. */
   per_machine?: number;
+  /** The cap in force on a named machine in place of `per_machine`. */
+  per_machine_overrides?: Record<string, number>;
   /** `host`: the holder's machine; `null` for a holder volleyd did not spawn, absent from an older one. */
   held: { lease_id: string; holder: string; host?: string | null; since: string; ttl_s: number }[];
   queue: { lease_id: string; holder: string; host?: string | null; since: string }[];
@@ -387,11 +487,90 @@ export interface ReadinessPayload {
   placed: number;
   path_ok: { claude: boolean | null; bun: boolean | null };
   requirements: { volley: string; bun?: string; sharing?: Record<string, string> };
+  /** Per heavy pool: leases held on this machine and the cap in force there (may be 0). */
   heavy: Record<string, { held: number; per_machine: number }>;
   usage: { account: string | null; five_hour_pct: number | null };
   eligible: boolean;
   ineligible_reason?: string;
   checked_at: string;
+  /**
+   * The supervisor's own machine only (absent from an older supervisor): its `fleet.local_agents`
+   * mode, whether the fallback profile is in force, and why.
+   */
+  local_agents?: { mode: LocalAgentsMode; active: boolean; why?: string };
+}
+
+/** inbox-item.schema.json payload.kind. */
+export const INBOX_KINDS = ["decision", "picker", "handoff", "release"] as const;
+export type InboxKind = (typeof INBOX_KINDS)[number];
+
+/** inbox-item.schema.json $defs.where.kind: where an answer was given. */
+export const INBOX_WHERE_KINDS = ["desk", "terminal", "cli", "autopilot"] as const;
+
+export interface InboxWhere {
+  kind: (typeof INBOX_WHERE_KINDS)[number];
+  device?: string;
+  machine?: string;
+}
+
+/**
+ * inbox-item.schema.json payload: one thing waiting for a person, on `volley/_inbox/<id>`
+ * (SPEC §4.6.18). Answer it with an `inbox_answer { id, version, answer, where }` request to
+ * volleyd, the referee: the first answer at the current `version` wins.
+ */
+export interface InboxItem {
+  id: string;
+  kind: InboxKind;
+  version: number;
+  owner_only: boolean;
+  wave?: string;
+  task?: string;
+  agent_id: string;
+  title: string;
+  question: string;
+  options?: { label: string; description?: string }[];
+  allow_other?: boolean;
+  multi?: boolean;
+  pointers: Record<string, string>;
+  opened_at: string;
+  source: Record<string, unknown>;
+  answered?: { answer: string; by: string; where: InboxWhere; at: string };
+}
+
+/**
+ * digest.schema.json payload: a wave's morning digest on `volley/_waves/<wave>/digest`
+ * (SPEC §4.6.16) — what shipped, what autopilot handled, and what is waiting for the owner.
+ */
+export interface DigestPayload {
+  wave: string;
+  release_branch: string;
+  generated_at: string;
+  trigger: "wave_complete" | "release_go" | "escalation" | "stopped";
+  shipped: {
+    task: string;
+    issue: number;
+    title?: string;
+    pr: { number: number; url: string };
+    merge_sha: string | null;
+    merged_by: "supervisor" | "operator" | "github";
+  }[];
+  auto: {
+    decisions_resolved: number;
+    flakes_fixed: { test: string; fixer: string; prs_released: number }[];
+    conflicts_resolved: number;
+    retries: number;
+    merges: number;
+  };
+  waiting: {
+    id: string;
+    kind: string;
+    task?: string;
+    question: string;
+    since: string;
+    owner_only: boolean;
+  }[];
+  release?: WaveRelease;
+  failures: { task: string; why: string }[];
 }
 
 // ------------------------------------------------------------------- store
@@ -534,6 +713,8 @@ export interface DeskState {
   /** Supervisors by agent id; they are never in `agents`. */
   supervisors: Record<string, SupervisorView>;
   config: ConfigPayload | null;
+  /** The supervisor's index of archived waves (`volley/_waves/_archive`); null until retained. */
+  archive: ArchivePayload | null;
   leases: Record<string, LeasePoolPayload>;
   /** `volley/_system/admission` summary; its schema lands with the daemon's admission controller. */
   admission: Record<string, unknown> | null;
@@ -560,6 +741,15 @@ export interface DeskState {
   machines?: Record<string, MachinePayload>;
   /** volleyd's readiness verdicts, by machine name. */
   readiness?: Record<string, ReadinessPayload>;
+  /** The needs-you inbox (SPEC §4.6.18): volleyd's retained items, by item id. */
+  inbox?: Record<string, InboxItem>;
+  /** Each wave's retained morning digest (SPEC §4.6.16), by wave. */
+  digests?: Record<string, DigestPayload>;
+  /**
+   * Autopilot's events (`decision_auto_resolved`, `decision_escalated`, SPEC §4.6.16) from each
+   * wave's `events` mirror, by wave; live-only (the topic is not retained), kept across a resync.
+   */
+  waveFeed?: Record<string, FeedEntry[]>;
 }
 
 /** When each agent (by id) answered a message id, in local ms. */

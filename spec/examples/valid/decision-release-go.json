@@ -1,0 +1,33 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T15:20:00.000Z",
+  "channel": "_waves/decisions",
+  "type": "decision_opened",
+  "payload": {
+    "decision_id": "release_go-3f2a9c1d0b4e",
+    "wave": "w1",
+    "task": null,
+    "kind": "release_go",
+    "question": "Wave w1's release train is verified: bump, staging, notes. Release it?",
+    "options": [
+      "go",
+      "hold"
+    ],
+    "pointers": {},
+    "opened_at": "2026-10-18T15:20:00.000Z",
+    "stages": [
+      {
+        "name": "bump",
+        "evidence": "waves/w1/release/bump/evidence.md"
+      },
+      {
+        "name": "staging",
+        "evidence": "waves/w1/release/staging/evidence.md"
+      },
+      {
+        "name": "notes"
+      }
+    ]
+  }
+}

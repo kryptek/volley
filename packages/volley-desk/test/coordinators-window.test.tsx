@@ -173,6 +173,75 @@ describe("CoordinatorsWindow supervisor row", () => {
   });
 });
 
+describe("CoordinatorsWindow repo chips", () => {
+  const gh = (slug: string) => ({ slug, url: `https://github.com/${slug}` });
+  const on = (w: WaveView, slug: string, status?: "complete"): WaveView => ({
+    ...w,
+    state: w.state && { ...w.state, github: gh(slug), ...(status ? { status } : {}) },
+  });
+  const sup = {
+    id: "volleyd",
+    namespace: "default",
+    registry: null,
+    status: "working",
+    lastHeartbeat: Date.parse("2026-10-18T12:00:00.000Z"),
+    wavesOwned: 3,
+  };
+  const supRow = () => screen.getByRole("listitem", { name: "Supervisor volleyd" });
+
+  it("a wave row with github has the chip; one without has none", () => {
+    setup({ waves: [on(WAVES[0] as WaveView, "example-org/example-repo"), WAVES[1] as WaveView] });
+    const chip = within(row("status-chip")).getByRole("link", {
+      name: "example-org/example-repo on GitHub",
+    });
+    expect(chip).toHaveAttribute("href", "https://github.com/example-org/example-repo");
+    expect(within(row("ci-speed")).queryByRole("link")).toBeNull();
+  });
+
+  it("the Supervisor row: one chip per distinct repository of the active waves", () => {
+    setup({
+      supervisors: [sup],
+      now: Date.parse("2026-10-18T12:00:00.000Z"),
+      waves: [
+        on(WAVES[0] as WaveView, "example-org/a"),
+        on(WAVES[1] as WaveView, "example-org/b"),
+        on(WAVES[2] as WaveView, "example-org/a"),
+        on(wave("old", "coord-9"), "example-org/c", "complete"),
+      ],
+    });
+    const links = within(supRow()).getAllByRole("link");
+    expect(links.map((a) => a.getAttribute("aria-label"))).toEqual([
+      "example-org/a on GitHub",
+      "example-org/b on GitHub",
+    ]);
+  });
+
+  it("the Supervisor row: more than two repositories read `N repositories`, listed in its title", () => {
+    setup({
+      supervisors: [sup],
+      now: Date.parse("2026-10-18T12:00:00.000Z"),
+      waves: [
+        on(WAVES[0] as WaveView, "example-org/a"),
+        on(WAVES[1] as WaveView, "example-org/b"),
+        on(WAVES[2] as WaveView, "example-org/c"),
+      ],
+    });
+    expect(within(supRow()).queryByRole("link")).toBeNull();
+    const many = within(supRow()).getByText("3 repositories");
+    expect(many).toHaveAttribute("title", "example-org/a\nexample-org/b\nexample-org/c");
+    expect(many).toHaveAttribute(
+      "aria-label",
+      "3 repositories: example-org/a, example-org/b, example-org/c",
+    );
+  });
+
+  it("the Supervisor row has no chips when no wave has github", () => {
+    setup({ supervisors: [sup], now: Date.parse("2026-10-18T12:00:00.000Z") });
+    expect(within(supRow()).queryByRole("link")).toBeNull();
+    expect(within(supRow()).queryByText(/repositories/)).toBeNull();
+  });
+});
+
 describe("CoordinatorsWindow status chips and the Ended group", () => {
   const ended = (id: string, status: "complete" | "stopped"): WaveView => {
     const w = wave(id, "coord-9");
@@ -229,6 +298,27 @@ describe("CoordinatorsWindow status chips and the Ended group", () => {
     expect(p.onDismiss).toHaveBeenCalledWith("old-b");
   });
 
+  it("an archived wave (its one transient publish) is ended, with an archived chip", () => {
+    const w = wave("old-c", "coord-9");
+    setup({
+      waves: [WAVES[0] as WaveView, { ...w, state: w.state && { ...w.state, status: "archived" } }],
+    });
+    expect(screen.queryByRole("listitem", { name: "old-c" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Ended · 1" }));
+    expect(within(row("old-c")).getByText("archived")).toHaveClass("st-chip--archived");
+  });
+
+  it("counts archived waves from the index: `N archived (volleyd archive)`", () => {
+    setup({ archived: 3 });
+    expect(screen.getByText(/3 archived/)).toHaveTextContent("3 archived (volleyd archive)");
+    expect(screen.getByText("volleyd archive").tagName).toBe("CODE");
+  });
+
+  it("says nothing about archived waves when none are", () => {
+    setup({ archived: 0 });
+    expect(screen.queryByText(/archived \(/)).toBeNull();
+  });
+
   it("says how many waves are dismissed and brings them back", () => {
     const onRestore = vi.fn();
     setup({ dismissed: { count: 2, onRestore } });
@@ -236,5 +326,35 @@ describe("CoordinatorsWindow status chips and the Ended group", () => {
     expect(screen.getByText(/2 dismissed waves/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Bring back" }));
     expect(onRestore).toHaveBeenCalled();
+  });
+});
+
+describe("a coordinator reconnecting", () => {
+  const NOW = Date.parse("2026-10-18T12:00:00.000Z");
+  const w = wave("relaunch", "lead");
+  const reconnecting: EffectiveCoordinator = {
+    id: "lead",
+    state: "reconnecting",
+    since: NOW - 4 * 60_000,
+  };
+
+  it("reads `Coordinator reconnecting · 4m` with a neutral chip and no claim it", () => {
+    setup({ waves: [w], coordinators: { relaunch: reconnecting }, needsYou: 0, now: NOW });
+    const r = row("relaunch");
+    expect(within(r).getByText("Coordinator reconnecting · 4m")).toBeInTheDocument();
+    expect(within(r).getByText("reconnecting")).toHaveClass("st-chip--reconnecting");
+    expect(within(r).queryByText(/claim it/)).toBeNull();
+    expect(within(r).queryByText("needs you")).toBeNull();
+    expect(r).toHaveClass("st-reconnecting");
+  });
+});
+
+describe("messaging a reconnecting coordinator", () => {
+  it("is refused until a session binds again: its old agent is gone", async () => {
+    const { waveChatTarget } = await import("../src/steer/useSteering");
+    expect(waveChatTarget("lead", { id: "lead", state: "reconnecting" }, "desk")).toEqual({
+      agentId: null,
+      reason: "This wave's coordinator is reconnecting. Message it once it is back.",
+    });
   });
 });
