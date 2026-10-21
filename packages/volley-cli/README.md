@@ -334,7 +334,7 @@ volley peer doctor --sharing '{"skills":"own"}'   # by hand: this profile's shar
 | `repo.clone`, `repo.origin` | block | `--repo` (default `peer.json`'s) is a git clone whose `origin`, normalised to `<host>/<path>`, is `--origin`'s |
 | `repo.fetch` | warn | `origin` (or `origin/<--release>`) answers `git ls-remote` with no prompt of any kind (`GIT_TERMINAL_PROMPT=0`, no askpass, `ssh -o BatchMode=yes`) |
 | `gh.auth` | warn | `gh auth status`, and `gh repo view <owner/repo> --json viewerPermission` is WRITE, MAINTAIN or ADMIN (`auth.gh`: `ok`, `no_write`, `unauthenticated`, `missing`) |
-| `claude.signin` | warn | `claude auth status` (`auth.claude`: `signed_in` with the plan's label, `not_signed_in`, `missing`, `unknown`) |
+| `claude.signin` | warn | `claude auth status` (`auth.claude`: `signed_in` with the plan's label, `not_signed_in`, `missing`, `unknown`); while signed in, `auth.claude_email` / `auth.claude_org` are the login's identity from `~/.claude.json`'s `oauthAccount.emailAddress` / `organizationName` (the only two fields of it the doctor reports; identity, never a credential) |
 | `claude.trust` | warn | `~/.claude.json` trusts the repo's folder or a parent (`auth.trust`) |
 | `skills` | warn | `~/.claude/skills/volley` and `~/.claude/skills/volley-issues` link to this checkout's `packages/volley-skill` and `packages/volley-issues` (sharing `skills: copy`: they are there, copied or not; `own`: left as is) |
 | `hooks` | warn | `packages/volley-hooks/scripts/install.sh --dry-run`, run with `CLAUDE_SETTINGS=~/.claude/settings.json`, `--broker-url` at the tunnel's port and `--namespace` (when not `default`), prints exactly the profile's `settings.json` (what `volley setup` checks locally; `settings.json: own`: left as is) |

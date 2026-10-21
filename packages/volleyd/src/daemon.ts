@@ -1324,6 +1324,15 @@ export class Daemon {
       ...(opts.claude?.forwardSettleMs !== undefined
         ? { forwardSettleMs: opts.claude.forwardSettleMs }
         : {}),
+      // A paired machine's `primary@<name>` record and claude_accounts read its machine record.
+      machineIdentity: (name) => {
+        const auth = this.machines.record(name)?.auth;
+        return {
+          ...(auth?.claude_email !== undefined ? { email: auth.claude_email } : {}),
+          ...(auth?.claude_org !== undefined ? { org: auth.claude_org } : {}),
+        };
+      },
+      machines: () => this.machines.all(),
     });
     this.machines = new MachineHealth({
       now: this.now,
@@ -1577,6 +1586,8 @@ export class Daemon {
           this.machines.observe(record);
           if (record.tunnel === "up") this.sampleHost(name, record);
           await this.publishReadiness(name);
+          // `primary@<name>`'s usage record carries this record's identity (unchanged: no-op).
+          await this.usagePass();
         });
       }),
     );

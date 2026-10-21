@@ -8,7 +8,7 @@ import { ID_PATTERN } from "volley-mcp/topics";
  * `CLAUDE_CONFIG_DIR` at `<root>/<acct>` (default root `~/.volley/claude`), listed in
  * `<root>/accounts.json`. A profile is signed in only through Claude Code's own flow
  * (signin.ts); volleyd never reads, stores or forwards a credential — the registry holds an id, a
- * label, the machine and a plan label, nothing else.
+ * label, the machine, a plan label and the login's e-mail and org, nothing else.
  *
  * `primary` is the user's own default profile (`~/.claude`, no `CLAUDE_CONFIG_DIR`): what an agent
  * runs under when nothing selects an account.
@@ -37,6 +37,9 @@ export interface ClaudeAccount {
   created: string;
   /** Claude Code's `subscriptionType` (`claude auth status`), once signed in. */
   plan?: string;
+  /** The login's identity (identity.ts): what Claude Code records for it, never a credential. */
+  email?: string;
+  org?: string;
   signed_in_at?: string;
 }
 
@@ -134,11 +137,14 @@ export function addAccount(
   return acct;
 }
 
-/** Record a finished sign-in: when, and the plan label `claude auth status` reported. */
+/**
+ * Record a finished sign-in: when, the plan label `claude auth status` reported, and the login's
+ * e-mail and org as the profile's `.claude.json` records them.
+ */
 export function markSignedIn(
   root: string,
   id: string,
-  facts: { plan?: string },
+  facts: { plan?: string; email?: string; org?: string },
   now: string,
 ): ClaudeAccount {
   const reg = readRegistry(root);
@@ -148,6 +154,8 @@ export function markSignedIn(
   const next: ClaudeAccount = {
     ...prev,
     ...(facts.plan !== undefined ? { plan: facts.plan } : {}),
+    ...(facts.email !== undefined ? { email: facts.email } : {}),
+    ...(facts.org !== undefined ? { org: facts.org } : {}),
     signed_in_at: now,
   };
   reg.accounts[i] = next;

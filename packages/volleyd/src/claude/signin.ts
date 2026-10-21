@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn } from "../exec";
 import { sealSigninScript } from "../fence";
+import { readLoginIdentity } from "./identity";
 import { markSignedIn, profileDir } from "./profiles";
 import {
   BROWSER_HELPER,
@@ -53,7 +54,7 @@ export type SigninEvent =
       /** A paired machine's printed (manual-code) URL next to the forwarded one: for a phone. */
       manual_url?: string;
     }
-  | { type: "claude_signin_done"; acct: string; plan?: string }
+  | { type: "claude_signin_done"; acct: string; plan?: string; email?: string; org?: string }
   | { type: "claude_signin_failed"; acct: string; reason: string };
 
 /** Drop OSC (hyperlinks: `ESC ] 8 ;; url ESC \`), CSI (colours) and other ESC sequences. */
@@ -206,17 +207,12 @@ export async function runSignin(d: SigninDeps): Promise<SigninEvent> {
     });
     const s = parseAuthStatus(status.stdout);
     if (s?.loggedIn === true) {
-      markSignedIn(
-        d.root,
-        d.acct,
-        s.plan !== undefined ? { plan: s.plan } : {},
-        new Date(d.now()).toISOString(),
-      );
-      return finish({
-        type: "claude_signin_done",
-        acct: d.acct,
+      const facts = {
         ...(s.plan !== undefined ? { plan: s.plan } : {}),
-      });
+        ...readLoginIdentity(join(configDir, ".claude.json")),
+      };
+      markSignedIn(d.root, d.acct, facts, new Date(d.now()).toISOString());
+      return finish({ type: "claude_signin_done", acct: d.acct, ...facts });
     }
     if ((await d.exec(["tmux", "has-session", "-t", session])).code !== 0)
       return fail("claude auth login exited before the sign-in finished");

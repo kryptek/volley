@@ -51,6 +51,9 @@ export interface MachineRecord {
     claude: "signed_in" | "not_signed_in" | "missing" | "unknown";
     trust: "ok" | "missing" | "unknown";
     claude_plan?: string | null;
+    /** The default profile's identity (claude/identity.ts), only while it is signed in. */
+    claude_email?: string;
+    claude_org?: string;
   };
   repo?: {
     path: string;

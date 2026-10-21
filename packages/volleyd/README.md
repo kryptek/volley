@@ -368,7 +368,7 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
 | `admission` | — | the retained admission summary (null before the first sample) |
 | `spawn` | `wave`, `task`, `role?` (default `implementer`) | `{ kind: "launched", agent_id, workspace, worktree }`, or the spawn's decision `{ kind, decision, decision_id }`; outside admission. A failure carries `{ code, lock }` |
-| `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, dir, signin: { state, url?, flow?, attach? } }], primary: { plan? }, sharing }` |
+| `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, email?, org?, dir, signin: { state, url?, flow?, attach? } }], primary: { plan?, email?, org? }, machines: [{ name, kind?, claude, plan?, email?, org?, tunnel }], remote_signins, sharing }` |
 | `claude_account_add` | `label`, `machine?`, `by` | answered once the sign-in URL is known: `{ account, acct, topic, url, flow, attach }` |
 | `claude_signin` | `acct`, `by` | the same, for an existing profile |
 | `claude_sync` | `acct?`, `by` | `{ synced: [{ acct, shared, mcp_servers? }] }` |
@@ -476,10 +476,22 @@ volleyd can run agents under several Claude accounts. Each account is its own Cl
 profile: a directory under `~/.volley/claude/<acct>/` (`$VOLLEY_CLAUDE_DIR` moves the root) that
 the agent gets as `CLAUDE_CONFIG_DIR`. `primary` is your own default profile (`~/.claude`, no
 `CLAUDE_CONFIG_DIR`): what agents run under when nothing selects an account. The registry is
-`~/.volley/claude/accounts.json` (`{ id, label, machine, created, plan?, signed_in_at? }`).
-The primary is never in it: `claude_accounts` asks `claude auth status` of the default profile and
-answers its plan as `primary: { plan? }` (none when it is not logged in or names no plan), and the
-primary's usage record carries that plan from then on.
+`~/.volley/claude/accounts.json` (`{ id, label, machine, created, plan?, signed_in_at?, email?,
+org? }`). The primary is never in it: `claude_accounts` asks `claude auth status` of the default
+profile and answers its plan as `primary: { plan?, email?, org? }` (no plan when it is not logged
+in or names none; no identity when it is not logged in), and the primary's usage record carries
+them from then on. `machines` lists every machine record's Claude login (`claude`, `plan`,
+`email`, `org`: SPEC §4.6.15), the supervisor's own and each paired machine's.
+
+**Identity.** A login's `email` and `org` are what Claude Code itself records in the profile's
+`.claude.json` (`oauthAccount.emailAddress`, `oauthAccount.organizationName`); volleyd reads
+exactly those two fields of it and nothing else (`src/claude/identity.ts`; volley-cli's doctor
+keeps a byte-identical copy). A sign-in stores them in the registry and on `claude_signin_done`;
+a registry account's usage record and `claude_accounts` row re-read them from the profile's file
+(it wins over the registry; a profile not signed in has none), and a paired machine's
+`primary@<name>` record takes them from its machine record. They are identity, not credentials,
+and let a client show one account that is signed in on several machines once; they are never
+journaled.
 SPEC §4.6.11 is the contract; the accounts spike (`docs/claude-accounts-spike.md`) has the
 evidence behind each choice below.
 
@@ -508,7 +520,7 @@ the code straight back to the `claude` process. volleyd answers the op with the 
 retained: whoever opens it first picks the account; not retained is not private — under the
 example broker ACL every client, agents included, may read `volley/#` and so the URL while the
 sign-in runs: restrict `volley/_system/claude/#` to the owner's clients to keep it from them), then polls `claude auth status` until
-`loggedIn` → `claude_signin_done { acct, plan }`, or `claude_signin_failed { acct, reason }`
+`loggedIn` → `claude_signin_done { acct, plan, email?, org? }`, or `claude_signin_failed { acct, reason }`
 (the login exited, `claude_signin_timeout_ms` passed, or tmux is missing — then it tells you to
 run `CLAUDE_CONFIG_DIR=<dir> claude auth login` yourself). Without a `$BROWSER` call the URL is
 the one Claude Code printed (`flow: manual_code`): its page shows a code to paste into the
@@ -2030,7 +2042,8 @@ record with `tunnel: down` (built when it connected: volleyd keeps the last hear
 `last_seen`, load and agents). Every record also carries the Fleet fields (SPEC §4.6.15):
 `kind: peer`, `disk` (where the worktrees go) and `uptime_s` read fresh each heartbeat, `memory`
 too (on macOS, `available_pct` is the last doctor run's `vm_stat` figure), and the last
-finished doctor run's `versions`, `auth` (states only: `gh`, `claude`, `trust`, `claude_plan`),
+finished doctor run's `versions`, `auth` (states only: `gh`, `claude`, `trust`, `claude_plan`, and the signed-in default profile's
+`claude_email` / `claude_org`),
 `repo`, `checks` (no fix text) and `doctor_at`. The service re-runs the doctor every 600 s
 (`PEER_DEFAULTS.doctor_interval_s`) beside the heartbeat, so a slow network probe never delays a
 beat past `machine_down_after_ms`; the version it compares the checkout against is the
