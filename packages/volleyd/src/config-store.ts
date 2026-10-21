@@ -298,6 +298,14 @@ export class ConfigStore {
   }
 
   /**
+   * The global tunables with `overrides` applied (an archived wave's, no longer registered),
+   * resolved as `effective()` resolves them.
+   */
+  effectiveWith(overrides: TunablesPatch): Tunables {
+    return resolved(merge(this.global, overrides), this.localName());
+  }
+
+  /**
    * The full effective tunables: global, or global with `wave`'s overrides applied, with
    * `fleet.local_agents` and the `local` alias of `per_machine_overrides` resolved.
    */

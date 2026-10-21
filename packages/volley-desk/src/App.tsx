@@ -947,6 +947,7 @@ export default function App() {
                 onRestore: () =>
                   setDismissed(new Set([...dismissed].filter((id) => !ended.has(id)))),
               }}
+              archived={state.archive?.archived.length ?? 0}
               {...(supervisors ? { supervisors } : {})}
               now={supNow}
               finished={{

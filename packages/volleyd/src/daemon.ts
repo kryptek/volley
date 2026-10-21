@@ -61,6 +61,18 @@ import {
   machineReasons,
   summaryPayload,
 } from "./admission";
+import {
+  ADMIN_REASON,
+  ARCHIVED_ANSWER,
+  MANUAL_REASON,
+  archivable,
+  archiveEvents,
+  archiveFacts,
+  archiveRefusal,
+  endedAt,
+  indexEntry,
+  indexPayload,
+} from "./archive";
 import { budgetUsed, markerOf } from "./autopilot/budgets";
 import { carryHandoff, carryPicker } from "./autopilot/carry";
 import { type GithubStatus, githubStatusCache } from "./autopilot/github-status";
@@ -142,6 +154,7 @@ import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import { ConfigStore } from "./config-store";
 import {
   ADMISSION_TOPIC,
+  ARCHIVE_TOPIC,
   CONFIG_TOPIC,
   type ControlResponse,
   DAEMON_AGENT_ID,
@@ -668,7 +681,13 @@ interface DeferredAuth {
 }
 
 /** Pairing ops only an admin may run: answered on the account-op topic (SPEC §4.6.14). */
-const PEER_ADMIN_OPS: ReadonlySet<string> = new Set(["peer_invite", "peer_remove", "peer_doctor"]);
+const PEER_ADMIN_OPS: ReadonlySet<string> = new Set([
+  "peer_invite",
+  "peer_remove",
+  "peer_doctor",
+  // An admin archives any ended wave (SPEC §4.6.20), whoever owns it.
+  "archive",
+]);
 
 /** A task's why_waiting while its spawn failure is unrecovered. */
 function spawnFailedWhy(f: SpawnFailure, now: number): string {
@@ -955,6 +974,10 @@ export class Daemon {
     ["picker", (item, req) => this.carryInboxAnswer(item, req, carryPicker)],
     ["handoff", (item, req) => this.carryInboxAnswer(item, req, carryHandoff)],
   ]);
+  /** Archived waves (archive.ts): out of the live set, kept for `status --all` and the index. */
+  private readonly archived = new Map<WaveId, WaveLog>();
+  /** When each legacy ended wave ended, read once from its journal (records before `ended_at`). */
+  private readonly legacyEndedAt = new Map<WaveId, string | null>();
   /** Why ready tasks were not admitted on the last tick, per wave. */
   private readonly heldBack = new Map<WaveId, string[]>();
   /** The last "release playbook not run" reason logged per wave, so a tick does not repeat it. */
@@ -1357,6 +1380,11 @@ export class Daemon {
     for (const log of loadWaves(opts.home)) {
       const wave = log.record.state?.wave;
       if (wave === undefined) continue;
+      // Archived: never observed, published or ticked again.
+      if (log.record.state?.status === "archived") {
+        this.archived.set(wave, log);
+        continue;
+      }
       this.waves.set(wave, log);
       this.observeJournal(wave, log.journal);
       this.config.setWaveOverrides(wave, log.record.overrides);
@@ -1554,6 +1582,16 @@ export class Daemon {
     });
 
     await this.publishConfig();
+    await this.publishArchiveIndex();
+    // An archived wave's retained topics, in case a crash came between journaling wave_archived
+    // and clearing them (a clear is not a re-publish, SPEC §4.6.20).
+    for (const [wave, log] of this.archived) {
+      await this.clearRetained(waveStateTopic(wave));
+      for (const id of Object.keys(log.record.decisions))
+        await this.clearRetained(decisionTopic(wave, id));
+      for (const id of foldInbox(new Map(), log.journal.readAll()).keys())
+        await this.clearRetained(inboxTopic(id));
+    }
     for (const [wave, log] of this.waves) {
       await this.publishState(wave);
       // Re-publish open decisions; clear resolved ones, in case a crash came between journaling
@@ -2388,6 +2426,7 @@ export class Daemon {
       await this.completeIfSettled(wave);
       await this.releaseGoIfVerified(wave);
     }
+    await this.archivePass();
     let live = 0;
     for (const log of this.waves.values()) live += activeTasks(log.record).length;
     for (const [wave, log] of this.waves) {
@@ -3355,6 +3394,166 @@ export class Daemon {
       { ...input, id },
       { stages, ...(asked.length > 0 ? { class: "held" } : {}) },
     );
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Archiving (archive.ts, SPEC §4.6.20): an ended wave leaves the live set; its files stay.
+  // -------------------------------------------------------------------------------------------
+
+  /** Why `wave` cannot be archived right now (it has ended, but its agents have not yet). */
+  private archiveBusy(wave: WaveId): string | null {
+    const live = [...this.supervised.values()].filter((a) => a.wave === wave).length;
+    if (live > 0) return `wave '${wave}' still has ${live} live agent(s); archive it once they end`;
+    const log = this.waves.get(wave);
+    const running = log !== undefined ? runningAgents(log.record, retiredAgents(log)).length : 0;
+    if (this.stopGrace.has(wave) && running > 0)
+      return `wave '${wave}' has ${running} agent(s) in their stop grace (stop_grace_s); archive it once they end`;
+    return null;
+  }
+
+  /**
+   * Archive an ended wave: close its open decisions as `archived`, journal `wave_archived`,
+   * publish the state once (status archived) then clear it and each closed decision's topic,
+   * and move the wave out of the live set. Returns the closed decision ids, or the refusal.
+   */
+  private async archiveWave(
+    wave: WaveId,
+    by: string,
+    reason: string,
+  ): Promise<{ closed: string[] } | { error: string }> {
+    const log = this.waves.get(wave);
+    if (log === undefined)
+      return {
+        error: this.archived.has(wave)
+          ? `wave '${wave}' is archived already`
+          : `unknown wave '${wave}'`,
+      };
+    const why = archiveRefusal(log.record) ?? this.archiveBusy(wave);
+    if (why !== null) return { error: why };
+    const events = archiveEvents(log.record, by, reason, dateOf(this.time));
+    const closed = (events.at(-1)?.data.closed_decisions as string[] | undefined) ?? [];
+    // The needs-you inbox items of the decisions it closes are answered `archived` first
+    // (SPEC §4.6.18), so `wave_archived` stays the wave's last event.
+    for (const id of closed) {
+      const item = this.inbox.get(decisionItemId(wave, id));
+      if (item === undefined || item.answered !== undefined) continue;
+      const where: InboxWhere = by === DAEMON_AGENT_ID ? { kind: "autopilot" } : { kind: "cli" };
+      await this.recordInboxAnswer(item, { version: item.version, answer: "archived", by, where });
+    }
+    // Each append re-publishes the state; the last one carries status archived.
+    for (const ev of events) await this.append(wave, ev);
+    for (const id of closed) {
+      const d = log.record.decisions[id];
+      if (d !== undefined) await this.publishResolved(wave, d);
+    }
+    // Every inbox item of the wave goes: an archived wave's journal is not folded on start.
+    for (const item of [...this.inbox.values()]) {
+      if (item.wave !== wave) continue;
+      this.inbox.delete(item.id);
+      await this.clearRetained(inboxTopic(item.id));
+    }
+    await this.clearRetained(waveStateTopic(wave));
+    this.time.clearTimeout(this.stopGrace.get(wave));
+    this.stopGrace.delete(wave);
+    this.waves.delete(wave);
+    this.archived.set(wave, log);
+    this.heldBack.delete(wave);
+    this.issueFiles.delete(wave);
+    this.legacyEndedAt.delete(wave);
+    this.pipelines.delete(wave);
+    this.config.clearWave(wave);
+    await this.publishArchiveIndex();
+    this.log(`wave ${wave} archived by ${by} (${reason}); closed ${closed.length} decision(s)`);
+    return { closed };
+  }
+
+  /** Archive `wave` when auto-archive says it is due (archive_on_ack, archive_ended_after_h). */
+  private async archiveIfDue(wave: WaveId): Promise<void> {
+    const log = this.waves.get(wave);
+    if (log === undefined || this.archiveBusy(wave) !== null) return;
+    // A record from before `ended_at`: its journal is read once, not on every tick.
+    const facts = archiveFacts(log.record, () => {
+      if (!this.legacyEndedAt.has(wave))
+        this.legacyEndedAt.set(wave, endedAt(log.journal.readAll()));
+      return this.legacyEndedAt.get(wave) ?? null;
+    });
+    const verdict = archivable(facts, this.now(), this.config.effective(wave));
+    if (verdict.ok) await this.archiveWave(wave, DAEMON_AGENT_ID, verdict.reason);
+  }
+
+  /** The tick's auto-archive pass over every live wave. */
+  private async archivePass(): Promise<void> {
+    for (const wave of [...this.waves.keys()]) await this.archiveIfDue(wave);
+  }
+
+  /** `archive`: the owner (anyone for an ownerless wave) archives an ended wave; `dry_run` says what. */
+  private async archiveOp(p: Record<string, unknown>, by: string): Promise<HandlerResult> {
+    const w = this.waveOf(p);
+    if ("error" in w) return { ok: false, error: w.error };
+    const refused = guardMutation(w.log.record.state as WaveState, by, "archive");
+    if (refused !== null) return { ok: false, error: refused };
+    return this.archiveAs(w.wave, by, MANUAL_REASON, p.dry_run === true);
+  }
+
+  /** Archive (or, dry, say what archiving would close) once the caller is authorised. */
+  private async archiveAs(
+    wave: WaveId,
+    by: string,
+    reason: string,
+    dry: boolean,
+  ): Promise<HandlerResult> {
+    const log = this.waves.get(wave);
+    if (log === undefined) return { ok: false, error: `unknown wave '${wave}'` };
+    if (dry) {
+      const why = archiveRefusal(log.record) ?? this.archiveBusy(wave);
+      if (why !== null) return { ok: false, error: why };
+      return {
+        ok: true,
+        result: {
+          wave,
+          status: log.record.state?.status,
+          would_close: openDecisions(log.record).map((d) => d.decision_id),
+        },
+      };
+    }
+    const r = await this.archiveWave(wave, by, reason);
+    if ("error" in r) return { ok: false, error: r.error };
+    return { ok: true, result: { wave, status: "archived", closed: r.closed } };
+  }
+
+  /** An archived wave as `status --all` shows it: its last state, and when, by whom and why. */
+  private archivedSnapshot(wave: WaveId): WaveState | null {
+    const rec = this.archived.get(wave)?.record;
+    if (rec?.state == null) return null;
+    const state = structuredClone(rec.state);
+    state.effective_config = this.config.effectiveWith(rec.overrides);
+    if (rec.archived !== undefined) {
+      const { at, by, reason } = rec.archived;
+      state.archived = { at, by, reason };
+    }
+    return state;
+  }
+
+  /** The retained `volley/_waves/_archive` index, newest first (archive_index_max entries). */
+  private async publishArchiveIndex(): Promise<void> {
+    const entries = [...this.archived.values()].flatMap((log) => indexEntry(log.record) ?? []);
+    const payload = indexPayload(
+      entries,
+      DAEMON_DEFAULTS.archive_index_max,
+      dateOf(this.time).toISOString(),
+    );
+    await this.publish(ARCHIVE_TOPIC, this.envelope("_waves/_archive", "archive", payload), true);
+  }
+
+  /** A resolved decision's one non-retained publish, then its retained topic cleared (§4.6.2). */
+  private async publishResolved(wave: WaveId, d: DecisionRecord): Promise<void> {
+    const topic = decisionTopic(wave, d.decision_id);
+    await this.publish(
+      topic,
+      this.envelope("_waves/decisions", "decision_resolved", decisionPayload(d)),
+      false,
+    );
+    await this.clearRetained(topic);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -6739,14 +6938,17 @@ export class Daemon {
     );
   }
 
-  /** The reduced record of a wave (undefined when unknown). */
+  /**
+   * The reduced record of a wave, live or archived (undefined when unknown). An archived wave's
+   * journal is closed to `append`: a subsystem that journals after reading it checks `waves` first.
+   */
   record(wave: WaveId) {
-    return this.waves.get(wave)?.record;
+    return (this.waves.get(wave) ?? this.archived.get(wave))?.record;
   }
 
   /** Every journal event of a wave, oldest first. */
   journalEvents(wave: WaveId): JournalEvent[] {
-    return this.waves.get(wave)?.journal.readAll() ?? [];
+    return (this.waves.get(wave) ?? this.archived.get(wave))?.journal.readAll() ?? [];
   }
 
   /** Journal one event (serially, mirrored and re-published) — for in-daemon subsystems. */
@@ -6949,13 +7151,7 @@ export class Daemon {
       });
       this.log(`wave ${wave}: new agents start under Claude account ${move.to} (was ${move.from})`);
     }
-    const topic = decisionTopic(wave, id);
-    await this.publish(
-      topic,
-      this.envelope("_waves/decisions", "decision_resolved", decisionPayload(d)),
-      false,
-    );
-    await this.clearRetained(topic);
+    await this.publishResolved(wave, d);
     this.log(`resolved ${id} by ${r.by}: ${r.answer}`);
     await this.onRecoveryResolved(wave, d);
     // The pipeline asks its own questions again; a supervisor's is asked again here.
@@ -7008,6 +7204,8 @@ export class Daemon {
         }
       }
     }
+    // archive_on_ack: an answered wave_complete retires the wave now, not on the next tick.
+    if (d.kind === "wave_complete" && r.answer !== ARCHIVED_ANSWER) await this.archiveIfDue(wave);
     if (d.task === null) return { decision: d, already_resolved: false };
     if ((d as { pipeline?: unknown }).pipeline !== undefined && this.opts.spawner !== undefined) {
       const task = d.task;
@@ -7807,6 +8005,13 @@ export class Daemon {
     const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
     if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
     if (op === "peer_doctor") return this.peerDoctor(p, sender);
+    if (op === "archive") {
+      const wave = typeof p.wave === "string" ? p.wave : "";
+      const r = this.archived.has(wave)
+        ? { ok: false, error: `wave '${wave}' is archived already` }
+        : await this.archiveAs(wave, sender, ADMIN_REASON, p.dry_run === true);
+      return { reply: authReply(op, r) };
+    }
     const r =
       op === "peer_invite"
         ? await this.peers.invite(p, sender)
@@ -7854,6 +8059,8 @@ export class Daemon {
       case "resume":
       case "stop":
         return this.waveControl(op, p, by);
+      case "archive":
+        return this.archiveOp(p, by);
       case "steer":
         return this.steer(p, by);
       case "merged":
@@ -7862,7 +8069,7 @@ export class Daemon {
         return this.mergeOp(p, by);
       case "status": {
         if (typeof p.wave === "string") {
-          const state = this.snapshot(p.wave);
+          const state = this.snapshot(p.wave) ?? this.archivedSnapshot(p.wave);
           return state === null
             ? { ok: false, error: `unknown wave '${p.wave}'` }
             : { ok: true, result: state };
@@ -7870,7 +8077,13 @@ export class Daemon {
         return {
           ok: true,
           result: {
-            waves: [...this.waves.keys()].map((w) => this.snapshot(w)),
+            waves: [
+              ...[...this.waves.keys()].map((w) => this.snapshot(w)),
+              // `--all`: archived waves too, after the live ones.
+              ...(p.all === true
+                ? [...this.archived.keys()].map((w) => this.archivedSnapshot(w))
+                : []),
+            ],
             ...(this.killSwitch ? { kill_switch: true } : {}),
             // The cached count: status never waits on the broker's control connection.
             ...(this.sweeper !== undefined ? { agent_logins: { ...this.sweeper.counts } } : {}),
@@ -8129,6 +8342,9 @@ export class Daemon {
         errors: merged,
       });
     }
+    // Its journal is kept: a second wave_submitted would be appended to an archived wave.
+    if (this.archived.has(wave.wave))
+      return refuse({ ok: false, error: `wave '${wave.wave}' is archived; pick another id` });
     const log = this.waves.get(wave.wave);
     const existing = log?.record.state;
     if (log === undefined || existing == null) return { wave, owner };
@@ -8275,14 +8491,17 @@ export class Daemon {
   /** The wave a control op names, or a refusal. */
   private waveOf(p: Record<string, unknown>): { wave: WaveId; log: WaveLog } | { error: string } {
     if (typeof p.wave !== "string") return { error: "this op requires payload.wave" };
+    if (this.archived.has(p.wave)) return { error: `wave '${p.wave}' is archived` };
     const log = this.waves.get(p.wave);
     return log === undefined ? { error: `unknown wave '${p.wave}'` } : { wave: p.wave, log };
   }
 
   /** `decisions`: open decisions (all with `all: true`), for one wave or every wave. */
   private listDecisions(p: Record<string, unknown>): HandlerResult {
-    if (typeof p.wave === "string" && !this.waves.has(p.wave))
-      return { ok: false, error: `unknown wave '${p.wave}'` };
+    if (typeof p.wave === "string" && !this.waves.has(p.wave)) {
+      const w = this.waveOf(p);
+      return { ok: false, error: "error" in w ? w.error : `unknown wave '${p.wave}'` };
+    }
     const decisions: DecisionPayload[] = [...this.waves]
       .filter(([w]) => typeof p.wave !== "string" || w === p.wave)
       .flatMap(([, log]) =>
@@ -8444,7 +8663,8 @@ export class Daemon {
 
   /** Carry out the owner's answer to a plan_change decision (plan-apply.ts `planAnswer`). */
   private async applyPlanAnswer(wave: WaveId, d: DecisionRecord, by: string): Promise<void> {
-    const log = this.waves.get(wave) as WaveLog;
+    const log = this.waves.get(wave);
+    if (log === undefined) return; // archived by the answer (archive_on_ack)
     const effect = planAnswer(log.record, d);
     if (effect.cancel !== undefined && d.task !== null) {
       const task = d.task;

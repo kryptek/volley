@@ -11,7 +11,8 @@
  * bottom. With its agents an ended wave folds off the canvas under "Show
  * finished" like finished agents; its row offers Show (put its window back on
  * the canvas and fit to it) and Dismiss (drop it from this Desk: Desk-side
- * state only, the wave and its journal are untouched). A
+ * state only, the wave and its journal are untouched). A wave archived by the
+ * supervisor (`volleyd archive`) leaves every Desk; a footer line counts them. A
  * coordinator idle with a background wait armed reads `Working · waiting on
  * events`: it wakes on the wave's events, nobody has to answer. Hidden waves keep
  * running and still count towards the top-bar pill and notifications. The
@@ -61,17 +62,27 @@ export const WAITING_ON_EVENTS_LABEL = "Working · waiting on events";
 export const ENDED_LABEL: Partial<Record<string, string>> = {
   complete: "Complete",
   stopped: "Stopped",
+  // Seen only in the one publish before an archived wave's state is cleared (SPEC §4.6.20).
+  archived: "Archived",
 };
 
 const Icon = ({ i }: { i: typeof Cancel01Icon }) => (
   <HugeiconsIcon icon={i} size={13} strokeWidth={1.8} />
 );
 
-export type StatusChip = "working" | "needs" | "reconnecting" | "completed" | "stopped" | "failed";
+export type StatusChip =
+  | "working"
+  | "needs"
+  | "reconnecting"
+  | "completed"
+  | "stopped"
+  | "archived"
+  | "failed";
 
 const ENDED_CHIP: Partial<Record<string, StatusChip>> = {
   complete: "completed",
   stopped: "stopped",
+  archived: "archived",
 };
 
 export const CHIP_LABEL: Record<StatusChip, string> = {
@@ -80,6 +91,7 @@ export const CHIP_LABEL: Record<StatusChip, string> = {
   reconnecting: "reconnecting",
   completed: "completed",
   stopped: "stopped",
+  archived: "archived",
   failed: "failed",
 };
 
@@ -136,6 +148,8 @@ export interface CoordinatorsWindowProps {
   onDismiss?: (wave: string) => void;
   /** How many ended waves are dismissed, and how to bring them back. */
   dismissed?: { count: number; onRestore: () => void };
+  /** How many waves the supervisor archived (its `_archive` index): gone from every Desk. */
+  archived?: number;
   /** The supervisors for the first row; `[]` says volleyd is absent, omitted shows no row (demo). */
   supervisors?: readonly SupervisorView[];
   /** Clock for the supervisor's age (the App's attention tick). */
@@ -381,6 +395,11 @@ export function CoordinatorsWindow(p: CoordinatorsWindowProps) {
                 )}
               </ul>
             )}
+          </li>
+        )}
+        {(p.archived ?? 0) > 0 && (
+          <li className="coord-archived">
+            {p.archived} archived (<code>volleyd archive</code>)
           </li>
         )}
       </ul>

@@ -20,6 +20,7 @@ The wave's owner (the one coordinator allowed to resolve, pause, stop and steer 
 else VOLLEY_AGENT_ID, else the session registered for this directory, else VOLLEY_COORDINATOR
 (printed as "(auto)"); a session whose MCP server sets VOLLEY_COORDINATOR owns it by that name,
 so the session keeps its waves when its MCP server restarts under a new agent id.
+With none of them the wave has no owner: run warns, since nobody can answer its decisions.
 Paths a task shares with a running wave's task are printed as overlap warnings (advisory).
 If the daemon already runs a wave with this id, the file is that wave's next plan version: the
 daemon stores it as $VOLLEYD_HOME/waves/<wave>/v<N>.yaml, journals the structural diff and applies
@@ -28,6 +29,10 @@ Preview the diff with \`volleyd diff <wave> <wave.yaml>\`.
 A wave that places tasks (\`placement: auto\`, or a task's \`host: auto\`) also prints where its
 tasks would go if admitted now (as \`volleyd validate\` does); each is placed at admission.
 `;
+
+/** Printed when `run` submits a wave with no owner (SPEC §4.6.20). */
+export const noOwnerWarning = (wave: string) =>
+  `wave ${wave} has no owner: nobody can answer its decisions (pass --owner, set VOLLEY_AGENT_ID or VOLLEY_COORDINATOR, or run from a registered session); it is archived automatically once ended (archive_ended_after_h)`;
 
 export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   let parsed: ReturnType<typeof parseRun>;
@@ -67,6 +72,7 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   return withClient(target, io, "volleyd run", async (client) => {
     const owner = await resolveCaller(client, parsed.values.owner, env);
     if (owner.warning !== undefined) io.stderr(`warning: ${owner.warning}\n`);
+    if (owner.id === null) io.stderr(`warning: ${noOwnerWarning(wave.wave)}\n`);
     const res = await client.request(
       "run",
       { wave_yaml: text, source: file, ...(owner.id !== null ? { owner: owner.id } : {}) },

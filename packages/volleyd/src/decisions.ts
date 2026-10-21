@@ -6,6 +6,9 @@ import type { Budget, EscalateWhy } from "./autopilot/policy";
 import type { WaveRecord } from "./reducer";
 import type { NewEvent, TaskId, TaskStage, WaveId } from "./types";
 
+/** The answer an archive closes every open decision with. */
+export const ARCHIVED_ANSWER = "archived";
+
 /**
  * Decisions: questions only a human (or the owning coordinator) can answer, as first-class
  * journal events. Everything here is pure; the daemon journals the events these build, publishes

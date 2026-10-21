@@ -2,7 +2,25 @@
 
 This file collects feature-level smoke recipes that span multiple packages — the per-package SMOKE.md files under `packages/*/SMOKE.md` cover narrower scopes (volley-issues dispatch, volley-skill / volley-wait skill installation, etc.). Add a new section per plan that ships a release tag.
 
+**Next release:** deploy the tag to the supervisor's machine with `volley deploy v<X.Y.Z>` (after a `--dry-run`), then confirm the Desk shows the new version in Settings › About, `volley desk serve`'s log has no stale-build warning, and `volleyd status` answers. See [`volley deploy`](#deploying-a-release-volley-deploy) below.
+
 **v0.4.0** (the Fleet: pairing from the Desk, doctor and Repair, signing a paired machine in to Claude, automatic placement, a machine going down, overloaded and removed) is [Plan 12](#plan-12--fleet-v040) below. **v0.3.0** (onboarding: `volley setup`, the Desk's setup wizard and sign-in links, pairing, Claude accounts) is [Plan 11](#plan-11--onboarding-v030) below. **v0.2.0** (volleyd, volley-hooks, broker auth, the Desk) has its own owner smoke path: [`docs/SMOKE-v0.2.md`](docs/SMOKE-v0.2.md).
+
+---
+
+## Deploying a release (`volley deploy`)
+
+Owner checklist on the supervisor's machine, once per release tag (about 5 minutes):
+
+1. `volley deploy v<X.Y.Z> --dry-run` from any directory: it names the services checkout (from
+   volleyd's installed service), the current tag and the target, and lists every command. Nothing
+   changes (a dirty checkout exits 3 and lists the paths).
+2. `volley deploy v<X.Y.Z>`: one `ok` line per step, ending
+   `deployed v<X.Y.Z> (was v<previous>); waves continue (volleyd reconciles on start)`.
+3. Open the Desk: Settings › About shows the new version, and the release's UI is there.
+4. `volleyd status` answers; a wave that was running before the deploy is still running.
+5. Optional, rollback: in a scratch clone, break the Desk build of a test tag and deploy it with
+   `--repo <clone>`: the deploy reports the failed step and `rolled back to <previous>`.
 
 ---
 
@@ -34,7 +52,7 @@ the Desk's rows and **Repair** have something real to show and fix.
 
 **Before you start** (on the Mac): a heavy pool with one slot per machine, in
 `$VOLLEYD_HOME/config.yaml` (default `~/.volley/volleyd/config.yaml`), then restart volleyd
-(`launchctl kickstart -k gui/$UID/systems.volley.volleyd`):
+(`launchctl kickstart -k gui/$UID/systems.volley.volleyd`; to move it to a release instead, `volley deploy <tag>`):
 
 ```yaml
 lease_pools:
