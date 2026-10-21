@@ -70,6 +70,9 @@ export async function deskHealthy(
  * (the restart); null when healthy, else why not. `spawning` and `registered` come before its
  * subscriptions and reconcile, so a daemon that dies in its start never passes.
  */
+/** The least time one connection attempt gets, however little of the wait is left. */
+const CONNECT_FLOOR_MS = 1_000;
+
 export async function volleydHealthy(
   opts: { brokerUrl: string; auth: BrokerAuth | null; namespace: string; since: Date } & Wait,
 ): Promise<string | null> {
@@ -82,7 +85,12 @@ export async function volleydHealthy(
       broker = await Promise.race([
         connecting,
         new Promise<never>((_, fail) => {
-          timer = setTimeout(() => fail(new Error("timed out connecting")), remaining);
+          // A floor, not the sliver left of the deadline: a last poll that starts with 1 ms to go
+          // would otherwise report a live broker as unreachable and hide the real reason.
+          timer = setTimeout(
+            () => fail(new Error("timed out connecting")),
+            Math.max(remaining, CONNECT_FLOOR_MS),
+          );
         }),
       ]);
     } catch (e) {
