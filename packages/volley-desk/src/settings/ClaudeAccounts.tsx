@@ -1,10 +1,14 @@
 /**
  * Settings › Claude accounts & usage, ported from the prototype
- * `ClaudeAccounts` (SPEC §4.6.11–12). One card per account (the supervisor's
- * retained usage records, plus registry profiles that have not reported yet,
- * and this machine's own login, the primary, first and from the start):
- * label, machine, plan chip, the 5-hour and weekly meters with their resets,
- * the agents and waves on it, and "Move a wave here…". An open
+ * `ClaudeAccounts` (SPEC §4.6.11–12). One card per Anthropic account: the
+ * supervisor's retained usage records, registry profiles that have not
+ * reported yet, signed-in peers and this machine's own login (the primary,
+ * first and from the start), merged by the login's e-mail (`accountGroups`).
+ * A card shows the label, plan chip and organisation, the e-mail masked until
+ * its eye button reveals it (never persisted), the 5-hour and weekly meters
+ * from the freshest reading (a disagreeing older one named stale), one row per
+ * machine holding the account, the agents and waves on it, and "Move a wave
+ * here…" (its login on this machine, by account id). An open
  * `account_limit` decision is a Needs-you banner whose Move / Not now answer
  * it (`resolve`); volleyd moves a wave only by such an answer, so "Move a wave
  * here…" lists the waves that have one open. **Add Claude account** is a
@@ -18,17 +22,23 @@
  * The section drills into two groups (`GroupList`): Accounts (the banners,
  * the cards and Add) and Defaults.
  */
+import { EyeIcon, ViewOffIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useState } from "react";
+import { maskEmail } from "../lib/email";
 import { plural } from "../lib/plural";
 import Stepper, { Step } from "../rb/Stepper/Stepper";
 import type { ControlReply } from "../steer/transport";
 import {
+  type AccountGroup,
   type AccountInfo,
   LOCAL_MACHINE,
   type RegistryAccount,
+  accountGroups,
   accountList,
   fiveHourLabel,
   moveAnswer,
+  moveTargetOf,
   notNowAnswer,
   openLimitDecisions,
   resetsIn,
@@ -39,6 +49,7 @@ import type {
   ClaudeSignin,
   ConfigPayload,
   DecisionPayload,
+  MachinePayload,
   UsageWindow,
   WaveView,
 } from "../store/types";
@@ -134,6 +145,10 @@ export interface ClaudeAccountsProps {
   now?: number;
   /** Hears each registry fetch, so the agent windows can list profiles with no usage yet. */
   onRegistry?: (rows: RegistryAccount[]) => void;
+  /** The machine records: a peer's default login's e-mail and sign-in state. */
+  machines?: Record<string, MachinePayload>;
+  /** The supervisor's own machine record's name (`_config` `fleet.local_name`). */
+  localName?: string | undefined;
   /** The open group's page (`accounts`, `defaults`), or null for the group list. */
   group: string | null;
   onOpenGroup?: (group: string) => void;
@@ -183,8 +198,12 @@ function withPrimary(list: AccountInfo[], plan: string | undefined): AccountInfo
           label: PRIMARY_LABEL,
           machine: LOCAL_MACHINE,
           plan: plan ?? null,
+          email: null,
+          org: null,
           fiveHour: null,
           weekly: null,
+          sampledAt: null,
+          signedIn: true,
           agents: [],
           waves: [],
         }
@@ -228,41 +247,105 @@ function Meter({ label, w, now }: { label: string; w: UsageWindow | null; now: n
   );
 }
 
-/** One account's card. */
+/** `3 h`, `12 min`, `2 d`: how old a reading is; `null` under a minute. */
+function age(at: string, now: number): string | null {
+  const m = Math.floor((now - Date.parse(at)) / 60_000);
+  if (!(m >= 1)) return null;
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  return h < 48 ? `${h} h` : `${Math.floor(h / 24)} d`;
+}
+
+const WINDOW_NAME = { five_hour: "5-hour", weekly: "weekly" } as const;
+
+/** The login's e-mail, masked until its eye button shows it (per card, never persisted). */
+function EmailRow({ email }: { email: string | null }) {
+  const [shown, setShown] = useState(false);
+  if (email === null)
+    return <div className="s-hint">e-mail not reported yet (run the machine's doctor)</div>;
+  return (
+    <div className="cc-email">
+      <span className="mono ell">{shown ? email : maskEmail(email)}</span>
+      <button
+        type="button"
+        className="icon-btn"
+        aria-pressed={shown}
+        aria-label={shown ? "Hide email" : "Show email"}
+        onClick={() => setShown((v) => !v)}
+      >
+        <HugeiconsIcon icon={shown ? ViewOffIcon : EyeIcon} size={13} strokeWidth={1.8} />
+      </button>
+    </div>
+  );
+}
+
+/** One Anthropic account's card. */
 function AccountCard({
-  a,
+  g,
   movable,
   onMove,
   now,
 }: {
-  a: AccountInfo;
+  g: AccountGroup;
   /** Open `account_limit` decisions on other accounts: the waves that can move here. */
   movable: DecisionPayload[];
   onMove: ((d: DecisionPayload) => void) | null;
   now: number;
 }) {
+  const only = g.members.length === 1 ? g.members[0] : undefined;
+  const ago = g.freshest && age(g.freshest.sampledAt, now);
   return (
-    <article className="claude-card" aria-label={a.label}>
+    <article className="claude-card" aria-label={g.label}>
       <div className="cc-head">
         <span className="tile" style={{ background: CLAUDE_TINT }} aria-hidden="true">
           ✳
         </span>
         <div className="min0">
-          <b>{a.label}</b>
+          <b>{g.label}</b>
           <div className="s-hint ell">
-            {a.id === PRIMARY
-              ? `${PRIMARY} · Claude Code's default login`
-              : `${a.id} · ${machineName(a.machine)}`}
+            {g.org ??
+              (only === undefined
+                ? plural(g.members.length, "machine")
+                : only.account === PRIMARY
+                  ? `${PRIMARY} · Claude Code's default login`
+                  : `${only.account} · ${machineName(only.machine)}`)}
           </div>
         </div>
-        {a.plan && <span className="chip">{a.plan}</span>}
+        {g.plan && <span className="chip">{g.plan}</span>}
       </div>
-      <Meter label="5-hour window" w={a.fiveHour} now={now} />
-      <Meter label="This week" w={a.weekly} now={now} />
+      <EmailRow email={g.email} />
+      <Meter label="5-hour window" w={g.fiveHour} now={now} />
+      <Meter label="This week" w={g.weekly} now={now} />
+      {g.members.length > 1 && g.freshest && (
+        <div className="cc-fresh">
+          <div className="s-hint">
+            freshest: {machineName(g.freshest.machine)}, {ago ? `${ago} ago` : "just now"}
+          </div>
+          {g.stale.map((s) => (
+            <div key={`${s.machine}-${s.window}`} className="s-hint cc-stale">
+              {machineName(s.machine)}'s {WINDOW_NAME[s.window]} reading ({Math.round(s.pct)}%,{" "}
+              {age(s.sampledAt, now) ?? "<1 min"} old) is stale
+            </div>
+          ))}
+        </div>
+      )}
+      <ul className="cc-machines" aria-label="Machines">
+        {g.members.map((m) => (
+          <li key={m.account}>
+            <span className={`cc-dot${m.signedIn ? " cc-dot--in" : ""}`} aria-hidden="true" />
+            <span className="sr-only">{m.signedIn ? "signed in" : "signed out"}</span>
+            <b>{machineName(m.machine)}</b>
+            <span className="dim ell">{m.label}</span>
+            <span className="dim cc-waves">
+              {m.waves.length ? `waves: ${m.waves.join(", ")}` : "no waves"}
+            </span>
+          </li>
+        ))}
+      </ul>
       <div className="cc-move">
         <span className="s-hint">Use for</span>
         <select
-          aria-label={`Move a wave to ${a.label}`}
+          aria-label={`Move a wave to ${g.label}`}
           title={
             movable.length
               ? "Answers the wave's account-limit decision: new agents start on this account"
@@ -286,9 +369,9 @@ function AccountCard({
         </select>
       </div>
       <div className="cc-foot">
-        <span>{plural(a.agents.length, "agent")}</span>
+        <span>{plural(g.agents.length, "agent")}</span>
         <span className="dim">
-          {a.waves.length ? `waves: ${a.waves.join(", ")}` : "no waves assigned"}
+          {g.waves.length ? `waves: ${g.waves.join(", ")}` : "no waves assigned"}
         </span>
       </div>
     </article>
@@ -447,6 +530,8 @@ export function ClaudeAccounts({
   configTransport,
   now: fixedNow,
   onRegistry,
+  machines,
+  localName,
   group,
   onOpenGroup = () => {},
   hit,
@@ -467,6 +552,7 @@ export function ClaudeAccounts({
   }, [registry, onRegistry]);
 
   const list = withPrimary(accountList(records, registry), primaryPlan);
+  const groups = accountGroups(list, machines, localName);
   const labelOf = (id: string | null | undefined) =>
     list.find((a) => a.id === id)?.label ?? id ?? "";
   const decisions = openLimitDecisions(waves);
@@ -534,7 +620,7 @@ export function ClaudeAccounts({
       <GroupList
         section={sectionDef("claude")}
         summaries={claudeSummaries({
-          accounts: list.length,
+          accounts: groups.length,
           needsYou: decisions.length,
           defaultLabel: currentLabel,
           warnAt,
@@ -614,19 +700,22 @@ export function ClaudeAccounts({
         </p>
       )}
       <div className="claude-cards">
-        {list.map((a) => (
-          <AccountCard
-            key={a.id}
-            a={a}
-            movable={decisions.filter((d) => d.acct !== a.id)}
-            onMove={
-              control && !busy && !a.id.includes("@")
-                ? (d) => void answer(d, moveAnswer(d.wave, a.id))
-                : null
-            }
-            now={now}
-          />
-        ))}
+        {groups.map((g) => {
+          const to = moveTargetOf(g);
+          return (
+            <AccountCard
+              key={g.key}
+              g={g}
+              movable={decisions.filter((d) => !g.members.some((m) => m.account === d.acct))}
+              onMove={
+                control && !busy && to !== null
+                  ? (d) => void answer(d, moveAnswer(d.wave, to))
+                  : null
+              }
+              now={now}
+            />
+          );
+        })}
         <button
           type="button"
           className="claude-card claude-card--add"

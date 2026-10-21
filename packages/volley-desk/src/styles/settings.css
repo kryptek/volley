@@ -685,6 +685,53 @@
 .cc-head .chip {
   margin-left: auto;
 }
+.cc-email {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12.5px;
+}
+.cc-email .icon-btn {
+  flex: none;
+  width: 24px;
+  height: 24px;
+}
+.cc-email .icon-btn[aria-pressed="true"] {
+  color: var(--ink);
+}
+.cc-stale {
+  color: #ffd60a;
+}
+.cc-machines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+.cc-machines li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.cc-machines .cc-waves {
+  margin-left: auto;
+  flex: none;
+}
+.cc-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--mute);
+}
+.cc-dot--in {
+  background: #34c759;
+}
 .cc-foot {
   display: flex;
   justify-content: space-between;

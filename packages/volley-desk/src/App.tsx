@@ -1396,6 +1396,8 @@ export default function App() {
             waves: state.waves,
             control,
             onRegistry: setRegistry,
+            machines: state.machines ?? {},
+            localName: state.config?.fleet?.local_name ?? undefined,
           }}
           machines={{
             machines: state.machines ?? {},

@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import axe from "axe-core";
 import { describe, expect, it, vi } from "vitest";
 import {
   ClaudeAccounts,
@@ -156,8 +157,8 @@ describe("ClaudeAccounts", () => {
     const week = w.getByRole("meter", { name: "This week" });
     expect(week.closest(".meter")).toHaveTextContent("43%");
     expect(week.closest(".meter")).toHaveTextContent("resets in 2d 18h");
-    expect(w.getByText("2 agents")).toBeInTheDocument();
-    expect(w.getByText("waves: w1")).toBeInTheDocument();
+    const foot = within(w.getByText("2 agents").closest(".cc-foot") as HTMLElement);
+    expect(foot.getByText("waves: w1")).toBeInTheDocument();
     const p = within(screen.getByRole("article", { name: "Personal" }));
     expect(p.getByRole("meter", { name: "5-hour window" }).closest(".meter")).toHaveTextContent(
       "12%",
@@ -690,5 +691,158 @@ describe("SettingsModal › the wave's Claude account", () => {
   it("read-only: no picker even with a decision open", () => {
     modal({ [limit.decision_id]: limit }, null);
     expect(screen.queryByRole("combobox", { name: /Move wave w1/ })).toBeNull();
+  });
+});
+
+describe("ClaudeAccounts › one card per Anthropic account", () => {
+  const EMAIL = "owner@example.com";
+  const own: ClaudeAccountPayload = {
+    ...work,
+    email: EMAIL,
+    org: "Example Org",
+    five_hour: { pct: 37, resets_at: "2026-10-18T18:10:00.000Z" },
+    weekly: { pct: 56, resets_at: "2026-10-21T09:00:00.000Z" },
+  };
+  const peer: ClaudeAccountPayload = {
+    account: "primary@peer-a",
+    five_hour: { pct: 41, resets_at: null },
+    weekly: { pct: 56, resets_at: "2026-10-21T09:00:00.000Z" },
+    agents: ["w2-t1-implementer-1"],
+    waves: ["w2"],
+    sampled_at: "2026-10-18T11:06:00.000Z",
+  };
+  const machines = {
+    "peer-a": {
+      name: "peer-a",
+      kind: "peer",
+      os: "linux",
+      cores: 8,
+      tunnel: "up",
+      load: [0, 0, 0],
+      agents: 1,
+      last_seen: "2026-10-18T14:06:00.000Z",
+      auth: { gh: "ok", claude: "signed_in", trust: "ok", claude_email: EMAIL },
+    },
+  } as unknown as NonNullable<ClaudeAccountsProps["machines"]>;
+
+  const view = (records: Record<string, ClaudeAccountPayload>) => (
+    <main>
+      <ClaudeAccounts
+        accounts={records}
+        signins={{}}
+        waves={{}}
+        config={config}
+        control={null}
+        configTransport={null}
+        machines={machines}
+        localName="hub"
+        now={NOW}
+      />
+    </main>
+  );
+  const card = () => screen.getByRole("article", { name: "Work" });
+
+  it("renders one masked card for two logins on one e-mail", () => {
+    const { container } = render(view({ work: own, "primary@peer-a": peer }));
+    expect(screen.getAllByRole("article").map((c) => c.getAttribute("aria-label"))).toEqual([
+      "This machine's Claude login",
+      "Work",
+    ]);
+    expect(within(card()).getByText("o•••@example.com")).toBeInTheDocument();
+    expect(within(card()).getByText("Example Org")).toBeInTheDocument();
+    expect(container.innerHTML).not.toContain(EMAIL);
+  });
+
+  it("the eye button reveals and hides the address, and nothing is persisted", () => {
+    const { unmount } = render(view({ work: own, "primary@peer-a": peer }));
+    const c = within(card());
+    const eye = c.getByRole("button", { name: "Show email" });
+    expect(eye).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(eye);
+    expect(eye).toHaveAttribute("aria-pressed", "true");
+    expect(eye).toHaveAccessibleName("Hide email");
+    expect(c.getByText(EMAIL)).toBeInTheDocument();
+    expect(localStorage.length).toBe(0);
+    expect(sessionStorage.length).toBe(0);
+    fireEvent.click(eye);
+    expect(eye).toHaveAttribute("aria-pressed", "false");
+    expect(c.queryByText(EMAIL)).toBeNull();
+    fireEvent.click(eye);
+    unmount();
+    render(view({ work: own, "primary@peer-a": peer }));
+    expect(within(card()).getByRole("button", { name: "Show email" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(within(card()).queryByText(EMAIL)).toBeNull();
+  });
+
+  it("lists each machine holding the account with its sign-in state and waves", () => {
+    render(view({ work: own, "primary@peer-a": peer }));
+    const rows = within(within(card()).getByRole("list", { name: "Machines" })).getAllByRole(
+      "listitem",
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("this machine");
+    expect(rows[0]).toHaveTextContent("Work");
+    expect(rows[0]).toHaveTextContent("waves: w1");
+    expect(rows[0]).toHaveTextContent("signed in");
+    expect(rows[1]).toHaveTextContent("peer-a");
+    expect(rows[1]).toHaveTextContent("default login");
+    expect(rows[1]).toHaveTextContent("waves: w2");
+    expect(rows[1]).toHaveTextContent("signed in");
+  });
+
+  it("the meters show the freshest reading and name the stale one with its age", () => {
+    render(view({ work: own, "primary@peer-a": peer }));
+    const c = within(card());
+    expect(c.getByRole("meter", { name: "5-hour window" })).toHaveAttribute("aria-valuenow", "37");
+    expect(c.getByText("freshest: this machine, just now")).toBeInTheDocument();
+    expect(c.getByText("peer-a's 5-hour reading (41%, 3 h old) is stale")).toBeInTheDocument();
+  });
+
+  it("a card with no e-mail says so and has no eye button", () => {
+    render(view({ work: own, "primary@box": { ...peer, account: "primary@box" } }));
+    const c = within(screen.getByRole("article", { name: "primary@box" }));
+    expect(c.getByText("e-mail not reported yet (run the machine's doctor)")).toBeInTheDocument();
+    expect(c.queryByRole("button", { name: /email/ })).toBeNull();
+  });
+
+  it("Use for stays on this machine's account id", async () => {
+    const control = vi.fn(async () => ({ ok: true }));
+    render(
+      <ClaudeAccounts
+        accounts={{ work: own, "primary@peer-a": peer, personal }}
+        signins={{}}
+        waves={{ w1: wave({ [limit.decision_id]: { ...limit, acct: "personal" } }) }}
+        config={config}
+        control={control}
+        configTransport={null}
+        machines={machines}
+        localName="hub"
+        now={NOW}
+      />,
+    );
+    await act(async () => {
+      fireEvent.change(within(card()).getByRole("combobox", { name: "Move a wave to Work" }), {
+        target: { value: "w1" },
+      });
+    });
+    expect(control).toHaveBeenCalledWith(
+      "resolve",
+      { wave: "w1", decision_id: "d-7k2m9q4x", answer: "move wave w1 to work" },
+      expect.any(String),
+    );
+  });
+
+  it("passes axe with the address hidden and shown", async () => {
+    render(view({ work: own, "primary@peer-a": peer }));
+    const run = async () =>
+      (
+        await axe.run(document.body, { rules: { "color-contrast": { enabled: false } } })
+      ).violations.map((v) => v.id);
+    expect(await run()).toEqual([]);
+    fireEvent.click(within(card()).getByRole("button", { name: "Show email" }));
+    expect(await run()).toEqual([]);
   });
 });
