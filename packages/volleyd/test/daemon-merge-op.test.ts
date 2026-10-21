@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { buildEnvelope } from "volley-mcp/envelope";
+import { registryTopic } from "volley-mcp/topics";
+import { NS } from "./helpers/daemon-env";
 import { runCli } from "./helpers/run-cli";
 import {
   ARTIFACTS_OK,
@@ -107,6 +110,36 @@ describe("volleyd merge", () => {
       requested_by: "coord-1",
     });
     await (s as SupervisedEnv).event((e) => e.type === "stage_entered" && e.data.stage === "done");
+  });
+
+  it("by the agent bound to the owning coordinator name merges, as `merged` allows", async () => {
+    s = await makeSupervisedEnv({ merge: "manual", exec: replies() });
+    await s.status("done");
+    await s.event((e) => e.type === "stage_entered" && e.data.stage === "merge_ready");
+    await s.settled();
+    expect((await runCli(["claim", "w1", "--by", "coord-main"], s.env.env)).exitCode).toBe(0);
+    // coordinator-a1 carries the name coord-main (VOLLEY_COORDINATOR, SPEC §6.2).
+    const env = buildEnvelope({
+      agentId: "coordinator-a1",
+      parentId: null,
+      channel: "_system/registry",
+      type: "registered",
+      payload: {
+        capabilities: [],
+        cwd: "/repo",
+        coordinator: "coord-main",
+        started_at: new Date().toISOString(),
+      },
+    });
+    await s.agent.publish(
+      registryTopic("coordinator-a1"),
+      JSON.stringify({ ...env, namespace: NS }),
+      { qos: 1, retain: true },
+    );
+    await s.consumed();
+    const r = await merge("coordinator-a1");
+    expect(r.exitCode, r.stderr).toBe(0);
+    expect(r.stdout).toContain(MERGED);
   });
 
   it("a task that is not merge_ready is refused", async () => {

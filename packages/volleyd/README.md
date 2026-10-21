@@ -2631,7 +2631,8 @@ one at a time, in order, and brings each up to date just before its merge
   `updating`, `queued` or `refused`, and `volleyd status` prints it under the header:
   `merge queue: T3 merging · T5 updating · T7, T9 queued`.
 - **`volleyd merge <wave> <task>`** (the `merge` control op, owner only) merges one task at
-  `merge_ready` now through the same verb, under `merge: manual` too; it answers with the merge
+  `merge_ready` now through the same verb, under `merge: manual` too, and on a paused or stopped
+  wave (an explicit request: the queue itself does not run there); it answers with the merge
   commit (`merged_by_supervisor` carries `requested_by`), or with GitHub's refusal, and is refused
   while another task holds the release branch's turn (naming it: that task may be being brought
   up to date, which takes a rebase agent and a CI run).

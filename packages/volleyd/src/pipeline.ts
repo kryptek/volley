@@ -3078,7 +3078,8 @@ export class PipelineDriver {
     )
       return `task '${task}' is not merge_ready`;
     if (this.merging.has(task)) return `a merge of task '${task}' is already running`;
-    const branch = this.branchKey() as string;
+    const branch = this.branchKey();
+    if (branch === null) return `unknown task '${task}'`;
     const own = this.turn?.task === task;
     if (!this.lock.acquire(branch, `${this.wave}/${task}`))
       return `${this.lock.holder?.(branch) ?? "another task"} holds ${v.release_branch} (its merge-queue turn: it is brought up to date if it is behind, then merged); try again once it has merged or given up the turn`;

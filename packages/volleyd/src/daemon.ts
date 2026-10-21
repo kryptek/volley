@@ -7950,7 +7950,7 @@ export class Daemon {
     const t = state.tasks.find((x) => x.id === task);
     if (typeof task !== "string" || t === undefined)
       return { ok: false, error: `unknown task '${String(task)}' in wave '${w.wave}'` };
-    const refused = guardMutation(state, by, "merge");
+    const refused = guardMutation(state, by, "merge", this.bindings);
     if (refused !== null) return { ok: false, error: refused };
     if (t.stage !== "merge_ready") return { ok: false, error: `task '${task}' is not merge_ready` };
     const driver = this.pipelineFor(w.wave);

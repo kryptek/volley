@@ -462,6 +462,14 @@ describe("merge_conflict", () => {
     expect(h.openDecisions().map((d) => d.kind)).toEqual(["merge_conflict"]);
   });
 
+  it("cancel: the blocked rebase agent is stopped and the task cancelled", async () => {
+    const id = await conflicted();
+    const agent = h.run("rebase", "T2")?.agent_id as string;
+    await h.resolve(id, "cancel");
+    expect(h.task("T2")?.stage).toBe("cancelled");
+    expect(h.retired).toContainEqual({ agent_id: agent, status: "stopped" });
+  });
+
   it("manual: the task leaves the queue and waits at the gate for a person", async () => {
     const id = await conflicted();
     await h.resolve(id, "manual");
