@@ -31,7 +31,7 @@ export const BG_NO_WEBGL_NOTE =
   "This browser didn’t provide WebGL, so only the backgrounds that work without it are listed.";
 
 export const SURFACE_LITE_NOTE =
-  "On a touch screen the Desk draws its windows without the glass blur so panning stays smooth; Liquid glass is not offered.";
+  "On a touch screen, or when reduced transparency is on, the Desk draws its windows without the glass blur so panning stays smooth; Liquid glass is not offered.";
 
 /** The React Bits backgrounds that draw with the DOM or a 2D canvas; every other one needs WebGL. */
 const NO_WEBGL_BACKGROUNDS: ReadonlySet<string> = new Set(["GridMotion", "ShapeGrid"]);

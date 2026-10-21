@@ -126,7 +126,11 @@ export function useViewport(opts: { initial?: View } = {}) {
   const pointers = useRef(new Map<number, { x: number; y: number; canvas: boolean }>());
   /** The world layer, moved directly during a gesture. */
   const worldRef = useRef<HTMLDivElement>(null);
-  /** The view as the current gesture has moved it; `view` catches up on release. */
+  /**
+   * The view as the current gesture has moved it; `view` catches up on release.
+   * A `setView` mid-gesture (keyboard pan, wheel, fit) resets it, dropping the
+   * gesture's uncommitted delta; the gesture carries on from the new view.
+   */
   const live = useRef(view);
   const moved = useRef(false);
   const frame = useRef(0);

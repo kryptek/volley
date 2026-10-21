@@ -148,6 +148,20 @@ describe("lite.css", () => {
     expect(named.has(".glass-surface--fallback")).toBe(true);
   });
 
+  it("fills the dock opaque-ish under the rule that draws it (look.css `.dock-wrap .dock`)", () => {
+    // `.dock-wrap .dock` (0,2,0) sets the dock's translucent gradient; a bare `.dock` would lose to it.
+    const drawn = rules(read(join(SRC, "styles/look.css"))).some(
+      ([sels, body]) => sels.includes(".dock-wrap .dock") && decls(body, "background").length > 0,
+    );
+    expect(drawn).toBe(true);
+    const fill = liteRules.find(([sels]) => sels.includes(".dock-wrap .dock"))?.[1] ?? "";
+    const alphas = [
+      ...(decls(fill, "background")[0] ?? "").matchAll(/rgba\([^)]*,\s*([\d.]+)\)/g),
+    ].map((m) => Number(m[1]));
+    expect(alphas.length).toBeGreaterThan(0);
+    for (const a of alphas) expect(a).toBeGreaterThanOrEqual(0.9);
+  });
+
   it("pulses Needs-you with opacity, never box-shadow", () => {
     const rule = (sel: string) => liteRules.find(([sels]) => sels.includes(sel))?.[1] ?? "";
     expect(decls(rule(".win-attn-pulse"), "animation")).toEqual(["none"]);

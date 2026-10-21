@@ -45,6 +45,15 @@
   .dock-menu-glass {
     background: rgba(38, 35, 46, 0.94);
   }
+  /* look.css draws the dock panel with `.dock-wrap .dock`, which outranks `.dock`: the same gradient, opaque-ish. */
+  .dock-wrap .dock {
+    background: linear-gradient(
+      160deg,
+      rgba(48, 52, 72, 0.94),
+      rgba(22, 24, 36, 0.94) 55%,
+      rgba(12, 13, 22, 0.95)
+    );
+  }
   .ms-side {
     background: rgba(38, 39, 46, 0.97);
   }
