@@ -100,6 +100,12 @@
         },
         {
           "priority": 0,
+          "acltype": "publishClientSend",
+          "topic": "volley/_system/auth/ops/%u",
+          "allow": true
+        },
+        {
+          "priority": 0,
           "acltype": "subscribePattern",
           "topic": "volley/_system/desk-probe/%c",
           "allow": true
