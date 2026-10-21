@@ -714,6 +714,14 @@ describe("verifyStage", () => {
     expect(f.calls.some((c) => c.join(" ").includes(`--is-ancestor ${START} ${TIP}`))).toBe(true);
   });
 
+  it("commits_on_release needs HEAD past the start (an outside move of the tip does not count)", async () => {
+    const r = await verifyStage(fake({ head: START }).exec, {
+      ...base,
+      stage: stage({ commits_on_release: true }),
+    });
+    expect(r.missing).toEqual(["commits_on_release"]);
+  });
+
   it("the run lines must be reported in order, each once", async () => {
     const two: PlaybookStage = {
       ...stage(undefined),

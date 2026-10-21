@@ -711,9 +711,15 @@ export async function verifyStage(
     );
   const v = o.stage.verify ?? {};
   if (v.commits_on_release === true) {
-    // The tip moved past the stage's start (an unknown start is unverifiable), HEAD on it.
+    // The tip moved past the stage's start (an unknown start is unverifiable), HEAD on it and
+    // past the start too (a tip moved by someone else does not count).
     const start = o.start;
-    let ok = start !== undefined && tip !== undefined && head !== undefined && tip !== start;
+    let ok =
+      start !== undefined &&
+      tip !== undefined &&
+      head !== undefined &&
+      tip !== start &&
+      head !== start;
     if (ok)
       ok = (await git("merge-base", "--is-ancestor", start as string, tip as string)).code === 0;
     if (ok) ok = (await git("merge-base", "--is-ancestor", head as string, remote)).code === 0;
