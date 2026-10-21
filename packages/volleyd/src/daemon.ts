@@ -7106,8 +7106,10 @@ export class Daemon {
   /** `digest`: the wave's digest as last published (SPEC §4.6.16). */
   private async digestOp(p: Record<string, unknown>): Promise<HandlerResult> {
     const wave = typeof p.wave === "string" ? p.wave : "";
-    if (!this.waves.has(wave) && !this.archived.has(wave))
-      return { ok: false, error: `unknown wave '${wave}'` };
+    // Archiving clears the retained digest, so an archived wave has none to answer with.
+    if (this.archived.has(wave))
+      return { ok: false, error: `wave '${wave}' is archived; its digest was cleared` };
+    if (!this.waves.has(wave)) return { ok: false, error: `unknown wave '${wave}'` };
     const cached = this.digests.get(wave);
     if (cached !== undefined) return { ok: true, result: cached };
     const raw = await this.broker.queryRetained(waveDigestTopic(wave), DAEMON_DEFAULTS.probe_ms);
