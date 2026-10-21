@@ -3419,9 +3419,10 @@ export class Daemon {
     const why = archiveRefusal(log.record) ?? this.archiveBusy(wave);
     if (why !== null) return { error: why };
     const events = archiveEvents(log.record, by, reason, dateOf(this.time));
+    const closed = (events.at(-1)?.data.closed_decisions as string[] | undefined) ?? [];
     // The needs-you inbox items of the decisions it closes are answered `archived` first
     // (SPEC §4.6.18), so `wave_archived` stays the wave's last event.
-    for (const id of (events.at(-1)?.data.closed_decisions as string[] | undefined) ?? []) {
+    for (const id of closed) {
       const item = this.inbox.get(decisionItemId(wave, id));
       if (item === undefined || item.answered !== undefined) continue;
       const where: InboxWhere = by === DAEMON_AGENT_ID ? { kind: "autopilot" } : { kind: "cli" };
@@ -3429,7 +3430,6 @@ export class Daemon {
     }
     // Each append re-publishes the state; the last one carries status archived.
     for (const ev of events) await this.append(wave, ev);
-    const closed = (events.at(-1)?.data.closed_decisions as string[] | undefined) ?? [];
     for (const id of closed) {
       const d = log.record.decisions[id];
       if (d !== undefined) await this.publishResolved(wave, d);
