@@ -109,7 +109,7 @@ beforeEach(() => {
 });
 
 describe("SettingsWindow", () => {
-  it("lists eight sections in three groups, General first", () => {
+  it("lists ten sections in three groups, General first", () => {
     render(<Harness />);
     const lists = sidebar().getAllByRole("list");
     expect(lists).toHaveLength(3);
@@ -121,10 +121,10 @@ describe("SettingsWindow", () => {
       ),
     ).toEqual([
       ["General", "Sound", "Appearance"],
-      ["Supervisor", "Claude accounts & usage", "Broker accounts", "Machines"],
+      ["Supervisor", "Autopilot", "Claude accounts & usage", "Broker accounts", "Machines"],
       ["Setup & Security", "About Volley"],
     ]);
-    expect(SETTINGS_SECTIONS).toHaveLength(9);
+    expect(SETTINGS_SECTIONS).toHaveLength(10);
     expect(heading()).toHaveTextContent("General");
     expect(sidebar().getByRole("button", { name: "General" })).toHaveAttribute(
       "aria-current",

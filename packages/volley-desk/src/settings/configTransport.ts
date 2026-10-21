@@ -179,6 +179,9 @@ export function copyCommand(path: string, value: unknown): string {
       BARE.test(value) && !KEYWORDS.test(value)
         ? value
         : `'${JSON.stringify(value).replaceAll("'", "'\\''")}'`;
+  } else if (value !== null && typeof value === "object") {
+    // A list (`autopilot.owner_only`): YAML reads the JSON flow form; quote it for the shell.
+    v = `'${JSON.stringify(value).replaceAll("'", "'\\''")}'`;
   } else {
     v = value === undefined ? "null" : JSON.stringify(value);
   }

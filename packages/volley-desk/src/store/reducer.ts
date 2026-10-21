@@ -31,7 +31,12 @@
  * only when it names its topic's machine. Which of them are machines at all
  * (configured hosts) is the section's call, at render time. volleyd's
  * readiness verdict on each (§4.6.15) goes into `readiness` by name.
+ *
+ * Autopilot (SPEC §4.6.16): of each wave's live `events` mirror only volleyd's
+ * `decision_auto_resolved` / `decision_escalated` are kept, in `waveFeed` by
+ * wave and in the feeds of the event's task's agents.
  */
+import { AUTOPILOT_EVENTS } from "./autopilot";
 import {
   type AgentAttention,
   type AgentView,
@@ -92,6 +97,7 @@ export type Route =
   | { kind: "registry"; agentId: string }
   | { kind: "agent"; namespace: string; agentId: string; channel: AgentChannel }
   | { kind: "wave"; wave: string }
+  | { kind: "waveEvent"; wave: string }
   | { kind: "decision"; wave: string; decisionId: string }
   | { kind: "config" }
   | { kind: "lease"; pool: string }
@@ -124,6 +130,7 @@ export function routeTopic(topic: string): Route | null {
   if (a === "_waves") {
     if (p.length === 3 && b === "_config") return { kind: "config" };
     if (p.length === 4 && b && c === "state") return { kind: "wave", wave: b };
+    if (p.length === 4 && b && c === "events") return { kind: "waveEvent", wave: b };
     if (p.length === 5 && b && c === "decisions" && d) {
       return { kind: "decision", wave: b, decisionId: d };
     }
@@ -178,6 +185,8 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
     }
     case "wave":
       return withCoordinators(reduceWave(state, route.wave, m));
+    case "waveEvent":
+      return reduceWaveEvent(state, route.wave, m);
     case "decision":
       return reduceDecision(state, route.wave, route.decisionId, m);
     case "config":
@@ -410,6 +419,28 @@ function newAgent(
     bornAt: null,
     observedAt,
   };
+}
+
+/**
+ * An autopilot event from a wave's live `events` mirror (SPEC §4.6.16), taken only from volleyd:
+ * kept in the wave's feed and, when it names a task, in the feeds of that task's agents. Every
+ * other journal event is the supervisor's bookkeeping, already folded into the wave state.
+ */
+function reduceWaveEvent(state: DeskState, wave: string, m: DeskMessage): DeskState {
+  const env = m.envelope;
+  if (!env || env.agent_id !== "volleyd" || !AUTOPILOT_EVENTS.has(env.type)) return state;
+  const entry = { topic: m.topic, envelope: env, receivedAt: m.receivedAt };
+  const prior = state.waveFeed?.[wave] ?? [];
+  const feed = [...prior, entry].slice(-FEED_LIMIT);
+  const task = str(record(env.payload).task);
+  const t = task ? state.waves[wave]?.state?.tasks.find((x) => x.id === task) : undefined;
+  let agents = state.agents;
+  for (const id of new Set(Object.values(t?.agents ?? {}))) {
+    const a = id ? agents[id] : undefined;
+    if (!a) continue;
+    agents = { ...agents, [a.id]: { ...a, feed: pushFeed(a, m.topic, env, m.receivedAt) } };
+  }
+  return { ...state, agents, waveFeed: { ...state.waveFeed, [wave]: feed } };
 }
 
 function pushFeed(a: AgentView, topic: string, envelope: Envelope, receivedAt: number) {
@@ -912,6 +943,9 @@ function withCoordinators(state: DeskState): DeskState {
     if (id === state.self) {
       // The Desk claimed the wave: the person at this Desk coordinates it (it has no agent).
       view = { id, waves: [w.id], state: "working" };
+    } else if (s.coordinator?.state === "reconnecting") {
+      // The supervisor's call (its grace, its flip to gone): the bound agent's terminal status is why.
+      view = { id, waves: [w.id], state: "reconnecting", ...fallbacks };
     } else if (a?.status && TERMINAL_STATUS.has(a.status.type)) {
       view = { id, waves: [w.id], state: "gone", ...fallbacks };
     } else if (a?.attention && !waitsOnPerson(a.attention)) {

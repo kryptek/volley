@@ -8,6 +8,10 @@
 import type { ConfigPayload, LeasePoolPayload } from "../store/types";
 import { ConfigRows } from "./ConfigRows";
 import type { ConfigTransport } from "./configTransport";
+import { SECTIONS } from "./schemaRows";
+
+/** Every config group but autopilot's, which has its own section (Settings › Autopilot). */
+const SUPERVISOR_SECTIONS = SECTIONS.filter((s) => s !== "Autopilot");
 
 /** The prototype's macOS accent for the Supervisor sliders. */
 const ACCENT = "#0a84ff";
@@ -116,6 +120,7 @@ export function Supervisor({
       )}
       <ConfigRows
         scope="global"
+        sections={SUPERVISOR_SECTIONS}
         values={config}
         transport={transport}
         accent={ACCENT}
