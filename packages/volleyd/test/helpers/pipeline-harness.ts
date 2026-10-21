@@ -117,6 +117,8 @@ export interface HarnessOptions {
   fence?: boolean;
   /** Wrap the harness exec per task (the daemon's remote-host routing). */
   execFor?: (task: string, exec: ExecFn) => ExecFn;
+  /** Which recorded worktrees are gone from disk (default: none; the harness's paths are fake). */
+  worktreeGone?: (task: string, path: string) => boolean;
   /** More tasks after T1 (queued, never admitted or driven), e.g. `{ T2: [T1] }` → `after: [T1]`. */
   dependents?: Record<string, string[]>;
   /**
@@ -218,7 +220,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     if (o.fence !== false) assertAllowed(argv, opts);
     calls.push([...argv]);
     callOpts.push(opts);
-    const a = [...argv];
+    // `--repo <slug>` (a GitHub read run from the repo root) says nothing about the answer.
+    const a = argv.filter((x, i) => x !== "--repo" && argv[i - 1] !== "--repo");
     world.before?.(a);
     const gate = world.gate?.(a);
     if (gate !== undefined) await gate;
@@ -422,6 +425,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     now: () => clock,
     ...(o.nudgeOnMerge !== undefined ? { nudgeOnMerge: () => o.nudgeOnMerge as NudgeOnMerge } : {}),
     exec,
+    ...(o.worktreeGone !== undefined ? { worktreeGone: o.worktreeGone } : {}),
     ...(o.execFor !== undefined
       ? {
           execFor: (task: string) =>

@@ -1143,7 +1143,7 @@ describe("pipeline: I/O never blocks the queue", () => {
 });
 
 describe("pipeline: where the checks run", () => {
-  it("a task's git / gh checks go through its own exec when it has one (a remote host)", async () => {
+  it("a task's worktree checks go through its own exec when it has one (a remote host); the pipeline's GitHub reads run here, from the repo root", async () => {
     const used: string[][] = [];
     h = pipelineHarness({
       execFor: (task, exec) => async (argv, opts) => {
@@ -1155,8 +1155,48 @@ describe("pipeline: where the checks run", () => {
     h.openPr(H1);
     await h.finish("implementer", { head: H1, ci: "green" });
     expect(stage()).toBe("spec_review");
-    expect(used.length).toBe(h.calls.length);
     expect(used.every((u) => u[0] === "T1")).toBe(true);
+    // Everything else is the review gate's head check, from the wave's repo root.
+    const local = h.calls.filter((_, i) => h.callOpts[i]?.cwd === "/repo");
+    expect(local.length).toBeGreaterThan(0);
+    expect(local.every((a) => a.slice(0, 3).join(" ") === "gh pr view")).toBe(true);
+    expect(used.length + local.length).toBe(h.calls.length);
+  });
+
+  it("the head worktree gone (cleanup removed it): GitHub reads run from the repo root with --repo, git fetches the PR head there, a human merge still reaches done", async () => {
+    h = pipelineHarness({ pipeline: "[implement, merge_ready]", worktreeGone: () => true });
+    await h.start();
+    await h.journal({
+      type: "repo_visibility_detected",
+      data: {
+        visibility: "public",
+        github: { slug: "example/repo", url: "https://github.com/example/repo" },
+      },
+    });
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(stage()).toBe("merge_ready");
+    const gated = h.calls.length;
+    // A human merges the PR on GitHub; the merge check is due again.
+    h.world.prState[7] = "MERGED";
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(stage()).toBe("done");
+    expect(h.events.filter((e) => e.data.alarm === "pipeline_error")).toEqual([]);
+    const after = h.calls.map((argv, i) => ({ argv, cwd: h.callOpts[i]?.cwd })).slice(gated);
+    const views = after.filter((c) => c.argv[0] === "gh" && c.argv[2] === "view");
+    expect(views.length).toBeGreaterThan(0);
+    for (const c of views) {
+      expect(c.cwd).toBe("/repo");
+      expect(c.argv.slice(-2)).toEqual(["--repo", "example/repo"]);
+    }
+    // The gate's git checks (before the merge) ran in the repo root, after fetching the PR head.
+    const gits = h.calls.filter((a) => a[0] === "git" && a[1] === "-C").slice(0, gated);
+    expect(gits).toContainEqual(["git", "-C", "/repo", "fetch", "origin", "refs/pull/7/head"]);
+    // Nothing after the gate touches the removed worktree.
+    expect(
+      after.filter((c) => c.cwd?.startsWith("/wt/") || c.argv.some((x) => x.startsWith("/wt/"))),
+    ).toEqual([]);
   });
 });
 

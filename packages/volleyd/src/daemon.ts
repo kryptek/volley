@@ -5521,6 +5521,12 @@ export class Daemon {
           ? this.host.exec
           : this.remoteHost(wave, t).exec;
       },
+      // A local task's worktree removed by `volleyd cleanup` (or by hand): its git checks move to
+      // the repo root. A remote box's worktree is not probed here.
+      worktreeGone: (task, path) => {
+        const t = log.record.wave?.tasks[task];
+        return (t === undefined || t.host === "local") && !existsSync(path);
+      },
       home: this.opts.home,
       record: () => log.record,
       journal: (ev) => this.append(wave, ev),
@@ -8979,7 +8985,7 @@ export class Daemon {
       if (!r.ok) return { ok: false, error: r.error };
       const full = r.sha;
       // The record describes the commit that merged, and its own CI.
-      const merged_ci = await driver.ciOf(task, driver.headCwd(task), full);
+      const merged_ci = await driver.ciOf(task, full);
       const moved = await this.serial(async () => {
         // The head moved while it was verified: the check describes a head the task left.
         const now = driver.headOf(task);

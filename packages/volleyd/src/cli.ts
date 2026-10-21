@@ -20,7 +20,7 @@ Commands:
   config      Get or set supervisor config (volleyd config get|set)
   admission   Show the spawn admission verdict and its reasons
   spawn       Spawn one task's agent now (worktree, identity, launch, verify)
-  cleanup     Remove a wave's retired worktrees and workspaces (--yes)
+  cleanup     Remove a wave's finished tasks' retired worktrees and workspaces (--yes, --all)
   decisions   List open decisions
   resolve     Answer a decision (owner only)
   inbox       The needs-you inbox: what waits for a person; inbox answer <id> <answer>

@@ -289,7 +289,7 @@ describe("a blocked agent whose reason is a failing test, on a red PR head", () 
     });
   });
 
-  it("no worktree to read the PR head from: still the plain agent_blocked decision", async () => {
+  it("no worktree recorded for the run: the PR head is still read, from the repo root", async () => {
     h = pipelineHarness();
     await h.start();
     h.openPr(H1);
@@ -308,10 +308,13 @@ describe("a blocked agent whose reason is a failing test, on a red PR head", () 
       payload: {},
     });
     await h.driver.settled();
-    expect(facts(h.openDecisions()[0]).pipeline).toEqual({
-      on: "agent_blocked",
-      role: "implementer",
+    expect(facts(h.openDecisions()[0]).pipeline).toMatchObject({
+      on: "agent_blocked_ci",
+      head: H1,
     });
+    const gh = h.calls.flatMap((a, i) => (a[0] === "gh" ? [h.callOpts[i]?.cwd] : []));
+    expect(gh.length).toBeGreaterThan(0);
+    expect(gh.every((cwd) => cwd === "/repo")).toBe(true);
   });
 
   it("a PR head that is not red, or a reason about something else: the plain agent_blocked decision", async () => {

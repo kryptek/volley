@@ -1,12 +1,19 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanupWave } from "../src/commands/cleanup";
-import { exec } from "../src/exec";
+import { cleanupPlan, cleanupWave, readWave } from "../src/commands/cleanup";
+import { type ExecFn, exec } from "../src/exec";
 import { makeBufferIO } from "../src/io";
 import { Journal } from "../src/journal";
 import { parsePs } from "../src/procs";
+import { parseWaveFile } from "../src/wave-file";
 import { tempDir } from "./helpers/tmp";
+
+/** A one-task wave at `repo` (the journal needs a real one to reduce). */
+const minimalWave = (repo: string) =>
+  parseWaveFile(
+    `wave: w1\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement, merge_ready]\ntasks:\n  T1: { issue: 1 }\n`,
+  );
 
 /** `volleyd cleanup <wave> --yes` also stops the retired agents' claude processes. */
 
@@ -55,7 +62,7 @@ describe("cleanup stops retired agents' processes", () => {
     const home = tempDir("volleyd-cleanup-procs-");
     const root = join(home, "wt");
     const j = Journal.open(join(home, "waves", "w1"));
-    j.append({ type: "wave_submitted", data: { wave: { repo: join(home, "repo") } } });
+    j.append({ type: "wave_submitted", data: { wave: minimalWave(join(home, "repo")) } });
     const agents: [string, string, boolean][] = [
       ["w1-t1-implementer-1", join(root, "w1", "T1-implementer"), true],
       ["w1-t2-fixup-1", join(root, "w1", "T2-fixup"), true],
@@ -120,5 +127,85 @@ describe("cleanup stops retired agents' processes", () => {
     expect(out).not.toContain(`would stop ${launching} `);
     expect(out).not.toMatch(/^stopped /m);
     expect(alive(a)).toBe(true);
+  });
+});
+
+/** `volleyd cleanup` leaves an unfinished task's worktrees alone (a merge_ready task's PR is still read). */
+describe("cleanup skips unfinished tasks", () => {
+  /** Wave w1: T1 done, T2 merge_ready; every agent of both retired. */
+  const setup = () => {
+    const home = tempDir("volleyd-cleanup-stage-");
+    const wave = parseWaveFile(
+      [
+        "wave: w1",
+        `repo: ${join(home, "repo")}`,
+        "release_branch: release/w1",
+        "model: claude-opus-5-5",
+        "pipeline: [implement, merge_ready]",
+        "tasks:",
+        "  T1: { issue: 1 }",
+        "  T2: { issue: 2 }",
+        "",
+      ].join("\n"),
+    );
+    const j = Journal.open(join(home, "waves", "w1"));
+    j.append({ type: "wave_submitted", data: { wave } });
+    const wt = (task: string) => join(home, "wt", "w1", `${task}-implementer`);
+    for (const [task, stage] of [
+      ["T1", "done"],
+      ["T2", "merge_ready"],
+    ] as const) {
+      const agent_id = `w1-${task.toLowerCase()}-implementer-1`;
+      j.append({ type: "task_queued", task, data: { issue: 1 } });
+      j.append({ type: "stage_entered", task, data: { stage: "implement" } });
+      j.append({
+        type: "agent_spawned",
+        task,
+        data: { agent_id, role: "implementer", worktree: wt(task) },
+      });
+      j.append({ type: "agent_retired", task, data: { agent_id, workspace_closed: true } });
+      j.append({ type: "stage_entered", task, data: { stage } });
+    }
+    return { home, wt };
+  };
+  /** Answers every command with success; the worktrees "exist" (none are on disk). */
+  const fake = () => {
+    const argvs: string[][] = [];
+    const run: ExecFn = async (argv) => {
+      argvs.push([...argv]);
+      return { code: 0, stdout: "", stderr: "", timedOut: false };
+    };
+    return { argvs, run };
+  };
+
+  it("cleanupPlan keeps the merge_ready task's worktree out of the plan; --all puts it back", () => {
+    const { home, wt } = setup();
+    const { state, events } = readWave(home, "w1");
+    const plan = cleanupPlan(state, events);
+    expect(plan.targets.map((t) => t.worktree)).toEqual([wt("T1")]);
+    expect(plan.held).toEqual([{ task: "T2", stage: "merge_ready" }]);
+    const all = cleanupPlan(state, events, { all: true });
+    expect(all.targets.map((t) => t.worktree)).toEqual([wt("T1"), wt("T2")]);
+    expect(all.held).toEqual([]);
+  });
+
+  it("prints `skip T2: merge_ready` and removes only the done task's worktree; --all removes both", async () => {
+    const { home, wt } = setup();
+    const removed = (argvs: string[][]) =>
+      argvs.filter((a) => a.includes("worktree") && a.includes("remove")).map((a) => a.at(-1));
+    const io = makeBufferIO();
+    const a = fake();
+    await cleanupWave(home, "w1", { yes: true, force: false, exec: a.run }, io);
+    expect(io.readStdout()).toContain("skip T2: merge_ready\n");
+    // Not on disk: reported gone, never removed (and never the merge_ready task's).
+    expect(io.readStdout()).toContain(`gone ${wt("T1")}\n`);
+    expect(io.readStdout()).not.toContain(wt("T2"));
+    expect(removed(a.argvs)).toEqual([]);
+
+    const io2 = makeBufferIO();
+    await cleanupWave(home, "w1", { yes: false, force: false, all: true }, io2);
+    expect(io2.readStdout()).not.toContain("skip T2");
+    expect(io2.readStdout()).toContain(`would remove ${wt("T1")}\n`);
+    expect(io2.readStdout()).toContain(`would remove ${wt("T2")}\n`);
   });
 });
