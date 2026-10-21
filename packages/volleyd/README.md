@@ -883,7 +883,9 @@ through its host adapter (cmux on this machine, tmux on a paired one), **before*
   on each row to toggle, the `Submit` row and `Enter`, then `Enter` again on the review screen
   that opens. A multi-select answer is the labels joined with `, `, as Claude Code reports them.
 - *handoff*: read the screen; refuse `prompt not idle` unless it shows the empty input box with no
-  turn running; then type the reply and press `Enter`. The input box must be empty: when Claude
+  turn running, and `the question is not on screen` unless the question's last line shows above
+  that prompt (compared on letters and digits, so wrapping and rendered markdown do not matter: an
+  idle prompt that is another session's is not typed into); then type the reply and press `Enter`. The input box must be empty: when Claude
   Code shows placeholder or suggestion text after `❯`, the answer is refused `prompt not idle`
   (fail safe; answer in the terminal).
 
@@ -893,7 +895,11 @@ never starting with `/` or `!`). A refused answer leaves the item open, still an
 terminal, whose hook event then closes it. A picker with several questions, and a session whose
 workspace volleyd does not know, are answered in their terminal. A session volleyd does not
 supervise is typed into only in its own workspace: one that is a supervised agent's, or that
-another live session's registry entry names, is refused.
+another live session's registry entry names, is refused. Neither the registry nor the hooks say
+which machine a session volleyd does not supervise runs on, so such a session is labelled and
+carried on this machine: a coordinator on a paired machine shows this machine's name, and its
+workspace ref is read on the local cmux, where the screen checks above refuse to type into a
+session that is not showing its picker or question.
 
 The carry runs on the daemon's serial queue, like every other answer: reading the screen, pressing
 the keys and recording the answer are one step, so a terminal pick (`picker_answered`) or the next

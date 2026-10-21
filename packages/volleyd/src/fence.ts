@@ -325,7 +325,8 @@ export type PickerKey = (typeof PICKER_KEYS)[number];
 function answerTextRefusal(text: string): string | null {
   if (text.trim() === "") return "empty text";
   // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
-  if (/[\u0000-\u001f\u007f]/.test(text)) return "a control character or a second line";
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(text))
+    return "a control character or a second line";
   if (/^\s*[/!]/.test(text)) return "a slash command or shell line";
   return null;
 }

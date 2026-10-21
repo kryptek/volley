@@ -11,6 +11,7 @@ import {
   parsePicker,
   parseReview,
   promptIdle,
+  questionOnScreen,
 } from "./picker";
 
 /**
@@ -79,13 +80,15 @@ export async function carryPicker(
   throw new Error("the picker's review screen did not appear after Submit");
 }
 
-/** Type the reply into the session's idle prompt and submit it. */
+/** Type the reply into the session's idle prompt, below the question it asked, and submit it. */
 export async function carryHandoff(
   d: CarryDeps,
   item: InboxItem,
   answer: string,
 ): Promise<string | null> {
-  if (!promptIdle(await d.readScreen(d.workspace))) return "prompt not idle";
+  const screen = await d.readScreen(d.workspace);
+  if (!promptIdle(screen)) return "prompt not idle";
+  if (!questionOnScreen(screen, item.question)) return "the question is not on screen";
   const handoff = mintHandoffToken({ item_id: item.id, version: item.version, text: answer });
   await d.host.sendText(d.workspace, answer, { handoff });
   await d.host.sendKeys(d.workspace, "Enter");

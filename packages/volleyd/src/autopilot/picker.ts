@@ -256,6 +256,27 @@ export function parseReview(screen: string | null): Key[] | null {
   return [...move(cursor, submit), "Enter"];
 }
 
+/** Letters and digits only, lowercased: what survives wrapping, indents and markdown rendering. */
+const bare = (s: string): string => s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+
+/**
+ * The session's screen shows `question` (its last non-empty line) above its last prompt: the
+ * idle prompt is the one that asked, not another session's holding the same workspace ref.
+ */
+export function questionOnScreen(screen: string | null, question: string): boolean {
+  if (screen === null) return false;
+  const want = bare(
+    question
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .at(-1) ?? "",
+  );
+  if (want === "") return false;
+  const lines = linesOf(screen);
+  const i = lastIndex(lines, (l) => l.startsWith(PROMPT));
+  return bare(lines.slice(0, Math.max(i, 0)).join("")).includes(want);
+}
+
 /**
  * Claude Code waits at an empty prompt: the last input box (`❯` alone between two rules) and no
  * turn running (`esc to interrupt`). A handoff reply is typed only then.

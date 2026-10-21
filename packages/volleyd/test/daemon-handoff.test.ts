@@ -18,6 +18,8 @@ afterEach(async () => {
 
 const SCREENS = new URL("./fixtures/screens/", import.meta.url).pathname;
 const screen = (name: string) => readFileSync(`${SCREENS}${name}.txt`, "utf-8");
+/** coord-1's idle prompt, its turn's last message the question it asked. */
+const asked = () => screen("picker-gone").replace("● You picked Banana.", `● ${QUESTION}`);
 
 /** An interactive coordinator session (not supervised by volleyd) beside the wave. */
 const COORD = "coord-1";
@@ -100,7 +102,7 @@ describe("needs-you inbox: coordinator handoffs (SPEC §4.6.18)", () => {
   it("an answer is typed into the idle prompt with the item's token, then submitted", async () => {
     s = await makeSupervisedEnv();
     const item = await handoff();
-    s.host.screens = [screen("picker-gone")];
+    s.host.screens = [asked()];
     const r = await answer(item.id, "dispatch T2 now");
     expect(r.error).toBeUndefined();
     expect(s.host.texts).toEqual([{ workspace: "workspace:7", text: "dispatch T2 now" }]);
@@ -124,10 +126,23 @@ describe("needs-you inbox: coordinator handoffs (SPEC §4.6.18)", () => {
     expect(s.daemon.inboxItem(item.id)?.answered).toBeUndefined();
   });
 
-  it("refuses a reply that would be a command in the prompt", async () => {
+  it("refuses an idle prompt that does not show the question: another session's screen", async () => {
     s = await makeSupervisedEnv();
     const item = await handoff();
     s.host.screens = [screen("picker-gone")];
+    expect(await answer(item.id, "go")).toMatchObject({
+      ok: false,
+      error: "the question is not on screen",
+    });
+    expect(s.host.texts).toEqual([]);
+    expect(s.host.keys).toEqual([]);
+    expect(s.daemon.inboxItem(item.id)?.answered).toBeUndefined();
+  });
+
+  it("refuses a reply that would be a command in the prompt", async () => {
+    s = await makeSupervisedEnv();
+    const item = await handoff();
+    s.host.screens = [asked()];
     const r = await answer(item.id, "!git push");
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/slash command or shell line/);
@@ -158,7 +173,7 @@ describe("needs-you inbox: coordinator handoffs (SPEC §4.6.18)", () => {
   it("owner_only: an answer from anyone but the session (or its coordinator name) is refused", async () => {
     s = await makeSupervisedEnv();
     const item = await handoff();
-    s.host.screens = [screen("picker-gone")];
+    s.host.screens = [asked()];
     const r = await answer(item.id, "dispatch T2 now", "someone-else");
     expect(r.ok).toBe(false);
     expect(r.error).toContain("only its owner answers");
@@ -227,7 +242,7 @@ describe("needs-you inbox: coordinator handoffs (SPEC §4.6.18)", () => {
     s = await makeSupervisedEnv();
     // The supervised wave agent is in workspace:1; this session names it as its own.
     const item = await handoff(30, "workspace:1");
-    s.host.screens = [screen("picker-gone")];
+    s.host.screens = [asked()];
     const r = await answer(item.id, "go");
     expect(r.ok).toBe(false);
     expect(r.error).toContain("workspace:1 is w1-t1-implementer-1's screen");
@@ -253,7 +268,7 @@ describe("needs-you inbox: coordinator handoffs (SPEC §4.6.18)", () => {
       { qos: 1, retain: true },
     );
     const item = await handoff(31, "workspace:7");
-    s.host.screens = [screen("picker-gone")];
+    s.host.screens = [asked()];
     const r = await answer(item.id, "go");
     expect(r.error).toContain("workspace:7 is coord-other's screen");
     expect(s.host.keys).toEqual([]);

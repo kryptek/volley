@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildTopic } from "volley-mcp/topics";
+import { buildEnvelope } from "volley-mcp/envelope";
+import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { type InboxItem, inboxTopic, pickerItemId } from "../src/autopilot/inbox";
 import { ControlClient } from "../src/control";
 import { NS } from "./helpers/daemon-env";
@@ -275,8 +276,62 @@ describe("needs-you inbox: Claude pickers (SPEC §4.6.18)", () => {
     expect(s.journal().filter((e) => e.type === "inbox_answered")).toHaveLength(1);
   });
 
-  it("a wave agent's picker is anyone's who may steer (not owner_only)", async () => {
-    s = await makeSupervisedEnv();
+  it("a terminal pick that differs from the inbox answer it confirms is logged", async () => {
+    const logs: string[] = [];
+    s = await makeSupervisedEnv({ daemon: { log: (m: string) => logs.push(m) } });
+    const item = await opened("toolu_01Fruit", [FRUIT]);
+    s.host.screens = [screen("picker-single")];
+    expect((await answer(item.id, "Banana")).error).toBeUndefined();
+    await hook("picker_answered", {
+      tool_use_id: "toolu_01Fruit",
+      answers: { "Which fruit do you want?": "Cherry" },
+    });
+    await s.until(() => logs.some((l) => l.includes("its terminal reports 'Cherry'")));
+    expect(s.daemon.inboxItem(item.id)?.answered).toMatchObject({ answer: "Banana", where: phone });
+  });
+
+  it("a wave agent's picker is not owner_only, but only the wave's owner (or its bound session) steers it", async () => {
+    s = await makeSupervisedEnv({ owner: "boss" });
+    const item = await opened("toolu_01Fruit", [FRUIT]);
+    expect(item.owner_only).toBe(false);
+    s.host.screens = [screen("picker-single")];
+    client ??= await ControlClient.connect(s.env.broker.url, NS);
+    const as = (by: string) =>
+      client?.request("inbox_answer", {
+        id: item.id,
+        version: 1,
+        answer: "Banana",
+        where: phone,
+        by,
+      });
+    const r = await as("a-teammate");
+    expect(r?.ok).toBe(false);
+    expect(r?.error).toContain(
+      "wave 'w1' is owned by boss; 'inbox_answer' as a-teammate is refused",
+    );
+    expect(s.host.keys).toEqual([]);
+    // The session bound to the owner's coordinator name acts as the owner.
+    await s.agent.publish(
+      registryTopic("boss-session"),
+      JSON.stringify({
+        ...buildEnvelope({
+          agentId: "boss-session",
+          parentId: null,
+          channel: "_system/registry",
+          type: "registered",
+          payload: { cwd: "/repo", started_at: new Date().toISOString(), coordinator: "boss" },
+        }),
+        namespace: NS,
+      }),
+      { qos: 1, retain: true },
+    );
+    await s.until(() => s.daemon.bindingOf("boss") === "boss-session");
+    const bound = await as("boss-session");
+    expect(bound?.error).toBeUndefined();
+  });
+
+  it("the wave's owner by name answers its agent's picker", async () => {
+    s = await makeSupervisedEnv({ owner: "boss" });
     const item = await opened("toolu_01Fruit", [FRUIT]);
     s.host.screens = [screen("picker-single")];
     client ??= await ControlClient.connect(s.env.broker.url, NS);
@@ -285,7 +340,7 @@ describe("needs-you inbox: Claude pickers (SPEC §4.6.18)", () => {
       version: 1,
       answer: "Banana",
       where: phone,
-      by: "a-teammate",
+      by: "boss",
     });
     expect(r.error).toBeUndefined();
   });

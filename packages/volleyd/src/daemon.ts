@@ -6939,6 +6939,11 @@ export class Daemon {
     } else {
       const refused = this.guardSessionAnswer(item, req.by);
       if (refused !== null) return { refused };
+      // Keys in a wave agent's session steer it: the owner check `steer` applies.
+      const state = item.wave !== undefined ? this.waves.get(item.wave)?.record.state : undefined;
+      const notOwner =
+        state != null ? guardMutation(state, req.by, "inbox_answer", this.bindings) : null;
+      if (notOwner !== null) return { refused: notOwner };
       const handler = this.inboxHandlers.get(item.kind);
       if (handler === undefined) this.log(`inbox ${id}: no handler for ${item.kind} answers`);
       else {
@@ -7068,7 +7073,15 @@ export class Daemon {
   /** Close an open item with what its session's terminal answered (`where: terminal`). */
   private async closeInTerminal(id: string, answer: string): Promise<void> {
     const item = this.inbox.get(id);
-    if (item === undefined || item.answered !== undefined) return; // answered here: confirmed
+    if (item === undefined) return;
+    if (item.answered !== undefined) {
+      // Answered here: confirmed. The hook is what the session received; a difference is logged.
+      if (item.answered.answer !== answer)
+        this.log(
+          `inbox ${id}: answered '${item.answered.answer}' on ${whereLabel(item.answered.where)}, but its terminal reports '${answer}'`,
+        );
+      return;
+    }
     const machine = typeof item.source.machine === "string" ? item.source.machine : undefined;
     await this.recordInboxAnswer(item, {
       version: item.version,

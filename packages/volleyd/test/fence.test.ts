@@ -1282,7 +1282,17 @@ describe("pickers and handoffs: Up/Down/Space and typed answers need the inbox i
   });
 
   it("refuses to mint a token for text that would be a command or more than one line", () => {
-    for (const text of ["!rm -rf ~", "/model opus", "two\nlines", "tab\there", "", "esc\u001b[A"]) {
+    for (const text of [
+      "!rm -rf ~",
+      "/model opus",
+      "two\nlines",
+      "tab\there",
+      "",
+      "esc\u001b[A",
+      "csi\u009b2J",
+      "line\u2028sep",
+      "para\u2029sep",
+    ]) {
       expect(() => mintHandoffToken({ item_id: "h-a1-7", version: 1, text }), text).toThrow(
         FenceError,
       );

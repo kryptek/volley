@@ -8,6 +8,7 @@ import {
   parsePicker,
   parseReview,
   promptIdle,
+  questionOnScreen,
 } from "../src/autopilot/picker";
 
 const SCREENS = new URL("./fixtures/screens/", import.meta.url).pathname;
@@ -242,5 +243,27 @@ describe("promptIdle (a handoff reply is typed only into an idle, empty prompt)"
     expect(promptIdle(screen("picker-single"))).toBe(false);
     expect(promptIdle(screen("picker-gone").replace(/^❯$/m, "❯ half a sentence"))).toBe(false);
     expect(promptIdle(null)).toBe(false);
+  });
+});
+
+describe("questionOnScreen (a handoff reply goes only to the session that asked)", () => {
+  const Q = "T1 is merged. Shall I dispatch T2 now,\nor hold until **CI on main** is green?";
+  // The turn's last message, as Claude Code renders it: wrapped, indented, markdown dropped.
+  const asked = screen("picker-gone").replace(
+    "● You picked Banana.",
+    "● T1 is merged. Shall I dispatch T2 now,\n  or hold until CI on main\n  is green?",
+  );
+
+  it("the question's last line above the prompt, through wrapping and markdown", () => {
+    expect(questionOnScreen(asked, Q)).toBe(true);
+  });
+
+  it("not another session's idle prompt, a question only below the prompt, or no screen", () => {
+    expect(questionOnScreen(screen("picker-gone"), Q)).toBe(false);
+    expect(
+      questionOnScreen(`${screen("picker-gone")}\nor hold until CI on main is green?\n`, Q),
+    ).toBe(false);
+    expect(questionOnScreen(null, Q)).toBe(false);
+    expect(questionOnScreen(asked, "?!")).toBe(false);
   });
 });
