@@ -27,6 +27,7 @@ const config: ConfigPayload = {
     merge_retry_max: 2,
     delete_branch: false,
     reconnect_grace_s: 900,
+    incident_wait_max_s: 14_400,
   },
 };
 
