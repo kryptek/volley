@@ -331,3 +331,26 @@ describe("merge_ready invariant: never without both reviews for the current head
     expect(rec.state?.tasks[0]?.reviews_skipped_by_plan).toBe(true);
   });
 });
+
+describe("a gate's head move is handled by one detector (#271)", () => {
+  const implemented = at(H1, { runs: { implementer: { ...accepted, head: H1 } } });
+  const moved = (p: TaskPipeline) =>
+    next(view(p), { kind: "head_moved", expected: H1, actual: H2 });
+
+  it("a move nobody else saw: the alarm and a re-verify at the new head", () => {
+    expect(kinds(moved(implemented))).toEqual(["journal", "verify"]);
+    expect(alarmOf(moved(implemented))).toMatchObject({ alarm: "pr_head_moved", expected: H1 });
+  });
+
+  it("the gate's head check saw it first (its decision pending): nothing", () => {
+    expect(moved({ ...implemented, moved: { from: H1, to: H2, during: "merge_ready" } })).toEqual(
+      [],
+    );
+  });
+
+  it("its decision answered accept, the accept's verification still to come: nothing", () => {
+    expect(moved({ ...implemented, accepting: H2 })).toEqual([]);
+    // Another head than the one accepted is a move of its own.
+    expect(kinds(moved({ ...implemented, accepting: H3 }))).toEqual(["journal", "verify"]);
+  });
+});

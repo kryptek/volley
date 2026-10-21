@@ -192,6 +192,8 @@ export interface TaskPipeline {
   ci_hold?: CiHold | undefined;
   /** The PR head moved after a gate (`pr_head_moved`), until the owner's answer. */
   moved?: MovedHead | undefined;
+  /** A moved head answered `accept`, until the accept's verification moves the task's head there. */
+  accepting?: string | undefined;
   /** Every head the task was gated at (evidence head history). */
   gated: string[];
   /** What the next fixup must do about a moved head (the CI failure, the diff), until it is verified. */
@@ -453,6 +455,7 @@ export function reducePipeline(
         if (PUBLISHING_ROLES.has(role) && typeof d.head_sha === "string") run.head = d.head_sha;
       }
       if (typeof d.head_sha === "string") p.head = d.head_sha;
+      if (p.accepting === p.head) p.accepting = undefined;
       const pr = d.pr as { number: number; url: string; ci?: string } | undefined;
       // The merge record describes the commit that merged (its own CI): not the pipeline's head.
       if (pr !== undefined && d.role !== "merged") {
@@ -579,6 +582,7 @@ export function reducePipeline(
       p.ci_hold = undefined;
       if (ev.type === "task_cancelled") {
         p.moved = undefined;
+        p.accepting = undefined;
         p.remediation = undefined;
         p.merge_inflight = undefined;
       }
@@ -651,12 +655,12 @@ export function reducePipeline(
             p.ci_superseded = dir.superseded;
           }
           p.moved = undefined;
-        } else if (
-          isAnswer(answer, "cancel") ||
-          (isAnswer(answer, "accept") && (ctx.decision?.options ?? []).includes("accept"))
-        )
+        } else if (isAnswer(answer, "cancel")) p.moved = undefined;
+        else if (isAnswer(answer, "accept") && (ctx.decision?.options ?? []).includes("accept")) {
           // accept: the head moves with the artifact_verified onResolved journals next.
+          p.accepting = p.moved.to;
           p.moved = undefined;
+        }
       }
       break;
     }
@@ -1103,7 +1107,10 @@ function onHeadMoved(
 ): PipelineAction[] {
   const role = headRole(v.p);
   if (v.stage === "cancelled" || v.stage === "merge_ready" || ev.expected !== v.p.head) return [];
-  if (role === undefined) return [];
+  // The gate's head check saw this move first (pr_head_moved): its decision, asked or answered
+  // `accept`, handles it. A plain re-verify here would land before the accept's and record the
+  // move as one that voids the reviews (#271).
+  if (role === undefined || v.p.moved !== undefined || v.p.accepting === ev.actual) return [];
   return [
     {
       kind: "journal",
