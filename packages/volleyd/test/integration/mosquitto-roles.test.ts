@@ -92,16 +92,23 @@ describe.skipIf(!RUN)("account roles on mosquitto 2.1 Dynamic Security", () => {
     expect(seen).not.toContain(mailbox);
   });
 
-  it("only an admin writes account ops, and only on its own username's topic", async () => {
+  it("an admin and a Desk login write account ops, each only on its own username's topic", async () => {
     const admin = probe("admin-ops");
     const impersonated = probe("steer-as-admin");
     const steerOwn = probe("steer-ops");
+    const watchOwn = probe("watch-ops");
+    const peerOwn = probe("peer-ops");
     await attempt("admin-test", authOpsTopic("admin-test"), admin);
     await attempt("steer-test", authOpsTopic("admin-test"), impersonated);
+    // A Desk login sends its Needs-you answers on its own account-op topic (#274).
     await attempt("steer-test", authOpsTopic("steer-test"), steerOwn);
+    await attempt("watch-test", authOpsTopic("watch-test"), watchOwn);
+    await attempt("peer-test", authOpsTopic("peer-test"), peerOwn);
     expect(await delivered(admin)).toBe(true);
+    expect(await delivered(steerOwn)).toBe(true);
     expect(seen).not.toContain(impersonated);
-    expect(seen).not.toContain(steerOwn);
+    expect(seen).not.toContain(watchOwn);
+    expect(seen).not.toContain(peerOwn);
   });
 
   it("a token login writes only its own redeem topic; nobody else writes it", async () => {
