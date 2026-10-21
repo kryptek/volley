@@ -60,6 +60,12 @@ describe("agentIdFor", () => {
     expect(err).toBeInstanceOf(SpawnError);
     expect((err as SpawnError).permanent).toBe(true);
   });
+
+  it("a role tail that leaves no room for any of the task keeps only its hash", () => {
+    const id = agentIdFor("w1", "fix-test-clock-test-ts-sleep", "r".repeat(50), 1);
+    expect(id.length).toBeLessThanOrEqual(63);
+    expect(id).toMatch(/^w1-[0-9a-f]{6}-r{50}-1$/);
+  });
 });
 
 describe("releaseAgentId", () => {

@@ -52,7 +52,8 @@ export function agentIdFor(wave: string, task: string, role: string, attempt: nu
   // Only an id that could not be formed otherwise is cut here: every other one keeps its shape.
   const room = MAX_ID - MIN_HEAD - rest.length - 1;
   if (wave.length + 1 + t.length + rest.length > MAX_ID && t.length > room) {
-    t = `${t.slice(0, room - HASH - 1).replace(/-+$/, "")}-${shortHash(t)}`;
+    const head = t.slice(0, Math.max(0, room - HASH - 1)).replace(/-+$/, "");
+    t = head ? `${head}-${shortHash(t)}` : shortHash(t);
   }
   return idWithTail(wave, `-${t}${rest}`, task);
 }
