@@ -288,6 +288,21 @@ describe("the other grouped sections", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Account for new waves")).toBeInTheDocument();
   });
+
+  it("Defaults renders the account radiogroup when the Desk has broker credentials", () => {
+    const send = vi.fn(async () => ({ applied: true, rejected: [] }));
+    render(<Harness initial="claude" transport={{ identity: "desk", send }} />);
+    fireEvent.click(row("Defaults"));
+    expect(screen.getByRole("radiogroup", { name: "Account for new waves" })).toBeInTheDocument();
+  });
+
+  it("the Lease pools page does not repeat its title as a card heading", () => {
+    render(<Harness initial="supervisor" />);
+    fireEvent.click(row("Lease pools"));
+    expect(heading()).toHaveTextContent("Lease pools");
+    expect(within(dialog()).getAllByRole("heading", { name: "Lease pools" })).toHaveLength(1);
+    expect(screen.getByRole("region", { name: "Lease pools" })).toBeInTheDocument();
+  });
 });
 
 describe("summaries", () => {

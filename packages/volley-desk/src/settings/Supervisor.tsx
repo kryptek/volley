@@ -94,8 +94,8 @@ export function LeasePools({ leases }: { leases: Record<string, LeasePoolPayload
   const pools = Object.values(leases).sort((a, b) => a.pool.localeCompare(b.pool));
   if (pools.length === 0) return null;
   return (
-    <section className="s-group lease-pools" aria-labelledby="lease-pools-h">
-      <h3 id="lease-pools-h">Lease pools</h3>
+    // The page title is already "Lease pools": the region keeps the name, not a second heading.
+    <section className="s-group lease-pools" aria-label="Lease pools">
       {pools.map((p) => (
         <article key={p.pool} className="lease-pool" aria-label={p.pool}>
           <div className="lease-head">
