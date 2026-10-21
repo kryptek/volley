@@ -15,6 +15,7 @@ import {
   memoPath,
   parseUsageResponse,
   probeLogin,
+  probeLogins,
   readCredential,
   withRedacted,
 } from "../../src/peer/usage-probe";
@@ -438,6 +439,48 @@ describe("memo and cadence", () => {
     expect(memo).not.toHaveProperty("backoff_until");
     await probeLogin(f.deps, login, at(6));
     expect(f.requests).toHaveLength(2);
+  });
+
+  it("another status (a redirect, a 404) is error at the normal interval, no backoff", async () => {
+    for (const code of [302, 404]) {
+      const f = fake({ answer: status(code) });
+      const login = defaultLogin(f.home);
+      storeFile(login);
+      expect((await probeLogin(f.deps, login, NOW)).state).toBe("error");
+      const memo = JSON.parse(readFileSync(memoPath(f.home, "default"), "utf-8"));
+      expect(memo).not.toHaveProperty("backoff_until");
+      await probeLogin(f.deps, login, at(6));
+      expect(f.requests).toHaveLength(2);
+    }
+  });
+
+  it("probes every login at once, so one slow login does not add up across 16", async () => {
+    let started = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const f = fake({
+      answer: async () => {
+        started += 1;
+        if (started === 3) release();
+        await gate;
+        return status(200)();
+      },
+    });
+    storeFile(defaultLogin(f.home));
+    for (const id of ["a", "b"]) {
+      const dir = join(f.home, ".volley", "claude", id);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, ".claude.json"), "{}");
+      storeFile({ profile: id, dir, isDefault: false });
+    }
+    const logins = await probeLogins(f.deps, NOW);
+    expect(logins.map((l) => [l.profile, l.state])).toEqual([
+      ["default", "ok"],
+      ["a", "ok"],
+      ["b", "ok"],
+    ]);
   });
 
   it("memo dir 0700, file 0600, numbers only", async () => {

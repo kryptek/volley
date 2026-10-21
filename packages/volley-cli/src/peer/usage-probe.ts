@@ -281,7 +281,8 @@ async function call(deps: ProbeDeps, token: string): Promise<Outcome> {
     // A failure's body is never read: it may echo what was sent.
     if (res.status === 401 || res.status === 403) return { state: "rejected" };
     if (res.status === 429) return { state: "rate_limited", backoff: true };
-    if (res.status !== 200) return { state: "error", backoff: true };
+    // Only 5xx backs off; another status (a redirect, a 404) waits the normal interval.
+    if (res.status !== 200) return { state: "error", backoff: res.status >= 500 };
     const parsed = parseUsageResponse(await res.json().catch(() => null));
     return "state" in parsed
       ? { state: "error", backoff: false }
@@ -428,11 +429,9 @@ export async function probeLogin(deps: ProbeDeps, login: Login, now: Date): Prom
   return loginOf(memo);
 }
 
-/** Every login this machine holds, probed in turn. */
+/** Every login this machine holds, probed at once: 16 slow logins cost one timeout, not 16. */
 export async function probeLogins(deps: ProbeDeps, now: Date): Promise<ClaudeLogin[]> {
-  const out: ClaudeLogin[] = [];
-  for (const login of findLogins(deps.home, deps.env)) out.push(await probeLogin(deps, login, now));
-  return out;
+  return Promise.all(findLogins(deps.home, deps.env).map((login) => probeLogin(deps, login, now)));
 }
 
 /** The real request: fetch with a timeout and no redirects. */
