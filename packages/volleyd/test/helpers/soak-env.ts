@@ -6,6 +6,7 @@ import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { CONFIG_DEFAULTS } from "../../src/config-defaults";
 import { ControlClient } from "../../src/control";
 import type { Daemon } from "../../src/daemon";
+import { readJournalFile } from "../../src/journal";
 import type { JournalEvent } from "../../src/types";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./daemon-env";
 import { type Behaviour, type Fleet, type FleetAgent, fakeFleet } from "./fake-agents";
@@ -32,8 +33,8 @@ export interface SoakEnvOptions {
   tasks: string[];
   seed?: number;
   flake?: Flake;
-  /** Heads the flake fails whatever the seed. */
-  forceFlaky?: (head: string) => boolean;
+  /** The flake per head over the seed (soak-world.ts `flaky`). */
+  flaky?: (head: string) => boolean | undefined;
   behaviour?: (a: Omit<FleetAgent, "behaviour">) => Behaviour;
   /** The release playbook (`.volley/release.yaml`; none: no release train). */
   playbook?: string;
@@ -64,6 +65,10 @@ export interface SoakEnv {
    * journal tail and the open decisions (what a failing soak prints).
    */
   until: (pred: () => boolean, what: string, maxSteps?: number, ms?: number) => Promise<number>;
+  /** Run `fn` at the start of every step (a scenario's world events). */
+  onStep: (fn: () => void | Promise<void>) => void;
+  /** Steps taken so far. */
+  steps: () => number;
   /** The journal's last `n` events and the open decisions, one line each. */
   report: (n?: number) => string;
   /** Everything published so far consumed and the daemon idle (bounded: never deadlocks on a timer). */
@@ -98,12 +103,14 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
     release_branch: RELEASE,
     seed: o.seed ?? 1,
     ...(o.flake !== undefined ? { flake: o.flake } : {}),
-    ...(o.forceFlaky !== undefined ? { forceFlaky: o.forceFlaky } : {}),
+    ...(o.flaky !== undefined ? { flaky: o.flaky } : {}),
   });
   /** The daemon's log lines. */
   const logs: string[] = [];
   const fx = fakeExec().on([], (argv, opts) => world.exec(argv, opts));
   const host = fakeHost(fx);
+  // Every pane shows a Claude session mid-task (a screen read finds it, never a crash).
+  host.screens = ["⏺ Reading the diff.\n\n  ? for shortcuts  ·  Opus 5.5"];
   host.sleep = async (ms) => {
     await new Promise<void>((r) => clock.setTimeout(r, ms));
   };
@@ -230,7 +237,11 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
   if (!run.ok) throw new Error(`run: ${run.error}`);
   await consumed();
 
+  const hooks: (() => void | Promise<void>)[] = [];
+  let steps = 0;
   const step = async (ms = 5_000) => {
+    steps++;
+    for (const h of hooks) await h();
     await fleet.step();
     await consumed();
     await fleet.heartbeats();
@@ -240,7 +251,7 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
     await consumed();
   };
   const report = (n = 40) => {
-    const j = d.journalEvents(WAVE);
+    const j = readJournalFile(join(env.home, "waves", WAVE, "journal.jsonl"));
     const rec = d.record(WAVE);
     const open = (rec?.state?.open_decisions ?? []).map((id) => {
       const x = rec?.decisions[id];
@@ -270,11 +281,15 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
     clock,
     repo,
     control,
-    journal: () => d.journalEvents(WAVE),
+    journal: () => readJournalFile(join(env.home, "waves", WAVE, "journal.jsonl")),
     logs,
     consumed,
     step,
     report,
+    onStep: (fn) => {
+      hooks.push(fn);
+    },
+    steps: () => steps,
     async until(pred, what, maxSteps = 200, ms = 5_000) {
       for (let i = 0; i < maxSteps; i++) {
         if (pred()) return i;

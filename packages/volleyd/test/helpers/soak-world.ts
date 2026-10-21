@@ -55,8 +55,11 @@ export interface SoakWorldOptions {
   release_branch: string;
   seed: number;
   flake?: Flake;
-  /** Heads the flake fails no matter the seed (while unfixed and not touched). */
-  forceFlaky?: (head: string) => boolean;
+  /**
+   * Overrides the seed per head: true, the flake fails it (while unfixed and not touched); false,
+   * it never does; undefined, the seed decides.
+   */
+  flaky?: (head: string) => boolean | undefined;
 }
 
 /** What GitHub says when `--match-head-commit` no longer matches. */
@@ -252,7 +255,7 @@ export function soakWorld(o: SoakWorldOptions) {
     if (o.flake === undefined || !flakeActive(head)) return false;
     if (release) return true;
     if (touchesFlake(head)) return false;
-    return o.forceFlaky?.(head) === true || unit(o.seed, head) < o.flake.rate;
+    return o.flaky?.(head) ?? unit(o.seed, head) < o.flake.rate;
   };
 
   const ciOf = (head: string, event: Run["event"]): Run[] => {
@@ -511,6 +514,7 @@ export function soakWorld(o: SoakWorldOptions) {
 
   return {
     root,
+    release: o.release_branch,
     refs,
     local,
     prs,

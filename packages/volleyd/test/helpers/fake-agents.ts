@@ -27,9 +27,13 @@ import type { SoakWorld } from "./soak-world";
  */
 
 export type Behaviour =
-  /** Do the role's work and report done. */
-  | { kind: "work"; findings?: { severity: "P1" | "P2" | "P3"; file: string; text: string }[] }
-  /** Register, heartbeat once, then never another word (the watchdog's stall). */
+  /** Do the role's work (after `delaySteps` steps: a long review) and report done. */
+  | {
+      kind: "work";
+      findings?: { severity: "P1" | "P2" | "P3"; file: string; text: string }[];
+      delaySteps?: number;
+    }
+  /** Stop without a terminal status (the Stop hook's `idle`), and ignore every nudge. */
   | { kind: "stall" }
   /** Report `failed`. */
   | { kind: "fail"; reason: string }
@@ -59,6 +63,8 @@ export interface FleetAgent {
   retired: boolean;
   /** Steers the daemon sent it that the agent has not answered yet. */
   steers: number;
+  /** Steps since it registered. */
+  waited: number;
   behaviour: Behaviour;
 }
 
@@ -165,6 +171,7 @@ export function fakeFleet(o: FleetOptions) {
       acted: false,
       retired: false,
       steers: 0,
+      waited: 0,
     };
     const a: FleetAgent = { ...base, behaviour: o.behaviour?.(base) ?? { kind: "work" } };
     agents.set(a.agent_id, a);
@@ -293,6 +300,18 @@ export function fakeFleet(o: FleetOptions) {
         await work(a, b);
         return;
       case "stall":
+        await pub(
+          a.agent_id,
+          "progress",
+          "idle",
+          {
+            text: "Done reading the diff.",
+            source: "harness-hook",
+            seq: ++seq,
+            hook_event: "Stop",
+          },
+          false,
+        );
         return;
       case "fail":
         await pub(a.agent_id, "status", "failed", {
@@ -318,11 +337,12 @@ export function fakeFleet(o: FleetOptions) {
   /** A steer an agent answers: the unparseable reviewer repeats itself; a worker does it again. */
   const answer = async (a: FleetAgent) => {
     a.steers--;
+    if (a.behaviour.kind === "stall") return;
     await narrate(a, 80, "acknowledged: redoing it");
     if (a.behaviour.kind === "unparseable") {
       await pub(a.agent_id, "result", "review", { verdict: "still fine" });
       await done(a, "reviewed again");
-    } else if (a.behaviour.kind === "work") await done(a, `${a.role} done (again)`);
+    } else if (a.behaviour.kind === "work" && a.acted) await done(a, `${a.role} done (again)`);
   };
 
   return {
@@ -338,6 +358,8 @@ export function fakeFleet(o: FleetOptions) {
       for (const a of agents.values()) {
         if (a.retired || !a.registered) continue;
         if (!a.acted) {
+          const b = a.behaviour;
+          if (b.kind === "work" && a.waited++ < (b.delaySteps ?? 0)) continue;
           a.acted = true;
           await track(act(a));
         } else if (a.steers > 0) await track(answer(a));
@@ -348,10 +370,10 @@ export function fakeFleet(o: FleetOptions) {
     async idle(): Promise<void> {
       while (inflight.size > 0) await Promise.allSettled([...inflight]);
     },
-    /** Heartbeats from every live agent that works (a stalled one stays silent). */
+    /** Heartbeats from every live agent that works (a stalled one has stopped: silent). */
     async heartbeats(): Promise<void> {
       for (const a of agents.values())
-        if (!a.retired && a.registered && a.behaviour.kind !== "stall")
+        if (!a.retired && a.registered && !(a.behaviour.kind === "stall" && a.acted))
           await track(heartbeat(a, "PostToolUse"));
     },
     observe,
