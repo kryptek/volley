@@ -6,9 +6,11 @@
  * with `payload.op` and its reply) is not shown: it is the daemon's, not a conversation with the agent.
  * Heartbeats are liveness (the footer's dot and age), not rows: the store only counts them, and
  * the "show heartbeats" toggle (off by default) adds one collapsed `heartbeat ×N · last 3s` row at
- * the end.
+ * the end. Autopilot's events on the agent's task (SPEC §4.6.16) read as their line
+ * (`Autopilot · relaunch (<policy>): <rationale>`), the evidence in their JSON.
  */
 import { type UIEvent, useLayoutEffect, useRef, useState } from "react";
+import { autopilotLine } from "../../store/autopilot";
 import { isControlTraffic } from "../../store/reducer";
 import type { FeedEntry } from "../../store/types";
 
@@ -70,6 +72,8 @@ export function feedChannel(e: FeedEntry): string {
 }
 
 function summary(e: FeedEntry): string {
+  const auto = autopilotLine(e.envelope);
+  if (auto !== null) return auto;
   const p = e.envelope.payload;
   if (p === null || typeof p !== "object") return typeof p === "string" ? p : "";
   const r = p as Record<string, unknown>;

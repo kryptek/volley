@@ -6,7 +6,8 @@
  *     A PR whose diff touches packages/ or spec/ adds a fragment, changes/<issue>.<type>.md,
  *     unless it carries the `no-changelog` label.
  *   bun scripts/changelog-ci.ts untouched --base <sha> --head <sha>
- *     Every commit in base..head that changes CHANGELOG.md is a release commit (its subject
+ *     When the PR's net diff (base...head) changes CHANGELOG.md, every commit in base..head that
+ *     changes it is a release commit (its subject
  *     starts with `release:` or `chore(release):`, as `bun run changelog --commit` writes).
  *     An all-zero base (the push that creates a branch) is skipped.
  *
@@ -76,6 +77,23 @@ export function changelogTouched(commits: Commit[]): CheckResult {
       ...bad.map((c) => `  ${c.subject}`),
     ].join("\n"),
   };
+}
+
+/**
+ * The `untouched` rule judged on the PR's net change: when the diff from the merge base does not
+ * touch CHANGELOG.md, it holds, whatever older commits on the branch did. A branch written before
+ * the fragments rule may carry commits that edited CHANGELOG.md and later merged the release
+ * branch over them; without a force-push that history stays, and it changes nothing on merge.
+ */
+export function untouchedCheck({
+  netFiles,
+  commits,
+}: {
+  netFiles: string[];
+  commits: () => Commit[];
+}): CheckResult {
+  if (!netFiles.includes("CHANGELOG.md")) return { ok: true };
+  return changelogTouched(commits());
 }
 
 /** `git log --format=%x1e%H%x1f%s --name-only` output → one Commit per record. */
@@ -148,9 +166,11 @@ export function main(argv: string[], deps: MainDeps = {}): number {
         out("changelog-ci: a new branch (all-zero base); nothing to check");
         return 0;
       }
-      result = changelogTouched(
-        parseLog(git("log", "--format=%x1e%H%x1f%s", "--name-only", `${base}..${head}`)),
-      );
+      result = untouchedCheck({
+        netFiles: lines(git("diff", "--name-only", `${base}...${head}`, "--", "CHANGELOG.md")),
+        commits: () =>
+          parseLog(git("log", "--format=%x1e%H%x1f%s", "--name-only", `${base}..${head}`)),
+      });
     }
   } catch (e) {
     err((e as Error).message);

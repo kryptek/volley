@@ -200,6 +200,42 @@
   font: 11.5px var(--f-mono);
 }
 
+/* Autopilot (SPEC §4.6.16–19): its chip, the merge queue, the release train and fixer tasks. */
+.chip--autopilot {
+  color: #9fd9ff;
+  border-color: rgba(110, 190, 249, 0.45);
+}
+.chip--autopilot.chip--off {
+  color: var(--mute);
+  border-color: rgba(163, 171, 192, 0.4);
+}
+.wave-queue {
+  margin: 8px 0 0;
+  font: 11.5px var(--f-mono);
+}
+.wave-train,
+.wave-fixers {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.wave-train [aria-current="step"] {
+  color: var(--amber);
+}
+.wave-train .train-verified {
+  color: #8ee6a8;
+}
+.wave-train .train-failed {
+  color: #ff9a9a;
+}
+.dag-fixer {
+  font-size: 11px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .clawd--wait {
     animation: none;

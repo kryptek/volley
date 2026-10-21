@@ -10,8 +10,8 @@ import { formatDecision } from "./decisions";
 const HELP = `Usage: volleyd status [wave] [--json] [--by <agent-id>] [--broker-url <url>] [--namespace <ns>]
 
 Print every wave the daemon owns (or one wave) from the daemon's live state, with open
-decisions and a "needs you" count on the waves the caller owns (--by, else VOLLEY_AGENT_ID,
-else the session registered for this directory).
+decisions and a "needs you" count on the waves the caller owns (--by, else
+VOLLEY_AGENT_ID, else the session registered for this directory, else VOLLEY_COORDINATOR).
 --json prints, for one wave, its wave-state payload exactly as published on
 volley/_waves/<wave>/state (each task's pr { number, head_sha, ci, checks }, stage_group and
 alarms included); without a wave, { waves: [those payloads], agent_logins }.
@@ -19,7 +19,9 @@ A placed task shows its host and, under it, every machine the supervisor conside
 best first, with its score and the supervisor's one-line why.
 Without a wave, a first line counts the broker's agent logins (as last re-read: after each
 mint, delete and sweep, and every 30 s), and how many the credential sweeps deleted in total
-(--json: agent_logins).
+(--json: agent_logins). With a paired machine configured, the next says how the supervisor's
+own machine takes auto-placed tasks (fleet.local_agents) and whether it is the fallback now
+(--json: local_agents).
 `;
 
 export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> {
@@ -51,6 +53,7 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
       wave !== undefined ? [res.result as WaveState] : (res.result as { waves: WaveState[] }).waves;
     const kill = (res.result as { kill_switch?: boolean }).kill_switch === true;
     const logins = (res.result as { agent_logins?: { live: number; swept: number } }).agent_logins;
+    const localAgents = (res.result as { local_agents?: LocalAgentsView }).local_agents;
     let decisions: DecisionPayload[] = [];
     let caller: string | null = null;
     if (states.some((s) => s.open_decisions.length > 0)) {
@@ -61,6 +64,7 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     io.stdout(
       (kill ? "KILL SWITCH ENGAGED: run is refused until `volleyd resume --all`\n" : "") +
         (logins !== undefined ? `${formatLogins(logins)}\n` : "") +
+        (localAgents !== undefined ? `${formatLocalAgents(localAgents)}\n` : "") +
         (states.length === 0
           ? "no waves\n"
           : states.map((s) => formatWave(s, { caller, decisions })).join("\n")),
@@ -92,6 +96,23 @@ export function formatLogins(l: { live: number; swept: number }): string {
   return `agent logins: ${l.live} live, ${l.swept} swept`;
 }
 
+/** The own machine's verdict's `local_agents` (readiness.schema.json). */
+export interface LocalAgentsView {
+  mode: "always" | "fallback" | "never";
+  active: boolean;
+  why?: string;
+}
+
+/**
+ * `local agents: fallback (idle: box-a eligible)` / `fallback (active: box-a: tunnel down)` /
+ * `always` / `never`: how the supervisor's own machine takes auto-placed tasks (SPEC §4.6.15).
+ */
+export function formatLocalAgents(l: LocalAgentsView): string {
+  if (l.mode !== "fallback") return `local agents: ${l.mode}`;
+  const state = l.active ? "active" : "idle";
+  return `local agents: fallback (${l.why !== undefined ? `${state}: ${l.why}` : state})`;
+}
+
 function parseStatus(argv: string[]) {
   return parseArgs({
     args: argv,
@@ -110,16 +131,25 @@ function parseStatus(argv: string[]) {
 /**
  * Human-readable wave summary: a header line, then one line per task, then its open decisions.
  * The header shows `plan vN`, with `(K tasks pending decision)` when open plan_change decisions
- * (in `ctx.decisions`) wait on K tasks, gains `needs you: N` when `caller` owns the wave and N
- * decisions are open, and ends with `alarms: N`, the tasks whose spawn failed and is unrecovered.
+ * (in `ctx.decisions`) wait on K tasks, names the agent a coordinator-name owner acts through
+ * (`owner: coord-main (via coordinator-c7d9)`), gains `needs you: N` when `caller` owns the wave
+ * (or is that agent) and N decisions are open, and ends with `alarms: N`, the tasks whose spawn
+ * failed and is unrecovered.
  */
 export function formatWave(
   s: WaveState,
   ctx: { caller?: string | null; decisions?: DecisionPayload[] } = {},
 ): string {
   const open = s.open_decisions.length;
-  const needs =
-    open > 0 && s.owner !== null && s.owner === ctx.caller ? `  needs you: ${open}` : "";
+  // A coordinator-name owner acts through the agent bound to it (SPEC §4.6.1).
+  const via =
+    s.owner !== null && s.coordinator !== undefined && s.coordinator.agent_id !== s.owner
+      ? s.coordinator.agent_id
+      : undefined;
+  const mine = ctx.caller != null && (ctx.caller === s.owner || ctx.caller === via);
+  const needs = open > 0 && mine ? `  needs you: ${open}` : "";
+  const away = s.coordinator?.state === "reconnecting" ? ", reconnecting" : "";
+  const owner = via !== undefined ? `${s.owner} (via ${via}${away})` : (s.owner ?? "-");
   const pending = new Set(
     (ctx.decisions ?? [])
       .filter(
@@ -140,7 +170,7 @@ export function formatWave(
     (t) => t.last_error !== undefined || (t.alarms ?? []).length > 0,
   ).length;
   const header =
-    `${s.wave}  ${s.status}  ${version}  owner: ${s.owner ?? "-"}  ` +
+    `${s.wave}  ${s.status}  ${version}  owner: ${owner}  ` +
     `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${open}${needs}  alarms: ${alarms}\n`;
   // Which rules the agents got (absent: a state from before the field).
   const preface = s.brief_preface !== undefined ? `  ${formatBriefPreface(s.brief_preface)}\n` : "";
@@ -151,6 +181,13 @@ export function formatWave(
   const autopilot =
     ap !== undefined
       ? `  autopilot: ${ap.enabled ? "on" : "off"} · ${ap.auto_resolved} auto-resolved · ${ap.escalated} escalated\n`
+      : "";
+  const queue = s.merge_queue !== undefined ? `  ${formatMergeQueue(s.merge_queue)}\n` : "";
+  // The release train (SPEC §4.6.19): the stage running or awaiting its go, and how far it is.
+  const r = s.release;
+  const release =
+    r !== undefined
+      ? `  release: ${r.stage ?? "-"} (${r.stages.filter((x) => x.state === "verified").length}/${r.stages.length} verified)\n`
       : "";
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {
@@ -169,7 +206,31 @@ export function formatWave(
   const decisions = (ctx.decisions ?? [])
     .filter((d) => d.wave === s.wave && s.open_decisions.includes(d.decision_id))
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
-  return header + autopilot + preface + hygiene + github + rows.join("") + decisions.join("");
+  return (
+    header +
+    queue +
+    release +
+    autopilot +
+    preface +
+    hygiene +
+    github +
+    rows.join("") +
+    decisions.join("")
+  );
+}
+
+/**
+ * `merge queue: T3 merging · T5 updating · T7, T9 queued` (SPEC §4.6.17): the queue in merge
+ * order, neighbours in the same state named together.
+ */
+export function formatMergeQueue(q: NonNullable<WaveState["merge_queue"]>): string {
+  const runs: { state: string; tasks: string[] }[] = [];
+  for (const e of q) {
+    const last = runs.at(-1);
+    if (last?.state === e.state) last.tasks.push(e.task);
+    else runs.push({ state: e.state, tasks: [e.task] });
+  }
+  return `merge queue: ${runs.map((r) => `${r.tasks.join(", ")} ${r.state}`).join(" · ")}`;
 }
 
 /**

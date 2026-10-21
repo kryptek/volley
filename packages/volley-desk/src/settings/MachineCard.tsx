@@ -10,7 +10,10 @@
  * `RepairSheet`), **Re-pair…** (a code bound to the machine, `invite --for`)
  * and **Remove…** (`RemoveMachineSheet`); the supervisor's own machine has
  * none of them (its cap is `hard_ceiling`, and it is not paired). `signIn` is
- * the slot a remote Claude sign-in fills.
+ * the slot a remote Claude sign-in fills. The supervisor's own card also
+ * carries the local agents chip (`fleet.local_agents` from volleyd's verdict:
+ * `always`, `never`, `fallback`, or `fallback · active` while no paired machine
+ * is eligible), titled with volleyd's why; a click opens the setting.
  */
 
 import { type ReactNode, useEffect, useState } from "react";
@@ -114,6 +117,41 @@ export function ReadinessLine({
     );
   }
   return <p className="m-ready m-ready--ok">ready for agents{stale}</p>;
+}
+
+/** `fallback · active` while the fallback profile is in force, else the mode. */
+export function localAgentsText(la: NonNullable<ReadinessPayload["local_agents"]>): string {
+  return la.mode === "fallback" && la.active ? "fallback · active" : la.mode;
+}
+
+/** The supervisor's own machine's `fleet.local_agents` mode; a click opens the setting. */
+function LocalAgentsChip({
+  la,
+  onOpen,
+}: {
+  la: NonNullable<ReadinessPayload["local_agents"]>;
+  onOpen?: (() => void) | undefined;
+}) {
+  const text = localAgentsText(la);
+  const cls = `chip m-local${la.active ? " m-local--active" : ""}`;
+  if (!onOpen) {
+    return (
+      <span className={cls} title={la.why}>
+        {text}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className={cls}
+      title={la.why}
+      aria-label={`Local agents: ${text}`}
+      onClick={onOpen}
+    >
+      {text}
+    </button>
+  );
 }
 
 /** The 5-hour usage of the account the machine's agents run under. */
@@ -296,6 +334,8 @@ export interface MachineCardProps {
   signIn?: ReactNode;
   /** A re-pairing code starts (`true`) or stops counting down: the section ticks faster meanwhile. */
   onCountdown?: (on: boolean) => void;
+  /** The local agents chip's click (own card only): open the `fleet.local_agents` setting. */
+  onOpenLocalAgents?: (() => void) | undefined;
 }
 
 export function MachineCard(p: MachineCardProps) {
@@ -314,6 +354,9 @@ export function MachineCard(p: MachineCardProps) {
       <div className="m-head">
         <b>{m.name}</b>
         {p.self && <span className="chip chip--mine">this one</span>}
+        {p.self && r?.local_agents && (
+          <LocalAgentsChip la={r.local_agents} onOpen={p.onOpenLocalAgents} />
+        )}
       </div>
       <div className="dim">{specs(m)}</div>
       <div className="m-stats">

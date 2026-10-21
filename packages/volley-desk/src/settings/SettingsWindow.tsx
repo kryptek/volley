@@ -23,6 +23,7 @@ import type { AdminStatus } from "../store/peerOps";
 import type { ConfigPayload, LeasePoolPayload } from "../store/types";
 import { About } from "./About";
 import { Appearance } from "./Appearance";
+import { Autopilot } from "./Autopilot";
 import { BrokerAccounts } from "./BrokerAccounts";
 import { ClaudeAccounts, type ClaudeAccountsProps } from "./ClaudeAccounts";
 import { General } from "./General";
@@ -122,6 +123,12 @@ export function SettingsWindow(p: SettingsWindowProps) {
   useEffect(() => {
     if (initial) setSec(initial);
   }, [initial, focusMachine, focusSeq]);
+  /** A Supervisor row to bring into view (a machine card's local agents chip); seq: each click. */
+  const [focusRow, setFocusRow] = useState<{ path: string; seq: number } | null>(null);
+  const openSetting = (path: string) => {
+    setSec("supervisor");
+    setFocusRow((f) => ({ path, seq: (f?.seq ?? 0) + 1 }));
+  };
   const [q, setQ] = useState("");
   const dialog = useRef<HTMLDivElement>(null);
   const shown = matchSections(q);
@@ -252,7 +259,20 @@ export function SettingsWindow(p: SettingsWindowProps) {
               <Appearance look={p.look} setLook={p.setLook} webgl={p.webgl} />
             )}
             {sec === "supervisor" && (
-              <Supervisor config={p.config} transport={p.transport} leases={p.leases ?? {}} />
+              <Supervisor
+                config={p.config}
+                transport={p.transport}
+                leases={p.leases ?? {}}
+                focus={focusRow?.path}
+                focusSeq={focusRow?.seq}
+              />
+            )}
+            {sec === "autopilot" && (
+              <Autopilot
+                config={p.config}
+                transport={p.transport}
+                control={p.claude?.control ?? null}
+              />
             )}
             {sec === "claude" && (
               <ClaudeAccounts
@@ -278,6 +298,7 @@ export function SettingsWindow(p: SettingsWindowProps) {
               <Machines
                 {...(p.machines ?? { machines: {}, hubUp: false, ops: null })}
                 onAdmin={setPeerAdmin}
+                onOpenSetting={openSetting}
               />
             )}
             {sec === "setup" && (

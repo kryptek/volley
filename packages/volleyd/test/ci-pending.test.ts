@@ -118,7 +118,7 @@ describe("CI pending is visible", () => {
     ];
     await recheck();
     const [d] = h.openDecisions();
-    expect(d).toMatchObject({ kind: "ci_failed", options: ["re-verify", "cancel"] });
+    expect(d).toMatchObject({ kind: "ci_failed", options: ["fixup", "re-verify", "cancel"] });
     expect(h.events.some((e) => e.type === "ci_green")).toBe(false);
     expect(h.task()?.pr).toMatchObject({ number: 7, ci: "red" });
     expect(h.task()?.why_waiting).toContain("awaiting decision");

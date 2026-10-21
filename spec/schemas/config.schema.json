@@ -394,6 +394,31 @@
               ],
               "default": null,
               "description": "The name the supervisor's own machine record is published under (volley/_system/machines/<name>); null: derived from the machine's host name (spec section 4.6.15). Never a hosts.<name> key. The retained effective config carries the resolved name, never null."
+            },
+            "local_agents": {
+              "oneOf": [{ "enum": ["always", "fallback", "never"] }, { "type": "null" }],
+              "default": null,
+              "description": "How the supervisor's own machine takes auto-placed tasks (spec section 4.6.15). always: a candidate like any peer. fallback: only while no paired machine is eligible, under fleet.fallback. never: not a candidate (a task pinned to local still runs there). null: fallback when any hosts.<name> is configured, else always; the retained effective config carries the resolved value. A value chosen in the Desk is set explicitly; volleyd config set fleet.local_agents null derives it again."
+            },
+            "fallback": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "The profile the supervisor's own machine runs under while it is the fallback (local_agents: fallback, no paired machine eligible; spec section 4.6.15).",
+              "properties": {
+                "max_agents": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100,
+                  "default": 3,
+                  "description": "Under local_agents: fallback, the most supervised agents the supervisor's own machine runs while it is the fallback; hard_ceiling still caps the total."
+                },
+                "per_machine": {
+                  "type": "object",
+                  "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                  "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 64 },
+                  "description": "Per heavy pool, the leases holders on the supervisor's own machine may hold while it is the fallback; a pool not named here gets 1 when it has a per-machine cap there (per_machine or a per_machine_overrides entry). 0 keeps heavy tasks off it. The Desk offers a row for each pool that sets per_machine; name any other pool in config.yaml."
+                }
+              }
             }
           }
         },
@@ -465,7 +490,7 @@
               "minimum": 0,
               "maximum": 10,
               "default": 1,
-              "description": "Automatic respawns of one task's role (agent_blocked)."
+              "description": "Automatic respawns of one task's role (agent_blocked, agent_stalled)."
             },
             "rereview_max": {
               "type": "integer",
@@ -473,6 +498,13 @@
               "maximum": 10,
               "default": 2,
               "description": "Automatic re-reviews of one task (pr_head_moved, a stale review at the gate)."
+            },
+            "ci_fixup_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 2,
+              "description": "Automatic CI fixups of one task (ci_failed on the change's own head answered fixup)."
             },
             "question_max": {
               "type": "integer",
@@ -488,6 +520,13 @@
               "default": 2,
               "description": "spawn_budget_exhausted: automatic raise by <n> answers may take the wave's spawn budget up to this multiple of its derived budget."
             },
+            "inbox_answered_ttl_s": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 86400,
+              "default": 600,
+              "description": "How long an answered needs-you inbox item stays retained with its answered record before the supervisor clears it (spec section 4.6.18)."
+            },
             "merge": {
               "type": "string",
               "enum": ["auto", "manual"],
@@ -500,6 +539,25 @@
               "maximum": 10,
               "default": 2,
               "description": "Merges GitHub may refuse at one gated head (the head moved, checks required, branch protection) before the supervisor opens a merge_refused decision."
+            },
+            "delete_branch": {
+              "type": "boolean",
+              "default": false,
+              "description": "Autopilot merges also delete the PR's head branch (gh pr merge --delete-branch)."
+            },
+            "reconnect_grace_s": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400,
+              "default": 900,
+              "description": "How long a wave whose owner is a coordinator name shows coordinator.state reconnecting after the agent bound to the name went away (terminal status or LWT) with no other agent binding to it; then gone."
+            },
+            "incident_wait_max_s": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400,
+              "default": 14400,
+              "description": "How long a red head classified as an infra incident (an infra-shaped run, or GitHub's status page reporting an Actions or API incident) is held in CI and re-checked every poll before the supervisor opens its ci_failed decision, escalated budget_exhausted."
             }
           }
         }
@@ -584,6 +642,12 @@
           "minimum": 1,
           "maximum": 64,
           "description": "The most leases of this pool that holders on one machine may hold at once, at most capacity (spec section 4.6.5). Unset: capacity."
+        },
+        "per_machine_overrides": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$" },
+          "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 64 },
+          "description": "Per machine name (a hosts.<name> key, the supervisor's fleet.local_name, or local), the most leases of this pool its holders may hold, in place of per_machine; at most capacity (checked by the supervisor). 0: none on that machine (spec section 4.6.5)."
         },
         "ttl_s": { "type": "integer", "minimum": 60, "maximum": 86400 },
         "match": {

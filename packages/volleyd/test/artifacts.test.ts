@@ -6,9 +6,12 @@ import {
   artifactOutcome,
   checkRebase,
   isInfraFailure,
+  prFiles,
   probeMovedHead,
+  probeReleaseCi,
   verifyArtifacts,
 } from "../src/artifacts";
+import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { type FakeExec, fakeExec } from "./helpers/fake-exec";
 import { FIXTURES } from "./helpers/fake-host";
 
@@ -110,6 +113,57 @@ describe("artifact verification", () => {
     expect(out.decision.question).toContain("CI / test");
     expect(out.decision.question).not.toMatch(/status page/);
     expect(out.data).toMatchObject({ head_sha: HEAD, run_urls: [expect.stringContaining("502")] });
+  });
+
+  it("CI red: the failed runs' logs are read once each; ci_failed carries failing_tests, log and offers fixup first", async () => {
+    const fake = allGood()
+      .on(["gh", "run", "list"], { stdout: fx("gh-run-list-red.json") })
+      .on(["gh", "run", "view"], { stdout: fx("gh-run-view-failed.json") })
+      .on(["gh", "run", "view", "502", "--log-failed"], { stdout: fx("gh-run-log-failed.txt") });
+    const report = await verifyArtifacts(fake.exec, SPEC);
+    expect(fake.argvs(["gh", "run", "view", "502", "--log-failed"])).toHaveLength(1);
+    const out = artifactOutcome("T1", "implementer", report);
+    expect(out.kind).toBe("ci_failed");
+    if (out.kind !== "ci_failed") return;
+    expect(out.decision.options).toEqual(["fixup", "re-verify", "cancel"]);
+    expect(out.decision.question).toMatch(/fixup: a fixup agent/);
+    expect(out.data.failing_tests).toEqual([
+      "test/pipeline.test.ts > pipeline: the default sequence > implement then merge_ready",
+      "test/clock.test.ts > sleep > resolves on abort",
+    ]);
+    expect(out.data.log).toContain("AssertionError: expected 1 to be 2");
+    expect(out.data.ci_runs).toEqual(report.kind === "ok" ? report.ci.runs : []);
+  });
+
+  it("CI red on two runs: each run's log is headed by its name", async () => {
+    const [one] = JSON.parse(fx("gh-run-list-red.json")) as Record<string, unknown>[];
+    const two = { ...one, databaseId: 503, name: "Lint", workflowName: "Lint" };
+    const fake = allGood()
+      .on(["gh", "run", "list"], { stdout: JSON.stringify([one, two]) })
+      .on(["gh", "run", "view"], { stdout: fx("gh-run-view-failed.json") })
+      .on(["gh", "run", "view", "502", "--log-failed"], { stdout: "first log\n" })
+      .on(["gh", "run", "view", "503", "--log-failed"], { stdout: "second log\n" });
+    const out = artifactOutcome("T1", "implementer", await verifyArtifacts(fake.exec, SPEC));
+    const log = out.kind === "ci_failed" ? String(out.data.log) : "";
+    expect(log).toBe("== CI (run 502) ==\nfirst log\n== Lint (run 503) ==\nsecond log");
+  });
+
+  it("a red report's log is clipped to its tail; a green report reads no log and is unchanged", async () => {
+    const long = `${"x".repeat(DAEMON_DEFAULTS.ci_log_max_chars)}\nthe last line\n`;
+    const red = allGood()
+      .on(["gh", "run", "list"], { stdout: fx("gh-run-list-red.json") })
+      .on(["gh", "run", "view"], { stdout: fx("gh-run-view-failed.json") })
+      .on(["gh", "run", "view", "502", "--log-failed"], { stdout: long });
+    const out = artifactOutcome("T1", "implementer", await verifyArtifacts(red.exec, SPEC));
+    const log = out.kind === "ci_failed" ? String(out.data.log) : "";
+    expect(log.length).toBeLessThanOrEqual(DAEMON_DEFAULTS.ci_log_max_chars);
+    expect(log).toMatch(/the last line$/);
+
+    const green = allGood();
+    const report = await verifyArtifacts(green.exec, SPEC);
+    expect(green.argvs(["gh", "run", "view"])).toEqual([]);
+    expect(report.kind === "ok" && report.ci).not.toHaveProperty("log");
+    expect(report.kind === "ok" && report.ci).not.toHaveProperty("failing_tests");
   });
 
   it("an infra-shaped failure says to check the hosting provider's status page first", async () => {
@@ -249,7 +303,7 @@ describe("superseded runs (latest run per workflow and trigger event wins)", () 
     expect(out.kind).toBe("ci_failed");
     if (out.kind !== "ci_failed") return;
     expect(out.decision.question).toContain(
-      "Run https://github.com/example/repo/actions/runs/601 was cancelled and nothing replaced it: re-run it (or push again). volleyd never re-runs CI; fix or re-run it, then answer re-verify (or cancel).",
+      "Run https://github.com/example/repo/actions/runs/601 was cancelled and nothing replaced it: re-run it (or push again). volleyd never re-runs CI. fixup: a fixup agent at",
     );
     expect(out.decision.question).not.toMatch(/status page/);
     expect(out.data).toMatchObject({ infra: true, infra_reason: "cancelled" });
@@ -385,5 +439,52 @@ describe("moved head: a merge of the release branch only", () => {
       { stdout: `${MB} ${X}\n` },
     );
     expect((await probe(other)).release_merge).toBeUndefined();
+  });
+});
+
+describe("probeReleaseCi", () => {
+  const RELEASE = { cwd: WT, release_branch: "release/w1" };
+
+  it("the latest run per workflow on the release branch is red: its failing tests", async () => {
+    const fake = fakeExec()
+      .on(["gh", "run", "list"], { stdout: fx("gh-run-list-release-red.json") })
+      .on(["gh", "run", "view"], { stdout: fx("gh-run-log-failed-flake.txt") });
+    expect(await probeReleaseCi(fake.exec, RELEASE)).toEqual({
+      state: "red",
+      failing_tests: ["test/clock.test.ts > sleep > resolves on abort"],
+    });
+    expect(fake.argvs(["gh", "run", "list"])[0]?.slice(0, 7)).toEqual([
+      "gh",
+      "run",
+      "list",
+      "--branch",
+      "release/w1",
+      "--limit",
+      "20",
+    ]);
+    // Only the latest CI run's log is read (the older green one and Docs are not red).
+    expect(fake.argvs(["gh", "run", "view"])).toEqual([
+      ["gh", "run", "view", "812", "--log-failed"],
+    ]);
+  });
+
+  it("green, and unreadable", async () => {
+    const green = fakeExec().on(["gh", "run", "list"], { stdout: fx("gh-run-list-green.json") });
+    expect(await probeReleaseCi(green.exec, RELEASE)).toEqual({
+      state: "green",
+      failing_tests: [],
+    });
+    const broken = fakeExec().on(["gh", "run", "list"], { code: 1, stderr: "HTTP 502" });
+    expect(await probeReleaseCi(broken.exec, RELEASE)).toEqual({
+      state: "unknown",
+      failing_tests: [],
+    });
+  });
+
+  it("prFiles: the PR's changed files, null when gh fails", async () => {
+    const ok = fakeExec().on(["gh", "pr", "view"], { stdout: fx("gh-pr-view-files.json") });
+    expect(await prFiles(ok.exec, WT, 7)).toContain("packages/volleyd/src/pipeline.ts");
+    const broken = fakeExec().on(["gh", "pr", "view"], { code: 1 });
+    expect(await prFiles(broken.exec, WT, 7)).toBeNull();
   });
 });

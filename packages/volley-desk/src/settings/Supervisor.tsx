@@ -8,16 +8,30 @@
 import type { ConfigPayload, LeasePoolPayload } from "../store/types";
 import { ConfigRows } from "./ConfigRows";
 import type { ConfigTransport } from "./configTransport";
+import { SECTIONS } from "./schemaRows";
+
+/** Every config group but autopilot's, which has its own section (Settings › Autopilot). */
+const SUPERVISOR_SECTIONS = SECTIONS.filter((s) => s !== "Autopilot");
 
 /** The prototype's macOS accent for the Supervisor sliders. */
 const ACCENT = "#0a84ff";
 /** A holder volleyd did not spawn (`host: null`), or one from a volleyd that predates `host`. */
 export const UNKNOWN_HOST = "(unknown host)";
 
-/** A pool's holders by host, hosts by name and the unknown host last. */
-function byHost(held: LeasePoolPayload["held"]): [string, string[]][] {
+/** The per-machine cap in force on `host`: its override, else the pool's `per_machine`. */
+export function capInForce(p: LeasePoolPayload, host: string): number | undefined {
+  if (host === UNKNOWN_HOST) return undefined;
+  return p.per_machine_overrides?.[host] ?? p.per_machine;
+}
+
+/**
+ * A pool's holders by host, plus every host with a cap override (its cap shows before it holds
+ * anything): hosts by name and the unknown host last.
+ */
+function byHost(p: LeasePoolPayload): [string, string[]][] {
   const groups = new Map<string, string[]>();
-  for (const h of held) {
+  for (const host of Object.keys(p.per_machine_overrides ?? {})) groups.set(host, []);
+  for (const h of p.held) {
     const host = h.host ?? UNKNOWN_HOST;
     groups.set(host, [...(groups.get(host) ?? []), h.holder]);
   }
@@ -41,19 +55,30 @@ export function LeasePools({ leases }: { leases: Record<string, LeasePoolPayload
               {p.per_machine !== undefined ? ` · ${p.per_machine} per machine` : ""}
             </span>
           </div>
-          {byHost(p.held).map(([host, holders]) => (
-            // biome-ignore lint/a11y/useSemanticElements: a labelled group of holders, not a form fieldset
-            <div key={host} className="lease-host" role="group" aria-label={host}>
-              <span className="lease-host-name">{host}</span>
-              <span className="mono">
-                {holders.map((h) => (
-                  <span key={h} className="lease-holder">
-                    {h}
-                  </span>
-                ))}
-              </span>
-            </div>
-          ))}
+          {byHost(p).map(([host, holders]) => {
+            const cap = capInForce(p, host);
+            return (
+              // biome-ignore lint/a11y/useSemanticElements: a labelled group of holders, not a form fieldset
+              <div key={host} className="lease-host" role="group" aria-label={host}>
+                <span className="lease-host-name">{host}</span>
+                <span
+                  className="lease-host-count mono dim"
+                  title={
+                    cap !== undefined ? `${holders.length} held of ${cap} on ${host}` : undefined
+                  }
+                >
+                  {cap !== undefined ? `${holders.length}/${cap}` : `${holders.length}`}
+                </span>
+                <span className="mono">
+                  {holders.map((h) => (
+                    <span key={h} className="lease-holder">
+                      {h}
+                    </span>
+                  ))}
+                </span>
+              </div>
+            );
+          })}
           {p.queue.length > 0 && <div className="dim">{p.queue.length} queued</div>}
           {p.reasons.map((r) => (
             <p key={r} className="s-hint lease-reason">
@@ -70,6 +95,8 @@ export function Supervisor({
   config,
   transport,
   leases = {},
+  focus,
+  focusSeq,
 }: {
   /** The retained `volley/_waves/_config` payload. */
   config: ConfigPayload | null;
@@ -77,6 +104,10 @@ export function Supervisor({
   transport: ConfigTransport | null;
   /** The retained lease pools, by pool. */
   leases?: Record<string, LeasePoolPayload>;
+  /** A config row to scroll to and focus, by its path (a machine card's local agents chip). */
+  focus?: string | undefined;
+  /** Bumped on every such click, so a second one brings the row back into view. */
+  focusSeq?: number | undefined;
 }) {
   return (
     <>
@@ -89,9 +120,12 @@ export function Supervisor({
       )}
       <ConfigRows
         scope="global"
+        sections={SUPERVISOR_SECTIONS}
         values={config}
         transport={transport}
         accent={ACCENT}
+        focus={focus}
+        focusSeq={focusSeq}
         foot="Saved through volleyd config set · applies at the next admission tick · never preempts running work. A wave’s own ⚙ shows the values that wave runs with."
       />
     </>

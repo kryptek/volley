@@ -31,7 +31,12 @@
  * only when it names its topic's machine. Which of them are machines at all
  * (configured hosts) is the section's call, at render time. volleyd's
  * readiness verdict on each (§4.6.15) goes into `readiness` by name.
+ *
+ * Autopilot (SPEC §4.6.16): of each wave's live `events` mirror only volleyd's
+ * `decision_auto_resolved` / `decision_escalated` are kept, in `waveFeed` by
+ * wave and in the feeds of the event's task's agents.
  */
+import { AUTOPILOT_EVENTS } from "./autopilot";
 import {
   type AgentAttention,
   type AgentView,
@@ -43,6 +48,7 @@ import {
   type DeskMessage,
   type DeskState,
   type Envelope,
+  type InboxItem,
   type LeasePoolPayload,
   type MachinePayload,
   ROLES,
@@ -91,6 +97,7 @@ export type Route =
   | { kind: "registry"; agentId: string }
   | { kind: "agent"; namespace: string; agentId: string; channel: AgentChannel }
   | { kind: "wave"; wave: string }
+  | { kind: "waveEvent"; wave: string }
   | { kind: "decision"; wave: string; decisionId: string }
   | { kind: "config" }
   | { kind: "lease"; pool: string }
@@ -99,13 +106,15 @@ export type Route =
   | { kind: "signin"; acct: string }
   | { kind: "usage"; agentId: string }
   | { kind: "machine"; name: string }
-  | { kind: "readiness"; name: string };
+  | { kind: "readiness"; name: string }
+  | { kind: "inbox"; id: string };
 
 /** Map a topic to what it updates, or `null` for anything outside the Desk's subscriptions. */
 export function routeTopic(topic: string): Route | null {
   const p = topic.split("/");
   if (p[0] !== "volley" || p.some((s) => s === "")) return null;
   const [, a, b, c, d] = p;
+  if (a === "_inbox") return p.length === 3 && b ? { kind: "inbox", id: b } : null;
   if (a === "_system") {
     if (p.length === 4 && b === "registry" && c) return { kind: "registry", agentId: c };
     if (p.length === 4 && b === "leases" && c) return { kind: "lease", pool: c };
@@ -121,6 +130,7 @@ export function routeTopic(topic: string): Route | null {
   if (a === "_waves") {
     if (p.length === 3 && b === "_config") return { kind: "config" };
     if (p.length === 4 && b && c === "state") return { kind: "wave", wave: b };
+    if (p.length === 4 && b && c === "events") return { kind: "waveEvent", wave: b };
     if (p.length === 5 && b && c === "decisions" && d) {
       return { kind: "decision", wave: b, decisionId: d };
     }
@@ -175,6 +185,8 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
     }
     case "wave":
       return withCoordinators(reduceWave(state, route.wave, m));
+    case "waveEvent":
+      return reduceWaveEvent(state, route.wave, m);
     case "decision":
       return reduceDecision(state, route.wave, route.decisionId, m);
     case "config":
@@ -210,7 +222,22 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
       return reduceMachine(state, route.name, m);
     case "readiness":
       return reduceReadiness(state, route.name, m);
+    case "inbox":
+      return reduceInbox(state, route.id, m);
   }
+}
+
+/**
+ * A needs-you inbox item (SPEC §4.6.18): taken only from volleyd (the broker lets no one else
+ * write it; the id is a sanity check) and only when it names its topic's id; a cleared topic
+ * forgets it. An answered item stays (with `answered`) until volleyd clears it.
+ */
+function reduceInbox(state: DeskState, id: string, m: DeskMessage): DeskState {
+  const env = m.envelope;
+  if (env === null) return { ...state, inbox: keyed(state.inbox, id, undefined) };
+  const p = env.payload as Partial<InboxItem> | undefined;
+  if (env.agent_id !== "volleyd" || p?.id !== id) return state;
+  return { ...state, inbox: keyed(state.inbox, id, p as InboxItem) };
 }
 
 /**
@@ -343,6 +370,7 @@ export function resync(state: DeskState): DeskState {
     usage: {},
     machines: {},
     readiness: {},
+    inbox: {},
     unconfirmed: [...unconfirmed],
   };
 }
@@ -391,6 +419,33 @@ function newAgent(
     bornAt: null,
     observedAt,
   };
+}
+
+/**
+ * An autopilot event from a wave's live `events` mirror (SPEC §4.6.16), taken only from volleyd:
+ * kept in the wave's feed and, when it names a task, in the feeds of that task's agents. Every
+ * other journal event is the supervisor's bookkeeping, already folded into the wave state.
+ */
+function reduceWaveEvent(state: DeskState, wave: string, m: DeskMessage): DeskState {
+  const env = m.envelope;
+  if (!env || env.agent_id !== "volleyd" || !AUTOPILOT_EVENTS.has(env.type)) return state;
+  const entry = { topic: m.topic, envelope: env, receivedAt: m.receivedAt };
+  const prior = state.waveFeed?.[wave] ?? [];
+  // A QoS-1 redelivery after a reconnect carries a seq already kept.
+  const seq = record(env.payload).seq;
+  if (typeof seq === "number" && prior.some((e) => record(e.envelope.payload).seq === seq)) {
+    return state;
+  }
+  const feed = [...prior, entry].slice(-FEED_LIMIT);
+  const task = str(record(env.payload).task);
+  const t = task ? state.waves[wave]?.state?.tasks.find((x) => x.id === task) : undefined;
+  let agents = state.agents;
+  for (const id of new Set(Object.values(t?.agents ?? {}))) {
+    const a = id ? agents[id] : undefined;
+    if (!a) continue;
+    agents = { ...agents, [a.id]: { ...a, feed: pushFeed(a, m.topic, env, m.receivedAt) } };
+  }
+  return { ...state, agents, waveFeed: { ...state.waveFeed, [wave]: feed } };
 }
 
 function pushFeed(a: AgentView, topic: string, envelope: Envelope, receivedAt: number) {
@@ -826,7 +881,9 @@ function reduceWave(state: DeskState, id: string, m: DeskMessage): DeskState {
     for (const a of Object.values(state.agents)) {
       agents[a.id] = a.wave === id ? { ...a, wave: UNASSIGNED, task: null, role: null } : a;
     }
-    return { ...state, waves, agents };
+    if (!state.waveFeed?.[id]) return { ...state, waves, agents };
+    const { [id]: _gone, ...waveFeed } = state.waveFeed;
+    return { ...state, waves, agents, waveFeed };
   }
   const payload = m.envelope.payload as WaveStatePayload;
   waves[id] = { id, decisions: {}, ...waves[id], state: payload, receivedAt: m.receivedAt };
@@ -893,6 +950,9 @@ function withCoordinators(state: DeskState): DeskState {
     if (id === state.self) {
       // The Desk claimed the wave: the person at this Desk coordinates it (it has no agent).
       view = { id, waves: [w.id], state: "working" };
+    } else if (s.coordinator?.state === "reconnecting") {
+      // The supervisor's call (its grace, its flip to gone): the bound agent's terminal status is why.
+      view = { id, waves: [w.id], state: "reconnecting", ...fallbacks };
     } else if (a?.status && TERMINAL_STATUS.has(a.status.type)) {
       view = { id, waves: [w.id], state: "gone", ...fallbacks };
     } else if (a?.attention && !waitsOnPerson(a.attention)) {

@@ -39,6 +39,9 @@ export type ControlOp =
   // Decisions, ownership and operator controls (decisions.ts, ownership.ts, controls.ts).
   | "decisions"
   | "resolve"
+  // The needs-you inbox: list its open items, answer one through the referee (autopilot/inbox.ts).
+  | "inbox"
+  | "inbox_answer"
   // Autopilot's effective policy table (autopilot/policy.ts).
   | "policy"
   | "claim"
@@ -48,6 +51,8 @@ export type ControlOp =
   | "steer"
   // The owner's merge outside GitHub's merge button, verified (pipeline.ts verifyMerge).
   | "merged"
+  // The owner merges one gated task now, through the merge queue's verb (pipeline.ts mergeNow).
+  | "merge"
   // Heavy-operation leases and spawn admission (leases.ts, admission.ts).
   | "admission"
   // Spawn one task's agent now (spawn.ts).

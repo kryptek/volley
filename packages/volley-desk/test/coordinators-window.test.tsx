@@ -307,3 +307,33 @@ describe("CoordinatorsWindow status chips and the Ended group", () => {
     expect(onRestore).toHaveBeenCalled();
   });
 });
+
+describe("a coordinator reconnecting", () => {
+  const NOW = Date.parse("2026-10-18T12:00:00.000Z");
+  const w = wave("relaunch", "lead");
+  const reconnecting: EffectiveCoordinator = {
+    id: "lead",
+    state: "reconnecting",
+    since: NOW - 4 * 60_000,
+  };
+
+  it("reads `Coordinator reconnecting · 4m` with a neutral chip and no claim it", () => {
+    setup({ waves: [w], coordinators: { relaunch: reconnecting }, needsYou: 0, now: NOW });
+    const r = row("relaunch");
+    expect(within(r).getByText("Coordinator reconnecting · 4m")).toBeInTheDocument();
+    expect(within(r).getByText("reconnecting")).toHaveClass("st-chip--reconnecting");
+    expect(within(r).queryByText(/claim it/)).toBeNull();
+    expect(within(r).queryByText("needs you")).toBeNull();
+    expect(r).toHaveClass("st-reconnecting");
+  });
+});
+
+describe("messaging a reconnecting coordinator", () => {
+  it("is refused until a session binds again: its old agent is gone", async () => {
+    const { waveChatTarget } = await import("../src/steer/useSteering");
+    expect(waveChatTarget("lead", { id: "lead", state: "reconnecting" }, "desk")).toEqual({
+      agentId: null,
+      reason: "This wave's coordinator is reconnecting. Message it once it is back.",
+    });
+  });
+});

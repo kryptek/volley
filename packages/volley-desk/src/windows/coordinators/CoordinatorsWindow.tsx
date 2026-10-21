@@ -1,9 +1,9 @@
 /**
  * The coordinators window, ported from the prototype `CoordinatorsWindow`: one
  * row per wave with its coordinator's state (`Working` / `Waiting for your
- * answer` / `No coordinator · claim it`), the wave's progress, go-to (fit the
+ * answer` / `Coordinator reconnecting · 4m` / `No coordinator · claim it`), the wave's progress, go-to (fit the
  * viewport to the wave and its agents) and show/hide. Every row carries a status
- * chip (`working`, `needs you`, `completed`, `stopped`), apart from its left
+ * chip (`working`, `needs you`, a neutral `reconnecting`, `completed`, `stopped`), apart from its left
  * bar, which is the wave's identity colour (the supervisor row's bar is neutral
  * and its health is a chip too, red when down), so a colour never means two things.
  * Active waves come first; ended ones (their coordinator is gone because the
@@ -28,7 +28,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useState } from "react";
-import type { EffectiveCoordinator } from "../../attention";
+import { type EffectiveCoordinator, reconnectingLabel } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
 import type { Rect } from "../../canvas/useViewport";
 import { githubOf } from "../../lib/github";
@@ -50,6 +50,7 @@ export const COORDS_W = 430;
 export const STATE_LABEL: Record<CoordinatorState, string> = {
   working: "Working",
   awaiting_input: "Waiting for your answer",
+  reconnecting: "Coordinator reconnecting",
   gone: "No coordinator · claim it",
 };
 
@@ -66,7 +67,7 @@ const Icon = ({ i }: { i: typeof Cancel01Icon }) => (
   <HugeiconsIcon icon={i} size={13} strokeWidth={1.8} />
 );
 
-export type StatusChip = "working" | "needs" | "completed" | "stopped" | "failed";
+export type StatusChip = "working" | "needs" | "reconnecting" | "completed" | "stopped" | "failed";
 
 const ENDED_CHIP: Partial<Record<string, StatusChip>> = {
   complete: "completed",
@@ -76,6 +77,7 @@ const ENDED_CHIP: Partial<Record<string, StatusChip>> = {
 export const CHIP_LABEL: Record<StatusChip, string> = {
   working: "working",
   needs: "needs you",
+  reconnecting: "reconnecting",
   completed: "completed",
   stopped: "stopped",
   failed: "failed",
@@ -83,7 +85,10 @@ export const CHIP_LABEL: Record<StatusChip, string> = {
 
 /** A wave row's status chip: its end state once ended, else whether its coordinator needs you. */
 export function waveChip(w: WaveView, c: EffectiveCoordinator): StatusChip {
-  return ENDED_CHIP[w.state?.status ?? ""] ?? (c.state === "working" ? "working" : "needs");
+  const ended = ENDED_CHIP[w.state?.status ?? ""];
+  if (ended) return ended;
+  if (c.state === "reconnecting") return "reconnecting";
+  return c.state === "working" ? "working" : "needs";
 }
 
 export function Chip({ kind, label }: { kind: StatusChip; label?: string }) {
@@ -255,7 +260,9 @@ function WaveRow({
             {ended ??
               (c.state === "working" && c.waitingOnEvents
                 ? WAITING_ON_EVENTS_LABEL
-                : STATE_LABEL[c.state])}
+                : c.state === "reconnecting"
+                  ? reconnectingLabel(c, p.now ?? Date.now())
+                  : STATE_LABEL[c.state])}
           </span>
           {ended && hidden && <span className="dim"> · hidden</span>}
           {github && (

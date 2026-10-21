@@ -1,0 +1,16 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-c7d9",
+  "parent_id": null,
+  "namespace": "default",
+  "wall_time": "2026-10-20T09:12:00.000Z",
+  "channel": "_system/registry",
+  "type": "registered",
+  "payload": {
+    "capabilities": ["dispatches-issues", "reviews-prs"],
+    "cwd": "/path/to/your/repo",
+    "model": "claude-opus-4-7",
+    "coordinator": "coord-main",
+    "started_at": "2026-10-20T09:12:00.000Z"
+  }
+}

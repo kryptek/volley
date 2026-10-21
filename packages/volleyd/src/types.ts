@@ -24,7 +24,13 @@ export type TaskStage =
   | "awaiting_decision"
   | "cancelled";
 
-export type WaveStatus = "running" | "paused" | "awaiting_decision" | "complete" | "stopped";
+export type WaveStatus =
+  | "running"
+  | "paused"
+  | "awaiting_decision"
+  | "releasing"
+  | "complete"
+  | "stopped";
 
 /** One pipeline entry as written: a stage, or a group of stages that run in parallel. */
 export type PipelineStep = PipelineStage | PipelineStage[];
@@ -37,6 +43,11 @@ export interface LeasePoolConfig {
   capacity: number;
   /** The most leases holders on one machine may hold at once (1..capacity); unset: capacity. */
   per_machine?: number;
+  /**
+   * Per machine name (a `hosts.<name>` key, the supervisor's `fleet.local_name`, or `local`), the
+   * cap in place of `per_machine` there (0..capacity). `effective()` resolves `local`.
+   */
+  per_machine_overrides?: Record<string, number>;
   ttl_s?: number;
   match?: string[];
 }
@@ -151,19 +162,50 @@ export interface AutopilotConfig {
   respawn_max: number;
   /** Re-reviews of one task (a moved head, a stale review at the gate). */
   rereview_max: number;
+  /** CI fixups (a ci_failed answered `fixup`) of one task. */
+  ci_fixup_max: number;
   /** Agent questions answered for one run. */
   question_max: number;
   /** Multiplier of the derived spawn budget that `raise by <n>` answers may reach. */
   budget_raise_max: number;
+  /** How long an answered inbox item stays retained (with `answered`) before it is cleared. */
+  inbox_answered_ttl_s: number;
   /** The merge mode for a wave file without `merge:` (SPEC §4.6.17). */
   merge: MergeMode;
   /** Refused autopilot merges at one gated head before a `merge_refused` decision. */
   merge_retry_max: number;
+  /** Autopilot merges also delete the PR's head branch (`gh pr merge --delete-branch`). */
+  delete_branch: boolean;
+  /**
+   * How long a wave owned by a coordinator name reads `reconnecting` after the agent bound to
+   * the name went away, before `gone` (SPEC §4.6.1).
+   */
+  reconnect_grace_s: number;
+  /**
+   * How long a red head classified as an infra incident is held and re-checked before the owner
+   * is asked (`ci_failed`, escalated `budget_exhausted`).
+   */
+  incident_wait_max_s: number;
 }
+
+/** How the supervisor's own machine takes auto-placed tasks (config `fleet.local_agents`). */
+export type LocalAgentsMode = "always" | "fallback" | "never";
 
 /** Config `fleet`: `local_name` null derives the supervisor's machine name from its host name. */
 export interface FleetConfig {
   local_name: string | null;
+  /** null: `fallback` when any `hosts.<name>` is configured, else `always` (`effective()` resolves it). */
+  local_agents: LocalAgentsMode | null;
+  /** The own machine's profile while it is the fallback (no paired machine eligible). */
+  fallback: FallbackProfile;
+}
+
+/** Config `fleet.fallback`. */
+export interface FallbackProfile {
+  /** The most supervised agents on the own machine while it is the fallback. */
+  max_agents: number;
+  /** Per heavy pool, the own machine's slots while it is the fallback; unnamed: 1 (when the pool sets `per_machine`). */
+  per_machine: Record<string, number>;
 }
 
 /** Who gets a steering nudge when a wave's PR merges (config `placement.nudge_on_merge`). */
@@ -274,6 +316,8 @@ export interface Wave {
   placement_avoid?: string[];
   /** `merge:` as written (SPEC §4.6.17); absent: the `autopilot.merge` tunable. */
   merge?: MergeMode;
+  /** `playbook:` as written (SPEC §4.6.19): a path, or `none`; absent: `.volley/release.yaml`. */
+  playbook?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +366,8 @@ export interface TaskState {
   queued_steers?: number;
   /** Alarms on the task that still hold (e.g. merged_unverified_head), with a human line each. */
   alarms?: { alarm: string; message: string }[];
+  /** A remediation requested for the task's red head that still holds (a flake awaiting its fixer). */
+  remediation?: { kind: "fix_flake"; test: string; since: string };
   evidence_path?: string;
   /** The task's latest spawn failure, while it is not recovered (`spawn_failed`). */
   last_error?: { code: string; message: string; at: string };
@@ -382,7 +428,28 @@ export interface WaveState {
   github?: GitHubRepo;
   /** What autopilot answered and escalated in this wave (SPEC §4.6.16). */
   autopilot?: AutopilotState;
+  /** The merge queue in merge order (SPEC §4.6.17); absent while it is empty. */
+  merge_queue?: MergeQueueEntry[] | undefined;
+  /** The release train (SPEC §4.6.19), from `release_started` on; absent for a wave without one. */
+  release?: ReleaseState;
   updated_at: string;
+}
+
+/** wave-state `merge_queue[]` (SPEC §4.6.1, §4.6.17). */
+export interface MergeQueueEntry {
+  task: TaskId;
+  state: "merging" | "updating" | "queued" | "refused";
+  /** When the task entered the queue. */
+  since: string;
+}
+
+/** One release stage's state in the wave state (SPEC §4.6.1, §4.6.19). */
+export type ReleaseStageState = "pending" | "awaiting_go" | "running" | "verified" | "failed";
+
+/** wave-state `release`: the stage running or awaiting its go (else null), and every stage. */
+export interface ReleaseState {
+  stage: string | null;
+  stages: { name: string; state: ReleaseStageState }[];
 }
 
 /** wave-state `autopilot` (SPEC §4.6.1, §4.6.16). */
@@ -394,10 +461,14 @@ export interface AutopilotState {
   budgets: Record<string, { used: number; max: number }>;
 }
 
-/** wave-state `coordinator` (SPEC §4.6.1): the owning coordinator's attention state. */
+/**
+ * wave-state `coordinator` (SPEC §4.6.1): the owning coordinator's attention state. For an owner
+ * that is a coordinator name, `agent_id` is the agent bound to it, and `reconnecting` means that
+ * agent went away less than `autopilot.reconnect_grace_s` ago.
+ */
 export interface CoordinatorAttention {
   agent_id: string;
-  state: "working" | "awaiting_input" | "gone";
+  state: "working" | "awaiting_input" | "reconnecting" | "gone";
   question?: string;
   session_url?: string;
   workspace?: string;
@@ -417,6 +488,7 @@ export const WAVE_EVENT_TYPES = [
   "wave_stopped",
   "wave_complete",
   "owner_claimed",
+  "owner_reconnected",
   "task_queued",
   "task_admitted",
   "task_cancelled",
@@ -477,6 +549,12 @@ export const WAVE_EVENT_TYPES = [
   "merged_by_operator",
   // Autopilot merging (SPEC §4.6.17): volleyd merged a gated PR at its gated head.
   "merged_by_supervisor",
+  // The merge queue (SPEC §4.6.17): a gated task entered or left it; volleyd's merge of it began,
+  // or ended without an outcome (timed out, failed to run, interrupted by a restart).
+  "merge_queued",
+  "merge_dequeued",
+  "merge_started",
+  "merge_ended",
   "agent_force_retired",
   "alarm_cleared",
   // Usage metering (claude/usage.ts): an answered account_limit decision moved the wave.
@@ -504,6 +582,18 @@ export const WAVE_EVENT_TYPES = [
   // Autopilot (SPEC §4.6.16): a decision answered from the policy table, or left for the owner.
   "decision_auto_resolved",
   "decision_escalated",
+  // The release train (SPEC §4.6.19): a settled wave whose repo has a playbook starts releasing;
+  // each stage is entered, then verified or failed; the owner's `release_go` go completes it.
+  "release_started",
+  "release_stage_entered",
+  "release_stage_verified",
+  "release_stage_failed",
+  "release_done",
+  // The needs-you inbox (SPEC §4.6.18): an item opened, and the answer its referee accepted.
+  "inbox_opened",
+  "inbox_answered",
+  // Self-healing CI (SPEC §4.6.16): a remediation for a classified red head (a flake's fixer).
+  "remediation_requested",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

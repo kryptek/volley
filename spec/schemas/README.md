@@ -18,6 +18,7 @@ Machine-readable mirror of `SPEC.md`. Each schema follows JSON Schema 2020-12.
 | `claude-account.schema.json` | `_system/claude-accounts/<acct>` | section 4.6.12 |
 | `wave-state.schema.json` | `_waves/<wave>/state` | sections 4.6.1, 4.6.15 |
 | `decision.schema.json` | `_waves/<wave>/decisions/<id>` | sections 4.6.2, 4.6.15 |
+| `inbox-item.schema.json` | `_inbox/<id>` (the supervisor only) | section 4.6.18 |
 | `wave-event.schema.json` | `_waves/<wave>/events` | sections 4.6.3, 4.6.15 |
 | `config.schema.json` | `_waves/_config` (tunables in `$defs/tunables`) | sections 4.6.4, 4.6.15 |
 | `config-set-request.schema.json` | supervisor `mailbox` (`op: config_set`) | section 4.6.4 |

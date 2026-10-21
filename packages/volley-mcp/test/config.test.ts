@@ -279,3 +279,21 @@ describe("broker credentials (VOLLEY_AUTH_* and the identity file broker block)"
     }
   });
 });
+
+describe("VOLLEY_COORDINATOR", () => {
+  it("is carried verbatim as the stable coordinator name; unset or blank is none", () => {
+    expect(loadConfig({ VOLLEY_COORDINATOR: "coord-main" }, "/x").coordinator).toBe("coord-main");
+    expect(loadConfig({}, "/x")).not.toHaveProperty("coordinator");
+    expect(loadConfig({ VOLLEY_COORDINATOR: "" }, "/x")).not.toHaveProperty("coordinator");
+  });
+
+  it("is ignored under a supervisor identity file: a worker inheriting the export is no coordinator", () => {
+    const cwd = tempDir("volley-identity-");
+    mkdirSync(join(cwd, ".volley"));
+    writeFileSync(
+      join(cwd, ".volley", "agent.json"),
+      JSON.stringify({ agent_id: "w1-t1-implementer-1", namespace: "default" }),
+    );
+    expect(loadConfig({ VOLLEY_COORDINATOR: "coord-main" }, cwd)).not.toHaveProperty("coordinator");
+  });
+});

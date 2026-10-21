@@ -62,6 +62,34 @@ import {
   summaryPayload,
 } from "./admission";
 import { budgetUsed } from "./autopilot/budgets";
+import { type GithubStatus, githubStatusCache } from "./autopilot/github-status";
+import {
+  INBOX_CHANNEL,
+  type InboxAnswerRequest,
+  type InboxItem,
+  type InboxKind,
+  type InboxWhere,
+  answerEvent,
+  decisionItemId,
+  foldInbox,
+  inboxEnvelopeType,
+  inboxTopic,
+  itemForDecision,
+  openedEvent,
+  parseWhere,
+  parseWhereLabel,
+  ttlExpired,
+  whereLabel,
+} from "./autopilot/inbox";
+import {
+  DEFAULT_PLAYBOOK,
+  PlaybookError,
+  type WavePlaybook,
+  allVerified,
+  playbookPath,
+  releaseGoInput,
+  wavePlaybook,
+} from "./autopilot/playbook";
 import {
   type Budget,
   type EscalateWhy,
@@ -166,6 +194,7 @@ import {
   type LeaseBook,
   type LeaseInput,
   type LeaseRequest,
+  capFor,
   heldOn,
   step as leaseStep,
   poolPayload,
@@ -184,11 +213,20 @@ import {
   parseMachine,
 } from "./machines";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
-import { claimVerdict, guardMutation } from "./ownership";
+import {
+  type Binding,
+  type RegistryEntry,
+  bindOwner,
+  claimVerdict,
+  guardMutation,
+  parseRegistryEntry,
+} from "./ownership";
 import { type DoctorRun, type PeerReply, PeerService } from "./peers";
 import {
   AUTO_HOST,
+  type FilterOptions,
   type MachineView,
+  type PlaceOptions,
   type Placement,
   type Snapshot,
   type Unplaced,
@@ -257,6 +295,7 @@ import {
   SUPERSEDED_BY_MERGE,
   type SpawnStart,
   blockedReason,
+  releaseLockOn,
   roleSpawnHold,
 } from "./pipeline";
 
@@ -424,6 +463,11 @@ export interface DaemonOptions {
    * one (test/helpers/fake-clock.ts) and move time by hand.
    */
   clock?: Clock;
+  /**
+   * The HTTP fetch for GitHub's status page, read when a red head is classified (SPEC §4.6.16).
+   * Default `globalThis.fetch`; tests pass a fake.
+   */
+  fetch?: typeof fetch;
   /** Wall clock override on top of `clock` (tests that only fix the time). */
   now?: () => number;
   /** The config's bottom layer (default CONFIG_DEFAULTS; `volleyd daemon`: `defaultsFor` env). */
@@ -772,6 +816,8 @@ const OWNER_GONE = new Set(["reaped", "done", "failed"]);
 /** The wave_complete decision's id (one per wave, never shared with another wave). */
 const waveCompleteDecisionId = (wave: WaveId) => waveDecisionId("wave_complete", wave);
 
+/** Every agent's registry entry: the coordinator names they carry (SPEC §6.2). */
+const REGISTRY_FILTER = "volley/_system/registry/+";
 /** Every agent's progress, in every namespace: the daemon's ONE progress subscription. */
 const PROGRESS_FILTER = "volley/+/+/progress";
 /** The daemon's mailbox in every namespace (a wave's agents ack in the wave's namespace). */
@@ -873,8 +919,19 @@ export class Daemon {
   /** The namespace each swept candidate's records live in (found while judging liveness). */
   private readonly sweepNamespaces = new Map<string, string>();
   private readonly waves = new Map<WaveId, WaveLog>();
+  /** GitHub's status page reader (githubStatus), made on first use. */
+  private statusPageRead: (() => Promise<GithubStatus>) | undefined;
+  /** The needs-you inbox (SPEC §4.6.18), by item id: rebuilt from the journals on start. */
+  private readonly inbox = new Map<string, InboxItem>();
+  /**
+   * What acts on an accepted answer to an item that is not a decision (a decision's answer
+   * resolves it): pickers and handoffs, release stages, registered by their subsystems.
+   */
+  readonly inboxHandlers = new Map<InboxKind, (item: InboxItem) => Promise<void>>();
   /** Why ready tasks were not admitted on the last tick, per wave. */
   private readonly heldBack = new Map<WaveId, string[]>();
+  /** The last "release playbook not run" reason logged per wave, so a tick does not repeat it. */
+  private readonly playbookNotRun = new Map<WaveId, string>();
   /** Each task's issue-body `Files` list, per wave (journaled on `task_queued`; overlap only). */
   private readonly issueFiles = new Map<WaveId, Record<TaskId, string[]>>();
   private readonly config: ConfigStore;
@@ -913,6 +970,15 @@ export class Daemon {
     string,
     Omit<CoordinatorAttention, "agent_id" | "last_seen">
   >();
+  /** Registry entries that carry a coordinator name (SPEC §6.2), by agent id. */
+  private readonly namedEntries = new Map<string, RegistryEntry>();
+  /**
+   * Coordinator name → the agent bound to it (`bindOwner`); `gone_at` (daemon ms) once that agent
+   * went away with no other bound, which starts `autopilot.reconnect_grace_s`.
+   */
+  private readonly bindings = new Map<string, Binding & { gone_at?: number }>();
+  /** Per coordinator name: the timer that turns its waves' `reconnecting` into `gone`. */
+  private readonly reconnectTimers = new Map<string, TimerHandle>();
   /** Mailbox topics (one per namespace) whose stray retained message this process cleared. */
   private readonly clearedMailboxes = new Set<string>();
   private lastReading: PressureReading | null = null;
@@ -936,6 +1002,12 @@ export class Daemon {
   private readonly refused = new Map<string, { n: number; until: number }>();
   /** Each wave's pipeline driver (T6), created on first use. */
   private readonly pipelines = new Map<WaveId, PipelineDriver>();
+  /**
+   * The merge queue's release-branch locks (SPEC §4.6.17), shared by every wave on this daemon:
+   * `<repo>#<release_branch>` → the `<wave>/<task>` holding its merge turn. Two waves on one
+   * release branch never merge at once.
+   */
+  private readonly releaseLocks = new Map<string, string>();
   /** Live spawned agents by agent id. */
   private readonly supervised = new Map<string, Supervised>();
   /** Terminal statuses received and not yet journaled about (watchdog.ts), by agent. */
@@ -1040,6 +1112,8 @@ export class Daemon {
   >();
   /** Each machine's verdict as last published (`key`: readinessKey) and when. */
   private readonly published = new Map<string, { key: string; at: number }>();
+  /** The own machine's last computed `local_agents` (its verdict's), for `volleyd status`. */
+  private ownLocalAgents: ReadinessPayload["local_agents"];
   /** Each machine's `ready` / `reasons` as last journaled (`machine_readiness_changed`). */
   private readonly journaledReadiness = new Map<string, { ready: boolean; reasons: string[] }>();
   // --- Fleet (F3): placement ---
@@ -1268,6 +1342,8 @@ export class Daemon {
         }
       }
     }
+    foldInbox(this.inbox, this.system.readAll());
+    for (const log of this.waves.values()) foldInbox(this.inbox, log.journal.readAll());
   }
 
   /**
@@ -1456,8 +1532,20 @@ export class Daemon {
       for (const d of Object.values(log.record.decisions)) {
         if (d.resolved === undefined) await this.publishDecision(wave, d);
         else await this.clearRetained(decisionTopic(wave, d.decision_id));
+        // A decision opened before the inbox existed gets its item now.
+        if (d.resolved === undefined && !this.inbox.has(decisionItemId(wave, d.decision_id)))
+          await this.openDecisionItem(wave, d);
+        // Resolved without closing its item (a crash between the two): closed now, as answered.
+        else if (d.resolved !== undefined)
+          await this.closeDecisionItem(wave, d, { by: d.resolved.by });
       }
     }
+    // The journal is the record: every item is re-published (an answered one until its ttl).
+    await this.sweepInbox();
+    for (const item of this.inbox.values()) await this.publishInboxItem(item);
+    // Before the statuses: a replayed terminal status of a session carrying a coordinator name
+    // is kept only once its registry entry is known (`bindOwner` needs it).
+    await this.subscribeRegistry();
     await this.subscribeLeaseInputs();
     await this.publishAllPools();
     // One pressure sample before the first admission (`tick` samples first): a daemon restarted
@@ -1581,35 +1669,171 @@ export class Daemon {
     if (before !== JSON.stringify(next)) this.ownerChanged(agent);
   }
 
+  /** Does `agent` own a wave itself, or as the agent bound to the coordinator name owning it? */
   private ownsAWave(agent: string): boolean {
-    for (const log of this.waves.values()) if (log.record.state?.owner === agent) return true;
+    for (const log of this.waves.values()) {
+      const owner = log.record.state?.owner;
+      if (owner != null && this.actsAs(agent, owner)) return true;
+    }
     return false;
+  }
+
+  /** `agent` is `owner`, or the agent bound to the coordinator name `owner`. */
+  private actsAs(agent: string, owner: string): boolean {
+    return owner === agent || this.bindings.get(owner)?.agent_id === agent;
   }
 
   /** An agent's status or attention changed: re-publish the waves it owns (`coordinator`). */
   private ownerChanged(agent: string): void {
     if (!this.running) return;
     for (const [wave, log] of this.waves) {
-      if (log.record.state?.owner === agent) void this.enqueue(() => this.publishState(wave));
+      const owner = log.record.state?.owner;
+      if (owner != null && this.actsAs(agent, owner))
+        void this.enqueue(() => this.publishState(wave));
     }
   }
 
-  /** wave-state `coordinator` for `owner`; undefined until anything of it was seen. */
+  /**
+   * wave-state `coordinator` for `owner` (through its binding when it is a coordinator name);
+   * undefined until anything of it was seen. A bound agent that went away is `reconnecting` for
+   * `autopilot.reconnect_grace_s`, then `gone`.
+   */
   private coordinatorFor(owner: string): CoordinatorAttention | undefined {
-    const status = this.statusOf.get(owner);
-    const attention = this.attentionOf.get(owner);
-    if (status === undefined && attention === undefined) return undefined;
+    const binding = this.bindings.get(owner);
+    const agent = binding?.agent_id ?? owner;
+    const status = this.statusOf.get(agent);
+    const attention = this.attentionOf.get(agent);
+    if (status === undefined && attention === undefined && binding === undefined) return undefined;
     const seen = [
-      this.lastSeen.get(owner),
+      this.lastSeen.get(agent),
       status !== undefined ? Date.parse(status.at) : undefined,
+      binding !== undefined ? Date.parse(binding.since) : undefined,
     ]
       .filter((t): t is number => t !== undefined && !Number.isNaN(t))
       .sort((a, b) => b - a)[0];
     const last_seen = new Date(seen ?? this.now()).toISOString();
     if (status !== undefined && OWNER_GONE.has(status.type)) {
-      return { agent_id: owner, state: "gone", last_seen };
+      // Not yet stamped: the status was just seen and its rebind is still queued.
+      const away = binding?.gone_at ?? this.wentAwayAt(status.at);
+      const grace = secondsMs(this.config.effective().autopilot.reconnect_grace_s);
+      const state = binding !== undefined && this.now() - away < grace ? "reconnecting" : "gone";
+      return { agent_id: agent, state, last_seen };
     }
-    return { agent_id: owner, ...(attention ?? { state: "working" }), last_seen };
+    return { agent_id: agent, ...(attention ?? { state: "working" }), last_seen };
+  }
+
+  /**
+   * When a bound agent went away: its terminal status's own time (a restart replays a long-past
+   * `done` as if fresh), never later than now; now when unknown.
+   */
+  private wentAwayAt(at: string | undefined): number {
+    const t = at !== undefined ? Date.parse(at) : Number.NaN;
+    return Number.isNaN(t) ? this.now() : Math.min(t, this.now());
+  }
+
+  /** Every agent's registry entry: the coordinator names they carry feed `bindings`. */
+  private async subscribeRegistry(): Promise<void> {
+    this.unsubscribers.push(
+      await this.broker.subscribeStream(REGISTRY_FILTER, (m) => {
+        const id = m.topic.split("/")[3] ?? "";
+        const entry = m.payload === "" ? null : parseRegistryEntry(m.payload);
+        // Recorded on arrival, not on the queue: the status subscription reads it on arrival.
+        const before = this.namedEntries.get(id)?.coordinator;
+        if (entry?.coordinator !== undefined && entry.agent_id === id) {
+          this.namedEntries.set(id, entry);
+        } else {
+          this.namedEntries.delete(id);
+        }
+        for (const name of new Set([before, entry?.coordinator])) {
+          if (name !== undefined) void this.enqueue(() => this.rebind(name));
+        }
+      }),
+    );
+  }
+
+  /**
+   * Re-bind coordinator name `name` to its newest live registry entry (`bindOwner`). A new agent
+   * on a name that already had one is a reconnect: journaled `owner_reconnected` in each unfinished
+   * wave the name owns (once: a replayed registry after a restart finds it journaled). With no live
+   * entry the binding stays on its last agent, marked away (it no longer acts for the name), so
+   * its waves read `reconnecting` until
+   * `autopilot.reconnect_grace_s` passes. Runs on the queue.
+   */
+  private async rebind(name: string): Promise<void> {
+    const statuses = new Map([...this.statusOf].map(([id, s]) => [id, s.type]));
+    const prev = this.bindings.get(name);
+    let next = bindOwner([...this.namedEntries.values()], statuses, name);
+    // An older entry whose status was never seen is most likely a session long gone (its status
+    // forgotten), not a coordinator coming back: the current binding keeps the name.
+    const startedAt = (id: string | undefined) =>
+      id !== undefined ? (this.namedEntries.get(id)?.started_at ?? "") : "";
+    if (
+      next !== null &&
+      prev !== undefined &&
+      !statuses.has(next) &&
+      startedAt(next) < startedAt(prev.agent_id)
+    )
+      next = null;
+    const owned = [...this.waves].filter(([, log]) => log.record.state?.owner === name);
+    if (next !== null && next !== prev?.agent_id) {
+      this.bindings.set(name, {
+        agent_id: next,
+        since: dateOf(this.time).toISOString(),
+        status: statuses.get(next) ?? null,
+      });
+      this.time.clearTimeout(this.reconnectTimers.get(name));
+      this.reconnectTimers.delete(name);
+      // A binding made before its agent's status was known (a restart replays the registry before
+      // the statuses), or to an agent already gone when it was bound, was never a live session:
+      // moving off it is no reconnect, unless a wave journaled that agent as its owner.
+      const left = prev !== undefined ? this.statusOf.get(prev.agent_id) : undefined;
+      const provisional =
+        prev !== undefined &&
+        (left === undefined ||
+          (OWNER_GONE.has(left.type) && Date.parse(left.at) < Date.parse(prev.since)));
+      for (const [wave, log] of owned) {
+        const waveStatus = log.record.state?.status;
+        if (
+          prev === undefined ||
+          waveStatus === "complete" ||
+          waveStatus === "stopped" ||
+          log.record.owner_agent === next ||
+          (provisional && log.record.owner_agent !== prev.agent_id)
+        ) {
+          await this.publishState(wave);
+          continue;
+        }
+        await this.append(wave, {
+          type: "owner_reconnected",
+          data: { owner: name, agent_id: next, previous_agent_id: prev.agent_id },
+        });
+        this.log(`wave ${wave}: owner ${name} reconnected as ${next} (was ${prev.agent_id})`);
+      }
+      return;
+    }
+    if (prev === undefined) return;
+    const status = statuses.get(prev.agent_id) ?? null;
+    const away = OWNER_GONE.has(status ?? "");
+    const { gone_at, ...binding } = prev;
+    const awayAt = gone_at ?? this.wentAwayAt(this.statusOf.get(prev.agent_id)?.at);
+    this.bindings.set(name, { ...binding, status, ...(away ? { gone_at: awayAt } : {}) });
+    if (away && gone_at === undefined) {
+      const grace = secondsMs(this.config.effective().autopilot.reconnect_grace_s);
+      const left = Math.max(0, grace - (this.now() - awayAt));
+      this.reconnectTimers.set(
+        name,
+        this.time.setTimeout(() => {
+          this.reconnectTimers.delete(name);
+          for (const [wave, log] of this.waves) {
+            if (log.record.state?.owner === name) void this.enqueue(() => this.publishState(wave));
+          }
+        }, left),
+      );
+    } else if (!away) {
+      this.time.clearTimeout(this.reconnectTimers.get(name));
+      this.reconnectTimers.delete(name);
+    }
+    for (const [wave] of owned) await this.publishState(wave);
   }
 
   /** False for a progress message already handled (same topic and bytes); bounded memory. */
@@ -1770,6 +1994,8 @@ export class Daemon {
     if (closeControl) void this.dynsec?.close();
     for (const t of this.stopGrace.values()) this.time.clearTimeout(t);
     this.stopGrace.clear();
+    for (const t of this.reconnectTimers.values()) this.time.clearTimeout(t);
+    this.reconnectTimers.clear();
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
@@ -1964,14 +2190,20 @@ export class Daemon {
         const env = parseEnvelope(m.payload);
         if (env !== null && !(m.topic.split("/")[1] ?? "").startsWith("_")) {
           const prev = this.statusOf.get(holder)?.type;
-          if (OWNER_GONE.has(env.type) && !this.ownsAWave(holder)) {
+          const name = this.namedEntries.get(holder)?.coordinator;
+          // A session carrying a coordinator name keeps its status: `bindOwner` needs it. Each
+          // coordinator restart adds one; registry reaping (clearing `namedEntries`) bounds them.
+          if (OWNER_GONE.has(env.type) && !this.ownsAWave(holder) && name === undefined) {
             // A finished agent that owns no wave needs no `coordinator`: forget it (bounded).
             this.statusOf.delete(holder);
             this.attentionOf.delete(holder);
           } else {
             this.statusOf.set(holder, { type: env.type, at: env.wall_time });
           }
-          if (prev !== env.type) this.ownerChanged(holder);
+          if (prev !== env.type) {
+            this.ownerChanged(holder);
+            if (name !== undefined) void this.enqueue(() => this.rebind(name));
+          }
         }
         if (env === null || !HOLDER_GONE.has(env.type)) return;
         // Checked in queue order, so an `acquire` from this holder still waiting in the queue
@@ -2104,6 +2336,7 @@ export class Daemon {
    * lowering one never un-admits anything.
    */
   private async tickNow(): Promise<void> {
+    await this.sweepInbox();
     await this.sweepMachines();
     await this.machineDownPass();
     await this.removalSweep();
@@ -2111,7 +2344,10 @@ export class Daemon {
     await this.runLeases({ kind: "tick" });
     await this.monitor();
     await this.watchTerminals();
-    for (const wave of this.waves.keys()) await this.completeIfSettled(wave);
+    for (const wave of this.waves.keys()) {
+      await this.completeIfSettled(wave);
+      await this.releaseGoIfVerified(wave);
+    }
     let live = 0;
     for (const log of this.waves.values()) live += activeTasks(log.record).length;
     for (const [wave, log] of this.waves) {
@@ -2164,7 +2400,11 @@ export class Daemon {
       // Level-triggered pipeline work: retry held role spawns, re-check pending CI, see merges.
       // Its git / gh checks run beside the queue; one wave's error never skips the others.
       for (const wave of this.waves.keys()) {
-        if (this.waves.get(wave)?.record.state?.status !== "running") continue;
+        if (this.waves.get(wave)?.record.state?.status !== "running") {
+          // A wave that does not tick never ends its merge turn: it gives the branch up.
+          this.pipelines.get(wave)?.releaseTurn();
+          continue;
+        }
         try {
           await this.pipelineFor(wave).tick();
         } catch (e) {
@@ -2200,11 +2440,7 @@ export class Daemon {
       candidates,
       w,
       this.placementSnapshot(gate, eff),
-      {
-        placement: eff.placement,
-        warn_at_pct: eff.claude.warn_at_pct,
-        localName: this.config.localName(),
-      },
+      this.placeOptions(eff),
       gate,
       (host) => this.hostVerdict(host, eff),
       {
@@ -2268,6 +2504,26 @@ export class Daemon {
     const input = this.readinessInput(name, isLocal, cfg, extra, eff, gate);
     const verdict = readiness(input);
     return { verdict, view: machineView(input, verdict, verdict.usage.five_hour_pct) };
+  }
+
+  /**
+   * The machine filter's options under `eff`: placement's thresholds, the usage warning level and
+   * the own machine's `fleet.local_agents` mode with its fallback profile (SPEC §4.6.15).
+   */
+  private filterOptions(eff: Tunables): FilterOptions {
+    return {
+      placement: eff.placement,
+      warn_at_pct: eff.claude.warn_at_pct,
+      local_agents: eff.fleet.local_agents ?? "always",
+      fallback: eff.fleet.fallback,
+      now: this.now(),
+      down_grace_ms: secondsMs(eff.placement.down_decision_after_s),
+    };
+  }
+
+  /** `place`'s options under `eff`: the machine filter's, and the own machine's name. */
+  private placeOptions(eff: Tunables): PlaceOptions {
+    return { ...this.filterOptions(eff), localName: this.config.localName() };
   }
 
   /** What placement knows now: the own machine and every configured host, with their verdicts. */
@@ -2446,9 +2702,7 @@ export class Daemon {
     const eff = this.config.effective(wave);
     const gate = admissionFor(rec, this.killSwitch, this.pressure(wave));
     return place({ ...def, host: AUTO_HOST }, w, snap ?? this.placementSnapshot(gate, eff), {
-      placement: eff.placement,
-      warn_at_pct: eff.claude.warn_at_pct,
-      localName: this.config.localName(),
+      ...this.placeOptions(eff),
       exclude,
     });
   }
@@ -2742,7 +2996,8 @@ export class Daemon {
   /**
    * Why machine `host` should not take a respawn now: closed to new agents (draining, being
    * removed, removed: `closed`), down, or not eligible (readiness and placement's filter); null
-   * when it may.
+   * when it may. The own machine is judged as a candidate like any (`local_agents: always`):
+   * its `fleet.local_agents` mode steers where new work goes, it is no trouble with the machine.
    */
   private hostTrouble(host: string): { why: string; closed: boolean } | null {
     const closed = this.closedMachine(host);
@@ -2757,12 +3012,14 @@ export class Daemon {
     const cfg = this.config.effective();
     const local = this.config.localName();
     if (host !== local && !Object.hasOwn(cfg.hosts, host)) return null;
+    const eff: Tunables =
+      host === local ? { ...cfg, fleet: { ...cfg.fleet, local_agents: "always" } } : cfg;
     const v = this.machineState(
       host,
       host === local,
       cfg,
       this.requirementsExtra(),
-      cfg,
+      eff,
       this.pressure(GLOBAL),
     ).verdict;
     return v.eligible
@@ -2969,6 +3226,18 @@ export class Daemon {
     if (!state.tasks.every((t) => t.stage === "done" || t.stage === "cancelled")) return;
     const done = state.tasks.filter((t) => t.stage === "done").map((t) => t.id);
     const cancelled = state.tasks.filter((t) => t.stage === "cancelled").map((t) => t.id);
+    // The release train (SPEC §4.6.19): under autopilot, a repo with a playbook starts releasing
+    // instead; the owner hears from release_go once every stage is verified.
+    const train = this.releasePlaybook(wave);
+    if (typeof train === "object" && train !== null) {
+      const { path, sha256, playbook } = train;
+      await this.append(wave, {
+        type: "release_started",
+        data: { done, cancelled, playbook: { path, sha256, stages: playbook.stages } },
+      });
+      this.log(`wave ${wave} releasing: ${playbook.stages.map((s) => s.name).join(", ")}`);
+      return;
+    }
     // The decision first: once wave_complete is journaled the wave is no longer `running` and no
     // later tick comes back here, so a failed open must leave the wave to retry.
     if (rec.decisions[waveCompleteDecisionId(wave)] === undefined) {
@@ -2977,13 +3246,74 @@ export class Daemon {
         kind: "wave_complete",
         task: null,
         id: waveCompleteDecisionId(wave),
-        question: `Wave ${wave} is complete: ${done.length} task(s) done${merged}, ${cancelled.length} cancelled. Review and merge ${state.release_branch} when ready.`,
+        question: `Wave ${wave} is complete: ${done.length} task(s) done${merged}, ${cancelled.length} cancelled. Review and merge ${state.release_branch} when ready.${typeof train === "string" ? ` Its release playbook was not run: ${train}` : ""}`,
         options: ["acknowledged"],
       });
     }
     await this.append(wave, { type: "wave_complete", data: { done, cancelled } });
     this.log(
       `wave ${wave} complete: done ${done.join(", ") || "-"}; cancelled ${cancelled.join(", ") || "-"}`,
+    );
+  }
+
+  /**
+   * The playbook a settled wave releases with (SPEC §4.6.19): null when it has none or autopilot
+   * is off for it; a string saying why when it no longer validates (the wave completes as
+   * without one, and its wave_complete question says so on one line, naming the playbook as the
+   * wave file does).
+   */
+  private releasePlaybook(wave: WaveId): WavePlaybook | string | null {
+    const plan = this.waves.get(wave)?.record.wave;
+    if (plan == null || !this.config.effective(wave).autopilot.enabled) return null;
+    try {
+      return wavePlaybook(plan);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (this.playbookNotRun.get(wave) !== msg) {
+        this.playbookNotRun.set(wave, msg);
+        this.log(`wave ${wave}: release playbook not run: ${msg}`);
+      }
+      const path = playbookPath(plan.repo, plan.playbook);
+      const named = path === null ? msg : msg.replace(path, plan.playbook ?? DEFAULT_PLAYBOOK);
+      return named.replace(/:\n\s*/, ": ").replace(/\n\s*/g, "; ");
+    }
+  }
+
+  /**
+   * Once every stage of a releasing wave is verified, ask the owner `release_go` (owner-only,
+   * wave-level), unless one is open already. After a `hold` it is asked again (`class: held`), so
+   * the Desk keeps showing it.
+   */
+  private async releaseGoIfVerified(wave: WaveId): Promise<void> {
+    const log = this.waves.get(wave);
+    const state = log?.record.state;
+    if (log === undefined || state?.status !== "releasing" || state.release === undefined) return;
+    if (!allVerified(state.release)) return;
+    if (openDecisions(log.record).some((d) => d.kind === "release_go")) return;
+    const asked = Object.values(log.record.decisions).filter((d) => d.kind === "release_go");
+    // Answered go, but release_done was not journaled (it failed): journal it now.
+    const go = asked.find((d) => d.resolved?.answer.trim().toLowerCase() === "go");
+    if (go?.resolved !== undefined) {
+      await this.append(wave, {
+        type: "release_done",
+        data: { by: go.resolved.by, decision_id: go.decision_id },
+      });
+      return;
+    }
+    const evidence = new Map<string, string>();
+    for (const e of log.journal.readAll()) {
+      if (e.type === "release_stage_verified" && typeof e.data.evidence === "string")
+        evidence.set(String(e.data.stage), e.data.evidence);
+    }
+    const { input, stages } = releaseGoInput(wave, state.release, evidence);
+    const id =
+      asked.length === 0
+        ? waveDecisionId("release_go", wave)
+        : waveDecisionId("release_go", wave, String(asked.length));
+    await this.openDecisionNow(
+      wave,
+      { ...input, id },
+      { stages, ...(asked.length > 0 ? { class: "held" } : {}) },
     );
   }
 
@@ -3942,12 +4272,16 @@ export class Daemon {
     for (const n of [...this.published.keys()])
       if (!names.includes(n)) await this.clearReadiness(n);
     const shared = this.requirementsExtra();
-    for (const name of only === undefined ? names : names.filter((n) => n === only)) {
+    // The own machine's verdict weighs every peer's (its `local_agents` mode), so a peer's
+    // change re-computes it too.
+    const which = only === undefined ? names : names.filter((n) => n === only || n === local);
+    for (const name of which) {
       const isLocal = name === local;
       if (!isLocal) this.maybeProbe(name);
       // Inputs not gathered yet in this process: the last retained verdict stands.
       if (!this.isSettled(name, isLocal)) continue;
       const v = this.machineState(name, isLocal, cfg, shared, cfg, this.pressure(GLOBAL)).verdict;
+      if (isLocal) this.ownLocalAgents = v.local_agents;
       const key = readinessKey(v);
       const now = this.now();
       const prior = this.published.get(name);
@@ -4020,6 +4354,7 @@ export class Daemon {
   ): ReadinessInput {
     const h = Object.hasOwn(cfg.hosts, name) ? cfg.hosts[name] : undefined;
     const probe = this.probes.get(name);
+    const downSince = isLocal ? undefined : this.machines.downSince(name);
     const records = accountRecords(this.usage);
     const account = isLocal
       ? cfg.claude.default_account
@@ -4049,26 +4384,44 @@ export class Daemon {
       placed: isLocal
         ? this.supervised.size + this.reservedOn(null)
         : this.placedOn(name) + this.reservedOn(name),
+      ...(isLocal
+        ? {
+            // Its own agents alone, which its fallback profile counts (SPEC §4.6.15), and every
+            // peer, whose eligibility its `local_agents` mode weighs. Each peer's view is built
+            // again here (and placement's snapshot builds it once more): O(peers²) per tick,
+            // deliberate at fleet sizes of a handful, for one source of each peer's view.
+            localAgents: this.placedOn(name) + this.reservedOn(name),
+            peers: Object.keys(cfg.hosts)
+              .filter((n) => n !== name)
+              .map((n) => this.machineState(n, false, cfg, extra, eff, gate).view),
+          }
+        : downSince !== undefined
+          ? { downSince }
+          : {}),
       heavy: Object.fromEntries(
-        Object.entries(cfg.lease_pools).flatMap(([pool, c]) =>
-          c.per_machine === undefined
+        Object.entries(cfg.lease_pools).flatMap(([pool, c]) => {
+          // The cap in force on this machine (its override, else the pool's); the own machine
+          // also has a slot count in each pool its fallback profile names.
+          const named = isLocal && Object.hasOwn(cfg.fleet.fallback.per_machine, pool);
+          const cap = capFor(c, name) ?? (named ? c.capacity : undefined);
+          return cap === undefined
             ? []
             : [
                 [
                   pool,
                   {
                     held: heldOn(this.leases, pool, name) + this.heavyReservedOn(name, pool),
-                    per_machine: c.per_machine,
+                    per_machine: cap,
                   },
                 ],
-              ],
-        ),
+              ];
+        }),
       ),
       usage: {
         account,
         five_hour_pct: account !== null ? (records[account]?.five_hour?.pct ?? null) : null,
       },
-      filter: { placement: eff.placement, warn_at_pct: eff.claude.warn_at_pct },
+      filter: this.filterOptions(eff),
       held: isLocal ? machineReasons(gate) : this.hostVerdict(name, eff).recovering,
       ...extra,
       checkedAt: dateOf(this.time),
@@ -4650,6 +5003,14 @@ export class Daemon {
   // Pipeline (T6): every role's `done` is verified before the next stage; volleyd merges only under `merge: auto` (SPEC §4.6.17).
   // -------------------------------------------------------------------------------------------
 
+  /** GitHub's status page through `DaemonOptions.fetch`, cached; one reader for every wave. */
+  private githubStatus(): () => Promise<GithubStatus> {
+    this.statusPageRead ??= githubStatusCache(this.opts.fetch ?? globalThis.fetch, () =>
+      this.now(),
+    );
+    return this.statusPageRead;
+  }
+
   /** The pipeline driver of a wave, on this daemon's journal, spawner, steering and decisions. */
   private pipelineFor(wave: WaveId): PipelineDriver {
     let d = this.pipelines.get(wave);
@@ -4703,6 +5064,11 @@ export class Daemon {
       mergeMode: () =>
         log.record.wave?.merge ?? (this.config.get("autopilot.merge", wave) as MergeMode),
       mergeRetryMax: () => this.config.get("autopilot.merge_retry_max", wave) as number,
+      // --- Self-healing CI (SPEC §4.6.16): an infra incident's wait, GitHub's status page. ---
+      incidentWaitMaxS: () => this.config.get("autopilot.incident_wait_max_s", wave) as number,
+      statusPage: this.githubStatus(),
+      deleteBranch: () => this.config.get("autopilot.delete_branch", wave) as boolean,
+      releaseLock: releaseLockOn(this.releaseLocks),
       retire: async (agentId, status) => {
         // Replaced or cancelled without having ended itself: stop its session first, so it does
         // nothing next to (or instead of) the new attempt.
@@ -5204,18 +5570,38 @@ export class Daemon {
         );
       case "steer":
         return this.steerAgent(agentId, a, x.text, { reason: "idle" });
-      case "agent_stalled":
+      case "agent_stalled": {
+        // A respawn is the pipeline's (its relaunch): offered where a pipeline spawns the role.
+        const respawn = this.opts.spawner !== undefined;
+        const attempt = this.spawnedRecord((e) => e.data.agent_id === agentId, wave)?.attempt;
         return open(
           "stalled",
           {
             kind: "agent_stalled",
             task,
-            question: `Needs you: ${agentId} ended its turn without publishing done/blocked/failed and is still idle ${Math.floor(x.idle_s / 60)} min later, after a nudge.${x.last_text !== null ? ` Last message: ${clipText(x.last_text)}` : ""} Answer to steer it, or stop the task.${x.asked > 1 ? ` (Asked ${x.asked} times; next in ${Math.round(x.next_s / 60)} min.)` : ""}`,
-            options: ["nudge again", STOP_ANSWER],
+            question: `Needs you: ${agentId} ended its turn without publishing done/blocked/failed and is still idle ${Math.floor(x.idle_s / 60)} min later, after a nudge.${x.last_text !== null ? ` Last message: ${clipText(x.last_text)}` : ""} Answer to steer it${respawn ? `, respawn: stop it and start the ${a.role} again (${a.role === "implementer" ? "on the branch it pushed" : "from the head, with the same inputs"})` : ""}, or stop the task.${x.asked > 1 ? ` (Asked ${x.asked} times; next in ${Math.round(x.next_s / 60)} min.)` : ""}`,
+            options: respawn
+              ? ["nudge again", "respawn", STOP_ANSWER]
+              : ["nudge again", STOP_ANSWER],
             pointers: { screen: buildTopic(a.namespace, agentId, "screen") },
           },
-          { class: "agent_stalled", idle_s: x.idle_s, asked: x.asked },
+          {
+            class: "agent_stalled",
+            idle_s: x.idle_s,
+            asked: x.asked,
+            ...(respawn
+              ? {
+                  pipeline: {
+                    on: "liveness",
+                    role: a.role,
+                    agent_id: agentId,
+                    ...(typeof attempt === "number" ? { attempt } : {}),
+                  },
+                }
+              : {}),
+          },
         );
+      }
       case "credit_exhausted": {
         const now = this.now();
         const allowed = recoveryAllowed(creditOccurrences(this.journalEvents(wave), agentId, now));
@@ -5445,6 +5831,8 @@ export class Daemon {
           decision_id: d.decision_id,
         });
       case "agent_stalled":
+        // respawn: the pipeline relaunches the role (its liveness marker); nothing is typed.
+        if (isRespawnAnswer(answer, d.options)) return;
         return this.steerAgent(
           agentId,
           a,
@@ -5960,6 +6348,8 @@ export class Daemon {
               (event.type === "stage_entered" && event.data.stage === "done"))
           ? [event.task]
           : [];
+    // The last stage of the release train verified: the owner's release_go (SPEC §4.6.19).
+    if (event.type === "release_stage_verified") await this.releaseGoIfVerified(wave);
     for (const task of ended) {
       const ids = (queued[task] ?? []).map((q) => q.message_id);
       if (ids.length === 0) continue;
@@ -6146,6 +6536,8 @@ export class Daemon {
     const log = this.waves.get(wave);
     const opened = log?.record.decisions[id];
     if (log === undefined || opened === undefined) return;
+    // Its inbox item first (SPEC §4.6.18): an autopilot answer closes it like any other.
+    if (opened.resolved === undefined) await this.openDecisionItem(wave, opened);
     if (!(await this.autopilot(wave, opened))) return;
     const d = log.record.decisions[id] as DecisionRecord;
     await this.publishDecision(wave, d);
@@ -6253,7 +6645,7 @@ export class Daemon {
   private async resolveNow(
     wave: WaveId,
     id: string,
-    r: { answer: string; by: string; rationale?: string },
+    r: { answer: string; by: string; rationale?: string; where?: InboxWhere },
     beforeResolved?: () => Promise<void>,
   ): Promise<{ decision: DecisionRecord; already_resolved: boolean; brief?: string }> {
     const log = this.waves.get(wave);
@@ -6285,6 +6677,8 @@ export class Daemon {
     await beforeResolved?.();
     await this.append(wave, ev.event);
     const d = log.record.decisions[id] as DecisionRecord;
+    // Every answer closes the decision's inbox item through the referee (SPEC §4.6.18).
+    await this.closeDecisionItem(wave, d, r);
     if (move !== null) {
       await this.append(wave, {
         type: "wave_account_moved",
@@ -6305,6 +6699,12 @@ export class Daemon {
     if (refused !== null && (d as { pipeline?: unknown }).pipeline === undefined)
       await this.askAgainRefused(wave, d, r.answer, refused);
     if (d.kind === "machine_down") await this.onMachineDownResolved(wave, d);
+    if (d.kind === "release_go") {
+      // go: the release is the owner's, and done. Anything else holds it: asked again.
+      if (r.answer.trim().toLowerCase() === "go")
+        await this.append(wave, { type: "release_done", data: { by: r.by, decision_id: id } });
+      else await this.releaseGoIfVerified(wave);
+    }
     if (d.kind === "remote_repo_missing" && d.task !== null) {
       if (r.answer.trim().toLowerCase() === "cancel") {
         await this.append(wave, {
@@ -6462,6 +6862,209 @@ export class Daemon {
         this.log(`account_limit for ${lim.wave}: ${e instanceof Error ? e.message : String(e)}`),
       );
     }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // The needs-you inbox (SPEC §4.6.18): volleyd is the referee
+  // -------------------------------------------------------------------------------------------
+
+  /** One inbox item (open, or answered and not yet cleared). */
+  inboxItem(id: string): InboxItem | undefined {
+    return this.inbox.get(id);
+  }
+
+  /**
+   * Open an inbox item (pickers, handoffs, release stages): journal `inbox_opened` in its wave
+   * (else `_system`) and publish it retained. Opening an id that exists returns that item.
+   */
+  openInboxItem(
+    input: Omit<InboxItem, "version" | "opened_at" | "answered"> & { opened_at?: string },
+  ): Promise<InboxItem> {
+    return this.serial(() =>
+      this.openInboxItemNow({
+        ...input,
+        version: 1,
+        opened_at: input.opened_at ?? dateOf(this.time).toISOString(),
+      }),
+    );
+  }
+
+  /**
+   * Answer an inbox item through the referee: the first answer at the item's current version wins;
+   * a decision's answer resolves it, any other kind's goes to its `inboxHandlers` entry.
+   */
+  answerInboxItem(
+    id: string,
+    req: InboxAnswerRequest,
+  ): Promise<{ item: InboxItem } | { refused: string }> {
+    return this.serial(() => this.answerInboxItemNow(id, req));
+  }
+
+  private async openInboxItemNow(item: InboxItem): Promise<InboxItem> {
+    const prior = this.inbox.get(item.id);
+    if (prior !== undefined) return prior;
+    this.inbox.set(item.id, item);
+    await this.journalInbox(item, openedEvent(item));
+    await this.publishInboxItem(item);
+    return item;
+  }
+
+  private async answerInboxItemNow(
+    id: string,
+    req: InboxAnswerRequest,
+  ): Promise<{ item: InboxItem } | { refused: string }> {
+    const item = this.inbox.get(id);
+    if (item === undefined) return { refused: `unknown inbox item '${id}'` };
+    const check = answerEvent(item, req, dateOf(this.time));
+    if ("refused" in check) return check;
+    if (item.kind === "decision") {
+      const wave = item.wave;
+      const decision = item.source.decision_id;
+      if (wave === undefined || typeof decision !== "string" || !this.waves.has(wave))
+        return { refused: `inbox item '${id}' names no open decision` };
+      // The owner check `resolve` applies: the inbox is no way around it.
+      const state = this.waves.get(wave)?.record.state;
+      const refused =
+        state != null ? guardMutation(state, req.by, "inbox_answer", this.bindings) : null;
+      if (refused !== null) return { refused };
+      const r = await this.answerDecision(wave, decision, req);
+      if ("refused" in r) return r;
+      if (r.already_resolved) {
+        // Resolved without closing its item (a crash between the two): closed now, as answered.
+        const first = r.decision.resolved;
+        if (first !== undefined) await this.closeDecisionItem(wave, r.decision, { by: first.by });
+        const now = this.inbox.get(id)?.answered;
+        return {
+          refused: `already answered on ${now !== undefined ? whereLabel(now.where) : "cli"}`,
+        };
+      }
+    } else {
+      const answered = await this.recordInboxAnswer(item, req);
+      const handler = this.inboxHandlers.get(item.kind);
+      if (handler === undefined) this.log(`inbox ${id}: no handler for ${item.kind} answers`);
+      else
+        await handler(answered).catch((e: unknown) =>
+          this.log(`inbox ${id}: ${e instanceof Error ? e.message : String(e)}`),
+        );
+    }
+    return { item: this.inbox.get(id) as InboxItem };
+  }
+
+  /**
+   * Resolve a decision with an answer given anywhere (the resolve op, the Desk, a terminal): the
+   * trust check, the resolution (which closes its inbox item), then what a plan answer applies.
+   */
+  private async answerDecision(
+    wave: WaveId,
+    id: string,
+    r: { answer: string; by: string; rationale?: string; where?: InboxWhere },
+  ): Promise<
+    { refused: string } | { decision: DecisionRecord; already_resolved: boolean; brief?: string }
+  > {
+    const trust = await this.trustAnswer(wave, id, r.answer);
+    if (trust !== null) return { refused: trust };
+    const res = await this.resolveNow(wave, id, r);
+    if (!res.already_resolved) await this.applyPlanAnswer(wave, res.decision, r.by);
+    return res;
+  }
+
+  /** The referee accepted an answer: journal `inbox_answered`, keep and publish the record. */
+  private async recordInboxAnswer(item: InboxItem, req: InboxAnswerRequest): Promise<InboxItem> {
+    const r = answerEvent(item, req, dateOf(this.time));
+    if ("refused" in r) throw new Error(r.refused);
+    this.inbox.set(item.id, r.item);
+    await this.journalInbox(item, r.event);
+    await this.publishInboxItem(r.item);
+    this.log(`inbox ${item.id} answered on ${whereLabel(req.where)} by ${req.by}: ${req.answer}`);
+    return r.item;
+  }
+
+  /** An inbox event goes to the item's wave journal, else `_system`. */
+  private async journalInbox(item: InboxItem, ev: NewEvent): Promise<void> {
+    if (item.wave !== undefined && this.waves.has(item.wave)) await this.append(item.wave, ev);
+    else await this.appendSystem(ev);
+  }
+
+  private async publishInboxItem(item: InboxItem): Promise<void> {
+    await this.publish(
+      inboxTopic(item.id),
+      this.envelope(INBOX_CHANNEL, inboxEnvelopeType(item), item),
+      true,
+    );
+  }
+
+  /** The inbox item mirroring a decision; `owner_only` from the wave's `autopilot.owner_only`. */
+  private async openDecisionItem(wave: WaveId, d: DecisionRecord): Promise<void> {
+    const agent = (d as { agent_id?: unknown }).agent_id;
+    await this.openInboxItemNow(
+      itemForDecision(
+        { ...decisionPayload(d), ...(typeof agent === "string" ? { agent_id: agent } : {}) },
+        this.config.effective(wave).autopilot,
+      ),
+    );
+  }
+
+  /**
+   * A decision was resolved: its open item is answered at its current version. `where` is
+   * autopilot for volleyd's own answers, else the request's (default: the CLI).
+   */
+  private async closeDecisionItem(
+    wave: WaveId,
+    d: DecisionRecord,
+    r: { by: string; where?: InboxWhere },
+  ): Promise<void> {
+    const item = this.inbox.get(decisionItemId(wave, d.decision_id));
+    if (item === undefined || item.answered !== undefined || d.resolved === undefined) return;
+    const where: InboxWhere =
+      r.by === DAEMON_AGENT_ID ? { kind: "autopilot" } : (r.where ?? { kind: "cli" });
+    await this.recordInboxAnswer(item, {
+      version: item.version,
+      answer: d.resolved.answer,
+      by: r.by,
+      where,
+    });
+  }
+
+  /** Clear the answered items whose `autopilot.inbox_answered_ttl_s` has passed. */
+  private async sweepInbox(): Promise<void> {
+    for (const item of [...this.inbox.values()]) {
+      const wave = item.wave !== undefined && this.waves.has(item.wave) ? item.wave : undefined;
+      const ttl = this.config.effective(wave).autopilot.inbox_answered_ttl_s;
+      if (!ttlExpired(item, this.now(), ttl)) continue;
+      this.inbox.delete(item.id);
+      await this.clearRetained(inboxTopic(item.id));
+    }
+  }
+
+  /** `inbox`: the open items (with `all: true`, answered ones not yet cleared too), oldest first. */
+  private listInbox(p: Record<string, unknown>): HandlerResult {
+    const items = [...this.inbox.values()]
+      .filter((i) => p.all === true || i.answered === undefined)
+      .sort((a, b) => a.opened_at.localeCompare(b.opened_at));
+    return { ok: true, result: { items, now: dateOf(this.time).toISOString() } };
+  }
+
+  /** `inbox_answer { id, version, answer, where }`: any login that may steer. */
+  private async inboxAnswerOp(p: Record<string, unknown>, by: string): Promise<HandlerResult> {
+    if (typeof p.id !== "string" || p.id === "")
+      return { ok: false, error: "inbox_answer requires payload.id" };
+    if (typeof p.version !== "number" || !Number.isInteger(p.version))
+      return { ok: false, error: "inbox_answer requires an integer payload.version" };
+    if (typeof p.answer !== "string")
+      return { ok: false, error: "inbox_answer requires payload.answer" };
+    const where = parseWhere(p.where);
+    if (where === null)
+      return { ok: false, error: "where.kind must be desk, terminal, cli or autopilot" };
+    // Only volleyd answers as autopilot.
+    if (where.kind === "autopilot")
+      return { ok: false, error: "only the supervisor answers as autopilot" };
+    const r = await this.answerInboxItemNow(p.id, {
+      version: p.version,
+      answer: p.answer,
+      by,
+      where,
+    });
+    return "refused" in r ? { ok: false, error: r.refused } : { ok: true, result: r.item };
   }
 
   private async publishDecision(wave: WaveId, d: DecisionRecord): Promise<void> {
@@ -6776,12 +7379,17 @@ export class Daemon {
         return this.policyOp(p);
       case "resolve":
         return this.resolveOp(p, by);
+      case "inbox":
+        return this.listInbox(p);
+      case "inbox_answer":
+        return this.inboxAnswerOp(p, by);
       case "claim":
         // Ownership must go to a stable identity, never the CLI's per-invocation agent id.
         if (typeof p.by !== "string" || p.by === "")
           return {
             ok: false,
-            error: "claim needs an identity: pass --by <agent-id> or set VOLLEY_AGENT_ID",
+            error:
+              "claim needs an identity: pass --by <name|agent-id> or set VOLLEY_COORDINATOR or VOLLEY_AGENT_ID",
           };
         // The new owner lands in the wave-state `owner` (agent id pattern): never a free-form name.
         if (!isValidAgentId(p.by))
@@ -6798,6 +7406,8 @@ export class Daemon {
         return this.steer(p, by);
       case "merged":
         return this.mergedOp(p, by);
+      case "merge":
+        return this.mergeOp(p, by);
       case "status": {
         if (typeof p.wave === "string") {
           const state = this.snapshot(p.wave);
@@ -6812,6 +7422,12 @@ export class Daemon {
             ...(this.killSwitch ? { kill_switch: true } : {}),
             // The cached count: status never waits on the broker's control connection.
             ...(this.sweeper !== undefined ? { agent_logins: { ...this.sweeper.counts } } : {}),
+            // The own machine's local_agents mode, as its last verdict said (SPEC §4.6.15),
+            // once it has a peer to weigh (a lone machine has no fallback to speak of).
+            ...(this.ownLocalAgents !== undefined &&
+            Object.keys(this.config.effective().hosts).length > 0
+              ? { local_agents: this.ownLocalAgents }
+              : {}),
           },
         };
       }
@@ -6905,6 +7521,8 @@ export class Daemon {
     if ("refusal" in first) return first.refusal;
     const preface = this.briefPreface(first.wave);
     if ("refusal" in preface) return preface.refusal;
+    const playbook = this.playbookRefusal(first.wave);
+    if (playbook !== null) return playbook;
     const missing = await this.releaseBranchMissing(first.wave);
     if (missing !== null) return { ok: false, error: missing };
     const text = p.wave_yaml as string;
@@ -6999,6 +7617,20 @@ export class Daemon {
   }
 
   /**
+   * RELEASE_PLAYBOOK_INVALID (with its path-qualified errors) when the wave's release playbook
+   * (SPEC §4.6.19) does not validate, or is configured and missing; null when it is fine or none.
+   */
+  private playbookRefusal(wave: Wave): Reply | null {
+    try {
+      wavePlaybook(wave);
+      return null;
+    } catch (e) {
+      if (e instanceof PlaybookError) return { ok: false, error: e.message, errors: e.errors };
+      throw e;
+    }
+  }
+
+  /**
    * RELEASE_BRANCH_MISSING when the wave's repo has its release branch neither locally nor as
    * `origin/<branch>` once it is fetched (a branch pushed from another clone counts), so a wave
    * whose every spawn would fail is refused before any task is admitted. Checked only where
@@ -7048,6 +7680,8 @@ export class Daemon {
     const log = this.waves.get(wave.wave);
     const existing = log?.record.state;
     if (log === undefined || existing == null) return { wave, owner };
+    if (existing.owner !== null && owner !== null && this.actsAs(owner, existing.owner))
+      return { wave, owner: existing.owner, existing: log };
     if (existing.owner !== null && existing.owner !== owner) {
       return refuse({
         ok: false,
@@ -7238,16 +7872,24 @@ export class Daemon {
         ok: false,
         error: `unknown decision '${id}'${wave !== undefined ? ` in wave '${wave}'` : ""}`,
       };
-    const refused = guardMutation(state, by, "resolve");
+    const refused = guardMutation(state, by, "resolve", this.bindings);
     if (refused !== null) return { ok: false, error: refused };
-    const trust = await this.trustAnswer(wave, id, p.answer);
-    if (trust !== null) return { ok: false, error: trust };
-    const r = await this.resolveNow(wave, id, {
+    let where: InboxWhere = { kind: "cli" };
+    if (p.where !== undefined) {
+      const w = typeof p.where === "string" ? parseWhereLabel(p.where) : parseWhere(p.where);
+      if (w === null || w.kind === "autopilot")
+        return { ok: false, error: `resolve: unknown --where '${String(p.where)}'` };
+      where = w;
+    }
+    const r = await this.answerDecision(wave, id, {
       answer: p.answer,
       by,
+      where,
       ...(typeof p.rationale === "string" ? { rationale: p.rationale } : {}),
     });
-    if (!r.already_resolved) await this.applyPlanAnswer(wave, r.decision, by);
+    if ("refused" in r) return { ok: false, error: r.refused };
+    // Resolving twice stays a no-op; the answer says where the first one was given.
+    const first = this.inbox.get(decisionItemId(wave, id))?.answered;
     return {
       ok: true,
       result: {
@@ -7255,6 +7897,9 @@ export class Daemon {
         decision_id: id,
         already_resolved: r.already_resolved,
         resolved: r.decision.resolved,
+        ...(r.already_resolved && first !== undefined
+          ? { already_answered: `already answered on ${whereLabel(first.where)}` }
+          : {}),
         ...(r.brief !== undefined ? { brief: r.brief } : {}),
       },
     };
@@ -7275,7 +7920,7 @@ export class Daemon {
       return { ok: false, error: `unknown task '${String(task)}' in wave '${w.wave}'` };
     if (typeof sha !== "string" || !/^[0-9a-f]{7,40}$/.test(sha))
       return { ok: false, error: "merged requires payload.sha (7 to 40 lowercase hex digits)" };
-    const refused = guardMutation(state, by, "merged");
+    const refused = guardMutation(state, by, "merged", this.bindings);
     if (refused !== null) return { ok: false, error: refused };
     const driver = this.pipelineFor(w.wave);
     const defer = (async (): Promise<Reply> => {
@@ -7315,6 +7960,32 @@ export class Daemon {
           error: `the PR head moved from ${r.head} to ${moved} while ${full} was verified; run \`volleyd merged\` again`,
         };
       return { ok: true, result: { wave: w.wave, task, sha: full, how: r.how } };
+    })();
+    return { ok: true, defer };
+  }
+
+  /**
+   * `merge` (SPEC §4.6.17): the owner merges one gated task now, through the merge queue's verb
+   * (`gh pr merge --squash --match-head-commit`, behind the fence), under `merge: manual` too.
+   * Checked here and again on the queue; the merge runs off it and is answered when it ends.
+   */
+  private mergeOp(p: Record<string, unknown>, by: string): HandlerResult {
+    const w = this.waveOf(p);
+    if ("error" in w) return { ok: false, error: w.error };
+    const state = w.log.record.state as WaveState;
+    const task = p.task;
+    const t = state.tasks.find((x) => x.id === task);
+    if (typeof task !== "string" || t === undefined)
+      return { ok: false, error: `unknown task '${String(task)}' in wave '${w.wave}'` };
+    const refused = guardMutation(state, by, "merge", this.bindings);
+    if (refused !== null) return { ok: false, error: refused };
+    if (t.stage !== "merge_ready") return { ok: false, error: `task '${task}' is not merge_ready` };
+    const driver = this.pipelineFor(w.wave);
+    const defer = (async (): Promise<Reply> => {
+      const r = await driver.mergeNow(task, by);
+      return r.ok
+        ? { ok: true, result: { wave: w.wave, task, merge_sha: r.merge_sha } }
+        : { ok: false, error: r.error };
     })();
     return { ok: true, defer };
   }
@@ -7375,18 +8046,25 @@ export class Daemon {
     const w = this.waveOf(p);
     if ("error" in w) return { ok: false, error: w.error };
     const owner = w.log.record.state?.owner ?? null;
-    const info = owner !== null && owner !== by ? await this.ownerLiveness(owner) : null;
+    // A coordinator name is measured by its newest binding, never by an agent id it left.
+    const bound = owner !== null ? this.bindings.get(owner)?.agent_id : undefined;
+    const agent = bound ?? owner;
+    const info = agent !== null && agent !== by ? await this.ownerLiveness(agent) : null;
     const verdict = claimVerdict({
       owner,
       by,
+      ...(bound !== undefined ? { bound } : {}),
       status: info?.status ?? null,
       registryAt: info?.registryAt ?? null,
-      heartbeatAt: owner !== null ? (this.lastSeen.get(owner) ?? this.startedAt) : null,
+      heartbeatAt: agent !== null ? (this.lastSeen.get(agent) ?? this.startedAt) : null,
       ownedSince: ownedSince(this.journalEvents(w.wave), this.now()),
       now: this.now(),
       claimAfterS: this.config.effective(w.wave).claim_after_s,
     });
     if (!verdict.ok) return { ok: false, error: `wave '${w.wave}': ${verdict.reason}` };
+    // The agent bound to a coordinator-name owner already acts for it: the name keeps the wave.
+    if (bound !== undefined && bound === by)
+      return { ok: true, result: { wave: w.wave, owner, previous: owner, why: verdict.why } };
     if (owner !== by) {
       await this.append(w.wave, {
         type: "owner_claimed",
@@ -7433,7 +8111,7 @@ export class Daemon {
     const w = this.waveOf(p);
     if ("error" in w) return { ok: false, error: w.error };
     const state = w.log.record.state as WaveState;
-    const refused = guardMutation(state, by, op);
+    const refused = guardMutation(state, by, op, this.bindings);
     if (refused !== null) return { ok: false, error: refused };
     const done = (changed: boolean): HandlerResult => ({
       ok: true,
@@ -7441,17 +8119,18 @@ export class Daemon {
     });
     if (op === "pause") {
       if (state.status === "paused") return done(false);
-      if (state.status !== "running")
+      // A releasing wave pauses too, and resumes releasing (SPEC §4.6.19).
+      if (state.status !== "running" && state.status !== "releasing")
         return {
           ok: false,
-          error: `wave '${w.wave}' is ${state.status}; only a running wave can be paused`,
+          error: `wave '${w.wave}' is ${state.status}; only a running or releasing wave can be paused`,
         };
       await this.append(w.wave, { type: "wave_paused", data: { by } });
       await this.tickNow();
       return done(true);
     }
     if (op === "resume") {
-      if (state.status === "running") return done(false);
+      if (state.status === "running" || state.status === "releasing") return done(false);
       if (this.killSwitch)
         return { ok: false, error: `${KILL_SWITCH_REASON}: \`volleyd resume --all\` first` };
       if (state.status === "complete") return { ok: false, error: `wave '${w.wave}' is complete` };
@@ -7742,7 +8421,7 @@ export class Daemon {
     const urgent = escapeOnly || p.urgent === true;
     if (!escapeOnly && (typeof p.text !== "string" || p.text.trim() === ""))
       return { ok: false, error: "steer requires a non-empty payload.text" };
-    const refused = guardMutation(w.log.record.state as WaveState, by, "steer");
+    const refused = guardMutation(w.log.record.state as WaveState, by, "steer", this.bindings);
     if (refused !== null) return { ok: false, error: refused };
     if (p.role !== undefined && (typeof p.role !== "string" || !isTaskRole(p.role)))
       return {
@@ -7830,7 +8509,7 @@ export class Daemon {
     const rec = log.record;
     const state = rec.state;
     if (state === null) return { ok: false, error: `wave '${wave.wave}' has no state` };
-    if (state.status === "complete" || state.status === "stopped") {
+    if (state.status === "complete" || state.status === "stopped" || state.status === "releasing") {
       return {
         ok: false,
         error: `wave '${wave.wave}' is ${state.status}; a new version applies only to a live wave`,

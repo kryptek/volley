@@ -59,6 +59,7 @@ interface RawWave {
   placement_prefer?: string[];
   placement_avoid?: string[];
   merge?: MergeMode;
+  playbook?: string;
 }
 
 /** Parse wave-file YAML, validate it (schema + structural rules) and normalise it. */
@@ -196,6 +197,7 @@ function normalise(w: RawWave): Wave {
     ...(w.placement_prefer !== undefined ? { placement_prefer: w.placement_prefer } : {}),
     ...(w.placement_avoid !== undefined ? { placement_avoid: w.placement_avoid } : {}),
     ...(w.merge !== undefined ? { merge: w.merge } : {}),
+    ...(w.playbook !== undefined ? { playbook: w.playbook } : {}),
   };
 }
 

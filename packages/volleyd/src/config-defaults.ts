@@ -56,7 +56,8 @@ export const CONFIG_DEFAULTS: Tunables = {
     down_decision_after_s: 300,
   },
   // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
-  fleet: { local_name: null },
+  // local_agents null: fallback once any hosts.<name> is configured, else always.
+  fleet: { local_name: null, local_agents: null, fallback: { max_agents: 3, per_machine: {} } },
   // --- Autopilot: decisions volleyd answers itself (SPEC §4.6.16); merging (SPEC §4.6.17) ---
   autopilot: {
     enabled: true,
@@ -65,10 +66,15 @@ export const CONFIG_DEFAULTS: Tunables = {
     nudge_max: 1,
     respawn_max: 1,
     rereview_max: 2,
+    ci_fixup_max: 2,
     question_max: 1,
     budget_raise_max: 2,
+    inbox_answered_ttl_s: 600,
     merge: "auto",
     merge_retry_max: 2,
+    delete_branch: false,
+    reconnect_grace_s: 900,
+    incident_wait_max_s: 14_400,
   },
 };
 
@@ -211,14 +217,22 @@ export const DAEMON_DEFAULTS = {
   ci_poll_ms: 60_000,
   /** How long a head may have no CI run at all before the pipeline asks the owner. */
   ci_none_grace_ms: 900_000,
+  /** Failed checks in a row after which the merge turn's holder passes the turn on (SPEC §4.6.17). */
+  merge_turn_check_failures_max: 3,
   /** Bound on the advance rounds one pipeline observation may trigger (a guard, never reached). */
   pipeline_max_advances: 8,
   /** A blocked agent's reason is clipped to this many characters in its decision's question. */
   blocked_reason_max_chars: 500,
   /** A terminal status (done / blocked / failed) nothing in the journal names for this long alarms. */
   terminal_unjournaled_alarm_ms: 60_000,
+  /** The tail of a red head's failed-run logs kept on its ci_failed decision (a CI fixup's directive). */
+  ci_log_max_chars: 4_000,
   /** Hard bound on each git / gh call of the pipeline; a timeout is "not verified yet". */
   pipeline_io_ms: 30_000,
+  /** Hard bound on one read of GitHub's status page (a red head's classification). */
+  status_page_timeout_ms: 5_000,
+  /** How long one read of GitHub's status page is reused. */
+  status_page_cache_ms: 60_000,
   /** How often the screen publisher checks which agents are due a capture. */
   screen_tick_ms: 1_000,
   /** Lines read per screen-tail capture (`cmux read-screen --lines`), before the chrome is cut. */
