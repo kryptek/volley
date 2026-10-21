@@ -497,7 +497,13 @@ evidence behind each choice below.
 
 > **Terms note.** Volley never collects, stores or intermediates Claude credentials. Sign-in
 > completes through Anthropic's own flow (`claude auth login`, in your browser); volleyd sees the
-> authorize URL and the plan label, never a code, a token or a Keychain item. Usage limits assume
+> authorize URL and the plan label, never a code, a token or a Keychain item. The one exception
+> (SPEC §4.6.11) is the usage probe of each machine's doctor (Usage metering, below): the machine
+> that holds a login reads that login's own token, in memory, for one read-only request to
+> Claude's usage endpoint, and publishes only percentages and reset times. The token never
+> leaves that process: it is never refreshed, written, logged or journaled, and it never crosses
+> ssh or the broker. Claude Code's statusLine has no per-model weekly window, and balancing
+> needs one. Usage limits assume
 > individual use: several profiles are for an individual's own accounts, not for pooling or
 > sharing one subscription among people.
 
@@ -619,8 +625,9 @@ profile's first agent does not stop at onboarding (read → set that key → tem
 rename, under Claude Code's own `.claude.json.lock/`; a lock older than
 `claude_json_lock_stale_ms` was left by a crashed process and is taken over). MCP entries can carry third-party secrets (`env`,
 `headers`), so volleyd never publishes or journals them (`claude_profile_synced` carries counts).
-`.credentials.json` (Claude Code's fallback when the Keychain is locked) is never touched;
-`test/no-credentials.test.ts` keeps every credential location out of `src/`.
+`.credentials.json` (Claude Code's fallback when the Keychain is locked) is never touched by
+volleyd; `test/no-credentials.test.ts` keeps every credential location out of `src/`, and out of
+the machine doctor except its usage probe's two read-only lookups.
 
 **Moving an agent.** `agent_move_account { agent, acct }` journals `agent_account_moved
 { agent_id, role, from, to, by }` first, cancels the agent (mailbox `cancel` + Escape) and waits
@@ -664,6 +671,26 @@ one is refused and the decision stays open) journals `wave_account_moved { from,
 decision_id }`: the wave's new agents that would have started under `from` start under `to`,
 and running agents finish where they are. The weekly window is informational. The same data
 resolves `most_headroom`.
+
+**The usage probe.** The statusLine reports the 5-hour and weekly windows only, and only while
+an agent runs on the account; the per-model weekly windows (Fable's among them) come only from
+the usage endpoint Claude Code's `/usage` calls. So each machine's doctor probes the logins it
+holds: its default profile and each profile in its profiles root, read and called on that
+machine, numbers only out (volley-cli's README, `volley peer doctor`, has what is read and
+sent). The results ride in the machine record's `claude_logins`: every heartbeat of a paired
+machine's `volley peer run` (its doctor runs every 10 min), and the supervisor's own record (its
+`volley peer doctor --json` runs every 30 s, and the probe's on-disk memo holds it to one request
+per login per 5 min, with a backoff after 429 or 5xx). Whenever the daemon folds a record (its
+own in `publishOwnRecord`, a peer's as it arrives) it maps each login to an account record:
+`default` is `primary` on its own machine and `primary@<name>` on a peer, and a profile `<id>`
+is `<id>` (or `<id>@<name>`) when the registry has it on that machine (`accountForLogin`); a
+login the registry does not know there is skipped. `foldProbe` then takes the 5-hour and weekly
+windows when the reading is fresher than the newest statusLine sample, and the other way round.
+It also takes each family's `model_weekly` window (kept until a newer reading has one) and
+`probe { machine, state, attempted_at, read_at? }`, the newest attempt, a failed one included.
+The account record carries `model_weekly` once a family is known and `probe` once a probe has
+reported. `sampled_at` is the newest of sample and reading, and `sampled_by` appears only when
+a statusLine sample set it. The book keeps all of it on disk across restarts.
 
 ---
 

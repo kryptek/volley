@@ -49,6 +49,20 @@
       { "id": "volley-version", "ok": true, "severity": "block", "detail": "volley 0.4.0 matches the supervisor" },
       { "id": "disk", "ok": false, "severity": "warn", "detail": "37% free on /srv/worktrees (88 GB)" }
     ],
+    "claude_logins": [
+      {
+        "profile": "default",
+        "state": "ok",
+        "attempted_at": "2026-10-19T09:00:00.000Z",
+        "reading": {
+          "read_at": "2026-10-19T09:00:00.000Z",
+          "five_hour": { "pct": 37, "resets_at": "2026-10-19T12:00:00.000Z" },
+          "weekly": { "pct": 56, "resets_at": "2026-10-24T00:00:00.000Z" },
+          "model_weekly": { "fable": { "pct": 12, "resets_at": "2026-10-24T00:00:00.000Z" } }
+        }
+      },
+      { "profile": "work", "state": "expired", "attempted_at": "2026-10-19T09:00:00.000Z" }
+    ],
     "doctor_at": "2026-10-19T09:00:00.000Z",
     "last_seen": "2026-10-19T09:30:00.000Z"
   }

@@ -17,6 +17,12 @@ import { PRIMARY_ACCOUNT } from "./profiles";
  * the same name: its samples fold into `<acct>@<host>`, a record of its own that opens no
  * decision (a wave move cannot reach a remote host's agents). The book's account windows are kept
  * on disk (`bookState` / `restoreBook`), so a restart forgets none.
+ *
+ * Each machine's usage probe (volley-cli's `usage-probe.ts`, run by its doctor) reads every login
+ * it holds from the usage endpoint and reports numbers only in its machine record's
+ * `claude_logins`. `foldProbe` folds one login into its account: the 5-hour and weekly windows
+ * against the statusLine samples (the freshest wins, both ways), the per-model weekly windows
+ * (which only the probe knows), and `probe`, the newest attempt.
  */
 
 export interface UsageWindow {
@@ -89,6 +95,41 @@ interface SeenWindow extends UsageWindow {
   at: string;
 }
 
+/** The model families a weekly window can be scoped to (context-window.ts's `FAMILY`). */
+export const MODEL_FAMILIES = ["fable", "opus", "sonnet", "haiku"] as const;
+export type ModelFamily = (typeof MODEL_FAMILIES)[number];
+
+export type ProbeState = "ok" | "expired" | "no_credential" | "rate_limited" | "rejected" | "error";
+const PROBE_STATES: readonly string[] = [
+  "ok",
+  "expired",
+  "no_credential",
+  "rate_limited",
+  "rejected",
+  "error",
+];
+
+/** One `claude_logins[]` entry of a machine record (machine.schema.json). */
+export interface ProbeLogin {
+  profile: string;
+  state: ProbeState;
+  attempted_at: string;
+  reading?: {
+    read_at: string;
+    five_hour?: UsageWindow;
+    weekly?: UsageWindow;
+    model_weekly?: Partial<Record<ModelFamily, UsageWindow>>;
+  };
+}
+
+/** An account's newest probe attempt: where, how it went, and when it last read. */
+export interface ProbeSeen {
+  machine: string;
+  state: ProbeState;
+  attempted_at: string;
+  read_at?: string;
+}
+
 /**
  * What the daemon knows: which account and wave each agent's latest sample was on, and each
  * account's windows (kept when its agents are gone: the limits are the account's).
@@ -100,8 +141,12 @@ export interface UsageBook {
     {
       five_hour: SeenWindow | null;
       weekly: SeenWindow | null;
+      /** Per-model weekly windows: only a usage probe reports them. */
+      model_weekly?: Partial<Record<ModelFamily, SeenWindow>>;
+      probe?: ProbeSeen;
       sampled_at: string;
-      sampled_by: string;
+      /** The agent of the newest statusLine sample; absent while only probes reported. */
+      sampled_by?: string;
     }
   >;
 }
@@ -128,10 +173,60 @@ export function foldUsage(
     accounts: {
       ...book.accounts,
       [s.account]: {
+        ...prev,
         five_hour: pickWindow(prev?.five_hour ?? null, s.payload.rate_limits.five_hour, at),
         weekly: pickWindow(prev?.weekly ?? null, s.payload.rate_limits.weekly, at),
         sampled_at: latest ? at : (prev?.sampled_at ?? at),
         sampled_by: latest ? s.agent : (prev?.sampled_by ?? s.agent),
+      },
+    },
+  };
+}
+
+/**
+ * Fold one login of a machine's usage probe into `account`'s record: each window of its reading
+ * against what the book has (the freshest wins), and `probe`, the newest attempt (a failed one
+ * included). `sampled_at` is the newest of sample and reading (the attempt, while there is
+ * neither); `sampled_by` stays a statusLine sample's.
+ */
+export function foldProbe(
+  book: UsageBook,
+  p: { account: string; machine: string; login: ProbeLogin },
+): UsageBook {
+  const prev = book.accounts[p.account];
+  const r = p.login.reading;
+  const at = r?.read_at ?? p.login.attempted_at;
+  const families: Partial<Record<ModelFamily, SeenWindow>> = { ...prev?.model_weekly };
+  for (const f of MODEL_FAMILIES) {
+    const w = pickWindow(families[f] ?? null, r?.model_weekly?.[f], at);
+    if (w !== null) families[f] = w;
+  }
+  const probe: ProbeSeen =
+    prev?.probe !== undefined && newer(prev.probe.attempted_at, p.login.attempted_at)
+      ? prev.probe
+      : {
+          machine: p.machine,
+          state: p.login.state,
+          attempted_at: p.login.attempted_at,
+          ...(r !== undefined ? { read_at: r.read_at } : {}),
+        };
+  const sampledAt =
+    prev === undefined
+      ? at
+      : r !== undefined && newer(r.read_at, prev.sampled_at)
+        ? r.read_at
+        : prev.sampled_at;
+  return {
+    ...book,
+    accounts: {
+      ...book.accounts,
+      [p.account]: {
+        five_hour: pickWindow(prev?.five_hour ?? null, r?.five_hour, at),
+        weekly: pickWindow(prev?.weekly ?? null, r?.weekly, at),
+        ...(Object.keys(families).length > 0 ? { model_weekly: families } : {}),
+        probe,
+        sampled_at: sampledAt,
+        ...(prev?.sampled_by !== undefined ? { sampled_by: prev.sampled_by } : {}),
       },
     },
   };
@@ -167,6 +262,19 @@ function restoreWindow(v: unknown): SeenWindow | null | undefined {
   return { pct: w.pct as number, resets_at: w.resets_at as string | null, at: w.at as string };
 }
 
+function restoreProbe(v: unknown): ProbeSeen | undefined {
+  const p = obj(v);
+  if (p === null || typeof p.machine !== "string" || !PROBE_STATES.includes(p.state as string))
+    return;
+  if (!isDate(p.attempted_at) || !(p.read_at === undefined || isDate(p.read_at))) return;
+  return {
+    machine: p.machine,
+    state: p.state as ProbeState,
+    attempted_at: p.attempted_at as string,
+    ...(p.read_at !== undefined ? { read_at: p.read_at as string } : {}),
+  };
+}
+
 /** A book from `bookState` text, no agents; an unreadable file or entry is left out. */
 export function restoreBook(text: string): UsageBook {
   let raw: unknown;
@@ -182,12 +290,21 @@ export function restoreBook(text: string): UsageBook {
     const five = restoreWindow(a.five_hour);
     const weekly = restoreWindow(a.weekly);
     if (five === undefined || weekly === undefined) continue;
-    if (!isDate(a.sampled_at) || typeof a.sampled_by !== "string") continue;
+    if (!isDate(a.sampled_at) || !(a.sampled_by === undefined || typeof a.sampled_by === "string"))
+      continue;
+    const families: Partial<Record<ModelFamily, SeenWindow>> = {};
+    for (const f of MODEL_FAMILIES) {
+      const w = restoreWindow(obj(a.model_weekly)?.[f]);
+      if (w !== undefined && w !== null) families[f] = w;
+    }
+    const probe = restoreProbe(a.probe);
     accounts[id] = {
       five_hour: five,
       weekly,
+      ...(Object.keys(families).length > 0 ? { model_weekly: families } : {}),
+      ...(probe !== undefined ? { probe } : {}),
       sampled_at: a.sampled_at as string,
-      sampled_by: a.sampled_by,
+      ...(typeof a.sampled_by === "string" ? { sampled_by: a.sampled_by } : {}),
     };
   }
   return { agents: {}, accounts };
@@ -205,10 +322,12 @@ export interface AccountUsage {
   account: string;
   five_hour: UsageWindow | null;
   weekly: UsageWindow | null;
+  model_weekly?: Partial<Record<ModelFamily, UsageWindow>>;
+  probe?: ProbeSeen;
   agents: string[];
   waves: string[];
   sampled_at: string;
-  sampled_by: string;
+  sampled_by?: string;
 }
 
 const bare = (w: SeenWindow | null): UsageWindow | null =>
@@ -219,14 +338,17 @@ export function accountRecords(book: UsageBook): Record<string, AccountUsage> {
   const out: Record<string, AccountUsage> = {};
   for (const [account, a] of Object.entries(book.accounts)) {
     const mine = Object.entries(book.agents).filter(([, x]) => x.account === account);
+    const families = Object.entries(a.model_weekly ?? {}).map(([f, w]) => [f, bare(w)] as const);
     out[account] = {
       account,
       five_hour: bare(a.five_hour),
       weekly: bare(a.weekly),
+      ...(families.length > 0 ? { model_weekly: Object.fromEntries(families) } : {}),
+      ...(a.probe !== undefined ? { probe: a.probe } : {}),
       agents: mine.map(([id]) => id).sort(),
       waves: [...new Set(mine.flatMap(([, x]) => (x.wave !== null ? [x.wave] : [])))].sort(),
       sampled_at: a.sampled_at,
-      sampled_by: a.sampled_by,
+      ...(a.sampled_by !== undefined ? { sampled_by: a.sampled_by } : {}),
     };
   }
   return out;

@@ -1,3 +1,4 @@
+import type { ProbeLogin } from "./claude/usage";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { validator } from "./schemas";
 
@@ -63,6 +64,8 @@ export interface MachineRecord {
     fetched_at?: string | null;
   };
   checks?: MachineCheck[];
+  /** Each login's usage probe reading (SPEC §4.6.12): numbers and states only. */
+  claude_logins?: ProbeLogin[];
   doctor_at?: string;
   last_seen: string;
 }
@@ -219,6 +222,7 @@ export interface DoctorReport {
   repo?: MachineRecord["repo"];
   memory?: MachineRecord["memory"];
   disk?: MachineRecord["disk"];
+  claude_logins?: ProbeLogin[];
   doctor_at: string;
 }
 
@@ -250,6 +254,7 @@ export function doctorFields(r: DoctorReport): Partial<MachineRecord> {
     ...pick("repo"),
     ...pick("memory"),
     ...pick("disk"),
+    ...(Array.isArray(r.claude_logins) ? { claude_logins: r.claude_logins.slice(0, 16) } : {}),
     doctor_at: r.doctor_at,
   };
 }
