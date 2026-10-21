@@ -30,7 +30,9 @@ export type WaveStatus =
   | "awaiting_decision"
   | "releasing"
   | "complete"
-  | "stopped";
+  | "stopped"
+  // Retired (archive.ts): published once, then the retained state is cleared.
+  | "archived";
 
 /** One pipeline entry as written: a stage, or a group of stages that run in parallel. */
 export type PipelineStep = PipelineStage | PipelineStage[];
@@ -141,6 +143,11 @@ export interface Tunables {
   fleet: FleetConfig;
   /** Decisions volleyd answers itself from its policy table (SPEC §4.6.16), and autopilot merging (SPEC §4.6.17). */
   autopilot: AutopilotConfig;
+  // --- Archiving (SPEC §4.6.20) ---
+  /** Hours after its `wave_stopped` / `wave_complete` an ended wave is archived; 0: never. */
+  archive_ended_after_h: number;
+  /** A complete wave is archived as soon as its `wave_complete` decision is answered. */
+  archive_on_ack: boolean;
 }
 
 /** Who merges a gated PR: volleyd itself (`auto`) or a human (`manual`). */
@@ -432,6 +439,8 @@ export interface WaveState {
   merge_queue?: MergeQueueEntry[] | undefined;
   /** The release train (SPEC §4.6.19), from `release_started` on; absent for a wave without one. */
   release?: ReleaseState;
+  /** When, by whom and why the wave was archived (`volleyd status --all` only). */
+  archived?: { at: string; by: string; reason: string };
   updated_at: string;
 }
 
@@ -487,6 +496,8 @@ export const WAVE_EVENT_TYPES = [
   "wave_resumed",
   "wave_stopped",
   "wave_complete",
+  // An ended wave retired (archive.ts): its open decisions closed, out of the live set.
+  "wave_archived",
   "owner_claimed",
   "owner_reconnected",
   "task_queued",

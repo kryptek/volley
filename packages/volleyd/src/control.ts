@@ -7,6 +7,7 @@ import { randomSuffix } from "volley-mcp/util";
 import { authFields, controlAuth } from "./broker-auth";
 import { type TimerHandle, systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
+import { DAEMON_AGENT_ID } from "./daemon-id";
 import type { DecisionPayload } from "./decisions";
 import { EXIT, type ExitCode, type IO } from "./io";
 import type { PlanDiff } from "./plan-diff";
@@ -19,10 +20,12 @@ import type { PathError } from "./schemas";
  * envelope carrying the same `correlation_id` and `payload: { text, acked_type, op, ok, ... }`.
  */
 
-/** The daemon's literal agent id — it is a supervisor, not an MCP session, so no suffix. */
-export const DAEMON_AGENT_ID = "volleyd";
+// Lives in a constants-only module so pure modules can name the daemon without loading mqtt.
+export { DAEMON_AGENT_ID };
 
 export const CONFIG_TOPIC = "volley/_waves/_config";
+/** The retained index of archived waves (SPEC §4.6.20); `_` keeps it out of the wave id space. */
+export const ARCHIVE_TOPIC = "volley/_waves/_archive";
 export const waveStateTopic = (wave: string) => `volley/_waves/${wave}/state`;
 export const waveEventsTopic = (wave: string) => `volley/_waves/${wave}/events`;
 export const ADMISSION_TOPIC = "volley/_system/admission";
@@ -48,6 +51,8 @@ export type ControlOp =
   | "pause"
   | "resume"
   | "stop"
+  // Retire an ended wave (archive.ts); also an admin op on the account-op topic.
+  | "archive"
   | "steer"
   // The owner's merge outside GitHub's merge button, verified (pipeline.ts verifyMerge).
   | "merged"

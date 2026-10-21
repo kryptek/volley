@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { authOpsTopic, authReplyTopic } from "../src/accounts";
+import { noOwnerWarning } from "../src/commands/run";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { CONFIG_TOPIC, ControlClient, waveEventsTopic, waveStateTopic } from "../src/control";
 import { Daemon, daemonClientId } from "../src/daemon";
@@ -53,7 +54,8 @@ describe("volleyd daemon + control channel", () => {
   it("run submits a wave (no spawning; tasks stay queued) and status --json returns the retained state", async () => {
     await t.start();
     const run = await runCli(["run", EXAMPLE], t.env);
-    expect(run.stderr).toBe("");
+    // No owner (no --owner, VOLLEY_AGENT_ID or registered session): the one warning.
+    expect(run.stderr).toBe(`warning: ${noOwnerWarning(WAVE)}\n`);
     expect(run.exitCode).toBe(0);
     expect(run.stdout).toContain(`submitted wave ${WAVE} (4 tasks)`);
 

@@ -17,6 +17,7 @@
             "wave_resumed",
             "wave_stopped",
             "wave_complete",
+            "wave_archived",
             "owner_claimed",
             "owner_reconnected",
             "task_queued",
@@ -206,6 +207,35 @@
                       "previous_agent_id": {
                         "type": "string",
                         "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "wave_archived" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["by", "reason", "closed_decisions"],
+                    "properties": {
+                      "by": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Who archived the wave: the owner or caller, an admin, or the supervisor (auto-archive)."
+                      },
+                      "reason": { "type": "string" },
+                      "closed_decisions": {
+                        "type": "array",
+                        "items": { "$ref": "wave-state.schema.json#/$defs/decisionId" },
+                        "description": "The decisions the archive closed with answer archived (each journaled before as decision_resolved)."
                       }
                     }
                   }

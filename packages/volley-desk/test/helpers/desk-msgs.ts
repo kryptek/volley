@@ -99,6 +99,38 @@ export const waveMsg = (state: WaveStatePayload, at = NOW): DeskMessage => ({
   receivedAt: at,
 });
 
+/** The retained `volley/_waves/_archive` index (null: cleared). */
+export const archiveMsg = (waves: string[] | null, at = NOW): DeskMessage => ({
+  topic: "volley/_waves/_archive",
+  envelope:
+    waves === null
+      ? null
+      : env(
+          "volleyd",
+          "_waves/_archive",
+          "archive",
+          {
+            archived: waves.map((wave) => ({
+              wave,
+              status: "stopped",
+              archived_at: new Date(at).toISOString(),
+              by: "volleyd",
+              reason: "volleyd archive",
+            })),
+            updated_at: new Date(at).toISOString(),
+          },
+          at,
+        ),
+  receivedAt: at,
+});
+
+/** A cleared retained topic (zero-length payload). */
+export const cleared = (topic: string, at = NOW): DeskMessage => ({
+  topic,
+  envelope: null,
+  receivedAt: at,
+});
+
 export const waveView = (state: WaveStatePayload): WaveView => ({
   id: state.wave,
   state,

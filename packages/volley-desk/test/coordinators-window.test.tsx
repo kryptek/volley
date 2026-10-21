@@ -298,6 +298,27 @@ describe("CoordinatorsWindow status chips and the Ended group", () => {
     expect(p.onDismiss).toHaveBeenCalledWith("old-b");
   });
 
+  it("an archived wave (its one transient publish) is ended, with an archived chip", () => {
+    const w = wave("old-c", "coord-9");
+    setup({
+      waves: [WAVES[0] as WaveView, { ...w, state: w.state && { ...w.state, status: "archived" } }],
+    });
+    expect(screen.queryByRole("listitem", { name: "old-c" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Ended · 1" }));
+    expect(within(row("old-c")).getByText("archived")).toHaveClass("st-chip--archived");
+  });
+
+  it("counts archived waves from the index: `N archived (volleyd archive)`", () => {
+    setup({ archived: 3 });
+    expect(screen.getByText(/3 archived/)).toHaveTextContent("3 archived (volleyd archive)");
+    expect(screen.getByText("volleyd archive").tagName).toBe("CODE");
+  });
+
+  it("says nothing about archived waves when none are", () => {
+    setup({ archived: 0 });
+    expect(screen.queryByText(/archived \(/)).toBeNull();
+  });
+
   it("says how many waves are dismissed and brings them back", () => {
     const onRestore = vi.fn();
     setup({ dismissed: { count: 2, onRestore } });

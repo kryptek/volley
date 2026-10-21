@@ -60,6 +60,7 @@ export function dagWidthFor(maxWidth: number): number {
 const ENDED_CHIP: Partial<Record<WaveStatePayload["status"], string>> = {
   stopped: "Stopped",
   complete: "Complete",
+  archived: "Archived",
 };
 
 export interface WaveWindowProps {

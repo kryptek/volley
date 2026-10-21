@@ -530,6 +530,18 @@ describe("fleet.local_agents and lease_pools.<pool>.per_machine_overrides (SPEC 
     expect(c.effective().lease_pools.js?.per_machine_overrides).toEqual({ laptop: 3 });
   });
 
+  it("effectiveWith (an archived wave's config) resolves like effective(wave) does", () => {
+    writeFileSync(
+      join(home, "config.yaml"),
+      "lease_pools:\n  js:\n    capacity: 4\n    per_machine_overrides: { local: 2 }\n",
+    );
+    const c = openAs("laptop");
+    const eff = c.effectiveWith({ admission: { container_max: 7 } });
+    expect(eff.lease_pools.js?.per_machine_overrides).toEqual({ laptop: 2 });
+    expect(eff.fleet.local_agents).toBe("always");
+    expect(eff.admission.container_max).toBe(7);
+  });
+
   it("local_agents null resolves to always with no hosts and fallback once a host exists", () => {
     const c = openAs("laptop");
     expect(c.effective().fleet.local_agents).toBe("always");

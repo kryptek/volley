@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/wave-state.schema.json",
   "title": "Volley Wave State",
-  "description": "Retained full wave snapshot published by a supervisor to volley/_waves/<wave>/state. See spec section 4.6.1.",
+  "description": "Retained full wave snapshot published by a supervisor to volley/_waves/<wave>/state. An archived wave (status archived) is published once and then its retained state is cleared. See spec sections 4.6.1 and 4.6.20.",
   "allOf": [
     { "$ref": "envelope.schema.json" },
     {
@@ -44,7 +44,8 @@
                 "awaiting_decision",
                 "releasing",
                 "complete",
-                "stopped"
+                "stopped",
+                "archived"
               ],
               "description": "releasing: every task is settled and the release train (spec section 4.6.19) runs; complete once the owner answers release_go go (or, without a train, once every task is settled)."
             },
@@ -109,6 +110,17 @@
                 }
               }
             },
+            "archived": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["at", "by", "reason"],
+              "properties": {
+                "at": { "type": "string", "format": "date-time" },
+                "by": { "type": "string", "minLength": 1 },
+                "reason": { "type": "string" }
+              },
+              "description": "When, by whom and why the wave was archived (spec section 4.6.20). Only on an archived wave; a supervisor's status listing carries it, the retained topic need not."
+            },
             "merge_queue": {
               "type": "array",
               "description": "The merge queue (spec section 4.6.17), in merge order: the wave's gated tasks the supervisor merges itself, one per release branch at a time. merging: its merge is running; updating: it is being brought up to date with the release branch before its merge; queued: waiting for its turn; refused: GitHub refused its last merge, and it goes after the tasks still queued. since: when the task entered the queue. Absent while the queue is empty.",
@@ -151,6 +163,14 @@
         }
       },
       "required": ["channel", "type", "payload"]
+    },
+    {
+      "if": {
+        "properties": { "payload": { "properties": { "status": { "const": "archived" } } } }
+      },
+      "then": {
+        "properties": { "payload": { "properties": { "open_decisions": { "maxItems": 0 } } } }
+      }
     }
   ],
   "$defs": {

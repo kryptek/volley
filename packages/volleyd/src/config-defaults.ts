@@ -76,6 +76,9 @@ export const CONFIG_DEFAULTS: Tunables = {
     reconnect_grace_s: 900,
     incident_wait_max_s: 14_400,
   },
+  // --- Archiving (SPEC §4.6.20) ---
+  archive_ended_after_h: 24,
+  archive_on_ack: true,
 };
 
 /**
@@ -131,6 +134,8 @@ export const DAEMON_DEFAULTS = {
   mailbox_idle_ms: 30_000,
   /** Recently answered control requests remembered for QoS 1 redelivery dedupe. */
   dedupe_max: 256,
+  /** Entries the retained `volley/_waves/_archive` index keeps (newest first). */
+  archive_index_max: 200,
   /** After an exec timeout's SIGTERM, wait this long before SIGKILL. */
   exec_kill_grace_ms: 5_000,
   /** Cap on captured stdout and stderr per exec (each), in bytes. */

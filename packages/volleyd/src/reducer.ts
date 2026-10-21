@@ -2,7 +2,7 @@ import { type AutopilotRecord, emptyAutopilot, foldAutoResolved } from "./autopi
 import { queueOf } from "./autopilot/merge-queue";
 import { stepRelease } from "./autopilot/playbook";
 import type { Budget, EscalateWhy } from "./autopilot/policy";
-import { type DecisionRecord, parksTask } from "./decisions";
+import { ARCHIVED_ANSWER, type DecisionRecord, parksTask } from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
 import { AUTO_HOST } from "./placement";
@@ -72,6 +72,10 @@ export interface WaveRecord {
   owner_agent?: string | null;
   /** What autopilot answered and escalated (SPEC §4.6.16); absent in older snapshots. */
   autopilot?: AutopilotRecord;
+  /** When the wave last ended (`wave_stopped` / `wave_complete`); null after a resume. */
+  ended_at?: string | null;
+  /** Set by `wave_archived` (archive.ts): when, by whom, why, and how the wave had ended. */
+  archived?: { at: string; by: string; reason: string; from: "stopped" | "complete" };
 }
 
 /** A steer journaled while its task had no live agent: delivered to the next one to register. */
@@ -393,7 +397,11 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
           return x !== undefined && x.task === d.task && parksTask(x);
         });
         const parked = task !== undefined && task.stage === "awaiting_decision";
-        if (task !== undefined && parked && parksTask(d) && !stillOpen) {
+        // An archive's close (SPEC §4.6.20) leaves the task parked: its wave has ended for good.
+        const archiveClose =
+          d.resolved.answer === ARCHIVED_ANSWER &&
+          (state.status === "stopped" || state.status === "complete");
+        if (task !== undefined && parked && parksTask(d) && !stillOpen && !archiveClose) {
           task.stage = d.resume_stage ?? "queued";
         }
       }
@@ -475,6 +483,15 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     case "owner_reconnected":
       next.owner_agent = ev.data.agent_id as string;
       break;
+    case "wave_archived":
+      next.archived = {
+        at: ev.at,
+        by: String(ev.data.by),
+        reason: String(ev.data.reason ?? ""),
+        from: state.status === "complete" ? "complete" : "stopped",
+      };
+      state.status = "archived";
+      break;
     default: {
       const status = WAVE_STATUS[ev.type];
       // A releasing wave that was paused resumes releasing (SPEC §4.6.19).
@@ -483,6 +500,8 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
           status === "running" && state.release !== undefined && ev.type === "wave_resumed"
             ? "releasing"
             : status;
+      if (ev.type === "wave_stopped" || ev.type === "wave_complete") next.ended_at = ev.at;
+      if (ev.type === "wave_resumed") next.ended_at = null;
     }
   }
   if (state.release !== undefined || ev.type === "release_started") {
