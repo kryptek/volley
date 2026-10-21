@@ -256,6 +256,12 @@ export const DAEMON_DEFAULTS = {
   ps_timeout_ms: 10_000,
   /** Hard bound on one screen read; a read still pending then counts as failed (and slow). */
   screen_read_timeout_ms: 5_000,
+  /**
+   * A multi-select picker answered from the inbox: screen reads (this many, this far apart) that
+   * wait for the review screen its Submit opens (autopilot/carry.ts).
+   */
+  picker_review_reads: 5,
+  picker_review_gap_ms: 200,
   /** Consecutive failed captures that back the agent off and mark its screen stale. */
   screen_max_failures: 3,
   /** Capture interval while an agent is backed off. */

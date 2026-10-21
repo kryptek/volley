@@ -112,7 +112,7 @@ export interface RemoteHost extends Host {
 /** The fence tokens and bound a `run` may carry. */
 export type RemoteRunOptions = Pick<
   ExecOptions,
-  "consent" | "timeoutMs" | "launch" | "modelSwitch" | "signin"
+  "consent" | "timeoutMs" | "launch" | "modelSwitch" | "signin" | "picker" | "handoff"
 >;
 
 /** ssh's own failure (unreachable, auth, host key, timeout), as opposed to the remote command's. */
@@ -190,6 +190,8 @@ export class SshTmuxHost implements RemoteHost {
         ...(opts.consent !== undefined ? { consent: opts.consent } : {}),
         ...(opts.launch !== undefined ? { launch: opts.launch } : {}),
         ...(opts.modelSwitch !== undefined ? { modelSwitch: opts.modelSwitch } : {}),
+        ...(opts.picker !== undefined ? { picker: opts.picker } : {}),
+        ...(opts.handoff !== undefined ? { handoff: opts.handoff } : {}),
         ...(opts.signin !== undefined ? { signin: opts.signin } : {}),
       },
     );
@@ -453,8 +455,8 @@ export class SshTmuxHost implements RemoteHost {
     return rows.slice(-lines).join("\n");
   }
 
-  async sendKeys(workspace: string, key: string): Promise<void> {
-    await this.run([{ argv: ["tmux", "send-keys", "-t", pane(workspace), key] }]);
+  async sendKeys(workspace: string, key: string, tokens: TypedTextTokens = {}): Promise<void> {
+    await this.run([{ argv: ["tmux", "send-keys", "-t", pane(workspace), key] }], tokens);
   }
 
   async sendText(workspace: string, text: string, tokens: TypedTextTokens = {}): Promise<void> {

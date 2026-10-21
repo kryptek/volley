@@ -128,13 +128,20 @@ export interface RegistryEntry {
   started_at?: string;
   /** The stable coordinator name the session acts as (`VOLLEY_COORDINATOR`, SPEC §6.2). */
   coordinator?: string;
+  /** The cmux workspace ref the session's SessionStart hook reported. */
+  workspace?: string;
 }
 
 /** Parse one retained `volley/_system/registry/<id>` message; null if it is not an entry. */
 export function parseRegistryEntry(raw: string): RegistryEntry | null {
   const env = parseEnvelope(raw);
   if (env === null) return null;
-  const p = (env.payload ?? {}) as { cwd?: unknown; started_at?: unknown; coordinator?: unknown };
+  const p = (env.payload ?? {}) as {
+    cwd?: unknown;
+    started_at?: unknown;
+    coordinator?: unknown;
+    workspace?: unknown;
+  };
   return {
     agent_id: env.agent_id,
     parent_id: env.parent_id,
@@ -144,6 +151,7 @@ export function parseRegistryEntry(raw: string): RegistryEntry | null {
     ...(typeof p.coordinator === "string" && isValidAgentId(p.coordinator)
       ? { coordinator: p.coordinator }
       : {}),
+    ...(typeof p.workspace === "string" && p.workspace !== "" ? { workspace: p.workspace } : {}),
   };
 }
 

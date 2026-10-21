@@ -144,8 +144,8 @@ export class LocalCmuxHost implements Host {
     return r !== null && r.code === 0 && !r.timedOut ? r.stdout : null;
   }
 
-  async sendKeys(workspace: string, key: string): Promise<void> {
-    await this.cmux(["cmux", "send-key", "--workspace", workspace, key]);
+  async sendKeys(workspace: string, key: string, tokens: TypedTextTokens = {}): Promise<void> {
+    await this.cmux(["cmux", "send-key", "--workspace", workspace, key], tokens);
   }
 
   async sendText(workspace: string, text: string, tokens: TypedTextTokens = {}): Promise<void> {

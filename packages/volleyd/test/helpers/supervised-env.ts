@@ -90,6 +90,8 @@ export interface SupervisedEnvOptions {
   waveExtra?: string;
   /** How launches end (fake-host.ts `launchOutcome`; default ok). */
   launchOutcome?: FakeHost["launchOutcome"];
+  /** The wave's owner (`volleyd run --owner`); none when unset. */
+  owner?: string;
 }
 
 export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<SupervisedEnv> {
@@ -186,7 +188,10 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
     waveFile,
     `wave: w1\n${o.namespace !== undefined ? `namespace: ${o.namespace}\n` : ""}repo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: ${o.pipeline ?? "[implement]"}\n${o.merge === null ? "" : `merge: ${o.merge ?? "manual"}\n`}${o.waveExtra !== undefined ? `${o.waveExtra}\n` : ""}tasks:\n  T1: { issue: 42 }\n${(o.tasks ?? []).map((t) => `  ${t}\n`).join("")}config: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
   );
-  const r = await runCli(["run", waveFile], env.env);
+  const r = await runCli(
+    ["run", waveFile, ...(o.owner !== undefined ? ["--owner", o.owner] : [])],
+    env.env,
+  );
   if (r.exitCode !== 0) throw new Error(`run failed: ${r.stderr}${r.stdout}`);
 
   const journal = (wave = "w1"): JournalEvent[] =>
