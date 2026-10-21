@@ -453,7 +453,7 @@ function failStage(
   ];
 }
 
-/** Steer once (`text`), then fail the stage (`reason`). */
+/** Steer once (`text`), then retire the agent as failed and fail the stage (`reason`). */
 function steerOrFail(
   v: ReleaseView,
   stage: string,
@@ -463,7 +463,10 @@ function steerOrFail(
 ): ReleaseAction[] {
   if ((v.steers[run.agent_id] ?? 0) === 0)
     return [{ kind: "steer", stage, agent_id: run.agent_id, text }];
-  return [{ kind: "retire", agent_id: run.agent_id }, ...failStage(v, stage, run, reason)];
+  return [
+    { kind: "retire", agent_id: run.agent_id, status: "failed" },
+    ...failStage(v, stage, run, reason),
+  ];
 }
 
 /** The stage `agent_id` runs (its current attempt), if any. */

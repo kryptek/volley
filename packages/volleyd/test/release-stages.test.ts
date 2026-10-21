@@ -286,7 +286,7 @@ describe("nextRelease (SPEC §4.6.19)", () => {
     };
     expect(kinds(t.step(done))).toEqual(["steer bump"]);
     expect(kinds(t.step(done))).toEqual([
-      "retire w1-release-bump-1",
+      "retire w1-release-bump-1 failed",
       "release_stage_failed bump",
       "decide agent_blocked bump",
     ]);
