@@ -322,6 +322,89 @@
 .ms-close {
   margin-left: auto;
 }
+.ms-head h2:focus {
+  outline: none;
+}
+/* A group page's back control (‹ Section), like macOS System Settings. */
+.ms-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 30px;
+  padding: 2px 8px 2px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: #0a84ff;
+  font-size: 13px;
+  cursor: pointer;
+}
+.ms-back span {
+  font-size: 18px;
+  line-height: 1;
+}
+.ms-back:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.ms-back:focus-visible {
+  outline: 2px solid #0a84ff;
+  outline-offset: 1px;
+}
+/* A long section's group list: one row per group (label · live summary · chevron). */
+.gl {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.gl li + li {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.gl-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.gl-row:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.gl-row:focus-visible {
+  outline: 2px solid #0a84ff;
+  outline-offset: -2px;
+}
+.gl-row--hit {
+  background: rgba(10, 132, 255, 0.22);
+}
+.gl-label {
+  flex: none;
+}
+.gl-sum {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  color: var(--dim);
+}
+.gl-chev {
+  flex: none;
+  color: var(--mute);
+  font-size: 16px;
+  line-height: 1;
+}
 .ms-body {
   padding: 16px 20px 24px;
   overflow: auto;
@@ -528,6 +611,25 @@
   }
   .ms-body {
     padding: 12px 12px 20px;
+  }
+  /* The group list goes full width; a row's summary wraps under its label. */
+  .gl-row {
+    min-height: 48px;
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  .gl-sum {
+    order: 3;
+    flex-basis: 100%;
+    white-space: normal;
+    text-align: left;
+  }
+  .gl-chev {
+    margin-left: auto;
+  }
+  .ms-back {
+    min-height: 48px;
+    min-width: 48px;
   }
   .s-slider {
     width: 160px;
