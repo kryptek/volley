@@ -167,7 +167,7 @@ export function Supervisor({
   /** The group a sidebar search hit. */
   hit?: string | undefined;
 }) {
-  const rows = group === null ? undefined : PAGE_ROWS[group];
+  const rows = group !== null && Object.hasOwn(PAGE_ROWS, group) ? PAGE_ROWS[group] : undefined;
   if (rows === undefined) {
     return (
       <GroupList

@@ -7,7 +7,7 @@ import { autopilotSummaries } from "../src/settings/Autopilot";
 import { claudeSummaries } from "../src/settings/ClaudeAccounts";
 import { SettingsWindow, type SettingsWindowProps } from "../src/settings/SettingsWindow";
 import { soundSummaries } from "../src/settings/Sound";
-import { supervisorSummaries } from "../src/settings/Supervisor";
+import { Supervisor, supervisorSummaries } from "../src/settings/Supervisor";
 import { sectionOfPath } from "../src/settings/schemaRows";
 import { groupOf, matchGroups, matchSections, sectionDef } from "../src/settings/sections";
 import { SOUND_EVENT_IDS } from "../src/sounds/events";
@@ -388,5 +388,12 @@ describe("the group list at phone width", () => {
     } finally {
       Object.defineProperty(window, "innerWidth", { value: width, configurable: true });
     }
+  });
+});
+
+describe("an unknown group key", () => {
+  it("an Object prototype name like constructor shows the list, not a page", () => {
+    render(<Supervisor config={null} transport={null} group="constructor" />);
+    expect(screen.getByRole("list", { name: "Supervisor groups" })).toBeInTheDocument();
   });
 });
