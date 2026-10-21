@@ -10,6 +10,31 @@ import type { AuthClaude, Check, Facts } from "../doctor";
 /** A plan label (`max`, `pro`, `team`): short, plain words only, never anything token-shaped. */
 const PLAN_RE = /^[a-z][a-z0-9 _-]{0,31}$/i;
 
+export interface LoginIdentity {
+  email?: string;
+  org?: string;
+}
+
+/**
+ * The default profile's login identity in `~/.claude.json`: exactly `oauthAccount.emailAddress`
+ * and `oauthAccount.organizationName`, nothing else of the file. Identity, never a credential.
+ */
+// Kept byte-identical with volleyd's copy (src/claude/identity.ts): volley-cli cannot import it.
+// The schemas' `format: email` (ajv-formats' full mode), so no address kept here fails them.
+const EMAIL =
+  /^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
+
+/** `{ email?, org? }` from a parsed `.claude.json`; a field that is not well-formed is left out. */
+export function loginIdentity(json: Record<string, unknown> | null): LoginIdentity {
+  const oauth = json?.oauthAccount;
+  if (typeof oauth !== "object" || oauth === null || Array.isArray(oauth)) return {};
+  const { emailAddress: e, organizationName: o } = oauth as Record<string, unknown>;
+  const email = typeof e === "string" && e.length <= 254 && EMAIL.test(e) ? e.toLowerCase() : null;
+  const org = typeof o === "string" && o !== "" && o.length <= 128 ? o : null;
+  return { ...(email !== null ? { email } : {}), ...(org !== null ? { org } : {}) };
+}
+// End of the copy shared with volleyd.
+
 /** `claude auth status`'s answer as a state and a plan label; nothing else is kept. */
 export function parseClaudeStatus(
   code: number,

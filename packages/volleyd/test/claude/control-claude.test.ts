@@ -8,12 +8,14 @@ import { signinDir } from "../../src/claude/signin";
 import { usageAccountTopic } from "../../src/claude/usage";
 import { ControlClient } from "../../src/control";
 import { readJournalFile } from "../../src/journal";
+import { MACHINE_CHANNEL, machineTopic } from "../../src/machines";
 import { eventually } from "../helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "../helpers/daemon-env";
 import { fakeClock } from "../helpers/fake-clock";
 import { fakeExec } from "../helpers/fake-exec";
 import { SIGNIN_CALLBACK, type SigninBoxOptions, fakeSigninBox } from "../helpers/fake-host";
 import { journalWait } from "../helpers/journal-wait";
+import { schemaErrors } from "../helpers/schema";
 import { tempDir } from "../helpers/tmp";
 
 /** The claude_* control ops end to end: a real daemon on Aedes, a fake tmux / claude. */
@@ -29,6 +31,22 @@ afterEach(() => env.cleanup());
 /** What `claude auth status` says for Claude Code's default profile (no CLAUDE_CONFIG_DIR). */
 const PRIMARY_STATUS = { loggedIn: true, subscriptionType: "pro" };
 
+/** Claude Code signing a profile in: it records the login in the profile's `.claude.json`. */
+function signedInAs(dir: string) {
+  writeFileSync(
+    join(dir, ".claude.json"),
+    JSON.stringify({
+      userID: "c0ffee",
+      oauthAccount: {
+        accountUuid: "11111111-2222-3333-4444-555555555555",
+        emailAddress: "owner@example.com",
+        organizationName: "Example Org",
+      },
+    }),
+  );
+  return { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "max" }) };
+}
+
 async function setup(opts: { signInAfter?: number; primary?: Record<string, unknown> } = {}) {
   env = await makeDaemonEnv();
   const base = tempDir("volleyd-claude-");
@@ -37,7 +55,13 @@ async function setup(opts: { signInAfter?: number; primary?: Record<string, unkn
   const primaryJson = join(base, ".claude.json");
   mkdirSync(join(primary, "agents"), { recursive: true });
   writeFileSync(join(primary, "CLAUDE.md"), "# rules\n");
-  writeFileSync(primaryJson, JSON.stringify({ mcpServers: { volley: { env: { K: "secret" } } } }));
+  writeFileSync(
+    primaryJson,
+    JSON.stringify({
+      oauthAccount: { emailAddress: "me@example.com", organizationName: "Home" },
+      mcpServers: { volley: { env: { K: "secret" } } },
+    }),
+  );
   let polls = 0;
   const fx = fakeExec()
     .on(["tmux", "new-session"], (argv) => {
@@ -48,7 +72,7 @@ async function setup(opts: { signInAfter?: number; primary?: Record<string, unkn
       o.env?.CLAUDE_CONFIG_DIR === undefined
         ? { stdout: JSON.stringify(opts.primary ?? PRIMARY_STATUS) }
         : ++polls >= (opts.signInAfter ?? 3)
-          ? { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "max" }) }
+          ? signedInAs(o.env.CLAUDE_CONFIG_DIR as string)
           : { code: 1, stdout: JSON.stringify({ loggedIn: false }) },
     );
   // The sign-in's poll interval and timeout run on the daemon's clock: polls happen as it moves.
@@ -101,6 +125,13 @@ describe("claude_* control ops", () => {
       // journal entry, so wait for it there.
       await eventually(() => t.seen.some((e) => e.type === "claude_signin_done"));
       expect(t.seen.map((e) => e.type)).toEqual(["claude_signin_url", "claude_signin_done"]);
+      expect(t.seen.at(-1)?.payload).toEqual({
+        type: "claude_signin_done",
+        acct: "work",
+        plan: "max",
+        email: "owner@example.com",
+        org: "Example Org",
+      });
       // non-retained: nothing left on the topic
       expect(await env.retained("volley/_system/claude/work/signin")).toBeNull();
 
@@ -109,6 +140,8 @@ describe("claude_* control ops", () => {
       expect(accounts[0]).toMatchObject({
         id: "work",
         plan: "max",
+        email: "owner@example.com",
+        org: "Example Org",
         signin: { state: "signed_in" },
       });
 
@@ -123,6 +156,9 @@ describe("claude_* control ops", () => {
       const journal = readFileSync(join(env.home, "waves", "_system", "journal.jsonl"), "utf-8");
       expect(journal).not.toContain("oauth/authorize");
       expect(journal).not.toContain("secret");
+      // The login's identity lives in the registry and the retained records, never the journal.
+      expect(journal).not.toContain("@example.com");
+      expect(journal).not.toContain("Example Org");
     } finally {
       await t.client.close();
       await t.watcher.disconnect();
@@ -220,7 +256,11 @@ describe("claude_* control ops", () => {
     try {
       const list = await t.client.request("claude_accounts", {});
       expect(list.ok).toBe(true);
-      expect((list.result as { primary?: unknown }).primary).toEqual({ plan: "pro" });
+      expect((list.result as { primary?: unknown }).primary).toEqual({
+        plan: "pro",
+        email: "me@example.com",
+        org: "Home",
+      });
       // Asked of Claude Code's default profile: no CLAUDE_CONFIG_DIR.
       const asked = t.fx.calls.filter((c) => c.argv.join(" ") === "claude auth status");
       expect(asked.map((c) => c.opts.env?.CLAUDE_CONFIG_DIR)).toEqual([undefined]);
@@ -251,7 +291,14 @@ describe("claude_* control ops", () => {
         record = env?.payload ?? null;
         return record !== null;
       });
-      expect(record).toMatchObject({ account: "primary", plan: "pro", five_hour: { pct: 12 } });
+      expect(record).toMatchObject({
+        account: "primary",
+        plan: "pro",
+        email: "me@example.com",
+        org: "Home",
+        five_hour: { pct: 12 },
+      });
+      expect(schemaErrors("claude-account.schema.json", await t.reader("primary"))).toEqual([]);
     } finally {
       await t.client.close();
       await t.watcher.disconnect();
@@ -259,14 +306,15 @@ describe("claude_* control ops", () => {
   });
 
   it.each([
-    ["not logged in", { loggedIn: false, subscriptionType: "max" }],
-    ["logged in without a plan", { loggedIn: true }],
-  ])("a primary %s: claude_accounts claims no plan", async (_, primary) => {
+    ["not logged in", { loggedIn: false, subscriptionType: "max" }, {}],
+    ["logged in without a plan", { loggedIn: true }, { email: "me@example.com", org: "Home" }],
+  ])("a primary %s: claude_accounts claims no plan", async (_, primary, identity) => {
     const t = await setup({ primary });
     try {
       const list = await t.client.request("claude_accounts", {});
       expect(list.ok).toBe(true);
-      expect((list.result as { primary?: unknown }).primary).toEqual({});
+      // A signed-out primary has no identity either, whatever its .claude.json still says.
+      expect((list.result as { primary?: unknown }).primary).toEqual(identity);
     } finally {
       await t.client.close();
       await t.watcher.disconnect();
@@ -343,6 +391,60 @@ describe("claude_signin for a paired machine (primary@<name>)", () => {
       expect(journal).toContain('"claude_signin_started"');
       expect(journal).not.toContain("oauth/authorize");
     } finally {
+      await t.close();
+    }
+  });
+
+  it("claude_accounts lists every machine record's Claude login, with its identity", async () => {
+    const t = await remoteSetup();
+    const box = new VolleyBroker();
+    await box.connect({ url: env.broker.url, agentId: "box-a" });
+    try {
+      await box.publish(
+        machineTopic("box-a"),
+        JSON.stringify(
+          buildEnvelope({
+            agentId: "box-a",
+            parentId: null,
+            channel: MACHINE_CHANNEL,
+            type: "machine",
+            payload: {
+              name: "box-a",
+              os: "linux",
+              cores: 8,
+              tunnel: "up",
+              load: [0.1, 0.1, 0.1],
+              agents: 0,
+              auth: {
+                gh: "ok",
+                claude: "signed_in",
+                trust: "ok",
+                claude_plan: "max",
+                claude_email: "owner@example.com",
+                claude_org: "Example Org",
+              },
+              last_seen: new Date().toISOString(),
+            },
+          }),
+        ),
+        { qos: 1, retain: true },
+      );
+      let machines: Record<string, unknown>[] = [];
+      await eventually(async () => {
+        const list = await t.client.request("claude_accounts", {});
+        machines = (list.result as { machines: Record<string, unknown>[] }).machines;
+        return machines.some((m) => m.name === "box-a");
+      });
+      expect(machines.find((m) => m.name === "box-a")).toEqual({
+        name: "box-a",
+        claude: "signed_in",
+        plan: "max",
+        email: "owner@example.com",
+        org: "Example Org",
+        tunnel: "up",
+      });
+    } finally {
+      await box.disconnect();
       await t.close();
     }
   });

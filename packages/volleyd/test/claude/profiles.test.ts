@@ -65,6 +65,34 @@ describe("profiles: the accounts.json registry", () => {
     });
   });
 
+  it("markSignedIn stores the login's email and org beside the plan", () => {
+    const r = root();
+    addAccount(r, { label: "work" }, NOW);
+    markSignedIn(
+      r,
+      "work",
+      { plan: "max", email: "owner@example.com", org: "Example Org" },
+      "2026-10-18T12:05:00.000Z",
+    );
+    expect(readRegistry(r).accounts[0]).toEqual({
+      id: "work",
+      label: "work",
+      machine: "local",
+      created: NOW,
+      plan: "max",
+      email: "owner@example.com",
+      org: "Example Org",
+      signed_in_at: "2026-10-18T12:05:00.000Z",
+    });
+  });
+
+  it("an entry without email or org round-trips unchanged", () => {
+    const r = root();
+    const acct = addAccount(r, { label: "work" }, NOW);
+    markSignedIn(r, "work", {}, NOW);
+    expect(readRegistry(r).accounts[0]).toEqual({ ...acct, signed_in_at: NOW });
+  });
+
   it("an absent registry is empty", () => {
     expect(readRegistry(root())).toEqual({ version: 1, accounts: [] });
   });

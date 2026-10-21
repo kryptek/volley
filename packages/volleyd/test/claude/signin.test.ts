@@ -195,6 +195,38 @@ describe("runSignin", () => {
     expect(w.fx.argvs(["tmux", "kill-session"]).length).toBeGreaterThan(0);
   });
 
+  it("done carries the login's email and org from the profile's .claude.json, nothing else of it", async () => {
+    const w = world({ signInAfter: 2 });
+    writeFileSync(
+      join(profileDir(w.root, "work"), ".claude.json"),
+      JSON.stringify({
+        userID: "c0ffee",
+        oauthAccount: {
+          accountUuid: "11111111-2222-3333-4444-555555555555",
+          emailAddress: "Owner@Example.com",
+          organizationName: "Example Org",
+        },
+        mcpServers: { volley: { env: { TOKEN: "secret" } } },
+      }),
+    );
+    const last = await w.run();
+    expect(last).toEqual({
+      type: "claude_signin_done",
+      acct: "work",
+      plan: "max",
+      email: "owner@example.com",
+      org: "Example Org",
+    });
+    expect(readRegistry(w.root).accounts[0]).toMatchObject({
+      plan: "max",
+      email: "owner@example.com",
+      org: "Example Org",
+    });
+    const published = JSON.stringify(w.events);
+    for (const key of ["userID", "accountUuid", "mcpServers", "secret"])
+      expect(published).not.toContain(key);
+  });
+
   it("auth status runs under the profile with the credential env stripped", async () => {
     const w = world({ signInAfter: 1 });
     await w.run();

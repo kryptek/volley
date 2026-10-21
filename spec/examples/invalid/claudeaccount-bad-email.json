@@ -1,0 +1,31 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T14:06:01.000Z",
+  "channel": "_system/claude-accounts",
+  "type": "claude_account",
+  "payload": {
+    "account": "work",
+    "label": "Work",
+    "plan": "max",
+    "email": "not-an-email",
+    "org": "Example Org",
+    "five_hour": {
+      "pct": 91,
+      "resets_at": "2026-10-18T18:10:00.000Z"
+    },
+    "weekly": {
+      "pct": 43,
+      "resets_at": "2026-10-21T09:00:00.000Z"
+    },
+    "agents": [
+      "w1-t1-implementer-1",
+      "w1-t2-implementer-1"
+    ],
+    "waves": [
+      "w1"
+    ],
+    "sampled_at": "2026-10-18T14:06:00.000Z",
+    "sampled_by": "w1-t2-implementer-1"
+  }
+}
