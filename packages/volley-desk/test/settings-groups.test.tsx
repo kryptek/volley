@@ -349,6 +349,10 @@ describe("summaries", () => {
     );
     const quiet = { ...SOUND0, quietHours: { ...SOUND0.quietHours, on: true } };
     expect(soundSummaries({ sound: quiet, loading: false }).when).toBe("quiet 22:00–07:00");
+    const both = { ...quiet, signalsOnlyWhenHidden: true };
+    expect(soundSummaries({ sound: both, loading: false }).when).toBe(
+      "only when hidden · quiet 22:00–07:00",
+    );
     expect(soundSummaries({ sound: SOUND0, loading: true }).theme).toMatch(/ · loading…$/);
   });
 

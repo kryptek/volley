@@ -58,11 +58,10 @@ export function soundSummaries({
     theme: `${label(sound.theme)}${loading ? " · loading…" : ""}`,
     volume: sound.muted ? "muted" : `${Math.round(sound.volume * 100)}%`,
     events: `${on} of ${SOUND_EVENT_IDS.length} on`,
-    when: q.on
-      ? `quiet ${q.from}–${q.to}`
-      : sound.signalsOnlyWhenHidden
-        ? "only when hidden"
-        : "always",
+    when:
+      [sound.signalsOnlyWhenHidden && "only when hidden", q.on && `quiet ${q.from}–${q.to}`]
+        .filter(Boolean)
+        .join(" · ") || "always",
   };
 }
 
@@ -201,8 +200,8 @@ export function Sound({
   if (group === "events") {
     return (
       <>
-        {EVENT_GROUPS.map(({ group, ids }) => (
-          <Group key={group} title={group}>
+        {EVENT_GROUPS.map(({ group: title, ids }) => (
+          <Group key={title} title={title}>
             {ids.map((id) => {
               const e = SOUND_EVENTS[id];
               return (
