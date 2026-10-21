@@ -76,6 +76,8 @@ function train() {
       }
       if (a.kind === "decide") {
         const id = a.decision.id as string;
+        // As openEvent: a decision id is opened once.
+        if (decisions[id] !== undefined) throw new Error(`decision ${id} already exists`);
         decisions[id] = {
           decision_id: id,
           wave: WAVE,
@@ -411,6 +413,32 @@ describe("nextRelease (SPEC §4.6.19)", () => {
     u.step({ kind: "advance" });
     u.spawned("bump", 1);
     expect(u.step(ev)).toEqual([]);
+  });
+
+  it("a stage failing again after spawn_stopped and respawn opens a second, distinct decision", () => {
+    const t = train();
+    t.step({ kind: "advance" });
+    t.step({ kind: "spawn_stopped", why: "owner stopped the stage's spawn retries" });
+    expect(kinds(t.resolve("agent_blocked", "bump", "respawn"))).toEqual([
+      "release_stage_entered bump",
+      "spawn bump 2",
+    ]);
+    // The first agent that actually spawns counts its own attempt from 1.
+    t.spawned("bump", 1);
+    expect(
+      kinds(
+        t.step({
+          kind: "agent_done",
+          agent_id: "w1-release-bump-1",
+          status: "failed",
+          why: "boom",
+        }),
+      ),
+    ).toEqual(["release_stage_failed bump", "decide agent_blocked bump"]);
+    const blocked = Object.values(t.decisions).filter((d) => d.kind === "agent_blocked");
+    expect(blocked).toHaveLength(2);
+    expect(blocked.filter((d) => d.resolved === undefined)).toHaveLength(1);
+    expect(t.view().open.bump?.kind).toBe("agent_blocked");
   });
 });
 

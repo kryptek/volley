@@ -430,6 +430,9 @@ function failStage(
   reason: string,
 ): ReleaseAction[] {
   const agent = run.agent_id !== undefined ? { agent_id: run.agent_id } : {};
+  // Keyed on the entered attempt, never the run's: an agent counts its attempts from its own
+  // spawns, so after a stopped spawn and a respawn the two drift and an id would repeat.
+  const entered = v.attempt[stage] ?? run.attempt;
   return [
     journal("release_stage_failed", { stage, reason, ...agent }),
     {
@@ -437,7 +440,7 @@ function failStage(
       decision: {
         kind: "agent_blocked",
         task: null,
-        id: waveDecisionId("agent_blocked", v.wave, RELEASE_TASK, stage, String(run.attempt)),
+        id: waveDecisionId("agent_blocked", v.wave, RELEASE_TASK, stage, String(entered)),
         question: `Wave ${v.wave}'s release stage ${stage} failed (${run.agent_id ?? "no agent spawned"}): ${reason}. respawn: a fresh agent runs the stage again; skip: the stage is skipped; cancel: the train stops and the wave completes without its release.`,
         options: [...STAGE_FAILED_OPTIONS],
       },
