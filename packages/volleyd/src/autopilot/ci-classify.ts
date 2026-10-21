@@ -12,7 +12,9 @@ import type { GithubStatus } from "./github-status";
  *     incident (a hold, re-checked; never a fixer and never a re-run).
  *
  * The order: an infra shape first, then own-change evidence (it wins over a status-page incident),
- * then the status page, then flake.
+ * then the status page, then flake. PR files that could not be read establish nothing: such a
+ * head is an incident when the status page reports one (a hold is non-destructive), else the PR's
+ * own change; never a flake.
  */
 
 export type Classification = "own_change" | "flake" | "infra_incident";
@@ -66,7 +68,11 @@ const INFRA_LINE: Record<InfraReason, string> = {
   cancelled: "a run was cancelled and nothing replaced it",
 };
 
-/** Whether `file` (a path in the test log, often relative to a package) is one of the PR's files. */
+/**
+ * Whether `file` (a path in the test log, often relative to a package) is one of the PR's files.
+ * A suffix match: the same relative path in another package counts too, which errs toward
+ * own_change (a fixup), the safe side.
+ */
 const touches = (prFiles: string[], file: string): boolean =>
   prFiles.some((f) => f === file || f.endsWith(`/${file}`));
 

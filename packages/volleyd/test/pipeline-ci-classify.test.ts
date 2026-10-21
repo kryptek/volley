@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { GithubStatus } from "../src/autopilot/github-status";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
+import { emptyPipeline, reducePipeline } from "../src/pipeline";
 import { FIXTURES } from "./helpers/fake-host";
 import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
 
@@ -97,6 +98,24 @@ describe("a red head is classified before anyone is asked", () => {
     expect(h.calls.slice(lists).some((c) => c[1] === "run" && c[2] === "list")).toBe(false);
     expect(h.openDecisions()).toEqual([]);
     expect(events("remediation_requested")).toHaveLength(1);
+  });
+
+  it("flake answered `re-verify`: CI re-running is held and re-polled like any pending head, then accepted green", async () => {
+    h = pipelineHarness();
+    await redHead();
+    const d = ciFailed();
+    expect(facts(d).classification).toBe("flake");
+    h.world.ci[H1] = "running";
+    await h.resolve(d?.decision_id as string, "re-verify");
+    expect(events("ci_pending")).toHaveLength(1);
+    // The CI hold supersedes the flake: nothing waits on a fixer for a head that is not red now.
+    expect(h.task()?.remediation).toBeUndefined();
+    h.world.ci[H1] = "green";
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(events("ci_green")).toHaveLength(1);
+    expect(h.run("implementer")?.accepted).toBe(true);
+    expect(h.openDecisions()).toEqual([]);
   });
 
   it("infra-shaped red → a ci_pending infra hold, no decision; re-verified after ci_poll_ms; budget → ci_failed escalated", async () => {
@@ -315,5 +334,19 @@ describe("a blocked agent whose reason is a failing test, on a red PR head", () 
       on: "agent_blocked",
       role: "implementer",
     });
+  });
+});
+
+describe("a parked flake's remediation", () => {
+  it("ends when the PR head moves off the flaky head; a move from another head keeps it", () => {
+    const p = emptyPipeline();
+    const ev = (seq: number, type: string, data: Record<string, unknown>) =>
+      reducePipeline(p, { seq, at: "", type, task: "T1", data } as never, { stages: [] });
+    const flake = { kind: "fix_flake", test: FLAKE, head: H1, role: "implementer" };
+    ev(1, "remediation_requested", flake);
+    ev(2, "pr_head_moved", { from: sha(0x4002), to: sha(0x4003), during: "review" });
+    expect(p.remediation?.head).toBe(H1);
+    ev(3, "pr_head_moved", { from: H1, to: sha(0x4003), during: "review" });
+    expect(p.remediation).toBeUndefined();
   });
 });

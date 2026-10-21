@@ -519,12 +519,18 @@ export function reducePipeline(
       if (isRole(role) && p.runs[role]?.agent_id === d.from_agent) delete p.runs[role];
       break;
     case "pr_head_moved":
-      if (typeof d.from === "string" && typeof d.to === "string")
+      if (typeof d.from === "string" && typeof d.to === "string") {
         p.moved = { from: d.from, to: d.to, during: d.during as TaskStage };
+        // The flake was on the old head: the new one is verified on its own.
+        if (p.remediation?.head === d.from) p.remediation = undefined;
+      }
       if (p.pr === undefined && typeof d.pr === "string" && typeof d.pr_number === "number")
         p.pr = { number: d.pr_number, url: d.pr };
       break;
     case "ci_pending":
+      // CI is running (or held) again for the role: its head is not a parked flake any more, and
+      // the hold's re-polls must not be skipped for a fixer.
+      if (p.remediation?.role === role) p.remediation = undefined;
       if ((isRole(role) || role === "moved") && typeof d.sha === "string")
         p.ci_hold = {
           role,
@@ -3841,7 +3847,8 @@ export class PipelineDriver {
       ...blocked,
     });
     // A blocked agent is asked about whatever happens here: no worktree to read from, or a failed
-    // read, is the plain question.
+    // read, is the plain question. A verified red head with no worktree is asked about nothing on
+    // this pass: its run stays retired-done and unaccepted, so advance re-verifies it (a retry).
     if (cwd === undefined) return a.blocked !== undefined ? unclassified() : null;
     if (a.blocked !== undefined)
       return this.classifyRed(exec, cwd, v, base, a.report ?? null, blocked).catch(unclassified);
