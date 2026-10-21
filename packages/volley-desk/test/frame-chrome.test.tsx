@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { lazy } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { REDUCED_MOTION_QUERY } from "../src/a11y/motion";
+import { LITE_SURFACE_QUERY } from "../src/a11y/surface";
 import {
   type AttnStyle,
   type Chrome,
@@ -58,6 +59,44 @@ describe("Frame chromes", () => {
     else expect(el.firstElementChild).toHaveClass("win-inner");
     // Only the liquid chrome lays glass under the content.
     expect(el.querySelector(".win-glass") !== null).toBe(chrome === "liquid");
+  });
+
+  describe("on the lite surface (touch screen)", () => {
+    const realMatchMedia = window.matchMedia;
+    afterEach(() => {
+      window.matchMedia = realMatchMedia;
+    });
+    const lite = () => {
+      window.matchMedia = (q: string) =>
+        ({ ...realMatchMedia(q), matches: q === LITE_SURFACE_QUERY }) as MediaQueryList;
+    };
+
+    it("liquid renders as the CSS glass, with no GlassSurface", () => {
+      lite();
+      render(
+        <Frame {...base} chrome="liquid">
+          body
+        </Frame>,
+      );
+      const el = win();
+      expect(el.querySelector(".win-inner")).toHaveClass("chrome-glass");
+      expect(el.querySelector(".win-inner")).not.toHaveClass("chrome-liquid");
+      expect(el.querySelector(".win-glass")).toBeNull();
+      expect(el.querySelector(".glass-surface")).toBeNull();
+    });
+
+    it.each(cases.filter(([c]) => c !== "liquid"))("%s renders as before", (chrome, wrapper) => {
+      lite();
+      render(
+        <Frame {...base} chrome={chrome}>
+          body
+        </Frame>,
+      );
+      const el = win();
+      expect(el.querySelector(".win-inner")).toHaveClass(`chrome-${chrome}`);
+      if (wrapper) expect(el.querySelector(wrapper)).not.toBeNull();
+      else expect(el.firstElementChild).toHaveClass("win-inner");
+    });
   });
 
   it("tints the spotlight and glow with the accent", () => {

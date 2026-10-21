@@ -50,6 +50,8 @@ export interface SettingsWindowProps {
   setNotify: SetNotify;
   /** Whether this browser has WebGL (`useWebGL`). */
   webgl: boolean;
+  /** Whether the Desk draws the lite surface (`useLiteSurface`). */
+  lite?: boolean;
   /** The Desk's broker identity; `null` when anonymous. */
   identity: string | null;
   demo: boolean;
@@ -259,7 +261,12 @@ export function SettingsWindow(p: SettingsWindowProps) {
             )}
             {sec === "sound" && <Sound {...(p.sound ?? SOUND_OFF)} />}
             {sec === "appearance" && (
-              <Appearance look={p.look} setLook={p.setLook} webgl={p.webgl} />
+              <Appearance
+                look={p.look}
+                setLook={p.setLook}
+                webgl={p.webgl}
+                lite={p.lite ?? false}
+              />
             )}
             {sec === "supervisor" && (
               <Supervisor

@@ -9,7 +9,10 @@
  * back in smoothly and never further out. Touch (D8): one finger on empty canvas
  * pans, two fingers pinch-zoom around their midpoint, on empty canvas or on a
  * window's body alike (windows fill a phone screen); `panBy` serves the arrow
- * keys. Phones (< `NARROW_PX`) start zoomed out and clamp window widths
+ * keys. A pointer pan or pinch never renders per move: it writes the world
+ * element's transform (`worldRef`) once per animation frame and commits
+ * `view` when a finger lifts (pointer up or cancel). The wheel, `zoomAt`,
+ * `panBy` and `fitTo` set `view` directly. Phones (< `NARROW_PX`) start zoomed out and clamp window widths
  * (`clampWindowWidth`).
  */
 import type React from "react";
@@ -106,6 +109,9 @@ export function initialView(): View {
   return { x: narrow ? 8 : 40, y: narrow ? 70 : 76, s: narrow ? 0.5 : 0.82 };
 }
 
+/** The world layer's transform for a view (the one place it is built). */
+export const worldTransform = (v: View): string => `translate(${v.x}px, ${v.y}px) scale(${v.s})`;
+
 /** Zoom from `from` to `s`, clamped; below `MIN_SCALE` (after a fit) zooming out stays put. */
 const clamp = (s: number, from: number) =>
   Math.min(MAX_SCALE, Math.max(Math.min(MIN_SCALE, from), s));
@@ -118,6 +124,31 @@ export function useViewport(opts: { initial?: View } = {}) {
    * any two pinch. `canvas` is false for a touch on a window's body.
    */
   const pointers = useRef(new Map<number, { x: number; y: number; canvas: boolean }>());
+  /** The world layer, moved directly during a gesture. */
+  const worldRef = useRef<HTMLDivElement>(null);
+  /**
+   * The view as the current gesture has moved it; `view` catches up on release.
+   * A `setView` mid-gesture (keyboard pan, wheel, fit) resets it, dropping the
+   * gesture's uncommitted delta; the gesture carries on from the new view.
+   */
+  const live = useRef(view);
+  const moved = useRef(false);
+  const frame = useRef(0);
+  useEffect(() => {
+    live.current = view;
+  }, [view]);
+  useEffect(() => () => cancelAnimationFrame(frame.current), []);
+
+  /** Move the gesture's view and write it to the world element on the next frame. */
+  const glide = (next: View) => {
+    live.current = next;
+    moved.current = true;
+    if (frame.current) return;
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0;
+      if (worldRef.current) worldRef.current.style.transform = worldTransform(live.current);
+    });
+  };
 
   const zoomAt = useCallback(
     (factor: number, cx = window.innerWidth / 2, cy = window.innerHeight / 2) =>
@@ -165,7 +196,11 @@ export function useViewport(opts: { initial?: View } = {}) {
   );
 
   const release = (e: React.PointerEvent) => {
-    pointers.current.delete(e.pointerId);
+    if (!pointers.current.delete(e.pointerId) || !moved.current) return;
+    cancelAnimationFrame(frame.current);
+    frame.current = 0;
+    moved.current = false;
+    setView(live.current);
   };
   const stageHandlers = {
     onPointerDown: (e: React.PointerEvent) => {
@@ -188,7 +223,10 @@ export function useViewport(opts: { initial?: View } = {}) {
       const other = [...ps].find(([id]) => id !== e.pointerId)?.[1];
       ps.set(e.pointerId, { ...now, canvas: last.canvas });
       if (!other) {
-        if (last.canvas) panBy(now.x - last.x, now.y - last.y);
+        if (last.canvas) {
+          const v = live.current;
+          glide({ ...v, x: v.x + now.x - last.x, y: v.y + now.y - last.y });
+        }
         return;
       }
       // Pinch: scale by the change in finger distance around the midpoint,
@@ -197,14 +235,13 @@ export function useViewport(opts: { initial?: View } = {}) {
       const d1 = Math.hypot(now.x - other.x, now.y - other.y);
       const m0 = { x: (last.x + other.x) / 2, y: (last.y + other.y) / 2 };
       const m1 = { x: (now.x + other.x) / 2, y: (now.y + other.y) / 2 };
-      setView((v) => {
-        const s = d0 > 0 ? clamp((v.s * d1) / d0, v.s) : v.s;
-        return { s, x: m1.x - ((m0.x - v.x) * s) / v.s, y: m1.y - ((m0.y - v.y) * s) / v.s };
-      });
+      const v = live.current;
+      const s = d0 > 0 ? clamp((v.s * d1) / d0, v.s) : v.s;
+      glide({ s, x: m1.x - ((m0.x - v.x) * s) / v.s, y: m1.y - ((m0.y - v.y) * s) / v.s });
     },
     onPointerUp: release,
     onPointerCancel: release,
   };
 
-  return { view, setView, zoomAt, panBy, fitTo, stageRef, stageHandlers };
+  return { view, setView, zoomAt, panBy, fitTo, stageRef, worldRef, stageHandlers };
 }
