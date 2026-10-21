@@ -380,16 +380,6 @@ describe("ClaudeAccounts review fixes", () => {
     expect(screen.getByText("applied · v4")).toBeInTheDocument();
   });
 
-  it("Add offers only this machine; a remote host gets the command to run there", () => {
-    setup([accountMsg(remote)]);
-    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
-    expect(screen.getByRole("button", { name: "Sign in on this machine" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Sign in on box/ })).toBeNull();
-    expect(screen.getByText("volley claude add").closest("p")).toHaveTextContent(
-      "To add one on box, run volley claude add there",
-    );
-  });
-
   it("a remote account's card does not offer to move a wave there", () => {
     setup([accountMsg(remote)], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
     const card = within(screen.getByRole("article", { name: "Team" }));
@@ -846,5 +836,181 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
     expect(await run()).toEqual([]);
     fireEvent.click(within(card()).getByRole("button", { name: "Show email" }));
     expect(await run()).toEqual([]);
+  });
+});
+
+describe("ClaudeAccounts › Add on any machine", () => {
+  const MANUAL = "https://claude.com/cai/oauth/authorize?code=true&state=m";
+  const URL = "https://claude.com/cai/oauth/authorize?redirect_uri=localhost&state=s";
+  const ATTACH = "ssh dev@peer-a -t tmux attach -t volley-signin-work";
+  const machines = {
+    "peer-a": { name: "peer-a", kind: "peer", tunnel: "up", auth: { claude: "signed_out" } },
+    "peer-b": { name: "peer-b", kind: "peer", tunnel: "down", auth: { claude: "signed_out" } },
+  } as unknown as NonNullable<ClaudeAccountsProps["machines"]>;
+  const fleet = { hosts: ["peer-a", "peer-b"], machines, localName: "hub" };
+  const radio = (name: RegExp) => screen.getByRole("radio", { name });
+
+  it("step 1 lists this machine and each paired host; a peer whose tunnel is down is disabled", () => {
+    setup([], fleet);
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    const picker = within(screen.getByRole("group", { name: "Machine" }));
+    expect(picker.getAllByRole("radio").map((r) => r.closest("label")?.textContent)).toEqual([
+      "this machine",
+      "peer-a",
+      "peer-btunnel down",
+    ]);
+    expect(radio(/^this machine/)).toBeChecked();
+    expect(radio(/^peer-a/)).toBeEnabled();
+    expect(radio(/^peer-b/)).toBeDisabled();
+    expect(screen.queryByText(/volley claude add/)).toBeNull();
+  });
+
+  it("a peer's sign-in shows the link and the phone steps, never a field, and completes there", async () => {
+    const { control, rerender, view, state } = setup([], fleet);
+    control.mockResolvedValueOnce({
+      ok: true,
+      result: {
+        acct: "work@peer-a",
+        url: URL,
+        flow: "browser_callback",
+        attach: ATTACH,
+        manual_url: MANUAL,
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Account label" }), {
+      target: { value: "Work" },
+    });
+    fireEvent.click(radio(/^peer-a/));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in on peer-a" }));
+    });
+    expect(control).toHaveBeenCalledWith(
+      "claude_account_add",
+      { label: "Work", machine: "peer-a" },
+      expect.any(String),
+      expect.any(Number),
+    );
+    expect(screen.getByRole("link", { name: /Open sign-in/ })).toHaveAttribute("href", URL);
+    fireEvent.click(screen.getByText("From a phone instead"));
+    expect(screen.getByRole("link", { name: /Open on the phone/ })).toHaveAttribute("href", MANUAL);
+    expect(document.body).toHaveTextContent(ATTACH);
+    expect(screen.queryAllByRole("textbox")).toHaveLength(0);
+
+    const done = reduceAll(state, [
+      signinMsg("work@peer-a", "claude_signin_url", { url: URL, flow: "browser_callback" }),
+      signinMsg("work@peer-a", "claude_signin_done", { plan: "max" }),
+    ]);
+    rerender(view(done));
+    expect(screen.getByRole("heading", { name: "Added: Work" })).toBeInTheDocument();
+    expect(screen.getByText(/max · signed in on peer-a/)).toBeInTheDocument();
+  });
+
+  it("Add to another machine… prefills the label and greys out the machines holding it", () => {
+    setup([], fleet);
+    const card = within(screen.getByRole("article", { name: "Work" }));
+    fireEvent.click(card.getByRole("button", { name: "Add to another machine…" }));
+    // volleyd's ids are unique across machines, so the prefill names the machine too.
+    expect(screen.getByRole("textbox", { name: "Account label" })).toHaveValue("Work (peer-a)");
+    expect(screen.getByText(/needs its own label/)).toBeInTheDocument();
+    expect(radio(/^this machine/)).toBeDisabled();
+    expect(radio(/^this machine/).closest("label")).toHaveTextContent("already holds this account");
+    expect(radio(/^peer-a/)).toBeEnabled();
+    expect(radio(/^peer-a/)).toBeChecked();
+    expect(screen.getByRole("button", { name: "Sign in on peer-a" })).toBeEnabled();
+  });
+
+  it("Add to another machine… sends the label volleyd accepts, and keeps one the owner typed", async () => {
+    const { control } = setup([], {
+      ...fleet,
+      machines: {
+        ...machines,
+        "peer-b": { ...machines["peer-a"], name: "peer-b" },
+      } as typeof machines,
+    });
+    control.mockResolvedValue({ ok: false });
+    const card = within(screen.getByRole("article", { name: "Work" }));
+    fireEvent.click(card.getByRole("button", { name: "Add to another machine…" }));
+    const field = screen.getByRole("textbox", { name: "Account label" });
+    fireEvent.click(radio(/^peer-b/));
+    expect(field).toHaveValue("Work (peer-b)");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in on peer-b" }));
+    });
+    expect(control).toHaveBeenLastCalledWith(
+      "claude_account_add",
+      { label: "Work (peer-b)", machine: "peer-b" },
+      expect.any(String),
+      expect.any(Number),
+    );
+    fireEvent.change(field, { target: { value: "Office" } });
+    fireEvent.click(radio(/^peer-a/));
+    expect(field).toHaveValue("Office");
+  });
+
+  it("Add to another machine… on the primary's card starts with an empty label", () => {
+    setup([], fleet);
+    const card = within(screen.getByRole("article", { name: "This machine's Claude login" }));
+    fireEvent.click(card.getByRole("button", { name: "Add to another machine…" }));
+    expect(screen.getByRole("textbox", { name: "Account label" })).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Sign in on peer-a" })).toBeDisabled();
+  });
+
+  it("Add to another machine… on a peer's card names this machine by its host name", () => {
+    const team: ClaudeAccountPayload = { ...personal, account: "team@peer-a", label: "Team" };
+    setup([accountMsg(team)], fleet);
+    const card = within(screen.getByRole("article", { name: "Team" }));
+    fireEvent.click(card.getByRole("button", { name: "Add to another machine…" }));
+    expect(radio(/^this machine/)).toBeChecked();
+    expect(screen.getByRole("textbox", { name: "Account label" })).toHaveValue("Team (hub)");
+  });
+
+  it("a peer's sign-in waits for the link, and says why when it fails", async () => {
+    const { control, rerender, view, state } = setup([], fleet);
+    control.mockResolvedValueOnce({ ok: true, result: { acct: "work@peer-a" } });
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Account label" }), {
+      target: { value: "Work" },
+    });
+    fireEvent.click(radio(/^peer-a/));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in on peer-a" }));
+    });
+    expect(screen.getByText(/Starting the sign-in on peer-a…/)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Open sign-in/ })).toBeNull();
+
+    rerender(
+      view(
+        reduceAll(state, [
+          signinMsg("work@peer-a", "claude_signin_url", { url: URL, flow: "browser_callback" }),
+          signinMsg("work@peer-a", "claude_signin_failed", { reason: "timed out" }),
+        ]),
+      ),
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("The sign-in did not finish: timed out");
+    expect(screen.queryByRole("link", { name: /Open sign-in/ })).toBeNull();
+  });
+
+  it("a paired host with no machine record yet is offered, and says so", () => {
+    setup([], { ...fleet, hosts: ["peer-a", "peer-c"] });
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    expect(radio(/^peer-c/)).toBeEnabled();
+    expect(radio(/^peer-c/).closest("label")).toHaveTextContent("no record yet");
+  });
+
+  it("read-only: no Add to another machine…", () => {
+    setup([], { ...fleet, control: null });
+    expect(screen.queryByRole("button", { name: "Add to another machine…" })).toBeNull();
+  });
+
+  it("the radios are reachable from the keyboard and Cancel closes the dialog", () => {
+    setup([], fleet);
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    const here = radio(/^this machine/);
+    here.focus();
+    expect(here).toHaveFocus();
+    expect(here).not.toHaveAttribute("tabindex", "-1");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("group", { name: "Machine" })).toBeNull();
   });
 });

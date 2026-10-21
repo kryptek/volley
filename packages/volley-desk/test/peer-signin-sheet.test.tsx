@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { describe, expect, it, vi } from "vitest";
 import type { ControlFn } from "../src/settings/ClaudeAccounts";
 import { Machines, type MachinesProps } from "../src/settings/Machines";
-import { PeerSignin } from "../src/settings/PeerSigninSheet";
+import { PeerSignin, SigninLink } from "../src/settings/PeerSigninSheet";
 import { initialState, reduceAll } from "../src/store/reducer";
 import type { ClaudeSignin, DeskMessage } from "../src/store/types";
 import { NOW, machineRecord, readiness } from "./helpers/desk-msgs";
@@ -206,5 +206,37 @@ describe("Sign in on <machine>: PeerSigninSheet", () => {
       <PeerSignin machine="box-a" signin={undefined} signedIn control={controlOk()} ops={ops} />,
     );
     expect(screen.queryByRole("button", { name: "Sign in on box-a" })).toBeNull();
+  });
+});
+
+describe("SigninLink: the sign-in link and phone steps, shared with Add Claude account", () => {
+  it("renders Open sign-in, the browser-here line and the closed phone disclosure", () => {
+    render(
+      <SigninLink
+        machine="box-a"
+        url={LOCAL_URL}
+        flow="browser_callback"
+        attach={ATTACH}
+        manualUrl={MANUAL_URL}
+      />,
+    );
+    expect(screen.getByRole("link", { name: /Open sign-in/ })).toHaveAttribute("href", LOCAL_URL);
+    expect(screen.getByText(/browser on this computer/)).toBeInTheDocument();
+    expect(screen.getByText("From a phone instead").closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByRole("link", { name: /Open on the phone/ })).toHaveAttribute(
+      "href",
+      MANUAL_URL,
+    );
+    expect(document.body).toHaveTextContent(ATTACH);
+    expect(screen.getByText(/Waiting for the sign-in to finish/)).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("a manual-code sign-in opens the steps at once, with no phone link", () => {
+    render(<SigninLink machine="box-a" url={MANUAL_URL} flow="manual_code" attach={ATTACH} />);
+    expect(screen.getByText("Type the code on the machine").closest("details")).toHaveAttribute(
+      "open",
+    );
+    expect(screen.queryByRole("link", { name: /Open on the phone/ })).toBeNull();
   });
 });

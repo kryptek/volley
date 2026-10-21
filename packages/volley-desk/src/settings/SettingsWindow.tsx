@@ -77,7 +77,7 @@ export interface SettingsWindowProps {
   /** Settings › Claude accounts & usage: the store's slices and volleyd's control channel. */
   claude?: Pick<
     ClaudeAccountsProps,
-    "accounts" | "signins" | "waves" | "control" | "onRegistry" | "machines" | "localName"
+    "accounts" | "signins" | "waves" | "control" | "onRegistry" | "machines" | "localName" | "hosts"
   >;
   /** Settings › Sound: the sound settings and the sound manager's theme loading and audition. */
   sound?: SoundSectionProps;
@@ -336,6 +336,7 @@ export function SettingsWindow(p: SettingsWindowProps) {
                 {...(p.claude?.onRegistry ? { onRegistry: p.claude.onRegistry } : {})}
                 {...(p.claude?.machines ? { machines: p.claude.machines } : {})}
                 localName={p.claude?.localName}
+                {...(p.claude?.hosts ? { hosts: p.claude.hosts } : {})}
                 config={p.config}
                 configTransport={p.transport}
                 {...groupProps}

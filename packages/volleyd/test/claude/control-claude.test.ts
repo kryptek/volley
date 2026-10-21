@@ -685,6 +685,31 @@ describe("claude_account_add on a paired machine (<acct>@<name>)", () => {
     }
   });
 
+  it("a label this machine already holds is refused on a peer; the Desk's '<label> (<peer>)' is not", async () => {
+    // The Desk's Add to another machine… prefills `Work (peer-a)`: ids are unique across machines.
+    const t = await peerSetup();
+    try {
+      addAccount(t.root, { label: "Work" }, "2026-10-21T00:00:00.000Z");
+      const same = await t.client.request("claude_account_add", {
+        label: "Work",
+        machine: "peer-a",
+      });
+      expect(same.ok).toBe(false);
+      expect(same.error).toMatch(/already exists/);
+      const r = await t.client.request("claude_account_add", {
+        label: "Work (peer-a)",
+        machine: "peer-a",
+      });
+      expect(r.ok).toBe(true);
+      expect(r.result).toMatchObject({
+        account: { id: "work-peer-a", label: "Work (peer-a)", machine: "peer-a" },
+        acct: "work-peer-a@peer-a",
+      });
+    } finally {
+      await t.close();
+    }
+  });
+
   it("an unknown machine is refused with the host error and no registry entry", async () => {
     const t = await peerSetup();
     try {

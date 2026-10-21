@@ -12,11 +12,15 @@
  * `account_limit` decision is a Needs-you banner whose Move / Not now answer
  * it (`resolve`); volleyd moves a wave only by such an answer, so "Move a wave
  * here…" lists the waves that have one open. **Add Claude account** is a
- * Stepper: a label, then "Sign in on this machine" (`claude_account_add`;
- * volleyd adds profiles on its own machine only, so a remote host gets the
- * `volley claude add` hint), then "Open Anthropic sign-in ↗" with the link
- * from the `claude_signin_url` event, waiting until `claude_signin_done`. The Desk shows only the provider's sign-in link, never
- * a credential. Defaults: the account for new waves (`claude.default_account`,
+ * Stepper: a label and the machine (this one, or any paired host whose tunnel
+ * is up), then "Sign in on <machine>" (`claude_account_add { label, machine }`),
+ * then the sign-in link from the answer and the `claude_signin_url` event (on
+ * a peer, the same link and phone steps as Settings › Machines, `SigninLink`),
+ * waiting until `claude_signin_done`. A card's **Add to another machine…**
+ * opens it with the label suggested as `<label> (<machine>)` (following the
+ * picked machine until the owner types) and the machines holding the account
+ * greyed out. The Desk shows only the provider's sign-in link, never a
+ * credential. Defaults: the account for new waves (`claude.default_account`,
  * through config_set) and the warn-at threshold from config.
  *
  * The section drills into two groups (`GroupList`): Accounts (the banners,
@@ -55,6 +59,7 @@ import type {
 } from "../store/types";
 import { AckLine, type RowState } from "./ConfigRows";
 import { GroupList } from "./GroupNav";
+import { SigninLink } from "./PeerSigninSheet";
 import type { ConfigTransport } from "./configTransport";
 import { Group, Row, Seg } from "./primitives";
 import { sectionDef } from "./sections";
@@ -149,6 +154,8 @@ export interface ClaudeAccountsProps {
   machines?: Record<string, MachinePayload>;
   /** The supervisor's own machine record's name (`_config` `fleet.local_name`). */
   localName?: string | undefined;
+  /** The paired hosts (`_config` `hosts`): the machines Add can sign a profile in on. */
+  hosts?: string[];
   /** The open group's page (`accounts`, `defaults`), or null for the group list. */
   group: string | null;
   onOpenGroup?: (group: string) => void;
@@ -284,12 +291,15 @@ function AccountCard({
   g,
   movable,
   onMove,
+  onAdd,
   now,
 }: {
   g: AccountGroup;
   /** Open `account_limit` decisions on other accounts: the waves that can move here. */
   movable: DecisionPayload[];
   onMove: ((d: DecisionPayload) => void) | null;
+  /** Add to another machine…; `null`: read-only. */
+  onAdd: (() => void) | null;
   now: number;
 }) {
   const only = g.members.length === 1 ? g.members[0] : undefined;
@@ -367,6 +377,11 @@ function AccountCard({
             </option>
           ))}
         </select>
+        {onAdd && (
+          <button type="button" className="btn" onClick={onAdd}>
+            Add to another machine…
+          </button>
+        )}
       </div>
       <div className="cc-foot">
         <span>{plural(g.agents.length, "agent")}</span>
@@ -378,47 +393,96 @@ function AccountCard({
   );
 }
 
-type Adding =
-  | { phase: "pick"; label: string; error?: string }
-  | { phase: "waiting"; label: string; machine: string; acct?: string; url?: string };
+/** A machine the Add dialog can sign a new profile in on. */
+export interface AddMachine {
+  /** How the picker names it ("this machine" for volleyd's own). */
+  name: string;
+  /** Its host name, when known: what a suggested label names it by (`name` otherwise). */
+  host?: string;
+  /** `claude_account_add`'s `machine`: `LOCAL_MACHINE` or the peer's host name. */
+  op: string;
+  /** Its tunnel is up (this machine always is). */
+  up: boolean;
+  /** A paired host that has published no machine record yet: offered, but its state is unknown. */
+  unknown?: boolean;
+  /** It already holds the account being added (Add to another machine…). */
+  holds: boolean;
+}
 
-/** The add-account Stepper: machine → Anthropic's sign-in page → done. */
+/** What volleyd's `claude_account_add` answer carries for the sign-in (as its URL event). */
+interface Started {
+  url?: string;
+  flow?: string;
+  attach?: string;
+  manual_url?: string;
+}
+
+type Adding =
+  | { phase: "pick"; error?: string }
+  | { phase: "waiting"; machine: string; label: string; acct?: string; r?: Started };
+
+/** The add-account Stepper: label and machine → Anthropic's sign-in page → done. */
 function AddAccount({
-  remotes,
+  machines,
+  baseLabel = "",
   signins,
   control,
   onClose,
 }: {
-  /** Remote hosts seen in the account list: volleyd adds profiles on its own machine only. */
-  remotes: string[];
+  /** This machine first, then each paired host. */
+  machines: AddMachine[];
+  /**
+   * Add to another machine…: the account's profile label. volleyd's ids are unique across
+   * machines, so the field starts as `<label> (<machine>)` and follows the picked machine
+   * until the owner types their own.
+   */
+  baseLabel?: string;
   signins: Record<string, ClaudeSignin>;
   control: ControlFn;
   onClose: () => void;
 }) {
-  const [s, setS] = useState<Adding>({ phase: "pick", label: "" });
+  const [s, setS] = useState<Adding>({ phase: "pick" });
+  /** What the owner typed; null while the field still follows the suggestion. */
+  const [typed, setTyped] = useState<string | null>(null);
+  const [pick, setPick] = useState(() => machines.find((m) => m.up && !m.holds)?.op);
+  const chosen = machines.find((m) => m.op === pick && m.up && !m.holds);
+  const label =
+    s.phase === "waiting"
+      ? s.label
+      : (typed ??
+        (baseLabel && chosen ? `${baseLabel} (${chosen.host ?? chosen.name})` : baseLabel));
   const signin = s.phase === "waiting" && s.acct ? signins[s.acct] : undefined;
   const done = signin?.state === "done";
-  const url = signin?.url ?? (s.phase === "waiting" ? s.url : undefined);
+  const r = s.phase === "waiting" ? (s.r ?? {}) : {};
+  const url = signin?.url ?? r.url;
+  const machine = s.phase === "waiting" ? s.machine : (chosen?.op ?? LOCAL_MACHINE);
+  const remote = machine !== LOCAL_MACHINE;
 
   const start = async (machine: string) => {
-    const label = s.label.trim();
-    if (!label) return;
-    setS({ phase: "waiting", label, machine });
+    const name = label.trim();
+    if (!name) return;
+    setS({ phase: "waiting", machine, label: name });
     const r = await control(
       "claude_account_add",
-      { label, machine },
-      `volley claude add "${label}"`,
+      { label: name, machine },
+      `volley claude add "${name}"`,
       ADD_ACCOUNT_TIMEOUT_MS,
     );
-    const res = (r.result ?? {}) as { acct?: unknown; account?: unknown; url?: unknown };
+    const res = (r.result ?? {}) as Record<string, unknown>;
     const acct = typeof res.acct === "string" ? res.acct : res.account;
     if (!r.ok || typeof acct !== "string") {
-      setS({ phase: "pick", label, error: r.error ?? "volleyd did not start the sign-in" });
+      setS({ phase: "pick", error: r.error ?? "volleyd did not start the sign-in" });
       return;
     }
+    const field = (k: keyof Started) =>
+      typeof res[k] === "string" ? { [k]: res[k] as string } : {};
     setS((cur) =>
       cur.phase === "waiting"
-        ? { ...cur, acct, ...(typeof res.url === "string" ? { url: res.url } : {}) }
+        ? {
+            ...cur,
+            acct,
+            r: { ...field("url"), ...field("flow"), ...field("attach"), ...field("manual_url") },
+          }
         : cur,
     );
   };
@@ -446,15 +510,39 @@ function AddAccount({
             className="recessed claude-add-label"
             aria-label="Account label"
             placeholder="Label, e.g. Work"
-            value={s.label}
-            onChange={(e) => setS({ phase: "pick", label: e.target.value })}
+            value={label}
+            onChange={(e) => setTyped(e.target.value)}
           />
-          {remotes.length > 0 && (
+          {baseLabel && (
             <p className="s-hint">
-              To add one on {remotes.join(", ")}, run <code>volley claude add</code> there: each
-              machine's volleyd adds its own.
+              Each machine’s profile needs its own label: volleyd names a profile once across
+              machines.
             </p>
           )}
+          <fieldset className="claude-add-machines">
+            <legend>Machine</legend>
+            {machines.map((m) => {
+              const why = m.holds ? "already holds this account" : m.up ? null : "tunnel down";
+              const note = why ?? (m.unknown ? "no record yet" : null);
+              return (
+                <label
+                  key={m.op}
+                  className={`claude-add-machine${why ? " claude-add-machine--off" : ""}`}
+                >
+                  <input
+                    type="radio"
+                    name="claude-add-machine"
+                    value={m.op}
+                    checked={chosen?.op === m.op}
+                    disabled={why !== null}
+                    onChange={() => setPick(m.op)}
+                  />
+                  <span>{m.name}</span>
+                  {note && <span className="s-hint">{note}</span>}
+                </label>
+              );
+            })}
+          </fieldset>
           {s.phase === "pick" && s.error && (
             <p className="s-error" role="alert">
               {s.error}
@@ -464,10 +552,10 @@ function AddAccount({
             <button
               type="button"
               className="btn btn--blue"
-              disabled={!s.label.trim()}
-              onClick={() => void start(LOCAL_MACHINE)}
+              disabled={!label.trim() || chosen === undefined}
+              onClick={() => chosen && void start(chosen.op)}
             >
-              Sign in on {machineName(LOCAL_MACHINE)}
+              Sign in on {chosen ? chosen.name : "…"}
             </button>
             <button type="button" className="btn" onClick={onClose}>
               Cancel
@@ -476,28 +564,44 @@ function AddAccount({
         </Step>
         <Step title="Sign in" description="Anthropic’s page">
           <h3>Sign in with the account you want to add</h3>
-          {url && (
-            <div className="ny-actions">
-              <a className="btn btn--blue" href={url} target="_blank" rel="noreferrer">
-                Open Anthropic sign-in ↗
-              </a>
-            </div>
-          )}
-          <p className="dim">
-            The page hands the sign-in straight back to Claude Code on{" "}
-            {machineName(s.phase === "waiting" ? s.machine : LOCAL_MACHINE)}: open it in a browser
-            there.
-            {signin?.flow === "manual_code" &&
-              ` If it shows a code, paste it into the sign-in terminal${signin.attach ? ` (tmux attach -t ${signin.attach})` : ""}, never here.`}
-          </p>
           {signin?.state === "failed" ? (
             <p className="s-error" role="alert">
               The sign-in did not finish: {signin.reason ?? "unknown reason"}
             </p>
+          ) : remote ? (
+            url ? (
+              <SigninLink
+                machine={machine}
+                url={url}
+                flow={signin?.flow ?? r.flow}
+                attach={signin?.attach ?? r.attach}
+                manualUrl={signin?.manual_url ?? r.manual_url}
+                lead={`Sign in on Anthropic’s own page; the profile lives on ${machine}.`}
+              />
+            ) : (
+              <p className="dim">
+                <span className="spinner" aria-hidden="true" /> Starting the sign-in on {machine}…
+              </p>
+            )
           ) : (
-            <div className="waiting">
-              <span className="spinner" aria-hidden="true" /> Waiting for the sign-in to finish…
-            </div>
+            <>
+              {url && (
+                <div className="ny-actions">
+                  <a className="btn btn--blue" href={url} target="_blank" rel="noreferrer">
+                    Open Anthropic sign-in ↗
+                  </a>
+                </div>
+              )}
+              <p className="dim">
+                The page hands the sign-in straight back to Claude Code on{" "}
+                {machineName(LOCAL_MACHINE)}: open it in a browser there.
+                {signin?.flow === "manual_code" &&
+                  ` If it shows a code, paste it into the sign-in terminal${signin.attach ? ` (tmux attach -t ${signin.attach})` : ""}, never here.`}
+              </p>
+              <div className="waiting">
+                <span className="spinner" aria-hidden="true" /> Waiting for the sign-in to finish…
+              </div>
+            </>
           )}
           <div className="ny-actions">
             <button type="button" className="btn" onClick={onClose}>
@@ -506,11 +610,10 @@ function AddAccount({
           </div>
         </Step>
         <Step title="Done" description="Added">
-          <h3>Added: {s.label}</h3>
+          <h3>Added: {label.trim()}</h3>
           <p className="dim">
-            {signin?.plan ? `${signin.plan} · ` : ""}signed in on{" "}
-            {machineName(s.phase === "waiting" ? s.machine : LOCAL_MACHINE)}. Pick it for new waves
-            under Defaults, or let them take the account with the most headroom.
+            {signin?.plan ? `${signin.plan} · ` : ""}signed in on {machineName(machine)}. Pick it
+            for new waves under Defaults, or let them take the account with the most headroom.
           </p>
           <button type="button" className="btn" onClick={onClose}>
             Done
@@ -532,11 +635,13 @@ export function ClaudeAccounts({
   onRegistry,
   machines,
   localName,
+  hosts = [],
   group,
   onOpenGroup = () => {},
   hit,
 }: ClaudeAccountsProps) {
-  const [adding, setAdding] = useState(false);
+  /** The Add dialog: the account's profile label and the machines already holding it. */
+  const [adding, setAdding] = useState<{ label: string; holds: string[] } | null>(null);
   const [closed, setClosed] = useState(0);
   const [error, setError] = useState<string | null>(null);
   /** A resolve in flight: the answers stay disabled so a double click sends one. */
@@ -556,7 +661,23 @@ export function ClaudeAccounts({
   const labelOf = (id: string | null | undefined) =>
     list.find((a) => a.id === id)?.label ?? id ?? "";
   const decisions = openLimitDecisions(waves);
-  const remotes = [...new Set(list.map((a) => a.machine).filter((m) => m !== LOCAL_MACHINE))];
+  const addMachines = (holds: string[]): AddMachine[] =>
+    [
+      {
+        name: machineName(LOCAL_MACHINE),
+        op: LOCAL_MACHINE,
+        up: true,
+        ...(localName ? { host: localName } : {}),
+      },
+      ...hosts
+        .filter((h) => h !== localName)
+        .map((h) => ({
+          name: h,
+          op: h,
+          up: machines?.[h]?.tunnel !== "down",
+          ...(machines?.[h] === undefined ? { unknown: true } : {}),
+        })),
+    ].map((m) => ({ ...m, holds: holds.includes(m.op) }));
 
   const answer = async (d: DecisionPayload, text: string) => {
     if (!control || busy) return;
@@ -712,6 +833,16 @@ export function ClaudeAccounts({
                   ? (d) => void answer(d, moveAnswer(d.wave, to))
                   : null
               }
+              onAdd={
+                control
+                  ? () =>
+                      setAdding({
+                        // A real profile label only: never the card's e-mail or the primary's name.
+                        label: g.members.find((m) => !m.isPrimary)?.label ?? "",
+                        holds: g.members.map((m) => m.machine),
+                      })
+                  : null
+              }
               now={now}
             />
           );
@@ -720,18 +851,19 @@ export function ClaudeAccounts({
           type="button"
           className="claude-card claude-card--add"
           disabled={!control}
-          onClick={() => setAdding(true)}
+          onClick={() => setAdding({ label: "", holds: [] })}
         >
           + Add Claude account
         </button>
       </div>
       {adding && control && (
         <AddAccount
-          remotes={remotes}
+          machines={addMachines(adding.holds)}
+          baseLabel={adding.label}
           signins={signins}
           control={control}
           onClose={() => {
-            setAdding(false);
+            setAdding(null);
             setClosed((n) => n + 1);
           }}
         />
