@@ -107,6 +107,13 @@ export interface WaveTask {
   placement?: TaskPlacement;
   /** The release-branch commit the task's current worktree was cut from. */
   base_sha?: string;
+  /**
+   * A task the supervisor added itself (a fixer), not one from the wave file: `true`, or
+   * `{ for }` naming the tasks it fixes. Read with `fixerFor` (also takes `remediation.for`).
+   */
+  synthetic?: boolean | { for?: string[]; [key: string]: unknown };
+  /** What a synthetic task remediates; `for` names the tasks it fixes. */
+  remediation?: { for?: string[]; [key: string]: unknown };
   [key: string]: unknown;
 }
 
@@ -138,7 +145,11 @@ export interface WaveSpec {
   tasks: Record<string, { issue: number; title?: string; after: string[] }>;
 }
 
-export type CoordinatorState = "working" | "awaiting_input" | "gone";
+/**
+ * `reconnecting`: the agent bound to a coordinator-name owner went away less than
+ * `autopilot.reconnect_grace_s` ago (SPEC §4.6.1); the supervisor flips it to `gone`.
+ */
+export type CoordinatorState = "working" | "awaiting_input" | "reconnecting" | "gone";
 
 export interface WaveCoordinator {
   agent_id: string;
@@ -147,6 +158,27 @@ export interface WaveCoordinator {
   session_url?: string;
   workspace?: string;
   last_seen: string;
+}
+
+/** wave-state `autopilot` (SPEC §4.6.16): on or off for the wave, and what it did. */
+export interface WaveAutopilot {
+  enabled: boolean;
+  auto_resolved: number;
+  escalated: number;
+  budgets: Record<string, { used: number; max: number }>;
+}
+
+/** wave-state `merge_queue[]` (SPEC §4.6.17), in merge order. */
+export interface MergeQueueEntry {
+  task: string;
+  state: "merging" | "updating" | "queued" | "refused";
+  since: string;
+}
+
+/** wave-state `release` (SPEC §4.6.19): the train's stage in play and every stage's state. */
+export interface WaveRelease {
+  stage: string | null;
+  stages: { name: string; state: "pending" | "awaiting_go" | "running" | "verified" | "failed" }[];
 }
 
 export interface WaveStatePayload {
@@ -162,6 +194,12 @@ export interface WaveStatePayload {
   spec?: WaveSpec;
   coordinator?: WaveCoordinator;
   effective_config?: Tunables;
+  /** Absent from a supervisor that predates autopilot. */
+  autopilot?: WaveAutopilot;
+  /** Absent while the queue is empty. */
+  merge_queue?: MergeQueueEntry[];
+  /** Absent for a wave without a release train. */
+  release?: WaveRelease;
   updated_at: string;
   [key: string]: unknown;
 }
@@ -259,6 +297,15 @@ export interface Tunables {
   claude?: { default_account?: string | null; warn_at_pct?: number };
   /** Remote hosts (SPEC §4.6.4); the Desk reads their names and caps. */
   hosts?: Record<string, { max_agents?: number; drain?: boolean; [key: string]: unknown }>;
+  /** Autopilot (SPEC §4.6.16–17); absent from a supervisor that predates it. */
+  autopilot?: {
+    enabled?: boolean;
+    owner_only?: string[];
+    merge?: "auto" | "manual";
+    delete_branch?: boolean;
+    reconnect_grace_s?: number;
+    [key: string]: unknown;
+  };
   /**
    * The Fleet (SPEC §4.6.15): `local_name` is the supervisor's own machine; `local_agents` how it
    * takes auto-placed tasks (the retained config carries it resolved; null only in a config file);
@@ -628,6 +675,11 @@ export interface DeskState {
   readiness?: Record<string, ReadinessPayload>;
   /** The needs-you inbox (SPEC §4.6.18): volleyd's retained items, by item id. */
   inbox?: Record<string, InboxItem>;
+  /**
+   * Autopilot's events (`decision_auto_resolved`, `decision_escalated`, SPEC §4.6.16) from each
+   * wave's `events` mirror, by wave; live-only (the topic is not retained), kept across a resync.
+   */
+  waveFeed?: Record<string, FeedEntry[]>;
 }
 
 /** When each agent (by id) answered a message id, in local ms. */

@@ -147,6 +147,8 @@ export interface EffectiveCoordinator {
   lastSeen?: number;
   /** Idle with a background wait armed (`state` is `working`). */
   waitingOnEvents?: boolean;
+  /** `reconnecting`: ms the bound agent went away (the supervisor's `coordinator.last_seen`). */
+  since?: number;
 }
 
 const NONE: Attn = { tier: "none" };
@@ -195,6 +197,11 @@ export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordin
   const id = s?.owner ?? s?.coordinator?.agent_id ?? null;
   if (!id) return { id: null, state: "gone" };
   if (claimedHere(w, ctx)) return { id, state: "working" };
+  // The supervisor times the grace and flips it to gone; the Desk never does (SPEC §4.6.1).
+  if (s?.coordinator?.state === "reconnecting") {
+    const since = parseTime(s.coordinator.last_seen);
+    return { id, state: "reconnecting", ...(since !== undefined ? { since } : {}) };
+  }
   const view = ctx.coordinators?.[id];
   const sup = s?.coordinator?.agent_id === id ? s.coordinator : undefined;
   const a = ctx.agents?.[id];
@@ -237,6 +244,11 @@ export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordin
     ...(lastSeen !== undefined ? { lastSeen } : {}),
     ...(waitingOnEvents ? { waitingOnEvents: true } : {}),
   };
+}
+
+/** `Coordinator reconnecting · 3m` (just the label while the time it went away is unknown). */
+export function reconnectingLabel(c: EffectiveCoordinator, now: number): string {
+  return `Coordinator reconnecting${c.since === undefined ? "" : ` · ${mins(now - c.since)}m`}`;
 }
 
 export function openDecisions(w: WaveView | undefined): DecisionPayload[] {
@@ -303,6 +315,8 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
   if (gate !== undefined && claimedHere(w, ctx)) {
     return { tier: "you", reason: `Merge-ready gate: ${gate} is waiting on you` };
   }
+  // Neutral: the session is coming back; nothing to claim, decisions wait or autopilot answers.
+  if (c.state === "reconnecting") return { tier: "info", reason: reconnectingLabel(c, ctx.now) };
   const items = [
     ...decisions.map((d) => ({ reason: `Decision: ${d.question}`, since: parseTime(d.opened_at) })),
     ...s.gates.map((t) => ({ reason: gateReason(t), since: ctx.gateSince?.[`${w.id}/${t}`] })),
