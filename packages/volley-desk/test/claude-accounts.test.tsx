@@ -736,6 +736,7 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
         configTransport={null}
         machines={machines}
         localName="hub"
+        group="accounts"
         now={NOW}
       />
     </main>
@@ -820,6 +821,7 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
         configTransport={null}
         machines={machines}
         localName="hub"
+        group="accounts"
         now={NOW}
       />,
     );
