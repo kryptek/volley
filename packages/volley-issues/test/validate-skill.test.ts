@@ -149,15 +149,18 @@ describe("validateReleaseMerge (#313: release PRs pass the changelog guards)", (
       `release branch merge must mention: ${needle}`,
     );
   });
-  it("names the label step, the release: titles and subjects, and the no-changelog label", () => {
-    expect(REQUIRED_RELEASE_MERGE).toEqual(
-      expect.arrayContaining([
-        "bun scripts/changelog-ci.ts labels --ensure",
-        '--title "release:',
-        "--label no-changelog",
-        '--subject "release:',
-      ]),
+  it("flags a bare gh pr merge, which resolves to the checked-out branch's PR", () => {
+    const bare = FULL_OK.replace(
+      "- --label no-changelog\n",
+      '- --label no-changelog\n   gh pr merge --squash --subject "release: x"\n',
     );
+    expect(validateReleaseMerge(bare).errors.join(" ")).toContain("gh pr merge must name its PR");
+  });
+  it("names the PR on every merge in the shipped SKILL.md (the coordinator sits on release-prep/<v>)", () => {
+    const section = releaseMergeSection(splitFrontmatter(SHIPPED).body) ?? "";
+    expect(section).toContain("gh pr merge release-prep/<v> --squash");
+    expect(section).toContain("gh pr merge release/<date>-<theme> --squash");
+    expect(section).not.toMatch(/gh pr merge --/);
   });
   it("guards the shipped SKILL.md's release section", () => {
     const section = releaseMergeSection(splitFrontmatter(SHIPPED).body) ?? "";

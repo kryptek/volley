@@ -554,14 +554,14 @@ Once every dispatched agent has reached `done` AND its PR is merged into the rel
    git push -u origin release-prep/<v>
    bun scripts/changelog-ci.ts labels --ensure
    gh pr create --base release/<date>-<theme> --head release-prep/<v> --title "release: <v> — <theme>" --label no-changelog
-   gh pr merge --squash --subject "release: <v> — <theme>"
+   gh pr merge release-prep/<v> --squash --subject "release: <v> — <theme>"
    ```
-   `bun run changelog --commit` turns every `changes/` fragment into the `## <v> — <date>` section of `CHANGELOG.md` and commits `release: changelog for <v>`; the volley-cli version test checks that the newest section matches the root version. The PR passes CI's changelog guards by construction: its squash subject starts with `release:` (the only commits allowed to change `CHANGELOG.md`), and it carries the `no-changelog` label because the version bump touches `packages/` without a fragment. `labels --ensure` creates that label when the repository lacks it.
+   `bun run changelog --commit` turns every `changes/` fragment into the `## <v> — <date>` section of `CHANGELOG.md` and commits `release: changelog for <v>`; the volley-cli version test checks that the newest section matches the root version. The PR passes CI's changelog guards by construction: its squash subject starts with `release:` (the only commits allowed to change `CHANGELOG.md`), and it carries the `no-changelog` label because the version bump touches `packages/` without a fragment. `labels --ensure` creates that label when the repository lacks it. Each merge names its PR by branch: the coordinator is still checked out on `release-prep/<v>`, so a bare `gh pr merge` would pick that PR.
 
 3. **After staging verification**, squash-merge the release branch into main, again under a `release:` subject:
    ```bash
    gh pr create --base main --head release/<date>-<theme> --title "release: <date> — <theme>"
-   gh pr merge --squash --subject "release: <date> — <theme>"
+   gh pr merge release/<date>-<theme> --squash --subject "release: <date> — <theme>"
    ```
 
 4. **Delete the release branch** after merge:

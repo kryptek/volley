@@ -199,6 +199,9 @@ export function releaseMergeSection(body: string): string | null {
   return body.slice(start.index, start.index + start[0].length + (end?.index ?? rest.length));
 }
 
+/** `gh pr merge` followed directly by a flag, so no PR is named. */
+const BARE_PR_MERGE = /gh pr merge --\S*/;
+
 export function validateReleaseMerge(source: string): ValidationResult {
   const section = releaseMergeSection(splitFrontmatter(source).body);
   if (section === null)
@@ -206,6 +209,10 @@ export function validateReleaseMerge(source: string): ValidationResult {
   const errors = REQUIRED_RELEASE_MERGE.filter((needle) => !section.includes(needle)).map(
     (needle) => `release branch merge must mention: ${needle}`,
   );
+  // A bare `gh pr merge` resolves to the checked-out branch's PR; after step 2 that is the
+  // release-prep PR, already merged, not the release->main PR.
+  const bare = BARE_PR_MERGE.exec(section);
+  if (bare !== null) errors.push(`gh pr merge must name its PR: ${bare[0]}`);
   return { ok: errors.length === 0, errors };
 }
 
