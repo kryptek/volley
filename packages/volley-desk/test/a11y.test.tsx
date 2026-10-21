@@ -127,6 +127,13 @@ describe("axe (jsdom)", () => {
     expect(await violations()).toEqual([]);
   }, 30_000);
 
+  it("reports no violations with the Machines window open", async () => {
+    renderApp();
+    fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+    expect(screen.getByRole("region", { name: "Machines" })).toBeInTheDocument();
+    expect(await violations()).toEqual([]);
+  }, 30_000);
+
   it("reports no violations with a terminal popout open", async () => {
     renderApp();
     fireEvent.click(screen.getAllByRole("tab", { name: "Terminal" })[0] as HTMLElement);
@@ -369,7 +376,8 @@ describe("contrast (WCAG AA, 4.5:1 for text)", () => {
   it.each(CHROMES)("text tokens on the %s chrome", (chrome) => {
     expect(bodyStops(chrome).length, `${chrome} depth gradient`).toBeGreaterThan(0);
     for (const surface of surfaces[chrome] as RGB[]) {
-      for (const t of ["ink", "mute", "dim"]) {
+      // --amber and --bad: the Machines window's numbers at 70 / 90 %.
+      for (const t of ["ink", "mute", "dim", "amber", "bad"]) {
         const ratio = contrast(parseColor(token(t)).rgb, surface);
         expect(ratio, `--${t} on ${chrome}: ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
       }
