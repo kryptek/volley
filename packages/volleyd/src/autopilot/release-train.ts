@@ -131,12 +131,12 @@ export function verifyProse(stage: PlaybookStage, releaseBranch: string): string
   return out;
 }
 
-/** The lease line of a heavy stage (`volley lease acquire <pool>` first), else none. */
+/** The lease lines of a heavy stage (acquire first, release once done), else none. */
 const leaseLines = (stage: PlaybookStage): string[] =>
   stage.heavy === undefined
     ? []
     : [
-        `This stage is heavy: before anything else run \`volley lease acquire ${stage.heavy}\` and wait for the grant; hold it until the stage is done.`,
+        `This stage is heavy: before anything else run \`volley lease acquire --pool ${stage.heavy}\` and wait for the grant; it prints a \`lease_id\`. Hold the lease until the stage's commands are done, then give it back with \`volley lease release --pool ${stage.heavy} --lease-id <id>\`.`,
         "",
       ];
 
@@ -240,6 +240,8 @@ export interface ReleaseView {
   open: Record<string, DecisionRecord>;
   /** Every `stage_go` asked per stage (the next one's id). */
   asked: Record<string, number>;
+  /** Each verified stage's evidence file (its latest `release_stage_verified`). */
+  evidence: Record<string, string>;
 }
 
 /** A decision record's stage, when it is one of the train's. */
@@ -269,6 +271,7 @@ export function releaseView(o: {
   const attempt: Record<string, number> = {};
   const runs: Record<string, StageRun> = {};
   const steers: Record<string, number> = {};
+  const evidence: Record<string, string> = {};
   for (const e of o.events) {
     if (e.type === "release_started") {
       stages = ((e.data.playbook as { stages?: PlaybookStage[] } | undefined)?.stages ??
@@ -294,6 +297,12 @@ export function releaseView(o: {
     ) {
       const id = String(e.data.agent_id);
       steers[id] = (steers[id] ?? 0) + 1;
+    } else if (
+      e.type === "release_stage_verified" &&
+      typeof e.data.stage === "string" &&
+      typeof e.data.evidence === "string"
+    ) {
+      evidence[e.data.stage] = e.data.evidence;
     }
   }
   const open: Record<string, DecisionRecord> = {};
@@ -316,6 +325,7 @@ export function releaseView(o: {
     steers,
     open,
     asked,
+    evidence,
   };
 }
 
@@ -380,10 +390,17 @@ const enter = (stage: string, attempt: number): ReleaseAction[] => [
   { kind: "spawn", stage, attempt },
 ];
 
-/** Ask the owner `stage_go` about an owner-gated stage (the `n`th time: `class: held` after a hold). */
+/**
+ * Ask the owner `stage_go` about an owner-gated stage (the `n`th time: `class: held` after a
+ * hold). It opens with the earlier stages' evidence, as `release_go` does.
+ */
 function askGo(v: ReleaseView, stage: PlaybookStage): ReleaseAction {
   const n = v.asked[stage.name] ?? 0;
   const done = v.train.stages.filter((s) => s.state === "verified").map((s) => s.name);
+  const stages = done.map((name) => {
+    const e = v.evidence[name];
+    return { name, ...(e !== undefined ? { evidence: e } : {}) };
+  });
   return {
     kind: "decide",
     decision: {
@@ -396,7 +413,7 @@ function askGo(v: ReleaseView, stage: PlaybookStage): ReleaseAction {
       question: `Wave ${v.wave}'s release stage ${stage.name} is owner-gated (verified so far: ${done.join(", ") || "none"}). Run it? go: volleyd spawns its agent; skip: the stage is skipped; hold: asked again.`,
       options: [...STAGE_GO_OPTIONS],
     },
-    data: { stage: stage.name, ...(n > 0 ? { class: "held" } : {}) },
+    data: { stage: stage.name, stages, ...(n > 0 ? { class: "held" } : {}) },
   };
 }
 
@@ -548,7 +565,10 @@ function onRecovery(
   ev: Extract<ReleaseEvent, { kind: "agent_recovery" }>,
 ): ReleaseAction[] {
   const stage = stageOfAgent(v, ev.agent_id);
-  if (stage === undefined || stateOf(v, stage) !== "running" || !v.releasing) return [];
+  // Paused too, as onResolved: the answer is consumed now (the agent already retired), and
+  // advance never respawns a stage whose run is still recorded. The spawn waits for the resume.
+  if (stage === undefined || stateOf(v, stage) !== "running" || !(v.releasing || v.paused))
+    return [];
   const run = v.runs[stage] as StageRun;
   if (ev.answer === "stop")
     return [
@@ -677,14 +697,22 @@ export async function verifyStage(
   }
   if (v.tag !== undefined) {
     const name = `tag ${v.tag}`;
+    // Every page (a common glob like `v*` outgrows the first 30 refs): --slurp makes an array
+    // of pages.
     const r = await exec(
-      ["gh", "api", `repos/{owner}/{repo}/git/matching-refs/tags/${globPrefix(v.tag)}`],
+      [
+        "gh",
+        "api",
+        `repos/{owner}/{repo}/git/matching-refs/tags/${globPrefix(v.tag)}`,
+        "--paginate",
+        "--slurp",
+      ],
       { cwd: o.cwd },
     );
     let refs: { ref?: string; object?: { sha?: string; type?: string } }[] = [];
     try {
       const parsed: unknown = r.code === 0 ? JSON.parse(r.stdout) : [];
-      if (Array.isArray(parsed)) refs = parsed;
+      if (Array.isArray(parsed)) refs = parsed.flat();
     } catch {}
     const re = globRegex(v.tag);
     const matching = refs.filter((x) => re.test((x.ref ?? "").replace(/^refs\/tags\//, "")));

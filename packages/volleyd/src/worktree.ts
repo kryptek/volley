@@ -31,9 +31,10 @@ export function releaseBranchName(wave: string, stage: string, attempt: number):
 }
 
 /**
- * The shape of every branch `branchName` (or `releaseBranchName`) mints: the wave-file id grammars for the wave and task,
- * a role volleyd spawns (brief.ts ROLES — not imported: brief.ts imports the fence, which uses
- * this) or `release-<stage>` (a stage name is id-shaped), and an attempt from 1. The fence lets `worktree add -B` re-create only such a branch.
+ * The shape of every branch `branchName` (or `releaseBranchName`) mints: the wave-file id
+ * grammars for the wave and task, a role volleyd spawns (brief.ts ROLES — not imported: brief.ts
+ * imports the fence, which uses this) or `release-<stage>` (a stage name is id-shaped), and an
+ * attempt from 1. The fence lets `worktree add -B` re-create only such a branch.
  */
 export const AGENT_BRANCH =
   /^[a-z0-9][a-z0-9_-]{0,62}\/([A-Za-z0-9][A-Za-z0-9_-]{0,62}-(implementer|spec_reviewer|quality_reviewer|fixup|rebase)|release-[a-z0-9][a-z0-9_-]{0,62})-[1-9][0-9]*$/;

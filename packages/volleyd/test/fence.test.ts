@@ -397,6 +397,7 @@ const ALLOWED: string[][] = [
   // release stage verification (SPEC §4.6.19): a file on the release branch, the tag as a GET
   ["git", "-C", "/tmp/wt", "show", "--quiet", "refs/remotes/origin/release/w1:CHANGELOG.md"],
   ["gh", "api", "repos/{owner}/{repo}/git/matching-refs/tags/v0."],
+  ["gh", "api", "repos/{owner}/{repo}/git/matching-refs/tags/v", "--paginate", "--slurp"],
   ["gh", "api", "repos/{owner}/{repo}/git/tags/0123456789abcdef0123456789abcdef01234567"],
   ["git", "-C", "/tmp/repo", "branch", "--track", "release/w1", "origin/release/w1"],
   ["git", "-C", "/tmp/repo", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/release/w1"],

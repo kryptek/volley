@@ -195,7 +195,11 @@ describe("release stages (SPEC §4.6.19)", () => {
       expect(status.stdout).toContain("release: deploy-staging awaiting go (1/3 verified)");
       expect(ofType("agent_spawned").filter((e) => e.task === RELEASE_TASK)).toHaveLength(1);
       const go = ofType("decision_opened").find((e) => e.data.kind === "stage_go");
-      expect(go?.data).toMatchObject({ stage: "deploy-staging", options: ["go", "skip", "hold"] });
+      expect(go?.data).toMatchObject({
+        stage: "deploy-staging",
+        options: ["go", "skip", "hold"],
+        stages: [{ name: "bump", evidence }],
+      });
 
       ctl = await ControlClient.connect(s.env.broker.url, NS);
       const r = await ctl.request("resolve", {

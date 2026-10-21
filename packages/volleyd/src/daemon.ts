@@ -5324,6 +5324,8 @@ export class Daemon {
         });
       },
       journal: (ev) => this.append(wave, ev),
+      // The interpreter's `attempt` is advisory: releaseSpawn recomputes it (agentAttempt counts
+      // burned identities and relaunches too), and the agent's `-<n>` is that one.
       spawn: (stage) => this.releaseSpawn(wave, stage),
       steer: (agentId, text) =>
         this.deliverSteer(

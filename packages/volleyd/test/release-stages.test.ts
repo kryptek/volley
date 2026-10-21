@@ -176,7 +176,13 @@ describe("nextRelease (SPEC §4.6.19)", () => {
       evidence: "/h/bump.md",
       head: "b".repeat(40),
     });
-    expect(kinds(t.step({ kind: "advance" }))).toEqual(["decide stage_go deploy-staging"]);
+    const ask = t.step({ kind: "advance" });
+    expect(kinds(ask)).toEqual(["decide stage_go deploy-staging"]);
+    // It opens with the earlier stages' evidence.
+    expect(ask[0]?.kind === "decide" && ask[0].data).toEqual({
+      stage: "deploy-staging",
+      stages: [{ name: "bump", evidence: "/h/bump.md" }],
+    });
     expect(t.view().train.stage).toBe("deploy-staging");
     expect(t.step({ kind: "advance" })).toEqual([]);
     expect(kinds(t.resolve("stage_go", "deploy-staging", "go"))).toEqual([
@@ -372,6 +378,26 @@ describe("nextRelease (SPEC §4.6.19)", () => {
     expect(u.view().train.stages[0]?.state).toBe("running");
     expect(u.view().attempt.bump).toBe(2);
   });
+
+  it("a recovery answer while the wave is paused still acts (its spawn waits for the resume)", () => {
+    const t = train();
+    t.step({ kind: "advance" });
+    t.spawned("bump", 1);
+    const ev = {
+      kind: "agent_recovery" as const,
+      agent_id: "w1-release-bump-1",
+      answer: "respawn" as const,
+      why: "agent gone",
+    };
+    expect(kinds(nextRelease({ ...t.view(), releasing: false, paused: true }, ev))).toEqual([
+      "retire w1-release-bump-1 relaunched",
+      "release_stage_failed bump",
+      "release_stage_entered bump",
+      "spawn bump 2",
+    ]);
+    // Stopped (neither releasing nor paused): nothing.
+    expect(nextRelease({ ...t.view(), releasing: false, paused: false }, ev)).toEqual([]);
+  });
 });
 
 describe("releaseGoInput", () => {
@@ -516,6 +542,7 @@ describe("verifyStage", () => {
     ancestor?: boolean;
     files?: string[];
     tags?: unknown[];
+    pages?: unknown[][];
     startAncestor?: boolean;
     tagObjects?: Record<string, string>;
   }) => {
@@ -538,8 +565,9 @@ describe("verifyStage", () => {
       const obj = argv[0] === "gh" ? /git\/tags\/([0-9a-f]+)$/.exec(String(argv[2])) : null;
       if (obj !== null)
         return r(JSON.stringify({ object: { sha: o.tagObjects?.[obj[1] as string] } }));
+      // --paginate --slurp: an array of pages.
       if (argv[0] === "gh" && a.includes("matching-refs/tags/v0."))
-        return r(JSON.stringify(o.tags ?? []));
+        return r(JSON.stringify(o.pages ?? [o.tags ?? []]));
       return r("", 1);
     };
     return { exec, calls };
@@ -602,6 +630,21 @@ describe("verifyStage", () => {
       "file NOTES.md",
       "result smoke",
     ]);
+  });
+
+  it("reads every page of matching tags (a match on page 2 holds)", async () => {
+    const page1 = Array.from({ length: 30 }, (_, i) => ({
+      ref: `refs/tags/v0.4.${i}`,
+      object: { sha: START, type: "commit" },
+    }));
+    const f = fake({
+      pages: [page1, [{ ref: "refs/tags/v0.5.0", object: { sha: TIP, type: "commit" } }]],
+    });
+    const r = await verifyStage(f.exec, { ...base, stage: stage({ tag: "v0.*" }) });
+    expect(r.missing).toEqual([]);
+    const call = f.calls.find((c) => c[0] === "gh" && c[2]?.includes("matching-refs"));
+    expect(call).toContain("--paginate");
+    expect(call).toContain("--slurp");
   });
 
   it("a verify.result field the agent published holds", async () => {

@@ -58,7 +58,8 @@ describe("renderStageMd", () => {
 
   it("a heavy stage takes its lease first", () => {
     const md = renderStageMd(TAG, { wave: "w1", release_branch: "release/w1", attempt: 2 });
-    expect(md).toContain("`volley lease acquire deploy`");
+    expect(md).toContain("`volley lease acquire --pool deploy`");
+    expect(md).toContain("`volley lease release --pool deploy --lease-id <id>`");
     expect(md.indexOf("volley lease acquire")).toBeLessThan(md.indexOf("names no commands"));
     expect(md).toContain("A tag matching `v0.5.*` exists on origin at the head of `release/w1`");
   });
