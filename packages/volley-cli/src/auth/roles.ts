@@ -89,7 +89,8 @@ const operator: RoleAcl[] = [
  * The needs-you inbox (`volley/_inbox/<id>`, SPEC §4.6.18) needs no rows of its own: every
  * account reads it through `volley/#`, no account or agent grant reaches it (their writes are
  * four levels deep, or under `_system`), and only `volleyd` and `supervisor` write it, through
- * `volley/#`. An answer is a mailbox request to volleyd, so any login that may steer answers.
+ * `volley/#`. A Desk login answers on its own account-op topic (`desk` grants it, `%u`), where the
+ * broker names the sender; the owner's CLI and coordinator sessions answer on volleyd's mailbox.
  */
 export const ROLE_ACLS: Record<VolleyRole, readonly RoleAcl[]> = {
   // The supervisor daemon: the whole tree, including `_waves/*`, `_waves/_config`, the screen
@@ -101,8 +102,14 @@ export const ROLE_ACLS: Record<VolleyRole, readonly RoleAcl[]> = {
   // Browser clients (volley dash, the Desk) and `steer` accounts: steer any agent and send control
   // requests (config_set included) to the daemon's mailbox. The Desk's resume probe subscribes to
   // a topic named by its own client id (nothing publishes there), granted here with `%c` so it
-  // does not hang on the broad read of the account role.
-  desk: [send("volley/+/+/mailbox"), read("volley/_system/desk-probe/%c")],
+  // does not hang on the broad read of the account role. Its own account-op topic carries its
+  // Needs-you answers (SPEC §4.6.18): the broker names the sender there, so volleyd can tell a
+  // Desk login from an agent claiming to be one.
+  desk: [
+    send("volley/+/+/mailbox"),
+    send("volley/_system/auth/ops/%u"),
+    read("volley/_system/desk-probe/%c"),
+  ],
   // Another volleyd: the whole tree except the account-op and answer topics, so it can neither
   // impersonate an admin nor forge volleyd's answers (SPEC §4.6.10).
   supervisor: [

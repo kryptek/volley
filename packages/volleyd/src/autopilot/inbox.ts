@@ -61,6 +61,12 @@ export interface InboxAnswerRequest {
   answer: string;
   by: string;
   where: InboxWhere;
+  /**
+   * Set by the daemon only when the request arrived on the sender's own account-op topic, where
+   * the broker names the sender, and the sender is a Desk login: the owner on another screen, so
+   * the ownership checks do not apply. Never read from a payload.
+   */
+  desk_login?: true;
 }
 
 /**

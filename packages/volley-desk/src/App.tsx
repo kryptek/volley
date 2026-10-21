@@ -93,6 +93,7 @@ import { emitSound } from "./sounds/emit";
 import { useNotifyMirror, useSoundSettings } from "./sounds/settings";
 import { useFlipSound, useSoundManager } from "./sounds/useSoundManager";
 import { ClaimButton } from "./steer/SteerPanel";
+import { routeDeskControl } from "./steer/deskControl";
 import { deskDevice } from "./steer/transport";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
 import { type RegistryAccount, accountChoices, accountList, resolveFields } from "./store/claude";
@@ -335,8 +336,6 @@ export default function App() {
     setNotify((prev) => ({ ...prev, sound: on })),
   );
   const steering = useSteering(state, writer, identity);
-  // volleyd's control channel for the Claude account ops; demo mode has no daemon to answer them.
-  const control = demo ? null : (steering.transport?.control ?? null);
   // volleyd's profile registry, as Settings › Claude accounts last fetched it (nothing is asked at load).
   const [registry, setRegistry] = useState<RegistryAccount[]>([]);
   const accounts = accountList(state.claudeAccounts, registry);
@@ -392,10 +391,22 @@ export default function App() {
   useEffect(() => {
     if (deskSettings === null) setFocusMachine(null);
   }, [deskSettings]);
-  /** volleyd's admin channel (account and setup ops); the Desk's own account must be an admin. */
+  /**
+   * volleyd's account-op channel: account and setup ops (the Desk's own account must be an
+   * admin), and any Desk login's Needs-you answers.
+   */
   const authOps = useMemo(
     () => (writer && identity && !demo ? createAuthOps(writer, { identity }) : null),
     [writer, identity, demo],
+  );
+  // volleyd's control channel (the Claude account ops, claims, Needs-you answers); demo mode has
+  // no daemon to answer it. A Needs-you answer rides this Desk login's own account-op topic, where
+  // volleyd knows it is the owner answering from another screen (SPEC §4.6.18).
+  const mailboxControl = demo ? null : (steering.transport?.control ?? null);
+  const control = useMemo(
+    () =>
+      routeDeskControl(mailboxControl, authOps, authOps ? readSessionRole(authOps.identity) : null),
+    [mailboxControl, authOps],
   );
   // Settings › Machines: the pairing ops ride the same admin channel (and its reply key).
   const peerOps = useMemo(

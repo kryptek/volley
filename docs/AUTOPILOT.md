@@ -46,7 +46,8 @@ briefs forbid it and the fence enforces it for volleyd itself.
   coordinator turn that ends on a question.
 
 Each of these is one item in the **needs-you inbox** and rings your phone once. Answer it
-wherever is closest: the Desk's **Needs you** window (desktop or phone), `volleyd inbox answer
+wherever is closest: the Desk's **Needs you** window (desktop or phone; from any Desk login: the
+owner on any screen), `volleyd inbox answer
 <id> <answer>`, `volleyd resolve`, or the terminal the question is on. The first answer wins;
 any later one is refused with where it was answered (`already answered on desk·phone`).
 ([Needs-you inbox](../packages/volleyd/README.md#needs-you-inbox),
