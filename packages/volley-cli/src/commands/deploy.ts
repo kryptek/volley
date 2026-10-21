@@ -324,13 +324,14 @@ export async function deploy({ argv, env, io, deps: given }: DeployArgs): Promis
  * The release tag HEAD is exactly at, else its branch, else the commit. Another tag on HEAD
  * (`smoke-ok`) is passed over: the rollback may check out only a release tag.
  */
+/** What HEAD is, for the rollback: a branch first (so it keeps the branch), then a release tag. */
 async function currentRef(exec: SetupExec, repo: string): Promise<Ref | null> {
-  const tag = await exec(git(repo, "describe", "--tags", "--exact-match", "HEAD"));
-  const t = tag.stdout.trim();
-  if (tag.code === 0 && TAG_RE.test(t)) return { kind: "tag", name: t };
   const branch = await exec(git(repo, "rev-parse", "--abbrev-ref", "HEAD"));
   const b = branch.stdout.trim();
   if (branch.code === 0 && b !== "" && b !== "HEAD") return { kind: "branch", name: b };
+  const tag = await exec(git(repo, "describe", "--tags", "--exact-match", "HEAD"));
+  const t = tag.stdout.trim();
+  if (tag.code === 0 && TAG_RE.test(t)) return { kind: "tag", name: t };
   const sha = await exec(git(repo, "rev-parse", "HEAD"));
   const s = sha.stdout.trim();
   return sha.code === 0 && /^[0-9a-f]{40}$/.test(s) ? { kind: "commit", name: s } : null;
@@ -342,7 +343,8 @@ export const DEPLOY_HELP = `Usage: volley deploy (<tag> | --latest) [--dry-run] 
 Take the checkout this machine's volleyd and Desk services run from to a release tag: fetch
 tags, check the tag out (detached), bun install --frozen-lockfile, build the Desk, self-check,
 restart both services, health-check. A failure after the checkout repeats those steps at the
-previous tag (or branch) and exits 1. Running waves continue: volleyd reconciles on start.
+previous branch (or tag, when HEAD was detached) and exits 1. Running waves continue: volleyd
+reconciles on start.
 
 The services checkout is the one volleyd's installed service runs (its launchd plist or systemd
 unit); with none installed, the checkout this volley runs from. A checkout with local changes is

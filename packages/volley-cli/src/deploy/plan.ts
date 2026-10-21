@@ -262,7 +262,7 @@ export function deployPlan(ctx: PlanContext): PlanStep[] {
         {
           argv:
             target.kind === "branch"
-              ? git(repo, "checkout", target.name)
+              ? git(repo, "checkout", target.name, "--")
               : git(repo, "checkout", "--detach", target.name),
         },
       ],

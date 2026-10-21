@@ -71,7 +71,7 @@ export function fakeRepo(opts: {
         return res(0, `Saved working directory and index state On x: ${g[4]}\n`);
       }
       if (g[0] === "checkout") {
-        const ref = g[g.length - 1] as string;
+        const ref = (g[1] === "--detach" ? g[2] : g[1]) as string;
         state.head =
           g[1] === "--detach"
             ? /^[0-9a-f]{40}$/.test(ref)

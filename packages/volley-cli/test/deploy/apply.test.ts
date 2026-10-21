@@ -195,7 +195,7 @@ describe("applyDeploy", () => {
     const r = await run();
     expect(r.from).toBe("main");
     expect(r.rolledBack).toBe(true);
-    expect(f.lines()).toContain(`git -C ${f.repo} checkout main`);
+    expect(f.lines()).toContain(`git -C ${f.repo} checkout main --`);
     expect(f.state.head).toEqual({ branch: "main" });
   });
 

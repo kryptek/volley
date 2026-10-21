@@ -189,7 +189,7 @@ describe("deployPlan", () => {
     ]);
     const back = deployPlan({ ...ctx, target: { kind: "branch", name: "main" }, fetch: false });
     expect(back[0]?.title).toBe("checkout main");
-    expect(back[0]?.commands[0]?.argv).toEqual(["git", "-C", "/r", "checkout", "main"]);
+    expect(back[0]?.commands[0]?.argv).toEqual(["git", "-C", "/r", "checkout", "main", "--"]);
     const sha = "0123456789abcdef0123456789abcdef01234567";
     const commit = deployPlan({ ...ctx, target: { kind: "commit", name: sha }, fetch: false });
     expect(commit[0]?.title).toBe("checkout 0123456 (detached)");

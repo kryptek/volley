@@ -41,7 +41,7 @@ export function deployFence({ repo, bun, services }: DeployFenceInputs) {
       gis("rev-parse", "HEAD") ||
       gis("describe", "--tags", "--exact-match", "HEAD") ||
       (gis("checkout", "--detach", arg(2)) && (TAG_RE.test(arg(2)) || SHA_RE.test(arg(2)))) ||
-      (gis("checkout", arg(1)) && BRANCH_RE.test(arg(1)) && !arg(1).includes("..")) ||
+      (gis("checkout", arg(1), "--") && BRANCH_RE.test(arg(1)) && !arg(1).includes("..")) ||
       (gis("stash", "push", "-u", "-m", arg(4)) && STASH_RE.test(arg(4))) ||
       (is(bun, "install", "--frozen-lockfile") && opts?.cwd === repo) ||
       (is(bun, "run", "build") && opts?.cwd === deskDir(repo)) ||

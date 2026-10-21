@@ -84,6 +84,7 @@ describe("volley deploy --dry-run", () => {
     // A dry run never fetches.
     expect(m.f.lines()).toEqual([
       `git -C ${m.f.repo} status --porcelain`,
+      `git -C ${m.f.repo} rev-parse --abbrev-ref HEAD`,
       `git -C ${m.f.repo} describe --tags --exact-match HEAD`,
       `git -C ${m.f.repo} tag --list v*`,
     ]);
@@ -237,7 +238,17 @@ describe("volley deploy", () => {
     m.health.volleyd.push("volleyd's status is failed");
     expect(await m.run(["v0.5.0"])).toBe(1);
     expect(m.io.readStderr().trim().split("\n").at(-1)).toMatch(/rolled back to main$/);
-    expect(m.f.lines()).toContain(`git -C ${m.f.repo} checkout main`);
+    expect(m.f.lines()).toContain(`git -C ${m.f.repo} checkout main --`);
+  });
+
+  it("prefers the branch over a release tag on HEAD, so the rollback keeps the branch", async () => {
+    const m = machine({ head: { tag: "v0.4.0", branch: "main" } });
+    m.health.volleyd.push("volleyd's status is failed");
+    expect(await m.run(["v0.5.0"])).toBe(1);
+    expect(m.io.readStdout()).toContain("current: main (branch)");
+    expect(m.io.readStderr().trim().split("\n").at(-1)).toMatch(/rolled back to main$/);
+    expect(m.f.lines()).toContain(`git -C ${m.f.repo} checkout main --`);
+    expect(m.f.state.head).toEqual({ branch: "main" });
   });
 
   it("--force-clean stashes first and names the stash", async () => {
