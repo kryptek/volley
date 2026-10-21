@@ -325,6 +325,92 @@ describe("volley peer doctor: the Claude profile's MCP server", () => {
   });
 });
 
+describe("volley peer doctor: every volley MCP entry on the machine", () => {
+  const OLD = "/path/to/old-checkout";
+  const profileJson = (m: FakePeerMachine, acct: string) =>
+    join(m.home, ".volley", "claude", acct, ".claude.json");
+  const writeJson = (file: string, j: unknown) => {
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, `${JSON.stringify(j, null, 2)}\n`);
+  };
+  const volleyArgs = (file: string) =>
+    (JSON.parse(readFileSync(file, "utf-8")) as { mcpServers: { volley: { args: string[] } } })
+      .mcpServers.volley.args;
+  const secretEnv = { VOLLEY_AUTH_PASSWORD: "hunter2-not-printed", VOLLEY_AGENT_ID: "acct-b" };
+
+  it("an account profile whose volley entry runs an old checkout fails naming it; --fix re-points it and keeps the rest", async () => {
+    const m = machine({ profile: { url: TUNNEL } });
+    const file = profileJson(m, "acct-b");
+    writeJson(file, {
+      numStartups: 3,
+      mcpServers: {
+        volley: { ...fakeMcpEntry(OLD, TUNNEL), env: secretEnv },
+        other: { command: "x" },
+      },
+    });
+    writeJson(profileJson(m, "acct-a"), { mcpServers: { volley: fakeMcpEntry(m.volleyDir) } });
+    const r = await report(m);
+    expect(check(r, "mcp")).toMatchObject({ ok: false, severity: "warn" });
+    expect(check(r, "mcp")?.detail).toBe(`account profile acct-b runs ${OLD}`);
+    expect(check(r, "mcp")?.fix).toBe("volley peer doctor --fix");
+
+    const fixed = await run(m, { fix: true, yes: true });
+    expect(fixed.stdout).not.toContain("hunter2");
+    expect(volleyArgs(file)).toEqual([
+      "run",
+      join(m.volleyDir, "packages", "volley-mcp", "src", "index.ts"),
+    ]);
+    const after = JSON.parse(readFileSync(file, "utf-8"));
+    expect(after.numStartups).toBe(3);
+    expect(after.mcpServers.other).toEqual({ command: "x" });
+    expect(after.mcpServers.volley.env).toEqual(secretEnv);
+    // The user scope was right: claude mcp is never run for it.
+    expect(mcpCalls(m)).toEqual([]);
+    expect(check(await report(m), "mcp")?.ok).toBe(true);
+  });
+
+  it("the wave repo's .mcp.json is checked and re-pointed too", async () => {
+    const m = machine({ profile: { url: TUNNEL } });
+    const file = join(m.repoPath, ".mcp.json");
+    writeJson(file, { mcpServers: { volley: fakeMcpEntry(OLD) } });
+    const r = await report(m);
+    expect(check(r, "mcp")?.detail).toBe(`${file} runs ${OLD}`);
+    await run(m, { fix: true, yes: true });
+    expect(volleyArgs(file)[1]).toBe(
+      join(m.volleyDir, "packages", "volley-mcp", "src", "index.ts"),
+    );
+  });
+
+  it("the user scope on an old checkout names the directory it runs", async () => {
+    const m = machine({ profile: { mcp: fakeMcpEntry(OLD, TUNNEL), url: TUNNEL } });
+    expect(check(await report(m), "mcp")?.detail).toBe(`~/.claude.json runs ${OLD}`);
+  });
+
+  it("mcp: own skips only the user scope: an account profile is still checked", async () => {
+    const m = machine({ profile: { mcp: fakeMcpEntry(OLD, TUNNEL), url: TUNNEL } });
+    writeJson(profileJson(m, "acct-b"), { mcpServers: { volley: fakeMcpEntry(OLD) } });
+    const sharing = { ...DEFAULT_SHARING, mcp: "own" as const };
+    const r = await report(m, { profile: target({ sharing }) });
+    expect(check(r, "mcp")).toMatchObject({ ok: false });
+    expect(check(r, "mcp")?.detail).toBe(`account profile acct-b runs ${OLD}`);
+    await run(m, { profile: target({ sharing }), fix: true, yes: true });
+    expect(mcpCalls(m)).toEqual([]);
+    expect(volleyArgs(m.claudeJsonFile)[1]).toContain(OLD);
+    expect(volleyArgs(profileJson(m, "acct-b"))[1]).toContain(m.volleyDir);
+  });
+
+  it("the supervisor's volley_dir differing from this checkout fails naming both, and is not rewritten", async () => {
+    const m = machine({ profile: { url: TUNNEL } });
+    const r = await report(m, { volleyDir: OLD });
+    expect(check(r, "mcp")?.ok).toBe(false);
+    expect(check(r, "mcp")?.detail).toContain(OLD);
+    expect(check(r, "mcp")?.detail).toContain(m.volleyDir);
+    await run(m, { volleyDir: OLD, fix: true, yes: true });
+    expect(mcpCalls(m)).toEqual([]);
+    expect(check(await report(m, { volleyDir: m.volleyDir }), "mcp")?.ok).toBe(true);
+  });
+});
+
 describe("volley peer doctor: the Claude profile overall", () => {
   it("every profile check is a warn, in the documented order, and the sharing row names its modes' source", async () => {
     const m = machine({ profile: { skills: "absent", hooks: "absent", mcp: "absent" } });
@@ -503,5 +589,22 @@ describe("volley peer doctor: where the sharing modes come from", () => {
     expect(bad.stderr).toContain("--sharing");
     const typo = await verb(m, ["--sharing", '{"skils":"own"}']);
     expect(typo.exit).toBe(2);
+  });
+
+  it("--supervisor-volley-dir <abs> (volleyd's Repair) is compared with this checkout; a relative one is a usage error", async () => {
+    const m = machine({ profile: { url: TUNNEL } });
+    const r = await verb(m, [
+      "--repo",
+      m.repoPath,
+      "--supervisor-volley-dir",
+      "/path/to/old-checkout",
+    ]);
+    expect(check(r.report, "mcp")?.ok).toBe(false);
+    expect(check(r.report, "mcp")?.detail).toContain("/path/to/old-checkout");
+    const same = await verb(m, ["--repo", m.repoPath, "--supervisor-volley-dir", m.volleyDir]);
+    expect(check(same.report, "mcp")?.ok).toBe(true);
+    const rel = await verb(m, ["--supervisor-volley-dir", "volley"]);
+    expect(rel.exit).toBe(2);
+    expect(rel.stderr).toContain("--supervisor-volley-dir");
   });
 });

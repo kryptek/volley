@@ -1,4 +1,14 @@
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DEFAULT_SHARING, type Sharing } from "volleyd/claude/sharing";
 import type { Check, Fix } from "./doctor";
@@ -15,10 +25,12 @@ export { DEFAULT_SHARING, type Sharing };
  * Every check is a `warn`: an agent volleyd spawns still runs without them (its spawn provides
  * `.volley/mcp.json` and the hooks itself); they are for the sessions people start here. The
  * fixes write only inside `~/.claude`, `~/.claude.json`'s `mcpServers` and the hooks' state dir,
- * through the packages' own installers and `claude mcp`. No credential is read, printed or
- * registered: the MCP entry carries no broker login, the hooks get the URL without one, and an
- * entry that has settings of its own is never rewritten (its fix is printed for the person to
- * run, naming those settings but not their values).
+ * through the packages' own installers and `claude mcp`, and re-point the volley MCP entry of a
+ * Claude account profile or the wave repo's `.mcp.json` at this checkout (its other keys kept).
+ * No credential is read, printed or registered: the MCP entry carries no broker login, the hooks
+ * get the URL without one, and a user-scope entry that has settings of its own is never
+ * rewritten (its fix is printed for the person to run, naming those settings but not their
+ * values).
  */
 
 export const PROFILE_CHECKS = ["skills", "hooks", "mcp", "sharing"] as const;
@@ -104,7 +116,27 @@ export interface ProfileFacts {
     own: boolean;
     /** For an `own` entry: the re-registration that keeps them (other keys as placeholders). */
     keep: string[] | null;
+    /** The checkout the entry runs instead of this one, when it runs another's volley-mcp. */
+    ran: string | null;
   };
+  /**
+   * The volley MCP entries besides the user scope's: each Claude account profile's (under the
+   * Volley home) and the wave repo's `.mcp.json`, where one exists.
+   */
+  mcpScopes: McpScope[];
+  /** The supervisor's `volley_dir` for this machine, when it is not this checkout. */
+  supervisorDir: string | null;
+}
+
+export interface McpScope {
+  /** How the row names it: `account profile <id>`, or the file. */
+  label: string;
+  file: string;
+  /** elsewhere: runs another checkout's volley-mcp; differs: runs no volley-mcp at all. */
+  state: "ok" | "elsewhere" | "differs" | "unreadable";
+  /** For `elsewhere`: the arg that names the other entry, and that checkout. */
+  arg: string | null;
+  ran: string | null;
 }
 
 type Sh = (argv: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
@@ -167,6 +199,62 @@ function installedPrefix(settings: string, name: string): string | null {
   return null;
 }
 
+/** The tail of a volley-mcp entry path after the checkout. */
+const MCP_TAIL = "/packages/volley-mcp/src/index.ts";
+
+/** The arg naming a volley-mcp entry (any checkout's), and that checkout. */
+function volleyMcpArg(args: unknown): { arg: string; ran: string } | null {
+  if (!Array.isArray(args)) return null;
+  const arg = args.find((a): a is string => typeof a === "string" && a.endsWith(MCP_TAIL));
+  return arg !== undefined ? { arg, ran: arg.slice(0, -MCP_TAIL.length) } : null;
+}
+
+/** `mcpServers.volley` in a Claude config file: undefined when the file cannot be read. */
+function volleyEntryIn(file: string): Record<string, unknown> | null | undefined {
+  let j: unknown;
+  try {
+    j = JSON.parse(readFileSync(file, "utf-8"));
+  } catch {
+    return undefined;
+  }
+  if (typeof j !== "object" || j === null || Array.isArray(j)) return undefined;
+  const servers = (j as { mcpServers?: unknown }).mcpServers;
+  if (typeof servers !== "object" || servers === null) return null;
+  const v = Object.hasOwn(servers, "volley") ? (servers as { volley: unknown }).volley : null;
+  return typeof v === "object" && v !== null ? (v as Record<string, unknown>) : null;
+}
+
+function mcpScope(label: string, file: string, entry: string): McpScope | null {
+  if (!existsSync(file)) return null;
+  const v = volleyEntryIn(file);
+  if (v === null) return null;
+  const scope: McpScope = { label, file, state: "unreadable", arg: null, ran: null };
+  if (v === undefined) return scope;
+  const found = volleyMcpArg(v.args);
+  if (found === null) return { ...scope, state: "differs" };
+  if (realOf(found.arg) === realOf(entry)) return { ...scope, state: "ok" };
+  return { ...scope, state: "elsewhere", ...found };
+}
+
+/**
+ * Re-point `file`'s volley MCP entry from `from` to `entry`, every other key kept (its env can
+ * hold a login: it is never read out). Claude Code rewrites its config often, so the file is
+ * re-read just before the rename and left alone if it changed meanwhile.
+ */
+export function repointVolleyEntry(file: string, from: string, entry: string): void {
+  const before = readFileSync(file, "utf-8");
+  const j = JSON.parse(before) as { mcpServers: { volley: { args: unknown[] } } };
+  const v = j.mcpServers.volley;
+  v.args = v.args.map((a) => (a === from ? entry : a));
+  const tmp = `${file}.volley-doctor.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(j, null, 2)}\n`, { mode: statSync(file).mode & 0o777 });
+  if (readFileSync(file, "utf-8") !== before) {
+    rmSync(tmp, { force: true });
+    throw new Error(`${file} changed while it was being updated: run the doctor again`);
+  }
+  renameSync(tmp, file);
+}
+
 const lastLine = (s: string) => s.trim().split("\n").pop()?.trim() ?? "";
 
 /** A single-quoted shell word. */
@@ -175,7 +263,18 @@ const shellLine = (argv: string[]) => argv.map(sq).join(" ");
 
 export async function gatherProfile(
   sh: Sh,
-  where: { home: string; volleyDir: string; bun: string | null; claude: string | null },
+  where: {
+    home: string;
+    volleyDir: string;
+    bun: string | null;
+    claude: string | null;
+    /** The Claude account profiles' root (default `<home>/.volley/claude`). */
+    claudeRoot?: string;
+    /** The wave repo's clone: its `.mcp.json` is checked. */
+    repo?: string | null;
+    /** The supervisor's `volley_dir` for this machine (where it launches agents from). */
+    supervisorDir?: string | null;
+  },
   given: ProfileTarget,
 ): Promise<ProfileFacts> {
   const { home, volleyDir, bun, claude } = where;
@@ -270,6 +369,7 @@ export async function gatherProfile(
     why: null,
     own: false,
     keep: null,
+    ran: null,
   };
   const file = join(home, ".claude.json");
   let j: unknown = {};
@@ -309,8 +409,11 @@ export async function gatherProfile(
         /(^|\/)bun$/.test(command) &&
         Array.isArray(args) &&
         args.some((a) => typeof a === "string" && realOf(a) === realOf(entry));
-      if (!runsEntry) mcp.why = "does not run this checkout's volley-mcp";
-      else if (target.brokerUrl !== null && envs.VOLLEY_BROKER_URL !== target.brokerUrl) {
+      if (!runsEntry) {
+        const found = volleyMcpArg(args);
+        mcp.ran = found !== null && realOf(found.arg) !== realOf(entry) ? found.ran : null;
+        mcp.why = mcp.ran !== null ? `runs ${mcp.ran}` : "does not run this checkout's volley-mcp";
+      } else if (target.brokerUrl !== null && envs.VOLLEY_BROKER_URL !== target.brokerUrl) {
         mcp.why = `is not at ${target.brokerUrl}`;
       } else if (
         target.namespace !== null &&
@@ -321,7 +424,25 @@ export async function gatherProfile(
       if (mcp.why !== null) mcp.state = "differs";
     }
   }
-  return { home, target, skillsDir, skills, hooks, mcp };
+
+  // The other places a volley entry lives: each account profile's `.claude.json` (its
+  // CLAUDE_CONFIG_DIR) and the wave repo's `.mcp.json`.
+  const root = where.claudeRoot ?? join(home, ".volley", "claude");
+  const repo = where.repo ?? null;
+  let accounts: string[] = [];
+  try {
+    accounts = readdirSync(root, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+      .sort();
+  } catch {}
+  const mcpScopes = [
+    ...accounts.map((a) => mcpScope(`account profile ${a}`, join(root, a, ".claude.json"), entry)),
+    ...(repo !== null ? [mcpScope(join(repo, ".mcp.json"), join(repo, ".mcp.json"), entry)] : []),
+  ].filter((s): s is McpScope => s !== null);
+  const sup = where.supervisorDir ?? null;
+  const supervisorDir = sup !== null && realOf(sup) !== realOf(volleyDir) ? sup : null;
+  return { home, target, skillsDir, skills, hooks, mcp, mcpScopes, supervisorDir };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -414,7 +535,8 @@ function hooksCheck(p: ProfileFacts): Check {
   }
 }
 
-function mcpCheck(p: ProfileFacts): Check {
+/** The user scope's entry (`~/.claude.json`), registered through `claude mcp`. */
+function userMcpCheck(p: ProfileFacts): Check {
   const m = p.mcp;
   if (p.target.sharing.mcp === "own")
     return warn("mcp", true, `the MCP servers: ${leftAsIs("mcp")}`);
@@ -433,6 +555,7 @@ function mcpCheck(p: ProfileFacts): Check {
   if (m.state === "missing") {
     return warn("mcp", false, "the volley MCP server is not registered", stepsFix([m.add]));
   }
+  const subject = m.ran !== null ? "~/.claude.json" : "the volley MCP server";
   // Not atomic: should add-json fail after the remove, the next check reports the server
   // missing and its fix adds it back.
   const steps = [m.remove, m.add];
@@ -442,11 +565,61 @@ function mcpCheck(p: ProfileFacts): Check {
     return warn(
       "mcp",
       false,
-      `the volley MCP server ${m.why}; it has settings of its own, so it is yours to update (replace each <yours> with your value)`,
+      `${subject} ${m.why}; it has settings of its own, so it is yours to update (replace each <yours> with your value)`,
       { command: [m.remove, m.keep].map(shellLine).join(" && ") },
     );
   }
-  return warn("mcp", false, `the volley MCP server ${m.why}`, stepsFix(steps));
+  return warn("mcp", false, `${subject} ${m.why}`, stepsFix(steps));
+}
+
+const scopeWhy = (s: McpScope) =>
+  s.state === "elsewhere"
+    ? `${s.label} runs ${s.ran}`
+    : s.state === "differs"
+      ? `${s.label} does not run this checkout's volley-mcp`
+      : `${s.label}: ${s.file} cannot be read`;
+
+/**
+ * Every volley MCP entry on the machine runs this checkout: the user scope's (skipped under
+ * `mcp: own`), each account profile's and the wave repo's `.mcp.json`; and this checkout is the
+ * supervisor's `volley_dir`, when it is known (agents are launched from there).
+ */
+function mcpCheck(p: ProfileFacts): Check {
+  const checkout = p.mcp.entry.slice(0, -MCP_TAIL.length);
+  if (p.supervisorDir !== null) {
+    // No entry can run both: the doctor to run is the one in the supervisor's checkout.
+    return warn(
+      "mcp",
+      false,
+      `the supervisor launches agents from ${p.supervisorDir}, but this doctor runs ${checkout}`,
+      {
+        command: shellLine([
+          "bun",
+          join(p.supervisorDir, "packages", "volley-cli", "src", "cli.ts"),
+          "peer",
+          "doctor",
+          "--fix",
+        ]),
+      },
+    );
+  }
+  const user = userMcpCheck(p);
+  const bad = p.mcpScopes.filter((s) => s.state !== "ok");
+  if (bad.length === 0) return user;
+  const detail = [...(user.ok ? [] : [user.detail]), ...bad.map(scopeWhy)].join("; ");
+  const repoint = bad.filter((s) => s.state === "elsewhere");
+  // A user scope the person fixes by hand goes first: the next run re-points the rest.
+  if (repoint.length === 0 || (!user.ok && user.fix?.steps === undefined)) {
+    return warn("mcp", false, detail, user.ok ? undefined : user.fix);
+  }
+  return warn("mcp", false, detail, {
+    command: "volley peer doctor --fix",
+    steps: user.ok ? [] : (user.fix?.steps ?? []),
+    apply: repoint.map((s) => ({
+      what: `${s.file}: the volley entry re-pointed at ${checkout}`,
+      run: () => repointVolleyEntry(s.file, s.arg as string, p.mcp.entry),
+    })),
+  });
 }
 
 /** The four checks, in this order: skills, hooks, mcp, then the sharing modes they applied. */
