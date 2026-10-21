@@ -37,6 +37,12 @@ export interface WaveOptions {
   satisfied?: number[];
   /** The wave's `brief_preface:` (relative to the repo, or absolute); default `.volley/brief-preface.md`. */
   briefPreface?: string;
+  /** Who merges a gated PR: `auto` (volleyd, the default) or `manual` (a human). */
+  merge?: "auto" | "manual";
+  /** `config: { autopilot: { enabled } }`; omitted, the wave inherits the supervisor's setting. */
+  autopilot?: boolean;
+  /** `config: { branch_update }`; `merge` is the recommended setting for autopilot waves. */
+  branchUpdate?: "merge" | "rebase";
 }
 
 export interface WaveResult {
@@ -208,6 +214,28 @@ export function parseDependsOn(
 /** JSON is valid YAML: a JSON string is a double-quoted scalar, a JSON array a flow sequence. */
 const q = (v: unknown) => JSON.stringify(v);
 
+/** The wave's `config:` line (per-wave tunables), when any option sets one. */
+function waveConfigLine(opts: WaveOptions): string[] {
+  const config = {
+    ...(opts.autopilot !== undefined ? { autopilot: { enabled: opts.autopilot } } : {}),
+    ...(opts.branchUpdate !== undefined ? { branch_update: opts.branchUpdate } : {}),
+  };
+  return Object.keys(config).length > 0 ? [`config: ${q(config)}`] : [];
+}
+
+/**
+ * The lines printed after the wave file is written: how to submit it, owned by the stable
+ * coordinator name (`VOLLEY_COORDINATOR`), and whose name that is.
+ */
+export function submitLines(file: string, coordinator: string | undefined): string[] {
+  return [
+    `submit: volleyd run ${file} --owner "$VOLLEY_COORDINATOR"`,
+    coordinator !== undefined && coordinator !== ""
+      ? `owner: ${coordinator} (VOLLEY_COORDINATOR)`
+      : "owner: VOLLEY_COORDINATOR is unset: set it in the volley MCP server's env (a stable name like coord-main) before submitting",
+  ];
+}
+
 /** Turn a set of issues into a wave file. Pure; throws with the offending issue named. */
 export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveResult {
   if (!WAVE_ID.test(opts.wave)) {
@@ -247,6 +275,8 @@ export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveRes
     ...(opts.namespace !== undefined ? [`namespace: ${q(opts.namespace)}`] : []),
     `brief_preface: ${q(opts.briefPreface ?? DEFAULT_BRIEF_PREFACE)}`,
     `pipeline: ${opts.pipeline !== undefined ? q(opts.pipeline) : "[implement, [spec_review, quality_review], fixup, merge_ready]"}`,
+    `merge: ${q(opts.merge ?? "auto")}`,
+    ...waveConfigLine(opts),
     "tasks:",
   ];
   for (const issue of issues) {
@@ -304,6 +334,7 @@ export function ensureBriefPreface(
 const HELP = `Usage: bun run scripts/wave-from-issues.ts <issues.json> --wave <id> --repo <path>
          --release-branch <branch> --model <model> [--pipeline <json>] [--namespace <ns>]
          [--repo-slug <owner/repo>] [--satisfied <n,n,...>] [--brief-preface <path>]
+         [--merge auto|manual] [--autopilot on|off] [--branch-update merge|rebase]
          [--out <wave.yaml>]
 
 <issues.json> is a JSON array of { number, title, body } ("-" reads stdin), e.g.
@@ -320,6 +351,11 @@ The wave file names a brief preface (--brief-preface, default .volley/brief-pref
 repo) that volleyd puts at the top of every agent's brief. When --repo is a directory on this
 machine and that file does not exist, it is written from templates/brief-preface.md (public-repo
 hygiene rules); an existing one is never changed.
+--merge writes merge: (default auto: volleyd squash-merges each gated PR; manual: a human does).
+--autopilot writes config: { autopilot: { enabled } } (omitted: the supervisor's setting, on by
+default). --branch-update writes config: { branch_update } (merge is recommended for autopilot
+waves: no force-push). The last lines on stderr are the submit command, owned by the stable
+coordinator name in VOLLEY_COORDINATOR, and that name.
 `;
 
 function main(argv: string[]): number {
@@ -359,6 +395,21 @@ function main(argv: string[]): number {
     return 2;
   }
   const satisfied = satisfiedRaw.map(Number);
+  const choice = <T extends string>(flag: string, value: string | undefined, allowed: T[]) => {
+    if (value === undefined || (allowed as string[]).includes(value)) return value as T | undefined;
+    throw new Error(`--${flag} must be ${allowed.join(" or ")}, got ${value}`);
+  };
+  let merge: "auto" | "manual" | undefined;
+  let autopilot: "on" | "off" | undefined;
+  let branchUpdate: "merge" | "rebase" | undefined;
+  try {
+    merge = choice("merge", v.merge, ["auto", "manual"]);
+    autopilot = choice("autopilot", v.autopilot, ["on", "off"]);
+    branchUpdate = choice("branch-update", v["branch-update"], ["merge", "rebase"]);
+  } catch (e) {
+    process.stderr.write(`wave-from-issues: ${e instanceof Error ? e.message : String(e)}\n`);
+    return 2;
+  }
   let pipeline: unknown[] | undefined;
   if (v.pipeline !== undefined) {
     let value: unknown;
@@ -388,6 +439,9 @@ function main(argv: string[]): number {
       ...(v["repo-slug"] !== undefined ? { repoSlug: v["repo-slug"] } : {}),
       ...(v["brief-preface"] !== undefined ? { briefPreface: v["brief-preface"] } : {}),
       satisfied,
+      ...(merge !== undefined ? { merge } : {}),
+      ...(autopilot !== undefined ? { autopilot: autopilot === "on" } : {}),
+      ...(branchUpdate !== undefined ? { branchUpdate } : {}),
     });
     if (v.out !== undefined) writeFileSync(v.out, yaml);
     else process.stdout.write(yaml);
@@ -405,6 +459,9 @@ function main(argv: string[]): number {
       process.stderr.write(
         `note: no Depends on:/deps: line in ${undeclared.map((n) => `#${n}`).join(", ")}; confirm their order before submitting\n`,
       );
+    }
+    for (const line of submitLines(v.out ?? "<wave.yaml>", process.env.VOLLEY_COORDINATOR)) {
+      process.stderr.write(`${line}\n`);
     }
     return 0;
   } catch (e) {
@@ -426,6 +483,9 @@ function parse(argv: string[]) {
       "repo-slug": { type: "string" },
       satisfied: { type: "string" },
       "brief-preface": { type: "string" },
+      merge: { type: "string" },
+      autopilot: { type: "string" },
+      "branch-update": { type: "string" },
       out: { type: "string" },
       help: { type: "boolean", short: "h" },
     },

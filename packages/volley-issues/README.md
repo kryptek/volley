@@ -50,8 +50,13 @@ The full surface is in [`SKILL.md`](./SKILL.md). Two dispatch paths:
 - **Volleyd path** (default when `volleyd status` succeeds): the skill turns
   the issues into a wave file at `.volley/waves/<date>-<theme>.yaml`
   (`after:` lists come from `Depends on:` / `deps:` lines in the issue
-  bodies), runs `volleyd validate` then `volleyd run --owner <coordinator id>`,
-  and waits on the wave's decisions and merge-ready gates.
+  bodies), runs `volleyd validate` then
+  `volleyd run --owner "$VOLLEY_COORDINATOR"` (the stable coordinator name),
+  and **leaves**: under autopilot volleyd answers routine decisions and merges
+  gated PRs itself, and what still needs the owner reaches the Desk's
+  Needs-you window and the morning digest. The optional wait is one
+  `volley sub` on `volley/_waves/<wave>/digest`. With `--autopilot off` the
+  session drives the wave by hand (decisions and merge-ready gates).
 - **Legacy path**: the skill launches each agent itself and runs the
   per-agent "watch for terminal status, pick up the PR" loop.
 
@@ -64,7 +69,8 @@ issues JSON in, wave YAML out.
 for n in 101 102 103; do gh issue view $n --json number,title,body; done | jq -s . > issues.json
 bun run scripts/wave-from-issues.ts issues.json --wave 2026-10-18-example \
   --repo "$(git rev-parse --show-toplevel)" --release-branch release/2026-10-18-example \
-  --model claude-opus-4-7 --out .volley/waves/2026-10-18-example.yaml
+  --model claude-opus-4-7 --merge auto --autopilot on --branch-update merge \
+  --out .volley/waves/2026-10-18-example.yaml
 ```
 
 Each issue becomes a task named by its title's task tag (`O0: …` → `O0`), else `i<N>`; `Depends on: #101` becomes `after: [i101]` (or the tag of #101).
@@ -73,7 +79,14 @@ URLs for this repository. A dependency outside the set is an error naming it,
 unless it is listed in `--satisfied` (already merged); so is a dependency line
 the helper cannot read (`Depends on: T3`): a dependency is never silently
 dropped. Issues with no dependency line are reported on stderr so their order
-can be confirmed. `--help` lists every option.
+can be confirmed. `--merge auto|manual` writes `merge:` (default `auto`:
+volleyd merges each gated PR); `--autopilot on|off` writes
+`config: { autopilot: { enabled } }` and `--branch-update merge|rebase`
+writes `config: { branch_update }` (`merge`, no force-push, is recommended for
+autopilot waves); left out, those two follow the supervisor's settings. The
+last stderr lines are the submit command, `volleyd run <file> --owner
+"$VOLLEY_COORDINATOR"`, and the owner that names (or a note that
+`VOLLEY_COORDINATOR` is unset). `--help` lists every option.
 
 ## Brief gate
 
