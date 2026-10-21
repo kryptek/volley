@@ -21,7 +21,10 @@ import { THEMES } from "../src/sounds/themes";
 afterEach(() => localStorage.clear());
 
 /** The section over the real settings hook, so every change round-trips through storage. */
-function Harness(over: Partial<SoundSectionProps> = {}) {
+function Harness({
+  group = null,
+  ...over
+}: Partial<SoundSectionProps> & { group?: string | null }) {
   const [sound, setSound] = useSoundSettings();
   return (
     <Sound
@@ -31,16 +34,34 @@ function Harness(over: Partial<SoundSectionProps> = {}) {
       audition={() => {}}
       disposeAudition={() => {}}
       canVibrate
+      group={group}
       {...over}
     />
   );
 }
 
 const sw = (name: string) => screen.getByRole("switch", { name });
+/** The list and each group's page. */
+const PAGES = [null, "theme", "volume", "events", "when"] as const;
 
 describe("Settings › Sound", () => {
-  it("shows twelve theme cards with the selected one pressed", () => {
+  it("opens on its groups: Theme, Volume, Sounds and When sounds play, with summaries", () => {
     render(<Harness />);
+    const rows = within(screen.getByRole("list", { name: "Sound groups" })).getAllByRole("button");
+    expect(rows.map((b) => b.querySelector(".gl-label")?.textContent)).toEqual([
+      "Theme",
+      "Volume",
+      "Sounds",
+      "When sounds play",
+    ]);
+    expect(screen.getByRole("button", { name: "Volume" })).toHaveAccessibleDescription("70%");
+    expect(screen.getByRole("button", { name: "When sounds play" })).toHaveAccessibleDescription(
+      "always",
+    );
+  });
+
+  it("shows twelve theme cards with the selected one pressed", () => {
+    render(<Harness group="theme" />);
     const picks = THEMES.map((t) =>
       screen.getByRole("button", { name: new RegExp(`^${t.label}`) }),
     );
@@ -57,7 +78,7 @@ describe("Settings › Sound", () => {
           finish = r;
         }),
     );
-    render(<Harness loadTheme={loadTheme} />);
+    render(<Harness group="theme" loadTheme={loadTheme} />);
     fireEvent.click(screen.getByRole("button", { name: /^Arcade 8-bit/ }));
     expect(loadTheme).toHaveBeenCalledWith("arcade");
     expect(loadSoundSettings().theme).toBe("arcade");
@@ -71,7 +92,7 @@ describe("Settings › Sound", () => {
   });
 
   it("master volume and Mute all persist", () => {
-    render(<Harness />);
+    render(<Harness group="volume" />);
     const slider = screen.getByRole("slider", { name: "Master volume" });
     fireEvent.keyDown(slider, { key: "End" });
     expect(loadSoundSettings().volume).toBe(1);
@@ -80,7 +101,7 @@ describe("Settings › Sound", () => {
   });
 
   it("lists the per-event switches by group with their defaults; a toggle saves only its key", () => {
-    render(<Harness />);
+    render(<Harness group="events" />);
     for (const { group } of EVENT_GROUPS)
       expect(screen.getByRole("heading", { name: group })).toBeInTheDocument();
     expect(sw("Agent working sound")).toHaveAttribute("aria-checked", "false");
@@ -92,7 +113,7 @@ describe("Settings › Sound", () => {
   });
 
   it("the quiet rules round-trip through storage; an invalid time is ignored on blur", () => {
-    render(<Harness />);
+    render(<Harness group="when" />);
     fireEvent.click(sw("Only when the Desk tab is hidden"));
     fireEvent.click(sw("Quiet hours"));
     fireEvent.click(sw("Attention sounds too"));
@@ -114,26 +135,39 @@ describe("Settings › Sound", () => {
   });
 
   it("hides the vibrate row where the browser cannot vibrate", () => {
-    render(<Harness canVibrate={false} />);
+    render(<Harness group="when" canVibrate={false} />);
     expect(screen.queryByRole("switch", { name: "Vibrate on attention" })).toBeNull();
   });
 
-  it("passes axe", async () => {
-    render(
-      <main>
-        <Harness />
-      </main>,
-    );
-    const results = await axe.run(document.body, {
-      rules: { "color-contrast": { enabled: false } },
-    });
-    expect(results.violations.map((v) => v.id)).toEqual([]);
+  it("passes axe, on the list and every page", async () => {
+    for (const group of PAGES) {
+      const { unmount } = render(
+        <main>
+          <Harness group={group} />
+        </main>,
+      );
+      const results = await axe.run(document.body, {
+        rules: { "color-contrast": { enabled: false } },
+      });
+      expect(
+        results.violations.map((v) => v.id),
+        String(group),
+      ).toEqual([]);
+      unmount();
+    }
   });
 
   it("is keyboard reachable: every control is a focusable button, switch, slider or input", () => {
-    render(<Harness />);
-    for (const el of screen.getAllByRole("button")) expect(el.tabIndex).toBeGreaterThanOrEqual(0);
-    expect(screen.getByRole("slider", { name: "Master volume" }).tabIndex).toBe(0);
+    for (const group of PAGES) {
+      const { unmount } = render(<Harness group={group} />);
+      for (const el of screen.queryAllByRole("button")) {
+        expect(el.tabIndex).toBeGreaterThanOrEqual(0);
+      }
+      if (group === "volume") {
+        expect(screen.getByRole("slider", { name: "Master volume" }).tabIndex).toBe(0);
+      }
+      unmount();
+    }
   });
 });
 
@@ -162,6 +196,8 @@ describe("in the Settings window", () => {
     const general = screen.getByText(/Sounds are in Settings › Sound/);
     fireEvent.click(within(general).getByRole("button", { name: "Open Sound" }));
     expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("Sound");
+    fireEvent.click(screen.getByRole("button", { name: "Theme" }));
+    expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("Theme");
     expect(screen.getByRole("group", { name: "Audition Synthwave" })).toBeInTheDocument();
   });
 });

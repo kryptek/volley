@@ -30,7 +30,7 @@ afterEach(() => {
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
-function setup(sound: SoundSettings = SOUND0) {
+function setup(sound: SoundSettings = SOUND0, group = "theme") {
   const player = createPlayer({ baseUrl: "/sounds" });
   const setSound = vi.fn();
   const view = render(
@@ -41,6 +41,7 @@ function setup(sound: SoundSettings = SOUND0) {
       audition={(t, id) => player.audition(t, id)}
       disposeAudition={() => player.disposeAudition()}
       canVibrate={false}
+      group={group}
     />,
   );
   return { player, setSound, ...view };
@@ -92,7 +93,7 @@ describe("audition rows", () => {
   });
 
   it("a per-event row's play button auditions the selected theme", async () => {
-    const { player } = setup({ ...SOUND0, theme: "arcade" });
+    const { player } = setup({ ...SOUND0, theme: "arcade" }, "events");
     await player.loadTheme("arcade");
     fireEvent.click(
       screen.getByRole("button", { name: "Play CI failed in the current theme (Arcade 8-bit)" }),

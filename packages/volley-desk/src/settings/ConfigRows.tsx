@@ -201,6 +201,8 @@ export interface ConfigRowsProps {
   focusSeq?: number | undefined;
   /** Only these sections' groups (Settings › Autopilot's own); all of them by default. */
   sections?: readonly Section[];
+  /** No group titles: the page's own title names its one group (a Settings group page). */
+  untitled?: boolean;
 }
 
 export function ConfigRows({
@@ -212,6 +214,7 @@ export function ConfigRows({
   focus,
   focusSeq,
   sections = SECTIONS,
+  untitled = false,
 }: ConfigRowsProps) {
   const [drafts, setDrafts] = useState<Record<string, unknown>>({});
   const [acks, setAcks] = useState<Record<string, RowState>>({});
@@ -431,7 +434,11 @@ export function ConfigRows({
   return (
     <div className="cfg-rows" ref={root}>
       {groups.map(([section, inSection], i) => (
-        <Group key={section} title={section} {...(foot && i === groups.length - 1 ? { foot } : {})}>
+        <Group
+          key={section}
+          {...(untitled ? {} : { title: section })}
+          {...(foot && i === groups.length - 1 ? { foot } : {})}
+        >
           {inSection.length === 0 ? (
             <div className="cfg-row cfg-hint">No lease pools configured.</div>
           ) : (

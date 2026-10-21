@@ -8,6 +8,9 @@
  * through `useSoundSettings`; an audition ignores mute, quiet hours and the
  * hidden-tab rule (it is asked for) but keeps the master volume. Leaving the
  * section drops the auditioned themes.
+ *
+ * The section drills into groups (`GroupList`): Theme, Volume, Sounds (the
+ * per-event cards) and When sounds play, one page each.
  */
 import { PlayCircleIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -16,7 +19,9 @@ import ElasticSlider from "../rb/ElasticSlider/ElasticSlider";
 import { EVENT_GROUPS, SOUND_EVENTS, SOUND_EVENT_IDS, type SoundEventId } from "../sounds/events";
 import { type SoundChange, type SoundSettings, isHHMM } from "../sounds/settings";
 import { THEMES, type ThemeId } from "../sounds/themes";
+import { GroupList } from "./GroupNav";
 import { Group, Row, Toggle } from "./primitives";
+import { sectionDef } from "./sections";
 import "../styles/settings.css";
 
 export interface SoundSectionProps {
@@ -28,6 +33,37 @@ export interface SoundSectionProps {
   disposeAudition: () => void;
   /** The browser can vibrate; the row is hidden otherwise. */
   canVibrate: boolean;
+}
+
+/** Settings › Sound's own props, besides the sound settings: which group page is open. */
+export interface SoundNavProps {
+  /** The open group's page (`theme`, `volume`, `events`, `when`), or null for the group list. */
+  group: string | null;
+  onOpenGroup?: (group: string) => void;
+  /** The group a sidebar search hit. */
+  hit?: string | undefined;
+}
+
+/** The group list's one-line summaries; `loading`: the picked theme is still loading. */
+export function soundSummaries({
+  sound,
+  loading,
+}: {
+  sound: SoundSettings;
+  loading: boolean;
+}): Record<string, string> {
+  const on = SOUND_EVENT_IDS.filter((id) => sound.events[id]).length;
+  const q = sound.quietHours;
+  return {
+    theme: `${label(sound.theme)}${loading ? " · loading…" : ""}`,
+    volume: sound.muted ? "muted" : `${Math.round(sound.volume * 100)}%`,
+    events: `${on} of ${SOUND_EVENT_IDS.length} on`,
+    when: q.on
+      ? `quiet ${q.from}–${q.to}`
+      : sound.signalsOnlyWhenHidden
+        ? "only when hidden"
+        : "always",
+  };
 }
 
 const label = (theme: ThemeId) => THEMES.find((t) => t.id === theme)?.label ?? theme;
@@ -78,7 +114,10 @@ export function Sound({
   audition,
   disposeAudition,
   canVibrate,
-}: SoundSectionProps) {
+  group,
+  onOpenGroup = () => {},
+  hit,
+}: SoundSectionProps & SoundNavProps) {
   const [loading, setLoading] = useState<ThemeId | null>(null);
   useEffect(() => () => disposeAudition(), [disposeAudition]);
 
@@ -90,12 +129,9 @@ export function Sound({
   };
   const q = sound.quietHours;
 
-  return (
-    <>
-      <Group
-        title="Theme"
-        foot="Each theme loads only when you pick it or play one of its sounds. Playing a sound here ignores mute and quiet hours."
-      >
+  if (group === "theme") {
+    return (
+      <Group foot="Each theme loads only when you pick it or play one of its sounds. Playing a sound here ignores mute and quiet hours.">
         <div className="s-pad snd-themes">
           {THEMES.map((t) => {
             const on = t.id === sound.theme;
@@ -132,8 +168,11 @@ export function Sound({
           })}
         </div>
       </Group>
-
-      <Group title="Volume">
+    );
+  }
+  if (group === "volume") {
+    return (
+      <Group>
         <Row label="Master volume">
           <div className="s-slider">
             <ElasticSlider
@@ -157,86 +196,98 @@ export function Sound({
           <Toggle label="Mute all" on={sound.muted} onChange={(muted) => setSound({ muted })} />
         </Row>
       </Group>
-
-      {EVENT_GROUPS.map(({ group, ids }) => (
-        <Group key={group} title={group}>
-          {ids.map((id) => {
-            const e = SOUND_EVENTS[id];
-            return (
-              <Row key={id} label={e.label}>
-                <PlayBtn
-                  name={`Play ${e.label} in the current theme (${label(sound.theme)})`}
-                  onPlay={() => void audition(sound.theme, id)}
-                />
-                <Toggle
-                  label={`${e.label} sound`}
-                  on={sound.events[id]}
-                  onChange={(v) => setSound({ events: { [id]: v } })}
-                />
-              </Row>
-            );
-          })}
-        </Group>
-      ))}
-
-      <Group title="When sounds play">
-        <Row
+    );
+  }
+  if (group === "events") {
+    return (
+      <>
+        {EVENT_GROUPS.map(({ group, ids }) => (
+          <Group key={group} title={group}>
+            {ids.map((id) => {
+              const e = SOUND_EVENTS[id];
+              return (
+                <Row key={id} label={e.label}>
+                  <PlayBtn
+                    name={`Play ${e.label} in the current theme (${label(sound.theme)})`}
+                    onPlay={() => void audition(sound.theme, id)}
+                  />
+                  <Toggle
+                    label={`${e.label} sound`}
+                    on={sound.events[id]}
+                    onChange={(v) => setSound({ events: { [id]: v } })}
+                  />
+                </Row>
+              );
+            })}
+          </Group>
+        ))}
+      </>
+    );
+  }
+  if (group !== "when") {
+    return (
+      <GroupList
+        section={sectionDef("sound")}
+        summaries={soundSummaries({ sound, loading: loading !== null })}
+        onOpen={onOpenGroup}
+        hit={hit}
+      />
+    );
+  }
+  return (
+    <Group>
+      <Row
+        label="Only when the Desk tab is hidden"
+        hint="Agent, pipeline, wave and system sounds; clicks never play in a hidden tab, and Needs you always plays"
+      >
+        <Toggle
           label="Only when the Desk tab is hidden"
-          hint="Agent, pipeline, wave and system sounds; clicks never play in a hidden tab, and Needs you always plays"
-        >
-          <Toggle
-            label="Only when the Desk tab is hidden"
-            on={sound.signalsOnlyWhenHidden}
-            onChange={(signalsOnlyWhenHidden) => setSound({ signalsOnlyWhenHidden })}
-          />
-        </Row>
-        <Row label="Quiet hours" hint="Local time; a range past midnight wraps">
-          <TimeInput
-            id="snd-quiet-from"
-            ariaLabel="Quiet hours from"
-            value={q.from}
-            onCommit={(from) => setSound({ quietHours: { from } })}
-          />
-          <span className="dim">to</span>
-          <TimeInput
-            id="snd-quiet-to"
-            ariaLabel="Quiet hours to"
-            value={q.to}
-            onCommit={(to) => setSound({ quietHours: { to } })}
-          />
-          <Toggle
-            label="Quiet hours"
-            on={q.on}
-            onChange={(on) => setSound({ quietHours: { on } })}
-          />
-        </Row>
-        <Row label="Attention sounds too" hint="Off: Needs you still plays in quiet hours">
-          <Toggle
-            label="Attention sounds too"
-            on={q.attentionToo}
-            onChange={(attentionToo) => setSound({ quietHours: { attentionToo } })}
-          />
-        </Row>
-        <Row
+          on={sound.signalsOnlyWhenHidden}
+          onChange={(signalsOnlyWhenHidden) => setSound({ signalsOnlyWhenHidden })}
+        />
+      </Row>
+      <Row label="Quiet hours" hint="Local time; a range past midnight wraps">
+        <TimeInput
+          id="snd-quiet-from"
+          ariaLabel="Quiet hours from"
+          value={q.from}
+          onCommit={(from) => setSound({ quietHours: { from } })}
+        />
+        <span className="dim">to</span>
+        <TimeInput
+          id="snd-quiet-to"
+          ariaLabel="Quiet hours to"
+          value={q.to}
+          onCommit={(to) => setSound({ quietHours: { to } })}
+        />
+        <Toggle label="Quiet hours" on={q.on} onChange={(on) => setSound({ quietHours: { on } })} />
+      </Row>
+      <Row label="Attention sounds too" hint="Off: Needs you still plays in quiet hours">
+        <Toggle
+          label="Attention sounds too"
+          on={q.attentionToo}
+          onChange={(attentionToo) => setSound({ quietHours: { attentionToo } })}
+        />
+      </Row>
+      <Row
+        label="Follow reduced motion"
+        hint="When the system asks for reduced motion, play no sounds"
+      >
+        <Toggle
           label="Follow reduced motion"
-          hint="When the system asks for reduced motion, play no sounds"
-        >
+          on={sound.followReducedMotion}
+          onChange={(followReducedMotion) => setSound({ followReducedMotion })}
+        />
+      </Row>
+      {canVibrate && (
+        <Row label="Vibrate on attention" hint="On a phone, or while the tab is hidden">
           <Toggle
-            label="Follow reduced motion"
-            on={sound.followReducedMotion}
-            onChange={(followReducedMotion) => setSound({ followReducedMotion })}
+            label="Vibrate on attention"
+            on={sound.vibrate}
+            onChange={(vibrate) => setSound({ vibrate })}
           />
         </Row>
-        {canVibrate && (
-          <Row label="Vibrate on attention" hint="On a phone, or while the tab is hidden">
-            <Toggle
-              label="Vibrate on attention"
-              on={sound.vibrate}
-              onChange={(vibrate) => setSound({ vibrate })}
-            />
-          </Row>
-        )}
-      </Group>
-    </>
+      )}
+    </Group>
   );
 }
