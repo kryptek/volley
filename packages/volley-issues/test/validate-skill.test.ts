@@ -237,3 +237,19 @@ describe("install.sh --check", () => {
     expect(check(h).status).toBe(0);
   });
 });
+
+describe("the coordinator's go/no-go convention", () => {
+  it("SKILL.md asks go/no-go through AskUserQuestion with go, hold, cancel", () => {
+    const skill = readFileSync(fileURLToPath(new URL("../SKILL.md", import.meta.url)), "utf-8");
+    const section = volleydPathSection(splitFrontmatter(skill).body) ?? "";
+    expect(section).toMatch(/go\/no-go through `AskUserQuestion`/);
+    expect(section).toContain("options `go`, `hold`, `cancel`");
+  });
+
+  it("a volleyd path without it is refused", () => {
+    const without = FULL_OK.replace("- AskUserQuestion\n", "");
+    expect(validateVolleydPath(without).errors).toEqual([
+      "volleyd path must mention: AskUserQuestion",
+    ]);
+  });
+});

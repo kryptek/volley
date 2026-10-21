@@ -18,8 +18,10 @@ import {
   MODEL_ID,
   assertAllowed,
   mintConsentToken,
+  mintHandoffToken,
   mintMergeToken,
   mintModelSwitchToken,
+  mintPickerToken,
   mintScriptToken,
   mintSetupToken,
   mintSigninForwardToken,
@@ -1249,5 +1251,76 @@ describe("merge token (autopilot merging)", () => {
   it("refuses to mint over a short head or a non-positive PR", () => {
     expect(() => token(7, "abc1234")).toThrow(FenceError);
     expect(() => token(0)).toThrow(FenceError);
+  });
+});
+
+describe("pickers and handoffs: Up/Down/Space and typed answers need the inbox item's token", () => {
+  const key = (k: string, ws = "workspace:3") => ["cmux", "send-key", "--workspace", ws, k];
+  const send = (text: string, ws = "workspace:3") => ["cmux", "send", "--workspace", ws, text];
+
+  it("Up, Down and Space are denied bare; Enter and Escape need nothing", () => {
+    for (const k of ["Up", "Down", "Space"])
+      expect(() => assertAllowed(key(k)), k).toThrow(FenceError);
+    for (const k of ["Enter", "Escape"]) expect(() => assertAllowed(key(k)), k).not.toThrow();
+  });
+
+  it("a PickerToken allows exactly the keys it names, checked by identity", () => {
+    const t = mintPickerToken({ item_id: "p-a1-toolu_1", version: 1, keys: ["Down", "Enter"] });
+    expect(() => assertAllowed(key("Down"), { picker: t })).not.toThrow();
+    expect(() => assertAllowed(key("Up"), { picker: t })).toThrow(FenceError);
+    expect(() => assertAllowed(key("Space"), { picker: t })).toThrow(FenceError);
+    const forged = { item_id: "p-a1-toolu_1", version: 1, keys: ["Down"] } as ReturnType<
+      typeof mintPickerToken
+    >;
+    expect(() => assertAllowed(key("Down"), { picker: forged })).toThrow(FenceError);
+  });
+
+  it("a picker's typed Other text: only the token's exact text, and only once", () => {
+    const t = mintPickerToken({
+      item_id: "p-a1-toolu_1",
+      version: 1,
+      keys: ["Down", "Enter"],
+      text: "yes please",
+    });
+    expect(() => assertAllowed(send("yes please! rm"), { picker: t })).toThrow(FenceError);
+    expect(() => assertAllowed(send("yes please"))).toThrow(FenceError);
+    expect(() => assertAllowed(send("yes please"), { picker: t })).not.toThrow();
+    expect(() => assertAllowed(send("yes please"), { picker: t })).toThrow(/once/);
+  });
+
+  it("a HandoffToken types exactly its reply, once; it unlocks no navigation key", () => {
+    const t = mintHandoffToken({ item_id: "h-a1-7", version: 1, text: "go ahead with T2" });
+    expect(() => assertAllowed(send("go ahead with T2"), { handoff: t })).not.toThrow();
+    expect(() => assertAllowed(send("go ahead with T2"), { handoff: t })).toThrow(FenceError);
+    expect(() => assertAllowed(key("Down"), { handoff: t })).toThrow(FenceError);
+    const forged = { item_id: "h-a1-7", version: 1, text: "x" } as ReturnType<
+      typeof mintHandoffToken
+    >;
+    expect(() => assertAllowed(send("x"), { handoff: forged })).toThrow(FenceError);
+  });
+
+  it("refuses to mint a token for text that would be a command or more than one line", () => {
+    for (const text of [
+      "!rm -rf ~",
+      "/model opus",
+      "two\nlines",
+      "tab\there",
+      "",
+      "esc\u001b[A",
+      "csi\u009b2J",
+      "line\u2028sep",
+      "para\u2029sep",
+    ]) {
+      expect(() => mintHandoffToken({ item_id: "h-a1-7", version: 1, text }), text).toThrow(
+        FenceError,
+      );
+      expect(
+        () => mintPickerToken({ item_id: "p-a1-t", version: 1, keys: [], text }),
+        text,
+      ).toThrow(FenceError);
+    }
+    expect(() => mintPickerToken({ item_id: "p-a1-t", version: 1, keys: ["Tab" as "Up"] })).toThrow(
+      FenceError,
+    );
   });
 });
