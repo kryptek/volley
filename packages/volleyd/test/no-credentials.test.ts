@@ -11,7 +11,9 @@ import { CREDENTIAL_ENV, renderSigninScript } from "../src/claude/signin-script"
  * `setup-token` flow, which prints a bearer token. The credential env variables appear only in
  * CREDENTIAL_ENV, which launch.sh and signin.sh `unset`. The same holds for the machine doctor
  * (`volley peer doctor`, volley-cli's `src/peer/`), which runs `claude auth status` and reads
- * `~/.claude.json` on every paired machine.
+ * `~/.claude.json` on every paired machine, with one exception (SPEC §4.6.11): its usage probe,
+ * `usage-probe.ts`, which reads a login's token on the machine that holds it, read-only, through
+ * exactly the Keychain lookup and the file named below.
  */
 
 const SRC = new URL("../src/", import.meta.url).pathname;
@@ -60,7 +62,7 @@ describe("no Claude credential handling in volleyd", () => {
   });
 
   it("the machine doctor's modules name no token location and no credential env", () => {
-    const files = sourceFiles(PEER_DOCTOR);
+    const files = sourceFiles(PEER_DOCTOR).filter((f) => !f.endsWith("/usage-probe.ts"));
     // The doctor and every check family are scanned (a module that moves away must be followed).
     expect(files.map((f) => relative(PEER_DOCTOR, f)).sort()).toEqual(
       expect.arrayContaining([
@@ -73,6 +75,22 @@ describe("no Claude credential handling in volleyd", () => {
       ]),
     );
     expect(files.flatMap(offenders)).toEqual([]);
+  });
+
+  it("the usage probe is the one exception: a Keychain lookup and the credentials file, read-only", () => {
+    const probe = join(PEER_DOCTOR, "usage-probe.ts");
+    const lines = offenders(probe).map((o) => o.replace(/^.*?:\d+: /, ""));
+    // Exactly the reads of SPEC §4.6.11's exception; never a write, a dump or a token flow.
+    expect(lines).toEqual([
+      'if (dir === null) return "Claude Code-credentials";',
+      "return `Claude Code-credentials-${h}`;",
+      '"find-generic-password",',
+      'text = readFileSync(join(login.dir, ".credentials.json"), "utf-8");',
+    ]);
+    const text = readFileSync(probe, "utf-8");
+    expect(text).not.toMatch(
+      /add-generic-password|delete-generic-password|dump-keychain|setup-token|writeFileSync\([^)]*credentials/,
+    );
   });
 
   it("a paired machine's sign-in (remote-signin, forward) names none and unsets the credential env there", () => {

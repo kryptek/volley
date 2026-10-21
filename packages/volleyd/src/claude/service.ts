@@ -156,6 +156,21 @@ export class ClaudeService {
   }
 
   /**
+   * The account record a usage probe login of `machine` (`local`: the supervisor's own) folds
+   * into: `default` is `primary` here, `primary@<machine>` there; a profile is the registry's
+   * account of that id on that machine (`<id>`, or `<id>@<machine>`). A login the registry does
+   * not have on that machine: null (skipped).
+   */
+  accountForLogin(machine: string, profile: string): string | null {
+    const local = machine === LOCAL_MACHINE;
+    if (profile === "default")
+      return local ? PRIMARY_ACCOUNT : remoteAccount(PRIMARY_ACCOUNT, machine);
+    const a = this.registry().find((x) => x.id === profile && x.machine === machine);
+    if (a === undefined) return null;
+    return local ? a.id : remoteAccount(a.id, machine);
+  }
+
+  /**
    * An account's usage-record facts: a registry account's label, plan and identity; the primary's
    * plan once known and its identity; a paired machine's (`primary@<name>`) identity from its
    * machine record.

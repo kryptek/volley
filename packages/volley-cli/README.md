@@ -395,6 +395,40 @@ the `loggedIn` and plan of `claude auth status`, an origin with any credentials 
 it prints or publishes carries a token (it also scrubs anything token-shaped), and `--origin`
 refuses a URL with a password or token in it.
 
+**Claude usage.** After the checks, the doctor prints one line per Claude Code login on this
+machine:
+
+```text
+Claude usage: default 5h 37% · 7d 56% · Fable 12% (read 2 min ago)
+Claude usage: work — (login expired; Claude Code renews it on its next request)
+```
+
+The logins are the default profile (`~/.claude`, as `default`) and each profile under
+`$VOLLEY_CLAUDE_DIR` (else `~/.volley/claude`) that has a `.claude.json` (as its id), at most 16.
+For each, the doctor's usage probe (`src/peer/usage-probe.ts`, SPEC §4.6.12) reads exactly
+`claudeAiOauth.accessToken` and `expiresAt` of the login's stored credential (macOS: `security
+find-generic-password` on Claude Code's Keychain item for that config dir, else the profile's
+`.credentials.json`; Linux: that file), in memory, and makes one read-only `GET` to the usage
+endpoint Claude Code's own `/usage` calls (`api.anthropic.com/api/oauth/usage`, the token as a
+bearer, `User-Agent: claude-code/<installed version>`, 10 s, no redirects). This is SPEC
+§4.6.11's one exception to never reading a credential: it never refreshes or writes a
+credential, never runs `claude`, and skips an expired token (no request; Claude Code renews it
+on its next request). Any error on the request's path has the token replaced by `[redacted]`,
+and a failed answer's body is never read. What is published (`--json`'s `claude_logins`, and so
+every heartbeat of `volley peer run` and the supervisor's own record) is numbers and states
+only: `{ profile, state, attempted_at, reading?: { read_at, five_hour?, weekly?, model_weekly?
+} }`, no directory, no e-mail. The state is `ok`, `expired`, `no_credential`, `rate_limited`,
+`rejected` or `error`, and `reading` is the last good one (it survives failures, so its age
+shows).
+
+The probe is gentle. It makes at most one request per login per
+`usage_probe_min_interval_s` (300 s); the last attempt is kept in
+`~/.volley/claude-usage/<profile>.json` (folder `0700`, file `0600`, numbers only), because the
+supervisor's own doctor is a fresh process every 30 s. A 429, 5xx, timeout or network error backs
+off 10, 20, 40 and then 60 minutes (`usage_probe_backoff_max_s`), and the next success resets it.
+A 401/403 is `rejected` and tried again at the normal interval. In practice a paired machine
+reads every 10 minutes (its doctor's interval) and the supervisor's machine every 5.
+
 **Where it runs.** `volley peer join` runs it first and stops on a `block` check before the
 pairing code is used, so the code stays valid while you fix things (it prints the exact
 `volley peer doctor --fix --repo …` to run); `warn` checks, the ssh `PATH` estimate among them,

@@ -141,7 +141,12 @@ import {
 } from "./autopilot/remediation";
 import { authFields } from "./broker-auth";
 import { accountMoves, moveAgentAccount, moveRespawn } from "./claude/move";
-import { ClaudeAccountError, type SelectedAccount, claudeRoot } from "./claude/profiles";
+import {
+  ClaudeAccountError,
+  LOCAL_MACHINE,
+  type SelectedAccount,
+  claudeRoot,
+} from "./claude/profiles";
 import { ClaudeService, SIGNIN_CHANNEL } from "./claude/service";
 import { type Sharing, readSharing } from "./claude/sharing";
 import {
@@ -151,6 +156,7 @@ import {
   accountRecords,
   bookState,
   emptyBook,
+  foldProbe,
   foldUsage,
   forgetAgent,
   limitDecisions,
@@ -1586,7 +1592,9 @@ export class Daemon {
           this.machines.observe(record);
           if (record.tunnel === "up") this.sampleHost(name, record);
           await this.publishReadiness(name);
-          // `primary@<name>`'s usage record carries this record's identity (unchanged: no-op).
+          this.foldLogins(record, name);
+          // `primary@<name>`'s usage record carries this record's identity, and its logins'
+          // usage probe readings (unchanged: no-op).
           await this.usagePass();
         });
       }),
@@ -4535,6 +4543,26 @@ export class Daemon {
     this.ownRecordAt = this.now();
     this.machines.observe(record);
     await this.publish(machineTopic(name), this.envelope(MACHINE_CHANNEL, "machine", record), true);
+    if (this.foldLogins(record, LOCAL_MACHINE)) await this.usagePass();
+  }
+
+  /**
+   * Fold a machine record's usage probe logins (SPEC §4.6.12) into their accounts: `machine` is
+   * `local` for the own record, else the paired machine's name. A login the registry does not
+   * have on that machine is skipped. True when the book changed (it is then kept on disk).
+   */
+  private foldLogins(record: MachineRecord, machine: string): boolean {
+    if (record.claude_logins === undefined) return false;
+    const before = bookState(this.usage);
+    for (const login of record.claude_logins) {
+      const account = this.claude.accountForLogin(machine, login.profile);
+      if (account === null) continue;
+      this.usage = foldProbe(this.usage, { account, machine: record.name, login });
+    }
+    const after = bookState(this.usage);
+    if (after === before) return false;
+    writeFileAtomic(this.usageFile, after);
+    return true;
   }
 
   /** Live supervised agents on machine `name` (the `local` token is the own machine). */
