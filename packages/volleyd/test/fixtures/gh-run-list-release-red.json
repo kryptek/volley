@@ -1,0 +1,38 @@
+[
+  {
+    "databaseId": 812,
+    "name": "CI",
+    "workflowName": "CI",
+    "workflowDatabaseId": 11,
+    "event": "push",
+    "status": "completed",
+    "conclusion": "failure",
+    "headSha": "beaa000000000000000000000000000000000002",
+    "createdAt": "2026-10-20T10:40:00Z",
+    "url": "https://github.com/example/repo/actions/runs/812"
+  },
+  {
+    "databaseId": 790,
+    "name": "CI",
+    "workflowName": "CI",
+    "workflowDatabaseId": 11,
+    "event": "push",
+    "status": "completed",
+    "conclusion": "success",
+    "headSha": "beaa000000000000000000000000000000000001",
+    "createdAt": "2026-10-20T09:10:00Z",
+    "url": "https://github.com/example/repo/actions/runs/790"
+  },
+  {
+    "databaseId": 811,
+    "name": "Docs",
+    "workflowName": "Docs",
+    "workflowDatabaseId": 12,
+    "event": "push",
+    "status": "completed",
+    "conclusion": "success",
+    "headSha": "beaa000000000000000000000000000000000002",
+    "createdAt": "2026-10-20T10:40:00Z",
+    "url": "https://github.com/example/repo/actions/runs/811"
+  }
+]

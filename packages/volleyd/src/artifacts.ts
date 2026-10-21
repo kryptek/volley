@@ -1,6 +1,7 @@
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { DecisionInput } from "./decisions";
 import type { ExecFn, ExecResult } from "./exec";
+import { parsePrFiles } from "./overlap";
 import type { NewEvent, TaskId } from "./types";
 
 /**
@@ -614,6 +615,67 @@ export async function verifyOperatorMerge(
 /** CI on exactly `head` (runs, aggregate state, failed job names), for a head the pipeline did not push. */
 export async function ciReport(exec: ExecFn, cwd: string, head: string): Promise<CiFacts> {
   return ciOn(exec, cwd, head);
+}
+
+/** CI on exactly `head` and, when red, its failing tests and logs' tail (a blocked agent's PR head). */
+export async function redHeadCi(exec: ExecFn, cwd: string, head: string): Promise<CiFacts> {
+  const ci = await ciOn(exec, cwd, head);
+  if (ci.state === "red") Object.assign(ci, await failedLogs(exec, cwd, ci.runs));
+  return ci;
+}
+
+/** How many of the release branch's latest runs a classification reads. */
+const RELEASE_RUNS = "20";
+
+/**
+ * The release branch's latest CI (a red head's classification): the latest run per workflow and
+ * trigger event of its recent runs (latestRuns) and, when red, the tests failing there. `unknown`
+ * when `gh run list` fails. Read-only.
+ */
+export async function probeReleaseCi(
+  exec: ExecFn,
+  o: { cwd: string; release_branch: string },
+): Promise<{ state: CiState | "unknown"; failing_tests: string[] }> {
+  const r = await exec(
+    [
+      "gh",
+      "run",
+      "list",
+      "--branch",
+      o.release_branch,
+      "--limit",
+      RELEASE_RUNS,
+      "--json",
+      RUN_FIELDS,
+    ],
+    { cwd: o.cwd },
+  );
+  const raw = r.code === 0 ? parseJson<RawRun[]>(r.stdout) : null;
+  if (raw === null || !Array.isArray(raw)) return { state: "unknown", failing_tests: [] };
+  const runs: CiRun[] = latestRuns(raw).effective.map((x) => ({
+    id: x.databaseId,
+    name: x.workflowName ?? x.name,
+    status: x.status,
+    conclusion: x.conclusion === "" ? null : x.conclusion,
+    url: x.url,
+  }));
+  const failed = failedRuns(runs);
+  const state: CiState =
+    runs.length === 0
+      ? "none"
+      : failed.length > 0
+        ? "red"
+        : runs.some((x) => x.status !== "completed")
+          ? "running"
+          : "green";
+  if (state !== "red") return { state, failing_tests: [] };
+  return { state, failing_tests: (await failedLogs(exec, o.cwd, runs)).failing_tests };
+}
+
+/** The PR's changed files (`gh pr view <n> --json files`); null when they cannot be read. */
+export async function prFiles(exec: ExecFn, cwd: string, pr: number): Promise<string[] | null> {
+  const r = await exec(["gh", "pr", "view", String(pr), "--json", "files"], { cwd });
+  return r.code === 0 ? parsePrFiles(r.stdout) : null;
 }
 
 /** The completed runs that failed a head. */

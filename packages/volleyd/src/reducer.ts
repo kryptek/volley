@@ -558,6 +558,12 @@ function derive(state: WaveState, rec: WaveRecord): void {
   state.tasks = state.tasks.map(({ stage_label: _l, stage_group: _g, ...t }) =>
     withStageGroup(t, rec.pipeline[t.id]),
   );
+  state.tasks = state.tasks.map(({ remediation: _r, ...t }) => {
+    const r = rec.pipeline[t.id]?.remediation;
+    return r === undefined
+      ? t
+      : { ...t, remediation: { kind: r.kind, test: r.test, since: r.since } };
+  });
   state.tasks = state.tasks.map(({ waiting_on: _w, why_waiting: _y, alarms: _a, ...t }) => {
     if (t.stage === "awaiting_decision") {
       const ids = openOn(t.id);
@@ -572,8 +578,10 @@ function derive(state: WaveState, rec: WaveRecord): void {
     const hold = rec.pipeline[t.id]?.ci_hold;
     if (hold !== undefined && t.stage !== "done" && t.stage !== "cancelled") {
       const at = hold.sha.slice(0, 7);
-      const why =
-        hold.checks.total === 0
+      const infra = hold.reason === "infra_incident";
+      const why = infra
+        ? `CI infra incident: ${hold.incident ?? "infra-shaped failure"}; re-checking`
+        : hold.checks.total === 0
           ? `CI pending on ${at} (no run yet)`
           : `CI pending on ${at} (${hold.checks.done}/${hold.checks.total} checks)`;
       const pr = hold.pr ?? t.pr;
@@ -586,13 +594,20 @@ function derive(state: WaveState, rec: WaveRecord): void {
                 number: pr.number,
                 url: pr.url,
                 head_sha: hold.sha,
-                ci: hold.checks.total === 0 ? ("none" as const) : ("running" as const),
+                ci: infra
+                  ? ("red" as const)
+                  : hold.checks.total === 0
+                    ? ("none" as const)
+                    : ("running" as const),
                 checks: hold.checks,
               },
             }
           : {}),
       };
     }
+    // A red head awaiting its flake's fixer: say which test.
+    if (t.remediation !== undefined && t.stage !== "done" && t.stage !== "cancelled")
+      return { ...t, why_waiting: `CI flake in ${t.remediation.test}: fixer pending` };
     const pending =
       t.stage === "queued"
         ? (rec.wave?.tasks[t.id]?.after ?? []).filter((d) => stageOf.get(d) !== "done")
