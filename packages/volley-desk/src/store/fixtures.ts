@@ -235,6 +235,12 @@ function placed(wave: string, task: string, now: number) {
   };
 }
 
+/** The demo waves' repository on GitHub (SPEC §4.6.1), so the demo shows chips and links. */
+const DEMO_GITHUB = {
+  slug: "example-org/example-repo",
+  url: "https://github.com/example-org/example-repo",
+};
+
 const decisionId = (w: WaveDef) =>
   `${w.id}-${w.decision?.task.toLowerCase()}-${w.decision?.kind}-1`;
 
@@ -244,8 +250,9 @@ function waveState(w: WaveDef, now: number, tasks: TaskDef[] = w.tasks): DeskMes
     wave: w.id,
     version: 1,
     owner: w.owner,
-    repo: "example-org/example-repo",
+    repo: "/srv/work/example-repo",
     release_branch: w.releaseBranch,
+    github: DEMO_GITHUB,
     status: w.status,
     tasks: tasks.map((t) => ({
       id: t.id,
