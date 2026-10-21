@@ -1,0 +1,181 @@
+/*
+ * The Needs you window (windows/inbox): Gooey filter tabs, one SpotlightCard row per inbox item
+ * with its wave's colour bar, the answers, a release item's train, changelog, screenshots and
+ * links. Below 700 px (the JS `NARROW_PX`; `.inbox--phone` is the same switch from JS) the rows
+ * are stacked full-width cards, every button and tab at least 48 px tall, the live line one line
+ * and the options a vertical stack.
+ */
+.inbox {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.inbox-tabs {
+  overflow-x: auto;
+}
+.inbox-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.inbox-empty {
+  margin: 8px 0;
+}
+
+.inbox-row {
+  transition: opacity 600ms ease, transform 600ms ease;
+}
+.inbox-row--leaving {
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+}
+.inbox-row--answered .inbox-card {
+  opacity: 0.78;
+}
+.inbox-star {
+  display: block;
+  border-radius: 14px;
+}
+
+.inbox-card.spotlight-card {
+  display: flex;
+  gap: 10px;
+  padding: 10px 10px 10px 0;
+  border-radius: 12px;
+}
+.inbox-bar {
+  flex: none;
+  width: 4px;
+  border-radius: 0 3px 3px 0;
+  align-self: stretch;
+}
+.inbox-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.inbox-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.inbox-title {
+  font-weight: 600;
+}
+.inbox-sub {
+  font-size: 12px;
+}
+.inbox-question {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.inbox-live {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.inbox-actions {
+  align-self: flex-start;
+}
+
+.inbox-options {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.inbox-opt-desc {
+  opacity: 0.7;
+}
+.inbox-other {
+  display: flex;
+  gap: 6px;
+}
+.inbox-other input {
+  flex: 1;
+  min-width: 0;
+}
+.inbox-error {
+  margin: 0;
+  color: #ff9d85;
+  font-size: 12px;
+}
+.inbox-cmd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.inbox-cmd code {
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
+.inbox-release {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.inbox-changelog p,
+.inbox-changelog ul {
+  margin: 0 0 4px;
+}
+.inbox-changelog ul {
+  padding-left: 18px;
+}
+.inbox-shots {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+}
+.inbox-shots img {
+  height: 90px;
+  border-radius: 6px;
+  display: block;
+}
+.inbox-links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12px;
+}
+
+@media (max-width: 699px) {
+  .inbox-card.spotlight-card {
+    flex-wrap: wrap;
+  }
+  .inbox-main {
+    flex-basis: calc(100% - 20px);
+  }
+  .inbox-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .inbox-live {
+    white-space: nowrap;
+  }
+  .inbox-options {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .inbox-target,
+  .inbox-row .icon-btn,
+  .inbox-tabs [role="tab"],
+  .inbox .coord-link {
+    min-height: 48px;
+    min-width: 48px;
+  }
+}
