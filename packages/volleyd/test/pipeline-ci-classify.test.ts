@@ -176,6 +176,54 @@ describe("a red head is classified before anyone is asked", () => {
   });
 });
 
+describe("an unreadable release branch read (#310) classifies nothing", () => {
+  const RATE = "HTTP 403: API rate limit exceeded for user ID 1.";
+  const rateAlarms = () =>
+    events("alarm_raised").filter((e) => e.data.alarm === "github_rate_limited");
+  const releaseReads = () =>
+    h.calls.filter((c) => c[1] === "run" && c[2] === "list" && c.includes("--branch")).length;
+
+  it("a 403 on the release read: no ci_failed, one rate-limit alarm, no CI call until retry_at; readable again → classified", async () => {
+    h = pipelineHarness();
+    h.world.releaseError = RATE;
+    await redHead();
+    expect(ciFailed()).toBeUndefined();
+    expect(events("remediation_requested")).toEqual([]);
+    expect(rateAlarms()).toHaveLength(1);
+
+    // Backed off: neither the head nor the release branch is read before retry_at.
+    const calls = h.calls.length;
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(h.calls.slice(calls).some((c) => isHeadRunsRead(c) || c.includes("--branch"))).toBe(
+      false,
+    );
+    expect(ciFailed()).toBeUndefined();
+
+    // GitHub answers again: the head is re-verified and classified.
+    h.world.releaseError = undefined;
+    h.elapse(CONFIG_DEFAULTS.ci_rate_limit_backoff_ms);
+    await h.tick();
+    expect(facts(ciFailed()).classification).toBe("flake");
+    expect(
+      events("alarm_cleared").filter((e) => e.data.alarm === "github_rate_limited"),
+    ).toHaveLength(1);
+  });
+
+  it("another failure (HTTP 502) on the release read: no decision, re-checked every ci_poll_ms", async () => {
+    h = pipelineHarness();
+    h.world.releaseError = "HTTP 502: Bad Gateway";
+    await redHead();
+    expect(ciFailed()).toBeUndefined();
+    expect(rateAlarms()).toEqual([]);
+    const before = releaseReads();
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(releaseReads()).toBeGreaterThan(before);
+    expect(ciFailed()).toBeUndefined();
+  });
+});
+
 describe("a blocked agent whose reason is a failing test, on a red PR head", () => {
   it("is classified like ci_failed: the decision carries the classification and offers fix flake", async () => {
     h = pipelineHarness();

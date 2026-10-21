@@ -1901,7 +1901,8 @@ function ciPending(
 }
 
 /**
- * Journal `ci_pending` for `role`'s head (once per change of head, counts or readability).
+ * Journal `ci_pending` for `role`'s head (once per change of head, counts or readability; an
+ * unreadable answer's error text, which may carry request ids, is not a change).
  * `unreadable`: the runs could not be read (why): the hold says `reason: ci_unreadable`.
  */
 function holdFor(
@@ -1920,7 +1921,6 @@ function holdFor(
     hold?.role === role &&
     hold.sha === head &&
     hold.reason === reason &&
-    hold.error === unreadable &&
     (unreadable !== undefined ||
       (hold.checks.done === checks.done && hold.checks.total === checks.total))
   )
@@ -3275,7 +3275,7 @@ export class PipelineDriver {
   /** When each `<task>/<head>` was first seen with no CI run at all. */
   private readonly noCiSince = new Map<string, number>();
   /**
-   * GitHub's rate limit per repo (the wave repo): no CI call before `retry_at`. `task`: the one
+   * GitHub's rate limit on the wave repo, kept per wave (this driver): no CI call before `retry_at`. `task`: the one
    * whose probe met it, which carries the `github_rate_limited` alarm until a probe succeeds.
    */
   private readonly ciBackoff = new Map<string, { retry_at: number; task: TaskId }>();
@@ -3889,7 +3889,7 @@ export class PipelineDriver {
     return progressed;
   }
 
-  /** The wave repo: what the rate-limit backoff is kept per. */
+  /** The wave repo: the key of this wave's rate-limit backoff (another wave keeps its own). */
   private repoKey(): string {
     return this.deps.record().state?.repo ?? ".";
   }
@@ -4072,11 +4072,23 @@ export class PipelineDriver {
     given: OkReport | null,
     blocked: { blocked?: BlockedStatus },
   ): Promise<PipelineEvent> {
+    const none = (): PipelineEvent => ({
+      ...base,
+      report: null,
+      result: null,
+      at: this.now(),
+      ...blocked,
+    });
+    // Rate-limited: no CI call before retry_at; the head is re-verified, then classified, after it.
+    if (this.ciBackedOff()) return none();
     const report = given ?? (await this.blockedHead(exec, cwd, v));
-    if (report === null || report.ci.state !== "red")
-      return { ...base, report: null, result: null, at: this.now(), ...blocked };
+    if (report === null || report.ci.state !== "red") return none();
     const files = await prFiles(exec, cwd, report.pr.number);
     const release = await probeReleaseCi(exec, { cwd, release_branch: v.release_branch });
+    await this.noteCi(v.task, release);
+    // An unreadable release branch is no evidence either way: nothing is classified on it (the
+    // head is re-verified and classified again later, like an infra hold's re-check).
+    if (release.state === "unknown") return none();
     const status = (await this.deps.statusPage?.()) ?? STATUS_UNKNOWN;
     const result = classify({
       failing_tests: report.ci.failing_tests ?? [],

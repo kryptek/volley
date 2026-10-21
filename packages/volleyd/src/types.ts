@@ -155,8 +155,8 @@ export interface Tunables {
   /** A complete wave is archived as soon as its `wave_complete` decision is answered. */
   archive_on_ack: boolean;
   /**
-   * After a rate-limited GitHub answer, the pipeline makes no CI call to that repo for this long
-   * (or the answer's `Retry-After`, if longer).
+   * After a rate-limited GitHub answer, the wave's pipeline makes no CI call for this long (or a
+   * `Retry-After` in `gh`'s output, if longer; `gh` prints no headers, so rarely).
    */
   ci_rate_limit_backoff_ms: number;
 }

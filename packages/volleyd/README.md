@@ -2686,8 +2686,11 @@ task's worktree. An answer that cannot be read (a non-zero exit, output that is 
 state `unknown`, never "no CI": it opens no decision, neither starts nor advances the
 `ci_none_grace_ms` clock, and is re-polled like running CI. The hold journals `ci_pending {
 reason: ci_unreadable, error }` and the task reads `CI unreadable (<error>), retrying`. A
-rate-limited answer (`rate limit`, HTTP 403 or 429) also backs the repo off: no CI call for
-`ci_rate_limit_backoff_ms` (default 300000), or the answer's `Retry-After` when longer. The first
+rate-limited answer (`rate limit`, HTTP 403 or 429) also backs the wave off: none of its CI calls
+(a head's runs, the release branch's for a classification) for `ci_rate_limit_backoff_ms`
+(default 300000). `gh` prints no response headers, so that tunable is the wait in practice; a
+`Retry-After` in its output, should one appear, lengthens it. The backoff is kept per wave (the
+wave's repo): two waves on one repo each back off on their own answers. The first
 one journals `alarm_raised { alarm: github_rate_limited, retry_at }`, and the first readable
 answer after it journals `alarm_cleared`.
 

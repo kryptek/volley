@@ -760,12 +760,17 @@ const RELEASE_RUNS = "20";
 /**
  * The release branch's latest CI (a red head's classification): the latest run per workflow and
  * trigger event of its recent runs (latestRuns) and, when red, the tests failing there. `unknown`
- * when `gh run list` fails. Read-only.
+ * when `gh run list` fails (why, and whether it was a rate limit, come along). Read-only.
  */
 export async function probeReleaseCi(
   exec: ExecFn,
   o: { cwd: string; release_branch: string },
-): Promise<{ state: CiState; failing_tests: string[] }> {
+): Promise<{
+  state: CiState;
+  failing_tests: string[];
+  error?: string;
+  rate_limited?: RateLimited;
+}> {
   const r = await exec(
     [
       "gh",
@@ -781,7 +786,15 @@ export async function probeReleaseCi(
     { cwd: o.cwd },
   );
   const raw = r.code === 0 ? parseJson<RawRun[]>(r.stdout) : null;
-  if (raw === null || !Array.isArray(raw)) return { state: "unknown", failing_tests: [] };
+  if (raw === null || !Array.isArray(raw)) {
+    const { error, rate_limited } = unreadable(r, "gh run list");
+    return {
+      state: "unknown",
+      failing_tests: [],
+      ...(error !== undefined ? { error } : {}),
+      ...(rate_limited !== undefined ? { rate_limited } : {}),
+    };
+  }
   const runs: CiRun[] = latestRuns(raw).effective.map((x) => ({
     id: x.databaseId,
     name: x.workflowName ?? x.name,

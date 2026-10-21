@@ -83,6 +83,8 @@ export interface World {
   releaseRuns: string;
   /** Set: every read of a head's runs (`gh api …/actions/runs?head_sha=`, `gh run list --commit`) exits 1 with this stderr. */
   ciError?: string | undefined;
+  /** Set: `gh run list --branch <release>` exits 1 with this stderr. */
+  releaseError?: string | undefined;
   /** Called with every argv before it is answered (a test may change the world mid-run). */
   before?: ((argv: string[]) => void) | undefined;
   /** An argv this returns a promise for is answered only once it resolves. */
@@ -307,7 +309,9 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       );
     }
     if (a[0] === "gh" && a[1] === "run" && a[2] === "list" && a.includes("--branch"))
-      return out(world.releaseRuns);
+      return world.releaseError !== undefined
+        ? { ...out(""), code: 1, stderr: world.releaseError }
+        : out(world.releaseRuns);
     // A head's runs: `gh api …/actions/runs?head_sha=` (the supervisor's read, in the wave
     // repo), or `gh run list --commit` (no wave repo): the same runs in each one's shape.
     const runsApi =

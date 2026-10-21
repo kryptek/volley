@@ -575,6 +575,17 @@ describe("probeReleaseCi", () => {
     expect(await probeReleaseCi(broken.exec, RELEASE)).toEqual({
       state: "unknown",
       failing_tests: [],
+      error: "HTTP 502",
+    });
+    const limited = fakeExec().on(["gh", "run", "list"], {
+      code: 1,
+      stderr: "HTTP 403: API rate limit exceeded for user ID 1.",
+    });
+    expect(await probeReleaseCi(limited.exec, RELEASE)).toEqual({
+      state: "unknown",
+      failing_tests: [],
+      error: "HTTP 403: API rate limit exceeded for user ID 1.",
+      rate_limited: {},
     });
   });
 
