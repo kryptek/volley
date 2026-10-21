@@ -2,7 +2,7 @@
 //
 // The build's dist/version.json: what `volley desk serve` and `volley deploy` read to learn the
 // bundle's version without parsing a hashed asset.
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { build } from "vite";
 import { describe, expect, it } from "vitest";
@@ -12,7 +12,9 @@ import { tempDir } from "./helpers/tmp";
 
 describe("the Desk build's version.json", () => {
   it("is emitted into the outDir with package.json's version", async () => {
-    const root = tempDir("volley-desk-version-");
+    // The real path: macOS's tmpdir is under the /var → /private/var symlink, and vite refuses an
+    // index.html whose resolved name walks out of the root it was given.
+    const root = realpathSync(tempDir("volley-desk-version-"));
     writeFileSync(join(root, "index.html"), "<!doctype html><title>t</title>");
     const outDir = join(root, "dist");
     await build({
