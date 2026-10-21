@@ -127,6 +127,19 @@ describe("needs-you inbox: Claude pickers (SPEC §4.6.18)", () => {
     expect(s.host.texts).toEqual([{ workspace: "workspace:1", text: "durian" }]);
   });
 
+  it("Other: a slash command or second line refuses in plain words before any key", async () => {
+    s = await makeSupervisedEnv();
+    const item = await opened("toolu_01Fruit", [FRUIT]);
+    s.host.screens = [screen("picker-single")];
+    expect(await answer(item.id, "/clear")).toMatchObject({
+      ok: false,
+      error: "an Other answer must be one line of plain text, not a slash command or shell line",
+    });
+    expect(s.host.keys).toEqual([]);
+    expect(s.host.texts).toEqual([]);
+    expect(s.daemon.inboxItem(item.id)?.answered).toBeUndefined();
+  });
+
   it("multi-select: Space per label, Submit, then Enter on the review screen", async () => {
     s = await makeSupervisedEnv();
     const item = await opened("toolu_01Top", [TOPPINGS]);
@@ -154,7 +167,7 @@ describe("needs-you inbox: Claude pickers (SPEC §4.6.18)", () => {
     expect(r).toMatchObject({
       ok: false,
       error:
-        "could not carry out the answer: the picker's review screen did not appear after Submit",
+        "could not carry out the answer: the picker's review screen did not appear after Submit; the toggles and Submit were pressed, so finish it in its terminal",
     });
     // Submit was pressed: nothing is recorded from the Desk, the item stays open for the hook.
     expect(s.host.keys.at(-1)?.key).toBe("Enter");

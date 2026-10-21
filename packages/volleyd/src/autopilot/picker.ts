@@ -262,6 +262,8 @@ const bare = (s: string): string => s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "
 /**
  * The session's screen shows `question` (its last non-empty line) above its last prompt: the
  * idle prompt is the one that asked, not another session's holding the same workspace ref.
+ * A short last line ("Proceed?") is a weak identity check on its own; the daemon's workspace
+ * holder check is what guards the ref.
  */
 export function questionOnScreen(screen: string | null, question: string): boolean {
   if (screen === null) return false;

@@ -66,6 +66,10 @@ export async function carryPicker(
   if (parsed === null || !matches(parsed, want)) return "picker not on screen";
   const keys = keysFor(parsed, choiceFor(answer, want));
   if (keys === null) return `the picker cannot take '${answer}'`;
+  // The fence refuses bad Other text too; checked first so the Desk gets plain words.
+  const text = keys.find((k): k is { text: string } => typeof k === "object")?.text;
+  const why = text !== undefined ? answerTextRefusal(text) : null;
+  if (why !== null) return `an Other answer must be one line of plain text, not ${why}`;
   await press(d, keys, item);
   if (!parsed.multi) return null;
   // Multi-select: Submit opens a review screen, which takes one more Enter.
@@ -77,7 +81,9 @@ export async function carryPicker(
       return null;
     }
   }
-  throw new Error("the picker's review screen did not appear after Submit");
+  throw new Error(
+    "the picker's review screen did not appear after Submit; the toggles and Submit were pressed, so finish it in its terminal",
+  );
 }
 
 /** Type the reply into the session's idle prompt, below the question it asked, and submit it. */
