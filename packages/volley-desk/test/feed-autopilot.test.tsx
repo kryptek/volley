@@ -115,6 +115,19 @@ describe("the store's autopilot feed", () => {
     expect(s.waveFeed?.w1 ?? []).toEqual([]);
   });
 
+  it("drops a redelivered event (same seq) instead of showing it twice", () => {
+    const s = reduceAll(stored(), [m("volley/_waves/w1/events", AUTO, T0 + 5000)]);
+    expect(s.waveFeed?.w1).toHaveLength(2);
+    expect(s.agents[IMPL]?.feed).toHaveLength(2);
+  });
+
+  it("forgets a wave's autopilot feed when its retained state is cleared", () => {
+    const s = reduceAll(stored(), [
+      { topic: "volley/_waves/w1/state", envelope: null, receivedAt: T0 },
+    ]);
+    expect(s.waveFeed?.w1).toBeUndefined();
+  });
+
   it("keeps the wave's autopilot feed across a reconnect's resync", async () => {
     const { resync } = await import("../src/store/reducer");
     expect(resync(stored()).waveFeed?.w1).toHaveLength(2);

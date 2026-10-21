@@ -297,11 +297,6 @@ export interface Tunables {
   claude?: { default_account?: string | null; warn_at_pct?: number };
   /** Remote hosts (SPEC §4.6.4); the Desk reads their names and caps. */
   hosts?: Record<string, { max_agents?: number; drain?: boolean; [key: string]: unknown }>;
-  /**
-   * The Fleet (SPEC §4.6.15): `local_name` is the supervisor's own machine; `local_agents` how it
-   * takes auto-placed tasks (the retained config carries it resolved; null only in a config file);
-   * `fallback` the profile it runs under while it is the fallback (no paired machine eligible).
-   */
   /** Autopilot (SPEC §4.6.16–17); absent from a supervisor that predates it. */
   autopilot?: {
     enabled?: boolean;
@@ -311,6 +306,11 @@ export interface Tunables {
     reconnect_grace_s?: number;
     [key: string]: unknown;
   };
+  /**
+   * The Fleet (SPEC §4.6.15): `local_name` is the supervisor's own machine; `local_agents` how it
+   * takes auto-placed tasks (the retained config carries it resolved; null only in a config file);
+   * `fallback` the profile it runs under while it is the fallback (no paired machine eligible).
+   */
   fleet?: {
     local_name?: string | null;
     local_agents?: LocalAgentsMode | null;

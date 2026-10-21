@@ -434,6 +434,14 @@ describe("a coordinator reconnecting (SPEC §4.6.1: the bound agent went away, i
     expect(waveAttention(w, c)).toEqual({ tier: "info", reason: "Coordinator reconnecting · 3m" });
   });
 
+  it("never downgrades an open decision on a wave this browser owns (it is still Needs you)", () => {
+    // autopilot escalates an owner_only kind (stage_go) to the owner: the grace must not hide it.
+    const w = reconnecting();
+    const owned = wave(w.state ?? {}, [decision({ kind: "stage_go", question: "Proceed?" })]);
+    const c = ctx({ me: "lead", coordinators: viewOf(w).coordinators, agents: {} });
+    expect(waveAttention(owned, c)).toEqual({ tier: "you", reason: "Decision: Proceed?" });
+  });
+
   it("the store keeps reconnecting even though the bound agent's status is terminal", () => {
     const w = reconnecting({ owner: "lead-a1" });
     const status = (type: string) => ({

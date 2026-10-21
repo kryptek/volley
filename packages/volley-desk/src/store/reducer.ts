@@ -431,6 +431,11 @@ function reduceWaveEvent(state: DeskState, wave: string, m: DeskMessage): DeskSt
   if (!env || env.agent_id !== "volleyd" || !AUTOPILOT_EVENTS.has(env.type)) return state;
   const entry = { topic: m.topic, envelope: env, receivedAt: m.receivedAt };
   const prior = state.waveFeed?.[wave] ?? [];
+  // A QoS-1 redelivery after a reconnect carries a seq already kept.
+  const seq = record(env.payload).seq;
+  if (typeof seq === "number" && prior.some((e) => record(e.envelope.payload).seq === seq)) {
+    return state;
+  }
   const feed = [...prior, entry].slice(-FEED_LIMIT);
   const task = str(record(env.payload).task);
   const t = task ? state.waves[wave]?.state?.tasks.find((x) => x.id === task) : undefined;
@@ -876,7 +881,9 @@ function reduceWave(state: DeskState, id: string, m: DeskMessage): DeskState {
     for (const a of Object.values(state.agents)) {
       agents[a.id] = a.wave === id ? { ...a, wave: UNASSIGNED, task: null, role: null } : a;
     }
-    return { ...state, waves, agents };
+    if (!state.waveFeed?.[id]) return { ...state, waves, agents };
+    const { [id]: _gone, ...waveFeed } = state.waveFeed;
+    return { ...state, waves, agents, waveFeed };
   }
   const payload = m.envelope.payload as WaveStatePayload;
   waves[id] = { id, decisions: {}, ...waves[id], state: payload, receivedAt: m.receivedAt };

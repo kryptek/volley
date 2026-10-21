@@ -306,8 +306,6 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
     const away = c.lastSeen === undefined ? "" : ` for ${mins(ctx.now - c.lastSeen)} min`;
     return { tier: "you", reason: `No coordinator${away}` };
   }
-  // Neutral: the session is coming back; nothing to claim, decisions wait or autopilot answers.
-  if (c.state === "reconnecting") return { tier: "info", reason: reconnectingLabel(c, ctx.now) };
   const decisions = openDecisions(w);
   const first = decisions[0];
   if (first && ((ctx.me && s.owner === ctx.me) || claimedHere(w, ctx))) {
@@ -317,6 +315,8 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
   if (gate !== undefined && claimedHere(w, ctx)) {
     return { tier: "you", reason: `Merge-ready gate: ${gate} is waiting on you` };
   }
+  // Neutral: the session is coming back; nothing to claim, decisions wait or autopilot answers.
+  if (c.state === "reconnecting") return { tier: "info", reason: reconnectingLabel(c, ctx.now) };
   const items = [
     ...decisions.map((d) => ({ reason: `Decision: ${d.question}`, since: parseTime(d.opened_at) })),
     ...s.gates.map((t) => ({ reason: gateReason(t), since: ctx.gateSince?.[`${w.id}/${t}`] })),
