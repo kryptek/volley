@@ -150,6 +150,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd inbox answer <id> <answer> [--where <where>] [--version <n>]` | Answer one item through the referee; a late answer is refused with where the first was given (exit 1). |
 | `volleyd merge <wave> <task>` | Merge one gated task now, at its gated head, through the merge queue's fenced verb (owner only; under `merge: manual` too). Answers with the merge commit, or the refusal ([The merge queue](#the-merge-queue)). |
 | `volleyd policy [wave] [--json]` | Autopilot's effective policy table: the decisions volleyd answers itself, with each budget ([Autopilot](#autopilot)). `--json` prints `{ rules, config }`. |
+| `volleyd digest <wave> [--json]` | The wave's morning digest as last published: `## Shipped`, `## Autopilot handled`, `## Waiting for you` (and `## Failed`) ([The morning digest](#the-morning-digest)). `--json` prints the retained payload. |
 | `volleyd claim <wave> [--by <id>]` | Take over a wave whose owner is gone. Needs an identity. |
 | `volleyd pause <wave>` / `resume <wave>` | Stop / restart admissions (owner only); running agents carry on. |
 | `volleyd stop <wave>` | Stop a wave (owner only): no admissions, `cancel` to every running agent. |
@@ -312,7 +313,8 @@ that the scheduler applies on top of the hard ceiling and spawn budget:
 | `volley/_waves/_config` | yes | Effective global config + `version` / `updated_at` / `updated_by`. |
 | `volley/_waves/<wave>/decisions/<id>` | while open | Each open decision (`decision.schema.json`); cleared on resolve. |
 | `volley/_inbox/<id>` | yes, then cleared | Each needs-you inbox item (`inbox-item.schema.json`); answered ones stay `autopilot.inbox_answered_ttl_s`. |
-| `volley/<ns>/volleyd/progress` | no | Notify bridge: a `blocked`-typed envelope with `attention: "decision_opened"` per new decision. |
+| `volley/_waves/<wave>/digest` | yes | The wave's morning digest (`digest.schema.json`, [The morning digest](#the-morning-digest)); cleared on archive. |
+| `volley/<ns>/volleyd/progress` | no | Notify bridge: a `blocked`-typed envelope with `attention: "decision_opened"` per new decision, and a `digest`-typed one (`payload.msg`: the summary line) per published digest. |
 | `volley/_waves/_system/events` | no | Live mirror of `_system` journal events (the kill switch). |
 | `volley/_system/leases/<pool>` | yes | One lease pool: `capacity`, `per_machine?`, `held`, FIFO `queue` (each with the holder's `host`), `reasons`. |
 | `volley/_system/leases/<pool>/requests` | no | Agents' `acquire` / `release` / `renew` (any agent may publish). |
@@ -882,6 +884,37 @@ Running the stages (the `release` role, its brief, `verify` and stage evidence, 
 before a `gate: owner` stage) arrives with the next part of the train; until then a stage moves
 only when its `release_stage_*` events are journaled.
 
+### The morning digest
+
+An unattended wave journals hundreds of events; in the morning the owner wants one answer. volleyd
+computes it from the journal (`src/autopilot/digest.ts`, pure) and publishes it retained on
+`volley/_waves/<wave>/digest` (`digest.schema.json`):
+
+- `shipped`: each merged task with its issue, title, PR, merge sha and `merged_by` (`supervisor`
+  for autopilot merging, `operator` for `volleyd merged` or a merge outside GitHub, `github`).
+- `auto`: `decisions_resolved` (`decision_auto_resolved`), `flakes_fixed` (each landed
+  `remediation_closed`: the test, its fixer, the tasks it released), `conflicts_resolved` (rebase
+  steps that verified), `retries` (`spawn_recovered` + `relaunched`), `merges` (PRs volleyd merged).
+- `waiting`: the wave's open decisions (`owner_only` when escalated as such); `release` (the
+  train's stages, when it has one); `failures`: cancelled tasks and why.
+
+It is published, and `digest_published { trigger }` journaled, on `wave_complete` or
+`release_done` (`trigger: wave_complete`), `wave_stopped` (`stopped`), a `release_go` opening
+(`release_go`) and an escalation (`escalation`; a `release_go`'s own escalation is the
+`release_go` digest's). A trigger is published again at most once per
+`autopilot.digest_min_interval_s` (default 1800): the owner hears about the first thing that
+needs them, not each one. Each publish sends **one push**: a `progress` envelope of type `digest`
+on volleyd's own topic whose `payload.msg` is the summary line, which `volley notify` rings for by
+default (its desktop banner shows `msg`):
+
+```text
+w1 complete: 27 shipped, 3 flakes fixed, 2 conflicts resolved, 1 waiting for you (release_go)
+```
+
+Decisions autopilot answers never ring, so an autopilot night ends in one digest push plus one
+`blocked` push per genuine escalation. `volleyd digest <wave>` prints it as markdown; the Desk's
+digest card shows it in the wave window while the wave has ended or has an escalation open.
+
 ---
 
 ## Needs-you inbox
@@ -1198,6 +1231,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `stop_grace_s` | the next `stop` | a grace already running keeps its length |
 | `autopilot.reconnect_grace_s` | the next wave-state publish ([ownership](#ownership-and-claim)) | — |
 | `autopilot.incident_wait_max_s` | the next re-check of a red head held for an infra incident | a hold already running keeps its start |
+| `autopilot.digest_min_interval_s` | the next digest trigger ([The morning digest](#the-morning-digest)) | — |
 | `dynsec_batch_ms` | the next batch of broker login changes | — |
 | `credential_sweep_interval_s` | after the next sweep | — |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |

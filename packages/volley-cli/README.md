@@ -210,7 +210,7 @@ On first load the Desk asks for broker credentials: sign in as the `desk` identi
 
 ## `volley notify`
 
-Long-lived subscriber that bridges agent state transitions to the human-visible surfaces you're already paying attention to: the terminal bell in the shell you're in, macOS desktop banners, or arbitrary HTTP webhooks. Runs until SIGINT/SIGTERM. Default trigger set is `blocked,failed,reaped` (attention-needed only — `done` is expected and would create noise during dispatch loops).
+Long-lived subscriber that bridges agent state transitions to the human-visible surfaces you're already paying attention to: the terminal bell in the shell you're in, macOS desktop banners, or arbitrary HTTP webhooks. Runs until SIGINT/SIGTERM. Default trigger set is `blocked,failed,reaped,digest` (attention-needed only — `done` is expected and would create noise during dispatch loops). `digest` is volleyd's morning digest push: one `progress` envelope per published wave digest (on `volley/<ns>/volleyd/progress`), whose `payload.msg` is the one-line summary, e.g. `w1 complete: 27 shipped, 3 flakes fixed, 2 conflicts resolved, 1 waiting for you (release_go)`.
 
 ```sh
 # Bell-only, watch every status transition on the default namespace
@@ -220,6 +220,9 @@ volley notify --pattern 'volley/+/+/status'
 volley notify --pattern 'volley/+/+/status' \
   --surface bell,desktop,webhook \
   --webhook-url https://ntfy.sh/your-private-topic
+
+# volleyd's pushes: one per decision left for you, and one per wave digest
+volley notify --pattern 'volley/+/volleyd/progress' --surface bell,desktop
 ```
 
 The surfaces fire concurrently; one surface erroring (e.g. webhook returns non-2xx) never aborts the loop. Each fired notification emits one JSON line on stdout (`{topic, type, agent_id, surfaces}`) so you can pipe to `jq` for live-tail.
@@ -227,7 +230,7 @@ The surfaces fire concurrently; one surface erroring (e.g. webhook returns non-2
 | Flag | Env | Default | Description |
 |---|---|---|---|
 | `--pattern <filter>` | — | (required) | MQTT topic filter, e.g. `volley/+/+/status` for a whole namespace |
-| `--on <csv>` | `VOLLEY_NOTIFY_ON` | `blocked,failed,reaped` | Lifecycle types that fire (`spawning,working,done,blocked,failed,reaped,registered`) |
+| `--on <csv>` | `VOLLEY_NOTIFY_ON` | `blocked,failed,reaped,digest` | Lifecycle types that fire (`spawning,working,done,blocked,failed,reaped,registered,digest`) |
 | `--surface <csv>` | `VOLLEY_NOTIFY_SURFACES` | `bell` | Comma-separated surfaces: `bell`, `desktop`, `webhook` |
 | `--webhook-url <url>` | `VOLLEY_NOTIFY_WEBHOOK_URL` | — | Required only when `webhook ∈ --surface`. Must be `http(s)://` |
 | `--namespace <ns>` | `VOLLEY_NAMESPACE` | `default` | Informational (the pattern already encodes the namespace) |
@@ -236,7 +239,7 @@ The surfaces fire concurrently; one surface erroring (e.g. webhook returns non-2
 | `--broker-url <url>` | `VOLLEY_BROKER_URL` | `mqtt://localhost:1883` | MQTT broker |
 | `--help` / `-h` | — | — | Print usage and exit |
 
-**Desktop surface (macOS only)** shells out to [`terminal-notifier`](https://github.com/julienXX/terminal-notifier) — install via `brew install terminal-notifier`. If absent, the desktop surface logs a one-time warning to stderr and degrades to no-op for the rest of the process; the other surfaces continue to fire. Sound configurable via `VOLLEY_NOTIFY_SOUND` (default `Glass`).
+**Desktop surface (macOS only)** shells out to [`terminal-notifier`](https://github.com/julienXX/terminal-notifier) — install via `brew install terminal-notifier`. If absent, the desktop surface logs a one-time warning to stderr and degrades to no-op for the rest of the process; the other surfaces continue to fire. Sound configurable via `VOLLEY_NOTIFY_SOUND` (default `Glass`). The banner's body is the envelope's `payload.msg` when it carries one (the digest's summary line), else its type.
 
 **Webhook surface** POSTs `{topic, envelope}` JSON with a 5s timeout. Non-2xx responses are logged but not retried — notification, not delivery.
 
@@ -695,7 +698,7 @@ Required:
   --pattern <filter>       MQTT topic filter, e.g. "volley/+/+/status"
 
 Optional:
-  --on <csv>               Lifecycle types that fire (default: blocked,failed,reaped)
+  --on <csv>               Lifecycle types that fire (default: blocked,failed,reaped,digest)
   --surface <csv>          Surfaces to fire (default: bell)
                            Valid: bell, desktop, webhook
   --webhook-url <url>      Required when webhook ∈ --surface; must be http(s)://

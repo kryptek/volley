@@ -6852,7 +6852,7 @@ export class Daemon {
     const last = this.journalEvents(wave)
       .filter((e) => e.type === "digest_published" && e.data.trigger === trigger)
       .at(-1);
-    const minMs = (this.config.get("autopilot.digest_min_interval_s", wave) as number) * 1000;
+    const minMs = secondsMs(this.config.get("autopilot.digest_min_interval_s", wave) as number);
     return last !== undefined && this.now() - Date.parse(last.at) < minMs ? null : trigger;
   }
 

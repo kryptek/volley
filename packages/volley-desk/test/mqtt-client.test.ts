@@ -50,6 +50,7 @@ describe("createMqttClient (desk)", () => {
       "volley/_waves/+/state",
       "volley/_waves/+/events",
       "volley/_waves/+/decisions/+",
+      "volley/_waves/+/digest",
       "volley/_waves/_config",
       // The index of archived waves (SPEC §4.6.20): the coordinators window counts it.
       "volley/_waves/_archive",

@@ -3,6 +3,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { summaryLine } from "../src/autopilot/digest";
 import { ControlClient, waveDigestTopic } from "../src/control";
 import type { Daemon } from "../src/daemon";
+import { eventually } from "./helpers/broker-wait";
 import { AUTOPILOT_ON, type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { schemaErrors } from "./helpers/schema";
@@ -25,6 +26,7 @@ let daemon: Daemon;
 let client: ControlClient;
 let sub: VolleyBroker;
 let pushes: { type: string; payload: Record<string, unknown> }[];
+let markers: string[];
 
 beforeEach(async () => {
   clock = fakeClock(Date.parse("2026-10-20T22:00:00.000Z"));
@@ -32,11 +34,13 @@ beforeEach(async () => {
   daemon = await t.start({ ...AUTOPILOT_ON, clock });
   client = await ControlClient.connect(t.broker.url, NS);
   pushes = [];
+  markers = [];
   sub = new VolleyBroker();
   await sub.connect({ url: t.broker.url, agentId: "test-notify" });
   await sub.subscribeStream(`volley/${NS}/volleyd/progress`, (m) => {
     const env = JSON.parse(m.payload);
     if (env.type === "digest") pushes.push(env);
+    if (env.type === "marker") markers.push(env.id);
   });
   expect((await client.request("run", { wave_yaml: YAML, owner: OWNER })).error).toBeUndefined();
 });
@@ -52,11 +56,18 @@ const published = () =>
     .filter((e) => e.type === "digest_published")
     .map((e) => e.data.trigger);
 
-/** Every push the notify bridge would see, once the broker delivered them. */
+/**
+ * Every push the notify bridge would see: once `n` arrived, a marker the test publishes after them
+ * on the same topic comes back, so any push the daemon sent before it has arrived too.
+ */
 async function pushed(n: number): Promise<typeof pushes> {
-  for (let i = 0; i < 100 && pushes.length < n; i++) await new Promise((r) => setTimeout(r, 10));
-  // Anything past `n` would have arrived by now too.
-  await new Promise((r) => setTimeout(r, 50));
+  await eventually(() => pushes.length >= n);
+  const id = `marker-${n}-${pushes.length}`;
+  await sub.publish(`volley/${NS}/volleyd/progress`, JSON.stringify({ type: "marker", id }), {
+    qos: 1,
+    retain: false,
+  });
+  await eventually(() => markers.includes(id));
   return pushes;
 }
 

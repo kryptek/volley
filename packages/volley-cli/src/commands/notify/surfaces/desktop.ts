@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn, spawnSync } from "node:child_process";
+import type { Envelope } from "volley-mcp/envelope";
 import type { IO } from "../../../io";
 import type { Surface } from "./types";
 
@@ -45,6 +46,12 @@ const defaultWhich: DesktopWhichFn = (cmd) => {
   }
 };
 
+/** The banner's body: the envelope's one-line `payload.msg` (the digest push), else its type. */
+function bodyOf(envelope: Envelope): string {
+  const msg = (envelope.payload as { msg?: unknown } | null | undefined)?.msg;
+  return typeof msg === "string" && msg !== "" ? msg : envelope.type;
+}
+
 export function createDesktopSurface(opts: CreateDesktopSurfaceOpts): Surface {
   const { io } = opts;
   const which = opts.which ?? defaultWhich;
@@ -76,7 +83,7 @@ export function createDesktopSurface(opts: CreateDesktopSurfaceOpts): Surface {
           "-subtitle",
           envelope.agent_id,
           "-message",
-          envelope.type,
+          bodyOf(envelope),
           "-sound",
           sound,
         ]);

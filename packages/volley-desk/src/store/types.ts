@@ -537,6 +537,42 @@ export interface InboxItem {
   answered?: { answer: string; by: string; where: InboxWhere; at: string };
 }
 
+/**
+ * digest.schema.json payload: a wave's morning digest on `volley/_waves/<wave>/digest`
+ * (SPEC §4.6.16) — what shipped, what autopilot handled, and what is waiting for the owner.
+ */
+export interface DigestPayload {
+  wave: string;
+  release_branch: string;
+  generated_at: string;
+  trigger: "wave_complete" | "release_go" | "escalation" | "stopped";
+  shipped: {
+    task: string;
+    issue: number;
+    title?: string;
+    pr: { number: number; url: string };
+    merge_sha: string | null;
+    merged_by: "supervisor" | "operator" | "github";
+  }[];
+  auto: {
+    decisions_resolved: number;
+    flakes_fixed: { test: string; fixer: string; prs_released: number }[];
+    conflicts_resolved: number;
+    retries: number;
+    merges: number;
+  };
+  waiting: {
+    id: string;
+    kind: string;
+    task?: string;
+    question: string;
+    since: string;
+    owner_only: boolean;
+  }[];
+  release?: WaveRelease;
+  failures: { task: string; why: string }[];
+}
+
 // ------------------------------------------------------------------- store
 
 export interface FeedEntry {
@@ -707,6 +743,8 @@ export interface DeskState {
   readiness?: Record<string, ReadinessPayload>;
   /** The needs-you inbox (SPEC §4.6.18): volleyd's retained items, by item id. */
   inbox?: Record<string, InboxItem>;
+  /** Each wave's retained morning digest (SPEC §4.6.16), by wave. */
+  digests?: Record<string, DigestPayload>;
   /**
    * Autopilot's events (`decision_auto_resolved`, `decision_escalated`, SPEC §4.6.16) from each
    * wave's `events` mirror, by wave; live-only (the topic is not retained), kept across a resync.
