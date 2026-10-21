@@ -221,7 +221,7 @@ describe("volleyd status formatting", () => {
     });
     expect(out.split("\n").slice(1, 3)).toEqual([
       "  T3               #103   implement       CI flake in a.test.ts > x: fixer pending",
-      "  fix-a-test-ts-x  implement  fixer for T3, T7 (flake: a.test.ts > x)  PR #9",
+      "  fix-a-test-ts-x         implement     fixer for T3, T7 (flake: a.test.ts > x)  PR #9",
     ]);
   });
 

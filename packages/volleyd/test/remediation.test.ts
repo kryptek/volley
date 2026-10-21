@@ -126,6 +126,20 @@ describe("fixerFor (SPEC §4.6.16)", () => {
     expect(rec.state?.spec?.tasks["fix-clock-test-ts-advance"]).toBeUndefined();
   });
 
+  it("two requests journaled before the fixer is added: the fixer is for both", () => {
+    // Back to back (one tick, two pipeline jobs): T7's request is reduced before the fixer exists.
+    const first = record([...flaky("T3"), ...flaky("T7")]);
+    const add = fixerFor(first, request("T3"), 3);
+    if (!("add" in add)) throw new Error("expected add");
+    const rec = record([...flaky("T3"), ...flaky("T7"), add.add]);
+    expect(rec.wave?.tasks["fix-clock-test-ts-advance"]?.remediation?.for).toEqual(["T3", "T7"]);
+    expect(fixerFor(rec, request("T7"), 3)).toEqual({ reuse: "fix-clock-test-ts-advance" });
+    expect(releasedBy(rec, "fix-clock-test-ts-advance")).toEqual(["T3", "T7"]);
+    // A task parked on another test is not this fixer's.
+    const other = record([...flaky("T3"), ...flaky("T7", "other.test.ts > x"), add.add]);
+    expect(other.wave?.tasks["fix-clock-test-ts-advance"]?.remediation?.for).toEqual(["T3"]);
+  });
+
   it("the fixer is a task like any other: wave pipeline, issue 0, no after, its test's file", () => {
     const first = record(flaky("T3"));
     const add = fixerFor(first, request("T3"), 3);

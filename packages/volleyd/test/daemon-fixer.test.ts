@@ -71,6 +71,16 @@ const of = (events: JournalEvent[], type: string, task?: string) =>
   events.filter((e) => e.type === type && (task === undefined || e.task === task));
 
 describe("the flake fixer task (SPEC §4.6.16)", () => {
+  it("two requests back to back, before the fixer is added: it is for both", async () => {
+    s = await env();
+    await Promise.all([flaky(s, "T3"), flaky(s, "T7")]);
+    await s.event((e) => e.type === "agent_spawned" && e.task === FIXER);
+    await s.settled();
+    expect(of(s.journal(), "task_queued", FIXER)).toHaveLength(1);
+    const t = s.daemon.snapshot("w1")?.tasks.find((x) => x.id === FIXER);
+    expect(t?.remediation?.for).toEqual(["T3", "T7"]);
+  });
+
   it("two requests for one test: one synthetic fixer for both, launched with the flake brief (no gh issue view)", async () => {
     s = await env();
     const issueViews = s.host.fake.argvs(["gh", "issue", "view"]).length;

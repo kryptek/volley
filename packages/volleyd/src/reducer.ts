@@ -180,6 +180,21 @@ function addSynthetic(
   const w = rec.wave;
   const r = data.remediation as FixerRemediation | undefined;
   if (w == null || r === undefined || w.tasks[id] !== undefined) return;
+  // A request for the test reduced before the fixer existed (two back to back) joins it too.
+  const blocked = [...r.for];
+  for (const t of rec.state?.tasks ?? []) {
+    const parked = rec.pipeline[t.id]?.remediation;
+    if (
+      t.id !== id &&
+      t.stage !== "done" &&
+      t.stage !== "cancelled" &&
+      !blocked.includes(t.id) &&
+      parked?.kind === "fix_flake" &&
+      parked.test === r.test &&
+      parked.landed !== true
+    )
+      blocked.push(t.id);
+  }
   const def: WaveTask = {
     id,
     issue: 0,
@@ -191,7 +206,7 @@ function addSynthetic(
     host: w.placement === AUTO_HOST ? AUTO_HOST : "local",
     files: r.test_file !== null ? [r.test_file] : [],
     synthetic: true,
-    remediation: { ...r, for: [...r.for], since: at },
+    remediation: { ...r, for: blocked, since: at },
   };
   rec.wave = { ...w, tasks: { ...w.tasks, [id]: def }, task_order: [...w.task_order, id] };
 }

@@ -9133,8 +9133,10 @@ const DECISION_RECORD_KEYS: ReadonlySet<string> = new Set([
 
 /**
  * Why a fixer task's event means it will not land its fix (SPEC §4.6.16): cancelled, blocked (its
- * agent's `blocked` opens an agent_blocked decision), or one of its decisions escalated. null: it
- * does not.
+ * agent's `blocked` opens an agent_blocked decision), or one of its decisions escalated. Any
+ * escalation counts, as SPEC §4.6.16 says: the fixer is then waiting on the owner, so the tasks it
+ * holds go to the owner too rather than wait unseen; if it lands after all it closes again `landed`.
+ * null: it does not.
  */
 function fixerFailure(e: JournalEvent): string | null {
   if (e.type === "task_cancelled")
