@@ -1398,6 +1398,7 @@ export default function App() {
             onRegistry: setRegistry,
             machines: state.machines ?? {},
             localName: state.config?.fleet?.local_name ?? undefined,
+            hosts: Object.keys(state.config?.hosts ?? {}),
           }}
           machines={{
             machines: state.machines ?? {},

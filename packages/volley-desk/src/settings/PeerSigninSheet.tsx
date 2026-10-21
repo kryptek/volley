@@ -114,30 +114,7 @@ export function PeerSigninSheet({
           <span className="spinner" aria-hidden="true" /> Starting the sign-in on {machine}…
         </p>
       ) : (
-        <>
-          <p className="dim">
-            Sign in with the Claude account {machine}’s agents should use, on Anthropic’s own page.
-            {flow === "browser_callback"
-              ? ` It hands the sign-in straight back to Claude Code on ${machine} through this computer, so open it in a browser on this computer.`
-              : " The page then shows a code: type it into the sign-in terminal below."}
-          </p>
-          <div className="ny-actions">
-            <a className="btn btn--blue" href={url} target="_blank" rel="noreferrer">
-              Open sign-in ↗
-            </a>
-          </div>
-          {(flow !== "browser_callback" || manualUrl) && attach && (
-            <PhoneSteps
-              machine={machine}
-              manualUrl={flow === "browser_callback" ? manualUrl : undefined}
-              attach={attach}
-              open={flow !== "browser_callback"}
-            />
-          )}
-          <div className="waiting">
-            <span className="spinner" aria-hidden="true" /> Waiting for the sign-in to finish…
-          </div>
-        </>
+        <SigninLink machine={machine} url={url} flow={flow} attach={attach} manualUrl={manualUrl} />
       )}
       <div className="ny-actions">
         <button type="button" className={done ? "btn btn--hot" : "btn"} onClick={onClose}>
@@ -145,6 +122,53 @@ export function PeerSigninSheet({
         </button>
       </div>
     </MachineSheet>
+  );
+}
+
+/**
+ * A remote sign-in once volleyd has its URL: **Open sign-in ↗**, the phone
+ * disclosure (the manual URL and the command that attaches to the sign-in
+ * terminal), and the wait. Shared by this sheet and Add Claude account, so a
+ * peer's sign-in reads the same in both; it has no field of any kind.
+ */
+export function SigninLink({
+  machine,
+  url,
+  flow,
+  attach,
+  manualUrl,
+}: {
+  machine: string;
+  url: string;
+  flow?: string | undefined;
+  attach?: string | undefined;
+  manualUrl?: string | undefined;
+}) {
+  return (
+    <>
+      <p className="dim">
+        Sign in with the Claude account {machine}’s agents should use, on Anthropic’s own page.
+        {flow === "browser_callback"
+          ? ` It hands the sign-in straight back to Claude Code on ${machine} through this computer, so open it in a browser on this computer.`
+          : " The page then shows a code: type it into the sign-in terminal below."}
+      </p>
+      <div className="ny-actions">
+        <a className="btn btn--blue" href={url} target="_blank" rel="noreferrer">
+          Open sign-in ↗
+        </a>
+      </div>
+      {(flow !== "browser_callback" || manualUrl) && attach && (
+        <PhoneSteps
+          machine={machine}
+          manualUrl={flow === "browser_callback" ? manualUrl : undefined}
+          attach={attach}
+          open={flow !== "browser_callback"}
+        />
+      )}
+      <div className="waiting">
+        <span className="spinner" aria-hidden="true" /> Waiting for the sign-in to finish…
+      </div>
+    </>
   );
 }
 

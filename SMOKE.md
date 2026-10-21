@@ -731,6 +731,13 @@ on GitHub with one small open issue and a pushed release branch
    **Sign in on this machine**, then **Open Anthropic sign-in ↗** and sign in with the *second*
    account.
    **Pass:** the card shows `second` signed in; `volley claude list` lists both profiles.
+   - **On a paired machine (owner-run; needs a paired peer with its tunnel up).** On the
+     `second` card, **Add to another machine…**: the label reads `second`, `this machine` is
+     greyed out ("already holds this account"). Pick the peer, **Sign in on <peer>**: the dialog
+     shows **Open sign-in ↗** and **From a phone instead** (the manual URL and the `ssh … tmux
+     attach` command), and no field. Sign in with the *second* account.
+     **Pass:** the dialog reaches `Added: second` and `signed in on <peer>`; the `second` card
+     lists both machines.
    Write `smoke.yaml` (the issue and branch from "You need"):
    ```yaml
    wave: <yyyy-mm-dd>-onboarding-smoke
