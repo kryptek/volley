@@ -3275,7 +3275,11 @@ export class PipelineDriver {
 
   /** The task's fenced exec with the pipeline's hard timeout; a timeout throws `IoTimeout`. */
   private io(task: TaskId): ExecFn {
-    const exec = this.deps.execFor?.(task) ?? this.deps.exec;
+    return this.timed(this.deps.execFor?.(task) ?? this.deps.exec);
+  }
+
+  /** `exec` with the pipeline's hard timeout: a call past it throws `IoTimeout`. */
+  private timed(exec: ExecFn): ExecFn {
     return async (argv, opts: ExecOptions = {}): Promise<ExecResult> => {
       const r = await exec(argv, { timeoutMs: DAEMON_DEFAULTS.pipeline_io_ms, ...opts });
       if (r.timedOut) throw new IoTimeout(`${argv.slice(0, 3).join(" ")} timed out`);
@@ -4344,8 +4348,24 @@ export class PipelineDriver {
     token: MergeToken,
     by?: string,
   ): Promise<PipelineEvent | null> {
-    const cwd = this.headWorktree(v.p);
-    const r = await mergePr(this.io(v.task), token, cwd, this.deps.deleteBranch?.() ?? false);
+    // A merge is the supervisor's act (its gh login, its MergeToken): it runs here, in the wave's
+    // repo, whatever machine the task's agents ran on. A paired machine's fence never holds a
+    // MergeToken, so a merge sent there would always be refused.
+    const repo = this.deps.record().state?.repo;
+    const r =
+      repo != null
+        ? await mergePr(
+            this.timed(this.deps.exec),
+            token,
+            repo,
+            this.deps.deleteBranch?.() ?? false,
+          )
+        : await mergePr(
+            this.io(v.task),
+            token,
+            this.headWorktree(v.p),
+            this.deps.deleteBranch?.() ?? false,
+          );
     return r.ok
       ? {
           kind: "supervisor_merged",

@@ -3786,7 +3786,9 @@ export class Daemon {
       (prevAttempt === spawnAttempt || this.burnedAttempts(wave, task, role).includes(prevAttempt))
         ? prev.attempt + 1
         : 1;
-    const stopped = n >= eff.spawn_retry_max;
+    // A refusal that can never succeed as is stops the retries at its first failure.
+    const permanent = e instanceof SpawnError && e.permanent;
+    const stopped = permanent || n >= eff.spawn_retry_max;
     const wait = Math.min(
       DAEMON_DEFAULTS.spawn_retry_base_ms * 2 ** (n - 1),
       secondsMs(eff.spawn_retry_max_s),
@@ -3817,9 +3819,11 @@ export class Daemon {
     if (open !== undefined && (!stopped || open.stopped === true)) return;
     try {
       if (open !== undefined) await this.resolveNow(wave, open.decision_id, SPAWN_RETRIES_STOPPED);
-      const question = stopped
-        ? `Needs you: ${task}'s ${role} could not be spawned after ${n} attempts (${code}: ${message}); volleyd's automatic retries stopped. Fix the cause, then retry now — or stop the task?`
-        : `Needs you: ${task}'s ${role} could not be spawned (${code}: ${message}). volleyd retries on its own (next in ${wait / 1000}s, attempt ${n} of ${eff.spawn_retry_max}). Retry now, or stop the task?`;
+      const question = permanent
+        ? `Needs you: ${task}'s ${role} could not be spawned (${code}: ${message}); a retry can never succeed as is, so volleyd does not retry it. Fix the cause, then retry now — or stop the task?`
+        : stopped
+          ? `Needs you: ${task}'s ${role} could not be spawned after ${n} attempts (${code}: ${message}); volleyd's automatic retries stopped. Fix the cause, then retry now — or stop the task?`
+          : `Needs you: ${task}'s ${role} could not be spawned (${code}: ${message}). volleyd retries on its own (next in ${wait / 1000}s, attempt ${n} of ${eff.spawn_retry_max}). Retry now, or stop the task?`;
       const base = spawnFailedDecisionId(wave, task, role);
       let id = base;
       for (let k = 2; rec.decisions[id] !== undefined; k++) id = `${base}-${k}`;
