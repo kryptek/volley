@@ -28,6 +28,18 @@ export interface DagNode {
   stage: DeskStage;
   /** Cancelled by a plan change: drawn faded, labelled `cancelled`, kept out of progress. */
   cancelled?: boolean;
+  /** A synthetic fixer task (SPEC §4.6.16): the tasks it fixes; drawn with a wrench. */
+  fixerFor?: string[];
+}
+
+/** `fixer for T3, T7` (just `fixer` when the supervisor names no task). */
+export const fixerLabel = (fixes: readonly string[]) =>
+  fixes.length ? `fixer for ${fixes.join(", ")}` : "fixer";
+
+/** A node's tooltip: its title, or what a fixer fixes. */
+function nodeTip(t: DagNode): string | undefined {
+  if (t.fixerFor) return `${t.id} · ${fixerLabel(t.fixerFor)}`;
+  return t.title ? `${t.id} · ${t.title}` : undefined;
 }
 
 export interface DagLayout {
@@ -186,8 +198,13 @@ export function Dag({
             data-col={t.col}
             data-id={t.id}
           >
-            {t.title && <title>{`${t.id} · ${t.title}`}</title>}
+            {nodeTip(t) && <title>{nodeTip(t)}</title>}
             <rect width={W} height={H} rx="9" />
+            {t.fixerFor && (
+              <text x={W - 10} y="34" textAnchor="end" className="dag-fixer">
+                🔧
+              </text>
+            )}
             <text x="10" y="18" className="dag-id" fill={accent}>
               {t.id}
             </text>

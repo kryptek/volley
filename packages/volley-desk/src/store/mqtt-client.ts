@@ -79,6 +79,7 @@ export const DESK_SUBSCRIPTIONS = [
   "volley/+/+/mailbox",
   "volley/+/+/screen",
   "volley/_waves/+/state",
+  "volley/_waves/+/events",
   "volley/_waves/+/decisions/+",
   "volley/_waves/_config",
   "volley/_system/leases/+",

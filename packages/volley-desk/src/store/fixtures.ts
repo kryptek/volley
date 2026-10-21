@@ -932,3 +932,111 @@ export function demoReviewer(now = Date.now()): DeskMessage[] {
     ),
   ];
 }
+
+/**
+ * Autopilot's surfaces (SPEC §4.6.16–19), as two more waves a supervisor would publish: one whose
+ * coordinator is reconnecting (its session's MCP restarted), and one autopilot runs that is
+ * releasing, with a merge queue, a release train, a synthetic fixer task and both journal events.
+ */
+export function demoAutopilot(now = Date.now()): DeskMessage[] {
+  const base = (wave: string, over: Partial<WaveStatePayload>): WaveStatePayload => ({
+    wave,
+    version: 1,
+    owner: "lead",
+    repo: "example-org/example-repo",
+    release_branch: `release/2026-10-20-${wave}`,
+    status: "running",
+    tasks: [],
+    open_decisions: [],
+    gates: [],
+    updated_at: iso(now),
+    ...over,
+  });
+  const state = (p: WaveStatePayload): DeskMessage => ({
+    topic: `volley/_waves/${p.wave}/state`,
+    envelope: env(SUPERVISOR, "_waves/state", "wave_state", p, now),
+    receivedAt: now,
+  });
+  const task = (id: string, issue: number, stage: Stage) => ({ id, issue, stage, agents: {} });
+  const reconnecting = base("relaunch", {
+    tasks: [task("T1", 201, "implement")],
+    spec: { version: 1, tasks: { T1: { issue: 201, title: "Grace window", after: [] } } },
+    coordinator: { agent_id: "lead-a7", state: "reconnecting", last_seen: iso(now - 3 * 60_000) },
+    autopilot: { enabled: true, auto_resolved: 0, escalated: 0, budgets: {} },
+  });
+  const train = base("autopilot", {
+    status: "releasing",
+    tasks: [
+      task("T3", 211, "merge_ready"),
+      task("T5", 212, "merge_ready"),
+      task("T7", 213, "merge_ready"),
+      task("T9", 214, "merge_ready"),
+      { ...task("T3-ci1", 211, "fixup"), synthetic: { for: ["T3", "T7"] } },
+    ],
+    gates: ["T3", "T5", "T7", "T9"],
+    spec: {
+      version: 1,
+      tasks: {
+        T3: { issue: 211, title: "Queue order", after: [] },
+        T5: { issue: 212, title: "Update before merge", after: [] },
+        T7: { issue: 213, title: "Refused merges", after: ["T3"] },
+        T9: { issue: 214, title: "Train stages", after: ["T5"] },
+      },
+    },
+    coordinator: { agent_id: "lead", state: "working", last_seen: iso(now) },
+    autopilot: {
+      enabled: true,
+      auto_resolved: 4,
+      escalated: 1,
+      budgets: { "relaunch_max:T3/implementer": { used: 1, max: 1 } },
+    },
+    merge_queue: [
+      { task: "T3", state: "merging", since: iso(now - 4 * 60_000) },
+      { task: "T5", state: "updating", since: iso(now - 3 * 60_000) },
+      { task: "T7", state: "queued", since: iso(now - 2 * 60_000) },
+      { task: "T9", state: "queued", since: iso(now - 60_000) },
+    ],
+    release: {
+      stage: "publish",
+      stages: [
+        { name: "tag", state: "verified" },
+        { name: "publish", state: "awaiting_go" },
+        { name: "announce", state: "pending" },
+      ],
+    },
+  });
+  const event = (type: string, seq: number, data: Record<string, unknown>, t?: string) => ({
+    topic: "volley/_waves/autopilot/events",
+    envelope: env(
+      SUPERVISOR,
+      "_waves/events",
+      type,
+      { wave: "autopilot", seq, at: iso(now), ...(t ? { task: t } : {}), data },
+      now,
+    ),
+    receivedAt: now,
+  });
+  return [
+    state(reconnecting),
+    state(train),
+    event(
+      "decision_auto_resolved",
+      41,
+      {
+        decision_id: "autopilot-t3-hooks_auth_failed-1",
+        kind: "hooks_auth_failed",
+        policy: "hooks_auth_failed/relaunch",
+        answer: "relaunch",
+        rationale: "a bad launch is cheaper to retry than to read",
+        evidence: { screen_hash: "9c41e0aa", attempt: 1 },
+        budget: { key: "relaunch_max:T3/implementer", used: 1, max: 1 },
+      },
+      "T3",
+    ),
+    event("decision_escalated", 42, {
+      decision_id: "autopilot-stage_go-1",
+      kind: "stage_go",
+      why: "owner_only",
+    }),
+  ];
+}
