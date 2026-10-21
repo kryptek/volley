@@ -598,6 +598,7 @@ const INFRA = new Set([
  *   numeric  — `-<n>` is accepted (git log -5)
  *   pathspecs — `--` ends the options; everything after it is a path
  *   positional — extra check for every non-option argument
+ *   values   — extra check for a valued option's value, by option (either form)
  */
 interface OptSpec {
   flags?: readonly string[];
@@ -606,6 +607,7 @@ interface OptSpec {
   numeric?: boolean;
   pathspecs?: boolean;
   positional?: (arg: string) => boolean;
+  values?: Readonly<Record<string, (value: string) => boolean>>;
 }
 
 const DIFF_OUTPUT = [
@@ -832,6 +834,10 @@ const GIT_BRANCH_MUTATORS = new Set([
   "--edit-description",
 ]);
 
+/** A git branch name as `gh run list --branch` takes it: never an option, no space or shell syntax. */
+const isBranchName = (v: string): boolean =>
+  /^[A-Za-z0-9._/-]+$/.test(v) && !v.startsWith("-") && !v.includes("..");
+
 /** Options every gh read verb that prints JSON accepts. */
 const GH_OUTPUT = ["--json", "--jq", "-q", "--template", "-t", "--repo", "-R"];
 
@@ -879,6 +885,8 @@ const GH_SPECS: Record<string, OptSpec> = {
       "--event",
       "-e",
     ],
+    // A branch name (a red head's classification reads the release branch's runs), never an option.
+    values: { "--branch": isBranchName, "-b": isBranchName },
   },
   "run view": {
     flags: ["--log", "--log-failed", "--verbose", "-v", "--exit-status"],
@@ -1031,6 +1039,10 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
   }
 }
 
+/** A valued option's value passes the spec's check for that option (none: any value). */
+const valueOk = (spec: OptSpec, option: string, value: string): boolean =>
+  spec.values?.[option]?.(value) ?? true;
+
 /**
  * Check every argument after an allowed subcommand against its `OptSpec`. Returns the denial for
  * the first option (or positional) the spec does not accept, naming it after `verb`.
@@ -1049,10 +1061,14 @@ function checkArgs(verb: string, args: readonly string[], spec: OptSpec): Verdic
     if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       const name = eq === -1 ? a : a.slice(0, eq);
-      if (eq !== -1 && (has(spec.valued, name) || has(spec.optional, name))) continue;
+      if (eq !== -1 && (has(spec.valued, name) || has(spec.optional, name))) {
+        if (!valueOk(spec, name, a.slice(eq + 1))) return deny(`${verb} ${a}`);
+        continue;
+      }
       if (eq === -1 && has(spec.valued, a)) {
         const v = args[i + 1];
         if (v === undefined || v.startsWith("-")) return deny(`${verb} ${a} (missing value)`);
+        if (!valueOk(spec, a, v)) return deny(`${verb} ${a} ${v}`);
         i++;
         continue;
       }
@@ -1062,9 +1078,13 @@ function checkArgs(verb: string, args: readonly string[], spec: OptSpec): Verdic
     // flags (`-uq`) are not accepted: one of them could be a value-taking option.
     const short = a.slice(0, 2);
     if (has(spec.valued, short)) {
-      if (a.length > 2) continue;
+      if (a.length > 2) {
+        if (!valueOk(spec, short, a.slice(2))) return deny(`${verb} ${a}`);
+        continue;
+      }
       const v = args[i + 1];
       if (v === undefined || v.startsWith("-")) return deny(`${verb} ${a} (missing value)`);
+      if (!valueOk(spec, short, v)) return deny(`${verb} ${a} ${v}`);
       i++;
       continue;
     }

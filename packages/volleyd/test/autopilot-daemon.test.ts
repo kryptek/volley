@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { ControlClient, waveStateTopic } from "../src/control";
@@ -255,5 +256,76 @@ describe("autopilot in the daemon (SPEC §4.6.16)", () => {
     expect(await s.env.retained(decisionTopic("w1", d.decision_id))).toBeNull();
     expect(b.ids()).not.toContain(d.decision_id);
     await b.close();
+  });
+});
+
+describe("self-healing CI in the daemon (SPEC §4.6.16)", () => {
+  const RED = `c1a55${"0".repeat(35)}`;
+  const fixture = (name: string) =>
+    readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf-8");
+
+  it("a blocked agent whose failing test is not in its change, on a red PR head: classified flake and auto-answered like a ci_failed", async () => {
+    s = await makeSupervisedEnv({
+      daemon: AUTOPILOT_ON,
+      exec: [
+        [
+          ["gh", "pr", "list"],
+          {
+            stdout: JSON.stringify([
+              {
+                number: 7,
+                url: "https://example.test/pr/7",
+                headRefName: "w1/T1-implementer-1",
+                baseRefName: "release/w1",
+                headRefOid: RED,
+              },
+            ]),
+          },
+        ],
+        [
+          ["gh", "run", "list"],
+          (argv) => ({
+            stdout: argv.includes("--branch")
+              ? fixture("gh-run-list-green.json")
+              : fixture("gh-run-list-red.json").replaceAll("1".repeat(40), RED),
+          }),
+        ],
+        [["gh", "run", "view"], { stdout: fixture("gh-run-log-failed-flake.txt") }],
+        [["gh", "pr", "view"], { stdout: fixture("gh-pr-view-files.json") }],
+      ],
+    });
+    await s.status("blocked", { reason: "test/clock.test.ts is red on CI, not in my change" });
+    const opened = await s.event((e) => e.type === "decision_opened");
+    await s.event("decision_resolved");
+    await s.settled();
+    expect(opened.data).toMatchObject({
+      kind: "agent_blocked",
+      classification: "flake",
+      pipeline: { on: "agent_blocked_ci", role: "implementer", head: RED },
+      evidence: {
+        failing_tests: ["test/clock.test.ts > sleep > resolves on abort"],
+        test_files: ["test/clock.test.ts"],
+        release_ci: { state: "green" },
+        status_page: { incident: false },
+      },
+    });
+    const req = s.journal().find((e) => e.type === "remediation_requested");
+    expect(req?.data).toMatchObject({
+      kind: "fix_flake",
+      test_file: "test/clock.test.ts",
+      head: RED,
+    });
+    const auto = s.journal().find((e) => e.type === "decision_auto_resolved");
+    expect(auto?.data).toMatchObject({ policy: "ci_failed/fix-flake", answer: "fix flake" });
+    expect(types()).not.toContain("decision_escalated");
+    const t = s.daemon.snapshot("w1")?.tasks[0];
+    expect(t?.remediation).toMatchObject({
+      kind: "fix_flake",
+      test: "test/clock.test.ts > sleep > resolves on abort",
+    });
+    await s.consumed();
+    const retained = (await s.env.retained(waveStateTopic("w1"))) as { payload: WaveState };
+    expect(retained.payload.tasks[0]?.remediation?.kind).toBe("fix_flake");
+    expect(schemaErrors("wave-state.schema.json", retained)).toEqual([]);
   });
 });
