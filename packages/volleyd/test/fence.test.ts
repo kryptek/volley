@@ -824,6 +824,49 @@ describe("the launch command needs the token of a launch script volleyd sealed",
       expect(() => sealLaunchScript("/tmp/wt", bad), why).toThrow(FenceError);
     }
   });
+
+  it("pins the auto-compact window: one integer 100000..1000000, right after VOLLEY_HOOKS_DIR", () => {
+    const compact = renderLaunchScript({ ...vars, autoCompactWindow: 850000 });
+    const line = "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='850000'";
+    expect(compact.split("\n")[5]).toBe(line);
+    expect(() => sealLaunchScript("/tmp/wt", compact)).not.toThrow();
+    for (const n of [100000, 1000000]) {
+      const edge = renderLaunchScript({ ...vars, autoCompactWindow: n });
+      expect(() => sealLaunchScript("/tmp/wt", edge), String(n)).not.toThrow();
+    }
+    const edits: Record<string, string> = {
+      "below the minimum": compact.replace("'850000'", "'99999'"),
+      "above the maximum": compact.replace("'850000'", "'1000001'"),
+      "a suffixed value": compact.replace("'850000'", "'850k'"),
+      unquoted: compact.replace("'850000'", "850000"),
+      "an empty value": compact.replace("'850000'", "''"),
+      "a leading zero": compact.replace("'850000'", "'0850000'"),
+      "a second line": compact.replace(line, `${line}\n${line}`),
+      "before VOLLEY_HOOKS_DIR": compact
+        .replace(`${line}\n`, "")
+        .replace("export VOLLEY_HOOKS_DIR=", `${line}\nexport VOLLEY_HOOKS_DIR=`),
+      "after unset VOLLEY_COORDINATOR": compact
+        .replace(`${line}\n`, "")
+        .replace("unset VOLLEY_COORDINATOR\n", `unset VOLLEY_COORDINATOR\n${line}\n`),
+      "another CLAUDE_ export in its place": compact.replace(
+        line,
+        "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='400000'",
+      ),
+      "the 1M switch in its place": compact.replace(
+        line,
+        "export CLAUDE_CODE_DISABLE_1M_CONTEXT='1'",
+      ),
+    };
+    for (const [why, bad] of Object.entries(edits)) {
+      expect(bad, why).not.toBe(compact);
+      expect(() => sealLaunchScript("/tmp/wt", bad), why).toThrow(FenceError);
+    }
+    // Out-of-range values never render into a script the fence seals.
+    for (const n of [99999, 1000001, 850000.5]) {
+      const s = renderLaunchScript({ ...vars, autoCompactWindow: n });
+      expect(() => sealLaunchScript("/tmp/wt", s), String(n)).toThrow(FenceError);
+    }
+  });
 });
 
 describe("exec", () => {
