@@ -15,4 +15,23 @@ describe("templates/brief-preface.md", () => {
     expect(rules).toContain("changes/<issue>.<type>.md");
     expect(rules).toContain("never edit `CHANGELOG.md`");
   });
+
+  it("carries the go/no-go AskUserQuestion convention, before the repository's own rules", () => {
+    const text = readFileSync(TEMPLATE, "utf8");
+    const [before = "", rules = ""] = text.split("## Repository rules");
+    expect(before).toContain("## Asking for a go-ahead");
+    for (const part of [
+      "`AskUserQuestion`",
+      "`go`",
+      "`hold`",
+      "`cancel`",
+      "`multiSelect: false`",
+    ]) {
+      expect(before).toContain(part);
+    }
+    expect(before).toContain("never as a question at the end of your turn");
+    // The hygiene rules are unchanged by it.
+    expect(before).toContain("## Public-repo hygiene");
+    expect(rules).not.toContain("AskUserQuestion");
+  });
 });
