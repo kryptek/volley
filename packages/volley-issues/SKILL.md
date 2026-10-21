@@ -546,16 +546,22 @@ Once every dispatched agent has reached `done` AND its PR is merged into the rel
    gh workflow run deploy-admin-frontend.yml --ref release/<date>-<theme> -f environment=staging
    ```
 
-2. **Assemble the changelog** on the release branch, before the version bump commit:
+2. **Assemble the changelog and bump the versions** in a release-prep PR into the release branch:
    ```bash
+   git checkout -b release-prep/<v> release/<date>-<theme>
    bun run changelog --version <v> --date <YYYY-MM-DD> --commit
+   # bump the package.json versions, commit as `release: <v>`
+   git push -u origin release-prep/<v>
+   bun scripts/changelog-ci.ts labels --ensure
+   gh pr create --base release/<date>-<theme> --head release-prep/<v> --title "release: <v> — <theme>" --label no-changelog
+   gh pr merge --squash --subject "release: <v> — <theme>"
    ```
-   It turns every `changes/` fragment into the `## <v> — <date>` section of `CHANGELOG.md` and commits `release: changelog for <v>`; then bump the `package.json` versions in the same release PR. The volley-cli version test checks that the newest section matches the root version.
+   `bun run changelog --commit` turns every `changes/` fragment into the `## <v> — <date>` section of `CHANGELOG.md` and commits `release: changelog for <v>`; the volley-cli version test checks that the newest section matches the root version. The PR passes CI's changelog guards by construction: its squash subject starts with `release:` (the only commits allowed to change `CHANGELOG.md`), and it carries the `no-changelog` label because the version bump touches `packages/` without a fragment. `labels --ensure` creates that label when the repository lacks it.
 
-3. **After staging verification**, squash-merge the release branch into main:
+3. **After staging verification**, squash-merge the release branch into main, again under a `release:` subject:
    ```bash
-   gh pr create --base main --head release/<date>-<theme> --title "Release: <date> — <theme>"
-   gh pr merge --squash
+   gh pr create --base main --head release/<date>-<theme> --title "release: <date> — <theme>"
+   gh pr merge --squash --subject "release: <date> — <theme>"
    ```
 
 4. **Delete the release branch** after merge:

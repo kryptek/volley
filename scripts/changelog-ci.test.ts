@@ -66,6 +66,13 @@ describe("changelogTouched", () => {
     expect(changelogTouched([touch("chore(release): 0.5.0")]).ok).toBe(true);
   });
 
+  test("the release prefix is case-insensitive (a squash under the PR title `Release: …`)", () => {
+    expect(changelogTouched([touch("Release: 2026-10-21 — theme")]).ok).toBe(true);
+    expect(changelogTouched([touch("RELEASE: 0.5.0")]).ok).toBe(true);
+    expect(changelogTouched([touch("Chore(Release): 0.5.0")]).ok).toBe(true);
+    expect(changelogTouched([touch("Released the thing")]).ok).toBe(false);
+  });
+
   test("passes when CHANGELOG.md is not in any commit", () => {
     expect(changelogTouched([{ subject: "feat(volleyd): x", files: ["x.ts"] }]).ok).toBe(true);
     expect(changelogTouched([]).ok).toBe(true);
@@ -148,6 +155,14 @@ describe("main", () => {
     expect(r.err).toContain("fix(volleyd): y");
   });
 
+  test("untouched: a squash under the PR title `Release: <date> — <theme>` passes", () => {
+    const { cwd, base } = repo();
+    const head = commit(cwd, "Release: 2026-10-21 — theme", {
+      "CHANGELOG.md": "# C\n\n## 0.5.1\n",
+    });
+    expect(run(["untouched", "--base", base, "--head", head], cwd).code).toBe(0);
+  });
+
   test("untouched: an all-zero base (a new branch) is skipped", () => {
     const { cwd, base } = repo();
     expect(run(["untouched", "--base", "0".repeat(40), "--head", base], cwd).code).toBe(0);
@@ -157,6 +172,45 @@ describe("main", () => {
     const { cwd, base } = repo();
     expect(run(["fragment", "--head", base], cwd).code).toBe(2);
     expect(run(["bogus", "--base", base, "--head", base], cwd).code).toBe(2);
+  });
+});
+
+describe("labels --ensure", () => {
+  function fakeGh(existing: string[]) {
+    const calls: string[][] = [];
+    const gh = (...args: string[]): string => {
+      calls.push(args);
+      return args[0] === "label" && args[1] === "list"
+        ? existing.map((l) => `${l}\n`).join("")
+        : "";
+    };
+    return { calls, gh };
+  }
+
+  test("creates the no-changelog label when the repository lacks it", () => {
+    const { calls, gh } = fakeGh(["bug", "enhancement"]);
+    const out: string[] = [];
+    expect(main(["labels", "--ensure"], { gh, out: (s) => out.push(s), err: () => {} })).toBe(0);
+    const create = calls.find((c) => c[0] === "label" && c[1] === "create");
+    expect(create?.slice(0, 3)).toEqual(["label", "create", "no-changelog"]);
+    expect(create).toContain("--force");
+    expect(out.join("\n")).toContain("created");
+  });
+
+  test("is a no-op when the label exists", () => {
+    const { calls, gh } = fakeGh(["bug", "no-changelog"]);
+    expect(main(["labels", "--ensure"], { gh, out: () => {}, err: () => {} })).toBe(0);
+    expect(calls.some((c) => c[1] === "create")).toBe(false);
+  });
+
+  test("a gh failure exits 1 with its message; `labels` without --ensure is a usage error", () => {
+    const err: string[] = [];
+    const gh = (): string => {
+      throw new Error("gh label list failed: not logged in");
+    };
+    expect(main(["labels", "--ensure"], { gh, out: () => {}, err: (s) => err.push(s) })).toBe(1);
+    expect(err.join("\n")).toContain("not logged in");
+    expect(main(["labels"], { gh, out: () => {}, err: () => {} })).toBe(2);
   });
 });
 

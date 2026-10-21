@@ -5,13 +5,16 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   BRIEF_TITLE_RULES,
+  REQUIRED_RELEASE_MERGE,
   REQUIRED_SECTIONS,
   REQUIRED_VOLLEYD_PATH,
   SKILL_VERSION,
   parseSimpleYaml,
+  releaseMergeSection,
   splitFrontmatter,
   validateBriefTitle,
   validateFrontmatter,
+  validateReleaseMerge,
   validateSections,
   validateSkill,
   validateVolleydPath,
@@ -28,8 +31,13 @@ version: ${SKILL_VERSION}
 `;
 
 const VOLLEYD_NEEDLES = REQUIRED_VOLLEYD_PATH.map((needle) => `- ${needle}\n`).join("");
+const RELEASE_NEEDLES = REQUIRED_RELEASE_MERGE.map((needle) => `- ${needle}\n`).join("");
 const ALL_SECTIONS = REQUIRED_SECTIONS.map((h) =>
-  h === "## Volleyd path" ? `${h}\n\n${VOLLEYD_NEEDLES}` : `${h}\n\nbody\n`,
+  h === "## Volleyd path"
+    ? `${h}\n\n${VOLLEYD_NEEDLES}`
+    : h === "## Release branch merge"
+      ? `${h}\n\n${RELEASE_NEEDLES}`
+      : `${h}\n\nbody\n`,
 ).join("\n");
 const BRIEF_TITLE_NEEDLES = BRIEF_TITLE_RULES.map((needle) => `- ${needle}\n`).join("");
 const FULL_OK = `${GOOD_FRONTMATTER}\n# /volley-issues\n\n${ALL_SECTIONS}\n${BRIEF_TITLE_NEEDLES}`;
@@ -130,6 +138,34 @@ describe("validateVolleydPath", () => {
       );
     },
   );
+});
+
+describe("validateReleaseMerge (#313: release PRs pass the changelog guards)", () => {
+  it("accepts a body that names every release command inside the release section", () => {
+    expect(validateReleaseMerge(FULL_OK).errors).toEqual([]);
+  });
+  it.each([...REQUIRED_RELEASE_MERGE])("flags a release section that loses %s", (needle) => {
+    expect(validateReleaseMerge(FULL_OK.replace(`- ${needle}\n`, "")).errors).toContain(
+      `release branch merge must mention: ${needle}`,
+    );
+  });
+  it("names the label step, the release: titles and subjects, and the no-changelog label", () => {
+    expect(REQUIRED_RELEASE_MERGE).toEqual(
+      expect.arrayContaining([
+        "bun scripts/changelog-ci.ts labels --ensure",
+        '--title "release:',
+        "--label no-changelog",
+        '--subject "release:',
+      ]),
+    );
+  });
+  it("guards the shipped SKILL.md's release section", () => {
+    const section = releaseMergeSection(splitFrontmatter(SHIPPED).body) ?? "";
+    expect(section.startsWith("## Release branch merge")).toBe(true);
+    expect(validateReleaseMerge(SHIPPED).errors).toEqual([]);
+    // The capital-R title the changelog guard once rejected is gone.
+    expect(section).not.toContain('--title "Release:');
+  });
 });
 
 describe("validateBriefTitle (P2-2 regression guard)", () => {
