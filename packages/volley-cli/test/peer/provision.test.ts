@@ -350,12 +350,16 @@ describe("volley peer doctor: every volley MCP entry on the machine", () => {
     });
     writeJson(profileJson(m, "acct-a"), { mcpServers: { volley: fakeMcpEntry(m.volleyDir) } });
     const r = await report(m);
-    expect(check(r, "mcp")).toMatchObject({ ok: false, severity: "warn" });
+    expect(check(r, "mcp")).toMatchObject({ ok: false, severity: "block" });
     expect(check(r, "mcp")?.detail).toBe(`account profile acct-b runs ${OLD}`);
     expect(check(r, "mcp")?.fix).toBe("volley peer doctor --fix");
+    expect((await run(m)).stdout).toMatch(/✗ mcp: account profile acct-b runs/);
 
     const fixed = await run(m, { fix: true, yes: true });
     expect(fixed.stdout).not.toContain("hunter2");
+    // The plan names the file it rewrites before the yes.
+    const plan = fixed.stdout.slice(0, fixed.stdout.indexOf("~ "));
+    expect(plan).toContain(`${file}: the volley entry re-pointed at ${m.volleyDir}`);
     expect(volleyArgs(file)).toEqual([
       "run",
       join(m.volleyDir, "packages", "volley-mcp", "src", "index.ts"),
@@ -381,9 +385,31 @@ describe("volley peer doctor: every volley MCP entry on the machine", () => {
     );
   });
 
-  it("the user scope on an old checkout names the directory it runs", async () => {
+  it("a .mcp.json git tracks is reported, never rewritten in the clone", async () => {
+    const m = machine({ profile: { url: TUNNEL }, trackedMcpJson: true });
+    const file = join(m.repoPath, ".mcp.json");
+    writeJson(file, { mcpServers: { volley: fakeMcpEntry(OLD) } });
+    const r = await report(m);
+    expect(check(r, "mcp")).toMatchObject({ ok: false, severity: "block" });
+    expect(check(r, "mcp")?.detail).toBe(
+      `${file} runs ${OLD} (tracked by git: update it in the repo)`,
+    );
+    expect(check(r, "mcp")?.fix).toBeUndefined();
+    await run(m, { fix: true, yes: true });
+    expect(volleyArgs(file)[1]).toContain(OLD);
+  });
+
+  it("the user scope on an old checkout names the directory it runs, and fails", async () => {
     const m = machine({ profile: { mcp: fakeMcpEntry(OLD, TUNNEL), url: TUNNEL } });
-    expect(check(await report(m), "mcp")?.detail).toBe(`~/.claude.json runs ${OLD}`);
+    expect(check(await report(m), "mcp")).toMatchObject({
+      severity: "block",
+      detail: `~/.claude.json runs ${OLD}`,
+    });
+  });
+
+  it("a user scope on this checkout at another broker stays a warn", async () => {
+    const m = machine({ profile: { url: "mqtt://127.0.0.1:21999" } });
+    expect(check(await report(m), "mcp")).toMatchObject({ ok: false, severity: "warn" });
   });
 
   it("mcp: own skips only the user scope: an account profile is still checked", async () => {
@@ -402,7 +428,7 @@ describe("volley peer doctor: every volley MCP entry on the machine", () => {
   it("the supervisor's volley_dir differing from this checkout fails naming both, and is not rewritten", async () => {
     const m = machine({ profile: { url: TUNNEL } });
     const r = await report(m, { volleyDir: OLD });
-    expect(check(r, "mcp")?.ok).toBe(false);
+    expect(check(r, "mcp")).toMatchObject({ ok: false, severity: "block" });
     expect(check(r, "mcp")?.detail).toContain(OLD);
     expect(check(r, "mcp")?.detail).toContain(m.volleyDir);
     await run(m, { volleyDir: OLD, fix: true, yes: true });

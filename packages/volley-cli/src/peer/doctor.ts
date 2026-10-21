@@ -465,6 +465,7 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       volleyDir: dir,
       bun,
       claude: claudeBin,
+      git: gitBin,
       repo: path,
       ...(deps.claudeRoot !== undefined ? { claudeRoot: deps.claudeRoot } : {}),
       ...(opts.volleyDir !== undefined ? { supervisorDir: opts.volleyDir } : {}),
@@ -656,7 +657,11 @@ export async function doctor(io: IO, deps: DoctorDeps, opts: DoctorOptions): Pro
     for (const c of plan.unchecked) {
       lines.push(`· ${c.id}: not checked (the supervisor's requirement is not known here)`);
     }
-    for (const c of plan.run) lines.push(`→ ${c.id}: ${c.fix?.command}`);
+    for (const c of plan.run) {
+      lines.push(`→ ${c.id}: ${c.fix?.command}`);
+      // The edits it makes, named before the yes.
+      for (const a of c.fix?.apply ?? []) lines.push(`    ${a.what}`);
+    }
     for (const c of plan.manual) {
       const hint =
         c.fix?.needsClone === true ? " (or pass --clone to let the doctor clone it)" : "";

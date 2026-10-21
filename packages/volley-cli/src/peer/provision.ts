@@ -137,6 +137,8 @@ export interface McpScope {
   /** For `elsewhere`: the arg that names the other entry, and that checkout. */
   arg: string | null;
   ran: string | null;
+  /** The wave repo's `.mcp.json` is tracked by git: never rewritten in the clone. */
+  tracked?: true;
 }
 
 type Sh = (argv: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
@@ -247,12 +249,17 @@ export function repointVolleyEntry(file: string, from: string, entry: string): v
   const v = j.mcpServers.volley;
   v.args = v.args.map((a) => (a === from ? entry : a));
   const tmp = `${file}.volley-doctor.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(j, null, 2)}\n`, { mode: statSync(file).mode & 0o777 });
-  if (readFileSync(file, "utf-8") !== before) {
+  // A tmp left by a crash goes first: writeFileSync's mode applies to a new file only.
+  rmSync(tmp, { force: true });
+  try {
+    writeFileSync(tmp, `${JSON.stringify(j, null, 2)}\n`, { mode: statSync(file).mode & 0o777 });
+    if (readFileSync(file, "utf-8") !== before) {
+      throw new Error(`${file} changed while it was being updated: run the doctor again`);
+    }
+    renameSync(tmp, file);
+  } finally {
     rmSync(tmp, { force: true });
-    throw new Error(`${file} changed while it was being updated: run the doctor again`);
   }
-  renameSync(tmp, file);
 }
 
 const lastLine = (s: string) => s.trim().split("\n").pop()?.trim() ?? "";
@@ -268,6 +275,8 @@ export async function gatherProfile(
     volleyDir: string;
     bun: string | null;
     claude: string | null;
+    /** git, to tell a tracked `.mcp.json` (never rewritten) from a local one. */
+    git?: string | null;
     /** The Claude account profiles' root (default `<home>/.volley/claude`). */
     claudeRoot?: string;
     /** The wave repo's clone: its `.mcp.json` is checked. */
@@ -440,6 +449,14 @@ export async function gatherProfile(
     ...accounts.map((a) => mcpScope(`account profile ${a}`, join(root, a, ".claude.json"), entry)),
     ...(repo !== null ? [mcpScope(join(repo, ".mcp.json"), join(repo, ".mcp.json"), entry)] : []),
   ].filter((s): s is McpScope => s !== null);
+  const repoScope = mcpScopes.find((s) => repo !== null && s.file === join(repo, ".mcp.json"));
+  if (repoScope !== undefined && repoScope.state !== "ok" && repo !== null) {
+    // A committed `.mcp.json` is the repo's: rewriting it in the clone would leave a modified
+    // tracked file (and agents' worktrees check out the committed one anyway).
+    const git = where.git ?? "git";
+    const r = await sh([git, "-C", repo, "ls-files", "--error-unmatch", "--", ".mcp.json"]);
+    if (r.code === 0) repoScope.tracked = true;
+  }
   const sup = where.supervisorDir ?? null;
   const supervisorDir = sup !== null && realOf(sup) !== realOf(volleyDir) ? sup : null;
   return { home, target, skillsDir, skills, hooks, mcp, mcpScopes, supervisorDir };
@@ -456,6 +473,8 @@ const warn = (id: string, ok: boolean, detail: string, fix?: Fix): Check => ({
   detail,
   ...(fix !== undefined ? { fix } : {}),
 });
+/** A volley entry that runs another checkout fails: agents would run that one's volley-mcp. */
+const block = (c: Check): Check => ({ ...c, severity: "block" });
 const stepsFix = (steps: string[][]): Fix => ({
   command: steps.map(shellLine).join(" && "),
   steps,
@@ -574,7 +593,7 @@ function userMcpCheck(p: ProfileFacts): Check {
 
 const scopeWhy = (s: McpScope) =>
   s.state === "elsewhere"
-    ? `${s.label} runs ${s.ran}`
+    ? `${s.label} runs ${s.ran}${s.tracked === true ? " (tracked by git: update it in the repo)" : ""}`
     : s.state === "differs"
       ? `${s.label} does not run this checkout's volley-mcp`
       : `${s.label}: ${s.file} cannot be read`;
@@ -588,38 +607,50 @@ function mcpCheck(p: ProfileFacts): Check {
   const checkout = p.mcp.entry.slice(0, -MCP_TAIL.length);
   if (p.supervisorDir !== null) {
     // No entry can run both: the doctor to run is the one in the supervisor's checkout.
-    return warn(
-      "mcp",
-      false,
-      `the supervisor launches agents from ${p.supervisorDir}, but this doctor runs ${checkout}`,
-      {
-        command: shellLine([
-          "bun",
-          join(p.supervisorDir, "packages", "volley-cli", "src", "cli.ts"),
-          "peer",
-          "doctor",
-          "--fix",
-        ]),
-      },
+    return block(
+      warn(
+        "mcp",
+        false,
+        `the supervisor launches agents from ${p.supervisorDir}, but this doctor runs ${checkout} (the volley entries are checked by that doctor)`,
+        {
+          command: shellLine([
+            "bun",
+            join(p.supervisorDir, "packages", "volley-cli", "src", "cli.ts"),
+            "peer",
+            "doctor",
+            "--fix",
+          ]),
+        },
+      ),
     );
   }
   const user = userMcpCheck(p);
+  // The user scope runs another checkout (or no volley-mcp): a broker or namespace that differs,
+  // or no entry at all, stays a warn.
+  const userElsewhere =
+    p.target.sharing.mcp !== "own" &&
+    p.mcp.state === "differs" &&
+    (p.mcp.ran !== null || p.mcp.why === "does not run this checkout's volley-mcp");
   const bad = p.mcpScopes.filter((s) => s.state !== "ok");
-  if (bad.length === 0) return user;
+  if (bad.length === 0) return userElsewhere ? block(user) : user;
   const detail = [...(user.ok ? [] : [user.detail]), ...bad.map(scopeWhy)].join("; ");
-  const repoint = bad.filter((s) => s.state === "elsewhere");
+  const fails = userElsewhere || bad.some((s) => s.state !== "unreadable");
+  const sev = (c: Check) => (fails ? block(c) : c);
+  const repoint = bad.filter((s) => s.state === "elsewhere" && s.tracked !== true);
   // A user scope the person fixes by hand goes first: the next run re-points the rest.
   if (repoint.length === 0 || (!user.ok && user.fix?.steps === undefined)) {
-    return warn("mcp", false, detail, user.ok ? undefined : user.fix);
+    return sev(warn("mcp", false, detail, user.ok ? undefined : user.fix));
   }
-  return warn("mcp", false, detail, {
-    command: "volley peer doctor --fix",
-    steps: user.ok ? [] : (user.fix?.steps ?? []),
-    apply: repoint.map((s) => ({
-      what: `${s.file}: the volley entry re-pointed at ${checkout}`,
-      run: () => repointVolleyEntry(s.file, s.arg as string, p.mcp.entry),
-    })),
-  });
+  return sev(
+    warn("mcp", false, detail, {
+      command: "volley peer doctor --fix",
+      steps: user.ok ? [] : (user.fix?.steps ?? []),
+      apply: repoint.map((s) => ({
+        what: `${s.file}: the volley entry re-pointed at ${checkout}`,
+        run: () => repointVolleyEntry(s.file, s.arg as string, p.mcp.entry),
+      })),
+    }),
+  );
 }
 
 /** The four checks, in this order: skills, hooks, mcp, then the sharing modes they applied. */
