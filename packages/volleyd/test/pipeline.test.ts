@@ -1156,10 +1156,13 @@ describe("pipeline: where the checks run", () => {
     await h.finish("implementer", { head: H1, ci: "green" });
     expect(stage()).toBe("spec_review");
     expect(used.every((u) => u[0] === "T1")).toBe(true);
-    // Everything else is the review gate's head check, from the wave's repo root.
+    expect(used.some((u) => u[1] === "gh")).toBe(false);
+    // Everything else is a GitHub read (verify's PR lookup, the review gate's head check), from
+    // the wave's repo root.
     const local = h.calls.filter((_, i) => h.callOpts[i]?.cwd === "/repo");
-    expect(local.length).toBeGreaterThan(0);
-    expect(local.every((a) => a.slice(0, 3).join(" ") === "gh pr view")).toBe(true);
+    expect(local.map((a) => a.slice(0, 3).join(" "))).toContain("gh pr list");
+    expect(local.map((a) => a.slice(0, 3).join(" "))).toContain("gh pr view");
+    expect(local.every((a) => a[0] === "gh")).toBe(true);
     expect(used.length + local.length).toBe(h.calls.length);
   });
 

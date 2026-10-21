@@ -3934,7 +3934,8 @@ export class PipelineDriver {
     if (v === null || run?.agent_id !== agentId || run.worktree === undefined) return null;
     if (v.p.branch === undefined) return null;
     const since = run.adopt === true ? v.p.head : role === "rebase" ? run.start : undefined;
-    let report = await verifyArtifacts(this.io(task), {
+    // Its git checks run in the run's worktree; its `gh` reads from the repo root (ghExec).
+    let report = await verifyArtifacts(this.ghExec(task), {
       cwd: run.worktree,
       branch: v.p.branch,
       release_branch: v.release_branch,
