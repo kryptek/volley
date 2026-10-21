@@ -43,6 +43,8 @@ export interface SoakEnvOptions {
   /** Extra top-level wave-file lines. */
   waveExtra?: string;
   pipeline?: string;
+  /** Runs before the wave is submitted (host knobs that must hold from the first launch). */
+  prepare?: (host: FakeHost, world: SoakWorld) => void;
   /** The screen publisher's slow-read bound (ms of the fake clock). */
   screenSlowMs?: number;
 }
@@ -209,11 +211,17 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
 
   const consumed = async () => {
     await fleet.idle();
-    const r = await control.request("status", {});
-    if (!r.ok) throw new Error(`status: ${r.error}`);
+    // A control round-trip behind what was published, then the daemon idle. Bounded: a spawn
+    // waiting out a fake-clock timer (a slow launch) holds both until the next step moves time.
+    const caughtUp = (async () => {
+      const r = await control.request("status", {});
+      if (!r.ok) throw new Error(`status: ${r.error}`);
+      await d.settled();
+    })();
+    caughtUp.catch(() => {});
     await Promise.race([
-      d.settled(),
-      // broker round-trip: a settle a fake-clock timer holds is released by the next step.
+      caughtUp,
+      // broker round-trip: what a fake-clock timer holds is released by the next step.
       new Promise((r) => setTimeout(r, SETTLE_MS)),
     ]);
     await flushMicrotasks();
@@ -233,6 +241,7 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
     `config: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }`,
     "",
   ].join("\n");
+  o.prepare?.(host, world);
   const run = await control.request("run", { wave_yaml: yaml, owner: OWNER });
   if (!run.ok) throw new Error(`run: ${run.error}`);
   await consumed();

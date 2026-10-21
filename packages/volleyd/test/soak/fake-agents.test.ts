@@ -13,8 +13,7 @@ stages:
 `;
 
 let s: SoakEnv | undefined;
-afterEach(async (ctx) => {
-  if (ctx.task.result?.state === "fail" && s !== undefined) console.log(s.report(80));
+afterEach(async () => {
   await s?.cleanup();
   s = undefined;
 });

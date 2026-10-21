@@ -79,7 +79,7 @@ export interface FleetOptions {
   /** The flaky test's file: a fixer's commit marks it fixed. */
   flakeFile?: string;
   /** The wave clock (envelope wall_time). */
-  now?: () => number;
+  now: () => number;
 }
 
 export type Fleet = ReturnType<typeof fakeFleet>;
@@ -95,7 +95,7 @@ export function fakeFleet(o: FleetOptions) {
   const inflight = new Set<Promise<unknown>>();
   /** What each agent published, in order (type per channel), for assertions. */
   const published: { agent_id: string; channel: string; type: string }[] = [];
-  const now = o.now ?? (() => Date.now());
+  const { now } = o;
 
   const track = <T>(p: Promise<T>): Promise<T> => {
     inflight.add(p);

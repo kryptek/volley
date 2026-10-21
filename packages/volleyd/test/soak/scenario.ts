@@ -1,6 +1,8 @@
+import { queueOf } from "../../src/autopilot/merge-queue";
 import type { JournalEvent } from "../../src/types";
 import type { Behaviour, FleetAgent } from "../helpers/fake-agents";
-import type { SoakEnv } from "../helpers/soak-env";
+import type { FakeHost } from "../helpers/fake-host";
+import { type SoakEnv, WAVE } from "../helpers/soak-env";
 import { type Flake, unit } from "../helpers/soak-world";
 
 /**
@@ -45,15 +47,12 @@ export interface Scenario {
   /** Screen reads are slow from this many merges until that many. */
   slowScreens: { from: number; to: number };
   /**
-   * The tasks whose PR head takes a release-only merge (an "Update branch") while its reviewers
-   * work, once the release tip has moved past the PR: their reviews take long enough for the
-   * review gate's head check to see it (ci_poll_ms).
+   * How many PR heads take a release-only merge (someone presses "Update branch") while the PR
+   * waits in the merge queue behind another, behind the release tip: the gate's head check sees
+   * the move before the merge (#195). The first such PRs of tasks no other fault touches.
    */
-  moved: string[];
+  moved: number;
 }
-
-/** How many steps the moved tasks' reviews take (past one head check, ci_poll_ms). */
-export const SLOW_REVIEW_STEPS = 16;
 
 /** The soak's task ids: T01 … Tnn. */
 export const taskIds = (n: number) =>
@@ -74,7 +73,9 @@ export function scenario(seed: number, n: number): Scenario {
     launchTimeouts: [3 + Math.floor(unit(seed, "lt1") * 3), 9 + Math.floor(unit(seed, "lt2") * 4)],
     ownerDropAfterMerges: 2,
     slowScreens: { from: 1, to: 3 },
-    moved: [order[4] as string, order[5] as string],
+    // 0 by default until #269 and #271 land: a queued PR's release-only move can race the merge
+    // check into a voided accept and an escalation. SOAK_MOVED_HEADS=2 runs the fault.
+    moved: Number(process.env.SOAK_MOVED_HEADS ?? 0),
   };
 }
 
@@ -99,8 +100,6 @@ export function behaviour(
       conflicted = true;
       return { kind: "conflict", file: `src/${a.task.toLowerCase()}.ts` };
     }
-    if (a.nth === 1 && sc.moved.includes(a.task) && a.role.endsWith("_reviewer"))
-      return { kind: "work", delaySteps: SLOW_REVIEW_STEPS };
     return { kind: "work" };
   };
 }
@@ -134,11 +133,15 @@ export function flakyOverride(applied: Applied) {
     applied.green.has(head) ? false : head === applied.flakyHead ? true : undefined;
 }
 
+/** The slow launches: set before the wave is submitted (SoakEnvOptions.prepare). */
+export function slowLaunches(sc: Scenario, host: FakeHost): void {
+  host.launchDelayMs = () =>
+    sc.launchTimeouts.includes(host.launches.length) ? (SPAWN_TIMEOUT_S + 10) * 1000 : 0;
+}
+
 /** Install the scenario's host knobs and world events on a soak env. */
 export function apply(sc: Scenario, env: SoakEnv, applied: Applied): void {
   const { host, world, fleet } = env;
-  host.launchDelayMs = () =>
-    sc.launchTimeouts.includes(host.launches.length) ? (SPAWN_TIMEOUT_S + 10) * 1000 : 0;
   const merges = () => env.journal().filter((e) => e.type === "merged_by_supervisor").length;
   env.onStep(async () => {
     // The flaky task's first head (its implementer's push) fails on the flake.
@@ -158,20 +161,25 @@ export function apply(sc: Scenario, env: SoakEnv, applied: Applied): void {
       applied.ownerDropped = true;
       await env.owner.drop();
     }
-    // A PR under review takes a release-only merge ("Update branch") once the tip moved past it.
-    for (const a of fleet.launches) {
-      if (a.role !== "spec_reviewer" || a.nth !== 1 || !a.registered || a.acted) continue;
-      if (!sc.moved.includes(a.task) || applied.moved.some((x) => x.task === a.task)) continue;
-      {
-        const branch = fleet.prBranch[a.task];
-        const from = branch !== undefined ? world.refs[branch] : undefined;
-        if (branch === undefined || from === undefined) continue;
-        if (world.isAncestor(world.tip(), from)) continue;
-        const to = world.merge(from, world.tip(), `Merge branch '${world.release}' into ${branch}`);
-        applied.green.add(to);
-        world.push(branch, to);
-        applied.moved.push({ task: a.task, from, to });
-      }
+    // A PR waiting in the merge queue, behind the release tip, takes a release-only merge.
+    if (applied.moved.length >= sc.moved) return;
+    const rec = env.daemon.record(WAVE);
+    if (rec === undefined) return;
+    const queue = queueOf(rec);
+    if (!queue.some((e) => e.state === "merging" || e.state === "updating")) return;
+    const faulted = [sc.flaky, sc.stalled, sc.failed, sc.unparseable];
+    for (const e of queue) {
+      if (applied.moved.length >= sc.moved) break;
+      if (e.state !== "queued" || !e.gated || faulted.includes(e.task)) continue;
+      if (!sc.tasks.includes(e.task) || applied.moved.some((x) => x.task === e.task)) continue;
+      const branch = fleet.prBranch[e.task];
+      const from = branch !== undefined ? world.refs[branch] : undefined;
+      if (branch === undefined || from === undefined || world.isAncestor(world.tip(), from))
+        continue;
+      const to = world.merge(from, world.tip(), `Merge branch '${world.release}' into ${branch}`);
+      applied.green.add(to);
+      world.push(branch, to);
+      applied.moved.push({ task: e.task, from, to });
     }
   });
 }

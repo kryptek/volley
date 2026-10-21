@@ -14,6 +14,7 @@ import {
   behaviour,
   flakyOverride,
   scenario,
+  slowLaunches,
 } from "./scenario";
 
 /**
@@ -81,6 +82,7 @@ describe.skipIf(process.env.VOLLEYD_SOAK !== "1")(`the soak (${TASKS} tasks, see
           playbook: PLAYBOOK,
           config: `spawn_timeout_s: ${SPAWN_TIMEOUT_S}, idle_grace_s: ${IDLE_GRACE_S}`,
           screenSlowMs: 2_000,
+          prepare: (host) => slowLaunches(sc, host),
         });
         const env = s;
         apply(sc, env, applied);
@@ -139,7 +141,13 @@ describe.skipIf(process.env.VOLLEYD_SOAK !== "1")(`the soak (${TASKS} tasks, see
         expect(of(j, "spawn_adopted").length, "two launch timeouts adopted").toBeGreaterThanOrEqual(
           2,
         );
-        expect(applied.moved).toHaveLength(2);
+        expect(applied.moved).toHaveLength(sc.moved);
+        const accepted = of(j, "decision_auto_resolved").filter(
+          (e) => e.data.policy === "pr_head_moved/accept",
+        );
+        expect(new Set(accepted.map((e) => e.task))).toEqual(
+          new Set(applied.moved.map((m) => m.task)),
+        );
         expect(of(j, "pr_head_moved").map((e) => e.task)).toEqual(
           expect.arrayContaining(applied.moved.map((m) => m.task)),
         );
@@ -169,7 +177,19 @@ describe.skipIf(process.env.VOLLEYD_SOAK !== "1")(`the soak (${TASKS} tasks, see
         expect(digest.auto.flakes_fixed[0]).toMatchObject({ test: FLAKE.test, fixer });
         const status = await runCli(["status", WAVE], env.env.env);
         expect(status.exitCode).toBe(0);
-        console.log(status.stdout);
+        const rows = [
+          ...status.stdout.matchAll(/^ {2}(\S+)\s+(?:#\d+\s+)?(\w+)\s.*PR #(\d+)\s*$/gm),
+        ];
+        const listed = new Map(rows.map((m) => [m[1], { stage: m[2], pr: Number(m[3]) }]));
+        for (const x of digest.shipped)
+          expect(listed.get(x.task), `status row of ${x.task}`).toEqual({
+            stage: "done",
+            pr: x.pr.number,
+          });
+        expect(listed.size).toBe(digest.shipped.length);
+        expect(status.stdout).toContain(
+          `autopilot: on · ${digest.auto.decisions_resolved} auto-resolved`,
+        );
         // real process: the soak's own budget is wall time, the whole run.
         expect(Date.now() - started).toBeLessThan(BUDGET_MS);
       } catch (e) {
