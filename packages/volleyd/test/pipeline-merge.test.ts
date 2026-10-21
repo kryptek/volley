@@ -44,6 +44,37 @@ async function due() {
   await h.tick();
 }
 
+describe("merge: auto, a task whose agents ran on a paired machine", () => {
+  it("merges on the supervisor, in the wave's repo, never through the paired machine's exec", async () => {
+    const remote: string[][] = [];
+    await gated({
+      merge: "auto",
+      // The paired machine's fence never holds a MergeToken: `gh pr merge` there is refused.
+      execFor: (_task, exec) => async (argv, opts) => {
+        remote.push([...argv]);
+        if (argv[0] === "gh" && argv[1] === "pr" && argv[2] === "merge")
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "FENCE_DENIED: remote gh pr merge",
+            timedOut: false,
+          };
+        return exec(argv, opts);
+      },
+    });
+    expect(remote.filter((a) => a[0] === "gh" && a[1] === "pr" && a[2] === "merge")).toEqual([]);
+    expect(mergeCalls()).toEqual([
+      ["gh", "pr", "merge", "7", "--squash", "--match-head-commit", H],
+    ]);
+    const at = h.calls.findIndex((a) => a[0] === "gh" && a[1] === "pr" && a[2] === "merge");
+    expect(h.callOpts[at]?.cwd).toBe("/repo");
+    expect(types()).toContain("merged_by_supervisor");
+    expect(
+      h.events.some((e) => e.type === "alarm_raised" && e.data.alarm === "pipeline_error"),
+    ).toBe(false);
+  });
+});
+
 describe("merge: auto", () => {
   it("merges exactly the gated head once, journals merged_by_supervisor, then done", async () => {
     await gated({ merge: "auto" });
