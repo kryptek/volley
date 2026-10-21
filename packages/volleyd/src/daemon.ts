@@ -293,6 +293,7 @@ import {
   SUPERSEDED_BY_MERGE,
   type SpawnStart,
   blockedReason,
+  releaseLockOn,
   roleSpawnHold,
 } from "./pipeline";
 
@@ -988,6 +989,12 @@ export class Daemon {
   private readonly refused = new Map<string, { n: number; until: number }>();
   /** Each wave's pipeline driver (T6), created on first use. */
   private readonly pipelines = new Map<WaveId, PipelineDriver>();
+  /**
+   * The merge queue's release-branch locks (SPEC §4.6.17), shared by every wave on this daemon:
+   * `<repo>#<release_branch>` → the `<wave>/<task>` holding its merge turn. Two waves on one
+   * release branch never merge at once.
+   */
+  private readonly releaseLocks = new Map<string, string>();
   /** Live spawned agents by agent id. */
   private readonly supervised = new Map<string, Supervised>();
   /** Terminal statuses received and not yet journaled about (watchdog.ts), by agent. */
@@ -2380,7 +2387,11 @@ export class Daemon {
       // Level-triggered pipeline work: retry held role spawns, re-check pending CI, see merges.
       // Its git / gh checks run beside the queue; one wave's error never skips the others.
       for (const wave of this.waves.keys()) {
-        if (this.waves.get(wave)?.record.state?.status !== "running") continue;
+        if (this.waves.get(wave)?.record.state?.status !== "running") {
+          // A wave that does not tick never ends its merge turn: it gives the branch up.
+          this.pipelines.get(wave)?.releaseTurn();
+          continue;
+        }
         try {
           await this.pipelineFor(wave).tick();
         } catch (e) {
@@ -5032,6 +5043,8 @@ export class Daemon {
       mergeMode: () =>
         log.record.wave?.merge ?? (this.config.get("autopilot.merge", wave) as MergeMode),
       mergeRetryMax: () => this.config.get("autopilot.merge_retry_max", wave) as number,
+      deleteBranch: () => this.config.get("autopilot.delete_branch", wave) as boolean,
+      releaseLock: releaseLockOn(this.releaseLocks),
       retire: async (agentId, status) => {
         // Replaced or cancelled without having ended itself: stop its session first, so it does
         // nothing next to (or instead of) the new attempt.
@@ -7369,6 +7382,8 @@ export class Daemon {
         return this.steer(p, by);
       case "merged":
         return this.mergedOp(p, by);
+      case "merge":
+        return this.mergeOp(p, by);
       case "status": {
         if (typeof p.wave === "string") {
           const state = this.snapshot(p.wave);
@@ -7918,6 +7933,32 @@ export class Daemon {
           error: `the PR head moved from ${r.head} to ${moved} while ${full} was verified; run \`volleyd merged\` again`,
         };
       return { ok: true, result: { wave: w.wave, task, sha: full, how: r.how } };
+    })();
+    return { ok: true, defer };
+  }
+
+  /**
+   * `merge` (SPEC §4.6.17): the owner merges one gated task now, through the merge queue's verb
+   * (`gh pr merge --squash --match-head-commit`, behind the fence), under `merge: manual` too.
+   * Checked here and again on the queue; the merge runs off it and is answered when it ends.
+   */
+  private mergeOp(p: Record<string, unknown>, by: string): HandlerResult {
+    const w = this.waveOf(p);
+    if ("error" in w) return { ok: false, error: w.error };
+    const state = w.log.record.state as WaveState;
+    const task = p.task;
+    const t = state.tasks.find((x) => x.id === task);
+    if (typeof task !== "string" || t === undefined)
+      return { ok: false, error: `unknown task '${String(task)}' in wave '${w.wave}'` };
+    const refused = guardMutation(state, by, "merge", this.bindings);
+    if (refused !== null) return { ok: false, error: refused };
+    if (t.stage !== "merge_ready") return { ok: false, error: `task '${task}' is not merge_ready` };
+    const driver = this.pipelineFor(w.wave);
+    const defer = (async (): Promise<Reply> => {
+      const r = await driver.mergeNow(task, by);
+      return r.ok
+        ? { ok: true, result: { wave: w.wave, task, merge_sha: r.merge_sha } }
+        : { ok: false, error: r.error };
     })();
     return { ok: true, defer };
   }
