@@ -87,6 +87,8 @@ export interface LeasePoolPayload {
   pool: string;
   capacity: number;
   per_machine?: number;
+  /** Per machine name, the cap in force there in place of `per_machine`. */
+  per_machine_overrides?: Record<string, number>;
   held: { lease_id: string; holder: string; host?: LeaseHost; since: string; ttl_s: number }[];
   queue: { lease_id: string; holder: string; host?: LeaseHost; since: string }[];
   reasons: string[];
@@ -119,9 +121,21 @@ export function heldOn(book: LeaseBook, pool: string, host: LeaseHost | undefine
   return book[pool]?.held.filter((h) => h.host === host).length ?? 0;
 }
 
-/** A queued request's machine is at the pool's `per_machine` cap (never, when it sets none). */
-const machineFull = (book: LeaseBook, pool: string, cfg: LeasePoolConfig, q: QueuedLease) =>
-  cfg.per_machine !== undefined && heldOn(book, pool, q.host) >= cfg.per_machine;
+/**
+ * The per-machine cap in force on `host` (SPEC §4.6.5): its `per_machine_overrides` entry, else
+ * the pool's `per_machine`; undefined: no cap there (none set, or a holder on no known machine).
+ */
+export function capFor(cfg: LeasePoolConfig, host: LeaseHost | undefined): number | undefined {
+  if (host === null || host === undefined) return undefined;
+  const over = cfg.per_machine_overrides;
+  return over !== undefined && Object.hasOwn(over, host) ? over[host] : cfg.per_machine;
+}
+
+/** A queued request's machine is at its cap in the pool (`capFor`; never, when none is set). */
+const machineFull = (book: LeaseBook, pool: string, cfg: LeasePoolConfig, q: QueuedLease) => {
+  const cap = capFor(cfg, q.host);
+  return cap !== undefined && heldOn(book, pool, q.host) >= cap;
+};
 
 const has = (p: PoolLeases | undefined, leaseId: string) =>
   p !== undefined &&
@@ -320,7 +334,7 @@ export function poolPayload(
       reasons.push(`queued: ${p.held.length}/${capacity} ${pool} leases held`);
     for (const q of perMachine) {
       reasons.push(
-        `queued ${q.lease_id}: ${heldOn(book, pool, q.host)}/${cfg.per_machine} ${pool} leases held on ${q.host} (per machine)`,
+        `queued ${q.lease_id}: ${heldOn(book, pool, q.host)}/${capFor(cfg, q.host)} ${pool} leases held on ${q.host} (per machine)`,
       );
     }
   }
@@ -329,6 +343,9 @@ export function poolPayload(
     pool,
     capacity,
     ...(cfg?.per_machine !== undefined ? { per_machine: cfg.per_machine } : {}),
+    ...(cfg?.per_machine_overrides !== undefined
+      ? { per_machine_overrides: { ...cfg.per_machine_overrides } }
+      : {}),
     held: p.held.map(({ lease_id, holder, host, since, ttl_s }) => ({
       lease_id,
       holder,

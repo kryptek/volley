@@ -37,7 +37,17 @@
             },
             "repo": { "type": "string", "minLength": 1 },
             "release_branch": { "type": "string", "minLength": 1 },
-            "status": { "enum": ["running", "paused", "awaiting_decision", "complete", "stopped"] },
+            "status": {
+              "enum": [
+                "running",
+                "paused",
+                "awaiting_decision",
+                "releasing",
+                "complete",
+                "stopped"
+              ],
+              "description": "releasing: every task is settled and the release train (spec section 4.6.19) runs; complete once the owner answers release_go go (or, without a train, once every task is settled)."
+            },
             "tasks": { "type": "array", "items": { "$ref": "#/$defs/task" } },
             "open_decisions": { "type": "array", "items": { "$ref": "#/$defs/decisionId" } },
             "gates": {
@@ -84,6 +94,43 @@
                     "properties": {
                       "used": { "type": "number", "minimum": 0 },
                       "max": { "type": "number", "minimum": 0 }
+                    }
+                  }
+                }
+              }
+            },
+            "merge_queue": {
+              "type": "array",
+              "description": "The merge queue (spec section 4.6.17), in merge order: the wave's gated tasks the supervisor merges itself, one per release branch at a time. merging: its merge is running; updating: it is being brought up to date with the release branch before its merge; queued: waiting for its turn; refused: GitHub refused its last merge, and it goes after the tasks still queued. since: when the task entered the queue. Absent while the queue is empty.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["task", "state", "since"],
+                "properties": {
+                  "task": { "type": "string" },
+                  "state": { "enum": ["merging", "updating", "queued", "refused"] },
+                  "since": { "type": "string", "format": "date-time" }
+                }
+              }
+            },
+            "release": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["stage", "stages"],
+              "description": "The release train (spec section 4.6.19), from release_started on: the stage running or awaiting its go (null when none is), and every playbook stage in order with its state. Absent for a wave without a train.",
+              "properties": {
+                "stage": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+                "stages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "state"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "state": {
+                        "enum": ["pending", "awaiting_go", "running", "verified", "failed"]
+                      }
                     }
                   }
                 }
@@ -216,6 +263,17 @@
             }
           }
         },
+        "remediation": {
+          "type": "object",
+          "required": ["kind", "test", "since"],
+          "additionalProperties": false,
+          "description": "A remediation requested for the task's red head that still holds (spec section 4.6.16): fix_flake, a failing test the PR does not touch awaiting its dedicated fixer. Gone once the head is verified, a new step starts, or the task is cancelled.",
+          "properties": {
+            "kind": { "enum": ["fix_flake"] },
+            "test": { "type": "string", "minLength": 1 },
+            "since": { "type": "string", "format": "date-time" }
+          }
+        },
         "evidence_path": { "type": "string", "minLength": 1 },
         "last_error": {
           "type": "object",
@@ -335,11 +393,11 @@
     },
     "coordinator": {
       "type": "object",
-      "description": "Owner coordinator attention state, maintained by the supervisor from the owner's registry and progress topics.",
+      "description": "Owner coordinator attention state, maintained by the supervisor from the owner's registry and progress topics. For an owner that is a coordinator name (spec section 6.2), agent_id is the agent bound to it and reconnecting means that agent went away less than autopilot.reconnect_grace_s ago.",
       "required": ["agent_id", "state", "last_seen"],
       "properties": {
         "agent_id": { "$ref": "#/$defs/agentId" },
-        "state": { "enum": ["working", "awaiting_input", "gone"] },
+        "state": { "enum": ["working", "awaiting_input", "reconnecting", "gone"] },
         "question": { "type": "string" },
         "session_url": { "type": "string", "format": "uri" },
         "workspace": { "type": "string" },

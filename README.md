@@ -200,6 +200,7 @@ claude mcp add-json -s user volley '{
   "args": ["run", "<absolute-path-to-this-repo>/packages/volley-mcp/src/index.ts"],
   "env": {
     "VOLLEY_AGENT_ID": "coordinator",
+    "VOLLEY_COORDINATOR": "coord-main",
     "VOLLEY_NAMESPACE": "default",
     "VOLLEY_AUTH_USERNAME": "coordinator",
     "VOLLEY_AUTH_PASSWORD": "<coordinator password from step 2>"
@@ -213,6 +214,8 @@ The `env` block reaches only the MCP server, **not** the session's Bash tool, an
 export VOLLEY_AUTH_USERNAME=coordinator
 export VOLLEY_AUTH_PASSWORD='<coordinator password from step 2>'
 ```
+
+`VOLLEY_COORDINATOR` is your **coordinator name**: a stable id you choose once (`[a-z0-9][a-z0-9_-]{0,62}`). Export it in your shell profile too (`export VOLLEY_COORDINATOR=coord-main`) and submit waves with `volleyd run <wave.yaml> --owner "$VOLLEY_COORDINATOR"`: the wave is then owned by the name, not by the session's per-restart agent id, so the session keeps steering, resolving, pausing and stopping its waves after its MCP server restarts (volleyd journals `owner_reconnected`; nothing needs claiming).
 
 `VOLLEY_AGENT_ID` is a **prefix**: the server appends a fresh `-xxxx` at every start, so this session registers as `coordinator-xxxx` (and two sessions sharing the registration still get distinct ids). Leave it set: without it the id is named after the session's working directory (`volley-xxxx` in this checkout), which reads as just another agent, while the `--owner` a wave is submitted with, the Desk's owner chip and `★ yours`, and the [v0.2 owner smoke](docs/SMOKE-v0.2.md) all expect the `coordinator-` id. For a separate registry (a smoke run, say), change `VOLLEY_NAMESPACE` instead.
 

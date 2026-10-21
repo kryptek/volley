@@ -1,0 +1,19 @@
+{
+  "page": {
+    "id": "kctbh9vrtdwd",
+    "name": "GitHub",
+    "url": "https://www.githubstatus.com",
+    "updated_at": "2026-10-20T11:58:02.000Z"
+  },
+  "components": [
+    { "id": "8l4ygp009s5s", "name": "Git Operations", "status": "operational" },
+    { "id": "brv1bkgrwx7q", "name": "API Requests", "status": "operational" },
+    { "id": "br0l2tvcx85d", "name": "Actions", "status": "major_outage" },
+    { "id": "h2ftsgbw7kmk", "name": "Pull Requests", "status": "operational" },
+    {
+      "id": "0l2p9nhqnxpd",
+      "name": "Visit www.githubstatus.com for more information",
+      "status": "operational"
+    }
+  ]
+}

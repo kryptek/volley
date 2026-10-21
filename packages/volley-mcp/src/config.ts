@@ -13,6 +13,11 @@ export interface VolleyConfig {
   auth?: BrokerAuth;
   /** The Claude account profile a supervisor launched the agent under (agent.json `claude_account`). */
   claudeAccount?: string;
+  /**
+   * The stable coordinator name (`VOLLEY_COORDINATOR`, SPEC §6.2) a wave may name as its owner,
+   * so a session keeps its waves across restarts. Checked by `vol_register` (`checkCoordinator`).
+   */
+  coordinator?: string;
 }
 
 /** MQTT username/password for brokers that require authentication (SPEC §11.5). */
@@ -267,5 +272,18 @@ export function loadConfig(
     parentId,
     ...(auth !== null ? { auth } : {}),
     ...(identity?.claudeAccount !== undefined ? { claudeAccount: identity.claudeAccount } : {}),
+    // A supervised agent (identity file) is never a coordinator, whatever its shell exported.
+    ...(identity === null && env.VOLLEY_COORDINATOR ? { coordinator: env.VOLLEY_COORDINATOR } : {}),
   };
+}
+
+/** The coordinator name when it is in the agent-id grammar; else an INVALID_AGENT_ID error. */
+export function checkCoordinator(name: string): string {
+  if (!isValidAgentId(name)) {
+    throw new VolleyError(
+      "INVALID_AGENT_ID",
+      `VOLLEY_COORDINATOR "${name}" does not match [a-z0-9][a-z0-9_-]{0,62} (SPEC §2.2): set it to a stable lowercase name like "coord-main"`,
+    );
+  }
+  return name;
 }

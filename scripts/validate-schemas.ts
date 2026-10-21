@@ -17,6 +17,7 @@
  *   - `waveevent-*.json` -> wave-event.schema.json
  *   - `wavefile-*.json` -> wave-file.schema.json (a file, not an envelope)
  *   - `decision-*.json` -> decision.schema.json
+ *   - `inbox-*.json` -> inbox-item.schema.json
  *   - `lease-*.json` -> lease-pool.schema.json
  *   - `leasereq-*.json` -> lease-request.schema.json
  *   - `identity-*.json` -> agent-identity.schema.json (a file, not an envelope)
@@ -32,6 +33,7 @@
  *   - `readiness-*.json` -> readiness.schema.json
  *   - `setupplan-*.json` -> setup-result.schema.json `$defs/plan` (a result, not an envelope)
  *   - `setupapply-*.json` -> setup-result.schema.json `$defs/applied` (a result, not an envelope)
+ *   - `release-playbook-*.json` -> release-playbook.schema.json (a file, not an envelope)
  *
  * Exit code 0 on success; non-zero on any unexpected pass/fail.
  */
@@ -56,6 +58,7 @@ const PREFIX_TO_SCHEMA: Record<string, string> = {
   waveevent: "wave-event.schema.json",
   wavefile: "wave-file.schema.json",
   decision: "decision.schema.json",
+  inbox: "inbox-item.schema.json",
   lease: "lease-pool.schema.json",
   leasereq: "lease-request.schema.json",
   identity: "agent-identity.schema.json",
@@ -71,6 +74,7 @@ const PREFIX_TO_SCHEMA: Record<string, string> = {
   readiness: "readiness.schema.json",
   setupplan: "setup-result.schema.json#/$defs/plan",
   setupapply: "setup-result.schema.json#/$defs/applied",
+  release: "release-playbook.schema.json",
 };
 
 async function loadSchemas(ajv: Ajv2020): Promise<void> {
