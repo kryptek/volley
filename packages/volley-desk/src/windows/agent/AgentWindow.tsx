@@ -26,7 +26,8 @@
  * from this browser's session carries an `as of HH:MM` marker. A task whose
  * two reviewers run in parallel gets a `review (spec + quality)` stage chip.
  * From the agent's `usage` sample (SPEC §4.6.12) the footer gets a context
- * meter (`ctx 72% · 143K/200K`, hot ≥ 85, warn ≥ 65), and row 2 an
+ * meter (`ctx 72% · 143K/200K`, hot ≥ 85, warn ≥ 65; pulse ≥ 70, faster when
+ * hot, none under reduced motion), and row 2 an
  * account picker listing the Claude accounts with their 5-hour usage: picking
  * another asks to confirm (the agent restarts with a resume note) and then
  * calls `agent_move_account`. The Terminal tab's ⤢ (`onPopout`) opens the
@@ -35,6 +36,7 @@
 import { BubbleChatIcon, ListViewIcon, TerminalIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useId, useState } from "react";
+import { useReducedMotion } from "../../a11y/motion";
 import { type NoSignal, SYNCING_LABEL } from "../../attention";
 import { BORN_MS, Frame, type FrameProps } from "../../canvas/Frame";
 import { plural } from "../../lib/plural";
@@ -136,6 +138,8 @@ export function terminalProps(
 /** Context meter tones: compaction risk as the window fills. */
 export const CTX_HOT_PCT = 85;
 export const CTX_WARN_PCT = 65;
+/** From here the meter's bar pulses (slowly; fast once hot): compaction is getting close. */
+export const CTX_PULSE_PCT = 70;
 
 /** `143K`, `1M`, `1.5M`. */
 function tokens(n: number): string {
@@ -144,9 +148,12 @@ function tokens(n: number): string {
 }
 
 /** The footer's context meter for a usage sample, or `null` while nothing is known. */
-export function contextMeter(
-  usage: UsagePayload | null | undefined,
-): { pct: number; tone: "ok" | "warn" | "hot"; text: string } | null {
+export function contextMeter(usage: UsagePayload | null | undefined): {
+  pct: number;
+  tone: "ok" | "warn" | "hot";
+  pulse: "none" | "slow" | "fast";
+  text: string;
+} | null {
   const cw = usage?.context_window;
   if (!cw) return null;
   const { used, size } = cw;
@@ -154,8 +161,9 @@ export function contextMeter(
   if (raw === null) return null;
   const pct = Math.round(Math.max(0, Math.min(100, raw)));
   const tone = pct >= CTX_HOT_PCT ? "hot" : pct >= CTX_WARN_PCT ? "warn" : "ok";
+  const pulse = tone === "hot" ? "fast" : pct >= CTX_PULSE_PCT ? "slow" : "none";
   const amounts = used !== null && size ? ` · ${tokens(used)}/${tokens(size)}` : "";
-  return { pct, tone, text: `ctx ${pct}%${amounts}` };
+  return { pct, tone, pulse, text: `ctx ${pct}%${amounts}` };
 }
 
 /** `Work · 34%`; `Fresh · no usage yet` until the account has reported usage (`fiveHourLabel`). */
@@ -329,6 +337,7 @@ export function AgentWindow({
   const session = isSession(agent);
   const [purposeOpen, setPurposeOpen] = useState(false);
   const [nameOpen, setNameOpen] = useState(false);
+  const reducedMotion = useReducedMotion();
   // The title's name: the purpose when it names the window, else the task (or the id) as before.
   const headline = named ? purpose.label : (agent.task ?? agent.id);
   const progress = agent.progress === null ? null : Math.max(0, Math.min(100, agent.progress));
@@ -382,6 +391,8 @@ export function AgentWindow({
     .filter(Boolean)
     .join(" ")}`;
   const ctx = contextMeter(usage);
+  // Reduced motion keeps the colour change and drops the pulse.
+  const ctxPulse = ctx && ctx.pulse !== "none" && !reducedMotion ? ` ctx--pulse-${ctx.pulse}` : "";
   const account = usage?.account ?? str(agent.registry?.claude_account);
   const nameText = named ? purpose.full : `${headline}${issue !== undefined ? ` #${issue}` : ""}`;
   const subtitle = (
@@ -464,7 +475,7 @@ export function AgentWindow({
       )}
       {ctx && (
         <span
-          className={`ctx ctx--${ctx.tone}`}
+          className={`ctx ctx--${ctx.tone}${ctxPulse}`}
           title="Context window used (compaction risk as it fills)"
         >
           <span className="ctx-bar">

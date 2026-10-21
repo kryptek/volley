@@ -17,6 +17,7 @@ import {
   runBriefGate,
   withPreface,
 } from "./brief";
+import { autoCompactWindowTokens } from "./claude/context-window";
 import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { waveDecisionId } from "./decisions";
@@ -167,6 +168,7 @@ export interface SpawnDeps {
     | "heartbeat_alarm_s"
     | "brief_preface_max_bytes"
     | "agent_mcp"
+    | "agent_auto_compact_pct"
   > &
     Partial<Pick<Tunables, "require_fresh_base">>;
   /** The wave owner: the agents' parent (default volleyd). */
@@ -627,6 +629,7 @@ async function launchAttempt(
     });
     // volleyd's own MCP server for the agent: this release's volley-mcp, on this broker.
     await host.writeFile(mcpConfigPath(ctx.worktree), renderMcpConfig(deps.mcpEntry));
+    const compactWindow = autoCompactWindowTokens(task.model, deps.tunables.agent_auto_compact_pct);
     const script = renderLaunchScript({
       hooksDir: deps.hooksDir,
       model: task.model,
@@ -634,6 +637,7 @@ async function launchAttempt(
       worktree: ctx.worktree,
       ...(profile !== undefined ? { claudeConfigDir: profile } : {}),
       ...(agentMcp === "inherit" ? { agentMcp } : {}),
+      ...(compactWindow !== undefined ? { autoCompactWindow: compactWindow } : {}),
       ...(host.launchEnv !== undefined
         ? { env: host.launchEnv({ agent_id: agentId, namespace: ctx.namespace }) }
         : {}),
@@ -693,6 +697,7 @@ async function launchAttempt(
         ...(req.worktreeAttempt !== undefined ? { worktree_attempt: req.worktreeAttempt } : {}),
         ...(req.branch_update === "merge" ? { branch_update: "merge" } : {}),
         ...(agentMcp === "inherit" ? { agent_mcp: "inherit" } : {}),
+        ...(compactWindow !== undefined ? { auto_compact_window: compactWindow } : {}),
         issue: { number: issue.number, title: issue.title, url: issue.url },
         credentials: creds !== undefined ? "minted" : "none",
         claude_account: accountId(req),

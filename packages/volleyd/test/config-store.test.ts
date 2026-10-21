@@ -106,6 +106,25 @@ describe("ConfigStore layering", () => {
     ).toEqual([]);
   });
 
+  it("agent_auto_compact_pct defaults to 85, is bounded 0..100 and layers per wave", () => {
+    expect(CONFIG_DEFAULTS.agent_auto_compact_pct).toBe(85);
+    const c = open();
+    for (const bad of [101, -1, 50.5]) {
+      const r = c.applyPatch({ agent_auto_compact_pct: bad }, "x");
+      expect(r.applied).toBe(false);
+      expect(r.rejected?.[0]?.path).toBe("agent_auto_compact_pct");
+    }
+    expect(c.applyPatch({ agent_auto_compact_pct: 0 }, "x").applied).toBe(true);
+    expect(c.applyPatch({ agent_auto_compact_pct: 100 }, "x").applied).toBe(true);
+    expect(c.applyPatch({ agent_auto_compact_pct: 85 }, "x").applied).toBe(true);
+    c.setWaveOverrides("w1", { agent_auto_compact_pct: 60 });
+    expect(c.effective("w1").agent_auto_compact_pct).toBe(60);
+    expect(c.effective().agent_auto_compact_pct).toBe(85);
+    expect(
+      schemaErrors("config.schema.json", envelope("_waves/_config", "config", c.retainedPayload())),
+    ).toEqual([]);
+  });
+
   it("background_wait_max_s and stall_backoff_max_s: bounded, per-wave, in the effective config", () => {
     expect(CONFIG_DEFAULTS).toMatchObject({
       background_wait_max_s: 7200,

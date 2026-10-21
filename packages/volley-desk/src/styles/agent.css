@@ -387,6 +387,28 @@
 .ctx--warn .mono {
   color: #ffd60a;
 }
+/* From 70% the bar pulses (the colour stays); faster once red. */
+@keyframes ctx-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+.ctx--pulse-slow .ctx-bar > span {
+  animation: ctx-pulse 1.6s ease-in-out infinite;
+}
+.ctx--pulse-fast .ctx-bar > span {
+  animation: ctx-pulse 0.7s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ctx--pulse-slow .ctx-bar > span,
+  .ctx--pulse-fast .ctx-bar > span {
+    animation: none;
+  }
+}
 
 /* The purpose line: one bold line under the title; a tap unwraps it (touch has no hover). */
 .a-purpose {

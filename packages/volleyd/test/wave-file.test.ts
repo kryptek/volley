@@ -267,6 +267,14 @@ describe("account: (Claude account profiles)", () => {
       /^config\.agent_mcp/,
     );
   });
+
+  it("agent_auto_compact_pct is a per-wave config override, 0..100", () => {
+    const w = parseWaveFile(`${HEADER}config:\n  agent_auto_compact_pct: 70\n${TASKS}`);
+    expect(w.config.agent_auto_compact_pct).toBe(70);
+    expect(errorsOf(`${HEADER}config:\n  agent_auto_compact_pct: 101\n${TASKS}`)[0]).toMatch(
+      /^config\.agent_auto_compact_pct/,
+    );
+  });
 });
 
 describe("placement (SPEC §4.6.15)", () => {

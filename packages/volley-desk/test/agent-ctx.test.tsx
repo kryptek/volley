@@ -1,9 +1,12 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { render } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { REDUCED_MOTION_QUERY } from "../src/a11y/motion";
 import { demoMessages } from "../src/store/fixtures";
 import { initialState, reduceAll } from "../src/store/reducer";
 import type { DeskMessage, UsagePayload } from "../src/store/types";
-import { AgentWindow, contextMeter } from "../src/windows/agent/AgentWindow";
+import { AgentWindow, CTX_PULSE_PCT, contextMeter } from "../src/windows/agent/AgentWindow";
 
 const NOW = Date.parse("2026-10-18T12:00:00Z");
 const FIXUP = "status-chip-t1-fixup-1";
@@ -124,5 +127,129 @@ describe("contextMeter", () => {
   it("nothing known yet → no meter", () => {
     expect(contextMeter(usage({ used_percentage: null, used: null, size: 200_000 }))).toBeNull();
     expect(contextMeter(null)).toBeNull();
+  });
+});
+
+describe("contextMeter pulse", () => {
+  const at = (pct: number) =>
+    contextMeter(usage({ used_percentage: pct, used: pct * 2000, size: 200_000 }));
+
+  it("pulses slowly from 70% and fast once red (85%)", () => {
+    expect(CTX_PULSE_PCT).toBe(70);
+    expect(at(69)).toMatchObject({ tone: "warn", pulse: "none" });
+    expect(at(70)).toMatchObject({ tone: "warn", pulse: "slow" });
+    expect(at(84)).toMatchObject({ tone: "warn", pulse: "slow" });
+    expect(at(85)).toMatchObject({ tone: "hot", pulse: "fast" });
+    expect(at(100)).toMatchObject({ tone: "hot", pulse: "fast" });
+    expect(at(10)).toMatchObject({ tone: "ok", pulse: "none" });
+  });
+});
+
+describe("agent window context meter pulse", () => {
+  const realMatchMedia = window.matchMedia;
+  afterEach(() => {
+    window.matchMedia = realMatchMedia;
+  });
+
+  const meterAt = (pct: number) => {
+    const { container } = renderWith(
+      usageMsg(FIXUP, usage({ used_percentage: pct, used: pct * 2000, size: 200_000 })),
+    );
+    return container.querySelector(".agent-foot .ctx") as HTMLElement;
+  };
+
+  it("69%: amber, no pulse", () => {
+    const ctx = meterAt(69);
+    expect(ctx).toHaveClass("ctx--warn");
+    expect(ctx).not.toHaveClass("ctx--pulse-slow");
+    expect(ctx).not.toHaveClass("ctx--pulse-fast");
+  });
+
+  it("70%: amber, slow pulse", () => {
+    const ctx = meterAt(70);
+    expect(ctx).toHaveClass("ctx--warn", "ctx--pulse-slow");
+    expect(ctx).not.toHaveClass("ctx--pulse-fast");
+  });
+
+  it("85%: red, fast pulse; text and bar width unchanged", () => {
+    const ctx = meterAt(85);
+    expect(ctx).toHaveClass("ctx--hot", "ctx--pulse-fast");
+    expect(ctx).not.toHaveClass("ctx--pulse-slow");
+    expect(ctx).toHaveTextContent("ctx 85% · 170K/200K");
+    expect(ctx.querySelector(".ctx-bar > span")).toHaveStyle({ width: "85%" });
+  });
+
+  it("under reduced motion: the colour changes, nothing pulses", () => {
+    window.matchMedia = ((query: string) => ({
+      matches: query === REDUCED_MOTION_QUERY,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })) as typeof window.matchMedia;
+    const ctx = meterAt(85);
+    expect(ctx).toHaveClass("ctx--hot");
+    expect(ctx.className).not.toMatch(/ctx--pulse-/);
+  });
+});
+
+const STYLES = join(__dirname, "../src/styles");
+const css = (f: string) => readFileSync(join(STYLES, f), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+
+/** Every declaration of the rules whose selector list includes exactly `selector`. */
+function decls(sheet: string, selector: string): string {
+  const out: string[] = [];
+  for (const m of sheet.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const sels = (m[1] ?? "").split(",").map((s) => s.trim());
+    if (sels.includes(selector)) out.push(m[2] ?? "");
+  }
+  return out.join(";").replace(/\s+/g, " ");
+}
+
+/** The `@media (prefers-reduced-motion: reduce)` blocks of a sheet, each up to its closing brace. */
+function reducedMotion(sheet: string): string {
+  const out: string[] = [];
+  let at = sheet.indexOf("@media (prefers-reduced-motion: reduce)");
+  while (at >= 0) {
+    let depth = 0;
+    let end = sheet.indexOf("{", at);
+    for (; end < sheet.length; end++) {
+      if (sheet[end] === "{") depth++;
+      if (sheet[end] === "}" && --depth === 0) break;
+    }
+    out.push(sheet.slice(at, end + 1));
+    at = sheet.indexOf("@media (prefers-reduced-motion: reduce)", end);
+  }
+  return out.join("\n");
+}
+
+const seconds = (d: string, prop: string) => {
+  const m = new RegExp(`${prop}:[^;]*?([0-9.]+)s`).exec(d);
+  return m ? Number(m[1]) : Number.NaN;
+};
+
+describe("context meter pulse: the stylesheet", () => {
+  const SLOW = ".ctx--pulse-slow .ctx-bar > span";
+  const FAST = ".ctx--pulse-fast .ctx-bar > span";
+  const agent = css("agent.css");
+
+  it("pulses the bar with ctx-pulse, faster when hot", () => {
+    expect(agent).toMatch(/@keyframes ctx-pulse\s*\{/);
+    const slow = decls(agent, SLOW);
+    expect(slow).toMatch(/animation: ctx-pulse /);
+    const fast = decls(agent, FAST);
+    expect(fast).toMatch(/animation: ctx-pulse /);
+    expect(seconds(fast, "animation")).toBeLessThan(seconds(slow, "animation"));
+  });
+
+  it("stops both under prefers-reduced-motion, in agent.css and responsive.css", () => {
+    for (const f of ["agent.css", "responsive.css"]) {
+      const block = reducedMotion(css(f));
+      expect(decls(block, SLOW), f).toMatch(/animation: none/);
+      expect(decls(block, FAST), f).toMatch(/animation: none/);
+    }
   });
 });

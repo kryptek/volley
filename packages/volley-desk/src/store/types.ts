@@ -313,6 +313,8 @@ export interface Tunables {
   screen_tail_interval_s?: number;
   /** Claude account profiles (SPEC §4.6.11); absent from a supervisor that predates them. */
   claude?: { default_account?: string | null; warn_at_pct?: number };
+  /** The share of an agent's context window at which it compacts (SPEC §4.6.4). */
+  agent_auto_compact_pct?: number;
   /** Remote hosts (SPEC §4.6.4); the Desk reads their names and caps. */
   hosts?: Record<string, { max_agents?: number; drain?: boolean; [key: string]: unknown }>;
   /** Autopilot (SPEC §4.6.16–17); absent from a supervisor that predates it. */

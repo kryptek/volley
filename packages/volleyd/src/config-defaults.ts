@@ -40,6 +40,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   claude: { default_account: null, warn_at_pct: 90 },
   branch_update: "rebase",
   agent_mcp: "strict",
+  agent_auto_compact_pct: 85,
   public_hygiene: "auto",
   hosts: {},
   // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
