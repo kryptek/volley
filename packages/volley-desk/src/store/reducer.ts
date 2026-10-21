@@ -371,7 +371,8 @@ function reduceSignin(state: DeskState, acct: string, m: DeskMessage): DeskState
  * admission, Claude account records and usage samples, machine records, each agent's
  * registry, status and screen, and each supervisor's registry and status.
  * Live-only parts — feed, narration, progress, heartbeat, attention, a
- * supervisor's namespace — are kept. Agents and supervisors that were
+ * supervisor's namespace, the machines' sparkline rings (machineHistory; the
+ * replayed record is deduplicated by last_seen) — are kept. Agents and supervisors that were
  * registered become `unconfirmed` until their registry entry is replayed.
  */
 export function resync(state: DeskState): DeskState {
@@ -416,7 +417,10 @@ export function resync(state: DeskState): DeskState {
   };
 }
 
-/** Drop agents and supervisors still `unconfirmed` once the post-reconnect replay has settled. */
+/**
+ * Drop agents and supervisors still `unconfirmed` once the post-reconnect replay has settled, and
+ * the sparkline ring of any machine whose record was not replayed (removed while disconnected).
+ */
 export function pruneUnconfirmed(state: DeskState): DeskState {
   if (state.unconfirmed === undefined) return state;
   const { unconfirmed, ...rest } = state;
@@ -426,7 +430,13 @@ export function pruneUnconfirmed(state: DeskState): DeskState {
     if (agents[id] && !agents[id].registered) delete agents[id];
     if (supervisors[id] && !supervisors[id].registry) delete supervisors[id];
   }
-  return withCoordinators({ ...rest, agents, supervisors });
+  const pruned = { ...rest, agents, supervisors };
+  if (state.machineHistory !== undefined) {
+    pruned.machineHistory = Object.fromEntries(
+      Object.entries(state.machineHistory).filter(([name]) => state.machines?.[name] !== undefined),
+    );
+  }
+  return withCoordinators(pruned);
 }
 
 // ------------------------------------------------------------------ agents

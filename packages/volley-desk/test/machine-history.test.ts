@@ -7,7 +7,7 @@ import {
   mergeSamples,
   pushRecord,
 } from "../src/store/machineHistory";
-import { initialState, reduce, reduceAll, resync } from "../src/store/reducer";
+import { initialState, pruneUnconfirmed, reduce, reduceAll, resync } from "../src/store/reducer";
 import { NOW, machineMsg, machineRecord } from "./helpers/desk-msgs";
 
 const S = 1000;
@@ -109,6 +109,14 @@ describe("the store's machineHistory", () => {
     const rec = machineMsg(machineRecord({ name: "box-a" }));
     const state = reduce(resync(reduce(initialState(), rec)), rec);
     expect(state.machineHistory?.["box-a"]).toHaveLength(1);
+  });
+
+  it("once the replay settles, a ring whose machine was not replayed (removed meanwhile) is dropped", () => {
+    const a = machineMsg(machineRecord({ name: "box-a" }));
+    const b = machineMsg(machineRecord({ name: "box-b" }));
+    const state = pruneUnconfirmed(reduce(resync(reduceAll(initialState(), [a, b])), a));
+    expect(state.machineHistory?.["box-a"]).toHaveLength(1);
+    expect(state.machineHistory?.["box-b"]).toBeUndefined();
   });
 
   it("the demo: one sample for studio and box-a, none for box-b (down)", () => {

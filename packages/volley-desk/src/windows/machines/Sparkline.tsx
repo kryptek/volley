@@ -27,13 +27,19 @@ export function sparkLevel(v: number | null): SparkLevel {
   return v >= BAD_AT ? "bad" : v >= WARN_AT ? "warn" : "ok";
 }
 
-/** The samples inside the window, as viewBox points (x 0–100 by time, y 0 at the top). */
+/**
+ * The samples inside the window, as viewBox points (x 0–100 by time, y 0 at the top). `at` is the
+ * machine's clock and `now` the browser's: the window ends at the later of `now` and the newest
+ * sample, so a machine whose clock runs ahead still draws a line rather than a stack at the right
+ * edge. One more than 10 minutes behind draws nothing (the clocks are assumed NTP-synced).
+ */
 export function sparkPoints(
   samples: readonly SparkSample[],
   now: number,
   windowMs = HISTORY_MS,
 ): { x: number; y: number }[] {
-  const start = now - windowMs;
+  const end = samples.reduce((m, s) => Math.max(m, s.at), now);
+  const start = end - windowMs;
   return samples.flatMap((s) => {
     if (s.value === null || s.at < start) return [];
     const x = Math.min(100, ((s.at - start) / windowMs) * 100);

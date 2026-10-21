@@ -47,6 +47,19 @@ describe("sparkPoints", () => {
     );
     expect(pts).toHaveLength(1);
   });
+
+  it("ends the window at the newest sample when the machine's clock is ahead of the browser", () => {
+    const pts = sparkPoints(
+      [
+        { at: NOW + 2 * MIN - 5 * MIN, value: 10 },
+        { at: NOW + 2 * MIN - MIN, value: 20 },
+        { at: NOW + 2 * MIN, value: 30 },
+      ],
+      NOW,
+      HISTORY_MS,
+    );
+    expect(pts.map((p) => p.x)).toEqual([50, 90, 100]);
+  });
 });
 
 describe("sparkLevel", () => {
