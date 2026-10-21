@@ -1807,12 +1807,12 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
   switch (prog) {
     case "git":
       return git(args);
-    case "gh": {
-      const two = args.slice(0, 2).join(" ");
-      return two === "issue view"
-        ? checkArgs("gh issue view", args.slice(2), GH_SPECS["issue view"] as OptSpec)
-        : deny(`gh ${two}`.trim());
-    }
+    case "gh":
+      // The named read-only verbs of this machine's policy (issue/repo/pr view, pr list, pr checks,
+      // run list): verifying an agent's PR on a paired machine reads them there. No `gh api` at all
+      // on a remote box; merges, workflow runs and deletes stay denied (no tokens: a merge is
+      // never authorized on a paired machine).
+      return args[0] === "api" ? deny("gh api (not on a remote machine)") : gh(args, {});
     case "tmux":
       return tmux(args, opts);
     case "mkdir":

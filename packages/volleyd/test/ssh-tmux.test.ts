@@ -478,6 +478,96 @@ describe("SshTmuxHost", () => {
     );
   });
 
+  it("prepareWorktree at a PR head sha: a reviewer gets it detached, a fixup a branch from it, never origin/<sha>", async () => {
+    const sha = "c173b8450164fc5107b1fba7d4b5e3b218636c12";
+    const wt = "/home/dev/wt/w1/T1-quality_reviewer-1";
+    const mk = () =>
+      remote((s) =>
+        argvIs("git", "-C", wt, "rev-parse")(s) ||
+        argvIs("git", "-C", "/home/dev/wt/w1/T1-fixup-1", "rev-parse")(s)
+          ? { code: 128, stderr: "not a git repository" }
+          : argvIs("git", "-C", SPEC.repo, "rev-parse", "--git-common-dir")(s)
+            ? { stdout: ".git\n" }
+            : argvIs("cat")(s)
+              ? { stdout: "# existing\n.volley/\n/ISSUE.md\n" }
+              : undefined,
+      );
+    const rev = mk();
+    const res = await rev.host.prepareWorktree({
+      repo: SPEC.repo,
+      path: wt,
+      branch: "unused",
+      base: sha,
+      detach: true,
+    });
+    expect(res).toEqual({ path: wt, branch: `HEAD (detached at ${sha})`, reused: false });
+    expect(rev.steps().map((s) => s.argv)).toContainEqual([
+      "git",
+      "-C",
+      SPEC.repo,
+      "worktree",
+      "add",
+      "--detach",
+      wt,
+      sha,
+    ]);
+    expect(rev.steps().some((s) => s.argv.includes(`origin/${sha}`))).toBe(false);
+
+    const fix = mk();
+    const fwt = "/home/dev/wt/w1/T1-fixup-1";
+    await fix.host.prepareWorktree({
+      repo: SPEC.repo,
+      path: fwt,
+      branch: "w1/T1-fixup-1",
+      base: sha,
+    });
+    expect(fix.steps().map((s) => s.argv)).toContainEqual([
+      "git",
+      "-C",
+      SPEC.repo,
+      "worktree",
+      "add",
+      "--no-track",
+      fwt,
+      "-b",
+      "w1/T1-fixup-1",
+      sha,
+    ]);
+  });
+
+  it("prepareWorktree at a sha the box already holds: a failed fetch is fine", async () => {
+    const sha = "c173b8450164fc5107b1fba7d4b5e3b218636c12";
+    const wt = "/home/dev/wt/w1/T1-spec_reviewer-1";
+    const r = remote((s) =>
+      argvIs("git", "-C", wt, "rev-parse")(s)
+        ? { code: 128, stderr: "not a git repository" }
+        : argvIs("git", "-C", SPEC.repo, "fetch")(s)
+          ? { code: 1, stderr: "fatal: couldn't find remote ref" }
+          : argvIs("git", "-C", SPEC.repo, "rev-parse", "--git-common-dir")(s)
+            ? { stdout: ".git\n" }
+            : argvIs("cat")(s)
+              ? { stdout: "# existing\n.volley/\n/ISSUE.md\n" }
+              : undefined,
+    );
+    const res = await r.host.prepareWorktree({
+      repo: SPEC.repo,
+      path: wt,
+      branch: "x",
+      base: sha,
+      detach: true,
+    });
+    expect(res.reused).toBe(false);
+    expect(r.steps().map((s) => s.argv)).toContainEqual([
+      "git",
+      "-C",
+      SPEC.repo,
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `${sha}^{commit}`,
+    ]);
+  });
+
   it("prepareWorktree reuses an existing remote worktree and reports its branch", async () => {
     const wt = "/home/dev/wt/w1/T1-implementer";
     const r = remote((s) =>
