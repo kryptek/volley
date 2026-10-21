@@ -8348,9 +8348,12 @@ export class Daemon {
     p: Record<string, unknown>,
   ): Promise<AuthOutcome> {
     const op = p.op as string;
-    const accounts = await listAccounts(exec);
-    const why = typeof accounts === "string" ? accounts : deskRefusal(accounts, sender);
-    if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
+    // The fixed `desk` identity has no account entry: no lookup, so a failing tool cannot refuse it.
+    if (sender !== "desk") {
+      const accounts = await listAccounts(exec);
+      const why = typeof accounts === "string" ? accounts : deskRefusal(accounts, sender);
+      if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
+    }
     const r =
       op === "inbox_answer"
         ? await this.inboxAnswerOp(p, sender, { desk_login: true })

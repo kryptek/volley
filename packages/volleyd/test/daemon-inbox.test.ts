@@ -6,6 +6,7 @@ import { type InboxItem, decisionItemId, inboxTopic } from "../src/autopilot/inb
 import { ControlClient } from "../src/control";
 import { AUTOPILOT_ON, NS } from "./helpers/daemon-env";
 import { deskAccounts, deskAnswer } from "./helpers/desk-answer";
+import { fakeExec } from "./helpers/fake-exec";
 import { runCli } from "./helpers/run-cli";
 import { schemaErrors } from "./helpers/schema";
 import { type SupervisedEnv, makeSupervisedEnv, systemJournal } from "./helpers/supervised-env";
@@ -375,6 +376,18 @@ describe("a Desk login answers on its own account-op topic (the owner on any scr
     expect(await answerFrom("admin-1", decisionItemId("w1", b.decision_id))).toMatchObject({
       ok: true,
     });
+  });
+
+  it("the fixed desk identity needs no account lookup (a failing account tool does not refuse it)", async () => {
+    const accounts = fakeExec().on(["volley", "auth", "list"], { code: 1, stderr: "boom" });
+    s = await makeSupervisedEnv({ daemon: { authExec: accounts.exec } });
+    const c = await control();
+    expect((await c.request("claim", { wave: "w1", by: "coord-main" })).ok).toBe(true);
+    const d = await s.daemon.openDecision("w1", disagree);
+    const r = await answerFrom("desk", decisionItemId("w1", d.decision_id));
+    expect(r.error).toBeUndefined();
+    expect(r).toMatchObject({ ok: true });
+    expect(accounts.calls.filter((x) => x.argv[2] === "list")).toHaveLength(0);
   });
 
   it("a watch login or a name with no account is refused by role, with no claim hint", async () => {

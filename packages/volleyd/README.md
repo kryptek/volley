@@ -1018,7 +1018,9 @@ its coordinator name, a coordinator session's own item by that session. A Desk l
 or `admin` account, or the fixed `desk` identity) sends it on its own account-op topic
 `volley/_system/auth/ops/<username>`, where the broker names the sender, and volleyd treats it as
 the owner answering from another screen: `by` is that login, and no ownership check applies (a
-`resolve` sent there likewise). It is accepted only at the item's current `version`
+`resolve` sent there likewise). Every `steer` account, a sign-in link's included, thus carries
+the owner's power over every wave's Needs-you items: issue them only for the owner's own devices.
+It is accepted only at the item's current `version`
 (compare-and-set): the first accepted answer bumps the version, sets `answered { answer, by,
 where, at }`, journals `inbox_answered { id, kind, answer, by, where, version }` (in the item's
 wave, else `_system`) and acts on it. A later answer is refused with `already answered on
