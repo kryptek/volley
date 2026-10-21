@@ -1008,6 +1008,7 @@ export default function App() {
                     {showDigest(wave, state.digests?.[id]) && (
                       <DigestCard
                         digest={state.digests?.[id] as DigestPayload}
+                        // TODO(A12): open the clicked decision in the Needs-you window once it lands.
                         onOpenDecision={() => goTo({ kind: "wave", id, wave: id })}
                       />
                     )}

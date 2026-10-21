@@ -903,7 +903,8 @@ It is published, and `digest_published { trigger }` journaled, on `wave_complete
 (`release_go`) and an escalation (`escalation`; a `release_go`'s own escalation is the
 `release_go` digest's). A trigger is published again at most once per
 `autopilot.digest_min_interval_s` (default 1800): the owner hears about the first thing that
-needs them, not each one. Each publish sends **one push**: a `progress` envelope of type `digest`
+needs them, not each one. The retained digest is as of its last publish, so its `waiting` can
+lag a decision opened inside that window; the wave state's decisions are always current. Each publish sends **one push**: a `progress` envelope of type `digest`
 on volleyd's own topic whose `payload.msg` is the summary line, which `volley notify` rings for by
 default (its desktop banner shows `msg`):
 

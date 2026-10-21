@@ -3459,6 +3459,7 @@ export class Daemon {
     }
     await this.clearRetained(waveStateTopic(wave));
     await this.clearRetained(waveDigestTopic(wave));
+    this.digests.delete(wave);
     this.time.clearTimeout(this.stopGrace.get(wave));
     this.stopGrace.delete(wave);
     this.waves.delete(wave);
@@ -6863,22 +6864,22 @@ export class Daemon {
    * that triggered it.
    */
   private async publishDigest(wave: WaveId, trigger: DigestTrigger): Promise<void> {
-    const state = this.snapshot(wave);
-    if (state === null) return;
-    const digest = digestOf(
-      this.journalEvents(wave),
-      state,
-      dateOf(this.time).toISOString(),
-      trigger,
-    );
-    const msg = summaryLine(digest);
     try {
-      this.digests.set(wave, digest);
+      const state = this.snapshot(wave);
+      if (state === null) return;
+      const digest = digestOf(
+        this.journalEvents(wave),
+        state,
+        dateOf(this.time).toISOString(),
+        trigger,
+      );
+      const msg = summaryLine(digest);
       await this.publish(
         waveDigestTopic(wave),
         this.envelope("_waves/digest", "digest", digest),
         true,
       );
+      this.digests.set(wave, digest);
       await this.append(wave, { type: "digest_published", data: { trigger } });
       // SPEC §4.1: progress is QoS 0, not retained.
       await this.broker.publish(
@@ -6902,7 +6903,12 @@ export class Daemon {
     const cached = this.digests.get(wave);
     if (cached !== undefined) return { ok: true, result: cached };
     const raw = await this.broker.queryRetained(waveDigestTopic(wave), DAEMON_DEFAULTS.probe_ms);
-    const env = raw !== null && raw !== "" ? (JSON.parse(raw) as { payload?: Digest }) : null;
+    let env: { payload?: Digest } | null = null;
+    try {
+      env = raw !== null && raw !== "" ? (JSON.parse(raw) as { payload?: Digest }) : null;
+    } catch {
+      return { ok: false, error: `wave '${wave}' has a malformed retained digest` };
+    }
     if (env?.payload !== undefined) return { ok: true, result: env.payload };
     return {
       ok: false,

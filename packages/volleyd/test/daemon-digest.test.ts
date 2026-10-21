@@ -146,6 +146,16 @@ describe("the morning digest in the daemon (SPEC §4.6.16)", () => {
     expect(await t.retained(waveDigestTopic(WAVE))).not.toBeNull();
     expect((await client.request("archive", { wave: WAVE, by: OWNER })).ok).toBe(true);
     expect(await t.retained(waveDigestTopic(WAVE))).toBeNull();
+    // The digest op answers the same before a restart as after one.
+    expect((await client.request("digest", { wave: WAVE })).error).toContain("no digest yet");
+  });
+
+  it("the digest op refuses a malformed retained digest", async () => {
+    await sub.publish(waveDigestTopic(WAVE), "{not json", { qos: 1, retain: true });
+    await eventually(async () => (await sub.queryRetained(waveDigestTopic(WAVE), 500)) !== null);
+    const r = await client.request("digest", { wave: WAVE });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("malformed");
   });
 
   it("the digest op refuses a wave with no digest yet, and an unknown wave", async () => {
