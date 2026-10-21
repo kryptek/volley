@@ -1,6 +1,6 @@
 # Desk browser checks
 
-Playwright scripts for the Desk behaviours jsdom can't show: the first frame against a broker holding hundreds of retained agents, text selection, how each window style draws, and window pinning. They are not part of `bun run test`, and the workspace has no Playwright dependency. Each check loads Playwright from the directory it is run in.
+Playwright scripts for the Desk behaviours jsdom can't show: the first frame against a broker holding hundreds of retained agents, text selection, how each window style draws, window pinning, and pan performance on a phone. They are not part of `bun run test`, and the workspace has no Playwright dependency. Each check loads Playwright from the directory it is run in.
 
 Use a **private** broker on ports of your own. Never point them at a shared or live broker.
 
@@ -28,6 +28,7 @@ node $CHECKS/selection.mjs <out dir>       # canvas and chrome drags select noth
 node $CHECKS/pinning.mjs <out dir>         # anchor the coordinators top-left: arrange, pan, resize, reload; pin a wave in place
 node $CHECKS/styles-audit.mjs <out dir>    # every window style: box, hover overflow, paint under the body
 node $CHECKS/sheet.mjs <out dir>           # the comparison sheet from the audit
+node $CHECKS/pan-perf.mjs <out dir> [tag]  # demo, no broker: phone pan frame times (4x CPU) and backdrop filters, desktop window crop
 ```
 
 Re-run `seed-waves.mjs` before `styles-audit.mjs`, because the seeded wave goes stale and grows a banner. Each check prints a JSON report and writes its screenshots to the output directory. Stop the broker and the dev server afterwards.

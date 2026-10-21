@@ -96,7 +96,7 @@ function Stage({ initial }: { initial: View }) {
   api = useViewport({ initial });
   return (
     <div data-testid="stage" ref={api.stageRef} {...api.stageHandlers}>
-      <World view={api.view}>
+      <World view={api.view} ref={api.worldRef}>
         <section className="win" data-testid="win">
           <div className="win-bar" data-testid="bar" />
           <div className="win-body" data-testid="body">
@@ -135,19 +135,24 @@ describe("touch: pan and two-finger pinch", () => {
     fireEvent.pointerDown(stage, t(2, 200, 100));
     // Spread to twice the distance; the midpoint moves from (150,100) to (200,100).
     fireEvent.pointerMove(stage, t(2, 300, 100));
+    // The view commits when a finger lifts (the gesture moves the world element until then).
+    fireEvent.pointerUp(stage, t(2, 300, 100));
     expect(api.view.s).toBeCloseTo(1);
     // The world point under the old midpoint is now under the new one.
     expect((200 - api.view.x) / api.view.s).toBeCloseTo(150 / 0.5);
     expect((100 - api.view.y) / api.view.s).toBeCloseTo(100 / 0.5);
-    // Pinch-in clamps at MIN_SCALE.
-    fireEvent.pointerMove(stage, t(2, 101, 100));
-    expect(api.view.s).toBe(0.3);
-    // Lift one finger: the other pans on from where it is, without a jump.
-    fireEvent.pointerUp(stage, t(2, 101, 100));
+    // The other finger pans on from where it is, without a jump.
     const before = { ...api.view };
     fireEvent.pointerMove(stage, t(1, 110, 105));
-    expect(api.view).toEqual({ ...before, x: before.x + 10, y: before.y + 5 });
     fireEvent.pointerUp(stage, t(1, 110, 105));
+    expect(api.view).toEqual({ ...before, x: before.x + 10, y: before.y + 5 });
+    // Pinch-in clamps at MIN_SCALE.
+    fireEvent.pointerDown(stage, t(1, 100, 100));
+    fireEvent.pointerDown(stage, t(2, 200, 100));
+    fireEvent.pointerMove(stage, t(2, 101, 100));
+    fireEvent.pointerUp(stage, t(2, 101, 100));
+    fireEvent.pointerUp(stage, t(1, 100, 100));
+    expect(api.view.s).toBe(0.3);
   });
 
   const t = (pointerId: number, clientX: number, clientY: number, pointerType = "touch") => ({
@@ -165,10 +170,10 @@ describe("touch: pan and two-finger pinch", () => {
     fireEvent.pointerDown(body, t(2, 200, 100));
     // Touch pointers stay with the element they went down on; moves bubble to the stage.
     fireEvent.pointerMove(body, t(2, 300, 100));
-    expect(api.view.s).toBeCloseTo(1);
-    expect((200 - api.view.x) / api.view.s).toBeCloseTo(150 / 0.5);
     fireEvent.pointerUp(body, t(2, 300, 100));
     fireEvent.pointerUp(stage, t(1, 100, 100));
+    expect(api.view.s).toBeCloseTo(1);
+    expect((200 - api.view.x) / api.view.s).toBeCloseTo(150 / 0.5);
   });
 
   it("a pinch with both fingers on a window zooms; one finger left on a window does not pan", () => {
@@ -179,12 +184,12 @@ describe("touch: pan and two-finger pinch", () => {
     expect(api.view).toEqual({ x: 0, y: 0, s: 0.5 });
     fireEvent.pointerDown(body, t(2, 230, 120));
     fireEvent.pointerMove(body, t(2, 330, 120));
-    expect(api.view.s).toBeCloseTo(1);
     fireEvent.pointerUp(body, t(2, 330, 120));
+    expect(api.view.s).toBeCloseTo(1);
     const before = { ...api.view };
     fireEvent.pointerMove(body, t(1, 160, 140));
-    expect(api.view).toEqual(before);
     fireEvent.pointerUp(body, t(1, 160, 140));
+    expect(api.view).toEqual(before);
   });
 
   it("a finger on a button in a window (a feed row) counts toward a pinch", () => {
@@ -194,6 +199,7 @@ describe("touch: pan and two-finger pinch", () => {
     fireEvent.pointerDown(stage, t(1, 100, 100));
     fireEvent.pointerDown(btn, t(2, 200, 100));
     fireEvent.pointerMove(btn, t(2, 300, 100));
+    fireEvent.pointerUp(btn, t(2, 300, 100));
     expect(api.view.s).toBeCloseTo(1);
   });
 
@@ -205,15 +211,15 @@ describe("touch: pan and two-finger pinch", () => {
       fireEvent.pointerDown(stage, t(1, 0, 0));
       fireEvent.pointerDown(el, t(2, 100, 0));
       fireEvent.pointerMove(el, t(2, 300, 0));
-      expect(api.view.s).toBe(0.5);
       fireEvent.pointerUp(el, t(2, 300, 0));
       fireEvent.pointerUp(stage, t(1, 0, 0));
+      expect(api.view.s).toBe(0.5);
     }
     const body = screen.getByTestId("body");
     fireEvent.pointerDown(body, t(3, 10, 10, "mouse"));
     fireEvent.pointerMove(body, t(3, 60, 60, "mouse"));
-    expect(api.view).toEqual({ x: 0, y: 0, s: 0.5 });
     fireEvent.pointerUp(body, t(3, 60, 60, "mouse"));
+    expect(api.view).toEqual({ x: 0, y: 0, s: 0.5 });
   });
 
   it("a cancelled touch (the browser took it to scroll) leaves the pinch", () => {
@@ -224,6 +230,7 @@ describe("touch: pan and two-finger pinch", () => {
     fireEvent.pointerCancel(body, t(1, 100, 100));
     fireEvent.pointerDown(stage, t(2, 200, 100));
     fireEvent.pointerMove(stage, t(2, 220, 100));
+    fireEvent.pointerUp(stage, t(2, 220, 100));
     // A plain one-finger pan, not a pinch against a stale finger.
     expect(api.view).toEqual({ x: 20, y: 0, s: 0.5 });
   });
