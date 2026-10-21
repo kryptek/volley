@@ -94,6 +94,8 @@
             "release_stage_entered",
             "release_stage_verified",
             "release_stage_failed",
+            "release_stage_skipped",
+            "release_cancelled",
             "release_done",
             "inbox_opened",
             "inbox_answered",
@@ -117,7 +119,11 @@
               "description": "Journal sequence number, monotonic per wave."
             },
             "at": { "type": "string", "format": "date-time" },
-            "task": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+            "task": {
+              "type": "string",
+              "pattern": "^([A-Za-z0-9][A-Za-z0-9_-]{0,62}|_release)$",
+              "description": "A wave-file task id, or _release: the release train's pseudo task (spec section 4.6.19)."
+            },
             "data": { "type": "object", "description": "Event-type-specific detail." }
           }
         }

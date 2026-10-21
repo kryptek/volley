@@ -151,7 +151,14 @@
                     "properties": {
                       "name": { "type": "string" },
                       "state": {
-                        "enum": ["pending", "awaiting_go", "running", "verified", "failed"]
+                        "enum": [
+                          "pending",
+                          "awaiting_go",
+                          "running",
+                          "verified",
+                          "failed",
+                          "skipped"
+                        ]
                       }
                     }
                   }

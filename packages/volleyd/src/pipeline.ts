@@ -100,6 +100,8 @@ const ROLE_STAGE: Record<Role, TaskStage> = {
   fixup: "fixup",
   // The rebase is a fix-up of the branch; the closed stage enum has no stage of its own for it.
   rebase: "fixup",
+  // The release train's role (SPEC §4.6.19): never in a task's pipeline (isRole excludes it).
+  release: "done",
 };
 
 /** Roles whose `done` claims pushed commits on the PR branch (checked by artifacts.ts). */
@@ -346,7 +348,8 @@ export const emptyPipeline = (): TaskPipeline => ({
   gated: [],
 });
 
-const isRole = (r: unknown): r is Role => typeof r === "string" && r in ROLE_STAGE;
+const isRole = (r: unknown): r is Role =>
+  typeof r === "string" && r !== "release" && r in ROLE_STAGE;
 
 /**
  * Fold one journal event into a task's pipeline. Pure; mutates and returns `p` (the reducer
