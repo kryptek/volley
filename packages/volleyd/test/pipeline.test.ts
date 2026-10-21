@@ -1013,9 +1013,8 @@ describe("pipeline: the merge_ready invariant under autopilot", () => {
     (h.world.prs[0] as { headRefOid: string }).headRefOid = H2;
     h.world.ci[H2] = "green";
     await h.finish("spec_reviewer", { result: result("approve-empty") });
+    // The second reviewer's done is the observation that finds the head moved.
     await h.finish("quality_reviewer", { result: result("approve-empty") });
-    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
-    await h.tick();
     expect(h.events.find((e) => e.data.alarm === "merge_ready_invariant")?.data).toMatchObject({
       head: H2,
       stale: ["spec_reviewer", "quality_reviewer"],
