@@ -271,6 +271,19 @@ describe("releasedBy and remediation_closed", () => {
     ).toBe("landed");
   });
 
+  it("an unknown outcome is ignored: nothing is closed or released", () => {
+    const rec = record([
+      ...twoBlocked(),
+      {
+        type: "remediation_closed",
+        task: "fix-clock-test-ts-advance",
+        data: { kind: "fix_flake", test: TEST, outcome: "merged", released: ["T3", "T7"] },
+      },
+    ]);
+    expect(rec.pipeline.T3?.remediation?.landed).toBeUndefined();
+    expect(rec.wave?.tasks["fix-clock-test-ts-advance"]?.remediation?.outcome).toBeUndefined();
+  });
+
   it("a task_queued for a synthetic task survives a plan version that does not list it", () => {
     const next: Wave = { ...wave, version: 2 };
     const rec = record([

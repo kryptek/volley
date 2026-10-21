@@ -349,7 +349,8 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     }
     case "remediation_closed": {
       const r = ev.task !== undefined ? next.wave?.tasks[ev.task]?.remediation : undefined;
-      const outcome = ev.data.outcome === "failed" ? "failed" : "landed";
+      const outcome = ev.data.outcome;
+      if (outcome !== "failed" && outcome !== "landed") break;
       if (ev.task !== undefined && r !== undefined) setFixer(next, ev.task, { ...r, outcome });
       // The fix is on the release branch: each released task's next advance takes it.
       const released = Array.isArray(ev.data.released) ? (ev.data.released as TaskId[]) : [];

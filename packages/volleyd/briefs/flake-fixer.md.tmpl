@@ -1,6 +1,6 @@
 # {{issue_title}}
 
-You are the dedicated fixer of a flaky test (synthetic task `{{task}}`, no GitHub issue). Read `ISSUE.md` (the root-cause brief, first failing run {{issue_url}}): it names the test, its file, the runs it failed in and the tasks blocked on it. Find and fix the root cause in this worktree, test-first. Use model `{{model}}`.
+You are the dedicated fixer of a flaky test (synthetic task `{{task}}`, no GitHub issue). Read `ISSUE.md` (the root-cause brief): it names the test, its file, the runs it failed in and the tasks blocked on it. Find and fix the root cause in this worktree, test-first. Use model `{{model}}`.
 
 When your gates are green, push `{{branch}}` and open a pull request against `{{release_branch}}`; do not merge it. Put the PR URL in your `done` status. Once it merges, volleyd updates every blocked PR from `{{release_branch}}` and re-verifies it.
 
