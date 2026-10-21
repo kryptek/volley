@@ -52,7 +52,6 @@ function setup() {
 
 /** The first published request, once it is out. */
 async function sent(m: ReturnType<typeof mockClient>) {
-  await vi.waitUntil?.(() => m.published.length > 0);
   for (let i = 0; i < 50 && m.published.length === 0; i++)
     await new Promise((r) => setTimeout(r, 0));
   return m.published[0] as { topic: string; envelope: Envelope };
@@ -108,7 +107,7 @@ describe("routeDeskControl: Needs-you answers travel the Desk's own account-op t
     const mailbox = vi.fn<SteerTransport["control"]>(async () => ({ ok: true }));
     const control = routeDeskControl(mailbox, null);
     await control?.("inbox_answer", answer);
-    expect(mailbox).toHaveBeenCalledWith("inbox_answer", answer, undefined, undefined);
+    expect(mailbox).toHaveBeenCalledWith("inbox_answer", answer);
     expect(routeDeskControl(null, null)).toBeNull();
   });
 });
