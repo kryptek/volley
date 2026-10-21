@@ -405,16 +405,15 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     return agent_id;
   };
 
-  /** Autopilot answers not yet handed back to the pipeline (`settle` waits for them). */
-  const handBacks = new Set<Promise<unknown>>();
-  /** The driver's I/O and every autopilot hand-back, until none is left. */
+  /** Autopilot answers not yet handed back to the pipeline (`settle` runs them). */
+  const handBacks: (() => Promise<void>)[] = [];
+  /** The driver's I/O, then every autopilot hand-back on the queue, until none is left. */
   const settle = async () => {
     for (;;) {
       await driver.settled();
-      if (handBacks.size === 0) return;
-      const all = [...handBacks];
-      handBacks.clear();
-      await Promise.all(all);
+      const fn = handBacks.shift();
+      if (fn === undefined) return;
+      await deps.enqueue(fn);
     }
   };
   let clock = Date.parse("2026-10-18T12:00:00.000Z");
@@ -476,13 +475,9 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       if (!("event" in res)) throw new Error(`cannot resolve ${r.id}`);
       await journal(res.event);
       const d = rec.decisions[r.id] as DecisionRecord;
-      // After the observation being handled (the daemon's queue runs it next): a macrotask.
-      handBacks.add(
-        new Promise<void>((done) => setTimeout(done, 0)).then(() =>
-          deps.enqueue(() =>
-            driver.handle(d.task ?? "T1", { kind: "decision_resolved", decision: d }),
-          ),
-        ),
+      // After the observation being handled (the daemon's queue runs it next): `settle` runs it.
+      handBacks.push(() =>
+        driver.handle(d.task ?? "T1", { kind: "decision_resolved", decision: d }),
       );
     },
     // The daemon's resolveNow: journaled; a done task acts on no answer, so no hand-back here.
