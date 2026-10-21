@@ -11,6 +11,7 @@ import {
   type WaveOptions,
   ensureBriefPreface,
   parseDependsOn,
+  submitLines as submitLinesFor,
   taskIdFor,
   waveFromIssues,
 } from "../scripts/wave-from-issues";
@@ -59,9 +60,26 @@ const noCoordinator = Object.fromEntries(
 const submitLines = (file: string) =>
   [
     `submit: volleyd run ${file} --owner "$VOLLEY_COORDINATOR"`,
-    "owner: VOLLEY_COORDINATOR is unset: set it in the volley MCP server's env (a stable name like coord-main) before submitting",
+    "owner: VOLLEY_COORDINATOR is unset: export it in this shell (and set it in the volley MCP server's env), a stable name like coord-main, before submitting",
     "",
   ].join("\n");
+
+describe("submitLines", () => {
+  it("leaves a plain path and the <wave.yaml> placeholder bare", () => {
+    expect(submitLinesFor(".volley/waves/w.yaml", "c")[0]).toBe(
+      'submit: volleyd run .volley/waves/w.yaml --owner "$VOLLEY_COORDINATOR"',
+    );
+    expect(submitLinesFor("<wave.yaml>", "c")[0]).toBe(
+      'submit: volleyd run <wave.yaml> --owner "$VOLLEY_COORDINATOR"',
+    );
+  });
+
+  it("single-quotes a path the shell would split or expand", () => {
+    expect(submitLinesFor("/tmp/my waves/it's.yaml", "c")[0]).toBe(
+      `submit: volleyd run '/tmp/my waves/it'\\''s.yaml' --owner "$VOLLEY_COORDINATOR"`,
+    );
+  });
+});
 
 describe("parseDependsOn", () => {
   it("reads 'Depends on:' and 'deps:' lines, markdown emphasis included", () => {

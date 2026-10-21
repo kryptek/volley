@@ -228,11 +228,16 @@ function waveConfigLine(opts: WaveOptions): string[] {
  * coordinator name (`VOLLEY_COORDINATOR`), and whose name that is.
  */
 export function submitLines(file: string, coordinator: string | undefined): string[] {
+  // The `<wave.yaml>` placeholder stays bare; a path the shell would split or expand is single-quoted.
+  const arg =
+    file === "<wave.yaml>" || /^[\w@%+=:,./-]+$/.test(file)
+      ? file
+      : `'${file.replaceAll("'", "'\\''")}'`;
   return [
-    `submit: volleyd run ${file} --owner "$VOLLEY_COORDINATOR"`,
+    `submit: volleyd run ${arg} --owner "$VOLLEY_COORDINATOR"`,
     coordinator !== undefined && coordinator !== ""
       ? `owner: ${coordinator} (VOLLEY_COORDINATOR)`
-      : "owner: VOLLEY_COORDINATOR is unset: set it in the volley MCP server's env (a stable name like coord-main) before submitting",
+      : "owner: VOLLEY_COORDINATOR is unset: export it in this shell (and set it in the volley MCP server's env), a stable name like coord-main, before submitting",
   ];
 }
 
