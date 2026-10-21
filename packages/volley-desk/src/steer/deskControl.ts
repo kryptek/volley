@@ -22,7 +22,7 @@ const MIGRATE_HINT =
 /**
  * The ops a Desk login answers as the owner, on its own account-op topic. Keep it equal to
  * volleyd's `DESK_OPS` (packages/volleyd/src/accounts.ts): an op only one list names is sent
- * to the mailbox and refused there, or to the ops topic and answered `unknown op`.
+ * to the mailbox and refused there, or to the ops topic and answered `unknown op` (scripts/desk-ops-sync.test.ts checks it).
  */
 export const DESK_LOGIN_OPS: readonly string[] = ["inbox_answer", "resolve"];
 

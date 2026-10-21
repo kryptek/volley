@@ -198,14 +198,17 @@ export function adminRefusal(accounts: Account[], sender: string): string | unde
 
 /**
  * A Desk login's Needs-you answers (SPEC §4.6.18), the owner's on any screen. The Desk routes
- * the same list (`DESK_LOGIN_OPS`, packages/volley-desk/src/steer/deskControl.ts); keep the two equal.
+ * the same list (`DESK_LOGIN_OPS`, packages/volley-desk/src/steer/deskControl.ts); keep the two equal
+ * (scripts/desk-ops-sync.test.ts checks it).
  */
 export const DESK_OPS: ReadonlySet<string> = new Set(["inbox_answer", "resolve"]);
 
 /**
  * Why `sender` (the username an ops topic names) may not send a Desk op, or undefined when it is
  * a Desk login: the fixed `desk` identity (it has no account entry) or a `steer` or `admin`
- * account.
+ * account. Trusting the literal `desk` name is safe because the broker ACL (`%u`) lets only the
+ * `desk` login write `ops/desk`; on a broker without auth anyone can, but the mailbox `from` is
+ * just as forgeable there.
  */
 export function deskRefusal(accounts: Account[], sender: string): string | undefined {
   if (sender === "desk") return undefined;
