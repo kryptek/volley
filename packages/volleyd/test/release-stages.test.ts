@@ -116,7 +116,10 @@ function train() {
     d.resolved = { answer, by: "owner", at };
     return step({ kind: "decision_resolved", decision: d });
   };
-  return { events, decisions, view, step, spawned, resolve };
+  const setStatus = (s: string) => {
+    status = s;
+  };
+  return { events, decisions, view, step, spawned, resolve, setStatus };
 }
 
 const kinds = (acts: ReleaseAction[]) =>
@@ -221,6 +224,47 @@ describe("nextRelease (SPEC §4.6.19)", () => {
       "spawn smoke 1",
     ]);
     expect(t.view().train.stages.find((s) => s.name === "deploy-staging")?.state).toBe("skipped");
+  });
+
+  it("an answer given while the wave is paused still acts; the spawn waits for the resume", () => {
+    const t = train();
+    t.step({ kind: "advance" });
+    t.spawned("bump", 1);
+    t.step({ kind: "stage_checked", stage: "bump", agent_id: "w1-release-bump-1", report: OK });
+    t.step({ kind: "advance" });
+    t.setStatus("paused");
+    expect(kinds(t.resolve("stage_go", "deploy-staging", "go"))).toEqual([
+      "release_stage_entered deploy-staging",
+      "spawn deploy-staging 1",
+    ]);
+    // Paused: no retry of the spawn; resumed, the advance retries it.
+    expect(t.step({ kind: "advance" })).toEqual([]);
+    t.setStatus("releasing");
+    expect(kinds(t.step({ kind: "advance" }))).toEqual(["spawn deploy-staging 1"]);
+    // A failed stage's answer while paused acts too.
+    t.spawned("deploy-staging", 1);
+    t.step({
+      kind: "agent_done",
+      agent_id: "w1-release-deploy-staging-1",
+      status: "failed",
+      why: "boom",
+    });
+    t.setStatus("paused");
+    expect(kinds(t.resolve("agent_blocked", "deploy-staging", "respawn"))).toEqual([
+      "retire w1-release-deploy-staging-1 stopped",
+      "release_stage_entered deploy-staging",
+      "spawn deploy-staging 2",
+    ]);
+  });
+
+  it("an answer for a wave that is neither releasing nor paused does nothing", () => {
+    const t = train();
+    t.step({ kind: "advance" });
+    t.spawned("bump", 1);
+    t.step({ kind: "stage_checked", stage: "bump", agent_id: "w1-release-bump-1", report: OK });
+    t.step({ kind: "advance" });
+    t.setStatus("stopped");
+    expect(t.resolve("stage_go", "deploy-staging", "go")).toEqual([]);
   });
 
   it("a done without a stage result is steered once, then the stage fails with an agent_blocked decision; respawn is attempt 2", () => {
@@ -447,6 +491,12 @@ describe("parseStageResult", () => {
     ).toBeNull();
     expect(parseStageResult(undefined, "bump")).toBeNull();
   });
+
+  it("keeps the payload's other fields, for verify.result", () => {
+    expect(parseStageResult({ ...RESULT("smoke"), smoke: "passed" }, "smoke")?.fields).toEqual({
+      smoke: "passed",
+    });
+  });
 });
 
 describe("verifyStage", () => {
@@ -552,6 +602,19 @@ describe("verifyStage", () => {
       "file NOTES.md",
       "result smoke",
     ]);
+  });
+
+  it("a verify.result field the agent published holds", async () => {
+    const payload = { ...result, smoke: "passed", runs: 3 };
+    const parsed = parseStageResult(payload, "tag");
+    if (parsed === null) throw new Error("not a stage result");
+    const r = await verifyStage(fake({}).exec, {
+      ...base,
+      result: parsed,
+      stage: stage({ result: { smoke: "passed", runs: 3 } }),
+    });
+    expect(r.missing).toEqual([]);
+    expect(r.facts.find((x) => x.fact === "result smoke")?.evidence).toBe('smoke: "passed"');
   });
 
   it("commits_on_release needs the stage's start, and the tip past it", async () => {

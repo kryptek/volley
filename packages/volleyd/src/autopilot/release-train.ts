@@ -65,7 +65,11 @@ export interface StageResult {
   commands: StageCommand[];
   notes?: string;
   artifacts: { tag?: string; files?: string[]; urls?: string[] };
+  /** The payload's other top-level fields (what a stage's `verify.result` checks). */
+  fields?: Record<string, unknown>;
 }
+
+const CONTRACT_KEYS = new Set(["stage", "commands", "notes", "artifacts"]);
 
 const isStrings = (x: unknown): x is string[] =>
   Array.isArray(x) && x.every((s) => typeof s === "string");
@@ -89,11 +93,13 @@ export function parseStageResult(payload: unknown, stage: string): StageResult |
     ...(isStrings(a.files) ? { files: a.files } : {}),
     ...(isStrings(a.urls) ? { urls: a.urls } : {}),
   };
+  const fields = Object.fromEntries(Object.entries(p).filter(([k]) => !CONTRACT_KEYS.has(k)));
   return {
     stage,
     commands,
     ...(typeof p.notes === "string" ? { notes: p.notes } : {}),
     artifacts,
+    ...(Object.keys(fields).length > 0 ? { fields } : {}),
   };
 }
 
@@ -220,6 +226,8 @@ export interface ReleaseView {
   release_branch: string;
   /** Whether the wave is `releasing` (paused or stopped: nothing runs). */
   releasing: boolean;
+  /** Whether the wave is paused (an owner's answer still lands; its spawn waits for the resume). */
+  paused: boolean;
   stages: PlaybookStage[];
   train: ReleaseState;
   /** The attempt each entered stage is at (its latest `release_stage_entered`). */
@@ -300,6 +308,7 @@ export function releaseView(o: {
     wave: o.wave,
     release_branch: o.release_branch,
     releasing: o.status === "releasing",
+    paused: o.status === "paused",
     stages,
     train: o.train,
     attempt,
@@ -510,7 +519,9 @@ function onChecked(
 function onResolved(v: ReleaseView, d: DecisionRecord): ReleaseAction[] {
   const stage = stageOf(d);
   const answer = d.resolved?.answer.trim().toLowerCase();
-  if (stage === undefined || answer === undefined || !v.releasing) return [];
+  // Paused too: the decision is consumed now, and advance never re-asks a stage awaiting its go
+  // or failed. The spawn this enters is held until the wave resumes.
+  if (stage === undefined || answer === undefined || !(v.releasing || v.paused)) return [];
   const by = d.resolved?.by ?? "";
   const skip = journal("release_stage_skipped", { stage, by, decision_id: d.decision_id });
   if (d.kind === "stage_go") {
@@ -712,9 +723,8 @@ export async function verifyStage(
       r.code === 0 ? `on origin/${o.release_branch}` : `git show exited ${r.code}`,
     );
   }
-  const payload = o.result as unknown as Record<string, unknown>;
   for (const [k, want] of Object.entries(v.result ?? {})) {
-    const got = payload[k];
+    const got = o.result.fields?.[k];
     fact(
       `result ${k}`,
       got === want,
