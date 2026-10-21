@@ -154,7 +154,9 @@ the inbox: `volleyd inbox` lists nothing open.
 
 ### Metrics for the tag annotation
 
-Record these in the `v0.5.0` tag's annotation (`git tag -a v0.5.0`), one per line:
+Record these in the `v0.5.0` tag's annotation (`git tag -a v0.5.0`), one per line. If the tag
+lands on a later day than the `## 0.5.0 — <date>` heading in `CHANGELOG.md` (its dates are
+release-tag dates), correct that date in a `release:` commit before tagging.
 
 ```
 tasks: <n> (issues <n>, fixer tasks <n>)

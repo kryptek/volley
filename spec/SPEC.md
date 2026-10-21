@@ -801,6 +801,7 @@ Supervisor topics are informative in 0.1 (§4.6), so nothing here is required of
 - Classify a red head before asking anyone, and fix a flake through a synthetic task (§4.6.16)
 - Publish one retained digest per wave (§4.6.16; SHOULD, for a supervisor that runs waves unattended)
 - Merge a gated PR itself under `merge: auto` (§4.6.17). It MUST merge only a task at `merge_ready`, only at its gated head and only into the release branch the PR targets, MUST NOT force a merge GitHub refuses, MUST journal `merged_by_supervisor`, and MUST keep at most one merge in flight per release branch (§4.6.17). Under `merge: manual` it MUST NOT merge on its own; only the owner's explicit merge of one task does (§4.6.17)
+- Run a repository's release playbook once every task of a wave is settled (§4.6.19). It MUST NOT answer `stage_go` or `release_go` itself, whatever its policy table says, and MUST NOT deploy to production as part of a train's automatic run (§4.6.19)
 
 ---
 
