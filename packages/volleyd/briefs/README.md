@@ -2,7 +2,9 @@
 
 One template per role volleyd spawns: `implementer`, `spec_reviewer`, `quality_reviewer`,
 `fixup`, `rebase`, `release` (a release playbook stage's agent, SPEC §4.6.19), plus `rebase-merge.md.tmpl`, the rebase role's brief when its step runs under
-`branch_update: merge` (merge the release branch in, a normal push, never a force-push). At
+`branch_update: merge` (merge the release branch in, a normal push, never a force-push), and
+`flake-fixer.md.tmpl`, the implementer's brief for a synthetic flake-fixer task (no issue: its
+`ISSUE.md` is the root-cause brief, `src/autopilot/flake-brief.ts`). At
 spawn, `src/brief.ts` renders `<role>.md.tmpl` (or that variant) into the agent's
 `.volley/brief.md`, below the repo's brief preface (if any); `launch.sh` passes that file to
 `claude` as its prompt, so the brief never appears in an argv.
@@ -16,7 +18,7 @@ that itself contains `{{…}}`, is never expanded again). An unknown placeholder
 |---|---|
 | `agent_id`, `namespace` | the agent's literal id and Volley namespace (also in `.volley/agent.json`) |
 | `wave`, `task`, `role` | where the agent sits in the wave |
-| `issue`, `issue_title`, `issue_url` | from `gh issue view`, for the number in the wave file |
+| `issue`, `issue_title`, `issue_url` | from `gh issue view`, for the number in the wave file (a flake fixer: `0`, `Fix flaky test <test>` and its first failing run) |
 | `model` | the task's model |
 | `repo`, `release_branch`, `branch`, `worktree` | the repo root, the base branch, the agent's branch and worktree |
 | `extra` | repo-specific notes (below), or empty |

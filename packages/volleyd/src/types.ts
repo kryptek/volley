@@ -30,7 +30,9 @@ export type WaveStatus =
   | "awaiting_decision"
   | "releasing"
   | "complete"
-  | "stopped";
+  | "stopped"
+  // Retired (archive.ts): published once, then the retained state is cleared.
+  | "archived";
 
 /** One pipeline entry as written: a stage, or a group of stages that run in parallel. */
 export type PipelineStep = PipelineStage | PipelineStage[];
@@ -141,6 +143,11 @@ export interface Tunables {
   fleet: FleetConfig;
   /** Decisions volleyd answers itself from its policy table (SPEC §4.6.16), and autopilot merging (SPEC §4.6.17). */
   autopilot: AutopilotConfig;
+  // --- Archiving (SPEC §4.6.20) ---
+  /** Hours after its `wave_stopped` / `wave_complete` an ended wave is archived; 0: never. */
+  archive_ended_after_h: number;
+  /** A complete wave is archived as soon as its `wave_complete` decision is answered. */
+  archive_on_ack: boolean;
 }
 
 /** Who merges a gated PR: volleyd itself (`auto`) or a human (`manual`). */
@@ -186,6 +193,11 @@ export interface AutopilotConfig {
    * is asked (`ci_failed`, escalated `budget_exhausted`).
    */
   incident_wait_max_s: number;
+  /**
+   * Flake fixers (synthetic `fix-<slug>` tasks) one wave may add; a request past it escalates the
+   * blocked task's `ci_failed` as `budget_exhausted`.
+   */
+  fix_flake_max: number;
 }
 
 /** How the supervisor's own machine takes auto-placed tasks (config `fleet.local_agents`). */
@@ -288,6 +300,28 @@ export interface WaveTask {
   account?: string;
   /** `heavy: true`: placement needs a free per-machine slot in each of the wave's `heavy_pools`. */
   heavy?: boolean;
+  /**
+   * Added by the supervisor, never by a wave file (journal-only, `issue: 0`): a flake's fixer
+   * (SPEC §4.6.16), with the remediation it carries out.
+   */
+  synthetic?: true;
+  remediation?: FixerRemediation;
+}
+
+/**
+ * A synthetic fixer task's remediation (SPEC §4.6.16): the failing test, its file, the runs it
+ * failed in, and the tasks it blocks (`for`, released when the fixer is done). `outcome` once
+ * `remediation_closed` is journaled.
+ */
+export interface FixerRemediation {
+  kind: "fix_flake";
+  test: string;
+  test_file: string | null;
+  run_urls: string[];
+  for: TaskId[];
+  outcome?: "landed" | "failed";
+  /** When the fixer was queued (the reducer sets it from its `task_queued`). */
+  since?: string;
 }
 
 export interface Wave {
@@ -369,7 +403,18 @@ export interface TaskState {
   /** Alarms on the task that still hold (e.g. merged_unverified_head), with a human line each. */
   alarms?: { alarm: string; message: string }[];
   /** A remediation requested for the task's red head that still holds (a flake awaiting its fixer). */
-  remediation?: { kind: "fix_flake"; test: string; since: string };
+  remediation?: {
+    kind: "fix_flake";
+    test: string;
+    since: string;
+    /** A synthetic fixer's: the test's file, its failing runs and the tasks it blocks. */
+    test_file?: string | null;
+    run_urls?: string[];
+    for?: TaskId[];
+    outcome?: "landed" | "failed";
+  };
+  /** A supervisor-added task (a flake's fixer, SPEC §4.6.16): never from the wave file. */
+  synthetic?: true;
   evidence_path?: string;
   /** The task's latest spawn failure, while it is not recovered (`spawn_failed`). */
   last_error?: { code: string; message: string; at: string };
@@ -434,6 +479,8 @@ export interface WaveState {
   merge_queue?: MergeQueueEntry[] | undefined;
   /** The release train (SPEC §4.6.19), from `release_started` on; absent for a wave without one. */
   release?: ReleaseState;
+  /** When, by whom and why the wave was archived (`volleyd status --all` only). */
+  archived?: { at: string; by: string; reason: string };
   updated_at: string;
 }
 
@@ -495,6 +542,8 @@ export const WAVE_EVENT_TYPES = [
   "wave_resumed",
   "wave_stopped",
   "wave_complete",
+  // An ended wave retired (archive.ts): its open decisions closed, out of the live set.
+  "wave_archived",
   "owner_claimed",
   "owner_reconnected",
   "task_queued",
@@ -604,6 +653,7 @@ export const WAVE_EVENT_TYPES = [
   "inbox_answered",
   // Self-healing CI (SPEC §4.6.16): a remediation for a classified red head (a flake's fixer).
   "remediation_requested",
+  "remediation_closed",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

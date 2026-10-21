@@ -7,11 +7,13 @@ import { resolveCaller } from "../ownership";
 import type { TaskState, WaveState } from "../types";
 import { formatDecision } from "./decisions";
 
-const HELP = `Usage: volleyd status [wave] [--json] [--by <agent-id>] [--broker-url <url>] [--namespace <ns>]
+const HELP = `Usage: volleyd status [wave] [--all] [--json] [--by <agent-id>] [--broker-url <url>] [--namespace <ns>]
 
-Print every wave the daemon owns (or one wave) from the daemon's live state, with open
+Print every live wave the daemon owns (or one wave) from the daemon's live state, with open
 decisions and a "needs you" count on the waves the caller owns (--by, else
 VOLLEY_AGENT_ID, else the session registered for this directory, else VOLLEY_COORDINATOR).
+Archived waves (\`volleyd archive\`) are left out; --all lists them too, with when, by whom
+and why each was archived.
 --json prints, for one wave, its wave-state payload exactly as published on
 volley/_waves/<wave>/state (each task's pr { number, head_sha, ci, checks }, stage_group and
 alarms included); without a wave, { waves: [those payloads], agent_logins }.
@@ -40,7 +42,10 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
   }
   const wave = parsed.positionals[0];
   return withClient(target, io, "volleyd status", async (client) => {
-    const res = await client.request("status", wave !== undefined ? { wave } : {});
+    const res = await client.request(
+      "status",
+      wave !== undefined ? { wave } : parsed.values.all === true ? { all: true } : {},
+    );
     if (!res.ok) {
       io.stderr(`volleyd status: ${res.error ?? "failed"}\n`);
       return EXIT.ERROR;
@@ -118,6 +123,7 @@ function parseStatus(argv: string[]) {
     args: argv,
     options: {
       json: { type: "boolean", default: false },
+      all: { type: "boolean", default: false },
       by: { type: "string" },
       "broker-url": { type: "string" },
       namespace: { type: "string" },
@@ -182,6 +188,10 @@ export function formatWave(
     ap !== undefined
       ? `  autopilot: ${ap.enabled ? "on" : "off"} · ${ap.auto_resolved} auto-resolved · ${ap.escalated} escalated\n`
       : "";
+  const archived =
+    s.archived !== undefined
+      ? `  archived ${s.archived.at} by ${s.archived.by}: ${s.archived.reason}\n`
+      : "";
   const queue = s.merge_queue !== undefined ? `  ${formatMergeQueue(s.merge_queue)}\n` : "";
   // The release train (SPEC §4.6.19): the stage running, awaiting its go or failed, and how far
   // the train is (`release: smoke running (2/4 verified)`).
@@ -209,6 +219,13 @@ export function formatWave(
       .map((g) => `    ${g.role} ${g.agent_id ?? "-"} (${g.state})\n`)
       .join("");
     const alarms = (t.alarms ?? []).map((a) => `    ! ${a.alarm}: ${a.message}\n`).join("");
+    // A flake's fixer (SPEC §4.6.16): no issue (its column blank, so the stages line up); what it
+    // fixes and for whom.
+    const r = t.remediation;
+    if (t.synthetic === true && r !== undefined) {
+      const closed = r.outcome !== undefined ? ` [${r.outcome}]` : "";
+      return `  ${t.id.padEnd(idW)}  ${"".padEnd(7)}${stage.padEnd(14)}fixer for ${(r.for ?? []).join(", ") || "-"} (flake: ${r.test})${closed}${pr}${queued}${why}\n${group}${alarms}${formatPlacement(t)}`;
+    }
     return `  ${t.id.padEnd(idW)}  #${String(t.issue).padEnd(5)} ${stage.padEnd(14)}${pr}${skipped}${queued}${why}\n${group}${alarms}${formatPlacement(t)}`;
   });
   const decisions = (ctx.decisions ?? [])
@@ -216,6 +233,7 @@ export function formatWave(
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
   return (
     header +
+    archived +
     queue +
     release +
     autopilot +

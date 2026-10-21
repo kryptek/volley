@@ -237,7 +237,14 @@ export function applyPlan(rec: WaveRecord, submitted: Wave, ctx: PlanContext): P
 
   // Tasks the new plan no longer lists but that keep running (their agents need the definition).
   const retained: TaskId[] = current.task_order.filter(
-    (id) => plan.tasks[id] === undefined && ["in_flight", "settled"].includes(phase(id)),
+    (id) =>
+      plan.tasks[id] === undefined &&
+      current.tasks[id]?.synthetic !== true &&
+      ["in_flight", "settled"].includes(phase(id)),
+  );
+  // Synthetic tasks (a flake's fixer, SPEC §4.6.16) are never in a file: every version keeps them.
+  const synthetic: TaskId[] = current.task_order.filter(
+    (id) => plan.tasks[id] === undefined && current.tasks[id]?.synthetic === true,
   );
 
   const tasks: Record<TaskId, WaveTask> = {};
@@ -287,7 +294,8 @@ export function applyPlan(rec: WaveRecord, submitted: Wave, ctx: PlanContext): P
       );
     }
   }
-  const order = [...plan.task_order, ...retained];
+  for (const id of synthetic) tasks[id] = current.tasks[id] as WaveTask;
+  const order = [...plan.task_order, ...retained, ...synthetic];
   for (const id of retained) {
     const t = tasks[id] as WaveTask;
     tasks[id] = { ...t, after: t.after.filter((d) => order.includes(d)) };

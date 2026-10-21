@@ -1,0 +1,19 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-21T10:00:00.000Z",
+  "channel": "_waves/events",
+  "type": "wave_archived",
+  "payload": {
+    "wave": "2026-10-20-example",
+    "seq": 118,
+    "at": "2026-10-21T10:00:00.000Z",
+    "data": {
+      "by": "volleyd",
+      "reason": "ended 24 h ago (archive_ended_after_h)",
+      "closed_decisions": [
+        "agent_blocked-3f9a1c2b7d4e"
+      ]
+    }
+  }
+}

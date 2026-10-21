@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { flakeIssue } from "./autopilot/flake-brief";
 import type { PlaybookStage } from "./autopilot/playbook";
 import { releaseWaveTask, stageBriefVars } from "./autopilot/release-train";
 import {
@@ -371,10 +372,14 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
     );
 
     // 2–5. Worktree, issue, brief, identity, launch.
+    // A release stage is no issue's; a flake's fixer (SPEC §4.6.16) has none either: its
+    // root-cause brief takes ISSUE.md's place.
     const issue =
       req.stage !== undefined
         ? stageIssue(req.stage)
-        : await fetchIssue(deps.host.exec, ctx.root, task.issue);
+        : task.synthetic === true && task.remediation !== undefined
+          ? flakeIssue(task.remediation, task.id)
+          : await fetchIssue(deps.host.exec, ctx.root, task.issue);
     const launched = await launchAttempt(ctx, req.attempt, agentId, issue);
     const lock = ctx.lock;
     return {
@@ -534,7 +539,10 @@ async function launchAttempt(
   // The quality reviewer reviews the diff only: it gets no copy of the issue and its plan. A
   // release stage is no issue's.
   if (req.role !== "quality_reviewer" && req.stage === undefined)
-    await host.writeFile(join(ctx.worktree, "ISSUE.md"), renderIssueMd(issue));
+    await host.writeFile(
+      join(ctx.worktree, "ISSUE.md"),
+      task.synthetic === true ? issue.body : renderIssueMd(issue),
+    );
   for (const [name, content] of Object.entries(req.files ?? {})) {
     await host.writeFile(join(ctx.worktree, ".volley", name), content);
   }
@@ -544,7 +552,12 @@ async function launchAttempt(
 
   const briefPath = join(ctx.worktree, ".volley", "brief.md");
   const preface = loadPreface(req.wave, deps);
-  const variant = req.role === "rebase" && req.branch_update === "merge" ? "merge" : undefined;
+  const variant =
+    req.role === "rebase" && req.branch_update === "merge"
+      ? "merge"
+      : req.role === "implementer" && task.synthetic === true
+        ? "flake"
+        : undefined;
   const hygiene = hygieneText(req.hygiene ?? "p1", req.wave.release_branch);
   const rendered = renderBrief(loadTemplate(req.role, deps.briefsDir, variant), {
     agent_id: agentId,

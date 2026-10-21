@@ -34,7 +34,11 @@ export interface AdmitContext {
 /** Stages in which an admitted task no longer holds an agent slot. */
 const SETTLED: ReadonlySet<TaskStage> = new Set(["merge_ready", "done", "cancelled"]);
 
-/** Longest dependency chain starting at each task (counting the task itself). */
+/**
+ * Longest dependency chain starting at each task (counting the task itself). A synthetic task (a
+ * flake's fixer, SPEC §4.6.16) blocks tasks that wait on no dependency: it counts as one longer
+ * than the longest chain, so it is scheduled first.
+ */
 export function criticalPaths(wave: Wave): Record<TaskId, number> {
   const dependents = new Map<TaskId, TaskId[]>(wave.task_order.map((id) => [id, []]));
   for (const id of wave.task_order) {
@@ -50,6 +54,14 @@ export function criticalPaths(wave: Wave): Record<TaskId, number> {
     return v;
   };
   for (const id of wave.task_order) len(id);
+  const synthetic = wave.task_order.filter((id) => wave.tasks[id]?.synthetic === true);
+  if (synthetic.length > 0) {
+    const longest = Math.max(
+      0,
+      ...wave.task_order.filter((id) => !synthetic.includes(id)).map((id) => memo[id] ?? 0),
+    );
+    for (const id of synthetic) memo[id] = longest + 1;
+  }
   return memo;
 }
 

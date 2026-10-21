@@ -43,6 +43,7 @@ coordinator session.
 - [Needs-you inbox](#needs-you-inbox)
 - [Ownership and claim](#ownership-and-claim)
 - [Pause, stop and the kill switch](#pause-stop-and-the-kill-switch)
+- [Archiving](#archiving)
 - [Steering](#steering)
 - [Overlap warnings](#overlap-warnings)
 - [Configuration](#configuration)
@@ -141,8 +142,8 @@ config.hard_ceiling: must be <= 100
 | `volleyd uninstall` | `launchctl bootout` the service and remove the plist (journals stay). |
 | `volleyd run <wave.yaml> [--owner <id>] [--json]` | Validate locally, then submit to the daemon. Returns once the wave is journaled. Prints the owner and any overlap warnings. For a wave id the daemon already holds, the file is its next plan version ([Plan changes](#plan-changes-versioned-wave-files)). |
 | `volleyd diff <wave> <wave.yaml> [--json]` | Print the structural diff between a submitted wave's current plan and the file, without submitting. |
-| `volleyd validate <wave.yaml>` | Validate locally; exit 1 with path-qualified errors, or `RELEASE_BRANCH_MISSING` when the wave's repo (if on this machine) has neither the release branch nor `origin/<branch>`. |
-| `volleyd status [wave] [--by <id>] [--json]` | Wave state from the daemon, with open decisions, `needs you: N` on waves the caller owns and `alarms: N` (tasks whose spawn failed and has not recovered), and under the header the merge queue (`merge queue: T3 merging · T5 updating · T7, T9 queued`). `--json` prints the exact `wave_state` payload. |
+| `volleyd validate <wave.yaml>` | Validate locally; exit 1 with path-qualified errors, or `RELEASE_BRANCH_MISSING` when the wave's repo (if on this machine) has neither the release branch nor `origin/<branch>`. Notes that `volleyd run` needs an owner. |
+| `volleyd status [wave] [--all] [--by <id>] [--json]` | Wave state from the daemon, with open decisions, `needs you: N` on waves the caller owns and `alarms: N` (tasks whose spawn failed and has not recovered), and under the header the merge queue (`merge queue: T3 merging · T5 updating · T7, T9 queued`). Archived waves are left out; `--all` lists them too, each with an `archived <at> by <who>: <reason>` line. `--json` prints the exact `wave_state` payload. |
 | `volleyd decisions [wave] [--all]` | Open decisions (with `--all`, resolved ones too): question, options, evidence pointers. |
 | `volleyd resolve <decision-id> <answer> [--rationale <why>] [--wave <w>] [--where <where>]` | Answer a decision (owner only). Its inbox item is answered too, where `--where` says (default `cli`). |
 | `volleyd inbox [--all] [--json]` | The needs-you inbox: everything waiting for a person, one line each ([Needs-you inbox](#needs-you-inbox)). |
@@ -153,6 +154,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd pause <wave>` / `resume <wave>` | Stop / restart admissions (owner only); running agents carry on. |
 | `volleyd stop <wave>` | Stop a wave (owner only): no admissions, `cancel` to every running agent. |
 | `volleyd stop --all` / `resume --all` | Engage / release the kill switch (anyone). |
+| `volleyd archive <wave> [--yes]` | Retire an ended (stopped or complete) wave (owner only; anyone for an ownerless wave): close its open decisions, drop it from `status` and the Desk ([Archiving](#archiving)). Without `--yes` only prints what it would close. |
 | `volleyd steer <wave> <task> <text> [--role <r>] [--wait-ack-ms <ms>]` | Mailbox steering to the task's live agent; reports `acked`, `received` or `delivered`, or `queued` for the task's next agent when none is live. |
 | `volleyd events <wave> --cursor <name>` | Print (JSONL) every journal event after the named cursor. Does not move it. |
 | `volleyd ack <wave> --cursor <name> --seq <N>` | Advance the cursor to `N`. Ack **after** acting, so a crash replays. |
@@ -162,7 +164,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd spawn <wave> <task> [--role <role>] [--json]` | Spawn one agent now, outside admission. Returns once it is launched or refused (`SPAWN_LOCKED`, …); the daemon then verifies it. |
 | `volleyd cleanup <wave> [--yes] [--force]` | Remove retired agents' cmux workspaces and worktrees. Without `--yes` only prints the plan. Branches are kept. |
 
-The mutating commands (`resolve`, `pause`, `resume`, `stop`, `steer`, `claim`) act as the caller's
+The mutating commands (`resolve`, `pause`, `resume`, `stop`, `archive`, `steer`, `claim`) act as the caller's
 agent id: `--by <id>`, else `VOLLEY_AGENT_ID`, else the top-level session registered for the
 closest enclosing directory (newest first among equally close ones; the daemon's own entry and
 sessions whose retained status is `reaped`/`done`/`failed` are skipped). `run` uses the same
@@ -339,7 +341,7 @@ clears a stray retained message on its mailbox at startup instead of executing i
 |---|---|---|
 | `run` | `wave_yaml`, `source?` | the new wave state |
 | `diff` | `wave`, `wave_yaml`, `source?` | the structural diff between the wave's current plan and the file, plus `plan: { version, diff, unchanged }`; submits nothing |
-| `status` | `wave?` | one wave state, or `{ waves: [...] }` |
+| `status` | `wave?`, `all?` | one wave state (an archived one too), or `{ waves: [...] }` (with `all`, archived waves too) |
 | `config_get` | `path?`, `wave?` | the value (the full retained payload when neither is given) |
 | `config_set` | `patch`, `by` (SPEC §4.6.4) | `{ version }`, plus `applied` / `rejected: [{ path, reason }]` |
 | `decisions` | `wave?`, `all?` | `{ decisions: [decision payload] }` |
@@ -347,6 +349,7 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `claim` | `wave`, `by` | `{ wave, owner, previous, why }` |
 | `pause` / `resume` | `wave` (or `all: true` for `resume`), `by` | `{ wave, status, changed }` / `{ kill_switch }` |
 | `stop` | `wave` or `all: true`, `by` | `{ wave, status, changed, cancelled }` / `{ kill_switch, stopped }` |
+| `archive` | `wave`, `by`, `dry_run?` | `{ wave, status: "archived", closed }`; with `dry_run`: `{ wave, status, would_close }` |
 | `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
 | `admission` | — | the retained admission summary (null before the first sample) |
 | `spawn` | `wave`, `task`, `role?` (default `implementer`) | `{ kind: "launched", agent_id, workspace, worktree }`, or the spawn's decision `{ kind, decision, decision_id }`; outside admission. A failure carries `{ code, lock }` |
@@ -738,7 +741,7 @@ autopilot: on
     wave_complete/acknowledge: the end of a wave needs no answer; the owner reads its outcome
   ci_failed, agent_blocked · pipeline.on === "ci_failed" or "agent_blocked_ci", and classification: own_change (unclassified ci_failed: infra === false) · fixup · ci_fixup_max per <task> · max 2
     ci_failed/fixup-own-change: a fixup agent with the CI result as its directive is what a person would do
-  ci_failed, agent_blocked · pipeline.on === "ci_failed" or "agent_blocked_ci", and classification: flake · fix flake · no budget
+  ci_failed, agent_blocked · pipeline.on === "ci_failed" or "agent_blocked_ci", and classification: flake (no fixer can take it: escalate) · fix flake · fix_flake_max per <wave> (fixers) · max 3
     ci_failed/fix-flake: a test the PR does not touch gets a dedicated fixer, never a re-run or a wider scope
   ci_failed · classification: infra_incident (asked only once autopilot.incident_wait_max_s passed) · escalate budget_exhausted · no budget
     ci_failed/infra-incident: the incident outlasted the wait: the owner decides; volleyd never re-runs CI
@@ -771,6 +774,49 @@ or CI while its PR head is red gets the same treatment: its `agent_blocked` deci
 `pipeline.on: agent_blocked_ci`, carries the classification and offers `fixup` (the blocked agent
 is stopped and a CI fixup starts at the red head) or `fix flake`, which autopilot answers like a
 `ci_failed`. Nothing re-runs CI, for any classification: the fence denies `gh run rerun`.
+
+### The fixer task
+
+A flake gets a dedicated fixer: a **synthetic task** volleyd adds to the wave itself
+(`src/autopilot/remediation.ts`, pure). On `remediation_requested { kind: fix_flake }` (or a
+`fix flake` answer) it journals `task_queued { synthetic: true, issue: 0, title: "Fix flaky test
+<test>", remediation: { kind, test, test_file, run_urls, for } }` for task `fix-<slug>` (the test
+lowercased, other characters one dash, at most 40 of them, `-2` when taken). The fixer has no
+`after`, runs the wave's pipeline, is scheduled first (`criticalPaths` gives it one more than the
+longest chain) and is placed and admitted like any task. It never appears in the wave file's
+`spec`, and a plan version keeps it.
+
+- **Dedupe and budget.** One fixer per distinct test per wave: a second request for the same
+  test joins its `for`. At most `autopilot.fix_flake_max` (default 3, 0..20) fixers per wave;
+  past it, the blocked task's `ci_failed` is escalated `budget_exhausted` (`{ key:
+  "fix_flake_max", used, max }`), and autopilot does not answer it `fix flake`. A request for a
+  test whose fixer already closed, or from the fixer's own head, is the owner's
+  (`unattended_safety`).
+- **The brief.** Its agents get `ISSUE.md` from the root-cause brief
+  (`src/autopilot/flake-brief.ts`: the test, its file, the failing runs, the blocked tasks)
+  instead of `gh issue view`; the implementer's brief is `briefs/flake-fixer.md.tmpl`:
+  reproduce it locally (alone, in the suite, under load), look for shared state, timing, ports,
+  the clock, temp dirs and retained broker state, fix the cause test-first, never re-run CI,
+  never `skip`, `.only`, retry wrappers or quarantine (if that is the only fix: `blocked`, the
+  owner decides). It branches from the release branch and opens a PR against it; reviews,
+  fixup and the gate run as usual.
+- **The unblock cascade.** When the fixer reaches `done` (merged by the merge queue or by
+  hand), volleyd journals `remediation_closed { kind, test, task, outcome: landed, released }`
+  for the tasks still parked on that test, resolves each one's open red-head decision `fix
+  landed`, and each enters the branch-update step (`stage_entered { stage: fixup, rebase: true,
+  fix_landed: <test> }`, under the wave's `branch_update`) at its red head. Its new head is
+  verified (CI) and the pipeline goes on from where the flake stopped it (the reviews, or the
+  gate).
+- **A fixer that fails.** Cancelled, `blocked` (its `agent_blocked` decision, with or without
+  autopilot), or one of its decisions escalated (any of them, a spawn-budget escalation too):
+  `remediation_closed { outcome: failed, why, released: [] }`, and each blocked task's red head goes back to the owner once, escalated
+  `unattended_safety`: its open decision is escalated, or an answered one is asked again (without
+  `fix flake`) with the fixer's PR and agents. If the owner unblocks it and it merges after all,
+  it is closed again, `landed`, and the cascade above runs.
+
+`volleyd status` shows a fixer as `fix-<slug>  <stage>  fixer for T3, T7 (flake: <test>)`; the
+wave state carries `tasks[].synthetic: true` and `tasks[].remediation` (with `test_file`,
+`run_urls`, `for` and, once closed, `outcome`).
 
 ### The release train
 
@@ -999,7 +1045,7 @@ the session registered for the caller's directory — its coordinator name when 
 `VOLLEY_COORDINATOR`; printed as `owner: … (auto)`), else `null` (unowned). The exported name comes
 last so a supervised worker whose shell inherited it acts as itself: the MCP server also ignores
 `VOLLEY_COORDINATOR` under a `.volley/agent.json` identity, and `launch.sh` unsets it. `resolve`, `pause`,
-`resume`, `stop`, `steer` and re-running the wave id require `by == owner` (or the agent bound to
+`resume`, `stop`, `archive`, `steer` and re-running the wave id require `by == owner` (or the agent bound to
 it, below); anyone else is refused with the owner's id. An unowned wave accepts anyone.
 
 **Coordinator names.** The MCP server appends a fresh suffix to `VOLLEY_AGENT_ID` at every start,
@@ -1018,6 +1064,10 @@ agent; when it goes away (terminal status, or its LWT) with no other agent bindi
 `gone`. Until another agent binds the name, the binding stays on that departed agent id (that is
 what lets the state read `reconnecting`), but its id is no longer accepted for the name: only the
 name itself, or the next agent to bind it, may act. `volleyd status` prints such an owner as `owner: coord-main (via coordinator-c7d9)`.
+
+An unowned wave's decisions have nobody to answer them, so `volleyd run` warns when it submits
+one (`warning: wave <id> has no owner: …`) and `volleyd validate` notes that `run` needs an owner.
+Such a wave is still archived automatically once it has ended ([Archiving](#archiving)).
 
 `volleyd claim <wave>` hands the wave to the caller when the owner is gone: its retained status
 is `reaped`, `done` or `failed`, or nothing has been heard from it — registry entry, status,
@@ -1062,6 +1112,44 @@ becomes claimable only after a full `claim_after_s`. A claim must name a stable 
   even if the daemon dies part-way, and survives restarts), every wave stops, and the daemon refuses `run` with `kill switch engaged` until
   `resume --all`, and spawns nothing (neither admitted tasks nor `volleyd spawn`). Anyone may
   pull it; releasing it leaves stopped waves stopped.
+
+## Archiving
+
+An ended wave stays in `volleyd status`, `volleyd decisions` and the Desk until it is archived
+(SPEC §4.6.20). `volleyd archive <wave> --yes` (without `--yes` it only prints what it would
+close) retires a `stopped` or `complete` wave; a running, paused or awaiting-decision wave is
+refused (stop it first), and so is a wave whose agents are still ending in their stop grace.
+
+- Every open decision is closed with the answer `archived` (`decision_resolved { answer:
+  "archived", by, at }`), then `wave_archived { by, reason, closed_decisions }` is journaled.
+  Before them each closed decision's needs-you inbox item is answered `archived`, and every
+  inbox item of the wave has its retained record cleared.
+- Each closed decision is published once as `decision_resolved` and its retained topic cleared;
+  the wave state is published once with `status: "archived"`, then
+  `volley/_waves/<wave>/state` is cleared. A Desk that is open drops the wave; one that attaches
+  later never sees it.
+- The wave leaves the daemon's live set: no tick, sweep or monitor visits it, and a restarted
+  daemon does not load it as live or republish it. `volleyd status --all` (`status { all: true
+  }`) still lists it, with when, by whom and why. `run` refuses its id (`wave '<id>' is archived;
+  pick another id`); there is no unarchive.
+- Its journal, snapshots, plan versions and evidence stay under `$VOLLEYD_HOME/waves/<wave>/`,
+  and `volleyd cleanup <wave>` still removes its retired worktrees and workspaces.
+- The retained index `volley/_waves/_archive` (`archive.schema.json`) lists archived waves,
+  newest first, at most 200 (`DAEMON_DEFAULTS.archive_index_max`): `{ archived: [{ wave, status,
+  archived_at, by, reason }], updated_at }`. The Desk's coordinators window counts it.
+
+Who may archive: on the control channel, the owner (anyone for an ownerless wave), as for
+`stop`; an admin account through its account-op topic (`volley/_system/auth/ops/<username>`,
+`{ op: "archive", wave, dry_run? }`), whoever owns the wave (`reason: "volleyd archive (admin)"`).
+The daemon archives on its own, as `volleyd`:
+
+- `archive_ended_after_h` (default 24; 0: never): a stopped wave that long after its
+  `wave_stopped`, a complete wave that long after its `wave_complete` (`reason: "ended <N> h ago
+  (archive_ended_after_h)"`). Checked on every tick, on the daemon's clock.
+- `archive_on_ack` (default true): a complete wave as soon as its `wave_complete` decision is
+  answered, in the same `resolve` (`reason: "wave_complete acknowledged (archive_on_ack)"`). Only
+  an answer from outside volleyd counts: autopilot's own `acknowledged` leaves the wave on the
+  Desk until `archive_ended_after_h`, so the owner still sees how it ended.
 
 ## Steering
 
@@ -1168,6 +1256,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
 | `agent_mcp` | spawns after the change | running agents keep the MCP servers they launched with |
 | `public_hygiene` | the next wave version (`run` of a new wave, or a new version of a live one) | the level journaled for the current version holds for its reviewers and their results |
+| `archive_ended_after_h`, `archive_on_ack` | the next tick (and the next `wave_complete` answer) | archived waves stay archived ([Archiving](#archiving)) |
 
 The scheduler consumes `hard_ceiling` and `spawn_budget_multiplier`, the lease book
 `lease_pools`, and admission `admission.*`; the other rows describe the contract the subsystems

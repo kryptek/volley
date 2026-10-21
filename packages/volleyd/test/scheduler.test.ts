@@ -91,6 +91,42 @@ tasks:
   });
 });
 
+describe("synthetic tasks (a flake's fixer, SPEC §4.6.16)", () => {
+  const fixer: NewEvent = {
+    type: "task_queued",
+    task: "fix-clock-test-ts-advance",
+    data: {
+      issue: 0,
+      synthetic: true,
+      title: "Fix flaky test clock.test.ts > advance",
+      remediation: {
+        kind: "fix_flake",
+        test: "clock.test.ts > advance",
+        test_file: "test/clock.test.ts",
+        run_urls: [],
+        for: ["T3"],
+      },
+    },
+  };
+
+  it("criticalPaths treats a synthetic task as the longest path", () => {
+    const rec = record(epic, [fixer]);
+    const cp = criticalPaths(rec.wave as Wave);
+    expect(cp["fix-clock-test-ts-advance"]).toBe(4);
+    expect(cp.T0).toBe(3);
+  });
+
+  it("is first in ready() regardless of file order, with no `after`", () => {
+    expect(ready(record(epic, [fixer]))).toEqual(["fix-clock-test-ts-advance", "T0"]);
+  });
+
+  it("counts against the hard ceiling like any task", () => {
+    const r = admit(ready(record(epic, [fixer])), OPEN, ctx({ live: 11 }));
+    expect(r.admit).toEqual(["fix-clock-test-ts-advance"]);
+    expect(r.reasons).toEqual(["hard ceiling reached: 12/12 live agents"]);
+  });
+});
+
 describe("admit", () => {
   it("admits everything ready when nothing limits it", () => {
     expect(admit(["T1", "T2"], OPEN, ctx())).toEqual({ admit: ["T1", "T2"], reasons: [] });
