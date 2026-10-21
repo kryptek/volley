@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdir, rename, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { randomSuffix } from "volley-mcp/util";
 import type { Budget, EscalateWhy } from "./autopilot/policy";
+import type { Host } from "./hosts/host";
 import type { WaveRecord } from "./reducer";
 import type { NewEvent, TaskId, TaskStage, WaveId } from "./types";
 
@@ -434,12 +435,32 @@ export function renderDecisionsMd(wave: WaveId, task: TaskId, decisions: Decisio
   ].join("\n");
 }
 
-/** Write `<dir>/.volley/decisions.md` atomically; returns its path. */
-export function writeDecisionsFile(dir: string, content: string): string {
-  const volley = join(dir, ".volley");
-  mkdirSync(volley, { recursive: true });
-  const path = join(volley, "decisions.md");
-  writeFileSync(`${path}.tmp`, content);
-  renameSync(`${path}.tmp`, path);
+/** Where a task's decisions file goes in `dir` (its worktree, or its local task dir). */
+export function decisionsFilePath(dir: string): string {
+  return join(dir, ".volley", "decisions.md");
+}
+
+/** The supervisor's own disk, for a task with no worktree yet: written atomically. */
+export const LOCAL_FILES: Pick<Host, "writeFile"> = {
+  async writeFile(path, content) {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(`${path}.tmp`, content);
+    await rename(`${path}.tmp`, path);
+  },
+};
+
+/**
+ * Write `<dir>/.volley/decisions.md` through `files` (the task's host: a remote task's worktree
+ * is on its machine); returns its path. The mode makes the local adapter write a temp file and
+ * rename it, so a reader never sees half a file; the ssh adapter writes in place, which is fine
+ * because the file is read at the next stage's brief, not while it is written.
+ */
+export async function writeDecisionsFile(
+  files: Pick<Host, "writeFile">,
+  dir: string,
+  content: string,
+): Promise<string> {
+  const path = decisionsFilePath(dir);
+  await files.writeFile(path, content, 0o644);
   return path;
 }
