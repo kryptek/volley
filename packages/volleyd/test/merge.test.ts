@@ -62,9 +62,45 @@ describe("autopilot merge (the one module that builds gh pr merge)", () => {
     const r = await mergePr(f.exec, token);
     expect(r).toEqual({
       ok: false,
+      reason: "head_moved",
       stderr: "GraphQL: Head branch was modified. Review and try the merge again.",
     });
     expect(f.calls).toHaveLength(2);
+  });
+});
+
+describe("autopilot merge classifies a refusal (#311)", () => {
+  const refused = async (stderr: string) => {
+    const f = fakeExec().on(PRE, { stdout: OPEN }).on(["gh", "pr", "merge"], { code: 1, stderr });
+    return mergePr(f.exec, token);
+  };
+  it("required checks → checks: nothing about the release branch", async () => {
+    const stderr = "Pull request is not mergeable: required checks";
+    expect(await refused(stderr)).toEqual({ ok: false, reason: "checks", stderr });
+  });
+  it("out of date or conflicting → behind", async () => {
+    for (const stderr of [
+      "Pull request is not mergeable: the head branch is out of date",
+      "Pull request is not mergeable: the merge commit cannot be cleanly created (conflicts)",
+    ])
+      expect(await refused(stderr)).toMatchObject({ ok: false, reason: "behind" });
+  });
+  it("anything else → unknown", async () => {
+    expect(await refused("GraphQL: something odd")).toMatchObject({ reason: "unknown" });
+  });
+  it("the pre-merge read: head moved, retargeted, closed, unreadable", async () => {
+    const pre = async (stdout: string, code = 0) =>
+      mergePr(fakeExec().on(PRE, { stdout, code, stderr: "rate limited" }).exec, token);
+    const view = (v: object) =>
+      JSON.stringify({ state: "OPEN", headRefOid: H, baseRefName: "release/w", ...v });
+    expect(await pre(view({ headRefOid: M }))).toEqual({
+      ok: false,
+      reason: "head_moved",
+      stderr: `not merged: PR #7 head is ${M}, not the gated ${H}`,
+    });
+    expect(await pre(view({ baseRefName: "main" }))).toMatchObject({ reason: "retargeted" });
+    expect(await pre(view({ state: "CLOSED" }))).toMatchObject({ reason: "closed" });
+    expect(await pre("", 1)).toMatchObject({ reason: "unknown" });
   });
 });
 

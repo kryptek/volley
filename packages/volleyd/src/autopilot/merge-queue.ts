@@ -1,3 +1,4 @@
+import type { TaskPipeline } from "../pipeline";
 import type { WaveRecord } from "../reducer";
 import type { TaskId, Wave, WaveId } from "../types";
 
@@ -21,7 +22,16 @@ export interface QueueEntry {
   since: string;
   /** At merge_ready now: the only entries that can take the merge turn. */
   gated: boolean;
+  /**
+   * A `refused` entry whose last refusal says nothing about the release branch (required checks,
+   * unknown): it keeps its place, competing as a `queued` one does (#311).
+   */
+  keepsPlace?: boolean;
 }
+
+/** Where an entry competes in nextToMerge. */
+const rank = (e: QueueEntry): QueueState =>
+  e.state === "refused" && e.keepsPlace === true ? "queued" : e.state;
 
 /** Code-unit order (ISO times and ids compare as written, whatever the locale). */
 const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
@@ -29,6 +39,17 @@ const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 /** How many of the wave's tasks name `task` in their `after`. */
 export function dependents(wave: Wave, task: TaskId): number {
   return Object.values(wave.tasks).filter((t) => t.after.includes(task)).length;
+}
+
+/**
+ * The last refusal says the branch must change before it can merge (behind the release branch,
+ * or its head moved): the task gives up the merge turn. Any other refusal (required checks,
+ * branch protection, unknown) keeps it, and the merge is tried again up to `merge_retry_max`
+ * (#311). A refusal journaled before reasons were recorded counts as `behind`.
+ */
+export function refusalEndsTurn(p: TaskPipeline): boolean {
+  const reason = p.alarms?.merge_refused?.reason;
+  return reason === undefined || reason === "behind" || reason === "head_moved";
 }
 
 /** The wave's queue in merge order. */
@@ -40,19 +61,21 @@ export function queueOf(rec: WaveRecord): QueueEntry[] {
   for (const t of state.tasks) {
     const p = rec.pipeline[t.id];
     if (p?.queued_at === undefined || p.merge_manual === true) continue;
+    const qs: QueueState =
+      p.merge_inflight === true
+        ? "merging"
+        : p.rebasing && t.stage !== "merge_ready"
+          ? "updating"
+          : (p.merge_refusals ?? 0) > 0
+            ? "refused"
+            : "queued";
     entries.push({
       wave: state.wave,
       task: t.id,
-      state:
-        p.merge_inflight === true
-          ? "merging"
-          : p.rebasing && t.stage !== "merge_ready"
-            ? "updating"
-            : (p.merge_refusals ?? 0) > 0
-              ? "refused"
-              : "queued",
+      state: qs,
       since: p.queued_at,
       gated: t.stage === "merge_ready",
+      ...(qs === "refused" && !refusalEndsTurn(p) ? { keepsPlace: true } : {}),
     });
   }
   const score = new Map(entries.map((e) => [e.task, dependents(wave, e.task)]));
@@ -90,8 +113,9 @@ function afterFirst(entries: QueueEntry[], wave: Wave): QueueEntry[] {
 /**
  * The task that takes the merge turn next, per release branch (`<repo>#<release_branch>`): none
  * on a branch with a merge in flight. A branch's candidates are its gated entries; a refused one
- * only when no other waits. Across waves sharing a branch, each wave's first candidate competes
- * by readiness. (Each pipeline driver passes its own wave only: across waves the release-branch
+ * only when no other waits, unless its refusal said nothing about the release branch
+ * (`keepsPlace`: it competes as a queued one). Across waves sharing a branch, each wave's first
+ * candidate competes by readiness. (Each pipeline driver passes its own wave only: across waves the release-branch
  * lock goes to whichever wave asks first.)
  *
  * An ungated (updating) entry is skipped, so a gated entry behind it can go first: the "never
@@ -108,7 +132,7 @@ export function nextToMerge(
     for (const state of ["queued", "refused"] as const) {
       const firsts = new Map<WaveId, QueueEntry>();
       for (const e of entries)
-        if (e.gated && e.state === state && !firsts.has(e.wave)) firsts.set(e.wave, e);
+        if (e.gated && rank(e) === state && !firsts.has(e.wave)) firsts.set(e.wave, e);
       const best = [...firsts.values()].sort((a, b) => cmp(a.since, b.since))[0];
       if (best !== undefined) return { branch, wave: best.wave, task: best.task };
     }

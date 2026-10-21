@@ -101,4 +101,43 @@ describe("merged_unverified_head", () => {
     expect(merged()?.data).toMatchObject({ pr: { head_sha: A, ci: "green" } });
     expect(merged()?.data.merged_ci).toBeUndefined();
   });
+
+  it("merged by a person at the gated head during a branch update: done, the update retired, no alarm (#311)", async () => {
+    const B = sha(0xb2);
+    h = pipelineHarness({
+      pipeline: "[implement, merge_ready]",
+      merge: "auto",
+      branchUpdate: "merge",
+      siblings: { T2: null },
+    });
+    await h.start();
+    await h.startTask("T2");
+    h.openPr(A, "T1", 7);
+    h.openPr(B, "T2", 8);
+    h.world.mergeCommit[7] = sha(0xa101);
+    // T1's merge moves the release tip: T2 is behind it.
+    h.world.before = (a) => {
+      if (a[1] === "pr" && a[2] === "merge") h.world.mergeBase[B] = sha(0xbea5e);
+    };
+    await h.finish("implementer", { task: "T1", head: A, ci: "green" });
+    await h.finish("implementer", { task: "T2", head: B, ci: "green" });
+    await h.tick(); // T1 merged
+    await h.tick(); // T2's turn: behind, its branch update starts
+    expect(h.task("T2")?.stage).toBe("fixup");
+    const update = h.spawns.find((s) => s.task === "T2" && s.role === "rebase");
+    expect(update?.branch_update).toBe("merge");
+
+    // A person merges PR #8 on GitHub at B, the head the gate saw.
+    h.world.prState[8] = "MERGED";
+    await checkMerged();
+    expect(h.task("T2")?.stage).toBe("done");
+    expect(h.events.some((e) => e.data.alarm === "merged_unverified_head")).toBe(false);
+    expect(h.task("T2")?.alarms).toBeUndefined();
+    const m = h.events.find(
+      (e) => e.task === "T2" && e.type === "artifact_verified" && e.data.role === "merged",
+    );
+    expect(m?.data).toMatchObject({ via: "operator", head_sha: B, pr: { head_sha: B } });
+    expect(m?.data.merged_head_sha).toBeUndefined();
+    expect(h.retired).toContainEqual({ agent_id: update?.agent_id, status: "superseded" });
+  });
 });

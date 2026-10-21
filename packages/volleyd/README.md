@@ -2801,13 +2801,15 @@ branch, the task's open decisions are resolved first (`superseded_by_merge`, by 
 the merge commit in the rationale; a parked task would otherwise stay parked), its live agents
 are retired, and it journals `artifact_verified { role: "merged", head_sha, merge_sha }` and
 `stage_entered done`, which releases the task's dependents. Merged at another head than the
-gated one, or before the task reached `merge_ready` → also `alarm_raised { alarm:
+gated one, or before the task was ever gated at that head → also `alarm_raised { alarm:
 "merged_unverified_head", gated, merged }` (`gated`: the task's verified head, `null` if none), and the merge record describes the commit that merged: `gated_head_sha`,
 `merged_head_sha` and `merged_ci`, the CI of that head (read with `gh run list --commit`;
 `unknown` when it cannot be read), never the gated head's CI carried over; the task's `pr` names
 that head. The alarm is published in the wave state (`alarms: [{ alarm, message }]` and
 `why_waiting: "merged with an unverified head: gated <a>, merged <c>"`) and listed by
-`volleyd status`; the task still completes.
+`volleyd status`; the task still completes. A merge at a head the task was gated at, during a
+later step (a branch update or fixup that has not pushed yet), is the gated head: no alarm; the
+record says `via: "operator"`, and the running update or fixup agent is retired as `superseded`.
 
 **The merge nudge.** volleyd never rebases anyone. When a task's PR merges (any of the ways
 above), each running implementer of the same wave whose task's wave-file `files` hints overlap
@@ -2901,12 +2903,18 @@ In an unattended wave the gate is where work stalls: every merge waited for a pe
   (`superseded_by_merge`), `artifact_verified { role: "merged", via: "supervisor" }`,
   `stage_entered done` and the merge nudge.
 - **Refused, never forced.** `gh` exiting non-zero (the head moved, required checks, branch
-  protection) journals `alarm_raised { alarm: "merge_refused", pr, head, stderr, attempt }` and
-  reads the PR at once as any gate does (someone else may have merged it; a moved head
+  protection) journals `alarm_raised { alarm: "merge_refused", pr, head, stderr, reason, attempt }`
+  and reads the PR at once as any gate does (someone else may have merged it; a moved head
   invalidates the gate). After `autopilot.merge_retry_max` (default 2) refusals at one gated
   head the task leaves the gate (`blocked`) and decision `merge_refused` asks `retry` (one more
   attempt, at the task's next turn in the merge queue), `manual` (this task goes back to the
-  gate and a human merges it) or `cancel`. A new gated head starts the count again.
+  gate and a human merges it) or `cancel`. A new gated head starts the count again. `reason` is
+  what the refusal says: `behind` (out of date with or conflicting with the release branch),
+  `head_moved`, `retargeted`, `closed`, `checks` (required checks, branch protection, reviews) or
+  `unknown`. Only `behind` and `head_moved` give up the merge turn; any other keeps the turn and
+  the gated head, and the merge is tried again at the next up-to-date check. No refusal enters a
+  branch update by itself: one runs only when the turn's rebase check counts the release branch's
+  commits the head lacks (a failed `git fetch` or `git log` is a failed check, never "behind").
 - **When: the merge queue.** Nothing merges at the gate itself: the merge queue below gives one
   task at a time its turn.
 - **`autopilot.delete_branch`** (default `false`) adds `--delete-branch` to the merge.
@@ -2929,10 +2937,12 @@ one at a time, in order, and brings each up to date just before its merge
   `merge: manual` keeps a wave's tasks out of the queue altogether.
 - **Order.** Dependency first: a task more tasks name in their `after` goes first, and a task
   never goes ahead of a queued task it comes after. Then readiness: the task queued earliest. A
-  task GitHub refused goes after the tasks still waiting.
+  task GitHub refused as `behind` or `head_moved` goes after the tasks still waiting; one refused
+  for any other reason keeps its place.
 - **One merge in flight per release branch.** The task at the front takes the release branch's
   lock (`<repo>#<release_branch>`, held by the daemon, so two waves on one release branch share
-  it) and keeps it until it merged, GitHub refused it, or it waits for an answer. A task whose
+  it) and keeps it until it merged, GitHub refused it as `behind` or `head_moved`, or it waits
+  for an answer. A task whose
   turn checks fail `merge_turn_check_failures_max` (3) times in a row (its PR was retargeted, `gh`
   keeps failing, its worktree is gone; each failure is a `pipeline_error` alarm) gives up the turn
   and is passed over, with the tasks that come after it, while another queued task can go.

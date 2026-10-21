@@ -24,8 +24,8 @@ import {
 } from "./artifacts";
 import { type ClassifyResult, classify } from "./autopilot/ci-classify";
 import { type GithubStatus, STATUS_UNKNOWN } from "./autopilot/github-status";
-import { mergePr } from "./autopilot/merge";
-import { type QueueEntry, nextToMerge, queueOf } from "./autopilot/merge-queue";
+import { type RefusalReason, mergePr } from "./autopilot/merge";
+import { type QueueEntry, nextToMerge, queueOf, refusalEndsTurn } from "./autopilot/merge-queue";
 import type { Role } from "./brief";
 import { systemClock } from "./clock";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "./config-defaults";
@@ -525,7 +525,10 @@ export function reducePipeline(
     }
     case "agent_retired": {
       const run = isRole(role) ? p.runs[role] : undefined;
-      if (run !== undefined && run.agent_id === d.agent_id && d.status !== "superseded") {
+      // A spawn retry's `superseded` (superseded_by its next attempt) is not the run's end; a
+      // merge's is (mergedActions).
+      const replaced = d.status === "superseded" && d.superseded_by !== undefined;
+      if (run !== undefined && run.agent_id === d.agent_id && !replaced) {
         run.retired = String(d.status);
         // The retained result goes with the retire: a fixup verified later (CI pending at its
         // done, a re-verify answer, an accepted no-CI head) still reports how it resolved things.
@@ -845,7 +848,7 @@ export type PipelineEvent =
    */
   | { kind: "supervisor_merged"; sha: string | null; head: string; by?: string }
   /** Autopilot merging: `gh pr merge` exited non-zero for `head` (moved, checks, protection). */
-  | { kind: "merge_refused"; stderr: string; head: string }
+  | { kind: "merge_refused"; stderr: string; head: string; reason?: RefusalReason }
   /**
    * Self-healing CI (SPEC §4.6.16): the fixer of the flake `test` merged and released the task
    * (`remediation_closed`): it takes the fix from the release branch and is verified again.
@@ -1155,9 +1158,11 @@ function onMergeChecked(
   // A human merged the PR, in whatever stage the task is (its open decisions were closed first).
   if (view.state === "MERGED" && view.baseRefName === v.release_branch) {
     const merged = typeof view.headRefOid === "string" ? view.headRefOid : undefined;
-    // Not through the gate: merged at another head, or before the task reached merge_ready.
+    // Not through the gate: merged at another head, or before the task was ever gated. A merge at
+    // the gated head while a later step runs (a branch update) is the gated head, verified (#311).
     const other = merged !== undefined && merged !== head;
-    const unverified = other || v.stage !== "merge_ready";
+    const atGated = head !== undefined && v.p.gated.includes(head);
+    const unverified = other || (v.stage !== "merge_ready" && !atGated);
     return [
       ...(unverified
         ? [
@@ -1178,7 +1183,11 @@ function onMergeChecked(
         : []),
       ...mergedActions(
         v,
-        { merge_sha: view.mergeCommit?.oid ?? null, merged_at: view.mergedAt ?? null },
+        {
+          ...(v.stage !== "merge_ready" && !unverified ? { via: "operator" } : {}),
+          merge_sha: view.mergeCommit?.oid ?? null,
+          merged_at: view.mergedAt ?? null,
+        },
         other ? { sha: merged, ci: ev.merged_ci ?? "unknown" } : undefined,
       ),
     ];
@@ -1275,6 +1284,7 @@ function onMergeRefused(
           pr: pr.url,
           head: ev.head,
           stderr: ev.stderr,
+          reason: ev.reason ?? "unknown",
           attempt: (v.p.merge_refusals ?? 0) + 1,
         },
       },
@@ -1508,8 +1518,11 @@ function mergedActions(
         },
       },
     },
-    // Merged mid-pipeline: whoever is still at work on it stops.
-    ...Object.values(v.p.runs).flatMap(retireIfLive),
+    // Merged mid-pipeline: whoever is still at work on it stops (a branch update or fixup of a
+    // head that merged is superseded by the merge).
+    ...Object.entries(v.p.runs).flatMap(([role, run]) =>
+      retireIfLive(run, role === "rebase" || role === "fixup" ? "superseded" : undefined),
+    ),
     {
       kind: "journal",
       event: { type: "stage_entered", task: v.task, data: { stage: "done", merged: true } },
@@ -1619,9 +1632,9 @@ function onIoFailed(
   return out;
 }
 
-const retireIfLive = (run: RoleRun | undefined): PipelineAction[] =>
+const retireIfLive = (run: RoleRun | undefined, status?: string): PipelineAction[] =>
   run !== undefined && run.retired === undefined
-    ? [{ kind: "retire", agent_id: run.agent_id }]
+    ? [{ kind: "retire", agent_id: run.agent_id, ...(status !== undefined ? { status } : {}) }]
     : [];
 
 function onDone(
@@ -3451,7 +3464,7 @@ export class PipelineDriver {
       const holds =
         v !== null &&
         queue.some((e) => e.task === turn.task) &&
-        (v.p.merge_refusals ?? 0) <= turn.refusals &&
+        !((v.p.merge_refusals ?? 0) > turn.refusals && refusalEndsTurn(v.p)) &&
         v.stage !== "awaiting_decision" &&
         v.stage !== "blocked" &&
         turn.branch === branch &&
@@ -4393,7 +4406,7 @@ export class PipelineDriver {
           head: token.head,
           ...(by !== undefined ? { by } : {}),
         }
-      : { kind: "merge_refused", stderr: r.stderr, head: token.head };
+      : { kind: "merge_refused", stderr: r.stderr, head: token.head, reason: r.reason };
   }
 
   /**
