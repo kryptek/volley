@@ -506,10 +506,20 @@ volley claude add "Work"            # profile + background sign-in; prints the s
 volley claude add "Work" --wait     # … and waits until the sign-in finishes
 volley claude add "Work" --machine peer-a  # a profile on a paired machine, signed in there
 volley claude signin work           # sign an existing profile in again
-volley claude list                  # profiles, sign-in state, plan, sharing modes
+volley claude list                  # one block per account (by e-mail): machines, usage, sharing
+volley claude list --show-email     # … with the e-mail unmasked (--json: the raw answer + records)
 volley claude sync [work]           # re-apply sharing.yaml, re-sync the MCP servers
 volley claude move <agent-id> work  # stop an agent and respawn it under another account
 ```
+
+`volley claude list` groups the logins the way the Desk's Claude accounts cards do: one block per
+Anthropic account, keyed by the login's e-mail (masked as `o•••@example.com` unless
+`--show-email`; an account whose e-mail is not reported yet gets its own block, headed by its id),
+one line per machine holding it (this machine's profiles and default login, each paired
+machine's), and per usage window the freshest reading among its retained usage records
+(`volley/_system/claude-accounts/<acct>`), with where it came from and how old it is. A member's
+older reading that disagrees is marked `(stale)`. `--json` prints the `claude_accounts` answer
+with the records it read as `records`.
 
 **Sign-in.** `claude_account_add` creates the directory (`0700`) and registry entry, then runs
 `claude auth login` under that `CLAUDE_CONFIG_DIR` in a detached tmux session

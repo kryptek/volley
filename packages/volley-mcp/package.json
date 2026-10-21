@@ -13,7 +13,8 @@
     "./channels": "./src/channels.ts",
     "./errors": "./src/errors.ts",
     "./config": "./src/config.ts",
-    "./util": "./src/util.ts"
+    "./util": "./src/util.ts",
+    "./mask": "./src/mask.ts"
   },
   "scripts": {
     "test": "vitest run",

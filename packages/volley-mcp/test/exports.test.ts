@@ -9,6 +9,7 @@ describe("volley-mcp package exports", () => {
     const errors = await import("volley-mcp/errors");
     const config = await import("volley-mcp/config");
     const util = await import("volley-mcp/util");
+    const mask = await import("volley-mcp/mask");
 
     expect(typeof broker.VolleyBroker).toBe("function");
     expect(typeof topics.buildTopic).toBe("function");
@@ -17,5 +18,6 @@ describe("volley-mcp package exports", () => {
     expect(typeof errors.VolleyError).toBe("function");
     expect(typeof config.loadConfig).toBe("function");
     expect(typeof util.randomSuffix).toBe("function");
+    expect(typeof mask.maskEmail).toBe("function");
   });
 });
