@@ -17,7 +17,8 @@
  * then the sign-in link from the answer and the `claude_signin_url` event (on
  * a peer, the same link and phone steps as Settings › Machines, `SigninLink`),
  * waiting until `claude_signin_done`. A card's **Add to another machine…**
- * opens it with the label filled in and the machines holding the account
+ * opens it with the label suggested as `<label> (<machine>)` (following the
+ * picked machine until the owner types) and the machines holding the account
  * greyed out. The Desk shows only the provider's sign-in link, never a
  * credential. Defaults: the account for new waves (`claude.default_account`,
  * through config_set) and the warn-at threshold from config.
@@ -396,6 +397,8 @@ function AccountCard({
 export interface AddMachine {
   /** How the picker names it ("this machine" for volleyd's own). */
   name: string;
+  /** Its host name, when known: what a suggested label names it by (`name` otherwise). */
+  host?: string;
   /** `claude_account_add`'s `machine`: `LOCAL_MACHINE` or the peer's host name. */
   op: string;
   /** Its tunnel is up (this machine always is). */
@@ -446,7 +449,8 @@ function AddAccount({
   const label =
     s.phase === "waiting"
       ? s.label
-      : (typed ?? (baseLabel && chosen ? `${baseLabel} (${chosen.name})` : baseLabel));
+      : (typed ??
+        (baseLabel && chosen ? `${baseLabel} (${chosen.host ?? chosen.name})` : baseLabel));
   const signin = s.phase === "waiting" && s.acct ? signins[s.acct] : undefined;
   const done = signin?.state === "done";
   const r = s.phase === "waiting" ? (s.r ?? {}) : {};
@@ -659,7 +663,12 @@ export function ClaudeAccounts({
   const decisions = openLimitDecisions(waves);
   const addMachines = (holds: string[]): AddMachine[] =>
     [
-      { name: machineName(LOCAL_MACHINE), op: LOCAL_MACHINE, up: true },
+      {
+        name: machineName(LOCAL_MACHINE),
+        op: LOCAL_MACHINE,
+        up: true,
+        ...(localName ? { host: localName } : {}),
+      },
       ...hosts
         .filter((h) => h !== localName)
         .map((h) => ({

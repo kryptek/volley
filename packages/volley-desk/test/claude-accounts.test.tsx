@@ -956,6 +956,41 @@ describe("ClaudeAccounts › Add on any machine", () => {
     expect(screen.getByRole("button", { name: "Sign in on peer-a" })).toBeDisabled();
   });
 
+  it("Add to another machine… on a peer's card names this machine by its host name", () => {
+    const team: ClaudeAccountPayload = { ...personal, account: "team@peer-a", label: "Team" };
+    setup([accountMsg(team)], fleet);
+    const card = within(screen.getByRole("article", { name: "Team" }));
+    fireEvent.click(card.getByRole("button", { name: "Add to another machine…" }));
+    expect(radio(/^this machine/)).toBeChecked();
+    expect(screen.getByRole("textbox", { name: "Account label" })).toHaveValue("Team (hub)");
+  });
+
+  it("a peer's sign-in waits for the link, and says why when it fails", async () => {
+    const { control, rerender, view, state } = setup([], fleet);
+    control.mockResolvedValueOnce({ ok: true, result: { acct: "work@peer-a" } });
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Account label" }), {
+      target: { value: "Work" },
+    });
+    fireEvent.click(radio(/^peer-a/));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in on peer-a" }));
+    });
+    expect(screen.getByText(/Starting the sign-in on peer-a…/)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Open sign-in/ })).toBeNull();
+
+    rerender(
+      view(
+        reduceAll(state, [
+          signinMsg("work@peer-a", "claude_signin_url", { url: URL, flow: "browser_callback" }),
+          signinMsg("work@peer-a", "claude_signin_failed", { reason: "timed out" }),
+        ]),
+      ),
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("The sign-in did not finish: timed out");
+    expect(screen.queryByRole("link", { name: /Open sign-in/ })).toBeNull();
+  });
+
   it("a paired host with no machine record yet is offered, and says so", () => {
     setup([], { ...fleet, hosts: ["peer-a", "peer-c"] });
     fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
