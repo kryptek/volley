@@ -196,12 +196,14 @@ import {
   type DecisionPayload,
   type DecisionRecord,
   ID_RE,
+  LOCAL_FILES,
   MACHINE_DOWN_CANCEL,
   MACHINE_DOWN_REPLACE,
   MACHINE_DOWN_WAIT,
   attentionPayload,
   decisionPayload,
   decisionTopic,
+  decisionsFilePath,
   describeDecision,
   machineDownInput,
   openDecisions,
@@ -4009,14 +4011,22 @@ export class Daemon {
     return true;
   }
 
-  /** Where a task's `.volley/decisions.md` goes (its worktree once it has one). */
-  private taskDirFor(wave: WaveId, task: TaskId): string {
-    if (this.opts.taskDir !== undefined) return this.opts.taskDir(wave, task);
+  /**
+   * Where a task's `.volley/decisions.md` goes, and through what: its worktree once it has one,
+   * written by the task's host (a remote task's worktree is on its machine); else a local dir.
+   */
+  private taskDirAndHostFor(
+    wave: WaveId,
+    task: TaskId,
+  ): { dir: string; files: Pick<Host, "writeFile"> } {
+    if (this.opts.taskDir !== undefined)
+      return { dir: this.opts.taskDir(wave, task), files: LOCAL_FILES };
     const wt =
       this.opts.spawner !== undefined
         ? this.spawnedRecord((e) => e.task === task, wave)?.worktree
         : undefined;
-    return typeof wt === "string" ? wt : join(this.opts.home, "waves", wave, "tasks", task);
+    if (typeof wt === "string") return { dir: wt, files: this.hostOfTask(wave, task)[0] };
+    return { dir: join(this.opts.home, "waves", wave, "tasks", task), files: LOCAL_FILES };
   }
 
   /**
@@ -7544,15 +7554,22 @@ export class Daemon {
       );
     }
     // The next stage's brief: every resolved decision of the task, in opening order. The
-    // resolution is already journaled, so a failed write is logged, not reported as a failure.
+    // resolution is already journaled, so a failed write is an alarm, not a failed resolve.
     const all = Object.values(log.record.decisions).filter((x) => x.task === d.task);
-    let dir = `the brief for ${wave}/${d.task}`;
+    const { dir, files } = this.taskDirAndHostFor(wave, d.task);
     try {
-      dir = this.taskDirFor(wave, d.task);
-      const brief = writeDecisionsFile(dir, renderDecisionsMd(wave, d.task, all));
+      const brief = await writeDecisionsFile(files, dir, renderDecisionsMd(wave, d.task, all));
       return { decision: d, already_resolved: false, brief };
     } catch (e) {
-      this.log(`resolved ${id}, but writing ${dir}: ${e instanceof Error ? e.message : String(e)}`);
+      const error = e instanceof Error ? e.message : String(e);
+      const path = decisionsFilePath(dir);
+      this.log(`resolved ${id}, but writing ${path}: ${error}`);
+      // Once per decision: a second resolve returns `already_resolved` before it gets here.
+      await this.append(wave, {
+        type: "alarm_raised",
+        task: d.task,
+        data: { alarm: "decisions_file_unwritten", decision_id: id, path, error },
+      });
       return { decision: d, already_resolved: false };
     }
   }
