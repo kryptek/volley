@@ -3,8 +3,10 @@ import { type Server, createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { extname, join, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
+import pkg from "../../package.json";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
+import { deskStamp, readBundleVersion, readDeskStamp } from "../setup/desk-build";
 import { findRepoRoot } from "./dash";
 
 /**
@@ -58,6 +60,33 @@ export function resolveDeskFile(root: string, urlPath: string): string | null {
   if (file !== base && !file.startsWith(base + sep)) return null;
   if (!existsSync(file) || !statSync(file).isFile()) return null;
   return file;
+}
+
+/**
+ * The lines `volley desk serve` warns with at start (never a refusal): the build at `root` was not
+ * made from the checkout's current Desk sources (`repo`'s `deskStamp`; skipped with no checkout),
+ * or the bundle's `version.json` is not this volley's `version`.
+ */
+export function deskWarnings(opts: {
+  root: string;
+  repo: string | null;
+  version: string;
+}): string[] {
+  const out: string[] = [];
+  if (opts.repo !== null) {
+    const now = deskStamp(opts.repo);
+    const built = readDeskStamp(opts.root);
+    if (built !== now) {
+      out.push(
+        `warning: the Desk build is stale (built from ${built ?? "unknown"}, the checkout is ${now}); run volley deploy or volley setup --repair`,
+      );
+    }
+  }
+  const bundle = readBundleVersion(opts.root);
+  if (bundle !== opts.version) {
+    out.push(`warning: the Desk bundle is ${bundle ?? "unknown"}, this volley is ${opts.version}`);
+  }
+  return out;
 }
 
 export interface DeskServer {
@@ -123,10 +152,14 @@ export interface DeskArgs {
   io: IO;
   /** Resolves when the server should stop (tests); the real CLI runs until a signal. */
   until?: Promise<void>;
+  /** The checkout the stale-build check compares with (tests); default: this one. */
+  repo?: string | null;
+  /** This volley's version (tests); default: package.json's. */
+  version?: string;
 }
 
-/** `volley desk serve [--host] [--port] [--root]`. */
-export async function desk({ argv, io, until }: DeskArgs): Promise<ExitCode> {
+/** `volley desk serve [--host] [--port] [--root] [--quiet]`. */
+export async function desk({ argv, io, until, ...given }: DeskArgs): Promise<ExitCode> {
   let parsed: ReturnType<typeof parseArgs>;
   try {
     parsed = parseArgs({
@@ -135,6 +168,7 @@ export async function desk({ argv, io, until }: DeskArgs): Promise<ExitCode> {
         host: { type: "string" },
         port: { type: "string" },
         root: { type: "string" },
+        quiet: { type: "boolean", short: "q" },
         help: { type: "boolean", short: "h" },
       },
       strict: true,
@@ -166,6 +200,12 @@ export async function desk({ argv, io, until }: DeskArgs): Promise<ExitCode> {
     );
     return EXIT.ERROR;
   }
+  if (parsed.values.quiet !== true) {
+    const repo = given.repo !== undefined ? given.repo : findRepoRoot();
+    for (const w of deskWarnings({ root, repo, version: given.version ?? pkg.version })) {
+      io.stderr(`${w}\n`);
+    }
+  }
   let server: DeskServer;
   try {
     server = await startDeskServer({ root, host, port });
@@ -182,17 +222,19 @@ export async function desk({ argv, io, until }: DeskArgs): Promise<ExitCode> {
   return EXIT.OK;
 }
 
-export const DESK_HELP = `Usage: volley desk serve [--host <addr>] [--port <n>] [--root <dir>]
+export const DESK_HELP = `Usage: volley desk serve [--host <addr>] [--port <n>] [--root <dir>] [--quiet]
 
 Serve the built Volley Desk (packages/volley-desk/dist; build it with
 \`bun run --cwd packages/volley-desk build\`) from a small static server. Unknown paths get
 the index. The page signs in to the broker itself (its WebSocket listener, port 9001 on the
 host the page came from); this server holds no credentials. \`volley setup\` installs it as a
-service on 0.0.0.0:${DESK_PORT}.
+service on 0.0.0.0:${DESK_PORT}. At start it warns (and still serves) when the build is stale:
+not made from this checkout's Desk sources, or its version.json is not this volley's version.
 
 Options:
   --host <addr>   Interface to listen on (default 127.0.0.1; 0.0.0.0 for a phone on the LAN)
   --port <n>      Port (default ${DESK_PORT})
   --root <dir>    The built Desk (default packages/volley-desk/dist in this checkout)
+  -q, --quiet     No stale-build warnings
   -h, --help      Show this help and exit
 `;

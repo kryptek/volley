@@ -1,8 +1,14 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type DeskServer, desk, startDeskServer } from "../../src/commands/desk-serve";
+import {
+  type DeskServer,
+  desk,
+  deskWarnings,
+  startDeskServer,
+} from "../../src/commands/desk-serve";
 import { makeBufferIO } from "../../src/io";
+import { DESK_STAMP, deskStamp } from "../../src/setup/desk-build";
 import { tempDir } from "../helpers/tmp";
 
 describe("volley desk serve", () => {
@@ -100,5 +106,108 @@ describe("volley desk serve", () => {
     const io3 = makeBufferIO();
     expect(await desk({ argv: ["serve", "--help"], env: {}, io: io3 })).toBe(0);
     expect(io3.readStdout()).toContain("5199");
+  });
+});
+
+describe("volley desk serve: the stale-build warnings", () => {
+  let repo: string;
+  let root: string;
+  beforeEach(() => {
+    repo = tempDir("volley-desk-stale-");
+    writeFileSync(join(repo, "bun.lock"), "{}");
+    mkdirSync(join(repo, "packages", "volley-desk", "src"), { recursive: true });
+    writeFileSync(join(repo, "packages", "volley-desk", "src", "main.ts"), "export {};");
+    root = join(repo, "packages", "volley-desk", "dist");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "index.html"), "<!doctype html><title>Desk</title>");
+  });
+  const fresh = (version = "0.5.0") => {
+    writeFileSync(join(root, DESK_STAMP), `${deskStamp(repo)}\n`);
+    writeFileSync(join(root, "version.json"), JSON.stringify({ version }));
+  };
+  const STALE =
+    /^warning: the Desk build is stale \(built from .+, the checkout is [0-9a-f]{16}\); run volley deploy or volley setup --repair$/;
+
+  it("says nothing when the build is from this checkout and this version", () => {
+    fresh();
+    expect(deskWarnings({ root, repo, version: "0.5.0" })).toEqual([]);
+  });
+
+  it("warns when the stamp is missing or differs", () => {
+    writeFileSync(join(root, "version.json"), JSON.stringify({ version: "0.5.0" }));
+    const missing = deskWarnings({ root, repo, version: "0.5.0" });
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toMatch(STALE);
+    expect(missing[0]).toContain("built from unknown");
+    writeFileSync(join(root, DESK_STAMP), "0123456789abcdef\n");
+    const differs = deskWarnings({ root, repo, version: "0.5.0" });
+    expect(differs[0]).toContain("built from 0123456789abcdef");
+    expect(differs[0]).toContain(`the checkout is ${deskStamp(repo)}`);
+  });
+
+  it("warns when the bundle's version differs from this volley's", () => {
+    fresh("0.4.0");
+    expect(deskWarnings({ root, repo, version: "0.5.0" })).toEqual([
+      "warning: the Desk bundle is 0.4.0, this volley is 0.5.0",
+    ]);
+  });
+
+  it("gives both lines when both hold; with no checkout only the version line", () => {
+    writeFileSync(join(root, "version.json"), JSON.stringify({ version: "0.4.0" }));
+    const both = deskWarnings({ root, repo, version: "0.5.0" });
+    expect(both).toHaveLength(2);
+    expect(both[0]).toMatch(STALE);
+    expect(both[1]).toBe("warning: the Desk bundle is 0.4.0, this volley is 0.5.0");
+    expect(deskWarnings({ root, repo: null, version: "0.5.0" })).toEqual([
+      "warning: the Desk bundle is 0.4.0, this volley is 0.5.0",
+    ]);
+  });
+
+  it("calls a bundle without version.json unknown", () => {
+    writeFileSync(join(root, DESK_STAMP), `${deskStamp(repo)}\n`);
+    expect(deskWarnings({ root, repo, version: "0.5.0" })).toEqual([
+      "warning: the Desk bundle is unknown, this volley is 0.5.0",
+    ]);
+  });
+
+  const serveOnce = async (argv: string[]) => {
+    const io = makeBufferIO();
+    let stop: () => void = () => {};
+    const until = new Promise<void>((ok) => {
+      stop = ok;
+    });
+    const running = desk({
+      argv: ["serve", "--port", "0", "--root", root, ...argv],
+      env: {},
+      io,
+      until,
+      repo,
+      version: "0.5.0",
+    });
+    // The server is up once it has said where.
+    for (let i = 0; i < 200 && !io.readStdout().includes("Serving the Desk"); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    stop();
+    return { code: await running, io };
+  };
+
+  it("prints the warnings to stderr before serving, and still serves", async () => {
+    writeFileSync(join(root, "version.json"), JSON.stringify({ version: "0.4.0" }));
+    const { code, io } = await serveOnce([]);
+    expect(code).toBe(0);
+    expect(io.readStdout()).toContain("Serving the Desk from");
+    const lines = io.readStderr().trim().split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(STALE);
+    expect(lines[1]).toBe("warning: the Desk bundle is 0.4.0, this volley is 0.5.0");
+  });
+
+  it("--quiet prints neither", async () => {
+    writeFileSync(join(root, "version.json"), JSON.stringify({ version: "0.4.0" }));
+    const { code, io } = await serveOnce(["--quiet"]);
+    expect(code).toBe(0);
+    expect(io.readStdout()).toContain("Serving the Desk from");
+    expect(io.readStderr()).toBe("");
   });
 });

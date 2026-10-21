@@ -22,6 +22,7 @@ Subcommands:
   peer     Pair machines with volleyd's (invite, join, list, remove)
   setup    First-run / repair wizard: broker, accounts, services, phone sign-in QR
   desk     Serve the built Volley Desk (desk serve) for phones and the setup service
+  deploy   Deploy a release tag to this machine's volleyd and Desk services
 
 Global flags:
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -75,6 +76,8 @@ async function loadSubcommand(name: string): Promise<Subcommand | null> {
       return (await import("./commands/setup")).setup as Subcommand;
     case "desk":
       return (await import("./commands/desk-serve")).desk as Subcommand;
+    case "deploy":
+      return (await import("./commands/deploy")).deploy as Subcommand;
     default:
       return null;
   }
