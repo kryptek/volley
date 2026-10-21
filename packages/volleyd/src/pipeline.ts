@@ -19,6 +19,7 @@ import {
   verifyOperatorMerge,
 } from "./artifacts";
 import { mergePr } from "./autopilot/merge";
+import { type QueueEntry, nextToMerge, queueOf } from "./autopilot/merge-queue";
 import type { Role } from "./brief";
 import { systemClock } from "./clock";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "./config-defaults";
@@ -201,6 +202,10 @@ export interface TaskPipeline {
   merge_retries?: number;
   /** The owner answered a `merge_refused` decision `manual`: a human merges this task. */
   merge_manual?: boolean;
+  /** When the task entered the merge queue (`merge_queued`), until it left it (`merge_dequeued`). */
+  queued_at?: string | undefined;
+  /** volleyd's `gh pr merge` for the task is running (`merge_started`, until its outcome). */
+  merge_inflight?: boolean | undefined;
 }
 
 export interface MovedHead {
@@ -268,7 +273,8 @@ export interface PipelineMarker {
     | "spawn_failed"
     | "pr_closed"
     | "pr_head_moved"
-    | "merge_refused";
+    | "merge_refused"
+    | "merge_conflict";
   role?: Role;
   head?: string;
   /** ci_none on a rebase: the files it changed, for the re-review rule if the head is accepted. */
@@ -359,6 +365,19 @@ export function reducePipeline(
         p.rebasing = false;
         p.branch_update = undefined;
       }
+      break;
+    case "merge_queued":
+      p.queued_at = ev.at;
+      break;
+    case "merge_dequeued":
+      p.queued_at = undefined;
+      break;
+    case "merge_started":
+      p.merge_inflight = true;
+      break;
+    case "merged_by_supervisor":
+    case "merge_ended":
+      p.merge_inflight = undefined;
       break;
     case "merge_nudge_sent":
       if (typeof d.agent_id === "string" && typeof d.merged_pr === "number")
@@ -498,7 +517,10 @@ export function reducePipeline(
     case "task_cancelled":
       // Settled, or someone is asked about it: the hold is over.
       p.ci_hold = undefined;
-      if (ev.type === "task_cancelled") p.moved = undefined;
+      if (ev.type === "task_cancelled") {
+        p.moved = undefined;
+        p.merge_inflight = undefined;
+      }
       if (
         ev.type === "decision_opened" &&
         p.moved !== undefined &&
@@ -514,6 +536,9 @@ export function reducePipeline(
       // Only a refusal of the current gated head counts: a late one for an older head says nothing.
       if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1))
         p.merge_refusals = (p.merge_refusals ?? 0) + 1;
+      // volleyd's merge ended without merging (refused, or `gh` could not run).
+      if (d.alarm === "merge_refused" || (d.alarm === "pipeline_error" && d.check === "merge"))
+        p.merge_inflight = undefined;
       // The PR is no longer at the verified head: that role's acceptance no longer holds.
       const run = d.alarm === "pr_head_moved" && isRole(role) ? p.runs[role] : undefined;
       if (run !== undefined) {
@@ -527,7 +552,8 @@ export function reducePipeline(
       const answer = String(d.answer ?? "");
       if (m?.on === "merge_refused" && isAnswer(answer, "retry"))
         p.merge_retries = (p.merge_retries ?? 0) + 1;
-      if (m?.on === "merge_refused" && isAnswer(answer, "manual")) p.merge_manual = true;
+      if ((m?.on === "merge_refused" || m?.on === "merge_conflict") && isAnswer(answer, "manual"))
+        p.merge_manual = true;
       if (m?.on === "reviewers_disagree")
         p.disagreement = {
           round: p.round,
@@ -626,6 +652,12 @@ export interface PipelineView {
   merge_token?: MergeToken;
   /** `autopilot.merge_retry_max`: refusals before the owner is asked (absent: the default). */
   merge_retry_max?: number;
+  /**
+   * The task holds its release branch's merge turn (the merge queue, driver-local): `check` while
+   * it is checked against (or brought up to date with) the release branch, `go` once it is gated
+   * up to date with a MergeToken. Only `go` merges.
+   */
+  merge_turn?: "check" | "go";
 }
 
 export type PipelineEvent =
@@ -711,8 +743,11 @@ export type PipelineEvent =
       timed_out: boolean;
     }
   | { kind: "decision_resolved"; decision: DecisionRecord }
-  /** Autopilot merging: GitHub merged `head` (the token's) as `sha` (null: not read back). */
-  | { kind: "supervisor_merged"; sha: string | null; head: string }
+  /**
+   * Autopilot merging: GitHub merged `head` (the token's) as `sha` (null: not read back); `by`:
+   * the owner who asked for it (`volleyd merge`), absent for the merge queue's own merge.
+   */
+  | { kind: "supervisor_merged"; sha: string | null; head: string; by?: string }
   /** Autopilot merging: `gh pr merge` exited non-zero for `head` (moved, checks, protection). */
   | { kind: "merge_refused"; stderr: string; head: string };
 
@@ -796,10 +831,12 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
     case "verified":
       return onVerified(v, ev);
     case "rebase_checked":
-      if (v.stage === "cancelled" || ev.head !== v.p.head) return [];
-      // Gated already: only a gate that lost its MergeToken (a restart) is re-run, to re-mint it,
-      // and only while the head is still up to date (a moved release branch is rebased onto).
-      if (v.stage === "merge_ready" && !remintWanted(v)) return [];
+      // Merged meanwhile (`volleyd merge` during the merge turn's check): nothing to update.
+      if (v.stage === "cancelled" || v.stage === "done" || ev.head !== v.p.head) return [];
+      // Gated already: only the task holding the merge turn is checked again, so it merges up to
+      // date with the release branch (re-gated, which re-mints a token a restart lost), or is
+      // brought up to date first (a release branch that moved is rebased onto).
+      if (v.stage === "merge_ready" && v.merge_turn === undefined) return [];
       return ev.check.behind === 0 ? guardedGate(v, ev) : enterRebase(v);
     case "head_moved":
       return onHeadMoved(v, ev);
@@ -1042,13 +1079,11 @@ function remintWanted(v: PipelineView): boolean {
 }
 
 /**
- * The merge verb at the gate (A6's queue decides when across tasks; the driver offers `merge`
- * only to a wave of one task until then): with the gate's token, merge; without one (a restart
- * lost it), re-run the gate's checks through the rebase check, which re-mints it.
+ * The merge verb at the gate: only for the task the merge queue gave the turn, once its turn's
+ * rebase check found it up to date and the gate (re-)minted its token.
  */
 function autoMerge(v: PipelineView): PipelineAction[] {
-  if (!autoMergeOn(v) || mergeExhausted(v)) return [];
-  if (remintWanted(v)) return [{ kind: "check_rebase" }];
+  if (v.merge_turn !== "go" || !autoMergeOn(v) || mergeExhausted(v) || remintWanted(v)) return [];
   return [{ kind: "merge", token: v.merge_token as MergeToken }];
 }
 
@@ -1066,7 +1101,14 @@ function onSupervisorMerged(
       event: {
         type: "merged_by_supervisor",
         task: v.task,
-        data: { task: v.task, pr: pr.number, head, merge_sha: ev.sha, by: "volleyd" },
+        data: {
+          task: v.task,
+          pr: pr.number,
+          head,
+          merge_sha: ev.sha,
+          by: "volleyd",
+          ...(ev.by !== undefined ? { requested_by: ev.by } : {}),
+        },
       },
     },
     ...mergedActions(v, { via: "supervisor", merge_sha: ev.sha }),
@@ -1409,6 +1451,16 @@ function onIoFailed(
     // Not verified yet. The agent's claim stands; a later tick re-checks it.
     out.push(...retireIfLive(run));
   }
+  // volleyd's merge ended without an outcome (a timeout, or `gh` could not run): not in flight.
+  if (ev.what === "merge" && v.p.merge_inflight === true)
+    out.push({
+      kind: "journal",
+      event: {
+        type: "merge_ended",
+        task: v.task,
+        data: { task: v.task, why: ev.timed_out ? "timed_out" : "failed" },
+      },
+    });
   // A timeout is the network's problem and resolves itself; anything else is worth one alarm.
   if (!ev.timed_out) {
     out.push({
@@ -1448,6 +1500,11 @@ function onDone(
   ) {
     return [{ kind: "retire", agent_id: ev.agent_id }];
   }
+  if (ev.status === "failed" && mergeConflict(v, ev.role))
+    return [
+      { kind: "retire", agent_id: ev.agent_id },
+      mergeConflictDecision(v, ev.agent_id, ev.why ?? "failed"),
+    ];
   if (ev.status === "failed") {
     return [
       { kind: "retire", agent_id: ev.agent_id },
@@ -1777,10 +1834,15 @@ function onBlocked(
   if (run === undefined || run.agent_id !== ev.agent_id || run.accepted || v.stage === "cancelled")
     return [];
   const label = roleLabel(v.p, ev.role);
-  const max = DAEMON_DEFAULTS.blocked_reason_max_chars;
-  // By code point, so a clip never splits a surrogate pair.
-  const chars = Array.from(ev.reason);
-  const reason = chars.length > max ? `${chars.slice(0, max).join("")}…` : ev.reason;
+  const reason = clipReason(ev.reason);
+  const data = {
+    agent_id: ev.agent_id,
+    reason: ev.reason,
+    payload: ev.payload,
+    ...(ev.at !== undefined ? { status_at: ev.at } : {}),
+  };
+  if (mergeConflict(v, ev.role))
+    return [{ ...mergeConflictDecision(v, ev.agent_id, `is blocked: ${reason}`), data }];
   return [
     {
       kind: "decide",
@@ -1791,14 +1853,44 @@ function onBlocked(
         question: `${ev.agent_id} (${label}) is blocked: ${reason}. continue: you steered it and it goes on; respawn the ${label}; or cancel the task?`,
         options: ["continue", "respawn", "cancel"],
       },
-      data: {
-        agent_id: ev.agent_id,
-        reason: ev.reason,
-        payload: ev.payload,
-        ...(ev.at !== undefined ? { status_at: ev.at } : {}),
-      },
+      data,
     },
   ];
+}
+
+/** By code point, so a clip never splits a surrogate pair. */
+function clipReason(text: string): string {
+  const max = DAEMON_DEFAULTS.blocked_reason_max_chars;
+  const chars = Array.from(text);
+  return chars.length > max ? `${chars.slice(0, max).join("")}…` : text;
+}
+
+/**
+ * Under autopilot merging, a rebase (or merge) agent that cannot bring a queued task's branch up
+ * to date — it publishes `blocked`, or fails — is a merge conflict (SPEC §4.6.17). A rebase
+ * before the gate (the task was never queued) is an ordinary blocked agent.
+ */
+const mergeConflict = (v: PipelineView, role: Role): boolean =>
+  role === "rebase" && v.p.rebasing && v.merge === "auto" && v.p.queued_at !== undefined;
+
+function mergeConflictDecision(
+  v: PipelineView,
+  agentId: string,
+  what: string,
+): Extract<PipelineAction, { kind: "decide" }> {
+  const label = roleLabel(v.p, "rebase");
+  return {
+    kind: "decide",
+    marker: { on: "merge_conflict", role: "rebase" },
+    decision: {
+      kind: "merge_conflict",
+      task: v.task,
+      question: `${agentId} (${label}) ${what}: the branch could not be brought up to date with ${v.release_branch}. respawn: a fresh ${label} agent; manual: a person resolves and merges this PR (it leaves the merge queue and waits at the gate); or cancel the task?`,
+      ...(v.p.pr !== undefined ? { pointers: { pr: v.p.pr.url } } : {}),
+      options: ["respawn", "manual", "cancel"],
+    },
+    data: { agent_id: agentId },
+  };
 }
 
 /** A role as the owner reads it: the rebase role of a merge-mode step is the merge it runs. */
@@ -1819,7 +1911,10 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
   // types anything else (a free-text `cancel` too) to the agent, which stays live.
   if (isAnswer(answer, "cancel") && m.on !== "liveness") {
     // A blocked agent is still live (SPEC §5.2): it is stopped with the task.
-    const blocked = m.on === "agent_blocked" && m.role !== undefined ? v.p.runs[m.role] : undefined;
+    const blocked =
+      (m.on === "agent_blocked" || m.on === "merge_conflict") && m.role !== undefined
+        ? v.p.runs[m.role]
+        : undefined;
     const agent = (d as { agent_id?: unknown }).agent_id;
     return [
       ...(blocked !== undefined && blocked.agent_id === agent && blocked.retired === undefined
@@ -1984,19 +2079,34 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
     case "spawn_failed":
       // spawn_failed: the daemon's resolveNow acts on it (retry now / stop task).
       return [];
-    case "merge_refused": {
-      // Back to the gate; retry: one more attempt now (the reducer granted it), manual: a human
-      // merges it (the reducer took the task out of autopilot merging).
-      const retry = isAnswer(answer, "retry");
-      if (!retry && !isAnswer(answer, "manual")) return reask();
-      const back: PipelineAction = {
-        kind: "journal",
-        event: { type: "stage_entered", task: v.task, data: { stage: "merge_ready" } },
-      };
-      const token = v.merge_token;
-      return retry && token !== undefined && m.head === v.p.head && token.head === m.head
-        ? [back, { kind: "merge", token }]
-        : [back];
+    case "merge_refused":
+      // Back to the gate; retry: one more attempt at the task's next merge turn (the reducer
+      // granted it), manual: a human merges it (the reducer took it out of autopilot merging).
+      if (!isAnswer(answer, "retry") && !isAnswer(answer, "manual")) return reask();
+      return [
+        {
+          kind: "journal",
+          event: { type: "stage_entered", task: v.task, data: { stage: "merge_ready" } },
+        },
+      ];
+    case "merge_conflict": {
+      const agent = (d as { agent_id?: unknown }).agent_id;
+      const live = run !== undefined && run.agent_id === agent && !run.accepted;
+      // respawn: a fresh rebase (or merge) agent at the next attempt.
+      if (isRespawnAnswer(answer, d.options))
+        return live ? [{ kind: "relaunch", role: "rebase", agent_id: run.agent_id }] : [];
+      if (!isAnswer(answer, "manual")) return reask();
+      // manual: a person merges the PR; the task waits at the gate (the reducer took it out of
+      // the merge queue) and its update stops.
+      return [
+        ...(live && run.retired === undefined
+          ? [{ kind: "retire" as const, agent_id: run.agent_id, status: "stopped" }]
+          : []),
+        {
+          kind: "journal",
+          event: { type: "stage_entered", task: v.task, data: { stage: "merge_ready" } },
+        },
+      ];
     }
     case "merge_ready_invariant": {
       if (!isAnswer(answer, "rereview")) return reask();
@@ -2291,7 +2401,8 @@ function advance(v: PipelineView): PipelineAction[] {
   // The PR head moved after a gate: nothing moves on until its CI and the owner's answer.
   if (p.moved !== undefined && v.stage !== "cancelled" && v.stage !== "done")
     return movedAdvance(v);
-  // A gated task becomes done once its PR merged: by volleyd under `merge: auto`, else a human.
+  // A gated task becomes done once its PR merged: by volleyd under `merge: auto` (at its merge
+  // turn), else a human.
   if (v.stage === "merge_ready" && p.pr !== undefined)
     return [...autoMerge(v), { kind: "check_merged" }];
   if (IDLE.has(v.stage) || p.step < 0) return [];
@@ -2530,6 +2641,8 @@ function renderRebaseMd(c: BriefCtx): string {
     "",
     `That lease-guarded push to \`${c.pr_branch}\` is the one force-push this role may do. PR: ${c.pr_url}.`,
     "",
+    "A conflict you cannot resolve without changing what the PR does: push nothing, and publish `blocked` with the conflicting files in `reason` (the owner decides).",
+    "",
   ].join("\n");
 }
 
@@ -2549,6 +2662,8 @@ function renderMergeMd(c: BriefCtx): string {
     `    git push origin HEAD:${c.pr_branch}`,
     "",
     `That push moves \`${c.pr_branch}\` forward: its new head must descend from \`${c.head}\`. Never rewrite the branch's history. PR: ${c.pr_url}.`,
+    "",
+    "A conflict you cannot resolve without changing what the PR does: push nothing, and publish `blocked` with the conflicting files in `reason` (the owner decides).",
     "",
   ].join("\n");
 }
@@ -2606,8 +2721,39 @@ export interface PipelineDeps {
   mergeMode?: () => "auto" | "manual";
   /** The wave's `autopilot.merge_retry_max` (default: the config default). */
   mergeRetryMax?: () => number;
+  /** The wave's `autopilot.delete_branch` (default: false). */
+  deleteBranch?: () => boolean;
+  /**
+   * The merge turn of a release branch (`<repo>#<release_branch>`), shared by every wave on this
+   * daemon: `acquire` succeeds when the branch is free or already held by `key`
+   * (`<wave>/<task>`). Default: a lock of this driver's own.
+   */
+  releaseLock?: ReleaseLock;
   now?: () => number;
   log?: (line: string) => void;
+}
+
+export interface ReleaseLock {
+  acquire(branch: string, key: string): boolean;
+  release(branch: string, key: string): void;
+  /** Who holds the branch now (`<wave>/<task>`), if anyone. */
+  holder?(branch: string): string | undefined;
+}
+
+/** A release lock over one map (the daemon's, or a driver's own). */
+export function releaseLockOn(held: Map<string, string>): ReleaseLock {
+  return {
+    acquire: (branch, key) => {
+      const k = held.get(branch);
+      if (k !== undefined && k !== key) return false;
+      held.set(branch, key);
+      return true;
+    },
+    release: (branch, key) => {
+      if (held.get(branch) === key) held.delete(branch);
+    },
+    holder: (branch) => held.get(branch),
+  };
 }
 
 /** A pipeline git / gh call that hit its hard timeout: "not verified yet", never an alarm. */
@@ -2657,11 +2803,30 @@ export class PipelineDriver {
   private readonly mergeTokens = new Map<TaskId, MergeToken>();
   /** The head a MergeToken could not be minted for, per task: that head is a human's to merge. */
   private readonly mintFailed = new Map<TaskId, string>();
+  /**
+   * The merge queue's turn in this wave (SPEC §4.6.17): the task holding its release branch's
+   * lock, the refusals it had when it took the turn, and whether its rebase check found it up to
+   * date (then the gate re-minted its token and it may merge), and its turn checks that failed
+   * in a row.
+   */
+  private turn:
+    | { task: TaskId; branch: string; refusals: number; fresh: boolean; failures: number }
+    | undefined;
+  /**
+   * Tasks that gave up the turn after `merge_turn_check_failures_max` failed turn checks: passed
+   * over (with the tasks after them) while another queued task can take the turn.
+   */
+  private readonly passedOver = new Set<TaskId>();
+  private readonly lock: ReleaseLock;
+  /** Tasks whose `gh pr merge` this driver runs (from `merge_started` until its outcome is in). */
+  private readonly merging = new Set<TaskId>();
 
   constructor(
     private readonly wave: WaveId,
     private readonly deps: PipelineDeps,
-  ) {}
+  ) {
+    this.lock = deps.releaseLock ?? releaseLockOn(new Map());
+  }
 
   private now(): number {
     // real clock: the default when the daemon injects no clock
@@ -2693,22 +2858,18 @@ export class PipelineDriver {
       p: rec.pipeline[task] ?? emptyPipeline(),
       ...(this.deps.branchUpdate !== undefined ? { branch_update: this.deps.branchUpdate() } : {}),
       ...(this.deps.hygiene !== undefined ? { hygiene: this.deps.hygiene() } : {}),
-      merge:
-        this.mintFailed.get(task) === rec.pipeline[task]?.head ? "manual" : this.mergeMode(rec),
+      merge: this.mintFailed.get(task) === rec.pipeline[task]?.head ? "manual" : this.mergeMode(),
       ...(token !== undefined ? { merge_token: token } : {}),
       ...(this.deps.mergeRetryMax !== undefined
         ? { merge_retry_max: this.deps.mergeRetryMax() }
         : {}),
+      ...(this.turn?.task === task ? { merge_turn: this.turn.fresh ? "go" : "check" } : {}),
     };
   }
 
-  /**
-   * The merge mode the pipeline acts on: the wave's, but `auto` only for a wave of one task
-   * until A6's merge queue orders merges across tasks (then every task of an auto wave).
-   */
-  private mergeMode(rec: WaveRecord): "auto" | "manual" {
-    const mode = this.deps.mergeMode?.() ?? "manual";
-    return mode === "auto" && Object.keys(rec.wave?.tasks ?? {}).length === 1 ? "auto" : "manual";
+  /** The merge mode the pipeline acts on: the wave file's `merge:`, else `autopilot.merge`. */
+  private mergeMode(): "auto" | "manual" {
+    return this.deps.mergeMode?.() ?? "manual";
   }
 
   /** Handle one observation, then advance until the task settles. */
@@ -2749,6 +2910,210 @@ export class PipelineDriver {
         await this.alarmError(t.id, "tick", e);
       }
     }
+    await this.mergeNext().catch((e: unknown) =>
+      this.deps.log?.(`pipeline ${this.wave} merge queue: ${String(e)}`),
+    );
+  }
+
+  // --- The merge queue (SPEC §4.6.17) ---
+
+  /** The release branch's lock name: `<repo>#<release_branch>`. */
+  private branchKey(): string | null {
+    const s = this.deps.record().state;
+    return s == null ? null : `${s.repo}#${s.release_branch}`;
+  }
+
+  /**
+   * One step of the merge queue, from the tick: tasks that are gated under `merge: auto` enter
+   * the queue, tasks that merged, were cancelled or went to a human leave it; then the turn
+   * holder keeps the release branch until it merged (or was refused, or waits for an answer),
+   * and the next task takes the turn: an event-driven rebase check, so it is brought up to date
+   * with the release branch first if it is behind, then merged once it gates again.
+   */
+  async mergeNext(): Promise<void> {
+    const branch = this.branchKey();
+    if (branch === null) return;
+    // A merge journaled as started that no driver here runs (the daemon restarted): it ended.
+    for (const t of this.deps.record().state?.tasks ?? []) {
+      if (this.view(t.id)?.p.merge_inflight !== true || this.merging.has(t.id)) continue;
+      await this.deps.journal({
+        type: "merge_ended",
+        task: t.id,
+        data: { task: t.id, why: "interrupted" },
+      });
+    }
+    for (const t of this.deps.record().state?.tasks ?? []) {
+      const v = this.view(t.id);
+      if (v === null || v.p.queued_at === undefined) continue;
+      const why =
+        t.stage === "done"
+          ? "merged"
+          : t.stage === "cancelled"
+            ? "cancelled"
+            : v.merge !== "auto" || v.p.merge_manual === true
+              ? "manual"
+              : null;
+      if (why !== null)
+        await this.deps.journal({ type: "merge_dequeued", task: t.id, data: { task: t.id, why } });
+    }
+    for (const t of this.deps.record().state?.tasks ?? []) {
+      const v = this.view(t.id);
+      if (v === null || t.stage !== "merge_ready" || v.p.queued_at !== undefined) continue;
+      if (!autoMergeOn(v) || v.p.pr === undefined) continue;
+      // Its place, as the newest entry: "~" sorts after every ISO time (code-unit order).
+      const rec = this.deps.record();
+      const hyp = { ...rec, pipeline: { ...rec.pipeline, [t.id]: { ...v.p, queued_at: "~" } } };
+      const position = queueOf(hyp).findIndex((e) => e.task === t.id) + 1;
+      await this.deps.journal({
+        type: "merge_queued",
+        task: t.id,
+        data: { task: t.id, position },
+      });
+    }
+    const queue = queueOf(this.deps.record());
+    const turn = this.turn;
+    if (turn !== undefined) {
+      const key = `${this.wave}/${turn.task}`;
+      const v = this.view(turn.task);
+      const stuck = turn.failures >= DAEMON_DEFAULTS.merge_turn_check_failures_max;
+      const holds =
+        v !== null &&
+        queue.some((e) => e.task === turn.task) &&
+        (v.p.merge_refusals ?? 0) <= turn.refusals &&
+        v.stage !== "awaiting_decision" &&
+        v.stage !== "blocked" &&
+        turn.branch === branch &&
+        !stuck;
+      // acquire is idempotent for the holder: it only re-asserts the lock.
+      if (holds && this.lock.acquire(branch, key)) {
+        // The turn's rebase check did not come back usable (an error, a head that moved): again.
+        if (v.stage === "merge_ready" && !turn.fresh && !this.merging.has(turn.task))
+          await this.run(turn.task, [{ kind: "check_rebase" }], false);
+        return;
+      }
+      this.lock.release(turn.branch, key);
+      this.turn = undefined;
+      if (stuck) this.passedOver.add(turn.task);
+    }
+    for (const t of this.passedOver)
+      if (!queue.some((e) => e.task === t)) this.passedOver.delete(t);
+    const n =
+      nextToMerge({ [branch]: this.withoutPassedOver(queue) }, new Set()) ??
+      nextToMerge({ [branch]: queue }, new Set());
+    if (n === null || !this.lock.acquire(branch, `${this.wave}/${n.task}`)) return;
+    const refusals = this.view(n.task)?.p.merge_refusals ?? 0;
+    this.passedOver.delete(n.task);
+    this.turn = { task: n.task, branch, refusals, fresh: false, failures: 0 };
+    await this.run(n.task, [{ kind: "check_rebase" }], true);
+  }
+
+  /** The queue without the passed-over tasks and the tasks after them (they never go first). */
+  private withoutPassedOver(queue: QueueEntry[]): QueueEntry[] {
+    if (this.passedOver.size === 0) return queue;
+    const wave = this.deps.record().wave;
+    const skip = new Set(this.passedOver);
+    // Queue order puts a task after the ones it comes after, so one pass is transitive.
+    return queue.filter((e) => {
+      if (wave?.tasks[e.task]?.after.some((d) => skip.has(d))) skip.add(e.task);
+      return !skip.has(e.task);
+    });
+  }
+
+  /**
+   * The owner's `volleyd merge` (SPEC §4.6.17): merge one gated task now through the merge verb,
+   * under `merge: manual` too, holding its release branch for the merge (refused while another
+   * task holds it). The checks and the outcome run on the queue (`deps.enqueue`); the merge
+   * itself beside it. Call it off the queue.
+   */
+  async mergeNow(
+    task: TaskId,
+    by: string,
+  ): Promise<{ ok: true; merge_sha: string | null } | { ok: false; error: string }> {
+    // undefined only when the queue dropped the check (the daemon stopped)
+    const prep = (await this.onQueue(() => this.mergeNowPrep(task))) ?? "volleyd is stopping";
+    if (typeof prep === "string") return { ok: false, error: prep };
+    const { v, token, branch, own } = prep;
+    let ev: PipelineEvent;
+    try {
+      ev = (await this.merge(v, token, by)) as PipelineEvent;
+    } catch (e) {
+      ev = {
+        kind: "io_failed",
+        what: "merge",
+        message: e instanceof Error ? e.message : String(e),
+        timed_out: e instanceof IoTimeout,
+      };
+    }
+    await this.deps.enqueue(async () => {
+      this.merging.delete(task);
+      await this.supersedeOnMerge(task, ev);
+      await this.handle(task, ev);
+      if (!own) this.lock.release(branch, `${this.wave}/${task}`);
+    });
+    if (ev.kind === "supervisor_merged") return { ok: true, merge_sha: ev.sha };
+    return {
+      ok: false,
+      error: `not merged: ${ev.kind === "merge_refused" ? ev.stderr : ev.kind === "io_failed" ? ev.message : ev.kind}`,
+    };
+  }
+
+  /** Run `fn` on the queue and hand back its value (undefined when the queue dropped it). */
+  private async onQueue<T>(fn: () => Promise<T>): Promise<T | undefined> {
+    let out: T | undefined;
+    await this.deps.enqueue(async () => {
+      out = await fn();
+    });
+    return out;
+  }
+
+  /** mergeNow's checks, on the queue: the task, its gate, the release branch and the token. */
+  private async mergeNowPrep(
+    task: TaskId,
+  ): Promise<{ v: PipelineView; token: MergeToken; branch: string; own: boolean } | string> {
+    const v = this.view(task);
+    if (v === null) return `unknown task '${task}'`;
+    const { pr, head } = v.p;
+    if (
+      v.stage !== "merge_ready" ||
+      pr === undefined ||
+      head === undefined ||
+      v.p.gated.at(-1) !== head
+    )
+      return `task '${task}' is not merge_ready`;
+    if (this.merging.has(task)) return `a merge of task '${task}' is already running`;
+    const branch = this.branchKey();
+    if (branch === null) return `unknown task '${task}'`;
+    const own = this.turn?.task === task;
+    if (!this.lock.acquire(branch, `${this.wave}/${task}`))
+      return `${this.lock.holder?.(branch) ?? "another task"} holds ${v.release_branch} (its merge-queue turn: it is brought up to date if it is behind, then merged); try again once it has merged or given up the turn`;
+    const held = this.mergeTokens.get(task);
+    const token =
+      held !== undefined && held.head === head && held.pr === pr.number
+        ? held
+        : this.mintFor(task, pr.number, head, v);
+    if (token === undefined) {
+      if (!own) this.lock.release(branch, `${this.wave}/${task}`);
+      return `no merge token can be minted for head ${head} (volleyd merges only an exact 40-hex head)`;
+    }
+    if (own && this.turn !== undefined) this.turn.fresh = false;
+    this.merging.add(task);
+    await this.deps.journal({
+      type: "merge_started",
+      task,
+      data: { task, pr: token.pr, head: token.head },
+    });
+    return { v, token, branch, own };
+  }
+
+  /**
+   * Give up this wave's merge turn (the wave stopped): the release branch is free again, once
+   * no merge of this wave runs (the daemon calls it again on its next tick).
+   */
+  releaseTurn(): void {
+    if (this.merging.size > 0) return;
+    if (this.turn !== undefined)
+      this.lock.release(this.turn.branch, `${this.wave}/${this.turn.task}`);
+    this.turn = undefined;
   }
 
   /** Resolves once no check is running beside the queue (tests; a graceful stop). */
@@ -2893,7 +3258,17 @@ export class PipelineDriver {
           const key = `${task}/check_rebase`;
           if (v?.p.head === undefined || this.inflight.has(key)) break;
           if (!eventDriven && !this.due(`${task}/check_rebase/${v.p.head}`)) break;
-          this.beside(task, key, { what: "check_rebase" }, () => this.gateCheck(v));
+          this.beside(
+            task,
+            key,
+            { what: "check_rebase" },
+            () => this.gateCheck(v),
+            async (ev) => {
+              // The merge turn's check: failures in a row pass the turn on (mergeNext).
+              if (this.turn?.task === task)
+                this.turn.failures = ev.kind === "io_failed" ? this.turn.failures + 1 : 0;
+            },
+          );
           break;
         }
         case "check_merged": {
@@ -2919,16 +3294,30 @@ export class PipelineDriver {
           // `retry` is event-driven: at once).
           const key = `${task}/merge`;
           if (this.inflight.has(key) || this.inflight.has(`${task}/check_merged`)) break;
+          // The owner's `volleyd merge` of it is running (mergeNow): one `gh pr merge` at a time.
+          if (this.merging.has(task)) break;
           if (!eventDriven && !this.due(key)) break;
           if (eventDriven) this.lastCheck.set(key, this.now());
           const v = this.view(task);
           if (v === null) break;
+          // One attempt per up-to-date check: another needs the turn's rebase check again.
+          if (this.turn?.task === task) this.turn.fresh = false;
+          this.merging.add(task);
+          await this.deps.journal({
+            type: "merge_started",
+            task,
+            data: { task, pr: a.token.pr, head: a.token.head },
+          });
+          progressed = true;
           this.beside(
             task,
             key,
             { what: "merge" },
             () => this.merge(v, a.token),
-            (ev) => this.supersedeOnMerge(task, ev),
+            (ev) => {
+              this.merging.delete(task);
+              return this.supersedeOnMerge(task, ev);
+            },
           );
           break;
         }
@@ -3390,11 +3779,20 @@ export class PipelineDriver {
    * Autopilot merging: `gh pr merge` the token's PR at exactly its head (src/autopilot/merge.ts),
    * fenced by the token. Merged → `supervisor_merged`; refused → `merge_refused`.
    */
-  private async merge(v: PipelineView, token: MergeToken): Promise<PipelineEvent | null> {
+  private async merge(
+    v: PipelineView,
+    token: MergeToken,
+    by?: string,
+  ): Promise<PipelineEvent | null> {
     const cwd = this.headWorktree(v.p);
-    const r = await mergePr(this.io(v.task), token, cwd);
+    const r = await mergePr(this.io(v.task), token, cwd, this.deps.deleteBranch?.() ?? false);
     return r.ok
-      ? { kind: "supervisor_merged", sha: r.merge_sha, head: token.head }
+      ? {
+          kind: "supervisor_merged",
+          sha: r.merge_sha,
+          head: token.head,
+          ...(by !== undefined ? { by } : {}),
+        }
       : { kind: "merge_refused", stderr: r.stderr, head: token.head };
   }
 
@@ -3454,6 +3852,8 @@ export class PipelineDriver {
     const paths = writeEvidence(this.deps.home, input);
     // Usable only once the evidence that describes its head is written.
     if (token !== undefined) this.mergeTokens.set(task, token);
+    // The merge turn's task, gated up to date with the release branch: it may merge now.
+    if (token !== undefined && this.turn?.task === task) this.turn.fresh = true;
     if (v.stage === "merge_ready" && p.gated.at(-1) === head) return;
     await this.deps.journal({
       type: "artifact_verified",

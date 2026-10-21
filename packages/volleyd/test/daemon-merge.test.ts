@@ -75,6 +75,10 @@ describe("daemon: autopilot merging", () => {
   it("a one-task wave without merge: is merged by volleyd at the gated head (autopilot.merge default auto)", async () => {
     s = await makeSupervisedEnv({ merge: null, exec: replies() });
     await s.status("done");
+    await s.event((e) => e.type === "stage_entered" && e.data.stage === "merge_ready");
+    await s.settled();
+    // The merge queue gives the task its turn on the daemon's tick.
+    await s.daemon.tick();
     await s.event("merged_by_supervisor");
     await s.event((e) => e.type === "stage_entered" && e.data.stage === "done");
     await s.settled();

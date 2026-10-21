@@ -174,6 +174,8 @@ export interface AutopilotConfig {
   merge: MergeMode;
   /** Refused autopilot merges at one gated head before a `merge_refused` decision. */
   merge_retry_max: number;
+  /** Autopilot merges also delete the PR's head branch (`gh pr merge --delete-branch`). */
+  delete_branch: boolean;
   /**
    * How long a wave owned by a coordinator name reads `reconnecting` after the agent bound to
    * the name went away, before `gone` (SPEC §4.6.1).
@@ -408,9 +410,19 @@ export interface WaveState {
   hygiene_level?: HygieneLevel;
   /** What autopilot answered and escalated in this wave (SPEC §4.6.16). */
   autopilot?: AutopilotState;
+  /** The merge queue in merge order (SPEC §4.6.17); absent while it is empty. */
+  merge_queue?: MergeQueueEntry[] | undefined;
   /** The release train (SPEC §4.6.19), from `release_started` on; absent for a wave without one. */
   release?: ReleaseState;
   updated_at: string;
+}
+
+/** wave-state `merge_queue[]` (SPEC §4.6.1, §4.6.17). */
+export interface MergeQueueEntry {
+  task: TaskId;
+  state: "merging" | "updating" | "queued" | "refused";
+  /** When the task entered the queue. */
+  since: string;
 }
 
 /** One release stage's state in the wave state (SPEC §4.6.1, §4.6.19). */
@@ -525,6 +537,12 @@ export const WAVE_EVENT_TYPES = [
   "merged_by_operator",
   // Autopilot merging (SPEC §4.6.17): volleyd merged a gated PR at its gated head.
   "merged_by_supervisor",
+  // The merge queue (SPEC §4.6.17): a gated task entered or left it; volleyd's merge of it began,
+  // or ended without an outcome (timed out, failed to run, interrupted by a restart).
+  "merge_queued",
+  "merge_dequeued",
+  "merge_started",
+  "merge_ended",
   "agent_force_retired",
   "alarm_cleared",
   // Usage metering (claude/usage.ts): an answered account_limit decision moved the wave.

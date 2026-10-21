@@ -142,11 +142,12 @@ config.hard_ceiling: must be <= 100
 | `volleyd run <wave.yaml> [--owner <id>] [--json]` | Validate locally, then submit to the daemon. Returns once the wave is journaled. Prints the owner and any overlap warnings. For a wave id the daemon already holds, the file is its next plan version ([Plan changes](#plan-changes-versioned-wave-files)). |
 | `volleyd diff <wave> <wave.yaml> [--json]` | Print the structural diff between a submitted wave's current plan and the file, without submitting. |
 | `volleyd validate <wave.yaml>` | Validate locally; exit 1 with path-qualified errors, or `RELEASE_BRANCH_MISSING` when the wave's repo (if on this machine) has neither the release branch nor `origin/<branch>`. |
-| `volleyd status [wave] [--by <id>] [--json]` | Wave state from the daemon, with open decisions, `needs you: N` on waves the caller owns and `alarms: N` (tasks whose spawn failed and has not recovered). `--json` prints the exact `wave_state` payload. |
+| `volleyd status [wave] [--by <id>] [--json]` | Wave state from the daemon, with open decisions, `needs you: N` on waves the caller owns and `alarms: N` (tasks whose spawn failed and has not recovered), and under the header the merge queue (`merge queue: T3 merging · T5 updating · T7, T9 queued`). `--json` prints the exact `wave_state` payload. |
 | `volleyd decisions [wave] [--all]` | Open decisions (with `--all`, resolved ones too): question, options, evidence pointers. |
 | `volleyd resolve <decision-id> <answer> [--rationale <why>] [--wave <w>] [--where <where>]` | Answer a decision (owner only). Its inbox item is answered too, where `--where` says (default `cli`). |
 | `volleyd inbox [--all] [--json]` | The needs-you inbox: everything waiting for a person, one line each ([Needs-you inbox](#needs-you-inbox)). |
 | `volleyd inbox answer <id> <answer> [--where <where>] [--version <n>]` | Answer one item through the referee; a late answer is refused with where the first was given (exit 1). |
+| `volleyd merge <wave> <task>` | Merge one gated task now, at its gated head, through the merge queue's fenced verb (owner only; under `merge: manual` too). Answers with the merge commit, or the refusal ([The merge queue](#the-merge-queue)). |
 | `volleyd policy [wave] [--json]` | Autopilot's effective policy table: the decisions volleyd answers itself, with each budget ([Autopilot](#autopilot)). `--json` prints `{ rules, config }`. |
 | `volleyd claim <wave> [--by <id>]` | Take over a wave whose owner is gone. Needs an identity. |
 | `volleyd pause <wave>` / `resume <wave>` | Stop / restart admissions (owner only); running agents carry on. |
@@ -739,7 +740,9 @@ autopilot: on
     ci_failed/fixup-own-change: a fixup agent with the CI result as its directive is what a person would do
   ci_failed · otherwise (ci_none included) · escalate no_policy · no budget
     ci_failed/owner: an infra-shaped red head and a repository without workflows are the owner's
-  pr_closed, remote_repo_missing, merge_conflict · always · escalate no_policy · no budget
+  merge_conflict · within respawn_max per task/role · respawn · respawn_max per <task>/<role> · max 1
+    merge_conflict/respawn: a fresh rebase (or merge) agent retries the update; a conflict it cannot resolve either is the owner's
+  pr_closed, remote_repo_missing · always · escalate no_policy · no budget
     pr/owner: where the work went, or a clone that is missing, is the owner's call
 ```
 
@@ -2612,15 +2615,69 @@ In an unattended wave the gate is where work stalls: every merge waited for a pe
   reads the PR at once as any gate does (someone else may have merged it; a moved head
   invalidates the gate). After `autopilot.merge_retry_max` (default 2) refusals at one gated
   head the task leaves the gate (`blocked`) and decision `merge_refused` asks `retry` (one more
-  attempt, at once), `manual` (this task goes back to the gate and a human merges it) or
-  `cancel`. A new gated head starts the count again.
-- **One task at a time, for now.** The merge queue that orders merges across a wave's tasks is
-  not here yet, so volleyd merges only in a wave of one task; every other wave's gates wait for
-  a human, as under `manual` (and their evidence says so).
+  attempt, at the task's next turn in the merge queue), `manual` (this task goes back to the
+  gate and a human merges it) or `cancel`. A new gated head starts the count again.
+- **When: the merge queue.** Nothing merges at the gate itself: the merge queue below gives one
+  task at a time its turn.
+- **`autopilot.delete_branch`** (default `false`) adds `--delete-branch` to the merge.
 
 The evidence package names who merges: `volleyd merges this PR itself (merge: auto) at exactly
 this head; the merge is journaled as merged_by_supervisor.`, or under `manual` the old `volleyd
 never merges. A human merges this PR after reading the above.`
+
+### The merge queue
+
+A 30-task wave gates many tasks, often at once, and every merge moves the release branch under
+the PRs still waiting. Merging everything green at once gets half the merges refused by
+`--match-head-commit` races or lands conflicting changes; so volleyd merges a wave's gated tasks
+one at a time, in order, and brings each up to date just before its merge
+(`src/autopilot/merge-queue.ts` is the pure part; the driver's `mergeNext` runs it from the tick):
+
+- **Entering and leaving.** A task gated under `merge: auto` enters the queue
+  (`merge_queued { task, position }`) and leaves it when it merged (by volleyd or anyone),
+  was cancelled, or went to a human (`merge_dequeued { task, why: merged | cancelled | manual }`).
+  `merge: manual` keeps a wave's tasks out of the queue altogether.
+- **Order.** Dependency first: a task more tasks name in their `after` goes first, and a task
+  never goes ahead of a queued task it comes after. Then readiness: the task queued earliest. A
+  task GitHub refused goes after the tasks still waiting.
+- **One merge in flight per release branch.** The task at the front takes the release branch's
+  lock (`<repo>#<release_branch>`, held by the daemon, so two waves on one release branch share
+  it) and keeps it until it merged, GitHub refused it, or it waits for an answer. A task whose
+  turn checks fail `merge_turn_check_failures_max` (3) times in a row (its PR was retargeted, `gh`
+  keeps failing, its worktree is gone; each failure is a `pipeline_error` alarm) gives up the turn
+  and is passed over, with the tasks that come after it, while another queued task can go.
+  `merge_started { task, pr, head }` is journaled before each `gh pr merge`. A merge that ends
+  without an outcome (the hard timeout fired, `gh` could not run, or the daemon restarted while
+  it ran) is journaled `merge_ended { task, why: timed_out | failed | interrupted }`: the task is
+  queued again and takes the turn (or `volleyd merge`) as usual. A stopped wave gives its turn up
+  only once its running merge is back. Across waves on one release branch the lock goes to the
+  wave whose front task asks first (the daemon's tick order), not to the task queued earliest.
+- **Updated just before its merge.** At its turn the task is checked against the release branch
+  at once (an event-driven rebase check, not delayed by `ci_poll_ms`). Up to date: the gate runs
+  again (evidence rewritten, token re-minted) and it merges. Behind (a merge before it landed):
+  the usual rebase step runs under the wave's `branch_update`, its agent pushes, CI runs on the
+  new head, the gate checks it again and it merges. Only the front task is updated, after the
+  merge before it: a 30-task wave does at most 29 updates, one at a time, never a storm, and the
+  tasks behind keep their gates and evidence meanwhile. **Use `branch_update: merge` for an
+  unattended wave**: it merges the release branch in with a normal push (no force-push, and the
+  history the reviewers saw stays).
+- **Conflicts.** Resolving a conflict is the rebase (or merge) agent's job; its brief
+  (`.volley/rebase.md`) says so. An agent that publishes `blocked` on a conflict it cannot
+  resolve, or fails, while the task is queued opens decision `merge_conflict` (options
+  `respawn`, `manual`, `cancel`); during a rebase before the gate it is an ordinary
+  `agent_blocked`.
+  Autopilot answers `respawn` once per task (`merge_conflict/respawn`, under `respawn_max`), then
+  leaves it to the owner; `manual` takes the task out of the queue and leaves it at the gate for a
+  person, and the turn passes to the next task.
+- **The wave state** carries `merge_queue: [{ task, state, since }]`, `state` being `merging`,
+  `updating`, `queued` or `refused`, and `volleyd status` prints it under the header:
+  `merge queue: T3 merging · T5 updating · T7, T9 queued`.
+- **`volleyd merge <wave> <task>`** (the `merge` control op, owner only) merges one task at
+  `merge_ready` now through the same verb, under `merge: manual` too, and on a paused or stopped
+  wave (an explicit request: the queue itself does not run there); it answers with the merge
+  commit (`merged_by_supervisor` carries `requested_by`), or with GitHub's refusal, and is refused
+  while another task holds the release branch's turn (naming it: that task may be being brought
+  up to date, which takes a rebase agent and a CI run).
 
 ---
 
