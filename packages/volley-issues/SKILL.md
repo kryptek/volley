@@ -186,7 +186,7 @@ The 5-minute heartbeat bounds the cost of a slow subscribe: an event that slippe
 
 For each event printed, by `type`:
 
-- **`decision_opened`**: `volleyd decisions "$WAVE"` lists the open ones (id, task, kind, question, options, evidence pointers). Read the evidence. Answer what is within the coordinator's authority; ask the user for anything else (`repo_untrusted`, `model_switch`, `plan_change` and `wave_complete` are always the user's). Then:
+- **`decision_opened`**: `volleyd decisions "$WAVE"` lists the open ones (id, task, kind, question, options, evidence pointers). Read the evidence. Answer what is within the coordinator's authority; ask the user for anything else (`repo_untrusted`, `model_switch`, `plan_change` and `wave_complete` are always the user's; ask through `AskUserQuestion`, below). Then:
   ```bash
   volleyd resolve <decision-id> <answer...> --wave "$WAVE" --rationale "<why>"
   ```
@@ -204,6 +204,8 @@ After acting on everything printed, advance the cursor to the last `seq` you han
 ```bash
 volleyd ack "$WAVE" --cursor coordinator --seq <last-seq>
 ```
+
+**Asking the user: go/no-go through `AskUserQuestion`.** Whenever the run needs the user's go-ahead (before `volleyd run`, before merging a gate or the release branch, a decision that is theirs), ask it with the `AskUserQuestion` tool, never as a question at the end of your turn: one question, options `go`, `hold`, `cancel` (each with a one-line description of what happens), `multiSelect: false`. The volley hooks publish the picker, and volleyd opens it as a needs-you inbox item the user can answer from the Desk or a phone as well as in this terminal: volleyd selects the answer on this session's screen, and whichever answer comes first wins. A question left at the end of a turn becomes a handoff item instead, whose reply is typed into your prompt; keep those for questions that need words, not buttons. Act on `go`; on `hold`, wait and ask again when the user says so; on `cancel`, stop (`volleyd stop "$WAVE"` once a wave is running) and say what you stopped.
 
 `volley sub` exit `124` is the fallback heartbeat: re-arm and run the catch-up anyway. Exit `1` is an error (broker down, or `AUTH_FAILED`: the shell lacks `VOLLEY_AUTH_*`), not a wake; fix it before re-arming. `volleyd status "$WAVE"` is the human-readable view at any time ("are they done?"); `volleyd pause "$WAVE"` / `volleyd stop "$WAVE"` stop admitting or cancel the wave.
 

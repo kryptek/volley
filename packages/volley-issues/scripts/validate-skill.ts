@@ -56,6 +56,9 @@ export const REQUIRED_VOLLEYD_PATH = [
   "volleyd resolve",
   "volleyd cleanup",
   "--yes",
+  // A go/no-go is asked as a picker (the needs-you inbox answers it from any device), not prose.
+  "AskUserQuestion",
+  "`go`, `hold`, `cancel`",
 ] as const;
 
 /**

@@ -8,7 +8,9 @@ import {
   type RemoteStep,
   assertAllowed,
   mintConsentToken,
+  mintHandoffToken,
   mintModelSwitchToken,
+  mintPickerToken,
   renderRemoteScript,
   sealLaunchScript,
   sealRemoteSigninScript,
@@ -510,6 +512,28 @@ describe("remote allow-list (ssh … bash -s)", () => {
         launch,
       }),
     ).toThrow(FenceError);
+  });
+
+  it("tmux send-keys Up|Down|Space and a picker's or handoff's text only with their tokens", () => {
+    const key = (k: string) => step("tmux", "send-keys", "-t", "=w1-T1-implementer:", k);
+    const text = (t: string) =>
+      step("tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", t);
+    for (const k of ["Up", "Down", "Space"])
+      expect(() => assertAllowed(SSH, remote(key(k))), k).toThrow(FenceError);
+    const picker = mintPickerToken({
+      item_id: "p-a1-toolu_1",
+      version: 1,
+      keys: ["Down", "Space"],
+      text: "anchovies",
+    });
+    expect(() => assertAllowed(SSH, { ...remote(key("Down")), picker })).not.toThrow();
+    expect(() => assertAllowed(SSH, { ...remote(key("Up")), picker })).toThrow(FenceError);
+    expect(() => assertAllowed(SSH, { ...remote(text("anchovies")), picker })).not.toThrow();
+    const handoff = mintHandoffToken({ item_id: "h-a1-7", version: 1, text: "ship it" });
+    expect(() => assertAllowed(SSH, { ...remote(text("ship it")), handoff })).not.toThrow();
+    expect(() => assertAllowed(SSH, { ...remote(text("ship it now")), handoff })).toThrow(
+      FenceError,
+    );
   });
 
   it("the trust write: compare the file as read (base64 stdin), write beside it, swap it in", () => {

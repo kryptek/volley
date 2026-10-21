@@ -1,0 +1,23 @@
+
+ ▐▛███▛█   Claude Code v2.1.305
+▝▜██████▀  Haiku 5.5 · Claude Max
+
+❯ Use the AskUserQuestion tool exactly once to ask me "Which fruit do you want?" with header "Fruit" and three
+  single-select options: Apple (description: red), Banana (description: yellow), Cherry (description: small). Do
+  nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Fruit
+
+Which fruit do you want?
+
+❯ 1. Apple
+     red
+  2. Banana
+     yellow
+  3. Cherry
+     small
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
