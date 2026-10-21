@@ -1,0 +1,100 @@
+/*
+ * The lite surface (a11y/surface.ts): on a touch screen, or under
+ * `prefers-reduced-transparency`, nothing in the Desk is a backdrop-filter
+ * surface. A backdrop filter re-samples and re-blurs whatever is behind it on
+ * every frame the canvas moves beneath it, so a dozen glass windows are a
+ * phone GPU's whole frame budget during a pan. Each surface keeps its tokens,
+ * border, radius, shadow and gradient body over an opaque-ish fill of the same
+ * colour. Loaded last (main.tsx), so it wins over the rules it overrides.
+ *
+ * Any new `backdrop-filter` in the Desk's CSS gets its selector here
+ * (test/lite-surface.test.tsx enforces it). Vendored React Bits CSS is never
+ * edited: it is overridden from here.
+ */
+/* biome-ignore lint/correctness/noUnknownMediaFeatureName: prefers-reduced-transparency (Media Queries 5) is newer than Biome's list */
+@media (hover: none) and (pointer: coarse), (prefers-reduced-transparency: reduce) {
+  .win-inner.chrome-glass,
+  .win-inner.chrome-spotlight,
+  .win-inner.chrome-liquid,
+  .dock,
+  .dock-menu-glass,
+  .modal-scrim,
+  .ms-side,
+  .signin-card,
+  .glass-surface--svg,
+  .glass-surface--fallback,
+  .gooey-nav--framed,
+  .stepper--framed,
+  .specular-button,
+  .grid-scan-status {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .win-inner.chrome-glass {
+    background-color: rgba(13, 15, 25, 0.94);
+  }
+  .win-inner.chrome-spotlight {
+    background-color: rgba(12, 14, 22, 0.94);
+  }
+  .win-inner.chrome-liquid {
+    background-color: rgba(8, 10, 18, 0.94);
+  }
+  /* The dock sets `--dock-panel` inline: override the property, not the variable. */
+  .dock,
+  .dock-menu-glass {
+    background: rgba(38, 35, 46, 0.94);
+  }
+  /* look.css draws the dock panel with `.dock-wrap .dock`, which outranks `.dock`: the same gradient, opaque-ish. */
+  .dock-wrap .dock {
+    background: linear-gradient(
+      160deg,
+      rgba(48, 52, 72, 0.94),
+      rgba(22, 24, 36, 0.94) 55%,
+      rgba(12, 13, 22, 0.95)
+    );
+  }
+  .ms-side {
+    background: rgba(38, 39, 46, 0.97);
+  }
+  .signin-card {
+    background: linear-gradient(
+      160deg,
+      rgba(34, 38, 58, 0.96),
+      rgba(14, 16, 28, 0.97) 55%,
+      rgba(10, 11, 20, 0.98)
+    );
+  }
+
+  /* The Needs-you pulse animates opacity (a compositor animation), not a box-shadow repaint. */
+  .win-attn-pulse {
+    animation: none;
+    position: relative;
+  }
+  .win-attn-pulse::after {
+    content: "";
+    position: absolute;
+    inset: -8px;
+    border-radius: 24px;
+    border: 8px solid rgba(255, 122, 89, 0.55);
+    pointer-events: none;
+    animation: attn-pulse-lite 1.8s ease-in-out infinite;
+  }
+  /* Under reduced motion the steady ring (attention.css) stays; the pulse ring does not. */
+  @media (prefers-reduced-motion: reduce) {
+    .win-attn-pulse::after {
+      animation: none;
+      display: none;
+    }
+  }
+}
+
+@keyframes attn-pulse-lite {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}

@@ -4,7 +4,9 @@
  * `win--born` entrance kept for 4 s, and `ResizeObserver` sizing via `onSize`.
  * Chromes (D7): `glass` (default) and `solid` are CSS; `liquid` lays a React
  * Bits `GlassSurface` under the content, `spotlight` wraps it in a
- * `SpotlightCard` and `glow` in a `BorderGlow`, all tinted by the accent. A
+ * `SpotlightCard` and `glow` in a `BorderGlow`, all tinted by the accent. On
+ * the lite surface (a touch screen, `useLiteSurface`) `liquid` renders as
+ * `glass` and styles/lite.css drops every backdrop filter. A
  * window at attention tier `you` is wrapped in its Needs-you effect
  * (`attnStyle`): the pulse (the owner's default), an `ElectricBorder` or a
  * `StarBorder`. The `wrapAttention` slot overrides the effect.
@@ -50,6 +52,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { REDUCED_MOTION_QUERY } from "../a11y/motion";
+import { useLiteSurface } from "../a11y/surface";
 import { type PinMode, pinButtonLabel } from "../layout/pins";
 import type { AttnStyle, Chrome } from "../look/options";
 import BorderGlow from "../rb/BorderGlow/BorderGlow";
@@ -193,6 +196,8 @@ export function Frame(p: FrameProps) {
   const onSize = useRef(p.onSize);
   onSize.current = p.onSize;
   const [born, setBorn] = useState(p.born ?? false);
+  const lite = useLiteSurface();
+  const chrome = lite && p.chrome === "liquid" ? "glass" : p.chrome;
 
   useEffect(() => {
     if (!born) return;
@@ -286,8 +291,8 @@ export function Frame(p: FrameProps) {
   useLayoutEffect(() => () => host.remove(), [host]);
 
   const inner = (
-    <div className={`win-inner win-depth chrome-${p.chrome}`}>
-      {p.chrome === "liquid" && (
+    <div className={`win-inner win-depth chrome-${chrome}`}>
+      {chrome === "liquid" && (
         <div className="win-glass" aria-hidden>
           <GlassSurface
             width="100%"
@@ -356,13 +361,13 @@ export function Frame(p: FrameProps) {
   );
 
   let framed: ReactNode = inner;
-  if (p.chrome === "spotlight") {
+  if (chrome === "spotlight") {
     framed = (
       <SpotlightCard className="win-wrap" spotlightColor={hexA(p.accent, 0.22)} ambient>
         {inner}
       </SpotlightCard>
     );
-  } else if (p.chrome === "glow") {
+  } else if (chrome === "glow") {
     framed = (
       <BorderGlow
         className="win-wrap"
