@@ -1,13 +1,14 @@
 import { parseArgs } from "node:util";
-import type { AdmissionSummary } from "../admission";
+import type { AdmissionSummary, CeilingView } from "../admission";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 
 const HELP = `Usage: volleyd admission [wave] [--json] [--broker-url <url>] [--namespace <ns>]
 
 Show the daemon's current load-aware spawn admission verdict: whether starts are throttled, why
-(one reason per signal), each pressure signal with its threshold, and the per-wave verdicts
-(with a wave: that wave's only).
+(one reason per signal), what the hard ceiling counts (the agents volleyd runs or is starting,
+how many are still launching, and each wave's share), each pressure signal with its threshold,
+and the per-wave verdicts (with a wave: that wave's only).
 --json prints the payload exactly as published on volley/_system/admission (with a wave, its
 per-wave verdicts narrowed to that wave).
 `;
@@ -68,13 +69,24 @@ export function admissionFor(s: AdmissionSummary, wave: string): AdmissionSummar
   return { ...s, waves: v !== undefined ? { [wave]: v } : {} };
 }
 
-/** Human-readable verdict: a header, the reasons, one line per signal, one line per wave. */
+/** `ceiling: 4/12 live agents · 2 launching · by wave: w1 3, w2 1` (no wave share: no tail). */
+export function formatCeiling(c: CeilingView): string {
+  const waves = Object.entries(c.by_wave).map(([w, n]) => `${w} ${n}`);
+  const by = waves.length > 0 ? ` · by wave: ${waves.join(", ")}` : "";
+  return `ceiling: ${c.live}/${c.max} live agents · ${c.launching} launching${by}`;
+}
+
+/**
+ * Human-readable verdict: a header, the reasons, the hard ceiling's count, one line per signal,
+ * one line per wave.
+ */
 export function formatAdmission(s: AdmissionSummary): string {
   const allow = s.allow === null ? "no pressure limit" : `allow ${s.allow}`;
   const lines = [
     `admission: ${s.throttled ? "THROTTLED" : "open"} (${allow})  sampled ${s.sampled_at}`,
   ];
   for (const r of s.reasons) lines.push(`  - ${r}`);
+  if (s.ceiling !== undefined) lines.push(formatCeiling(s.ceiling));
   lines.push("signals:");
   const w = Math.max(...Object.keys(s.signals).map((k) => k.length));
   for (const [name, sig] of Object.entries(s.signals)) {

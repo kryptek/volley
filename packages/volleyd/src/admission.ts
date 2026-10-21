@@ -330,6 +330,24 @@ export interface AdmissionSummary {
   reasons: string[];
   signals: Record<SignalName, SignalReport>;
   waves?: Record<string, { allow: number | null; reasons: string[] }>;
+  /** What the hard ceiling counts now (absent from a supervisor that predates it). */
+  ceiling?: CeilingView;
+}
+
+/**
+ * The agents the hard ceiling counts: `live` in all (supervised, starting, and admitted tasks
+ * queued for their implementer), `launching` the part not supervised yet, and `by_wave` each
+ * wave's share (a wave with none is absent).
+ */
+export interface CeilingCount {
+  live: number;
+  launching: number;
+  by_wave: Record<string, number>;
+}
+
+/** `CeilingCount` with the global `hard_ceiling` it is held to. */
+export interface CeilingView extends CeilingCount {
+  max: number;
 }
 
 export const allowJson = (allow: number): number | null => (Number.isFinite(allow) ? allow : null);

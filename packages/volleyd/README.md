@@ -174,7 +174,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd ack <wave> --cursor <name> --seq <N>` | Advance the cursor to `N`. Ack **after** acting, so a crash replays. |
 | `volleyd config get [path] [--wave <id>] [--json]` | Effective config (or one dotted path), optionally with a wave's overrides. |
 | `volleyd config set <path> <value> [--by <who>]` | Change a tunable at runtime (validated, journaled, hot-applied). `<value>` is YAML. |
-| `volleyd admission [wave] [--json]` | The current spawn admission verdict: throttled or not, why, every pressure signal, per-wave verdicts (with a wave: that wave's only). |
+| `volleyd admission [wave] [--json]` | The current spawn admission verdict: throttled or not, why, what the hard ceiling counts (`ceiling: 4/12 live agents · 2 launching · by wave: w1 3, w2 1`), every pressure signal, per-wave verdicts (with a wave: that wave's only). |
 | `volleyd spawn <wave> <task> [--role <role>] [--json]` | Spawn one agent now, outside admission. Returns once it is launched or refused (`SPAWN_LOCKED`, …); the daemon then verifies it. |
 | `volleyd cleanup <wave> [--yes] [--force]` | Remove retired agents' cmux workspaces and worktrees. Without `--yes` only prints the plan. Branches are kept. |
 
@@ -215,8 +215,12 @@ and work while the daemon is down; use the wave `_system` for global events (`co
 - **Scheduler** (`src/scheduler.ts`): `ready` = queued, not admitted, every `after` done; ordered
   by critical path length (longest downstream chain first), then by `files` overlap with active
   tasks, then id. `admit` takes an admission verdict `{ allow, reasons }` (pressure-based
-  admission plugs in here later) and never exceeds the hard ceiling (live agents across all waves)
-  or the wave's spawn budget. Lowering a limit admits nothing new and preempts nothing.
+  admission plugs in here later) and never exceeds the hard ceiling or the wave's spawn budget.
+  The hard ceiling counts the agents volleyd runs or is starting, across all waves and machines:
+  supervised, launched and being verified, spawning (a release stage's agent too), and each
+  admitted task of a running wave still queued for its first agent. A task's stage counts nothing
+  by itself: a task awaiting a decision or blocked, or one in a paused, stopped or ended wave,
+  holds a slot only while one of its agents is live. Lowering a limit admits nothing new and preempts nothing.
   Unadmitted ready tasks show the reasons in `why_waiting`, e.g. `hard ceiling reached: 2/2 live agents`.
 - **Restart**: the daemon reopens every journal under `$VOLLEYD_HOME/waves/`, re-publishes each
   wave's state, and resumes admission.
@@ -309,7 +313,8 @@ that the scheduler applies on top of the hard ceiling and spawn budget:
 - **Reasons everywhere**: the verdict's reasons become `why_waiting` on the wave's ready tasks
   (`memory pressure critical (level 4 > max 2)`), joined by the ceiling/budget reasons, and are
   published retained on `volley/_system/admission` (`spec/schemas/admission.schema.json`) with
-  every signal's value and threshold. `volleyd admission` prints it.
+  every signal's value and threshold, and the hard ceiling's count (`ceiling`). `volleyd admission`
+  prints it; `volleyd status` heads its output with `hard ceiling: 4/12`.
 - **Hot**: thresholds are read from the config store per wave (`config:` overrides apply); a
   `config_set` re-decides the last sample with the new thresholds immediately.
 
@@ -1186,7 +1191,7 @@ becomes claimable only after a full `claim_after_s`. A claim must name a stable 
   with `workspace_closed: false`). A stopped wave can be resumed explicitly; resumed within the
   grace, its agents carry on and their screens are captured again. Known gap until the pipeline stages can respawn: `stop` journals
   no `task_cancelled`, so after `resume` the tasks that were running come back as active (still
-  in their stage, counting against `hard_ceiling`) with no agent working them.
+  in their stage) with no agent working them; with no live agent they hold no `hard_ceiling` slot.
 - `stop --all` is the **kill switch**: the switch is journaled in `_system` first (so it holds
   even if the daemon dies part-way, and survives restarts), every wave stops, and the daemon refuses `run` with `kill switch engaged` until
   `resume --all`, and spawns nothing (neither admitted tasks nor `volleyd spawn`). Anyone may

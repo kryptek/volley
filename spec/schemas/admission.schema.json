@@ -44,6 +44,29 @@
                   "reasons": { "type": "array", "items": { "type": "string" } }
                 }
               }
+            },
+            "ceiling": {
+              "type": "object",
+              "description": "What the hard ceiling counts: the agents the supervisor runs or is starting in every wave (supervised, launched and being verified, spawning, and admitted tasks of running waves queued for their first agent). See spec section 4.6.4.",
+              "required": ["live", "max", "launching", "by_wave"],
+              "properties": {
+                "live": { "type": "integer", "minimum": 0 },
+                "max": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "The global hard_ceiling."
+                },
+                "launching": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "The part of live not supervised yet."
+                },
+                "by_wave": {
+                  "type": "object",
+                  "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                  "additionalProperties": { "type": "integer", "minimum": 1 }
+                }
+              }
             }
           }
         }
