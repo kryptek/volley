@@ -129,6 +129,11 @@ describe("launch.sh", () => {
     );
     // The primary profile: no CLAUDE_CONFIG_DIR line at all.
     expect(script).not.toContain("CLAUDE_CONFIG_DIR");
+    // The auto-compact window comes right after the profile's unset line, and seals.
+    const compact = renderLaunchScript({ ...vars, autoCompactWindow: 850000 }).split("\n");
+    const unset = compact.findIndex((l) => l.startsWith("unset ANTHROPIC_API_KEY"));
+    expect(compact[unset + 1]).toBe("export CLAUDE_CODE_AUTO_COMPACT_WINDOW='850000'");
+    expect(() => sealLaunchScript(vars.worktree, compact.join("\n"))).not.toThrow();
   }
 
   it("agent_mcp: inherit drops --strict-mcp-config but keeps volleyd's own `volley` server", () => {
@@ -354,6 +359,30 @@ describe("launch (local cmux host)", () => {
     );
   });
 
+  it("agent_auto_compact_pct (default 85) exports the model's compact window after VOLLEY_HOOKS_DIR", async () => {
+    env = await makeSpawnEnv();
+    env.deps.tunables = { ...env.deps.tunables, agent_auto_compact_pct: 85 };
+    expect((await spawnAgent(env.request(), env.deps)).kind).toBe("launched");
+    const lines = readFileSync(join(env.worktree, ".volley", "launch.sh"), "utf-8").split("\n");
+    const hooks = lines.findIndex((l) => l.startsWith("export VOLLEY_HOOKS_DIR="));
+    expect(lines[hooks + 1]).toBe("export CLAUDE_CODE_AUTO_COMPACT_WINDOW='850000'");
+    expect(lines.filter((l) => l.includes("CLAUDE_CODE_AUTO_COMPACT_WINDOW"))).toHaveLength(1);
+    expect(env.events.find((e) => e.type === "agent_spawned")?.data).toMatchObject({
+      auto_compact_window: 850000,
+    });
+  });
+
+  it("agent_auto_compact_pct: 0 exports no compact window and journals none", async () => {
+    env = await makeSpawnEnv();
+    env.deps.tunables = { ...env.deps.tunables, agent_auto_compact_pct: 0 };
+    expect((await spawnAgent(env.request(), env.deps)).kind).toBe("launched");
+    const script = readFileSync(join(env.worktree, ".volley", "launch.sh"), "utf-8");
+    expect(script).not.toContain("CLAUDE_CODE_AUTO_COMPACT_WINDOW");
+    expect(env.events.find((e) => e.type === "agent_spawned")?.data).not.toHaveProperty(
+      "auto_compact_window",
+    );
+  });
+
   it("launch.sh, run by bash, execs claude with the brief as one positional argument", async () => {
     await launchWithCmux();
     // A stand-in claude that records its argv and env.
@@ -362,16 +391,17 @@ describe("launch (local cmux host)", () => {
     const record = join(env.dir, "claude-args");
     writeFileSync(
       join(bin, "claude"),
-      `#!/usr/bin/env bash\nprintf '%s\\0' "$VOLLEY_HOOKS_DIR" "$@" > ${JSON.stringify(record)}\n`,
+      `#!/usr/bin/env bash\nprintf '%s\\0' "$VOLLEY_HOOKS_DIR" "$CLAUDE_CODE_AUTO_COMPACT_WINDOW" "$@" > ${JSON.stringify(record)}\n`,
     );
     chmodSync(join(bin, "claude"), 0o755);
     execFileSync("bash", [".volley/launch.sh"], {
       cwd: env.worktree,
       env: { PATH: `${bin}:/usr/bin:/bin`, HOME: env.dir },
     });
-    const [hooksDir, ...args] = readFileSync(record, "utf-8").split("\0").slice(0, -1);
+    const [hooksDir, compact, ...args] = readFileSync(record, "utf-8").split("\0").slice(0, -1);
     const brief = readFileSync(join(env.worktree, ".volley", "brief.md"), "utf-8");
     expect(hooksDir).toBe("/opt/volley/packages/volley-hooks");
+    expect(compact).toBe("850000");
     expect(args).toEqual([
       "--dangerously-skip-permissions",
       "--model",

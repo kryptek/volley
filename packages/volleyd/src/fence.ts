@@ -171,7 +171,9 @@ import { AGENT_BRANCH } from "./worktree";
  *     config, HEAD, gitfile or hook, or a case variant of launch.sh), an absolute path ending in
  *     `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh`
  *     (what the tmux session runs) is written whole, never appended, and its content must be
- *     exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS); a
+ *     exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS: a
+ *     `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the profile block, an
+ *     integer in 100000..1000000, never in the env block); a
  *     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
  *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG); and
  *     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
@@ -1619,6 +1621,11 @@ const unshq = (q: string) => q.slice(1, -1).replace(/'\\''/g, "'");
 const LAUNCH_EXPORT = new RegExp(`^export ([A-Z0-9_]+)=(${SHQ})$`);
 const LAUNCH_HOOKS = new RegExp(`^export VOLLEY_HOOKS_DIR=(${SHQ})$`);
 const LAUNCH_PROFILE = new RegExp(`^export CLAUDE_CONFIG_DIR=(${SHQ})$`);
+/** The auto-compact window: a plain token count, never suffixed (`850k`) or signed. */
+const LAUNCH_COMPACT = /^export CLAUDE_CODE_AUTO_COMPACT_WINDOW='([1-9][0-9]{5,6})'$/;
+/** The window Claude Code accepts, in tokens (src/claude/context-window.ts clamps to it). */
+const COMPACT_WINDOW_MIN = 100_000;
+const COMPACT_WINDOW_MAX = 1_000_000;
 const LAUNCH_EXEC = new RegExp(
   `^exec claude .* --model (${SHQ}) --settings ${SHQ}( --strict-mcp-config)? --mcp-config=(${SHQ}) --name (${SHQ}) -- `,
 );
@@ -1691,7 +1698,8 @@ function profileDirAllowed(dir: string, worktree: string): boolean {
  * well-formed model id, agent id, absolute hooks directory (never inside a `.volley/`, where
  * volleyd writes), env block (`launchEnvAllowed`: a second VOLLEY_HOOKS_DIR export would win in
  * bash and point every hook at other code), optional Claude account profile (`CLAUDE_CONFIG_DIR`,
- * `profileDirAllowed`, with its credential env unset) and `worktree` — so
+ * `profileDirAllowed`, with its credential env unset), optional auto-compact window (the line
+ * after the profile block: an integer in Claude Code's 100000..1000000) and `worktree` — so
  * `--mcp-config=` names exactly `<worktree>/.volley/mcp.json` (with `--strict-mcp-config`, or
  * without it under `agent_mcp: inherit`, and `--` before the prompt). Parsed back into its
  * values and re-rendered, so not one byte can differ from a script volleyd writes.
@@ -1705,11 +1713,14 @@ function isLaunchScript(content: string, worktree: string): boolean {
   // A Claude account profile: its CLAUDE_CONFIG_DIR export (re-rendered below with its unset).
   const profile = LAUNCH_PROFILE.exec(lines[5] ?? "");
   const claudeConfigDir = profile !== null ? unshq(profile[1] as string) : undefined;
+  const at = profile !== null ? 7 : 5;
+  const compact = LAUNCH_COMPACT.exec(lines[at] ?? "");
+  const autoCompactWindow = compact !== null ? Number(compact[1]) : undefined;
   // `agent_mcp: inherit` (the user's MCP servers load too) renders no --strict-mcp-config.
   const strict = run[2] !== undefined;
   const env: Record<string, string> = {};
   // The exports end before launch.sh's `unset VOLLEY_COORDINATOR` and claude check.
-  for (const line of lines.slice(profile !== null ? 7 : 5, -4)) {
+  for (const line of lines.slice(compact !== null ? at + 1 : at, -4)) {
     const m = LAUNCH_EXPORT.exec(line);
     if (m === null || Object.hasOwn(env, m[1] ?? "")) return false;
     env[m[1] as string] = unshq(m[2] as string);
@@ -1722,9 +1733,12 @@ function isLaunchScript(content: string, worktree: string): boolean {
     env,
     ...(claudeConfigDir !== undefined ? { claudeConfigDir } : {}),
     ...(strict ? {} : { agentMcp: "inherit" as const }),
+    ...(autoCompactWindow !== undefined ? { autoCompactWindow } : {}),
   };
   return (
     (claudeConfigDir === undefined || profileDirAllowed(claudeConfigDir, worktree)) &&
+    (autoCompactWindow === undefined ||
+      (autoCompactWindow >= COMPACT_WINDOW_MIN && autoCompactWindow <= COMPACT_WINDOW_MAX)) &&
     outsideVolley(vars.hooksDir) &&
     MODEL_ID.test(vars.model) &&
     AGENT_ID.test(vars.agentId) &&

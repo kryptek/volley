@@ -100,6 +100,11 @@ export interface LaunchScriptVars {
   claudeConfigDir?: string;
   /** `inherit`: the user's MCP servers load too (no `--strict-mcp-config`); absent: `strict`. */
   agentMcp?: AgentMcp;
+  /**
+   * `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in tokens (`agent_auto_compact_pct`,
+   * src/claude/context-window.ts); absent: not exported (Claude Code's own default).
+   */
+  autoCompactWindow?: number;
 }
 
 /**
@@ -115,7 +120,8 @@ export interface LaunchScriptVars {
  * from `.volley/agent.json`; `env` exports (remote hosts) are for tooling that reads env only —
  * the identity file wins. Under a Claude account profile it exports
  * `CLAUDE_CONFIG_DIR` and unsets every credential variable, so the profile's own login is the one
- * claude uses.
+ * claude uses. Next, `CLAUDE_CODE_AUTO_COMPACT_WINDOW=<tokens>` when `autoCompactWindow` is set:
+ * the context size at which claude compacts the conversation.
  */
 export function renderLaunchScript(v: LaunchScriptVars): string {
   const strict = v.agentMcp === "inherit" ? "" : " --strict-mcp-config";
@@ -127,6 +133,9 @@ export function renderLaunchScript(v: LaunchScriptVars): string {
     `export VOLLEY_HOOKS_DIR=${shq(v.hooksDir)}`,
     ...(v.claudeConfigDir !== undefined
       ? [`export CLAUDE_CONFIG_DIR=${shq(v.claudeConfigDir)}`, `unset ${CREDENTIAL_ENV.join(" ")}`]
+      : []),
+    ...(v.autoCompactWindow !== undefined
+      ? [`export CLAUDE_CODE_AUTO_COMPACT_WINDOW=${shq(String(v.autoCompactWindow))}`]
       : []),
     ...Object.entries(v.env ?? {}).map(([k, val]) => `export ${k}=${shq(val)}`),
     // A coordinator name in the person's profile must not make every worker a coordinator.

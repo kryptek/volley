@@ -74,6 +74,10 @@
 # plugin servers and connectors).
 # agent_mcp: strict
 
+# The share of an agent's context window at which Claude Code compacts its conversation (README
+# "Auto-compaction"): 85 compacts where the Desk's meter turns red; 0 leaves Claude Code's default.
+# agent_auto_compact_pct: 85
+
 # What the reviewers flag as public hygiene (person names, local usernames, machine paths,
 # private hostnames or IPs): auto (read the repository's visibility once per wave version: P1
 # for a public repository or one whose visibility cannot be read, a non-blocking P3 for a
