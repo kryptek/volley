@@ -804,10 +804,12 @@ longest chain) and is placed and admitted like any task. It never appears in the
   fix_landed: <test> }`, under the wave's `branch_update`) at its red head. Its new head is
   verified (CI) and the pipeline goes on from where the flake stopped it (the reviews, or the
   gate).
-- **A fixer that fails.** Cancelled, `blocked`, or one of its decisions escalated:
-  `remediation_closed { outcome: failed, why, released: [] }`, and each blocked task's red head
-  goes back to the owner once, escalated `unattended_safety`: its open decision is escalated, or
-  an answered one is asked again (without `fix flake`) with the fixer's PR and agents.
+- **A fixer that fails.** Cancelled, `blocked` (its `agent_blocked` decision, with or without
+  autopilot), or one of its decisions escalated: `remediation_closed { outcome: failed, why,
+  released: [] }`, and each blocked task's red head goes back to the owner once, escalated
+  `unattended_safety`: its open decision is escalated, or an answered one is asked again (without
+  `fix flake`) with the fixer's PR and agents. If the owner unblocks it and it merges after all,
+  it is closed again, `landed`, and the cascade above runs.
 
 `volleyd status` shows a fixer as `fix-<slug>  <stage>  fixer for T3, T7 (flake: <test>)`; the
 wave state carries `tasks[].synthetic: true` and `tasks[].remediation` (with `test_file`,

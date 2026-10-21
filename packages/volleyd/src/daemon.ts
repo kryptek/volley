@@ -5030,26 +5030,30 @@ export class Daemon {
       if (req !== null) void this.enqueue(() => this.requestFixer(wave, req));
       return;
     }
+    // A fixer closed failed can still land: the owner unblocks it and its fix merges after all.
     const fixer = rec.wave?.tasks[e.task];
-    if (fixer?.synthetic !== true || fixer.remediation?.outcome !== undefined) return;
+    const outcome = fixer?.remediation?.outcome;
+    if (fixer?.synthetic !== true || outcome === "landed") return;
     const id = fixer.id;
     if (e.type === "stage_entered" && e.data.stage === "done")
       void this.enqueue(() => this.closeFixer(wave, id, null));
-    const why = fixerFailure(e);
+    const why = outcome === undefined ? fixerFailure(e) : null;
     if (why !== null) void this.enqueue(() => this.closeFixer(wave, id, why));
   }
 
   /**
    * Level-triggered backstop for noteRemediation (a restart between a fixer's end and its
-   * `remediation_closed`): every fixer that is done or cancelled is closed.
+   * `remediation_closed`): every fixer that is done (and not closed landed) or cancelled (and not
+   * closed) is closed.
    */
   private async settleFixers(wave: WaveId): Promise<void> {
     const rec = this.waves.get(wave)?.record;
     for (const f of rec !== undefined ? fixers(rec) : []) {
-      if (f.remediation?.outcome !== undefined) continue;
+      const outcome = f.remediation?.outcome;
       const stage = rec?.state?.tasks.find((t) => t.id === f.id)?.stage;
-      if (stage === "done") await this.closeFixer(wave, f.id, null);
-      else if (stage === "cancelled") await this.closeFixer(wave, f.id, "cancelled");
+      if (stage === "done" && outcome !== "landed") await this.closeFixer(wave, f.id, null);
+      else if (stage === "cancelled" && outcome === undefined)
+        await this.closeFixer(wave, f.id, "cancelled");
     }
   }
 
@@ -5118,12 +5122,14 @@ export class Daemon {
    * A fixer settled. Merged (`why` null): `remediation_closed` releases the tasks still parked on
    * its test; their open red-head decisions are resolved `fix landed`, and each takes the fix from
    * the release branch (pipeline `fix_landed`). Failed: `remediation_closed { outcome: failed }`
-   * and each blocked task's red head goes back to the owner, escalated, once.
+   * and each blocked task's red head goes back to the owner, escalated, once. A fixer closed failed
+   * that merges after all is closed again, landed.
    */
   private async closeFixer(wave: WaveId, fixer: TaskId, why: string | null): Promise<void> {
     const rec = this.waves.get(wave)?.record;
     const r = rec?.wave?.tasks[fixer]?.remediation;
-    if (rec === undefined || r === undefined || r.outcome !== undefined) return;
+    if (rec === undefined || r === undefined || r.outcome === "landed") return;
+    if (why !== null && r.outcome === "failed") return;
     const blocked = releasedBy(rec, fixer);
     const base = { kind: r.kind, test: r.test, task: fixer };
     if (why === null) {
@@ -8909,14 +8915,17 @@ const DECISION_RECORD_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Why a fixer task's event means it will not land its fix (SPEC §4.6.16): cancelled, blocked, or
- * one of its decisions escalated. null: it does not.
+ * Why a fixer task's event means it will not land its fix (SPEC §4.6.16): cancelled, blocked (its
+ * agent's `blocked` opens an agent_blocked decision), or one of its decisions escalated. null: it
+ * does not.
  */
 function fixerFailure(e: JournalEvent): string | null {
   if (e.type === "task_cancelled")
     return typeof e.data.by === "string" ? `cancelled by ${e.data.by}` : "cancelled";
   if (e.type === "stage_entered" && e.data.stage === "blocked")
     return typeof e.data.why === "string" ? `blocked: ${e.data.why}` : "blocked";
+  if (e.type === "decision_opened" && e.data.kind === "agent_blocked")
+    return typeof e.data.question === "string" ? `blocked: ${e.data.question}` : "blocked";
   if (e.type === "decision_escalated")
     return `its ${String(e.data.kind)} decision escalated (${String(e.data.why)})`;
   return null;

@@ -377,6 +377,7 @@ export function reducePipeline(
       p.why = typeof d.why === "string" ? d.why : undefined;
       if (Array.isArray(d.roles)) {
         // A flake's fix taken (landedFix): where the pipeline goes on once the update is verified.
+        // Read before p.rebasing is overwritten below: a parked pre-gate update resumes at the gate.
         p.fix_resume =
           typeof d.fix_landed === "string" ? (p.rebasing ? "gate" : "next") : undefined;
         p.step = d.step as number;

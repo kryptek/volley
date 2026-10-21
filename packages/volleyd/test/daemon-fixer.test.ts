@@ -235,6 +235,55 @@ describe("the flake fixer task (SPEC §4.6.16)", () => {
     expect(of(j, "remediation_closed")).toHaveLength(1);
   });
 
+  it("the fixer blocked (its agent_blocked decision): remediation_closed failed; merged after all, it still lands", async () => {
+    s = await env();
+    await flaky(s, "T3");
+    const d3 = await ciFailed(s, "T3");
+    await s.event((e) => e.type === "agent_spawned" && e.task === FIXER);
+    await s.settled();
+    // The brief's route when the only fix is a skip or quarantine: `blocked`, a decision for the
+    // owner (not escalated: autopilot is off).
+    await s.daemon.recordEvent("w1", {
+      type: "decision_opened",
+      task: FIXER,
+      data: {
+        decision_id: "blk-fixer",
+        kind: "agent_blocked",
+        question: "only a quarantine would fix it",
+        options: ["unblock", "cancel"],
+        pointers: {},
+      },
+    } satisfies NewEvent);
+    const failed = await s.event("remediation_closed");
+    await s.event("decision_escalated");
+    await s.settled();
+    expect(failed.data).toMatchObject({
+      task: FIXER,
+      outcome: "failed",
+      why: expect.stringContaining("blocked"),
+      released: [],
+    });
+    expect(of(s.journal(), "decision_escalated").map((e) => e.data.decision_id)).toEqual([d3]);
+    // The owner unblocks it after all and its fix merges: the blocked task is still released.
+    await s.daemon.recordEvent("w1", {
+      type: "stage_entered",
+      task: FIXER,
+      data: { stage: "done" },
+    });
+    const landed = await s.event("remediation_closed", 2);
+    await s.event((e) => e.type === "stage_entered" && e.task === "T3" && e.data.rebase === true);
+    await s.settled();
+    expect(landed.data).toMatchObject({ outcome: "landed", released: ["T3"] });
+    const j = s.journal();
+    expect(of(j, "remediation_closed")).toHaveLength(2);
+    expect(
+      j.find((e) => e.type === "decision_resolved" && e.data.decision_id === d3)?.data,
+    ).toMatchObject({
+      answer: "fix landed",
+      by: "volleyd",
+    });
+  });
+
   it("a restart closes a fixer that ended just before a crash (no remediation_closed journaled)", async () => {
     s = await env();
     await flaky(s, "T3");
