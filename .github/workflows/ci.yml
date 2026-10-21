@@ -5,6 +5,9 @@ on:
     branches: [main, "release/**"]
   pull_request:
     branches: [main, "release/**"]
+    # labeled/unlabeled: adding `no-changelog` re-runs the fragment check with the new labels
+    # (`gh run rerun` reuses the original event payload, so it never sees a label added later).
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 jobs:
   validate-schemas:

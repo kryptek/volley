@@ -655,8 +655,11 @@ disagree, a merge conflict, an agent blocked, a plan change. It is a journal eve
   resolved, puts it back in the stage it was in. The task's resolved decisions are written to
   `.volley/decisions.md` in its task directory for the next stage's brief: the task's latest
   worktree (from its `agent_spawned`), or `$VOLLEYD_HOME/waves/<wave>/tasks/<task>/` before the
-  task has one or when spawning is off. A failed write is logged and the answer omits `brief`; the
-  resolution itself stands. Resolving an unknown id is an error; resolving twice is a no-op.
+  task has one or when spawning is off. The worktree's file is written through the task's host, so
+  a task on a paired machine gets it in its worktree there (over ssh), not at that path on the
+  supervisor's disk. A failed write is logged, journaled once per decision as `alarm_raised
+  { alarm: "decisions_file_unwritten", decision_id, path, error }`, and the answer omits `brief`;
+  the resolution itself stands. Resolving an unknown id is an error; resolving twice is a no-op.
 - **Answers it cannot apply are refused.** An answer is one of the decision's options (case and
   spacing aside) or free-form text, except for the kinds the supervisor carries out itself, where
   an answer it cannot apply is refused with code `BAD_ANSWER` (`volleyd resolve` and `volleyd
