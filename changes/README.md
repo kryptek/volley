@@ -61,4 +61,9 @@ release PR (a volley-cli test ties the newest section to the root version).
 - A PR that touches `packages/` or `spec/` adds at least one fragment here, unless it carries
   the `no-changelog` label.
 - A commit that changes `CHANGELOG.md` is a release commit: its subject starts with `release:`
-  or `chore(release):`. The check runs on pushes to and PRs into `release/**`.
+  or `chore(release):` (in any case). The check runs on pushes to and PRs into `release/**`.
+- The release steps in `packages/volley-issues/SKILL.md` pass both by construction: the
+  release-prep PR into the release branch is titled `release: <v> — <theme>` and labelled
+  `no-changelog` (`bun scripts/changelog-ci.ts labels --ensure` creates the label when the
+  repository lacks it), the PR into `main` is titled `release: <date> — <theme>`, and both
+  squash with `--subject "release: …"`. Adding or removing a label re-runs the check.

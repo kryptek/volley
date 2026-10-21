@@ -10,6 +10,9 @@
  *     changes it is a release commit (its subject
  *     starts with `release:` or `chore(release):`, as `bun run changelog --commit` writes).
  *     An all-zero base (the push that creates a branch) is skipped.
+ *   bun scripts/changelog-ci.ts labels --ensure
+ *     Creates the `no-changelog` label in the current GitHub repository (through `gh`) when it is
+ *     missing; a no-op when it exists. The release steps run it before labelling the release PR.
  *
  * Exit code: 0 when the rule holds; 1 with the reason when it does not; 2 on usage.
  */
@@ -18,8 +21,11 @@ import { parseArgs } from "node:util";
 
 export const NO_CHANGELOG_LABEL = "no-changelog";
 
-/** The subjects of the commits allowed to change CHANGELOG.md. */
-const RELEASE_SUBJECT = /^(release:|chore\(release\):)/;
+/**
+ * The subjects of the commits allowed to change CHANGELOG.md. Case-insensitive: a release PR
+ * squash-merged under its title (`Release: <date> — <theme>`) is a release commit too.
+ */
+const RELEASE_SUBJECT = /^(release:|chore\(release\):)/i;
 
 /**
  * The one non-release commit allowed to change CHANGELOG.md: #231's, which moved its `## Unreleased`
@@ -110,13 +116,38 @@ export function parseLog(out: string): Commit[] {
     });
 }
 
-const USAGE =
-  "usage: bun scripts/changelog-ci.ts fragment|untouched --base <sha> --head <sha> [--labels <a,b>]";
+const USAGE = [
+  "usage: bun scripts/changelog-ci.ts fragment|untouched --base <sha> --head <sha> [--labels <a,b>]",
+  "       bun scripts/changelog-ci.ts labels --ensure",
+].join("\n");
+
+/** Runs `gh <args>` and returns its stdout; throws with gh's stderr on failure. */
+export type Gh = (...args: string[]) => string;
+
+/** Creates the `no-changelog` label when the repository lacks it; true when it created it. */
+export function ensureLabels(gh: Gh): boolean {
+  const names = gh("label", "list", "--limit", "1000", "--json", "name", "--jq", ".[].name")
+    .split("\n")
+    .map((l) => l.trim());
+  if (names.includes(NO_CHANGELOG_LABEL)) return false;
+  gh(
+    "label",
+    "create",
+    NO_CHANGELOG_LABEL,
+    "--color",
+    "ededed",
+    "--description",
+    "This PR needs no changes/ fragment (see changes/README.md)",
+    "--force",
+  );
+  return true;
+}
 
 export interface MainDeps {
   cwd?: string;
   out?: (s: string) => void;
   err?: (s: string) => void;
+  gh?: Gh;
 }
 
 export function main(argv: string[], deps: MainDeps = {}): number {
@@ -128,13 +159,26 @@ export function main(argv: string[], deps: MainDeps = {}): number {
     return r.stdout;
   };
   const lines = (s: string) => s.split("\n").filter((l) => l !== "");
+  const gh: Gh =
+    deps.gh ??
+    ((...args) => {
+      const r = spawnSync("gh", args, { cwd: deps.cwd, encoding: "utf8" });
+      if (r.status !== 0)
+        throw new Error(`gh ${args.join(" ")} failed: ${(r.stderr ?? "").trim()}`);
+      return r.stdout;
+    });
 
   let check: string | undefined;
-  let values: { base?: string; head?: string; labels?: string };
+  let values: { base?: string; head?: string; labels?: string; ensure?: boolean };
   try {
     const parsed = parseArgs({
       args: argv,
-      options: { base: { type: "string" }, head: { type: "string" }, labels: { type: "string" } },
+      options: {
+        base: { type: "string" },
+        head: { type: "string" },
+        labels: { type: "string" },
+        ensure: { type: "boolean" },
+      },
       strict: true,
       allowPositionals: true,
     });
@@ -143,6 +187,24 @@ export function main(argv: string[], deps: MainDeps = {}): number {
   } catch (e) {
     err(`${(e as Error).message}\n${USAGE}`);
     return 2;
+  }
+  if (check === "labels") {
+    if (!values.ensure) {
+      err(USAGE);
+      return 2;
+    }
+    try {
+      const created = ensureLabels(gh);
+      out(
+        created
+          ? `changelog-ci: created the \`${NO_CHANGELOG_LABEL}\` label`
+          : `changelog-ci: the \`${NO_CHANGELOG_LABEL}\` label exists`,
+      );
+      return 0;
+    } catch (e) {
+      err((e as Error).message);
+      return 1;
+    }
   }
   const { base, head } = values;
   if ((check !== "fragment" && check !== "untouched") || !base || !head) {
