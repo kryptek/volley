@@ -971,7 +971,18 @@ export function demoAutopilot(now = Date.now()): DeskMessage[] {
       task("T5", 212, "merge_ready"),
       task("T7", 213, "merge_ready"),
       task("T9", 214, "merge_ready"),
-      { ...task("T3-ci1", 211, "fixup"), synthetic: { for: ["T3", "T7"] } },
+      {
+        ...task("fix-queue-order-flake", 0, "fixup"),
+        synthetic: true,
+        remediation: {
+          kind: "fix_flake",
+          test: "merge queue > orders by dependents",
+          since: iso(now - 6 * 60_000),
+          test_file: "packages/volleyd/test/merge-queue.test.ts",
+          run_urls: ["https://github.com/example/repo/actions/runs/1"],
+          for: ["T3", "T7"],
+        },
+      },
     ],
     gates: ["T3", "T5", "T7", "T9"],
     spec: {
