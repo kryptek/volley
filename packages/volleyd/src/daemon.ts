@@ -229,6 +229,7 @@ import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
 import { mintConsentToken, mintModelSwitchToken, mintWakeToken } from "./fence";
 import { LOCAL_HOST } from "./fleet-name";
+import { lockFetches } from "./git-lock";
 import type { Host } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import {
@@ -5735,11 +5736,16 @@ export class Daemon {
     d = new PipelineDriver(wave, {
       exec: this.host.exec,
       // A task on a remote host (T15): its worktrees, and so its git / gh checks, are on the box.
+      // The artifact probes fetch in worktrees of the task's clone: one fetch into it at a time.
       execFor: (task) => {
         const t = this.ranDef(log.record, task);
-        return t === undefined || t.host === "local" || this.autoHostReached(wave, t)
-          ? this.host.exec
-          : this.remoteHost(wave, t).exec;
+        if (t === undefined || t.host === "local" || this.autoHostReached(wave, t)) {
+          const w = log.record.wave;
+          return w == null ? this.host.exec : lockFetches(this.host.exec, LOCAL_HOST, expandHome(w.repo));
+        }
+        const remote = this.remoteHost(wave, t);
+        // Keyed like spawn's fetches into the same clone (spawn.ts: `expandHome(req.wave.repo)`).
+        return lockFetches(remote.exec, remote.name, expandHome(remote.spec.repo));
       },
       worktreeGone: (task, path) => worktreeGone(this.ranDef(log.record, task), path),
       home: this.opts.home,
@@ -6171,7 +6177,12 @@ export class Daemon {
     if (d !== undefined) return d;
     const log = this.waves.get(wave) as WaveLog;
     d = new ReleaseTrain(wave, {
-      exec: this.host.exec,
+      // A stage is verified in a worktree of the wave's clone: its fetch takes the clone's lock.
+      exec: (argv, opts) => {
+        const repo = log.record.wave?.repo;
+        if (repo == null) return this.host.exec(argv, opts);
+        return lockFetches(this.host.exec, LOCAL_HOST, expandHome(repo))(argv, opts);
+      },
       home: this.opts.home,
       view: () => {
         const st = log.record.state;

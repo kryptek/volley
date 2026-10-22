@@ -37,6 +37,10 @@ import { schemaErrors } from "./helpers/schema";
 
 const ID = "w1-t1-implementer-1";
 
+/** git losing a ref update to a concurrent fetch into the same clone. */
+const RACE =
+  "error: fetching ref refs/remotes/origin/release/w1 failed: incorrect old value provided";
+
 describe("daemon spawn loop", () => {
   let env: DaemonEnv;
   let agent: VolleyBroker;
@@ -52,6 +56,9 @@ describe("daemon spawn loop", () => {
   const sessions = new Set<Promise<void>>();
   /** With `freshBase`: while true, `git fetch origin release/w1` fails (offline). */
   let fetchFails = false;
+  /** With `freshBase`: the next spawn's fetch loses a ref-lock race to another git process. */
+  let fetchRaces = false;
+  let preparing = false;
 
   const journal = (): JournalEvent[] =>
     readJournalFile(join(env.home, "waves", "w1", "journal.jsonl"));
@@ -133,15 +140,22 @@ describe("daemon spawn loop", () => {
       .on(["gh", "pr", "view"], {
         stdout: JSON.stringify({ state: "OPEN", baseRefName: "release/w1" }),
       });
-    fake.on(["git", "-C", repo, "fetch"], () =>
-      fetchFails ? { code: 128, stderr: "fatal: unable to access origin" } : {},
-    );
+    fake.on(["git", "-C", repo, "fetch"], () => {
+      if (fetchRaces && preparing) {
+        fetchRaces = false;
+        return { code: 1, stderr: RACE };
+      }
+      return fetchFails ? { code: 128, stderr: "fatal: unable to access origin" } : {};
+    });
     creds = memoryCredentials();
     host = fakeHost(fake);
     if (o.freshBase === true) {
       const prepare = host.prepareWorktree.bind(host);
       host.prepareWorktree = async (spec) => {
-        const r = await addWorktree(fake.exec, spec);
+        preparing = true;
+        const r = await addWorktree(fake.exec, spec).finally(() => {
+          preparing = false;
+        });
         await prepare(spec);
         return r;
       };
@@ -329,6 +343,28 @@ describe("daemon spawn loop", () => {
       payload: { tasks: { base_sha?: string }[] };
     };
     expect(state.payload.tasks[0]?.base_sha).toBe("1".repeat(40));
+  });
+
+  it("a fetch that lost a ref-lock race is retried in place: the spawn goes on, fetch_retried journaled", async () => {
+    fetchRaces = true;
+    await setup({ freshBase: true });
+    const spawned = await event("agent_spawned");
+    expect(spawned?.data.base_sha).toBe("1".repeat(40));
+    await event("agent_registered");
+    await waits.settled();
+    expect(fetchRaces).toBe(false);
+    expect(journal().some((e) => e.type === "spawn_failed")).toBe(false);
+    const alarm = journal().find(
+      (e) => e.type === "alarm_raised" && e.data.alarm === "fetch_retried",
+    );
+    expect(alarm?.task).toBe("T1");
+    expect(alarm?.data).toMatchObject({
+      alarm: "fetch_retried",
+      role: "implementer",
+      attempt: 1,
+      host: "local",
+      fetch_error: RACE,
+    });
   });
 
   it("require_fresh_base off: a failed fetch spawns from the local copy and journals a BASE_STALE warning", async () => {
