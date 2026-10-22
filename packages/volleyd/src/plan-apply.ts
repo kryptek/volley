@@ -5,6 +5,7 @@ import {
   resolveEvent,
   waveDecisionId,
 } from "./decisions";
+import { AUTO_HOST } from "./placement";
 import { type HostKept, type PlanDiff, diffPlans } from "./plan-diff";
 import { type WaveRecord, startedHost } from "./reducer";
 import type { JournalEvent, NewEvent, TaskId, TaskState, Wave, WaveTask } from "./types";
@@ -264,7 +265,9 @@ export function applyPlan(rec: WaveRecord, submitted: Wave, ctx: PlanContext): P
       const { host_spec: _s, ...rest } = tasks[id] as WaveTask;
       const spec = cur?.host === ran ? cur.host_spec : undefined;
       tasks[id] = { ...rest, host: ran, ...(spec !== undefined ? { host_spec: spec } : {}) };
-      hostsKept.push({ task: id, kept: ran, planned: t.host, running: p === "in_flight" });
+      // A placed task the plan still leaves to placement is where `auto` put it: nothing kept.
+      if (!(t.host === AUTO_HOST && st?.placement !== undefined))
+        hostsKept.push({ task: id, kept: ran, planned: t.host, running: p === "in_flight" });
     }
 
     const issueD = latestPlanDecision(rec, id, "issue");

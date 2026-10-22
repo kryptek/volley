@@ -359,6 +359,26 @@ describe("task_placed (SPEC §4.6.15)", () => {
     expect(rec.wave?.tasks.T2?.host).toBe("auto");
   });
 
+  it("a placed task spawned on its host gets no host_planned from a version that still says auto (#323)", () => {
+    let rec = replay([
+      ...base,
+      placedA,
+      {
+        seq: 5,
+        at: AT,
+        type: "agent_spawned",
+        task: "T1",
+        data: { role: "implementer", agent_id: "w1-t1-implementer-1", host: "box-a" },
+      },
+    ]);
+    const v2 = { ...wave, version: 2 };
+    rec = apply(rec, { seq: 6, at: AT, type: "wave_versioned", data: { wave: v2, plan: v2 } });
+    const t1 = rec.state?.tasks.find((t) => t.id === "T1");
+    expect(rec.wave?.tasks.T1?.host).toBe("box-a");
+    expect(t1?.host_actual).toBe("box-a");
+    expect(t1?.host_planned).toBeUndefined();
+  });
+
   it("a task spawned before placement keeps the host it runs on across a plan version (#323)", () => {
     const v1 = parseWaveFile(
       "wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n  T2: { issue: 2 }\n",

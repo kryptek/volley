@@ -991,4 +991,28 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       schemaErrors("wave-state.schema.json", await env.retained("volley/_waves/w8/state")),
     ).toEqual([]);
   });
+  it("an unplaced auto task reaching the host resolver raises host_auto_unresolved once and runs locally (#323)", async () => {
+    localClaude = false;
+    await setup({ drain: true });
+    await submit("w9", "placement: auto\n", "  T1: { issue: 42 }\n");
+    await tick();
+    // No eligible machine: T1 stays queued, never placed or spawned, its host still `auto`.
+    expect(daemon.record("w9")?.wave?.tasks.T1?.host).toBe("auto");
+    const d = daemon as unknown as {
+      pipelineFor(w: string): { deps: { execFor(task: string): unknown } };
+    };
+    const { execFor } = d.pipelineFor("w9").deps;
+    expect(execFor("T1")).toBe(local.exec);
+    expect(execFor("T1")).toBe(local.exec);
+    await eventually(async () =>
+      journal("w9").some(
+        (e) => e.type === "alarm_raised" && e.data.alarm === "host_auto_unresolved",
+      ),
+    );
+    const alarms = journal("w9").filter(
+      (e) => e.type === "alarm_raised" && e.data.alarm === "host_auto_unresolved",
+    );
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0]?.task).toBe("T1");
+  });
 });

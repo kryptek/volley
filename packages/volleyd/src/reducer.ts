@@ -323,7 +323,11 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         if (ran === undefined) return t;
         keepTaskHost(next, t.id, ran, prev);
         const planned = plan.tasks[t.id]?.host;
-        return planned !== undefined && planned !== ran ? { ...t, host_planned: planned } : t;
+        // `auto` on a placed task is satisfied by its placement: no conflict to record.
+        const placed = planned === AUTO_HOST && t.placement !== undefined;
+        return planned !== undefined && planned !== ran && !placed
+          ? { ...t, host_planned: planned }
+          : t;
       });
       // A task is placed once: a placed task the new version still leaves to placement keeps
       // its host.

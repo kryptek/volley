@@ -2226,6 +2226,8 @@ plan version that writes another `host:` for it (say `placement: auto` on an in-
 moves it. The reducer records that host from the task's `agent_spawned` as `tasks[].host_actual`,
 and the plan's own as `tasks[].host_planned` while they differ; every later role and check of the
 task (`verify`, `check_merged`) runs on `host_actual`. The tasks that have not started are placed.
+A placed task the new version still leaves to `auto` is where placement put it: no
+`host_planned`, and `volleyd run` reports no kept host for it.
 
 **Eligible.** The candidates are volleyd's own machine and every configured host with a machine
 record. A machine is eligible when its readiness verdict is `ready`, it is not draining, `placed`

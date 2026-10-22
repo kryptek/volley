@@ -3496,6 +3496,8 @@ export class Daemon {
     this.heldBack.delete(wave);
     this.issueFiles.delete(wave);
     this.legacyEndedAt.delete(wave);
+    for (const key of this.autoHostAlarmed)
+      if (key.startsWith(`${wave}/`)) this.autoHostAlarmed.delete(key);
     this.pipelines.delete(wave);
     this.config.clearWave(wave);
     await this.publishArchiveIndex();
