@@ -124,6 +124,8 @@ export function listProblems(
 
 interface SchemaNode {
   properties?: Record<string, SchemaNode>;
+  /** Any other JSON Schema keyword (`type`, `default`, `additionalProperties`, …). */
+  [keyword: string]: unknown;
 }
 
 /** Every tunable key, dotted: objects with fixed `properties` recurse, maps and scalars are keys. */
