@@ -16,10 +16,11 @@ commit messages, branch names or PR text:
 - a private hostname, internal domain or IP address;
 - a private issue or ticket number, or a company or customer name.
 
-Use placeholders (`<repo>`, `/path/to/repo`, `example.com`, `198.51.100.7`) where an example
-needs one. Reviewers flag any of these as a P1. volleyd's reviewers also run this check at P1
-for public repositories, P3 for private ones; set `public_hygiene` in the wave's `config:` to
-force it.
+Use placeholders (`<repo>`, `/path/to/repo`, `/path/to/home`, `example.com`, `198.51.100.7`)
+where an example needs one; a guard test can hold the line on home paths (Volley's own is
+`scripts/no-home-paths.test.ts`). Reviewers flag any of these as a P1. volleyd's reviewers also
+run this check at P1 for public repositories, P3 for private ones; set `public_hygiene` in the
+wave's `config:` to force it.
 
 ## Asking for a go-ahead
 

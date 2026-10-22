@@ -1901,9 +1901,9 @@ inline or as an entry of the config's `hosts` map (an inline `host:` is layered 
 hosts:
   box:
     target: dev@box.example          # ssh destination ([user@]host or an ssh config alias)
-    repo: /home/dev/src/example-repo # the wave repo's clone on the box
-    volley_dir: /home/dev/src/volley # a volley checkout on the box (its hooks)
-    # worktree_root: /home/dev/src/.volley-worktrees   (default: beside repo)
+    repo: /path/to/repo              # the wave repo's clone on the box
+    volley_dir: /path/to/volley      # a volley checkout on the box (its hooks)
+    # worktree_root: /path/to/worktrees   (default: beside repo)
     # tunnel: { remote_port: 21883, supervise: true }
 
 # wave file
@@ -2038,8 +2038,8 @@ account named after the machine (`--name`, default its short hostname) and adds
 hosts:
   box-a:
     target: dev@box-a           # --target: how this machine reaches the new one (default $USER@<hostname>)
-    repo: /home/dev/src/example-repo
-    volley_dir: /home/dev/src/volley
+    repo: /path/to/repo
+    volley_dir: /path/to/volley
     tunnel: { remote_port: 21883, supervise: false }   # the machine keeps its own tunnel
 ```
 
@@ -2259,6 +2259,17 @@ rename), and the reducer folds it into the wave state's `tasks[].placement` and 
 (`tasks[].host`, absent for its own machine). Under `placement: auto`, a task that names its host is journaled `by: "wave_file"`,
 unscored, with that one candidate. `volleyd spawn` refuses a task that is still `auto` (it is
 placed when admitted).
+
+**Switching a running wave to placement.** A task that has spawned keeps the host it runs on: a
+plan version that writes another `host:` for it (say `placement: auto` on an in-flight wave) never
+moves it. The reducer records that host from the task's `agent_spawned` as `tasks[].host_actual`,
+and the plan's own as `tasks[].host_planned` while they differ; every later role and check of the
+task (`verify`, `check_merged`) runs on `host_actual`. The tasks that have not started are placed.
+A placed task the new version still leaves to `auto` is where placement put it: no
+`host_planned`, and `volleyd run` reports no kept host for it. A task whose host is still `auto`
+when a check needs it (never placed, never spawned) never reaches the host resolver: volleyd
+raises `alarm_raised { alarm: "host_auto_unresolved" }` once per task per daemon run and runs that
+check on its own host.
 
 **Eligible.** The candidates are volleyd's own machine and every configured host with a machine
 record. A machine is eligible when its readiness verdict is `ready`, it is not draining, `placed`
@@ -2630,6 +2641,7 @@ holds (running, paused or awaiting a decision) submits the file as that wave's *
 | `after` changed | the new dependencies apply (`waiting_on` re-evaluated) | not paused (it already started); its dependents re-evaluate |
 | `issue` changed | applies | keeps the old issue; decision `plan_change` — `restart` / `let finish` |
 | `pipeline` / `model` changed | applies | applies to stages not yet started; running agents keep theirs |
+| `host` changed (e.g. the wave switched to `placement: auto`) | applies (an `auto` task is placed when admitted) | keeps the host it was spawned on; `volleyd run` prints `T3: host kept local (already running; new plan says auto)` |
 
 Tasks that finished (`merge_ready`, `done`) are left as they are. The scheduler and spawner use the
 *effective* plan: the submitted one, plus removed in-flight tasks and in-flight tasks' old issues,

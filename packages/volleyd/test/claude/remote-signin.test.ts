@@ -23,7 +23,7 @@ import {
 
 const PRINTED = parseSigninUrl(TRANSCRIPT) as string;
 const TARGET = "dev@box-a";
-const DIR = remoteSigninDir("/home/dev");
+const DIR = remoteSigninDir("/path/to/home");
 const SPEC = {
   name: "box-a",
   target: TARGET,

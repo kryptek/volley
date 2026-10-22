@@ -12,13 +12,13 @@ describe("isRepoTrusted", () => {
       projects: {
         "/w/repo": { hasTrustDialogAccepted: true },
         "/w/other": { hasTrustDialogAccepted: false },
-        "/home/me": { hasTrustDialogAccepted: true },
+        "/path/to/home": { hasTrustDialogAccepted: true },
       },
     };
     expect(isRepoTrusted(cfg, "/w/repo")).toBe(true);
     expect(isRepoTrusted(cfg, "/w/other")).toBe(false);
     expect(isRepoTrusted(cfg, "/w/missing")).toBe(false);
-    expect(isRepoTrusted(cfg, "/home/me/src/x")).toBe(true);
+    expect(isRepoTrusted(cfg, "/path/to/home/src/x")).toBe(true);
     expect(isRepoTrusted(null, "/w/repo")).toBe(false);
     expect(isRepoTrusted({ projects: "nope" }, "/w/repo")).toBe(false);
   });
