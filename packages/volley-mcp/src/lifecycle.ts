@@ -1,5 +1,5 @@
 import { VolleyBroker } from "./broker";
-import type { VolleyConfig } from "./config";
+import { DEFAULT_HEARTBEAT_S, type VolleyConfig } from "./config";
 import { buildEnvelope } from "./envelope";
 import type { ServerState } from "./state";
 import { volRegister } from "./tools/register";
@@ -11,7 +11,9 @@ import { buildTopic } from "./topics";
  *  2. publish the initial retained status: spawning,
  *  3. auto-register with default capabilities=[] and cwd=process.cwd() so the
  *     server is SPEC §6.3-compliant by default — agents/skills can re-call
- *     vol_register later to update capabilities/model/cwd (idempotent).
+ *     vol_register later to update capabilities/model/cwd (idempotent),
+ *  4. publish a `progress` heartbeat every `config.heartbeatS` while registered (SPEC §4.3), so a
+ *     session that is quiet on purpose (blocked on `volley wait`) still reads as alive.
  * Throws VolleyError(BROKER_DOWN) if the broker is unreachable, or
  * VolleyError(AUTH_FAILED) if it refuses `config.auth` (or anonymous access).
  */
@@ -58,7 +60,44 @@ export async function startLifecycle(config: VolleyConfig): Promise<ServerState>
     throw e;
   }
 
+  startHeartbeat(state);
   return state;
+}
+
+/**
+ * Arm the heartbeat timer: a non-retained `progress { type: "heartbeat" }` on the agent's own
+ * topic every `heartbeatS`. It stops itself once the connection is gone (no auto-reconnect: the
+ * LWT has spoken), and never keeps the process alive.
+ */
+function startHeartbeat(state: ServerState): void {
+  const seconds = state.config.heartbeatS ?? DEFAULT_HEARTBEAT_S;
+  if (seconds <= 0) return;
+  const topic = buildTopic(state.config.namespace, state.config.agentId, "progress");
+  const timer = setInterval(() => {
+    if (!state.broker.connected) {
+      stopHeartbeat(state);
+      return;
+    }
+    if (!state.registered) return;
+    const beat = buildEnvelope({
+      agentId: state.config.agentId,
+      parentId: state.config.parentId,
+      channel: "progress",
+      type: "heartbeat",
+      payload: { source: "volley-mcp" },
+    });
+    state.broker.publish(topic, JSON.stringify(beat), { qos: 0, retain: false }).catch(() => {
+      // A lost beat is harmless: the next one (or the LWT) tells the truth.
+    });
+  }, seconds * 1000);
+  timer.unref?.();
+  state.heartbeat = timer;
+}
+
+function stopHeartbeat(state: ServerState): void {
+  if (state.heartbeat === undefined) return;
+  clearInterval(state.heartbeat);
+  state.heartbeat = undefined;
 }
 
 /**
@@ -70,6 +109,7 @@ export async function shutdownLifecycle(
   state: ServerState,
   terminalType: "done" | "blocked" | "failed" = "done",
 ): Promise<void> {
+  stopHeartbeat(state);
   if (!state.broker.connected) return;
   const statusTopic = buildTopic(state.config.namespace, state.config.agentId, "status");
   const terminal = buildEnvelope({
