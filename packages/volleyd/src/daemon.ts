@@ -5875,7 +5875,9 @@ export class Daemon {
         const t = this.ranDef(log.record, task);
         if (t === undefined || t.host === "local" || this.autoHostReached(wave, t)) {
           const w = log.record.wave;
-          return w == null ? this.host.exec : lockFetches(this.host.exec, LOCAL_HOST, expandHome(w.repo));
+          return w == null
+            ? this.host.exec
+            : lockFetches(this.host.exec, LOCAL_HOST, expandHome(w.repo));
         }
         const remote = this.remoteHost(wave, t);
         // Keyed like spawn's fetches into the same clone (spawn.ts: `expandHome(req.wave.repo)`).
