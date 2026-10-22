@@ -589,6 +589,9 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
     await submit("w1");
     await tick();
     expect(box?.launches).toHaveLength(1);
+    // The box's session never registers: its spawn settles, supervised, once spawn_timeout_s
+    // passes. Advanced at once, not a second a tick inside the broker wait.
+    await tick(CONFIG_DEFAULTS.spawn_timeout_s * 1000);
     await eventually(async () => {
       await tick();
       const v = await verdict("control");

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { memoryOf, vmStatAvailablePct } from "volley-cli/peer/machine";
 import { MAC_16GB_BYTES, VM_STAT_MAC_16GB } from "volley-cli/test/vm-stat";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -197,92 +197,109 @@ describe("daemon spawn loop", () => {
     await env.cleanup();
   });
 
-  it("spawns the admitted implementer, verifies it through the hooks, refuses a second spawn, retires on done", async () => {
-    await setup();
-    await event("agent_registered");
-    await waits.settled();
-    const types = journal().map((e) => e.type);
-    expect(types).toEqual(
-      expect.arrayContaining([
-        "task_admitted",
-        "agent_spawned",
-        "stage_entered",
-        "agent_registered",
-      ]),
-    );
-    expect(host.launches).toHaveLength(1);
-    const state = (await env.retained("volley/_waves/w1/state")) as {
-      payload: { tasks: { id: string; stage: string; agents: Record<string, string> }[] };
-    };
-    expect(state.payload.tasks[0]).toMatchObject({
-      stage: "implement",
-      agents: { implementer: ID },
-    });
+  describe("the default wave", () => {
+    // The broker, the daemon's start-up probe and `volleyd run` cost real time: the hook's
+    // budget, not the test's.
+    beforeEach(() => setup());
 
-    // A second `volleyd spawn` for the same worktree while the agent is working is refused.
-    const second = await runCli(["spawn", "w1", "T1", "--json"], env.env);
-    expect(second.exitCode).toBe(1);
-    expect(JSON.parse(second.stdout).result.code).toBe("SPAWN_LOCKED");
-    expect(host.launches).toHaveLength(1);
-    expect(
-      journal()
-        .filter((e) => e.type === "alarm_raised")
-        .at(-1)?.data,
-    ).toMatchObject({
-      code: "SPAWN_LOCKED",
-    });
-    // A refused extra spawn says nothing about the running task: no spawn failure, no alarm.
-    expect(journal().some((e) => e.type === "spawn_failed")).toBe(false);
-    expect(daemon.snapshot("w1")?.tasks[0]?.last_error).toBeUndefined();
-    expect(daemon.snapshot("w1")?.open_decisions).toEqual([]);
+    it("spawns the admitted implementer, verifies it through the hooks, refuses a second spawn, retires on done", async () => {
+      await event("agent_registered");
+      await waits.settled();
+      const types = journal().map((e) => e.type);
+      expect(types).toEqual(
+        expect.arrayContaining([
+          "task_admitted",
+          "agent_spawned",
+          "stage_entered",
+          "agent_registered",
+        ]),
+      );
+      expect(host.launches).toHaveLength(1);
+      const state = (await env.retained("volley/_waves/w1/state")) as {
+        payload: { tasks: { id: string; stage: string; agents: Record<string, string> }[] };
+      };
+      expect(state.payload.tasks[0]).toMatchObject({
+        stage: "implement",
+        agents: { implementer: ID },
+      });
 
-    // done → retire: credentials revoked, retained records cleared, lock released.
-    await pub(buildTopic(NS, ID, "result"), "result", "result", { summary: "ok" });
-    await pub(buildTopic(NS, ID, "status"), "done", "status", { summary: "ok" });
-    await event("agent_retired");
-    // The cleared status/result payloads are kept in the journal.
-    expect(journal().find((e) => e.type === "agent_retired")?.data).toMatchObject({
-      agent_id: ID,
-      status: "done",
-      terminal: { summary: "ok" },
-      result: { summary: "ok" },
-    });
-    // Retired only after its artifacts were verified; `[implement]` then ends at the gate.
-    const order = journal().map((e) => e.type);
-    expect(order.indexOf("artifact_verified")).toBeLessThan(order.indexOf("agent_retired"));
-    await event((e) => e.data.stage === "merge_ready");
-    // The state that stage change published is on the broker once the daemon is idle.
-    await waits.settled();
-    const gated = (await env.retained("volley/_waves/w1/state")) as {
-      payload: { gates: string[]; tasks: { evidence_path?: string }[] };
-    };
-    expect(gated.payload.gates).toEqual(["T1"]);
-    expect(existsSync(gated.payload.tasks[0]?.evidence_path as string)).toBe(true);
-    expect(creds.revoked).toEqual([ID]);
-    expect(await env.retained(registryTopic(ID))).toBeNull();
-    expect(await env.retained(buildTopic(NS, ID, "status"))).toBeNull();
-    expect(await env.retained(buildTopic(NS, ID, "result"))).toBeNull();
-    const lock = journal().find((e) => e.type === "agent_spawned")?.data.lock as string;
-    expect(existsSync(lock)).toBe(false);
+      // A second `volleyd spawn` for the same worktree while the agent is working is refused.
+      const second = await runCli(["spawn", "w1", "T1", "--json"], env.env);
+      expect(second.exitCode).toBe(1);
+      expect(JSON.parse(second.stdout).result.code).toBe("SPAWN_LOCKED");
+      expect(host.launches).toHaveLength(1);
+      expect(
+        journal()
+          .filter((e) => e.type === "alarm_raised")
+          .at(-1)?.data,
+      ).toMatchObject({
+        code: "SPAWN_LOCKED",
+      });
+      // A refused extra spawn says nothing about the running task: no spawn failure, no alarm.
+      expect(journal().some((e) => e.type === "spawn_failed")).toBe(false);
+      expect(daemon.snapshot("w1")?.tasks[0]?.last_error).toBeUndefined();
+      expect(daemon.snapshot("w1")?.open_decisions).toEqual([]);
 
-    // The retire closed its workspace; cleanup keeps the gated (merge_ready) task's worktree: its
-    // PR is still read. --all: the dry run lists the worktree, --yes removes it.
-    expect(host.closed).toEqual(["workspace:1"]);
-    const io = makeBufferIO();
-    const worktree = join(env.home, "wt", "w1", "T1-implementer");
-    expect(await cleanupWave(env.home, "w1", { yes: false, force: false }, io)).toBe(0);
-    expect(io.readStdout()).toBe("skip T1: merge_ready\n");
-    expect(await cleanupWave(env.home, "w1", { yes: false, force: false, all: true }, io)).toBe(0);
-    expect(io.readStdout()).toContain(`would remove ${worktree}\n`);
-    const fx = fakeExec();
-    expect(
-      await cleanupWave(env.home, "w1", { yes: true, force: false, all: true, exec: fx.exec }, io),
-    ).toBe(0);
-    expect(fx.argvs()).toEqual([
-      ["git", "-C", repo, "worktree", "remove", worktree],
-      // The wave's leftover claude processes are looked for (none here).
-      ["ps", "-axo", "pid=,command="],
-    ]);
+      // done → retire: credentials revoked, retained records cleared, lock released.
+      await pub(buildTopic(NS, ID, "result"), "result", "result", { summary: "ok" });
+      await pub(buildTopic(NS, ID, "status"), "done", "status", { summary: "ok" });
+      await event("agent_retired");
+      // The cleared status/result payloads are kept in the journal.
+      expect(journal().find((e) => e.type === "agent_retired")?.data).toMatchObject({
+        agent_id: ID,
+        status: "done",
+        terminal: { summary: "ok" },
+        result: { summary: "ok" },
+      });
+      // Retired only after its artifacts were verified; `[implement]` then ends at the gate.
+      const order = journal().map((e) => e.type);
+      expect(order.indexOf("artifact_verified")).toBeLessThan(order.indexOf("agent_retired"));
+      await event((e) => e.data.stage === "merge_ready");
+      // The state that stage change published is on the broker once the daemon is idle.
+      await waits.settled();
+      const gated = (await env.retained("volley/_waves/w1/state")) as {
+        payload: { gates: string[]; tasks: { evidence_path?: string }[] };
+      };
+      expect(gated.payload.gates).toEqual(["T1"]);
+      expect(existsSync(gated.payload.tasks[0]?.evidence_path as string)).toBe(true);
+      expect(creds.revoked).toEqual([ID]);
+      // Read at once: each cleared topic waits out the read timeout.
+      expect(
+        await env.stillRetained([
+          registryTopic(ID),
+          buildTopic(NS, ID, "status"),
+          buildTopic(NS, ID, "result"),
+        ]),
+      ).toEqual([]);
+      const lock = journal().find((e) => e.type === "agent_spawned")?.data.lock as string;
+      expect(existsSync(lock)).toBe(false);
+
+      // The retire closed its workspace; cleanup keeps the gated (merge_ready) task's worktree: its
+      // PR is still read. --all: the dry run lists the worktree, --yes removes it.
+      expect(host.closed).toEqual(["workspace:1"]);
+      const io = makeBufferIO();
+      const worktree = join(env.home, "wt", "w1", "T1-implementer");
+      expect(await cleanupWave(env.home, "w1", { yes: false, force: false }, io)).toBe(0);
+      expect(io.readStdout()).toBe("skip T1: merge_ready\n");
+      expect(await cleanupWave(env.home, "w1", { yes: false, force: false, all: true }, io)).toBe(
+        0,
+      );
+      expect(io.readStdout()).toContain(`would remove ${worktree}\n`);
+      const fx = fakeExec();
+      expect(
+        await cleanupWave(
+          env.home,
+          "w1",
+          { yes: true, force: false, all: true, exec: fx.exec },
+          io,
+        ),
+      ).toBe(0);
+      expect(fx.argvs()).toEqual([
+        ["git", "-C", repo, "worktree", "remove", worktree],
+        // The wave's leftover claude processes are looked for (none here).
+        ["ps", "-axo", "pid=,command="],
+      ]);
+    });
   });
 
   it("a failed release-branch fetch refuses with BASE_STALE, backs off like any spawn failure, and the retry records base_sha", async () => {
