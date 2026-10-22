@@ -270,6 +270,32 @@ export function heldOnFrom(v: unknown): HeldOn | null {
 
 const SETTLED_BLOCKER = new Set<TaskStage>(["done", "cancelled"]);
 
+/**
+ * How task `from` waits on task `to` — through `after:` or an open decision of its own held on a
+ * task — as `[from, …, to]`, or null when it does not. A hold whose blocker waits on the held
+ * decision's task would never release.
+ */
+function waitPath(rec: WaveRecord, from: TaskId, to: TaskId): TaskId[] | null {
+  const heldOn = new Map<TaskId, TaskId[]>();
+  for (const d of Object.values(rec.decisions)) {
+    const on = d.held?.on.task;
+    if (d.task === null || on === undefined || d.resolved !== undefined) continue;
+    heldOn.set(d.task, [...(heldOn.get(d.task) ?? []), on]);
+  }
+  const seen = new Set<TaskId>();
+  const visit = (id: TaskId): TaskId[] | null => {
+    if (id === to) return [id];
+    if (seen.has(id)) return null;
+    seen.add(id);
+    for (const next of [...(rec.wave?.tasks[id]?.after ?? []), ...(heldOn.get(id) ?? [])]) {
+      const p = visit(next);
+      if (p !== null) return [id, ...p];
+    }
+    return null;
+  };
+  return visit(from);
+}
+
 /** The `decision_held` event (a second hold replaces the first), or why it is refused. Pure. */
 export function holdEvent(
   rec: WaveRecord,
@@ -287,6 +313,11 @@ export function holdEvent(
     if (on.task === d.task) return { error: `${id} is ${on.task}'s own decision` };
     if (SETTLED_BLOCKER.has(t.stage))
       return { error: `${on.task} is ${t.stage} already: nothing to wait for` };
+    const path = d.task !== null ? waitPath(rec, on.task, d.task) : null;
+    if (path !== null)
+      return {
+        error: `${on.task} waits on ${d.task} (${path.join(" → ")}): holding ${id} on it would never release`,
+      };
   }
   return {
     event: {

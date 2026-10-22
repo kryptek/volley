@@ -9270,7 +9270,7 @@ export class Daemon {
     const before = d.escalated;
     if (!(await this.autopilot(wave, d, { again: true }))) return;
     const now = this.waves.get(wave)?.record.decisions[id] as DecisionRecord;
-    if (now.escalated !== before) await this.ringDecision(wave, now);
+    if (now.escalated?.why !== before?.why) await this.ringDecision(wave, now);
     else await this.publishDecision(wave, now);
   }
 

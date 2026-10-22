@@ -145,6 +145,46 @@ describe("holdEvent / releaseEvent: held on the decision record", () => {
     expect(holdEvent(resolved, "d-x", { on: { task: "T4" }, by: "o" })).toHaveProperty("error");
   });
 
+  it("refuses a blocker that can never land while this decision is open (Q1: no silent deadlock)", () => {
+    const chain = parseWaveFile(`wave: w1
+repo: r
+release_branch: release/w1
+model: m
+pipeline: [implement]
+tasks:
+  T1: { issue: 41 }
+  T4: { issue: 44, after: [T5] }
+  T5: { issue: 45, after: [T1] }
+  T6: { issue: 46 }
+`);
+    const rec = replay(
+      [
+        { type: "wave_submitted", data: { wave: chain, owner: null } } as NewEvent,
+        ...chain.task_order.map((id): NewEvent => ({ type: "task_queued", task: id, data: {} })),
+        { type: "stage_entered", task: "T1", data: { stage: "implement" } } as NewEvent,
+        opened,
+        { type: "stage_entered", task: "T6", data: { stage: "implement" } } as NewEvent,
+        {
+          ...opened,
+          task: "T6",
+          data: { ...opened.data, decision_id: "d-y", question: "CI failed on T6's head." },
+        },
+      ].map((e, i): JournalEvent => ({ ...e, seq: i + 1, at: AT })),
+    );
+    // T4 runs after T5, which runs after T1: it cannot finish while T1 is parked on d-x.
+    expect(holdEvent(rec, "d-x", { on: { task: "T4" }, by: "o" })).toEqual({
+      error: "T4 waits on T1 (T4 → T5 → T1): holding d-x on it would never release",
+    });
+    // A cycle of holds: d-y (T6) held on T1, then d-x (T1) held on T6.
+    const y = holdEvent(rec, "d-y", { on: { task: "T1" }, by: "o" });
+    if (!("event" in y)) throw new Error(JSON.stringify(y));
+    expect(holdEvent(apply(rec, y.event), "d-x", { on: { task: "T6" }, by: "o" })).toEqual({
+      error: "T6 waits on T1 (T6 → T1): holding d-x on it would never release",
+    });
+    // Without the hold on d-y, T6 is a fine blocker.
+    expect(holdEvent(rec, "d-x", { on: { task: "T6" }, by: "o" })).toHaveProperty("event");
+  });
+
   it("the journaled events validate against wave-event.schema.json", () => {
     const h = holdEvent(record(), "d-x", { on: { task: "T4" }, by: "owner" });
     if (!("event" in h)) throw new Error("expected an event");

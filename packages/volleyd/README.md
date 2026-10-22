@@ -678,7 +678,9 @@ blocker: a task of the wave (`T4`), a PR (`#194`, `pr#194`) or an issue (`issue#
   `decision_held { decision_id, kind, on, note?, by }`. The decision stays open and its task stays
   parked; its retained topic and inbox item carry `held: { on, note?, by, at }` (the item's
   version does not change, so it can still be answered). A second hold replaces the first. A hold
-  on the decision's own task, an unknown task, or one already `done` or `cancelled` is refused.
+  on the decision's own task, an unknown task, or one already `done` or `cancelled` is refused, and
+  so is one on a task that waits on the decision's own (through `after:`, or an open decision of
+  its own held on it): `T4 waits on T1 (T4 → T5 → T1): holding d-… on it would never release`.
 - **Never escalated**: the Desk shows a held item amber, `Held · waiting on T4 (#194) · 3 h`, in
   the Needs-you window and on its wave and agent windows: never red, never pulsing, never counted
   in the top-bar pill. `volleyd decisions` prints `held on T4 by <who> since <at>`; the morning
@@ -686,7 +688,9 @@ blocker: a task of the wave (`T4`), a PR (`#194`, `pr#194`) or an issue (`issue#
 - **Released when the blocker lands**, while the wave is running (a paused or releasing wave's
   holds wait until it runs again): a task `done` or `cancelled`, checked on every tick; a PR merged
   or closed (`gh pr view <n> --json state`), an issue closed (`gh issue view <n> --json state`),
-  checked on the merge-check cadence, once per `ci_poll_ms` per hold, beside the queue. A task
+  checked on the merge-check cadence, once per `ci_poll_ms` per hold, beside the queue (a `gh`
+  read that fails is logged by the daemon, `read no state`, and tried again next interval; the
+  daemon log is the only place it shows). A task
   that is `blocked` or `awaiting_decision` does not release a hold on it, however long it stays
   so: only `done` or `cancelled` does. `volleyd release d-…` lifts one by hand. Either way
   `decision_released { decision_id, kind, why, by }` is journaled, `held` is gone from the topic
