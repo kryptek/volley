@@ -6,6 +6,8 @@ export const EXIT = {
   OK: 0,
   ERROR: 1,
   USAGE: 2,
+  /** `resolve` / `inbox answer`: an answer the decision cannot apply (code BAD_ANSWER). */
+  BAD_ANSWER: 3,
   TIMEOUT: 124,
 } as const;
 

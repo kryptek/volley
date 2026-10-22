@@ -2,6 +2,397 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.6.0 — 2026-10-22
+
+### Added
+
+- **volleyd, volley-cli: every machine reports which Claude account its logins belong to.** A
+  login's `email` and `org` — exactly `oauthAccount.emailAddress` and
+  `oauthAccount.organizationName` from the profile's `.claude.json`, nothing else of it — are
+  stored in the registry at sign-in and carried on `claude_signin_done`, each `claude_accounts`
+  row, `primary`, the new `machines` list, the retained usage record
+  (`volley/_system/claude-accounts/<acct>`, `primary@<name>` from the machine record) and the
+  machine record (`auth.claude_email` / `auth.claude_org`, from `volley peer doctor`, only while
+  signed in). They are identity, never credentials, and never journaled; the schemas and SPEC
+  §4.6.11, §4.6.12 and §4.6.15 say so. (#281)
+- **volley-desk: Settings › Claude accounts & usage shows one card per Anthropic account.** Logins
+  on every machine that share an e-mail (a peer's default login through its machine record's
+  `auth.claude_email`) are one card: the e-mail masked (`o•••@example.com`) until its eye button
+  shows it (never stored), the organisation, the meters from the freshest reading with any older
+  reading that disagrees named stale with its age, and one row per machine holding the account
+  (signed in or not, the profile there, its waves). A login whose e-mail is not reported yet keeps
+  its own card; pickers and "Move a wave here…" still answer with account ids. (#282)
+- **volleyd: `volley claude add <label> --machine <peer>` creates a Claude profile on a paired
+  machine and signs it in there.** The profile is `~/.volley/claude/<acct>` on that machine, the
+  account `<acct>@<peer>`: Claude Code's own `claude auth login` runs there in the tmux session
+  `volley-signin-<acct>`, with the browser callback forwarded to the supervisor's machine, as a
+  paired machine's own sign-in does. `claude_signin_done` carries the plan, e-mail and org, which
+  the registry records; `claude_accounts` shows the row pending, then signed in. `volley claude
+  signin <acct>@<peer>` refuses a profile already signed in there and names the
+  `ssh <target> CLAUDE_CONFIG_DIR=… claude auth logout` to run first. The fence lets
+  `claude auth status` carry exactly `CLAUDE_CONFIG_DIR=<home>/.volley/claude/<acct>` and nothing
+  else. Such a profile is signed in and shown, not yet used by placement. (#283)
+- **volley-desk: Add Claude account signs a profile in on any paired machine.** The dialog's first
+  step picks the machine (this machine, or a paired host whose tunnel is up); on a peer it shows the
+  same **Open sign-in ↗** and phone steps as Settings › Machines, never a code field, and the
+  "run `volley claude add` there" hint is gone. Each account card has **Add to another machine…**,
+  which opens the dialog with the label filled in as `<label> (<machine>)` (volleyd names a profile
+  once across machines; this machine goes by its host name), following the machine you pick until
+  you type your own, and the machines already holding the account greyed out. A paired host that
+  has reported nothing yet is offered with "no record yet". (#284)
+- **volley-desk: each account card shows every configured machine, and signs the account in on the
+  ones missing it.** One row per machine (this machine, then each paired host): a filled dot and the
+  profile where it holds the account, a hollow dot and **Sign in on <machine>** where it does not
+  (disabled with "tunnel down" while the tunnel is down), with an `on 2 of 3 machines` chip, amber
+  while one is missing. The button opens the Add dialog already at the sign-in step, titled with the
+  masked account (`Sign in with o•••@example.com on peer-a`); a sign-in that finishes on another
+  e-mail says `signed in as another account (p•••@example.com)` instead of filling the row. The new
+  profile is named `<label> (<machine>)`, keeping one machine suffix (`Work (peer-a)` signs in on
+  peer-b as `Work (peer-b)`). Each
+  card in Settings › Machines gains a **Claude accounts** block with the same dots and button. (#297)
+- **volley-cli: `volley claude list` prints `not on: peer-b`** under an account that a configured
+  machine does not hold, and nothing when every machine does. (#297)
+- **volley-desk + volley-cli: three usage meters per Claude account, Fable's weekly window
+  included, each with the reading's age.** An account card in Settings › Claude accounts shows
+  5-hour, 7-day and Fable (7-day) side by side. The Fable figure is the one the machine's usage
+  probe last read, labelled `read 4 min ago on peer-a`. While the probe's last attempt failed, it
+  reads `—` and says why (login expired, no credential, rate limited, probe failed), with when it
+  last read. Every machine row on the card, and each held account on a Settings › Machines card
+  (where it replaces the single 5-hour meter), shows the three figures compactly
+  (`5h 37% · 7d 56% · Fable 12%`), plus `sampled 3 h ago` when that machine's own reading is
+  older. `volley claude list` prints the same three windows on one line, for example
+  `Fable 12% (resets in 4d 2h, read 4 min ago)` or `Fable — (login expired, last read 25 min ago)`,
+  with the freshest machine on the line below it. A window whose reset has passed counts as 0%. (#298)
+- **volley-desk: each agent's Claude account, why it was chosen, and autopilot's moves.** The
+  agent window's account picker lists only the accounts of the agent's own machine, labelled
+  `Work · 12% · peer-a`, with a tooltip saying why it runs there (the task role's latest
+  `account_chosen`, or `moved off primary by autopilot: <why>` / `moved by <person>`); its
+  Volley feed shows `Account ·` rows for those events; and an open `agent_account_limit` is a
+  banner on the agent (what autopilot will do, or `Move to work (5h 12%, 7d 40%)` / Not now). Settings › Claude accounts
+  renders the agent-level decision beside the wave-level one (`move to work (5h 12%, 7d 40%)`,
+  `not now`) and, from `claude_balance`, says on each card which model families pick it next
+  (`picks next: Fable, others`) and marks the machine rows that would (`next pick`). (#300)
+- **volley-cli: `volley claude balance` shows what the next spawn would pick.** Per machine, the
+  signed-in accounts ranked by headroom with their 5-hour, 7-day and Fable figures and agents,
+  and an arrow on each model family's pick (`--model <m>` for one model, `--machine <name>` for
+  one machine, `--json` for volleyd's answer; e-mails masked unless `--show-email`).
+  An account with no reading yet shows `no usage yet` and still its agent count.
+  `volley claude list` marks `next pick` on those logins (asking volleyd for at most 3 s). (#300)
+- **volley-cli + volleyd: each machine reads its own Claude logins' usage, Fable's weekly window
+  included.** `volley peer doctor` probes every Claude Code login on the machine (the default
+  profile and each profile under `~/.volley/claude`). It reads the login's own stored token in
+  memory, for one read-only request to Claude's usage endpoint, and reports only the 5-hour,
+  7-day and per-model weekly windows in the machine record's `claude_logins` and in one
+  `Claude usage:` line per login. The token is never refreshed, written, logged or sent, and
+  never crosses ssh or the broker. An expired token is skipped, and the probe makes at most one
+  request per login per 5 minutes, backing off after 429 or 5xx. volleyd folds the readings into
+  the retained account records (`primary@<name>` / `<id>@<name>` for a paired machine's logins)
+  as `model_weekly` and `probe`. A reading and a statusLine sample race for the 5-hour and
+  weekly windows, and the freshest wins. SPEC §4.6.11 now allows this one read, and says why.
+  (#306)
+- **volleyd: a wave without `placement:` uses a paired machine.** The new tunable
+  `placement.default` (`local` | `auto`, default `auto`) decides a wave file that sets no
+  `placement:`: `auto` once a `hosts.<name>` is configured, `local` while none is; an explicit
+  `placement:` is unchanged, and a later plan version of a running wave keeps the placement the
+  wave already has, whatever its own `config: placement.default` says (its `run` prints no placement preview then). `volleyd validate` and `run` print the outcome
+  (`placement: auto (placement.default; 1 paired machine)`, `placement: local (no paired machine)`). (#324)
+- **volleyd: a paired machine's `max_agents` is derived from its size.** `volley peer join` sends
+  the machine's total memory (when it can read it), and the join writes `hosts.<name>.max_agents =
+  clamp(min(floor(cores / 3), floor(memory_total_mb / 4096)), 2, 16)` (a 32-core / 60 GB box: 10);
+  unset, readiness derives it the same way from the machine record, and 4 applies only when the
+  size is unknown. An explicit value always wins. `volley peer doctor` shows it on a new
+  `machine.size` row (`max_agents 10 (derived from 32 cores, 60 GB)`). (#324)
+- **volleyd: a local wave on an overloaded supervisor says what it leaves unused.** When the
+  supervisor's load per core is over `placement.load_per_core_max` (the wave's own, when its
+  `config:` sets one) while a ready, undrained peer
+  has free slots, a running `placement: local` wave raises `alarm_raised { alarm:
+  "peer_idle_under_load" }` once, and clears it (`alarm_cleared`) when the load has passed; while it
+  holds, the wave state's new `alarms`, `volleyd status` and the digest show it. (#324)
+- volley-issues: `wave-from-issues.ts --placement local|auto` pins a wave's placement. (#324)
+- **volley-desk: demo mode shows autopilot, the Needs-you inbox, the digest and live machines.**
+  `?demo=1` now loads the autopilot waves (chip, feed, merge queue, release train), the Needs-you
+  inbox with its Dock tile, an ended wave with its morning digest card and, after 40 s, a running
+  wave's morning digest. The Machines window's load and memory sparklines move: the machines beat
+  every 5 s with a load walk, and box-a swells into its overload band and back. (#326)
+- **volley-desk: sign out and switch account from Settings and the Dock.** Settings' account
+  card and the Dock's new account menu (the avatar) offer **Sign out**, which forgets the stored
+  login and its role and shows the sign-in form, and **Switch account…**, which redeems a
+  sign-in link or one-time token over the running Desk and reconnects as the new account
+  without a reload. Every read-only notice (Machines, Broker accounts, Supervisor, the
+  Autopilot policy table) links to **Switch to an admin account**, and Setup & Security's
+  admin-token sign-in uses the same entry. A Desk signed in by `VITE_VOLLEY_BROKER_*` says so and
+  offers neither. (#328)
+- **volleyd: `agent_mcp_allow` starts only the MCP servers a repository names under
+  `agent_mcp: inherit`.** `inherit` alone starts every server in the owner's profile in every agent
+  (one process each). A non-empty list (global or in a wave's `config:`) copies just those entries
+  from the profile's `.claude.json` and the repository's `.mcp.json` (a paired machine's own) into
+  the agent's `.volley/mcp.json` beside `volley` and launches it strict; a `.mcp.json` entry only
+  when the profile approved it for the repository (`enabledMcpjsonServers` /
+  `enableAllProjectMcpServers` in its `.claude.json`), since the file comes from the branch checked out. A name found nowhere is
+  skipped and journaled once per wave and machine (`agent_mcp_allow_missing`, saying when the name is in `.mcp.json`
+  but not approved); so is an entry of a shape volleyd does not copy (a string `command` with
+  string `args` and `env`, or a string `url` with string `headers`), the same on every machine,
+  and a broader scope's entry of that name is not used in its place.
+  Only names are ever logged, and the agent's `mcp.json` is written owner-only (0600, on a paired
+  machine too: a file volleyd writes there is replaced, never left at an older file's mode), since
+  the copied entries can hold the user's tokens.
+  `volleyd validate` prints `agent_mcp: inherit (allow: …)`, and the Desk's settings edit the list.
+  (#331)
+- **volleyd, volley-desk: held decisions: "waiting on <task|PR|issue>", never escalated,
+  released when the blocker lands.** `volleyd hold <decision-id> --on <task|#pr|issue#n>`,
+  `volleyd inbox hold`, and the Desk's **Hold · waiting on…** picker on a Needs-you row journal
+  `decision_held`; a hold on a task that waits on the held decision's own task (through
+  `after:` or a hold of its own) is refused, as it would never release; the decision and its inbox item carry `held`, and the Desk shows the item
+  amber (`Held · waiting on T4 (#194) · 3 h`), never red, never pulsing. volleyd releases the
+  hold (`decision_released`) when the task is done or cancelled, the PR merged or closed, or the
+  issue closed (a PR or issue read once per CI poll interval), and autopilot's rule runs again,
+  a red head's once its PR head is read again (green now: answered `re-verify`); `volleyd
+  release` lifts one by hand. Autopilot holds a red head on its flake's fixer task itself, and
+  lifts that hold when the fixer fails so the escalation reaches the owner (a hold the owner set
+  on another blocker stands); `volleyd decisions` prints `held on …` and the digest lists held
+  decisions under their own heading (the Desk's digest card too, its headline counting them
+  like volleyd's summary line). A wave whose only open decisions are held shows `running`, not
+  `awaiting_decision`. (#335)
+
+### Changed
+
+- **volley-cli: `volley claude list` shows one block per Anthropic account.** Logins are grouped
+  by e-mail the way the Desk's account cards are: the heading names the account (its profile
+  label, or `default login`; plan, org, e-mail masked as `o•••@example.com` unless `--show-email`), one line per machine holding
+  it with its sign-in state and waves, and per usage window the freshest reading from the retained
+  usage records, with where it came from and its age; a machine's older reading that disagrees is
+  marked `(stale)`. An account whose e-mail is not reported yet keeps a block of its own.
+  `--json` prints the `claude_accounts` answer plus the records it read as `records`. The masking
+  rules are exported as `volley-mcp/mask`. (#285)
+- **volley-desk: Settings sections drill into groups, like macOS System Settings.** Supervisor,
+  Autopilot, Sound and Claude accounts open on a list of group rows with live summaries; a row
+  opens the group's page with a back control (Escape goes back too); search opens the matching
+  group. (#286)
+- **volleyd: spawns balance across the Claude accounts signed in on each machine.** With
+  `claude.default_account: null` (the default; `most_headroom` means the same) every spawn
+  picks the account with the most headroom on the machine it runs on, by the 5-hour, 7-day and
+  the model family's weekly windows (`rankAccounts`); a one-login machine runs as before, and
+  `primary`, a registry id or a task or wave `account:` still pins. A paired machine's agents
+  can run under the profiles kept for it (their `CLAUDE_CONFIG_DIR` there, sealed by the fence
+  for that host only). Each pick is journaled as `account_chosen` with a one-line `why`
+  (`agent_spawned.account_why`), and `claude_balance` answers each machine's ranking. (#299)
+- **volleyd: autopilot moves a running agent off a hot account at the warn level.** A new
+  task-level `agent_account_limit` decision opens when an agent's account reaches
+  `claude.warn_at_pct` in a window that counts for it, suggesting another login on its machine;
+  autopilot answers `move <agent> to <acct>` under the new `autopilot.account_move_max` budget
+  (default 2 per task role) or waits (`not now`); an agent whose task, wave or
+  `claude.default_account` names an account gets none (the wave-level `account_limit` covers
+  it). A balanced wave gets no `move wave` decision, and placement judges a machine by its best
+  login (`usage 12% (work)`). (#299)
+
+### Fixed
+
+- **volley-desk: the Desk no longer lags on a phone.** On a touch screen (or under
+  `prefers-reduced-transparency`) windows, the dock, the sheets and the sign-in card drop their
+  backdrop blur for an opaque-ish fill of the same colours, Liquid glass renders as Frosted glass,
+  the Needs-you pulse animates opacity, and a pan or pinch moves the canvas directly, with the view
+  committed on release. Desktop keeps the glass. (#295)
+- **volleyd: an unreadable `gh run list` is not "no CI".** A CI read that fails (a rate limit,
+  HTTP 403 / 429, a 502, output that is not JSON) is CI state `unknown`: it opens no decision,
+  never starts or advances the `ci_none_grace_ms` clock (unreadable time is not counted: the next
+  readable `none` starts it over), and is re-polled; the task reads
+  `CI unreadable (<error>), retrying`. A rate-limited answer backs the wave's CI calls off for
+  `ci_rate_limit_backoff_ms` (new tunable, default 300000), journaling one
+  `github_rate_limited` alarm that the next readable answer clears. A head's runs are now read with
+  one `gh api …/actions/runs?head_sha=` call on the supervisor, which lists no workflows. A red head whose release
+  branch's CI cannot be read is not classified (no CI fixup or flake request on it): it is
+  re-verified and classified once the release branch reads again; a blocked agent on such a head
+  gets the plain `agent_blocked` question. (#310)
+- **volleyd: a merge GitHub refuses for a reason other than "behind" no longer updates the branch.**
+  A `merge_refused` alarm now carries `reason` (`behind`, `head_moved`, `retargeted`, `closed`,
+  `checks` or `unknown`; GitHub's "Base branch was modified" is `behind`). Only `behind`,
+  `head_moved`, `retargeted` and `closed` give up the merge turn. A refusal for required checks, branch
+  protection or an unknown reason keeps the turn and the task's place in the queue, and the merge
+  is tried again up to `autopilot.merge_retry_max`. A branch update starts only when the turn's
+  rebase check counts commits the head lacks. A failed `git fetch` or `git log` is now a failed
+  check, not "behind by 1". (#311)
+- **volleyd: a merge at the gated head is never `merged_unverified_head`.** A person who merges
+  the PR at the head volleyd gated while a branch update or fixup is still running completes the
+  task (`artifact_verified { role: "merged" }`, then `done`; the digest counts it as a GitHub merge). No alarm is raised,
+  and the running update or fixup agent is retired as `superseded`. A merge whose head GitHub does
+  not report still alarms. (#311)
+- **volleyd: a conflicting PR is brought up to date instead of waiting for CI that never runs.**
+  GitHub runs no CI on a PR that conflicts with the release branch, so volleyd used to wait out
+  `ci_none_grace_ms` and ask "No CI run exists … accept | cancel". The PR read now carries
+  `mergeable` and `mergeStateStatus`: a `CONFLICTING` PR journals `pr_conflicting` and enters the
+  branch-update step at once (under the wave's `branch_update`, its brief saying the PR conflicts),
+  and `UNKNOWN` is re-polled like running CI. If the update step's own head still conflicts, it is
+  not updated again: after the grace the owner is asked, and the question says the PR still
+  conflicts with the release branch. (#312)
+- **ci, volley-issues: release PRs pass the changelog guards by construction.** The `untouched`
+  guard accepts a `release:` / `chore(release):` subject in any case, so a release PR squashed
+  under `Release: <date> — <theme>` passes; the CI workflow re-runs on `labeled` / `unlabeled`, so
+  adding `no-changelog` reaches the fragment check without a new push; `bun scripts/changelog-ci.ts
+  labels --ensure` creates the `no-changelog` label when the repository lacks it; and the skill's
+  release steps title and squash both release PRs `release: …` and label the release-prep PR
+  `no-changelog`, naming each PR on `gh pr merge` (the skill validator checks each command and
+  rejects a bare `gh pr merge`). (#313)
+- **volleyd: cleanup keeps unfinished tasks' worktrees, and the pipeline reads GitHub from the
+  repo root.** `volleyd cleanup` removes only the worktrees of tasks that are done or cancelled
+  (an unfinished one prints `skip <task>: <stage>`; `--all` includes it), so a `merge_ready`
+  task's worktree survives until it merges. The pipeline's `gh pr` / `gh run` reads run from the
+  wave's repo root with `--repo <owner/repo>`, and its git checks fall back to the repo root
+  (fetching the PR head; a failed fetch says so) when the head's worktree is gone: a removed
+  worktree no longer fails every merge check with `ENOENT` and wedges the task short of `done`.
+  (#314)
+- **volleyd: a `spawn_budget_exhausted` raise is sized for the wave, not one spawn.** The offered
+  `raise by <n>` now covers the spawns the wave's unfinished tasks still need (each implement and
+  review stage not yet spawned, plus one fixup allowance per task), at least a quarter of the
+  derived budget, capped by `autopilot.budget_raise_max` while that cap leaves room for one; one
+  raise, by the owner or autopilot, lets every held spawn through instead of opening a new
+  decision per spawn. (#315)
+- **volleyd: `resolve` and the inbox refuse an answer a decision cannot apply.** `raise 120` was
+  accepted, journaled and ignored; it is now read as `raise by 120`, and an answer that is neither
+  an option nor a form the kind accepts (`spawn_budget_exhausted`, `machine_down`,
+  `repo_untrusted`) is refused with `BAD_ANSWER` (`volleyd resolve` / `volleyd inbox answer` exit
+  3), saying what to write, and nothing is journaled. `volleyd resolve --help` lists the answers
+  each kind takes. (#315)
+- **volleyd: a resolved decision's `.volley/decisions.md` reaches a remote task's worktree.**
+  `resolve` wrote it with local file calls at the remote worktree's path, so the agent on the
+  paired machine never saw it (and on macOS it failed with ENOTSUP). It now goes through the
+  task's host, over ssh for a paired machine; a failed write is journaled once per decision as
+  `alarm_raised { alarm: "decisions_file_unwritten" }` and never fails the resolve. (#316)
+- **volleyd: a steer reaches the task's live agent of any role, and wakes it when it is idle.**
+  `volleyd steer` targets the task's newest agent that is not retired, whatever its role, so a
+  live rebase agent is no longer answered `queued for the next agent of the task`; `--role`
+  accepts `rebase` and `release` (task `_release` for the release train's stage agent). A queued
+  steer also goes to an agent already up at its next hook signal, not only to a newly registered
+  one. When an idle agent's hooks do not ack a mailbox steer (a steer, the liveness nudge, an
+  answer, `nudge again`) within `mailbox_wake_after_ms` (new tunable, default 20 s), volleyd
+  types `Check your Volley mailbox.` + Enter into its session under a new fence `WakeToken`, once
+  per message (one wake drains every message sent before it), and journals `agent_woken` (with
+  `enter_failed: true` when the line was typed but its Enter failed: the next wake then sends only
+  the Enter, never a second line); a working agent or one with a picker open is never typed into,
+  and the pause steer to an agent whose hooks the broker refused arms no wake.
+  `volleyd status` shows `steer unacked (<agent>)` until the woken message is acked (also after a
+  newer message or a daemon restart), and the CLI prints
+  `delivered · woke the agent` / `delivered (acked by …)` / `queued (no live agent)`. (#317)
+- **volleyd: a retained `blocked` always gets a decision, and an undecided block is a stall.** A
+  `blocked` status already retained when supervision attaches (a fast agent, every agent after a
+  restart) is handled like a live one, and the watchdog is armed for it. A `blocked` the pipeline
+  cannot own (a `merge_ready` or `done` task, a stale or accepted run, a pipeline error) journals
+  `alarm_raised { alarm: "blocked_unhandled", agent_id, why }` and opens a daemon-level
+  `agent_blocked` (`respawn | cancel`, or `manual | cancel` without parking a settled task or
+  a stale run's) instead of returning silently or logging an error; a per-tick sweep asks for one
+  never decided, waiting while a red head is still being classified.
+  The watchdog counts only a decision or a retire as handling a `blocked`, and a blocked agent no
+  decision names (open, or answered for that status) for `blocked_undecided_stall_ms` (new tunable, default 300000) is
+  `agent_stalled` (`respawn | stop task`); that stall names the status too, so a steer that leaves
+  the agent blocked is not asked again every window. (#318)
+- **volleyd: spawns admitted together no longer fail on a fetch race.** Every `git fetch` volleyd
+  runs into a clone (both hosts' worktree prepare, a continued branch's check, the pipeline's
+  artifact probes, the release train's stage check) now waits its turn on a per-machine, per-clone lock, so two tasks admitted on
+  the same tick no longer race `refs/remotes/origin/<branch>` (`incorrect old value provided`) into
+  `BASE_STALE`. A fetch that still loses a ref-lock race to another git process is retried once
+  after 500 ms and the spawn goes on, journaling `alarm_raised { alarm: "fetch_retried" }`. A fetch
+  that never reached origin (`Could not resolve host`, `Connection timed out`) is refused as
+  `BASE_UNREACHABLE` and retried with the usual backoff, instead of a `BASE_STALE` that says the
+  base is old. A fetch under the lock that names no timeout of its own is bounded by
+  `git_fetch_timeout_ms` with credential prompts off, so a hung fetch cannot hold the lock and stall
+  every later spawn into that clone. (#319)
+- **volley-cli, volleyd: peer readiness no longer keeps a stale doctor result until the service
+  restarts.** `volley peer run` re-runs the doctor on the next heartbeat when the volley
+  checkout's `package.json`, `bun.lock` or install marker changes, or when `volley peer doctor`
+  ran (it writes `~/.volley/peer-doctor-ran`), and re-reads the versions it reports; `volley peer
+  doctor --fix` says it is waiting (up to about 2 minutes), then prints `readiness republished`
+  once the service's record carries the new run, else how to restart the service (and says it
+  could not check when the broker refuses it). A Repair (`peer_doctor`) folds its report into
+  the box's retained machine record and readiness verdict at once, and while the box's
+  heartbeats still carry its service's older run the supervisor republishes them with the newer
+  one, so neither the Desk nor readiness goes back to the stale checks. A record the supervisor
+  republishes no longer counts as the box's heartbeat, nor brings a down box back up. A doctor
+  report's `doctor_at` is now when its run started, so a run that began before a fix never reads
+  as one after it, and runs are compared as instants. A Repair on a box whose tunnel is down
+  leaves its record as it is. (#320)
+- **volley-cli: the doctor checks every `volley` MCP entry on the machine against this checkout.**
+  The `mcp` row covers each Claude account profile under the Volley home and the wave repo's
+  `.mcp.json` as well as `~/.claude.json` (`mcp: own` skips only the latter): an entry that runs
+  another checkout is a blocking failure (`✗ mcp: account profile acct-b runs
+  /path/to/old-checkout`), and `--fix` re-points it, keeping its other keys (a `.mcp.json` git
+  tracks is reported, never rewritten in the clone). volleyd's Repair passes the box's `volley_dir`
+  (`--supervisor-volley-dir`), and a checkout other than that one fails naming both. (#321)
+- **volley-cli: `volley peer join` finds the supervisor's volley without `--remote-volley`.** It
+  runs `volley peer redeem` as `volley` when that is on the supervisor's non-interactive ssh
+  `PATH`, else as `~/.volley/bin/volley`, where `volley setup` installs it. (#321)
+- **volleyd: the hard ceiling counts the agents volleyd runs, not admitted tasks.** It counted every
+  admitted, unsettled task of every loaded wave, so tasks awaiting a decision, blocked tasks whose
+  agents had retired and the tasks of paused, stopped or ended waves held slots (`9/9 live` with 4
+  running starved a new wave). It now counts supervised agents, those launching or spawning
+  (release stages too), and one slot per admitted task of a running wave that will spawn its
+  next agent (queued for its implementer, or between pipeline roles with a role still to
+  come). A task whose agent died unverified, or whose next role was refused for good, holds
+  nothing. A reviewer or fixup spawn and a queued task's first agent (a retry, a resumed
+  wave's backlog) start only while the agents running or starting leave room, so neither
+  overshoots and held slots never deadlock.
+  A release stage's spawn checks the same, so another wave's held slots never hold a release.
+  `volleyd admission` prints `ceiling: 4/12 live agents · 2 launching · by wave: …`
+  (`launching`: not supervised yet, held slots included; the `admission` op and retained
+  payload carry `ceiling`), and `volleyd status` prints `hard ceiling: 4/12`. (#322)
+- **volleyd: a running task keeps its host across plan versions.** Switching an in-flight wave to
+  `placement: auto` no longer fails the checks of the tasks already running locally with
+  `host 'auto' is not configured`: a task that has spawned, or was spawning when the new version
+  arrived, keeps the host it runs on (the wave
+  state's `tasks[].host_actual`, the plan's own as `host_planned`), only unstarted tasks are
+  placed, and `volleyd run` prints `T3: host kept local (already running; new plan says auto)`. (#323)
+- **volley-mcp, volleyd, volley-desk: a live but quiet coordinator no longer reads "No coordinator ·
+  claim it".** The MCP server publishes a `progress` heartbeat every `VOLLEY_HEARTBEAT_S` (default
+  300 s) while registered, so a session blocked on `volley wait` stays alive; volleyd re-publishes
+  the wave state's `coordinator.last_seen` at least every `claim_after_s / 4` while it hears the
+  coordinator; and the Desk finds a coordinator-name owner through its bound agent
+  (`coordinator.agent_id`) and trusts volleyd's fresh `last_seen`. A heartbeat no longer counts as a
+  progress report on the Desk, and it leaves a coordinator waiting on the owner in `awaiting_input`
+  ("needs you") rather than flipping it back to working. (#325)
+- **volley-desk: the wave header's autopilot chip never truncates mid-word, and a long task id
+  fits its dependency-graph node.** The chip shows the full sentence, or `⚙ 4 · ↑ 1` in a compact
+  window, with the full text as its title; the owner chip has a title too. A graph node elides an
+  id longer than it fits as `head…tail` (a flake-fixer's `fix-<slug>`), with the full id in its
+  tooltip; the `#issue` link moves to the second line, and a synthetic task draws its wrench
+  instead of `#0`. (#327)
+- **volleyd, volley-hooks: a long foreground tool call no longer raises `hooks_silent`.** A full
+  test suite or `gh run watch` kept the hooks quiet for 10 min while the screen changed, which
+  opened a "hooks may be broken" decision that cleared itself when the tool returned. PreToolUse
+  now publishes a tool boundary on every call (`activity` with `tool_use_id` and `tool`, outside
+  the 5 s work-log limit) and PostToolUse's heartbeat carries the same `tool_use_id`; volleyd
+  treats a tool in flight (each of several parallel calls until its own PostToolUse) as work, not silence, until the new `tool_in_flight_max_s` (default 2 h)
+  with a static screen. With no tool in flight, `hooks_silent` now needs the screen to keep
+  changing with no hook signal across two `heartbeat_alarm_s` windows (20 min by default). (#329)
+- **volley-hooks: the lease hook matches the commands the shell would execute, not text that
+  mentions them.** A pool's `match` regexes were tested against the whole Bash command string, so
+  a heredoc writing a note, a `#` comment, a `git commit -m "… bun run test …"` or an `echo`
+  queued behind real test runs. They now run against each executed command: the line is split on
+  `;`, `&&`, `||`, `|`, newlines and `$(…)`, `sh -c` scripts are split in turn, and comments,
+  heredoc bodies, `echo` / `printf` arguments and git / gh message text (`-m`, `-am`, `--body`,
+  …) are dropped. (#330)
+- **volleyd: a coordinator that ended while the daemon was down reads `gone` after the restart,
+  whatever order the replays arrive in.** The retained statuses and registry entries replay on
+  two subscriptions; when the `done` came first, the daemon forgot it (no coordinator name known
+  yet) and the wave's `coordinator` then read `working` forever. A forgotten terminal status is
+  now set aside (bounded) and taken back when the session's registry entry arrives (not by an
+  entry that started after it: that id registered anew). (#332)
+- volleyd tests: the broker and journal waits (`eventually`, `until`, `journalWait`) fail after
+  5 s naming what they waited for and the last assertion error, never as a vitest timeout, and a
+  grep guard keeps every test's wait helper on them; the spawn test's set-up moves to its hook
+  and its cleared-topic reads run at once. (#332)
+
+### Docs
+
+- **repo: no home-directory paths in tracked files.** Docs, examples, `config.example.yaml`, the
+  spec examples and the tests now write `/path/to/repo`, `/path/to/volley`, `/path/to/worktrees`
+  and `/path/to/home` in place of invented `/home/<user>` and `/Users/<user>` paths, and the new
+  `scripts/no-home-paths.test.ts` guard keeps them out. (#333)
+- **spec: the decision kinds, wave events and tunables are one item per line, checked against
+  the schemas.** Sibling PRs that each add a kind, event or key no longer edit the same line.
+  `bun run check:spec-refs` fails, naming the item, when a list and its schema
+  (`decision.schema.json`, `wave-event.schema.json`, `config.schema.json`) differ; the tunables
+  list gains the missing `autopilot.digest_min_interval_s`. New `spec/RESERVED.md` reserves SPEC
+  section numbers for an epic's parallel children, and the check fails when a sibling's heading
+  takes a reserved number (or when `spec/RESERVED.md` is missing); `/volley-issues` says to reserve them in the epic's first PR. (#334)
+
 ## 0.5.0 — 2026-10-21
 
 The Autopilot release: a wave runs unattended. volleyd answers routine decisions from a

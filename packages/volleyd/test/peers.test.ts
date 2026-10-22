@@ -215,6 +215,47 @@ describe("PeerService (pairing codes, peer accounts, host registration)", () => 
     expect(auth.accounts.has("box-b")).toBe(false);
   });
 
+  it("join sizes hosts.<name>.max_agents from the machine's cores and memory (#324)", async () => {
+    const r = await peers.join(
+      joinFields(await invite(), { cores: 32, memory_total_mb: 61_440 }),
+      "cli",
+    );
+    expect(r.ok, r.error).toBe(true);
+    expect(hosts["box-a"]?.max_agents).toBe(10);
+    expect(events.at(-1)?.data).toMatchObject({
+      cores: 32,
+      memory_total_mb: 61_440,
+      max_agents: 10,
+    });
+  });
+
+  it("join with an unknown size leaves max_agents unset (4 applies) (#324)", async () => {
+    const r = await peers.join(joinFields(await invite()), "cli");
+    expect(r.ok, r.error).toBe(true);
+    expect(hosts["box-a"]?.max_agents).toBeUndefined();
+    expect(REMOTE_HOST_DEFAULTS.max_agents).toBe(4);
+  });
+
+  it("a re-pairing keeps a max_agents already configured (#324)", async () => {
+    await peers.join(joinFields(await invite()), "cli");
+    hosts = { ...hosts, "box-a": { ...(hosts["box-a"] as RemoteHostConfig), max_agents: 6 } };
+    const written: RemoteHostConfig[] = [];
+    const set = peers.deps.setHost;
+    peers.deps.setHost = (name, host, by) => {
+      written.push(host);
+      return set(name, host, by);
+    };
+    const r = await peers.invite({ reply_key: REPLY_KEY, for: "box-a" }, "admin-1");
+    const code = unseal(r.sealed).code as string;
+    const again = await peers.join(
+      joinFields(code, { replace: true, cores: 32, memory_total_mb: 61_440 }),
+      "cli",
+    );
+    expect(again.ok, again.error).toBe(true);
+    // The patch does not touch it (config.yaml's merge keeps the hand-set 6).
+    expect(written[0]?.max_agents).toBeUndefined();
+  });
+
   it("an explicit port is the host's remote_port", async () => {
     const code = await invite();
     const r = await peers.join(joinFields(code, { port: 22883 }), "cli");

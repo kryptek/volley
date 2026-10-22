@@ -44,6 +44,7 @@
                 "pr_head_moved",
                 "spawn_budget_exhausted",
                 "account_limit",
+                "agent_account_limit",
                 "machine_down",
                 "merge_refused",
                 "release_go",
@@ -63,6 +64,45 @@
               }
             },
             "opened_at": { "type": "string", "format": "date-time" },
+            "held": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["on", "by", "at"],
+              "properties": {
+                "on": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "minProperties": 1,
+                  "description": "What it waits on: a task of the wave, a PR, an issue (one or more).",
+                  "properties": {
+                    "task": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+                    },
+                    "pr": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "issue": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  }
+                },
+                "note": {
+                  "type": "string"
+                },
+                "by": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "description": "Held (spec section 4.6.2): the decision stays open but waits on a task, PR or issue; it is never escalated, and the supervisor releases it when the blocker lands (a task done or cancelled, a PR merged or closed, an issue closed)."
+            },
             "stage": {
               "type": "string",
               "minLength": 1,
@@ -107,25 +147,43 @@
             },
             "acct": {
               "type": "string",
-              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
-              "description": "account_limit: the Claude account whose 5-hour window crossed claude.warn_at_pct (spec section 4.6.12)."
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}(@[a-z0-9][a-z0-9_.-]{0,62})?$",
+              "description": "account_limit: the Claude account whose 5-hour window crossed claude.warn_at_pct (spec section 4.6.12). agent_account_limit: the account record the agent runs under (<acct>@<name> on a paired machine)."
+            },
+            "agent_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "agent_account_limit: the running agent on the account at the warn level."
+            },
+            "role": {
+              "type": "string",
+              "minLength": 1,
+              "description": "agent_account_limit: that agent's role in its task."
+            },
+            "window": {
+              "type": "string",
+              "pattern": "^(five_hour|weekly|model_weekly:(fable|opus|sonnet|haiku))$",
+              "description": "agent_account_limit: the window at or over claude.warn_at_pct: the 5-hour, the 7-day, or the weekly window of the agent's model family."
             },
             "pct": {
               "type": "number",
               "minimum": 0,
               "maximum": 100,
-              "description": "account_limit: that window's used percentage when the decision opened."
+              "description": "account_limit / agent_account_limit: that window's used percentage when the decision opened."
             },
             "resets_at": {
               "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }],
-              "description": "account_limit: when that window resets."
+              "description": "account_limit / agent_account_limit: when that window resets."
             },
             "suggested": {
               "oneOf": [
-                { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9_-]{0,62}(@[a-z0-9][a-z0-9_.-]{0,62})?$"
+                },
                 { "type": "null" }
               ],
-              "description": "account_limit: the account with the most 5-hour headroom among those under the threshold in both windows, else a signed-in account with no 5-hour usage data yet (\"no usage yet\"; a signed-in profile before primary), or null when there is none."
+              "description": "agent_account_limit: the account the balancing rule ranks first among the other candidates on the agent's machine under the threshold in every window that counts for it, or null. account_limit: the account with the most 5-hour headroom among those under the threshold in both windows, else a signed-in account with no 5-hour usage data yet (\"no usage yet\"; a signed-in profile before primary), or null when there is none."
             },
             "down_since": {
               "type": "string",
@@ -153,11 +211,25 @@
               }
             }
           },
-          "if": { "properties": { "kind": { "const": "machine_down" } }, "required": ["kind"] },
-          "then": {
-            "required": ["host", "down_since", "tasks"],
-            "properties": { "task": { "type": "null" } }
-          }
+          "allOf": [
+            {
+              "if": { "properties": { "kind": { "const": "machine_down" } }, "required": ["kind"] },
+              "then": {
+                "required": ["host", "down_since", "tasks"],
+                "properties": { "task": { "type": "null" } }
+              }
+            },
+            {
+              "if": {
+                "properties": { "kind": { "const": "agent_account_limit" } },
+                "required": ["kind"]
+              },
+              "then": {
+                "required": ["agent_id", "role", "acct", "window", "pct", "resets_at", "suggested"],
+                "properties": { "task": { "type": "string" } }
+              }
+            }
+          ]
         }
       },
       "required": ["channel", "type", "payload"],

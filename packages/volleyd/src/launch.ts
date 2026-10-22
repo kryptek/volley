@@ -32,13 +32,101 @@ export const VOLLEY_MCP_SERVER = "volley";
 export const mcpConfigPath = (worktree: string) => join(worktree, ".volley", "mcp.json");
 
 /**
- * `.volley/mcp.json`: one `volley` server, `bun run <entry>` (volley-mcp). The server reads its
- * broker URL, identity and minted credentials from `.volley/agent.json` in its cwd (the
- * worktree), so nothing secret is in this file.
+ * `.volley/mcp.json`: the `volley` server, `bun run <entry>` (volley-mcp), first. The server reads
+ * its broker URL, identity and minted credentials from `.volley/agent.json` in its cwd (the
+ * worktree), so nothing secret of volleyd's is in this file. `extra`: the user's servers that
+ * `agent_mcp_allow` names, copied as they are (an entry may hold the user's own secrets, so the
+ * file is never logged and spawn writes it 0600); an entry named `volley` never replaces volleyd's.
  */
-export function renderMcpConfig(entry: string): string {
-  const servers = { [VOLLEY_MCP_SERVER]: { command: "bun", args: ["run", entry] } };
+export function renderMcpConfig(entry: string, extra: Record<string, unknown> = {}): string {
+  const { [VOLLEY_MCP_SERVER]: _, ...rest } = extra;
+  const servers = { [VOLLEY_MCP_SERVER]: { command: "bun", args: ["run", entry] }, ...rest };
   return `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`;
+}
+
+/** The `mcpServers` map of a parsed `.claude.json` / `.mcp.json` (or of a project entry). */
+const mcpServersOf = (config: unknown): Record<string, unknown> => {
+  const servers = (config as { mcpServers?: unknown } | null)?.mcpServers;
+  return typeof servers === "object" && servers !== null && !Array.isArray(servers)
+    ? (servers as Record<string, unknown>)
+    : {};
+};
+
+/**
+ * The repository's `.mcp.json` (`project`, parsed or null) cut to the servers the profile approved
+ * for it in its project entry (`local`): `enabledMcpjsonServers`, or every one under
+ * `enableAllProjectMcpServers`, less `disabledMcpjsonServers`. The file comes from the branch
+ * checked out (for a reviewer, a PR head a contributor controls), and copying an entry into a
+ * strict `--mcp-config` would skip Claude Code's own approval of it.
+ */
+export function approvedProjectServers(project: unknown, local: unknown): unknown {
+  if (project === null) return null;
+  const p = (local ?? {}) as Record<string, unknown>;
+  const names = (v: unknown) =>
+    Array.isArray(v) ? v.filter((n): n is string => typeof n === "string") : [];
+  const enabled = names(p.enabledMcpjsonServers);
+  const disabled = names(p.disabledMcpjsonServers);
+  const all = p.enableAllProjectMcpServers === true;
+  return {
+    mcpServers: Object.fromEntries(
+      Object.entries(mcpServersOf(project)).filter(
+        ([name]) => (all || enabled.includes(name)) && !disabled.includes(name),
+      ),
+    ),
+  };
+}
+
+const isStrings = (v: unknown) => Array.isArray(v) && v.every((a) => typeof a === "string");
+const isStringMap = (v: unknown) =>
+  typeof v === "object" &&
+  v !== null &&
+  !Array.isArray(v) &&
+  Object.values(v).every((a) => typeof a === "string");
+
+/**
+ * An `agent_mcp_allow` server volleyd copies beside `volley`: a stdio entry (a string `command`,
+ * string `args`, a string map `env`) or a remote one (a string `url`, a string map `headers`).
+ * The remote fence admits an mcp.json of these only, so spawn copies no other shape anywhere.
+ */
+export function isMcpServerEntry(e: unknown): boolean {
+  if (typeof e !== "object" || e === null || Array.isArray(e)) return false;
+  const { command, args, env, url, headers } = e as Record<string, unknown>;
+  if (typeof command === "string")
+    return (args === undefined || isStrings(args)) && (env === undefined || isStringMap(env));
+  return typeof url === "string" && (headers === undefined || isStringMap(headers));
+}
+
+/**
+ * `agent_mcp_allow`: the entries `allow` names from `configs` (each a parsed `mcpServers` holder,
+ * or null), a later source winning a name, and the names found in none. A name whose winning
+ * entry is of a shape volleyd does not copy (isMcpServerEntry) is `malformed`, not copied, even
+ * when a broader source has a good one.
+ * `volley` is volleyd's own server, so it is neither copied nor missing.
+ */
+export function allowedMcpServers(
+  allow: readonly string[],
+  configs: readonly { source: string; config: unknown }[],
+): { servers: Record<string, unknown>; missing: string[]; malformed: string[] } {
+  const servers: Record<string, unknown> = {};
+  const missing: string[] = [];
+  const malformed: string[] = [];
+  for (const name of allow) {
+    if (name === VOLLEY_MCP_SERVER) continue;
+    let found: unknown;
+    let odd = false;
+    for (const { config } of configs) {
+      const entry = mcpServersOf(config)[name];
+      if (entry === undefined) continue;
+      // A narrower scope's entry overrides a broader one even when volleyd cannot copy it, as
+      // Claude Code would use it: the broader entry is never the fallback.
+      odd = !isMcpServerEntry(entry);
+      found = odd ? undefined : entry;
+    }
+    if (found !== undefined) servers[name] = found;
+    else if (odd) malformed.push(name);
+    else missing.push(name);
+  }
+  return { servers, missing, malformed };
 }
 
 /** An MCP server entry, other than volleyd's own `volley`, that runs volley-mcp. */
@@ -59,9 +147,7 @@ export function strayVolleyServers(
 ): StrayVolleyServer[] {
   const out: StrayVolleyServer[] = [];
   for (const { source, config } of configs) {
-    const servers = (config as { mcpServers?: unknown } | null)?.mcpServers;
-    if (typeof servers !== "object" || servers === null) continue;
-    for (const [name, entry] of Object.entries(servers)) {
+    for (const [name, entry] of Object.entries(mcpServersOf(config))) {
       if (name === VOLLEY_MCP_SERVER || typeof entry !== "object" || entry === null) continue;
       const { command, args } = entry as { command?: unknown; args?: unknown };
       const argv = [command, ...(Array.isArray(args) ? args : [])];
@@ -101,6 +187,11 @@ export interface LaunchScriptVars {
   /** `inherit`: the user's MCP servers load too (no `--strict-mcp-config`); absent: `strict`. */
   agentMcp?: AgentMcp;
   /**
+   * `agent_mcp_allow` under `inherit`: non-empty, only these load (copied into mcp.json), so the
+   * launch is `--strict-mcp-config` again; absent or empty: every server.
+   */
+  mcpAllow?: readonly string[];
+  /**
    * `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in tokens (`agent_auto_compact_pct`,
    * src/claude/context-window.ts); absent: not exported (Claude Code's own default).
    */
@@ -112,7 +203,8 @@ export interface LaunchScriptVars {
  * exports `VOLLEY_HOOKS_DIR` for the hook commands in the settings template, and execs claude
  * with the hooks via `--settings` and volleyd's own MCP server: `--strict-mcp-config` (the
  * user's MCP servers — an everyday `volley` on another broker — are not loaded; omitted under
- * `agent_mcp: inherit`, where they load and volleyd's `volley` shadows a user-scope one) and
+ * `agent_mcp: inherit` with no `agent_mcp_allow`, where they load and volleyd's `volley`
+ * shadows a user-scope one; an allowlist is copied into mcp.json instead) and
  * `--mcp-config=<worktree>/.volley/mcp.json`. The `=` form gives the variadic option exactly one
  * value and `--` ends option parsing, so the prompt (last) is never swallowed as a config. The
  * brief is read from `.volley/brief.md` at launch, so it never appears in any argv volleyd
@@ -124,7 +216,8 @@ export interface LaunchScriptVars {
  * the context size at which claude compacts the conversation.
  */
 export function renderLaunchScript(v: LaunchScriptVars): string {
-  const strict = v.agentMcp === "inherit" ? "" : " --strict-mcp-config";
+  const every = v.agentMcp === "inherit" && (v.mcpAllow ?? []).length === 0;
+  const strict = every ? "" : " --strict-mcp-config";
   return [
     "#!/usr/bin/env bash",
     "# Written by volleyd for one agent launch. Do not edit.",

@@ -39,6 +39,7 @@ const config: ConfigPayload = {
   fallback_model: "claude-sonnet-5-5",
   mailbox: { session_expiry_s: 604800 },
   worktree_root: "/tmp/volley worktrees",
+  agent_mcp_allow: [],
   spawn_timeout_s: 180,
   wake_grace_s: 120,
 };
@@ -94,12 +95,22 @@ function fakeClient() {
   return { client, published, deliver, ack, handlers };
 }
 
-/** Settings › Supervisor: the global config rows. */
-function setup(transport: ConfigTransport | null) {
-  const view = render(<Supervisor config={config} transport={transport} />);
-  const retain = (next: ConfigPayload) =>
-    view.rerender(<Supervisor config={next} transport={transport} />);
-  return { retain };
+/** Settings › Supervisor: the global config rows, one group's page (Admission first). */
+function setup(transport: ConfigTransport | null, first = "admission") {
+  let group = first;
+  let values = config;
+  const page = () => <Supervisor config={values} transport={transport} group={group} />;
+  const view = render(page());
+  const retain = (next: ConfigPayload) => {
+    values = next;
+    view.rerender(page());
+  };
+  /** Another group's page of the same section. */
+  const show = (next: string) => {
+    group = next;
+    view.rerender(page());
+  };
+  return { retain, show };
 }
 
 const slider = (name: string) => screen.getByRole("slider", { name });
@@ -139,17 +150,10 @@ describe("Settings › Supervisor (global config rows)", () => {
     setExecCommand(undefined);
   });
 
-  it("builds its sections from the schema and shows the current global values", () => {
-    setup(null);
-    for (const h of ["Admission", "Leases", "Attention", "Recovery"]) {
-      expect(screen.getByRole("heading", { name: h })).toBeInTheDocument();
-    }
+  it("builds its groups' pages from the schema and shows the current global values", () => {
+    const { show } = setup(null);
     expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "12");
     expect(slider("Hard ceiling")).toHaveAttribute("aria-valuemax", "100");
-    expect(slider("build pool capacity")).toHaveAttribute("aria-valuenow", "2");
-    expect(screen.getByRole("textbox", { name: "Fallback model" })).toHaveValue(
-      "claude-sonnet-5-5",
-    );
     expect(
       screen.getByText(
         "Runaway fuse: maximum concurrently live supervised agents across all waves.",
@@ -157,6 +161,14 @@ describe("Settings › Supervisor (global config rows)", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/applies at the next admission tick/)).toHaveTextContent(
       "Saved through volleyd config set · applies at the next admission tick · never preempts running work",
+    );
+    show("leases");
+    expect(screen.getByRole("heading", { name: "Leases" })).toBeInTheDocument();
+    expect(slider("build pool capacity")).toHaveAttribute("aria-valuenow", "2");
+    show("recovery");
+    expect(screen.queryByRole("slider", { name: "Hard ceiling" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Fallback model" })).toHaveValue(
+      "claude-sonnet-5-5",
     );
   });
 
@@ -195,7 +207,7 @@ describe("Settings › Supervisor (global config rows)", () => {
 
   it("shows a rejected ack's reasons inline and returns the slider to the current value", async () => {
     const f = fakeClient();
-    setup(createConfigTransport(f.client, { identity: "desk" }));
+    setup(createConfigTransport(f.client, { identity: "desk" }), "leases");
     press("build pool capacity", "ArrowLeft");
     await settle();
     const { envelope } = f.published[0] as (typeof f.published)[number];
@@ -291,13 +303,13 @@ describe("Settings › Supervisor (global config rows)", () => {
     const { retain } = setup(createConfigTransport(f.client, { identity: "desk" }));
     press("Hard ceiling", "ArrowRight");
     await settle();
-    retain({ ...config, version: 8, claim_after_s: 900 });
-    expect(slider("Claim after")).toHaveAttribute("aria-valuenow", "900");
+    retain({ ...config, version: 8, spawn_budget_multiplier: 4 });
+    expect(slider("Spawn budget")).toHaveAttribute("aria-valuenow", "4");
     expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "13");
     expect(within(rowOf("Hard ceiling")).getByText("sending…")).toBeInTheDocument();
 
     // Its own value retained: the row shows it, whatever order the ack comes in.
-    retain({ ...config, version: 9, claim_after_s: 900, hard_ceiling: 13 });
+    retain({ ...config, version: 9, spawn_budget_multiplier: 4, hard_ceiling: 13 });
     await f.ack(ids(f)[0] as string, applied(9));
     expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "13");
     retain({ ...config, version: 10, claim_after_s: 900, hard_ceiling: 15 });
@@ -337,19 +349,64 @@ describe("Settings › Supervisor (global config rows)", () => {
   });
 
   it("puts a multiplier's × right after the value", () => {
-    setup(null);
+    const { show } = setup(null);
     expect(within(rowOf("Spawn budget")).getByText("3×")).toBeInTheDocument();
+    show("attention");
     expect(within(rowOf("Claim after")).getByText("1800 s")).toBeInTheDocument();
   });
 
   it("sends a text tunable on Enter, empty meaning null when the schema allows it", async () => {
     const f = fakeClient();
-    setup(createConfigTransport(f.client, { identity: "desk" }));
+    setup(createConfigTransport(f.client, { identity: "desk" }), "recovery");
     const box = screen.getByRole("textbox", { name: "Fallback model" });
     fireEvent.change(box, { target: { value: "" } });
     fireEvent.keyDown(box, { key: "Enter" });
     await flush();
     expect(f.published[0]?.envelope.payload).toMatchObject({ patch: { fallback_model: null } });
+  });
+
+  it("sends a list tunable (agent_mcp_allow) on Enter, as distinct trimmed names", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk" }), "other");
+    const box = screen.getByRole("textbox", { name: "Agent MCP allow" });
+    fireEvent.change(box, { target: { value: "migrations, playwright,, migrations " } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    expect(f.published[0]?.envelope.payload).toMatchObject({
+      patch: { agent_mcp_allow: ["migrations", "playwright"] },
+    });
+  });
+
+  it("does not send a list tunable over the schema's bounds; the field says why", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk" }), "other");
+    const box = screen.getByRole("textbox", { name: "Agent MCP allow" });
+    fireEvent.change(box, { target: { value: `ok, ${"x".repeat(129)}` } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    expect(box.getAttribute("aria-invalid")).toBe("true");
+    expect(box.getAttribute("title")).toMatch(/at most 128 characters/);
+    const many = Array.from({ length: 65 }, (_, i) => `s${i}`).join(", ");
+    fireEvent.change(box, { target: { value: many } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    expect(box.getAttribute("title")).toMatch(/at most 64 names/);
+    expect(f.published).toHaveLength(0);
+  });
+
+  it("clears a list tunable's over-bounds mark when the retained value changes elsewhere", async () => {
+    const f = fakeClient();
+    const { retain } = setup(createConfigTransport(f.client, { identity: "desk" }), "other");
+    const box = screen.getByRole("textbox", { name: "Agent MCP allow" });
+    fireEvent.change(box, { target: { value: "x".repeat(129) } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    expect(box.getAttribute("aria-invalid")).toBe("true");
+    retain({ ...config, agent_mcp_allow: ["playwright"] });
+    await flush();
+    expect((box as HTMLInputElement).value).toBe("playwright");
+    expect(box.getAttribute("aria-invalid")).toBe("false");
+    expect(box.getAttribute("title")).toBeNull();
   });
 
   it("sends a switch tunable on a click and a choice tunable on a pick", async () => {
@@ -359,6 +416,7 @@ describe("Settings › Supervisor (global config rows)", () => {
       <Supervisor
         config={fleet}
         transport={createConfigTransport(f.client, { identity: "desk" })}
+        group="other"
       />,
     );
     fireEvent.click(screen.getByRole("switch", { name: "Require fresh base" }));
@@ -379,7 +437,7 @@ describe("Settings › Supervisor (global config rows)", () => {
     const writeText = vi.fn(async () => {});
     setClipboard({ writeText });
     const f = fakeClient();
-    setup(null);
+    const { show } = setup(null);
     expect(screen.getByText(/read-only/i)).toBeInTheDocument();
 
     // Until the value changes there is nothing to copy: re-setting the current value does nothing.
@@ -398,19 +456,20 @@ describe("Settings › Supervisor (global config rows)", () => {
     expect(within(row).getByRole("button", { name: "Copy command" })).toHaveTextContent("Copied");
     expect(f.published).toHaveLength(0);
 
-    const root = screen.getByRole("textbox", { name: "Worktree root" });
-    fireEvent.change(root, { target: { value: "/srv/wt" } });
-    fireEvent.keyDown(root, { key: "Enter" });
-    expect(screen.getByText("volleyd config set worktree_root /srv/wt")).toBeInTheDocument();
-
     // Back to the current value: nothing to copy again.
     press("Hard ceiling", "ArrowLeft");
     await settle();
     expect(within(row).queryByRole("button", { name: "Copy command" })).not.toBeInTheDocument();
+
+    show("recovery");
+    const root = screen.getByRole("textbox", { name: "Worktree root" });
+    fireEvent.change(root, { target: { value: "/srv/wt" } });
+    fireEvent.keyDown(root, { key: "Enter" });
+    expect(screen.getByText("volleyd config set worktree_root /srv/wt")).toBeInTheDocument();
   });
 
   it("a missing global config shows a note and no rows", () => {
-    render(<Supervisor config={null} transport={null} />);
+    render(<Supervisor config={null} transport={null} group="admission" />);
     expect(screen.getByText("No config from volleyd yet.")).toBeInTheDocument();
     expect(screen.queryAllByRole("slider")).toHaveLength(0);
   });
@@ -461,12 +520,15 @@ describe("Settings › Supervisor (global config rows)", () => {
         onClose={onClose}
       />,
     );
+    fireEvent.click(screen.getByRole("button", { name: "Recovery" }));
     const box = screen.getByRole("textbox", { name: "Fallback model" });
     fireEvent.change(box, { target: { value: "other-model" } });
     fireEvent.keyDown(box, { key: "Escape" });
     fireEvent.blur(box);
     await flush();
     expect(onClose).not.toHaveBeenCalled();
+    // Nor does it go back from the group's page.
+    expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("Recovery");
     expect(box).toHaveValue("claude-sonnet-5-5");
     expect(f.published).toHaveLength(0);
   });
@@ -633,6 +695,7 @@ describe("App wiring", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings for ci-speed" }));
     expect(screen.getByRole("dialog", { name: "Wave settings" })).toHaveTextContent("ci-speed");
     fireEvent.click(screen.getByRole("button", { name: "Global settings…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Admission" }));
     expect(screen.getByText(/read-only/i)).toBeInTheDocument();
     expect(within(rowOf("Hard ceiling")).getByText(/Pick a new value/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
@@ -724,8 +787,11 @@ describe("App wiring", () => {
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Supervisor" }));
+    fireEvent.click(screen.getByRole("button", { name: "Admission" }));
     expect(screen.queryByText(/read-only/i)).not.toBeInTheDocument();
     expect(slider("Hard ceiling")).not.toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Back to Supervisor" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recovery" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Fallback model" }), {
       target: { value: "claude-haiku-5-5" },
     });

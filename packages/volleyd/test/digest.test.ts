@@ -224,6 +224,38 @@ describe("digestOf", () => {
   });
 });
 
+describe("a wave-level alarm (#324)", () => {
+  const message =
+    "this machine is overloaded (load 130.0 on 10 cores, max 1.5 per core) while box-a is ready with 10 free agent slots; this wave is placement: local (set placement: auto to use it)";
+  const raised = journal(...events.map(({ seq: _s, at: _a, ...e }) => e), {
+    type: "alarm_raised",
+    data: { alarm: "peer_idle_under_load", peer: "box-a", free: 10, message },
+  });
+  const s = reduce(raised);
+  const d = digestOf(raised, s, NOW, "escalation");
+
+  it("peer_idle_under_load holds on the wave state, and the digest carries it", () => {
+    expect(s.alarms).toEqual([{ alarm: "peer_idle_under_load", message }]);
+    expect(d.alarms).toEqual([{ alarm: "peer_idle_under_load", message }]);
+    expect(digest.alarms).toBeUndefined();
+    expect(schemaErrors("digest.schema.json", envelope("_waves/digest", "digest", d))).toEqual([]);
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", s)),
+    ).toEqual([]);
+    expect(renderDigestMd(d)).toContain(`## Alarms\n\n- peer_idle_under_load: ${message}\n`);
+  });
+
+  it("alarm_cleared drops it: the state and the digest no longer carry it", () => {
+    const cleared = journal(...raised.map(({ seq: _s, at: _a, ...e }) => e), {
+      type: "alarm_cleared",
+      data: { alarm: "peer_idle_under_load" },
+    });
+    const after = reduce(cleared);
+    expect(after.alarms).toBeUndefined();
+    expect(digestOf(cleared, after, NOW, "escalation").alarms).toBeUndefined();
+  });
+});
+
 describe("summaryLine", () => {
   const base: Digest = {
     wave: "w1",
@@ -245,6 +277,7 @@ describe("summaryLine", () => {
       merges: 27,
     },
     waiting: [{ id: "d-go", kind: "release_go", question: "Go?", since: NOW, owner_only: true }],
+    held: [],
     failures: [],
   };
 
@@ -266,6 +299,49 @@ describe("summaryLine", () => {
         waiting: [],
       }),
     ).toBe("w1 stopped: 27 shipped");
+  });
+});
+
+describe("held decisions (#335)", () => {
+  const withHold = journal(...events.map(({ seq: _s, at: _a, ...e }) => e), {
+    type: "decision_held",
+    task: "E",
+    data: { decision_id: "d-4", kind: "agent_blocked", on: { task: "C" }, by: "coord-a" },
+  });
+  const d = digestOf(withHold, reduce(withHold), NOW, "escalation");
+
+  it("lists a held decision under held, not waiting", () => {
+    expect(d.waiting.map((w) => w.id)).toEqual(["d-3"]);
+    expect(d.held).toEqual([
+      {
+        id: "d-4",
+        kind: "agent_blocked",
+        task: "E",
+        question: "Stuck?",
+        since: withHold.find((e) => e.data.decision_id === "d-4")?.at,
+        on: { task: "C" },
+        label: "C (#23)",
+        held_since: withHold.at(-1)?.at,
+      },
+    ]);
+    expect(schemaErrors("digest.schema.json", envelope("_waves/digest", "digest", d))).toEqual([]);
+    expect(summaryLine(d)).toContain("1 waiting for you (plan_change), 1 held");
+  });
+
+  it("renders them under their own heading; a released hold is waiting again", () => {
+    const md = renderDigestMd(d);
+    expect(md).toContain(
+      `## Held\n\n- d-4 agent_blocked on E: waiting on C (#23) since ${withHold.at(-1)?.at}`,
+    );
+    expect(md.indexOf("## Waiting for you")).toBeLessThan(md.indexOf("## Held"));
+    const released = journal(...withHold.map(({ seq: _s, at: _a, ...e }) => e), {
+      type: "decision_released",
+      task: "E",
+      data: { decision_id: "d-4", kind: "agent_blocked", why: "C done", by: "volleyd" },
+    });
+    const r = digestOf(released, reduce(released), NOW, "escalation");
+    expect(r.held).toEqual([]);
+    expect(r.waiting.map((w) => w.id)).toEqual(["d-3", "d-4"]);
   });
 });
 

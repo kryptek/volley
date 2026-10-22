@@ -10,7 +10,7 @@ import {
   reserve,
 } from "./placement";
 import type { WaveRecord } from "./reducer";
-import type { TaskId, TaskStage, Wave } from "./types";
+import type { PipelineStage, TaskAgents, TaskId, TaskStage, Wave } from "./types";
 
 /**
  * An admission verdict: how many more agents may start right now, and why not more.
@@ -223,6 +223,82 @@ export function spawnBudget(wave: Wave, multiplier: number, raised = 0): number 
     Math.ceil(roles * DAEMON_DEFAULTS.spawn_budget_retry_headroom),
   );
   return Math.max(roles + headroom, Math.ceil(multiplier * wave.task_order.length)) + raised;
+}
+
+/** The agent a pipeline stage spawns (the gate spawns none). */
+const STAGE_AGENT: Partial<Record<PipelineStage, keyof TaskAgents>> = {
+  implement: "implementer",
+  spec_review: "spec_reviewer",
+  quality_review: "quality_reviewer",
+  fixup: "fixup",
+};
+
+/**
+ * Task stages that spawn nothing more. A `blocked` task can still come back through a respawn
+ * decision; it counts 0 here like a rereview does (the min-share floor cushions both).
+ */
+const FINISHED = new Set<TaskStage>(["done", "merge_ready", "cancelled", "blocked"]);
+
+/**
+ * Spawns the wave's unfinished tasks still need to finish their pipelines: per task, every
+ * implement and review stage from the one it is at (a parked task: where it resumes) that has
+ * no agent yet, plus one fixup allowance. A queued task counts its whole pipeline.
+ */
+export function spawnsOutstanding(wave: Wave, rec: WaveRecord): number {
+  let n = 0;
+  for (const t of rec.state?.tasks ?? []) {
+    const stages = wave.tasks[t.id]?.stages;
+    if (stages === undefined) continue;
+    let stage = t.stage;
+    if (stage === "awaiting_decision")
+      stage =
+        Object.values(rec.decisions).find(
+          (d) => d.task === t.id && d.resolved === undefined && d.resume_stage !== undefined,
+        )?.resume_stage ?? "queued";
+    if (FINISHED.has(stage)) continue;
+    // A stage outside the stage groups (`fixup`, `rebase`, `queued`) finds -1 and counts the
+    // whole pipeline from 0, on purpose: after a fixup the reviewers run again.
+    const at = Math.max(
+      0,
+      stages.findIndex((g) => g.includes(stage as PipelineStage)),
+    );
+    for (const [i, group] of stages.entries()) {
+      if (i < at) continue;
+      for (const s of group) {
+        const agent = STAGE_AGENT[s];
+        if (agent === undefined || s === "fixup") continue;
+        // Only the current group's agents count as spawned: a later group has none yet, and a
+        // task back at review after a fixup reuses its role keys from round 1, so a rereview
+        // counts 0 here and the raise comes out low (the min-share floor cushions it).
+        if (i === at && t.agents[agent] !== undefined) continue;
+        n++;
+      }
+    }
+    n++; // the fixup allowance
+  }
+  return n;
+}
+
+/**
+ * The `raise by <n>` a spawn_budget_exhausted decision offers: what the wave still needs
+ * (`spawnsOutstanding`), at least `spawn_budget_raise_min_share` of the derived budget, capped
+ * so `used + n` stays within `derived × raiseMax` (autopilot's `budget_raise_max`) while that
+ * leaves room for one. Never less than 1. Once `used` is past that cap the owner is offered the
+ * full need (not a raise by 0); autopilot's own `budget_raise_max` check still escalates it.
+ */
+export function budgetRaise(o: {
+  outstanding: number;
+  derived: number;
+  used: number;
+  raiseMax: number;
+}): number {
+  const want = Math.max(
+    1,
+    o.outstanding,
+    Math.ceil(o.derived * DAEMON_DEFAULTS.spawn_budget_raise_min_share),
+  );
+  const room = Math.floor(o.derived * o.raiseMax) - o.used;
+  return room >= 1 ? Math.min(want, room) : want;
 }
 
 /** Spawns a wave has used or committed to: actual spawns plus admitted tasks not yet spawned. */

@@ -10,6 +10,7 @@ import {
   type RemoteStep,
   TMUX_LAUNCH_COMMAND,
 } from "../fence";
+import { fetchFailure, lockedFetch } from "../git-lock";
 import { type DoctorReport, parseDoctorReport } from "../machines";
 import { PATH_TOOLS, type PathProbe, parsePathProbe } from "../readiness";
 import { SpawnError } from "../spawn-error";
@@ -90,10 +91,13 @@ export interface RemoteHost extends Host {
   /** True / false for a clone / none at `repo`; throws LAUNCH_FAILED when ssh itself fails. */
   repoExists(): Promise<boolean>;
   tunnelUp(): Promise<boolean>;
-  /** The box's folder trust; null when it has no readable `~/.claude.json`; throws if ssh fails. */
-  readTrust(): Promise<Record<string, unknown> | null>;
-  /** The owner's `trust` answer, recorded in the box's own `~/.claude.json`. */
-  recordTrust(root: string): Promise<void>;
+  /**
+   * The box's folder trust (or, with `configDir`, that profile's there); null when it has no
+   * readable `.claude.json`; throws if ssh fails.
+   */
+  readTrust(configDir?: string): Promise<Record<string, unknown> | null>;
+  /** The owner's `trust` answer, recorded in the box's own `~/.claude.json` (or the profile's). */
+  recordTrust(root: string, configDir?: string): Promise<void>;
   /** A file on the box; null when it does not exist; throws when ssh fails. */
   readFile(path: string): Promise<string | null>;
   /**
@@ -102,8 +106,8 @@ export interface RemoteHost extends Host {
    */
   probePath(): Promise<PathProbe>;
   /**
-   * `volley peer doctor --json [--fix --yes [--clone --origin <clone>]]` on the box, in its volley
-   * checkout: the parsed report. `clone` (with `fix`) is the wave repo's URL the doctor clones
+   * `volley peer doctor --json --supervisor-volley-dir <volley_dir> [--fix --yes [--clone
+   * --origin <clone>]]` on the box, in its volley checkout: the parsed report. `clone` (with `fix`) is the wave repo's URL the doctor clones
    * where the box's clone is missing. Throws when ssh fails or the doctor printed no report.
    */
   runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport>;
@@ -112,7 +116,7 @@ export interface RemoteHost extends Host {
 /** The fence tokens and bound a `run` may carry. */
 export type RemoteRunOptions = Pick<
   ExecOptions,
-  "consent" | "timeoutMs" | "launch" | "modelSwitch" | "signin" | "picker" | "handoff"
+  "consent" | "timeoutMs" | "launch" | "modelSwitch" | "signin" | "picker" | "handoff" | "wake"
 >;
 
 /** ssh's own failure (unreachable, auth, host key, timeout), as opposed to the remote command's. */
@@ -185,13 +189,17 @@ export class SshTmuxHost implements RemoteHost {
         "-s",
       ],
       {
-        remote: { steps },
+        remote: {
+          steps,
+          host: { name: this.spec.name, worktree_root: this.spec.worktree_root },
+        },
         timeoutMs: opts.timeoutMs ?? DAEMON_DEFAULTS.remote_exec_timeout_ms,
         ...(opts.consent !== undefined ? { consent: opts.consent } : {}),
         ...(opts.launch !== undefined ? { launch: opts.launch } : {}),
         ...(opts.modelSwitch !== undefined ? { modelSwitch: opts.modelSwitch } : {}),
         ...(opts.picker !== undefined ? { picker: opts.picker } : {}),
         ...(opts.handoff !== undefined ? { handoff: opts.handoff } : {}),
+        ...(opts.wake !== undefined ? { wake: opts.wake } : {}),
         ...(opts.signin !== undefined ? { signin: opts.signin } : {}),
       },
     );
@@ -292,16 +300,32 @@ export class SshTmuxHost implements RemoteHost {
     // The box's clone must have the release branch as it is now: fetch it, cut from origin's.
     // A failed fetch refuses the spawn unless require_fresh_base is off (then: the box's copy);
     // for a start ref (a reviewer's head), it is a plain worktree failure, as it always was.
-    const fetch = await git("-C", spec.repo, "fetch", "--quiet", "origin", spec.base);
+    // One fetch into the box's clone at a time (git-lock.ts); a lost ref-lock race is retried.
+    const { result: fetch, retried } = await lockedFetch(this.name, spec.repo, () =>
+      git("-C", spec.repo, "fetch", "--quiet", "origin", spec.base),
+    );
     const fetchError = fetch.code === 0 ? null : firstLine(fetch.stderr, `exit ${fetch.code}`);
+    const retriedNote = retried !== undefined ? { fetch_retried: retried } : {};
     // A start commit (a reviewer's or fixup's PR head, by sha) is used as it is, like on this
     // machine: never `origin/<sha>`. The box may already hold it (its own agent pushed it).
-    if (isCommitSha(spec.base)) return this.worktreeAtCommit(spec, fetchError);
+    if (isCommitSha(spec.base))
+      return { ...(await this.worktreeAtCommit(spec, fetchError)), ...retriedNote };
     if (fetchError !== null && spec.releaseBase !== true) {
       throw new SpawnError(
         "WORKTREE_FAILED",
         `git fetch origin ${spec.base} failed on ${this.spec.target}: ${fetchError}`,
         { host: this.name, repo: spec.repo },
+      );
+    }
+    if (
+      fetchError !== null &&
+      spec.requireFresh !== false &&
+      fetchFailure(fetchError) === "unreachable"
+    ) {
+      throw new SpawnError(
+        "BASE_UNREACHABLE",
+        `git fetch origin ${spec.base} failed on ${this.spec.target}: ${fetchError}; origin was not reached, so no worktree is cut from the box's copy. The spawn is retried with the usual backoff.`,
+        { host: this.name, repo: spec.repo, branch: spec.base, fetch_error: fetchError },
       );
     }
     if (fetchError !== null && spec.requireFresh !== false) {
@@ -346,6 +370,7 @@ export class SshTmuxHost implements RemoteHost {
       path: spec.path,
       branch: spec.branch,
       reused: false,
+      ...retriedNote,
       ...(sha !== ""
         ? {
             base: {
@@ -570,18 +595,32 @@ export class SshTmuxHost implements RemoteHost {
   }
 
   async runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport> {
-    const argv = [
-      "volley",
-      "peer",
-      "doctor",
-      "--json",
-      ...(opts.fix ? ["--fix", "--yes"] : []),
-      ...(opts.fix && opts.clone !== undefined ? ["--clone", "--origin", opts.clone] : []),
-    ];
-    // Through run, not exec: `volley` is otherwise a local program (LOCAL_PROGRAMS).
-    const r = await this.run([{ argv, cwd: this.spec.volley_dir }], {
-      timeoutMs: DAEMON_DEFAULTS.peer_doctor_timeout_ms,
-    }).catch(() => null);
+    const doctorRun = (dir: string[]) => {
+      const argv = [
+        "volley",
+        "peer",
+        "doctor",
+        "--json",
+        ...dir,
+        ...(opts.fix ? ["--fix", "--yes"] : []),
+        ...(opts.fix && opts.clone !== undefined ? ["--clone", "--origin", opts.clone] : []),
+      ];
+      // Through run, not exec: `volley` is otherwise a local program (LOCAL_PROGRAMS).
+      return this.run([{ argv, cwd: this.spec.volley_dir }], {
+        timeoutMs: DAEMON_DEFAULTS.peer_doctor_timeout_ms,
+      }).catch(() => null);
+    };
+    // The box's volley_dir: every volley MCP entry there must run it (agents are launched from
+    // it). A volley older than the flag refuses it: its doctor then runs without.
+    let r = await doctorRun(["--supervisor-volley-dir", this.spec.volley_dir]);
+    if (
+      r !== null &&
+      !transportFailed(r) &&
+      parseDoctorReport(r.stdout) === null &&
+      r.stderr.includes("--supervisor-volley-dir")
+    ) {
+      r = await doctorRun([]);
+    }
     if (r === null || transportFailed(r)) throw this.sshFailed("volley peer doctor", r);
     // A failing block check exits 1 with the report on stdout.
     const report = parseDoctorReport(r.stdout);
@@ -607,8 +646,8 @@ export class SshTmuxHost implements RemoteHost {
    * nothing else from that file: `{ projects: { <dir>: { hasTrustDialogAccepted: true } } }`.
    * Null when it cannot be read.
    */
-  async readTrust(): Promise<Record<string, unknown> | null> {
-    const cfg = await this.readClaudeJson();
+  async readTrust(configDir?: string): Promise<Record<string, unknown> | null> {
+    const cfg = (await this.readClaudeJsonText(configDir))?.cfg ?? null;
     if (cfg === null) return null;
     const projects: Record<string, { hasTrustDialogAccepted: true }> = {};
     const table = (cfg as { projects?: unknown } | null)?.projects;
@@ -624,17 +663,24 @@ export class SshTmuxHost implements RemoteHost {
     return { projects };
   }
 
-  /** The box's whole `~/.claude.json` and its text; null when absent or not a JSON object. */
-  private async readClaudeJson(): Promise<Record<string, unknown> | null> {
-    return (await this.readClaudeJsonText())?.cfg ?? null;
-  }
-
-  private async readClaudeJsonText(): Promise<{
+  /**
+   * The box's whole `~/.claude.json` (or a profile's, in `configDir`) and its text; null when
+   * absent or not a JSON object.
+   */
+  private async readClaudeJsonText(configDir?: string): Promise<{
     text: string;
     cfg: Record<string, unknown>;
   } | null> {
-    // bash -s starts in the login user's home directory.
-    const text = await this.readFile(REMOTE_CLAUDE_JSON);
+    // bash -s starts in the login user's home directory; a profile's is read in its own dir.
+    const text =
+      configDir === undefined
+        ? await this.readFile(REMOTE_CLAUDE_JSON)
+        : await this.run([{ argv: ["cat", REMOTE_CLAUDE_JSON], cwd: configDir }])
+            .catch(() => null)
+            .then((r) => {
+              if (r === null || transportFailed(r)) throw this.sshFailed(`read ${configDir}`, r);
+              return r.code === 0 ? r.stdout : null;
+            });
     if (text === null) return null;
     try {
       const cfg = JSON.parse(text) as unknown;
@@ -653,19 +699,26 @@ export class SshTmuxHost implements RemoteHost {
    * rewrites the file often, so a changed file is re-read and the write retried. Called only on
    * the owner's explicit `trust` answer.
    */
-  async recordTrust(root: string): Promise<void> {
+  async recordTrust(root: string, configDir?: string): Promise<void> {
+    // A profile's files by absolute path: a write step does not run in a cwd.
+    const json =
+      configDir !== undefined ? posix.join(configDir, REMOTE_CLAUDE_JSON) : REMOTE_CLAUDE_JSON;
+    const tmp =
+      configDir !== undefined
+        ? posix.join(configDir, REMOTE_CLAUDE_JSON_TMP)
+        : REMOTE_CLAUDE_JSON_TMP;
     for (let i = 0; i < DAEMON_DEFAULTS.trust_write_attempts; i++) {
-      const cur = await this.readClaudeJsonText();
+      const cur = await this.readClaudeJsonText(configDir);
       if (cur === null) {
         throw new Error(
-          `no readable ~/.claude.json on ${this.spec.target}: run claude there once, then retry`,
+          `no readable ${configDir !== undefined ? json : "~/.claude.json"} on ${this.spec.target}: run claude there once, then retry`,
         );
       }
       const next = `${JSON.stringify(withTrust(cur.cfg, root), null, 2)}\n`;
       const r = await this.run([
-        { argv: ["cmp", "-s", "-", REMOTE_CLAUDE_JSON], stdin: b64(cur.text) },
-        { argv: ["base64", "-d"], stdin: b64(next), stdout: REMOTE_CLAUDE_JSON_TMP },
-        { argv: ["mv", "-f", REMOTE_CLAUDE_JSON_TMP, REMOTE_CLAUDE_JSON] },
+        { argv: ["cmp", "-s", "-", json], stdin: b64(cur.text) },
+        { argv: ["base64", "-d"], stdin: b64(next), stdout: tmp },
+        { argv: ["mv", "-f", tmp, json] },
       ]).catch(() => null);
       if (r === null || transportFailed(r)) throw this.sshFailed("trust write", r);
       if (r.code === 0) return;

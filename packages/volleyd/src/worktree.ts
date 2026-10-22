@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { ExecFn } from "./exec";
+import { LOCAL_HOST } from "./fleet-name";
+import { fetchFailure, lockedFetch } from "./git-lock";
 import type { WorktreeResult, WorktreeSpec } from "./hosts/host";
 import { SpawnError } from "./spawn-error";
 import type { Wave } from "./types";
@@ -138,12 +140,30 @@ export async function fetchRelease(
   repo: string,
   branch: string,
 ): Promise<string | null> {
-  const r = await exec(["git", "-C", repo, "fetch", "--quiet", REMOTE, branch], {
-    timeoutMs: DAEMON_DEFAULTS.git_fetch_timeout_ms,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-  });
-  if (r.timedOut) return "git fetch timed out";
-  return r.code === 0 ? null : firstLine(r.stderr, `git fetch exited ${r.code}`);
+  return (await fetchReleaseRetried(exec, repo, branch)).error;
+}
+
+/**
+ * `fetchRelease`, under the supervisor's lock on `repo` (git-lock.ts: one fetch into a clone at a
+ * time; a lost ref-lock race is retried once), with the retried attempt's error when there was one.
+ */
+async function fetchReleaseRetried(
+  exec: ExecFn,
+  repo: string,
+  branch: string,
+): Promise<{ error: string | null; retried?: string }> {
+  const { result: r, retried } = await lockedFetch(LOCAL_HOST, repo, () =>
+    exec(["git", "-C", repo, "fetch", "--quiet", REMOTE, branch], {
+      timeoutMs: DAEMON_DEFAULTS.git_fetch_timeout_ms,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    }),
+  );
+  const error = r.timedOut
+    ? "git fetch timed out"
+    : r.code === 0
+      ? null
+      : firstLine(r.stderr, `git fetch exited ${r.code}`);
+  return retried !== undefined ? { error, retried } : { error };
 }
 
 /** The local release branch's and origin's tracking ref's commits (null where absent). */
@@ -188,6 +208,8 @@ export interface ReleaseBase {
   fresh: boolean;
   /** Why the fetch failed (only when not fresh). */
   fetch_error?: string;
+  /** The fetch lost a ref-lock race and was retried: the first attempt's error. */
+  fetch_retried?: string;
 }
 
 /**
@@ -209,7 +231,18 @@ export async function resolveReleaseBase(
   branch: string,
   opts: { requireFresh?: boolean } = {},
 ): Promise<ReleaseBase> {
-  const fetchError = await fetchRelease(exec, repo, branch);
+  const { error: fetchError, retried } = await fetchReleaseRetried(exec, repo, branch);
+  if (
+    fetchError !== null &&
+    opts.requireFresh !== false &&
+    fetchFailure(fetchError) === "unreachable"
+  ) {
+    throw new SpawnError(
+      "BASE_UNREACHABLE",
+      `git fetch ${REMOTE} ${branch} failed in ${repo} (${fetchError}); ${REMOTE} was not reached, so no worktree is cut from the local copy. The spawn is retried with the usual backoff.`,
+      { repo, branch, fetch_error: fetchError },
+    );
+  }
   if (fetchError !== null && opts.requireFresh !== false) {
     throw new SpawnError(
       "BASE_STALE",
@@ -217,8 +250,10 @@ export async function resolveReleaseBase(
       { repo, branch, fetch_error: fetchError },
     );
   }
-  const freshness =
-    fetchError === null ? { fresh: true } : { fresh: false, fetch_error: fetchError };
+  const freshness = {
+    ...(fetchError === null ? { fresh: true } : { fresh: false, fetch_error: fetchError }),
+    ...(retried !== undefined ? { fetch_retried: retried } : {}),
+  };
   const { local, remote } = await releaseRefs(exec, repo, branch);
   const tracking = `${REMOTE}/${branch}`;
   if (local === null && remote === null) {
@@ -287,6 +322,7 @@ export async function addWorktree(exec: ExecFn, spec: WorktreeSpec): Promise<Wor
     path: spec.path,
     branch: spec.detach === true ? `HEAD (detached at ${base})` : spec.branch,
     reused: false,
+    ...(release?.fetch_retried !== undefined ? { fetch_retried: release.fetch_retried } : {}),
     ...(release !== null ? { base: baseOf(release) } : {}),
   };
 }

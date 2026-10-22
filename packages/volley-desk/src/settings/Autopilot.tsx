@@ -8,13 +8,21 @@
  * The global scope writes through config_set; a wave's scope (`wave` and its
  * `effective_config` as `values`) is read-only, as every wave row is, and asks
  * for that wave's policy.
+ *
+ * The section drills into two groups (`GroupList`): Tunables and Policy table.
+ * The policy is asked for once, by the section, so the list's row can count
+ * its rules and the page shows the same answer.
  */
 import { useEffect, useState } from "react";
+import { SwitchToAdmin } from "../auth/AccountActions";
+import { plural } from "../lib/plural";
 import type { ConfigPayload, Tunables } from "../store/types";
 import type { ControlFn } from "./ClaudeAccounts";
 import { ConfigRows } from "./ConfigRows";
+import { GroupList } from "./GroupNav";
 import type { ConfigTransport } from "./configTransport";
 import { Group } from "./primitives";
+import { sectionDef } from "./sections";
 
 /** The prototype's macOS accent, as Settings › Supervisor uses. */
 const ACCENT = "#0a84ff";
@@ -34,7 +42,7 @@ export interface PolicyRow {
   rationale: string;
 }
 
-type PolicyState =
+export type PolicyState =
   | { state: "loading" }
   | { state: "done"; rules: PolicyRow[] }
   | { state: "failed"; error: string };
@@ -158,6 +166,37 @@ function PolicyGrid({ rules }: { rules: readonly PolicyRow[] }) {
   );
 }
 
+/** The group list's one-line summaries, from the config and the `policy` answer. */
+export function autopilotSummaries({
+  config,
+  policy,
+}: {
+  config: Tunables | null;
+  policy: PolicyState | null;
+}): Record<string, string> {
+  const a = config?.autopilot;
+  const tunables = !a
+    ? ""
+    : a.enabled === false
+      ? "off"
+      : [
+          "on",
+          `${a.owner_only?.length ?? 0} owner-only`,
+          ...(a.merge ? [`merge ${a.merge}`] : []),
+        ].join(" · ");
+  return {
+    tunables,
+    policy:
+      policy === null
+        ? "needs broker credentials"
+        : policy.state === "loading"
+          ? "asking volleyd…"
+          : policy.state === "failed"
+            ? "no table"
+            : plural(policy.rules.length, "rule"),
+  };
+}
+
 export interface AutopilotProps {
   /** The retained `volley/_waves/_config` payload (the global scope's values). */
   config: ConfigPayload | null;
@@ -168,42 +207,69 @@ export interface AutopilotProps {
   /** A wave's scope: its policy, and its effective config (`values`) read-only. */
   wave?: string;
   values?: Tunables | null;
+  /** The open group's page (`tunables`, `policy`), or null for the group list. */
+  group: string | null;
+  onOpenGroup?: (group: string) => void;
+  /** The group a sidebar search hit. */
+  hit?: string | undefined;
 }
 
-export function Autopilot({ config, transport, control, wave, values }: AutopilotProps) {
+export function Autopilot({
+  config,
+  transport,
+  control,
+  wave,
+  values,
+  group,
+  onOpenGroup = () => {},
+  hit,
+}: AutopilotProps) {
   const policy = usePolicy(control, wave);
   const scoped = wave !== undefined;
   const cmd = scoped ? `volleyd policy ${wave}` : "volleyd policy";
-  return (
-    <>
+  if (group !== "tunables" && group !== "policy") {
+    return (
+      <GroupList
+        section={sectionDef("autopilot")}
+        summaries={autopilotSummaries({ config: scoped ? (values ?? null) : config, policy })}
+        onOpen={onOpenGroup}
+        hit={hit}
+      />
+    );
+  }
+  if (group === "tunables") {
+    return (
       <ConfigRows
         scope={scoped ? "wave" : "global"}
         sections={AUTOPILOT_SECTIONS}
         values={scoped ? (values ?? null) : config}
         transport={transport}
         accent={ACCENT}
+        untitled
         {...(scoped
           ? {}
           : {
               foot: "Saved through volleyd config set · applies from the next decision on. A kind under Owner only always waits for the owner.",
             })}
       />
-      <Group title="Policy table">
-        {policy === null ? (
-          <p className="s-hint">
-            The Desk cannot ask volleyd without broker credentials: run <code>{cmd}</code> in a
-            terminal.
-          </p>
-        ) : policy.state === "loading" ? (
-          <p className="s-hint dim">Asking volleyd…</p>
-        ) : policy.state === "failed" ? (
-          <p className="s-hint" role="alert">
-            No policy table: {policy.error}. <code>{cmd}</code> prints it in a terminal.
-          </p>
-        ) : (
-          <PolicyTable rules={policy.rules} />
-        )}
-      </Group>
-    </>
+    );
+  }
+  return (
+    <Group>
+      {policy === null ? (
+        <p className="s-hint">
+          The Desk cannot ask volleyd without broker credentials: run <code>{cmd}</code> in a
+          terminal. <SwitchToAdmin />
+        </p>
+      ) : policy.state === "loading" ? (
+        <p className="s-hint dim">Asking volleyd…</p>
+      ) : policy.state === "failed" ? (
+        <p className="s-hint" role="alert">
+          No policy table: {policy.error}. <code>{cmd}</code> prints it in a terminal.
+        </p>
+      ) : (
+        <PolicyTable rules={policy.rules} />
+      )}
+    </Group>
   );
 }

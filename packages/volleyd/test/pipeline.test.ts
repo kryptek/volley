@@ -1,15 +1,19 @@
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
+import { ranTaskDef, worktreeGone } from "../src/daemon";
 import type { DecisionRecord } from "../src/decisions";
 import type { EvidenceJson } from "../src/evidence";
+import type { ExecFn } from "../src/exec";
 import { roleSpawnHold } from "../src/pipeline";
 import { eventually } from "./helpers/broker-wait";
 import { FIXTURES } from "./helpers/fake-host";
 import {
   type Harness,
   type HarnessOptions,
+  isHeadRunsRead,
   pipelineHarness,
   sha,
 } from "./helpers/pipeline-harness";
@@ -210,7 +214,7 @@ describe("pipeline: artifacts and CI", () => {
     expect(stage()).toBe("implement");
 
     // Re-checks are rate-limited.
-    const runLists = () => h.calls.filter((c) => c[1] === "run" && c[2] === "list").length;
+    const runLists = () => h.calls.filter(isHeadRunsRead).length;
     const before = runLists();
     await h.tick();
     expect(runLists()).toBe(before);
@@ -280,6 +284,56 @@ describe("pipeline: rebase before the gate", () => {
     expect(h.spawns.some((s) => s.role === "rebase")).toBe(false);
     expect(types()).toContain("stage_entered");
     expect(stage()).toBe("merge_ready");
+  });
+});
+
+describe("pipeline: a CONFLICTING PR (#312)", () => {
+  it("the implementer's conflicting head is merged up to date, then reviewed, gated and merged as usual", async () => {
+    h = pipelineHarness({ merge: "auto" });
+    await h.start();
+    h.openPr(H1);
+    const pr = h.world.prs[0];
+    if (pr === undefined) throw new Error("no PR");
+    pr.mergeable = "CONFLICTING";
+    await h.finish("implementer", { head: H1 });
+    expect(h.spawns.filter((s) => s.role === "rebase")).toHaveLength(1);
+    expect(h.openDecisions()).toEqual([]);
+
+    // The update agent pushes a merge commit; GitHub runs CI on it, green.
+    pr.mergeable = "MERGEABLE";
+    h.world.ancestor[`${H1}..${H2}`] = true;
+    h.world.diffNames[`${H1}..${H2}`] = ["CHANGELOG.md"];
+    await h.finish("rebase", { head: H2, ci: "green" });
+    // The implementer's work was never reviewed: the reviews run next, at the merged head.
+    const reviewers = h.spawns.filter((s) => s.role !== "implementer" && s.role !== "rebase");
+    expect(reviewers.map((s) => [s.role, s.start])).toEqual([
+      ["spec_reviewer", { ref: H2, detach: true }],
+      ["quality_reviewer", { ref: H2, detach: true }],
+    ]);
+    expect(h.task()?.why_waiting).toBeUndefined();
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    expect(stage()).toBe("merge_ready");
+    expect(h.task()?.pr?.head_sha).toBe(H2);
+    await h.tick();
+    expect(types()).toContain("merged_by_supervisor");
+    expect(h.openDecisions()).toEqual([]);
+  });
+
+  it("a fixup's conflicting head is updated, then gated: the reviews it fixed still hold", async () => {
+    await reviewed();
+    const pr = h.world.prs[0];
+    if (pr === undefined) throw new Error("no PR");
+    pr.mergeable = "CONFLICTING";
+    await h.finish("fixup", { head: H2, result: result("fixup-resolved") });
+    expect(h.spawns.find((s) => s.role === "rebase")?.start).toEqual({ ref: H2, detach: false });
+    pr.mergeable = "MERGEABLE";
+    h.world.diffNames[`${H2}..${H3}`] = ["README.md"];
+    await h.finish("rebase", { head: H3, ci: "green" });
+    expect(stage()).toBe("merge_ready");
+    expect(h.task()?.pr?.head_sha).toBe(H3);
+    expect(h.openDecisions()).toEqual([]);
+    expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
   });
 });
 
@@ -737,6 +791,17 @@ describe("pipeline: the fixup's result is durable", () => {
     );
   });
 
+  it("the fixup's worktree gone at the gate: its diffstat is read from the repo root", async () => {
+    await reviewed({ worktreeGone: (_, wt) => wt.includes("fixup") });
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    expect(stage()).toBe("merge_ready");
+    const stats = h.calls.filter((a) => a[0] === "git" && a[3] === "diff" && a[4] === "--stat");
+    expect(stats.map((a) => a[2])).toEqual(["/repo"]);
+    expect(readFileSync(h.task()?.evidence_path as string, "utf-8")).toContain(
+      "```\n src/batch.ts | 4 ++--\n 1 file changed\n```",
+    );
+  });
+
   it("CI red at the fixup's done → re-verify after a fix keeps the resolutions", async () => {
     await reviewed();
     await h.finish("fixup", { head: H2, ci: "red", result: result("fixup-resolved") });
@@ -1109,7 +1174,7 @@ describe("pipeline: I/O never blocks the queue", () => {
     h.world.local[h.run("implementer")?.worktree as string] = H1;
     h.world.origin[h.PR_BRANCH] = H1;
     (h.world.prs[0] as { headRefOid: string }).headRefOid = H1;
-    h.world.timeout = (a) => a[1] === "run";
+    h.world.timeout = (a) => a[1] === "run" || isHeadRunsRead(a);
     await h.finish("implementer", {});
     expect(h.events.filter((e) => e.type === "alarm_raised")).toEqual([]);
     expect(h.openDecisions()).toEqual([]);
@@ -1143,7 +1208,7 @@ describe("pipeline: I/O never blocks the queue", () => {
 });
 
 describe("pipeline: where the checks run", () => {
-  it("a task's git / gh checks go through its own exec when it has one (a remote host)", async () => {
+  it("a task's worktree checks go through its own exec when it has one (a remote host); the pipeline's GitHub reads run here, from the repo root", async () => {
     const used: string[][] = [];
     h = pipelineHarness({
       execFor: (task, exec) => async (argv, opts) => {
@@ -1155,8 +1220,136 @@ describe("pipeline: where the checks run", () => {
     h.openPr(H1);
     await h.finish("implementer", { head: H1, ci: "green" });
     expect(stage()).toBe("spec_review");
-    expect(used.length).toBe(h.calls.length);
+    // Every check but the head's runs; those are the supervisor's one `gh api` GET in the wave
+    // repo (a paired machine's fence denies `gh api`).
+    const reads = h.calls.filter(isHeadRunsRead);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((c) => c[1] === "api")).toBe(true);
+    expect(h.callOpts.filter((_o, i) => isHeadRunsRead(h.calls[i] as string[]))).toEqual(
+      reads.map(() => expect.objectContaining({ cwd: "/repo" })),
+    );
     expect(used.every((u) => u[0] === "T1")).toBe(true);
+    expect(used.some((u) => u[1] === "gh")).toBe(false);
+    // Everything else is a GitHub read (verify's PR lookup, the review gate's head check), from
+    // the wave's repo root.
+    const local = h.calls.filter((_, i) => h.callOpts[i]?.cwd === "/repo");
+    expect(local.map((a) => a.slice(0, 3).join(" "))).toContain("gh pr list");
+    expect(local.map((a) => a.slice(0, 3).join(" "))).toContain("gh pr view");
+    expect(local.every((a) => a[0] === "gh")).toBe(true);
+    expect(used.length + local.length).toBe(h.calls.length);
+  });
+
+  it("a `repo: ~/…` wave: the head's runs are read from the expanded repo root, like every other GitHub read", async () => {
+    h = pipelineHarness({ repo: "~/src/repo" });
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    const root = join(homedir(), "src/repo");
+    const reads = h.callOpts.filter((_o, i) => isHeadRunsRead(h.calls[i] as string[]));
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads).toEqual(reads.map(() => expect.objectContaining({ cwd: root })));
+    expect(h.callOpts.some((o) => o?.cwd?.startsWith("~"))).toBe(false);
+  });
+
+  it("the head worktree gone (cleanup removed it): GitHub reads run from the repo root with --repo, git fetches the PR head there, a human merge still reaches done", async () => {
+    h = pipelineHarness({ pipeline: "[implement, merge_ready]", worktreeGone: () => true });
+    await h.start();
+    await h.journal({
+      type: "repo_visibility_detected",
+      data: {
+        visibility: "public",
+        github: { slug: "example/repo", url: "https://github.com/example/repo" },
+      },
+    });
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(stage()).toBe("merge_ready");
+    const gated = h.calls.length;
+    // A human merges the PR on GitHub; the merge check is due again.
+    h.world.prState[7] = "MERGED";
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(stage()).toBe("done");
+    expect(h.events.filter((e) => e.data.alarm === "pipeline_error")).toEqual([]);
+    const after = h.calls.map((argv, i) => ({ argv, cwd: h.callOpts[i]?.cwd })).slice(gated);
+    const views = after.filter((c) => c.argv[0] === "gh" && c.argv[2] === "view");
+    expect(views.length).toBeGreaterThan(0);
+    for (const c of views) {
+      expect(c.cwd).toBe("/repo");
+      expect(c.argv.slice(-2)).toEqual(["--repo", "example/repo"]);
+    }
+    // The gate's git checks (before the merge) ran in the repo root, after fetching the PR head.
+    const gits = h.calls.slice(0, gated).filter((a) => a[0] === "git" && a[1] === "-C");
+    expect(gits).toContainEqual(["git", "-C", "/repo", "fetch", "origin", "refs/pull/7/head"]);
+    // Nothing after the gate touches the removed worktree.
+    expect(
+      after.filter((c) => c.cwd?.startsWith("/wt/") || c.argv.some((x) => x.startsWith("/wt/"))),
+    ).toEqual([]);
+  });
+
+  it("a `gh api` call through the GitHub-read exec gets no --repo (gh api rejects it)", async () => {
+    h = pipelineHarness();
+    await h.start();
+    await h.journal({
+      type: "repo_visibility_detected",
+      data: {
+        visibility: "public",
+        github: { slug: "example/repo", url: "https://github.com/example/repo" },
+      },
+    });
+    // biome-ignore lint/suspicious/noExplicitAny: reaching the private exec on purpose
+    const gh = (h.driver as any).ghExec("T1") as ExecFn;
+    await gh(["gh", "api", "repos/example/repo/actions/runs"], { cwd: "/wt/x" });
+    await gh(["gh", "pr", "view", "7"], { cwd: "/wt/x" });
+    const api = h.calls.filter((a) => a[0] === "gh" && a[1] === "api");
+    expect(api.at(-1)).toEqual(["gh", "api", "repos/example/repo/actions/runs"]);
+    const view = h.calls.filter((a) => a[0] === "gh" && a[1] === "pr");
+    expect(view.at(-1)).toEqual(["gh", "pr", "view", "7", "--repo", "example/repo"]);
+  });
+
+  it("off github.com, --repo is host-qualified (<host>/<slug>)", async () => {
+    h = pipelineHarness({ pipeline: "[implement, merge_ready]", worktreeGone: () => true });
+    await h.start();
+    await h.journal({
+      type: "repo_visibility_detected",
+      data: {
+        visibility: "public",
+        github: { slug: "example/repo", url: "https://ghe.example.com/example/repo" },
+      },
+    });
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    const views = h.calls.filter((a) => a[0] === "gh" && a[2] === "view");
+    expect(views.length).toBeGreaterThan(0);
+    for (const a of views) expect(a.slice(-2)).toEqual(["--repo", "ghe.example.com/example/repo"]);
+  });
+});
+
+describe("worktreeGone (the daemon's answer to the driver)", () => {
+  it("is true only for a local (or unknown) task whose worktree is missing", () => {
+    const missing = () => false;
+    const present = () => true;
+    expect(worktreeGone({ host: "local" }, "/wt/T1", missing)).toBe(true);
+    expect(worktreeGone(undefined, "/wt/T1", missing)).toBe(true);
+    expect(worktreeGone({ host: "local" }, "/wt/T1", present)).toBe(false);
+    // A remote box's worktree is never probed from here.
+    expect(worktreeGone({ host: "box" }, "/wt/T1", missing)).toBe(false);
+  });
+  it("treats an unplaced `host: auto` task as local, as execFor falls back to the local host", () => {
+    expect(worktreeGone({ host: "auto" }, "/wt/T1", () => false)).toBe(true);
+  });
+  it("answers from the host the task ran on, not a later plan version's host (#323)", () => {
+    // Spawned locally; a later plan version names a remote box. execFor keeps the local exec,
+    // so the removed local worktree must read as gone.
+    const rec = {
+      wave: { tasks: { T1: { id: "T1", host: "box" } } },
+      state: { tasks: [{ id: "T1", host_actual: "local" }] },
+    } as unknown as Parameters<typeof ranTaskDef>[0];
+    expect(worktreeGone(ranTaskDef(rec, "T1"), "/wt/T1", () => false)).toBe(true);
+  });
+  it("probes the real filesystem by default", () => {
+    expect(worktreeGone({ host: "local" }, process.cwd())).toBe(false);
+    expect(worktreeGone({ host: "local" }, `${process.cwd()}/no-such-worktree-314`)).toBe(true);
   });
 });
 
@@ -1170,6 +1363,8 @@ describe("roleSpawnHold (what the daemon checks before a role spawn)", () => {
       /admission closed: memory pressure/,
     );
     expect(roleSpawnHold({ ...ok, used: 4 })).toMatch(/spawn budget exhausted \(4\/4\)/);
+    expect(roleSpawnHold({ ...ok, live: 1, ceiling: 2 })).toBeNull();
+    expect(roleSpawnHold({ ...ok, live: 2, ceiling: 2 })).toMatch(/hard ceiling reached \(2\/2\)/);
   });
 });
 

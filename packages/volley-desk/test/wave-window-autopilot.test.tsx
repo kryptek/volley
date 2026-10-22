@@ -71,15 +71,44 @@ const renderWave = (w: WaveView, p: Partial<WaveWindowProps> = {}) =>
 
 describe("the wave window's autopilot chip", () => {
   it("reads `autopilot on · N auto · M escalated` from state.autopilot", () => {
-    renderWave(wave());
-    expect(screen.getByText("autopilot on · 4 auto · 1 escalated")).toHaveClass("chip");
+    const { container } = renderWave(wave());
+    const chip = container.querySelector(".chip--autopilot") as HTMLElement;
+    expect(chip.querySelector(".ap-full")).toHaveTextContent("autopilot on · 4 auto · 1 escalated");
+  });
+
+  it("carries the full sentence as its title and readable text, never only the clipped text", () => {
+    const { container } = renderWave(wave());
+    const chip = container.querySelector(".chip--autopilot") as HTMLElement;
+    expect(chip).toHaveAttribute("title", "autopilot on · 4 auto · 1 escalated");
+    // aria-label is prohibited on a generic <span>: the sentence is the chip's own text instead.
+    expect(chip).not.toHaveAttribute("aria-label");
+    expect(chip.querySelector(".ap-full")).not.toHaveAttribute("aria-hidden");
+  });
+
+  it("is three glyph-and-number tokens in a compact window", () => {
+    const { container } = renderWave(wave(), { frame: { ...frame, maxWidth: 366 } });
+    expect(container.querySelector("section.win")).toHaveClass("win--compact");
+    const short = container.querySelector(".chip--autopilot .ap-short");
+    expect(short).toHaveTextContent("⚙ 4 · ↑ 1");
+    expect(short).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("titles the owner chip too, so a truncated name stays reachable", () => {
+    const { container } = renderWave(wave());
+    const owner = [...container.querySelectorAll(".win-bar .chip")].find(
+      (c) => c.textContent === "lead",
+    );
+    expect(owner).toHaveAttribute("title", "owner: lead");
   });
 
   it("reads `autopilot off` when the wave runs without it", () => {
-    renderWave(
+    const { container } = renderWave(
       wave({ autopilot: { enabled: false, auto_resolved: 0, escalated: 0, budgets: {} } }),
     );
-    expect(screen.getByText("autopilot off")).toHaveClass("chip");
+    const chip = container.querySelector(".chip--autopilot") as HTMLElement;
+    expect(chip).toHaveAttribute("title", "autopilot off");
+    expect(chip.querySelector(".ap-full")).toHaveTextContent("autopilot off");
+    expect(chip.querySelector(".ap-short")).toHaveTextContent("⚙ off");
   });
 
   it("is absent for a supervisor that predates autopilot", () => {

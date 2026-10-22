@@ -185,6 +185,66 @@ function MultiControl(p: {
   );
 }
 
+/**
+ * A list of free strings as one comma-separated field; a commit sends the whole new list. A list
+ * over the schema's bounds (`maxItems`, an item's `maxLength`) is not sent: the field stays as typed
+ * and says why.
+ */
+function ListControl(p: {
+  row: SchemaRow;
+  value: unknown;
+  disabled: boolean;
+  maxItems?: number;
+  maxLength?: number;
+  onCommit: (v: string[]) => void;
+}) {
+  const items = Array.isArray(p.value)
+    ? p.value.filter((v): v is string => typeof v === "string")
+    : [];
+  const current = items.join(", ");
+  const [draft, setDraft] = useState(current);
+  const [invalid, setInvalid] = useState<string | null>(null);
+  useEffect(() => {
+    setDraft(current);
+    setInvalid(null);
+  }, [current]);
+  const commit = () => {
+    const next = [...new Set(draft.split(",").map((v) => v.trim()))].filter((v) => v !== "");
+    const { maxItems, maxLength } = p;
+    const over =
+      maxItems !== undefined && next.length > maxItems
+        ? `at most ${maxItems} names`
+        : maxLength !== undefined && next.some((v) => v.length > maxLength)
+          ? `a name is at most ${maxLength} characters`
+          : null;
+    setInvalid(over);
+    if (over !== null || next.join(", ") === current) return;
+    p.onCommit(next);
+  };
+  return (
+    <input
+      className="cfg-text recessed mono"
+      aria-label={p.row.label}
+      aria-invalid={invalid !== null}
+      title={invalid ?? undefined}
+      value={draft}
+      disabled={p.disabled}
+      placeholder="none"
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+        if (e.key === "Escape") {
+          // Drop the edit; the dialog stays open.
+          e.stopPropagation();
+          setDraft(current);
+          setInvalid(null);
+        }
+      }}
+    />
+  );
+}
+
 export interface ConfigRowsProps {
   scope: ConfigScope;
   /** The values shown: the retained `_config` (global) or the wave's `effective_config`. */
@@ -201,6 +261,8 @@ export interface ConfigRowsProps {
   focusSeq?: number | undefined;
   /** Only these sections' groups (Settings › Autopilot's own); all of them by default. */
   sections?: readonly Section[];
+  /** No group titles: the page's own title names its one group (a Settings group page). */
+  untitled?: boolean;
 }
 
 export function ConfigRows({
@@ -212,6 +274,7 @@ export function ConfigRows({
   focus,
   focusSeq,
   sections = SECTIONS,
+  untitled = false,
 }: ConfigRowsProps) {
   const [drafts, setDrafts] = useState<Record<string, unknown>>({});
   const [acks, setAcks] = useState<Record<string, RowState>>({});
@@ -370,6 +433,15 @@ export function ConfigRows({
             disabled={!(writable || draftOnly) || current === undefined}
             onCommit={(v) => commit(row, v, 0)}
           />
+        ) : c.kind === "list" ? (
+          <ListControl
+            row={row}
+            value={shown}
+            {...(c.maxItems !== undefined ? { maxItems: c.maxItems } : {})}
+            {...(c.maxLength !== undefined ? { maxLength: c.maxLength } : {})}
+            disabled={!(writable || draftOnly) || current === undefined}
+            onCommit={(v) => commit(row, v, 0)}
+          />
         ) : c.kind === "slider" ? (
           <ElasticSlider
             value={typeof shown === "number" ? shown : c.min}
@@ -431,7 +503,11 @@ export function ConfigRows({
   return (
     <div className="cfg-rows" ref={root}>
       {groups.map(([section, inSection], i) => (
-        <Group key={section} title={section} {...(foot && i === groups.length - 1 ? { foot } : {})}>
+        <Group
+          key={section}
+          {...(untitled ? {} : { title: section })}
+          {...(foot && i === groups.length - 1 ? { foot } : {})}
+        >
           {inSection.length === 0 ? (
             <div className="cfg-row cfg-hint">No lease pools configured.</div>
           ) : (

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
-import { Background } from "../src/look/Background";
+import { Background, SURFACE_LITE_NOTE, degradeLook } from "../src/look/Background";
 import {
   BACKGROUNDS,
   type BackgroundDef,
@@ -11,7 +11,7 @@ import {
   REACT_BITS_BACKGROUNDS,
   isLazyBackground,
 } from "../src/look/backgrounds";
-import { LOOK_STORAGE_KEY, type Look, useLook } from "../src/look/useLook";
+import { LOOK0, LOOK_STORAGE_KEY, type Look, useLook } from "../src/look/useLook";
 import { Appearance } from "../src/settings/Appearance";
 import { General } from "../src/settings/General";
 import { DeskStoreProvider } from "../src/store/context";
@@ -212,6 +212,9 @@ describe("Settings › Appearance and General", () => {
   });
 });
 
+/** Agents' tethers (the Needs-you window's items tether to their waves too). */
+const AGENT_TETHERS = '.world svg.tethers g.tether:not([data-agent^="inbox:"]) path.tether-core';
+
 describe("App look (demo mode)", () => {
   const renderApp = () =>
     render(
@@ -228,11 +231,14 @@ describe("App look (demo mode)", () => {
     expect((container.querySelector(".bg-dim") as HTMLElement).style.opacity).toBe("0.4");
     const agents = container.querySelectorAll(".world .win .narr").length;
     expect(agents).toBeGreaterThan(0);
-    expect(container.querySelectorAll(".world svg.tethers path.tether-core")).toHaveLength(agents);
+    expect(container.querySelectorAll(AGENT_TETHERS)).toHaveLength(agents);
+    // The pill counts what needs you: the coordinators' badge plus the Needs-you inbox's.
     const pill = container.querySelector(".topbar .ny-pill")?.textContent ?? "";
-    const n = pill.match(/(\d+) needs? you/)?.[1];
-    expect(n).toBeDefined();
-    expect(dock().getByRole("button", { name: "Wave coordinators" })).toHaveTextContent(n ?? "");
+    const n = Number(pill.match(/(\d+) needs? you/)?.[1]);
+    const badge = (name: string) =>
+      Number(dock().getByRole("button", { name }).textContent?.match(/\d+/)?.[0] ?? 0);
+    expect(badge("Wave coordinators")).toBeGreaterThan(0);
+    expect(badge("Wave coordinators") + badge("Needs you")).toBe(n);
     // Narration uses the default effect (decrypt).
     expect(container.querySelector(".world .narr")).toHaveAttribute("data-fx", "decrypt");
   });
@@ -240,7 +246,7 @@ describe("App look (demo mode)", () => {
   it("draws tethers only for the agents of visible waves", () => {
     localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ bg: "none" }));
     const { container } = renderApp();
-    const paths = () => container.querySelectorAll(".world svg.tethers path.tether-core").length;
+    const paths = () => container.querySelectorAll(AGENT_TETHERS).length;
     const agents = () => container.querySelectorAll(".world .win .narr").length;
     const before = paths();
     const first = container.querySelector(".coord-list > li") as HTMLElement;
@@ -277,5 +283,30 @@ describe("App look (demo mode)", () => {
     });
     fireEvent.click(settings.getByRole("button", { name: "Close settings" }));
     expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+  });
+});
+
+describe("Appearance on the lite surface (touch screen)", () => {
+  it("does not offer Liquid glass and says why", () => {
+    render(<Appearance look={LOOK0} setLook={() => {}} lite />);
+    const style = within(screen.getByRole("radiogroup", { name: "Window style" }));
+    expect(style.queryByRole("radio", { name: "Liquid glass" })).toBeNull();
+    expect(style.getByRole("radio", { name: "Frosted glass" })).toBeInTheDocument();
+    expect(screen.getByText(SURFACE_LITE_NOTE)).toBeInTheDocument();
+  });
+
+  it("offers Liquid glass and no note off the lite surface", () => {
+    render(<Appearance look={LOOK0} setLook={() => {}} />);
+    const style = within(screen.getByRole("radiogroup", { name: "Window style" }));
+    expect(style.getByRole("radio", { name: "Liquid glass" })).toBeInTheDocument();
+    expect(screen.queryByText(SURFACE_LITE_NOTE)).toBeNull();
+  });
+
+  it("degradeLook renders liquid as glass when lite, even with WebGL", () => {
+    const liquid: Look = { ...LOOK0, chrome: "liquid" };
+    expect(degradeLook(liquid, true, true).chrome).toBe("glass");
+    expect(degradeLook(liquid, true, false)).toBe(liquid);
+    const solid: Look = { ...LOOK0, chrome: "solid" };
+    expect(degradeLook(solid, true, true)).toBe(solid);
   });
 });

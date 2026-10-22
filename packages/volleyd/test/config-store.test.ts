@@ -20,7 +20,7 @@ beforeEach(() => {
 describe("volleydHome", () => {
   it("is $VOLLEYD_HOME, else ~/.volley/volleyd", () => {
     expect(volleydHome({ VOLLEYD_HOME: "/x/y" })).toBe("/x/y");
-    expect(volleydHome({ HOME: "/home/u" })).toBe("/home/u/.volley/volleyd");
+    expect(volleydHome({ HOME: "/path/to/home" })).toBe("/path/to/home/.volley/volleyd");
   });
 });
 
@@ -86,6 +86,21 @@ describe("ConfigStore layering", () => {
     expect(c.get("placement.nudge_on_merge", "w2")).toBe("all");
   });
 
+  it("placement.default: auto by default, layers like any tunable, set hot and refused outside local | auto", () => {
+    expect(open().get("placement.default")).toBe("auto");
+    writeFileSync(join(home, "config.yaml"), "placement:\n  default: local\n");
+    const c = open();
+    c.setWaveOverrides("w1", { placement: { default: "auto" } });
+    expect(c.get("placement.default", "w1")).toBe("auto");
+    expect(c.get("placement.default", "w2")).toBe("local");
+    expect(c.applyPatch({ placement: { default: "auto" } } as never, "x").applied).toBe(true);
+    expect(c.get("placement.default", "w2")).toBe("auto");
+    const r = c.applyPatch({ placement: { default: "remote" } } as never, "x");
+    expect(r.applied).toBe(false);
+    expect(r.rejected.map((e) => e.path)).toEqual(["placement.default"]);
+    expect(c.get("placement.default", "w2")).toBe("auto");
+  });
+
   it("rejects an unknown path in get()", () => {
     expect(() => open().get("nope")).toThrow(/unknown config path 'nope'/);
   });
@@ -101,6 +116,26 @@ describe("ConfigStore layering", () => {
     expect(c.effective().agent_mcp).toBe("strict");
     const r = c.applyPatch({ agent_mcp: "everything" } as never, "x");
     expect(r.applied).toBe(false);
+    expect(
+      schemaErrors("config.schema.json", envelope("_waves/_config", "config", c.retainedPayload())),
+    ).toEqual([]);
+  });
+
+  it("agent_mcp_allow defaults to [] (every server) and takes distinct server names, globally and per wave", () => {
+    expect(CONFIG_DEFAULTS.agent_mcp_allow).toEqual([]);
+    writeFileSync(join(home, "config.yaml"), "agent_mcp_allow: [migrations]\n");
+    const c = open();
+    expect(c.get("agent_mcp_allow")).toEqual(["migrations"]);
+    c.setWaveOverrides("w1", { agent_mcp: "inherit", agent_mcp_allow: ["a", "plugin:pw:pw"] });
+    expect(c.effective("w1").agent_mcp_allow).toEqual(["a", "plugin:pw:pw"]);
+    expect(c.effective().agent_mcp_allow).toEqual(["migrations"]);
+    for (const bad of [[1], ["a", "a"], [""], "a"]) {
+      expect(
+        c.applyPatch({ agent_mcp_allow: bad } as never, "x").applied,
+        JSON.stringify(bad),
+      ).toBe(false);
+    }
+    expect(c.applyPatch({ agent_mcp_allow: ["b"] }, "x").applied).toBe(true);
     expect(
       schemaErrors("config.schema.json", envelope("_waves/_config", "config", c.retainedPayload())),
     ).toEqual([]);

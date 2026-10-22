@@ -1,5 +1,5 @@
 import { DAEMON_AGENT_ID } from "../control";
-import type { DecisionPayload } from "../decisions";
+import { type DecisionKind, type DecisionPayload, type Held, validateAnswer } from "../decisions";
 import type { AutopilotConfig, JournalEvent, NewEvent, TaskId, WaveId } from "../types";
 
 /**
@@ -53,6 +53,8 @@ export interface InboxItem {
   opened_at: string;
   source: Record<string, unknown>;
   answered?: InboxAnswered;
+  /** A decision's item: its hold (#335), mirrored from the decision record. */
+  held?: Held;
 }
 
 /** An answer offered to the referee (the `inbox_answer` op, or a CLI / autopilot resolve). */
@@ -120,7 +122,14 @@ export function itemForDecision(
     pointers: { ...d.pointers } as Record<string, string>,
     opened_at: d.opened_at,
     source: { decision_id: d.decision_id, decision_kind: d.kind },
+    ...(d.held !== undefined ? { held: d.held } : {}),
   };
+}
+
+/** A decision's item with its hold set (a `Held`) or lifted (undefined); the version is kept. */
+export function withHeld(item: InboxItem, held: Held | undefined): InboxItem {
+  const { held: _old, ...rest } = item;
+  return held !== undefined ? { ...rest, held } : rest;
 }
 
 /** `desk·phone`, `<machine>·terminal`, `cli`, `autopilot`. */
@@ -196,14 +205,54 @@ export function answerEvent(
   };
 }
 
+/**
+ * A person's answer to a decision item that its decision cannot apply (decisions.ts
+ * `validateAnswer`), or null. The referee asks before the compare-and-set: a refused answer
+ * changes nothing, whatever version it names. It skips `checkAnswer`'s exemption for
+ * pipeline-marked decisions (the item does not carry the marker): `validateAnswer` checks only
+ * supervisor-owned kinds, which no pipeline opens.
+ */
+export function decisionAnswerRefusal(item: InboxItem, answer: string): string | null {
+  const kind = item.source.decision_kind;
+  if (item.kind !== "decision" || typeof kind !== "string") return null;
+  const r = validateAnswer(
+    kind as DecisionKind,
+    item.options?.map((o) => o.label),
+    answer,
+  );
+  return "refused" in r ? r.refused : null;
+}
+
 /** An answered item whose `ttlS` has passed since its answer: its retained record is cleared. */
 export function ttlExpired(item: InboxItem, now: number, ttlS: number): boolean {
   return item.answered !== undefined && now - Date.parse(item.answered.at) >= ttlS * 1000;
 }
 
-/** Fold journal events onto the inbox map (rebuilt on start from every journal). */
-export function foldInbox(map: Map<string, InboxItem>, events: readonly JournalEvent[]) {
+/**
+ * Fold journal events onto the inbox map (rebuilt on start from every journal). `wave` is the
+ * journal's wave: its `decision_held` / `decision_released` set and lift its decisions' holds.
+ */
+export function foldInbox(
+  map: Map<string, InboxItem>,
+  events: readonly JournalEvent[],
+  wave?: WaveId,
+) {
   for (const e of events) {
+    if ((e.type === "decision_held" || e.type === "decision_released") && wave !== undefined) {
+      const item = map.get(decisionItemId(wave, e.data.decision_id as string));
+      if (item === undefined) continue;
+      const held =
+        e.type === "decision_held"
+          ? {
+              on: e.data.on as Held["on"],
+              ...(typeof e.data.note === "string" ? { note: e.data.note } : {}),
+              by: e.data.by as string,
+              at: e.at,
+            }
+          : undefined;
+      map.set(item.id, withHeld(item, held));
+      continue;
+    }
     if (e.type === "inbox_opened") {
       const item = e.data.item as InboxItem | undefined;
       if (item?.id !== undefined) map.set(item.id, item);

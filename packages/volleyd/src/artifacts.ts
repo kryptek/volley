@@ -7,8 +7,9 @@ import type { NewEvent, TaskId } from "./types";
 /**
  * Artifact verification: a role's `done` is a claim, checked here against git and GitHub through
  * the fenced exec (read-only verbs only: rev-parse, fetch, diff, merge-base, log, gh pr list,
- * gh run list/view). `verifyArtifacts` gathers the facts; `artifactOutcome` (pure) turns them
- * into what the pipeline journals or asks.
+ * gh run list/view, and a head's runs by `gh api …/actions/runs?head_sha=` on the supervisor).
+ * `verifyArtifacts` gathers the facts; `artifactOutcome` (pure) turns them into what the pipeline
+ * journals or asks. A GitHub answer that cannot be read is CI state `unknown`, never `none`.
  */
 
 export interface ArtifactSpec {
@@ -24,6 +25,18 @@ export interface ArtifactSpec {
    * origin as it is now, not the role's own local HEAD.
    */
   adopt?: boolean;
+  /** Where the head's runs are read (RunsVia); absent: `gh run list --commit` in `cwd`. */
+  runs_via?: RunsVia;
+}
+
+/**
+ * The supervisor's own exec and the wave repo's clone: a head's runs are read there with one
+ * `gh api …/actions/runs?head_sha=` GET (no workflow listing), whatever machine the task ran on
+ * (a paired machine's fence denies `gh api`).
+ */
+export interface RunsVia {
+  exec: ExecFn;
+  cwd: string;
 }
 
 export interface CiRun {
@@ -34,7 +47,13 @@ export interface CiRun {
   url: string;
 }
 
-export type CiState = "green" | "red" | "running" | "none";
+/** `unknown`: GitHub's answer could not be read (a failed or unparseable `gh` call). */
+export type CiState = "green" | "red" | "running" | "none" | "unknown";
+
+/** A rate-limited GitHub answer; `retry_after_ms` when it carried a `Retry-After`. */
+export interface RateLimited {
+  retry_after_ms?: number;
+}
 
 /** A run a newer run of the same workflow and trigger event replaced on the same head. */
 export interface SupersededRun {
@@ -63,13 +82,23 @@ export interface CiFacts {
   /** Red only (verifyArtifacts): failing test ids and the tail of the failed runs' logs. */
   failing_tests?: string[];
   log?: string;
+  /** Unknown only: the failed call's first stderr line, and whether it was a rate limit. */
+  error?: string;
+  rate_limited?: RateLimited;
 }
+
+/** GitHub's mergeability of a PR; `UNKNOWN` while it is still computing it. */
+export type Mergeable = "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
 
 export interface PrRef {
   number: number;
   url: string;
   head_sha: string;
   base: string;
+  /** Absent when GitHub reported none. */
+  mergeable?: Mergeable;
+  /** GitHub's `mergeStateStatus` (`CLEAN`, `DIRTY`, `BEHIND`, …), as reported. */
+  merge_state?: string;
 }
 
 export type ArtifactReport =
@@ -94,9 +123,14 @@ export type ArtifactReport =
       touched?: string[];
     };
 
-const PR_FIELDS = "number,url,headRefName,baseRefName,headRefOid";
+const PR_FIELDS = "number,url,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus";
 const RUN_FIELDS =
   "databaseId,name,workflowName,status,conclusion,url,headSha,event,createdAt,workflowDatabaseId";
+/** How many runs on one head the `head_sha` lookup reads. */
+const HEAD_RUNS = "50";
+/** The `actions/runs` fields a head's CI is computed from (keeps `gh api`'s answer small). */
+const API_RUN_JQ =
+  "[.workflow_runs[] | {id, name, status, conclusion, html_url, head_sha, event, run_attempt, workflow_id, created_at}]";
 
 /** Run conclusions that fail a head. */
 const FAILED = new Set(["failure", "cancelled", "timed_out", "startup_failure", "action_required"]);
@@ -105,12 +139,40 @@ const INFRA_STEP = /checkout|set up job|runner|network|connection|timed? ?out wh
 
 const line = (s: string) => s.trim().split("\n")[0]?.trim() ?? "";
 
+const isMergeable = (m: unknown): m is Mergeable =>
+  m === "MERGEABLE" || m === "CONFLICTING" || m === "UNKNOWN";
+
 function parseJson<T>(text: string): T | null {
   try {
     return JSON.parse(text) as T;
   } catch {
     return null;
   }
+}
+
+/**
+ * Is a failed `gh` call GitHub's rate limit (`rate limit`, HTTP 403 / 429 in its output)? The
+ * wait a `Retry-After` names comes along. Null: some other failure. Pure.
+ */
+export function rateLimited(r: { stdout: string; stderr: string }): RateLimited | null {
+  const text = `${r.stderr}\n${r.stdout}`;
+  if (!/rate limit|HTTP 403|HTTP 429/i.test(text)) return null;
+  const after = /retry-after:\s*(\d+)/i.exec(text)?.[1];
+  return after !== undefined ? { retry_after_ms: Number(after) * 1000 } : {};
+}
+
+/** CI that could not be read: why (the call's first output line), and whether it was a rate limit. */
+function unreadable(r: ExecResult, what: string): CiFacts {
+  const rate = r.code !== 0 ? rateLimited(r) : null;
+  return {
+    state: "unknown",
+    runs: [],
+    superseded: [],
+    failed_jobs: [],
+    infra: null,
+    error: line(r.stderr) || line(r.stdout) || `${what} exited ${r.code}`,
+    ...(rate !== null ? { rate_limited: rate } : {}),
+  };
 }
 
 /** Gather the artifacts of a role's claimed work. Never throws for a missing artifact. */
@@ -155,6 +217,8 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
             headRefName: string;
             baseRefName: string;
             headRefOid: string;
+            mergeable?: string;
+            mergeStateStatus?: string;
           }[]
         >(prs.stdout) ?? [])
       : [];
@@ -180,11 +244,16 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
     url: pr.url,
     head_sha: pr.headRefOid,
     base: pr.baseRefName,
+    ...(isMergeable(pr.mergeable) ? { mergeable: pr.mergeable } : {}),
+    ...(typeof pr.mergeStateStatus === "string" ? { merge_state: pr.mergeStateStatus } : {}),
   };
 
-  const ci = await ciOn(exec, spec.cwd, head);
+  const ci = await ciOn(exec, spec.cwd, head, spec.runs_via);
   // GitHub has not caught up with the push yet: the PR's checks are not this head's.
-  if (pr.headRefOid !== head) ci.state = ci.state === "red" ? "red" : "running";
+  if (pr.headRefOid !== head && ci.state !== "red" && ci.state !== "unknown") ci.state = "running";
+  // GitHub is still computing whether the PR conflicts (it runs no CI on a conflicting one):
+  // pending, so no-CI's clock does not start.
+  else if (ci.state === "none" && prRef.mergeable === "UNKNOWN") ci.state = "running";
   // What a CI fixup works from: the failed runs' logs (each call bounded by the driver's timeout).
   if (ci.state === "red") Object.assign(ci, await failedLogs(exec, spec.cwd, ci.runs));
   const report: ArtifactReport = { kind: "ok", head, branch: spec.branch, pr: prRef, ci };
@@ -199,8 +268,13 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
 }
 
 /** The aggregate CI state on exactly `head` (e.g. a head merged other than the gated one). */
-export async function ciStateOf(exec: ExecFn, cwd: string, head: string): Promise<CiState> {
-  return (await ciOn(exec, cwd, head)).state;
+export async function ciStateOf(
+  exec: ExecFn,
+  cwd: string,
+  head: string,
+  via?: RunsVia,
+): Promise<CiState> {
+  return (await ciOn(exec, cwd, head, via)).state;
 }
 
 interface RawRun {
@@ -219,8 +293,8 @@ interface RawRun {
 /**
  * Split a head's runs into the effective ones and the superseded ones. Runs of one workflow for
  * one trigger event are a replacement chain (a concurrency cancel-in-progress, a re-push of the
- * same sha): the highest id wins (`gh run list` lists one row per run, its latest attempt, so ids are
- * unique; `createdAt` only breaks a tie between duplicate rows). Runs of another event (`push`
+ * same sha): the highest id wins (`gh run list` and `actions/runs` list one row per run, its
+ * latest attempt, so ids are unique; `createdAt` only breaks a tie between duplicate rows). Runs of another event (`push`
  * beside `pull_request`) are distinct CI, never a replacement. Order is kept. Pure.
  */
 export function latestRuns<T extends RawRun>(runs: T[]): { effective: T[]; superseded: T[] } {
@@ -238,10 +312,60 @@ export function latestRuns<T extends RawRun>(runs: T[]): { effective: T[]; super
   return { effective, superseded: runs.filter((r) => latest.get(key(r)) !== r) };
 }
 
-/** CI on exactly `head`: the latest run per workflow and trigger event (latestRuns). */
-async function ciOn(exec: ExecFn, cwd: string, head: string): Promise<CiFacts> {
-  const r = await exec(["gh", "run", "list", "--commit", head, "--json", RUN_FIELDS], { cwd });
-  const raw = r.code === 0 ? (parseJson<RawRun[]>(r.stdout) ?? []) : [];
+/** One run of `actions/runs` as API_RUN_JQ projects it. */
+interface ApiRun {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  html_url: string;
+  head_sha?: string;
+  event?: string;
+  workflow_id?: number;
+  created_at?: string;
+}
+
+/**
+ * The runs on `head`: one `gh api …/actions/runs?head_sha=` GET through `via` (the supervisor, in
+ * the wave repo), else `gh run list --commit` in `cwd`. An ExecResult: the call failed or its
+ * answer is not a run list.
+ */
+async function listRuns(
+  exec: ExecFn,
+  cwd: string,
+  head: string,
+  via: RunsVia | undefined,
+): Promise<RawRun[] | ExecResult> {
+  if (via === undefined) {
+    const r = await exec(["gh", "run", "list", "--commit", head, "--json", RUN_FIELDS], { cwd });
+    const raw = r.code === 0 ? parseJson<RawRun[]>(r.stdout) : null;
+    return Array.isArray(raw) ? raw : r;
+  }
+  const endpoint = `repos/{owner}/{repo}/actions/runs?head_sha=${head}&per_page=${HEAD_RUNS}`;
+  const r = await via.exec(["gh", "api", endpoint, "--jq", API_RUN_JQ], { cwd: via.cwd });
+  const raw = r.code === 0 ? parseJson<ApiRun[]>(r.stdout) : null;
+  if (!Array.isArray(raw)) return r;
+  return raw.map((x) => ({
+    databaseId: x.id,
+    name: x.name,
+    workflowName: x.name,
+    ...(x.workflow_id !== undefined ? { workflowDatabaseId: x.workflow_id } : {}),
+    ...(x.event !== undefined ? { event: x.event } : {}),
+    ...(x.created_at !== undefined ? { createdAt: x.created_at } : {}),
+    status: x.status,
+    conclusion: x.conclusion,
+    url: x.html_url,
+    ...(x.head_sha !== undefined ? { headSha: x.head_sha } : {}),
+  }));
+}
+
+/**
+ * CI on exactly `head`: the latest run per workflow and trigger event (latestRuns). `unknown`
+ * when the runs, or a failed run's jobs, cannot be read.
+ */
+async function ciOn(exec: ExecFn, cwd: string, head: string, via?: RunsVia): Promise<CiFacts> {
+  const raw = await listRuns(exec, cwd, head, via);
+  if (!Array.isArray(raw)) return unreadable(raw, "gh run list");
   const conclusion = (x: RawRun) => (x.conclusion === "" ? null : x.conclusion);
   const { effective: own, superseded } = latestRuns(
     raw.filter((x) => x.headSha === undefined || x.headSha === head),
@@ -266,14 +390,18 @@ async function ciOn(exec: ExecFn, cwd: string, head: string): Promise<CiFacts> {
   const jobSteps: { name: string; steps: string[] }[] = [];
   for (const run of failed) {
     const v = await exec(["gh", "run", "view", String(run.databaseId), "--json", "jobs"], { cwd });
-    const jobs =
-      parseJson<{
-        jobs?: {
-          name: string;
-          conclusion: string;
-          steps?: { name: string; conclusion: string }[];
-        }[];
-      }>(v.stdout)?.jobs ?? [];
+    const view =
+      v.code === 0
+        ? parseJson<{
+            jobs?: {
+              name: string;
+              conclusion: string;
+              steps?: { name: string; conclusion: string }[];
+            }[];
+          }>(v.stdout)
+        : null;
+    if (view === null || typeof view !== "object") return unreadable(v, "gh run view");
+    const jobs = view.jobs ?? [];
     for (const j of jobs.filter((j) => FAILED.has(j.conclusion))) {
       failedJobs.push(`${run.workflowName ?? run.name} / ${j.name}`);
       // A cancelled run's steps say where the cancel landed, not what broke.
@@ -326,7 +454,16 @@ export type ArtifactOutcome =
       /** Facts kept on the decision (journal + topic). */
       data: Record<string, unknown>;
     }
-  | { kind: "ci_pending"; state: "running" | "none"; head: string }
+  /** `unreadable`: GitHub's answer could not be read (`error`): re-polled, never a decision. */
+  | {
+      kind: "ci_pending";
+      state: "running" | "none" | "unknown";
+      head: string;
+      unreadable?: true;
+      error?: string;
+    }
+  /** No run on the head of a PR that conflicts with its base: GitHub will run none. */
+  | { kind: "conflicting"; head: string; pr: { number: number; url: string } }
   | { kind: "verified"; event: NewEvent & { data: Record<string, unknown> } };
 
 /**
@@ -412,6 +549,12 @@ export function artifactOutcome(
       },
     };
   }
+  if (ci.state === "unknown")
+    return { kind: "ci_pending", state: "unknown", head, unreadable: true, error: ci.error ?? "" };
+  if (ci.state === "none" && pr.mergeable === "CONFLICTING")
+    return { kind: "conflicting", head, pr: { number: pr.number, url: pr.url } };
+  if (ci.state === "none" && pr.mergeable === "UNKNOWN")
+    return { kind: "ci_pending", state: "running", head };
   if (ci.state === "running" || ci.state === "none")
     return { kind: "ci_pending", state: ci.state, head };
   return {
@@ -440,13 +583,35 @@ export interface RebaseCheck {
   behind: number;
 }
 
+/**
+ * Where a probe's git runs: the worktree at the PR head, or the repo root with `fetch` (the PR
+ * head's ref, `refs/pull/<n>/head` or its branch) fetched first, when that worktree is gone.
+ */
+export interface GitAt {
+  cwd: string;
+  fetch?: string;
+}
+
+/** Fetch `o.fetch` (the PR head into a repo root), when given; throws, naming it, on a failure. */
+async function fetchHead(git: (...a: string[]) => Promise<ExecResult>, o: GitAt): Promise<void> {
+  if (o.fetch === undefined) return;
+  const r = await git("fetch", "origin", o.fetch);
+  if (r.code !== 0)
+    throw new Error(`git fetch origin ${o.fetch} failed (${r.code}): ${line(r.stderr)}`);
+}
+
 /** Has the release branch moved past where `head` branched from it? */
 export async function checkRebase(
   exec: ExecFn,
-  o: { cwd: string; head: string; release_branch: string },
+  o: GitAt & { head: string; release_branch: string },
 ): Promise<RebaseCheck> {
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
-  await git("fetch", "origin", o.release_branch);
+  await fetchHead(git, o);
+  const fetched = await git("fetch", "origin", o.release_branch);
+  if (fetched.code !== 0)
+    throw new Error(
+      `git fetch origin ${o.release_branch} failed: ${(fetched.stderr || fetched.stdout).trim()}`,
+    );
   const tip = line(
     (await git("rev-parse", "--verify", "--quiet", `refs/remotes/origin/${o.release_branch}`))
       .stdout,
@@ -457,8 +622,12 @@ export async function checkRebase(
   if (mb.code !== 0 || base === "") throw new Error(`no merge-base of ${o.head} and ${tip}`);
   if (base === tip) return { release_sha: tip, merge_base: base, behind: 0 };
   const log = await git("log", "--oneline", `${base}..${tip}`);
+  if (log.code !== 0)
+    throw new Error(`git log ${base}..${tip} failed: ${(log.stderr || log.stdout).trim()}`);
   const behind = log.stdout.split("\n").filter((l) => l.trim() !== "").length;
-  return { release_sha: tip, merge_base: base, behind: Math.max(behind, 1) };
+  // The merge-base is not the tip, so the tip has commits the head lacks: none listed is no count.
+  if (behind === 0) throw new Error(`inconsistent rebase check: ${base}..${tip} lists no commits`);
+  return { release_sha: tip, merge_base: base, behind };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -534,10 +703,11 @@ async function unmatchedCommits(git: Git, base: string, head: string): Promise<s
 /** Gather LandedFacts for `head` against `origin/<release_branch>` (read-only git). */
 export async function probeLanded(
   exec: ExecFn,
-  o: { cwd: string; head: string; release_branch: string; pr: number },
+  o: GitAt & { head: string; release_branch: string; pr: number },
 ): Promise<LandedFacts & { release_sha: string }> {
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
   const release = `origin/${o.release_branch}`;
+  await fetchHead(git, o);
   await git("fetch", "origin", o.release_branch);
   const tip = line(
     (await git("rev-parse", "--verify", "--quiet", `refs/remotes/${release}`)).stdout,
@@ -586,10 +756,15 @@ export type OperatorMergeCheck =
  */
 export async function verifyOperatorMerge(
   exec: ExecFn,
-  o: { cwd: string; head: string; sha: string; release_branch: string },
+  o: GitAt & { head: string; sha: string; release_branch: string },
 ): Promise<OperatorMergeCheck> {
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
   const release = `origin/${o.release_branch}`;
+  try {
+    await fetchHead(git, o);
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
   await git("fetch", "origin", o.release_branch);
   // A short sha is the same commit as its full one: compare (and record) the full sha.
   const full = await git("rev-parse", "--verify", "--quiet", `${o.sha}^{commit}`);
@@ -613,13 +788,23 @@ export async function verifyOperatorMerge(
 // ---------------------------------------------------------------------------------------------
 
 /** CI on exactly `head` (runs, aggregate state, failed job names), for a head the pipeline did not push. */
-export async function ciReport(exec: ExecFn, cwd: string, head: string): Promise<CiFacts> {
-  return ciOn(exec, cwd, head);
+export async function ciReport(
+  exec: ExecFn,
+  cwd: string,
+  head: string,
+  via?: RunsVia,
+): Promise<CiFacts> {
+  return ciOn(exec, cwd, head, via);
 }
 
 /** CI on exactly `head` and, when red, its failing tests and logs' tail (a blocked agent's PR head). */
-export async function redHeadCi(exec: ExecFn, cwd: string, head: string): Promise<CiFacts> {
-  const ci = await ciOn(exec, cwd, head);
+export async function redHeadCi(
+  exec: ExecFn,
+  cwd: string,
+  head: string,
+  via?: RunsVia,
+): Promise<CiFacts> {
+  const ci = await ciOn(exec, cwd, head, via);
   if (ci.state === "red") Object.assign(ci, await failedLogs(exec, cwd, ci.runs));
   return ci;
 }
@@ -630,12 +815,17 @@ const RELEASE_RUNS = "20";
 /**
  * The release branch's latest CI (a red head's classification): the latest run per workflow and
  * trigger event of its recent runs (latestRuns) and, when red, the tests failing there. `unknown`
- * when `gh run list` fails. Read-only.
+ * when `gh run list` fails (why, and whether it was a rate limit, come along). Read-only.
  */
 export async function probeReleaseCi(
   exec: ExecFn,
   o: { cwd: string; release_branch: string },
-): Promise<{ state: CiState | "unknown"; failing_tests: string[] }> {
+): Promise<{
+  state: CiState;
+  failing_tests: string[];
+  error?: string;
+  rate_limited?: RateLimited;
+}> {
   const r = await exec(
     [
       "gh",
@@ -651,7 +841,15 @@ export async function probeReleaseCi(
     { cwd: o.cwd },
   );
   const raw = r.code === 0 ? parseJson<RawRun[]>(r.stdout) : null;
-  if (raw === null || !Array.isArray(raw)) return { state: "unknown", failing_tests: [] };
+  if (raw === null || !Array.isArray(raw)) {
+    const { error, rate_limited } = unreadable(r, "gh run list");
+    return {
+      state: "unknown",
+      failing_tests: [],
+      ...(error !== undefined ? { error } : {}),
+      ...(rate_limited !== undefined ? { rate_limited } : {}),
+    };
+  }
   const runs: CiRun[] = latestRuns(raw).effective.map((x) => ({
     id: x.databaseId,
     name: x.workflowName ?? x.name,
@@ -708,6 +906,9 @@ export interface MovedHeadFacts {
     superseded: SupersededRun[];
     failed_jobs: string[];
     failing_tests: string[];
+    /** Unknown only (CiFacts). */
+    error?: string;
+    rate_limited?: RateLimited;
   };
   /** `git log --oneline <from>..<to>` and `git diff --stat <from> <to>`. */
   log: string;
@@ -764,11 +965,25 @@ async function releaseMergeOf(
 /** Gather MovedHeadFacts (read-only git / gh through the fenced exec). */
 export async function probeMovedHead(
   exec: ExecFn,
-  o: { cwd: string; branch: string; from: string; to: string; release_branch?: string },
+  o: GitAt & {
+    branch: string;
+    from: string;
+    to: string;
+    release_branch?: string;
+    runs_via?: RunsVia;
+  },
 ): Promise<MovedHeadFacts> {
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
   await git("fetch", "origin", o.branch);
-  const ci = await ciOn(exec, o.cwd, o.to);
+  if (o.fetch !== o.branch) await fetchHead(git, o);
+  // From a repo root, the gated head may be missing (force-pushed away): fetch it by sha, best
+  // effort; without it the log and diffstat below come back empty.
+  if (
+    o.fetch !== undefined &&
+    (await git("rev-parse", "--verify", "--quiet", `${o.from}^{commit}`)).code !== 0
+  )
+    await git("fetch", "origin", o.from);
+  const ci = await ciOn(exec, o.cwd, o.to, o.runs_via);
   const tests = ci.state === "red" ? (await failedLogs(exec, o.cwd, ci.runs)).failing_tests : [];
   const log = await git("log", "--oneline", `${o.from}..${o.to}`);
   const stat = await git("diff", "--stat", o.from, o.to);
@@ -783,6 +998,8 @@ export async function probeMovedHead(
       superseded: ci.superseded,
       failed_jobs: ci.failed_jobs,
       failing_tests: tests,
+      ...(ci.error !== undefined ? { error: ci.error } : {}),
+      ...(ci.rate_limited !== undefined ? { rate_limited: ci.rate_limited } : {}),
     },
     log: log.code === 0 ? log.stdout.trim() : "",
     diffstat: stat.code === 0 ? stat.stdout.replace(/^\n+/, "").trimEnd() : "",

@@ -47,8 +47,10 @@ export interface MachineView {
   down_since?: number;
   /** Each lease pool that sets `per_machine`: its holders' leases on this machine. */
   heavy: Record<string, { held: number; per_machine: number }>;
-  /** Its account's 5-hour usage percentage; null: unknown. */
+  /** Its best candidate account's 5-hour usage percentage; null: unknown. */
   usage_pct: number | null;
+  /** That account (the balancing rule's pick on the machine), when known. */
+  usage_account?: string;
   /**
    * What its own admission holds back beyond the load and memory filter below: on the supervisor's
    * own machine its local signals (memory pressure, cmux ping, containers), on a peer its per-host
@@ -378,7 +380,9 @@ function score(
     `load ${r.load[0].toFixed(1)} on ${r.cores} cores`,
     `${n}/${max} agents`,
     r.memory !== undefined ? `${pct(r.memory.available_pct)} mem` : "mem unknown",
-    m.usage_pct !== null ? `usage ${pct(m.usage_pct)}` : "usage unknown",
+    m.usage_pct !== null
+      ? `usage ${pct(m.usage_pct)}${m.usage_account !== undefined ? ` (${m.usage_account})` : ""}`
+      : "usage unknown",
     ...heavySlots(m, task, wave, snap, o).map(
       ([pool, held, per]) => `heavy slots ${Math.max(0, per - held)}/${per} free (${pool})`,
     ),
@@ -485,7 +489,7 @@ export interface VerdictView {
   max_agents: number;
   placed: number;
   heavy: Record<string, { held: number; per_machine: number }>;
-  usage: { five_hour_pct: number | null };
+  usage: { five_hour_pct: number | null; account?: string | null };
 }
 
 /** A snapshot from the retained machine records and readiness verdicts. */
@@ -509,6 +513,7 @@ export function snapshotFrom(
         agents: v?.placed ?? 0,
         heavy: v?.heavy ?? {},
         usage_pct: v?.usage.five_hour_pct ?? null,
+        ...(typeof v?.usage.account === "string" ? { usage_account: v.usage.account } : {}),
         held: [],
       };
     }),
@@ -535,4 +540,48 @@ export function preview(wave: Wave, snap: Snapshot, o: PlaceOptions): string | n
     s = reserve(s, p.host, t, wave);
   }
   return parts.length === 0 ? null : `if admitted now: ${parts.join(", ")}`;
+}
+
+// --- Fleet defaults (#324): the supervisor overloaded while a paired machine idles ---
+
+/** A paired machine left unused while the supervisor's own machine is overloaded. */
+export interface IdlePeer {
+  /** The own machine's load (the higher of the 1- and 5-minute averages) and cores. */
+  load: number;
+  cores: number;
+  /** The peer with the most free slots, and how many. */
+  peer: string;
+  free: number;
+  /** The `alarm_raised` line: what is overloaded, what idles, and the key that uses it. */
+  message: string;
+}
+
+/**
+ * Whether the supervisor's own machine is over `placement.load_per_core_max` while a ready,
+ * undrained peer that is not down has free `max_agents` slots (SPEC §4.6.15): what a
+ * `placement: local` wave is leaving unused. Null otherwise, or before the own record is known.
+ */
+export function peerIdleUnderLoad(
+  snap: Snapshot,
+  o: { placement: Pick<PlacementConfig, "load_per_core_max"> },
+): IdlePeer | null {
+  const own = snap.machines.find((m) => m.local)?.record;
+  if (own === undefined || !(own.cores > 0)) return null;
+  const load = overloadLoad(own);
+  const max = o.placement.load_per_core_max;
+  if (load / own.cores <= max) return null;
+  const idle = snap.machines
+    .filter((m) => !m.local && m.ready && !m.drain && m.down_since === undefined)
+    .map((m) => ({ name: m.name, free: m.max_agents - placed(m, snap) }))
+    .filter((m) => m.free > 0)
+    .sort((a, b) => b.free - a.free || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))[0];
+  if (idle === undefined) return null;
+  const slots = `${idle.free} free agent slot${idle.free === 1 ? "" : "s"}`;
+  return {
+    load,
+    cores: own.cores,
+    peer: idle.name,
+    free: idle.free,
+    message: `this machine is overloaded (load ${load.toFixed(1)} on ${own.cores} cores, max ${max} per core) while ${idle.name} is ready with ${slots}; this wave is placement: local (set placement: auto to use it)`,
+  };
 }

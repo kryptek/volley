@@ -7,9 +7,11 @@ import {
   checkRebase,
   isInfraFailure,
   prFiles,
+  probeLanded,
   probeMovedHead,
   probeReleaseCi,
   verifyArtifacts,
+  verifyOperatorMerge,
 } from "../src/artifacts";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { type FakeExec, fakeExec } from "./helpers/fake-exec";
@@ -69,7 +71,7 @@ describe("artifact verification", () => {
       "--state",
       "open",
       "--json",
-      "number,url,headRefName,baseRefName,headRefOid",
+      "number,url,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus",
     ]);
     expect(fake.calls.find((c) => c.argv[1] === "pr")?.opts.cwd).toBe(WT);
     // No CI is consulted for a PR that is not ours.
@@ -214,6 +216,43 @@ describe("artifact verification", () => {
     expect(await verifyArtifacts(none.exec, SPEC)).toMatchObject({ ci: { state: "none" } });
   });
 
+  it("a CONFLICTING PR with no run → conflicting (GitHub runs no CI on it); UNKNOWN → pending, running", async () => {
+    const withMergeable = (mergeable: string) => {
+      const pr = JSON.parse(fx("gh-pr-list-ok.json"));
+      pr[0].mergeable = mergeable;
+      pr[0].mergeStateStatus = mergeable === "CONFLICTING" ? "DIRTY" : "UNKNOWN";
+      return allGood()
+        .on(["gh", "pr", "list"], { stdout: JSON.stringify(pr) })
+        .on(["gh", "run", "list"], { stdout: "[]" });
+    };
+    const report = await verifyArtifacts(withMergeable("CONFLICTING").exec, SPEC);
+    expect(report).toMatchObject({
+      kind: "ok",
+      pr: { number: 7, mergeable: "CONFLICTING", merge_state: "DIRTY" },
+      ci: { state: "none" },
+    });
+    expect(artifactOutcome("T1", "implementer", report)).toEqual({
+      kind: "conflicting",
+      head: HEAD,
+      pr: { number: 7, url: "https://github.com/example/repo/pull/7" },
+    });
+    // Still computing: the head is pending, as if CI ran (no no-CI clock).
+    const unknown = await verifyArtifacts(withMergeable("UNKNOWN").exec, SPEC);
+    expect(unknown).toMatchObject({ pr: { mergeable: "UNKNOWN" }, ci: { state: "running" } });
+    expect(artifactOutcome("T1", "implementer", unknown)).toEqual({
+      kind: "ci_pending",
+      state: "running",
+      head: HEAD,
+    });
+    // A conflicting head CI did run on is judged by its CI, as before.
+    const green = JSON.parse(fx("gh-pr-list-ok.json"));
+    green[0].mergeable = "CONFLICTING";
+    const ran = allGood().on(["gh", "pr", "list"], { stdout: JSON.stringify(green) });
+    expect(artifactOutcome("T1", "implementer", await verifyArtifacts(ran.exec, SPEC)).kind).toBe(
+      "verified",
+    );
+  });
+
   it("all good → artifact_verified journaled with the sha, PR and run links", async () => {
     const report = await verifyArtifacts(allGood().exec, SPEC);
     const out = artifactOutcome("T1", "implementer", report);
@@ -340,6 +379,103 @@ describe("superseded runs (latest run per workflow and trigger event wins)", () 
   });
 });
 
+describe("unreadable CI is unknown, never `none` (#310)", () => {
+  const RATE = "HTTP 403: API rate limit exceeded for user ID 1. (https://api.github.com/x)";
+
+  it("a failed `gh run list` → state unknown with the error; the outcome is an unreadable hold", async () => {
+    const fake = allGood().on(["gh", "run", "list"], { code: 1, stderr: `${RATE}\n` });
+    const report = await verifyArtifacts(fake.exec, SPEC);
+    expect(report).toMatchObject({
+      kind: "ok",
+      ci: { state: "unknown", runs: [], error: RATE, rate_limited: {} },
+    });
+    expect(artifactOutcome("T1", "implementer", report)).toEqual({
+      kind: "ci_pending",
+      state: "unknown",
+      head: HEAD,
+      unreadable: true,
+      error: RATE,
+    });
+  });
+
+  it("unparseable output and a failed `gh run view` are unknown too; a 502 is not a rate limit", async () => {
+    const garbage = allGood().on(["gh", "run", "list"], { stdout: "<html>oops" });
+    expect(await verifyArtifacts(garbage.exec, SPEC)).toMatchObject({
+      ci: { state: "unknown" },
+    });
+    const red = JSON.parse(fx("gh-run-list-green.json"));
+    red[0].conclusion = "failure";
+    const view = allGood()
+      .on(["gh", "run", "list"], { stdout: JSON.stringify(red) })
+      .on(["gh", "run", "view"], { code: 1, stderr: "HTTP 502: Bad Gateway" });
+    const report = await verifyArtifacts(view.exec, SPEC);
+    expect(report).toMatchObject({ ci: { state: "unknown", error: "HTTP 502: Bad Gateway" } });
+    expect(report.kind === "ok" && report.ci.rate_limited).toBeUndefined();
+  });
+
+  it("a 429 with Retry-After carries the wait", async () => {
+    const fake = allGood().on(["gh", "run", "list"], {
+      code: 1,
+      stderr: "HTTP 429: Too Many Requests\nRetry-After: 120\n",
+    });
+    expect(await verifyArtifacts(fake.exec, SPEC)).toMatchObject({
+      ci: { state: "unknown", rate_limited: { retry_after_ms: 120_000 } },
+    });
+  });
+
+  it("with runs_via, runs are read by head_sha (one gh api GET) through the supervisor's exec", async () => {
+    const api = fakeExec().on(["gh", "api"], {
+      stdout: JSON.stringify([
+        {
+          id: 501,
+          name: "CI",
+          status: "completed",
+          conclusion: "success",
+          html_url: "https://github.com/example/repo/actions/runs/501",
+          head_sha: HEAD,
+          event: "pull_request",
+          run_attempt: 1,
+          workflow_id: 9,
+        },
+      ]),
+    });
+    const fake = allGood();
+    const report = await verifyArtifacts(fake.exec, {
+      ...SPEC,
+      runs_via: { exec: api.exec, cwd: "/repo" },
+    });
+    expect(report).toMatchObject({
+      kind: "ok",
+      ci: {
+        state: "green",
+        runs: [
+          {
+            id: 501,
+            name: "CI",
+            status: "completed",
+            conclusion: "success",
+            url: "https://github.com/example/repo/actions/runs/501",
+          },
+        ],
+      },
+    });
+    // The task's exec lists no runs; the supervisor's reads them in the wave repo.
+    expect(fake.argvs(["gh", "run"])).toEqual([]);
+    const [argv] = api.argvs(["gh", "api"]);
+    expect(argv?.[2]).toBe(`repos/{owner}/{repo}/actions/runs?head_sha=${HEAD}&per_page=50`);
+    expect(api.calls[0]?.opts.cwd).toBe("/repo");
+  });
+
+  it("with runs_via, a 403 from gh api is unknown", async () => {
+    const api = fakeExec().on(["gh", "api"], { code: 1, stderr: RATE });
+    const report = await verifyArtifacts(allGood().exec, {
+      ...SPEC,
+      runs_via: { exec: api.exec, cwd: "/repo" },
+    });
+    expect(report).toMatchObject({ ci: { state: "unknown", rate_limited: {} } });
+  });
+});
+
 describe("rebase check", () => {
   const TIP = "3333333333333333333333333333333333333333";
   it("current when the merge-base with origin/<release> is its tip; else behind by N", async () => {
@@ -364,6 +500,107 @@ describe("rebase check", () => {
     expect(behind.argvs(["git", "-C", WT, "log"])).toEqual([
       ["git", "-C", WT, "log", "--oneline", `${OTHER}..${TIP}`],
     ]);
+  });
+
+  it("a failed fetch or log, or an empty log off the tip, throws: never counted as behind (#311)", async () => {
+    const o = { cwd: WT, head: HEAD, release_branch: "release/w1" };
+    const offTip = () =>
+      fakeExec()
+        .on(["git", "-C", WT, "rev-parse"], { stdout: `${TIP}\n` })
+        .on(["git", "-C", WT, "merge-base"], { stdout: `${OTHER}\n` });
+    const fetchFails = offTip().on(["git", "-C", WT, "fetch"], { code: 128, stderr: "no route" });
+    await expect(checkRebase(fetchFails.exec, o)).rejects.toThrow(/fetch/);
+    const logFails = offTip().on(["git", "-C", WT, "log"], { code: 128, stderr: "bad object" });
+    await expect(checkRebase(logFails.exec, o)).rejects.toThrow(/log/);
+    const empty = offTip().on(["git", "-C", WT, "log"], { stdout: "" });
+    await expect(checkRebase(empty.exec, o)).rejects.toThrow("inconsistent rebase check");
+  });
+});
+
+describe("probes from the repo root (the head worktree is gone)", () => {
+  const ROOT = "/repo";
+  const TIP = "3333333333333333333333333333333333333333";
+  const at = { cwd: ROOT, fetch: "refs/pull/7/head" };
+  it("checkRebase fetches the PR head into the repo root first, then answers as in the worktree", async () => {
+    const f = fakeExec()
+      .on(["git", "-C", ROOT, "rev-parse"], { stdout: `${TIP}\n` })
+      .on(["git", "-C", ROOT, "merge-base"], { stdout: `${TIP}\n` });
+    expect(await checkRebase(f.exec, { ...at, head: HEAD, release_branch: "release/w1" })).toEqual({
+      release_sha: TIP,
+      merge_base: TIP,
+      behind: 0,
+    });
+    expect(f.argvs()).toEqual([
+      ["git", "-C", ROOT, "fetch", "origin", "refs/pull/7/head"],
+      ["git", "-C", ROOT, "fetch", "origin", "release/w1"],
+      ["git", "-C", ROOT, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/release/w1"],
+      ["git", "-C", ROOT, "merge-base", HEAD, TIP],
+    ]);
+  });
+
+  it("probeLanded fetches the PR head into the repo root first; an ancestor head has landed", async () => {
+    const f = fakeExec()
+      .on(["git", "-C", ROOT, "rev-parse"], { stdout: `${TIP}\n` })
+      .on(["git", "-C", ROOT, "merge-base", "--is-ancestor"], { code: 0 });
+    expect(
+      await probeLanded(f.exec, { ...at, head: HEAD, release_branch: "release/w1", pr: 7 }),
+    ).toEqual({ ancestor: true, unmatched: [], subjects: [], release_sha: TIP });
+    expect(f.argvs()[0]).toEqual(["git", "-C", ROOT, "fetch", "origin", "refs/pull/7/head"]);
+    expect(f.argvs()).toContainEqual([
+      "git",
+      "-C",
+      ROOT,
+      "merge-base",
+      "--is-ancestor",
+      HEAD,
+      "origin/release/w1",
+    ]);
+  });
+
+  it("probeMovedHead fetches the gated head by sha when the repo root lacks it (a force-push), and not when it has it", async () => {
+    const FROM = "4444444444444444444444444444444444444444";
+    const moved = { ...at, branch: "b", from: FROM, to: TIP };
+    const missing = fakeExec().on(["git", "-C", ROOT, "rev-parse", "--verify"], { code: 1 });
+    await probeMovedHead(missing.exec, moved);
+    expect(missing.argvs(["git", "-C", ROOT, "fetch"])).toContainEqual([
+      "git",
+      "-C",
+      ROOT,
+      "fetch",
+      "origin",
+      FROM,
+    ]);
+    const present = fakeExec();
+    await probeMovedHead(present.exec, moved);
+    expect(present.argvs(["git", "-C", ROOT, "fetch", "origin", FROM])).toEqual([]);
+    // In the worktree the gated head is local: no check, no fetch.
+    const wt = fakeExec();
+    await probeMovedHead(wt.exec, { cwd: WT, branch: "b", from: FROM, to: TIP });
+    expect(wt.argvs(["git", "-C", WT, "rev-parse"])).toEqual([]);
+  });
+
+  it("a failed PR-head fetch is named as such, not left to the next step's error", async () => {
+    const failing = () =>
+      fakeExec().on(["git", "-C", ROOT, "fetch", "origin", "refs/pull/7/head"], {
+        code: 128,
+        stderr: "fatal: couldn't find remote ref refs/pull/7/head\n",
+      });
+    const why =
+      "git fetch origin refs/pull/7/head failed (128): fatal: couldn't find remote ref refs/pull/7/head";
+    await expect(
+      checkRebase(failing().exec, { ...at, head: HEAD, release_branch: "release/w1" }),
+    ).rejects.toThrow(why);
+    await expect(
+      probeLanded(failing().exec, { ...at, head: HEAD, release_branch: "release/w1", pr: 7 }),
+    ).rejects.toThrow(why);
+    expect(
+      await verifyOperatorMerge(failing().exec, {
+        ...at,
+        head: HEAD,
+        sha: TIP,
+        release_branch: "release/w1",
+      }),
+    ).toEqual({ ok: false, error: why });
   });
 });
 
@@ -478,6 +715,17 @@ describe("probeReleaseCi", () => {
     expect(await probeReleaseCi(broken.exec, RELEASE)).toEqual({
       state: "unknown",
       failing_tests: [],
+      error: "HTTP 502",
+    });
+    const limited = fakeExec().on(["gh", "run", "list"], {
+      code: 1,
+      stderr: "HTTP 403: API rate limit exceeded for user ID 1.",
+    });
+    expect(await probeReleaseCi(limited.exec, RELEASE)).toEqual({
+      state: "unknown",
+      failing_tests: [],
+      error: "HTTP 403: API rate limit exceeded for user ID 1.",
+      rate_limited: {},
     });
   });
 

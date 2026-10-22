@@ -12,8 +12,8 @@
         "type": "ssh",
         "name": "box",
         "target": "dev@box.example",
-        "repo": "/home/dev/src/example-repo",
-        "volley_dir": "/home/dev/src/volley",
+        "repo": "/path/to/repo",
+        "volley_dir": "/path/to/volley",
         "tunnel": { "remote_port": 1883 }
       }
     },

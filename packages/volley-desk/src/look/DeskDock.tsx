@@ -4,7 +4,8 @@
  * (badge: the inbox items only a person answers), the Machines window (badge:
  * the machines that are down), tethers, arrange &
  * fit, zoom in / out and the Settings window (appearance and auto-arrange
- * live there). Its panel is lifted and lit like the Desk's windows (D10,
+ * live there), and, in a signed-in session, the account avatar, whose menu
+ * signs out or switches account (`AccountMenu`). Its panel is lifted and lit like the Desk's windows (D10,
  * `.dock-wrap .dock` in look.css).
  */
 import {
@@ -18,6 +19,7 @@ import {
   ZoomOutAreaIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { AccountMenu, initials } from "../auth/AccountActions";
 import Dock, { type DockItemData } from "../rb/Dock/Dock";
 import "../styles/look.css";
 
@@ -45,6 +47,15 @@ export interface DeskDockProps {
   onZoom: (factor: number) => void;
   settingsOpen: boolean;
   onToggleSettings: () => void;
+  /** The signed-in account (the avatar and its menu); absent outside a sign-in gate (demo). */
+  account?: {
+    identity: string | null;
+    /** The menu's second line ("Desk · can steer…", "Admin · …"). */
+    role: string;
+    open: boolean;
+    onToggle: () => void;
+    onClose: () => void;
+  };
 }
 
 export function dockItems(p: DeskDockProps): DockItemData[] {
@@ -87,6 +98,21 @@ export function dockItems(p: DeskDockProps): DockItemData[] {
       onClick: p.onToggleSettings,
       active: p.settingsOpen,
     },
+    ...(p.account
+      ? [
+          {
+            icon: (
+              <span className="avatar dock-avatar">
+                {p.account.identity ? initials(p.account.identity) : "?"}
+              </span>
+            ),
+            label: "Account",
+            className: "dock-item--account",
+            onClick: p.account.onToggle,
+            active: p.account.open,
+          },
+        ]
+      : []),
   ];
 }
 
@@ -102,6 +128,13 @@ export function DeskDock(p: DeskDockProps) {
         badgeColor="#ff7a59"
         showLabels
       />
+      {p.account?.open && (
+        <AccountMenu
+          identity={p.account.identity}
+          role={p.account.role}
+          onClose={p.account.onClose}
+        />
+      )}
     </nav>
   );
 }

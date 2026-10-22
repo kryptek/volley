@@ -322,6 +322,89 @@
 .ms-close {
   margin-left: auto;
 }
+.ms-head h2:focus {
+  outline: none;
+}
+/* A group page's back control (‹ Section), like macOS System Settings. */
+.ms-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 30px;
+  padding: 2px 8px 2px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: #0a84ff;
+  font-size: 13px;
+  cursor: pointer;
+}
+.ms-back span {
+  font-size: 18px;
+  line-height: 1;
+}
+.ms-back:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.ms-back:focus-visible {
+  outline: 2px solid #0a84ff;
+  outline-offset: 1px;
+}
+/* A long section's group list: one row per group (label · live summary · chevron). */
+.gl {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.gl li + li {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.gl-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.gl-row:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.gl-row:focus-visible {
+  outline: 2px solid #0a84ff;
+  outline-offset: -2px;
+}
+.gl-row--hit {
+  background: rgba(10, 132, 255, 0.22);
+}
+.gl-label {
+  flex: none;
+}
+.gl-sum {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  color: var(--dim);
+}
+.gl-chev {
+  flex: none;
+  color: var(--mute);
+  font-size: 16px;
+  line-height: 1;
+}
 .ms-body {
   padding: 16px 20px 24px;
   overflow: auto;
@@ -529,6 +612,25 @@
   .ms-body {
     padding: 12px 12px 20px;
   }
+  /* The group list goes full width; a row's summary wraps under its label. */
+  .gl-row {
+    min-height: 48px;
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  .gl-sum {
+    order: 3;
+    flex-basis: 100%;
+    white-space: normal;
+    text-align: left;
+  }
+  .gl-chev {
+    margin-left: auto;
+  }
+  .ms-back {
+    min-height: 48px;
+    min-width: 48px;
+  }
   .s-slider {
     width: 160px;
   }
@@ -583,11 +685,115 @@
 .cc-head .chip {
   margin-left: auto;
 }
+.cc-email {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12.5px;
+}
+.cc-email .icon-btn {
+  flex: none;
+  width: 24px;
+  height: 24px;
+}
+.cc-email .icon-btn[aria-pressed="true"] {
+  color: var(--ink);
+}
+.cc-stale {
+  color: #ffd60a;
+}
+.cc-machines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+.cc-machines li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.cc-machines .cc-waves {
+  margin-left: auto;
+  flex: none;
+}
+.cc-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--mute);
+}
+.cc-dot--in {
+  background: #34c759;
+}
+/* A configured machine without the account: a hollow dot, and Sign in on it. */
+.cc-machines .gap .cc-dot,
+.m-accounts .gap .cc-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--mute);
+}
+.cc-signin {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: none;
+}
+.cc-signin .btn {
+  padding: 2px 8px;
+  font-size: 11.5px;
+}
+/* `on 2 of 3 machines`: amber while a configured machine misses the account. */
+.cc-head .chip + .chip {
+  margin-left: 0;
+}
+.chip--gap {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 55%, transparent);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+}
 .cc-foot {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 8px;
   font-size: 12px;
+}
+/* From volleyd's claude_balance: the families that pick this account next, and the machine row. */
+.cc-picks {
+  flex-basis: 100%;
+  color: var(--ok);
+}
+.cc-machines .cc-next {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
+/* The three meters: 5-hour, 7-day and Fable (7-day), side by side while the card is wide. */
+.cc-meters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+/* A machine row's `5h 37% · 7d 56% · Fable 12%`, and `sampled 3 h ago` when it is older. */
+.cc-usage {
+  flex: none;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.cc-machines .cc-usage,
+.m-accounts .cc-usage {
+  margin-left: auto;
+}
+.cc-machines .cc-usage + .cc-waves {
+  margin-left: 0;
 }
 .meter-top {
   display: flex;
@@ -935,5 +1141,64 @@
   }
   .policy-stack {
     display: block;
+  }
+}
+/* Add Claude account: the machine picker, one row per machine. */
+.claude-add-machines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 10px;
+  padding: 0;
+  border: 0;
+}
+.claude-add-machines legend {
+  padding: 0;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.claude-add-machine {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.claude-add-machine--off {
+  cursor: default;
+  opacity: 0.55;
+}
+.cc-move {
+  flex-wrap: wrap;
+}
+.cc-move .btn {
+  flex: none;
+}
+
+/* Sign out and Switch account… under the account (Settings' sidebar, the Dock's account menu). */
+.ms-account {
+  flex-wrap: wrap;
+}
+.account-actions {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.account-env {
+  flex-basis: 100%;
+}
+@media (max-width: 699.98px) {
+  /* The phone strip keeps the account on one line: the avatar, then its two buttons. */
+  .mac-settings .ms-account {
+    flex-wrap: nowrap;
+  }
+  .mac-settings .account-actions,
+  .mac-settings .account-env {
+    flex-basis: auto;
+    flex-wrap: nowrap;
+    white-space: nowrap;
   }
 }

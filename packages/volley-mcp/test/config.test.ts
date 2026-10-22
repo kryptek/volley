@@ -11,7 +11,7 @@ describe("generateAgentId", () => {
     );
   });
   it("sanitizes non-conforming characters", () => {
-    expect(generateAgentId("/Users/Someone/My Project!")).toMatch(/^my-project-[a-z0-9]{4}$/);
+    expect(generateAgentId("/path/to/My Project!")).toMatch(/^my-project-[a-z0-9]{4}$/);
   });
   it("falls back to 'agent' when the basename sanitizes to empty", () => {
     expect(generateAgentId("/!!!")).toMatch(/^agent-[a-z0-9]{4}$/);
@@ -277,6 +277,18 @@ describe("broker credentials (VOLLEY_AUTH_* and the identity file broker block)"
         new RegExp(`${join(cwd, ".volley", "agent.json")}: broker`),
       );
     }
+  });
+});
+
+describe("VOLLEY_HEARTBEAT_S", () => {
+  it("is absent by default (the lifecycle's 300 s), read as seconds, and 0 is off", () => {
+    expect(loadConfig({}, "/x")).not.toHaveProperty("heartbeatS");
+    expect(loadConfig({ VOLLEY_HEARTBEAT_S: "60" }, "/x").heartbeatS).toBe(60);
+    expect(loadConfig({ VOLLEY_HEARTBEAT_S: "0" }, "/x").heartbeatS).toBe(0);
+  });
+  it("rejects a value that is not a non-negative number", () => {
+    expect(() => loadConfig({ VOLLEY_HEARTBEAT_S: "soon" }, "/x")).toThrow(/VOLLEY_HEARTBEAT_S/);
+    expect(() => loadConfig({ VOLLEY_HEARTBEAT_S: "-5" }, "/x")).toThrow(/VOLLEY_HEARTBEAT_S/);
   });
 });
 

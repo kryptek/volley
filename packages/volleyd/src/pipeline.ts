@@ -3,15 +3,18 @@ import {
   type ArtifactReport,
   type CiRun,
   type CiState,
+  type GitAt,
   type Landed,
   type MovedHeadFacts,
   type OperatorMergeCheck,
+  type RateLimited,
   type RebaseCheck,
   type ReleaseMerge,
+  type RunsVia,
   type SupersededRun,
   artifactOutcome,
   checkRebase,
-  ciStateOf,
+  ciReport,
   failedRuns,
   landed,
   prFiles,
@@ -24,8 +27,8 @@ import {
 } from "./artifacts";
 import { type ClassifyResult, classify } from "./autopilot/ci-classify";
 import { type GithubStatus, STATUS_UNKNOWN } from "./autopilot/github-status";
-import { mergePr } from "./autopilot/merge";
-import { type QueueEntry, nextToMerge, queueOf } from "./autopilot/merge-queue";
+import { type RefusalReason, isRefusalReason, mergePr } from "./autopilot/merge";
+import { type QueueEntry, nextToMerge, queueOf, refusalEndsTurn } from "./autopilot/merge-queue";
 import type { Role } from "./brief";
 import { systemClock } from "./clock";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "./config-defaults";
@@ -63,6 +66,8 @@ import type {
   TaskStage,
   WaveId,
 } from "./types";
+import { BLOCKED_ALARM } from "./watchdog";
+import { expandHome } from "./worktree";
 
 /**
  * The pipeline: drives a task through its stage groups — implement → [spec_review ∥
@@ -148,6 +153,8 @@ export interface TaskPipeline {
    * step started): a normal push, and its head must descend from the step's start.
    */
   branch_update?: "merge" | undefined;
+  /** The rebase step was entered because GitHub reported the PR CONFLICTING (`pr_conflicting`). */
+  conflicting?: true | undefined;
   runs: Partial<Record<Role, RoleRun>>;
   /** The PR's head branch (the implementer's). */
   branch?: string;
@@ -206,6 +213,11 @@ export interface TaskPipeline {
   nudged?: string[];
   /** Autopilot merges GitHub refused at the current gated head (`merge_refused` alarms). */
   merge_refusals?: number;
+  /**
+   * The reason of the last of those refusals (absent for one journaled before reasons were
+   * recorded). Unlike `alarms.merge_refused`, a late refusal of an older head never sets it.
+   */
+  merge_refusal_reason?: RefusalReason | undefined;
   /** Extra attempts the owner granted (`merge_refused` answered `retry`). */
   merge_retries?: number;
   /** The owner answered a `merge_refused` decision `manual`: a human merges this task. */
@@ -273,10 +285,14 @@ export interface CiHold {
   checks: { done: number; total: number };
   next_poll_at: string;
   pr?: { number: number; url: string };
-  /** An infra incident hold (a red head classified `infra_incident`): what it is and since when. */
-  reason?: "infra_incident";
+  /**
+   * An infra incident hold (a red head classified `infra_incident`): what it is and since when.
+   * `ci_unreadable`: GitHub's answer about the head's runs could not be read (`error`).
+   */
+  reason?: "infra_incident" | "ci_unreadable";
   incident?: string;
   since?: string;
+  error?: string;
 }
 
 export type SteerReason = "artifacts" | "result" | "merge_nudge";
@@ -381,14 +397,20 @@ export function reducePipeline(
     case "stage_entered":
       p.why = typeof d.why === "string" ? d.why : undefined;
       if (Array.isArray(d.roles)) {
-        // A flake's fix taken (landedFix): where the pipeline goes on once the update is verified.
-        // Read before p.rebasing is overwritten below: a parked pre-gate update resumes at the gate.
+        // A flake's fix taken (landedFix), or a conflicting PR brought up to date (onVerified):
+        // where the pipeline goes on once the update is verified. Read before p.rebasing is
+        // overwritten below: a parked pre-gate update resumes at the gate.
         p.fix_resume =
-          typeof d.fix_landed === "string" ? (p.rebasing ? "gate" : "next") : undefined;
+          typeof d.fix_landed === "string" || d.conflicting === true
+            ? p.rebasing
+              ? "gate"
+              : "next"
+            : undefined;
         p.step = d.step as number;
         p.roles = (d.roles as unknown[]).filter(isRole);
         p.rebasing = d.rebase === true;
         p.branch_update = p.rebasing && d.branch_update === "merge" ? "merge" : undefined;
+        p.conflicting = p.rebasing && d.conflicting === true ? true : undefined;
         p.rereview = [];
         if (typeof d.review_round === "number") p.round = d.review_round;
         if (typeof d.directive === "object" && d.directive !== null) ciFixupEntered(p, d);
@@ -401,6 +423,7 @@ export function reducePipeline(
         p.roles = ["implementer"];
         p.rebasing = false;
         p.branch_update = undefined;
+        p.conflicting = undefined;
       }
       break;
     case "merge_queued":
@@ -443,6 +466,7 @@ export function reducePipeline(
           p.gated.push(d.head_sha);
           // A new gated head: GitHub's refusals of the old one say nothing about it.
           p.merge_refusals = 0;
+          p.merge_refusal_reason = undefined;
           p.merge_retries = 0;
         }
       }
@@ -525,7 +549,10 @@ export function reducePipeline(
     }
     case "agent_retired": {
       const run = isRole(role) ? p.runs[role] : undefined;
-      if (run !== undefined && run.agent_id === d.agent_id && d.status !== "superseded") {
+      // A spawn retry's `superseded` (superseded_by its next attempt) is not the run's end; a
+      // merge's is (mergedActions).
+      const replaced = d.status === "superseded" && d.superseded_by !== undefined;
+      if (run !== undefined && run.agent_id === d.agent_id && !replaced) {
         run.retired = String(d.status);
         // The retained result goes with the retire: a fixup verified later (CI pending at its
         // done, a re-verify answer, an accepted no-CI head) still reports how it resolved things.
@@ -566,8 +593,29 @@ export function reducePipeline(
                 ...(typeof d.since === "string" ? { since: d.since } : {}),
               }
             : {}),
+          ...(d.reason === "ci_unreadable"
+            ? { reason: "ci_unreadable" as const, error: String(d.error ?? "") }
+            : {}),
         };
       break;
+    case "pr_conflicting": {
+      // GitHub runs no CI on the head: no hold. The update step starts from it (never verified).
+      p.ci_hold = undefined;
+      // A fixup's head is still its fixup: the reviews it fixed hold through the update after it.
+      const run = role === "fixup" ? p.runs.fixup : undefined;
+      if (run !== undefined && typeof d.head === "string")
+        p.fixups.push({
+          round: p.round,
+          ...(run.start !== undefined ? { from: run.start } : {}),
+          to: d.head,
+          ...(run.result !== undefined ? { result: run.result } : {}),
+          ...(run.worktree !== undefined ? { worktree: run.worktree } : {}),
+        });
+      if (typeof d.head === "string") p.head = d.head;
+      if (p.pr === undefined && typeof d.pr === "object" && d.pr !== null)
+        p.pr = d.pr as { number: number; url: string };
+      break;
+    }
     case "remediation_requested":
       if (d.kind === "fix_flake" && isRole(role) && typeof d.head === "string")
         p.remediation = {
@@ -603,8 +651,10 @@ export function reducePipeline(
     case "alarm_raised": {
       if (typeof d.alarm === "string") p.alarms = { ...p.alarms, [d.alarm]: d };
       // Only a refusal of the current gated head counts: a late one for an older head says nothing.
-      if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1))
+      if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1)) {
         p.merge_refusals = (p.merge_refusals ?? 0) + 1;
+        p.merge_refusal_reason = isRefusalReason(d.reason) ? d.reason : undefined;
+      }
       // volleyd's merge ended without merging (refused, or `gh` could not run).
       if (d.alarm === "merge_refused" || (d.alarm === "pipeline_error" && d.check === "merge"))
         p.merge_inflight = undefined;
@@ -845,7 +895,7 @@ export type PipelineEvent =
    */
   | { kind: "supervisor_merged"; sha: string | null; head: string; by?: string }
   /** Autopilot merging: `gh pr merge` exited non-zero for `head` (moved, checks, protection). */
-  | { kind: "merge_refused"; stderr: string; head: string }
+  | { kind: "merge_refused"; stderr: string; head: string; reason?: RefusalReason }
   /**
    * Self-healing CI (SPEC §4.6.16): the fixer of the flake `test` merged and released the task
    * (`remediation_closed`): it takes the fix from the release branch and is verified again.
@@ -853,7 +903,7 @@ export type PipelineEvent =
   | { kind: "fix_landed"; test: string };
 
 /** CI on a merged head that is not the gated one; `unknown` when it could not be read. */
-export type MergedCi = CiState | "unknown";
+export type MergedCi = CiState;
 
 export interface PrView {
   state?: string;
@@ -1155,9 +1205,14 @@ function onMergeChecked(
   // A human merged the PR, in whatever stage the task is (its open decisions were closed first).
   if (view.state === "MERGED" && view.baseRefName === v.release_branch) {
     const merged = typeof view.headRefOid === "string" ? view.headRefOid : undefined;
-    // Not through the gate: merged at another head, or before the task reached merge_ready.
+    // Not through the gate: merged at another head, or before the task was gated at it. A merge at
+    // the current gated head while a later step runs (a branch update or fixup that has not
+    // pushed, or a task the owner sent back to verify again at that head) is verified (#311).
     const other = merged !== undefined && merged !== head;
-    const unverified = other || v.stage !== "merge_ready";
+    const atGated = head !== undefined && v.p.gated.at(-1) === head;
+    // Off merge_ready the merged head must be read as the gated one: a branch update's agent may
+    // have pushed and merged a head volleyd has not seen yet.
+    const unverified = other || (v.stage !== "merge_ready" && !(atGated && merged === head));
     return [
       ...(unverified
         ? [
@@ -1275,6 +1330,8 @@ function onMergeRefused(
           pr: pr.url,
           head: ev.head,
           stderr: ev.stderr,
+          // Absent: refusalEndsTurn reads it as `behind`, like a refusal journaled before reasons.
+          ...(ev.reason !== undefined ? { reason: ev.reason } : {}),
           attempt: (v.p.merge_refusals ?? 0) + 1,
         },
       },
@@ -1394,10 +1451,21 @@ function onMovedCi(
   const m = v.p.moved;
   if (m === undefined || m.to !== ev.to || m.asked === true) return [];
   const ci = ev.facts.ci;
+  // Unreadable CI (`unknown`) is re-polled like running CI: never a decision.
   const waiting =
     ci.state === "running" ||
+    ci.state === "unknown" ||
     (ci.state === "none" && ev.waited_ms < DAEMON_DEFAULTS.ci_none_grace_ms);
-  if (waiting) return holdFor(v, "moved", ev.to, ci.runs, ev.pr, ev.at);
+  if (waiting)
+    return holdFor(
+      v,
+      "moved",
+      ev.to,
+      ci.runs,
+      ev.pr,
+      ev.at,
+      ci.state === "unknown" ? (ci.error ?? "") : undefined,
+    );
   const at = (x: string) => x.slice(0, 7);
   const failure =
     ci.state === "red"
@@ -1508,8 +1576,11 @@ function mergedActions(
         },
       },
     },
-    // Merged mid-pipeline: whoever is still at work on it stops.
-    ...Object.values(v.p.runs).flatMap(retireIfLive),
+    // Merged mid-pipeline: whoever is still at work on it stops (a branch update or fixup of a
+    // head that merged is superseded by the merge).
+    ...Object.entries(v.p.runs).flatMap(([role, run]) =>
+      retireIfLive(run, role === "rebase" || role === "fixup" ? "superseded" : undefined),
+    ),
     {
       kind: "journal",
       event: { type: "stage_entered", task: v.task, data: { stage: "done", merged: true } },
@@ -1619,9 +1690,9 @@ function onIoFailed(
   return out;
 }
 
-const retireIfLive = (run: RoleRun | undefined): PipelineAction[] =>
+const retireIfLive = (run: RoleRun | undefined, status?: string): PipelineAction[] =>
   run !== undefined && run.retired === undefined
-    ? [{ kind: "retire", agent_id: run.agent_id }]
+    ? [{ kind: "retire", agent_id: run.agent_id, ...(status !== undefined ? { status } : {}) }]
     : [];
 
 function onDone(
@@ -1808,33 +1879,36 @@ function onVerified(
           report: ev.report as OkReport,
         },
       ];
-    case "ci_pending": {
-      const grace = ev.waited_ms !== undefined && ev.waited_ms >= DAEMON_DEFAULTS.ci_none_grace_ms;
-      if (out.state === "none" && grace) {
-        const touched = ev.report.kind === "ok" ? ev.report.touched : undefined;
-        return [
-          ...retireIfLive(run),
-          {
-            kind: "decide",
-            marker: {
-              on: "ci_none",
+    case "ci_pending":
+      return noCiYet(v, ev, run, out.state, out.head);
+    case "conflicting": {
+      // An update step's own head that still conflicts is not updated again (that could loop):
+      // it waits like any head with no CI, and the owner is asked once the grace has passed.
+      if (ev.role === "rebase") return noCiYet(v, ev, run, "none", out.head);
+      // GitHub runs no CI on a PR that conflicts with its base: bring it up to date now, at the
+      // head the agent pushed (never verified), as a behind > 0 rebase check would.
+      const [entered, spawn] = enterRebase(
+        { ...v, p: { ...v.p, head: out.head, pr: v.p.pr ?? out.pr } },
+        { conflicting: true },
+      );
+      return [
+        {
+          kind: "journal",
+          event: {
+            type: "pr_conflicting",
+            task: v.task,
+            data: {
               role: ev.role,
+              pr: out.pr,
               head: out.head,
-              ...(touched !== undefined ? { touched } : {}),
-            },
-            decision: {
-              kind: "ci_failed",
-              task: v.task,
-              question: `No CI run exists for ${out.head.slice(0, 12)} after ${Math.round((ev.waited_ms ?? 0) / 60_000)} min. Check the repository's workflows (and the hosting provider's status page). Accept the head without CI, or cancel?`,
-              ...(ev.report.kind === "ok" ? { pointers: { pr: ev.report.pr.url } } : {}),
-              options: ["accept", "cancel"],
+              release_branch: v.release_branch,
             },
           },
-        ];
-      }
-      // The pushed work is in place; CI is re-checked on later ticks. The agent is done — the
-      // hold is the pipeline's, and it says so (once per change of head or counts).
-      return [...ciPending(v, ev, out.head), ...retireIfLive(run)];
+        },
+        ...retireIfLive(run),
+        ...(entered !== undefined ? [entered] : []),
+        ...(spawn !== undefined ? [spawn] : []),
+      ];
     }
     case "verified":
       return [
@@ -1867,6 +1941,48 @@ function onVerified(
   }
 }
 
+/** A pushed head CI has not settled on (running, or no run yet: the owner is asked after the grace). */
+function noCiYet(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "verified" }>,
+  run: RoleRun,
+  state: "running" | "none" | "unknown",
+  head: string,
+): PipelineAction[] {
+  const grace = ev.waited_ms !== undefined && ev.waited_ms >= DAEMON_DEFAULTS.ci_none_grace_ms;
+  if (state === "none" && grace) {
+    const touched = ev.report.kind === "ok" ? ev.report.touched : undefined;
+    const minutes = Math.round((ev.waited_ms ?? 0) / 60_000);
+    // Only an update step's own head gets here conflicting: that, not the workflows, is the cause.
+    const question =
+      ev.report.kind === "ok" && ev.report.pr.mergeable === "CONFLICTING"
+        ? `The PR still conflicts with ${v.release_branch} at ${head.slice(0, 12)} after its branch-update step, so no CI has run for ${minutes} min. Resolve the conflict and push, then accept the head without CI, or cancel?`
+        : `No CI run exists for ${head.slice(0, 12)} after ${minutes} min. Check the repository's workflows (and the hosting provider's status page). Accept the head without CI, or cancel?`;
+    return [
+      ...retireIfLive(run),
+      {
+        kind: "decide",
+        marker: {
+          on: "ci_none",
+          role: ev.role,
+          head,
+          ...(touched !== undefined ? { touched } : {}),
+        },
+        decision: {
+          kind: "ci_failed",
+          task: v.task,
+          question,
+          ...(ev.report.kind === "ok" ? { pointers: { pr: ev.report.pr.url } } : {}),
+          options: ["accept", "cancel"],
+        },
+      },
+    ];
+  }
+  // The pushed work is in place; CI is re-checked on later ticks. The agent is done — the
+  // hold is the pipeline's, and it says so (once per change of head or counts).
+  return [...ciPending(v, ev, head), ...retireIfLive(run)];
+}
+
 /** The `ci_pending` event for a verification whose CI is still running (or has no run yet). */
 function ciPending(
   v: PipelineView,
@@ -1875,10 +1991,16 @@ function ciPending(
 ): PipelineAction[] {
   if (ev.report.kind !== "ok") return [];
   const { number, url } = ev.report.pr;
-  return holdFor(v, ev.role, head, ev.report.ci.runs, { number, url }, ev.at);
+  const ci = ev.report.ci;
+  const unreadable = ci.state === "unknown" ? (ci.error ?? "") : undefined;
+  return holdFor(v, ev.role, head, ci.runs, { number, url }, ev.at, unreadable);
 }
 
-/** Journal `ci_pending` for `role`'s head (once per change of head or counts). */
+/**
+ * Journal `ci_pending` for `role`'s head (once per change of head, counts or readability; an
+ * unreadable answer's error text, which may carry request ids, is not a change).
+ * `unreadable`: the runs could not be read (why): the hold says `reason: ci_unreadable`.
+ */
 function holdFor(
   v: PipelineView,
   role: Role | "moved",
@@ -1886,15 +2008,17 @@ function holdFor(
   runs: CiRun[],
   pr: { number: number; url: string },
   at: number | undefined,
+  unreadable?: string,
 ): PipelineAction[] {
   const checks = { done: runs.filter((r) => r.status === "completed").length, total: runs.length };
   const hold = v.p.ci_hold;
+  const reason = unreadable !== undefined ? "ci_unreadable" : undefined;
   if (
     hold?.role === role &&
     hold.sha === head &&
-    hold.reason === undefined &&
-    hold.checks.done === checks.done &&
-    hold.checks.total === checks.total
+    hold.reason === reason &&
+    (unreadable !== undefined ||
+      (hold.checks.done === checks.done && hold.checks.total === checks.total))
   )
     return [];
   return [
@@ -1911,6 +2035,7 @@ function holdFor(
             ? { next_poll_at: new Date(at + DAEMON_DEFAULTS.ci_poll_ms).toISOString() }
             : {}),
           pr,
+          ...(unreadable !== undefined ? { reason: "ci_unreadable", error: unreadable } : {}),
         },
       },
     },
@@ -2172,6 +2297,9 @@ export function blockedReason(payload: unknown): string {
   return "(no reason given)";
 }
 
+/** The `why` of a blocked alarm on a cancelled task: the one case that is not a stale run. */
+export const BLOCKED_TASK_CANCELLED = "the task is cancelled";
+
 /**
  * A role's agent is blocked: ask the owner. Nothing is retired (the agent may be waiting on its
  * mailbox); `continue` waits for its next status, `respawn` relaunches the role.
@@ -2181,8 +2309,33 @@ function onBlocked(
   ev: Extract<PipelineEvent, { kind: "agent_blocked" }>,
 ): PipelineAction[] {
   const run = v.p.runs[ev.role];
-  if (run === undefined || run.agent_id !== ev.agent_id || run.accepted || v.stage === "cancelled")
-    return [];
+  const why =
+    run === undefined || run.agent_id !== ev.agent_id
+      ? `not the ${ev.role}'s current run`
+      : run.accepted
+        ? `the ${ev.role}'s run is already accepted`
+        : v.stage === "cancelled"
+          ? BLOCKED_TASK_CANCELLED
+          : undefined;
+  // Never silent: the alarm says why the pipeline asks nothing (the daemon asks instead).
+  if (why !== undefined)
+    return [
+      {
+        kind: "alarm",
+        key: `${BLOCKED_ALARM}/${ev.agent_id}/${ev.at ?? ""}`,
+        event: {
+          type: "alarm_raised",
+          task: v.task,
+          data: {
+            alarm: BLOCKED_ALARM,
+            agent_id: ev.agent_id,
+            role: ev.role,
+            why,
+            ...(ev.at !== undefined ? { status_at: ev.at } : {}),
+          },
+        },
+      },
+    ];
   const blocked: BlockedStatus = {
     reason: ev.reason,
     payload: ev.payload,
@@ -2747,6 +2900,7 @@ function spawnFor(v: PipelineView, role: Role): PipelineAction {
     pr_url: v.p.pr?.url ?? "",
     head,
     release_branch: v.release_branch,
+    ...(role === "rebase" && v.p.conflicting === true ? { conflicting: true as const } : {}),
   };
   if (isReviewerRole(role)) {
     return {
@@ -2932,10 +3086,14 @@ function enterStep(
   ];
 }
 
-function enterRebase(v: PipelineView): PipelineAction[] {
+/** `conflicting`: GitHub reported the PR CONFLICTING (`pr_conflicting`); the step's brief says so. */
+function enterRebase(v: PipelineView, o: { conflicting?: true } = {}): PipelineAction[] {
   const merge = v.branch_update === "merge";
   // spawnFor reads the step's mode, which the stage_entered below fixes.
-  const after: PipelineView = { ...v, p: { ...v.p, branch_update: merge ? "merge" : undefined } };
+  const after: PipelineView = {
+    ...v,
+    p: { ...v.p, branch_update: merge ? "merge" : undefined, conflicting: o.conflicting },
+  };
   return [
     {
       kind: "journal",
@@ -2949,6 +3107,7 @@ function enterRebase(v: PipelineView): PipelineAction[] {
           rebase: true,
           // The mode is the step's from here on: a config change reaches the next step only.
           ...(merge ? { branch_update: "merge" } : {}),
+          ...(o.conflicting === true ? { conflicting: true } : {}),
         },
       },
     },
@@ -3046,7 +3205,18 @@ interface BriefCtx {
   pr_url: string;
   head: string;
   release_branch: string;
+  /** The update step is for a PR GitHub reports CONFLICTING. */
+  conflicting?: true;
 }
+
+/** The line that opens an update step's `.volley/rebase.md` for a conflicting PR, or none. */
+const conflictLines = (c: BriefCtx): string[] =>
+  c.conflicting === true
+    ? [
+        `GitHub reports that the PR conflicts with \`${c.release_branch}\`: it runs no CI on it until the conflicts are resolved and pushed.`,
+        "",
+      ]
+    : [];
 
 /** `.volley/review.md`: what to review (the PR's diff at one head) and how to report. */
 function renderReviewMd(role: ReviewerRole, c: BriefCtx): string {
@@ -3073,6 +3243,7 @@ function renderRebaseMd(c: BriefCtx): string {
   return [
     "# Rebase",
     "",
+    ...conflictLines(c),
     `\`${c.release_branch}\` moved since \`${c.pr_branch}\` branched from it. This worktree starts at the PR head \`${c.head}\`.`,
     "",
     `    git fetch origin ${c.release_branch}`,
@@ -3095,6 +3266,7 @@ function renderMergeMd(c: BriefCtx): string {
   return [
     "# Merge",
     "",
+    ...conflictLines(c),
     `\`${c.release_branch}\` moved since \`${c.pr_branch}\` branched from it. This worktree starts at the PR head \`${c.head}\`.`,
     "",
     `    git fetch origin ${c.release_branch}`,
@@ -3118,6 +3290,11 @@ export interface PipelineDeps {
   exec: ExecFn;
   /** The exec for one task's worktrees when they live elsewhere (a remote host); default `exec`. */
   execFor?: (task: TaskId) => ExecFn;
+  /**
+   * True when a task's recorded worktree is gone (`volleyd cleanup`, a crash): its git checks run
+   * in the repo root instead. Default: never gone.
+   */
+  worktreeGone?: (task: TaskId, path: string) => boolean;
   /** $VOLLEYD_HOME: evidence goes to `<home>/waves/<wave>/evidence/`. */
   home: string;
   /** The wave's current record (re-read after every journal append). */
@@ -3164,6 +3341,8 @@ export interface PipelineDeps {
   mergeRetryMax?: () => number;
   /** The wave's `autopilot.incident_wait_max_s` (default: the config default). */
   incidentWaitMaxS?: () => number;
+  /** The wave's `ci_rate_limit_backoff_ms` (default: the config default). */
+  ciRateLimitBackoffMs?: () => number;
   /** GitHub's status page, cached (github-status.ts); absent: not read (unknown, never an incident). */
   statusPage?: () => Promise<GithubStatus>;
   /** The wave's `autopilot.delete_branch` (default: false). */
@@ -3206,20 +3385,25 @@ class IoTimeout extends Error {}
 
 /**
  * What the daemon checks before a pipeline role spawn (the implementer's spawn is admitted per
- * task by the scheduler): the kill switch, the wave running, T5's admission verdict and the
- * wave's spawn budget. Null: spawn now; a reason: hold it (the next tick asks again). Pure.
+ * task by the scheduler): the kill switch, the wave running, T5's admission verdict, the hard
+ * ceiling (`live`: the agents running or starting, no held slot) and the wave's spawn budget.
+ * Null: spawn now; a reason: hold it (the next tick asks again). Pure.
  */
 export function roleSpawnHold(o: {
   killSwitch: boolean;
   running: boolean;
   admission: number;
   reasons?: string[];
+  live?: number;
+  ceiling?: number;
   used: number;
   budget: number;
 }): string | null {
   if (o.killSwitch) return "kill switch engaged";
   if (!o.running) return "wave not running";
   if (o.admission < 1) return `admission closed: ${(o.reasons ?? []).join(", ") || "no capacity"}`;
+  if (o.live !== undefined && o.ceiling !== undefined && o.live >= o.ceiling)
+    return `hard ceiling reached (${o.live}/${o.ceiling})`;
   if (o.used >= o.budget) return `spawn budget exhausted (${o.used}/${o.budget})`;
   return null;
 }
@@ -3243,6 +3427,11 @@ export class PipelineDriver {
   private readonly alarmed = new Set<string>();
   /** When each `<task>/<head>` was first seen with no CI run at all. */
   private readonly noCiSince = new Map<string, number>();
+  /**
+   * GitHub's rate limit on the wave repo, kept per wave (this driver): no CI call before `retry_at`. `task`: the one
+   * whose probe met it, which carries the `github_rate_limited` alarm until a probe succeeds.
+   */
+  private readonly ciBackoff = new Map<string, { retry_at: number; task: TaskId }>();
   /** Checks whose I/O is running beside the queue, by `<task>/<what>[/<agent>]`; one per key. */
   private readonly inflight = new Set<string>();
   /** Every check until its result has been folded back in (what `settled` waits for). */
@@ -3451,7 +3640,7 @@ export class PipelineDriver {
       const holds =
         v !== null &&
         queue.some((e) => e.task === turn.task) &&
-        (v.p.merge_refusals ?? 0) <= turn.refusals &&
+        !((v.p.merge_refusals ?? 0) > turn.refusals && refusalEndsTurn(v.p)) &&
         v.stage !== "awaiting_decision" &&
         v.stage !== "blocked" &&
         turn.branch === branch &&
@@ -3586,6 +3775,11 @@ export class PipelineDriver {
     if (this.turn !== undefined)
       this.lock.release(this.turn.branch, `${this.wave}/${this.turn.task}`);
     this.turn = undefined;
+  }
+
+  /** Whether a blocked agent's red head is still being classified (its decision is to come). */
+  classifying(task: TaskId, agentId: string): boolean {
+    return this.inflight.has(`${task}/classify/blocked/${agentId}`);
   }
 
   /** Resolves once no check is running beside the queue (tests; a graceful stop). */
@@ -3723,7 +3917,9 @@ export class PipelineDriver {
           if (agent === undefined) break;
           // Rate-limit per agent: a new run of the role is checked at once.
           const key = `${task}/verify/${agent}`;
-          if (this.inflight.has(key) || (!eventDriven && !this.due(key))) break;
+          // Rate-limited: no CI call before retry_at, event-driven or not (a later tick verifies).
+          if (this.inflight.has(key) || this.ciBackedOff()) break;
+          if (!eventDriven && !this.due(key)) break;
           this.lastCheck.set(key, this.now());
           this.beside(task, key, { what: "verify", role: a.role, agent_id: agent }, () =>
             this.verify(task, a.role, agent, a.result),
@@ -3818,7 +4014,7 @@ export class PipelineDriver {
         case "check_moved_ci": {
           const v = this.view(task);
           const key = `${task}/moved_ci`;
-          if (v?.p.moved === undefined || this.inflight.has(key)) break;
+          if (v?.p.moved === undefined || this.inflight.has(key) || this.ciBackedOff()) break;
           if (!this.due(`${key}/${v.p.moved.to}`)) break;
           this.beside(task, key, { what: "moved_ci" }, () => this.movedCheck(v));
           break;
@@ -3851,6 +4047,66 @@ export class PipelineDriver {
     return progressed;
   }
 
+  /** The wave repo: the key of this wave's rate-limit backoff (another wave keeps its own). */
+  private repoKey(): string {
+    return this.deps.record().state?.repo ?? ".";
+  }
+
+  /**
+   * Where a head's runs are read: the supervisor's own exec in the wave's repo root (ghCwd; one `gh api
+   * …/actions/runs?head_sha=` GET, never sent to a paired machine); without a wave repo, the
+   * task's `gh run list --commit`.
+   */
+  private runsVia(): RunsVia | undefined {
+    const cwd = this.ghCwd();
+    return cwd !== undefined ? { exec: this.timed(this.deps.exec), cwd } : undefined;
+  }
+
+  /** GitHub rate-limited the wave repo's last CI read and its backoff has not passed. */
+  private ciBackedOff(): boolean {
+    const b = this.ciBackoff.get(this.repoKey());
+    return b !== undefined && this.now() < b.retry_at;
+  }
+
+  /**
+   * Fold a CI read into the rate-limit backoff: a rate-limited answer backs the repo off for
+   * max(`Retry-After`, `ci_rate_limit_backoff_ms`), journaling `github_rate_limited` once; a
+   * readable answer ends it and clears the alarm. Another unreadable answer changes nothing.
+   */
+  private async noteCi(
+    task: TaskId,
+    ci: { state: CiState; error?: string; rate_limited?: RateLimited },
+  ): Promise<void> {
+    const repo = this.repoKey();
+    const b = this.ciBackoff.get(repo);
+    if (ci.rate_limited !== undefined) {
+      const wait = Math.max(
+        ci.rate_limited.retry_after_ms ?? 0,
+        this.deps.ciRateLimitBackoffMs?.() ?? CONFIG_DEFAULTS.ci_rate_limit_backoff_ms,
+      );
+      const retryAt = this.now() + wait;
+      this.ciBackoff.set(repo, { retry_at: retryAt, task: b?.task ?? task });
+      if (b !== undefined) return;
+      await this.deps.journal({
+        type: "alarm_raised",
+        task,
+        data: {
+          alarm: "github_rate_limited",
+          retry_at: new Date(retryAt).toISOString(),
+          message: `GitHub rate-limited CI reads (${ci.error ?? "rate limit"}); no CI call before ${new Date(retryAt).toISOString()}`,
+        },
+      });
+      return;
+    }
+    if (ci.state === "unknown" || b === undefined) return;
+    this.ciBackoff.delete(repo);
+    await this.deps.journal({
+      type: "alarm_cleared",
+      task: b.task,
+      data: { alarm: "github_rate_limited", why: "a CI read succeeded" },
+    });
+  }
+
   /** Level-triggered checks run at most once per `ci_poll_ms`. */
   private due(key: string): boolean {
     const now = this.now();
@@ -3866,6 +4122,57 @@ export class PipelineDriver {
     return (r !== undefined ? p.runs[r]?.worktree : undefined) ?? p.runs.implementer?.worktree;
   }
 
+  /** The wave's repo root on this machine: where the pipeline's GitHub reads run. */
+  private ghCwd(): string | undefined {
+    const repo = this.deps.record().state?.repo;
+    return repo != null ? expandHome(repo) : undefined;
+  }
+
+  /** `--repo <slug>` (host-qualified off github.com) when GitHub's slug was read; else none. */
+  private repoArgs(): string[] {
+    const gh = this.deps.record().state?.github;
+    if (gh === undefined) return [];
+    const host = URL.canParse(gh.url) ? new URL(gh.url).host : "github.com";
+    return ["--repo", host === "github.com" ? gh.slug : `${host}/${gh.slug}`];
+  }
+
+  /**
+   * The exec for a task's GitHub reads: every `gh` argv runs on this machine from the repo root
+   * (ghCwd) with repoArgs, whatever `cwd` the caller passed — never in an agent's worktree, which
+   * cleanup may have removed (a missing cwd fails the spawn: ENOENT). Any other argv goes to
+   * `other` (default: the task's own exec). Without a repo root, everything goes to `other`
+   * with the caller's cwd: unreachable from a wave file (the schema requires `repo`).
+   * A `gh api` call gets no `--repo` (gh api rejects it; its endpoint names the repository).
+   */
+  private ghExec(task: TaskId, other: ExecFn = this.io(task)): ExecFn {
+    const root = this.ghCwd();
+    if (root === undefined) return other;
+    const local = this.timed(this.deps.exec);
+    return (argv, opts = {}) =>
+      argv[0] === "gh"
+        ? local(argv[1] === "api" ? argv : [...argv, ...this.repoArgs()], { ...opts, cwd: root })
+        : other(argv, opts);
+  }
+
+  /**
+   * Where a task's git checks run: the worktree at its PR head through the task's exec, or, once
+   * that worktree is gone (or none was recorded), the repo root on this machine with the PR head
+   * fetched there first (`refs/pull/<n>/head`, else its branch).
+   */
+  private gitAt(v: PipelineView): (GitAt & { exec: ExecFn }) | undefined {
+    const wt = this.headWorktree(v.p);
+    if (wt !== undefined && this.deps.worktreeGone?.(v.task, wt) !== true)
+      return { exec: this.io(v.task), cwd: wt };
+    const root = this.ghCwd();
+    if (root === undefined) return undefined;
+    const fetch = v.p.pr !== undefined ? `refs/pull/${v.p.pr.number}/head` : v.p.branch;
+    return {
+      exec: this.timed(this.deps.exec),
+      cwd: root,
+      ...(fetch !== undefined ? { fetch } : {}),
+    };
+  }
+
   /** Beside the queue: verify `role`'s run `agentId` (a moved PR: its branch head as it is). */
   private async verify(
     task: TaskId,
@@ -3878,13 +4185,17 @@ export class PipelineDriver {
     if (v === null || run?.agent_id !== agentId || run.worktree === undefined) return null;
     if (v.p.branch === undefined) return null;
     const since = run.adopt === true ? v.p.head : role === "rebase" ? run.start : undefined;
-    let report = await verifyArtifacts(this.io(task), {
+    const via = this.runsVia();
+    // Its git checks run in the run's worktree; its `gh` reads from the repo root (ghExec).
+    let report = await verifyArtifacts(this.ghExec(task), {
       cwd: run.worktree,
       branch: v.p.branch,
       release_branch: v.release_branch,
       ...(since !== undefined ? { since } : {}),
       ...(run.adopt === true ? { adopt: true } : {}),
+      ...(via !== undefined ? { runs_via: via } : {}),
     });
+    if (report.kind === "ok") await this.noteCi(task, report.ci);
     // A merge-mode update moves the branch forward: a head that does not descend from the step's
     // start was force-pushed (a rebase), which `branch_update: merge` forbids.
     if (
@@ -3915,11 +4226,20 @@ export class PipelineDriver {
         };
     }
     let waited: number | undefined;
-    if (report.kind === "ok" && report.ci.state === "none") {
+    // A conflicting PR gets no CI at all: its update step starts instead, with no clock.
+    // (An update step's own conflicting head is not updated again: it waits, and is asked about.)
+    if (
+      report.kind === "ok" &&
+      report.ci.state === "none" &&
+      (report.pr.mergeable !== "CONFLICTING" || role === "rebase")
+    ) {
       const key = `${task}/${report.head}`;
       const first = this.noCiSince.get(key) ?? this.now();
       this.noCiSince.set(key, first);
       waited = this.now() - first;
+    } else if (report.kind === "ok" && report.ci.state === "unknown") {
+      // Unreadable time is not no-CI time: a later `none` starts the clock over.
+      this.noCiSince.delete(`${task}/${report.head}`);
     }
     return {
       kind: "verified",
@@ -3943,8 +4263,8 @@ export class PipelineDriver {
   ): Promise<PipelineEvent | null> {
     const v = this.view(task);
     if (v === null) return null;
-    const exec = this.io(task);
-    const cwd = v.p.runs[a.role]?.worktree ?? this.headCwd(task);
+    const exec = this.ghExec(task);
+    const cwd = this.ghCwd();
     const base = { kind: "ci_classified" as const, role: a.role, agent_id: a.agent_id };
     const blocked = a.blocked !== undefined ? { blocked: a.blocked } : {};
     const unclassified = (): PipelineEvent => ({
@@ -3954,8 +4274,8 @@ export class PipelineDriver {
       at: this.now(),
       ...blocked,
     });
-    // A blocked agent is asked about whatever happens here: no worktree to read from, or a failed
-    // read, is the plain question. A verified red head with no worktree is asked about nothing on
+    // A blocked agent is asked about whatever happens here: no repo to read from, or a failed
+    // read, is the plain question. A verified red head with no repo is asked about nothing on
     // this pass: its run stays retired-done and unaccepted, so advance re-verifies it (a retry).
     if (cwd === undefined) return a.blocked !== undefined ? unclassified() : null;
     if (a.blocked !== undefined)
@@ -3971,11 +4291,23 @@ export class PipelineDriver {
     given: OkReport | null,
     blocked: { blocked?: BlockedStatus },
   ): Promise<PipelineEvent> {
+    const none = (): PipelineEvent => ({
+      ...base,
+      report: null,
+      result: null,
+      at: this.now(),
+      ...blocked,
+    });
+    // Rate-limited: no CI call before retry_at; the head is re-verified, then classified, after it.
+    if (this.ciBackedOff()) return none();
     const report = given ?? (await this.blockedHead(exec, cwd, v));
-    if (report === null || report.ci.state !== "red")
-      return { ...base, report: null, result: null, at: this.now(), ...blocked };
+    if (report === null || report.ci.state !== "red") return none();
     const files = await prFiles(exec, cwd, report.pr.number);
     const release = await probeReleaseCi(exec, { cwd, release_branch: v.release_branch });
+    await this.noteCi(v.task, release);
+    // An unreadable release branch is no evidence either way: nothing is classified on it (the
+    // head is re-verified and classified again later, like an infra hold's re-check).
+    if (release.state === "unknown") return none();
     const status = (await this.deps.statusPage?.()) ?? STATUS_UNKNOWN;
     const result = classify({
       failing_tests: report.ci.failing_tests ?? [],
@@ -4019,7 +4351,8 @@ export class PipelineDriver {
       pr.headRefOid === ""
     )
       return null;
-    const ci = await redHeadCi(exec, cwd, pr.headRefOid);
+    const ci = await redHeadCi(exec, cwd, pr.headRefOid, this.runsVia());
+    await this.noteCi(v.task, ci);
     return {
       kind: "ok",
       head: pr.headRefOid,
@@ -4037,13 +4370,17 @@ export class PipelineDriver {
     const { p } = v;
     const io = this.io(v.task);
     const head = p.head as string;
-    const cwd = this.headWorktree(p);
-    if (cwd === undefined) throw new Error("no worktree at the PR head");
+    const at = this.gitAt(v);
+    if (at === undefined) throw new Error("no worktree or repo root at the PR head");
     if (p.pr !== undefined) {
-      const r = await io(
-        ["gh", "pr", "view", String(p.pr.number), "--json", "headRefOid,state,baseRefName"],
-        { cwd },
-      );
+      const r = await this.ghExec(v.task)([
+        "gh",
+        "pr",
+        "view",
+        String(p.pr.number),
+        "--json",
+        "headRefOid,state,baseRefName",
+      ]);
       const pr = r.code === 0 ? parsePrView(r.stdout) : null;
       if (pr === null) throw new Error(`gh pr view ${p.pr.number} failed: ${r.stderr.trim()}`);
       if (typeof pr.headRefOid === "string" && pr.headRefOid !== head)
@@ -4054,16 +4391,17 @@ export class PipelineDriver {
           `PR #${p.pr.number} targets ${String(pr.baseRefName)}, not ${v.release_branch}`,
         );
     }
-    const check = await checkRebase(io, {
-      cwd,
-      head,
-      release_branch: v.release_branch,
-    });
+    const { exec: git, ...where } = at;
+    const check = await checkRebase(git, { ...where, head, release_branch: v.release_branch });
     const diffstats: Record<string, string> = {};
     if (check.behind === 0) {
       for (const f of p.fixups) {
         if (f.from === undefined || f.worktree === undefined) continue;
-        const r = await io(["git", "-C", f.worktree, "diff", "--stat", f.from, f.to]);
+        // Its own worktree while it is there; else where the gate's checks ran (head fetched).
+        const r =
+          this.deps.worktreeGone?.(v.task, f.worktree) === true
+            ? await git(["git", "-C", where.cwd, "diff", "--stat", f.from, f.to])
+            : await io(["git", "-C", f.worktree, "diff", "--stat", f.from, f.to]);
         // trimEnd only: the first line's leading space is part of git's column alignment.
         if (r.code === 0) diffstats[`${f.from}..${f.to}`] = r.stdout.replace(/^\n+/, "").trimEnd();
       }
@@ -4075,23 +4413,19 @@ export class PipelineDriver {
   private async mergeCheck(v: PipelineView): Promise<PipelineEvent | null> {
     const pr = v.p.pr;
     if (pr === undefined) return null;
-    const cwd = this.headWorktree(v.p);
-    const r = await this.io(v.task)(
-      [
-        "gh",
-        "pr",
-        "view",
-        String(pr.number),
-        "--json",
-        "state,mergedAt,mergeCommit,baseRefName,headRefOid",
-      ],
-      cwd !== undefined ? { cwd } : {},
-    );
+    const r = await this.ghExec(v.task)([
+      "gh",
+      "pr",
+      "view",
+      String(pr.number),
+      "--json",
+      "state,mergedAt,mergeCommit,baseRefName,headRefOid",
+    ]);
     const view = r.code === 0 ? parsePrView(r.stdout) : null;
     if (view === null) return null;
     const merged = view.headRefOid;
     if (view.state === "MERGED" && typeof merged === "string" && merged !== v.p.head)
-      return { kind: "merge_checked", view, merged_ci: await this.ciOf(v.task, cwd, merged) };
+      return { kind: "merge_checked", view, merged_ci: await this.ciOf(v.task, merged) };
     return { kind: "merge_checked", view };
   }
 
@@ -4139,11 +4473,14 @@ export class PipelineDriver {
     const key = `${task}/merge_nudge`;
     if (this.inflight.has(key)) return;
     this.inflight.add(key);
-    const cwd = this.headWorktree(v.p);
-    const p: Promise<void> = this.io(task)(
-      ["gh", "pr", "view", String(pr.number), "--json", "files"],
-      cwd !== undefined ? { cwd } : {},
-    )
+    const p: Promise<void> = this.ghExec(task)([
+      "gh",
+      "pr",
+      "view",
+      String(pr.number),
+      "--json",
+      "files",
+    ])
       .then((r) => {
         const files = r.code === 0 ? parsePrFiles(r.stdout) : null;
         if (files === null)
@@ -4241,11 +4578,13 @@ export class PipelineDriver {
   /** Beside the queue: is the closed PR's head on the release branch anyway? */
   private async landedCheck(v: PipelineView): Promise<PipelineEvent | null> {
     const { pr, head } = v.p;
-    const cwd = this.headWorktree(v.p);
     if (pr === undefined || head === undefined) return null;
-    if (cwd === undefined) throw new Error("no worktree to check the closed PR's head from");
-    const f = await probeLanded(this.io(v.task), {
-      cwd,
+    const at = this.gitAt(v);
+    if (at === undefined)
+      throw new Error("no worktree or repo root to check the closed PR's head from");
+    const { exec: git, ...where } = at;
+    const f = await probeLanded(git, {
+      ...where,
       head,
       release_branch: v.release_branch,
       pr: pr.number,
@@ -4255,7 +4594,7 @@ export class PipelineDriver {
       kind: "landed_checked",
       head,
       landed: l,
-      ...(l !== null && l.sha !== head ? { merged_ci: await this.ciOf(v.task, cwd, l.sha) } : {}),
+      ...(l !== null && l.sha !== head ? { merged_ci: await this.ciOf(v.task, l.sha) } : {}),
     };
   }
 
@@ -4263,11 +4602,14 @@ export class PipelineDriver {
   private async headCheck(v: PipelineView): Promise<PipelineEvent | null> {
     const pr = v.p.pr;
     if (pr === undefined) return null;
-    const cwd = this.headWorktree(v.p);
-    const r = await this.io(v.task)(
-      ["gh", "pr", "view", String(pr.number), "--json", "headRefOid,state"],
-      cwd !== undefined ? { cwd } : {},
-    );
+    const r = await this.ghExec(v.task)([
+      "gh",
+      "pr",
+      "view",
+      String(pr.number),
+      "--json",
+      "headRefOid,state",
+    ]);
     const view = r.code === 0 ? parsePrView(r.stdout) : null;
     if (view?.state !== "OPEN" || typeof view.headRefOid !== "string") return null;
     return { kind: "pr_head", head: view.headRefOid, expected: v.p.head as string };
@@ -4276,24 +4618,28 @@ export class PipelineDriver {
   /** Beside the queue: CI on a moved head, its failing tests, and the diff from the gated head. */
   private async movedCheck(v: PipelineView): Promise<PipelineEvent | null> {
     const { moved, pr, branch } = v.p;
-    const cwd = this.headWorktree(v.p);
     if (moved === undefined || pr === undefined) return null;
-    if (branch === undefined || cwd === undefined)
-      throw new Error("no PR branch / worktree to check the moved head from");
-    const facts = await probeMovedHead(this.io(v.task), {
-      cwd,
+    const at = this.gitAt(v);
+    if (branch === undefined || at === undefined)
+      throw new Error("no PR branch / worktree or repo root to check the moved head from");
+    const { exec: git, ...where } = at;
+    const via = this.runsVia();
+    const facts = await probeMovedHead(this.ghExec(v.task, git), {
+      ...where,
       branch,
       from: moved.from,
       to: moved.to,
       release_branch: v.release_branch,
+      ...(via !== undefined ? { runs_via: via } : {}),
     });
+    await this.noteCi(v.task, facts.ci);
     const key = `${v.task}/${moved.to}`;
     let waited = 0;
     if (facts.ci.state === "none") {
       const first = this.noCiSince.get(key) ?? this.now();
       this.noCiSince.set(key, first);
       waited = this.now() - first;
-    }
+    } else if (facts.ci.state === "unknown") this.noCiSince.delete(key);
     return {
       kind: "moved_ci",
       to: moved.to,
@@ -4304,19 +4650,21 @@ export class PipelineDriver {
     };
   }
 
-  /** CI on a merged commit other than the gated head; `unknown` when it cannot be read. */
-  async ciOf(task: TaskId, cwd: string | undefined, sha: string): Promise<MergedCi> {
+  /**
+   * CI on a merged commit other than the gated head, read from the repo root; `unknown` when it
+   * cannot be read (or there is no repo root).
+   */
+  async ciOf(task: TaskId, sha: string): Promise<MergedCi> {
+    if (this.ciBackedOff()) return "unknown";
+    const cwd = this.ghCwd();
+    if (cwd === undefined) return "unknown";
     try {
-      return await ciStateOf(this.io(task), cwd ?? ".", sha);
+      const ci = await ciReport(this.ghExec(task), cwd, sha, this.runsVia());
+      await this.noteCi(task, ci);
+      return ci.state;
     } catch {
       return "unknown";
     }
-  }
-
-  /** The worktree the task's PR head is checked out in (pipeline git / gh calls run there). */
-  headCwd(task: TaskId): string | undefined {
-    const v = this.view(task);
-    return v === null ? undefined : this.headWorktree(v.p);
   }
 
   /**
@@ -4331,11 +4679,12 @@ export class PipelineDriver {
       return { ok: false, error: `task '${task}' is ${v.stage}` };
     if (pr === undefined || head === undefined)
       return { ok: false, error: `task '${task}' has no verified PR head yet` };
-    const cwd = this.headWorktree(v.p);
-    if (cwd === undefined)
-      return { ok: false, error: `task '${task}' has no worktree at its head` };
-    const r = await verifyOperatorMerge(this.io(task), {
-      cwd,
+    const at = this.gitAt(v);
+    if (at === undefined)
+      return { ok: false, error: `task '${task}' has no worktree or repo root at its head` };
+    const { exec: git, ...where } = at;
+    const r = await verifyOperatorMerge(git, {
+      ...where,
       head,
       sha,
       release_branch: v.release_branch,
@@ -4393,7 +4742,7 @@ export class PipelineDriver {
           head: token.head,
           ...(by !== undefined ? { by } : {}),
         }
-      : { kind: "merge_refused", stderr: r.stderr, head: token.head };
+      : { kind: "merge_refused", stderr: r.stderr, head: token.head, reason: r.reason };
   }
 
   /**

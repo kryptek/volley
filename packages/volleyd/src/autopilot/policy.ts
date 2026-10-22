@@ -1,4 +1,4 @@
-import type { DecisionKind, DecisionRecord } from "../decisions";
+import { type DecisionKind, type DecisionRecord, raiseBy } from "../decisions";
 import type { AutopilotConfig, TaskState } from "../types";
 import { budgetKey, markerOf } from "./budgets";
 import type { FixerVerdict } from "./remediation";
@@ -30,7 +30,8 @@ export type CountedBudget =
   | "respawn_max"
   | "rereview_max"
   | "question_max"
-  | "ci_fixup_max";
+  | "ci_fixup_max"
+  | "account_move_max";
 
 /** What a counted budget is per: the task, one role of it, or one run (`<task>/<role>/<attempt>`). */
 export type BudgetScope = "task" | "task_role" | "run";
@@ -108,8 +109,8 @@ const retriesStopped = (d: Facts, ctx: PolicyContext): boolean =>
 /** `raise by <n>` as the decision offers it, or null. */
 function offeredRaise(d: Facts): { answer: string; n: number } | null {
   for (const o of d.options ?? []) {
-    const m = /^raise by (\d+)$/.exec(o.trim().toLowerCase());
-    if (m !== null) return { answer: o, n: Number(m[1]) };
+    const n = raiseBy(o);
+    if (n !== null) return { answer: o, n };
   }
   return null;
 }
@@ -248,6 +249,25 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     rationale: "nothing is lost by re-placing a queued task",
   },
   {
+    policy: "agent_account_limit/move",
+    kinds: ["agent_account_limit"],
+    condition: "suggested !== null",
+    when: (d) => typeof d.suggested === "string" && d.suggested !== "",
+    answer: (d) => `move ${String(d.agent_id)} to ${String(d.suggested)}`,
+    answer_label: "move <agent> to <suggested>",
+    budget: { name: "account_move_max", per: "task_role" },
+    rationale:
+      "the account is at the warn level and another login on the machine has room; the move restarts the session with a resume note",
+  },
+  {
+    policy: "agent_account_limit/wait",
+    kinds: ["agent_account_limit"],
+    condition: "suggested === null",
+    answer: "not now",
+    rationale:
+      "no other login on the machine has room; the agent finishes where it is and the window resets",
+  },
+  {
     policy: "account_limit/move",
     kinds: ["account_limit"],
     condition: "suggested !== null",
@@ -261,7 +281,8 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     kinds: ["account_limit"],
     condition: "suggested === null",
     answer: "not now",
-    rationale: "no account has headroom: wait for the window to reset",
+    rationale:
+      "no account on the machine has headroom; new agents take the one with the most room; wait for the reset",
   },
   {
     policy: "pr_head_moved/accept",

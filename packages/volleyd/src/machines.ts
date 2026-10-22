@@ -1,3 +1,4 @@
+import type { ProbeLogin } from "./claude/usage";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { validator } from "./schemas";
 
@@ -51,6 +52,9 @@ export interface MachineRecord {
     claude: "signed_in" | "not_signed_in" | "missing" | "unknown";
     trust: "ok" | "missing" | "unknown";
     claude_plan?: string | null;
+    /** The default profile's identity (claude/identity.ts), only while it is signed in. */
+    claude_email?: string;
+    claude_org?: string;
   };
   repo?: {
     path: string;
@@ -60,6 +64,8 @@ export interface MachineRecord {
     fetched_at?: string | null;
   };
   checks?: MachineCheck[];
+  /** Each login's usage probe reading (SPEC §4.6.12): numbers and states only. */
+  claude_logins?: ProbeLogin[];
   doctor_at?: string;
   last_seen: string;
 }
@@ -75,6 +81,14 @@ export const statusOf = (r: MachineRecord): MachineStatus => (r.tunnel === "down
  * machine itself nor the supervisor (the broker ACL already allows only those two).
  */
 export function parseMachine(topic: string, raw: string): MachineRecord | null {
+  return parseMachineFrom(topic, raw)?.record ?? null;
+}
+
+/** As `parseMachine`, with who published the record (the machine itself, or `volleyd`). */
+export function parseMachineFrom(
+  topic: string,
+  raw: string,
+): { record: MachineRecord; by: string } | null {
   if (raw === "") return null;
   let env: unknown;
   try {
@@ -87,7 +101,7 @@ export function parseMachine(topic: string, raw: string): MachineRecord | null {
   const name = topic.split("/")[3];
   if (e.payload.name !== name) return null;
   if (e.agent_id !== name && e.agent_id !== "volleyd") return null;
-  return e.payload;
+  return { record: e.payload, by: e.agent_id };
 }
 
 /** Why a machine is down, as a task's why_waiting reads it (`limitMs`: the heartbeat timeout). */
@@ -117,6 +131,26 @@ interface Entry {
   downAt?: number;
 }
 
+/**
+ * `incoming`, with `prior`'s doctor fields when `prior` holds a newer doctor run. A run's
+ * `doctor_at` is when it started, so a heartbeat carrying a run that began before a Repair never
+ * replaces the Repair's fold, however late that run ended.
+ */
+function keepNewerDoctor(incoming: MachineRecord, prior: MachineRecord | undefined): MachineRecord {
+  if (prior?.doctor_at === undefined || incoming.doctor_at === undefined) return incoming;
+  // As instants: the schema allows any date-time form (offsets, fraction lengths).
+  if (!(Date.parse(incoming.doctor_at) < Date.parse(prior.doctor_at))) return incoming;
+  const { versions, auth, repo, checks, doctor_at } = prior;
+  return {
+    ...incoming,
+    ...(versions !== undefined ? { versions } : {}),
+    ...(auth !== undefined ? { auth } : {}),
+    ...(repo !== undefined ? { repo } : {}),
+    ...(checks !== undefined ? { checks } : {}),
+    doctor_at,
+  };
+}
+
 export class MachineHealth {
   private readonly machines = new Map<string, Entry>();
   constructor(private readonly deps: MachineHealthDeps) {}
@@ -124,11 +158,16 @@ export class MachineHealth {
   /**
    * Fold in a record from the broker. A down record after an up one keeps the last heartbeat's
    * values: the machine's LWT was built when it connected, so its `last_seen`, `load` and
-   * `agents` may be hours old.
+   * `agents` may be hours old. An up record whose doctor run is older than the one held (a
+   * supervisor-run doctor folded in before the box's service re-ran its own) keeps the newer
+   * run's fields, and says so (`true`), for the supervisor to re-assert them. `heard: false`
+   * folds a record the supervisor made itself (a Repair's fold, or its echo): it is no heartbeat,
+   * so the machine's down timer keeps running, and it never brings a down machine back up.
    */
-  observe(incoming: MachineRecord): void {
+  observe(incoming: MachineRecord, opts: { heard?: boolean } = {}): boolean {
     const prior = this.machines.get(incoming.name);
     const status = statusOf(incoming);
+    if (opts.heard === false && status === "up" && prior?.status === "down") return false;
     const record: MachineRecord =
       status === "down" && prior !== undefined
         ? {
@@ -140,8 +179,9 @@ export class MachineHealth {
                 ? incoming.last_seen
                 : prior.record.last_seen,
           }
-        : incoming;
-    const heardAt = status === "up" ? this.deps.now() : (prior?.heardAt ?? this.deps.now());
+        : keepNewerDoctor(incoming, prior?.record);
+    const heard = status === "up" && opts.heard !== false;
+    const heardAt = heard || prior === undefined ? this.deps.now() : prior.heardAt;
     const downAt =
       status === "up" ? undefined : prior?.status === "down" ? prior.downAt : this.deps.now();
     this.machines.set(record.name, {
@@ -151,6 +191,7 @@ export class MachineHealth {
       ...(downAt !== undefined ? { downAt } : {}),
     });
     if (prior?.status !== status) this.deps.onChange(record.name, status, record);
+    return status === "up" && record.doctor_at !== incoming.doctor_at;
   }
 
   /**
@@ -216,6 +257,7 @@ export interface DoctorReport {
   repo?: MachineRecord["repo"];
   memory?: MachineRecord["memory"];
   disk?: MachineRecord["disk"];
+  claude_logins?: ProbeLogin[];
   doctor_at: string;
 }
 
@@ -247,6 +289,7 @@ export function doctorFields(r: DoctorReport): Partial<MachineRecord> {
     ...pick("repo"),
     ...pick("memory"),
     ...pick("disk"),
+    ...(Array.isArray(r.claude_logins) ? { claude_logins: r.claude_logins.slice(0, 16) } : {}),
     doctor_at: r.doctor_at,
   };
 }

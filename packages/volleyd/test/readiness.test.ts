@@ -9,6 +9,7 @@ import {
   type ReadinessInput,
   machineView,
   parsePathProbe,
+  peerMaxAgents,
   readiness,
   readinessKey,
   readinessTopic,
@@ -275,6 +276,27 @@ describe("readiness (the supervisor's verdict on one machine)", () => {
   });
 });
 
+describe("peerMaxAgents: a peer's cap (#324)", () => {
+  it("hosts.<name>.max_agents wins; else derived from the record's size; else 4", () => {
+    const big = { cores: 32, memory: { total_mb: 61_440, available_pct: 80 } };
+    expect(peerMaxAgents(6, big)).toBe(6);
+    expect(peerMaxAgents(undefined, big)).toBe(10);
+    expect(
+      peerMaxAgents(undefined, { cores: 10, memory: { total_mb: 32_768, available_pct: 50 } }),
+    ).toBe(3);
+    // The bounds: never under 2, never over 16.
+    expect(
+      peerMaxAgents(undefined, { cores: 2, memory: { total_mb: 4096, available_pct: 50 } }),
+    ).toBe(2);
+    expect(
+      peerMaxAgents(undefined, { cores: 128, memory: { total_mb: 524_288, available_pct: 50 } }),
+    ).toBe(16);
+    // No memory figure (a record from before the Fleet), or no record: 4.
+    expect(peerMaxAgents(undefined, { cores: 32 })).toBe(4);
+    expect(peerMaxAgents(undefined, undefined)).toBe(4);
+  });
+});
+
 describe("local_agents on the supervisor's own verdict (SPEC §4.6.15)", () => {
   const NOW = Date.parse("2026-10-19T09:00:00.000Z");
   const OWN = {
@@ -288,7 +310,7 @@ describe("local_agents on the supervisor's own verdict (SPEC §4.6.15)", () => {
   const peer = (over: Partial<ReadinessInput> = {}) => {
     const i = input({ filter: OWN, ...over });
     const v = readiness(i);
-    return machineView(i, v, v.usage.five_hour_pct);
+    return machineView(i, v, v.usage);
   };
   const DOWN = { record: record({ tunnel: "down", reason: "heartbeat_timeout" as const }) };
   const own = (peers: ReturnType<typeof peer>[], filter: ReadinessInput["filter"] = OWN) =>
@@ -381,7 +403,7 @@ describe("requirements.sharing is the supervisor's sharing.yaml", () => {
 
 describe("parsePathProbe (`command -v claude bun` on the box)", () => {
   it("maps each resolved path to its tool, a missing one to false", () => {
-    expect(parsePathProbe("/home/dev/.bun/bin/bun\n")).toEqual({ claude: false, bun: true });
+    expect(parsePathProbe("/path/to/home/.bun/bin/bun\n")).toEqual({ claude: false, bun: true });
     expect(parsePathProbe("/usr/local/bin/claude\n/usr/bin/bun\n")).toEqual({
       claude: true,
       bun: true,

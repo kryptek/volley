@@ -1,6 +1,7 @@
 import { randomBytes, randomInt, scryptSync, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { derivedMaxAgents } from "volley-cli/peer/machine";
 import { isValidAgentId } from "volley-mcp/topics";
 import { listAccounts, replyKey, seal, volleyAuth } from "./accounts";
 import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "./config-defaults";
@@ -19,10 +20,11 @@ import type { NewEvent, RemoteHostConfig } from "./types";
  *     request's `reply_key` (every account may read the answers). Only a salted scrypt
  *     hash of it is kept, in `$VOLLEYD_HOME/peer-codes.json` (mode 0600), so it survives a restart.
  *   - `peer_join {code, name, target, volley_dir, repo?, worktree_root?, port?, os?, cores?,
- *     reply_key}` → burns the code, creates a `peer` account named `name` (`volley auth add`),
- *     adds `hosts.<name>` with `tunnel.supervise: false` (the machine keeps its own tunnel as a
- *     service), records the name in `$VOLLEYD_HOME/peers.json`, and answers with the broker's
- *     address and the sealed `{username, password}`.
+ *     memory_total_mb?, reply_key}` → burns the code, creates a `peer` account named `name`
+ *     (`volley auth add`), adds `hosts.<name>` with `tunnel.supervise: false` (the machine keeps
+ *     its own tunnel as a service) and `max_agents` derived from `cores` and `memory_total_mb`
+ *     (`derivedMaxAgents`; unknown: unset), records the name in `$VOLLEYD_HOME/peers.json`, and
+ *     answers with the broker's address and the sealed `{username, password}`.
  *   - `peer_invite {reply_key, ttl_s?, for}` → a code bound to the paired machine `for`: it
  *     re-pairs that machine only. `peer_join {..., name: <for>, replace: true}` with it rotates the
  *     peer account's password and rewrites `hosts.<name>` (the join's fields; a hand-set
@@ -125,6 +127,9 @@ export interface PeerDeps {
 
 type Fields = Record<string, unknown>;
 const refuse = (error: string): PeerReply => ({ ok: false, error });
+/** A finite number field, else undefined. */
+const num = (x: unknown): number | undefined =>
+  typeof x === "number" && Number.isFinite(x) ? x : undefined;
 const isAbsolute = (p: unknown): p is string =>
   typeof p === "string" && p.startsWith("/") && !/[\n\r]/.test(p) && p.length <= 1024;
 
@@ -242,12 +247,19 @@ export class PeerService {
       if (!existing) await volleyAuth(this.deps.exec, ["revoke", name]);
       return refuse(`volley auth ${existing ? "rotate" : "add"} printed no credentials`);
     }
+    // Sized from the machine (SPEC §4.6.15); a max_agents already configured (a re-pairing's
+    // hand-set value) stays, and an unknown size leaves it unset (4).
+    const sized =
+      this.deps.hosts()[name]?.max_agents === undefined
+        ? derivedMaxAgents(num(p.cores), num(p.memory_total_mb))
+        : null;
     const host: RemoteHostConfig = {
       target: p.target,
       ...(p.repo !== undefined ? { repo: p.repo as string } : {}),
       ...(p.worktree_root !== undefined ? { worktree_root: p.worktree_root as string } : {}),
       volley_dir: p.volley_dir,
       tunnel: { remote_port: port, supervise: false },
+      ...(sized !== null ? { max_agents: sized } : {}),
     };
     const applied = this.deps.setHost(name, host, by);
     if (!applied.applied) {
@@ -268,6 +280,8 @@ export class PeerService {
         target: p.target,
         ...(typeof p.os === "string" ? { os: p.os } : {}),
         ...(typeof p.cores === "number" ? { cores: p.cores } : {}),
+        ...(typeof p.memory_total_mb === "number" ? { memory_total_mb: p.memory_total_mb } : {}),
+        ...(sized !== null ? { max_agents: sized } : {}),
         ...(replacing ? { replaced: true } : {}),
       },
     });
@@ -434,8 +448,16 @@ export class PeerService {
     return { name, fix, clone, host, ...(url !== null ? { origin: url } : {}) };
   }
 
-  /** Run a checked `peer_doctor` on its box: the report (and the plan without `fix`), or why not. */
-  async runDoctor({ name, fix, host, origin }: DoctorRun): Promise<PeerReply> {
+  /**
+   * Run a checked `peer_doctor` on its box: the report (and the plan without `fix`), or why not.
+   * `report` is the run's own, for the supervisor to fold into the box's machine record.
+   */
+  async runDoctor({
+    name,
+    fix,
+    host,
+    origin,
+  }: DoctorRun): Promise<PeerReply & { report?: DoctorReport }> {
     let report: DoctorReport;
     try {
       report = await host.runDoctor({ fix, ...(origin !== undefined ? { clone: origin } : {}) });
@@ -445,6 +467,7 @@ export class PeerService {
     return {
       ok: true,
       result: { name, fix, ...report, ...(fix ? {} : { plan: doctorPlan(report) }) },
+      report,
     };
   }
 

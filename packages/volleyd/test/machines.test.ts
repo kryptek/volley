@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
+import { buildTopic } from "volley-mcp/topics";
 import { authOpsTopic, authReplyTopic } from "../src/accounts";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
 import { ControlClient } from "../src/control";
@@ -135,6 +136,81 @@ describe("MachineHealth", () => {
         last_seen: "2026-10-19T12:00:00.000Z",
       }),
     );
+  });
+
+  it("a heartbeat carrying an older doctor run than the record's keeps the newer doctor fields (a Repair's fold)", () => {
+    const stale: Partial<MachineRecord> = {
+      versions: { peer: "0.4.0", volley: "0.4.0", bun: "1.3.0", git: "2.47.0" },
+      auth: { gh: "ok", claude: "signed_in", trust: "ok" },
+      checks: [{ id: "volley.installed", ok: false, severity: "block", detail: "stale" }],
+      doctor_at: "2026-10-19T08:00:00.000Z",
+    };
+    const fresh: Partial<MachineRecord> = {
+      versions: { peer: "0.5.0", volley: "0.5.0", bun: "1.3.0", git: "2.47.0" },
+      auth: { gh: "ok", claude: "signed_in", trust: "ok" },
+      checks: [{ id: "volley.installed", ok: true, severity: "block", detail: "ok" }],
+      doctor_at: "2026-10-19T09:00:05.000Z",
+    };
+    // The supervisor folded a Repair's report; the box's next beat still carries its old run.
+    health.observe(record(fresh));
+    health.observe(record({ ...stale, load: [2, 1, 0.5], last_seen: "2026-10-19T09:00:30.000Z" }));
+    expect(health.record("box")).toEqual(
+      record({ ...fresh, load: [2, 1, 0.5], last_seen: "2026-10-19T09:00:30.000Z" }),
+    );
+    // The service's own newer run replaces it.
+    const later = { ...stale, doctor_at: "2026-10-19T09:01:00.000Z" };
+    health.observe(record(later));
+    expect(health.record("box")).toEqual(record(later));
+  });
+
+  it("says when it kept the newer run's doctor fields over an incoming record's older ones", () => {
+    const newer = { checks: [], doctor_at: "2026-10-19T09:00:05.000Z" };
+    expect(health.observe(record(newer))).toBe(false);
+    expect(health.observe(record({ checks: [], doctor_at: "2026-10-19T08:00:00.000Z" }))).toBe(
+      true,
+    );
+    expect(health.observe(record({ checks: [], doctor_at: "2026-10-19T09:01:00.000Z" }))).toBe(
+      false,
+    );
+  });
+
+  it("a record the supervisor republished itself is not a heartbeat: the box still goes down", () => {
+    health.observe(record({ doctor_at: "2026-10-19T08:00:00.000Z" }));
+    now += DAEMON_DEFAULTS.machine_down_after_ms - 1;
+    // A Repair's fold (or its echo through the broker) a moment before the timeout.
+    health.observe(record({ doctor_at: "2026-10-19T09:00:05.000Z" }), { heard: false });
+    expect(health.record("box")?.doctor_at).toBe("2026-10-19T09:00:05.000Z");
+    now += 1;
+    expect(health.sweep().map((r) => r.reason)).toEqual(["heartbeat_timeout"]);
+  });
+
+  it("a record the supervisor republished itself never brings a down box back up", () => {
+    health.observe(record());
+    now += DAEMON_DEFAULTS.machine_down_after_ms;
+    health.sweep();
+    const since = now;
+    // The echo of a fold published just before the sweep marked the box down.
+    now += 10;
+    expect(
+      health.observe(record({ doctor_at: "2026-10-19T09:00:05.000Z" }), { heard: false }),
+    ).toBe(false);
+    expect(health.status("box")).toBe("down");
+    expect(health.downSince("box")).toBe(since);
+    expect(health.record("box")?.reason).toBe("heartbeat_timeout");
+    expect(changes.map(([, s]) => s)).toEqual(["up", "down"]);
+  });
+
+  it("compares doctor runs by instant, not by how the timestamp is written", () => {
+    const checks = (detail: string) => [
+      { id: "volley.installed", ok: true, severity: "block" as const, detail },
+    ];
+    // 09:30Z, written with an offset: newer than 09:00Z, though it sorts lower as a string.
+    health.observe(record({ checks: checks("old"), doctor_at: "2026-10-19T09:00:00.000Z" }));
+    health.observe(record({ checks: checks("new"), doctor_at: "2026-10-19T08:30:00-01:00" }));
+    expect(health.record("box")?.checks?.[0]?.detail).toBe("new");
+    // 09:20Z: older than 09:30Z, though it sorts higher as a string.
+    health.observe(record({ checks: checks("older"), doctor_at: "2026-10-19T09:20:00Z" }));
+    expect(health.record("box")?.checks?.[0]?.detail).toBe("new");
   });
 
   it("says why with its own heartbeat timeout", () => {
@@ -589,6 +665,9 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
     await submit("w1");
     await tick();
     expect(box?.launches).toHaveLength(1);
+    // The box's session never registers: its spawn settles, supervised, once spawn_timeout_s
+    // passes. Advanced at once, not a second a tick inside the broker wait.
+    await tick(CONFIG_DEFAULTS.spawn_timeout_s * 1000);
     await eventually(async () => {
       await tick();
       const v = await verdict("control");
@@ -766,6 +845,59 @@ describe("the supervisor's own record and readiness verdicts (SPEC §4.6.15)", (
       sharing: { skills: "own", mcp: "own", "CLAUDE.md": "linked", "settings.json": "copy" },
     });
     expect(schemaErrors("readiness.schema.json", v)).toEqual([]);
+  });
+
+  it("its usage is its best login's 5-hour window: work at 12% beats primary at 95%", async () => {
+    mkdirSync(join(claudeRoot, "work"), { recursive: true });
+    writeFileSync(
+      join(claudeRoot, "accounts.json"),
+      JSON.stringify({
+        version: 1,
+        accounts: [
+          {
+            id: "work",
+            label: "work",
+            machine: "local",
+            created: "2026-10-18T12:00:00.000Z",
+            signed_in_at: "2026-10-18T12:00:00.000Z",
+          },
+        ],
+      }),
+    );
+    const resets = "2099-01-01T00:00:00.000Z";
+    const sample = (agent: string, account: string, pct: number) =>
+      peer.publish(
+        buildTopic(NS, agent, "usage"),
+        JSON.stringify(
+          buildEnvelope({
+            agentId: agent,
+            parentId: null,
+            channel: "usage",
+            type: "usage",
+            payload: {
+              account,
+              model: "claude-opus-5-5",
+              context_window: { used_percentage: 20, used: 200_000, size: 1_000_000 },
+              rate_limits: {
+                five_hour: { pct, resets_at: resets },
+                weekly: { pct: 30, resets_at: resets },
+              },
+              captured_at: new Date(clock.now()).toISOString(),
+            },
+          }),
+        ),
+        { qos: 1, retain: true },
+      );
+    await sample("a-hot", "primary", 95);
+    await sample("a-cool", "work", 12);
+    await eventually(async () => {
+      await tick();
+      const u = (await verdict(LOCAL))?.payload.usage as { five_hour_pct?: number } | undefined;
+      return u?.five_hour_pct === 12;
+    });
+    const v = (await verdict(LOCAL)) as Verdict;
+    expect(v.payload.usage).toEqual({ account: "work", five_hour_pct: 12 });
+    expect(v.payload.eligible).toBe(true);
   });
 
   it("a peer's record change re-publishes its verdict; ready flipping journals once", async () => {

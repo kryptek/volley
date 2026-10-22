@@ -1,5 +1,10 @@
-import { basename } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
+import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import addFormats from "ajv-formats";
+import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, describe, expect, it } from "vitest";
+import { buildEnvelope } from "volley-mcp/envelope";
 import { makeBufferIO } from "../../src/io";
 import {
   type DoctorDeps,
@@ -8,8 +13,10 @@ import {
   doctor,
   normalizeOrigin,
   runDoctor,
+  scrub,
 } from "../../src/peer/doctor";
 import { VM_STAT_MAC_16GB } from "../fixtures/vm-stat";
+import { FAKE_TOKEN, storeLogins, usageEndpoint } from "../helpers/fake-logins";
 import {
   type FakeMachineOptions,
   type FakePeerMachine,
@@ -83,14 +90,14 @@ describe("volley peer doctor: tools and PATH", () => {
 
   it("claude missing from the estimated non-interactive PATH warns, labelled an estimate; its fix is the symlink, never run", async () => {
     const m = machine({
-      tools: { claude: { path: "/home/dev/.local/bin/claude", sshPath: null } },
+      tools: { claude: { path: "/path/to/home/.local/bin/claude", sshPath: null } },
     });
     const r = await report(m);
     // An estimate (the supervisor's own path_ok probe decides): it warns, it never blocks.
     expect(check(r, "claude_on_path")).toMatchObject({
       ok: false,
       severity: "warn",
-      fix: "sudo ln -s /home/dev/.local/bin/claude /usr/local/bin/claude",
+      fix: "sudo ln -s /path/to/home/.local/bin/claude /usr/local/bin/claude",
     });
     expect(check(r, "claude_on_path")?.detail).toMatch(/^estimated: /);
     expect(check(r, "claude_on_path")?.detail).toContain("path_ok");
@@ -99,7 +106,9 @@ describe("volley peer doctor: tools and PATH", () => {
     expect(r.versions.claude).toBe("2.0.14");
 
     const fixed = await run(m, { fix: true, yes: true });
-    expect(fixed.stdout).toContain("sudo ln -s /home/dev/.local/bin/claude /usr/local/bin/claude");
+    expect(fixed.stdout).toContain(
+      "sudo ln -s /path/to/home/.local/bin/claude /usr/local/bin/claude",
+    );
     expect(MUTATING(m)).toEqual([]);
     expect(fixed.exit).toBe(0);
   });
@@ -113,17 +122,17 @@ describe("volley peer doctor: tools and PATH", () => {
   });
 
   it("the PATH fix follows the login shell: zsh's ~/.zshenv, fish's fish_add_path, bash on macOS has none", async () => {
-    const off = { claude: { path: "/Users/dev/.local/bin/claude", sshPath: null } };
+    const off = { claude: { path: "/path/to/home/.local/bin/claude", sshPath: null } };
     const zsh = await report(machine({ platform: "darwin", shell: "/bin/zsh", tools: off }));
     expect(check(zsh, "claude_on_path")?.fix).toBe(
-      `echo 'export PATH="/Users/dev/.local/bin:$PATH"' >> ~/.zshenv`,
+      `echo 'export PATH="/path/to/home/.local/bin:$PATH"' >> ~/.zshenv`,
     );
     box?.cleanup();
     const fish = await report(
       machine({ platform: "darwin", shell: "/opt/homebrew/bin/fish", tools: off }),
     );
     expect(check(fish, "claude_on_path")?.fix).toBe(
-      "fish -c 'fish_add_path -U /Users/dev/.local/bin'",
+      "fish -c 'fish_add_path -U /path/to/home/.local/bin'",
     );
     box?.cleanup();
     // bash -c reads no startup file and macOS's sshd PATH cannot be extended by the user.
@@ -138,7 +147,7 @@ describe("volley peer doctor: tools and PATH", () => {
     // Linux: /usr/local/bin is on sshd's PATH whatever the shell.
     const linux = await report(machine({ shell: "/bin/zsh", tools: off }));
     expect(check(linux, "claude_on_path")?.fix).toBe(
-      "sudo ln -s /Users/dev/.local/bin/claude /usr/local/bin/claude",
+      "sudo ln -s /path/to/home/.local/bin/claude /usr/local/bin/claude",
     );
   });
 
@@ -148,8 +157,8 @@ describe("volley peer doctor: tools and PATH", () => {
       shell: "/bin/zsh",
       trusted: true,
       tools: {
-        bun: { path: null, sshPath: "/Users/dev/.bun/bin/bun" },
-        claude: { path: null, sshPath: "/Users/dev/.local/bin/claude" },
+        bun: { path: null, sshPath: "/path/to/home/.bun/bin/bun" },
+        claude: { path: null, sshPath: "/path/to/home/.local/bin/claude" },
       },
     });
     const r = await report(m);
@@ -158,16 +167,16 @@ describe("volley peer doctor: tools and PATH", () => {
     expect(r.versions.claude).toBe("2.0.14");
     expect(r.auth.claude).toBe("signed_in");
     const argv = m.calls.map((c) => c.argv);
-    expect(argv).toContainEqual(["/Users/dev/.bun/bin/bun", "--version"]);
+    expect(argv).toContainEqual(["/path/to/home/.bun/bin/bun", "--version"]);
     expect(argv).toContainEqual([
-      "/Users/dev/.bun/bin/bun",
+      "/path/to/home/.bun/bin/bun",
       "install",
       "--cwd",
       m.volleyDir,
       "--frozen-lockfile",
       "--dry-run",
     ]);
-    expect(argv).toContainEqual(["/Users/dev/.local/bin/claude", "auth", "status"]);
+    expect(argv).toContainEqual(["/path/to/home/.local/bin/claude", "auth", "status"]);
     // Nothing runs by a bare name the service's PATH may not reach.
     for (const a of argv) {
       if (["bun", "claude", "gh", "git", "tmux"].includes(a[0] as string)) {
@@ -188,14 +197,14 @@ describe("volley peer doctor: tools and PATH", () => {
 
   it("the human output has one line per check with its mark, and the fix under a failing one", async () => {
     const m = machine({
-      tools: { claude: { path: "/home/dev/.local/bin/claude", sshPath: null } },
+      tools: { claude: { path: "/path/to/home/.local/bin/claude", sshPath: null } },
     });
     const r = await run(m);
     expect(r.exit).toBe(0);
     expect(r.stdout).toMatch(/^✓ tool\.bun: /m);
     expect(r.stdout).toMatch(/^! claude_on_path: estimated: /m);
     expect(r.stdout).toMatch(
-      /^! claude_on_path: .*\n {4}fix: sudo ln -s \/home\/dev\/\.local\/bin\/claude \/usr\/local\/bin\/claude$/m,
+      /^! claude_on_path: .*\n {4}fix: sudo ln -s \/path\/to\/home\/\.local\/bin\/claude \/usr\/local\/bin\/claude$/m,
     );
   });
 
@@ -521,6 +530,42 @@ describe("volley peer doctor: GitHub and Claude", () => {
     expect((await report(machine({ claudeStatus: "something else" }))).auth.claude).toBe("unknown");
   });
 
+  it("a signed-in profile's identity comes from ~/.claude.json: claude_email and claude_org only", async () => {
+    const claudeJson = {
+      userID: "c0ffee",
+      oauthAccount: {
+        accountUuid: "11111111-2222-3333-4444-555555555555",
+        emailAddress: "Owner@Example.com",
+        organizationName: "Example Org",
+      },
+    };
+    const m = machine({ claudeStatus: { loggedIn: true, subscriptionType: "max" }, claudeJson });
+    const r = await report(m);
+    // scrub leaves an e-mail alone; nothing else of the file travels.
+    expect(r.auth).toMatchObject({
+      claude: "signed_in",
+      claude_email: "owner@example.com",
+      claude_org: "Example Org",
+    });
+    const text = JSON.stringify(r);
+    for (const key of ["c0ffee", "11111111-2222"]) expect(text).not.toContain(key);
+    box?.cleanup();
+    const out = await report(
+      machine({ claudeStatus: { loggedIn: false }, claudeCode: 1, claudeJson }),
+    );
+    expect(out.auth.claude_email).toBeUndefined();
+    expect(out.auth.claude_org).toBeUndefined();
+    box?.cleanup();
+    const bad = await report(
+      machine({
+        claudeStatus: { loggedIn: true },
+        claudeJson: { oauthAccount: { emailAddress: 42, organizationName: "" } },
+      }),
+    );
+    expect(bad.auth).not.toHaveProperty("claude_email");
+    expect(bad.auth).not.toHaveProperty("claude_org");
+  });
+
   it("folder trust comes from the box's ~/.claude.json; a parent folder counts", async () => {
     const untrusted = await report(machine());
     expect(untrusted.auth.trust).toBe("missing");
@@ -561,6 +606,22 @@ describe("volley peer doctor: machine and secrets", () => {
     expect(r.disk?.path.endsWith(".volley-worktrees")).toBe(true);
     expect(seen).toEqual([`${m.root}/src`]);
     expect(check(r, "machine.disk")).toMatchObject({ ok: true, severity: "warn" });
+  });
+
+  it("the machine row names the max_agents volleyd derives from its size at join (#324)", async () => {
+    const m = machine();
+    const sized = async (over: Partial<DoctorDeps>) =>
+      JSON.parse((await run(m, { json: true }, over)).stdout) as DoctorReport;
+    const big = await sized({ cpus: () => 32, totalmem: () => 61_440 * 1024 ** 2 });
+    expect(check(big, "machine.size")).toMatchObject({
+      ok: true,
+      severity: "warn",
+      detail: "max_agents 10 (derived from 32 cores, 60 GB)",
+    });
+    const small = await sized({ cpus: () => 10, totalmem: () => 32 * 1024 ** 3 });
+    expect(check(small, "machine.size")?.detail).toBe(
+      "max_agents 3 (derived from 10 cores, 32 GB)",
+    );
   });
 
   it("on macOS the memory comes from vm_stat: free + inactive + speculative + purgeable pages", async () => {
@@ -633,6 +694,20 @@ describe("volley peer doctor: machine and secrets", () => {
     }
   });
 
+  it("runDoctor stamps the report with the time the run started, not when it ended", async () => {
+    const m = machine();
+    // A run's facts are as old as its start: one that began before a `doctor --fix` and ended
+    // after it must not read as a run from after the fix.
+    let t = Date.parse("2026-10-19T09:00:00.000Z");
+    const now = () => {
+      t += 60_000;
+      return new Date(t);
+    };
+    const deps = { ...m.deps(), now };
+    const { report: r } = await runDoctor(deps, { repo: m.repoPath });
+    expect(r.doctor_at).toBe("2026-10-19T09:01:00.000Z");
+  });
+
   it("runDoctor returns the report and the facts it was built from", async () => {
     const m = machine();
     const { report: r } = await runDoctor(m.deps(), { repo: m.repoPath });
@@ -641,5 +716,112 @@ describe("volley peer doctor: machine and secrets", () => {
       expect(c.id).toMatch(/^[a-z0-9][a-z0-9_.-]{0,62}$/);
       expect(c.detail.length).toBeLessThanOrEqual(200);
     }
+  });
+});
+
+describe("volley peer doctor: Claude usage", () => {
+  const NOW = Date.parse("2026-10-19T09:00:00.000Z");
+  const SCHEMAS = fileURLToPath(new URL("../../../../spec/schemas/", import.meta.url));
+
+  function validMachine(payload: Record<string, unknown>) {
+    const ajv = new Ajv2020({ allErrors: true, strict: false });
+    addFormats(ajv);
+    for (const f of readdirSync(SCHEMAS).filter((f) => f.endsWith(".schema.json"))) {
+      ajv.addSchema(JSON.parse(readFileSync(join(SCHEMAS, f), "utf-8")));
+    }
+    const validate = ajv.getSchema("https://volley.systems/schemas/0.1/machine.schema.json");
+    const env = buildEnvelope({
+      agentId: "peer-a",
+      parentId: null,
+      channel: "_system/machines",
+      type: "machine",
+      payload,
+    });
+    validate?.(env);
+    return validate?.errors ?? [];
+  }
+
+  it("--json carries claude_logins for the default login and a profile; the record validates", async () => {
+    const m = machine({ trusted: true });
+    storeLogins(m.home, { default: NOW + 3_600_000, work: NOW + 3_600_000 });
+    const api = usageEndpoint();
+    const r = await report(m, {});
+    expect(r).not.toHaveProperty("claude_logins");
+    const io = makeBufferIO();
+    await doctor(io, m.deps({ fetch: api.fetch, env: { USER: "dev" } }), {
+      repo: m.repoPath,
+      json: true,
+    });
+    const out = JSON.parse(io.readStdout()) as DoctorReport;
+    const reading = {
+      read_at: "2026-10-19T09:00:00.000Z",
+      five_hour: { pct: 37, resets_at: "2026-10-19T12:00:00.000Z" },
+      weekly: { pct: 56, resets_at: "2026-10-24T00:00:00.000Z" },
+      model_weekly: { fable: { pct: 12, resets_at: "2026-10-24T00:00:00.000Z" } },
+    };
+    expect(out.claude_logins).toEqual([
+      { profile: "default", state: "ok", attempted_at: "2026-10-19T09:00:00.000Z", reading },
+      { profile: "work", state: "ok", attempted_at: "2026-10-19T09:00:00.000Z", reading },
+    ]);
+    // The claude version the doctor found is the User-Agent.
+    expect(api.requests[0]?.["User-Agent"]).toBe("claude-code/2.0.14");
+    const text = JSON.stringify(out);
+    expect(text).not.toContain(FAKE_TOKEN);
+    expect(text).not.toContain(join(m.home, ".volley", "claude"));
+    expect(
+      validMachine({
+        name: "peer-a",
+        os: "linux",
+        cores: 8,
+        tunnel: "up",
+        load: [0, 0, 0],
+        agents: 0,
+        claude_logins: out.claude_logins,
+        last_seen: "2026-10-19T09:00:00.000Z",
+      }),
+    ).toEqual([]);
+  });
+
+  it("the human output has one usage line per login: ok with its age, expired with why", async () => {
+    const m = machine({ trusted: true });
+    storeLogins(m.home, { default: NOW + 3_600_000, work: NOW - 1 });
+    const api = usageEndpoint();
+    await run(m, {}, { fetch: api.fetch });
+    // Two minutes later the memo answers (no call) and the reading is two minutes old.
+    const later = await run(m, {}, { fetch: api.fetch, now: () => new Date(NOW + 2 * 60_000) });
+    expect(api.requests).toHaveLength(1);
+    expect(later.stdout).toContain(
+      "Claude usage: default 5h 37% · 7d 56% · Fable 12% (read 2 min ago)\n",
+    );
+    expect(later.stdout).toContain(
+      "Claude usage: work — (login expired; Claude Code renews it on its next request)\n",
+    );
+  });
+
+  it("a probe that fails with the token in its error leaks it nowhere", async () => {
+    const m = machine({ trusted: true });
+    storeLogins(m.home, { default: NOW + 86_400_000 });
+    const api = usageEndpoint({ fail: (h) => new Error(`boom ${h.Authorization}`) });
+    for (const json of [true, false]) {
+      const out = await run(
+        m,
+        { json },
+        { fetch: api.fetch, now: () => new Date(NOW + (json ? 0 : 3_600_000)) },
+      );
+      expect(`${out.stdout}${out.stderr}`).not.toContain(FAKE_TOKEN);
+    }
+    expect(api.requests).toHaveLength(2);
+    const memo = readFileSync(join(m.home, ".volley", "claude-usage", "default.json"), "utf-8");
+    expect(memo).not.toContain(FAKE_TOKEN);
+    expect(JSON.parse(memo)).toMatchObject({ state: "error" });
+  });
+
+  it("scrub still redacts an sk-ant token anywhere in a report with logins", () => {
+    const token = "sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    const r = scrub({
+      claude_logins: [{ profile: "default", state: "error", note: `x ${token}` }],
+    });
+    expect(JSON.stringify(r)).not.toContain(token);
+    expect(r.claude_logins[0]?.note).toBe("x [redacted]");
   });
 });

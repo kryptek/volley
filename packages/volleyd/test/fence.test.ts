@@ -25,9 +25,11 @@ import {
   mintScriptToken,
   mintSetupToken,
   mintSigninForwardToken,
+  mintWakeToken,
   sealLaunchScript,
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
+import { WAKE_TEXT } from "../src/liveness";
 import { tempDir, tempDirForAll } from "./helpers/tmp";
 import { withEnvSync } from "./helpers/with-env";
 
@@ -341,7 +343,7 @@ const DENIED: string[][] = [
   ["volley", "auth", "redeem", "vly_admin_0000abcd_secret", "--label", "x", "--json"],
   ["volley", "auth", "redeem", "--label", "x", "--json", "--dir", "/tmp/x"],
   // a script path without a minted token
-  ["/home/u/.volley/volleyd/brief-gate", "/tmp/wt/.volley/brief.md"],
+  ["/path/to/home/.volley/volleyd/brief-gate", "/tmp/wt/.volley/brief.md"],
   [],
 ];
 
@@ -514,6 +516,21 @@ describe("assertAllowed", () => {
     expect(() => assertAllowed(["terraform", "apply"])).toThrow(/terraform/);
   });
 
+  it("CI runs by head_sha: the read-only gh api GET is allowed locally, never on a paired machine (#310)", () => {
+    const argv = [
+      "gh",
+      "api",
+      "repos/{owner}/{repo}/actions/runs?head_sha=abc&per_page=50",
+      "--jq",
+      "[.workflow_runs[] | {id, name, status, conclusion, html_url, head_sha, event, run_attempt, workflow_id, created_at}]",
+    ];
+    expect(() => assertAllowed(argv)).not.toThrow();
+    const ssh = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"];
+    expect(() => assertAllowed(ssh, { remote: { steps: [{ argv }] } })).toThrow(
+      /gh api \(not on a remote machine\)/,
+    );
+  });
+
   it("a consent token does not unlock the explicit deny list", () => {
     const consent = mintConsentToken("volleyd cleanup --yes");
     expect(() => assertAllowed(["git", "push"], { consent })).toThrow(FenceError);
@@ -542,7 +559,7 @@ describe("assertAllowed", () => {
 
 describe("SETUP: what a setup step volleyd runs for the Desk may run (a setup token)", () => {
   const repo = "/src/volley";
-  const home = "/home/owner";
+  const home = "/path/to/home";
   const inputs = {
     restart: "brew services restart mosquitto",
     ctrl: { bin: "mosquitto_ctrl", stateFile: "/opt/homebrew/var/mosquitto/dynamic-security.json" },
@@ -1360,6 +1377,19 @@ describe("pickers and handoffs: Up/Down/Space and typed answers need the inbox i
       typeof mintHandoffToken
     >;
     expect(() => assertAllowed(send("x"), { handoff: forged })).toThrow(FenceError);
+  });
+
+  it("a WakeToken types exactly the wake line, once; any other text under it is refused", () => {
+    const wake = mintWakeToken();
+    expect(() => assertAllowed(send(WAKE_TEXT))).toThrow(/text volleyd never types/);
+    expect(() => assertAllowed(send("check your mailbox now"), { wake })).toThrow(
+      /text volleyd never types/,
+    );
+    expect(() => assertAllowed(send(WAKE_TEXT), { wake })).not.toThrow();
+    expect(() => assertAllowed(send(WAKE_TEXT), { wake })).toThrow(FenceError);
+    expect(() => assertAllowed(key("Down"), { wake: mintWakeToken() })).toThrow(FenceError);
+    const forged = {} as ReturnType<typeof mintWakeToken>;
+    expect(() => assertAllowed(send(WAKE_TEXT), { wake: forged })).toThrow(FenceError);
   });
 
   it("refuses to mint a token for text that would be a command or more than one line", () => {

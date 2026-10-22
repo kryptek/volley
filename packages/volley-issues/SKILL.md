@@ -2,7 +2,7 @@
 name: volley-issues
 description: Dispatch GitHub issues to autonomous Claude agents, each in its own git worktree and cmux workspace, coordinated via Volley. By default emits a wave file and submits it to the volleyd supervisor; the hand-launched legacy path remains. Replaces the claude-peers/ScheduleWakeup polling loop with sub-5s volley wait notifications. Use when the user asks to dispatch issues, work on issues, or launch agents for issues.
 user_invocable: true
-version: 0.5
+version: 0.6
 ---
 
 # /volley-issues
@@ -109,6 +109,8 @@ Each issue becomes a task named by the task tag its title starts with (`O0: …`
 - A dependency on an issue **outside** the set is an error that names it. Either add that issue to the set, or, if it is already merged (`gh issue view <N> --json state` is `CLOSED` and its PR is in the release branch), pass it with `--satisfied <N,...>` so it is dropped.
 - Issues with **no** dependency line are listed on stderr (`note: no Depends on:/deps: line in ...`). Ask the user how they are ordered (or confirm they are independent), then add `after:` lines to the wave file by hand before Step 4.
 
+**Reserve shared numbers and names before the children branch.** When an epic's children will each add to the spec (a new section, wave event or decision kind), the epic's first PR reserves them per child in `spec/RESERVED.md`, the way a migration counter reserves numbers: one row per item (`| §4.6.21 | #312 | held decisions |`, or a backticked event or kind name), and each child's ISSUE.md names its reserved items. Sibling PRs then never pick the same number. `bun run check:spec-refs` fails when a reserved section number is taken by a heading on another topic. The child that lands a section, event or kind removes its row in the same PR. Add a new decision kind, event or tunable as its own line in the SPEC's list (`<!-- spec-list: … -->`), never by editing a neighbour's line.
+
 ### Step 3: write the wave file
 
 The wave id is `<date>-<theme>` (lowercase, `[a-z0-9][a-z0-9_-]*`, at most 63 chars), the same theme as the release branch. The file goes in the repo at `.volley/waves/<date>-<theme>.yaml`:
@@ -134,6 +136,10 @@ The three autopilot settings, written into the wave file:
 - `--autopilot on|off` writes `config: { autopilot: { enabled } }` for this wave. `on` lets volleyd answer the routine decisions from its policy table (`volleyd policy` prints it); `off` makes every decision wait for the owner, as before autopilot, and the wave is driven by hand (**Driving a wave by hand**). Left out, the wave follows the supervisor's `autopilot.enabled` (on by default). Ask the user only when they have said they want to steer this wave themselves.
 - `--branch-update merge|rebase` writes `config: { branch_update }`. `merge` is the recommended setting for autopilot waves: volleyd brings a PR branch up to date by merging the release branch in and pushing normally (no force-push of any kind), so nobody's head is rewritten while the wave runs unattended. Left out, the supervisor's `branch_update` applies (`rebase` by default).
 
+The helper writes no MCP setting. When the repository's agents need some of the user's own MCP servers (a migration counter, say), add `agent_mcp: inherit` and `agent_mcp_allow: [<server name>, …]` to the wave file's `config:` by hand: each agent then starts volleyd's `volley` plus only the named servers, not every server in the profile. Without the list `inherit` starts them all; a name volleyd finds nowhere is skipped and journaled once (`agent_mcp_allow_missing`).
+
+`--placement local|auto` pins where the wave's tasks run (`placement:`); left out, the supervisor's `placement.default` decides (`auto` once a machine is paired, so the tasks spread onto it), and `volleyd validate` prints which.
+
 The helper's last stderr lines are the submit command and the owner it names:
 
 ```text
@@ -143,7 +149,7 @@ owner: coord-main (VOLLEY_COORDINATOR)
 
 `owner: VOLLEY_COORDINATOR is unset: …` means this shell has no coordinator name: export it (Prerequisites step 2) before Step 4.
 
-The default pipeline is `[implement, [spec_review, quality_review], fixup, merge_ready]` (the nested array runs both reviewers in parallel). A pipeline without the review group (`["implement","merge_ready"]`) is honoured only because the file says so: volleyd marks each such task `reviews skipped by plan`, and otherwise never gates a task without both reviews for its current head. Exit 1 means a dependency or issue problem (the message names the issue; an issue both in the set and in `--satisfied` is one); exit 2 is a usage error (including a `--pipeline` that is not a JSON array, or a `--merge`, `--autopilot` or `--branch-update` value it does not know). Show the user the generated file.
+The default pipeline is `[implement, [spec_review, quality_review], fixup, merge_ready]` (the nested array runs both reviewers in parallel). A pipeline without the review group (`["implement","merge_ready"]`) is honoured only because the file says so: volleyd marks each such task `reviews skipped by plan`, and otherwise never gates a task without both reviews for its current head. Exit 1 means a dependency or issue problem (the message names the issue; an issue both in the set and in `--satisfied` is one); exit 2 is a usage error (including a `--pipeline` that is not a JSON array, or a `--merge`, `--autopilot`, `--branch-update` or `--placement` value it does not know). Show the user the generated file.
 
 **The brief preface: public-repo hygiene rules go here.** The wave file carries `brief_preface: ".volley/brief-preface.md"` (`--brief-preface <path>` names another file, relative to the repo or absolute). volleyd puts that file, byte for byte, at the top of **every** brief it writes — implementer, both reviewers, fixup, rebase — above the role's own template. It is the only way to give volleyd-spawned agents the rules you would otherwise put in a hand-written brief, so rules like "this repository is public: no person names, no local usernames, no machine paths, no private hostnames or IPs" belong in it. When the repo is on this machine and the file does not exist, the helper writes it from `templates/brief-preface.md` and says so on stderr (`wrote <path> from the template`); an existing preface is never changed (`brief preface: <path> (kept)`). Show it to the user and add the repository's own rules under its `## Repository rules` heading:
 
@@ -546,16 +552,22 @@ Once every dispatched agent has reached `done` AND its PR is merged into the rel
    gh workflow run deploy-admin-frontend.yml --ref release/<date>-<theme> -f environment=staging
    ```
 
-2. **Assemble the changelog** on the release branch, before the version bump commit:
+2. **Assemble the changelog and bump the versions** in a release-prep PR into the release branch:
    ```bash
+   git checkout -b release-prep/<v> release/<date>-<theme>
    bun run changelog --version <v> --date <YYYY-MM-DD> --commit
+   # bump the package.json versions, commit as `release: <v>`
+   git push -u origin release-prep/<v>
+   bun scripts/changelog-ci.ts labels --ensure
+   gh pr create --base release/<date>-<theme> --head release-prep/<v> --title "release: <v> — <theme>" --label no-changelog
+   gh pr merge release-prep/<v> --squash --subject "release: <v> — <theme>"
    ```
-   It turns every `changes/` fragment into the `## <v> — <date>` section of `CHANGELOG.md` and commits `release: changelog for <v>`; then bump the `package.json` versions in the same release PR. The volley-cli version test checks that the newest section matches the root version.
+   `bun run changelog --commit` turns every `changes/` fragment into the `## <v> — <date>` section of `CHANGELOG.md` and commits `release: changelog for <v>`; the volley-cli version test checks that the newest section matches the root version. The PR passes CI's changelog guards by construction: its squash subject starts with `release:` (the only commits allowed to change `CHANGELOG.md`), and it carries the `no-changelog` label because the version bump touches `packages/` without a fragment. `labels --ensure` creates that label when the repository lacks it. Each merge names its PR by branch: the coordinator is still checked out on `release-prep/<v>`, so a bare `gh pr merge` would pick that PR.
 
-3. **After staging verification**, squash-merge the release branch into main:
+3. **After staging verification**, squash-merge the release branch into main, again under a `release:` subject:
    ```bash
-   gh pr create --base main --head release/<date>-<theme> --title "Release: <date> — <theme>"
-   gh pr merge --squash
+   gh pr create --base main --head release/<date>-<theme> --title "release: <date> — <theme>"
+   gh pr merge release/<date>-<theme> --squash --subject "release: <date> — <theme>"
    ```
 
 4. **Delete the release branch** after merge:

@@ -5,7 +5,7 @@ import type { GithubStatus } from "../src/autopilot/github-status";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
 import { emptyPipeline, reducePipeline } from "../src/pipeline";
 import { FIXTURES } from "./helpers/fake-host";
-import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
+import { type Harness, isHeadRunsRead, pipelineHarness, sha } from "./helpers/pipeline-harness";
 
 /**
  * Self-healing CI (SPEC §4.6.16): a red head is classified before anyone is asked. The PR's own
@@ -95,7 +95,9 @@ describe("a red head is classified before anyone is asked", () => {
     const lists = h.calls.length;
     h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
     await h.tick();
-    expect(h.calls.slice(lists).some((c) => c[1] === "run" && c[2] === "list")).toBe(false);
+    expect(h.calls.slice(lists).some((c) => isHeadRunsRead(c) || c.includes("--branch"))).toBe(
+      false,
+    );
     expect(h.openDecisions()).toEqual([]);
     expect(events("remediation_requested")).toHaveLength(1);
   });
@@ -129,7 +131,7 @@ describe("a red head is classified before anyone is asked", () => {
     expect(h.task()?.why_waiting).toMatch(/^CI infra incident: .+; re-checking$/);
 
     // Not re-checked before ci_poll_ms; re-checked after it, still held (no second event).
-    const runLists = () => h.calls.filter((c) => c[1] === "run" && c[2] === "list").length;
+    const runLists = () => h.calls.filter(isHeadRunsRead).length;
     const before = runLists();
     await h.tick();
     expect(runLists()).toBe(before);
@@ -171,6 +173,54 @@ describe("a red head is classified before anyone is asked", () => {
     h.elapse(CONFIG_DEFAULTS.autopilot.incident_wait_max_s * 1000 + DAEMON_DEFAULTS.ci_poll_ms);
     await h.tick();
     expect(facts(ciFailed()).classification).toBe("infra_incident");
+  });
+});
+
+describe("an unreadable release branch read (#310) classifies nothing", () => {
+  const RATE = "HTTP 403: API rate limit exceeded for user ID 1.";
+  const rateAlarms = () =>
+    events("alarm_raised").filter((e) => e.data.alarm === "github_rate_limited");
+  const releaseReads = () =>
+    h.calls.filter((c) => c[1] === "run" && c[2] === "list" && c.includes("--branch")).length;
+
+  it("a 403 on the release read: no ci_failed, one rate-limit alarm, no CI call until retry_at; readable again → classified", async () => {
+    h = pipelineHarness();
+    h.world.releaseError = RATE;
+    await redHead();
+    expect(ciFailed()).toBeUndefined();
+    expect(events("remediation_requested")).toEqual([]);
+    expect(rateAlarms()).toHaveLength(1);
+
+    // Backed off: neither the head nor the release branch is read before retry_at.
+    const calls = h.calls.length;
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(h.calls.slice(calls).some((c) => isHeadRunsRead(c) || c.includes("--branch"))).toBe(
+      false,
+    );
+    expect(ciFailed()).toBeUndefined();
+
+    // GitHub answers again: the head is re-verified and classified.
+    h.world.releaseError = undefined;
+    h.elapse(CONFIG_DEFAULTS.ci_rate_limit_backoff_ms);
+    await h.tick();
+    expect(facts(ciFailed()).classification).toBe("flake");
+    expect(
+      events("alarm_cleared").filter((e) => e.data.alarm === "github_rate_limited"),
+    ).toHaveLength(1);
+  });
+
+  it("another failure (HTTP 502) on the release read: no decision, re-checked every ci_poll_ms", async () => {
+    h = pipelineHarness();
+    h.world.releaseError = "HTTP 502: Bad Gateway";
+    await redHead();
+    expect(ciFailed()).toBeUndefined();
+    expect(rateAlarms()).toEqual([]);
+    const before = releaseReads();
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(releaseReads()).toBeGreaterThan(before);
+    expect(ciFailed()).toBeUndefined();
   });
 });
 
@@ -275,6 +325,22 @@ describe("a blocked agent whose reason is a failing test, on a red PR head", () 
     expect(events("remediation_requested")).toEqual([]);
   });
 
+  it("an unreadable release branch (#310): the plain agent_blocked decision, nothing classified", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    h.world.origin[h.PR_BRANCH] = H1;
+    h.world.ci[H1] = "red";
+    h.world.runLog = fx("gh-run-log-failed-flake.txt");
+    h.world.releaseError = "HTTP 502: Bad Gateway";
+    await h.block("implementer", "test/clock.test.ts is red on CI, not in my change");
+    const [d] = h.openDecisions();
+    expect(d?.kind).toBe("agent_blocked");
+    expect(facts(d).pipeline).toEqual({ on: "agent_blocked", role: "implementer" });
+    expect(facts(d).classification).toBeUndefined();
+    expect(events("remediation_requested")).toEqual([]);
+  });
+
   it("a PR list entry without a number or url: the plain agent_blocked decision", async () => {
     h = pipelineHarness();
     await h.start();
@@ -289,7 +355,7 @@ describe("a blocked agent whose reason is a failing test, on a red PR head", () 
     });
   });
 
-  it("no worktree to read the PR head from: still the plain agent_blocked decision", async () => {
+  it("no worktree recorded for the run: the PR head is still read, from the repo root", async () => {
     h = pipelineHarness();
     await h.start();
     h.openPr(H1);
@@ -308,10 +374,13 @@ describe("a blocked agent whose reason is a failing test, on a red PR head", () 
       payload: {},
     });
     await h.driver.settled();
-    expect(facts(h.openDecisions()[0]).pipeline).toEqual({
-      on: "agent_blocked",
-      role: "implementer",
+    expect(facts(h.openDecisions()[0]).pipeline).toMatchObject({
+      on: "agent_blocked_ci",
+      head: H1,
     });
+    const gh = h.calls.flatMap((a, i) => (a[0] === "gh" ? [h.callOpts[i]?.cwd] : []));
+    expect(gh.length).toBeGreaterThan(0);
+    expect(gh.every((cwd) => cwd === "/repo")).toBe(true);
   });
 
   it("a PR head that is not red, or a reason about something else: the plain agent_blocked decision", async () => {
@@ -410,11 +479,7 @@ describe("the flake's fix landed (SPEC §4.6.16: the fixer task merged)", () => 
     await h.resolve(d?.decision_id as string, "fix landed", "volleyd");
     await h.driver.handle("T1", { kind: "fix_landed", test: FLAKE });
     await h.driver.settled();
-    expect(
-      h.calls
-        .slice(lists)
-        .some((c) => c[1] === "run" && c[2] === "list" && !c.includes("--branch")),
-    ).toBe(false);
+    expect(h.calls.slice(lists).some(isHeadRunsRead)).toBe(false);
     expect(events("stage_entered").at(-1)?.data).toMatchObject({ rebase: true, fix_landed: FLAKE });
   });
 

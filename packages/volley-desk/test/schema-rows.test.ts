@@ -48,8 +48,12 @@ function expectedLeaves(s: Record<string, JsonSchema>, prefix = ""): string[] {
   return Object.entries(s).flatMap(([k, v]) => {
     const p = `${prefix}${k}`;
     if (isRecordMap(v)) return [];
-    // A list of an enum (`autopilot.owner_only`) is a multi-select; any other list has no row.
-    if (v.type === "array") return (v.items as JsonSchema | undefined)?.enum ? [p] : [];
+    // A list of an enum (`autopilot.owner_only`) is a multi-select, a top-level list of strings
+    // (`agent_mcp_allow`) a list field; any other list has no row.
+    if (v.type === "array") {
+      const items = v.items as JsonSchema | undefined;
+      return items?.enum || (prefix === "" && items?.type === "string") ? [p] : [];
+    }
     if (v.properties) return expectedLeaves(v.properties as Record<string, JsonSchema>, `${p}.`);
     if (v.additionalProperties) {
       // A top-level map is `lease_pools` (a capacity row per pool); a nested map of integers
@@ -122,6 +126,14 @@ describe("schemaRows", () => {
           });
         } else if (t === "boolean") {
           expect(row.control).toEqual({ kind: "toggle" });
+        } else if (t === "array") {
+          // a top-level list of strings (agent_mcp_allow)
+          const items = leaf.items as JsonSchema;
+          expect(row.control).toEqual({
+            kind: "list",
+            maxItems: leaf.maxItems,
+            maxLength: items.maxLength,
+          });
         } else if (Array.isArray(leaf.enum)) {
           expect(row.control).toEqual({ kind: "choice", options: leaf.enum });
         } else if ((leaf.oneOf as JsonSchema[] | undefined)?.some((o) => Array.isArray(o.enum))) {
@@ -240,6 +252,14 @@ describe("schemaRows", () => {
     expect(owner?.control).toMatchObject({ kind: "multi" });
     expect(owner?.control.kind === "multi" && owner.control.options).toContain("release_go");
     expect(at.get("autopilot.enabled")?.section).toBe("Autopilot");
+  });
+
+  it("gives a list of strings (agent_mcp_allow) a list row, bounded as the schema bounds it", () => {
+    const allow = at.get("agent_mcp_allow");
+    expect(allow?.section).toBe("Other");
+    expect(allow?.label).toBe("Agent MCP allow");
+    expect(allow?.control).toEqual({ kind: "list", maxItems: 64, maxLength: 128 });
+    expect(allow?.hint).toMatch(/agent_mcp: inherit/);
   });
 
   it("has no lease rows when no pools are configured", () => {

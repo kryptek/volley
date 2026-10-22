@@ -1,12 +1,14 @@
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { buildEnvelope } from "volley-mcp/envelope";
+import { buildTopic } from "volley-mcp/topics";
 import { claudeRoot } from "../../src/claude/profiles";
 import { ControlClient } from "../../src/control";
 import { NS } from "../helpers/daemon-env";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervised-env";
 import { tempDir } from "../helpers/tmp";
-import { withEnv } from "../helpers/with-env";
+import { stubEnv, withEnv } from "../helpers/with-env";
 
 /** agent_move_account through a real daemon: cancel, stop, retire, respawn under the profile. */
 
@@ -108,4 +110,212 @@ describe("agent_move_account (daemon)", () => {
       },
     );
   }, 20_000);
+
+  it("refuses a profile on another machine: the agent stays where it is", async () => {
+    const base = tempDir("volleyd-move-");
+    const root = join(base, "claude");
+    const primary = join(base, ".claude");
+    mkdirSync(primary, { recursive: true });
+    await withEnv({ VOLLEY_CLAUDE_DIR: root }, async () => {
+      s = await makeSupervisedEnv({ daemon: { claude: { root, primaryDir: primary } } });
+      mkdirSync(root, { recursive: true });
+      writeFileSync(
+        join(root, "accounts.json"),
+        JSON.stringify({
+          version: 1,
+          accounts: [
+            {
+              id: "work",
+              label: "work",
+              machine: "peer-a",
+              dir: "/path/to/home/.volley/claude/work",
+              created: "2026-10-18T12:00:00.000Z",
+              signed_in_at: "2026-10-18T12:00:00.000Z",
+            },
+          ],
+        }),
+      );
+      const client = await ControlClient.connect(s.env.broker.url, NS);
+      try {
+        expect(
+          await client.request("agent_move_account", { agent: AGENT, acct: "work", by: "o" }),
+        ).toMatchObject({
+          ok: false,
+          error: "Claude account 'work' lives on machine 'peer-a', not this supervisor's",
+        });
+        expect(
+          await client.request("agent_move_account", {
+            agent: AGENT,
+            acct: "work@peer-a",
+            by: "o",
+          }),
+        ).toMatchObject({
+          ok: false,
+          error: `${AGENT} runs on local: Claude account 'work@peer-a' is not one of its machine's (profiles on other machines cannot take it)`,
+        });
+        const j = s.journal();
+        expect(j.some((e) => e.type === "agent_account_moved")).toBe(false);
+        expect(j.filter((e) => e.type === "agent_spawned")).toHaveLength(1);
+      } finally {
+        await client.close();
+      }
+    });
+  }, 20_000);
+});
+
+describe("agent_account_limit (D2): autopilot moves a running agent off a hot account", () => {
+  let restore: (() => void) | undefined;
+  afterEach(() => {
+    restore?.();
+    restore = undefined;
+  });
+  const RESETS = new Date(Date.now() + 3_600_000).toISOString();
+  let n = 0;
+  const sample = (account: string, pct: number, resets = RESETS) => ({
+    account,
+    model: "claude-opus-5-5",
+    context_window: { used_percentage: 20, used: 200_000, size: 1_000_000 },
+    rate_limits: {
+      five_hour: { pct, resets_at: resets },
+      weekly: { pct: 30, resets_at: RESETS },
+    },
+    captured_at: new Date(Date.now() + ++n * 1000).toISOString(),
+  });
+  const publishUsage = (agent: string, payload: unknown) =>
+    s.agent.publish(
+      buildTopic(NS, agent, "usage"),
+      JSON.stringify(
+        buildEnvelope({ agentId: agent, parentId: null, channel: "usage", type: "usage", payload }),
+      ),
+      { qos: 1, retain: true },
+    );
+  const limits = () =>
+    s
+      .journal()
+      .filter((e) => e.type === "decision_opened" && e.data.kind === "agent_account_limit");
+
+  /**
+   * A balanced wave whose agent runs on the primary; `work` signed in after its spawn. `config`
+   * adds wave `config:` entries (a `claude.default_account` pin).
+   */
+  async function balancedOnPrimary(config?: string): Promise<string> {
+    const base = tempDir("volleyd-agent-limit-");
+    const root = join(base, "claude");
+    restore = stubEnv({ VOLLEY_CLAUDE_DIR: root });
+    const primary = join(base, ".claude");
+    mkdirSync(primary, { recursive: true });
+    s = await makeSupervisedEnv({
+      daemon: { claude: { root, primaryDir: primary } },
+      ...(config !== undefined ? { config } : {}),
+    });
+    const dir = join(root, "work");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(root, "accounts.json"),
+      JSON.stringify({
+        version: 1,
+        accounts: [
+          {
+            id: "work",
+            label: "work",
+            machine: "local",
+            created: "2026-10-18T12:00:00.000Z",
+            signed_in_at: "2026-10-18T12:00:00.000Z",
+          },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(dir, ".claude.json"),
+      JSON.stringify({ projects: { [s.repo]: { hasTrustDialogAccepted: true } } }),
+    );
+    return dir;
+  }
+
+  it("opens once for the hot window; answered by autopilot it moves the agent, journaled with why", async () => {
+    const dir = await balancedOnPrimary();
+    await publishUsage("other-agent", sample("work", 12));
+    await publishUsage(AGENT, sample("primary", 93));
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_account_limit",
+    );
+    expect(opened.task).toBe("T1");
+    expect(opened.data).toMatchObject({
+      agent_id: AGENT,
+      role: "implementer",
+      acct: "primary",
+      window: "five_hour",
+      pct: 93,
+      resets_at: RESETS,
+      suggested: "work",
+      options: [`move ${AGENT} to work`, "not now"],
+    });
+    // the wave balances: no wave-level move decision for the hot account
+    expect(s.journal().some((e) => e.data.kind === "account_limit")).toBe(false);
+    // a second sample in the same window: no second decision
+    await publishUsage(AGENT, sample("primary", 95));
+    await s.consumed();
+    expect(limits()).toHaveLength(1);
+
+    s.host.onLaunch = () => {};
+    const id = opened.data.decision_id as string;
+    // an account the agent's machine cannot take is refused before anything moves
+    await expect(
+      s.daemon.resolveDecision("w1", id, { answer: `move ${AGENT} to nope`, by: "o" }),
+    ).rejects.toThrow(/unknown Claude account 'nope'/);
+    await s.daemon.resolveDecision("w1", id, { answer: `move ${AGENT} to work`, by: "autopilot" });
+    await s.until(() => s.journal().some((e) => e.type === "agent_account_moved"));
+    await s.status("blocked", { reason: "moving" });
+    await s.event("agent_spawned", 2);
+    const why = "moved off primary (5h 93%) by autopilot";
+    expect(s.journal().find((e) => e.type === "agent_account_moved")?.data).toEqual({
+      agent_id: AGENT,
+      role: "implementer",
+      from: "primary",
+      to: "work",
+      by: "autopilot",
+      decision_id: id,
+      why,
+    });
+    const chosen = s.journal().filter((e) => e.type === "account_chosen");
+    expect(chosen.map((e) => e.data.source)).toEqual(["default", "move"]);
+    expect(chosen[1]?.data).toMatchObject({ account: "work", attempt: 2, why });
+    const spawned = s.journal().filter((e) => e.type === "agent_spawned");
+    expect(spawned[1]?.data).toMatchObject({ claude_account: "work", account_why: why });
+    const wt = join(s.env.home, "wt", "w1", "T1-implementer");
+    expect(readFileSync(join(wt, ".volley", "launch.sh"), "utf-8")).toContain(
+      `export CLAUDE_CONFIG_DIR='${dir}'`,
+    );
+  }, 30_000);
+
+  it("a claude.default_account pin is respected: the wave-level decision only, no agent move", async () => {
+    await balancedOnPrimary("claude: { default_account: primary }");
+    await publishUsage("other-agent", sample("work", 12));
+    await publishUsage(AGENT, sample("primary", 93));
+    await s.event((e) => e.type === "decision_opened" && e.data.kind === "account_limit");
+    await s.consumed();
+    expect(limits()).toHaveLength(0);
+  }, 30_000);
+
+  it("not now leaves the agent; the next decision waits for the window's reset", async () => {
+    await balancedOnPrimary();
+    await publishUsage("other-agent", sample("work", 12));
+    await publishUsage(AGENT, sample("primary", 93));
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_account_limit",
+    );
+    await s.daemon.resolveDecision("w1", opened.data.decision_id as string, {
+      answer: "not now",
+      by: "autopilot",
+    });
+    await publishUsage(AGENT, sample("primary", 96));
+    await s.consumed();
+    expect(limits()).toHaveLength(1);
+    expect(s.journal().some((e) => e.type === "agent_account_moved")).toBe(false);
+    // the window reset and filled again: asked again
+    const later = new Date(Date.now() + 7_200_000).toISOString();
+    await publishUsage(AGENT, sample("primary", 92, later));
+    await s.event((e) => e.type === "decision_opened" && e.data.kind === "agent_account_limit", 2);
+    expect(limits()[1]?.data.resets_at).toBe(later);
+  }, 30_000);
 });

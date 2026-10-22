@@ -62,6 +62,8 @@ export interface FakeMachineOptions {
   origin?: string;
   /** `git ls-remote` of the release branch succeeds. */
   fetchable?: boolean;
+  /** git tracks the wave repo's `.mcp.json` (`git ls-files --error-unmatch` succeeds). */
+  trackedMcpJson?: boolean;
   gh?: { signedIn?: boolean; user?: string; permission?: string };
   /** `claude auth status`'s JSON (or raw text), and its exit code. */
   claudeStatus?: unknown;
@@ -345,6 +347,7 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
       if (sub[0] === "rev-parse") return state.isGit ? { stdout: "true\n" } : { code: 128 };
       if (sub[0] === "remote") return state.isGit ? { stdout: `${state.origin}\n` } : { code: 2 };
       if (sub[0] === "ls-remote") return { code: (opts.fetchable ?? true) ? 0 : 2 };
+      if (sub[0] === "ls-files") return { code: opts.trackedMcpJson === true ? 0 : 1 };
       if (sub[0] === "clone") {
         const [url, path] = sub.slice(1).filter((w) => w !== "--");
         mkdirSync(join(path as string, ".git"), { recursive: true });
@@ -428,6 +431,7 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
     now: () => new Date("2026-10-19T09:00:00.000Z"),
     totalmem: () => 16 * 1024 ** 3,
     freemem: () => 8 * 1024 ** 3,
+    cpus: () => 8,
     uptime: () => 86_400,
     statfs: () => ({ bsize: 4096, blocks: 262_144_000, bavail: 131_072_000 }),
     ...over,

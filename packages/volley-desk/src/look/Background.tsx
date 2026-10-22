@@ -9,7 +9,9 @@
  *
  * WebGL (D8) is detected up front (`hasWebGL`): without it `degradeLook`
  * renders `none` for a WebGL background and `glass` for the `liquid` chrome,
- * and Settings › Appearance hides both; the saved look is left alone. The
+ * and Settings › Appearance hides both; the saved look is left alone. On the
+ * lite surface (a touch screen, a11y/surface.ts) `liquid` renders as `glass`
+ * as well and is not offered. The
  * error boundary stays as the last line (a context lost later, a driver bug).
  */
 import { Component, type ReactNode, Suspense, useMemo, useState } from "react";
@@ -27,6 +29,9 @@ export const BG_FALLBACK = "This background needs WebGL, which this browser didn
 export const BG_LOAD_FAILED = "Couldn’t load this background.";
 export const BG_NO_WEBGL_NOTE =
   "This browser didn’t provide WebGL, so only the backgrounds that work without it are listed.";
+
+export const SURFACE_LITE_NOTE =
+  "On a touch screen, or when reduced transparency is on, the Desk draws its windows without the glass blur so panning stays smooth; Liquid glass is not offered.";
 
 /** The React Bits backgrounds that draw with the DOM or a 2D canvas; every other one needs WebGL. */
 const NO_WEBGL_BACKGROUNDS: ReadonlySet<string> = new Set(["GridMotion", "ShapeGrid"]);
@@ -57,9 +62,9 @@ export function useWebGL(): boolean {
 }
 
 /** The look as this browser can render it: without WebGL, `none` and `glass` stand in. */
-export function degradeLook(look: Look, webgl: boolean): Look {
-  if (webgl) return look;
-  const bg = needsWebGL(look.bg) ? NO_BACKGROUND : look.bg;
+export function degradeLook(look: Look, webgl: boolean, lite = false): Look {
+  if (webgl && !lite) return look;
+  const bg = !webgl && needsWebGL(look.bg) ? NO_BACKGROUND : look.bg;
   const chrome = look.chrome === "liquid" ? "glass" : look.chrome;
   return bg === look.bg && chrome === look.chrome ? look : { ...look, bg, chrome };
 }

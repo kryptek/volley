@@ -38,6 +38,8 @@
             "steering_sent",
             "steering_queued",
             "steering_dropped",
+            "steering_received",
+            "agent_woken",
             "decision_opened",
             "decision_resolved",
             "lease_requested",
@@ -63,11 +65,13 @@
             "claude_signin_failed",
             "claude_profile_synced",
             "agent_account_moved",
+            "account_chosen",
             "relaunched",
             "ci_pending",
             "ci_green",
             "pr_head_moved",
             "merged_by_operator",
+            "pr_conflicting",
             "merged_by_supervisor",
             "merge_queued",
             "merge_dequeued",
@@ -90,6 +94,8 @@
             "repo_visibility_detected",
             "decision_auto_resolved",
             "decision_escalated",
+            "decision_held",
+            "decision_released",
             "release_started",
             "release_stage_entered",
             "release_stage_verified",
@@ -132,6 +138,118 @@
     },
     {
       "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "account_chosen" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "description": "The Claude account a spawn runs under and why (spec section 4.6.11), journaled right before its agent_spawned. Names no e-mail.",
+                    "required": [
+                      "task",
+                      "role",
+                      "attempt",
+                      "account",
+                      "machine",
+                      "source",
+                      "why",
+                      "candidates"
+                    ],
+                    "properties": {
+                      "task": {
+                        "type": "string",
+                        "pattern": "^([A-Za-z0-9][A-Za-z0-9_-]{0,62}|_release)$"
+                      },
+                      "role": { "type": "string", "minLength": 1 },
+                      "attempt": { "type": "integer", "minimum": 1 },
+                      "account": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}(@[a-z0-9][a-z0-9_.-]{0,62})?$"
+                      },
+                      "machine": { "$ref": "wave-state.schema.json#/$defs/hostName" },
+                      "source": {
+                        "enum": ["task", "wave", "config", "balance", "move", "default"]
+                      },
+                      "why": { "type": "string", "minLength": 1 },
+                      "candidates": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "account",
+                            "five_hour_pct",
+                            "weekly_pct",
+                            "agents",
+                            "headroom"
+                          ],
+                          "properties": {
+                            "account": {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}(@[a-z0-9][a-z0-9_.-]{0,62})?$"
+                            },
+                            "five_hour_pct": {
+                              "oneOf": [
+                                { "type": "number", "minimum": 0, "maximum": 100 },
+                                { "type": "null" }
+                              ]
+                            },
+                            "weekly_pct": {
+                              "oneOf": [
+                                { "type": "number", "minimum": 0, "maximum": 100 },
+                                { "type": "null" }
+                              ]
+                            },
+                            "model_weekly_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+                            "agents": { "type": "integer", "minimum": 0 },
+                            "headroom": {
+                              "oneOf": [
+                                { "type": "number", "minimum": 0, "maximum": 100 },
+                                { "type": "null" }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "agent_account_moved" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "decision_id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+                        "description": "The agent_account_limit decision whose answer moved it (absent: an agent_move_account request)."
+                      },
+                      "why": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "That decision's one-line reason."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
         {
           "if": { "properties": { "type": { "const": "task_placed" } }, "required": ["type"] },
           "then": {
@@ -323,6 +441,107 @@
         },
         {
           "if": {
+            "properties": {
+              "type": {
+                "const": "decision_held"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["decision_id", "kind", "on", "by"],
+                    "properties": {
+                      "decision_id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "on": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "description": "What it waits on: a task of the wave, a PR, an issue (one or more).",
+                        "properties": {
+                          "task": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+                          },
+                          "pr": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "issue": {
+                            "type": "integer",
+                            "minimum": 1
+                          }
+                        }
+                      },
+                      "note": {
+                        "type": "string"
+                      },
+                      "by": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "decision_released"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["decision_id", "kind", "why", "by"],
+                    "properties": {
+                      "decision_id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "why": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "by": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
             "properties": { "type": { "const": "decision_escalated" } },
             "required": ["type"]
           },
@@ -376,6 +595,42 @@
                       "by": { "type": "string", "minLength": 1 },
                       "where": { "$ref": "inbox-item.schema.json#/$defs/where" },
                       "version": { "type": "integer", "minimum": 2 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "pr_conflicting" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["pr", "head", "release_branch"],
+                    "properties": {
+                      "pr": {
+                        "type": "object",
+                        "required": ["number", "url"],
+                        "properties": {
+                          "number": { "type": "integer", "minimum": 1 },
+                          "url": { "type": "string" }
+                        }
+                      },
+                      "head": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{7,64}$",
+                        "description": "The PR head GitHub reports CONFLICTING, where the branch-update step starts."
+                      },
+                      "release_branch": { "type": "string", "minLength": 1 },
+                      "role": {
+                        "type": "string",
+                        "description": "The role whose pushed head it is (implementer, fixup)."
+                      }
                     }
                   }
                 }

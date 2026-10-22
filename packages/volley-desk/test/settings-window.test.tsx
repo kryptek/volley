@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import pkg from "../package.json";
 import App from "../src/App";
+import { SignInGate } from "../src/auth/SignInGate";
 import { LOOK_STORAGE_KEY, type Look, useLook } from "../src/look/useLook";
 import {
   NOTIFY_STORAGE_KEY,
@@ -13,9 +14,10 @@ import {
 import { SettingsWindow, type SettingsWindowProps } from "../src/settings/SettingsWindow";
 import { type ConfigClient, createConfigTransport } from "../src/settings/configTransport";
 import { SETTINGS_SECTIONS, type SectionKey } from "../src/settings/sections";
-import { DeskStoreProvider } from "../src/store/context";
+import { CREDENTIALS_STORAGE_KEY, DeskStoreProvider, useDesk } from "../src/store/context";
+import { readSessionRole } from "../src/store/control";
 import type { ConfigPayload, DeskMessage, Envelope } from "../src/store/types";
-import { machineRecord, readiness } from "./helpers/desk-msgs";
+import { connectingFactory, machineRecord, readiness } from "./helpers/desk-msgs";
 
 const config: ConfigPayload = {
   version: 7,
@@ -166,7 +168,7 @@ describe("SettingsWindow", () => {
     expect(heading()).toHaveTextContent("Machines");
   });
 
-  it("the machine card's local agents chip opens Supervisor at the fleet.local_agents row", () => {
+  it("the machine card's local agents chip opens Supervisor › Admission at the fleet.local_agents row", () => {
     const spy = vi.fn();
     Object.defineProperty(Element.prototype, "scrollIntoView", { value: spy, configurable: true });
     try {
@@ -187,7 +189,8 @@ describe("SettingsWindow", () => {
         />,
       );
       fireEvent.click(screen.getByRole("button", { name: "Local agents: fallback" }));
-      expect(heading()).toHaveTextContent("Supervisor");
+      expect(heading()).toHaveTextContent("Admission");
+      expect(screen.getByRole("button", { name: "Back to Supervisor" })).toBeInTheDocument();
       const select = screen.getByRole("combobox", { name: "Fleet local agents" });
       expect(spy.mock.contexts.at(-1)).toBe(select.closest(".cfg-row"));
       expect(select).toHaveFocus();
@@ -358,9 +361,10 @@ describe("SettingsWindow", () => {
   describe("Supervisor", () => {
     it("renders the schema rows with the global values, read-only without credentials", () => {
       render(<Harness initial="supervisor" />);
-      for (const h of ["Admission", "Leases", "Attention", "Recovery"]) {
-        expect(screen.getByRole("heading", { name: h })).toBeInTheDocument();
+      for (const g of ["Lease pools", "Admission", "Attention", "Recovery", "Other"]) {
+        expect(screen.getByRole("button", { name: g })).toBeInTheDocument();
       }
+      fireEvent.click(screen.getByRole("button", { name: "Admission" }));
       expect(screen.getByRole("slider", { name: "Hard ceiling" })).toHaveAttribute(
         "aria-valuenow",
         "12",
@@ -386,6 +390,7 @@ describe("SettingsWindow", () => {
           transport={createConfigTransport(client, { identity: "desk" })}
         />,
       );
+      fireEvent.click(screen.getByRole("button", { name: "Recovery" }));
       const box = screen.getByRole("textbox", { name: "Fallback model" });
       fireEvent.change(box, { target: { value: "claude-haiku-5-5" } });
       fireEvent.keyDown(box, { key: "Enter" });
@@ -476,7 +481,10 @@ describe("SettingsWindow", () => {
     expect(heading()).toHaveTextContent("Claude accounts & usage");
     const body = within(dialog());
     expect(body.queryByText(/Coming with Onboarding/)).toBeNull();
+    fireEvent.click(body.getByRole("button", { name: "Accounts" }));
     expect(body.getByRole("button", { name: "+ Add Claude account" })).toBeDisabled();
+    fireEvent.click(body.getByRole("button", { name: "Back to Claude accounts & usage" }));
+    fireEvent.click(body.getByRole("button", { name: "Defaults" }));
     expect(body.getByText("Warn me at")).toBeInTheDocument();
   });
 
@@ -616,5 +624,75 @@ describe("App: the Settings window", () => {
     fireEvent.click(wave.getByRole("button", { name: "Global settings…" }));
     expect(screen.queryByRole("dialog", { name: "Wave settings" })).toBeNull();
     expect(heading()).toHaveTextContent("Supervisor");
+  });
+});
+
+describe("Settings: sign out and switch account (#328)", () => {
+  /** The Settings window inside the real sign-in gate, as the signed-in identity. */
+  function Signed() {
+    const { identity } = useDesk();
+    return <Harness identity={identity} />;
+  }
+  const gate = (env: Record<string, unknown> = {}) =>
+    render(
+      <SignInGate
+        demo={false}
+        env={env}
+        brokerUrl="ws://broker.test:9001"
+        clientFactory={connectingFactory().make}
+      >
+        <Signed />
+      </SignInGate>,
+    );
+  const account = () => within(screen.getByRole("group", { name: "Signed-in account" }));
+
+  beforeEach(() => {
+    localStorage.setItem(
+      CREDENTIALS_STORAGE_KEY,
+      JSON.stringify({ username: "steer-0123abcd", password: "pw", role: "steer" }),
+    );
+  });
+
+  it("the account card has Sign out and Switch account…", async () => {
+    gate();
+    await screen.findByRole("dialog", { name: "Settings" });
+    expect(account().getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    expect(account().getByRole("button", { name: "Switch account…" })).toBeInTheDocument();
+  });
+
+  it("Sign out forgets the stored login and its role and shows the sign-in gate", async () => {
+    gate();
+    await screen.findByRole("dialog", { name: "Settings" });
+    fireEvent.click(account().getByRole("button", { name: "Sign out" }));
+    expect(localStorage.getItem(CREDENTIALS_STORAGE_KEY)).toBeNull();
+    expect(readSessionRole("steer-0123abcd")).toBeNull();
+    expect(screen.getByRole("form", { name: "Sign in to the broker" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+    // The username the browser signed out of is filled in, the password is not.
+    expect(screen.getByLabelText("Username")).toHaveValue("steer-0123abcd");
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+  });
+
+  it("Switch account… opens the token entry over the session", async () => {
+    gate();
+    await screen.findByRole("dialog", { name: "Settings" });
+    fireEvent.click(account().getByRole("button", { name: "Switch account…" }));
+    expect(screen.getByRole("dialog", { name: "Switch account" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Sign-in link or token")).toBeInTheDocument();
+    // The session stays up underneath.
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("signed in by the environment: said so, and no sign-out or switch", async () => {
+    gate({ VITE_VOLLEY_BROKER_USERNAME: "desk", VITE_VOLLEY_BROKER_PASSWORD: "pw" });
+    await screen.findByRole("dialog", { name: "Settings" });
+    expect(account().getByText(/signed in by environment/i)).toBeInTheDocument();
+    expect(account().queryByRole("button", { name: "Sign out" })).toBeNull();
+    expect(account().queryByRole("button", { name: "Switch account…" })).toBeNull();
+  });
+
+  it("outside a sign-in gate (demo, previews) the card has no actions", () => {
+    render(<Harness identity="desk" />);
+    expect(account().queryByRole("button")).toBeNull();
   });
 });

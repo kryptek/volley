@@ -20,9 +20,15 @@ import type { TaskId } from "./types";
  *   idle while waiting on its own work (activity-evidence.ts: the hooks' `background_wait`, a
  *     lease, running shells in the footer, a fresh worktree write) → no steer, no agent_stalled
  *   awaiting_input class credit                          → credit_exhausted
+ *   status `blocked` with no decision (open, or answered for that status) naming the agent for
+ *     blocked_undecided_stall_ms, its hooks not working → agent_stalled (a block nobody was asked about is a stall)
  *   no hook signal for heartbeat_alarm_s while the status is `working` → read the screen:
- *     the credit prompt → credit_exhausted · changing → hooks_silent · unchanged on a second read
- *     → screen_static · unreadable → crash_candidate (alarm only: wait for the LWT, never kill)
+ *     the credit prompt → credit_exhausted · changing → held one more window, still changing at
+ *     its end → hooks_silent · unchanged on a second read → screen_static · unreadable →
+ *     crash_candidate (alarm only: wait for the LWT, never kill)
+ *   a tool in flight (the hooks' PreToolUse boundary, ended by the PostToolUse carrying the same
+ *     `tool_use_id`) is not silence: no screen read until it has run tool_in_flight_max_s with
+ *     the screen static for a window, and then never hooks_silent (only screen_static)
  */
 
 export type Activity = "working" | "idle" | "awaiting_input";
@@ -63,14 +69,20 @@ export interface AgentLiveness {
   own_work: string | null;
   /** Open liveness decisions; `pending` until the daemon has opened it and noted its id. */
   decisions: Partial<Record<DecisionSlot, string>>;
+  /** The tool calls between their PreToolUse and PostToolUse, from the hooks' boundary (in
+   *  order of start: parallel calls end in any order). */
+  tool_in_flight: { tool_use_id: string; tool: string | null; since: number }[];
   /** The silence probe: screen reads since the last hook signal. */
   silence: {
-    phase: "probing" | "decided" | "crash_candidate";
+    /** `holding`: the screen changed in the first window; the decision waits for a second. */
+    phase: "probing" | "holding" | "decided" | "crash_candidate";
     started_at: number;
     /** Hash of the previous probe read's tail. */
     hash: string | null;
     /** A read is in flight: the next one waits for its result. */
     reading: boolean;
+    /** When the probe was held (the screen changed): the second window counts from here. */
+    held_at: number | null;
   } | null;
   /** The latest screen capture (T13 publisher) and when its content last changed. */
   screen: { hash: string; changed_at: number } | null;
@@ -94,6 +106,8 @@ export type LivenessAction =
       asked: number;
       /** Seconds after an answer before the next decision. */
       next_s: number;
+      /** Blocked with no open decision (not an idle turn): `idle_s` counts from then. */
+      blocked?: true;
     }
   | { kind: "credit_exhausted"; source: "hook" | "screen"; text: string | null; screen?: string }
   | { kind: "read_screen" }
@@ -111,6 +125,8 @@ export interface LivenessTunables {
   heartbeat_alarm_s: number;
   background_wait_max_s: number;
   stall_backoff_max_s: number;
+  blocked_undecided_stall_ms: number;
+  tool_in_flight_max_s: number;
 }
 
 export const PENDING = "pending";
@@ -120,6 +136,12 @@ const secondsMs = (s: number) => s * 1000;
 /** The steer an idle agent gets once. */
 export const CONTINUE_TEXT =
   "volleyd: your turn ended but the task is not finished. Continue; publish done/blocked/failed when finished.";
+
+/**
+ * The one line volleyd types into an idle session whose hooks did not ack a mailbox message in
+ * `mailbox_wake_after_ms`: its UserPromptSubmit hook drains the mailbox (fence.ts WakeToken).
+ */
+export const WAKE_TEXT = "Check your Volley mailbox.";
 
 const QUESTION_TYPES = new Set(["permission_prompt", "agent_needs_input"]);
 /** Statuses during which an idle agent is a stall (not: blocked, which waits on purpose). */
@@ -163,6 +185,7 @@ export function trackAgent(a: { agent_id: string; task: TaskId; now: number }): 
     stalls: 0,
     own_work: null,
     decisions: {},
+    tool_in_flight: [],
     silence: null,
     screen: null,
   };
@@ -192,6 +215,15 @@ export function observeSignal(prev: AgentLiveness, sig: HookSignal): Step {
   const p = sig.payload;
   const text = str(p.text);
   const backgroundWait = p.background_wait === true;
+  const toolUseId = str(p.tool_use_id);
+  if (sig.hook_event === "PreToolUse" && sig.type === "activity" && toolUseId !== undefined) {
+    s.tool_in_flight = s.tool_in_flight.filter((t) => t.tool_use_id !== toolUseId);
+    s.tool_in_flight.push({ tool_use_id: toolUseId, tool: str(p.tool) ?? null, since: sig.at });
+  } else if (sig.hook_event === "PostToolUse" && toolUseId !== undefined) {
+    s.tool_in_flight = s.tool_in_flight.filter((t) => t.tool_use_id !== toolUseId);
+  } else if (sig.type === "idle" || sig.hook_event === "UserPromptSubmit") {
+    s.tool_in_flight = []; // the turn ended
+  }
 
   switch (sig.type) {
     case "idle":
@@ -281,9 +313,13 @@ export function checkLiveness(
     status: string | null;
     tunables: LivenessTunables;
     evidence?: ActivityEvidence;
+    /** A `blocked` agent: since when no decision names it (null: one does). */
+    undecided_since?: number | null;
   },
 ): Step {
   const { now, status, tunables } = sample;
+  if (status === "blocked")
+    return blockedStall(prev, now, sample.undecided_since ?? null, tunables);
   if (!stallable(status)) return { state: prev, actions: [] };
   const s = structuredClone(prev);
   const actions: LivenessAction[] = [];
@@ -325,13 +361,23 @@ export function checkLiveness(
   }
 
   // Silence: only a working agent is expected to keep its hooks firing.
-  if (status === "working" && s.activity === "working" && s.decisions.silent === undefined) {
+  if (
+    status === "working" &&
+    s.activity === "working" &&
+    s.decisions.silent === undefined &&
+    !toolRunning(s, now, tunables)
+  ) {
     const last = s.last_heartbeat?.at ?? s.since;
-    if (now - last >= secondsMs(tunables.heartbeat_alarm_s)) {
+    const alarmMs = secondsMs(tunables.heartbeat_alarm_s);
+    if (now - last >= alarmMs) {
       if (s.silence === null) {
-        s.silence = { phase: "probing", started_at: now, hash: null, reading: true };
+        s.silence = { phase: "probing", started_at: now, hash: null, reading: true, held_at: null };
         actions.push({ kind: "read_screen" });
       } else if (s.silence.phase === "probing" && !s.silence.reading) {
+        s.silence.reading = true;
+        actions.push({ kind: "read_screen" });
+      } else if (s.silence.phase === "holding" && now - (s.silence.held_at ?? now) >= alarmMs) {
+        s.silence.phase = "probing";
         s.silence.reading = true;
         actions.push({ kind: "read_screen" });
       }
@@ -340,7 +386,57 @@ export function checkLiveness(
   return { state: s, actions };
 }
 
-/** The result of a `read_screen` (null = unreadable / pane gone). */
+/**
+ * A `blocked` agent waits on purpose, but only on a decision: undecided (no decision names
+ * it) for `blocked_undecided_stall_ms`, with its hooks not working, it is an `agent_stalled`.
+ */
+function blockedStall(
+  prev: AgentLiveness,
+  now: number,
+  since: number | null,
+  tunables: LivenessTunables,
+): Step {
+  if (
+    since === null ||
+    prev.activity === "working" ||
+    prev.decisions.stalled !== undefined ||
+    now - since < tunables.blocked_undecided_stall_ms
+  )
+    return { state: prev, actions: [] };
+  const s = structuredClone(prev);
+  s.decisions.stalled = PENDING;
+  s.stalls += 1;
+  return {
+    state: s,
+    actions: [
+      {
+        kind: "agent_stalled",
+        idle_s: Math.floor((now - since) / 1000),
+        last_text: s.last_text,
+        asked: s.stalls,
+        next_s: stallDelayMs(s.stalls, tunables) / 1000,
+        blocked: true,
+      },
+    ],
+  };
+}
+
+/**
+ * A tool call in flight keeps the silence probe off: always for its first `tool_in_flight_max_s`,
+ * after that while the screen changed within the last `heartbeat_alarm_s`.
+ */
+function toolRunning(s: AgentLiveness, now: number, t: LivenessTunables): boolean {
+  const tool = s.tool_in_flight[0]; // the oldest call still running
+  if (tool === undefined) return false;
+  if (now - tool.since < secondsMs(t.tool_in_flight_max_s)) return true;
+  return s.screen !== null && s.screen.changed_at > now - secondsMs(t.heartbeat_alarm_s);
+}
+
+/**
+ * The result of a `read_screen` (null = unreadable / pane gone). A screen that changed is held
+ * one more window: `hooks_silent` only when it is still changing at the end of the second one,
+ * with no tool in flight (a long foreground tool call clears itself at its PostToolUse).
+ */
 export function observeScreen(
   prev: AgentLiveness,
   r: { now: number; screen: string | null },
@@ -365,9 +461,18 @@ export function observeScreen(
     };
   }
   const hash = screenHash(screenTail(r.screen, Number.POSITIVE_INFINITY));
+  // A changed screen counts from the hold, or for a tool past its max from the probe's start.
+  const inFlight = s.tool_in_flight.length > 0;
+  const from = silence.held_at ?? (inFlight ? silence.started_at : last);
   const changing =
-    (s.screen !== null && s.screen.changed_at > last) ||
+    (s.screen !== null && s.screen.changed_at > from) ||
     (silence.hash !== null && silence.hash !== hash);
+  if (changing && (silence.held_at === null || inFlight)) {
+    silence.phase = "holding";
+    silence.held_at = r.now;
+    silence.hash = hash;
+    return { state: s, actions: [] };
+  }
   if (changing) {
     silence.phase = "decided";
     s.decisions.silent = PENDING;
@@ -428,7 +533,8 @@ export function rebase(prev: AgentLiveness, at: number): AgentLiveness {
   s.activity_at = Math.max(s.activity_at, at);
   if (s.steered_at !== null) s.steered_at = Math.max(s.steered_at, at);
   if (s.background_wait !== null) s.background_wait.since = Math.max(s.background_wait.since, at);
-  if (s.silence?.phase === "probing") s.silence = null;
+  for (const t of s.tool_in_flight) t.since = Math.max(t.since, at);
+  if (s.silence?.phase === "probing" || s.silence?.phase === "holding") s.silence = null;
   return s;
 }
 

@@ -1,9 +1,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { addAccount, claudeRoot, profileDir } from "../../src/claude/profiles";
+import { addAccount, claudeRoot, markSignedIn, profileDir } from "../../src/claude/profiles";
 import { spawnAgent } from "../../src/spawn";
 import { type SpawnEnv, makeSpawnEnv } from "../helpers/fake-host";
+import { envelope, schemaErrors } from "../helpers/schema";
 import { stubEnv, withEnv } from "../helpers/with-env";
 
 /** spawnAgent under a Claude account profile (the daemon resolves `account` with selectAccount). */
@@ -48,6 +49,83 @@ describe("spawn under a Claude account", () => {
     expect(spawned?.data.claude_account).toBe("work");
     // sharing + MCP sync run before the launch, once per attempt
     expect(prepared).toEqual(["work"]);
+  });
+
+  it("journals account_chosen right before agent_spawned, whose account_why repeats its why", async () => {
+    env = await makeSpawnEnv();
+    const dir = profile(true);
+    const why = "work: most headroom on local (5h 12%, 7d 40%; primary 5h 88%)";
+    const candidates = [
+      { account: "work", headroom: 60, five_hour_pct: 12, weekly_pct: 40, agents: 0 },
+      { account: "primary", headroom: 12, five_hour_pct: 88, weekly_pct: 20, agents: 1 },
+    ];
+    const out = await spawnAgent(
+      env.request({
+        account: { id: "work", dir, machine: "local" },
+        accountChosen: { account: "work", machine: "local", source: "balance", why, candidates },
+      }),
+      env.deps,
+    );
+    expect(out.kind).toBe("launched");
+    const types = env.events.map((e) => e.type);
+    const at = types.indexOf("agent_spawned");
+    expect(types[at - 1]).toBe("account_chosen");
+    const chosen = env.events[at - 1];
+    expect(chosen?.data).toEqual({
+      task: "T1",
+      role: "implementer",
+      attempt: 1,
+      account: "work",
+      machine: "local",
+      source: "balance",
+      why,
+      candidates,
+    });
+    expect(
+      schemaErrors(
+        "wave-event.schema.json",
+        envelope("_waves/events", "account_chosen", {
+          wave: "w1",
+          seq: 3,
+          at: "2026-10-21T00:00:00.000Z",
+          task: "T1",
+          data: chosen?.data,
+        }),
+      ),
+    ).toEqual([]);
+    expect(env.events[at]?.data.account_why).toBe(why);
+    expect(JSON.stringify(env.events)).not.toContain("@example.com");
+  });
+
+  it("a profile on a paired machine: its dir there, no preparation here, trust read in it", async () => {
+    env = await makeSpawnEnv();
+    const root = join(env.dir, "claude");
+    restoreEnv = stubEnv({ VOLLEY_CLAUDE_DIR: root, VOLLEYD_HOME: join(env.dir, "volleyd") });
+    const dir = "/path/to/home/.volley/claude/work";
+    addAccount(root, { label: "work", machine: "peer-a" }, "2026-10-19T00:00:00.000Z");
+    markSignedIn(root, "work", { dir }, "2026-10-19T00:00:00.000Z");
+    const prepared: string[] = [];
+    env.deps.prepareAccount = async (a) => {
+      prepared.push(a.id);
+    };
+    const reads: (string | undefined)[] = [];
+    env.deps.remoteTrust = {
+      host: "peer-a",
+      target: "u@peer-a",
+      read: async (configDir) => {
+        reads.push(configDir);
+        return { projects: { [env.repo]: { hasTrustDialogAccepted: true } } };
+      },
+    };
+    const out = await spawnAgent(
+      env.request({ account: { id: "work", dir, machine: "peer-a" } }),
+      env.deps,
+    );
+    expect(out.kind).toBe("launched");
+    const script = readFileSync(join(env.worktree, ".volley", "launch.sh"), "utf-8");
+    expect(script).toContain(`export CLAUDE_CONFIG_DIR='${dir}'`);
+    expect(prepared).toEqual([]);
+    expect(reads[0]).toBe(dir);
   });
 
   it("the primary: no CLAUDE_CONFIG_DIR, recorded as primary", async () => {
