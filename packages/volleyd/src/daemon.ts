@@ -1029,7 +1029,7 @@ export class Daemon {
       woken: boolean;
     }
   >();
-  /** Epoch ms of each agent's last typed wake: a wake drains every message sent before it. */
+  /** Epoch ms of each agent's last submitted wake: a wake drains every message sent before it. */
   private readonly lastWokenAt = new Map<string, number>();
   /** Agents whose wake line was typed but whose Enter failed: their next wake sends only Enter. */
   private readonly wakeTyped = new Set<string>();
@@ -5341,6 +5341,7 @@ export class Daemon {
     this.supervised.delete(agentId);
     this.lastWokenAt.delete(agentId);
     this.wakeTyped.delete(agentId);
+    for (const [id, w] of this.wakes) if (w.agent === agentId) this.disarmWake(id);
     this.time.clearTimeout(a.reapTimer);
     const terminal = a.watch.state.status?.payload;
     await a.watch.close();
@@ -6169,6 +6170,8 @@ export class Daemon {
     void this.enqueue(async () => {
       if (this.supervised.get(agentId) !== a) return;
       await this.applyLiveness(agentId, a, observeSignal(a.liveness, sig));
+      // Out of idle, the prompt was submitted or cleared: no wake line is left typed.
+      if (a.liveness.activity !== "idle") this.wakeTyped.delete(agentId);
       // An agent already up when a steer was queued (no registration will deliver it): its next
       // hook signal does.
       if (this.supervised.get(agentId) === a)
@@ -9624,7 +9627,8 @@ export class Daemon {
       enterFailed = true;
     }
     w.woken = true;
-    this.lastWokenAt.set(w.agent, this.time.now());
+    // Only a submitted wake drains: after a failed Enter the next message still wakes.
+    if (!enterFailed) this.lastWokenAt.set(w.agent, this.time.now());
     await this.append(w.wave, {
       type: "agent_woken",
       task: w.task,

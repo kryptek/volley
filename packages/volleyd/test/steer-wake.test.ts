@@ -158,6 +158,70 @@ describe("steer wakes an idle agent", () => {
     });
   });
 
+  it("a failed Enter drains nothing: a steer whose window ends inside the failed wake's still wakes", async () => {
+    await setup();
+    await idle();
+    const sendKeys = s.host.sendKeys.bind(s.host);
+    let failEnter = true;
+    s.host.sendKeys = async (workspace, key, tokens) => {
+      if (key === "Enter" && failEnter) throw new Error("cmux: socket closed");
+      return sendKeys(workspace, key, tokens);
+    };
+    await steer();
+    await clock.advance(WAKE_MS / 2);
+    const next = await steer({ text: "and rebase first" });
+    await clock.advance(WAKE_MS / 2);
+    await s.event("agent_woken");
+    failEnter = false;
+    await clock.advance(WAKE_MS / 2);
+    await s.settled();
+    expect(woken()).toHaveLength(2);
+    expect(woken().at(-1)?.data).toEqual({
+      agent_id: AGENT,
+      reason: "mailbox",
+      message_id: next.message_id,
+    });
+    expect(wakes()).toHaveLength(1);
+    expect(s.host.keys.at(-1)?.key).toBe("Enter");
+  });
+
+  it("an agent that leaves idle after a failed Enter has no line left typed: its next wake types it again", async () => {
+    await setup();
+    await idle();
+    const sendKeys = s.host.sendKeys.bind(s.host);
+    let failEnter = true;
+    s.host.sendKeys = async (workspace, key, tokens) => {
+      if (key === "Enter" && failEnter) throw new Error("cmux: socket closed");
+      return sendKeys(workspace, key, tokens);
+    };
+    await steer();
+    await clock.advance(WAKE_MS);
+    await s.event("agent_woken");
+    failEnter = false;
+    // Someone submitted the line: the agent worked, then stopped again.
+    await s.hook("resumed.json");
+    await s.consumed();
+    await idle();
+    await steer({ text: "and rebase first" });
+    await clock.advance(WAKE_MS);
+    await s.event("agent_woken", 2);
+    expect(wakes()).toHaveLength(2);
+    expect(s.host.keys.at(-1)?.key).toBe("Enter");
+  });
+
+  it("a retired agent's wakes are dropped", async () => {
+    await setup();
+    await idle();
+    await steer();
+    await clock.advance(WAKE_MS);
+    await s.event("agent_woken");
+    const pending = () => (s.daemon as unknown as { wakes: Map<string, unknown> }).wakes.size;
+    expect(pending()).toBe(1);
+    await s.status("failed", { reason: "tests red" });
+    await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    expect(pending()).toBe(0);
+  });
+
   it("two steers sent together to an idle agent type one wake line: it drains both", async () => {
     await setup();
     await idle();
