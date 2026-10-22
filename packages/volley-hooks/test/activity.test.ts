@@ -25,7 +25,14 @@ afterEach(async () => {
   await broker.close();
 });
 
-const activities = (envs: Envelope[]) => envs.filter((e) => e.type === "activity");
+/** The work-log lines: `activity` ticks carrying a `msg` (a boundary alone carries none). */
+const activities = (envs: Envelope[]) =>
+  envs.filter((e) => e.type === "activity" && "msg" in (e.payload as object));
+/** The tool boundaries: `activity` ticks carrying a `tool_use_id` (a flushed line carries none). */
+const boundaries = (envs: Envelope[]) =>
+  envs
+    .filter((e) => e.type === "activity" && "tool_use_id" in (e.payload as object))
+    .map((e) => e.payload as Record<string, unknown>);
 /** The session the other fixtures (post-tool-use, stop, user-prompt-submit) were recorded in. */
 const SESSION = "7c984d76-0e0e-40d5-b9f1-777e9c0e6caa";
 const workLogFile = () => JSON.parse(readFileSync(join(dir, ".volley", "work-log.json"), "utf-8"));
@@ -67,6 +74,35 @@ describe("pre-tool-use activity ticks", () => {
       source: "harness-hook",
       seq: expect.any(Number),
       hook_event: "PreToolUse",
+      tool_use_id: "toolu_01ABCDEF",
+      tool: "Bash",
+    });
+    await progress.stop();
+  });
+
+  it("every call publishes its tool boundary, even inside the 5 s window; PostToolUse ends it", async () => {
+    const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
+    await preToolUse({ tool_use_id: "toolu_A", tool_input: { command: "first" } });
+    await tick(1000);
+    // Restart the window now, so a slow runner cannot let the second call's line through.
+    ageWindow(workLog().last_published_at - Date.now());
+    await preToolUse({ tool_use_id: "toolu_B", tool_input: { command: "bun run test" } });
+    await runHook(
+      "post-tool-use",
+      fixture("post-tool-use.json", dir, { tool_use_id: "toolu_B", tool_name: "Bash" }),
+      { cwd: dir },
+    );
+    await tick(150);
+    expect(boundaries(progress.envelopes)).toEqual([
+      expect.objectContaining({ hook_event: "PreToolUse", tool_use_id: "toolu_A", tool: "Bash" }),
+      expect.objectContaining({ hook_event: "PreToolUse", tool_use_id: "toolu_B", tool: "Bash" }),
+    ]);
+    // The second is inside the window: the boundary alone, its line held back.
+    expect(boundaries(progress.envelopes)[1]).not.toHaveProperty("msg");
+    expect(progress.envelopes.find((e) => e.type === "heartbeat")?.payload).toMatchObject({
+      hook_event: "PostToolUse",
+      tool_use_id: "toolu_B",
+      tool: "Bash",
     });
     await progress.stop();
   });
@@ -91,16 +127,14 @@ describe("pre-tool-use activity ticks", () => {
     await progress.stop();
   });
 
-  it("a tick inside the 5 s window opens no connection and is kept as pending", async () => {
+  it("a tick inside the 5 s window publishes no line and is kept as pending", async () => {
     const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
     await preToolUse({ tool_input: { command: "first" } });
-    await tick(100);
-    const before = broker.connections();
     await preToolUse({ tool_input: { command: "second" } });
     await preToolUse({ tool_input: { command: "third" } });
     await tick(150);
-    expect(broker.connections()).toBe(before);
     expect(activities(progress.envelopes)).toHaveLength(1);
+    expect(boundaries(progress.envelopes)).toHaveLength(3);
     expect(workLog()).toMatchObject({ tool_calls: 3, pending: "Bash: third" });
     await progress.stop();
   });
@@ -179,7 +213,7 @@ describe("a coalesced tick is published at the next slot", () => {
 });
 
 describe("a work-log failure is cosmetic: it never changes a hook's other output", () => {
-  it("pre-tool-use with work-log.lock held: exit 0, empty output, nothing published", async () => {
+  it("pre-tool-use with work-log.lock held: exit 0, empty output, the boundary but no line", async () => {
     holdLock("work-log.lock");
     const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
     const run = await preToolUse();
@@ -187,6 +221,9 @@ describe("a work-log failure is cosmetic: it never changes a hook's other output
     expect(run.stdout).toBe("");
     await tick(100);
     expect(activities(progress.envelopes)).toHaveLength(0);
+    expect(boundaries(progress.envelopes)).toEqual([
+      expect.objectContaining({ tool_use_id: "toolu_01ABCDEF" }),
+    ]);
     await progress.stop();
   });
 
