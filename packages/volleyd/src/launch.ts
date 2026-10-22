@@ -53,6 +53,30 @@ const mcpServersOf = (config: unknown): Record<string, unknown> => {
 };
 
 /**
+ * The repository's `.mcp.json` (`project`, parsed or null) cut to the servers the profile approved
+ * for it in its project entry (`local`): `enabledMcpjsonServers`, or every one under
+ * `enableAllProjectMcpServers`, less `disabledMcpjsonServers`. The file comes from the branch
+ * checked out (for a reviewer, a PR head a contributor controls), and copying an entry into a
+ * strict `--mcp-config` would skip Claude Code's own approval of it.
+ */
+export function approvedProjectServers(project: unknown, local: unknown): unknown {
+  if (project === null) return null;
+  const p = (local ?? {}) as Record<string, unknown>;
+  const names = (v: unknown) =>
+    Array.isArray(v) ? v.filter((n): n is string => typeof n === "string") : [];
+  const enabled = names(p.enabledMcpjsonServers);
+  const disabled = names(p.disabledMcpjsonServers);
+  const all = p.enableAllProjectMcpServers === true;
+  return {
+    mcpServers: Object.fromEntries(
+      Object.entries(mcpServersOf(project)).filter(
+        ([name]) => (all || enabled.includes(name)) && !disabled.includes(name),
+      ),
+    ),
+  };
+}
+
+/**
  * `agent_mcp_allow`: the entries `allow` names from `configs` (each a parsed `mcpServers` holder,
  * or null), a later source winning a name, and the names found in none. `volley` is volleyd's
  * own server, so it is neither copied nor missing.

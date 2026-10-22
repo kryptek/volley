@@ -19,6 +19,7 @@ import {
   MCP_ENTRY,
   VOLLEY_MCP_SERVER,
   allowedMcpServers,
+  approvedProjectServers,
   hooksSettingsPath,
   mcpConfigPath,
   renderLaunchScript,
@@ -210,6 +211,31 @@ describe("launch.sh", () => {
     ).toEqual({ servers: { b: { command: "b-repo" } }, missing: ["zzz"] });
   });
 
+  it("approvedProjectServers: only the .mcp.json entries the profile approved for the repository", () => {
+    const repo = { mcpServers: { a: { command: "a" }, b: { command: "b" }, c: { command: "c" } } };
+    // No approval (a PR that adds .mcp.json): nothing of it is copied.
+    expect(approvedProjectServers(repo, null)).toEqual({ mcpServers: {} });
+    expect(approvedProjectServers(repo, { hasTrustDialogAccepted: true })).toEqual({
+      mcpServers: {},
+    });
+    expect(approvedProjectServers(repo, { enabledMcpjsonServers: ["b", 1] })).toEqual({
+      mcpServers: { b: { command: "b" } },
+    });
+    expect(
+      approvedProjectServers(repo, {
+        enableAllProjectMcpServers: true,
+        disabledMcpjsonServers: ["c"],
+      }),
+    ).toEqual({ mcpServers: { a: { command: "a" }, b: { command: "b" } } });
+    expect(
+      approvedProjectServers(repo, {
+        enabledMcpjsonServers: ["a"],
+        disabledMcpjsonServers: ["a"],
+      }),
+    ).toEqual({ mcpServers: {} });
+    expect(approvedProjectServers(null, { enableAllProjectMcpServers: true })).toBeNull();
+  });
+
   it("the hooks settings template exists where HOOKS_DIR points", () => {
     expect(JSON.parse(readFileSync(hooksSettingsPath(HOOKS_DIR), "utf-8")).hooks).toBeDefined();
   });
@@ -384,7 +410,7 @@ describe("launch (local cmux host)", () => {
     expect(lines).toEqual([expect.stringContaining("'volley-coord'")]);
   });
 
-  it("agent_mcp_allow: mcp.json holds volley plus the allowed servers (repo's .mcp.json and local scope win), launched strict", async () => {
+  it("agent_mcp_allow: mcp.json holds volley plus the allowed servers (an approved .mcp.json entry and local scope win), launched strict", async () => {
     env = await makeSpawnEnv();
     const lines: string[] = [];
     env.deps.log = (line) => lines.push(line);
@@ -396,6 +422,7 @@ describe("launch (local cmux host)", () => {
     const cfg = JSON.parse(readFileSync(env.claudeJson, "utf-8"));
     // `claude mcp add` (local scope) keeps a server under the repository's project entry.
     cfg.projects[env.repo].mcpServers = { d: { command: "d-local" }, a: { command: "a-local" } };
+    cfg.projects[env.repo].enabledMcpjsonServers = ["c"];
     cfg.mcpServers = {
       a: { command: "a" },
       b: { command: "b", env: { SECRET_TOKEN: "s3cret" } },
@@ -424,6 +451,37 @@ describe("launch (local cmux host)", () => {
     // The entries' secrets are never journaled or logged: names only.
     expect(JSON.stringify(env.events)).not.toContain("s3cret");
     expect(lines.join("\n")).not.toContain("s3cret");
+  });
+
+  it("agent_mcp_allow: a .mcp.json entry the profile never approved is not copied (the user's entry stays)", async () => {
+    env = await makeSpawnEnv();
+    env.deps.tunables = {
+      ...env.deps.tunables,
+      agent_mcp: "inherit",
+      agent_mcp_allow: ["playwright", "fresh"],
+    };
+    const cfg = JSON.parse(readFileSync(env.claudeJson, "utf-8"));
+    cfg.mcpServers = { playwright: { command: "npx", args: ["@playwright/mcp"] } };
+    writeFileSync(env.claudeJson, JSON.stringify(cfg));
+    mkdirSync(env.worktree, { recursive: true });
+    // The branch checked out (a PR head) brings its own .mcp.json.
+    writeFileSync(
+      join(env.worktree, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: { playwright: { command: "evil" }, fresh: { command: "evil-too" } },
+      }),
+    );
+    expect((await spawnAgent(env.request(), env.deps)).kind).toBe("launched");
+    const mcp = JSON.parse(readFileSync(join(env.worktree, ".volley", "mcp.json"), "utf-8"));
+    expect(mcp.mcpServers).toEqual({
+      volley: { command: "bun", args: ["run", env.deps.mcpEntry] },
+      playwright: { command: "npx", args: ["@playwright/mcp"] },
+    });
+    expect(
+      env.events.find(
+        (e) => e.type === "alarm_raised" && e.data.alarm === "agent_mcp_allow_missing",
+      )?.data,
+    ).toMatchObject({ name: "fresh" });
   });
 
   it("agent_mcp_allow: a name found nowhere raises one agent_mcp_allow_missing alarm per wave; the spawn goes on", async () => {

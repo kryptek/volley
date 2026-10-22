@@ -1550,8 +1550,13 @@ machine's load). A non-empty list under `inherit` starts only those: volleyd cop
 entry into `.volley/mcp.json` after its own `volley` and launches with `--strict-mcp-config`
 again. It reads them where Claude Code would: the profile's `.claude.json` (`mcpServers`, user
 scope; then the repository's `projects.<repo>.mcpServers`, local scope) and the worktree's
-`.mcp.json` (project scope), the narrower scope winning a name (local over project over user). A
-paired machine's are read from its own `~/.claude.json` and worktree. A name found in none of them
+`.mcp.json` (project scope), the narrower scope winning a name (local over project over user).
+A `.mcp.json` entry is copied only when the profile approved it for the repository, as Claude Code
+asks before starting one: named in `projects.<repo>.enabledMcpjsonServers`, or under
+`enableAllProjectMcpServers: true`, and not in `disabledMcpjsonServers`. The file comes from the
+branch checked out (for a reviewer or a fixup, a PR head a contributor controls), and the strict
+copy would otherwise skip that approval; an unapproved entry is ignored, so the user's own entry
+of that name stays. A paired machine's are read from its own `~/.claude.json` and worktree. A name found in none of them
 is skipped (the spawn goes on), logged and journaled once per wave as
 `alarm_raised { alarm: "agent_mcp_allow_missing", name }`; servers a plugin or a claude.ai
 connector brings are in none of these files, so they cannot be allowed by name. A copied entry

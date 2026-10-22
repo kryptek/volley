@@ -36,6 +36,7 @@ import { type IssueData, fetchIssue, renderIssueMd } from "./issue";
 import {
   LAUNCH_COMMAND,
   allowedMcpServers,
+  approvedProjectServers,
   launchScriptPath,
   mcpConfigPath,
   renderLaunchScript,
@@ -564,7 +565,13 @@ async function launchAttempt(
   if (agentMcp === "inherit") {
     const sources = await userMcpSources(ctx);
     if (mcpAllow.length > 0) {
-      const allowed = allowedMcpServers(mcpAllow, sources);
+      // Only the .mcp.json entries the profile approved: the strict copy skips Claude Code's ask.
+      const [user, project, local] = sources;
+      const allowed = allowedMcpServers(mcpAllow, [
+        user,
+        { ...project, config: approvedProjectServers(project.config, local.config) },
+        local,
+      ]);
       mcpExtra = allowed.servers;
       await alarmMissingAllowed(ctx, allowed.missing);
     }
@@ -1181,13 +1188,16 @@ function saveScreen(ctx: Ctx, agentId: string, screen: string | null): string | 
   return path;
 }
 
+type McpSource = { source: string; config: unknown };
+
 /**
  * The MCP servers Claude Code would load for the agent under `agent_mcp: inherit`, lowest
  * precedence first: the profile's `.claude.json` user scope, the worktree's `.mcp.json` (project
- * scope), then the repository's local-scope entry in `.claude.json`. A paired machine's are its own. Their
- * entries may hold the user's secrets: only names ever leave this function's callers.
+ * scope), then the repository's local-scope entry in `.claude.json` (which also holds the
+ * `.mcp.json` approvals). A paired machine's are its own. Their entries may hold the user's
+ * secrets: only names ever leave this function's callers.
  */
-async function userMcpSources(ctx: Ctx): Promise<{ source: string; config: unknown }[]> {
+async function userMcpSources(ctx: Ctx): Promise<[McpSource, McpSource, McpSource]> {
   const { deps } = ctx;
   const profilePath = deps.remoteTrust !== undefined ? "~/.claude.json" : claudeJsonOf(ctx);
   const profile =

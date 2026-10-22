@@ -185,11 +185,17 @@ function MultiControl(p: {
   );
 }
 
-/** A list of free strings as one comma-separated field; a commit sends the whole new list. */
+/**
+ * A list of free strings as one comma-separated field; a commit sends the whole new list. A list
+ * over the schema's bounds (`maxItems`, an item's `maxLength`) is not sent: the field stays as typed
+ * and says why.
+ */
 function ListControl(p: {
   row: SchemaRow;
   value: unknown;
   disabled: boolean;
+  maxItems?: number;
+  maxLength?: number;
   onCommit: (v: string[]) => void;
 }) {
   const items = Array.isArray(p.value)
@@ -197,16 +203,27 @@ function ListControl(p: {
     : [];
   const current = items.join(", ");
   const [draft, setDraft] = useState(current);
+  const [invalid, setInvalid] = useState<string | null>(null);
   useEffect(() => setDraft(current), [current]);
   const commit = () => {
     const next = [...new Set(draft.split(",").map((v) => v.trim()))].filter((v) => v !== "");
-    if (next.join(", ") === current) return;
+    const { maxItems, maxLength } = p;
+    const over =
+      maxItems !== undefined && next.length > maxItems
+        ? `at most ${maxItems} names`
+        : maxLength !== undefined && next.some((v) => v.length > maxLength)
+          ? `a name is at most ${maxLength} characters`
+          : null;
+    setInvalid(over);
+    if (over !== null || next.join(", ") === current) return;
     p.onCommit(next);
   };
   return (
     <input
       className="cfg-text recessed mono"
       aria-label={p.row.label}
+      aria-invalid={invalid !== null}
+      title={invalid ?? undefined}
       value={draft}
       disabled={p.disabled}
       placeholder="none"
@@ -218,6 +235,7 @@ function ListControl(p: {
           // Drop the edit; the dialog stays open.
           e.stopPropagation();
           setDraft(current);
+          setInvalid(null);
         }
       }}
     />
@@ -413,6 +431,8 @@ export function ConfigRows({
           <ListControl
             row={row}
             value={shown}
+            {...(c.maxItems !== undefined ? { maxItems: c.maxItems } : {})}
+            {...(c.maxLength !== undefined ? { maxLength: c.maxLength } : {})}
             disabled={!(writable || draftOnly) || current === undefined}
             onCommit={(v) => commit(row, v, 0)}
           />

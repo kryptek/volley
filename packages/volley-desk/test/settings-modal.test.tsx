@@ -365,6 +365,23 @@ describe("Settings › Supervisor (global config rows)", () => {
     });
   });
 
+  it("does not send a list tunable over the schema's bounds; the field says why", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk" }));
+    const box = screen.getByRole("textbox", { name: "Agent MCP allow" });
+    fireEvent.change(box, { target: { value: `ok, ${"x".repeat(129)}` } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    expect(box.getAttribute("aria-invalid")).toBe("true");
+    expect(box.getAttribute("title")).toMatch(/at most 128 characters/);
+    const many = Array.from({ length: 65 }, (_, i) => `s${i}`).join(", ");
+    fireEvent.change(box, { target: { value: many } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    expect(box.getAttribute("title")).toMatch(/at most 64 names/);
+    expect(f.published).toHaveLength(0);
+  });
+
   it("sends a switch tunable on a click and a choice tunable on a pick", async () => {
     const f = fakeClient();
     const fleet = { ...config, require_fresh_base: true, placement: { nudge_on_merge: "files" } };
