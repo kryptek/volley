@@ -4505,13 +4505,14 @@ export class Daemon {
     const cfg = this.config.effective();
     const own = this.ownRecord;
     if (own === undefined || !(own.cores > 0)) return;
-    const hot =
-      Object.keys(cfg.hosts).length > 0 &&
-      overloadLoad(own) / own.cores > cfg.placement.load_per_core_max;
+    const perCore = overloadLoad(own) / own.cores;
     for (const [wave, log] of this.runningWaves()) {
       // After a restart the journal says whether it was raised, or raised and cleared, already.
       const known = this.peerIdleWarned.get(wave) ?? peerIdleAlarmState(log.journal.readAll());
       this.peerIdleWarned.set(wave, known);
+      // Overloaded by the wave's own threshold (its `config:` may set one), as it was raised.
+      const placement = this.config.effective(wave).placement;
+      const hot = Object.keys(cfg.hosts).length > 0 && perCore > placement.load_per_core_max;
       if (known === "cleared" || (known === "none" && !hot)) continue;
       const local = (log.record.plan ?? log.record.wave)?.placement !== AUTO_HOST;
       // Only the load clears it: a peer's verdict settling after a restart is no all-clear.
@@ -4523,9 +4524,7 @@ export class Daemon {
       }
       if (!local) continue;
       const gate = admissionFor(log.record, this.killSwitch, this.pressure(wave));
-      const idle = peerIdleUnderLoad(this.placementSnapshot(gate, cfg), {
-        placement: this.config.effective(wave).placement,
-      });
+      const idle = peerIdleUnderLoad(this.placementSnapshot(gate, cfg), { placement });
       if (idle !== null) {
         this.peerIdleWarned.set(wave, "raised");
         await this.append(wave, {
@@ -8850,7 +8849,8 @@ export class Daemon {
    * What a wave file without `placement:` takes: `placement.default` once a machine is paired
    * (SPEC §4.6.15). Decided when the wave is first submitted: a later plan version of a known
    * wave keeps the placement its current plan has, so pairing or unpairing a machine mid-wave
-   * never moves a running task's next role.
+   * never moves a running task's next role. (`paired: 1` only lets that kept placement resolve
+   * as `auto`; a version's own `placement:` or `config: placement.default` still wins over it.)
    */
   private placementDefaults(wave?: WaveId): PlacementDefaults {
     const rec = wave === undefined ? undefined : this.waves.get(wave)?.record;

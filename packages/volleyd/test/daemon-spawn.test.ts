@@ -1086,6 +1086,25 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       expect(cleared("w1")).toHaveLength(1);
     });
 
+    it("a wave's own lower load_per_core_max holds the alarm: not cleared on the next tick", async () => {
+      localClaude = true;
+      perCore = 1.2;
+      await setup({ os: HOT_OS });
+      await submit(
+        "w1",
+        "placement: local\nconfig:\n  placement:\n    load_per_core_max: 1.0\n",
+        "  T1: { issue: 42 }\n",
+      );
+      await tick();
+      expect(alarms("w1")).toHaveLength(1);
+      await resample();
+      await resample();
+      expect(cleared("w1")).toHaveLength(0);
+      perCore = 0.5;
+      await resample();
+      expect(cleared("w1")).toHaveLength(1);
+    });
+
     it("a restart does not raise it again: the journal says it was raised", async () => {
       localClaude = true;
       perCore = 10;
