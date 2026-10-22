@@ -149,6 +149,8 @@ export interface TaskPipeline {
    * step started): a normal push, and its head must descend from the step's start.
    */
   branch_update?: "merge" | undefined;
+  /** The rebase step was entered because GitHub reported the PR CONFLICTING (`pr_conflicting`). */
+  conflicting?: true | undefined;
   runs: Partial<Record<Role, RoleRun>>;
   /** The PR's head branch (the implementer's). */
   branch?: string;
@@ -382,14 +384,20 @@ export function reducePipeline(
     case "stage_entered":
       p.why = typeof d.why === "string" ? d.why : undefined;
       if (Array.isArray(d.roles)) {
-        // A flake's fix taken (landedFix): where the pipeline goes on once the update is verified.
-        // Read before p.rebasing is overwritten below: a parked pre-gate update resumes at the gate.
+        // A flake's fix taken (landedFix), or a conflicting PR brought up to date (onVerified):
+        // where the pipeline goes on once the update is verified. Read before p.rebasing is
+        // overwritten below: a parked pre-gate update resumes at the gate.
         p.fix_resume =
-          typeof d.fix_landed === "string" ? (p.rebasing ? "gate" : "next") : undefined;
+          typeof d.fix_landed === "string" || d.conflicting === true
+            ? p.rebasing
+              ? "gate"
+              : "next"
+            : undefined;
         p.step = d.step as number;
         p.roles = (d.roles as unknown[]).filter(isRole);
         p.rebasing = d.rebase === true;
         p.branch_update = p.rebasing && d.branch_update === "merge" ? "merge" : undefined;
+        p.conflicting = p.rebasing && d.conflicting === true ? true : undefined;
         p.rereview = [];
         if (typeof d.review_round === "number") p.round = d.review_round;
         if (typeof d.directive === "object" && d.directive !== null) ciFixupEntered(p, d);
@@ -402,6 +410,7 @@ export function reducePipeline(
         p.roles = ["implementer"];
         p.rebasing = false;
         p.branch_update = undefined;
+        p.conflicting = undefined;
       }
       break;
     case "merge_queued":
@@ -569,6 +578,24 @@ export function reducePipeline(
             : {}),
         };
       break;
+    case "pr_conflicting": {
+      // GitHub runs no CI on the head: no hold. The update step starts from it (never verified).
+      p.ci_hold = undefined;
+      // A fixup's head is still its fixup: the reviews it fixed hold through the update after it.
+      const run = role === "fixup" ? p.runs.fixup : undefined;
+      if (run !== undefined && typeof d.head === "string")
+        p.fixups.push({
+          round: p.round,
+          ...(run.start !== undefined ? { from: run.start } : {}),
+          to: d.head,
+          ...(run.result !== undefined ? { result: run.result } : {}),
+          ...(run.worktree !== undefined ? { worktree: run.worktree } : {}),
+        });
+      if (typeof d.head === "string") p.head = d.head;
+      if (p.pr === undefined && typeof d.pr === "object" && d.pr !== null)
+        p.pr = d.pr as { number: number; url: string };
+      break;
+    }
     case "remediation_requested":
       if (d.kind === "fix_flake" && isRole(role) && typeof d.head === "string")
         p.remediation = {
@@ -1809,33 +1836,36 @@ function onVerified(
           report: ev.report as OkReport,
         },
       ];
-    case "ci_pending": {
-      const grace = ev.waited_ms !== undefined && ev.waited_ms >= DAEMON_DEFAULTS.ci_none_grace_ms;
-      if (out.state === "none" && grace) {
-        const touched = ev.report.kind === "ok" ? ev.report.touched : undefined;
-        return [
-          ...retireIfLive(run),
-          {
-            kind: "decide",
-            marker: {
-              on: "ci_none",
+    case "ci_pending":
+      return noCiYet(v, ev, run, out.state, out.head);
+    case "conflicting": {
+      // An update step's own head that still conflicts is not updated again (that could loop):
+      // it waits like any head with no CI, and the owner is asked once the grace has passed.
+      if (ev.role === "rebase") return noCiYet(v, ev, run, "none", out.head);
+      // GitHub runs no CI on a PR that conflicts with its base: bring it up to date now, at the
+      // head the agent pushed (never verified), as a behind > 0 rebase check would.
+      const [entered, spawn] = enterRebase(
+        { ...v, p: { ...v.p, head: out.head, pr: v.p.pr ?? out.pr } },
+        { conflicting: true },
+      );
+      return [
+        {
+          kind: "journal",
+          event: {
+            type: "pr_conflicting",
+            task: v.task,
+            data: {
               role: ev.role,
+              pr: out.pr,
               head: out.head,
-              ...(touched !== undefined ? { touched } : {}),
-            },
-            decision: {
-              kind: "ci_failed",
-              task: v.task,
-              question: `No CI run exists for ${out.head.slice(0, 12)} after ${Math.round((ev.waited_ms ?? 0) / 60_000)} min. Check the repository's workflows (and the hosting provider's status page). Accept the head without CI, or cancel?`,
-              ...(ev.report.kind === "ok" ? { pointers: { pr: ev.report.pr.url } } : {}),
-              options: ["accept", "cancel"],
+              release_branch: v.release_branch,
             },
           },
-        ];
-      }
-      // The pushed work is in place; CI is re-checked on later ticks. The agent is done — the
-      // hold is the pipeline's, and it says so (once per change of head or counts).
-      return [...ciPending(v, ev, out.head), ...retireIfLive(run)];
+        },
+        ...retireIfLive(run),
+        ...(entered !== undefined ? [entered] : []),
+        ...(spawn !== undefined ? [spawn] : []),
+      ];
     }
     case "verified":
       return [
@@ -1866,6 +1896,48 @@ function onVerified(
         ...retireIfLive(run),
       ];
   }
+}
+
+/** A pushed head CI has not settled on (running, or no run yet: the owner is asked after the grace). */
+function noCiYet(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "verified" }>,
+  run: RoleRun,
+  state: "running" | "none",
+  head: string,
+): PipelineAction[] {
+  const grace = ev.waited_ms !== undefined && ev.waited_ms >= DAEMON_DEFAULTS.ci_none_grace_ms;
+  if (state === "none" && grace) {
+    const touched = ev.report.kind === "ok" ? ev.report.touched : undefined;
+    const minutes = Math.round((ev.waited_ms ?? 0) / 60_000);
+    // Only an update step's own head gets here conflicting: that, not the workflows, is the cause.
+    const question =
+      ev.report.kind === "ok" && ev.report.pr.mergeable === "CONFLICTING"
+        ? `The PR still conflicts with ${v.release_branch} at ${head.slice(0, 12)} after its branch-update step, so no CI has run for ${minutes} min. Resolve the conflict and push, then accept the head without CI, or cancel?`
+        : `No CI run exists for ${head.slice(0, 12)} after ${minutes} min. Check the repository's workflows (and the hosting provider's status page). Accept the head without CI, or cancel?`;
+    return [
+      ...retireIfLive(run),
+      {
+        kind: "decide",
+        marker: {
+          on: "ci_none",
+          role: ev.role,
+          head,
+          ...(touched !== undefined ? { touched } : {}),
+        },
+        decision: {
+          kind: "ci_failed",
+          task: v.task,
+          question,
+          ...(ev.report.kind === "ok" ? { pointers: { pr: ev.report.pr.url } } : {}),
+          options: ["accept", "cancel"],
+        },
+      },
+    ];
+  }
+  // The pushed work is in place; CI is re-checked on later ticks. The agent is done — the
+  // hold is the pipeline's, and it says so (once per change of head or counts).
+  return [...ciPending(v, ev, head), ...retireIfLive(run)];
 }
 
 /** The `ci_pending` event for a verification whose CI is still running (or has no run yet). */
@@ -2773,6 +2845,7 @@ function spawnFor(v: PipelineView, role: Role): PipelineAction {
     pr_url: v.p.pr?.url ?? "",
     head,
     release_branch: v.release_branch,
+    ...(role === "rebase" && v.p.conflicting === true ? { conflicting: true as const } : {}),
   };
   if (isReviewerRole(role)) {
     return {
@@ -2958,10 +3031,14 @@ function enterStep(
   ];
 }
 
-function enterRebase(v: PipelineView): PipelineAction[] {
+/** `conflicting`: GitHub reported the PR CONFLICTING (`pr_conflicting`); the step's brief says so. */
+function enterRebase(v: PipelineView, o: { conflicting?: true } = {}): PipelineAction[] {
   const merge = v.branch_update === "merge";
   // spawnFor reads the step's mode, which the stage_entered below fixes.
-  const after: PipelineView = { ...v, p: { ...v.p, branch_update: merge ? "merge" : undefined } };
+  const after: PipelineView = {
+    ...v,
+    p: { ...v.p, branch_update: merge ? "merge" : undefined, conflicting: o.conflicting },
+  };
   return [
     {
       kind: "journal",
@@ -2975,6 +3052,7 @@ function enterRebase(v: PipelineView): PipelineAction[] {
           rebase: true,
           // The mode is the step's from here on: a config change reaches the next step only.
           ...(merge ? { branch_update: "merge" } : {}),
+          ...(o.conflicting === true ? { conflicting: true } : {}),
         },
       },
     },
@@ -3072,7 +3150,18 @@ interface BriefCtx {
   pr_url: string;
   head: string;
   release_branch: string;
+  /** The update step is for a PR GitHub reports CONFLICTING. */
+  conflicting?: true;
 }
+
+/** The line that opens an update step's `.volley/rebase.md` for a conflicting PR, or none. */
+const conflictLines = (c: BriefCtx): string[] =>
+  c.conflicting === true
+    ? [
+        `GitHub reports that the PR conflicts with \`${c.release_branch}\`: it runs no CI on it until the conflicts are resolved and pushed.`,
+        "",
+      ]
+    : [];
 
 /** `.volley/review.md`: what to review (the PR's diff at one head) and how to report. */
 function renderReviewMd(role: ReviewerRole, c: BriefCtx): string {
@@ -3099,6 +3188,7 @@ function renderRebaseMd(c: BriefCtx): string {
   return [
     "# Rebase",
     "",
+    ...conflictLines(c),
     `\`${c.release_branch}\` moved since \`${c.pr_branch}\` branched from it. This worktree starts at the PR head \`${c.head}\`.`,
     "",
     `    git fetch origin ${c.release_branch}`,
@@ -3121,6 +3211,7 @@ function renderMergeMd(c: BriefCtx): string {
   return [
     "# Merge",
     "",
+    ...conflictLines(c),
     `\`${c.release_branch}\` moved since \`${c.pr_branch}\` branched from it. This worktree starts at the PR head \`${c.head}\`.`,
     "",
     `    git fetch origin ${c.release_branch}`,
@@ -3941,7 +4032,13 @@ export class PipelineDriver {
         };
     }
     let waited: number | undefined;
-    if (report.kind === "ok" && report.ci.state === "none") {
+    // A conflicting PR gets no CI at all: its update step starts instead, with no clock.
+    // (An update step's own conflicting head is not updated again: it waits, and is asked about.)
+    if (
+      report.kind === "ok" &&
+      report.ci.state === "none" &&
+      (report.pr.mergeable !== "CONFLICTING" || role === "rebase")
+    ) {
       const key = `${task}/${report.head}`;
       const first = this.noCiSince.get(key) ?? this.now();
       this.noCiSince.set(key, first);
