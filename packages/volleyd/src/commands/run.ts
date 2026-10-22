@@ -6,10 +6,9 @@ import { type ControlTarget, resolveControlTarget, withClient } from "../control
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { resolveCaller } from "../ownership";
 import { formatDiff } from "../plan-diff";
-import type { WaveState } from "../types";
-import { parseWaveFile } from "../wave-file";
+import type { Wave, WaveState } from "../types";
 import { formatWave } from "./status";
-import { places, previewPlacement } from "./validate";
+import { parseWithPlacement, placementDefaults, places, previewPlacement } from "./validate";
 
 const HELP = `Usage: volleyd run <wave.yaml> [--owner <name|agent-id>] [--json] [--broker-url <url>] [--namespace <ns>]
 
@@ -27,7 +26,8 @@ daemon stores it as $VOLLEYD_HOME/waves/<wave>/v<N>.yaml, journals the structura
 it (added tasks queue, removed queued tasks cancel, in-flight tasks get a plan_change decision).
 Preview the diff with \`volleyd diff <wave> <wave.yaml>\`.
 A wave that places tasks (\`placement: auto\`, or a task's \`host: auto\`) also prints where its
-tasks would go if admitted now (as \`volleyd validate\` does); each is placed at admission.
+tasks would go if admitted now (as \`volleyd validate\` does; a later version only when its file
+sets placement:); each is placed at admission.
 `;
 
 /** Printed when `run` submits a wave with no owner (SPEC §4.6.20). */
@@ -56,12 +56,19 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
 
   // Validate locally first: a bad file fails fast, with or without a daemon.
   let text: string;
-  let wave: ReturnType<typeof parseWaveFile>;
+  let wave: Wave;
   let playbookLine: string;
+  let placementLine: string;
+  let placementFromFile: boolean;
   try {
     text = await readFile(file, "utf-8");
-    wave = parseWaveFile(text, file);
-    // The release playbook as read here (the daemon reads it again and is authoritative).
+    // Placement and the release playbook as read here (the daemon decides both again, and is
+    // authoritative).
+    ({
+      wave,
+      placementLine,
+      fromFile: placementFromFile,
+    } = parseWithPlacement(text, file, placementDefaults(env)));
     const playbook = wavePlaybook(wave);
     playbookLine = `${formatPlaybook(playbook?.display ?? null, playbook?.playbook ?? null)}\n`;
   } catch (e) {
@@ -88,20 +95,24 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
     }
     const state = res.result as WaveState;
     const warnings = (res.warnings ?? []).map((w) => `warning: ${w}\n`).join("");
-    // Where its auto tasks would go if admitted now (the daemon places each at admission).
+    // Where its auto tasks would go if admitted now (the daemon places each at admission). A later
+    // version without placement: keeps the wave's own, which this parse cannot know: no preview.
+    const preview = places(wave) && (res.plan === undefined || placementFromFile);
     const placement =
-      parsed.values.json !== true && places(wave) ? await previewPlacement(wave, target) : "";
+      parsed.values.json !== true && preview ? await previewPlacement(wave, target) : "";
     if (parsed.values.json === true) {
       io.stdout(`${JSON.stringify(state, null, 2)}\n`);
       io.stderr(warnings);
     } else if (res.plan !== undefined) {
+      // A later version without placement: keeps the wave's own (SPEC §4.6.15): no default line.
+      const placed = placementFromFile ? placementLine : "";
       io.stdout(
-        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${warnings}${playbookLine}${placement}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
+        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${warnings}${playbookLine}${placed}${placement}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
       );
     } else {
       const auto = owner.auto ? " (auto)" : "";
       io.stdout(
-        `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${warnings}${playbookLine}${placement}${formatWave(state)}`,
+        `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${warnings}${playbookLine}${placementLine}${placement}${formatWave(state)}`,
       );
     }
     return EXIT.OK;

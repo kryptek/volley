@@ -708,6 +708,8 @@ interface RedeemRequest {
   port?: number;
   os?: string;
   cores?: number;
+  /** Total memory: with `cores`, what volleyd derives the machine's `max_agents` from. */
+  memory_total_mb?: number;
   /** Re-pairing with a code from `invite --for <name>`: replace the account and hosts entry. */
   replace?: true;
 }
@@ -835,6 +837,7 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
 
   // 2. On the host: check it can ssh back here (every spawn on this machine needs it), then
   // redeem the code (its volleyd creates the peer account and hosts.<name>).
+  const totalMem = deps.totalmem();
   const request: RedeemRequest = {
     code,
     name,
@@ -844,6 +847,8 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
     port,
     os: deps.platform,
     cores: deps.cpus(),
+    // Only a size it can read: an unknown one leaves max_agents unset (4).
+    ...(totalMem > 0 ? { memory_total_mb: memoryOf(totalMem, 0).total_mb } : {}),
     ...(v.replace === true ? { replace: true as const } : {}),
   };
   const remoteVolley = v["remote-volley"] ?? null;

@@ -1,5 +1,7 @@
 import { basename } from "node:path";
+import { derivedMaxAgents } from "volley-cli/peer/machine";
 import type { Sharing } from "./claude/sharing";
+import { REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import { PATH_PROBE_TOOLS } from "./fence";
 import { type MachineRecord, machineTopic } from "./machines";
 import { type FilterOptions, type MachineView, localRole, machineIneligible } from "./placement";
@@ -34,6 +36,21 @@ export type PathProbe = Record<PathTool, boolean>;
 /** One reason or ineligible_reason line, at most (readiness.schema.json). */
 const LINE_MAX = 200;
 const REASONS_MAX = 32;
+
+/**
+ * A peer's `max_agents` (SPEC §4.6.15): its `hosts.<name>.max_agents` when set, else derived from
+ * its record's cores and total memory (as `join` derives it), else 4 when its size is unknown.
+ */
+export function peerMaxAgents(
+  configured: number | undefined,
+  record: Pick<MachineRecord, "cores" | "memory"> | undefined,
+): number {
+  return (
+    configured ??
+    derivedMaxAgents(record?.cores, record?.memory?.total_mb) ??
+    REMOTE_HOST_DEFAULTS.max_agents
+  );
+}
 
 export interface ReadinessInput {
   name: string;

@@ -565,6 +565,22 @@ describe("volley peer doctor: machine and secrets", () => {
     expect(check(r, "machine.disk")).toMatchObject({ ok: true, severity: "warn" });
   });
 
+  it("the machine row names the max_agents volleyd derives from its size at join (#324)", async () => {
+    const m = machine();
+    const sized = async (over: Partial<DoctorDeps>) =>
+      JSON.parse((await run(m, { json: true }, over)).stdout) as DoctorReport;
+    const big = await sized({ cpus: () => 32, totalmem: () => 61_440 * 1024 ** 2 });
+    expect(check(big, "machine.size")).toMatchObject({
+      ok: true,
+      severity: "warn",
+      detail: "max_agents 10 (derived from 32 cores, 60 GB)",
+    });
+    const small = await sized({ cpus: () => 10, totalmem: () => 32 * 1024 ** 3 });
+    expect(check(small, "machine.size")?.detail).toBe(
+      "max_agents 3 (derived from 10 cores, 32 GB)",
+    );
+  });
+
   it("on macOS the memory comes from vm_stat: free + inactive + speculative + purgeable pages", async () => {
     const m = machine({ platform: "darwin", vmStat: VM_STAT_MAC_16GB });
     const r = await report(m);

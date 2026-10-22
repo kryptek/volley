@@ -86,6 +86,21 @@ describe("ConfigStore layering", () => {
     expect(c.get("placement.nudge_on_merge", "w2")).toBe("all");
   });
 
+  it("placement.default: auto by default, layers like any tunable, set hot and refused outside local | auto", () => {
+    expect(open().get("placement.default")).toBe("auto");
+    writeFileSync(join(home, "config.yaml"), "placement:\n  default: local\n");
+    const c = open();
+    c.setWaveOverrides("w1", { placement: { default: "auto" } });
+    expect(c.get("placement.default", "w1")).toBe("auto");
+    expect(c.get("placement.default", "w2")).toBe("local");
+    expect(c.applyPatch({ placement: { default: "auto" } } as never, "x").applied).toBe(true);
+    expect(c.get("placement.default", "w2")).toBe("auto");
+    const r = c.applyPatch({ placement: { default: "remote" } } as never, "x");
+    expect(r.applied).toBe(false);
+    expect(r.rejected.map((e) => e.path)).toEqual(["placement.default"]);
+    expect(c.get("placement.default", "w2")).toBe("auto");
+  });
+
   it("rejects an unknown path in get()", () => {
     expect(() => open().get("nope")).toThrow(/unknown config path 'nope'/);
   });

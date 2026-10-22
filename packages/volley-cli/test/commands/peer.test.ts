@@ -362,6 +362,20 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(plain.request.replace).toBeUndefined();
   });
 
+  it("a machine whose total memory reads 0 sends no memory_total_mb: its size stays unknown (#324)", async () => {
+    const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec, { totalmem: () => 0 }),
+    );
+    expect(r.exitCode).toBe(0);
+    const { request } = redeemRequest(
+      f.calls.filter((c) => c.argv[0] === "ssh")[1]?.input as string,
+    );
+    expect(request.cores).toBe(8);
+    expect(request.memory_total_mb).toBeUndefined();
+  });
+
   it("runs every remote step as a script under bash -s, writes peer.json, installs the service, prints trust, registers", async () => {
     const repo = box.repoPath;
     rmSync(join(home, ".claude.json"));
@@ -403,6 +417,8 @@ describe("volley peer join (on the machine to pair)", () => {
       port: 21883,
       os: "linux",
       cores: 8,
+      // With cores, what volleyd sizes the machine's max_agents from (#324).
+      memory_total_mb: 16384,
     });
 
     // peer.json, mode 0600, with the account.

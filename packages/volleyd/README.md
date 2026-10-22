@@ -119,7 +119,8 @@ tasks:
 # config: { hard_ceiling: 4 }  # per-wave overrides of any tunable but lease_pools (see Configuration)
 # brief_preface: .volley/brief-preface.md  # the default; relative to repo, or absolute (see Brief preface)
 # account: work              # the Claude account its agents run under (see Claude accounts)
-# placement: auto            # place every task without a host: across machines (see Fleet: placement)
+# placement: auto            # place every task without a host: across machines, or local to keep
+#                            # them here; default: placement.default (auto once a machine is paired)
 # placement_prefer: [box-a]  # machines placement ranks first
 # placement_avoid: [box-c]   # machines placement uses only when nothing else is eligible
 # merge: manual              # who merges a gated PR: auto (volleyd, at exactly the gated head) or
@@ -128,7 +129,7 @@ tasks:
 
 Per task: `issue` (required), `after`, `pipeline`, `model`, `title`, `host` (where its agents run:
 `local`, a configured host's name, an inline ssh host, or `auto` to have volleyd place it; default
-`local`, or `auto` under `placement: auto`), `heavy` (`true`: placement needs a free per-machine
+`auto` when the wave's placement is `auto`, else `local`), `heavy` (`true`: placement needs a free per-machine
 slot in each of the wave's `heavy_pools`), `account` (overrides the wave's; see
 [Claude accounts](#claude-accounts)), and `files` (a scheduling hint: paths the task will touch;
 tasks overlapping active ones start later).
@@ -1437,6 +1438,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
 | `require_fresh_base` | spawns after the change ([base ref](#base-ref)) | worktrees already cut untouched |
 | `retire_close_session` | retires after the change ([retire and cleanup](#retire-and-cleanup)) | sessions already kept open stay open |
+| `placement.default` | the next submitted wave without `placement:` ([the default](#fleet-placement)) | waves already submitted, and their later plan versions, keep their placement |
 | `placement.nudge_on_merge` | the next merge ([the merge nudge](#the-pipeline-and-the-merge-ready-gate)) | nudges already sent stand |
 | `fleet.local_agents`, `fleet.fallback.*` | the next placement ([the supervisor's own machine as a fallback](#the-supervisors-own-machine-as-a-fallback)) | agents already on this machine keep running there; nothing is moved |
 | `autopilot.merge` | the next gate of a wave whose file has no `merge:` ([autopilot merging](#autopilot-merging)) | a gate already entered keeps the mode its evidence names until it is gated again |
@@ -2343,8 +2345,14 @@ and journals nothing for a machine that did not change: the first verdict with i
 compared with the last journaled one, or, when there is none, is the baseline.
 `peer_remove`, or a host leaving the config, clears the verdict.
 
-**Caps and drain.** `hosts.<name>.max_agents` (1 to 100, default 4) and `hosts.<name>.drain`
-(default `false`) are validated by `config_set`, applied hot and journaled as `config_changed`:
+**Caps and drain.** `hosts.<name>.max_agents` (1 to 100) and `hosts.<name>.drain` (default
+`false`) are validated by `config_set`, applied hot and journaled as `config_changed`. A join
+writes `max_agents` from the machine's size: `clamp(min(floor(cores / 3), floor(memory_total_mb /
+4096)), 2, 16)`, so a 32-core / 60 GB box gets 10 and a 10-core / 32 GB laptop 3. Left unset (a
+machine paired before this, or configured by hand), volleyd derives it the same way from the
+machine record, and uses 4 when the record has no memory figure. An explicit value always wins,
+and a re-pairing keeps it. `volley peer doctor` shows the figure on its `machine.size` row
+(`max_agents 10 (derived from 32 cores, 60 GB)`):
 
 ```sh
 volleyd config set hosts.box-a.max_agents 2
@@ -2384,9 +2392,39 @@ the box's non-interactive ssh PATH: on a box whose PATH probe finds no `bun` (an
 
 ## Fleet: placement
 
-Placement (SPEC §4.6.15) is opt-in: a wave's `placement: auto` places every task that does not
-name a host, and a task's `host: auto` is placed in any wave. Every other task runs where its
-`host:` says, and a wave with neither runs exactly as before (nothing is journaled for it).
+Placement (SPEC §4.6.15): a wave's `placement: auto` places every task that does not name a host,
+and a task's `host: auto` is placed in any wave. Every other task runs where its `host:` says, and
+a `placement: local` wave with no `host: auto` task runs on the supervisor's own machine (nothing
+is journaled for it).
+
+**The default.** A wave file without `placement:` takes `placement.default` (`auto` by default;
+the wave's own `config: { placement: { default } }` wins over config.yaml's) once a paired
+machine, a `hosts.<name>`, is configured, and `local` while none is: an owner who paired a
+machine has it used, and `placement: local` (or `volleyd config set placement.default local`)
+keeps a wave here. volleyd decides it when the wave is first submitted, and the journaled wave
+keeps the hosts it got: a later plan version without `placement:` keeps the wave's placement, so
+pairing or unpairing a machine mid-wave never moves a running task's next role. `volleyd validate` and `run` print the outcome:
+
+```text
+placement: auto (placement.default; 1 paired machine)
+placement: local (no paired machine)
+placement: local (placement.default)
+placement: auto (wave file)
+```
+
+**Overloaded while a peer idles.** A running `placement: local` wave on a supervisor whose own
+load per core (the higher of its 1- and 5-minute load averages) is over
+`placement.load_per_core_max`, while a peer is ready, not draining, not down and has free
+`max_agents` slots, journals once `alarm_raised { alarm: "peer_idle_under_load", peer, free,
+message }`, and `alarm_cleared` once the supervisor's load per core is back under the threshold
+(it is not raised again for that wave). While it holds, the wave state carries it in `alarms`, `volleyd status` shows it under the wave's
+header and the digest lists it under `## Alarms`:
+
+```text
+  ! peer_idle_under_load: this machine is overloaded (load 130.0 on 10 cores, max 1.5 per core) while box-a is ready with 10 free agent slots; this wave is placement: local (set placement: auto to use it)
+```
+
+An `auto` wave raises none (placement uses the peer itself), nor does a drained peer.
 
 **When.** A task is placed once, when the scheduler admits it, and never moved afterwards: every
 role of the task (implementer, reviewers, fixup, rebase) runs on that host. volleyd journals
@@ -2497,7 +2535,7 @@ if admitted now: T1 → box-a (0.85), T3 → local (0.58)
       box-b    -     ineligible: draining
 ```
 
-Tunables (`config set`, hot): `placement.load_per_core_max`, `placement.mem_available_min_pct`,
+Tunables (`config set`, hot): `placement.default` (`local` | `auto`), `placement.load_per_core_max`, `placement.mem_available_min_pct`,
 `placement.disk_free_min_gb`, `placement.weights.{cpu,slots,mem,usage}` (not all four 0).
 A machine that stays down, re-placement and drain are the owner's decisions (next section):
 nothing running is ever moved.

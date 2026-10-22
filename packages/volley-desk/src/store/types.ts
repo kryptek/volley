@@ -605,6 +605,8 @@ export interface DigestPayload {
   }[];
   release?: WaveRelease;
   failures: { task: string; why: string }[];
+  /** The wave's own alarms (`peer_idle_under_load`); absent: none. */
+  alarms?: { alarm: string; message: string }[];
 }
 
 // ------------------------------------------------------------------- store

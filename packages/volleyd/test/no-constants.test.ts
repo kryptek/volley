@@ -31,12 +31,20 @@ function sourceFiles(dir: string): string[] {
  */
 const OPAQUE = new Set(["lease_pools", "weights", "per_machine", "per_machine_overrides"]);
 
+/**
+ * Tunable names that are plain English words a line uses for other things (`placement.default`:
+ * "default 30000" in a help text); their values are strings, so no number could hard-code them.
+ */
+const GENERIC = new Set(["default"]);
+
 /** Every tunable key, including nested ones (admission.*, mailbox.*). */
 function tunableKeys(obj: Record<string, unknown>): string[] {
   return Object.entries(obj).flatMap(([k, v]) =>
     typeof v === "object" && v !== null && !Array.isArray(v) && !OPAQUE.has(k)
       ? [k, ...tunableKeys(v as Record<string, unknown>)]
-      : [k],
+      : GENERIC.has(k)
+        ? []
+        : [k],
   );
 }
 

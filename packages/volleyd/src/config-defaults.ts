@@ -52,6 +52,8 @@ export const CONFIG_DEFAULTS: Tunables = {
   retire_close_session: true,
   placement: {
     nudge_on_merge: "files",
+    // a wave file without placement: (wave-file.ts defaultPlacement)
+    default: "auto",
     // --- Fleet: placement engine (placement.ts, SPEC §4.6.15) ---
     load_per_core_max: 1.5,
     mem_available_min_pct: 10,

@@ -169,6 +169,8 @@ export interface Facts {
   };
   claude: { state: AuthClaude; plan: string | null; trust: AuthTrust };
   machine: {
+    /** Logical CPUs (the size a paired machine's derived `max_agents` reads). */
+    cores: number;
     memory: Memory;
     disk: Disk | null;
     limits: { mem_low_pct: number; disk_low_gb: number };
@@ -222,6 +224,7 @@ export interface DoctorDeps {
   now: () => Date;
   totalmem: () => number;
   freemem: () => number;
+  cpus: () => number;
   uptime: () => number;
   /** `fs.statfs` of an existing path; null when it cannot be read. */
   statfs: (path: string) => StatFs | null;
@@ -515,6 +518,7 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     github: { present: ghPresent, signedIn, user, slug, permission },
     claude: { ...claude, trust },
     machine: {
+      cores: deps.cpus(),
       memory: memoryOf(deps.totalmem(), deps.freemem(), available),
       disk: st !== null ? diskOf(root, st) : null,
       limits: {
