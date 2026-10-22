@@ -75,6 +75,7 @@ describe("home-directory paths in tracked files", () => {
         } catch {
           return []; // deleted in the working tree
         }
+        if (text.includes("\0")) return []; // binary
         return homePaths(f, text);
       });
     expect(offenders, RULE).toEqual([]);
