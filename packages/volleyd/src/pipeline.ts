@@ -3983,6 +3983,7 @@ export class PipelineDriver {
    * (ghCwd) with repoArgs, whatever `cwd` the caller passed — never in an agent's worktree, which
    * cleanup may have removed (a missing cwd fails the spawn: ENOENT). Any other argv goes to
    * `other` (default: the task's own exec). Without a repo root, everything goes to `other`.
+   * Only `gh pr …` / `gh run …` may come through here: `gh api` rejects the appended `--repo`.
    */
   private ghExec(task: TaskId, other: ExecFn = this.io(task)): ExecFn {
     const root = this.ghCwd();
