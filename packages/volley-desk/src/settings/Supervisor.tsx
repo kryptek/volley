@@ -5,6 +5,7 @@
  * pools (`volley/_system/leases/+`, SPEC §4.6.5): each pool's holders grouped
  * by the machine they run on, its `per_machine` cap and the queue's reasons.
  */
+import { SwitchToAdmin } from "../auth/AccountActions";
 import type { ConfigPayload, LeasePoolPayload } from "../store/types";
 import { ConfigRows } from "./ConfigRows";
 import type { ConfigTransport } from "./configTransport";
@@ -115,7 +116,7 @@ export function Supervisor({
       {!transport && (
         <p className="s-note">
           Read-only: the Desk has no broker credentials. Pick a new value, then copy its command and
-          run it in a terminal.
+          run it in a terminal. <SwitchToAdmin />
         </p>
       )}
       <ConfigRows
