@@ -60,6 +60,8 @@ export interface WaveRecord {
   /**
    * Per task: the agent woken for a mailbox message it had not acked (`agent_woken`), until that
    * message is acked (`steering_received`) or the agent is retired. Absent in older snapshots.
+   * One entry per task: when two parallel reviewers are both woken, the later one replaces the
+   * earlier, so status names only the last woken agent until it acks.
    */
   woken?: Record<TaskId, { agent_id: string; message_id: string }>;
   /** Each task's position in its pipeline (stage steps, role runs, reviews, verified head). */

@@ -63,6 +63,23 @@ const ack = (messageId: string) =>
     { qos: 1, retain: false },
   );
 
+/** The agent acknowledges `messageId` on its progress channel (SPEC §4.3 `steering_acked`). */
+const steeringAcked = (messageId: string) =>
+  s.agent.publish(
+    buildTopic(NS, AGENT, "progress"),
+    JSON.stringify(
+      buildEnvelope({
+        agentId: AGENT,
+        parentId: "volleyd",
+        channel: "progress",
+        type: "steering_acked",
+        payload: { progress: 50, msg: "acknowledged: use the shared table" },
+        correlationId: messageId,
+      }),
+    ),
+    { qos: 0, retain: false },
+  );
+
 async function idle(): Promise<void> {
   await s.hook("idle-stop.json");
   await s.consumed();
@@ -211,6 +228,42 @@ describe("steer wakes an idle agent", () => {
     expect(woken()).toEqual([]);
   });
 
+  it("an ack that arrives before steering_sent is journaled cancels the wake too", async () => {
+    await setup();
+    await idle();
+    // The agent acks while volleyd is still journaling the steer (append fsyncs).
+    const d = s.daemon as unknown as {
+      append: (
+        wave: string,
+        ev: { type: string; data: { message_id?: string } },
+      ) => Promise<unknown>;
+      mailboxHeard: (messageId: string, by: string) => void;
+    };
+    const append = d.append.bind(d);
+    const mailboxHeard = d.mailboxHeard.bind(d);
+    let heard: () => void = () => {};
+    d.mailboxHeard = (messageId, by) => {
+      mailboxHeard(messageId, by);
+      heard();
+    };
+    d.append = async (wave, ev) => {
+      if (ev.type === "steering_sent" && ev.data.message_id !== undefined) {
+        const acked = new Promise<void>((r) => {
+          heard = r;
+        });
+        await steeringAcked(ev.data.message_id);
+        await acked;
+      }
+      return append(wave, ev);
+    };
+    await steer();
+    await s.settled();
+    await clock.advance(2 * WAKE_MS);
+    await s.settled();
+    expect(wakes()).toEqual([]);
+    expect(woken()).toEqual([]);
+  });
+
   it("the liveness nudge wakes the idle agent it steers", async () => {
     await setup();
     await idle();
@@ -234,7 +287,7 @@ describe("steer wakes an idle agent", () => {
       text: "use the shared table",
       wait_ack_ms: 30_000,
     });
-    // The wake timer is armed just after the steer is journaled.
+    // The wake timer is armed as the steer is sent.
     const armed = clock.armed(WAKE_MS);
     await s.event("steering_sent");
     await armed;

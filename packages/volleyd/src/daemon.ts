@@ -9445,24 +9445,34 @@ export class Daemon {
     // A merge nudge is additive: it never supersedes an earlier (owner or pipeline) steer.
     const { seq, supersedes } =
       numbered ?? nextSteer(log.record, task, { additive: isAdditiveSteer(extra.reason) });
-    await this.publish(
-      buildTopic(target.namespace, target.agent_id, "mailbox"),
-      this.envelope(
-        "mailbox",
-        "steering",
-        {
-          text,
-          from_agent_id: DAEMON_AGENT_ID,
-          seq,
-          ...(supersedes !== undefined ? { supersedes } : {}),
-          wave,
-          task,
-          by,
-        },
-        messageId,
-      ),
-      false,
-    );
+    // Armed before the publish (dropped if it fails): the hooks may ack while steering_sent is
+    // still being journaled, and an ack finds only a wake that already exists. An agent whose
+    // hooks the broker refused is paused, not prompted: a wake would submit a prompt whose work
+    // it cannot deliver.
+    if (extra.reason !== "auth_failed") this.armWake(wave, task, target.agent_id, messageId);
+    try {
+      await this.publish(
+        buildTopic(target.namespace, target.agent_id, "mailbox"),
+        this.envelope(
+          "mailbox",
+          "steering",
+          {
+            text,
+            from_agent_id: DAEMON_AGENT_ID,
+            seq,
+            ...(supersedes !== undefined ? { supersedes } : {}),
+            wave,
+            task,
+            by,
+          },
+          messageId,
+        ),
+        false,
+      );
+    } catch (e) {
+      this.disarmWake(messageId);
+      throw e;
+    }
     await this.append(wave, {
       type: "steering_sent",
       task,
@@ -9478,9 +9488,6 @@ export class Daemon {
         ...extra,
       },
     });
-    // An agent whose hooks the broker refused is paused, not prompted: a wake would submit a
-    // prompt whose work it cannot deliver.
-    if (extra.reason !== "auth_failed") this.armWake(wave, task, target.agent_id, messageId);
   }
 
   /**
@@ -9499,17 +9506,21 @@ export class Daemon {
     this.wakes.set(messageId, { agent: agentId, wave, task, timer, woken: false });
   }
 
+  /** Drop `messageId`'s pending wake, if any. */
+  private disarmWake(messageId: string): void {
+    const w = this.wakes.get(messageId);
+    if (w === undefined) return;
+    this.time.clearTimeout(w.timer);
+    this.wakes.delete(messageId);
+  }
+
   /**
    * `by` acked `messageId`: no wake; one that was woken is journaled as received at last. The
    * journal's `woken` mark decides, not the timer map: a newer message, or a restart, drops the
    * woken message's entry there before its ack comes.
    */
   private mailboxHeard(messageId: string, by: string): void {
-    const w = this.wakes.get(messageId);
-    if (w !== undefined && w.agent === by) {
-      this.time.clearTimeout(w.timer);
-      this.wakes.delete(messageId);
-    }
+    if (this.wakes.get(messageId)?.agent === by) this.disarmWake(messageId);
     // In the queue: a wake being typed journals its agent_woken first.
     void this.enqueue(async () => {
       for (const [wave, log] of this.waves)

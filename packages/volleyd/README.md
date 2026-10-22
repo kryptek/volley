@@ -169,7 +169,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd stop <wave>` | Stop a wave (owner only): no admissions, `cancel` to every running agent. |
 | `volleyd stop --all` / `resume --all` | Engage / release the kill switch (anyone). |
 | `volleyd archive <wave> [--yes]` | Retire an ended (stopped or complete) wave (owner only; anyone for an ownerless wave): close its open decisions, drop it from `status` and the Desk ([Archiving](#archiving)). Without `--yes` only prints what it would close. |
-| `volleyd steer <wave> <task> <text> [--role <r>] [--wait-ack-ms <ms>]` | Mailbox steering to the task's live agent of any role; reports `delivered (acked)`, `delivered (received, not acted on yet)`, `delivered · woke the agent` (an idle agent was typed the wake line) or `delivered (no ack yet)`, or `queued (no live agent)` for the task's next agent when none is live. |
+| `volleyd steer <wave> <task> <text> [--role <r>] [--wait-ack-ms <ms>]` | Mailbox steering to the task's live agent of any role; reports `delivered (acked by <agent>)`, `delivered (received, not acted on yet)`, `delivered · woke the agent` (an idle agent was typed the wake line) or `delivered (no ack yet)`, or `queued (no live agent)` for the task's next agent when none is live. |
 | `volleyd events <wave> --cursor <name>` | Print (JSONL) every journal event after the named cursor. Does not move it. |
 | `volleyd ack <wave> --cursor <name> --seq <N>` | Advance the cursor to `N`. Ack **after** acting, so a crash replays. |
 | `volleyd config get [path] [--wave <id>] [--json]` | Effective config (or one dotted path), optionally with a wave's overrides. |
