@@ -107,18 +107,19 @@ function notMergeable(
   return null;
 }
 
-const REFUSAL_REASONS: readonly string[] = [
-  "behind",
-  "head_moved",
-  "retargeted",
-  "closed",
-  "checks",
-  "unknown",
-] satisfies readonly RefusalReason[];
+// Keyed by every RefusalReason, so the compiler rejects a reason left out.
+const REFUSAL_REASONS: Record<RefusalReason, true> = {
+  behind: true,
+  head_moved: true,
+  retargeted: true,
+  closed: true,
+  checks: true,
+  unknown: true,
+};
 
 /** A journaled `reason` volleyd knows. Pure. */
 export function isRefusalReason(v: unknown): v is RefusalReason {
-  return typeof v === "string" && REFUSAL_REASONS.includes(v);
+  return typeof v === "string" && Object.hasOwn(REFUSAL_REASONS, v);
 }
 
 /** What `gh pr merge`'s refusal says, from its stderr. Pure. */

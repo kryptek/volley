@@ -1194,7 +1194,8 @@ function onMergeChecked(
   if (view.state === "MERGED" && view.baseRefName === v.release_branch) {
     const merged = typeof view.headRefOid === "string" ? view.headRefOid : undefined;
     // Not through the gate: merged at another head, or before the task was gated at it. A merge at
-    // the current gated head while a later step runs (a branch update) is verified (#311).
+    // the current gated head while a later step runs (a branch update or fixup that has not
+    // pushed, or a task the owner sent back to verify again at that head) is verified (#311).
     const other = merged !== undefined && merged !== head;
     const atGated = head !== undefined && v.p.gated.at(-1) === head;
     // Off merge_ready the merged head must be read as the gated one: a branch update's agent may
@@ -1221,7 +1222,6 @@ function onMergeChecked(
       ...mergedActions(
         v,
         {
-          ...(v.stage !== "merge_ready" && !unverified ? { via: "operator" } : {}),
           merge_sha: view.mergeCommit?.oid ?? null,
           merged_at: view.mergedAt ?? null,
         },

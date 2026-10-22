@@ -2825,8 +2825,9 @@ that head. The alarm is published in the wave state (`alarms: [{ alarm, message 
 `why_waiting: "merged with an unverified head: gated <a>, merged <c>"`) and listed by
 `volleyd status`; the task still completes. A merge at the task's current gated head, during a
 later step (a branch update or fixup that has not pushed yet), is the gated head: no alarm; the
-record says `via: "operator"` and carries that head's CI as volleyd last read it (red, when a CI
-fixup was running), and the running update or fixup agent is retired as `superseded`.
+record has no `via` (it merged with GitHub's button, so the digest reads it as `github`) and
+carries that head's CI as volleyd last read it (red, when a CI fixup was running), and the running
+update or fixup agent is retired as `superseded`.
 
 **The merge nudge.** volleyd never rebases anyone. When a task's PR merges (any of the ways
 above), each running implementer of the same wave whose task's wave-file `files` hints overlap
@@ -2955,15 +2956,15 @@ one at a time, in order, and brings each up to date just before its merge
   `merge: manual` keeps a wave's tasks out of the queue altogether.
 - **Order.** Dependency first: a task more tasks name in their `after` goes first, and a task
   never goes ahead of a queued task it comes after. Then readiness: the task queued earliest. A
-  task GitHub refused as `behind`, `head_moved` or `retargeted` goes after the tasks still
-  waiting; one refused for any other reason keeps its place.
+  task GitHub refused as `behind`, `head_moved`, `retargeted` or `closed` goes after the tasks
+  still waiting; one refused for any other reason keeps its place.
 - **One merge in flight per release branch.** The task at the front takes the release branch's
   lock (`<repo>#<release_branch>`, held by the daemon, so two waves on one release branch share
-  it) and keeps it until it merged, GitHub refused it as `behind`, `head_moved` or `retargeted`,
-  or it waits for an answer. A task whose
-  turn checks fail `merge_turn_check_failures_max` (3) times in a row (its PR was retargeted, `gh`
-  keeps failing, its worktree is gone; each failure is a `pipeline_error` alarm) gives up the turn
-  and is passed over, with the tasks that come after it, while another queued task can go.
+  it) and keeps it until it merged, GitHub refused it as `behind`, `head_moved`, `retargeted` or
+  `closed`, or it waits for an answer. A task whose turn checks fail
+  `merge_turn_check_failures_max` (3) times in a row (its PR was retargeted, `gh` keeps failing,
+  its worktree is gone; each failure is a `pipeline_error` alarm) gives up the turn and is passed
+  over, with the tasks that come after it, while another queued task can go.
   `merge_started { task, pr, head }` is journaled before each `gh pr merge`. A merge that ends
   without an outcome (the hard timeout fired, `gh` could not run, or the daemon restarted while
   it ran) is journaled `merge_ended { task, why: timed_out | failed | interrupted }`: the task is

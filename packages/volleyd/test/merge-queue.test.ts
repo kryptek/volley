@@ -174,6 +174,34 @@ describe("nextToMerge", () => {
     expect(refusalEndsTurn(p)).toBe(false);
   });
 
+  it("a PR closed unmerged gives up the turn: no retry can merge it (#311)", () => {
+    let p = emptyPipeline();
+    p = reducePipeline(
+      p,
+      {
+        seq: 1,
+        at: "",
+        type: "artifact_verified",
+        task: "T1",
+        data: { role: "gate", head_sha: "a".repeat(40) },
+      } as never,
+      { stages: [] },
+    );
+    p = reducePipeline(
+      p,
+      {
+        seq: 2,
+        at: "",
+        type: "alarm_raised",
+        task: "T1",
+        data: { alarm: "merge_refused", head: "a".repeat(40), reason: "closed" },
+      } as never,
+      { stages: [] },
+    );
+    expect(p.merge_refusal_reason).toBe("closed");
+    expect(refusalEndsTurn(p)).toBe(true);
+  });
+
   it("two waves on one release branch share it: one merge in flight", () => {
     const a = queueOf(record("wa", { T1: { p: queued(2) } }));
     const b = queueOf(record("wb", { T1: { p: queued(1) } }));

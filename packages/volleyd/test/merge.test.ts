@@ -93,6 +93,15 @@ describe("autopilot merge classifies a refusal (#311)", () => {
     const stderr = "GraphQL: Head sha didn't match expected head sha (match-head-commit)";
     expect(await refused(stderr)).toEqual({ ok: false, reason: "head_moved", stderr });
   });
+  it("GitHub's own wording for reviews, status checks and rulesets → checks", async () => {
+    for (const stderr of [
+      "GraphQL: At least 1 approving review is required by reviewers with write access. (mergePullRequest)",
+      'GraphQL: Required status check "ci" is expected. (mergePullRequest)',
+      'GraphQL: Repository rule violations found\n\nRequired status check "ci" is expected.',
+      "GraphQL: Changes must be made through a pull request. Protected branch rules not satisfied.",
+    ])
+      expect(await refused(stderr)).toEqual({ ok: false, reason: "checks", stderr });
+  });
   it("anything else → unknown", async () => {
     expect(await refused("GraphQL: something odd")).toMatchObject({ reason: "unknown" });
   });

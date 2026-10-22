@@ -137,7 +137,9 @@ describe("merged_unverified_head", () => {
     const m = h.events.find(
       (e) => e.task === "T2" && e.type === "artifact_verified" && e.data.role === "merged",
     );
-    expect(m?.data).toMatchObject({ via: "operator", head_sha: B, pr: { head_sha: B } });
+    // Merged with GitHub's button: no `via`, so the digest reads it as `github`, not `operator`.
+    expect(m?.data).toMatchObject({ head_sha: B, pr: { head_sha: B } });
+    expect(m?.data.via).toBeUndefined();
     expect(m?.data.merged_head_sha).toBeUndefined();
     expect(h.retired).toContainEqual({ agent_id: update?.agent_id, status: "superseded" });
   });
