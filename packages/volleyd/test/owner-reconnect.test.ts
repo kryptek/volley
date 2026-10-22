@@ -34,7 +34,7 @@ let daemon: Daemon;
 let client: ControlClient;
 let pub: VolleyBroker;
 
-async function registry(agentId: string, coordinator: string = NAME) {
+async function registry(agentId: string, coordinator: string = NAME, startedAt = clock.now()) {
   const env = buildEnvelope({
     now: () => new Date(clock.now()),
     agentId,
@@ -45,7 +45,7 @@ async function registry(agentId: string, coordinator: string = NAME) {
       capabilities: [],
       cwd: "/repo",
       coordinator,
-      started_at: new Date(clock.now()).toISOString(),
+      started_at: new Date(startedAt).toISOString(),
     },
   });
   await pub.publish(registryTopic(agentId), JSON.stringify({ ...env, namespace: NS }), {
@@ -68,6 +68,10 @@ async function status(agentId: string, type: string) {
   });
 }
 const coordinator = () => daemon.snapshot(WAVE)?.coordinator;
+// Private reads, for ordering only: a replay was handled once its later sentinel is seen.
+const statusOf = () => (daemon as unknown as { statusOf: Map<string, unknown> }).statusOf;
+const namedEntries = () =>
+  (daemon as unknown as { namedEntries: Map<string, unknown> }).namedEntries;
 const reconnects = () => daemon.journalEvents(WAVE).filter((e) => e.type === "owner_reconnected");
 
 beforeEach(async () => {
@@ -244,7 +248,7 @@ describe("a coordinator name across a daemon restart", () => {
 
   it("a terminal status replayed before its registry entry still reads gone", async () => {
     // The two replays arrive on two subscriptions, in either order: force the status first.
-    const statusOf = () => (daemon as unknown as { statusOf: Map<string, unknown> }).statusOf;
+    const startedAt = clock.now();
     await registry("coordinator-a1");
     await status("coordinator-a1", "working");
     await until(() => expect(coordinator()?.state).toBe("working"));
@@ -256,10 +260,24 @@ describe("a coordinator name across a daemon restart", () => {
     // Delivered after the replayed `done` on the same subscription: once seen, `done` was handled.
     await status("sentinel-1", "working");
     await until(() => expect(statusOf().has("sentinel-1")).toBe(true));
-    await registry("coordinator-a1");
+    // The same session's entry, replayed late: it started before its `done`.
+    await registry("coordinator-a1", NAME, startedAt);
     await until(() =>
       expect(coordinator()).toMatchObject({ agent_id: "coordinator-a1", state: "gone" }),
     );
+  });
+
+  it("an id registering anew after its set-aside terminal status does not take that status back", async () => {
+    await daemon.stop();
+    await status("coordinator-a1", "done");
+    clock.sleepHost(3_600_000);
+    daemon = await t.start({ clock });
+    await status("sentinel-1", "working");
+    await until(() => expect(statusOf().has("sentinel-1")).toBe(true));
+    // A session started after the `done`: that status is not its own.
+    await registry("coordinator-a1");
+    await until(() => expect(namedEntries().has("coordinator-a1")).toBe(true));
+    expect(statusOf().has("coordinator-a1")).toBe(false);
   });
 
   it("a reconnect journals nothing in a stopped wave", async () => {

@@ -1847,10 +1847,16 @@ export class Daemon {
         else this.registryWorkspaces.delete(id);
         if (entry?.coordinator !== undefined && entry.agent_id === id) {
           this.namedEntries.set(id, entry);
-          // Its terminal status arrived first and was set aside: `bindOwner` needs it.
+          // Its terminal status arrived first and was set aside: `bindOwner` needs it. Not when
+          // the entry started after that status (the id registered anew: it is not its own).
           const ended = this.endedStatusOf.get(id);
           this.endedStatusOf.delete(id);
-          if (ended !== undefined && !this.statusOf.has(id)) this.statusOf.set(id, ended);
+          const startedAfter =
+            entry.started_at !== undefined &&
+            ended !== undefined &&
+            Date.parse(entry.started_at) > Date.parse(ended.at);
+          if (ended !== undefined && !startedAfter && !this.statusOf.has(id))
+            this.statusOf.set(id, ended);
         } else {
           this.namedEntries.delete(id);
         }
