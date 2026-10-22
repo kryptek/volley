@@ -162,4 +162,20 @@ describe("merged_unverified_head", () => {
     expect(alarmed(B)).toBe(false);
     expect(alarmed(A)).toBe(true);
   });
+  it("off merge_ready, a merge whose head GitHub does not report still alarms (#311)", () => {
+    const view: PipelineView = {
+      task: "T1",
+      stages: [["implement"], ["merge_ready"]],
+      stage: "fixup",
+      release_branch: "release/w",
+      p: { ...emptyPipeline(), pr: { url: "u", number: 7 } as never, head: A, gated: [A] },
+    };
+    const actions = next(view, {
+      kind: "merge_checked",
+      view: { state: "MERGED", baseRefName: "release/w" },
+    });
+    expect(
+      actions.some((a) => a.kind === "journal" && a.event.data?.alarm === "merged_unverified_head"),
+    ).toBe(true);
+  });
 });

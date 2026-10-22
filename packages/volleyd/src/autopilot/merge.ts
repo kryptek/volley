@@ -12,8 +12,8 @@ import type { MergeToken } from "../fence";
 /**
  * Why a merge was refused. Only `behind` (out of date with, or conflicting with, the release
  * branch) and `head_moved` (the PR is no longer at the gated head) say the branch must change
- * before it can merge; `checks` (required checks, branch protection), `retargeted`, `closed` and
- * `unknown` say nothing about the release branch.
+ * before it can merge, and `retargeted` that it can never merge into it; `checks` (required
+ * checks, branch protection), `closed` and `unknown` say nothing about the release branch.
  */
 export type RefusalReason =
   | "behind"
@@ -105,6 +105,20 @@ function notMergeable(
   if (v.state !== "OPEN")
     return { reason: "closed", text: `PR #${token.pr} is ${String(v.state)}` };
   return null;
+}
+
+const REFUSAL_REASONS: readonly string[] = [
+  "behind",
+  "head_moved",
+  "retargeted",
+  "closed",
+  "checks",
+  "unknown",
+] satisfies readonly RefusalReason[];
+
+/** A journaled `reason` volleyd knows. Pure. */
+export function isRefusalReason(v: unknown): v is RefusalReason {
+  return typeof v === "string" && REFUSAL_REASONS.includes(v);
 }
 
 /** What `gh pr merge`'s refusal says, from its stderr. Pure. */

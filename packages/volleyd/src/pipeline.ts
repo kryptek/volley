@@ -24,7 +24,7 @@ import {
 } from "./artifacts";
 import { type ClassifyResult, classify } from "./autopilot/ci-classify";
 import { type GithubStatus, STATUS_UNKNOWN } from "./autopilot/github-status";
-import { type RefusalReason, mergePr } from "./autopilot/merge";
+import { type RefusalReason, isRefusalReason, mergePr } from "./autopilot/merge";
 import { type QueueEntry, nextToMerge, queueOf, refusalEndsTurn } from "./autopilot/merge-queue";
 import type { Role } from "./brief";
 import { systemClock } from "./clock";
@@ -212,7 +212,7 @@ export interface TaskPipeline {
    * The reason of the last of those refusals (absent for one journaled before reasons were
    * recorded). Unlike `alarms.merge_refused`, a late refusal of an older head never sets it.
    */
-  merge_refusal_reason?: string | undefined;
+  merge_refusal_reason?: RefusalReason | undefined;
   /** Extra attempts the owner granted (`merge_refused` answered `retry`). */
   merge_retries?: number;
   /** The owner answered a `merge_refused` decision `manual`: a human merges this task. */
@@ -641,7 +641,7 @@ export function reducePipeline(
       // Only a refusal of the current gated head counts: a late one for an older head says nothing.
       if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1)) {
         p.merge_refusals = (p.merge_refusals ?? 0) + 1;
-        p.merge_refusal_reason = typeof d.reason === "string" ? d.reason : undefined;
+        p.merge_refusal_reason = isRefusalReason(d.reason) ? d.reason : undefined;
       }
       // volleyd's merge ended without merging (refused, or `gh` could not run).
       if (d.alarm === "merge_refused" || (d.alarm === "pipeline_error" && d.check === "merge"))
@@ -1197,7 +1197,9 @@ function onMergeChecked(
     // the current gated head while a later step runs (a branch update) is verified (#311).
     const other = merged !== undefined && merged !== head;
     const atGated = head !== undefined && v.p.gated.at(-1) === head;
-    const unverified = other || (v.stage !== "merge_ready" && !atGated);
+    // Off merge_ready the merged head must be read as the gated one: a branch update's agent may
+    // have pushed and merged a head volleyd has not seen yet.
+    const unverified = other || (v.stage !== "merge_ready" && !(atGated && merged === head));
     return [
       ...(unverified
         ? [

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { RefusalReason } from "../src/autopilot/merge";
 import { dependents, nextToMerge, queueOf, refusalEndsTurn } from "../src/autopilot/merge-queue";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "../src/pipeline";
 import type { WaveRecord } from "../src/reducer";
@@ -142,17 +143,17 @@ describe("nextToMerge", () => {
     expect(nextToMerge(onlyRefused, new Set())?.task).toBe("T1");
   });
 
-  it("a checks refusal keeps its queue place; a behind refusal waits behind the rest (#311)", () => {
-    const refusal = (reason?: string) =>
+  it("a checks refusal keeps its queue place; a behind or retargeted refusal waits behind the rest (#311)", () => {
+    const refusal = (reason?: RefusalReason) =>
       queued(1, {
         merge_refusals: 1,
         merge_refusal_reason: reason,
       });
-    for (const reason of ["checks", "unknown"]) {
+    for (const reason of ["checks", "unknown"] as const) {
       const rec = record("w1", { T1: { p: refusal(reason) }, T2: { p: queued(2) } });
       expect(nextToMerge({ b: queueOf(rec) }, new Set())?.task).toBe("T1");
     }
-    for (const reason of ["behind", "head_moved", undefined]) {
+    for (const reason of ["behind", "head_moved", "retargeted", undefined] as const) {
       const rec = record("w1", { T1: { p: refusal(reason) }, T2: { p: queued(2) } });
       expect(nextToMerge({ b: queueOf(rec) }, new Set())?.task).toBe("T2");
     }
