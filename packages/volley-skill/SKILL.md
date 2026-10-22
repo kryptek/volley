@@ -115,7 +115,7 @@ The tool returns `{ agents: AgentSummary[] }` where each `AgentSummary` is:
 ```
 AGENT_ID                NAMESPACE      STATUS        PARENT                  CWD                            LAST_SEEN
 issue-42-fix-7a3f      example-dispatch   🔄 working    coordinator-abcd     /private/tmp/example-issue-42     2m ago
-volley-cli-spec-aaaa    default        ✅ done       -                       /Users/x/repos/volley           14s ago
+volley-cli-spec-aaaa    default        ✅ done       -                       /path/to/volley                 14s ago
 ```
 
 Status emoji map (apply to the `status` column):

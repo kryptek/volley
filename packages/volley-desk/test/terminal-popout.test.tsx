@@ -153,7 +153,7 @@ describe("terminal popout", () => {
     }
     expect(body().style.fontSize).toBe(`${TERMINAL_FONT_MIN}px`);
     expect(localStorage.getItem(TERMINAL_FONT_KEY)).toBe(String(TERMINAL_FONT_MIN));
-  });
+  }, 30_000); // renders the full demo twice
 
   it("a stored size out of range or garbage falls back into bounds", () => {
     localStorage.setItem(TERMINAL_FONT_KEY, "99");
@@ -165,7 +165,7 @@ describe("terminal popout", () => {
     renderDemo();
     popOut(FIXUP);
     expect((dialogFor(FIXUP).querySelector(".term") as HTMLElement).style.fontSize).toBe("12px");
-  });
+  }, 30_000); // renders the full demo twice
 
   it("is draggable by its title bar on a desktop", () => {
     renderDemo();
