@@ -1442,7 +1442,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `autopilot.merge` | the next gate of a wave whose file has no `merge:` ([autopilot merging](#autopilot-merging)) | a gate already entered keeps the mode its evidence names until it is gated again |
 | `autopilot.merge_retry_max` | the next refused merge ([autopilot merging](#autopilot-merging)) | refusals already counted stand |
 | `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
-| `agent_mcp` | spawns after the change | running agents keep the MCP servers they launched with |
+| `agent_mcp`, `agent_mcp_allow` | spawns after the change | running agents keep the MCP servers they launched with |
 | `agent_auto_compact_pct` | spawns after the change | running agents keep the window they launched with |
 | `public_hygiene` | the next wave version (`run` of a new wave, or a new version of a live one) | the level journaled for the current version holds for its reviewers and their results |
 | `archive_ended_after_h`, `archive_on_ack` | the next tick (and the next `wave_complete` answer) | archived waves stay archived ([Archiving](#archiving)) |
@@ -1624,7 +1624,7 @@ random-suffixed coordinator is dropped, SPEC §4.4).
 exports `VOLLEY_HOOKS_DIR=<checkout>/packages/volley-hooks` and
 `CLAUDE_CODE_AUTO_COMPACT_WINDOW=<tokens>` (`agent_auto_compact_pct`, below) and execs
 `claude --dangerously-skip-permissions --model <model> --settings <hooks settings template> --strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json --name <id> -- "$(cat .volley/brief.md)"`
-(without `--strict-mcp-config` under `agent_mcp: inherit`, below).
+(without `--strict-mcp-config` under `agent_mcp: inherit` with no `agent_mcp_allow`, below).
 The hooks come in through `--settings`. Just before the exec it checks `claude` is on the
 session's `PATH`: if not it prints `volleyd: cannot start the agent: claude is not on this
 session's PATH (<PATH>)` with the fix and keeps the session open, so the screen volleyd reads
@@ -1655,9 +1655,43 @@ named `volley`. volleyd warns at each `inherit` spawn that has one in the profil
 `mcpServers` or the worktree's `.mcp.json` (it logs it and journals
 `alarm_raised { alarm: "agent_mcp_stray_volley", servers }`; the spawn goes on). The trade-off:
 more tools, but an agent whose tool set depends on the machine and on servers that may prompt,
-fail to connect or slow its start. The fence accepts both forms and nothing else;
+fail to connect or slow its start. The fence accepts both forms and nothing else (under
+`agent_mcp_allow`, an `mcp.json` may also carry the copied servers after `volley`, each a stdio
+entry with a string `command` or a remote one with a string `url`);
 `agent_spawned` records `agent_mcp: "inherit"` when it applies, and a respawn of a moved or
-vanished agent keeps the servers it launched with. The cmux command starts with two spaces, which keeps it out of shell history and away
+vanished agent keeps the servers it launched with.
+
+**`agent_mcp_allow: [<name>, …]`** (a tunable, global or in a wave's `config:`; default `[]`,
+every server). A repository usually needs one or two of the user's servers, and under `inherit`
+every agent starts all of them (each its own process: with many agents, a real share of the
+machine's load). A non-empty list under `inherit` starts only those: volleyd copies each named
+entry into `.volley/mcp.json` after its own `volley` and launches with `--strict-mcp-config`
+again. It reads them where Claude Code would: the profile's `.claude.json` (`mcpServers`, user
+scope; then the repository's `projects.<repo>.mcpServers`, local scope) and the worktree's
+`.mcp.json` (project scope), the narrower scope winning a name (local over project over user).
+A `.mcp.json` entry is copied only when the profile approved it for the repository, as Claude Code
+asks before starting one: named in `projects.<repo>.enabledMcpjsonServers`, or under
+`enableAllProjectMcpServers: true`, and not in `disabledMcpjsonServers` (only the approvals in
+`.claude.json` count: one set in a settings file, `.claude/settings.local.json` or
+`~/.claude/settings.json`, is not read, and the entry is alarmed as not approved). The file comes from the
+branch checked out (for a reviewer or a fixup, a PR head a contributor controls), and the strict
+copy would otherwise skip that approval; an unapproved entry is ignored, so the user's own entry
+of that name stays. A paired machine's are read from its own `~/.claude.json` and worktree. A name found in none of them
+is skipped (the spawn goes on), logged and journaled once per wave and machine as
+`alarm_raised { alarm: "agent_mcp_allow_missing", name, host }` (its message says when the name is in
+`.mcp.json` but not approved for the repository); servers a plugin or a claude.ai
+connector brings are in none of these files, so they cannot be allowed by name. A copied entry
+may hold the user's secrets (an `env` token): it is written only to the agent's `mcp.json`, and
+only names reach the journal and the log. `agent_spawned` records the list as
+`agent_mcp_allow`, and `volleyd validate` prints `agent_mcp: inherit (allow: migrations,
+playwright)`. With a list, the stray-`volley` warning above only counts an allowed entry.
+
+The cmux command starts with two spaces, which keeps it out of shell history and away
+from prompts that eat the first character. Nothing else is typed into the pane, with two
+exceptions: the Enter that answers an update prompt and the relaunch after it (below), and the
+Escape that `volleyd stop` sends. The brief never appears in an argv.
+
+The cmux command starts with two spaces, which keeps it out of shell history and away
 from prompts that eat the first character. Nothing else is typed into the pane, with three
 exceptions: the Enter that answers an update prompt and the relaunch after it (below), the
 Escape that `volleyd stop` sends, and the wake line `Check your Volley mailbox.` + Enter for an
@@ -2028,7 +2062,8 @@ the wave repo at `repo` (its `origin` must have the release branch) and a volley
 - The agent's MCP server is the box's `volley_dir` checkout (`.volley/mcp.json` runs its
   `packages/volley-mcp/src/index.ts` with `bun`), so `bun` must be on the non-interactive ssh
   `PATH` too, and that checkout must be this release with `bun install` run. User-scope MCP
-  servers on the box are not loaded (`--strict-mcp-config`), unless `agent_mcp` is `inherit`. The
+  servers on the box are not loaded (`--strict-mcp-config`), unless `agent_mcp` is `inherit`
+  (with `agent_mcp_allow`, only the named ones, read from the box's own config). The
 daemon's machine needs key-based, non-interactive ssh to `target` (`BatchMode=yes`: a password
 or host-key prompt fails the command). `remote_port` (default 21883) must be free on the box's
 loopback: a box that runs its own MQTT broker usually has 1883 taken, and a forward that cannot
@@ -3349,7 +3384,8 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the profile block, an
     integer in 100000..1000000, never in the env block); a
     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
-    absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG); and
+    absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/`, with the
+    `agent_mcp_allow` entries copied from the box's own config after it (MCP_CONFIG); and
     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
     login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty

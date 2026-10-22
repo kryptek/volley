@@ -131,6 +131,12 @@ export interface Tunables {
    */
   agent_mcp: AgentMcp;
   /**
+   * Under `agent_mcp: inherit`, the user's MCP servers that load (by name, copied from the
+   * profile's `.claude.json` and the repository's `.mcp.json` into the agent's mcp.json, which
+   * then launches strict); empty: every one.
+   */
+  agent_mcp_allow: string[];
+  /**
    * The share of a launched agent's context window at which Claude Code compacts: the launch
    * exports `CLAUDE_CODE_AUTO_COMPACT_WINDOW` as that share of the model's window in tokens
    * (src/claude/context-window.ts); 0 exports nothing (Claude Code's own default).

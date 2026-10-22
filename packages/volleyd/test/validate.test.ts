@@ -235,6 +235,30 @@ describe("volleyd validate: the brief preface", () => {
     expect(waved.exitCode).toBe(0);
   });
 
+  it("prints agent_mcp under inherit, with its allowlist; strict prints nothing", async () => {
+    const strict = await runCli(["validate", waveFile()]);
+    expect(strict.stdout).not.toContain("agent_mcp");
+    const all = await runCli(["validate", waveFile("config: { agent_mcp: inherit }\n")]);
+    expect(all.stdout).toContain("agent_mcp: inherit (every user server)\n");
+    const allow = await runCli([
+      "validate",
+      waveFile("config: { agent_mcp: inherit, agent_mcp_allow: [migrations, playwright] }\n"),
+    ]);
+    expect(allow.exitCode).toBe(0);
+    expect(allow.stdout).toContain("agent_mcp: inherit (allow: migrations, playwright)\n");
+    // config.yaml's, under the wave's config:.
+    const home = join(dir, "home");
+    mkdirSync(home);
+    writeFileSync(join(home, "config.yaml"), "agent_mcp: inherit\nagent_mcp_allow: [m]\n");
+    const env = { VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1", VOLLEYD_HOME: home };
+    expect((await runCli(["validate", waveFile()], env)).stdout).toContain(
+      "agent_mcp: inherit (allow: m)\n",
+    );
+    expect(
+      (await runCli(["validate", waveFile("config: { agent_mcp: strict }\n")], env)).stdout,
+    ).not.toContain("agent_mcp");
+  });
+
   it("a preface that is not valid UTF-8 fails validate", async () => {
     const file = join(dir, "bad.md");
     writeFileSync(file, Buffer.from([0x61, 0xff, 0x0a]));

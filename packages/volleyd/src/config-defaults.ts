@@ -43,6 +43,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   claude: { default_account: null, warn_at_pct: 90 },
   branch_update: "rebase",
   agent_mcp: "strict",
+  agent_mcp_allow: [],
   agent_auto_compact_pct: 85,
   public_hygiene: "auto",
   hosts: {},

@@ -288,6 +288,14 @@
           "default": "strict",
           "description": "The MCP servers a launched agent loads (spec section 4.6.4): strict (only the supervisor's own volley server: a reproducible, minimal agent) or inherit (the user's own servers too, such as plugin servers and connectors, beside the supervisor's volley server, which takes over a user-scope server of the same name). Optional in the retained payload: a supervisor that predates it omits it."
         },
+        "agent_mcp_allow": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "default": [],
+          "description": "Under agent_mcp: inherit, the user's MCP servers a launched agent loads, by name (spec section 4.6.4): the supervisor copies each named entry from the profile's ~/.claude.json (user and local scope) and the repository's .mcp.json into the agent's own MCP config and launches it strict, so only those start. Empty: every server, as inherit alone. A name found nowhere, unapproved in .mcp.json or of an entry shape volleyd does not copy is skipped and journaled once per wave and machine. Optional in the retained payload: a supervisor that predates it omits it."
+        },
         "agent_auto_compact_pct": {
           "type": "integer",
           "minimum": 0,

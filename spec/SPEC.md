@@ -520,6 +520,7 @@ A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out
 - `claude.warn_at_pct` — default 90: the 5-hour usage that opens an `account_limit` decision (§4.6.12).
 - `branch_update` — `rebase` | `merge`, default `rebase` (below).
 - `agent_mcp` — `strict` | `inherit`, default `strict` (below).
+- `agent_mcp_allow` — list of server names, default `[]` (below).
 - `agent_auto_compact_pct` — integer 0..100, default 85 (below).
 - `public_hygiene` — `auto` | `on` | `off`, default `auto`: what review roles flag as public hygiene (§4.6.8).
 - `hosts` — default `{}`; `{ <name>: { type?, target, repo, worktree_root?, volley_dir, tunnel?: { remote_port, supervise }, max_agents?, drain? } }`: remote SSH + tmux hosts a wave task names with `host:`, or placement chooses; `<name>` is never `local` or `auto`.
@@ -579,6 +580,11 @@ Under `strict` it loads only the supervisor's own Volley server.
 Under `inherit` it also loads the user's own servers (plugins, connectors).
 The supervisor MUST name its own Volley server `volley`, so that it takes over a user-scope entry of the same name (such as a coordinator's), and every Volley server in the session carries the agent's identity from `.volley/agent.json` (§6.5), never a coordinator's.
 A user entry under another name that runs a Volley server still starts, a second Volley server in the session: at spawn under `inherit` the supervisor SHOULD warn (journal and log) when the profile's `~/.claude.json` `mcpServers` or the worktree's `.mcp.json` has such an entry.
+`agent_mcp_allow` narrows `inherit`: when it is non-empty, the supervisor MUST start only the named user servers beside its own, by copying each named entry from the user's configuration on the agent's machine (the profile's `~/.claude.json` user- and local-scope `mcpServers`, and the worktree's `.mcp.json`, the narrower scope winning a name) into the agent's own MCP configuration and loading nothing else.
+The worktree's `.mcp.json` comes from the branch checked out, so the supervisor MUST copy an entry of it only when the user approved that server for the repository (Claude Code: `enabledMcpjsonServers` or `enableAllProjectMcpServers`, less `disabledMcpjsonServers`, in the repository's project entry).
+A name found nowhere, or only as an entry the supervisor does not copy (unapproved, or of a shape it does not copy), is skipped, and the supervisor SHOULD journal it once per wave and machine (`alarm_raised { alarm: "agent_mcp_allow_missing", name, host }`).
+A copied entry may hold the user's secrets: the supervisor MUST NOT journal, log or publish an entry, only its name.
+Empty, `inherit` loads every user server.
 `strict` gives a minimal, reproducible agent; `inherit` gives it more tools, at the cost of depending on the machine it runs on.
 
 **Auto-compaction.** `agent_auto_compact_pct` is the share of the model's context window at which a supervisor-launched agent's harness compacts its conversation. A supervisor that launches Claude Code agents sets the harness's auto-compact window to that share of the model's window in tokens (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, clamped to the harness's accepted range) in the launch it renders, for every role; `0` sets nothing and the harness's own default applies. The window is fixed at launch (a supervisor records it with `agent_spawned`), so a change applies to later spawns only. The usage channel's `used_percentage` (§4.6.12) keeps measuring the full window.

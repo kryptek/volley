@@ -175,6 +175,14 @@ describe("moveRespawn (what a moved or vanished agent's respawn carries over)", 
   it("keeps the agent's MCP servers (agent_mcp), whatever the tunable says now", () => {
     expect(moveRespawn({ role: "implementer", attempt: 1, agent_mcp: "inherit" })).toEqual({
       agent_mcp: "inherit",
+      agent_mcp_allow: [],
+    });
+    // ...and its agent_mcp_allow list, which only applies under inherit.
+    expect(
+      moveRespawn({ role: "implementer", agent_mcp: "inherit", agent_mcp_allow: ["m", 3] }),
+    ).toEqual({ agent_mcp: "inherit", agent_mcp_allow: ["m"] });
+    expect(moveRespawn({ role: "implementer", agent_mcp_allow: ["m"] })).toEqual({
+      agent_mcp: "strict",
     });
     expect(
       moveRespawn({ role: "fixup", attempt: 2, start: "abc123", agent_mcp: "inherit" }),
