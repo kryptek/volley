@@ -169,12 +169,12 @@ describe("selectAccount: task > wave > config default > primary", () => {
   it("a profile on a paired machine is selectable there, refused here", () => {
     const r2 = root();
     addAccount(r2, { label: "far", machine: "peer-a" }, NOW);
-    markSignedIn(r2, "far", { dir: "/home/u/.volley/claude/far" }, NOW);
+    markSignedIn(r2, "far", { dir: "/path/to/home/.volley/claude/far" }, NOW);
     const reg2 = readRegistry(r2);
-    expect(reg2.accounts[0]?.dir).toBe("/home/u/.volley/claude/far");
+    expect(reg2.accounts[0]?.dir).toBe("/path/to/home/.volley/claude/far");
     expect(selectAccount(r2, reg2, { task: "far", machine: "peer-a" })).toMatchObject({
       id: "far",
-      dir: "/home/u/.volley/claude/far",
+      dir: "/path/to/home/.volley/claude/far",
       machine: "peer-a",
       source: "task",
     });
@@ -190,7 +190,7 @@ describe("selectAccount: task > wave > config default > primary", () => {
         }))
         .sort((a, b) => (b.headroom ?? 0) - (a.headroom ?? 0)),
     );
-    expect(sel).toMatchObject({ id: "far", dir: "/home/u/.volley/claude/far", source: "balance" });
+    expect(sel).toMatchObject({ id: "far", dir: "/path/to/home/.volley/claude/far", source: "balance" });
     expect(sel.why).toBe("far: most headroom on peer-a (5h 12%; primary@peer-a 5h 90%)");
     // a local profile is not a candidate there, nor pinnable
     addAccount(r2, { label: "home" }, NOW);

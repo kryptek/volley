@@ -101,7 +101,7 @@ describe("spawn under a Claude account", () => {
     env = await makeSpawnEnv();
     const root = join(env.dir, "claude");
     restoreEnv = stubEnv({ VOLLEY_CLAUDE_DIR: root, VOLLEYD_HOME: join(env.dir, "volleyd") });
-    const dir = "/home/u/.volley/claude/work";
+    const dir = "/path/to/home/.volley/claude/work";
     addAccount(root, { label: "work", machine: "peer-a" }, "2026-10-19T00:00:00.000Z");
     markSignedIn(root, "work", { dir }, "2026-10-19T00:00:00.000Z");
     const prepared: string[] = [];

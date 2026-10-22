@@ -1043,8 +1043,8 @@ describe("a profile the supervisor created on a paired machine (#283): the REMOT
     (s: RemoteStep, opts: Record<string, unknown> = {}) =>
     () =>
       assertAllowed(SSH, { ...remote(s), ...opts });
-  const DIR = "/home/u/.volley/signin/work";
-  const PROFILE = "/home/u/.volley/claude/work";
+  const DIR = "/path/to/home/.volley/signin/work";
+  const PROFILE = "/path/to/home/.volley/claude/work";
   const b64 = (s: string) => Buffer.from(s, "utf-8").toString("base64");
   const write = (path: string, content: string): RemoteStep => ({
     argv: ["base64", "-d"],
@@ -1058,12 +1058,12 @@ describe("a profile the supervisor created on a paired machine (#283): the REMOT
   it("claude auth status takes CLAUDE_CONFIG_DIR=<home>/.volley/claude/<acct>, and nothing else does", () => {
     expect(allowed(status({ CLAUDE_CONFIG_DIR: PROFILE }))).not.toThrow();
     for (const value of [
-      "/home/u/.claude",
-      "/home/u/.volley/claude/../x",
+      "/path/to/home/.claude",
+      "/path/to/home/.volley/claude/../x",
       ".volley/claude/work",
-      "/home/u/.volley/claude/Work",
-      "/home/u/.volley/claude/work/",
-      "/home/u/.volley/claude/work\nrm -rf /",
+      "/path/to/home/.volley/claude/Work",
+      "/path/to/home/.volley/claude/work/",
+      "/path/to/home/.volley/claude/work\nrm -rf /",
     ])
       expect(allowed(status({ CLAUDE_CONFIG_DIR: value })), value).toThrow(FenceError);
     expect(allowed(status({ HOME: PROFILE }))).toThrow(FenceError);
@@ -1094,19 +1094,19 @@ describe("a profile the supervisor created on a paired machine (#283): the REMOT
     expect(() =>
       sealRemoteSigninScript(
         DIR,
-        renderSigninScript({ configDir: "/home/u/.volley/claude/other", signinDir: DIR }),
+        renderSigninScript({ configDir: "/path/to/home/.volley/claude/other", signinDir: DIR }),
       ),
     ).toThrow(FenceError);
     expect(() =>
       sealRemoteSigninScript(
         DIR,
-        renderSigninScript({ configDir: "/home/v/.volley/claude/work", signinDir: DIR }),
+        renderSigninScript({ configDir: "/path/to/home2/.volley/claude/work", signinDir: DIR }),
       ),
     ).toThrow(FenceError);
     expect(() =>
       sealRemoteSigninScript(
         DIR,
-        renderSigninScript({ configDir: "/home/u/.claude", signinDir: DIR }),
+        renderSigninScript({ configDir: "/path/to/home/.claude", signinDir: DIR }),
       ),
     ).toThrow(FenceError);
     expect(() => sealRemoteSigninScript(DIR, SCRIPT.replace("auth login", "setup-token"))).toThrow(
@@ -1123,7 +1123,7 @@ describe("a profile the supervisor created on a paired machine (#283): the REMOT
       allowed(
         write(
           `${DIR}/signin.sh`,
-          renderSigninScript({ configDir: "/home/u/.volley/claude/other", signinDir: DIR }),
+          renderSigninScript({ configDir: "/path/to/home/.volley/claude/other", signinDir: DIR }),
         ),
       ),
     ).toThrow(FenceError);
@@ -1136,18 +1136,18 @@ describe("a profile the supervisor created on a paired machine (#283): the REMOT
   it("chmod 700 of the profile dir (the only chmod on a directory)", () => {
     expect(allowed(step("mkdir", "-p", PROFILE))).not.toThrow();
     expect(allowed(step("chmod", "700", PROFILE))).not.toThrow();
-    expect(allowed(step("chmod", "700", "/home/u/.claude"))).toThrow(FenceError);
+    expect(allowed(step("chmod", "700", "/path/to/home/.claude"))).toThrow(FenceError);
     expect(allowed(step("chmod", "755", PROFILE))).toThrow(FenceError);
-    expect(allowed(step("chmod", "700", "/home/u/.volley/claude"))).toThrow(FenceError);
-    expect(allowed(step("chmod", "700", "/home/u/.volley/claude/../work"))).toThrow(FenceError);
+    expect(allowed(step("chmod", "700", "/path/to/home/.volley/claude"))).toThrow(FenceError);
+    expect(allowed(step("chmod", "700", "/path/to/home/.volley/claude/../work"))).toThrow(FenceError);
   });
 });
 
 describe("a profile on a paired machine in its launch.sh (account balancing)", () => {
   const shared = tempDirForAll("volley-remote-profile-");
-  const DIR = "/home/u/.volley/claude/work";
-  const HOST = { name: "peer-a", worktree_root: "/home/u/wt" };
-  const WT = "/home/u/wt/w1/T1-implementer";
+  const DIR = "/path/to/home/.volley/claude/work";
+  const HOST = { name: "peer-a", worktree_root: "/path/to/home/wt" };
+  const WT = "/path/to/home/wt/w1/T1-implementer";
   let restore: () => void;
   beforeAll(() => {
     const root = join(shared(), "claude");
@@ -1160,7 +1160,7 @@ describe("a profile on a paired machine in its launch.sh (account balancing)", (
 
   const script = (configDir: string, worktree = WT) =>
     renderLaunchScript({
-      hooksDir: "/home/u/src/volley/packages/volley-hooks",
+      hooksDir: "/path/to/home/src/volley/packages/volley-hooks",
       model: "claude-opus-5-5",
       agentId: "w1-t1-implementer-1",
       worktree,
@@ -1189,16 +1189,16 @@ describe("a profile on a paired machine in its launch.sh (account balancing)", (
     const local = "/srv/wt/w1/T1-implementer";
     expect(() => sealLaunchScript(local, script(DIR, local), HOST)).toThrow(FenceError);
     expect(() => assertAllowed(SSH, onHost(write(script(DIR, local), local)))).toThrow(FenceError);
-    const other = { name: "peer-b", worktree_root: "/home/u/wt" };
+    const other = { name: "peer-b", worktree_root: "/path/to/home/wt" };
     expect(() => sealLaunchScript(WT, script(DIR), other)).toThrow(FenceError);
     expect(() => assertAllowed(SSH, onHost(write(script(DIR)), other))).toThrow(FenceError);
-    expect(() => sealLaunchScript(WT, script("/home/v/.volley/claude/work"), HOST)).toThrow(
+    expect(() => sealLaunchScript(WT, script("/path/to/home2/.volley/claude/work"), HOST)).toThrow(
       FenceError,
     );
-    expect(() => sealLaunchScript(WT, script("/home/u/.volley/claude/unsigned"), HOST)).toThrow(
+    expect(() => sealLaunchScript(WT, script("/path/to/home/.volley/claude/unsigned"), HOST)).toThrow(
       FenceError,
     );
-    expect(() => sealLaunchScript(WT, script("/home/u/.claude"), HOST)).toThrow(FenceError);
+    expect(() => sealLaunchScript(WT, script("/path/to/home/.claude"), HOST)).toThrow(FenceError);
     // no host on the script: the local profile rule, which this dir never passes
     expect(() => assertAllowed(SSH, onHost(write(script(DIR)), null))).toThrow(FenceError);
   });
@@ -1218,7 +1218,7 @@ describe("a profile on a paired machine in its launch.sh (account balancing)", (
     ];
     expect(() => assertAllowed(SSH, { remote: { steps } })).not.toThrow();
     for (const bad of [
-      step("mv", "-f", `${DIR}/.claude.json.volleyd.tmp`, "/home/u/.volley/claude/x/.claude.json"),
+      step("mv", "-f", `${DIR}/.claude.json.volleyd.tmp`, "/path/to/home/.volley/claude/x/.claude.json"),
       step("mv", "-f", "/tmp/.claude.json.volleyd.tmp", "/tmp/.claude.json"),
     ])
       expect(() => assertAllowed(SSH, remote(bad))).toThrow(FenceError);

@@ -84,8 +84,8 @@ describe("remote sign-in helpers", () => {
   });
 
   it("the sign-in and profile dirs on the box", () => {
-    expect(remoteSigninDir("/home/u", "work")).toBe("/home/u/.volley/signin/work");
-    expect(remoteProfileDir("/home/u", "work")).toBe("/home/u/.volley/claude/work");
+    expect(remoteSigninDir("/path/to/home", "work")).toBe("/path/to/home/.volley/signin/work");
+    expect(remoteProfileDir("/path/to/home", "work")).toBe("/path/to/home/.volley/claude/work");
   });
 
   it("the forwarded port is the callback URL's redirect port", () => {
@@ -270,7 +270,7 @@ describe("runRemoteSignin", () => {
 });
 
 describe("runRemoteSignin of a profile the supervisor created there (profile: true)", () => {
-  const HOME = "/home/dev";
+  const HOME = "/path/to/home";
   const WDIR = remoteSigninDir(HOME, "work");
   const PROFILE = remoteProfileDir(HOME, "work");
   const CLAUDE_JSON = JSON.stringify({

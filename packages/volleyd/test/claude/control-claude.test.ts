@@ -506,7 +506,7 @@ describe("claude_signin for a paired machine (primary@<name>)", () => {
 describe("claude_account_add on a paired machine (<acct>@<name>)", () => {
   const HOSTS =
     "hosts:\n  peer-a:\n    target: dev@peer-a\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n";
-  const PROFILE = "/home/dev/.volley/claude/work";
+  const PROFILE = "/path/to/home/.volley/claude/work";
   const CLAUDE_JSON = JSON.stringify({
     userID: "c0ffee",
     oauthAccount: {
@@ -565,7 +565,7 @@ describe("claude_account_add on a paired machine (<acct>@<name>)", () => {
         topic: "volley/_system/claude/work@peer-a/signin",
       });
       // The profile lives on the box, not here.
-      expect(t.b.ran("mkdir")).toEqual([["mkdir", "-p", "/home/dev/.volley/signin/work", PROFILE]]);
+      expect(t.b.ran("mkdir")).toEqual([["mkdir", "-p", "/path/to/home/.volley/signin/work", PROFILE]]);
       expect(t.b.ran("tmux", "new-session")[0]?.[4]).toBe("volley-signin-work");
       const { accounts, remote_signins } = await t.accounts();
       expect(accounts).toEqual([

@@ -30,8 +30,8 @@ import { tempDir } from "../helpers/tmp";
 const TOKEN = "FAKE-TOKEN-7f3a9c";
 const NOW = new Date("2026-10-21T09:00:00.000Z");
 const at = (min: number) => new Date(NOW.getTime() + min * 60_000);
-/** sha256("/home/u/.volley/claude/work") (NFC), first 8 hex characters. */
-const WORK_HASH = "f3cdc077";
+/** sha256("/path/to/home/.volley/claude/work") (NFC), first 8 hex characters. */
+const WORK_HASH = "f8568817";
 
 /** What the usage endpoint answered in public reports (2026-10). */
 const FIXTURE = {
@@ -223,10 +223,10 @@ describe("logins and credential sources", () => {
 
   it("macOS: the Keychain item Claude Code keeps per config dir", () => {
     expect(keychainService(null)).toBe("Claude Code-credentials");
-    expect(keychainService("/home/u/.volley/claude/work")).toBe(
+    expect(keychainService("/path/to/home/.volley/claude/work")).toBe(
       `Claude Code-credentials-${WORK_HASH}`,
     );
-    expect(credentialArgv(keychainService("/home/u/.volley/claude/work"), "u")).toEqual([
+    expect(credentialArgv(keychainService("/path/to/home/.volley/claude/work"), "u")).toEqual([
       "security",
       "find-generic-password",
       "-s",
@@ -239,7 +239,7 @@ describe("logins and credential sources", () => {
 
   it("macOS reads the Keychain item: the profile's hashed service, the default's unsuffixed", async () => {
     const f = fake({ platform: "darwin", keychain: credentialJson() });
-    const work: Login = { profile: "work", dir: "/home/u/.volley/claude/work", isDefault: false };
+    const work: Login = { profile: "work", dir: "/path/to/home/.volley/claude/work", isDefault: false };
     expect(await readCredential(f.deps, work, NOW)).toEqual({
       token: TOKEN,
       expiresAt: at(60).getTime(),

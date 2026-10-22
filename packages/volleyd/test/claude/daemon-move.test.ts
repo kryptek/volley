@@ -128,7 +128,7 @@ describe("agent_move_account (daemon)", () => {
               id: "work",
               label: "work",
               machine: "peer-a",
-              dir: "/home/u/.volley/claude/work",
+              dir: "/path/to/home/.volley/claude/work",
               created: "2026-10-18T12:00:00.000Z",
               signed_in_at: "2026-10-18T12:00:00.000Z",
             },
