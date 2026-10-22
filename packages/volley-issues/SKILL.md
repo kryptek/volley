@@ -2,7 +2,7 @@
 name: volley-issues
 description: Dispatch GitHub issues to autonomous Claude agents, each in its own git worktree and cmux workspace, coordinated via Volley. By default emits a wave file and submits it to the volleyd supervisor; the hand-launched legacy path remains. Replaces the claude-peers/ScheduleWakeup polling loop with sub-5s volley wait notifications. Use when the user asks to dispatch issues, work on issues, or launch agents for issues.
 user_invocable: true
-version: 0.5
+version: 0.6
 ---
 
 # /volley-issues
