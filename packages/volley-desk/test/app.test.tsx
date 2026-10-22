@@ -4,7 +4,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { ARRANGE_ANIM_MS, FIRST_ARRANGE_MS } from "../src/layout/useAutoArrange";
-import { DeskStoreProvider } from "../src/store/context";
+import { DIGEST_AFTER_MS, DeskStoreProvider } from "../src/store/context";
+import { DIGEST_WAVE } from "../src/store/fixtures";
 import type { DeskMqttClient } from "../src/store/mqtt-client";
 import type { DeskMessage, Envelope, WaveStatePayload } from "../src/store/types";
 
@@ -15,18 +16,54 @@ describe("App (demo mode)", () => {
         <App />
       </DeskStoreProvider>,
     );
-    // 3 waves + 5 agents + the coordinators window.
-    expect(container.querySelectorAll(".world .win")).toHaveLength(3 + 5 + 1);
+    // 5 live waves (the ended one folds under Show finished) + 5 agents + the coordinators
+    // and Needs-you windows.
+    expect(container.querySelectorAll(".world .win")).toHaveLength(5 + 5 + 2);
     // Agent windows use .t-name too; wave windows are the ones with a dependency graph.
     const waveNames = [...container.querySelectorAll(".world .win")]
       .filter((w) => w.querySelector(".dag"))
       .map((w) => w.querySelector(".t-name")?.textContent);
-    expect(waveNames).toEqual(["status-chip", "ci-speed", "leaderboard"]);
+    expect(waveNames).toEqual(["status-chip", "ci-speed", "leaderboard", "relaunch", "autopilot"]);
     expect(screen.getByRole("region", { name: "status-chip" })).toBeInTheDocument();
     expect(container.querySelectorAll(".world .narr")).toHaveLength(5);
-    expect(container.querySelectorAll(".world .dag")).toHaveLength(3);
+    expect(container.querySelectorAll(".world .dag")).toHaveLength(5);
     expect(screen.getByText("Demo · sample data")).toBeInTheDocument();
-    expect(container.querySelector(".topbar-mid")?.textContent).toContain("3 waves");
+    expect(container.querySelector(".topbar-mid")?.textContent).toContain("6 waves");
+  });
+});
+
+describe("App autopilot, Needs you and the digest (demo mode)", () => {
+  it("shows the autopilot chip and the Needs-you Dock tile from the start", () => {
+    const { container } = render(
+      <DeskStoreProvider demo>
+        <App />
+      </DeskStoreProvider>,
+    );
+    expect(screen.getByRole("region", { name: "autopilot" })).toHaveTextContent(
+      /autopilot on · 4 auto · 1 escalated/,
+    );
+    expect(container.textContent).toMatch(/Needs you/);
+  });
+
+  it("after DIGEST_AFTER_MS the running wave's morning digest card renders", () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <DeskStoreProvider demo>
+          <App />
+        </DeskStoreProvider>,
+      );
+      const ci = () => screen.getByRole("region", { name: DIGEST_WAVE });
+      expect(within(ci()).queryByRole("region", { name: "Morning digest" })).toBeNull();
+      act(() => {
+        vi.advanceTimersByTime(DIGEST_AFTER_MS);
+      });
+      expect(within(ci()).getByRole("region", { name: "Morning digest" })).toHaveTextContent(
+        `${DIGEST_WAVE} needs you`,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -453,8 +490,9 @@ describe("App tethers (live store, D10)", () => {
         </DeskStoreProvider>,
       );
       const sways = () => container.querySelectorAll(".world g.tether[data-sway]");
-      const win = [...container.querySelectorAll<HTMLElement>(".world .win")].find((w) =>
-        w.querySelector(".gooey-tabs"),
+      // An agent window: it narrates (the Needs-you window has Gooey tabs too).
+      const win = [...container.querySelectorAll<HTMLElement>(".world .win")].find(
+        (w) => w.querySelector(".gooey-tabs") && w.querySelector(".narr"),
       ) as HTMLElement;
       const bar = win.querySelector(".win-bar") as HTMLElement;
       fireEvent.pointerDown(bar, { clientX: 100, clientY: 100, pointerId: 1 });
