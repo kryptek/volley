@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { memoryOf, vmStatAvailablePct } from "volley-cli/peer/machine";
 import { MAC_16GB_BYTES, VM_STAT_MAC_16GB } from "volley-cli/test/vm-stat";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -1016,6 +1016,10 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     const cores = Math.max(1, availableParallelism());
     /** The own machine's load per core (HOT_OS reads it on every sample). */
     let perCore = 10;
+    // Every test starts hot, whatever the one before it left.
+    beforeEach(() => {
+      perCore = 10;
+    });
     const HOT_OS = {
       ...CALM_OS,
       loadavg: () => [cores * perCore, cores * perCore, cores * perCore],
