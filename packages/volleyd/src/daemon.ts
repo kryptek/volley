@@ -1743,9 +1743,10 @@ export class Daemon {
 
   /**
    * The attention state an agent's progress implies (SPEC §4.3): `awaiting_input` (with its
-   * question, session and workspace) until anything else but `idle` says it works again. An
-   * unchanged state is re-published anyway once `claim_after_s / 4` has passed, so the retained
-   * `coordinator.last_seen` of a coordinator that only heartbeats stays fresh for a cold Desk.
+   * question, session and workspace) until anything else but `idle` or `heartbeat` says it works
+   * again. An unchanged state is re-published anyway once `claim_after_s / 4` has passed, so the
+   * retained `coordinator.last_seen` of a coordinator that only heartbeats stays fresh for a cold
+   * Desk.
    */
   private noteAttention(agent: string, env: Envelope): void {
     // Only wave owners have a `coordinator`: other agents' attention would just pile up.
@@ -1767,7 +1768,10 @@ export class Daemon {
               ? { workspace: p.workspace }
               : {}),
           }
-        : { state: "working" };
+        : // A heartbeat only says the session is alive: it leaves `awaiting_input` standing.
+          env.type === "heartbeat"
+          ? (this.attentionOf.get(agent) ?? { state: "working" })
+          : { state: "working" };
     const before = JSON.stringify(this.attentionOf.get(agent) ?? null);
     this.attentionOf.set(agent, next);
     const now = this.now();

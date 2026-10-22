@@ -203,6 +203,35 @@ describe("a wave owned by a coordinator name", () => {
     expect(await retainedCoordinator()).toMatchObject({ state: "working", last_seen: lastBeat });
   });
 
+  it("a heartbeat keeps an awaiting_input coordinator awaiting, and advances its last_seen", async () => {
+    await registry("coordinator-a1");
+    await status("coordinator-a1", "working");
+    const env = buildEnvelope({
+      now: () => new Date(clock.now()),
+      agentId: "coordinator-a1",
+      parentId: null,
+      channel: "progress",
+      type: "awaiting_input",
+      payload: { question: "Merge now?" },
+    });
+    await pub.publish(`volley/${NS}/coordinator-a1/progress`, JSON.stringify(env), {
+      qos: 1,
+      retain: false,
+    });
+    await until(() => expect(coordinator()?.state).toBe("awaiting_input"));
+    // volley-mcp beats every VOLLEY_HEARTBEAT_S while the coordinator waits on the owner.
+    clock.sleepHost(600_000);
+    await heartbeat("coordinator-a1");
+    expect((await client.request("status", {})).ok).toBe(true);
+    const lastBeat = new Date(clock.now()).toISOString();
+    await eventually(async () => (await retainedCoordinator())?.last_seen === lastBeat);
+    expect(await retainedCoordinator()).toMatchObject({
+      state: "awaiting_input",
+      last_seen: lastBeat,
+    });
+    expect(coordinator()).toMatchObject({ state: "awaiting_input", question: "Merge now?" });
+  });
+
   it("the bound agent answers the name's decision through inbox_answer, as through resolve", async () => {
     await registry("coordinator-a1");
     await status("coordinator-a1", "working");

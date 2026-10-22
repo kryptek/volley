@@ -112,7 +112,10 @@ describe("the progress heartbeat", () => {
     await observer.subscribeAsync("volley/test/beat-aaaa/progress", { qos: 1 });
 
     const state = await startLifecycle({ ...cfg(tb, "beat-aaaa"), heartbeatS: 0.1 });
-    await new Promise((r) => setTimeout(r, 350));
+    // Wait for the beats rather than counting them in a fixed window: a loaded runner is slow.
+    for (const deadline = Date.now() + 5_000; beats.length < 2 && Date.now() < deadline; ) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
     expect(beats.length).toBeGreaterThanOrEqual(2);
     expect(beats[0]).toMatchObject({
       agent_id: "beat-aaaa",
