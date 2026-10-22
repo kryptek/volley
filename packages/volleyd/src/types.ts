@@ -96,6 +96,8 @@ export interface Tunables {
   stall_backoff_max_s: number;
   /** A `blocked` agent no decision names (open, or answered for its status) this long is stalled. */
   blocked_undecided_stall_ms: number;
+  /** Longest a tool call in flight (PreToolUse, no PostToolUse yet) holds off the silence probe. */
+  tool_in_flight_max_s: number;
   fallback_model: string | null;
   mailbox: { session_expiry_s: number };
   worktree_root: string;

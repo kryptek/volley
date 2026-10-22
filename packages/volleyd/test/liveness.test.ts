@@ -34,6 +34,7 @@ const TUNABLES = {
   background_wait_max_s: 7200,
   stall_backoff_max_s: 1800,
   blocked_undecided_stall_ms: 300_000,
+  tool_in_flight_max_s: 7200,
 };
 
 const hook = (name: string, at: number): HookSignal => {
@@ -301,27 +302,61 @@ describe("liveness: silence → screen fallback", () => {
     expect(kinds(r.actions)).toEqual(["read_screen"]);
   });
 
-  it("heartbeats stop for 11 min with the screen readable and changing → hooks_silent", () => {
-    const r = run(silent(), [
+  /** Silent and changing for one window: the change is held, not yet a decision. */
+  const changingOneWindow = () =>
+    run(silent(), [
       check(T0 + 11 * MIN),
       read(screen("working.txt"), T0 + 11 * MIN),
       check(T0 + 11 * MIN + 10_000),
       read(screen("claude-session.txt"), T0 + 11 * MIN + 10_000),
     ]);
-    expect(kinds(r.actions)).toEqual(["read_screen", "read_screen", "hooks_silent"]);
-    const alarm = r.actions.at(-1) as Extract<LivenessAction, { kind: "hooks_silent" }>;
-    expect(alarm.silent_s).toBeGreaterThanOrEqual(600);
-    expect(alarm.screen).toBe(screen("claude-session.txt"));
-    // Decided: no more reads, no second alarm.
-    expect(run(r.state, [check(T0 + 20 * MIN)]).actions).toEqual([]);
+
+  it("heartbeats stop and the screen changes for one window → held, no decision", () => {
+    const r = changingOneWindow();
+    expect(kinds(r.actions)).toEqual(["read_screen", "read_screen"]);
+    // Held one more window: no re-read until it has passed.
+    expect(run(r.state, [check(T0 + 15 * MIN), check(T0 + 20 * MIN)]).actions).toEqual([]);
   });
 
-  it("a screen the capture saw changing since the last hook signal decides on the first read", () => {
+  it("the screen keeps changing with no hook signal for a second window → hooks_silent", () => {
+    const r = run(changingOneWindow().state, [
+      check(T0 + 21 * MIN + 10_000),
+      read(screen("working.txt"), T0 + 21 * MIN + 10_000),
+    ]);
+    expect(kinds(r.actions)).toEqual(["read_screen", "hooks_silent"]);
+    const alarm = r.actions.at(-1) as Extract<LivenessAction, { kind: "hooks_silent" }>;
+    expect(alarm.silent_s).toBeGreaterThanOrEqual(1200);
+    expect(alarm.screen).toBe(screen("working.txt"));
+    // Decided: no more reads, no second alarm.
+    expect(run(r.state, [check(T0 + 30 * MIN)]).actions).toEqual([]);
+  });
+
+  it("a hook signal inside the held window clears it: a silence that ends is no decision", () => {
+    const r = run(changingOneWindow().state, [
+      signal("heartbeat.json", T0 + 15 * MIN),
+      check(T0 + 22 * MIN),
+    ]);
+    expect(r.actions).toEqual([]);
+    expect(r.state.silence).toBeNull();
+  });
+
+  it("the screen stops changing during the held window → screen_static", () => {
+    const r = run(changingOneWindow().state, [
+      check(T0 + 21 * MIN + 10_000),
+      read(screen("claude-session.txt"), T0 + 21 * MIN + 10_000),
+    ]);
+    expect(kinds(r.actions)).toEqual(["read_screen", "screen_static"]);
+  });
+
+  it("a screen the capture saw changing since the last hook signal is held on the first read", () => {
     let s = silent();
     s = noteCapture(s, { hash: "aaa", at: T0 + 2 * MIN });
     s = noteCapture(s, { hash: "bbb", at: T0 + 8 * MIN });
-    const r = run(s, [check(T0 + 11 * MIN), read(screen("working.txt"), T0 + 11 * MIN)]);
-    expect(kinds(r.actions)).toEqual(["read_screen", "hooks_silent"]);
+    const first = run(s, [check(T0 + 11 * MIN), read(screen("working.txt"), T0 + 11 * MIN)]);
+    expect(kinds(first.actions)).toEqual(["read_screen"]);
+    const changed = noteCapture(first.state, { hash: "ccc", at: T0 + 15 * MIN });
+    const second = run(changed, [check(T0 + 21 * MIN), read(screen("working.txt"), T0 + 21 * MIN)]);
+    expect(kinds(second.actions)).toEqual(["read_screen", "hooks_silent"]);
   });
 
   it("a screen showing the credit prompt → credit_exhausted with the screen", () => {
@@ -368,14 +403,12 @@ describe("liveness: silence → screen fallback", () => {
   });
 
   it("a hook signal closes an open hooks_silent decision", () => {
-    let s = run(silent(), [
-      check(T0 + 11 * MIN),
-      read(screen("working.txt"), T0 + 11 * MIN),
-      check(T0 + 11 * MIN + 10_000),
-      read(screen("claude-session.txt"), T0 + 11 * MIN + 10_000),
+    let s = run(changingOneWindow().state, [
+      check(T0 + 21 * MIN + 10_000),
+      read(screen("working.txt"), T0 + 21 * MIN + 10_000),
     ]).state;
     s = noteDecision(s, "silent", "d-s1");
-    const r = observeSignal(s, hook("heartbeat.json", T0 + 13 * MIN));
+    const r = observeSignal(s, hook("heartbeat.json", T0 + 23 * MIN));
     expect(r.actions).toEqual([
       { kind: "close", decision_id: "d-s1", answer: expect.stringContaining("hook") },
     ]);
@@ -385,6 +418,98 @@ describe("liveness: silence → screen fallback", () => {
     const s = rebase(silent(), T0 + 60 * MIN);
     expect(run(s, [check(T0 + 61 * MIN)]).actions).toEqual([]);
     expect(kinds(run(s, [check(T0 + 71 * MIN)]).actions)).toEqual(["read_screen"]);
+  });
+});
+
+describe("liveness: a tool in flight is not silence", () => {
+  /** The hooks' tool boundary: PreToolUse's `activity`, PostToolUse's `heartbeat` (SPEC §4.3). */
+  const tool =
+    (type: string, hook_event: string, at: number, tool_use_id: string) => (s: AgentLiveness) =>
+      observeSignal(s, {
+        type,
+        at,
+        seq: null,
+        hook_event,
+        payload: { source: "harness-hook", hook_event, tool_use_id, tool: "Bash" },
+      });
+  const pre = (at: number, id = "toolu_1") => tool("activity", "PreToolUse", at, id);
+  const post = (at: number, id = "toolu_1") => tool("heartbeat", "PostToolUse", at, id);
+  /** The screen publisher saw the screen change at `at`. */
+  const capture = (at: number) => (s: AgentLiveness) => ({
+    state: noteCapture(s, { hash: `h${at}`, at }),
+    actions: [],
+  });
+  const started = () => run(fresh(), [capture(T0 - MIN), pre(T0)]).state;
+
+  it("PreToolUse records the tool in flight; the matching PostToolUse ends it", () => {
+    const s = started();
+    expect(s.tool_in_flight).toEqual([{ tool_use_id: "toolu_1", tool: "Bash", since: T0 }]);
+    expect(run(s, [post(T0 + MIN, "toolu_other")]).state.tool_in_flight).toHaveLength(1);
+    expect(run(s, [post(T0 + MIN)]).state.tool_in_flight).toEqual([]);
+    expect(run(s, [signal("idle-stop.json", T0 + MIN)]).state.tool_in_flight).toEqual([]);
+  });
+
+  it("a PreToolUse with no PostToolUse and a changing screen for 3 windows → no read, no decision", () => {
+    const steps = [];
+    for (let m = 1; m <= 31; m++) steps.push(capture(T0 + m * MIN), check(T0 + m * MIN + 1000));
+    const r = run(started(), steps);
+    expect(r.actions).toEqual([]);
+    expect(r.state.silence).toBeNull();
+  });
+
+  it("the matching PostToolUse restarts the silence clock", () => {
+    const r = run(started(), [capture(T0 + 20 * MIN), post(T0 + 30 * MIN), check(T0 + 39 * MIN)]);
+    expect(r.actions).toEqual([]);
+    expect(kinds(run(r.state, [check(T0 + 41 * MIN)]).actions)).toEqual(["read_screen"]);
+  });
+
+  it("past tool_in_flight_max_s with a static screen → today's path: screen_static", () => {
+    const at = T0 + 121 * MIN;
+    const r = run(started(), [
+      capture(T0 + 5 * MIN),
+      check(T0 + 119 * MIN),
+      check(at),
+      read(screen("working.txt"), at),
+      check(at + 10_000),
+      read(screen("working.txt"), at + 10_000),
+    ]);
+    expect(kinds(r.actions)).toEqual(["read_screen", "read_screen", "screen_static"]);
+  });
+
+  it("past tool_in_flight_max_s a screen still changing is no decision either", () => {
+    const steps = [];
+    for (let m = 115; m <= 150; m++) steps.push(capture(T0 + m * MIN), check(T0 + m * MIN + 1000));
+    expect(run(started(), steps).actions).toEqual([]);
+  });
+
+  it("past tool_in_flight_max_s, reads that keep differing on a static capture → never hooks_silent", () => {
+    const at = T0 + 121 * MIN;
+    const r = run(started(), [
+      capture(T0 + 5 * MIN),
+      check(at),
+      read(screen("working.txt"), at),
+      check(at + 10_000),
+      read(screen("claude-session.txt"), at + 10_000),
+      check(at + 11 * MIN),
+      read(screen("working.txt"), at + 11 * MIN),
+      check(at + 22 * MIN),
+      read(screen("claude-session.txt"), at + 22 * MIN),
+    ]);
+    expect(kinds(r.actions)).toEqual(["read_screen", "read_screen", "read_screen", "read_screen"]);
+    expect(r.state.silence?.phase).toBe("holding");
+  });
+
+  it("parallel calls: the one that ends first leaves the other in flight", () => {
+    const steps = [pre(T0 + 1000, "toolu_2"), post(T0 + 2000, "toolu_2")];
+    for (let m = 1; m <= 31; m++) steps.push(capture(T0 + m * MIN), check(T0 + m * MIN + 1000));
+    const r = run(started(), steps);
+    expect(r.actions).toEqual([]);
+    expect(r.state.tool_in_flight).toEqual([{ tool_use_id: "toolu_1", tool: "Bash", since: T0 }]);
+    expect(run(r.state, [post(T0 + 32 * MIN)]).state.tool_in_flight).toEqual([]);
+  });
+
+  it("rebase after a wake moves the tool's start forward", () => {
+    expect(rebase(started(), T0 + 60 * MIN).tool_in_flight[0]?.since).toBe(T0 + 60 * MIN);
   });
 });
 
@@ -482,8 +607,10 @@ describe("whyWaiting", () => {
       read(screen("working.txt"), T0 + 11 * MIN),
       check(T0 + 11 * MIN + 10_000),
       read(screen("claude-session.txt"), T0 + 11 * MIN + 10_000),
+      check(T0 + 21 * MIN + 10_000),
+      read(screen("working.txt"), T0 + 21 * MIN + 10_000),
     ]).state;
-    expect(whyWaiting(silent, T0 + 12 * MIN)).toBe("hooks silent 12 min");
+    expect(whyWaiting(silent, T0 + 22 * MIN)).toBe("hooks silent 22 min");
 
     const idle = run(fresh(), [signal("idle-stop.json", T0), check(T0 + 3 * MIN)]).state;
     expect(whyWaiting(idle, T0 + 4 * MIN)).toBe("idle 4 min: nudged to continue");
@@ -729,15 +856,25 @@ describe("daemon: hook-signal liveness", () => {
     expect(steers()).toHaveLength(1);
   });
 
-  it("silence past heartbeat_alarm_s reads the screen once per tick and opens hooks_silent", async () => {
+  it("silence past two heartbeat_alarm_s windows reads the screen once per tick and opens hooks_silent", async () => {
     const clock = fakeClock(Date.now());
     s = await makeSupervisedEnv({ daemon: { clock } });
-    s.host.screens = ["● step one\n✶ Working… (3s)", "● step two\n✶ Working… (9s)"];
+    s.host.screens = [
+      "● step one\n✶ Working… (3s)",
+      "● step two\n✶ Working… (9s)",
+      "● step three\n✶ Working… (15s)",
+    ];
     await clock.advance(11 * MIN);
     await s.daemon.tick();
     await s.settled();
     expect(s.host.screenReads).toHaveLength(1);
     await clock.advance(10_000);
+    await s.daemon.tick();
+    await s.settled();
+    // Changing for one window: held, no decision yet.
+    expect(s.host.screenReads).toHaveLength(2);
+    expect(decisions("unknown_screen")).toEqual([]);
+    await clock.advance(10 * MIN);
     await s.daemon.tick();
     await opened("unknown_screen");
     await s.settled();
@@ -746,6 +883,6 @@ describe("daemon: hook-signal liveness", () => {
       agent_id: AGENT,
     });
     expect(decisions("unknown_screen")[0]?.data.question).toMatch(/hooks may be broken/);
-    expect(s.daemon.snapshot("w1")?.tasks[0]?.why_waiting).toBe("hooks silent 11 min");
+    expect(s.daemon.snapshot("w1")?.tasks[0]?.why_waiting).toBe("hooks silent 21 min");
   });
 });
