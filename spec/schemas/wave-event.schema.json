@@ -70,6 +70,7 @@
             "ci_green",
             "pr_head_moved",
             "merged_by_operator",
+            "pr_conflicting",
             "merged_by_supervisor",
             "merge_queued",
             "merge_dequeued",
@@ -378,6 +379,42 @@
                       "by": { "type": "string", "minLength": 1 },
                       "where": { "$ref": "inbox-item.schema.json#/$defs/where" },
                       "version": { "type": "integer", "minimum": 2 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "pr_conflicting" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["pr", "head", "release_branch"],
+                    "properties": {
+                      "pr": {
+                        "type": "object",
+                        "required": ["number", "url"],
+                        "properties": {
+                          "number": { "type": "integer", "minimum": 1 },
+                          "url": { "type": "string" }
+                        }
+                      },
+                      "head": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{7,64}$",
+                        "description": "The PR head GitHub reports CONFLICTING, where the branch-update step starts."
+                      },
+                      "release_branch": { "type": "string", "minLength": 1 },
+                      "role": {
+                        "type": "string",
+                        "description": "The role whose pushed head it is (implementer, fixup)."
+                      }
                     }
                   }
                 }

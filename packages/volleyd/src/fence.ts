@@ -184,7 +184,8 @@ import { AGENT_BRANCH } from "./worktree";
  *     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
  *     login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
  *   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
- *   volley peer doctor --json [--fix --yes [--clone --origin <https URL>]] — the machine's doctor
+ *   volley peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
+ *     <https URL>]] — the machine's doctor
  *     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
  *     credentials or port, isCloneUrl); no other volley argv runs on a box
  *   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
@@ -1580,6 +1581,17 @@ const REMOTE_DOCTOR: readonly (readonly string[])[] = [
   ["peer", "doctor", "--json"],
   ["peer", "doctor", "--json", "--fix", "--yes"],
 ];
+/**
+ * After `--json`, the doctor may be told the box's `volley_dir` (`--supervisor-volley-dir`, so
+ * it checks every volley MCP entry against it): an absolute path, no `..` segment, no control
+ * character.
+ */
+const SUPERVISOR_VOLLEY_DIR = "--supervisor-volley-dir";
+const isVolleyDir = (p: string) =>
+  p.startsWith("/") &&
+  !p.split("/").includes("..") &&
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
+  !/[\u0000-\u001f\u007f]/.test(p);
 /** … and with `--clone`, the URL it clones from (`--origin`, a CLONE_URL). */
 const REMOTE_DOCTOR_CLONE = ["peer", "doctor", "--json", "--fix", "--yes", "--clone", "--origin"];
 /**
@@ -1894,16 +1906,20 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
         args.slice(1).every((n) => (PATH_PROBE_TOOLS as readonly string[]).includes(n))
         ? ALLOW
         : deny(`command (only -v ${PATH_PROBE_TOOLS.join(" ")})`);
-    case "volley":
+    case "volley": {
       // The one remote volley step: elsewhere volley is a local program (`volley auth`).
-      return REMOTE_DOCTOR.some((shape) => sameArgv(args, shape)) ||
-        (args.length === REMOTE_DOCTOR_CLONE.length + 1 &&
-          sameArgv(args.slice(0, -1), REMOTE_DOCTOR_CLONE) &&
-          isCloneUrl(args.at(-1) ?? ""))
+      const dir = args[3] === SUPERVISOR_VOLLEY_DIR ? (args[4] ?? "") : null;
+      const rest = dir !== null ? [...args.slice(0, 3), ...args.slice(5)] : args;
+      return (dir === null || isVolleyDir(dir)) &&
+        (REMOTE_DOCTOR.some((shape) => sameArgv(rest, shape)) ||
+          (rest.length === REMOTE_DOCTOR_CLONE.length + 1 &&
+            sameArgv(rest.slice(0, -1), REMOTE_DOCTOR_CLONE) &&
+            isCloneUrl(rest.at(-1) ?? "")))
         ? ALLOW
         : deny(
-            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--fix --yes [--clone --origin <https URL>]])`,
+            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--supervisor-volley-dir <abs>] [--fix --yes [--clone --origin <https URL>]])`,
           );
+    }
     default: {
       // Locally allowed programs (cmux, volley, launchctl) have no business on a remote host.
       const v = evaluate([prog, ...args], opts);

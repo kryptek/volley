@@ -283,6 +283,56 @@ describe("pipeline: rebase before the gate", () => {
   });
 });
 
+describe("pipeline: a CONFLICTING PR (#312)", () => {
+  it("the implementer's conflicting head is merged up to date, then reviewed, gated and merged as usual", async () => {
+    h = pipelineHarness({ merge: "auto" });
+    await h.start();
+    h.openPr(H1);
+    const pr = h.world.prs[0];
+    if (pr === undefined) throw new Error("no PR");
+    pr.mergeable = "CONFLICTING";
+    await h.finish("implementer", { head: H1 });
+    expect(h.spawns.filter((s) => s.role === "rebase")).toHaveLength(1);
+    expect(h.openDecisions()).toEqual([]);
+
+    // The update agent pushes a merge commit; GitHub runs CI on it, green.
+    pr.mergeable = "MERGEABLE";
+    h.world.ancestor[`${H1}..${H2}`] = true;
+    h.world.diffNames[`${H1}..${H2}`] = ["CHANGELOG.md"];
+    await h.finish("rebase", { head: H2, ci: "green" });
+    // The implementer's work was never reviewed: the reviews run next, at the merged head.
+    const reviewers = h.spawns.filter((s) => s.role !== "implementer" && s.role !== "rebase");
+    expect(reviewers.map((s) => [s.role, s.start])).toEqual([
+      ["spec_reviewer", { ref: H2, detach: true }],
+      ["quality_reviewer", { ref: H2, detach: true }],
+    ]);
+    expect(h.task()?.why_waiting).toBeUndefined();
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    expect(stage()).toBe("merge_ready");
+    expect(h.task()?.pr?.head_sha).toBe(H2);
+    await h.tick();
+    expect(types()).toContain("merged_by_supervisor");
+    expect(h.openDecisions()).toEqual([]);
+  });
+
+  it("a fixup's conflicting head is updated, then gated: the reviews it fixed still hold", async () => {
+    await reviewed();
+    const pr = h.world.prs[0];
+    if (pr === undefined) throw new Error("no PR");
+    pr.mergeable = "CONFLICTING";
+    await h.finish("fixup", { head: H2, result: result("fixup-resolved") });
+    expect(h.spawns.find((s) => s.role === "rebase")?.start).toEqual({ ref: H2, detach: false });
+    pr.mergeable = "MERGEABLE";
+    h.world.diffNames[`${H2}..${H3}`] = ["README.md"];
+    await h.finish("rebase", { head: H3, ci: "green" });
+    expect(stage()).toBe("merge_ready");
+    expect(h.task()?.pr?.head_sha).toBe(H3);
+    expect(h.openDecisions()).toEqual([]);
+    expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
+  });
+});
+
 describe("pipeline: branch_update: merge (no force-push)", () => {
   /** As fixedUpBehind, with the `branch_update` tunable set (default `merge`). */
   async function behindInMergeMode(mode: "merge" | "rebase" = "merge") {

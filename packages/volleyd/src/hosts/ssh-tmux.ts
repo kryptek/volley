@@ -102,8 +102,8 @@ export interface RemoteHost extends Host {
    */
   probePath(): Promise<PathProbe>;
   /**
-   * `volley peer doctor --json [--fix --yes [--clone --origin <clone>]]` on the box, in its volley
-   * checkout: the parsed report. `clone` (with `fix`) is the wave repo's URL the doctor clones
+   * `volley peer doctor --json --supervisor-volley-dir <volley_dir> [--fix --yes [--clone
+   * --origin <clone>]]` on the box, in its volley checkout: the parsed report. `clone` (with `fix`) is the wave repo's URL the doctor clones
    * where the box's clone is missing. Throws when ssh fails or the doctor printed no report.
    */
   runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport>;
@@ -571,18 +571,32 @@ export class SshTmuxHost implements RemoteHost {
   }
 
   async runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport> {
-    const argv = [
-      "volley",
-      "peer",
-      "doctor",
-      "--json",
-      ...(opts.fix ? ["--fix", "--yes"] : []),
-      ...(opts.fix && opts.clone !== undefined ? ["--clone", "--origin", opts.clone] : []),
-    ];
-    // Through run, not exec: `volley` is otherwise a local program (LOCAL_PROGRAMS).
-    const r = await this.run([{ argv, cwd: this.spec.volley_dir }], {
-      timeoutMs: DAEMON_DEFAULTS.peer_doctor_timeout_ms,
-    }).catch(() => null);
+    const doctorRun = (dir: string[]) => {
+      const argv = [
+        "volley",
+        "peer",
+        "doctor",
+        "--json",
+        ...dir,
+        ...(opts.fix ? ["--fix", "--yes"] : []),
+        ...(opts.fix && opts.clone !== undefined ? ["--clone", "--origin", opts.clone] : []),
+      ];
+      // Through run, not exec: `volley` is otherwise a local program (LOCAL_PROGRAMS).
+      return this.run([{ argv, cwd: this.spec.volley_dir }], {
+        timeoutMs: DAEMON_DEFAULTS.peer_doctor_timeout_ms,
+      }).catch(() => null);
+    };
+    // The box's volley_dir: every volley MCP entry there must run it (agents are launched from
+    // it). A volley older than the flag refuses it: its doctor then runs without.
+    let r = await doctorRun(["--supervisor-volley-dir", this.spec.volley_dir]);
+    if (
+      r !== null &&
+      !transportFailed(r) &&
+      parseDoctorReport(r.stdout) === null &&
+      r.stderr.includes("--supervisor-volley-dir")
+    ) {
+      r = await doctorRun([]);
+    }
     if (r === null || transportFailed(r)) throw this.sshFailed("volley peer doctor", r);
     // A failing block check exits 1 with the report on stdout.
     const report = parseDoctorReport(r.stdout);

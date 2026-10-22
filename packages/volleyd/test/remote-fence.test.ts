@@ -764,6 +764,24 @@ describe("Fleet steps (F2): the PATH probe and the doctor on a paired machine", 
       [...CLONE, "https://git.example.com/team/sub.group/repo_1"],
     ]) {
       expect(allowed({ argv: [...DOCTOR, "--json", ...extra], cwd: VOLLEY_DIR })).not.toThrow();
+      const dir = ["--supervisor-volley-dir", VOLLEY_DIR];
+      expect(
+        allowed({ argv: [...DOCTOR, "--json", ...dir, ...extra], cwd: VOLLEY_DIR }),
+      ).not.toThrow();
+    }
+  });
+
+  it("--supervisor-volley-dir takes one absolute path, right after --json", () => {
+    for (const argv of [
+      [...DOCTOR, "--json", "--supervisor-volley-dir"],
+      [...DOCTOR, "--json", "--supervisor-volley-dir", "opt/volley"],
+      [...DOCTOR, "--json", "--supervisor-volley-dir", "/opt/../etc"],
+      [...DOCTOR, "--json", "--supervisor-volley-dir", "/opt/volley\nid"],
+      [...DOCTOR, "--json", "--supervisor-volley-dir", "--fix", "--yes"],
+      [...DOCTOR, "--json", "--fix", "--yes", "--supervisor-volley-dir", VOLLEY_DIR],
+      [...DOCTOR, "--supervisor-volley-dir", VOLLEY_DIR, "--json"],
+    ]) {
+      expect(allowed({ argv, cwd: VOLLEY_DIR }), argv.join(" ")).toThrow(FenceError);
     }
   });
 
