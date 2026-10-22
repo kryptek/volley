@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
+import { worktreeGone } from "../src/daemon";
 import type { DecisionRecord } from "../src/decisions";
 import type { EvidenceJson } from "../src/evidence";
 import { roleSpawnHold } from "../src/pipeline";
@@ -1244,12 +1245,45 @@ describe("pipeline: where the checks run", () => {
       expect(c.argv.slice(-2)).toEqual(["--repo", "example/repo"]);
     }
     // The gate's git checks (before the merge) ran in the repo root, after fetching the PR head.
-    const gits = h.calls.filter((a) => a[0] === "git" && a[1] === "-C").slice(0, gated);
+    const gits = h.calls.slice(0, gated).filter((a) => a[0] === "git" && a[1] === "-C");
     expect(gits).toContainEqual(["git", "-C", "/repo", "fetch", "origin", "refs/pull/7/head"]);
     // Nothing after the gate touches the removed worktree.
     expect(
       after.filter((c) => c.cwd?.startsWith("/wt/") || c.argv.some((x) => x.startsWith("/wt/"))),
     ).toEqual([]);
+  });
+
+  it("off github.com, --repo is host-qualified (<host>/<slug>)", async () => {
+    h = pipelineHarness({ pipeline: "[implement, merge_ready]", worktreeGone: () => true });
+    await h.start();
+    await h.journal({
+      type: "repo_visibility_detected",
+      data: {
+        visibility: "public",
+        github: { slug: "example/repo", url: "https://ghe.example.com/example/repo" },
+      },
+    });
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    const views = h.calls.filter((a) => a[0] === "gh" && a[2] === "view");
+    expect(views.length).toBeGreaterThan(0);
+    for (const a of views) expect(a.slice(-2)).toEqual(["--repo", "ghe.example.com/example/repo"]);
+  });
+});
+
+describe("worktreeGone (the daemon's answer to the driver)", () => {
+  it("is true only for a local (or unknown) task whose worktree is missing", () => {
+    const missing = () => false;
+    const present = () => true;
+    expect(worktreeGone({ host: "local" }, "/wt/T1", missing)).toBe(true);
+    expect(worktreeGone(undefined, "/wt/T1", missing)).toBe(true);
+    expect(worktreeGone({ host: "local" }, "/wt/T1", present)).toBe(false);
+    // A remote box's worktree is never probed from here.
+    expect(worktreeGone({ host: "box" }, "/wt/T1", missing)).toBe(false);
+  });
+  it("probes the real filesystem by default", () => {
+    expect(worktreeGone({ host: "local" }, process.cwd())).toBe(false);
+    expect(worktreeGone({ host: "local" }, `${process.cwd()}/no-such-worktree-314`)).toBe(true);
   });
 });
 

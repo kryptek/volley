@@ -726,6 +726,18 @@ function spawnFailedTask(d: DecisionRecord): TaskId | null {
 }
 
 /**
+ * Whether a task's worktree is gone: a local task's worktree removed by `volleyd cleanup` (or by
+ * hand), so its git checks move to the repo root. A remote box's worktree is never probed here.
+ */
+export function worktreeGone(
+  task: Pick<WaveTask, "host"> | undefined,
+  path: string,
+  exists: (path: string) => boolean = existsSync,
+): boolean {
+  return (task === undefined || task.host === "local") && !exists(path);
+}
+
+/**
  * The id of a role's `spawn_failed` decision: hashed over its wave, task and role, so two waves
  * with the same task never share one (a `-<n>` suffix keeps a wave's later ones apart).
  */
@@ -5531,12 +5543,7 @@ export class Daemon {
           ? this.host.exec
           : this.remoteHost(wave, t).exec;
       },
-      // A local task's worktree removed by `volleyd cleanup` (or by hand): its git checks move to
-      // the repo root. A remote box's worktree is not probed here.
-      worktreeGone: (task, path) => {
-        const t = log.record.wave?.tasks[task];
-        return (t === undefined || t.host === "local") && !existsSync(path);
-      },
+      worktreeGone: (task, path) => worktreeGone(log.record.wave?.tasks[task], path),
       home: this.opts.home,
       record: () => log.record,
       journal: (ev) => this.append(wave, ev),
