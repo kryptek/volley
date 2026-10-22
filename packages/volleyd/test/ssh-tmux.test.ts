@@ -819,14 +819,16 @@ describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
     const r = remote(() => ({ code: 1, stdout: JSON.stringify(REPORT) }));
     expect(await r.host.runDoctor({ fix: false })).toEqual(REPORT);
     expect(await r.host.runDoctor({ fix: true, clone: "https://github.com/o/r" })).toEqual(REPORT);
+    const dir = ["--supervisor-volley-dir", SPEC.volley_dir];
     expect(r.steps()).toEqual([
-      { argv: ["volley", "peer", "doctor", "--json"], cwd: SPEC.volley_dir },
+      { argv: ["volley", "peer", "doctor", "--json", ...dir], cwd: SPEC.volley_dir },
       {
         argv: [
           "volley",
           "peer",
           "doctor",
           "--json",
+          ...dir,
           "--fix",
           "--yes",
           "--clone",
@@ -835,6 +837,20 @@ describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
         ],
         cwd: SPEC.volley_dir,
       },
+    ]);
+  });
+
+  it("runDoctor on a volley older than --supervisor-volley-dir runs the doctor again without it", async () => {
+    let n = 0;
+    const r = remote(() =>
+      n++ === 0
+        ? { code: 2, stderr: "volley peer: Unknown option '--supervisor-volley-dir'" }
+        : { code: 0, stdout: JSON.stringify(REPORT) },
+    );
+    expect(await r.host.runDoctor({ fix: false })).toEqual(REPORT);
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      ["volley", "peer", "doctor", "--json", "--supervisor-volley-dir", SPEC.volley_dir],
+      ["volley", "peer", "doctor", "--json"],
     ]);
   });
 

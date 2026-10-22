@@ -8,7 +8,8 @@
 # spawn_budget_multiplier: 3    # raises the derived spawn budget to multiplier x task count
 
 # Heavy-operation lease pools. A command matching a pool's `match` regex (checked by the
-# volley-hooks PreToolUse lease hook) runs inside `volley lease run --pool <pool> -- ...` and
+# volley-hooks PreToolUse lease hook, matched against each command the shell would execute, not
+# comments, heredocs or message text) runs inside `volley lease run --pool <pool> -- ...` and
 # waits for one of `capacity` leases. Lowering a capacity never preempts a holder; removing a
 # pool keeps its holders and rejects new requests.
 # lease_pools:
