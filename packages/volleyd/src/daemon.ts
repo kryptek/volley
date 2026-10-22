@@ -6013,7 +6013,9 @@ export class Daemon {
 
   /**
    * A task between roles will spawn an agent of its current step: no role of it is refused for
-   * good, and none retired unverified (a dead agent) unless its respawn is on its way.
+   * good, and none retired unverified (a dead agent) unless its respawn is on its way. A step whose
+   * roles are all accepted (implemented, waiting on CI before its reviewers) holds its slot for
+   * the whole wait; it reads as `launching` and gates admission only, never a role's spawn.
    */
   private nextRoleComes(wave: WaveId, task: TaskId, p: TaskPipeline | undefined): boolean {
     if (p === undefined) return true;

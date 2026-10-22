@@ -153,6 +153,34 @@ describe("hard ceiling without a spawner (admitted, not started)", () => {
     expect(admitted("w-d")).toEqual(["A", "B"]);
   });
 
+  it("a task whose implementer retired unverified keeps its slot while its respawn is held", async () => {
+    await run(reviewed("w-h", ["A", "B"], "hard_ceiling: 1"));
+    expect(admitted("w-h")).toEqual(["A"]);
+    await daemon.recordEvent("w-h", {
+      type: "agent_spawned",
+      task: "A",
+      data: { role: "implementer", agent_id: "w-h-a-implementer-1" },
+    });
+    await daemon.recordEvent("w-h", {
+      type: "stage_entered",
+      task: "A",
+      data: { stage: "implement" },
+    });
+    await daemon.recordEvent("w-h", {
+      type: "agent_retired",
+      task: "A",
+      data: { role: "implementer", agent_id: "w-h-a-implementer-1", status: "dead" },
+    });
+    // Its respawn is held (a closed machine): the slot stays held for it.
+    const heldRespawn = (daemon as unknown as { heldRespawn: Map<string, unknown> }).heldRespawn;
+    heldRespawn.set("w-h/A", { role: "implementer", pipeline: {} });
+    await daemon.tick();
+    expect(admitted("w-h")).toEqual(["A"]);
+    heldRespawn.delete("w-h/A");
+    await daemon.tick();
+    expect(admitted("w-h")).toEqual(["A", "B"]);
+  });
+
   it("a task between roles whose next role is refused for good frees its slot", async () => {
     await run(reviewed("w-q", ["A", "B"], "hard_ceiling: 1"));
     expect(admitted("w-q")).toEqual(["A"]);
