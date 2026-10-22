@@ -58,6 +58,7 @@ describe("the Desk's DigestPayload mirrors digest.schema.json", () => {
       "waiting",
       "release",
       "failures",
+      "alarms",
     ];
     expect([...keys].sort()).toEqual(Object.keys(schema.$defs.digest.properties).sort());
   });

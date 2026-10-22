@@ -43,6 +43,11 @@ export interface WaveOptions {
   autopilot?: boolean;
   /** `config: { branch_update }`; `merge` is the recommended setting for autopilot waves. */
   branchUpdate?: "merge" | "rebase";
+  /**
+   * `placement:` pinned for this wave; omitted, the supervisor's `placement.default` decides
+   * (`auto` once a machine is paired).
+   */
+  placement?: "local" | "auto";
 }
 
 export interface WaveResult {
@@ -281,6 +286,7 @@ export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveRes
     `brief_preface: ${q(opts.briefPreface ?? DEFAULT_BRIEF_PREFACE)}`,
     `pipeline: ${opts.pipeline !== undefined ? q(opts.pipeline) : "[implement, [spec_review, quality_review], fixup, merge_ready]"}`,
     `merge: ${q(opts.merge ?? "auto")}`,
+    ...(opts.placement !== undefined ? [`placement: ${q(opts.placement)}`] : []),
     ...waveConfigLine(opts),
     "tasks:",
   ];
@@ -340,7 +346,7 @@ const HELP = `Usage: bun run scripts/wave-from-issues.ts <issues.json> --wave <i
          --release-branch <branch> --model <model> [--pipeline <json>] [--namespace <ns>]
          [--repo-slug <owner/repo>] [--satisfied <n,n,...>] [--brief-preface <path>]
          [--merge auto|manual] [--autopilot on|off] [--branch-update merge|rebase]
-         [--out <wave.yaml>]
+         [--placement local|auto] [--out <wave.yaml>]
 
 <issues.json> is a JSON array of { number, title, body } ("-" reads stdin), e.g.
   for n in 101 102 103; do gh issue view $n --json number,title,body; done | jq -s . > issues.json
@@ -359,7 +365,8 @@ hygiene rules); an existing one is never changed.
 --merge writes merge: (default auto: volleyd squash-merges each gated PR; manual: a human does).
 --autopilot writes config: { autopilot: { enabled } } (omitted: the supervisor's setting, on by
 default). --branch-update writes config: { branch_update } (merge is recommended for autopilot
-waves: no force-push). The last lines on stderr are the submit command, owned by the stable
+waves: no force-push). --placement writes placement: to pin where the wave's tasks run (omitted:
+the supervisor's placement.default, auto once a machine is paired). The last lines on stderr are the submit command, owned by the stable
 coordinator name in VOLLEY_COORDINATOR, and that name.
 `;
 
@@ -407,10 +414,12 @@ function main(argv: string[]): number {
   let merge: "auto" | "manual" | undefined;
   let autopilot: "on" | "off" | undefined;
   let branchUpdate: "merge" | "rebase" | undefined;
+  let placement: "local" | "auto" | undefined;
   try {
     merge = choice("merge", v.merge, ["auto", "manual"]);
     autopilot = choice("autopilot", v.autopilot, ["on", "off"]);
     branchUpdate = choice("branch-update", v["branch-update"], ["merge", "rebase"]);
+    placement = choice("placement", v.placement, ["local", "auto"]);
   } catch (e) {
     process.stderr.write(`wave-from-issues: ${e instanceof Error ? e.message : String(e)}\n`);
     return 2;
@@ -447,6 +456,7 @@ function main(argv: string[]): number {
       ...(merge !== undefined ? { merge } : {}),
       ...(autopilot !== undefined ? { autopilot: autopilot === "on" } : {}),
       ...(branchUpdate !== undefined ? { branchUpdate } : {}),
+      ...(placement !== undefined ? { placement } : {}),
     });
     if (v.out !== undefined) writeFileSync(v.out, yaml);
     else process.stdout.write(yaml);
@@ -491,6 +501,7 @@ function parse(argv: string[]) {
       merge: { type: "string" },
       autopilot: { type: "string" },
       "branch-update": { type: "string" },
+      placement: { type: "string" },
       out: { type: "string" },
       help: { type: "boolean", short: "h" },
     },

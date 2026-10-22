@@ -7,6 +7,7 @@ import type {
   MergeMode,
   PipelineStage,
   PipelineStep,
+  PlacementDefault,
   RemoteHostConfig,
   TaskId,
   TunablesPatch,
@@ -62,8 +63,53 @@ interface RawWave {
   playbook?: string;
 }
 
-/** Parse wave-file YAML, validate it (schema + structural rules) and normalise it. */
-export function parseWaveFile(text: string, source?: string): Wave {
+/**
+ * What a wave file without `placement:` takes (SPEC §4.6.15): the supervisor's
+ * `placement.default` (its config.yaml over the built-in) and how many paired machines
+ * (`hosts.<name>`) it has configured. The wave's own `config: placement.default` wins over
+ * `default`. Absent: `local`, as before the tunable.
+ */
+export interface PlacementDefaults {
+  default: PlacementDefault;
+  paired: number;
+}
+
+/** Where a wave's unpinned tasks run, and what decided it (the line validate and run print). */
+export interface WavePlacement {
+  placement: "auto" | "local";
+  /** `wave file`: its `placement:`; `default`: `placement.default` with a paired machine; `unpaired`: no paired machine. */
+  by: "wave file" | "default" | "unpaired";
+}
+
+/** `placement:` of the raw wave, else the effective `placement.default` once a machine is paired. */
+export function defaultPlacement(
+  raw: { placement?: "auto" | "local"; config?: TunablesPatch },
+  d: PlacementDefaults | undefined,
+): WavePlacement {
+  if (raw.placement !== undefined) return { placement: raw.placement, by: "wave file" };
+  const def = raw.config?.placement?.default ?? d?.default ?? "local";
+  if (def === "local") return { placement: "local", by: "default" };
+  return (d?.paired ?? 0) > 0
+    ? { placement: "auto", by: "default" }
+    : { placement: "local", by: "unpaired" };
+}
+
+/**
+ * `placement: auto (placement.default; 1 paired machine)`, `placement: local (no paired
+ * machine)`, `placement: local (placement.default)` or `placement: auto (wave file)`.
+ */
+export function formatPlacement(p: WavePlacement, paired: number): string {
+  if (p.by === "wave file") return `placement: ${p.placement} (wave file)`;
+  if (p.by === "unpaired") return `placement: ${p.placement} (no paired machine)`;
+  if (p.placement === "local") return "placement: local (placement.default)";
+  return `placement: auto (placement.default; ${paired} paired machine${paired === 1 ? "" : "s"})`;
+}
+
+/**
+ * Parse wave-file YAML, validate it (schema + structural rules) and normalise it. `defaults`
+ * decides a wave without `placement:` (`defaultPlacement`); without it such a wave is `local`.
+ */
+export function parseWaveFile(text: string, source?: string, defaults?: PlacementDefaults): Wave {
   const fail = (errors: PathError[]): never => {
     throw new WaveFileError(errors, source);
   };
@@ -151,15 +197,15 @@ export function parseWaveFile(text: string, source?: string): Wave {
     fail([{ path: `tasks.${cycle[0]}.after`, reason: `dependency cycle ${cycle.join(" -> ")}` }]);
   }
 
-  return normalise(w);
+  return normalise(w, defaultPlacement(w, defaults).placement);
 }
 
 /** Read and parse a wave file from disk; errors carry the file path. */
-export async function loadWaveFile(path: string): Promise<Wave> {
-  return parseWaveFile(await readFile(path, "utf-8"), path);
+export async function loadWaveFile(path: string, defaults?: PlacementDefaults): Promise<Wave> {
+  return parseWaveFile(await readFile(path, "utf-8"), path, defaults);
 }
 
-function normalise(w: RawWave): Wave {
+function normalise(w: RawWave, placement: "auto" | "local"): Wave {
   const tasks: Record<TaskId, WaveTask> = {};
   for (const [id, t] of Object.entries(w.tasks)) {
     const pipeline = t.pipeline ?? w.pipeline;
@@ -171,7 +217,7 @@ function normalise(w: RawWave): Wave {
       pipeline,
       stages: toStageGroups(pipeline),
       model: t.model ?? w.model,
-      ...normaliseHost(t.host, w.placement),
+      ...normaliseHost(t.host, placement),
       files: t.files ?? [],
       ...(t.account !== undefined ? { account: t.account } : {}),
       ...(t.heavy === true ? { heavy: true } : {}),
@@ -193,7 +239,7 @@ function normalise(w: RawWave): Wave {
     config: w.config ?? {},
     ...(w.brief_preface !== undefined ? { brief_preface: w.brief_preface } : {}),
     ...(w.account !== undefined ? { account: w.account } : {}),
-    ...(w.placement === "auto" ? { placement: "auto" as const } : {}),
+    ...(placement === "auto" ? { placement: "auto" as const } : {}),
     ...(w.placement_prefer !== undefined ? { placement_prefer: w.placement_prefer } : {}),
     ...(w.placement_avoid !== undefined ? { placement_avoid: w.placement_avoid } : {}),
     ...(w.merge !== undefined ? { merge: w.merge } : {}),
@@ -203,11 +249,11 @@ function normalise(w: RawWave): Wave {
 
 /**
  * `host:` as a name (`local`, `auto`, a config `hosts.<name>`) plus the inline spec when there is
- * one. No `host:` is `auto` under the wave's `placement: auto`, else `local`.
+ * one. No `host:` is `auto` under the wave's placement `auto` (its own, or the default), else `local`.
  */
 function normaliseHost(
   h: RawTask["host"],
-  placement: RawWave["placement"],
+  placement: "auto" | "local",
 ): Pick<WaveTask, "host" | "host_spec"> {
   if (h === undefined) return { host: placement === "auto" ? AUTO_HOST : "local" };
   if (typeof h === "string") return { host: h };

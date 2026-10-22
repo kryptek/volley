@@ -398,6 +398,8 @@ describe("volley peer join (on the machine to pair)", () => {
       port: 21883,
       os: "linux",
       cores: 8,
+      // With cores, what volleyd sizes the machine's max_agents from (#324).
+      memory_total_mb: 16384,
     });
 
     // peer.json, mode 0600, with the account.

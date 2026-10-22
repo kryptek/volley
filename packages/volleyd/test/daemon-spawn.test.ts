@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { memoryOf, vmStatAvailablePct } from "volley-cli/peer/machine";
@@ -946,13 +947,93 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     expect(own.payload.memory).toBeUndefined();
   });
 
-  it("a wave that does not opt in journals no placement and runs locally as before", async () => {
+  it("a wave pinned to placement: local journals no placement and runs locally as before", async () => {
     localClaude = true;
     await setup();
-    await submit("w3", "", "  T1: { issue: 42 }\n");
+    await submit("w3", "placement: local\n", "  T1: { issue: 42 }\n");
     await tick();
     await eventually(async () => local.launches.length === 1);
     expect(journal("w3").some((e) => e.type === "task_placed")).toBe(false);
     expect(box?.launches ?? []).toHaveLength(0);
+  });
+
+  it("a wave without placement: takes placement.default (auto) with a machine paired, and placement.default: local keeps it here (#324)", async () => {
+    localClaude = true;
+    await setup();
+    await submit("w4", "", "  T1: { issue: 42 }\n");
+    await tick();
+    expect(journal("w4").find((e) => e.type === "task_placed")?.data).toMatchObject({
+      host: "box",
+      by: "auto",
+    });
+    const submitted = journal("w4").find((e) => e.type === "wave_submitted")?.data.wave as {
+      placement?: string;
+      tasks: Record<string, { host: string }>;
+    };
+    expect(submitted.placement).toBe("auto");
+    expect(submitted.tasks.T1?.host).toBe("auto");
+    // The supervisor's config says local: the next such wave stays here.
+    expect((await runCli(["config", "set", "placement.default", "local"], env.env)).exitCode).toBe(
+      0,
+    );
+    await submit("w5", "", "  T1: { issue: 42 }\n");
+    await tick();
+    expect(journal("w5").some((e) => e.type === "task_placed")).toBe(false);
+  });
+
+  describe("peer_idle_under_load (#324)", () => {
+    // Load 10 per core on the own machine: over placement.load_per_core_max (1.5).
+    const cores = Math.max(1, availableParallelism());
+    const HOT_OS = { ...CALM_OS, loadavg: () => [cores * 10, cores * 10, cores * 10] };
+    const alarms = (wave: string) =>
+      journal(wave).filter(
+        (e) => e.type === "alarm_raised" && e.data.alarm === "peer_idle_under_load",
+      );
+
+    it("a local wave on an overloaded supervisor with a ready peer free: raised once, shown in status", async () => {
+      localClaude = true;
+      await setup({ os: HOT_OS });
+      await submit("w1", "placement: local\n", "  T1: { issue: 42 }\n");
+      await tick();
+      await tick();
+      await tick();
+      expect(alarms("w1")).toHaveLength(1);
+      // The box's max_agents is derived from its record: 16 cores, 64 GB → 5.
+      expect(alarms("w1")[0]?.data).toMatchObject({ peer: "box", free: 5 });
+      expect(String(alarms("w1")[0]?.data.message)).toMatch(
+        /^this machine is overloaded \(load [\d.]+ on \d+ cores, max 1\.5 per core\) while box is ready with 5 free agent slots; this wave is placement: local/,
+      );
+      const st = (await env.retained("volley/_waves/w1/state")) as {
+        payload: { alarms?: { alarm: string }[] };
+      };
+      expect(st.payload.alarms).toEqual([
+        { alarm: "peer_idle_under_load", message: alarms("w1")[0]?.data.message },
+      ]);
+      expect(schemaErrors("wave-state.schema.json", st)).toEqual([]);
+      expect((await runCli(["status", "w1"], env.env)).stdout).toContain(
+        "  ! peer_idle_under_load: this machine is overloaded",
+      );
+      // An auto wave places onto the box itself: no alarm.
+      await submit("w2", "placement: auto\n", "  T1: { issue: 42 }\n");
+      await tick();
+      expect(alarms("w2")).toHaveLength(0);
+    });
+
+    it("not when the peer is drained", async () => {
+      localClaude = true;
+      await setup({ os: HOT_OS, drain: true });
+      await submit("w1", "placement: local\n", "  T1: { issue: 42 }\n");
+      await tick();
+      await tick();
+      expect(alarms("w1")).toHaveLength(0);
+    });
+
+    it("not while the supervisor is calm", async () => {
+      localClaude = true;
+      await setup();
+      await submit("w1", "placement: local\n", "  T1: { issue: 42 }\n");
+      await tick();
+      expect(alarms("w1")).toHaveLength(0);
+    });
   });
 });

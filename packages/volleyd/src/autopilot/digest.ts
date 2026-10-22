@@ -51,6 +51,8 @@ export interface Digest {
   waiting: DigestWaiting[];
   release?: ReleaseState;
   failures: { task: TaskId; why: string }[];
+  /** The wave's own alarms (`peer_idle_under_load`); absent: none. */
+  alarms?: { alarm: string; message: string }[];
 }
 
 const str = (x: unknown): string | undefined => (typeof x === "string" ? x : undefined);
@@ -198,6 +200,9 @@ export function digestOf(
     waiting,
     ...(state.release !== undefined ? { release: structuredClone(state.release) } : {}),
     failures,
+    ...(state.alarms !== undefined && state.alarms.length > 0
+      ? { alarms: state.alarms.map((a) => ({ alarm: a.alarm, message: a.message })) }
+      : {}),
   };
 }
 
@@ -231,7 +236,7 @@ export function summaryLine(d: Digest): string {
   return `${d.wave} ${VERB[d.trigger]}: ${parts.join(", ")}`;
 }
 
-/** The digest as markdown: `## Shipped`, `## Autopilot handled`, `## Waiting for you` (and `## Failed`). */
+/** The digest as markdown: `## Shipped`, `## Autopilot handled`, `## Waiting for you` (and `## Failed`, `## Alarms`). */
 export function renderDigestMd(d: Digest): string {
   const out = [
     `# ${summaryLine(d)}`,
@@ -271,6 +276,10 @@ export function renderDigestMd(d: Digest): string {
   if (d.failures.length > 0) {
     out.push("", "## Failed", "");
     for (const f of d.failures) out.push(`- ${f.task}: ${f.why}`);
+  }
+  if (d.alarms !== undefined && d.alarms.length > 0) {
+    out.push("", "## Alarms", "");
+    for (const a of d.alarms) out.push(`- ${a.alarm}: ${a.message}`);
   }
   return `${out.join("\n")}\n`;
 }

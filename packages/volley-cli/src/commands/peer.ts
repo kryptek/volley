@@ -688,6 +688,8 @@ interface RedeemRequest {
   port?: number;
   os?: string;
   cores?: number;
+  /** Total memory: with `cores`, what volleyd derives the machine's `max_agents` from. */
+  memory_total_mb?: number;
   /** Re-pairing with a code from `invite --for <name>`: replace the account and hosts entry. */
   replace?: true;
 }
@@ -824,6 +826,7 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
     port,
     os: deps.platform,
     cores: deps.cpus(),
+    memory_total_mb: memoryOf(deps.totalmem(), 0).total_mb,
     ...(v.replace === true ? { replace: true as const } : {}),
   };
   const remoteVolley = v["remote-volley"] ?? null;

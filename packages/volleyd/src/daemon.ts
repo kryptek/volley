@@ -277,6 +277,8 @@ import {
   type Snapshot,
   type Unplaced,
   needsPlacement,
+  overloadLoad,
+  peerIdleUnderLoad,
   place,
   reserve,
 } from "./placement";
@@ -294,6 +296,7 @@ import {
   type ReadinessInput,
   type ReadinessPayload,
   machineView,
+  peerMaxAgents,
   readiness,
   readinessKey,
   readinessTopic,
@@ -334,7 +337,7 @@ import type {
   WaveTask,
 } from "./types";
 import { SYSTEM_WAVE } from "./types";
-import { WaveFileError, parseWaveFile } from "./wave-file";
+import { type PlacementDefaults, WaveFileError, parseWaveFile } from "./wave-file";
 
 import {
   FIX_FLAKE,
@@ -867,6 +870,9 @@ const placing = (w: Wave): boolean =>
   w.placement === AUTO_HOST ||
   w.task_order.some((id) => needsPlacement(w.tasks[id] ?? { host: "" }));
 
+/** The alarm a `placement: local` wave raises once when the own machine is overloaded while a peer idles. */
+const PEER_IDLE_ALARM = "peer_idle_under_load";
+
 /** Before the first pressure sample nothing is known about load, so nothing starts. */
 const AWAITING_SAMPLE: Admission = { allow: 0, reasons: ["waiting for the first pressure sample"] };
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
@@ -1206,6 +1212,8 @@ export class Daemon {
    * reconnect's retained copy, a QoS 1 duplicate) is not counted again.
    */
   private readonly hostHistory = new Map<string, { last_seen: string; samples: HostSamples[] }>();
+  /** Waves whose `peer_idle_under_load` alarm is raised (true) or known not raised (false). */
+  private readonly peerIdleWarned = new Map<WaveId, boolean>();
   /** Why a ready task of a placing wave was not admitted (`<wave>/<task>`: no eligible machine). */
   private readonly heldTask = new Map<string, string>();
   /** The account records last published, by account (an unchanged one is not re-published). */
@@ -2476,6 +2484,7 @@ export class Daemon {
     await this.machineDownPass();
     await this.removalSweep();
     await this.fleetTick();
+    await this.warnPeerIdle();
     await this.runLeases({ kind: "tick" });
     await this.monitor();
     await this.watchTerminals();
@@ -4470,6 +4479,44 @@ export class Daemon {
   }
 
   /**
+   * Once per wave (SPEC §4.6.15): a running `placement: local` wave, while the own machine's load
+   * per core is over `placement.load_per_core_max` and a ready, undrained peer has free
+   * `max_agents` slots, journals `alarm_raised { alarm: "peer_idle_under_load", peer, free,
+   * message }` (`volleyd status` and the digest show it). An `auto` wave places onto the peer
+   * itself.
+   */
+  private async warnPeerIdle(): Promise<void> {
+    // Cheap first: no peer configured, or the own machine is not overloaded, decides nothing.
+    const cfg = this.config.effective();
+    const own = this.ownRecord;
+    if (Object.keys(cfg.hosts).length === 0 || own === undefined || !(own.cores > 0)) return;
+    if (overloadLoad(own) / own.cores <= cfg.placement.load_per_core_max) return;
+    const waves = this.runningWaves().filter(([wave, log]) => {
+      if (log.record.wave?.placement === AUTO_HOST) return false;
+      let warned = this.peerIdleWarned.get(wave);
+      // After a restart the journal says whether it was raised already.
+      warned ??= log.journal
+        .readAll()
+        .some((e) => e.type === "alarm_raised" && e.data.alarm === PEER_IDLE_ALARM);
+      this.peerIdleWarned.set(wave, warned);
+      return !warned;
+    });
+    for (const [wave, log] of waves) {
+      const gate = admissionFor(log.record, this.killSwitch, this.pressure(wave));
+      const idle = peerIdleUnderLoad(this.placementSnapshot(gate, cfg), {
+        placement: this.config.effective(wave).placement,
+      });
+      if (idle === null) continue;
+      this.peerIdleWarned.set(wave, true);
+      await this.append(wave, {
+        type: "alarm_raised",
+        data: { alarm: PEER_IDLE_ALARM, peer: idle.peer, free: idle.free, message: idle.message },
+      });
+      this.log(`wave ${wave}: ${idle.message}`);
+    }
+  }
+
+  /**
    * The supervisor's own doctor (`volley peer doctor --json --repo <the running wave's repo>`); its
    * report fills the own record. Runs again at once when the running wave's repo changes.
    */
@@ -4688,7 +4735,7 @@ export class Daemon {
       host: isLocal
         ? { max_agents: cfg.hard_ceiling, drain: false }
         : {
-            max_agents: h?.max_agents ?? REMOTE_HOST_DEFAULTS.max_agents,
+            max_agents: peerMaxAgents(h?.max_agents, this.machines.record(name)),
             // A pending removal keeps it closed, whatever its drain says now.
             drain:
               (h?.drain ?? REMOTE_HOST_DEFAULTS.drain) ||
@@ -8778,12 +8825,29 @@ export class Daemon {
     return { wave, owner, existing: log };
   }
 
+  /**
+   * What a wave file without `placement:` takes: `placement.default` once a machine is paired
+   * (SPEC §4.6.15). Decided at submit; the journaled wave keeps the hosts it was given.
+   */
+  private placementDefaults(): PlacementDefaults {
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    return {
+      default: cfg.placement.default,
+      paired: Object.keys(cfg.hosts).filter((n) => n !== local).length,
+    };
+  }
+
   /** Parse a request's `wave_yaml`; a Reply when it is missing or invalid. */
   private parseRequestWave(p: Record<string, unknown>, op: string): Wave | Reply {
     if (typeof p.wave_yaml !== "string")
       return { ok: false, error: `${op} requires payload.wave_yaml` };
     try {
-      return parseWaveFile(p.wave_yaml, typeof p.source === "string" ? p.source : undefined);
+      return parseWaveFile(
+        p.wave_yaml,
+        typeof p.source === "string" ? p.source : undefined,
+        this.placementDefaults(),
+      );
     } catch (e) {
       if (e instanceof WaveFileError) return { ok: false, error: e.message, errors: e.errors };
       throw e;

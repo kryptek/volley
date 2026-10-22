@@ -563,6 +563,11 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       // Gated without reviews: the wave file's pipeline for the task lists none.
       if (task !== undefined && ev.data.alarm === "reviews_skipped_by_plan")
         task.reviews_skipped_by_plan = true;
+      // The supervisor overloaded while a paired machine idles (SPEC §4.6.15): raised once.
+      if (ev.task === undefined && ev.data.alarm === "peer_idle_under_load") {
+        const alarm = { alarm: "peer_idle_under_load", message: String(ev.data.message ?? "") };
+        state.alarms = [...(state.alarms ?? []).filter((a) => a.alarm !== alarm.alarm), alarm];
+      }
       break;
     case "repo_visibility_detected": {
       const visibility = (ev.data.visibility as RepoVisibility | null | undefined) ?? null;

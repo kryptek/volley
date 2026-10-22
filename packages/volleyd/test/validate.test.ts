@@ -161,6 +161,32 @@ describe("volleyd validate: the release branch", () => {
     expect(ok.exitCode).toBe(0);
   });
 
+  it("a wave without placement: prints what placement.default and the paired machines decide (#324)", async () => {
+    git(repo, "branch", "release/x");
+    const home = join(dir, "home-placement");
+    mkdirSync(home);
+    const env = { VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1", VOLLEYD_HOME: home };
+    writeFileSync(join(home, "config.yaml"), "require_fresh_base: false\n");
+    const alone = await runCli(["validate", waveFile(repo)], env);
+    expect(alone.exitCode).toBe(0);
+    expect(alone.stdout).toContain("placement: local (no paired machine)\n");
+    writeFileSync(
+      join(home, "config.yaml"),
+      "require_fresh_base: false\nhosts:\n  box-a: { target: dev@box-a, repo: /srv/r, volley_dir: /opt/v }\n",
+    );
+    const paired = await runCli(["validate", waveFile(repo)], env);
+    expect(paired.exitCode).toBe(0);
+    expect(paired.stdout).toContain("placement: auto (placement.default; 1 paired machine)\n");
+    // It places, so the preview is attempted (no supervisor here: it says so).
+    expect(paired.stdout).toContain("placement preview unavailable");
+    writeFileSync(
+      join(home, "config.yaml"),
+      "require_fresh_base: false\nplacement: { default: local }\nhosts:\n  box-a: { target: dev@box-a, repo: /srv/r, volley_dir: /opt/v }\n",
+    );
+    const pinned = await runCli(["validate", waveFile(repo)], env);
+    expect(pinned.stdout).toContain("placement: local (placement.default)\n");
+  });
+
   it("a repo that is not on this machine is noted, not refused (the daemon checks it at run)", async () => {
     const r = await runCli(["validate", waveFile(join(dir, "elsewhere"))]);
     expect(r.exitCode).toBe(0);

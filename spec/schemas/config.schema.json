@@ -389,6 +389,12 @@
               "enum": ["files", "all", "off"],
               "default": "files",
               "description": "When a wave's PR merges, send one steering message to its running implementers: files (those whose task's files overlap the merged PR's), all, or off."
+            },
+            "default": {
+              "type": "string",
+              "enum": ["local", "auto"],
+              "default": "auto",
+              "description": "The placement of a wave file without placement: (spec section 4.6.15). auto places its unpinned tasks across machines once a paired machine (a hosts.<name> entry) is configured; with none, or under local, they run on the supervisor's own machine."
             }
           }
         },
@@ -620,7 +626,7 @@
           "minimum": 1,
           "maximum": 100,
           "default": 4,
-          "description": "The most supervised agents this host runs at once (spec section 4.6.15); hard_ceiling still caps the total."
+          "description": "The most supervised agents this host runs at once (spec section 4.6.15); hard_ceiling still caps the total. Derived at join from the machine's size, min(floor(cores / 3), floor(memory_total_mb / 4096)) clamped to 2..16; unset, it is derived the same way from the machine record, and 4 when the size is unknown. An explicit value always wins."
         },
         "drain": {
           "type": "boolean",

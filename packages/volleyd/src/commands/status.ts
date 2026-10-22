@@ -140,7 +140,7 @@ function parseStatus(argv: string[]) {
  * (in `ctx.decisions`) wait on K tasks, names the agent a coordinator-name owner acts through
  * (`owner: coord-main (via coordinator-c7d9)`), gains `needs you: N` when `caller` owns the wave
  * (or is that agent) and N decisions are open, and ends with `alarms: N`, the tasks whose spawn
- * failed and is unrecovered.
+ * failed and is unrecovered or hold an alarm, plus the wave's own alarms (each on a `!` line).
  */
 export function formatWave(
   s: WaveState,
@@ -172,9 +172,12 @@ export function formatWave(
       ? `plan v${s.version} (${pending} task${pending === 1 ? "" : "s"} pending decision)`
       : `plan v${s.version}`;
   // Open alarms: tasks whose spawn failed and has not recovered since, or with an alarm that holds.
-  const alarms = s.tasks.filter(
-    (t) => t.last_error !== undefined || (t.alarms ?? []).length > 0,
-  ).length;
+  // And the wave's own (peer_idle_under_load), each shown under the header.
+  const waveAlarms = s.alarms ?? [];
+  const alarms =
+    s.tasks.filter((t) => t.last_error !== undefined || (t.alarms ?? []).length > 0).length +
+    waveAlarms.length;
+  const waveAlarmLines = waveAlarms.map((a) => `  ! ${a.alarm}: ${a.message}\n`).join("");
   const header =
     `${s.wave}  ${s.status}  ${version}  owner: ${owner}  ` +
     `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${open}${needs}  alarms: ${alarms}\n`;
@@ -233,6 +236,7 @@ export function formatWave(
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
   return (
     header +
+    waveAlarmLines +
     archived +
     queue +
     release +

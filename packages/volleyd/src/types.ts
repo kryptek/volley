@@ -238,9 +238,17 @@ export interface FallbackProfile {
 /** Who gets a steering nudge when a wave's PR merges (config `placement.nudge_on_merge`). */
 export type NudgeOnMerge = "files" | "all" | "off";
 
+/** Config `placement.default`: the placement of a wave file that sets none. */
+export type PlacementDefault = "local" | "auto";
+
 /** Automatic placement across machines (config `placement`, SPEC §4.6.15). */
 export interface PlacementConfig {
   nudge_on_merge: NudgeOnMerge;
+  /**
+   * A wave file without `placement:`: `auto` once a paired machine (`hosts.<name>`) is
+   * configured, else `local` (wave-file.ts `defaultPlacement`).
+   */
+  default: PlacementDefault;
   // --- Fleet: placement engine (placement.ts) ---
   /** A machine whose load per core (the higher of the 1- and 5-minute) is above this takes no new placement. */
   load_per_core_max: number;
@@ -494,6 +502,8 @@ export interface WaveState {
   merge_queue?: MergeQueueEntry[] | undefined;
   /** The release train (SPEC §4.6.19), from `release_started` on; absent for a wave without one. */
   release?: ReleaseState;
+  /** Wave-level alarms that hold (`peer_idle_under_load`, SPEC §4.6.15); absent: none. */
+  alarms?: { alarm: string; message: string }[];
   /** When, by whom and why the wave was archived (`volleyd status --all` only). */
   archived?: { at: string; by: string; reason: string };
   updated_at: string;
