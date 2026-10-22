@@ -846,6 +846,18 @@ const retiredAgents = (log: WaveLog): Set<string> =>
 /** Task stages a steer is refused in: nothing will ever read it. */
 const UNSTEERABLE: ReadonlySet<TaskStage> = new Set(["done", "cancelled", "blocked"]);
 
+/** An admitted task still waiting for its first implementer (spawnAdmitted, the hard ceiling). */
+const awaitsImplementer = (t: TaskState): boolean =>
+  t.stage === "queued" && t.agents.implementer === undefined;
+
+/** Stages whose task, with no agent live, has a pipeline role still to spawn (the ceiling). */
+const BETWEEN_ROLES: ReadonlySet<TaskStage> = new Set([
+  "implement",
+  "spec_review",
+  "quality_review",
+  "fixup",
+]);
+
 export const daemonClientId = (namespace: string) =>
   `volley-${DAEMON_AGENT_ID}-daemon-${namespace}`;
 
@@ -3602,7 +3614,7 @@ export class Daemon {
     if (this.killSwitch || rec?.state == null || rec.state.status !== "running") return;
     for (const id of rec.admitted) {
       const t = rec.state.tasks.find((x) => x.id === id);
-      if (t === undefined || t.agents.implementer !== undefined || t.stage !== "queued") continue;
+      if (t === undefined || !awaitsImplementer(t)) continue;
       const key = `${wave}/${id}/implementer`;
       if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) continue;
       if (this.parkOnTunnel(wave, id)) continue;
@@ -5860,31 +5872,39 @@ export class Daemon {
   /**
    * What the hard ceiling counts (SPEC §4.6.4): the agents volleyd runs or is starting, in every
    * wave and on every machine — supervised, launched and being verified, spawning (a release
-   * stage's agent too) — and each admitted task of a running wave still queued for its
-   * implementer (its spawn not backed off). A task's stage counts nothing by itself: a task
+   * stage's agent too) — and one slot for each admitted task of a running wave that will spawn
+   * its next agent: queued for its implementer (backed off too: the retry starts unchecked; not
+   * once refused for good), or between roles in implement…fixup (reviewers or a fixup to come,
+   * which spawn against this slot). A task's stage counts nothing by itself otherwise: a task
    * awaiting a decision, blocked, or in a paused, stopped or ended wave holds a slot only while
-   * one of its agents is live. `launching` is the part not supervised yet.
+   * one of its agents is live. `launching` is the part not supervised yet. `except`
+   * (`<wave>/<task>`): leave out that task's held slot (its own role spawn's check).
    */
-  private ceilingCount(): CeilingCount {
+  private ceilingCount(except?: string): CeilingCount {
     const byWave: Record<string, number> = {};
     const add = (wave: WaveId) => {
       byWave[wave] = (byWave[wave] ?? 0) + 1;
     };
     const roles = new Set<string>();
+    const liveTasks = new Set<string>();
     let launching = 0;
+    const seen = (key: string) => {
+      roles.add(key);
+      liveTasks.add(key.slice(0, key.lastIndexOf("/")));
+    };
     for (const a of this.supervised.values()) {
       add(a.wave);
-      roles.add(`${a.wave}/${a.task}/${a.role}`);
+      seen(`${a.wave}/${a.task}/${a.role}`);
     }
     for (const a of this.launching.values()) {
       add(a.wave);
       launching++;
-      roles.add(`${a.wave}/${a.task}/${a.role}`);
+      seen(`${a.wave}/${a.task}/${a.role}`);
     }
     // A spawn's key is in `spawning` until its launch half returns, after it joined `launching`.
     for (const key of this.spawning) {
       if (roles.has(key)) continue;
-      roles.add(key);
+      seen(key);
       add(key.split("/")[0] ?? "");
       launching++;
     }
@@ -5893,11 +5913,14 @@ export class Daemon {
       if (rec.state?.status !== "running") continue;
       for (const id of rec.admitted) {
         const t = rec.state.tasks.find((x) => x.id === id);
-        if (t === undefined || t.stage !== "queued" || t.agents.implementer !== undefined) continue;
-        const key = `${wave}/${id}/implementer`;
-        if (roles.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) continue;
-        add(wave);
-        launching++;
+        if (t === undefined || `${wave}/${id}` === except || liveTasks.has(`${wave}/${id}`))
+          continue;
+        if (awaitsImplementer(t)) {
+          if (this.refused.get(`${wave}/${id}/implementer`)?.until === Number.POSITIVE_INFINITY)
+            continue;
+          add(wave);
+          launching++;
+        } else if (BETWEEN_ROLES.has(t.stage)) add(wave);
       }
     }
     const live = Object.values(byWave).reduce((a, b) => a + b, 0);
@@ -5972,6 +5995,8 @@ export class Daemon {
       running: rec.state?.status === "running",
       admission: admission.allow,
       reasons: admission.reasons,
+      live: this.ceilingCount(`${wave}/${task}`).live,
+      ceiling: this.config.effective(wave).hard_ceiling,
       used: spawnsUsed(rec),
       budget: spawnBudget(
         rec.wave,

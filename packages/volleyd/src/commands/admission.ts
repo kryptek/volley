@@ -7,8 +7,9 @@ const HELP = `Usage: volleyd admission [wave] [--json] [--broker-url <url>] [--n
 
 Show the daemon's current load-aware spawn admission verdict: whether starts are throttled, why
 (one reason per signal), what the hard ceiling counts (the agents volleyd runs or is starting,
-how many are still launching, and each wave's share), each pressure signal with its threshold,
-and the per-wave verdicts (with a wave: that wave's only).
+how many are still launching, and each wave's share; the max is the global hard_ceiling, while
+a wave's own hard_ceiling override holds that wave's admissions), each pressure signal with its
+threshold, and the per-wave verdicts (with a wave: that wave's only).
 --json prints the payload exactly as published on volley/_system/admission (with a wave, its
 per-wave verdicts narrowed to that wave).
 `;

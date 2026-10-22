@@ -91,6 +91,51 @@ describe("hard ceiling without a spawner (admitted, not started)", () => {
     await daemon.tick();
     expect(admitted("w-a")).toEqual(["A", "B"]);
   });
+
+  const reviewed = (wave: string, tasks: string[], config: string) =>
+    yaml(wave, tasks, config).replace(
+      "pipeline: [implement, merge_ready]",
+      "pipeline: [implement, [spec_review, quality_review], fixup, merge_ready]",
+    );
+
+  it("a running wave's task between roles holds its slot: its reviewers come before a new task", async () => {
+    await run(reviewed("w-r", ["A", "B"], "hard_ceiling: 1"));
+    expect(admitted("w-r")).toEqual(["A"]);
+    await daemon.recordEvent("w-r", {
+      type: "agent_spawned",
+      task: "A",
+      data: { role: "implementer", agent_id: "w-r-a-implementer-1" },
+    });
+    // Implemented and retired; its reviewers are not spawned yet.
+    await daemon.recordEvent("w-r", {
+      type: "stage_entered",
+      task: "A",
+      data: { stage: "spec_review" },
+    });
+    await daemon.tick();
+    expect(admitted("w-r")).toEqual(["A"]);
+    expect(daemon.snapshot("w-r")?.tasks.find((x) => x.id === "B")?.why_waiting).toBe(
+      "hard ceiling reached: 1/1 live agents",
+    );
+    // Paused, the same task holds nothing.
+    expect((await client.request("pause", { wave: "w-r", by: "coord-a" })).ok).toBe(true);
+    const res = await client.request("admission", {});
+    expect((res.result as { ceiling: { live: number } }).ceiling.live).toBe(0);
+  });
+
+  it("an admitted task whose implementer spawn is backed off keeps its slot", async () => {
+    await run(yaml("w-b", ["A", "B"], "hard_ceiling: 1"));
+    expect(admitted("w-b")).toEqual(["A"]);
+    const refused = (daemon as unknown as { refused: Map<string, { n: number; until: number }> })
+      .refused;
+    refused.set("w-b/A/implementer", { n: 1, until: Date.now() + 60_000 });
+    await daemon.tick();
+    expect(admitted("w-b")).toEqual(["A"]);
+    // Refused for good (it never retries by itself), it frees its slot.
+    refused.set("w-b/A/implementer", { n: 1, until: Number.POSITIVE_INFINITY });
+    await daemon.tick();
+    expect(admitted("w-b")).toEqual(["A", "B"]);
+  });
 });
 
 describe("hard ceiling with a supervised agent", () => {

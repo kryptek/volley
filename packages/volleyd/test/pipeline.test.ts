@@ -1220,6 +1220,8 @@ describe("roleSpawnHold (what the daemon checks before a role spawn)", () => {
       /admission closed: memory pressure/,
     );
     expect(roleSpawnHold({ ...ok, used: 4 })).toMatch(/spawn budget exhausted \(4\/4\)/);
+    expect(roleSpawnHold({ ...ok, live: 1, ceiling: 2 })).toBeNull();
+    expect(roleSpawnHold({ ...ok, live: 2, ceiling: 2 })).toMatch(/hard ceiling reached \(2\/2\)/);
   });
 });
 
