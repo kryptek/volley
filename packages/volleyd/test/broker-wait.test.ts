@@ -27,8 +27,18 @@ describe("broker-wait helpers carry a deadline", () => {
   });
 
   it("until fails with the last assertion error", async () => {
-    await expect(
-      until(() => expect("working").toBe("gone"), { deadlineMs: 50, what: "gone" }),
-    ).rejects.toThrow(/waited 50 ms for gone; last error: .*expected 'working' to be 'gone'/);
+    const err = await until(() => expect("working").toBe("gone"), {
+      deadlineMs: 50,
+      what: "gone",
+    }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    // vitest and bun word an assertion failure differently: check the cause is carried, not its wording.
+    expect(err).toBeInstanceOf(Error);
+    const { message, cause } = err as Error;
+    expect(cause).toBeInstanceOf(Error);
+    expect(message).toBe(`waited 50 ms for gone; last error: ${(cause as Error).message}`);
+    expect((cause as Error).message).toMatch(/working/);
   });
 });
