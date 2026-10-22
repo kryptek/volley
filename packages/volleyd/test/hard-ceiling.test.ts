@@ -6,7 +6,7 @@ import type { Daemon } from "../src/daemon";
 import { readJournalFile } from "../src/journal";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { runCli } from "./helpers/run-cli";
-import { type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
+import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
 
 // #322: the hard ceiling counts the agents volleyd runs or is starting, never a task's stage.
 
@@ -118,6 +118,12 @@ describe("hard ceiling without a spawner (admitted, not started)", () => {
     expect(daemon.snapshot("w-r")?.tasks.find((x) => x.id === "B")?.why_waiting).toBe(
       "hard ceiling reached: 1/1 live agents",
     );
+    // Held, not supervised: it reads as launching, never as a running agent.
+    const held = await client.request("admission", {});
+    expect((held.result as { ceiling: unknown }).ceiling).toMatchObject({
+      live: 1,
+      launching: 1,
+    });
     // Paused, the same task holds nothing.
     expect((await client.request("pause", { wave: "w-r", by: "coord-a" })).ok).toBe(true);
     const res = await client.request("admission", {});
@@ -155,6 +161,30 @@ describe("hard ceiling with a supervised agent", () => {
     expect(cli.stdout).toContain("ceiling: 1/12 live agents · 0 launching · by wave: w1 1");
     const status = await runCli(["status"], s.env.env);
     expect(status.stdout).toContain("hard ceiling: 1/12");
+  });
+
+  it("a task awaiting a decision counts its agent while it is live, nothing once it retires", async () => {
+    await s.status("blocked", { reason: "stuck" });
+    await s.event("decision_opened");
+    await s.settled();
+    expect(s.daemon.snapshot("w1")?.tasks[0]?.stage).toBe("awaiting_decision");
+    const ceiling = async () => {
+      const client = await ControlClient.connect(s.env.broker.url, NS);
+      try {
+        return ((await client.request("admission", {})).result as { ceiling: { live: number } })
+          .ceiling.live;
+      } finally {
+        await client.close();
+      }
+    };
+    expect(await ceiling()).toBe(1);
+    await (s.daemon as unknown as { retire: (id: string, status: string) => Promise<void> }).retire(
+      AGENT,
+      "stopped",
+    );
+    await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    expect(s.daemon.snapshot("w1")?.tasks[0]?.stage).toBe("awaiting_decision");
+    expect(await ceiling()).toBe(0);
   });
 });
 
@@ -292,5 +322,25 @@ describe("hard ceiling and pipeline role spawns", () => {
     expect((await client.request("resume", { wave: "w-x", by: "coord-a" })).ok).toBe(true);
     expect(spawnRole("w-x", "A", "spec_reviewer")).toEqual(["w-x/A/spec_reviewer"]);
     expect(spawnRole("w-y", "C", "spec_reviewer")).toEqual(["w-y/C/spec_reviewer"]);
+  });
+
+  it("a release stage's spawn is not held by another wave's tasks between roles", async () => {
+    await configSet({ hard_ceiling: 2 });
+    await run(reviewed("w-h", ["A", "B"], ""));
+    for (const id of ["A", "B"]) await betweenRoles("w-h", id);
+    await run(yaml("w-rel", ["R"], ""));
+    const rec = (
+      daemon as unknown as { waves: Map<string, { record: { state: { status: string } } }> }
+    ).waves.get("w-rel")?.record;
+    if (rec === undefined) throw new Error("w-rel not loaded");
+    rec.state.status = "releasing";
+    d().opts.spawner = {};
+    started = [];
+    const stage = { name: "tag", brief: "Tag it.", run: [], gate: "auto" as const };
+    (daemon as unknown as { releaseSpawn: (w: string, s: object) => void }).releaseSpawn(
+      "w-rel",
+      stage,
+    );
+    expect(started).toEqual(["w-rel/_release/release"]);
   });
 });

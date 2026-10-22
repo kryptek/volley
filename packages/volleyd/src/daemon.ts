@@ -5882,11 +5882,12 @@ export class Daemon {
    * wave and on every machine — supervised, launched and being verified, spawning (a release
    * stage's agent too) — and one slot for each admitted task of a running wave that will spawn
    * its next agent: queued for its implementer (backed off too; not once refused for good), or
-   * between roles in implement…fixup (reviewers or a fixup to come). A task's stage counts nothing by itself otherwise: a task
-   * awaiting a decision, blocked, or in a paused, stopped or ended wave holds a slot only while
-   * one of its agents is live. `launching` is the part not supervised yet. `held: false` counts
-   * only the agents running or starting, no held slot: what a spawn checks (`spawnAdmitted`, a
-   * pipeline role's), so tasks holding more slots than the ceiling never hold each other's spawns.
+   * between roles in implement…fixup (reviewers or a fixup to come). A task's stage counts
+   * nothing by itself otherwise: a task awaiting a decision, blocked, or in a paused, stopped or
+   * ended wave holds a slot only while one of its agents is live. `launching` is the part not
+   * supervised yet, held slots included. `held: false` counts only the agents running or
+   * starting, no held slot: what a spawn checks (`spawnAdmitted`, a pipeline role's, a release
+   * stage's), so tasks holding more slots than the ceiling never hold each other's spawns.
    */
   private ceilingCount(held = true): CeilingCount {
     const byWave: Record<string, number> = {};
@@ -5927,7 +5928,10 @@ export class Daemon {
             continue;
           add(wave);
           launching++;
-        } else if (BETWEEN_ROLES.has(t.stage)) add(wave);
+        } else if (BETWEEN_ROLES.has(t.stage)) {
+          add(wave);
+          launching++;
+        }
       }
     }
     const live = Object.values(byWave).reduce((a, b) => a + b, 0);
@@ -5951,7 +5955,8 @@ export class Daemon {
     const key = `${wave}/${RELEASE_TASK}/release`;
     if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) return;
     if (this.taskLive(wave, RELEASE_TASK)) return;
-    const live = this.ceilingCount().live;
+    const live = this.ceilingCount(false).live;
+    const max = this.config.effective(wave).hard_ceiling;
     const pressure = this.pressure(wave);
     const hold = this.killSwitch
       ? "kill switch engaged"
@@ -5959,8 +5964,8 @@ export class Daemon {
         ? "wave not releasing"
         : pressure.allow < 1
           ? `admission closed: ${(pressure.reasons ?? []).join(", ") || "no capacity"}`
-          : live >= this.config.effective(wave).hard_ceiling
-            ? `hard ceiling reached (${live})`
+          : live >= max
+            ? `hard ceiling reached (${live}/${max})`
             : null;
     if (hold !== null) {
       this.log(`spawn ${key} (${stage.name}): held, ${hold}`);

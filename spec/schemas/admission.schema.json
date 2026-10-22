@@ -59,7 +59,7 @@
                 "launching": {
                   "type": "integer",
                   "minimum": 0,
-                  "description": "The part of live not supervised yet."
+                  "description": "The part of live not supervised yet: agents starting, and slots held for a task's next agent."
                 },
                 "by_wave": {
                   "type": "object",
