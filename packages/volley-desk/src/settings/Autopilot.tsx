@@ -14,8 +14,8 @@
  * its rules and the page shows the same answer.
  */
 import { useEffect, useState } from "react";
-import { plural } from "../lib/plural";
 import { SwitchToAdmin } from "../auth/AccountActions";
+import { plural } from "../lib/plural";
 import type { ConfigPayload, Tunables } from "../store/types";
 import type { ControlFn } from "./ClaudeAccounts";
 import { ConfigRows } from "./ConfigRows";

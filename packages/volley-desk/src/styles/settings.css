@@ -1175,6 +1175,7 @@
 }
 .cc-move .btn {
   flex: none;
+}
 
 /* Sign out and Switch account… under the account (Settings' sidebar, the Dock's account menu). */
 .ms-account {

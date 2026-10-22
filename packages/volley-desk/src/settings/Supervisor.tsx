@@ -1,3 +1,4 @@
+import { SwitchToAdmin } from "../auth/AccountActions";
 /**
  * Settings › Supervisor: volleyd's global config (the retained `_config`) as
  * D5's schema-driven rows (`ConfigRows`, global scope). A wave's own ⚙ shows
@@ -9,7 +10,6 @@
  * their capacity rows), Admission, Attention, Recovery and Other, one page each.
  */
 import { plural } from "../lib/plural";
-import { SwitchToAdmin } from "../auth/AccountActions";
 import type { ConfigPayload, LeasePoolPayload } from "../store/types";
 import { ConfigRows } from "./ConfigRows";
 import { GroupList } from "./GroupNav";

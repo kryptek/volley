@@ -363,7 +363,7 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
     const open = openDecisionFor(deps.openDecisions, trustId(ctx));
     const cfg =
       deps.remoteTrust !== undefined
-        ? await deps.remoteTrust.read(remoteProfileOf(req))
+        ? await deps.remoteTrust.read(remoteProfileOf(ctx.req))
         : readClaudeJson(claudeJsonOf(ctx));
     const trusted = isRepoTrusted(cfg, ctx.root);
     if (!trusted) {
@@ -1276,7 +1276,7 @@ async function userMcpSources(ctx: Ctx): Promise<[McpSource, McpSource, McpSourc
   const profilePath = deps.remoteTrust !== undefined ? "~/.claude.json" : claudeJsonOf(ctx);
   const profile =
     deps.remoteTrust !== undefined
-      ? await deps.remoteTrust.read(remoteProfileOf(req))
+      ? await deps.remoteTrust.read(remoteProfileOf(ctx.req))
       : readClaudeJson(profilePath);
   const local = (profile as { projects?: Record<string, unknown> } | null)?.projects?.[ctx.root];
   const mcpJson = join(ctx.worktree, ".mcp.json");
