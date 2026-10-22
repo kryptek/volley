@@ -686,11 +686,13 @@ blocker: a task of the wave (`T4`), a PR (`#194`, `pr#194`) or an issue (`issue#
 - **Released when the blocker lands**, while the wave is running (a paused or releasing wave's
   holds wait until it runs again): a task `done` or `cancelled`, checked on every tick; a PR merged
   or closed (`gh pr view <n> --json state`), an issue closed (`gh issue view <n> --json state`),
-  checked on the merge-check cadence, once per `ci_poll_ms` per hold, beside the queue. `volleyd
-  release d-…` lifts one by hand. Either way `decision_released { decision_id, kind, why, by }` is
-  journaled, `held` is gone from the topic and the item, and the decision is open in its normal
-  tier again: the Desk's escalation timer applies from then, and autopilot's rule for its kind
-  runs again (an escalation it repeats is not journaled twice). A red head re-verifies its head
+  checked on the merge-check cadence, once per `ci_poll_ms` per hold, beside the queue. A task
+  that is `blocked` or `awaiting_decision` does not release a hold on it, however long it stays
+  so: only `done` or `cancelled` does. `volleyd release d-…` lifts one by hand. Either way
+  `decision_released { decision_id, kind, why, by }` is journaled, `held` is gone from the topic
+  and the item, and the decision is open in its normal tier again: the Desk's escalation timer
+  applies from then, and autopilot's rule for its kind runs again (an escalation it repeats is
+  not journaled twice; a new one rings the notify bridge). A red head re-verifies its head
   first: its PR's head (`gh pr view <n> --json headRefOid`) and the CI on it are read again, and
   a `ci_failed` whose head is green now is answered `re-verify` by `volleyd`, so the pipeline
   verifies it as it is.

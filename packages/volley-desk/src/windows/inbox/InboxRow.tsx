@@ -46,7 +46,7 @@ export function holdCommand(id: string, on: HeldOn): string {
   return `volleyd inbox hold ${shellQuote(id)} --on ${shellQuote(target)}`;
 }
 
-/** What a decision can be held on: the wave's other unsettled tasks, then their open PRs. */
+/** What a decision can be held on: the wave's other unsettled tasks, then their PRs. */
 export function holdChoices(
   item: InboxItem,
   wave: WaveView | undefined,

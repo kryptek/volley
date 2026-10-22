@@ -512,6 +512,27 @@ describe("held decisions (#335): waiting on a task, PR or issue", () => {
     expect(s.daemon.record("w1")?.decisions[d.decision_id]?.resolved).toBeUndefined();
   });
 
+  it("a hold on T2 is released when T2 reaches done", async () => {
+    s = await withT2();
+    const d = await s.daemon.openDecision("w1", disagree);
+    const c = await control();
+    const h = await c.request("hold", {
+      decision_id: d.decision_id,
+      on: { task: "T2" },
+      by: "owner",
+    });
+    expect(h.error).toBeUndefined();
+    await s.daemon.recordEvent("w1", {
+      type: "stage_entered",
+      task: "T2",
+      data: { stage: "done" },
+    });
+    await s.daemon.tick();
+    const released = await s.event((e) => e.type === "decision_released");
+    expect(released.data).toMatchObject({ decision_id: d.decision_id, why: "T2 done" });
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.held).toBeUndefined();
+  });
+
   it("--on '#12' is released when gh pr view says MERGED, read once per ci_poll_ms", async () => {
     let state = "OPEN";
     let now = Date.parse("2026-10-21T09:00:00Z");
@@ -658,6 +679,36 @@ describe("held decisions (#335): waiting on a task, PR or issue", () => {
     expect(after?.resolved).toBeUndefined();
     expect(after?.escalated).toBeDefined();
     expect(escalations()).toHaveLength(1);
+  });
+
+  it("a released decision autopilot escalates anew rings the notify bridge", async () => {
+    s = await withT2({ daemon: AUTOPILOT_ON });
+    const c = await control();
+    const set = (patch: unknown) => c.request("config_set", { patch, by: "owner" });
+    expect((await set({ autopilot: { enabled: false } })).error).toBeUndefined();
+    const d = await s.daemon.openDecision("w1", disagree);
+    await s.settled();
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.escalated).toBeUndefined();
+    await c.request("hold", { decision_id: d.decision_id, on: { issue: 7 }, by: "owner" });
+    const patch = { autopilot: { enabled: true, owner_only: ["reviewers_disagree"] } };
+    expect((await set(patch)).error).toBeUndefined();
+
+    const sub = new VolleyBroker();
+    await sub.connect({ url: s.env.broker.url, agentId: "test-notify" });
+    const rung: string[] = [];
+    await sub.subscribeStream(`volley/${NS}/volleyd/progress`, (m) => {
+      const env = JSON.parse(m.payload);
+      if (env.type === "blocked" && env.payload?.attention === "decision_opened")
+        rung.push(env.payload.decision_id as string);
+    });
+    try {
+      const r = await c.request("release", { decision_id: d.decision_id, by: "owner" });
+      expect(r.error).toBeUndefined();
+      await s.event((e) => e.type === "decision_escalated");
+      await s.until(() => rung.includes(d.decision_id));
+    } finally {
+      await sub.disconnect();
+    }
   });
 
   it("hold is owner-guarded like resolve; a Desk login holds on its account-op topic", async () => {

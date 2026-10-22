@@ -9221,15 +9221,18 @@ export class Daemon {
     return { released: true };
   }
 
-  /** Autopilot's rule for a released decision, again; its retained topic follows an escalation. */
+  /**
+   * Autopilot's rule for a released decision, again; its retained topic follows an escalation,
+   * and a new one rings the notify bridge as settleDecision's does.
+   */
   private async rerunAutopilot(wave: WaveId, id: string): Promise<void> {
     const d = this.waves.get(wave)?.record.decisions[id];
     if (d === undefined || d.resolved !== undefined || d.held !== undefined) return;
-    if (await this.autopilot(wave, d, { again: true }))
-      await this.publishDecision(
-        wave,
-        this.waves.get(wave)?.record.decisions[id] as DecisionRecord,
-      );
+    const before = d.escalated;
+    if (!(await this.autopilot(wave, d, { again: true }))) return;
+    const now = this.waves.get(wave)?.record.decisions[id] as DecisionRecord;
+    if (now.escalated !== before) await this.ringDecision(wave, now);
+    else await this.publishDecision(wave, now);
   }
 
   /**
@@ -9303,6 +9306,13 @@ export class Daemon {
       }
       if (d.held.on.pr !== undefined || d.held.on.issue !== undefined)
         this.checkHeldOnGitHub(wave, d.decision_id, d.held);
+    }
+    // A hold answered or archived while held: its last check is no one's.
+    for (const key of this.heldCheckedAt.keys()) {
+      if (!key.startsWith(`${wave}/`)) continue;
+      const d = log.record.decisions[key.slice(wave.length + 1)];
+      if (d === undefined || d.resolved !== undefined || d.held === undefined)
+        this.heldCheckedAt.delete(key);
     }
   }
 
