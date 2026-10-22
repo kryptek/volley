@@ -1039,6 +1039,12 @@ export class Daemon {
   private readonly seenProgress = new Set<string>();
   /** The latest status (type, wall_time) of every agent id, for a wave owner's `coordinator`. */
   private readonly statusOf = new Map<string, { type: string; at: string }>();
+  /**
+   * The terminal statuses `statusOf` forgot (agents owning no wave, with no coordinator name known),
+   * the newest `dedupe_max`: the status replay can arrive before the registry replay, and a
+   * named entry arriving later takes its status back from here.
+   */
+  private readonly endedStatusOf = new Map<string, { type: string; at: string }>();
   /** What each agent's progress says about its attention (a wave owner's `coordinator`). */
   private readonly attentionOf = new Map<
     string,
@@ -1646,8 +1652,8 @@ export class Daemon {
     // The journal is the record: every item is re-published (an answered one until its ttl).
     await this.sweepInbox();
     for (const item of this.inbox.values()) await this.publishInboxItem(item);
-    // Before the statuses: a replayed terminal status of a session carrying a coordinator name
-    // is kept only once its registry entry is known (`bindOwner` needs it).
+    // The two replays arrive in either order: a terminal status replayed before its session's
+    // registry entry is set aside (`endedStatusOf`) and taken back when the entry arrives.
     await this.subscribeRegistry();
     await this.subscribeLeaseInputs();
     await this.publishAllPools();
@@ -1872,6 +1878,16 @@ export class Daemon {
         else this.registryWorkspaces.delete(id);
         if (entry?.coordinator !== undefined && entry.agent_id === id) {
           this.namedEntries.set(id, entry);
+          // Its terminal status arrived first and was set aside: `bindOwner` needs it. Not when
+          // the entry started after that status (the id registered anew: it is not its own).
+          const ended = this.endedStatusOf.get(id);
+          this.endedStatusOf.delete(id);
+          const startedAfter =
+            entry.started_at !== undefined &&
+            ended !== undefined &&
+            Date.parse(entry.started_at) > Date.parse(ended.at);
+          if (ended !== undefined && !startedAfter && !this.statusOf.has(id))
+            this.statusOf.set(id, ended);
         } else {
           this.namedEntries.delete(id);
         }
@@ -1942,11 +1958,24 @@ export class Daemon {
       }
       return;
     }
-    if (prev === undefined) return;
-    const status = statuses.get(prev.agent_id) ?? null;
+    // Never bound, every session carrying the name already ended (a restart replayed their
+    // statuses before their entries): the newest stands bound and away, as it would have had its
+    // entry come first.
+    const last: (Binding & { gone_at?: number }) | undefined =
+      prev ??
+      [...this.namedEntries.values()]
+        .filter((e) => e.coordinator === name && statuses.has(e.agent_id))
+        .sort((a, b) => (b.started_at ?? "").localeCompare(a.started_at ?? ""))
+        .map((e) => ({
+          agent_id: e.agent_id,
+          since: dateOf(this.time).toISOString(),
+          status: null,
+        }))[0];
+    if (last === undefined) return;
+    const status = statuses.get(last.agent_id) ?? null;
     const away = OWNER_GONE.has(status ?? "");
-    const { gone_at, ...binding } = prev;
-    const awayAt = gone_at ?? this.wentAwayAt(this.statusOf.get(prev.agent_id)?.at);
+    const { gone_at, ...binding } = last;
+    const awayAt = gone_at ?? this.wentAwayAt(this.statusOf.get(last.agent_id)?.at);
     this.bindings.set(name, { ...binding, status, ...(away ? { gone_at: awayAt } : {}) });
     if (away && gone_at === undefined) {
       const grace = secondsMs(this.config.effective().autopilot.reconnect_grace_s);
@@ -2328,7 +2357,13 @@ export class Daemon {
             // A finished agent that owns no wave needs no `coordinator`: forget it (bounded).
             this.statusOf.delete(holder);
             this.attentionOf.delete(holder);
+            // Kept aside (bounded) for a registry entry naming a coordinator that arrives later.
+            this.endedStatusOf.delete(holder);
+            this.endedStatusOf.set(holder, { type: env.type, at: env.wall_time });
+            if (this.endedStatusOf.size > DAEMON_DEFAULTS.dedupe_max)
+              this.endedStatusOf.delete(this.endedStatusOf.keys().next().value as string);
           } else {
+            this.endedStatusOf.delete(holder);
             this.statusOf.set(holder, { type: env.type, at: env.wall_time });
           }
           if (prev !== env.type) {
