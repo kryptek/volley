@@ -65,7 +65,7 @@ describe("setup: cmux", () => {
     }
     // A bad path in a cmux command is not "cmux is not running".
     expect(classifyCmux(r(1, "Error: no such file or directory: /bad/worktree"))).toBe("unknown");
-    expect(classifyCmux(r(1, "connect ENOENT /Users/x/.cmux/cmux.sock"))).toBe("not_running");
+    expect(classifyCmux(r(1, "connect ENOENT /path/to/home/.cmux/cmux.sock"))).toBe("not_running");
   });
 
   it("checks what volleyd needs, not `cmux ping`, and reads the socket's mode", () => {
@@ -139,7 +139,9 @@ describe("setup: cmux", () => {
       repoRoot: "/r",
       bun: "bun",
     });
-    expect(() => fence(cmuxCheckArgv("/Users/x/.volley/volleyd/cmux-check.out"))).not.toThrow();
+    expect(() =>
+      fence(cmuxCheckArgv("/path/to/home/.volley/volleyd/cmux-check.out")),
+    ).not.toThrow();
     expect(() => fence(["sh", "-c", "cmux ping", "sh", "/x/cmux-check.out"])).toThrow();
     expect(() => fence(["sh", "-c", CMUX_CHECK_SCRIPT, "sh", "/x/other"])).toThrow();
     expect(() => fence(["sh", "-c", CMUX_CHECK_SCRIPT, "sh", "rel/cmux-check.out"])).toThrow();

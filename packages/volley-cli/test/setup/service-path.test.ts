@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { isEphemeralDir, stableServicePath } from "../../src/setup/service-path";
 
-const HOME = "/Users/someone";
+const HOME = "/path/to/home";
 
 /** A fake filesystem: the files that exist. */
 const fs = (...files: string[]) => {
@@ -87,7 +87,7 @@ describe("isEphemeralDir", () => {
     expect(isEphemeralDir("/var/folders/xy/abc/T/cmux-cli-shims/1234")).toBe(true);
     expect(isEphemeralDir("/private/var/folders/xy/abc/T/x")).toBe(true);
     expect(isEphemeralDir("/tmp/x")).toBe(true);
-    expect(isEphemeralDir("/home/u/.cache/cmux-cli-shims/abc")).toBe(true);
+    expect(isEphemeralDir("/path/to/home/.cache/cmux-cli-shims/abc")).toBe(true);
     expect(isEphemeralDir("/scratch/tmpdir/x", "/scratch/tmpdir")).toBe(true);
     expect(isEphemeralDir("relative/bin")).toBe(true);
     expect(isEphemeralDir("/opt/homebrew/bin")).toBe(false);

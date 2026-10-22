@@ -9,7 +9,7 @@
     "wave": "w1",
     "task": "T1",
     "kind": "repo_untrusted",
-    "question": "Needs you: trust /home/u/src/example-repo for dispatch?",
+    "question": "Needs you: trust /path/to/repo for dispatch?",
     "options": ["trust", "cancel"],
     "pointers": {},
     "opened_at": "2026-10-18T15:20:00.000Z"

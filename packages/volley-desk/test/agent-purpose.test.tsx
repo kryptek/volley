@@ -176,7 +176,7 @@ describe("sessions", () => {
         model_source: "harness-hook",
         workspace: "workspace:12",
         workspace_title: "Release triage",
-        cwd: "/home/someone/repos/volley",
+        cwd: "/path/to/home/repos/volley",
       },
       null,
     );
