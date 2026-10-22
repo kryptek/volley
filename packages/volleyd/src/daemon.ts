@@ -1044,6 +1044,11 @@ export class Daemon {
     string,
     Omit<CoordinatorAttention, "agent_id" | "last_seen">
   >();
+  /**
+   * When each wave owner's `coordinator` was last re-published for its attention (epoch ms): a
+   * quiet but heard-from owner's `last_seen` is refreshed every `claim_after_s / 4`.
+   */
+  private readonly attentionPublishedAt = new Map<string, number>();
   /** Registry entries that carry a coordinator name (SPEC §6.2), by agent id. */
   private readonly namedEntries = new Map<string, RegistryEntry>();
   /** The workspace each registered session's entry names: whose screen a ref is (`carryInboxAnswer`). */
@@ -1726,12 +1731,12 @@ export class Daemon {
     if (agent === DAEMON_AGENT_ID) return;
     const env = parseEnvelope(raw);
     if (env !== null && isApiSignal(env)) this.apiSignals.push(this.now());
-    if (env !== null) this.noteAttention(agent, env);
-    if (env !== null) this.noteInboxSignal(agent, env);
     // A message queued while the daemon was down arrives late: count it from when it was sent.
     const sent = env !== null ? Date.parse(env.wall_time) : Number.NaN;
     const now = this.now();
     this.lastSeen.set(agent, Number.isNaN(sent) ? now : Math.min(now, sent));
+    if (env !== null) this.noteAttention(agent, env);
+    if (env !== null) this.noteInboxSignal(agent, env);
     // The topic names the sender (and is what broker ACLs authorise), so it identifies the acker.
     if (env?.type === "steering_acked" && env.correlation_id !== null) {
       this.acks.acked(env.correlation_id, agent);
@@ -1740,7 +1745,10 @@ export class Daemon {
 
   /**
    * The attention state an agent's progress implies (SPEC §4.3): `awaiting_input` (with its
-   * question, session and workspace) until anything else but `idle` says it works again.
+   * question, session and workspace) until anything else but `idle` or `heartbeat` says it works
+   * again. An unchanged state is re-published anyway once `claim_after_s / 4` has passed, so the
+   * retained `coordinator.last_seen` of a coordinator that only heartbeats stays fresh for a cold
+   * Desk.
    */
   private noteAttention(agent: string, env: Envelope): void {
     // Only wave owners have a `coordinator`: other agents' attention would just pile up.
@@ -1762,10 +1770,31 @@ export class Daemon {
               ? { workspace: p.workspace }
               : {}),
           }
-        : { state: "working" };
+        : // A heartbeat only says the session is alive: it leaves `awaiting_input` standing.
+          env.type === "heartbeat"
+          ? (this.attentionOf.get(agent) ?? { state: "working" })
+          : { state: "working" };
     const before = JSON.stringify(this.attentionOf.get(agent) ?? null);
     this.attentionOf.set(agent, next);
-    if (before !== JSON.stringify(next)) this.ownerChanged(agent);
+    const now = this.now();
+    const stale =
+      now - (this.attentionPublishedAt.get(agent) ?? Number.NEGATIVE_INFINITY) >=
+      this.lastSeenRefreshMs(agent);
+    if (before !== JSON.stringify(next) || stale) {
+      this.attentionPublishedAt.set(agent, now);
+      this.ownerChanged(agent);
+    }
+  }
+
+  /** `claim_after_s / 4` of the waves `agent` owns (the shortest), in ms. */
+  private lastSeenRefreshMs(agent: string): number {
+    let s = Number.POSITIVE_INFINITY;
+    for (const [wave, log] of this.waves) {
+      const owner = log.record.state?.owner;
+      if (owner != null && this.actsAs(agent, owner))
+        s = Math.min(s, this.config.effective(wave).claim_after_s);
+    }
+    return secondsMs(s) / 4;
   }
 
   /** Does `agent` own a wave itself, or as the agent bound to the coordinator name owning it? */
@@ -5614,6 +5643,7 @@ export class Daemon {
       mergeRetryMax: () => this.config.get("autopilot.merge_retry_max", wave) as number,
       // --- Self-healing CI (SPEC §4.6.16): an infra incident's wait, GitHub's status page. ---
       incidentWaitMaxS: () => this.config.get("autopilot.incident_wait_max_s", wave) as number,
+      ciRateLimitBackoffMs: () => this.config.get("ci_rate_limit_backoff_ms", wave) as number,
       statusPage: this.githubStatus(),
       deleteBranch: () => this.config.get("autopilot.delete_branch", wave) as boolean,
       releaseLock: releaseLockOn(this.releaseLocks),
