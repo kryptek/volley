@@ -6184,18 +6184,21 @@ export class Daemon {
 
   /**
    * Retire a pipeline (or release stage) agent. Replaced or cancelled without having ended itself
-   * (`relaunched`, `stopped`): its session is stopped first, so it does nothing next to (or
-   * instead of) the new attempt.
+   * (`relaunched`, `stopped`, or `superseded` by its PR's merge): its session is stopped first, so
+   * it does nothing next to (or instead of) the new attempt.
    */
   private async retireRole(wave: WaveId, agentId: string, status?: string): Promise<void> {
     const a = this.supervised.get(agentId);
-    if (a !== undefined && (status === "relaunched" || status === "stopped"))
+    if (
+      a !== undefined &&
+      (status === "relaunched" || status === "stopped" || status === "superseded")
+    )
       await this.cancelAgent(
         wave,
         { task: a.task, role: a.role, agent_id: agentId },
         DAEMON_AGENT_ID,
         {
-          text: `volleyd: ${agentId} is being ${status === "relaunched" ? "replaced by a relaunch" : "stopped"}. Stop work now: do not push, open or merge anything further, and exit.`,
+          text: `volleyd: ${agentId} is being ${status === "relaunched" ? "replaced by a relaunch" : status === "superseded" ? "stopped: its PR merged" : "stopped"}. Stop work now: do not push, open or merge anything further, and exit.`,
           from_agent_id: DAEMON_AGENT_ID,
           wave,
           task: a.task,

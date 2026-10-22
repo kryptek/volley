@@ -607,7 +607,11 @@ export async function checkRebase(
 ): Promise<RebaseCheck> {
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
   await fetchHead(git, o);
-  await git("fetch", "origin", o.release_branch);
+  const fetched = await git("fetch", "origin", o.release_branch);
+  if (fetched.code !== 0)
+    throw new Error(
+      `git fetch origin ${o.release_branch} failed: ${(fetched.stderr || fetched.stdout).trim()}`,
+    );
   const tip = line(
     (await git("rev-parse", "--verify", "--quiet", `refs/remotes/origin/${o.release_branch}`))
       .stdout,
@@ -618,8 +622,12 @@ export async function checkRebase(
   if (mb.code !== 0 || base === "") throw new Error(`no merge-base of ${o.head} and ${tip}`);
   if (base === tip) return { release_sha: tip, merge_base: base, behind: 0 };
   const log = await git("log", "--oneline", `${base}..${tip}`);
+  if (log.code !== 0)
+    throw new Error(`git log ${base}..${tip} failed: ${(log.stderr || log.stdout).trim()}`);
   const behind = log.stdout.split("\n").filter((l) => l.trim() !== "").length;
-  return { release_sha: tip, merge_base: base, behind: Math.max(behind, 1) };
+  // The merge-base is not the tip, so the tip has commits the head lacks: none listed is no count.
+  if (behind === 0) throw new Error(`inconsistent rebase check: ${base}..${tip} lists no commits`);
+  return { release_sha: tip, merge_base: base, behind };
 }
 
 // ---------------------------------------------------------------------------------------------

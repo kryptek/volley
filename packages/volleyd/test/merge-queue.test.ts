@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { dependents, nextToMerge, queueOf } from "../src/autopilot/merge-queue";
-import { type TaskPipeline, emptyPipeline } from "../src/pipeline";
+import type { RefusalReason } from "../src/autopilot/merge";
+import { dependents, nextToMerge, queueOf, refusalEndsTurn } from "../src/autopilot/merge-queue";
+import { type TaskPipeline, emptyPipeline, reducePipeline } from "../src/pipeline";
 import type { WaveRecord } from "../src/reducer";
 import type { TaskStage } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
@@ -140,6 +141,46 @@ describe("nextToMerge", () => {
     expect(nextToMerge(q, new Set())?.task).toBe("T3");
     const onlyRefused = { b: queueOf(rec).filter((e) => e.task !== "T3") };
     expect(nextToMerge(onlyRefused, new Set())?.task).toBe("T1");
+  });
+
+  it("a checks refusal keeps its queue place; a behind, retargeted or closed refusal waits behind the rest (#311)", () => {
+    const refusal = (reason?: RefusalReason) =>
+      queued(1, {
+        merge_refusals: 1,
+        merge_refusal_reason: reason,
+      });
+    for (const reason of ["checks", "unknown"] as const) {
+      const rec = record("w1", { T1: { p: refusal(reason) }, T2: { p: queued(2) } });
+      expect(nextToMerge({ b: queueOf(rec) }, new Set())?.task).toBe("T1");
+    }
+    for (const reason of ["behind", "head_moved", "retargeted", "closed", undefined] as const) {
+      const rec = record("w1", { T1: { p: refusal(reason) }, T2: { p: queued(2) } });
+      expect(nextToMerge({ b: queueOf(rec) }, new Set())?.task).toBe("T2");
+    }
+  });
+
+  let seq = 0;
+  const fold = (p: TaskPipeline, type: string, data: Record<string, unknown>) =>
+    reducePipeline(p, { seq: ++seq, at: "", type, task: "T1", data } as never, { stages: [] });
+
+  it("a late refusal of an older gated head does not change the current refusal's reason (#311)", () => {
+    const [A, B] = ["a".repeat(40), "b".repeat(40)];
+    let p = emptyPipeline();
+    p = fold(p, "artifact_verified", { role: "gate", head_sha: A });
+    p = fold(p, "artifact_verified", { role: "gate", head_sha: B });
+    p = fold(p, "alarm_raised", { alarm: "merge_refused", head: B, reason: "checks" });
+    expect(refusalEndsTurn(p)).toBe(false);
+    p = fold(p, "alarm_raised", { alarm: "merge_refused", head: A, reason: "behind" });
+    expect(p.merge_refusals).toBe(1);
+    expect(refusalEndsTurn(p)).toBe(false);
+  });
+
+  it("a PR closed unmerged gives up the turn: no retry can merge it (#311)", () => {
+    let p = emptyPipeline();
+    p = fold(p, "artifact_verified", { role: "gate", head_sha: "a".repeat(40) });
+    p = fold(p, "alarm_raised", { alarm: "merge_refused", head: "a".repeat(40), reason: "closed" });
+    expect(p.merge_refusal_reason).toBe("closed");
+    expect(refusalEndsTurn(p)).toBe(true);
   });
 
   it("two waves on one release branch share it: one merge in flight", () => {
