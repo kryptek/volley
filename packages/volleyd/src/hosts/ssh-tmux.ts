@@ -112,7 +112,7 @@ export interface RemoteHost extends Host {
 /** The fence tokens and bound a `run` may carry. */
 export type RemoteRunOptions = Pick<
   ExecOptions,
-  "consent" | "timeoutMs" | "launch" | "modelSwitch" | "signin" | "picker" | "handoff"
+  "consent" | "timeoutMs" | "launch" | "modelSwitch" | "signin" | "picker" | "handoff" | "wake"
 >;
 
 /** ssh's own failure (unreachable, auth, host key, timeout), as opposed to the remote command's. */
@@ -192,6 +192,7 @@ export class SshTmuxHost implements RemoteHost {
         ...(opts.modelSwitch !== undefined ? { modelSwitch: opts.modelSwitch } : {}),
         ...(opts.picker !== undefined ? { picker: opts.picker } : {}),
         ...(opts.handoff !== undefined ? { handoff: opts.handoff } : {}),
+        ...(opts.wake !== undefined ? { wake: opts.wake } : {}),
         ...(opts.signin !== undefined ? { signin: opts.signin } : {}),
       },
     );

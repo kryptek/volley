@@ -134,7 +134,7 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
       host.keys.push({ workspace, key });
     },
     async sendText(workspace, text, tokens = {}) {
-      if (tokens.picker !== undefined || tokens.handoff !== undefined)
+      if (tokens.picker !== undefined || tokens.handoff !== undefined || tokens.wake !== undefined)
         assertAllowed(["cmux", "send", "--workspace", workspace, text], tokens);
       host.texts.push({ workspace, text });
     },

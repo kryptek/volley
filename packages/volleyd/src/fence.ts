@@ -14,6 +14,7 @@ import {
 } from "./claude/signin-script";
 import { volleydHome } from "./config-store";
 import { LAUNCH_COMMAND, mcpConfigPath, renderLaunchScript, renderMcpConfig, shq } from "./launch";
+import { WAKE_TEXT } from "./liveness";
 import { AGENT_BRANCH } from "./worktree";
 
 /**
@@ -127,6 +128,8 @@ import { AGENT_BRANCH } from "./worktree";
  *                      coordinator handoff's reply) carrying exactly that text, typed once per
  *                      token; minted only for one line with no control character that does not
  *                      start with `/` or `!` (never a slash command or bash-mode line)
+ *     WAKE_TEXT        with a WakeToken (`mintWakeToken`, minted when an idle agent did not ack
+ *                      a mailbox message in time), typed once per token; nothing else with it
  *
  * PICKER (needs-you inbox pickers, SPEC §4.6.18): `cmux send-key … Up|Down|Space` and
  *   `tmux send-keys -t <t> Up|Down|Space` only with a PickerToken (`mintPickerToken`, minted for
@@ -395,6 +398,23 @@ export function mintHandoffToken(t: {
   if (why !== null) throw new FenceError(`handoff text ${JSON.stringify(t.text)}`, why);
   const token = Object.freeze({ item_id: t.item_id, version: t.version, text: t.text });
   handoffs.add(token);
+  return token;
+}
+
+const wakes = new WeakSet<object>();
+
+/**
+ * Waking an idle agent to read its mailbox: WAKE_TEXT, the one constant, is typed once with it.
+ * Only `mintWakeToken` creates one (checked by identity).
+ */
+export interface WakeToken {
+  readonly text: typeof WAKE_TEXT;
+}
+
+/** Callers: the daemon, when an idle agent has not acked a mailbox message (wakeIfUnacked). */
+export function mintWakeToken(): WakeToken {
+  const token = Object.freeze({ text: WAKE_TEXT });
+  wakes.add(token);
   return token;
 }
 
@@ -672,6 +692,8 @@ export interface FenceOptions {
   picker?: PickerToken;
   /** For typing a coordinator handoff's reply: the inbox item's answer. */
   handoff?: HandoffToken;
+  /** For typing WAKE_TEXT into an idle agent's session. */
+  wake?: WakeToken;
   /** For starting a sign-in tmux session: the sealed sign-in script. */
   signin?: SigninToken;
   /** For the sign-in forward (`ssh -N -L`): the token a remote sign-in minted. */
@@ -1048,6 +1070,12 @@ function typedTextRefusal(text: string, opts: FenceOptions): string | null {
     return t !== undefined && switches.has(t) && text === `/model ${t.model}`
       ? null
       : "/model without the token of an approved model_switch decision";
+  }
+  const wake = opts.wake;
+  if (text === WAKE_TEXT && wake !== undefined && wakes.has(wake)) {
+    if (spentText.has(wake)) return "a wake is typed once";
+    spentText.add(wake);
+    return null;
   }
   const answer = answerTextToken(text, opts);
   if (answer !== null) {

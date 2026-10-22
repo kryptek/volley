@@ -27,6 +27,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   stall_backoff_max_s: 1800,
   blocked_undecided_stall_ms: 300_000,
   tool_in_flight_max_s: 7200,
+  mailbox_wake_after_ms: 20_000,
   fallback_model: null,
   mailbox: { session_expiry_s: 604800 },
   worktree_root: "~/.volley/worktrees",

@@ -286,6 +286,11 @@
           "minimum": 1,
           "description": "Steering messages the supervisor holds for the task's next agent because none was live when they were sent (SPEC §4.4); absent when none are held."
         },
+        "steer_unacked": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The task's agent the supervisor woke (agent_woken) for a mailbox message its hooks have not acked yet; absent once acked or the agent is retired."
+        },
         "screen_stale": {
           "type": "boolean",
           "description": "True while the supervisor's screen capture for one of the task's agents is backed off (slow or failing), so its retained screen topic may be out of date."

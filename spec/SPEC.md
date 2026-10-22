@@ -284,7 +284,7 @@ Every message on these topics is a standard envelope (§3) whose `agent_id` is t
 | `repo`, `release_branch` | string | Where the wave's PRs land. |
 | `github` | object | `{ slug, url }`: the repository on GitHub as the supervisor read it for the current plan version (`gh repo view`: `nameWithOwner`, `url`), so a client can link issue `n` as `<url>/issues/<n>`. Absent when it could not be read; never derived from `repo` or a remote. |
 | `status` | enum | `running` \| `paused` \| `awaiting_decision` \| `releasing` \| `complete` \| `stopped` \| `archived`. `releasing`: every task is settled and the wave's release train runs (§4.6.19); the wave is `complete` once the owner answers `release_go` `go`. `archived` is published once, with `open_decisions` empty, just before the topic is cleared (§4.6.20). |
-| `tasks[]` | object | `{ id, issue, stage, agents, waiting_on?, why_waiting?, host?, host_actual?, host_planned?, host_down?, placement?, base_sha?, pr?, evidence_path?, screen_stale?, queued_steers?, last_error?, attempt?, next_retry_at?, reviews_skipped_by_plan?, stage_label?, stage_group?, alarms?, remediation?, synthetic? }`. |
+| `tasks[]` | object | `{ id, issue, stage, agents, waiting_on?, why_waiting?, host?, host_actual?, host_planned?, host_down?, placement?, base_sha?, pr?, evidence_path?, screen_stale?, queued_steers?, steer_unacked?, last_error?, attempt?, next_retry_at?, reviews_skipped_by_plan?, stage_label?, stage_group?, alarms?, remediation?, synthetic? }`. |
 | `tasks[].stage` | enum (closed) | `queued` \| `implement` \| `spec_review` \| `quality_review` \| `fixup` \| `merge_ready` \| `done` \| `blocked` \| `awaiting_decision` \| `cancelled`. |
 | `tasks[].agents` | object | Current agent id per role: `implementer?`, `spec_reviewer?`, `quality_reviewer?`, `fixup?`, `rebase?`. |
 | `tasks[].waiting_on`, `why_waiting` | string[], string | What the task is blocked on, and a human-readable reason (e.g. `tunnel down to <target>` while a remote host's broker tunnel is down). |
@@ -296,6 +296,7 @@ Every message on these topics is a standard envelope (§3) whose `agent_id` is t
 | `tasks[].base_sha` | string | The release-branch commit the task's current worktree was cut from (§4.6.15). |
 | `tasks[].screen_stale` | boolean | `true` while the supervisor's screen capture for any of the task's agents is backed off (§4.6.6), so the retained `screen` topic may be out of date. Per task, not per agent; absent otherwise. |
 | `tasks[].queued_steers` | integer | Steering messages held for the task's next agent because none was live when they were sent (§4.4); absent when none are held. |
+| `tasks[].steer_unacked` | string | The task's agent the supervisor woke (`agent_woken`, §4.6.4) for a mailbox message its hooks have not acked yet; absent once acked or the agent is retired. |
 | `tasks[].last_error`, `attempt`, `next_retry_at` | object, integer, date-time \| null | While a spawn of the task has failed and that role has not spawned since: `last_error` `{ code, message, at }`, `attempt` (failed attempts in a row) and `next_retry_at` (the supervisor's next automatic retry; `null` once it stopped retrying). Failures are counted per role (two roles of one step may fail at once); these fields show the most recent one. Absent otherwise. |
 | `tasks[].pr` | object | `{ number, url, head_sha?, ci?, checks? }`; `ci` is `green` \| `red` \| `running` \| `none`. While the supervisor holds the task for CI on `head_sha`, `ci` is `running` and `checks` is `{ done, total }` (its CI runs completed, and all of them); `why_waiting` then reads e.g. `CI pending on <sha7> (2/5 checks)`. While it holds a red head for an infra incident (§4.6.16), `ci` is `red` and `why_waiting` reads `CI infra incident: <what>; re-checking`. |
 | `tasks[].reviews_skipped_by_plan` | boolean | `true` once the task reached `merge_ready` without reviews because its wave-file pipeline lists no review stage (§4.6.8); absent otherwise. |
@@ -405,6 +406,8 @@ A decision that offers `respawn` for an agent whose host is down or not eligible
 - `steering_sent`
 - `steering_queued`
 - `steering_dropped`
+- `steering_received`
+- `agent_woken`
 - `decision_opened`
 - `decision_resolved`
 - `lease_requested`
@@ -498,6 +501,7 @@ A decision that offers `respawn` for an agent whose host is down or not eligible
 - `stall_backoff_max_s` — default 1800: the cap on the doubling gap between stall decisions of one idle.
 - `tool_in_flight_max_s` — default 7200: how long a tool call in flight, from its `PreToolUse` boundary to the matching `PostToolUse`, §4.3, holds off the silence alarm.
 - `blocked_undecided_stall_ms` — default 300000, 10000..86400000: how long an agent whose retained status is `blocked` may go with no decision naming it (open, or answered for that status) before the supervisor calls it stalled, an `agent_stalled` decision offering `respawn` and `stop task`.
+- `mailbox_wake_after_ms` — default 20000, 1000..600000: how long the supervisor waits for an agent's hooks to ack a mailbox message it sent before it types the fixed wake line into an idle agent's session (never a working one, or one with a picker open), once per message, journaled `agent_woken { agent_id, reason: "mailbox", message_id, enter_failed? }` (`enter_failed: true`: the line was typed but its Enter failed, and the agent's next wake sends only the Enter); the late ack is journaled `steering_received { agent_id, message_id }`.
 - `fallback_model` — string | null, default `null`.
 - `mailbox.session_expiry_s` — default 604800.
 - `worktree_root` — default `~/.volley/worktrees`.

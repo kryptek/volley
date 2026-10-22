@@ -25,9 +25,11 @@ import {
   mintScriptToken,
   mintSetupToken,
   mintSigninForwardToken,
+  mintWakeToken,
   sealLaunchScript,
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
+import { WAKE_TEXT } from "../src/liveness";
 import { tempDir, tempDirForAll } from "./helpers/tmp";
 import { withEnvSync } from "./helpers/with-env";
 
@@ -1375,6 +1377,19 @@ describe("pickers and handoffs: Up/Down/Space and typed answers need the inbox i
       typeof mintHandoffToken
     >;
     expect(() => assertAllowed(send("x"), { handoff: forged })).toThrow(FenceError);
+  });
+
+  it("a WakeToken types exactly the wake line, once; any other text under it is refused", () => {
+    const wake = mintWakeToken();
+    expect(() => assertAllowed(send(WAKE_TEXT))).toThrow(/text volleyd never types/);
+    expect(() => assertAllowed(send("check your mailbox now"), { wake })).toThrow(
+      /text volleyd never types/,
+    );
+    expect(() => assertAllowed(send(WAKE_TEXT), { wake })).not.toThrow();
+    expect(() => assertAllowed(send(WAKE_TEXT), { wake })).toThrow(FenceError);
+    expect(() => assertAllowed(key("Down"), { wake: mintWakeToken() })).toThrow(FenceError);
+    const forged = {} as ReturnType<typeof mintWakeToken>;
+    expect(() => assertAllowed(send(WAKE_TEXT), { wake: forged })).toThrow(FenceError);
   });
 
   it("refuses to mint a token for text that would be a command or more than one line", () => {

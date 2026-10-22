@@ -57,6 +57,13 @@ export interface WaveRecord {
   steers: Record<TaskId, { seq: number; message_id?: string }>;
   /** Steers held for each task's next agent, in order (`steering_queued`), until sent or dropped. */
   queued_steers: Record<TaskId, QueuedSteer[]>;
+  /**
+   * Per task: the agent woken for a mailbox message it had not acked (`agent_woken`), until that
+   * message is acked (`steering_received`) or the agent is retired. Absent in older snapshots.
+   * One entry per task: when two parallel reviewers are both woken, the later one replaces the
+   * earlier, so status names only the last woken agent until it acks.
+   */
+  woken?: Record<TaskId, { agent_id: string; message_id: string }>;
   /** Each task's position in its pipeline (stage steps, role runs, reviews, verified head). */
   pipeline: Record<TaskId, TaskPipeline>;
   /**
@@ -154,6 +161,7 @@ export function emptyRecord(): WaveRecord {
     decisions: {},
     steers: {},
     queued_steers: {},
+    woken: {},
     pipeline: {},
     spawnFailures: {},
     budget_raised: 0,
@@ -641,6 +649,24 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         next.steers[ev.task] = { seq: q.seq, message_id: q.message_id };
       }
       break;
+    case "agent_woken":
+      if (ev.task !== undefined)
+        next.woken = {
+          ...next.woken,
+          [ev.task]: {
+            agent_id: String(ev.data.agent_id),
+            message_id: String(ev.data.message_id),
+          },
+        };
+      break;
+    case "steering_received":
+      if (ev.task !== undefined && next.woken?.[ev.task]?.message_id === ev.data.message_id)
+        delete next.woken?.[ev.task];
+      break;
+    case "agent_retired":
+      if (ev.task !== undefined && next.woken?.[ev.task]?.agent_id === ev.data.agent_id)
+        delete next.woken?.[ev.task];
+      break;
     case "steering_dropped":
       if (ev.task !== undefined) unqueue(next, ev.task, (ev.data.message_ids as unknown[]) ?? []);
       break;
@@ -759,9 +785,14 @@ function derive(state: WaveState, rec: WaveRecord): void {
           };
     },
   );
-  state.tasks = state.tasks.map(({ queued_steers: _q, ...t }) => {
+  state.tasks = state.tasks.map(({ queued_steers: _q, steer_unacked: _u, ...t }) => {
     const n = rec.queued_steers[t.id]?.length ?? 0;
-    return n > 0 ? { ...t, queued_steers: n } : t;
+    const woken = rec.woken?.[t.id]?.agent_id;
+    return {
+      ...t,
+      ...(n > 0 ? { queued_steers: n } : {}),
+      ...(woken !== undefined ? { steer_unacked: woken } : {}),
+    };
   });
   state.tasks = state.tasks.map(({ stage_label: _l, stage_group: _g, ...t }) =>
     withStageGroup(t, rec.pipeline[t.id]),

@@ -137,6 +137,12 @@ const secondsMs = (s: number) => s * 1000;
 export const CONTINUE_TEXT =
   "volleyd: your turn ended but the task is not finished. Continue; publish done/blocked/failed when finished.";
 
+/**
+ * The one line volleyd types into an idle session whose hooks did not ack a mailbox message in
+ * `mailbox_wake_after_ms`: its UserPromptSubmit hook drains the mailbox (fence.ts WakeToken).
+ */
+export const WAKE_TEXT = "Check your Volley mailbox.";
+
 const QUESTION_TYPES = new Set(["permission_prompt", "agent_needs_input"]);
 /** Statuses during which an idle agent is a stall (not: blocked, which waits on purpose). */
 const STALLABLE = new Set(["spawning", "registered", "working"]);

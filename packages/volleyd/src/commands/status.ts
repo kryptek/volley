@@ -213,6 +213,7 @@ export function formatWave(
     const pr = t.pr !== undefined ? `  PR #${t.pr.number}` : "";
     const skipped = t.reviews_skipped_by_plan === true ? "  reviews skipped by plan" : "";
     const queued = t.queued_steers !== undefined ? `  steer queued (${t.queued_steers})` : "";
+    const unacked = t.steer_unacked !== undefined ? `  steer unacked (${t.steer_unacked})` : "";
     const stage = t.stage_label ?? t.stage;
     // A parallel stage group: every role of it, with its agent and state.
     const group = (t.stage_group ?? [])
@@ -224,9 +225,9 @@ export function formatWave(
     const r = t.remediation;
     if (t.synthetic === true && r !== undefined) {
       const closed = r.outcome !== undefined ? ` [${r.outcome}]` : "";
-      return `  ${t.id.padEnd(idW)}  ${"".padEnd(7)}${stage.padEnd(14)}fixer for ${(r.for ?? []).join(", ") || "-"} (flake: ${r.test})${closed}${pr}${queued}${why}\n${group}${alarms}${formatPlacement(t)}`;
+      return `  ${t.id.padEnd(idW)}  ${"".padEnd(7)}${stage.padEnd(14)}fixer for ${(r.for ?? []).join(", ") || "-"} (flake: ${r.test})${closed}${pr}${queued}${unacked}${why}\n${group}${alarms}${formatPlacement(t)}`;
     }
-    return `  ${t.id.padEnd(idW)}  #${String(t.issue).padEnd(5)} ${stage.padEnd(14)}${pr}${skipped}${queued}${why}\n${group}${alarms}${formatPlacement(t)}`;
+    return `  ${t.id.padEnd(idW)}  #${String(t.issue).padEnd(5)} ${stage.padEnd(14)}${pr}${skipped}${queued}${unacked}${why}\n${group}${alarms}${formatPlacement(t)}`;
   });
   const decisions = (ctx.decisions ?? [])
     .filter((d) => d.wave === s.wave && s.open_decisions.includes(d.decision_id))

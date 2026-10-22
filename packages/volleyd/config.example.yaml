@@ -44,6 +44,7 @@
 # stall_backoff_max_s: 1800     # cap on the doubling gap between agent_stalled decisions
 # blocked_undecided_stall_ms: 300000  # a blocked agent no decision names this long -> agent_stalled
 # tool_in_flight_max_s: 7200    # a tool call in flight (PreToolUse, no PostToolUse yet) is not silence this long
+# mailbox_wake_after_ms: 20000  # no ack of a mailbox steer this long: wake an idle agent
 # fallback_model: null
 # mailbox: { session_expiry_s: 604800 }
 # worktree_root: ~/.volley/worktrees  # default $VOLLEYD_HOME/worktrees when VOLLEYD_HOME is set

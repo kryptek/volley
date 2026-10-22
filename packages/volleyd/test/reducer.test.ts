@@ -239,6 +239,39 @@ describe("reduce", () => {
     expect(rec.state?.tasks.find((t) => t.id === "T1")?.queued_steers).toBeUndefined();
   });
 
+  it("steer_unacked: set by agent_woken, cleared by its steering_received or the agent's retirement", () => {
+    const last = events.at(-1) as JournalEvent;
+    const at = "2026-10-20T10:00:00.000Z";
+    let seq = last.seq;
+    const ev = (type: JournalEvent["type"], data: Record<string, unknown>): JournalEvent => ({
+      seq: ++seq,
+      at,
+      type,
+      task: "T1",
+      data,
+    });
+    const unacked = (r: ReturnType<typeof replay>) =>
+      r.state?.tasks.find((t) => t.id === "T1")?.steer_unacked;
+    const woken = ev("agent_woken", { agent_id: "a1", reason: "mailbox", message_id: "m1" });
+    let rec = replay([...events, woken]);
+    expect(unacked(rec)).toBe("a1");
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", rec.state)),
+    ).toEqual([]);
+    // Another agent's retirement leaves the mark.
+    rec = apply(rec, ev("agent_retired", { agent_id: "a0", status: "done" }));
+    expect(unacked(rec)).toBe("a1");
+    // The woken agent is retired without acking: nothing is left to ack it.
+    rec = apply(rec, ev("agent_retired", { agent_id: "a1", status: "done" }));
+    expect(unacked(rec)).toBeUndefined();
+
+    rec = apply(rec, ev("agent_woken", { agent_id: "a2", reason: "mailbox", message_id: "m2" }));
+    rec = apply(rec, ev("steering_received", { agent_id: "a2", message_id: "m1" }));
+    expect(unacked(rec)).toBe("a2");
+    rec = apply(rec, ev("steering_received", { agent_id: "a2", message_id: "m2" }));
+    expect(unacked(rec)).toBeUndefined();
+  });
+
   it("a cancelled task drops its queue", () => {
     const last = events.at(-1) as JournalEvent;
     const at = "2026-10-20T10:00:00.000Z";

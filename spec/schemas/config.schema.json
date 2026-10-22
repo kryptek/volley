@@ -164,6 +164,13 @@
           "default": 7200,
           "description": "Seconds a tool call in flight (its PreToolUse boundary seen, its PostToolUse not yet) holds off the silence probe; past it, a screen static for heartbeat_alarm_s falls back to the screen_static path."
         },
+        "mailbox_wake_after_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 600000,
+          "default": 20000,
+          "description": "Milliseconds the supervisor waits for an agent's hooks to ack a mailbox message it sent (a steer, a nudge, an answer) before it types the fixed wake line into the agent's session; only an agent idle at its prompt is woken, once per message."
+        },
         "fallback_model": {
           "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 128 }, { "type": "null" }],
           "description": "Model offered in a model_switch decision on credit exhaustion; null disables the offer."
