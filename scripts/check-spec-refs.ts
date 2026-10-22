@@ -110,6 +110,13 @@ export function specListItems(spec: string, name: string): string[] | null {
   });
 }
 
+/** The top-level `- ` lines of the named list that do not open with a code span, so are not counted. */
+function specListMalformed(spec: string, name: string): string[] {
+  return (specListBody(spec, name)?.lines ?? []).filter(
+    (line) => line.startsWith("- ") && !/^- `[^`]+`/.test(line),
+  );
+}
+
 /** Whether the named list ends in its own `<!-- /spec-list -->` marker. */
 function specListClosed(spec: string, name: string): boolean {
   return specListBody(spec, name)?.closed === true;
@@ -182,7 +189,10 @@ export function specListProblems(spec: string, sources: ListSources): string[] {
     if (!specListClosed(spec, name)) {
       return [`the ${name} list has no closing \`<!-- /spec-list -->\``];
     }
-    return listProblems(name, items, expected, source);
+    const malformed = specListMalformed(spec, name).map(
+      (line) => `the ${name} list has an item that does not open with a code span: \`${line}\``,
+    );
+    return [...malformed, ...listProblems(name, items, expected, source)];
   });
 }
 

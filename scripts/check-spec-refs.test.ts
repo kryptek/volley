@@ -219,6 +219,17 @@ describe("specListProblems", () => {
     ).toEqual([]);
   });
 
+  test("an item that does not open with a code span fails naming its line", () => {
+    const bad = spec(["hard_ceiling", "autopilot.digest_min_interval_s"]).replace(
+      "- `wave_submitted`",
+      "- `wave_submitted`\n- **`new_event`** — bold\n- new_kind — bare",
+    );
+    expect(specListProblems(bad, sources)).toEqual([
+      "the events list has an item that does not open with a code span: `- **`new_event`** — bold`",
+      "the events list has an item that does not open with a code span: `- new_kind — bare`",
+    ]);
+  });
+
   test("a missing list fails", () => {
     expect(specListProblems("no lists here", sources)).toEqual([
       "no `<!-- spec-list: decision-kinds -->` list",
