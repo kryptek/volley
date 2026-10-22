@@ -65,4 +65,21 @@ describe("diffPlans", () => {
       ].join("\n"),
     );
   });
+
+  it("names each host a started task kept, after the structural lines (#323)", () => {
+    const d = diffPlans(fixture("v1.yaml"), fixture("v1.yaml"));
+    d.hosts_kept = [
+      { task: "T1", kept: "local", planned: "auto", running: false },
+      { task: "T3", kept: "box", planned: "auto", running: true },
+    ];
+    expect(isEmptyDiff(d)).toBe(true); // not structural
+    expect(formatDiff(d)).toBe(
+      [
+        "no structural changes",
+        "T1: host kept local (already ran; new plan says auto)",
+        "T3: host kept box (already running; new plan says auto)",
+        "",
+      ].join("\n"),
+    );
+  });
 });
