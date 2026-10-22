@@ -1239,9 +1239,8 @@ agent: its newest spawned agent that is not retired, whatever its role (a rebase
 `quality_reviewer`, `fixup`, `rebase` or `release`); the task `_release` names the release
 train's stage agent. When a stage runs two agents at once (`spec_reviewer` and
 `quality_reviewer`), a steer without `--role` reaches the one spawned last: name the role to pick.
-Its `correlation_id`
-is the message id; `payload.seq` counts steers to that task (1, 2, …) and `payload.supersedes`
-names the previous steer, so the recipient can drop stale guidance (a [merge
+Its `correlation_id` is the message id; `payload.seq` counts steers to that task (1, 2, …) and
+`payload.supersedes` names the previous steer, so the recipient can drop stale guidance (a [merge
 nudge](#the-pipeline-and-the-merge-ready-gate) is additive: it supersedes nothing, and the next
 steer supersedes the one before the nudge). The steer is journaled as
 `steering_sent`. The command then waits up to `--wait-ack-ms` (default 30000) and reports:
@@ -1274,7 +1273,9 @@ There is at most one wake per message: until its ack arrives (journaled `steerin
 wave state's `tasks[].steer_unacked` names the agent and `volleyd status` prints
 `steer unacked (<agent>)`. When the host typed the line but its `Enter` failed, the line stays
 in the prompt and `agent_woken` carries `enter_failed: true`; the agent's next wake sends only
-the `Enter`, which submits that same line, instead of typing it again.
+the `Enter`, which submits that same line, instead of typing it again. When typing the line
+itself fails, nothing is journaled and that message is not woken again (only the daemon log
+records it); the agent's next hook signal drains it.
 
 A steer never goes to a retired agent (`task.agents` keeps the last agent per role after it is
 retired, and nobody drains its mailbox). When the task has no live agent, between stages or before
