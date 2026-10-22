@@ -1230,10 +1230,7 @@ function onMergeChecked(
         : []),
       ...mergedActions(
         v,
-        {
-          merge_sha: view.mergeCommit?.oid ?? null,
-          merged_at: view.mergedAt ?? null,
-        },
+        { merge_sha: view.mergeCommit?.oid ?? null, merged_at: view.mergedAt ?? null },
         other ? { sha: merged, ci: ev.merged_ci ?? "unknown" } : undefined,
       ),
     ];
