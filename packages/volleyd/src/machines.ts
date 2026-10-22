@@ -75,6 +75,14 @@ export const statusOf = (r: MachineRecord): MachineStatus => (r.tunnel === "down
  * machine itself nor the supervisor (the broker ACL already allows only those two).
  */
 export function parseMachine(topic: string, raw: string): MachineRecord | null {
+  return parseMachineFrom(topic, raw)?.record ?? null;
+}
+
+/** As `parseMachine`, with who published the record (the machine itself, or `volleyd`). */
+export function parseMachineFrom(
+  topic: string,
+  raw: string,
+): { record: MachineRecord; by: string } | null {
   if (raw === "") return null;
   let env: unknown;
   try {
@@ -87,7 +95,7 @@ export function parseMachine(topic: string, raw: string): MachineRecord | null {
   const name = topic.split("/")[3];
   if (e.payload.name !== name) return null;
   if (e.agent_id !== name && e.agent_id !== "volleyd") return null;
-  return e.payload;
+  return { record: e.payload, by: e.agent_id };
 }
 
 /** Why a machine is down, as a task's why_waiting reads it (`limitMs`: the heartbeat timeout). */
@@ -146,9 +154,11 @@ export class MachineHealth {
    * values: the machine's LWT was built when it connected, so its `last_seen`, `load` and
    * `agents` may be hours old. An up record whose doctor run is older than the one held (a
    * supervisor-run doctor folded in before the box's service re-ran its own) keeps the newer
-   * run's fields.
+   * run's fields, and says so (`true`), for the supervisor to re-assert them. `heard: false`
+   * folds a record the supervisor made itself (a Repair's fold, or its echo): it is no heartbeat,
+   * so the machine's down timer keeps running.
    */
-  observe(incoming: MachineRecord): void {
+  observe(incoming: MachineRecord, opts: { heard?: boolean } = {}): boolean {
     const prior = this.machines.get(incoming.name);
     const status = statusOf(incoming);
     const record: MachineRecord =
@@ -163,7 +173,8 @@ export class MachineHealth {
                 : prior.record.last_seen,
           }
         : keepNewerDoctor(incoming, prior?.record);
-    const heardAt = status === "up" ? this.deps.now() : (prior?.heardAt ?? this.deps.now());
+    const heard = status === "up" && opts.heard !== false;
+    const heardAt = heard || prior === undefined ? this.deps.now() : prior.heardAt;
     const downAt =
       status === "up" ? undefined : prior?.status === "down" ? prior.downAt : this.deps.now();
     this.machines.set(record.name, {
@@ -173,6 +184,7 @@ export class MachineHealth {
       ...(downAt !== undefined ? { downAt } : {}),
     });
     if (prior?.status !== status) this.deps.onChange(record.name, status, record);
+    return status === "up" && record.doctor_at !== incoming.doctor_at;
   }
 
   /**

@@ -256,7 +256,7 @@ import {
   doctorFields,
   machineTopic,
   parseDoctorReport,
-  parseMachine,
+  parseMachineFrom,
 } from "./machines";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
 import {
@@ -1575,16 +1575,29 @@ export class Daemon {
           });
           return;
         }
-        const record = parseMachine(m.topic, m.payload);
+        const parsed = parseMachineFrom(m.topic, m.payload);
         // Every account may publish its own record: only a configured host's is a machine.
-        if (record === null) return;
+        if (parsed === null) return;
+        const { record, by } = parsed;
+        // Our own republish (a sweep's down, a Repair's fold) coming back is no heartbeat.
+        const heard = by !== "volleyd";
         void this.enqueue(async () => {
           // A configured host is a peer whatever its record says (SPEC §4.6.15): never local.
           if (!Object.hasOwn(this.config.effective().hosts, name) || record.tunnel === "local") {
             return;
           }
-          this.machines.observe(record);
-          if (record.tunnel === "up") this.sampleHost(name, record);
+          const keptNewer = this.machines.observe(record, { heard });
+          if (record.tunnel === "up" && heard) this.sampleHost(name, record);
+          // The box's beat still carries its service's older doctor run: re-assert the newer one
+          // (a Repair's) over it, so clients never see the stale checks again.
+          const held = this.machines.record(name);
+          if (keptNewer && heard && held !== undefined) {
+            await this.publish(
+              machineTopic(name),
+              this.envelope(MACHINE_CHANNEL, "machine", held),
+              true,
+            );
+          }
           await this.publishReadiness(name);
         });
       }),
@@ -4944,7 +4957,7 @@ export class Daemon {
       this.log(`${name}'s doctor report does not fit machine.schema.json: record left as it was`);
       return;
     }
-    this.machines.observe(record);
+    this.machines.observe(record, { heard: false });
     await this.publish(machineTopic(name), this.envelope(MACHINE_CHANNEL, "machine", record), true);
     await this.publishReadiness(name);
   }

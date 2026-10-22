@@ -689,6 +689,34 @@ describe("peer_doctor (the doctor on a paired machine, for an admin)", () => {
     const reasons = (await verdict())?.reasons ?? [];
     expect(reasons.some((r) => r.startsWith("volley.installed"))).toBe(false);
     expect(reasons).not.toEqual(before?.reasons);
+
+    // The box's next beat still carries its service's older run: the supervisor re-asserts the
+    // newer one over it, so the Desk never shows the stale checks again.
+    await c.publish(
+      machineTopic("box-a"),
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "box-a",
+          parentId: null,
+          channel: "_system/machines",
+          type: "machine",
+          payload: { ...beat, last_seen: "2026-10-19T09:00:30.000Z" },
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    await eventually(async () => {
+      const r = await record();
+      return (
+        r?.agent_id === "volleyd" &&
+        (r.payload as { last_seen?: string }).last_seen === "2026-10-19T09:00:30.000Z"
+      );
+    });
+    expect((await record())?.payload).toMatchObject({
+      last_seen: "2026-10-19T09:00:30.000Z",
+      doctor_at: "2026-10-19T09:00:05.000Z",
+      versions: REPORT.versions,
+    });
   });
 
   it("a run on a box that never published a record publishes none", async () => {

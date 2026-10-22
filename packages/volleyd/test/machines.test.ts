@@ -162,6 +162,27 @@ describe("MachineHealth", () => {
     expect(health.record("box")).toEqual(record(later));
   });
 
+  it("says when it kept the newer run's doctor fields over an incoming record's older ones", () => {
+    const newer = { checks: [], doctor_at: "2026-10-19T09:00:05.000Z" };
+    expect(health.observe(record(newer))).toBe(false);
+    expect(health.observe(record({ checks: [], doctor_at: "2026-10-19T08:00:00.000Z" }))).toBe(
+      true,
+    );
+    expect(health.observe(record({ checks: [], doctor_at: "2026-10-19T09:01:00.000Z" }))).toBe(
+      false,
+    );
+  });
+
+  it("a record the supervisor republished itself is not a heartbeat: the box still goes down", () => {
+    health.observe(record({ doctor_at: "2026-10-19T08:00:00.000Z" }));
+    now += DAEMON_DEFAULTS.machine_down_after_ms - 1;
+    // A Repair's fold (or its echo through the broker) a moment before the timeout.
+    health.observe(record({ doctor_at: "2026-10-19T09:00:05.000Z" }), { heard: false });
+    expect(health.record("box")?.doctor_at).toBe("2026-10-19T09:00:05.000Z");
+    now += 1;
+    expect(health.sweep().map((r) => r.reason)).toEqual(["heartbeat_timeout"]);
+  });
+
   it("compares doctor runs by instant, not by how the timestamp is written", () => {
     const checks = (detail: string) => [
       { id: "volley.installed", ok: true, severity: "block" as const, detail },
