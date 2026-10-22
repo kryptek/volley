@@ -381,7 +381,7 @@ describe("requirements.sharing is the supervisor's sharing.yaml", () => {
 
 describe("parsePathProbe (`command -v claude bun` on the box)", () => {
   it("maps each resolved path to its tool, a missing one to false", () => {
-    expect(parsePathProbe("/home/dev/.bun/bin/bun\n")).toEqual({ claude: false, bun: true });
+    expect(parsePathProbe("/path/to/home/.bun/bin/bun\n")).toEqual({ claude: false, bun: true });
     expect(parsePathProbe("/usr/local/bin/claude\n/usr/bin/bun\n")).toEqual({
       claude: true,
       bun: true,
