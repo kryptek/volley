@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ControlClient } from "../src/control";
@@ -154,5 +155,49 @@ describe("hard ceiling with a supervised agent", () => {
     expect(cli.stdout).toContain("ceiling: 1/12 live agents · 0 launching · by wave: w1 1");
     const status = await runCli(["status"], s.env.env);
     expect(status.stdout).toContain("hard ceiling: 1/12");
+  });
+});
+
+describe("hard ceiling with a supervised agent and a tight ceiling", () => {
+  let s: SupervisedEnv;
+  beforeEach(async () => {
+    s = await makeSupervisedEnv();
+  });
+  afterEach(async () => {
+    await s.cleanup();
+  });
+
+  it("the supervised agent and one new admission fill it; the next task waits", async () => {
+    const client = await ControlClient.connect(s.env.broker.url, NS);
+    try {
+      const set = await client.request(
+        "config_set",
+        { patch: { hard_ceiling: 2 }, by: "tester" },
+        { text: "t" },
+      );
+      expect(set.applied).toBe(true);
+    } finally {
+      await client.close();
+    }
+    const wave = join(s.env.home, "w2.yaml");
+    writeFileSync(
+      wave,
+      `wave: w2\nrepo: ${s.repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  R1: { issue: 42 }\n  R2: { issue: 42 }\nconfig: { worktree_root: ${join(s.env.home, "wt2")} }\n`,
+    );
+    const r = await runCli(["run", wave], s.env.env);
+    expect(r.exitCode).toBe(0);
+    await s.daemon.tick();
+    await s.settled();
+    expect(
+      s
+        .journal("w2")
+        .filter((e) => e.type === "task_admitted")
+        .map((e) => e.task),
+    ).toEqual(["R1"]);
+    expect(s.daemon.snapshot("w2")?.tasks.find((x) => x.id === "R2")?.why_waiting).toBe(
+      "hard ceiling reached: 2/2 live agents",
+    );
+    const cli = await runCli(["admission"], s.env.env);
+    expect(cli.stdout).toContain("ceiling: 2/2 live agents · 1 launching · by wave: w1 1, w2 1");
   });
 });
