@@ -133,6 +133,17 @@ describe("the dock's account menu (#328)", () => {
     expect(screen.queryByRole("dialog", { name: "Account" })).toBeNull();
   });
 
+  it("closing the menu gives focus back to the avatar", async () => {
+    signedIn();
+    const avatar = await screen.findByRole("button", { name: "Account" });
+    avatar.focus();
+    fireEvent.click(avatar);
+    const menu = screen.getByRole("dialog", { name: "Account" });
+    expect(menu).toHaveFocus();
+    fireEvent.keyDown(menu, { key: "Escape" });
+    expect(avatar).toHaveFocus();
+  });
+
   it("signed in by the environment, the menu says so and offers no sign-out", async () => {
     signedIn({ VITE_VOLLEY_BROKER_USERNAME: "desk", VITE_VOLLEY_BROKER_PASSWORD: "pw" });
     fireEvent.click(await screen.findByRole("button", { name: "Account" }));

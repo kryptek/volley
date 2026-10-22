@@ -79,7 +79,9 @@ export function AccountMenu({
   // A ref, not an effect dependency: a new callback must not move focus again.
   const close = useRef(onClose);
   close.current = onClose;
+  // Focus moves into the menu on open and goes back to its opener (the avatar) on close.
   useEffect(() => {
+    const opener = document.activeElement;
     menu.current?.focus();
     const outside = (e: PointerEvent) => {
       const target = e.target as Element | null;
@@ -88,7 +90,10 @@ export function AccountMenu({
       close.current();
     };
     window.addEventListener("pointerdown", outside);
-    return () => window.removeEventListener("pointerdown", outside);
+    return () => {
+      window.removeEventListener("pointerdown", outside);
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+    };
   }, []);
   return (
     <div

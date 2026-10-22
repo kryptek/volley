@@ -85,7 +85,7 @@ import { MOVE_ACCOUNT_TIMEOUT_MS } from "./settings/ClaudeAccounts";
 import { agentsOnMachines, sshHost } from "./settings/Machines";
 import { PeerSignin, peerAccount } from "./settings/PeerSigninSheet";
 import { SettingsModal } from "./settings/SettingsModal";
-import { SettingsWindow } from "./settings/SettingsWindow";
+import { ADMIN_ROLE, SettingsWindow } from "./settings/SettingsWindow";
 import { SetupWizard } from "./settings/SetupWizard";
 import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTransport";
 import { type SectionKey, accountRole } from "./settings/sections";
@@ -1362,9 +1362,7 @@ export default function App() {
               account: {
                 identity,
                 role:
-                  readSessionRole(identity) === "admin"
-                    ? "Admin · manages accounts and setup"
-                    : accountRole(identity, demo),
+                  readSessionRole(identity) === "admin" ? ADMIN_ROLE : accountRole(identity, demo),
                 open: accountOpen,
                 onToggle: () => setAccountOpen((o) => !o),
                 onClose: () => setAccountOpen(false),

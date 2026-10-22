@@ -1,4 +1,3 @@
-import { type FormEvent, useEffect, useState } from "react";
 /**
  * Settings › Setup & Security, ported from the prototype `settings.tsx`
  * (`setup`). **Broker**: the broker the Desk talks to and, for an admin, what
@@ -16,6 +15,7 @@ import { type FormEvent, useEffect, useState } from "react";
  * token from `volley auth token`, pasted here or opened as `#signin=<token>`.
  * The Desk never writes a broker password; admin comes only from a token.
  */
+import { type FormEvent, useEffect, useState } from "react";
 import { useAccount } from "../auth/SignInGate";
 import {
   type AuthOps,

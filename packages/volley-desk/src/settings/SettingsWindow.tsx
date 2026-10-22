@@ -98,8 +98,8 @@ const SOUND_OFF: SoundSectionProps = {
   canVibrate: false,
 };
 
-/** The account row's second line for an admin session (a redeemed admin token). */
-const ADMIN_ROLE = "Admin · manages accounts and setup";
+/** The account row's second line for an admin session (a redeemed admin token); the Dock's menu shows it too. */
+export const ADMIN_ROLE = "Admin · manages accounts and setup";
 
 const Tile = ({ s, size }: { s: SectionDef; size: number }) => (
   <span className={`tile${size > 13 ? " tile--lg" : ""}`} style={{ background: s.tint }}>
