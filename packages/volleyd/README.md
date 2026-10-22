@@ -2230,7 +2230,10 @@ moves it. The reducer records that host from the task's `agent_spawned` as `task
 and the plan's own as `tasks[].host_planned` while they differ; every later role and check of the
 task (`verify`, `check_merged`) runs on `host_actual`. The tasks that have not started are placed.
 A placed task the new version still leaves to `auto` is where placement put it: no
-`host_planned`, and `volleyd run` reports no kept host for it.
+`host_planned`, and `volleyd run` reports no kept host for it. A task whose host is still `auto`
+when a check needs it (never placed, never spawned) never reaches the host resolver: volleyd
+raises `alarm_raised { alarm: "host_auto_unresolved" }` once per task per daemon run and runs that
+check on its own host.
 
 **Eligible.** The candidates are volleyd's own machine and every configured host with a machine
 record. A machine is eligible when its readiness verdict is `ready`, it is not draining, `placed`

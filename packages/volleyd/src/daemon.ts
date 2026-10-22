@@ -1092,7 +1092,7 @@ export class Daemon {
   private readonly terminals = new Map<string, TerminalSeen & { wave: WaveId }>();
   /** Per agent: the seq of the latest wave journal event naming it (watchdog.ts namedAgent). */
   private readonly lastNamed = new Map<string, number>();
-  /** `<wave>/<task>` of each task whose host reached a resolver as `auto` (one alarm each). */
+  /** `<wave>/<task>` of each task whose host reached a resolver as `auto` (one alarm each per daemon run). */
   private readonly autoHostAlarmed = new Set<string>();
   /** `<agent>@<wall_time>` of each terminal status the watchdog has alarmed on. */
   private readonly terminalAlarmed = new Set<string>();
@@ -4232,7 +4232,7 @@ export class Daemon {
 
   /**
    * Task `t` reached a host resolver as `auto` (never placed, never spawned): an alarm, once per
-   * task, and the caller falls back to the supervisor's own host.
+   * task per daemon run (the set is in memory), and the caller falls back to the supervisor's own host.
    */
   private autoHostReached(wave: WaveId, t: WaveTask): boolean {
     if (t.host !== AUTO_HOST) return false;
