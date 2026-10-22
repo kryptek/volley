@@ -1272,7 +1272,9 @@ would submit cannot deliver its work. One wake drains every message sent before 
 whose window ends within `mailbox_wake_after_ms` of the agent's last wake types no second line.
 There is at most one wake per message: until its ack arrives (journaled `steering_received`) the
 wave state's `tasks[].steer_unacked` names the agent and `volleyd status` prints
-`steer unacked (<agent>)`.
+`steer unacked (<agent>)`. When the host typed the line but its `Enter` failed, the line stays
+in the prompt and `agent_woken` carries `enter_failed: true`; the agent's next wake sends only
+the `Enter`, which submits that same line, instead of typing it again.
 
 A steer never goes to a retired agent (`task.agents` keeps the last agent per role after it is
 retired, and nobody drains its mailbox). When the task has no live agent, between stages or before

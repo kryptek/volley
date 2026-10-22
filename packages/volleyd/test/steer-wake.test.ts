@@ -122,6 +122,42 @@ describe("steer wakes an idle agent", () => {
     ).toBeUndefined();
   });
 
+  it("an Enter that fails after the wake line is typed is journaled; the next wake sends only Enter", async () => {
+    await setup();
+    await idle();
+    const sendKeys = s.host.sendKeys.bind(s.host);
+    let failEnter = true;
+    s.host.sendKeys = async (workspace, key, tokens) => {
+      if (key === "Enter" && failEnter) throw new Error("cmux: socket closed");
+      return sendKeys(workspace, key, tokens);
+    };
+    const sent = await steer();
+    await clock.advance(WAKE_MS);
+    const e = await s.event("agent_woken");
+    expect(e.data).toEqual({
+      agent_id: AGENT,
+      reason: "mailbox",
+      message_id: sent.message_id,
+      enter_failed: true,
+    });
+    expect(wakes()).toHaveLength(1);
+    const status = s.daemon.snapshot("w1")?.tasks.find((t) => t.id === "T1");
+    expect(status?.steer_unacked).toBe(AGENT);
+
+    // The next message's wake does not type the line again on top of itself: it sends the Enter.
+    failEnter = false;
+    const next = await steer({ text: "and rebase first" });
+    await clock.advance(WAKE_MS);
+    await s.settled();
+    expect(wakes()).toHaveLength(1);
+    expect(s.host.keys.at(-1)?.key).toBe("Enter");
+    expect(woken().at(-1)?.data).toEqual({
+      agent_id: AGENT,
+      reason: "mailbox",
+      message_id: next.message_id,
+    });
+  });
+
   it("two steers sent together to an idle agent type one wake line: it drains both", async () => {
     await setup();
     await idle();

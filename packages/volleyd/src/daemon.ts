@@ -1031,6 +1031,8 @@ export class Daemon {
   >();
   /** Epoch ms of each agent's last typed wake: a wake drains every message sent before it. */
   private readonly lastWokenAt = new Map<string, number>();
+  /** Agents whose wake line was typed but whose Enter failed: their next wake sends only Enter. */
+  private readonly wakeTyped = new Set<string>();
   /** Restart reconciliation, started by `start()` beside the queue (see `reconciled()`). */
   private reconciling: Promise<void> = Promise.resolve();
   /** Epoch ms of the last progress message seen per agent id (heartbeats, for `claim`). */
@@ -2181,6 +2183,7 @@ export class Daemon {
     for (const w of this.wakes.values()) this.time.clearTimeout(w.timer);
     this.wakes.clear();
     this.lastWokenAt.clear();
+    this.wakeTyped.clear();
     // The mailbox subscription is kept: it lives in the persistent session, so requests sent
     // while the daemon is down are queued for the next start. Only the progress watch goes.
     if (this.broker.connected) {
@@ -5295,6 +5298,7 @@ export class Daemon {
     if (a === undefined || log === undefined) return;
     this.supervised.delete(agentId);
     this.lastWokenAt.delete(agentId);
+    this.wakeTyped.delete(agentId);
     this.time.clearTimeout(a.reapTimer);
     const terminal = a.watch.state.status?.payload;
     await a.watch.close();
@@ -9550,23 +9554,43 @@ export class Daemon {
     const last = this.lastWokenAt.get(w.agent);
     const recent = last !== undefined && this.time.now() - last < window;
     if (a === undefined || a.liveness.activity !== "idle" || recent) {
+      if (a !== undefined && recent) this.log(`wake ${w.agent}: skipped, woken ${window} ms ago`);
       this.wakes.delete(messageId);
       return;
     }
+    // A line left typed by a failed Enter is the wake line: submitting it is the wake.
+    if (!this.wakeTyped.has(w.agent)) {
+      try {
+        await a.host.sendText(a.workspace, WAKE_TEXT, { wake: mintWakeToken() });
+      } catch (e) {
+        this.log(`wake ${w.agent}: ${e instanceof Error ? e.message : String(e)}`);
+        this.wakes.delete(messageId);
+        return;
+      }
+    }
+    let enterFailed = false;
     try {
-      await a.host.sendText(a.workspace, WAKE_TEXT, { wake: mintWakeToken() });
       await a.host.sendKeys(a.workspace, "Enter");
+      this.wakeTyped.delete(w.agent);
     } catch (e) {
-      this.log(`wake ${w.agent}: ${e instanceof Error ? e.message : String(e)}`);
-      this.wakes.delete(messageId);
-      return;
+      // The line stays typed: journaled, so status shows the agent unwoken-but-typed-into.
+      this.log(
+        `wake ${w.agent}: Enter failed, wake line left typed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      this.wakeTyped.add(w.agent);
+      enterFailed = true;
     }
     w.woken = true;
     this.lastWokenAt.set(w.agent, this.time.now());
     await this.append(w.wave, {
       type: "agent_woken",
       task: w.task,
-      data: { agent_id: w.agent, reason: "mailbox", message_id: messageId },
+      data: {
+        agent_id: w.agent,
+        reason: "mailbox",
+        message_id: messageId,
+        ...(enterFailed ? { enter_failed: true } : {}),
+      },
     });
   }
 
