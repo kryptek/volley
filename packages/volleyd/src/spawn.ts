@@ -574,7 +574,12 @@ async function launchAttempt(
       ]);
       mcpExtra = allowed.servers;
       const unapproved = Object.keys(allowedMcpServers(allowed.missing, [project]).servers);
-      await alarmMissingAllowed(ctx, allowed.missing, new Set(unapproved));
+      await alarmMissingAllowed(
+        ctx,
+        [...allowed.missing, ...allowed.malformed],
+        new Set(unapproved),
+        new Set(allowed.malformed),
+      );
     }
     await warnStrayVolley(ctx, agentId, attempt, sources, mcpAllow);
   }
@@ -1233,12 +1238,14 @@ async function userMcpSources(ctx: Ctx): Promise<[McpSource, McpSource, McpSourc
  * `agent_mcp_allow` names no server the agent's config has: journal
  * `alarm_raised { alarm: "agent_mcp_allow_missing", name, host }` once per wave, name and machine
  * (each machine has its own config; and log it); the spawn goes on without it. `unapproved` are names the worktree's `.mcp.json` has but the
- * profile never approved for the repository, which the message says rather than "no server".
+ * profile never approved for the repository, which the message says rather than "no server";
+ * `malformed` are names whose entry is of a shape volleyd does not copy (isMcpServerEntry).
  */
 async function alarmMissingAllowed(
   ctx: Ctx,
   missing: readonly string[],
   unapproved: ReadonlySet<string>,
+  malformed: ReadonlySet<string>,
 ): Promise<void> {
   const { deps, req } = ctx;
   for (const name of missing) {
@@ -1250,9 +1257,11 @@ async function alarmMissingAllowed(
         e.data.host === deps.host.name,
     );
     if (seen === true) continue;
-    const why = unapproved.has(name)
-      ? `the repository's .mcp.json has '${name}' but it is not approved for this repository (enabledMcpjsonServers)`
-      : `no MCP server '${name}' in the profile's .claude.json or the repository's .mcp.json`;
+    const why = malformed.has(name)
+      ? `volleyd cannot copy MCP server '${name}' (a string command with string args and env, or a string url with string headers)`
+      : unapproved.has(name)
+        ? `the repository's .mcp.json has '${name}' but it is not approved for this repository (enabledMcpjsonServers)`
+        : `no MCP server '${name}' in the profile's .claude.json or the repository's .mcp.json`;
     const message = `agent_mcp_allow: ${why} on ${deps.host.name}; agents of wave ${req.wave.wave} start without it there`;
     deps.log?.(message);
     await deps.journal({

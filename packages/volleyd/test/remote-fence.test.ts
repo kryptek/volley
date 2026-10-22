@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { renderBrowserHelper, renderSigninScript } from "../src/claude/signin-script";
@@ -663,6 +664,7 @@ describe("remote allow-list (ssh … bash -s)", () => {
 });
 
 describe("renderRemoteScript", () => {
+  const tmp = tempDirForAll("volleyd-remote-script-");
   it("gives every step but a heredoc one /dev/null on stdin (bash -s reads the script from it)", () => {
     const script = renderRemoteScript({
       steps: [step("cat", "/x"), { ...step("git", "status"), cwd: "/wt" }],
@@ -698,8 +700,33 @@ describe("renderRemoteScript", () => {
       steps: [{ argv: ["base64", "-d"], stdin: b64, stdout: "/wt/x/.volley/agent.json" }],
     });
     expect(script).toContain(
-      `( umask 077 && 'base64' '-d' > '/wt/x/.volley/agent.json' <<'VOLLEY_EOF'\n${b64}\nVOLLEY_EOF\n)`,
+      `( umask 077 && 'rm' '-f' '/wt/x/.volley/agent.json' && 'base64' '-d' > '/wt/x/.volley/agent.json' <<'VOLLEY_EOF'\n${b64}\nVOLLEY_EOF\n)`,
     );
+  });
+
+  it("an overwrite of an existing world-readable file lands owner-only, never at the old mode", () => {
+    const file = join(tmp(), "mcp.json");
+    writeFileSync(file, "old\n", { mode: 0o644 });
+    chmodSync(file, 0o644);
+    const b64 = Buffer.from("secret\n").toString("base64");
+    const script = renderRemoteScript({
+      steps: [{ argv: ["base64", "-d"], stdin: b64, stdout: file }],
+    });
+    const r = spawnSync("bash", ["-s"], { input: script, encoding: "utf-8" });
+    expect(r.status).toBe(0);
+    expect(readFileSync(file, "utf-8")).toBe("secret\n");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it("an append keeps the file it appends to", () => {
+    const file = join(tmp(), "exclude");
+    writeFileSync(file, "a\n");
+    const b64 = Buffer.from("b\n").toString("base64");
+    const script = renderRemoteScript({
+      steps: [{ argv: ["base64", "-d"], stdin: b64, stdout: file, append: true }],
+    });
+    expect(spawnSync("bash", ["-s"], { input: script, encoding: "utf-8" }).status).toBe(0);
+    expect(readFileSync(file, "utf-8")).toBe("a\nb\n");
   });
 });
 

@@ -76,28 +76,53 @@ export function approvedProjectServers(project: unknown, local: unknown): unknow
   };
 }
 
+const isStrings = (v: unknown) => Array.isArray(v) && v.every((a) => typeof a === "string");
+const isStringMap = (v: unknown) =>
+  typeof v === "object" &&
+  v !== null &&
+  !Array.isArray(v) &&
+  Object.values(v).every((a) => typeof a === "string");
+
+/**
+ * An `agent_mcp_allow` server volleyd copies beside `volley`: a stdio entry (a string `command`,
+ * string `args`, a string map `env`) or a remote one (a string `url`, a string map `headers`).
+ * The remote fence admits an mcp.json of these only, so spawn copies no other shape anywhere.
+ */
+export function isMcpServerEntry(e: unknown): boolean {
+  if (typeof e !== "object" || e === null || Array.isArray(e)) return false;
+  const { command, args, env, url, headers } = e as Record<string, unknown>;
+  if (typeof command === "string")
+    return (args === undefined || isStrings(args)) && (env === undefined || isStringMap(env));
+  return typeof url === "string" && (headers === undefined || isStringMap(headers));
+}
+
 /**
  * `agent_mcp_allow`: the entries `allow` names from `configs` (each a parsed `mcpServers` holder,
- * or null), a later source winning a name, and the names found in none. `volley` is volleyd's
- * own server, so it is neither copied nor missing.
+ * or null), a later source winning a name, and the names found in none. A name whose only
+ * entries are of a shape volleyd does not copy (isMcpServerEntry) is `malformed`, not copied.
+ * `volley` is volleyd's own server, so it is neither copied nor missing.
  */
 export function allowedMcpServers(
   allow: readonly string[],
   configs: readonly { source: string; config: unknown }[],
-): { servers: Record<string, unknown>; missing: string[] } {
+): { servers: Record<string, unknown>; missing: string[]; malformed: string[] } {
   const servers: Record<string, unknown> = {};
   const missing: string[] = [];
+  const malformed: string[] = [];
   for (const name of allow) {
     if (name === VOLLEY_MCP_SERVER) continue;
     let found: unknown;
+    let odd = false;
     for (const { config } of configs) {
       const entry = mcpServersOf(config)[name];
-      if (typeof entry === "object" && entry !== null) found = entry;
+      if (isMcpServerEntry(entry)) found = entry;
+      else if (entry !== undefined) odd = true;
     }
     if (found !== undefined) servers[name] = found;
+    else if (odd) malformed.push(name);
     else missing.push(name);
   }
-  return { servers, missing };
+  return { servers, missing, malformed };
 }
 
 /** An MCP server entry, other than volleyd's own `volley`, that runs volley-mcp. */

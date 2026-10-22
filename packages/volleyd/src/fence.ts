@@ -13,7 +13,14 @@ import {
   renderSigninScript,
 } from "./claude/signin-script";
 import { volleydHome } from "./config-store";
-import { LAUNCH_COMMAND, mcpConfigPath, renderLaunchScript, renderMcpConfig, shq } from "./launch";
+import {
+  LAUNCH_COMMAND,
+  isMcpServerEntry,
+  mcpConfigPath,
+  renderLaunchScript,
+  renderMcpConfig,
+  shq,
+} from "./launch";
 import { AGENT_BRANCH } from "./worktree";
 
 /**
@@ -1765,25 +1772,6 @@ function isLaunchScript(content: string, worktree: string): boolean {
  * only: the fence does not bound their `command` (nor check it came from the box's config), as
  * claude would start the same entry under `agent_mcp: inherit` anyway.
  */
-const isStrings = (v: unknown) => Array.isArray(v) && v.every((a) => typeof a === "string");
-const isStringMap = (v: unknown) =>
-  typeof v === "object" &&
-  v !== null &&
-  !Array.isArray(v) &&
-  Object.values(v).every((a) => typeof a === "string");
-
-/**
- * An `agent_mcp_allow` server copied beside `volley`: a stdio entry (a string `command`, string
- * `args`, a string map `env`) or a remote one (a string `url`, a string map `headers`).
- */
-function isMcpServerEntry(e: unknown): boolean {
-  if (typeof e !== "object" || e === null || Array.isArray(e)) return false;
-  const { command, args, env, url, headers } = e as Record<string, unknown>;
-  if (typeof command === "string")
-    return (args === undefined || isStrings(args)) && (env === undefined || isStringMap(env));
-  return typeof url === "string" && (headers === undefined || isStringMap(headers));
-}
-
 function isMcpConfig(content: string): boolean {
   let entry: unknown;
   let extra: Record<string, unknown>;
@@ -2068,7 +2056,8 @@ function newSessionSealed(args: readonly string[], opts: FenceOptions): Verdict 
  * The bash script for `ssh -T <target> bash -s`: `set -euo pipefail`, then one line per step,
  * every word single-quoted (so no path or value is ever shell syntax). A step with a `cwd` runs
  * in a subshell that `cd`s first; a file write runs `base64 -d` under `umask 077` from a quoted
- * heredoc (base64 text cannot contain its delimiter). The trust compare is fed the same way,
+ * heredoc (base64 text cannot contain its delimiter), into a file it first removes (an append
+ * excepted), so the content never lands at an existing file's looser mode. The trust compare is fed the same way,
  * through `base64 -d |`. Every other step reads /dev/null: under `bash -s` a step that read its
  * stdin would consume the rest of the script.
  */
@@ -2078,8 +2067,11 @@ export function renderRemoteScript(script: RemoteScript): string {
   for (const s of script.steps) {
     const cmd = s.argv.map(shq).join(" ");
     if (s.stdout !== undefined) {
-      const redirect = s.append === true ? ">>" : ">";
-      lines.push(`( umask 077 && ${cmd} ${redirect} ${shq(s.stdout)} ${heredoc(s)}\n)`);
+      // A whole write removes the file first, so it is created afresh under the umask: an
+      // overwrite never keeps an earlier, looser mode while the new content lands.
+      const out = shq(s.stdout);
+      const write = s.append === true ? `${cmd} >> ${out}` : `'rm' '-f' ${out} && ${cmd} > ${out}`;
+      lines.push(`( umask 077 && ${write} ${heredoc(s)}\n)`);
     } else if (s.stdin !== undefined) {
       lines.push(`'base64' '-d' ${heredoc(s).replace("\n", ` | ${cmd}\n`)}`);
     } else if (s.cwd !== undefined) {

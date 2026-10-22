@@ -209,7 +209,38 @@ describe("launch.sh", () => {
           { source: ".mcp.json", config: null },
         ],
       ),
-    ).toEqual({ servers: { b: { command: "b-repo" } }, missing: ["zzz"] });
+    ).toEqual({ servers: { b: { command: "b-repo" } }, missing: ["zzz"], malformed: [] });
+  });
+
+  it("allowedMcpServers: an entry of a shape a paired machine's fence refuses is skipped as malformed", () => {
+    const user = {
+      mcpServers: {
+        good: { command: "g", args: ["x"], env: { T: "t" } },
+        numArg: { command: "n", args: [1] },
+        numEnv: { command: "e", env: { T: 1 } },
+        neither: { type: "stdio" },
+        remote: { url: "https://x", headers: { A: "b" } },
+        both: { command: "repo-bad" },
+      },
+    };
+    const repo = { mcpServers: { both: { command: "c", args: [2] } } };
+    expect(
+      allowedMcpServers(
+        ["good", "numArg", "numEnv", "neither", "remote", "both"],
+        [
+          { source: "~/.claude.json", config: user },
+          { source: ".mcp.json", config: repo },
+        ],
+      ),
+    ).toEqual({
+      servers: {
+        good: { command: "g", args: ["x"], env: { T: "t" } },
+        remote: { url: "https://x", headers: { A: "b" } },
+        both: { command: "repo-bad" },
+      },
+      missing: [],
+      malformed: ["numArg", "numEnv", "neither"],
+    });
   });
 
   it("approvedProjectServers: only the .mcp.json entries the profile approved for the repository", () => {
@@ -505,6 +536,29 @@ describe("launch (local cmux host)", () => {
     );
     expect(alarms).toHaveLength(1);
     expect(alarms[0]?.data).toMatchObject({ name: "zzz" });
+  });
+
+  it("agent_mcp_allow: a malformed entry is skipped with the alarm; the good one is copied", async () => {
+    env = await makeSpawnEnv();
+    env.deps.tunables = {
+      ...env.deps.tunables,
+      agent_mcp: "inherit",
+      agent_mcp_allow: ["ok", "odd"],
+    };
+    const cfg = JSON.parse(readFileSync(env.claudeJson, "utf-8"));
+    cfg.mcpServers = { ok: { command: "ok" }, odd: { command: "odd", args: [3000] } };
+    writeFileSync(env.claudeJson, JSON.stringify(cfg));
+    expect((await spawnAgent(env.request(), env.deps)).kind).toBe("launched");
+    const mcp = JSON.parse(readFileSync(join(env.worktree, ".volley", "mcp.json"), "utf-8"));
+    expect(Object.keys(mcp.mcpServers)).toEqual(["volley", "ok"]);
+    const alarms = env.events.filter(
+      (e) => e.type === "alarm_raised" && e.data.alarm === "agent_mcp_allow_missing",
+    );
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0]?.data).toMatchObject({
+      name: "odd",
+      message: expect.stringContaining("cannot copy"),
+    });
   });
 
   it("agent_mcp_allow: the missing-name alarm is per machine and names the machine", async () => {
