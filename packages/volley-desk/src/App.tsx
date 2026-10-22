@@ -1094,6 +1094,7 @@ export default function App() {
               tiers={inboxTiers}
               live={Object.fromEntries(inboxItems.map((i) => [i.id, liveLine(i, state)]))}
               waves={state.waves}
+              now={now}
               control={control}
               device={deskDevice(narrow)}
               narrow={narrow}

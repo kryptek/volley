@@ -1,0 +1,43 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T12:00:00.000Z",
+  "channel": "_inbox",
+  "type": "inbox_item",
+  "payload": {
+    "id": "d-w1-d-3k9x2m7q",
+    "kind": "decision",
+    "version": 1,
+    "owner_only": false,
+    "wave": "w1",
+    "task": "T1",
+    "agent_id": "w1-t1-implementer-1",
+    "title": "Reviewers disagree · w1/T1",
+    "question": "The spec reviewer calls the missing retry a P1; the quality reviewer says fine. Is it a blocker?",
+    "options": [
+      {
+        "label": "blocker"
+      },
+      {
+        "label": "fine"
+      }
+    ],
+    "allow_other": true,
+    "pointers": {
+      "pr": "https://github.com/example-org/example-repo/pull/8"
+    },
+    "opened_at": "2026-10-20T12:00:00.000Z",
+    "source": {
+      "decision_id": "d-3k9x2m7q",
+      "decision_kind": "reviewers_disagree"
+    },
+    "held": {
+      "on": {
+        "task": "T4"
+      },
+      "note": "the red check is a release-branch flake T4 is fixing",
+      "by": "coord-main",
+      "at": "2026-10-20T12:30:00.000Z"
+    }
+  }
+}

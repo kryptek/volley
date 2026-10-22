@@ -40,7 +40,9 @@
                 "peer_doctor",
                 "archive",
                 "inbox_answer",
-                "resolve"
+                "resolve",
+                "hold",
+                "release"
               ]
             },
             "id": {
@@ -68,7 +70,27 @@
             "decision_id": {
               "type": "string",
               "minLength": 1,
-              "description": "resolve: the decision resolved."
+              "description": "resolve: the decision resolved; hold / release: the decision held or released (or item)."
+            },
+            "item": {
+              "type": "string",
+              "minLength": 1,
+              "description": "hold / release: the decision's Needs-you item id instead of decision_id (spec section 4.6.2)."
+            },
+            "on": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "description": "hold: what the decision waits on (spec section 4.6.2).",
+              "properties": {
+                "task": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+                "pr": { "type": "integer", "minimum": 1 },
+                "issue": { "type": "integer", "minimum": 1 }
+              }
+            },
+            "note": {
+              "type": "string",
+              "description": "hold: why, kept with the hold."
             },
             "rationale": {
               "type": "string",
@@ -306,6 +328,17 @@
                 "required": ["op", "decision_id", "answer"],
                 "properties": {}
               }
+            },
+            {
+              "if": { "properties": { "op": { "const": "hold" } } },
+              "then": {
+                "required": ["op", "on"],
+                "anyOf": [{ "required": ["decision_id"] }, { "required": ["item"] }]
+              }
+            },
+            {
+              "if": { "properties": { "op": { "const": "release" } } },
+              "then": { "anyOf": [{ "required": ["decision_id"] }, { "required": ["item"] }] }
             },
             {
               "if": {

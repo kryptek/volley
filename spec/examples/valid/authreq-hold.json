@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "steer-1a2b3c4d",
+  "wall_time": "2026-10-21T12:05:00.000Z",
+  "channel": "_system/auth",
+  "type": "query",
+  "correlation_id": "8a1d4c2e-5b6f-4e71-9a0c-3d2e1f4b5a6c",
+  "payload": {
+    "op": "hold",
+    "item": "d-w1-d-abc",
+    "on": {
+      "task": "T4"
+    },
+    "note": "waiting on the flake fix",
+    "reply_key": {
+      "kty": "RSA",
+      "n": "xPNUfrSTG-aLr2sQsVKPpITFOinhuAoNHTkmDuaipSh3OcODvQzMdhMopzNjalZCEfqsrrg3WYHEx172ihkLTb1JnFeYs3E_a93hCRyhcuZdn_wnPNij41wn8oABPLqoQh74I4sH91m6tyso30uzFi7D_78v2QK49RORtdDbWAJ-tlOklAF7R0uk80mnFjobHYXcopwlGM3hNLK-ZJwLKgjAiIYvT4rUVKNXbVnhufMszH9-_5TmRKcJQ1K1-bxlYtDWzkmisiS_xIpBg2WO69wU8KfroibtNGeksINH1eqiJ-p_P3Tr_ztWilDVKbZCBLbPLMsXSVsfcHgOZmaFCw",
+      "e": "AQAB"
+    }
+  }
+}

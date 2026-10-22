@@ -93,6 +93,8 @@
             "repo_visibility_detected",
             "decision_auto_resolved",
             "decision_escalated",
+            "decision_held",
+            "decision_released",
             "release_started",
             "release_stage_entered",
             "release_stage_verified",
@@ -316,6 +318,107 @@
                           "used": { "type": "number", "minimum": 0 },
                           "max": { "type": "number", "minimum": 0 }
                         }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "decision_held"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["decision_id", "kind", "on", "by"],
+                    "properties": {
+                      "decision_id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "on": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "minProperties": 1,
+                        "description": "What it waits on: a task of the wave, a PR, an issue (one or more).",
+                        "properties": {
+                          "task": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+                          },
+                          "pr": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "issue": {
+                            "type": "integer",
+                            "minimum": 1
+                          }
+                        }
+                      },
+                      "note": {
+                        "type": "string"
+                      },
+                      "by": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "decision_released"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["decision_id", "kind", "why", "by"],
+                    "properties": {
+                      "decision_id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "why": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "by": {
+                        "type": "string",
+                        "minLength": 1
                       }
                     }
                   }

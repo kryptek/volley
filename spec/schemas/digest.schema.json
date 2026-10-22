@@ -122,6 +122,45 @@
             }
           }
         },
+        "held": {
+          "type": "array",
+          "description": "The wave's open decisions that are held (spec section 4.6.2): waiting on a task, PR or issue rather than on the owner, listed apart from waiting.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "kind", "question", "since", "on", "label", "held_since"],
+            "properties": {
+              "id": {
+                "$ref": "wave-state.schema.json#/$defs/decisionId"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "task": {
+                "$ref": "wave-state.schema.json#/$defs/taskId"
+              },
+              "question": {
+                "type": "string"
+              },
+              "since": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "on": {
+                "$ref": "decision.schema.json#/allOf/1/properties/payload/properties/held/properties/on"
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "description": "What it waits on, for people: T4 (#194), PR #12, issue #7."
+              },
+              "held_since": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        },
         "release": {
           "type": "object",
           "additionalProperties": false,

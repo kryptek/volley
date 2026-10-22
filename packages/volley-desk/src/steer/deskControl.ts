@@ -28,7 +28,7 @@ const DESK_ANSWER_ROLES: readonly (string | null)[] = ["steer", "admin", null];
  * volleyd's `DESK_OPS` (packages/volleyd/src/accounts.ts): an op only one list names is sent
  * to the mailbox and refused there, or to the ops topic and answered `unknown op` (scripts/desk-ops-sync.test.ts checks it).
  */
-export const DESK_LOGIN_OPS: readonly string[] = ["inbox_answer", "resolve"];
+export const DESK_LOGIN_OPS: readonly string[] = ["inbox_answer", "resolve", "hold", "release"];
 
 /**
  * The Desk's `control()`: the Needs-you ops through `authOps`, the rest through the mailbox.
