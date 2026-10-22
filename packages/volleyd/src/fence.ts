@@ -1761,8 +1761,9 @@ function isLaunchScript(content: string, worktree: string): boolean {
 /**
  * MCP_CONFIG: whether `content` is exactly `renderMcpConfig` of an absolute, clean volley-mcp
  * entry point outside any `.volley/` (claude runs that server for the agent), plus, after it, the
- * entries `agent_mcp_allow` copied from the machine's own MCP config (each an object; claude
- * would start that entry under `agent_mcp: inherit` anyway).
+ * entries `agent_mcp_allow` copied from the machine's own MCP config. Those are checked for shape
+ * only: the fence does not bound their `command` (nor check it came from the box's config), as
+ * claude would start the same entry under `agent_mcp: inherit` anyway.
  */
 const isStrings = (v: unknown) => Array.isArray(v) && v.every((a) => typeof a === "string");
 const isStringMap = (v: unknown) =>

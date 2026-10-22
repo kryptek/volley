@@ -1557,8 +1557,8 @@ asks before starting one: named in `projects.<repo>.enabledMcpjsonServers`, or u
 branch checked out (for a reviewer or a fixup, a PR head a contributor controls), and the strict
 copy would otherwise skip that approval; an unapproved entry is ignored, so the user's own entry
 of that name stays. A paired machine's are read from its own `~/.claude.json` and worktree. A name found in none of them
-is skipped (the spawn goes on), logged and journaled once per wave as
-`alarm_raised { alarm: "agent_mcp_allow_missing", name }` (its message says when the name is in
+is skipped (the spawn goes on), logged and journaled once per wave and machine as
+`alarm_raised { alarm: "agent_mcp_allow_missing", name, host }` (its message says when the name is in
 `.mcp.json` but not approved for the repository); servers a plugin or a claude.ai
 connector brings are in none of these files, so they cannot be allowed by name. A copied entry
 may hold the user's secrets (an `env` token): it is written only to the agent's `mcp.json`, and

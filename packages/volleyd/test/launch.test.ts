@@ -504,6 +504,46 @@ describe("launch (local cmux host)", () => {
     expect(alarms[0]?.data).toMatchObject({ name: "zzz" });
   });
 
+  it("agent_mcp_allow: the missing-name alarm is per machine and names the machine", async () => {
+    env = await makeSpawnEnv();
+    env.deps.tunables = { ...env.deps.tunables, agent_mcp: "inherit", agent_mcp_allow: ["zzz"] };
+    env.deps.journaled = (match) => env.events.some((e) => match(e));
+    const out = await spawnAgent(env.request(), env.deps);
+    if (out.kind === "launched") out.lock.release();
+    const local = env.deps.host.name;
+    env.deps.host = { ...env.deps.host, name: "box-b" };
+    env.deps.remoteTrust = {
+      host: "box-b",
+      target: "dev@box-b",
+      read: async () => ({
+        projects: { [realpathSync(env.repo)]: { hasTrustDialogAccepted: true } },
+      }),
+    };
+    expect((await spawnAgent(env.request({ attempt: 2 }), env.deps)).kind).toBe("launched");
+    const alarms = env.events.filter(
+      (e) => e.type === "alarm_raised" && e.data.alarm === "agent_mcp_allow_missing",
+    );
+    expect(alarms.map((a) => a.data.host)).toEqual([local, "box-b"]);
+    expect(alarms[1]?.data.message).toContain("on box-b");
+  });
+
+  it("agent_mcp_allow: a stray volley under a local-scope name says it is local scope", async () => {
+    env = await makeSpawnEnv();
+    env.deps.tunables = { ...env.deps.tunables, agent_mcp: "inherit", agent_mcp_allow: ["vol2"] };
+    const cfg = JSON.parse(readFileSync(env.claudeJson, "utf-8"));
+    cfg.projects ??= {};
+    cfg.projects[realpathSync(env.repo)] = {
+      ...(cfg.projects[realpathSync(env.repo)] ?? {}),
+      mcpServers: { vol2: { command: "bun", args: ["run", env.deps.mcpEntry] } },
+    };
+    writeFileSync(env.claudeJson, JSON.stringify(cfg));
+    expect((await spawnAgent(env.request(), env.deps)).kind).toBe("launched");
+    const stray = env.events.find(
+      (e) => e.type === "alarm_raised" && e.data.alarm === "agent_mcp_stray_volley",
+    );
+    expect(stray?.data.message).toContain("local scope");
+  });
+
   it("agent_mcp_allow on a paired machine reads the box's own ~/.claude.json", async () => {
     env = await makeSpawnEnv();
     env.deps.tunables = { ...env.deps.tunables, agent_mcp: "inherit", agent_mcp_allow: ["b"] };

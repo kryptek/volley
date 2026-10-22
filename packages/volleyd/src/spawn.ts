@@ -1220,14 +1220,14 @@ async function userMcpSources(ctx: Ctx): Promise<[McpSource, McpSource, McpSourc
   return [
     { source: profilePath, config: profile },
     { source: ".mcp.json", config: project },
-    { source: profilePath, config: local ?? null },
+    { source: `${profilePath} local scope`, config: local ?? null },
   ];
 }
 
 /**
  * `agent_mcp_allow` names no server the agent's config has: journal
- * `alarm_raised { alarm: "agent_mcp_allow_missing", name }` once per wave and name (and log it);
- * the spawn goes on without it. `unapproved` are names the worktree's `.mcp.json` has but the
+ * `alarm_raised { alarm: "agent_mcp_allow_missing", name, host }` once per wave, name and machine
+ * (each machine has its own config; and log it); the spawn goes on without it. `unapproved` are names the worktree's `.mcp.json` has but the
  * profile never approved for the repository, which the message says rather than "no server".
  */
 async function alarmMissingAllowed(
@@ -1241,17 +1241,18 @@ async function alarmMissingAllowed(
       (e) =>
         e.type === "alarm_raised" &&
         e.data.alarm === "agent_mcp_allow_missing" &&
-        e.data.name === name,
+        e.data.name === name &&
+        e.data.host === deps.host.name,
     );
     if (seen === true) continue;
     const why = unapproved.has(name)
       ? `the repository's .mcp.json has '${name}' but it is not approved for this repository (enabledMcpjsonServers)`
       : `no MCP server '${name}' in the profile's .claude.json or the repository's .mcp.json`;
-    const message = `agent_mcp_allow: ${why}; agents of wave ${req.wave.wave} start without it`;
+    const message = `agent_mcp_allow: ${why} on ${deps.host.name}; agents of wave ${req.wave.wave} start without it there`;
     deps.log?.(message);
     await deps.journal({
       type: "alarm_raised",
-      data: { alarm: "agent_mcp_allow_missing", name, message },
+      data: { alarm: "agent_mcp_allow_missing", name, host: deps.host.name, message },
     });
   }
 }
