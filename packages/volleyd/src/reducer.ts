@@ -172,6 +172,45 @@ function setTaskHost(rec: WaveRecord, id: TaskId, host: string): void {
 }
 
 /**
+ * The host task `t` runs on, if it has started: the host its `agent_spawned` named, else (a
+ * journal from before `host_actual`) its effective plan's `prev` host once it has an agent. A
+ * cancelled task runs nowhere. A plan version never moves a started task (#323).
+ */
+export function startedHost(t: TaskState, prev: WaveTask | undefined): string | undefined {
+  if (t.stage === "cancelled") return undefined;
+  if (t.host_actual !== undefined) return t.host_actual;
+  return Object.keys(t.agents).length > 0 ? prev?.host : undefined;
+}
+
+/**
+ * The host a plan writes for a started task running on `ran`, when the two conflict: `planned`,
+ * unless it is `auto` on a placed task (its placement satisfies it). Shared by `wave_versioned`,
+ * `agent_spawned` and plan apply's kept-host report so they agree (#323).
+ */
+export function plannedHostConflict(
+  planned: string | undefined,
+  ran: string,
+  t: Pick<TaskState, "placement">,
+): string | undefined {
+  if (planned === undefined || planned === ran) return undefined;
+  return planned === AUTO_HOST && t.placement !== undefined ? undefined : planned;
+}
+
+/**
+ * Run task `id` on `host` in the effective plan (copy on write, like setTaskHost), with `prev`'s
+ * inline `host:` when `prev` ran there.
+ */
+function keepTaskHost(rec: WaveRecord, id: TaskId, host: string, prev: WaveTask | undefined): void {
+  const def = rec.wave?.tasks[id];
+  if (rec.wave == null || def === undefined) return;
+  const spec = prev?.host === host ? prev.host_spec : undefined;
+  if (def.host === host && def.host_spec === spec) return;
+  const { host_spec: _s, ...rest } = def;
+  const kept: WaveTask = { ...rest, host, ...(spec !== undefined ? { host_spec: spec } : {}) };
+  rec.wave = { ...rec.wave, tasks: { ...rec.wave.tasks, [id]: kept } };
+}
+
+/**
  * A synthetic task (a flake's fixer, SPEC §4.6.16) joins the effective plan: the wave's pipeline,
  * issue 0, no `after`, its test's file. Copy on write, like setTaskHost; never in `plan` (the
  * submitted file).
@@ -290,6 +329,16 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
               },
               task_order: [...wave.task_order, ...synthetic],
             };
+      // A started task keeps the host it runs on, whatever the new version writes for it (the
+      // plan's own is `host_planned`, while they differ).
+      state.tasks = state.tasks.map(({ host_planned: _p, ...t }) => {
+        const prev = before?.tasks[t.id];
+        const ran = startedHost(t, prev);
+        if (ran === undefined) return t;
+        keepTaskHost(next, t.id, ran, prev);
+        const planned = plannedHostConflict(plan.tasks[t.id]?.host, ran, t);
+        return planned !== undefined ? { ...t, host_planned: planned } : t;
+      });
       // A task is placed once: a placed task the new version still leaves to placement keeps
       // its host.
       for (const t of state.tasks) {
@@ -326,12 +375,12 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       if (task === undefined) state.tasks.push(queued);
       else if (task.stage === "cancelled") {
         // Re-added by a later plan version, or restarted on a new issue: starts over, on the
-        // issue the event names, and is placed afresh when its plan leaves it to placement.
+        // issue the event names, and is placed afresh when its plan leaves it to placement (a
+        // host kept for its earlier run, recorded or not, is the plan's again).
         state.tasks = state.tasks.map((t) => (t.id === ev.task ? queued : t));
         next.admitted = next.admitted.filter((id) => id !== ev.task);
-        const asWritten = next.plan?.tasks[ev.task]?.host;
-        if (task.placement !== undefined && asWritten === AUTO_HOST)
-          setTaskHost(next, ev.task, AUTO_HOST);
+        const written = next.plan?.tasks[ev.task];
+        if (written !== undefined) keepTaskHost(next, ev.task, written.host, written);
         const def = next.wave?.tasks[ev.task];
         if (def !== undefined && typeof ev.data.issue === "number") def.issue = ev.data.issue;
       }
@@ -387,6 +436,21 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       next.spawns += 1;
       if (task !== undefined) {
         task.agents[ev.data.role as keyof TaskAgents] = ev.data.agent_id as string;
+        if (typeof ev.data.host === "string" && ev.task !== undefined) {
+          task.host_actual = ev.data.host;
+          // A plan version applied while this spawn ran may have written another host: the
+          // effective plan runs the task where it was spawned (the plan's is `host_planned`).
+          const def = next.wave?.tasks[ev.task];
+          if (def !== undefined && def.host !== ev.data.host) {
+            const planned = plannedHostConflict(
+              next.plan?.tasks[ev.task]?.host,
+              ev.data.host,
+              task,
+            );
+            keepTaskHost(next, ev.task, ev.data.host, def);
+            if (planned !== undefined) task.host_planned = planned;
+          }
+        }
         // A worktree cut from the release branch (not a pipeline start ref): its base.
         if (typeof ev.data.base_sha === "string") task.base_sha = ev.data.base_sha;
       }
