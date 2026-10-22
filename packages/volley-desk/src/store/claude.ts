@@ -178,7 +178,7 @@ export interface AccountGroup {
   plan: string | null;
   fiveHour: UsageWindow | null;
   weekly: UsageWindow | null;
-  /** The Fable weekly window from the freshest member whose probe read one. */
+  /** The Fable weekly window of the member whose probe `probe` reports; `null`: it read none. */
   fable: UsageWindow | null;
   /** The usage probe the Fable meter reports: the freshest read first, else the newest attempt. */
   probe: ProbeInfo | null;
@@ -244,14 +244,17 @@ const ms = (iso: string | null | undefined) => {
 const desc = (a: number, b: number) => (a === b ? 0 : b > a ? 1 : -1);
 
 /** The member whose probe read last, else the one whose probe attempted last. */
-function pickProbe(accounts: AccountInfo[]): ProbeInfo | null {
-  const best = accounts
+function probeMember(accounts: AccountInfo[]): AccountInfo | undefined {
+  return accounts
     .filter((a) => a.probe !== null)
     .sort(
       (a, b) =>
         desc(ms(a.probe?.read_at), ms(b.probe?.read_at)) ||
         desc(ms(a.probe?.attempted_at), ms(b.probe?.attempted_at)),
     )[0];
+}
+
+function toProbe(best: AccountInfo | undefined): ProbeInfo | null {
   if (!best?.probe) return null;
   const p = best.probe;
   return {
@@ -260,15 +263,6 @@ function pickProbe(accounts: AccountInfo[]): ProbeInfo | null {
     attemptedAt: p.attempted_at,
     readAt: p.read_at ?? null,
   };
-}
-
-/** The Fable window of the member whose probe read it last. */
-function pickFable(accounts: AccountInfo[]): UsageWindow | null {
-  const readAt = (a: AccountInfo) => ms(a.probe?.read_at ?? a.sampledAt);
-  const best = accounts
-    .filter((a) => a.modelWeekly.fable !== undefined)
-    .sort((a, b) => desc(readAt(a), readAt(b)))[0];
-  return best?.modelWeekly.fable ?? null;
 }
 
 /**
@@ -361,8 +355,9 @@ export function accountGroups(
       plan: newest.find((a) => a.plan)?.plan ?? null,
       fiveHour: five.w,
       weekly: week.w,
-      fable: pickFable(list),
-      probe: pickProbe(list),
+      // The figure comes from the member whose probe it reports, so its label names the right read.
+      fable: probeMember(list)?.modelWeekly.fable ?? null,
+      probe: toProbe(probeMember(list)),
       freshest: fresh ? { machine: fresh.machine, sampledAt: fresh.sampledAt as string } : null,
       members,
       stale: [...five.stale, ...week.stale],

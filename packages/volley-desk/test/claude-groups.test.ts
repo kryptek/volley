@@ -358,6 +358,20 @@ describe("the Fable window and the usage probe", () => {
     expect(g?.fable).toEqual(fable);
   });
 
+  it("takes the figure from the member whose probe it reports, not another's", () => {
+    // peer-a carries a Fable window but no probe; this machine's probe read, with no window.
+    const [g] = groups({
+      work: probed(
+        work,
+        { machine: "hub", state: "ok", attempted_at: min(4), read_at: min(4) },
+        null,
+      ),
+      "primary@peer-a": { ...peer, sampled_at: min(1), model_weekly: { fable } },
+    });
+    expect(g?.probe).toMatchObject({ machine: "local", state: "ok" });
+    expect(g?.fable).toBeNull();
+  });
+
   it("with no read anywhere, the newest attempt reports", () => {
     const [g] = groups({
       work: { ...work, probe: { machine: "hub", state: "expired", attempted_at: min(9) } },

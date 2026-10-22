@@ -281,7 +281,7 @@ export function UsageTriple({ text, sampled }: { text: string; sampled: string |
   );
 }
 
-const WINDOW_NAME = { five_hour: "5-hour", weekly: "weekly" } as const;
+const WINDOW_NAME = { five_hour: "5-hour", weekly: "7-day" } as const;
 
 /** An e-mail masked until its eye button shows it (per mount, never persisted). */
 function MaskedEmail({ email }: { email: string }) {

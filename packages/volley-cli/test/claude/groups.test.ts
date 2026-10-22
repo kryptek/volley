@@ -318,6 +318,18 @@ describe("renderGroups", () => {
       expect(g?.fable).toEqual(fable);
     });
 
+    it("takes the figure from the login whose probe it reports, not another's", () => {
+      // peer-a carries a Fable window but no probe; the hub's probe read, with no window.
+      const unprobed: UsageRecord = { ...peer, sampled_at: at(1), model_weekly: { fable } };
+      const probed: UsageRecord = {
+        ...work,
+        probe: { machine: "hub", state: "ok", attempted_at: at(4), read_at: at(4) },
+      };
+      const [g] = groupAccounts(result(), [probed, unprobed]);
+      expect(g?.probe).toMatchObject({ machine: "local", state: "ok" });
+      expect(g?.fable).toBeNull();
+    });
+
     it("a failed probe prints why, and the last read's age", () => {
       const expired: UsageRecord = {
         ...work,

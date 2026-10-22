@@ -6,8 +6,8 @@ import { maskEmail, normalizeEmail } from "volley-mcp/mask";
  * The grouping rule is the Desk's (`accountGroups` in `packages/volley-desk/src/store/claude.ts`):
  * key = the normalised e-mail, else the account id; per window the newest `sampled_at` wins, a
  * tie going to the reading with a known reset; a member's older reading that differs is stale.
- * The Fable window is the one the usage probe read last, reported with the probe whose read is
- * the freshest (else the newest attempt), so a failed probe says why there is no figure.
+ * The Fable window and its probe come from one login: the one whose probe read last (else whose
+ * probe attempted last), so the figure's age is its own and a failed probe says why there is none.
  */
 
 /** volleyd's own machine (`LOCAL_MACHINE` in its profiles). */
@@ -110,7 +110,7 @@ export interface AccountGroup {
   plan: string | null;
   fiveHour: Reading | null;
   weekly: Reading | null;
-  /** The Fable weekly window the usage probe read last. */
+  /** The Fable weekly window of the login whose probe `probe` reports; `null`: it read none. */
   fable: UsageWindow | null;
   probe: Probe | null;
   stale: Reading[];
@@ -226,14 +226,18 @@ const ms = (iso: string | undefined) => {
 /** A sort comparator, newest first, that never answers NaN for two missing times. */
 const desc = (a: number, b: number) => (a === b ? 0 : b > a ? 1 : -1);
 
-function pickProbe(list: Login[]): Probe | null {
-  const best = list
+/** The login whose probe read last, else the one whose probe attempted last. */
+function probeLogin(list: Login[]): Login | undefined {
+  return list
     .filter((l) => l.record?.probe !== undefined)
     .sort(
       (a, b) =>
         desc(ms(a.record?.probe?.read_at), ms(b.record?.probe?.read_at)) ||
         desc(ms(a.record?.probe?.attempted_at), ms(b.record?.probe?.attempted_at)),
     )[0];
+}
+
+function toProbe(best: Login | undefined): Probe | null {
   const p = best?.record?.probe;
   if (best === undefined || p === undefined) return null;
   return {
@@ -242,14 +246,6 @@ function pickProbe(list: Login[]): Probe | null {
     attemptedAt: p.attempted_at,
     readAt: p.read_at ?? null,
   };
-}
-
-function pickFable(list: Login[]): UsageWindow | null {
-  const readAt = (l: Login) => ms(l.record?.probe?.read_at ?? l.record?.sampled_at);
-  const best = list
-    .filter((l) => l.record?.model_weekly?.fable !== undefined)
-    .sort((a, b) => desc(readAt(a), readAt(b)))[0];
-  return best?.record?.model_weekly?.fable ?? null;
 }
 
 /** The machines volleyd knows of: its own, then every paired machine's record (T0's `machines[]`). */
@@ -297,8 +293,9 @@ export function groupAccounts(r: ListResult, records: UsageRecord[]): AccountGro
       plan: newest.find((l) => l.plan !== undefined)?.plan ?? null,
       fiveHour: five.w,
       weekly: week.w,
-      fable: pickFable(list),
-      probe: pickProbe(list),
+      // The figure comes from the login whose probe it reports, so its age is that read's.
+      fable: probeLogin(list)?.record?.model_weekly?.fable ?? null,
+      probe: toProbe(probeLogin(list)),
       stale: [...five.stale, ...week.stale],
       members,
       missing: machines.filter((name) => !members.some((m) => m.machine === name)),

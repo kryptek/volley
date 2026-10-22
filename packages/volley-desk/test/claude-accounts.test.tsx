@@ -792,6 +792,12 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
     expect(c.getByText("peer-a's 5-hour reading (41%, 3 h old) is stale")).toBeInTheDocument();
   });
 
+  it("names a stale weekly reading by its meter's label, 7-day", () => {
+    const week = { pct: 70, resets_at: "2026-10-20T00:00:00.000Z" };
+    render(view({ work: own, "primary@peer-a": { ...peer, weekly: week } }));
+    expect(within(card()).getByText(/^peer-a's 7-day reading \(70%/)).toBeInTheDocument();
+  });
+
   describe("three meters: 5-hour, 7-day and Fable", () => {
     const min = (n: number) => new Date(NOW - n * 60_000).toISOString();
     const fable = { pct: 12, resets_at: "2026-10-22T16:00:00.000Z" };
