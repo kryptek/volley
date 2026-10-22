@@ -5736,16 +5736,12 @@ export class Daemon {
     const rec = log?.record;
     if (rec?.wave == null || rec.state?.status !== "running") return;
     if (openDecisions(rec).some((d) => d.kind === "spawn_budget_exhausted")) return;
-    const budget = spawnBudget(
-      rec.wave,
-      this.config.effective(wave).spawn_budget_multiplier,
-      rec.budget_raised ?? 0,
-    );
+    const eff = this.config.effective(wave);
+    const budget = spawnBudget(rec.wave, eff.spawn_budget_multiplier, rec.budget_raised ?? 0);
     const used = spawnsUsed(rec);
     // A hold queued behind a raise that already covers it (the same tick's other held spawns).
     if (used < budget) return;
     // Sized for the wave, not this one spawn: one raise lets every held spawn through.
-    const eff = this.config.effective(wave);
     const n = budgetRaise({
       outstanding: spawnsOutstanding(rec.wave, rec),
       derived: spawnBudget(rec.wave, eff.spawn_budget_multiplier, 0),

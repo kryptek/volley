@@ -199,7 +199,9 @@ export function answerEvent(
 /**
  * A person's answer to a decision item that its decision cannot apply (decisions.ts
  * `validateAnswer`), or null. The referee asks before the compare-and-set: a refused answer
- * changes nothing, whatever version it names.
+ * changes nothing, whatever version it names. It skips `checkAnswer`'s exemption for
+ * pipeline-marked decisions (the item does not carry the marker): `validateAnswer` checks only
+ * supervisor-owned kinds, which no pipeline opens.
  */
 export function decisionAnswerRefusal(item: InboxItem, answer: string): string | null {
   const kind = item.source.decision_kind;
