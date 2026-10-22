@@ -235,7 +235,7 @@ describe("purposeOf", () => {
         model_source: "harness-hook",
         workspace: "workspace:12",
         workspace_title: "Release triage",
-        cwd: "/home/someone/repos/volley",
+        cwd: "/path/to/home/repos/volley",
       }),
     });
     const p = purposeOf(a, undefined);
@@ -246,7 +246,7 @@ describe("purposeOf", () => {
   it("a session with no workspace title falls back to its cwd basename", () => {
     const a = agent({
       parentId: null,
-      registry: reg({ model_source: "harness-hook", cwd: "/home/someone/repos/volley" }),
+      registry: reg({ model_source: "harness-hook", cwd: "/path/to/home/repos/volley" }),
     });
     expect(purposeOf(a, undefined)).toMatchObject({ label: "volley", source: "cwd" });
   });
