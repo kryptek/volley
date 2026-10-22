@@ -7838,6 +7838,15 @@ export class Daemon {
   ): Promise<{ item: InboxItem } | { refused: string; code?: typeof BAD_ANSWER }> {
     const item = this.inbox.get(id);
     if (item === undefined) return { refused: `unknown inbox item '${id}'` };
+    // The owner check `resolve` applies: the inbox is no way around it. A Desk login is the
+    // owner on another screen: the broker named it on its own account-op topic. It comes
+    // before the answer's own check, so a non-owner hears it is not theirs to answer.
+    if (item.kind === "decision" && item.wave !== undefined && req.desk_login !== true) {
+      const state = this.waves.get(item.wave)?.record.state;
+      const refused =
+        state != null ? guardMutation(state, req.by, "inbox_answer", this.bindings) : null;
+      if (refused !== null) return { refused };
+    }
     // An answer its decision cannot apply is refused before the compare-and-set (#315).
     // A decision already resolved (a crash before its item closed) answers "already answered".
     const decided =
@@ -7854,14 +7863,6 @@ export class Daemon {
       const decision = item.source.decision_id;
       if (wave === undefined || typeof decision !== "string" || !this.waves.has(wave))
         return { refused: `inbox item '${id}' names no open decision` };
-      // The owner check `resolve` applies: the inbox is no way around it. A Desk login is the
-      // owner on another screen: the broker named it on its own account-op topic.
-      const state = this.waves.get(wave)?.record.state;
-      const refused =
-        state != null && req.desk_login !== true
-          ? guardMutation(state, req.by, "inbox_answer", this.bindings)
-          : null;
-      if (refused !== null) return { refused };
       const r = await this.answerDecision(wave, decision, req);
       if ("refused" in r) return r;
       if (r.already_resolved) {

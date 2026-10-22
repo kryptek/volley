@@ -399,6 +399,23 @@ describe("an answer a decision cannot apply is refused (#315)", () => {
     expect(resolvedEvents()).toHaveLength(0);
   });
 
+  it("inbox_answer by a non-owner with an answer it cannot apply: the ownership refusal comes first", async () => {
+    s = await makeSupervisedEnv();
+    const d = await s.daemon.openDecision("w1", budget);
+    const c = await control();
+    expect((await c.request("claim", { wave: "w1", by: "coord-a" })).ok).toBe(true);
+    const r = await c.request("inbox_answer", {
+      id: decisionItemId("w1", d.decision_id),
+      version: 1,
+      answer: "raise",
+      where: phone,
+      by: "someone-else",
+    });
+    expect(r.code).toBeUndefined();
+    expect(r.error).toContain("is owned by coord-a");
+    expect(resolvedEvents()).toHaveLength(0);
+  });
+
   it("inbox_answer on a decision resolved before its item closed: already answered, not BAD_ANSWER", async () => {
     s = await makeSupervisedEnv();
     const d = await s.daemon.openDecision("w1", budget);
