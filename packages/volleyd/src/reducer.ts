@@ -366,13 +366,11 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       else if (task.stage === "cancelled") {
         // Re-added by a later plan version, or restarted on a new issue: starts over, on the
         // issue the event names, and is placed afresh when its plan leaves it to placement (a
-        // host kept for its earlier run is the plan's again).
+        // host kept for its earlier run, recorded or not, is the plan's again).
         state.tasks = state.tasks.map((t) => (t.id === ev.task ? queued : t));
         next.admitted = next.admitted.filter((id) => id !== ev.task);
         const written = next.plan?.tasks[ev.task];
-        if (task.placement !== undefined || task.host_actual !== undefined) {
-          if (written !== undefined) keepTaskHost(next, ev.task, written.host, written);
-        }
+        if (written !== undefined) keepTaskHost(next, ev.task, written.host, written);
         const def = next.wave?.tasks[ev.task];
         if (def !== undefined && typeof ev.data.issue === "number") def.issue = ev.data.issue;
       }
@@ -428,7 +426,18 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       next.spawns += 1;
       if (task !== undefined) {
         task.agents[ev.data.role as keyof TaskAgents] = ev.data.agent_id as string;
-        if (typeof ev.data.host === "string") task.host_actual = ev.data.host;
+        if (typeof ev.data.host === "string" && ev.task !== undefined) {
+          task.host_actual = ev.data.host;
+          // A plan version applied while this spawn ran may have written another host: the
+          // effective plan runs the task where it was spawned (the plan's is `host_planned`).
+          const def = next.wave?.tasks[ev.task];
+          if (def !== undefined && def.host !== ev.data.host) {
+            const planned = next.plan?.tasks[ev.task]?.host;
+            keepTaskHost(next, ev.task, ev.data.host, def);
+            if (planned !== undefined && planned !== ev.data.host && task.placement === undefined)
+              task.host_planned = planned;
+          }
+        }
         // A worktree cut from the release branch (not a pipeline start ref): its base.
         if (typeof ev.data.base_sha === "string") task.base_sha = ev.data.base_sha;
       }

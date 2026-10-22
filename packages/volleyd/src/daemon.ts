@@ -4220,14 +4220,14 @@ export class Daemon {
   /**
    * Task `id`'s definition in the effective plan, on the host its agents were spawned on (its
    * `host_actual`, #323): a plan version that writes another host for a started task never
-   * moves it.
+   * moves it. The plan's inline `host:` names the plan's host, not that one: it is dropped.
    */
   private ranDef(rec: WaveRecord | undefined, id: TaskId): WaveTask | undefined {
     const def = rec?.wave?.tasks[id];
     const actual = rec?.state?.tasks.find((t) => t.id === id)?.host_actual;
-    return def === undefined || actual === undefined || actual === def.host
-      ? def
-      : { ...def, host: actual };
+    if (def === undefined || actual === undefined || actual === def.host) return def;
+    const { host_spec: _s, ...rest } = def;
+    return { ...rest, host: actual };
   }
 
   /**
@@ -4239,14 +4239,16 @@ export class Daemon {
     const key = `${wave}/${t.id}`;
     if (!this.autoHostAlarmed.has(key)) {
       this.autoHostAlarmed.add(key);
-      void this.append(wave, {
+      this.append(wave, {
         type: "alarm_raised",
         task: t.id,
         data: {
           alarm: "host_auto_unresolved",
           message: `host 'auto' reached the host resolver for ${t.id}: its checks run on the supervisor's own host`,
         },
-      });
+      }).catch((e: unknown) =>
+        this.log(`host_auto_unresolved ${key}: ${e instanceof Error ? e.message : String(e)}`),
+      );
     }
     return true;
   }
