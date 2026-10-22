@@ -516,6 +516,8 @@ volley claude signin work           # sign an existing profile in again
 volley claude list                  # one block per account (by e-mail): machines, usage, sharing
 volley claude list --show-email     # … with the e-mail unmasked (--json: the raw answer + records)
 volley claude sync [work]           # re-apply sharing.yaml, re-sync the MCP servers
+volley claude balance               # per machine: accounts ranked by headroom, each family's next pick
+volley claude balance --model claude-opus-5-5 --machine peer-a  # … for one model on one machine
 volley claude move <agent-id> work  # stop an agent and respawn it under another account
 ```
 

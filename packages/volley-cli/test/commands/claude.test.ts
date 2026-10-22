@@ -303,6 +303,134 @@ describe("volley claude", () => {
     await v.b.disconnect();
   });
 
+  /** volleyd's `claude_balance` answer: two machines, each ranked, the pick per family. */
+  const BALANCE = {
+    machines: [
+      {
+        name: "local",
+        candidates: [
+          { account: "work", headroom: 60, five_hour_pct: 12, weekly_pct: 40, agents: 2 },
+          { account: "primary", headroom: 40, five_hour_pct: 60, weekly_pct: 20, agents: 1 },
+        ],
+        picks: { fable: "work", opus: "work", sonnet: "primary", haiku: "primary" },
+      },
+      {
+        name: "peer-a",
+        candidates: [
+          { account: "primary@peer-a", headroom: 5, five_hour_pct: 88, weekly_pct: 30, agents: 3 },
+          {
+            account: "work@peer-a",
+            headroom: null,
+            five_hour_pct: null,
+            weekly_pct: null,
+            agents: 0,
+          },
+        ],
+        picks: { fable: "work@peer-a", opus: "work@peer-a", sonnet: null, haiku: null },
+      },
+    ],
+  };
+  const BALANCE_RECORDS = [
+    {
+      account: "work",
+      label: "Work",
+      email: "owner@example.com",
+      five_hour: { pct: 12, resets_at: null },
+      weekly: { pct: 40, resets_at: null },
+      model_weekly: { fable: { pct: 30, resets_at: null } },
+      agents: ["a-1", "a-2"],
+      waves: ["w1"],
+      sampled_at: iso(60_000),
+    },
+  ];
+
+  async function balanceVolleyd(
+    answer = (op: string, p: Record<string, unknown>) => {
+      if (op !== "claude_balance") return { ok: true, result: LIST_RESULT };
+      if (typeof p.model !== "string") return { ok: true, result: BALANCE };
+      const machines = BALANCE.machines.map((m) => ({
+        ...m,
+        picks: { model: m.candidates[0]?.account ?? null },
+      }));
+      return { ok: true, result: { model: p.model, machines } };
+    },
+  ) {
+    const v = await fakeVolleyd(tb.url, answer);
+    for (const rec of BALANCE_RECORDS)
+      await v.b.publish(
+        `volley/_system/claude-accounts/${rec.account}`,
+        v.env("_system/claude-accounts", "claude_account", rec),
+        { qos: 1, retain: true },
+      );
+    return v;
+  }
+
+  it("balance prints each machine's ranked candidates, figures, headroom and picks, e-mails masked", async () => {
+    const v = await balanceVolleyd();
+    const r = await run(["balance"]);
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    expect(v.seen[0]).toMatchObject({ op: "claude_balance" });
+    const lines = r.stdout.split("\n");
+    expect(lines[0]).toBe("this machine");
+    expect(lines[1]).toMatch(
+      /^ {2}work +o•••@example\.com +5h 12% +7d 40% +Fable 30% +headroom 60 +2 agents +← fable, opus$/,
+    );
+    expect(lines[2]).toMatch(
+      /^ {2}primary +5h 60% +7d 20% +Fable — +headroom 40 +1 agent +← sonnet, haiku$/,
+    );
+    expect(lines[3]).toBe("peer-a");
+    expect(lines[4]).toMatch(/^ {2}primary@peer-a +5h 88% +7d 30% +Fable — +headroom 5 +3 agents$/);
+    expect(lines[5]).toMatch(/^ {2}work@peer-a +no usage yet +← fable, opus$/);
+    expect(r.stdout).not.toContain("owner@example.com");
+    await v.b.disconnect();
+  });
+
+  it("balance --show-email shows the address", async () => {
+    const v = await balanceVolleyd();
+    const r = await run(["balance", "--show-email"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/ {2}work +owner@example\.com +5h 12%/);
+    await v.b.disconnect();
+  });
+
+  it("balance --model and --machine pass through; one arrow per machine", async () => {
+    const v = await balanceVolleyd();
+    const r = await run(["balance", "--model", "claude-fable-1"]);
+    expect(r.exitCode).toBe(0);
+    expect(v.seen[0]).toMatchObject({ op: "claude_balance", model: "claude-fable-1" });
+    expect(r.stdout.match(/← claude-fable-1/g)).toHaveLength(2);
+    await run(["balance", "--machine", "peer-a"]);
+    expect(v.seen.at(-1)).toMatchObject({ op: "claude_balance", machine: "peer-a" });
+    await v.b.disconnect();
+  });
+
+  it("balance --json prints volleyd's raw answer", async () => {
+    const v = await balanceVolleyd();
+    const r = await run(["balance", "--json"]);
+    expect(r.exitCode).toBe(0);
+    expect(JSON.parse(r.stdout)).toEqual(BALANCE);
+    await v.b.disconnect();
+  });
+
+  it("balance takes no arguments; --model is for balance only", async () => {
+    const extra = await run(["balance", "extra"]);
+    expect(extra.exitCode).toBe(EXIT.USAGE);
+    expect(extra.stderr).toContain("takes no arguments");
+    const model = await run(["list", "--model", "claude-fable-1"]);
+    expect(model.exitCode).toBe(EXIT.USAGE);
+    expect(model.stderr).toContain("--model");
+  });
+
+  it("list marks the member rows volleyd's next spawn would pick", async () => {
+    const v = await balanceVolleyd();
+    const r = await run(["list"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/this machine +work +signed in +waves: w1 +next pick/);
+    expect(r.stdout).toMatch(/peer-a +default login +signed in(?! +next pick)/);
+    await v.b.disconnect();
+  });
+
   it("an empty registry still prints the sharing line", async () => {
     const v = await fakeVolleyd(tb.url, () => ({
       ok: true,

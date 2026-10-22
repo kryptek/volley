@@ -5,6 +5,7 @@ import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
+import { type BalanceAnswer, isNextPick, printBalance } from "../claude/balance";
 import { type ListResult, type UsageRecord, groupAccounts, renderGroups } from "../claude/groups";
 import { connectAsClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
@@ -19,8 +20,9 @@ export interface ClaudeArgs {
 /**
  * `volley claude`: Claude account profiles on the volleyd supervisor. Each verb is one control
  * query on volleyd's mailbox (`claude_accounts`, `claude_account_add`, `claude_signin`,
- * `claude_sync`, `agent_move_account`), answered with an `ack` on this client's own mailbox.
- * `list` also reads every account's retained usage record, to show each Anthropic account once.
+ * `claude_sync`, `claude_balance`, `agent_move_account`), answered with an `ack` on this client's
+ * own mailbox. `list` also reads every account's retained usage record, to show each Anthropic
+ * account once, and asks `claude_balance` to mark the logins the next spawn would pick.
  * Signing in happens in the browser, through Claude Code's own flow: this command prints the
  * sign-in URL volleyd got from `claude auth login` and never sees a code or a token.
  */
@@ -29,6 +31,9 @@ const HELP = `Usage:
   volley claude add <label> [--machine <name>] [--wait]   Add a profile and start its sign-in
   volley claude signin <acct> [--wait]                    Sign an existing profile in again
   volley claude list [--json] [--show-email]              Accounts grouped by e-mail, their machines, usage, sharing
+  volley claude balance [--model <m>] [--machine <name>] [--json] [--show-email]
+                                                          Per machine, the accounts ranked by headroom
+                                                          and which one each model family picks next
   volley claude sync [<acct>]                             Re-apply sharing.yaml, re-sync MCP servers
   volley claude move <agent-id> <acct>                    Stop an agent and respawn it under <acct>
                                                           (an account of the agent's own machine:
@@ -41,12 +46,15 @@ never anywhere else. --wait blocks until the sign-in finishes.
 
 Options:
   --machine <name>       add: a paired machine: the profile is created and signed in there
-                         (default: the supervisor's own machine)
+                         (default: the supervisor's own machine); balance: that machine only
+                         (local: the supervisor's own)
+  --model <m>            balance: rank for this model and print its pick (default: each family's)
   --wait                 add / signin: wait for the sign-in to finish (exit 1 if it fails,
                          124 if it has not ended within --timeout, default 960)
   --timeout <seconds>    How long to wait for volleyd's answer (default 60; move: 180)
-  --json                 list: print the raw result, with the usage records as "records"
-  --show-email           list: show each account's e-mail (masked by default)
+  --json                 list: print the raw result, with the usage records as "records";
+                         balance: print volleyd's answer
+  --show-email           list / balance: show each account's e-mail (masked by default)
   --broker-url <url>     MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
   --namespace <ns>       volleyd's namespace (env: VOLLEY_NAMESPACE; default: default)
   --username <user>      Broker username (env: VOLLEY_AUTH_USERNAME)
@@ -55,6 +63,7 @@ Options:
 
 const OPTIONS = {
   machine: { type: "string" },
+  model: { type: "string" },
   wait: { type: "boolean" },
   timeout: { type: "string" },
   json: { type: "boolean" },
@@ -117,7 +126,9 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
     io.stderr(`volley claude ${verb}: ${msg}\n`);
     return EXIT.USAGE;
   };
-  if (v["show-email"] === true && verb !== "list") return usage("--show-email is for list only");
+  if (v["show-email"] === true && verb !== "list" && verb !== "balance")
+    return usage("--show-email is for list and balance only");
+  if (v.model !== undefined && verb !== "balance") return usage("--model is for balance only");
   let op: string;
   let fields: Record<string, unknown>;
   switch (verb) {
@@ -135,6 +146,14 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
       if (pos.length !== 0) return usage("takes no arguments");
       op = "claude_accounts";
       fields = {};
+      break;
+    case "balance":
+      if (pos.length !== 0) return usage("takes no arguments");
+      op = "claude_balance";
+      fields = {
+        ...(v.model !== undefined ? { model: v.model } : {}),
+        ...(v.machine !== undefined ? { machine: v.machine } : {}),
+      };
       break;
     case "sync":
       if (pos.length > 1) return usage("takes at most one <acct>");
@@ -206,7 +225,24 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
       const result = answer.result as ListResult;
       const records = await usageRecords(broker);
       if (v.json === true) io.stdout(`${JSON.stringify({ ...result, records }, null, 2)}\n`);
-      else printList(io, result, records, v["show-email"] === true);
+      else {
+        // A volleyd that predates the op (or does not answer it) only costs the marker.
+        const b = await request(broker, namespace, "claude_balance", {}, timeoutMs);
+        const balance = b?.ok === true ? balanceOf(b.result) : null;
+        printList(io, result, records, v["show-email"] === true, balance);
+      }
+      return EXIT.OK;
+    }
+    if (verb === "balance") {
+      const result = balanceOf(answer.result);
+      if (v.json === true) io.stdout(`${JSON.stringify(answer.result, null, 2)}\n`);
+      else if (result === null) {
+        io.stderr("volley claude balance: volleyd's answer has no machines\n");
+        return EXIT.ERROR;
+      } else
+        io.stdout(
+          printBalance(result, await usageRecords(broker), { showEmail: v["show-email"] === true }),
+        );
       return EXIT.OK;
     }
     if (verb === "move") {
@@ -352,10 +388,31 @@ async function usageRecords(broker: VolleyBroker): Promise<UsageRecord[]> {
   });
 }
 
-function printList(io: IO, r: ListResult, records: UsageRecord[], showEmail: boolean): void {
+/** A `claude_balance` result, or null when it is not one (machines with their picks). */
+function balanceOf(result: unknown): BalanceAnswer | null {
+  const machines = (result as { machines?: unknown } | undefined)?.machines;
+  return Array.isArray(machines) &&
+    machines.every((m) => typeof m === "object" && m !== null && "picks" in m && "candidates" in m)
+    ? (result as BalanceAnswer)
+    : null;
+}
+
+function printList(
+  io: IO,
+  r: ListResult,
+  records: UsageRecord[],
+  showEmail: boolean,
+  balance: BalanceAnswer | null,
+): void {
   const groups = groupAccounts(r, records);
   if (groups.length === 0) io.stdout(`no Claude account profiles under ${r.root}\n`);
-  io.stdout(renderGroups(groups, { now: Date.now(), showEmail }));
+  io.stdout(
+    renderGroups(groups, {
+      now: Date.now(),
+      showEmail,
+      nextPick: (account) => isNextPick(balance, account),
+    }),
+  );
   io.stdout(
     `sharing: ${Object.entries(r.sharing)
       .map(([item, mode]) => `${item}=${mode}`)
