@@ -5990,9 +5990,9 @@ export class Daemon {
    * wave and on every machine — supervised, launched and being verified, spawning (a release
    * stage's agent too) — and one slot for each admitted task of a running wave that will spawn
    * its next agent: queued for its implementer (backed off too; not once refused for good), or
-   * between roles in implement…fixup with a role still to come (`nextRoleComes`). A task's stage counts
-   * nothing by itself otherwise: a task awaiting a decision, blocked, or in a paused, stopped or
-   * ended wave holds a slot only while one of its agents is live. `launching` is the part not
+   * between roles in implement…fixup with a role still to come (`nextRoleComes`). A task's stage
+   * counts nothing by itself otherwise: a task awaiting a decision, blocked, or in a paused,
+   * stopped or ended wave holds a slot only while one of its agents is live. `launching` is the part not
    * supervised yet, held slots included. `held: false` counts only the agents running or
    * starting, no held slot: what a spawn checks (`spawnAdmitted`, a pipeline role's, a release
    * stage's), so tasks holding more slots than the ceiling never hold each other's spawns.
@@ -6059,7 +6059,12 @@ export class Daemon {
       const until = this.refused.get(`${wave}/${task}/${role}`)?.until;
       if (until === Number.POSITIVE_INFINITY) return false;
       const run = p.runs[role];
-      return run?.retired === undefined || run.accepted || until !== undefined || respawning;
+      return (
+        run?.retired === undefined || // not run yet, or its agent still live
+        run.accepted || // its agent finished and was accepted
+        until !== undefined || // a backed-off respawn of this role is pending
+        respawning // a held respawn will re-place the dead agent
+      );
     });
   }
 
