@@ -366,8 +366,8 @@ hygiene rules); an existing one is never changed.
 --autopilot writes config: { autopilot: { enabled } } (omitted: the supervisor's setting, on by
 default). --branch-update writes config: { branch_update } (merge is recommended for autopilot
 waves: no force-push). --placement writes placement: to pin where the wave's tasks run (omitted:
-the supervisor's placement.default, auto once a machine is paired). The last lines on stderr are the submit command, owned by the stable
-coordinator name in VOLLEY_COORDINATOR, and that name.
+the supervisor's placement.default, auto once a machine is paired). The last lines on stderr are
+the submit command, owned by the stable coordinator name in VOLLEY_COORDINATOR, and that name.
 `;
 
 function main(argv: string[]): number {

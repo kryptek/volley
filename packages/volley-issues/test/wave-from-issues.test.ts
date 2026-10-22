@@ -64,6 +64,15 @@ const submitLines = (file: string) =>
     "",
   ].join("\n");
 
+describe("--help", () => {
+  it("keeps every line within the help text's wrap width", () => {
+    const r = spawnSync("bun", [HELPER_CLI, "--help"], { encoding: "utf-8" });
+    expect(r.status).toBe(0);
+    const long = r.stdout.split("\n").filter((l) => l.length > 98);
+    expect(long).toEqual([]);
+  });
+});
+
 describe("submitLines", () => {
   it("leaves a plain path and the <wave.yaml> placeholder bare", () => {
     expect(submitLinesFor(".volley/waves/w.yaml", "c")[0]).toBe(
