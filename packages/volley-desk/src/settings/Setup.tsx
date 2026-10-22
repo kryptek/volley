@@ -16,6 +16,7 @@
  * The Desk never writes a broker password; admin comes only from a token.
  */
 import { type FormEvent, useEffect, useState } from "react";
+import { useAccount } from "../auth/SignInGate";
 import {
   type AuthOps,
   type SetupPlan,
@@ -121,6 +122,7 @@ function when(iso: string): string {
 }
 
 export function Setup(p: SetupProps) {
+  const account = useAccount();
   const [plan, setPlan] = useState<PlanState>({ state: "none" });
   const [issue, setIssue] = useState<Issue>({ state: "idle" });
   const [desk, setDesk] = useState<DeskPassword>({ state: "idle" });
@@ -355,7 +357,13 @@ export function Setup(p: SetupProps) {
       ) : (
         <BecomeAdmin
           identity={p.identity}
-          onUseToken={p.onUseToken ?? reopenWithToken(p.deskUrl)}
+          onUseToken={
+            p.onUseToken ??
+            // In place through the Switch account entry; a page reload with the link otherwise.
+            (account !== null && !account.byEnvironment
+              ? account.switchAccount
+              : reopenWithToken(p.deskUrl))
+          }
           {...(p.onPreviewSignIn ? { onPreviewSignIn: p.onPreviewSignIn } : {})}
         />
       )}

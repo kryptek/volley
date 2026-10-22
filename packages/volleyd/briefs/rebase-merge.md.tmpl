@@ -2,6 +2,8 @@
 
 `{{release_branch}}` moved since this task's PR branched from it. Read `.volley/rebase.md`: it names the PR branch, the head this worktree starts at, and the exact commands. Merge `origin/{{release_branch}}` into the PR branch (never rebase it), resolve conflicts keeping the PR's intent (`ISSUE.md`, {{issue_url}}), run the repository's gates, and publish the merge commit with the normal push given there. Do not change behaviour beyond what the conflicts require.
 
+When `.volley/rebase.md` says the PR conflicts with `{{release_branch}}`, GitHub runs no CI on it: your merge resolving the conflicts is what lets CI run at all.
+
 ## Result contract
 
 Your `done` is checked: the PR branch on origin must equal this worktree's HEAD, that head must descend from the PR head you started at (a merge moves the branch forward; rewritten history is not accepted), the PR must still target `{{release_branch}}`, and CI must be green on the new head. Reviewers whose flagged files your merge touched review again. Optionally publish `vol_publish(channel="result", type="rebase", payload={ "summary": "<conflicts and how you resolved them>" })`.
