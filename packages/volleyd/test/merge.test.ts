@@ -102,6 +102,15 @@ describe("autopilot merge classifies a refusal (#311)", () => {
     ])
       expect(await refused(stderr)).toEqual({ ok: false, reason: "checks", stderr });
   });
+  it("closed or merged, in any case → closed", async () => {
+    for (const stderr of [
+      "GraphQL: Pull request is closed (mergePullRequest)",
+      "GraphQL: Pull Request is already merged",
+      "Pull request #7 is MERGED",
+      "Pull request #7 is Closed",
+    ])
+      expect(await refused(stderr)).toEqual({ ok: false, reason: "closed", stderr });
+  });
   it("anything else → unknown", async () => {
     expect(await refused("GraphQL: something odd")).toMatchObject({ reason: "unknown" });
   });

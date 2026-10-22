@@ -133,7 +133,7 @@ export function refusalReason(stderr: string): RefusalReason {
     )
   )
     return "behind";
-  if (/already merged|is closed|is MERGED|is CLOSED/.test(stderr)) return "closed";
+  if (/already merged|is (closed|merged)\b/i.test(stderr)) return "closed";
   if (/check|protect|review|approv/i.test(stderr)) return "checks";
   return "unknown";
 }
