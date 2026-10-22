@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildEnvelope } from "volley-mcp/envelope";
+import { buildTopic } from "volley-mcp/topics";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
 import { Daemon } from "../src/daemon";
 import type { PipelineDriver, PipelineEvent } from "../src/pipeline";
 import { BLOCKED_ALARM, TERMINAL_ALARM } from "../src/watchdog";
+import { NS } from "./helpers/daemon-env";
 import { fakeClock } from "./helpers/fake-clock";
 import { runCli } from "./helpers/run-cli";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
@@ -356,6 +359,41 @@ describe("daemon: a retained blocked always has a decision (the invariant)", () 
     );
     // Answered; the agent has not published a new status yet (still blocked, same status_at).
     await resolve(opened.data.decision_id as string, "continue");
+    for (let i = 0; i < 3; i++) {
+      await s.daemon.tick();
+      await clock.advance(CONFIG_DEFAULTS.blocked_undecided_stall_ms + 1_000);
+    }
+    await s.daemon.tick();
+    await s.settled();
+    expect(
+      s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === "agent_stalled"),
+    ).toHaveLength(0);
+  });
+
+  it("an answered blocked under a suppressed reap is still decided: no stall", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ reapGraceMs: 60_000, daemon: { clock } });
+    await s.hook("idle-stop.json");
+    await s.status("blocked", { reason: "stuck" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    await resolve(opened.data.decision_id as string, "continue");
+    // An LWT a heartbeat suppresses: the retained status is now `reaped`, liveness reads `blocked`.
+    const lwt = JSON.stringify(
+      buildEnvelope({
+        agentId: AGENT,
+        parentId: "volleyd",
+        channel: "status",
+        type: "reaped",
+        payload: { reason: "lwt" },
+      }),
+    );
+    await s.agent.publish(buildTopic(NS, AGENT, "status"), lwt, { qos: 1, retain: true });
+    await s.until(() => s.daemon.snapshot("w1") !== undefined);
+    await clock.advance(1000);
+    await s.hook("heartbeat.json");
+    await s.until(() => s.journal().some((e) => e.type === "reap_suppressed"));
     for (let i = 0; i < 3; i++) {
       await s.daemon.tick();
       await clock.advance(CONFIG_DEFAULTS.blocked_undecided_stall_ms + 1_000);

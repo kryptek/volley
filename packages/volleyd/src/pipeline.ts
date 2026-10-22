@@ -2245,13 +2245,13 @@ export function blockedReason(payload: unknown): string {
   return "(no reason given)";
 }
 
+/** The `why` of a blocked alarm on a cancelled task: the one case that is not a stale run. */
+export const BLOCKED_TASK_CANCELLED = "the task is cancelled";
+
 /**
  * A role's agent is blocked: ask the owner. Nothing is retired (the agent may be waiting on its
  * mailbox); `continue` waits for its next status, `respawn` relaunches the role.
  */
-/** The `why` of a blocked alarm on a cancelled task: the one case that is not a stale run. */
-export const BLOCKED_TASK_CANCELLED = "the task is cancelled";
-
 function onBlocked(
   v: PipelineView,
   ev: Extract<PipelineEvent, { kind: "agent_blocked" }>,

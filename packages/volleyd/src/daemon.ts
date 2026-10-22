@@ -6301,11 +6301,13 @@ export class Daemon {
           : undefined;
       if (this.supervised.get(agentId) !== a) continue; // retired during the worktree walk
       // Blocked: since when no decision names it (an undecided block is a stall). One open, or
-      // one answered for this very status (`manual` leaves it blocked), is a decision.
+      // one answered for this very status (`manual` leaves it blocked), is a decision. Under a
+      // suppressed reap that status is the `blocked` before the `reaped`, not the retained one.
+      const blockedAt = retained?.type === "blocked" ? retained.wall_time : a.blockedSeen;
       if (status !== "blocked") a.undecidedSince = undefined;
       else if (
         this.openNaming(a.wave, agentId) ||
-        (retained !== null && this.blockedDecided(a.wave, agentId, retained.wall_time))
+        (blockedAt !== undefined && this.blockedDecided(a.wave, agentId, blockedAt))
       )
         a.undecidedSince = undefined;
       else a.undecidedSince ??= now;
