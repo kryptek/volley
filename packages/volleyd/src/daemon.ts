@@ -9001,12 +9001,13 @@ export class Daemon {
    * (SPEC §4.6.15). Decided when the wave is first submitted: a later plan version of a known
    * wave keeps the placement its current plan has, so pairing or unpairing a machine mid-wave
    * never moves a running task's next role. (`paired: 1` only lets that kept placement resolve
-   * as `auto`; a version's own `placement:` or `config: placement.default` still wins over it.)
+   * as `auto`; a version's own `placement:` still wins over it, its `config: placement.default`
+   * does not.)
    */
   private placementDefaults(wave?: WaveId): PlacementDefaults {
     const rec = wave === undefined ? undefined : this.waves.get(wave)?.record;
     const current = rec?.plan ?? rec?.wave;
-    if (current != null) return { default: current.placement ?? "local", paired: 1 };
+    if (current != null) return { default: current.placement ?? "local", paired: 1, kept: true };
     const cfg = this.config.effective();
     const local = this.config.localName();
     return {

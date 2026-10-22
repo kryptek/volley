@@ -346,6 +346,13 @@ describe("placement (SPEC §4.6.15)", () => {
       { default: "auto", paired: 1 },
     );
     expect(own.tasks.T1?.host).toBe("local");
+    // A known wave's kept placement: its config: default no longer decides, its placement: does.
+    const kept = { default: "local" as const, paired: 1, kept: true };
+    const auto = `${HEADER}config:\n  placement:\n    default: auto\n${TASKS}`;
+    expect(parseWaveFile(auto, undefined, kept).tasks.T1?.host).toBe("local");
+    expect(parseWaveFile(`${HEADER}placement: auto\n${TASKS}`, undefined, kept).placement).toBe(
+      "auto",
+    );
   });
 
   it("the placement line names what decided it (#324)", () => {

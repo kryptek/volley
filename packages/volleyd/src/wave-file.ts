@@ -72,6 +72,8 @@ interface RawWave {
 export interface PlacementDefaults {
   default: PlacementDefault;
   paired: number;
+  /** A known wave's kept placement: only the file's own `placement:` changes it, not its `config:`. */
+  kept?: boolean;
 }
 
 /** Where a wave's unpinned tasks run, and what decided it (the line validate and run print). */
@@ -87,7 +89,7 @@ export function defaultPlacement(
   d: PlacementDefaults | undefined,
 ): WavePlacement {
   if (raw.placement !== undefined) return { placement: raw.placement, by: "wave file" };
-  const def = raw.config?.placement?.default ?? d?.default ?? "local";
+  const def = d?.kept ? d.default : (raw.config?.placement?.default ?? d?.default ?? "local");
   if (def === "local") return { placement: "local", by: "default" };
   return (d?.paired ?? 0) > 0
     ? { placement: "auto", by: "default" }

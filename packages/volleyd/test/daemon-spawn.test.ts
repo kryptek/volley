@@ -1035,6 +1035,25 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     expect(w5.placement).toBeUndefined();
   });
 
+  it("a later version's config: placement.default does not move a wave's kept placement (#324)", async () => {
+    localClaude = true;
+    await setup();
+    expect((await runCli(["config", "set", "placement.default", "local"], env.env)).exitCode).toBe(
+      0,
+    );
+    await submit("w7", "", "  T1: { issue: 42 }\n");
+    // Only an explicit placement: changes a known wave's placement, never its config: default.
+    await submit("w7", "config:\n  placement:\n    default: auto\n", "  T1: { issue: 42 }\n");
+    const v2 = journal("w7").find((e) => e.type === "wave_versioned")?.data.wave as {
+      placement?: string;
+      tasks: Record<string, { host: string }>;
+    };
+    expect(v2.placement).toBeUndefined();
+    expect(v2.tasks.T1?.host).toBe("local");
+    await tick();
+    expect(journal("w7").some((e) => e.type === "task_placed")).toBe(false);
+  });
+
   it("run prints no placement preview for a later version of a local wave without placement: (#324)", async () => {
     localClaude = true;
     await setup();
