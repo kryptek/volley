@@ -1,10 +1,10 @@
 import { opCommand } from "../controls";
-import type { DecisionPayload } from "../decisions";
+import { type DecisionPayload, heldLabel } from "../decisions";
 
 const HELP = `Usage: volleyd decisions [wave] [--all] [--json] [--broker-url <url>] [--namespace <ns>]
 
 List open decisions (every wave, or one). --all includes resolved ones. Answer one with
-\`volleyd resolve <decision-id> <answer>\`.
+\`volleyd resolve <decision-id> <answer>\`; a held one says what it waits on (\`volleyd hold\`).
 `;
 
 export const decisions = opCommand({
@@ -32,6 +32,10 @@ export function formatDecision(d: DecisionPayload): string {
   if (d.options !== undefined) lines.push(`  options: ${d.options.join(" | ")}`);
   const ptrs = Object.entries(d.pointers).map(([k, v]) => `${k}: ${v}`);
   if (ptrs.length > 0) lines.push(`  evidence: ${ptrs.join("  ")}`);
+  if (d.held !== undefined)
+    lines.push(
+      `  held on ${heldLabel(d.held.on)} by ${d.held.by} since ${d.held.at}${d.held.note !== undefined ? `: ${d.held.note}` : ""}`,
+    );
   if (d.resolved !== undefined) lines.push(`  resolved by ${d.resolved.by}: ${d.resolved.answer}`);
   return `${lines.join("\n")}\n`;
 }

@@ -56,6 +56,7 @@ describe("the Desk's DigestPayload mirrors digest.schema.json", () => {
       "shipped",
       "auto",
       "waiting",
+      "held",
       "release",
       "failures",
       "alarms",
@@ -102,6 +103,25 @@ describe("DigestCard", () => {
     const id = d.waiting[0]?.id as string;
     fireEvent.click(screen.getByRole("button", { name: id }));
     expect(onOpenDecision).toHaveBeenCalledWith(id);
+  });
+
+  it("counts held decisions in the headline like volleyd's summaryLine, and lists them under Held", () => {
+    const d = escalation.payload as DigestPayload;
+    const held = {
+      id: "d-held-1",
+      kind: "ci_failed",
+      task: "T2",
+      question: "CI failed on PR #211",
+      since: "2026-10-21T05:00:00.000Z",
+      on: { task: "T4", pr: 194 },
+      label: "T4 (#194)",
+      held_since: "2026-10-21T05:10:00.000Z",
+    };
+    render(<DigestCard digest={{ ...d, held: [held] }} />);
+    const card = screen.getByRole("region", { name: "Morning digest" });
+    expect(screen.getByText(/, 1 held$/)).toHaveClass("digest-head");
+    expect(screen.getByRole("heading", { name: "Held" })).toBeInTheDocument();
+    expect(card).toHaveTextContent("d-held-1 ci_failed on T2: waiting on T4 (#194)");
   });
 
   it("lists failures, and says when nothing is waiting", () => {

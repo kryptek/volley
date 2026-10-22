@@ -56,6 +56,7 @@ describe("the Desk's inbox types mirror inbox-item.schema.json", () => {
       "opened_at",
       "source",
       "answered",
+      "held",
     ];
     expect([...keys].sort()).toEqual(Object.keys(payloadSchema().properties).sort());
   });
