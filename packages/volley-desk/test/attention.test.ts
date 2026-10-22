@@ -265,6 +265,24 @@ describe("tierFor(wave)", () => {
     expect(tierFor(sup, ctx({ agents: {} }))).toBe("you");
   });
 
+  it("finds a named owner's coordinator through the bound agent, and trusts volleyd's fresh state", () => {
+    // Owned by a coordinator name: the Desk has no agent under it, only under the bound id.
+    const named = (coordinator: WaveStatePayload["coordinator"]) =>
+      wave({ owner: "coord-main", ...(coordinator ? { coordinator } : {}) });
+    const bound = named({ agent_id: "coord-a1", state: "working", last_seen: iso(NOW - 40 * MIN) });
+    const heard = ctx({ coordinators: {}, agents: { "coord-a1": agent("coord-a1") } });
+    expect(coordinatorFor(bound, heard)).toMatchObject({ id: "coord-main", state: "working" });
+    expect(tierFor(bound, heard)).toBe("none");
+    // volleyd says working with a fresh last_seen and the Desk has no agent view: working.
+    const fresh = named({ agent_id: "coord-a1", state: "working", last_seen: iso(NOW - 2 * MIN) });
+    const cold = ctx({ coordinators: {}, agents: {} });
+    expect(coordinatorFor(fresh, cold).state).toBe("working");
+    expect(tierFor(fresh, cold)).toBe("none");
+    // volleyd says gone: gone.
+    const gone = named({ agent_id: "coord-a1", state: "gone", last_seen: iso(NOW - 2 * MIN) });
+    expect(coordinatorFor(gone, cold).state).toBe("gone");
+  });
+
   it("keeps awaiting_input over staleness: the coordinator waits quietly for an answer", () => {
     const c = ctx({
       coordinators: { "coord-1": coord("awaiting_input") },
