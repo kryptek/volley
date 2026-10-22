@@ -5,10 +5,19 @@ import type { JournalEvent } from "../../src/types";
 import { WAIT_DEADLINE_MS } from "./broker-wait";
 import { flushMicrotasks } from "./fake-clock";
 
-/** An event type, or a predicate over events. */
-export type EventMatch = string | ((e: JournalEvent) => boolean);
+/**
+ * An event type, a predicate over events, or a predicate with `what` it waits for (named in the
+ * timeout message, as `WaitOptions.what` is for `eventually`).
+ */
+export type EventMatch =
+  | string
+  | ((e: JournalEvent) => boolean)
+  | { what: string; test: (e: JournalEvent) => boolean };
 
-const matcher = (m: EventMatch) => (typeof m === "string" ? (e: JournalEvent) => e.type === m : m);
+const matcher = (m: EventMatch) =>
+  typeof m === "string" ? (e: JournalEvent) => e.type === m : typeof m === "function" ? m : m.test;
+const label = (m: EventMatch) =>
+  typeof m === "string" ? m : typeof m === "function" ? "a matching event" : m.what;
 
 /**
  * Await journal events as the daemon appends them: the promise is resolved by the append itself
@@ -43,7 +52,7 @@ export function journalWait(home: string, daemon: () => Daemon): JournalWait {
       const seen = events(wave).filter(pred);
       if (seen.length >= n) return Promise.resolve(seen[n - 1] as JournalEvent);
       let count = seen.length;
-      const what = typeof match === "string" ? match : "a matching event";
+      const what = label(match);
       return new Promise((resolve, reject) => {
         // broker round-trip: the append follows MQTT deliveries; an event that never lands fails.
         const timer = setTimeout(() => {

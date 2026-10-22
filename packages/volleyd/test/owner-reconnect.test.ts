@@ -90,9 +90,11 @@ const retainedCoordinator = async () =>
   )?.payload?.coordinator;
 const coordinator = () => daemon.snapshot(WAVE)?.coordinator;
 // Private reads, for ordering only: a replay was handled once its later sentinel is seen.
-const statusOf = () => (daemon as unknown as { statusOf: Map<string, unknown> }).statusOf;
-const namedEntries = () =>
-  (daemon as unknown as { namedEntries: Map<string, unknown> }).namedEntries;
+// Bracket access keeps them type-checked: renaming either field fails typecheck, not silently.
+// biome-ignore lint/complexity/useLiteralKeys: dot access to a private field does not compile
+const statusOf = () => daemon["statusOf"];
+// biome-ignore lint/complexity/useLiteralKeys: dot access to a private field does not compile
+const namedEntries = () => daemon["namedEntries"];
 const reconnects = () => daemon.journalEvents(WAVE).filter((e) => e.type === "owner_reconnected");
 
 beforeEach(async () => {

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import type { Daemon } from "../src/daemon";
 import { eventually, until } from "./helpers/broker-wait";
+import { journalWait } from "./helpers/journal-wait";
 
 describe("broker-wait helpers carry a deadline", () => {
   it("eventually resolves once the predicate holds", async () => {
@@ -40,5 +42,13 @@ describe("broker-wait helpers carry a deadline", () => {
     expect(cause).toBeInstanceOf(Error);
     expect(message).toBe(`waited 50 ms for gone; last error: ${(cause as Error).message}`);
     expect((cause as Error).message).toMatch(/working/);
+  });
+
+  it("journalWait names a labelled predicate when its event never lands", async () => {
+    // No journal on disk and a daemon that never appends: the wait can only time out.
+    const daemon = { onJournal: () => () => {} } as unknown as Daemon;
+    const waits = journalWait("/nonexistent-volleyd-home", () => daemon);
+    const p = waits.event("w1", { what: "the coordinator's done", test: () => false }, 1, 20);
+    await expect(p).rejects.toThrow("waited 20 ms for the coordinator's done #1 in wave w1");
   });
 });
