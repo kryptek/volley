@@ -127,7 +127,7 @@
           "minimum": 60,
           "maximum": 86400,
           "default": 600,
-          "description": "Seconds without a hook heartbeat (while working and alive) before a hooks_silent alarm."
+          "description": "Seconds without a hook heartbeat (while working and alive, no tool call in flight) before the screen is read; a screen still changing across two such windows opens a hooks_silent alarm."
         },
         "idle_grace_s": {
           "type": "integer",
@@ -149,6 +149,13 @@
           "maximum": 86400,
           "default": 1800,
           "description": "Cap on the gap before a re-opened agent_stalled decision: the n-th re-open waits idle_grace_s × 2^n after the answer, at most this long."
+        },
+        "tool_in_flight_max_s": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400,
+          "default": 7200,
+          "description": "Seconds a tool call in flight (its PreToolUse boundary seen, its PostToolUse not yet) holds off the silence probe; past it, a screen static for heartbeat_alarm_s falls back to the screen_static path."
         },
         "fallback_model": {
           "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 128 }, { "type": "null" }],
