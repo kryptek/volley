@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { nextSteer } from "../src/controls";
 import { apply, emptyRecord, reduce, replay } from "../src/reducer";
-import type { JournalEvent } from "../src/types";
+import type { JournalEvent, WaveTask } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
 import { envelope, schemaErrors } from "./helpers/schema";
 
@@ -390,6 +390,154 @@ describe("task_placed (SPEC §4.6.15)", () => {
     rec = apply(rec, { seq: 5, at: AT, type: "wave_versioned", data: { wave: v2, plan: v2 } });
     expect(rec.wave?.tasks.T1?.host).toBe("box-a");
     expect(rec.wave?.tasks.T2?.host).toBe("auto");
+  });
+
+  it("a placed task spawned on its host gets no host_planned from a version that still says auto (#323)", () => {
+    let rec = replay([
+      ...base,
+      placedA,
+      {
+        seq: 5,
+        at: AT,
+        type: "agent_spawned",
+        task: "T1",
+        data: { role: "implementer", agent_id: "w1-t1-implementer-1", host: "box-a" },
+      },
+    ]);
+    const v2 = { ...wave, version: 2 };
+    rec = apply(rec, { seq: 6, at: AT, type: "wave_versioned", data: { wave: v2, plan: v2 } });
+    const t1 = rec.state?.tasks.find((t) => t.id === "T1");
+    expect(rec.wave?.tasks.T1?.host).toBe("box-a");
+    expect(t1?.host_actual).toBe("box-a");
+    expect(t1?.host_planned).toBeUndefined();
+  });
+
+  it("a placed task records another written host as host_planned whether the version lands before or during its spawn (#323)", () => {
+    const spawnedA = (seq: number): JournalEvent => ({
+      seq,
+      at: AT,
+      type: "agent_spawned",
+      task: "T1",
+      data: { role: "implementer", agent_id: "w1-t1-implementer-1", host: "box-a" },
+    });
+    const v2 = {
+      ...wave,
+      version: 2,
+      tasks: { ...wave.tasks, T1: { ...(wave.tasks.T1 as WaveTask), host: "box-b" } },
+    };
+    const versioned: JournalEvent = {
+      seq: 0,
+      at: AT,
+      type: "wave_versioned",
+      data: { wave: v2, plan: v2 },
+    };
+    // The version lands after the spawn.
+    const after = replay([...base, placedA, spawnedA(5), { ...versioned, seq: 6 }]);
+    // The version lands while the spawn runs.
+    const during = replay([...base, placedA, { ...versioned, seq: 5 }, spawnedA(6)]);
+    for (const rec of [after, during]) {
+      expect(rec.wave?.tasks.T1?.host).toBe("box-a");
+      expect(rec.state?.tasks.find((t) => t.id === "T1")).toMatchObject({
+        host_actual: "box-a",
+        host_planned: "box-b",
+      });
+    }
+  });
+
+  it("a task spawned before placement keeps the host it runs on across a plan version (#323)", () => {
+    const v1 = parseWaveFile(
+      "wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n  T2: { issue: 2 }\n",
+    );
+    let rec = replay([
+      { seq: 1, at: AT, type: "wave_submitted", data: { wave: v1 } },
+      ...base.slice(1),
+      {
+        seq: 4,
+        at: AT,
+        type: "agent_spawned",
+        task: "T1",
+        data: { role: "implementer", agent_id: "w1-t1-implementer-1", host: "local" },
+      },
+    ]);
+    expect(rec.state?.tasks.find((t) => t.id === "T1")?.host_actual).toBe("local");
+    const v2 = { ...wave, version: 2 }; // placement: auto: both tasks say `auto`
+    rec = apply(rec, { seq: 5, at: AT, type: "wave_versioned", data: { wave: v2, plan: v2 } });
+    const t1 = rec.state?.tasks.find((t) => t.id === "T1");
+    expect(rec.wave?.tasks.T1?.host).toBe("local");
+    expect(t1).toMatchObject({ host_actual: "local", host_planned: "auto" });
+    // The unstarted task is left to placement.
+    expect(rec.wave?.tasks.T2?.host).toBe("auto");
+    expect(rec.state?.tasks.find((t) => t.id === "T2")?.host_planned).toBeUndefined();
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", rec.state)),
+    ).toEqual([]);
+    // A later version that agrees with where it runs clears host_planned.
+    const v3 = { ...v1, version: 3 };
+    rec = apply(rec, { seq: 6, at: AT, type: "wave_versioned", data: { wave: v3, plan: v3 } });
+    expect(rec.state?.tasks.find((t) => t.id === "T1")?.host_planned).toBeUndefined();
+    expect(rec.wave?.tasks.T1?.host).toBe("local");
+  });
+
+  const v1Local = parseWaveFile(
+    "wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n  T2: { issue: 2 }\n",
+  );
+  const spawnedLocal = (seq: number): JournalEvent => ({
+    seq,
+    at: AT,
+    type: "agent_spawned",
+    task: "T1",
+    data: { role: "implementer", agent_id: "w1-t1-implementer-1", host: "local" },
+  });
+
+  it("a plan version applied while a task's first spawn runs: the spawn's host is the effective plan's (#323)", () => {
+    let rec = replay([
+      { seq: 1, at: AT, type: "wave_submitted", data: { wave: v1Local } },
+      ...base.slice(1),
+    ]);
+    const v2 = { ...wave, version: 2 }; // placement: auto, while T1's spawn is in flight
+    rec = apply(rec, { seq: 4, at: AT, type: "wave_versioned", data: { wave: v2, plan: v2 } });
+    expect(rec.wave?.tasks.T1?.host).toBe("auto");
+    rec = apply(rec, spawnedLocal(5));
+    const t1 = rec.state?.tasks.find((t) => t.id === "T1");
+    expect(rec.wave?.tasks.T1?.host).toBe("local");
+    expect(t1).toMatchObject({ host_actual: "local", host_planned: "auto" });
+  });
+
+  it("a cancelled started task re-queued under placement: auto takes its plan's host again (#323)", () => {
+    let rec = replay([
+      { seq: 1, at: AT, type: "wave_submitted", data: { wave: v1Local } },
+      ...base.slice(1),
+      spawnedLocal(4),
+    ]);
+    rec = apply(rec, { seq: 5, at: AT, type: "task_cancelled", task: "T1", data: {} });
+    const v2 = { ...wave, version: 2 };
+    rec = apply(rec, { seq: 6, at: AT, type: "wave_versioned", data: { wave: v2, plan: v2 } });
+    rec = apply(rec, { seq: 7, at: AT, type: "task_queued", task: "T1", data: { issue: 1 } });
+    const t1 = rec.state?.tasks.find((t) => t.id === "T1");
+    expect(rec.wave?.tasks.T1?.host).toBe("auto");
+    expect(t1?.host_actual).toBeUndefined();
+    expect(t1?.host_planned).toBeUndefined();
+  });
+
+  it("a cancelled task from a journal before host_actual is restarted on its plan's host (#323)", () => {
+    const old: JournalEvent = {
+      seq: 4,
+      at: AT,
+      type: "agent_spawned",
+      task: "T1",
+      data: { role: "implementer", agent_id: "w1-t1-implementer-1" },
+    };
+    let rec = replay([
+      { seq: 1, at: AT, type: "wave_submitted", data: { wave: v1Local } },
+      ...base.slice(1),
+      old,
+    ]);
+    const v2 = { ...wave, version: 2 }; // kept on `local`: it has an agent
+    rec = apply(rec, { seq: 5, at: AT, type: "wave_versioned", data: { wave: v2, plan: v2 } });
+    expect(rec.wave?.tasks.T1?.host).toBe("local");
+    rec = apply(rec, { seq: 6, at: AT, type: "task_cancelled", task: "T1", data: {} });
+    rec = apply(rec, { seq: 7, at: AT, type: "task_queued", task: "T1", data: { issue: 5 } });
+    expect(rec.wave?.tasks.T1?.host).toBe("auto");
   });
 });
 

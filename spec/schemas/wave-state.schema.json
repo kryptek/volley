@@ -257,6 +257,16 @@
           "minLength": 1,
           "description": "The remote host the task's agents run on (its name from the wave file, the hosts tunable or placement); absent for the supervisor's own host."
         },
+        "host_actual": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The host the task's agents were spawned on, from its agent_spawned ('local' for the supervisor's own): a later plan version never moves a started task (spec section 4.6.15)."
+        },
+        "host_planned": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The host the current plan version writes for a started task, while it differs from host_actual (e.g. 'auto' after the wave switched to placement: auto); absent otherwise."
+        },
         "host_down": {
           "type": "string",
           "minLength": 1,
