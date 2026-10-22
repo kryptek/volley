@@ -1021,7 +1021,14 @@ export class Daemon {
    */
   private readonly wakes = new Map<
     string,
-    { agent: string; wave: WaveId; task: TaskId; timer: TimerHandle; woken: boolean }
+    {
+      agent: string;
+      wave: WaveId;
+      task: TaskId;
+      timer: TimerHandle;
+      woken: boolean;
+      wokenAt?: number;
+    }
   >();
   /** Restart reconciliation, started by `start()` beside the queue (see `reconciled()`). */
   private reconciling: Promise<void> = Promise.resolve();
@@ -9492,7 +9499,12 @@ export class Daemon {
     const w = this.wakes.get(messageId);
     if (w === undefined || w.woken) return;
     const a = this.supervised.get(w.agent);
-    if (a === undefined || a.liveness.activity !== "idle") {
+    // A wake typed within the window drains this message too: liveness has not left idle yet.
+    const window = this.config.effective(w.wave).mailbox_wake_after_ms;
+    const recent = [...this.wakes.values()].some(
+      (o) => o.agent === w.agent && o.wokenAt !== undefined && this.time.now() - o.wokenAt < window,
+    );
+    if (a === undefined || a.liveness.activity !== "idle" || recent) {
       this.wakes.delete(messageId);
       return;
     }
@@ -9505,6 +9517,7 @@ export class Daemon {
       return;
     }
     w.woken = true;
+    w.wokenAt = this.time.now();
     await this.append(w.wave, {
       type: "agent_woken",
       task: w.task,

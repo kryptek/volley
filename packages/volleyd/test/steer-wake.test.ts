@@ -105,6 +105,18 @@ describe("steer wakes an idle agent", () => {
     ).toBeUndefined();
   });
 
+  it("two steers sent together to an idle agent type one wake line: it drains both", async () => {
+    await setup();
+    await idle();
+    await steer();
+    await steer({ text: "and rebase first" });
+    await clock.advance(WAKE_MS);
+    await s.event("agent_woken");
+    await s.settled();
+    expect(wakes()).toHaveLength(1);
+    expect(woken()).toHaveLength(1);
+  });
+
   it("a woken message's late ack clears the unacked mark although a newer message was sent since", async () => {
     await setup();
     await idle();
