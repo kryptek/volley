@@ -123,6 +123,42 @@ describe("reduce", () => {
     expect(rec.spawns).toBe(1);
   });
 
+  it("an implementer that launches on a later attempt moves its queued task to implement", () => {
+    // spawn.ts journals stage_entered { implement } only on attempt 1; when the first launches
+    // fail, the attempt that succeeds must still start the task (else CI, review, merge never run).
+    const last = events.at(-1) as JournalEvent;
+    const at = "2026-10-20T10:00:00.000Z";
+    const queued = reduce(events).tasks.find((t) => t.stage === "queued");
+    expect(queued).toBeDefined();
+    const id = queued?.id as string;
+    const spawned = (seq: number, role: string, attempt: number): JournalEvent => ({
+      seq,
+      at,
+      type: "agent_spawned",
+      task: id,
+      data: {
+        role,
+        agent_id: `2026-10-20-example-${id.toLowerCase()}-${role}-${attempt}`,
+        attempt,
+      },
+    });
+    // A reviewer launching on a queued task does not start it.
+    expect(
+      reduce([...events, spawned(last.seq + 1, "spec_reviewer", 1)]).tasks.find((t) => t.id === id)
+        ?.stage,
+    ).toBe("queued");
+    const more = [spawned(last.seq + 1, "implementer", 3)];
+    const state = reduce([...events, ...more]);
+    expect(state.tasks.find((t) => t.id === id)?.stage).toBe("implement");
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", state)),
+    ).toEqual([]);
+    // Replayed after a restart it is the same.
+    expect(replay([...events, ...more]).state?.tasks.find((t) => t.id === id)?.stage).toBe(
+      "implement",
+    );
+  });
+
   it("tasks[].base_sha comes from agent_spawned, survives replay, and a start-ref spawn keeps it", () => {
     const last = events.at(-1) as JournalEvent;
     const at = "2026-10-20T10:00:00.000Z";
