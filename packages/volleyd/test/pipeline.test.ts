@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
-import { worktreeGone } from "../src/daemon";
+import { ranTaskDef, worktreeGone } from "../src/daemon";
 import type { DecisionRecord } from "../src/decisions";
 import type { EvidenceJson } from "../src/evidence";
 import { roleSpawnHold } from "../src/pipeline";
@@ -1313,6 +1313,18 @@ describe("worktreeGone (the daemon's answer to the driver)", () => {
     expect(worktreeGone({ host: "local" }, "/wt/T1", present)).toBe(false);
     // A remote box's worktree is never probed from here.
     expect(worktreeGone({ host: "box" }, "/wt/T1", missing)).toBe(false);
+  });
+  it("treats an unplaced `host: auto` task as local, as execFor falls back to the local host", () => {
+    expect(worktreeGone({ host: "auto" }, "/wt/T1", () => false)).toBe(true);
+  });
+  it("answers from the host the task ran on, not a later plan version's host (#323)", () => {
+    // Spawned locally; a later plan version names a remote box. execFor keeps the local exec,
+    // so the removed local worktree must read as gone.
+    const rec = {
+      wave: { tasks: { T1: { id: "T1", host: "box" } } },
+      state: { tasks: [{ id: "T1", host_actual: "local" }] },
+    } as unknown as Parameters<typeof ranTaskDef>[0];
+    expect(worktreeGone(ranTaskDef(rec, "T1"), "/wt/T1", () => false)).toBe(true);
   });
   it("probes the real filesystem by default", () => {
     expect(worktreeGone({ host: "local" }, process.cwd())).toBe(false);
