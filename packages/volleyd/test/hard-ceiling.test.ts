@@ -236,6 +236,18 @@ describe("hard ceiling with a supervised agent", () => {
     expect(status.stdout).toContain("hard ceiling: 1/12");
   });
 
+  it("a relaunch spawning while the role's old agent is still supervised counts both", async () => {
+    await s.daemon.tick();
+    const spawning = (s.daemon as unknown as { spawning: Set<string> }).spawning;
+    spawning.add("w1/T1/implementer");
+    try {
+      const cli = await runCli(["admission"], s.env.env);
+      expect(cli.stdout).toContain("ceiling: 2/12 live agents · 1 launching · by wave: w1 2");
+    } finally {
+      spawning.delete("w1/T1/implementer");
+    }
+  });
+
   it("a task awaiting a decision counts its agent while it is live, nothing once it retires", async () => {
     await s.status("blocked", { reason: "stuck" });
     await s.event("decision_opened");

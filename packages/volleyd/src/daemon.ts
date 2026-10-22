@@ -6013,23 +6013,21 @@ export class Daemon {
    * its next agent: queued for its implementer (backed off too; not once refused for good), or
    * between roles in implement…fixup with a role still to come (`nextRoleComes`). A task's stage
    * counts nothing by itself otherwise: a task awaiting a decision, blocked, or in a paused,
-   * stopped or ended wave holds a slot only while one of its agents is live. `launching` is the part not
-   * supervised yet, held slots included. `held: false` counts only the agents running or
-   * starting, no held slot: what a spawn checks (`spawnAdmitted`, a pipeline role's, a release
-   * stage's), so tasks holding more slots than the ceiling never hold each other's spawns.
+   * stopped or ended wave holds a slot only while one of its agents is live. `launching` is the
+   * part not supervised yet, held slots included. `held: false` counts only the agents running
+   * or starting, no held slot: what a spawn checks (`spawnAdmitted`, a pipeline role's, a
+   * release stage's), so tasks holding more slots than the ceiling never hold each other's
+   * spawns. A parallel step holds one slot while it waits, though it runs an agent per role.
    */
   private ceilingCount(held = true): CeilingCount {
     const byWave: Record<string, number> = {};
     const add = (wave: WaveId) => {
       byWave[wave] = (byWave[wave] ?? 0) + 1;
     };
-    const roles = new Set<string>();
+    const launched = new Set<string>();
     const liveTasks = new Set<string>();
     let launching = 0;
-    const seen = (key: string) => {
-      roles.add(key);
-      liveTasks.add(key.slice(0, key.lastIndexOf("/")));
-    };
+    const seen = (key: string) => liveTasks.add(key.slice(0, key.lastIndexOf("/")));
     for (const a of this.supervised.values()) {
       add(a.wave);
       seen(`${a.wave}/${a.task}/${a.role}`);
@@ -6037,11 +6035,14 @@ export class Daemon {
     for (const a of this.launching.values()) {
       add(a.wave);
       launching++;
+      launched.add(`${a.wave}/${a.task}/${a.role}`);
       seen(`${a.wave}/${a.task}/${a.role}`);
     }
-    // A spawn's key is in `spawning` until its launch half returns, after it joined `launching`.
+    // A spawn's key is in `spawning` until its launch half returns, after it joined `launching`
+    // (it leaves `spawning` before it can be supervised). A relaunch's spawn counts beside the
+    // role's old agent while that one is still supervised.
     for (const key of this.spawning) {
-      if (roles.has(key)) continue;
+      if (launched.has(key)) continue;
       seen(key);
       add(key.split("/")[0] ?? "");
       launching++;
@@ -6049,8 +6050,9 @@ export class Daemon {
     for (const [wave, log] of held ? this.waves : []) {
       const rec = log.record;
       if (rec.state?.status !== "running") continue;
+      const tasks = new Map(rec.state.tasks.map((x) => [x.id, x]));
       for (const id of rec.admitted) {
-        const t = rec.state.tasks.find((x) => x.id === id);
+        const t = tasks.get(id);
         if (t === undefined || liveTasks.has(`${wave}/${id}`)) continue;
         if (awaitsImplementer(t)) {
           if (this.refused.get(`${wave}/${id}/implementer`)?.until === Number.POSITIVE_INFINITY)
