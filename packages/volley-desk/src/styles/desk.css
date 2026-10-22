@@ -264,16 +264,28 @@ code {
 .win--compact .win-bar .chip {
   max-width: 72px;
 }
-/* The autopilot chip never ellipsizes: the full sentence, or in a compact window its tokens. */
-.win-bar .chip--autopilot {
+/* The autopilot chip never ellipsizes: the full sentence, or in a compact window its tokens. The compact
+   selector outranks the 72px cap above (same specificity, later). */
+.win-bar .chip--autopilot,
+.win--compact .win-bar .chip--autopilot {
   max-width: none;
+  text-overflow: clip;
 }
-.chip--autopilot .ap-short,
-.win--compact .win-bar .chip--autopilot .ap-full {
+.chip--autopilot .ap-short {
   display: none;
 }
 .win--compact .win-bar .chip--autopilot .ap-short {
   display: inline;
+}
+/* Visually hidden, not display:none: the tokens are aria-hidden, so the sentence is what a screen reader reads. */
+.win--compact .win-bar .chip--autopilot .ap-full {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 /* The machine chip keeps its name readable ("this machine"): a phone cannot hover for the tooltip. */
 .win--compact .win-bar .m-chip {

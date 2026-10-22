@@ -51,16 +51,28 @@ describe("the autopilot chip never truncates mid-word", () => {
     return desk.slice(at, desk.indexOf("}\n", at));
   };
 
-  it("lifts the title-bar chip width cap", () => {
-    expect(deskRule(".win-bar .chip--autopilot")).toMatch(/max-width: none;/);
+  it("lifts the title-bar chip width cap, in a compact window too", () => {
+    // The compact selector matches `.win--compact .win-bar .chip` (0,3,0) and comes after it, so it wins.
+    const lift = deskRule(".win-bar .chip--autopilot,\n.win--compact .win-bar .chip--autopilot");
+    expect(lift).toMatch(/max-width: none;/);
+    expect(lift).toMatch(/text-overflow: clip;/);
+    expect(desk.indexOf(".win--compact .win-bar .chip {")).toBeLessThan(
+      desk.indexOf(".win--compact .win-bar .chip--autopilot {"),
+    );
   });
 
   it("shows the full sentence, and only the tokens in a compact window", () => {
-    expect(desk).toMatch(
-      /\.chip--autopilot \.ap-short,\n\.win--compact \.win-bar \.chip--autopilot \.ap-full \{\n {2}display: none;/,
-    );
+    expect(deskRule(".chip--autopilot .ap-short")).toMatch(/display: none;/);
     expect(deskRule(".win--compact .win-bar .chip--autopilot .ap-short")).toMatch(
       /display: inline;/,
     );
+  });
+
+  it("keeps the full sentence readable by a screen reader in a compact window", () => {
+    // Visually hidden, not display:none: the tokens are aria-hidden, so the sentence is the chip's only text.
+    const hidden = deskRule(".win--compact .win-bar .chip--autopilot .ap-full");
+    expect(hidden).not.toMatch(/display: none;/);
+    expect(hidden).toMatch(/position: absolute;/);
+    expect(hidden).toMatch(/clip: rect\(0 0 0 0\);/);
   });
 });

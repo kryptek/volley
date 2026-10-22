@@ -250,7 +250,6 @@ export function WaveWindow(p: WaveWindowProps) {
         <span
           className={`chip chip--autopilot${s.autopilot.enabled ? "" : " chip--off"}`}
           title={autopilotChip(s.autopilot)}
-          aria-label={autopilotChip(s.autopilot)}
         >
           <span className="ap-full">{autopilotChip(s.autopilot)}</span>
           <span className="ap-short" aria-hidden="true">

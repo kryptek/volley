@@ -76,11 +76,13 @@ describe("the wave window's autopilot chip", () => {
     expect(chip.querySelector(".ap-full")).toHaveTextContent("autopilot on · 4 auto · 1 escalated");
   });
 
-  it("carries the full sentence as its title and accessible name, never only the clipped text", () => {
+  it("carries the full sentence as its title and readable text, never only the clipped text", () => {
     const { container } = renderWave(wave());
     const chip = container.querySelector(".chip--autopilot") as HTMLElement;
     expect(chip).toHaveAttribute("title", "autopilot on · 4 auto · 1 escalated");
-    expect(chip).toHaveAttribute("aria-label", "autopilot on · 4 auto · 1 escalated");
+    // aria-label is prohibited on a generic <span>: the sentence is the chip's own text instead.
+    expect(chip).not.toHaveAttribute("aria-label");
+    expect(chip.querySelector(".ap-full")).not.toHaveAttribute("aria-hidden");
   });
 
   it("is three glyph-and-number tokens in a compact window", () => {
