@@ -245,6 +245,7 @@ export const DECISION_KINDS = [
   "pr_head_moved",
   "spawn_budget_exhausted",
   "account_limit",
+  "agent_account_limit",
   "machine_down",
   "merge_refused",
   "release_go",

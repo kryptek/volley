@@ -18,6 +18,7 @@ import {
   withPreface,
 } from "./brief";
 import { autoCompactWindowTokens } from "./claude/context-window";
+import type { Ranked } from "./claude/usage";
 import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { waveDecisionId } from "./decisions";
@@ -113,7 +114,18 @@ export interface SpawnRequest {
    * The Claude account profile the agent runs under (claude/profiles.ts selectAccount): `dir` is
    * its `CLAUDE_CONFIG_DIR`, null (or no `account`) the primary profile.
    */
-  account?: { id: string; dir: string | null };
+  account?: { id: string; dir: string | null; machine?: string };
+  /**
+   * Why the spawn runs under its account (`account_chosen`, journaled right before
+   * `agent_spawned`, whose `account_why` repeats `why`): without the attempt, which the spawn adds.
+   */
+  accountChosen?: {
+    account: string;
+    machine: string;
+    source: string;
+    why: string;
+    candidates: readonly Ranked[];
+  };
   /** Appended to the brief: an account move's resume note (claude/move.ts). */
   resumeNote?: string;
   /**
@@ -226,7 +238,8 @@ export type DecisionKind =
 export interface RemoteTrust {
   host: string;
   target: string;
-  read: () => Promise<Record<string, unknown> | null>;
+  /** The box's folder trust: its `~/.claude.json`, or a profile's (`configDir`) there. */
+  read: (configDir?: string) => Promise<Record<string, unknown> | null>;
 }
 
 /** A decision a spawn opens; `id` is the base id (the store may suffix a re-opened one). */
@@ -340,7 +353,7 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
     const open = openDecisionFor(deps.openDecisions, trustId(ctx));
     const cfg =
       deps.remoteTrust !== undefined
-        ? await deps.remoteTrust.read()
+        ? await deps.remoteTrust.read(remoteProfileOf(req))
         : readClaudeJson(claudeJsonOf(ctx));
     const trusted = isRepoTrusted(cfg, ctx.root);
     if (!trusted) {
@@ -413,6 +426,10 @@ const accountId = (req: SpawnRequest) => req.account?.id ?? "primary";
 
 /** A Claude account profile's directory, or undefined for the primary. */
 const profileDirOf = (req: SpawnRequest) => req.account?.dir ?? undefined;
+
+/** A profile on a paired machine: its dir there (nothing of it is on this machine). */
+const remoteProfileOf = (req: SpawnRequest) =>
+  (req.account?.machine ?? "local") !== "local" ? profileDirOf(req) : undefined;
 
 /** Folder trust is per profile: its own `.claude.json` (the primary's is `claudeJsonPath`). */
 const claudeJsonOf = (ctx: Ctx) => {
@@ -596,7 +613,12 @@ async function launchAttempt(
     await runBriefGate(host.exec, deps.briefGate, briefPath, ctx.worktree);
 
   const profile = profileDirOf(req);
-  if (profile !== undefined && deps.prepareAccount !== undefined) {
+  // Sharing and the MCP sync are this machine's: nothing is copied to a paired machine's profile.
+  if (
+    profile !== undefined &&
+    remoteProfileOf(req) === undefined &&
+    deps.prepareAccount !== undefined
+  ) {
     try {
       await deps.prepareAccount({ id: accountId(req), dir: profile });
     } catch (e) {
@@ -642,8 +664,16 @@ async function launchAttempt(
         ? { env: host.launchEnv({ agent_id: agentId, namespace: ctx.namespace }) }
         : {}),
     });
-    // The fence starts (or types) the launch command only with this seal of what it runs.
-    const launch = sealLaunchScript(ctx.worktree, script);
+    // The fence starts (or types) the launch command only with this seal of what it runs; a
+    // paired machine's profile is admitted for that machine's worktrees only.
+    const machine = req.account?.machine ?? "local";
+    const launch = sealLaunchScript(
+      ctx.worktree,
+      script,
+      machine !== "local"
+        ? { name: machine, worktree_root: deps.tunables.worktree_root }
+        : undefined,
+    );
     await host.writeFile(launchScriptPath(ctx.worktree), script, 0o700);
 
     // Subscribe before launching, so no hook signal can be missed.
@@ -679,6 +709,12 @@ async function launchAttempt(
       workspace = found.workspace;
       adopted = true;
     }
+    if (req.accountChosen !== undefined)
+      await deps.journal({
+        type: "account_chosen",
+        task: req.task,
+        data: { task: req.task, role: req.role, attempt, ...req.accountChosen },
+      });
     await deps.journal({
       type: "agent_spawned",
       task: req.task,
@@ -701,6 +737,7 @@ async function launchAttempt(
         issue: { number: issue.number, title: issue.title, url: issue.url },
         credentials: creds !== undefined ? "minted" : "none",
         claude_account: accountId(req),
+        ...(req.accountChosen !== undefined ? { account_why: req.accountChosen.why } : {}),
         ...(ctx.lock !== undefined ? { lock: ctx.lock.path } : {}),
         ...(recovered !== undefined
           ? { recovered_from: recovered.from, recovery: recovered.reason }
@@ -1126,8 +1163,13 @@ const trustId = (ctx: Ctx) =>
   trustDecisionId(
     ctx.req.wave.wave,
     ctx.root,
-    ctx.deps.remoteTrust?.target ??
-      (profileDirOf(ctx.req) !== undefined ? `claude-account:${accountId(ctx.req)}` : undefined),
+    ctx.deps.remoteTrust !== undefined
+      ? remoteProfileOf(ctx.req) !== undefined
+        ? `${ctx.deps.remoteTrust.target}:claude-account:${accountId(ctx.req)}`
+        : ctx.deps.remoteTrust.target
+      : profileDirOf(ctx.req) !== undefined
+        ? `claude-account:${accountId(ctx.req)}`
+        : undefined,
   );
 
 /** The repo_untrusted question, naming the host and the Claude account where it is answered. */
@@ -1170,7 +1212,9 @@ async function warnStrayVolley(ctx: Ctx, agentId: string, attempt: number): Prom
   const { deps, req } = ctx;
   const profilePath = deps.remoteTrust !== undefined ? "~/.claude.json" : claudeJsonOf(ctx);
   const profile =
-    deps.remoteTrust !== undefined ? await deps.remoteTrust.read() : readClaudeJson(profilePath);
+    deps.remoteTrust !== undefined
+      ? await deps.remoteTrust.read(remoteProfileOf(req))
+      : readClaudeJson(profilePath);
   const mcpJson = join(ctx.worktree, ".mcp.json");
   const raw =
     deps.host.readFile !== undefined

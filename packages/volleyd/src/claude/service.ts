@@ -15,6 +15,7 @@ import {
   PRIMARY_ACCOUNT,
   type SelectedAccount,
   addAccount,
+  machineCandidates,
   markSignedIn,
   profileDir,
   readRegistry,
@@ -36,6 +37,15 @@ import {
   syncMcp,
 } from "./sharing";
 import { SUPERSEDED, type SigninEvent, parseAuthStatus, profileEnv, runSignin } from "./signin";
+import { MODEL_FAMILIES, type Ranked } from "./usage";
+
+const unranked = (account: string): Ranked => ({
+  account,
+  headroom: null,
+  five_hour_pct: null,
+  weekly_pct: null,
+  agents: 0,
+});
 
 /**
  * The daemon's Claude account profiles: the control ops (`claude_accounts`,
@@ -70,10 +80,10 @@ export interface ClaudeServiceDeps {
   signinPollMs?: number;
   signinTimeoutMs?: number;
   /**
-   * Usage metering's pick among `candidates` (claude/usage.ts mostHeadroom), for
-   * `most_headroom`; null when no candidate has usage data.
+   * Usage metering's ranking of `candidates` (usage-record keys) for an agent of `model`
+   * (claude/usage.ts rankAccounts): the balancing rule a spawn picks by.
    */
-  headroom?: (candidates: readonly string[]) => string | null;
+  rank?: (candidates: readonly string[], model: string | null) => Ranked[];
   /**
    * The primary's plan or sign-in state changed (`claude_accounts` asked): its usage record is
    * out of date.
@@ -131,22 +141,53 @@ export class ClaudeService {
   }
 
   /** The account a spawn runs under (profiles.ts selectAccount over the current registry). */
-  select(want: { task?: string; wave?: string; configDefault?: string | null }): SelectedAccount {
-    const headroom = this.d.headroom;
+  select(want: {
+    task?: string;
+    wave?: string;
+    configDefault?: string | null;
+    machine?: string;
+    model?: string | null;
+  }): SelectedAccount {
+    const rank = this.d.rank;
     return selectAccount(
       this.d.root,
       () => readRegistry(this.d.root),
       want,
-      headroom !== undefined ? () => headroom(this.candidates()) : undefined,
+      rank !== undefined ? (c) => rank(c, want.model ?? null) : undefined,
     );
   }
 
-  /** Accounts a local agent can start under: the primary, then every signed-in local profile. */
-  candidates(): string[] {
-    const ready = this.registry().filter(
-      (a) => a.machine === LOCAL_MACHINE && a.signed_in_at !== undefined,
-    );
-    return [PRIMARY_ACCOUNT, ...ready.map((a) => a.id)];
+  /**
+   * Accounts an agent on `machine` can start under, as usage-record keys: the primary, then every
+   * signed-in profile kept for that machine (`primary@<name>`, `<id>@<name>` on a paired one).
+   */
+  candidates(machine: string = LOCAL_MACHINE): string[] {
+    return machineCandidates({ version: 1, accounts: this.registry() }, machine);
+  }
+
+  /**
+   * `claude_balance { model?, machine? }`: per machine (`local` and each of `machines`), the
+   * candidates ranked for `model` (default: each family's ranking's pick) — pure over the
+   * current records.
+   */
+  balance(p: Record<string, unknown>, machines: readonly string[]): Reply {
+    const model = typeof p.model === "string" && p.model !== "" ? p.model : null;
+    const only = typeof p.machine === "string" && p.machine !== "" ? p.machine : null;
+    const rank = this.d.rank ?? ((c: readonly string[]) => c.map((account) => unranked(account)));
+    const names = [LOCAL_MACHINE, ...machines.filter((m) => m !== LOCAL_MACHINE)];
+    if (only !== null && !names.includes(only)) return { ok: false, error: `no machine '${only}'` };
+    const out = names
+      .filter((n) => only === null || n === only)
+      .map((name) => {
+        const cands = this.candidates(name);
+        const picks: Record<string, string | null> = {};
+        for (const f of model !== null ? [model] : MODEL_FAMILIES) {
+          const key = model !== null ? "model" : f;
+          picks[key] = rank(cands, model ?? f)[0]?.account ?? null;
+        }
+        return { name, candidates: rank(cands, model), picks };
+      });
+    return { ok: true, result: { ...(model !== null ? { model } : {}), machines: out } };
   }
 
   /** The registry account whose profile is `dir` (a usage sample's `config_dir`), if any. */
@@ -469,7 +510,13 @@ export class ClaudeService {
         publish: async (e) => {
           if (e.type === "claude_signin_done") {
             const { type: _t, acct: _a, ...facts } = e;
-            markSignedIn(this.d.root, a.id, facts, new Date(r.now()).toISOString());
+            const home = this.homes.get(a.machine);
+            markSignedIn(
+              this.d.root,
+              a.id,
+              { ...facts, ...(home !== undefined ? { dir: remoteProfileDir(home, a.id) } : {}) },
+              new Date(r.now()).toISOString(),
+            );
           }
           await r.publish(e);
         },

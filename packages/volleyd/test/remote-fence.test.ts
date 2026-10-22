@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { addAccount, markSignedIn } from "../src/claude/profiles";
 import { renderBrowserHelper, renderSigninScript } from "../src/claude/signin-script";
 import { exec } from "../src/exec";
 import {
@@ -17,6 +18,7 @@ import {
 } from "../src/fence";
 import { LAUNCH_COMMAND, renderLaunchScript, renderMcpConfig } from "../src/launch";
 import { tempDirForAll } from "./helpers/tmp";
+import { stubEnv } from "./helpers/with-env";
 
 /** The one local argv a remote command runs as. */
 const SSH = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"];
@@ -1055,5 +1057,87 @@ describe("a profile the supervisor created on a paired machine (#283): the REMOT
     expect(allowed(step("chmod", "755", PROFILE))).toThrow(FenceError);
     expect(allowed(step("chmod", "700", "/home/u/.volley/claude"))).toThrow(FenceError);
     expect(allowed(step("chmod", "700", "/home/u/.volley/claude/../work"))).toThrow(FenceError);
+  });
+});
+
+describe("a profile on a paired machine in its launch.sh (account balancing)", () => {
+  const shared = tempDirForAll("volley-remote-profile-");
+  const DIR = "/home/u/.volley/claude/work";
+  const HOST = { name: "peer-a", worktree_root: "/home/u/wt" };
+  const WT = "/home/u/wt/w1/T1-implementer";
+  let restore: () => void;
+  beforeAll(() => {
+    const root = join(shared(), "claude");
+    restore = stubEnv({ VOLLEY_CLAUDE_DIR: root });
+    addAccount(root, { label: "work", machine: "peer-a" }, "2026-10-21T00:00:00.000Z");
+    markSignedIn(root, "work", { dir: DIR }, "2026-10-21T00:00:00.000Z");
+    addAccount(root, { label: "unsigned", machine: "peer-a" }, "2026-10-21T00:00:00.000Z");
+  });
+  afterAll(() => restore());
+
+  const script = (configDir: string, worktree = WT) =>
+    renderLaunchScript({
+      hooksDir: "/home/u/src/volley/packages/volley-hooks",
+      model: "claude-opus-5-5",
+      agentId: "w1-t1-implementer-1",
+      worktree,
+      claudeConfigDir: configDir,
+      env: {
+        VOLLEY_BROKER_URL: "mqtt://127.0.0.1:21883",
+        VOLLEY_NAMESPACE: "default",
+        VOLLEY_AGENT_ID: "w1-t1-implementer-1",
+      },
+    });
+  const write = (content: string, worktree = WT): RemoteStep => ({
+    argv: ["base64", "-d"],
+    stdin: Buffer.from(content).toString("base64"),
+    stdout: `${worktree}/.volley/launch.sh`,
+  });
+  const onHost = (s: RemoteStep, host: typeof HOST | null = HOST) => ({
+    remote: { steps: [s], ...(host !== null ? { host } : {}) },
+  });
+
+  it("seals and writes the registry's recorded dir for a worktree under the host's root", () => {
+    expect(() => sealLaunchScript(WT, script(DIR), HOST)).not.toThrow();
+    expect(() => assertAllowed(SSH, onHost(write(script(DIR))))).not.toThrow();
+  });
+
+  it("refuses a local worktree, another host, another dir, an unsigned profile and ~/.claude", () => {
+    const local = "/srv/wt/w1/T1-implementer";
+    expect(() => sealLaunchScript(local, script(DIR, local), HOST)).toThrow(FenceError);
+    expect(() => assertAllowed(SSH, onHost(write(script(DIR, local), local)))).toThrow(FenceError);
+    const other = { name: "peer-b", worktree_root: "/home/u/wt" };
+    expect(() => sealLaunchScript(WT, script(DIR), other)).toThrow(FenceError);
+    expect(() => assertAllowed(SSH, onHost(write(script(DIR)), other))).toThrow(FenceError);
+    expect(() => sealLaunchScript(WT, script("/home/v/.volley/claude/work"), HOST)).toThrow(
+      FenceError,
+    );
+    expect(() => sealLaunchScript(WT, script("/home/u/.volley/claude/unsigned"), HOST)).toThrow(
+      FenceError,
+    );
+    expect(() => sealLaunchScript(WT, script("/home/u/.claude"), HOST)).toThrow(FenceError);
+    // no host on the script: the local profile rule, which this dir never passes
+    expect(() => assertAllowed(SSH, onHost(write(script(DIR)), null))).toThrow(FenceError);
+  });
+
+  it("the trust write in that profile's own .claude.json, by absolute path", () => {
+    const steps: RemoteStep[] = [
+      {
+        argv: ["cmp", "-s", "-", `${DIR}/.claude.json`],
+        stdin: Buffer.from("{}").toString("base64"),
+      },
+      {
+        argv: ["base64", "-d"],
+        stdin: Buffer.from('{"projects":{}}').toString("base64"),
+        stdout: `${DIR}/.claude.json.volleyd.tmp`,
+      },
+      step("mv", "-f", `${DIR}/.claude.json.volleyd.tmp`, `${DIR}/.claude.json`),
+    ];
+    expect(() => assertAllowed(SSH, { remote: { steps } })).not.toThrow();
+    for (const bad of [
+      step("mv", "-f", `${DIR}/.claude.json.volleyd.tmp`, "/home/u/.volley/claude/x/.claude.json"),
+      step("mv", "-f", "/tmp/.claude.json.volleyd.tmp", "/tmp/.claude.json"),
+    ])
+      expect(() => assertAllowed(SSH, remote(bad))).toThrow(FenceError);
   });
 });

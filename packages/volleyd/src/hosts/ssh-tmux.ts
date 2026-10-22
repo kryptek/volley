@@ -90,10 +90,13 @@ export interface RemoteHost extends Host {
   /** True / false for a clone / none at `repo`; throws LAUNCH_FAILED when ssh itself fails. */
   repoExists(): Promise<boolean>;
   tunnelUp(): Promise<boolean>;
-  /** The box's folder trust; null when it has no readable `~/.claude.json`; throws if ssh fails. */
-  readTrust(): Promise<Record<string, unknown> | null>;
-  /** The owner's `trust` answer, recorded in the box's own `~/.claude.json`. */
-  recordTrust(root: string): Promise<void>;
+  /**
+   * The box's folder trust (or, with `configDir`, that profile's there); null when it has no
+   * readable `.claude.json`; throws if ssh fails.
+   */
+  readTrust(configDir?: string): Promise<Record<string, unknown> | null>;
+  /** The owner's `trust` answer, recorded in the box's own `~/.claude.json` (or the profile's). */
+  recordTrust(root: string, configDir?: string): Promise<void>;
   /** A file on the box; null when it does not exist; throws when ssh fails. */
   readFile(path: string): Promise<string | null>;
   /**
@@ -185,7 +188,10 @@ export class SshTmuxHost implements RemoteHost {
         "-s",
       ],
       {
-        remote: { steps },
+        remote: {
+          steps,
+          host: { name: this.spec.name, worktree_root: this.spec.worktree_root },
+        },
         timeoutMs: opts.timeoutMs ?? DAEMON_DEFAULTS.remote_exec_timeout_ms,
         ...(opts.consent !== undefined ? { consent: opts.consent } : {}),
         ...(opts.launch !== undefined ? { launch: opts.launch } : {}),
@@ -607,8 +613,8 @@ export class SshTmuxHost implements RemoteHost {
    * nothing else from that file: `{ projects: { <dir>: { hasTrustDialogAccepted: true } } }`.
    * Null when it cannot be read.
    */
-  async readTrust(): Promise<Record<string, unknown> | null> {
-    const cfg = await this.readClaudeJson();
+  async readTrust(configDir?: string): Promise<Record<string, unknown> | null> {
+    const cfg = (await this.readClaudeJsonText(configDir))?.cfg ?? null;
     if (cfg === null) return null;
     const projects: Record<string, { hasTrustDialogAccepted: true }> = {};
     const table = (cfg as { projects?: unknown } | null)?.projects;
@@ -624,17 +630,24 @@ export class SshTmuxHost implements RemoteHost {
     return { projects };
   }
 
-  /** The box's whole `~/.claude.json` and its text; null when absent or not a JSON object. */
-  private async readClaudeJson(): Promise<Record<string, unknown> | null> {
-    return (await this.readClaudeJsonText())?.cfg ?? null;
-  }
-
-  private async readClaudeJsonText(): Promise<{
+  /**
+   * The box's whole `~/.claude.json` (or a profile's, in `configDir`) and its text; null when
+   * absent or not a JSON object.
+   */
+  private async readClaudeJsonText(configDir?: string): Promise<{
     text: string;
     cfg: Record<string, unknown>;
   } | null> {
-    // bash -s starts in the login user's home directory.
-    const text = await this.readFile(REMOTE_CLAUDE_JSON);
+    // bash -s starts in the login user's home directory; a profile's is read in its own dir.
+    const text =
+      configDir === undefined
+        ? await this.readFile(REMOTE_CLAUDE_JSON)
+        : await this.run([{ argv: ["cat", REMOTE_CLAUDE_JSON], cwd: configDir }])
+            .catch(() => null)
+            .then((r) => {
+              if (r === null || transportFailed(r)) throw this.sshFailed(`read ${configDir}`, r);
+              return r.code === 0 ? r.stdout : null;
+            });
     if (text === null) return null;
     try {
       const cfg = JSON.parse(text) as unknown;
@@ -653,9 +666,16 @@ export class SshTmuxHost implements RemoteHost {
    * rewrites the file often, so a changed file is re-read and the write retried. Called only on
    * the owner's explicit `trust` answer.
    */
-  async recordTrust(root: string): Promise<void> {
+  async recordTrust(root: string, configDir?: string): Promise<void> {
+    // A profile's files by absolute path: a write step does not run in a cwd.
+    const json =
+      configDir !== undefined ? posix.join(configDir, REMOTE_CLAUDE_JSON) : REMOTE_CLAUDE_JSON;
+    const tmp =
+      configDir !== undefined
+        ? posix.join(configDir, REMOTE_CLAUDE_JSON_TMP)
+        : REMOTE_CLAUDE_JSON_TMP;
     for (let i = 0; i < DAEMON_DEFAULTS.trust_write_attempts; i++) {
-      const cur = await this.readClaudeJsonText();
+      const cur = await this.readClaudeJsonText(configDir);
       if (cur === null) {
         throw new Error(
           `no readable ~/.claude.json on ${this.spec.target}: run claude there once, then retry`,
@@ -663,9 +683,9 @@ export class SshTmuxHost implements RemoteHost {
       }
       const next = `${JSON.stringify(withTrust(cur.cfg, root), null, 2)}\n`;
       const r = await this.run([
-        { argv: ["cmp", "-s", "-", REMOTE_CLAUDE_JSON], stdin: b64(cur.text) },
-        { argv: ["base64", "-d"], stdin: b64(next), stdout: REMOTE_CLAUDE_JSON_TMP },
-        { argv: ["mv", "-f", REMOTE_CLAUDE_JSON_TMP, REMOTE_CLAUDE_JSON] },
+        { argv: ["cmp", "-s", "-", json], stdin: b64(cur.text) },
+        { argv: ["base64", "-d"], stdin: b64(next), stdout: tmp },
+        { argv: ["mv", "-f", tmp, json] },
       ]).catch(() => null);
       if (r === null || transportFailed(r)) throw this.sshFailed("trust write", r);
       if (r.code === 0) return;

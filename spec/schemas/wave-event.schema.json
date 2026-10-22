@@ -63,6 +63,7 @@
             "claude_signin_failed",
             "claude_profile_synced",
             "agent_account_moved",
+            "account_chosen",
             "relaunched",
             "ci_pending",
             "ci_green",
@@ -132,6 +133,118 @@
     },
     {
       "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "account_chosen" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "description": "The Claude account a spawn runs under and why (spec section 4.6.11), journaled right before its agent_spawned. Names no e-mail.",
+                    "required": [
+                      "task",
+                      "role",
+                      "attempt",
+                      "account",
+                      "machine",
+                      "source",
+                      "why",
+                      "candidates"
+                    ],
+                    "properties": {
+                      "task": {
+                        "type": "string",
+                        "pattern": "^([A-Za-z0-9][A-Za-z0-9_-]{0,62}|_release)$"
+                      },
+                      "role": { "type": "string", "minLength": 1 },
+                      "attempt": { "type": "integer", "minimum": 1 },
+                      "account": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}(@[a-z0-9][a-z0-9_.-]{0,62})?$"
+                      },
+                      "machine": { "$ref": "wave-state.schema.json#/$defs/hostName" },
+                      "source": {
+                        "enum": ["task", "wave", "config", "balance", "move", "default"]
+                      },
+                      "why": { "type": "string", "minLength": 1 },
+                      "candidates": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "account",
+                            "five_hour_pct",
+                            "weekly_pct",
+                            "agents",
+                            "headroom"
+                          ],
+                          "properties": {
+                            "account": {
+                              "type": "string",
+                              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}(@[a-z0-9][a-z0-9_.-]{0,62})?$"
+                            },
+                            "five_hour_pct": {
+                              "oneOf": [
+                                { "type": "number", "minimum": 0, "maximum": 100 },
+                                { "type": "null" }
+                              ]
+                            },
+                            "weekly_pct": {
+                              "oneOf": [
+                                { "type": "number", "minimum": 0, "maximum": 100 },
+                                { "type": "null" }
+                              ]
+                            },
+                            "model_weekly_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+                            "agents": { "type": "integer", "minimum": 0 },
+                            "headroom": {
+                              "oneOf": [
+                                { "type": "number", "minimum": 0, "maximum": 100 },
+                                { "type": "null" }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "agent_account_moved" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "decision_id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+                        "description": "The agent_account_limit decision whose answer moved it (absent: an agent_move_account request)."
+                      },
+                      "why": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "That decision's one-line reason."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
         {
           "if": { "properties": { "type": { "const": "task_placed" } }, "required": ["type"] },
           "then": {

@@ -31,6 +31,8 @@ const HELP = `Usage:
   volley claude list [--json] [--show-email]              Accounts grouped by e-mail, their machines, usage, sharing
   volley claude sync [<acct>]                             Re-apply sharing.yaml, re-sync MCP servers
   volley claude move <agent-id> <acct>                    Stop an agent and respawn it under <acct>
+                                                          (an account of the agent's own machine:
+                                                          for a paired machine, a profile kept for it)
 
 Each profile is its own Claude Code CLAUDE_CONFIG_DIR (default ~/.volley/claude/<acct>). add and
 signin print a sign-in URL: open it in a browser on the supervisor's machine. When the URL is the

@@ -335,10 +335,11 @@ describe("daemon: restart reconciliation", () => {
     const brief = readFileSync(join(launch?.cwd ?? "", ".volley", "brief.md"), "utf-8");
     expect(brief).toContain("# Merge for issue #42");
     expect(brief).not.toContain("# Rebase for issue");
-    const spawned = s
-      .journal()
-      .filter((e) => e.type === "agent_spawned" && e.data.role === "rebase")
-      .at(-1);
+    // agent_spawned is journaled after the launch returns (account_chosen right before it):
+    // wait for the respawn's own record, not the launch.
+    const spawned = await s.event(
+      (e) => e.type === "agent_spawned" && e.data.role === "rebase" && e.data.agent_id !== gone,
+    );
     expect(spawned?.data).toMatchObject({
       start: "abc123",
       worktree_attempt: 1,

@@ -125,6 +125,8 @@ describe("usage metering (daemon)", () => {
   it("folds samples per account, opens one account_limit decision, and moves the wave only on an answer", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
       daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
     });
 
@@ -194,6 +196,8 @@ describe("usage metering (daemon)", () => {
     const { root, primary, spare } = spareProfile(tempDir("volleyd-usage-"));
     const clock: FakeClock = fakeClock(T0);
     s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
       daemon: { claude: { root, primaryDir: primary }, clock },
       reapGraceMs: 60_000,
     });
@@ -239,6 +243,8 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
   it("an account's windows outlive a restart with nothing running on it", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
       daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
     });
     await publishUsage("other-agent", {
@@ -271,6 +277,8 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
   it("a registry account's record carries its login's email and org; it validates", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
       daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
     });
     await publishUsage("other-agent", {
@@ -291,6 +299,8 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
   it("a sample retained while the daemon was down opens account_limit on restart, with no new sample", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
       daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
     });
     await s.daemon.stop();
@@ -311,6 +321,8 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
   it("a remote host's agent is metered on that host's account, never the local primary", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
       daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
     });
     await s.daemon.stop();
@@ -414,6 +426,8 @@ describe("usage probe readings in machine records (daemon)", () => {
     });
     writeFileSync(join(root, "accounts.json"), JSON.stringify(reg));
     s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
       daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
     });
     await s.daemon.stop();
@@ -474,6 +488,8 @@ describe("usage probe readings in machine records (daemon)", () => {
   it("the supervisor's own record: its default login is primary", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
       daemon: {
         claude: { root, primaryDir: primary },
         clock: fakeClock(T0),

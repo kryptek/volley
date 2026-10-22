@@ -179,6 +179,8 @@ export interface AutopilotConfig {
   ci_fixup_max: number;
   /** Agent questions answered for one run. */
   question_max: number;
+  /** Automatic account moves of one task's role (agent_account_limit). */
+  account_move_max: number;
   /** Multiplier of the derived spawn budget that `raise by <n>` answers may reach. */
   budget_raise_max: number;
   /** How long an answered inbox item stays retained (with `answered`) before it is cleared. */
@@ -605,6 +607,8 @@ export const WAVE_EVENT_TYPES = [
   "claude_signin_failed",
   "claude_profile_synced",
   "agent_account_moved",
+  // Account balancing (claude/usage.ts rankAccounts): the account a spawn runs under and why.
+  "account_chosen",
   // Pipeline / lifecycle round 2: relaunches, CI holds, PR heads moved at a gate, merges outside
   // GitHub's merge button, agents retired without their ack, alarms that no longer hold.
   "relaunched",

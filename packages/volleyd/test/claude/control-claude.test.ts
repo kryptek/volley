@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
-import { addAccount } from "../../src/claude/profiles";
+import { addAccount, readRegistry } from "../../src/claude/profiles";
 import { signinDir } from "../../src/claude/signin";
 import { usageAccountTopic } from "../../src/claude/usage";
 import { ControlClient } from "../../src/control";
@@ -620,10 +620,56 @@ describe("claude_account_add on a paired machine (<acct>@<name>)", () => {
         acct: "work",
         machine: "peer-a",
       });
+      // the profile's dir there is recorded: the launch fence admits exactly it for peer-a
+      expect(readRegistry(t.root).accounts[0]?.dir).toBe(PROFILE);
       const journal = readFileSync(join(env.home, "waves", "_system", "journal.jsonl"), "utf-8");
       expect(journal).not.toContain("oauth/authorize");
       expect(journal).not.toContain("@example.com");
       expect(journal).not.toContain("Example Org");
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("claude_balance ranks each machine's signed-in accounts and names the pick per family", async () => {
+    const t = await peerSetup({ signInAfter: 3 });
+    try {
+      const done = t.waits.event("_system", "claude_signin_done");
+      await t.client.request("claude_account_add", { label: "Work", machine: "peer-a" });
+      await done;
+      const all = await t.client.request("claude_balance", {});
+      expect(all.ok).toBe(true);
+      const { machines } = all.result as {
+        machines: {
+          name: string;
+          candidates: { account: string }[];
+          picks: Record<string, string>;
+        }[];
+      };
+      expect(machines.map((m) => m.name)).toEqual(["local", "peer-a"]);
+      expect(machines[0]?.candidates.map((c) => c.account)).toEqual(["primary"]);
+      // no usage yet: the signed-in profile is offered before the machine's own login
+      expect(machines[1]?.candidates.map((c) => c.account)).toEqual([
+        "work@peer-a",
+        "primary@peer-a",
+      ]);
+      expect(machines[1]?.picks).toEqual({
+        fable: "work@peer-a",
+        opus: "work@peer-a",
+        sonnet: "work@peer-a",
+        haiku: "work@peer-a",
+      });
+      const one = await t.client.request("claude_balance", {
+        model: "claude-fable-1",
+        machine: "peer-a",
+      });
+      expect(one.result).toMatchObject({
+        model: "claude-fable-1",
+        machines: [{ name: "peer-a", picks: { model: "work@peer-a" } }],
+      });
+      expect(await t.client.request("claude_balance", { machine: "nope" })).toMatchObject({
+        ok: false,
+      });
     } finally {
       await t.close();
     }
