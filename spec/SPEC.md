@@ -359,7 +359,7 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 - `spawn_budget_exhausted` — asks about a spawn the wave's spawn budget holds (`raise by <n>` | `cancel`).
 - `account_limit` — carries `acct`, `pct`, `resets_at` and `suggested`; §4.6.12.
 - `machine_down` — wave-level; carries `host`, `down_since`, `tasks` (the wave's unfinished tasks on that host) and optionally `machine` (`down`, the default, | `draining` | `removing` | `removed`), with the options `wait`, `re-place queued tasks` and `cancel` (no `wait` for `removing` and `removed`); §4.6.15.
-- `merge_refused` — the host refused a merge; §4.6.17.
+- `merge_refused` — asks about a task the host refused to merge `autopilot.merge_retry_max` times at one gated head (`retry` | `manual` | `cancel`); §4.6.17.
 - `release_go` — wave-level, offers `go` and `hold`, and carries `stages` (each playbook stage as `{ name, evidence? }`, `evidence` being where its evidence lives); §4.6.19.
 - `stage_go` — wave-level, offers `go`, `skip` and `hold`, and carries `stage` (the owner-gated stage it asks about) and `stages` (the stages verified before it, as `release_go`'s); §4.6.19.
 <!-- /spec-list -->

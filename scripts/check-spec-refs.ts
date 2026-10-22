@@ -132,9 +132,10 @@ export function listProblems(
   const problems: string[] = [];
   const have = new Set(items);
   const want = new Set(expected);
-  for (const [i, item] of items.entries()) {
-    if (items.indexOf(item) !== i) problems.push(`the ${name} list has \`${item}\` twice`);
-  }
+  const seen = new Set<string>();
+  const repeated = new Set<string>();
+  for (const item of items) (seen.has(item) ? repeated : seen).add(item);
+  for (const item of repeated) problems.push(`the ${name} list has \`${item}\` twice`);
   for (const item of want) {
     if (!have.has(item)) problems.push(`the ${name} list lacks \`${item}\` (in ${source})`);
   }
@@ -275,19 +276,25 @@ export function fileProblems(f: string, text: string, known: Set<string>): strin
   return problems;
 }
 
+/** The reservations file's text; null when it does not exist. Any other read error is thrown. */
+export function readReserved(path: string): string | null {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
+}
+
 export function check(): string[] {
   const spec = readFileSync(join(ROOT, SPEC), "utf-8");
   const sections = specSections(spec);
   const known = new Set(sections);
   const problems = numberingProblems(sections).map((p) => `${SPEC}: ${p}`);
   problems.push(...specListProblems(spec, listSources()).map((p) => `${SPEC}: ${p}`));
-  let reserved = "";
-  try {
-    reserved = readFileSync(join(ROOT, RESERVED), "utf-8");
-  } catch {
-    // no reservations
-  }
-  problems.push(...reservationProblems(spec, parseReserved(reserved)));
+  const reserved = readReserved(join(ROOT, RESERVED));
+  if (reserved === null) problems.push(`${RESERVED}: missing, so no reservation is checked`);
+  else problems.push(...reservationProblems(spec, parseReserved(reserved)));
   for (const f of trackedFiles()) {
     if (f === "scripts/check-spec-refs.ts") continue;
     let text: string;

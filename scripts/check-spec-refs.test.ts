@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   citedSections,
@@ -8,12 +8,14 @@ import {
   listProblems,
   numberingProblems,
   parseReserved,
+  readReserved,
   reservationProblems,
   specListItems,
   specListProblems,
   specSections,
   tunableKeys,
 } from "./check-spec-refs";
+import { tempDir } from "./helpers/tmp";
 
 /**
  * `head rest`, joined at runtime: the repo scan reads this file too, so a design-doc citation
@@ -170,6 +172,30 @@ describe("listProblems", () => {
 
   test("equal sets pass, in any order", () => {
     expect(listProblems("kinds", ["b", "a"], ["a", "b"], "x.json")).toEqual([]);
+  });
+
+  test("an item listed three times is named once", () => {
+    expect(listProblems("kinds", ["a", "a", "a"], ["a"], "x.json")).toEqual([
+      "the kinds list has `a` twice",
+    ]);
+  });
+});
+
+describe("readReserved", () => {
+  test("reads the reservations file", () => {
+    const dir = tempDir("volley-spec-refs-");
+    writeFileSync(join(dir, "RESERVED.md"), "| §9.9 | #1 | foo |\n");
+    expect(readReserved(join(dir, "RESERVED.md"))).toBe("| §9.9 | #1 | foo |\n");
+  });
+
+  test("a missing file is reported, not read as no reservations", () => {
+    const dir = tempDir("volley-spec-refs-");
+    expect(readReserved(join(dir, "RESERVED.md"))).toBeNull();
+  });
+
+  test("any other read error is thrown", () => {
+    const dir = tempDir("volley-spec-refs-");
+    expect(() => readReserved(dir)).toThrow();
   });
 });
 
