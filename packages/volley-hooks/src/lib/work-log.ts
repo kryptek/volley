@@ -337,6 +337,21 @@ function writeWorkLog(stateDir: string, log: WorkLog & { session_id: string }, n
   );
 }
 
+/**
+ * A tool call's boundary (SPEC §4.3): its `tool_use_id` and `tool`, from the hook input. PreToolUse
+ * publishes it on every call, outside the work log's window; PostToolUse's heartbeat carries the
+ * same id as the end. Empty when the harness sends no id.
+ */
+export function toolBoundary(input: Record<string, unknown>): {
+  tool_use_id?: string;
+  tool?: string;
+} {
+  const id = input.tool_use_id;
+  if (typeof id !== "string" || id === "") return {};
+  const tool = input.tool_name;
+  return { tool_use_id: id, ...(typeof tool === "string" && tool !== "" ? { tool } : {}) };
+}
+
 /** Whether a tick at `now` may publish, given the last publish. */
 const slotOpen = (last: number | null, now: number) =>
   last === null || now - last >= ACTIVITY_INTERVAL_MS || now < last;

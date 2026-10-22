@@ -1,6 +1,7 @@
 import { constants, createPublicKey, publicEncrypt } from "node:crypto";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SignInGate } from "../src/auth/SignInGate";
 import { Machines, type MachinesProps, sshHost } from "../src/settings/Machines";
 import { CREDENTIALS_STORAGE_KEY } from "../src/store/context";
 import { type ReplyKey, createAuthOps } from "../src/store/control";
@@ -16,6 +17,7 @@ import {
 } from "../src/store/peerOps";
 import { initialState, localAgentCount, reduceAll, resync } from "../src/store/reducer";
 import type { DeskMessage, Envelope, MachinePayload } from "../src/store/types";
+import { connectingFactory } from "./helpers/desk-msgs";
 import { fakePeerOps } from "./helpers/peer-ops";
 
 const NOW = Date.parse("2026-10-19T09:30:00.000Z");
@@ -902,5 +904,39 @@ describe("Settings › Machines", () => {
     await act(flush);
     expect(screen.getByText(/No other machines yet/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "+ Add a machine" })).toBeInTheDocument();
+  });
+});
+
+describe("Machines: the read-only notice links to an admin sign-in (#328)", () => {
+  afterEach(() => localStorage.clear());
+
+  it("a steer session's notice has 'Switch to an admin account', which opens the token entry", async () => {
+    localStorage.setItem(
+      CREDENTIALS_STORAGE_KEY,
+      JSON.stringify({ username: "steer-0123abcd", password: "pw", role: "steer" }),
+    );
+    const ops = fakeOps({ admin: vi.fn(async (): Promise<AdminStatus> => "not-admin") });
+    render(
+      <SignInGate
+        demo={false}
+        env={{}}
+        brokerUrl="ws://broker.test:9001"
+        clientFactory={connectingFactory().make}
+      >
+        <Machines machines={{ "box-a": boxA }} hubUp ops={ops} now={NOW} host="hub.local" />
+      </SignInGate>,
+    );
+    await act(flush);
+    const notice = screen.getByText(/takes an admin account/).closest("p") as HTMLElement;
+    const link = within(notice).getByRole("button", { name: "Switch to an admin account" });
+    fireEvent.click(link);
+    expect(screen.getByRole("dialog", { name: "Switch account" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Sign-in link or token")).toBeInTheDocument();
+  });
+
+  it("without a sign-in gate (demo) the notice has no link", async () => {
+    setup({ ops: fakeOps({ admin: vi.fn(async (): Promise<AdminStatus> => "not-admin") }) });
+    await act(flush);
+    expect(screen.queryByRole("button", { name: "Switch to an admin account" })).toBeNull();
   });
 });
