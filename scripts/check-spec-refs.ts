@@ -85,25 +85,34 @@ export function citesDesignDoc(line: string): boolean {
   return /design doc(?:'s)? (?:§|section\s+\d)|design §/i.test(line);
 }
 
-/** The first code span of each top-level `- ` item of the named list; null when it is absent. */
-export function specListItems(spec: string, name: string): string[] | null {
+/** The lines of the named list and whether its `<!-- /spec-list -->` closes it; null when absent. */
+function specListBody(spec: string, name: string): { lines: string[]; closed: boolean } | null {
   const lines = spec.split("\n");
   const start = lines.findIndex((l) => l.trim() === `<!-- spec-list: ${name} -->`);
   if (start < 0) return null;
-  const items: string[] = [];
+  const body: string[] = [];
   for (const line of lines.slice(start + 1)) {
-    if (line.trim() === "<!-- /spec-list -->") break;
-    const m = /^- `([^`]+)`/.exec(line);
-    if (m?.[1] !== undefined) items.push(m[1]);
+    if (line.trim() === "<!-- /spec-list -->") return { lines: body, closed: true };
+    // The next list's opener ends this one unclosed, so its closer is not taken for ours.
+    if (line.trim().startsWith("<!-- spec-list: ")) break;
+    body.push(line);
   }
-  return items;
+  return { lines: body, closed: false };
 }
 
-/** Whether the named list ends in its `<!-- /spec-list -->` marker rather than at end of file. */
+/** The first code span of each top-level `- ` item of the named list; null when it is absent. */
+export function specListItems(spec: string, name: string): string[] | null {
+  const body = specListBody(spec, name);
+  if (body === null) return null;
+  return body.lines.flatMap((line) => {
+    const m = /^- `([^`]+)`/.exec(line);
+    return m?.[1] !== undefined ? [m[1]] : [];
+  });
+}
+
+/** Whether the named list ends in its own `<!-- /spec-list -->` marker. */
 function specListClosed(spec: string, name: string): boolean {
-  const lines = spec.split("\n").map((l) => l.trim());
-  const start = lines.indexOf(`<!-- spec-list: ${name} -->`);
-  return lines.indexOf("<!-- /spec-list -->", start + 1) > start;
+  return specListBody(spec, name)?.closed === true;
 }
 
 /** How the SPEC list `name` differs from `expected` (read from `source`), one line per item. */

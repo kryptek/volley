@@ -236,6 +236,16 @@ describe("specListProblems", () => {
       "the tunables list has no closing `<!-- /spec-list -->`",
     ]);
   });
+
+  test("an open list followed by another list fails naming the open one", () => {
+    const open = spec(["hard_ceiling", "autopilot.digest_min_interval_s"]).replace(
+      "- `agent_blocked` — blocked.\n<!-- /spec-list -->",
+      "- `agent_blocked` — blocked.",
+    );
+    expect(specListProblems(open, sources)).toEqual([
+      "the decision-kinds list has no closing `<!-- /spec-list -->`",
+    ]);
+  });
 });
 
 describe("reservations", () => {
