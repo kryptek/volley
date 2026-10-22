@@ -22,7 +22,7 @@ import { eventually } from "./helpers/broker-wait";
 import { CALM_OS, type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { type MemoryCredentials, memoryCredentials } from "./helpers/fake-dynsec";
-import { fakeExec } from "./helpers/fake-exec";
+import { asApiRuns, fakeExec } from "./helpers/fake-exec";
 import {
   FIXTURES,
   type FakeHost,
@@ -116,17 +116,19 @@ describe("daemon spawn loop", () => {
           },
         ]),
       })
-      .on(["gh", "run", "list"], {
-        stdout: JSON.stringify([
-          {
-            databaseId: 1,
-            name: "CI",
-            status: "completed",
-            conclusion: "success",
-            headSha: head,
-            url: "https://github.com/example/repo/actions/runs/1",
-          },
-        ]),
+      .on(["gh", "api"], {
+        stdout: asApiRuns(
+          JSON.stringify([
+            {
+              databaseId: 1,
+              name: "CI",
+              status: "completed",
+              conclusion: "success",
+              headSha: head,
+              url: "https://github.com/example/repo/actions/runs/1",
+            },
+          ]),
+        ),
       })
       .on(["gh", "pr", "view"], {
         stdout: JSON.stringify({ state: "OPEN", baseRefName: "release/w1" }),
