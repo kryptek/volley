@@ -226,6 +226,16 @@ describe("specListProblems", () => {
       "no `<!-- spec-list: tunables -->` list",
     ]);
   });
+
+  test("a list without its closing marker fails naming the list", () => {
+    const open = spec(["hard_ceiling", "autopilot.digest_min_interval_s"]).replace(
+      /<!-- \/spec-list -->$/,
+      "",
+    );
+    expect(specListProblems(open, sources)).toEqual([
+      "the tunables list has no closing `<!-- /spec-list -->`",
+    ]);
+  });
 });
 
 describe("reservations", () => {
@@ -262,6 +272,13 @@ describe("reservations", () => {
     const twice = `${reserved}\n| §9.9 | #3 | bar |`;
     expect(reservationProblems("", parseReserved(twice))).toEqual([
       "spec/RESERVED.md:7: §9.9 is already reserved on line 5",
+    ]);
+  });
+
+  test("a reservation with no topic fails", () => {
+    const blank = "| §9.8 | #4 |  |";
+    expect(reservationProblems("## 9. Nine\n### 9.8 Anything\n", parseReserved(blank))).toEqual([
+      "spec/RESERVED.md:1: §9.8 is reserved for #4 with no topic",
     ]);
   });
 });

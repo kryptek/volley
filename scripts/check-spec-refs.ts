@@ -99,6 +99,13 @@ export function specListItems(spec: string, name: string): string[] | null {
   return items;
 }
 
+/** Whether the named list ends in its `<!-- /spec-list -->` marker rather than at end of file. */
+function specListClosed(spec: string, name: string): boolean {
+  const lines = spec.split("\n").map((l) => l.trim());
+  const start = lines.indexOf(`<!-- spec-list: ${name} -->`);
+  return lines.indexOf("<!-- /spec-list -->", start + 1) > start;
+}
+
 /** How the SPEC list `name` differs from `expected` (read from `source`), one line per item. */
 export function listProblems(
   name: string,
@@ -163,6 +170,9 @@ export function specListProblems(spec: string, sources: ListSources): string[] {
   return lists.flatMap(([name, expected, source]) => {
     const items = specListItems(spec, name);
     if (items === null) return [`no \`<!-- spec-list: ${name} -->\` list`];
+    if (!specListClosed(spec, name)) {
+      return [`the ${name} list has no closing \`<!-- /spec-list -->\``];
+    }
     return listProblems(name, items, expected, source);
   });
 }
@@ -210,6 +220,12 @@ export function reservationProblems(spec: string, reserved: Reservation[]): stri
       continue;
     }
     seen.set(r.section, r.line);
+    if (r.topic === "") {
+      problems.push(
+        `${RESERVED}:${r.line}: §${r.section} is reserved for ${r.issue} with no topic`,
+      );
+      continue;
+    }
     const title = titles.get(r.section);
     if (title !== undefined && !title.toLowerCase().includes(r.topic.toLowerCase())) {
       problems.push(
