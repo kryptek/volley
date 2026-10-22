@@ -19,9 +19,9 @@ import { FIXTURES } from "./helpers/fake-host";
 const SPEC: RemoteHostSpec = {
   name: "box",
   target: "dev@box",
-  repo: "/home/dev/src/repo",
-  worktree_root: "/home/dev/wt",
-  volley_dir: "/home/dev/src/volley",
+  repo: "/path/to/home/src/repo",
+  worktree_root: "/path/to/home/wt",
+  volley_dir: "/path/to/home/src/volley",
   tunnel: { remote_port: 21883, supervise: true },
 };
 /** A launch script volleyd would render, sealed for `cwd` (the fence starts it only so). */
@@ -72,7 +72,7 @@ const argvIs =
 describe("SshTmuxHost", () => {
   it("every remote invocation is `ssh -T <target> bash -s` with the script on stdin", async () => {
     const r = remote((s) => (argvIs("tmux", "capture-pane")(s) ? { stdout: "x\n" } : undefined));
-    await r.host.writeFile("/home/dev/wt/w1/T1-implementer/ISSUE.md", "# issue\n");
+    await r.host.writeFile("/path/to/home/wt/w1/T1-implementer/ISSUE.md", "# issue\n");
     await r.host.readScreen("w1-T1-implementer", 40);
     await r.host.sendKeys("w1-T1-implementer", "Enter");
     await r.host.exec(["gh", "issue", "view", "42", "--json", "number"], { cwd: SPEC.repo });
@@ -91,12 +91,12 @@ describe("SshTmuxHost", () => {
 
   it("writeFile creates the directory, decodes base64 into the file, and ends with chmod for a mode", async () => {
     const r = remote();
-    const path = "/home/dev/wt/w1/T1-implementer/.volley/agent.json";
+    const path = "/path/to/home/wt/w1/T1-implementer/.volley/agent.json";
     const content = `${JSON.stringify({ agent_id: "a", broker: { password: "pw" } })}\n`;
     await r.host.writeFile(path, content, 0o600);
     const steps = r.scripts()[0]?.steps ?? [];
     expect(steps.map((s) => s.argv)).toEqual([
-      ["mkdir", "-p", "/home/dev/wt/w1/T1-implementer/.volley"],
+      ["mkdir", "-p", "/path/to/home/wt/w1/T1-implementer/.volley"],
       ["base64", "-d"],
       ["chmod", "600", path],
     ]);
@@ -105,7 +105,7 @@ describe("SshTmuxHost", () => {
     // The password never appears in clear in the script.
     expect(JSON.stringify(steps)).not.toContain('"pw"');
 
-    await r.host.writeFile("/home/dev/wt/x/ISSUE.md", "plain");
+    await r.host.writeFile("/path/to/home/wt/x/ISSUE.md", "plain");
     expect(r.scripts()[1]?.steps.map((s) => s.argv[0])).toEqual(["mkdir", "base64"]);
   });
 
@@ -117,10 +117,10 @@ describe("SshTmuxHost", () => {
   it("launch: tmux new-session -d -s <wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'", async () => {
     const r = remote((s) => (argvIs("tmux", "has-session")(s) ? { code: 1 } : undefined));
     const ws = await r.host.launch({
-      cwd: "/home/dev/wt/w1/T1-implementer",
+      cwd: "/path/to/home/wt/w1/T1-implementer",
       name: "w1 T1 implementer",
       command: LAUNCH_COMMAND,
-      launch: sealed("/home/dev/wt/w1/T1-implementer"),
+      launch: sealed("/path/to/home/wt/w1/T1-implementer"),
     });
     expect(ws).toEqual({ workspace: "w1-T1-implementer" });
     expect(r.steps().map((s) => s.argv)).toEqual([
@@ -133,7 +133,7 @@ describe("SshTmuxHost", () => {
         "-s",
         "w1-T1-implementer",
         "-c",
-        "/home/dev/wt/w1/T1-implementer",
+        "/path/to/home/wt/w1/T1-implementer",
         "bash .volley/launch.sh",
       ],
     ]);
@@ -163,7 +163,7 @@ describe("SshTmuxHost", () => {
 
   it("launch adds the ssh session's PATH to a running tmux server's first (a server keeps its old one)", async () => {
     const argvs = await launchWithPaths(
-      "/home/dev/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",
+      "/path/to/home/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",
       "/usr/bin:/bin",
     );
     expect(argvs).toContainEqual(["tmux", "show-environment", "-g", "PATH"]);
@@ -173,7 +173,7 @@ describe("SshTmuxHost", () => {
       "set-environment",
       "-g",
       "PATH",
-      "/home/dev/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",
+      "/path/to/home/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",
     ]);
     expect(set).toBeLessThan(argvs.findIndex((a) => a[1] === "new-session"));
   });
@@ -182,20 +182,20 @@ describe("SshTmuxHost", () => {
     // Started from a full terminal: claude is in ~/.local/bin, which the ssh PATH lacks.
     const argvs = await launchWithPaths(
       "/opt/homebrew/bin:/usr/bin:/bin",
-      "/home/dev/.local/bin:/usr/bin:/bin",
+      "/path/to/home/.local/bin:/usr/bin:/bin",
     );
     expect(argvs.find((a) => a[1] === "set-environment")).toEqual([
       "tmux",
       "set-environment",
       "-g",
       "PATH",
-      "/opt/homebrew/bin:/usr/bin:/bin:/home/dev/.local/bin",
+      "/opt/homebrew/bin:/usr/bin:/bin:/path/to/home/.local/bin",
     ]);
   });
 
   it("launch leaves the tmux server alone when it has every directory already, or none runs", async () => {
-    for (const server of ["/home/dev/.local/bin:/usr/bin:/bin", null]) {
-      const argvs = await launchWithPaths("/usr/bin::/home/dev/.local/bin", server);
+    for (const server of ["/path/to/home/.local/bin:/usr/bin:/bin", null]) {
+      const argvs = await launchWithPaths("/usr/bin::/path/to/home/.local/bin", server);
       expect(argvs.some((a) => a[1] === "set-environment")).toBe(false);
       expect(argvs.some((a) => a[1] === "new-session")).toBe(true);
     }
@@ -330,7 +330,7 @@ describe("SshTmuxHost", () => {
   it("launch.sh for a remote host: the box's mcp.json, the remote hooks dir, env exports for tooling", () => {
     const host = new SshTmuxHost(SPEC, fakeExec().exec);
     // The box's own volley checkout runs the agent's MCP server.
-    expect(host.mcpEntry).toBe("/home/dev/src/volley/packages/volley-mcp/src/index.ts");
+    expect(host.mcpEntry).toBe("/path/to/home/src/volley/packages/volley-mcp/src/index.ts");
     const script = renderLaunchScript({
       hooksDir: new SshTmuxHost(SPEC, fakeExec().exec).hooksDir,
       model: "claude-opus-5-5",
@@ -344,7 +344,7 @@ describe("SshTmuxHost", () => {
     expect(script).toContain("--strict-mcp-config --mcp-config='/wt/x/.volley/mcp.json'");
     expect(script.startsWith("#!/usr/bin/env bash\n")).toBe(true);
     expect(script).toContain(
-      "export VOLLEY_HOOKS_DIR='/home/dev/src/volley/packages/volley-hooks'",
+      "export VOLLEY_HOOKS_DIR='/path/to/home/src/volley/packages/volley-hooks'",
     );
     expect(script).toContain("export VOLLEY_BROKER_URL='mqtt://127.0.0.1:21883'");
     expect(script).toContain("export VOLLEY_NAMESPACE='default'");
@@ -436,7 +436,7 @@ describe("SshTmuxHost", () => {
   });
 
   it("prepareWorktree fetches the release branch, then cuts the worktree from it, no tracking", async () => {
-    const wt = "/home/dev/wt/w1/T1-implementer";
+    const wt = "/path/to/home/wt/w1/T1-implementer";
     const r = remote((s) =>
       argvIs("git", "-C", wt, "rev-parse")(s)
         ? { code: 128, stderr: "not a git repository" }
@@ -480,11 +480,11 @@ describe("SshTmuxHost", () => {
 
   it("prepareWorktree at a PR head sha: a reviewer gets it detached, a fixup a branch from it, never origin/<sha>", async () => {
     const sha = "c173b8450164fc5107b1fba7d4b5e3b218636c12";
-    const wt = "/home/dev/wt/w1/T1-quality_reviewer-1";
+    const wt = "/path/to/home/wt/w1/T1-quality_reviewer-1";
     const mk = () =>
       remote((s) =>
         argvIs("git", "-C", wt, "rev-parse")(s) ||
-        argvIs("git", "-C", "/home/dev/wt/w1/T1-fixup-1", "rev-parse")(s)
+        argvIs("git", "-C", "/path/to/home/wt/w1/T1-fixup-1", "rev-parse")(s)
           ? { code: 128, stderr: "not a git repository" }
           : argvIs("git", "-C", SPEC.repo, "rev-parse", "--git-common-dir")(s)
             ? { stdout: ".git\n" }
@@ -514,7 +514,7 @@ describe("SshTmuxHost", () => {
     expect(rev.steps().some((s) => s.argv.includes(`origin/${sha}`))).toBe(false);
 
     const fix = mk();
-    const fwt = "/home/dev/wt/w1/T1-fixup-1";
+    const fwt = "/path/to/home/wt/w1/T1-fixup-1";
     await fix.host.prepareWorktree({
       repo: SPEC.repo,
       path: fwt,
@@ -537,7 +537,7 @@ describe("SshTmuxHost", () => {
 
   it("prepareWorktree at a sha the box already holds: a failed fetch is fine", async () => {
     const sha = "c173b8450164fc5107b1fba7d4b5e3b218636c12";
-    const wt = "/home/dev/wt/w1/T1-spec_reviewer-1";
+    const wt = "/path/to/home/wt/w1/T1-spec_reviewer-1";
     const r = remote((s) =>
       argvIs("git", "-C", wt, "rev-parse")(s)
         ? { code: 128, stderr: "not a git repository" }
@@ -569,7 +569,7 @@ describe("SshTmuxHost", () => {
   });
 
   it("prepareWorktree reuses an existing remote worktree and reports its branch", async () => {
-    const wt = "/home/dev/wt/w1/T1-implementer";
+    const wt = "/path/to/home/wt/w1/T1-implementer";
     const r = remote((s) =>
       argvIs("git", "-C", wt, "rev-parse", "--is-inside-work-tree")(s)
         ? { stdout: "true\n" }
@@ -645,7 +645,7 @@ describe("SshTmuxHost", () => {
   it("repoExists / tunnelUp / readTrust run over bash -s", async () => {
     const claudeJson = JSON.stringify({
       oauthAccount: { token: "secret" },
-      projects: { "/home/dev/src/repo": { hasTrustDialogAccepted: true, history: ["x"] } },
+      projects: { "/path/to/home/src/repo": { hasTrustDialogAccepted: true, history: ["x"] } },
     });
     const r = remote((s) =>
       argvIs("git", "-C", SPEC.repo, "rev-parse", "--git-dir")(s)
@@ -661,7 +661,7 @@ describe("SshTmuxHost", () => {
     expect(r.steps().find(argvIs("nc"))?.argv).toEqual(["nc", "-z", "127.0.0.1", "21883"]);
     // Only the trust bits are kept: nothing else from the remote ~/.claude.json.
     expect(await r.host.readTrust()).toEqual({
-      projects: { "/home/dev/src/repo": { hasTrustDialogAccepted: true } },
+      projects: { "/path/to/home/src/repo": { hasTrustDialogAccepted: true } },
     });
   });
 
@@ -702,7 +702,7 @@ describe("SshTmuxHost", () => {
       projects: { "/other": { history: ["x"] } },
     })}\n`;
     const r = remote((s) => (argvIs("cat", ".claude.json")(s) ? { stdout: before } : undefined));
-    await r.host.recordTrust("/home/dev/src/repo");
+    await r.host.recordTrust("/path/to/home/src/repo");
     const write = r.scripts().at(-1)?.steps ?? [];
     expect(write.map((s) => s.argv)).toEqual([
       ["cmp", "-s", "-", ".claude.json"],
@@ -716,7 +716,7 @@ describe("SshTmuxHost", () => {
       oauthAccount: { token: "secret" },
       projects: {
         "/other": { history: ["x"] },
-        "/home/dev/src/repo": { hasTrustDialogAccepted: true },
+        "/path/to/home/src/repo": { hasTrustDialogAccepted: true },
       },
     });
   });
@@ -732,14 +732,14 @@ describe("SshTmuxHost", () => {
             : {}
           : undefined,
     );
-    await r.host.recordTrust("/home/dev/src/repo");
+    await r.host.recordTrust("/path/to/home/src/repo");
     expect(compares).toBe(2);
     expect(r.steps().filter(argvIs("cat", ".claude.json"))).toHaveLength(2);
 
     const none = remote((s) =>
       argvIs("cat")(s) ? { code: 1, stderr: "No such file" } : undefined,
     );
-    await expect(none.host.recordTrust("/home/dev/src/repo")).rejects.toThrow(
+    await expect(none.host.recordTrust("/path/to/home/src/repo")).rejects.toThrow(
       /run claude there once/,
     );
     expect(none.steps().some(argvIs("mv"))).toBe(false);
@@ -753,18 +753,21 @@ describe("SshTmuxHost", () => {
 
     // The brief gate is a local program: it gets a local copy of the remote brief.
     let seen = "";
-    const gate = "/home/me/.volleyd/brief-gate";
+    const gate = "/path/to/home/.volleyd/brief-gate";
     r.fake.on([gate], (argv) => {
       seen = readFileSync(argv[1] as string, "utf-8");
       return { stdout: "ok" };
     });
-    const res = await r.host.exec([gate, "/home/dev/wt/x/.volley/brief.md"], {
-      cwd: "/home/dev/wt/x",
+    const res = await r.host.exec([gate, "/path/to/home/wt/x/.volley/brief.md"], {
+      cwd: "/path/to/home/wt/x",
       script: mintScriptToken(gate),
     });
     expect(res.code).toBe(0);
     expect(seen).toBe("the brief\n");
-    expect(r.steps().find(argvIs("cat"))?.argv).toEqual(["cat", "/home/dev/wt/x/.volley/brief.md"]);
+    expect(r.steps().find(argvIs("cat"))?.argv).toEqual([
+      "cat",
+      "/path/to/home/wt/x/.volley/brief.md",
+    ]);
   });
 });
 
@@ -805,7 +808,7 @@ describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
 
   it("probePath runs `command -v claude bun` on the box and reads what resolved", async () => {
     // `command -v` exits 1 when one name is missing; what it printed is still the answer.
-    const r = remote(() => ({ code: 1, stdout: "/home/dev/.bun/bin/bun\n" }));
+    const r = remote(() => ({ code: 1, stdout: "/path/to/home/.bun/bin/bun\n" }));
     expect(await r.host.probePath()).toEqual({ claude: false, bun: true });
     expect(r.steps()).toEqual([{ argv: ["command", "-v", "claude", "bun"] }]);
   });

@@ -175,7 +175,7 @@ function deps(exec: PeerExec, over: Partial<PeerDeps> = {}): PeerDeps {
     loadavg: () => [0.5, 0.25, 0.125],
     now: () => new Date("2026-10-19T09:00:00.000Z"),
     monotonic: () => 0,
-    envPath: () => "/home/dev/.bun/bin:/usr/local/bin:/usr/bin:/bin",
+    envPath: () => "/path/to/home/.bun/bin:/usr/local/bin:/usr/bin:/bin",
     sleep: async () => {},
     readStdin: async () => "",
     volleyArgv: ["/usr/local/bin/bun", "/opt/volley/packages/volley-cli/src/cli.ts"],
@@ -275,7 +275,7 @@ describe("volley peer join (on the machine to pair)", () => {
   });
 
   it("the estimated ssh PATH never stops a join: it warns, and the supervisor's own probe decides", async () => {
-    box.tools.claude.path = "/home/dev/.local/bin/claude";
+    box.tools.claude.path = "/path/to/home/.local/bin/claude";
     box.tools.claude.sshPath = null;
     const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
     const r = await run(
@@ -285,7 +285,9 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(r.stderr).toBe("");
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toMatch(/^! claude_on_path: estimated: /m);
-    expect(r.stdout).toContain("fix: sudo ln -s /home/dev/.local/bin/claude /usr/local/bin/claude");
+    expect(r.stdout).toContain(
+      "fix: sudo ln -s /path/to/home/.local/bin/claude /usr/local/bin/claude",
+    );
     expect(f.calls.filter((c) => c.argv[0] === "ssh")).toHaveLength(2);
   });
 
@@ -424,7 +426,7 @@ describe("volley peer join (on the machine to pair)", () => {
     );
     expect(unit).toContain("Restart=on-failure");
     // join's PATH, so the heartbeat's doctor finds what this terminal finds.
-    expect(unit).toContain("Environment=PATH=/home/dev/.bun/bin:/usr/local/bin:/usr/bin:/bin");
+    expect(unit).toContain("Environment=PATH=/path/to/home/.bun/bin:/usr/local/bin:/usr/bin:/bin");
     expect(unit).not.toContain("network-online.target");
     // Lingering first (the service must outlive this ssh session), then enable + restart (a
     // re-join replaces a running service).
@@ -484,7 +486,7 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(text).toContain("<key>SuccessfulExit</key><false/>");
     // launchd's own PATH is /usr/bin:/bin:/usr/sbin:/sbin: the service gets join's.
     expect(text).toContain(
-      "<key>EnvironmentVariables</key>\n  <dict><key>PATH</key><string>/home/dev/.bun/bin:/usr/local/bin:/usr/bin:/bin</string></dict>",
+      "<key>EnvironmentVariables</key>\n  <dict><key>PATH</key><string>/path/to/home/.bun/bin:/usr/local/bin:/usr/bin:/bin</string></dict>",
     );
     // Nothing loaded yet: nothing to boot out.
     expect(
@@ -705,7 +707,7 @@ describe("volley peer join (on the machine to pair)", () => {
     );
     const which = (c: string) =>
       c === "claude"
-        ? "/Users/dev/.local/bin/claude"
+        ? "/path/to/home/.local/bin/claude"
         : c === "bun"
           ? "/opt/homebrew/bin/bun"
           : null;
@@ -716,7 +718,7 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("claude, bun are not on the PATH of a non-interactive ssh session");
     expect(r.stderr).toContain("~/.zshenv");
-    expect(r.stderr).toContain('export PATH="/Users/dev/.local/bin:/opt/homebrew/bin:$PATH"');
+    expect(r.stderr).toContain('export PATH="/path/to/home/.local/bin:/opt/homebrew/bin:$PATH"');
     expect(r.stderr).toContain("the code is still valid");
     expect(existsSync(peerFile(home))).toBe(false);
     // bash: the top of ~/.bashrc; a tool this shell cannot find either: install it.
@@ -797,7 +799,7 @@ describe("volley peer join (on the machine to pair)", () => {
     const f = fakeExec(
       hostSsh({
         code: 127,
-        stderr: "bash: line 13: /Users/dev/.volley/bin/volley: No such file or directory\n",
+        stderr: "bash: line 13: /path/to/home/.volley/bin/volley: No such file or directory\n",
       }),
     );
     const r = await run(
@@ -806,7 +808,7 @@ describe("volley peer join (on the machine to pair)", () => {
     );
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("No such file or directory");
-    expect(r.stderr).toContain("`/Users/dev/.volley/bin/volley` does not exist on dev@host");
+    expect(r.stderr).toContain("`/path/to/home/.volley/bin/volley` does not exist on dev@host");
     // The fallback was tried already: never suggested again.
     expect(r.stderr).toContain("Run `volley setup` on dev@host");
     expect(r.stderr).toContain("--remote-volley");
@@ -912,7 +914,7 @@ describe("volley peer join (on the machine to pair)", () => {
     const h = fakeExec(
       hostSsh({
         code: 127,
-        stderr: "bash: line 6: /home/dev/.volley/bin/volley: No such file or directory\n",
+        stderr: "bash: line 6: /path/to/home/.volley/bin/volley: No such file or directory\n",
       }),
     );
     const again = await run(
@@ -928,7 +930,9 @@ describe("volley peer join (on the machine to pair)", () => {
       ],
       deps(h.exec),
     );
-    expect(again.stderr).toContain("`/home/dev/.volley/bin/volley` does not exist on dev@host.");
+    expect(again.stderr).toContain(
+      "`/path/to/home/.volley/bin/volley` does not exist on dev@host.",
+    );
     expect(again.stderr).toContain(
       "Run `volley setup` on dev@host (it installs ~/.volley/bin/volley)",
     );

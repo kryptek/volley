@@ -536,7 +536,7 @@ describe("App purpose labels and sessions (live store)", () => {
       {
         model_source: "harness-hook",
         workspace_title: "Release triage",
-        cwd: "/home/someone/repos/volley",
+        cwd: "/path/to/home/repos/volley",
       },
       null,
     ),

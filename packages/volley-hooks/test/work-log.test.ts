@@ -180,6 +180,8 @@ describe("toolSummary", () => {
   });
 
   it("maps paths under HOME outside the project to ~/…", () => {
+    // A home-shaped path on purpose: the test is that paths under HOME are redacted (allowlisted
+    // in scripts/no-home-paths.test.ts).
     const home = "/home/someone";
     expect(toolSummary("Read", { file_path: "/home/someone/.ssh/id_rsa" }, project, home)).toBe(
       "Read: ~/.ssh/id_rsa",

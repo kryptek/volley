@@ -83,14 +83,14 @@ describe("volley peer doctor: tools and PATH", () => {
 
   it("claude missing from the estimated non-interactive PATH warns, labelled an estimate; its fix is the symlink, never run", async () => {
     const m = machine({
-      tools: { claude: { path: "/home/dev/.local/bin/claude", sshPath: null } },
+      tools: { claude: { path: "/path/to/home/.local/bin/claude", sshPath: null } },
     });
     const r = await report(m);
     // An estimate (the supervisor's own path_ok probe decides): it warns, it never blocks.
     expect(check(r, "claude_on_path")).toMatchObject({
       ok: false,
       severity: "warn",
-      fix: "sudo ln -s /home/dev/.local/bin/claude /usr/local/bin/claude",
+      fix: "sudo ln -s /path/to/home/.local/bin/claude /usr/local/bin/claude",
     });
     expect(check(r, "claude_on_path")?.detail).toMatch(/^estimated: /);
     expect(check(r, "claude_on_path")?.detail).toContain("path_ok");
@@ -99,7 +99,9 @@ describe("volley peer doctor: tools and PATH", () => {
     expect(r.versions.claude).toBe("2.0.14");
 
     const fixed = await run(m, { fix: true, yes: true });
-    expect(fixed.stdout).toContain("sudo ln -s /home/dev/.local/bin/claude /usr/local/bin/claude");
+    expect(fixed.stdout).toContain(
+      "sudo ln -s /path/to/home/.local/bin/claude /usr/local/bin/claude",
+    );
     expect(MUTATING(m)).toEqual([]);
     expect(fixed.exit).toBe(0);
   });
@@ -113,17 +115,17 @@ describe("volley peer doctor: tools and PATH", () => {
   });
 
   it("the PATH fix follows the login shell: zsh's ~/.zshenv, fish's fish_add_path, bash on macOS has none", async () => {
-    const off = { claude: { path: "/Users/dev/.local/bin/claude", sshPath: null } };
+    const off = { claude: { path: "/path/to/home/.local/bin/claude", sshPath: null } };
     const zsh = await report(machine({ platform: "darwin", shell: "/bin/zsh", tools: off }));
     expect(check(zsh, "claude_on_path")?.fix).toBe(
-      `echo 'export PATH="/Users/dev/.local/bin:$PATH"' >> ~/.zshenv`,
+      `echo 'export PATH="/path/to/home/.local/bin:$PATH"' >> ~/.zshenv`,
     );
     box?.cleanup();
     const fish = await report(
       machine({ platform: "darwin", shell: "/opt/homebrew/bin/fish", tools: off }),
     );
     expect(check(fish, "claude_on_path")?.fix).toBe(
-      "fish -c 'fish_add_path -U /Users/dev/.local/bin'",
+      "fish -c 'fish_add_path -U /path/to/home/.local/bin'",
     );
     box?.cleanup();
     // bash -c reads no startup file and macOS's sshd PATH cannot be extended by the user.
@@ -138,7 +140,7 @@ describe("volley peer doctor: tools and PATH", () => {
     // Linux: /usr/local/bin is on sshd's PATH whatever the shell.
     const linux = await report(machine({ shell: "/bin/zsh", tools: off }));
     expect(check(linux, "claude_on_path")?.fix).toBe(
-      "sudo ln -s /Users/dev/.local/bin/claude /usr/local/bin/claude",
+      "sudo ln -s /path/to/home/.local/bin/claude /usr/local/bin/claude",
     );
   });
 
@@ -148,8 +150,8 @@ describe("volley peer doctor: tools and PATH", () => {
       shell: "/bin/zsh",
       trusted: true,
       tools: {
-        bun: { path: null, sshPath: "/Users/dev/.bun/bin/bun" },
-        claude: { path: null, sshPath: "/Users/dev/.local/bin/claude" },
+        bun: { path: null, sshPath: "/path/to/home/.bun/bin/bun" },
+        claude: { path: null, sshPath: "/path/to/home/.local/bin/claude" },
       },
     });
     const r = await report(m);
@@ -158,16 +160,16 @@ describe("volley peer doctor: tools and PATH", () => {
     expect(r.versions.claude).toBe("2.0.14");
     expect(r.auth.claude).toBe("signed_in");
     const argv = m.calls.map((c) => c.argv);
-    expect(argv).toContainEqual(["/Users/dev/.bun/bin/bun", "--version"]);
+    expect(argv).toContainEqual(["/path/to/home/.bun/bin/bun", "--version"]);
     expect(argv).toContainEqual([
-      "/Users/dev/.bun/bin/bun",
+      "/path/to/home/.bun/bin/bun",
       "install",
       "--cwd",
       m.volleyDir,
       "--frozen-lockfile",
       "--dry-run",
     ]);
-    expect(argv).toContainEqual(["/Users/dev/.local/bin/claude", "auth", "status"]);
+    expect(argv).toContainEqual(["/path/to/home/.local/bin/claude", "auth", "status"]);
     // Nothing runs by a bare name the service's PATH may not reach.
     for (const a of argv) {
       if (["bun", "claude", "gh", "git", "tmux"].includes(a[0] as string)) {
@@ -188,14 +190,14 @@ describe("volley peer doctor: tools and PATH", () => {
 
   it("the human output has one line per check with its mark, and the fix under a failing one", async () => {
     const m = machine({
-      tools: { claude: { path: "/home/dev/.local/bin/claude", sshPath: null } },
+      tools: { claude: { path: "/path/to/home/.local/bin/claude", sshPath: null } },
     });
     const r = await run(m);
     expect(r.exit).toBe(0);
     expect(r.stdout).toMatch(/^✓ tool\.bun: /m);
     expect(r.stdout).toMatch(/^! claude_on_path: estimated: /m);
     expect(r.stdout).toMatch(
-      /^! claude_on_path: .*\n {4}fix: sudo ln -s \/home\/dev\/\.local\/bin\/claude \/usr\/local\/bin\/claude$/m,
+      /^! claude_on_path: .*\n {4}fix: sudo ln -s \/path\/to\/home\/\.local\/bin\/claude \/usr\/local\/bin\/claude$/m,
     );
   });
 
