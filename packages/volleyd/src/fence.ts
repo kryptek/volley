@@ -1764,6 +1764,25 @@ function isLaunchScript(content: string, worktree: string): boolean {
  * entries `agent_mcp_allow` copied from the machine's own MCP config (each an object; claude
  * would start that entry under `agent_mcp: inherit` anyway).
  */
+const isStrings = (v: unknown) => Array.isArray(v) && v.every((a) => typeof a === "string");
+const isStringMap = (v: unknown) =>
+  typeof v === "object" &&
+  v !== null &&
+  !Array.isArray(v) &&
+  Object.values(v).every((a) => typeof a === "string");
+
+/**
+ * An `agent_mcp_allow` server copied beside `volley`: a stdio entry (a string `command`, string
+ * `args`, a string map `env`) or a remote one (a string `url`, a string map `headers`).
+ */
+function isMcpServerEntry(e: unknown): boolean {
+  if (typeof e !== "object" || e === null || Array.isArray(e)) return false;
+  const { command, args, env, url, headers } = e as Record<string, unknown>;
+  if (typeof command === "string")
+    return (args === undefined || isStrings(args)) && (env === undefined || isStringMap(env));
+  return typeof url === "string" && (headers === undefined || isStringMap(headers));
+}
+
 function isMcpConfig(content: string): boolean {
   let entry: unknown;
   let extra: Record<string, unknown>;
@@ -1778,7 +1797,7 @@ function isMcpConfig(content: string): boolean {
     typeof entry === "string" &&
     entry.endsWith(MCP_ENTRY_SUFFIX) &&
     outsideVolley(entry) &&
-    Object.values(extra).every((e) => typeof e === "object" && e !== null && !Array.isArray(e)) &&
+    Object.values(extra).every(isMcpServerEntry) &&
     renderMcpConfig(entry, extra) === content
   );
 }

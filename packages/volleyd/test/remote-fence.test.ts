@@ -433,6 +433,11 @@ describe("remote allow-list (ssh … bash -s)", () => {
     // agent_mcp_allow: the box's own allowed servers beside volleyd's `volley`, as rendered.
     const allowed = renderMcpConfig(entry, { migrations: { command: "npx", args: ["m"] } });
     expect(() => assertAllowed(SSH, remote(write(allowed)))).not.toThrow();
+    const remoteServer = renderMcpConfig(entry, {
+      web: { type: "http", url: "https://mcp.example/x", headers: { Authorization: "t" } },
+      env: { command: "m", args: [], env: { K: "v" } },
+    });
+    expect(() => assertAllowed(SSH, remote(write(remoteServer)))).not.toThrow();
     Object.assign(bad, {
       "extras before volley": JSON.stringify(
         { mcpServers: { m: { command: "m" }, volley: JSON.parse(allowed).mcpServers.volley } },
@@ -440,6 +445,13 @@ describe("remote allow-list (ssh … bash -s)", () => {
         2,
       ),
       "an extra that is not an entry": renderMcpConfig(entry, { m: "sh" } as never),
+      "an extra with neither command nor url": renderMcpConfig(entry, { m: { args: ["x"] } }),
+      "an extra with a non-string command": renderMcpConfig(entry, { m: { command: ["sh"] } }),
+      "an extra with non-string args": renderMcpConfig(entry, { m: { command: "m", args: [1] } }),
+      "an extra with a non-string env value": renderMcpConfig(entry, {
+        m: { command: "m", env: { K: 1 } },
+      }),
+      "an extra with a non-string url": renderMcpConfig(entry, { m: { type: "http", url: 1 } }),
       "a re-indented copy": JSON.stringify(JSON.parse(allowed)),
     });
     for (const [why, content] of Object.entries(bad)) {

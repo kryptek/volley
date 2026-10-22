@@ -1182,9 +1182,9 @@ function saveScreen(ctx: Ctx, agentId: string, screen: string | null): string | 
 }
 
 /**
- * The MCP servers Claude Code would load for the agent under `agent_mcp: inherit`: the profile's
- * `.claude.json` (user scope, then the repository's local-scope project entry) and the worktree's
- * `.mcp.json` (project scope), lowest precedence first. A paired machine's are its own. Their
+ * The MCP servers Claude Code would load for the agent under `agent_mcp: inherit`, lowest
+ * precedence first: the profile's `.claude.json` user scope, the worktree's `.mcp.json` (project
+ * scope), then the repository's local-scope entry in `.claude.json`. A paired machine's are its own. Their
  * entries may hold the user's secrets: only names ever leave this function's callers.
  */
 async function userMcpSources(ctx: Ctx): Promise<{ source: string; config: unknown }[]> {

@@ -1536,7 +1536,9 @@ named `volley`. volleyd warns at each `inherit` spawn that has one in the profil
 `mcpServers` or the worktree's `.mcp.json` (it logs it and journals
 `alarm_raised { alarm: "agent_mcp_stray_volley", servers }`; the spawn goes on). The trade-off:
 more tools, but an agent whose tool set depends on the machine and on servers that may prompt,
-fail to connect or slow its start. The fence accepts both forms and nothing else;
+fail to connect or slow its start. The fence accepts both forms and nothing else (under
+`agent_mcp_allow`, an `mcp.json` may also carry the copied servers after `volley`, each a stdio
+entry with a string `command` or a remote one with a string `url`);
 `agent_spawned` records `agent_mcp: "inherit"` when it applies, and a respawn of a moved or
 vanished agent keeps the servers it launched with.
 
