@@ -1,0 +1,22 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-21T14:02:10.000Z",
+  "channel": "_waves/events",
+  "type": "account_chosen",
+  "payload": {
+    "wave": "w1",
+    "seq": 17,
+    "at": "2026-10-21T14:02:10.000Z",
+    "task": "T1",
+    "data": {
+      "task": "T1",
+      "role": "implementer",
+      "attempt": 1,
+      "account": "work",
+      "machine": "peer-a",
+      "source": "balance",
+      "why": "work: most headroom on peer-a (5h 12%, 7d 40%; primary@peer-a 5h 88%)"
+    }
+  }
+}

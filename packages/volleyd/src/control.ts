@@ -71,6 +71,7 @@ export type ControlOp =
   | "claude_account_add"
   | "claude_signin"
   | "claude_sync"
+  | "claude_balance"
   | "agent_move_account"
   // Machines + pairing (peers.ts).
   | "peer_invite"

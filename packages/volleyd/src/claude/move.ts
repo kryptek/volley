@@ -19,6 +19,10 @@ export interface MoveRequest {
   from: string;
   to: { id: string; dir: string | null };
   by: string;
+  /** The `agent_account_limit` decision whose answer asked for it. */
+  decisionId?: string;
+  /** One line on why (`moved off primary (5h 91%) by autopilot`): the respawn's `account_chosen`. */
+  why?: string;
 }
 
 export interface MoveDeps {
@@ -62,7 +66,15 @@ export async function moveAgentAccount(m: MoveRequest, d: MoveDeps): Promise<Mov
   await d.journal({
     type: "agent_account_moved",
     task: m.task,
-    data: { agent_id: m.agentId, role: m.role, from: m.from, to: m.to.id, by: m.by },
+    data: {
+      agent_id: m.agentId,
+      role: m.role,
+      from: m.from,
+      to: m.to.id,
+      by: m.by,
+      ...(m.decisionId !== undefined ? { decision_id: m.decisionId } : {}),
+      why: m.why ?? `moved off ${m.from} by ${m.by}`,
+    },
   });
   await d.cancel(
     `volleyd: the operator is moving you to Claude account ${m.to.id}. Stop now: do not push, open or merge anything further; commit nothing half-done, publish your terminal status and exit. A new session under that account continues the task.`,
@@ -134,6 +146,34 @@ export function accountMoves(events: readonly JournalEvent[]): Record<string, st
     if (e.type !== "agent_account_moved" || e.task === undefined) continue;
     const { role, to } = e.data as { role?: unknown; to?: unknown };
     if (typeof role === "string" && typeof to === "string") out[`${e.task}/${role}`] = to;
+  }
+  return out;
+}
+
+/**
+ * A task role's latest move (`agent_account_moved`), replayed from a wave journal: the account and
+ * the move's `why` (an older move without one: `moved off <from> by <by>`).
+ */
+export function lastAccountMove(
+  events: readonly JournalEvent[],
+  task: TaskId,
+  role: Role,
+): { to: string; why: string } | undefined {
+  let out: { to: string; why: string } | undefined;
+  for (const e of events) {
+    if (e.type !== "agent_account_moved" || e.task !== task) continue;
+    const d = e.data as {
+      role?: unknown;
+      to?: unknown;
+      from?: unknown;
+      by?: unknown;
+      why?: unknown;
+    };
+    if (d.role !== role || typeof d.to !== "string") continue;
+    out = {
+      to: d.to,
+      why: typeof d.why === "string" ? d.why : `moved off ${String(d.from)} by ${String(d.by)}`,
+    };
   }
   return out;
 }

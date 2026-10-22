@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
+import { buildTopic } from "volley-mcp/topics";
 import { authOpsTopic, authReplyTopic } from "../src/accounts";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
 import { ControlClient } from "../src/control";
@@ -766,6 +767,59 @@ describe("the supervisor's own record and readiness verdicts (SPEC §4.6.15)", (
       sharing: { skills: "own", mcp: "own", "CLAUDE.md": "linked", "settings.json": "copy" },
     });
     expect(schemaErrors("readiness.schema.json", v)).toEqual([]);
+  });
+
+  it("its usage is its best login's 5-hour window: work at 12% beats primary at 95%", async () => {
+    mkdirSync(join(claudeRoot, "work"), { recursive: true });
+    writeFileSync(
+      join(claudeRoot, "accounts.json"),
+      JSON.stringify({
+        version: 1,
+        accounts: [
+          {
+            id: "work",
+            label: "work",
+            machine: "local",
+            created: "2026-10-18T12:00:00.000Z",
+            signed_in_at: "2026-10-18T12:00:00.000Z",
+          },
+        ],
+      }),
+    );
+    const resets = "2099-01-01T00:00:00.000Z";
+    const sample = (agent: string, account: string, pct: number) =>
+      peer.publish(
+        buildTopic(NS, agent, "usage"),
+        JSON.stringify(
+          buildEnvelope({
+            agentId: agent,
+            parentId: null,
+            channel: "usage",
+            type: "usage",
+            payload: {
+              account,
+              model: "claude-opus-5-5",
+              context_window: { used_percentage: 20, used: 200_000, size: 1_000_000 },
+              rate_limits: {
+                five_hour: { pct, resets_at: resets },
+                weekly: { pct: 30, resets_at: resets },
+              },
+              captured_at: new Date(clock.now()).toISOString(),
+            },
+          }),
+        ),
+        { qos: 1, retain: true },
+      );
+    await sample("a-hot", "primary", 95);
+    await sample("a-cool", "work", 12);
+    await eventually(async () => {
+      await tick();
+      const u = (await verdict(LOCAL))?.payload.usage as { five_hour_pct?: number } | undefined;
+      return u?.five_hour_pct === 12;
+    });
+    const v = (await verdict(LOCAL)) as Verdict;
+    expect(v.payload.usage).toEqual({ account: "work", five_hour_pct: 12 });
+    expect(v.payload.eligible).toBe(true);
   });
 
   it("a peer's record change re-publishes its verdict; ready flipping journals once", async () => {

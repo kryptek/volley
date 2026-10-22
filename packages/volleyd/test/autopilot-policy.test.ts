@@ -334,6 +334,50 @@ describe("evaluate: the policy table, row by row", () => {
     expect(answerOf(evaluate({ ...d, task: null }, ctx({ task: undefined })))).toBe("not now");
   });
 
+  it("agent_account_limit with a suggestion: move the agent, under account_move_max per task role", () => {
+    const d = rec("agent_account_limit", ["move w1-t1-implementer-1 to work", "not now"], {
+      agent_id: "w1-t1-implementer-1",
+      role: "implementer",
+      acct: "primary",
+      window: "five_hour",
+      suggested: "work",
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("move w1-t1-implementer-1 to work");
+    expect("policy" in v && v.policy).toBe("agent_account_limit/move");
+    expect("budget" in v && v.budget).toEqual({
+      key: "account_move_max:T1/implementer",
+      used: 1,
+      max: 2,
+    });
+    // the third move of the role: the owner's
+    expect(whyOf(evaluate(d, ctx({}, { "account_move_max:T1/implementer": 2 })))).toBe(
+      "budget_exhausted",
+    );
+  });
+
+  it("agent_account_limit with no suggestion: wait (not now)", () => {
+    const d = rec("agent_account_limit", ["not now"], {
+      agent_id: "w1-t1-implementer-1",
+      role: "implementer",
+      acct: "primary",
+      suggested: null,
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("not now");
+    expect("rationale" in v && v.rationale).toBe(
+      "no other login on the machine has room; the agent finishes where it is and the window resets",
+    );
+  });
+
+  it("account_limit/wait explains the balanced wait", () => {
+    const d = rec("account_limit", ["not now"], { acct: "primary", suggested: null });
+    const v = evaluate({ ...d, task: null }, ctx({ task: undefined }));
+    expect("rationale" in v && v.rationale).toBe(
+      "no account on the machine has headroom; new agents take the one with the most room; wait for the reset",
+    );
+  });
+
   it("pr_head_moved by a green release-only merge: accept", () => {
     const d = rec("pr_head_moved", ["rereview", "fixup", "accept", "cancel"], {
       pipeline: { on: "pr_head_moved", head: "b", from: "a" },
