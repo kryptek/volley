@@ -12,6 +12,7 @@ import {
   decisionTopic,
   describeDecision,
   machineDownInput,
+  raiseBy,
   renderDecisionsMd,
   validateAnswer,
   waveDecisionId,
@@ -561,5 +562,16 @@ describe("validateAnswer (#315)", () => {
     const d = { kind: "spawn_budget_exhausted" as const, options: raise, pipeline: { on: "x" } };
     expect(checkAnswer(d, "raise")).toEqual({ answer: "raise" });
     expect(checkAnswer({ ...d, pipeline: undefined }, "raise")).toHaveProperty("refused");
+  });
+});
+
+describe("raiseBy (#315)", () => {
+  it("reads raise by N and raise N (N ≥ 1); anything else is no raise", () => {
+    expect(raiseBy("raise 12")).toBe(12);
+    expect(raiseBy("raise by 12")).toBe(12);
+    expect(raiseBy(" RAISE BY 3 ")).toBe(3);
+    expect(raiseBy("raise")).toBeNull();
+    expect(raiseBy("raise by 0")).toBeNull();
+    expect(raiseBy("raise by 3 please")).toBeNull();
   });
 });

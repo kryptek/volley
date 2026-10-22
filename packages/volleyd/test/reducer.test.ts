@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { nextSteer } from "../src/controls";
-import { raiseBy } from "../src/decisions";
 import { apply, emptyRecord, reduce, replay } from "../src/reducer";
 import type { JournalEvent } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
@@ -502,16 +501,7 @@ describe("the release train (SPEC §4.6.19)", () => {
   });
 });
 
-describe("raiseBy (#315)", () => {
-  it("reads raise by N and raise N (N ≥ 1); anything else is no raise", () => {
-    expect(raiseBy("raise 12")).toBe(12);
-    expect(raiseBy("raise by 12")).toBe(12);
-    expect(raiseBy(" RAISE BY 3 ")).toBe(3);
-    expect(raiseBy("raise")).toBeNull();
-    expect(raiseBy("raise by 0")).toBeNull();
-    expect(raiseBy("raise by 3 please")).toBeNull();
-  });
-
+describe("a journaled raise on replay (#315)", () => {
   it("a journaled `raise N` replays as no raise: only the normalised `raise by N` counts", () => {
     // Before #315 `raise 120` was journaled and ignored; a replay must not start applying it.
     const at = "2026-10-20T09:20:00.000Z";

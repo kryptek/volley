@@ -262,6 +262,9 @@ export function spawnsOutstanding(wave: Wave, rec: WaveRecord): number {
       for (const s of group) {
         const agent = STAGE_AGENT[s];
         if (agent === undefined || s === "fixup") continue;
+        // Only the current group's agents count as spawned: a later group has none yet, and a
+        // task back at review after a fixup reuses its role keys from round 1, so a rereview
+        // counts 0 here and the raise comes out low (the min-share floor cushions it).
         if (i === at && t.agents[agent] !== undefined) continue;
         n++;
       }
