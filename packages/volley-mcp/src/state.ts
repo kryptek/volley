@@ -7,4 +7,6 @@ export interface ServerState {
   broker: VolleyBroker;
   /** Flips true after a successful vol_register; gates the publish-path tools. */
   registered: boolean;
+  /** The `progress` heartbeat timer (lifecycle.ts); cleared on shutdown. */
+  heartbeat?: ReturnType<typeof setInterval> | undefined;
 }

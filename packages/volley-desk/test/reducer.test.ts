@@ -306,6 +306,39 @@ describe("reducer — coordinator attention", () => {
     });
   });
 
+  it("a wave owned by a coordinator name reads its bound agent (coordinator.agent_id)", () => {
+    const next = example("wave-state-running");
+    const payload = next.payload as Record<string, unknown>;
+    payload.owner = "coord-main";
+    payload.coordinator = {
+      agent_id: "coordinator-ab12",
+      state: "working",
+      last_seen: "2026-10-18T13:00:00.000Z",
+    };
+    const named = msg("volley/_waves/w1/state", next);
+    const waiting = apply(
+      named,
+      msg("volley/default/coordinator-ab12/progress", example("progress-awaiting-input")),
+    );
+    expect(waiting.coordinators["coord-main"]).toMatchObject({
+      id: "coord-main",
+      state: "awaiting_input",
+      question: "Merge T3 into the release branch now?",
+    });
+    const done = example("status-done");
+    const ended = reduce(
+      waiting,
+      msg("volley/default/coordinator-ab12/status", { ...done, agent_id: "coordinator-ab12" }),
+    );
+    expect(ended.coordinators["coord-main"]?.state).toBe("gone");
+  });
+
+  it("a heartbeat keeps an agent seen without counting as a progress report", () => {
+    const s = apply(progress("worker-ab12", "heartbeat", { source: "volley-mcp" }));
+    expect(s.agents["worker-ab12"]?.heartbeat).toBeDefined();
+    expect(s.agents["worker-ab12"]?.reportedAt).toBeUndefined();
+  });
+
   it("marks the coordinator gone after a terminal status", () => {
     const done = example("status-done");
     const s = apply(
