@@ -481,7 +481,10 @@ describe("launch (local cmux host)", () => {
       env.events.find(
         (e) => e.type === "alarm_raised" && e.data.alarm === "agent_mcp_allow_missing",
       )?.data,
-    ).toMatchObject({ name: "fresh" });
+    ).toMatchObject({
+      name: "fresh",
+      message: expect.stringContaining("not approved for this repository"),
+    });
   });
 
   it("agent_mcp_allow: a name found nowhere raises one agent_mcp_allow_missing alarm per wave; the spawn goes on", async () => {

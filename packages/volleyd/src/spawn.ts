@@ -573,7 +573,8 @@ async function launchAttempt(
         local,
       ]);
       mcpExtra = allowed.servers;
-      await alarmMissingAllowed(ctx, allowed.missing);
+      const unapproved = Object.keys(allowedMcpServers(allowed.missing, [project]).servers);
+      await alarmMissingAllowed(ctx, allowed.missing, new Set(unapproved));
     }
     await warnStrayVolley(ctx, agentId, attempt, sources, mcpAllow);
   }
@@ -1226,9 +1227,14 @@ async function userMcpSources(ctx: Ctx): Promise<[McpSource, McpSource, McpSourc
 /**
  * `agent_mcp_allow` names no server the agent's config has: journal
  * `alarm_raised { alarm: "agent_mcp_allow_missing", name }` once per wave and name (and log it);
- * the spawn goes on without it.
+ * the spawn goes on without it. `unapproved` are names the worktree's `.mcp.json` has but the
+ * profile never approved for the repository, which the message says rather than "no server".
  */
-async function alarmMissingAllowed(ctx: Ctx, missing: readonly string[]): Promise<void> {
+async function alarmMissingAllowed(
+  ctx: Ctx,
+  missing: readonly string[],
+  unapproved: ReadonlySet<string>,
+): Promise<void> {
   const { deps, req } = ctx;
   for (const name of missing) {
     const seen = deps.journaled?.(
@@ -1238,7 +1244,10 @@ async function alarmMissingAllowed(ctx: Ctx, missing: readonly string[]): Promis
         e.data.name === name,
     );
     if (seen === true) continue;
-    const message = `agent_mcp_allow: no MCP server '${name}' in the profile's .claude.json or the repository's .mcp.json; agents of wave ${req.wave.wave} start without it`;
+    const why = unapproved.has(name)
+      ? `the repository's .mcp.json has '${name}' but it is not approved for this repository (enabledMcpjsonServers)`
+      : `no MCP server '${name}' in the profile's .claude.json or the repository's .mcp.json`;
+    const message = `agent_mcp_allow: ${why}; agents of wave ${req.wave.wave} start without it`;
     deps.log?.(message);
     await deps.journal({
       type: "alarm_raised",

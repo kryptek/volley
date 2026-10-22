@@ -1558,12 +1558,15 @@ branch checked out (for a reviewer or a fixup, a PR head a contributor controls)
 copy would otherwise skip that approval; an unapproved entry is ignored, so the user's own entry
 of that name stays. A paired machine's are read from its own `~/.claude.json` and worktree. A name found in none of them
 is skipped (the spawn goes on), logged and journaled once per wave as
-`alarm_raised { alarm: "agent_mcp_allow_missing", name }`; servers a plugin or a claude.ai
+`alarm_raised { alarm: "agent_mcp_allow_missing", name }` (its message says when the name is in
+`.mcp.json` but not approved for the repository); servers a plugin or a claude.ai
 connector brings are in none of these files, so they cannot be allowed by name. A copied entry
 may hold the user's secrets (an `env` token): it is written only to the agent's `mcp.json`, and
 only names reach the journal and the log. `agent_spawned` records the list as
 `agent_mcp_allow`, and `volleyd validate` prints `agent_mcp: inherit (allow: migrations,
-playwright)`. With a list, the stray-`volley` warning above only counts an allowed entry. The cmux command starts with two spaces, which keeps it out of shell history and away
+playwright)`. With a list, the stray-`volley` warning above only counts an allowed entry.
+
+The cmux command starts with two spaces, which keeps it out of shell history and away
 from prompts that eat the first character. Nothing else is typed into the pane, with two
 exceptions: the Enter that answers an update prompt and the relaunch after it (below), and the
 Escape that `volleyd stop` sends. The brief never appears in an argv.
