@@ -28,8 +28,11 @@ afterEach(async () => {
 /** The work-log lines: `activity` ticks carrying a `msg` (a boundary alone carries none). */
 const activities = (envs: Envelope[]) =>
   envs.filter((e) => e.type === "activity" && "msg" in (e.payload as object));
+/** The tool boundaries: `activity` ticks carrying a `tool_use_id` (a flushed line carries none). */
 const boundaries = (envs: Envelope[]) =>
-  envs.filter((e) => e.type === "activity").map((e) => e.payload as Record<string, unknown>);
+  envs
+    .filter((e) => e.type === "activity" && "tool_use_id" in (e.payload as object))
+    .map((e) => e.payload as Record<string, unknown>);
 /** The session the other fixtures (post-tool-use, stop, user-prompt-submit) were recorded in. */
 const SESSION = "7c984d76-0e0e-40d5-b9f1-777e9c0e6caa";
 const workLogFile = () => JSON.parse(readFileSync(join(dir, ".volley", "work-log.json"), "utf-8"));
@@ -81,6 +84,8 @@ describe("pre-tool-use activity ticks", () => {
     const progress = await collect(client, buildTopic(NS, AGENT, "progress"));
     await preToolUse({ tool_use_id: "toolu_A", tool_input: { command: "first" } });
     await tick(1000);
+    // Restart the window now, so a slow runner cannot let the second call's line through.
+    ageWindow(workLog().last_published_at - Date.now());
     await preToolUse({ tool_use_id: "toolu_B", tool_input: { command: "bun run test" } });
     await runHook(
       "post-tool-use",
