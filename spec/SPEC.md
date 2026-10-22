@@ -329,24 +329,239 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 |---|---|---|
 | `decision_id`, `wave` | string | Identity. |
 | `task` | task id \| null | `null` for a wave-level decision. |
-| `kind` | enum (closed) | `reviewers_disagree` \| `merge_conflict` \| `agent_blocked` \| `agent_question` \| `agent_stalled` \| `unknown_screen` \| `hooks_auth_failed` \| `mcp_not_registered` \| `spawn_failed` \| `model_switch` \| `repo_untrusted` \| `remote_repo_missing` \| `ci_failed` \| `wave_complete` \| `plan_change` \| `pr_closed` \| `pr_head_moved` \| `spawn_budget_exhausted` \| `account_limit` \| `machine_down` \| `merge_refused` (§4.6.17) \| `release_go` \| `stage_go` (§4.6.19). A `repo_untrusted` or `remote_repo_missing` decision carries `repo` (the repo path it is about) and, for a remote host, `host` and `target` (the ssh destination; `repo` is then a path on it); a `repo_untrusted` one is answered on that host (its own folder trust), never the supervisor's. A `plan_change` decision carries `change`: `removed` (the new wave version dropped the task) \| `issue` (it moved the task to another issue). A `pr_closed` decision asks about a gated PR closed without a merge whose head the release branch does not carry (`landed` \| `abandoned`); a `pr_head_moved` decision asks about a PR head that moved after a gate (`rereview` \| `fixup` \| `accept` \| `cancel`; `accept` is offered only when CI on the new head is green and the move is a merge of the release branch only: the new head is a merge commit whose parents are the old head and a commit on the release branch, and every file the move changed is one the release branch changed since the PR branched from it); a `ci_failed` decision about CI red on the head a pipeline role pushed offers `fixup` (a fixup agent at that head, the CI result as its only directive) \| `re-verify` \| `cancel` and carries `failed_jobs`, `failing_tests` and `log` (the tail of the failed runs' logs); an `agent_stalled` decision offers `nudge again` \| `respawn` (the stalled agent is stopped and its role spawned again; an implementer continues its pushed branch; offered only where the supervisor can spawn the role) \| `stop task`; a `spawn_budget_exhausted` decision asks about a spawn the wave's spawn budget holds (`raise by <n>` \| `cancel`; `n` SHOULD cover the spawns the wave's unfinished tasks still need, not the one spawn held). A `merge_conflict` decision (§4.6.17) asks about a task the merge queue could not bring up to date with the release branch (`respawn` \| `manual` \| `cancel`). An `account_limit` decision (§4.6.12) carries `acct`, `pct`, `resets_at` and `suggested`. A `machine_down` decision (§4.6.15) is wave-level and carries `host`, `down_since`, `tasks` (the wave's unfinished tasks on that host) and optionally `machine` (`down`, the default, \| `draining` \| `removing` \| `removed`), with the options `wait`, `re-place queued tasks` and `cancel` (no `wait` for `removing` and `removed`). A `release_go` decision (§4.6.19) is wave-level, offers `go` and `hold`, and carries `stages` (each playbook stage as `{ name, evidence? }`, `evidence` being where its evidence lives); a `stage_go` decision is wave-level, offers `go`, `skip` and `hold`, and carries `stage` (the owner-gated stage it asks about) and `stages` (the stages verified before it, as `release_go`'s); a failed release stage's `agent_blocked` decision is wave-level, offers `respawn`, `skip` and `cancel`, and carries `stage`, `agent_id` and `pipeline: { on: "stage", stage, agent_id, attempt }`. A decision that offers `respawn` for an agent whose host is down or not eligible (§4.6.15) also offers `respawn on <best>`, `<best>` being the best eligible machine when it opened; on a host closed to new agents it offers `respawn on <best>` instead of `respawn`. A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out to a decision whose answer it acts on itself; in the reference supervisor, one line per kind: `spawn_budget_exhausted` takes `raise by <n>` (any n ≥ 1; `raise <n>` is read as `raise by <n>`) or `cancel`; `machine_down` takes only its options; `repo_untrusted` takes `trust` or `cancel`. Every other kind takes its options or free-form text. |
+| `kind` | enum (closed) | One of the decision kinds listed below the table. |
 | `question` | string | What needs answering. |
 | `options` | string[] | Suggested answers (optional; free text is always allowed). |
 | `pointers` | object | `{ diff?, transcript?, screen?, pr? }` — where the evidence lives. |
 | `opened_at` | date-time | |
 | `resolved` | object | `{ answer, by, at }`; required when `type` is `decision_resolved`. |
 
+**Decision kinds** (one per line; `bun run check:spec-refs` checks the list against `decision.schema.json`):
+
+<!-- spec-list: decision-kinds -->
+- `reviewers_disagree` — the review roles disagree about a PR.
+- `merge_conflict` — the merge queue could not bring a task up to date with the release branch (`respawn` | `manual` | `cancel`); §4.6.17.
+- `agent_blocked` — an agent reported itself blocked. A failed release stage's `agent_blocked` decision is wave-level, offers `respawn`, `skip` and `cancel`, and carries `stage`, `agent_id` and `pipeline: { on: "stage", stage, agent_id, attempt }`; §4.6.19.
+- `agent_question` — an agent asked a question only the owner can answer.
+- `agent_stalled` — an agent stays idle; offers `nudge again` | `respawn` (the stalled agent is stopped and its role spawned again; an implementer continues its pushed branch; offered only where the supervisor can spawn the role) | `stop task`.
+- `unknown_screen` — the supervisor cannot classify an agent's screen.
+- `hooks_auth_failed` — an agent's hooks cannot log in to the broker.
+- `mcp_not_registered` — an agent's MCP server did not register on the broker.
+- `spawn_failed` — a spawn failed.
+- `model_switch` — an agent runs on another model than the one asked for, or hit a credit limit.
+- `repo_untrusted` — carries `repo` (the repo path it is about) and, for a remote host, `host` and `target` (the ssh destination; `repo` is then a path on it); it is answered on that host (its own folder trust), never the supervisor's.
+- `remote_repo_missing` — carries `repo` (the repo path it is about) and, for a remote host, `host` and `target` (the ssh destination; `repo` is then a path on it).
+- `ci_failed` — CI is red on the head a pipeline role pushed; offers `fixup` (a fixup agent at that head, the CI result as its only directive) | `re-verify` | `cancel` and carries `failed_jobs`, `failing_tests` and `log` (the tail of the failed runs' logs).
+- `wave_complete` — every task of the wave finished.
+- `plan_change` — carries `change`: `removed` (the new wave version dropped the task) | `issue` (it moved the task to another issue).
+- `pr_closed` — asks about a gated PR closed without a merge whose head the release branch does not carry (`landed` | `abandoned`).
+- `pr_head_moved` — asks about a PR head that moved after a gate (`rereview` | `fixup` | `accept` | `cancel`; `accept` is offered only when CI on the new head is green and the move is a merge of the release branch only: the new head is a merge commit whose parents are the old head and a commit on the release branch, and every file the move changed is one the release branch changed since the PR branched from it).
+- `spawn_budget_exhausted` — asks about a spawn the wave's spawn budget holds (`raise by <n>` | `cancel`; `n` SHOULD cover the spawns the wave's unfinished tasks still need, not the one spawn held).
+- `account_limit` — carries `acct`, `pct`, `resets_at` and `suggested`; §4.6.12.
+- `machine_down` — wave-level; carries `host`, `down_since`, `tasks` (the wave's unfinished tasks on that host) and optionally `machine` (`down`, the default, | `draining` | `removing` | `removed`), with the options `wait`, `re-place queued tasks` and `cancel` (no `wait` for `removing` and `removed`); §4.6.15.
+- `merge_refused` — asks about a task the host refused to merge `autopilot.merge_retry_max` times at one gated head (`retry` | `manual` | `cancel`); §4.6.17.
+- `release_go` — wave-level, offers `go` and `hold`, and carries `stages` (each playbook stage as `{ name, evidence? }`, `evidence` being where its evidence lives); §4.6.19.
+- `stage_go` — wave-level, offers `go`, `skip` and `hold`, and carries `stage` (the owner-gated stage it asks about) and `stages` (the stages verified before it, as `release_go`'s); §4.6.19.
+<!-- /spec-list -->
+
+A decision that offers `respawn` for an agent whose host is down or not eligible (§4.6.15) also offers `respawn on <best>`, `<best>` being the best eligible machine when it opened; on a host closed to new agents it offers `respawn on <best>` instead of `respawn`.
+
+A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out to a decision whose answer it acts on itself; in the reference supervisor, one line per kind: `spawn_budget_exhausted` takes `raise by <n>` (any n ≥ 1; `raise <n>` is read as `raise by <n>`) or `cancel`; `machine_down` takes only its options; `repo_untrusted` takes `trust` or `cancel`. Every other kind takes its options or free-form text.
+
 #### 4.6.3 Wave events
 
-`volley/_waves/<wave>/events` is a non-retained live mirror of the supervisor's per-wave journal; the journal (not the broker) is the record, and consumers that need every event read it through the supervisor. The envelope `type` is the event type, from a closed enum in `wave-event.schema.json` (`wave_submitted`, `task_queued`, `agent_spawned`, `spawn_failed`, `spawn_recovered`, `stage_entered`, `decision_opened`, `lease_granted`, `steering_sent`, `steering_queued`, `steering_dropped`, `config_changed`, …). `payload` is `{ wave, seq, at, task?, data? }`, where `seq` is monotonic per wave and `data` is event-specific. Global events use the pseudo-wave `_system`. The schema fixes `data` for the Fleet events (§4.6.15): `task_placed { task, host, score, candidates, by, from?, local? }` (`local: true` marks the supervisor's own machine, whose agents' `tasks[].host` stays absent, so a replay needs no config and survives a `fleet.local_name` rename), `machine_readiness_changed { name, ready, reasons }` (in `_system`) and `merge_nudge_sent { task, agent_id, merged_pr, files }`, the branch update a conflicting PR starts (§4.6.4): `pr_conflicting { pr, head, release_branch, role? }`, and `owner_reconnected { owner, agent_id, previous_agent_id }` (§4.6.1). It also fixes `data` for autopilot's two events (§4.6.16): `decision_auto_resolved { decision_id, kind, policy, answer, rationale, evidence, budget? }` and `decision_escalated { decision_id, kind, why, budget? }`, `budget` being `{ key, used, max }`, and the needs-you inbox's answer (§4.6.18): `inbox_answered { id, kind, answer, by, where, version }`, and self-healing CI's request (§4.6.16): `remediation_requested { kind, test, test_file, head, run_urls, for, tests?, role?, release_ci? }`, a synthetic fixer's `task_queued { issue: 0, synthetic: true, title, remediation: { kind, test, test_file, run_urls, for[] } }` and its close, `remediation_closed { kind, test, task, outcome, released, why? }` (`why` when `outcome` is `failed`). The release train's events (§4.6.19) carry `release_started { done, cancelled, playbook: { path, sha256, stages } }`, `release_stage_entered { stage, attempt? }`, `release_stage_verified { stage, agent_id?, head?, evidence? }`, `release_stage_failed { stage, reason?, agent_id? }`, `release_stage_skipped { stage, by, decision_id }`, `release_cancelled { stage, by, decision_id }` and `release_done { by, decision_id }`. It also fixes `wave_archived { by, reason, closed_decisions[] }` (§4.6.20) and the morning digest's `digest_published { trigger }` (§4.6.16). A release stage agent's own events (`agent_spawned { stage, … }`, `steering_sent`, `agent_retired`) carry the pseudo task `_release`, which no wave-file task id can be. Every other event's `data` is free-form.
+`volley/_waves/<wave>/events` is a non-retained live mirror of the supervisor's per-wave journal; the journal (not the broker) is the record, and consumers that need every event read it through the supervisor. The envelope `type` is the event type, from a closed enum in `wave-event.schema.json` (listed below). `payload` is `{ wave, seq, at, task?, data? }`, where `seq` is monotonic per wave and `data` is event-specific. Global events use the pseudo-wave `_system`. A release stage agent's own events (`agent_spawned { stage, … }`, `steering_sent`, `agent_retired`) carry the pseudo task `_release`, which no wave-file task id can be.
+
+**Wave events** (one per line; `bun run check:spec-refs` checks the list against `wave-event.schema.json`). The schema fixes `data` for the events shown with it; every other event's `data` is free-form.
+
+<!-- spec-list: events -->
+- `wave_submitted`
+- `wave_versioned`
+- `wave_paused`
+- `wave_resumed`
+- `wave_stopped`
+- `wave_complete`
+- `wave_archived` — `{ by, reason, closed_decisions[] }` (§4.6.20)
+- `owner_claimed`
+- `owner_reconnected` — `{ owner, agent_id, previous_agent_id }` (§4.6.1)
+- `task_queued` — a synthetic fixer's: `{ issue: 0, synthetic: true, title, remediation: { kind, test, test_file, run_urls, for[] } }` (self-healing CI, §4.6.16)
+- `task_admitted`
+- `task_cancelled`
+- `agent_spawned`
+- `agent_registered`
+- `agent_retired`
+- `agent_session_closed`
+- `spawn_failed`
+- `spawn_recovered`
+- `spawn_adopted`
+- `launch_orphan_closed`
+- `spawn_identity_burned`
+- `verify_failed`
+- `stage_entered`
+- `artifact_verified`
+- `steering_sent`
+- `steering_queued`
+- `steering_dropped`
+- `decision_opened`
+- `decision_resolved`
+- `lease_requested`
+- `lease_granted`
+- `lease_released`
+- `lease_expired`
+- `alarm_raised`
+- `wake_detected`
+- `reap_suppressed`
+- `reconciled`
+- `config_changed`
+- `account_created`
+- `account_rotated`
+- `account_revoked`
+- `signin_link_issued`
+- `token_redeemed`
+- `setup_step_applied`
+- `admin_token_issued`
+- `desk_password_issued`
+- `claude_account_added`
+- `claude_signin_started`
+- `claude_signin_done`
+- `claude_signin_failed`
+- `claude_profile_synced`
+- `agent_account_moved`
+- `relaunched`
+- `ci_pending`
+- `ci_green`
+- `pr_head_moved`
+- `merged_by_operator`
+- `pr_conflicting` — `{ pr, head, release_branch, role? }`: the branch update a conflicting PR starts (§4.6.4)
+- `merged_by_supervisor`
+- `merge_queued`
+- `merge_dequeued`
+- `merge_started`
+- `merge_ended`
+- `agent_force_retired`
+- `alarm_cleared`
+- `wave_account_moved`
+- `agent_reaped_by_supervisor`
+- `credentials_revoked`
+- `credentials_swept`
+- `peer_invited`
+- `peer_joined`
+- `peer_removed`
+- `task_placed` — `{ task, host, score, candidates, by, from?, local? }` (§4.6.15; `local: true` marks the supervisor's own machine, whose agents' `tasks[].host` stays absent, so a replay needs no config and survives a `fleet.local_name` rename)
+- `machine_readiness_changed` — `{ name, ready, reasons }`, in `_system` (§4.6.15)
+- `merge_nudge_sent` — `{ task, agent_id, merged_pr, files }` (§4.6.15)
+- `peer_doctor_run`
+- `peer_drain_started`
+- `repo_visibility_detected`
+- `decision_auto_resolved` — `{ decision_id, kind, policy, answer, rationale, evidence, budget? }`, `budget` being `{ key, used, max }` (autopilot, §4.6.16)
+- `decision_escalated` — `{ decision_id, kind, why, budget? }`, `budget` as `decision_auto_resolved`'s (autopilot, §4.6.16)
+- `release_started` — `{ done, cancelled, playbook: { path, sha256, stages } }` (§4.6.19)
+- `release_stage_entered` — `{ stage, attempt? }` (§4.6.19)
+- `release_stage_verified` — `{ stage, agent_id?, head?, evidence? }` (§4.6.19)
+- `release_stage_failed` — `{ stage, reason?, agent_id? }` (§4.6.19)
+- `release_stage_skipped` — `{ stage, by, decision_id }` (§4.6.19)
+- `release_cancelled` — `{ stage, by, decision_id }` (§4.6.19)
+- `release_done` — `{ by, decision_id }` (§4.6.19)
+- `inbox_opened`
+- `inbox_answered` — `{ id, kind, answer, by, where, version }`: the needs-you inbox's answer (§4.6.18)
+- `remediation_requested` — `{ kind, test, test_file, head, run_urls, for, tests?, role?, release_ci? }`: self-healing CI's request (§4.6.16)
+- `remediation_closed` — `{ kind, test, task, outcome, released, why? }` (`why` when `outcome` is `failed`; §4.6.16)
+- `digest_published` — `{ trigger }`: the morning digest (§4.6.16)
+<!-- /spec-list -->
 
 #### 4.6.4 Supervisor config
 
-`volley/_waves/_config` holds the supervisor's current *effective* global config: every runtime tunable plus `version` (monotonic), `updated_at` and `updated_by`. The tunable model is `config.schema.json#/$defs/tunables` — every key has `minimum`/`maximum` (or length) bounds so a UI can render and validate it without hard-coding limits:
+`volley/_waves/_config` holds the supervisor's current *effective* global config: every runtime tunable plus `version` (monotonic), `updated_at` and `updated_by`. The tunable model is `config.schema.json#/$defs/tunables` — every key has `minimum`/`maximum` (or length) bounds so a UI can render and validate it without hard-coding limits.
 
-`hard_ceiling`, `spawn_budget_multiplier`, `lease_pools: { <pool>: { capacity, per_machine?, per_machine_overrides?, ttl_s?, match[]? } }`, `admission: { memory_pressure_max_level, cmux_ping_max_ms, container_max, api_overload_window_s, api_overload_max, ci_queue_max, hysteresis_samples }`, `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `background_wait_max_s` (default 7200: how long an idle agent's own work, its `background_wait`, §4.3, or other evidence, holds off the idle nudge), `stall_backoff_max_s` (default 1800: the cap on the doubling gap between stall decisions of one idle), `tool_in_flight_max_s` (default 7200: how long a tool call in flight, from its `PreToolUse` boundary to the matching `PostToolUse`, §4.3, holds off the silence alarm), `fallback_model` (string \| null), `mailbox: { session_expiry_s }`, `worktree_root`, `spawn_timeout_s`, `spawn_retry_max_s`, `spawn_retry_max`, `brief_preface_max_bytes`, `wake_grace_s`, `screen_tail_interval_s`, `stop_grace_s`, `dynsec_batch_ms`, `credential_sweep_interval_s` (§4.6.13), `claude: { default_account, warn_at_pct }` (`default_account`, string \| null: the Claude account an agent runs under when its task and wave name none, §4.6.11; `warn_at_pct`, default 90: the 5-hour usage that opens an `account_limit` decision, §4.6.12), `branch_update` (`rebase` \| `merge`, default `rebase`: below), `agent_mcp` (`strict` \| `inherit`, default `strict`: below), `agent_auto_compact_pct` (integer 0..100, default 85: below), `public_hygiene` (`auto` \| `on` \| `off`, default `auto`: what review roles flag as public hygiene, §4.6.8), `retire_close_session` (boolean, default `true`: retiring an agent also ends its session, below), `hosts: { <name>: { type?, target, repo, worktree_root?, volley_dir, tunnel?: { remote_port, supervise }, max_agents?, drain? } }` (remote SSH + tmux hosts a wave task names with `host:`, or placement chooses; `<name>` is never `local` or `auto`), and the Fleet tunables of §4.6.15: `require_fresh_base` (boolean, default `true`), `placement: { load_per_core_max, mem_available_min_pct, disk_free_min_gb, down_decision_after_s, weights: { cpu, slots, mem, usage }, nudge_on_merge }` and `fleet: { local_name, local_agents, fallback: { max_agents, per_machine } }`, and autopilot's (§4.6.16): `autopilot: { enabled, owner_only[], relaunch_max, nudge_max, respawn_max, rereview_max, ci_fixup_max, question_max, budget_raise_max, inbox_answered_ttl_s }` (`inbox_answered_ttl_s`, default 600: how long an answered needs-you inbox item stays retained, §4.6.18), and autopilot merging's (§4.6.17): `autopilot: { merge, merge_retry_max, delete_branch }` (`delete_branch`, default `false`: a merge also deletes the PR's head branch), and `autopilot: { reconnect_grace_s }` (default 900, 60..86400: how long a coordinator name's waves read `reconnecting`, §4.6.1), and `autopilot: { incident_wait_max_s }` (default 14400, 60..86400: how long a red head classified as an infra incident is held before its `ci_failed` decision, §4.6.16), and `autopilot: { fix_flake_max }` (default 3, 0..20: the flake fixers one wave may add, §4.6.16). The archiving tunables of §4.6.20: `archive_ended_after_h` (0 to 8760, default 24; 0: never) and `archive_on_ack` (boolean, default `true`). `ci_rate_limit_backoff_ms` (10000 to 3600000, default 300000): after a rate-limited GitHub answer (HTTP 403 or 429) to a CI read, the supervisor makes none of that wave's CI calls for this long (longer when the answer's output names a `Retry-After`); an unreadable answer is CI state `unknown`, never "no CI run", and opens no decision, and a red head whose release branch's CI is unreadable is not classified. A boolean has no bounds; an enum (`nudge_on_merge`) is bounded by its values.
+**Tunables** (one per line, as dotted keys; `bun run check:spec-refs` checks the list against `config.schema.json`):
 
-**Branch updates and agent MCP servers.** `branch_update` is how a supervisor's pipeline brings a PR branch up to date when the release branch moved before the gate. Under `rebase` the agent rebases onto the release branch and publishes with a lease-guarded force-push. Under `merge` it merges the release branch into the PR branch and publishes with a normal push: the supervisor MUST NOT instruct any force-push, and accepts the new head only if it descends from the head the update started at. The mode is fixed when the update starts (a supervisor records it with the step), so a change applies to later updates only. A PR the host reports as conflicting with the release branch (GitHub's `mergeable: CONFLICTING`) gets no CI at all, so a supervisor MUST NOT hold it for CI or ask the owner about the missing run: it journals `pr_conflicting { pr: { number, url }, head, release_branch, role? }` and starts the update at that head at once, its directive saying the PR conflicts. While the host is still computing mergeability (`UNKNOWN`) the head is pending, as if CI were running. `agent_mcp` is which MCP servers a supervisor-launched agent loads. Under `strict` it loads only the supervisor's own Volley server. Under `inherit` it also loads the user's own servers (plugins, connectors). The supervisor MUST name its own Volley server `volley`, so that it takes over a user-scope entry of the same name (such as a coordinator's), and every Volley server in the session carries the agent's identity from `.volley/agent.json` (§6.5), never a coordinator's. A user entry under another name that runs a Volley server still starts, a second Volley server in the session: at spawn under `inherit` the supervisor SHOULD warn (journal and log) when the profile's `~/.claude.json` `mcpServers` or the worktree's `.mcp.json` has such an entry. `strict` gives a minimal, reproducible agent; `inherit` gives it more tools, at the cost of depending on the machine it runs on.
+<!-- spec-list: tunables -->
+- `hard_ceiling` — default 12.
+- `spawn_budget_multiplier` — default 3.
+- `lease_pools` — default `{}`; `{ <pool>: { capacity, per_machine?, per_machine_overrides?, ttl_s?, match[]? } }` (§4.6.5).
+- `admission.memory_pressure_max_level` — default 2 (§4.6.7).
+- `admission.cmux_ping_max_ms` — default 2000 (§4.6.7).
+- `admission.container_max` — default 20 (§4.6.7).
+- `admission.api_overload_window_s` — default 300 (§4.6.7).
+- `admission.api_overload_max` — default 3 (§4.6.7).
+- `admission.ci_queue_max` — default 10 (§4.6.7).
+- `admission.hysteresis_samples` — default 3 (§4.6.7).
+- `claim_after_s` — default 1800.
+- `heartbeat_alarm_s` — default 600.
+- `idle_grace_s` — default 180.
+- `background_wait_max_s` — default 7200: how long an idle agent's own work, its `background_wait`, §4.3, or other evidence, holds off the idle nudge.
+- `stall_backoff_max_s` — default 1800: the cap on the doubling gap between stall decisions of one idle.
+- `tool_in_flight_max_s` — default 7200: how long a tool call in flight, from its `PreToolUse` boundary to the matching `PostToolUse`, §4.3, holds off the silence alarm.
+- `fallback_model` — string | null, default `null`.
+- `mailbox.session_expiry_s` — default 604800.
+- `worktree_root` — default `~/.volley/worktrees`.
+- `spawn_timeout_s` — default 120.
+- `spawn_retry_max_s` — default 900.
+- `spawn_retry_max` — default 8.
+- `brief_preface_max_bytes` — default 16384 (§4.6.9).
+- `wake_grace_s` — default 120.
+- `screen_tail_interval_s` — default 5 (§4.6.6).
+- `stop_grace_s` — default 30.
+- `dynsec_batch_ms` — default 50.
+- `credential_sweep_interval_s` — default 600 (§4.6.13).
+- `claude.default_account` — string | null, default `null`: the Claude account an agent runs under when its task and wave name none (§4.6.11).
+- `claude.warn_at_pct` — default 90: the 5-hour usage that opens an `account_limit` decision (§4.6.12).
+- `branch_update` — `rebase` | `merge`, default `rebase` (below).
+- `agent_mcp` — `strict` | `inherit`, default `strict` (below).
+- `agent_auto_compact_pct` — integer 0..100, default 85 (below).
+- `public_hygiene` — `auto` | `on` | `off`, default `auto`: what review roles flag as public hygiene (§4.6.8).
+- `hosts` — default `{}`; `{ <name>: { type?, target, repo, worktree_root?, volley_dir, tunnel?: { remote_port, supervise }, max_agents?, drain? } }`: remote SSH + tmux hosts a wave task names with `host:`, or placement chooses; `<name>` is never `local` or `auto`.
+- `require_fresh_base` — boolean, default `true` (§4.6.15).
+- `retire_close_session` — boolean, default `true`: retiring an agent also ends its session (below).
+- `placement.load_per_core_max` — default 1.5 (§4.6.15).
+- `placement.mem_available_min_pct` — default 10 (§4.6.15).
+- `placement.disk_free_min_gb` — default 5 (§4.6.15).
+- `placement.down_decision_after_s` — default 300 (§4.6.15).
+- `placement.weights.cpu` — default 40 (§4.6.15).
+- `placement.weights.slots` — default 30 (§4.6.15).
+- `placement.weights.mem` — default 15 (§4.6.15).
+- `placement.weights.usage` — default 15 (§4.6.15).
+- `placement.nudge_on_merge` — `files` | `all` | `off`, default `files` (§4.6.15).
+- `archive_ended_after_h` — 0 to 8760, default 24; 0: never (§4.6.20).
+- `archive_on_ack` — boolean, default `true` (§4.6.20).
+- `ci_rate_limit_backoff_ms` — 10000 to 3600000, default 300000: after a rate-limited GitHub answer (HTTP 403 or 429) to a CI read, the supervisor makes none of that wave's CI calls for this long (longer when the answer's output names a `Retry-After`); an unreadable answer is CI state `unknown`, never "no CI run", and opens no decision, and a red head whose release branch's CI is unreadable is not classified.
+- `fleet.local_name` — default `null`: derived from the host name (§4.6.15).
+- `fleet.local_agents` — default `null` (§4.6.15).
+- `fleet.fallback.max_agents` — default 3 (§4.6.15).
+- `fleet.fallback.per_machine` — default `{}` (§4.6.15).
+- `autopilot.enabled` — boolean, default `true` (§4.6.16).
+- `autopilot.owner_only` — default `[plan_change, repo_untrusted, model_switch, release_go, stage_go]` (§4.6.16).
+- `autopilot.relaunch_max` — default 1 (§4.6.16).
+- `autopilot.nudge_max` — default 1 (§4.6.16).
+- `autopilot.respawn_max` — default 1 (§4.6.16).
+- `autopilot.rereview_max` — default 2 (§4.6.16).
+- `autopilot.ci_fixup_max` — default 2 (§4.6.16).
+- `autopilot.question_max` — default 1 (§4.6.16).
+- `autopilot.budget_raise_max` — default 2 (§4.6.16).
+- `autopilot.inbox_answered_ttl_s` — default 600: how long an answered needs-you inbox item stays retained (§4.6.18).
+- `autopilot.merge` — `auto` | `manual`, default `auto` (§4.6.17).
+- `autopilot.merge_retry_max` — default 2 (§4.6.17).
+- `autopilot.delete_branch` — boolean, default `false`: a merge also deletes the PR's head branch (§4.6.17).
+- `autopilot.reconnect_grace_s` — default 900, 60..86400: how long a coordinator name's waves read `reconnecting` (§4.6.1).
+- `autopilot.incident_wait_max_s` — default 14400, 60..86400: how long a red head classified as an infra incident is held before its `ci_failed` decision (§4.6.16).
+- `autopilot.fix_flake_max` — default 3, 0..20: the flake fixers one wave may add (§4.6.16).
+- `autopilot.digest_min_interval_s` — default 1800, 0..86400 (§4.6.16).
+<!-- /spec-list -->
+
+A boolean has no bounds; an enum (`nudge_on_merge`) is bounded by its values.
+
+**Branch updates and agent MCP servers.** `branch_update` is how a supervisor's pipeline brings a PR branch up to date when the release branch moved before the gate.
+Under `rebase` the agent rebases onto the release branch and publishes with a lease-guarded force-push.
+Under `merge` it merges the release branch into the PR branch and publishes with a normal push: the supervisor MUST NOT instruct any force-push, and accepts the new head only if it descends from the head the update started at.
+The mode is fixed when the update starts (a supervisor records it with the step), so a change applies to later updates only.
+A PR the host reports as conflicting with the release branch (GitHub's `mergeable: CONFLICTING`) gets no CI at all, so a supervisor MUST NOT hold it for CI or ask the owner about the missing run: it journals `pr_conflicting { pr: { number, url }, head, release_branch, role? }` and starts the update at that head at once, its directive saying the PR conflicts.
+While the host is still computing mergeability (`UNKNOWN`) the head is pending, as if CI were running.
+`agent_mcp` is which MCP servers a supervisor-launched agent loads.
+Under `strict` it loads only the supervisor's own Volley server.
+Under `inherit` it also loads the user's own servers (plugins, connectors).
+The supervisor MUST name its own Volley server `volley`, so that it takes over a user-scope entry of the same name (such as a coordinator's), and every Volley server in the session carries the agent's identity from `.volley/agent.json` (§6.5), never a coordinator's.
+A user entry under another name that runs a Volley server still starts, a second Volley server in the session: at spawn under `inherit` the supervisor SHOULD warn (journal and log) when the profile's `~/.claude.json` `mcpServers` or the worktree's `.mcp.json` has such an entry.
+`strict` gives a minimal, reproducible agent; `inherit` gives it more tools, at the cost of depending on the machine it runs on.
 
 **Auto-compaction.** `agent_auto_compact_pct` is the share of the model's context window at which a supervisor-launched agent's harness compacts its conversation. A supervisor that launches Claude Code agents sets the harness's auto-compact window to that share of the model's window in tokens (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, clamped to the harness's accepted range) in the launch it renders, for every role; `0` sets nothing and the harness's own default applies. The window is fixed at launch (a supervisor records it with `agent_spawned`), so a change applies to later spawns only. The usage channel's `used_percentage` (§4.6.12) keeps measuring the full window.
 
