@@ -280,6 +280,18 @@ describe("broker credentials (VOLLEY_AUTH_* and the identity file broker block)"
   });
 });
 
+describe("VOLLEY_HEARTBEAT_S", () => {
+  it("is absent by default (the lifecycle's 300 s), read as seconds, and 0 is off", () => {
+    expect(loadConfig({}, "/x")).not.toHaveProperty("heartbeatS");
+    expect(loadConfig({ VOLLEY_HEARTBEAT_S: "60" }, "/x").heartbeatS).toBe(60);
+    expect(loadConfig({ VOLLEY_HEARTBEAT_S: "0" }, "/x").heartbeatS).toBe(0);
+  });
+  it("rejects a value that is not a non-negative number", () => {
+    expect(() => loadConfig({ VOLLEY_HEARTBEAT_S: "soon" }, "/x")).toThrow(/VOLLEY_HEARTBEAT_S/);
+    expect(() => loadConfig({ VOLLEY_HEARTBEAT_S: "-5" }, "/x")).toThrow(/VOLLEY_HEARTBEAT_S/);
+  });
+});
+
 describe("VOLLEY_COORDINATOR", () => {
   it("is carried verbatim as the stable coordinator name; unset or blank is none", () => {
     expect(loadConfig({ VOLLEY_COORDINATOR: "coord-main" }, "/x").coordinator).toBe("coord-main");
