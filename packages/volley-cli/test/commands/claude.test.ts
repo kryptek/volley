@@ -39,14 +39,12 @@ async function fakeVolleyd(
     if (q?.type !== "query" || q.correlation_id === null) return;
     const p = q.payload as Record<string, unknown>;
     seen.push(p);
+    const a = answer(p.op as string, p);
+    // `null`: a volleyd that never answers the op.
+    if (a === null) return;
     void b.publish(
       `volley/test/${q.agent_id}/mailbox`,
-      env(
-        "mailbox",
-        "ack",
-        { text: "ACKED", op: p.op, ...(answer(p.op as string, p) as object) },
-        q.correlation_id,
-      ),
+      env("mailbox", "ack", { text: "ACKED", op: p.op, ...(a as object) }, q.correlation_id),
       { qos: 1, retain: false },
     );
   });
@@ -323,7 +321,7 @@ describe("volley claude", () => {
             headroom: null,
             five_hour_pct: null,
             weekly_pct: null,
-            agents: 0,
+            agents: 2,
           },
         ],
         picks: { fable: "work@peer-a", opus: "work@peer-a", sonnet: null, haiku: null },
@@ -345,7 +343,7 @@ describe("volley claude", () => {
   ];
 
   async function balanceVolleyd(
-    answer = (op: string, p: Record<string, unknown>) => {
+    answer: (op: string, p: Record<string, unknown>) => unknown = (op, p) => {
       if (op !== "claude_balance") return { ok: true, result: LIST_RESULT };
       if (typeof p.model !== "string") return { ok: true, result: BALANCE };
       const machines = BALANCE.machines.map((m) => ({
@@ -381,7 +379,7 @@ describe("volley claude", () => {
     );
     expect(lines[3]).toBe("peer-a");
     expect(lines[4]).toMatch(/^ {2}primary@peer-a +5h 88% +7d 30% +Fable — +headroom 5 +3 agents$/);
-    expect(lines[5]).toMatch(/^ {2}work@peer-a +no usage yet +← fable, opus$/);
+    expect(lines[5]).toMatch(/^ {2}work@peer-a +no usage yet +2 agents +← fable, opus$/);
     expect(r.stdout).not.toContain("owner@example.com");
     await v.b.disconnect();
   });
@@ -430,6 +428,19 @@ describe("volley claude", () => {
     expect(r.stdout).toMatch(/peer-a +default login +signed in(?! +next pick)/);
     await v.b.disconnect();
   });
+
+  it("list does not wait the full --timeout on a volleyd that never answers claude_balance", async () => {
+    const v = await balanceVolleyd((op) =>
+      op === "claude_balance" ? null : { ok: true, result: LIST_RESULT },
+    );
+    const t0 = Date.now();
+    const r = await run(["list", "--timeout", "30"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/this machine +work +signed in/);
+    expect(r.stdout).not.toContain("next pick");
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    await v.b.disconnect();
+  }, 20_000);
 
   it("an empty registry still prints the sharing line", async () => {
     const v = await fakeVolleyd(tb.url, () => ({

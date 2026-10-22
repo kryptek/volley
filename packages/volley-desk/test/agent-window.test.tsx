@@ -418,6 +418,7 @@ describe("AgentWindow: the account it runs under (T8)", () => {
         now={NOW}
         accountEvents={state.accountFeed?.["status-chip"] ?? []}
         accountLimit={limit}
+        accounts={[{ id: "work", label: "Work", machine: "local", fivePct: 12, weeklyPct: 40 }]}
         {...(opts.onResolve ? { onResolve: opts.onResolve } : {})}
       />,
     );
@@ -461,7 +462,9 @@ describe("AgentWindow: the account it runs under (T8)", () => {
     const { container } = renderAccount({ onResolve });
     const banner = screen.getByRole("status", { name: "Claude account limit" });
     await act(async () => {
-      fireEvent.click(within(banner).getByRole("button", { name: "Move to work" }));
+      fireEvent.click(
+        within(banner).getByRole("button", { name: "Move to work (5h 12%, 7d 40%)" }),
+      );
     });
     expect(onResolve).toHaveBeenCalledWith(limit, `move ${FIXUP} to work`);
     await act(async () => {

@@ -646,5 +646,8 @@ describe("agent-level account decisions and events (T8)", () => {
       "moved off primary by autopilot: primary at 91% of its 5-hour window",
     );
     expect(accountWhy([chosen], "T2", "implementer")).toBeNull();
+    // An account_chosen without a why still names its account.
+    const bare = ev("account_chosen", 6, { task: "T1", role: "implementer", account: "work" });
+    expect(accountWhy([bare], "T1", "implementer")).toBe("work");
   });
 });

@@ -694,7 +694,8 @@ export function accountWhy(
   const c = last("account_chosen");
   const chosen = c < 0 ? null : dataOf((events[c] as FeedEntry).envelope);
   // A move not seen since the Desk loaded: the respawn's own line is all there is.
-  if (chosen && c > m && (chosen.source !== "move" || m < 0)) return text(chosen.why);
+  if (chosen && c > m && (chosen.source !== "move" || m < 0))
+    return text(chosen.why) ?? text(chosen.account);
   if (m < 0) return null;
   const d = dataOf((events[m] as FeedEntry).envelope);
   const by = text(d.by) ?? "?";

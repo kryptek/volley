@@ -51,6 +51,7 @@ import StatusMark, { type StatusMarkStatus } from "../../rb/StatusMark/StatusMar
 import {
   type AccountChoice,
   LOCAL_MACHINE,
+  NO_USAGE_YET,
   accountEventsFor,
   accountWhy,
   choicesFor,
@@ -202,6 +203,15 @@ export function contextMeter(usage: UsagePayload | null | undefined): {
 const choiceLabel = (a: AccountChoice) =>
   `${a.label} · ${fiveHourLabel(a.fivePct, a.weeklyPct)} · ${machineName(a.machine)}`;
 
+/** `5h 12%, 7d 40%`, as the Settings card's `accountFigures`; `no usage yet` without. */
+const choiceFigures = (a: AccountChoice | undefined) => {
+  const bits = [
+    ...(a && a.fivePct !== null ? [`5h ${Math.round(a.fivePct)}%`] : []),
+    ...(a && a.weeklyPct !== null ? [`7d ${Math.round(a.weeklyPct)}%`] : []),
+  ];
+  return bits.length ? bits.join(", ") : NO_USAGE_YET;
+};
+
 /**
  * The title's account picker. The current account is the usage sample's (else
  * the registry's `claude_account`); picking another confirms, then moves. Its
@@ -275,10 +285,12 @@ function AccountPicker({
 function AccountLimitBanner({
   d,
   autopilot,
+  accounts,
   onResolve,
 }: {
   d: DecisionPayload;
   autopilot: boolean;
+  accounts: readonly AccountChoice[];
   onResolve: AgentWindowProps["onResolve"];
 }) {
   const [busy, setBusy] = useState(false);
@@ -313,7 +325,7 @@ function AccountLimitBanner({
               disabled={busy}
               onClick={() => void answer(move)}
             >
-              Move to {d.suggested}
+              Move to {d.suggested} ({choiceFigures(accounts.find((a) => a.id === d.suggested))})
             </button>
           )}
           <button
@@ -551,7 +563,7 @@ export function AgentWindow({
           name={agent.task ?? headline}
           current={account}
           accounts={choices}
-          why={accountWhy(own, agent.task, agent.role)}
+          why={accountWhy(accountEvents, agent.task, agent.role)}
           onMove={onMoveAccount}
         />
       )}
@@ -679,6 +691,7 @@ export function AgentWindow({
         <AccountLimitBanner
           d={accountLimit}
           autopilot={ws?.autopilot?.enabled === true}
+          accounts={accounts}
           onResolve={onResolve}
         />
       )}

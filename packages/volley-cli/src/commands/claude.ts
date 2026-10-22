@@ -82,6 +82,8 @@ const MOVE_TIMEOUT_S = 180;
 const SIGNIN_WAIT_S = 960;
 /** How long volleyd's retained status may take to arrive. */
 const PROBE_MS = 1_000;
+/** `list`'s best-effort `claude_balance` for the next-pick marker: never the full --timeout. */
+const BALANCE_HINT_MS = 3_000;
 const LIVE = new Set(["spawning", "registered", "working"]);
 /** Every account's sign-in topic: subscribed before the request, so no end can be missed. */
 const SIGNIN_FILTER = "volley/_system/claude/+/signin";
@@ -227,7 +229,13 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
       if (v.json === true) io.stdout(`${JSON.stringify({ ...result, records }, null, 2)}\n`);
       else {
         // A volleyd that predates the op (or does not answer it) only costs the marker.
-        const b = await request(broker, namespace, "claude_balance", {}, timeoutMs);
+        const b = await request(
+          broker,
+          namespace,
+          "claude_balance",
+          {},
+          Math.min(timeoutMs, BALANCE_HINT_MS),
+        );
         const balance = b?.ok === true ? balanceOf(b.result) : null;
         printList(io, result, records, v["show-email"] === true, balance);
       }

@@ -88,8 +88,9 @@ export function printBalance(
               `7d ${pct(c.weekly_pct)}`,
               `Fable ${pct(fable)}`,
               `headroom ${c.headroom === null ? "—" : Math.round(c.headroom)}`,
-              `${c.agents} agent${c.agents === 1 ? "" : "s"}`,
             ],
+        // Beside `no usage yet` too: an account with running agents and no reading is not idle.
+        agents: `${c.agents} agent${c.agents === 1 ? "" : "s"}`,
         arrow: picks.length ? `← ${picks.join(", ")}` : "",
       };
     });
@@ -104,6 +105,7 @@ export function printBalance(
         r.account,
         ...(emails ? [r.email] : []),
         (figures[i] ?? "").padEnd(width),
+        r.agents,
         r.arrow,
       ]),
     );
