@@ -3993,13 +3993,13 @@ export class PipelineDriver {
   }
 
   /**
-   * Where a head's runs are read: the supervisor's own exec in the wave repo (one `gh api
+   * Where a head's runs are read: the supervisor's own exec in the wave's repo root (ghCwd; one `gh api
    * …/actions/runs?head_sha=` GET, never sent to a paired machine); without a wave repo, the
    * task's `gh run list --commit`.
    */
   private runsVia(): RunsVia | undefined {
-    const repo = this.deps.record().state?.repo;
-    return repo != null ? { exec: this.timed(this.deps.exec), cwd: repo } : undefined;
+    const cwd = this.ghCwd();
+    return cwd !== undefined ? { exec: this.timed(this.deps.exec), cwd } : undefined;
   }
 
   /** GitHub rate-limited the wave repo's last CI read and its backoff has not passed. */
@@ -4080,7 +4080,8 @@ export class PipelineDriver {
    * The exec for a task's GitHub reads: every `gh` argv runs on this machine from the repo root
    * (ghCwd) with repoArgs, whatever `cwd` the caller passed — never in an agent's worktree, which
    * cleanup may have removed (a missing cwd fails the spawn: ENOENT). Any other argv goes to
-   * `other` (default: the task's own exec). Without a repo root, everything goes to `other`.
+   * `other` (default: the task's own exec). Without a repo root, everything goes to `other`
+   * with the caller's cwd: unreachable from a wave file (the schema requires `repo`).
    * Only `gh pr …` / `gh run …` may come through here: `gh api` rejects the appended `--repo`.
    */
   private ghExec(task: TaskId, other: ExecFn = this.io(task)): ExecFn {

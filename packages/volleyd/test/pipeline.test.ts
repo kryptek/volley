@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
@@ -1235,6 +1236,18 @@ describe("pipeline: where the checks run", () => {
     expect(local.map((a) => a.slice(0, 3).join(" "))).toContain("gh pr view");
     expect(local.every((a) => a[0] === "gh")).toBe(true);
     expect(used.length + local.length).toBe(h.calls.length);
+  });
+
+  it("a `repo: ~/…` wave: the head's runs are read from the expanded repo root, like every other GitHub read", async () => {
+    h = pipelineHarness({ repo: "~/src/repo" });
+    await h.start();
+    h.openPr(H1);
+    await h.finish("implementer", { head: H1, ci: "green" });
+    const root = join(homedir(), "src/repo");
+    const reads = h.callOpts.filter((_o, i) => isHeadRunsRead(h.calls[i] as string[]));
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads).toEqual(reads.map(() => expect.objectContaining({ cwd: root })));
+    expect(h.callOpts.some((o) => o?.cwd?.startsWith("~"))).toBe(false);
   });
 
   it("the head worktree gone (cleanup removed it): GitHub reads run from the repo root with --repo, git fetches the PR head there, a human merge still reaches done", async () => {

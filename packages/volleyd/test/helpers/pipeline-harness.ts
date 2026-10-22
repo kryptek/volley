@@ -164,6 +164,8 @@ export interface HarnessOptions {
    * hears of it later, on the queue, as the daemon's resolveNow hands it back.
    */
   autopilot?: (d: DecisionRecord) => string | undefined;
+  /** The wave file's `repo:` (default: `/repo`). */
+  repo?: string;
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -171,7 +173,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
   const wave = parseWaveFile(
     [
       "wave: w1",
-      "repo: /repo",
+      `repo: ${o.repo ?? "/repo"}`,
       "release_branch: release/w1",
       "model: claude-opus-5-5",
       `pipeline: ${o.pipeline ?? DEFAULT_PIPELINE}`,
