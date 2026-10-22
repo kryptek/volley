@@ -5,9 +5,11 @@ import {
   ClaudeAccounts,
   type ClaudeAccountsProps,
   type ControlFn,
+  signInPreset,
+  withSignIns,
 } from "../src/settings/ClaudeAccounts";
 import { SettingsModal } from "../src/settings/SettingsModal";
-import { accountList } from "../src/store/claude";
+import { type AccountGroup, accountList } from "../src/store/claude";
 import { initialState, reduceAll } from "../src/store/reducer";
 import type {
   ClaudeAccountPayload,
@@ -1191,3 +1193,50 @@ describe("reducer: a finished sign-in's e-mail", () => {
 });
 
 const flushAll = () => new Promise((r) => setTimeout(r, 0));
+
+describe("Sign in on <machine>: the preset's label and the finished sign-in", () => {
+  const group = (over: Partial<AccountGroup>): AccountGroup => ({
+    key: "owner@example.com",
+    email: "owner@example.com",
+    org: null,
+    label: "Work",
+    plan: "max",
+    fiveHour: null,
+    weekly: null,
+    freshest: null,
+    members: [],
+    stale: [],
+    agents: [],
+    waves: [],
+    ...over,
+  });
+  const member = (label: string, machine: string) => ({
+    account: label.toLowerCase(),
+    machine,
+    label,
+    signedIn: true,
+    agents: [],
+    waves: [],
+    isPrimary: false,
+  });
+  const peerB = { name: "peer-b", op: "peer-b", up: true };
+
+  it("a label already naming its machine is not suffixed twice", () => {
+    const g = group({ members: [member("Work (peer-a)", "peer-a")] });
+    expect(signInPreset(g, peerB).label).toBe("Work (peer-b)");
+    expect(signInPreset(group({ members: [member("Work", "local")] }), peerB).label).toBe(
+      "Work (peer-b)",
+    );
+  });
+
+  it("a group with no reported e-mail takes the login it started as its own", () => {
+    const g = group({ key: "work", email: null, members: [member("Work", "local")] });
+    const { groups, others } = withSignIns(
+      [g],
+      [{ key: "work", op: "peer-b", label: "Work (peer-b)", acct: "work-peer-b@peer-b" }],
+      { "work-peer-b@peer-b": { state: "done", email: "owner@example.com" } as never },
+    );
+    expect(others).toEqual({});
+    expect(groups[0]?.members.map((m) => m.machine)).toEqual(["local", "peer-b"]);
+  });
+});

@@ -486,7 +486,9 @@ const NEW_PROFILE = "Claude login";
 
 /** The Sign in on <machine> preset for an account on a configured machine missing it. */
 export function signInPreset(g: AccountGroup, m: MatrixMachine): SignInPreset {
-  const base = g.members.find((x) => !x.isPrimary)?.label ?? NEW_PROFILE;
+  const held = g.members.find((x) => !x.isPrimary);
+  // A label made by this rule names its machine already: `Work (peer-a)` → `Work`.
+  const base = held ? held.label.replace(/ \([^()]+\)$/, "") || held.label : NEW_PROFILE;
   return {
     key: g.key,
     account: g.label,
@@ -786,10 +788,12 @@ export function withSignIns(
 ): { groups: AccountGroup[]; others: Record<string, Record<string, string>> } {
   const others: Record<string, Record<string, string>> = {};
   const added = new Map<string, Member[]>();
+  // A group with no reported e-mail is keyed by its account id: nothing to compare against.
+  const unknown = new Set(groups.filter((g) => g.email === null).map((g) => g.key));
   for (const t of tries) {
     const done = signins[t.acct];
     if (done?.state !== "done" || done.email === undefined) continue;
-    if (normalizeEmail(done.email) !== t.key) {
+    if (!unknown.has(t.key) && normalizeEmail(done.email) !== t.key) {
       others[t.key] = { ...others[t.key], [t.op]: done.email };
       continue;
     }

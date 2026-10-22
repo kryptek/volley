@@ -24,7 +24,10 @@
  *
  * Each card lists the Claude accounts (`accountMatrix` over the groups App
  * computes): **Sign in on <machine>** opens Settings › Claude accounts' sign-in
- * for that account there (`SignInOnDialog`).
+ * for that account there (`SignInOnDialog`). The block shows the registry's view only: a
+ * sign-in started here fills its row once the registry is re-fetched, and one that finished
+ * on another e-mail is said on the dialog's Done step, not on the card (Settings › Claude
+ * accounts tracks both on its own cards).
  */
 import { Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";

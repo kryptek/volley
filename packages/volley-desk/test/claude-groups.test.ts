@@ -263,6 +263,23 @@ describe("accountMatrix: which configured machines hold each account", () => {
     expect(row?.coverage).toEqual({ held: 3, total: 3 });
   });
 
+  it("a signed-out login still holds the account there: it counts and offers no Sign in", () => {
+    const out = {
+      ...fleet,
+      "peer-b": machine("peer-b", { claude: "not_signed_in", claude_email: EMAIL }),
+    };
+    // peer-b's default login has a usage record, but its machine reports it signed out.
+    const peerB = { ...peer, account: "primary@peer-b" };
+    const [row] = accountMatrix(
+      groups({ work, "primary@peer-a": peer, "primary@peer-b": peerB }, out),
+      configuredMachines(["peer-a", "peer-b"], out, "hub"),
+    );
+    const b = row?.present.find((m) => m.machine === "peer-b");
+    expect(b?.signedIn).toBe(false);
+    expect(row?.missing).toEqual([]);
+    expect(row?.coverage).toEqual({ held: 3, total: 3 });
+  });
+
   it("keeps the order of the configured list, and a member on an unconfigured machine last", () => {
     const rows = accountMatrix(
       groups({ personal, "primary@peer-a": peer }, fleet),
