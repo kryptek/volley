@@ -31,8 +31,8 @@ const usage: UsagePayload = {
   captured_at: new Date(NOW).toISOString(),
 };
 const accounts = [
-  { id: "work", label: "Work", fivePct: 91, weeklyPct: 40 },
-  { id: "personal", label: "Personal", fivePct: 12, weeklyPct: 22 },
+  { id: "work", label: "Work", machine: "box-a", fivePct: 91, weeklyPct: 40 },
+  { id: "personal", label: "Personal", machine: "box-a", fivePct: 12, weeklyPct: 22 },
 ];
 
 /** The demo state with the fixup's task T1 changed (host, placement) and its title replaced. */
@@ -143,8 +143,9 @@ describe("agent window header: the machine chip", () => {
     renderHeader(demo({ host: "box-a", placement: placement() }), { onOpenMachine });
     const chip = screen.getByRole("button", { name: "Runs on box-a: why here" });
     expect(chip.querySelector(".m-dot--up")).toBeTruthy();
-    const tip = screen.getByRole("tooltip");
-    expect(chip).toHaveAttribute("aria-describedby", tip.id);
+    // The account picker has a tooltip of its own: the chip's is the one it names.
+    const tip = document.getElementById(chip.getAttribute("aria-describedby") ?? "");
+    expect(tip).toHaveAttribute("role", "tooltip");
     expect(tip).toHaveTextContent("box-a: 0.82 (cpu 0.9, slots 0.5, mem 0.71, usage 0.58)");
     expect(tip).toHaveTextContent("cores");
     fireEvent.click(chip);

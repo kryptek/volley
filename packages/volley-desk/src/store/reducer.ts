@@ -34,9 +34,12 @@
  *
  * Autopilot (SPEC §4.6.16): of each wave's live `events` mirror only volleyd's
  * `decision_auto_resolved` / `decision_escalated` are kept, in `waveFeed` by
- * wave and in the feeds of the event's task's agents.
+ * wave and in the feeds of the event's task's agents. The account events (`account_chosen`,
+ * `agent_account_moved`, §4.6.11) are kept in `accountFeed` by wave: the agent window reads its
+ * task role's from there (a choice is journaled before the agent it chose for exists).
  */
 import { AUTOPILOT_EVENTS } from "./autopilot";
+import { ACCOUNT_EVENTS } from "./claude";
 import { pushRecord } from "./machineHistory";
 import {
   type AgentAttention,
@@ -51,6 +54,7 @@ import {
   type DeskState,
   type DigestPayload,
   type Envelope,
+  type FeedEntry,
   type InboxItem,
   type LeasePoolPayload,
   type MachinePayload,
@@ -480,14 +484,17 @@ function newAgent(
  */
 function reduceWaveEvent(state: DeskState, wave: string, m: DeskMessage): DeskState {
   const env = m.envelope;
-  if (!env || env.agent_id !== "volleyd" || !AUTOPILOT_EVENTS.has(env.type)) return state;
+  if (!env || env.agent_id !== "volleyd") return state;
   const entry = { topic: m.topic, envelope: env, receivedAt: m.receivedAt };
-  const prior = state.waveFeed?.[wave] ?? [];
-  // A QoS-1 redelivery after a reconnect carries a seq already kept.
-  const seq = record(env.payload).seq;
-  if (typeof seq === "number" && prior.some((e) => record(e.envelope.payload).seq === seq)) {
-    return state;
+  if (ACCOUNT_EVENTS.has(env.type)) {
+    const kept = state.accountFeed?.[wave] ?? [];
+    if (redelivered(kept, env)) return state;
+    const accountFeed = { ...state.accountFeed, [wave]: [...kept, entry].slice(-FEED_LIMIT) };
+    return { ...state, accountFeed };
   }
+  if (!AUTOPILOT_EVENTS.has(env.type)) return state;
+  const prior = state.waveFeed?.[wave] ?? [];
+  if (redelivered(prior, env)) return state;
   const feed = [...prior, entry].slice(-FEED_LIMIT);
   const task = str(record(env.payload).task);
   const t = task ? state.waves[wave]?.state?.tasks.find((x) => x.id === task) : undefined;
@@ -498,6 +505,12 @@ function reduceWaveEvent(state: DeskState, wave: string, m: DeskMessage): DeskSt
     agents = { ...agents, [a.id]: { ...a, feed: pushFeed(a, m.topic, env, m.receivedAt) } };
   }
   return { ...state, agents, waveFeed: { ...state.waveFeed, [wave]: feed } };
+}
+
+/** A QoS-1 redelivery after a reconnect carries a seq already kept. */
+function redelivered(kept: readonly FeedEntry[], env: Envelope): boolean {
+  const seq = record(env.payload).seq;
+  return typeof seq === "number" && kept.some((e) => record(e.envelope.payload).seq === seq);
 }
 
 function pushFeed(a: AgentView, topic: string, envelope: Envelope, receivedAt: number) {
@@ -937,9 +950,15 @@ function reduceWave(state: DeskState, id: string, m: DeskMessage): DeskState {
       else if (a.status !== null || a.registry !== null)
         agents[a.id] = { ...a, wave: UNASSIGNED, task: null, role: null };
     }
-    if (!state.waveFeed?.[id]) return { ...state, waves, agents };
-    const { [id]: _gone, ...waveFeed } = state.waveFeed;
-    return { ...state, waves, agents, waveFeed };
+    const { [id]: _gone, ...waveFeed } = state.waveFeed ?? {};
+    const { [id]: _chosen, ...accountFeed } = state.accountFeed ?? {};
+    return {
+      ...state,
+      waves,
+      agents,
+      ...(state.waveFeed ? { waveFeed } : {}),
+      ...(state.accountFeed ? { accountFeed } : {}),
+    };
   }
   const payload = m.envelope.payload as WaveStatePayload;
   waves[id] = { id, decisions: {}, ...waves[id], state: payload, receivedAt: m.receivedAt };

@@ -101,6 +101,7 @@ import {
   type RegistryAccount,
   accountChoices,
   accountList,
+  agentLimitFor,
   deskAccountGroups,
   resolveFields,
 } from "./store/claude";
@@ -122,7 +123,13 @@ import {
   supervisorNamespace,
   unclassifiedAgents,
 } from "./store/reducer";
-import type { AgentView, DeskState, DigestPayload, InboxItem } from "./store/types";
+import type {
+  AgentView,
+  DecisionPayload,
+  DeskState,
+  DigestPayload,
+  InboxItem,
+} from "./store/types";
 import { TopBar } from "./topbar/TopBar";
 import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
 import { TerminalPopout } from "./windows/agent/TerminalPopout";
@@ -1276,6 +1283,18 @@ export default function App() {
                   accounts={choices}
                   machine={machineFor(a, state.waves[a.wave], state)}
                   onOpenMachine={openMachine}
+                  accountEvents={state.accountFeed?.[a.wave] ?? []}
+                  accountLimit={agentLimitFor(state.waves, a.id)}
+                  {...(control
+                    ? {
+                        onResolve: (d: DecisionPayload, answer: string) =>
+                          control(
+                            "resolve",
+                            resolveFields(d, answer),
+                            `volleyd resolve ${d.decision_id}`,
+                          ),
+                      }
+                    : {})}
                   {...(control
                     ? {
                         onMoveAccount: (acct: string) =>

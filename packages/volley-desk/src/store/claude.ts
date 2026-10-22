@@ -11,6 +11,8 @@ import { maskEmail, normalizeEmail } from "../lib/email";
 import type {
   ClaudeAccountPayload,
   DecisionPayload,
+  Envelope,
+  FeedEntry,
   MachinePayload,
   ModelFamily,
   ProbeState,
@@ -76,6 +78,8 @@ export function fiveHourLabel(fivePct: number | null, weeklyPct: number | null):
 export interface AccountChoice {
   id: string;
   label: string;
+  /** `local` (volleyd's machine) or a remote host: an agent can only move to its own machine's. */
+  machine: string;
   /** The 5-hour window's pct, or `null` until the account reports usage. */
   fivePct: number | null;
   /** The weekly window's pct, or `null` until the account reports it. */
@@ -533,17 +537,171 @@ export function accountChoices(accounts: readonly AccountInfo[]): AccountChoice[
   return accounts.map((a) => ({
     id: a.id,
     label: a.label,
+    machine: a.machine,
     fivePct: a.fiveHour?.pct ?? null,
     weeklyPct: a.weekly?.pct ?? null,
   }));
 }
 
-/** Every unresolved `account_limit` decision, oldest first. */
+/** An account's usage-record key: a profile kept for a paired machine is `<id>@<machine>`. */
+const recordKey = (c: Pick<AccountChoice, "id" | "machine">) =>
+  c.machine === LOCAL_MACHINE || c.id.includes("@") ? c.id : `${c.id}@${c.machine}`;
+
+/**
+ * The choices an agent on `machine` can move to (`agent_move_account` refuses any other): that
+ * machine's logins, each once, by its usage-record key.
+ */
+export function choicesFor(choices: readonly AccountChoice[], machine: string): AccountChoice[] {
+  const seen = new Set<string>();
+  return choices
+    .filter((c) => c.machine === machine)
+    .map((c) => ({ ...c, id: recordKey(c) }))
+    .filter((c) => !seen.has(c.id) && seen.add(c.id) !== undefined);
+}
+
+/** One candidate in a `claude_balance` answer, as volleyd ranked it. */
+export interface BalanceCandidate {
+  account: string;
+  headroom: number | null;
+  five_hour_pct: number | null;
+  weekly_pct: number | null;
+  model_weekly_pct?: number;
+  agents: number;
+}
+
+/** volleyd's `claude_balance` answer (SPEC §4.6.11): per machine, its ranking and the picks. */
+export interface BalanceAnswer {
+  model?: string;
+  machines: {
+    name: string;
+    candidates: BalanceCandidate[];
+    /** The pick per model family (or `model`, when one was asked for); `null`: no candidate. */
+    picks: Record<string, string | null>;
+  }[];
+}
+
+const FAMILIES: readonly ModelFamily[] = ["fable", "opus", "sonnet", "haiku"];
+
+/** The model families whose next spawn `answer` puts on `account` (a usage-record key). */
+export function nextPicks(answer: BalanceAnswer | null, account: string): ModelFamily[] {
+  const picks = answer?.machines.map((m) => m.picks) ?? [];
+  return FAMILIES.filter((f) => picks.some((p) => p[f] === account));
+}
+
+/** `Fable, others`, `Fable`, `others`; `null` when no family picks the account next. */
+export function picksLine(families: readonly ModelFamily[]): string | null {
+  const parts = [
+    ...(families.includes("fable") ? ["Fable"] : []),
+    ...(families.some((f) => f !== "fable") ? ["others"] : []),
+  ];
+  return parts.length ? parts.join(", ") : null;
+}
+
+const LIMIT_KINDS: ReadonlySet<string> = new Set(["account_limit", "agent_account_limit"]);
+
+/**
+ * Every unresolved account-limit decision, oldest first: the wave-level `account_limit` and the
+ * agent-level `agent_account_limit` (SPEC §4.6.12).
+ */
 export function openLimitDecisions(waves: Record<string, WaveView>): DecisionPayload[] {
   return Object.values(waves)
     .flatMap((w) => Object.values(w.decisions))
-    .filter((d) => d.kind === "account_limit" && !d.resolved && typeof d.acct === "string")
+    .filter((d) => LIMIT_KINDS.has(d.kind) && !d.resolved && typeof d.acct === "string")
     .sort((a, b) => a.opened_at.localeCompare(b.opened_at));
+}
+
+/** A wave-level `account_limit`: the only kind a `move wave` answers. */
+export const isWaveLimit = (d: DecisionPayload) => d.kind === "account_limit";
+
+/** The agent's open `agent_account_limit` decision, if any. */
+export function agentLimitFor(
+  waves: Record<string, WaveView>,
+  agentId: string,
+): DecisionPayload | null {
+  return (
+    openLimitDecisions(waves).find(
+      (d) => d.kind === "agent_account_limit" && d.agent_id === agentId,
+    ) ?? null
+  );
+}
+
+/** The decision's own `move <agent> to <acct>` option: the card never composes one. */
+export const moveOption = (d: DecisionPayload): string | null =>
+  d.options?.find((o) => /^move /.test(o)) ?? null;
+
+/** `5h 12%, 7d 40%`: what a decision card says of the account it suggests; `no usage yet` without. */
+export function accountFigures(a: AccountInfo | undefined): string {
+  const bits = [
+    ...(a?.fiveHour ? [`5h ${Math.round(a.fiveHour.pct)}%`] : []),
+    ...(a?.weekly ? [`7d ${Math.round(a.weekly.pct)}%`] : []),
+  ];
+  return bits.length ? bits.join(", ") : NO_USAGE_YET;
+}
+
+/** The journal events that say which account an agent runs under (SPEC §4.6.11). */
+export const ACCOUNT_EVENTS: ReadonlySet<string> = new Set([
+  "account_chosen",
+  "agent_account_moved",
+]);
+
+const text = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
+const dataOf = (env: Envelope): Record<string, unknown> =>
+  (env.payload as { data?: Record<string, unknown> } | null)?.data ?? {};
+
+/**
+ * `Account · <why>` for an `account_chosen`, `Account · moved off <from> to <to> by <by>: <why>`
+ * for an `agent_account_moved`; `null` for any other envelope.
+ */
+export function accountLine(env: Envelope): string | null {
+  if (!ACCOUNT_EVENTS.has(env.type)) return null;
+  const d = dataOf(env);
+  if (env.type === "account_chosen") return `Account · ${text(d.why) ?? text(d.account) ?? "?"}`;
+  const why = text(d.why);
+  return `Account · moved off ${text(d.from) ?? "?"} to ${text(d.to) ?? "?"} by ${text(d.by) ?? "?"}${why ? `: ${why}` : ""}`;
+}
+
+/** The account events of one task's role, oldest first. */
+export function accountEventsFor(
+  feed: readonly FeedEntry[] | undefined,
+  task: string | null,
+  role: string | null,
+): FeedEntry[] {
+  if (!task) return [];
+  return (feed ?? []).filter((e) => {
+    const p = e.envelope.payload as { task?: unknown } | null;
+    const d = dataOf(e.envelope);
+    return (
+      ACCOUNT_EVENTS.has(e.envelope.type) &&
+      (p?.task ?? d.task) === task &&
+      (role === null || d.role === role)
+    );
+  });
+}
+
+/**
+ * Why the agent of a task's role runs under its account: the latest `account_chosen` line, or,
+ * after a move (the respawn's own choice says `source: move`), the move's
+ * (`moved off primary by autopilot: <why>`, `moved by <person>`). `null`: none seen.
+ */
+export function accountWhy(
+  feed: readonly FeedEntry[] | undefined,
+  task: string | null,
+  role: string | null,
+): string | null {
+  const events = accountEventsFor(feed, task, role);
+  const last = (type: string) => events.map((e) => e.envelope.type).lastIndexOf(type);
+  const m = last("agent_account_moved");
+  const c = last("account_chosen");
+  const chosen = c < 0 ? null : dataOf((events[c] as FeedEntry).envelope);
+  // A move not seen since the Desk loaded: the respawn's own line is all there is.
+  if (chosen && c > m && (chosen.source !== "move" || m < 0))
+    return text(chosen.why) ?? text(chosen.account);
+  if (m < 0) return null;
+  const d = dataOf((events[m] as FeedEntry).envelope);
+  const by = text(d.by) ?? "?";
+  if (by !== "autopilot") return `moved by ${by}`;
+  const why = text(d.why);
+  return `moved off ${text(d.from) ?? "?"} by autopilot${why ? `: ${why}` : ""}`;
 }
 
 /** volleyd's answer that moves a wave (`moveAnswer` in its usage module). */

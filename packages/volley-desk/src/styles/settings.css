@@ -760,9 +760,21 @@
 }
 .cc-foot {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 8px;
   font-size: 12px;
+}
+/* From volleyd's claude_balance: the families that pick this account next, and the machine row. */
+.cc-picks {
+  flex-basis: 100%;
+  color: var(--ok);
+}
+.cc-machines .cc-next {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
 }
 /* The three meters: 5-hour, 7-day and Fable (7-day), side by side while the card is wide. */
 .cc-meters {

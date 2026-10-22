@@ -17,7 +17,13 @@
  * here…" (its login on this machine, by account id). An open
  * `account_limit` decision is a Needs-you banner whose Move / Not now answer
  * it (`resolve`); volleyd moves a wave only by such an answer, so "Move a wave
- * here…" lists the waves that have one open. **Add Claude account** is a
+ * here…" lists the waves that have one open. An agent-level
+ * `agent_account_limit` is a banner too: its question, then its own options,
+ * the move labelled with the suggested account's figures
+ * (`move to work (5h 12%, 7d 40%)`). From volleyd's `claude_balance`, fetched
+ * with the registry, a card's foot says which model families pick the account
+ * next (`picks next: Fable, others`) and a machine row `next pick` when that
+ * machine would. **Add Claude account** is a
  * Stepper: a label and the machine (this one, or any paired host whose tunnel
  * is up), then "Sign in on <machine>" (`claude_account_add { label, machine }`),
  * then the sign-in link from the answer and the `claude_signin_url` event (on
@@ -42,12 +48,14 @@ import type { ControlReply } from "../steer/transport";
 import {
   type AccountGroup,
   type AccountMatrixRow,
+  type BalanceAnswer,
   LOCAL_MACHINE,
   type MatrixCell,
   type MatrixMachine,
   type Member,
   PRIMARY_LABEL,
   type RegistryAccount,
+  accountFigures,
   accountList,
   accountMatrix,
   configuredMachines,
@@ -55,11 +63,15 @@ import {
   fableHint,
   fableShown,
   fiveHourLabel,
+  isWaveLimit,
   machineName,
   moveAnswer,
+  moveOption,
   moveTargetOf,
+  nextPicks,
   notNowAnswer,
   openLimitDecisions,
+  picksLine,
   readingAge,
   resetsIn,
   resolveFields,
@@ -148,6 +160,27 @@ export function useClaudeRegistry(control: ControlFn | null, refresh = 0): Claud
     };
   }, [control, refresh]);
   return registry;
+}
+
+/**
+ * volleyd's `claude_balance` answer (each machine's ranking and next picks), fetched when the Desk
+ * can ask and again with each registry refresh; `null` until one arrives, or read-only.
+ */
+export function useClaudeBalance(control: ControlFn | null, refresh = 0): BalanceAnswer | null {
+  const [answer, setAnswer] = useState<BalanceAnswer | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refresh is the re-fetch trigger
+  useEffect(() => {
+    if (!control) return;
+    let live = true;
+    void control("claude_balance", {}, "volley claude balance").then((r) => {
+      const result = r.result as BalanceAnswer | undefined;
+      if (live && r.ok && Array.isArray(result?.machines)) setAnswer(result);
+    });
+    return () => {
+      live = false;
+    };
+  }, [control, refresh]);
+  return control ? answer : null;
 }
 
 /** How many sign-ins have finished: a registry refresh key. */
@@ -376,9 +409,12 @@ function AccountCard({
   onMove,
   onAdd,
   onSignInOn,
+  balance,
   now,
 }: {
   row: AccountMatrixRow;
+  /** volleyd's `claude_balance` answer; `null`: not known (nothing said). */
+  balance: BalanceAnswer | null;
   /** A sign-in started here that finished on another e-mail, by machine (`op`). */
   others: Record<string, string>;
   /** Open `account_limit` decisions on other accounts: the waves that can move here. */
@@ -394,6 +430,7 @@ function AccountCard({
   const { held, total } = row.coverage;
   const only = g.members.length === 1 ? g.members[0] : undefined;
   const ago = g.freshest && readingAge(g.freshest.sampledAt, now);
+  const picks = picksLine(g.members.flatMap((m) => nextPicks(balance, m.account)));
   return (
     <article className="claude-card" aria-label={g.label}>
       <div className="cc-head">
@@ -453,6 +490,11 @@ function AccountCard({
               <b>{c.name}</b>
               <span className="dim ell">{m.label}</span>
               <UsageTriple {...usageTriple(g, m, now)} />
+              {nextPicks(balance, m.account).length > 0 && (
+                <span className="chip cc-next" title="volleyd's next spawn there runs under it">
+                  next pick
+                </span>
+              )}
               <span className="dim cc-waves">
                 {m.waves.length ? `waves: ${m.waves.join(", ")}` : "no waves"}
               </span>
@@ -496,6 +538,7 @@ function AccountCard({
         <span className="dim">
           {g.waves.length ? `waves: ${g.waves.join(", ")}` : "no waves assigned"}
         </span>
+        {picks && <span className="cc-picks">picks next: {picks}</span>}
       </div>
     </article>
   );
@@ -896,6 +939,7 @@ export function ClaudeAccounts({
     control,
     signinsDone(signins) + closed,
   );
+  const balance = useClaudeBalance(control, signinsDone(signins) + closed);
   useEffect(() => {
     if (registry.length) onRegistry?.(registry);
   }, [registry, onRegistry]);
@@ -997,6 +1041,41 @@ export function ClaudeAccounts({
       )}
       {decisions.map((d) => {
         const target = d.suggested ? list.find((a) => a.id === d.suggested) : undefined;
+        if (!isWaveLimit(d)) {
+          const move = moveOption(d);
+          return (
+            // biome-ignore lint/a11y/useSemanticElements: a banner live region (as in the prototype), not a form <output>
+            <div key={d.decision_id} className="needs-you" role="status">
+              <div className="ny-head">
+                Needs you: {d.agent_id ?? "an agent"} on {labelOf(d.acct)} at{" "}
+                {Math.round(d.pct ?? 0)}%
+              </div>
+              <p className="ny-q">{d.question}</p>
+              {control && (
+                <div className="ny-actions">
+                  {move && d.suggested && (
+                    <button
+                      type="button"
+                      className="btn btn--hot"
+                      disabled={busy}
+                      onClick={() => void answer(d, move)}
+                    >
+                      move to {d.suggested} ({accountFigures(target)})
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={busy}
+                    onClick={() => void answer(d, notNowAnswer(d))}
+                  >
+                    not now
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        }
         return (
           // biome-ignore lint/a11y/useSemanticElements: a banner live region (as in the prototype), not a form <output>
           <div key={d.decision_id} className="needs-you" role="status">
@@ -1065,7 +1144,9 @@ export function ClaudeAccounts({
               key={g.key}
               row={row}
               others={signedIn.others[g.key] ?? {}}
-              movable={decisions.filter((d) => !g.members.some((m) => m.account === d.acct))}
+              movable={decisions.filter(
+                (d) => isWaveLimit(d) && !g.members.some((m) => m.account === d.acct),
+              )}
               onMove={
                 control && !busy && to !== null
                   ? (d) => void answer(d, moveAnswer(d.wave, to))
@@ -1089,6 +1170,7 @@ export function ClaudeAccounts({
                     }
                   : null
               }
+              balance={balance}
               now={now}
             />
           );

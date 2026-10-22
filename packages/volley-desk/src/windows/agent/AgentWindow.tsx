@@ -28,10 +28,16 @@
  * From the agent's `usage` sample (SPEC §4.6.12) the footer gets a context
  * meter (`ctx 72% · 143K/200K`, hot ≥ 85, warn ≥ 65; pulse ≥ 70, faster when
  * hot, none under reduced motion), and row 2 an
- * account picker listing the Claude accounts with their 5-hour usage: picking
- * another asks to confirm (the agent restarts with a resume note) and then
- * calls `agent_move_account`. The Terminal tab's ⤢ (`onPopout`) opens the
- * agent's screen in a floating window (`TerminalPopout`).
+ * account picker listing the Claude accounts of the agent's own machine with
+ * their 5-hour usage and machine (`Work · 12% · peer-a`): picking another asks
+ * to confirm (the agent restarts with a resume note) and then calls
+ * `agent_move_account`. On hover or focus its tooltip says why the agent runs
+ * under its account (`accountWhy`: the latest `account_chosen`, or the move
+ * after it), and the Volley feed shows the task role's account events as
+ * `Account · …` rows. An open `agent_account_limit` decision on the agent is a
+ * banner: what autopilot will do while it is on, else Move / Not now, which
+ * answer it with the decision's own options. The Terminal tab's ⤢ (`onPopout`)
+ * opens the agent's screen in a floating window (`TerminalPopout`).
  */
 import { BubbleChatIcon, ListViewIcon, TerminalIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -42,9 +48,27 @@ import { BORN_MS, Frame, type FrameProps } from "../../canvas/Frame";
 import { plural } from "../../lib/plural";
 import { GooeyTabs, tabPanelProps } from "../../look/GooeyTabs";
 import StatusMark, { type StatusMarkStatus } from "../../rb/StatusMark/StatusMark";
-import { type AccountChoice, fiveHourLabel } from "../../store/claude";
+import {
+  type AccountChoice,
+  LOCAL_MACHINE,
+  NO_USAGE_YET,
+  accountEventsFor,
+  accountWhy,
+  choicesFor,
+  fiveHourLabel,
+  machineName,
+  moveOption,
+  notNowAnswer,
+} from "../../store/claude";
 import { UNASSIGNED, isSession } from "../../store/reducer";
-import type { AgentView, FeedEntry, Role, UsagePayload, WaveView } from "../../store/types";
+import type {
+  AgentView,
+  DecisionPayload,
+  FeedEntry,
+  Role,
+  UsagePayload,
+  WaveView,
+} from "../../store/types";
 import { Feed, feedChannel } from "./Feed";
 import { MachineChip } from "./MachineChip";
 import { Narration, type NarrationFx } from "./Narration";
@@ -114,6 +138,12 @@ export interface AgentWindowProps {
   machine?: AgentMachine | null;
   /** The machine chip's click: opens Settings › Machines at that machine. */
   onOpenMachine?: (name: string) => void;
+  /** The wave's account events (`accountFeed`): the picker's why and the feed's `Account ·` rows. */
+  accountEvents?: readonly FeedEntry[];
+  /** The agent's open `agent_account_limit` decision: the banner. */
+  accountLimit?: DecisionPayload | null;
+  /** Answers a decision (`resolve`); absent = read-only (the banner has no buttons). */
+  onResolve?: (d: DecisionPayload, answer: string) => Promise<{ ok: boolean; error?: string }>;
 }
 
 /**
@@ -166,24 +196,41 @@ export function contextMeter(usage: UsagePayload | null | undefined): {
   return { pct, tone, pulse, text: `ctx ${pct}%${amounts}` };
 }
 
-/** `Work · 34%`; `Fresh · no usage yet` until the account has reported usage (`fiveHourLabel`). */
-const choiceLabel = (a: AccountChoice) => `${a.label} · ${fiveHourLabel(a.fivePct, a.weeklyPct)}`;
+/**
+ * `Work · 34% · peer-a`; `Fresh · no usage yet · this machine` until the account has reported
+ * usage (`fiveHourLabel`).
+ */
+const choiceLabel = (a: AccountChoice) =>
+  `${a.label} · ${fiveHourLabel(a.fivePct, a.weeklyPct)} · ${machineName(a.machine)}`;
+
+/** `5h 12%, 7d 40%`, as the Settings card's `accountFigures`; `no usage yet` without. */
+const choiceFigures = (a: AccountChoice | undefined) => {
+  const bits = [
+    ...(a && a.fivePct !== null ? [`5h ${Math.round(a.fivePct)}%`] : []),
+    ...(a && a.weeklyPct !== null ? [`7d ${Math.round(a.weeklyPct)}%`] : []),
+  ];
+  return bits.length ? bits.join(", ") : NO_USAGE_YET;
+};
 
 /**
  * The title's account picker. The current account is the usage sample's (else
- * the registry's `claude_account`); picking another confirms, then moves.
+ * the registry's `claude_account`); picking another confirms, then moves. Its
+ * tooltip (hover / focus, `MachineChip`'s pattern) says why it runs there.
  */
 function AccountPicker({
   name,
   current,
   accounts,
+  why,
   onMove,
 }: {
   name: string;
   current: string | null;
   accounts: readonly AccountChoice[];
+  why: string | null;
   onMove: AgentWindowProps["onMoveAccount"];
 }) {
+  const tipId = useId();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pick = async (acct: string) => {
@@ -196,12 +243,13 @@ function AccountPicker({
     setBusy(false);
     if (r && !r.ok) setError(r.error ?? "volleyd refused the move");
   };
+  const own = accounts.find((a) => a.id === current);
   return (
-    <>
+    <span className="acct-pick-wrap">
       <select
         className="acct-pick"
         aria-label={`Claude account for ${name}`}
-        title="Move this agent to another Claude account (restarts it with a resume note)"
+        aria-describedby={tipId}
         value={current ?? ""}
         disabled={!onMove || busy}
         onChange={(e) => void pick(e.target.value)}
@@ -216,12 +264,86 @@ function AccountPicker({
           </option>
         ))}
       </select>
+      <div role="tooltip" id={tipId} className="host-pop acct-tip">
+        <p className="host-rule">{own ? choiceLabel(own) : (current ?? "no account known yet")}</p>
+        <p className="dim">{why ?? "why this account: not seen since the Desk loaded"}</p>
+        <p className="dim">Pick another to move it (it restarts with a resume note).</p>
+      </div>
       {error && (
         <span className="acct-err" role="alert" title={error}>
           Move failed: {error}
         </span>
       )}
-    </>
+    </span>
+  );
+}
+
+/**
+ * An open `agent_account_limit` on the agent: while autopilot is on, what it will do; else (or
+ * with nothing to move to) the decision's own answers.
+ */
+function AccountLimitBanner({
+  d,
+  autopilot,
+  accounts,
+  onResolve,
+}: {
+  d: DecisionPayload;
+  autopilot: boolean;
+  accounts: readonly AccountChoice[];
+  onResolve: AgentWindowProps["onResolve"];
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const move = moveOption(d);
+  const at = `account at ${Math.round(d.pct ?? 0)}%`;
+  const answer = async (text: string) => {
+    if (!onResolve) return;
+    setBusy(true);
+    setError(null);
+    const r = await onResolve(d, text);
+    setBusy(false);
+    if (!r.ok) setError(r.error ?? "volleyd refused the answer");
+  };
+  const line = autopilot
+    ? d.suggested
+      ? `${at} — autopilot will move it to ${d.suggested}`
+      : `${at} — no other login on its machine has room; it finishes where it is`
+    : d.suggested
+      ? `${at} — move it to ${d.suggested}?`
+      : `${at} — no other login on its machine has room`;
+  return (
+    // biome-ignore lint/a11y/useSemanticElements: a banner live region, as the Needs-you banners
+    <div className="a-limit" role="status" aria-label="Claude account limit">
+      <span className="a-limit-line">{line}</span>
+      {!autopilot && onResolve && (
+        <span className="a-limit-actions">
+          {move && d.suggested && (
+            <button
+              type="button"
+              className="btn btn--hot"
+              disabled={busy}
+              onClick={() => void answer(move)}
+            >
+              Move to {d.suggested} ({choiceFigures(accounts.find((a) => a.id === d.suggested))})
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn"
+            disabled={busy}
+            onClick={() => void answer(notNowAnswer(d))}
+          >
+            Not now
+          </button>
+        </span>
+      )}
+      {error && (
+        <span className="acct-err" role="alert" title={error}>
+          {error}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -323,6 +445,9 @@ export function AgentWindow({
   onPopout,
   machine = null,
   onOpenMachine,
+  accountEvents = [],
+  accountLimit = null,
+  onResolve,
 }: AgentWindowProps) {
   const now = useNow(fixedNow);
   const [tab, setTab] = useState<"feed" | "term">("feed");
@@ -394,6 +519,11 @@ export function AgentWindow({
   // Reduced motion keeps the colour change and drops the pulse.
   const ctxPulse = ctx && ctx.pulse !== "none" && !reducedMotion ? ` ctx--pulse-${ctx.pulse}` : "";
   const account = usage?.account ?? str(agent.registry?.claude_account);
+  // Only the agent's own machine's accounts: `agent_move_account` refuses any other.
+  const choices = machine
+    ? choicesFor(accounts, machine.local ? LOCAL_MACHINE : machine.name)
+    : accounts;
+  const own = accountEventsFor(accountEvents, agent.task, agent.role);
   const nameText = named ? purpose.full : `${headline}${issue !== undefined ? ` #${issue}` : ""}`;
   const subtitle = (
     <>
@@ -428,11 +558,12 @@ export function AgentWindow({
           ),
         )}
       </span>
-      {accounts.length > 0 && (
+      {choices.length > 0 && (
         <AccountPicker
           name={agent.task ?? headline}
           current={account}
-          accounts={accounts}
+          accounts={choices}
+          why={accountWhy(accountEvents, agent.task, agent.role)}
           onMove={onMoveAccount}
         />
       )}
@@ -556,6 +687,14 @@ export function AgentWindow({
           </div>
         )
       )}
+      {accountLimit && (
+        <AccountLimitBanner
+          d={accountLimit}
+          autopilot={ws?.autopilot?.enabled === true}
+          accounts={accounts}
+          onResolve={onResolve}
+        />
+      )}
       {attention}
       <GooeyTabs
         id={tabsId}
@@ -568,7 +707,7 @@ export function AgentWindow({
       <div className="tab-panel" {...tabPanelProps(tabsId, tab)}>
         {tab === "feed" ? (
           <Feed
-            feed={agent.feed}
+            feed={own.length ? [...agent.feed, ...own] : agent.feed}
             noSignal={mcpMissing}
             heartbeats={{ count: agent.heartbeats ?? 0, last: agent.heartbeat }}
             now={now}

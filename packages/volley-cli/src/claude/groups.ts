@@ -394,10 +394,17 @@ const STATE: Record<string, string> = {
   not_signed_in: "signed out",
 };
 
-/** The groups as `volley claude list` prints them; e-mails masked unless `showEmail`. */
+/**
+ * The groups as `volley claude list` prints them; e-mails masked unless `showEmail`, and a
+ * `next pick` on each login `nextPick` says volleyd's next spawn there would run under.
+ */
 export function renderGroups(
   groups: AccountGroup[],
-  { now, showEmail }: { now: number; showEmail: boolean },
+  {
+    now,
+    showEmail,
+    nextPick = () => false,
+  }: { now: number; showEmail: boolean; nextPick?: (account: string) => boolean },
 ): string {
   const rows = groups.flatMap((g) => g.members);
   const machineW = Math.max(0, ...rows.map((m) => where(m.machine).length));
@@ -426,6 +433,7 @@ export function renderGroups(
         cols.push(
           `${WINDOW_NAME[s.window]} ${Math.round(s.pct)}% ${age(s.sampledAt, now)} old (stale)`,
         );
+      if (nextPick(m.account)) cols.push("next pick");
       out += `  ${cols.join("   ").trimEnd()}\n`;
       if (m.url !== undefined) out += `    sign in: ${m.url}\n`;
     }
