@@ -245,6 +245,7 @@ describe("summaryLine", () => {
       merges: 27,
     },
     waiting: [{ id: "d-go", kind: "release_go", question: "Go?", since: NOW, owner_only: true }],
+    held: [],
     failures: [],
   };
 
@@ -266,6 +267,49 @@ describe("summaryLine", () => {
         waiting: [],
       }),
     ).toBe("w1 stopped: 27 shipped");
+  });
+});
+
+describe("held decisions (#335)", () => {
+  const withHold = journal(...events.map(({ seq: _s, at: _a, ...e }) => e), {
+    type: "decision_held",
+    task: "E",
+    data: { decision_id: "d-4", kind: "agent_blocked", on: { task: "C" }, by: "coord-a" },
+  });
+  const d = digestOf(withHold, reduce(withHold), NOW, "escalation");
+
+  it("lists a held decision under held, not waiting", () => {
+    expect(d.waiting.map((w) => w.id)).toEqual(["d-3"]);
+    expect(d.held).toEqual([
+      {
+        id: "d-4",
+        kind: "agent_blocked",
+        task: "E",
+        question: "Stuck?",
+        since: withHold.find((e) => e.data.decision_id === "d-4")?.at,
+        on: { task: "C" },
+        label: "C (#23)",
+        held_since: withHold.at(-1)?.at,
+      },
+    ]);
+    expect(schemaErrors("digest.schema.json", envelope("_waves/digest", "digest", d))).toEqual([]);
+    expect(summaryLine(d)).toContain("1 waiting for you (plan_change), 1 held");
+  });
+
+  it("renders them under their own heading; a released hold is waiting again", () => {
+    const md = renderDigestMd(d);
+    expect(md).toContain(
+      `## Held\n\n- d-4 agent_blocked on E: waiting on C (#23) since ${withHold.at(-1)?.at}`,
+    );
+    expect(md.indexOf("## Waiting for you")).toBeLessThan(md.indexOf("## Held"));
+    const released = journal(...withHold.map(({ seq: _s, at: _a, ...e }) => e), {
+      type: "decision_released",
+      task: "E",
+      data: { decision_id: "d-4", kind: "agent_blocked", why: "C done", by: "volleyd" },
+    });
+    const r = digestOf(released, reduce(released), NOW, "escalation");
+    expect(r.held).toEqual([]);
+    expect(r.waiting.map((w) => w.id)).toEqual(["d-3", "d-4"]);
   });
 });
 

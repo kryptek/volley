@@ -42,6 +42,7 @@
 # idle_grace_s: 180             # turn ended without a terminal status -> one steer, then a decision
 # background_wait_max_s: 7200   # an idle agent showing its own work (background task, lease, shells, writes) is left alone this long
 # stall_backoff_max_s: 1800     # cap on the doubling gap between agent_stalled decisions
+# blocked_undecided_stall_ms: 300000  # a blocked agent no decision names this long -> agent_stalled
 # tool_in_flight_max_s: 7200    # a tool call in flight (PreToolUse, no PostToolUse yet) is not silence this long
 # fallback_model: null
 # mailbox: { session_expiry_s: 604800 }

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import {
+  BLOCKED_ALARM,
   TERMINAL_ALARM,
   type TerminalSeen,
+  decidedAgent,
   namedAgent,
   unjournaledTerminals,
 } from "../src/watchdog";
@@ -35,9 +37,18 @@ describe("unjournaledTerminals", () => {
     ]);
   });
 
-  it("an event naming the agent after the status (a decision_opened) → not listed", () => {
+  it("a decision naming the agent after a blocked → not listed", () => {
+    const decided = new Map([[A, 11]]);
+    expect(unjournaledTerminals([seen("blocked")], new Map(), T0 + 61_000, MS, decided)).toEqual(
+      [],
+    );
+  });
+
+  it("a blocked is handled only by a decision or a retire: any other event naming it is not", () => {
     const named = new Map([[A, 11]]);
-    expect(unjournaledTerminals([seen("blocked")], named, T0 + 61_000, MS)).toEqual([]);
+    expect(unjournaledTerminals([seen("blocked")], named, T0 + 61_000, MS)).toHaveLength(1);
+    // A done's claim is checked by events of its own (verification): those still count.
+    expect(unjournaledTerminals([seen("done")], named, T0 + 61_000, MS)).toEqual([]);
   });
 
   it("an event naming the agent before the status arrived does not count", () => {
@@ -72,5 +83,25 @@ describe("namedAgent", () => {
       namedAgent({ type: "alarm_cleared", data: { alarm: TERMINAL_ALARM, agent_id: A } }),
     ).toBeUndefined();
     expect(namedAgent({ type: "alarm_raised", data: { alarm: "other", agent_id: A } })).toBe(A);
+  });
+
+  it("a registration, a reconcile or a blocked_unhandled alarm is not handling the status", () => {
+    expect(namedAgent({ type: "agent_registered", data: { agent_id: A } })).toBeUndefined();
+    expect(namedAgent({ type: "reconciled", data: { agent_id: A } })).toBeUndefined();
+    expect(
+      namedAgent({ type: "alarm_raised", data: { alarm: BLOCKED_ALARM, agent_id: A } }),
+    ).toBeUndefined();
+  });
+});
+
+describe("decidedAgent", () => {
+  it("a decision, a retire or a relaunch names the agent; nothing else does", () => {
+    expect(decidedAgent({ type: "decision_opened", data: { agent_id: A } })).toBe(A);
+    expect(decidedAgent({ type: "agent_retired", data: { agent_id: A } })).toBe(A);
+    expect(decidedAgent({ type: "agent_force_retired", data: { agent_id: A } })).toBe(A);
+    expect(decidedAgent({ type: "relaunched", data: { from_agent: A, to_agent: "x" } })).toBe(A);
+    expect(decidedAgent({ type: "agent_registered", data: { agent_id: A } })).toBeUndefined();
+    expect(decidedAgent({ type: "steering_sent", data: { agent_id: A } })).toBeUndefined();
+    expect(decidedAgent({ type: "artifact_verified", data: { agent_id: A } })).toBeUndefined();
   });
 });

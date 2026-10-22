@@ -20,6 +20,8 @@ import type { TaskId } from "./types";
  *   idle while waiting on its own work (activity-evidence.ts: the hooks' `background_wait`, a
  *     lease, running shells in the footer, a fresh worktree write) → no steer, no agent_stalled
  *   awaiting_input class credit                          → credit_exhausted
+ *   status `blocked` with no decision (open, or answered for that status) naming the agent for
+ *     blocked_undecided_stall_ms, its hooks not working → agent_stalled (a block nobody was asked about is a stall)
  *   no hook signal for heartbeat_alarm_s while the status is `working` → read the screen:
  *     the credit prompt → credit_exhausted · changing → held one more window, still changing at
  *     its end → hooks_silent · unchanged on a second read → screen_static · unreadable →
@@ -104,6 +106,8 @@ export type LivenessAction =
       asked: number;
       /** Seconds after an answer before the next decision. */
       next_s: number;
+      /** Blocked with no open decision (not an idle turn): `idle_s` counts from then. */
+      blocked?: true;
     }
   | { kind: "credit_exhausted"; source: "hook" | "screen"; text: string | null; screen?: string }
   | { kind: "read_screen" }
@@ -121,6 +125,7 @@ export interface LivenessTunables {
   heartbeat_alarm_s: number;
   background_wait_max_s: number;
   stall_backoff_max_s: number;
+  blocked_undecided_stall_ms: number;
   tool_in_flight_max_s: number;
 }
 
@@ -302,9 +307,13 @@ export function checkLiveness(
     status: string | null;
     tunables: LivenessTunables;
     evidence?: ActivityEvidence;
+    /** A `blocked` agent: since when no decision names it (null: one does). */
+    undecided_since?: number | null;
   },
 ): Step {
   const { now, status, tunables } = sample;
+  if (status === "blocked")
+    return blockedStall(prev, now, sample.undecided_since ?? null, tunables);
   if (!stallable(status)) return { state: prev, actions: [] };
   const s = structuredClone(prev);
   const actions: LivenessAction[] = [];
@@ -369,6 +378,41 @@ export function checkLiveness(
     }
   }
   return { state: s, actions };
+}
+
+/**
+ * A `blocked` agent waits on purpose, but only on a decision: undecided (no decision names
+ * it) for `blocked_undecided_stall_ms`, with its hooks not working, it is an `agent_stalled`.
+ */
+function blockedStall(
+  prev: AgentLiveness,
+  now: number,
+  since: number | null,
+  tunables: LivenessTunables,
+): Step {
+  if (
+    since === null ||
+    prev.activity === "working" ||
+    prev.decisions.stalled !== undefined ||
+    now - since < tunables.blocked_undecided_stall_ms
+  )
+    return { state: prev, actions: [] };
+  const s = structuredClone(prev);
+  s.decisions.stalled = PENDING;
+  s.stalls += 1;
+  return {
+    state: s,
+    actions: [
+      {
+        kind: "agent_stalled",
+        idle_s: Math.floor((now - since) / 1000),
+        last_text: s.last_text,
+        asked: s.stalls,
+        next_s: stallDelayMs(s.stalls, tunables) / 1000,
+        blocked: true,
+      },
+    ],
+  };
 }
 
 /**

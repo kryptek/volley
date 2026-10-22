@@ -76,7 +76,46 @@
               "type": "object",
               "description": "What the item mirrors: for a decision, { decision_id, decision_kind }."
             },
-            "answered": { "$ref": "#/$defs/answered" }
+            "answered": { "$ref": "#/$defs/answered" },
+            "held": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["on", "by", "at"],
+              "properties": {
+                "on": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "minProperties": 1,
+                  "description": "What it waits on: a task of the wave, a PR, an issue (one or more).",
+                  "properties": {
+                    "task": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+                    },
+                    "pr": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "issue": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  }
+                },
+                "note": {
+                  "type": "string"
+                },
+                "by": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "description": "A decision's item: its hold (spec section 4.6.18), mirrored from the decision. A held item is never escalated; the hold changes no version."
+            }
           }
         }
       },

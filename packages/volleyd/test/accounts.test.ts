@@ -226,7 +226,7 @@ describe("deskRefusal (a Desk login's Needs-you answers, SPEC §4.6.18)", () => 
     );
   });
 
-  it("covers inbox_answer and resolve only", () => {
-    expect([...DESK_OPS].sort()).toEqual(["inbox_answer", "resolve"]);
+  it("covers inbox_answer, resolve, hold and release only", () => {
+    expect([...DESK_OPS].sort()).toEqual(["hold", "inbox_answer", "release", "resolve"]);
   });
 });

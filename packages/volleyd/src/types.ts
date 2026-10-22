@@ -94,6 +94,8 @@ export interface Tunables {
   background_wait_max_s: number;
   /** Cap on the doubling gap between `agent_stalled` decisions of one idle cycle. */
   stall_backoff_max_s: number;
+  /** A `blocked` agent no decision names (open, or answered for its status) this long is stalled. */
+  blocked_undecided_stall_ms: number;
   /** Longest a tool call in flight (PreToolUse, no PostToolUse yet) holds off the silence probe. */
   tool_in_flight_max_s: number;
   fallback_model: string | null;
@@ -666,6 +668,9 @@ export const WAVE_EVENT_TYPES = [
   // Autopilot (SPEC §4.6.16): a decision answered from the policy table, or left for the owner.
   "decision_auto_resolved",
   "decision_escalated",
+  // Held decisions (#335): one waits on a task, PR or issue, never escalated; released when it lands.
+  "decision_held",
+  "decision_released",
   // The release train (SPEC §4.6.19): a settled wave whose repo has a playbook starts releasing;
   // each stage is entered, then verified or failed; the owner's `release_go` go completes it.
   "release_started",
