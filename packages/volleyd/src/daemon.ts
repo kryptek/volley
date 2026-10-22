@@ -7760,7 +7760,13 @@ export class Daemon {
     const item = this.inbox.get(id);
     if (item === undefined) return { refused: `unknown inbox item '${id}'` };
     // An answer its decision cannot apply is refused before the compare-and-set (#315).
-    const bad = item.answered === undefined ? decisionAnswerRefusal(item, req.answer) : null;
+    // A decision already resolved (a crash before its item closed) answers "already answered".
+    const decided =
+      item.wave !== undefined &&
+      typeof item.source.decision_id === "string" &&
+      this.waves.get(item.wave)?.record.decisions[item.source.decision_id]?.resolved !== undefined;
+    const bad =
+      item.answered === undefined && !decided ? decisionAnswerRefusal(item, req.answer) : null;
     if (bad !== null) return { refused: bad, code: BAD_ANSWER };
     const check = answerEvent(item, req, dateOf(this.time));
     if ("refused" in check) return check;

@@ -79,6 +79,8 @@ export interface SupervisedEnvOptions {
    * launched but never register: they stay in verification (running in the wave, not supervised).
    */
   tasks?: string[];
+  /** Implementer spawns to await before returning (default: one per task). */
+  spawned?: number;
   /** The wave's pipeline (default `[implement]`). */
   pipeline?: string;
   /**
@@ -207,7 +209,7 @@ export async function makeSupervisedEnv(o: SupervisedEnvOptions = {}): Promise<S
   };
   const event = (match: EventMatch, n = 1, wave = "w1") => waits.event(wave, match, n);
   await event("agent_registered");
-  await event("agent_spawned", 1 + (o.tasks ?? []).length);
+  await event("agent_spawned", o.spawned ?? 1 + (o.tasks ?? []).length);
   // Supervision starts once the daemon has consumed the verification outcome.
   await waits.settled();
   return {

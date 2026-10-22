@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { type InboxItem, decisionItemId, inboxTopic } from "../src/autopilot/inbox";
 import { ControlClient } from "../src/control";
+import { resolveEvent } from "../src/decisions";
 import { AUTOPILOT_ON, NS } from "./helpers/daemon-env";
 import { deskAccounts, deskAnswer } from "./helpers/desk-answer";
 import { fakeExec } from "./helpers/fake-exec";
@@ -396,6 +397,29 @@ describe("an answer a decision cannot apply is refused (#315)", () => {
     });
     expect(s.daemon.inboxItem(id)?.version).toBe(1);
     expect(resolvedEvents()).toHaveLength(0);
+  });
+
+  it("inbox_answer on a decision resolved before its item closed: already answered, not BAD_ANSWER", async () => {
+    s = await makeSupervisedEnv();
+    const d = await s.daemon.openDecision("w1", budget);
+    const id = decisionItemId("w1", d.decision_id);
+    // A crash between journaling decision_resolved and closing the item.
+    const rec = s.daemon.record("w1");
+    if (rec === undefined) throw new Error("no wave");
+    const ev = resolveEvent(rec, d.decision_id, { answer: "cancel", by: "t" }, new Date());
+    if (!("event" in ev)) throw new Error("not resolvable");
+    // biome-ignore lint/suspicious/noExplicitAny: journaling past the item close, as a crash would
+    await (s.daemon as any).append("w1", ev.event);
+    expect(s.daemon.inboxItem(id)?.answered).toBeUndefined();
+    const r = await (await control()).request("inbox_answer", {
+      id,
+      version: 1,
+      answer: "raise",
+      where: phone,
+      by: "t",
+    });
+    expect(r.code).toBeUndefined();
+    expect(r).toMatchObject({ ok: false, error: "already answered on cli" });
   });
 
   it("inbox_answer: raise N is recorded as raise by N on the item and the decision alike", async () => {

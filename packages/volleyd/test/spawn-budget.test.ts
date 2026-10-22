@@ -100,6 +100,26 @@ describe("spawn budget exhausted", () => {
     expect(budgetDecisions()).toHaveLength(1);
   });
 
+  it("one autopilot raise lets every held admission through with no second decision (#315)", async () => {
+    // Budget 1: T1's implementer spends it, so T2 and T3 are both held at admission.
+    s = await makeSupervisedEnv({
+      exec: ARTIFACTS_OK,
+      waveExtra: "spawn_budget: 1",
+      tasks: ["T2: { issue: 42 }", "T3: { issue: 42 }"],
+      config: "autopilot: { enabled: true, budget_raise_max: 3 }",
+      daemon: AUTOPILOT_ON,
+      spawned: 1,
+    });
+    await s.event("decision_resolved");
+    await s.daemon.tick();
+    await s.event((e) => e.type === "agent_spawned" && e.task === "T2");
+    await s.event((e) => e.type === "agent_spawned" && e.task === "T3");
+    await s.daemon.tick();
+    await s.settled();
+    expect(budgetDecisions()).toHaveLength(1);
+    expect(s.journal().filter((e) => e.type === "decision_resolved")).toHaveLength(1);
+  });
+
   it("an answer it cannot apply is refused and the decision stays open (#315)", async () => {
     const d = await held();
     const r = await runCli(
