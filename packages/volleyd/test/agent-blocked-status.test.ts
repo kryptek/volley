@@ -28,8 +28,15 @@ const terminalAlarms = () =>
   s.journal().filter((e) => e.type === "alarm_raised" && e.data.alarm === TERMINAL_ALARM);
 const late = DAEMON_DEFAULTS.terminal_unjournaled_alarm_ms + 1_000;
 
-/** The daemon's pipeline for w1, with its `handle` replaced for `agent_blocked` events. */
-function dropBlocked(daemon: Daemon, handle: (ev: PipelineEvent) => Promise<void>): void {
+/**
+ * The daemon's pipeline for w1, with its `handle` replaced for `agent_blocked` events (and
+ * whatever else `more` replaces).
+ */
+function dropBlocked(
+  daemon: Daemon,
+  handle: (ev: PipelineEvent) => Promise<void>,
+  more: Partial<PipelineDriver> = {},
+): void {
   const d = daemon as unknown as { pipelineFor(w: string): PipelineDriver };
   const real = d.pipelineFor.bind(d);
   d.pipelineFor = (w) => {
@@ -37,6 +44,7 @@ function dropBlocked(daemon: Daemon, handle: (ev: PipelineEvent) => Promise<void
     return Object.assign(Object.create(p), {
       handle: (task: string, ev: PipelineEvent) =>
         ev.kind === "agent_blocked" ? handle(ev) : p.handle(task, ev),
+      ...more,
     });
   };
 }
@@ -172,6 +180,64 @@ describe("daemon: a retained blocked always has a decision (the invariant)", () 
     // The decision handles the status: the terminal-status watchdog stays quiet.
     expect(terminalAlarms()).toHaveLength(0);
     expect(stage()).toBe("awaiting_decision");
+  });
+
+  it("a stale run the pipeline drops: manual | cancel, the task is not parked; cancel stops only the agent", async () => {
+    s = await makeSupervisedEnv();
+    dropBlocked(s.daemon, async (ev) => {
+      if (ev.kind !== "agent_blocked") return;
+      // What the pipeline's onBlocked journals for a stale run (already on the serial queue).
+      const d = s.daemon as unknown as { append(w: string, e: unknown): Promise<unknown> };
+      await d.append("w1", {
+        type: "alarm_raised",
+        task: "T1",
+        data: {
+          alarm: BLOCKED_ALARM,
+          agent_id: ev.agent_id,
+          role: ev.role,
+          why: "not the implementer's current run",
+          ...(ev.at !== undefined ? { status_at: ev.at } : {}),
+        },
+      });
+    });
+    await s.status("blocked", { reason: "stuck" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    expect(opened.data).toMatchObject({
+      class: "blocked_unhandled",
+      agent_id: AGENT,
+      options: ["manual", "cancel"],
+    });
+    await s.settled();
+    expect(stage()).toBe("implement");
+    await resolve(opened.data.decision_id as string, "cancel");
+    await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    expect(s.journal().some((e) => e.type === "task_cancelled")).toBe(false);
+    expect(stage()).toBe("implement");
+  });
+
+  it("a red head still being classified: the sweep waits for it, then asks after a full window", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    let classifying = true;
+    dropBlocked(s.daemon, async () => {}, { classifying: () => classifying });
+    await s.status("blocked", { reason: "stuck" });
+    await s.consumed();
+    await clock.advance(late);
+    for (let i = 0; i < 3; i++) await s.daemon.tick();
+    await s.settled();
+    expect(blockedOpened()).toHaveLength(0);
+    expect(unhandled()).toHaveLength(0);
+    // The classify ends without a decision: a full window from then on, the daemon asks.
+    classifying = false;
+    await s.daemon.tick();
+    await s.settled();
+    expect(blockedOpened()).toHaveLength(0);
+    await clock.advance(late);
+    for (let i = 0; i < 3; i++) await s.daemon.tick();
+    await s.settled();
+    expect(blockedOpened()).toHaveLength(1);
   });
 
   it("the pipeline throws: the daemon asks at once, the alarm carries the error", async () => {

@@ -2515,8 +2515,8 @@ daemon-level `agent_blocked` with `class: "blocked_unhandled"`:
 
 | Why the pipeline cannot own it | Options |
 |---|---|
-| the agent is not the role's current run, the run is already accepted, the pipeline failed, or no decision came `terminal_unjournaled_alarm_ms` after the hand-over | `respawn` (the agent is retired `relaunched` and its role spawns again), `cancel` (the task is cancelled) |
-| the task is `done`, `merge_ready` or `cancelled` (settled: its dependents moved on), or not in the wave | `manual` (yours; nothing is done), `cancel` (the agent is stopped; the task stays where it is). The decision does not park the task |
+| the pipeline failed, or no decision came `terminal_unjournaled_alarm_ms` after the hand-over (a red head still being classified restarts that window) | `respawn` (the agent is retired `relaunched` and its role spawns again), `cancel` (the task is cancelled) |
+| the task is `done`, `merge_ready` or `cancelled` (settled: its dependents moved on), or not in the wave; or the agent is stale (not the role's current run, or its run is already accepted), whose role's current run goes on | `manual` (yours; nothing is done), `cancel` (the agent is stopped; the task stays where it is). The decision does not park the task |
 
 Should even that be lost, liveness counts a blocked agent no decision names (open, or answered
 for that status) for `blocked_undecided_stall_ms` as stalled (above).

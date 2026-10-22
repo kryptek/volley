@@ -3705,6 +3705,11 @@ export class PipelineDriver {
     this.turn = undefined;
   }
 
+  /** Whether a blocked agent's red head is still being classified (its decision is to come). */
+  classifying(task: TaskId, agentId: string): boolean {
+    return this.inflight.has(`${task}/classify/blocked/${agentId}`);
+  }
+
   /** Resolves once no check is running beside the queue (tests; a graceful stop). */
   async settled(): Promise<void> {
     while (this.chains.size > 0) await Promise.all([...this.chains]);

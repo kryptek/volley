@@ -5652,7 +5652,8 @@ export class Daemon {
     const status = a?.watch.state.status;
     if (a === undefined || status?.type !== "blocked") return;
     if (this.moving.has(agentId)) {
-      // Not handed over: the sweep hands it over once the move ends.
+      // Not handed over: the sweep hands it over once the move ends. The sweep skips a moving
+      // agent, so this reset is what makes it hand the status over then (not every tick now).
       a.blockedSeen = undefined;
       return;
     }
@@ -5695,14 +5696,16 @@ export class Daemon {
     if (this.blockedDecided(a.wave, agentId, status.wall_time)) return;
     // The pipeline said why it asks nothing: the daemon asks. Otherwise (a red head being
     // classified first) the sweep asks if no decision comes within the window.
-    const dropped = this.journalEvents(a.wave).some(
+    const dropped = this.journalEvents(a.wave).find(
       (e) =>
         e.seq > before &&
         e.type === "alarm_raised" &&
         e.data.alarm === BLOCKED_ALARM &&
         e.data.agent_id === agentId,
     );
-    if (dropped) await this.blockedFallback(agentId, a, null);
+    // A stale or accepted run: the role's current run is healthy, so the task is not parked.
+    if (dropped !== undefined)
+      await this.blockedFallback(agentId, a, null, dropped.data.why !== "the task is cancelled");
   }
 
   /** Whether any decision (open or answered) names the agent and its status `at` (status_at). */
@@ -5716,10 +5719,16 @@ export class Daemon {
 
   /**
    * The daemon's own `agent_blocked` for a block the pipeline cannot own: `respawn | cancel`, or
-   * `manual | cancel` (not parking it) for a settled task. `why` journals `blocked_unhandled`
-   * first (null: the pipeline already did). Asked once per status.
+   * `manual | cancel` (not parking it) for a settled task or a `stale` agent (not the role's
+   * current run, or one already accepted), whose cancel stops only the agent. `why` journals
+   * `blocked_unhandled` first (null: the pipeline already did). Asked once per status.
    */
-  private async blockedFallback(agentId: string, a: Supervised, why: string | null): Promise<void> {
+  private async blockedFallback(
+    agentId: string,
+    a: Supervised,
+    why: string | null,
+    stale = false,
+  ): Promise<void> {
     const status = a.watch.state.status;
     if (status?.type !== "blocked" || a.blockedAsked === status.wall_time) return;
     if (this.blockedDecided(a.wave, agentId, status.wall_time)) return;
@@ -5742,11 +5751,14 @@ export class Daemon {
       });
     }
     const settled = stage === undefined || SETTLED_STAGES.has(stage);
-    const respawn = !settled && this.opts.spawner !== undefined;
-    const options = settled ? ["manual", "cancel"] : respawn ? ["respawn", "cancel"] : ["cancel"];
+    const keep = settled || stale;
+    const respawn = !keep && this.opts.spawner !== undefined;
+    const options = keep ? ["manual", "cancel"] : respawn ? ["respawn", "cancel"] : ["cancel"];
     const what = settled
       ? `manual: you handle it yourself; or cancel: stop the agent (the task stays ${stage ?? "as it is"})`
-      : `${respawn ? `respawn: stop it and start the ${a.role} again; or ` : ""}cancel the task`;
+      : stale
+        ? `manual: you handle it yourself; or cancel: stop this agent (the ${a.role}'s current run goes on)`
+        : `${respawn ? `respawn: stop it and start the ${a.role} again; or ` : ""}cancel the task`;
     try {
       await this.openDecisionNow(
         a.wave,
@@ -5756,7 +5768,7 @@ export class Daemon {
           id: waveDecisionId("agent_blocked", a.wave, agentId, status.wall_time),
           question: `Needs you: ${agentId} (${a.task}) is blocked: ${clipText(reason)}. ${what}?`,
           options,
-          ...(settled && stage !== undefined ? { park: false } : {}),
+          ...(keep && stage !== undefined ? { park: false } : {}),
         },
         {
           class: BLOCKED_CLASS,
@@ -5766,6 +5778,7 @@ export class Daemon {
           payload: status.payload,
           status_at: status.wall_time,
           minted: a.minted,
+          ...(stale ? { stale: true } : {}),
         },
       );
     } catch (e) {
@@ -5790,6 +5803,11 @@ export class Daemon {
         a.blockedSeen = st.wall_time;
         a.blockedAt = now;
         await this.onBlocked(agentId);
+        continue;
+      }
+      // A red head still being classified: its decision is to come; the window starts after.
+      if (this.pipelineFor(a.wave).classifying(a.task, agentId)) {
+        a.blockedAt = now;
         continue;
       }
       const waited = now - (a.blockedAt ?? now);
@@ -6649,10 +6667,10 @@ export class Daemon {
       // The daemon's own agent_blocked (blockedFallback): manual is the owner's, nothing to do.
       const ans = answer.trim().toLowerCase();
       const stage = this.waves.get(wave)?.record.state?.tasks.find((t) => t.id === task)?.stage;
-      const settled = stage === undefined || SETTLED_STAGES.has(stage);
+      const settled = stage === undefined || SETTLED_STAGES.has(stage) || x.stale === true;
       if (ans === "cancel") {
         if (!settled) return this.cancelTask(wave, task, agentId, why);
-        // A settled task stays as it is: only the blocked agent is stopped.
+        // A settled task (or a stale agent's) stays as it is: only the blocked agent is stopped.
         if (a !== undefined) await this.retireRole(wave, agentId, "stopped");
         return;
       }
