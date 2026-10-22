@@ -5,6 +5,7 @@ import { ControlClient, waveStateTopic } from "../src/control";
 import { decisionTopic } from "../src/decisions";
 import type { WaveState } from "../src/types";
 import { AUTOPILOT_ON, NS } from "./helpers/daemon-env";
+import { asApiRuns } from "./helpers/fake-exec";
 import { schemaErrors } from "./helpers/schema";
 import { type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
 
@@ -290,7 +291,28 @@ describe("self-healing CI in the daemon (SPEC §4.6.16)", () => {
               : fixture("gh-run-list-red.json").replaceAll("1".repeat(40), RED),
           }),
         ],
-        [["gh", "run", "view"], { stdout: fixture("gh-run-log-failed-flake.txt") }],
+        [
+          ["gh", "api"],
+          {
+            stdout: asApiRuns(fixture("gh-run-list-red.json").replaceAll("1".repeat(40), RED)),
+          },
+        ],
+        [
+          ["gh", "run", "view"],
+          (argv) => ({
+            stdout: argv.includes("--log-failed")
+              ? fixture("gh-run-log-failed-flake.txt")
+              : JSON.stringify({
+                  jobs: [
+                    {
+                      name: "test",
+                      conclusion: "failure",
+                      steps: [{ name: "Run tests", conclusion: "failure" }],
+                    },
+                  ],
+                }),
+          }),
+        ],
         [["gh", "pr", "view"], { stdout: fixture("gh-pr-view-files.json") }],
       ],
     });

@@ -10,6 +10,7 @@ import { FIXTURES } from "./helpers/fake-host";
 import {
   type Harness,
   type HarnessOptions,
+  isHeadRunsRead,
   pipelineHarness,
   sha,
 } from "./helpers/pipeline-harness";
@@ -210,7 +211,7 @@ describe("pipeline: artifacts and CI", () => {
     expect(stage()).toBe("implement");
 
     // Re-checks are rate-limited.
-    const runLists = () => h.calls.filter((c) => c[1] === "run" && c[2] === "list").length;
+    const runLists = () => h.calls.filter(isHeadRunsRead).length;
     const before = runLists();
     await h.tick();
     expect(runLists()).toBe(before);
@@ -1159,7 +1160,7 @@ describe("pipeline: I/O never blocks the queue", () => {
     h.world.local[h.run("implementer")?.worktree as string] = H1;
     h.world.origin[h.PR_BRANCH] = H1;
     (h.world.prs[0] as { headRefOid: string }).headRefOid = H1;
-    h.world.timeout = (a) => a[1] === "run";
+    h.world.timeout = (a) => a[1] === "run" || isHeadRunsRead(a);
     await h.finish("implementer", {});
     expect(h.events.filter((e) => e.type === "alarm_raised")).toEqual([]);
     expect(h.openDecisions()).toEqual([]);
@@ -1205,7 +1206,15 @@ describe("pipeline: where the checks run", () => {
     h.openPr(H1);
     await h.finish("implementer", { head: H1, ci: "green" });
     expect(stage()).toBe("spec_review");
-    expect(used.length).toBe(h.calls.length);
+    // Every check but the head's runs; those are the supervisor's one `gh api` GET in the wave
+    // repo (a paired machine's fence denies `gh api`).
+    const reads = h.calls.filter(isHeadRunsRead);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((c) => c[1] === "api")).toBe(true);
+    expect(h.callOpts.filter((_o, i) => isHeadRunsRead(h.calls[i] as string[]))).toEqual(
+      reads.map(() => expect.objectContaining({ cwd: "/repo" })),
+    );
+    expect(used.length).toBe(h.calls.length - reads.length);
     expect(used.every((u) => u[0] === "T1")).toBe(true);
   });
 });
