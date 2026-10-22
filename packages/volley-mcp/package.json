@@ -1,6 +1,6 @@
 {
   "name": "volley-mcp",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "Volley reference MCP server — stdio MCP server wrapping an MQTT broker",
   "license": "Apache-2.0",

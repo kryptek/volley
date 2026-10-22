@@ -1,6 +1,6 @@
 {
   "name": "volley-wait",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "Volley /wait Claude Code skill — event-driven wait on a Volley topic, replacing the polling loop pattern",
   "license": "Apache-2.0",
