@@ -109,6 +109,8 @@ Each issue becomes a task named by the task tag its title starts with (`O0: …`
 - A dependency on an issue **outside** the set is an error that names it. Either add that issue to the set, or, if it is already merged (`gh issue view <N> --json state` is `CLOSED` and its PR is in the release branch), pass it with `--satisfied <N,...>` so it is dropped.
 - Issues with **no** dependency line are listed on stderr (`note: no Depends on:/deps: line in ...`). Ask the user how they are ordered (or confirm they are independent), then add `after:` lines to the wave file by hand before Step 4.
 
+**Reserve shared numbers and names before the children branch.** When an epic's children will each add to the spec (a new section, wave event or decision kind), the epic's first PR reserves them per child in `spec/RESERVED.md`, the way a migration counter reserves numbers: one row per item (`| §4.6.21 | #312 | held decisions |`, or a backticked event or kind name), and each child's ISSUE.md names its reserved items. Sibling PRs then never pick the same number. `bun run check:spec-refs` fails when a reserved section number is taken by a heading on another topic. The child that lands a section, event or kind removes its row in the same PR. Add a new decision kind, event or tunable as its own line in the SPEC's list (`<!-- spec-list: … -->`), never by editing a neighbour's line.
+
 ### Step 3: write the wave file
 
 The wave id is `<date>-<theme>` (lowercase, `[a-z0-9][a-z0-9_-]*`, at most 63 chars), the same theme as the release branch. The file goes in the repo at `.volley/waves/<date>-<theme>.yaml`:

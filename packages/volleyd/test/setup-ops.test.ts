@@ -23,6 +23,7 @@ import {
   terminalOnly,
 } from "../src/setup-ops";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
+import { eventually } from "./helpers/broker-wait";
 import { NO_PRESSURE } from "./helpers/daemon-env";
 import { type FakeDynsec, startFakeDynsec } from "./helpers/fake-dynsec";
 import { type FakeExec, fakeExec } from "./helpers/fake-exec";
@@ -338,11 +339,9 @@ describe("setup ops: volleyd runs `volley setup`'s planners and steps for the De
       : [];
   const systemEvents = () =>
     readJournalFile(join(m.volleydHome, "waves", "_system", "journal.jsonl"));
-  const until = async (ok: () => boolean, ms = 5000) => {
-    // broker round-trip: the restart runs after the answer; poll for its effects, bounded.
-    for (let t = 0; t < ms && !ok(); t += 25) await new Promise((r) => setTimeout(r, 25));
-    expect(ok()).toBe(true);
-  };
+  /** The restart runs after the answer: poll for its effects, bounded. */
+  const until = (ok: () => boolean, deadlineMs?: number) =>
+    eventually(ok, { ...(deadlineMs !== undefined ? { deadlineMs } : {}), what: "the restart" });
 
   it("setup_plan from an admin answers the five steps in order, as `volley setup` plans them", async () => {
     mkdirSync(m.volleydHome, { recursive: true });
