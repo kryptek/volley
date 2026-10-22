@@ -781,6 +781,8 @@ function machines(now: number, step = 0): DeskMessage[] {
     checks: checks(trust),
     doctor_at: iso(now - 60_000),
   });
+  // studio sits under its 20% memory floor at every step, as its stock verdict says.
+  const localMemory = memWalk(LOCAL_MACHINE, 13);
   const records = [
     {
       name: LOCAL_MACHINE,
@@ -792,7 +794,7 @@ function machines(now: number, step = 0): DeskMessage[] {
       load: loads(Math.max(0.2, 3.1 + 1.2 * walk(LOCAL_MACHINE, step)), [3.1, 2.8, 2.5]),
       agents: 5,
       last_seen: iso(now - 5_000),
-      ...doctor(true, "/path/to/repo", memWalk(LOCAL_MACHINE, 71)),
+      ...doctor(true, "/path/to/repo", localMemory),
     },
     {
       name: "box-a",
@@ -801,7 +803,7 @@ function machines(now: number, step = 0): DeskMessage[] {
       arch: "x64",
       cores: 32,
       tunnel: "up",
-      load: loads(Math.max(0.2, 1.6 + 0.6 * walk("box-a", step) + 51 * up), [1.6, 1.2, 0.9]),
+      load: loads(Math.max(0.2, 1.6 + 0.6 * walk("box-a", step) + 72 * up), [1.6, 1.2, 0.9]),
       agents: 2,
       remote_port: 21883,
       last_seen: iso(now - 12_000),
@@ -840,7 +842,7 @@ function machines(now: number, step = 0): DeskMessage[] {
       max_agents: 12,
       placed: 5,
       eligible: false,
-      ineligible_reason: "memory available 18% (min 20%)",
+      ineligible_reason: `memory available ${localMemory}% (min 20%)`,
       usage: { account: "primary", five_hour_pct: 64 },
     }),
     verdict("box-a", { max_agents: 6, placed: 2, ...overload(records[1] as MachineLoad) }),

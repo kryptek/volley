@@ -63,7 +63,9 @@ describe("keyboard: canvas", () => {
     const v1 = view(container);
     expect((720 - v1.x) / v1.s).toBeCloseTo((720 - v0.x) / v0.s, 1);
     // Below MIN_SCALE (a fit of the whole demo) zooming out stays put, so zoom in past it first.
-    while (view(container).s < MIN_SCALE * ZOOM_STEP) fireEvent.keyDown(stage(), { key: "+" });
+    for (let i = 0; i < 20 && view(container).s < MIN_SCALE * ZOOM_STEP; i++)
+      fireEvent.keyDown(stage(), { key: "+" });
+    expect(view(container).s).toBeGreaterThanOrEqual(MIN_SCALE * ZOOM_STEP);
     const v2 = view(container);
     fireEvent.keyDown(stage(), { key: "-" });
     expect(view(container).s).toBeCloseTo(v2.s / ZOOM_STEP, 4);
