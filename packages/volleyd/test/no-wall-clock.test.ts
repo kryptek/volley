@@ -110,6 +110,97 @@ function testViolations(text: string): string[] {
   });
 }
 
+/**
+ * A broker wait carries a deadline: `eventually` and `until` (helpers/broker-wait.ts) fail past
+ * theirs naming what they waited for, never as a vitest timeout. A test's own `eventually`,
+ * `until` or `waitFor` is an alias of them or calls them; it never polls on its own.
+ */
+const WAIT_HELPER =
+  /^\s*(?:export\s+)?(?:(?:async\s+)?function\s+|(?:const|let)\s+)(?:eventually|until|waitFor)\b/;
+const BOUNDED_WAIT = /\b(?:eventually|until)\b/;
+
+/**
+ * The definition starting at line `i`: through the line at the same indentation that closes the
+ * statement (`};`, `});`), not a multi-line parameter list's `) => {`.
+ */
+function definitionAt(lines: string[], i: number): string {
+  const first = lines[i] ?? "";
+  if (/;\s*$/.test(code(first))) return first;
+  const indent = /^\s*/.exec(first)?.[0] ?? "";
+  const end = lines.findIndex(
+    (l, j) => j > i && /^\s*[})\]].*;\s*$/.test(code(l)) && /^\s*/.exec(l)?.[0] === indent,
+  );
+  return lines.slice(i, end === -1 ? undefined : end + 1).join("\n");
+}
+
+function waitHelperViolations(text: string): string[] {
+  const lines = text.split("\n");
+  return lines.flatMap((line, i) => {
+    if (isCommentLine(line) || !WAIT_HELPER.test(line)) return [];
+    const body = definitionAt(lines, i)
+      .replace(WAIT_HELPER, "")
+      .split("\n")
+      .filter((l) => !isCommentLine(l))
+      .map(code)
+      .join("\n");
+    return BOUNDED_WAIT.test(body) ? [] : [`${i + 1}: ${line.trim()}`];
+  });
+}
+
+describe("broker waits carry a deadline", () => {
+  it("the detector catches a wait helper of a test's own, not one that delegates", () => {
+    expect(
+      waitHelperViolations(
+        "const until = async (ok: () => boolean) => {\n  while (!ok()) await sleep(10);\n};",
+      ),
+    ).toHaveLength(1);
+    expect(
+      waitHelperViolations("async function waitFor(p: () => boolean) {\n  for (;;) {}\n}"),
+    ).toHaveLength(1);
+    expect(waitHelperViolations("const waitFor = eventually;")).toEqual([]);
+    expect(
+      waitHelperViolations(
+        "  const until = async (name: string) => {\n    await eventually(async () => ok(name));\n  };",
+      ),
+    ).toEqual([]);
+    expect(
+      waitHelperViolations(
+        "const until = (ok: () => boolean) =>\n  eventually(ok, { what: 'x' });",
+      ),
+    ).toEqual([]);
+    expect(
+      waitHelperViolations("const until = async () => {\n  // until eventually\n  poll();\n};"),
+    ).toHaveLength(1);
+    // A multi-line parameter list: the body after `) => {` is the definition.
+    expect(
+      waitHelperViolations(
+        "  const until = async (\n    name: string,\n  ) => {\n    while (!ok(name)) await tick();\n  };\n  await until('x');",
+      ),
+    ).toHaveLength(1);
+    expect(
+      waitHelperViolations(
+        "  const until = async (\n    name: string,\n  ) => {\n    await eventually(() => ok(name));\n  };",
+      ),
+    ).toEqual([]);
+  });
+
+  it("eventually and until take a deadline by default", () => {
+    const src = readFileSync(join(TEST, "helpers", "broker-wait.ts"), "utf-8");
+    expect(src).toMatch(/export async function eventually\([\s\S]*?deadlineMs = WAIT_DEADLINE_MS/);
+    expect(src).toMatch(/export const until = \([\s\S]*?opts: WaitOptions = \{\}\)/);
+  });
+
+  it("test/ defines no wait helper of its own that polls without them", () => {
+    const helpers = join(TEST, "helpers", "broker-wait.ts");
+    const offenders = tsFiles(TEST)
+      .filter((f) => f !== helpers && f !== new URL(import.meta.url).pathname)
+      .flatMap((f) =>
+        waitHelperViolations(readFileSync(f, "utf-8")).map((v) => `${relative(TEST, f)}:${v}`),
+      );
+    expect(offenders).toEqual([]);
+  });
+});
+
 describe("no wall clock outside src/clock.ts", () => {
   it("the src detector catches what it guards against", () => {
     expect(srcViolations("const t = setTimeout(fn, 10);")).toHaveLength(1);

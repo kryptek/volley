@@ -5,7 +5,7 @@ import { registryTopic } from "volley-mcp/topics";
 import { decisionItemId } from "../src/autopilot/inbox";
 import { ControlClient } from "../src/control";
 import type { Daemon } from "../src/daemon";
-import { eventually } from "./helpers/broker-wait";
+import { until } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 
@@ -69,16 +69,6 @@ async function status(agentId: string, type: string) {
 }
 const coordinator = () => daemon.snapshot(WAVE)?.coordinator;
 const reconnects = () => daemon.journalEvents(WAVE).filter((e) => e.type === "owner_reconnected");
-// Not vi.waitFor: the bun test runner (one of CI's two runners) does not provide it.
-const until = (check: () => void) =>
-  eventually(() => {
-    try {
-      check();
-      return true;
-    } catch {
-      return false;
-    }
-  });
 
 beforeEach(async () => {
   t = await makeDaemonEnv();
@@ -247,6 +237,26 @@ describe("a coordinator name across a daemon restart", () => {
     await status("coordinator-a1", "done");
     clock.sleepHost(3_600_000);
     daemon = await t.start({ clock });
+    await until(() =>
+      expect(coordinator()).toMatchObject({ agent_id: "coordinator-a1", state: "gone" }),
+    );
+  });
+
+  it("a terminal status replayed before its registry entry still reads gone", async () => {
+    // The two replays arrive on two subscriptions, in either order: force the status first.
+    const statusOf = () => (daemon as unknown as { statusOf: Map<string, unknown> }).statusOf;
+    await registry("coordinator-a1");
+    await status("coordinator-a1", "working");
+    await until(() => expect(coordinator()?.state).toBe("working"));
+    await daemon.stop();
+    await status("coordinator-a1", "done");
+    await pub.publish(registryTopic("coordinator-a1"), "", { qos: 1, retain: true });
+    clock.sleepHost(3_600_000);
+    daemon = await t.start({ clock });
+    // Delivered after the replayed `done` on the same subscription: once seen, `done` was handled.
+    await status("sentinel-1", "working");
+    await until(() => expect(statusOf().has("sentinel-1")).toBe(true));
+    await registry("coordinator-a1");
     await until(() =>
       expect(coordinator()).toMatchObject({ agent_id: "coordinator-a1", state: "gone" }),
     );
