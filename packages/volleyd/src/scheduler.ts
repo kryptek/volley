@@ -256,6 +256,8 @@ export function spawnsOutstanding(wave: Wave, rec: WaveRecord): number {
           (d) => d.task === t.id && d.resolved === undefined && d.resume_stage !== undefined,
         )?.resume_stage ?? "queued";
     if (FINISHED.has(stage)) continue;
+    // A stage outside the stage groups (`fixup`, `rebase`, `queued`) finds -1 and counts the
+    // whole pipeline from 0, on purpose: after a fixup the reviewers run again.
     const at = Math.max(
       0,
       stages.findIndex((g) => g.includes(stage as PipelineStage)),
