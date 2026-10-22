@@ -372,9 +372,9 @@ registry (a smoke run) is a different `VOLLEY_NAMESPACE`, not a different prefix
 ## Heavy-operation leases
 
 `pre-tool-use-lease.ts` (PreToolUse, matcher `Bash`) keeps heavy commands inside volleyd's lease
-pools. When `tool_input.command` matches one of a pool's `match` regexes (the `lease_pools` of the
-retained `volley/_waves/_config`, read once a minute and cached in `lease-pools.json`), the hook
-returns `hookSpecificOutput.updatedInput` with the command wrapped:
+pools. When a command in `tool_input.command` matches one of a pool's `match` regexes (the
+`lease_pools` of the retained `volley/_waves/_config`, read once a minute and cached in
+`lease-pools.json`), the hook returns `hookSpecificOutput.updatedInput` with the command wrapped:
 
 ```
 cd x && mvn -q verify
@@ -397,7 +397,18 @@ that is already wrapped, matches no pool, or arrives while no pools are configur
 untouched (empty output). The hook never changes the permission decision. Because the original
 runs in a child shell, a `cd` inside it does not carry over to the next Bash call.
 
-**Known gap.** Matching is on the command text, so an agent can run a heavy operation the
+**What is matched.** The regexes run against each command the shell would execute, not against
+the raw string (`src/lib/shell-segments.ts`): the line is split on `;`, `&&`, `||`, `|`, `&`,
+newlines and subshells; `$(…)`, backticks and `<(…)` contribute their own commands; `sh -c` /
+`bash -c` scripts and `eval` arguments are split in turn. Comments, heredoc bodies, redirect
+targets, leading `NAME=value` assignments, the arguments of `echo` / `printf`, git's `-m` /
+`--message` and gh's `--title` / `--body` / `--notes` values are dropped. So `cat <<'EOF' >
+notes.md` with "run bun run test" in the body, or `git commit -m "fix: bun run test flake"`, runs
+unleased, while `cd packages/x && bunx vitest run` or `bash -c "bun run test"` is wrapped. Each
+command is one string of its words, unquoted and space-joined (`cd x && mvn -q verify` is
+`cd x` and `mvn -q verify`), so a pattern meant to span `&&` no longer matches.
+
+**Known gap.** Matching is on the command line as written, so an agent can run a heavy operation the
 regexes do not see — from a script file (`./run-it.sh`), through an alias or a wrapper
 (`./mvnw`), or by building the command at runtime. The wrapper is a courtesy, not a sandbox: the
 backstop is volleyd's pressure-based spawn admission (memory pressure, multiplexer latency,
