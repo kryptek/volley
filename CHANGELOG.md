@@ -2,6 +2,12 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.6.2 — 2026-10-22
+
+### Fixed
+
+- **volleyd: a task whose first implementer launches failed now starts.** `stage_entered { implement }` was journaled only on attempt 1, so a task whose implementer launched on a later attempt stayed `queued`: its CI was never polled again and review and merge never started. The reducer now moves a queued task to `implement` when its implementer launches, which also recovers a stuck wave on restart. (#409)
+
 ## 0.6.1 — 2026-10-22
 
 ### Fixed
