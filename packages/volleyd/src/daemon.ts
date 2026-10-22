@@ -8172,7 +8172,7 @@ export class Daemon {
       return {
         ok: false,
         error: r.refused,
-        ...("code" in r && r.code !== undefined ? { code: r.code } : {}),
+        ...(r.code !== undefined ? { code: r.code } : {}),
       };
     return { ok: true, result: r.item };
   }
