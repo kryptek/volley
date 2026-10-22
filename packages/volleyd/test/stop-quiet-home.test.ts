@@ -45,6 +45,9 @@ describe("stop() leaves $VOLLEYD_HOME quiet", () => {
     expect(snapshot(env.home)).toEqual(before);
   };
 
+  /** How long the doctor's grandchild waits before its write: long enough that a loaded CI runner's stop still lands first. */
+  const LATE_WRITE_MS = 1500;
+
   it("kills the own doctor's own children, so none writes under $HOME after the stop", async () => {
     const repo = tempDir("volleyd-quiet-repo-");
     execFileSync("git", ["-C", repo, "init", "-q"], { stdio: "ignore" });
@@ -57,7 +60,7 @@ describe("stop() leaves $VOLLEYD_HOME quiet", () => {
         cwd: repo,
         env: {
           ...process.env,
-          GIT_SSH_COMMAND: `sh -c 'touch "${marks}/up"; sleep 0.2; mkdir -p "${env.home}/.local/state/gh"' --`,
+          GIT_SSH_COMMAND: `sh -c 'touch "${marks}/up"; sleep ${LATE_WRITE_MS / 1000}; mkdir -p "${env.home}/.local/state/gh"' --`,
         },
       });
     const daemon = await env.start({ fleet: { localDoctor: realLocalDoctor(doctorExec) } });
@@ -67,8 +70,13 @@ describe("stop() leaves $VOLLEYD_HOME quiet", () => {
       await new Promise((r) => setTimeout(r, 20));
     }
     expect(existsSync(join(marks, "up"))).toBe(true);
+    const upAt = Date.now();
     await daemon.stop();
+    // real process: the stop has to land before the grandchild's write, or the check below proves nothing.
+    expect(Date.now() - upAt).toBeLessThan(LATE_WRITE_MS);
     await quietAfter();
+    // real process: past the grandchild's late write, had it survived the stop.
+    await new Promise((r) => setTimeout(r, Math.max(0, upAt + LATE_WRITE_MS + 300 - Date.now())));
     expect(existsSync(join(env.home, ".local"))).toBe(false);
   });
 
