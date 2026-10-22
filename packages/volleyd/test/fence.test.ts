@@ -516,6 +516,21 @@ describe("assertAllowed", () => {
     expect(() => assertAllowed(["terraform", "apply"])).toThrow(/terraform/);
   });
 
+  it("CI runs by head_sha: the read-only gh api GET is allowed locally, never on a paired machine (#310)", () => {
+    const argv = [
+      "gh",
+      "api",
+      "repos/{owner}/{repo}/actions/runs?head_sha=abc&per_page=50",
+      "--jq",
+      "[.workflow_runs[] | {id, name, status, conclusion, html_url, head_sha, event, run_attempt, workflow_id, created_at}]",
+    ];
+    expect(() => assertAllowed(argv)).not.toThrow();
+    const ssh = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"];
+    expect(() => assertAllowed(ssh, { remote: { steps: [{ argv }] } })).toThrow(
+      /gh api \(not on a remote machine\)/,
+    );
+  });
+
   it("a consent token does not unlock the explicit deny list", () => {
     const consent = mintConsentToken("volleyd cleanup --yes");
     expect(() => assertAllowed(["git", "push"], { consent })).toThrow(FenceError);

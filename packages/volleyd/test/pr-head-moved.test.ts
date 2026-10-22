@@ -142,6 +142,27 @@ describe("PR head moved at merge_ready", () => {
     expect(h.events.filter((e) => e.type === "pr_head_moved")).toHaveLength(1);
   });
 
+  it("CI on B unreadable past ci_none_grace_ms: an unreadable hold, never the decision (#310)", async () => {
+    await gatedAtA();
+    pushB();
+    h.world.ciError = "HTTP 502: Bad Gateway";
+    const until = DAEMON_DEFAULTS.ci_none_grace_ms + 2 * DAEMON_DEFAULTS.ci_poll_ms;
+    for (let t = 0; t <= until; t += DAEMON_DEFAULTS.ci_poll_ms) await poll();
+    expect(h.events.some((e) => e.type === "pr_head_moved")).toBe(true);
+    expect(h.openDecisions()).toEqual([]);
+    const pending = h.events.find((e) => e.type === "ci_pending" && e.data.sha === B);
+    expect(pending?.data).toMatchObject({
+      reason: "ci_unreadable",
+      error: "HTTP 502: Bad Gateway",
+    });
+    expect(h.task()?.why_waiting).toBe("CI unreadable (HTTP 502: Bad Gateway), retrying");
+    // Readable again: green on B asks (the reviews saw A).
+    h.world.ciError = undefined;
+    h.world.ci[B] = "green";
+    await poll();
+    expect(h.openDecisions()).toHaveLength(1);
+  });
+
   it("CI red on B → decision rereview | fixup | cancel with the failing jobs and tests; fixup → fixup-2 with the directive", async () => {
     await gatedAtA();
     pushB("running");

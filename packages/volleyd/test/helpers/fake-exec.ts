@@ -51,3 +51,24 @@ export function fakeExec(): FakeExec {
   };
   return fake;
 }
+
+/**
+ * A `gh run list --json` answer as the supervisor's `gh api …/actions/runs?head_sha=` read
+ * answers it (the `--jq` projection of `workflow_runs`).
+ */
+export function asApiRuns(runList: string): string {
+  const runs = JSON.parse(runList) as Record<string, unknown>[];
+  return JSON.stringify(
+    runs.map((r) => ({
+      id: r.databaseId,
+      name: r.workflowName ?? r.name,
+      status: r.status,
+      conclusion: r.conclusion === "" ? null : r.conclusion,
+      html_url: r.url,
+      head_sha: r.headSha,
+      ...(r.event !== undefined ? { event: r.event } : {}),
+      ...(r.workflowDatabaseId !== undefined ? { workflow_id: r.workflowDatabaseId } : {}),
+      ...(r.createdAt !== undefined ? { created_at: r.createdAt } : {}),
+    })),
+  );
+}

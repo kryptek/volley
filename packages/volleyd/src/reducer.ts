@@ -750,11 +750,14 @@ function derive(state: WaveState, rec: WaveRecord): void {
     if (hold !== undefined && t.stage !== "done" && t.stage !== "cancelled") {
       const at = hold.sha.slice(0, 7);
       const infra = hold.reason === "infra_incident";
+      const unreadable = hold.reason === "ci_unreadable";
       const why = infra
         ? `CI infra incident: ${hold.incident ?? "infra-shaped failure"}; re-checking`
-        : hold.checks.total === 0
-          ? `CI pending on ${at} (no run yet)`
-          : `CI pending on ${at} (${hold.checks.done}/${hold.checks.total} checks)`;
+        : unreadable
+          ? `CI unreadable (${hold.error || "no answer"}), retrying`
+          : hold.checks.total === 0
+            ? `CI pending on ${at} (no run yet)`
+            : `CI pending on ${at} (${hold.checks.done}/${hold.checks.total} checks)`;
       const pr = hold.pr ?? t.pr;
       return {
         ...t,
@@ -765,12 +768,17 @@ function derive(state: WaveState, rec: WaveRecord): void {
                 number: pr.number,
                 url: pr.url,
                 head_sha: hold.sha,
-                ci: infra
-                  ? ("red" as const)
-                  : hold.checks.total === 0
-                    ? ("none" as const)
-                    : ("running" as const),
-                checks: hold.checks,
+                // Unreadable: no CI state is claimed (none of green / red / running / none).
+                ...(unreadable
+                  ? {}
+                  : {
+                      ci: infra
+                        ? ("red" as const)
+                        : hold.checks.total === 0
+                          ? ("none" as const)
+                          : ("running" as const),
+                      checks: hold.checks,
+                    }),
               },
             }
           : {}),
