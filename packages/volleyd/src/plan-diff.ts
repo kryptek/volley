@@ -9,16 +9,29 @@ export interface TaskChange {
   model?: { from: string; to: string };
 }
 
+/** A started task the new version would move: it keeps the host it runs on (#323). */
+export interface HostKept {
+  task: TaskId;
+  /** Where it runs (its `agent_spawned`'s host). */
+  kept: string;
+  /** What the new version writes for it. */
+  planned: string;
+  /** Still in flight (else settled: done or merge-ready). */
+  running: boolean;
+}
+
 /**
  * The structural diff between two versions of a wave plan: tasks added (in the new file's order),
  * removed (in the old file's order) and changed (in the new file's order). Changes are compared on
  * the normalised tasks, so a wave-level `model:`/`pipeline:` change shows on every task that
- * inherits it. Titles, hosts and `files` hints are not structural.
+ * inherits it. Titles, hosts and `files` hints are not structural; `hosts_kept` (set by
+ * plan-apply.ts, which knows which tasks started) reports the host changes that did not apply.
  */
 export interface PlanDiff {
   added: TaskId[];
   removed: TaskId[];
   changed: TaskChange[];
+  hosts_kept?: HostKept[];
 }
 
 export function diffPlans(prev: Wave, next: Wave): PlanDiff {
@@ -51,9 +64,14 @@ export const isEmptyDiff = (d: PlanDiff) =>
 const pipelineText = (p: PipelineStep[]): string =>
   `[${p.map((s) => (Array.isArray(s) ? `[${s.join(", ")}]` : s)).join(", ")}]`;
 
-/** One line per change: `+ T6`, `- T3`, `~ T2  after +T6; model a -> b`. */
+/** A host the new version did not apply: `T3: host kept local (already running; new plan says auto)`. */
+const keptLine = (k: HostKept): string =>
+  `${k.task}: host kept ${k.kept} (already ${k.running ? "running" : "ran"}; new plan says ${k.planned})`;
+
+/** One line per change: `+ T6`, `- T3`, `~ T2  after +T6; model a -> b`, then each host kept. */
 export function formatDiff(d: PlanDiff): string {
-  if (isEmptyDiff(d)) return "no structural changes\n";
+  const kept = (d.hosts_kept ?? []).map((k) => `${keptLine(k)}\n`).join("");
+  if (isEmptyDiff(d)) return `no structural changes\n${kept}`;
   const lines = [...d.added.map((id) => `+ ${id}`), ...d.removed.map((id) => `- ${id}`)];
   for (const c of d.changed) {
     const parts: string[] = [];
@@ -68,5 +86,5 @@ export function formatDiff(d: PlanDiff): string {
     if (c.model !== undefined) parts.push(`model ${c.model.from} -> ${c.model.to}`);
     lines.push(`~ ${c.task}  ${parts.join("; ")}`);
   }
-  return `${lines.join("\n")}\n`;
+  return `${lines.join("\n")}\n${kept}`;
 }
