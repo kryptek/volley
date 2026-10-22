@@ -1,19 +1,22 @@
-import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
+import { addAccount, readRegistry } from "../../src/claude/profiles";
 import { signinDir } from "../../src/claude/signin";
 import { usageAccountTopic } from "../../src/claude/usage";
 import { ControlClient } from "../../src/control";
 import { readJournalFile } from "../../src/journal";
+import { MACHINE_CHANNEL, machineTopic } from "../../src/machines";
 import { eventually } from "../helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "../helpers/daemon-env";
 import { fakeClock } from "../helpers/fake-clock";
 import { fakeExec } from "../helpers/fake-exec";
 import { SIGNIN_CALLBACK, type SigninBoxOptions, fakeSigninBox } from "../helpers/fake-host";
 import { journalWait } from "../helpers/journal-wait";
+import { schemaErrors } from "../helpers/schema";
 import { tempDir } from "../helpers/tmp";
 
 /** The claude_* control ops end to end: a real daemon on Aedes, a fake tmux / claude. */
@@ -29,6 +32,22 @@ afterEach(() => env.cleanup());
 /** What `claude auth status` says for Claude Code's default profile (no CLAUDE_CONFIG_DIR). */
 const PRIMARY_STATUS = { loggedIn: true, subscriptionType: "pro" };
 
+/** Claude Code signing a profile in: it records the login in the profile's `.claude.json`. */
+function signedInAs(dir: string) {
+  writeFileSync(
+    join(dir, ".claude.json"),
+    JSON.stringify({
+      userID: "c0ffee",
+      oauthAccount: {
+        accountUuid: "11111111-2222-3333-4444-555555555555",
+        emailAddress: "owner@example.com",
+        organizationName: "Example Org",
+      },
+    }),
+  );
+  return { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "max" }) };
+}
+
 async function setup(opts: { signInAfter?: number; primary?: Record<string, unknown> } = {}) {
   env = await makeDaemonEnv();
   const base = tempDir("volleyd-claude-");
@@ -37,7 +56,13 @@ async function setup(opts: { signInAfter?: number; primary?: Record<string, unkn
   const primaryJson = join(base, ".claude.json");
   mkdirSync(join(primary, "agents"), { recursive: true });
   writeFileSync(join(primary, "CLAUDE.md"), "# rules\n");
-  writeFileSync(primaryJson, JSON.stringify({ mcpServers: { volley: { env: { K: "secret" } } } }));
+  writeFileSync(
+    primaryJson,
+    JSON.stringify({
+      oauthAccount: { emailAddress: "me@example.com", organizationName: "Home" },
+      mcpServers: { volley: { env: { K: "secret" } } },
+    }),
+  );
   let polls = 0;
   const fx = fakeExec()
     .on(["tmux", "new-session"], (argv) => {
@@ -48,7 +73,7 @@ async function setup(opts: { signInAfter?: number; primary?: Record<string, unkn
       o.env?.CLAUDE_CONFIG_DIR === undefined
         ? { stdout: JSON.stringify(opts.primary ?? PRIMARY_STATUS) }
         : ++polls >= (opts.signInAfter ?? 3)
-          ? { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "max" }) }
+          ? signedInAs(o.env.CLAUDE_CONFIG_DIR as string)
           : { code: 1, stdout: JSON.stringify({ loggedIn: false }) },
     );
   // The sign-in's poll interval and timeout run on the daemon's clock: polls happen as it moves.
@@ -101,6 +126,13 @@ describe("claude_* control ops", () => {
       // journal entry, so wait for it there.
       await eventually(() => t.seen.some((e) => e.type === "claude_signin_done"));
       expect(t.seen.map((e) => e.type)).toEqual(["claude_signin_url", "claude_signin_done"]);
+      expect(t.seen.at(-1)?.payload).toEqual({
+        type: "claude_signin_done",
+        acct: "work",
+        plan: "max",
+        email: "owner@example.com",
+        org: "Example Org",
+      });
       // non-retained: nothing left on the topic
       expect(await env.retained("volley/_system/claude/work/signin")).toBeNull();
 
@@ -109,6 +141,8 @@ describe("claude_* control ops", () => {
       expect(accounts[0]).toMatchObject({
         id: "work",
         plan: "max",
+        email: "owner@example.com",
+        org: "Example Org",
         signin: { state: "signed_in" },
       });
 
@@ -123,6 +157,9 @@ describe("claude_* control ops", () => {
       const journal = readFileSync(join(env.home, "waves", "_system", "journal.jsonl"), "utf-8");
       expect(journal).not.toContain("oauth/authorize");
       expect(journal).not.toContain("secret");
+      // The login's identity lives in the registry and the retained records, never the journal.
+      expect(journal).not.toContain("@example.com");
+      expect(journal).not.toContain("Example Org");
     } finally {
       await t.client.close();
       await t.watcher.disconnect();
@@ -148,11 +185,14 @@ describe("claude_* control ops", () => {
     }
   });
 
-  it("claude_account_add refuses another machine and a duplicate", async () => {
+  it("claude_account_add refuses a machine that is not paired, and a duplicate", async () => {
     const t = await setup();
     try {
       const far = await t.client.request("claude_account_add", { label: "x", machine: "studio" });
       expect(far).toMatchObject({ ok: false, error: expect.stringMatching(/studio/) });
+      expect(
+        (await t.client.request("claude_accounts", {})).result as { accounts: unknown[] },
+      ).toMatchObject({ accounts: [] });
       await t.client.request("claude_account_add", { label: "dup" });
       const again = await t.client.request("claude_account_add", { label: "dup" });
       expect(again).toMatchObject({ ok: false, error: expect.stringMatching(/already exists/) });
@@ -220,7 +260,11 @@ describe("claude_* control ops", () => {
     try {
       const list = await t.client.request("claude_accounts", {});
       expect(list.ok).toBe(true);
-      expect((list.result as { primary?: unknown }).primary).toEqual({ plan: "pro" });
+      expect((list.result as { primary?: unknown }).primary).toEqual({
+        plan: "pro",
+        email: "me@example.com",
+        org: "Home",
+      });
       // Asked of Claude Code's default profile: no CLAUDE_CONFIG_DIR.
       const asked = t.fx.calls.filter((c) => c.argv.join(" ") === "claude auth status");
       expect(asked.map((c) => c.opts.env?.CLAUDE_CONFIG_DIR)).toEqual([undefined]);
@@ -251,7 +295,14 @@ describe("claude_* control ops", () => {
         record = env?.payload ?? null;
         return record !== null;
       });
-      expect(record).toMatchObject({ account: "primary", plan: "pro", five_hour: { pct: 12 } });
+      expect(record).toMatchObject({
+        account: "primary",
+        plan: "pro",
+        email: "me@example.com",
+        org: "Home",
+        five_hour: { pct: 12 },
+      });
+      expect(schemaErrors("claude-account.schema.json", await t.reader("primary"))).toEqual([]);
     } finally {
       await t.client.close();
       await t.watcher.disconnect();
@@ -259,14 +310,15 @@ describe("claude_* control ops", () => {
   });
 
   it.each([
-    ["not logged in", { loggedIn: false, subscriptionType: "max" }],
-    ["logged in without a plan", { loggedIn: true }],
-  ])("a primary %s: claude_accounts claims no plan", async (_, primary) => {
+    ["not logged in", { loggedIn: false, subscriptionType: "max" }, {}],
+    ["logged in without a plan", { loggedIn: true }, { email: "me@example.com", org: "Home" }],
+  ])("a primary %s: claude_accounts claims no plan", async (_, primary, identity) => {
     const t = await setup({ primary });
     try {
       const list = await t.client.request("claude_accounts", {});
       expect(list.ok).toBe(true);
-      expect((list.result as { primary?: unknown }).primary).toEqual({});
+      // A signed-out primary has no identity either, whatever its .claude.json still says.
+      expect((list.result as { primary?: unknown }).primary).toEqual(identity);
     } finally {
       await t.client.close();
       await t.watcher.disconnect();
@@ -347,6 +399,60 @@ describe("claude_signin for a paired machine (primary@<name>)", () => {
     }
   });
 
+  it("claude_accounts lists every machine record's Claude login, with its identity", async () => {
+    const t = await remoteSetup();
+    const box = new VolleyBroker();
+    await box.connect({ url: env.broker.url, agentId: "box-a" });
+    try {
+      await box.publish(
+        machineTopic("box-a"),
+        JSON.stringify(
+          buildEnvelope({
+            agentId: "box-a",
+            parentId: null,
+            channel: MACHINE_CHANNEL,
+            type: "machine",
+            payload: {
+              name: "box-a",
+              os: "linux",
+              cores: 8,
+              tunnel: "up",
+              load: [0.1, 0.1, 0.1],
+              agents: 0,
+              auth: {
+                gh: "ok",
+                claude: "signed_in",
+                trust: "ok",
+                claude_plan: "max",
+                claude_email: "owner@example.com",
+                claude_org: "Example Org",
+              },
+              last_seen: new Date().toISOString(),
+            },
+          }),
+        ),
+        { qos: 1, retain: true },
+      );
+      let machines: Record<string, unknown>[] = [];
+      await eventually(async () => {
+        const list = await t.client.request("claude_accounts", {});
+        machines = (list.result as { machines: Record<string, unknown>[] }).machines;
+        return machines.some((m) => m.name === "box-a");
+      });
+      expect(machines.find((m) => m.name === "box-a")).toEqual({
+        name: "box-a",
+        claude: "signed_in",
+        plan: "max",
+        email: "owner@example.com",
+        org: "Example Org",
+        tunnel: "up",
+      });
+    } finally {
+      await box.disconnect();
+      await t.close();
+    }
+  });
+
   it("claude_accounts shows a waiting paired-machine sign-in to a late client", async () => {
     const t = await remoteSetup();
     try {
@@ -391,6 +497,272 @@ describe("claude_signin for a paired machine (primary@<name>)", () => {
       await t.daemon.stop();
       expect(t.b.forwards[0]?.stopped).toBe(true);
       expect(t.b.box.session).toBe(false);
+    } finally {
+      await t.close();
+    }
+  });
+});
+
+describe("claude_account_add on a paired machine (<acct>@<name>)", () => {
+  const HOSTS =
+    "hosts:\n  peer-a:\n    target: dev@peer-a\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n";
+  const PROFILE = "/home/dev/.volley/claude/work";
+  const CLAUDE_JSON = JSON.stringify({
+    userID: "c0ffee",
+    oauthAccount: {
+      accountUuid: "11111111-2222-3333-4444-555555555555",
+      emailAddress: "owner@example.com",
+      organizationName: "Example Org",
+    },
+  });
+
+  async function peerSetup(o: SigninBoxOptions = {}) {
+    env = await makeDaemonEnv();
+    writeFileSync(join(env.home, "config.yaml"), HOSTS);
+    const b = fakeSigninBox({ files: { [`${PROFILE}/.claude.json`]: CLAUDE_JSON }, ...o });
+    const root = join(tempDir("volleyd-claude-"), "claude");
+    const daemon = await env.start({
+      claude: { root, exec: b.exec, signinPollMs: 20, signinTimeoutMs: 5000, forwardSettleMs: 20 },
+      spawner: { remoteExec: b.exec },
+    });
+    const waits = journalWait(env.home, () => daemon);
+    const client = await ControlClient.connect(env.broker.url, NS);
+    const watcher = new VolleyBroker();
+    await watcher.connect({ url: env.broker.url, agentId: "signin-watcher" });
+    const seen: { topic: string; type: string; payload: Record<string, unknown> }[] = [];
+    await watcher.subscribeStream("volley/_system/claude/+/signin", ({ topic, payload }) => {
+      const e = parseEnvelope(payload);
+      if (e !== null)
+        seen.push({ topic, type: e.type, payload: e.payload as Record<string, unknown> });
+    });
+    const accounts = async () =>
+      ((await client.request("claude_accounts", {})).result as {
+        accounts: Record<string, unknown>[];
+        remote_signins: Record<string, unknown>[];
+      }) ?? { accounts: [], remote_signins: [] };
+    const close = async () => {
+      await client.close();
+      await watcher.disconnect();
+    };
+    return { b, root, daemon, waits, client, seen, accounts, close };
+  }
+
+  it("creates the profile there and answers with its forwarded sign-in under work@peer-a", async () => {
+    const t = await peerSetup();
+    try {
+      const r = await t.client.request("claude_account_add", {
+        label: "Work",
+        machine: "peer-a",
+        by: "owner-1",
+      });
+      expect(r.ok).toBe(true);
+      expect(r.result).toMatchObject({
+        account: { id: "work", label: "Work", machine: "peer-a" },
+        acct: "work@peer-a",
+        url: SIGNIN_CALLBACK,
+        flow: "browser_callback",
+        attach: "ssh dev@peer-a -t tmux attach -t volley-signin-work",
+        topic: "volley/_system/claude/work@peer-a/signin",
+      });
+      // The profile lives on the box, not here.
+      expect(t.b.ran("mkdir")).toEqual([["mkdir", "-p", "/home/dev/.volley/signin/work", PROFILE]]);
+      expect(t.b.ran("tmux", "new-session")[0]?.[4]).toBe("volley-signin-work");
+      const { accounts, remote_signins } = await t.accounts();
+      expect(accounts).toEqual([
+        expect.objectContaining({
+          id: "work",
+          machine: "peer-a",
+          dir: PROFILE,
+          signin: expect.objectContaining({ state: "pending", url: SIGNIN_CALLBACK }),
+        }),
+      ]);
+      expect(remote_signins).toEqual([
+        expect.objectContaining({ acct: "work@peer-a", state: "pending" }),
+      ]);
+      expect(existsSync(join(t.root, "work"))).toBe(false);
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("done flips the row to signed_in with plan, email and org; the journal never holds the URL or the e-mail", async () => {
+    const t = await peerSetup({ signInAfter: 3 });
+    try {
+      const done = t.waits.event("_system", "claude_signin_done");
+      await t.client.request("claude_account_add", { label: "Work", machine: "peer-a" });
+      await done;
+      await eventually(() => t.seen.some((e) => e.type === "claude_signin_done"));
+      expect(t.seen.map((e) => [e.topic, e.type])).toEqual([
+        ["volley/_system/claude/work@peer-a/signin", "claude_signin_url"],
+        ["volley/_system/claude/work@peer-a/signin", "claude_signin_done"],
+      ]);
+      expect(t.seen.at(-1)?.payload).toEqual({
+        type: "claude_signin_done",
+        acct: "work@peer-a",
+        plan: "max",
+        email: "owner@example.com",
+        org: "Example Org",
+      });
+      const { accounts } = await t.accounts();
+      expect(accounts[0]).toMatchObject({
+        id: "work",
+        machine: "peer-a",
+        plan: "max",
+        email: "owner@example.com",
+        org: "Example Org",
+        signin: { state: "signed_in" },
+      });
+      // Every poll ran under the profile.
+      const polls = t.b.remoteSteps().filter((s) => s.argv[0] === "claude");
+      expect(polls.every((s) => s.env?.CLAUDE_CONFIG_DIR === PROFILE)).toBe(true);
+      const system = readJournalFile(join(env.home, "waves", "_system", "journal.jsonl"));
+      expect(system.find((e) => e.type === "claude_account_added")?.data).toMatchObject({
+        acct: "work",
+        machine: "peer-a",
+      });
+      // the profile's dir there is recorded: the launch fence admits exactly it for peer-a
+      expect(readRegistry(t.root).accounts[0]?.dir).toBe(PROFILE);
+      const journal = readFileSync(join(env.home, "waves", "_system", "journal.jsonl"), "utf-8");
+      expect(journal).not.toContain("oauth/authorize");
+      expect(journal).not.toContain("@example.com");
+      expect(journal).not.toContain("Example Org");
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("claude_balance ranks each machine's signed-in accounts and names the pick per family", async () => {
+    const t = await peerSetup({ signInAfter: 3 });
+    try {
+      const done = t.waits.event("_system", "claude_signin_done");
+      await t.client.request("claude_account_add", { label: "Work", machine: "peer-a" });
+      await done;
+      const all = await t.client.request("claude_balance", {});
+      expect(all.ok).toBe(true);
+      const { machines } = all.result as {
+        machines: {
+          name: string;
+          candidates: { account: string }[];
+          picks: Record<string, string>;
+        }[];
+      };
+      expect(machines.map((m) => m.name)).toEqual(["local", "peer-a"]);
+      expect(machines[0]?.candidates.map((c) => c.account)).toEqual(["primary"]);
+      // no usage yet: the signed-in profile is offered before the machine's own login
+      expect(machines[1]?.candidates.map((c) => c.account)).toEqual([
+        "work@peer-a",
+        "primary@peer-a",
+      ]);
+      expect(machines[1]?.picks).toEqual({
+        fable: "work@peer-a",
+        opus: "work@peer-a",
+        sonnet: "work@peer-a",
+        haiku: "work@peer-a",
+      });
+      const one = await t.client.request("claude_balance", {
+        model: "claude-fable-1",
+        machine: "peer-a",
+      });
+      expect(one.result).toMatchObject({
+        model: "claude-fable-1",
+        machines: [{ name: "peer-a", picks: { model: "work@peer-a" } }],
+      });
+      expect(await t.client.request("claude_balance", { machine: "nope" })).toMatchObject({
+        ok: false,
+      });
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("claude_signin of work@peer-a signs the same profile in again; an unknown one is refused", async () => {
+    const t = await peerSetup({ signInAfter: 10_000 });
+    try {
+      await t.client.request("claude_account_add", { label: "Work", machine: "peer-a" });
+      const again = await t.client.request("claude_signin", { acct: "work@peer-a" });
+      expect(again).toMatchObject({
+        ok: true,
+        result: {
+          acct: "work@peer-a",
+          attach: "ssh dev@peer-a -t tmux attach -t volley-signin-work",
+        },
+      });
+      const other = await t.client.request("claude_signin", { acct: "home@peer-a" });
+      expect(other).toMatchObject({ ok: false, error: expect.stringMatching(/home/) });
+      const wrongBox = await t.client.request("claude_signin", { acct: "work@peer-b" });
+      expect(wrongBox.ok).toBe(false);
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("claude_signin of a signed-in work@peer-a is refused with the remote logout remedy", async () => {
+    const t = await peerSetup({ signInAfter: 3 });
+    try {
+      const done = t.waits.event("_system", "claude_signin_done");
+      await t.client.request("claude_account_add", { label: "Work", machine: "peer-a" });
+      await done;
+      const before = t.b.box.starts;
+      const again = await t.client.request("claude_signin", { acct: "work@peer-a" });
+      expect(again.ok).toBe(false);
+      expect(again.error).toMatch(/already signed in/);
+      expect(again.error).toContain(
+        `ssh dev@peer-a CLAUDE_CONFIG_DIR=${PROFILE} claude auth logout`,
+      );
+      expect(t.b.box.starts).toBe(before);
+      const status = t.b.remoteSteps().filter((s) => s.argv[0] === "claude");
+      expect(status.at(-1)).toMatchObject({ env: { CLAUDE_CONFIG_DIR: PROFILE } });
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("a remote profile's row omits dir until the peer's HOME is known", async () => {
+    const t = await peerSetup();
+    try {
+      // A profile recorded before this daemon learned the peer's HOME (a restart).
+      addAccount(t.root, { label: "Work", machine: "peer-a" }, "2026-10-21T00:00:00.000Z");
+      const row = (await t.accounts()).accounts.find((a) => a.id === "work");
+      expect(row).toMatchObject({ id: "work", machine: "peer-a" });
+      expect(row).not.toHaveProperty("dir");
+      expect(t.b.steps()).toEqual([]);
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("a label this machine already holds is refused on a peer; the Desk's '<label> (<peer>)' is not", async () => {
+    // The Desk's Add to another machine… prefills `Work (peer-a)`: ids are unique across machines.
+    const t = await peerSetup();
+    try {
+      addAccount(t.root, { label: "Work" }, "2026-10-21T00:00:00.000Z");
+      const same = await t.client.request("claude_account_add", {
+        label: "Work",
+        machine: "peer-a",
+      });
+      expect(same.ok).toBe(false);
+      expect(same.error).toMatch(/already exists/);
+      const r = await t.client.request("claude_account_add", {
+        label: "Work (peer-a)",
+        machine: "peer-a",
+      });
+      expect(r.ok).toBe(true);
+      expect(r.result).toMatchObject({
+        account: { id: "work-peer-a", label: "Work (peer-a)", machine: "peer-a" },
+        acct: "work-peer-a@peer-a",
+      });
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("an unknown machine is refused with the host error and no registry entry", async () => {
+    const t = await peerSetup();
+    try {
+      const r = await t.client.request("claude_account_add", { label: "Work", machine: "peer-z" });
+      expect(r).toMatchObject({ ok: false, error: expect.stringContaining("peer-z") });
+      expect((await t.accounts()).accounts).toEqual([]);
+      expect(t.b.steps()).toEqual([]);
     } finally {
       await t.close();
     }

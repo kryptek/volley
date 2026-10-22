@@ -1,5 +1,10 @@
-import { basename } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
+import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import addFormats from "ajv-formats";
+import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, describe, expect, it } from "vitest";
+import { buildEnvelope } from "volley-mcp/envelope";
 import { makeBufferIO } from "../../src/io";
 import {
   type DoctorDeps,
@@ -8,8 +13,10 @@ import {
   doctor,
   normalizeOrigin,
   runDoctor,
+  scrub,
 } from "../../src/peer/doctor";
 import { VM_STAT_MAC_16GB } from "../fixtures/vm-stat";
+import { FAKE_TOKEN, storeLogins, usageEndpoint } from "../helpers/fake-logins";
 import {
   type FakeMachineOptions,
   type FakePeerMachine,
@@ -521,6 +528,42 @@ describe("volley peer doctor: GitHub and Claude", () => {
     expect((await report(machine({ claudeStatus: "something else" }))).auth.claude).toBe("unknown");
   });
 
+  it("a signed-in profile's identity comes from ~/.claude.json: claude_email and claude_org only", async () => {
+    const claudeJson = {
+      userID: "c0ffee",
+      oauthAccount: {
+        accountUuid: "11111111-2222-3333-4444-555555555555",
+        emailAddress: "Owner@Example.com",
+        organizationName: "Example Org",
+      },
+    };
+    const m = machine({ claudeStatus: { loggedIn: true, subscriptionType: "max" }, claudeJson });
+    const r = await report(m);
+    // scrub leaves an e-mail alone; nothing else of the file travels.
+    expect(r.auth).toMatchObject({
+      claude: "signed_in",
+      claude_email: "owner@example.com",
+      claude_org: "Example Org",
+    });
+    const text = JSON.stringify(r);
+    for (const key of ["c0ffee", "11111111-2222"]) expect(text).not.toContain(key);
+    box?.cleanup();
+    const out = await report(
+      machine({ claudeStatus: { loggedIn: false }, claudeCode: 1, claudeJson }),
+    );
+    expect(out.auth.claude_email).toBeUndefined();
+    expect(out.auth.claude_org).toBeUndefined();
+    box?.cleanup();
+    const bad = await report(
+      machine({
+        claudeStatus: { loggedIn: true },
+        claudeJson: { oauthAccount: { emailAddress: 42, organizationName: "" } },
+      }),
+    );
+    expect(bad.auth).not.toHaveProperty("claude_email");
+    expect(bad.auth).not.toHaveProperty("claude_org");
+  });
+
   it("folder trust comes from the box's ~/.claude.json; a parent folder counts", async () => {
     const untrusted = await report(machine());
     expect(untrusted.auth.trust).toBe("missing");
@@ -641,5 +684,112 @@ describe("volley peer doctor: machine and secrets", () => {
       expect(c.id).toMatch(/^[a-z0-9][a-z0-9_.-]{0,62}$/);
       expect(c.detail.length).toBeLessThanOrEqual(200);
     }
+  });
+});
+
+describe("volley peer doctor: Claude usage", () => {
+  const NOW = Date.parse("2026-10-19T09:00:00.000Z");
+  const SCHEMAS = fileURLToPath(new URL("../../../../spec/schemas/", import.meta.url));
+
+  function validMachine(payload: Record<string, unknown>) {
+    const ajv = new Ajv2020({ allErrors: true, strict: false });
+    addFormats(ajv);
+    for (const f of readdirSync(SCHEMAS).filter((f) => f.endsWith(".schema.json"))) {
+      ajv.addSchema(JSON.parse(readFileSync(join(SCHEMAS, f), "utf-8")));
+    }
+    const validate = ajv.getSchema("https://volley.systems/schemas/0.1/machine.schema.json");
+    const env = buildEnvelope({
+      agentId: "peer-a",
+      parentId: null,
+      channel: "_system/machines",
+      type: "machine",
+      payload,
+    });
+    validate?.(env);
+    return validate?.errors ?? [];
+  }
+
+  it("--json carries claude_logins for the default login and a profile; the record validates", async () => {
+    const m = machine({ trusted: true });
+    storeLogins(m.home, { default: NOW + 3_600_000, work: NOW + 3_600_000 });
+    const api = usageEndpoint();
+    const r = await report(m, {});
+    expect(r).not.toHaveProperty("claude_logins");
+    const io = makeBufferIO();
+    await doctor(io, m.deps({ fetch: api.fetch, env: { USER: "dev" } }), {
+      repo: m.repoPath,
+      json: true,
+    });
+    const out = JSON.parse(io.readStdout()) as DoctorReport;
+    const reading = {
+      read_at: "2026-10-19T09:00:00.000Z",
+      five_hour: { pct: 37, resets_at: "2026-10-19T12:00:00.000Z" },
+      weekly: { pct: 56, resets_at: "2026-10-24T00:00:00.000Z" },
+      model_weekly: { fable: { pct: 12, resets_at: "2026-10-24T00:00:00.000Z" } },
+    };
+    expect(out.claude_logins).toEqual([
+      { profile: "default", state: "ok", attempted_at: "2026-10-19T09:00:00.000Z", reading },
+      { profile: "work", state: "ok", attempted_at: "2026-10-19T09:00:00.000Z", reading },
+    ]);
+    // The claude version the doctor found is the User-Agent.
+    expect(api.requests[0]?.["User-Agent"]).toBe("claude-code/2.0.14");
+    const text = JSON.stringify(out);
+    expect(text).not.toContain(FAKE_TOKEN);
+    expect(text).not.toContain(join(m.home, ".volley", "claude"));
+    expect(
+      validMachine({
+        name: "peer-a",
+        os: "linux",
+        cores: 8,
+        tunnel: "up",
+        load: [0, 0, 0],
+        agents: 0,
+        claude_logins: out.claude_logins,
+        last_seen: "2026-10-19T09:00:00.000Z",
+      }),
+    ).toEqual([]);
+  });
+
+  it("the human output has one usage line per login: ok with its age, expired with why", async () => {
+    const m = machine({ trusted: true });
+    storeLogins(m.home, { default: NOW + 3_600_000, work: NOW - 1 });
+    const api = usageEndpoint();
+    await run(m, {}, { fetch: api.fetch });
+    // Two minutes later the memo answers (no call) and the reading is two minutes old.
+    const later = await run(m, {}, { fetch: api.fetch, now: () => new Date(NOW + 2 * 60_000) });
+    expect(api.requests).toHaveLength(1);
+    expect(later.stdout).toContain(
+      "Claude usage: default 5h 37% · 7d 56% · Fable 12% (read 2 min ago)\n",
+    );
+    expect(later.stdout).toContain(
+      "Claude usage: work — (login expired; Claude Code renews it on its next request)\n",
+    );
+  });
+
+  it("a probe that fails with the token in its error leaks it nowhere", async () => {
+    const m = machine({ trusted: true });
+    storeLogins(m.home, { default: NOW + 86_400_000 });
+    const api = usageEndpoint({ fail: (h) => new Error(`boom ${h.Authorization}`) });
+    for (const json of [true, false]) {
+      const out = await run(
+        m,
+        { json },
+        { fetch: api.fetch, now: () => new Date(NOW + (json ? 0 : 3_600_000)) },
+      );
+      expect(`${out.stdout}${out.stderr}`).not.toContain(FAKE_TOKEN);
+    }
+    expect(api.requests).toHaveLength(2);
+    const memo = readFileSync(join(m.home, ".volley", "claude-usage", "default.json"), "utf-8");
+    expect(memo).not.toContain(FAKE_TOKEN);
+    expect(JSON.parse(memo)).toMatchObject({ state: "error" });
+  });
+
+  it("scrub still redacts an sk-ant token anywhere in a report with logins", () => {
+    const token = "sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    const r = scrub({
+      claude_logins: [{ profile: "default", state: "error", note: `x ${token}` }],
+    });
+    expect(JSON.stringify(r)).not.toContain(token);
+    expect(r.claude_logins[0]?.note).toBe("x [redacted]");
   });
 });

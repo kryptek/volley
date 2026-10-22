@@ -4,7 +4,8 @@ import type { ExecFn, ExecResult } from "../exec";
 import { type RemoteStep, mintSigninForwardToken, sealRemoteSigninScript } from "../fence";
 import type { RemoteHost } from "../hosts/ssh-tmux";
 import { type Forward, openForward } from "./forward";
-import { PRIMARY_ACCOUNT } from "./profiles";
+import { loginIdentity } from "./identity";
+import { PRIMARY_ACCOUNT, isValidAccountId } from "./profiles";
 import {
   SUPERSEDED,
   type SigninEvent,
@@ -24,22 +25,27 @@ import {
 
 /**
  * Signing a paired machine's own default profile (`primary@<name>`, SPEC §4.6.11) in to Claude,
- * from the Desk: Claude Code's own `claude auth login` runs on the box, in a detached tmux
- * session, as the local sign-in does (signin.ts), every step a fenced REMOTE step over
- * `SshTmuxHost.run`:
+ * from the Desk, or a profile the supervisor created there (`<acct>@<name>`, `profile: true`):
+ * Claude Code's own `claude auth login` runs on the box, in a detached tmux session, as the local
+ * sign-in does (signin.ts), every step a fenced REMOTE step over `SshTmuxHost.run`:
  *
- *   start    → printenv HOME; mkdir -p <home>/.volley/signin/primary; the sealed signin.sh and
+ *   start    → printenv HOME; mkdir -p <home>/.volley/signin/<acct>; the sealed signin.sh and
  *              browser.sh (no CLAUDE_CONFIG_DIR: the box's default profile), an empty url file;
- *              tmux new-session -d -s volley-signin-primary -c <dir> 'bash signin.sh'
+ *              tmux new-session -d -s volley-signin-<acct> -c <dir> 'bash signin.sh'.
+ *              A profile also gets mkdir -p + chmod 700 <home>/.volley/claude/<acct>, and its
+ *              signin.sh exports that dir as CLAUDE_CONFIG_DIR.
  *   the URL  → `cat <dir>/url` (the helper's localhost-callback URL) and the session's
  *              `capture-pane` (the printed manual-code URL), every poll until one is known.
  *              For the callback URL's port p the supervisor holds `ssh -N -L 127.0.0.1:p:
  *              127.0.0.1:p <target>` (forward.ts, with the token minted here and nowhere else),
  *              then publishes `claude_signin_url { url, flow: browser_callback, manual_url,
- *              attach: "ssh <target> -t tmux attach -t volley-signin-primary" }`. A port taken on
+ *              attach: "ssh <target> -t tmux attach -t volley-signin-<acct>" }`. A port taken on
  *              this machine restarts the sign-in once (Claude Code picks a fresh port), then
  *              fails naming the port.
- *   done     → the box's `claude auth status` reports loggedIn: `claude_signin_done { plan }`.
+ *   done     → the box's `claude auth status` (a profile's under its CLAUDE_CONFIG_DIR) reports
+ *              loggedIn: `claude_signin_done { plan }`; a profile's also carries the identity in
+ *              its `.claude.json` (`cat .claude.json` in the profile dir: `{ email?, org? }`, no
+ *              other key of the file).
  *   failed   → the login exited, the timeout passed, ssh or tmux failed (no tmux: the command to
  *              run there by hand).
  *   Every end kills the session (no consent: it holds no agent's work) and the forward; a
@@ -50,25 +56,30 @@ import {
  * owner.
  */
 
-/** A paired machine's own Claude login: `primary@<name>` (SPEC §4.6.12 naming). */
-export const remoteAccount = (name: string) => `${PRIMARY_ACCOUNT}@${name}`;
+/**
+ * A profile on a paired machine: `<acct>@<name>` (SPEC §4.6.12 naming); `primary@<name>` is the
+ * box's own default profile.
+ */
+export const remoteAccount = (acct: string, name: string) => `${acct}@${name}`;
 
-/** `primary@<name>` → `<name>`; null for any other account id. */
-export function remoteAccountHost(acct: string): string | null {
-  const prefix = `${PRIMARY_ACCOUNT}@`;
-  return acct.startsWith(prefix) && acct.length > prefix.length ? acct.slice(prefix.length) : null;
+/** `<acct>@<name>` → its halves (each in the id grammar); null for any other account id. */
+export function remoteAccountHost(id: string): { acct: string; name: string } | null {
+  const [acct, name, ...rest] = id.split("@");
+  if (acct === undefined || name === undefined || rest.length > 0) return null;
+  return isValidAccountId(acct) && isValidAccountId(name) ? { acct, name } : null;
 }
 
-/** The sign-in's tmux session on the box. */
-export const REMOTE_SIGNIN_SESSION = signinSession(PRIMARY_ACCOUNT);
+/** `<home>/.volley/signin/<acct>`: the session's cwd on the box. */
+export const remoteSigninDir = (home: string, acct: string) =>
+  posix.join(home, ".volley", "signin", acct);
 
-/** `<home>/.volley/signin/primary`: the session's cwd on the box. */
-export const remoteSigninDir = (home: string) =>
-  posix.join(home, ".volley", "signin", PRIMARY_ACCOUNT);
+/** `<home>/.volley/claude/<acct>`: a profile the supervisor created on the box. */
+export const remoteProfileDir = (home: string, acct: string) =>
+  posix.join(home, ".volley", "claude", acct);
 
 /** The one-line command that reaches the sign-in terminal on the box. */
-export const remoteAttach = (target: string) =>
-  `ssh ${target} -t tmux attach -t ${REMOTE_SIGNIN_SESSION}`;
+export const remoteAttach = (target: string, acct: string = PRIMARY_ACCOUNT) =>
+  `ssh ${target} -t tmux attach -t ${signinSession(acct)}`;
 
 /** What the owner runs on a box without tmux. */
 export const remoteManualCommand = (target: string) => `ssh ${target} -t claude auth login`;
@@ -99,6 +110,15 @@ export interface RemoteSigninDeps {
   reservedPorts: readonly number[];
   /** Stops the sign-in: `SUPERSEDED` (a newer one) or the daemon stopping. */
   signal?: AbortSignal;
+  /** The profile on the box (default `primary`, the box's own default profile). */
+  acct?: string;
+  /**
+   * A profile the supervisor created there: `<home>/.volley/claude/<acct>` as its
+   * CLAUDE_CONFIG_DIR. Without it, the box's default profile (no CLAUDE_CONFIG_DIR).
+   */
+  profile?: true;
+  /** The box's HOME, once the sign-in learned it (`printenv HOME`). */
+  onHome?: (home: string) => void;
 }
 
 const b64 = (s: string) => Buffer.from(s, "utf-8").toString("base64");
@@ -118,10 +138,11 @@ const noTmux = (r: ExecResult) => r.code === 127 || /tmux: (?:command )?not foun
 
 /** Run one remote sign-in to its end; resolves with the terminal event (also published). */
 export async function runRemoteSignin(d: RemoteSigninDeps): Promise<SigninEvent> {
-  const acct = remoteAccount(d.host.name);
+  const id = d.acct ?? PRIMARY_ACCOUNT;
+  const acct = remoteAccount(id, d.host.name);
   const target = d.host.spec.target;
-  const session = REMOTE_SIGNIN_SESSION;
-  const attach = remoteAttach(target);
+  const session = signinSession(id);
+  const attach = remoteAttach(target, id);
   const run = (steps: RemoteStep[], opts: Parameters<typeof d.host.run>[1] = {}) =>
     d.host.run(steps, opts).catch(() => null);
   const aborted = () => d.signal?.aborted === true;
@@ -150,17 +171,36 @@ export async function runRemoteSignin(d: RemoteSigninDeps): Promise<SigninEvent>
     return e;
   };
   const fail = (reason: string) => finish({ type: "claude_signin_failed", acct, reason });
+  /** A profile's login identity, the T0 way: its `.claude.json`'s email and org, nothing else. */
+  const identity = async (profileDir: string) => {
+    const r = await run([{ argv: ["cat", ".claude.json"], cwd: profileDir }]);
+    if (r?.code !== 0) return {};
+    try {
+      const json: unknown = JSON.parse(r.stdout);
+      return typeof json === "object" && json !== null && !Array.isArray(json)
+        ? loginIdentity(json as Record<string, unknown>)
+        : {};
+    } catch {
+      return {};
+    }
+  };
 
   const home = await run([{ argv: ["printenv", "HOME"] }]);
   const homeDir = home?.code === 0 ? home.stdout.trim() : "";
   if (!homeDir.startsWith("/") || homeDir.includes("\n"))
     return fail(`could not reach ${target} over ssh: ${why(home)}`);
-  const dir = remoteSigninDir(homeDir);
-  const script = renderSigninScript({ signinDir: dir });
+  d.onHome?.(homeDir);
+  const dir = remoteSigninDir(homeDir, id);
+  const profileDir = d.profile === true ? remoteProfileDir(homeDir, id) : null;
+  const script = renderSigninScript(
+    profileDir !== null ? { configDir: profileDir, signinDir: dir } : { signinDir: dir },
+  );
   const signin = sealRemoteSigninScript(dir, script);
   const urlFile = posix.join(dir, SIGNIN_URL_FILE);
   const wrote = await run([
-    { argv: ["mkdir", "-p", dir] },
+    ...(profileDir !== null
+      ? [{ argv: ["mkdir", "-p", dir, profileDir] }, { argv: ["chmod", "700", profileDir] }]
+      : [{ argv: ["mkdir", "-p", dir] }]),
     write(posix.join(dir, BROWSER_HELPER), renderBrowserHelper(dir)),
     write(posix.join(dir, SIGNIN_SCRIPT), script),
     { argv: ["chmod", "700", posix.join(dir, BROWSER_HELPER), posix.join(dir, SIGNIN_SCRIPT)] },
@@ -249,9 +289,15 @@ export async function runRemoteSignin(d: RemoteSigninDeps): Promise<SigninEvent>
         });
       }
     }
-    const status = await run([{ argv: ["claude", "auth", "status"] }], {
-      timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms,
-    });
+    const status = await run(
+      [
+        {
+          argv: ["claude", "auth", "status"],
+          ...(profileDir !== null ? { env: { CLAUDE_CONFIG_DIR: profileDir } } : {}),
+        },
+      ],
+      { timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms },
+    );
     // Aborted during the round trip: the loop's top settles it.
     if (aborted()) continue;
     const s = status !== null ? parseAuthStatus(status.stdout) : null;
@@ -260,6 +306,7 @@ export async function runRemoteSignin(d: RemoteSigninDeps): Promise<SigninEvent>
         type: "claude_signin_done",
         acct,
         ...(s.plan !== undefined ? { plan: s.plan } : {}),
+        ...(profileDir !== null ? await identity(profileDir) : {}),
       });
     if ((await run([{ argv: ["tmux", "has-session", "-t", session] }]))?.code !== 0)
       return fail("claude auth login exited before the sign-in finished");

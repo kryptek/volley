@@ -36,6 +36,7 @@ export const DECISION_KINDS = [
   "pr_head_moved",
   "spawn_budget_exhausted",
   "account_limit",
+  "agent_account_limit",
   "machine_down",
   "merge_refused",
   "release_go",
@@ -73,6 +74,10 @@ export interface DecisionPayload {
   pct?: number;
   resets_at?: string | null;
   suggested?: string | null;
+  /** agent_account_limit: the agent, its role and the window at the warn level. */
+  agent_id?: string;
+  role?: string;
+  window?: string;
   /** machine_down: when the supervisor marked `host` down, and the wave's unfinished tasks there. */
   down_since?: string;
   tasks?: TaskId[];

@@ -5,8 +5,12 @@
  * broker account and the sections in three groups with coloured icon tiles;
  * the main pane shows the picked section (General, Sound, Appearance, Supervisor,
  * Claude accounts & usage, Broker accounts, Machines, Setup & Security,
- * About). Escape, the close button and a scrim click close it (Escape in a search box with a
- * query clears the query instead); focus moves in on open (and Tab stays
+ * About). A long section (Supervisor, Autopilot, Sound, Claude accounts) drills
+ * into groups (`GroupNav`): its list of group rows, then a group's page under a
+ * `‹ Section` back control; a search hit inside a group opens that group.
+ * Escape, the close button and a scrim click close it (Escape in a search box with a
+ * query clears the query instead, and Escape on a group's page goes back to the
+ * list); focus moves in on open (and Tab stays
  * inside) and goes back to the opener on close. It is built like a Desk
  * window (D10): the `win-depth` lift and gradient body, and a `win-edge`.
  */
@@ -27,17 +31,20 @@ import { Autopilot } from "./Autopilot";
 import { BrokerAccounts } from "./BrokerAccounts";
 import { ClaudeAccounts, type ClaudeAccountsProps } from "./ClaudeAccounts";
 import { General } from "./General";
+import { useGroupNav } from "./GroupNav";
 import { Machines, type MachinesProps } from "./Machines";
 import { Setup, useAdminRole } from "./Setup";
 import { Sound, type SoundSectionProps } from "./Sound";
-import { Supervisor } from "./Supervisor";
+import { Supervisor, supervisorGroupOf } from "./Supervisor";
 import type { ConfigTransport } from "./configTransport";
 import { clearOnEscape } from "./primitives";
+import { sectionOfPath } from "./schemaRows";
 import {
   SECTION_GROUPS,
   type SectionDef,
   type SectionKey,
   accountRole,
+  groupOf,
   matchSections,
   sectionDef,
 } from "./sections";
@@ -50,6 +57,8 @@ export interface SettingsWindowProps {
   setNotify: SetNotify;
   /** Whether this browser has WebGL (`useWebGL`). */
   webgl: boolean;
+  /** Whether the Desk draws the lite surface (`useLiteSurface`). */
+  lite?: boolean;
   /** The Desk's broker identity; `null` when anonymous. */
   identity: string | null;
   demo: boolean;
@@ -66,7 +75,10 @@ export interface SettingsWindowProps {
   /** The section shown first; General by default. */
   initial?: SectionKey;
   /** Settings › Claude accounts & usage: the store's slices and volleyd's control channel. */
-  claude?: Pick<ClaudeAccountsProps, "accounts" | "signins" | "waves" | "control" | "onRegistry">;
+  claude?: Pick<
+    ClaudeAccountsProps,
+    "accounts" | "signins" | "waves" | "control" | "onRegistry" | "machines" | "localName" | "hosts"
+  >;
   /** Settings › Sound: the sound settings and the sound manager's theme loading and audition. */
   sound?: SoundSectionProps;
   /** Settings › Machines: the machine records and the pairing ops. */
@@ -125,14 +137,31 @@ export function SettingsWindow(p: SettingsWindowProps) {
   }, [initial, focusMachine, focusSeq]);
   /** A Supervisor row to bring into view (a machine card's local agents chip); seq: each click. */
   const [focusRow, setFocusRow] = useState<{ path: string; seq: number } | null>(null);
+  const dialog = useRef<HTMLDivElement>(null);
+  const nav = useGroupNav(dialog);
   const openSetting = (path: string) => {
     setSec("supervisor");
+    // The row's own page, so ConfigRows finds it; the row takes focus, not the page title.
+    nav.openGroup("supervisor", supervisorGroupOf(sectionOfPath(path)), false);
     setFocusRow((f) => ({ path, seq: (f?.seq ?? 0) + 1 }));
   };
   const [q, setQ] = useState("");
-  const dialog = useRef<HTMLDivElement>(null);
   const shown = matchSections(q);
   const cur = sectionDef(sec);
+  /** The open group's page, or null: the section's group list (or a section without groups). */
+  const open = cur.groups ? nav.openOf(sec) : null;
+  const openGroup = cur.groups?.find((g) => g.key === open);
+  /** What a grouped section takes: its open page, how to open one and the search's hit. */
+  const groupProps = {
+    group: open,
+    onOpenGroup: (g: string) => nav.openGroup(sec, g),
+    hit: groupOf(cur, q),
+  };
+  const pick = (s: SectionDef) => {
+    setSec(s.key);
+    const g = groupOf(s, q);
+    if (g) nav.openGroup(s.key, g, false);
+  };
   const ops = p.onboarding?.ops ?? null;
   // Asked only once an admin-only section is open: a non-admin's ask is never answered.
   const { admin: authAdmin, role } = useAdminRole(
@@ -169,7 +198,8 @@ export function SettingsWindow(p: SettingsWindowProps) {
           if (e.key !== "Escape") return;
           // Claimed, so the Desk's window-level Escape doesn't close the next dialog down too.
           e.preventDefault();
-          p.onClose();
+          if (openGroup) nav.back(sec);
+          else p.onClose();
         }}
       >
         <div className="ms-side">
@@ -213,7 +243,7 @@ export function SettingsWindow(p: SettingsWindowProps) {
                       <button
                         type="button"
                         className={sec === s.key ? "on" : ""}
-                        onClick={() => setSec(s.key)}
+                        onClick={() => pick(s)}
                         aria-current={sec === s.key ? "page" : undefined}
                       >
                         <Tile s={s} size={13} />
@@ -231,8 +261,24 @@ export function SettingsWindow(p: SettingsWindowProps) {
         </div>
         <div className="ms-main">
           <div className="ms-head">
-            <Tile s={cur} size={16} />
-            <h2>{cur.label}</h2>
+            {openGroup ? (
+              <>
+                <button
+                  type="button"
+                  className="ms-back"
+                  aria-label={`Back to ${cur.label}`}
+                  onClick={() => nav.back(sec)}
+                >
+                  <span aria-hidden="true">‹</span> {cur.label}
+                </button>
+                <h2 tabIndex={-1}>{openGroup.label}</h2>
+              </>
+            ) : (
+              <>
+                <Tile s={cur} size={16} />
+                <h2 tabIndex={-1}>{cur.label}</h2>
+              </>
+            )}
             <button
               type="button"
               className="icon-btn ms-close"
@@ -254,9 +300,14 @@ export function SettingsWindow(p: SettingsWindowProps) {
                 onOpenSound={() => setSec("sound")}
               />
             )}
-            {sec === "sound" && <Sound {...(p.sound ?? SOUND_OFF)} />}
+            {sec === "sound" && <Sound {...(p.sound ?? SOUND_OFF)} {...groupProps} />}
             {sec === "appearance" && (
-              <Appearance look={p.look} setLook={p.setLook} webgl={p.webgl} />
+              <Appearance
+                look={p.look}
+                setLook={p.setLook}
+                webgl={p.webgl}
+                lite={p.lite ?? false}
+              />
             )}
             {sec === "supervisor" && (
               <Supervisor
@@ -265,6 +316,7 @@ export function SettingsWindow(p: SettingsWindowProps) {
                 leases={p.leases ?? {}}
                 focus={focusRow?.path}
                 focusSeq={focusRow?.seq}
+                {...groupProps}
               />
             )}
             {sec === "autopilot" && (
@@ -272,6 +324,7 @@ export function SettingsWindow(p: SettingsWindowProps) {
                 config={p.config}
                 transport={p.transport}
                 control={p.claude?.control ?? null}
+                {...groupProps}
               />
             )}
             {sec === "claude" && (
@@ -281,8 +334,12 @@ export function SettingsWindow(p: SettingsWindowProps) {
                 waves={p.claude?.waves ?? {}}
                 control={p.claude?.control ?? null}
                 {...(p.claude?.onRegistry ? { onRegistry: p.claude.onRegistry } : {})}
+                {...(p.claude?.machines ? { machines: p.claude.machines } : {})}
+                localName={p.claude?.localName}
+                {...(p.claude?.hosts ? { hosts: p.claude.hosts } : {})}
                 config={p.config}
                 configTransport={p.transport}
+                {...groupProps}
               />
             )}
             {sec === "accounts" && (

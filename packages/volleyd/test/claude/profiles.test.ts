@@ -12,6 +12,7 @@ import {
   registryPath,
   selectAccount,
 } from "../../src/claude/profiles";
+import type { Ranked } from "../../src/claude/usage";
 import { tempDir, tempDirForAll } from "../helpers/tmp";
 
 const root = () => tempDir("volley-claude-");
@@ -65,6 +66,34 @@ describe("profiles: the accounts.json registry", () => {
     });
   });
 
+  it("markSignedIn stores the login's email and org beside the plan", () => {
+    const r = root();
+    addAccount(r, { label: "work" }, NOW);
+    markSignedIn(
+      r,
+      "work",
+      { plan: "max", email: "owner@example.com", org: "Example Org" },
+      "2026-10-18T12:05:00.000Z",
+    );
+    expect(readRegistry(r).accounts[0]).toEqual({
+      id: "work",
+      label: "work",
+      machine: "local",
+      created: NOW,
+      plan: "max",
+      email: "owner@example.com",
+      org: "Example Org",
+      signed_in_at: "2026-10-18T12:05:00.000Z",
+    });
+  });
+
+  it("an entry without email or org round-trips unchanged", () => {
+    const r = root();
+    const acct = addAccount(r, { label: "work" }, NOW);
+    markSignedIn(r, "work", {}, NOW);
+    expect(readRegistry(r).accounts[0]).toEqual({ ...acct, signed_in_at: NOW });
+  });
+
   it("an absent registry is empty", () => {
     expect(readRegistry(root())).toEqual({ version: 1, accounts: [] });
   });
@@ -83,50 +112,113 @@ describe("selectAccount: task > wave > config default > primary", () => {
     reg = readRegistry(r);
   });
 
-  it("nothing set → the primary profile (no CLAUDE_CONFIG_DIR)", () => {
-    expect(selectAccount(r, reg, {})).toEqual({
+  it("nothing set and no profile signed in → the primary alone (source default)", () => {
+    const r1 = root();
+    expect(selectAccount(r1, readRegistry(r1), {})).toEqual({
       id: PRIMARY_ACCOUNT,
       dir: null,
       source: "default",
+      machine: "local",
+      why: "primary: the only signed-in account on local",
     });
   });
 
-  it("the config default, then the wave, then the task", () => {
+  it("the config default, then the wave, then the task pin", () => {
     expect(selectAccount(r, reg, { configDefault: "work" })).toEqual({
       id: "work",
       dir: profileDir(r, "work"),
       source: "config",
+      machine: "local",
+      why: "claude.default_account names work",
     });
     expect(selectAccount(r, reg, { configDefault: "work", wave: "primary" }).id).toBe("primary");
     expect(
       selectAccount(r, reg, { configDefault: "primary", wave: "primary", task: "work" }),
-    ).toMatchObject({ id: "work", source: "task" });
-  });
-
-  it("most_headroom falls back to the primary without usage data", () => {
-    expect(selectAccount(r, reg, { configDefault: "most_headroom" })).toEqual({
-      id: PRIMARY_ACCOUNT,
-      dir: null,
+    ).toMatchObject({ id: "work", source: "task", why: "task names work" });
+    expect(selectAccount(r, reg, { configDefault: "primary" })).toMatchObject({
+      id: "primary",
       source: "config",
-      fallback: "most_headroom",
-    });
-    expect(selectAccount(r, reg, { configDefault: "most_headroom" }, () => null)).toMatchObject({
-      id: PRIMARY_ACCOUNT,
-      fallback: "most_headroom",
     });
   });
 
-  it("most_headroom resolves to the account usage metering ranks first", () => {
-    expect(selectAccount(r, reg, { wave: "most_headroom" }, () => "work")).toEqual({
-      id: "work",
-      dir: profileDir(r, "work"),
-      source: "wave",
+  it("null (and most_headroom) balances across the signed-in accounts by rank", () => {
+    const rank = (c: readonly string[]): Ranked[] =>
+      [...c].reverse().map((account, i) => ({
+        account,
+        headroom: 60 - i * 30,
+        five_hour_pct: 12 + i * 70,
+        weekly_pct: 40,
+        agents: 0,
+      }));
+    for (const configDefault of [null, "most_headroom"]) {
+      const sel = selectAccount(r, reg, { configDefault }, rank);
+      expect(sel).toMatchObject({
+        id: "work",
+        dir: profileDir(r, "work"),
+        source: "balance",
+        machine: "local",
+        why: "work: most headroom on local (5h 12%, 7d 40%; primary 5h 82%)",
+      });
+      expect(sel.candidates?.map((x) => x.account)).toEqual(["work", "primary"]);
+    }
+    // without usage data a signed-in profile is offered before the primary
+    expect(selectAccount(r, reg, {}).id).toBe("work");
+    expect(selectAccount(r, reg, { wave: "most_headroom" }).source).toBe("balance");
+  });
+
+  it("a profile on a paired machine is selectable there, refused here", () => {
+    const r2 = root();
+    addAccount(r2, { label: "far", machine: "peer-a" }, NOW);
+    markSignedIn(r2, "far", { dir: "/home/u/.volley/claude/far" }, NOW);
+    const reg2 = readRegistry(r2);
+    expect(reg2.accounts[0]?.dir).toBe("/home/u/.volley/claude/far");
+    expect(selectAccount(r2, reg2, { task: "far", machine: "peer-a" })).toMatchObject({
+      id: "far",
+      dir: "/home/u/.volley/claude/far",
+      machine: "peer-a",
+      source: "task",
     });
-    expect(selectAccount(r, reg, { wave: "most_headroom" }, () => PRIMARY_ACCOUNT)).toEqual({
-      id: PRIMARY_ACCOUNT,
-      dir: null,
-      source: "wave",
-    });
+    expect(() => selectAccount(r2, reg2, { task: "far" })).toThrow(/peer-a/);
+    const sel = selectAccount(r2, reg2, { machine: "peer-a" }, (c) =>
+      c
+        .map((account) => ({
+          account,
+          headroom: account === "far@peer-a" ? 60 : 10,
+          five_hour_pct: account === "far@peer-a" ? 12 : 90,
+          weekly_pct: null,
+          agents: 0,
+        }))
+        .sort((a, b) => (b.headroom ?? 0) - (a.headroom ?? 0)),
+    );
+    expect(sel).toMatchObject({ id: "far", dir: "/home/u/.volley/claude/far", source: "balance" });
+    expect(sel.why).toBe("far: most headroom on peer-a (5h 12%; primary@peer-a 5h 90%)");
+    // a local profile is not a candidate there, nor pinnable
+    addAccount(r2, { label: "home" }, NOW);
+    markSignedIn(r2, "home", {}, NOW);
+    expect(() => selectAccount(r2, readRegistry(r2), { task: "home", machine: "peer-a" })).toThrow(
+      /supervisor's machine/,
+    );
+  });
+
+  it("a paired machine's profile signed out (or with no recorded dir) falls back to primary@<name>", () => {
+    const r2 = root();
+    addAccount(r2, { label: "far", machine: "peer-a" }, NOW);
+    // ranked first if it were a candidate: it must not be one
+    const rank = (c: readonly string[]) =>
+      [...c]
+        .map((account) => ({
+          account,
+          headroom: account === "far@peer-a" ? 90 : 10,
+          five_hour_pct: account === "far@peer-a" ? 10 : 90,
+          weekly_pct: null,
+          agents: 0,
+        }))
+        .sort((a, b) => (b.headroom ?? 0) - (a.headroom ?? 0));
+    const signedOut = selectAccount(r2, readRegistry(r2), { machine: "peer-a" }, rank);
+    expect(signedOut).toMatchObject({ id: PRIMARY_ACCOUNT, dir: null, machine: "peer-a" });
+    markSignedIn(r2, "far", {}, NOW);
+    const noDir = selectAccount(r2, readRegistry(r2), { machine: "peer-a" }, rank);
+    expect(noDir).toMatchObject({ id: PRIMARY_ACCOUNT, dir: null, machine: "peer-a" });
   });
 
   it("refuses an unknown account and one that never finished signing in", () => {

@@ -288,7 +288,7 @@ describe("local_agents on the supervisor's own verdict (SPEC §4.6.15)", () => {
   const peer = (over: Partial<ReadinessInput> = {}) => {
     const i = input({ filter: OWN, ...over });
     const v = readiness(i);
-    return machineView(i, v, v.usage.five_hour_pct);
+    return machineView(i, v, v.usage);
   };
   const DOWN = { record: record({ tunnel: "down", reason: "heartbeat_timeout" as const }) };
   const own = (peers: ReturnType<typeof peer>[], filter: ReadinessInput["filter"] = OWN) =>

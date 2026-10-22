@@ -1,0 +1,116 @@
+import { maskEmail } from "volley-mcp/mask";
+import type { UsageRecord } from "./groups";
+
+/**
+ * `volley claude balance`: volleyd's `claude_balance` answer (SPEC §4.6.11) as a table, one block
+ * per machine, its candidates in volleyd's rank order with their figures, headroom and agents,
+ * and an arrow on the account each model family (or `--model`) would start on next. The figures
+ * are volleyd's; the e-mail and the Fable window come from the account's retained usage record
+ * (a ranking without a model carries no family window). Pure.
+ */
+
+/** One candidate as volleyd ranked it (`Ranked` in its usage module). */
+export interface BalanceCandidate {
+  account: string;
+  headroom: number | null;
+  five_hour_pct: number | null;
+  weekly_pct: number | null;
+  model_weekly_pct?: number;
+  agents: number;
+}
+
+export interface BalanceAnswer {
+  model?: string;
+  machines: {
+    name: string;
+    candidates: BalanceCandidate[];
+    /** The pick per model family, or `model` when one was asked for; `null`: no candidate. */
+    picks: Record<string, string | null>;
+  }[];
+}
+
+const FAMILIES = ["fable", "opus", "sonnet", "haiku"] as const;
+const LOCAL_MACHINE = "local";
+const where = (machine: string) => (machine === LOCAL_MACHINE ? "this machine" : machine);
+
+/** The picks keys whose next spawn the answer puts on `account` (`model`: the asked model). */
+function picksOf(answer: BalanceAnswer | null, account: string): string[] {
+  const keys = new Set<string>();
+  for (const m of answer?.machines ?? [])
+    for (const [k, v] of Object.entries(m.picks ?? {})) if (v === account) keys.add(k);
+  return [...keys];
+}
+
+/** Whether any model family's next spawn runs under `account`: `volley claude list`'s marker. */
+export const isNextPick = (answer: BalanceAnswer | null, account: string) =>
+  picksOf(answer, account).length > 0;
+
+const pct = (n: number | null | undefined) => (n == null ? "—" : `${Math.round(n)}%`);
+
+/** Columns padded to the widest cell of each, joined by two spaces. */
+function table(rows: string[][]): string[] {
+  const widths = rows.reduce<number[]>(
+    (w, r) => r.map((c, i) => Math.max(w[i] ?? 0, c.length)),
+    [],
+  );
+  return rows.map((r) =>
+    r
+      .map((c, i) => c.padEnd(widths[i] ?? 0))
+      .join("  ")
+      .trimEnd(),
+  );
+}
+
+export function printBalance(
+  answer: BalanceAnswer,
+  records: readonly UsageRecord[],
+  { showEmail }: { showEmail: boolean },
+): string {
+  const byAccount = new Map(records.map((r) => [r.account, r]));
+  const family = FAMILIES.find((f) => answer.model?.includes(f));
+  let out = "";
+  for (const m of answer.machines) {
+    out += `${where(m.name)}\n`;
+    const rows = m.candidates.map((c) => {
+      const rec = byAccount.get(c.account);
+      const fable = family === "fable" ? c.model_weekly_pct : rec?.model_weekly?.fable?.pct;
+      const none = c.headroom === null && c.five_hour_pct === null && c.weekly_pct === null;
+      const picks = picksOf({ machines: [m] }, c.account).map((k) =>
+        k === "model" ? (answer.model ?? k) : k,
+      );
+      return {
+        account: c.account,
+        email: rec?.email ? (showEmail ? rec.email : maskEmail(rec.email)) : "",
+        figures: none
+          ? null
+          : [
+              `5h ${pct(c.five_hour_pct)}`,
+              `7d ${pct(c.weekly_pct)}`,
+              `Fable ${pct(fable)}`,
+              `headroom ${c.headroom === null ? "—" : Math.round(c.headroom)}`,
+            ],
+        // Beside `no usage yet` too: an account with running agents and no reading is not idle.
+        agents: `${c.agents} agent${c.agents === 1 ? "" : "s"}`,
+        arrow: picks.length ? `← ${picks.join(", ")}` : "",
+      };
+    });
+    // "no usage yet" spans the figure columns, so the arrows still line up.
+    const known = table(rows.flatMap((r) => (r.figures ? [r.figures] : [])));
+    let k = 0;
+    const figures = rows.map((r) => (r.figures ? (known[k++] ?? "") : "no usage yet"));
+    const width = Math.max(0, ...figures.map((f) => f.length));
+    const emails = rows.some((r) => r.email !== "");
+    const lines = table(
+      rows.map((r, i) => [
+        r.account,
+        ...(emails ? [r.email] : []),
+        (figures[i] ?? "").padEnd(width),
+        r.agents,
+        r.arrow,
+      ]),
+    );
+    if (m.candidates.length === 0) out += "  no signed-in accounts\n";
+    for (const l of lines) out += `  ${l}\n`;
+  }
+  return out;
+}

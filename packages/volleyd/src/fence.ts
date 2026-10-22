@@ -160,9 +160,12 @@ import { AGENT_BRANCH } from "./worktree";
  *     kill-session -t volley-signin-<acct> (no consent: a sign-in session holds no agent's
  *     work) — any other kill-session = CONSENT; no other tmux global option
  *   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
- *     nc -z 127.0.0.1 <port> · printenv PATH | HOME
+ *     chmod 700 <home>/.volley/claude/<acct> (a remote profile dir: the only chmod on a
+ *     directory) · nc -z 127.0.0.1 <port> · printenv PATH | HOME
  *   claude auth status (exactly: the box's login state and plan, never a credential; a login
- *     runs only from a sealed signin.sh)
+ *     runs only from a sealed signin.sh) — the one step with an env: `env.CLAUDE_CONFIG_DIR`
+ *     only, only `<abs>/.volley/claude/<acct>` (a profile the supervisor created there),
+ *     rendered as one single-quoted `CLAUDE_CONFIG_DIR=…` before the argv
  *   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
  *     `/info/exclude`, `<dir>/.volley/<name>` for a VOLLEY_READS name, or a sign-in dir's `url`
  *   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
@@ -174,19 +177,25 @@ import { AGENT_BRANCH } from "./worktree";
  *     (what the tmux session runs) is written whole, never appended, and its content must be
  *     exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS: a
  *     `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the profile block, an
- *     integer in 100000..1000000, never in the env block); a
+ *     integer in 100000..1000000, never in the env block; its `CLAUDE_CONFIG_DIR`, if any,
+ *     exactly the `<home>/.volley/claude/<id>` the registry recorded at sign-in for a signed-in
+ *     profile `<id>` of that host — the script's `host`, SshTmuxHost's spec — with the worktree
+ *     under that host's `worktree_root`); a
  *     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
  *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG); and
  *     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
- *     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
- *     login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
+ *     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir, or with the
+ *     profile dir `<same abs>/.volley/claude/<same acct>` (`claude auth login`, never
+ *     `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
  *   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
  *   volley peer doctor --json [--fix --yes [--clone --origin <https URL>]] — the machine's doctor
  *     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
  *     credentials or port, isCloneUrl); no other volley argv runs on a box
  *   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
  *     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
- *     mv -f .claude.json.volleyd.tmp .claude.json
+ *     mv -f .claude.json.volleyd.tmp .claude.json — or, for a profile the supervisor created
+ *     there, the same three steps on `<home>/.volley/claude/<acct>/.claude.json` and its
+ *     `.claude.json.volleyd.tmp` (absolute paths; the tmp the only other file base64 -d writes)
  *   Every other step's stdin is /dev/null, so no step can read the rest of the script.
  *
  * OPTIONS: every git and gh subcommand above has an exact option allow-list (GIT_SPECS and
@@ -431,10 +440,15 @@ export interface LaunchToken {
  * `renderLaunchScript` renders for that worktree (LAUNCH_SCRIPT_VARS: its `--mcp-config=` is
  * `<worktree>/.volley/mcp.json`). Callers: spawn, before the write.
  */
-export function sealLaunchScript(worktree: string, content: string): LaunchToken {
+export function sealLaunchScript(
+  worktree: string,
+  content: string,
+  /** A paired machine's spawn: its name and `worktree_root` (a profile there is checked so). */
+  host?: ProfileHost,
+): LaunchToken {
   if (!absPath(worktree))
     throw new FenceError("launch.sh", "the worktree is not a clean absolute path");
-  if (!isLaunchScript(content, worktree))
+  if (!isLaunchScript(content, worktree, host))
     throw new FenceError("launch.sh", "only a script renderLaunchScript renders for this worktree");
   const token = Object.freeze({ cwd: worktree });
   launches.add(token);
@@ -474,20 +488,40 @@ export function sealSigninScript(dir: string, content: string): SigninToken {
   return token;
 }
 
+/** `<home>/.volley/<segment>/<acct>` on a paired machine, `<acct>` in the §2.1 id grammar. */
+const remoteVolleyDir = (segment: string) =>
+  new RegExp(`^/(?:.*/)?\\.volley/${segment}/[a-z0-9][a-z0-9_-]{0,62}$`);
 /** A paired machine's sign-in dir: `<home>/.volley/signin/<acct>` (remote-signin.ts). */
-const REMOTE_SIGNIN_DIR = /^\/(?:.*\/)?\.volley\/signin\/[a-z0-9][a-z0-9_-]{0,62}$/;
+const REMOTE_SIGNIN_DIR = remoteVolleyDir("signin");
 const isRemoteSigninDir = (dir: string) => absPath(dir) && REMOTE_SIGNIN_DIR.test(dir);
+/** A profile the supervisor created on a paired machine: `<home>/.volley/claude/<acct>`. */
+const REMOTE_PROFILE_DIR = remoteVolleyDir("claude");
+const isRemoteProfileDir = (dir: string) => absPath(dir) && REMOTE_PROFILE_DIR.test(dir);
+
+/**
+ * The two `signin.sh` renderings a paired machine's sign-in dir may hold: the box's default
+ * profile's (no `CLAUDE_CONFIG_DIR`), or, for `<home>/.volley/signin/<acct>`, the profile
+ * `<home>/.volley/claude/<acct>`'s (the same home, the same acct).
+ */
+function remoteSigninScripts(dir: string): string[] {
+  const profile = dir.replace(/\/\.volley\/signin\/([^/]+)$/, "/.volley/claude/$1");
+  return [
+    renderSigninScript({ signinDir: dir }),
+    renderSigninScript({ configDir: profile, signinDir: dir }),
+  ];
+}
 
 /**
  * Seal the sign-in script volleyd is about to write to `<dir>/signin.sh` on a paired machine:
  * throws `FenceError` unless `dir` is `<abs>/.volley/signin/<acct>` and `content` is exactly
- * `renderSigninScript` of that dir with no profile dir (the box's own default profile).
+ * `renderSigninScript` of that dir with no profile dir (the box's own default profile) or with
+ * the profile dir `<abs>/.volley/claude/<acct>` (a profile the supervisor created there).
  * Callers: remote-signin.ts.
  */
 export function sealRemoteSigninScript(dir: string, content: string): SigninToken {
   if (!isRemoteSigninDir(dir))
     throw new FenceError("signin.sh", "the sign-in dir is not <home>/.volley/signin/<acct>");
-  if (renderSigninScript({ signinDir: dir }) !== content)
+  if (!remoteSigninScripts(dir).includes(content))
     throw new FenceError("signin.sh", "only a script renderSigninScript renders for this dir");
   const token = Object.freeze({ cwd: dir, remote: true });
   signins.add(token);
@@ -495,18 +529,18 @@ export function sealRemoteSigninScript(dir: string, content: string): SigninToke
 }
 
 /**
- * A file of a paired machine's sign-in dir and the only content volleyd writes to it: the sealed
- * `signin.sh`, the `browser.sh` helper, or an empty `url` (a stale URL is never read back). Null
- * for any other path.
+ * A file of a paired machine's sign-in dir and the only contents volleyd writes to it: a sealed
+ * `signin.sh` (either rendering, `remoteSigninScripts`), the `browser.sh` helper, or an empty
+ * `url` (a stale URL is never read back). Null for any other path.
  */
-function remoteSigninFile(path: string): { name: string; content: string } | null {
+function remoteSigninFile(path: string): { name: string; contents: string[] } | null {
   const slash = path.lastIndexOf("/");
   const dir = path.slice(0, slash);
   const name = path.slice(slash + 1);
   if (slash < 0 || !absPath(path) || !isRemoteSigninDir(dir)) return null;
-  if (name === SIGNIN_SCRIPT) return { name, content: renderSigninScript({ signinDir: dir }) };
-  if (name === BROWSER_HELPER) return { name, content: renderBrowserHelper(dir) };
-  if (name === SIGNIN_URL_FILE) return { name, content: "" };
+  if (name === SIGNIN_SCRIPT) return { name, contents: remoteSigninScripts(dir) };
+  if (name === BROWSER_HELPER) return { name, contents: [renderBrowserHelper(dir)] };
+  if (name === SIGNIN_URL_FILE) return { name, contents: [""] };
   return null;
 }
 
@@ -646,6 +680,11 @@ export interface RemoteStep {
   argv: string[];
   /** Absolute directory on the remote host to run in. */
   cwd?: string;
+  /**
+   * `claude auth status` of a profile the supervisor created on the box (remote-signin.ts): its
+   * `CLAUDE_CONFIG_DIR`, `<home>/.volley/claude/<acct>`. On no other step.
+   */
+  env?: { CLAUDE_CONFIG_DIR: string };
   stdin?: string;
   stdout?: string;
   append?: boolean;
@@ -654,6 +693,14 @@ export interface RemoteStep {
 /** The script `ssh -T <target> bash -s` runs: fenced step by step, rendered by `renderRemoteScript`. */
 export interface RemoteScript {
   steps: RemoteStep[];
+  /** The configured host it runs on (SshTmuxHost's spec): which profiles its launch.sh may use. */
+  host?: ProfileHost;
+}
+
+/** A paired machine as the profile rule sees it: its name and its worktree root there. */
+export interface ProfileHost {
+  name: string;
+  worktree_root: string;
 }
 
 export interface FenceOptions {
@@ -1573,6 +1620,27 @@ export const REMOTE_CLAUDE_JSON_TMP = ".claude.json.volleyd.tmp";
 /** The only argv that takes base64 on stdin without writing a file: the trust write's compare. */
 const TRUST_COMPARE = ["cmp", "-s", "-", REMOTE_CLAUDE_JSON];
 const TRUST_SWAP = ["mv", "-f", REMOTE_CLAUDE_JSON_TMP, REMOTE_CLAUDE_JSON];
+/** The trust write's files in a profile the supervisor created on the box (absolute paths). */
+const profileTrustFile = (path: string, name: string) =>
+  path.endsWith(`/${name}`) && isRemoteProfileDir(path.slice(0, -(name.length + 1)));
+const isTrustCompare = (argv: readonly string[]) =>
+  sameArgv(argv, TRUST_COMPARE) ||
+  (sameArgv(argv.slice(0, 3), ["cmp", "-s", "-"]) &&
+    argv.length === 4 &&
+    profileTrustFile(argv[3] as string, REMOTE_CLAUDE_JSON));
+const isTrustSwap = (argv: readonly string[]) => {
+  if (sameArgv(argv, TRUST_SWAP)) return true;
+  const [mv, f, tmp, json] = argv;
+  return (
+    argv.length === 4 &&
+    mv === "mv" &&
+    f === "-f" &&
+    typeof tmp === "string" &&
+    typeof json === "string" &&
+    profileTrustFile(json, REMOTE_CLAUDE_JSON) &&
+    tmp === `${json.slice(0, -REMOTE_CLAUDE_JSON.length)}${REMOTE_CLAUDE_JSON_TMP}`
+  );
+};
 const sameArgv = (a: readonly string[], b: readonly string[]) =>
   a.length === b.length && a.every((x, i) => x === b[i]);
 
@@ -1607,6 +1675,7 @@ function volleyPath(path: string, names: ReadonlySet<string>, endings: readonly 
 function writablePath(path: string): boolean {
   return (
     path === REMOTE_CLAUDE_JSON_TMP ||
+    profileTrustFile(path, REMOTE_CLAUDE_JSON_TMP) ||
     volleyPath(path, VOLLEY_WRITES, ["/ISSUE.md", "/info/exclude"])
   );
 }
@@ -1692,6 +1761,29 @@ function profileDirAllowed(dir: string, worktree: string): boolean {
 }
 
 /**
+ * A paired machine's launch script's `CLAUDE_CONFIG_DIR`: `<home>/.volley/claude/<id>`
+ * (REMOTE_PROFILE_DIR) and exactly the `dir` the supervisor's registry recorded at sign-in for a
+ * signed-in profile `<id>` kept on `host`, for a worktree under that host's `worktree_root` (and
+ * neither inside the other). Nothing on this machine is consulted beyond the registry.
+ */
+function remoteProfileDirAllowed(dir: string, worktree: string, host: ProfileHost): boolean {
+  try {
+    if (host.name === "local" || !isRemoteProfileDir(dir)) return false;
+    const root = host.worktree_root.replace(/(.)\/+$/, "$1");
+    if (!absPath(root) || !absPath(worktree) || worktree === root || !within(worktree, root))
+      return false;
+    if (within(dir, worktree) || within(worktree, dir)) return false;
+    const id = basename(dir);
+    return readRegistry(canonicalRoot(claudeRoot())).accounts.some(
+      (a) =>
+        a.id === id && a.machine === host.name && a.dir === dir && a.signed_in_at !== undefined,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * LAUNCH_SCRIPT_VARS: whether `content` is exactly what `renderLaunchScript` renders for a
  * well-formed model id, agent id, absolute hooks directory (never inside a `.volley/`, where
  * volleyd writes), env block (`launchEnvAllowed`: a second VOLLEY_HOOKS_DIR export would win in
@@ -1702,7 +1794,7 @@ function profileDirAllowed(dir: string, worktree: string): boolean {
  * without it under `agent_mcp: inherit`, and `--` before the prompt). Parsed back into its
  * values and re-rendered, so not one byte can differ from a script volleyd writes.
  */
-function isLaunchScript(content: string, worktree: string): boolean {
+function isLaunchScript(content: string, worktree: string, host?: ProfileHost): boolean {
   const lines = content.split("\n");
   const hooks = LAUNCH_HOOKS.exec(lines[4] ?? "");
   const run = LAUNCH_EXEC.exec(lines.at(-2) ?? "");
@@ -1734,7 +1826,10 @@ function isLaunchScript(content: string, worktree: string): boolean {
     ...(autoCompactWindow !== undefined ? { autoCompactWindow } : {}),
   };
   return (
-    (claudeConfigDir === undefined || profileDirAllowed(claudeConfigDir, worktree)) &&
+    (claudeConfigDir === undefined ||
+      (host === undefined
+        ? profileDirAllowed(claudeConfigDir, worktree)
+        : remoteProfileDirAllowed(claudeConfigDir, worktree, host))) &&
     (autoCompactWindow === undefined ||
       (autoCompactWindow >= COMPACT_MIN && autoCompactWindow <= COMPACT_MAX)) &&
     outsideVolley(vars.hooksDir) &&
@@ -1772,18 +1867,19 @@ const isMcpConfigPath = (path: string) => path.endsWith("/.volley/mcp.json");
 function remoteStep(step: RemoteStep, opts: FenceOptions): Verdict {
   if (step.cwd !== undefined && !REMOTE_PATH.test(step.cwd))
     return deny("remote cwd (not absolute)");
+  if (step.env !== undefined) return remoteProfileStatus(step);
   const [prog, ...args] = step.argv;
   const io = step.stdin !== undefined || step.stdout !== undefined || step.append === true;
   if (io) {
     const b64 = step.stdin !== undefined && BASE64.test(step.stdin);
-    if (sameArgv(step.argv, TRUST_COMPARE) && step.stdout === undefined && step.append !== true)
+    if (isTrustCompare(step.argv) && step.stdout === undefined && step.append !== true)
       return b64 ? ALLOW : deny("remote cmp (base64 text on stdin only)");
     const signin = step.stdout !== undefined ? remoteSigninFile(step.stdout) : null;
     if (signin !== null) {
       return sameArgv(step.argv, ["base64", "-d"]) &&
         b64 &&
         step.append !== true &&
-        Buffer.from(step.stdin ?? "", "base64").toString("utf-8") === signin.content
+        signin.contents.includes(Buffer.from(step.stdin ?? "", "base64").toString("utf-8"))
         ? ALLOW
         : deny(`remote ${signin.name} write (only what volleyd renders for that sign-in dir)`);
     }
@@ -1794,22 +1890,43 @@ function remoteStep(step: RemoteStep, opts: FenceOptions): Verdict {
       b64 &&
       step.stdout !== undefined &&
       writablePath(step.stdout) &&
-      (step.append !== true || step.stdout !== REMOTE_CLAUDE_JSON_TMP);
+      (step.append !== true ||
+        (step.stdout !== REMOTE_CLAUDE_JSON_TMP &&
+          !profileTrustFile(step.stdout, REMOTE_CLAUDE_JSON_TMP)));
     if (!write)
       return deny("remote file write (base64 -d of base64 text to a file volleyd writes only)");
     const path = step.stdout ?? "";
     const content = () => Buffer.from(step.stdin ?? "", "base64").toString("utf-8");
     if (isLaunchScriptPath(path)) {
       const worktree = path.slice(0, -"/.volley/launch.sh".length);
-      if (step.append === true || !isLaunchScript(content(), worktree))
+      if (step.append === true || !isLaunchScript(content(), worktree, opts.remote?.host))
         return deny("remote launch.sh write (only a script renderLaunchScript renders)");
     }
     if (isMcpConfigPath(path) && (step.append === true || !isMcpConfig(content())))
       return deny("remote mcp.json write (only an mcp.json renderMcpConfig renders)");
     return ALLOW;
   }
-  if (sameArgv(step.argv, TRUST_SWAP)) return ALLOW;
+  if (isTrustSwap(step.argv)) return ALLOW;
   return remoteDeny(remoteCommand(prog, args, opts));
+}
+
+/**
+ * The one step with an env: `CLAUDE_CONFIG_DIR=<home>/.volley/claude/<acct> claude auth status`,
+ * a remote profile's login state and plan (remote-signin.ts). No other key, value or argv.
+ */
+function remoteProfileStatus(step: RemoteStep): Verdict {
+  const env = step.env as Record<string, unknown>;
+  const keys = Object.keys(env);
+  const dir = env.CLAUDE_CONFIG_DIR;
+  return keys.length === 1 &&
+    typeof dir === "string" &&
+    isRemoteProfileDir(dir) &&
+    sameArgv(step.argv, ["claude", "auth", "status"]) &&
+    step.stdin === undefined &&
+    step.stdout === undefined &&
+    step.append === undefined
+    ? ALLOW
+    : deny("remote env (only CLAUDE_CONFIG_DIR=<home>/.volley/claude/<acct> claude auth status)");
 }
 
 function remoteCommand(prog: string | undefined, args: string[], opts: FenceOptions): Verdict {
@@ -1835,10 +1952,18 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
         ? ALLOW
         : deny("cat (only the files volleyd reads)");
     case "chmod":
-      // Three digits: no setuid, setgid or sticky bit; only on the files volleyd writes.
+      // Three digits: no setuid, setgid or sticky bit; only on the files volleyd writes, and 700
+      // on a remote profile dir (the only directory).
       return /^[0-7]{3}$/.test(args[0] ?? "") &&
         paths(args.slice(1)) &&
-        args.slice(1).every((a) => writablePath(a) || isSigninScriptFile(a))
+        args
+          .slice(1)
+          .every(
+            (a) =>
+              writablePath(a) ||
+              isSigninScriptFile(a) ||
+              (args[0] === "700" && isRemoteProfileDir(a)),
+          )
         ? ALLOW
         : deny("chmod (only <3 octal digits> <a file volleyd writes>…)");
     case "printenv":
@@ -2033,7 +2158,8 @@ export function renderRemoteScript(script: RemoteScript): string {
   const lines = ["set -euo pipefail"];
   const heredoc = (s: RemoteStep) => `<<'VOLLEY_EOF'\n${s.stdin ?? ""}\nVOLLEY_EOF`;
   for (const s of script.steps) {
-    const cmd = s.argv.map(shq).join(" ");
+    const env = s.env !== undefined ? `CLAUDE_CONFIG_DIR=${shq(s.env.CLAUDE_CONFIG_DIR)} ` : "";
+    const cmd = env + s.argv.map(shq).join(" ");
     if (s.stdout !== undefined) {
       const redirect = s.append === true ? ">>" : ">";
       lines.push(`( umask 077 && ${cmd} ${redirect} ${shq(s.stdout)} ${heredoc(s)}\n)`);

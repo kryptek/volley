@@ -47,8 +47,10 @@ export interface MachineView {
   down_since?: number;
   /** Each lease pool that sets `per_machine`: its holders' leases on this machine. */
   heavy: Record<string, { held: number; per_machine: number }>;
-  /** Its account's 5-hour usage percentage; null: unknown. */
+  /** Its best candidate account's 5-hour usage percentage; null: unknown. */
   usage_pct: number | null;
+  /** That account (the balancing rule's pick on the machine), when known. */
+  usage_account?: string;
   /**
    * What its own admission holds back beyond the load and memory filter below: on the supervisor's
    * own machine its local signals (memory pressure, cmux ping, containers), on a peer its per-host
@@ -378,7 +380,9 @@ function score(
     `load ${r.load[0].toFixed(1)} on ${r.cores} cores`,
     `${n}/${max} agents`,
     r.memory !== undefined ? `${pct(r.memory.available_pct)} mem` : "mem unknown",
-    m.usage_pct !== null ? `usage ${pct(m.usage_pct)}` : "usage unknown",
+    m.usage_pct !== null
+      ? `usage ${pct(m.usage_pct)}${m.usage_account !== undefined ? ` (${m.usage_account})` : ""}`
+      : "usage unknown",
     ...heavySlots(m, task, wave, snap, o).map(
       ([pool, held, per]) => `heavy slots ${Math.max(0, per - held)}/${per} free (${pool})`,
     ),
@@ -485,7 +489,7 @@ export interface VerdictView {
   max_agents: number;
   placed: number;
   heavy: Record<string, { held: number; per_machine: number }>;
-  usage: { five_hour_pct: number | null };
+  usage: { five_hour_pct: number | null; account?: string | null };
 }
 
 /** A snapshot from the retained machine records and readiness verdicts. */
@@ -509,6 +513,7 @@ export function snapshotFrom(
         agents: v?.placed ?? 0,
         heavy: v?.heavy ?? {},
         usage_pct: v?.usage.five_hour_pct ?? null,
+        ...(typeof v?.usage.account === "string" ? { usage_account: v.usage.account } : {}),
         held: [],
       };
     }),

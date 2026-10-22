@@ -100,8 +100,33 @@ describe("Supervisor › Lease pools", () => {
     expect(count("laptop")).toBe("0/1");
   });
 
-  it("Settings › Supervisor shows the card above the config rows when pools exist", () => {
-    render(<Supervisor config={null} transport={null} leases={{ "backend-it": backendIt }} />);
-    expect(screen.getByRole("heading", { name: "Lease pools" })).toBeInTheDocument();
+  it("Settings › Supervisor › Lease pools shows the card above the pools' capacity rows", () => {
+    const config = {
+      version: 1,
+      updated_at: at,
+      updated_by: "owner",
+      lease_pools: { "backend-it": { capacity: 3, ttl_s: 1800, match: ["make it"] } },
+    };
+    const { container, rerender } = render(
+      <Supervisor
+        config={config}
+        transport={null}
+        leases={{ "backend-it": backendIt }}
+        group="leases"
+      />,
+    );
+    const card = screen.getByRole("region", { name: "Lease pools" });
+    const rowEl = screen.getByRole("slider", { name: "backend-it pool capacity" });
+    expect(card.compareDocumentPosition(rowEl) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.querySelectorAll(".lease-pools")).toHaveLength(1);
+    rerender(
+      <Supervisor
+        config={config}
+        transport={null}
+        leases={{ "backend-it": backendIt }}
+        group="admission"
+      />,
+    );
+    expect(screen.queryByRole("region", { name: "Lease pools" })).toBeNull();
   });
 });

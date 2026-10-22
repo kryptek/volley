@@ -66,6 +66,7 @@ describe("agent_move_account", () => {
         from: "primary",
         to: "work",
         by: "owner-1",
+        why: "moved off primary by owner-1",
       },
     });
     expect(w.dir).toBe("/srv/claude/work");

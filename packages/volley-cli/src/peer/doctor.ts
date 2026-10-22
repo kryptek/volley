@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import type { PeerExec } from "../commands/peer";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
-import { claudeChecks, isRepoTrusted, parseClaudeStatus } from "./checks/claude";
+import { claudeChecks, isRepoTrusted, loginIdentity, parseClaudeStatus } from "./checks/claude";
 import { ghPermission, ghState, ghUser, githubChecks } from "./checks/github";
 import {
   diskOf,
@@ -23,6 +23,13 @@ import {
   gatherProfile,
   profileChecks,
 } from "./provision";
+import {
+  type ClaudeLogin,
+  PROBE_FAMILIES,
+  type UsageFetch,
+  type UsageWindow,
+  probeLogins,
+} from "./usage-probe";
 
 export { normalizeOrigin } from "./checks/repo";
 export { binOf } from "./checks/tools";
@@ -36,9 +43,10 @@ export { binOf } from "./checks/tools";
  * Safe fixes write only inside the volley checkout (`bun install --frozen-lockfile`, a checkout of
  * the supervisor's version) or create the wave repo's clone at an empty path (`--clone`, with a
  * known origin URL). Everything else (a symlink that needs root, `gh auth login`, a Claude
- * sign-in, installing a tool) is printed for the person to run. The doctor never reads, stores
- * or prints a credential: it keeps states and plain labels, and scrubs anything token-shaped from
- * what it prints.
+ * sign-in, installing a tool) is printed for the person to run. The doctor never stores or
+ * prints a credential: it keeps states and plain labels, and scrubs anything token-shaped from
+ * what it prints. Its one read of a credential is the usage probe's (usage-probe.ts, SPEC
+ * §4.6.11's exception): each login's own token, in memory, for one read-only usage request.
  */
 
 export const TOOLS = ["bun", "git", "gh", "tmux", "nc", "base64", "cmp", "claude"] as const;
@@ -165,7 +173,16 @@ export interface Facts {
     slug: string | null;
     permission: string | null;
   };
-  claude: { state: AuthClaude; plan: string | null; trust: AuthTrust };
+  claude: {
+    state: AuthClaude;
+    plan: string | null;
+    trust: AuthTrust;
+    /** The default profile's login identity (checks/claude.ts loginIdentity). */
+    email: string | null;
+    org: string | null;
+    /** Each login's usage probe (usage-probe.ts); null when the doctor has no fetch to call it. */
+    logins: ClaudeLogin[] | null;
+  };
   machine: {
     memory: Memory;
     disk: Disk | null;
@@ -214,6 +231,10 @@ export interface DoctorDeps {
   statfs: (path: string) => StatFs | null;
   /** Asks the person at the terminal; absent or false without one. */
   confirm?: (question: string) => Promise<boolean>;
+  /** The usage probe's one request (usage-probe.ts); absent, no login is probed. */
+  fetch?: UsageFetch;
+  /** This process's environment: `$USER` (the Keychain account), `$VOLLEY_CLAUDE_DIR`. */
+  env?: Record<string, string | undefined>;
 }
 
 export interface DoctorOptions {
@@ -246,7 +267,14 @@ export interface DoctorReport {
   checks: (RecordCheck & { fix?: string })[];
   versions: Record<"peer" | "volley" | "bun" | "git", string | null> &
     Partial<Record<"gh" | "tmux" | "claude", string | null>>;
-  auth: { gh: AuthGh; claude: AuthClaude; trust: AuthTrust; claude_plan?: string };
+  auth: {
+    gh: AuthGh;
+    claude: AuthClaude;
+    trust: AuthTrust;
+    claude_plan?: string;
+    claude_email?: string;
+    claude_org?: string;
+  };
   repo?: {
     path: string;
     exists: boolean;
@@ -256,6 +284,8 @@ export interface DoctorReport {
   };
   memory: Memory;
   disk?: Disk;
+  /** Each signed-in login's usage windows: numbers and states only (SPEC §4.6.14). */
+  claude_logins?: ClaudeLogin[];
   doctor_at: string;
 }
 
@@ -431,15 +461,21 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     const r = await sh([claudeBin, "auth", "status"]);
     claude = parseClaudeStatus(r.code, r.stdout);
   }
+  // One parse of ~/.claude.json: the trust table and the login's identity, nothing else of it.
+  const claudeJsonFile = join(deps.home, ".claude.json");
+  const claudeJson = existsSync(claudeJsonFile) ? readJson(claudeJsonFile) : undefined;
   let trust: AuthTrust = "unknown";
   if (path !== null) {
-    const file = join(deps.home, ".claude.json");
-    if (!existsSync(file)) trust = "missing";
-    else {
-      const j = readJson(file);
-      trust = j === undefined ? "unknown" : isRepoTrusted(j, path) ? "ok" : "missing";
-    }
+    if (!existsSync(claudeJsonFile)) trust = "missing";
+    else
+      trust =
+        claudeJson === undefined ? "unknown" : isRepoTrusted(claudeJson, path) ? "ok" : "missing";
   }
+  const identity = loginIdentity(
+    typeof claudeJson === "object" && claudeJson !== null && !Array.isArray(claudeJson)
+      ? (claudeJson as Record<string, unknown>)
+      : null,
+  );
 
   // The machine: memory (macOS: vm_stat's reclaimable pages, as free pages under-count) and the
   // worktrees' disk.
@@ -448,6 +484,22 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     available = vmStatAvailablePct((await sh(["vm_stat"])).stdout, deps.totalmem());
   const root = worktreeRoot(path, deps.home);
   const st = deps.statfs(nearestExisting(root));
+
+  // The usage probe: each login read on this machine, numbers only out.
+  const logins =
+    deps.fetch === undefined
+      ? null
+      : await probeLogins(
+          {
+            exec: deps.exec,
+            fetch: deps.fetch,
+            platform: deps.platform,
+            home: deps.home,
+            env: deps.env ?? {},
+            claudeVersion: tools.claude.version,
+          },
+          deps.now(),
+        ).catch(() => null);
 
   const profile = await gatherProfile(
     sh,
@@ -484,7 +536,13 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       fetchedAt,
     },
     github: { present: ghPresent, signedIn, user, slug, permission },
-    claude: { ...claude, trust },
+    claude: {
+      ...claude,
+      trust,
+      email: identity.email ?? null,
+      org: identity.org ?? null,
+      logins,
+    },
     machine: {
       memory: memoryOf(deps.totalmem(), deps.freemem(), available),
       disk: st !== null ? diskOf(root, st) : null,
@@ -539,6 +597,13 @@ export function reportOf(f: Facts, checks: Check[], at: Date): DoctorReport {
       ...(f.claude.state === "signed_in" && f.claude.plan !== null
         ? { claude_plan: f.claude.plan }
         : {}),
+      // The login's identity only while it is signed in.
+      ...(f.claude.state === "signed_in" && f.claude.email !== null
+        ? { claude_email: f.claude.email }
+        : {}),
+      ...(f.claude.state === "signed_in" && f.claude.org !== null
+        ? { claude_org: f.claude.org }
+        : {}),
     },
     ...(r.path !== null
       ? {
@@ -553,6 +618,7 @@ export function reportOf(f: Facts, checks: Check[], at: Date): DoctorReport {
       : {}),
     memory: f.machine.memory,
     ...(f.machine.disk !== null ? { disk: f.machine.disk } : {}),
+    ...(f.claude.logins !== null ? { claude_logins: f.claude.logins } : {}),
     doctor_at: at.toISOString(),
   });
 }
@@ -593,6 +659,46 @@ export function renderHuman(checks: DoctorReport["checks"]): string {
   return needed.length > 0
     ? `${lines}${needed.length} warning(s) still keep this machine from being ready for agents (the supervisor needs them): ${needed.join(", ")}\n`
     : lines;
+}
+
+const pctOf = (w: UsageWindow) => `${Math.round(w.pct)}%`;
+
+function ageOf(iso: string, now: Date): string {
+  const min = Math.max(0, Math.floor((now.getTime() - Date.parse(iso)) / 60_000));
+  if (min < 1) return "just now";
+  return min < 120 ? `${min} min ago` : `${Math.floor(min / 60)} h ago`;
+}
+
+const WHY: Record<Exclude<ClaudeLogin["state"], "ok">, string> = {
+  expired: "login expired; Claude Code renews it on its next request",
+  no_credential: "no stored login",
+  rate_limited: "the usage endpoint asked to slow down",
+  rejected: "the usage endpoint refused the login",
+  error: "the usage endpoint did not answer",
+};
+
+/**
+ * One line per login: `Claude usage: default 5h 37% · 7d 56% · Fable 12% (read 2 min ago)`, or
+ * `—` and why when there is no reading.
+ */
+export function renderUsage(logins: readonly ClaudeLogin[], now: Date): string {
+  return logins
+    .map((l) => {
+      const r = l.reading;
+      const why = l.state === "ok" ? null : WHY[l.state];
+      if (r === undefined) return `Claude usage: ${l.profile} — (${why ?? "no reading yet"})\n`;
+      const parts = [
+        ...(r.five_hour !== undefined ? [`5h ${pctOf(r.five_hour)}`] : []),
+        ...(r.weekly !== undefined ? [`7d ${pctOf(r.weekly)}`] : []),
+        ...PROBE_FAMILIES.flatMap((f) => {
+          const w = r.model_weekly?.[f];
+          return w !== undefined ? [`${f[0]?.toUpperCase()}${f.slice(1)} ${pctOf(w)}`] : [];
+        }),
+      ];
+      const age = `read ${ageOf(r.read_at, now)}`;
+      return `Claude usage: ${l.profile} ${parts.join(" · ") || "—"} (${why === null ? age : `${age}; ${why}`})\n`;
+    })
+    .join("");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -687,7 +793,9 @@ export async function doctor(io: IO, deps: DoctorDeps, opts: DoctorOptions): Pro
     }
   }
   io.stdout(
-    opts.json === true ? `${JSON.stringify(report, null, 2)}\n` : renderHuman(report.checks),
+    opts.json === true
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : `${renderHuman(report.checks)}${renderUsage(report.claude_logins ?? [], deps.now())}`,
   );
   return blocking(report).length > 0 ? EXIT.ERROR : EXIT.OK;
 }

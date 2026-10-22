@@ -409,7 +409,7 @@ describe("one machine filter: the readiness verdict agrees with placement", () =
   /** Placement's view of the verdict's machine, and the candidate line for task `t` of `w`. */
   const candidate = (i: ReadinessInput, w = AUTO, t = task(w)) => {
     const v = readiness(i);
-    const view = machineView(i, v, v.usage.five_hour_pct);
+    const view = machineView(i, v, v.usage);
     const p = place(t, w, snap(view), OPTS);
     return { v, line: p.candidates[0]?.line ?? "", placed: p.host !== null };
   };
@@ -458,6 +458,15 @@ describe("one machine filter: the readiness verdict agrees with placement", () =
       }
     });
   }
+
+  it("usage is the machine's best login: eligible with one fresh login, and the line names it", () => {
+    // the daemon hands readiness its best candidate (rankAccounts: work at 12%, beside a hot 95%)
+    const { v, line, placed } = candidate(input({ usage: { account: "work", five_hour_pct: 12 } }));
+    expect(v.usage).toEqual({ account: "work", five_hour_pct: 12 });
+    expect(v.eligible).toBe(true);
+    expect(placed).toBe(true);
+    expect(line).toContain("usage 12% (work)");
+  });
 
   it("heavy slots: the verdict says the machine takes work, a heavy task's line says the slots", () => {
     const w = wave(

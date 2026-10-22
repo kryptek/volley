@@ -19,6 +19,17 @@ const ALIASES = new Set(["fable", "opus", "sonnet", "haiku"]);
 /** `claude-<family>-<major>[-<minor>]` anywhere in a provider-qualified id. */
 const FAMILY = /claude-(fable|opus|sonnet|haiku)-(\d+)(?:-(\d+))?/;
 
+/** The model family `model` belongs to (`claude-<family>-…`, or a bare alias); null when unreadable. */
+export function familyOf(
+  model: string | null | undefined,
+): "fable" | "opus" | "sonnet" | "haiku" | null {
+  if (model === null || model === undefined) return null;
+  const id = model.trim().toLowerCase();
+  if (ALIASES.has(id)) return id as "fable" | "opus" | "sonnet" | "haiku";
+  const m = FAMILY.exec(id);
+  return m !== null ? (m[1] as "fable" | "opus" | "sonnet" | "haiku") : null;
+}
+
 /** [major, minor] at or above which a family runs with a 1M window natively. */
 const NATIVE_1M: Record<string, [number, number]> = {
   fable: [0, 0],

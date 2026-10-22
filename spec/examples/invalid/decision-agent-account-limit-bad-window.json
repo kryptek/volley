@@ -1,0 +1,27 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-21T14:06:01.000Z",
+  "channel": "_waves/decisions",
+  "type": "decision_opened",
+  "payload": {
+    "decision_id": "agent_account_limit-3f9a0c1d2e4b",
+    "wave": "w1",
+    "task": "T1",
+    "kind": "agent_account_limit",
+    "question": "Needs you: w1-t1-implementer-1 (T1/implementer) runs on Claude account primary, at 91% of its 5-hour window (resets 2026-10-21T18:10:00.000Z). Move it to work (5h 12%, 7d 40%)? The session restarts with a resume note; the account's window resets at 2026-10-21T18:10:00.000Z.",
+    "options": [
+      "move w1-t1-implementer-1 to work",
+      "not now"
+    ],
+    "pointers": {},
+    "opened_at": "2026-10-21T14:06:01.000Z",
+    "agent_id": "w1-t1-implementer-1",
+    "role": "implementer",
+    "acct": "primary",
+    "window": "monthly",
+    "pct": 91,
+    "resets_at": "2026-10-21T18:10:00.000Z",
+    "suggested": "work"
+  }
+}

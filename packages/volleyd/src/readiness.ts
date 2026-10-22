@@ -183,7 +183,7 @@ function blockers(i: ReadinessInput): string[] {
 export function machineView(
   i: Pick<ReadinessInput, "name" | "local" | "record" | "held" | "localAgents" | "downSince">,
   v: Pick<ReadinessPayload, "ready" | "reasons" | "drain" | "max_agents" | "placed" | "heavy">,
-  usagePct: number | null,
+  usage: { account: string | null; five_hour_pct: number | null },
 ): MachineView {
   return {
     name: i.name,
@@ -197,7 +197,8 @@ export function machineView(
     ...(i.localAgents !== undefined ? { local_agents: i.localAgents } : {}),
     ...(i.downSince !== undefined ? { down_since: i.downSince } : {}),
     heavy: v.heavy,
-    usage_pct: usagePct,
+    usage_pct: usage.five_hour_pct,
+    ...(usage.account !== null ? { usage_account: usage.account } : {}),
     held: i.held,
   };
 }
@@ -216,7 +217,7 @@ export function readiness(i: ReadinessInput): ReadinessPayload {
       placed: i.placed,
       heavy: i.heavy,
     },
-    i.usage.five_hour_pct,
+    i.usage,
   );
   const snap = { machines: [view, ...(i.local ? (i.peers ?? []) : [])], reservations: {} };
   const why = machineIneligible(view, snap, i.filter);

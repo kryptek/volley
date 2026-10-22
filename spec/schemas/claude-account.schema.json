@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/claude-account.schema.json",
   "title": "Volley Claude Account Usage",
-  "description": "A supervisor's retained per-account fold of its agents' usage samples, published to volley/_system/claude-accounts/<acct>. The rate-limit windows belong to the account, not the agent, so the newest sample wins. See spec section 4.6.12.",
+  "description": "A supervisor's retained per-account fold of its agents' usage samples and its machines' usage probe readings, published to volley/_system/claude-accounts/<acct>. The rate-limit windows belong to the account, not the agent, so the newest sample wins. See spec section 4.6.12.",
   "allOf": [
     { "$ref": "envelope.schema.json" },
     {
@@ -25,13 +25,45 @@
               "minLength": 1,
               "description": "The plan label Claude Code reports: at sign-in for a registry account, from `claude auth status` of the default profile for `primary`. Absent when it is not known."
             },
+            "email": {
+              "type": "string",
+              "format": "email",
+              "maxLength": 254,
+              "description": "The login's e-mail address: the login's identity as Claude Code's own configuration records it; never a credential. Absent when it is not known."
+            },
+            "org": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "description": "The login's organisation name: the login's identity as Claude Code's own configuration records it; never a credential. Absent when it is not known."
+            },
             "five_hour": {
               "oneOf": [{ "$ref": "usage.schema.json#/$defs/window" }, { "type": "null" }],
-              "description": "The 5-hour window from the newest sample that carried one; null when none has."
+              "description": "The 5-hour window from the newest sample or usage probe reading that carried one; null when none has."
             },
             "weekly": {
               "oneOf": [{ "$ref": "usage.schema.json#/$defs/window" }, { "type": "null" }],
-              "description": "The weekly window from the newest sample that carried one; null when none has."
+              "description": "The weekly window from the newest sample or usage probe reading that carried one; null when none has."
+            },
+            "model_weekly": {
+              "type": "object",
+              "propertyNames": { "enum": ["fable", "opus", "sonnet", "haiku"] },
+              "additionalProperties": { "$ref": "usage.schema.json#/$defs/window" },
+              "description": "Weekly windows scoped to one model family, as the machine that holds the login last read them with its usage probe (the statusLine reports none). Absent until a probe has read one."
+            },
+            "probe": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["machine", "state", "attempted_at"],
+              "description": "The newest usage probe attempt for this account's login, a failed one included: the machine that holds the login, how it went (machine.schema.json claude_logins[].state), when, and when it last read. Absent until a probe has reported.",
+              "properties": {
+                "machine": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                "state": {
+                  "enum": ["ok", "expired", "no_credential", "rate_limited", "rejected", "error"]
+                },
+                "attempted_at": { "type": "string", "format": "date-time" },
+                "read_at": { "type": "string", "format": "date-time" }
+              }
             },
             "agents": {
               "type": "array",
@@ -46,12 +78,12 @@
             "sampled_at": {
               "type": "string",
               "format": "date-time",
-              "description": "captured_at of the newest sample folded in."
+              "description": "captured_at of the newest sample, or read_at of the newest usage probe reading, folded in (a probe's attempt while there is neither)."
             },
             "sampled_by": {
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
-              "description": "The agent that published that sample."
+              "description": "The agent that published the newest statusLine sample; absent while only usage probes have reported."
             }
           }
         }

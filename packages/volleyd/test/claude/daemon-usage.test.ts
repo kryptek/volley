@@ -5,10 +5,12 @@ import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
 import { usageAccountTopic } from "../../src/claude/usage";
 import { Journal } from "../../src/journal";
+import { MACHINE_CHANNEL, machineTopic } from "../../src/machines";
 import type { ReconcileProbes } from "../../src/reconcile";
 import { eventually } from "../helpers/broker-wait";
 import { NS } from "../helpers/daemon-env";
 import { type FakeClock, fakeClock } from "../helpers/fake-clock";
+import { schemaErrors } from "../helpers/schema";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervised-env";
 import { tempDir } from "../helpers/tmp";
 import { stubEnv } from "../helpers/with-env";
@@ -55,6 +57,11 @@ async function publishUsage(agent: string, payload: unknown): Promise<void> {
   );
 }
 
+async function accountEnvelope(acct: string): Promise<unknown> {
+  const raw = await s.agent.queryRetained(usageAccountTopic(acct), 300);
+  return raw === null || raw === "" ? null : JSON.parse(raw);
+}
+
 async function accountRecord(acct: string): Promise<Record<string, unknown> | null> {
   const raw = await s.agent.queryRetained(usageAccountTopic(acct), 300);
   return raw === null || raw === ""
@@ -95,6 +102,8 @@ function spareProfile(base: string): { root: string; primary: string; spare: str
           machine: "local",
           created: "2026-10-18T12:00:00.000Z",
           plan: "max",
+          email: "spare@example.com",
+          org: "Example Org",
           signed_in_at: "2026-10-18T12:00:00.000Z",
         },
       ],
@@ -116,6 +125,8 @@ describe("usage metering (daemon)", () => {
   it("folds samples per account, opens one account_limit decision, and moves the wave only on an answer", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
       daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
     });
 
@@ -185,6 +196,8 @@ describe("usage metering (daemon)", () => {
     const { root, primary, spare } = spareProfile(tempDir("volleyd-usage-"));
     const clock: FakeClock = fakeClock(T0);
     s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
       daemon: { claude: { root, primaryDir: primary }, clock },
       reapGraceMs: 60_000,
     });
@@ -230,6 +243,8 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
   it("an account's windows outlive a restart with nothing running on it", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
       daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
     });
     await publishUsage("other-agent", {
@@ -259,9 +274,33 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
     });
   }, 20_000);
 
+  it("a registry account's record carries its login's email and org; it validates", async () => {
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+    s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
+      daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
+    });
+    await publishUsage("other-agent", {
+      ...usage("spare", 10),
+      account: null,
+      config_dir: join(root, "spare"),
+    });
+    expect(await recordWhen("spare", () => true)).toMatchObject({
+      account: "spare",
+      label: "Spare",
+      plan: "max",
+      email: "spare@example.com",
+      org: "Example Org",
+    });
+    expect(schemaErrors("claude-account.schema.json", await accountEnvelope("spare"))).toEqual([]);
+  }, 20_000);
+
   it("a sample retained while the daemon was down opens account_limit on restart, with no new sample", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
       daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
     });
     await s.daemon.stop();
@@ -282,6 +321,8 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
   it("a remote host's agent is metered on that host's account, never the local primary", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
       daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
     });
     await s.daemon.stop();
@@ -295,6 +336,39 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
       },
       new Date(T0),
     );
+    // gpu-box is a paired machine whose record names its default profile's login.
+    writeFileSync(
+      join(s.env.home, "config.yaml"),
+      "hosts:\n  gpu-box:\n    target: dev@gpu-box\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n",
+    );
+    await s.agent.publish(
+      machineTopic("gpu-box"),
+      JSON.stringify({
+        ...buildEnvelope({
+          agentId: "gpu-box",
+          parentId: null,
+          channel: MACHINE_CHANNEL,
+          type: "machine",
+          payload: {
+            name: "gpu-box",
+            os: "linux",
+            cores: 8,
+            tunnel: "up",
+            load: [0.1, 0.1, 0.1],
+            agents: 1,
+            auth: {
+              gh: "ok",
+              claude: "signed_in",
+              trust: "ok",
+              claude_email: "gpu@example.com",
+              claude_org: "Example Org",
+            },
+            last_seen: new Date(T0).toISOString(),
+          },
+        }),
+      }),
+      { qos: 1, retain: true },
+    );
     const second = await s.restart({ reconcile: probes });
     await second.reconciled();
 
@@ -302,12 +376,179 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
     await publishUsage(AGENT, usage("primary", 20));
     expect(
       await recordWhen("primary@gpu-box", (r) => (r.five_hour as { pct: number }).pct === 95),
-    ).toMatchObject({ account: "primary@gpu-box", agents: [remote], waves: ["w1"] });
+    ).toMatchObject({
+      account: "primary@gpu-box",
+      email: "gpu@example.com",
+      org: "Example Org",
+      agents: [remote],
+      waves: ["w1"],
+    });
+    expect(
+      schemaErrors("claude-account.schema.json", await accountEnvelope("primary@gpu-box")),
+    ).toEqual([]);
     expect(
       await recordWhen("primary", (r) => (r.five_hour as { pct: number }).pct === 20),
     ).toMatchObject({ agents: [AGENT], five_hour: { pct: 20 } });
     // A wave move cannot reach a remote host's agents: its window opens no decision.
     await s.consumed();
     expect(s.journal().filter(limitOpened)).toEqual([]);
+  }, 20_000);
+});
+
+describe("usage probe readings in machine records (daemon)", () => {
+  const probes: ReconcileProbes = {
+    branch: async (_repo, branch) => ({ name: branch, exists: true, head: "abc123" }),
+    pr: async () => null,
+  };
+  const READ = new Date(T0).toISOString();
+  const login = (profile: string, fable: number) => ({
+    profile,
+    state: "ok" as const,
+    attempted_at: READ,
+    reading: {
+      read_at: READ,
+      five_hour: { pct: 37, resets_at: RESETS },
+      weekly: { pct: 56, resets_at: RESETS },
+      model_weekly: { fable: { pct: fable, resets_at: RESETS } },
+    },
+  });
+
+  it("a paired machine's logins meter as primary@<name> and <id>@<name>; one the registry lacks is skipped", async () => {
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+    // `work` is a profile the registry has on peer-a; `stray` is unknown there.
+    const reg = JSON.parse(readFileSync(join(root, "accounts.json"), "utf-8"));
+    reg.accounts.push({
+      id: "work",
+      label: "Work",
+      machine: "peer-a",
+      created: "2026-10-18T12:00:00.000Z",
+      signed_in_at: "2026-10-18T12:00:00.000Z",
+    });
+    writeFileSync(join(root, "accounts.json"), JSON.stringify(reg));
+    s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
+      daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
+    });
+    await s.daemon.stop();
+    writeFileSync(
+      join(s.env.home, "config.yaml"),
+      "hosts:\n  peer-a:\n    target: dev@peer-a\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n",
+    );
+    await s.agent.publish(
+      machineTopic("peer-a"),
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "peer-a",
+          parentId: null,
+          channel: MACHINE_CHANNEL,
+          type: "machine",
+          payload: {
+            name: "peer-a",
+            os: "linux",
+            cores: 8,
+            tunnel: "up",
+            load: [0.1, 0.1, 0.1],
+            agents: 0,
+            claude_logins: [login("default", 20), login("work", 70), login("stray", 5)],
+            last_seen: READ,
+          },
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    const second = await s.restart({ reconcile: probes });
+    await second.reconciled();
+
+    const probe = { machine: "peer-a", state: "ok", attempted_at: READ, read_at: READ };
+    expect(await recordWhen("primary@peer-a", (r) => r.probe !== undefined)).toMatchObject({
+      account: "primary@peer-a",
+      five_hour: { pct: 37 },
+      weekly: { pct: 56 },
+      model_weekly: { fable: { pct: 20 } },
+      probe,
+    });
+    expect(await recordWhen("work@peer-a", (r) => r.probe !== undefined)).toMatchObject({
+      account: "work@peer-a",
+      label: "Work",
+      model_weekly: { fable: { pct: 70 } },
+      probe,
+    });
+    for (const acct of ["primary@peer-a", "work@peer-a"]) {
+      const env = await accountEnvelope(acct);
+      expect(schemaErrors("claude-account.schema.json", env)).toEqual([]);
+      expect((env as { payload: object }).payload).not.toHaveProperty("sampled_by");
+    }
+    await s.consumed();
+    for (const acct of ["stray@peer-a", "stray", "work", "primary"]) {
+      expect(await accountRecord(acct)).toBeNull();
+    }
+  }, 20_000);
+
+  it("the supervisor's own record: its default login is primary", async () => {
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+    s = await makeSupervisedEnv({
+      // Pinned to the primary: the wave-level account_limit and move (no D3 balancing).
+      waveExtra: "account: primary",
+      daemon: {
+        claude: { root, primaryDir: primary },
+        clock: fakeClock(T0),
+        fleet: {
+          version: "0.5.0",
+          localDoctor: async () => ({
+            checks: [],
+            claude_logins: [login("default", 33), login("spare", 44)],
+            doctor_at: READ,
+          }),
+          localPath: () => ({ claude: true, bun: true }),
+        },
+      },
+    });
+    expect(await recordWhen("primary", (r) => r.probe !== undefined)).toMatchObject({
+      account: "primary",
+      model_weekly: { fable: { pct: 33 } },
+      probe: { state: "ok", read_at: READ },
+    });
+    expect(await recordWhen("spare", (r) => r.probe !== undefined)).toMatchObject({
+      account: "spare",
+      model_weekly: { fable: { pct: 44 } },
+    });
+    expect(schemaErrors("claude-account.schema.json", await accountEnvelope("primary"))).toEqual(
+      [],
+    );
+  }, 20_000);
+
+  it("a Fable agent's trigger reads the probe's model_weekly.fable: an agent_account_limit on that window", async () => {
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+    restoreEnv = stubEnv({ VOLLEY_CLAUDE_DIR: root });
+    s = await makeSupervisedEnv({
+      // Balanced (no pin): a hot account opens an agent-level decision.
+      daemon: {
+        claude: { root, primaryDir: primary },
+        clock: fakeClock(T0),
+        fleet: {
+          version: "0.5.0",
+          localDoctor: async () => ({
+            checks: [],
+            claude_logins: [login("default", 95), login("spare", 10)],
+            doctor_at: READ,
+          }),
+          localPath: () => ({ claude: true, bun: true }),
+        },
+      },
+    });
+    await recordWhen("primary", (r) => r.probe !== undefined);
+    // The agent's statusLine says Fable, and its 5-hour and 7-day windows have room.
+    await publishUsage(AGENT, { ...usage("primary", 20), model: "claude-fable-5-1" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_account_limit",
+    );
+    expect(opened.data).toMatchObject({
+      agent_id: AGENT,
+      acct: "primary",
+      window: "model_weekly:fable",
+      pct: 95,
+      suggested: "spare",
+    });
   }, 20_000);
 });

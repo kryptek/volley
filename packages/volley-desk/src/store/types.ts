@@ -245,6 +245,7 @@ export const DECISION_KINDS = [
   "pr_head_moved",
   "spawn_budget_exhausted",
   "account_limit",
+  "agent_account_limit",
   "machine_down",
   "merge_refused",
   "release_go",
@@ -266,6 +267,10 @@ export interface DecisionPayload {
   resolved?: { answer: string; by: string; at: string };
   /** `account_limit` extras (SPEC §4.6.12): the account, its 5-hour pct and reset, the suggestion. */
   acct?: string;
+  /** `agent_account_limit` extras (SPEC §4.6.12): the agent, its role and the window at the level. */
+  agent_id?: string;
+  role?: string;
+  window?: string;
   pct?: number;
   resets_at?: string | null;
   suggested?: string | null;
@@ -397,12 +402,35 @@ export interface ClaudeAccountPayload {
   account: string;
   label?: string;
   plan?: string;
+  /** The login's e-mail (identity, never a credential); absent while not known. */
+  email?: string;
+  /** The login's organisation name; absent while not known. */
+  org?: string;
   five_hour: UsageWindow | null;
   weekly: UsageWindow | null;
+  /** Weekly windows scoped to one model family, as the machine's usage probe last read them. */
+  model_weekly?: Partial<Record<ModelFamily, UsageWindow>>;
+  /** The newest usage probe attempt for this login; absent until a probe has reported. */
+  probe?: UsageProbe;
   agents: string[];
   waves: string[];
   sampled_at: string;
   sampled_by?: string;
+}
+
+/** claude-account.schema.json `model_weekly`'s keys. */
+export type ModelFamily = "fable" | "opus" | "sonnet" | "haiku";
+
+/** claude-account.schema.json `probe.state` (machine.schema.json `claude_logins[].state`). */
+export type ProbeState = "ok" | "expired" | "no_credential" | "rate_limited" | "rejected" | "error";
+
+/** claude-account.schema.json `probe`: how the holding machine's last usage probe went. */
+export interface UsageProbe {
+  machine: string;
+  state: ProbeState;
+  attempted_at: string;
+  /** The last successful read. */
+  read_at?: string;
 }
 
 /**
@@ -421,6 +449,8 @@ export interface ClaudeSignin {
   /** A paired machine's printed (manual-code) URL next to the forwarded one: for a phone. */
   manual_url?: string;
   plan?: string;
+  /** The login's e-mail, from `claude_signin_done` (SPEC §4.6.11). */
+  email?: string;
   reason?: string;
   /** Local receipt time (ms). */
   at: number;
@@ -465,6 +495,9 @@ export interface MachinePayload {
     claude: "signed_in" | "not_signed_in" | "missing" | "unknown";
     trust: "ok" | "missing" | "unknown";
     claude_plan?: string;
+    /** The default profile's login e-mail, only while it is signed in. */
+    claude_email?: string;
+    claude_org?: string;
   };
   repo?: {
     path: string;
@@ -759,6 +792,11 @@ export interface DeskState {
    * wave's `events` mirror, by wave; live-only (the topic is not retained), kept across a resync.
    */
   waveFeed?: Record<string, FeedEntry[]>;
+  /**
+   * The account events (`account_chosen`, `agent_account_moved`, SPEC §4.6.11) from each wave's
+   * `events` mirror, by wave; live-only like `waveFeed`.
+   */
+  accountFeed?: Record<string, FeedEntry[]>;
 }
 
 /** When each agent (by id) answered a message id, in local ms. */

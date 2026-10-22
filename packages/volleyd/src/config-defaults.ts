@@ -69,6 +69,7 @@ export const CONFIG_DEFAULTS: Tunables = {
     rereview_max: 2,
     ci_fixup_max: 2,
     question_max: 1,
+    account_move_max: 2,
     budget_raise_max: 2,
     inbox_answered_ttl_s: 600,
     merge: "auto",

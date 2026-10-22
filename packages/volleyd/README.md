@@ -368,9 +368,9 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
 | `admission` | — | the retained admission summary (null before the first sample) |
 | `spawn` | `wave`, `task`, `role?` (default `implementer`) | `{ kind: "launched", agent_id, workspace, worktree }`, or the spawn's decision `{ kind, decision, decision_id }`; outside admission. A failure carries `{ code, lock }` |
-| `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, dir, signin: { state, url?, flow?, attach? } }], primary: { plan? }, sharing }` |
-| `claude_account_add` | `label`, `machine?`, `by` | answered once the sign-in URL is known: `{ account, acct, topic, url, flow, attach }` |
-| `claude_signin` | `acct`, `by` | the same, for an existing profile |
+| `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, email?, org?, dir?, signin: { state, url?, flow?, attach? } }], primary: { plan?, email?, org? }, machines: [{ name, kind?, claude, plan?, email?, org?, tunnel }], remote_signins, sharing }` |
+| `claude_account_add` | `label`, `machine?` (a paired machine: the profile is created and signed in there, as `<acct>@<machine>`), `by` | answered once the sign-in URL is known: `{ account, acct, topic, url, flow, attach }` |
+| `claude_signin` | `acct` (a registry account, `primary@<name>` or `<acct>@<name>`), `by` | the same, for an existing profile |
 | `claude_sync` | `acct?`, `by` | `{ synced: [{ acct, shared, mcp_servers? }] }` |
 | `agent_move_account` | `agent`, `acct`, `by` | answered after the respawn: `{ agent_id, decision?, from, to }` |
 
@@ -476,27 +476,60 @@ volleyd can run agents under several Claude accounts. Each account is its own Cl
 profile: a directory under `~/.volley/claude/<acct>/` (`$VOLLEY_CLAUDE_DIR` moves the root) that
 the agent gets as `CLAUDE_CONFIG_DIR`. `primary` is your own default profile (`~/.claude`, no
 `CLAUDE_CONFIG_DIR`): what agents run under when nothing selects an account. The registry is
-`~/.volley/claude/accounts.json` (`{ id, label, machine, created, plan?, signed_in_at? }`).
-The primary is never in it: `claude_accounts` asks `claude auth status` of the default profile and
-answers its plan as `primary: { plan? }` (none when it is not logged in or names no plan), and the
-primary's usage record carries that plan from then on.
+`~/.volley/claude/accounts.json` (`{ id, label, machine, created, plan?, signed_in_at?, email?,
+org? }`). Ids are global, not per machine: a profile of the same account on another machine is its
+own registry entry with its own label (the Desk's `Work (peer-a)` → `work-peer-a`). The primary is never in it: `claude_accounts` asks `claude auth status` of the default
+profile and answers its plan as `primary: { plan?, email?, org? }` (no plan when it is not logged
+in or names none; no identity when it is not logged in), and the primary's usage record carries
+them from then on. `machines` lists every machine record's Claude login (`claude`, `plan`,
+`email`, `org`: SPEC §4.6.15), the supervisor's own and each paired machine's.
+
+**Identity.** A login's `email` and `org` are what Claude Code itself records in the profile's
+`.claude.json` (`oauthAccount.emailAddress`, `oauthAccount.organizationName`); volleyd reads
+exactly those two fields of it and nothing else (`src/claude/identity.ts`; volley-cli's doctor
+keeps a byte-identical copy). A sign-in stores them in the registry and on `claude_signin_done`;
+a registry account's usage record and `claude_accounts` row re-read them from the profile's file
+(it wins over the registry; a profile not signed in has none), and a paired machine's
+`primary@<name>` record takes them from its machine record. They are identity, not credentials,
+and let a client show one account that is signed in on several machines once; they are never
+journaled.
 SPEC §4.6.11 is the contract; the accounts spike (`docs/claude-accounts-spike.md`) has the
 evidence behind each choice below.
 
 > **Terms note.** Volley never collects, stores or intermediates Claude credentials. Sign-in
 > completes through Anthropic's own flow (`claude auth login`, in your browser); volleyd sees the
-> authorize URL and the plan label, never a code, a token or a Keychain item. Usage limits assume
+> authorize URL and the plan label, never a code, a token or a Keychain item. The one exception
+> (SPEC §4.6.11) is the usage probe of each machine's doctor (Usage metering, below): the machine
+> that holds a login reads that login's own token, in memory, for one read-only request to
+> Claude's usage endpoint, and publishes only percentages and reset times. The token never
+> leaves that process: it is never refreshed, written, logged or journaled, and it never crosses
+> ssh or the broker. Claude Code's statusLine has no per-model weekly window, and balancing
+> needs one. Usage limits assume
 > individual use: several profiles are for an individual's own accounts, not for pooling or
 > sharing one subscription among people.
 
 ```sh
 volley claude add "Work"            # profile + background sign-in; prints the sign-in URL
 volley claude add "Work" --wait     # … and waits until the sign-in finishes
+volley claude add "Work" --machine peer-a  # a profile on a paired machine, signed in there
 volley claude signin work           # sign an existing profile in again
-volley claude list                  # profiles, sign-in state, plan, sharing modes
+volley claude list                  # one block per account (by e-mail): machines, usage, sharing
+volley claude list --show-email     # … with the e-mail unmasked (--json: the raw answer + records)
 volley claude sync [work]           # re-apply sharing.yaml, re-sync the MCP servers
+volley claude balance               # per machine: accounts ranked by headroom, each family's next pick
+volley claude balance --model claude-opus-5-5 --machine peer-a  # … for one model on one machine
 volley claude move <agent-id> work  # stop an agent and respawn it under another account
 ```
+
+`volley claude list` groups the logins the way the Desk's Claude accounts cards do: one block per
+Anthropic account, keyed by the login's e-mail (masked as `o•••@example.com` unless
+`--show-email`; an account whose e-mail is not reported yet gets its own block, headed by its id),
+one line per machine holding it (this machine's profiles and default login, each paired
+machine's), and per usage window the freshest reading among its retained usage records
+(`volley/_system/claude-accounts/<acct>`), with where it came from and how old it is. A member's
+older reading that disagrees is marked `(stale)`. A block missing a machine (this machine, or a
+paired machine in the answer's `machines[]`) ends with `not on: peer-b`. `--json` prints the `claude_accounts` answer
+with the records it read as `records`.
 
 **Sign-in.** `claude_account_add` creates the directory (`0700`) and registry entry, then runs
 `claude auth login` under that `CLAUDE_CONFIG_DIR` in a detached tmux session
@@ -508,7 +541,7 @@ the code straight back to the `claude` process. volleyd answers the op with the 
 retained: whoever opens it first picks the account; not retained is not private — under the
 example broker ACL every client, agents included, may read `volley/#` and so the URL while the
 sign-in runs: restrict `volley/_system/claude/#` to the owner's clients to keep it from them), then polls `claude auth status` until
-`loggedIn` → `claude_signin_done { acct, plan }`, or `claude_signin_failed { acct, reason }`
+`loggedIn` → `claude_signin_done { acct, plan, email?, org? }`, or `claude_signin_failed { acct, reason }`
 (the login exited, `claude_signin_timeout_ms` passed, or tmux is missing — then it tells you to
 run `CLAUDE_CONFIG_DIR=<dir> claude auth login` yourself). Without a `$BROWSER` call the URL is
 the one Claude Code printed (`flow: manual_code`): its page shows a code to paste into the
@@ -543,11 +576,37 @@ at once and nothing more of it is published. A machine whose `claude auth status
 `claude_accounts` lists it under `remote_signins: [{ acct, state: "pending", url?, flow?, attach?,
 manual_url? }]` for a late client.
 
-**Selection.** An agent runs under its task's `account:`, else the wave's, else
-`claude.default_account` (a tunable; `null` = primary), else the primary. `most_headroom` is the
-signed-in account with the lowest 5-hour usage (see "Usage metering"), or the primary while no
-account has usage data. An account that has not reported usage yet is not ranked, so a profile
-at 80% wins over a primary that simply has not reported (it may be at 0%). A spawn under an unknown account, one
+**A profile on a paired machine.** `claude_account_add { label, machine: "<name>" }` (`volley
+claude add <label> --machine <name>`) for a configured paired machine records `{ id, machine:
+"<name>" }` in the registry (nothing is created here) and signs the profile in there the same way,
+as the account `<id>@<name>`: the first step also makes `~/.volley/claude/<id>` on the box
+(`mkdir -p`, `chmod 700`), the sealed `signin.sh` exports it as `CLAUDE_CONFIG_DIR`, the session is
+`volley-signin-<id>` (the attach line names it), and the poll is `CLAUDE_CONFIG_DIR=<that dir>
+claude auth status` (the only remote step the fence lets carry an env). On done volleyd reads the
+login's identity with `cat .claude.json` in that dir (only `email` and `org` of it, as above) and
+records `signed_in_at`, the plan and the identity in the registry before it publishes
+`claude_signin_done { acct: "<id>@<name>", plan?, email?, org? }`. `claude_signin { acct:
+"<id>@<name>" }` signs it in again. An unknown machine is refused with the host's error, before
+any registry entry. Its `claude_accounts` row carries `dir` (the dir on the box) once a sign-in
+there has read the box's `$HOME`, and none before. No token ever crosses the fence, and nothing
+(`sharing.yaml`, MCP servers) is copied to the box's profile, nor before an agent's spawn there.
+The sign-in records the profile's dir there (`dir` in `accounts.json`): its agents launch with
+exactly that `CLAUDE_CONFIG_DIR`, and a local spawn naming it is refused.
+
+**Selection.** An agent runs under its last account move, else its task's `account:`, else the
+wave's, else `claude.default_account` when it names `primary` or a registry id. Otherwise (the
+default `null`, or `most_headroom`, a synonym) volleyd **balances**: the agent runs under the
+account `rankAccounts` (see "Usage metering") puts first among the signed-in accounts of the
+machine it runs on, for its model. On the supervisor's machine those are `primary` and every
+signed-in local profile; on a paired machine `primary@<name>` and every signed-in profile kept
+for it (`<id>@<name>`). With the primary alone there is nothing to balance, so a one-login
+machine runs as before. Every pick is journaled right before `agent_spawned`, as
+`account_chosen { task, role, attempt, account, machine, source, why, candidates }` (`source`:
+`task`, `wave`, `config`, `balance`, `move`, or `default` for the primary alone), and
+`agent_spawned.data.account_why` repeats `why`, e.g. `work: most headroom on peer-a (5h 12%,
+7d 40%; primary@peer-a 5h 88%)`, `task names work`, `moved off primary (5h 91%) by autopilot`.
+No e-mail is in either. `claude_balance { model?, machine? }` answers each machine's ranked
+candidates and the pick per model family. A spawn under an unknown account, one
 not signed in yet, or one on another machine is refused (`CLAUDE_ACCOUNT_UNAVAILABLE`, through the
 usual spawn-failure retries). `launch.sh` then exports `CLAUDE_CONFIG_DIR` and unsets
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and
@@ -558,8 +617,12 @@ holds or sits in `$VOLLEYD_HOME` admits none);
 `.volley/agent.json`, `agent_spawned` and the agent's registry entry record `claude_account`.
 Folder trust is per profile: the spawn reads the profile's own `.claude.json`, and a
 `repo_untrusted` decision carries `claude_config_dir` so a `trust` answer is recorded there.
-Remote-host tasks run under the box's default profile: an account named for one is refused, and
-the config default does not apply there.
+A remote-host task runs under the box's default profile or a profile kept for that box: its
+`launch.sh` (written over ssh) exports the dir its sign-in recorded, and the fence seals it only
+for that dir, a signed-in registry profile of that host, and a worktree under the host's
+`worktree_root`. Its trust is read (and a `trust` answer recorded) in that profile's
+`.claude.json` on the box. A local profile named for a remote task is refused, and a config
+default naming a profile kept elsewhere does not apply there (it balances).
 
 **Sharing** (`~/.volley/claude/sharing.yaml`, `item: mode`): what each profile shares with the
 primary. Applied before every spawn under a profile and by `volley claude sync`.
@@ -580,17 +643,21 @@ profile's first agent does not stop at onboarding (read → set that key → tem
 rename, under Claude Code's own `.claude.json.lock/`; a lock older than
 `claude_json_lock_stale_ms` was left by a crashed process and is taken over). MCP entries can carry third-party secrets (`env`,
 `headers`), so volleyd never publishes or journals them (`claude_profile_synced` carries counts).
-`.credentials.json` (Claude Code's fallback when the Keychain is locked) is never touched;
-`test/no-credentials.test.ts` keeps every credential location out of `src/`.
+`.credentials.json` (Claude Code's fallback when the Keychain is locked) is never touched by
+volleyd; `test/no-credentials.test.ts` keeps every credential location out of `src/`, and out of
+the machine doctor except its usage probe's two read-only lookups.
 
-**Moving an agent.** `agent_move_account { agent, acct }` journals `agent_account_moved
-{ agent_id, role, from, to, by }` first, cancels the agent (mailbox `cancel` + Escape) and waits
+**Moving an agent.** `agent_move_account { agent, acct }` (`acct` an account of the agent's own
+machine: for an agent on a paired machine, `primary` or a profile kept for it, as `<id>` or
+`<id>@<name>`) journals `agent_account_moved { agent_id, role, from, to, by, decision_id?, why }`
+first, cancels the agent (mailbox `cancel` + Escape) and waits
 up to `account_move_stop_ms` for its terminal status. Then it retires it (`moved`) and respawns
 the role under the other account: a new attempt in the same worktree, with a resume note at the
 end of its brief. A reviewer, fixup or rebase keeps its start point and its own attempt's worktree,
 with the `.volley/` inputs it was given. The move is replayed from the journal, so later spawns of that task role keep
 the new account. An agent that does not stop is not respawned (`ACCOUNT_MOVE_STOP_TIMEOUT`
-alarm): two sessions never share a worktree. Nothing rotates accounts automatically.
+alarm): two sessions never share a worktree. Autopilot moves an agent only by answering an
+`agent_account_limit` decision (below), under `autopilot.account_move_max`.
 
 ### Usage metering
 
@@ -611,8 +678,30 @@ open `account_limit`) as soon as the restarted daemon reads it. A remote host's 
 that host's own Claude login: its samples fold into `<acct>@<host>` (e.g. `primary@gpu-box`),
 never the local `primary`, and that record opens no decision (a wave move cannot reach it).
 
-When an account's 5-hour window reaches `claude.warn_at_pct` (default 90; a wave's `config:`
-can override it), each running wave with agents on that account gets one wave-level
+**The rank rule** (`rankAccounts`, SPEC §4.6.12): an account's headroom is the smallest of
+`100 − five_hour`, `100 − weekly` and, when the model's family (`fable`, `opus`, `sonnet`,
+`haiku`; `familyOf`) has a `model_weekly` window on the record, `100 − model_weekly[family]`. A
+window whose reset passed counts as empty, one not reported is left out, and a probe reading
+that is no longer fresh still counts until its `resets_at`. An account with no usage at all
+ranks after every known one, signed-in profiles before the primary. Highest headroom wins; ties
+go to fewer agents, then candidate order.
+
+**Running agents** (D2). When an account a supervised agent runs under reaches the wave's
+`claude.warn_at_pct` in a window that counts for it (5-hour, 7-day, or its model family's weekly
+window), volleyd opens one task-level `agent_account_limit { agent_id, role, acct, window, pct,
+resets_at, suggested }` that does not park the task. `suggested` is the best other account on
+the agent's machine under the level in every window that counts for it (none: only `not now`).
+Autopilot answers `move <agent> to <suggested>` (`agent_account_limit/move`, budget
+`account_move_max` per task role) or `not now` (`agent_account_limit/wait`); the move runs as
+`agent_move_account` does, with `by` the answerer, `decision_id` and `why` on
+`agent_account_moved`, and the respawn's `account_chosen.source` is `move`. No decision opens
+for an agent whose task, wave or `claude.default_account` names an account, one already
+moving, or a second time for the same task role, account, window and `resets_at` (after
+`not now` the next waits for the reset).
+
+**Pinned waves.** When an account's 5-hour window reaches `claude.warn_at_pct` (default 90; a
+wave's `config:` can override it), each running wave with agents on that account whose account
+is pinned (its task, its `account:` or `claude.default_account` names one) gets one wave-level
 `account_limit` decision: `acct`, `pct`, `resets_at`, and `suggested`, the account with the
 most headroom among those under the threshold in both windows, else a signed-in account that
 has not reported 5-hour usage yet (labelled "no usage yet", or "no 5-hour usage yet" when it has
@@ -623,8 +712,32 @@ nor for the same window once answered. **Nothing switches on its own.**
 Answering `move wave <w> to <acct>` (any signed-in account, not only the suggestion; an unusable
 one is refused and the decision stays open) journals `wave_account_moved { from, to, by,
 decision_id }`: the wave's new agents that would have started under `from` start under `to`,
-and running agents finish where they are. The weekly window is informational. The same data
-resolves `most_headroom`.
+and running agents finish where they are. A balanced wave gets no `move wave` decision; only
+when every candidate on a machine it uses is at or over the level in its 5-hour window does it
+get one `account_limit` with no suggestion (`not now`: new agents take the one with the most
+room until the window resets).
+
+**The usage probe.** The statusLine reports the 5-hour and weekly windows only, and only while
+an agent runs on the account; the per-model weekly windows (Fable's among them) come only from
+the usage endpoint Claude Code's `/usage` calls. So each machine's doctor probes the logins it
+holds: its default profile and each profile in its profiles root, read and called on that
+machine, numbers only out (volley-cli's README, `volley peer doctor`, has what is read and
+sent). The results ride in the machine record's `claude_logins`: every heartbeat of a paired
+machine's `volley peer run` (its doctor runs every 10 min), and the supervisor's own record (its
+`volley peer doctor --json` runs every 30 s, and the probe's on-disk memo holds it to one request
+per login per 5 min, with a backoff after 429 or 5xx). Whenever the daemon folds a record (its
+own in `publishOwnRecord`, a peer's as it arrives) it maps each login to an account record:
+`default` is `primary` on its own machine and `primary@<name>` on a peer, and a profile `<id>`
+is `<id>` (or `<id>@<name>`) when the registry has it on that machine (`accountForLogin`); a
+login the registry does not know there is skipped. `foldProbe` then takes the 5-hour and weekly
+windows when the reading is fresher than the newest statusLine sample, and the other way round.
+It also takes each family's `model_weekly` window (kept until a newer reading has one) and
+`probe { machine, state, attempted_at, read_at? }`, the newest attempt, a failed one included.
+The account record carries `model_weekly` once a family is known and `probe` once a probe has
+reported. `sampled_at` is the newest of sample and reading, and `sampled_by` appears only when
+a statusLine sample set it. The book keeps all of it on disk across restarts. The Desk's account cards and
+`volley claude list` show the probe's Fable window beside the 5-hour and 7-day ones, with the
+reading's age (or, while the last attempt failed, why, and when it last read).
 
 ---
 
@@ -722,7 +835,8 @@ left for you, with one push.
   any answer).
 - **Budgets** are per wave and key: `relaunch_max` and `respawn_max` per `<task>/<role>`,
   `nudge_max` and `question_max` per run (`<task>/<role>/<attempt>`), `rereview_max` and
-  `ci_fixup_max` (CI fixups, default 2) per task, and `budget_raise_max`, a multiple of the
+  `ci_fixup_max` (CI fixups, default 2) per task, `account_move_max` (automatic account moves,
+  `agent_account_limit`, default 2) per `<task>/<role>`, and `budget_raise_max`, a multiple of the
   wave's derived spawn budget that `raise by <n>` answers may reach. Each is reduced from the
   journal's `decision_auto_resolved` events, so a restart keeps them.
 - **Off**: `volleyd config set autopilot.enabled false` (or a wave's `config: { autopilot: {
@@ -766,10 +880,14 @@ autopilot: on
     spawn_budget_exhausted/raise: retries are the normal cost of a long wave
   machine_down · re-place queued tasks offered · re-place queued tasks · no budget
     machine_down/re-place: nothing is lost by re-placing a queued task
+  agent_account_limit · suggested !== null · move <agent> to <suggested> · account_move_max per <task>/<role> · max 2
+    agent_account_limit/move: the account is at the warn level and another login on the machine has room; the move restarts the session with a resume note
+  agent_account_limit · suggested === null · not now · no budget
+    agent_account_limit/wait: no other login on the machine has room; the agent finishes where it is and the window resets
   account_limit · suggested !== null · move wave <wave> to <suggested> · no budget
     account_limit/move: the daemon suggested a healthy account
   account_limit · suggested === null · not now · no budget
-    account_limit/wait: no account has headroom: wait for the window to reset
+    account_limit/wait: no account on the machine has headroom; new agents take the one with the most room; wait for the reset
   pr_head_moved · a green merge of the release branch only (accept offered) · accept · no budget
     pr_head_moved/accept: a release-branch merge into the PR is not new code
   pr_head_moved · otherwise (rereview offered) · rereview · rereview_max per <task> · max 2
@@ -2030,7 +2148,8 @@ record with `tunnel: down` (built when it connected: volleyd keeps the last hear
 `last_seen`, load and agents). Every record also carries the Fleet fields (SPEC §4.6.15):
 `kind: peer`, `disk` (where the worktrees go) and `uptime_s` read fresh each heartbeat, `memory`
 too (on macOS, `available_pct` is the last doctor run's `vm_stat` figure), and the last
-finished doctor run's `versions`, `auth` (states only: `gh`, `claude`, `trust`, `claude_plan`),
+finished doctor run's `versions`, `auth` (states only: `gh`, `claude`, `trust`, `claude_plan`, and the signed-in default profile's
+`claude_email` / `claude_org`),
 `repo`, `checks` (no fix text) and `doctor_at`. The service re-runs the doctor every 600 s
 (`PEER_DEFAULTS.doctor_interval_s`) beside the heartbeat, so a slow network probe never delays a
 beat past `machine_down_after_ms`; the version it compares the checkout against is the
@@ -2223,8 +2342,10 @@ record. A machine is eligible when its readiness verdict is `ready`, it is not d
 is under `max_agents`, its load per core (the higher of its 1- and 5-minute load averages) is at
 most `placement.load_per_core_max` (1.5),
 its available memory is at least `placement.mem_available_min_pct` (10 %), its free disk at least
-`placement.disk_free_min_gb` (5 GB), its account's 5-hour usage is under `claude.warn_at_pct`
-(unknown usage passes), its own admission is not holding starts (below), and, for a `heavy: true`
+`placement.disk_free_min_gb` (5 GB), its best login's 5-hour usage is under `claude.warn_at_pct`
+(unknown usage passes; the best login is the account `rankAccounts` puts first among the
+machine's signed-in ones, so one hot login beside a fresh one keeps the machine eligible, and the
+verdict's `usage` and the line name it: `usage 12% (work)`), its own admission is not holding starts (below), and, for a `heavy: true`
 task, every pool of the wave's `heavy_pools` that sets `per_machine` has a free slot there.
 Memory is the record's `memory.available_pct`, which has one definition on every machine: memory
 the kernel can hand out without paging anything active out, over total memory. On Linux that is
@@ -2251,7 +2372,7 @@ then the name.
 as written:
 
 ```
-load 3.2 on 16 cores · 1/4 agents · 71% mem · usage 34%
+load 3.2 on 16 cores · 1/4 agents · 71% mem · usage 34% (work)
 load 3.2 on 16 cores · 0/4 agents · 71% mem · usage 34% · heavy slots 1/1 free (backend-it) · preferred
 ineligible: overloaded: load 32.0 on 16 cores · no new agents
 ineligible: overloaded: memory available 9% (min 10%) · no new agents
@@ -3115,9 +3236,12 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     kill-session -t volley-signin-<acct> (no consent: a sign-in session holds no agent's
     work) — any other kill-session = CONSENT; no other tmux global option
   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
-    nc -z 127.0.0.1 <port> · printenv PATH | HOME
+    chmod 700 <home>/.volley/claude/<acct> (a remote profile dir: the only chmod on a
+    directory) · nc -z 127.0.0.1 <port> · printenv PATH | HOME
   claude auth status (exactly: the box's login state and plan, never a credential; a login
-    runs only from a sealed signin.sh)
+    runs only from a sealed signin.sh) — the one step with an env: `env.CLAUDE_CONFIG_DIR`
+    only, only `<abs>/.volley/claude/<acct>` (a profile the supervisor created there),
+    rendered as one single-quoted `CLAUDE_CONFIG_DIR=…` before the argv
   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
     `/info/exclude`, `<dir>/.volley/<name>` for a VOLLEY_READS name, or a sign-in dir's `url`
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
@@ -3129,19 +3253,25 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     (what the tmux session runs) is written whole, never appended, and its content must be
     exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS: a
     `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the profile block, an
-    integer in 100000..1000000, never in the env block); a
+    integer in 100000..1000000, never in the env block; its `CLAUDE_CONFIG_DIR`, if any,
+    exactly the `<home>/.volley/claude/<id>` the registry recorded at sign-in for a signed-in
+    profile `<id>` of that host — the script's `host`, SshTmuxHost's spec — with the worktree
+    under that host's `worktree_root`); a
     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG); and
     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
-    `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
-    login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
+    `signin.sh` exactly `renderSigninScript` for that dir with no profile dir, or with the
+    profile dir `<same abs>/.volley/claude/<same acct>` (`claude auth login`, never
+    `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
   volley peer doctor --json [--fix --yes [--clone --origin <https URL>]] — the machine's doctor
     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
     credentials or port, isCloneUrl); no other volley argv runs on a box
   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
-    mv -f .claude.json.volleyd.tmp .claude.json
+    mv -f .claude.json.volleyd.tmp .claude.json — or, for a profile the supervisor created
+    there, the same three steps on `<home>/.volley/claude/<acct>/.claude.json` and its
+    `.claude.json.volleyd.tmp` (absolute paths; the tmp the only other file base64 -d writes)
   Every other step's stdin is /dev/null, so no step can read the rest of the script.
 
 OPTIONS: every git and gh subcommand above has an exact option allow-list (GIT_SPECS and

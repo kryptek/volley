@@ -1,11 +1,17 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import axe from "axe-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { DeskStoreProvider } from "../src/store/context";
 import { demoMessages, demoReviewer } from "../src/store/fixtures";
 import { UNASSIGNED, initialState, reduceAll } from "../src/store/reducer";
-import type { DeskMessage, DeskState } from "../src/store/types";
-import { AgentWindow, NEUTRAL_ACCENT, markStatus } from "../src/windows/agent/AgentWindow";
+import type { DecisionPayload, DeskMessage, DeskState } from "../src/store/types";
+import {
+  AgentWindow,
+  type AgentWindowProps,
+  NEUTRAL_ACCENT,
+  markStatus,
+} from "../src/windows/agent/AgentWindow";
 import { Pipeline } from "../src/windows/agent/Pipeline";
 
 const NOW = Date.parse("2026-10-18T12:00:00Z");
@@ -338,5 +344,134 @@ describe("App agent windows", () => {
       vi.advanceTimersByTime(4_500);
     });
     expect(born()).toHaveLength(0);
+  });
+});
+
+describe("AgentWindow: the account it runs under (T8)", () => {
+  const ev = (type: string, seq: number, data: Record<string, unknown>): DeskMessage => ({
+    topic: "volley/_waves/status-chip/events",
+    envelope: {
+      schema_version: "0.1",
+      agent_id: "volleyd",
+      channel: "_waves/events",
+      type,
+      wall_time: new Date(NOW - 120_000 + seq * 1000).toISOString(),
+      payload: { wave: "status-chip", seq, task: "T1", data },
+    },
+    receivedAt: NOW,
+  });
+  const chosen = ev("account_chosen", 9001, {
+    task: "T1",
+    role: "fixup",
+    attempt: 1,
+    account: "primary",
+    machine: "local",
+    source: "balance",
+    why: "work: most headroom on peer-a (5h 12%, 7d 40%; primary@peer-a 5h 88%)",
+    candidates: [],
+  });
+  const moved = ev("agent_account_moved", 9002, {
+    agent_id: FIXUP,
+    role: "fixup",
+    from: "primary",
+    to: "work",
+    by: "autopilot",
+    decision_id: "d-acct-1",
+    why: "primary at 91% of its 5-hour window",
+  });
+  const limit: DecisionPayload = {
+    decision_id: "status-chip-t1-agent_account_limit-1",
+    wave: "status-chip",
+    task: "T1",
+    kind: "agent_account_limit",
+    question: `${FIXUP} runs under primary, at 91% of its 5-hour window.`,
+    options: [`move ${FIXUP} to work`, "not now"],
+    opened_at: new Date(NOW).toISOString(),
+    agent_id: FIXUP,
+    role: "fixup",
+    window: "five_hour",
+    acct: "primary",
+    pct: 91,
+    resets_at: null,
+    suggested: "work",
+  };
+
+  function renderAccount(
+    opts: { autopilot?: boolean; onResolve?: AgentWindowProps["onResolve"] } = {},
+  ) {
+    const state = stateWith(chosen, moved);
+    const agent = state.agents[FIXUP];
+    const wave = state.waves[agent?.wave ?? ""];
+    if (!agent || !wave?.state) throw new Error("no agent");
+    const autopilot = {
+      enabled: opts.autopilot ?? false,
+      auto_resolved: 0,
+      escalated: 0,
+      budgets: {},
+    };
+    return render(
+      <AgentWindow
+        agent={agent}
+        wave={{ ...wave, state: { ...wave.state, autopilot } }}
+        accent={ACCENT}
+        frame={frame}
+        now={NOW}
+        accountEvents={state.accountFeed?.["status-chip"] ?? []}
+        accountLimit={limit}
+        accounts={[{ id: "work", label: "Work", machine: "local", fivePct: 12, weeklyPct: 40 }]}
+        {...(opts.onResolve ? { onResolve: opts.onResolve } : {})}
+      />,
+    );
+  }
+
+  it("the store keeps a wave's account events, by wave, once each", () => {
+    const s = reduceAll(stateWith(chosen, moved), [chosen]);
+    expect(s.accountFeed?.["status-chip"]?.map((e) => e.envelope.type)).toEqual([
+      "account_chosen",
+      "agent_account_moved",
+    ]);
+    // Not the autopilot feed: the wave window's Autopilot list stays autopilot's.
+    expect(s.waveFeed?.["status-chip"] ?? []).toEqual([]);
+  });
+
+  it("the Volley feed shows the task role's Account rows", () => {
+    renderAccount();
+    expect(
+      screen.getByText(
+        "Account · work: most headroom on peer-a (5h 12%, 7d 40%; primary@peer-a 5h 88%)",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Account · moved off primary to work by autopilot: primary at 91% of its 5-hour window",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("an open agent_account_limit while autopilot is on: what autopilot will do, no buttons", async () => {
+    const { container } = renderAccount({ autopilot: true, onResolve: vi.fn() });
+    const banner = screen.getByRole("status", { name: "Claude account limit" });
+    expect(banner).toHaveTextContent("account at 91% — autopilot will move it to work");
+    expect(within(banner).queryByRole("button")).toBeNull();
+    const r = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(r.violations.map((v) => v.id)).toEqual([]);
+  });
+
+  it("with autopilot off, Move sends the decision's own option and Not now its own", async () => {
+    const onResolve = vi.fn(async () => ({ ok: true }));
+    const { container } = renderAccount({ onResolve });
+    const banner = screen.getByRole("status", { name: "Claude account limit" });
+    await act(async () => {
+      fireEvent.click(
+        within(banner).getByRole("button", { name: "Move to work (5h 12%, 7d 40%)" }),
+      );
+    });
+    expect(onResolve).toHaveBeenCalledWith(limit, `move ${FIXUP} to work`);
+    await act(async () => {
+      fireEvent.click(within(banner).getByRole("button", { name: "Not now" }));
+    });
+    expect(onResolve).toHaveBeenLastCalledWith(limit, "not now");
+    const r = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(r.violations.map((v) => v.id)).toEqual([]);
   });
 });

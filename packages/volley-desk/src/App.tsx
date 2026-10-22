@@ -29,6 +29,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useDeskKeys } from "./a11y/keys";
+import { useLiteSurface } from "./a11y/surface";
 import {
   type Attn,
   type NeedsYouTarget,
@@ -81,7 +82,7 @@ import { progressBeat } from "./look/tetherPulses";
 import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
-import { MOVE_ACCOUNT_TIMEOUT_MS } from "./settings/ClaudeAccounts";
+import { MOVE_ACCOUNT_TIMEOUT_MS, signinsDone, useClaudeRegistry } from "./settings/ClaudeAccounts";
 import { agentsOnMachines, sshHost } from "./settings/Machines";
 import { PeerSignin, peerAccount } from "./settings/PeerSigninSheet";
 import { SettingsModal } from "./settings/SettingsModal";
@@ -96,7 +97,14 @@ import { ClaimButton } from "./steer/SteerPanel";
 import { routeDeskControl } from "./steer/deskControl";
 import { deskDevice } from "./steer/transport";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
-import { type RegistryAccount, accountChoices, accountList, resolveFields } from "./store/claude";
+import {
+  type RegistryAccount,
+  accountChoices,
+  accountList,
+  agentLimitFor,
+  deskAccountGroups,
+  resolveFields,
+} from "./store/claude";
 import { useDesk } from "./store/context";
 import { createAuthOps, deskUrl, readSessionRole, takeFirstRun } from "./store/control";
 import { createPeerOps, keepAdminSeen } from "./store/peerOps";
@@ -115,7 +123,13 @@ import {
   supervisorNamespace,
   unclassifiedAgents,
 } from "./store/reducer";
-import type { AgentView, DeskState, DigestPayload, InboxItem } from "./store/types";
+import type {
+  AgentView,
+  DecisionPayload,
+  DeskState,
+  DigestPayload,
+  InboxItem,
+} from "./store/types";
 import { TopBar } from "./topbar/TopBar";
 import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
 import { TerminalPopout } from "./windows/agent/TerminalPopout";
@@ -302,7 +316,16 @@ function useDismissedWaves() {
 export default function App() {
   const { state, connection, demo, settling, offline, syncing, writer, identity, brokerUrl } =
     useDesk();
-  const { view, setView, zoomAt, panBy, fitTo: fitView, stageRef, stageHandlers } = useViewport();
+  const {
+    view,
+    setView,
+    zoomAt,
+    panBy,
+    fitTo: fitView,
+    stageRef,
+    worldRef,
+    stageHandlers,
+  } = useViewport();
   const screenSize = useScreenSize();
   const vw = screenSize.width;
   const narrow = vw < NARROW_PX;
@@ -374,8 +397,9 @@ export default function App() {
   // ------------------------------------------------------------ look (D7)
   const [saved, setLook] = useLook();
   const webgl = useWebGL();
+  const lite = useLiteSurface();
   // What this browser can render; the saved look keeps the owner's picks for one that has WebGL.
-  const look = degradeLook(saved, webgl);
+  const look = degradeLook(saved, webgl, lite);
   useFlipSound(saved.tethers, "tethers_on", "tethers_off", emitSound);
   /** The Settings window's section while it is open; setup once after an admin token sign-in. */
   const [deskSettings, setDeskSettings] = useState<SectionKey | null>(() =>
@@ -407,6 +431,24 @@ export default function App() {
     () =>
       routeDeskControl(mailboxControl, authOps, authOps ? readSessionRole(authOps.identity) : null),
     [mailboxControl, authOps],
+  );
+  // Settings › Machines lists every Claude account on each machine: it asks volleyd's registry
+  // while it is open (Settings › Claude accounts asks on its own).
+  const machinesRegistry = useClaudeRegistry(
+    deskSettings === "machines" ? control : null,
+    signinsDone(state.signins),
+  );
+  const localName = state.config?.fleet?.local_name ?? undefined;
+  const claudeGroups = useMemo(
+    () =>
+      deskAccountGroups(
+        state.claudeAccounts,
+        machinesRegistry.accounts.length ? machinesRegistry.accounts : registry,
+        machinesRegistry.primaryPlan,
+        state.machines,
+        localName,
+      ),
+    [state.claudeAccounts, machinesRegistry, registry, state.machines, localName],
   );
   // Settings › Machines: the pairing ops ride the same admin channel (and its reply key).
   const peerOps = useMemo(
@@ -1046,7 +1088,7 @@ export default function App() {
         role="region"
         aria-label="Desk canvas: arrow keys pan, + and − zoom, f arranges and fits"
       >
-        <World view={view} animating={animating}>
+        <World view={view} animating={animating} ref={worldRef}>
           <Tethers on={look.tethers} tethers={tethers} dragging={dragging} />
           {coordsShown && (
             <CoordinatorsWindow
@@ -1241,6 +1283,18 @@ export default function App() {
                   accounts={choices}
                   machine={machineFor(a, state.waves[a.wave], state)}
                   onOpenMachine={openMachine}
+                  accountEvents={state.accountFeed?.[a.wave] ?? []}
+                  accountLimit={agentLimitFor(state.waves, a.id)}
+                  {...(control
+                    ? {
+                        onResolve: (d: DecisionPayload, answer: string) =>
+                          control(
+                            "resolve",
+                            resolveFields(d, answer),
+                            `volleyd resolve ${d.decision_id}`,
+                          ),
+                      }
+                    : {})}
                   {...(control
                     ? {
                         onMoveAccount: (acct: string) =>
@@ -1373,6 +1427,7 @@ export default function App() {
             canVibrate: sounds.player.canVibrate(),
           }}
           webgl={webgl}
+          lite={lite}
           identity={identity}
           demo={demo}
           config={state.config}
@@ -1384,6 +1439,9 @@ export default function App() {
             waves: state.waves,
             control,
             onRegistry: setRegistry,
+            machines: state.machines ?? {},
+            localName: state.config?.fleet?.local_name ?? undefined,
+            hosts: Object.keys(state.config?.hosts ?? {}),
           }}
           machines={{
             machines: state.machines ?? {},
@@ -1397,7 +1455,7 @@ export default function App() {
             focus: focusMachine?.name,
             focusSeq: focusMachine?.seq,
             configTransport,
-            accounts: state.claudeAccounts ?? {},
+            claude: { groups: claudeGroups, signins: state.signins ?? {}, control },
             agentsOn: agentsOnMachines(
               Object.values(state.waves).flatMap((w) => (w.state ? [w.state] : [])),
               (id) => isLiveAgent(state, id),

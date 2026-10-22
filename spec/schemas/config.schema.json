@@ -244,7 +244,7 @@
                 { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }
               ],
               "default": null,
-              "description": "The Claude account an agent runs under when neither its task nor its wave names one: a registry id, primary, or most_headroom (the signed-in account with the lowest 5-hour usage, spec section 4.6.12; primary when none has usage data). null: primary."
+              "description": "The Claude account an agent runs under when neither its task nor its wave names one. null (the default): balance across the machine's signed-in accounts by headroom in the 5-hour, 7-day and the model family's weekly windows (spec section 4.6.12); a one-login machine uses its login; most_headroom means the same; primary or a registry id pins."
             },
             "warn_at_pct": {
               "type": "integer",
@@ -531,6 +531,13 @@
               "maximum": 10,
               "default": 1,
               "description": "Agent questions answered automatically for one run (agent_question)."
+            },
+            "account_move_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 2,
+              "description": "Automatic account moves of one task's role (agent_account_limit)."
             },
             "budget_raise_max": {
               "type": "number",

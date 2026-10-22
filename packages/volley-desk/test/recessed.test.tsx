@@ -90,7 +90,7 @@ describe("recessed text boxes", () => {
 
   it("settings text fields are recessed, and a focused one takes the focus ring", () => {
     const config = demo().config as ConfigPayload;
-    render(<Supervisor config={config} transport={null} />);
+    render(<Supervisor config={config} transport={null} group="recovery" />);
     const field = screen.getByRole("textbox", { name: "Fallback model" });
     expect(field).toHaveClass("recessed");
     expect(field).toBeEnabled();

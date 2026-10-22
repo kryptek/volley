@@ -140,23 +140,35 @@ import {
   requestOf,
 } from "./autopilot/remediation";
 import { authFields } from "./broker-auth";
-import { accountMoves, moveAgentAccount, moveRespawn } from "./claude/move";
-import { ClaudeAccountError, type SelectedAccount, claudeRoot } from "./claude/profiles";
+import { lastAccountMove, moveAgentAccount, moveRespawn } from "./claude/move";
+import {
+  ClaudeAccountError,
+  LOCAL_MACHINE,
+  MOST_HEADROOM,
+  type SelectedAccount,
+  accountKey,
+  claudeRoot,
+} from "./claude/profiles";
 import { ClaudeService, SIGNIN_CHANNEL } from "./claude/service";
 import { type Sharing, readSharing } from "./claude/sharing";
 import {
+  type AgentLimitSeen,
+  type AgentOnAccount,
   type LimitSeen,
   USAGE_FILTER,
   type UsageBook,
   accountRecords,
+  agentLimitDecisions,
   bookState,
   emptyBook,
+  foldProbe,
   foldUsage,
   forgetAgent,
   limitDecisions,
-  mostHeadroom,
+  parseAgentMoveAnswer,
   parseMoveAnswer,
   parseUsage,
+  rankAccounts,
   restoreBook,
   sampleAccount,
   usageAccountTopic,
@@ -1310,7 +1322,8 @@ export class Daemon {
       ...(opts.claude?.signinTimeoutMs !== undefined
         ? { signinTimeoutMs: opts.claude.signinTimeoutMs }
         : {}),
-      headroom: (candidates) => mostHeadroom(accountRecords(this.usage), candidates, this.now()),
+      rank: (candidates, model) =>
+        rankAccounts(accountRecords(this.usage), candidates, { model, now: this.now() }),
       // The primary's record carries its plan (describe) once claude_accounts has asked it.
       onPrimaryPlan: () => void this.enqueue(() => this.usagePass()),
       // --- Fleet (F8): a paired machine's sign-in (`primary@<name>`) and its forward ---
@@ -1324,6 +1337,15 @@ export class Daemon {
       ...(opts.claude?.forwardSettleMs !== undefined
         ? { forwardSettleMs: opts.claude.forwardSettleMs }
         : {}),
+      // A paired machine's `primary@<name>` record and claude_accounts read its machine record.
+      machineIdentity: (name) => {
+        const auth = this.machines.record(name)?.auth;
+        return {
+          ...(auth?.claude_email !== undefined ? { email: auth.claude_email } : {}),
+          ...(auth?.claude_org !== undefined ? { org: auth.claude_org } : {}),
+        };
+      },
+      machines: () => this.machines.all(),
     });
     this.machines = new MachineHealth({
       now: this.now,
@@ -1577,6 +1599,10 @@ export class Daemon {
           this.machines.observe(record);
           if (record.tunnel === "up") this.sampleHost(name, record);
           await this.publishReadiness(name);
+          this.foldLogins(record, name);
+          // `primary@<name>`'s usage record carries this record's identity, and its logins'
+          // usage probe readings (unchanged: no-op).
+          await this.usagePass();
         });
       }),
     );
@@ -2611,7 +2637,7 @@ export class Daemon {
   ): { verdict: ReadinessPayload; view: MachineView } {
     const input = this.readinessInput(name, isLocal, cfg, extra, eff, gate);
     const verdict = readiness(input);
-    return { verdict, view: machineView(input, verdict, verdict.usage.five_hour_pct) };
+    return { verdict, view: machineView(input, verdict, verdict.usage) };
   }
 
   /**
@@ -3712,7 +3738,14 @@ export class Daemon {
         role,
         attempt,
         ...rest,
-        account: { id: account.id, dir: account.dir },
+        account: { id: account.id, dir: account.dir, machine: account.machine },
+        accountChosen: {
+          account: account.id,
+          machine: account.machine,
+          source: account.source,
+          why: account.why,
+          candidates: account.candidates ?? [],
+        },
         hygiene: log.record.state?.hygiene_level ?? "p1",
         ...(resumeNote !== undefined ? { resumeNote } : {}),
         ...(carried !== undefined ? { continueBranch: carried } : {}),
@@ -3929,39 +3962,71 @@ export class Daemon {
   }
 
   /**
-   * The Claude account a task role runs under: its last `agent_account_moved`, else the task's
-   * `account:`, the wave's, `claude.default_account`, the primary. A remote host's agents run
-   * under its own default profile: an account named for one is refused, and the config default
-   * does not apply there.
+   * The Claude account a task role runs under (SPEC §4.6.11): its last `agent_account_moved`
+   * (`source: move`), else the task's `account:`, the wave's, `claude.default_account`, else the
+   * balancing rule over the signed-in accounts of the machine it runs on (`primary`, the local
+   * profiles here; `primary@<name>` and the profiles kept for it on a paired machine). Every pick
+   * carries its `why` and the machine's candidates as ranked for the task's model.
    */
   private accountFor(wave: WaveId, w: Wave, t: WaveTask, role: Role): SelectedAccount {
-    const journal = this.waves.get(wave)?.journal;
-    const moved =
-      journal !== undefined ? accountMoves(journal.readAll())[`${t.id}/${role}`] : undefined;
-    const task = moved ?? t.account;
-    if (t.host === "local") {
-      const sel = this.claude.select({
-        ...(task !== undefined ? { task } : {}),
-        ...(w.account !== undefined ? { wave: w.account } : {}),
-        configDefault: this.config.effective(wave).claude.default_account,
+    const events = this.waves.get(wave)?.journal.readAll() ?? [];
+    const machine = t.host === "local" ? LOCAL_MACHINE : t.host;
+    const model = t.model;
+    const rank = () =>
+      rankAccounts(accountRecords(this.usage), this.claude.candidates(machine), {
+        model,
+        now: this.now(),
       });
-      // An answered account_limit moved the wave: its new agents start under the other account
-      // (an agent moved on its own keeps its own move).
-      const to =
-        moved === undefined && journal !== undefined
-          ? waveAccount(sel.id, waveAccountMoves(journal.readAll()))
-          : sel.id;
-      return to === sel.id ? sel : { ...this.claude.select({ task: to }), source: sel.source };
+    const withCandidates = (sel: SelectedAccount): SelectedAccount =>
+      sel.candidates !== undefined ? sel : { ...sel, candidates: rank() };
+    const move = lastAccountMove(events, t.id, role);
+    if (move !== undefined) {
+      const sel = this.claude.select({ task: move.to, machine, model });
+      return withCandidates({ ...sel, source: "move", why: move.why });
     }
     const sel = this.claude.select({
-      ...(task !== undefined ? { task } : {}),
+      ...(t.account !== undefined ? { task: t.account } : {}),
       ...(w.account !== undefined ? { wave: w.account } : {}),
+      configDefault: this.config.effective(wave).claude.default_account,
+      machine,
+      model,
     });
-    if (sel.dir !== null)
-      throw new ClaudeAccountError(
-        `Claude account '${sel.id}' is a profile on the supervisor's machine; task ${t.id} runs on host ${t.host}`,
-      );
-    return sel;
+    // An answered account_limit moved the wave: its new agents start under the other account
+    // (an agent moved on its own keeps its own move).
+    const to = machine === LOCAL_MACHINE ? waveAccount(sel.id, waveAccountMoves(events)) : sel.id;
+    if (to === sel.id) return withCandidates(sel);
+    return withCandidates({
+      ...this.claude.select({ task: to }),
+      source: sel.source,
+      why: `wave ${wave} moved to ${to} (account_limit)`,
+    });
+  }
+
+  /** Whether a wave's spawns balance: neither it nor a task names an account, nor the config. */
+  private balanced(wave: WaveId): boolean {
+    const w = this.waves.get(wave)?.record.wave;
+    if (w === undefined || w === null) return false;
+    if (w.account !== undefined && w.account !== MOST_HEADROOM) return false;
+    const def = this.config.effective(wave).claude.default_account;
+    if (def !== null && def !== MOST_HEADROOM) return false;
+    return Object.values(w.tasks).every(
+      (t) => t.account === undefined || t.account === MOST_HEADROOM,
+    );
+  }
+
+  /**
+   * A task role's agent names its account: the task, the wave or `claude.default_account` pins
+   * one (D2: no agent move; the wave-level `account_limit` covers it).
+   */
+  private pinned(wave: WaveId, task: TaskId): boolean {
+    const w = this.waves.get(wave)?.record.wave;
+    const named = (a: string | null | undefined) =>
+      a !== undefined && a !== null && a !== MOST_HEADROOM;
+    return (
+      named(w?.tasks[task]?.account) ||
+      named(w?.account) ||
+      named(this.config.effective(wave).claude.default_account)
+    );
   }
 
   /** The `local` host agents run on. */
@@ -4071,8 +4136,9 @@ export class Daemon {
     if (remote === undefined) return;
     const entry = { at: now, inFlight: true };
     this.trustChecks.set(d.decision_id, entry);
+    const profile = (d as { claude_config_dir?: unknown }).claude_config_dir;
     void remote
-      .readTrust()
+      .readTrust(typeof profile === "string" ? profile : undefined)
       .then((cfg) => {
         if (!isRepoTrusted(cfg, repo) || !this.running) return;
         return this.enqueue(async () => {
@@ -4524,6 +4590,26 @@ export class Daemon {
     this.ownRecordAt = this.now();
     this.machines.observe(record);
     await this.publish(machineTopic(name), this.envelope(MACHINE_CHANNEL, "machine", record), true);
+    if (this.foldLogins(record, LOCAL_MACHINE)) await this.usagePass();
+  }
+
+  /**
+   * Fold a machine record's usage probe logins (SPEC §4.6.12) into their accounts: `machine` is
+   * `local` for the own record, else the paired machine's name. A login the registry does not
+   * have on that machine is skipped. True when the book changed (it is then kept on disk).
+   */
+  private foldLogins(record: MachineRecord, machine: string): boolean {
+    if (record.claude_logins === undefined) return false;
+    const before = bookState(this.usage);
+    for (const login of record.claude_logins) {
+      const account = this.claude.accountForLogin(machine, login.profile);
+      if (account === null) continue;
+      this.usage = foldProbe(this.usage, { account, machine: record.name, login });
+    }
+    const after = bookState(this.usage);
+    if (after === before) return false;
+    writeFileAtomic(this.usageFile, after);
+    return true;
   }
 
   /** Live supervised agents on machine `name` (the `local` token is the own machine). */
@@ -4635,11 +4721,15 @@ export class Daemon {
     const probe = this.probes.get(name);
     const downSince = isLocal ? undefined : this.machines.downSince(name);
     const records = accountRecords(this.usage);
-    const account = isLocal
-      ? cfg.claude.default_account
-      : (Object.keys(records)
-          .filter((a) => a.endsWith(`@${name}`))
-          .sort()[0] ?? null);
+    // Its best candidate (the balancing rule's pick there), so one fresh login keeps it eligible;
+    // a config default that pins an account here is that account.
+    const pin = cfg.claude.default_account;
+    const account =
+      isLocal && pin !== null && pin !== MOST_HEADROOM
+        ? pin
+        : (rankAccounts(records, this.claude.candidates(isLocal ? LOCAL_MACHINE : name), {
+            now: this.now(),
+          })[0]?.account ?? null);
     return {
       name,
       record: isLocal ? this.ownRecord : this.machines.record(name),
@@ -4986,7 +5076,7 @@ export class Daemon {
         hooksDir: remote.hooksDir,
         mcpEntry: remote.mcpEntry,
         // Trust is the box's own: read from its ~/.claude.json at every spawn, never mirrored.
-        remoteTrust: { host: spec.name, target: spec.target, read: () => remote.readTrust() },
+        remoteTrust: { host: spec.name, target: spec.target, read: (dir) => remote.readTrust(dir) },
         tunables: { ...deps.tunables, worktree_root: spec.worktree_root },
         // cleanup reaches the box again from the journal: record where the agent runs.
         journal: (ev) =>
@@ -6892,32 +6982,54 @@ export class Daemon {
    * `agent_move_account { agent, acct }` (claude/move.ts): journal, cancel, wait for the stop,
    * retire (`moved`), respawn the role under the other profile with a resume note.
    */
-  private async moveAccount(p: Record<string, unknown>, by: string): Promise<Reply> {
+  private async moveAccount(
+    p: Record<string, unknown>,
+    by: string,
+    /** An `agent_account_limit` answer: its decision and the move's one-line reason. */
+    asked?: { decisionId: string; why: string },
+  ): Promise<Reply> {
     if (this.opts.spawner === undefined) return { ok: false, error: "spawning is disabled" };
     const agentId = typeof p.agent === "string" ? p.agent : "";
     const acct = typeof p.acct === "string" ? p.acct : "";
     const a = this.supervised.get(agentId);
     if (a === undefined) return { ok: false, error: `no supervised agent '${agentId}'` };
     if (this.moving.has(agentId)) return { ok: false, error: `${agentId} is already moving` };
-    let to: SelectedAccount;
-    try {
-      to = this.claude.select({ task: acct });
-    } catch (e) {
-      if (e instanceof ClaudeAccountError) return { ok: false, error: e.message };
-      throw e;
-    }
-    if (to.dir !== null && a.host.name !== "local")
+    // The agent's own machine: a profile there (`work`, or its record key `work@<name>`).
+    const machine = a.host.name === "local" ? LOCAL_MACHINE : a.host.name;
+    const at = acct.indexOf("@");
+    if (at !== -1 && acct.slice(at + 1) !== machine)
       return {
         ok: false,
-        error: `${agentId} runs on host ${a.host.name}: profiles are local only`,
+        error: `${agentId} runs on ${machine}: Claude account '${acct}' is not one of its machine's (profiles on other machines cannot take it)`,
       };
+    let to: SelectedAccount;
+    try {
+      to = this.claude.select({ task: at === -1 ? acct : acct.slice(0, at), machine });
+    } catch (e) {
+      if (!(e instanceof ClaudeAccountError)) throw e;
+      return machine === LOCAL_MACHINE
+        ? { ok: false, error: e.message }
+        : {
+            ok: false,
+            error: `${agentId} runs on ${machine}: ${e.message} (profiles on other machines cannot take it)`,
+          };
+    }
     const spawned = this.spawnedRecord((e) => e.data.agent_id === agentId, a.wave);
     const from = typeof spawned?.claude_account === "string" ? spawned.claude_account : "primary";
     const stopped = new Set([...TERMINAL_STATUS, "blocked"]);
     this.moving.add(agentId);
     try {
       return await moveAgentAccount(
-        { wave: a.wave, task: a.task, role: a.role, agentId, from, to, by },
+        {
+          wave: a.wave,
+          task: a.task,
+          role: a.role,
+          agentId,
+          from,
+          to,
+          by,
+          ...(asked !== undefined ? { decisionId: asked.decisionId, why: asked.why } : {}),
+        },
         {
           journal: (ev) => this.serial(() => this.append(a.wave, ev)),
           cancel: (text) =>
@@ -7449,6 +7561,7 @@ export class Daemon {
       ev = again;
     }
     const move = this.accountLimitMove(wave, log.record.decisions[id], r.answer);
+    const agentMove = this.agentLimitMove(wave, log.record.decisions[id], r.answer, r.by);
     // The answer is accepted: what must come right before decision_resolved (autopilot's event).
     await beforeResolved?.();
     await this.append(wave, ev.event);
@@ -7462,6 +7575,18 @@ export class Daemon {
       });
       this.log(`wave ${wave}: new agents start under Claude account ${move.to} (was ${move.from})`);
     }
+    // The move waits for the agent to stop: it runs beside the serial queue, as the op's does.
+    if (agentMove !== null)
+      void this.moveAccount({ agent: agentMove.agent, acct: agentMove.to }, r.by, {
+        decisionId: id,
+        why: agentMove.why,
+      }).then(
+        (res) => {
+          if (!res.ok) this.log(`agent_account_limit ${id}: ${res.error ?? "move refused"}`);
+        },
+        (e: unknown) =>
+          this.log(`agent_account_limit ${id}: ${e instanceof Error ? e.message : String(e)}`),
+      );
     await this.publishResolved(wave, d);
     this.log(`resolved ${id} by ${r.by}: ${r.answer}`);
     await this.onRecoveryResolved(wave, d);
@@ -7575,6 +7700,37 @@ export class Daemon {
   }
 
   /**
+   * The agent move an `agent_account_limit` answer asks for (`move <agent> to <acct>`), or null
+   * for any other answer (`not now`: it stays, and the next decision waits for the reset). Throws,
+   * before anything is journaled, for another agent than the decision's or one no longer
+   * supervised or already moving, so the decision stays open.
+   */
+  private agentLimitMove(
+    wave: WaveId,
+    d: DecisionRecord | undefined,
+    answer: string,
+    by: string,
+  ): { agent: string; to: string; why: string } | null {
+    if (d?.kind !== "agent_account_limit" || typeof d.agent_id !== "string") return null;
+    const m = parseAgentMoveAnswer(answer);
+    if (m === null) return null;
+    if (m.agent !== d.agent_id)
+      throw new Error(`decision ${d.decision_id} is about ${d.agent_id}, not ${m.agent}`);
+    const a = this.supervised.get(m.agent);
+    if (a === undefined || a.wave !== wave) throw new Error(`no supervised agent '${m.agent}'`);
+    if (this.moving.has(m.agent)) throw new Error(`${m.agent} is already moving`);
+    // An account the agent's machine cannot take refuses the answer (the decision stays open).
+    const machine = a.host.name === "local" ? LOCAL_MACHINE : a.host.name;
+    const at = m.to.indexOf("@");
+    if (at !== -1 && m.to.slice(at + 1) !== machine)
+      throw new Error(`Claude account '${m.to}' is not one of ${machine}'s`);
+    this.claude.select({ task: at === -1 ? m.to : m.to.slice(0, at), machine });
+    const pct =
+      typeof d.pct === "number" ? ` (${windowShort(d.window)} ${Math.round(d.pct)}%)` : "";
+    return { agent: m.agent, to: m.to, why: `moved off ${d.acct ?? "its account"}${pct} by ${by}` };
+  }
+
+  /**
    * One agent's retained usage sample (or its clearing): fold it into its account's record,
    * re-publish the records that changed, then open any `account_limit` decision it calls for.
    * A sample is the agent's own (the envelope's `agent_id` is the topic's); its wave and host are
@@ -7639,6 +7795,10 @@ export class Daemon {
         ...[...this.waves.keys()].map((w) => this.config.effective(w).claude.warn_at_pct),
       ),
       candidates: this.claude.candidates(),
+      peers: Object.fromEntries(
+        Object.keys(this.config.effective().hosts).map((n) => [n, this.claude.candidates(n)]),
+      ),
+      balanced: (w) => this.balanced(w),
       existing,
       now: this.now(),
     })) {
@@ -7648,6 +7808,70 @@ export class Daemon {
       if (lim.extra.pct < warnAt) continue;
       await this.openDecisionNow(lim.wave, lim.input, lim.extra).catch((e: unknown) =>
         this.log(`account_limit for ${lim.wave}: ${e instanceof Error ? e.message : String(e)}`),
+      );
+    }
+    await this.agentLimitPass(records);
+  }
+
+  /**
+   * D2: an `agent_account_limit` decision for each supervised agent whose account is at the warn
+   * level in a window that counts for it (claude/usage.ts agentLimitDecisions), once per task
+   * role, account, window and reset. It does not park the task; autopilot answers it.
+   */
+  private async agentLimitPass(records: ReturnType<typeof accountRecords>): Promise<void> {
+    const agents: AgentOnAccount[] = [];
+    for (const [id, a] of this.supervised) {
+      const status = this.waves.get(a.wave)?.record.state?.status;
+      if (status === undefined || status === "complete" || status === "stopped") continue;
+      const machine = a.host.name === "local" ? LOCAL_MACHINE : a.host.name;
+      const seen = this.usage.agents[id];
+      const def = this.waves.get(a.wave)?.record.wave?.tasks[a.task];
+      // Before its first sample: the account its spawn journaled.
+      const own = () => {
+        const spawned = this.spawnedRecord((e) => e.data.agent_id === id, a.wave);
+        return typeof spawned?.claude_account === "string" ? spawned.claude_account : "primary";
+      };
+      agents.push({
+        agent_id: id,
+        wave: a.wave,
+        task: a.task,
+        role: a.role,
+        acct: seen?.account ?? accountKey(own(), machine),
+        model: seen?.model ?? def?.model ?? null,
+        machine,
+        pinned: this.pinned(a.wave, a.task),
+        moving: this.moving.has(id),
+      });
+    }
+    if (agents.length === 0) return;
+    const existing: AgentLimitSeen[] = [...this.waves].flatMap(([w, log]) =>
+      Object.values(log.record.decisions).flatMap((d) =>
+        d.kind === "agent_account_limit" && d.task !== null && typeof d.acct === "string"
+          ? [
+              {
+                wave: w,
+                task: d.task,
+                role: d.role ?? "",
+                acct: d.acct,
+                window: d.window ?? "",
+                resets_at: d.resets_at ?? null,
+              },
+            ]
+          : [],
+      ),
+    );
+    for (const lim of agentLimitDecisions({
+      accounts: records,
+      agents,
+      candidates: (m) => this.claude.candidates(m),
+      warnAtPct: (w) => this.config.effective(w).claude.warn_at_pct,
+      existing,
+      now: this.now(),
+    })) {
+      await this.openDecisionNow(lim.wave, lim.input, lim.extra).catch((e: unknown) =>
+        this.log(
+          `agent_account_limit for ${lim.extra.agent_id}: ${e instanceof Error ? e.message : String(e)}`,
+        ),
       );
     }
   }
@@ -8481,6 +8705,8 @@ export class Daemon {
       // Claude account profiles (src/claude/service.ts); a sign-in answers once its URL is known.
       case "claude_accounts":
         return { ok: true, defer: this.claude.list() };
+      case "claude_balance":
+        return this.claude.balance(p, Object.keys(this.config.effective().hosts));
       case "claude_account_add":
         return { ok: true, defer: this.claude.add(p, by) };
       case "claude_signin":
@@ -9080,7 +9306,7 @@ export class Daemon {
       if (typeof target === "string") {
         const remote = this.remoteForDecision(wave, d);
         if (remote === undefined) return `no configured host reaches ${target} to trust ${root}`;
-        await remote.recordTrust(root);
+        await remote.recordTrust(root, typeof profile === "string" ? profile : undefined);
       } else
         recordRepoTrust(
           typeof profile === "string" ? join(profile, ".claude.json") : this.claudeJsonPath,
@@ -9756,4 +9982,12 @@ function fixerFailure(e: JournalEvent): string | null {
   if (e.type === "decision_escalated")
     return `its ${String(e.data.kind)} decision escalated (${String(e.data.why)})`;
   return null;
+}
+
+/** A limit window as a move's `why` names it: `5h`, `7d`, or the model family (`Fable`). */
+function windowShort(window: string | undefined): string {
+  if (window === "five_hour") return "5h";
+  if (window === "weekly") return "7d";
+  const f = window?.startsWith("model_weekly:") ? window.slice("model_weekly:".length) : "";
+  return f !== "" ? `${f.charAt(0).toUpperCase()}${f.slice(1)}` : "window";
 }
