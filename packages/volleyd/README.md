@@ -1864,8 +1864,8 @@ inline or as an entry of the config's `hosts` map (an inline `host:` is layered 
 hosts:
   box:
     target: dev@box.example          # ssh destination ([user@]host or an ssh config alias)
-    repo: /path/to/repo # the wave repo's clone on the box
-    volley_dir: /path/to/volley # a volley checkout on the box (its hooks)
+    repo: /path/to/repo              # the wave repo's clone on the box
+    volley_dir: /path/to/volley      # a volley checkout on the box (its hooks)
     # worktree_root: /path/to/worktrees   (default: beside repo)
     # tunnel: { remote_port: 21883, supervise: true }
 

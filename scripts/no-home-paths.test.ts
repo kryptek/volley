@@ -23,11 +23,14 @@ const HOME_PATH = /(?<!\w)\\?\/(?:Users|home)\\?\/[A-Za-z][A-Za-z0-9_-]*/g;
 /** Real system paths, not anyone's home. */
 const SYSTEM_PATHS = new Set(["/home/linuxbrew"]);
 
-/** Files that keep a home-shaped path on purpose. */
-const ALLOWED = new Set([
-  "scripts/no-home-paths.test.ts", // this guard
-  "packages/volley-hooks/test/work-log.test.ts", // tests that paths under HOME are redacted to ~/
-]);
+/** This guard spells home paths in its own self-test. */
+const SELF = "scripts/no-home-paths.test.ts";
+
+/** Home-shaped paths a file keeps on purpose; anything else in that file still fails. */
+const ALLOWED: Record<string, Set<string>> = {
+  // tests that paths under HOME are redacted to ~/ (and that a sibling home is not)
+  "packages/volley-hooks/test/work-log.test.ts": new Set(["/home/someone", "/home/someone2"]),
+};
 
 function tracked(): string[] {
   const ls = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: ROOT });
@@ -40,7 +43,7 @@ function homePaths(file: string, text: string): string[] {
   return text.split("\n").flatMap((line, i) =>
     [...line.matchAll(HOME_PATH)]
       .map((m) => m[0].replaceAll("\\", ""))
-      .filter((p) => !SYSTEM_PATHS.has(p))
+      .filter((p) => !SYSTEM_PATHS.has(p) && !ALLOWED[file]?.has(p))
       .map((p) => `${file}:${i + 1}: ${p}`),
   );
 }
@@ -56,9 +59,15 @@ describe("home-directory paths in tracked files", () => {
     expect(hits("/smoke/home/worktrees /path/to/home /home/<user>")).toEqual([]);
   });
 
+  test("an allowed file keeps only its listed paths", () => {
+    const file = "packages/volley-hooks/test/work-log.test.ts";
+    expect(homePaths(file, "/home/someone/.ssh /home/someone2/x")).toEqual([]);
+    expect(homePaths(file, "/home/dev/x")).toEqual([`${file}:1: /home/dev`]);
+  });
+
   test("no tracked file names a home directory", () => {
     const offenders = tracked()
-      .filter((f) => !ALLOWED.has(f))
+      .filter((f) => f !== SELF)
       .flatMap((f) => {
         let text: string;
         try {
@@ -68,7 +77,6 @@ describe("home-directory paths in tracked files", () => {
         }
         return homePaths(f, text);
       });
-    if (offenders.length > 0) console.error(`${RULE}\n${offenders.join("\n")}`);
-    expect(offenders).toEqual([]);
+    expect(offenders, RULE).toEqual([]);
   });
 });
