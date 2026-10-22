@@ -93,6 +93,8 @@ export interface Fix {
   steps?: string[][];
   /** The fix runs only with `--clone`. */
   needsClone?: boolean;
+  /** Edits the doctor makes itself under `--fix`, after the steps (never in the report). */
+  apply?: { what: string; run: () => void }[];
 }
 
 export interface Check {
@@ -225,6 +227,8 @@ export interface DoctorDeps {
   statfs: (path: string) => StatFs | null;
   /** Asks the person at the terminal; absent or false without one. */
   confirm?: (question: string) => Promise<boolean>;
+  /** The Claude account profiles' root (default `<home>/.volley/claude`). */
+  claudeRoot?: string;
 }
 
 export interface DoctorOptions {
@@ -242,6 +246,11 @@ export interface DoctorOptions {
   clone?: boolean;
   /** What the Claude profile is checked against (default: the default modes, no broker URL). */
   profile?: ProfileTarget;
+  /**
+   * The supervisor's `hosts.<name>.volley_dir` (where it launches this machine's agents from):
+   * every volley MCP entry must run it as well as this checkout.
+   */
+  volleyDir?: string;
 }
 
 /** The record's check: no fix text (the doctor that reads a record supplies its own). */
@@ -462,7 +471,16 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
 
   const profile = await gatherProfile(
     sh,
-    { home: deps.home, volleyDir: dir, bun, claude: claudeBin },
+    {
+      home: deps.home,
+      volleyDir: dir,
+      bun,
+      claude: claudeBin,
+      git: gitBin,
+      repo: path,
+      ...(deps.claudeRoot !== undefined ? { claudeRoot: deps.claudeRoot } : {}),
+      ...(opts.volleyDir !== undefined ? { supervisorDir: opts.volleyDir } : {}),
+    },
     opts.profile ?? defaultTarget(),
   );
 
@@ -655,7 +673,11 @@ export async function doctor(io: IO, deps: DoctorDeps, opts: DoctorOptions): Pro
     for (const c of plan.unchecked) {
       lines.push(`· ${c.id}: not checked (the supervisor's requirement is not known here)`);
     }
-    for (const c of plan.run) lines.push(`→ ${c.id}: ${c.fix?.command}`);
+    for (const c of plan.run) {
+      lines.push(`→ ${c.id}: ${c.fix?.command}`);
+      // The edits it makes, named before the yes.
+      for (const a of c.fix?.apply ?? []) lines.push(`    ${a.what}`);
+    }
     for (const c of plan.manual) {
       const hint =
         c.fix?.needsClone === true ? " (or pass --clone to let the doctor clone it)" : "";
@@ -695,6 +717,20 @@ export async function doctor(io: IO, deps: DoctorDeps, opts: DoctorOptions): Pro
             step[2] === "--cwd"
           ) {
             markInstalled(step[3] as string);
+          }
+        }
+        for (const c of plan.run) {
+          if (failed.has(c.id)) continue;
+          for (const a of c.fix?.apply ?? []) {
+            say(scrub(`~ ${a.what}\n`));
+            try {
+              a.run();
+            } catch (e) {
+              const why = e instanceof Error ? e.message : String(e);
+              say(scrub(`✗ ${c.id}: fix failed: ${why}\n`));
+              failed.add(c.id);
+              break;
+            }
           }
         }
         say("\n");

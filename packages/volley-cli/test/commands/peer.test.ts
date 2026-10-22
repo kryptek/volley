@@ -234,7 +234,7 @@ const hostSsh =
 
 /** The JSON the redeem script pipes into `volley peer redeem` on the host. */
 const redeemRequest = (script: string) => {
-  const m = /printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d \| (.+) peer redeem/.exec(script);
+  const m = /printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d \| (.+?) peer redeem/.exec(script);
   if (m === null) throw new Error(`no redeem in ${script}`);
   return { request: JSON.parse(Buffer.from(m[1] as string, "base64").toString()), volley: m[2] };
 };
@@ -388,7 +388,9 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(probe).toBeGreaterThan(-1);
     expect(probe).toBeLessThan(script.indexOf("peer redeem"));
     const { request, volley } = redeemRequest(script);
-    expect(volley).toBe("volley");
+    // No --remote-volley: volley on the host's PATH, else the one `volley setup` installs.
+    expect(volley).toBe("if command -v volley >/dev/null 2>&1; then volley");
+    expect(script).toContain("; else ~/.volley/bin/volley peer redeem; fi");
     expect(request).toEqual({
       code: "abcd-efgh",
       name: "box-a",
@@ -793,21 +795,67 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(existsSync(peerFile(home))).toBe(false);
   });
 
-  it("volley missing on the host's ssh PATH: says to pass --remote-volley, and the code still works", async () => {
-    const f = fakeExec(hostSsh({ code: 127, stderr: "bash: line 6: volley: command not found\n" }));
+  it("volley neither on the host's ssh PATH nor at ~/.volley/bin/volley: says to run volley setup there, and the code still works", async () => {
+    const f = fakeExec(
+      hostSsh({
+        code: 127,
+        stderr: "bash: line 13: /Users/dev/.volley/bin/volley: No such file or directory\n",
+      }),
+    );
     const r = await run(
       ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
       deps(f.exec),
     );
     expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain("volley: command not found");
-    expect(r.stderr).toContain(
-      "`volley` is not on dev@host's PATH for a non-interactive ssh command",
-    );
-    // Quoted, so the host's shell expands ~ (its home, not this machine's).
-    expect(r.stderr).toContain("--remote-volley '~/.volley/bin/volley'");
+    expect(r.stderr).toContain("No such file or directory");
+    expect(r.stderr).toContain("`/Users/dev/.volley/bin/volley` does not exist on dev@host");
+    // The fallback was tried already: never suggested again.
+    expect(r.stderr).toContain("Run `volley setup` on dev@host");
+    expect(r.stderr).toContain("--remote-volley");
+    expect(r.stderr).not.toContain("--remote-volley '~/.volley/bin/volley'");
     expect(r.stderr).toContain("the code is still valid");
     expect(existsSync(peerFile(home))).toBe(false);
+  });
+
+  it("volley not on the host's ssh PATH: the redeem falls back to ~/.volley/bin/volley without --remote-volley", () => {
+    // The real script under bash: the stub ssh's PATH has the agent tools, the host's own PATH
+    // has no volley, and its home has the one `volley setup` installs.
+    const tmp = tempDir("volley-peer-fallback-");
+    const write = (p: string, text: string) => {
+      writeFileSync(p, text);
+      chmodSync(p, 0o755);
+    };
+    for (const d of ["bin", "tools", "home/.volley/bin"])
+      mkdirSync(join(tmp, d), { recursive: true });
+    write(
+      join(tmp, "bin", "ssh"),
+      '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -n|-T) shift;; -o) shift 2;; *) break;; esac; done\nshift\nexec /usr/bin/env -i PATH="$TOOLS" /bin/sh -c "$*"\n',
+    );
+    symlinkSync("/bin/sh", join(tmp, "tools", "sh"));
+    for (const t of ["bun", "tmux", "claude"]) write(join(tmp, "tools", t), "#!/bin/sh\n");
+    write(
+      join(tmp, "home", ".volley", "bin", "volley"),
+      `#!/bin/sh\necho "$*" > ${join(tmp, "argv")}\ncat > ${join(tmp, "redeemed")}\n`,
+    );
+    const script = redeemScript(
+      { code: "ABCD-EFGH", name: "box-a", target: "dev@box-a", volley_dir: "/opt/volley" },
+      null,
+    );
+    expect(script).toContain("~/.volley/bin/volley peer redeem");
+    const r = spawnSync("bash", ["-s"], {
+      input: script,
+      encoding: "utf-8",
+      env: {
+        PATH: `${join(tmp, "bin")}:/usr/bin:/bin`,
+        TOOLS: join(tmp, "tools"),
+        HOME: join(tmp, "home"),
+      },
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readFileSync(join(tmp, "argv"), "utf-8").trim()).toBe("peer redeem");
+    expect(JSON.parse(readFileSync(join(tmp, "redeemed"), "utf-8"))).toMatchObject({
+      code: "ABCD-EFGH",
+    });
   });
 
   it("bun missing on the host's ssh PATH: names bun, never says volley is missing", async () => {
