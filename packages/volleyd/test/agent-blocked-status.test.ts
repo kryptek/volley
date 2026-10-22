@@ -1,7 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { DAEMON_DEFAULTS } from "../src/config-defaults";
-import type { PipelineDriver } from "../src/pipeline";
-import { TERMINAL_ALARM } from "../src/watchdog";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildEnvelope } from "volley-mcp/envelope";
+import { buildTopic } from "volley-mcp/topics";
+import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
+import { Daemon } from "../src/daemon";
+import type { PipelineDriver, PipelineEvent } from "../src/pipeline";
+import { BLOCKED_ALARM, TERMINAL_ALARM } from "../src/watchdog";
+import { NS } from "./helpers/daemon-env";
 import { fakeClock } from "./helpers/fake-clock";
 import { runCli } from "./helpers/run-cli";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
@@ -14,12 +18,40 @@ import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervis
 
 let s: SupervisedEnv;
 afterEach(async () => {
+  vi.restoreAllMocks();
   await s?.cleanup();
 });
 
 const blockedOpened = () =>
   s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked");
 const stage = () => s.daemon.snapshot("w1")?.tasks[0]?.stage;
+const unhandled = () =>
+  s.journal().filter((e) => e.type === "alarm_raised" && e.data.alarm === BLOCKED_ALARM);
+const terminalAlarms = () =>
+  s.journal().filter((e) => e.type === "alarm_raised" && e.data.alarm === TERMINAL_ALARM);
+const late = DAEMON_DEFAULTS.terminal_unjournaled_alarm_ms + 1_000;
+
+/**
+ * The daemon's pipeline for w1, with its `handle` replaced for `agent_blocked` events (and
+ * whatever else `more` replaces).
+ */
+function dropBlocked(
+  daemon: Daemon,
+  handle: (ev: PipelineEvent) => Promise<void>,
+  more: Partial<PipelineDriver> = {},
+): void {
+  const d = daemon as unknown as { pipelineFor(w: string): PipelineDriver };
+  const real = d.pipelineFor.bind(d);
+  d.pipelineFor = (w) => {
+    const p = real(w);
+    return Object.assign(Object.create(p), {
+      handle: (task: string, ev: PipelineEvent) =>
+        ev.kind === "agent_blocked" ? handle(ev) : p.handle(task, ev),
+      ...more,
+    });
+  };
+}
+
 const resolve = async (id: string, answer: string) => {
   const r = await runCli(["resolve", id, answer, "--by", "tester"], s.env.env);
   expect(r.exitCode).toBe(0);
@@ -104,10 +136,428 @@ describe("daemon: a blocked status", () => {
   });
 });
 
+describe("daemon: a retained blocked always has a decision (the invariant)", () => {
+  it("a blocked retained before supervision attaches (a restart) opens exactly one decision", async () => {
+    s = await makeSupervisedEnv();
+    await s.daemon.stop();
+    await s.status("blocked", { reason: "stuck while volleyd was down" });
+    await s.restart();
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    expect(opened.data).toMatchObject({
+      agent_id: AGENT,
+      reason: "stuck while volleyd was down",
+      pipeline: { on: "agent_blocked", role: "implementer" },
+    });
+    await s.consumed();
+    expect(blockedOpened()).toHaveLength(1);
+  });
+
+  it("the pipeline opens nothing: after the window the sweep asks, with one blocked_unhandled alarm", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    dropBlocked(s.daemon, async () => {});
+    await s.status("blocked", { reason: "stuck" });
+    await s.consumed();
+    expect(blockedOpened()).toHaveLength(0);
+    await clock.advance(late);
+    for (let i = 0; i < 3; i++) await s.daemon.tick();
+    await s.settled();
+    expect(blockedOpened()).toHaveLength(1);
+    expect(blockedOpened()[0]).toMatchObject({
+      task: "T1",
+      data: {
+        class: "blocked_unhandled",
+        agent_id: AGENT,
+        role: "implementer",
+        reason: "stuck",
+        options: ["respawn", "cancel"],
+      },
+    });
+    expect(typeof blockedOpened()[0]?.data.status_at).toBe("string");
+    expect(blockedOpened()[0]?.data.pipeline).toBeUndefined();
+    expect(unhandled()).toHaveLength(1);
+    expect(unhandled()[0]?.data).toMatchObject({ agent_id: AGENT });
+    expect(String(unhandled()[0]?.data.why)).toContain("no decision");
+    // The decision handles the status: the terminal-status watchdog stays quiet.
+    expect(terminalAlarms()).toHaveLength(0);
+    expect(stage()).toBe("awaiting_decision");
+  });
+
+  it("a stale run the pipeline drops: manual | cancel, the task is not parked; cancel stops only the agent", async () => {
+    s = await makeSupervisedEnv();
+    dropBlocked(s.daemon, async (ev) => {
+      if (ev.kind !== "agent_blocked") return;
+      // What the pipeline's onBlocked journals for a stale run (already on the serial queue).
+      const d = s.daemon as unknown as { append(w: string, e: unknown): Promise<unknown> };
+      await d.append("w1", {
+        type: "alarm_raised",
+        task: "T1",
+        data: {
+          alarm: BLOCKED_ALARM,
+          agent_id: ev.agent_id,
+          role: ev.role,
+          why: "not the implementer's current run",
+          ...(ev.at !== undefined ? { status_at: ev.at } : {}),
+        },
+      });
+    });
+    await s.status("blocked", { reason: "stuck" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    expect(opened.data).toMatchObject({
+      class: "blocked_unhandled",
+      agent_id: AGENT,
+      options: ["manual", "cancel"],
+    });
+    await s.settled();
+    expect(stage()).toBe("implement");
+    await resolve(opened.data.decision_id as string, "cancel");
+    await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    expect(s.journal().some((e) => e.type === "task_cancelled")).toBe(false);
+    expect(stage()).toBe("implement");
+  });
+
+  it("a red head still being classified: the sweep waits for it, then asks after a full window", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    let classifying = true;
+    dropBlocked(s.daemon, async () => {}, { classifying: () => classifying });
+    await s.status("blocked", { reason: "stuck" });
+    await s.consumed();
+    await clock.advance(late);
+    for (let i = 0; i < 3; i++) await s.daemon.tick();
+    await s.settled();
+    expect(blockedOpened()).toHaveLength(0);
+    expect(unhandled()).toHaveLength(0);
+    // The classify ends without a decision: a full window from then on, the daemon asks.
+    classifying = false;
+    await s.daemon.tick();
+    await s.settled();
+    expect(blockedOpened()).toHaveLength(0);
+    await clock.advance(late);
+    for (let i = 0; i < 3; i++) await s.daemon.tick();
+    await s.settled();
+    expect(blockedOpened()).toHaveLength(1);
+  });
+
+  it("the pipeline throws: the daemon asks at once, the alarm carries the error", async () => {
+    s = await makeSupervisedEnv();
+    dropBlocked(s.daemon, async () => {
+      throw new Error("view gone");
+    });
+    await s.status("blocked", { reason: "stuck" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    expect(opened.data).toMatchObject({ class: "blocked_unhandled", agent_id: AGENT });
+    expect(String(unhandled()[0]?.data.why)).toContain("view gone");
+  });
+
+  it("its respawn: the agent is retired as relaunched and attempt 2 launches", async () => {
+    s = await makeSupervisedEnv();
+    dropBlocked(s.daemon, async () => {
+      throw new Error("dropped");
+    });
+    await s.status("blocked", { reason: "stuck" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    await resolve(opened.data.decision_id as string, "respawn");
+    await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    expect(
+      s.journal().find((e) => e.type === "agent_retired" && e.data.agent_id === AGENT)?.data,
+    ).toMatchObject({ status: "relaunched" });
+    await s.event("agent_spawned", 2);
+    expect(s.host.launches).toHaveLength(2);
+  });
+
+  it("its cancel: the task is cancelled", async () => {
+    s = await makeSupervisedEnv();
+    dropBlocked(s.daemon, async () => {
+      throw new Error("dropped");
+    });
+    await s.status("blocked", { reason: "stuck" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    await resolve(opened.data.decision_id as string, "cancel");
+    await s.event("task_cancelled");
+  });
+
+  it("a blocked on a merge_ready task: a daemon-level manual | cancel decision, no error", async () => {
+    const logs: string[] = [];
+    s = await makeSupervisedEnv({ daemon: { log: (l) => logs.push(l) } });
+    await s.daemon.recordEvent("w1", {
+      type: "stage_entered",
+      task: "T1",
+      data: { stage: "merge_ready" },
+    });
+    await s.status("blocked", { reason: "stuck after the gate" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    expect(opened).toMatchObject({
+      task: "T1",
+      data: {
+        class: "blocked_unhandled",
+        agent_id: AGENT,
+        options: ["manual", "cancel"],
+        stage: "merge_ready",
+      },
+    });
+    expect(unhandled()[0]?.data).toMatchObject({
+      agent_id: AGENT,
+      why: "the task is merge_ready",
+    });
+    await s.settled();
+    expect(stage()).toBe("merge_ready");
+    expect(logs.filter((l) => l.startsWith("error:"))).toEqual([]);
+    // cancel on a settled task stops the agent; the task stays where it is.
+    await resolve(opened.data.decision_id as string, "cancel");
+    await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    expect(stage()).toBe("merge_ready");
+  });
+
+  it("a blocked agent nobody decided on is stalled after blocked_undecided_stall_ms", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    // Every path that would ask is lost: liveness is the last line.
+    vi.spyOn(Daemon.prototype as never, "onBlocked").mockResolvedValue(undefined as never);
+    vi.spyOn(Daemon.prototype as never, "blockedInvariant").mockResolvedValue(undefined as never);
+    await s.hook("idle-stop.json");
+    await s.status("blocked", { reason: "stuck" });
+    await s.consumed();
+    await s.daemon.tick();
+    await clock.advance(CONFIG_DEFAULTS.blocked_undecided_stall_ms + 1_000);
+    await s.daemon.tick();
+    await s.settled();
+    const stalled = s
+      .journal()
+      .filter((e) => e.type === "decision_opened" && e.data.kind === "agent_stalled");
+    expect(stalled).toHaveLength(1);
+    expect(stalled[0]?.data).toMatchObject({ agent_id: AGENT, options: ["respawn", "stop task"] });
+    expect(String(stalled[0]?.data.question)).toContain("blocked");
+    // It names the status it asks about: answered with a steer (the agent stays blocked on that
+    // same status), the stall is not asked again every window.
+    expect(stalled[0]?.data.status_at).toEqual(expect.any(String));
+    await resolve(stalled[0]?.data.decision_id as string, "try the other approach");
+    for (let i = 0; i < 3; i++) {
+      await clock.advance(CONFIG_DEFAULTS.blocked_undecided_stall_ms + 1_000);
+      await s.daemon.tick();
+    }
+    await s.settled();
+    expect(
+      s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === "agent_stalled"),
+    ).toHaveLength(1);
+  });
+
+  it("a blocked the owner answered (continue) is not asked about again as a stall", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    await s.hook("idle-stop.json");
+    await s.status("blocked", { reason: "stuck" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    // Answered; the agent has not published a new status yet (still blocked, same status_at).
+    await resolve(opened.data.decision_id as string, "continue");
+    for (let i = 0; i < 3; i++) {
+      await s.daemon.tick();
+      await clock.advance(CONFIG_DEFAULTS.blocked_undecided_stall_ms + 1_000);
+    }
+    await s.daemon.tick();
+    await s.settled();
+    expect(
+      s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === "agent_stalled"),
+    ).toHaveLength(0);
+  });
+
+  it("an answered blocked under a suppressed reap is still decided: no stall", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ reapGraceMs: 60_000, daemon: { clock } });
+    await s.hook("idle-stop.json");
+    await s.status("blocked", { reason: "stuck" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    await resolve(opened.data.decision_id as string, "continue");
+    // An LWT a heartbeat suppresses: the retained status is now `reaped`, liveness reads `blocked`.
+    const lwt = JSON.stringify(
+      buildEnvelope({
+        agentId: AGENT,
+        parentId: "volleyd",
+        channel: "status",
+        type: "reaped",
+        payload: { reason: "lwt" },
+      }),
+    );
+    await s.agent.publish(buildTopic(NS, AGENT, "status"), lwt, { qos: 1, retain: true });
+    await s.until(() => s.daemon.snapshot("w1") !== undefined);
+    await clock.advance(1000);
+    await s.hook("heartbeat.json");
+    await s.until(() => s.journal().some((e) => e.type === "reap_suppressed"));
+    for (let i = 0; i < 3; i++) {
+      await s.daemon.tick();
+      await clock.advance(CONFIG_DEFAULTS.blocked_undecided_stall_ms + 1_000);
+    }
+    await s.daemon.tick();
+    await s.settled();
+    expect(
+      s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === "agent_stalled"),
+    ).toHaveLength(0);
+  });
+
+  it("a blocked stall under a suppressed reap, answered with a steer, is not asked again", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ reapGraceMs: 60_000, daemon: { clock } });
+    vi.spyOn(Daemon.prototype as never, "onBlocked").mockResolvedValue(undefined as never);
+    vi.spyOn(Daemon.prototype as never, "blockedInvariant").mockResolvedValue(undefined as never);
+    await s.hook("idle-stop.json");
+    await s.status("blocked", { reason: "stuck" });
+    await s.consumed();
+    const lwt = JSON.stringify(
+      buildEnvelope({
+        agentId: AGENT,
+        parentId: "volleyd",
+        channel: "status",
+        type: "reaped",
+        payload: { reason: "lwt" },
+      }),
+    );
+    await s.agent.publish(buildTopic(NS, AGENT, "status"), lwt, { qos: 1, retain: true });
+    await clock.advance(1000);
+    await s.hook("heartbeat.json");
+    await s.until(() => s.journal().some((e) => e.type === "reap_suppressed"));
+    await s.daemon.tick();
+    await clock.advance(CONFIG_DEFAULTS.blocked_undecided_stall_ms + 1_000);
+    await s.daemon.tick();
+    await s.settled();
+    const stalled = () =>
+      s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === "agent_stalled");
+    expect(stalled()).toHaveLength(1);
+    // The stall names the blocked status liveness judged, not the retained `reaped`.
+    expect(stalled()[0]?.data.status_at).toEqual(expect.any(String));
+    await resolve(stalled()[0]?.data.decision_id as string, "try the other approach");
+    for (let i = 0; i < 3; i++) {
+      await clock.advance(CONFIG_DEFAULTS.blocked_undecided_stall_ms + 1_000);
+      await s.daemon.tick();
+    }
+    await s.settled();
+    expect(stalled()).toHaveLength(1);
+  });
+
+  it("a blocked that arrives during an account move is the pipeline's once the move ends", async () => {
+    s = await makeSupervisedEnv();
+    const moving = (s.daemon as unknown as { moving: Set<string> }).moving;
+    moving.add(AGENT);
+    await s.status("blocked", { reason: "stuck" });
+    await s.consumed();
+    await s.settled();
+    expect(blockedOpened()).toHaveLength(0);
+    moving.delete(AGENT);
+    await s.daemon.tick();
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    expect(opened.data).toMatchObject({ options: ["continue", "respawn", "cancel"] });
+    expect(unhandled()).toHaveLength(0);
+  });
+
+  it("cancel on a blocked whose task is not in the wave stops the agent", async () => {
+    s = await makeSupervisedEnv();
+    const sup = (s.daemon as unknown as { supervised: Map<string, { task: string }> }).supervised;
+    const a = sup.get(AGENT);
+    if (a === undefined) throw new Error("not supervised");
+    a.task = "T-gone";
+    await s.status("blocked", { reason: "stuck" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    expect(opened.task ?? null).toBeNull();
+    expect(opened.data).toMatchObject({
+      class: "blocked_unhandled",
+      options: ["manual", "cancel"],
+    });
+    await resolve(opened.data.decision_id as string, "cancel");
+    await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+  });
+
+  it("the blocked agent answering cancel on its own task-less decision does not retire itself", async () => {
+    s = await makeSupervisedEnv();
+    const sup = (s.daemon as unknown as { supervised: Map<string, { task: string }> }).supervised;
+    const a = sup.get(AGENT);
+    if (a === undefined) throw new Error("not supervised");
+    a.task = "T-gone";
+    await s.status("blocked", { reason: "stuck" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    expect(opened.data).not.toHaveProperty("stage");
+    const id = opened.data.decision_id as string;
+    const r = await runCli(["resolve", id, "cancel", "--by", AGENT], s.env.env);
+    expect(r.exitCode).toBe(0);
+    await s.event((e) => e.type === "decision_resolved" && e.data.decision_id === id);
+    await s.settled();
+    expect(s.journal().some((e) => e.type === "agent_retired")).toBe(false);
+    expect(sup.has(AGENT)).toBe(true);
+  });
+});
+
 describe("daemon: the terminal-status watchdog", () => {
-  const alarms = () =>
-    s.journal().filter((e) => e.type === "alarm_raised" && e.data.alarm === TERMINAL_ALARM);
-  const late = DAEMON_DEFAULTS.terminal_unjournaled_alarm_ms + 1_000;
+  const alarms = terminalAlarms;
+
+  it("is armed for a blocked already retained when supervision attaches", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    await s.daemon.stop();
+    await s.status("blocked", { reason: "stuck" });
+    vi.spyOn(Daemon.prototype as never, "onBlocked").mockResolvedValue(undefined as never);
+    vi.spyOn(Daemon.prototype as never, "blockedInvariant").mockResolvedValue(undefined as never);
+    const d = await s.restart();
+    await d.reconciled();
+    await s.consumed();
+    await clock.advance(late);
+    await d.tick();
+    await s.settled();
+    expect(alarms()).toHaveLength(1);
+    expect(alarms()[0]?.data).toMatchObject({ agent_id: AGENT, status: "blocked" });
+  });
+
+  it("a blocked decided before a restart is not alarmed after it", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    await s.status("blocked", { reason: "stuck" });
+    await s.event("decision_opened");
+    await s.daemon.stop();
+    const d = await s.restart();
+    await d.reconciled();
+    await s.consumed();
+    await clock.advance(late);
+    await d.tick();
+    await s.settled();
+    expect(alarms()).toHaveLength(0);
+    expect(blockedOpened()).toHaveLength(1);
+  });
+
+  it("is not armed for a done already retained when supervision attaches", async () => {
+    // A done re-sent at re-attach is the same claim (e.g. a head still held for CI): the
+    // pipeline journals nothing new for it, and that is not a dropped status.
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    await s.daemon.stop();
+    await s.status("done", { summary: "ok" });
+    vi.spyOn(Daemon.prototype as never, "onFinal").mockResolvedValue(undefined as never);
+    const d = await s.restart();
+    await d.reconciled();
+    await s.consumed();
+    await clock.advance(late);
+    await d.tick();
+    await s.settled();
+    expect(alarms()).toHaveLength(0);
+  });
 
   it("a handled blocked status raises nothing", async () => {
     const clock = fakeClock(Date.now());
