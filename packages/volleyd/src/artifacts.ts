@@ -583,12 +583,30 @@ export interface RebaseCheck {
   behind: number;
 }
 
+/**
+ * Where a probe's git runs: the worktree at the PR head, or the repo root with `fetch` (the PR
+ * head's ref, `refs/pull/<n>/head` or its branch) fetched first, when that worktree is gone.
+ */
+export interface GitAt {
+  cwd: string;
+  fetch?: string;
+}
+
+/** Fetch `o.fetch` (the PR head into a repo root), when given; throws, naming it, on a failure. */
+async function fetchHead(git: (...a: string[]) => Promise<ExecResult>, o: GitAt): Promise<void> {
+  if (o.fetch === undefined) return;
+  const r = await git("fetch", "origin", o.fetch);
+  if (r.code !== 0)
+    throw new Error(`git fetch origin ${o.fetch} failed (${r.code}): ${line(r.stderr)}`);
+}
+
 /** Has the release branch moved past where `head` branched from it? */
 export async function checkRebase(
   exec: ExecFn,
-  o: { cwd: string; head: string; release_branch: string },
+  o: GitAt & { head: string; release_branch: string },
 ): Promise<RebaseCheck> {
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
+  await fetchHead(git, o);
   const fetched = await git("fetch", "origin", o.release_branch);
   if (fetched.code !== 0)
     throw new Error(
@@ -685,10 +703,11 @@ async function unmatchedCommits(git: Git, base: string, head: string): Promise<s
 /** Gather LandedFacts for `head` against `origin/<release_branch>` (read-only git). */
 export async function probeLanded(
   exec: ExecFn,
-  o: { cwd: string; head: string; release_branch: string; pr: number },
+  o: GitAt & { head: string; release_branch: string; pr: number },
 ): Promise<LandedFacts & { release_sha: string }> {
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
   const release = `origin/${o.release_branch}`;
+  await fetchHead(git, o);
   await git("fetch", "origin", o.release_branch);
   const tip = line(
     (await git("rev-parse", "--verify", "--quiet", `refs/remotes/${release}`)).stdout,
@@ -737,10 +756,15 @@ export type OperatorMergeCheck =
  */
 export async function verifyOperatorMerge(
   exec: ExecFn,
-  o: { cwd: string; head: string; sha: string; release_branch: string },
+  o: GitAt & { head: string; sha: string; release_branch: string },
 ): Promise<OperatorMergeCheck> {
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
   const release = `origin/${o.release_branch}`;
+  try {
+    await fetchHead(git, o);
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
   await git("fetch", "origin", o.release_branch);
   // A short sha is the same commit as its full one: compare (and record) the full sha.
   const full = await git("rev-parse", "--verify", "--quiet", `${o.sha}^{commit}`);
@@ -941,8 +965,7 @@ async function releaseMergeOf(
 /** Gather MovedHeadFacts (read-only git / gh through the fenced exec). */
 export async function probeMovedHead(
   exec: ExecFn,
-  o: {
-    cwd: string;
+  o: GitAt & {
     branch: string;
     from: string;
     to: string;
@@ -952,6 +975,14 @@ export async function probeMovedHead(
 ): Promise<MovedHeadFacts> {
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
   await git("fetch", "origin", o.branch);
+  if (o.fetch !== o.branch) await fetchHead(git, o);
+  // From a repo root, the gated head may be missing (force-pushed away): fetch it by sha, best
+  // effort; without it the log and diffstat below come back empty.
+  if (
+    o.fetch !== undefined &&
+    (await git("rev-parse", "--verify", "--quiet", `${o.from}^{commit}`)).code !== 0
+  )
+    await git("fetch", "origin", o.from);
   const ci = await ciOn(exec, o.cwd, o.to, o.runs_via);
   const tests = ci.state === "red" ? (await failedLogs(exec, o.cwd, ci.runs)).failing_tests : [];
   const log = await git("log", "--oneline", `${o.from}..${o.to}`);
