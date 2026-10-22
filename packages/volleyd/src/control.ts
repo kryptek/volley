@@ -83,12 +83,17 @@ export type ControlOp =
   // Fleet (F2): the doctor on a paired machine, for an admin (peers.ts doctor).
   | "peer_doctor";
 
+/** A decision's answer it cannot apply (resolve, inbox_answer): the refusal's `code`. */
+export const BAD_ANSWER = "BAD_ANSWER";
+
 export interface ControlResponse {
   text: string;
   acked_type: "query";
   op: string;
   ok: boolean;
   error?: string;
+  /** A refusal's machine-readable code (e.g. BAD_ANSWER), where the op gives one. */
+  code?: string;
   /** Path-qualified validation errors (a rejected wave file). */
   errors?: PathError[];
   result?: unknown;

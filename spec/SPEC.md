@@ -360,7 +360,7 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 - `plan_change` — carries `change`: `removed` (the new wave version dropped the task) | `issue` (it moved the task to another issue).
 - `pr_closed` — asks about a gated PR closed without a merge whose head the release branch does not carry (`landed` | `abandoned`).
 - `pr_head_moved` — asks about a PR head that moved after a gate (`rereview` | `fixup` | `accept` | `cancel`; `accept` is offered only when CI on the new head is green and the move is a merge of the release branch only: the new head is a merge commit whose parents are the old head and a commit on the release branch, and every file the move changed is one the release branch changed since the PR branched from it).
-- `spawn_budget_exhausted` — asks about a spawn the wave's spawn budget holds (`raise by <n>` | `cancel`).
+- `spawn_budget_exhausted` — asks about a spawn the wave's spawn budget holds (`raise by <n>` | `cancel`; `n` SHOULD cover the spawns the wave's unfinished tasks still need, not the one spawn held).
 - `account_limit` — carries `acct`, `pct`, `resets_at` and `suggested`; §4.6.12.
 - `machine_down` — wave-level; carries `host`, `down_since`, `tasks` (the wave's unfinished tasks on that host) and optionally `machine` (`down`, the default, | `draining` | `removing` | `removed`), with the options `wait`, `re-place queued tasks` and `cancel` (no `wait` for `removing` and `removed`); §4.6.15.
 - `merge_refused` — asks about a task the host refused to merge `autopilot.merge_retry_max` times at one gated head (`retry` | `manual` | `cancel`); §4.6.17.
@@ -369,6 +369,8 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 <!-- /spec-list -->
 
 A decision that offers `respawn` for an agent whose host is down or not eligible (§4.6.15) also offers `respawn on <best>`, `<best>` being the best eligible machine when it opened; on a host closed to new agents it offers `respawn on <best>` instead of `respawn`.
+
+A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out to a decision whose answer it acts on itself. For `spawn_budget_exhausted` it MUST accept `raise by <n>` with any n ≥ 1 besides the offered options, and SHOULD read `raise <n>` as `raise by <n>`. Which free-form answers the reference supervisor accepts for each kind is listed in its README.
 
 **A blocked agent is always asked about.** A supervised agent's retained `blocked` status (§5.1) SHOULD always have a decision about it: the supervisor checks on the status event, when its watch attaches to a status already retained (a restart), and on every tick. A `blocked` its pipeline cannot own (the task is `done`, `merge_ready` or `cancelled`, the agent is not the role's current run, the run was accepted, or the pipeline failed) is never dropped silently: the supervisor journals `alarm_raised { alarm: "blocked_unhandled", agent_id, why }` and opens its own `agent_blocked` decision, `respawn` \| `cancel`, or, on a settled task or for a run that is not the role's current one or was accepted, `manual` \| `cancel` without parking the task (`cancel` then stops only that agent and leaves the task as it is).
 

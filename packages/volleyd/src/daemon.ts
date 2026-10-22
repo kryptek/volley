@@ -90,6 +90,7 @@ import {
   type InboxWhere,
   type SessionSurface,
   answerEvent,
+  decisionAnswerRefusal,
   decisionItemId,
   foldInbox,
   inboxEnvelopeType,
@@ -172,6 +173,7 @@ import { ConfigStore } from "./config-store";
 import {
   ADMISSION_TOPIC,
   ARCHIVE_TOPIC,
+  BAD_ANSWER,
   CONFIG_TOPIC,
   type ControlResponse,
   DAEMON_AGENT_ID,
@@ -207,6 +209,7 @@ import {
   MACHINE_DOWN_REPLACE,
   MACHINE_DOWN_WAIT,
   attentionPayload,
+  checkAnswer,
   decisionPayload,
   decisionTopic,
   decisionsFilePath,
@@ -318,8 +321,9 @@ import {
   activeTasks,
   admit,
   admitPlacing,
-  pipelineRoles,
+  budgetRaise,
   spawnBudget,
+  spawnsOutstanding,
   spawnsUsed,
 } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
@@ -6148,19 +6152,18 @@ export class Daemon {
     const rec = log?.record;
     if (rec?.wave == null || rec.state?.status !== "running") return;
     if (openDecisions(rec).some((d) => d.kind === "spawn_budget_exhausted")) return;
-    const budget = spawnBudget(
-      rec.wave,
-      this.config.effective(wave).spawn_budget_multiplier,
-      rec.budget_raised ?? 0,
-    );
+    const eff = this.config.effective(wave);
+    const budget = spawnBudget(rec.wave, eff.spawn_budget_multiplier, rec.budget_raised ?? 0);
     const used = spawnsUsed(rec);
-    const n = Math.max(
-      1,
-      task !== null
-        ? pipelineRoles(rec.wave, task) -
-            Object.keys(rec.state.tasks.find((t) => t.id === task)?.agents ?? {}).length
-        : 1,
-    );
+    // A hold queued behind a raise that already covers it (the same tick's other held spawns).
+    if (used < budget) return;
+    // Sized for the wave, not this one spawn: one raise lets every held spawn through.
+    const n = budgetRaise({
+      outstanding: spawnsOutstanding(rec.wave, rec),
+      derived: spawnBudget(rec.wave, eff.spawn_budget_multiplier, 0),
+      used,
+      raiseMax: eff.autopilot.budget_raise_max,
+    });
     const what = task !== null ? `${task}'s ${role ?? "next role"}` : "the next ready task";
     const base = waveDecisionId("spawn_budget_exhausted", wave);
     let id = base;
@@ -8248,9 +8251,27 @@ export class Daemon {
   private async answerInboxItemNow(
     id: string,
     req: InboxAnswerRequest,
-  ): Promise<{ item: InboxItem } | { refused: string }> {
+  ): Promise<{ item: InboxItem } | { refused: string; code?: typeof BAD_ANSWER }> {
     const item = this.inbox.get(id);
     if (item === undefined) return { refused: `unknown inbox item '${id}'` };
+    // The owner check `resolve` applies: the inbox is no way around it. A Desk login is the
+    // owner on another screen: the broker named it on its own account-op topic. It comes
+    // before the answer's own check, so a non-owner hears it is not theirs to answer.
+    if (item.kind === "decision" && item.wave !== undefined && req.desk_login !== true) {
+      const state = this.waves.get(item.wave)?.record.state;
+      const refused =
+        state != null ? guardMutation(state, req.by, "inbox_answer", this.bindings) : null;
+      if (refused !== null) return { refused };
+    }
+    // An answer its decision cannot apply is refused before the compare-and-set (#315).
+    // A decision already resolved (a crash before its item closed) answers "already answered".
+    const decided =
+      item.wave !== undefined &&
+      typeof item.source.decision_id === "string" &&
+      this.waves.get(item.wave)?.record.decisions[item.source.decision_id]?.resolved !== undefined;
+    const bad =
+      item.answered === undefined && !decided ? decisionAnswerRefusal(item, req.answer) : null;
+    if (bad !== null) return { refused: bad, code: BAD_ANSWER };
     const check = answerEvent(item, req, dateOf(this.time));
     if ("refused" in check) return check;
     if (item.kind === "decision") {
@@ -8258,14 +8279,6 @@ export class Daemon {
       const decision = item.source.decision_id;
       if (wave === undefined || typeof decision !== "string" || !this.waves.has(wave))
         return { refused: `inbox item '${id}' names no open decision` };
-      // The owner check `resolve` applies: the inbox is no way around it. A Desk login is the
-      // owner on another screen: the broker named it on its own account-op topic.
-      const state = this.waves.get(wave)?.record.state;
-      const refused =
-        state != null && req.desk_login !== true
-          ? guardMutation(state, req.by, "inbox_answer", this.bindings)
-          : null;
-      if (refused !== null) return { refused };
       const r = await this.answerDecision(wave, decision, req);
       if ("refused" in r) return r;
       if (r.already_resolved) {
@@ -8324,10 +8337,19 @@ export class Daemon {
   private async answerDecision(
     wave: WaveId,
     id: string,
-    r: { answer: string; by: string; rationale?: string; where?: InboxWhere },
+    given: { answer: string; by: string; rationale?: string; where?: InboxWhere },
   ): Promise<
-    { refused: string } | { decision: DecisionRecord; already_resolved: boolean; brief?: string }
+    | { refused: string; code?: typeof BAD_ANSWER }
+    | { decision: DecisionRecord; already_resolved: boolean; brief?: string }
   > {
+    // An answer the decision cannot apply is refused, and nothing is journaled (#315).
+    const asked = this.waves.get(wave)?.record.decisions[id];
+    const checked =
+      asked !== undefined && asked.resolved === undefined
+        ? checkAnswer(asked, given.answer)
+        : { answer: given.answer };
+    if ("refused" in checked) return { refused: checked.refused, code: BAD_ANSWER };
+    const r = { ...given, answer: checked.answer };
     const trust = await this.trustAnswer(wave, id, r.answer);
     if (trust !== null) return { refused: trust };
     const res = await this.resolveNow(wave, id, r);
@@ -8598,7 +8620,13 @@ export class Daemon {
       where,
       ...(opts.desk_login === true ? { desk_login: true as const } : {}),
     });
-    return "refused" in r ? { ok: false, error: r.refused } : { ok: true, result: r.item };
+    if ("refused" in r)
+      return {
+        ok: false,
+        error: r.refused,
+        ...(r.code !== undefined ? { code: r.code } : {}),
+      };
+    return { ok: true, result: r.item };
   }
 
   private async publishDecision(wave: WaveId, d: DecisionRecord): Promise<void> {
@@ -9491,7 +9519,8 @@ export class Daemon {
       where,
       ...(typeof p.rationale === "string" ? { rationale: p.rationale } : {}),
     });
-    if ("refused" in r) return { ok: false, error: r.refused };
+    if ("refused" in r)
+      return { ok: false, error: r.refused, ...(r.code !== undefined ? { code: r.code } : {}) };
     // Resolving twice stays a no-op; the answer says where the first one was given.
     const first = this.inbox.get(decisionItemId(wave, id))?.answered;
     return {

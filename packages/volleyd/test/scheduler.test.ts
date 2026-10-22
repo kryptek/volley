@@ -7,9 +7,11 @@ import {
   type Admission,
   admit,
   admitPlacing,
+  budgetRaise,
   criticalPaths,
   ready,
   spawnBudget,
+  spawnsOutstanding,
 } from "../src/scheduler";
 import type { JournalEvent, NewEvent, Wave } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
@@ -177,6 +179,55 @@ describe("spawnBudget", () => {
     expect(spawnBudget(w, 10)).toBe(30);
     expect(spawnBudget({ ...w, spawn_budget: 5 }, 3)).toBe(5);
     expect(spawnBudget(epic, 3)).toBeGreaterThanOrEqual(12);
+  });
+});
+
+describe("spawnsOutstanding (#315)", () => {
+  const wave5 = parseWaveFile(
+    `wave: w5\nrepo: /r\nrelease_branch: release/w5\nmodel: m\npipeline: [implement, spec_review, merge_ready]\nspawn_budget: 12\ntasks:\n${[1, 2, 3, 4, 5].map((i) => `  T${i}: { issue: ${i} }\n`).join("")}`,
+  );
+  /** A task whose implementer finished and whose reviewer's spawn is still to come. */
+  const inReview = (task: string): NewEvent[] => [
+    { type: "task_admitted", task, data: {} },
+    { type: "agent_spawned", task, data: { role: "implementer", agent_id: `${task}-i` } },
+    { type: "stage_entered", task, data: { stage: "spec_review" } },
+  ];
+
+  it("counts each unfinished task's stages still to spawn, plus one fixup allowance each", () => {
+    const rec = record(wave5, wave5.task_order.flatMap(inReview));
+    // 5 tasks × (spec_review + a fixup allowance)
+    expect(spawnsOutstanding(wave5, rec)).toBe(10);
+  });
+
+  it("a queued task counts its whole pipeline; a finished or cancelled one counts nothing", () => {
+    const rec = record(wave5, [
+      ...inReview("T1"),
+      { type: "stage_entered", task: "T1", data: { stage: "done" } },
+      { type: "task_cancelled", task: "T2", data: { by: "t", why: "x" } },
+    ]);
+    // T3..T5 queued: implement + spec_review + fixup allowance = 3 each
+    expect(spawnsOutstanding(wave5, rec)).toBe(9);
+  });
+
+  it("a stage whose agent is spawned already is not counted again", () => {
+    const rec = record(wave5, [
+      ...inReview("T1"),
+      { type: "agent_spawned", task: "T1", data: { role: "spec_reviewer", agent_id: "T1-s" } },
+    ]);
+    // T1: the fixup allowance only; T2..T5: 3 each
+    expect(spawnsOutstanding(wave5, rec)).toBe(1 + 12);
+  });
+});
+
+describe("budgetRaise (#315)", () => {
+  it("is what the wave still needs, at least a quarter of the derived budget, within the raise cap", () => {
+    expect(budgetRaise({ outstanding: 10, derived: 12, used: 12, raiseMax: 2 })).toBe(10);
+    expect(budgetRaise({ outstanding: 1, derived: 12, used: 12, raiseMax: 2 })).toBe(3);
+    expect(budgetRaise({ outstanding: 40, derived: 12, used: 12, raiseMax: 2 })).toBe(12);
+  });
+  it("never offers less than 1, even past the cap (the owner may still raise)", () => {
+    expect(budgetRaise({ outstanding: 10, derived: 12, used: 24, raiseMax: 2 })).toBe(10);
+    expect(budgetRaise({ outstanding: 0, derived: 1, used: 1, raiseMax: 2 })).toBe(1);
   });
 });
 
