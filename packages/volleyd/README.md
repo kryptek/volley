@@ -693,8 +693,9 @@ Autopilot answers `move <agent> to <suggested>` (`agent_account_limit/move`, bud
 `account_move_max` per task role) or `not now` (`agent_account_limit/wait`); the move runs as
 `agent_move_account` does, with `by` the answerer, `decision_id` and `why` on
 `agent_account_moved`, and the respawn's `account_chosen.source` is `move`. No decision opens
-for an agent whose task or wave names an account, one already moving, or a second time for the
-same task role, account, window and `resets_at` (after `not now` the next waits for the reset).
+for an agent whose task, wave or `claude.default_account` names an account, one already
+moving, or a second time for the same task role, account, window and `resets_at` (after
+`not now` the next waits for the reset).
 
 **Pinned waves.** When an account's 5-hour window reaches `claude.warn_at_pct` (default 90; a
 wave's `config:` can override it), each running wave with agents on that account whose account

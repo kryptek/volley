@@ -200,6 +200,27 @@ describe("selectAccount: task > wave > config default > primary", () => {
     );
   });
 
+  it("a paired machine's profile signed out (or with no recorded dir) falls back to primary@<name>", () => {
+    const r2 = root();
+    addAccount(r2, { label: "far", machine: "peer-a" }, NOW);
+    // ranked first if it were a candidate: it must not be one
+    const rank = (c: readonly string[]) =>
+      [...c]
+        .map((account) => ({
+          account,
+          headroom: account === "far@peer-a" ? 90 : 10,
+          five_hour_pct: account === "far@peer-a" ? 10 : 90,
+          weekly_pct: null,
+          agents: 0,
+        }))
+        .sort((a, b) => (b.headroom ?? 0) - (a.headroom ?? 0));
+    const signedOut = selectAccount(r2, readRegistry(r2), { machine: "peer-a" }, rank);
+    expect(signedOut).toMatchObject({ id: PRIMARY_ACCOUNT, dir: null, machine: "peer-a" });
+    markSignedIn(r2, "far", {}, NOW);
+    const noDir = selectAccount(r2, readRegistry(r2), { machine: "peer-a" }, rank);
+    expect(noDir).toMatchObject({ id: PRIMARY_ACCOUNT, dir: null, machine: "peer-a" });
+  });
+
   it("refuses an unknown account and one that never finished signing in", () => {
     expect(() => selectAccount(r, reg, { wave: "nope" })).toThrow(/unknown Claude account 'nope'/);
     expect(() => selectAccount(r, reg, { task: "fresh" })).toThrow(/not signed in/);

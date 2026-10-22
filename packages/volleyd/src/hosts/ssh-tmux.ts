@@ -678,7 +678,7 @@ export class SshTmuxHost implements RemoteHost {
       const cur = await this.readClaudeJsonText(configDir);
       if (cur === null) {
         throw new Error(
-          `no readable ~/.claude.json on ${this.spec.target}: run claude there once, then retry`,
+          `no readable ${configDir !== undefined ? json : "~/.claude.json"} on ${this.spec.target}: run claude there once, then retry`,
         );
       }
       const next = `${JSON.stringify(withTrust(cur.cfg, root), null, 2)}\n`;

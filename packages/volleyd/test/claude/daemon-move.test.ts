@@ -110,6 +110,57 @@ describe("agent_move_account (daemon)", () => {
       },
     );
   }, 20_000);
+
+  it("refuses a profile on another machine: the agent stays where it is", async () => {
+    const base = tempDir("volleyd-move-");
+    const root = join(base, "claude");
+    const primary = join(base, ".claude");
+    mkdirSync(primary, { recursive: true });
+    await withEnv({ VOLLEY_CLAUDE_DIR: root }, async () => {
+      s = await makeSupervisedEnv({ daemon: { claude: { root, primaryDir: primary } } });
+      mkdirSync(root, { recursive: true });
+      writeFileSync(
+        join(root, "accounts.json"),
+        JSON.stringify({
+          version: 1,
+          accounts: [
+            {
+              id: "work",
+              label: "work",
+              machine: "peer-a",
+              dir: "/home/u/.volley/claude/work",
+              created: "2026-10-18T12:00:00.000Z",
+              signed_in_at: "2026-10-18T12:00:00.000Z",
+            },
+          ],
+        }),
+      );
+      const client = await ControlClient.connect(s.env.broker.url, NS);
+      try {
+        expect(
+          await client.request("agent_move_account", { agent: AGENT, acct: "work", by: "o" }),
+        ).toMatchObject({
+          ok: false,
+          error: "Claude account 'work' lives on machine 'peer-a', not this supervisor's",
+        });
+        expect(
+          await client.request("agent_move_account", {
+            agent: AGENT,
+            acct: "work@peer-a",
+            by: "o",
+          }),
+        ).toMatchObject({
+          ok: false,
+          error: `${AGENT} runs on local: Claude account 'work@peer-a' is not one of its machine's (profiles on other machines cannot take it)`,
+        });
+        const j = s.journal();
+        expect(j.some((e) => e.type === "agent_account_moved")).toBe(false);
+        expect(j.filter((e) => e.type === "agent_spawned")).toHaveLength(1);
+      } finally {
+        await client.close();
+      }
+    });
+  }, 20_000);
 });
 
 describe("agent_account_limit (D2): autopilot moves a running agent off a hot account", () => {
@@ -143,14 +194,20 @@ describe("agent_account_limit (D2): autopilot moves a running agent off a hot ac
       .journal()
       .filter((e) => e.type === "decision_opened" && e.data.kind === "agent_account_limit");
 
-  /** A balanced wave whose agent runs on the primary; `work` signed in after its spawn. */
-  async function balancedOnPrimary(): Promise<string> {
+  /**
+   * A balanced wave whose agent runs on the primary; `work` signed in after its spawn. `config`
+   * adds wave `config:` entries (a `claude.default_account` pin).
+   */
+  async function balancedOnPrimary(config?: string): Promise<string> {
     const base = tempDir("volleyd-agent-limit-");
     const root = join(base, "claude");
     restore = stubEnv({ VOLLEY_CLAUDE_DIR: root });
     const primary = join(base, ".claude");
     mkdirSync(primary, { recursive: true });
-    s = await makeSupervisedEnv({ daemon: { claude: { root, primaryDir: primary } } });
+    s = await makeSupervisedEnv({
+      daemon: { claude: { root, primaryDir: primary } },
+      ...(config !== undefined ? { config } : {}),
+    });
     const dir = join(root, "work");
     mkdirSync(dir, { recursive: true });
     writeFileSync(
@@ -229,6 +286,15 @@ describe("agent_account_limit (D2): autopilot moves a running agent off a hot ac
     expect(readFileSync(join(wt, ".volley", "launch.sh"), "utf-8")).toContain(
       `export CLAUDE_CONFIG_DIR='${dir}'`,
     );
+  }, 30_000);
+
+  it("a claude.default_account pin is respected: the wave-level decision only, no agent move", async () => {
+    await balancedOnPrimary("claude: { default_account: primary }");
+    await publishUsage("other-agent", sample("work", 12));
+    await publishUsage(AGENT, sample("primary", 93));
+    await s.event((e) => e.type === "decision_opened" && e.data.kind === "account_limit");
+    await s.consumed();
+    expect(limits()).toHaveLength(0);
   }, 30_000);
 
   it("not now leaves the agent; the next decision waits for the window's reset", async () => {

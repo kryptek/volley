@@ -4014,11 +4014,19 @@ export class Daemon {
     );
   }
 
-  /** A task role's agent names its account: the task or the wave pins one (D2: no agent move). */
+  /**
+   * A task role's agent names its account: the task, the wave or `claude.default_account` pins
+   * one (D2: no agent move; the wave-level `account_limit` covers it).
+   */
   private pinned(wave: WaveId, task: TaskId): boolean {
     const w = this.waves.get(wave)?.record.wave;
-    const named = (a: string | undefined) => a !== undefined && a !== MOST_HEADROOM;
-    return named(w?.tasks[task]?.account) || named(w?.account);
+    const named = (a: string | null | undefined) =>
+      a !== undefined && a !== null && a !== MOST_HEADROOM;
+    return (
+      named(w?.tasks[task]?.account) ||
+      named(w?.account) ||
+      named(this.config.effective(wave).claude.default_account)
+    );
   }
 
   /** The `local` host agents run on. */

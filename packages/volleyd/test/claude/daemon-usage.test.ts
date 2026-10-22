@@ -517,4 +517,38 @@ describe("usage probe readings in machine records (daemon)", () => {
       [],
     );
   }, 20_000);
+
+  it("a Fable agent's trigger reads the probe's model_weekly.fable: an agent_account_limit on that window", async () => {
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+    restoreEnv = stubEnv({ VOLLEY_CLAUDE_DIR: root });
+    s = await makeSupervisedEnv({
+      // Balanced (no pin): a hot account opens an agent-level decision.
+      daemon: {
+        claude: { root, primaryDir: primary },
+        clock: fakeClock(T0),
+        fleet: {
+          version: "0.5.0",
+          localDoctor: async () => ({
+            checks: [],
+            claude_logins: [login("default", 95), login("spare", 10)],
+            doctor_at: READ,
+          }),
+          localPath: () => ({ claude: true, bun: true }),
+        },
+      },
+    });
+    await recordWhen("primary", (r) => r.probe !== undefined);
+    // The agent's statusLine says Fable, and its 5-hour and 7-day windows have room.
+    await publishUsage(AGENT, { ...usage("primary", 20), model: "claude-fable-5-1" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_account_limit",
+    );
+    expect(opened.data).toMatchObject({
+      agent_id: AGENT,
+      acct: "primary",
+      window: "model_weekly:fable",
+      pct: 95,
+      suggested: "spare",
+    });
+  }, 20_000);
 });
