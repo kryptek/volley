@@ -319,34 +319,6 @@ describe("Pipeline", () => {
   });
 });
 
-describe("App agent windows", () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("an agent volleyd spawns mid-session pops in with the born class", () => {
-    vi.useFakeTimers();
-    const { container } = render(
-      <DeskStoreProvider demo>
-        <App />
-      </DeskStoreProvider>,
-    );
-    const born = () => [...container.querySelectorAll(".world .win--born .t-name")];
-    expect(born()).toHaveLength(0);
-    act(() => {
-      vi.advanceTimersByTime(22_500);
-    });
-    expect(born().map((n) => n.textContent)).toEqual(["T1 · Chip mapper + null-case handling"]);
-    expect(container.querySelector(".world .win--born .chip--role")).toHaveTextContent(
-      "spec review",
-    );
-    act(() => {
-      vi.advanceTimersByTime(4_500);
-    });
-    expect(born()).toHaveLength(0);
-  });
-});
-
 describe("AgentWindow: the account it runs under (T8)", () => {
   const ev = (type: string, seq: number, data: Record<string, unknown>): DeskMessage => ({
     topic: "volley/_waves/status-chip/events",

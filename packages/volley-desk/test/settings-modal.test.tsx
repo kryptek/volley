@@ -367,7 +367,7 @@ describe("Settings › Supervisor (global config rows)", () => {
 
   it("sends a list tunable (agent_mcp_allow) on Enter, as distinct trimmed names", async () => {
     const f = fakeClient();
-    setup(createConfigTransport(f.client, { identity: "desk" }));
+    setup(createConfigTransport(f.client, { identity: "desk" }), "other");
     const box = screen.getByRole("textbox", { name: "Agent MCP allow" });
     fireEvent.change(box, { target: { value: "migrations, playwright,, migrations " } });
     fireEvent.keyDown(box, { key: "Enter" });
@@ -379,7 +379,7 @@ describe("Settings › Supervisor (global config rows)", () => {
 
   it("does not send a list tunable over the schema's bounds; the field says why", async () => {
     const f = fakeClient();
-    setup(createConfigTransport(f.client, { identity: "desk" }));
+    setup(createConfigTransport(f.client, { identity: "desk" }), "other");
     const box = screen.getByRole("textbox", { name: "Agent MCP allow" });
     fireEvent.change(box, { target: { value: `ok, ${"x".repeat(129)}` } });
     fireEvent.keyDown(box, { key: "Enter" });
@@ -396,7 +396,7 @@ describe("Settings › Supervisor (global config rows)", () => {
 
   it("clears a list tunable's over-bounds mark when the retained value changes elsewhere", async () => {
     const f = fakeClient();
-    const { retain } = setup(createConfigTransport(f.client, { identity: "desk" }));
+    const { retain } = setup(createConfigTransport(f.client, { identity: "desk" }), "other");
     const box = screen.getByRole("textbox", { name: "Agent MCP allow" });
     fireEvent.change(box, { target: { value: "x".repeat(129) } });
     fireEvent.keyDown(box, { key: "Enter" });
