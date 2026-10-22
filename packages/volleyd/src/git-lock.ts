@@ -68,12 +68,21 @@ export function lockedFetch(
 /**
  * `exec` with every `git -C <dir> fetch …` it runs going through `lockedFetch(host, repo)`: for
  * callers that fetch into a worktree of the clone `repo` (spawn's `pushedBranch`, the pipeline's
- * artifact probes), whose remote-tracking refs are the clone's.
+ * artifact probes), whose remote-tracking refs are the clone's. A fetch the caller left unbounded
+ * gets `git_fetch_timeout_ms` and no credential prompt: a hung fetch would otherwise hold the lock,
+ * and with it every later fetch into the clone, forever.
  */
 export function lockFetches(exec: ExecFn, host: string, repo: string): ExecFn {
   return async (argv, opts) => {
+    // Only the `git -C <dir> fetch …` shape is recognized (every caller's); any other form, such
+    // as `git -c k=v -C …` or a fetch without `-C`, would bypass the lock.
     if (argv[0] !== "git" || argv[1] !== "-C" || argv[3] !== "fetch") return exec(argv, opts);
-    return (await lockedFetch(host, repo, () => exec(argv, opts))).result;
+    const bounded = {
+      ...opts,
+      timeoutMs: opts?.timeoutMs ?? DAEMON_DEFAULTS.git_fetch_timeout_ms,
+      env: opts?.env ?? { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    };
+    return (await lockedFetch(host, repo, () => exec(argv, bounded))).result;
   };
 }
 

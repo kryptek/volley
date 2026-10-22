@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ExecFn, ExecResult } from "../src/exec";
+import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import type { ExecFn, ExecOptions, ExecResult } from "../src/exec";
 import { fetchFailure, lockFetches, lockedFetch, withRepoLock } from "../src/git-lock";
 
 /** A promise and the function that settles it. */
@@ -118,5 +119,31 @@ describe("lockFetches", () => {
       b(["git", "-C", "/wt/2", "rev-parse", "HEAD"]),
     ]);
     expect(log.slice(0, 2)).toEqual(["start /wt/1 rev-parse HEAD", "start /wt/2 rev-parse HEAD"]);
+  });
+
+  it("bounds a fetch the caller left unbounded, so a hung fetch cannot hold the lock forever", async () => {
+    const seen: (ExecOptions | undefined)[] = [];
+    // A fetch with no timeout never settles (a credential prompt, a stalled connection); exec's
+    // timeout is what ends it.
+    const exec: ExecFn = (_argv, opts) => {
+      seen.push(opts);
+      return opts?.timeoutMs !== undefined
+        ? Promise.resolve({ code: 143, stdout: "", stderr: "", timedOut: true })
+        : new Promise<ExecResult>(() => {});
+    };
+    const locked = lockFetches(exec, "box-a", "/hung");
+    const hung = await locked(["git", "-C", "/wt/1", "fetch", "origin", "x"]);
+    expect(hung.timedOut).toBe(true);
+    const next = await locked(["git", "-C", "/wt/2", "fetch", "origin", "y"], { cwd: "/wt/2" });
+    expect(next.timedOut).toBe(true);
+    for (const opts of seen) {
+      expect(opts?.timeoutMs).toBe(DAEMON_DEFAULTS.git_fetch_timeout_ms);
+      expect(opts?.env?.GIT_TERMINAL_PROMPT).toBe("0");
+    }
+    expect(seen[1]?.cwd).toBe("/wt/2");
+    // A caller's own bound and env stand.
+    await locked(["git", "-C", "/wt/3", "fetch", "origin", "z"], { timeoutMs: 5, env: { A: "1" } });
+    expect(seen[2]?.timeoutMs).toBe(5);
+    expect(seen[2]?.env).toEqual({ A: "1" });
   });
 });
