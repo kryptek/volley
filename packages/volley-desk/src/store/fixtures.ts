@@ -1329,14 +1329,20 @@ export function demoDigest(now: number, wave: string): DeskMessage[] {
             retries: 1,
             merges: 1,
           },
-          waiting: WAVES.filter((w) => w.id === wave && w.decision).map((w) => ({
-            id: decisionId(w),
-            kind: w.decision?.kind as string,
-            task: w.decision?.task as string,
-            question: w.decision?.question as string,
-            since: iso(now - 50 * 60_000),
-            owner_only: false,
-          })),
+          waiting: WAVES.flatMap((w) => {
+            const d = w.decision;
+            if (w.id !== wave || !d) return [];
+            return [
+              {
+                id: decisionId(w),
+                kind: d.kind,
+                task: d.task,
+                question: d.question,
+                since: iso(now - 50 * 60_000),
+                owner_only: false,
+              },
+            ];
+          }),
           failures: [],
         };
   return [
