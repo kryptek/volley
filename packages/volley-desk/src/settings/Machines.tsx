@@ -25,6 +25,7 @@
 import { Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { SwitchToAdmin } from "../auth/AccountActions";
 import { plural } from "../lib/plural";
 import Stepper, { Step } from "../rb/Stepper/Stepper";
 import { type AdminStatus, type PeerOps, joinCommand, pairingSupported } from "../store/peerOps";
@@ -628,9 +629,15 @@ export function Machines(p: MachinesProps) {
       )}
       {!canPair && (
         <p className="s-hint m-readonly">
-          {readOnlyReason(secure, admin)} From a terminal on this machine,{" "}
-          <code className="mono">volley peer invite</code> makes a pairing code and{" "}
-          <code className="mono">volley peer remove &lt;name&gt;</code> unpairs one.
+          {readOnlyReason(secure, admin)}{" "}
+          {secure && admin === "not-admin" && (
+            <>
+              <SwitchToAdmin />{" "}
+            </>
+          )}
+          From a terminal on this machine, <code className="mono">volley peer invite</code> makes a
+          pairing code and <code className="mono">volley peer remove &lt;name&gt;</code> unpairs
+          one.
         </p>
       )}
     </div>
