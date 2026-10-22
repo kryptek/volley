@@ -3534,7 +3534,8 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     only, only `<abs>/.volley/claude/<acct>` (a profile the supervisor created there),
     rendered as one single-quoted `CLAUDE_CONFIG_DIR=…` before the argv
   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
-    `/info/exclude`, `<dir>/.volley/<name>` for a VOLLEY_READS name, or a sign-in dir's `url`
+    `/info/exclude`, `<dir>/.volley/<name>` for a VOLLEY_READS name, a worktree's
+    `<abs dir>/.mcp.json` (no `..` segment), or a sign-in dir's `url`
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
     (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
