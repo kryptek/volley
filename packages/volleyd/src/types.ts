@@ -662,6 +662,9 @@ export const WAVE_EVENT_TYPES = [
   // Autopilot (SPEC §4.6.16): a decision answered from the policy table, or left for the owner.
   "decision_auto_resolved",
   "decision_escalated",
+  // Held decisions (#335): one waits on a task, PR or issue, never escalated; released when it lands.
+  "decision_held",
+  "decision_released",
   // The release train (SPEC §4.6.19): a settled wave whose repo has a playbook starts releasing;
   // each stage is entered, then verified or failed; the owner's `release_go` go completes it.
   "release_started",

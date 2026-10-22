@@ -1,0 +1,18 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-20T02:31:40.000Z",
+  "channel": "_waves/events",
+  "type": "decision_released",
+  "payload": {
+    "wave": "w1",
+    "seq": 58,
+    "at": "2026-10-20T02:31:40.000Z",
+    "task": "T1",
+    "data": {
+      "decision_id": "ci_failed-3f2a9c1d0b7e",
+      "kind": "ci_failed",
+      "by": "volleyd"
+    }
+  }
+}
