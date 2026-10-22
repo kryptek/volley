@@ -25,7 +25,8 @@ bun run format           # biome format --write .
 bun run typecheck        # root tsc + recurse into every workspace package
 bun run test             # scripts/*.test.ts (bun test), then every package's test script
 bun run validate:schemas # ajv-validates every spec/examples/{valid,invalid}/*.json against spec/schemas/
-bun run check:spec-refs  # SPEC heading numbering is contiguous; every "SPEC §x.y" in the repo resolves
+bun run check:spec-refs  # SPEC heading numbering is contiguous; every "SPEC §x.y" in the repo resolves;
+                         # the SPEC lists match the schemas; spec/RESERVED.md holds
 ```
 
 Per-package (drill in when iterating on volley-mcp):
@@ -79,6 +80,7 @@ The mosquitto integration test is opt-in because it needs a real broker on `loca
 - **`exports` field gates cross-package imports.** When a package needs another's module, expose it via an `exports` map on the producer (the consumer imports `volley-mcp/<subpath>`). Don't reach into `packages/*/src/` via relative paths.
 - **No home-directory paths in tracked files.** The repository is public: docs and examples write `/path/to/<thing>` (`/path/to/repo`, `/path/to/volley`, `/path/to/worktrees`), and a test that needs a HOME passes `/path/to/home`. `scripts/no-home-paths.test.ts` fails on any `/home/<user>` or `/Users/<user>` outside its short allowlist.
 - **Temp dirs in tests go through `tempDir` / `tempDirForAll`** (each package's `test/helpers/tmp.ts`), never `mkdtemp` directly (`scripts/no-direct-mkdtemp.test.ts` rejects it): they are removed when the test or file ends, pass or fail. The root `test` script runs under `scripts/check-tmp-leaks.ts`, which fails on any Volley-prefixed entry a run leaves in the temp dir.
+- **SPEC lists are one item per line.** The decision kinds (§4.6.2), wave events (§4.6.3) and tunables (§4.6.4) live between `<!-- spec-list: … -->` markers, and `check:spec-refs` fails when one differs from its schema (`decision.schema.json`, `wave-event.schema.json`, `config.schema.json`). Add a kind, event or key as a new line (with the schema change), never by editing a neighbour's line. Parallel tasks that add SPEC sections reserve the numbers in `spec/RESERVED.md` first.
 - **Commit message style:** see `git log --oneline` — scoped Conventional Commits (`feat(volley-mcp): ...`, `test(volley-mcp): ...`, `ci: ...`, `refactor(volley-mcp): ...`).
 
 ## Workflow rhythm
