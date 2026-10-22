@@ -234,7 +234,8 @@ A bare concurrency cap is the wrong tool: six agents editing files is fine, six 
 integration suites with containers is not. Heavy commands therefore take a lease from a
 machine-global **pool** (`lease_pools` in the config: `capacity`, optional `per_machine` and
 `ttl_s`, and the `match` regexes the [volley-hooks](../volley-hooks/README.md) lease hook uses to
-wrap matching Bash commands in [`volley lease run`](../volley-cli/README.md#volley-lease)).
+wrap matching Bash commands in [`volley lease run`](../volley-cli/README.md#volley-lease); they are
+matched against each command the shell would execute, not comments, heredocs or message text).
 
 - **Requests** arrive on `volley/_system/leases/<pool>/requests` (`acquire | release | renew`,
   SPEC §4.6.5). A request whose `holder` is not the sender is ignored; a repeated `acquire` for a
@@ -2187,8 +2188,10 @@ with 12 agents on peers and a ceiling of 12 it is `"12/12 agents"`.
 
 **Repair (`peer_doctor`).** An admin (the account-op topic and admin check of `peer_remove`;
 refused on the mailbox) asks volleyd to run the doctor on a configured host:
-`{ op: "peer_doctor", name, fix?, clone? }`. volleyd runs `volley peer doctor --json`, plus
-`--fix --yes` with `fix: true` and `--clone --origin <url>` with `clone: true` (which needs `fix`),
+`{ op: "peer_doctor", name, fix?, clone? }`. volleyd runs `volley peer doctor --json
+--supervisor-volley-dir <volley_dir>` (so every volley MCP entry on the box is checked against
+the checkout agents are launched from; a volley older than the flag refuses it, and the doctor
+runs again without), plus `--fix --yes` with `fix: true` and `--clone --origin <url>` with `clone: true` (which needs `fix`),
 in the box's `volley_dir` as one fenced remote step; the fence allows exactly those argv on a box
 and no other `volley` command. `<url>` is the running wave's origin as the supervisor's own doctor
 read it from its clone, as `https://<host>/<path>` (`gh auth setup-git` signs git in to it; the
@@ -2684,7 +2687,16 @@ on from the red head's step: after a CI failure on the implementer's first head,
 on a fixup's or rebase's head, to the gate (the reviews of the head it fixed still hold).
 `re-verify` is for a fix or re-run you did yourself. Pending CI is re-checked every
 `ci_poll_ms` (the agent is retired meanwhile); a head with no CI run at all for
-`ci_none_grace_ms` asks the owner (`accept` / `cancel`). The hold is visible: entering it (and
+`ci_none_grace_ms` asks the owner (`accept` / `cancel`). A PR GitHub reports `CONFLICTING`
+(the PR read carries `mergeable` and `mergeStateStatus`) gets no CI at all, so it is neither held
+nor asked about: volleyd journals `pr_conflicting { pr, head, release_branch, role? }` and enters the
+branch-update step at that head at once (`stage_entered { rebase: true, conflicting: true }`,
+under the wave's `branch_update`), its `.volley/rebase.md` saying the PR conflicts; `why_waiting`
+reads `PR conflicts with <release>, updating`. Once the update's head is verified the pipeline
+goes on from where it stopped (the implementer's work still gets its reviews). An update step's
+own head that still conflicts waits like any head with no CI (past the grace the question says
+the PR still conflicts with the release branch). `mergeable: UNKNOWN` (GitHub still
+computing) counts as running: re-polled, no clock. The hold is visible: entering it (and
 every change of head or counts) journals `ci_pending { role, sha, checks: { done, total },
 next_poll_at, pr }`, the task's `why_waiting` reads `CI pending on <sha7> (n/m checks)` and its
 `pr` carries `{ number, head_sha, ci: running, checks }` (what `volleyd status --json` prints);
@@ -3148,7 +3160,8 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
     login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
-  volley peer doctor --json [--fix --yes [--clone --origin <https URL>]] — the machine's doctor
+  volley peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
+    <https URL>]] — the machine's doctor
     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
     credentials or port, isCloneUrl); no other volley argv runs on a box
   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):

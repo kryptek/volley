@@ -616,6 +616,8 @@ export const WAVE_EVENT_TYPES = [
   "ci_green",
   "pr_head_moved",
   "merged_by_operator",
+  // A PR GitHub reports CONFLICTING (no CI will run on it): its branch-update step starts.
+  "pr_conflicting",
   // Autopilot merging (SPEC §4.6.17): volleyd merged a gated PR at its gated head.
   "merged_by_supervisor",
   // The merge queue (SPEC §4.6.17): a gated task entered or left it; volleyd's merge of it began,
