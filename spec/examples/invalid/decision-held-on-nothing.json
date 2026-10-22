@@ -1,0 +1,29 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T15:20:00.000Z",
+  "channel": "_waves/decisions",
+  "type": "decision_opened",
+  "payload": {
+    "decision_id": "w1-t2-merge_conflict-1",
+    "wave": "w1",
+    "task": "T2",
+    "kind": "merge_conflict",
+    "question": "T2 conflicts with T1 in spec/SPEC.md after rebase. Re-dispatch a fixup or resolve by hand?",
+    "options": [
+      "fixup",
+      "manual",
+      "drop T2"
+    ],
+    "pointers": {
+      "diff": "waves/w1/evidence/T2-conflict.diff",
+      "pr": "https://github.com/example-org/example-repo/pull/8"
+    },
+    "opened_at": "2026-10-18T15:20:00.000Z",
+    "held": {
+      "on": {},
+      "by": "coord-main",
+      "at": "2026-10-20T12:30:00.000Z"
+    }
+  }
+}
