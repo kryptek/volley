@@ -412,6 +412,13 @@
           "default": true,
           "description": "true: a complete wave is archived as soon as its wave_complete decision is answered (spec section 4.6.20). Optional in the retained payload: a supervisor that predates it omits it."
         },
+        "ci_rate_limit_backoff_ms": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 3600000,
+          "default": 300000,
+          "description": "After a rate-limited GitHub answer (HTTP 403 or 429), the supervisor makes none of that wave's CI calls for this long (longer when the answer's output names a Retry-After). Optional in the retained payload: a supervisor that predates it omits it."
+        },
         "fleet": {
           "type": "object",
           "additionalProperties": false,
