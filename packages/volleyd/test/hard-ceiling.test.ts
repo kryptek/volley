@@ -280,6 +280,10 @@ describe("hard ceiling and pipeline role spawns", () => {
     });
     await daemon.recordEvent(wave, { type: "stage_entered", task, data: { stage: "spec_review" } });
   };
+  // startSpawn is stubbed, so these tests add to `spawning` by hand. That stands for the real
+  // launchSpawn, which reaches `spawning.add(key)` with no await on its success paths: the next
+  // pipelineSpawn in the same pass already counts it. Keep it that way, or parallel reviewers
+  // can overshoot the ceiling.
   const spawnRole = (wave: string, task: string, role: string) => {
     // A spawner only from here on: `run` checks no repo, and nothing spawns on its own before.
     d().opts.spawner = {};
