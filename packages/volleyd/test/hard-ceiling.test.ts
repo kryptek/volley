@@ -130,6 +130,51 @@ describe("hard ceiling without a spawner (admitted, not started)", () => {
     expect((res.result as { ceiling: { live: number } }).ceiling.live).toBe(0);
   });
 
+  it("a running wave's task in implement whose implementer retired unverified counts nothing", async () => {
+    await run(reviewed("w-d", ["A", "B"], "hard_ceiling: 1"));
+    expect(admitted("w-d")).toEqual(["A"]);
+    await daemon.recordEvent("w-d", {
+      type: "agent_spawned",
+      task: "A",
+      data: { role: "implementer", agent_id: "w-d-a-implementer-1" },
+    });
+    await daemon.recordEvent("w-d", {
+      type: "stage_entered",
+      task: "A",
+      data: { stage: "implement" },
+    });
+    await daemon.recordEvent("w-d", {
+      type: "agent_retired",
+      task: "A",
+      data: { role: "implementer", agent_id: "w-d-a-implementer-1", status: "dead" },
+    });
+    expect(daemon.snapshot("w-d")?.tasks.find((x) => x.id === "A")?.stage).toBe("implement");
+    await daemon.tick();
+    expect(admitted("w-d")).toEqual(["A", "B"]);
+  });
+
+  it("a task between roles whose next role is refused for good frees its slot", async () => {
+    await run(reviewed("w-q", ["A", "B"], "hard_ceiling: 1"));
+    expect(admitted("w-q")).toEqual(["A"]);
+    await daemon.recordEvent("w-q", {
+      type: "agent_spawned",
+      task: "A",
+      data: { role: "implementer", agent_id: "w-q-a-implementer-1" },
+    });
+    await daemon.recordEvent("w-q", {
+      type: "stage_entered",
+      task: "A",
+      data: { stage: "implement" },
+    });
+    await daemon.tick();
+    expect(admitted("w-q")).toEqual(["A"]);
+    const refused = (daemon as unknown as { refused: Map<string, { n: number; until: number }> })
+      .refused;
+    refused.set("w-q/A/implementer", { n: 1, until: Number.POSITIVE_INFINITY });
+    await daemon.tick();
+    expect(admitted("w-q")).toEqual(["A", "B"]);
+  });
+
   it("an admitted task whose implementer spawn is backed off keeps its slot", async () => {
     await run(yaml("w-b", ["A", "B"], "hard_ceiling: 1"));
     expect(admitted("w-b")).toEqual(["A"]);

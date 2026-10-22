@@ -343,6 +343,7 @@ import {
   PipelineDriver,
   SUPERSEDED_BY_MERGE,
   type SpawnStart,
+  type TaskPipeline,
   blockedReason,
   isAnswer,
   releaseLockOn,
@@ -5954,7 +5955,7 @@ export class Daemon {
    * wave and on every machine — supervised, launched and being verified, spawning (a release
    * stage's agent too) — and one slot for each admitted task of a running wave that will spawn
    * its next agent: queued for its implementer (backed off too; not once refused for good), or
-   * between roles in implement…fixup (reviewers or a fixup to come). A task's stage counts
+   * between roles in implement…fixup with a role still to come (`nextRoleComes`). A task's stage counts
    * nothing by itself otherwise: a task awaiting a decision, blocked, or in a paused, stopped or
    * ended wave holds a slot only while one of its agents is live. `launching` is the part not
    * supervised yet, held slots included. `held: false` counts only the agents running or
@@ -6000,7 +6001,7 @@ export class Daemon {
             continue;
           add(wave);
           launching++;
-        } else if (BETWEEN_ROLES.has(t.stage)) {
+        } else if (BETWEEN_ROLES.has(t.stage) && this.nextRoleComes(wave, id, rec.pipeline[id])) {
           add(wave);
           launching++;
         }
@@ -6008,6 +6009,21 @@ export class Daemon {
     }
     const live = Object.values(byWave).reduce((a, b) => a + b, 0);
     return { live, launching, by_wave: byWave };
+  }
+
+  /**
+   * A task between roles will spawn an agent of its current step: no role of it is refused for
+   * good, and none retired unverified (a dead agent) unless its respawn is on its way.
+   */
+  private nextRoleComes(wave: WaveId, task: TaskId, p: TaskPipeline | undefined): boolean {
+    if (p === undefined) return true;
+    const respawning = this.heldRespawn.has(`${wave}/${task}`);
+    return p.roles.every((role) => {
+      const until = this.refused.get(`${wave}/${task}/${role}`)?.until;
+      if (until === Number.POSITIVE_INFINITY) return false;
+      const run = p.runs[role];
+      return run?.retired === undefined || run.accepted || until !== undefined || respawning;
+    });
   }
 
   /** The hard ceiling's count against its global limit (the admission topic, `volleyd admission`). */
