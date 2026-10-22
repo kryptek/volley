@@ -183,6 +183,22 @@ describe("MachineHealth", () => {
     expect(health.sweep().map((r) => r.reason)).toEqual(["heartbeat_timeout"]);
   });
 
+  it("a record the supervisor republished itself never brings a down box back up", () => {
+    health.observe(record());
+    now += DAEMON_DEFAULTS.machine_down_after_ms;
+    health.sweep();
+    const since = now;
+    // The echo of a fold published just before the sweep marked the box down.
+    now += 10;
+    expect(
+      health.observe(record({ doctor_at: "2026-10-19T09:00:05.000Z" }), { heard: false }),
+    ).toBe(false);
+    expect(health.status("box")).toBe("down");
+    expect(health.downSince("box")).toBe(since);
+    expect(health.record("box")?.reason).toBe("heartbeat_timeout");
+    expect(changes.map(([, s]) => s)).toEqual(["up", "down"]);
+  });
+
   it("compares doctor runs by instant, not by how the timestamp is written", () => {
     const checks = (detail: string) => [
       { id: "volley.installed", ok: true, severity: "block" as const, detail },

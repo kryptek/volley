@@ -156,11 +156,12 @@ export class MachineHealth {
    * supervisor-run doctor folded in before the box's service re-ran its own) keeps the newer
    * run's fields, and says so (`true`), for the supervisor to re-assert them. `heard: false`
    * folds a record the supervisor made itself (a Repair's fold, or its echo): it is no heartbeat,
-   * so the machine's down timer keeps running.
+   * so the machine's down timer keeps running, and it never brings a down machine back up.
    */
   observe(incoming: MachineRecord, opts: { heard?: boolean } = {}): boolean {
     const prior = this.machines.get(incoming.name);
     const status = statusOf(incoming);
+    if (opts.heard === false && status === "up" && prior?.status === "down") return false;
     const record: MachineRecord =
       status === "down" && prior !== undefined
         ? {

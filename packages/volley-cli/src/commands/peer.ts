@@ -1410,12 +1410,8 @@ function doctorWatch(deps: PeerDeps): string {
       return "-";
     }
   };
-  const stamp = peerDoctorStamp(deps.home);
-  let ran = "";
-  try {
-    ran = readFileSync(stamp, "utf-8");
-  } catch {}
-  return JSON.stringify([...doctorInputs(deps.volleyDir).map(stat), stat(stamp), ran]);
+  // Every stamp write changes its mtime: no need to read it.
+  return JSON.stringify([...doctorInputs(deps.volleyDir), peerDoctorStamp(deps.home)].map(stat));
 }
 
 /**
@@ -1669,7 +1665,7 @@ async function awaitRepublish(
   ranAt: Date,
 ): Promise<string> {
   if (!tunnelUp) {
-    return `\nReadiness not republished: the peer service is not connected (its tunnel is down), so the supervisor still sees the last record it sent. Restart it: \`${restartHint(deps)}\`\n`;
+    return `\nReadiness not republished: the peer service is not connected (its tunnel is down, or the broker refused this machine), so the supervisor still sees the last record it sent. Restart it: \`${restartHint(deps)}\`\n`;
   }
   const b = await deps.connect(brokerThroughTunnel(cfg), peerAuth(cfg)).catch(() => null);
   if (b === null) {
