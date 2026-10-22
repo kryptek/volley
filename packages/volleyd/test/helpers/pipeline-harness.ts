@@ -43,6 +43,9 @@ export interface World {
     headRefName: string;
     baseRefName: string;
     headRefOid: string;
+    /** GitHub's mergeability of the PR (absent: not reported). */
+    mergeable?: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+    mergeStateStatus?: string;
   }[];
   /** CI per head (absent: no run). */
   ci: Record<string, "green" | "red" | "running">;
