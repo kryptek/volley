@@ -233,7 +233,10 @@ const STAGE_AGENT: Partial<Record<PipelineStage, keyof TaskAgents>> = {
   fixup: "fixup",
 };
 
-/** Task stages that spawn nothing more. */
+/**
+ * Task stages that spawn nothing more. A `blocked` task can still come back through a respawn
+ * decision; it counts 0 here like a rereview does (the min-share floor cushions both).
+ */
 const FINISHED = new Set<TaskStage>(["done", "merge_ready", "cancelled", "blocked"]);
 
 /**
