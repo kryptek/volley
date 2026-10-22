@@ -152,7 +152,8 @@ export const isRedHead = (d: DecisionRecord): boolean => {
 /**
  * The holds autopilot adds (#335): each open red-head decision of a task parked on a flake whose
  * fixer is still at work is held on that fixer task, so it waits amber rather than escalating.
- * A decision held or released before is never held again (the owner's release stands).
+ * A decision held or released before is never held again (the owner's release stands), and a
+ * fixer task that is done or cancelled already holds nothing.
  */
 export function autoHolds(rec: WaveRecord): { decision_id: string; on: HeldOn; note: string }[] {
   const open = new Set(rec.state?.open_decisions ?? []);
@@ -164,6 +165,9 @@ export function autoHolds(rec: WaveRecord): { decision_id: string; on: HeldOn; n
     const fixer = fixerOf(rec, r.test);
     if (fixer === undefined || fixer.id === d.task || fixer.remediation?.outcome !== undefined)
       return [];
+    // A fixer task already done or cancelled: holdEvent refuses it, so it is not tried every tick.
+    const stage = rec.state?.tasks.find((t) => t.id === fixer.id)?.stage;
+    if (stage === "done" || stage === "cancelled") return [];
     return [
       {
         decision_id: d.decision_id,

@@ -630,6 +630,36 @@ describe("held decisions (#335): waiting on a task, PR or issue", () => {
     expect(d?.held).toBeUndefined();
   });
 
+  it("a released decision autopilot already escalated is not escalated a second time", async () => {
+    s = await withT2({
+      daemon: AUTOPILOT_ON,
+      config: "autopilot: { owner_only: [reviewers_disagree] }",
+    });
+    const d = await s.daemon.openDecision("w1", disagree);
+    await s.settled();
+    const escalations = () =>
+      s
+        ?.journal()
+        .filter((e) => e.type === "decision_escalated" && e.data.decision_id === d.decision_id) ??
+      [];
+    expect(escalations()).toHaveLength(1);
+    const c = await control();
+    const h = await c.request("hold", {
+      decision_id: d.decision_id,
+      on: { issue: 7 },
+      by: "owner",
+    });
+    expect(h.error).toBeUndefined();
+    const r = await c.request("release", { decision_id: d.decision_id, by: "owner" });
+    expect(r.error).toBeUndefined();
+    await s.settled();
+    const after = s.daemon.record("w1")?.decisions[d.decision_id];
+    expect(after?.held).toBeUndefined();
+    expect(after?.resolved).toBeUndefined();
+    expect(after?.escalated).toBeDefined();
+    expect(escalations()).toHaveLength(1);
+  });
+
   it("hold is owner-guarded like resolve; a Desk login holds on its account-op topic", async () => {
     s = await withT2({ daemon: { authExec: deskAccounts().exec } });
     const c = await control();

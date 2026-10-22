@@ -349,6 +349,15 @@ describe("autoHolds: a red head waiting on its flake's fixer is held on it (#335
     expect(autoHolds(record([...withFixer(), closed, redHead("T3")]))).toEqual([]);
   });
 
+  it("not on a fixer task that settled before its remediation closed (the hold would be refused)", () => {
+    const cancelled: NewEvent = {
+      type: "task_cancelled",
+      task: "fix-clock-test-ts-advance",
+      data: { by: "owner" },
+    };
+    expect(autoHolds(record([...withFixer(), cancelled, redHead("T3")]))).toEqual([]);
+  });
+
   it("never a decision of the fixer itself, nor one that is not a red head", () => {
     const other: NewEvent = {
       type: "decision_opened",

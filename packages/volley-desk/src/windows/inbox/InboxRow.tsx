@@ -100,6 +100,7 @@ export function InboxRow(p: InboxRowProps) {
   const [command, setCommand] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
   const [holdError, setHoldError] = useState<string | null>(null);
+  const [holdBusy, setHoldBusy] = useState(false);
   const accent = item.wave !== undefined ? accentFor(item.wave) : NEUTRAL_ACCENT;
 
   const send = async (answer: string) => {
@@ -139,7 +140,9 @@ export function InboxRow(p: InboxRowProps) {
       setPicking(false);
       return;
     }
+    setHoldBusy(true);
     const r = await p.control(op, { item: item.id, ...(on !== undefined ? { on } : {}) }, cli);
+    setHoldBusy(false);
     if (r.ok) setPicking(false);
     else setHoldError(r.error ?? `volleyd refused the ${op}`);
   };
@@ -216,6 +219,7 @@ export function InboxRow(p: InboxRowProps) {
               <button
                 type="button"
                 className={`coord-btn ${btn}`}
+                disabled={holdBusy}
                 onClick={() => void holdOp("release")}
               >
                 Release
@@ -227,6 +231,7 @@ export function InboxRow(p: InboxRowProps) {
               <select
                 className={`recessed ${btn}`}
                 aria-label="Hold · waiting on"
+                disabled={holdBusy}
                 defaultValue=""
                 onChange={(e) => {
                   const c = choices.find((x) => x.key === e.target.value);

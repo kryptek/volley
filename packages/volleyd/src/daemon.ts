@@ -5546,7 +5546,8 @@ export class Daemon {
     }
     if (d.resolved === undefined) {
       if (d.escalated?.why === why) return;
-      await this.escalate(wave, d, why, budget);
+      // current(): releaseNow above replaced the record, and `d` still carries the lifted hold.
+      await this.escalate(wave, current(d.decision_id), why, budget);
       await this.ringDecision(wave, current(d.decision_id));
       return;
     }

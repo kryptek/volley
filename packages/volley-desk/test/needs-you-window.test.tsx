@@ -418,6 +418,30 @@ describe("held decisions (SPEC §4.6.2)", () => {
     );
   });
 
+  it("Release is disabled while its op is in flight, so a double click sends one", async () => {
+    let finish: (r: { ok: boolean }) => void = () => {};
+    const control = vi.fn(
+      () =>
+        new Promise<{ ok: boolean }>((res) => {
+          finish = res;
+        }),
+    );
+    const held = {
+      ...decisionItem,
+      held: { on: { pr: 194 }, by: "lead", at: new Date(NOW - 60_000).toISOString() },
+    };
+    setup({ items: [held], control, now: NOW });
+    const release = within(row(DECISION)).getByRole("button", { name: "Release" });
+    await act(async () => {
+      fireEvent.click(release);
+    });
+    expect(release).toBeDisabled();
+    fireEvent.click(release);
+    expect(control).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ ok: true }));
+    expect(release).not.toBeDisabled();
+  });
+
   it("without credentials, the hold is a command to copy", () => {
     setup({ items: [decisionItem], control: null });
     fireEvent.click(within(row(DECISION)).getByRole("button", { name: "Hold · waiting on…" }));
