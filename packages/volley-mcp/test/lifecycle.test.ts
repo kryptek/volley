@@ -92,6 +92,57 @@ describe("startLifecycle", () => {
   });
 });
 
+describe("the progress heartbeat", () => {
+  let tb: TestBroker;
+  beforeEach(async () => {
+    tb = await startTestBroker();
+  });
+  afterEach(async () => {
+    await tb.close();
+  });
+
+  it("a registered idle server beats on its progress topic every interval until shutdown", async () => {
+    const observer = await mqtt.connectAsync(tb.url, { reconnectPeriod: 0 });
+    const beats: Record<string, unknown>[] = [];
+    observer.on("message", (t, p, packet) => {
+      if (t !== "volley/test/beat-aaaa/progress") return;
+      expect(packet.retain).toBe(false);
+      beats.push(JSON.parse(p.toString()));
+    });
+    await observer.subscribeAsync("volley/test/beat-aaaa/progress", { qos: 1 });
+
+    const state = await startLifecycle({ ...cfg(tb, "beat-aaaa"), heartbeatS: 0.1 });
+    await new Promise((r) => setTimeout(r, 350));
+    expect(beats.length).toBeGreaterThanOrEqual(2);
+    expect(beats[0]).toMatchObject({
+      agent_id: "beat-aaaa",
+      channel: "progress",
+      type: "heartbeat",
+      payload: { source: "volley-mcp" },
+    });
+
+    await shutdownLifecycle(state);
+    const after = beats.length;
+    await new Promise((r) => setTimeout(r, 300));
+    expect(beats.length).toBe(after);
+    await observer.endAsync();
+  });
+
+  it("does not beat with VOLLEY_HEARTBEAT_S=0", async () => {
+    const observer = await mqtt.connectAsync(tb.url, { reconnectPeriod: 0 });
+    let beats = 0;
+    observer.on("message", () => {
+      beats++;
+    });
+    await observer.subscribeAsync("volley/test/beat-bbbb/progress", { qos: 1 });
+    const state = await startLifecycle({ ...cfg(tb, "beat-bbbb"), heartbeatS: 0 });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(beats).toBe(0);
+    await shutdownLifecycle(state);
+    await observer.endAsync();
+  });
+});
+
 describe("shutdownLifecycle", () => {
   let tb: TestBroker;
   beforeEach(async () => {
