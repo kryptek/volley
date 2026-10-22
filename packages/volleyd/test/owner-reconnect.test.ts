@@ -346,6 +346,8 @@ describe("a coordinator name across a daemon restart", () => {
     await registry("coordinator-a1");
     await until(() => expect(namedEntries().has("coordinator-a1")).toBe(true));
     expect(statusOf().has("coordinator-a1")).toBe(false);
+    expect(coordinator()?.agent_id).toBe("coordinator-a1");
+    expect(coordinator()?.state).not.toBe("gone");
   });
 
   it("a reconnect journals nothing in a stopped wave", async () => {

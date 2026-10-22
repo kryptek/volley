@@ -118,13 +118,28 @@ function testViolations(text: string): string[] {
 const WAIT_HELPER =
   /^\s*(?:export\s+)?(?:(?:async\s+)?function\s+|(?:const|let)\s+)(?:eventually|until|waitFor)\b/;
 const BOUNDED_WAIT = /\b(?:eventually|until)\b/;
-/** `const until = <expression>;` on one line that is neither a function nor an alias: a value (a deadline), not a helper. */
+/**
+ * `const until = <expression>;` on one line that is neither a function nor an alias: a value (a deadline), not a helper.
+ * The lookaheads, in order, refuse:
+ * - an alias, `const waitFor = poll;` (checked as a helper: `poll` is unbounded);
+ * - an arrow, `const until = (ok) => ok();`;
+ * - a function expression, `const until = async function () {};`.
+ * What is left is a value, e.g. `const until = DEFAULTS.grace_ms + 2 * DEFAULTS.poll_ms;`.
+ */
 const PLAIN_VALUE =
   /^\s*(?:export\s+)?(?:const|let)\s+\w+\s*=(?!\s*[\w$.]+\s*;)(?!.*=>)(?!\s*(?:async\b|function\b)).*;\s*$/;
 
 /**
  * The definition starting at line `i`: through the line at the same indentation that closes the
- * statement (`};`, `});`), not a multi-line parameter list's `) => {`.
+ * statement (`};`, `});`), not a multi-line parameter list's `) => {`. For
+ *
+ *     const until = async (
+ *       ok: () => boolean,
+ *     ) => {
+ *       await eventually(ok);
+ *     };
+ *
+ * it is all six lines: `) => {` is not a closer, and the last `};` sits at the first line's indent.
  */
 function definitionAt(lines: string[], i: number): string {
   const first = lines[i] ?? "";
