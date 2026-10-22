@@ -442,6 +442,21 @@ describe("held decisions (SPEC §4.6.2)", () => {
     expect(release).not.toBeDisabled();
   });
 
+  it("a refused hold resets the picker, so the same choice can be picked again", async () => {
+    const control = vi.fn(async () => ({ ok: false, error: "volleyd refused the hold" }));
+    setup({ items: [decisionItem], control });
+    fireEvent.click(within(row(DECISION)).getByRole("button", { name: "Hold · waiting on…" }));
+    const select = within(row(DECISION)).getByRole("combobox", {
+      name: "Hold · waiting on",
+    }) as HTMLSelectElement;
+    const first = choices[0] as (typeof choices)[number];
+    await act(async () => {
+      fireEvent.change(select, { target: { value: first.key } });
+    });
+    expect(screen.getByText("volleyd refused the hold")).toBeTruthy();
+    expect(select.value).toBe("");
+  });
+
   it("without credentials, the hold is a command to copy", () => {
     setup({ items: [decisionItem], control: null });
     fireEvent.click(within(row(DECISION)).getByRole("button", { name: "Hold · waiting on…" }));

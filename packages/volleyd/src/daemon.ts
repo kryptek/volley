@@ -7367,8 +7367,12 @@ export class Daemon {
       if (why !== undefined && t !== undefined) t.why_waiting = why;
     }
     // Nothing can move without an answer: every unsettled task is parked on a decision or
-    // queued behind one. Published only; internally the wave keeps running.
-    if (state.status === "running" && state.open_decisions.length > 0) {
+    // queued behind one. Published only; internally the wave keeps running. Held decisions wait
+    // on a blocker, not on the owner, so a wave with only held ones open stays `running`.
+    if (
+      state.status === "running" &&
+      state.open_decisions.some((id) => rec.decisions[id]?.held === undefined)
+    ) {
       const unsettled = state.tasks.filter((t) => t.stage !== "done" && t.stage !== "cancelled");
       const stuck = (t: (typeof unsettled)[number]) =>
         t.stage === "awaiting_decision" ||

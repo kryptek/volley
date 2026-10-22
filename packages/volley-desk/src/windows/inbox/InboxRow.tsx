@@ -129,7 +129,7 @@ export function InboxRow(p: InboxRowProps) {
   };
 
   /** `hold { item, on }` or `release { item }` through volleyd; the retained item follows. */
-  const holdOp = async (op: "hold" | "release", on?: HeldOn) => {
+  const holdOp = async (op: "hold" | "release", on?: HeldOn): Promise<boolean> => {
     setHoldError(null);
     const cli =
       on !== undefined
@@ -138,13 +138,14 @@ export function InboxRow(p: InboxRowProps) {
     if (!p.control) {
       setCommand(cli);
       setPicking(false);
-      return;
+      return true;
     }
     setHoldBusy(true);
     const r = await p.control(op, { item: item.id, ...(on !== undefined ? { on } : {}) }, cli);
     setHoldBusy(false);
     if (r.ok) setPicking(false);
     else setHoldError(r.error ?? `volleyd refused the ${op}`);
+    return r.ok;
   };
   const choices = item.kind === "decision" ? holdChoices(item, p.wave) : [];
 
@@ -234,8 +235,13 @@ export function InboxRow(p: InboxRowProps) {
                 disabled={holdBusy}
                 defaultValue=""
                 onChange={(e) => {
-                  const c = choices.find((x) => x.key === e.target.value);
-                  if (c) void holdOp("hold", c.on);
+                  const select = e.currentTarget;
+                  const c = choices.find((x) => x.key === select.value);
+                  // A refused hold resets the picker so the same choice can be retried.
+                  if (c)
+                    void holdOp("hold", c.on).then((ok) => {
+                      if (!ok) select.value = "";
+                    });
                 }}
               >
                 <option value="" disabled>
