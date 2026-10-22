@@ -405,7 +405,8 @@ join ran with) runs it every `PEER_DEFAULTS.doctor_interval_s` (600 s, on a mono
 and at once on the next heartbeat when something the result depends on changed: the volley
 checkout's `package.json`, `bun.lock` or `node_modules/.volley-lock-sha256` (a checkout update,
 a `bun install`; a stat per beat), or `~/.volley/peer-doctor-ran`, which every `volley peer
-doctor` on a paired machine writes. Each run re-reads the versions it reports, so readiness
+doctor` on a paired machine writes (with or without `--fix`, the supervisor's `peer_doctor`
+among them, so the service's next run, auth probes included, follows the latest facts). Each run re-reads the versions it reports, so readiness
 follows the machine, never the service's uptime. `volley peer doctor --fix` then reads the
 record back through the tunnel and prints `readiness republished` once it carries a run from
 after the fix, or, when the service has not picked it up yet (or its tunnel is down), the

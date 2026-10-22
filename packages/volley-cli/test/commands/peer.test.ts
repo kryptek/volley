@@ -1322,7 +1322,7 @@ describe("volley peer run (the service)", () => {
   async function heartbeats(
     beats: number,
     f: { exec: PeerExec; calls: Call[] } = fakeExec(() => undefined),
-    opts: { between?: (beat: number) => void; deps?: (d: PeerDeps) => void } = {},
+    opts: { between?: (beat: number) => void | Promise<void>; deps?: (d: PeerDeps) => void } = {},
   ) {
     const start = Date.parse("2026-10-19T09:00:00.000Z");
     let t = start;
@@ -1337,7 +1337,7 @@ describe("volley peer run (the service)", () => {
         await new Promise((r) => setTimeout(r, last ? 300 : 30));
         if (last) stop.abort();
         else {
-          opts.between?.(n);
+          await opts.between?.(n);
           t += ms;
         }
       },
@@ -1521,6 +1521,38 @@ describe("volley peer run (the service)", () => {
     });
     expect(stamp).not.toBe("");
     expect(doctorRuns(f)).toBe(2);
+  });
+
+  it("doctor --fix beside a running service: it re-runs within a beat, republishing the current version", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", {});
+    let cliVersion = "0.4.0";
+    const f = fakeExec(() => undefined);
+    let verb: Promise<{ stdout: string }> | undefined;
+    const { records } = await heartbeats(4, f, {
+      between: (beat) => {
+        if (beat !== 1) return;
+        // The fix moves this checkout's CLI on; the verb runs between the service's beats and
+        // waits (in real time) for the service's record to carry a run after its own.
+        cliVersion = "0.5.0";
+        verb = run(
+          ["doctor", "--fix", "--yes"],
+          deps(fakeExec(() => undefined).exec, {
+            now: () => new Date("2026-10-19T09:00:15.000Z"),
+            sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 20))),
+          }),
+        );
+      },
+      deps: (d) => Object.defineProperty(d, "version", { get: () => cliVersion }),
+    });
+    expect(verb).toBeDefined();
+    expect((await verb)?.stdout).toContain("readiness republished");
+    expect(doctorRuns(f)).toBe(2);
+    const last = lastUp(records);
+    expect(last.versions?.peer).toBe("0.5.0");
+    expect(Date.parse(last.doctor_at ?? "")).toBeGreaterThan(
+      Date.parse("2026-10-19T09:00:15.000Z"),
+    );
   });
 
   it("keeps the -L tunnel up and heartbeats the record; a clean stop leaves it tunnel: down", async () => {
@@ -1710,10 +1742,22 @@ describe("volley peer doctor (the verb)", () => {
 
   it("--fix: says readiness was republished once the service's record carries a run after it", async () => {
     writeCfg({ repo: box.repoPath });
-    await serviceRecord("2026-10-19T09:00:00.000Z");
+    // The record the service sent before the fix; it re-runs (and republishes) while we poll.
+    await serviceRecord("2026-10-19T08:50:00.000Z");
+    let polls = 0;
     const f = fakeExec(() => undefined);
-    const r = await run(["doctor", "--fix", "--yes"], deps(f.exec));
+    const r = await run(
+      ["doctor", "--fix", "--yes"],
+      deps(f.exec, {
+        sleep: async (ms) => {
+          if (ms === PEER_DEFAULTS.republish_poll_ms && ++polls === 2) {
+            await serviceRecord("2026-10-19T09:00:30.000Z");
+          }
+        },
+      }),
+    );
     expect(r.stdout).toContain("readiness republished");
+    expect(polls).toBe(2);
   });
 
   it("--fix: a service that never picks the run up is named, with how to restart it", async () => {
