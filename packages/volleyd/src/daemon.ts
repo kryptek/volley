@@ -75,6 +75,7 @@ import {
   indexEntry,
   indexPayload,
 } from "./archive";
+import { ciStateOf } from "./artifacts";
 import { budgetUsed } from "./autopilot/budgets";
 import { carryHandoff, carryPicker } from "./autopilot/carry";
 import { type Digest, type DigestTrigger, digestOf, summaryLine } from "./autopilot/digest";
@@ -1089,6 +1090,8 @@ export class Daemon {
   private readonly refused = new Map<string, { n: number; until: number }>();
   /** Held decisions whose PR / issue gh is checking now (`<wave>/<id>`): one check at a time. */
   private readonly heldChecks = new Set<string>();
+  /** When each held decision's PR / issue was last checked (`<wave>/<id>`): once per ci_poll_ms. */
+  private readonly heldCheckedAt = new Map<string, number>();
   /** Each wave's pipeline driver (T6), created on first use. */
   private readonly pipelines = new Map<WaveId, PipelineDriver>();
   /** The release train's stage driver per releasing wave (SPEC §4.6.19). */
@@ -5497,6 +5500,11 @@ export class Daemon {
     }
     // Each append replaces the record: the decision is read back from the current one.
     const current = (id: string) => this.waves.get(wave)?.record.decisions[id] as DecisionRecord;
+    // Held on the fixer that just failed (autoHolds): the hold is lifted, or the owner never sees it.
+    if (d.resolved === undefined && d.held !== undefined)
+      await this.releaseNow(wave, d.decision_id, `escalated: ${why}`, DAEMON_AGENT_ID, {
+        rerun: false,
+      });
     if (d.resolved === undefined) {
       if (d.escalated?.why === why) return;
       await this.escalate(wave, d, why, budget);
@@ -9099,13 +9107,15 @@ export class Daemon {
   /**
    * Journal `decision_released`: the decision is open in its normal tier again, and autopilot's
    * rule for its kind runs again (it may answer it now; an escalation it repeats is not journaled
-   * twice). `released: false` when it was not held.
+   * twice), a red head's once its PR head is read again (`recheckRedHead`). `rerun: false` (an
+   * escalation lifting the hold) runs nothing. `released: false` when it was not held.
    */
   private async releaseNow(
     wave: WaveId,
     id: string,
     why: string,
     by: string,
+    opts: { rerun?: false } = {},
   ): Promise<{ released: boolean } | { error: string }> {
     const log = this.waves.get(wave);
     if (log === undefined) return { error: `unknown wave '${wave}'` };
@@ -9116,9 +9126,66 @@ export class Daemon {
     const d = log.record.decisions[id] as DecisionRecord;
     await this.mirrorHeld(wave, d);
     this.log(`released ${id}: ${why}`);
-    if (await this.autopilot(wave, d, { again: true }))
-      await this.publishDecision(wave, log.record.decisions[id] as DecisionRecord);
+    if (opts.rerun === false) return { released: true };
+    const pr =
+      isRedHead(d) && d.task !== null
+        ? log.record.state?.tasks.find((t) => t.id === d.task)?.pr?.number
+        : undefined;
+    if (pr !== undefined) this.recheckRedHead(wave, id, pr);
+    else await this.rerunAutopilot(wave, id);
     return { released: true };
+  }
+
+  /** Autopilot's rule for a released decision, again; its retained topic follows an escalation. */
+  private async rerunAutopilot(wave: WaveId, id: string): Promise<void> {
+    const d = this.waves.get(wave)?.record.decisions[id];
+    if (d === undefined || d.resolved !== undefined || d.held !== undefined) return;
+    if (await this.autopilot(wave, d, { again: true }))
+      await this.publishDecision(
+        wave,
+        this.waves.get(wave)?.record.decisions[id] as DecisionRecord,
+      );
+  }
+
+  /**
+   * A released red head (ci_failed / agent_blocked_ci) re-verifies its head first: its PR's head
+   * and the CI on it are read beside the queue (as the pipeline's CI check reads them). Green now
+   * (the blocker's fix landed and CI was re-run): answered `re-verify`, when it offers it, so the
+   * pipeline verifies the head as it is. Otherwise autopilot's rule runs again.
+   */
+  private recheckRedHead(wave: WaveId, id: string, pr: number): void {
+    const repo = this.waves.get(wave)?.record.wave?.repo;
+    const cwd = repo !== undefined ? repoDir(repo) : process.cwd();
+    void (async () => {
+      const view = await this.host
+        .exec(["gh", "pr", "view", String(pr), "--json", "headRefOid"], { cwd })
+        .catch(() => null);
+      let head: string | undefined;
+      try {
+        const v = view?.code === 0 ? (JSON.parse(view.stdout) as { headRefOid?: unknown }) : {};
+        head = typeof v.headRefOid === "string" ? v.headRefOid : undefined;
+      } catch {
+        head = undefined;
+      }
+      const ci =
+        head !== undefined
+          ? await ciStateOf(this.host.exec, cwd, head).catch(() => "none" as const)
+          : "none";
+      await this.enqueue(async () => {
+        const d = this.waves.get(wave)?.record.decisions[id];
+        // Answered or held again meanwhile: not this check's.
+        if (d === undefined || d.resolved !== undefined || d.held !== undefined) return;
+        if (ci === "green" && (d.options ?? []).some((o) => isAnswer(o, "re-verify"))) {
+          await this.resolveNow(wave, id, {
+            answer: "re-verify",
+            by: DAEMON_AGENT_ID,
+            rationale: `released, and CI on PR #${pr}'s head ${head?.slice(0, 12)} is green now`,
+          });
+          return;
+        }
+        await this.rerunAutopilot(wave, id);
+      });
+    })();
   }
 
   /** A hold set or lifted: the decision's retained topic and its inbox item follow it. */
@@ -9132,10 +9199,10 @@ export class Daemon {
   }
 
   /**
-   * On every tick (the merge-check cadence), per wave: autopilot holds each red head waiting on
-   * its flake's fixer (`autoHolds`), a hold on a task that is done or cancelled is released, and
-   * holds on PRs and issues are checked with gh beside the queue, released on the queue when the
-   * PR merged or closed or the issue closed.
+   * On every tick, per wave: autopilot holds each red head waiting on its flake's fixer
+   * (`autoHolds`), a hold on a task that is done or cancelled is released, and holds on PRs and
+   * issues are checked with gh beside the queue on the merge-check cadence (once per ci_poll_ms
+   * each), released on the queue when the PR merged or closed or the issue closed.
    */
   private async holdPass(wave: WaveId): Promise<void> {
     const log = this.waves.get(wave);
@@ -9158,6 +9225,9 @@ export class Daemon {
   private checkHeldOnGitHub(wave: WaveId, id: string, held: Held): void {
     const key = `${wave}/${id}`;
     if (this.heldChecks.has(key)) return;
+    const last = this.heldCheckedAt.get(key);
+    if (last !== undefined && this.now() - last < DAEMON_DEFAULTS.ci_poll_ms) return;
+    this.heldCheckedAt.set(key, this.now());
     this.heldChecks.add(key);
     const repo = this.waves.get(wave)?.record.wave?.repo;
     const cwd = repo !== undefined ? { cwd: repoDir(repo) } : {};

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { type InboxItem, decisionItemId, inboxTopic } from "../src/autopilot/inbox";
+import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { ControlClient } from "../src/control";
 import { AUTOPILOT_ON, NS } from "./helpers/daemon-env";
 import { deskAccounts, deskAnswer } from "./helpers/desk-answer";
@@ -511,10 +512,12 @@ describe("held decisions (#335): waiting on a task, PR or issue", () => {
     expect(s.daemon.record("w1")?.decisions[d.decision_id]?.resolved).toBeUndefined();
   });
 
-  it("--on '#12' is released when gh pr view says MERGED", async () => {
+  it("--on '#12' is released when gh pr view says MERGED, read once per ci_poll_ms", async () => {
     let state = "OPEN";
+    let now = Date.parse("2026-10-21T09:00:00Z");
     s = await withT2({
       exec: [[["gh", "pr", "view", "12"], () => ({ stdout: JSON.stringify({ state }) })]],
+      daemon: { now: () => now },
     });
     const d = await s.daemon.openDecision("w1", disagree);
     const c = await control();
@@ -523,7 +526,17 @@ describe("held decisions (#335): waiting on a task, PR or issue", () => {
     await s.daemon.tick();
     await s.settled();
     expect(s.daemon.record("w1")?.decisions[d.decision_id]?.held?.on).toEqual({ pr: 12 });
+    const reads = () => s?.host.fake.argvs(["gh", "pr", "view", "12"]).length ?? 0;
+    const first = reads();
+    expect(first).toBeGreaterThan(0);
+    // Ticks inside ci_poll_ms do not read it again.
     state = "MERGED";
+    await s.daemon.tick();
+    await s.daemon.tick();
+    await s.settled();
+    expect(reads()).toBe(first);
+    expect(s.journal().some((e) => e.type === "decision_released")).toBe(false);
+    now += DAEMON_DEFAULTS.ci_poll_ms;
     await s.daemon.tick();
     const released = await s.event((e) => e.type === "decision_released");
     expect(released.data).toMatchObject({ decision_id: d.decision_id, why: "PR #12 merged" });
@@ -550,6 +563,71 @@ describe("held decisions (#335): waiting on a task, PR or issue", () => {
     const ev = s.journal().find((e) => e.type === "decision_released");
     expect(ev?.data).toMatchObject({ why: "released by owner", by: "owner" });
     expect(s.daemon.inboxItem(id)?.held).toBeUndefined();
+  });
+
+  /** A ci_failed on T2's PR #12 (red head RED), as the pipeline opens it. */
+  const RED = `badc0de${"0".repeat(33)}`;
+  const GREEN = `600d${"0".repeat(36)}`;
+  const ciFailedOnT2 = (env: SupervisedEnv) =>
+    env.daemon.recordEvent("w1", {
+      type: "decision_opened",
+      task: "T2",
+      data: {
+        decision_id: "ci-t2",
+        kind: "ci_failed",
+        question: "CI failed on badc0de: a flake.",
+        options: ["fix flake", "fixup", "re-verify", "cancel"],
+        pointers: {},
+        pr: { number: 12, url: "https://example.test/pr/12" },
+        pipeline: { on: "ci_failed", role: "implementer", head: RED },
+      },
+    });
+  const prHead = (head: string, conclusion: string): [string[], { stdout: string }][] => [
+    [["gh", "pr", "view", "12"], { stdout: JSON.stringify({ state: "OPEN", headRefOid: head }) }],
+    [
+      ["gh", "run", "list"],
+      {
+        stdout: JSON.stringify([
+          {
+            databaseId: 3,
+            name: "CI",
+            status: "completed",
+            conclusion,
+            headSha: head,
+            url: "https://example.test/runs/3",
+          },
+        ]),
+      },
+    ],
+  ];
+
+  it("a released ci_failed re-verifies its head first: green now, it is answered re-verify", async () => {
+    s = await withT2({ exec: prHead(GREEN, "success") });
+    await ciFailedOnT2(s);
+    const c = await control();
+    const h = await c.request("hold", { decision_id: "ci-t2", on: { issue: 7 }, by: "owner" });
+    expect(h.error).toBeUndefined();
+    const r = await c.request("release", { decision_id: "ci-t2", by: "owner" });
+    expect(r.error).toBeUndefined();
+    const resolved = await s.event(
+      (e) => e.type === "decision_resolved" && e.data.decision_id === "ci-t2",
+    );
+    expect(resolved.data).toMatchObject({ answer: "re-verify", by: "volleyd" });
+    expect(String(resolved.data.rationale)).toContain("green");
+    expect(s.host.fake.argvs(["gh", "run", "list"]).at(-1)).toContain(GREEN);
+  });
+
+  it("a released ci_failed whose head is still red stays open for autopilot's rule", async () => {
+    s = await withT2({ exec: prHead(RED, "failure") });
+    await ciFailedOnT2(s);
+    const c = await control();
+    await c.request("hold", { decision_id: "ci-t2", on: { issue: 7 }, by: "owner" });
+    await c.request("release", { decision_id: "ci-t2", by: "owner" });
+    await s.until(() => (s?.host.fake.argvs(["gh", "run", "list"]).length ?? 0) > 0);
+    await s.settled();
+    const d = s.daemon.record("w1")?.decisions["ci-t2"];
+    expect(d?.resolved).toBeUndefined();
+    expect(d?.held).toBeUndefined();
   });
 
   it("hold is owner-guarded like resolve; a Desk login holds on its account-op topic", async () => {

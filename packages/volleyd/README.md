@@ -683,17 +683,23 @@ blocker: a task of the wave (`T4`), a PR (`#194`, `pr#194`) or an issue (`issue#
   the Needs-you window and on its wave and agent windows: never red, never pulsing, never counted
   in the top-bar pill. `volleyd decisions` prints `held on T4 by <who> since <at>`; the morning
   digest lists held decisions under `## Held`, not `## Waiting for you`.
-- **Released when the blocker lands**, checked on every tick: a task `done` or `cancelled`, a PR
-  merged or closed (`gh pr view <n> --json state`), an issue closed (`gh issue view <n> --json
-  state`); the gh checks run beside the queue. `volleyd release d-…` lifts one by hand. Either way
-  `decision_released { decision_id, kind, why, by }` is journaled, `held` is gone from the topic and
-  the item, and the decision is open in its normal tier again: the Desk's escalation timer applies
-  from then, and autopilot's rule for its kind runs again (an escalation it repeats is not
-  journaled twice).
+- **Released when the blocker lands**, while the wave is running (a paused or releasing wave's
+  holds wait until it runs again): a task `done` or `cancelled`, checked on every tick; a PR merged
+  or closed (`gh pr view <n> --json state`), an issue closed (`gh issue view <n> --json state`),
+  checked on the merge-check cadence, once per `ci_poll_ms` per hold, beside the queue. `volleyd
+  release d-…` lifts one by hand. Either way `decision_released { decision_id, kind, why, by }` is
+  journaled, `held` is gone from the topic and the item, and the decision is open in its normal
+  tier again: the Desk's escalation timer applies from then, and autopilot's rule for its kind
+  runs again (an escalation it repeats is not journaled twice). A red head re-verifies its head
+  first: its PR's head (`gh pr view <n> --json headRefOid`) and the CI on it are read again, and
+  a `ci_failed` whose head is green now is answered `re-verify` by `volleyd`, so the pipeline
+  verifies it as it is.
 - **Autopilot holds a red head on its flake's fixer**: an open red-head decision (`ci_failed`,
   or `agent_blocked` on a red head) of a task parked on a flake whose fixer is still at work is
   held on the fixer task, by `volleyd`, with the note `CI flake in <test>: its fixer <task> is on
-  it`. A decision whose hold was released before is never held again automatically.
+  it`. A decision whose hold was released before is never held again automatically. A fixer that
+  fails (cancelled, blocked) lifts the hold (`decision_released`, `why: escalated: …`) before its
+  red head is escalated to the owner, so the escalation is in plain sight.
 
 **A blocked agent.** An agent of any role (implementer, either reviewer, fixup, rebase or merge)
 that publishes `status: blocked` (SPEC §5.1) gets an `agent_blocked` decision on its task, with
