@@ -337,6 +337,7 @@ import { SYSTEM_WAVE } from "./types";
 import { WaveFileError, parseWaveFile } from "./wave-file";
 
 import {
+  BLOCKED_TASK_CANCELLED,
   FIX_FLAKE,
   FIX_LANDED,
   PipelineDriver,
@@ -5705,7 +5706,7 @@ export class Daemon {
     );
     // A stale or accepted run: the role's current run is healthy, so the task is not parked.
     if (dropped !== undefined)
-      await this.blockedFallback(agentId, a, null, dropped.data.why !== "the task is cancelled");
+      await this.blockedFallback(agentId, a, null, dropped.data.why !== BLOCKED_TASK_CANCELLED);
   }
 
   /** Whether any decision (open or answered) names the agent and its status `at` (status_at). */

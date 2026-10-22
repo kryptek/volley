@@ -2249,6 +2249,9 @@ export function blockedReason(payload: unknown): string {
  * A role's agent is blocked: ask the owner. Nothing is retired (the agent may be waiting on its
  * mailbox); `continue` waits for its next status, `respawn` relaunches the role.
  */
+/** The `why` of a blocked alarm on a cancelled task: the one case that is not a stale run. */
+export const BLOCKED_TASK_CANCELLED = "the task is cancelled";
+
 function onBlocked(
   v: PipelineView,
   ev: Extract<PipelineEvent, { kind: "agent_blocked" }>,
@@ -2260,7 +2263,7 @@ function onBlocked(
       : run.accepted
         ? `the ${ev.role}'s run is already accepted`
         : v.stage === "cancelled"
-          ? "the task is cancelled"
+          ? BLOCKED_TASK_CANCELLED
           : undefined;
   // Never silent: the alarm says why the pipeline asks nothing (the daemon asks instead).
   if (why !== undefined)
