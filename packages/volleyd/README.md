@@ -234,7 +234,8 @@ A bare concurrency cap is the wrong tool: six agents editing files is fine, six 
 integration suites with containers is not. Heavy commands therefore take a lease from a
 machine-global **pool** (`lease_pools` in the config: `capacity`, optional `per_machine` and
 `ttl_s`, and the `match` regexes the [volley-hooks](../volley-hooks/README.md) lease hook uses to
-wrap matching Bash commands in [`volley lease run`](../volley-cli/README.md#volley-lease)).
+wrap matching Bash commands in [`volley lease run`](../volley-cli/README.md#volley-lease); they are
+matched against each command the shell would execute, not comments, heredocs or message text).
 
 - **Requests** arrive on `volley/_system/leases/<pool>/requests` (`acquire | release | renew`,
   SPEC §4.6.5). A request whose `holder` is not the sender is ignored; a repeated `acquire` for a

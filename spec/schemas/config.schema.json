@@ -695,7 +695,7 @@
           "type": "array",
           "maxItems": 32,
           "items": { "type": "string", "format": "regex", "minLength": 1, "maxLength": 256 },
-          "description": "Regular expressions over a command line; a match requires a lease from this pool."
+          "description": "Regular expressions matched against each command the shell would execute (not comments, heredocs or message text); a match requires a lease from this pool."
         }
       }
     },
