@@ -162,6 +162,19 @@ describe("MachineHealth", () => {
     expect(health.record("box")).toEqual(record(later));
   });
 
+  it("compares doctor runs by instant, not by how the timestamp is written", () => {
+    const checks = (detail: string) => [
+      { id: "volley.installed", ok: true, severity: "block" as const, detail },
+    ];
+    // 09:30Z, written with an offset: newer than 09:00Z, though it sorts lower as a string.
+    health.observe(record({ checks: checks("old"), doctor_at: "2026-10-19T09:00:00.000Z" }));
+    health.observe(record({ checks: checks("new"), doctor_at: "2026-10-19T08:30:00-01:00" }));
+    expect(health.record("box")?.checks?.[0]?.detail).toBe("new");
+    // 09:20Z: older than 09:30Z, though it sorts higher as a string.
+    health.observe(record({ checks: checks("older"), doctor_at: "2026-10-19T09:20:00Z" }));
+    expect(health.record("box")?.checks?.[0]?.detail).toBe("new");
+  });
+
   it("says why with its own heartbeat timeout", () => {
     health = new MachineHealth({ now: () => now, onChange: () => {}, downAfterMs: 30_000 });
     health.observe(record());

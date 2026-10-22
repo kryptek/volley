@@ -2038,10 +2038,9 @@ finished doctor run's `versions`, `auth` (states only: `gh`, `claude`, `trust`, 
 `repo`, `checks` (no fix text) and `doctor_at`. The service re-runs the doctor every 600 s
 (`PEER_DEFAULTS.doctor_interval_s`), and on the next heartbeat after the checkout's
 `package.json`, `bun.lock` or install marker changes or `volley peer doctor` runs, beside the
-heartbeat, so a slow network probe never delays a
-beat past `machine_down_after_ms`; the version it compares the checkout against is the
-supervisor's readiness verdict's `requirements.volley`. The service file carries the `PATH` the
-join ran with (launchd's own has no Homebrew or `~/.bun/bin`). volleyd only counts records for a configured host, and marks a
+heartbeat, so a slow network probe never delays a beat past `machine_down_after_ms`; the
+version it compares the checkout against is the supervisor's readiness verdict's
+`requirements.volley`. The service file carries the `PATH` the join ran with (launchd's own has no Homebrew or `~/.bun/bin`). volleyd only counts records for a configured host, and marks a
 machine whose record stopped for 90 s down (republishing the record with
 `reason: heartbeat_timeout`). While a machine is down its spawns park with
 `why_waiting: "tunnel down to <name>: no heartbeat for 90 s"`, every unfinished task on it

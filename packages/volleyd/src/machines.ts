@@ -124,7 +124,8 @@ interface Entry {
  */
 function keepNewerDoctor(incoming: MachineRecord, prior: MachineRecord | undefined): MachineRecord {
   if (prior?.doctor_at === undefined || incoming.doctor_at === undefined) return incoming;
-  if (incoming.doctor_at >= prior.doctor_at) return incoming;
+  // As instants: the schema allows any date-time form (offsets, fraction lengths).
+  if (!(Date.parse(incoming.doctor_at) < Date.parse(prior.doctor_at))) return incoming;
   const { versions, auth, repo, checks, doctor_at } = prior;
   return {
     ...incoming,

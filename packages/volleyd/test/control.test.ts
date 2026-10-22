@@ -704,6 +704,57 @@ describe("peer_doctor (the doctor on a paired machine, for an admin)", () => {
     expect(await c.queryRetained(machineTopic("box-a"), 300)).toBeNull();
   });
 
+  it("a run on a box whose tunnel is down folds nothing: its record stays the box's own", async () => {
+    const c = new VolleyBroker();
+    await c.connect({
+      url: broker.url,
+      agentId: "box-a",
+      username: "volleyd",
+      password: pw("volleyd"),
+    });
+    clients.push(c);
+    const record = async () => {
+      const raw = await c.queryRetained(machineTopic("box-a"), 500);
+      return raw === null ? null : parseEnvelope(raw);
+    };
+    // The box's LWT: ssh still reaches it, its tunnel does not.
+    const lwt = {
+      name: "box-a",
+      os: "linux",
+      cores: 8,
+      tunnel: "down",
+      reason: "disconnect",
+      load: [0.5, 0.25, 0.125],
+      agents: 0,
+      checks: [{ id: "volley.installed", ok: false, severity: "block", detail: "stale install" }],
+      doctor_at: "2026-10-19T08:00:00.000Z",
+      last_seen: "2026-10-19T09:00:00.000Z",
+    };
+    await c.publish(
+      machineTopic("box-a"),
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "box-a",
+          parentId: null,
+          channel: "_system/machines",
+          type: "machine",
+          payload: lwt,
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    await eventually(async () => (await record())?.agent_id === "box-a");
+    await daemon.tick();
+
+    answers.doctor = { ...REPORT, doctor_at: "2026-10-19T09:00:05.000Z" };
+    expect(await op("admin-1", { op: "peer_doctor", name: "box-a", fix: true })).toMatchObject({
+      ok: true,
+    });
+    const after = await record();
+    expect(after?.agent_id).toBe("box-a");
+    expect(after?.payload).toMatchObject({ tunnel: "down", doctor_at: lwt.doctor_at });
+  });
+
   it("refuses an unknown host and --clone without --fix before ssh", async () => {
     expect(await op("admin-1", { op: "peer_doctor", name: "nobody" })).toMatchObject({
       ok: false,

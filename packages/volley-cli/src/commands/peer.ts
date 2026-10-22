@@ -1664,22 +1664,23 @@ async function awaitRepublish(
     return `\nReadiness not republished: the peer service is not connected (its tunnel is down), so the supervisor still sees the last record it sent. Restart it: \`${restartHint(deps)}\`\n`;
   }
   const b = await deps.connect(brokerThroughTunnel(cfg), peerAuth(cfg)).catch(() => null);
-  if (b !== null) {
-    try {
-      for (let i = 0; i < PEER_DEFAULTS.republish_polls; i++) {
-        const raw = await b
-          .queryRetained(machineTopic(cfg.name), PEER_DEFAULTS.readiness_wait_ms)
-          .catch(() => null);
-        const at = (parseEnvelope(raw ?? "")?.payload as { doctor_at?: unknown } | undefined)
-          ?.doctor_at;
-        if (typeof at === "string" && Date.parse(at) >= ranAt.getTime()) {
-          return "\nreadiness republished: the peer service ran the doctor again\n";
-        }
-        await deps.sleep(PEER_DEFAULTS.republish_poll_ms);
+  if (b === null) {
+    return `\nReadiness not checked: could not check whether the peer service ran the doctor again (the broker refused the connection). If the supervisor still shows the last run in a few minutes, restart it: \`${restartHint(deps)}\`\n`;
+  }
+  try {
+    for (let i = 0; i < PEER_DEFAULTS.republish_polls; i++) {
+      const raw = await b
+        .queryRetained(machineTopic(cfg.name), PEER_DEFAULTS.readiness_wait_ms)
+        .catch(() => null);
+      const at = (parseEnvelope(raw ?? "")?.payload as { doctor_at?: unknown } | undefined)
+        ?.doctor_at;
+      if (typeof at === "string" && Date.parse(at) >= ranAt.getTime()) {
+        return "\nreadiness republished: the peer service ran the doctor again\n";
       }
-    } finally {
-      await b.disconnect().catch(() => {});
+      await deps.sleep(PEER_DEFAULTS.republish_poll_ms);
     }
+  } finally {
+    await b.disconnect().catch(() => {});
   }
   // Each poll waits for the retained record, then sleeps.
   const waited = Math.round(
@@ -1761,7 +1762,7 @@ export function currentUser(
 
 const PKG_JSON = fileURLToPath(new URL("../../package.json", import.meta.url));
 
-function realDeps(): PeerDeps {
+export function realDeps(): PeerDeps {
   const cli = fileURLToPath(new URL("../cli.ts", import.meta.url));
   return {
     exec: realExec,

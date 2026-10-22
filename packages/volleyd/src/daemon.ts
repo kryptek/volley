@@ -4891,11 +4891,12 @@ export class Daemon {
    * the box's retained record (republished as volleyd, as the sweep does) and its verdict is
    * recomputed, so the Desk and readiness follow the run without waiting for the box's next
    * heartbeat (whose service re-runs its own doctor too). A box that never published a record
-   * has nothing to fold into.
+   * has nothing to fold into, and one whose tunnel is down keeps its record (a down box is not
+   * ready whatever its checks say; its next `up` heartbeat brings the run).
    */
   private async foldDoctor(name: string, report: DoctorReport): Promise<void> {
     const prior = this.machines.record(name);
-    if (!this.running || prior === undefined || prior.tunnel === "local") return;
+    if (!this.running || prior?.tunnel !== "up") return;
     const record: MachineRecord = { ...prior, ...doctorFields(report) };
     if (!validator("machine.schema.json")(this.envelope(MACHINE_CHANNEL, "machine", record))) {
       this.log(`${name}'s doctor report does not fit machine.schema.json: record left as it was`);

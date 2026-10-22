@@ -33,6 +33,7 @@ import {
   machineTopic,
   peerDoctorStamp,
   peerFile,
+  realDeps,
   redeemScript,
   runPeer,
   runService,
@@ -1779,6 +1780,27 @@ describe("volley peer doctor (the verb)", () => {
     expect(r.stdout).not.toContain("republished");
   });
 
+  it("--fix: a broker that refuses the republish check says it could not check, not that it waited", async () => {
+    writeCfg({ repo: box.repoPath });
+    const f = fakeExec(() => undefined);
+    const base = deps(f.exec);
+    // The first connect (the requirements) works; the second (the republish poll) is refused.
+    let connects = 0;
+    const r = await run(
+      ["doctor", "--fix", "--yes"],
+      deps(f.exec, {
+        connect: async (...a) => {
+          if (++connects === 2) throw new Error("connect ECONNREFUSED 127.0.0.1:21883");
+          return base.connect(...a);
+        },
+      }),
+    );
+    expect(connects).toBe(2);
+    expect(r.stdout).toContain("could not check");
+    expect(r.stdout).not.toContain("did not run the doctor again");
+    expect(r.stdout).toContain(`systemctl --user restart ${SYSTEMD_UNIT}`);
+  });
+
   it("--fix with the tunnel down says the service is not running, at once", async () => {
     writeCfg({ repo: box.repoPath });
     const f = fakeExec(() => undefined);
@@ -1802,6 +1824,14 @@ describe("volley peer doctor (the verb)", () => {
     expect(r.report.versions.volley).toBe("0.3.9");
     expect(check(r.report, "volley.installed")?.ok).toBe(false);
     expect(check(r.report, "volley.installed")?.detail).toContain(dir);
+  });
+});
+
+describe("the real dependencies", () => {
+  it("report the checkout's package.json version", () => {
+    const file = fileURLToPath(new URL("../../package.json", import.meta.url));
+    const { version } = JSON.parse(readFileSync(file, "utf-8")) as { version: string };
+    expect(realDeps().version).toBe(version);
   });
 });
 
