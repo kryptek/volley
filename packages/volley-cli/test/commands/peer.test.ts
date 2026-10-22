@@ -1531,18 +1531,25 @@ describe("volley peer run (the service)", () => {
     const f = fakeExec(() => undefined);
     let verb: Promise<{ stdout: string }> | undefined;
     const { records } = await heartbeats(4, f, {
-      between: (beat) => {
-        if (beat !== 1) return;
-        // The fix moves this checkout's CLI on; the verb runs between the service's beats and
-        // waits (in real time) for the service's record to carry a run after its own.
-        cliVersion = "0.5.0";
-        verb = run(
-          ["doctor", "--fix", "--yes"],
-          deps(fakeExec(() => undefined).exec, {
-            now: () => new Date("2026-10-19T09:00:15.000Z"),
-            sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 20))),
-          }),
-        );
+      between: async (beat) => {
+        if (beat === 1) {
+          // The fix moves this checkout's CLI on; the verb runs between the service's beats and
+          // waits (in real time) for the service's record to carry a run after its own.
+          cliVersion = "0.5.0";
+          verb = run(
+            ["doctor", "--fix", "--yes"],
+            deps(fakeExec(() => undefined).exec, {
+              now: () => new Date("2026-10-19T09:00:15.000Z"),
+              sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 100))),
+            }),
+          );
+        }
+        // The verb's own doctor takes real time (slow on CI): hold the service's next beat until
+        // it has left its stamp, then let the service's re-run land before the beats run out.
+        if (beat === 2) {
+          while (!existsSync(peerDoctorStamp(home))) await new Promise((r) => setTimeout(r, 10));
+        }
+        if (beat === 3) await verb;
       },
       deps: (d) => Object.defineProperty(d, "version", { get: () => cliVersion }),
     });
