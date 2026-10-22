@@ -371,6 +371,8 @@ A decision that offers `respawn` for an agent whose host is down or not eligible
 
 A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out to a decision whose answer it acts on itself. For `spawn_budget_exhausted` it MUST accept `raise by <n>` with any n ≥ 1 besides the offered options, and SHOULD read `raise <n>` as `raise by <n>`. Which free-form answers the reference supervisor accepts for each kind is listed in its README.
 
+**A blocked agent is always asked about.** A supervised agent's retained `blocked` status (§5.1) SHOULD always have a decision about it: the supervisor checks on the status event, when its watch attaches to a status already retained (a restart), and on every tick. A `blocked` its pipeline cannot own (the task is `done`, `merge_ready` or `cancelled`, the agent is not the role's current run, the run was accepted, or the pipeline failed) is never dropped silently: the supervisor journals `alarm_raised { alarm: "blocked_unhandled", agent_id, why }` and opens its own `agent_blocked` decision, `respawn` \| `cancel`, or, on a settled task or for a run that is not the role's current one or was accepted, `manual` \| `cancel` without parking the task (`cancel` then stops only that agent and leaves the task as it is).
+
 #### 4.6.3 Wave events
 
 `volley/_waves/<wave>/events` is a non-retained live mirror of the supervisor's per-wave journal; the journal (not the broker) is the record, and consumers that need every event read it through the supervisor. The envelope `type` is the event type, from a closed enum in `wave-event.schema.json` (listed below). `payload` is `{ wave, seq, at, task?, data? }`, where `seq` is monotonic per wave and `data` is event-specific. Global events use the pseudo-wave `_system`. A release stage agent's own events (`agent_spawned { stage, … }`, `steering_sent`, `agent_retired`) carry the pseudo task `_release`, which no wave-file task id can be.
@@ -497,6 +499,7 @@ A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out
 - `background_wait_max_s` — default 7200: how long an idle agent's own work, its `background_wait`, §4.3, or other evidence, holds off the idle nudge.
 - `stall_backoff_max_s` — default 1800: the cap on the doubling gap between stall decisions of one idle.
 - `tool_in_flight_max_s` — default 7200: how long a tool call in flight, from its `PreToolUse` boundary to the matching `PostToolUse`, §4.3, holds off the silence alarm.
+- `blocked_undecided_stall_ms` — default 300000, 10000..86400000: how long an agent whose retained status is `blocked` may go with no decision naming it (open, or answered for that status) before the supervisor calls it stalled, an `agent_stalled` decision offering `respawn` and `stop task`.
 - `fallback_model` — string | null, default `null`.
 - `mailbox.session_expiry_s` — default 604800.
 - `worktree_root` — default `~/.volley/worktrees`.

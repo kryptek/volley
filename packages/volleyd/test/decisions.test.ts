@@ -131,6 +131,29 @@ describe("decision lifecycle", () => {
     expect(daemon.snapshot(WAVE)?.open_decisions).toEqual([d.decision_id]);
   });
 
+  it("a blocked agent on a settled task: an agent_blocked that does not park it is allowed", async () => {
+    await daemon.recordEvent(WAVE, {
+      type: "stage_entered",
+      task: "B",
+      data: { stage: "merge_ready" },
+    });
+    const d = await daemon.openDecision(WAVE, {
+      kind: "agent_blocked",
+      task: "B",
+      question: "B's agent is blocked after merge_ready: manual or cancel?",
+      options: ["manual", "cancel"],
+      park: false,
+    });
+    expect(d.task).toBe("B");
+    expect(task("B")?.stage).toBe("merge_ready");
+    expect(task("C")?.why_waiting ?? "").not.toContain("decision");
+    // Any other kind, or one that would park, is still refused.
+    await expect(
+      daemon.openDecision(WAVE, { kind: "plan_change", task: "B", question: "x?", park: false }),
+    ).rejects.toThrow("task 'B' is merge_ready");
+    await expect(openOnB()).rejects.toThrow("task 'B' is merge_ready");
+  });
+
   it("a stage event while parked keeps the task parked and moves where it resumes", async () => {
     const d = await openOnB();
     await daemon.recordEvent(WAVE, {

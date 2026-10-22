@@ -66,6 +66,7 @@ import type {
   TaskStage,
   WaveId,
 } from "./types";
+import { BLOCKED_ALARM } from "./watchdog";
 import { expandHome } from "./worktree";
 
 /**
@@ -2275,6 +2276,9 @@ export function blockedReason(payload: unknown): string {
   return "(no reason given)";
 }
 
+/** The `why` of a blocked alarm on a cancelled task: the one case that is not a stale run. */
+export const BLOCKED_TASK_CANCELLED = "the task is cancelled";
+
 /**
  * A role's agent is blocked: ask the owner. Nothing is retired (the agent may be waiting on its
  * mailbox); `continue` waits for its next status, `respawn` relaunches the role.
@@ -2284,8 +2288,33 @@ function onBlocked(
   ev: Extract<PipelineEvent, { kind: "agent_blocked" }>,
 ): PipelineAction[] {
   const run = v.p.runs[ev.role];
-  if (run === undefined || run.agent_id !== ev.agent_id || run.accepted || v.stage === "cancelled")
-    return [];
+  const why =
+    run === undefined || run.agent_id !== ev.agent_id
+      ? `not the ${ev.role}'s current run`
+      : run.accepted
+        ? `the ${ev.role}'s run is already accepted`
+        : v.stage === "cancelled"
+          ? BLOCKED_TASK_CANCELLED
+          : undefined;
+  // Never silent: the alarm says why the pipeline asks nothing (the daemon asks instead).
+  if (why !== undefined)
+    return [
+      {
+        kind: "alarm",
+        key: `${BLOCKED_ALARM}/${ev.agent_id}/${ev.at ?? ""}`,
+        event: {
+          type: "alarm_raised",
+          task: v.task,
+          data: {
+            alarm: BLOCKED_ALARM,
+            agent_id: ev.agent_id,
+            role: ev.role,
+            why,
+            ...(ev.at !== undefined ? { status_at: ev.at } : {}),
+          },
+        },
+      },
+    ];
   const blocked: BlockedStatus = {
     reason: ev.reason,
     payload: ev.payload,
@@ -3720,6 +3749,11 @@ export class PipelineDriver {
     if (this.turn !== undefined)
       this.lock.release(this.turn.branch, `${this.wave}/${this.turn.task}`);
     this.turn = undefined;
+  }
+
+  /** Whether a blocked agent's red head is still being classified (its decision is to come). */
+  classifying(task: TaskId, agentId: string): boolean {
+    return this.inflight.has(`${task}/classify/blocked/${agentId}`);
   }
 
   /** Resolves once no check is running beside the queue (tests; a graceful stop). */
