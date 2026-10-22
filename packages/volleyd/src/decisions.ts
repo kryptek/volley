@@ -246,6 +246,7 @@ export function validateAnswer(
   options: readonly string[] | undefined,
   answer: string,
 ): { answer: string } | { refused: string } {
+  // Every checked kind opens with options today, so the no-options pass-through is unreachable.
   if (!CHECKED_KINDS.has(kind) || options === undefined || options.length === 0) return { answer };
   const offered = options.find((o) => norm(o) === norm(answer));
   if (offered !== undefined) return { answer: offered };
