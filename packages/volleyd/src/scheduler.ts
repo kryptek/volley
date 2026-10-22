@@ -281,7 +281,8 @@ export function spawnsOutstanding(wave: Wave, rec: WaveRecord): number {
  * The `raise by <n>` a spawn_budget_exhausted decision offers: what the wave still needs
  * (`spawnsOutstanding`), at least `spawn_budget_raise_min_share` of the derived budget, capped
  * so `used + n` stays within `derived × raiseMax` (autopilot's `budget_raise_max`) while that
- * leaves room for one. Never less than 1.
+ * leaves room for one. Never less than 1. Once `used` is past that cap the owner is offered the
+ * full need (not a raise by 0); autopilot's own `budget_raise_max` check still escalates it.
  */
 export function budgetRaise(o: {
   outstanding: number;

@@ -366,7 +366,7 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 
 A decision that offers `respawn` for an agent whose host is down or not eligible (§4.6.15) also offers `respawn on <best>`, `<best>` being the best eligible machine when it opened; on a host closed to new agents it offers `respawn on <best>` instead of `respawn`.
 
-A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out to a decision whose answer it acts on itself; in the reference supervisor, one line per kind: `spawn_budget_exhausted` takes `raise by <n>` (any n ≥ 1; `raise <n>` is read as `raise by <n>`) or `cancel`; `machine_down` takes only its options; `repo_untrusted` takes `trust` or `cancel`. Every other kind takes its options or free-form text.
+A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out to a decision whose answer it acts on itself. For `spawn_budget_exhausted` it MUST accept `raise by <n>` with any n ≥ 1 besides the offered options, and SHOULD read `raise <n>` as `raise by <n>`. Which free-form answers the reference supervisor accepts for each kind is listed in its README.
 
 #### 4.6.3 Wave events
 
