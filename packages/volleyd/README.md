@@ -655,8 +655,11 @@ disagree, a merge conflict, an agent blocked, a plan change. It is a journal eve
   resolved, puts it back in the stage it was in. The task's resolved decisions are written to
   `.volley/decisions.md` in its task directory for the next stage's brief: the task's latest
   worktree (from its `agent_spawned`), or `$VOLLEYD_HOME/waves/<wave>/tasks/<task>/` before the
-  task has one or when spawning is off. A failed write is logged and the answer omits `brief`; the
-  resolution itself stands. Resolving an unknown id is an error; resolving twice is a no-op.
+  task has one or when spawning is off. The worktree's file is written through the task's host, so
+  a task on a paired machine gets it in its worktree there (over ssh), not at that path on the
+  supervisor's disk. A failed write is logged, journaled once per decision as `alarm_raised
+  { alarm: "decisions_file_unwritten", decision_id, path, error }`, and the answer omits `brief`;
+  the resolution itself stands. Resolving an unknown id is an error; resolving twice is a no-op.
 
 Open decisions survive a restart (they are re-published from the journal), and a restart clears
 the retained topic of every resolved one, in case the daemon died between the two.
@@ -2674,7 +2677,16 @@ on from the red head's step: after a CI failure on the implementer's first head,
 on a fixup's or rebase's head, to the gate (the reviews of the head it fixed still hold).
 `re-verify` is for a fix or re-run you did yourself. Pending CI is re-checked every
 `ci_poll_ms` (the agent is retired meanwhile); a head with no CI run at all for
-`ci_none_grace_ms` asks the owner (`accept` / `cancel`). The hold is visible: entering it (and
+`ci_none_grace_ms` asks the owner (`accept` / `cancel`). A PR GitHub reports `CONFLICTING`
+(the PR read carries `mergeable` and `mergeStateStatus`) gets no CI at all, so it is neither held
+nor asked about: volleyd journals `pr_conflicting { pr, head, release_branch, role? }` and enters the
+branch-update step at that head at once (`stage_entered { rebase: true, conflicting: true }`,
+under the wave's `branch_update`), its `.volley/rebase.md` saying the PR conflicts; `why_waiting`
+reads `PR conflicts with <release>, updating`. Once the update's head is verified the pipeline
+goes on from where it stopped (the implementer's work still gets its reviews). An update step's
+own head that still conflicts waits like any head with no CI (past the grace the question says
+the PR still conflicts with the release branch). `mergeable: UNKNOWN` (GitHub still
+computing) counts as running: re-polled, no clock. The hold is visible: entering it (and
 every change of head or counts) journals `ci_pending { role, sha, checks: { done, total },
 next_poll_at, pr }`, the task's `why_waiting` reads `CI pending on <sha7> (n/m checks)` and its
 `pr` carries `{ number, head_sha, ci: running, checks }` (what `volleyd status --json` prints);

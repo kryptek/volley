@@ -62,6 +62,19 @@ export const REQUIRED_VOLLEYD_PATH = [
 ] as const;
 
 /**
+ * Strings the `## Release branch merge` section must name verbatim (#313): CI's changelog guards
+ * pass a release PR only when its squash subject starts with `release:` and, when it touches
+ * packages/ without a fragment, it carries the `no-changelog` label, which the first command
+ * creates in a repository that lacks it.
+ */
+export const REQUIRED_RELEASE_MERGE = [
+  "bun scripts/changelog-ci.ts labels --ensure",
+  '--title "release:',
+  "--label no-changelog",
+  '--subject "release:',
+] as const;
+
+/**
  * The brief title (P2-2): an issue title is attacker-controlled text, and the cmux line nests it
  * in a single-quoted prompt inside a double-quoted `--command`, so a quote ends the prompt early
  * and a backtick or `$(…)` runs in the coordinator's shell. SKILL.md must route the title through
@@ -177,11 +190,38 @@ export function validateVolleydPath(source: string): ValidationResult {
   return { ok: errors.length === 0, errors };
 }
 
+/** The body text from the `## Release branch merge` heading up to the next `## ` heading, or null. */
+export function releaseMergeSection(body: string): string | null {
+  const start = /^## Release branch merge\b.*$/m.exec(body);
+  if (start === null) return null;
+  const rest = body.slice(start.index + start[0].length);
+  const end = /^## /m.exec(rest);
+  return body.slice(start.index, start.index + start[0].length + (end?.index ?? rest.length));
+}
+
+/** `gh pr merge` followed directly by a flag, so no PR is named. */
+const BARE_PR_MERGE = /gh pr merge --\S*/;
+
+export function validateReleaseMerge(source: string): ValidationResult {
+  const section = releaseMergeSection(splitFrontmatter(source).body);
+  if (section === null)
+    return { ok: false, errors: ["missing the ## Release branch merge section"] };
+  const errors = REQUIRED_RELEASE_MERGE.filter((needle) => !section.includes(needle)).map(
+    (needle) => `release branch merge must mention: ${needle}`,
+  );
+  // A bare `gh pr merge` resolves to the checked-out branch's PR; after step 2 that is the
+  // release-prep PR, already merged, not the release->main PR.
+  const bare = BARE_PR_MERGE.exec(section);
+  if (bare !== null) errors.push(`gh pr merge must name its PR: ${bare[0]}`);
+  return { ok: errors.length === 0, errors };
+}
+
 export function validateSkill(source: string): ValidationResult {
   const results = [
     validateFrontmatter(source),
     validateSections(source),
     validateVolleydPath(source),
+    validateReleaseMerge(source),
     validateBriefTitle(source),
   ];
   return { ok: results.every((r) => r.ok), errors: results.flatMap((r) => r.errors) };
