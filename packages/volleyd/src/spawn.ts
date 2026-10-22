@@ -573,7 +573,9 @@ async function launchAttempt(
         local,
       ]);
       mcpExtra = allowed.servers;
-      const unapproved = Object.keys(allowedMcpServers(allowed.missing, [project]).servers);
+      // In .mcp.json at all (of any shape) but filtered out by approvedProjectServers.
+      const raw = allowedMcpServers(allowed.missing, [project]);
+      const unapproved = [...Object.keys(raw.servers), ...raw.malformed];
       await alarmMissingAllowed(
         ctx,
         [...allowed.missing, ...allowed.malformed],
@@ -1248,15 +1250,22 @@ async function alarmMissingAllowed(
   malformed: ReadonlySet<string>,
 ): Promise<void> {
   const { deps, req } = ctx;
+  if (missing.length === 0) return;
+  // One journal scan for every name (it stops once all of them are found).
+  const seen = new Set<string>();
+  deps.journaled?.((e) => {
+    if (
+      e.type === "alarm_raised" &&
+      e.data.alarm === "agent_mcp_allow_missing" &&
+      e.data.host === deps.host.name &&
+      typeof e.data.name === "string" &&
+      missing.includes(e.data.name)
+    )
+      seen.add(e.data.name);
+    return seen.size === missing.length;
+  });
   for (const name of missing) {
-    const seen = deps.journaled?.(
-      (e) =>
-        e.type === "alarm_raised" &&
-        e.data.alarm === "agent_mcp_allow_missing" &&
-        e.data.name === name &&
-        e.data.host === deps.host.name,
-    );
-    if (seen === true) continue;
+    if (seen.has(name)) continue;
     const why = malformed.has(name)
       ? `volleyd cannot copy MCP server '${name}' (a string command with string args and env, or a string url with string headers)`
       : unapproved.has(name)

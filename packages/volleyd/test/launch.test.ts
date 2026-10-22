@@ -538,6 +538,48 @@ describe("launch (local cmux host)", () => {
     expect(alarms[0]?.data).toMatchObject({ name: "zzz" });
   });
 
+  it("agent_mcp_allow: an unapproved .mcp.json entry of an odd shape is still reported as not approved", async () => {
+    env = await makeSpawnEnv();
+    env.deps.tunables = { ...env.deps.tunables, agent_mcp: "inherit", agent_mcp_allow: ["odd"] };
+    mkdirSync(env.worktree, { recursive: true });
+    writeFileSync(
+      join(env.worktree, ".mcp.json"),
+      JSON.stringify({ mcpServers: { odd: { command: "odd", args: [3000] } } }),
+    );
+    expect((await spawnAgent(env.request(), env.deps)).kind).toBe("launched");
+    expect(
+      env.events.find(
+        (e) => e.type === "alarm_raised" && e.data.alarm === "agent_mcp_allow_missing",
+      )?.data,
+    ).toMatchObject({
+      name: "odd",
+      message: expect.stringContaining("not approved for this repository"),
+    });
+  });
+
+  it("agent_mcp_allow: several missing names read the journal once per spawn", async () => {
+    env = await makeSpawnEnv();
+    env.deps.tunables = {
+      ...env.deps.tunables,
+      agent_mcp: "inherit",
+      agent_mcp_allow: ["zz1", "zz2", "zz3"],
+    };
+    let reads = 0;
+    env.deps.journaled = (match) => {
+      reads++;
+      return env.events.some((e) => match(e));
+    };
+    const out = await spawnAgent(env.request(), env.deps);
+    if (out.kind === "launched") out.lock.release();
+    expect(reads).toBe(1);
+    expect((await spawnAgent(env.request({ attempt: 2 }), env.deps)).kind).toBe("launched");
+    expect(reads).toBe(2);
+    const alarms = env.events.filter(
+      (e) => e.type === "alarm_raised" && e.data.alarm === "agent_mcp_allow_missing",
+    );
+    expect(alarms.map((a) => a.data.name)).toEqual(["zz1", "zz2", "zz3"]);
+  });
+
   it("agent_mcp_allow: a malformed entry is skipped with the alarm; the good one is copied", async () => {
     env = await makeSpawnEnv();
     env.deps.tunables = {

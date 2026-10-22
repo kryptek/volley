@@ -1553,7 +1553,9 @@ scope; then the repository's `projects.<repo>.mcpServers`, local scope) and the 
 `.mcp.json` (project scope), the narrower scope winning a name (local over project over user).
 A `.mcp.json` entry is copied only when the profile approved it for the repository, as Claude Code
 asks before starting one: named in `projects.<repo>.enabledMcpjsonServers`, or under
-`enableAllProjectMcpServers: true`, and not in `disabledMcpjsonServers`. The file comes from the
+`enableAllProjectMcpServers: true`, and not in `disabledMcpjsonServers` (only the approvals in
+`.claude.json` count: one set in a settings file, `.claude/settings.local.json` or
+`~/.claude/settings.json`, is not read, and the entry is alarmed as not approved). The file comes from the
 branch checked out (for a reviewer or a fixup, a PR head a contributor controls), and the strict
 copy would otherwise skip that approval; an unapproved entry is ignored, so the user's own entry
 of that name stays. A paired machine's are read from its own `~/.claude.json` and worktree. A name found in none of them
