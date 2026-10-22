@@ -1639,10 +1639,17 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
   } catch {}
   // A --json run is the supervisor's (Repair): it folds the report into the record itself.
   if (opts.fix === true && opts.json !== true) {
-    io.stdout(await awaitRepublish(deps, cfg, tunnelUp, ranAt));
+    io.stdout(await awaitRepublish(io, deps, cfg, tunnelUp, ranAt));
   }
   return code;
 }
+
+/**
+ * The republish poll's window, in whole minutes. A retained record answers each query at once,
+ * so the sleeps set it (a box with no record also waits out each query: still about this long).
+ */
+const waitMinutes = () =>
+  Math.round((PEER_DEFAULTS.republish_polls * PEER_DEFAULTS.republish_poll_ms) / 60_000);
 
 /** How to restart the service on this machine. */
 const restartHint = (deps: PeerDeps) =>
@@ -1655,6 +1662,7 @@ const restartHint = (deps: PeerDeps) =>
  * (it re-runs on the stamp at its next heartbeat), and say whether it did.
  */
 async function awaitRepublish(
+  io: IO,
   deps: PeerDeps,
   cfg: PeerConfig,
   tunnelUp: boolean,
@@ -1667,6 +1675,10 @@ async function awaitRepublish(
   if (b === null) {
     return `\nReadiness not checked: could not check whether the peer service ran the doctor again (the broker refused the connection). If the supervisor still shows the last run in a few minutes, restart it: \`${restartHint(deps)}\`\n`;
   }
+  // The poll is silent for up to the whole window: say so, or it reads as hung.
+  io.stdout(
+    `\nWaiting for the peer service to run the doctor again (up to about ${waitMinutes()} minutes)…\n`,
+  );
   try {
     for (let i = 0; i < PEER_DEFAULTS.republish_polls; i++) {
       const raw = await b
@@ -1682,15 +1694,9 @@ async function awaitRepublish(
   } finally {
     await b.disconnect().catch(() => {});
   }
-  // Each poll waits for the retained record, then sleeps.
-  const waited = Math.round(
-    (PEER_DEFAULTS.republish_polls *
-      (PEER_DEFAULTS.readiness_wait_ms + PEER_DEFAULTS.republish_poll_ms)) /
-      1000,
-  );
   // A run already under way when the stamp was written re-runs only after it ends (up to
   // doctor_timeout_ms), so a healthy service can still be late: "not yet", not "failed".
-  return `\nReadiness not republished yet: the peer service did not run the doctor again within about ${waited} s, so the supervisor may still see its last run. If it has not caught up within a few minutes, restart it: \`${restartHint(deps)}\`\n`;
+  return `\nReadiness not republished yet: the peer service did not run the doctor again within about ${waitMinutes()} minutes, so the supervisor may still see its last run. If it has not caught up within a few minutes, restart it: \`${restartHint(deps)}\`\n`;
 }
 
 // ---------------------------------------------------------------------------------------------

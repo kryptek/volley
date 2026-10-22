@@ -1547,7 +1547,10 @@ describe("volley peer run (the service)", () => {
         // The verb's own doctor takes real time (slow on CI): hold the service's next beat until
         // it has left its stamp, then let the service's re-run land before the beats run out.
         if (beat === 2) {
-          while (!existsSync(peerDoctorStamp(home))) await new Promise((r) => setTimeout(r, 10));
+          for (let i = 0; !existsSync(peerDoctorStamp(home)); i++) {
+            if (i >= 3_000) throw new Error("the verb never wrote its doctor-ran stamp (30 s)");
+            await new Promise((r) => setTimeout(r, 10));
+          }
         }
         if (beat === 3) await verb;
       },
@@ -1774,6 +1777,10 @@ describe("volley peer doctor (the verb)", () => {
     const f = fakeExec(() => undefined);
     const r = await run(["doctor", "--fix", "--yes"], deps(f.exec));
     expect(r.stdout).not.toContain("readiness republished");
+    // It says it is waiting before it polls, and how long it waited, not a worst-case sum.
+    expect(r.stdout).toMatch(
+      /Waiting for the peer service to run the doctor again \(up to about 2 minutes\)[^\n]*\n[\s\S]*within about 2 minutes/,
+    );
     expect(r.stdout).toContain(`systemctl --user restart ${SYSTEMD_UNIT}`);
     const mac = await run(["doctor", "--fix", "--yes"], deps(f.exec, { platform: "darwin" }));
     expect(mac.stdout).toContain(`launchctl kickstart -k gui/501/${LAUNCHD_LABEL}`);
