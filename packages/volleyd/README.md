@@ -1293,7 +1293,9 @@ steer supersedes the one before the nudge). The steer is journaled as
 - `delivered (received, …)`: only its SPEC §4.4 mailbox `ack` (to `volley/<ns>/volleyd/mailbox`)
   arrived;
 - `delivered · woke the agent`: no ack came in `mailbox_wake_after_ms`, and volleyd woke the
-  idle agent (below);
+  idle agent (below). Only a wake within `--wait-ack-ms` is reported: with
+  `mailbox_wake_after_ms` at or above it the answer is `delivered (no ack yet)`, and the wake
+  still comes later;
 - `delivered (no ack yet)`: neither arrived in time.
 
 Only the steered agent's acks count (the progress topic or the ack envelope must name it).

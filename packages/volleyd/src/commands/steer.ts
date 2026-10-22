@@ -11,7 +11,8 @@ unless --role names one). Each steer carries a per-task seq and supersedes the p
 Waits up to --wait-ack-ms (default 30000; 0 = don't wait) for the agent's steering_acked and
 reports \`delivered (acked by <agent>)\`, \`delivered (received, not acted on yet)\` (mailbox
 ack only), \`delivered · woke the agent\` (an idle agent whose hooks did not ack within
-mailbox_wake_after_ms was typed the wake line) or \`delivered (no ack yet)\`. With no live agent
+mailbox_wake_after_ms was typed the wake line; shown only when the wake comes within
+--wait-ack-ms, though a later one still happens) or \`delivered (no ack yet)\`. With no live agent
 on the task (between stages, or with --role, none in that role) the steer is
 \`queued (no live agent)\` at once and delivered to the task's next agent (of that role) when it
 registers, or to one already up at its next hook signal.
