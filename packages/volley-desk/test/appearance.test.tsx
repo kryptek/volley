@@ -212,6 +212,9 @@ describe("Settings › Appearance and General", () => {
   });
 });
 
+/** Agents' tethers (the Needs-you window's items tether to their waves too). */
+const AGENT_TETHERS = '.world svg.tethers g.tether:not([data-agent^="inbox:"]) path.tether-core';
+
 describe("App look (demo mode)", () => {
   const renderApp = () =>
     render(
@@ -228,11 +231,14 @@ describe("App look (demo mode)", () => {
     expect((container.querySelector(".bg-dim") as HTMLElement).style.opacity).toBe("0.4");
     const agents = container.querySelectorAll(".world .win .narr").length;
     expect(agents).toBeGreaterThan(0);
-    expect(container.querySelectorAll(".world svg.tethers path.tether-core")).toHaveLength(agents);
+    expect(container.querySelectorAll(AGENT_TETHERS)).toHaveLength(agents);
+    // The pill counts what needs you: the coordinators' badge plus the Needs-you inbox's.
     const pill = container.querySelector(".topbar .ny-pill")?.textContent ?? "";
-    const n = pill.match(/(\d+) needs? you/)?.[1];
-    expect(n).toBeDefined();
-    expect(dock().getByRole("button", { name: "Wave coordinators" })).toHaveTextContent(n ?? "");
+    const n = Number(pill.match(/(\d+) needs? you/)?.[1]);
+    const badge = (name: string) =>
+      Number(dock().getByRole("button", { name }).textContent?.match(/\d+/)?.[0] ?? 0);
+    expect(badge("Wave coordinators")).toBeGreaterThan(0);
+    expect(badge("Wave coordinators") + badge("Needs you")).toBe(n);
     // Narration uses the default effect (decrypt).
     expect(container.querySelector(".world .narr")).toHaveAttribute("data-fx", "decrypt");
   });
@@ -240,7 +246,7 @@ describe("App look (demo mode)", () => {
   it("draws tethers only for the agents of visible waves", () => {
     localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ bg: "none" }));
     const { container } = renderApp();
-    const paths = () => container.querySelectorAll(".world svg.tethers path.tether-core").length;
+    const paths = () => container.querySelectorAll(AGENT_TETHERS).length;
     const agents = () => container.querySelectorAll(".world .win .narr").length;
     const before = paths();
     const first = container.querySelector(".coord-list > li") as HTMLElement;
