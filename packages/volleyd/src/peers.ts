@@ -23,8 +23,8 @@ import type { NewEvent, RemoteHostConfig } from "./types";
  *     memory_total_mb?, reply_key}` → burns the code, creates a `peer` account named `name`
  *     (`volley auth add`), adds `hosts.<name>` with `tunnel.supervise: false` (the machine keeps
  *     its own tunnel as a service) and `max_agents` derived from `cores` and `memory_total_mb`
- *     (`derivedMaxAgents`; unknown: unset), records the name in `$VOLLEYD_HOME/peers.json`, and answers with the broker's
- *     address and the sealed `{username, password}`.
+ *     (`derivedMaxAgents`; unknown: unset), records the name in `$VOLLEYD_HOME/peers.json`, and
+ *     answers with the broker's address and the sealed `{username, password}`.
  *   - `peer_invite {reply_key, ttl_s?, for}` → a code bound to the paired machine `for`: it
  *     re-pairs that machine only. `peer_join {..., name: <for>, replace: true}` with it rotates the
  *     peer account's password and rewrites `hosts.<name>` (the join's fields; a hand-set

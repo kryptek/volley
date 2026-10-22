@@ -1157,6 +1157,18 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       expect(cleared("w1")).toHaveLength(1);
     });
 
+    it("cleared when a later plan version switches the wave to placement: auto, still overloaded", async () => {
+      localClaude = true;
+      await setup({ os: HOT_OS });
+      await submit("w1", "placement: local\n", "  T1: { issue: 42 }\n");
+      await tick();
+      expect(alarms("w1")).toHaveLength(1);
+      await submit("w1", "placement: auto\n", "  T1: { issue: 42 }\n  T2: { issue: 42 }\n");
+      await resample();
+      expect(cleared("w1")).toHaveLength(1);
+      expect(alarms("w1")).toHaveLength(1);
+    });
+
     it("a restart does not raise it again: the journal says it was raised", async () => {
       localClaude = true;
       perCore = 10;
