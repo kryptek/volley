@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { PAN_STEP, ZOOM_STEP, focusables } from "../src/a11y/keys";
+import { MIN_SCALE } from "../src/canvas/useViewport";
 import { LOOK_STORAGE_KEY } from "../src/look/useLook";
 import { DeskStoreProvider } from "../src/store/context";
 
@@ -61,8 +62,11 @@ describe("keyboard: canvas", () => {
     // The point at the centre stays at the centre.
     const v1 = view(container);
     expect((720 - v1.x) / v1.s).toBeCloseTo((720 - v0.x) / v0.s, 1);
+    // Below MIN_SCALE (a fit of the whole demo) zooming out stays put, so zoom in past it first.
+    while (view(container).s < MIN_SCALE * ZOOM_STEP) fireEvent.keyDown(stage(), { key: "+" });
+    const v2 = view(container);
     fireEvent.keyDown(stage(), { key: "-" });
-    expect(view(container).s).toBeCloseTo(v0.s, 4);
+    expect(view(container).s).toBeCloseTo(v2.s / ZOOM_STEP, 4);
     fireEvent.keyDown(document.body, { key: "=" });
     expect(view(container).s).toBeGreaterThan(v0.s);
   });

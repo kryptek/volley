@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { demoState } from "../src/store/fixtures";
+import { MACHINES_TICK_MS, demoState, machinesTick } from "../src/store/fixtures";
 import {
   HISTORY_MAX,
   HISTORY_MS,
@@ -124,5 +124,36 @@ describe("the store's machineHistory", () => {
     expect(h.studio).toHaveLength(1);
     expect(h["box-a"]).toHaveLength(1);
     expect(h["box-b"] ?? []).toHaveLength(0);
+  });
+
+  it("the demo's machine tick: N ticks add N samples per live machine, each at a new last_seen", () => {
+    let state = demoState(NOW);
+    for (let step = 1; step <= 5; step++) {
+      state = reduceAll(state, machinesTick(NOW + step * MACHINES_TICK_MS, step));
+    }
+    const h = state.machineHistory ?? {};
+    for (const name of ["studio", "box-a"]) {
+      const ring = h[name] ?? [];
+      expect(ring, name).toHaveLength(1 + 5);
+      expect(new Set(ring.map((s) => s.at)).size, name).toBe(6);
+    }
+    expect(h["box-b"] ?? []).toHaveLength(0);
+    // The load walks: not a flat line.
+    expect(new Set((h.studio ?? []).map((s) => s.load)).size).toBeGreaterThan(1);
+  });
+
+  it("the demo's box-a climbs into its overload band and back, so its verdict flips once", () => {
+    const cycle = Array.from({ length: 48 }, (_, i) => i + 1);
+    const eligible = cycle.map((step) => {
+      const v = machinesTick(NOW + step * MACHINES_TICK_MS, step).find(
+        (m) => m.topic === "volley/_system/machines/box-a/readiness",
+      )?.envelope?.payload as { eligible: boolean; ineligible_reason?: string };
+      if (!v.eligible) expect(v.ineligible_reason).toMatch(/^overloaded: load/);
+      return v.eligible;
+    });
+    expect(eligible[0]).toBe(true);
+    expect(eligible[eligible.length - 1]).toBe(true);
+    const flips = eligible.filter((e, i) => i > 0 && e !== eligible[i - 1]).length;
+    expect(flips).toBe(2);
   });
 });

@@ -6,13 +6,17 @@ import { describe, expect, it } from "vitest";
 import { coordinatorFor, waveAttention } from "../src/attention";
 import {
   DEMO_AGENTS_MAX,
+  DEMO_ENDED_WAVE,
+  DIGEST_WAVE,
   NARRATION_POOL,
   demoAgentCount,
   demoAutopilot,
+  demoDigest,
   demoMessages,
   demoReviewer,
   demoState,
   isDemoMode,
+  machinesTick,
   tick,
 } from "../src/store/fixtures";
 import {
@@ -26,12 +30,41 @@ import {
 const NOW = Date.parse("2026-10-18T15:00:00.000Z");
 
 describe("fixtures — demo state", () => {
-  it("produces 3 waves and 5 agents, all assigned", () => {
+  it("produces 6 waves (3 stock, 2 autopilot, 1 ended) and 5 agents, all assigned", () => {
     const s = demoState(NOW);
-    expect(Object.keys(s.waves)).toHaveLength(3);
+    expect(Object.keys(s.waves)).toHaveLength(6);
     expect(Object.keys(s.agents)).toHaveLength(5);
     expect(agentsByWave(s)[UNASSIGNED]).toEqual([]);
     for (const w of Object.values(s.waves)) expect(w.state?.spec).toBeDefined();
+  });
+
+  it("shows autopilot: the releasing wave answered decisions on its own and escalated one", () => {
+    const s = demoState(NOW);
+    const ap = s.waves.autopilot?.state?.autopilot;
+    expect(ap?.enabled).toBe(true);
+    expect(ap?.auto_resolved).toBeGreaterThan(0);
+    expect(s.waves.autopilot?.state?.merge_queue?.length).toBeGreaterThan(0);
+    expect(s.waveFeed?.autopilot?.length).toBeGreaterThan(0);
+  });
+
+  it("fills the Needs-you inbox with a decision, a picker and a release item", () => {
+    const kinds = new Set(Object.values(demoState(NOW).inbox ?? {}).map((i) => i.kind));
+    for (const k of ["decision", "picker", "release"]) expect(kinds.has(k as never), k).toBe(true);
+  });
+
+  it("carries a digest for the ended wave, and none yet for the running one", () => {
+    const s = demoState(NOW);
+    expect(s.waves[DEMO_ENDED_WAVE]?.state?.status).toBe("complete");
+    expect(s.digests?.[DEMO_ENDED_WAVE]?.trigger).toBe("wave_complete");
+    expect(s.digests?.[DIGEST_WAVE]).toBeUndefined();
+  });
+
+  it("the running wave's morning digest lists its open decision as waiting", () => {
+    const s = reduceAll(demoState(NOW), demoDigest(NOW + 40_000, DIGEST_WAVE));
+    const d = s.digests?.[DIGEST_WAVE];
+    expect(d?.trigger).toBe("escalation");
+    const open = s.waves[DIGEST_WAVE]?.state?.open_decisions ?? [];
+    expect(d?.waiting.some((w) => open.includes(w.id))).toBe(true);
   });
 
   it("has one coordinator per attention state, as in the prototype", () => {
@@ -40,7 +73,9 @@ describe("fixtures — demo state", () => {
       Object.values(s.coordinators)
         .map((c) => c.state)
         .sort(),
-    ).toEqual(["awaiting_input", "gone", "working"]);
+      // The ended wave's coordinator is gone too (it signed off), which needs nobody; the two
+      // autopilot waves share one owner, reconnecting.
+    ).toEqual(["awaiting_input", "gone", "gone", "reconnecting", "working"]);
     const waiting = Object.values(s.coordinators).find((c) => c.state === "awaiting_input");
     expect(waiting?.question).toMatch(/merge/i);
   });
@@ -117,7 +152,7 @@ describe("fixtures — sized demo (?demo=1&agents=N, for the 20-agent fps check)
   it("adds working agents on a load wave, all assigned, keeping the stock demo", () => {
     const s = demoState(NOW, 20);
     expect(Object.keys(s.agents)).toHaveLength(20);
-    expect(Object.keys(s.waves)).toHaveLength(4);
+    expect(Object.keys(s.waves)).toHaveLength(7);
     expect(agentsByWave(s)[UNASSIGNED]).toEqual([]);
     const stock = demoState(NOW);
     for (const id of Object.keys(stock.agents)) expect(s.agents[id]).toBeDefined();
@@ -173,6 +208,14 @@ describe("fixtures — schema validity", () => {
         return "config.schema.json";
       case "lease":
         return "lease-pool.schema.json";
+      case "digest":
+        return "digest.schema.json";
+      case "inbox":
+        return "inbox-item.schema.json";
+      case "machine":
+        return "machine.schema.json";
+      case "readiness":
+        return "readiness.schema.json";
       default:
         return null; // admission: no schema yet
     }
@@ -180,7 +223,12 @@ describe("fixtures — schema validity", () => {
 
   it("every demo envelope validates against its T1 schema", () => {
     const failures: string[] = [];
-    for (const m of [...demoMessages(NOW), ...demoReviewer(NOW), ...demoAutopilot(NOW)]) {
+    for (const m of [
+      ...demoMessages(NOW),
+      ...demoReviewer(NOW),
+      ...demoDigest(NOW, DIGEST_WAVE),
+      ...[1, 12, 30].flatMap((step) => machinesTick(NOW + step * 5_000, step)),
+    ]) {
       const schema = schemaFor(m.topic);
       if (schema === null || m.envelope === null) continue;
       const validate = ajv.getSchema(schema);
