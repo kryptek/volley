@@ -375,12 +375,13 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     });
     await waits.settled();
 
-    // cleanup --yes reaches the box again: remove the remote worktree (the session is gone).
+    // cleanup --yes --all (the failed task is not finished) reaches the box again: remove the
+    // remote worktree (the session is gone).
     const fx = fakeExec();
     const io = makeBufferIO();
-    expect(await cleanupWave(env.home, "w1", { yes: true, force: false, exec: fx.exec }, io)).toBe(
-      0,
-    );
+    expect(
+      await cleanupWave(env.home, "w1", { yes: true, force: false, all: true, exec: fx.exec }, io),
+    ).toBe(0);
     const wt = join(box.spec.worktree_root, "w1", "T1-implementer");
     expect(fx.calls.map((c) => [c.argv.at(-3), c.opts.remote?.steps.map((x) => x.argv)])).toEqual([
       ["dev@box", [["git", "-C", wt, "rev-parse", "--is-inside-work-tree"]]],
@@ -396,7 +397,12 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     );
     const io2 = makeBufferIO();
     expect(
-      await cleanupWave(env.home, "w1", { yes: true, force: false, exec: gone.exec }, io2),
+      await cleanupWave(
+        env.home,
+        "w1",
+        { yes: true, force: false, all: true, exec: gone.exec },
+        io2,
+      ),
     ).toBe(0);
     expect(io2.readStdout()).toContain(`gone ${wt} on dev@box`);
     expect(
@@ -406,7 +412,12 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     const down = fakeExec().on(["ssh"], { code: 255, stderr: "ssh: connect: refused" });
     const io3 = makeBufferIO();
     expect(
-      await cleanupWave(env.home, "w1", { yes: true, force: false, exec: down.exec }, io3),
+      await cleanupWave(
+        env.home,
+        "w1",
+        { yes: true, force: false, all: true, exec: down.exec },
+        io3,
+      ),
     ).toBe(1);
     expect(io3.readStderr()).toContain(`could not remove ${wt} on dev@box`);
   });

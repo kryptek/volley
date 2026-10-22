@@ -1,9 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanupPlan } from "../src/commands/cleanup";
+import { cleanupPlan, readWave } from "../src/commands/cleanup";
 import { Journal } from "../src/journal";
 import { retiredMarkerPath } from "../src/retire";
+import { parseWaveFile } from "../src/wave-file";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { runCli } from "./helpers/run-cli";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
@@ -150,11 +151,17 @@ describe("retire closes the agent's workspace", () => {
   });
 });
 
+/** A one-task wave at `repo` (the journal needs a real one to reduce). */
+const minimalWave = (repo: string) =>
+  parseWaveFile(
+    `wave: w1\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement, merge_ready]\ntasks:\n  T1: { issue: 1 }\n`,
+  );
+
 describe("cleanup after retires that closed workspaces", () => {
   it("skips the workspace of an agent whose retire closed it, not a later agent given the same ref", () => {
     const home = tempDir("volleyd-cleanup-");
     const j = Journal.open(join(home, "waves", "w1"));
-    j.append({ type: "wave_submitted", data: { wave: { repo: "/repo" } } });
+    j.append({ type: "wave_submitted", data: { wave: minimalWave("/repo") } });
     const spawned = (agent_id: string, worktree: string) =>
       j.append({
         type: "agent_spawned",
@@ -172,7 +179,8 @@ describe("cleanup after retires that closed workspaces", () => {
     // cmux handed the closed ref to the next agent; its own close failed.
     spawned("w1-t1-spec_reviewer-1", "/wt/b");
     retired("w1-t1-spec_reviewer-1", false);
-    const plan = cleanupPlan(home, "w1");
+    const { state, events } = readWave(home, "w1");
+    const plan = cleanupPlan(state, events);
     expect(plan.targets.find((t) => t.worktree === "/wt/a")?.workspaces).toEqual([]);
     expect(plan.targets.find((t) => t.worktree === "/wt/b")?.workspaces).toEqual(["workspace:1"]);
   });
