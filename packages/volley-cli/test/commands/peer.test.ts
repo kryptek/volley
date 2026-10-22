@@ -1679,6 +1679,14 @@ describe("volley peer doctor (the verb)", () => {
     expect(mac.stdout).toContain(`launchctl kickstart -k gui/501/${LAUNCHD_LABEL}`);
   });
 
+  it("--json --fix (the supervisor's Repair) prints only the report: no republish line", async () => {
+    writeCfg({ repo: box.repoPath });
+    await serviceRecord("2026-10-19T09:00:00.000Z");
+    const r = await doctorJson(["--fix", "--yes"]);
+    expect(r.report).toMatchObject({ checks: expect.any(Array) });
+    expect(r.stdout).not.toContain("republished");
+  });
+
   it("--fix with the tunnel down says the service is not running, at once", async () => {
     writeCfg({ repo: box.repoPath });
     const f = fakeExec(() => undefined);

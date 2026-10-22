@@ -12,6 +12,7 @@ import { CONFIG_TOPIC, ControlClient, waveEventsTopic, waveStateTopic } from "..
 import { Daemon, daemonClientId } from "../src/daemon";
 import { readJournalFile } from "../src/journal";
 import { type DoctorReport, machineTopic } from "../src/machines";
+import type { ReadinessPayload } from "../src/readiness";
 import { SYSTEM_WAVE } from "../src/types";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { eventually } from "./helpers/broker-wait";
@@ -656,10 +657,18 @@ describe("peer_doctor (the doctor on a paired machine, for an admin)", () => {
       { qos: 1, retain: true },
     );
     await eventually(async () => (await record())?.agent_id === "box-a");
+    /** box-a's retained readiness verdict. */
+    const verdict = async () => {
+      const raw = await c.queryRetained(`${machineTopic("box-a")}/readiness`, 200);
+      return raw === null ? null : (parseEnvelope(raw)?.payload as ReadinessPayload | undefined);
+    };
     await eventually(async () => {
       await daemon.tick();
-      return (await c.queryRetained(`${machineTopic("box-a")}/readiness`, 200)) !== null;
+      return (await verdict()) !== null;
     });
+    const before = await verdict();
+    expect(before?.ready).toBe(false);
+    expect(before?.reasons).toContain("volley.installed: stale install");
 
     answers.doctor = { ...REPORT, doctor_at: "2026-10-19T09:00:05.000Z" };
     expect(await op("admin-1", { op: "peer_doctor", name: "box-a", fix: true })).toMatchObject({
@@ -676,6 +685,10 @@ describe("peer_doctor (the doctor on a paired machine, for an admin)", () => {
       doctor_at: "2026-10-19T09:00:05.000Z",
     });
     expect(JSON.stringify(after?.payload)).not.toContain("gh auth login");
+    // The verdict is re-computed from the folded checks, not left for the next heartbeat.
+    const reasons = (await verdict())?.reasons ?? [];
+    expect(reasons.some((r) => r.startsWith("volley.installed"))).toBe(false);
+    expect(reasons).not.toEqual(before?.reasons);
   });
 
   it("a run on a box that never published a record publishes none", async () => {

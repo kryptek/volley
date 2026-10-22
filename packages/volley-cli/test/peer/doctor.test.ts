@@ -633,6 +633,20 @@ describe("volley peer doctor: machine and secrets", () => {
     }
   });
 
+  it("runDoctor stamps the report with the time the run started, not when it ended", async () => {
+    const m = machine();
+    // A run's facts are as old as its start: one that began before a `doctor --fix` and ended
+    // after it must not read as a run from after the fix.
+    let t = Date.parse("2026-10-19T09:00:00.000Z");
+    const now = () => {
+      t += 60_000;
+      return new Date(t);
+    };
+    const deps = { ...m.deps(), now };
+    const { report: r } = await runDoctor(deps, { repo: m.repoPath });
+    expect(r.doctor_at).toBe("2026-10-19T09:01:00.000Z");
+  });
+
   it("runDoctor returns the report and the facts it was built from", async () => {
     const m = machine();
     const { report: r } = await runDoctor(m.deps(), { repo: m.repoPath });

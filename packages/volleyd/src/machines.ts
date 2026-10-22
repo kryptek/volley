@@ -117,7 +117,11 @@ interface Entry {
   downAt?: number;
 }
 
-/** `incoming`, with `prior`'s doctor fields when `prior` holds a newer doctor run. */
+/**
+ * `incoming`, with `prior`'s doctor fields when `prior` holds a newer doctor run. A run's
+ * `doctor_at` is when it started, so a heartbeat carrying a run that began before a Repair never
+ * replaces the Repair's fold, however late that run ended.
+ */
 function keepNewerDoctor(incoming: MachineRecord, prior: MachineRecord | undefined): MachineRecord {
   if (prior?.doctor_at === undefined || incoming.doctor_at === undefined) return incoming;
   if (incoming.doctor_at >= prior.doctor_at) return incoming;
