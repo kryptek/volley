@@ -5806,13 +5806,20 @@ export class Daemon {
     if (this.blockedDecided(a.wave, agentId, status.wall_time)) return;
     // The pipeline said why it asks nothing: the daemon asks. Otherwise (a red head being
     // classified first) the sweep asks if no decision comes within the window.
-    const dropped = this.journalEvents(a.wave).find(
-      (e) =>
-        e.seq > before &&
-        e.type === "alarm_raised" &&
+    // Newest first, only the events the pipeline appended (seq > before).
+    const events = this.journalEvents(a.wave);
+    let dropped: JournalEvent | undefined;
+    for (let i = events.length - 1; i >= 0 && (events[i]?.seq ?? 0) > before; i--) {
+      const e = events[i];
+      if (
+        e?.type === "alarm_raised" &&
         e.data.alarm === BLOCKED_ALARM &&
-        e.data.agent_id === agentId,
-    );
+        e.data.agent_id === agentId
+      ) {
+        dropped = e;
+        break;
+      }
+    }
     // A stale or accepted run: the role's current run is healthy, so the task is not parked.
     if (dropped !== undefined)
       await this.blockedFallback(agentId, a, null, dropped.data.why !== BLOCKED_TASK_CANCELLED);
@@ -5889,6 +5896,7 @@ export class Daemon {
           reason,
           payload: status.payload,
           status_at: status.wall_time,
+          ...(stage !== undefined ? { stage } : {}),
           minted: a.minted,
           ...(stale ? { stale: true } : {}),
         },
@@ -6754,6 +6762,7 @@ export class Daemon {
       // The daemon's agent_blocked for a task not in the wave: cancel stops the agent.
       if (cls !== BLOCKED_CLASS || a === undefined) return;
       a.liveness = noteResolved(a.liveness, d.decision_id, this.now());
+      if (d.resolved.by === agentId) return;
       if (d.resolved.answer.trim().toLowerCase() === "cancel")
         await this.retireRole(wave, agentId, "stopped");
       return;

@@ -301,7 +301,12 @@ describe("daemon: a retained blocked always has a decision (the invariant)", () 
     );
     expect(opened).toMatchObject({
       task: "T1",
-      data: { class: "blocked_unhandled", agent_id: AGENT, options: ["manual", "cancel"] },
+      data: {
+        class: "blocked_unhandled",
+        agent_id: AGENT,
+        options: ["manual", "cancel"],
+        stage: "merge_ready",
+      },
     });
     expect(unhandled()[0]?.data).toMatchObject({
       agent_id: AGENT,
@@ -478,6 +483,26 @@ describe("daemon: a retained blocked always has a decision (the invariant)", () 
     });
     await resolve(opened.data.decision_id as string, "cancel");
     await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+  });
+
+  it("the blocked agent answering cancel on its own task-less decision does not retire itself", async () => {
+    s = await makeSupervisedEnv();
+    const sup = (s.daemon as unknown as { supervised: Map<string, { task: string }> }).supervised;
+    const a = sup.get(AGENT);
+    if (a === undefined) throw new Error("not supervised");
+    a.task = "T-gone";
+    await s.status("blocked", { reason: "stuck" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    expect(opened.data).not.toHaveProperty("stage");
+    const id = opened.data.decision_id as string;
+    const r = await runCli(["resolve", id, "cancel", "--by", AGENT], s.env.env);
+    expect(r.exitCode).toBe(0);
+    await s.event((e) => e.type === "decision_resolved" && e.data.decision_id === id);
+    await s.settled();
+    expect(s.journal().some((e) => e.type === "agent_retired")).toBe(false);
+    expect(sup.has(AGENT)).toBe(true);
   });
 });
 
