@@ -25,6 +25,7 @@
  * become an admin.
  */
 import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { SwitchToAdmin } from "../auth/AccountActions";
 import { type AuthOps, type BrokerAccount, parseAccounts } from "../store/control";
 import { Once } from "./onboardingParts";
 import { Seg } from "./primitives";
@@ -203,7 +204,7 @@ export function BrokerAccounts(p: BrokerAccountsProps) {
         <p className="dim">
           Who can connect to your broker and what they may do. Only an admin can list and manage
           accounts: sign in as admin in Settings › Setup &amp; Security (a one-time token from{" "}
-          <span className="mono">volley auth token</span>).
+          <span className="mono">volley auth token</span>). <SwitchToAdmin />
         </p>
         <table className="acct-table">
           <thead>

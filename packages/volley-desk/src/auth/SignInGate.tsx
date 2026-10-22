@@ -27,17 +27,28 @@
  * typed one, with its role; an admin token also asks the Desk to open
  * Settings › Setup & Security once. A used or expired link shows the form
  * with the reason and what to do next.
+ *
+ * A signed-in session can change its own sign-in (`useAccount`, for Settings'
+ * account card, the Dock's account menu and every read-only notice): Sign out
+ * forgets the stored login and its role and shows the form; Switch account
+ * opens the token entry (`SwitchAccountSheet`) over the session, and a redeemed
+ * link or token replaces the stored login and reconnects in place, without a
+ * reload. A Desk signed in by the `VITE_VOLLEY_BROKER_*` variables has neither:
+ * the build would sign it straight back in.
  */
 import {
   type CSSProperties,
   type FormEvent,
   type PointerEvent,
   type ReactNode,
+  createContext,
+  useContext,
   useEffect,
   useRef,
   useState,
 } from "react";
 import SpecularButton from "../rb/SpecularButton/SpecularButton";
+import { MachineSheet } from "../settings/MachineSheet";
 import {
   CREDENTIALS_STORAGE_KEY,
   DeskStoreProvider,
@@ -51,6 +62,7 @@ import {
   type RedeemResult,
   deviceLabel,
   markFirstRun,
+  parseToken,
   redeemToken,
   signinTokenFromHash,
 } from "../store/control";
@@ -59,6 +71,7 @@ import type { BrokerCredentials, DeskMqttClient } from "../store/mqtt-client";
 import { Clawd } from "../windows/wave/Clawd";
 import { PHONE, REDUCED_MOTION, SignInBackdrop, useMedia } from "./SignInBackdrop";
 import "../styles/signin.css";
+import "../styles/machines.css";
 
 /** The agent-id grammar (SPEC §2.2): the username signs every envelope and names the Desk's mailbox. */
 const AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
@@ -98,6 +111,31 @@ function writeStored(storage: Storage0 | null, creds: StoredSignIn | null): void
     // Storage blocked (private mode): the session still works until reload.
   }
 }
+
+type Redeemed = Extract<RedeemResult, { ok: true }>;
+
+/** Store a redeemed account like a typed sign-in, with its role and label; an admin opens setup once. */
+function storeRedeemed(storage: Storage0 | null, r: Redeemed): BrokerCredentials {
+  const next = { username: r.username, password: r.password };
+  writeStored(storage, { ...next, ...(r.role !== null ? { role: r.role } : {}), label: r.label });
+  if (r.role === "admin") markFirstRun();
+  return next;
+}
+
+/** What a signed-in session may do about its own sign-in; see the header. */
+export interface AccountActions {
+  /** Signed in by `VITE_VOLLEY_BROKER_*`: there is nothing to sign out of or switch. */
+  byEnvironment: boolean;
+  /** Forget the stored login and its role and show the sign-in form. */
+  signOut: () => void;
+  /** Open the token entry over the session; with `token`, redeem it at once (Become admin). */
+  switchAccount: (token?: string) => void;
+}
+
+const AccountContext = createContext<AccountActions | null>(null);
+
+/** The session's sign-in actions; `null` outside a signed-in gate (demo, tests, previews). */
+export const useAccount = () => useContext(AccountContext);
 
 export interface SignInGateProps {
   children: ReactNode;
@@ -149,6 +187,12 @@ export function SignInGate({
   const [redeeming, setRedeeming] = useState(link !== null);
   /** A token is single use: redeem it once, even when an effect runs twice. */
   const started = useRef(false);
+  /** Credentials from the build: they win over any stored sign-in, so there is none to change. */
+  const [byEnvironment] = useState(() => readCredentials(env, null) !== null);
+  /** The token entry is open over the session; `token` when one was handed in (Become admin). */
+  const [switching, setSwitching] = useState<{ token?: string } | null>(null);
+  /** Bumped by every switch, so the store reconnects as the new account (it reads `auth` once). */
+  const [session, setSession] = useState(0);
   const passthrough = {
     ...(brokerUrl !== undefined ? { brokerUrl } : {}),
     ...(clientFactory !== undefined ? { clientFactory } : {}),
@@ -168,19 +212,29 @@ export function SignInGate({
         );
         return;
       }
-      const next = { username: r.username, password: r.password };
-      writeStored(storage, {
-        ...next,
-        ...(r.role !== null ? { role: r.role } : {}),
-        label: r.label,
-      });
-      if (r.role === "admin") markFirstRun();
+      const next = storeRedeemed(storage, r);
       setLastUsername(r.username);
       setError(null);
       setPending(true);
       setCreds(next);
     });
   }, [link, redeem, storage, url]);
+
+  const account: AccountActions = {
+    byEnvironment,
+    signOut: () => {
+      if (byEnvironment) return;
+      writeStored(storage, null);
+      if (creds !== null) setLastUsername(creds.username);
+      setError(null);
+      setPending(false);
+      setSwitching(null);
+      setCreds(null);
+    },
+    switchAccount: (token) => {
+      if (!byEnvironment) setSwitching(token !== undefined ? { token } : {});
+    },
+  };
 
   if (demo) {
     return (
@@ -221,6 +275,7 @@ export function SignInGate({
         />
       ) : (
         <DeskStoreProvider
+          key={session}
           demo={false}
           auth={creds.username !== "" ? creds : null}
           onAuthFailed={(message) => {
@@ -245,11 +300,138 @@ export function SignInGate({
               />
             </Connecting>
           ) : (
-            children
+            <AccountContext.Provider value={account}>
+              {children}
+              {switching !== null && (
+                <SwitchAccountSheet
+                  brokerUrl={url}
+                  redeem={redeem}
+                  {...(switching.token !== undefined ? { token: switching.token } : {})}
+                  onClose={() => setSwitching(null)}
+                  onUsePassword={account.signOut}
+                  onRedeemed={(r) => {
+                    const next = storeRedeemed(storage, r);
+                    setLastUsername(r.username);
+                    setError(null);
+                    setSwitching(null);
+                    setPending(true);
+                    setSession((n) => n + 1);
+                    setCreds(next);
+                  }}
+                />
+              )}
+            </AccountContext.Provider>
           )}
         </DeskStoreProvider>
       )}
     </>
+  );
+}
+
+/** The token in what was pasted: a whole sign-in link (`…#signin=<token>`) or a bare token. */
+function tokenIn(text: string): string | null {
+  const t = text.trim();
+  const at = t.indexOf("#");
+  const token = at >= 0 ? signinTokenFromHash(t.slice(at)) : t;
+  return token !== null && parseToken(token) !== null ? token.trim() : null;
+}
+
+/**
+ * Switch account: the token entry over a signed-in session. A sign-in link
+ * (Settings › Setup & Security, or a scanned QR code's address) or a one-time
+ * token (`volley auth token` prints an admin one) is redeemed with volleyd as
+ * the gate redeems a `#signin=` link; the session underneath stays until it
+ * succeeds. Closing is held while a redeem is in flight: the token is spent.
+ */
+export function SwitchAccountSheet({
+  brokerUrl,
+  redeem,
+  token,
+  onClose,
+  onUsePassword,
+  onRedeemed,
+}: {
+  brokerUrl: string;
+  redeem: (req: RedeemRequest) => Promise<RedeemResult>;
+  /** Redeem this one at once (Settings › Setup & Security › Become admin). */
+  token?: string;
+  onClose: () => void;
+  onUsePassword: () => void;
+  onRedeemed: (r: Redeemed) => void;
+}) {
+  const [text, setText] = useState(token ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const go = (raw: string) => {
+    const t = tokenIn(raw);
+    if (t === null) {
+      setError(
+        "That is not a sign-in link or token: a link ends in #signin=vly_…, a token looks like vly_admin_<id>_<secret>.",
+      );
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    void redeem({ url: brokerUrl, token: t, label: deviceLabel(navigator.userAgent) }).then((r) => {
+      setBusy(false);
+      if (r.ok) onRedeemed(r);
+      else setError(`That did not sign in: ${r.error}. Ask for a new link or token.`);
+    });
+  };
+  /** A handed-in token is single use: redeem it once, even when an effect runs twice. */
+  const started = useRef(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only the token handed in on open
+  useEffect(() => {
+    if (token === undefined || started.current) return;
+    started.current = true;
+    go(token);
+  }, [token]);
+  const close = busy ? () => {} : onClose;
+  return (
+    <MachineSheet label="Switch account" onClose={close}>
+      <p className="s-hint">
+        Paste a sign-in link (Settings › Setup &amp; Security on an admin Desk, or{" "}
+        <code className="mono">volley auth signin-link</code>) or an admin token (
+        <code className="mono">volley auth token</code>). On a phone, scanning a sign-in QR code
+        opens its link directly.
+      </p>
+      <form
+        className="token-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!busy) go(text);
+        }}
+      >
+        <label className="field">
+          <span>Sign-in link or token</span>
+          <input
+            value={text}
+            autoComplete="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            placeholder="vly_…"
+            readOnly={busy}
+            onChange={(e) => setText(e.target.value)}
+          />
+        </label>
+        <button type="submit" className="btn btn--blue" disabled={busy}>
+          {busy ? "Switching…" : "Switch"}
+        </button>
+      </form>
+      {error !== null && (
+        <p className="s-error" role="alert">
+          {error}
+        </p>
+      )}
+      <div className="ny-actions">
+        <button type="button" className="btn" disabled={busy} onClick={onUsePassword}>
+          Use a username and password
+        </button>
+        <button type="button" className="btn" disabled={busy} onClick={onClose}>
+          Cancel
+        </button>
+      </div>
+    </MachineSheet>
   );
 }
 
