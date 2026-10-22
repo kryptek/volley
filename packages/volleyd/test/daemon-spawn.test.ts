@@ -275,15 +275,25 @@ describe("daemon spawn loop", () => {
       const lock = journal().find((e) => e.type === "agent_spawned")?.data.lock as string;
       expect(existsSync(lock)).toBe(false);
 
-      // The retire closed its workspace; cleanup: dry run lists the worktree, --yes removes it.
+      // The retire closed its workspace; cleanup keeps the gated (merge_ready) task's worktree: its
+      // PR is still read. --all: the dry run lists the worktree, --yes removes it.
       expect(host.closed).toEqual(["workspace:1"]);
       const io = makeBufferIO();
       const worktree = join(env.home, "wt", "w1", "T1-implementer");
       expect(await cleanupWave(env.home, "w1", { yes: false, force: false }, io)).toBe(0);
+      expect(io.readStdout()).toBe("skip T1: merge_ready\n");
+      expect(await cleanupWave(env.home, "w1", { yes: false, force: false, all: true }, io)).toBe(
+        0,
+      );
       expect(io.readStdout()).toContain(`would remove ${worktree}\n`);
       const fx = fakeExec();
       expect(
-        await cleanupWave(env.home, "w1", { yes: true, force: false, exec: fx.exec }, io),
+        await cleanupWave(
+          env.home,
+          "w1",
+          { yes: true, force: false, all: true, exec: fx.exec },
+          io,
+        ),
       ).toBe(0);
       expect(fx.argvs()).toEqual([
         ["git", "-C", repo, "worktree", "remove", worktree],
@@ -349,6 +359,10 @@ describe("daemon spawn loop", () => {
     const io = makeBufferIO();
     const fx = fakeExec();
     await cleanupWave(env.home, "w1", { yes: true, force: false, exec: fx.exec }, io);
+    expect(fx.calls).toEqual([]);
+    expect(io.readStdout()).toContain("skip T1: implement\n");
+    // --all lifts the stage hold, never the live agent's.
+    await cleanupWave(env.home, "w1", { yes: true, force: false, all: true, exec: fx.exec }, io);
     expect(fx.calls).toEqual([]);
     expect(io.readStdout()).toContain(`agent(s) not retired: ${ID}`);
   });
