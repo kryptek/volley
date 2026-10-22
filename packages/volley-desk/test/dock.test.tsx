@@ -60,12 +60,15 @@ describe("the dock", () => {
     expect(screen.queryByRole("complementary", { name: "Appearance" })).toBeNull();
   });
 
-  it("the coordinators badge still shows what needs you", () => {
+  it("the coordinators badge still shows what needs you, the inbox's beside it", () => {
     const { container } = renderApp();
     const pill = container.querySelector(".topbar .ny-pill")?.textContent ?? "";
-    const n = pill.match(/(\d+) needs? you/)?.[1];
-    expect(n).toBeDefined();
-    expect(dock().getByRole("button", { name: "Wave coordinators" })).toHaveTextContent(n ?? "");
+    const n = Number(pill.match(/(\d+) needs? you/)?.[1]);
+    const badge = (name: string) =>
+      Number(dock().getByRole("button", { name }).textContent?.match(/\d+/)?.[0] ?? 0);
+    expect(badge("Wave coordinators")).toBeGreaterThan(0);
+    expect(badge("Needs you")).toBeGreaterThan(0);
+    expect(badge("Wave coordinators") + badge("Needs you")).toBe(n);
   });
 
   it("tethers toggle from the dock; Settings opens and closes the Settings window", () => {

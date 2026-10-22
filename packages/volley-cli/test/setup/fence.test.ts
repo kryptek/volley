@@ -13,7 +13,7 @@ describe("setupFence", () => {
     [["brew", "services", "restart", "mosquitto"]],
     [["launchctl", "print", "gui/501/systems.volley.desk"]],
     [["launchctl", "bootout", "gui/501/systems.volley.desk"]],
-    [["launchctl", "bootstrap", "gui/501", "/home/u/Library/LaunchAgents/x.plist"]],
+    [["launchctl", "bootstrap", "gui/501", "/path/to/home/Library/LaunchAgents/x.plist"]],
     [["systemctl", "--user", "daemon-reload"]],
     [["systemctl", "--user", "enable", "volleyd.service"]],
     [["systemctl", "--user", "restart", "volley-desk.service"]],

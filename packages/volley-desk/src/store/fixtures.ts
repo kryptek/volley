@@ -11,6 +11,7 @@ import { initialState, reduceAll } from "./reducer";
 import type {
   DeskMessage,
   DeskState,
+  DigestPayload,
   Envelope,
   InboxItem,
   Role,
@@ -695,11 +696,62 @@ function claudeUsage(now: number): DeskMessage[] {
   ];
 }
 
+/** How often the demo republishes the live machines' records (a real peer beats every 30 s). */
+export const MACHINES_TICK_MS = 5_000;
+/** box-a's overload swell: every `SWELL_EVERY` ticks it climbs over `SWELL_TICKS` and back. */
+const SWELL_EVERY = 48;
+const SWELL_TICKS = 24;
+/** volleyd's `placement.load_per_core_max` default: above it a machine takes no new agents. */
+const LOAD_PER_CORE_MAX = 1.5;
+
+/** Deterministic noise in [-1, 1] for `name` at `step` (the demo's tests replay it exactly). */
+function noise(name: string, step: number): number {
+  return (Number.parseInt(hash([name, String(step)]), 16) / 0xffffffff) * 2 - 1;
+}
+
+/** A bounded walk around 0: two neighbouring steps' noise, averaged, so it drifts rather than jumps. */
+const walk = (name: string, step: number) =>
+  step === 0 ? 0 : (noise(name, step) + noise(name, step - 1)) / 2;
+
+/** box-a's swell at `step`, 0 … 1: a half sine over `SWELL_TICKS` once every `SWELL_EVERY`. */
+function swell(step: number): number {
+  const phase = step % SWELL_EVERY;
+  return step > 0 && phase < SWELL_TICKS ? Math.sin((Math.PI * phase) / SWELL_TICKS) : 0;
+}
+
+const round1 = (n: number) => Math.round(n * 10) / 10;
+
+/** A load triple whose 5- and 15-minute averages trail the 1-minute one. */
+const loads = (one: number, base: readonly [number, number, number]) =>
+  [round1(one), round1((one + base[1]) / 2), round1((one + 2 * base[2]) / 3)] as const;
+
+interface MachineLoad {
+  cores: number;
+  load: readonly number[];
+}
+
+/** placement's overload line (volleyd `machineIneligible`): judged on the higher of load 1 / 5. */
+function overload(r: MachineLoad): { eligible?: false; ineligible_reason?: string } {
+  const load = Math.max(r.load[0] ?? 0, r.load[1] ?? 0);
+  if (load / r.cores <= LOAD_PER_CORE_MAX) return {};
+  return {
+    eligible: false,
+    ineligible_reason: `overloaded: load ${load.toFixed(1)} on ${r.cores} cores · no new agents`,
+  };
+}
+
+/** The demo's live machines' next beat: new `last_seen`, load and memory, and their verdicts. */
+export function machinesTick(now: number, step: number): DeskMessage[] {
+  return machines(now, step);
+}
+
 /**
  * The machines (SPEC §4.6.14–15): the supervisor's own record, two paired machines' (one up
  * with a doctor report, one whose heartbeat stopped) and volleyd's readiness verdict on each.
+ * `step` 0 is the demo's starting reading; every later step (`machinesTick`) walks the live
+ * machines' load and memory around it, and box-a swells into its overload band and back.
  */
-function machines(now: number): DeskMessage[] {
+function machines(now: number, step = 0): DeskMessage[] {
   const checks = (trust: boolean) => [
     { id: "tool.git", ok: true, severity: "block", detail: "git 2.47.0" },
     { id: "tool.bun", ok: true, severity: "block", detail: "bun 1.3.2" },
@@ -717,8 +769,11 @@ function machines(now: number): DeskMessage[] {
       ? { id: "claude.trust", ok: true, severity: "warn", detail: "Claude Code trusts the repo" }
       : { id: "claude.trust", ok: false, severity: "warn", detail: "the repo is not trusted yet" },
   ];
-  const doctor = (trust: boolean, repo: string) => ({
-    memory: { total_mb: 65_536, available_pct: 71 },
+  const up = swell(step);
+  const memWalk = (name: string, base: number) =>
+    Math.round(Math.min(95, Math.max(5, base + 6 * walk(`${name}:mem`, step))));
+  const doctor = (trust: boolean, repo: string, available_pct: number) => ({
+    memory: { total_mb: 65_536, available_pct },
     disk: { path: "/srv/work", free_gb: 312, free_pct: 64 },
     versions: { peer: "0.3.1", volley: "0.3.1", bun: "1.3.2", git: "2.47.0", claude: "2.1.0" },
     auth: { gh: "ok", claude: "signed_in", trust: trust ? "ok" : "missing" },
@@ -726,6 +781,8 @@ function machines(now: number): DeskMessage[] {
     checks: checks(trust),
     doctor_at: iso(now - 60_000),
   });
+  // studio sits under its 20% memory floor at every step, as its stock verdict says.
+  const localMemory = memWalk(LOCAL_MACHINE, 13);
   const records = [
     {
       name: LOCAL_MACHINE,
@@ -734,10 +791,10 @@ function machines(now: number): DeskMessage[] {
       arch: "arm64",
       cores: 12,
       tunnel: "local",
-      load: [3.1, 2.8, 2.5],
+      load: loads(Math.max(0.2, 3.1 + 1.2 * walk(LOCAL_MACHINE, step)), [3.1, 2.8, 2.5]),
       agents: 5,
       last_seen: iso(now - 5_000),
-      ...doctor(true, "/path/to/repo"),
+      ...doctor(true, "/path/to/repo", localMemory),
     },
     {
       name: "box-a",
@@ -746,11 +803,11 @@ function machines(now: number): DeskMessage[] {
       arch: "x64",
       cores: 32,
       tunnel: "up",
-      load: [1.6, 1.2, 0.9],
+      load: loads(Math.max(0.2, 1.6 + 0.6 * walk("box-a", step) + 72 * up), [1.6, 1.2, 0.9]),
       agents: 2,
       remote_port: 21883,
       last_seen: iso(now - 12_000),
-      ...doctor(false, "/srv/work/example-repo"),
+      ...doctor(false, "/srv/work/example-repo", memWalk("box-a", 71 - 30 * up)),
     },
     {
       name: "box-b",
@@ -785,10 +842,10 @@ function machines(now: number): DeskMessage[] {
       max_agents: 12,
       placed: 5,
       eligible: false,
-      ineligible_reason: "memory available 18% (min 20%)",
+      ineligible_reason: `memory available ${localMemory}% (min 20%)`,
       usage: { account: "primary", five_hour_pct: 64 },
     }),
-    verdict("box-a", { max_agents: 6, placed: 2 }),
+    verdict("box-a", { max_agents: 6, placed: 2, ...overload(records[1] as MachineLoad) }),
     verdict("box-b", {
       ready: false,
       eligible: false,
@@ -796,14 +853,18 @@ function machines(now: number): DeskMessage[] {
       ineligible_reason: "box-b is down (no heartbeat for 90 s)",
     }),
   ];
+  // After the start only the live machines beat (and are judged again): box-b's record and
+  // verdict stand.
+  const live = step === 0 ? records : records.filter((r) => r.tunnel !== "down");
+  const judged = step === 0 ? verdicts : verdicts.filter((v) => v.name !== "box-b");
   return [
-    ...records.map((r) => ({
+    ...live.map((r) => ({
       topic: `volley/_system/machines/${r.name}`,
       envelope: env(r.tunnel === "up" ? r.name : SUPERVISOR, "_system/machines", "machine", r, now),
       receivedAt: now,
       retained: true,
     })),
-    ...verdicts.map((v) => ({
+    ...judged.map((v) => ({
       topic: `volley/_system/machines/${v.name}/readiness`,
       envelope: env(SUPERVISOR, "_system/machines/readiness", "readiness", v, now),
       receivedAt: now,
@@ -819,6 +880,10 @@ export function demoMessages(now: number, agents = AGENTS.length): DeskMessage[]
     ...claudeUsage(now),
     ...machines(now),
     ...WAVES.flatMap((w) => [waveState(w, now), ...decision(w, now)]),
+    ...demoAutopilot(now),
+    endedWave(now),
+    ...demoDigest(now, DEMO_ENDED_WAVE),
+    ...demoInbox(now),
     ...AGENTS.flatMap((a) => agentMessages(a, now)),
     ...loadMessages(agents - AGENTS.length, now),
   ];
@@ -1158,5 +1223,134 @@ export function demoInbox(now = Date.now()): DeskMessage[] {
         },
       },
     }),
+  ];
+}
+
+// ------------------------------------------------------------------ digest
+
+/** The demo's finished wave: it folds under Show finished, its digest card on top. */
+export const DEMO_ENDED_WAVE = "onboarding";
+/** The running wave whose morning digest the demo publishes after `DIGEST_AFTER_MS`. */
+export const DIGEST_WAVE = "ci-speed";
+
+const ENDED_TASKS = [
+  { id: "T0", issue: 91, title: "Welcome screen copy", pr: 181 },
+  { id: "T1", issue: 92, title: "First-run checklist", pr: 182 },
+  { id: "T2", issue: 93, title: "Invite a teammate", pr: 184 },
+];
+
+/** `onboarding`, complete: every task merged, its coordinator signed off. */
+function endedWave(now: number): DeskMessage {
+  const payload: WaveStatePayload = {
+    wave: DEMO_ENDED_WAVE,
+    version: 1,
+    owner: "coordinator-desk4",
+    repo: "/srv/work/example-repo",
+    release_branch: "release/2026-10-19-onboarding",
+    github: DEMO_GITHUB,
+    status: "complete",
+    tasks: ENDED_TASKS.map((t) => ({ id: t.id, issue: t.issue, stage: "done", agents: {} })),
+    open_decisions: [],
+    gates: [],
+    spec: {
+      version: 1,
+      release_branch: "release/2026-10-19-onboarding",
+      model: MODEL,
+      pipeline: PIPELINE,
+      tasks: Object.fromEntries(
+        ENDED_TASKS.map((t) => [t.id, { issue: t.issue, title: t.title, after: [] }]),
+      ),
+    },
+    updated_at: iso(now - 9 * 60 * 60_000),
+  };
+  return {
+    topic: `volley/_waves/${DEMO_ENDED_WAVE}/state`,
+    envelope: env(SUPERVISOR, "_waves/state", "wave_state", payload, now),
+    receivedAt: now,
+    retained: true,
+  };
+}
+
+const pr = (number: number) => ({ number, url: `${DEMO_GITHUB.url}/pull/${number}` });
+
+/**
+ * volleyd's morning digest (SPEC §4.6.16) on `volley/_waves/<wave>/digest`: for
+ * `DEMO_ENDED_WAVE` the wave-complete one (three PRs merged, a flake fixed on the way), for
+ * `DIGEST_WAVE` the escalation it sends at morning: FA shipped overnight, FB's merge conflict
+ * waits for the owner.
+ */
+export function demoDigest(now: number, wave: string): DeskMessage[] {
+  const payload: DigestPayload =
+    wave === DEMO_ENDED_WAVE
+      ? {
+          wave,
+          release_branch: "release/2026-10-19-onboarding",
+          generated_at: iso(now - 9 * 60 * 60_000),
+          trigger: "wave_complete",
+          shipped: ENDED_TASKS.map((t, i) => ({
+            task: t.id,
+            issue: t.issue,
+            title: t.title,
+            pr: pr(t.pr),
+            merge_sha: hash([t.id]).repeat(5),
+            merged_by: i === 2 ? ("operator" as const) : ("supervisor" as const),
+          })),
+          auto: {
+            decisions_resolved: 3,
+            flakes_fixed: [
+              { test: "checklist > persists ticks", fixer: "fix-checklist-flake", prs_released: 1 },
+            ],
+            conflicts_resolved: 1,
+            retries: 2,
+            merges: 2,
+          },
+          waiting: [],
+          failures: [],
+        }
+      : {
+          wave,
+          release_branch: "release/2026-10-17-ci-speed",
+          generated_at: iso(now),
+          trigger: "escalation",
+          shipped: [
+            {
+              task: "FA",
+              issue: 113,
+              title: "Flaky test root cause",
+              pr: pr(190),
+              merge_sha: hash(["FA"]).repeat(5),
+              merged_by: "supervisor",
+            },
+          ],
+          auto: {
+            decisions_resolved: 2,
+            flakes_fixed: [],
+            conflicts_resolved: 0,
+            retries: 1,
+            merges: 1,
+          },
+          waiting: WAVES.flatMap((w) => {
+            const d = w.decision;
+            if (w.id !== wave || !d) return [];
+            return [
+              {
+                id: decisionId(w),
+                kind: d.kind,
+                task: d.task,
+                question: d.question,
+                since: iso(now - 50 * 60_000),
+                owner_only: false,
+              },
+            ];
+          }),
+          failures: [],
+        };
+  return [
+    {
+      topic: `volley/_waves/${wave}/digest`,
+      envelope: env(SUPERVISOR, "_waves/digest", "digest", payload, now),
+      receivedAt: now,
+      retained: true,
+    },
   ];
 }

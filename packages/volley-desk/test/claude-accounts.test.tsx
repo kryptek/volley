@@ -460,7 +460,7 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
         ? {
             ok: true,
             result: {
-              root: "/home/owner/.volley/claude",
+              root: "/path/to/home/.volley/claude",
               accounts: rows,
               primary,
               sharing: { mcp: "copy" },
