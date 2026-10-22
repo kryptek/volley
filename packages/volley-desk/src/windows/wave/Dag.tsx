@@ -39,10 +39,11 @@ export interface DagNode {
 export const fixerLabel = (fixes: readonly string[]) =>
   fixes.length ? `fixer for ${fixes.join(", ")}` : "fixer";
 
-/** A node's tooltip: its title, or what a fixer fixes. */
+/** A node's tooltip: its title, or what a fixer fixes; else the id itself when the node elides it. */
 function nodeTip(t: DagNode): string | undefined {
   if (t.fixerFor) return `${t.id} · ${fixerLabel(t.fixerFor)}`;
-  return t.title ? `${t.id} · ${t.title}` : undefined;
+  if (t.title) return `${t.id} · ${t.title}`;
+  return fitId(t.id) === t.id ? undefined : t.id;
 }
 
 export interface DagLayout {
@@ -61,6 +62,19 @@ const GY = 14;
 const GB = 2 * GY;
 export const DAG_NODE_W = W;
 export const DAG_NODE_H = H;
+/** A `.dag-id` character's advance: 600 13px mono is about 0.6 em. */
+export const DAG_ID_CHAR_PX = 7.8;
+/** Characters of id that fit between the node's 10 px insets. */
+const ID_FIT = Math.floor((W - 20) / DAG_ID_CHAR_PX);
+
+/**
+ * A task id that fits its node: as is when it does, else `head…tail` (the first 6 and the
+ * last 5 characters), as a flake-fixer's `fix-<slug>` id can run to 44. The node's tooltip
+ * keeps the full id.
+ */
+export function fitId(id: string): string {
+  return id.length <= ID_FIT ? id : `${id.slice(0, 6)}…${id.slice(-5)}`;
+}
 
 /** The width of `n` columns side by side. */
 const spanOf = (n: number) => (n ? n * W + (n - 1) * GX + 8 : 0);
@@ -205,18 +219,18 @@ export function Dag({
           >
             {nodeTip(t) && <title>{nodeTip(t)}</title>}
             <rect width={W} height={H} rx="9" />
-            {t.fixerFor && (
-              <text x={W - 10} y="34" textAnchor="end" className="dag-fixer">
-                🔧
-              </text>
-            )}
             <text x="10" y="18" className="dag-id" fill={accent}>
-              {t.id}
+              {fitId(t.id)}
             </text>
             <text x="10" y="34" className="dag-stage">
               {t.cancelled ? "cancelled" : (labels[t.id] ?? STAGE_LABEL[t.stage])}
             </text>
-            {t.issueHref ? (
+            {/* Second line, right: a fixer's wrench, else its issue (none for a synthetic `#0`). */}
+            {t.fixerFor ? (
+              <text x={W - 10} y="34" textAnchor="end" className="dag-fixer">
+                🔧
+              </text>
+            ) : t.issue > 0 && t.issueHref ? (
               <a
                 href={t.issueHref}
                 target="_blank"
@@ -225,15 +239,15 @@ export function Dag({
                 className="dag-issue-link"
                 onClick={(e) => e.stopPropagation()}
               >
-                <text x={W - 10} y="18" textAnchor="end" className="dag-issue">
+                <text x={W - 10} y="34" textAnchor="end" className="dag-issue">
                   #{t.issue}
                 </text>
               </a>
-            ) : (
-              <text x={W - 10} y="18" textAnchor="end" className="dag-issue">
+            ) : t.issue > 0 ? (
+              <text x={W - 10} y="34" textAnchor="end" className="dag-issue">
                 #{t.issue}
               </text>
-            )}
+            ) : null}
           </g>
         ))}
       </svg>

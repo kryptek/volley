@@ -5601,6 +5601,7 @@ export class Daemon {
       mergeRetryMax: () => this.config.get("autopilot.merge_retry_max", wave) as number,
       // --- Self-healing CI (SPEC §4.6.16): an infra incident's wait, GitHub's status page. ---
       incidentWaitMaxS: () => this.config.get("autopilot.incident_wait_max_s", wave) as number,
+      ciRateLimitBackoffMs: () => this.config.get("ci_rate_limit_backoff_ms", wave) as number,
       statusPage: this.githubStatus(),
       deleteBranch: () => this.config.get("autopilot.delete_branch", wave) as boolean,
       releaseLock: releaseLockOn(this.releaseLocks),

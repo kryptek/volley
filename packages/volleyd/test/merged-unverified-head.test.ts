@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { formatWave } from "../src/commands/status";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { type PipelineView, emptyPipeline, next } from "../src/pipeline";
-import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
+import { type Harness, isHeadRunsRead, pipelineHarness, sha } from "./helpers/pipeline-harness";
 
 /**
  * GitHub reports MERGED with a head other than the gated one: the task completes (the merge
@@ -60,14 +60,14 @@ describe("merged_unverified_head", () => {
       pr: { number: 7, head_sha: C, ci: "red" },
     });
     expect(t?.pr).toMatchObject({ head_sha: C, ci: "red" });
-    expect(h.calls).toContainEqual(expect.arrayContaining(["gh", "run", "list", "--commit", C]));
+    expect(h.calls.some((c) => isHeadRunsRead(c) && c.join(" ").includes(C))).toBe(true);
   });
 
   it("the merged head's CI cannot be read → merged_ci: unknown, no CI claimed for it", async () => {
     await gated();
     h.world.prState[7] = "MERGED";
     h.world.prView[7] = { headRefOid: C };
-    h.world.fail = (argv) => argv[1] === "run" && argv.includes(C);
+    h.world.fail = (argv) => isHeadRunsRead(argv) && argv.join(" ").includes(C);
     await checkMerged();
     expect(h.task()?.stage).toBe("done");
     const d = merged()?.data as { merged_ci: string; pr: { ci?: string; head_sha: string } };
