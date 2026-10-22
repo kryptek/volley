@@ -369,6 +369,16 @@ export const emptyPipeline = (): TaskPipeline => ({
 const isRole = (r: unknown): r is Role =>
   typeof r === "string" && r !== "release" && r in ROLE_STAGE;
 
+/** The pipeline at its implement step, keeping the implementer's run. */
+function enterImplement(p: TaskPipeline, stages: PipelineStage[][]): void {
+  const i = stages.findIndex((g) => g.includes("implement"));
+  p.step = i >= 0 ? i : 0;
+  p.roles = ["implementer"];
+  p.rebasing = false;
+  p.branch_update = undefined;
+  p.conflicting = undefined;
+}
+
 /**
  * Fold one journal event into a task's pipeline. Pure; mutates and returns `p` (the reducer
  * passes its own clone). `stages` is the task's stage groups; `decision` the record of a
@@ -393,6 +403,10 @@ export function reducePipeline(
         spawned_seq: ev.seq,
       };
       if (role === "implementer" && typeof d.branch === "string") p.branch = d.branch;
+      // The implementer launched but the pipeline never started: spawn.ts journals
+      // stage_entered { implement } only on attempt 1, so a task whose first launches failed
+      // starts here (#409), as that event would have started it.
+      if (role === "implementer" && p.step < 0) enterImplement(p, ctx.stages);
       break;
     case "stage_entered":
       p.why = typeof d.why === "string" ? d.why : undefined;
@@ -418,12 +432,7 @@ export function reducePipeline(
         p.remediation = undefined;
       } else if (d.stage === "implement") {
         // Journaled by the spawn itself, after its agent_spawned: keep that run.
-        const i = ctx.stages.findIndex((g) => g.includes("implement"));
-        p.step = i >= 0 ? i : 0;
-        p.roles = ["implementer"];
-        p.rebasing = false;
-        p.branch_update = undefined;
-        p.conflicting = undefined;
+        enterImplement(p, ctx.stages);
       }
       break;
     case "merge_queued":
