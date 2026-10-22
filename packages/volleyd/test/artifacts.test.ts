@@ -69,7 +69,7 @@ describe("artifact verification", () => {
       "--state",
       "open",
       "--json",
-      "number,url,headRefName,baseRefName,headRefOid",
+      "number,url,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus",
     ]);
     expect(fake.calls.find((c) => c.argv[1] === "pr")?.opts.cwd).toBe(WT);
     // No CI is consulted for a PR that is not ours.
@@ -212,6 +212,43 @@ describe("artifact verification", () => {
     expect(artifactOutcome("T1", "implementer", report).kind).toBe("ci_pending");
     const none = allGood().on(["gh", "run", "list"], { stdout: "[]" });
     expect(await verifyArtifacts(none.exec, SPEC)).toMatchObject({ ci: { state: "none" } });
+  });
+
+  it("a CONFLICTING PR with no run → conflicting (GitHub runs no CI on it); UNKNOWN → pending, running", async () => {
+    const withMergeable = (mergeable: string) => {
+      const pr = JSON.parse(fx("gh-pr-list-ok.json"));
+      pr[0].mergeable = mergeable;
+      pr[0].mergeStateStatus = mergeable === "CONFLICTING" ? "DIRTY" : "UNKNOWN";
+      return allGood()
+        .on(["gh", "pr", "list"], { stdout: JSON.stringify(pr) })
+        .on(["gh", "run", "list"], { stdout: "[]" });
+    };
+    const report = await verifyArtifacts(withMergeable("CONFLICTING").exec, SPEC);
+    expect(report).toMatchObject({
+      kind: "ok",
+      pr: { number: 7, mergeable: "CONFLICTING", merge_state: "DIRTY" },
+      ci: { state: "none" },
+    });
+    expect(artifactOutcome("T1", "implementer", report)).toEqual({
+      kind: "conflicting",
+      head: HEAD,
+      pr: { number: 7, url: "https://github.com/example/repo/pull/7" },
+    });
+    // Still computing: the head is pending, as if CI ran (no no-CI clock).
+    const unknown = await verifyArtifacts(withMergeable("UNKNOWN").exec, SPEC);
+    expect(unknown).toMatchObject({ pr: { mergeable: "UNKNOWN" }, ci: { state: "running" } });
+    expect(artifactOutcome("T1", "implementer", unknown)).toEqual({
+      kind: "ci_pending",
+      state: "running",
+      head: HEAD,
+    });
+    // A conflicting head CI did run on is judged by its CI, as before.
+    const green = JSON.parse(fx("gh-pr-list-ok.json"));
+    green[0].mergeable = "CONFLICTING";
+    const ran = allGood().on(["gh", "pr", "list"], { stdout: JSON.stringify(green) });
+    expect(artifactOutcome("T1", "implementer", await verifyArtifacts(ran.exec, SPEC)).kind).toBe(
+      "verified",
+    );
   });
 
   it("all good → artifact_verified journaled with the sha, PR and run links", async () => {

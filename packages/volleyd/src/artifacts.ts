@@ -65,11 +65,18 @@ export interface CiFacts {
   log?: string;
 }
 
+/** GitHub's mergeability of a PR; `UNKNOWN` while it is still computing it. */
+export type Mergeable = "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+
 export interface PrRef {
   number: number;
   url: string;
   head_sha: string;
   base: string;
+  /** Absent when GitHub reported none. */
+  mergeable?: Mergeable;
+  /** GitHub's `mergeStateStatus` (`CLEAN`, `DIRTY`, `BEHIND`, …), as reported. */
+  merge_state?: string;
 }
 
 export type ArtifactReport =
@@ -94,7 +101,7 @@ export type ArtifactReport =
       touched?: string[];
     };
 
-const PR_FIELDS = "number,url,headRefName,baseRefName,headRefOid";
+const PR_FIELDS = "number,url,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus";
 const RUN_FIELDS =
   "databaseId,name,workflowName,status,conclusion,url,headSha,event,createdAt,workflowDatabaseId";
 
@@ -104,6 +111,9 @@ const FAILED = new Set(["failure", "cancelled", "timed_out", "startup_failure", 
 const INFRA_STEP = /checkout|set up job|runner|network|connection|timed? ?out while|fetch/i;
 
 const line = (s: string) => s.trim().split("\n")[0]?.trim() ?? "";
+
+const isMergeable = (m: unknown): m is Mergeable =>
+  m === "MERGEABLE" || m === "CONFLICTING" || m === "UNKNOWN";
 
 function parseJson<T>(text: string): T | null {
   try {
@@ -155,6 +165,8 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
             headRefName: string;
             baseRefName: string;
             headRefOid: string;
+            mergeable?: string;
+            mergeStateStatus?: string;
           }[]
         >(prs.stdout) ?? [])
       : [];
@@ -180,11 +192,16 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
     url: pr.url,
     head_sha: pr.headRefOid,
     base: pr.baseRefName,
+    ...(isMergeable(pr.mergeable) ? { mergeable: pr.mergeable } : {}),
+    ...(typeof pr.mergeStateStatus === "string" ? { merge_state: pr.mergeStateStatus } : {}),
   };
 
   const ci = await ciOn(exec, spec.cwd, head);
   // GitHub has not caught up with the push yet: the PR's checks are not this head's.
   if (pr.headRefOid !== head) ci.state = ci.state === "red" ? "red" : "running";
+  // GitHub is still computing whether the PR conflicts (it runs no CI on a conflicting one):
+  // pending, so no-CI's clock does not start.
+  else if (ci.state === "none" && prRef.mergeable === "UNKNOWN") ci.state = "running";
   // What a CI fixup works from: the failed runs' logs (each call bounded by the driver's timeout).
   if (ci.state === "red") Object.assign(ci, await failedLogs(exec, spec.cwd, ci.runs));
   const report: ArtifactReport = { kind: "ok", head, branch: spec.branch, pr: prRef, ci };
@@ -327,6 +344,8 @@ export type ArtifactOutcome =
       data: Record<string, unknown>;
     }
   | { kind: "ci_pending"; state: "running" | "none"; head: string }
+  /** No run on the head of a PR that conflicts with its base: GitHub will run none. */
+  | { kind: "conflicting"; head: string; pr: { number: number; url: string } }
   | { kind: "verified"; event: NewEvent & { data: Record<string, unknown> } };
 
 /**
@@ -412,6 +431,10 @@ export function artifactOutcome(
       },
     };
   }
+  if (ci.state === "none" && pr.mergeable === "CONFLICTING")
+    return { kind: "conflicting", head, pr: { number: pr.number, url: pr.url } };
+  if (ci.state === "none" && pr.mergeable === "UNKNOWN")
+    return { kind: "ci_pending", state: "running", head };
   if (ci.state === "running" || ci.state === "none")
     return { kind: "ci_pending", state: ci.state, head };
   return {

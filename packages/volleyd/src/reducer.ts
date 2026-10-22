@@ -745,6 +745,15 @@ function derive(state: WaveState, rec: WaveRecord): void {
           : {}),
       };
     }
+    // A conflicting PR's update step: GitHub runs no CI on it until the conflicts are resolved.
+    const p = rec.pipeline[t.id];
+    if (
+      p?.rebasing === true &&
+      p.conflicting === true &&
+      t.stage !== "done" &&
+      t.stage !== "cancelled"
+    )
+      return { ...t, why_waiting: `PR conflicts with ${state.release_branch}, updating` };
     // A red head awaiting its flake's fixer: say which test.
     // (A fixer's own remediation is what it fixes, not what it waits for: the pipeline's is.)
     const flake = rec.pipeline[t.id]?.remediation;
