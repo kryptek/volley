@@ -176,7 +176,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd config set <path> <value> [--by <who>]` | Change a tunable at runtime (validated, journaled, hot-applied). `<value>` is YAML. |
 | `volleyd admission [wave] [--json]` | The current spawn admission verdict: throttled or not, why, what the hard ceiling counts (`ceiling: 4/12 live agents · 2 launching · by wave: w1 3, w2 1`), every pressure signal, per-wave verdicts (with a wave: that wave's only). |
 | `volleyd spawn <wave> <task> [--role <role>] [--json]` | Spawn one agent now, outside admission. Returns once it is launched or refused (`SPAWN_LOCKED`, …); the daemon then verifies it. |
-| `volleyd cleanup <wave> [--yes] [--force]` | Remove retired agents' cmux workspaces and worktrees. Without `--yes` only prints the plan. Branches are kept. |
+| `volleyd cleanup <wave> [--yes] [--force] [--all]` | Remove retired agents' cmux workspaces and worktrees of tasks that are `done` or `cancelled` (an unfinished task prints `skip <task>: <stage>`; `--all` includes it). Without `--yes` only prints the plan. Branches are kept. |
 
 The mutating commands (`resolve`, `pause`, `resume`, `stop`, `archive`, `steer`, `claim`) act as the caller's
 agent id: `--by <id>`, else `VOLLEY_AGENT_ID`, else the top-level session registered for the
@@ -1843,7 +1843,16 @@ running on this machine: every process whose `--mcp-config=` lies inside the wor
 target whose every agent is retired, never one under any other worktree (an agent not yet
 retired, or one the daemon is launching and has not journaled yet) (`stopped <pid> (<agent
 id>)`; the dry run prints `would stop …`). Worktrees of agents not yet retired are skipped, and branches are never
-deleted.
+deleted. Only tasks that are `done` or `cancelled` are cleaned up: an unfinished task (a
+`merge_ready` task's agents are all retired while its merge waits) prints `skip <task>: <stage>`
+and keeps its worktrees, unless `--all` is given (on an unfinished task that runs on a remote
+host, `--all` leaves its git checks failing: the repo-root fallback below is the supervisor's
+machine only). The pipeline does not depend on them anyway:
+its GitHub reads (`gh pr view`, `gh pr list`, `gh run list|view`) run on the supervisor's
+machine from the wave's repo root, with `--repo <owner/repo>` once the repository was read; its
+git checks (the gate's rebase check, a closed PR's landed probe, a moved head's diff,
+`volleyd merged`) use the head's worktree while it exists and otherwise the repo root, after
+`git fetch origin refs/pull/<n>/head`.
 
 Answering a `repo_untrusted` decision with `volleyd resolve <id> trust` (owner only) records
 exactly `projects[<root>].hasTrustDialogAccepted: true` (`recordRepoTrust`; it re-checks the

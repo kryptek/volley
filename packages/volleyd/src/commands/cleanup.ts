@@ -10,17 +10,22 @@ import { SshTmuxHost } from "../hosts/ssh-tmux";
 import { type CommandArgs, EXIT, type ExitCode, type IO } from "../io";
 import { readJournalFile } from "../journal";
 import { type StopOptions, listAgentProcesses, stopProcesses, underRoot } from "../procs";
-import type { Wave } from "../types";
+import { replay } from "../reducer";
+import type { JournalEvent, WaveState } from "../types";
 import { expandHome } from "../worktree";
 
-const HELP = `Usage: volleyd cleanup <wave> [--yes] [--force]
+const HELP = `Usage: volleyd cleanup <wave> [--yes] [--force] [--all]
 
 Remove what a wave's retired agents left behind: their cmux workspaces (tmux sessions on a
 remote host), git worktrees, and claude processes still running on this machine (any process
 whose --mcp-config= lies in one of those worktrees: SIGTERM, a grace, then SIGKILL).
 Without --yes, only prints what would be removed. Only worktrees whose every agent is retired
 (journaled agent_retired) are touched; live agents are listed and skipped. Branches are kept.
-A worktree with uncommitted changes is skipped unless --force is given.
+A worktree with uncommitted changes is skipped unless --force is given. Only tasks that are done
+or cancelled are touched: an unfinished task (e.g. merge_ready, its agents retired while the
+merge waits) is listed and skipped unless --all is given. The pipeline falls back to the repo
+root for a local task's removed worktree, not for a remote task's: --all on an unfinished remote
+task leaves its git checks failing until it is resolved by hand.
 Reads $VOLLEYD_HOME directly; works while the daemon is down.
 `;
 
@@ -33,12 +38,31 @@ interface Target {
   remote?: { host: string; target: string; repo: string };
 }
 
-/** The cleanup plan from a wave journal: one entry per worktree its agents used. */
-export function cleanupPlan(home: string, wave: string): { repo: string; targets: Target[] } {
+/** A wave's reduced state and its journal ($VOLLEYD_HOME directly; works while the daemon is down). */
+export function readWave(home: string, wave: string): { state: WaveState; events: JournalEvent[] } {
   const events = readJournalFile(join(home, "waves", wave, "journal.jsonl"));
-  const submitted = events.find((e) => e.type === "wave_submitted");
-  if (submitted === undefined) throw new Error(`unknown wave '${wave}'`);
-  const repo = expandHome((submitted.data.wave as Wave).repo);
+  const { state } = replay(events);
+  if (state === null) throw new Error(`unknown wave '${wave}'`);
+  return { state, events };
+}
+
+/**
+ * The cleanup plan: one entry per worktree the wave's agents used, and the tasks it holds back.
+ * A worktree of a task that is not done or cancelled is left alone (`held`) unless `all`: a
+ * merge_ready task's agents are all retired while its merge waits, and the pipeline still reads
+ * its PR. A task the state does not know is not held.
+ */
+export function cleanupPlan(
+  state: WaveState,
+  events: JournalEvent[],
+  o: { all?: boolean } = {},
+): { repo: string; targets: Target[]; held: { task: string; stage: string }[] } {
+  const repo = expandHome(state.repo);
+  const unfinished = new Map(
+    state.tasks
+      .filter((t) => t.stage !== "done" && t.stage !== "cancelled")
+      .map((t) => [t.id, t.stage as string]),
+  );
   const retired = new Set(
     events.filter((e) => e.type === "agent_retired").map((e) => e.data.agent_id as string),
   );
@@ -49,9 +73,15 @@ export function cleanupPlan(home: string, wave: string): { repo: string; targets
       .filter((e) => e.type === "agent_retired" && e.data.workspace_closed === true)
       .map((e) => e.data.agent_id as string),
   );
+  const held = new Map<string, string>();
   const byPath = new Map<string, Target>();
   for (const e of events) {
     if (e.type !== "agent_spawned" || typeof e.data.worktree !== "string") continue;
+    const stage = e.task !== undefined ? unfinished.get(e.task) : undefined;
+    if (stage !== undefined && o.all !== true) {
+      held.set(e.task as string, stage);
+      continue;
+    }
     const t = byPath.get(e.data.worktree) ?? {
       worktree: e.data.worktree,
       agents: [],
@@ -70,12 +100,18 @@ export function cleanupPlan(home: string, wave: string): { repo: string; targets
     if (!retired.has(id)) t.live.push(id);
     byPath.set(t.worktree, t);
   }
-  return { repo, targets: [...byPath.values()] };
+  return {
+    repo,
+    targets: [...byPath.values()],
+    held: [...held].map(([task, stage]) => ({ task, stage })),
+  };
 }
 
 export interface CleanupOptions {
   yes: boolean;
   force: boolean;
+  /** Also unfinished tasks' worktrees (default: only done and cancelled tasks'). */
+  all?: boolean;
   exec?: ExecFn;
   /** How processes are stopped (tests: a shorter grace). */
   reap?: StopOptions;
@@ -88,7 +124,9 @@ export async function cleanupWave(
   opts: CleanupOptions,
   io: IO,
 ): Promise<number> {
-  const { repo, targets } = cleanupPlan(home, wave);
+  const { state, events } = readWave(home, wave);
+  const { repo, targets, held } = cleanupPlan(state, events, { all: opts.all === true });
+  for (const h of held) io.stdout(`skip ${h.task}: ${h.stage}\n`);
   const run = opts.exec ?? fencedExec;
   const local = new LocalCmuxHost(run);
   const consent: ConsentToken | undefined = opts.yes
@@ -223,7 +261,11 @@ export async function cleanup({ argv, env, io }: CommandArgs): Promise<ExitCode>
     const failed = await cleanupWave(
       volleydHome(env),
       wave,
-      { yes: parsed.values.yes === true, force: parsed.values.force === true },
+      {
+        yes: parsed.values.yes === true,
+        force: parsed.values.force === true,
+        all: parsed.values.all === true,
+      },
       io,
     );
     return failed > 0 ? EXIT.ERROR : EXIT.OK;
@@ -239,6 +281,7 @@ function parseCleanup(argv: string[]) {
     options: {
       yes: { type: "boolean", default: false },
       force: { type: "boolean", default: false },
+      all: { type: "boolean", default: false },
       help: { type: "boolean", short: "h" },
     },
     strict: true,

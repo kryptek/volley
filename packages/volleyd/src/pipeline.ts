@@ -3,6 +3,7 @@ import {
   type ArtifactReport,
   type CiRun,
   type CiState,
+  type GitAt,
   type Landed,
   type MovedHeadFacts,
   type OperatorMergeCheck,
@@ -65,6 +66,7 @@ import type {
   TaskStage,
   WaveId,
 } from "./types";
+import { expandHome } from "./worktree";
 
 /**
  * The pipeline: drives a task through its stage groups — implement → [spec_review ∥
@@ -3238,6 +3240,11 @@ export interface PipelineDeps {
   exec: ExecFn;
   /** The exec for one task's worktrees when they live elsewhere (a remote host); default `exec`. */
   execFor?: (task: TaskId) => ExecFn;
+  /**
+   * True when a task's recorded worktree is gone (`volleyd cleanup`, a crash): its git checks run
+   * in the repo root instead. Default: never gone.
+   */
+  worktreeGone?: (task: TaskId, path: string) => boolean;
   /** $VOLLEYD_HOME: evidence goes to `<home>/waves/<wave>/evidence/`. */
   home: string;
   /** The wave's current record (re-read after every journal append). */
@@ -3991,13 +3998,13 @@ export class PipelineDriver {
   }
 
   /**
-   * Where a head's runs are read: the supervisor's own exec in the wave repo (one `gh api
+   * Where a head's runs are read: the supervisor's own exec in the wave's repo root (ghCwd; one `gh api
    * …/actions/runs?head_sha=` GET, never sent to a paired machine); without a wave repo, the
    * task's `gh run list --commit`.
    */
   private runsVia(): RunsVia | undefined {
-    const repo = this.deps.record().state?.repo;
-    return repo != null ? { exec: this.timed(this.deps.exec), cwd: repo } : undefined;
+    const cwd = this.ghCwd();
+    return cwd !== undefined ? { exec: this.timed(this.deps.exec), cwd } : undefined;
   }
 
   /** GitHub rate-limited the wave repo's last CI read and its backoff has not passed. */
@@ -4060,6 +4067,57 @@ export class PipelineDriver {
     return (r !== undefined ? p.runs[r]?.worktree : undefined) ?? p.runs.implementer?.worktree;
   }
 
+  /** The wave's repo root on this machine: where the pipeline's GitHub reads run. */
+  private ghCwd(): string | undefined {
+    const repo = this.deps.record().state?.repo;
+    return repo != null ? expandHome(repo) : undefined;
+  }
+
+  /** `--repo <slug>` (host-qualified off github.com) when GitHub's slug was read; else none. */
+  private repoArgs(): string[] {
+    const gh = this.deps.record().state?.github;
+    if (gh === undefined) return [];
+    const host = URL.canParse(gh.url) ? new URL(gh.url).host : "github.com";
+    return ["--repo", host === "github.com" ? gh.slug : `${host}/${gh.slug}`];
+  }
+
+  /**
+   * The exec for a task's GitHub reads: every `gh` argv runs on this machine from the repo root
+   * (ghCwd) with repoArgs, whatever `cwd` the caller passed — never in an agent's worktree, which
+   * cleanup may have removed (a missing cwd fails the spawn: ENOENT). Any other argv goes to
+   * `other` (default: the task's own exec). Without a repo root, everything goes to `other`
+   * with the caller's cwd: unreachable from a wave file (the schema requires `repo`).
+   * A `gh api` call gets no `--repo` (gh api rejects it; its endpoint names the repository).
+   */
+  private ghExec(task: TaskId, other: ExecFn = this.io(task)): ExecFn {
+    const root = this.ghCwd();
+    if (root === undefined) return other;
+    const local = this.timed(this.deps.exec);
+    return (argv, opts = {}) =>
+      argv[0] === "gh"
+        ? local(argv[1] === "api" ? argv : [...argv, ...this.repoArgs()], { ...opts, cwd: root })
+        : other(argv, opts);
+  }
+
+  /**
+   * Where a task's git checks run: the worktree at its PR head through the task's exec, or, once
+   * that worktree is gone (or none was recorded), the repo root on this machine with the PR head
+   * fetched there first (`refs/pull/<n>/head`, else its branch).
+   */
+  private gitAt(v: PipelineView): (GitAt & { exec: ExecFn }) | undefined {
+    const wt = this.headWorktree(v.p);
+    if (wt !== undefined && this.deps.worktreeGone?.(v.task, wt) !== true)
+      return { exec: this.io(v.task), cwd: wt };
+    const root = this.ghCwd();
+    if (root === undefined) return undefined;
+    const fetch = v.p.pr !== undefined ? `refs/pull/${v.p.pr.number}/head` : v.p.branch;
+    return {
+      exec: this.timed(this.deps.exec),
+      cwd: root,
+      ...(fetch !== undefined ? { fetch } : {}),
+    };
+  }
+
   /** Beside the queue: verify `role`'s run `agentId` (a moved PR: its branch head as it is). */
   private async verify(
     task: TaskId,
@@ -4073,7 +4131,8 @@ export class PipelineDriver {
     if (v.p.branch === undefined) return null;
     const since = run.adopt === true ? v.p.head : role === "rebase" ? run.start : undefined;
     const via = this.runsVia();
-    let report = await verifyArtifacts(this.io(task), {
+    // Its git checks run in the run's worktree; its `gh` reads from the repo root (ghExec).
+    let report = await verifyArtifacts(this.ghExec(task), {
       cwd: run.worktree,
       branch: v.p.branch,
       release_branch: v.release_branch,
@@ -4149,8 +4208,8 @@ export class PipelineDriver {
   ): Promise<PipelineEvent | null> {
     const v = this.view(task);
     if (v === null) return null;
-    const exec = this.io(task);
-    const cwd = v.p.runs[a.role]?.worktree ?? this.headCwd(task);
+    const exec = this.ghExec(task);
+    const cwd = this.ghCwd();
     const base = { kind: "ci_classified" as const, role: a.role, agent_id: a.agent_id };
     const blocked = a.blocked !== undefined ? { blocked: a.blocked } : {};
     const unclassified = (): PipelineEvent => ({
@@ -4160,8 +4219,8 @@ export class PipelineDriver {
       at: this.now(),
       ...blocked,
     });
-    // A blocked agent is asked about whatever happens here: no worktree to read from, or a failed
-    // read, is the plain question. A verified red head with no worktree is asked about nothing on
+    // A blocked agent is asked about whatever happens here: no repo to read from, or a failed
+    // read, is the plain question. A verified red head with no repo is asked about nothing on
     // this pass: its run stays retired-done and unaccepted, so advance re-verifies it (a retry).
     if (cwd === undefined) return a.blocked !== undefined ? unclassified() : null;
     if (a.blocked !== undefined)
@@ -4256,13 +4315,17 @@ export class PipelineDriver {
     const { p } = v;
     const io = this.io(v.task);
     const head = p.head as string;
-    const cwd = this.headWorktree(p);
-    if (cwd === undefined) throw new Error("no worktree at the PR head");
+    const at = this.gitAt(v);
+    if (at === undefined) throw new Error("no worktree or repo root at the PR head");
     if (p.pr !== undefined) {
-      const r = await io(
-        ["gh", "pr", "view", String(p.pr.number), "--json", "headRefOid,state,baseRefName"],
-        { cwd },
-      );
+      const r = await this.ghExec(v.task)([
+        "gh",
+        "pr",
+        "view",
+        String(p.pr.number),
+        "--json",
+        "headRefOid,state,baseRefName",
+      ]);
       const pr = r.code === 0 ? parsePrView(r.stdout) : null;
       if (pr === null) throw new Error(`gh pr view ${p.pr.number} failed: ${r.stderr.trim()}`);
       if (typeof pr.headRefOid === "string" && pr.headRefOid !== head)
@@ -4273,16 +4336,17 @@ export class PipelineDriver {
           `PR #${p.pr.number} targets ${String(pr.baseRefName)}, not ${v.release_branch}`,
         );
     }
-    const check = await checkRebase(io, {
-      cwd,
-      head,
-      release_branch: v.release_branch,
-    });
+    const { exec: git, ...where } = at;
+    const check = await checkRebase(git, { ...where, head, release_branch: v.release_branch });
     const diffstats: Record<string, string> = {};
     if (check.behind === 0) {
       for (const f of p.fixups) {
         if (f.from === undefined || f.worktree === undefined) continue;
-        const r = await io(["git", "-C", f.worktree, "diff", "--stat", f.from, f.to]);
+        // Its own worktree while it is there; else where the gate's checks ran (head fetched).
+        const r =
+          this.deps.worktreeGone?.(v.task, f.worktree) === true
+            ? await git(["git", "-C", where.cwd, "diff", "--stat", f.from, f.to])
+            : await io(["git", "-C", f.worktree, "diff", "--stat", f.from, f.to]);
         // trimEnd only: the first line's leading space is part of git's column alignment.
         if (r.code === 0) diffstats[`${f.from}..${f.to}`] = r.stdout.replace(/^\n+/, "").trimEnd();
       }
@@ -4294,23 +4358,19 @@ export class PipelineDriver {
   private async mergeCheck(v: PipelineView): Promise<PipelineEvent | null> {
     const pr = v.p.pr;
     if (pr === undefined) return null;
-    const cwd = this.headWorktree(v.p);
-    const r = await this.io(v.task)(
-      [
-        "gh",
-        "pr",
-        "view",
-        String(pr.number),
-        "--json",
-        "state,mergedAt,mergeCommit,baseRefName,headRefOid",
-      ],
-      cwd !== undefined ? { cwd } : {},
-    );
+    const r = await this.ghExec(v.task)([
+      "gh",
+      "pr",
+      "view",
+      String(pr.number),
+      "--json",
+      "state,mergedAt,mergeCommit,baseRefName,headRefOid",
+    ]);
     const view = r.code === 0 ? parsePrView(r.stdout) : null;
     if (view === null) return null;
     const merged = view.headRefOid;
     if (view.state === "MERGED" && typeof merged === "string" && merged !== v.p.head)
-      return { kind: "merge_checked", view, merged_ci: await this.ciOf(v.task, cwd, merged) };
+      return { kind: "merge_checked", view, merged_ci: await this.ciOf(v.task, merged) };
     return { kind: "merge_checked", view };
   }
 
@@ -4358,11 +4418,14 @@ export class PipelineDriver {
     const key = `${task}/merge_nudge`;
     if (this.inflight.has(key)) return;
     this.inflight.add(key);
-    const cwd = this.headWorktree(v.p);
-    const p: Promise<void> = this.io(task)(
-      ["gh", "pr", "view", String(pr.number), "--json", "files"],
-      cwd !== undefined ? { cwd } : {},
-    )
+    const p: Promise<void> = this.ghExec(task)([
+      "gh",
+      "pr",
+      "view",
+      String(pr.number),
+      "--json",
+      "files",
+    ])
       .then((r) => {
         const files = r.code === 0 ? parsePrFiles(r.stdout) : null;
         if (files === null)
@@ -4460,11 +4523,13 @@ export class PipelineDriver {
   /** Beside the queue: is the closed PR's head on the release branch anyway? */
   private async landedCheck(v: PipelineView): Promise<PipelineEvent | null> {
     const { pr, head } = v.p;
-    const cwd = this.headWorktree(v.p);
     if (pr === undefined || head === undefined) return null;
-    if (cwd === undefined) throw new Error("no worktree to check the closed PR's head from");
-    const f = await probeLanded(this.io(v.task), {
-      cwd,
+    const at = this.gitAt(v);
+    if (at === undefined)
+      throw new Error("no worktree or repo root to check the closed PR's head from");
+    const { exec: git, ...where } = at;
+    const f = await probeLanded(git, {
+      ...where,
       head,
       release_branch: v.release_branch,
       pr: pr.number,
@@ -4474,7 +4539,7 @@ export class PipelineDriver {
       kind: "landed_checked",
       head,
       landed: l,
-      ...(l !== null && l.sha !== head ? { merged_ci: await this.ciOf(v.task, cwd, l.sha) } : {}),
+      ...(l !== null && l.sha !== head ? { merged_ci: await this.ciOf(v.task, l.sha) } : {}),
     };
   }
 
@@ -4482,11 +4547,14 @@ export class PipelineDriver {
   private async headCheck(v: PipelineView): Promise<PipelineEvent | null> {
     const pr = v.p.pr;
     if (pr === undefined) return null;
-    const cwd = this.headWorktree(v.p);
-    const r = await this.io(v.task)(
-      ["gh", "pr", "view", String(pr.number), "--json", "headRefOid,state"],
-      cwd !== undefined ? { cwd } : {},
-    );
+    const r = await this.ghExec(v.task)([
+      "gh",
+      "pr",
+      "view",
+      String(pr.number),
+      "--json",
+      "headRefOid,state",
+    ]);
     const view = r.code === 0 ? parsePrView(r.stdout) : null;
     if (view?.state !== "OPEN" || typeof view.headRefOid !== "string") return null;
     return { kind: "pr_head", head: view.headRefOid, expected: v.p.head as string };
@@ -4495,13 +4563,14 @@ export class PipelineDriver {
   /** Beside the queue: CI on a moved head, its failing tests, and the diff from the gated head. */
   private async movedCheck(v: PipelineView): Promise<PipelineEvent | null> {
     const { moved, pr, branch } = v.p;
-    const cwd = this.headWorktree(v.p);
     if (moved === undefined || pr === undefined) return null;
-    if (branch === undefined || cwd === undefined)
-      throw new Error("no PR branch / worktree to check the moved head from");
+    const at = this.gitAt(v);
+    if (branch === undefined || at === undefined)
+      throw new Error("no PR branch / worktree or repo root to check the moved head from");
+    const { exec: git, ...where } = at;
     const via = this.runsVia();
-    const facts = await probeMovedHead(this.io(v.task), {
-      cwd,
+    const facts = await probeMovedHead(this.ghExec(v.task, git), {
+      ...where,
       branch,
       from: moved.from,
       to: moved.to,
@@ -4526,22 +4595,21 @@ export class PipelineDriver {
     };
   }
 
-  /** CI on a merged commit other than the gated head; `unknown` when it cannot be read. */
-  async ciOf(task: TaskId, cwd: string | undefined, sha: string): Promise<MergedCi> {
+  /**
+   * CI on a merged commit other than the gated head, read from the repo root; `unknown` when it
+   * cannot be read (or there is no repo root).
+   */
+  async ciOf(task: TaskId, sha: string): Promise<MergedCi> {
     if (this.ciBackedOff()) return "unknown";
+    const cwd = this.ghCwd();
+    if (cwd === undefined) return "unknown";
     try {
-      const ci = await ciReport(this.io(task), cwd ?? ".", sha, this.runsVia());
+      const ci = await ciReport(this.ghExec(task), cwd, sha, this.runsVia());
       await this.noteCi(task, ci);
       return ci.state;
     } catch {
       return "unknown";
     }
-  }
-
-  /** The worktree the task's PR head is checked out in (pipeline git / gh calls run there). */
-  headCwd(task: TaskId): string | undefined {
-    const v = this.view(task);
-    return v === null ? undefined : this.headWorktree(v.p);
   }
 
   /**
@@ -4556,11 +4624,12 @@ export class PipelineDriver {
       return { ok: false, error: `task '${task}' is ${v.stage}` };
     if (pr === undefined || head === undefined)
       return { ok: false, error: `task '${task}' has no verified PR head yet` };
-    const cwd = this.headWorktree(v.p);
-    if (cwd === undefined)
-      return { ok: false, error: `task '${task}' has no worktree at its head` };
-    const r = await verifyOperatorMerge(this.io(task), {
-      cwd,
+    const at = this.gitAt(v);
+    if (at === undefined)
+      return { ok: false, error: `task '${task}' has no worktree or repo root at its head` };
+    const { exec: git, ...where } = at;
+    const r = await verifyOperatorMerge(git, {
+      ...where,
       head,
       sha,
       release_branch: v.release_branch,
