@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
 import { type InboxItem, parseWhereLabel, whereLabel } from "../autopilot/inbox";
-import { type ControlTarget, resolveControlTarget, withClient } from "../control";
+import { BAD_ANSWER, type ControlTarget, resolveControlTarget, withClient } from "../control";
 import { heldLabel, parseHeldOn } from "../decisions";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { resolveCaller } from "../ownership";
@@ -168,7 +168,7 @@ export async function inbox({ argv, env, io }: CommandArgs): Promise<ExitCode> {
     );
     if (!res.ok) {
       io.stderr(`volleyd inbox answer: ${res.error ?? "refused"}\n`);
-      return EXIT.ERROR;
+      return res.code === BAD_ANSWER ? EXIT.BAD_ANSWER : EXIT.ERROR;
     }
     const item = res.result as InboxItem;
     if (values.json === true) io.stdout(`${JSON.stringify(item, null, 2)}\n`);

@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { renderBrowserHelper, renderSigninScript } from "../src/claude/signin-script";
@@ -147,6 +148,7 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ["mv", "-f", ".claude.json.volleyd.tmp", ".claude.json"],
     ["cat", "/src/r/.git/info/exclude"],
     ["chmod", "600", "/wt/x/.volley/agent.json"],
+    ["chmod", "600", "/wt/x/.volley/mcp.json"],
     ["chmod", "700", "/wt/x/.volley/launch.sh"],
     ["chmod", "600", "/wt/x/ISSUE.md"],
     ["cat", BRIEF],
@@ -432,6 +434,30 @@ describe("remote allow-list (ssh … bash -s)", () => {
       "an entry inside .volley/": renderMcpConfig("/wt/x/.volley/packages/volley-mcp/src/index.ts"),
       "an extra line": `${renderMcpConfig(entry)}\n{}`,
     };
+    // agent_mcp_allow: the box's own allowed servers beside volleyd's `volley`, as rendered.
+    const allowed = renderMcpConfig(entry, { migrations: { command: "npx", args: ["m"] } });
+    expect(() => assertAllowed(SSH, remote(write(allowed)))).not.toThrow();
+    const remoteServer = renderMcpConfig(entry, {
+      web: { type: "http", url: "https://mcp.example/x", headers: { Authorization: "t" } },
+      env: { command: "m", args: [], env: { K: "v" } },
+    });
+    expect(() => assertAllowed(SSH, remote(write(remoteServer)))).not.toThrow();
+    Object.assign(bad, {
+      "extras before volley": JSON.stringify(
+        { mcpServers: { m: { command: "m" }, volley: JSON.parse(allowed).mcpServers.volley } },
+        null,
+        2,
+      ),
+      "an extra that is not an entry": renderMcpConfig(entry, { m: "sh" } as never),
+      "an extra with neither command nor url": renderMcpConfig(entry, { m: { args: ["x"] } }),
+      "an extra with a non-string command": renderMcpConfig(entry, { m: { command: ["sh"] } }),
+      "an extra with non-string args": renderMcpConfig(entry, { m: { command: "m", args: [1] } }),
+      "an extra with a non-string env value": renderMcpConfig(entry, {
+        m: { command: "m", env: { K: 1 } },
+      }),
+      "an extra with a non-string url": renderMcpConfig(entry, { m: { type: "http", url: 1 } }),
+      "a re-indented copy": JSON.stringify(JSON.parse(allowed)),
+    });
     for (const [why, content] of Object.entries(bad)) {
       expect(() => assertAllowed(SSH, remote(write(content))), why).toThrow(FenceError);
     }
@@ -651,6 +677,7 @@ describe("remote allow-list (ssh … bash -s)", () => {
 });
 
 describe("renderRemoteScript", () => {
+  const tmp = tempDirForAll("volleyd-remote-script-");
   it("gives every step but a heredoc one /dev/null on stdin (bash -s reads the script from it)", () => {
     const script = renderRemoteScript({
       steps: [step("cat", "/x"), { ...step("git", "status"), cwd: "/wt" }],
@@ -686,8 +713,33 @@ describe("renderRemoteScript", () => {
       steps: [{ argv: ["base64", "-d"], stdin: b64, stdout: "/wt/x/.volley/agent.json" }],
     });
     expect(script).toContain(
-      `( umask 077 && 'base64' '-d' > '/wt/x/.volley/agent.json' <<'VOLLEY_EOF'\n${b64}\nVOLLEY_EOF\n)`,
+      `( umask 077 && set -C && 'rm' '-f' '/wt/x/.volley/agent.json' && 'base64' '-d' > '/wt/x/.volley/agent.json' <<'VOLLEY_EOF'\n${b64}\nVOLLEY_EOF\n)`,
     );
+  });
+
+  it("an overwrite of an existing world-readable file lands owner-only, never at the old mode", () => {
+    const file = join(tmp(), "mcp.json");
+    writeFileSync(file, "old\n", { mode: 0o644 });
+    chmodSync(file, 0o644);
+    const b64 = Buffer.from("secret\n").toString("base64");
+    const script = renderRemoteScript({
+      steps: [{ argv: ["base64", "-d"], stdin: b64, stdout: file }],
+    });
+    const r = spawnSync("bash", ["-s"], { input: script, encoding: "utf-8" });
+    expect(r.status).toBe(0);
+    expect(readFileSync(file, "utf-8")).toBe("secret\n");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it("an append keeps the file it appends to", () => {
+    const file = join(tmp(), "exclude");
+    writeFileSync(file, "a\n");
+    const b64 = Buffer.from("b\n").toString("base64");
+    const script = renderRemoteScript({
+      steps: [{ argv: ["base64", "-d"], stdin: b64, stdout: file, append: true }],
+    });
+    expect(spawnSync("bash", ["-s"], { input: script, encoding: "utf-8" }).status).toBe(0);
+    expect(readFileSync(file, "utf-8")).toBe("a\nb\n");
   });
 });
 

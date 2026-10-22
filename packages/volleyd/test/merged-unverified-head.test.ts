@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { formatWave } from "../src/commands/status";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import { type PipelineView, emptyPipeline, next } from "../src/pipeline";
 import { type Harness, isHeadRunsRead, pipelineHarness, sha } from "./helpers/pipeline-harness";
 
 /**
@@ -100,5 +101,117 @@ describe("merged_unverified_head", () => {
     expect(h.task()?.alarms).toBeUndefined();
     expect(merged()?.data).toMatchObject({ pr: { head_sha: A, ci: "green" } });
     expect(merged()?.data.merged_ci).toBeUndefined();
+  });
+
+  it("merged by a person at the gated head during a branch update: done, the update retired, no alarm (#311)", async () => {
+    const B = sha(0xb2);
+    h = pipelineHarness({
+      pipeline: "[implement, merge_ready]",
+      merge: "auto",
+      branchUpdate: "merge",
+      siblings: { T2: null },
+    });
+    await h.start();
+    await h.startTask("T2");
+    h.openPr(A, "T1", 7);
+    h.openPr(B, "T2", 8);
+    h.world.mergeCommit[7] = sha(0xa101);
+    // T1's merge moves the release tip: T2 is behind it.
+    h.world.before = (a) => {
+      if (a[1] === "pr" && a[2] === "merge") h.world.mergeBase[B] = sha(0xbea5e);
+    };
+    await h.finish("implementer", { task: "T1", head: A, ci: "green" });
+    await h.finish("implementer", { task: "T2", head: B, ci: "green" });
+    await h.tick(); // T1 merged
+    await h.tick(); // T2's turn: behind, its branch update starts
+    expect(h.task("T2")?.stage).toBe("fixup");
+    const update = h.spawns.find((s) => s.task === "T2" && s.role === "rebase");
+    expect(update?.branch_update).toBe("merge");
+
+    // A person merges PR #8 on GitHub at B, the head the gate saw.
+    h.world.prState[8] = "MERGED";
+    await checkMerged();
+    expect(h.task("T2")?.stage).toBe("done");
+    expect(h.events.some((e) => e.data.alarm === "merged_unverified_head")).toBe(false);
+    expect(h.task("T2")?.alarms).toBeUndefined();
+    const m = h.events.find(
+      (e) => e.task === "T2" && e.type === "artifact_verified" && e.data.role === "merged",
+    );
+    // Merged with GitHub's button: no `via`, so the digest reads it as `github`, not `operator`.
+    expect(m?.data).toMatchObject({ head_sha: B, pr: { head_sha: B } });
+    expect(m?.data.via).toBeUndefined();
+    expect(m?.data.merged_head_sha).toBeUndefined();
+    expect(h.retired).toContainEqual({ agent_id: update?.agent_id, status: "superseded" });
+  });
+
+  it("only the current gated head counts: a merge at an older gated head still alarms (#311)", () => {
+    const B = sha(0xb2);
+    const view = (head: string): PipelineView => ({
+      task: "T1",
+      stages: [["implement"], ["merge_ready"]],
+      stage: "fixup",
+      release_branch: "release/w",
+      p: { ...emptyPipeline(), pr: { url: "u", number: 7 } as never, head, gated: [A, B] },
+    });
+    const ev = (head: string) => ({
+      kind: "merge_checked" as const,
+      view: { state: "MERGED", baseRefName: "release/w", headRefOid: head },
+    });
+    const alarmed = (head: string) =>
+      next(view(head), ev(head)).some(
+        (a) => a.kind === "journal" && a.event.data?.alarm === "merged_unverified_head",
+      );
+    expect(alarmed(B)).toBe(false);
+    expect(alarmed(A)).toBe(true);
+  });
+  it("merged at the gated head while a fixup runs: the fixup is retired as superseded, no alarm (#311)", () => {
+    const run = (agent_id: string) => ({ agent_id, steers: {}, accepted: false });
+    const view: PipelineView = {
+      task: "T1",
+      stages: [["implement"], ["merge_ready"]],
+      stage: "fixup",
+      release_branch: "release/w",
+      p: {
+        ...emptyPipeline(),
+        pr: { url: "u", number: 7 } as never,
+        head: A,
+        gated: [A],
+        runs: { implementer: { ...run("impl"), accepted: true }, fixup: run("fix") },
+      },
+    };
+    const actions = next(view, {
+      kind: "merge_checked",
+      view: { state: "MERGED", baseRefName: "release/w", headRefOid: A },
+    });
+    expect(
+      actions.some((a) => a.kind === "journal" && a.event.data?.alarm === "merged_unverified_head"),
+    ).toBe(false);
+    expect(actions).toContainEqual({ kind: "retire", agent_id: "fix", status: "superseded" });
+    expect(actions).toContainEqual({ kind: "retire", agent_id: "impl" });
+    expect(actions).toContainEqual(
+      expect.objectContaining({
+        kind: "journal",
+        event: expect.objectContaining({
+          type: "stage_entered",
+          data: { stage: "done", merged: true },
+        }),
+      }),
+    );
+  });
+  it("off merge_ready, a merge whose head GitHub does not report still alarms (#311)", () => {
+    const view: PipelineView = {
+      task: "T1",
+      stages: [["implement"], ["merge_ready"]],
+      stage: "fixup",
+      release_branch: "release/w",
+      p: { ...emptyPipeline(), pr: { url: "u", number: 7 } as never, head: A, gated: [A] },
+    };
+    const actions = next(view, {
+      kind: "merge_checked",
+      view: { state: "MERGED", baseRefName: "release/w" },
+    });
+    expect(
+      actions.some((a) => a.kind === "journal" && a.event.data?.alarm === "merged_unverified_head"),
+    ).toBe(true);
   });
 });

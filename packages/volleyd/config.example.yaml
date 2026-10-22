@@ -78,6 +78,11 @@
 # plugin servers and connectors).
 # agent_mcp: strict
 
+# Under agent_mcp: inherit, the only user servers an agent starts, by name (README "MCP wiring"):
+# volleyd copies them from the profile's .claude.json and the repository's .mcp.json into the
+# agent's mcp.json and launches it strict. [] (the default): every server.
+# agent_mcp_allow: []
+
 # The share of an agent's context window at which Claude Code compacts its conversation (README
 # "Auto-compaction"): 85 compacts where the Desk's meter turns red; 0 leaves Claude Code's default.
 # agent_auto_compact_pct: 85

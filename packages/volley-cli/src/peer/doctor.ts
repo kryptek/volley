@@ -169,6 +169,8 @@ export interface Facts {
   };
   claude: { state: AuthClaude; plan: string | null; trust: AuthTrust };
   machine: {
+    /** Logical CPUs (the size a paired machine's derived `max_agents` reads). */
+    cores: number;
     memory: Memory;
     disk: Disk | null;
     limits: { mem_low_pct: number; disk_low_gb: number };
@@ -187,6 +189,17 @@ export function lockHash(dir: string): string | null {
     return null;
   }
 }
+
+/**
+ * The files of the volley checkout `dir` whose change can change a doctor run's result: its
+ * version, its lockfile and the marker of the doctor's last install from it. `volley peer run`
+ * re-runs its doctor as soon as one of them changes.
+ */
+export const doctorInputs = (dir: string): string[] => [
+  join(dir, "package.json"),
+  join(dir, "bun.lock"),
+  join(dir, "node_modules", LOCK_MARKER),
+];
 
 /** After the doctor's own install: remember the bun.lock it installed from. */
 function markInstalled(dir: string): void {
@@ -211,6 +224,7 @@ export interface DoctorDeps {
   now: () => Date;
   totalmem: () => number;
   freemem: () => number;
+  cpus: () => number;
   uptime: () => number;
   /** `fs.statfs` of an existing path; null when it cannot be read. */
   statfs: (path: string) => StatFs | null;
@@ -504,6 +518,7 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     github: { present: ghPresent, signedIn, user, slug, permission },
     claude: { ...claude, trust },
     machine: {
+      cores: deps.cpus(),
       memory: memoryOf(deps.totalmem(), deps.freemem(), available),
       disk: st !== null ? diskOf(root, st) : null,
       limits: {
@@ -575,14 +590,19 @@ export function reportOf(f: Facts, checks: Check[], at: Date): DoctorReport {
   });
 }
 
-/** Run every check once. */
+/**
+ * Run every check once. The report's `doctor_at` is when the run started: its facts are no older
+ * than that, so a run that began before a `doctor --fix` (or a Repair) and ended after it never
+ * reads as a run from after it.
+ */
 export async function runDoctor(
   deps: DoctorDeps,
   opts: DoctorOptions,
 ): Promise<{ report: DoctorReport; checks: Check[]; facts: Facts }> {
+  const at = deps.now();
   const facts = await gatherFacts(deps, opts);
   const checks = checksOf(facts);
-  return { report: reportOf(facts, checks, deps.now()), checks, facts };
+  return { report: reportOf(facts, checks, at), checks, facts };
 }
 
 /** The record's checks: the report's, without fix text. */

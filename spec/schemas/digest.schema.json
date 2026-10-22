@@ -193,6 +193,19 @@
               "why": { "type": "string" }
             }
           }
+        },
+        "alarms": {
+          "type": "array",
+          "description": "Wave-level alarms that still hold (peer_idle_under_load: the supervisor's own machine was overloaded while a ready paired machine idled, spec section 4.6.15). Absent: none.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["alarm", "message"],
+            "properties": {
+              "alarm": { "type": "string", "minLength": 1 },
+              "message": { "type": "string" }
+            }
+          }
         }
       }
     }

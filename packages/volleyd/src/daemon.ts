@@ -51,6 +51,8 @@ import { type ActivityEvidence, newestWrite } from "./activity-evidence";
 import {
   type AdmissionState,
   type AdmissionSummary,
+  type CeilingCount,
+  type CeilingView,
   type HostSamples,
   type HostThresholds,
   type Sample,
@@ -90,6 +92,7 @@ import {
   type InboxWhere,
   type SessionSurface,
   answerEvent,
+  decisionAnswerRefusal,
   decisionItemId,
   foldInbox,
   inboxEnvelopeType,
@@ -172,6 +175,7 @@ import { ConfigStore } from "./config-store";
 import {
   ADMISSION_TOPIC,
   ARCHIVE_TOPIC,
+  BAD_ANSWER,
   CONFIG_TOPIC,
   type ControlResponse,
   DAEMON_AGENT_ID,
@@ -207,6 +211,7 @@ import {
   MACHINE_DOWN_REPLACE,
   MACHINE_DOWN_WAIT,
   attentionPayload,
+  checkAnswer,
   decisionPayload,
   decisionTopic,
   decisionsFilePath,
@@ -229,6 +234,7 @@ import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
 import { mintConsentToken, mintModelSwitchToken, mintWakeToken } from "./fence";
 import { LOCAL_HOST } from "./fleet-name";
+import { lockFetches } from "./git-lock";
 import type { Host } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import {
@@ -268,7 +274,7 @@ import {
   doctorFields,
   machineTopic,
   parseDoctorReport,
-  parseMachine,
+  parseMachineFrom,
 } from "./machines";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
 import {
@@ -289,6 +295,8 @@ import {
   type Snapshot,
   type Unplaced,
   needsPlacement,
+  overloadLoad,
+  peerIdleUnderLoad,
   place,
   reserve,
 } from "./placement";
@@ -306,6 +314,7 @@ import {
   type ReadinessInput,
   type ReadinessPayload,
   machineView,
+  peerMaxAgents,
   readiness,
   readinessKey,
   readinessTopic,
@@ -314,11 +323,11 @@ import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure
 import { readRepoView } from "./repo-visibility";
 import {
   type Admission,
-  activeTasks,
   admit,
   admitPlacing,
-  pipelineRoles,
+  budgetRaise,
   spawnBudget,
+  spawnsOutstanding,
   spawnsUsed,
 } from "./scheduler";
 import { toPathErrors, validator } from "./schemas";
@@ -346,7 +355,7 @@ import type {
   WaveTask,
 } from "./types";
 import { SYSTEM_WAVE } from "./types";
-import { WaveFileError, parseWaveFile } from "./wave-file";
+import { type PlacementDefaults, WaveFileError, parseWaveFile } from "./wave-file";
 
 import {
   BLOCKED_TASK_CANCELLED,
@@ -355,6 +364,7 @@ import {
   PipelineDriver,
   SUPERSEDED_BY_MERGE,
   type SpawnStart,
+  type TaskPipeline,
   blockedReason,
   isAnswer,
   releaseLockOn,
@@ -651,6 +661,7 @@ interface SpawnPipelineOptions {
   branch_update?: "merge";
   /** A respawn of a moved or vanished agent: its own MCP servers, not the tunable's now. */
   agent_mcp?: AgentMcp;
+  agent_mcp_allow?: string[];
   /** An account move's resume note, appended to the brief. */
   resumeNote?: string;
   /** An account move of a pipeline role: the attempt whose worktree it continues in. */
@@ -899,6 +910,18 @@ const SETTLED_STAGES: ReadonlySet<TaskStage> = new Set(["done", "merge_ready", "
 /** The daemon's own `agent_blocked` (blockedFallback): a block the pipeline could not own. */
 const BLOCKED_CLASS = "blocked_unhandled";
 
+/** An admitted task still waiting for its first implementer (spawnAdmitted, the hard ceiling). */
+const awaitsImplementer = (t: TaskState): boolean =>
+  t.stage === "queued" && t.agents.implementer === undefined;
+
+/** Stages whose task, with no agent live, has a pipeline role still to spawn (the ceiling). */
+const BETWEEN_ROLES: ReadonlySet<TaskStage> = new Set([
+  "implement",
+  "spec_review",
+  "quality_review",
+  "fixup",
+]);
+
 export const daemonClientId = (namespace: string) =>
   `volley-${DAEMON_AGENT_ID}-daemon-${namespace}`;
 
@@ -920,6 +943,23 @@ const hostThresholds = (eff: Tunables): HostThresholds => ({
 const placing = (w: Wave): boolean =>
   w.placement === AUTO_HOST ||
   w.task_order.some((id) => needsPlacement(w.tasks[id] ?? { host: "" }));
+
+/** The alarm a `placement: local` wave raises once when the own machine is overloaded while a peer idles. */
+const PEER_IDLE_ALARM = "peer_idle_under_load";
+
+/** Where a wave's `peer_idle_under_load` alarm stands: raised at most once, then cleared. */
+type PeerIdleAlarm = "none" | "raised" | "cleared";
+
+/** The wave journal's last word on its `peer_idle_under_load` alarm. */
+function peerIdleAlarmState(events: readonly JournalEvent[]): PeerIdleAlarm {
+  let at: PeerIdleAlarm = "none";
+  for (const e of events) {
+    if (e.task !== undefined || e.data.alarm !== PEER_IDLE_ALARM) continue;
+    if (e.type === "alarm_raised") at = "raised";
+    else if (e.type === "alarm_cleared") at = "cleared";
+  }
+  return at;
+}
 
 /** Before the first pressure sample nothing is known about load, so nothing starts. */
 const AWAITING_SAMPLE: Admission = { allow: 0, reasons: ["waiting for the first pressure sample"] };
@@ -1292,6 +1332,8 @@ export class Daemon {
    * reconnect's retained copy, a QoS 1 duplicate) is not counted again.
    */
   private readonly hostHistory = new Map<string, { last_seen: string; samples: HostSamples[] }>();
+  /** Where each running wave's `peer_idle_under_load` alarm stands (none, raised, cleared). */
+  private readonly peerIdleWarned = new Map<WaveId, PeerIdleAlarm>();
   /** Why a ready task of a placing wave was not admitted (`<wave>/<task>`: no eligible machine). */
   private readonly heldTask = new Map<string, string>();
   /** The account records last published, by account (an unchanged one is not re-published). */
@@ -1659,16 +1701,29 @@ export class Daemon {
           });
           return;
         }
-        const record = parseMachine(m.topic, m.payload);
+        const parsed = parseMachineFrom(m.topic, m.payload);
         // Every account may publish its own record: only a configured host's is a machine.
-        if (record === null) return;
+        if (parsed === null) return;
+        const { record, by } = parsed;
+        // Our own republish (a sweep's down, a Repair's fold) coming back is no heartbeat.
+        const heard = by !== "volleyd";
         void this.enqueue(async () => {
           // A configured host is a peer whatever its record says (SPEC §4.6.15): never local.
           if (!Object.hasOwn(this.config.effective().hosts, name) || record.tunnel === "local") {
             return;
           }
-          this.machines.observe(record);
-          if (record.tunnel === "up") this.sampleHost(name, record);
+          const keptNewer = this.machines.observe(record, { heard });
+          if (record.tunnel === "up" && heard) this.sampleHost(name, record);
+          // The box's beat still carries its service's older doctor run: re-assert the newer one
+          // (a Repair's) over it, so clients never see the stale checks again.
+          const held = this.machines.record(name);
+          if (keptNewer && heard && held !== undefined) {
+            await this.publish(
+              machineTopic(name),
+              this.envelope(MACHINE_CHANNEL, "machine", held),
+              true,
+            );
+          }
           await this.publishReadiness(name);
         });
       }),
@@ -2408,7 +2463,10 @@ export class Daemon {
     for (const [key, v] of this.verdicts) {
       if (key !== GLOBAL) waves[key] = { allow: allowJson(v.allow), reasons: v.reasons };
     }
-    this.summary = summaryPayload(global, this.sampledAt ?? dateOf(this.time), waves);
+    this.summary = {
+      ...summaryPayload(global, this.sampledAt ?? dateOf(this.time), waves),
+      ceiling: this.ceilingView(),
+    };
     await this.publish(
       ADMISSION_TOPIC,
       this.envelope("_system/admission", "admission", this.summary),
@@ -2596,6 +2654,7 @@ export class Daemon {
     await this.machineDownPass();
     await this.removalSweep();
     await this.fleetTick();
+    await this.warnPeerIdle();
     await this.runLeases({ kind: "tick" });
     await this.monitor();
     await this.blockedInvariant();
@@ -2607,9 +2666,7 @@ export class Daemon {
       await this.releaseGoIfVerified(wave);
     }
     await this.archivePass();
-    // A release stage's agent counts toward the hard ceiling like a task's.
-    let live = this.releaseAgentsLive();
-    for (const log of this.waves.values()) live += activeTasks(log.record).length;
+    let live = this.ceilingCount().live;
     for (const [wave, log] of this.waves) {
       const rec = log.record;
       const candidates = admissible(rec);
@@ -3648,6 +3705,7 @@ export class Daemon {
     for (const key of this.autoHostAlarmed)
       if (key.startsWith(`${wave}/`)) this.autoHostAlarmed.delete(key);
     this.pipelines.delete(wave);
+    this.peerIdleWarned.delete(wave);
     this.config.clearWave(wave);
     await this.publishArchiveIndex();
     this.log(`wave ${wave} archived by ${by} (${reason}); closed ${closed.length} decision(s)`);
@@ -3747,16 +3805,24 @@ export class Daemon {
   // Spawning (T4): admitted tasks get an implementer; other roles are sequenced by the pipeline.
   // -------------------------------------------------------------------------------------------
 
-  /** Start an implementer for every admitted task that has none (runs beside the queue). */
+  /**
+   * Start an implementer for every admitted task that has none (runs beside the queue), while
+   * the agents running or starting leave the hard ceiling room: a retry after a backoff or a
+   * resumed wave's backlog waits for a free slot. Held slots are not counted here, so tasks
+   * waiting on each other's slots never all wait.
+   */
   private spawnAdmitted(wave: WaveId): void {
     const rec = this.waves.get(wave)?.record;
     if (this.killSwitch || rec?.state == null || rec.state.status !== "running") return;
+    let room = this.config.effective(wave).hard_ceiling - this.ceilingCount(false).live;
     for (const id of rec.admitted) {
+      if (room <= 0) return;
       const t = rec.state.tasks.find((x) => x.id === id);
-      if (t === undefined || t.agents.implementer !== undefined || t.stage !== "queued") continue;
+      if (t === undefined || !awaitsImplementer(t)) continue;
       const key = `${wave}/${id}/implementer`;
       if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) continue;
       if (this.parkOnTunnel(wave, id)) continue;
+      room--;
       void this.startSpawn(wave, id, "implementer").catch((e: unknown) => {
         this.log(`spawn ${key}: ${e instanceof Error ? e.message : String(e)}`);
       });
@@ -4341,6 +4407,7 @@ export class Daemon {
       tunables: eff,
       owner: log.record.state?.owner ?? null,
       journal: (ev) => this.append(wave, ev),
+      journaled: (match) => log.journal.readAll().some(match),
       now: this.now,
       get openDecisions() {
         return log.record.state?.open_decisions ?? [];
@@ -4624,6 +4691,49 @@ export class Daemon {
   }
 
   /**
+   * Once per wave (SPEC §4.6.15): a running `placement: local` wave, while the own machine's load
+   * per core is over `placement.load_per_core_max` and a ready, undrained peer has free
+   * `max_agents` slots, journals `alarm_raised { alarm: "peer_idle_under_load", peer, free,
+   * message }` (`volleyd status` and the digest show it), and `alarm_cleared` once the own load
+   * per core is back under the threshold (or the wave is `auto`); it is not raised again for the
+   * wave. An `auto` wave places onto the peer itself.
+   */
+  private async warnPeerIdle(): Promise<void> {
+    const cfg = this.config.effective();
+    const own = this.ownRecord;
+    if (own === undefined || !(own.cores > 0)) return;
+    const perCore = overloadLoad(own) / own.cores;
+    for (const [wave, log] of this.runningWaves()) {
+      // After a restart the journal says whether it was raised, or raised and cleared, already.
+      const known = this.peerIdleWarned.get(wave) ?? peerIdleAlarmState(log.journal.readAll());
+      this.peerIdleWarned.set(wave, known);
+      // Overloaded by the wave's own threshold (its `config:` may set one), as it was raised.
+      const placement = this.config.effective(wave).placement;
+      const hot = perCore > placement.load_per_core_max;
+      if (known === "cleared" || (known === "none" && !hot)) continue;
+      const local = (log.record.plan ?? log.record.wave)?.placement !== AUTO_HOST;
+      // Only the load clears it: a peer's verdict settling after a restart is no all-clear.
+      if (known === "raised") {
+        if (hot && local) continue;
+        this.peerIdleWarned.set(wave, "cleared");
+        await this.append(wave, { type: "alarm_cleared", data: { alarm: PEER_IDLE_ALARM } });
+        continue;
+      }
+      if (!local) continue;
+      const gate = admissionFor(log.record, this.killSwitch, this.pressure(wave));
+      const idle = peerIdleUnderLoad(this.placementSnapshot(gate, cfg), { placement });
+      if (idle !== null) {
+        this.peerIdleWarned.set(wave, "raised");
+        await this.append(wave, {
+          type: "alarm_raised",
+          data: { alarm: PEER_IDLE_ALARM, peer: idle.peer, free: idle.free, message: idle.message },
+        });
+        this.log(`wave ${wave}: ${idle.message}`);
+      }
+    }
+  }
+
+  /**
    * The supervisor's own doctor (`volley peer doctor --json --repo <the running wave's repo>`); its
    * report fills the own record. Runs again at once when the running wave's repo changes.
    */
@@ -4842,7 +4952,7 @@ export class Daemon {
       host: isLocal
         ? { max_agents: cfg.hard_ceiling, drain: false }
         : {
-            max_agents: h?.max_agents ?? REMOTE_HOST_DEFAULTS.max_agents,
+            max_agents: peerMaxAgents(h?.max_agents, this.machines.record(name)),
             // A pending removal keeps it closed, whatever its drain says now.
             drain:
               (h?.drain ?? REMOTE_HOST_DEFAULTS.drain) ||
@@ -5001,7 +5111,8 @@ export class Daemon {
    * `peer_doctor` (admin, peers.ts), checked inside the queue; its run (an ssh round-trip of up to
    * `peer_doctor_timeout_ms`) is awaited outside it, so ticks, control ops and record folds go on.
    * One run per host at a time: two `--fix` runs never overlap on one box. After a run the box's
-   * PATH is probed again, and `peer_doctor_run` is journaled.
+   * PATH is probed again, its report is folded into the box's machine record (`foldDoctor`), and
+   * `peer_doctor_run` is journaled.
    */
   private peerDoctor(p: Record<string, unknown>, sender: string): AuthOutcome | DeferredAuth {
     const req = this.peers.doctorRequest(p, this.waveOrigin());
@@ -5018,15 +5129,18 @@ export class Daemon {
     const run: DoctorRun = req;
     return {
       later: async () => {
-        let r: PeerReply;
+        let r: PeerReply & { report?: DoctorReport };
         try {
           r = await this.peers.runDoctor(run);
         } finally {
           this.doctoring.delete(run.name);
         }
+        const { report, ...reply } = r;
         if (r.ok) this.probes.delete(run.name);
+        // Through the queue (record folds and verdicts are its), before the answer goes back.
+        if (report !== undefined) await this.enqueue(() => this.foldDoctor(run.name, report));
         return {
-          reply: authReply("peer_doctor", r),
+          reply: authReply("peer_doctor", reply),
           journal: {
             type: "peer_doctor_run",
             data: { by: sender, name: run.name, fix: run.fix, clone: run.clone, ok: r.ok },
@@ -5034,6 +5148,27 @@ export class Daemon {
         };
       },
     };
+  }
+
+  /**
+   * A doctor run the supervisor started on a paired box: its report replaces the doctor fields of
+   * the box's retained record (republished as volleyd, as the sweep does) and its verdict is
+   * recomputed, so the Desk and readiness follow the run without waiting for the box's next
+   * heartbeat (whose service re-runs its own doctor too). A box that never published a record
+   * has nothing to fold into, and one whose tunnel is down keeps its record (a down box is not
+   * ready whatever its checks say; its next `up` heartbeat brings the run).
+   */
+  private async foldDoctor(name: string, report: DoctorReport): Promise<void> {
+    const prior = this.machines.record(name);
+    if (!this.running || prior?.tunnel !== "up") return;
+    const record: MachineRecord = { ...prior, ...doctorFields(report) };
+    if (!validator("machine.schema.json")(this.envelope(MACHINE_CHANNEL, "machine", record))) {
+      this.log(`${name}'s doctor report does not fit machine.schema.json: record left as it was`);
+      return;
+    }
+    this.machines.observe(record, { heard: false });
+    await this.publish(machineTopic(name), this.envelope(MACHINE_CHANNEL, "machine", record), true);
+    await this.publishReadiness(name);
   }
 
   /**
@@ -5735,11 +5870,18 @@ export class Daemon {
     d = new PipelineDriver(wave, {
       exec: this.host.exec,
       // A task on a remote host (T15): its worktrees, and so its git / gh checks, are on the box.
+      // The artifact probes fetch in worktrees of the task's clone: one fetch into it at a time.
       execFor: (task) => {
         const t = this.ranDef(log.record, task);
-        return t === undefined || t.host === "local" || this.autoHostReached(wave, t)
-          ? this.host.exec
-          : this.remoteHost(wave, t).exec;
+        if (t === undefined || t.host === "local" || this.autoHostReached(wave, t)) {
+          const w = log.record.wave;
+          return w == null
+            ? this.host.exec
+            : lockFetches(this.host.exec, LOCAL_HOST, expandHome(w.repo));
+        }
+        const remote = this.remoteHost(wave, t);
+        // Keyed like spawn's fetches into the same clone (spawn.ts: `expandHome(req.wave.repo)`).
+        return lockFetches(remote.exec, remote.name, expandHome(remote.spec.repo));
       },
       worktreeGone: (task, path) => worktreeGone(this.ranDef(log.record, task), path),
       home: this.opts.home,
@@ -6104,19 +6246,18 @@ export class Daemon {
     const rec = log?.record;
     if (rec?.wave == null || rec.state?.status !== "running") return;
     if (openDecisions(rec).some((d) => d.kind === "spawn_budget_exhausted")) return;
-    const budget = spawnBudget(
-      rec.wave,
-      this.config.effective(wave).spawn_budget_multiplier,
-      rec.budget_raised ?? 0,
-    );
+    const eff = this.config.effective(wave);
+    const budget = spawnBudget(rec.wave, eff.spawn_budget_multiplier, rec.budget_raised ?? 0);
     const used = spawnsUsed(rec);
-    const n = Math.max(
-      1,
-      task !== null
-        ? pipelineRoles(rec.wave, task) -
-            Object.keys(rec.state.tasks.find((t) => t.id === task)?.agents ?? {}).length
-        : 1,
-    );
+    // A hold queued behind a raise that already covers it (the same tick's other held spawns).
+    if (used < budget) return;
+    // Sized for the wave, not this one spawn: one raise lets every held spawn through.
+    const n = budgetRaise({
+      outstanding: spawnsOutstanding(rec.wave, rec),
+      derived: spawnBudget(rec.wave, eff.spawn_budget_multiplier, 0),
+      used,
+      raiseMax: eff.autopilot.budget_raise_max,
+    });
     const what = task !== null ? `${task}'s ${role ?? "next role"}` : "the next ready task";
     const base = waveDecisionId("spawn_budget_exhausted", wave);
     let id = base;
@@ -6140,18 +6281,21 @@ export class Daemon {
 
   /**
    * Retire a pipeline (or release stage) agent. Replaced or cancelled without having ended itself
-   * (`relaunched`, `stopped`): its session is stopped first, so it does nothing next to (or
-   * instead of) the new attempt.
+   * (`relaunched`, `stopped`, or `superseded` by its PR's merge): its session is stopped first, so
+   * it does nothing next to (or instead of) the new attempt.
    */
   private async retireRole(wave: WaveId, agentId: string, status?: string): Promise<void> {
     const a = this.supervised.get(agentId);
-    if (a !== undefined && (status === "relaunched" || status === "stopped"))
+    if (
+      a !== undefined &&
+      (status === "relaunched" || status === "stopped" || status === "superseded")
+    )
       await this.cancelAgent(
         wave,
         { task: a.task, role: a.role, agent_id: agentId },
         DAEMON_AGENT_ID,
         {
-          text: `volleyd: ${agentId} is being ${status === "relaunched" ? "replaced by a relaunch" : "stopped"}. Stop work now: do not push, open or merge anything further, and exit.`,
+          text: `volleyd: ${agentId} is being ${status === "relaunched" ? "replaced by a relaunch" : status === "superseded" ? "stopped: its PR merged" : "stopped"}. Stop work now: do not push, open or merge anything further, and exit.`,
           from_agent_id: DAEMON_AGENT_ID,
           wave,
           task: a.task,
@@ -6171,7 +6315,12 @@ export class Daemon {
     if (d !== undefined) return d;
     const log = this.waves.get(wave) as WaveLog;
     d = new ReleaseTrain(wave, {
-      exec: this.host.exec,
+      // A stage is verified in a worktree of the wave's clone: its fetch takes the clone's lock.
+      exec: (argv, opts) => {
+        const repo = log.record.wave?.repo;
+        if (repo == null) return this.host.exec(argv, opts);
+        return lockFetches(this.host.exec, LOCAL_HOST, expandHome(repo))(argv, opts);
+      },
       home: this.opts.home,
       view: () => {
         const st = log.record.state;
@@ -6227,13 +6376,94 @@ export class Daemon {
     }
   }
 
-  /** Release stage agents live in any wave: supervised, being verified, or spawning. */
-  private releaseAgentsLive(): number {
-    let n = 0;
-    for (const a of this.supervised.values()) if (a.task === RELEASE_TASK) n++;
-    for (const a of this.launching.values()) if (a.task === RELEASE_TASK) n++;
-    for (const key of this.spawning) if (key.split("/")[1] === RELEASE_TASK) n++;
-    return n;
+  /**
+   * What the hard ceiling counts (SPEC §4.6.4): the agents volleyd runs or is starting, in every
+   * wave and on every machine — supervised, launched and being verified, spawning (a release
+   * stage's agent too) — and one slot for each admitted task of a running wave that will spawn
+   * its next agent: queued for its implementer (backed off too; not once refused for good), or
+   * between roles in implement…fixup with a role still to come (`nextRoleComes`). A task's stage
+   * counts nothing by itself otherwise: a task awaiting a decision, blocked, or in a paused,
+   * stopped or ended wave holds a slot only while one of its agents is live. `launching` is the
+   * part not supervised yet, held slots included. `held: false` counts only the agents running
+   * or starting, no held slot: what a spawn checks (`spawnAdmitted`, a pipeline role's, a
+   * release stage's), so tasks holding more slots than the ceiling never hold each other's
+   * spawns. A parallel step holds one slot while it waits, though it runs an agent per role.
+   */
+  private ceilingCount(held = true): CeilingCount {
+    const byWave: Record<string, number> = {};
+    const add = (wave: WaveId) => {
+      byWave[wave] = (byWave[wave] ?? 0) + 1;
+    };
+    const launched = new Set<string>();
+    const liveTasks = new Set<string>();
+    let launching = 0;
+    const seen = (key: string) => liveTasks.add(key.slice(0, key.lastIndexOf("/")));
+    for (const a of this.supervised.values()) {
+      add(a.wave);
+      seen(`${a.wave}/${a.task}/${a.role}`);
+    }
+    for (const a of this.launching.values()) {
+      add(a.wave);
+      launching++;
+      launched.add(`${a.wave}/${a.task}/${a.role}`);
+      seen(`${a.wave}/${a.task}/${a.role}`);
+    }
+    // A spawn's key is in `spawning` until its launch half returns, after it joined `launching`
+    // (it leaves `spawning` before it can be supervised). A relaunch's spawn counts beside the
+    // role's old agent while that one is still supervised.
+    for (const key of this.spawning) {
+      if (launched.has(key)) continue;
+      seen(key);
+      add(key.split("/")[0] ?? "");
+      launching++;
+    }
+    for (const [wave, log] of held ? this.waves : []) {
+      const rec = log.record;
+      if (rec.state?.status !== "running") continue;
+      const tasks = new Map(rec.state.tasks.map((x) => [x.id, x]));
+      for (const id of rec.admitted) {
+        const t = tasks.get(id);
+        if (t === undefined || liveTasks.has(`${wave}/${id}`)) continue;
+        if (awaitsImplementer(t)) {
+          if (this.refused.get(`${wave}/${id}/implementer`)?.until === Number.POSITIVE_INFINITY)
+            continue;
+          add(wave);
+          launching++;
+        } else if (BETWEEN_ROLES.has(t.stage) && this.nextRoleComes(wave, id, rec.pipeline[id])) {
+          add(wave);
+          launching++;
+        }
+      }
+    }
+    const live = Object.values(byWave).reduce((a, b) => a + b, 0);
+    return { live, launching, by_wave: byWave };
+  }
+
+  /**
+   * A task between roles will spawn an agent of its current step: no role of it is refused for
+   * good, and none retired unverified (a dead agent) unless its respawn is on its way. A step whose
+   * roles are all accepted (implemented, waiting on CI before its reviewers) holds its slot for
+   * the whole wait; it reads as `launching` and gates admission only, never a role's spawn.
+   */
+  private nextRoleComes(wave: WaveId, task: TaskId, p: TaskPipeline | undefined): boolean {
+    if (p === undefined) return true;
+    const respawning = this.heldRespawn.has(`${wave}/${task}`);
+    return p.roles.every((role) => {
+      const until = this.refused.get(`${wave}/${task}/${role}`)?.until;
+      if (until === Number.POSITIVE_INFINITY) return false;
+      const run = p.runs[role];
+      return (
+        run?.retired === undefined || // not run yet, or its agent still live
+        run.accepted || // its agent finished and was accepted
+        until !== undefined || // a backed-off respawn of this role is pending
+        respawning // a held respawn will re-place the dead agent
+      );
+    });
+  }
+
+  /** The hard ceiling's count against its global limit (the admission topic, `volleyd admission`). */
+  private ceilingView(): CeilingView {
+    return { ...this.ceilingCount(), max: this.config.effective().hard_ceiling };
   }
 
   /**
@@ -6248,8 +6478,8 @@ export class Daemon {
     const key = `${wave}/${RELEASE_TASK}/release`;
     if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) return;
     if (this.taskLive(wave, RELEASE_TASK)) return;
-    let live = this.releaseAgentsLive();
-    for (const log of this.waves.values()) live += activeTasks(log.record).length;
+    const live = this.ceilingCount(false).live;
+    const max = this.config.effective(wave).hard_ceiling;
     const pressure = this.pressure(wave);
     const hold = this.killSwitch
       ? "kill switch engaged"
@@ -6257,8 +6487,8 @@ export class Daemon {
         ? "wave not releasing"
         : pressure.allow < 1
           ? `admission closed: ${(pressure.reasons ?? []).join(", ") || "no capacity"}`
-          : live >= this.config.effective(wave).hard_ceiling
-            ? `hard ceiling reached (${live})`
+          : live >= max
+            ? `hard ceiling reached (${live}/${max})`
             : null;
     if (hold !== null) {
       this.log(`spawn ${key} (${stage.name}): held, ${hold}`);
@@ -6300,6 +6530,8 @@ export class Daemon {
       running: rec.state?.status === "running",
       admission: admission.allow,
       reasons: admission.reasons,
+      live: this.ceilingCount(false).live,
+      ceiling: this.config.effective(wave).hard_ceiling,
       used: spawnsUsed(rec),
       budget: spawnBudget(
         rec.wave,
@@ -8196,9 +8428,27 @@ export class Daemon {
   private async answerInboxItemNow(
     id: string,
     req: InboxAnswerRequest,
-  ): Promise<{ item: InboxItem } | { refused: string }> {
+  ): Promise<{ item: InboxItem } | { refused: string; code?: typeof BAD_ANSWER }> {
     const item = this.inbox.get(id);
     if (item === undefined) return { refused: `unknown inbox item '${id}'` };
+    // The owner check `resolve` applies: the inbox is no way around it. A Desk login is the
+    // owner on another screen: the broker named it on its own account-op topic. It comes
+    // before the answer's own check, so a non-owner hears it is not theirs to answer.
+    if (item.kind === "decision" && item.wave !== undefined && req.desk_login !== true) {
+      const state = this.waves.get(item.wave)?.record.state;
+      const refused =
+        state != null ? guardMutation(state, req.by, "inbox_answer", this.bindings) : null;
+      if (refused !== null) return { refused };
+    }
+    // An answer its decision cannot apply is refused before the compare-and-set (#315).
+    // A decision already resolved (a crash before its item closed) answers "already answered".
+    const decided =
+      item.wave !== undefined &&
+      typeof item.source.decision_id === "string" &&
+      this.waves.get(item.wave)?.record.decisions[item.source.decision_id]?.resolved !== undefined;
+    const bad =
+      item.answered === undefined && !decided ? decisionAnswerRefusal(item, req.answer) : null;
+    if (bad !== null) return { refused: bad, code: BAD_ANSWER };
     const check = answerEvent(item, req, dateOf(this.time));
     if ("refused" in check) return check;
     if (item.kind === "decision") {
@@ -8206,14 +8456,6 @@ export class Daemon {
       const decision = item.source.decision_id;
       if (wave === undefined || typeof decision !== "string" || !this.waves.has(wave))
         return { refused: `inbox item '${id}' names no open decision` };
-      // The owner check `resolve` applies: the inbox is no way around it. A Desk login is the
-      // owner on another screen: the broker named it on its own account-op topic.
-      const state = this.waves.get(wave)?.record.state;
-      const refused =
-        state != null && req.desk_login !== true
-          ? guardMutation(state, req.by, "inbox_answer", this.bindings)
-          : null;
-      if (refused !== null) return { refused };
       const r = await this.answerDecision(wave, decision, req);
       if ("refused" in r) return r;
       if (r.already_resolved) {
@@ -8272,10 +8514,19 @@ export class Daemon {
   private async answerDecision(
     wave: WaveId,
     id: string,
-    r: { answer: string; by: string; rationale?: string; where?: InboxWhere },
+    given: { answer: string; by: string; rationale?: string; where?: InboxWhere },
   ): Promise<
-    { refused: string } | { decision: DecisionRecord; already_resolved: boolean; brief?: string }
+    | { refused: string; code?: typeof BAD_ANSWER }
+    | { decision: DecisionRecord; already_resolved: boolean; brief?: string }
   > {
+    // An answer the decision cannot apply is refused, and nothing is journaled (#315).
+    const asked = this.waves.get(wave)?.record.decisions[id];
+    const checked =
+      asked !== undefined && asked.resolved === undefined
+        ? checkAnswer(asked, given.answer)
+        : { answer: given.answer };
+    if ("refused" in checked) return { refused: checked.refused, code: BAD_ANSWER };
+    const r = { ...given, answer: checked.answer };
     const trust = await this.trustAnswer(wave, id, r.answer);
     if (trust !== null) return { refused: trust };
     const res = await this.resolveNow(wave, id, r);
@@ -8546,7 +8797,13 @@ export class Daemon {
       where,
       ...(opts.desk_login === true ? { desk_login: true as const } : {}),
     });
-    return "refused" in r ? { ok: false, error: r.refused } : { ok: true, result: r.item };
+    if ("refused" in r)
+      return {
+        ok: false,
+        error: r.refused,
+        ...(r.code !== undefined ? { code: r.code } : {}),
+      };
+    return { ok: true, result: r.item };
   }
 
   private async publishDecision(wave: WaveId, d: DecisionRecord): Promise<void> {
@@ -8958,6 +9215,7 @@ export class Daemon {
                 : []),
             ],
             ...(this.killSwitch ? { kill_switch: true } : {}),
+            ceiling: { live: this.ceilingCount().live, max: this.config.effective().hard_ceiling },
             // The cached count: status never waits on the broker's control connection.
             ...(this.sweeper !== undefined ? { agent_logins: { ...this.sweeper.counts } } : {}),
             // The own machine's local_agents mode, as its last verdict said (SPEC §4.6.15),
@@ -8976,7 +9234,10 @@ export class Daemon {
       case "admission":
         if (typeof p.wave === "string" && !this.waves.has(p.wave))
           return { ok: false, error: `unknown wave '${p.wave}'` };
-        return { ok: true, result: this.summary };
+        return {
+          ok: true,
+          result: this.summary === null ? null : { ...this.summary, ceiling: this.ceilingView() },
+        };
       case "spawn":
         return this.manualSpawn(p);
       // Claude account profiles (src/claude/service.ts); a sign-in answers once its URL is known.
@@ -9232,12 +9493,37 @@ export class Daemon {
     return { wave, owner, existing: log };
   }
 
+  /**
+   * What a wave file without `placement:` takes: `placement.default` once a machine is paired
+   * (SPEC §4.6.15). Decided when the wave is first submitted: a later plan version of a known
+   * wave keeps the placement its current plan has, so pairing or unpairing a machine mid-wave
+   * never moves a running task's next role. (`paired: 1` only lets that kept placement resolve
+   * as `auto`; a version's own `placement:` still wins over it, its `config: placement.default`
+   * does not.)
+   */
+  private placementDefaults(wave?: WaveId): PlacementDefaults {
+    const rec = wave === undefined ? undefined : this.waves.get(wave)?.record;
+    const current = rec?.plan ?? rec?.wave;
+    if (current != null) return { default: current.placement ?? "local", paired: 1, kept: true };
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    return {
+      default: cfg.placement.default,
+      paired: Object.keys(cfg.hosts).filter((n) => n !== local).length,
+    };
+  }
+
   /** Parse a request's `wave_yaml`; a Reply when it is missing or invalid. */
   private parseRequestWave(p: Record<string, unknown>, op: string): Wave | Reply {
     if (typeof p.wave_yaml !== "string")
       return { ok: false, error: `${op} requires payload.wave_yaml` };
+    const source = typeof p.source === "string" ? p.source : undefined;
     try {
-      return parseWaveFile(p.wave_yaml, typeof p.source === "string" ? p.source : undefined);
+      const wave = parseWaveFile(p.wave_yaml, source, this.placementDefaults());
+      // A known wave: parsed again under its own placement (the file's own placement: still wins).
+      return this.waves.get(wave.wave)?.record.wave == null
+        ? wave
+        : parseWaveFile(p.wave_yaml, source, this.placementDefaults(wave.wave));
     } catch (e) {
       if (e instanceof WaveFileError) return { ok: false, error: e.message, errors: e.errors };
       throw e;
@@ -9439,7 +9725,8 @@ export class Daemon {
       where,
       ...(typeof p.rationale === "string" ? { rationale: p.rationale } : {}),
     });
-    if ("refused" in r) return { ok: false, error: r.refused };
+    if ("refused" in r)
+      return { ok: false, error: r.refused, ...(r.code !== undefined ? { code: r.code } : {}) };
     // Resolving twice stays a no-op; the answer says where the first one was given.
     const first = this.inbox.get(decisionItemId(wave, id))?.answered;
     return {

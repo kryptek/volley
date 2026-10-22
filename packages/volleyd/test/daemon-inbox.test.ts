@@ -5,6 +5,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { type InboxItem, decisionItemId, inboxTopic } from "../src/autopilot/inbox";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { ControlClient } from "../src/control";
+import { resolveEvent } from "../src/decisions";
 import { AUTOPILOT_ON, NS } from "./helpers/daemon-env";
 import { deskAccounts, deskAnswer } from "./helpers/desk-answer";
 import { fakeExec } from "./helpers/fake-exec";
@@ -335,6 +336,124 @@ describe("the needs-you inbox in the daemon (SPEC §4.6.18)", () => {
       error: "where.kind must be desk, terminal, cli or autopilot",
     });
     expect(s.daemon.record("w1")?.decisions[d.decision_id]?.resolved).toBeUndefined();
+  });
+});
+
+describe("an answer a decision cannot apply is refused (#315)", () => {
+  const budget = {
+    kind: "spawn_budget_exhausted" as const,
+    task: null,
+    question: "Raise the spawn budget?",
+    options: ["raise by 3", "cancel"],
+  };
+  const resolvedEvents = () => s.journal().filter((e) => e.type === "decision_resolved");
+
+  it("volleyd resolve: refused with BAD_ANSWER (exit 3), nothing journaled", async () => {
+    s = await makeSupervisedEnv();
+    const d = await s.daemon.openDecision("w1", budget);
+    const r = await runCli(
+      ["resolve", d.decision_id, "raise", "--wave", "w1", "--by", "t"],
+      s.env.env,
+    );
+    expect(r.exitCode).toBe(3);
+    expect(r.stderr).toContain('"raise" is not one of raise by 3 / cancel (write "raise by <n>")');
+    expect(resolvedEvents()).toHaveLength(0);
+    expect(s.journal().filter((e) => e.type === "inbox_answered")).toHaveLength(0);
+    const ack = await (await control()).request("resolve", {
+      decision_id: d.decision_id,
+      answer: "raise",
+      by: "t",
+    });
+    expect(ack).toMatchObject({ ok: false, code: "BAD_ANSWER" });
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.resolved).toBeUndefined();
+  });
+
+  it("raise N is a raise: journaled as raise by N", async () => {
+    s = await makeSupervisedEnv();
+    const d = await s.daemon.openDecision("w1", budget);
+    const r = await runCli(
+      ["resolve", d.decision_id, "raise", "120", "--wave", "w1", "--by", "t"],
+      s.env.env,
+    );
+    expect(r.exitCode, r.stderr).toBe(0);
+    expect(resolvedEvents()[0]?.data.answer).toBe("raise by 120");
+    expect(s.daemon.record("w1")?.budget_raised).toBe(120);
+  });
+
+  it("inbox_answer: refused the same way, before the version check", async () => {
+    s = await makeSupervisedEnv();
+    const d = await s.daemon.openDecision("w1", budget);
+    const id = decisionItemId("w1", d.decision_id);
+    const r = await (await control()).request("inbox_answer", {
+      id,
+      version: 99,
+      answer: "raise",
+      where: phone,
+      by: "t",
+    });
+    expect(r).toMatchObject({
+      ok: false,
+      code: "BAD_ANSWER",
+      error: '"raise" is not one of raise by 3 / cancel (write "raise by <n>")',
+    });
+    expect(s.daemon.inboxItem(id)?.version).toBe(1);
+    expect(resolvedEvents()).toHaveLength(0);
+  });
+
+  it("inbox_answer by a non-owner with an answer it cannot apply: the ownership refusal comes first", async () => {
+    s = await makeSupervisedEnv();
+    const d = await s.daemon.openDecision("w1", budget);
+    const c = await control();
+    expect((await c.request("claim", { wave: "w1", by: "coord-a" })).ok).toBe(true);
+    const r = await c.request("inbox_answer", {
+      id: decisionItemId("w1", d.decision_id),
+      version: 1,
+      answer: "raise",
+      where: phone,
+      by: "someone-else",
+    });
+    expect(r.code).toBeUndefined();
+    expect(r.error).toContain("is owned by coord-a");
+    expect(resolvedEvents()).toHaveLength(0);
+  });
+
+  it("inbox_answer on a decision resolved before its item closed: already answered, not BAD_ANSWER", async () => {
+    s = await makeSupervisedEnv();
+    const d = await s.daemon.openDecision("w1", budget);
+    const id = decisionItemId("w1", d.decision_id);
+    // A crash between journaling decision_resolved and closing the item.
+    const rec = s.daemon.record("w1");
+    if (rec === undefined) throw new Error("no wave");
+    const ev = resolveEvent(rec, d.decision_id, { answer: "cancel", by: "t" }, new Date());
+    if (!("event" in ev)) throw new Error("not resolvable");
+    // biome-ignore lint/suspicious/noExplicitAny: journaling past the item close, as a crash would
+    await (s.daemon as any).append("w1", ev.event);
+    expect(s.daemon.inboxItem(id)?.answered).toBeUndefined();
+    const r = await (await control()).request("inbox_answer", {
+      id,
+      version: 1,
+      answer: "raise",
+      where: phone,
+      by: "t",
+    });
+    expect(r.code).toBeUndefined();
+    expect(r).toMatchObject({ ok: false, error: "already answered on cli" });
+  });
+
+  it("inbox_answer: raise N is recorded as raise by N on the item and the decision alike", async () => {
+    s = await makeSupervisedEnv();
+    const d = await s.daemon.openDecision("w1", budget);
+    const id = decisionItemId("w1", d.decision_id);
+    const r = await (await control()).request("inbox_answer", {
+      id,
+      version: 1,
+      answer: "raise 120",
+      where: phone,
+      by: "t",
+    });
+    expect(r.error).toBeUndefined();
+    expect(resolvedEvents()[0]?.data.answer).toBe("raise by 120");
+    expect(s.daemon.inboxItem(id)?.answered?.answer).toBe("raise by 120");
   });
 });
 

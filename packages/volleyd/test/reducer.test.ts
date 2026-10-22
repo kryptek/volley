@@ -681,3 +681,34 @@ describe("the release train (SPEC §4.6.19)", () => {
     expect(replay([entered], rec)).toEqual(rec);
   });
 });
+
+describe("a journaled raise on replay (#315)", () => {
+  it("a journaled `raise N` replays as no raise: only the normalised `raise by N` counts", () => {
+    // Before #315 `raise 120` was journaled and ignored; a replay must not start applying it.
+    const at = "2026-10-20T09:20:00.000Z";
+    const opened = (seq: number, id: string) =>
+      ({
+        seq,
+        at,
+        type: "decision_opened",
+        data: {
+          decision_id: id,
+          kind: "spawn_budget_exhausted",
+          question: "budget?",
+          options: ["raise by 1", "cancel"],
+        },
+      }) as JournalEvent;
+    const resolved = (seq: number, id: string, answer: string) =>
+      ({
+        seq,
+        at,
+        type: "decision_resolved",
+        data: { decision_id: id, answer, by: "owner" },
+      }) as JournalEvent;
+    const base = events.slice(0, 11);
+    const legacy = replay([...base, opened(12, "b1"), resolved(13, "b1", "raise 120")]);
+    expect(legacy.budget_raised ?? 0).toBe(0);
+    const raised = replay([...base, opened(12, "b1"), resolved(13, "b1", "raise by 120")]);
+    expect(raised.budget_raised).toBe(120);
+  });
+});

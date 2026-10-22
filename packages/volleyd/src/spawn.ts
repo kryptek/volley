@@ -22,6 +22,7 @@ import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { waveDecisionId } from "./decisions";
 import { mintConsentToken, sealLaunchScript } from "./fence";
+import { lockFetches } from "./git-lock";
 import type { Host, WorktreeResult } from "./hosts/host";
 import {
   type AgentCredentials,
@@ -35,6 +36,8 @@ import {
 import { type IssueData, fetchIssue, renderIssueMd } from "./issue";
 import {
   LAUNCH_COMMAND,
+  allowedMcpServers,
+  approvedProjectServers,
   launchScriptPath,
   mcpConfigPath,
   renderLaunchScript,
@@ -109,6 +112,8 @@ export interface SpawnRequest {
    * vanished agent, from its `agent_spawned` record), not the tunable's current value.
    */
   agent_mcp?: AgentMcp;
+  /** Likewise its `agent_mcp_allow` (under `inherit`; empty: every server). */
+  agent_mcp_allow?: string[];
   /**
    * The Claude account profile the agent runs under (claude/profiles.ts selectAccount): `dir` is
    * its `CLAUDE_CONFIG_DIR`, null (or no `account`) the primary profile.
@@ -170,13 +175,18 @@ export interface SpawnDeps {
     | "agent_mcp"
     | "agent_auto_compact_pct"
   > &
-    Partial<Pick<Tunables, "require_fresh_base">>;
+    Partial<Pick<Tunables, "require_fresh_base" | "agent_mcp_allow">>;
   /** The wave owner: the agents' parent (default volleyd). */
   owner: string | null;
   journal: (ev: NewEvent) => unknown | Promise<unknown>;
   /** Decision ids open in the wave. */
   openDecisions: readonly string[];
   probe: AgentProbe;
+  /**
+   * Whether the wave's journal already has an event `match` accepts (a once-per-wave alarm).
+   * Absent: none has, so such an alarm is raised at every spawn.
+   */
+  journaled?: (match: (ev: NewEvent) => boolean) => boolean;
   /** Subscribe to an agent's signals (called before its launch). */
   watch: (namespace: string, agentId: string) => Promise<AgentWatch>;
   /** `$VOLLEYD_HOME/brief-gate` when present. */
@@ -499,7 +509,11 @@ async function launchAttempt(
   const { host } = deps;
   const carried =
     req.start === undefined && req.continueBranch !== undefined
-      ? await pushedBranch(host.exec, ctx.repo, req.continueBranch)
+      ? await pushedBranch(
+          lockFetches(host.exec, host.name, ctx.repo),
+          ctx.repo,
+          req.continueBranch,
+        )
       : null;
   const branch =
     carried?.branch ??
@@ -520,6 +534,20 @@ async function launchAttempt(
   // A carried branch's tip is not the task's base: the first attempt's base_sha stands.
   const { base: _tip, ...carriedCut } = cut;
   const wt: WorktreeResult = carried !== null ? carriedCut : cut;
+  // The fetch lost a ref-lock race to another git process and its retry went through.
+  if (cut.fetch_retried !== undefined) {
+    await deps.journal({
+      type: "alarm_raised",
+      task: req.task,
+      data: {
+        alarm: "fetch_retried",
+        role: req.role,
+        attempt,
+        host: host.name,
+        fetch_error: cut.fetch_retried,
+      },
+    });
+  }
   // require_fresh_base off and the fetch failed: cut from the host's last copy, said out loud.
   if (wt.base !== undefined && !wt.base.fresh) {
     await deps.journal({
@@ -549,8 +577,33 @@ async function launchAttempt(
     await host.writeFile(join(ctx.worktree, ".volley", name), content);
   }
 
-  if ((req.agent_mcp ?? deps.tunables.agent_mcp) === "inherit")
-    await warnStrayVolley(ctx, agentId, attempt);
+  const agentMcp = req.agent_mcp ?? deps.tunables.agent_mcp;
+  const mcpAllow =
+    agentMcp === "inherit" ? (req.agent_mcp_allow ?? deps.tunables.agent_mcp_allow ?? []) : [];
+  let mcpExtra: Record<string, unknown> = {};
+  if (agentMcp === "inherit") {
+    const sources = await userMcpSources(ctx);
+    if (mcpAllow.length > 0) {
+      // Only the .mcp.json entries the profile approved: the strict copy skips Claude Code's ask.
+      const [user, project, local] = sources;
+      const allowed = allowedMcpServers(mcpAllow, [
+        user,
+        { ...project, config: approvedProjectServers(project.config, local.config) },
+        local,
+      ]);
+      mcpExtra = allowed.servers;
+      // In .mcp.json at all (of any shape) but filtered out by approvedProjectServers.
+      const raw = allowedMcpServers(allowed.missing, [project]);
+      const unapproved = [...Object.keys(raw.servers), ...raw.malformed];
+      await alarmMissingAllowed(
+        ctx,
+        [...allowed.missing, ...allowed.malformed],
+        new Set(unapproved),
+        new Set(allowed.malformed),
+      );
+    }
+    await warnStrayVolley(ctx, agentId, attempt, sources, mcpAllow);
+  }
 
   const briefPath = join(ctx.worktree, ".volley", "brief.md");
   const preface = loadPreface(req.wave, deps);
@@ -609,7 +662,6 @@ async function launchAttempt(
   }
 
   const parent = deps.owner ?? SUPERVISOR;
-  const agentMcp = req.agent_mcp ?? deps.tunables.agent_mcp;
   let creds: BrokerCredentials | undefined;
   if (deps.mintCredentials) {
     // Its acks reach volleyd and the Desk through the shared agent role: nothing per agent.
@@ -627,8 +679,14 @@ async function launchAttempt(
       claude_account: accountId(req),
       ...(creds !== undefined ? { broker: creds } : {}),
     });
-    // volleyd's own MCP server for the agent: this release's volley-mcp, on this broker.
-    await host.writeFile(mcpConfigPath(ctx.worktree), renderMcpConfig(deps.mcpEntry));
+    // volleyd's own MCP server for the agent: this release's volley-mcp, on this broker (and the
+    // user's servers agent_mcp_allow names). Owner-only: those copied entries hold the user's
+    // secrets (env tokens, headers).
+    await host.writeFile(
+      mcpConfigPath(ctx.worktree),
+      renderMcpConfig(deps.mcpEntry, mcpExtra),
+      0o600,
+    );
     const compactWindow = autoCompactWindowTokens(task.model, deps.tunables.agent_auto_compact_pct);
     const script = renderLaunchScript({
       hooksDir: deps.hooksDir,
@@ -637,6 +695,7 @@ async function launchAttempt(
       worktree: ctx.worktree,
       ...(profile !== undefined ? { claudeConfigDir: profile } : {}),
       ...(agentMcp === "inherit" ? { agentMcp } : {}),
+      ...(mcpAllow.length > 0 ? { mcpAllow } : {}),
       ...(compactWindow !== undefined ? { autoCompactWindow: compactWindow } : {}),
       ...(host.launchEnv !== undefined
         ? { env: host.launchEnv({ agent_id: agentId, namespace: ctx.namespace }) }
@@ -697,6 +756,7 @@ async function launchAttempt(
         ...(req.worktreeAttempt !== undefined ? { worktree_attempt: req.worktreeAttempt } : {}),
         ...(req.branch_update === "merge" ? { branch_update: "merge" } : {}),
         ...(agentMcp === "inherit" ? { agent_mcp: "inherit" } : {}),
+        ...(mcpAllow.length > 0 ? { agent_mcp_allow: [...mcpAllow] } : {}),
         ...(compactWindow !== undefined ? { auto_compact_window: compactWindow } : {}),
         issue: { number: issue.number, title: issue.title, url: issue.url },
         credentials: creds !== undefined ? "minted" : "none",
@@ -1160,17 +1220,21 @@ function saveScreen(ctx: Ctx, agentId: string, screen: string | null): string | 
   return path;
 }
 
+type McpSource = { source: string; config: unknown };
+
 /**
- * Under `agent_mcp: inherit`, warn (journal + log) when the profile's `.claude.json` or the
- * worktree's `.mcp.json` runs volley-mcp under a name other than `volley`: volleyd's server does
- * not take that entry over, so a second Volley server starts in the agent's session. The spawn
- * goes on; the entry is the owner's to rename or remove.
+ * The MCP servers Claude Code would load for the agent under `agent_mcp: inherit`, lowest
+ * precedence first: the profile's `.claude.json` user scope, the worktree's `.mcp.json` (project
+ * scope), then the repository's local-scope entry in `.claude.json` (which also holds the
+ * `.mcp.json` approvals). A paired machine's are its own. Their entries may hold the user's
+ * secrets: only names ever leave this function's callers.
  */
-async function warnStrayVolley(ctx: Ctx, agentId: string, attempt: number): Promise<void> {
-  const { deps, req } = ctx;
+async function userMcpSources(ctx: Ctx): Promise<[McpSource, McpSource, McpSource]> {
+  const { deps } = ctx;
   const profilePath = deps.remoteTrust !== undefined ? "~/.claude.json" : claudeJsonOf(ctx);
   const profile =
     deps.remoteTrust !== undefined ? await deps.remoteTrust.read() : readClaudeJson(profilePath);
+  const local = (profile as { projects?: Record<string, unknown> } | null)?.projects?.[ctx.root];
   const mcpJson = join(ctx.worktree, ".mcp.json");
   const raw =
     deps.host.readFile !== undefined
@@ -1184,10 +1248,76 @@ async function warnStrayVolley(ctx: Ctx, agentId: string, attempt: number): Prom
   } catch {
     // Not JSON: Claude Code loads nothing from it either.
   }
-  const servers = strayVolleyServers([
+  return [
     { source: profilePath, config: profile },
     { source: ".mcp.json", config: project },
-  ]);
+    { source: `${profilePath} local scope`, config: local ?? null },
+  ];
+}
+
+/**
+ * `agent_mcp_allow` names no server the agent's config has: journal
+ * `alarm_raised { alarm: "agent_mcp_allow_missing", name, host }` once per wave, name and machine
+ * (each machine has its own config), and log it; the spawn goes on without it. `unapproved` are
+ * names the worktree's `.mcp.json` has but the profile never approved for the repository, which
+ * the message says rather than "no server";
+ * `malformed` are names whose entry is of a shape volleyd does not copy (isMcpServerEntry).
+ */
+async function alarmMissingAllowed(
+  ctx: Ctx,
+  missing: readonly string[],
+  unapproved: ReadonlySet<string>,
+  malformed: ReadonlySet<string>,
+): Promise<void> {
+  const { deps, req } = ctx;
+  if (missing.length === 0) return;
+  // One journal scan for every name (it stops once all of them are found).
+  const seen = new Set<string>();
+  deps.journaled?.((e) => {
+    if (
+      e.type === "alarm_raised" &&
+      e.data.alarm === "agent_mcp_allow_missing" &&
+      e.data.host === deps.host.name &&
+      typeof e.data.name === "string" &&
+      missing.includes(e.data.name)
+    )
+      seen.add(e.data.name);
+    return seen.size === missing.length;
+  });
+  for (const name of missing) {
+    if (seen.has(name)) continue;
+    const why = malformed.has(name)
+      ? `volleyd cannot copy MCP server '${name}' (a string command with string args and env, or a string url with string headers)`
+      : unapproved.has(name)
+        ? `the repository's .mcp.json has '${name}' but it is not approved for this repository (enabledMcpjsonServers)`
+        : `no MCP server '${name}' in the profile's .claude.json or the repository's .mcp.json`;
+    const message = `agent_mcp_allow: ${why} on ${deps.host.name}; agents of wave ${req.wave.wave} start without it there`;
+    deps.log?.(message);
+    await deps.journal({
+      type: "alarm_raised",
+      data: { alarm: "agent_mcp_allow_missing", name, host: deps.host.name, message },
+    });
+  }
+}
+
+/**
+ * Under `agent_mcp: inherit`, warn (journal + log) when the profile's `.claude.json` or the
+ * worktree's `.mcp.json` runs volley-mcp under a name other than `volley`: volleyd's server does
+ * not take that entry over, so a second Volley server starts in the agent's session. With
+ * `agent_mcp_allow` only an allowed entry starts, so only one counts. The spawn goes on; the
+ * entry is the owner's to rename or remove.
+ */
+async function warnStrayVolley(
+  ctx: Ctx,
+  agentId: string,
+  attempt: number,
+  sources: { source: string; config: unknown }[],
+  allow: readonly string[],
+): Promise<void> {
+  const { deps, req } = ctx;
+  const servers = strayVolleyServers(sources).filter(
+    (s) => allow.length === 0 || allow.includes(s.name),
+  );
   if (servers.length === 0) return;
   const message = `agent_mcp: inherit: ${agentId} also loads ${servers.map((s) => `'${s.name}' (${s.source})`).join(", ")}, which runs volley-mcp under a name other than 'volley'; rename it to 'volley' so volleyd's server takes it over, or remove it`;
   deps.log?.(message);

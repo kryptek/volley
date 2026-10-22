@@ -128,11 +128,11 @@ describe("merge queue", () => {
     expect(rebasesOf("T1") + rebasesOf("T2") + rebasesOf("T3")).toBe(2);
   });
 
-  it("a refused merge releases the branch: the next task goes, the refused one is marked", async () => {
+  it("a merge refused as behind releases the branch: the next task goes, the refused one is marked", async () => {
     await threeGated();
     await h.tick(); // T1 merged
     await h.tick(); // T2 updating
-    h.world.mergeRefuse = "Pull request is not mergeable: required checks";
+    h.world.mergeRefuse = "Pull request is not mergeable: the head branch is out of date";
     await h.finish("rebase", { task: "T2", head: H2b, ci: "green" });
     expect(mergedPrs()).toEqual([7, 8]);
     expect(h.task("T2")?.stage).toBe("merge_ready");
@@ -148,6 +148,30 @@ describe("merge queue", () => {
     expect(ofType("merge_dequeued").map((e) => e.data.task)).toEqual(["T1"]);
     await h.finish("rebase", { task: "T3", head: H3b, ci: "green" });
     expect(mergedPrs()).toEqual([7, 8, 9]);
+  });
+
+  it("a refusal that is not 'behind' keeps the turn: no branch update, merged on the retry (#311)", async () => {
+    await threeGated();
+    h.world.mergeRefuse = "Pull request is not mergeable: required checks";
+    await h.tick(); // T1's merge is refused
+    expect(mergedPrs()).toEqual([7]);
+    expect(h.events.find((e) => e.data.alarm === "merge_refused")?.data).toMatchObject({
+      reason: "checks",
+      head: H.T1,
+    });
+    expect(h.task("T1")?.stage).toBe("merge_ready");
+    expect(queue()[0]).toMatchObject({ task: "T1", state: "refused" });
+
+    h.world.mergeRefuse = undefined;
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick(); // T1 still holds the turn: checked again (current), re-gated, merged
+    expect(mergedPrs()).toEqual([7, 7]);
+    expect(h.task("T1")?.stage).toBe("done");
+    expect(rebasesOf("T1")).toBe(0);
+    expect(rebasesOf("T2") + rebasesOf("T3")).toBe(0);
+    expect(h.events.some((e) => e.type === "stage_entered" && e.data.stage === "fixup")).toBe(
+      false,
+    );
   });
 
   it("a task after another never merges first, and dependents go first", async () => {

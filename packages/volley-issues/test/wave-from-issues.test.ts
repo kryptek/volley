@@ -64,6 +64,15 @@ const submitLines = (file: string) =>
     "",
   ].join("\n");
 
+describe("--help", () => {
+  it("keeps every line within the help text's wrap width", () => {
+    const r = spawnSync("bun", [HELPER_CLI, "--help"], { encoding: "utf-8" });
+    expect(r.status).toBe(0);
+    const long = r.stdout.split("\n").filter((l) => l.length > 98);
+    expect(long).toEqual([]);
+  });
+});
+
 describe("submitLines", () => {
   it("leaves a plain path and the <wave.yaml> placeholder bare", () => {
     expect(submitLinesFor(".volley/waves/w.yaml", "c")[0]).toBe(
@@ -233,6 +242,18 @@ describe("waveFromIssues", () => {
     const both = waveFromIssues(THREE, { ...OPTS, autopilot: true, branchUpdate: "merge" }).yaml;
     expect(both).toContain('config: {"autopilot":{"enabled":true},"branch_update":"merge"}\n');
     expect(volleydValidate(both).code).toBe(0);
+  });
+
+  it("writes placement: only when pinned, and the pinned wave validates (#324)", () => {
+    expect(waveFromIssues(THREE, OPTS).yaml).not.toContain("placement:");
+    const auto = waveFromIssues(THREE, { ...OPTS, placement: "auto" }).yaml;
+    expect(auto).toContain('placement: "auto"\n');
+    const v = volleydValidate(auto);
+    expect(v.code, v.out).toBe(0);
+    expect(v.out).toContain("placement: auto (wave file)\n");
+    const local = waveFromIssues(THREE, { ...OPTS, placement: "local" }).yaml;
+    expect(local).toContain('placement: "local"\n');
+    expect(volleydValidate(local).code).toBe(0);
   });
 
   it("rejects an invalid wave id before emitting anything", () => {
@@ -459,6 +480,8 @@ describe("wave-from-issues CLI", () => {
         "off",
         "--branch-update",
         "merge",
+        "--placement",
+        "auto",
         "--out",
         out,
       ],
@@ -467,6 +490,7 @@ describe("wave-from-issues CLI", () => {
     expect(r.stderr).toBe(submitLines(out));
     expect(r.status).toBe(0);
     const yaml = readFileSync(out, "utf-8");
+    expect(yaml).toContain('placement: "auto"\n');
     expect(yaml).toContain('merge: "manual"\n');
     expect(yaml).toContain('config: {"autopilot":{"enabled":false},"branch_update":"merge"}\n');
     expect(spawnSync("bun", [VOLLEYD_CLI, "validate", out], { encoding: "utf-8" }).status).toBe(0);
@@ -498,13 +522,14 @@ describe("wave-from-issues CLI", () => {
     );
   });
 
-  it("exits 2 on a --merge, --autopilot or --branch-update value it does not know", () => {
+  it("exits 2 on a --merge, --autopilot, --branch-update or --placement value it does not know", () => {
     const input = join(tmp(), "badflag.json");
     writeFileSync(input, JSON.stringify([{ number: 7, title: "x", body: "deps: none" }]));
     for (const [flag, value] of [
       ["--merge", "yes"],
       ["--autopilot", "true"],
       ["--branch-update", "squash"],
+      ["--placement", "elsewhere"],
     ] as const) {
       const r = spawnSync(
         "bun",

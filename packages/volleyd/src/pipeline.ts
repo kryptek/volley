@@ -27,8 +27,8 @@ import {
 } from "./artifacts";
 import { type ClassifyResult, classify } from "./autopilot/ci-classify";
 import { type GithubStatus, STATUS_UNKNOWN } from "./autopilot/github-status";
-import { mergePr } from "./autopilot/merge";
-import { type QueueEntry, nextToMerge, queueOf } from "./autopilot/merge-queue";
+import { type RefusalReason, isRefusalReason, mergePr } from "./autopilot/merge";
+import { type QueueEntry, nextToMerge, queueOf, refusalEndsTurn } from "./autopilot/merge-queue";
 import type { Role } from "./brief";
 import { systemClock } from "./clock";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "./config-defaults";
@@ -213,6 +213,11 @@ export interface TaskPipeline {
   nudged?: string[];
   /** Autopilot merges GitHub refused at the current gated head (`merge_refused` alarms). */
   merge_refusals?: number;
+  /**
+   * The reason of the last of those refusals (absent for one journaled before reasons were
+   * recorded). Unlike `alarms.merge_refused`, a late refusal of an older head never sets it.
+   */
+  merge_refusal_reason?: RefusalReason | undefined;
   /** Extra attempts the owner granted (`merge_refused` answered `retry`). */
   merge_retries?: number;
   /** The owner answered a `merge_refused` decision `manual`: a human merges this task. */
@@ -461,6 +466,7 @@ export function reducePipeline(
           p.gated.push(d.head_sha);
           // A new gated head: GitHub's refusals of the old one say nothing about it.
           p.merge_refusals = 0;
+          p.merge_refusal_reason = undefined;
           p.merge_retries = 0;
         }
       }
@@ -543,7 +549,10 @@ export function reducePipeline(
     }
     case "agent_retired": {
       const run = isRole(role) ? p.runs[role] : undefined;
-      if (run !== undefined && run.agent_id === d.agent_id && d.status !== "superseded") {
+      // A spawn retry's `superseded` (superseded_by its next attempt) is not the run's end; a
+      // merge's is (mergedActions).
+      const replaced = d.status === "superseded" && d.superseded_by !== undefined;
+      if (run !== undefined && run.agent_id === d.agent_id && !replaced) {
         run.retired = String(d.status);
         // The retained result goes with the retire: a fixup verified later (CI pending at its
         // done, a re-verify answer, an accepted no-CI head) still reports how it resolved things.
@@ -642,8 +651,10 @@ export function reducePipeline(
     case "alarm_raised": {
       if (typeof d.alarm === "string") p.alarms = { ...p.alarms, [d.alarm]: d };
       // Only a refusal of the current gated head counts: a late one for an older head says nothing.
-      if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1))
+      if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1)) {
         p.merge_refusals = (p.merge_refusals ?? 0) + 1;
+        p.merge_refusal_reason = isRefusalReason(d.reason) ? d.reason : undefined;
+      }
       // volleyd's merge ended without merging (refused, or `gh` could not run).
       if (d.alarm === "merge_refused" || (d.alarm === "pipeline_error" && d.check === "merge"))
         p.merge_inflight = undefined;
@@ -884,7 +895,7 @@ export type PipelineEvent =
    */
   | { kind: "supervisor_merged"; sha: string | null; head: string; by?: string }
   /** Autopilot merging: `gh pr merge` exited non-zero for `head` (moved, checks, protection). */
-  | { kind: "merge_refused"; stderr: string; head: string }
+  | { kind: "merge_refused"; stderr: string; head: string; reason?: RefusalReason }
   /**
    * Self-healing CI (SPEC §4.6.16): the fixer of the flake `test` merged and released the task
    * (`remediation_closed`): it takes the fix from the release branch and is verified again.
@@ -1194,9 +1205,14 @@ function onMergeChecked(
   // A human merged the PR, in whatever stage the task is (its open decisions were closed first).
   if (view.state === "MERGED" && view.baseRefName === v.release_branch) {
     const merged = typeof view.headRefOid === "string" ? view.headRefOid : undefined;
-    // Not through the gate: merged at another head, or before the task reached merge_ready.
+    // Not through the gate: merged at another head, or before the task was gated at it. A merge at
+    // the current gated head while a later step runs (a branch update or fixup that has not
+    // pushed, or a task the owner sent back to verify again at that head) is verified (#311).
     const other = merged !== undefined && merged !== head;
-    const unverified = other || v.stage !== "merge_ready";
+    const atGated = head !== undefined && v.p.gated.at(-1) === head;
+    // Off merge_ready the merged head must be read as the gated one: a branch update's agent may
+    // have pushed and merged a head volleyd has not seen yet.
+    const unverified = other || (v.stage !== "merge_ready" && !(atGated && merged === head));
     return [
       ...(unverified
         ? [
@@ -1314,6 +1330,8 @@ function onMergeRefused(
           pr: pr.url,
           head: ev.head,
           stderr: ev.stderr,
+          // Absent: refusalEndsTurn reads it as `behind`, like a refusal journaled before reasons.
+          ...(ev.reason !== undefined ? { reason: ev.reason } : {}),
           attempt: (v.p.merge_refusals ?? 0) + 1,
         },
       },
@@ -1558,8 +1576,11 @@ function mergedActions(
         },
       },
     },
-    // Merged mid-pipeline: whoever is still at work on it stops.
-    ...Object.values(v.p.runs).flatMap(retireIfLive),
+    // Merged mid-pipeline: whoever is still at work on it stops (a branch update or fixup of a
+    // head that merged is superseded by the merge).
+    ...Object.entries(v.p.runs).flatMap(([role, run]) =>
+      retireIfLive(run, role === "rebase" || role === "fixup" ? "superseded" : undefined),
+    ),
     {
       kind: "journal",
       event: { type: "stage_entered", task: v.task, data: { stage: "done", merged: true } },
@@ -1669,9 +1690,9 @@ function onIoFailed(
   return out;
 }
 
-const retireIfLive = (run: RoleRun | undefined): PipelineAction[] =>
+const retireIfLive = (run: RoleRun | undefined, status?: string): PipelineAction[] =>
   run !== undefined && run.retired === undefined
-    ? [{ kind: "retire", agent_id: run.agent_id }]
+    ? [{ kind: "retire", agent_id: run.agent_id, ...(status !== undefined ? { status } : {}) }]
     : [];
 
 function onDone(
@@ -3364,20 +3385,25 @@ class IoTimeout extends Error {}
 
 /**
  * What the daemon checks before a pipeline role spawn (the implementer's spawn is admitted per
- * task by the scheduler): the kill switch, the wave running, T5's admission verdict and the
- * wave's spawn budget. Null: spawn now; a reason: hold it (the next tick asks again). Pure.
+ * task by the scheduler): the kill switch, the wave running, T5's admission verdict, the hard
+ * ceiling (`live`: the agents running or starting, no held slot) and the wave's spawn budget.
+ * Null: spawn now; a reason: hold it (the next tick asks again). Pure.
  */
 export function roleSpawnHold(o: {
   killSwitch: boolean;
   running: boolean;
   admission: number;
   reasons?: string[];
+  live?: number;
+  ceiling?: number;
   used: number;
   budget: number;
 }): string | null {
   if (o.killSwitch) return "kill switch engaged";
   if (!o.running) return "wave not running";
   if (o.admission < 1) return `admission closed: ${(o.reasons ?? []).join(", ") || "no capacity"}`;
+  if (o.live !== undefined && o.ceiling !== undefined && o.live >= o.ceiling)
+    return `hard ceiling reached (${o.live}/${o.ceiling})`;
   if (o.used >= o.budget) return `spawn budget exhausted (${o.used}/${o.budget})`;
   return null;
 }
@@ -3614,7 +3640,7 @@ export class PipelineDriver {
       const holds =
         v !== null &&
         queue.some((e) => e.task === turn.task) &&
-        (v.p.merge_refusals ?? 0) <= turn.refusals &&
+        !((v.p.merge_refusals ?? 0) > turn.refusals && refusalEndsTurn(v.p)) &&
         v.stage !== "awaiting_decision" &&
         v.stage !== "blocked" &&
         turn.branch === branch &&
@@ -4716,7 +4742,7 @@ export class PipelineDriver {
           head: token.head,
           ...(by !== undefined ? { by } : {}),
         }
-      : { kind: "merge_refused", stderr: r.stderr, head: token.head };
+      : { kind: "merge_refused", stderr: r.stderr, head: token.head, reason: r.reason };
   }
 
   /**

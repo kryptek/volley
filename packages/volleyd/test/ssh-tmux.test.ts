@@ -628,6 +628,96 @@ describe("SshTmuxHost", () => {
     });
   });
 
+  it("concurrent prepares on one machine fetch one at a time, even through two host objects", async () => {
+    const log: string[] = [];
+    let n = 0;
+    const fake = fakeExec().on(["ssh"], async (_argv, opts: ExecOptions) => {
+      const s = opts.remote?.steps[0];
+      if (s === undefined) return {};
+      if (argvIs("git", "-C", SPEC.repo, "fetch")(s)) {
+        const i = n++;
+        log.push(`start ${i}`);
+        // Yield long enough for an unlocked second fetch to start.
+        for (let k = 0; k < 20; k++) await Promise.resolve();
+        log.push(`end ${i}`);
+        return {};
+      }
+      return argvIs("git", "-C")(s) && s.argv[3] === "rev-parse" && s.argv[2] !== SPEC.repo
+        ? { code: 128 }
+        : {};
+    });
+    // Two inline specs for one machine are two host objects with one name: one lock.
+    const a = new SshTmuxHost(SPEC, fake.exec);
+    const b = new SshTmuxHost({ ...SPEC }, fake.exec);
+    const spec = (task: string) => ({
+      repo: SPEC.repo,
+      path: `/wt/${task}`,
+      branch: `w1/${task}-implementer-1`,
+      base: "release/w1",
+    });
+    await Promise.all([
+      a.prepareWorktree(spec("T1")),
+      a.prepareWorktree(spec("T2")),
+      b.prepareWorktree(spec("T3")),
+    ]);
+    expect(log).toEqual(["start 0", "end 0", "start 1", "end 1", "start 2", "end 2"]);
+  });
+
+  it("a fetch that lost a ref-lock race is retried once and the spawn goes on, the retry reported", async () => {
+    const race =
+      "error: fetching ref refs/remotes/origin/release/w1 failed: incorrect old value provided";
+    let fetches = 0;
+    const r = remote((s) =>
+      argvIs("git", "-C", SPEC.repo, "fetch")(s)
+        ? fetches++ === 0
+          ? { code: 1, stderr: race }
+          : {}
+        : argvIs("git", "-C", "/wt", "rev-parse", "--is-inside-work-tree")(s)
+          ? { code: 128 }
+          : argvIs("git", "-C", "/wt", "rev-parse", "HEAD")(s)
+            ? { stdout: `${"d".repeat(40)}\n` }
+            : undefined,
+    );
+    const res = await r.host.prepareWorktree({
+      repo: SPEC.repo,
+      path: "/wt",
+      branch: "b",
+      base: "release/w1",
+      releaseBase: true,
+    });
+    expect(fetches).toBe(2);
+    expect(res.base).toEqual({ sha: "d".repeat(40), fresh: true });
+    expect(res.fetch_retried).toBe(race);
+  });
+
+  it("a fetch that never reached origin is BASE_UNREACHABLE, not BASE_STALE", async () => {
+    const r = remote((s) =>
+      argvIs("git", "-C", SPEC.repo, "fetch")(s)
+        ? {
+            code: 128,
+            stderr: "fatal: unable to access 'https://example.com/r/': Could not resolve host",
+          }
+        : argvIs("git", "-C", "/wt", "rev-parse")(s)
+          ? { code: 128 }
+          : undefined,
+    );
+    const err = (await r.host
+      .prepareWorktree({
+        repo: SPEC.repo,
+        path: "/wt",
+        branch: "b",
+        base: "release/w1",
+        releaseBase: true,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      )) as SpawnError;
+    expect(err).toMatchObject({ code: "BASE_UNREACHABLE", permanent: false });
+    expect(err.message).toContain("Could not resolve host");
+    expect(err.message).not.toContain("require_fresh_base false");
+  });
+
   it("a failed worktree add is WORKTREE_FAILED", async () => {
     const r = remote((s) =>
       argvIs("git", "-C", SPEC.repo, "worktree")(s)

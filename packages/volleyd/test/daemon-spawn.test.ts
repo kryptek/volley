@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { memoryOf, vmStatAvailablePct } from "volley-cli/peer/machine";
@@ -11,6 +12,7 @@ import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
 import { ControlClient } from "../src/control";
 import type { Daemon } from "../src/daemon";
 import { decisionTopic } from "../src/decisions";
+import { routedExec } from "../src/git-lock";
 import { makeBufferIO } from "../src/io";
 import { readJournalFile } from "../src/journal";
 import { MACHINE_CHANNEL, type MachineRecord, machineTopic } from "../src/machines";
@@ -37,6 +39,10 @@ import { schemaErrors } from "./helpers/schema";
 
 const ID = "w1-t1-implementer-1";
 
+/** git losing a ref update to a concurrent fetch into the same clone. */
+const RACE =
+  "error: fetching ref refs/remotes/origin/release/w1 failed: incorrect old value provided";
+
 describe("daemon spawn loop", () => {
   let env: DaemonEnv;
   let agent: VolleyBroker;
@@ -52,6 +58,9 @@ describe("daemon spawn loop", () => {
   const sessions = new Set<Promise<void>>();
   /** With `freshBase`: while true, `git fetch origin release/w1` fails (offline). */
   let fetchFails = false;
+  /** With `freshBase`: the next spawn's fetch loses a ref-lock race to another git process. */
+  let fetchRaces = false;
+  let preparing = false;
 
   const journal = (): JournalEvent[] =>
     readJournalFile(join(env.home, "waves", "w1", "journal.jsonl"));
@@ -133,15 +142,22 @@ describe("daemon spawn loop", () => {
       .on(["gh", "pr", "view"], {
         stdout: JSON.stringify({ state: "OPEN", baseRefName: "release/w1" }),
       });
-    fake.on(["git", "-C", repo, "fetch"], () =>
-      fetchFails ? { code: 128, stderr: "fatal: unable to access origin" } : {},
-    );
+    fake.on(["git", "-C", repo, "fetch"], () => {
+      if (fetchRaces && preparing) {
+        fetchRaces = false;
+        return { code: 1, stderr: RACE };
+      }
+      return fetchFails ? { code: 128, stderr: "fatal: unable to access origin" } : {};
+    });
     creds = memoryCredentials();
     host = fakeHost(fake);
     if (o.freshBase === true) {
       const prepare = host.prepareWorktree.bind(host);
       host.prepareWorktree = async (spec) => {
-        const r = await addWorktree(fake.exec, spec);
+        preparing = true;
+        const r = await addWorktree(fake.exec, spec).finally(() => {
+          preparing = false;
+        });
         await prepare(spec);
         return r;
       };
@@ -331,6 +347,28 @@ describe("daemon spawn loop", () => {
     expect(state.payload.tasks[0]?.base_sha).toBe("1".repeat(40));
   });
 
+  it("a fetch that lost a ref-lock race is retried in place: the spawn goes on, fetch_retried journaled", async () => {
+    fetchRaces = true;
+    await setup({ freshBase: true });
+    const spawned = await event("agent_spawned");
+    expect(spawned?.data.base_sha).toBe("1".repeat(40));
+    await event("agent_registered");
+    await waits.settled();
+    expect(fetchRaces).toBe(false);
+    expect(journal().some((e) => e.type === "spawn_failed")).toBe(false);
+    const alarm = journal().find(
+      (e) => e.type === "alarm_raised" && e.data.alarm === "fetch_retried",
+    );
+    expect(alarm?.task).toBe("T1");
+    expect(alarm?.data).toMatchObject({
+      alarm: "fetch_retried",
+      role: "implementer",
+      attempt: 1,
+      host: "local",
+      fetch_error: RACE,
+    });
+  });
+
   it("require_fresh_base off: a failed fetch spawns from the local copy and journals a BASE_STALE warning", async () => {
     fetchFails = true;
     await setup({ freshBase: true, config: "require_fresh_base: false" });
@@ -466,6 +504,8 @@ describe("placement at admission (SPEC §4.6.15)", () => {
   let localClaude: boolean;
   /** The daemon's log lines. */
   let logs: string[];
+  /** What setup started the daemon with (a restart starts it again with the same). */
+  let startOpts: Parameters<DaemonEnv["start"]>[0];
 
   const journal = (wave: string): JournalEvent[] =>
     readJournalFile(join(env.home, "waves", wave, "journal.jsonl"));
@@ -572,7 +612,7 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     );
     clock = fakeClock(1_000_000);
     logs = [];
-    daemon = await env.start({
+    startOpts = {
       clock,
       log: (line) => logs.push(line),
       fleet: {
@@ -595,7 +635,8 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         },
         credentials: memoryCredentials(),
       },
-    });
+    };
+    daemon = await env.start(startOpts);
     waits = journalWait(env.home, () => daemon);
     peer = new VolleyBroker();
     await peer.connect({ url: env.broker.url, agentId: "box" });
@@ -970,20 +1011,262 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     expect(own.payload.memory).toBeUndefined();
   });
 
-  it("a wave that does not opt in journals no placement and runs locally as before", async () => {
+  it("a wave pinned to placement: local journals no placement and runs locally as before", async () => {
     localClaude = true;
     await setup();
-    await submit("w3", "", "  T1: { issue: 42 }\n");
+    await submit("w3", "placement: local\n", "  T1: { issue: 42 }\n");
     await tick();
     await eventually(async () => local.launches.length === 1);
     expect(journal("w3").some((e) => e.type === "task_placed")).toBe(false);
     expect(box?.launches ?? []).toHaveLength(0);
   });
 
+  it("a wave without placement: takes placement.default (auto) with a machine paired, and placement.default: local keeps it here (#324)", async () => {
+    localClaude = true;
+    await setup();
+    await submit("w4", "", "  T1: { issue: 42 }\n");
+    await tick();
+    expect(journal("w4").find((e) => e.type === "task_placed")?.data).toMatchObject({
+      host: "box",
+      by: "auto",
+    });
+    const submitted = journal("w4").find((e) => e.type === "wave_submitted")?.data.wave as {
+      placement?: string;
+      tasks: Record<string, { host: string }>;
+    };
+    expect(submitted.placement).toBe("auto");
+    expect(submitted.tasks.T1?.host).toBe("auto");
+    // The supervisor's config says local: the next such wave stays here.
+    expect((await runCli(["config", "set", "placement.default", "local"], env.env)).exitCode).toBe(
+      0,
+    );
+    await submit("w5", "", "  T1: { issue: 42 }\n");
+    await tick();
+    expect(journal("w5").some((e) => e.type === "task_placed")).toBe(false);
+  });
+
+  it("a later plan version of a wave without placement: keeps the placement its first version got (#324)", async () => {
+    localClaude = true;
+    await setup();
+    await submit("w4", "", "  T1: { issue: 42 }\n");
+    await tick();
+    // The default changes between submits (as pairing or unpairing a machine would change it):
+    // the running wave's unpinned tasks keep where they were decided, so no role of T1 moves.
+    expect((await runCli(["config", "set", "placement.default", "local"], env.env)).exitCode).toBe(
+      0,
+    );
+    await submit("w4", "", "  T1: { issue: 42 }\n  T2: { issue: 42 }\n");
+    const v2 = journal("w4").find((e) => e.type === "wave_versioned")?.data.wave as {
+      placement?: string;
+      tasks: Record<string, { host: string }>;
+    };
+    expect(v2.placement).toBe("auto");
+    // T1 already runs on the box it was placed on: the version keeps it there (#323).
+    expect(v2.tasks.T1?.host).toBe("box");
+    expect(v2.tasks.T2?.host).toBe("auto");
+    // A new wave still takes the supervisor's default.
+    await submit("w5", "", "  T1: { issue: 42 }\n");
+    const w5 = journal("w5").find((e) => e.type === "wave_submitted")?.data.wave as {
+      placement?: string;
+    };
+    expect(w5.placement).toBeUndefined();
+  });
+
+  it("a later version's config: placement.default does not move a wave's kept placement (#324)", async () => {
+    localClaude = true;
+    await setup();
+    expect((await runCli(["config", "set", "placement.default", "local"], env.env)).exitCode).toBe(
+      0,
+    );
+    await submit("w7", "", "  T1: { issue: 42 }\n");
+    // Only an explicit placement: changes a known wave's placement, never its config: default.
+    await submit("w7", "config:\n  placement:\n    default: auto\n", "  T1: { issue: 42 }\n");
+    const v2 = journal("w7").find((e) => e.type === "wave_versioned")?.data.wave as {
+      placement?: string;
+      tasks: Record<string, { host: string }>;
+    };
+    expect(v2.placement).toBeUndefined();
+    expect(v2.tasks.T1?.host).toBe("local");
+    await tick();
+    expect(journal("w7").some((e) => e.type === "task_placed")).toBe(false);
+  });
+
+  it("run prints no placement preview for a later version of a local wave without placement: (#324)", async () => {
+    localClaude = true;
+    await setup();
+    expect((await runCli(["config", "set", "placement.default", "local"], env.env)).exitCode).toBe(
+      0,
+    );
+    await submit("w6", "", "  T1: { issue: 42 }\n");
+    // The default turns auto, but the running wave keeps local: no "if admitted now" for it.
+    expect((await runCli(["config", "set", "placement.default", "auto"], env.env)).exitCode).toBe(
+      0,
+    );
+    const file = join(env.home, "w6.yaml");
+    writeFileSync(
+      file,
+      `wave: w6\nrepo: ${repo}\nrelease_branch: release/w6\nmodel: claude-opus-5-5\npipeline: [implement, spec_review]\ntasks:\n  T1: { issue: 42 }\n  T2: { issue: 42 }\n`,
+    );
+    const r = await runCli(["run", file], env.env);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("plan v2");
+    expect(r.stdout).not.toContain("if admitted now");
+    expect(r.stdout).not.toContain("placement preview");
+  });
+
+  describe("peer_idle_under_load (#324)", () => {
+    // Load 10 per core on the own machine: over placement.load_per_core_max (1.5).
+    const cores = Math.max(1, availableParallelism());
+    /** The own machine's load per core (HOT_OS reads it on every sample). */
+    let perCore = 10;
+    // Every test starts hot, whatever the one before it left.
+    beforeEach(() => {
+      perCore = 10;
+    });
+    const HOT_OS = {
+      ...CALM_OS,
+      loadavg: () => [cores * perCore, cores * perCore, cores * perCore],
+    };
+    const cleared = (wave: string) =>
+      journal(wave).filter(
+        (e) => e.type === "alarm_cleared" && e.data.alarm === "peer_idle_under_load",
+      );
+    /** Past `machine_heartbeat_ms`: the own record is re-sampled. */
+    const resample = async () => {
+      await tick(DAEMON_DEFAULTS.machine_heartbeat_ms);
+      await tick();
+    };
+    const alarms = (wave: string) =>
+      journal(wave).filter(
+        (e) => e.type === "alarm_raised" && e.data.alarm === "peer_idle_under_load",
+      );
+
+    it("a local wave on an overloaded supervisor with a ready peer free: raised once, shown in status", async () => {
+      localClaude = true;
+      await setup({ os: HOT_OS });
+      await submit("w1", "placement: local\n", "  T1: { issue: 42 }\n");
+      await tick();
+      await tick();
+      await tick();
+      expect(alarms("w1")).toHaveLength(1);
+      // The box's max_agents is derived from its record: 16 cores, 64 GB → 5.
+      expect(alarms("w1")[0]?.data).toMatchObject({ peer: "box", free: 5 });
+      expect(String(alarms("w1")[0]?.data.message)).toMatch(
+        /^this machine is overloaded \(load [\d.]+ on \d+ cores, max 1\.5 per core\) while box is ready with 5 free agent slots; this wave is placement: local/,
+      );
+      const st = (await env.retained("volley/_waves/w1/state")) as {
+        payload: { alarms?: { alarm: string }[] };
+      };
+      expect(st.payload.alarms).toEqual([
+        { alarm: "peer_idle_under_load", message: alarms("w1")[0]?.data.message },
+      ]);
+      expect(schemaErrors("wave-state.schema.json", st)).toEqual([]);
+      expect((await runCli(["status", "w1"], env.env)).stdout).toContain(
+        "  ! peer_idle_under_load: this machine is overloaded",
+      );
+      // An auto wave places onto the box itself: no alarm.
+      await submit("w2", "placement: auto\n", "  T1: { issue: 42 }\n");
+      await tick();
+      expect(alarms("w2")).toHaveLength(0);
+    });
+
+    it("cleared once the supervisor calms down, and not raised again for the wave", async () => {
+      localClaude = true;
+      perCore = 10;
+      await setup({ os: HOT_OS });
+      await submit("w1", "placement: local\n", "  T1: { issue: 42 }\n");
+      await tick();
+      expect(alarms("w1")).toHaveLength(1);
+      perCore = 0.1;
+      await resample();
+      expect(cleared("w1")).toHaveLength(1);
+      const st = (await env.retained("volley/_waves/w1/state")) as {
+        payload: { alarms?: unknown[] };
+      };
+      expect(st.payload.alarms).toBeUndefined();
+      expect((await runCli(["status", "w1"], env.env)).stdout).not.toContain(
+        "peer_idle_under_load",
+      );
+      // Overloaded again: once per wave, so nothing new.
+      perCore = 10;
+      await resample();
+      expect(alarms("w1")).toHaveLength(1);
+      expect(cleared("w1")).toHaveLength(1);
+    });
+
+    it("a wave's own lower load_per_core_max holds the alarm: not cleared on the next tick", async () => {
+      localClaude = true;
+      perCore = 1.2;
+      await setup({ os: HOT_OS });
+      await submit(
+        "w1",
+        "placement: local\nconfig:\n  placement:\n    load_per_core_max: 1.0\n",
+        "  T1: { issue: 42 }\n",
+      );
+      await tick();
+      expect(alarms("w1")).toHaveLength(1);
+      await resample();
+      await resample();
+      expect(cleared("w1")).toHaveLength(0);
+      perCore = 0.5;
+      await resample();
+      expect(cleared("w1")).toHaveLength(1);
+    });
+
+    it("cleared when a later plan version switches the wave to placement: auto, still overloaded", async () => {
+      localClaude = true;
+      await setup({ os: HOT_OS });
+      await submit("w1", "placement: local\n", "  T1: { issue: 42 }\n");
+      await tick();
+      expect(alarms("w1")).toHaveLength(1);
+      await submit("w1", "placement: auto\n", "  T1: { issue: 42 }\n  T2: { issue: 42 }\n");
+      await resample();
+      expect(cleared("w1")).toHaveLength(1);
+      expect(alarms("w1")).toHaveLength(1);
+    });
+
+    it("a restart does not raise it again: the journal says it was raised", async () => {
+      localClaude = true;
+      perCore = 10;
+      await setup({ os: HOT_OS });
+      await submit("w1", "placement: local\n", "  T1: { issue: 42 }\n");
+      await tick();
+      expect(alarms("w1")).toHaveLength(1);
+      await daemon.stop();
+      daemon = await env.start(startOpts);
+      await heartbeat();
+      await tick();
+      await resample();
+      await resample();
+      expect(alarms("w1")).toHaveLength(1);
+      const st = (await env.retained("volley/_waves/w1/state")) as {
+        payload: { alarms?: { alarm: string }[] };
+      };
+      expect(st.payload.alarms?.map((a) => a.alarm)).toEqual(["peer_idle_under_load"]);
+    });
+
+    it("not when the peer is drained", async () => {
+      localClaude = true;
+      await setup({ os: HOT_OS, drain: true });
+      await submit("w1", "placement: local\n", "  T1: { issue: 42 }\n");
+      await tick();
+      await tick();
+      expect(alarms("w1")).toHaveLength(0);
+    });
+
+    it("not while the supervisor is calm", async () => {
+      localClaude = true;
+      await setup();
+      await submit("w1", "placement: local\n", "  T1: { issue: 42 }\n");
+      await tick();
+      expect(alarms("w1")).toHaveLength(0);
+    });
+  });
+
   it("switching a running wave to placement: auto: a task running locally keeps its host, the unstarted one is placed (#323)", async () => {
     localClaude = true;
     await setup();
-    await submit("w8", "", "  T1: { issue: 42 }\n");
+    await submit("w8", "placement: local\n", "  T1: { issue: 42 }\n");
     await tick();
     await eventually(async () => journal("w8").some((e) => e.type === "agent_spawned"));
     expect(journal("w8").find((e) => e.type === "agent_spawned")?.data.host).toBe("local");
@@ -1007,8 +1290,8 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       pipelineFor(w: string): { deps: { execFor(task: string): unknown } };
     };
     const { execFor } = d.pipelineFor("w8").deps;
-    expect(execFor("T1")).toBe(local.exec);
-    expect(execFor("T2")).toBe(box?.exec);
+    expect(routedExec(execFor("T1"))).toBe(local.exec);
+    expect(routedExec(execFor("T2"))).toBe(box?.exec);
     const t1 = (await state("w8")).tasks.find((t) => t.id === "T1");
     expect(t1?.host).toBeUndefined();
     expect(t1).toMatchObject({ host_actual: "local", host_planned: "auto" });
@@ -1028,8 +1311,8 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       pipelineFor(w: string): { deps: { execFor(task: string): unknown } };
     };
     const { execFor } = d.pipelineFor("w9").deps;
-    expect(execFor("T1")).toBe(local.exec);
-    expect(execFor("T1")).toBe(local.exec);
+    expect(routedExec(execFor("T1"))).toBe(local.exec);
+    expect(routedExec(execFor("T1"))).toBe(local.exec);
     await eventually(async () =>
       journal("w9").some(
         (e) => e.type === "alarm_raised" && e.data.alarm === "host_auto_unresolved",

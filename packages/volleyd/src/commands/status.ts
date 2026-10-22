@@ -21,9 +21,10 @@ A placed task shows its host and, under it, every machine the supervisor conside
 best first, with its score and the supervisor's one-line why.
 Without a wave, a first line counts the broker's agent logins (as last re-read: after each
 mint, delete and sweep, and every 30 s), and how many the credential sweeps deleted in total
-(--json: agent_logins). With a paired machine configured, the next says how the supervisor's
-own machine takes auto-placed tasks (fleet.local_agents) and whether it is the fallback now
-(--json: local_agents).
+(--json: agent_logins), then the hard ceiling's count, the agents volleyd runs or is starting
+in every wave against hard_ceiling (--json: ceiling { live, max }). With a paired machine
+configured, the next says how the supervisor's own machine takes auto-placed tasks
+(fleet.local_agents) and whether it is the fallback now (--json: local_agents).
 `;
 
 export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> {
@@ -59,6 +60,7 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     const kill = (res.result as { kill_switch?: boolean }).kill_switch === true;
     const logins = (res.result as { agent_logins?: { live: number; swept: number } }).agent_logins;
     const localAgents = (res.result as { local_agents?: LocalAgentsView }).local_agents;
+    const ceiling = (res.result as { ceiling?: { live: number; max: number } }).ceiling;
     let decisions: DecisionPayload[] = [];
     let caller: string | null = null;
     if (states.some((s) => s.open_decisions.length > 0)) {
@@ -69,6 +71,7 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     io.stdout(
       (kill ? "KILL SWITCH ENGAGED: run is refused until `volleyd resume --all`\n" : "") +
         (logins !== undefined ? `${formatLogins(logins)}\n` : "") +
+        (ceiling !== undefined ? `hard ceiling: ${ceiling.live}/${ceiling.max}\n` : "") +
         (localAgents !== undefined ? `${formatLocalAgents(localAgents)}\n` : "") +
         (states.length === 0
           ? "no waves\n"
@@ -140,7 +143,7 @@ function parseStatus(argv: string[]) {
  * (in `ctx.decisions`) wait on K tasks, names the agent a coordinator-name owner acts through
  * (`owner: coord-main (via coordinator-c7d9)`), gains `needs you: N` when `caller` owns the wave
  * (or is that agent) and N decisions are open, and ends with `alarms: N`, the tasks whose spawn
- * failed and is unrecovered.
+ * failed and is unrecovered or hold an alarm, plus the wave's own alarms (each on a `!` line).
  */
 export function formatWave(
   s: WaveState,
@@ -172,9 +175,12 @@ export function formatWave(
       ? `plan v${s.version} (${pending} task${pending === 1 ? "" : "s"} pending decision)`
       : `plan v${s.version}`;
   // Open alarms: tasks whose spawn failed and has not recovered since, or with an alarm that holds.
-  const alarms = s.tasks.filter(
-    (t) => t.last_error !== undefined || (t.alarms ?? []).length > 0,
-  ).length;
+  // And the wave's own (peer_idle_under_load), each shown under the header.
+  const waveAlarms = s.alarms ?? [];
+  const alarms =
+    s.tasks.filter((t) => t.last_error !== undefined || (t.alarms ?? []).length > 0).length +
+    waveAlarms.length;
+  const waveAlarmLines = waveAlarms.map((a) => `  ! ${a.alarm}: ${a.message}\n`).join("");
   const header =
     `${s.wave}  ${s.status}  ${version}  owner: ${owner}  ` +
     `tasks: ${s.tasks.length}  gates: ${s.gates.length}  decisions: ${open}${needs}  alarms: ${alarms}\n`;
@@ -234,6 +240,7 @@ export function formatWave(
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
   return (
     header +
+    waveAlarmLines +
     archived +
     queue +
     release +

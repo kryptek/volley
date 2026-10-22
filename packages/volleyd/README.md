@@ -119,7 +119,8 @@ tasks:
 # config: { hard_ceiling: 4 }  # per-wave overrides of any tunable but lease_pools (see Configuration)
 # brief_preface: .volley/brief-preface.md  # the default; relative to repo, or absolute (see Brief preface)
 # account: work              # the Claude account its agents run under (see Claude accounts)
-# placement: auto            # place every task without a host: across machines (see Fleet: placement)
+# placement: auto            # place every task without a host: across machines, or local to keep
+#                            # them here; default: placement.default (auto once a machine is paired)
 # placement_prefer: [box-a]  # machines placement ranks first
 # placement_avoid: [box-c]   # machines placement uses only when nothing else is eligible
 # merge: manual              # who merges a gated PR: auto (volleyd, at exactly the gated head) or
@@ -128,7 +129,7 @@ tasks:
 
 Per task: `issue` (required), `after`, `pipeline`, `model`, `title`, `host` (where its agents run:
 `local`, a configured host's name, an inline ssh host, or `auto` to have volleyd place it; default
-`local`, or `auto` under `placement: auto`), `heavy` (`true`: placement needs a free per-machine
+`auto` when the wave's placement is `auto`, else `local`), `heavy` (`true`: placement needs a free per-machine
 slot in each of the wave's `heavy_pools`), `account` (overrides the wave's; see
 [Claude accounts](#claude-accounts)), and `files` (a scheduling hint: paths the task will touch;
 tasks overlapping active ones start later).
@@ -176,7 +177,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd ack <wave> --cursor <name> --seq <N>` | Advance the cursor to `N`. Ack **after** acting, so a crash replays. |
 | `volleyd config get [path] [--wave <id>] [--json]` | Effective config (or one dotted path), optionally with a wave's overrides. |
 | `volleyd config set <path> <value> [--by <who>]` | Change a tunable at runtime (validated, journaled, hot-applied). `<value>` is YAML. |
-| `volleyd admission [wave] [--json]` | The current spawn admission verdict: throttled or not, why, every pressure signal, per-wave verdicts (with a wave: that wave's only). |
+| `volleyd admission [wave] [--json]` | The current spawn admission verdict: throttled or not, why, what the hard ceiling counts (`ceiling: 4/12 live agents · 2 launching · by wave: w1 3, w2 1`), every pressure signal, per-wave verdicts (with a wave: that wave's only). |
 | `volleyd spawn <wave> <task> [--role <role>] [--json]` | Spawn one agent now, outside admission. Returns once it is launched or refused (`SPAWN_LOCKED`, …); the daemon then verifies it. |
 | `volleyd cleanup <wave> [--yes] [--force] [--all]` | Remove retired agents' cmux workspaces and worktrees of tasks that are `done` or `cancelled` (an unfinished task prints `skip <task>: <stage>`; `--all` includes it). Without `--yes` only prints the plan. Branches are kept. |
 
@@ -217,8 +218,21 @@ and work while the daemon is down; use the wave `_system` for global events (`co
 - **Scheduler** (`src/scheduler.ts`): `ready` = queued, not admitted, every `after` done; ordered
   by critical path length (longest downstream chain first), then by `files` overlap with active
   tasks, then id. `admit` takes an admission verdict `{ allow, reasons }` (pressure-based
-  admission plugs in here later) and never exceeds the hard ceiling (live agents across all waves)
-  or the wave's spawn budget. Lowering a limit admits nothing new and preempts nothing.
+  admission plugs in here later) and never exceeds the hard ceiling or the wave's spawn budget.
+  The hard ceiling counts the agents volleyd runs or is starting, across all waves and machines:
+  supervised, launched and being verified, spawning (a release stage's agent too), and one slot
+  for each admitted task of a running wave with no agent live that will spawn its next one:
+  queued for its first agent (backed off too, not once refused for good), or between pipeline
+  roles in `implement`…`fixup` with a role still to come (none of the step's roles refused for
+  good, and no agent of it retired unverified unless its respawn is on the way). Those held
+  slots keep admission from handing a new task the slot of a task whose reviewers or fixup are
+  still to come. A pipeline role's spawn (held as
+  `hard ceiling reached (n/m)`) and a task's first agent (a retry, a resumed wave's backlog)
+  start only while the agents running or starting leave room under the ceiling; held slots never
+  hold a spawn, so tasks waiting on each other's slots never all wait. A task's stage counts
+  nothing otherwise: a task awaiting a decision or blocked, or one in a paused, stopped or ended
+  wave, holds a slot only while one of its agents is live. Lowering a limit admits nothing new
+  and preempts nothing.
   Unadmitted ready tasks show the reasons in `why_waiting`, e.g. `hard ceiling reached: 2/2 live agents`.
 - **Restart**: the daemon reopens every journal under `$VOLLEYD_HOME/waves/`, re-publishes each
   wave's state, and resumes admission.
@@ -312,7 +326,8 @@ that the scheduler applies on top of the hard ceiling and spawn budget:
 - **Reasons everywhere**: the verdict's reasons become `why_waiting` on the wave's ready tasks
   (`memory pressure critical (level 4 > max 2)`), joined by the ceiling/budget reasons, and are
   published retained on `volley/_system/admission` (`spec/schemas/admission.schema.json`) with
-  every signal's value and threshold. `volleyd admission` prints it.
+  every signal's value and threshold, and the hard ceiling's count (`ceiling`). `volleyd admission`
+  prints it; `volleyd status` heads its output with `hard ceiling: 4/12`.
 - **Hot**: thresholds are read from the config store per wave (`config:` overrides apply); a
   `config_set` re-decides the last sample with the new thresholds immediately.
 
@@ -663,6 +678,19 @@ disagree, a merge conflict, an agent blocked, a plan change. It is a journal eve
   supervisor's disk. A failed write is logged, journaled once per decision as `alarm_raised
   { alarm: "decisions_file_unwritten", decision_id, path, error }`, and the answer omits `brief`;
   the resolution itself stands. Resolving an unknown id is an error; resolving twice is a no-op.
+- **Answers it cannot apply are refused.** An answer is one of the decision's options (case and
+  spacing aside) or free-form text, except for the kinds the supervisor carries out itself, where
+  an answer it cannot apply is refused with code `BAD_ANSWER` (`volleyd resolve` and `volleyd
+  inbox answer` exit 3) and nothing is journaled; the Desk's inbox gets the same refusal:
+
+  | kind | answers |
+  | --- | --- |
+  | `spawn_budget_exhausted` | `raise by <n>` (any n ≥ 1; `raise <n>` is read as `raise by <n>` and journaled so), `cancel` |
+  | `machine_down` | its options only: `wait`, `re-place queued tasks`, `cancel` |
+  | `repo_untrusted` | `trust`, `cancel` |
+
+  For example `volleyd resolve <id> raise` is refused with `"raise" is not one of raise by 12 /
+  cancel (write "raise by <n>")`. A pipeline's own decisions keep asking again themselves.
 
 Open decisions survive a restart (they are re-published from the journal), and a restart clears
 the retained topic of every resolved one, in case the daemon died between the two.
@@ -1229,7 +1257,8 @@ becomes claimable only after a full `claim_after_s`. A claim must name a stable 
   with `workspace_closed: false`). A stopped wave can be resumed explicitly; resumed within the
   grace, its agents carry on and their screens are captured again. Known gap until the pipeline stages can respawn: `stop` journals
   no `task_cancelled`, so after `resume` the tasks that were running come back as active (still
-  in their stage, counting against `hard_ceiling`) with no agent working them.
+  in their stage) with no agent working them; one whose step has a role still to spawn holds a
+  `hard_ceiling` slot, one whose agent retired unverified holds none.
 - `stop --all` is the **kill switch**: the switch is journaled in `_system` first (so it holds
   even if the daemon dies part-way, and survives restarts), every wave stops, and the daemon refuses `run` with `kill switch engaged` until
   `resume --all`, and spawns nothing (neither admitted tasks nor `volleyd spawn`). Anyone may
@@ -1409,12 +1438,13 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
 | `require_fresh_base` | spawns after the change ([base ref](#base-ref)) | worktrees already cut untouched |
 | `retire_close_session` | retires after the change ([retire and cleanup](#retire-and-cleanup)) | sessions already kept open stay open |
+| `placement.default` | the next submitted wave without `placement:` ([the default](#fleet-placement)) | waves already submitted, and their later plan versions, keep their placement |
 | `placement.nudge_on_merge` | the next merge ([the merge nudge](#the-pipeline-and-the-merge-ready-gate)) | nudges already sent stand |
 | `fleet.local_agents`, `fleet.fallback.*` | the next placement ([the supervisor's own machine as a fallback](#the-supervisors-own-machine-as-a-fallback)) | agents already on this machine keep running there; nothing is moved |
 | `autopilot.merge` | the next gate of a wave whose file has no `merge:` ([autopilot merging](#autopilot-merging)) | a gate already entered keeps the mode its evidence names until it is gated again |
 | `autopilot.merge_retry_max` | the next refused merge ([autopilot merging](#autopilot-merging)) | refusals already counted stand |
 | `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
-| `agent_mcp` | spawns after the change | running agents keep the MCP servers they launched with |
+| `agent_mcp`, `agent_mcp_allow` | spawns after the change | running agents keep the MCP servers they launched with |
 | `agent_auto_compact_pct` | spawns after the change | running agents keep the window they launched with |
 | `public_hygiene` | the next wave version (`run` of a new wave, or a new version of a live one) | the level journaled for the current version holds for its reviewers and their results |
 | `archive_ended_after_h`, `archive_on_ack` | the next tick (and the next `wave_complete` answer) | archived waves stay archived ([Archiving](#archiving)) |
@@ -1441,7 +1471,7 @@ lists every key with its default and example pools, commented out.
 |---|---|---|---|
 | 0 | **Repo trust**: is the repo root trusted in `~/.claude.json` (`projects[<root>].hasTrustDialogAccepted`, or a parent's)? | `trust.ts` | untrusted → decision `repo_untrusted` ("Needs you: trust `<repo>` for dispatch?"), the wave's spawns park on it |
 | 1 | **Lock** `$VOLLEYD_HOME/locks/<worktree-hash>.lock`, `O_EXCL` | `locks.ts` | `SPAWN_LOCKED` |
-| 2 | **Worktree** `git -C <repo> worktree add <worktree_root>/<wave>/<task>-<role> -b <wave>/<task>-<role>-<attempt> <base>`, `<base>` the release branch as origin has it ([base ref](#base-ref)); `.volley/` and `/ISSUE.md` appended to the repo's `info/exclude` once | `worktree.ts` | `BASE_STALE`, `RELEASE_BRANCH_MISSING`, `WORKTREE_FAILED` |
+| 2 | **Worktree** `git -C <repo> worktree add <worktree_root>/<wave>/<task>-<role> -b <wave>/<task>-<role>-<attempt> <base>`, `<base>` the release branch as origin has it ([base ref](#base-ref)); `.volley/` and `/ISSUE.md` appended to the repo's `info/exclude` once | `worktree.ts` | `BASE_STALE`, `BASE_UNREACHABLE`, `RELEASE_BRANCH_MISSING`, `WORKTREE_FAILED` |
 | 3 | **ISSUE.md** from `gh issue view <n> --json number,title,body,url`, `<n>` from the wave file only | `issue.ts` | `ISSUE_MISMATCH`, `ISSUE_FETCH_FAILED` |
 | 4 | **Brief** the [brief preface](#brief-preface), then `briefs/<role>.md.tmpl` → `.volley/brief.md`, then the brief gate | `brief.ts` | `BRIEF_PREFACE_TOO_LARGE`, `SPAWN_BRIEF_REJECTED` |
 | 5 | **Identity** one Dynamic Security `createClient` (username = agent id, role `volley-agent`), batched with the wave's other mints → `.volley/agent.json` (mode 0600) | `identity.ts`, `dynsec.ts` | `CREDENTIALS_FAILED` |
@@ -1468,7 +1498,18 @@ volleyd runs `git -C <repo> fetch origin <release_branch>`, then picks the base:
 | neither | refused: `RELEASE_BRANCH_MISSING: <repo> has neither <b> nor origin/<b> — push it first` |
 
 `git fetch` is bounded (30 s) and never prompts for credentials; a timeout counts as a failed
-fetch. A failed fetch (offline, no remote, a timeout) refuses the spawn while
+fetch. Fetches into one clone run one at a time: every fetch volleyd runs (a spawn's, on either
+host, a continued branch's check, the pipeline's artifact probes, the release train's stage
+check) holds a lock keyed by the machine (`local`, or the host's name) and the clone's path, so
+tasks admitted on the same tick do not race each other's ref updates. A fetch's timeout starts
+once it holds the lock, so a fetch queued behind others can wait longer than one timeout. A fetch that loses a ref-lock race to another git process
+(`incorrect old value provided`, `cannot lock ref`, `Unable to create '….lock'`) is retried once
+after 500 ms before anything is decided; when the retry succeeds the spawn goes on and the wave
+journals `alarm_raised { alarm: "fetch_retried", role, attempt, host, fetch_error }`. A fetch that
+never reached origin (`Could not resolve host`, `Connection timed out`, `Connection refused`,
+`Network is unreachable`) refuses the spawn with `BASE_UNREACHABLE` while `require_fresh_base` is
+on, a transient [spawn failure](#spawn-failures-and-retries) retried with the usual backoff. Any
+other failed fetch (no remote, a timeout, a ref origin lacks) refuses the spawn while
 `require_fresh_base` is on (the default, on every host): `BASE_STALE: git fetch origin <b> failed
 in <repo> (<git's first line>); … Fix: …`, a [spawn failure](#spawn-failures-and-retries) like any
 other, retried with the usual backoff, so no agent starts from a stale copy of the release branch.
@@ -1585,7 +1626,7 @@ random-suffixed coordinator is dropped, SPEC §4.4).
 exports `VOLLEY_HOOKS_DIR=<checkout>/packages/volley-hooks` and
 `CLAUDE_CODE_AUTO_COMPACT_WINDOW=<tokens>` (`agent_auto_compact_pct`, below) and execs
 `claude --dangerously-skip-permissions --model <model> --settings <hooks settings template> --strict-mcp-config --mcp-config=<worktree>/.volley/mcp.json --name <id> -- "$(cat .volley/brief.md)"`
-(without `--strict-mcp-config` under `agent_mcp: inherit`, below).
+(without `--strict-mcp-config` under `agent_mcp: inherit` with no `agent_mcp_allow`, below).
 The hooks come in through `--settings`. Just before the exec it checks `claude` is on the
 session's `PATH`: if not it prints `volleyd: cannot start the agent: claude is not on this
 session's PATH (<PATH>)` with the fix and keeps the session open, so the screen volleyd reads
@@ -1616,9 +1657,43 @@ named `volley`. volleyd warns at each `inherit` spawn that has one in the profil
 `mcpServers` or the worktree's `.mcp.json` (it logs it and journals
 `alarm_raised { alarm: "agent_mcp_stray_volley", servers }`; the spawn goes on). The trade-off:
 more tools, but an agent whose tool set depends on the machine and on servers that may prompt,
-fail to connect or slow its start. The fence accepts both forms and nothing else;
+fail to connect or slow its start. The fence accepts both forms and nothing else (under
+`agent_mcp_allow`, an `mcp.json` may also carry the copied servers after `volley`, each a stdio
+entry with a string `command` or a remote one with a string `url`);
 `agent_spawned` records `agent_mcp: "inherit"` when it applies, and a respawn of a moved or
-vanished agent keeps the servers it launched with. The cmux command starts with two spaces, which keeps it out of shell history and away
+vanished agent keeps the servers it launched with.
+
+**`agent_mcp_allow: [<name>, …]`** (a tunable, global or in a wave's `config:`; default `[]`,
+every server). A repository usually needs one or two of the user's servers, and under `inherit`
+every agent starts all of them (each its own process: with many agents, a real share of the
+machine's load). A non-empty list under `inherit` starts only those: volleyd copies each named
+entry into `.volley/mcp.json` after its own `volley` and launches with `--strict-mcp-config`
+again. It reads them where Claude Code would: the profile's `.claude.json` (`mcpServers`, user
+scope; then the repository's `projects.<repo>.mcpServers`, local scope) and the worktree's
+`.mcp.json` (project scope), the narrower scope winning a name (local over project over user).
+A `.mcp.json` entry is copied only when the profile approved it for the repository, as Claude Code
+asks before starting one: named in `projects.<repo>.enabledMcpjsonServers`, or under
+`enableAllProjectMcpServers: true`, and not in `disabledMcpjsonServers` (only the approvals in
+`.claude.json` count: one set in a settings file, `.claude/settings.local.json` or
+`~/.claude/settings.json`, is not read, and the entry is alarmed as not approved). The file comes from the
+branch checked out (for a reviewer or a fixup, a PR head a contributor controls), and the strict
+copy would otherwise skip that approval; an unapproved entry is ignored, so the user's own entry
+of that name stays. A paired machine's are read from its own `~/.claude.json` and worktree. A name found in none of them
+is skipped (the spawn goes on), logged and journaled once per wave and machine as
+`alarm_raised { alarm: "agent_mcp_allow_missing", name, host }` (its message says when the name is in
+`.mcp.json` but not approved for the repository); servers a plugin or a claude.ai
+connector brings are in none of these files, so they cannot be allowed by name. A copied entry
+may hold the user's secrets (an `env` token): it is written only to the agent's `mcp.json`, and
+only names reach the journal and the log. `agent_spawned` records the list as
+`agent_mcp_allow`, and `volleyd validate` prints `agent_mcp: inherit (allow: migrations,
+playwright)`. With a list, the stray-`volley` warning above only counts an allowed entry.
+
+The cmux command starts with two spaces, which keeps it out of shell history and away
+from prompts that eat the first character. Nothing else is typed into the pane, with two
+exceptions: the Enter that answers an update prompt and the relaunch after it (below), and the
+Escape that `volleyd stop` sends. The brief never appears in an argv.
+
+The cmux command starts with two spaces, which keeps it out of shell history and away
 from prompts that eat the first character. Nothing else is typed into the pane, with three
 exceptions: the Enter that answers an update prompt and the relaunch after it (below), the
 Escape that `volleyd stop` sends, and the wake line `Check your Volley mailbox.` + Enter for an
@@ -1855,9 +1930,14 @@ is enough to finish with no retry at all plus headroom: the roles of every task'
 least 2), or `spawn_budget_multiplier` × task count when that is more. A wave file's
 `spawn_budget:` overrides both. Exhaustion is never silent: a spawn the budget holds opens one
 `spawn_budget_exhausted` decision (`raise by <n>` | `cancel`; on a task it parks the task, so its
-`why_waiting` names the decision). `raise by <n>` adds n spawns to the wave's budget (journaled
-with the answer, so it survives a restart) and the next tick spawns; `cancel` cancels the task (a
-wave-level one stops the wave).
+`why_waiting` names the decision). The offered n is sized for the wave, not the one spawn: the
+spawns its unfinished tasks still need to finish their pipelines (each implement and review stage
+not spawned yet, plus one fixup allowance per task), at least a quarter of the derived budget,
+and no more than `autopilot.budget_raise_max` × the derived budget allows (while that leaves room
+for one), so one raise lets every held spawn through. `raise by <n>` (or `raise <n>`, any n ≥ 1)
+adds n spawns to the wave's budget (journaled with the answer, so it survives a restart) and the
+next tick spawns; `cancel` cancels the task (a wave-level one stops the wave); any other answer
+is refused (`BAD_ANSWER`).
 
 ### Retire and cleanup
 
@@ -1984,7 +2064,8 @@ the wave repo at `repo` (its `origin` must have the release branch) and a volley
 - The agent's MCP server is the box's `volley_dir` checkout (`.volley/mcp.json` runs its
   `packages/volley-mcp/src/index.ts` with `bun`), so `bun` must be on the non-interactive ssh
   `PATH` too, and that checkout must be this release with `bun install` run. User-scope MCP
-  servers on the box are not loaded (`--strict-mcp-config`), unless `agent_mcp` is `inherit`. The
+  servers on the box are not loaded (`--strict-mcp-config`), unless `agent_mcp` is `inherit`
+  (with `agent_mcp_allow`, only the named ones, read from the box's own config). The
 daemon's machine needs key-based, non-interactive ssh to `target` (`BatchMode=yes`: a password
 or host-key prompt fails the command). `remote_port` (default 21883) must be free on the box's
 loopback: a box that runs its own MQTT broker usually has 1883 taken, and a forward that cannot
@@ -2002,7 +2083,7 @@ through `base64 -d`. The spawn steps are those of the local host, with these dif
 |---|---|
 | Repo trust | the box's own `~/.claude.json`, read at every spawn (only the trust bits); an untrusted repo opens `repo_untrusted` with `host` and `target` (see below) |
 | Lock | `$VOLLEYD_HOME/hosts/<target>/locks/` — keyed by target and worktree path |
-| Worktree | `git -C <repo> fetch origin <release_branch>`, then `worktree add … origin/<release_branch>` on the box; no clone at `repo` → decision `remote_repo_missing` naming the path (an ssh failure is not "no clone": the spawn is refused with `LAUNCH_FAILED` and retried with backoff) |
+| Worktree | `git -C <repo> fetch origin <release_branch>` (one fetch into the box's clone at a time, the same lock and ref-lock retry as on this machine: [base ref](#base-ref)), then `worktree add … origin/<release_branch>` on the box; no clone at `repo` → decision `remote_repo_missing` naming the path (an ssh failure is not "no clone": the spawn is refused with `LAUNCH_FAILED` and retried with backoff) |
 | Brief | `.volley/brief-extra.md` is read from the box's clone; the [brief preface](#brief-preface) on volleyd's host |
 | Identity | minted on the daemon's machine; `agent.json` carries `broker_url: mqtt://127.0.0.1:<remote_port>` |
 | Launch | `launch.sh` exports `VOLLEY_HOOKS_DIR=<volley_dir>/packages/volley-hooks` and, for tooling that reads env, `VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE`, `VOLLEY_AGENT_ID` (the identity file still wins); started with `tmux new-session -d -s <wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'`. Never `--mcp-config` |
@@ -2125,10 +2206,11 @@ record with `tunnel: down` (built when it connected: volleyd keeps the last hear
 too (on macOS, `available_pct` is the last doctor run's `vm_stat` figure), and the last
 finished doctor run's `versions`, `auth` (states only: `gh`, `claude`, `trust`, `claude_plan`),
 `repo`, `checks` (no fix text) and `doctor_at`. The service re-runs the doctor every 600 s
-(`PEER_DEFAULTS.doctor_interval_s`) beside the heartbeat, so a slow network probe never delays a
-beat past `machine_down_after_ms`; the version it compares the checkout against is the
-supervisor's readiness verdict's `requirements.volley`. The service file carries the `PATH` the
-join ran with (launchd's own has no Homebrew or `~/.bun/bin`). volleyd only counts records for a configured host, and marks a
+(`PEER_DEFAULTS.doctor_interval_s`), and on the next heartbeat after the checkout's
+`package.json`, `bun.lock` or install marker changes or `volley peer doctor` runs, beside the
+heartbeat, so a slow network probe never delays a beat past `machine_down_after_ms`; the
+version it compares the checkout against is the supervisor's readiness verdict's
+`requirements.volley`. The service file carries the `PATH` the join ran with (launchd's own has no Homebrew or `~/.bun/bin`). volleyd only counts records for a configured host, and marks a
 machine whose record stopped for 90 s down (republishing the record with
 `reason: heartbeat_timeout`). While a machine is down its spawns park with
 `why_waiting: "tunnel down to <name>: no heartbeat for 90 s"`, every unfinished task on it
@@ -2263,8 +2345,14 @@ and journals nothing for a machine that did not change: the first verdict with i
 compared with the last journaled one, or, when there is none, is the baseline.
 `peer_remove`, or a host leaving the config, clears the verdict.
 
-**Caps and drain.** `hosts.<name>.max_agents` (1 to 100, default 4) and `hosts.<name>.drain`
-(default `false`) are validated by `config_set`, applied hot and journaled as `config_changed`:
+**Caps and drain.** `hosts.<name>.max_agents` (1 to 100) and `hosts.<name>.drain` (default
+`false`) are validated by `config_set`, applied hot and journaled as `config_changed`. A join
+writes `max_agents` from the machine's size: `clamp(min(floor(cores / 3), floor(memory_total_mb /
+4096)), 2, 16)`, so a 32-core / 60 GB box gets 10 and a 10-core / 32 GB laptop 3. Left unset (a
+machine paired before this, or configured by hand), volleyd derives it the same way from the
+machine record, and uses 4 when the record has no memory figure. An explicit value always wins,
+and a re-pairing keeps it. `volley peer doctor` shows the figure on its `machine.size` row
+(`max_agents 10 (derived from 32 cores, 60 GB)`):
 
 ```sh
 volleyd config set hosts.box-a.max_agents 2
@@ -2291,18 +2379,52 @@ do before anyone runs it. An ssh failure answers `ok: false` with ssh's reason. 
 `peer_doctor_timeout_ms`, 15 min, for a `--fix`) happens outside volleyd's serial queue, so ticks
 and control ops go on meanwhile; a second `peer_doctor` for the same host while one runs is
 refused (`a doctor run on "<name>" is already in progress`). Each run is journaled in `_system`
-as `peer_doctor_run { by, name, fix, clone, ok }`. After a Repair the box's PATH is probed again
-on the next re-compute. Repair runs the bare `volley` of the box's non-interactive ssh PATH: on a
-box whose PATH probe finds no `bun` (and so no `volley`), fix the PATH first, or Repair answers
-only `volley: command not found`.
+as `peer_doctor_run { by, name, fix, clone, ok }`. The run's report is folded into the box's
+retained machine record before the answer goes back (its `checks` without fix text, `versions`,
+`auth`, `repo`, `doctor_at`; republished as volleyd) and the box's readiness verdict re-computed,
+so the Desk and placement follow the run without waiting for the box's next heartbeat; a
+heartbeat whose `doctor_at` is older than the record's keeps the newer run's doctor fields. After
+a Repair the box's PATH is probed again on the next re-compute. Repair runs the bare `volley` of
+the box's non-interactive ssh PATH: on a box whose PATH probe finds no `bun` (and so no
+`volley`), fix the PATH first, or Repair answers only `volley: command not found`.
 
 ---
 
 ## Fleet: placement
 
-Placement (SPEC §4.6.15) is opt-in: a wave's `placement: auto` places every task that does not
-name a host, and a task's `host: auto` is placed in any wave. Every other task runs where its
-`host:` says, and a wave with neither runs exactly as before (nothing is journaled for it).
+Placement (SPEC §4.6.15): a wave's `placement: auto` places every task that does not name a host,
+and a task's `host: auto` is placed in any wave. Every other task runs where its `host:` says, and
+a `placement: local` wave with no `host: auto` task runs on the supervisor's own machine (nothing
+is journaled for it).
+
+**The default.** A wave file without `placement:` takes `placement.default` (`auto` by default;
+the wave's own `config: { placement: { default } }` wins over config.yaml's) once a paired
+machine, a `hosts.<name>`, is configured, and `local` while none is: an owner who paired a
+machine has it used, and `placement: local` (or `volleyd config set placement.default local`)
+keeps a wave here. volleyd decides it when the wave is first submitted, and the journaled wave
+keeps the hosts it got: a later plan version without `placement:` keeps the wave's placement, so
+pairing or unpairing a machine mid-wave never moves a running task's next role. `volleyd validate` and `run` print the outcome:
+
+```text
+placement: auto (placement.default; 1 paired machine)
+placement: local (no paired machine)
+placement: local (placement.default)
+placement: auto (wave file)
+```
+
+**Overloaded while a peer idles.** A running `placement: local` wave on a supervisor whose own
+load per core (the higher of its 1- and 5-minute load averages) is over
+`placement.load_per_core_max`, while a peer is ready, not draining, not down and has free
+`max_agents` slots, journals once `alarm_raised { alarm: "peer_idle_under_load", peer, free,
+message }`, and `alarm_cleared` once the supervisor's load per core is back under the threshold
+(it is not raised again for that wave). While it holds, the wave state carries it in `alarms`, `volleyd status` shows it under the wave's
+header and the digest lists it under `## Alarms`:
+
+```text
+  ! peer_idle_under_load: this machine is overloaded (load 130.0 on 10 cores, max 1.5 per core) while box-a is ready with 10 free agent slots; this wave is placement: local (set placement: auto to use it)
+```
+
+An `auto` wave raises none (placement uses the peer itself), nor does a drained peer.
 
 **When.** A task is placed once, when the scheduler admits it, and never moved afterwards: every
 role of the task (implementer, reviewers, fixup, rebase) runs on that host. volleyd journals
@@ -2413,7 +2535,7 @@ if admitted now: T1 → box-a (0.85), T3 → local (0.58)
       box-b    -     ineligible: draining
 ```
 
-Tunables (`config set`, hot): `placement.load_per_core_max`, `placement.mem_available_min_pct`,
+Tunables (`config set`, hot): `placement.default` (`local` | `auto`), `placement.load_per_core_max`, `placement.mem_available_min_pct`,
 `placement.disk_free_min_gb`, `placement.weights.{cpu,slots,mem,usage}` (not all four 0).
 A machine that stays down, re-placement and drain are the owner's decisions (next section):
 nothing running is ever moved.
@@ -2955,13 +3077,17 @@ branch, the task's open decisions are resolved first (`superseded_by_merge`, by 
 the merge commit in the rationale; a parked task would otherwise stay parked), its live agents
 are retired, and it journals `artifact_verified { role: "merged", head_sha, merge_sha }` and
 `stage_entered done`, which releases the task's dependents. Merged at another head than the
-gated one, or before the task reached `merge_ready` → also `alarm_raised { alarm:
+gated one, or before the task was ever gated at that head → also `alarm_raised { alarm:
 "merged_unverified_head", gated, merged }` (`gated`: the task's verified head, `null` if none), and the merge record describes the commit that merged: `gated_head_sha`,
 `merged_head_sha` and `merged_ci`, the CI of that head (read with `gh run list --commit`;
 `unknown` when it cannot be read), never the gated head's CI carried over; the task's `pr` names
 that head. The alarm is published in the wave state (`alarms: [{ alarm, message }]` and
 `why_waiting: "merged with an unverified head: gated <a>, merged <c>"`) and listed by
-`volleyd status`; the task still completes.
+`volleyd status`; the task still completes. A merge at the task's current gated head, during a
+later step (a branch update or fixup that has not pushed yet), is the gated head: no alarm; the
+record has no `via` (it merged with GitHub's button, so the digest reads it as `github`) and
+carries that head's CI as volleyd last read it (red, when a CI fixup was running), and the running
+update or fixup agent is retired as `superseded`.
 
 **The merge nudge.** volleyd never rebases anyone. When a task's PR merges (any of the ways
 above), each running implementer of the same wave whose task's wave-file `files` hints overlap
@@ -3055,12 +3181,19 @@ In an unattended wave the gate is where work stalls: every merge waited for a pe
   (`superseded_by_merge`), `artifact_verified { role: "merged", via: "supervisor" }`,
   `stage_entered done` and the merge nudge.
 - **Refused, never forced.** `gh` exiting non-zero (the head moved, required checks, branch
-  protection) journals `alarm_raised { alarm: "merge_refused", pr, head, stderr, attempt }` and
-  reads the PR at once as any gate does (someone else may have merged it; a moved head
+  protection) journals `alarm_raised { alarm: "merge_refused", pr, head, stderr, reason, attempt }`
+  and reads the PR at once as any gate does (someone else may have merged it; a moved head
   invalidates the gate). After `autopilot.merge_retry_max` (default 2) refusals at one gated
   head the task leaves the gate (`blocked`) and decision `merge_refused` asks `retry` (one more
   attempt, at the task's next turn in the merge queue), `manual` (this task goes back to the
-  gate and a human merges it) or `cancel`. A new gated head starts the count again.
+  gate and a human merges it) or `cancel`. A new gated head starts the count again. `reason` is
+  what the refusal says: `behind` (out of date with or conflicting with the release branch, or
+  the release branch moved during the merge), `head_moved`, `retargeted`, `closed`, `checks`
+  (required checks, branch protection, reviews) or `unknown`. Only `behind`, `head_moved`,
+  `retargeted` and `closed` give up the merge turn; any other keeps the turn and the gated head, and the
+  merge is tried again at the next up-to-date check. No refusal enters a
+  branch update by itself: one runs only when the turn's rebase check counts the release branch's
+  commits the head lacks (a failed `git fetch` or `git log` is a failed check, never "behind").
 - **When: the merge queue.** Nothing merges at the gate itself: the merge queue below gives one
   task at a time its turn.
 - **`autopilot.delete_branch`** (default `false`) adds `--delete-branch` to the merge.
@@ -3083,13 +3216,15 @@ one at a time, in order, and brings each up to date just before its merge
   `merge: manual` keeps a wave's tasks out of the queue altogether.
 - **Order.** Dependency first: a task more tasks name in their `after` goes first, and a task
   never goes ahead of a queued task it comes after. Then readiness: the task queued earliest. A
-  task GitHub refused goes after the tasks still waiting.
+  task GitHub refused as `behind`, `head_moved`, `retargeted` or `closed` goes after the tasks
+  still waiting; one refused for any other reason keeps its place.
 - **One merge in flight per release branch.** The task at the front takes the release branch's
   lock (`<repo>#<release_branch>`, held by the daemon, so two waves on one release branch share
-  it) and keeps it until it merged, GitHub refused it, or it waits for an answer. A task whose
-  turn checks fail `merge_turn_check_failures_max` (3) times in a row (its PR was retargeted, `gh`
-  keeps failing, its worktree is gone; each failure is a `pipeline_error` alarm) gives up the turn
-  and is passed over, with the tasks that come after it, while another queued task can go.
+  it) and keeps it until it merged, GitHub refused it as `behind`, `head_moved`, `retargeted` or
+  `closed`, or it waits for an answer. A task whose turn checks fail
+  `merge_turn_check_failures_max` (3) times in a row (its PR was retargeted, `gh` keeps failing,
+  its worktree is gone; each failure is a `pipeline_error` alarm) gives up the turn and is passed
+  over, with the tasks that come after it, while another queued task can go.
   `merge_started { task, pr, head }` is journaled before each `gh pr merge`. A merge that ends
   without an outcome (the hard timeout fired, `gh` could not run, or the daemon restarted while
   it ran) is journaled `merge_ended { task, why: timed_out | failed | interrupted }`: the task is
@@ -3287,7 +3422,9 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the profile block, an
     integer in 100000..1000000, never in the env block); a
     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
-    absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG); and
+    absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/`, with the
+    `agent_mcp_allow` entries copied from the box's own config after it (MCP_CONFIG: shape
+    only, whatever their `command` and whatever `agent_mcp` — trusted as the owner's config); and
     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
     login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty

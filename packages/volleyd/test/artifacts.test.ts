@@ -501,6 +501,20 @@ describe("rebase check", () => {
       ["git", "-C", WT, "log", "--oneline", `${OTHER}..${TIP}`],
     ]);
   });
+
+  it("a failed fetch or log, or an empty log off the tip, throws: never counted as behind (#311)", async () => {
+    const o = { cwd: WT, head: HEAD, release_branch: "release/w1" };
+    const offTip = () =>
+      fakeExec()
+        .on(["git", "-C", WT, "rev-parse"], { stdout: `${TIP}\n` })
+        .on(["git", "-C", WT, "merge-base"], { stdout: `${OTHER}\n` });
+    const fetchFails = offTip().on(["git", "-C", WT, "fetch"], { code: 128, stderr: "no route" });
+    await expect(checkRebase(fetchFails.exec, o)).rejects.toThrow(/fetch/);
+    const logFails = offTip().on(["git", "-C", WT, "log"], { code: 128, stderr: "bad object" });
+    await expect(checkRebase(logFails.exec, o)).rejects.toThrow(/log/);
+    const empty = offTip().on(["git", "-C", WT, "log"], { stdout: "" });
+    await expect(checkRebase(empty.exec, o)).rejects.toThrow("inconsistent rebase check");
+  });
 });
 
 describe("probes from the repo root (the head worktree is gone)", () => {

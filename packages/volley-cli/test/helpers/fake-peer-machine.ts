@@ -431,6 +431,7 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
     now: () => new Date("2026-10-19T09:00:00.000Z"),
     totalmem: () => 16 * 1024 ** 3,
     freemem: () => 8 * 1024 ** 3,
+    cpus: () => 8,
     uptime: () => 86_400,
     statfs: () => ({ bsize: 4096, blocks: 262_144_000, bavail: 131_072_000 }),
     ...over,

@@ -13,7 +13,14 @@ import {
   renderSigninScript,
 } from "./claude/signin-script";
 import { volleydHome } from "./config-store";
-import { LAUNCH_COMMAND, mcpConfigPath, renderLaunchScript, renderMcpConfig, shq } from "./launch";
+import {
+  LAUNCH_COMMAND,
+  isMcpServerEntry,
+  mcpConfigPath,
+  renderLaunchScript,
+  renderMcpConfig,
+  shq,
+} from "./launch";
 import { WAKE_TEXT } from "./liveness";
 import { AGENT_BRANCH } from "./worktree";
 
@@ -179,7 +186,9 @@ import { AGENT_BRANCH } from "./worktree";
  *     `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the profile block, an
  *     integer in 100000..1000000, never in the env block); a
  *     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
- *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG); and
+ *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/`, with the
+ *     `agent_mcp_allow` entries copied from the box's own config after it (MCP_CONFIG: shape
+ *     only, whatever their `command` and whatever `agent_mcp` — trusted as the owner's config); and
  *     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
  *     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
  *     login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
@@ -1787,12 +1796,18 @@ function isLaunchScript(content: string, worktree: string): boolean {
 
 /**
  * MCP_CONFIG: whether `content` is exactly `renderMcpConfig` of an absolute, clean volley-mcp
- * entry point outside any `.volley/` (claude runs that server for the agent).
+ * entry point outside any `.volley/` (claude runs that server for the agent), plus, after it, the
+ * entries `agent_mcp_allow` copied from the machine's own MCP config. Those are checked for shape
+ * only: the fence does not bound their `command` (nor check it came from the box's config), as
+ * claude would start the same entry under `agent_mcp: inherit` anyway.
  */
 function isMcpConfig(content: string): boolean {
   let entry: unknown;
+  let extra: Record<string, unknown>;
   try {
-    entry = JSON.parse(content)?.mcpServers?.volley?.args?.[1];
+    const { volley, ...rest } = JSON.parse(content)?.mcpServers ?? {};
+    entry = volley?.args?.[1];
+    extra = rest;
   } catch {
     return false;
   }
@@ -1800,7 +1815,8 @@ function isMcpConfig(content: string): boolean {
     typeof entry === "string" &&
     entry.endsWith(MCP_ENTRY_SUFFIX) &&
     outsideVolley(entry) &&
-    renderMcpConfig(entry) === content
+    Object.values(extra).every(isMcpServerEntry) &&
+    renderMcpConfig(entry, extra) === content
   );
 }
 
@@ -2069,8 +2085,9 @@ function newSessionSealed(args: readonly string[], opts: FenceOptions): Verdict 
  * The bash script for `ssh -T <target> bash -s`: `set -euo pipefail`, then one line per step,
  * every word single-quoted (so no path or value is ever shell syntax). A step with a `cwd` runs
  * in a subshell that `cd`s first; a file write runs `base64 -d` under `umask 077` from a quoted
- * heredoc (base64 text cannot contain its delimiter). The trust compare is fed the same way,
- * through `base64 -d |`. Every other step reads /dev/null: under `bash -s` a step that read its
+ * heredoc (base64 text cannot contain its delimiter), into a file it first removes and then
+ * creates under `set -C` (an append excepted), so the content never lands at an existing file's
+ * looser mode or through a symlink. The trust compare is fed the same way, through `base64 -d |`. Every other step reads /dev/null: under `bash -s` a step that read its
  * stdin would consume the rest of the script.
  */
 export function renderRemoteScript(script: RemoteScript): string {
@@ -2079,8 +2096,13 @@ export function renderRemoteScript(script: RemoteScript): string {
   for (const s of script.steps) {
     const cmd = s.argv.map(shq).join(" ");
     if (s.stdout !== undefined) {
-      const redirect = s.append === true ? ">>" : ">";
-      lines.push(`( umask 077 && ${cmd} ${redirect} ${shq(s.stdout)} ${heredoc(s)}\n)`);
+      // A whole write removes the file first, so it is created afresh under the umask: an
+      // overwrite never keeps an earlier, looser mode while the new content lands. Noclobber
+      // makes the create exclusive, so a symlink planted after the rm is refused, not followed.
+      const out = shq(s.stdout);
+      const write =
+        s.append === true ? `${cmd} >> ${out}` : `set -C && 'rm' '-f' ${out} && ${cmd} > ${out}`;
+      lines.push(`( umask 077 && ${write} ${heredoc(s)}\n)`);
     } else if (s.stdin !== undefined) {
       lines.push(`'base64' '-d' ${heredoc(s).replace("\n", ` | ${cmd}\n`)}`);
     } else if (s.cwd !== undefined) {

@@ -9,6 +9,13 @@ decision is cleared, the task resumes, and the answer is written to the task's
 .volley/decisions.md for its next stage. Its needs-you inbox item is answered too, where
 --where says (default cli; desk·<device>, <machine>·terminal). Resolving twice is a no-op that
 says where the first answer was given.
+
+The answer is one of the decision's options (case and spacing aside). Most kinds also take a
+free-form answer; these act on what they are told, so an answer they cannot apply is refused
+(exit 3, BAD_ANSWER) and nothing is journaled:
+  spawn_budget_exhausted  raise by <n> (any n >= 1; "raise <n>" is read as "raise by <n>"), cancel
+  machine_down            its options only (wait, re-place queued tasks, cancel)
+  repo_untrusted          trust, cancel
 `;
 
 export const resolve = opCommand({

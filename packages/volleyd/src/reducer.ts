@@ -561,7 +561,8 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
           at: (ev.data.at as string | undefined) ?? ev.at,
         };
         if (typeof ev.data.rationale === "string") d.rationale = ev.data.rationale;
-        const raise = d.kind === "spawn_budget_exhausted" ? raiseBy(String(ev.data.answer)) : null;
+        const raise =
+          d.kind === "spawn_budget_exhausted" ? journaledRaise(String(ev.data.answer)) : null;
         if (raise !== null) next.budget_raised = (next.budget_raised ?? 0) + raise;
         // Only a parking decision keeps the task parked (one opened with `park: false` never does).
         const stillOpen = state.open_decisions.some((o) => {
@@ -674,6 +675,19 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       // Gated without reviews: the wave file's pipeline for the task lists none.
       if (task !== undefined && ev.data.alarm === "reviews_skipped_by_plan")
         task.reviews_skipped_by_plan = true;
+      // The supervisor overloaded while a paired machine idles (SPEC §4.6.15): raised once per wave.
+      if (ev.task === undefined && ev.data.alarm === "peer_idle_under_load") {
+        const alarm = { alarm: "peer_idle_under_load", message: String(ev.data.message ?? "") };
+        state.alarms = [...(state.alarms ?? []).filter((a) => a.alarm !== alarm.alarm), alarm];
+      }
+      break;
+    case "alarm_cleared":
+      // The overload that raised it has passed (SPEC §4.6.15).
+      if (ev.task === undefined && ev.data.alarm === "peer_idle_under_load") {
+        const held = (state.alarms ?? []).filter((a) => a.alarm !== ev.data.alarm);
+        if (held.length > 0) state.alarms = held;
+        else Reflect.deleteProperty(state, "alarms");
+      }
       break;
     case "repo_visibility_detected": {
       const visibility = (ev.data.visibility as RepoVisibility | null | undefined) ?? null;
@@ -924,8 +938,12 @@ function derive(state: WaveState, rec: WaveRecord): void {
   }
 }
 
-/** A `spawn_budget_exhausted` answer `raise by N` (N ≥ 1), or null. */
-export function raiseBy(answer: string): number | null {
+/**
+ * A journaled `spawn_budget_exhausted` answer `raise by N` (N ≥ 1), or null. Strict: answers are
+ * normalised to `raise by N` before they are journaled, and a `raise N` journaled before that
+ * (#315) was ignored then, so a replay ignores it too.
+ */
+function journaledRaise(answer: string): number | null {
   const m = /^raise by (\d+)$/.exec(answer.trim().toLowerCase());
   const n = m !== null ? Number(m[1]) : 0;
   return n >= 1 ? n : null;

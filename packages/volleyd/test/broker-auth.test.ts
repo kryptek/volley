@@ -191,7 +191,7 @@ describe("volleyd against a broker that requires credentials", () => {
     });
     expect(status.stderr).toBe("");
     expect(status.exitCode).toBe(0);
-    expect(JSON.parse(status.stdout)).toEqual({ waves: [] });
+    expect(JSON.parse(status.stdout)).toEqual({ waves: [], ceiling: { live: 0, max: 12 } });
   });
 
   it("`volleyd daemon` refuses a group-readable broker.json before connecting", async () => {

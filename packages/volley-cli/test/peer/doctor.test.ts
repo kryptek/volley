@@ -565,6 +565,22 @@ describe("volley peer doctor: machine and secrets", () => {
     expect(check(r, "machine.disk")).toMatchObject({ ok: true, severity: "warn" });
   });
 
+  it("the machine row names the max_agents volleyd derives from its size at join (#324)", async () => {
+    const m = machine();
+    const sized = async (over: Partial<DoctorDeps>) =>
+      JSON.parse((await run(m, { json: true }, over)).stdout) as DoctorReport;
+    const big = await sized({ cpus: () => 32, totalmem: () => 61_440 * 1024 ** 2 });
+    expect(check(big, "machine.size")).toMatchObject({
+      ok: true,
+      severity: "warn",
+      detail: "max_agents 10 (derived from 32 cores, 60 GB)",
+    });
+    const small = await sized({ cpus: () => 10, totalmem: () => 32 * 1024 ** 3 });
+    expect(check(small, "machine.size")?.detail).toBe(
+      "max_agents 3 (derived from 10 cores, 32 GB)",
+    );
+  });
+
   it("on macOS the memory comes from vm_stat: free + inactive + speculative + purgeable pages", async () => {
     const m = machine({ platform: "darwin", vmStat: VM_STAT_MAC_16GB });
     const r = await report(m);
@@ -633,6 +649,20 @@ describe("volley peer doctor: machine and secrets", () => {
     for (const id of ["skills", "hooks", "mcp", "sharing"]) {
       expect(check(r, id)).toMatchObject({ ok: true, severity: "warn" });
     }
+  });
+
+  it("runDoctor stamps the report with the time the run started, not when it ended", async () => {
+    const m = machine();
+    // A run's facts are as old as its start: one that began before a `doctor --fix` and ended
+    // after it must not read as a run from after the fix.
+    let t = Date.parse("2026-10-19T09:00:00.000Z");
+    const now = () => {
+      t += 60_000;
+      return new Date(t);
+    };
+    const deps = { ...m.deps(), now };
+    const { report: r } = await runDoctor(deps, { repo: m.repoPath });
+    expect(r.doctor_at).toBe("2026-10-19T09:01:00.000Z");
   });
 
   it("runDoctor returns the report and the facts it was built from", async () => {
