@@ -46,6 +46,11 @@ const MESSAGE_OPTIONS: Record<string, string[]> = {
   git: ["-m", "--message"],
   gh: ["-t", "--title", "-b", "--body", "--notes"],
 };
+/** A short-option cluster ending in a message option (`git commit -am <msg>`). */
+function takesMessage(w: string, options: string[]): boolean {
+  if (!/^-[a-zA-Z]{2,}$/.test(w)) return false;
+  return options.includes(`-${w.slice(-1)}`);
+}
 /** Ends an unquoted word (besides whitespace). */
 const METACHARS = new Set([";", "&", "|", "<", ">", "(", ")", "\n"]);
 
@@ -79,6 +84,7 @@ function render(words: string[], out: string[]): void {
     for (let i = 0; i < argv.length; i++) {
       const w = argv[i] ?? "";
       if (messageOptions.includes(w)) i++;
+      else if (takesMessage(w, messageOptions)) kept.push(argv[i++] ?? "");
       else if (!messageOptions.some((o) => w.startsWith(o.startsWith("--") ? `${o}=` : o)))
         kept.push(w);
     }

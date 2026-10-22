@@ -33,6 +33,10 @@ describe("executableSegments", () => {
   it("drops commit and PR message text", () => {
     expect(seg('git commit -m "fix: bun run test flake"')).toEqual(["git commit"]);
     expect(seg("git commit --message='bun run test' -q")).toEqual(["git commit -q"]);
+    expect(seg('git commit -am "fix: bun run test flake"')).toEqual(["git commit -am"]);
+    expect(seg("git commit -qm 'bun run test' --no-verify")).toEqual([
+      "git commit -qm --no-verify",
+    ]);
     expect(seg('gh pr create --title "bun run test" --body "x" --base main')).toEqual([
       "gh pr create --base main",
     ]);
