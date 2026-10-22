@@ -2487,7 +2487,7 @@ agent's retained status. All rules are pure functions; the daemon carries out th
 | ↳ readable and unchanged on a second read | decision `unknown_screen`, `class: "screen_static"` | — |
 | ↳ unreadable, pane gone | `alarm_raised { alarm: "crash_candidate" }` only: wait for the LWT. Nothing is killed because a pane or process cannot be seen | — |
 | any hook signal | ends a silence; closes an open `hooks_silent` / `screen_static` decision | — |
-| status `blocked` with no open decision naming the agent for `blocked_undecided_stall_ms` (default 5 min), its hooks not working | decision `agent_stalled` (options `respawn`, `stop task`): a block nobody was asked about is a stall, so autopilot's stall rule covers it | as for `agent_stalled` above |
+| status `blocked` with no decision naming the agent (open, or answered for that very status) for `blocked_undecided_stall_ms` (default 5 min), its hooks not working | decision `agent_stalled` (options `respawn`, `stop task`): a block nobody was asked about is a stall, so autopilot's stall rule covers it | as for `agent_stalled` above |
 
 **Terminal-status watchdog.** Every terminal status a supervised agent publishes (`done`,
 `blocked`, `failed`), or that is already retained when volleyd's watch attaches (a fast agent,

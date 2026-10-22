@@ -6408,6 +6408,10 @@ export class Daemon {
             class: "agent_stalled",
             idle_s: x.idle_s,
             asked: x.asked,
+            // A block's stall names its status: answered (a steer leaves it blocked), it is decided.
+            ...(x.blocked === true && a.watch.state.status?.type === "blocked"
+              ? { status_at: a.watch.state.status.wall_time }
+              : {}),
             ...(respawn
               ? {
                   pipeline: {

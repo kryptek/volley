@@ -266,6 +266,18 @@ describe("daemon: a retained blocked always has a decision (the invariant)", () 
     expect(stalled).toHaveLength(1);
     expect(stalled[0]?.data).toMatchObject({ agent_id: AGENT, options: ["respawn", "stop task"] });
     expect(String(stalled[0]?.data.question)).toContain("blocked");
+    // It names the status it asks about: answered with a steer (the agent stays blocked on that
+    // same status), the stall is not asked again every window.
+    expect(stalled[0]?.data.status_at).toEqual(expect.any(String));
+    await resolve(stalled[0]?.data.decision_id as string, "try the other approach");
+    for (let i = 0; i < 3; i++) {
+      await clock.advance(CONFIG_DEFAULTS.blocked_undecided_stall_ms + 1_000);
+      await s.daemon.tick();
+    }
+    await s.settled();
+    expect(
+      s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === "agent_stalled"),
+    ).toHaveLength(1);
   });
 
   it("a blocked the owner answered (continue) is not asked about again as a stall", async () => {
