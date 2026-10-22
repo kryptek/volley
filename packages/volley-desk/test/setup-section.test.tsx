@@ -1,10 +1,17 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import App from "../src/App";
+import { SignInGate } from "../src/auth/SignInGate";
 import { Setup } from "../src/settings/Setup";
-import { DeskStoreProvider } from "../src/store/context";
-import { type AuthOps, markFirstRun } from "../src/store/control";
+import { CREDENTIALS_STORAGE_KEY, DeskStoreProvider, useDesk } from "../src/store/context";
+import {
+  type AuthOps,
+  type RedeemRequest,
+  markFirstRun,
+  readSessionRole,
+} from "../src/store/control";
 import { PLAN, fakeOps } from "./helpers/auth-ops";
+import { connectingFactory } from "./helpers/desk-msgs";
 
 const DESK = "http://desk.example:5199/";
 
@@ -188,6 +195,57 @@ describe("Settings › Setup & Security", () => {
     fireEvent.change(field, { target: { value: ` ${token} ` } });
     fireEvent.click(screen.getByRole("button", { name: "Sign in with token" }));
     expect(go).toHaveBeenCalledWith(token);
+  });
+
+  it("in a signed-in session the admin token signs in in place, through the Switch account entry (#328)", async () => {
+    localStorage.setItem(
+      CREDENTIALS_STORAGE_KEY,
+      JSON.stringify({ username: "steer-11112222", password: "old", role: "steer" }),
+    );
+    const token = "vly_admin_89abcdef_0123456789abcdef0123456789abcdef";
+    const redeem = vi.fn(async (_r: RedeemRequest) => ({
+      ok: true as const,
+      username: "admin-89abcdef",
+      password: "pw",
+      role: "admin",
+      label: "Desk on Mac",
+    }));
+    function Signed() {
+      const { identity } = useDesk();
+      return (
+        <>
+          <div data-testid="who">{identity}</div>
+          <Setup
+            ops={null}
+            admin={false}
+            identity={identity}
+            brokerUrl="ws://desk.example:9001"
+            deskUrl={DESK}
+          />
+        </>
+      );
+    }
+    render(
+      <SignInGate
+        demo={false}
+        env={{}}
+        brokerUrl="ws://desk.example:9001"
+        clientFactory={connectingFactory().make}
+        redeem={redeem}
+      >
+        <Signed />
+      </SignInGate>,
+    );
+    await waitFor(() => expect(screen.getByTestId("who")).toHaveTextContent("steer-11112222"));
+    fireEvent.change(screen.getByLabelText("Admin token"), { target: { value: token } });
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Sign in with token" })),
+    );
+    expect(redeem).toHaveBeenCalledWith(expect.objectContaining({ token }));
+    await waitFor(() => expect(screen.getByTestId("who")).toHaveTextContent("admin-89abcdef"));
+    expect(readSessionRole("admin-89abcdef")).toBe("admin");
+    localStorage.clear();
+    sessionStorage.clear();
   });
 });
 

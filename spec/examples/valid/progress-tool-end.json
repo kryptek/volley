@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "coordinator-ab12",
+  "parent_id": null,
+  "wall_time": "2026-10-18T14:25:00.000Z",
+  "channel": "progress",
+  "type": "heartbeat",
+  "payload": {
+    "seq": 44,
+    "source": "harness-hook",
+    "hook_event": "PostToolUse",
+    "tool_use_id": "toolu_01ABCDEF",
+    "tool": "Bash"
+  }
+}
