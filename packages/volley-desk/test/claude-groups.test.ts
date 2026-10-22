@@ -6,7 +6,9 @@ import {
   accountList,
   accountMatrix,
   configuredMachines,
+  fableHint,
   moveTargetOf,
+  usageTriple,
 } from "../src/store/claude";
 import type { ClaudeAccountPayload, MachinePayload } from "../src/store/types";
 
@@ -80,6 +82,7 @@ describe("accountGroups", () => {
         agents: work.agents,
         waves: ["w1"],
         isPrimary: false,
+        sampledAt: work.sampled_at,
       },
       {
         account: "primary@peer-a",
@@ -89,6 +92,7 @@ describe("accountGroups", () => {
         agents: peer.agents,
         waves: ["w2"],
         isPrimary: true,
+        sampledAt: peer.sampled_at,
       },
     ]);
     expect(g?.agents).toEqual([...work.agents, ...peer.agents]);
@@ -298,5 +302,124 @@ describe("accountMatrix: which configured machines hold each account", () => {
       ["box", true],
     ]);
     expect(solo?.coverage).toEqual({ held: 0, total: 3 });
+  });
+});
+
+describe("the Fable window and the usage probe", () => {
+  const NOW = Date.parse("2026-10-18T14:10:00.000Z");
+  const min = (n: number) => new Date(NOW - n * 60_000).toISOString();
+  const fable = { pct: 12, resets_at: "2026-10-22T16:00:00.000Z" };
+  const probed = (
+    r: ClaudeAccountPayload,
+    probe: NonNullable<ClaudeAccountPayload["probe"]>,
+    w: typeof fable | null = fable,
+  ): ClaudeAccountPayload => ({ ...r, ...(w ? { model_weekly: { fable: w } } : {}), probe });
+
+  it("takes the Fable window from the freshest member carrying one", () => {
+    const older = { pct: 30, resets_at: fable.resets_at };
+    const [g] = groups({
+      work: probed(
+        work,
+        { machine: "hub", state: "ok", attempted_at: min(9), read_at: min(9) },
+        older,
+      ),
+      "primary@peer-a": probed(peer, {
+        machine: "peer-a",
+        state: "ok",
+        attempted_at: min(4),
+        read_at: min(4),
+      }),
+    });
+    expect(g?.fable).toEqual(fable);
+    expect(g?.probe).toEqual({
+      machine: "peer-a",
+      state: "ok",
+      attemptedAt: min(4),
+      readAt: min(4),
+    });
+  });
+
+  it("is null, with no probe, before any probe reported", () => {
+    const [g] = groups({ work });
+    expect(g?.fable).toBeNull();
+    expect(g?.probe).toBeNull();
+  });
+
+  it("an ok read 2 min ago beats an error attempted 1 min ago", () => {
+    const [g] = groups({
+      work: probed(work, { machine: "hub", state: "ok", attempted_at: min(2), read_at: min(2) }),
+      "primary@peer-a": probed(
+        peer,
+        { machine: "peer-a", state: "error", attempted_at: min(1) },
+        null,
+      ),
+    });
+    expect(g?.probe).toMatchObject({ machine: "local", state: "ok" });
+    expect(g?.fable).toEqual(fable);
+  });
+
+  it("with no read anywhere, the newest attempt reports", () => {
+    const [g] = groups({
+      work: { ...work, probe: { machine: "hub", state: "expired", attempted_at: min(9) } },
+      "primary@peer-a": {
+        ...peer,
+        probe: { machine: "peer-a", state: "no_credential", attempted_at: min(3) },
+      },
+    });
+    expect(g?.probe).toEqual({
+      machine: "peer-a",
+      state: "no_credential",
+      attemptedAt: min(3),
+      readAt: null,
+    });
+  });
+
+  it("fableHint names each state, and the last read when there is one", () => {
+    const p = (state: string, readAt: string | null = null) =>
+      ({ machine: "peer-a", state, attemptedAt: min(1), readAt }) as never;
+    expect(fableHint(null, NOW)).toBe("not read yet");
+    expect(fableHint(p("ok", min(4)), NOW)).toBe("read 4 min ago on peer-a");
+    expect(fableHint({ ...(p("ok", min(4)) as object), machine: "local" } as never, NOW)).toBe(
+      "read 4 min ago on this machine",
+    );
+    expect(fableHint(p("expired", min(25)), NOW)).toBe(
+      "login expired — Claude Code renews it on its next request; last read 25 min ago",
+    );
+    expect(fableHint(p("no_credential"), NOW)).toBe("no credential on peer-a");
+    expect(fableHint(p("rate_limited"), NOW)).toBe("rate limited, retrying");
+    expect(fableHint(p("rejected"), NOW)).toBe("probe failed");
+    expect(fableHint(p("error", min(180)), NOW)).toBe("probe failed; last read 3 h ago");
+  });
+
+  it("usageTriple: the three figures, and a member's own age when it is older", () => {
+    const [g] = groups({
+      work: probed(work, { machine: "hub", state: "ok", attempted_at: min(4), read_at: min(4) }),
+      "primary@peer-a": { ...peer, sampled_at: min(180) },
+    });
+    if (!g) throw new Error("no group");
+    const [local, peerA] = g.members;
+    const at = Date.parse(work.sampled_at) + 60_000;
+    expect(usageTriple(g, local as never, at)).toEqual({
+      text: "5h 37% · 7d 56% · Fable 12%",
+      sampled: null,
+    });
+    expect(usageTriple(g, peerA as never, NOW).sampled).toBe("sampled 3 h ago");
+    // A window whose reset passed counts as 0 %.
+    expect(usageTriple(g, local as never, Date.parse("2026-10-19T00:00:00.000Z")).text).toBe(
+      "5h 0% · 7d 56% · Fable 12%",
+    );
+  });
+
+  it("usageTriple shows Fable — while the probe's last attempt failed", () => {
+    const [g] = groups({
+      work: probed(work, {
+        machine: "hub",
+        state: "expired",
+        attempted_at: min(1),
+        read_at: min(25),
+      }),
+    });
+    if (!g) throw new Error("no group");
+    expect(usageTriple(g, g.members[0] as never, NOW).text).toBe("5h 37% · 7d 56% · Fable —");
   });
 });

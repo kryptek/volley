@@ -208,6 +208,18 @@ describe("volley claude", () => {
       email: "owner@example.com",
       five_hour: { pct: 37, resets_at: new Date(now + 2 * 3_600_000).toISOString() },
       weekly: { pct: 56, resets_at: null },
+      model_weekly: {
+        fable: {
+          pct: 12,
+          resets_at: new Date(now + (4 * 24 + 2) * 3_600_000 + 60_000).toISOString(),
+        },
+      },
+      probe: {
+        machine: "hub",
+        state: "ok",
+        attempted_at: iso(4 * 60_000),
+        read_at: iso(4 * 60_000),
+      },
       agents: ["w1-t1-implementer-1"],
       waves: ["w1"],
       sampled_at: iso(2 * 60_000),
@@ -241,7 +253,9 @@ describe("volley claude", () => {
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("Work · max · Example Org · o•••@example.com");
     expect(r.stdout).not.toContain("owner@example.com");
-    expect(r.stdout).toMatch(/5-hour 37% \(resets in 1h 59m, from this machine 2 m ago\)/);
+    expect(r.stdout).toMatch(
+      /5-hour 37% \(resets in 1h 59m\) · 7-day 56% · Fable 12% \(resets in 4d 2h, read 4 min ago\)\n {2}freshest: this machine, 2 min ago\n/,
+    );
     expect(r.stdout).toMatch(/this machine +work +signed in +waves: w1/);
     expect(r.stdout).toMatch(
       /peer-a +default login +signed in +waves: w2 +5-hour 41% 3 h old \(stale\)/,

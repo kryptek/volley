@@ -39,10 +39,10 @@ import {
   LOCAL_MACHINE,
   accountMatrix,
   configuredMachines,
+  usageTriple,
 } from "../store/claude";
 import { type AdminStatus, type PeerOps, joinCommand, pairingSupported } from "../store/peerOps";
 import type {
-  ClaudeAccountPayload,
   ClaudeSignin,
   MachinePayload,
   ReadinessPayload,
@@ -89,8 +89,6 @@ export interface MachinesProps {
   localName?: string | null | undefined;
   /** volleyd's config channel, for the cap editors; `null` = read-only. */
   configTransport?: ConfigTransport | null;
-  /** The Claude account records, for each machine's usage meter. */
-  accounts?: Record<string, ClaudeAccountPayload>;
   /** Each machine's live agents (`agentsOnMachines`), listed by Remove. */
   agentsOn?: Record<string, string[]>;
   /** The remote Claude sign-in's button for a machine, when the Desk has one. */
@@ -602,7 +600,9 @@ export function Machines(p: MachinesProps) {
         label: g.label,
         email: g.email,
         plan: g.plan,
-        held: here?.member ? { label: here.member.label } : null,
+        held: here?.member
+          ? { label: here.member.label, usage: usageTriple(g, here.member, now) }
+          : null,
         up: here?.up ?? true,
       };
     });
@@ -622,7 +622,6 @@ export function Machines(p: MachinesProps) {
       admin={canPair}
       ops={p.ops}
       config={p.configTransport}
-      accounts={p.accounts}
       agents={p.agentsOn?.[m.name]}
       host={p.host}
       onRemoved={setNotice}

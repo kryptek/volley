@@ -96,16 +96,13 @@ describe("Settings › Machines v2: the machine card", () => {
     expect(within(trust).getByText("cd /srv/work/repo && claude")).toBeInTheDocument();
   });
 
-  it("shows os, cores, memory and disk, the agents against the cap and the 5-hour usage of primary@<name>", async () => {
-    setup({ accounts: { "primary@box-a": usage } });
+  it("shows os, cores, memory and disk and the agents against the cap; no usage meter of its own", async () => {
+    setup();
     await act(flush);
     const a = card("box-a");
     expect(a.getByText(/linux x64 · 16 cores · 64 GB · 312 GB free/)).toBeInTheDocument();
     expect(a.getByText("2/4 agents")).toBeInTheDocument();
-    expect(a.getByRole("meter", { name: "primary@box-a 5-hour usage" })).toHaveAttribute(
-      "aria-valuenow",
-      "42",
-    );
+    expect(a.queryByRole("meter")).toBeNull();
   });
 
   it("a ready, eligible machine reads ready for agents", async () => {
@@ -559,7 +556,6 @@ describe("Settings › Machines v2: the machine card's Claude accounts", () => {
     );
     const r = setup({
       machines,
-      accounts: records,
       localName: "hub",
       signIn: (m) => <button type="button">Sign in on {m}</button>,
       claude: {
@@ -592,11 +588,46 @@ describe("Settings › Machines v2: the machine card's Claude accounts", () => {
         name: "Sign in on box-a with Personal",
       }),
     ).toBeEnabled();
-    // The default login's sign-in button and the usage meter stay.
+    // The default login's sign-in button stays; the usage is the held account's triple.
     expect(card("box-a").getByRole("button", { name: "Sign in on box-a" })).toBeInTheDocument();
-    expect(
-      card("box-a").getByRole("meter", { name: "primary@box-a 5-hour usage" }),
-    ).toHaveAttribute("aria-valuenow", "42");
+    expect(held).toHaveTextContent("5h 42% · 7d — · Fable —");
+    expect(missing).not.toHaveTextContent("5h");
+    expect(card("box-a").queryByRole("meter")).toBeNull();
+  });
+
+  it("a held account's triple carries the Fable figure and this login's age when older", async () => {
+    const at = (min: number) => iso(NOW - min * 60_000);
+    const machines = { "box-a": machineRecord() };
+    const records = {
+      "primary@box-a": {
+        ...usage,
+        email: "owner@example.com",
+        sampled_at: at(180),
+      },
+      work: {
+        ...usage,
+        account: "work",
+        label: "Work",
+        email: "owner@example.com",
+        five_hour: { pct: 37, resets_at: null },
+        weekly: { pct: 56, resets_at: null },
+        model_weekly: { fable: { pct: 12, resets_at: null } },
+        probe: { machine: "hub", state: "ok" as const, attempted_at: at(4), read_at: at(4) },
+        sampled_at: at(4),
+      },
+    };
+    withAccounts({
+      machines,
+      claude: {
+        groups: accountGroups(accountList(records), machines, "hub"),
+        signins: {},
+        control: null,
+      },
+    });
+    await act(flush);
+    const [row] = block();
+    expect(row).toHaveTextContent("5h 37% · 7d 56% · Fable 12%");
+    expect(row).toHaveTextContent("sampled 3 h ago");
   });
 
   it("Sign in on box-a opens the sign-in for that account there", async () => {
