@@ -88,7 +88,7 @@
             "tool_use_id": {
               "type": "string",
               "minLength": 1,
-              "description": "picker_opened / picker_answered: the harness's id of the picker's tool call."
+              "description": "picker_opened / picker_answered: the harness's id of the picker's tool call; activity (PreToolUse) / heartbeat (PostToolUse): the tool boundary, the id of the call that began / ended (spec section 4.3)."
             },
             "questions": {
               "type": "array",
@@ -119,6 +119,11 @@
               "type": "object",
               "additionalProperties": { "type": "string" },
               "description": "picker_answered: question → answer, as the harness reports it (a multi-select's labels joined with ', ')."
+            },
+            "tool": {
+              "type": "string",
+              "minLength": 1,
+              "description": "activity (PreToolUse) / heartbeat (PostToolUse): the tool boundary's tool name, e.g. Bash (spec section 4.3)."
             },
             "tool_calls": {
               "type": "integer",

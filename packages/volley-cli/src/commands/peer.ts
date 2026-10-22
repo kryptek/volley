@@ -8,7 +8,7 @@ import {
 } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from "node:fs";
 import os from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -85,7 +85,7 @@ const HELP = `Usage:
                      [--remote-volley <command>] [--no-service] [--replace]
     volley peer doctor [--fix] [--yes] [--json] [--repo <path>] [--clone]
                        [--origin <url>] [--release <branch>] [--volley-dir <path>]
-                       [--sharing <json>]
+                       [--sharing <json>] [--supervisor-volley-dir <path>]
                                                Check this machine; --fix applies the safe fixes
     volley peer run                            The tunnel + heartbeat service (installed by join)
   Internal:
@@ -99,7 +99,9 @@ join options:
   --repo <path>            This machine's clone of the wave repository
   --volley-dir <path>      This machine's volley checkout (default: the one running this command)
   --port <port>            Port on this machine's 127.0.0.1 that reaches the broker (default 21883)
-  --remote-volley <cmd>    How to run volley on the supervisor's machine (default: volley)
+  --remote-volley <cmd>    How to run volley on the supervisor's machine (default: volley when
+                           it is on that ssh PATH, else ~/.volley/bin/volley, where
+                           \`volley setup\` installs it)
   --no-service             Do not install the service (run \`volley peer run\` yourself)
   --replace                Re-pair: replace this machine's account and hosts entry (a code
                            from \`volley peer invite --for <name>\`, with --name <name>)
@@ -118,6 +120,10 @@ doctor options:
   --release <branch>       Check this branch is fetchable from origin
   --sharing <json>         The Claude profile's sharing modes, e.g. '{"skills":"own"}' (default:
                            the supervisor's, read through the tunnel; else the defaults)
+  --supervisor-volley-dir <path>
+                           The checkout the supervisor launches this machine's agents from
+                           (its hosts.<name>.volley_dir; volleyd's Repair passes it): every
+                           volley MCP entry must run it as well as this checkout
 
 Host options (invite, list, remove, redeem):
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -148,6 +154,7 @@ const OPTIONS = {
   origin: { type: "string" },
   release: { type: "string" },
   sharing: { type: "string" },
+  "supervisor-volley-dir": { type: "string" },
   ttl: { type: "string" },
   json: { type: "boolean" },
   timeout: { type: "string" },
@@ -166,6 +173,7 @@ const OWNED_BY: Partial<Record<keyof typeof OPTIONS, string[]>> = {
   origin: ["doctor"],
   release: ["doctor"],
   sharing: ["doctor"],
+  "supervisor-volley-dir": ["doctor"],
   for: ["invite"],
   replace: ["join"],
   drain: ["remove"],
@@ -818,7 +826,7 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
     cores: deps.cpus(),
     ...(v.replace === true ? { replace: true as const } : {}),
   };
-  const remoteVolley = v["remote-volley"] ?? "volley";
+  const remoteVolley = v["remote-volley"] ?? null;
   const redeemed = await remote(deps, host, redeemScript(request, remoteVolley));
   if (redeemed.code === NO_SSH_BACK) {
     const key = hostKeyHint(redeemed.stderr, target, host);
@@ -841,7 +849,7 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
   if (redeemed.code === 127) {
     // The shell found no such command: nothing ran on the host, so the code was not used.
     return fail(
-      `pairing refused on ${host}: ${redeemed.stderr.trim() || "command not found"}\n${missingCommandHint(redeemed.stderr, host, remoteVolley)} Nothing was redeemed: the code is still valid.`,
+      `pairing refused on ${host}: ${redeemed.stderr.trim() || "command not found"}\n${missingCommandHint(redeemed.stderr, host, remoteVolley ?? SETUP_VOLLEY)} Nothing was redeemed: the code is still valid.`,
     );
   }
   if (redeemed.code !== 0) {
@@ -994,9 +1002,10 @@ const TOOLS_PROBE = `missing=; for c in ${AGENT_TOOLS.join(" ")}; do command -v 
  * The script `join` runs on the host: check that the host reaches this machine over ssh, as
  * volleyd will for every spawn here, and that what an agent runs is on that ssh session's PATH
  * (before the code is used up), then redeem the code. `ssh -n`: the inner ssh must not read the
- * rest of this script from bash's stdin.
+ * rest of this script from bash's stdin. Without `remoteVolley`, `volley` on the host's PATH, else
+ * the one `volley setup` installs (a Mac's non-interactive ssh PATH has neither bun nor volley).
  */
-export function redeemScript(request: RedeemRequest, remoteVolley: string): string {
+export function redeemScript(request: RedeemRequest, remoteVolley: string | null): string {
   const t = sq(request.target);
   const ssh = `ssh -n -o BatchMode=yes -o ConnectTimeout=${PEER_DEFAULTS.ssh_connect_timeout_s} ${t}`;
   return [
@@ -1010,7 +1019,11 @@ export function redeemScript(request: RedeemRequest, remoteVolley: string): stri
     `if [ "$rc" -eq 255 ]; then echo "the supervisor's machine cannot ssh to "${t} >&2; exit ${NO_SSH_BACK}; fi`,
     `if [ "$rc" -ne 0 ]; then echo "the PATH check exited $rc" >&2; exit ${NO_PROBE}; fi`,
     `case "$tools" in *"volley-peer-missing: "*) printf '%s\\n' "$tools" >&2; exit ${NO_TOOLS};; esac`,
-    `printf '%s' ${sq(b64(JSON.stringify(request)))} | base64 -d | ${remoteVolley} peer redeem`,
+    `printf '%s' ${sq(b64(JSON.stringify(request)))} | base64 -d | ${
+      remoteVolley !== null
+        ? `${remoteVolley} peer redeem`
+        : `if command -v volley >/dev/null 2>&1; then volley peer redeem; else ${SETUP_VOLLEY} peer redeem; fi`
+    }`,
     "",
   ].join("\n");
 }
@@ -1516,6 +1529,11 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
     io.stderr("volley peer doctor: --clone needs --fix\n");
     return EXIT.USAGE;
   }
+  const supervisorDir = v["supervisor-volley-dir"];
+  if (supervisorDir !== undefined && !isAbsolute(supervisorDir)) {
+    io.stderr("volley peer doctor: --supervisor-volley-dir must be an absolute path\n");
+    return EXIT.USAGE;
+  }
   let flagSharing: Sharing | null = null;
   if (v.sharing !== undefined) {
     try {
@@ -1556,6 +1574,7 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
     fix: v.fix === true,
     yes: v.yes === true,
     clone: v.clone === true,
+    ...(supervisorDir !== undefined ? { volleyDir: supervisorDir } : {}),
   };
   return doctor(io, { ...deps, volleyDir: resolve(v["volley-dir"] ?? deps.volleyDir) }, opts);
 }
@@ -1659,6 +1678,8 @@ function realDeps(): PeerDeps {
     which: (cmd) => Bun.which(cmd),
     // packages/volley-cli/src/commands → the checkout root.
     volleyDir: resolve(dirname(cli), "..", "..", ".."),
+    // Where volleyd keeps the Claude account profiles (its claudeRoot()).
+    ...(process.env.VOLLEY_CLAUDE_DIR ? { claudeRoot: process.env.VOLLEY_CLAUDE_DIR } : {}),
     shell: () => os.userInfo().shell ?? process.env.SHELL ?? "/bin/sh",
     version: pkg.version,
     totalmem: () => os.totalmem(),

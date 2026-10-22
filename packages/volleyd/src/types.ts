@@ -94,6 +94,8 @@ export interface Tunables {
   background_wait_max_s: number;
   /** Cap on the doubling gap between `agent_stalled` decisions of one idle cycle. */
   stall_backoff_max_s: number;
+  /** Longest a tool call in flight (PreToolUse, no PostToolUse yet) holds off the silence probe. */
+  tool_in_flight_max_s: number;
   fallback_model: string | null;
   mailbox: { session_expiry_s: number };
   worktree_root: string;
@@ -612,6 +614,8 @@ export const WAVE_EVENT_TYPES = [
   "ci_green",
   "pr_head_moved",
   "merged_by_operator",
+  // A PR GitHub reports CONFLICTING (no CI will run on it): its branch-update step starts.
+  "pr_conflicting",
   // Autopilot merging (SPEC §4.6.17): volleyd merged a gated PR at its gated head.
   "merged_by_supervisor",
   // The merge queue (SPEC §4.6.17): a gated task entered or left it; volleyd's merge of it began,

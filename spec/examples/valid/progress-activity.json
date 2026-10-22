@@ -10,6 +10,8 @@
     "tool_calls": 17,
     "seq": 43,
     "source": "harness-hook",
-    "hook_event": "PreToolUse"
+    "hook_event": "PreToolUse",
+    "tool_use_id": "toolu_01ABCDEF",
+    "tool": "Bash"
   }
 }
