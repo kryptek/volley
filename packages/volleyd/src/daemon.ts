@@ -5099,11 +5099,13 @@ export class Daemon {
       this.scheduleReap(agentId, a);
     };
     this.trackScreen(agentId, a);
-    const check = (type: string) => {
+    const check = (type: string, live = true) => {
       if (this.supervised.get(agentId) !== a) return;
-      // The watchdog checks the status gets handled, whether it arrived live or was already
-      // retained when the watch attached (a fast agent, every agent after a restart).
-      this.noteTerminal(agentId, a);
+      // The watchdog checks the status gets handled. A `blocked` already retained when the watch
+      // attached (a fast agent, every agent after a restart) is checked too: it must have a
+      // decision. A `done` / `failed` retained at re-attach was handled, or is re-handled below
+      // as the same claim (e.g. a head still held for CI), which journals nothing new.
+      if (live || type === "blocked") this.noteTerminal(agentId, a);
       if (type === "reaped") {
         // A re-delivery (same wall_time) of a reap a heartbeat already suppressed changes nothing.
         if (a.watch.state.status?.wall_time === a.suppressedReap) return;
@@ -5135,7 +5137,7 @@ export class Daemon {
       void this.enqueue(() => this.onFinal(agentId, type));
     };
     watch.onStatus((type) => check(type));
-    if (watch.state.status !== null) check(watch.state.status.type);
+    if (watch.state.status !== null) check(watch.state.status.type, false);
     if (outcome.kind === "registered")
       void this.enqueue(() => this.deliverQueued(wave, task, role, agentId));
   }
@@ -5763,6 +5765,8 @@ export class Daemon {
     const status = a.watch.state.status;
     if (status?.type !== "blocked" || a.blockedAsked === status.wall_time) return;
     if (this.blockedDecided(a.wave, agentId, status.wall_time)) return;
+    // Recorded before the open: should the open throw (logged below), this status is not asked
+    // again here; the liveness backstop (blocked_undecided_stall_ms) still raises it as a stall.
     a.blockedAsked = status.wall_time;
     const rec = this.waves.get(a.wave)?.record;
     const stage = rec?.state?.tasks.find((t) => t.id === a.task)?.stage;
@@ -6436,23 +6440,23 @@ export class Daemon {
         // A respawn is the pipeline's (its relaunch): offered where a pipeline spawns the role.
         const respawn = this.opts.spawner !== undefined;
         const attempt = this.spawnedRecord((e) => e.data.agent_id === agentId, wave)?.attempt;
+        const said = x.last_text !== null ? ` Last message: ${clipText(x.last_text)}` : "";
+        const mins = Math.floor(x.idle_s / 60);
+        // A blocked agent nobody was asked about: respawn or stop (no nudge: it is waiting).
+        const blockedAsk = {
+          question: `Needs you: ${agentId} is blocked and nobody has been asked about it for ${mins} min.${said} ${respawn ? `respawn: stop it and start the ${a.role} again; or ` : ""}stop the task?`,
+          options: respawn ? ["respawn", STOP_ANSWER] : [STOP_ANSWER],
+        };
+        const idleAsk = {
+          question: `Needs you: ${agentId} ended its turn without publishing done/blocked/failed and is still idle ${mins} min later, after a nudge.${said} Answer to steer it${respawn ? `, respawn: stop it and start the ${a.role} again (${a.role === "implementer" ? "on the branch it pushed" : "from the head, with the same inputs"})` : ""}, or stop the task.${x.asked > 1 ? ` (Asked ${x.asked} times; next in ${Math.round(x.next_s / 60)} min.)` : ""}`,
+          options: respawn ? ["nudge again", "respawn", STOP_ANSWER] : ["nudge again", STOP_ANSWER],
+        };
         return open(
           "stalled",
           {
             kind: "agent_stalled",
             task,
-            question:
-              x.blocked === true
-                ? `Needs you: ${agentId} is blocked and nobody has been asked about it for ${Math.floor(x.idle_s / 60)} min.${x.last_text !== null ? ` Last message: ${clipText(x.last_text)}` : ""} ${respawn ? `respawn: stop it and start the ${a.role} again; or ` : ""}stop the task?`
-                : `Needs you: ${agentId} ended its turn without publishing done/blocked/failed and is still idle ${Math.floor(x.idle_s / 60)} min later, after a nudge.${x.last_text !== null ? ` Last message: ${clipText(x.last_text)}` : ""} Answer to steer it${respawn ? `, respawn: stop it and start the ${a.role} again (${a.role === "implementer" ? "on the branch it pushed" : "from the head, with the same inputs"})` : ""}, or stop the task.${x.asked > 1 ? ` (Asked ${x.asked} times; next in ${Math.round(x.next_s / 60)} min.)` : ""}`,
-            options:
-              x.blocked === true
-                ? respawn
-                  ? ["respawn", STOP_ANSWER]
-                  : [STOP_ANSWER]
-                : respawn
-                  ? ["nudge again", "respawn", STOP_ANSWER]
-                  : ["nudge again", STOP_ANSWER],
+            ...(x.blocked === true ? blockedAsk : idleAsk),
             pointers: { screen: buildTopic(a.namespace, agentId, "screen") },
           },
           {

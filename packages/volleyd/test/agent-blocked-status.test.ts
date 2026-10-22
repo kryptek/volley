@@ -478,6 +478,23 @@ describe("daemon: the terminal-status watchdog", () => {
     expect(blockedOpened()).toHaveLength(1);
   });
 
+  it("is not armed for a done already retained when supervision attaches", async () => {
+    // A done re-sent at re-attach is the same claim (e.g. a head still held for CI): the
+    // pipeline journals nothing new for it, and that is not a dropped status.
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    await s.daemon.stop();
+    await s.status("done", { summary: "ok" });
+    vi.spyOn(Daemon.prototype as never, "onFinal").mockResolvedValue(undefined as never);
+    const d = await s.restart();
+    await d.reconciled();
+    await s.consumed();
+    await clock.advance(late);
+    await d.tick();
+    await s.settled();
+    expect(alarms()).toHaveLength(0);
+  });
+
   it("a handled blocked status raises nothing", async () => {
     const clock = fakeClock(Date.now());
     s = await makeSupervisedEnv({ daemon: { clock } });
