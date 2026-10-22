@@ -118,6 +118,9 @@ function testViolations(text: string): string[] {
 const WAIT_HELPER =
   /^\s*(?:export\s+)?(?:(?:async\s+)?function\s+|(?:const|let)\s+)(?:eventually|until|waitFor)\b/;
 const BOUNDED_WAIT = /\b(?:eventually|until)\b/;
+/** `const until = <expression>;` on one line that is neither a function nor an alias: a value (a deadline), not a helper. */
+const PLAIN_VALUE =
+  /^\s*(?:export\s+)?(?:const|let)\s+\w+\s*=(?!\s*[\w$.]+\s*;)(?!.*=>)(?!\s*(?:async\b|function\b)).*;\s*$/;
 
 /**
  * The definition starting at line `i`: through the line at the same indentation that closes the
@@ -136,7 +139,7 @@ function definitionAt(lines: string[], i: number): string {
 function waitHelperViolations(text: string): string[] {
   const lines = text.split("\n");
   return lines.flatMap((line, i) => {
-    if (isCommentLine(line) || !WAIT_HELPER.test(line)) return [];
+    if (isCommentLine(line) || !WAIT_HELPER.test(line) || PLAIN_VALUE.test(code(line))) return [];
     const body = definitionAt(lines, i)
       .replace(WAIT_HELPER, "")
       .split("\n")
@@ -158,6 +161,11 @@ describe("broker waits carry a deadline", () => {
       waitHelperViolations("async function waitFor(p: () => boolean) {\n  for (;;) {}\n}"),
     ).toHaveLength(1);
     expect(waitHelperViolations("const waitFor = eventually;")).toEqual([]);
+    expect(waitHelperViolations("const waitFor = poll;")).toHaveLength(1);
+    // A deadline named `until` is a value, not a wait helper.
+    expect(
+      waitHelperViolations("    const until = DEFAULTS.grace_ms + 2 * DEFAULTS.poll_ms;"),
+    ).toEqual([]);
     expect(
       waitHelperViolations(
         "  const until = async (name: string) => {\n    await eventually(async () => ok(name));\n  };",
