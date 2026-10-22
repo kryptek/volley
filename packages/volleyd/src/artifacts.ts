@@ -968,6 +968,13 @@ export async function probeMovedHead(
   const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
   await git("fetch", "origin", o.branch);
   if (o.fetch !== o.branch) await fetchHead(git, o);
+  // From a repo root, the gated head may be missing (force-pushed away): fetch it by sha, best
+  // effort; without it the log and diffstat below come back empty.
+  if (
+    o.fetch !== undefined &&
+    (await git("rev-parse", "--verify", "--quiet", `${o.from}^{commit}`)).code !== 0
+  )
+    await git("fetch", "origin", o.from);
   const ci = await ciOn(exec, o.cwd, o.to, o.runs_via);
   const tests = ci.state === "red" ? (await failedLogs(exec, o.cwd, ci.runs)).failing_tests : [];
   const log = await git("log", "--oneline", `${o.from}..${o.to}`);

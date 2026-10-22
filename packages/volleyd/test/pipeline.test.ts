@@ -6,6 +6,7 @@ import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
 import { ranTaskDef, worktreeGone } from "../src/daemon";
 import type { DecisionRecord } from "../src/decisions";
 import type { EvidenceJson } from "../src/evidence";
+import type { ExecFn } from "../src/exec";
 import { roleSpawnHold } from "../src/pipeline";
 import { eventually } from "./helpers/broker-wait";
 import { FIXTURES } from "./helpers/fake-host";
@@ -1284,6 +1285,26 @@ describe("pipeline: where the checks run", () => {
     expect(
       after.filter((c) => c.cwd?.startsWith("/wt/") || c.argv.some((x) => x.startsWith("/wt/"))),
     ).toEqual([]);
+  });
+
+  it("a `gh api` call through the GitHub-read exec gets no --repo (gh api rejects it)", async () => {
+    h = pipelineHarness();
+    await h.start();
+    await h.journal({
+      type: "repo_visibility_detected",
+      data: {
+        visibility: "public",
+        github: { slug: "example/repo", url: "https://github.com/example/repo" },
+      },
+    });
+    // biome-ignore lint/suspicious/noExplicitAny: reaching the private exec on purpose
+    const gh = (h.driver as any).ghExec("T1") as ExecFn;
+    await gh(["gh", "api", "repos/example/repo/actions/runs"], { cwd: "/wt/x" });
+    await gh(["gh", "pr", "view", "7"], { cwd: "/wt/x" });
+    const api = h.calls.filter((a) => a[0] === "gh" && a[1] === "api");
+    expect(api.at(-1)).toEqual(["gh", "api", "repos/example/repo/actions/runs"]);
+    const view = h.calls.filter((a) => a[0] === "gh" && a[1] === "pr");
+    expect(view.at(-1)).toEqual(["gh", "pr", "view", "7", "--repo", "example/repo"]);
   });
 
   it("off github.com, --repo is host-qualified (<host>/<slug>)", async () => {

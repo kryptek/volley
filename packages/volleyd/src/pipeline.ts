@@ -4082,7 +4082,7 @@ export class PipelineDriver {
    * cleanup may have removed (a missing cwd fails the spawn: ENOENT). Any other argv goes to
    * `other` (default: the task's own exec). Without a repo root, everything goes to `other`
    * with the caller's cwd: unreachable from a wave file (the schema requires `repo`).
-   * Only `gh pr …` / `gh run …` may come through here: `gh api` rejects the appended `--repo`.
+   * A `gh api` call gets no `--repo` (gh api rejects it; its endpoint names the repository).
    */
   private ghExec(task: TaskId, other: ExecFn = this.io(task)): ExecFn {
     const root = this.ghCwd();
@@ -4090,7 +4090,7 @@ export class PipelineDriver {
     const local = this.timed(this.deps.exec);
     return (argv, opts = {}) =>
       argv[0] === "gh"
-        ? local([...argv, ...this.repoArgs()], { ...opts, cwd: root })
+        ? local(argv[1] === "api" ? argv : [...argv, ...this.repoArgs()], { ...opts, cwd: root })
         : other(argv, opts);
   }
 
