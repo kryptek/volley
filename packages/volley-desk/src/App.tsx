@@ -42,7 +42,7 @@ import {
   staleProgressFor,
   waveAttention,
 } from "./attention";
-import { SignInPreview } from "./auth/SignInGate";
+import { SignInPreview, useAccount } from "./auth/SignInGate";
 import { type Attention, Frame, useFocusOrder } from "./canvas/Frame";
 import { World } from "./canvas/World";
 import {
@@ -85,10 +85,10 @@ import { MOVE_ACCOUNT_TIMEOUT_MS } from "./settings/ClaudeAccounts";
 import { agentsOnMachines, sshHost } from "./settings/Machines";
 import { PeerSignin, peerAccount } from "./settings/PeerSigninSheet";
 import { SettingsModal } from "./settings/SettingsModal";
-import { SettingsWindow } from "./settings/SettingsWindow";
+import { ADMIN_ROLE, SettingsWindow } from "./settings/SettingsWindow";
 import { SetupWizard } from "./settings/SetupWizard";
 import { DAEMON_AGENT_ID, createConfigTransport } from "./settings/configTransport";
-import type { SectionKey } from "./settings/sections";
+import { type SectionKey, accountRole } from "./settings/sections";
 import { emitSound } from "./sounds/emit";
 import { useNotifyMirror, useSoundSettings } from "./sounds/settings";
 import { useFlipSound, useSoundManager } from "./sounds/useSoundManager";
@@ -328,6 +328,9 @@ export default function App() {
   const [coordsOpen, setCoordsOpen] = useState(true);
   const [inboxOpen, setInboxOpen] = useState(true);
   const [machinesOpen, setMachinesOpen] = useState(false);
+  /** The Dock's account menu (the avatar); only in a signed-in session. */
+  const account = useAccount();
+  const [accountOpen, setAccountOpen] = useState(false);
   const [notify, setNotify] = useNotifySettings();
   // Sound themes: the manager plays what the store and the Desk's controls do.
   const [sound, setSound] = useSoundSettings();
@@ -1355,6 +1358,18 @@ export default function App() {
         onZoom={(f) => zoomAt(f)}
         settingsOpen={deskSettings !== null}
         onToggleSettings={() => setDeskSettings((s) => (s === null ? "general" : null))}
+        {...(account !== null
+          ? {
+              account: {
+                identity,
+                role:
+                  readSessionRole(identity) === "admin" ? ADMIN_ROLE : accountRole(identity, demo),
+                open: accountOpen,
+                onToggle: () => setAccountOpen((o) => !o),
+                onClose: () => setAccountOpen(false),
+              },
+            }
+          : {})}
       />
 
       {deskSettings !== null && (

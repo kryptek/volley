@@ -4,7 +4,7 @@
  * state, and a `DeskMqttClient` whose deliveries, connects, disconnects and
  * reconnect probes the test drives by hand.
  */
-import type { DeskMqttClient } from "../../src/store/mqtt-client";
+import type { BrokerCredentials, DeskMqttClient } from "../../src/store/mqtt-client";
 import type {
   DeskMessage,
   Envelope,
@@ -271,4 +271,28 @@ export function fakeClient() {
     } as DeskMqttClient,
   };
   return ctl;
+}
+
+/** A `clientFactory` whose clients connect at once; `calls` records the credentials each was built with. */
+export function connectingFactory() {
+  const calls: (BrokerCredentials | undefined)[] = [];
+  const make = (_url: string, auth?: BrokerCredentials): DeskMqttClient => {
+    calls.push(auth);
+    const connected = new Set<() => void>();
+    return {
+      connect: async () => {
+        for (const h of connected) h();
+      },
+      disconnect: async () => {},
+      publish: async () => {},
+      onMessage: () => () => {},
+      onConnect: (h) => {
+        connected.add(h);
+        return () => connected.delete(h);
+      },
+      onDisconnect: () => () => {},
+      onError: () => () => {},
+    };
+  };
+  return { make, calls };
 }

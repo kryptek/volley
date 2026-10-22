@@ -196,7 +196,10 @@ const claimedHere = (w: WaveView | undefined, ctx: AttentionCtx): boolean =>
 /**
  * The wave's coordinator: the store's view (owner topics, else the
  * supervisor's), with a `working` coordinator silent for longer than
- * `claim_after_s` counted as `gone`. An `awaiting_input` coordinator stays
+ * `claim_after_s` counted as `gone`. Silence is measured from the newest of
+ * the bound agent's `lastSeen`/`heartbeat` and volleyd's `last_seen` (which it
+ * refreshes while it hears the coordinator), so a supervisor that still hears
+ * it outvotes this page's own timer. An `awaiting_input` coordinator stays
  * waiting: it is quiet because it is waiting for the owner; one waiting on
  * the wave's events (a live background wait, or the generic idle prompt with
  * nothing pending for the owner) stays `working` for the same reason.
@@ -212,8 +215,10 @@ export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordin
     return { id, state: "reconnecting", ...(since !== undefined ? { since } : {}) };
   }
   const view = ctx.coordinators?.[id];
-  const sup = s?.coordinator?.agent_id === id ? s.coordinator : undefined;
-  const a = ctx.agents?.[id];
+  // volleyd's view of this owner (through its binding when the owner is a coordinator name).
+  const sup = s?.coordinator;
+  // The bound agent first (a coordinator name has no agent of its own), then the owner id.
+  const a = (sup !== undefined ? ctx.agents?.[sup.agent_id] : undefined) ?? ctx.agents?.[id];
   const seen = [a?.lastSeen, a?.heartbeat ?? undefined, Date.parse(sup?.last_seen ?? "")].filter(
     (t): t is number => typeof t === "number" && Number.isFinite(t),
   );
