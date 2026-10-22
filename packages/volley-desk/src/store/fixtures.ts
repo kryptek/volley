@@ -740,7 +740,7 @@ function overload(r: MachineLoad): { eligible?: false; ineligible_reason?: strin
   };
 }
 
-/** The demo's live machines' next beat: new `last_seen`, load and memory, and box-a's verdict. */
+/** The demo's live machines' next beat: new `last_seen`, load and memory, and their verdicts. */
 export function machinesTick(now: number, step: number): DeskMessage[] {
   return machines(now, step);
 }
@@ -853,9 +853,10 @@ function machines(now: number, step = 0): DeskMessage[] {
       ineligible_reason: "box-b is down (no heartbeat for 90 s)",
     }),
   ];
-  // After the start only the live machines beat: box-b's record and the stock verdicts stand.
+  // After the start only the live machines beat (and are judged again): box-b's record and
+  // verdict stand.
   const live = step === 0 ? records : records.filter((r) => r.tunnel !== "down");
-  const judged = step === 0 ? verdicts : verdicts.filter((v) => v.name === "box-a");
+  const judged = step === 0 ? verdicts : verdicts.filter((v) => v.name !== "box-b");
   return [
     ...live.map((r) => ({
       topic: `volley/_system/machines/${r.name}`,

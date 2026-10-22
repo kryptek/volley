@@ -159,19 +159,22 @@ describe("the store's machineHistory", () => {
     expect(eligible.filter((e) => !e).length * MACHINES_TICK_MS).toBeGreaterThanOrEqual(60_000);
   });
 
-  it("the demo's studio keeps the low memory its stock verdict reports at every step", () => {
+  it("the demo's studio verdict reports the memory of the same beat, under its floor at every step", () => {
     const at = (step: number) => machinesTick(NOW + step * MACHINES_TICK_MS, step);
-    const reason = (
-      at(0).find((m) => m.topic === "volley/_system/machines/studio/readiness")?.envelope
-        ?.payload as { ineligible_reason: string }
-    ).ineligible_reason;
+    const reason = (step: number) =>
+      (
+        at(step).find((m) => m.topic === "volley/_system/machines/studio/readiness")?.envelope
+          ?.payload as { ineligible_reason: string }
+      ).ineligible_reason;
     const pct = (step: number) =>
       (
         at(step).find((m) => m.topic === "volley/_system/machines/studio")?.envelope?.payload as {
           memory: { available_pct: number };
         }
       ).memory.available_pct;
-    expect(reason).toBe(`memory available ${pct(0)}% (min 20%)`);
-    for (let step = 1; step <= 96; step++) expect(pct(step), `step ${step}`).toBeLessThan(20);
+    for (let step = 0; step <= 96; step++) {
+      expect(pct(step), `step ${step}`).toBeLessThan(20);
+      expect(reason(step), `step ${step}`).toBe(`memory available ${pct(step)}% (min 20%)`);
+    }
   });
 });
