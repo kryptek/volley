@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { nextSteer } from "../src/controls";
 import { apply, emptyRecord, reduce, replay } from "../src/reducer";
-import type { JournalEvent } from "../src/types";
+import type { JournalEvent, WaveTask } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
 import { envelope, schemaErrors } from "./helpers/schema";
 
@@ -377,6 +377,38 @@ describe("task_placed (SPEC §4.6.15)", () => {
     expect(rec.wave?.tasks.T1?.host).toBe("box-a");
     expect(t1?.host_actual).toBe("box-a");
     expect(t1?.host_planned).toBeUndefined();
+  });
+
+  it("a placed task records another written host as host_planned whether the version lands before or during its spawn (#323)", () => {
+    const spawnedA = (seq: number): JournalEvent => ({
+      seq,
+      at: AT,
+      type: "agent_spawned",
+      task: "T1",
+      data: { role: "implementer", agent_id: "w1-t1-implementer-1", host: "box-a" },
+    });
+    const v2 = {
+      ...wave,
+      version: 2,
+      tasks: { ...wave.tasks, T1: { ...(wave.tasks.T1 as WaveTask), host: "box-b" } },
+    };
+    const versioned: JournalEvent = {
+      seq: 0,
+      at: AT,
+      type: "wave_versioned",
+      data: { wave: v2, plan: v2 },
+    };
+    // The version lands after the spawn.
+    const after = replay([...base, placedA, spawnedA(5), { ...versioned, seq: 6 }]);
+    // The version lands while the spawn runs.
+    const during = replay([...base, placedA, { ...versioned, seq: 5 }, spawnedA(6)]);
+    for (const rec of [after, during]) {
+      expect(rec.wave?.tasks.T1?.host).toBe("box-a");
+      expect(rec.state?.tasks.find((t) => t.id === "T1")).toMatchObject({
+        host_actual: "box-a",
+        host_planned: "box-b",
+      });
+    }
   });
 
   it("a task spawned before placement keeps the host it runs on across a plan version (#323)", () => {

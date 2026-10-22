@@ -183,6 +183,20 @@ export function startedHost(t: TaskState, prev: WaveTask | undefined): string | 
 }
 
 /**
+ * The host a plan writes for a started task running on `ran`, when the two conflict: `planned`,
+ * unless it is `auto` on a placed task (its placement satisfies it). Shared by `wave_versioned`,
+ * `agent_spawned` and plan apply's kept-host report so they agree (#323).
+ */
+export function plannedHostConflict(
+  planned: string | undefined,
+  ran: string,
+  t: Pick<TaskState, "placement">,
+): string | undefined {
+  if (planned === undefined || planned === ran) return undefined;
+  return planned === AUTO_HOST && t.placement !== undefined ? undefined : planned;
+}
+
+/**
  * Run task `id` on `host` in the effective plan (copy on write, like setTaskHost), with `prev`'s
  * inline `host:` when `prev` ran there.
  */
@@ -322,12 +336,8 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         const ran = startedHost(t, prev);
         if (ran === undefined) return t;
         keepTaskHost(next, t.id, ran, prev);
-        const planned = plan.tasks[t.id]?.host;
-        // `auto` on a placed task is satisfied by its placement: no conflict to record.
-        const placed = planned === AUTO_HOST && t.placement !== undefined;
-        return planned !== undefined && planned !== ran && !placed
-          ? { ...t, host_planned: planned }
-          : t;
+        const planned = plannedHostConflict(plan.tasks[t.id]?.host, ran, t);
+        return planned !== undefined ? { ...t, host_planned: planned } : t;
       });
       // A task is placed once: a placed task the new version still leaves to placement keeps
       // its host.
@@ -432,10 +442,13 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
           // effective plan runs the task where it was spawned (the plan's is `host_planned`).
           const def = next.wave?.tasks[ev.task];
           if (def !== undefined && def.host !== ev.data.host) {
-            const planned = next.plan?.tasks[ev.task]?.host;
+            const planned = plannedHostConflict(
+              next.plan?.tasks[ev.task]?.host,
+              ev.data.host,
+              task,
+            );
             keepTaskHost(next, ev.task, ev.data.host, def);
-            if (planned !== undefined && planned !== ev.data.host && task.placement === undefined)
-              task.host_planned = planned;
+            if (planned !== undefined) task.host_planned = planned;
           }
         }
         // A worktree cut from the release branch (not a pipeline start ref): its base.
