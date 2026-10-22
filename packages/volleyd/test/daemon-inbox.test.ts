@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { type InboxItem, decisionItemId, inboxTopic } from "../src/autopilot/inbox";
+import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { ControlClient } from "../src/control";
 import { AUTOPILOT_ON, NS } from "./helpers/daemon-env";
 import { deskAccounts, deskAnswer } from "./helpers/desk-answer";
@@ -464,5 +465,274 @@ describe("a Desk login answers on its own account-op topic (the owner on any scr
     });
     expect(resolve.error).toContain("is owned by coord-main");
     expect(s.daemon.inboxItem(id)?.answered).toBeUndefined();
+  });
+});
+
+describe("held decisions (#335): waiting on a task, PR or issue", () => {
+  const withT2 = (o: Parameters<typeof makeSupervisedEnv>[0] = {}) =>
+    makeSupervisedEnv({ tasks: ["T2: { issue: 42 }"], ...o });
+
+  it("volleyd hold --on T2: decision_held journaled, item and decision carry `held`; T2 cancelled releases it", async () => {
+    s = await withT2();
+    const d = await s.daemon.openDecision("w1", disagree);
+    const id = decisionItemId("w1", d.decision_id);
+    const r = await runCli(
+      ["hold", d.decision_id, "--on", "T2", "--note", "flake fix", "--by", "owner"],
+      s.env.env,
+    );
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toContain(`held ${d.decision_id} (w1) on T2`);
+    const held = s.journal().find((e) => e.type === "decision_held");
+    expect(held?.data).toMatchObject({
+      decision_id: d.decision_id,
+      on: { task: "T2" },
+      note: "flake fix",
+      by: "owner",
+    });
+    const env = await retainedItem(id);
+    expect(env?.payload.held).toMatchObject({ on: { task: "T2" }, note: "flake fix" });
+    expect(env?.payload.version).toBe(1);
+    expect(schemaErrors("inbox-item.schema.json", env)).toEqual([]);
+    const dec = await s.env.retained(`volley/_waves/w1/decisions/${d.decision_id}`);
+    expect((dec as { payload: { held?: unknown } }).payload.held).toMatchObject({
+      on: { task: "T2" },
+    });
+    expect(schemaErrors("decision.schema.json", dec)).toEqual([]);
+    const list = await runCli(["decisions", "w1"], s.env.env);
+    expect(list.stdout).toContain("held on T2 by owner");
+
+    await s.daemon.recordEvent("w1", { type: "task_cancelled", task: "T2", data: {} });
+    await s.daemon.tick();
+    const released = await s.event((e) => e.type === "decision_released");
+    expect(released.data).toMatchObject({ decision_id: d.decision_id, why: "T2 cancelled" });
+    await s.settled();
+    expect(s.daemon.inboxItem(id)?.held).toBeUndefined();
+    expect((await retainedItem(id))?.payload.held).toBeUndefined();
+    // Still open, in its normal tier: released is not answered.
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.resolved).toBeUndefined();
+  });
+
+  it("a hold on T2 is released when T2 reaches done", async () => {
+    s = await withT2();
+    const d = await s.daemon.openDecision("w1", disagree);
+    const c = await control();
+    const h = await c.request("hold", {
+      decision_id: d.decision_id,
+      on: { task: "T2" },
+      by: "owner",
+    });
+    expect(h.error).toBeUndefined();
+    await s.daemon.recordEvent("w1", {
+      type: "stage_entered",
+      task: "T2",
+      data: { stage: "done" },
+    });
+    await s.daemon.tick();
+    const released = await s.event((e) => e.type === "decision_released");
+    expect(released.data).toMatchObject({ decision_id: d.decision_id, why: "T2 done" });
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.held).toBeUndefined();
+  });
+
+  it("--on '#12' is released when gh pr view says MERGED, read once per ci_poll_ms", async () => {
+    let state = "OPEN";
+    let now = Date.parse("2026-10-21T09:00:00Z");
+    s = await withT2({
+      exec: [[["gh", "pr", "view", "12"], () => ({ stdout: JSON.stringify({ state }) })]],
+      daemon: { now: () => now },
+    });
+    const d = await s.daemon.openDecision("w1", disagree);
+    const c = await control();
+    const r = await c.request("hold", { decision_id: d.decision_id, on: { pr: 12 }, by: "owner" });
+    expect(r.error).toBeUndefined();
+    await s.daemon.tick();
+    await s.settled();
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.held?.on).toEqual({ pr: 12 });
+    const reads = () => s?.host.fake.argvs(["gh", "pr", "view", "12"]).length ?? 0;
+    const first = reads();
+    expect(first).toBeGreaterThan(0);
+    // Ticks inside ci_poll_ms do not read it again.
+    state = "MERGED";
+    await s.daemon.tick();
+    await s.daemon.tick();
+    await s.settled();
+    expect(reads()).toBe(first);
+    expect(s.journal().some((e) => e.type === "decision_released")).toBe(false);
+    now += DAEMON_DEFAULTS.ci_poll_ms;
+    await s.daemon.tick();
+    const released = await s.event((e) => e.type === "decision_released");
+    expect(released.data).toMatchObject({ decision_id: d.decision_id, why: "PR #12 merged" });
+    expect(s.host.fake.argvs(["gh", "pr", "view", "12"]).at(-1)).toEqual([
+      "gh",
+      "pr",
+      "view",
+      "12",
+      "--json",
+      "state",
+    ]);
+  });
+
+  it("volleyd release lifts a hold by hand; inbox hold holds by item id", async () => {
+    s = await withT2();
+    const d = await s.daemon.openDecision("w1", disagree);
+    const id = decisionItemId("w1", d.decision_id);
+    const h = await runCli(["inbox", "hold", id, "--on", "issue#7", "--by", "owner"], s.env.env);
+    expect(h.stderr).toBe("");
+    expect(s.daemon.inboxItem(id)?.held?.on).toEqual({ issue: 7 });
+    const r = await runCli(["release", d.decision_id, "--by", "owner"], s.env.env);
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toContain(`released ${d.decision_id}`);
+    const ev = s.journal().find((e) => e.type === "decision_released");
+    expect(ev?.data).toMatchObject({ why: "released by owner", by: "owner" });
+    expect(s.daemon.inboxItem(id)?.held).toBeUndefined();
+  });
+
+  /** A ci_failed on T2's PR #12 (red head RED), as the pipeline opens it. */
+  const RED = `badc0de${"0".repeat(33)}`;
+  const GREEN = `600d${"0".repeat(36)}`;
+  const ciFailedOnT2 = (env: SupervisedEnv) =>
+    env.daemon.recordEvent("w1", {
+      type: "decision_opened",
+      task: "T2",
+      data: {
+        decision_id: "ci-t2",
+        kind: "ci_failed",
+        question: "CI failed on badc0de: a flake.",
+        options: ["fix flake", "fixup", "re-verify", "cancel"],
+        pointers: {},
+        pr: { number: 12, url: "https://example.test/pr/12" },
+        pipeline: { on: "ci_failed", role: "implementer", head: RED },
+      },
+    });
+  const prHead = (head: string, conclusion: string): [string[], { stdout: string }][] => [
+    [["gh", "pr", "view", "12"], { stdout: JSON.stringify({ state: "OPEN", headRefOid: head }) }],
+    [
+      ["gh", "run", "list"],
+      {
+        stdout: JSON.stringify([
+          {
+            databaseId: 3,
+            name: "CI",
+            status: "completed",
+            conclusion,
+            headSha: head,
+            url: "https://example.test/runs/3",
+          },
+        ]),
+      },
+    ],
+  ];
+
+  it("a released ci_failed re-verifies its head first: green now, it is answered re-verify", async () => {
+    s = await withT2({ exec: prHead(GREEN, "success") });
+    await ciFailedOnT2(s);
+    const c = await control();
+    const h = await c.request("hold", { decision_id: "ci-t2", on: { issue: 7 }, by: "owner" });
+    expect(h.error).toBeUndefined();
+    const r = await c.request("release", { decision_id: "ci-t2", by: "owner" });
+    expect(r.error).toBeUndefined();
+    const resolved = await s.event(
+      (e) => e.type === "decision_resolved" && e.data.decision_id === "ci-t2",
+    );
+    expect(resolved.data).toMatchObject({ answer: "re-verify", by: "volleyd" });
+    expect(String(resolved.data.rationale)).toContain("green");
+    expect(s.host.fake.argvs(["gh", "run", "list"]).at(-1)).toContain(GREEN);
+  });
+
+  it("a released ci_failed whose head is still red stays open for autopilot's rule", async () => {
+    s = await withT2({ exec: prHead(RED, "failure") });
+    await ciFailedOnT2(s);
+    const c = await control();
+    await c.request("hold", { decision_id: "ci-t2", on: { issue: 7 }, by: "owner" });
+    await c.request("release", { decision_id: "ci-t2", by: "owner" });
+    await s.until(() => (s?.host.fake.argvs(["gh", "run", "list"]).length ?? 0) > 0);
+    await s.settled();
+    const d = s.daemon.record("w1")?.decisions["ci-t2"];
+    expect(d?.resolved).toBeUndefined();
+    expect(d?.held).toBeUndefined();
+  });
+
+  it("a released decision autopilot already escalated is not escalated a second time", async () => {
+    s = await withT2({
+      daemon: AUTOPILOT_ON,
+      config: "autopilot: { owner_only: [reviewers_disagree] }",
+    });
+    const d = await s.daemon.openDecision("w1", disagree);
+    await s.settled();
+    const escalations = () =>
+      s
+        ?.journal()
+        .filter((e) => e.type === "decision_escalated" && e.data.decision_id === d.decision_id) ??
+      [];
+    expect(escalations()).toHaveLength(1);
+    const c = await control();
+    const h = await c.request("hold", {
+      decision_id: d.decision_id,
+      on: { issue: 7 },
+      by: "owner",
+    });
+    expect(h.error).toBeUndefined();
+    const r = await c.request("release", { decision_id: d.decision_id, by: "owner" });
+    expect(r.error).toBeUndefined();
+    await s.settled();
+    const after = s.daemon.record("w1")?.decisions[d.decision_id];
+    expect(after?.held).toBeUndefined();
+    expect(after?.resolved).toBeUndefined();
+    expect(after?.escalated).toBeDefined();
+    expect(escalations()).toHaveLength(1);
+  });
+
+  it("a released decision autopilot escalates anew rings the notify bridge", async () => {
+    s = await withT2({ daemon: AUTOPILOT_ON });
+    const c = await control();
+    const set = (patch: unknown) => c.request("config_set", { patch, by: "owner" });
+    expect((await set({ autopilot: { enabled: false } })).error).toBeUndefined();
+    const d = await s.daemon.openDecision("w1", disagree);
+    await s.settled();
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.escalated).toBeUndefined();
+    await c.request("hold", { decision_id: d.decision_id, on: { issue: 7 }, by: "owner" });
+    const patch = { autopilot: { enabled: true, owner_only: ["reviewers_disagree"] } };
+    expect((await set(patch)).error).toBeUndefined();
+
+    const sub = new VolleyBroker();
+    await sub.connect({ url: s.env.broker.url, agentId: "test-notify" });
+    const rung: string[] = [];
+    await sub.subscribeStream(`volley/${NS}/volleyd/progress`, (m) => {
+      const env = JSON.parse(m.payload);
+      if (env.type === "blocked" && env.payload?.attention === "decision_opened")
+        rung.push(env.payload.decision_id as string);
+    });
+    try {
+      const r = await c.request("release", { decision_id: d.decision_id, by: "owner" });
+      expect(r.error).toBeUndefined();
+      await s.event((e) => e.type === "decision_escalated");
+      await s.until(() => rung.includes(d.decision_id));
+    } finally {
+      await sub.disconnect();
+    }
+  });
+
+  it("hold is owner-guarded like resolve; a Desk login holds on its account-op topic", async () => {
+    s = await withT2({ daemon: { authExec: deskAccounts().exec } });
+    const c = await control();
+    expect((await c.request("claim", { wave: "w1", by: "coord-main" })).ok).toBe(true);
+    const d = await s.daemon.openDecision("w1", disagree);
+    const refused = await c.request("hold", {
+      decision_id: d.decision_id,
+      on: { task: "T2" },
+      by: "someone-else",
+    });
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain("owned by coord-main");
+    const r = await deskAnswer(
+      s.env.broker.url,
+      "steer-1",
+      { decision_id: d.decision_id, on: { task: "T2" } },
+      "hold",
+    );
+    expect(r.error).toBeUndefined();
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.held).toMatchObject({
+      on: { task: "T2" },
+      by: "steer-1",
+    });
   });
 });
