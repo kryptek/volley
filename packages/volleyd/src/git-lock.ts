@@ -73,7 +73,7 @@ export function lockedFetch(
  * and with it every later fetch into the clone, forever.
  */
 export function lockFetches(exec: ExecFn, host: string, repo: string): ExecFn {
-  return async (argv, opts) => {
+  const locked: ExecFn = async (argv, opts) => {
     // Only the `git -C <dir> fetch …` shape is recognized (every caller's); any other form, such
     // as `git -c k=v -C …` or a fetch without `-C`, would bypass the lock.
     if (argv[0] !== "git" || argv[1] !== "-C" || argv[3] !== "fetch") return exec(argv, opts);
@@ -84,6 +84,14 @@ export function lockFetches(exec: ExecFn, host: string, repo: string): ExecFn {
     };
     return (await lockedFetch(host, repo, () => exec(argv, bounded))).result;
   };
+  return Object.assign(locked, { [INNER]: exec });
+}
+
+const INNER = Symbol("lockFetches.inner");
+
+/** The exec a `lockFetches` wrapper routes to (itself when `exec` is not one): which machine it runs on. */
+export function routedExec(exec: unknown): unknown {
+  return (exec as { [INNER]?: ExecFn } | null)?.[INNER] ?? exec;
 }
 
 const firstLine = (s: string) => s.trim().split("\n")[0] ?? "";

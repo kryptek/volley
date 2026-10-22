@@ -12,6 +12,7 @@ import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../src/config-defaults";
 import { ControlClient } from "../src/control";
 import type { Daemon } from "../src/daemon";
 import { decisionTopic } from "../src/decisions";
+import { routedExec } from "../src/git-lock";
 import { makeBufferIO } from "../src/io";
 import { readJournalFile } from "../src/journal";
 import { MACHINE_CHANNEL, type MachineRecord, machineTopic } from "../src/machines";
@@ -1289,8 +1290,8 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       pipelineFor(w: string): { deps: { execFor(task: string): unknown } };
     };
     const { execFor } = d.pipelineFor("w8").deps;
-    expect(execFor("T1")).toBe(local.exec);
-    expect(execFor("T2")).toBe(box?.exec);
+    expect(routedExec(execFor("T1"))).toBe(local.exec);
+    expect(routedExec(execFor("T2"))).toBe(box?.exec);
     const t1 = (await state("w8")).tasks.find((t) => t.id === "T1");
     expect(t1?.host).toBeUndefined();
     expect(t1).toMatchObject({ host_actual: "local", host_planned: "auto" });
@@ -1310,8 +1311,8 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       pipelineFor(w: string): { deps: { execFor(task: string): unknown } };
     };
     const { execFor } = d.pipelineFor("w9").deps;
-    expect(execFor("T1")).toBe(local.exec);
-    expect(execFor("T1")).toBe(local.exec);
+    expect(routedExec(execFor("T1"))).toBe(local.exec);
+    expect(routedExec(execFor("T1"))).toBe(local.exec);
     await eventually(async () =>
       journal("w9").some(
         (e) => e.type === "alarm_raised" && e.data.alarm === "host_auto_unresolved",
