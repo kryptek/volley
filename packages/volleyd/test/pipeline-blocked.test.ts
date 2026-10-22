@@ -120,16 +120,48 @@ describe.each(ROLES)("pipeline: a blocked %s (branch_update %s)", (role, update)
 });
 
 describe("pipeline: blocked edge cases", () => {
-  it("a stale agent (not the role's run) opens nothing", async () => {
+  const unhandled = () =>
+    h.events.filter((e) => e.type === "alarm_raised" && e.data.alarm === "blocked_unhandled");
+
+  it("a stale agent (not the role's run) opens nothing: one blocked_unhandled alarm says why", async () => {
     await runningRole("implementer");
-    await h.driver.handle("T1", {
+    const blocked = {
       kind: "agent_blocked",
       role: "implementer",
       agent_id: "someone-else",
       reason: "stuck",
       payload: {},
+      at: "2026-10-21T10:00:00.000Z",
+    } as const;
+    await h.driver.handle("T1", blocked);
+    await h.driver.handle("T1", blocked);
+    expect(blockedDecisions()).toHaveLength(0);
+    expect(unhandled()).toHaveLength(1);
+    expect(unhandled()[0]).toMatchObject({
+      task: "T1",
+      data: {
+        agent_id: "someone-else",
+        status_at: "2026-10-21T10:00:00.000Z",
+        why: "not the implementer's current run",
+      },
+    });
+  });
+
+  it("an accepted run's blocked opens nothing: the alarm says the run is accepted", async () => {
+    await runningRole("spec_reviewer");
+    const agent = h.run("implementer")?.agent_id as string;
+    await h.driver.handle("T1", {
+      kind: "agent_blocked",
+      role: "implementer",
+      agent_id: agent,
+      reason: "stuck",
+      payload: {},
     });
     expect(blockedDecisions()).toHaveLength(0);
+    expect(unhandled()[0]?.data).toMatchObject({
+      agent_id: agent,
+      why: "the implementer's run is already accepted",
+    });
   });
 
   it("respawn after the agent finished by hand and was accepted relaunches nothing", async () => {

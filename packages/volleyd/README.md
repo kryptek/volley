@@ -1369,7 +1369,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `hard_ceiling`, `spawn_budget_multiplier` | next admission tick (immediately after the change) | never preempted; a limit below current use only stops new admissions |
 | `admission.*` | next admission tick | never preempted |
 | `lease_pools` | next lease grant | a pool shrunk below its holders stops granting until holders release; no holder is preempted |
-| `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `background_wait_max_s`, `stall_backoff_max_s`, `tool_in_flight_max_s`, `wake_grace_s` | next monitor tick | — |
+| `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `background_wait_max_s`, `stall_backoff_max_s`, `blocked_undecided_stall_ms`, `tool_in_flight_max_s`, `wake_grace_s` | next monitor tick | — |
 | `fallback_model` | decisions opened after the change | open decisions keep their offer |
 | `mailbox.session_expiry_s` | new connections only | existing sessions keep their expiry until they reconnect |
 | `worktree_root` | spawns after the change | existing worktrees untouched |
@@ -2568,16 +2568,37 @@ agent's retained status. All rules are pure functions; the daemon carries out th
 | ↳ readable and unchanged on a second read | decision `unknown_screen`, `class: "screen_static"` | — |
 | ↳ unreadable, pane gone | `alarm_raised { alarm: "crash_candidate" }` only: wait for the LWT. Nothing is killed because a pane or process cannot be seen | — |
 | any hook signal | ends a silence; closes an open `hooks_silent` / `screen_static` decision | — |
+| status `blocked` with no decision naming the agent (open, or answered for that very status) for `blocked_undecided_stall_ms` (default 5 min), its hooks not working | decision `agent_stalled` (options `respawn`, `stop task`): a block nobody was asked about is a stall, so autopilot's stall rule covers it | as for `agent_stalled` above |
 
 **Terminal-status watchdog.** Every terminal status a supervised agent publishes (`done`,
-`blocked`, `failed`) must lead to something in the wave journal that names the agent
-(`decision_opened`, `agent_retired`, `artifact_verified`, `ci_pending`, `steering_sent`,
-`relaunched`, …). One that nothing names within `terminal_unjournaled_alarm_ms` (60 s, on the
+`blocked`, `failed`), or that is already retained when volleyd's watch attaches (a fast agent,
+every agent after a restart), must lead to something in the wave journal that handles it. A
+`blocked` is handled only by a decision or a retire naming the agent (`decision_opened`,
+`agent_retired`, `agent_force_retired`, `relaunched`); a `done` or `failed` by any event naming
+it (`artifact_verified`, `ci_pending`, `steering_sent`, …) except a registration, a `reconciled`
+or an alarm. One that nothing handles within `terminal_unjournaled_alarm_ms` (60 s, on the
 daemon's clock) is a status volleyd dropped: it journals `alarm_raised { alarm:
 "terminal_status_unjournaled", agent_id, role, task, status, since }` once per status (`since` is
 the status's `wall_time`), logs `watchdog: <agent> <status> unjournaled for <n>s`, and journals
 `alarm_cleared` for it once something finally names the agent. A coordinator watching the journal
 learns a task is stuck even when no decision was opened for it.
+
+**A blocked agent is always asked about.** The invariant: a supervised agent whose retained
+status is `blocked` has a decision naming it and that status (`agent_id`, `status_at`, the
+status's `wall_time`; answered or still open). It is enforced on the status event, when the watch
+attaches to a status already retained (a restart's reconcile hands the agent back the same way),
+and on every tick (a status never handed over is handed over then). The pipeline opens its own
+`agent_blocked` (`continue`, `respawn`, `cancel`) where it can; where it cannot, volleyd journals
+`alarm_raised { alarm: "blocked_unhandled", agent_id, role, why, status_at }` and opens a
+daemon-level `agent_blocked` with `class: "blocked_unhandled"`:
+
+| Why the pipeline cannot own it | Options |
+|---|---|
+| the pipeline failed, or no decision came `terminal_unjournaled_alarm_ms` after the hand-over (a red head still being classified restarts that window) | `respawn` (the agent is retired `relaunched` and its role spawns again), `cancel` (the task is cancelled) |
+| the task is `done`, `merge_ready` or `cancelled` (settled: its dependents moved on), or not in the wave; or the agent is stale (not the role's current run, or its run is already accepted), whose role's current run goes on | `manual` (yours; nothing is done), `cancel` (the agent is stopped; the task stays where it is). The decision does not park the task |
+
+Should even that be lost, liveness counts a blocked agent no decision names (open, or answered
+for that status) for `blocked_undecided_stall_ms` as stalled (above).
 
 Every recovery decision carries `class` and `agent_id` (on the journal event and the retained
 topic) and answers `stop task` the same way: a `cancel` to the agent, an interrupt (Escape), and

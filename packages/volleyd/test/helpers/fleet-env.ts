@@ -77,11 +77,13 @@ export interface Fleet {
   /** The live agent's id for `wave/task/role` (its latest attempt). */
   agentOf: (wave: string, task: string, role?: string) => string;
   /** The simulated session publishes its terminal status. */
-  finish: (agentId: string, type: "done" | "failed" | "reaped") => Promise<void>;
+  finish: (agentId: string, type: "done" | "failed" | "reaped" | "blocked") => Promise<void>;
   /** Wait until `agentId` is supervised (the readiness `placed` of its machine counts it). */
   supervised: (agentId: string) => Promise<void>;
   /** An admin op as `admin-1` on the account-op topic; its answer. */
   adminOp: (payload: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+  /** Stop the daemon and start a second one on the same home and fakes (a volleyd restart). */
+  restart: () => Promise<Daemon>;
   /** The owner answers (no ownership check: `Daemon.resolveDecision`). */
   resolve: (wave: string, id: string, answer: string) => Promise<unknown>;
   close: () => Promise<void>;
@@ -195,7 +197,7 @@ export async function makeFleet(
   };
   local.onLaunch = onLaunch;
 
-  const daemon = await env.start({
+  const options: Parameters<DaemonEnv["start"]>[0] = {
     clock,
     authExec: auth.exec,
     fleet: {
@@ -220,7 +222,8 @@ export async function makeFleet(
       },
       credentials: memoryCredentials(),
     },
-  });
+  };
+  let daemon = await env.start(options);
   const waits = journalWait(env.home, () => daemon);
   const peer = new VolleyBroker();
   await peer.connect({ url: env.broker.url, agentId: PEER });
@@ -290,7 +293,9 @@ export async function makeFleet(
 
   const fleet: Fleet = {
     env,
-    daemon,
+    get daemon() {
+      return daemon;
+    },
     clock,
     waits,
     client,
@@ -391,6 +396,13 @@ export async function makeFleet(
       clearTimeout(timer);
       await c.disconnect();
       return r;
+    },
+    restart: async () => {
+      await daemon.stop();
+      daemon = await env.start(options);
+      await daemon.reconciled();
+      await waits.settled();
+      return daemon;
     },
     resolve: async (wave, id, answer) => {
       const r = await daemon.resolveDecision(wave, id, { answer, by: "owner" });
