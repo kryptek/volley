@@ -269,7 +269,7 @@ import {
   doctorFields,
   machineTopic,
   parseDoctorReport,
-  parseMachine,
+  parseMachineFrom,
 } from "./machines";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
 import {
@@ -1660,16 +1660,29 @@ export class Daemon {
           });
           return;
         }
-        const record = parseMachine(m.topic, m.payload);
+        const parsed = parseMachineFrom(m.topic, m.payload);
         // Every account may publish its own record: only a configured host's is a machine.
-        if (record === null) return;
+        if (parsed === null) return;
+        const { record, by } = parsed;
+        // Our own republish (a sweep's down, a Repair's fold) coming back is no heartbeat.
+        const heard = by !== "volleyd";
         void this.enqueue(async () => {
           // A configured host is a peer whatever its record says (SPEC §4.6.15): never local.
           if (!Object.hasOwn(this.config.effective().hosts, name) || record.tunnel === "local") {
             return;
           }
-          this.machines.observe(record);
-          if (record.tunnel === "up") this.sampleHost(name, record);
+          const keptNewer = this.machines.observe(record, { heard });
+          if (record.tunnel === "up" && heard) this.sampleHost(name, record);
+          // The box's beat still carries its service's older doctor run: re-assert the newer one
+          // (a Repair's) over it, so clients never see the stale checks again.
+          const held = this.machines.record(name);
+          if (keptNewer && heard && held !== undefined) {
+            await this.publish(
+              machineTopic(name),
+              this.envelope(MACHINE_CHANNEL, "machine", held),
+              true,
+            );
+          }
           await this.publishReadiness(name);
         });
       }),
@@ -5002,7 +5015,8 @@ export class Daemon {
    * `peer_doctor` (admin, peers.ts), checked inside the queue; its run (an ssh round-trip of up to
    * `peer_doctor_timeout_ms`) is awaited outside it, so ticks, control ops and record folds go on.
    * One run per host at a time: two `--fix` runs never overlap on one box. After a run the box's
-   * PATH is probed again, and `peer_doctor_run` is journaled.
+   * PATH is probed again, its report is folded into the box's machine record (`foldDoctor`), and
+   * `peer_doctor_run` is journaled.
    */
   private peerDoctor(p: Record<string, unknown>, sender: string): AuthOutcome | DeferredAuth {
     const req = this.peers.doctorRequest(p, this.waveOrigin());
@@ -5019,15 +5033,18 @@ export class Daemon {
     const run: DoctorRun = req;
     return {
       later: async () => {
-        let r: PeerReply;
+        let r: PeerReply & { report?: DoctorReport };
         try {
           r = await this.peers.runDoctor(run);
         } finally {
           this.doctoring.delete(run.name);
         }
+        const { report, ...reply } = r;
         if (r.ok) this.probes.delete(run.name);
+        // Through the queue (record folds and verdicts are its), before the answer goes back.
+        if (report !== undefined) await this.enqueue(() => this.foldDoctor(run.name, report));
         return {
-          reply: authReply("peer_doctor", r),
+          reply: authReply("peer_doctor", reply),
           journal: {
             type: "peer_doctor_run",
             data: { by: sender, name: run.name, fix: run.fix, clone: run.clone, ok: r.ok },
@@ -5035,6 +5052,27 @@ export class Daemon {
         };
       },
     };
+  }
+
+  /**
+   * A doctor run the supervisor started on a paired box: its report replaces the doctor fields of
+   * the box's retained record (republished as volleyd, as the sweep does) and its verdict is
+   * recomputed, so the Desk and readiness follow the run without waiting for the box's next
+   * heartbeat (whose service re-runs its own doctor too). A box that never published a record
+   * has nothing to fold into, and one whose tunnel is down keeps its record (a down box is not
+   * ready whatever its checks say; its next `up` heartbeat brings the run).
+   */
+  private async foldDoctor(name: string, report: DoctorReport): Promise<void> {
+    const prior = this.machines.record(name);
+    if (!this.running || prior?.tunnel !== "up") return;
+    const record: MachineRecord = { ...prior, ...doctorFields(report) };
+    if (!validator("machine.schema.json")(this.envelope(MACHINE_CHANNEL, "machine", record))) {
+      this.log(`${name}'s doctor report does not fit machine.schema.json: record left as it was`);
+      return;
+    }
+    this.machines.observe(record, { heard: false });
+    await this.publish(machineTopic(name), this.envelope(MACHINE_CHANNEL, "machine", record), true);
+    await this.publishReadiness(name);
   }
 
   /**

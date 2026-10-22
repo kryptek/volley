@@ -6,7 +6,15 @@ import {
   privateDecrypt,
   randomUUID,
 } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  statfsSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -34,6 +42,7 @@ import {
   type DoctorReport,
   blocking,
   doctor,
+  doctorInputs,
   looksSecret,
   recordChecks,
   renderHuman,
@@ -202,6 +211,12 @@ export const PEER_DEFAULTS = {
   doctor_timeout_ms: 300_000,
   /** How long the doctor waits for the supervisor's retained readiness verdict (its requirements). */
   readiness_wait_ms: 1_000,
+  /**
+   * `doctor --fix` on a paired machine: how often, and how many times, it reads the machine
+   * record back for the service's own run after it (one heartbeat to notice, then the run).
+   */
+  republish_poll_ms: 2_000,
+  republish_polls: 45,
 } as const;
 
 export const SYSTEMD_UNIT = "volley-peer.service";
@@ -269,6 +284,11 @@ export interface PeerConfig {
 }
 
 export const peerFile = (home: string) => join(home, ".volley", "peer.json");
+/**
+ * Written by every `volley peer doctor` on a paired machine (its time): the service watches it
+ * and re-runs its own doctor on its next heartbeat, so the record carries the run's outcome.
+ */
+export const peerDoctorStamp = (home: string) => join(home, ".volley", "peer-doctor-ran");
 
 export interface PeerArgs {
   argv: string[];
@@ -1380,6 +1400,20 @@ export function readPeerConfig(home: string): PeerConfig {
   return cfg;
 }
 
+/** What the service's doctor depends on, as one string that changes when any of it does. */
+function doctorWatch(deps: PeerDeps): string {
+  const stat = (f: string) => {
+    try {
+      const st = statSync(f);
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return "-";
+    }
+  };
+  // Every stamp write changes its mtime: no need to read it.
+  return JSON.stringify([...doctorInputs(deps.volleyDir), peerDoctorStamp(deps.home)].map(stat));
+}
+
 /**
  * The service: keep the tunnel up (restarting ssh with backoff) and publish the machine record
  * every heartbeat through it. Ends with exit 0 when the broker refuses the peer account (it was
@@ -1423,6 +1457,10 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
   let report: DoctorReport | null = null;
   let doctorAt = Number.NEGATIVE_INFINITY;
   let doctoring = false;
+  // What the last run was started on: the checkout's files and the doctor verb's stamp (a cheap
+  // stat per beat). Readiness follows the machine, never the service's uptime: a checkout update,
+  // a `bun install` or a `volley peer doctor --fix` re-runs the doctor on the next beat.
+  let doctoredOn: string | null = null;
   const startDoctor = (b: VolleyBroker) => {
     doctoring = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1458,8 +1496,13 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
       try {
         broker ??= await connectPeer(deps, cfg, report);
         const now = deps.monotonic();
-        if (!doctoring && now - doctorAt >= PEER_DEFAULTS.doctor_interval_s * 1000) {
+        const inputs = doctorWatch(deps);
+        if (
+          !doctoring &&
+          (now - doctorAt >= PEER_DEFAULTS.doctor_interval_s * 1000 || inputs !== doctoredOn)
+        ) {
           doctorAt = now;
+          doctoredOn = inputs;
           startDoctor(broker);
         }
         await broker.publish(
@@ -1552,9 +1595,11 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
     if (existsSync(peerFile(deps.home))) cfg = readPeerConfig(deps.home);
   } catch {}
   let req: { volley: string | null; sharing: Sharing | null } = { volley: null, sharing: null };
+  let tunnelUp = false;
   if (cfg !== null) {
     const b = await deps.connect(brokerThroughTunnel(cfg), peerAuth(cfg)).catch(() => null);
     if (b !== null) {
+      tunnelUp = true;
       req = await requirements(b, cfg.name);
       await b.disconnect().catch(() => {});
     }
@@ -1576,7 +1621,78 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
     clone: v.clone === true,
     ...(supervisorDir !== undefined ? { volleyDir: supervisorDir } : {}),
   };
-  return doctor(io, { ...deps, volleyDir: resolve(v["volley-dir"] ?? deps.volleyDir) }, opts);
+  const code = await doctor(
+    io,
+    { ...deps, volleyDir: resolve(v["volley-dir"] ?? deps.volleyDir) },
+    opts,
+  );
+  if (cfg === null) return code;
+  // The service's record still carries its own last run: have it run again, now.
+  const ranAt = deps.now();
+  try {
+    mkdirSync(dirname(peerDoctorStamp(deps.home)), { recursive: true });
+    writeFileSync(peerDoctorStamp(deps.home), `${ranAt.toISOString()}\n`);
+  } catch {}
+  // A --json run is the supervisor's (Repair): it folds the report into the record itself.
+  if (opts.fix === true && opts.json !== true) {
+    io.stdout(await awaitRepublish(io, deps, cfg, tunnelUp, ranAt));
+  }
+  return code;
+}
+
+/**
+ * The republish poll's window, in whole minutes. A retained record answers each query at once,
+ * so the sleeps set it (a box with no record also waits out each query: still about this long).
+ */
+const waitMinutes = () =>
+  Math.round((PEER_DEFAULTS.republish_polls * PEER_DEFAULTS.republish_poll_ms) / 60_000);
+
+/** How to restart the service on this machine. */
+const restartHint = (deps: PeerDeps) =>
+  deps.platform === "darwin"
+    ? `launchctl kickstart -k gui/${deps.uid()}/${LAUNCHD_LABEL}`
+    : `systemctl --user restart ${SYSTEMD_UNIT}`;
+
+/**
+ * After `doctor --fix`: wait for the service's record to carry a doctor run from after `ranAt`
+ * (it re-runs on the stamp at its next heartbeat), and say whether it did.
+ */
+async function awaitRepublish(
+  io: IO,
+  deps: PeerDeps,
+  cfg: PeerConfig,
+  tunnelUp: boolean,
+  ranAt: Date,
+): Promise<string> {
+  if (!tunnelUp) {
+    return `\nReadiness not republished: the peer service is not connected (its tunnel is down, or the broker refused this machine), so the supervisor still sees the last record it sent. Restart it: \`${restartHint(deps)}\`\n`;
+  }
+  const b = await deps.connect(brokerThroughTunnel(cfg), peerAuth(cfg)).catch(() => null);
+  if (b === null) {
+    return `\nReadiness not checked: could not check whether the peer service ran the doctor again (the broker refused the connection). If the supervisor still shows the last run in a few minutes, restart it: \`${restartHint(deps)}\`\n`;
+  }
+  // The poll is silent for up to the whole window: say so, or it reads as hung.
+  io.stdout(
+    `\nWaiting for the peer service to run the doctor again (up to about ${waitMinutes()} minutes)…\n`,
+  );
+  try {
+    for (let i = 0; i < PEER_DEFAULTS.republish_polls; i++) {
+      const raw = await b
+        .queryRetained(machineTopic(cfg.name), PEER_DEFAULTS.readiness_wait_ms)
+        .catch(() => null);
+      const at = (parseEnvelope(raw ?? "")?.payload as { doctor_at?: unknown } | undefined)
+        ?.doctor_at;
+      if (typeof at === "string" && Date.parse(at) >= ranAt.getTime()) {
+        return "\nreadiness republished: the peer service ran the doctor again\n";
+      }
+      await deps.sleep(PEER_DEFAULTS.republish_poll_ms);
+    }
+  } finally {
+    await b.disconnect().catch(() => {});
+  }
+  // A run already under way when the stamp was written re-runs only after it ends (up to
+  // doctor_timeout_ms), so a healthy service can still be late: "not yet", not "failed".
+  return `\nReadiness not republished yet: the peer service did not run the doctor again within about ${waitMinutes()} minutes, so the supervisor may still see its last run. If it has not caught up within a few minutes, restart it: \`${restartHint(deps)}\`\n`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1646,7 +1762,9 @@ export function currentUser(
   return idUn()?.trim() || "unknown";
 }
 
-function realDeps(): PeerDeps {
+const PKG_JSON = fileURLToPath(new URL("../../package.json", import.meta.url));
+
+export function realDeps(): PeerDeps {
   const cli = fileURLToPath(new URL("../cli.ts", import.meta.url));
   return {
     exec: realExec,
@@ -1681,7 +1799,16 @@ function realDeps(): PeerDeps {
     // Where volleyd keeps the Claude account profiles (its claudeRoot()).
     ...(process.env.VOLLEY_CLAUDE_DIR ? { claudeRoot: process.env.VOLLEY_CLAUDE_DIR } : {}),
     shell: () => os.userInfo().shell ?? process.env.SHELL ?? "/bin/sh",
-    version: pkg.version,
+    // Read per doctor run: the record's `versions.peer` is the checkout's on disk, so a running
+    // service reports a checkout update without a restart.
+    get version() {
+      try {
+        const v = (JSON.parse(readFileSync(PKG_JSON, "utf-8")) as { version?: unknown }).version;
+        return typeof v === "string" ? v : pkg.version;
+      } catch {
+        return pkg.version;
+      }
+    },
     totalmem: () => os.totalmem(),
     freemem: () => os.freemem(),
     uptime: () => os.uptime(),
