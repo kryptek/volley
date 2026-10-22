@@ -21,6 +21,12 @@
       "api_overload": { "state": "clear", "value": 0, "max": 3 },
       "ci_queue": { "state": "unknown", "error": "gh: not logged in" }
     },
+    "ceiling": {
+      "live": 4,
+      "max": 12,
+      "launching": 1,
+      "by_wave": { "2026-10-20-example": 3, "2026-10-21-other": 1 }
+    },
     "waves": {
       "2026-10-20-example": {
         "allow": 0,

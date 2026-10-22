@@ -21,9 +21,10 @@ A placed task shows its host and, under it, every machine the supervisor conside
 best first, with its score and the supervisor's one-line why.
 Without a wave, a first line counts the broker's agent logins (as last re-read: after each
 mint, delete and sweep, and every 30 s), and how many the credential sweeps deleted in total
-(--json: agent_logins). With a paired machine configured, the next says how the supervisor's
-own machine takes auto-placed tasks (fleet.local_agents) and whether it is the fallback now
-(--json: local_agents).
+(--json: agent_logins), then the hard ceiling's count, the agents volleyd runs or is starting
+in every wave against hard_ceiling (--json: ceiling { live, max }). With a paired machine
+configured, the next says how the supervisor's own machine takes auto-placed tasks
+(fleet.local_agents) and whether it is the fallback now (--json: local_agents).
 `;
 
 export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> {
@@ -59,6 +60,7 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     const kill = (res.result as { kill_switch?: boolean }).kill_switch === true;
     const logins = (res.result as { agent_logins?: { live: number; swept: number } }).agent_logins;
     const localAgents = (res.result as { local_agents?: LocalAgentsView }).local_agents;
+    const ceiling = (res.result as { ceiling?: { live: number; max: number } }).ceiling;
     let decisions: DecisionPayload[] = [];
     let caller: string | null = null;
     if (states.some((s) => s.open_decisions.length > 0)) {
@@ -69,6 +71,7 @@ export async function status({ argv, env, io }: CommandArgs): Promise<ExitCode> 
     io.stdout(
       (kill ? "KILL SWITCH ENGAGED: run is refused until `volleyd resume --all`\n" : "") +
         (logins !== undefined ? `${formatLogins(logins)}\n` : "") +
+        (ceiling !== undefined ? `hard ceiling: ${ceiling.live}/${ceiling.max}\n` : "") +
         (localAgents !== undefined ? `${formatLocalAgents(localAgents)}\n` : "") +
         (states.length === 0
           ? "no waves\n"

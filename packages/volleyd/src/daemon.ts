@@ -51,6 +51,8 @@ import { type ActivityEvidence, newestWrite } from "./activity-evidence";
 import {
   type AdmissionState,
   type AdmissionSummary,
+  type CeilingCount,
+  type CeilingView,
   type HostSamples,
   type HostThresholds,
   type Sample,
@@ -318,7 +320,6 @@ import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure
 import { readRepoView } from "./repo-visibility";
 import {
   type Admission,
-  activeTasks,
   admit,
   admitPlacing,
   budgetRaise,
@@ -360,6 +361,7 @@ import {
   PipelineDriver,
   SUPERSEDED_BY_MERGE,
   type SpawnStart,
+  type TaskPipeline,
   blockedReason,
   isAnswer,
   releaseLockOn,
@@ -903,6 +905,18 @@ const UNSTEERABLE: ReadonlySet<TaskStage> = new Set(["done", "cancelled", "block
 const SETTLED_STAGES: ReadonlySet<TaskStage> = new Set(["done", "merge_ready", "cancelled"]);
 /** The daemon's own `agent_blocked` (blockedFallback): a block the pipeline could not own. */
 const BLOCKED_CLASS = "blocked_unhandled";
+
+/** An admitted task still waiting for its first implementer (spawnAdmitted, the hard ceiling). */
+const awaitsImplementer = (t: TaskState): boolean =>
+  t.stage === "queued" && t.agents.implementer === undefined;
+
+/** Stages whose task, with no agent live, has a pipeline role still to spawn (the ceiling). */
+const BETWEEN_ROLES: ReadonlySet<TaskStage> = new Set([
+  "implement",
+  "spec_review",
+  "quality_review",
+  "fixup",
+]);
 
 export const daemonClientId = (namespace: string) =>
   `volley-${DAEMON_AGENT_ID}-daemon-${namespace}`;
@@ -2426,7 +2440,10 @@ export class Daemon {
     for (const [key, v] of this.verdicts) {
       if (key !== GLOBAL) waves[key] = { allow: allowJson(v.allow), reasons: v.reasons };
     }
-    this.summary = summaryPayload(global, this.sampledAt ?? dateOf(this.time), waves);
+    this.summary = {
+      ...summaryPayload(global, this.sampledAt ?? dateOf(this.time), waves),
+      ceiling: this.ceilingView(),
+    };
     await this.publish(
       ADMISSION_TOPIC,
       this.envelope("_system/admission", "admission", this.summary),
@@ -2625,9 +2642,7 @@ export class Daemon {
       await this.releaseGoIfVerified(wave);
     }
     await this.archivePass();
-    // A release stage's agent counts toward the hard ceiling like a task's.
-    let live = this.releaseAgentsLive();
-    for (const log of this.waves.values()) live += activeTasks(log.record).length;
+    let live = this.ceilingCount().live;
     for (const [wave, log] of this.waves) {
       const rec = log.record;
       const candidates = admissible(rec);
@@ -3765,16 +3780,24 @@ export class Daemon {
   // Spawning (T4): admitted tasks get an implementer; other roles are sequenced by the pipeline.
   // -------------------------------------------------------------------------------------------
 
-  /** Start an implementer for every admitted task that has none (runs beside the queue). */
+  /**
+   * Start an implementer for every admitted task that has none (runs beside the queue), while
+   * the agents running or starting leave the hard ceiling room: a retry after a backoff or a
+   * resumed wave's backlog waits for a free slot. Held slots are not counted here, so tasks
+   * waiting on each other's slots never all wait.
+   */
   private spawnAdmitted(wave: WaveId): void {
     const rec = this.waves.get(wave)?.record;
     if (this.killSwitch || rec?.state == null || rec.state.status !== "running") return;
+    let room = this.config.effective(wave).hard_ceiling - this.ceilingCount(false).live;
     for (const id of rec.admitted) {
+      if (room <= 0) return;
       const t = rec.state.tasks.find((x) => x.id === id);
-      if (t === undefined || t.agents.implementer !== undefined || t.stage !== "queued") continue;
+      if (t === undefined || !awaitsImplementer(t)) continue;
       const key = `${wave}/${id}/implementer`;
       if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) continue;
       if (this.parkOnTunnel(wave, id)) continue;
+      room--;
       void this.startSpawn(wave, id, "implementer").catch((e: unknown) => {
         this.log(`spawn ${key}: ${e instanceof Error ? e.message : String(e)}`);
       });
@@ -6282,13 +6305,94 @@ export class Daemon {
     }
   }
 
-  /** Release stage agents live in any wave: supervised, being verified, or spawning. */
-  private releaseAgentsLive(): number {
-    let n = 0;
-    for (const a of this.supervised.values()) if (a.task === RELEASE_TASK) n++;
-    for (const a of this.launching.values()) if (a.task === RELEASE_TASK) n++;
-    for (const key of this.spawning) if (key.split("/")[1] === RELEASE_TASK) n++;
-    return n;
+  /**
+   * What the hard ceiling counts (SPEC §4.6.4): the agents volleyd runs or is starting, in every
+   * wave and on every machine — supervised, launched and being verified, spawning (a release
+   * stage's agent too) — and one slot for each admitted task of a running wave that will spawn
+   * its next agent: queued for its implementer (backed off too; not once refused for good), or
+   * between roles in implement…fixup with a role still to come (`nextRoleComes`). A task's stage
+   * counts nothing by itself otherwise: a task awaiting a decision, blocked, or in a paused,
+   * stopped or ended wave holds a slot only while one of its agents is live. `launching` is the
+   * part not supervised yet, held slots included. `held: false` counts only the agents running
+   * or starting, no held slot: what a spawn checks (`spawnAdmitted`, a pipeline role's, a
+   * release stage's), so tasks holding more slots than the ceiling never hold each other's
+   * spawns. A parallel step holds one slot while it waits, though it runs an agent per role.
+   */
+  private ceilingCount(held = true): CeilingCount {
+    const byWave: Record<string, number> = {};
+    const add = (wave: WaveId) => {
+      byWave[wave] = (byWave[wave] ?? 0) + 1;
+    };
+    const launched = new Set<string>();
+    const liveTasks = new Set<string>();
+    let launching = 0;
+    const seen = (key: string) => liveTasks.add(key.slice(0, key.lastIndexOf("/")));
+    for (const a of this.supervised.values()) {
+      add(a.wave);
+      seen(`${a.wave}/${a.task}/${a.role}`);
+    }
+    for (const a of this.launching.values()) {
+      add(a.wave);
+      launching++;
+      launched.add(`${a.wave}/${a.task}/${a.role}`);
+      seen(`${a.wave}/${a.task}/${a.role}`);
+    }
+    // A spawn's key is in `spawning` until its launch half returns, after it joined `launching`
+    // (it leaves `spawning` before it can be supervised). A relaunch's spawn counts beside the
+    // role's old agent while that one is still supervised.
+    for (const key of this.spawning) {
+      if (launched.has(key)) continue;
+      seen(key);
+      add(key.split("/")[0] ?? "");
+      launching++;
+    }
+    for (const [wave, log] of held ? this.waves : []) {
+      const rec = log.record;
+      if (rec.state?.status !== "running") continue;
+      const tasks = new Map(rec.state.tasks.map((x) => [x.id, x]));
+      for (const id of rec.admitted) {
+        const t = tasks.get(id);
+        if (t === undefined || liveTasks.has(`${wave}/${id}`)) continue;
+        if (awaitsImplementer(t)) {
+          if (this.refused.get(`${wave}/${id}/implementer`)?.until === Number.POSITIVE_INFINITY)
+            continue;
+          add(wave);
+          launching++;
+        } else if (BETWEEN_ROLES.has(t.stage) && this.nextRoleComes(wave, id, rec.pipeline[id])) {
+          add(wave);
+          launching++;
+        }
+      }
+    }
+    const live = Object.values(byWave).reduce((a, b) => a + b, 0);
+    return { live, launching, by_wave: byWave };
+  }
+
+  /**
+   * A task between roles will spawn an agent of its current step: no role of it is refused for
+   * good, and none retired unverified (a dead agent) unless its respawn is on its way. A step whose
+   * roles are all accepted (implemented, waiting on CI before its reviewers) holds its slot for
+   * the whole wait; it reads as `launching` and gates admission only, never a role's spawn.
+   */
+  private nextRoleComes(wave: WaveId, task: TaskId, p: TaskPipeline | undefined): boolean {
+    if (p === undefined) return true;
+    const respawning = this.heldRespawn.has(`${wave}/${task}`);
+    return p.roles.every((role) => {
+      const until = this.refused.get(`${wave}/${task}/${role}`)?.until;
+      if (until === Number.POSITIVE_INFINITY) return false;
+      const run = p.runs[role];
+      return (
+        run?.retired === undefined || // not run yet, or its agent still live
+        run.accepted || // its agent finished and was accepted
+        until !== undefined || // a backed-off respawn of this role is pending
+        respawning // a held respawn will re-place the dead agent
+      );
+    });
+  }
+
+  /** The hard ceiling's count against its global limit (the admission topic, `volleyd admission`). */
+  private ceilingView(): CeilingView {
+    return { ...this.ceilingCount(), max: this.config.effective().hard_ceiling };
   }
 
   /**
@@ -6303,8 +6407,8 @@ export class Daemon {
     const key = `${wave}/${RELEASE_TASK}/release`;
     if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) return;
     if (this.taskLive(wave, RELEASE_TASK)) return;
-    let live = this.releaseAgentsLive();
-    for (const log of this.waves.values()) live += activeTasks(log.record).length;
+    const live = this.ceilingCount(false).live;
+    const max = this.config.effective(wave).hard_ceiling;
     const pressure = this.pressure(wave);
     const hold = this.killSwitch
       ? "kill switch engaged"
@@ -6312,8 +6416,8 @@ export class Daemon {
         ? "wave not releasing"
         : pressure.allow < 1
           ? `admission closed: ${(pressure.reasons ?? []).join(", ") || "no capacity"}`
-          : live >= this.config.effective(wave).hard_ceiling
-            ? `hard ceiling reached (${live})`
+          : live >= max
+            ? `hard ceiling reached (${live}/${max})`
             : null;
     if (hold !== null) {
       this.log(`spawn ${key} (${stage.name}): held, ${hold}`);
@@ -6355,6 +6459,8 @@ export class Daemon {
       running: rec.state?.status === "running",
       admission: admission.allow,
       reasons: admission.reasons,
+      live: this.ceilingCount(false).live,
+      ceiling: this.config.effective(wave).hard_ceiling,
       used: spawnsUsed(rec),
       budget: spawnBudget(
         rec.wave,
@@ -9038,6 +9144,7 @@ export class Daemon {
                 : []),
             ],
             ...(this.killSwitch ? { kill_switch: true } : {}),
+            ceiling: { live: this.ceilingCount().live, max: this.config.effective().hard_ceiling },
             // The cached count: status never waits on the broker's control connection.
             ...(this.sweeper !== undefined ? { agent_logins: { ...this.sweeper.counts } } : {}),
             // The own machine's local_agents mode, as its last verdict said (SPEC §4.6.15),
@@ -9056,7 +9163,10 @@ export class Daemon {
       case "admission":
         if (typeof p.wave === "string" && !this.waves.has(p.wave))
           return { ok: false, error: `unknown wave '${p.wave}'` };
-        return { ok: true, result: this.summary };
+        return {
+          ok: true,
+          result: this.summary === null ? null : { ...this.summary, ceiling: this.ceilingView() },
+        };
       case "spawn":
         return this.manualSpawn(p);
       // Claude account profiles (src/claude/service.ts); a sign-in answers once its URL is known.

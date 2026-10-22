@@ -76,7 +76,11 @@ describe("volleyd daemon + control channel", () => {
     expect(JSON.parse(status.stdout)).toEqual(retained.payload);
 
     const all = await runCli(["status", "--json"], t.env);
-    expect(JSON.parse(all.stdout)).toEqual({ waves: [retained.payload] });
+    expect(JSON.parse(all.stdout)).toEqual({
+      waves: [retained.payload],
+      // its admitted task, queued for its first agent (no spawner here), holds a ceiling slot
+      ceiling: { live: 1, max: 12 },
+    });
 
     const human = await runCli(["status"], t.env);
     expect(human.stdout).toContain(`${WAVE}  running  plan v1`);

@@ -116,7 +116,7 @@ describe.skipIf(!RUN)("volleyd daemon against mosquitto 2.1 Dynamic Security", (
       try {
         const res = await client.request("status", {});
         expect(res.ok).toBe(true);
-        expect(res.result).toEqual({ waves: [] });
+        expect(res.result).toEqual({ waves: [], ceiling: { live: 0, max: 12 } });
       } finally {
         await client.close();
       }
