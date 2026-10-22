@@ -67,7 +67,9 @@ export const isTaskRole = (r: string): r is keyof TaskAgents =>
  * Who a steer to `task` reaches: the task's newest spawned agent that `journal` has not retired,
  * whatever its role (a rebase agent runs in the fixup stage), or the newest of `role` when
  * given. `_release` names the release train's stage agents. Null when no agent is live: the
- * steer is queued for the task's next one.
+ * steer is queued for the task's next one. An agent that has published `done` stays the target
+ * until its retirement is journaled: in that short window a steer (and its wake) reaches an
+ * agent that is finishing.
  */
 export function steerTarget(
   rec: WaveRecord,

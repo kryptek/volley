@@ -117,6 +117,23 @@ describe("steer wakes an idle agent", () => {
     expect(woken()).toHaveLength(1);
   });
 
+  it("a wake drains the steers after it: one acked before the next one's window ends types no second line", async () => {
+    await setup();
+    await idle();
+    const a = await steer();
+    await clock.advance(WAKE_MS / 2);
+    await steer({ text: "and rebase first" });
+    await clock.advance(WAKE_MS / 2);
+    await s.event("agent_woken");
+    // The first ack lands; the second lags past its own window, which ends within the wake's.
+    await ack(a.message_id);
+    await s.event("steering_received");
+    await clock.advance(WAKE_MS / 2);
+    await s.settled();
+    expect(wakes()).toHaveLength(1);
+    expect(woken()).toHaveLength(1);
+  });
+
   it("a woken message's late ack clears the unacked mark although a newer message was sent since", async () => {
     await setup();
     await idle();

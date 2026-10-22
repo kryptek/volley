@@ -1027,9 +1027,10 @@ export class Daemon {
       task: TaskId;
       timer: TimerHandle;
       woken: boolean;
-      wokenAt?: number;
     }
   >();
+  /** Epoch ms of each agent's last typed wake: a wake drains every message sent before it. */
+  private readonly lastWokenAt = new Map<string, number>();
   /** Restart reconciliation, started by `start()` beside the queue (see `reconciled()`). */
   private reconciling: Promise<void> = Promise.resolve();
   /** Epoch ms of the last progress message seen per agent id (heartbeats, for `claim`). */
@@ -2150,6 +2151,7 @@ export class Daemon {
     this.acks.clear();
     for (const w of this.wakes.values()) this.time.clearTimeout(w.timer);
     this.wakes.clear();
+    this.lastWokenAt.clear();
     // The mailbox subscription is kept: it lives in the persistent session, so requests sent
     // while the daemon is down are queued for the next start. Only the progress watch goes.
     if (this.broker.connected) {
@@ -5263,6 +5265,7 @@ export class Daemon {
     const log = a !== undefined ? this.waves.get(a.wave) : undefined;
     if (a === undefined || log === undefined) return;
     this.supervised.delete(agentId);
+    this.lastWokenAt.delete(agentId);
     this.time.clearTimeout(a.reapTimer);
     const terminal = a.watch.state.status?.payload;
     await a.watch.close();
@@ -9446,7 +9449,9 @@ export class Daemon {
         ...extra,
       },
     });
-    this.armWake(wave, task, target.agent_id, messageId);
+    // An agent whose hooks the broker refused is paused, not prompted: a wake would submit a
+    // prompt whose work it cannot deliver.
+    if (extra.reason !== "auth_failed") this.armWake(wave, task, target.agent_id, messageId);
   }
 
   /**
@@ -9501,9 +9506,8 @@ export class Daemon {
     const a = this.supervised.get(w.agent);
     // A wake typed within the window drains this message too: liveness has not left idle yet.
     const window = this.config.effective(w.wave).mailbox_wake_after_ms;
-    const recent = [...this.wakes.values()].some(
-      (o) => o.agent === w.agent && o.wokenAt !== undefined && this.time.now() - o.wokenAt < window,
-    );
+    const last = this.lastWokenAt.get(w.agent);
+    const recent = last !== undefined && this.time.now() - last < window;
     if (a === undefined || a.liveness.activity !== "idle" || recent) {
       this.wakes.delete(messageId);
       return;
@@ -9517,7 +9521,7 @@ export class Daemon {
       return;
     }
     w.woken = true;
-    w.wokenAt = this.time.now();
+    this.lastWokenAt.set(w.agent, this.time.now());
     await this.append(w.wave, {
       type: "agent_woken",
       task: w.task,

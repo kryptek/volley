@@ -169,7 +169,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd stop <wave>` | Stop a wave (owner only): no admissions, `cancel` to every running agent. |
 | `volleyd stop --all` / `resume --all` | Engage / release the kill switch (anyone). |
 | `volleyd archive <wave> [--yes]` | Retire an ended (stopped or complete) wave (owner only; anyone for an ownerless wave): close its open decisions, drop it from `status` and the Desk ([Archiving](#archiving)). Without `--yes` only prints what it would close. |
-| `volleyd steer <wave> <task> <text> [--role <r>] [--wait-ack-ms <ms>]` | Mailbox steering to the task's live agent of any role; reports `delivered (acked)`, `received`, `delivered · woke the agent` (an idle agent was typed the wake line) or `delivered (no ack yet)`, or `queued (no live agent)` for the task's next agent when none is live. |
+| `volleyd steer <wave> <task> <text> [--role <r>] [--wait-ack-ms <ms>]` | Mailbox steering to the task's live agent of any role; reports `delivered (acked)`, `delivered (received, not acted on yet)`, `delivered · woke the agent` (an idle agent was typed the wake line) or `delivered (no ack yet)`, or `queued (no live agent)` for the task's next agent when none is live. |
 | `volleyd events <wave> --cursor <name>` | Print (JSONL) every journal event after the named cursor. Does not move it. |
 | `volleyd ack <wave> --cursor <name> --seq <N>` | Advance the cursor to `N`. Ack **after** acting, so a crash replays. |
 | `volleyd config get [path] [--wave <id>] [--json]` | Effective config (or one dotted path), optionally with a wave's overrides. |
@@ -1266,7 +1266,9 @@ mailbox.` and `Enter` into the agent's session through the host (`cmux send`, `t
 `agent_woken { agent_id, reason: "mailbox", message_id }`, and the UserPromptSubmit drain delivers
 the message. A `working` agent is never typed into (it reads the mailbox at its next tool call), nor one
 `awaiting_input`: a question, permission or credit picker is open there, and the Enter would
-answer it.
+answer it, nor one paused because the broker refused its hooks (`auth_failed`): the prompt it
+would submit cannot deliver its work. One wake drains every message sent before it, so a message
+whose window ends within `mailbox_wake_after_ms` of the agent's last wake types no second line.
 There is at most one wake per message: until its ack arrives (journaled `steering_received`) the
 wave state's `tasks[].steer_unacked` names the agent and `volleyd status` prints
 `steer unacked (<agent>)`.
