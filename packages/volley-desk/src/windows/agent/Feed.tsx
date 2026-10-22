@@ -7,10 +7,12 @@
  * Heartbeats are liveness (the footer's dot and age), not rows: the store only counts them, and
  * the "show heartbeats" toggle (off by default) adds one collapsed `heartbeat ×N · last 3s` row at
  * the end. Autopilot's events on the agent's task (SPEC §4.6.16) read as their line
- * (`Autopilot · relaunch (<policy>): <rationale>`), the evidence in their JSON.
+ * (`Autopilot · relaunch (<policy>): <rationale>`), the evidence in their JSON; its account events
+ * (SPEC §4.6.11) as `Account · <why>` and `Account · moved off <from> to <to> by <by>: <why>`.
  */
 import { type UIEvent, useLayoutEffect, useRef, useState } from "react";
 import { autopilotLine } from "../../store/autopilot";
+import { accountLine } from "../../store/claude";
 import { isControlTraffic } from "../../store/reducer";
 import type { FeedEntry } from "../../store/types";
 
@@ -72,7 +74,7 @@ export function feedChannel(e: FeedEntry): string {
 }
 
 function summary(e: FeedEntry): string {
-  const auto = autopilotLine(e.envelope);
+  const auto = autopilotLine(e.envelope) ?? accountLine(e.envelope);
   if (auto !== null) return auto;
   const p = e.envelope.payload;
   if (p === null || typeof p !== "object") return typeof p === "string" ? p : "";

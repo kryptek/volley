@@ -267,6 +267,10 @@ export interface DecisionPayload {
   resolved?: { answer: string; by: string; at: string };
   /** `account_limit` extras (SPEC §4.6.12): the account, its 5-hour pct and reset, the suggestion. */
   acct?: string;
+  /** `agent_account_limit` extras (SPEC §4.6.12): the agent, its role and the window at the level. */
+  agent_id?: string;
+  role?: string;
+  window?: string;
   pct?: number;
   resets_at?: string | null;
   suggested?: string | null;
@@ -788,6 +792,11 @@ export interface DeskState {
    * wave's `events` mirror, by wave; live-only (the topic is not retained), kept across a resync.
    */
   waveFeed?: Record<string, FeedEntry[]>;
+  /**
+   * The account events (`account_chosen`, `agent_account_moved`, SPEC §4.6.11) from each wave's
+   * `events` mirror, by wave; live-only like `waveFeed`.
+   */
+  accountFeed?: Record<string, FeedEntry[]>;
 }
 
 /** When each agent (by id) answered a message id, in local ms. */

@@ -18,6 +18,7 @@ import { PrimaryAction } from "../look/PrimaryAction";
 import {
   type AccountInfo,
   fiveHourLabel,
+  isWaveLimit,
   moveAnswer,
   openLimitDecisions,
   resolveFields,
@@ -52,7 +53,7 @@ function WaveAccount({
 }) {
   const [note, setNote] = useState<string | null>(null);
   const on = accounts.filter((a) => a.waves.includes(wave.id));
-  const d = openLimitDecisions({ [wave.id]: wave })[0];
+  const d = openLimitDecisions({ [wave.id]: wave }).find(isWaveLimit);
   const targets = d ? accounts.filter((a) => a.id !== d.acct && !a.id.includes("@")) : [];
   const move = async (acct: string) => {
     if (!d || !control) return;

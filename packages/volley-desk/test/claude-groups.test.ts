@@ -1,16 +1,31 @@
 import { describe, expect, it } from "vitest";
 import {
+  type BalanceAnswer,
   LOCAL_MACHINE,
   accountChoices,
   accountGroups,
+  accountLine,
   accountList,
   accountMatrix,
+  accountWhy,
+  agentLimitFor,
+  choicesFor,
   configuredMachines,
   fableHint,
   moveTargetOf,
+  nextPicks,
+  openLimitDecisions,
+  picksLine,
   usageTriple,
 } from "../src/store/claude";
-import type { ClaudeAccountPayload, MachinePayload } from "../src/store/types";
+import type {
+  ClaudeAccountPayload,
+  DecisionPayload,
+  Envelope,
+  FeedEntry,
+  MachinePayload,
+  WaveView,
+} from "../src/store/types";
 
 const EMAIL = "owner@example.com";
 
@@ -435,5 +450,201 @@ describe("the Fable window and the usage probe", () => {
     });
     if (!g) throw new Error("no group");
     expect(usageTriple(g, g.members[0] as never, NOW).text).toBe("5h 37% · 7d 56% · Fable —");
+  });
+});
+
+describe("the balance, per machine (T8)", () => {
+  const rec = (account: string, label: string, five: number | null): ClaudeAccountPayload => ({
+    account,
+    label,
+    five_hour: five === null ? null : { pct: five, resets_at: null },
+    weekly: { pct: 40, resets_at: null },
+    agents: [],
+    waves: [],
+    sampled_at: "2026-10-18T14:00:00.000Z",
+  });
+  const list = accountList(
+    {
+      primary: rec("primary", "primary", 60),
+      work: rec("work", "Work", 12),
+      "primary@peer-a": rec("primary@peer-a", "primary@peer-a", 88),
+      "team@peer-a": rec("team@peer-a", "Team", 12),
+    },
+    // A registry row for the peer's profile: the same login as its usage record, never twice.
+    [{ id: "team", label: "Team", machine: "peer-a" }],
+  );
+
+  it("accountChoices carries each account's machine; choicesFor keeps one machine's", () => {
+    const choices = accountChoices(list);
+    expect(choices.find((c) => c.id === "team@peer-a")?.machine).toBe("peer-a");
+    expect(choicesFor(choices, "peer-a").map((c) => c.id)).toEqual([
+      "primary@peer-a",
+      "team@peer-a",
+    ]);
+    expect(choicesFor(choices, LOCAL_MACHINE).map((c) => c.id)).toEqual(["primary", "work"]);
+  });
+
+  const answer: BalanceAnswer = {
+    machines: [
+      {
+        name: LOCAL_MACHINE,
+        candidates: [],
+        picks: { fable: "work", opus: "work", sonnet: "primary", haiku: "primary" },
+      },
+      {
+        name: "peer-a",
+        candidates: [],
+        picks: { fable: "work@peer-a", opus: "primary@peer-a" },
+      },
+    ],
+  };
+
+  it("nextPicks: the families whose next spawn the answer puts on an account", () => {
+    expect(nextPicks(answer, "work")).toEqual(["fable", "opus"]);
+    expect(nextPicks(answer, "primary")).toEqual(["sonnet", "haiku"]);
+    expect(nextPicks(answer, "personal")).toEqual([]);
+    expect(nextPicks(null, "work")).toEqual([]);
+  });
+
+  it("picksLine: Fable, others / others / nothing", () => {
+    expect(picksLine(["fable", "opus"])).toBe("Fable, others");
+    expect(picksLine(["fable"])).toBe("Fable");
+    expect(picksLine(["sonnet", "haiku"])).toBe("others");
+    expect(picksLine([])).toBeNull();
+  });
+});
+
+describe("agent-level account decisions and events (T8)", () => {
+  const waveLimit: DecisionPayload = {
+    decision_id: "w1-limit-1",
+    wave: "w1",
+    task: null,
+    kind: "account_limit",
+    question: "Claude account work is at 91%",
+    options: ["move wave w1 to personal", "not now"],
+    opened_at: "2026-10-18T14:06:01.000Z",
+    acct: "work",
+    pct: 91,
+    resets_at: null,
+    suggested: "personal",
+  };
+  const agentLimit: DecisionPayload = {
+    decision_id: "w1-t1-agent_account_limit-1",
+    wave: "w1",
+    task: "T1",
+    kind: "agent_account_limit",
+    question: "a-1 runs under primary, at 91% of its 5-hour window",
+    options: ["move a-1 to work", "not now"],
+    opened_at: "2026-10-18T14:07:00.000Z",
+    agent_id: "a-1",
+    role: "implementer",
+    window: "five_hour",
+    acct: "primary",
+    pct: 91,
+    resets_at: null,
+    suggested: "work",
+  };
+  const waves: Record<string, WaveView> = {
+    w1: {
+      id: "w1",
+      state: null,
+      receivedAt: 0,
+      decisions: { [waveLimit.decision_id]: waveLimit, [agentLimit.decision_id]: agentLimit },
+    },
+  };
+
+  it("openLimitDecisions returns both kinds, oldest first", () => {
+    expect(openLimitDecisions(waves).map((d) => d.kind)).toEqual([
+      "account_limit",
+      "agent_account_limit",
+    ]);
+  });
+
+  it("agentLimitFor finds the agent's open decision, never a resolved one", () => {
+    expect(agentLimitFor(waves, "a-1")?.decision_id).toBe(agentLimit.decision_id);
+    expect(agentLimitFor(waves, "a-2")).toBeNull();
+    const done = {
+      w1: {
+        ...(waves.w1 as WaveView),
+        decisions: {
+          x: { ...agentLimit, resolved: { answer: "not now", by: "lead", at: "2026-10-18" } },
+        },
+      },
+    };
+    expect(agentLimitFor(done, "a-1")).toBeNull();
+  });
+
+  const ev = (type: string, seq: number, data: Record<string, unknown>): FeedEntry => {
+    const envelope: Envelope = {
+      schema_version: "0.1",
+      agent_id: "volleyd",
+      channel: "_waves/events",
+      type,
+      wall_time: new Date(Date.UTC(2026, 9, 18, 14, 0, seq)).toISOString(),
+      payload: { wave: "w1", seq, task: "T1", data },
+    };
+    return { topic: "volley/_waves/w1/events", envelope, receivedAt: seq };
+  };
+  const chosen = ev("account_chosen", 1, {
+    task: "T1",
+    role: "implementer",
+    account: "primary",
+    source: "balance",
+    why: "primary: most headroom on this machine (5h 20%)",
+  });
+  const moved = ev("agent_account_moved", 2, {
+    agent_id: "a-1",
+    role: "implementer",
+    from: "primary",
+    to: "work",
+    by: "autopilot",
+    decision_id: "w1-t1-agent_account_limit-1",
+    why: "primary at 91% of its 5-hour window",
+  });
+  const reviewer = ev("account_chosen", 3, {
+    task: "T1",
+    role: "spec_reviewer",
+    account: "work",
+    why: "work: most headroom",
+  });
+
+  it("accountLine: the feed's Account rows", () => {
+    expect(accountLine(chosen.envelope)).toBe(
+      "Account · primary: most headroom on this machine (5h 20%)",
+    );
+    expect(accountLine(moved.envelope)).toBe(
+      "Account · moved off primary to work by autopilot: primary at 91% of its 5-hour window",
+    );
+    expect(accountLine({ ...chosen.envelope, type: "stage_entered" })).toBeNull();
+  });
+
+  it("accountWhy: the latest account_chosen of the task role, or the move after it", () => {
+    expect(accountWhy([chosen, reviewer], "T1", "implementer")).toBe(
+      "primary: most headroom on this machine (5h 20%)",
+    );
+    expect(accountWhy([chosen, moved, reviewer], "T1", "implementer")).toBe(
+      "moved off primary by autopilot: primary at 91% of its 5-hour window",
+    );
+    const byPerson = ev("agent_account_moved", 4, {
+      agent_id: "a-1",
+      role: "implementer",
+      from: "primary",
+      to: "work",
+      by: "lead",
+      why: "moved off primary by lead",
+    });
+    expect(accountWhy([chosen, byPerson], "T1", "implementer")).toBe("moved by lead");
+    // The respawn's own account_chosen (source move) keeps the move's line.
+    const after = ev("account_chosen", 5, {
+      task: "T1",
+      role: "implementer",
+      account: "work",
+      source: "move",
+      why: "moved off primary (5h 91%) by autopilot",
+    });
+    expect(accountWhy([chosen, moved, after], "T1", "implementer")).toBe(
+      "moved off primary by autopilot: primary at 91% of its 5-hour window",
+    );
+    expect(accountWhy([chosen], "T2", "implementer")).toBeNull();
   });
 });

@@ -1353,3 +1353,119 @@ describe("Sign in on <machine>: the preset's label and the finished sign-in", ()
     expect(groups[0]?.members.map((m) => m.machine)).toEqual(["local", "peer-b"]);
   });
 });
+
+describe("ClaudeAccounts › the balance and the agent-level decision (T8)", () => {
+  const EMAIL = "owner@example.com";
+  const machines = {
+    "peer-a": {
+      name: "peer-a",
+      kind: "peer",
+      tunnel: "up",
+      auth: { claude: "signed_in", claude_email: EMAIL },
+    },
+  } as unknown as NonNullable<ClaudeAccountsProps["machines"]>;
+  const balance = {
+    machines: [
+      {
+        name: "local",
+        candidates: [],
+        picks: { fable: "personal", opus: "personal", sonnet: "personal", haiku: "personal" },
+      },
+      {
+        name: "peer-a",
+        candidates: [],
+        picks: { fable: "primary@peer-a", opus: "primary@peer-a" },
+      },
+    ],
+  };
+  const agentLimit: DecisionPayload = {
+    decision_id: "w1-t1-agent_account_limit-1",
+    wave: "w1",
+    task: "T1",
+    kind: "agent_account_limit",
+    question: "w1-t1-implementer-1 runs under work, at 91% of its 5-hour window.",
+    options: ["move w1-t1-implementer-1 to personal", "not now"],
+    opened_at: "2026-10-18T14:06:01.000Z",
+    agent_id: "w1-t1-implementer-1",
+    role: "implementer",
+    window: "five_hour",
+    acct: "work",
+    pct: 91,
+    resets_at: null,
+    suggested: "personal",
+  };
+
+  function view(control: ControlFn | null, waves: Record<string, WaveView> = {}) {
+    const state = reduceAll(initialState(), [
+      accountMsg({ ...work, email: EMAIL }),
+      accountMsg(personal),
+    ]);
+    return render(
+      <main>
+        <ClaudeAccounts
+          accounts={state.claudeAccounts ?? {}}
+          signins={{}}
+          waves={waves}
+          config={config}
+          control={control}
+          configTransport={null}
+          now={NOW}
+          group="accounts"
+          machines={machines}
+          localName="hub"
+          hosts={["peer-a"]}
+        />
+      </main>,
+    );
+  }
+  const answering = () =>
+    vi.fn(async (op: string) =>
+      op === "claude_balance"
+        ? { ok: true, result: balance }
+        : ({ ok: true } as { ok: boolean; result?: unknown }),
+    );
+
+  it("asks claude_balance; the card's foot says which families pick it next, the row next pick", async () => {
+    const control = answering();
+    view(control);
+    expect(control).toHaveBeenCalledWith("claude_balance", {}, "volley claude balance");
+    const card = within(await screen.findByRole("article", { name: "Work" }));
+    expect(await card.findByText("picks next: Fable, others")).toBeInTheDocument();
+    const rows = within(card.getByRole("list", { name: "Machines" })).getAllByRole("listitem");
+    const peer = rows.find((r) => within(r).queryByText("peer-a"));
+    const local = rows.find((r) => within(r).queryByText("this machine"));
+    expect(peer && within(peer).queryByText("next pick")).toBeInTheDocument();
+    expect(local && within(local).queryByText("next pick")).toBeNull();
+    // The account every local family picks.
+    const other = within(screen.getByRole("article", { name: "Personal" }));
+    expect(other.getByText("picks next: Fable, others")).toBeInTheDocument();
+  });
+
+  it("read-only: no claude_balance request and no picks line", () => {
+    view(null);
+    expect(screen.queryByText(/picks next/)).toBeNull();
+    expect(screen.queryByText("next pick")).toBeNull();
+  });
+
+  it("the needs-you list renders an agent_account_limit: the question, move with figures, not now", async () => {
+    const control = answering();
+    view(control, { w1: wave({ [agentLimit.decision_id]: agentLimit }) });
+    const banner = screen.getByText(agentLimit.question).closest(".needs-you") as HTMLElement;
+    const move = within(banner).getByRole("button", { name: "move to personal (5h 12%, 7d 22%)" });
+    expect(within(banner).getByRole("button", { name: "not now" })).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(move);
+    });
+    expect(control).toHaveBeenCalledWith(
+      "resolve",
+      {
+        wave: "w1",
+        decision_id: agentLimit.decision_id,
+        answer: "move w1-t1-implementer-1 to personal",
+      },
+      `volleyd resolve ${agentLimit.decision_id}`,
+    );
+    // Use for… moves waves only: an agent's decision is not one of its waves.
+    expect(screen.getByRole("combobox", { name: "Move a wave to Personal" })).toBeDisabled();
+  });
+});
