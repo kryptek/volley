@@ -97,9 +97,9 @@
 # hosts:
 #   buildbox:
 #     target: me@buildbox          # ssh destination ([user@]host or an ssh config alias)
-#     repo: /home/me/src/myrepo    # the wave repo's clone there
-#     volley_dir: /home/me/src/volley
-#     worktree_root: /home/me/src/.volley-worktrees   # default: .volley-worktrees beside repo
+#     repo: /path/to/repo          # the wave repo's clone there
+#     volley_dir: /path/to/volley
+#     worktree_root: /path/to/worktrees  # default: .volley-worktrees beside repo
 #     tunnel:
 #       remote_port: 21883         # remote 127.0.0.1 port that reaches the broker
 #       supervise: true            # volleyd keeps `ssh -N -R` up itself

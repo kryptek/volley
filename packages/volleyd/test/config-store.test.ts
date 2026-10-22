@@ -20,7 +20,7 @@ beforeEach(() => {
 describe("volleydHome", () => {
   it("is $VOLLEYD_HOME, else ~/.volley/volleyd", () => {
     expect(volleydHome({ VOLLEYD_HOME: "/x/y" })).toBe("/x/y");
-    expect(volleydHome({ HOME: "/home/u" })).toBe("/home/u/.volley/volleyd");
+    expect(volleydHome({ HOME: "/path/to/home" })).toBe("/path/to/home/.volley/volleyd");
   });
 });
 
