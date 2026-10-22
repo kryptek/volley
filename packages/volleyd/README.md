@@ -220,13 +220,14 @@ and work while the daemon is down; use the wave `_system` for global events (`co
   supervised, launched and being verified, spawning (a release stage's agent too), and one slot
   for each admitted task of a running wave with no agent live that will spawn its next one:
   queued for its first agent (backed off too, not once refused for good), or between pipeline
-  roles in `implement`…`fixup`. A pipeline role's spawn is held (`hard ceiling reached (n/m)`)
-  while the count without its own task's slot is at the ceiling, so reviewers and fixups spawn
-  into the slot their task holds and a new task never takes it. A task's first agent (a retry,
-  a resumed wave's backlog) starts only while the agents running or starting leave room. A task's
-  stage counts nothing
-  otherwise: a task awaiting a decision or blocked, or one in a paused, stopped or ended wave,
-  holds a slot only while one of its agents is live. Lowering a limit admits nothing new and preempts nothing.
+  roles in `implement`…`fixup`. Those held slots keep admission from handing a new task the
+  slot of a task whose reviewers or fixup are still to come. A pipeline role's spawn (held as
+  `hard ceiling reached (n/m)`) and a task's first agent (a retry, a resumed wave's backlog)
+  start only while the agents running or starting leave room under the ceiling; held slots never
+  hold a spawn, so tasks waiting on each other's slots never all wait. A task's stage counts
+  nothing otherwise: a task awaiting a decision or blocked, or one in a paused, stopped or ended
+  wave, holds a slot only while one of its agents is live. Lowering a limit admits nothing new
+  and preempts nothing.
   Unadmitted ready tasks show the reasons in `why_waiting`, e.g. `hard ceiling reached: 2/2 live agents`.
 - **Restart**: the daemon reopens every journal under `$VOLLEYD_HOME/waves/`, re-publishes each
   wave's state, and resumes admission.

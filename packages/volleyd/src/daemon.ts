@@ -3617,7 +3617,7 @@ export class Daemon {
   private spawnAdmitted(wave: WaveId): void {
     const rec = this.waves.get(wave)?.record;
     if (this.killSwitch || rec?.state == null || rec.state.status !== "running") return;
-    let room = this.config.effective(wave).hard_ceiling - this.ceilingCount(undefined, false).live;
+    let room = this.config.effective(wave).hard_ceiling - this.ceilingCount(false).live;
     for (const id of rec.admitted) {
       if (room <= 0) return;
       const t = rec.state.tasks.find((x) => x.id === id);
@@ -5881,15 +5881,14 @@ export class Daemon {
    * What the hard ceiling counts (SPEC §4.6.4): the agents volleyd runs or is starting, in every
    * wave and on every machine — supervised, launched and being verified, spawning (a release
    * stage's agent too) — and one slot for each admitted task of a running wave that will spawn
-   * its next agent: queued for its implementer (backed off too: the retry starts unchecked; not
-   * once refused for good), or between roles in implement…fixup (reviewers or a fixup to come,
-   * which spawn against this slot). A task's stage counts nothing by itself otherwise: a task
+   * its next agent: queued for its implementer (backed off too; not once refused for good), or
+   * between roles in implement…fixup (reviewers or a fixup to come). A task's stage counts nothing by itself otherwise: a task
    * awaiting a decision, blocked, or in a paused, stopped or ended wave holds a slot only while
-   * one of its agents is live. `launching` is the part not supervised yet. `except`
-   * (`<wave>/<task>`): leave out that task's held slot (its own role spawn's check). `held:
-   * false` counts only the agents running or starting, no held slot (what `spawnAdmitted` checks).
+   * one of its agents is live. `launching` is the part not supervised yet. `held: false` counts
+   * only the agents running or starting, no held slot: what a spawn checks (`spawnAdmitted`, a
+   * pipeline role's), so tasks holding more slots than the ceiling never hold each other's spawns.
    */
-  private ceilingCount(except?: string, held = true): CeilingCount {
+  private ceilingCount(held = true): CeilingCount {
     const byWave: Record<string, number> = {};
     const add = (wave: WaveId) => {
       byWave[wave] = (byWave[wave] ?? 0) + 1;
@@ -5922,8 +5921,7 @@ export class Daemon {
       if (rec.state?.status !== "running") continue;
       for (const id of rec.admitted) {
         const t = rec.state.tasks.find((x) => x.id === id);
-        if (t === undefined || `${wave}/${id}` === except || liveTasks.has(`${wave}/${id}`))
-          continue;
+        if (t === undefined || liveTasks.has(`${wave}/${id}`)) continue;
         if (awaitsImplementer(t)) {
           if (this.refused.get(`${wave}/${id}/implementer`)?.until === Number.POSITIVE_INFINITY)
             continue;
@@ -6004,7 +6002,7 @@ export class Daemon {
       running: rec.state?.status === "running",
       admission: admission.allow,
       reasons: admission.reasons,
-      live: this.ceilingCount(`${wave}/${task}`).live,
+      live: this.ceilingCount(false).live,
       ceiling: this.config.effective(wave).hard_ceiling,
       used: spawnsUsed(rec),
       budget: spawnBudget(

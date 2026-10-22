@@ -201,3 +201,96 @@ describe("hard ceiling with a supervised agent and a tight ceiling", () => {
     expect(cli.stdout).toContain("ceiling: 2/2 live agents · 1 launching · by wave: w1 1, w2 1");
   });
 });
+
+describe("hard ceiling and pipeline role spawns", () => {
+  let t: DaemonEnv;
+  let daemon: Daemon;
+  let client: ControlClient;
+  let started: string[];
+  type Spawns = {
+    opts: { spawner?: object };
+    spawning: Set<string>;
+    startSpawn: (wave: string, task: string, role: string) => Promise<unknown>;
+    pipelineSpawn: (wave: string, task: string, role: string, req: { files: object }) => void;
+  };
+  const d = () => daemon as unknown as Spawns;
+  beforeEach(async () => {
+    t = await makeDaemonEnv();
+    daemon = await t.start();
+    started = [];
+    // Each start is recorded, never launched.
+    d().startSpawn = async (wave, task, role) => {
+      started.push(`${wave}/${task}/${role}`);
+      return new Promise(() => {});
+    };
+    client = await ControlClient.connect(t.broker.url, NS);
+  });
+  afterEach(async () => {
+    await client.close();
+    await t.cleanup();
+  });
+
+  const reviewed = (wave: string, tasks: string[], config: string) =>
+    yaml(wave, tasks, config).replace(
+      "pipeline: [implement, merge_ready]",
+      "pipeline: [implement, [spec_review, quality_review], fixup, merge_ready]",
+    );
+  const run = async (y: string) =>
+    expect((await client.request("run", { wave_yaml: y, owner: "coord-a" })).error).toBeUndefined();
+  const configSet = async (patch: Record<string, unknown>) =>
+    expect(
+      (await client.request("config_set", { patch, by: "tester" }, { text: "t" })).applied,
+    ).toBe(true);
+  /** Implemented and retired, its reviewers not spawned yet. */
+  const betweenRoles = async (wave: string, task: string) => {
+    await daemon.recordEvent(wave, {
+      type: "agent_spawned",
+      task,
+      data: { role: "implementer", agent_id: `${wave}-${task.toLowerCase()}-implementer-1` },
+    });
+    await daemon.recordEvent(wave, { type: "stage_entered", task, data: { stage: "spec_review" } });
+  };
+  const spawnRole = (wave: string, task: string, role: string) => {
+    // A spawner only from here on: `run` checks no repo, and nothing spawns on its own before.
+    d().opts.spawner = {};
+    started = [];
+    d().pipelineSpawn(wave, task, role, { files: {} });
+    return started;
+  };
+
+  it("parallel reviewers at a tight ceiling: the second waits for the first's slot", async () => {
+    await run(reviewed("w-p", ["A"], "hard_ceiling: 1"));
+    await betweenRoles("w-p", "A");
+    expect(spawnRole("w-p", "A", "spec_reviewer")).toEqual(["w-p/A/spec_reviewer"]);
+    d().spawning.add("w-p/A/spec_reviewer");
+    expect(spawnRole("w-p", "A", "quality_reviewer")).toEqual([]);
+    d().spawning.delete("w-p/A/spec_reviewer");
+    expect(spawnRole("w-p", "A", "quality_reviewer")).toEqual(["w-p/A/quality_reviewer"]);
+  });
+
+  it("more tasks between roles than the ceiling (a lowered ceiling): role spawns still start", async () => {
+    await configSet({ hard_ceiling: 4 });
+    await run(reviewed("w-l", ["A", "B", "C", "D"], ""));
+    for (const id of ["A", "B", "C", "D"]) await betweenRoles("w-l", id);
+    await configSet({ hard_ceiling: 2 });
+    // No agent runs: the four held slots never hold each other's spawns.
+    expect(spawnRole("w-l", "A", "spec_reviewer")).toEqual(["w-l/A/spec_reviewer"]);
+    d().spawning.add("w-l/A/spec_reviewer");
+    expect(spawnRole("w-l", "B", "spec_reviewer")).toEqual(["w-l/B/spec_reviewer"]);
+    d().spawning.add("w-l/B/spec_reviewer");
+    // Two agents starting fill the ceiling: the third waits.
+    expect(spawnRole("w-l", "C", "spec_reviewer")).toEqual([]);
+  });
+
+  it("a resumed wave's tasks between roles over the ceiling: role spawns still start", async () => {
+    await configSet({ hard_ceiling: 2 });
+    await run(reviewed("w-x", ["A", "B"], ""));
+    for (const id of ["A", "B"]) await betweenRoles("w-x", id);
+    expect((await client.request("pause", { wave: "w-x", by: "coord-a" })).ok).toBe(true);
+    await run(reviewed("w-y", ["C", "D"], ""));
+    for (const id of ["C", "D"]) await betweenRoles("w-y", id);
+    expect((await client.request("resume", { wave: "w-x", by: "coord-a" })).ok).toBe(true);
+    expect(spawnRole("w-x", "A", "spec_reviewer")).toEqual(["w-x/A/spec_reviewer"]);
+    expect(spawnRole("w-y", "C", "spec_reviewer")).toEqual(["w-y/C/spec_reviewer"]);
+  });
+});

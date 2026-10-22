@@ -335,9 +335,9 @@ export interface AdmissionSummary {
 }
 
 /**
- * The agents the hard ceiling counts: `live` in all (supervised, starting, and admitted tasks
- * queued for their implementer), `launching` the part not supervised yet, and `by_wave` each
- * wave's share (a wave with none is absent).
+ * The agents the hard ceiling counts: `live` in all (supervised, starting, and a slot held by
+ * each admitted task queued for its implementer or between pipeline roles), `launching` the part
+ * not supervised yet, and `by_wave` each wave's share (a wave with none is absent).
  */
 export interface CeilingCount {
   live: number;

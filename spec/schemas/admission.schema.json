@@ -47,7 +47,7 @@
             },
             "ceiling": {
               "type": "object",
-              "description": "What the hard ceiling counts: the agents the supervisor runs or is starting in every wave (supervised, launched and being verified, spawning, and admitted tasks of running waves queued for their first agent). See spec section 4.6.4.",
+              "description": "What the hard ceiling counts: the agents the supervisor runs or is starting in every wave (supervised, launched and being verified, spawning, and one slot per admitted task of a running wave with no agent live that is queued for its first agent or between pipeline roles). See spec section 4.6.4.",
               "required": ["live", "max", "launching", "by_wave"],
               "properties": {
                 "live": { "type": "integer", "minimum": 0 },

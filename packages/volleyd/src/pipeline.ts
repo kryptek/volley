@@ -3298,8 +3298,7 @@ class IoTimeout extends Error {}
 /**
  * What the daemon checks before a pipeline role spawn (the implementer's spawn is admitted per
  * task by the scheduler): the kill switch, the wave running, T5's admission verdict, the hard
- * ceiling (`live`: what it counts besides this task's own held slot) and the wave's spawn
- * budget. Null: spawn now; a reason: hold it (the next tick asks again). Pure.
+ * ceiling (`live`: the agents running or starting, no held slot) and the wave's spawn budget. Null: spawn now; a reason: hold it (the next tick asks again). Pure.
  */
 export function roleSpawnHold(o: {
   killSwitch: boolean;
