@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { dependents, nextToMerge, queueOf } from "../src/autopilot/merge-queue";
-import { type TaskPipeline, emptyPipeline } from "../src/pipeline";
+import { dependents, nextToMerge, queueOf, refusalEndsTurn } from "../src/autopilot/merge-queue";
+import { type TaskPipeline, emptyPipeline, reducePipeline } from "../src/pipeline";
 import type { WaveRecord } from "../src/reducer";
 import type { TaskStage } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
@@ -146,7 +146,7 @@ describe("nextToMerge", () => {
     const refusal = (reason?: string) =>
       queued(1, {
         merge_refusals: 1,
-        alarms: { merge_refused: { alarm: "merge_refused", ...(reason ? { reason } : {}) } },
+        merge_refusal_reason: reason,
       });
     for (const reason of ["checks", "unknown"]) {
       const rec = record("w1", { T1: { p: refusal(reason) }, T2: { p: queued(2) } });
@@ -156,6 +156,21 @@ describe("nextToMerge", () => {
       const rec = record("w1", { T1: { p: refusal(reason) }, T2: { p: queued(2) } });
       expect(nextToMerge({ b: queueOf(rec) }, new Set())?.task).toBe("T2");
     }
+  });
+
+  it("a late refusal of an older gated head does not change the current refusal's reason (#311)", () => {
+    const [A, B] = ["a".repeat(40), "b".repeat(40)];
+    let seq = 0;
+    const fold = (p: TaskPipeline, type: string, data: Record<string, unknown>) =>
+      reducePipeline(p, { seq: ++seq, at: "", type, task: "T1", data } as never, { stages: [] });
+    let p = emptyPipeline();
+    p = fold(p, "artifact_verified", { role: "gate", head_sha: A });
+    p = fold(p, "artifact_verified", { role: "gate", head_sha: B });
+    p = fold(p, "alarm_raised", { alarm: "merge_refused", head: B, reason: "checks" });
+    expect(refusalEndsTurn(p)).toBe(false);
+    p = fold(p, "alarm_raised", { alarm: "merge_refused", head: A, reason: "behind" });
+    expect(p.merge_refusals).toBe(1);
+    expect(refusalEndsTurn(p)).toBe(false);
   });
 
   it("two waves on one release branch share it: one merge in flight", () => {

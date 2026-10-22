@@ -45,10 +45,11 @@ export function dependents(wave: Wave, task: TaskId): number {
  * The last refusal says the branch must change before it can merge (behind the release branch,
  * or its head moved): the task gives up the merge turn. Any other refusal (required checks,
  * branch protection, unknown) keeps it, and the merge is tried again up to `merge_retry_max`
- * (#311). A refusal journaled before reasons were recorded counts as `behind`.
+ * (#311). A refusal journaled before reasons were recorded counts as `behind`; a late refusal of
+ * an older gated head counts for nothing (the reducer records only the current head's reason).
  */
 export function refusalEndsTurn(p: TaskPipeline): boolean {
-  const reason = p.alarms?.merge_refused?.reason;
+  const reason = p.merge_refusal_reason;
   return reason === undefined || reason === "behind" || reason === "head_moved";
 }
 

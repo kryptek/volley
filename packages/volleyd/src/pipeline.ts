@@ -206,6 +206,11 @@ export interface TaskPipeline {
   nudged?: string[];
   /** Autopilot merges GitHub refused at the current gated head (`merge_refused` alarms). */
   merge_refusals?: number;
+  /**
+   * The reason of the last of those refusals (absent for one journaled before reasons were
+   * recorded). Unlike `alarms.merge_refused`, a late refusal of an older head never sets it.
+   */
+  merge_refusal_reason?: string | undefined;
   /** Extra attempts the owner granted (`merge_refused` answered `retry`). */
   merge_retries?: number;
   /** The owner answered a `merge_refused` decision `manual`: a human merges this task. */
@@ -443,6 +448,7 @@ export function reducePipeline(
           p.gated.push(d.head_sha);
           // A new gated head: GitHub's refusals of the old one say nothing about it.
           p.merge_refusals = 0;
+          p.merge_refusal_reason = undefined;
           p.merge_retries = 0;
         }
       }
@@ -606,8 +612,10 @@ export function reducePipeline(
     case "alarm_raised": {
       if (typeof d.alarm === "string") p.alarms = { ...p.alarms, [d.alarm]: d };
       // Only a refusal of the current gated head counts: a late one for an older head says nothing.
-      if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1))
+      if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1)) {
         p.merge_refusals = (p.merge_refusals ?? 0) + 1;
+        p.merge_refusal_reason = typeof d.reason === "string" ? d.reason : undefined;
+      }
       // volleyd's merge ended without merging (refused, or `gh` could not run).
       if (d.alarm === "merge_refused" || (d.alarm === "pipeline_error" && d.check === "merge"))
         p.merge_inflight = undefined;
