@@ -10,13 +10,17 @@
  * `RepairSheet`), **Re-pair…** (a code bound to the machine, `invite --for`)
  * and **Remove…** (`RemoveMachineSheet`); the supervisor's own machine has
  * none of them (its cap is `hard_ceiling`, and it is not paired). `signIn` is
- * the slot a remote Claude sign-in fills. The supervisor's own card also
+ * the slot a remote Claude sign-in fills (the machine's default login); the
+ * **Claude accounts** block lists every account with a filled dot where a
+ * profile of it is signed in here and, where none is, **Sign in on <machine>**
+ * (off while the tunnel is down). The supervisor's own card also
  * carries the local agents chip (`fleet.local_agents` from volleyd's verdict:
  * `always`, `never`, `fallback`, or `fallback · active` while no paired machine
  * is eligible), titled with volleyd's why; a click opens the setting.
  */
 
 import { type ReactNode, useEffect, useState } from "react";
+import { maskEmail } from "../lib/email";
 import { plural } from "../lib/plural";
 import { type PeerInvite, type PeerOps, joinCommand } from "../store/peerOps";
 import type { ClaudeAccountPayload, MachinePayload, ReadinessPayload } from "../store/types";
@@ -171,6 +175,65 @@ function UsageMeter({ account, pct }: { account: string; pct: number }) {
         <i style={{ width: `${v}%` }} />
       </span>
       <span className="mono">{v}%</span>
+    </div>
+  );
+}
+
+/** One Claude account as a machine card lists it. */
+export interface MachineAccountRow {
+  /** The account group's key. */
+  key: string;
+  label: string;
+  email: string | null;
+  plan: string | null;
+  /** Its profile here (`default login` for the machine's own); `null`: not signed in here. */
+  held: { label: string } | null;
+  /** The machine's tunnel is up: a sign-in can start. */
+  up: boolean;
+}
+
+/** The Claude accounts signed in here, and Sign in on the machine for the ones that are not. */
+function AccountRows({
+  name,
+  rows,
+  onSignInOn,
+}: {
+  name: string;
+  rows: MachineAccountRow[];
+  onSignInOn?: ((key: string) => void) | undefined;
+}) {
+  return (
+    <div className="m-accounts-block">
+      <div className="s-hint">Claude accounts</div>
+      <ul className="m-accounts" aria-label={`Claude accounts on ${name}`}>
+        {rows.map((a) => (
+          <li key={a.key} className={a.held ? undefined : "gap"}>
+            <span className={`cc-dot${a.held ? " cc-dot--in" : ""}`} aria-hidden="true" />
+            <span className="sr-only">{a.held ? "signed in here" : "not signed in here"}</span>
+            <b className="ell">{a.label}</b>
+            {a.email && <span className="mono dim ell">{maskEmail(a.email)}</span>}
+            {a.plan && <span className="chip">{a.plan}</span>}
+            {a.held ? (
+              <span className="dim ell">{a.held.label}</span>
+            ) : (
+              onSignInOn && (
+                <span className="cc-signin">
+                  {!a.up && <span className="s-hint">tunnel down</span>}
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={!a.up}
+                    aria-label={`Sign in on ${name} with ${a.label}`}
+                    onClick={() => onSignInOn(a.key)}
+                  >
+                    Sign in on {name}
+                  </button>
+                </span>
+              )
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -332,6 +395,10 @@ export interface MachineCardProps {
   onRemoved: (notice: string) => void;
   /** The remote Claude sign-in's button for this machine, when one exists. */
   signIn?: ReactNode;
+  /** Every Claude account, held here or not (the account matrix's column for this machine). */
+  accountRows?: MachineAccountRow[] | undefined;
+  /** Sign in on this machine with an account (by group key); absent: read-only. */
+  onSignInOn?: ((key: string) => void) | undefined;
   /** A re-pairing code starts (`true`) or stops counting down: the section ticks faster meanwhile. */
   onCountdown?: (on: boolean) => void;
   /** The local agents chip's click (own card only): open the `fleet.local_agents` setting. */
@@ -375,6 +442,9 @@ export function MachineCard(p: MachineCardProps) {
         </p>
       )}
       {pct !== null && <UsageMeter account={account} pct={pct} />}
+      {p.accountRows && p.accountRows.length > 0 && (
+        <AccountRows name={m.name} rows={p.accountRows} onSignInOn={p.onSignInOn} />
+      )}
       {m.checks && m.checks.length > 0 && (
         <CheckRows checks={m.checks} ctx={ctx} label={`Checks on ${m.name}`} />
       )}

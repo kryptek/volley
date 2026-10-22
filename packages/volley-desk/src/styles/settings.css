@@ -732,6 +732,32 @@
 .cc-dot--in {
   background: #34c759;
 }
+/* A configured machine without the account: a hollow dot, and Sign in on it. */
+.cc-machines .gap .cc-dot,
+.m-accounts .gap .cc-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--mute);
+}
+.cc-signin {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: none;
+}
+.cc-signin .btn {
+  padding: 2px 8px;
+  font-size: 11.5px;
+}
+/* `on 2 of 3 machines`: amber while a configured machine misses the account. */
+.cc-head .chip + .chip {
+  margin-left: 0;
+}
+.chip--gap {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 55%, transparent);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+}
 .cc-foot {
   display: flex;
   justify-content: space-between;

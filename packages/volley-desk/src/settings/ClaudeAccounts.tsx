@@ -7,7 +7,10 @@
  * A card shows the label, plan chip and organisation, the e-mail masked until
  * its eye button reveals it (never persisted), the 5-hour and weekly meters
  * from the freshest reading (a disagreeing older one named stale), one row per
- * machine holding the account, the agents and waves on it, and "Move a wave
+ * configured machine (`accountMatrix`: a filled dot where it holds the account,
+ * else **Sign in on <machine>**, which opens Add already at the sign-in step
+ * with the label `<label> (<machine>)`) under an `on N of M machines` chip,
+ * the agents and waves on it, and "Move a wave
  * here…" (its login on this machine, by account id). An open
  * `account_limit` decision is a Needs-you banner whose Move / Not now answer
  * it (`resolve`); volleyd moves a wave only by such an answer, so "Move a wave
@@ -28,25 +31,33 @@
  */
 import { EyeIcon, ViewOffIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useState } from "react";
-import { maskEmail } from "../lib/email";
+import { useEffect, useRef, useState } from "react";
+import { maskEmail, normalizeEmail } from "../lib/email";
 import { plural } from "../lib/plural";
 import Stepper, { Step } from "../rb/Stepper/Stepper";
 import type { ControlReply } from "../steer/transport";
 import {
   type AccountGroup,
-  type AccountInfo,
+  type AccountMatrixRow,
   LOCAL_MACHINE,
+  type MatrixCell,
+  type MatrixMachine,
+  type Member,
+  PRIMARY_LABEL,
   type RegistryAccount,
-  accountGroups,
   accountList,
+  accountMatrix,
+  configuredMachines,
+  deskAccountGroups,
   fiveHourLabel,
+  machineName,
   moveAnswer,
   moveTargetOf,
   notNowAnswer,
   openLimitDecisions,
   resetsIn,
   resolveFields,
+  withPrimary,
 } from "../store/claude";
 import type {
   ClaudeAccountPayload,
@@ -183,44 +194,9 @@ export function claudeSummaries({
   };
 }
 
-const machineName = (m: string) => (m === LOCAL_MACHINE ? "this machine" : m);
-
 /** volleyd's id for Claude Code's default profile on its own machine. */
 const PRIMARY = "primary";
-/** How the primary's card names it: never just "primary", which reads as one more profile. */
-export const PRIMARY_LABEL = "This machine's Claude login";
-
-/**
- * The list with this machine's own login first. It is always there (agents run on it by
- * default), but it has a usage record only once it reports usage, so until then one is made up
- * for it: an owner who adds a profile must not read the missing card as their login gone. Its
- * plan is the one volleyd reports (its record's, else `claude_accounts`'s), never a guess.
- */
-function withPrimary(list: AccountInfo[], plan: string | undefined): AccountInfo[] {
-  const own = list.find((a) => a.id === PRIMARY);
-  const primary: AccountInfo =
-    own === undefined
-      ? {
-          id: PRIMARY,
-          label: PRIMARY_LABEL,
-          machine: LOCAL_MACHINE,
-          plan: plan ?? null,
-          email: null,
-          org: null,
-          fiveHour: null,
-          weekly: null,
-          sampledAt: null,
-          signedIn: true,
-          agents: [],
-          waves: [],
-        }
-      : {
-          ...own,
-          label: own.label === PRIMARY ? PRIMARY_LABEL : own.label,
-          plan: own.plan ?? plan ?? null,
-        };
-  return [primary, ...list.filter((a) => a !== own)];
-}
+export { PRIMARY_LABEL };
 
 function Meter({ label, w, now }: { label: string; w: UsageWindow | null; now: number }) {
   const pct = w === null ? null : Math.round(w.pct);
@@ -265,13 +241,11 @@ function age(at: string, now: number): string | null {
 
 const WINDOW_NAME = { five_hour: "5-hour", weekly: "weekly" } as const;
 
-/** The login's e-mail, masked until its eye button shows it (per card, never persisted). */
-function EmailRow({ email }: { email: string | null }) {
+/** An e-mail masked until its eye button shows it (per mount, never persisted). */
+function MaskedEmail({ email }: { email: string }) {
   const [shown, setShown] = useState(false);
-  if (email === null)
-    return <div className="s-hint">e-mail not reported yet (run the machine's doctor)</div>;
   return (
-    <div className="cc-email">
+    <>
       <span className="mono ell">{shown ? email : maskEmail(email)}</span>
       <button
         type="button"
@@ -282,26 +256,100 @@ function EmailRow({ email }: { email: string | null }) {
       >
         <HugeiconsIcon icon={shown ? ViewOffIcon : EyeIcon} size={13} strokeWidth={1.8} />
       </button>
+    </>
+  );
+}
+
+/** The login's e-mail, masked until its eye button shows it (per card, never persisted). */
+function EmailRow({ email }: { email: string | null }) {
+  if (email === null)
+    return <div className="s-hint">e-mail not reported yet (run the machine's doctor)</div>;
+  return (
+    <div className="cc-email">
+      <MaskedEmail email={email} />
     </div>
   );
 }
 
+/** Why a machine row's Sign in is off: its tunnel is down; `null` when it can sign in. */
+const offline = (c: { up: boolean }) => (c.up ? null : "tunnel down");
+
+/**
+ * A configured machine's row with no login on the account: an empty dot, and Sign in on it (off
+ * while its tunnel is down; none when the Desk cannot steer). `other` is the e-mail a sign-in
+ * started here finished with when it was not this account's.
+ */
+function MissingRow({
+  c,
+  account,
+  other,
+  onSignIn,
+}: {
+  c: MatrixCell;
+  /** The card's account, for the button's name (every card may offer the same machine). */
+  account: string;
+  other: string | null;
+  onSignIn: (() => void) | null;
+}) {
+  const why = offline(c);
+  return (
+    <li className="gap">
+      <span className="cc-dot" aria-hidden="true" />
+      <b>{c.name}</b>
+      <span className="dim ell">
+        {other ? `signed in as another account (${maskEmail(other)})` : `not on ${c.name}`}
+      </span>
+      {onSignIn && (
+        <span className="cc-signin">
+          {why && <span className="s-hint">{why}</span>}
+          <button
+            type="button"
+            className="btn"
+            disabled={why !== null}
+            aria-label={`Sign in on ${c.name} with ${account}`}
+            onClick={onSignIn}
+          >
+            Sign in on {c.name}
+          </button>
+        </span>
+      )}
+    </li>
+  );
+}
+
+/** A sign-in the account matrix started: which account, on which machine, under which id. */
+export interface SignInTry {
+  /** The account group's key (its normalised e-mail). */
+  key: string;
+  op: string;
+  label: string;
+  acct: string;
+}
+
 /** One Anthropic account's card. */
 function AccountCard({
-  g,
+  row,
+  others,
   movable,
   onMove,
   onAdd,
+  onSignInOn,
   now,
 }: {
-  g: AccountGroup;
+  row: AccountMatrixRow;
+  /** A sign-in started here that finished on another e-mail, by machine (`op`). */
+  others: Record<string, string>;
   /** Open `account_limit` decisions on other accounts: the waves that can move here. */
   movable: DecisionPayload[];
   onMove: ((d: DecisionPayload) => void) | null;
   /** Add to another machine…; `null`: read-only. */
   onAdd: (() => void) | null;
+  /** Sign in on a configured machine missing the account; `null`: read-only. */
+  onSignInOn: ((c: MatrixCell) => void) | null;
   now: number;
 }) {
+  const g = row.group;
+  const { held, total } = row.coverage;
   const only = g.members.length === 1 ? g.members[0] : undefined;
   const ago = g.freshest && age(g.freshest.sampledAt, now);
   return (
@@ -321,6 +369,11 @@ function AccountCard({
                   : `${only.account} · ${machineName(only.machine)}`)}
           </div>
         </div>
+        {total > 1 && (
+          <span className={`chip${held < total ? " chip--gap" : ""}`}>
+            on {held} of {total} machines
+          </span>
+        )}
         {g.plan && <span className="chip">{g.plan}</span>}
       </div>
       <EmailRow email={g.email} />
@@ -340,17 +393,30 @@ function AccountCard({
         </div>
       )}
       <ul className="cc-machines" aria-label="Machines">
-        {g.members.map((m) => (
-          <li key={m.account}>
-            <span className={`cc-dot${m.signedIn ? " cc-dot--in" : ""}`} aria-hidden="true" />
-            <span className="sr-only">{m.signedIn ? "signed in" : "signed out"}</span>
-            <b>{machineName(m.machine)}</b>
-            <span className="dim ell">{m.label}</span>
-            <span className="dim cc-waves">
-              {m.waves.length ? `waves: ${m.waves.join(", ")}` : "no waves"}
-            </span>
-          </li>
-        ))}
+        {row.rows.map((c) => {
+          const m = c.member;
+          if (m === null)
+            return (
+              <MissingRow
+                key={`gap-${c.op}`}
+                c={c}
+                account={g.label}
+                other={others[c.op] ?? null}
+                onSignIn={onSignInOn && (() => onSignInOn(c))}
+              />
+            );
+          return (
+            <li key={m.account}>
+              <span className={`cc-dot${m.signedIn ? " cc-dot--in" : ""}`} aria-hidden="true" />
+              <span className="sr-only">{m.signedIn ? "signed in" : "signed out"}</span>
+              <b>{c.name}</b>
+              <span className="dim ell">{m.label}</span>
+              <span className="dim cc-waves">
+                {m.waves.length ? `waves: ${m.waves.join(", ")}` : "no waves"}
+              </span>
+            </li>
+          );
+        })}
       </ul>
       <div className="cc-move">
         <span className="s-hint">Use for</span>
@@ -394,19 +460,41 @@ function AccountCard({
 }
 
 /** A machine the Add dialog can sign a new profile in on. */
-export interface AddMachine {
-  /** How the picker names it ("this machine" for volleyd's own). */
-  name: string;
-  /** Its host name, when known: what a suggested label names it by (`name` otherwise). */
-  host?: string;
-  /** `claude_account_add`'s `machine`: `LOCAL_MACHINE` or the peer's host name. */
-  op: string;
-  /** Its tunnel is up (this machine always is). */
-  up: boolean;
-  /** A paired host that has published no machine record yet: offered, but its state is unknown. */
-  unknown?: boolean;
+export interface AddMachine extends MatrixMachine {
   /** It already holds the account being added (Add to another machine…). */
   holds: boolean;
+}
+
+/**
+ * Sign in on <machine>: the account to sign in with and the profile to make for it. volleyd's
+ * ids are unique across machines, so the label is Add to another machine…'s `<label> (<machine>)`.
+ */
+export interface SignInPreset {
+  /** The account group's key. */
+  key: string;
+  /** The account as its card names it, for a dialog with no e-mail to show. */
+  account: string;
+  email: string | null;
+  label: string;
+  /** `claude_account_add`'s `machine`, and how the dialog names it. */
+  machine: string;
+  name: string;
+}
+
+/** A profile label for a machine's own login: never the e-mail, never "primary". */
+const NEW_PROFILE = "Claude login";
+
+/** The Sign in on <machine> preset for an account on a configured machine missing it. */
+export function signInPreset(g: AccountGroup, m: MatrixMachine): SignInPreset {
+  const base = g.members.find((x) => !x.isPrimary)?.label ?? NEW_PROFILE;
+  return {
+    key: g.key,
+    account: g.label,
+    email: g.email,
+    label: `${base} (${m.host ?? m.name})`,
+    machine: m.op,
+    name: m.name,
+  };
 }
 
 /** What volleyd's `claude_account_add` answer carries for the sign-in (as its URL event). */
@@ -419,14 +507,23 @@ interface Started {
 
 type Adding =
   | { phase: "pick"; error?: string }
-  | { phase: "waiting"; machine: string; label: string; acct?: string; r?: Started };
+  | {
+      phase: "waiting";
+      machine: string;
+      label: string;
+      acct?: string;
+      r?: Started;
+      error?: string;
+    };
 
 /** The add-account Stepper: label and machine → Anthropic's sign-in page → done. */
 function AddAccount({
   machines,
   baseLabel = "",
+  preset,
   signins,
   control,
+  onStarted,
   onClose,
 }: {
   /** This machine first, then each paired host. */
@@ -437,11 +534,17 @@ function AddAccount({
    * until the owner types their own.
    */
   baseLabel?: string;
+  /** Sign in on <machine>: no label or machine to pick, the sign-in starts at once. */
+  preset?: SignInPreset;
   signins: Record<string, ClaudeSignin>;
   control: ControlFn;
+  /** Hears the sign-in's account id once volleyd has started it. */
+  onStarted?: (acct: string, label: string, machine: string) => void;
   onClose: () => void;
 }) {
-  const [s, setS] = useState<Adding>({ phase: "pick" });
+  const [s, setS] = useState<Adding>(() =>
+    preset ? { phase: "waiting", machine: preset.machine, label: preset.label } : { phase: "pick" },
+  );
   /** What the owner typed; null while the field still follows the suggestion. */
   const [typed, setTyped] = useState<string | null>(null);
   const [pick, setPick] = useState(() => machines.find((m) => m.up && !m.holds)?.op);
@@ -458,8 +561,7 @@ function AddAccount({
   const machine = s.phase === "waiting" ? s.machine : (chosen?.op ?? LOCAL_MACHINE);
   const remote = machine !== LOCAL_MACHINE;
 
-  const start = async (machine: string) => {
-    const name = label.trim();
+  const start = async (machine: string, name = label.trim()) => {
     if (!name) return;
     setS({ phase: "waiting", machine, label: name });
     const r = await control(
@@ -471,9 +573,12 @@ function AddAccount({
     const res = (r.result ?? {}) as Record<string, unknown>;
     const acct = typeof res.acct === "string" ? res.acct : res.account;
     if (!r.ok || typeof acct !== "string") {
-      setS({ phase: "pick", error: r.error ?? "volleyd did not start the sign-in" });
+      const error = r.error ?? "volleyd did not start the sign-in";
+      // A preset has no step 1 to go back to: the sign-in step says why.
+      setS(preset ? { phase: "waiting", machine, label: name, error } : { phase: "pick", error });
       return;
     }
+    onStarted?.(acct, name, machine);
     const field = (k: keyof Started) =>
       typeof res[k] === "string" ? { [k]: res[k] as string } : {};
     setS((cur) =>
@@ -487,8 +592,18 @@ function AddAccount({
     );
   };
 
+  // Sign in on <machine> starts the sign-in on open, once (a re-render or a strict-mode remount
+  // must not start a second one).
+  const started = useRef(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: on open only
+  useEffect(() => {
+    if (!preset || started.current) return;
+    started.current = true;
+    void start(preset.machine, preset.label);
+  }, []);
+
   return (
-    <div className="pair claude-add">
+    <section className="pair claude-add" aria-label="Add Claude account">
       <Stepper
         theme="dark"
         accentColor={CLAUDE_TINT}
@@ -563,8 +678,26 @@ function AddAccount({
           </div>
         </Step>
         <Step title="Sign in" description="Anthropic’s page">
-          <h3>Sign in with the account you want to add</h3>
-          {signin?.state === "failed" ? (
+          {preset ? (
+            <h3>
+              Sign in{" "}
+              {preset.email ? (
+                <>
+                  with <MaskedEmail email={preset.email} />
+                </>
+              ) : (
+                `as ${preset.account}`
+              )}{" "}
+              on {preset.name}
+            </h3>
+          ) : (
+            <h3>Sign in with the account you want to add</h3>
+          )}
+          {s.phase === "waiting" && s.error ? (
+            <p className="s-error" role="alert">
+              {s.error}
+            </p>
+          ) : signin?.state === "failed" ? (
             <p className="s-error" role="alert">
               The sign-in did not finish: {signin.reason ?? "unknown reason"}
             </p>
@@ -615,13 +748,73 @@ function AddAccount({
             {signin?.plan ? `${signin.plan} · ` : ""}signed in on {machineName(machine)}. Pick it
             for new waves under Defaults, or let them take the account with the most headroom.
           </p>
+          {preset && signin?.email && normalizeEmail(signin.email) !== preset.key && (
+            <output className="s-hint">
+              That was another account ({maskEmail(signin.email)}): it gets a card of its own, and{" "}
+              {preset.name} still misses {preset.email ? maskEmail(preset.email) : preset.account}.
+            </output>
+          )}
           <button type="button" className="btn" onClick={onClose}>
             Done
           </button>
         </Step>
       </Stepper>
-    </div>
+    </section>
   );
+}
+
+/** Sign in on <machine> for one account: Add, already at the sign-in step. */
+export function SignInOnDialog(p: {
+  preset: SignInPreset;
+  signins: Record<string, ClaudeSignin>;
+  control: ControlFn;
+  onStarted?: (acct: string, label: string, machine: string) => void;
+  onClose: () => void;
+}) {
+  return <AddAccount machines={[]} {...p} />;
+}
+
+/**
+ * Per account, the e-mail a matrix sign-in finished with when it was another account's, by
+ * machine; and the groups with a login made up for each one that finished on the same e-mail
+ * (until the registry, re-fetched, has it).
+ */
+export function withSignIns(
+  groups: AccountGroup[],
+  tries: readonly SignInTry[],
+  signins: Record<string, ClaudeSignin>,
+): { groups: AccountGroup[]; others: Record<string, Record<string, string>> } {
+  const others: Record<string, Record<string, string>> = {};
+  const added = new Map<string, Member[]>();
+  for (const t of tries) {
+    const done = signins[t.acct];
+    if (done?.state !== "done" || done.email === undefined) continue;
+    if (normalizeEmail(done.email) !== t.key) {
+      others[t.key] = { ...others[t.key], [t.op]: done.email };
+      continue;
+    }
+    added.set(t.key, [
+      ...(added.get(t.key) ?? []),
+      {
+        account: t.acct,
+        machine: t.op,
+        label: t.label,
+        signedIn: true,
+        agents: [],
+        waves: [],
+        isPrimary: false,
+      },
+    ]);
+  }
+  return {
+    groups: groups.map((g) => {
+      const extra = (added.get(g.key) ?? []).filter(
+        (x) => !g.members.some((m) => m.machine === x.machine),
+      );
+      return extra.length ? { ...g, members: [...g.members, ...extra] } : g;
+    }),
+    others,
+  };
 }
 
 export function ClaudeAccounts({
@@ -642,6 +835,10 @@ export function ClaudeAccounts({
 }: ClaudeAccountsProps) {
   /** The Add dialog: the account's profile label and the machines already holding it. */
   const [adding, setAdding] = useState<{ label: string; holds: string[] } | null>(null);
+  /** Sign in on <machine>: the account and machine, from a card's matrix row. */
+  const [signingIn, setSigningIn] = useState<SignInPreset | null>(null);
+  /** The sign-ins the matrix started, to tell which account each one finished on. */
+  const [tries, setTries] = useState<SignInTry[]>([]);
   const [closed, setClosed] = useState(0);
   const [error, setError] = useState<string | null>(null);
   /** A resolve in flight: the answers stay disabled so a double click sends one. */
@@ -657,27 +854,19 @@ export function ClaudeAccounts({
   }, [registry, onRegistry]);
 
   const list = withPrimary(accountList(records, registry), primaryPlan);
-  const groups = accountGroups(list, machines, localName);
+  const signedIn = withSignIns(
+    deskAccountGroups(records, registry, primaryPlan, machines, localName),
+    tries,
+    signins,
+  );
+  const groups = signedIn.groups;
+  const configured = configuredMachines(hosts, machines, localName);
+  const matrix = accountMatrix(groups, configured);
   const labelOf = (id: string | null | undefined) =>
     list.find((a) => a.id === id)?.label ?? id ?? "";
   const decisions = openLimitDecisions(waves);
   const addMachines = (holds: string[]): AddMachine[] =>
-    [
-      {
-        name: machineName(LOCAL_MACHINE),
-        op: LOCAL_MACHINE,
-        up: true,
-        ...(localName ? { host: localName } : {}),
-      },
-      ...hosts
-        .filter((h) => h !== localName)
-        .map((h) => ({
-          name: h,
-          op: h,
-          up: machines?.[h]?.tunnel !== "down",
-          ...(machines?.[h] === undefined ? { unknown: true } : {}),
-        })),
-    ].map((m) => ({ ...m, holds: holds.includes(m.op) }));
+    configured.map((m) => ({ ...m, holds: holds.includes(m.op) }));
 
   const answer = async (d: DecisionPayload, text: string) => {
     if (!control || busy) return;
@@ -821,12 +1010,14 @@ export function ClaudeAccounts({
         </p>
       )}
       <div className="claude-cards">
-        {groups.map((g) => {
+        {matrix.map((row) => {
+          const g = row.group;
           const to = moveTargetOf(g);
           return (
             <AccountCard
               key={g.key}
-              g={g}
+              row={row}
+              others={signedIn.others[g.key] ?? {}}
               movable={decisions.filter((d) => !g.members.some((m) => m.account === d.acct))}
               onMove={
                 control && !busy && to !== null
@@ -843,6 +1034,14 @@ export function ClaudeAccounts({
                       })
                   : null
               }
+              onSignInOn={
+                control
+                  ? (c) => {
+                      const m = configured.find((x) => x.op === c.op);
+                      if (m) setSigningIn(signInPreset(g, m));
+                    }
+                  : null
+              }
               now={now}
             />
           );
@@ -856,6 +1055,21 @@ export function ClaudeAccounts({
           + Add Claude account
         </button>
       </div>
+      {signingIn && control && (
+        <SignInOnDialog
+          key={`${signingIn.key}@${signingIn.machine}`}
+          preset={signingIn}
+          signins={signins}
+          control={control}
+          onStarted={(acct, label, op) =>
+            setTries((ts) => [...ts, { key: signingIn.key, op, label, acct }])
+          }
+          onClose={() => {
+            setSigningIn(null);
+            setClosed((n) => n + 1);
+          }}
+        />
+      )}
       {adding && control && (
         <AddAccount
           machines={addMachines(adding.holds)}

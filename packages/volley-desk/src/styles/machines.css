@@ -228,6 +228,32 @@ button.m-local:focus-visible {
   gap: 4px;
   padding-left: 18px;
 }
+/* The machine card's Claude accounts: one row per account, held here or not. */
+.m-accounts-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+.m-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+.m-accounts li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.m-accounts li > .dim:last-child {
+  margin-left: auto;
+}
 .m-usage {
   display: flex;
   align-items: center;

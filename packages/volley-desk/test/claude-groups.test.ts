@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { accountChoices, accountGroups, accountList, moveTargetOf } from "../src/store/claude";
+import {
+  LOCAL_MACHINE,
+  accountChoices,
+  accountGroups,
+  accountList,
+  accountMatrix,
+  configuredMachines,
+  moveTargetOf,
+} from "../src/store/claude";
 import type { ClaudeAccountPayload, MachinePayload } from "../src/store/types";
 
 const EMAIL = "owner@example.com";
@@ -199,5 +207,79 @@ describe("accountGroups", () => {
   it("pickers keep listing every account id once", () => {
     const list = accountList({ work, "primary@peer-a": peer });
     expect(accountChoices(list).map((c) => c.id)).toEqual(["work", "primary@peer-a"]);
+  });
+});
+
+describe("accountMatrix: which configured machines hold each account", () => {
+  const fleet = {
+    "peer-a": machine("peer-a", { claude_email: "Owner@Example.com" }),
+    "peer-b": {
+      ...machine("peer-b", { claude: "not_signed_in" }),
+      tunnel: "down",
+    } as MachinePayload,
+  };
+  const configured = configuredMachines(["peer-a", "peer-b"], fleet, "hub");
+  const personal: ClaudeAccountPayload = {
+    ...work,
+    account: "personal",
+    label: "Personal",
+    email: "p@example.com",
+  };
+
+  it("lists the configured machines, this machine first, a peer whose tunnel is down not up", () => {
+    expect(configured).toEqual([
+      { name: "this machine", host: "hub", op: LOCAL_MACHINE, up: true },
+      { name: "peer-a", op: "peer-a", up: true },
+      { name: "peer-b", op: "peer-b", up: false },
+    ]);
+    // A paired host with no record yet is offered (its state unknown), never the supervisor's own.
+    expect(configuredMachines(["hub", "peer-c"], {}, "hub")).toEqual([
+      { name: "this machine", host: "hub", op: LOCAL_MACHINE, up: true },
+      { name: "peer-c", op: "peer-c", up: true, unknown: true },
+    ]);
+  });
+
+  it("a group held on this machine and peer-a misses peer-b: 2 of 3", () => {
+    const [row] = accountMatrix(groups({ work, "primary@peer-a": peer }, fleet), configured);
+    expect(row?.present.map((m) => m.machine)).toEqual([LOCAL_MACHINE, "peer-a"]);
+    expect(row?.missing.map((m) => m.name)).toEqual(["peer-b"]);
+    expect(row?.missing[0]?.up).toBe(false);
+    expect(row?.coverage).toEqual({ held: 2, total: 3 });
+    // One row per configured machine, in the configured order.
+    expect(row?.rows.map((r) => [r.name, r.member?.label ?? null])).toEqual([
+      ["this machine", "Work"],
+      ["peer-a", "default login"],
+      ["peer-b", null],
+    ]);
+  });
+
+  it("a group held everywhere misses none", () => {
+    const everywhere = { ...fleet, "peer-b": machine("peer-b", { claude_email: EMAIL }) };
+    const [row] = accountMatrix(
+      groups({ work, "primary@peer-a": peer }, everywhere),
+      configuredMachines(["peer-a", "peer-b"], everywhere, "hub"),
+    );
+    expect(row?.missing).toEqual([]);
+    expect(row?.coverage).toEqual({ held: 3, total: 3 });
+  });
+
+  it("keeps the order of the configured list, and a member on an unconfigured machine last", () => {
+    const rows = accountMatrix(
+      groups({ personal, "primary@peer-a": peer }, fleet),
+      [...configured].reverse(),
+    );
+    const p = rows.find((r) => r.group.label === "Personal");
+    expect(p?.rows.map((r) => r.name)).toEqual(["peer-b", "peer-a", "this machine"]);
+    const solo = accountMatrix(
+      groups({ "primary@box": { ...peer, account: "primary@box" } }, {}),
+      configured,
+    )[0];
+    expect(solo?.rows.map((r) => [r.name, r.member !== null])).toEqual([
+      ["this machine", false],
+      ["peer-a", false],
+      ["peer-b", false],
+      ["box", true],
+    ]);
+    expect(solo?.coverage).toEqual({ held: 0, total: 3 });
   });
 });

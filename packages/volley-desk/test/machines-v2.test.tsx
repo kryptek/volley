@@ -7,6 +7,7 @@ import { Machines, type MachinesProps, agentsOnMachines } from "../src/settings/
 import { PeerSignin } from "../src/settings/PeerSigninSheet";
 import type { ConfigTransport } from "../src/settings/configTransport";
 import { fixFor } from "../src/settings/machineFixes";
+import { accountGroups, accountList } from "../src/store/claude";
 import type { ClaudeAccountPayload, MachinePayload, ReadinessPayload } from "../src/store/types";
 import { NOW, S, machineRecord, placement, readiness, waveState } from "./helpers/desk-msgs";
 import { fakePeerOps } from "./helpers/peer-ops";
@@ -531,5 +532,132 @@ describe("the local agents chip (the supervisor's own card)", () => {
       rules: { "color-contrast": { enabled: false } },
     });
     expect(results.violations.map((v) => v.id)).toEqual([]);
+  });
+});
+
+describe("Settings › Machines v2: the machine card's Claude accounts", () => {
+  const personal: ClaudeAccountPayload = {
+    account: "personal",
+    label: "Personal",
+    plan: "pro",
+    email: "p@example.com",
+    five_hour: null,
+    weekly: null,
+    agents: [],
+    waves: [],
+    sampled_at: iso(NOW),
+  };
+  const URL = "https://claude.com/cai/oauth/authorize?redirect_uri=localhost&state=s";
+
+  function withAccounts(props: Partial<MachinesProps> = {}) {
+    const machines = { "box-a": machineRecord() };
+    const records = { "primary@box-a": usage, personal };
+    const control = vi.fn(async (op: string) =>
+      op === "claude_account_add"
+        ? { ok: true, result: { acct: "personal-box-a@box-a", url: URL } }
+        : ({ ok: true } as { ok: boolean; result?: unknown }),
+    );
+    const r = setup({
+      machines,
+      accounts: records,
+      localName: "hub",
+      signIn: (m) => <button type="button">Sign in on {m}</button>,
+      claude: {
+        groups: accountGroups(accountList(records), machines, "hub"),
+        signins: {},
+        control,
+      },
+      ...props,
+    });
+    return { ...r, control };
+  }
+  const block = () =>
+    within(card("box-a").getByRole("list", { name: "Claude accounts on box-a" })).getAllByRole(
+      "listitem",
+    );
+
+  it("lists each account with a held or missing dot, and Sign in on the machine for a missing one", async () => {
+    withAccounts();
+    await act(flush);
+    const [held, missing] = block();
+    expect(held).toHaveTextContent("primary@box-a");
+    expect(held).toHaveTextContent("default login");
+    expect(held?.querySelector(".cc-dot--in")).not.toBeNull();
+    expect(missing).toHaveTextContent("Personal");
+    expect(missing).toHaveTextContent("p•••@example.com");
+    expect(missing).toHaveTextContent("pro");
+    expect(missing?.querySelector(".cc-dot--in")).toBeNull();
+    expect(
+      within(missing as HTMLElement).getByRole("button", {
+        name: "Sign in on box-a with Personal",
+      }),
+    ).toBeEnabled();
+    // The default login's sign-in button and the usage meter stay.
+    expect(card("box-a").getByRole("button", { name: "Sign in on box-a" })).toBeInTheDocument();
+    expect(
+      card("box-a").getByRole("meter", { name: "primary@box-a 5-hour usage" }),
+    ).toHaveAttribute("aria-valuenow", "42");
+  });
+
+  it("Sign in on box-a opens the sign-in for that account there", async () => {
+    const { control } = withAccounts();
+    await act(flush);
+    await act(async () => {
+      fireEvent.click(
+        card("box-a").getByRole("button", { name: "Sign in on box-a with Personal" }),
+      );
+    });
+    expect(control).toHaveBeenCalledWith(
+      "claude_account_add",
+      { label: "Personal (box-a)", machine: "box-a" },
+      expect.any(String),
+      expect.any(Number),
+    );
+    const dialog = within(screen.getByRole("region", { name: "Add Claude account" }));
+    expect(dialog.getByRole("heading", { level: 3 })).toHaveTextContent(
+      "Sign in with p•••@example.com on box-a",
+    );
+    expect(dialog.getByRole("link", { name: /Open sign-in/ })).toHaveAttribute("href", URL);
+  });
+
+  it("no button while the tunnel is down or without control", async () => {
+    const down = { "box-a": machineRecord({ tunnel: "down" }) };
+    const records = { "primary@box-a": usage, personal };
+    withAccounts({
+      machines: down,
+      claude: {
+        groups: accountGroups(accountList(records), down, "hub"),
+        signins: {},
+        control: vi.fn(),
+      },
+    });
+    await act(flush);
+    const missing = block().find((li) => li.textContent?.includes("Personal"));
+    expect(within(missing as HTMLElement).getByRole("button")).toBeDisabled();
+    expect(missing).toHaveTextContent("tunnel down");
+  });
+
+  it("read-only: the rows without a button", async () => {
+    const records = { "primary@box-a": usage, personal };
+    const machines = { "box-a": machineRecord() };
+    withAccounts({
+      claude: {
+        groups: accountGroups(accountList(records), machines, "hub"),
+        signins: {},
+        control: null,
+      },
+    });
+    await act(flush);
+    expect(block()).toHaveLength(2);
+    expect(card("box-a").queryByRole("button", { name: /with Personal/ })).toBeNull();
+  });
+
+  it("passes axe with the block", async () => {
+    withAccounts();
+    await act(flush);
+    const res = await axe.run(screen.getByRole("article", { name: "box-a" }), {
+      rules: { "color-contrast": { enabled: false } },
+    });
+    expect(res.violations.map((v) => v.id)).toEqual([]);
   });
 });

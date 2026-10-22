@@ -1014,3 +1014,180 @@ describe("ClaudeAccounts › Add on any machine", () => {
     expect(screen.queryByRole("group", { name: "Machine" })).toBeNull();
   });
 });
+
+describe("ClaudeAccounts › the per-machine account matrix", () => {
+  const EMAIL = "owner@example.com";
+  const URL = "https://claude.com/cai/oauth/authorize?redirect_uri=localhost&state=s";
+  const own: ClaudeAccountPayload = { ...work, email: EMAIL };
+  const peerMachine = (name: string, over: Record<string, unknown> = {}) => ({
+    name,
+    kind: "peer",
+    tunnel: "up",
+    auth: { claude: "signed_out" },
+    ...over,
+  });
+  const machines = {
+    "peer-a": peerMachine("peer-a", { auth: { claude: "signed_in", claude_email: EMAIL } }),
+    "peer-b": peerMachine("peer-b"),
+  } as unknown as NonNullable<ClaudeAccountsProps["machines"]>;
+  const fleet = { hosts: ["peer-a", "peer-b"], machines, localName: "hub" };
+
+  function matrix(props: Partial<ClaudeAccountsProps> = {}) {
+    const state = reduceAll(initialState(), [accountMsg(own)]);
+    const control = vi.fn(async (op: string) =>
+      op === "claude_account_add"
+        ? { ok: true, result: { acct: "work-peer-b@peer-b", url: URL, flow: "browser_callback" } }
+        : ({ ok: true } as { ok: boolean; result?: unknown }),
+    );
+    const view = (s = state) => (
+      <main>
+        <ClaudeAccounts
+          accounts={s.claudeAccounts ?? {}}
+          signins={s.signins ?? {}}
+          waves={{}}
+          config={config}
+          control={control}
+          configTransport={null}
+          now={NOW}
+          group="accounts"
+          {...fleet}
+          {...props}
+        />
+      </main>
+    );
+    const r = render(view());
+    return { ...r, state, control, view };
+  }
+  const card = () => within(screen.getByRole("article", { name: "Work" }));
+  const rows = () =>
+    within(card().getByRole("list", { name: "Machines" })).getAllByRole("listitem");
+  const signInOn = async (machine: string) => {
+    await act(async () => {
+      fireEvent.click(card().getByRole("button", { name: `Sign in on ${machine} with Work` }));
+    });
+  };
+
+  it("one row per configured machine; the one missing it offers Sign in on it", () => {
+    matrix();
+    expect(rows().map((r) => r.querySelector("b")?.textContent)).toEqual([
+      "this machine",
+      "peer-a",
+      "peer-b",
+    ]);
+    expect(rows()[0]).toHaveTextContent("signed in");
+    expect(rows()[2]).toHaveTextContent("not on peer-b");
+    const button = within(rows()[2] as HTMLElement).getByRole("button");
+    expect(button).toHaveAccessibleName("Sign in on peer-b with Work");
+    expect(button).toHaveTextContent("Sign in on peer-b");
+    expect(rows()[2]?.querySelector(".cc-dot--in")).toBeNull();
+    expect(card().getByText("on 2 of 3 machines")).toHaveClass("chip--gap");
+  });
+
+  it("a complete account's chip is plain", () => {
+    matrix({ hosts: ["peer-a"] });
+    expect(card().getByText("on 2 of 2 machines")).not.toHaveClass("chip--gap");
+    expect(card().queryByRole("button", { name: /^Sign in on/ })).toBeNull();
+  });
+
+  it("Sign in on peer-b opens Add at the sign-in step, signing in with the masked account", async () => {
+    const { control } = matrix();
+    await signInOn("peer-b");
+    expect(control).toHaveBeenCalledWith(
+      "claude_account_add",
+      { label: "Work (peer-b)", machine: "peer-b" },
+      expect.any(String),
+      expect.any(Number),
+    );
+    expect(screen.queryAllByRole("textbox")).toHaveLength(0);
+    expect(screen.queryByRole("group", { name: "Machine" })).toBeNull();
+    const dialog = within(screen.getByRole("region", { name: "Add Claude account" }));
+    expect(dialog.getByRole("heading", { level: 3 })).toHaveTextContent(
+      "Sign in with o•••@example.com on peer-b",
+    );
+    expect(dialog.getByRole("link", { name: /Open sign-in/ })).toHaveAttribute("href", URL);
+    fireEvent.click(dialog.getByRole("button", { name: "Show email" }));
+    expect(dialog.getByRole("heading", { level: 3 })).toHaveTextContent(
+      `Sign in with ${EMAIL} on peer-b`,
+    );
+    fireEvent.click(dialog.getByRole("button", { name: "Hide email" }));
+    expect(dialog.getByRole("heading", { level: 3 })).not.toHaveTextContent(EMAIL);
+  });
+
+  it("sends the sign-in once, even when the dialog re-renders", async () => {
+    const { control, rerender, view } = matrix();
+    await signInOn("peer-b");
+    rerender(view());
+    await act(flushAll);
+    expect(control.mock.calls.filter(([op]) => op === "claude_account_add")).toHaveLength(1);
+  });
+
+  it("a sign-in done on the same e-mail fills the row", async () => {
+    const { rerender, view, state } = matrix();
+    await signInOn("peer-b");
+    rerender(
+      view(
+        reduceAll(state, [
+          signinMsg("work-peer-b@peer-b", "claude_signin_done", { plan: "max", email: EMAIL }),
+        ]),
+      ),
+    );
+    expect(rows()[2]).toHaveTextContent("peer-b");
+    expect(rows()[2]).toHaveTextContent("Work (peer-b)");
+    expect(rows()[2]?.querySelector(".cc-dot--in")).not.toBeNull();
+    expect(card().getByText("on 3 of 3 machines")).not.toHaveClass("chip--gap");
+  });
+
+  it("a sign-in done on another e-mail leaves the row empty and says so", async () => {
+    const { rerender, view, state } = matrix();
+    await signInOn("peer-b");
+    rerender(
+      view(
+        reduceAll(state, [
+          signinMsg("work-peer-b@peer-b", "claude_signin_done", { email: "p@example.com" }),
+        ]),
+      ),
+    );
+    expect(rows()[2]).toHaveTextContent("signed in as another account (p•••@example.com)");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "That was another account (p•••@example.com): it gets a card of its own, and peer-b still misses o•••@example.com.",
+    );
+    expect(rows()[2]?.querySelector(".cc-dot--in")).toBeNull();
+    expect(card().getByText("on 2 of 3 machines")).toHaveClass("chip--gap");
+  });
+
+  it("a machine whose tunnel is down: the button is disabled, and says why", () => {
+    matrix({
+      machines: { ...machines, "peer-b": peerMachine("peer-b", { tunnel: "down" }) } as never,
+    });
+    expect(card().getByRole("button", { name: "Sign in on peer-b with Work" })).toBeDisabled();
+    expect(rows()[2]).toHaveTextContent("tunnel down");
+  });
+
+  it("read-only: the row says the machine misses it, with no button", () => {
+    matrix({ control: null });
+    expect(rows()[2]).toHaveTextContent("not on peer-b");
+    expect(card().queryByRole("button", { name: /^Sign in on/ })).toBeNull();
+  });
+
+  it("passes axe with a gap row, and with the sign-in dialog open", async () => {
+    matrix();
+    const run = async () =>
+      (
+        await axe.run(document.body, { rules: { "color-contrast": { enabled: false } } })
+      ).violations.map((v) => v.id);
+    expect(await run()).toEqual([]);
+    await signInOn("peer-b");
+    expect(await run()).toEqual([]);
+  });
+});
+
+describe("reducer: a finished sign-in's e-mail", () => {
+  it("keeps the login's e-mail from claude_signin_done", () => {
+    const s = reduceAll(initialState(), [
+      signinMsg("team", "claude_signin_done", { plan: "max", email: "owner@example.com" }),
+    ]);
+    expect(s.signins?.team).toMatchObject({ state: "done", email: "owner@example.com" });
+  });
+});
+
+const flushAll = () => new Promise((r) => setTimeout(r, 0));

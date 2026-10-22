@@ -425,6 +425,8 @@ export interface ClaudeSignin {
   /** A paired machine's printed (manual-code) URL next to the forwarded one: for a phone. */
   manual_url?: string;
   plan?: string;
+  /** The login's e-mail, from `claude_signin_done` (SPEC §4.6.11). */
+  email?: string;
   reason?: string;
   /** Local receipt time (ms). */
   at: number;

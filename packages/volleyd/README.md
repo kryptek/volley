@@ -477,7 +477,8 @@ profile: a directory under `~/.volley/claude/<acct>/` (`$VOLLEY_CLAUDE_DIR` move
 the agent gets as `CLAUDE_CONFIG_DIR`. `primary` is your own default profile (`~/.claude`, no
 `CLAUDE_CONFIG_DIR`): what agents run under when nothing selects an account. The registry is
 `~/.volley/claude/accounts.json` (`{ id, label, machine, created, plan?, signed_in_at?, email?,
-org? }`). The primary is never in it: `claude_accounts` asks `claude auth status` of the default
+org? }`). Ids are global, not per machine: a profile of the same account on another machine is its
+own registry entry with its own label (the Desk's `Work (peer-a)` → `work-peer-a`). The primary is never in it: `claude_accounts` asks `claude auth status` of the default
 profile and answers its plan as `primary: { plan?, email?, org? }` (no plan when it is not logged
 in or names none; no identity when it is not logged in), and the primary's usage record carries
 them from then on. `machines` lists every machine record's Claude login (`claude`, `plan`,
@@ -524,7 +525,8 @@ Anthropic account, keyed by the login's e-mail (masked as `o•••@example.co
 one line per machine holding it (this machine's profiles and default login, each paired
 machine's), and per usage window the freshest reading among its retained usage records
 (`volley/_system/claude-accounts/<acct>`), with where it came from and how old it is. A member's
-older reading that disagrees is marked `(stale)`. `--json` prints the `claude_accounts` answer
+older reading that disagrees is marked `(stale)`. A block missing a machine (this machine, or a
+paired machine in the answer's `machines[]`) ends with `not on: peer-b`. `--json` prints the `claude_accounts` answer
 with the records it read as `records`.
 
 **Sign-in.** `claude_account_add` creates the directory (`0700`) and registry entry, then runs

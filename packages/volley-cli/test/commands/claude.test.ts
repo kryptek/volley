@@ -250,6 +250,27 @@ describe("volley claude", () => {
     await v.b.disconnect();
   });
 
+  it("list prints `not on:` under a group that misses a configured machine", async () => {
+    const v = await fakeVolleyd(tb.url, () => ({
+      ok: true,
+      result: {
+        ...LIST_RESULT,
+        machines: [...LIST_RESULT.machines, { name: "peer-b", kind: "peer", claude: "signed_out" }],
+      },
+    }));
+    const r = await run(["list"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/peer-a +default login[^\n]*\n {2}not on: peer-b\n/);
+    await v.b.disconnect();
+  });
+
+  it("list prints no `not on:` line when every machine holds the account", async () => {
+    const v = await listVolleyd();
+    const r = await run(["list"]);
+    expect(r.stdout).not.toContain("not on:");
+    await v.b.disconnect();
+  });
+
   it("list --show-email shows the address", async () => {
     const v = await listVolleyd();
     const r = await run(["list", "--show-email"]);
