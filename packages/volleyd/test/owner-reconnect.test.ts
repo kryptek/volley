@@ -5,7 +5,7 @@ import { registryTopic } from "volley-mcp/topics";
 import { decisionItemId } from "../src/autopilot/inbox";
 import { ControlClient, waveStateTopic } from "../src/control";
 import type { Daemon } from "../src/daemon";
-import { until } from "./helpers/broker-wait";
+import { eventually, until } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 
