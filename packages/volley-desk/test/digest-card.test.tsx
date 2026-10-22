@@ -56,6 +56,7 @@ describe("the Desk's DigestPayload mirrors digest.schema.json", () => {
       "shipped",
       "auto",
       "waiting",
+      "held",
       "release",
       "failures",
     ];

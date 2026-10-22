@@ -10,16 +10,23 @@
  * stay. The store applies the retained update either way. Without broker credentials (no
  * `control`) an option shows the `volleyd inbox answer <id> "<answer>"` command to copy instead.
  * An answered row shows `StatusMark` with where it was answered.
+ *
+ * A decision's row also offers **Hold · waiting on…** (SPEC §4.6.2): a picker of the wave's
+ * other unsettled tasks and their open PRs; picking one sends `hold { item, on }` (without
+ * credentials, the `volleyd inbox hold` command to copy). A held row shows the amber
+ * `Held · waiting on T4 (#194) · 3 h` line and a Release button (`release { item }`); its
+ * options still answer it.
  */
 import { CenterFocusIcon, EyeIcon, ViewOffIcon } from "@hugeicons/core-free-icons";
 import { type ReactNode, useState } from "react";
+import { heldReason } from "../../attention";
 import ShinyText from "../../rb/ShinyText/ShinyText";
 import SpecularButton from "../../rb/SpecularButton/SpecularButton";
 import SpotlightCard from "../../rb/SpotlightCard/SpotlightCard";
 import StarBorder from "../../rb/StarBorder/StarBorder";
 import StatusMark from "../../rb/StatusMark/StatusMark";
 import { type SteerTransport, shellQuote } from "../../steer/transport";
-import type { InboxItem, WaveView } from "../../store/types";
+import type { HeldOn, InboxItem, WaveView } from "../../store/types";
 import { IconBtn } from "../wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "../wave/accent";
 import { ReleaseItem, type ReleaseItemProps } from "./ReleaseItem";
@@ -32,6 +39,35 @@ export function answerCommand(id: string, answer: string): string {
   return `volleyd inbox answer ${shellQuote(id)} ${shellQuote(answer)}`;
 }
 
+/** The CLI fallback for a hold without broker credentials. */
+export function holdCommand(id: string, on: HeldOn): string {
+  const target =
+    on.task !== undefined ? on.task : on.pr !== undefined ? `#${on.pr}` : `issue#${on.issue}`;
+  return `volleyd inbox hold ${shellQuote(id)} --on ${shellQuote(target)}`;
+}
+
+/** What a decision can be held on: the wave's other unsettled tasks, then their open PRs. */
+export function holdChoices(
+  item: InboxItem,
+  wave: WaveView | undefined,
+): { key: string; label: string; on: HeldOn }[] {
+  const tasks = (wave?.state?.tasks ?? []).filter(
+    (t) => t.id !== item.task && t.stage !== "done" && t.stage !== "cancelled",
+  );
+  return [
+    ...tasks.map((t) => ({
+      key: `task:${t.id}`,
+      label: t.pr ? `${t.id} (#${t.pr.number})` : t.id,
+      on: { task: t.id },
+    })),
+    ...tasks.flatMap((t) =>
+      t.pr
+        ? [{ key: `pr:${t.pr.number}`, label: `PR #${t.pr.number}`, on: { pr: t.pr.number } }]
+        : [],
+    ),
+  ];
+}
+
 export interface InboxRowProps {
   item: InboxItem;
   /** Only a person answers it (`needsPerson`). */
@@ -40,6 +76,8 @@ export interface InboxRowProps {
   wave?: WaveView | undefined;
   control: SteerTransport["control"] | null;
   device: string;
+  /** Now (ms), for the held line's age (default: the clock). */
+  now?: number;
   /** The record has cleared: the row is fading out. */
   leaving?: boolean;
   narrow?: boolean;
@@ -60,6 +98,8 @@ export function InboxRow(p: InboxRowProps) {
   const [sent, setSent] = useState<Sent>({ state: "idle" });
   const [other, setOther] = useState<string | null>(null);
   const [command, setCommand] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
+  const [holdError, setHoldError] = useState<string | null>(null);
   const accent = item.wave !== undefined ? accentFor(item.wave) : NEUTRAL_ACCENT;
 
   const send = async (answer: string) => {
@@ -86,6 +126,24 @@ export function InboxRow(p: InboxRowProps) {
         : { state: "error", error },
     );
   };
+
+  /** `hold { item, on }` or `release { item }` through volleyd; the retained item follows. */
+  const holdOp = async (op: "hold" | "release", on?: HeldOn) => {
+    setHoldError(null);
+    const cli =
+      on !== undefined
+        ? holdCommand(item.id, on)
+        : `volleyd release ${shellQuote(String(item.source.decision_id ?? item.id))}`;
+    if (!p.control) {
+      setCommand(cli);
+      setPicking(false);
+      return;
+    }
+    const r = await p.control(op, { item: item.id, ...(on !== undefined ? { on } : {}) }, cli);
+    if (r.ok) setPicking(false);
+    else setHoldError(r.error ?? `volleyd refused the ${op}`);
+  };
+  const choices = item.kind === "decision" ? holdChoices(item, p.wave) : [];
 
   const answeredLabel = item.answered
     ? `answered on ${whereLabel(item.answered.where)} · ${item.answered.answer}`
@@ -152,6 +210,58 @@ export function InboxRow(p: InboxRowProps) {
             </SpecularButton>
           </form>
         )}
+        {item.kind === "decision" &&
+          (item.held ? (
+            <div className="inbox-held-actions">
+              <button
+                type="button"
+                className={`coord-btn ${btn}`}
+                onClick={() => void holdOp("release")}
+              >
+                Release
+              </button>
+            </div>
+          ) : picking ? (
+            <label className="inbox-hold">
+              <span className="dim">Hold · waiting on</span>
+              <select
+                className={`recessed ${btn}`}
+                aria-label="Hold · waiting on"
+                defaultValue=""
+                onChange={(e) => {
+                  const c = choices.find((x) => x.key === e.target.value);
+                  if (c) void holdOp("hold", c.on);
+                }}
+              >
+                <option value="" disabled>
+                  {choices.length === 0 ? "nothing to wait on" : "a task or PR…"}
+                </option>
+                {choices.map((c) => (
+                  <option key={c.key} value={c.key}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className={`coord-btn ${btn}`}
+                onClick={() => setPicking(false)}
+              >
+                Cancel
+              </button>
+            </label>
+          ) : (
+            choices.length > 0 && (
+              <button type="button" className={`coord-btn ${btn}`} onClick={() => setPicking(true)}>
+                Hold · waiting on…
+              </button>
+            )
+          ))}
+        {holdError !== null && (
+          <p className="inbox-error" role="alert">
+            {holdError}
+          </p>
+        )}
         {busy && <StatusMark status="running" label="Sending…" size={16} fontSize={12} />}
         {sent.state === "error" && (
           <p className="inbox-error" role="alert">
@@ -182,10 +292,19 @@ export function InboxRow(p: InboxRowProps) {
           <span className={`chip inbox-kind inbox-kind--${item.kind}`}>{item.kind}</span>
           {item.owner_only && <span className="chip chip--hot">owner only</span>}
           {p.needsYou && !item.owner_only && <span className="chip chip--hot">needs you</span>}
+          {item.held && item.answered === undefined && (
+            <span className="chip inbox-held-chip">held</span>
+          )}
           <span className="inbox-title">{item.title}</span>
         </div>
         <div className="inbox-sub dim">{where}</div>
         <p className="inbox-question">{item.question}</p>
+        {item.held && answeredLabel === null && (
+          <div className="attn-line attn-coordinator inbox-held">
+            {heldReason(item.held, p.wave, p.now ?? Date.now())}
+            {item.held.note ? ` · ${item.held.note}` : ""}
+          </div>
+        )}
         {p.live && (
           <div className="inbox-live">
             <ShinyText text={p.live} speed={3} />
@@ -204,7 +323,7 @@ export function InboxRow(p: InboxRowProps) {
   return (
     <li
       aria-label={`Inbox item ${item.id}: ${item.title}`}
-      className={`inbox-row inbox-row--${item.kind}${answeredLabel !== null ? " inbox-row--answered" : ""}${p.leaving ? " inbox-row--leaving" : ""}`}
+      className={`inbox-row inbox-row--${item.kind}${item.held && answeredLabel === null ? " inbox-row--held" : ""}${answeredLabel !== null ? " inbox-row--answered" : ""}${p.leaving ? " inbox-row--leaving" : ""}`}
     >
       {item.owner_only && item.kind === "release" ? (
         // A div, not StarBorder's default <button>: the row holds buttons of its own.

@@ -253,6 +253,21 @@ export const DECISION_KINDS = [
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
 /** decision.schema.json payload. */
+/** What a held decision waits on (SPEC §4.6.2): a task of its wave, a PR, an issue. */
+export interface HeldOn {
+  task?: string;
+  pr?: number;
+  issue?: number;
+}
+
+/** A decision's hold: open, waiting on `on` rather than on a person; never escalated. */
+export interface Held {
+  on: HeldOn;
+  note?: string;
+  by: string;
+  at: string;
+}
+
 export interface DecisionPayload {
   decision_id: string;
   wave: string;
@@ -274,6 +289,8 @@ export interface DecisionPayload {
   down_since?: string;
   tasks?: string[];
   machine?: "down" | "draining" | "removing" | "removed";
+  /** Held: waiting on a task, PR or issue (volleyd releases it when that lands). */
+  held?: Held;
 }
 
 // ------------------------------------------------------- config and leases
@@ -539,6 +556,8 @@ export interface InboxItem {
   opened_at: string;
   source: Record<string, unknown>;
   answered?: { answer: string; by: string; where: InboxWhere; at: string };
+  /** A decision's item: its hold, mirrored from the decision. */
+  held?: Held;
 }
 
 /**
@@ -572,6 +591,17 @@ export interface DigestPayload {
     question: string;
     since: string;
     owner_only: boolean;
+  }[];
+  /** Held decisions: open, waiting on a blocker rather than on the owner (absent: older volleyd). */
+  held?: {
+    id: string;
+    kind: string;
+    task?: string;
+    question: string;
+    since: string;
+    on: HeldOn;
+    label: string;
+    held_since: string;
   }[];
   release?: WaveRelease;
   failures: { task: string; why: string }[];

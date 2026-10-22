@@ -3,7 +3,7 @@ import { queueOf } from "./autopilot/merge-queue";
 import { stepRelease } from "./autopilot/playbook";
 import type { Budget, EscalateWhy } from "./autopilot/policy";
 import { fixerOf } from "./autopilot/remediation";
-import { ARCHIVED_ANSWER, type DecisionRecord, parksTask } from "./decisions";
+import { ARCHIVED_ANSWER, type DecisionRecord, type Held, parksTask } from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
 import { AUTO_HOST } from "./placement";
@@ -524,6 +524,27 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
           why: ev.data.why as EscalateWhy,
           ...(budget !== undefined ? { budget } : {}),
         };
+      }
+      break;
+    }
+    case "decision_held": {
+      const d = next.decisions[ev.data.decision_id as string];
+      if (d !== undefined) {
+        d.held = {
+          on: ev.data.on as Held["on"],
+          ...(typeof ev.data.note === "string" ? { note: ev.data.note } : {}),
+          by: ev.data.by as string,
+          at: ev.at,
+        };
+        Reflect.deleteProperty(d, "released");
+      }
+      break;
+    }
+    case "decision_released": {
+      const d = next.decisions[ev.data.decision_id as string];
+      if (d !== undefined) {
+        Reflect.deleteProperty(d, "held");
+        d.released = { why: ev.data.why as string, at: ev.at };
       }
       break;
     }

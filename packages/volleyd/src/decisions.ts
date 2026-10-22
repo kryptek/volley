@@ -5,7 +5,7 @@ import { randomSuffix } from "volley-mcp/util";
 import type { Budget, EscalateWhy } from "./autopilot/policy";
 import type { Host } from "./hosts/host";
 import type { WaveRecord } from "./reducer";
-import type { NewEvent, TaskId, TaskStage, WaveId } from "./types";
+import type { NewEvent, TaskId, TaskStage, TaskState, WaveId } from "./types";
 
 /** The answer an archive closes every open decision with. */
 export const ARCHIVED_ANSWER = "archived";
@@ -43,6 +43,21 @@ export const DECISION_KINDS = [
   "stage_go",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
+
+/** What a held decision waits on (#335): a task of its wave, a PR, an issue. */
+export interface HeldOn {
+  task?: TaskId;
+  pr?: number;
+  issue?: number;
+}
+
+/** A hold: the decision stays open but waits on `on`, never escalated, until it lands. */
+export interface Held {
+  on: HeldOn;
+  note?: string;
+  by: string;
+  at: string;
+}
 
 export interface DecisionPointers {
   diff?: string;
@@ -83,6 +98,8 @@ export interface DecisionPayload {
   stage?: string;
   /** release_go: every release stage, verified, with where its evidence lives. */
   stages?: { name: string; evidence?: string }[];
+  /** Held: waiting on a task, PR or issue (`decision_held`), until it lands or is released. */
+  held?: Held;
 }
 
 /** What the reducer keeps per decision: the payload plus what resolving needs. */
@@ -94,6 +111,8 @@ export interface DecisionRecord extends DecisionPayload {
   rationale?: string;
   /** Autopilot left it for the owner (`decision_escalated`, SPEC §4.6.16): why. */
   escalated?: { why: EscalateWhy; budget?: Budget };
+  /** Its last hold was lifted (`decision_released`): why. Autopilot never holds it again. */
+  released?: { why: string; at: string };
 }
 
 /** What a caller (T6 reviewers, T8 recovery, a coordinator) supplies to open a decision. */
@@ -216,6 +235,122 @@ export function resolveEvent(
   };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Held decisions (#335): "waiting on <task|PR|issue>", released when the blocker lands
+// ---------------------------------------------------------------------------------------------
+
+const TASK_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
+const NUM_RE = /^[1-9][0-9]{0,9}$/;
+
+/** `--on`: `T4` (a task), `#12` or `pr#12` (a PR), `issue#7`; null for anything else. */
+export function parseHeldOn(s: string): HeldOn | null {
+  const m = /^(pr|issue)?#(.*)$/.exec(s);
+  if (m !== null) {
+    if (!NUM_RE.test(m[2] as string)) return null;
+    return m[1] === "issue" ? { issue: Number(m[2]) } : { pr: Number(m[2]) };
+  }
+  return TASK_RE.test(s) ? { task: s } : null;
+}
+
+/** A `held.on` from untrusted input (a control payload), or null when it names nothing. */
+export function heldOnFrom(v: unknown): HeldOn | null {
+  if (typeof v === "string") return parseHeldOn(v);
+  if (typeof v !== "object" || v === null) return null;
+  const o = v as Record<string, unknown>;
+  const num = (x: unknown) => typeof x === "number" && Number.isInteger(x) && x > 0;
+  if (o.task !== undefined && !(typeof o.task === "string" && TASK_RE.test(o.task))) return null;
+  if ((o.pr !== undefined && !num(o.pr)) || (o.issue !== undefined && !num(o.issue))) return null;
+  const on: HeldOn = {
+    ...(o.task !== undefined ? { task: o.task as string } : {}),
+    ...(o.pr !== undefined ? { pr: o.pr as number } : {}),
+    ...(o.issue !== undefined ? { issue: o.issue as number } : {}),
+  };
+  return Object.keys(on).length > 0 ? on : null;
+}
+
+const SETTLED_BLOCKER = new Set<TaskStage>(["done", "cancelled"]);
+
+/** The `decision_held` event (a second hold replaces the first), or why it is refused. Pure. */
+export function holdEvent(
+  rec: WaveRecord,
+  id: string,
+  h: { on: HeldOn; note?: string; by: string },
+): { event: NewEvent } | { error: string } {
+  const d = rec.decisions[id];
+  if (d === undefined) return { error: `unknown decision '${id}' in wave '${rec.state?.wave}'` };
+  if (d.resolved !== undefined) return { error: `decision '${id}' is resolved already` };
+  const on = heldOnFrom(h.on);
+  if (on === null) return { error: "a hold needs what it waits on: a task, #<pr> or issue#<n>" };
+  if (on.task !== undefined) {
+    const t = rec.state?.tasks.find((x) => x.id === on.task);
+    if (t === undefined) return { error: `unknown task '${on.task}' in wave '${rec.state?.wave}'` };
+    if (on.task === d.task) return { error: `${id} is ${on.task}'s own decision` };
+    if (SETTLED_BLOCKER.has(t.stage))
+      return { error: `${on.task} is ${t.stage} already: nothing to wait for` };
+  }
+  return {
+    event: {
+      type: "decision_held",
+      ...(d.task !== null ? { task: d.task } : {}),
+      data: {
+        decision_id: id,
+        kind: d.kind,
+        on,
+        ...(h.note !== undefined && h.note !== "" ? { note: h.note } : {}),
+        by: h.by,
+      },
+    },
+  };
+}
+
+/** The `decision_released` event, `{ not_held }` when there is no hold to lift. Pure. */
+export function releaseEvent(
+  rec: WaveRecord,
+  id: string,
+  r: { why: string; by: string },
+): { event: NewEvent } | { not_held: true } | { error: string } {
+  const d = rec.decisions[id];
+  if (d === undefined) return { error: `unknown decision '${id}' in wave '${rec.state?.wave}'` };
+  if (d.held === undefined || d.resolved !== undefined) return { not_held: true };
+  return {
+    event: {
+      type: "decision_released",
+      ...(d.task !== null ? { task: d.task } : {}),
+      data: { decision_id: id, kind: d.kind, why: r.why, by: r.by },
+    },
+  };
+}
+
+/** Why a hold on a task of the wave lands now (`T4 done`, `T4 cancelled`), or null. */
+export function taskHoldReleased(rec: WaveRecord, on: HeldOn): string | null {
+  if (on.task === undefined) return null;
+  const t = rec.state?.tasks.find((x) => x.id === on.task);
+  return t !== undefined && SETTLED_BLOCKER.has(t.stage) ? `${t.id} ${t.stage}` : null;
+}
+
+/**
+ * Why a hold on a PR or issue lands now, given GitHub's `state` for each (`gh pr view` /
+ * `gh issue view --json state`): a PR merged or closed, an issue closed. Null otherwise.
+ */
+export function ghHoldReleased(on: HeldOn, states: { pr?: string; issue?: string }): string | null {
+  if (on.pr !== undefined && (states.pr === "MERGED" || states.pr === "CLOSED"))
+    return `PR #${on.pr} ${states.pr.toLowerCase()}`;
+  if (on.issue !== undefined && states.issue === "CLOSED") return `issue #${on.issue} closed`;
+  return null;
+}
+
+/** `T4 (#194)` (a task, with its PR when it has one), `PR #12`, `issue #7`. */
+export function heldLabel(on: HeldOn, tasks: readonly Pick<TaskState, "id" | "pr">[] = []): string {
+  const parts: string[] = [];
+  if (on.task !== undefined) {
+    const pr = tasks.find((t) => t.id === on.task)?.pr?.number;
+    parts.push(pr !== undefined ? `${on.task} (#${pr})` : on.task);
+  }
+  if (on.pr !== undefined) parts.push(`PR #${on.pr}`);
+  if (on.issue !== undefined) parts.push(`issue #${on.issue}`);
+  return parts.join(", ");
+}
+
 /** What an escalated decision's retained question starts with (SPEC §4.6.16). */
 export const escalatedPrefix = (why: string): string =>
   `Autopilot could not resolve this (${why}): `;
@@ -268,6 +403,7 @@ export function decisionPayload(d: DecisionRecord): DecisionPayload {
     pointers: d.pointers,
     opened_at: d.opened_at,
     ...(d.resolved !== undefined ? { resolved: d.resolved } : {}),
+    ...(d.held !== undefined && d.resolved === undefined ? { held: d.held } : {}),
     ...str("host"),
     ...str("target"),
     ...str("repo"),

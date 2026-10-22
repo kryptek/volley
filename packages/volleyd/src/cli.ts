@@ -23,6 +23,8 @@ Commands:
   cleanup     Remove a wave's retired worktrees and workspaces (--yes)
   decisions   List open decisions
   resolve     Answer a decision (owner only)
+  hold        Hold a decision: waiting on a task, PR or issue, never escalated (owner only)
+  release     Lift a decision's hold by hand (owner only)
   inbox       The needs-you inbox: what waits for a person; inbox answer <id> <answer>
   policy      Show autopilot's policy table: the decisions volleyd answers itself
   digest      A wave's morning digest: what shipped, what autopilot handled, what waits for you
@@ -62,6 +64,8 @@ const COMMANDS: Record<string, () => Promise<Command>> = {
   cleanup: async () => (await import("./commands/cleanup")).cleanup,
   decisions: async () => (await import("./commands/decisions")).decisions,
   resolve: async () => (await import("./commands/resolve")).resolve,
+  hold: async () => (await import("./commands/hold")).hold,
+  release: async () => (await import("./commands/release")).release,
   inbox: async () => (await import("./commands/inbox")).inbox,
   policy: async () => (await import("./commands/policy")).policy,
   digest: async () => (await import("./commands/digest")).digest,

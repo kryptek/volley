@@ -51,6 +51,12 @@
  * volleyd's defaults), so in practice it is the fixed 15 min below until it is
  * added there.
  *
+ * **Held** (SPEC §4.6.2): a decision volleyd holds on a task, PR or issue
+ * waits on that blocker, not on a person. It is amber (`coordinator`) with
+ * `Held · waiting on T4 (#194) · 3 h`, never escalated to **you** and never
+ * pulsing, owner-only or not; volleyd releases it when the blocker lands, and
+ * from then it is timed like any other item.
+ *
  * Silence (staleness) is measured only over time this browser was connected
  * and settled: while the Desk is offline nothing can refresh `lastSeen`, so
  * offline spans (`AttentionCtx.offline`) do not count towards `claim_after_s`.
@@ -63,6 +69,8 @@ import type {
   CoordinatorView,
   DecisionPayload,
   DeskState,
+  Held,
+  HeldOn,
   InboxItem,
   LeasePoolPayload,
   RegistryPayload,
@@ -220,7 +228,7 @@ export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordin
     a?.attention?.notificationType !== "permission_prompt" &&
     question !== undefined &&
     GENERIC_IDLE_PROMPT.test(question.trim()) &&
-    openDecisions(w).length === 0 &&
+    pendingDecisions(w).length === 0 &&
     (s?.gates.length ?? 0) === 0;
   if (idleOnly) state = "working";
   const waitingOnEvents = state === "working" && (idleOnly || view?.waitingOnEvents === true);
@@ -254,6 +262,41 @@ export function reconnectingLabel(c: EffectiveCoordinator, now: number): string 
 
 export function openDecisions(w: WaveView | undefined): DecisionPayload[] {
   return Object.values(w?.decisions ?? {}).filter((d) => !d.resolved);
+}
+
+/** Open decisions that wait on a person: not held. */
+function pendingDecisions(w: WaveView | undefined): DecisionPayload[] {
+  return openDecisions(w).filter((d) => !d.held);
+}
+
+/** volleyd's `heldLabel`: `T4 (#194)` (a task, with its PR), `PR #12`, `issue #7`. */
+export function heldLabel(on: HeldOn, w?: WaveView): string {
+  const parts: string[] = [];
+  if (on.task !== undefined) {
+    const pr = w?.state?.tasks.find((t) => t.id === on.task)?.pr?.number;
+    parts.push(pr !== undefined ? `${on.task} (#${pr})` : on.task);
+  }
+  if (on.pr !== undefined) parts.push(`PR #${on.pr}`);
+  if (on.issue !== undefined) parts.push(`issue #${on.issue}`);
+  return parts.join(", ");
+}
+
+/** `12 min`, `3 h`: how long a hold has lasted. */
+function heldFor(ms: number): string {
+  const m = mins(ms);
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h`;
+}
+
+/** `Held · waiting on T4 (#194) · 3 h`. */
+export function heldReason(held: Held, w: WaveView | undefined, now: number): string {
+  const since = parseTime(held.at);
+  const age = since === undefined ? "" : ` · ${heldFor(now - since)}`;
+  return `Held · waiting on ${heldLabel(held.on, w)}${age}`;
+}
+
+/** A held item: amber, never escalated (it waits on its blocker, not on anyone here). */
+function heldAttn(held: Held, w: WaveView | undefined, ctx: AttentionCtx): Attn {
+  return { tier: "coordinator", reason: heldReason(held, w, ctx.now) };
 }
 
 /** A coordinator-tier item, promoted to `you` once it has waited `escalate_after_min`. */
@@ -307,7 +350,7 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
     const away = c.lastSeen === undefined ? "" : ` for ${mins(ctx.now - c.lastSeen)} min`;
     return { tier: "you", reason: `No coordinator${away}` };
   }
-  const decisions = openDecisions(w);
+  const decisions = pendingDecisions(w);
   const first = decisions[0];
   if (first && ((ctx.me && s.owner === ctx.me) || claimedHere(w, ctx))) {
     return { tier: "you", reason: `Decision: ${first.question}` };
@@ -324,6 +367,10 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
   ];
   const top = oldest(items);
   if (top) return handled(top.reason, top.since, w, ctx);
+  const held = openDecisions(w)
+    .flatMap((d) => (d.held ? [d.held] : []))
+    .sort((a, b) => a.at.localeCompare(b.at))[0];
+  if (held) return heldAttn(held, w, ctx);
   const agentIds = s.tasks.flatMap((t) => Object.values(t.agents)).filter((x): x is string => !!x);
   // Ahead of the coordinator's own idle wait: that is its normal state while agents work.
   for (const id of agentIds) {
@@ -375,7 +422,10 @@ export function agentAttention(a: AgentView, w: WaveView | undefined, ctx: Atten
   const task = a.task;
   const s = w?.state;
   if (task && s) {
-    const d = openDecisions(w).find((x) => x.task === task);
+    const open = openDecisions(w).filter((x) => x.task === task);
+    const d = open.find((x) => !x.held);
+    const held = open.find((x) => x.held)?.held;
+    if (!d && held && !s.gates.includes(task)) return heldAttn(held, w, ctx);
     if (d) {
       const reason = `Decision: ${d.question}`;
       return live && !mine
@@ -563,13 +613,16 @@ export interface NeedsYouTarget {
 }
 
 /**
- * A needs-you inbox item's tier (SPEC §4.6.18). Answered: nobody. Owner-only: you, always.
+ * A needs-you inbox item's tier (SPEC §4.6.18). Answered: nobody. Held: amber, never escalated,
+ * owner-only or not. Owner-only: you, always.
  * An item of a session in no wave: you (no coordinator stands between it and the person). An
  * item of a wave: you when the wave is yours (or claimed here) or its coordinator is gone or
  * itself waiting on you; else its coordinator's, escalated to you after `escalate_after_min`.
  */
 export function inboxAttention(item: InboxItem, state: DeskState, ctx: AttentionCtx): Attn {
   if (item.answered !== undefined) return NONE;
+  if (item.held !== undefined)
+    return heldAttn(item.held, item.wave !== undefined ? state.waves[item.wave] : undefined, ctx);
   const reason = item.title;
   if (item.owner_only) return { tier: "you", reason };
   const w = item.wave !== undefined ? state.waves[item.wave] : undefined;
@@ -580,12 +633,12 @@ export function inboxAttention(item: InboxItem, state: DeskState, ctx: Attention
   return handled(reason, parseTime(item.opened_at), w, ctx);
 }
 
-/** The open inbox items a person must answer: owner-only, or at tier `you`. Oldest first. */
+/** The open inbox items a person must answer (not held): owner-only, or at tier `you`. Oldest first. */
 export function inboxNeedsYou(state: DeskState, opts: CtxOpts): InboxItem[] {
   const ctx = ctxFrom(state, opts);
   return Object.values(state.inbox ?? {})
     .filter((i) => i.answered === undefined)
-    .filter((i) => i.owner_only || inboxAttention(i, state, ctx).tier === "you")
+    .filter((i) => !i.held && (i.owner_only || inboxAttention(i, state, ctx).tier === "you"))
     .sort((a, b) => a.opened_at.localeCompare(b.opened_at));
 }
 

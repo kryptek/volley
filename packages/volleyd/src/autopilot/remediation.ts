@@ -1,5 +1,7 @@
+import type { DecisionRecord, HeldOn } from "../decisions";
 import type { WaveRecord } from "../reducer";
 import type { FixerRemediation, NewEvent, TaskId, WaveTask } from "../types";
+import { markerOf } from "./budgets";
 import type { Budget } from "./policy";
 
 /**
@@ -138,5 +140,36 @@ export function releasedBy(rec: WaveRecord, fixer: TaskId): TaskId[] {
       parked.test === r.test &&
       parked.landed !== true
     );
+  });
+}
+
+/** A red head's decision: a ci_failed, or a blocked agent's on a red PR head. */
+export const isRedHead = (d: DecisionRecord): boolean => {
+  const on = markerOf(d)?.on;
+  return on === "ci_failed" || on === "agent_blocked_ci";
+};
+
+/**
+ * The holds autopilot adds (#335): each open red-head decision of a task parked on a flake whose
+ * fixer is still at work is held on that fixer task, so it waits amber rather than escalating.
+ * A decision held or released before is never held again (the owner's release stands).
+ */
+export function autoHolds(rec: WaveRecord): { decision_id: string; on: HeldOn; note: string }[] {
+  const open = new Set(rec.state?.open_decisions ?? []);
+  return Object.values(rec.decisions).flatMap((d) => {
+    if (!open.has(d.decision_id) || d.task === null || !isRedHead(d)) return [];
+    if (d.held !== undefined || d.released !== undefined) return [];
+    const r = rec.pipeline[d.task]?.remediation;
+    if (r === undefined || r.landed === true) return [];
+    const fixer = fixerOf(rec, r.test);
+    if (fixer === undefined || fixer.id === d.task || fixer.remediation?.outcome !== undefined)
+      return [];
+    return [
+      {
+        decision_id: d.decision_id,
+        on: { task: fixer.id },
+        note: `CI flake in ${r.test}: its fixer ${fixer.id} is on it`,
+      },
+    ];
   });
 }

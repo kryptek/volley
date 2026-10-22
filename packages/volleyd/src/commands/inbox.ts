@@ -1,12 +1,14 @@
 import { parseArgs } from "node:util";
 import { type InboxItem, parseWhereLabel, whereLabel } from "../autopilot/inbox";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
+import { heldLabel, parseHeldOn } from "../decisions";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { resolveCaller } from "../ownership";
 
 const HELP = `Usage:
   volleyd inbox [--all] [--json]
   volleyd inbox answer <id> <answer...> [--where <where>] [--version <n>] [--by <agent-id>]
+  volleyd inbox hold <id> --on <task|#pr|issue#n> [--note <text>] [--by <agent-id>]
 
 The needs-you inbox: everything waiting for a person (decisions, pickers, handoffs, release
 stages), one line each: id, kind, age, owner-only, title and options. --all also lists answered
@@ -16,6 +18,9 @@ answer answers one through volleyd, the referee: the first answer at the item's 
 wins, and a later one is refused with where the winner answered (exit 1). --version answers the
 version you saw (default: the item's current one); --where says where you answered (default
 cli; desk·<device>, <machine>·terminal).
+
+hold holds a decision's item (as \`volleyd hold\`): it waits on a task, PR or issue, is never
+escalated, and is released when that lands.
 
 Common flags: --broker-url <url>  --namespace <ns>
 `;
@@ -44,7 +49,11 @@ export function formatInboxItem(item: InboxItem, now: number): string {
     item.answered !== undefined
       ? `  answered on ${whereLabel(item.answered.where)} by ${item.answered.by}: ${item.answered.answer}\n`
       : "";
-  return `${head}\n  ${item.question}\n${answered}`;
+  const held =
+    item.held !== undefined && item.answered === undefined
+      ? `  held on ${heldLabel(item.held.on)} since ${item.held.at}${item.held.note !== undefined ? `: ${item.held.note}` : ""}\n`
+      : "";
+  return `${head}\n  ${item.question}\n${held}${answered}`;
 }
 
 export async function inbox({ argv, env, io }: CommandArgs): Promise<ExitCode> {
@@ -60,6 +69,8 @@ export async function inbox({ argv, env, io }: CommandArgs): Promise<ExitCode> {
         where: { type: "string" },
         version: { type: "string" },
         by: { type: "string" },
+        on: { type: "string" },
+        note: { type: "string" },
         "broker-url": { type: "string" },
         namespace: { type: "string" },
         help: { type: "boolean", short: "h" },
@@ -94,6 +105,33 @@ export async function inbox({ argv, env, io }: CommandArgs): Promise<ExitCode> {
       else if (r.items.length === 0) io.stdout("nothing needs you\n");
       // Ages are on the daemon's clock (its `now`), never this process's.
       else io.stdout(r.items.map((i) => formatInboxItem(i, Date.parse(r.now))).join(""));
+      return EXIT.OK;
+    });
+  }
+  if (action === "hold") {
+    if (id === undefined || answer.length > 0) return usage("expected one item id");
+    const on = typeof values.on === "string" ? parseHeldOn(values.on) : null;
+    if (on === null) return usage("hold needs --on <task|#pr|issue#n>");
+    return withClient(target, io, "volleyd inbox hold", async (client) => {
+      const flag = typeof values.by === "string" ? values.by : undefined;
+      const caller = (await resolveCaller(client, flag, env))?.id ?? null;
+      const res = await client.request(
+        "hold",
+        {
+          item: id,
+          on,
+          ...(typeof values.note === "string" ? { note: values.note } : {}),
+          ...(caller !== null ? { by: caller } : {}),
+        },
+        { text: `volleyd inbox hold ${id}` },
+      );
+      if (!res.ok) {
+        io.stderr(`volleyd inbox hold: ${res.error ?? "refused"}\n`);
+        return EXIT.ERROR;
+      }
+      const r = res.result as { label: string };
+      if (values.json === true) io.stdout(`${JSON.stringify(res.result, null, 2)}\n`);
+      else io.stdout(`held ${id} on ${r.label}\n`);
       return EXIT.OK;
     });
   }

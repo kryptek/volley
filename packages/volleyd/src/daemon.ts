@@ -75,7 +75,7 @@ import {
   indexEntry,
   indexPayload,
 } from "./archive";
-import { budgetUsed, markerOf } from "./autopilot/budgets";
+import { budgetUsed } from "./autopilot/budgets";
 import { carryHandoff, carryPicker } from "./autopilot/carry";
 import { type Digest, type DigestTrigger, digestOf, summaryLine } from "./autopilot/digest";
 import { type GithubStatus, githubStatusCache } from "./autopilot/github-status";
@@ -104,6 +104,7 @@ import {
   pickerItemId,
   ttlExpired,
   whereLabel,
+  withHeld,
 } from "./autopilot/inbox";
 import {
   DEFAULT_PLAYBOOK,
@@ -134,8 +135,10 @@ import {
 import {
   type FixRequest,
   type FixerVerdict,
+  autoHolds,
   fixerFor,
   fixers,
+  isRedHead,
   releasedBy,
   requestOf,
 } from "./autopilot/remediation";
@@ -195,6 +198,8 @@ import {
   type DecisionInput,
   type DecisionPayload,
   type DecisionRecord,
+  type Held,
+  type HeldOn,
   ID_RE,
   LOCAL_FILES,
   MACHINE_DOWN_CANCEL,
@@ -205,11 +210,17 @@ import {
   decisionTopic,
   decisionsFilePath,
   describeDecision,
+  ghHoldReleased,
+  heldLabel,
+  heldOnFrom,
+  holdEvent,
   machineDownInput,
   openDecisions,
   openEvent,
+  releaseEvent,
   renderDecisionsMd,
   resolveEvent,
+  taskHoldReleased,
   waveDecisionId,
   writeDecisionsFile,
 } from "./decisions";
@@ -1076,6 +1087,8 @@ export class Daemon {
   private readonly spawning = new Set<string>();
   /** Automatic spawns refused this run: retried by the loop with backoff (`volleyd spawn` now). */
   private readonly refused = new Map<string, { n: number; until: number }>();
+  /** Held decisions whose PR / issue gh is checking now (`<wave>/<id>`): one check at a time. */
+  private readonly heldChecks = new Set<string>();
   /** Each wave's pipeline driver (T6), created on first use. */
   private readonly pipelines = new Map<WaveId, PipelineDriver>();
   /** The release train's stage driver per releasing wave (SPEC §4.6.19). */
@@ -1428,7 +1441,7 @@ export class Daemon {
       }
     }
     foldInbox(this.inbox, this.system.readAll());
-    for (const log of this.waves.values()) foldInbox(this.inbox, log.journal.readAll());
+    for (const [wave, log] of this.waves) foldInbox(this.inbox, log.journal.readAll(), wave);
   }
 
   /**
@@ -2452,6 +2465,7 @@ export class Daemon {
     await this.watchTerminals();
     for (const wave of this.waves.keys()) {
       await this.settleFixers(wave);
+      await this.holdPass(wave);
       await this.completeIfSettled(wave);
       await this.releaseGoIfVerified(wave);
     }
@@ -7341,7 +7355,11 @@ export class Daemon {
    * nothing is journaled and the decision waits, as before autopilot. A decision a resolution
    * opens (a re-ask) comes back through here, bounded by its budget.
    */
-  private async autopilot(wave: WaveId, d: DecisionRecord): Promise<boolean> {
+  private async autopilot(
+    wave: WaveId,
+    d: DecisionRecord,
+    opts: { again?: boolean } = {},
+  ): Promise<boolean> {
     const rec = this.waves.get(wave)?.record;
     if (rec === undefined || d.resolved !== undefined) return d.resolved === undefined;
     const eff = this.config.effective(wave);
@@ -7354,6 +7372,8 @@ export class Daemon {
       fixer: this.fixerVerdict(wave, d),
     });
     if ("off" in v) return true;
+    // Asked again (a released hold): an escalation it already carries is not journaled twice.
+    if ("escalate" in v && opts.again === true && d.escalated?.why === v.escalate) return true;
     if ("escalate" in v) return this.escalate(wave, d, v.escalate, v.budget);
     // Journaled once the answer is accepted, immediately before its decision_resolved: a refused
     // answer leaves no decision_auto_resolved and spends no budget.
@@ -8371,10 +8391,15 @@ export class Daemon {
       const why = typeof accounts === "string" ? accounts : deskRefusal(accounts, sender);
       if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
     }
+    const desk = { desk_login: true } as const;
     const r =
       op === "inbox_answer"
-        ? await this.inboxAnswerOp(p, sender, { desk_login: true })
-        : await this.resolveOp(p, sender, { desk_login: true });
+        ? await this.inboxAnswerOp(p, sender, desk)
+        : op === "hold"
+          ? await this.holdOp(p, sender, desk)
+          : op === "release"
+            ? await this.releaseOp(p, sender, desk)
+            : await this.resolveOp(p, sender, desk);
     return { reply: authReply(op, r) };
   }
 
@@ -8429,6 +8454,10 @@ export class Daemon {
         return this.listInbox(p);
       case "inbox_answer":
         return this.inboxAnswerOp(p, by);
+      case "hold":
+        return this.holdOp(p, by);
+      case "release":
+        return this.releaseOp(p, by);
       case "claim":
         // Ownership must go to a stable identity, never the CLI's per-invocation agent id.
         if (typeof p.by !== "string" || p.by === "")
@@ -8971,6 +9000,196 @@ export class Daemon {
         ...(r.brief !== undefined ? { brief: r.brief } : {}),
       },
     };
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Held decisions (#335): "waiting on <task|PR|issue>", never escalated, released when it lands
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * The decision a hold / release op names: `decision_id` (its wave found when not given), or an
+   * inbox `item` id; owner-guarded like `resolve` (a Desk login is the owner).
+   */
+  private heldTarget(
+    op: "hold" | "release",
+    p: Record<string, unknown>,
+    by: string,
+    opts: { desk_login?: true },
+  ): { wave: WaveId; id: string } | { error: string } {
+    let id = typeof p.decision_id === "string" ? p.decision_id : undefined;
+    let wave = typeof p.wave === "string" ? p.wave : undefined;
+    if (id === undefined && typeof p.item === "string") {
+      const item = this.inbox.get(p.item);
+      const source = item?.kind === "decision" ? item.source.decision_id : undefined;
+      if (typeof source !== "string" || item?.wave === undefined)
+        return { error: `unknown decision item '${p.item}'` };
+      id = source;
+      wave = item.wave;
+    }
+    if (id === undefined) return { error: `${op} requires payload.decision_id or payload.item` };
+    const key = id;
+    wave ??= [...this.waves].find(([, log]) => log.record.decisions[key] !== undefined)?.[0];
+    const state = wave !== undefined ? this.waves.get(wave)?.record.state : undefined;
+    if (
+      wave === undefined ||
+      state == null ||
+      this.waves.get(wave)?.record.decisions[id] === undefined
+    )
+      return { error: `unknown decision '${id}'${wave !== undefined ? ` in wave '${wave}'` : ""}` };
+    const refused = opts.desk_login === true ? null : guardMutation(state, by, op, this.bindings);
+    return refused !== null ? { error: refused } : { wave, id };
+  }
+
+  /** `hold { decision_id | item, on, note?, wave? }`: the decision waits on `on`, held. */
+  private async holdOp(
+    p: Record<string, unknown>,
+    by: string,
+    opts: { desk_login?: true } = {},
+  ): Promise<HandlerResult> {
+    const t = this.heldTarget("hold", p, by, opts);
+    if ("error" in t) return { ok: false, error: t.error };
+    const on = heldOnFrom(p.on);
+    if (on === null)
+      return { ok: false, error: "hold requires payload.on: a task, #<pr> or issue#<n>" };
+    const note = typeof p.note === "string" ? p.note : undefined;
+    const r = await this.holdNow(t.wave, t.id, { on, by, ...(note !== undefined ? { note } : {}) });
+    if ("error" in r) return { ok: false, error: r.error };
+    const rec = this.waves.get(t.wave)?.record;
+    return {
+      ok: true,
+      result: {
+        wave: t.wave,
+        decision_id: t.id,
+        held: r.held,
+        label: heldLabel(on, rec?.state?.tasks),
+      },
+    };
+  }
+
+  /** `release { decision_id | item, wave? }`: lift a hold by hand. */
+  private async releaseOp(
+    p: Record<string, unknown>,
+    by: string,
+    opts: { desk_login?: true } = {},
+  ): Promise<HandlerResult> {
+    const t = this.heldTarget("release", p, by, opts);
+    if ("error" in t) return { ok: false, error: t.error };
+    const r = await this.releaseNow(t.wave, t.id, `released by ${by}`, by);
+    if ("error" in r) return { ok: false, error: r.error };
+    return { ok: true, result: { wave: t.wave, decision_id: t.id, released: r.released } };
+  }
+
+  /** Journal `decision_held`; the decision's retained topic and inbox item carry the hold. */
+  private async holdNow(
+    wave: WaveId,
+    id: string,
+    h: { on: HeldOn; note?: string; by: string },
+  ): Promise<{ held: Held } | { error: string }> {
+    const log = this.waves.get(wave);
+    if (log === undefined) return { error: `unknown wave '${wave}'` };
+    const r = holdEvent(log.record, id, h);
+    if ("error" in r) return r;
+    await this.append(wave, r.event);
+    const d = log.record.decisions[id] as DecisionRecord;
+    await this.mirrorHeld(wave, d);
+    this.log(`held ${id} on ${heldLabel(h.on, log.record.state?.tasks)} by ${h.by}`);
+    return { held: d.held as Held };
+  }
+
+  /**
+   * Journal `decision_released`: the decision is open in its normal tier again, and autopilot's
+   * rule for its kind runs again (it may answer it now; an escalation it repeats is not journaled
+   * twice). `released: false` when it was not held.
+   */
+  private async releaseNow(
+    wave: WaveId,
+    id: string,
+    why: string,
+    by: string,
+  ): Promise<{ released: boolean } | { error: string }> {
+    const log = this.waves.get(wave);
+    if (log === undefined) return { error: `unknown wave '${wave}'` };
+    const r = releaseEvent(log.record, id, { why, by });
+    if ("error" in r) return r;
+    if ("not_held" in r) return { released: false };
+    await this.append(wave, r.event);
+    const d = log.record.decisions[id] as DecisionRecord;
+    await this.mirrorHeld(wave, d);
+    this.log(`released ${id}: ${why}`);
+    if (await this.autopilot(wave, d, { again: true }))
+      await this.publishDecision(wave, log.record.decisions[id] as DecisionRecord);
+    return { released: true };
+  }
+
+  /** A hold set or lifted: the decision's retained topic and its inbox item follow it. */
+  private async mirrorHeld(wave: WaveId, d: DecisionRecord): Promise<void> {
+    await this.publishDecision(wave, d);
+    const item = this.inbox.get(decisionItemId(wave, d.decision_id));
+    if (item === undefined || item.answered !== undefined) return;
+    const next = withHeld(item, d.held);
+    this.inbox.set(item.id, next);
+    await this.publishInboxItem(next);
+  }
+
+  /**
+   * On every tick (the merge-check cadence), per wave: autopilot holds each red head waiting on
+   * its flake's fixer (`autoHolds`), a hold on a task that is done or cancelled is released, and
+   * holds on PRs and issues are checked with gh beside the queue, released on the queue when the
+   * PR merged or closed or the issue closed.
+   */
+  private async holdPass(wave: WaveId): Promise<void> {
+    const log = this.waves.get(wave);
+    if (log === undefined || log.record.state?.status !== "running") return;
+    for (const h of autoHolds(log.record))
+      await this.holdNow(wave, h.decision_id, { on: h.on, note: h.note, by: DAEMON_AGENT_ID });
+    for (const d of openDecisions(log.record)) {
+      if (d.held === undefined) continue;
+      const why = taskHoldReleased(log.record, d.held.on);
+      if (why !== null) {
+        await this.releaseNow(wave, d.decision_id, why, DAEMON_AGENT_ID);
+        continue;
+      }
+      if (d.held.on.pr !== undefined || d.held.on.issue !== undefined)
+        this.checkHeldOnGitHub(wave, d.decision_id, d.held);
+    }
+  }
+
+  /** gh's `state` of a held decision's PR / issue, beside the queue; a landed one is released. */
+  private checkHeldOnGitHub(wave: WaveId, id: string, held: Held): void {
+    const key = `${wave}/${id}`;
+    if (this.heldChecks.has(key)) return;
+    this.heldChecks.add(key);
+    const repo = this.waves.get(wave)?.record.wave?.repo;
+    const cwd = repo !== undefined ? { cwd: repoDir(repo) } : {};
+    const state = async (argv: string[]) => {
+      const r = await this.host.exec(argv, cwd).catch(() => null);
+      if (r === null || r.code !== 0) return undefined;
+      try {
+        const v = (JSON.parse(r.stdout) as { state?: unknown }).state;
+        return typeof v === "string" ? v : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    void (async () => {
+      const { pr, issue } = held.on;
+      const states = {
+        ...(pr !== undefined
+          ? { pr: await state(["gh", "pr", "view", String(pr), "--json", "state"]) }
+          : {}),
+        ...(issue !== undefined
+          ? { issue: await state(["gh", "issue", "view", String(issue), "--json", "state"]) }
+          : {}),
+      } as { pr?: string; issue?: string };
+      const why = ghHoldReleased(held.on, states);
+      if (why === null) return;
+      await this.enqueue(async () => {
+        // Still the same hold: one set or lifted meanwhile is not this check's to release.
+        const d = this.waves.get(wave)?.record.decisions[id];
+        if (d?.held?.at !== held.at || d.resolved !== undefined) return;
+        await this.releaseNow(wave, id, why, DAEMON_AGENT_ID);
+      });
+    })().finally(() => this.heldChecks.delete(key));
   }
 
   /**
@@ -9733,12 +9952,6 @@ function brokerAddress(url: string): { host: string; port: number } {
   };
 }
 
-/** A red head's decision: a ci_failed, or a blocked agent's on a red PR head. */
-const isRedHead = (d: DecisionRecord): boolean => {
-  const on = markerOf(d)?.on;
-  return on === "ci_failed" || on === "agent_blocked_ci";
-};
-
 /** A decision record's own fields: the rest are the facts a re-ask carries over. */
 const DECISION_RECORD_KEYS: ReadonlySet<string> = new Set([
   "decision_id",
@@ -9751,6 +9964,8 @@ const DECISION_RECORD_KEYS: ReadonlySet<string> = new Set([
   "opened_at",
   "resolved",
   "escalated",
+  "held",
+  "released",
   "resume_stage",
   "parks",
   "rationale",

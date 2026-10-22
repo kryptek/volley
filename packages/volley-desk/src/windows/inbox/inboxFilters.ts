@@ -18,9 +18,9 @@ export const INBOX_FILTERS: readonly { key: InboxFilter; label: string }[] = [
   { key: "handoffs", label: "Handoffs" },
 ];
 
-/** Open, and only a person answers it: owner-only, or at tier `you` (`inboxAttention`). */
+/** Open, not held, and only a person answers it: owner-only, or at tier `you` (`inboxAttention`). */
 export function needsPerson(item: InboxItem, tier: Tier): boolean {
-  return item.answered === undefined && (item.owner_only || tier === "you");
+  return item.answered === undefined && !item.held && (item.owner_only || tier === "you");
 }
 
 /** A release's stage go / go-no-go is one more decision. */

@@ -12,7 +12,7 @@ import { demoAutopilot, demoInbox } from "../src/store/fixtures";
 import { initialState, reduceAll } from "../src/store/reducer";
 import type { AgentView, DeskState, InboxItem } from "../src/store/types";
 import { COORDS_ID } from "../src/windows/coordinators/CoordinatorsWindow";
-import { answerCommand } from "../src/windows/inbox/InboxRow";
+import { answerCommand, holdChoices, holdCommand } from "../src/windows/inbox/InboxRow";
 import { NeedsYouWindow, type NeedsYouWindowProps } from "../src/windows/inbox/NeedsYouWindow";
 import {
   INBOX_FILTERS,
@@ -371,5 +371,60 @@ describe("answerCommand", () => {
     expect(answerCommand("inbox-1", "$(curl x|sh) `id` $HOME it's")).toBe(
       "volleyd inbox answer 'inbox-1' '$(curl x|sh) `id` $HOME it'\\''s'",
     );
+  });
+});
+
+describe("held decisions (SPEC §4.6.2)", () => {
+  const decisionItem = item(DECISION);
+  const choices = holdChoices(decisionItem, STATE.waves[decisionItem.wave as string]);
+
+  it("the hold picker lists the wave's other unsettled tasks and their open PRs, and sends hold", async () => {
+    expect(choices.length).toBeGreaterThan(0);
+    expect(choices.every((c) => c.on.task !== decisionItem.task)).toBe(true);
+    const { props } = setup({ items: [decisionItem] });
+    fireEvent.click(within(row(DECISION)).getByRole("button", { name: "Hold · waiting on…" }));
+    const select = within(row(DECISION)).getByRole("combobox", { name: "Hold · waiting on" });
+    const first = choices[0] as (typeof choices)[number];
+    await act(async () => {
+      fireEvent.change(select, { target: { value: first.key } });
+    });
+    expect(props.control).toHaveBeenCalledWith(
+      "hold",
+      { item: DECISION, on: first.on },
+      holdCommand(DECISION, first.on),
+    );
+  });
+
+  it("a held row is amber with what it waits on, offers Release, and never needs a person", async () => {
+    const held = {
+      ...decisionItem,
+      owner_only: true,
+      held: { on: { pr: 194 }, by: "lead", at: new Date(NOW - 3 * 3_600_000).toISOString() },
+    };
+    expect(needsPerson(held, "you")).toBe(false);
+    const { props } = setup({ items: [held], tiers: { [DECISION]: "coordinator" }, now: NOW });
+    const r = row(DECISION);
+    expect(r.className).toContain("inbox-row--held");
+    expect(within(r).getByText("Held · waiting on PR #194 · 3 h")).toBeTruthy();
+    expect(within(r).queryByText("needs you")).toBeNull();
+    expect(screen.queryByText(/need you$/)).toBeNull();
+    await act(async () => {
+      fireEvent.click(within(r).getByRole("button", { name: "Release" }));
+    });
+    expect(props.control).toHaveBeenCalledWith(
+      "release",
+      { item: DECISION },
+      expect.stringContaining("volleyd release"),
+    );
+  });
+
+  it("without credentials, the hold is a command to copy", () => {
+    setup({ items: [decisionItem], control: null });
+    fireEvent.click(within(row(DECISION)).getByRole("button", { name: "Hold · waiting on…" }));
+    const first = choices[0] as (typeof choices)[number];
+    fireEvent.change(within(row(DECISION)).getByRole("combobox", { name: "Hold · waiting on" }), {
+      target: { value: first.key },
+    });
+    expect(screen.getByText(holdCommand(DECISION, first.on))).toBeTruthy();
   });
 });

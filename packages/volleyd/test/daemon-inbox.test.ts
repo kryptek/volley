@@ -466,3 +466,114 @@ describe("a Desk login answers on its own account-op topic (the owner on any scr
     expect(s.daemon.inboxItem(id)?.answered).toBeUndefined();
   });
 });
+
+describe("held decisions (#335): waiting on a task, PR or issue", () => {
+  const withT2 = (o: Parameters<typeof makeSupervisedEnv>[0] = {}) =>
+    makeSupervisedEnv({ tasks: ["T2: { issue: 42 }"], ...o });
+
+  it("volleyd hold --on T2: decision_held journaled, item and decision carry `held`; T2 cancelled releases it", async () => {
+    s = await withT2();
+    const d = await s.daemon.openDecision("w1", disagree);
+    const id = decisionItemId("w1", d.decision_id);
+    const r = await runCli(
+      ["hold", d.decision_id, "--on", "T2", "--note", "flake fix", "--by", "owner"],
+      s.env.env,
+    );
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toContain(`held ${d.decision_id} (w1) on T2`);
+    const held = s.journal().find((e) => e.type === "decision_held");
+    expect(held?.data).toMatchObject({
+      decision_id: d.decision_id,
+      on: { task: "T2" },
+      note: "flake fix",
+      by: "owner",
+    });
+    const env = await retainedItem(id);
+    expect(env?.payload.held).toMatchObject({ on: { task: "T2" }, note: "flake fix" });
+    expect(env?.payload.version).toBe(1);
+    expect(schemaErrors("inbox-item.schema.json", env)).toEqual([]);
+    const dec = await s.env.retained(`volley/_waves/w1/decisions/${d.decision_id}`);
+    expect((dec as { payload: { held?: unknown } }).payload.held).toMatchObject({
+      on: { task: "T2" },
+    });
+    expect(schemaErrors("decision.schema.json", dec)).toEqual([]);
+    const list = await runCli(["decisions", "w1"], s.env.env);
+    expect(list.stdout).toContain("held on T2 by owner");
+
+    await s.daemon.recordEvent("w1", { type: "task_cancelled", task: "T2", data: {} });
+    await s.daemon.tick();
+    const released = await s.event((e) => e.type === "decision_released");
+    expect(released.data).toMatchObject({ decision_id: d.decision_id, why: "T2 cancelled" });
+    await s.settled();
+    expect(s.daemon.inboxItem(id)?.held).toBeUndefined();
+    expect((await retainedItem(id))?.payload.held).toBeUndefined();
+    // Still open, in its normal tier: released is not answered.
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.resolved).toBeUndefined();
+  });
+
+  it("--on '#12' is released when gh pr view says MERGED", async () => {
+    let state = "OPEN";
+    s = await withT2({
+      exec: [[["gh", "pr", "view", "12"], () => ({ stdout: JSON.stringify({ state }) })]],
+    });
+    const d = await s.daemon.openDecision("w1", disagree);
+    const c = await control();
+    const r = await c.request("hold", { decision_id: d.decision_id, on: { pr: 12 }, by: "owner" });
+    expect(r.error).toBeUndefined();
+    await s.daemon.tick();
+    await s.settled();
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.held?.on).toEqual({ pr: 12 });
+    state = "MERGED";
+    await s.daemon.tick();
+    const released = await s.event((e) => e.type === "decision_released");
+    expect(released.data).toMatchObject({ decision_id: d.decision_id, why: "PR #12 merged" });
+    expect(s.host.fake.argvs(["gh", "pr", "view", "12"]).at(-1)).toEqual([
+      "gh",
+      "pr",
+      "view",
+      "12",
+      "--json",
+      "state",
+    ]);
+  });
+
+  it("volleyd release lifts a hold by hand; inbox hold holds by item id", async () => {
+    s = await withT2();
+    const d = await s.daemon.openDecision("w1", disagree);
+    const id = decisionItemId("w1", d.decision_id);
+    const h = await runCli(["inbox", "hold", id, "--on", "issue#7", "--by", "owner"], s.env.env);
+    expect(h.stderr).toBe("");
+    expect(s.daemon.inboxItem(id)?.held?.on).toEqual({ issue: 7 });
+    const r = await runCli(["release", d.decision_id, "--by", "owner"], s.env.env);
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toContain(`released ${d.decision_id}`);
+    const ev = s.journal().find((e) => e.type === "decision_released");
+    expect(ev?.data).toMatchObject({ why: "released by owner", by: "owner" });
+    expect(s.daemon.inboxItem(id)?.held).toBeUndefined();
+  });
+
+  it("hold is owner-guarded like resolve; a Desk login holds on its account-op topic", async () => {
+    s = await withT2({ daemon: { authExec: deskAccounts().exec } });
+    const c = await control();
+    expect((await c.request("claim", { wave: "w1", by: "coord-main" })).ok).toBe(true);
+    const d = await s.daemon.openDecision("w1", disagree);
+    const refused = await c.request("hold", {
+      decision_id: d.decision_id,
+      on: { task: "T2" },
+      by: "someone-else",
+    });
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toContain("owned by coord-main");
+    const r = await deskAnswer(
+      s.env.broker.url,
+      "steer-1",
+      { decision_id: d.decision_id, on: { task: "T2" } },
+      "hold",
+    );
+    expect(r.error).toBeUndefined();
+    expect(s.daemon.record("w1")?.decisions[d.decision_id]?.held).toMatchObject({
+      on: { task: "T2" },
+      by: "steer-1",
+    });
+  });
+});

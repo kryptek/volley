@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   type FixRequest,
+  autoHolds,
   fixerFor,
   releasedBy,
   requestOf,
@@ -292,5 +293,74 @@ describe("releasedBy and remediation_closed", () => {
     ]);
     expect(rec.wave?.tasks["fix-clock-test-ts-advance"]?.synthetic).toBe(true);
     expect(rec.wave?.task_order).toContain("fix-clock-test-ts-advance");
+  });
+});
+
+describe("autoHolds: a red head waiting on its flake's fixer is held on it (#335)", () => {
+  const redHead = (task: string, id = `d-${task.toLowerCase()}`): NewEvent => ({
+    type: "decision_opened",
+    task,
+    data: {
+      decision_id: id,
+      kind: "ci_failed",
+      question: `CI failed on ${task}'s head.`,
+      options: ["fix flake", "retry"],
+      pointers: {},
+      opened_at: "2026-10-20T09:00:00.000Z",
+      pipeline: { on: "ci_failed", role: "implementer" },
+    },
+  });
+  const withFixer = () => {
+    const first = record(flaky("T3"));
+    const add = fixerFor(first, request("T3"), 3);
+    if (!("add" in add)) throw new Error("expected add");
+    return [...flaky("T3"), add.add];
+  };
+
+  it("an open ci_failed whose task is parked on a flake with a fixer: held on the fixer task", () => {
+    expect(autoHolds(record([...withFixer(), redHead("T3")]))).toEqual([
+      {
+        decision_id: "d-t3",
+        on: { task: "fix-clock-test-ts-advance" },
+        note: `CI flake in ${TEST}: its fixer fix-clock-test-ts-advance is on it`,
+      },
+    ]);
+  });
+
+  it("not without a fixer, not once held or released, not after the fixer closed", () => {
+    expect(autoHolds(record([...flaky("T3"), redHead("T3")]))).toEqual([]);
+    const held: NewEvent = {
+      type: "decision_held",
+      task: "T3",
+      data: { decision_id: "d-t3", kind: "ci_failed", on: { task: "T7" }, by: "owner" },
+    };
+    expect(autoHolds(record([...withFixer(), redHead("T3"), held]))).toEqual([]);
+    const released: NewEvent = {
+      type: "decision_released",
+      task: "T3",
+      data: { decision_id: "d-t3", kind: "ci_failed", why: "by hand", by: "owner" },
+    };
+    expect(autoHolds(record([...withFixer(), redHead("T3"), held, released]))).toEqual([]);
+    const closed: NewEvent = {
+      type: "remediation_closed",
+      task: "fix-clock-test-ts-advance",
+      data: { kind: "fix_flake", test: TEST, outcome: "failed", why: "cancelled", released: [] },
+    };
+    expect(autoHolds(record([...withFixer(), closed, redHead("T3")]))).toEqual([]);
+  });
+
+  it("never a decision of the fixer itself, nor one that is not a red head", () => {
+    const other: NewEvent = {
+      type: "decision_opened",
+      task: "T3",
+      data: {
+        decision_id: "d-q",
+        kind: "agent_question",
+        question: "?",
+        pointers: {},
+        opened_at: "2026-10-20T09:00:00.000Z",
+      },
+    };
+    expect(autoHolds(record([...withFixer(), other]))).toEqual([]);
   });
 });

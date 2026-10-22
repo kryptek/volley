@@ -1,7 +1,7 @@
 /**
  * The Needs you window: the needs-you inbox (SPEC §4.6.18), one row per item volleyd keeps on
  * `volley/_inbox/<id>`: decisions, pickers, handoffs and the release train's go/no-go, oldest
- * first. In the glass window chrome like the coordinators window, with the Needs-you pulse ring
+ * first; a held one (SPEC §4.6.2) is amber with what it waits on, never counted or pulsing. In the glass window chrome like the coordinators window, with the Needs-you pulse ring
  * while any open item needs a person (owner-only, or at tier `you` per `attention.ts`), and the
  * title's `N need you` chip. Filters are Gooey tabs: All / Only you / Pickers / Decisions /
  * Handoffs. Rows are `InboxRow`s; Dismiss hides a row from this Desk only (the item stays open
@@ -40,6 +40,8 @@ export interface NeedsYouWindowProps {
   /** Each item's live line (`liveLine`), by id. */
   live?: Readonly<Record<string, string | null>>;
   waves?: Readonly<Record<string, WaveView>>;
+  /** Now (ms): the held line's age. */
+  now?: number;
   /** volleyd's control channel; null without broker credentials (rows offer the CLI command). */
   control: SteerTransport["control"] | null;
   /** This device, for `where.device` (`deskDevice`). */
@@ -161,6 +163,7 @@ export function NeedsYouWindow(p: NeedsYouWindowProps) {
                   wave={item.wave !== undefined ? p.waves?.[item.wave] : undefined}
                   control={p.control}
                   device={p.device}
+                  {...(p.now !== undefined ? { now: p.now } : {})}
                   leaving={gone}
                   narrow={p.narrow ?? false}
                   release={{
