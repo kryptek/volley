@@ -82,7 +82,7 @@ import { progressBeat } from "./look/tetherPulses";
 import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
-import { MOVE_ACCOUNT_TIMEOUT_MS } from "./settings/ClaudeAccounts";
+import { MOVE_ACCOUNT_TIMEOUT_MS, signinsDone, useClaudeRegistry } from "./settings/ClaudeAccounts";
 import { agentsOnMachines, sshHost } from "./settings/Machines";
 import { PeerSignin, peerAccount } from "./settings/PeerSigninSheet";
 import { SettingsModal } from "./settings/SettingsModal";
@@ -97,7 +97,13 @@ import { ClaimButton } from "./steer/SteerPanel";
 import { routeDeskControl } from "./steer/deskControl";
 import { deskDevice } from "./steer/transport";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
-import { type RegistryAccount, accountChoices, accountList, resolveFields } from "./store/claude";
+import {
+  type RegistryAccount,
+  accountChoices,
+  accountList,
+  deskAccountGroups,
+  resolveFields,
+} from "./store/claude";
 import { useDesk } from "./store/context";
 import { createAuthOps, deskUrl, readSessionRole, takeFirstRun } from "./store/control";
 import { createPeerOps, keepAdminSeen } from "./store/peerOps";
@@ -418,6 +424,24 @@ export default function App() {
     () =>
       routeDeskControl(mailboxControl, authOps, authOps ? readSessionRole(authOps.identity) : null),
     [mailboxControl, authOps],
+  );
+  // Settings › Machines lists every Claude account on each machine: it asks volleyd's registry
+  // while it is open (Settings › Claude accounts asks on its own).
+  const machinesRegistry = useClaudeRegistry(
+    deskSettings === "machines" ? control : null,
+    signinsDone(state.signins),
+  );
+  const localName = state.config?.fleet?.local_name ?? undefined;
+  const claudeGroups = useMemo(
+    () =>
+      deskAccountGroups(
+        state.claudeAccounts,
+        machinesRegistry.accounts.length ? machinesRegistry.accounts : registry,
+        machinesRegistry.primaryPlan,
+        state.machines,
+        localName,
+      ),
+    [state.claudeAccounts, machinesRegistry, registry, state.machines, localName],
   );
   // Settings › Machines: the pairing ops ride the same admin channel (and its reply key).
   const peerOps = useMemo(
@@ -1413,6 +1437,7 @@ export default function App() {
             focusSeq: focusMachine?.seq,
             configTransport,
             accounts: state.claudeAccounts ?? {},
+            claude: { groups: claudeGroups, signins: state.signins ?? {}, control },
             agentsOn: agentsOnMachines(
               Object.values(state.waves).flatMap((w) => (w.state ? [w.state] : [])),
               (id) => isLiveAgent(state, id),

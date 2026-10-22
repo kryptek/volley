@@ -739,6 +739,14 @@ on GitHub with one small open issue and a pushed release branch
      attach` command), and no field. Sign in with the *second* account.
      **Pass:** the dialog reaches `Added: second (<peer>)` and `signed in on <peer>`; the `second` card
      lists both machines.
+   - **The account matrix (owner-run; needs two paired peers, or one peer and `this machine` without
+     the account).** Each card lists every configured machine; one missing the account has a hollow
+     dot and **Sign in on <machine>**, and the head chip reads `on N of M machines` in amber. Click
+     it: the dialog opens at the sign-in step titled `Sign in with s•••@… on <machine>` (no label or
+     machine to pick). Sign in with the *same* account.
+     **Pass:** the row fills, the chip turns plain, Settings › Machines' card for that machine lists
+     the account with a filled dot under **Claude accounts**, and `volley claude list` prints no
+     `not on:` line under it (before, it printed `not on: <machine>`).
    Write `smoke.yaml` (the issue and branch from "You need"):
    ```yaml
    wave: <yyyy-mm-dd>-onboarding-smoke

@@ -21,20 +21,41 @@
  * session (not signed in, not an admin, demo, a browser that cannot make a
  * reply key at all) is read-only and is shown the terminal commands instead.
  * A plain-http LAN page can pair: its reply key comes from `lib/rsa.ts`.
+ *
+ * Each card lists the Claude accounts (`accountMatrix` over the groups App
+ * computes): **Sign in on <machine>** opens Settings › Claude accounts' sign-in
+ * for that account there (`SignInOnDialog`). The block shows the registry's view only: a
+ * sign-in started here fills its row once the registry is re-fetched, and one that finished
+ * on another e-mail is said on the dialog's Done step, not on the card (Settings › Claude
+ * accounts tracks both on its own cards).
  */
 import { Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { plural } from "../lib/plural";
 import Stepper, { Step } from "../rb/Stepper/Stepper";
+import {
+  type AccountGroup,
+  LOCAL_MACHINE,
+  accountMatrix,
+  configuredMachines,
+} from "../store/claude";
 import { type AdminStatus, type PeerOps, joinCommand, pairingSupported } from "../store/peerOps";
 import type {
   ClaudeAccountPayload,
+  ClaudeSignin,
   MachinePayload,
   ReadinessPayload,
   WaveStatePayload,
 } from "../store/types";
-import { DEFAULT_MAX_AGENTS, MachineCard, ReadinessLine, countdown } from "./MachineCard";
+import { type ControlFn, SignInOnDialog, type SignInPreset, signInPreset } from "./ClaudeAccounts";
+import {
+  DEFAULT_MAX_AGENTS,
+  type MachineAccountRow,
+  MachineCard,
+  ReadinessLine,
+  countdown,
+} from "./MachineCard";
 import { CheckRows, CopyCommand } from "./MachineRows";
 import { RepairSheet } from "./RepairSheet";
 import type { ConfigTransport } from "./configTransport";
@@ -80,6 +101,13 @@ export interface MachinesProps {
   focusSeq?: number | undefined;
   /** Open a Settings › Supervisor row by its config path (the local agents chip). */
   onOpenSetting?: ((path: string) => void) | undefined;
+  /** The Claude account groups (App's `deskAccountGroups`), the sign-ins and volleyd's control. */
+  claude?: {
+    groups: AccountGroup[];
+    signins: Record<string, ClaudeSignin>;
+    /** `null`: read-only, the accounts listed without Sign in. */
+    control: ControlFn | null;
+  };
 }
 
 const FINISHED: ReadonlySet<string> = new Set(["done", "cancelled"]);
@@ -562,6 +590,27 @@ export function Machines(p: MachinesProps) {
   const canPair = secure && admin === "admin" && p.ops !== null;
   // volleyd's own record, published as itself under its local name (never a configured host).
   const own = p.localName ? p.machines[p.localName] : undefined;
+  const [signingIn, setSigningIn] = useState<SignInPreset | null>(null);
+  const configured = configuredMachines(p.hosts ?? [], p.machines, p.localName ?? undefined);
+  const matrix = accountMatrix(p.claude?.groups ?? [], configured);
+  /** The account matrix's column for one machine. */
+  const accountRows = (op: string): MachineAccountRow[] =>
+    matrix.map(({ group: g, rows }) => {
+      const here = rows.find((c) => c.op === op);
+      return {
+        key: g.key,
+        label: g.label,
+        email: g.email,
+        plan: g.plan,
+        held: here?.member ? { label: here.member.label } : null,
+        up: here?.up ?? true,
+      };
+    });
+  const signInOn = (op: string) => (key: string) => {
+    const g = p.claude?.groups.find((x) => x.key === key);
+    const m = configured.find((x) => x.op === op);
+    if (g && m) setSigningIn(signInPreset(g, m));
+  };
   const card = (m: MachinePayload, self = false) => (
     <MachineCard
       key={m.name}
@@ -578,6 +627,8 @@ export function Machines(p: MachinesProps) {
       host={p.host}
       onRemoved={setNotice}
       signIn={self ? undefined : p.signIn?.(m.name)}
+      accountRows={p.claude ? accountRows(self ? LOCAL_MACHINE : m.name) : undefined}
+      onSignInOn={p.claude?.control ? signInOn(self ? LOCAL_MACHINE : m.name) : undefined}
       onCountdown={onCountdown}
       onOpenLocalAgents={
         self && p.onOpenSetting ? () => p.onOpenSetting?.("fleet.local_agents") : undefined
@@ -624,6 +675,15 @@ export function Machines(p: MachinesProps) {
           host={p.host ?? ""}
           hubUp={p.hubUp}
           onClose={() => setAdding(false)}
+        />
+      )}
+      {signingIn && p.claude?.control && (
+        <SignInOnDialog
+          key={`${signingIn.key}@${signingIn.machine}`}
+          preset={signingIn}
+          signins={p.claude.signins}
+          control={p.claude.control}
+          onClose={() => setSigningIn(null)}
         />
       )}
       {!canPair && (

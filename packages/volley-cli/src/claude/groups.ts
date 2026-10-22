@@ -89,6 +89,8 @@ export interface AccountGroup {
   weekly: Reading | null;
   stale: Reading[];
   members: Member[];
+  /** The configured machines with no login on the account: `local` first, then each peer. */
+  missing: string[];
 }
 
 interface Login extends Member, Identity {
@@ -190,7 +192,14 @@ function pickWindow(list: Login[], key: WindowKey): { w: Reading | null; stale: 
   return { w: strip(best), stale };
 }
 
+/** The machines volleyd knows of: its own, then every paired machine's record (T0's `machines[]`). */
+const configured = (r: ListResult) => [
+  LOCAL_MACHINE,
+  ...(r.machines ?? []).filter((m) => m.kind !== "supervisor").map((m) => m.name),
+];
+
 export function groupAccounts(r: ListResult, records: UsageRecord[]): AccountGroup[] {
+  const machines = configured(r);
   const byKey = new Map<string, Login[]>();
   for (const l of logins(r, records)) {
     const key = l.email !== undefined ? normalizeEmail(l.email) : l.account;
@@ -230,6 +239,7 @@ export function groupAccounts(r: ListResult, records: UsageRecord[]): AccountGro
       weekly: week.w,
       stale: [...five.stale, ...week.stale],
       members,
+      missing: machines.filter((name) => !members.some((m) => m.machine === name)),
     };
   });
 }
@@ -307,6 +317,7 @@ export function renderGroups(
       out += `  ${cols.join("   ").trimEnd()}\n`;
       if (m.url !== undefined) out += `    sign in: ${m.url}\n`;
     }
+    if (g.missing.length > 0) out += `  not on: ${g.missing.map(where).join(", ")}\n`;
   }
   return out;
 }

@@ -162,8 +162,50 @@ describe("groupAccounts", () => {
   });
 });
 
+describe("groupAccounts › the machines missing an account", () => {
+  const peerB = { name: "peer-b", kind: "peer", claude: "signed_out" };
+
+  it("names each configured machine with no login on the group, this machine first", () => {
+    const [g] = groupAccounts(result({ machines: [...(result().machines ?? []), peerB] }), [work]);
+    expect(g?.missing).toEqual(["peer-b"]);
+    const r = result({
+      accounts: [],
+      machines: [{ name: "peer-a", kind: "peer", claude: "signed_in", email: EMAIL }, peerB],
+    });
+    expect(groupAccounts(r, [])[0]?.missing).toEqual(["local", "peer-b"]);
+  });
+
+  it("a group on every machine misses none; the supervisor's own record is not a peer", () => {
+    expect(groupAccounts(result(), [work])[0]?.missing).toEqual([]);
+  });
+});
+
 describe("renderGroups", () => {
   const NOW = Date.parse("2026-10-18T14:08:00.000Z");
+
+  it("prints `not on:` under a group missing a configured machine, nothing when complete", () => {
+    const peerB = { name: "peer-b", kind: "peer", claude: "signed_out" };
+    const gap = renderGroups(
+      groupAccounts(result({ machines: [...(result().machines ?? []), peerB] }), [work, peer]),
+      { now: NOW, showEmail: false },
+    );
+    expect(gap).toMatch(/peer-a +default login[^\n]*\n {2}not on: peer-b\n/);
+    const full = renderGroups(groupAccounts(result(), [work, peer]), {
+      now: NOW,
+      showEmail: false,
+    });
+    expect(full).not.toContain("not on:");
+  });
+
+  it("a group missing this machine says so by name", () => {
+    const r = result({
+      accounts: [],
+      machines: [{ name: "peer-a", kind: "peer", claude: "signed_in", email: EMAIL }],
+    });
+    expect(renderGroups(groupAccounts(r, []), { now: NOW, showEmail: false })).toContain(
+      "  not on: this machine\n",
+    );
+  });
 
   it("masks the e-mail unless asked, and prints machines, usage and stale readings", () => {
     const text = renderGroups(groupAccounts(result(), [work, peer]), {

@@ -304,6 +304,159 @@ export function accountGroups(
   });
 }
 
+/** How the primary's card names it: never just "primary", which reads as one more profile. */
+export const PRIMARY_LABEL = "This machine's Claude login";
+
+/**
+ * The list with this machine's own login first. It is always there (agents run on it by
+ * default), but it has a usage record only once it reports usage, so until then one is made up
+ * for it: an owner who adds a profile must not read the missing card as their login gone. Its
+ * plan is the one volleyd reports (its record's, else `claude_accounts`'s), never a guess.
+ */
+export function withPrimary(list: AccountInfo[], plan: string | undefined): AccountInfo[] {
+  const own = list.find((a) => a.id === PRIMARY);
+  const primary: AccountInfo =
+    own === undefined
+      ? {
+          id: PRIMARY,
+          label: PRIMARY_LABEL,
+          machine: LOCAL_MACHINE,
+          plan: plan ?? null,
+          email: null,
+          org: null,
+          fiveHour: null,
+          weekly: null,
+          sampledAt: null,
+          signedIn: true,
+          agents: [],
+          waves: [],
+        }
+      : {
+          ...own,
+          label: own.label === PRIMARY ? PRIMARY_LABEL : own.label,
+          plan: own.plan ?? plan ?? null,
+        };
+  return [primary, ...list.filter((a) => a !== own)];
+}
+
+/**
+ * The Desk's account groups, the one grouping Settings › Claude accounts and Settings › Machines
+ * share: the usage records merged over the registry, this machine's own login first, grouped by
+ * e-mail.
+ */
+export function deskAccountGroups(
+  records: Record<string, ClaudeAccountPayload> | undefined,
+  registry: readonly RegistryAccount[],
+  primaryPlan: string | undefined,
+  machines: Record<string, MachinePayload> | undefined,
+  localName: string | undefined,
+): AccountGroup[] {
+  return accountGroups(
+    withPrimary(accountList(records, registry), primaryPlan),
+    machines,
+    localName,
+  );
+}
+
+/** How a row names a machine: volleyd's own is "this machine". */
+export const machineName = (m: string) => (m === LOCAL_MACHINE ? "this machine" : m);
+
+/** A configured machine: one an account can be signed in on. */
+export interface MatrixMachine {
+  /** How a row names it ("this machine" for volleyd's own). */
+  name: string;
+  /** Its host name, when known: what a suggested label names it by (`name` otherwise). */
+  host?: string;
+  /** `claude_account_add`'s `machine`: `LOCAL_MACHINE` or the peer's host name. */
+  op: string;
+  /** Its tunnel is up (this machine always is). */
+  up: boolean;
+  /** A paired host that has published no machine record yet: offered, but its state is unknown. */
+  unknown?: boolean;
+}
+
+/** The configured machines: volleyd's own first, then each paired host (`_config` `hosts`). */
+export function configuredMachines(
+  hosts: readonly string[],
+  machines: Record<string, MachinePayload> | undefined,
+  localName: string | undefined,
+): MatrixMachine[] {
+  return [
+    {
+      name: machineName(LOCAL_MACHINE),
+      ...(localName ? { host: localName } : {}),
+      op: LOCAL_MACHINE,
+      up: true,
+    },
+    ...hosts
+      .filter((h) => h !== localName)
+      .map((h) => ({
+        name: h,
+        op: h,
+        up: machines?.[h]?.tunnel !== "down",
+        ...(machines?.[h] === undefined ? { unknown: true } : {}),
+      })),
+  ];
+}
+
+/** One row of an account's machine list: a login there, or a configured machine without one. */
+export interface MatrixCell {
+  name: string;
+  op: string;
+  up: boolean;
+  member: Member | null;
+}
+
+/** One account across the configured machines. */
+export interface AccountMatrixRow {
+  group: AccountGroup;
+  /** Every login on the account (on a configured machine or not). */
+  present: Member[];
+  /** The configured machines holding none, in configured order. */
+  missing: MatrixMachine[];
+  /** How many configured machines hold it. */
+  coverage: { held: number; total: number };
+  /** One row per configured machine (each of its logins, else one empty row), in configured
+   *  order, then the logins on machines no longer configured. */
+  rows: MatrixCell[];
+}
+
+/** A pure view over `accountGroups`: per account, which configured machines hold it. */
+export function accountMatrix(
+  groups: readonly AccountGroup[],
+  machines: readonly MatrixMachine[],
+): AccountMatrixRow[] {
+  return groups.map((group) => {
+    const on = (op: string) => group.members.filter((m) => m.machine === op);
+    const missing = machines.filter((m) => on(m.op).length === 0);
+    const ops = new Set(machines.map((m) => m.op));
+    const rows: MatrixCell[] = [
+      ...machines.flatMap((m): MatrixCell[] => {
+        const here = on(m.op);
+        const cell = { name: m.name, op: m.op, up: m.up };
+        return here.length
+          ? here.map((member) => ({ ...cell, member }))
+          : [{ ...cell, member: null }];
+      }),
+      ...group.members
+        .filter((m) => !ops.has(m.machine))
+        .map((member) => ({
+          name: machineName(member.machine),
+          op: member.machine,
+          up: true,
+          member,
+        })),
+    ];
+    return {
+      group,
+      present: group.members,
+      missing,
+      coverage: { held: machines.length - missing.length, total: machines.length },
+      rows,
+    };
+  });
+}
+
 /** The account a group's Use-for answers with: its login on volleyd's own machine, if any. */
 export function moveTargetOf(g: AccountGroup): string | null {
   return (
