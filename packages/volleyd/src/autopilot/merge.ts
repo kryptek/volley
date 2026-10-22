@@ -126,10 +126,11 @@ export function isRefusalReason(v: unknown): v is RefusalReason {
 /** What `gh pr merge`'s refusal says, from its stderr. Pure. */
 export function refusalReason(stderr: string): RefusalReason {
   if (/head branch was modified|match-head-commit/i.test(stderr)) return "head_moved";
-  // "Base branch was modified": the release branch moved during the merge.
+  // "Base branch was modified": the release branch moved during the merge. Quoted
+  // text (a check's name, e.g. "merge-conflict-scan") never reads as behind.
   if (
-    /base branch was modified|out of date|not up to date|behind|conflict|cannot be cleanly created/i.test(
-      stderr,
+    /base branch was modified|out of date|not up to date|\bbehind\b|\bconflicts?\b|cannot be cleanly created/i.test(
+      stderr.replace(/"[^"]*"/g, '""'),
     )
   )
     return "behind";
