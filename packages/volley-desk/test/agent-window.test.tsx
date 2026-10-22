@@ -1,8 +1,6 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import axe from "axe-core";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import App from "../src/App";
-import { DeskStoreProvider } from "../src/store/context";
+import { describe, expect, it, vi } from "vitest";
 import { demoMessages, demoReviewer } from "../src/store/fixtures";
 import { UNASSIGNED, initialState, reduceAll } from "../src/store/reducer";
 import type { DecisionPayload, DeskMessage, DeskState } from "../src/store/types";

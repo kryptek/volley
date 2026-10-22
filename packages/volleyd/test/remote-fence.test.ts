@@ -1139,7 +1139,9 @@ describe("a profile the supervisor created on a paired machine (#283): the REMOT
     expect(allowed(step("chmod", "700", "/path/to/home/.claude"))).toThrow(FenceError);
     expect(allowed(step("chmod", "755", PROFILE))).toThrow(FenceError);
     expect(allowed(step("chmod", "700", "/path/to/home/.volley/claude"))).toThrow(FenceError);
-    expect(allowed(step("chmod", "700", "/path/to/home/.volley/claude/../work"))).toThrow(FenceError);
+    expect(allowed(step("chmod", "700", "/path/to/home/.volley/claude/../work"))).toThrow(
+      FenceError,
+    );
   });
 });
 
@@ -1195,9 +1197,9 @@ describe("a profile on a paired machine in its launch.sh (account balancing)", (
     expect(() => sealLaunchScript(WT, script("/path/to/home2/.volley/claude/work"), HOST)).toThrow(
       FenceError,
     );
-    expect(() => sealLaunchScript(WT, script("/path/to/home/.volley/claude/unsigned"), HOST)).toThrow(
-      FenceError,
-    );
+    expect(() =>
+      sealLaunchScript(WT, script("/path/to/home/.volley/claude/unsigned"), HOST),
+    ).toThrow(FenceError);
     expect(() => sealLaunchScript(WT, script("/path/to/home/.claude"), HOST)).toThrow(FenceError);
     // no host on the script: the local profile rule, which this dir never passes
     expect(() => assertAllowed(SSH, onHost(write(script(DIR)), null))).toThrow(FenceError);
@@ -1218,7 +1220,12 @@ describe("a profile on a paired machine in its launch.sh (account balancing)", (
     ];
     expect(() => assertAllowed(SSH, { remote: { steps } })).not.toThrow();
     for (const bad of [
-      step("mv", "-f", `${DIR}/.claude.json.volleyd.tmp`, "/path/to/home/.volley/claude/x/.claude.json"),
+      step(
+        "mv",
+        "-f",
+        `${DIR}/.claude.json.volleyd.tmp`,
+        "/path/to/home/.volley/claude/x/.claude.json",
+      ),
       step("mv", "-f", "/tmp/.claude.json.volleyd.tmp", "/tmp/.claude.json"),
     ])
       expect(() => assertAllowed(SSH, remote(bad))).toThrow(FenceError);

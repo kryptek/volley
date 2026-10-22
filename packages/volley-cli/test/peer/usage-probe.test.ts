@@ -239,7 +239,11 @@ describe("logins and credential sources", () => {
 
   it("macOS reads the Keychain item: the profile's hashed service, the default's unsuffixed", async () => {
     const f = fake({ platform: "darwin", keychain: credentialJson() });
-    const work: Login = { profile: "work", dir: "/path/to/home/.volley/claude/work", isDefault: false };
+    const work: Login = {
+      profile: "work",
+      dir: "/path/to/home/.volley/claude/work",
+      isDefault: false,
+    };
     expect(await readCredential(f.deps, work, NOW)).toEqual({
       token: TOKEN,
       expiresAt: at(60).getTime(),

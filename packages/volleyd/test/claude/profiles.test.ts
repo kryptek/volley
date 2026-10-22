@@ -190,7 +190,11 @@ describe("selectAccount: task > wave > config default > primary", () => {
         }))
         .sort((a, b) => (b.headroom ?? 0) - (a.headroom ?? 0)),
     );
-    expect(sel).toMatchObject({ id: "far", dir: "/path/to/home/.volley/claude/far", source: "balance" });
+    expect(sel).toMatchObject({
+      id: "far",
+      dir: "/path/to/home/.volley/claude/far",
+      source: "balance",
+    });
     expect(sel.why).toBe("far: most headroom on peer-a (5h 12%; primary@peer-a 5h 90%)");
     // a local profile is not a candidate there, nor pinnable
     addAccount(r2, { label: "home" }, NOW);
