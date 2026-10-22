@@ -2703,6 +2703,22 @@ next_poll_at, pr }`, the task's `why_waiting` reads `CI pending on <sha7> (n/m c
 `pr` carries `{ number, head_sha, ci: running, checks }` (what `volleyd status --json` prints);
 CI green journals `ci_green` and clears it.
 
+**Reading CI.** A head's runs are read with one call that lists no workflows, `gh api
+repos/{owner}/{repo}/actions/runs?head_sha=<head>&per_page=50`, which volleyd runs itself in the
+wave repo (as it runs a merge), whatever machine the task is on; `gh run view <id> --json jobs`
+is read for failed runs only. Without a wave repo it falls back to `gh run list --commit` in the
+task's worktree. An answer that cannot be read (a non-zero exit, output that is not JSON) is CI
+state `unknown`, never "no CI": it opens no decision, neither starts nor advances the
+`ci_none_grace_ms` clock, and is re-polled like running CI. The hold journals `ci_pending {
+reason: ci_unreadable, error }` and the task reads `CI unreadable (<error>), retrying`. A
+rate-limited answer (`rate limit`, HTTP 403 or 429) also backs the wave off: none of its CI calls
+(a head's runs, the release branch's for a classification) for `ci_rate_limit_backoff_ms`
+(default 300000). `gh` prints no response headers, so that tunable is the wait in practice; a
+`Retry-After` in its output, should one appear, lengthens it. The backoff is kept per wave (the
+wave's repo): two waves on one repo each back off on their own answers. The first
+one journals `alarm_raised { alarm: github_rate_limited, retry_at }`, and the first readable
+answer after it journals `alarm_cleared`.
+
 **Stage groups.** While a parallel group runs, the task's `stage` stays the closed enum (its
 first stage, `spec_review`) and the state adds `stage_label: "review (spec + quality)"` and
 `stage_group: [{ role, agent_id, state: pending|running|done|retired }]`; `volleyd status`

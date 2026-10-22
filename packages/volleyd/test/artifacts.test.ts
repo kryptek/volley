@@ -379,6 +379,103 @@ describe("superseded runs (latest run per workflow and trigger event wins)", () 
   });
 });
 
+describe("unreadable CI is unknown, never `none` (#310)", () => {
+  const RATE = "HTTP 403: API rate limit exceeded for user ID 1. (https://api.github.com/x)";
+
+  it("a failed `gh run list` → state unknown with the error; the outcome is an unreadable hold", async () => {
+    const fake = allGood().on(["gh", "run", "list"], { code: 1, stderr: `${RATE}\n` });
+    const report = await verifyArtifacts(fake.exec, SPEC);
+    expect(report).toMatchObject({
+      kind: "ok",
+      ci: { state: "unknown", runs: [], error: RATE, rate_limited: {} },
+    });
+    expect(artifactOutcome("T1", "implementer", report)).toEqual({
+      kind: "ci_pending",
+      state: "unknown",
+      head: HEAD,
+      unreadable: true,
+      error: RATE,
+    });
+  });
+
+  it("unparseable output and a failed `gh run view` are unknown too; a 502 is not a rate limit", async () => {
+    const garbage = allGood().on(["gh", "run", "list"], { stdout: "<html>oops" });
+    expect(await verifyArtifacts(garbage.exec, SPEC)).toMatchObject({
+      ci: { state: "unknown" },
+    });
+    const red = JSON.parse(fx("gh-run-list-green.json"));
+    red[0].conclusion = "failure";
+    const view = allGood()
+      .on(["gh", "run", "list"], { stdout: JSON.stringify(red) })
+      .on(["gh", "run", "view"], { code: 1, stderr: "HTTP 502: Bad Gateway" });
+    const report = await verifyArtifacts(view.exec, SPEC);
+    expect(report).toMatchObject({ ci: { state: "unknown", error: "HTTP 502: Bad Gateway" } });
+    expect(report.kind === "ok" && report.ci.rate_limited).toBeUndefined();
+  });
+
+  it("a 429 with Retry-After carries the wait", async () => {
+    const fake = allGood().on(["gh", "run", "list"], {
+      code: 1,
+      stderr: "HTTP 429: Too Many Requests\nRetry-After: 120\n",
+    });
+    expect(await verifyArtifacts(fake.exec, SPEC)).toMatchObject({
+      ci: { state: "unknown", rate_limited: { retry_after_ms: 120_000 } },
+    });
+  });
+
+  it("with runs_via, runs are read by head_sha (one gh api GET) through the supervisor's exec", async () => {
+    const api = fakeExec().on(["gh", "api"], {
+      stdout: JSON.stringify([
+        {
+          id: 501,
+          name: "CI",
+          status: "completed",
+          conclusion: "success",
+          html_url: "https://github.com/example/repo/actions/runs/501",
+          head_sha: HEAD,
+          event: "pull_request",
+          run_attempt: 1,
+          workflow_id: 9,
+        },
+      ]),
+    });
+    const fake = allGood();
+    const report = await verifyArtifacts(fake.exec, {
+      ...SPEC,
+      runs_via: { exec: api.exec, cwd: "/repo" },
+    });
+    expect(report).toMatchObject({
+      kind: "ok",
+      ci: {
+        state: "green",
+        runs: [
+          {
+            id: 501,
+            name: "CI",
+            status: "completed",
+            conclusion: "success",
+            url: "https://github.com/example/repo/actions/runs/501",
+          },
+        ],
+      },
+    });
+    // The task's exec lists no runs; the supervisor's reads them in the wave repo.
+    expect(fake.argvs(["gh", "run"])).toEqual([]);
+    const [argv] = api.argvs(["gh", "api"]);
+    expect(argv?.[2]).toBe(`repos/{owner}/{repo}/actions/runs?head_sha=${HEAD}&per_page=50`);
+    expect(api.calls[0]?.opts.cwd).toBe("/repo");
+  });
+
+  it("with runs_via, a 403 from gh api is unknown", async () => {
+    const api = fakeExec().on(["gh", "api"], { code: 1, stderr: RATE });
+    const report = await verifyArtifacts(allGood().exec, {
+      ...SPEC,
+      runs_via: { exec: api.exec, cwd: "/repo" },
+    });
+    expect(report).toMatchObject({ ci: { state: "unknown", rate_limited: {} } });
+  });
+});
+
 describe("rebase check", () => {
   const TIP = "3333333333333333333333333333333333333333";
   it("current when the merge-base with origin/<release> is its tip; else behind by N", async () => {
@@ -582,6 +679,17 @@ describe("probeReleaseCi", () => {
     expect(await probeReleaseCi(broken.exec, RELEASE)).toEqual({
       state: "unknown",
       failing_tests: [],
+      error: "HTTP 502",
+    });
+    const limited = fakeExec().on(["gh", "run", "list"], {
+      code: 1,
+      stderr: "HTTP 403: API rate limit exceeded for user ID 1.",
+    });
+    expect(await probeReleaseCi(limited.exec, RELEASE)).toEqual({
+      state: "unknown",
+      failing_tests: [],
+      error: "HTTP 403: API rate limit exceeded for user ID 1.",
+      rate_limited: {},
     });
   });
 
