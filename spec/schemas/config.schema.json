@@ -150,6 +150,13 @@
           "default": 1800,
           "description": "Cap on the gap before a re-opened agent_stalled decision: the n-th re-open waits idle_grace_s × 2^n after the answer, at most this long."
         },
+        "blocked_undecided_stall_ms": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 86400000,
+          "default": 300000,
+          "description": "Milliseconds an agent whose retained status is blocked may go with no decision naming it (open, or answered for that status) before it is stalled (an agent_stalled decision: respawn | stop task). Optional in the retained payload: a supervisor that predates it omits it."
+        },
         "tool_in_flight_max_s": {
           "type": "integer",
           "minimum": 60,
