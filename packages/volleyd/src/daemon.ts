@@ -1097,6 +1097,8 @@ export class Daemon {
   private readonly terminals = new Map<string, TerminalSeen & { wave: WaveId }>();
   /** Per agent: the seq of the latest wave journal event naming it (watchdog.ts namedAgent). */
   private readonly lastNamed = new Map<string, number>();
+  /** `<wave>/<task>` of each task whose host reached a resolver as `auto` (one alarm each per daemon run). */
+  private readonly autoHostAlarmed = new Set<string>();
   /** `<agent>@<wall_time>` of each terminal status the watchdog has alarmed on. */
   private readonly terminalAlarmed = new Set<string>();
   /** Answered control requests by `<sender>/<correlation_id>`, for QoS 1 redelivery. */
@@ -2749,7 +2751,7 @@ export class Daemon {
 
   /** The machine task `id` runs on (its own machine under its name); undefined: not placed yet. */
   private machineOfTask(rec: WaveRecord, id: TaskId): string | undefined {
-    const host = rec.wave?.tasks[id]?.host;
+    const host = this.ranDef(rec, id)?.host;
     if (host === undefined || host === AUTO_HOST) return undefined;
     return host === LOCAL_HOST ? this.config.localName() : host;
   }
@@ -3523,6 +3525,8 @@ export class Daemon {
     this.heldBack.delete(wave);
     this.issueFiles.delete(wave);
     this.legacyEndedAt.delete(wave);
+    for (const key of this.autoHostAlarmed)
+      if (key.startsWith(`${wave}/`)) this.autoHostAlarmed.delete(key);
     this.pipelines.delete(wave);
     this.config.clearWave(wave);
     await this.publishArchiveIndex();
@@ -4242,8 +4246,45 @@ export class Daemon {
   // Remote hosts (T15): ssh + tmux on a second machine, broker through a reverse tunnel.
   // -------------------------------------------------------------------------------------------
 
+  /**
+   * Task `id`'s definition in the effective plan, on the host its agents were spawned on (its
+   * `host_actual`, #323): a plan version that writes another host for a started task never
+   * moves it. The plan's inline `host:` names the plan's host, not that one: it is dropped.
+   */
+  private ranDef(rec: WaveRecord | undefined, id: TaskId): WaveTask | undefined {
+    const def = rec?.wave?.tasks[id];
+    const actual = rec?.state?.tasks.find((t) => t.id === id)?.host_actual;
+    if (def === undefined || actual === undefined || actual === def.host) return def;
+    const { host_spec: _s, ...rest } = def;
+    return { ...rest, host: actual };
+  }
+
+  /**
+   * Task `t` reached a host resolver as `auto` (never placed, never spawned): an alarm, once per
+   * task per daemon run (the set is in memory), and the caller falls back to the supervisor's own host.
+   */
+  private autoHostReached(wave: WaveId, t: WaveTask): boolean {
+    if (t.host !== AUTO_HOST) return false;
+    const key = `${wave}/${t.id}`;
+    if (!this.autoHostAlarmed.has(key)) {
+      this.autoHostAlarmed.add(key);
+      this.append(wave, {
+        type: "alarm_raised",
+        task: t.id,
+        data: {
+          alarm: "host_auto_unresolved",
+          message: `host 'auto' reached the host resolver for ${t.id}: its checks run on the supervisor's own host`,
+        },
+      }).catch((e: unknown) =>
+        this.log(`host_auto_unresolved ${key}: ${e instanceof Error ? e.message : String(e)}`),
+      );
+    }
+    return true;
+  }
+
   /** The task's remote host: config `hosts.<name>` ← its inline `host:`. Throws if unresolvable. */
   private remoteHost(wave: WaveId, t: WaveTask): RemoteHost {
+    if (t.host === AUTO_HOST) throw new Error(`host 'auto' reached the host resolver for ${t.id}`);
     return this.remoteBySpec(
       resolveRemoteHost(t.host, t.host_spec, this.config.effective(wave).hosts),
     );
@@ -4279,10 +4320,11 @@ export class Daemon {
   private checkTunnels(wave: WaveId): void {
     const rec = this.waves.get(wave)?.record;
     for (const t of rec?.state?.tasks ?? []) {
-      const def = rec?.wave?.tasks[t.id];
+      const def = this.ranDef(rec, t.id);
       if (
         def === undefined ||
         def.host === "local" ||
+        def.host === AUTO_HOST ||
         t.stage === "done" ||
         t.stage === "cancelled"
       )
@@ -5555,8 +5597,8 @@ export class Daemon {
       exec: this.host.exec,
       // A task on a remote host (T15): its worktrees, and so its git / gh checks, are on the box.
       execFor: (task) => {
-        const t = log.record.wave?.tasks[task];
-        return t === undefined || t.host === "local"
+        const t = this.ranDef(log.record, task);
+        return t === undefined || t.host === "local" || this.autoHostReached(wave, t)
           ? this.host.exec
           : this.remoteHost(wave, t).exec;
       },
@@ -5601,6 +5643,7 @@ export class Daemon {
       mergeRetryMax: () => this.config.get("autopilot.merge_retry_max", wave) as number,
       // --- Self-healing CI (SPEC §4.6.16): an infra incident's wait, GitHub's status page. ---
       incidentWaitMaxS: () => this.config.get("autopilot.incident_wait_max_s", wave) as number,
+      ciRateLimitBackoffMs: () => this.config.get("ci_rate_limit_backoff_ms", wave) as number,
       statusPage: this.githubStatus(),
       deleteBranch: () => this.config.get("autopilot.delete_branch", wave) as boolean,
       releaseLock: releaseLockOn(this.releaseLocks),
@@ -6866,8 +6909,9 @@ export class Daemon {
 
   /** The host (and a remote one's forward) a task's agents run on; local when unresolvable. */
   private hostOfTask(wave: WaveId, task: TaskId): [Host, string?] {
-    const def = this.waves.get(wave)?.record.wave?.tasks[task];
-    if (def === undefined || def.host === "local") return [this.host];
+    const def = this.ranDef(this.waves.get(wave)?.record, task);
+    if (def === undefined || def.host === "local" || this.autoHostReached(wave, def))
+      return [this.host];
     try {
       const remote = this.remoteHost(wave, def);
       return [remote, forwardOf(remote)];

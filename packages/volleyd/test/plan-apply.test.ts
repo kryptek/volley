@@ -12,6 +12,7 @@ import {
   planDecisionId,
   taskActivity,
 } from "../src/plan-apply";
+import { formatDiff } from "../src/plan-diff";
 import { type WaveRecord, replay } from "../src/reducer";
 import { spawnAgent } from "../src/spawn";
 import type { JournalEvent, NewEvent, TaskState, Wave } from "../src/types";
@@ -106,6 +107,52 @@ describe("applyPlan", () => {
     expect(
       schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", after.state)),
     ).toEqual([]);
+  });
+
+  it("switching to placement: auto keeps a started task's host and says so (#323)", () => {
+    const auto = parseWaveFile(`${text("v1.yaml")}placement: auto\n`);
+    const { res, after } = applyTo(midFlight(), auto);
+    // T3 and T4 implement on the supervisor's machine, T1 is done there: their host stays.
+    expect(res.diff.hosts_kept).toEqual([
+      { task: "T1", kept: "local", planned: "auto", running: false },
+      { task: "T3", kept: "local", planned: "auto", running: true },
+      { task: "T4", kept: "local", planned: "auto", running: true },
+    ]);
+    expect(formatDiff(res.diff)).toContain(
+      "T3: host kept local (already running; new plan says auto)",
+    );
+    expect(after.wave?.tasks.T3?.host).toBe("local");
+    expect(taskOf(after, "T3")?.host_planned).toBe("auto");
+    // T2 and T5 never started: placement places them.
+    expect(after.wave?.tasks.T2?.host).toBe("auto");
+    expect(after.wave?.tasks.T5?.host).toBe("auto");
+    expect(after.plan?.tasks.T3?.host).toBe("auto"); // the file as submitted
+  });
+
+  it("a placed, spawned task under an unchanged placement: auto is not reported as kept (#323)", () => {
+    const auto = parseWaveFile(`${text("v1.yaml")}placement: auto\n`);
+    const j = journal();
+    j.push({ type: "wave_submitted", data: { wave: auto, owner: null } });
+    for (const id of auto.task_order) {
+      j.push({ type: "task_queued", task: id, data: { issue: auto.tasks[id]?.issue } });
+    }
+    j.push({
+      type: "task_placed",
+      task: "T2",
+      data: { task: "T2", host: "box", score: 0.8, candidates: [], by: "auto" },
+    });
+    j.push({ type: "task_admitted", task: "T2", data: {} });
+    j.push({
+      type: "agent_spawned",
+      task: "T2",
+      data: { role: "implementer", agent_id: "w-plan-t2-implementer-1", issue: 2, host: "box" },
+    });
+    j.push({ type: "stage_entered", task: "T2", data: { stage: "implement" } });
+    const { res, after } = applyTo(j, parseWaveFile(`${text("v2.yaml")}placement: auto\n`));
+    expect(res.events[0]?.type).toBe("wave_versioned");
+    expect(res.diff.hosts_kept).toBeUndefined();
+    expect(after.wave?.tasks.T2?.host).toBe("box");
+    expect(taskOf(after, "T2")?.host_planned).toBeUndefined();
   });
 
   it("removed queued task → cancelled", () => {
