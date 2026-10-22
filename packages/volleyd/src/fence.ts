@@ -177,7 +177,8 @@ import { AGENT_BRANCH } from "./worktree";
  *     only, only `<abs>/.volley/claude/<acct>` (a profile the supervisor created there),
  *     rendered as one single-quoted `CLAUDE_CONFIG_DIR=…` before the argv
  *   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
- *     `/info/exclude`, `<dir>/.volley/<name>` for a VOLLEY_READS name, or a sign-in dir's `url`
+ *     `/info/exclude`, `<dir>/.volley/<name>` for a VOLLEY_READS name, a worktree's
+ *     `<abs dir>/.mcp.json` (no `..` segment), or a sign-in dir's `url`
  *   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
  *     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
  *     (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
@@ -1731,7 +1732,16 @@ function writablePath(path: string): boolean {
 
 /** The files volleyd reads on a remote host (the brief, brief-extra, the exclude, the config). */
 function readablePath(path: string): boolean {
-  return path === REMOTE_CLAUDE_JSON || volleyPath(path, VOLLEY_READS, ["/info/exclude"]);
+  return (
+    path === REMOTE_CLAUDE_JSON ||
+    volleyPath(path, VOLLEY_READS, ["/info/exclude"]) ||
+    worktreeMcpJson(path)
+  );
+}
+
+/** A worktree's own `.mcp.json` (the spawn's MCP approval check reads it): absolute, no `..`. */
+function worktreeMcpJson(path: string): boolean {
+  return absPath(path) && path.endsWith("/.mcp.json") && !path.split("/").includes("..");
 }
 
 /** One single-quoted bash word as `shq` renders it. */

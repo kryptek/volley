@@ -91,6 +91,9 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ["chmod", "700", "/src/r/.git/hooks/post-checkout"],
     ["cat", "/src/r/.volley/config"],
     ["cat", "/src/r/.volley/x/secret"],
+    ["cat", ".mcp.json"],
+    ["cat", "/wt/x/../../path/to/home/.mcp.json"],
+    ["cat", "/wt/x/.mcp.json.bak"],
     // typed text that needs a token (an approved model switch, a sealed launch script)
     ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", "/model claude-sonnet-5-5"],
     ["tmux", "send-keys", "-t", "=w1-T1-implementer:", "-l", "--", LAUNCH_COMMAND],
@@ -155,6 +158,8 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ["chmod", "600", "/wt/x/ISSUE.md"],
     ["cat", BRIEF],
     ["cat", "/src/r/.volley/brief-extra.md"],
+    // the spawn's MCP approval check reads the worktree's own .mcp.json
+    ["cat", "/wt/x/.mcp.json"],
     ["nc", "-z", "127.0.0.1", "1883"],
   ];
 
