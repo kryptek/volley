@@ -72,7 +72,7 @@ describe("stop() leaves $VOLLEYD_HOME quiet", () => {
     expect(existsSync(join(marks, "up"))).toBe(true);
     const upAt = Date.now();
     await daemon.stop();
-    // The stop has to land before the grandchild's write, or the check below proves nothing.
+    // real process: the stop has to land before the grandchild's write, or the check below proves nothing.
     expect(Date.now() - upAt).toBeLessThan(LATE_WRITE_MS);
     await quietAfter();
     // real process: past the grandchild's late write, had it survived the stop.
