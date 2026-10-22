@@ -156,6 +156,11 @@ export interface Tunables {
   archive_ended_after_h: number;
   /** A complete wave is archived as soon as its `wave_complete` decision is answered. */
   archive_on_ack: boolean;
+  /**
+   * After a rate-limited GitHub answer, the wave's pipeline makes no CI call for this long (or a
+   * `Retry-After` in `gh`'s output, if longer; `gh` prints no headers, so rarely).
+   */
+  ci_rate_limit_backoff_ms: number;
 }
 
 /** Who merges a gated PR: volleyd itself (`auto`) or a human (`manual`). */
@@ -388,6 +393,10 @@ export interface TaskState {
   why_waiting?: string;
   /** The remote host the task's agents run on (absent for `local`). */
   host?: string;
+  /** The host the task's agents were spawned on (`agent_spawned`): a plan version never moves it. */
+  host_actual?: string;
+  /** The host the current plan version writes for the task, while it differs from `host_actual`. */
+  host_planned?: string;
   /** Why the task's host, a paired machine, is down (machines.ts); absent while it is up. */
   host_down?: string;
   /** Set while the screen capture of one of the task's agents is backed off (screen-publisher.ts). */

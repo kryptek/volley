@@ -2229,6 +2229,17 @@ rename), and the reducer folds it into the wave state's `tasks[].placement` and 
 unscored, with that one candidate. `volleyd spawn` refuses a task that is still `auto` (it is
 placed when admitted).
 
+**Switching a running wave to placement.** A task that has spawned keeps the host it runs on: a
+plan version that writes another `host:` for it (say `placement: auto` on an in-flight wave) never
+moves it. The reducer records that host from the task's `agent_spawned` as `tasks[].host_actual`,
+and the plan's own as `tasks[].host_planned` while they differ; every later role and check of the
+task (`verify`, `check_merged`) runs on `host_actual`. The tasks that have not started are placed.
+A placed task the new version still leaves to `auto` is where placement put it: no
+`host_planned`, and `volleyd run` reports no kept host for it. A task whose host is still `auto`
+when a check needs it (never placed, never spawned) never reaches the host resolver: volleyd
+raises `alarm_raised { alarm: "host_auto_unresolved" }` once per task per daemon run and runs that
+check on its own host.
+
 **Eligible.** The candidates are volleyd's own machine and every configured host with a machine
 record. A machine is eligible when its readiness verdict is `ready`, it is not draining, `placed`
 is under `max_agents`, its load per core (the higher of its 1- and 5-minute load averages) is at
@@ -2599,6 +2610,7 @@ holds (running, paused or awaiting a decision) submits the file as that wave's *
 | `after` changed | the new dependencies apply (`waiting_on` re-evaluated) | not paused (it already started); its dependents re-evaluate |
 | `issue` changed | applies | keeps the old issue; decision `plan_change` — `restart` / `let finish` |
 | `pipeline` / `model` changed | applies | applies to stages not yet started; running agents keep theirs |
+| `host` changed (e.g. the wave switched to `placement: auto`) | applies (an `auto` task is placed when admitted) | keeps the host it was spawned on; `volleyd run` prints `T3: host kept local (already running; new plan says auto)` |
 
 Tasks that finished (`merge_ready`, `done`) are left as they are. The scheduler and spawner use the
 *effective* plan: the submitted one, plus removed in-flight tasks and in-flight tasks' old issues,
@@ -2698,6 +2710,22 @@ every change of head or counts) journals `ci_pending { role, sha, checks: { done
 next_poll_at, pr }`, the task's `why_waiting` reads `CI pending on <sha7> (n/m checks)` and its
 `pr` carries `{ number, head_sha, ci: running, checks }` (what `volleyd status --json` prints);
 CI green journals `ci_green` and clears it.
+
+**Reading CI.** A head's runs are read with one call that lists no workflows, `gh api
+repos/{owner}/{repo}/actions/runs?head_sha=<head>&per_page=50`, which volleyd runs itself in the
+wave repo (as it runs a merge), whatever machine the task is on; `gh run view <id> --json jobs`
+is read for failed runs only. Without a wave repo it falls back to `gh run list --commit` in the
+task's worktree. An answer that cannot be read (a non-zero exit, output that is not JSON) is CI
+state `unknown`, never "no CI": it opens no decision, neither starts nor advances the
+`ci_none_grace_ms` clock, and is re-polled like running CI. The hold journals `ci_pending {
+reason: ci_unreadable, error }` and the task reads `CI unreadable (<error>), retrying`. A
+rate-limited answer (`rate limit`, HTTP 403 or 429) also backs the wave off: none of its CI calls
+(a head's runs, the release branch's for a classification) for `ci_rate_limit_backoff_ms`
+(default 300000). `gh` prints no response headers, so that tunable is the wait in practice; a
+`Retry-After` in its output, should one appear, lengthens it. The backoff is kept per wave (the
+wave's repo): two waves on one repo each back off on their own answers. The first
+one journals `alarm_raised { alarm: github_rate_limited, retry_at }`, and the first readable
+answer after it journals `alarm_cleared`.
 
 **Stage groups.** While a parallel group runs, the task's `stage` stays the closed enum (its
 first stage, `spec_review`) and the state adds `stage_label: "review (spec + quality)"` and

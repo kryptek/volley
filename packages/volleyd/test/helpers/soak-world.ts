@@ -483,6 +483,24 @@ export function soakWorld(o: SoakWorldOptions) {
       squash(pr);
       return out("");
     }
+    // A head's runs by head_sha (the supervisor's read): `verb` is the endpoint.
+    const headSha = noun === "api" ? /actions\/runs\?head_sha=([^&]+)/.exec(verb ?? "") : null;
+    if (headSha !== null) {
+      const commit = headSha[1] as string;
+      return out(
+        JSON.stringify(
+          ciOf(commit, "pull_request").map((r) => ({
+            id: r.id,
+            name: "CI",
+            event: r.event,
+            status: "completed",
+            conclusion: r.failing === null ? "success" : "failure",
+            head_sha: r.head,
+            html_url: `https://github.com/example/soak/actions/runs/${r.id}`,
+          })),
+        ),
+      );
+    }
     if (noun === "run" && verb === "list") {
       if (rest.includes("--branch")) return out(JSON.stringify(ciOf(tip(), "push").map(runJson)));
       const commit = flag("--commit");
