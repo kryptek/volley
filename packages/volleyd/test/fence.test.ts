@@ -343,7 +343,7 @@ const DENIED: string[][] = [
   ["volley", "auth", "redeem", "vly_admin_0000abcd_secret", "--label", "x", "--json"],
   ["volley", "auth", "redeem", "--label", "x", "--json", "--dir", "/tmp/x"],
   // a script path without a minted token
-  ["/home/u/.volley/volleyd/brief-gate", "/tmp/wt/.volley/brief.md"],
+  ["/path/to/home/.volley/volleyd/brief-gate", "/tmp/wt/.volley/brief.md"],
   [],
 ];
 
@@ -559,7 +559,7 @@ describe("assertAllowed", () => {
 
 describe("SETUP: what a setup step volleyd runs for the Desk may run (a setup token)", () => {
   const repo = "/src/volley";
-  const home = "/home/owner";
+  const home = "/path/to/home";
   const inputs = {
     restart: "brew services restart mosquitto",
     ctrl: { bin: "mosquitto_ctrl", stateFile: "/opt/homebrew/var/mosquitto/dynamic-security.json" },

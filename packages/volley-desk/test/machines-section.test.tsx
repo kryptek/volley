@@ -22,6 +22,11 @@ import { fakePeerOps } from "./helpers/peer-ops";
 
 const NOW = Date.parse("2026-10-19T09:30:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
+/**
+ * For a test that makes a real lib/rsa key: the prime search is random, so its time has a long
+ * tail, and on a loaded CI runner (1–4 s typical there) it went past the default 10 s.
+ */
+const KEYGEN_TIMEOUT_MS = 60_000;
 
 const boxA: MachinePayload = {
   name: "box-a",
@@ -556,26 +561,30 @@ describe("peer ops: admin requests on the Desk's admin channel", () => {
     await expect(pending).resolves.toMatchObject({ expiresAt: iso(NOW + 600_000) });
   });
 
-  it("on plain http (no WebCrypto, a phone on the LAN) pairing works: the reply key is lib/rsa's", async () => {
-    plainHttp();
-    try {
-      expect(pairingSupported()).toBe(true);
-      const c = fakeClient();
-      const ops = peerOps(c);
-      const pending = ops.invite();
-      const req = await published(c, 1);
-      expect(req.env.correlation_id).toMatch(/^[0-9a-f-]{36}$/);
-      c.answer({
-        op: "peer_invite",
-        ok: true,
-        result: { ttl_s: 600 },
-        sealed: sealTo(req.env, { code: "MXQ4-7KDP" }),
-      });
-      await expect(pending).resolves.toMatchObject({ ok: true, code: "MXQ4-7KDP" });
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
+  it(
+    "on plain http (no WebCrypto, a phone on the LAN) pairing works: the reply key is lib/rsa's",
+    async () => {
+      plainHttp();
+      try {
+        expect(pairingSupported()).toBe(true);
+        const c = fakeClient();
+        const ops = peerOps(c);
+        const pending = ops.invite();
+        const req = await published(c, 1);
+        expect(req.env.correlation_id).toMatch(/^[0-9a-f-]{36}$/);
+        c.answer({
+          op: "peer_invite",
+          ok: true,
+          result: { ttl_s: 600 },
+          sealed: sealTo(req.env, { code: "MXQ4-7KDP" }),
+        });
+        await expect(pending).resolves.toMatchObject({ ok: true, code: "MXQ4-7KDP" });
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+    KEYGEN_TIMEOUT_MS,
+  );
 
   it("a browser that cannot make a reply key at all: nothing throws, invite says why", async () => {
     vi.stubGlobal("crypto", {});

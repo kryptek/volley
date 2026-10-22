@@ -1897,9 +1897,9 @@ inline or as an entry of the config's `hosts` map (an inline `host:` is layered 
 hosts:
   box:
     target: dev@box.example          # ssh destination ([user@]host or an ssh config alias)
-    repo: /home/dev/src/example-repo # the wave repo's clone on the box
-    volley_dir: /home/dev/src/volley # a volley checkout on the box (its hooks)
-    # worktree_root: /home/dev/src/.volley-worktrees   (default: beside repo)
+    repo: /path/to/repo              # the wave repo's clone on the box
+    volley_dir: /path/to/volley      # a volley checkout on the box (its hooks)
+    # worktree_root: /path/to/worktrees   (default: beside repo)
     # tunnel: { remote_port: 21883, supervise: true }
 
 # wave file
@@ -2034,8 +2034,8 @@ account named after the machine (`--name`, default its short hostname) and adds
 hosts:
   box-a:
     target: dev@box-a           # --target: how this machine reaches the new one (default $USER@<hostname>)
-    repo: /home/dev/src/example-repo
-    volley_dir: /home/dev/src/volley
+    repo: /path/to/repo
+    volley_dir: /path/to/volley
     tunnel: { remote_port: 21883, supervise: false }   # the machine keeps its own tunnel
 ```
 

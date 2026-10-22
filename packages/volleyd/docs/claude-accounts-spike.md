@@ -107,7 +107,7 @@ So a profile at `~/.volley/claude/<acct>` stores its login in Keychain item
 authentication docs say the same in prose: Claude Code "keys the macOS Keychain entry to
 that directory too, so a session with a different `CLAUDE_CONFIG_DIR` reads a different
 entry". The hash covers the **exact string** of the directory. `~/.volley/claude/a` and
-`/Users/x/.volley/claude/a/` are different profiles to Claude Code. Volley must always
+`/path/to/home/.volley/claude/a/` are different profiles to Claude Code. Volley must always
 pass one canonical absolute path with no trailing slash.
 
 Account metadata is split from the secret. With the default Keychain item but an empty
