@@ -284,6 +284,22 @@ export const ARTIFACTS_OK: NonNullable<SupervisedEnvOptions["exec"]> = [
       ]),
     },
   ],
+  // The same run, as the supervisor reads a head's runs (`gh api …/actions/runs?head_sha=`).
+  [
+    ["gh", "api"],
+    {
+      stdout: JSON.stringify([
+        {
+          id: 1,
+          name: "CI",
+          status: "completed",
+          conclusion: "success",
+          head_sha: PR_HEAD,
+          html_url: "https://example.test/runs/1",
+        },
+      ]),
+    },
+  ],
   [
     ["gh", "pr", "view"],
     { stdout: JSON.stringify({ state: "OPEN", headRefOid: PR_HEAD, baseRefName: "release/w1" }) },
