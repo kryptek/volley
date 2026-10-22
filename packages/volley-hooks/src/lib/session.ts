@@ -503,8 +503,8 @@ export class HookSession {
     });
   }
 
-  heartbeat(): Promise<void> {
-    return this.progress("heartbeat");
+  heartbeat(payload: Record<string, unknown> = {}): Promise<void> {
+    return this.progress("heartbeat", payload);
   }
 
   close(): Promise<void> {

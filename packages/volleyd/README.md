@@ -234,7 +234,8 @@ A bare concurrency cap is the wrong tool: six agents editing files is fine, six 
 integration suites with containers is not. Heavy commands therefore take a lease from a
 machine-global **pool** (`lease_pools` in the config: `capacity`, optional `per_machine` and
 `ttl_s`, and the `match` regexes the [volley-hooks](../volley-hooks/README.md) lease hook uses to
-wrap matching Bash commands in [`volley lease run`](../volley-cli/README.md#volley-lease)).
+wrap matching Bash commands in [`volley lease run`](../volley-cli/README.md#volley-lease); they are
+matched against each command the shell would execute, not comments, heredocs or message text).
 
 - **Requests** arrive on `volley/_system/leases/<pool>/requests` (`acquire | release | renew`,
   SPEC §4.6.5). A request whose `holder` is not the sender is ignored; a repeated `acquire` for a
@@ -1311,7 +1312,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `hard_ceiling`, `spawn_budget_multiplier` | next admission tick (immediately after the change) | never preempted; a limit below current use only stops new admissions |
 | `admission.*` | next admission tick | never preempted |
 | `lease_pools` | next lease grant | a pool shrunk below its holders stops granting until holders release; no holder is preempted |
-| `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `background_wait_max_s`, `stall_backoff_max_s`, `wake_grace_s` | next monitor tick | — |
+| `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `background_wait_max_s`, `stall_backoff_max_s`, `tool_in_flight_max_s`, `wake_grace_s` | next monitor tick | — |
 | `fallback_model` | decisions opened after the change | open decisions keep their offer |
 | `mailbox.session_expiry_s` | new connections only | existing sessions keep their expiry until they reconnect |
 | `worktree_root` | spawns after the change | existing worktrees untouched |
@@ -2196,8 +2197,10 @@ with 12 agents on peers and a ceiling of 12 it is `"12/12 agents"`.
 
 **Repair (`peer_doctor`).** An admin (the account-op topic and admin check of `peer_remove`;
 refused on the mailbox) asks volleyd to run the doctor on a configured host:
-`{ op: "peer_doctor", name, fix?, clone? }`. volleyd runs `volley peer doctor --json`, plus
-`--fix --yes` with `fix: true` and `--clone --origin <url>` with `clone: true` (which needs `fix`),
+`{ op: "peer_doctor", name, fix?, clone? }`. volleyd runs `volley peer doctor --json
+--supervisor-volley-dir <volley_dir>` (so every volley MCP entry on the box is checked against
+the checkout agents are launched from; a volley older than the flag refuses it, and the doctor
+runs again without), plus `--fix --yes` with `fix: true` and `--clone --origin <url>` with `clone: true` (which needs `fix`),
 in the box's `volley_dir` as one fenced remote step; the fence allows exactly those argv on a box
 and no other `volley` command. `<url>` is the running wave's origin as the supervisor's own doctor
 read it from its clone, as `https://<host>/<path>` (`gh auth setup-git` signs git in to it; the
@@ -2490,9 +2493,10 @@ agent's retained status. All rules are pure functions; the daemon carries out th
 | `idle` while the agent waits on its own work: the hooks' `background_wait` (a background shell still running), a lease it holds or waits on, a terminal footer counting running shells, or (local agents) a file under its worktree written within `idle_grace_s` (`.git`, `.volley`, `node_modules`, `target`, `build`, `dist`, `.venv`, `.next`, `coverage`, `.turbo` skipped; at most 2000 entries walked, a larger tree gives no write evidence); none of it counts once the idle is older than `background_wait_max_s` (default 2 h), so a shell that never exits still ends in a nudge | nothing: no steer, no `agent_stalled`; the task's `why_waiting` says `idle N min: <reason>` (e.g. `waiting on its own background task`, `holds lease <pool>`, `waits on lease <pool>`, `2 shells still running`, `worktree written in the last 3 min`) | — |
 | `idle_prompt` while a question or credit prompt is open | nothing: still a wait on the human (never a "continue" steer or an `agent_stalled`) | — |
 | `awaiting_input` with `class: "credit"` (`quota_auto_resume_*`) | `credit_exhausted` at once → decision `model_switch` (below) | the switch |
-| no hook signal for `heartbeat_alarm_s` (default 10 min) while the status is `working` | read the screen (bounded, once per tick until decided) and classify it: | |
+| a tool call in flight: the hooks' `PreToolUse` boundary (`activity` with `tool_use_id`) seen, its `PostToolUse` (the `heartbeat` with the same `tool_use_id`) not yet | not silence: no screen read, no decision, however long a foreground test suite or `gh run watch` runs; parallel calls are tracked per `tool_use_id`, so the one that ends first leaves the others in flight; the silence clock restarts at the last `PostToolUse` (or the turn's Stop or next prompt). A call that fails (Claude Code's `PostToolUseFailure`, which the hooks do not register) or a turn interrupted without a Stop leaves the call in flight until the next prompt, so a stuck screen then waits for `tool_in_flight_max_s`. Past `tool_in_flight_max_s` (default 2 h) a screen that has not changed for `heartbeat_alarm_s` falls back to the rows below, and only to `screen_static` | — |
+| no hook signal for `heartbeat_alarm_s` (default 10 min) while the status is `working` and no tool is in flight | read the screen (bounded, once per tick until decided) and classify it: | |
 | ↳ the credit prompt (`screens.ts` `credit_exhausted`) | decision `model_switch` with the capture | the switch |
-| ↳ readable and changing (two reads differ, or the screen-tail capture changed since the last hook signal) | decision `unknown_screen`, `class: "hooks_silent"`: "hooks may be broken by a harness update" | — |
+| ↳ readable and changing (two reads differ, or the screen-tail capture changed since the last hook signal) | held one more `heartbeat_alarm_s` window (a silence that ends by itself, a hook signal, opens nothing); still changing at its end, with no hook signal and no tool in flight — 20 min by default — decision `unknown_screen`, `class: "hooks_silent"`: "hooks may be broken by a harness update"; unchanged across it, `screen_static` | — |
 | ↳ readable and unchanged on a second read | decision `unknown_screen`, `class: "screen_static"` | — |
 | ↳ unreadable, pane gone | `alarm_raised { alarm: "crash_candidate" }` only: wait for the LWT. Nothing is killed because a pane or process cannot be seen | — |
 | any hook signal | ends a silence; closes an open `hooks_silent` / `screen_static` decision | — |
@@ -3157,7 +3161,8 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
     login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
-  volley peer doctor --json [--fix --yes [--clone --origin <https URL>]] — the machine's doctor
+  volley peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
+    <https URL>]] — the machine's doctor
     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
     credentials or port, isCloneUrl); no other volley argv runs on a box
   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
