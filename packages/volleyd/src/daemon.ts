@@ -873,6 +873,20 @@ const placing = (w: Wave): boolean =>
 /** The alarm a `placement: local` wave raises once when the own machine is overloaded while a peer idles. */
 const PEER_IDLE_ALARM = "peer_idle_under_load";
 
+/** Where a wave's `peer_idle_under_load` alarm stands: raised at most once, then cleared. */
+type PeerIdleAlarm = "none" | "raised" | "cleared";
+
+/** The wave journal's last word on its `peer_idle_under_load` alarm. */
+function peerIdleAlarmState(events: readonly JournalEvent[]): PeerIdleAlarm {
+  let at: PeerIdleAlarm = "none";
+  for (const e of events) {
+    if (e.task !== undefined || e.data.alarm !== PEER_IDLE_ALARM) continue;
+    if (e.type === "alarm_raised") at = "raised";
+    else if (e.type === "alarm_cleared") at = "cleared";
+  }
+  return at;
+}
+
 /** Before the first pressure sample nothing is known about load, so nothing starts. */
 const AWAITING_SAMPLE: Admission = { allow: 0, reasons: ["waiting for the first pressure sample"] };
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
@@ -1212,8 +1226,8 @@ export class Daemon {
    * reconnect's retained copy, a QoS 1 duplicate) is not counted again.
    */
   private readonly hostHistory = new Map<string, { last_seen: string; samples: HostSamples[] }>();
-  /** Waves whose `peer_idle_under_load` alarm is raised (true) or known not raised (false). */
-  private readonly peerIdleWarned = new Map<WaveId, boolean>();
+  /** Where each running wave's `peer_idle_under_load` alarm stands (none, raised, cleared). */
+  private readonly peerIdleWarned = new Map<WaveId, PeerIdleAlarm>();
   /** Why a ready task of a placing wave was not admitted (`<wave>/<task>`: no eligible machine). */
   private readonly heldTask = new Map<string, string>();
   /** The account records last published, by account (an unchanged one is not re-published). */
@@ -3533,6 +3547,7 @@ export class Daemon {
     this.issueFiles.delete(wave);
     this.legacyEndedAt.delete(wave);
     this.pipelines.delete(wave);
+    this.peerIdleWarned.delete(wave);
     this.config.clearWave(wave);
     await this.publishArchiveIndex();
     this.log(`wave ${wave} archived by ${by} (${reason}); closed ${closed.length} decision(s)`);
@@ -4482,37 +4497,43 @@ export class Daemon {
    * Once per wave (SPEC §4.6.15): a running `placement: local` wave, while the own machine's load
    * per core is over `placement.load_per_core_max` and a ready, undrained peer has free
    * `max_agents` slots, journals `alarm_raised { alarm: "peer_idle_under_load", peer, free,
-   * message }` (`volleyd status` and the digest show it). An `auto` wave places onto the peer
-   * itself.
+   * message }` (`volleyd status` and the digest show it), and `alarm_cleared` once the own load
+   * per core is back under the threshold (or the wave is `auto`); it is not raised again for the
+   * wave. An `auto` wave places onto the peer itself.
    */
   private async warnPeerIdle(): Promise<void> {
-    // Cheap first: no peer configured, or the own machine is not overloaded, decides nothing.
     const cfg = this.config.effective();
     const own = this.ownRecord;
-    if (Object.keys(cfg.hosts).length === 0 || own === undefined || !(own.cores > 0)) return;
-    if (overloadLoad(own) / own.cores <= cfg.placement.load_per_core_max) return;
-    const waves = this.runningWaves().filter(([wave, log]) => {
-      if (log.record.wave?.placement === AUTO_HOST) return false;
-      let warned = this.peerIdleWarned.get(wave);
-      // After a restart the journal says whether it was raised already.
-      warned ??= log.journal
-        .readAll()
-        .some((e) => e.type === "alarm_raised" && e.data.alarm === PEER_IDLE_ALARM);
-      this.peerIdleWarned.set(wave, warned);
-      return !warned;
-    });
-    for (const [wave, log] of waves) {
+    if (own === undefined || !(own.cores > 0)) return;
+    const hot =
+      Object.keys(cfg.hosts).length > 0 &&
+      overloadLoad(own) / own.cores > cfg.placement.load_per_core_max;
+    for (const [wave, log] of this.runningWaves()) {
+      // After a restart the journal says whether it was raised, or raised and cleared, already.
+      const known = this.peerIdleWarned.get(wave) ?? peerIdleAlarmState(log.journal.readAll());
+      this.peerIdleWarned.set(wave, known);
+      if (known === "cleared" || (known === "none" && !hot)) continue;
+      const local = (log.record.plan ?? log.record.wave)?.placement !== AUTO_HOST;
+      // Only the load clears it: a peer's verdict settling after a restart is no all-clear.
+      if (known === "raised") {
+        if (hot && local) continue;
+        this.peerIdleWarned.set(wave, "cleared");
+        await this.append(wave, { type: "alarm_cleared", data: { alarm: PEER_IDLE_ALARM } });
+        continue;
+      }
+      if (!local) continue;
       const gate = admissionFor(log.record, this.killSwitch, this.pressure(wave));
       const idle = peerIdleUnderLoad(this.placementSnapshot(gate, cfg), {
         placement: this.config.effective(wave).placement,
       });
-      if (idle === null) continue;
-      this.peerIdleWarned.set(wave, true);
-      await this.append(wave, {
-        type: "alarm_raised",
-        data: { alarm: PEER_IDLE_ALARM, peer: idle.peer, free: idle.free, message: idle.message },
-      });
-      this.log(`wave ${wave}: ${idle.message}`);
+      if (idle !== null) {
+        this.peerIdleWarned.set(wave, "raised");
+        await this.append(wave, {
+          type: "alarm_raised",
+          data: { alarm: PEER_IDLE_ALARM, peer: idle.peer, free: idle.free, message: idle.message },
+        });
+        this.log(`wave ${wave}: ${idle.message}`);
+      }
     }
   }
 
@@ -8827,9 +8848,14 @@ export class Daemon {
 
   /**
    * What a wave file without `placement:` takes: `placement.default` once a machine is paired
-   * (SPEC §4.6.15). Decided at submit; the journaled wave keeps the hosts it was given.
+   * (SPEC §4.6.15). Decided when the wave is first submitted: a later plan version of a known
+   * wave keeps the placement its current plan has, so pairing or unpairing a machine mid-wave
+   * never moves a running task's next role.
    */
-  private placementDefaults(): PlacementDefaults {
+  private placementDefaults(wave?: WaveId): PlacementDefaults {
+    const rec = wave === undefined ? undefined : this.waves.get(wave)?.record;
+    const current = rec?.plan ?? rec?.wave;
+    if (current != null) return { default: current.placement ?? "local", paired: 1 };
     const cfg = this.config.effective();
     const local = this.config.localName();
     return {
@@ -8842,12 +8868,13 @@ export class Daemon {
   private parseRequestWave(p: Record<string, unknown>, op: string): Wave | Reply {
     if (typeof p.wave_yaml !== "string")
       return { ok: false, error: `${op} requires payload.wave_yaml` };
+    const source = typeof p.source === "string" ? p.source : undefined;
     try {
-      return parseWaveFile(
-        p.wave_yaml,
-        typeof p.source === "string" ? p.source : undefined,
-        this.placementDefaults(),
-      );
+      const wave = parseWaveFile(p.wave_yaml, source, this.placementDefaults());
+      // A known wave: parsed again under its own placement (the file's own placement: still wins).
+      return this.waves.get(wave.wave)?.record.wave == null
+        ? wave
+        : parseWaveFile(p.wave_yaml, source, this.placementDefaults(wave.wave));
     } catch (e) {
       if (e instanceof WaveFileError) return { ok: false, error: e.message, errors: e.errors };
       throw e;

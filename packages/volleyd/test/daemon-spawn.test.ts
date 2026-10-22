@@ -443,6 +443,8 @@ describe("placement at admission (SPEC §4.6.15)", () => {
   let localClaude: boolean;
   /** The daemon's log lines. */
   let logs: string[];
+  /** What setup started the daemon with (a restart starts it again with the same). */
+  let startOpts: Parameters<DaemonEnv["start"]>[0];
 
   const journal = (wave: string): JournalEvent[] =>
     readJournalFile(join(env.home, "waves", wave, "journal.jsonl"));
@@ -549,7 +551,7 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     );
     clock = fakeClock(1_000_000);
     logs = [];
-    daemon = await env.start({
+    startOpts = {
       clock,
       log: (line) => logs.push(line),
       fleet: {
@@ -572,7 +574,8 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         },
         credentials: memoryCredentials(),
       },
-    });
+    };
+    daemon = await env.start(startOpts);
     waits = journalWait(env.home, () => daemon);
     peer = new VolleyBroker();
     await peer.connect({ url: env.broker.url, agentId: "box" });
@@ -981,10 +984,50 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     expect(journal("w5").some((e) => e.type === "task_placed")).toBe(false);
   });
 
+  it("a later plan version of a wave without placement: keeps the placement its first version got (#324)", async () => {
+    localClaude = true;
+    await setup();
+    await submit("w4", "", "  T1: { issue: 42 }\n");
+    await tick();
+    // The default changes between submits (as pairing or unpairing a machine would change it):
+    // the running wave's unpinned tasks keep where they were decided, so no role of T1 moves.
+    expect((await runCli(["config", "set", "placement.default", "local"], env.env)).exitCode).toBe(
+      0,
+    );
+    await submit("w4", "", "  T1: { issue: 42 }\n  T2: { issue: 42 }\n");
+    const v2 = journal("w4").find((e) => e.type === "wave_versioned")?.data.wave as {
+      placement?: string;
+      tasks: Record<string, { host: string }>;
+    };
+    expect(v2.placement).toBe("auto");
+    expect(v2.tasks.T1?.host).toBe("auto");
+    expect(v2.tasks.T2?.host).toBe("auto");
+    // A new wave still takes the supervisor's default.
+    await submit("w5", "", "  T1: { issue: 42 }\n");
+    const w5 = journal("w5").find((e) => e.type === "wave_submitted")?.data.wave as {
+      placement?: string;
+    };
+    expect(w5.placement).toBeUndefined();
+  });
+
   describe("peer_idle_under_load (#324)", () => {
     // Load 10 per core on the own machine: over placement.load_per_core_max (1.5).
     const cores = Math.max(1, availableParallelism());
-    const HOT_OS = { ...CALM_OS, loadavg: () => [cores * 10, cores * 10, cores * 10] };
+    /** The own machine's load per core (HOT_OS reads it on every sample). */
+    let perCore = 10;
+    const HOT_OS = {
+      ...CALM_OS,
+      loadavg: () => [cores * perCore, cores * perCore, cores * perCore],
+    };
+    const cleared = (wave: string) =>
+      journal(wave).filter(
+        (e) => e.type === "alarm_cleared" && e.data.alarm === "peer_idle_under_load",
+      );
+    /** Past `machine_heartbeat_ms`: the own record is re-sampled. */
+    const resample = async () => {
+      await tick(DAEMON_DEFAULTS.machine_heartbeat_ms);
+      await tick();
+    };
     const alarms = (wave: string) =>
       journal(wave).filter(
         (e) => e.type === "alarm_raised" && e.data.alarm === "peer_idle_under_load",
@@ -1017,6 +1060,50 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       await submit("w2", "placement: auto\n", "  T1: { issue: 42 }\n");
       await tick();
       expect(alarms("w2")).toHaveLength(0);
+    });
+
+    it("cleared once the supervisor calms down, and not raised again for the wave", async () => {
+      localClaude = true;
+      perCore = 10;
+      await setup({ os: HOT_OS });
+      await submit("w1", "placement: local\n", "  T1: { issue: 42 }\n");
+      await tick();
+      expect(alarms("w1")).toHaveLength(1);
+      perCore = 0.1;
+      await resample();
+      expect(cleared("w1")).toHaveLength(1);
+      const st = (await env.retained("volley/_waves/w1/state")) as {
+        payload: { alarms?: unknown[] };
+      };
+      expect(st.payload.alarms).toBeUndefined();
+      expect((await runCli(["status", "w1"], env.env)).stdout).not.toContain(
+        "peer_idle_under_load",
+      );
+      // Overloaded again: once per wave, so nothing new.
+      perCore = 10;
+      await resample();
+      expect(alarms("w1")).toHaveLength(1);
+      expect(cleared("w1")).toHaveLength(1);
+    });
+
+    it("a restart does not raise it again: the journal says it was raised", async () => {
+      localClaude = true;
+      perCore = 10;
+      await setup({ os: HOT_OS });
+      await submit("w1", "placement: local\n", "  T1: { issue: 42 }\n");
+      await tick();
+      expect(alarms("w1")).toHaveLength(1);
+      await daemon.stop();
+      daemon = await env.start(startOpts);
+      await heartbeat();
+      await tick();
+      await resample();
+      await resample();
+      expect(alarms("w1")).toHaveLength(1);
+      const st = (await env.retained("volley/_waves/w1/state")) as {
+        payload: { alarms?: { alarm: string }[] };
+      };
+      expect(st.payload.alarms?.map((a) => a.alarm)).toEqual(["peer_idle_under_load"]);
     });
 
     it("not when the peer is drained", async () => {

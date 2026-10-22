@@ -244,6 +244,16 @@ describe("a wave-level alarm (#324)", () => {
     ).toEqual([]);
     expect(renderDigestMd(d)).toContain(`## Alarms\n\n- peer_idle_under_load: ${message}\n`);
   });
+
+  it("alarm_cleared drops it: the state and the digest no longer carry it", () => {
+    const cleared = journal(...raised.map(({ seq: _s, at: _a, ...e }) => e), {
+      type: "alarm_cleared",
+      data: { alarm: "peer_idle_under_load" },
+    });
+    const after = reduce(cleared);
+    expect(after.alarms).toBeUndefined();
+    expect(digestOf(cleared, after, NOW, "escalation").alarms).toBeUndefined();
+  });
 });
 
 describe("summaryLine", () => {

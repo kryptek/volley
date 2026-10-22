@@ -167,9 +167,10 @@
             },
             "alarms": {
               "type": "array",
-              "description": "Wave-level alarms that still hold, each with a human-readable line: peer_idle_under_load (spec section 4.6.15), raised once when a placement: local wave runs while the supervisor's own machine is overloaded and a ready paired machine has free slots. Absent: none.",
+              "description": "Wave-level alarms that still hold, each with a human-readable line: peer_idle_under_load (spec section 4.6.15), raised once when a placement: local wave runs while the supervisor's own machine is overloaded and a ready paired machine has free slots, and cleared once that load has passed. Absent: none.",
               "items": {
                 "type": "object",
+                "additionalProperties": false,
                 "required": ["alarm", "message"],
                 "properties": {
                   "alarm": { "type": "string", "minLength": 1 },

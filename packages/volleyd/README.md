@@ -1331,7 +1331,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
 | `require_fresh_base` | spawns after the change ([base ref](#base-ref)) | worktrees already cut untouched |
 | `retire_close_session` | retires after the change ([retire and cleanup](#retire-and-cleanup)) | sessions already kept open stay open |
-| `placement.default` | the next submitted wave or plan version without `placement:` ([the default](#fleet-placement)) | waves already submitted keep their hosts |
+| `placement.default` | the next submitted wave without `placement:` ([the default](#fleet-placement)) | waves already submitted, and their later plan versions, keep their placement |
 | `placement.nudge_on_merge` | the next merge ([the merge nudge](#the-pipeline-and-the-merge-ready-gate)) | nudges already sent stand |
 | `fleet.local_agents`, `fleet.fallback.*` | the next placement ([the supervisor's own machine as a fallback](#the-supervisors-own-machine-as-a-fallback)) | agents already on this machine keep running there; nothing is moved |
 | `autopilot.merge` | the next gate of a wave whose file has no `merge:` ([autopilot merging](#autopilot-merging)) | a gate already entered keeps the mode its evidence names until it is gated again |
@@ -2228,8 +2228,9 @@ is journaled for it).
 the wave's own `config: { placement: { default } }` wins over config.yaml's) once a paired
 machine, a `hosts.<name>`, is configured, and `local` while none is: an owner who paired a
 machine has it used, and `placement: local` (or `volleyd config set placement.default local`)
-keeps a wave here. volleyd decides it when the wave (or its next plan version) is submitted, and
-the journaled wave keeps the hosts it got. `volleyd validate` and `run` print the outcome:
+keeps a wave here. volleyd decides it when the wave is first submitted, and the journaled wave
+keeps the hosts it got: a later plan version without `placement:` keeps the wave's placement, so
+pairing or unpairing a machine mid-wave never moves a running task's next role. `volleyd validate` and `run` print the outcome:
 
 ```text
 placement: auto (placement.default; 1 paired machine)
@@ -2242,7 +2243,8 @@ placement: auto (wave file)
 load per core (the higher of its 1- and 5-minute load averages) is over
 `placement.load_per_core_max`, while a peer is ready, not draining, not down and has free
 `max_agents` slots, journals once `alarm_raised { alarm: "peer_idle_under_load", peer, free,
-message }`. The wave state carries it in `alarms`, `volleyd status` shows it under the wave's
+message }`, and `alarm_cleared` once the supervisor's load per core is back under the threshold
+(it is not raised again for that wave). While it holds, the wave state carries it in `alarms`, `volleyd status` shows it under the wave's
 header and the digest lists it under `## Alarms`:
 
 ```text

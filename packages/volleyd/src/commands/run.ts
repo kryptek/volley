@@ -58,11 +58,16 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
   let wave: Wave;
   let playbookLine: string;
   let placementLine: string;
+  let placementFromFile: boolean;
   try {
     text = await readFile(file, "utf-8");
     // Placement and the release playbook as read here (the daemon decides both again, and is
     // authoritative).
-    ({ wave, placementLine } = parseWithPlacement(text, file, placementDefaults(env)));
+    ({
+      wave,
+      placementLine,
+      fromFile: placementFromFile,
+    } = parseWithPlacement(text, file, placementDefaults(env)));
     const playbook = wavePlaybook(wave);
     playbookLine = `${formatPlaybook(playbook?.display ?? null, playbook?.playbook ?? null)}\n`;
   } catch (e) {
@@ -96,8 +101,10 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
       io.stdout(`${JSON.stringify(state, null, 2)}\n`);
       io.stderr(warnings);
     } else if (res.plan !== undefined) {
+      // A later version without placement: keeps the wave's own (SPEC §4.6.15): no default line.
+      const placed = placementFromFile ? placementLine : "";
       io.stdout(
-        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${warnings}${playbookLine}${placementLine}${placement}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
+        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${warnings}${playbookLine}${placed}${placement}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
       );
     } else {
       const auto = owner.auto ? " (auto)" : "";

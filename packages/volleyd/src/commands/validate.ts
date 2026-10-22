@@ -143,13 +143,15 @@ export function parseWithPlacement(
   text: string,
   file: string,
   defaults: PlacementDefaults,
-): { wave: Wave; placementLine: string } {
+): { wave: Wave; placementLine: string; fromFile: boolean } {
   const wave = parseWaveFile(text, file, defaults);
   // Valid, so a mapping; `placement:` and `config:` as written.
   const raw = parse(text) as { placement?: "auto" | "local"; config?: Wave["config"] };
+  const placed = defaultPlacement(raw, defaults);
   return {
     wave,
-    placementLine: `${formatPlacement(defaultPlacement(raw, defaults), defaults.paired)}\n`,
+    placementLine: `${formatPlacement(placed, defaults.paired)}\n`,
+    fromFile: placed.by === "wave file",
   };
 }
 
