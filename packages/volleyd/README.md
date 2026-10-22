@@ -234,7 +234,8 @@ A bare concurrency cap is the wrong tool: six agents editing files is fine, six 
 integration suites with containers is not. Heavy commands therefore take a lease from a
 machine-global **pool** (`lease_pools` in the config: `capacity`, optional `per_machine` and
 `ttl_s`, and the `match` regexes the [volley-hooks](../volley-hooks/README.md) lease hook uses to
-wrap matching Bash commands in [`volley lease run`](../volley-cli/README.md#volley-lease)).
+wrap matching Bash commands in [`volley lease run`](../volley-cli/README.md#volley-lease); they are
+matched against each command the shell would execute, not comments, heredocs or message text).
 
 - **Requests** arrive on `volley/_system/leases/<pool>/requests` (`acquire | release | renew`,
   SPEC §4.6.5). A request whose `holder` is not the sender is ignored; a repeated `acquire` for a
@@ -2205,8 +2206,10 @@ with 12 agents on peers and a ceiling of 12 it is `"12/12 agents"`.
 
 **Repair (`peer_doctor`).** An admin (the account-op topic and admin check of `peer_remove`;
 refused on the mailbox) asks volleyd to run the doctor on a configured host:
-`{ op: "peer_doctor", name, fix?, clone? }`. volleyd runs `volley peer doctor --json`, plus
-`--fix --yes` with `fix: true` and `--clone --origin <url>` with `clone: true` (which needs `fix`),
+`{ op: "peer_doctor", name, fix?, clone? }`. volleyd runs `volley peer doctor --json
+--supervisor-volley-dir <volley_dir>` (so every volley MCP entry on the box is checked against
+the checkout agents are launched from; a volley older than the flag refuses it, and the doctor
+runs again without), plus `--fix --yes` with `fix: true` and `--clone --origin <url>` with `clone: true` (which needs `fix`),
 in the box's `volley_dir` as one fenced remote step; the fence allows exactly those argv on a box
 and no other `volley` command. `<url>` is the running wave's origin as the supervisor's own doctor
 read it from its clone, as `https://<host>/<path>` (`gh auth setup-git` signs git in to it; the
@@ -3166,7 +3169,8 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
     login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
-  volley peer doctor --json [--fix --yes [--clone --origin <https URL>]] — the machine's doctor
+  volley peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
+    <https URL>]] — the machine's doctor
     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
     credentials or port, isCloneUrl); no other volley argv runs on a box
   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
