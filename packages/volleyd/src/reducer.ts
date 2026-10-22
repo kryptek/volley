@@ -462,6 +462,12 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         // A worktree cut from the release branch (not a pipeline start ref): its base.
         if (typeof ev.data.base_sha === "string") task.base_sha = ev.data.base_sha;
       }
+      // An implementer launched on a task still queued: it is implementing. spawn.ts journals
+      // stage_entered only on attempt 1, so a task whose first launches failed (attempt > 1
+      // succeeded) would otherwise stay queued, and its CI, review and merge never start.
+      if (task !== undefined && ev.data.role === "implementer" && task.stage === "queued") {
+        task.stage = "implement";
+      }
       // That spawn launched: its failures are over (spawn_recovered reports them).
       if (ev.task !== undefined) clearSpawnFailure(next, ev.task, String(ev.data.role));
       break;
