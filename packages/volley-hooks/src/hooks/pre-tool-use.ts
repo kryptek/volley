@@ -9,7 +9,8 @@
  * window publishes the boundary alone and keeps its summary as `pending` (newest wins;
  * PostToolUse publishes it at the next slot). It never changes the tool call (empty output), a
  * work-log failure only drops the line (the log is cosmetic), and it needs no heartbeat:
- * PostToolUse sends one.
+ * PostToolUse sends one. The cost: a broker connect on every call (not once per 5 s), and with
+ * the broker unreachable each call can wait out the connect timeout here and in PostToolUse.
  */
 import { type HookContext, runHook } from "../lib/hook-io";
 import { openSession } from "../lib/session";

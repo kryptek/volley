@@ -67,8 +67,9 @@ export interface AgentLiveness {
   own_work: string | null;
   /** Open liveness decisions; `pending` until the daemon has opened it and noted its id. */
   decisions: Partial<Record<DecisionSlot, string>>;
-  /** The tool call between its PreToolUse and its PostToolUse, from the hooks' boundary. */
-  tool_in_flight: { tool_use_id: string; tool: string | null; since: number } | null;
+  /** The tool calls between their PreToolUse and PostToolUse, from the hooks' boundary (in
+   *  order of start: parallel calls end in any order). */
+  tool_in_flight: { tool_use_id: string; tool: string | null; since: number }[];
   /** The silence probe: screen reads since the last hook signal. */
   silence: {
     /** `holding`: the screen changed in the first window; the decision waits for a second. */
@@ -173,7 +174,7 @@ export function trackAgent(a: { agent_id: string; task: TaskId; now: number }): 
     stalls: 0,
     own_work: null,
     decisions: {},
-    tool_in_flight: null,
+    tool_in_flight: [],
     silence: null,
     screen: null,
   };
@@ -205,13 +206,12 @@ export function observeSignal(prev: AgentLiveness, sig: HookSignal): Step {
   const backgroundWait = p.background_wait === true;
   const toolUseId = str(p.tool_use_id);
   if (sig.hook_event === "PreToolUse" && sig.type === "activity" && toolUseId !== undefined) {
-    s.tool_in_flight = { tool_use_id: toolUseId, tool: str(p.tool) ?? null, since: sig.at };
-  } else if (
-    (sig.hook_event === "PostToolUse" && toolUseId === s.tool_in_flight?.tool_use_id) ||
-    sig.type === "idle" ||
-    sig.hook_event === "UserPromptSubmit"
-  ) {
-    s.tool_in_flight = null; // the call ended, or the turn did
+    s.tool_in_flight = s.tool_in_flight.filter((t) => t.tool_use_id !== toolUseId);
+    s.tool_in_flight.push({ tool_use_id: toolUseId, tool: str(p.tool) ?? null, since: sig.at });
+  } else if (sig.hook_event === "PostToolUse" && toolUseId !== undefined) {
+    s.tool_in_flight = s.tool_in_flight.filter((t) => t.tool_use_id !== toolUseId);
+  } else if (sig.type === "idle" || sig.hook_event === "UserPromptSubmit") {
+    s.tool_in_flight = []; // the turn ended
   }
 
   switch (sig.type) {
@@ -376,8 +376,8 @@ export function checkLiveness(
  * after that while the screen changed within the last `heartbeat_alarm_s`.
  */
 function toolRunning(s: AgentLiveness, now: number, t: LivenessTunables): boolean {
-  const tool = s.tool_in_flight;
-  if (tool === null) return false;
+  const tool = s.tool_in_flight[0]; // the oldest call still running
+  if (tool === undefined) return false;
   if (now - tool.since < secondsMs(t.tool_in_flight_max_s)) return true;
   return s.screen !== null && s.screen.changed_at > now - secondsMs(t.heartbeat_alarm_s);
 }
@@ -412,11 +412,12 @@ export function observeScreen(
   }
   const hash = screenHash(screenTail(r.screen, Number.POSITIVE_INFINITY));
   // A changed screen counts from the hold, or for a tool past its max from the probe's start.
-  const from = silence.held_at ?? (s.tool_in_flight !== null ? silence.started_at : last);
+  const inFlight = s.tool_in_flight.length > 0;
+  const from = silence.held_at ?? (inFlight ? silence.started_at : last);
   const changing =
     (s.screen !== null && s.screen.changed_at > from) ||
     (silence.hash !== null && silence.hash !== hash);
-  if (changing && (silence.held_at === null || s.tool_in_flight !== null)) {
+  if (changing && (silence.held_at === null || inFlight)) {
     silence.phase = "holding";
     silence.held_at = r.now;
     silence.hash = hash;
@@ -482,7 +483,7 @@ export function rebase(prev: AgentLiveness, at: number): AgentLiveness {
   s.activity_at = Math.max(s.activity_at, at);
   if (s.steered_at !== null) s.steered_at = Math.max(s.steered_at, at);
   if (s.background_wait !== null) s.background_wait.since = Math.max(s.background_wait.since, at);
-  if (s.tool_in_flight !== null) s.tool_in_flight.since = Math.max(s.tool_in_flight.since, at);
+  for (const t of s.tool_in_flight) t.since = Math.max(t.since, at);
   if (s.silence?.phase === "probing" || s.silence?.phase === "holding") s.silence = null;
   return s;
 }

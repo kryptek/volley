@@ -419,10 +419,10 @@ describe("liveness: a tool in flight is not silence", () => {
 
   it("PreToolUse records the tool in flight; the matching PostToolUse ends it", () => {
     const s = started();
-    expect(s.tool_in_flight).toEqual({ tool_use_id: "toolu_1", tool: "Bash", since: T0 });
-    expect(run(s, [post(T0 + MIN, "toolu_other")]).state.tool_in_flight).not.toBeNull();
-    expect(run(s, [post(T0 + MIN)]).state.tool_in_flight).toBeNull();
-    expect(run(s, [signal("idle-stop.json", T0 + MIN)]).state.tool_in_flight).toBeNull();
+    expect(s.tool_in_flight).toEqual([{ tool_use_id: "toolu_1", tool: "Bash", since: T0 }]);
+    expect(run(s, [post(T0 + MIN, "toolu_other")]).state.tool_in_flight).toHaveLength(1);
+    expect(run(s, [post(T0 + MIN)]).state.tool_in_flight).toEqual([]);
+    expect(run(s, [signal("idle-stop.json", T0 + MIN)]).state.tool_in_flight).toEqual([]);
   });
 
   it("a PreToolUse with no PostToolUse and a changing screen for 3 windows → no read, no decision", () => {
@@ -458,8 +458,34 @@ describe("liveness: a tool in flight is not silence", () => {
     expect(run(started(), steps).actions).toEqual([]);
   });
 
+  it("past tool_in_flight_max_s, reads that keep differing on a static capture → never hooks_silent", () => {
+    const at = T0 + 121 * MIN;
+    const r = run(started(), [
+      capture(T0 + 5 * MIN),
+      check(at),
+      read(screen("working.txt"), at),
+      check(at + 10_000),
+      read(screen("claude-session.txt"), at + 10_000),
+      check(at + 11 * MIN),
+      read(screen("working.txt"), at + 11 * MIN),
+      check(at + 22 * MIN),
+      read(screen("claude-session.txt"), at + 22 * MIN),
+    ]);
+    expect(kinds(r.actions)).toEqual(["read_screen", "read_screen", "read_screen", "read_screen"]);
+    expect(r.state.silence?.phase).toBe("holding");
+  });
+
+  it("parallel calls: the one that ends first leaves the other in flight", () => {
+    const steps = [pre(T0 + 1000, "toolu_2"), post(T0 + 2000, "toolu_2")];
+    for (let m = 1; m <= 31; m++) steps.push(capture(T0 + m * MIN), check(T0 + m * MIN + 1000));
+    const r = run(started(), steps);
+    expect(r.actions).toEqual([]);
+    expect(r.state.tool_in_flight).toEqual([{ tool_use_id: "toolu_1", tool: "Bash", since: T0 }]);
+    expect(run(r.state, [post(T0 + 32 * MIN)]).state.tool_in_flight).toEqual([]);
+  });
+
   it("rebase after a wake moves the tool's start forward", () => {
-    expect(rebase(started(), T0 + 60 * MIN).tool_in_flight?.since).toBe(T0 + 60 * MIN);
+    expect(rebase(started(), T0 + 60 * MIN).tool_in_flight[0]?.since).toBe(T0 + 60 * MIN);
   });
 });
 
