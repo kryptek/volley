@@ -239,10 +239,7 @@ export function WaveWindow(p: WaveWindowProps) {
       <Clawd waiting={waiting} />
       <span className="t-name">{id}</span>
       {s && (
-        <span
-          className={`chip${mine ? " chip--mine" : ""}`}
-          title={`owner: ${s.owner ?? "none"}`}
-        >
+        <span className={`chip${mine ? " chip--mine" : ""}`} title={`owner: ${s.owner ?? "none"}`}>
           {mine ? "★ yours" : (s.owner ?? "no owner")}
         </span>
       )}
