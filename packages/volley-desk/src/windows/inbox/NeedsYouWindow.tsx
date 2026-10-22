@@ -1,9 +1,10 @@
 /**
  * The Needs you window: the needs-you inbox (SPEC §4.6.18), one row per item volleyd keeps on
  * `volley/_inbox/<id>`: decisions, pickers, handoffs and the release train's go/no-go, oldest
- * first; a held one (SPEC §4.6.2) is amber with what it waits on, never counted or pulsing. In the glass window chrome like the coordinators window, with the Needs-you pulse ring
- * while any open item needs a person (owner-only, or at tier `you` per `attention.ts`), and the
- * title's `N need you` chip. Filters are Gooey tabs: All / Only you / Pickers / Decisions /
+ * first; a held one (SPEC §4.6.2) is amber with what it waits on, never counted or pulsing. In
+ * the glass window chrome like the coordinators window, with the Needs-you pulse ring while any
+ * open item needs a person (owner-only, or at tier `you` per `attention.ts`), and the title's
+ * `N need you` chip. Filters are Gooey tabs: All / Only you / Pickers / Decisions /
  * Handoffs. Rows are `InboxRow`s; Dismiss hides a row from this Desk only (the item stays open
  * and still counts), `Bring back` restores them. A row whose record clears (answered and past
  * volleyd's TTL, or closed) fades out over `LEAVE_MS`.

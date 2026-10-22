@@ -252,7 +252,6 @@ export const DECISION_KINDS = [
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
-/** decision.schema.json payload. */
 /** What a held decision waits on (SPEC §4.6.2): a task of its wave, a PR, an issue. */
 export interface HeldOn {
   task?: string;
@@ -268,6 +267,7 @@ export interface Held {
   at: string;
 }
 
+/** decision.schema.json payload. */
 export interface DecisionPayload {
   decision_id: string;
   wave: string;

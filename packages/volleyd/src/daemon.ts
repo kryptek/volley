@@ -5504,6 +5504,7 @@ export class Daemon {
         "unattended_safety",
         undefined,
         `The flake's fixer ${fixer} did not land a fix for ${r.test} (${why}${evidence.length > 0 ? `; ${evidence.join(", ")}` : ""}).`,
+        fixer,
       );
   }
 
@@ -5511,6 +5512,8 @@ export class Daemon {
    * Put a task's red head to the owner, escalated (`why`): its open ci_failed / agent_blocked_ci
    * decision is escalated, or, once answered (`fix flake`), asked again — `note` first, without
    * `fix flake` — and escalated. A decision escalated for the same reason already stays as it is.
+   * A hold on `failed` (the fixer that just failed) is lifted first; any other hold stands, and the
+   * decision is not escalated.
    */
   private async escalateRedHead(
     wave: WaveId,
@@ -5518,6 +5521,7 @@ export class Daemon {
     why: EscalateWhy,
     budget: Budget | undefined,
     note: string,
+    failed?: TaskId,
   ): Promise<void> {
     const rec = this.waves.get(wave)?.record;
     const d = Object.values(rec?.decisions ?? {})
@@ -5530,10 +5534,16 @@ export class Daemon {
     // Each append replaces the record: the decision is read back from the current one.
     const current = (id: string) => this.waves.get(wave)?.record.decisions[id] as DecisionRecord;
     // Held on the fixer that just failed (autoHolds): the hold is lifted, or the owner never sees it.
-    if (d.resolved === undefined && d.held !== undefined)
+    // Held on anything else (the owner's hold): a held decision never escalates.
+    if (d.resolved === undefined && d.held !== undefined) {
+      if (failed === undefined || d.held.on.task !== failed) {
+        this.log(`${wave}/${task}: ${note} (${d.decision_id} stays held, not escalated)`);
+        return;
+      }
       await this.releaseNow(wave, d.decision_id, `escalated: ${why}`, DAEMON_AGENT_ID, {
         rerun: false,
       });
+    }
     if (d.resolved === undefined) {
       if (d.escalated?.why === why) return;
       await this.escalate(wave, d, why, budget);
@@ -9152,6 +9162,7 @@ export class Daemon {
     if ("error" in r) return r;
     if ("not_held" in r) return { released: false };
     await this.append(wave, r.event);
+    this.heldCheckedAt.delete(`${wave}/${id}`);
     const d = log.record.decisions[id] as DecisionRecord;
     await this.mirrorHeld(wave, d);
     this.log(`released ${id}: ${why}`);
@@ -9262,13 +9273,16 @@ export class Daemon {
     const cwd = repo !== undefined ? { cwd: repoDir(repo) } : {};
     const state = async (argv: string[]) => {
       const r = await this.host.exec(argv, cwd).catch(() => null);
-      if (r === null || r.code !== 0) return undefined;
+      let v: unknown;
       try {
-        const v = (JSON.parse(r.stdout) as { state?: unknown }).state;
-        return typeof v === "string" ? v : undefined;
+        v = r?.code === 0 ? (JSON.parse(r.stdout) as { state?: unknown }).state : undefined;
       } catch {
-        return undefined;
+        v = undefined;
       }
+      if (typeof v === "string") return v;
+      // Still held; the owner can release it by hand.
+      this.log(`${wave}: ${id} stays held: \`${argv.slice(0, 4).join(" ")}\` read no state`);
+      return undefined;
     };
     void (async () => {
       const { pr, issue } = held.on;

@@ -333,6 +333,43 @@ describe("the flake fixer task (SPEC §4.6.16)", () => {
     expect(d?.escalated?.why).toBe("unattended_safety");
   });
 
+  it("the owner's hold on another blocker survives the fixer failing: not released, not escalated", async () => {
+    s = await env();
+    await flaky(s, "T3");
+    const d3 = await ciFailed(s, "T3");
+    await s.event((e) => e.type === "agent_spawned" && e.task === FIXER);
+    await s.settled();
+    // The owner holds T3's red head on PR #50 before autopilot holds it on the fixer.
+    await s.daemon.recordEvent("w1", {
+      type: "decision_held",
+      task: "T3",
+      data: { decision_id: d3, kind: "ci_failed", on: { pr: 50 }, by: "owner" },
+    } satisfies NewEvent);
+    await s.daemon.tick();
+    await s.settled();
+    await s.daemon.recordEvent("w1", {
+      type: "decision_opened",
+      task: FIXER,
+      data: {
+        decision_id: "blk-fixer",
+        kind: "agent_blocked",
+        question: "only a quarantine would fix it",
+        options: ["unblock", "cancel"],
+        pointers: {},
+      },
+    } satisfies NewEvent);
+    await s.event("remediation_closed");
+    await s.settled();
+    await s.daemon.tick();
+    await s.settled();
+    const j = s.journal();
+    expect(of(j, "decision_released")).toEqual([]);
+    expect(of(j, "decision_escalated").map((e) => e.data.decision_id)).not.toContain(d3);
+    const d = s.daemon.record("w1")?.decisions[d3];
+    expect(d?.held).toMatchObject({ on: { pr: 50 }, by: "owner" });
+    expect(d?.escalated).toBeUndefined();
+  });
+
   it("a restart closes a fixer that ended just before a crash (no remediation_closed journaled)", async () => {
     s = await env();
     await flaky(s, "T3");
