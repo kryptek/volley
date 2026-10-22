@@ -5842,6 +5842,8 @@ export class Daemon {
       }
     }
     // A stale or accepted run: the role's current run is healthy, so the task is not parked.
+    // A cancelled stage normally reaches blockedFallback before the pipeline is asked, so the
+    // BLOCKED_TASK_CANCELLED check only matters when the stage changed mid-handle (defensive).
     if (dropped !== undefined)
       await this.blockedFallback(agentId, a, null, dropped.data.why !== BLOCKED_TASK_CANCELLED);
   }
