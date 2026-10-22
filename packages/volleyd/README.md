@@ -2242,6 +2242,17 @@ rename), and the reducer folds it into the wave state's `tasks[].placement` and 
 unscored, with that one candidate. `volleyd spawn` refuses a task that is still `auto` (it is
 placed when admitted).
 
+**Switching a running wave to placement.** A task that has spawned keeps the host it runs on: a
+plan version that writes another `host:` for it (say `placement: auto` on an in-flight wave) never
+moves it. The reducer records that host from the task's `agent_spawned` as `tasks[].host_actual`,
+and the plan's own as `tasks[].host_planned` while they differ; every later role and check of the
+task (`verify`, `check_merged`) runs on `host_actual`. The tasks that have not started are placed.
+A placed task the new version still leaves to `auto` is where placement put it: no
+`host_planned`, and `volleyd run` reports no kept host for it. A task whose host is still `auto`
+when a check needs it (never placed, never spawned) never reaches the host resolver: volleyd
+raises `alarm_raised { alarm: "host_auto_unresolved" }` once per task per daemon run and runs that
+check on its own host.
+
 **Eligible.** The candidates are volleyd's own machine and every configured host with a machine
 record. A machine is eligible when its readiness verdict is `ready`, it is not draining, `placed`
 is under `max_agents`, its load per core (the higher of its 1- and 5-minute load averages) is at
@@ -2612,6 +2623,7 @@ holds (running, paused or awaiting a decision) submits the file as that wave's *
 | `after` changed | the new dependencies apply (`waiting_on` re-evaluated) | not paused (it already started); its dependents re-evaluate |
 | `issue` changed | applies | keeps the old issue; decision `plan_change` — `restart` / `let finish` |
 | `pipeline` / `model` changed | applies | applies to stages not yet started; running agents keep theirs |
+| `host` changed (e.g. the wave switched to `placement: auto`) | applies (an `auto` task is placed when admitted) | keeps the host it was spawned on; `volleyd run` prints `T3: host kept local (already running; new plan says auto)` |
 
 Tasks that finished (`merge_ready`, `done`) are left as they are. The scheduler and spawner use the
 *effective* plan: the submitted one, plus removed in-flight tasks and in-flight tasks' old issues,
