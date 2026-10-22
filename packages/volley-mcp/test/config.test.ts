@@ -11,7 +11,7 @@ describe("generateAgentId", () => {
     );
   });
   it("sanitizes non-conforming characters", () => {
-    expect(generateAgentId("/Users/Someone/My Project!")).toMatch(/^my-project-[a-z0-9]{4}$/);
+    expect(generateAgentId("/path/to/My Project!")).toMatch(/^my-project-[a-z0-9]{4}$/);
   });
   it("falls back to 'agent' when the basename sanitizes to empty", () => {
     expect(generateAgentId("/!!!")).toMatch(/^agent-[a-z0-9]{4}$/);

@@ -10,7 +10,7 @@
       "host": {
         "type": "ssh",
         "target": "-oProxyCommand=touch /tmp/pwned",
-        "repo": "/home/dev/src/example-repo"
+        "repo": "/path/to/repo"
       }
     }
   }

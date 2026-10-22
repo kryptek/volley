@@ -21,12 +21,12 @@ const PLIST = `<?xml version="1.0" encoding="UTF-8"?>
   <string>systems.volley.volleyd</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/op/.bun/bin/bun</string>
-    <string>/Users/op/src/volley &amp; co/packages/volleyd/src/cli.ts</string>
+    <string>/path/to/home/.bun/bin/bun</string>
+    <string>/path/to/home/src/volley &amp; co/packages/volleyd/src/cli.ts</string>
     <string>daemon</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/op/.volley/volleyd</string>
+  <string>/path/to/home/.volley/volleyd</string>
 </dict>
 </plist>
 `;
@@ -69,8 +69,8 @@ describe("resolveTag", () => {
 describe("servicesCheckout", () => {
   it("reads the checkout and bun from volleyd's launchd plist", () => {
     expect(servicesCheckout(PLIST)).toEqual({
-      repo: "/Users/op/src/volley & co",
-      bun: "/Users/op/.bun/bin/bun",
+      repo: "/path/to/home/src/volley & co",
+      bun: "/path/to/home/.bun/bin/bun",
     });
   });
 
@@ -79,14 +79,18 @@ describe("servicesCheckout", () => {
       name: "volleyd",
       label: "systems.volley.volleyd",
       description: "Volley wave supervisor (volleyd)",
-      args: ["/home/op/.bun/bin/bun", "/home/op/my repo/packages/volleyd/src/cli.ts", "daemon"],
+      args: [
+        "/path/to/home/.bun/bin/bun",
+        "/path/to/home/my repo/packages/volleyd/src/cli.ts",
+        "daemon",
+      ],
       env: { PATH: "/usr/bin" },
-      log: "/home/op/.volley/volleyd/volleyd.log",
-      workdir: "/home/op/.volley/volleyd",
+      log: "/path/to/home/.volley/volleyd/volleyd.log",
+      workdir: "/path/to/home/.volley/volleyd",
     });
     expect(servicesCheckout(unit)).toEqual({
-      repo: "/home/op/my repo",
-      bun: "/home/op/.bun/bin/bun",
+      repo: "/path/to/home/my repo",
+      bun: "/path/to/home/.bun/bin/bun",
     });
   });
 

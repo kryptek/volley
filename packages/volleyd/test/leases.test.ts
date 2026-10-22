@@ -810,7 +810,7 @@ describe("config.example.yaml", () => {
     });
     expect(eff.hosts.buildbox).toMatchObject({
       target: "me@buildbox",
-      repo: "/home/me/src/myrepo",
+      repo: "/path/to/repo",
     });
     expect(Object.keys(eff.lease_pools)).toEqual(["backend-it", "build", "browser"]);
     expect(eff.lease_pools["backend-it"]).toMatchObject({ capacity: 3, ttl_s: 3600 });
