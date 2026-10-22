@@ -9657,6 +9657,7 @@ export class Daemon {
     const recent = last !== undefined && this.time.now() - last < window;
     if (a === undefined || a.liveness.activity !== "idle" || recent) {
       if (a !== undefined && recent) this.log(`wake ${w.agent}: skipped, woken ${window} ms ago`);
+      // Nothing journaled: status shows no `steer unacked` for this message, only for the woken one.
       this.wakes.delete(messageId);
       return;
     }

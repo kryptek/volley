@@ -1268,7 +1268,10 @@ the message. A `working` agent is never typed into (it reads the mailbox at its 
 `awaiting_input`: a question, permission or credit picker is open there, and the Enter would
 answer it, nor one paused because the broker refused its hooks (`auth_failed`): the prompt it
 would submit cannot deliver its work. One wake drains every message sent before it, so a message
-whose window ends within `mailbox_wake_after_ms` of the agent's last wake types no second line.
+whose window ends within `mailbox_wake_after_ms` of the agent's last wake types no second line
+and journals nothing (status names only the woken message as unacked). A wake whose window has
+not ended lives in memory only: a daemon restart drops it, so a steer sent to an idle agent just
+before a restart is not woken (the agent's next hook signal drains it).
 There is at most one wake per message: until its ack arrives (journaled `steering_received`) the
 wave state's `tasks[].steer_unacked` names the agent and `volleyd status` prints
 `steer unacked (<agent>)`. When the host typed the line but its `Enter` failed, the line stays
