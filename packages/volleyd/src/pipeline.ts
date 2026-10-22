@@ -4118,6 +4118,9 @@ export class PipelineDriver {
       const first = this.noCiSince.get(key) ?? this.now();
       this.noCiSince.set(key, first);
       waited = this.now() - first;
+    } else if (report.kind === "ok" && report.ci.state === "unknown") {
+      // Unreadable time is not no-CI time: a later `none` starts the clock over.
+      this.noCiSince.delete(`${task}/${report.head}`);
     }
     return {
       kind: "verified",
@@ -4507,7 +4510,7 @@ export class PipelineDriver {
       const first = this.noCiSince.get(key) ?? this.now();
       this.noCiSince.set(key, first);
       waited = this.now() - first;
-    }
+    } else if (facts.ci.state === "unknown") this.noCiSince.delete(key);
     return {
       kind: "moved_ci",
       to: moved.to,

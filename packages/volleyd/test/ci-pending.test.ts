@@ -184,6 +184,24 @@ describe("unreadable CI (a rate limit) is not `no CI` (#310)", () => {
     expect(probes()).toBe(before);
   });
 
+  it("unreadable time is not no-CI time: none → unknown past grace → none restarts the clock", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    // No run yet: the no-CI clock starts.
+    await h.finish("implementer", { head: H1 });
+    h.world.ciError = "HTTP 502: Bad Gateway";
+    const grace = DAEMON_DEFAULTS.ci_none_grace_ms;
+    for (let t = 0; t <= grace; t += DAEMON_DEFAULTS.ci_poll_ms) await recheck();
+    // GitHub reads again, still no run: the clock starts over, so no decision yet.
+    h.world.ciError = undefined;
+    await recheck();
+    expect(h.openDecisions()).toEqual([]);
+    // A full grace of readable `none` opens it.
+    for (let t = 0; t <= grace; t += DAEMON_DEFAULTS.ci_poll_ms) await recheck();
+    expect(h.openDecisions()[0]).toMatchObject({ kind: "ci_failed" });
+  });
+
   it("a non-rate-limit failure (HTTP 502) is a hold re-polled every ci_poll_ms, never a decision", async () => {
     h = pipelineHarness();
     await h.start();

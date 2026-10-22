@@ -325,6 +325,22 @@ describe("a blocked agent whose reason is a failing test, on a red PR head", () 
     expect(events("remediation_requested")).toEqual([]);
   });
 
+  it("an unreadable release branch (#310): the plain agent_blocked decision, nothing classified", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    h.world.origin[h.PR_BRANCH] = H1;
+    h.world.ci[H1] = "red";
+    h.world.runLog = fx("gh-run-log-failed-flake.txt");
+    h.world.releaseError = "HTTP 502: Bad Gateway";
+    await h.block("implementer", "test/clock.test.ts is red on CI, not in my change");
+    const [d] = h.openDecisions();
+    expect(d?.kind).toBe("agent_blocked");
+    expect(facts(d).pipeline).toEqual({ on: "agent_blocked", role: "implementer" });
+    expect(facts(d).classification).toBeUndefined();
+    expect(events("remediation_requested")).toEqual([]);
+  });
+
   it("a PR list entry without a number or url: the plain agent_blocked decision", async () => {
     h = pipelineHarness();
     await h.start();
