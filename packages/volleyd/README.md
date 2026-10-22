@@ -2955,12 +2955,12 @@ one at a time, in order, and brings each up to date just before its merge
   `merge: manual` keeps a wave's tasks out of the queue altogether.
 - **Order.** Dependency first: a task more tasks name in their `after` goes first, and a task
   never goes ahead of a queued task it comes after. Then readiness: the task queued earliest. A
-  task GitHub refused as `behind` or `head_moved` goes after the tasks still waiting; one refused
-  for any other reason keeps its place.
+  task GitHub refused as `behind`, `head_moved` or `retargeted` goes after the tasks still
+  waiting; one refused for any other reason keeps its place.
 - **One merge in flight per release branch.** The task at the front takes the release branch's
   lock (`<repo>#<release_branch>`, held by the daemon, so two waves on one release branch share
-  it) and keeps it until it merged, GitHub refused it as `behind` or `head_moved`, or it waits
-  for an answer. A task whose
+  it) and keeps it until it merged, GitHub refused it as `behind`, `head_moved` or `retargeted`,
+  or it waits for an answer. A task whose
   turn checks fail `merge_turn_check_failures_max` (3) times in a row (its PR was retargeted, `gh`
   keeps failing, its worktree is gone; each failure is a `pipeline_error` alarm) gives up the turn
   and is passed over, with the tasks that come after it, while another queued task can go.

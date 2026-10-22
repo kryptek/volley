@@ -45,8 +45,9 @@ export function dependents(wave: Wave, task: TaskId): number {
  * The last refusal says the PR cannot merge into the release branch as it stands (behind it, its
  * head moved, or retargeted away from it): the task gives up the merge turn. Any other refusal
  * (required checks, branch protection, unknown) keeps it, and the merge is tried again up to
- * `merge_retry_max` (#311). A refusal journaled before reasons were recorded counts as `behind`; a late refusal of
- * an older gated head counts for nothing (the reducer records only the current head's reason).
+ * `merge_retry_max` (#311). A refusal journaled before reasons were recorded counts as `behind`;
+ * a late refusal of an older gated head counts for nothing (the reducer records only the current
+ * head's reason).
  */
 export function refusalEndsTurn(p: TaskPipeline): boolean {
   const reason = p.merge_refusal_reason;
@@ -121,8 +122,8 @@ function afterFirst(entries: QueueEntry[], wave: Wave): QueueEntry[] {
  * on a branch with a merge in flight. A branch's candidates are its gated entries; a refused one
  * only when no other waits, unless its refusal said nothing about the release branch
  * (`keepsPlace`: it competes as a queued one). Across waves sharing a branch, each wave's first
- * candidate competes by readiness. (Each pipeline driver passes its own wave only: across waves the release-branch
- * lock goes to whichever wave asks first.)
+ * candidate competes by readiness. (Each pipeline driver passes its own wave only: across waves
+ * the release-branch lock goes to whichever wave asks first.)
  *
  * An ungated (updating) entry is skipped, so a gated entry behind it can go first: the "never
  * ahead of a task it comes after" order holds only because a dependent is admitted after its
