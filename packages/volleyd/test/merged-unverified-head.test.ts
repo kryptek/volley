@@ -164,6 +164,40 @@ describe("merged_unverified_head", () => {
     expect(alarmed(B)).toBe(false);
     expect(alarmed(A)).toBe(true);
   });
+  it("merged at the gated head while a fixup runs: the fixup is retired as superseded, no alarm (#311)", () => {
+    const run = (agent_id: string) => ({ agent_id, steers: {}, accepted: false });
+    const view: PipelineView = {
+      task: "T1",
+      stages: [["implement"], ["merge_ready"]],
+      stage: "fixup",
+      release_branch: "release/w",
+      p: {
+        ...emptyPipeline(),
+        pr: { url: "u", number: 7 } as never,
+        head: A,
+        gated: [A],
+        runs: { implementer: { ...run("impl"), accepted: true }, fixup: run("fix") },
+      },
+    };
+    const actions = next(view, {
+      kind: "merge_checked",
+      view: { state: "MERGED", baseRefName: "release/w", headRefOid: A },
+    });
+    expect(
+      actions.some((a) => a.kind === "journal" && a.event.data?.alarm === "merged_unverified_head"),
+    ).toBe(false);
+    expect(actions).toContainEqual({ kind: "retire", agent_id: "fix", status: "superseded" });
+    expect(actions).toContainEqual({ kind: "retire", agent_id: "impl" });
+    expect(actions).toContainEqual(
+      expect.objectContaining({
+        kind: "journal",
+        event: expect.objectContaining({
+          type: "stage_entered",
+          data: { stage: "done", merged: true },
+        }),
+      }),
+    );
+  });
   it("off merge_ready, a merge whose head GitHub does not report still alarms (#311)", () => {
     const view: PipelineView = {
       task: "T1",

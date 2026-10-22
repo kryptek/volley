@@ -143,7 +143,7 @@ describe("nextToMerge", () => {
     expect(nextToMerge(onlyRefused, new Set())?.task).toBe("T1");
   });
 
-  it("a checks refusal keeps its queue place; a behind or retargeted refusal waits behind the rest (#311)", () => {
+  it("a checks refusal keeps its queue place; a behind, retargeted or closed refusal waits behind the rest (#311)", () => {
     const refusal = (reason?: RefusalReason) =>
       queued(1, {
         merge_refusals: 1,
@@ -153,7 +153,7 @@ describe("nextToMerge", () => {
       const rec = record("w1", { T1: { p: refusal(reason) }, T2: { p: queued(2) } });
       expect(nextToMerge({ b: queueOf(rec) }, new Set())?.task).toBe("T1");
     }
-    for (const reason of ["behind", "head_moved", "retargeted", undefined] as const) {
+    for (const reason of ["behind", "head_moved", "retargeted", "closed", undefined] as const) {
       const rec = record("w1", { T1: { p: refusal(reason) }, T2: { p: queued(2) } });
       expect(nextToMerge({ b: queueOf(rec) }, new Set())?.task).toBe("T2");
     }
