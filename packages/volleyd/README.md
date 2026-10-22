@@ -2945,8 +2945,8 @@ In an unattended wave the gate is where work stalls: every merge waited for a pe
   gate and a human merges it) or `cancel`. A new gated head starts the count again. `reason` is
   what the refusal says: `behind` (out of date with or conflicting with the release branch, or
   the release branch moved during the merge), `head_moved`, `retargeted`, `closed`, `checks`
-  (required checks, branch protection, reviews) or `unknown`. Only `behind`, `head_moved` and
-  `retargeted` give up the merge turn; any other keeps the turn and the gated head, and the
+  (required checks, branch protection, reviews) or `unknown`. Only `behind`, `head_moved`,
+  `retargeted` and `closed` give up the merge turn; any other keeps the turn and the gated head, and the
   merge is tried again at the next up-to-date check. No refusal enters a
   branch update by itself: one runs only when the turn's rebase check counts the release branch's
   commits the head lacks (a failed `git fetch` or `git log` is a failed check, never "behind").

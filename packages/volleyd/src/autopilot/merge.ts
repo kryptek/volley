@@ -12,8 +12,9 @@ import type { MergeToken } from "../fence";
 /**
  * Why a merge was refused. Only `behind` (out of date with, or conflicting with, the release
  * branch) and `head_moved` (the PR is no longer at the gated head) say the branch must change
- * before it can merge, and `retargeted` that it can never merge into it; `checks` (required
- * checks, branch protection), `closed` and `unknown` say nothing about the release branch.
+ * before it can merge; `retargeted` and `closed` say it can never merge into it. Those four give up
+ * the merge turn (refusalEndsTurn); `checks` (required checks, branch protection) and `unknown`
+ * say nothing about the release branch and keep it.
  */
 export type RefusalReason =
   | "behind"
@@ -124,8 +125,7 @@ export function isRefusalReason(v: unknown): v is RefusalReason {
 
 /** What `gh pr merge`'s refusal says, from its stderr. Pure. */
 export function refusalReason(stderr: string): RefusalReason {
-  if (/head branch was modified|head is \S+, not the gated|match-head-commit/i.test(stderr))
-    return "head_moved";
+  if (/head branch was modified|match-head-commit/i.test(stderr)) return "head_moved";
   // "Base branch was modified": the release branch moved during the merge.
   if (
     /base branch was modified|out of date|not up to date|behind|conflict|cannot be cleanly created/i.test(
