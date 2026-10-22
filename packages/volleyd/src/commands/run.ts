@@ -26,7 +26,8 @@ daemon stores it as $VOLLEYD_HOME/waves/<wave>/v<N>.yaml, journals the structura
 it (added tasks queue, removed queued tasks cancel, in-flight tasks get a plan_change decision).
 Preview the diff with \`volleyd diff <wave> <wave.yaml>\`.
 A wave that places tasks (\`placement: auto\`, or a task's \`host: auto\`) also prints where its
-tasks would go if admitted now (as \`volleyd validate\` does); each is placed at admission.
+tasks would go if admitted now (as \`volleyd validate\` does; a later version only when its file
+sets placement:); each is placed at admission.
 `;
 
 /** Printed when `run` submits a wave with no owner (SPEC §4.6.20). */
@@ -94,9 +95,11 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
     }
     const state = res.result as WaveState;
     const warnings = (res.warnings ?? []).map((w) => `warning: ${w}\n`).join("");
-    // Where its auto tasks would go if admitted now (the daemon places each at admission).
+    // Where its auto tasks would go if admitted now (the daemon places each at admission). A later
+    // version without placement: keeps the wave's own, which this parse cannot know: no preview.
+    const preview = places(wave) && (res.plan === undefined || placementFromFile);
     const placement =
-      parsed.values.json !== true && places(wave) ? await previewPlacement(wave, target) : "";
+      parsed.values.json !== true && preview ? await previewPlacement(wave, target) : "";
     if (parsed.values.json === true) {
       io.stdout(`${JSON.stringify(state, null, 2)}\n`);
       io.stderr(warnings);

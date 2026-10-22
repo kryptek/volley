@@ -4589,7 +4589,7 @@ export class Daemon {
       this.peerIdleWarned.set(wave, known);
       // Overloaded by the wave's own threshold (its `config:` may set one), as it was raised.
       const placement = this.config.effective(wave).placement;
-      const hot = Object.keys(cfg.hosts).length > 0 && perCore > placement.load_per_core_max;
+      const hot = perCore > placement.load_per_core_max;
       if (known === "cleared" || (known === "none" && !hot)) continue;
       const local = (log.record.plan ?? log.record.wave)?.placement !== AUTO_HOST;
       // Only the load clears it: a peer's verdict settling after a restart is no all-clear.

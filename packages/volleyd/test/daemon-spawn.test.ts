@@ -1021,6 +1021,29 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     expect(w5.placement).toBeUndefined();
   });
 
+  it("run prints no placement preview for a later version of a local wave without placement: (#324)", async () => {
+    localClaude = true;
+    await setup();
+    expect((await runCli(["config", "set", "placement.default", "local"], env.env)).exitCode).toBe(
+      0,
+    );
+    await submit("w6", "", "  T1: { issue: 42 }\n");
+    // The default turns auto, but the running wave keeps local: no "if admitted now" for it.
+    expect((await runCli(["config", "set", "placement.default", "auto"], env.env)).exitCode).toBe(
+      0,
+    );
+    const file = join(env.home, "w6.yaml");
+    writeFileSync(
+      file,
+      `wave: w6\nrepo: ${repo}\nrelease_branch: release/w6\nmodel: claude-opus-5-5\npipeline: [implement, spec_review]\ntasks:\n  T1: { issue: 42 }\n  T2: { issue: 42 }\n`,
+    );
+    const r = await runCli(["run", file], env.env);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("plan v2");
+    expect(r.stdout).not.toContain("if admitted now");
+    expect(r.stdout).not.toContain("placement preview");
+  });
+
   describe("peer_idle_under_load (#324)", () => {
     // Load 10 per core on the own machine: over placement.load_per_core_max (1.5).
     const cores = Math.max(1, availableParallelism());
