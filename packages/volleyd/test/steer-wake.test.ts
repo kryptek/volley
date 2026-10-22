@@ -185,6 +185,20 @@ describe("steer wakes an idle agent", () => {
     expect(woken()).toEqual([]);
   });
 
+  it("the auth_failed pause steers an idle agent but never types the wake line", async () => {
+    await setup();
+    await idle();
+    // The pause the daemon runs when the broker refused the agent's hooks (relaunch.test.ts).
+    await (s.daemon as unknown as { pauseAuthFailed(id: string): Promise<void> }).pauseAuthFailed(
+      AGENT,
+    );
+    await s.event((e) => e.type === "steering_sent" && e.data.reason === "auth_failed");
+    await clock.advance(2 * WAKE_MS);
+    await s.settled();
+    expect(wakes()).toEqual([]);
+    expect(woken()).toEqual([]);
+  });
+
   it("an ack within the window cancels the wake", async () => {
     await setup();
     await idle();
