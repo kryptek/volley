@@ -150,6 +150,23 @@ describe("awaiting_decision", () => {
     await daemon.resolveDecision(WAVE, d.decision_id, { answer: "v2", by: "coord-a" });
     expect((await retainedState()).status).toBe("running");
   });
+
+  it("a wave whose only open decisions are held waits on the blocker, not on the owner", async () => {
+    await stage("A", "implement");
+    const d = await daemon.openDecision(WAVE, {
+      kind: "agent_blocked",
+      task: "A",
+      question: "v1 or v2?",
+    });
+    expect((await retainedState()).status).toBe("awaiting_decision");
+    const h = await client.request("hold", {
+      decision_id: d.decision_id,
+      on: { issue: 7 },
+      by: "coord-a",
+    });
+    expect(h.error).toBeUndefined();
+    expect((await retainedState()).status).toBe("running");
+  });
 });
 
 describe("coordinator attention", () => {

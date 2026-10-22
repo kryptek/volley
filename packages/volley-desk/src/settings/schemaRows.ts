@@ -4,7 +4,8 @@
  * hand-maintained list of tunables. Each leaf of `$defs/tunableProperties`
  * becomes one row: a bounded number is a stepped slider, a boolean a switch, a
  * string enum a choice, a list of an enum (`autopilot.owner_only`) a
- * multi-select, a string (or string-or-null) a text field, a nested
+ * multi-select, a top-level list of strings (`agent_mcp_allow`) a list field (comma-separated),
+ * a string (or string-or-null) a text field, a nested
  * object one row per leaf (any other list leaf none), and the `lease_pools` map gets one capacity row per
  * configured pool. A string enum that may also be null (`fleet.local_agents`,
  * which the retained config carries resolved) is a choice of its strings, and a
@@ -73,6 +74,8 @@ export type RowControl =
   | { kind: "choice"; options: string[] }
   /** A list of distinct enum values (`autopilot.owner_only`): one checkbox per option. */
   | { kind: "multi"; options: string[] }
+  /** A list of distinct free strings (`agent_mcp_allow`): one comma-separated field. */
+  | { kind: "list"; maxItems?: number; maxLength?: number }
   | { kind: "text"; nullable: boolean; minLength?: number; maxLength?: number };
 
 export interface SchemaRow {
@@ -97,7 +100,7 @@ const UNITS: [suffix: string, unit: string][] = [
 ];
 
 /** Words a label spells as written here, never capitalised. */
-const AS_WRITTEN: Record<string, string> = { api: "API", ci: "CI", cmux: "cmux" };
+const AS_WRITTEN: Record<string, string> = { api: "API", ci: "CI", cmux: "cmux", mcp: "MCP" };
 
 /** `claim_after_s` → words `claim after`, unit `s`. */
 function wordsAndUnit(key: string): { words: string; unit: string } {
@@ -133,6 +136,13 @@ function controlFor(path: string, s: JsonSchema): RowControl {
   const items = s.items as JsonSchema | undefined;
   if (s.type === "array" && items?.enum?.every((e) => typeof e === "string")) {
     return { kind: "multi", options: items.enum as string[] };
+  }
+  if (s.type === "array" && items?.type === "string") {
+    return {
+      kind: "list",
+      ...(typeof s.maxItems === "number" ? { maxItems: s.maxItems } : {}),
+      ...(items.maxLength !== undefined ? { maxLength: items.maxLength } : {}),
+    };
   }
   const isChoice = (v: JsonSchema) =>
     v.enum !== undefined && v.enum.length > 0 && v.enum.every((e) => typeof e === "string");

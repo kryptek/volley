@@ -127,7 +127,7 @@
           "minimum": 60,
           "maximum": 86400,
           "default": 600,
-          "description": "Seconds without a hook heartbeat (while working and alive) before a hooks_silent alarm."
+          "description": "Seconds without a hook heartbeat (while working and alive, no tool call in flight) before the screen is read; a screen still changing across two such windows opens a hooks_silent alarm."
         },
         "idle_grace_s": {
           "type": "integer",
@@ -149,6 +149,27 @@
           "maximum": 86400,
           "default": 1800,
           "description": "Cap on the gap before a re-opened agent_stalled decision: the n-th re-open waits idle_grace_s × 2^n after the answer, at most this long."
+        },
+        "blocked_undecided_stall_ms": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 86400000,
+          "default": 300000,
+          "description": "Milliseconds an agent whose retained status is blocked may go with no decision naming it (open, or answered for that status) before it is stalled (an agent_stalled decision: respawn | stop task). Optional in the retained payload: a supervisor that predates it omits it."
+        },
+        "tool_in_flight_max_s": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400,
+          "default": 7200,
+          "description": "Seconds a tool call in flight (its PreToolUse boundary seen, its PostToolUse not yet) holds off the silence probe; past it, a screen static for heartbeat_alarm_s falls back to the screen_static path."
+        },
+        "mailbox_wake_after_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 600000,
+          "default": 20000,
+          "description": "Milliseconds the supervisor waits for an agent's hooks to ack a mailbox message it sent (a steer, a nudge, an answer) before it types the fixed wake line into the agent's session; only an agent idle at its prompt is woken, once per message."
         },
         "fallback_model": {
           "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 128 }, { "type": "null" }],
@@ -267,6 +288,14 @@
           "default": "strict",
           "description": "The MCP servers a launched agent loads (spec section 4.6.4): strict (only the supervisor's own volley server: a reproducible, minimal agent) or inherit (the user's own servers too, such as plugin servers and connectors, beside the supervisor's volley server, which takes over a user-scope server of the same name). Optional in the retained payload: a supervisor that predates it omits it."
         },
+        "agent_mcp_allow": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "default": [],
+          "description": "Under agent_mcp: inherit, the user's MCP servers a launched agent loads, by name (spec section 4.6.4): the supervisor copies each named entry from the profile's ~/.claude.json (user and local scope) and the repository's .mcp.json into the agent's own MCP config and launches it strict, so only those start. Empty: every server, as inherit alone. A name found nowhere, unapproved in .mcp.json or of an entry shape volleyd does not copy is skipped and journaled once per wave and machine. Optional in the retained payload: a supervisor that predates it omits it."
+        },
         "agent_auto_compact_pct": {
           "type": "integer",
           "minimum": 0,
@@ -382,6 +411,12 @@
               "enum": ["files", "all", "off"],
               "default": "files",
               "description": "When a wave's PR merges, send one steering message to its running implementers: files (those whose task's files overlap the merged PR's), all, or off."
+            },
+            "default": {
+              "type": "string",
+              "enum": ["local", "auto"],
+              "default": "auto",
+              "description": "The placement of a wave file without placement: (spec section 4.6.15). auto places its unpinned tasks across machines once a paired machine (a hosts.<name> entry) is configured; with none, or under local, they run on the supervisor's own machine."
             }
           }
         },
@@ -396,6 +431,13 @@
           "type": "boolean",
           "default": true,
           "description": "true: a complete wave is archived as soon as its wave_complete decision is answered (spec section 4.6.20). Optional in the retained payload: a supervisor that predates it omits it."
+        },
+        "ci_rate_limit_backoff_ms": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 3600000,
+          "default": 300000,
+          "description": "After a rate-limited GitHub answer (HTTP 403 or 429), the supervisor makes none of that wave's CI calls for this long (longer when the answer's output names a Retry-After). Optional in the retained payload: a supervisor that predates it omits it."
         },
         "fleet": {
           "type": "object",
@@ -613,7 +655,7 @@
           "minimum": 1,
           "maximum": 100,
           "default": 4,
-          "description": "The most supervised agents this host runs at once (spec section 4.6.15); hard_ceiling still caps the total."
+          "description": "The most supervised agents this host runs at once (spec section 4.6.15); hard_ceiling still caps the total. Derived at join from the machine's size, min(floor(cores / 3), floor(memory_total_mb / 4096)) clamped to 2..16; unset, it is derived the same way from the machine record, and 4 when the size is unknown. An explicit value always wins."
         },
         "drain": {
           "type": "boolean",
@@ -694,7 +736,7 @@
           "type": "array",
           "maxItems": 32,
           "items": { "type": "string", "format": "regex", "minLength": 1, "maxLength": 256 },
-          "description": "Regular expressions over a command line; a match requires a lease from this pool."
+          "description": "Regular expressions matched against each command the shell would execute (not comments, heredocs or message text); a match requires a lease from this pool."
         }
       }
     },

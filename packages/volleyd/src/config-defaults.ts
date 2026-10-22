@@ -25,6 +25,9 @@ export const CONFIG_DEFAULTS: Tunables = {
   idle_grace_s: 180,
   background_wait_max_s: 7200,
   stall_backoff_max_s: 1800,
+  blocked_undecided_stall_ms: 300_000,
+  tool_in_flight_max_s: 7200,
+  mailbox_wake_after_ms: 20_000,
   fallback_model: null,
   mailbox: { session_expiry_s: 604800 },
   worktree_root: "~/.volley/worktrees",
@@ -40,6 +43,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   claude: { default_account: null, warn_at_pct: 90 },
   branch_update: "rebase",
   agent_mcp: "strict",
+  agent_mcp_allow: [],
   agent_auto_compact_pct: 85,
   public_hygiene: "auto",
   hosts: {},
@@ -48,6 +52,8 @@ export const CONFIG_DEFAULTS: Tunables = {
   retire_close_session: true,
   placement: {
     nudge_on_merge: "files",
+    // a wave file without placement: (wave-file.ts defaultPlacement)
+    default: "auto",
     // --- Fleet: placement engine (placement.ts, SPEC §4.6.15) ---
     load_per_core_max: 1.5,
     mem_available_min_pct: 10,
@@ -83,6 +89,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   // --- Archiving (SPEC §4.6.20) ---
   archive_ended_after_h: 24,
   archive_on_ack: true,
+  ci_rate_limit_backoff_ms: 300_000,
 };
 
 /**
@@ -181,6 +188,9 @@ export const DAEMON_DEFAULTS = {
   /** How long a spawn's (or `run`'s) `git fetch origin <release branch>` may take before it is
    * treated as failed (an ssh remote with no agent, a credential prompt). */
   git_fetch_timeout_ms: 30_000,
+  /** After a fetch that lost a ref-lock race (another git process updating the same ref): how
+   * long to wait before its one retry (git-lock.ts lockedFetch). */
+  git_fetch_race_retry_ms: 500,
   /** Read-modify-write attempts on `~/.claude.json` while Claude Code keeps rewriting it. */
   trust_write_attempts: 5,
   /** How long `steer` waits for the recipient's `steering_acked` before reporting `delivered`. */
@@ -220,6 +230,8 @@ export const DAEMON_DEFAULTS = {
   /** Retry headroom of the derived spawn budget: this share of the wave's pipeline roles, at least `spawn_budget_retry_min`. */
   spawn_budget_retry_headroom: 0.5,
   spawn_budget_retry_min: 2,
+  /** The smallest `raise by <n>` a spawn_budget_exhausted decision offers: this share of the derived budget. */
+  spawn_budget_raise_min_share: 0.25,
   /** Two review findings in one file at most this many lines apart are on the same hunk. */
   review_hunk_lines: 10,
   /** How often the pipeline re-checks CI on a head whose runs are still pending. */

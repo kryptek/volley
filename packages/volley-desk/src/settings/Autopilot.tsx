@@ -15,6 +15,7 @@
  */
 import { useEffect, useState } from "react";
 import { plural } from "../lib/plural";
+import { SwitchToAdmin } from "../auth/AccountActions";
 import type { ConfigPayload, Tunables } from "../store/types";
 import type { ControlFn } from "./ClaudeAccounts";
 import { ConfigRows } from "./ConfigRows";
@@ -258,7 +259,7 @@ export function Autopilot({
       {policy === null ? (
         <p className="s-hint">
           The Desk cannot ask volleyd without broker credentials: run <code>{cmd}</code> in a
-          terminal.
+          terminal. <SwitchToAdmin />
         </p>
       ) : policy.state === "loading" ? (
         <p className="s-hint dim">Asking volleyd…</p>

@@ -112,7 +112,8 @@ export async function moveAgentAccount(m: MoveRequest, d: MoveDeps): Promise<Mov
 
 /**
  * What a respawn of a moved or vanished agent carries over from its `agent_spawned` record: its
- * MCP servers (`agent_mcp`, whatever the tunable says now), and for a pipeline role (reviewer,
+ * MCP servers (`agent_mcp` and, under `inherit`, `agent_mcp_allow`, whatever the tunables say
+ * now), and for a pipeline role (reviewer,
  * fixup, rebase) its start point and its own per-attempt worktree, where its `.volley/` inputs
  * (review.md, findings.md, rebase.md, …) still are, plus a merge-mode rebase step's merge brief.
  * An implementer's worktree is per role, so it needs neither.
@@ -122,9 +123,16 @@ export function moveRespawn(spawned: Record<string, unknown> | undefined): {
   worktreeAttempt?: number;
   branch_update?: "merge";
   agent_mcp?: AgentMcp;
+  agent_mcp_allow?: string[];
 } {
   if (spawned === undefined) return {};
-  const mcp = { agent_mcp: spawned.agent_mcp === "inherit" ? "inherit" : "strict" } as const;
+  const allow = Array.isArray(spawned.agent_mcp_allow)
+    ? spawned.agent_mcp_allow.filter((n): n is string => typeof n === "string")
+    : [];
+  const mcp =
+    spawned.agent_mcp === "inherit"
+      ? { agent_mcp: "inherit" as const, agent_mcp_allow: allow }
+      : { agent_mcp: "strict" as const };
   if (typeof spawned.start !== "string") return mcp;
   return {
     ...mcp,

@@ -107,7 +107,7 @@ describe("no Claude credential handling in volleyd", () => {
       [],
     );
     // The box's script (no profile dir) still unsets every credential variable.
-    const script = renderSigninScript({ signinDir: "/home/dev/.volley/signin/primary" });
+    const script = renderSigninScript({ signinDir: "/path/to/home/.volley/signin/primary" });
     expect(script).toContain(`unset ${CREDENTIAL_ENV.join(" ")}`);
     expect(script).not.toMatch(/setup-token|CLAUDE_CONFIG_DIR/);
   });

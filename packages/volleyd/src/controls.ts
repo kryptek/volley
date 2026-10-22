@@ -1,6 +1,8 @@
 import { parseArgs } from "node:util";
+import { RELEASE_TASK } from "./autopilot/release-train";
 import { type Clock, systemClock } from "./clock";
 import {
+  BAD_ANSWER,
   type ControlOp,
   type ControlResponse,
   type ControlTarget,
@@ -11,7 +13,7 @@ import { type Command, type CommandArgs, EXIT, type ExitCode } from "./io";
 import { resolveCaller } from "./ownership";
 import type { WaveRecord } from "./reducer";
 import { type Admission, activeTasks, ready } from "./scheduler";
-import type { JournalEvent, TaskAgents, TaskId, TaskStage, WaveId } from "./types";
+import type { JournalEvent, TaskAgents, TaskId, WaveId } from "./types";
 
 /**
  * Operator controls: pause/resume, stop, the stop --all kill switch, and steer. Pure helpers; the
@@ -49,43 +51,46 @@ export function candidates(rec: WaveRecord): TaskId[] {
   return ready(rec);
 }
 
-/** The agent each stage is driven by; steering a task goes to its current stage's agent. */
-const ROLE_FOR_STAGE: Partial<Record<TaskStage, keyof TaskAgents>> = {
-  implement: "implementer",
-  spec_review: "spec_reviewer",
-  quality_review: "quality_reviewer",
-  fixup: "fixup",
-};
-
-/** The roles a steer may name. */
+/** The roles a steer may name: every role a wave's agents run in. */
 export const TASK_ROLES: readonly (keyof TaskAgents)[] = [
   "implementer",
   "spec_reviewer",
   "quality_reviewer",
   "fixup",
+  "rebase",
+  "release",
 ];
 
 export const isTaskRole = (r: string): r is keyof TaskAgents =>
   (TASK_ROLES as readonly string[]).includes(r);
 
 /**
- * Who a steer to `task` reaches: `role`'s agent, else the current stage's, else the implementer;
- * never one in `retired` (task.agents keeps the last agent per role after it is retired). Null
- * when no live agent fits: the steer is queued for the task's next one.
+ * Who a steer to `task` reaches: the task's newest spawned agent that `journal` has not retired,
+ * whatever its role (a rebase agent runs in the fixup stage), or the newest of `role` when
+ * given. `_release` names the release train's stage agents. Null when no agent is live: the
+ * steer is queued for the task's next one. An agent that has published `done` stays the target
+ * until its retirement is journaled: in that short window a steer (and its wake) reaches an
+ * agent that is finishing.
  */
 export function steerTarget(
   rec: WaveRecord,
   task: TaskId,
-  retired: ReadonlySet<string>,
+  journal: readonly JournalEvent[],
   role?: keyof TaskAgents,
 ): { role: keyof TaskAgents; agent_id: string } | null {
-  const t = rec.state?.tasks.find((x) => x.id === task);
-  if (t === undefined) return null;
-  const order: (keyof TaskAgents)[] =
-    role !== undefined ? [role] : [ROLE_FOR_STAGE[t.stage] ?? "implementer", "implementer"];
-  for (const r of order) {
-    const id = Object.hasOwn(t.agents, r) ? t.agents[r] : undefined;
-    if (id !== undefined && !retired.has(id)) return { role: r, agent_id: id };
+  if (task !== RELEASE_TASK && rec.state?.tasks.find((x) => x.id === task) === undefined)
+    return null;
+  const retired = new Set(
+    journal.filter((e) => e.type === "agent_retired").map((e) => e.data.agent_id),
+  );
+  for (let i = journal.length - 1; i >= 0; i--) {
+    const e = journal[i];
+    if (e === undefined || e.type !== "agent_spawned" || e.task !== task) continue;
+    const id = e.data.agent_id;
+    const r = e.data.role;
+    if (typeof id !== "string" || typeof r !== "string" || !isTaskRole(r)) continue;
+    if (retired.has(id) || (role !== undefined && r !== role)) continue;
+    return { role: r, agent_id: id };
   }
   return null;
 }
@@ -298,7 +303,7 @@ export function opCommand(spec: OpCommand): Command {
             ? "\n(no caller identity: pass --by <name|agent-id> or set VOLLEY_COORDINATOR or VOLLEY_AGENT_ID)"
             : "";
         io.stderr(`volleyd ${spec.name}: ${res.error ?? "rejected"}${hint}\n`);
-        return EXIT.ERROR;
+        return res.code === BAD_ANSWER ? EXIT.BAD_ANSWER : EXIT.ERROR;
       }
       io.stdout(
         parsed.values.json === true

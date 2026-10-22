@@ -3,7 +3,7 @@ import { queueOf } from "./autopilot/merge-queue";
 import { stepRelease } from "./autopilot/playbook";
 import type { Budget, EscalateWhy } from "./autopilot/policy";
 import { fixerOf } from "./autopilot/remediation";
-import { ARCHIVED_ANSWER, type DecisionRecord, parksTask } from "./decisions";
+import { ARCHIVED_ANSWER, type DecisionRecord, type Held, parksTask } from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
 import { AUTO_HOST } from "./placement";
@@ -57,6 +57,13 @@ export interface WaveRecord {
   steers: Record<TaskId, { seq: number; message_id?: string }>;
   /** Steers held for each task's next agent, in order (`steering_queued`), until sent or dropped. */
   queued_steers: Record<TaskId, QueuedSteer[]>;
+  /**
+   * Per task: the agent woken for a mailbox message it had not acked (`agent_woken`), until that
+   * message is acked (`steering_received`) or the agent is retired. Absent in older snapshots.
+   * One entry per task: when two parallel reviewers are both woken, the later one replaces the
+   * earlier, so status names only the last woken agent until it acks.
+   */
+  woken?: Record<TaskId, { agent_id: string; message_id: string }>;
   /** Each task's position in its pipeline (stage steps, role runs, reviews, verified head). */
   pipeline: Record<TaskId, TaskPipeline>;
   /**
@@ -154,6 +161,7 @@ export function emptyRecord(): WaveRecord {
     decisions: {},
     steers: {},
     queued_steers: {},
+    woken: {},
     pipeline: {},
     spawnFailures: {},
     budget_raised: 0,
@@ -169,6 +177,45 @@ function setTaskHost(rec: WaveRecord, id: TaskId, host: string): void {
   const def = rec.wave?.tasks[id];
   if (rec.wave == null || def === undefined || def.host === host) return;
   rec.wave = { ...rec.wave, tasks: { ...rec.wave.tasks, [id]: { ...def, host } } };
+}
+
+/**
+ * The host task `t` runs on, if it has started: the host its `agent_spawned` named, else (a
+ * journal from before `host_actual`) its effective plan's `prev` host once it has an agent. A
+ * cancelled task runs nowhere. A plan version never moves a started task (#323).
+ */
+export function startedHost(t: TaskState, prev: WaveTask | undefined): string | undefined {
+  if (t.stage === "cancelled") return undefined;
+  if (t.host_actual !== undefined) return t.host_actual;
+  return Object.keys(t.agents).length > 0 ? prev?.host : undefined;
+}
+
+/**
+ * The host a plan writes for a started task running on `ran`, when the two conflict: `planned`,
+ * unless it is `auto` on a placed task (its placement satisfies it). Shared by `wave_versioned`,
+ * `agent_spawned` and plan apply's kept-host report so they agree (#323).
+ */
+export function plannedHostConflict(
+  planned: string | undefined,
+  ran: string,
+  t: Pick<TaskState, "placement">,
+): string | undefined {
+  if (planned === undefined || planned === ran) return undefined;
+  return planned === AUTO_HOST && t.placement !== undefined ? undefined : planned;
+}
+
+/**
+ * Run task `id` on `host` in the effective plan (copy on write, like setTaskHost), with `prev`'s
+ * inline `host:` when `prev` ran there.
+ */
+function keepTaskHost(rec: WaveRecord, id: TaskId, host: string, prev: WaveTask | undefined): void {
+  const def = rec.wave?.tasks[id];
+  if (rec.wave == null || def === undefined) return;
+  const spec = prev?.host === host ? prev.host_spec : undefined;
+  if (def.host === host && def.host_spec === spec) return;
+  const { host_spec: _s, ...rest } = def;
+  const kept: WaveTask = { ...rest, host, ...(spec !== undefined ? { host_spec: spec } : {}) };
+  rec.wave = { ...rec.wave, tasks: { ...rec.wave.tasks, [id]: kept } };
 }
 
 /**
@@ -290,6 +337,16 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
               },
               task_order: [...wave.task_order, ...synthetic],
             };
+      // A started task keeps the host it runs on, whatever the new version writes for it (the
+      // plan's own is `host_planned`, while they differ).
+      state.tasks = state.tasks.map(({ host_planned: _p, ...t }) => {
+        const prev = before?.tasks[t.id];
+        const ran = startedHost(t, prev);
+        if (ran === undefined) return t;
+        keepTaskHost(next, t.id, ran, prev);
+        const planned = plannedHostConflict(plan.tasks[t.id]?.host, ran, t);
+        return planned !== undefined ? { ...t, host_planned: planned } : t;
+      });
       // A task is placed once: a placed task the new version still leaves to placement keeps
       // its host.
       for (const t of state.tasks) {
@@ -326,12 +383,12 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       if (task === undefined) state.tasks.push(queued);
       else if (task.stage === "cancelled") {
         // Re-added by a later plan version, or restarted on a new issue: starts over, on the
-        // issue the event names, and is placed afresh when its plan leaves it to placement.
+        // issue the event names, and is placed afresh when its plan leaves it to placement (a
+        // host kept for its earlier run, recorded or not, is the plan's again).
         state.tasks = state.tasks.map((t) => (t.id === ev.task ? queued : t));
         next.admitted = next.admitted.filter((id) => id !== ev.task);
-        const asWritten = next.plan?.tasks[ev.task]?.host;
-        if (task.placement !== undefined && asWritten === AUTO_HOST)
-          setTaskHost(next, ev.task, AUTO_HOST);
+        const written = next.plan?.tasks[ev.task];
+        if (written !== undefined) keepTaskHost(next, ev.task, written.host, written);
         const def = next.wave?.tasks[ev.task];
         if (def !== undefined && typeof ev.data.issue === "number") def.issue = ev.data.issue;
       }
@@ -387,6 +444,21 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       next.spawns += 1;
       if (task !== undefined) {
         task.agents[ev.data.role as keyof TaskAgents] = ev.data.agent_id as string;
+        if (typeof ev.data.host === "string" && ev.task !== undefined) {
+          task.host_actual = ev.data.host;
+          // A plan version applied while this spawn ran may have written another host: the
+          // effective plan runs the task where it was spawned (the plan's is `host_planned`).
+          const def = next.wave?.tasks[ev.task];
+          if (def !== undefined && def.host !== ev.data.host) {
+            const planned = plannedHostConflict(
+              next.plan?.tasks[ev.task]?.host,
+              ev.data.host,
+              task,
+            );
+            keepTaskHost(next, ev.task, ev.data.host, def);
+            if (planned !== undefined) task.host_planned = planned;
+          }
+        }
         // A worktree cut from the release branch (not a pipeline start ref): its base.
         if (typeof ev.data.base_sha === "string") task.base_sha = ev.data.base_sha;
       }
@@ -489,7 +561,8 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
           at: (ev.data.at as string | undefined) ?? ev.at,
         };
         if (typeof ev.data.rationale === "string") d.rationale = ev.data.rationale;
-        const raise = d.kind === "spawn_budget_exhausted" ? raiseBy(String(ev.data.answer)) : null;
+        const raise =
+          d.kind === "spawn_budget_exhausted" ? journaledRaise(String(ev.data.answer)) : null;
         if (raise !== null) next.budget_raised = (next.budget_raised ?? 0) + raise;
         // Only a parking decision keeps the task parked (one opened with `park: false` never does).
         const stillOpen = state.open_decisions.some((o) => {
@@ -527,6 +600,27 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       }
       break;
     }
+    case "decision_held": {
+      const d = next.decisions[ev.data.decision_id as string];
+      if (d !== undefined) {
+        d.held = {
+          on: ev.data.on as Held["on"],
+          ...(typeof ev.data.note === "string" ? { note: ev.data.note } : {}),
+          by: ev.data.by as string,
+          at: ev.at,
+        };
+        Reflect.deleteProperty(d, "released");
+      }
+      break;
+    }
+    case "decision_released": {
+      const d = next.decisions[ev.data.decision_id as string];
+      if (d !== undefined) {
+        Reflect.deleteProperty(d, "held");
+        d.released = { why: ev.data.why as string, at: ev.at };
+      }
+      break;
+    }
     case "steering_sent":
       if (ev.task !== undefined && ev.data.type === "steering") {
         // A queued steer delivered late never moves the numbering back; an additive steer takes
@@ -556,6 +650,24 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         next.steers[ev.task] = { seq: q.seq, message_id: q.message_id };
       }
       break;
+    case "agent_woken":
+      if (ev.task !== undefined)
+        next.woken = {
+          ...next.woken,
+          [ev.task]: {
+            agent_id: String(ev.data.agent_id),
+            message_id: String(ev.data.message_id),
+          },
+        };
+      break;
+    case "steering_received":
+      if (ev.task !== undefined && next.woken?.[ev.task]?.message_id === ev.data.message_id)
+        delete next.woken?.[ev.task];
+      break;
+    case "agent_retired":
+      if (ev.task !== undefined && next.woken?.[ev.task]?.agent_id === ev.data.agent_id)
+        delete next.woken?.[ev.task];
+      break;
     case "steering_dropped":
       if (ev.task !== undefined) unqueue(next, ev.task, (ev.data.message_ids as unknown[]) ?? []);
       break;
@@ -563,6 +675,19 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       // Gated without reviews: the wave file's pipeline for the task lists none.
       if (task !== undefined && ev.data.alarm === "reviews_skipped_by_plan")
         task.reviews_skipped_by_plan = true;
+      // The supervisor overloaded while a paired machine idles (SPEC §4.6.15): raised once per wave.
+      if (ev.task === undefined && ev.data.alarm === "peer_idle_under_load") {
+        const alarm = { alarm: "peer_idle_under_load", message: String(ev.data.message ?? "") };
+        state.alarms = [...(state.alarms ?? []).filter((a) => a.alarm !== alarm.alarm), alarm];
+      }
+      break;
+    case "alarm_cleared":
+      // The overload that raised it has passed (SPEC §4.6.15).
+      if (ev.task === undefined && ev.data.alarm === "peer_idle_under_load") {
+        const held = (state.alarms ?? []).filter((a) => a.alarm !== ev.data.alarm);
+        if (held.length > 0) state.alarms = held;
+        else Reflect.deleteProperty(state, "alarms");
+      }
       break;
     case "repo_visibility_detected": {
       const visibility = (ev.data.visibility as RepoVisibility | null | undefined) ?? null;
@@ -674,9 +799,14 @@ function derive(state: WaveState, rec: WaveRecord): void {
           };
     },
   );
-  state.tasks = state.tasks.map(({ queued_steers: _q, ...t }) => {
+  state.tasks = state.tasks.map(({ queued_steers: _q, steer_unacked: _u, ...t }) => {
     const n = rec.queued_steers[t.id]?.length ?? 0;
-    return n > 0 ? { ...t, queued_steers: n } : t;
+    const woken = rec.woken?.[t.id]?.agent_id;
+    return {
+      ...t,
+      ...(n > 0 ? { queued_steers: n } : {}),
+      ...(woken !== undefined ? { steer_unacked: woken } : {}),
+    };
   });
   state.tasks = state.tasks.map(({ stage_label: _l, stage_group: _g, ...t }) =>
     withStageGroup(t, rec.pipeline[t.id]),
@@ -719,11 +849,14 @@ function derive(state: WaveState, rec: WaveRecord): void {
     if (hold !== undefined && t.stage !== "done" && t.stage !== "cancelled") {
       const at = hold.sha.slice(0, 7);
       const infra = hold.reason === "infra_incident";
+      const unreadable = hold.reason === "ci_unreadable";
       const why = infra
         ? `CI infra incident: ${hold.incident ?? "infra-shaped failure"}; re-checking`
-        : hold.checks.total === 0
-          ? `CI pending on ${at} (no run yet)`
-          : `CI pending on ${at} (${hold.checks.done}/${hold.checks.total} checks)`;
+        : unreadable
+          ? `CI unreadable (${hold.error || "no answer"}), retrying`
+          : hold.checks.total === 0
+            ? `CI pending on ${at} (no run yet)`
+            : `CI pending on ${at} (${hold.checks.done}/${hold.checks.total} checks)`;
       const pr = hold.pr ?? t.pr;
       return {
         ...t,
@@ -734,17 +867,31 @@ function derive(state: WaveState, rec: WaveRecord): void {
                 number: pr.number,
                 url: pr.url,
                 head_sha: hold.sha,
-                ci: infra
-                  ? ("red" as const)
-                  : hold.checks.total === 0
-                    ? ("none" as const)
-                    : ("running" as const),
-                checks: hold.checks,
+                // Unreadable: no CI state is claimed (none of green / red / running / none).
+                ...(unreadable
+                  ? {}
+                  : {
+                      ci: infra
+                        ? ("red" as const)
+                        : hold.checks.total === 0
+                          ? ("none" as const)
+                          : ("running" as const),
+                      checks: hold.checks,
+                    }),
               },
             }
           : {}),
       };
     }
+    // A conflicting PR's update step: GitHub runs no CI on it until the conflicts are resolved.
+    const p = rec.pipeline[t.id];
+    if (
+      p?.rebasing === true &&
+      p.conflicting === true &&
+      t.stage !== "done" &&
+      t.stage !== "cancelled"
+    )
+      return { ...t, why_waiting: `PR conflicts with ${state.release_branch}, updating` };
     // A red head awaiting its flake's fixer: say which test.
     // (A fixer's own remediation is what it fixes, not what it waits for: the pipeline's is.)
     const flake = rec.pipeline[t.id]?.remediation;
@@ -791,8 +938,12 @@ function derive(state: WaveState, rec: WaveRecord): void {
   }
 }
 
-/** A `spawn_budget_exhausted` answer `raise by N` (N ≥ 1), or null. */
-export function raiseBy(answer: string): number | null {
+/**
+ * A journaled `spawn_budget_exhausted` answer `raise by N` (N ≥ 1), or null. Strict: answers are
+ * normalised to `raise by N` before they are journaled, and a `raise N` journaled before that
+ * (#315) was ignored then, so a replay ignores it too.
+ */
+function journaledRaise(answer: string): number | null {
   const m = /^raise by (\d+)$/.exec(answer.trim().toLowerCase());
   const n = m !== null ? Number(m[1]) : 0;
   return n >= 1 ? n : null;

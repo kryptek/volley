@@ -9,6 +9,7 @@
  * their capacity rows), Admission, Attention, Recovery and Other, one page each.
  */
 import { plural } from "../lib/plural";
+import { SwitchToAdmin } from "../auth/AccountActions";
 import type { ConfigPayload, LeasePoolPayload } from "../store/types";
 import { ConfigRows } from "./ConfigRows";
 import { GroupList } from "./GroupNav";
@@ -184,7 +185,7 @@ export function Supervisor({
       {!transport && (
         <p className="s-note">
           Read-only: the Desk has no broker credentials. Pick a new value, then copy its command and
-          run it in a terminal.
+          run it in a terminal. <SwitchToAdmin />
         </p>
       )}
       <ConfigRows

@@ -4,7 +4,9 @@
  * page — mosquitto's WebSocket listener, so a phone on the LAN reaches the
  * same broker as the laptop) and folds every delivery through the reducer; demo mode
  * (`?demo=1` / `VITE_VOLLEY_DEMO=1`) starts from the fixtures and runs their
- * simulation instead, with no broker at all.
+ * simulation instead, with no broker at all: agent ticks every `TICK_MS`, a reviewer at
+ * `REVIEWER_AFTER_MS`, the running wave's morning digest at `DIGEST_AFTER_MS` and a machine
+ * beat every `MACHINES_TICK_MS`.
  *
  * On every reconnect the broker replays each retained topic, so the store
  * `resync`s first (dropping retained-derived state) and lets the replay
@@ -49,7 +51,17 @@ import {
 import type { OfflineSpan } from "../attention";
 import { DEMO_IDENTITY, createDemoSteerClient } from "../steer/demoClient";
 import type { SteerClient } from "../steer/transport";
-import { demoAgentCount, demoReviewer, demoState, isDemoMode, tick } from "./fixtures";
+import {
+  DIGEST_WAVE,
+  MACHINES_TICK_MS,
+  demoAgentCount,
+  demoDigest,
+  demoReviewer,
+  demoState,
+  isDemoMode,
+  machinesTick,
+  tick,
+} from "./fixtures";
 import {
   AuthFailedError,
   type BrokerCredentials,
@@ -91,6 +103,8 @@ export function resolveBrokerUrl(
 }
 const TICK_MS = 2600;
 const REVIEWER_AFTER_MS = 22_000;
+/** When the demo's running wave gets its morning digest. */
+export const DIGEST_AFTER_MS = 40_000;
 /** Coalesce a retained-message burst into one render. */
 const FLUSH_MS = 16;
 /** How long after a reconnect the retained replay is given to arrive. */
@@ -428,10 +442,21 @@ export function DeskStoreProvider({
       () => dispatch({ type: "apply", msgs: demoReviewer(Date.now()) }),
       REVIEWER_AFTER_MS,
     );
+    const d = setTimeout(
+      () => dispatch({ type: "apply", msgs: demoDigest(Date.now(), DIGEST_WAVE) }),
+      DIGEST_AFTER_MS,
+    );
+    let beat = 0;
+    const m = setInterval(() => {
+      beat += 1;
+      dispatch({ type: "apply", msgs: machinesTick(Date.now(), beat) });
+    }, MACHINES_TICK_MS);
     return () => {
       clearTimeout(settled);
       clearInterval(t);
       clearTimeout(r);
+      clearTimeout(d);
+      clearInterval(m);
     };
   }, [demo, settleMs]);
 

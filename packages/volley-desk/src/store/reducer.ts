@@ -636,7 +636,7 @@ function reduceAgent(
     next.lastProgress = { type: env.type, at };
   }
   const hook = channel === "progress" && payload.source === "harness-hook";
-  if (channel === "progress" && !hook && !replay) next.reportedAt = at;
+  if (channel === "progress" && !hook && !beat && !replay) next.reportedAt = at;
   if (channel === "progress" && !hook && prev.firstSaid === undefined) {
     const said = str(payload.msg);
     if (said !== undefined) next.firstSaid = said;
@@ -1013,8 +1013,9 @@ function withCoordinators(state: DeskState): DeskState {
       seen.waves.push(w.id);
       continue;
     }
-    const sup = s.coordinator?.agent_id === id ? s.coordinator : undefined;
-    const a = state.agents[id];
+    // volleyd's view of this owner; its agent_id is the bound agent when the owner is a name.
+    const sup = s.coordinator;
+    const a = (sup !== undefined ? state.agents[sup.agent_id] : undefined) ?? state.agents[id];
     const sessionUrl = str(a?.registry?.session_url) ?? sup?.session_url;
     const workspace = str(a?.registry?.workspace) ?? sup?.workspace;
     const fallbacks = {

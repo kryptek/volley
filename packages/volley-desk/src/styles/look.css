@@ -293,3 +293,28 @@
   border-radius: 7px;
   color: var(--ink);
 }
+
+/* The Dock's account avatar and its menu (sign out, switch account), above the dock's right end. */
+.dock-avatar {
+  width: 26px;
+  height: 26px;
+  font-size: 11px;
+}
+.dock-account-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  box-sizing: border-box;
+  width: min(280px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(160deg, rgba(48, 52, 72, 0.94), rgba(14, 15, 24, 0.96));
+  color: #e7e9f3;
+}
+.dock-account-menu:focus {
+  outline: none;
+}

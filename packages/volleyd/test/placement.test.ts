@@ -7,6 +7,7 @@ import {
   type Snapshot,
   type VerdictView,
   needsPlacement,
+  peerIdleUnderLoad,
   place,
   preview,
   reserve,
@@ -751,5 +752,48 @@ describe("per-machine lease overrides in placement (SPEC §4.6.5)", () => {
       "ineligible: heavy slots 0/0 free (js-suite)",
     );
     expect(place(task(heavy, "T2"), heavy, snap(none, three), OPTS).host).toBe("box-a");
+  });
+});
+
+describe("peerIdleUnderLoad: the supervisor overloaded while a peer idles (#324)", () => {
+  // 10 cores at load 130: 13 per core, over the 1.5 default.
+  const hot = machine(LOCAL, {
+    record: record(LOCAL, { tunnel: "local", cores: 10, load: [130, 120, 90] }),
+  });
+  const opts = { placement: CONFIG_DEFAULTS.placement };
+
+  it("names the peer with the most free slots, and the key that uses it", () => {
+    const idle = peerIdleUnderLoad(
+      snap(
+        hot,
+        machine("box-a", { max_agents: 10 }),
+        machine("box-b", { max_agents: 4, agents: 1 }),
+      ),
+      opts,
+    );
+    expect(idle).toMatchObject({ peer: "box-a", free: 10, load: 130, cores: 10 });
+    expect(idle?.message).toBe(
+      "this machine is overloaded (load 130.0 on 10 cores, max 1.5 per core) while box-a is ready with 10 free agent slots; this wave is placement: local (set placement: auto to use it)",
+    );
+  });
+
+  it("nothing when the own machine is under the threshold", () => {
+    expect(peerIdleUnderLoad(snap(machine(LOCAL), machine("box-a")), opts)).toBeNull();
+  });
+
+  it("nothing when the only peer is drained, not ready, down or full", () => {
+    for (const peer of [
+      machine("box-a", { drain: true }),
+      machine("box-a", { ready: false, reasons: ["not probed yet"] }),
+      machine("box-a", { down_since: 1 }),
+      machine("box-a", { max_agents: 4, agents: 4 }),
+    ]) {
+      expect(peerIdleUnderLoad(snap(hot, peer), opts)).toBeNull();
+    }
+  });
+
+  it("nothing before the own machine's record is known", () => {
+    const { record: _r, ...bare } = hot;
+    expect(peerIdleUnderLoad(snap(bare, machine("box-a")), opts)).toBeNull();
   });
 });

@@ -316,6 +316,24 @@ describe("visible spawn failures: spawn_failed, backoff, one decision, spawn_rec
     expect((await runCli(["status"], env.env)).stdout).toContain("decisions: 0  alarms: 0");
   });
 
+  it("a retry due while other agents fill the hard ceiling waits for a free slot (#322)", async () => {
+    await setup("hard_ceiling: 1");
+    await event("spawn_failed");
+    // Another wave's agent starts while T1 backs off and takes the one slot.
+    const spawning = (daemon as unknown as { spawning: Set<string> }).spawning;
+    spawning.add("w2/X/implementer");
+    failing = false;
+    await clock.advanceTo(T0 + 30_000);
+    await daemon.tick();
+    await settle();
+    expect(of("agent_spawned")).toHaveLength(0);
+    expect(of("spawn_failed")).toHaveLength(1);
+    // Its slot frees: the retry spawns.
+    spawning.delete("w2/X/implementer");
+    await daemon.tick();
+    await event("agent_spawned");
+  });
+
   it("spawn_retry_max reached: retries stop, the decision says so; 'retry now' tries again", async () => {
     await setup("spawn_retry_max: 2");
     await event("spawn_failed");

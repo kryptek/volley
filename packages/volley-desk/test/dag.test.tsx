@@ -1,6 +1,13 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { Dag, type DagNode, layoutDag } from "../src/windows/wave/Dag";
+import {
+  DAG_ID_CHAR_PX,
+  DAG_NODE_W,
+  Dag,
+  type DagNode,
+  fitId,
+  layoutDag,
+} from "../src/windows/wave/Dag";
 
 // The epic's example wave file: T0 → T1, T2 → T3.
 const EXAMPLE: DagNode[] = [
@@ -93,5 +100,47 @@ describe("Dag issue links", () => {
     expect(onClick).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("#102"));
     expect(onClick).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Dag task ids that do not fit", () => {
+  const LONG = "fix-test-clock-test-ts-sleep-resolves-on-abo";
+  const tasks: DagNode[] = [
+    { id: "T1", issue: 123, after: [], stage: "implement" },
+    { id: LONG, issue: 0, after: ["T1"], stage: "implement", fixerFor: ["T1"] },
+  ];
+
+  it("fitId keeps an id that fits and elides a long one as head…tail", () => {
+    expect(fitId("T1")).toBe("T1");
+    expect(fitId("fix-short-slug")).toBe("fix-short-slug");
+    expect(fitId(LONG)).toBe("fix-te…n-abo");
+    expect(fitId(LONG).length * DAG_ID_CHAR_PX).toBeLessThanOrEqual(DAG_NODE_W - 20);
+  });
+
+  it("draws a long fixer id inside its node, no #0, and the full id in the tooltip", () => {
+    const { container } = render(<Dag tasks={tasks} accent="#6ee7f9" />);
+    const node = container.querySelector(`.dag-node[data-id="${LONG}"]`) as SVGGElement;
+    const id = node.querySelector(".dag-id") as SVGTextElement;
+    expect(id.textContent).toBe("fix-te…n-abo");
+    expect((id.textContent ?? "").length * DAG_ID_CHAR_PX).toBeLessThanOrEqual(DAG_NODE_W - 20);
+    expect(node).not.toHaveTextContent("#0");
+    expect(node.querySelector(".dag-fixer")?.textContent).toBe("🔧");
+    expect(node.querySelector("title")?.textContent).toContain(LONG);
+  });
+
+  it("a normal task keeps its full id and its #issue, on the second line", () => {
+    const { container } = render(<Dag tasks={tasks} accent="#6ee7f9" />);
+    const node = container.querySelector('.dag-node[data-id="T1"]') as SVGGElement;
+    expect(node.querySelector(".dag-id")?.textContent).toBe("T1");
+    const issue = node.querySelector(".dag-issue") as SVGTextElement;
+    expect(issue).toHaveTextContent("#123");
+    expect(issue.getAttribute("y")).toBe(node.querySelector(".dag-stage")?.getAttribute("y"));
+  });
+
+  it("a non-fixer task without an issue draws no #0 either", () => {
+    const { container } = render(
+      <Dag tasks={[{ id: "T9", issue: 0, after: [], stage: "queued" }]} accent="#6ee7f9" />,
+    );
+    expect(container.querySelector(".dag-node")).not.toHaveTextContent("#0");
   });
 });

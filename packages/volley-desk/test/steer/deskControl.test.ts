@@ -58,8 +58,8 @@ async function sent(m: ReturnType<typeof mockClient>) {
 }
 
 describe("routeDeskControl: Needs-you answers travel the Desk's own account-op topic", () => {
-  it("names inbox_answer and resolve", () => {
-    expect([...DESK_LOGIN_OPS]).toEqual(["inbox_answer", "resolve"]);
+  it("names inbox_answer, resolve, and a decision's hold and release", () => {
+    expect([...DESK_LOGIN_OPS]).toEqual(["inbox_answer", "resolve", "hold", "release"]);
   });
 
   it("inbox_answer is published on volley/_system/auth/ops/<identity>, answered by volleyd's ack", async () => {

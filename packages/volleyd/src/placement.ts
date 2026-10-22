@@ -541,3 +541,47 @@ export function preview(wave: Wave, snap: Snapshot, o: PlaceOptions): string | n
   }
   return parts.length === 0 ? null : `if admitted now: ${parts.join(", ")}`;
 }
+
+// --- Fleet defaults (#324): the supervisor overloaded while a paired machine idles ---
+
+/** A paired machine left unused while the supervisor's own machine is overloaded. */
+export interface IdlePeer {
+  /** The own machine's load (the higher of the 1- and 5-minute averages) and cores. */
+  load: number;
+  cores: number;
+  /** The peer with the most free slots, and how many. */
+  peer: string;
+  free: number;
+  /** The `alarm_raised` line: what is overloaded, what idles, and the key that uses it. */
+  message: string;
+}
+
+/**
+ * Whether the supervisor's own machine is over `placement.load_per_core_max` while a ready,
+ * undrained peer that is not down has free `max_agents` slots (SPEC §4.6.15): what a
+ * `placement: local` wave is leaving unused. Null otherwise, or before the own record is known.
+ */
+export function peerIdleUnderLoad(
+  snap: Snapshot,
+  o: { placement: Pick<PlacementConfig, "load_per_core_max"> },
+): IdlePeer | null {
+  const own = snap.machines.find((m) => m.local)?.record;
+  if (own === undefined || !(own.cores > 0)) return null;
+  const load = overloadLoad(own);
+  const max = o.placement.load_per_core_max;
+  if (load / own.cores <= max) return null;
+  const idle = snap.machines
+    .filter((m) => !m.local && m.ready && !m.drain && m.down_since === undefined)
+    .map((m) => ({ name: m.name, free: m.max_agents - placed(m, snap) }))
+    .filter((m) => m.free > 0)
+    .sort((a, b) => b.free - a.free || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))[0];
+  if (idle === undefined) return null;
+  const slots = `${idle.free} free agent slot${idle.free === 1 ? "" : "s"}`;
+  return {
+    load,
+    cores: own.cores,
+    peer: idle.name,
+    free: idle.free,
+    message: `this machine is overloaded (load ${load.toFixed(1)} on ${own.cores} cores, max ${max} per core) while ${idle.name} is ready with ${slots}; this wave is placement: local (set placement: auto to use it)`,
+  };
+}

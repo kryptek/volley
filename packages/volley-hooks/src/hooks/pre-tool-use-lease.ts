@@ -9,8 +9,12 @@
  * command, a non-matching one, or no configured pools: empty output, the command runs as is.
  * The permission decision is never touched.
  *
+ * The regexes run against each command the shell would execute (`executableSegments`), so text
+ * that only mentions a heavy command (a heredoc body, a comment, a commit message, `echo`'s
+ * arguments) never queues for a lease.
+ *
  * Known gap: an agent can run a heavy command the regexes do not see (from a script file, an
- * alias, `$(…)`); pressure-based spawn admission in volleyd is the backstop.
+ * alias, a command built at runtime); pressure-based spawn admission in volleyd is the backstop.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -19,6 +23,7 @@ import { parseEnvelope } from "volley-mcp/envelope";
 import { isValidAgentId } from "volley-mcp/topics";
 import { type HookContext, type HookResult, runHook } from "../lib/hook-io";
 import { writeFileAtomic } from "../lib/seq";
+import { executableSegments } from "../lib/shell-segments";
 
 const CONFIG_TOPIC = "volley/_waves/_config";
 /** Pool definitions are cached this long, so a pool change reaches the hook within a minute. */
@@ -31,18 +36,21 @@ const WRAPPED = /(^|[\s'"/])(volley|cli\.ts['"]?)\s+lease\s+run\s/;
 type Pools = Record<string, { match?: unknown }>;
 
 /**
- * The first pool (config order) with a `match` regex that hits `command`; null when none. Pool
+ * The first pool (config order) with a `match` regex that hits one of the commands `command`
+ * would execute (its `executableSegments`); null when none. Pool
  * names come from a retained broker topic, so one that is not a valid pool id (§2.1 grammar,
  * which volleyd enforces) is skipped: it never reaches the shell command we build.
  */
 export function leaseFor(command: string, pools: Pools): string | null {
+  const segments = executableSegments(command);
   for (const [pool, def] of Object.entries(pools)) {
     if (!isValidAgentId(pool)) continue;
     const patterns = Array.isArray(def?.match) ? def.match : [];
     for (const p of patterns) {
       if (typeof p !== "string") continue;
       try {
-        if (new RegExp(p).test(command)) return pool;
+        const re = new RegExp(p);
+        if (segments.some((s) => re.test(s))) return pool;
       } catch {
         // an invalid regex never matches (volleyd validates them; the cache could be stale)
       }

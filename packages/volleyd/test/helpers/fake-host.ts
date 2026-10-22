@@ -134,7 +134,7 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
       host.keys.push({ workspace, key });
     },
     async sendText(workspace, text, tokens = {}) {
-      if (tokens.picker !== undefined || tokens.handoff !== undefined)
+      if (tokens.picker !== undefined || tokens.handoff !== undefined || tokens.wake !== undefined)
         assertAllowed(["cmux", "send", "--workspace", workspace, text], tokens);
       host.texts.push({ workspace, text });
     },
@@ -423,7 +423,7 @@ export interface SigninBoxOptions {
   /** How many forwards exit at once with the port taken. */
   busy?: number;
   noTmux?: boolean;
-  /** The box's HOME (default /home/dev). */
+  /** The box's HOME (default /path/to/home). */
   home?: string;
   /** Runs while a `claude auth status` is in flight, before it answers. */
   onAuthStatus?: (box: { session: boolean }) => void;
@@ -438,7 +438,7 @@ export interface SigninBoxOptions {
  */
 export function fakeSigninBox(o: SigninBoxOptions = {}) {
   const fx = fakeExec();
-  const home = o.home ?? "/home/dev";
+  const home = o.home ?? "/path/to/home";
   const box = {
     files: new Map<string, string>(Object.entries(o.files ?? {})),
     session: false,

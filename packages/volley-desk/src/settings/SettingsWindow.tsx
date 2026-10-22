@@ -3,6 +3,7 @@
  * System Settings–style dialog. The sidebar has the traffic dots, a search
  * over the section labels and keywords (`matchSections`), the signed-in
  * broker account and the sections in three groups with coloured icon tiles;
+ * Sign out and Switch account… sit under the account (`AccountButtons`);
  * the main pane shows the picked section (General, Sound, Appearance, Supervisor,
  * Claude accounts & usage, Broker accounts, Machines, Setup & Security,
  * About). A long section (Supervisor, Autopilot, Sound, Claude accounts) drills
@@ -18,6 +19,7 @@ import { Cancel01Icon, Search01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../a11y/keys";
+import { AccountButtons, initials } from "../auth/AccountActions";
 import type { Look } from "../look/useLook";
 import type { NotifyOptions, SetNotify } from "../notify/use-notify-settings";
 import { SOUND0 } from "../sounds/settings";
@@ -108,22 +110,14 @@ const SOUND_OFF: SoundSectionProps = {
   canVibrate: false,
 };
 
-/** The account row's second line for an admin session (a redeemed admin token). */
-const ADMIN_ROLE = "Admin · manages accounts and setup";
+/** The account row's second line for an admin session (a redeemed admin token); the Dock's menu shows it too. */
+export const ADMIN_ROLE = "Admin · manages accounts and setup";
 
 const Tile = ({ s, size }: { s: SectionDef; size: number }) => (
   <span className={`tile${size > 13 ? " tile--lg" : ""}`} style={{ background: s.tint }}>
     <HugeiconsIcon icon={s.icon} size={size} strokeWidth={1.8} />
   </span>
 );
-
-/** Up to two letters for the account avatar. */
-const initials = (name: string) =>
-  (name.match(/[a-z0-9]+/gi) ?? [name])
-    .slice(0, 2)
-    .map((w) => w[0] ?? "")
-    .join("")
-    .toUpperCase() || "?";
 
 export function SettingsWindow(p: SettingsWindowProps) {
   const [sec, setSec] = useState<SectionKey>(p.initial ?? "general");
@@ -232,6 +226,7 @@ export function SettingsWindow(p: SettingsWindowProps) {
               <div className="ms-name">{p.identity ?? "Not signed in"}</div>
               <div className="s-hint">{admin ? ADMIN_ROLE : accountRole(p.identity, p.demo)}</div>
             </div>
+            <AccountButtons />
           </div>
           <nav aria-label="Settings sections">
             {SECTION_GROUPS.map((g) => {

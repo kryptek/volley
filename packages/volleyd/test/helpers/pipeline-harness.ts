@@ -43,6 +43,9 @@ export interface World {
     headRefName: string;
     baseRefName: string;
     headRefOid: string;
+    /** GitHub's mergeability of the PR (absent: not reported). */
+    mergeable?: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+    mergeStateStatus?: string;
   }[];
   /** CI per head (absent: no run). */
   ci: Record<string, "green" | "red" | "running">;
@@ -81,6 +84,10 @@ export interface World {
   runLogs: Record<number, string>;
   /** `gh run list --branch <release>`: the release branch's runs, as JSON (default none). */
   releaseRuns: string;
+  /** Set: every read of a head's runs (`gh api …/actions/runs?head_sha=`, `gh run list --commit`) exits 1 with this stderr. */
+  ciError?: string | undefined;
+  /** Set: `gh run list --branch <release>` exits 1 with this stderr. */
+  releaseError?: string | undefined;
   /** Called with every argv before it is answered (a test may change the world mid-run). */
   before?: ((argv: string[]) => void) | undefined;
   /** An argv this returns a promise for is answered only once it resolves. */
@@ -111,12 +118,19 @@ export interface Spawned {
   branch_update?: BranchUpdate;
 }
 
+/** A read of one head's runs: `gh api …/actions/runs?head_sha=` (the supervisor) or `gh run list --commit`. */
+export const isHeadRunsRead = (c: readonly string[]): boolean =>
+  (c[0] === "gh" && c[1] === "api" && /\/actions\/runs\?head_sha=/.test(c[2] ?? "")) ||
+  (c[0] === "gh" && c[1] === "run" && c[2] === "list" && c.includes("--commit"));
+
 export interface HarnessOptions {
   pipeline?: string;
   /** Enforce the real fence on every argv (default true). */
   fence?: boolean;
   /** Wrap the harness exec per task (the daemon's remote-host routing). */
   execFor?: (task: string, exec: ExecFn) => ExecFn;
+  /** Which recorded worktrees are gone from disk (default: none; the harness's paths are fake). */
+  worktreeGone?: (task: string, path: string) => boolean;
   /** More tasks after T1 (queued, never admitted or driven), e.g. `{ T2: [T1] }` → `after: [T1]`. */
   dependents?: Record<string, string[]>;
   /**
@@ -150,6 +164,8 @@ export interface HarnessOptions {
    * hears of it later, on the queue, as the daemon's resolveNow hands it back.
    */
   autopilot?: (d: DecisionRecord) => string | undefined;
+  /** The wave file's `repo:` (default: `/repo`). */
+  repo?: string;
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -157,7 +173,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
   const wave = parseWaveFile(
     [
       "wave: w1",
-      "repo: /repo",
+      `repo: ${o.repo ?? "/repo"}`,
       "release_branch: release/w1",
       "model: claude-opus-5-5",
       `pipeline: ${o.pipeline ?? DEFAULT_PIPELINE}`,
@@ -218,7 +234,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     if (o.fence !== false) assertAllowed(argv, opts);
     calls.push([...argv]);
     callOpts.push(opts);
-    const a = [...argv];
+    // `--repo <slug>` (a GitHub read run from the repo root) says nothing about the answer.
+    const a = argv.filter((x, i) => x !== "--repo" && argv[i - 1] !== "--repo");
     world.before?.(a);
     const gate = world.gate?.(a);
     if (gate !== undefined) await gate;
@@ -300,39 +317,68 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       );
     }
     if (a[0] === "gh" && a[1] === "run" && a[2] === "list" && a.includes("--branch"))
-      return out(world.releaseRuns);
-    if (a[0] === "gh" && a[1] === "run" && a[2] === "list") {
-      const head = a[a.indexOf("--commit") + 1] as string;
+      return world.releaseError !== undefined
+        ? { ...out(""), code: 1, stderr: world.releaseError }
+        : out(world.releaseRuns);
+    // A head's runs: `gh api …/actions/runs?head_sha=` (the supervisor's read, in the wave
+    // repo), or `gh run list --commit` (no wave repo): the same runs in each one's shape.
+    const runsApi =
+      a[0] === "gh" && a[1] === "api" && /\/actions\/runs\?head_sha=/.test(a[2] ?? "");
+    if (runsApi || (a[0] === "gh" && a[1] === "run" && a[2] === "list")) {
+      if (world.ciError !== undefined) return { ...out(""), code: 1, stderr: world.ciError };
+      const head = runsApi
+        ? (/head_sha=([^&]+)/.exec(a[2] as string)?.[1] as string)
+        : (a[a.indexOf("--commit") + 1] as string);
       const many = world.ciRuns[head];
-      if (many !== undefined)
-        return out(
-          JSON.stringify(
-            many.map((r, i) => ({
-              databaseId: r.id ?? 900 + i,
+      const state = world.ci[head];
+      const rows =
+        many !== undefined
+          ? many.map((r, i) => ({
+              id: r.id ?? 900 + i,
               name: r.workflow ?? `check-${i + 1}`,
-              workflowName: r.workflow ?? `check-${i + 1}`,
               event: r.event ?? "pull_request",
               status: r.status,
               conclusion: r.conclusion,
-              headSha: head,
               url: `https://github.com/example/repo/actions/runs/${r.id ?? 900 + i}`,
-            })),
-          ),
-        );
-      const state = world.ci[head];
-      if (state === undefined) return out("[]");
+            }))
+          : state === undefined
+            ? []
+            : [
+                {
+                  id: 900,
+                  name: "CI",
+                  event: undefined,
+                  status: state === "running" ? "in_progress" : "completed",
+                  conclusion: state === "green" ? "success" : state === "red" ? "failure" : "",
+                  url: `https://github.com/example/repo/actions/runs/${head.slice(-4)}`,
+                },
+              ];
       return out(
-        JSON.stringify([
-          {
-            databaseId: 900,
-            name: "CI",
-            workflowName: "CI",
-            status: state === "running" ? "in_progress" : "completed",
-            conclusion: state === "green" ? "success" : state === "red" ? "failure" : "",
-            headSha: head,
-            url: `https://github.com/example/repo/actions/runs/${head.slice(-4)}`,
-          },
-        ]),
+        JSON.stringify(
+          rows.map((r) =>
+            runsApi
+              ? {
+                  id: r.id,
+                  name: r.name,
+                  status: r.status,
+                  conclusion: r.conclusion === "" ? null : r.conclusion,
+                  html_url: r.url,
+                  head_sha: head,
+                  event: r.event,
+                  run_attempt: 1,
+                }
+              : {
+                  databaseId: r.id,
+                  name: r.name,
+                  workflowName: r.name,
+                  event: r.event,
+                  status: r.status,
+                  conclusion: r.conclusion,
+                  headSha: head,
+                  url: r.url,
+                },
+          ),
+        ),
       );
     }
     if (a[0] === "gh" && a[1] === "run" && a[2] === "view") {
@@ -422,6 +468,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     now: () => clock,
     ...(o.nudgeOnMerge !== undefined ? { nudgeOnMerge: () => o.nudgeOnMerge as NudgeOnMerge } : {}),
     exec,
+    ...(o.worktreeGone !== undefined ? { worktreeGone: o.worktreeGone } : {}),
     ...(o.execFor !== undefined
       ? {
           execFor: (task: string) =>

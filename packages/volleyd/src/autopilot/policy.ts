@@ -1,4 +1,4 @@
-import type { DecisionKind, DecisionRecord } from "../decisions";
+import { type DecisionKind, type DecisionRecord, raiseBy } from "../decisions";
 import type { AutopilotConfig, TaskState } from "../types";
 import { budgetKey, markerOf } from "./budgets";
 import type { FixerVerdict } from "./remediation";
@@ -109,8 +109,8 @@ const retriesStopped = (d: Facts, ctx: PolicyContext): boolean =>
 /** `raise by <n>` as the decision offers it, or null. */
 function offeredRaise(d: Facts): { answer: string; n: number } | null {
   for (const o of d.options ?? []) {
-    const m = /^raise by (\d+)$/.exec(o.trim().toLowerCase());
-    if (m !== null) return { answer: o, n: Number(m[1]) };
+    const n = raiseBy(o);
+    if (n !== null) return { answer: o, n };
   }
   return null;
 }

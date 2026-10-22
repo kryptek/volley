@@ -13,7 +13,15 @@ import {
   renderSigninScript,
 } from "./claude/signin-script";
 import { volleydHome } from "./config-store";
-import { LAUNCH_COMMAND, mcpConfigPath, renderLaunchScript, renderMcpConfig, shq } from "./launch";
+import {
+  LAUNCH_COMMAND,
+  isMcpServerEntry,
+  mcpConfigPath,
+  renderLaunchScript,
+  renderMcpConfig,
+  shq,
+} from "./launch";
+import { WAKE_TEXT } from "./liveness";
 import { AGENT_BRANCH } from "./worktree";
 
 /**
@@ -127,6 +135,8 @@ import { AGENT_BRANCH } from "./worktree";
  *                      coordinator handoff's reply) carrying exactly that text, typed once per
  *                      token; minted only for one line with no control character that does not
  *                      start with `/` or `!` (never a slash command or bash-mode line)
+ *     WAKE_TEXT        with a WakeToken (`mintWakeToken`, minted when an idle agent did not ack
+ *                      a mailbox message in time), typed once per token; nothing else with it
  *
  * PICKER (needs-you inbox pickers, SPEC §4.6.18): `cmux send-key … Up|Down|Space` and
  *   `tmux send-keys -t <t> Up|Down|Space` only with a PickerToken (`mintPickerToken`, minted for
@@ -182,13 +192,16 @@ import { AGENT_BRANCH } from "./worktree";
  *     profile `<id>` of that host — the script's `host`, SshTmuxHost's spec — with the worktree
  *     under that host's `worktree_root`); a
  *     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
- *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG); and
+ *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/`, with the
+ *     `agent_mcp_allow` entries copied from the box's own config after it (MCP_CONFIG: shape
+ *     only, whatever their `command` and whatever `agent_mcp` — trusted as the owner's config); and
  *     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
  *     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir, or with the
  *     profile dir `<same abs>/.volley/claude/<same acct>` (`claude auth login`, never
  *     `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
  *   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
- *   volley peer doctor --json [--fix --yes [--clone --origin <https URL>]] — the machine's doctor
+ *   volley peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
+ *     <https URL>]] — the machine's doctor
  *     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
  *     credentials or port, isCloneUrl); no other volley argv runs on a box
  *   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
@@ -403,6 +416,23 @@ export function mintHandoffToken(t: {
   if (why !== null) throw new FenceError(`handoff text ${JSON.stringify(t.text)}`, why);
   const token = Object.freeze({ item_id: t.item_id, version: t.version, text: t.text });
   handoffs.add(token);
+  return token;
+}
+
+const wakes = new WeakSet<object>();
+
+/**
+ * Waking an idle agent to read its mailbox: WAKE_TEXT, the one constant, is typed once with it.
+ * Only `mintWakeToken` creates one (checked by identity).
+ */
+export interface WakeToken {
+  readonly text: typeof WAKE_TEXT;
+}
+
+/** Callers: the daemon, when an idle agent has not acked a mailbox message (wakeIfUnacked). */
+export function mintWakeToken(): WakeToken {
+  const token = Object.freeze({ text: WAKE_TEXT });
+  wakes.add(token);
   return token;
 }
 
@@ -718,6 +748,8 @@ export interface FenceOptions {
   picker?: PickerToken;
   /** For typing a coordinator handoff's reply: the inbox item's answer. */
   handoff?: HandoffToken;
+  /** For typing WAKE_TEXT into an idle agent's session. */
+  wake?: WakeToken;
   /** For starting a sign-in tmux session: the sealed sign-in script. */
   signin?: SigninToken;
   /** For the sign-in forward (`ssh -N -L`): the token a remote sign-in minted. */
@@ -1094,6 +1126,12 @@ function typedTextRefusal(text: string, opts: FenceOptions): string | null {
     return t !== undefined && switches.has(t) && text === `/model ${t.model}`
       ? null
       : "/model without the token of an approved model_switch decision";
+  }
+  const wake = opts.wake;
+  if (text === WAKE_TEXT && wake !== undefined && wakes.has(wake)) {
+    if (spentText.has(wake)) return "a wake is typed once";
+    spentText.add(wake);
+    return null;
   }
   const answer = answerTextToken(text, opts);
   if (answer !== null) {
@@ -1599,6 +1637,17 @@ const REMOTE_DOCTOR: readonly (readonly string[])[] = [
   ["peer", "doctor", "--json"],
   ["peer", "doctor", "--json", "--fix", "--yes"],
 ];
+/**
+ * After `--json`, the doctor may be told the box's `volley_dir` (`--supervisor-volley-dir`, so
+ * it checks every volley MCP entry against it): an absolute path, no `..` segment, no control
+ * character.
+ */
+const SUPERVISOR_VOLLEY_DIR = "--supervisor-volley-dir";
+const isVolleyDir = (p: string) =>
+  p.startsWith("/") &&
+  !p.split("/").includes("..") &&
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
+  !/[\u0000-\u001f\u007f]/.test(p);
 /** … and with `--clone`, the URL it clones from (`--origin`, a CLONE_URL). */
 const REMOTE_DOCTOR_CLONE = ["peer", "doctor", "--json", "--fix", "--yes", "--clone", "--origin"];
 /**
@@ -1842,12 +1891,18 @@ function isLaunchScript(content: string, worktree: string, host?: ProfileHost): 
 
 /**
  * MCP_CONFIG: whether `content` is exactly `renderMcpConfig` of an absolute, clean volley-mcp
- * entry point outside any `.volley/` (claude runs that server for the agent).
+ * entry point outside any `.volley/` (claude runs that server for the agent), plus, after it, the
+ * entries `agent_mcp_allow` copied from the machine's own MCP config. Those are checked for shape
+ * only: the fence does not bound their `command` (nor check it came from the box's config), as
+ * claude would start the same entry under `agent_mcp: inherit` anyway.
  */
 function isMcpConfig(content: string): boolean {
   let entry: unknown;
+  let extra: Record<string, unknown>;
   try {
-    entry = JSON.parse(content)?.mcpServers?.volley?.args?.[1];
+    const { volley, ...rest } = JSON.parse(content)?.mcpServers ?? {};
+    entry = volley?.args?.[1];
+    extra = rest;
   } catch {
     return false;
   }
@@ -1855,7 +1910,8 @@ function isMcpConfig(content: string): boolean {
     typeof entry === "string" &&
     entry.endsWith(MCP_ENTRY_SUFFIX) &&
     outsideVolley(entry) &&
-    renderMcpConfig(entry) === content
+    Object.values(extra).every(isMcpServerEntry) &&
+    renderMcpConfig(entry, extra) === content
   );
 }
 
@@ -1991,16 +2047,20 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
         args.slice(1).every((n) => (PATH_PROBE_TOOLS as readonly string[]).includes(n))
         ? ALLOW
         : deny(`command (only -v ${PATH_PROBE_TOOLS.join(" ")})`);
-    case "volley":
+    case "volley": {
       // The one remote volley step: elsewhere volley is a local program (`volley auth`).
-      return REMOTE_DOCTOR.some((shape) => sameArgv(args, shape)) ||
-        (args.length === REMOTE_DOCTOR_CLONE.length + 1 &&
-          sameArgv(args.slice(0, -1), REMOTE_DOCTOR_CLONE) &&
-          isCloneUrl(args.at(-1) ?? ""))
+      const dir = args[3] === SUPERVISOR_VOLLEY_DIR ? (args[4] ?? "") : null;
+      const rest = dir !== null ? [...args.slice(0, 3), ...args.slice(5)] : args;
+      return (dir === null || isVolleyDir(dir)) &&
+        (REMOTE_DOCTOR.some((shape) => sameArgv(rest, shape)) ||
+          (rest.length === REMOTE_DOCTOR_CLONE.length + 1 &&
+            sameArgv(rest.slice(0, -1), REMOTE_DOCTOR_CLONE) &&
+            isCloneUrl(rest.at(-1) ?? "")))
         ? ALLOW
         : deny(
-            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--fix --yes [--clone --origin <https URL>]])`,
+            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--supervisor-volley-dir <abs>] [--fix --yes [--clone --origin <https URL>]])`,
           );
+    }
     default: {
       // Locally allowed programs (cmux, volley, launchctl) have no business on a remote host.
       const v = evaluate([prog, ...args], opts);
@@ -2150,8 +2210,9 @@ function newSessionSealed(args: readonly string[], opts: FenceOptions): Verdict 
  * The bash script for `ssh -T <target> bash -s`: `set -euo pipefail`, then one line per step,
  * every word single-quoted (so no path or value is ever shell syntax). A step with a `cwd` runs
  * in a subshell that `cd`s first; a file write runs `base64 -d` under `umask 077` from a quoted
- * heredoc (base64 text cannot contain its delimiter). The trust compare is fed the same way,
- * through `base64 -d |`. Every other step reads /dev/null: under `bash -s` a step that read its
+ * heredoc (base64 text cannot contain its delimiter), into a file it first removes and then
+ * creates under `set -C` (an append excepted), so the content never lands at an existing file's
+ * looser mode or through a symlink. The trust compare is fed the same way, through `base64 -d |`. Every other step reads /dev/null: under `bash -s` a step that read its
  * stdin would consume the rest of the script.
  */
 export function renderRemoteScript(script: RemoteScript): string {
@@ -2161,8 +2222,13 @@ export function renderRemoteScript(script: RemoteScript): string {
     const env = s.env !== undefined ? `CLAUDE_CONFIG_DIR=${shq(s.env.CLAUDE_CONFIG_DIR)} ` : "";
     const cmd = env + s.argv.map(shq).join(" ");
     if (s.stdout !== undefined) {
-      const redirect = s.append === true ? ">>" : ">";
-      lines.push(`( umask 077 && ${cmd} ${redirect} ${shq(s.stdout)} ${heredoc(s)}\n)`);
+      // A whole write removes the file first, so it is created afresh under the umask: an
+      // overwrite never keeps an earlier, looser mode while the new content lands. Noclobber
+      // makes the create exclusive, so a symlink planted after the rm is refused, not followed.
+      const out = shq(s.stdout);
+      const write =
+        s.append === true ? `${cmd} >> ${out}` : `set -C && 'rm' '-f' ${out} && ${cmd} > ${out}`;
+      lines.push(`( umask 077 && ${write} ${heredoc(s)}\n)`);
     } else if (s.stdin !== undefined) {
       lines.push(`'base64' '-d' ${heredoc(s).replace("\n", ` | ${cmd}\n`)}`);
     } else if (s.cwd !== undefined) {

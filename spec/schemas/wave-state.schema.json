@@ -165,6 +165,19 @@
                 }
               }
             },
+            "alarms": {
+              "type": "array",
+              "description": "Wave-level alarms that still hold, each with a human-readable line: peer_idle_under_load (spec section 4.6.15), raised once when a placement: local wave runs while the supervisor's own machine is overloaded and a ready paired machine has free slots, and cleared once that load has passed. Absent: none.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["alarm", "message"],
+                "properties": {
+                  "alarm": { "type": "string", "minLength": 1 },
+                  "message": { "type": "string" }
+                }
+              }
+            },
             "updated_at": { "type": "string", "format": "date-time" }
           }
         }
@@ -257,6 +270,16 @@
           "minLength": 1,
           "description": "The remote host the task's agents run on (its name from the wave file, the hosts tunable or placement); absent for the supervisor's own host."
         },
+        "host_actual": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The host the task's agents were spawned on, from its agent_spawned ('local' for the supervisor's own): a later plan version never moves a started task (spec section 4.6.15)."
+        },
+        "host_planned": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The host the current plan version writes for a started task, while it differs from host_actual (e.g. 'auto' after the wave switched to placement: auto); absent otherwise."
+        },
         "host_down": {
           "type": "string",
           "minLength": 1,
@@ -275,6 +298,11 @@
           "type": "integer",
           "minimum": 1,
           "description": "Steering messages the supervisor holds for the task's next agent because none was live when they were sent (SPEC §4.4); absent when none are held."
+        },
+        "steer_unacked": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The task's agent the supervisor woke (agent_woken) for a mailbox message its hooks have not acked yet; absent once acked or the agent is retired."
         },
         "screen_stale": {
           "type": "boolean",

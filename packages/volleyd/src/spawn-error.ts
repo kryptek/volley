@@ -10,6 +10,8 @@ export type SpawnErrorCode =
   | "RELEASE_BRANCH_MISSING"
   // The release branch could not be fetched and require_fresh_base is on (worktree.ts).
   | "BASE_STALE"
+  // The release branch's fetch never reached origin (DNS, the network): transient, retried.
+  | "BASE_UNREACHABLE"
   // `detail.outcome`: `refused` (nothing was created) or `unknown` (it may have been): Host.launch.
   | "LAUNCH_FAILED"
   | "REMOTE_REPO_MISSING"

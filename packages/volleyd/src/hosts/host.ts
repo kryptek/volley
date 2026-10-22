@@ -3,9 +3,12 @@ import type { ConsentToken, FenceOptions, LaunchToken } from "../fence";
 
 /**
  * The fence tokens typed text and keys need (src/fence.ts TYPED_TEXT, PICKER): a sealed launch, a
- * switch, an inbox picker's or handoff's answer.
+ * switch, an inbox picker's or handoff's answer, a mailbox wake.
  */
-export type TypedTextTokens = Pick<FenceOptions, "launch" | "modelSwitch" | "picker" | "handoff">;
+export type TypedTextTokens = Pick<
+  FenceOptions,
+  "launch" | "modelSwitch" | "picker" | "handoff" | "wake"
+>;
 
 /** Where and how one agent's worktree is cut. */
 export interface WorktreeSpec {
@@ -41,6 +44,8 @@ export interface WorktreeResult {
    * fetch before it succeeded (`fetch_error`: why not, when it did not).
    */
   base?: { sha: string; fresh: boolean; fetch_error?: string };
+  /** The fetch lost a ref-lock race and was retried (git-lock.ts lockedFetch): the first error. */
+  fetch_retried?: string;
 }
 
 /** One terminal to open: the command is run by the pane's shell, nothing else is typed. */

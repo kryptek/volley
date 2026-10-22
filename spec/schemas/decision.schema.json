@@ -64,6 +64,45 @@
               }
             },
             "opened_at": { "type": "string", "format": "date-time" },
+            "held": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["on", "by", "at"],
+              "properties": {
+                "on": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "minProperties": 1,
+                  "description": "What it waits on: a task of the wave, a PR, an issue (one or more).",
+                  "properties": {
+                    "task": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+                    },
+                    "pr": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "issue": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  }
+                },
+                "note": {
+                  "type": "string"
+                },
+                "by": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "description": "Held (spec section 4.6.2): the decision stays open but waits on a task, PR or issue; it is never escalated, and the supervisor releases it when the blocker lands (a task done or cancelled, a PR merged or closed, an issue closed)."
+            },
             "stage": {
               "type": "string",
               "minLength": 1,

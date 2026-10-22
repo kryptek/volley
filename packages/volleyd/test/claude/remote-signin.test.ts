@@ -25,7 +25,7 @@ import {
 
 const PRINTED = parseSigninUrl(TRANSCRIPT) as string;
 const TARGET = "dev@box-a";
-const DIR = remoteSigninDir("/home/dev", "primary");
+const DIR = remoteSigninDir("/path/to/home", "primary");
 const SPEC = {
   name: "box-a",
   target: TARGET,

@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "parent_id": null,
+  "wall_time": "2026-10-18T15:00:10.000Z",
+  "channel": "_system/admission",
+  "type": "admission",
+  "correlation_id": null,
+  "payload": {
+    "sampled_at": "2026-10-18T15:00:10.000Z",
+    "allow": null,
+    "throttled": false,
+    "reasons": [],
+    "signals": {},
+    "ceiling": { "live": 0, "max": 12, "launching": 0, "by_wave": { "2026-10-20-example": 0 } }
+  }
+}

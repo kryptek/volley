@@ -6,6 +6,8 @@ import {
   agentAttention,
   connectedSilence,
   coordinatorFor,
+  inboxAttention,
+  inboxNeedsYou,
   needsYouTargets,
   tierFor,
   waveAttention,
@@ -18,6 +20,7 @@ import type {
   CoordinatorView,
   DecisionPayload,
   DeskState,
+  InboxItem,
   WaveStatePayload,
   WaveView,
 } from "../src/store/types";
@@ -265,6 +268,24 @@ describe("tierFor(wave)", () => {
     expect(tierFor(sup, ctx({ agents: {} }))).toBe("you");
   });
 
+  it("finds a named owner's coordinator through the bound agent, and trusts volleyd's fresh state", () => {
+    // Owned by a coordinator name: the Desk has no agent under it, only under the bound id.
+    const named = (coordinator: WaveStatePayload["coordinator"]) =>
+      wave({ owner: "coord-main", ...(coordinator ? { coordinator } : {}) });
+    const bound = named({ agent_id: "coord-a1", state: "working", last_seen: iso(NOW - 40 * MIN) });
+    const heard = ctx({ coordinators: {}, agents: { "coord-a1": agent("coord-a1") } });
+    expect(coordinatorFor(bound, heard)).toMatchObject({ id: "coord-main", state: "working" });
+    expect(tierFor(bound, heard)).toBe("none");
+    // volleyd says working with a fresh last_seen and the Desk has no agent view: working.
+    const fresh = named({ agent_id: "coord-a1", state: "working", last_seen: iso(NOW - 2 * MIN) });
+    const cold = ctx({ coordinators: {}, agents: {} });
+    expect(coordinatorFor(fresh, cold).state).toBe("working");
+    expect(tierFor(fresh, cold)).toBe("none");
+    // volleyd says gone: gone.
+    const gone = named({ agent_id: "coord-a1", state: "gone", last_seen: iso(NOW - 2 * MIN) });
+    expect(coordinatorFor(gone, cold).state).toBe("gone");
+  });
+
   it("keeps awaiting_input over staleness: the coordinator waits quietly for an answer", () => {
     const c = ctx({
       coordinators: { "coord-1": coord("awaiting_input") },
@@ -498,3 +519,88 @@ function waveEnvelope(w: WaveView) {
     payload: w.state,
   };
 }
+
+describe("held decisions (SPEC §4.6.2): waiting on a blocker, never escalated", () => {
+  const HOUR = 60 * MIN;
+  const held = { on: { task: "T2" }, by: "coord-1", at: iso(NOW - 3 * HOUR) };
+  const withPr = (over: Partial<WaveStatePayload> = {}) => ({
+    tasks: [
+      {
+        id: "T1",
+        issue: 1,
+        stage: "awaiting_decision" as const,
+        agents: { implementer: "impl-1" },
+      },
+      {
+        id: "T2",
+        issue: 2,
+        stage: "implement" as const,
+        agents: { implementer: "impl-2" },
+        pr: { number: 194, url: "https://example.com/pull/194" },
+      },
+    ],
+    ...over,
+  });
+  const old = decision({ opened_at: iso(NOW - 4 * HOUR), held });
+  const item = (over: Partial<InboxItem> = {}): InboxItem => ({
+    id: "d-w1-d-1",
+    kind: "decision",
+    version: 1,
+    owner_only: false,
+    wave: "w1",
+    task: "T1",
+    agent_id: "volleyd",
+    title: "Ci failed · w1/T1",
+    question: "CI failed. What now?",
+    pointers: {},
+    opened_at: iso(NOW - 4 * HOUR),
+    source: { decision_id: "d-1" },
+    held,
+    ...over,
+  });
+
+  it("a held decision 3 h old is amber with what it waits on, not you", () => {
+    const w = wave(withPr(), [old]);
+    expect(waveAttention(w, ctx())).toEqual({
+      tier: "coordinator",
+      reason: "Held · waiting on T2 (#194) · 3 h",
+    });
+    expect(agentAttention(agent("impl-1"), w, ctx())).toEqual({
+      tier: "coordinator",
+      reason: "Held · waiting on T2 (#194) · 3 h",
+    });
+  });
+
+  it("stays amber on a wave its viewer owns, while an unheld decision there is still yours", () => {
+    const w = wave(withPr(), [old]);
+    expect(waveAttention(w, ctx({ me: "coord-1" })).tier).toBe("coordinator");
+    const both = wave(withPr(), [old, decision({ decision_id: "d-2", task: null })]);
+    expect(waveAttention(both, ctx({ me: "coord-1" })).tier).toBe("you");
+  });
+
+  it("an inbox item: amber even owner-only, never in needs-you; released, it escalates as usual", () => {
+    const state = reduceAll(initialState(), []);
+    const s: DeskState = {
+      ...state,
+      waves: { w1: wave(withPr(), [old]) },
+      inbox: { "d-w1-d-1": item({ owner_only: true }) },
+    };
+    expect(inboxAttention(item({ owner_only: true }), s, ctx())).toEqual({
+      tier: "coordinator",
+      reason: "Held · waiting on T2 (#194) · 3 h",
+    });
+    expect(inboxNeedsYou(s, { now: NOW })).toEqual([]);
+    const { held: _h, ...released } = item();
+    expect(inboxAttention(released, s, ctx()).tier).toBe("you");
+    expect(inboxAttention(released, s, ctx()).reason).toContain("unresolved for 240 min");
+  });
+
+  it("names a PR or an issue, and a short hold in minutes", () => {
+    const w = wave(withPr(), [
+      decision({ held: { on: { pr: 12 }, by: "o", at: iso(NOW - 12 * MIN) } }),
+    ]);
+    expect(waveAttention(w, ctx()).reason).toBe("Held · waiting on PR #12 · 12 min");
+    const i = wave(withPr(), [decision({ held: { on: { issue: 7 }, by: "o", at: iso(NOW) } })]);
+    expect(waveAttention(i, ctx()).reason).toBe("Held · waiting on issue #7 · 0 min");
+  });
+});

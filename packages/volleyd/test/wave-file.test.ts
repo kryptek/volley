@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { WaveFileError, parseWaveFile } from "../src/wave-file";
+import { WaveFileError, defaultPlacement, formatPlacement, parseWaveFile } from "../src/wave-file";
 
 const fixture = (name: string) =>
   readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf-8");
@@ -268,6 +268,19 @@ describe("account: (Claude account profiles)", () => {
     );
   });
 
+  it("agent_mcp_allow is a per-wave config override: a list of server names", () => {
+    const w = parseWaveFile(
+      `${HEADER}config:\n  agent_mcp: inherit\n  agent_mcp_allow: [migrations, playwright]\n${TASKS}`,
+    );
+    expect(w.config).toEqual({
+      agent_mcp: "inherit",
+      agent_mcp_allow: ["migrations", "playwright"],
+    });
+    expect(errorsOf(`${HEADER}config:\n  agent_mcp_allow: [1]\n${TASKS}`)[0]).toMatch(
+      /^config\.agent_mcp_allow/,
+    );
+  });
+
   it("agent_auto_compact_pct is a per-wave config override, 0..100", () => {
     const w = parseWaveFile(`${HEADER}config:\n  agent_auto_compact_pct: 70\n${TASKS}`);
     expect(w.config.agent_auto_compact_pct).toBe(70);
@@ -314,6 +327,63 @@ describe("placement (SPEC §4.6.15)", () => {
     expect(w.tasks.T4?.host).toBe("auto");
     // placement: local is the default, written out.
     expect(parseWaveFile(`${HEADER}placement: local\n${TASKS}`).tasks.T1?.host).toBe("local");
+  });
+
+  it("no placement: takes placement.default: auto once a machine is paired (#324)", () => {
+    const paired = { default: "auto" as const, paired: 1 };
+    const w = parseWaveFile(`${HEADER}${TASKS}`, undefined, paired);
+    expect(w.placement).toBe("auto");
+    expect(w.tasks.T1?.host).toBe("auto");
+    expect(w.tasks.T2?.host).toBe("box-a");
+    expect(w.tasks.T3?.host).toBe("local");
+    // No paired machine: local, whatever the default.
+    const alone = parseWaveFile(`${HEADER}${TASKS}`, undefined, { default: "auto", paired: 0 });
+    expect(alone.placement).toBeUndefined();
+    expect(alone.tasks.T1?.host).toBe("local");
+  });
+
+  it("placement.default: local keeps it local; an explicit placement: wins over the default (#324)", () => {
+    const local = parseWaveFile(`${HEADER}${TASKS}`, undefined, { default: "local", paired: 2 });
+    expect(local.placement).toBeUndefined();
+    expect(local.tasks.T1?.host).toBe("local");
+    const pinned = parseWaveFile(`${HEADER}placement: local\n${TASKS}`, undefined, {
+      default: "auto",
+      paired: 2,
+    });
+    expect(pinned.placement).toBeUndefined();
+    expect(pinned.tasks.T1?.host).toBe("local");
+    // The wave's own config: placement.default wins over the supervisor's.
+    const own = parseWaveFile(
+      `${HEADER}config:\n  placement:\n    default: local\n${TASKS}`,
+      undefined,
+      { default: "auto", paired: 1 },
+    );
+    expect(own.tasks.T1?.host).toBe("local");
+    // A known wave's kept placement: its config: default no longer decides, its placement: does.
+    const kept = { default: "local" as const, paired: 1, kept: true };
+    const auto = `${HEADER}config:\n  placement:\n    default: auto\n${TASKS}`;
+    expect(parseWaveFile(auto, undefined, kept).tasks.T1?.host).toBe("local");
+    expect(parseWaveFile(`${HEADER}placement: auto\n${TASKS}`, undefined, kept).placement).toBe(
+      "auto",
+    );
+  });
+
+  it("the placement line names what decided it (#324)", () => {
+    const line = (
+      raw: { placement?: "auto" | "local" },
+      d: { default: "auto" | "local"; paired: number },
+    ) => formatPlacement(defaultPlacement(raw, d), d.paired);
+    expect(line({}, { default: "auto", paired: 1 })).toBe(
+      "placement: auto (placement.default; 1 paired machine)",
+    );
+    expect(line({}, { default: "auto", paired: 2 })).toBe(
+      "placement: auto (placement.default; 2 paired machines)",
+    );
+    expect(line({}, { default: "auto", paired: 0 })).toBe("placement: local (no paired machine)");
+    expect(line({}, { default: "local", paired: 1 })).toBe("placement: local (placement.default)");
+    expect(line({ placement: "local" }, { default: "auto", paired: 1 })).toBe(
+      "placement: local (wave file)",
+    );
   });
 
   it("placement: elsewhere is refused with a path-qualified error", () => {

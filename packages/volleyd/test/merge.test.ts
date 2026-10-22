@@ -62,9 +62,82 @@ describe("autopilot merge (the one module that builds gh pr merge)", () => {
     const r = await mergePr(f.exec, token);
     expect(r).toEqual({
       ok: false,
+      reason: "head_moved",
       stderr: "GraphQL: Head branch was modified. Review and try the merge again.",
     });
     expect(f.calls).toHaveLength(2);
+  });
+});
+
+describe("autopilot merge classifies a refusal (#311)", () => {
+  const refused = async (stderr: string) => {
+    const f = fakeExec().on(PRE, { stdout: OPEN }).on(["gh", "pr", "merge"], { code: 1, stderr });
+    return mergePr(f.exec, token);
+  };
+  it("required checks → checks: nothing about the release branch", async () => {
+    const stderr = "Pull request is not mergeable: required checks";
+    expect(await refused(stderr)).toEqual({ ok: false, reason: "checks", stderr });
+  });
+  it("out of date or conflicting → behind", async () => {
+    for (const stderr of [
+      "Pull request is not mergeable: the head branch is out of date",
+      "Pull request is not mergeable: the merge commit cannot be cleanly created (conflicts)",
+    ])
+      expect(await refused(stderr)).toMatchObject({ ok: false, reason: "behind" });
+  });
+  it("the base branch moved during the merge → behind", async () => {
+    const stderr = "GraphQL: Base branch was modified. Review and try the merge again.";
+    expect(await refused(stderr)).toEqual({ ok: false, reason: "behind", stderr });
+  });
+  it("--match-head-commit refused → head_moved", async () => {
+    const stderr = "GraphQL: Head sha didn't match expected head sha (match-head-commit)";
+    expect(await refused(stderr)).toEqual({ ok: false, reason: "head_moved", stderr });
+  });
+  it("GitHub's own wording for reviews, status checks and rulesets → checks", async () => {
+    for (const stderr of [
+      "GraphQL: At least 1 approving review is required by reviewers with write access. (mergePullRequest)",
+      'GraphQL: Required status check "ci" is expected. (mergePullRequest)',
+      'GraphQL: Repository rule violations found\n\nRequired status check "ci" is expected.',
+      "GraphQL: Changes must be made through a pull request. Protected branch rules not satisfied.",
+    ])
+      expect(await refused(stderr)).toEqual({ ok: false, reason: "checks", stderr });
+  });
+  it("a check whose name holds 'conflict' or 'behind' is still checks", async () => {
+    for (const stderr of [
+      'GraphQL: Required status check "merge-conflict-scan" is expected. (mergePullRequest)',
+      'GraphQL: Required status check "not-behind-guard" is expected. (mergePullRequest)',
+    ])
+      expect(await refused(stderr)).toEqual({ ok: false, reason: "checks", stderr });
+  });
+  it("only double-quoted text is blanked: a single-quoted check name holding 'conflict' reads as behind (fails safe)", async () => {
+    const stderr = "GraphQL: Required status check 'merge-conflict-scan' is expected.";
+    expect(await refused(stderr)).toEqual({ ok: false, reason: "behind", stderr });
+  });
+  it("closed or merged, in any case → closed", async () => {
+    for (const stderr of [
+      "GraphQL: Pull request is closed (mergePullRequest)",
+      "GraphQL: Pull Request is already merged",
+      "Pull request #7 is MERGED",
+      "Pull request #7 is Closed",
+    ])
+      expect(await refused(stderr)).toEqual({ ok: false, reason: "closed", stderr });
+  });
+  it("anything else → unknown", async () => {
+    expect(await refused("GraphQL: something odd")).toMatchObject({ reason: "unknown" });
+  });
+  it("the pre-merge read: head moved, retargeted, closed, unreadable", async () => {
+    const pre = async (stdout: string, code = 0) =>
+      mergePr(fakeExec().on(PRE, { stdout, code, stderr: "rate limited" }).exec, token);
+    const view = (v: object) =>
+      JSON.stringify({ state: "OPEN", headRefOid: H, baseRefName: "release/w", ...v });
+    expect(await pre(view({ headRefOid: M }))).toEqual({
+      ok: false,
+      reason: "head_moved",
+      stderr: `not merged: PR #7 head is ${M}, not the gated ${H}`,
+    });
+    expect(await pre(view({ baseRefName: "main" }))).toMatchObject({ reason: "retargeted" });
+    expect(await pre(view({ state: "CLOSED" }))).toMatchObject({ reason: "closed" });
+    expect(await pre("", 1)).toMatchObject({ reason: "unknown" });
   });
 });
 

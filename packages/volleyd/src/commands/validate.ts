@@ -24,7 +24,12 @@ import {
 } from "../placement";
 import { criticalPaths } from "../scheduler";
 import type { PlacementConfig, Tunables, Wave } from "../types";
-import { loadWaveFile } from "../wave-file";
+import {
+  type PlacementDefaults,
+  defaultPlacement,
+  formatPlacement,
+  parseWaveFile,
+} from "../wave-file";
 import { checkFreshBase, checkReleaseBranch, expandHome, spawnsLocally } from "../worktree";
 
 const HELP = `Usage: volleyd validate <wave.yaml>
@@ -40,6 +45,10 @@ A wave that places tasks (\`placement: auto\`, or a task's \`host: auto\`) also 
 preview, "if admitted now: T1 → box-a (0.81), T3 → local (0.63)", from the machine records and
 readiness verdicts retained on the broker (VOLLEY_BROKER_URL / VOLLEY_NAMESPACE); the real
 decision is made when the scheduler admits each task.
+
+Under \`agent_mcp: inherit\` (the wave's \`config:\`, else config.yaml's) it prints which MCP
+servers the agents start: "agent_mcp: inherit (allow: migrations, playwright)", or "(every user
+server)" with no \`agent_mcp_allow\`.
 
 It also prints the brief preface every agent of the wave would get — its path, size and sha256
 prefix, or "none" — and fails with BRIEF_PREFACE_TOO_LARGE when the file is over
@@ -57,11 +66,9 @@ RELEASE_PLAYBOOK_INVALID and its path-qualified errors.
  * `$VOLLEYD_HOME/config.yaml` over the default. A file that does not parse is the daemon's to
  * report; validate falls back to the default.
  */
-function globalTunable<K extends "brief_preface_max_bytes" | "require_fresh_base">(
-  env: CommandArgs["env"],
-  key: K,
-  valid: (v: unknown) => boolean,
-): Tunables[K] {
+function globalTunable<
+  K extends "brief_preface_max_bytes" | "require_fresh_base" | "agent_mcp" | "agent_mcp_allow",
+>(env: CommandArgs["env"], key: K, valid: (v: unknown) => boolean): Tunables[K] {
   const fallback = CONFIG_DEFAULTS[key];
   const file = join(volleydHome(env), "config.yaml");
   if (!existsSync(file)) return fallback;
@@ -100,6 +107,73 @@ export function localPinWarnings(wave: Wave, env: CommandArgs["env"]): string {
         `warning: ${id} pins host: local while fleet.local_agents is never; it still runs there (the wave file is explicit)\n`,
     )
     .join("");
+}
+
+/**
+ * `agent_mcp: inherit (allow: a, b)` (or `(every user server)`) when the wave's agents inherit the
+ * user's MCP servers, from the wave's `config:` over config.yaml; empty under `strict`.
+ */
+export function agentMcpLine(wave: Wave, env: CommandArgs["env"]): string {
+  const mode =
+    wave.config.agent_mcp ??
+    globalTunable(env, "agent_mcp", (v) => v === "strict" || v === "inherit");
+  if (mode !== "inherit") return "";
+  const allow =
+    wave.config.agent_mcp_allow ??
+    globalTunable(
+      env,
+      "agent_mcp_allow",
+      (v) => Array.isArray(v) && v.every((n) => typeof n === "string"),
+    );
+  return `agent_mcp: inherit (${allow.length > 0 ? `allow: ${allow.join(", ")}` : "every user server"})\n`;
+}
+
+/**
+ * What a wave without `placement:` takes as `run` would see it here: config.yaml's
+ * `placement.default` over the built-in, and its paired machines (`hosts.<name>`, the own
+ * machine's name aside). A file that does not parse is the daemon's to report: the built-in, none.
+ */
+export function placementDefaults(env: CommandArgs["env"]): PlacementDefaults {
+  const fallback: PlacementDefaults = { default: CONFIG_DEFAULTS.placement.default, paired: 0 };
+  const file = join(volleydHome(env), "config.yaml");
+  if (!existsSync(file)) return fallback;
+  try {
+    const cfg = parse(readFileSync(file, "utf-8")) as {
+      placement?: { default?: unknown };
+      hosts?: unknown;
+      fleet?: { local_name?: unknown };
+    } | null;
+    const def = cfg?.placement?.default;
+    const hosts =
+      cfg?.hosts !== null && typeof cfg?.hosts === "object" ? Object.keys(cfg.hosts) : [];
+    const local = cfg?.fleet?.local_name;
+    return {
+      default: def === "local" || def === "auto" ? def : fallback.default,
+      paired: hosts.filter((n) => n !== LOCAL_HOST && n !== local).length,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * The wave file `text` parsed under `defaults`, with its placement line
+ * (`placement: auto (placement.default; 1 paired machine)`).
+ */
+export function parseWithPlacement(
+  text: string,
+  file: string,
+  defaults: PlacementDefaults,
+): { wave: Wave; placementLine: string; fromFile: boolean } {
+  const wave = parseWaveFile(text, file, defaults);
+  // Valid, so a mapping; `placement:` and `config:` as written.
+  const raw = parse(text) as { placement?: "auto" | "local"; config?: Wave["config"] };
+  const placed = defaultPlacement(raw, defaults);
+  return {
+    wave,
+    placementLine: `${formatPlacement(placed, defaults.paired)}\n`,
+    fromFile: placed.by === "wave file",
+  };
 }
 
 /** `config.yaml`'s `placement.weights` (none: {}), for the merged all-zero check `run` makes. */
@@ -145,7 +219,11 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
     return EXIT.USAGE;
   }
   try {
-    const wave = await loadWaveFile(file);
+    const { wave, placementLine } = parseWithPlacement(
+      readFileSync(file, "utf-8"),
+      file,
+      placementDefaults(env),
+    );
     const weights = {
       ...CONFIG_DEFAULTS.placement.weights,
       ...globalWeights(env),
@@ -209,7 +287,7 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
       `ok: wave ${wave.wave} v${wave.version} — ${wave.task_order.length} task(s), ` +
         `critical path ${longest}, release branch ${wave.release_branch}\n` +
         `${env.VOLLEY_AGENT_ID || env.VOLLEY_COORDINATOR ? "" : OWNER_NOTE}` +
-        `${note}${localPinWarnings(wave, env)}${prefaceLine}\n${playbookLine}\n${placement}`,
+        `${note}${localPinWarnings(wave, env)}${agentMcpLine(wave, env)}${prefaceLine}\n${playbookLine}\n${placementLine}${placement}`,
     );
     return EXIT.OK;
   } catch (e) {

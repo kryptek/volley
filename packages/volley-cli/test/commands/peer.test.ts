@@ -31,7 +31,9 @@ import {
   hostKeyHint,
   localNotAdmin,
   machineTopic,
+  peerDoctorStamp,
   peerFile,
+  realDeps,
   redeemScript,
   runPeer,
   runService,
@@ -39,6 +41,7 @@ import {
 } from "../../src/commands/peer";
 import { EXIT } from "../../src/exit-codes";
 import { makeBufferIO } from "../../src/io";
+import { lockHash } from "../../src/peer/doctor";
 import { type TestBroker, startTestBroker } from "../helpers/aedes-broker";
 import { FAKE_TOKEN, storeLogins, usageEndpoint } from "../helpers/fake-logins";
 import { type FakePeerMachine, fakePeerMachine } from "../helpers/fake-peer-machine";
@@ -176,7 +179,7 @@ function deps(exec: PeerExec, over: Partial<PeerDeps> = {}): PeerDeps {
     loadavg: () => [0.5, 0.25, 0.125],
     now: () => new Date("2026-10-19T09:00:00.000Z"),
     monotonic: () => 0,
-    envPath: () => "/home/dev/.bun/bin:/usr/local/bin:/usr/bin:/bin",
+    envPath: () => "/path/to/home/.bun/bin:/usr/local/bin:/usr/bin:/bin",
     sleep: async () => {},
     readStdin: async () => "",
     volleyArgv: ["/usr/local/bin/bun", "/opt/volley/packages/volley-cli/src/cli.ts"],
@@ -233,7 +236,7 @@ const hostSsh =
 
 /** The JSON the redeem script pipes into `volley peer redeem` on the host. */
 const redeemRequest = (script: string) => {
-  const m = /printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d \| (.+) peer redeem/.exec(script);
+  const m = /printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d \| (.+?) peer redeem/.exec(script);
   if (m === null) throw new Error(`no redeem in ${script}`);
   return { request: JSON.parse(Buffer.from(m[1] as string, "base64").toString()), volley: m[2] };
 };
@@ -276,7 +279,7 @@ describe("volley peer join (on the machine to pair)", () => {
   });
 
   it("the estimated ssh PATH never stops a join: it warns, and the supervisor's own probe decides", async () => {
-    box.tools.claude.path = "/home/dev/.local/bin/claude";
+    box.tools.claude.path = "/path/to/home/.local/bin/claude";
     box.tools.claude.sshPath = null;
     const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
     const r = await run(
@@ -286,7 +289,9 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(r.stderr).toBe("");
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toMatch(/^! claude_on_path: estimated: /m);
-    expect(r.stdout).toContain("fix: sudo ln -s /home/dev/.local/bin/claude /usr/local/bin/claude");
+    expect(r.stdout).toContain(
+      "fix: sudo ln -s /path/to/home/.local/bin/claude /usr/local/bin/claude",
+    );
     expect(f.calls.filter((c) => c.argv[0] === "ssh")).toHaveLength(2);
   });
 
@@ -358,6 +363,20 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(plain.request.replace).toBeUndefined();
   });
 
+  it("a machine whose total memory reads 0 sends no memory_total_mb: its size stays unknown (#324)", async () => {
+    const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec, { totalmem: () => 0 }),
+    );
+    expect(r.exitCode).toBe(0);
+    const { request } = redeemRequest(
+      f.calls.filter((c) => c.argv[0] === "ssh")[1]?.input as string,
+    );
+    expect(request.cores).toBe(8);
+    expect(request.memory_total_mb).toBeUndefined();
+  });
+
   it("runs every remote step as a script under bash -s, writes peer.json, installs the service, prints trust, registers", async () => {
     const repo = box.repoPath;
     rmSync(join(home, ".claude.json"));
@@ -387,7 +406,9 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(probe).toBeGreaterThan(-1);
     expect(probe).toBeLessThan(script.indexOf("peer redeem"));
     const { request, volley } = redeemRequest(script);
-    expect(volley).toBe("volley");
+    // No --remote-volley: volley on the host's PATH, else the one `volley setup` installs.
+    expect(volley).toBe("if command -v volley >/dev/null 2>&1; then volley");
+    expect(script).toContain("; else ~/.volley/bin/volley peer redeem; fi");
     expect(request).toEqual({
       code: "abcd-efgh",
       name: "box-a",
@@ -397,6 +418,8 @@ describe("volley peer join (on the machine to pair)", () => {
       port: 21883,
       os: "linux",
       cores: 8,
+      // With cores, what volleyd sizes the machine's max_agents from (#324).
+      memory_total_mb: 16384,
     });
 
     // peer.json, mode 0600, with the account.
@@ -423,7 +446,7 @@ describe("volley peer join (on the machine to pair)", () => {
     );
     expect(unit).toContain("Restart=on-failure");
     // join's PATH, so the heartbeat's doctor finds what this terminal finds.
-    expect(unit).toContain("Environment=PATH=/home/dev/.bun/bin:/usr/local/bin:/usr/bin:/bin");
+    expect(unit).toContain("Environment=PATH=/path/to/home/.bun/bin:/usr/local/bin:/usr/bin:/bin");
     expect(unit).not.toContain("network-online.target");
     // Lingering first (the service must outlive this ssh session), then enable + restart (a
     // re-join replaces a running service).
@@ -483,7 +506,7 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(text).toContain("<key>SuccessfulExit</key><false/>");
     // launchd's own PATH is /usr/bin:/bin:/usr/sbin:/sbin: the service gets join's.
     expect(text).toContain(
-      "<key>EnvironmentVariables</key>\n  <dict><key>PATH</key><string>/home/dev/.bun/bin:/usr/local/bin:/usr/bin:/bin</string></dict>",
+      "<key>EnvironmentVariables</key>\n  <dict><key>PATH</key><string>/path/to/home/.bun/bin:/usr/local/bin:/usr/bin:/bin</string></dict>",
     );
     // Nothing loaded yet: nothing to boot out.
     expect(
@@ -704,7 +727,7 @@ describe("volley peer join (on the machine to pair)", () => {
     );
     const which = (c: string) =>
       c === "claude"
-        ? "/Users/dev/.local/bin/claude"
+        ? "/path/to/home/.local/bin/claude"
         : c === "bun"
           ? "/opt/homebrew/bin/bun"
           : null;
@@ -715,7 +738,7 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("claude, bun are not on the PATH of a non-interactive ssh session");
     expect(r.stderr).toContain("~/.zshenv");
-    expect(r.stderr).toContain('export PATH="/Users/dev/.local/bin:/opt/homebrew/bin:$PATH"');
+    expect(r.stderr).toContain('export PATH="/path/to/home/.local/bin:/opt/homebrew/bin:$PATH"');
     expect(r.stderr).toContain("the code is still valid");
     expect(existsSync(peerFile(home))).toBe(false);
     // bash: the top of ~/.bashrc; a tool this shell cannot find either: install it.
@@ -792,21 +815,67 @@ describe("volley peer join (on the machine to pair)", () => {
     expect(existsSync(peerFile(home))).toBe(false);
   });
 
-  it("volley missing on the host's ssh PATH: says to pass --remote-volley, and the code still works", async () => {
-    const f = fakeExec(hostSsh({ code: 127, stderr: "bash: line 6: volley: command not found\n" }));
+  it("volley neither on the host's ssh PATH nor at ~/.volley/bin/volley: says to run volley setup there, and the code still works", async () => {
+    const f = fakeExec(
+      hostSsh({
+        code: 127,
+        stderr: "bash: line 13: /path/to/home/.volley/bin/volley: No such file or directory\n",
+      }),
+    );
     const r = await run(
       ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
       deps(f.exec),
     );
     expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain("volley: command not found");
-    expect(r.stderr).toContain(
-      "`volley` is not on dev@host's PATH for a non-interactive ssh command",
-    );
-    // Quoted, so the host's shell expands ~ (its home, not this machine's).
-    expect(r.stderr).toContain("--remote-volley '~/.volley/bin/volley'");
+    expect(r.stderr).toContain("No such file or directory");
+    expect(r.stderr).toContain("`/path/to/home/.volley/bin/volley` does not exist on dev@host");
+    // The fallback was tried already: never suggested again.
+    expect(r.stderr).toContain("Run `volley setup` on dev@host");
+    expect(r.stderr).toContain("--remote-volley");
+    expect(r.stderr).not.toContain("--remote-volley '~/.volley/bin/volley'");
     expect(r.stderr).toContain("the code is still valid");
     expect(existsSync(peerFile(home))).toBe(false);
+  });
+
+  it("volley not on the host's ssh PATH: the redeem falls back to ~/.volley/bin/volley without --remote-volley", () => {
+    // The real script under bash: the stub ssh's PATH has the agent tools, the host's own PATH
+    // has no volley, and its home has the one `volley setup` installs.
+    const tmp = tempDir("volley-peer-fallback-");
+    const write = (p: string, text: string) => {
+      writeFileSync(p, text);
+      chmodSync(p, 0o755);
+    };
+    for (const d of ["bin", "tools", "home/.volley/bin"])
+      mkdirSync(join(tmp, d), { recursive: true });
+    write(
+      join(tmp, "bin", "ssh"),
+      '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -n|-T) shift;; -o) shift 2;; *) break;; esac; done\nshift\nexec /usr/bin/env -i PATH="$TOOLS" /bin/sh -c "$*"\n',
+    );
+    symlinkSync("/bin/sh", join(tmp, "tools", "sh"));
+    for (const t of ["bun", "tmux", "claude"]) write(join(tmp, "tools", t), "#!/bin/sh\n");
+    write(
+      join(tmp, "home", ".volley", "bin", "volley"),
+      `#!/bin/sh\necho "$*" > ${join(tmp, "argv")}\ncat > ${join(tmp, "redeemed")}\n`,
+    );
+    const script = redeemScript(
+      { code: "ABCD-EFGH", name: "box-a", target: "dev@box-a", volley_dir: "/opt/volley" },
+      null,
+    );
+    expect(script).toContain("~/.volley/bin/volley peer redeem");
+    const r = spawnSync("bash", ["-s"], {
+      input: script,
+      encoding: "utf-8",
+      env: {
+        PATH: `${join(tmp, "bin")}:/usr/bin:/bin`,
+        TOOLS: join(tmp, "tools"),
+        HOME: join(tmp, "home"),
+      },
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readFileSync(join(tmp, "argv"), "utf-8").trim()).toBe("peer redeem");
+    expect(JSON.parse(readFileSync(join(tmp, "redeemed"), "utf-8"))).toMatchObject({
+      code: "ABCD-EFGH",
+    });
   });
 
   it("bun missing on the host's ssh PATH: names bun, never says volley is missing", async () => {
@@ -865,7 +934,7 @@ describe("volley peer join (on the machine to pair)", () => {
     const h = fakeExec(
       hostSsh({
         code: 127,
-        stderr: "bash: line 6: /home/dev/.volley/bin/volley: No such file or directory\n",
+        stderr: "bash: line 6: /path/to/home/.volley/bin/volley: No such file or directory\n",
       }),
     );
     const again = await run(
@@ -881,7 +950,9 @@ describe("volley peer join (on the machine to pair)", () => {
       ],
       deps(h.exec),
     );
-    expect(again.stderr).toContain("`/home/dev/.volley/bin/volley` does not exist on dev@host.");
+    expect(again.stderr).toContain(
+      "`/path/to/home/.volley/bin/volley` does not exist on dev@host.",
+    );
     expect(again.stderr).toContain(
       "Run `volley setup` on dev@host (it installs ~/.volley/bin/volley)",
     );
@@ -1273,7 +1344,11 @@ describe("volley peer run (the service)", () => {
   async function heartbeats(
     beats: number,
     f: { exec: PeerExec; calls: Call[] } = fakeExec(() => undefined),
-    over: Partial<PeerDeps> = {},
+    opts: {
+      between?: (beat: number) => void | Promise<void>;
+      deps?: (d: PeerDeps) => void;
+      over?: Partial<PeerDeps>;
+    } = {},
   ) {
     const start = Date.parse("2026-10-19T09:00:00.000Z");
     let t = start;
@@ -1287,10 +1362,14 @@ describe("volley peer run (the service)", () => {
         const last = ++n >= beats;
         await new Promise((r) => setTimeout(r, last ? 300 : 30));
         if (last) stop.abort();
-        else t += ms;
+        else {
+          await opts.between?.(n);
+          t += ms;
+        }
       },
-      ...over,
+      ...opts.over,
     });
+    opts.deps?.(d);
     const reader = new VolleyBroker();
     await reader.connect({ url: tb.url, agentId: "reader" });
     const records: string[] = [];
@@ -1369,7 +1448,7 @@ describe("volley peer run (the service)", () => {
     const { records } = await heartbeats(
       3,
       fakeExec(() => undefined),
-      { fetch: api.fetch },
+      { over: { fetch: api.fetch } },
     );
     const up = records
       .map((r) => parseEnvelope(r)?.payload as Record<string, unknown>)
@@ -1435,6 +1514,122 @@ describe("volley peer run (the service)", () => {
       after.records.filter((r) => r.includes('"tunnel":"up"')).at(-1) ?? "",
     )?.payload as { doctor_at?: string };
     expect(last.doctor_at).toBe("2026-10-19T09:10:00.000Z");
+  });
+
+  const doctorRuns = (f: { calls: Call[] }) =>
+    f.calls.filter((c) => basename(c.argv[0] ?? "") === "claude" && c.argv[1] === "auth").length;
+  const lastUp = (records: string[]) =>
+    parseEnvelope(records.filter((r) => r.includes('"tunnel":"up"')).at(-1) ?? "")?.payload as {
+      doctor_at?: string;
+      versions?: { peer: string; volley: string };
+      checks?: { id: string; ok: boolean; detail: string }[];
+    };
+
+  it("a checkout update between heartbeats re-runs the doctor at once and re-reads both versions", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", {});
+    let cliVersion = "0.4.0";
+    const f = fakeExec(() => undefined);
+    const { records } = await heartbeats(4, f, {
+      // After the first beat: the checkout moves to 0.5.0 (package.json, bun.lock), and the
+      // doctor's own install of it rewrites the lock marker.
+      between: (beat) => {
+        if (beat !== 1) return;
+        writeFileSync(
+          join(box.volleyDir, "package.json"),
+          JSON.stringify({ name: "volley", version: "0.5.0" }),
+        );
+        writeFileSync(
+          join(box.volleyDir, "bun.lock"),
+          '{ "lockfileVersion": 1, "for": "0.5.0" }\n',
+        );
+        writeFileSync(
+          join(box.volleyDir, "node_modules", ".volley-lock-sha256"),
+          `${lockHash(box.volleyDir)}\n`,
+        );
+        cliVersion = "0.5.0";
+      },
+      // The CLI's own version follows its checkout's package.json (realDeps reads it per run).
+      deps: (d) => Object.defineProperty(d, "version", { get: () => cliVersion }),
+    });
+    expect(doctorRuns(f)).toBe(2);
+    const last = lastUp(records);
+    expect(last.versions).toMatchObject({ peer: "0.5.0", volley: "0.5.0" });
+    expect(last.doctor_at).not.toBe("2026-10-19T09:00:00.000Z");
+    expect(last.checks?.find((c) => c.id === "volley.installed")).toMatchObject({ ok: true });
+  });
+
+  it("only the lock marker changing (bun install by hand) re-runs the doctor on the next beat", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", {});
+    const f = fakeExec(() => undefined);
+    await heartbeats(4, f, {
+      between: (beat) => {
+        if (beat === 1)
+          writeFileSync(join(box.volleyDir, "node_modules", ".volley-lock-sha256"), "0".repeat(64));
+      },
+    });
+    expect(doctorRuns(f)).toBe(2);
+  });
+
+  it("the doctor verb's stamp (a run of volley peer doctor) re-runs the service's doctor on its next beat", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", {});
+    const f = fakeExec(() => undefined);
+    let stamp = "";
+    await heartbeats(4, f, {
+      between: (beat) => {
+        if (beat !== 1) return;
+        // What `volley peer doctor` leaves behind, written by a real run of the verb.
+        stamp = peerDoctorStamp(home);
+        mkdirSync(dirname(stamp), { recursive: true });
+        writeFileSync(stamp, "2026-10-19T09:00:30.000Z\n");
+      },
+    });
+    expect(stamp).not.toBe("");
+    expect(doctorRuns(f)).toBe(2);
+  });
+
+  it("doctor --fix beside a running service: it re-runs within a beat, republishing the current version", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", {});
+    let cliVersion = "0.4.0";
+    const f = fakeExec(() => undefined);
+    let verb: Promise<{ stdout: string }> | undefined;
+    const { records } = await heartbeats(4, f, {
+      between: async (beat) => {
+        if (beat === 1) {
+          // The fix moves this checkout's CLI on; the verb runs between the service's beats and
+          // waits (in real time) for the service's record to carry a run after its own.
+          cliVersion = "0.5.0";
+          verb = run(
+            ["doctor", "--fix", "--yes"],
+            deps(fakeExec(() => undefined).exec, {
+              now: () => new Date("2026-10-19T09:00:15.000Z"),
+              sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 100))),
+            }),
+          );
+        }
+        // The verb's own doctor takes real time (slow on CI): hold the service's next beat until
+        // it has left its stamp, then let the service's re-run land before the beats run out.
+        if (beat === 2) {
+          for (let i = 0; !existsSync(peerDoctorStamp(home)); i++) {
+            if (i >= 3_000) throw new Error("the verb never wrote its doctor-ran stamp (30 s)");
+            await new Promise((r) => setTimeout(r, 10));
+          }
+        }
+        if (beat === 3) await verb;
+      },
+      deps: (d) => Object.defineProperty(d, "version", { get: () => cliVersion }),
+    });
+    expect(verb).toBeDefined();
+    expect((await verb)?.stdout).toContain("readiness republished");
+    expect(doctorRuns(f)).toBe(2);
+    const last = lastUp(records);
+    expect(last.versions?.peer).toBe("0.5.0");
+    expect(Date.parse(last.doctor_at ?? "")).toBeGreaterThan(
+      Date.parse("2026-10-19T09:00:15.000Z"),
+    );
   });
 
   it("keeps the -L tunnel up and heartbeats the record; a clean stop leaves it tunnel: down", async () => {
@@ -1595,6 +1790,112 @@ describe("volley peer doctor (the verb)", () => {
     expect(check(r.report, "volley.version")?.detail).toContain("not known here");
   });
 
+  it("every run on a paired machine leaves the stamp the service watches", async () => {
+    writeCfg({ repo: box.repoPath });
+    expect(existsSync(peerDoctorStamp(home))).toBe(false);
+    await doctorJson([]);
+    expect(readFileSync(peerDoctorStamp(home), "utf-8").trim()).toBe("2026-10-19T09:00:00.000Z");
+  });
+
+  /** The service's retained record for box-a, carrying a doctor run from `doctorAt`. */
+  const serviceRecord = async (doctorAt: string) => {
+    const b = new VolleyBroker();
+    await b.connect({ url: tb.url, agentId: "box-a" });
+    await b.publish(
+      machineTopic("box-a"),
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "box-a",
+          parentId: null,
+          channel: "_system/machines",
+          type: "machine",
+          payload: { name: "box-a", tunnel: "up", checks: [], doctor_at: doctorAt },
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    await b.disconnect();
+  };
+
+  it("--fix: says readiness was republished once the service's record carries a run after it", async () => {
+    writeCfg({ repo: box.repoPath });
+    // The record the service sent before the fix; it re-runs (and republishes) while we poll.
+    await serviceRecord("2026-10-19T08:50:00.000Z");
+    let polls = 0;
+    const f = fakeExec(() => undefined);
+    const r = await run(
+      ["doctor", "--fix", "--yes"],
+      deps(f.exec, {
+        sleep: async (ms) => {
+          if (ms === PEER_DEFAULTS.republish_poll_ms && ++polls === 2) {
+            await serviceRecord("2026-10-19T09:00:30.000Z");
+          }
+        },
+      }),
+    );
+    expect(r.stdout).toContain("readiness republished");
+    expect(polls).toBe(2);
+  });
+
+  it("--fix: a service that never picks the run up is named, with how to restart it", async () => {
+    writeCfg({ repo: box.repoPath });
+    await serviceRecord("2026-10-19T08:50:00.000Z");
+    const f = fakeExec(() => undefined);
+    const r = await run(["doctor", "--fix", "--yes"], deps(f.exec));
+    expect(r.stdout).not.toContain("readiness republished");
+    // It says it is waiting before it polls, and how long it waited, not a worst-case sum.
+    expect(r.stdout).toMatch(
+      /Waiting for the peer service to run the doctor again \(up to about 2 minutes\)[^\n]*\n[\s\S]*within about 2 minutes/,
+    );
+    expect(r.stdout).toContain(`systemctl --user restart ${SYSTEMD_UNIT}`);
+    const mac = await run(["doctor", "--fix", "--yes"], deps(f.exec, { platform: "darwin" }));
+    expect(mac.stdout).toContain(`launchctl kickstart -k gui/501/${LAUNCHD_LABEL}`);
+  });
+
+  it("--json --fix (the supervisor's Repair) prints only the report: no republish line", async () => {
+    writeCfg({ repo: box.repoPath });
+    await serviceRecord("2026-10-19T09:00:00.000Z");
+    const r = await doctorJson(["--fix", "--yes"]);
+    expect(r.report).toMatchObject({ checks: expect.any(Array) });
+    expect(r.stdout).not.toContain("republished");
+  });
+
+  it("--fix: a broker that refuses the republish check says it could not check, not that it waited", async () => {
+    writeCfg({ repo: box.repoPath });
+    const f = fakeExec(() => undefined);
+    const base = deps(f.exec);
+    // The first connect (the requirements) works; the second (the republish poll) is refused.
+    let connects = 0;
+    const r = await run(
+      ["doctor", "--fix", "--yes"],
+      deps(f.exec, {
+        connect: async (...a) => {
+          if (++connects === 2) throw new Error("connect ECONNREFUSED 127.0.0.1:21883");
+          return base.connect(...a);
+        },
+      }),
+    );
+    expect(connects).toBe(2);
+    expect(r.stdout).toContain("could not check");
+    expect(r.stdout).not.toContain("did not run the doctor again");
+    expect(r.stdout).toContain(`systemctl --user restart ${SYSTEMD_UNIT}`);
+  });
+
+  it("--fix with the tunnel down says the service is not running, at once", async () => {
+    writeCfg({ repo: box.repoPath });
+    const f = fakeExec(() => undefined);
+    const r = await run(
+      ["doctor", "--fix", "--yes"],
+      deps(f.exec, {
+        connect: async () => {
+          throw new Error("connect ECONNREFUSED 127.0.0.1:21883");
+        },
+      }),
+    );
+    expect(r.stdout).toContain("the peer service is not connected");
+    expect(r.stdout).toContain(`systemctl --user restart ${SYSTEMD_UNIT}`);
+  });
+
   it("--volley-dir checks that checkout instead of the running one", async () => {
     const dir = join(box.root, "other-volley");
     mkdirSync(dir, { recursive: true });
@@ -1603,6 +1904,14 @@ describe("volley peer doctor (the verb)", () => {
     expect(r.report.versions.volley).toBe("0.3.9");
     expect(check(r.report, "volley.installed")?.ok).toBe(false);
     expect(check(r.report, "volley.installed")?.detail).toContain(dir);
+  });
+});
+
+describe("the real dependencies", () => {
+  it("report the checkout's package.json version", () => {
+    const file = fileURLToPath(new URL("../../package.json", import.meta.url));
+    const { version } = JSON.parse(readFileSync(file, "utf-8")) as { version: string };
+    expect(realDeps().version).toBe(version);
   });
 });
 

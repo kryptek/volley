@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { waveDecisionId } from "../src/decisions";
+import { AUTOPILOT_ON } from "./helpers/daemon-env";
 import { runCli } from "./helpers/run-cli";
 import { ARTIFACTS_OK, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
 
@@ -56,6 +57,84 @@ describe("spawn budget exhausted", () => {
       (e) => e.type === "agent_spawned" && e.data.role === "spec_reviewer",
     );
     expect(spawned.task).toBe("T1");
+  });
+
+  /**
+   * Three tasks, budget 3: every implementer spawned; T1's verified done needs a reviewer. Each
+   * task still needs its reviewer and a fixup allowance: 6 (the old offer was 1). The 5-task
+   * sizing is scheduler.test.ts's.
+   */
+  async function heldWide(o: { autopilot?: boolean } = {}) {
+    s = await makeSupervisedEnv({
+      exec: ARTIFACTS_OK,
+      pipeline: "[implement, spec_review, merge_ready]",
+      waveExtra: "spawn_budget: 3",
+      tasks: ["T2: { issue: 42 }", "T3: { issue: 42 }"],
+      config: `autopilot: { enabled: ${o.autopilot === true}, budget_raise_max: 3 }`,
+      ...(o.autopilot === true ? { daemon: AUTOPILOT_ON } : {}),
+    });
+    await s.status("done");
+    return s.event((e) => e.type === "decision_opened" && e.data.kind === "spawn_budget_exhausted");
+  }
+  const budgetDecisions = () =>
+    s
+      .journal()
+      .filter((e) => e.type === "decision_opened" && e.data.kind === "spawn_budget_exhausted");
+
+  it("raise by <n> is sized for what the wave still needs, not one spawn (#315)", async () => {
+    const d = await heldWide();
+    expect(d.data.options).toEqual(["raise by 6", "cancel"]);
+  });
+
+  it("one autopilot raise lets the held spawn through with no second decision (#315)", async () => {
+    await heldWide({ autopilot: true });
+    const spawned = await s.event(
+      (e) => e.type === "agent_spawned" && e.data.role === "spec_reviewer",
+    );
+    expect(spawned.task).toBe("T1");
+    const resolved = s.journal().filter((e) => e.type === "decision_resolved");
+    expect(resolved.map((e) => e.data.answer)).toEqual(["raise by 6"]);
+    expect(s.daemon.record("w1")?.budget_raised).toBe(6);
+    await s.daemon.tick();
+    await s.settled();
+    expect(budgetDecisions()).toHaveLength(1);
+  });
+
+  it("one autopilot raise lets every held admission through with no second decision (#315)", async () => {
+    // Budget 1: T1's implementer spends it, so T2 and T3 are both held at admission.
+    s = await makeSupervisedEnv({
+      exec: ARTIFACTS_OK,
+      waveExtra: "spawn_budget: 1",
+      tasks: ["T2: { issue: 42 }", "T3: { issue: 42 }"],
+      config: "autopilot: { enabled: true, budget_raise_max: 3 }",
+      daemon: AUTOPILOT_ON,
+      spawned: 1,
+    });
+    await s.event("decision_resolved");
+    await s.daemon.tick();
+    await s.event((e) => e.type === "agent_spawned" && e.task === "T2");
+    await s.event((e) => e.type === "agent_spawned" && e.task === "T3");
+    await s.daemon.tick();
+    await s.settled();
+    expect(budgetDecisions()).toHaveLength(1);
+    expect(s.journal().filter((e) => e.type === "decision_resolved")).toHaveLength(1);
+  });
+
+  it("an answer it cannot apply is refused and the decision stays open (#315)", async () => {
+    const d = await held();
+    const r = await runCli(
+      ["resolve", String(d.data.decision_id), "raise", "--wave", "w1", "--by", "t"],
+      s.env.env,
+    );
+    expect(r.exitCode).toBe(3);
+    expect(s.journal().filter((e) => e.type === "decision_resolved")).toHaveLength(0);
+    const ok = await runCli(
+      ["resolve", String(d.data.decision_id), "raise 2", "--wave", "w1", "--by", "t"],
+      s.env.env,
+    );
+    expect(ok.exitCode, ok.stderr).toBe(0);
+    await s.daemon.tick();
+    await s.event((e) => e.type === "agent_spawned" && e.data.role === "spec_reviewer");
   });
 
   it("cancel cancels the task", async () => {

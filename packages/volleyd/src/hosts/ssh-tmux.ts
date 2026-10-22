@@ -10,6 +10,7 @@ import {
   type RemoteStep,
   TMUX_LAUNCH_COMMAND,
 } from "../fence";
+import { fetchFailure, lockedFetch } from "../git-lock";
 import { type DoctorReport, parseDoctorReport } from "../machines";
 import { PATH_TOOLS, type PathProbe, parsePathProbe } from "../readiness";
 import { SpawnError } from "../spawn-error";
@@ -105,8 +106,8 @@ export interface RemoteHost extends Host {
    */
   probePath(): Promise<PathProbe>;
   /**
-   * `volley peer doctor --json [--fix --yes [--clone --origin <clone>]]` on the box, in its volley
-   * checkout: the parsed report. `clone` (with `fix`) is the wave repo's URL the doctor clones
+   * `volley peer doctor --json --supervisor-volley-dir <volley_dir> [--fix --yes [--clone
+   * --origin <clone>]]` on the box, in its volley checkout: the parsed report. `clone` (with `fix`) is the wave repo's URL the doctor clones
    * where the box's clone is missing. Throws when ssh fails or the doctor printed no report.
    */
   runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport>;
@@ -115,7 +116,7 @@ export interface RemoteHost extends Host {
 /** The fence tokens and bound a `run` may carry. */
 export type RemoteRunOptions = Pick<
   ExecOptions,
-  "consent" | "timeoutMs" | "launch" | "modelSwitch" | "signin" | "picker" | "handoff"
+  "consent" | "timeoutMs" | "launch" | "modelSwitch" | "signin" | "picker" | "handoff" | "wake"
 >;
 
 /** ssh's own failure (unreachable, auth, host key, timeout), as opposed to the remote command's. */
@@ -198,6 +199,7 @@ export class SshTmuxHost implements RemoteHost {
         ...(opts.modelSwitch !== undefined ? { modelSwitch: opts.modelSwitch } : {}),
         ...(opts.picker !== undefined ? { picker: opts.picker } : {}),
         ...(opts.handoff !== undefined ? { handoff: opts.handoff } : {}),
+        ...(opts.wake !== undefined ? { wake: opts.wake } : {}),
         ...(opts.signin !== undefined ? { signin: opts.signin } : {}),
       },
     );
@@ -298,16 +300,32 @@ export class SshTmuxHost implements RemoteHost {
     // The box's clone must have the release branch as it is now: fetch it, cut from origin's.
     // A failed fetch refuses the spawn unless require_fresh_base is off (then: the box's copy);
     // for a start ref (a reviewer's head), it is a plain worktree failure, as it always was.
-    const fetch = await git("-C", spec.repo, "fetch", "--quiet", "origin", spec.base);
+    // One fetch into the box's clone at a time (git-lock.ts); a lost ref-lock race is retried.
+    const { result: fetch, retried } = await lockedFetch(this.name, spec.repo, () =>
+      git("-C", spec.repo, "fetch", "--quiet", "origin", spec.base),
+    );
     const fetchError = fetch.code === 0 ? null : firstLine(fetch.stderr, `exit ${fetch.code}`);
+    const retriedNote = retried !== undefined ? { fetch_retried: retried } : {};
     // A start commit (a reviewer's or fixup's PR head, by sha) is used as it is, like on this
     // machine: never `origin/<sha>`. The box may already hold it (its own agent pushed it).
-    if (isCommitSha(spec.base)) return this.worktreeAtCommit(spec, fetchError);
+    if (isCommitSha(spec.base))
+      return { ...(await this.worktreeAtCommit(spec, fetchError)), ...retriedNote };
     if (fetchError !== null && spec.releaseBase !== true) {
       throw new SpawnError(
         "WORKTREE_FAILED",
         `git fetch origin ${spec.base} failed on ${this.spec.target}: ${fetchError}`,
         { host: this.name, repo: spec.repo },
+      );
+    }
+    if (
+      fetchError !== null &&
+      spec.requireFresh !== false &&
+      fetchFailure(fetchError) === "unreachable"
+    ) {
+      throw new SpawnError(
+        "BASE_UNREACHABLE",
+        `git fetch origin ${spec.base} failed on ${this.spec.target}: ${fetchError}; origin was not reached, so no worktree is cut from the box's copy. The spawn is retried with the usual backoff.`,
+        { host: this.name, repo: spec.repo, branch: spec.base, fetch_error: fetchError },
       );
     }
     if (fetchError !== null && spec.requireFresh !== false) {
@@ -352,6 +370,7 @@ export class SshTmuxHost implements RemoteHost {
       path: spec.path,
       branch: spec.branch,
       reused: false,
+      ...retriedNote,
       ...(sha !== ""
         ? {
             base: {
@@ -576,18 +595,32 @@ export class SshTmuxHost implements RemoteHost {
   }
 
   async runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport> {
-    const argv = [
-      "volley",
-      "peer",
-      "doctor",
-      "--json",
-      ...(opts.fix ? ["--fix", "--yes"] : []),
-      ...(opts.fix && opts.clone !== undefined ? ["--clone", "--origin", opts.clone] : []),
-    ];
-    // Through run, not exec: `volley` is otherwise a local program (LOCAL_PROGRAMS).
-    const r = await this.run([{ argv, cwd: this.spec.volley_dir }], {
-      timeoutMs: DAEMON_DEFAULTS.peer_doctor_timeout_ms,
-    }).catch(() => null);
+    const doctorRun = (dir: string[]) => {
+      const argv = [
+        "volley",
+        "peer",
+        "doctor",
+        "--json",
+        ...dir,
+        ...(opts.fix ? ["--fix", "--yes"] : []),
+        ...(opts.fix && opts.clone !== undefined ? ["--clone", "--origin", opts.clone] : []),
+      ];
+      // Through run, not exec: `volley` is otherwise a local program (LOCAL_PROGRAMS).
+      return this.run([{ argv, cwd: this.spec.volley_dir }], {
+        timeoutMs: DAEMON_DEFAULTS.peer_doctor_timeout_ms,
+      }).catch(() => null);
+    };
+    // The box's volley_dir: every volley MCP entry there must run it (agents are launched from
+    // it). A volley older than the flag refuses it: its doctor then runs without.
+    let r = await doctorRun(["--supervisor-volley-dir", this.spec.volley_dir]);
+    if (
+      r !== null &&
+      !transportFailed(r) &&
+      parseDoctorReport(r.stdout) === null &&
+      r.stderr.includes("--supervisor-volley-dir")
+    ) {
+      r = await doctorRun([]);
+    }
     if (r === null || transportFailed(r)) throw this.sshFailed("volley peer doctor", r);
     // A failing block check exits 1 with the report on stdout.
     const report = parseDoctorReport(r.stdout);

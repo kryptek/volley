@@ -39,6 +39,7 @@ const config: ConfigPayload = {
   fallback_model: "claude-sonnet-5-5",
   mailbox: { session_expiry_s: 604800 },
   worktree_root: "/tmp/volley worktrees",
+  agent_mcp_allow: [],
   spawn_timeout_s: 180,
   wake_grace_s: 120,
 };
@@ -362,6 +363,50 @@ describe("Settings › Supervisor (global config rows)", () => {
     fireEvent.keyDown(box, { key: "Enter" });
     await flush();
     expect(f.published[0]?.envelope.payload).toMatchObject({ patch: { fallback_model: null } });
+  });
+
+  it("sends a list tunable (agent_mcp_allow) on Enter, as distinct trimmed names", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk" }));
+    const box = screen.getByRole("textbox", { name: "Agent MCP allow" });
+    fireEvent.change(box, { target: { value: "migrations, playwright,, migrations " } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    expect(f.published[0]?.envelope.payload).toMatchObject({
+      patch: { agent_mcp_allow: ["migrations", "playwright"] },
+    });
+  });
+
+  it("does not send a list tunable over the schema's bounds; the field says why", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk" }));
+    const box = screen.getByRole("textbox", { name: "Agent MCP allow" });
+    fireEvent.change(box, { target: { value: `ok, ${"x".repeat(129)}` } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    expect(box.getAttribute("aria-invalid")).toBe("true");
+    expect(box.getAttribute("title")).toMatch(/at most 128 characters/);
+    const many = Array.from({ length: 65 }, (_, i) => `s${i}`).join(", ");
+    fireEvent.change(box, { target: { value: many } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    expect(box.getAttribute("title")).toMatch(/at most 64 names/);
+    expect(f.published).toHaveLength(0);
+  });
+
+  it("clears a list tunable's over-bounds mark when the retained value changes elsewhere", async () => {
+    const f = fakeClient();
+    const { retain } = setup(createConfigTransport(f.client, { identity: "desk" }));
+    const box = screen.getByRole("textbox", { name: "Agent MCP allow" });
+    fireEvent.change(box, { target: { value: "x".repeat(129) } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    expect(box.getAttribute("aria-invalid")).toBe("true");
+    retain({ ...config, agent_mcp_allow: ["playwright"] });
+    await flush();
+    expect((box as HTMLInputElement).value).toBe("playwright");
+    expect(box.getAttribute("aria-invalid")).toBe("false");
+    expect(box.getAttribute("title")).toBeNull();
   });
 
   it("sends a switch tunable on a click and a choice tunable on a pick", async () => {

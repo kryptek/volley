@@ -101,6 +101,8 @@ export interface Fix {
   steps?: string[][];
   /** The fix runs only with `--clone`. */
   needsClone?: boolean;
+  /** Edits the doctor makes itself under `--fix`, after the steps (never in the report). */
+  apply?: { what: string; run: () => void }[];
 }
 
 export interface Check {
@@ -184,6 +186,8 @@ export interface Facts {
     logins: ClaudeLogin[] | null;
   };
   machine: {
+    /** Logical CPUs (the size a paired machine's derived `max_agents` reads). */
+    cores: number;
     memory: Memory;
     disk: Disk | null;
     limits: { mem_low_pct: number; disk_low_gb: number };
@@ -202,6 +206,17 @@ export function lockHash(dir: string): string | null {
     return null;
   }
 }
+
+/**
+ * The files of the volley checkout `dir` whose change can change a doctor run's result: its
+ * version, its lockfile and the marker of the doctor's last install from it. `volley peer run`
+ * re-runs its doctor as soon as one of them changes.
+ */
+export const doctorInputs = (dir: string): string[] => [
+  join(dir, "package.json"),
+  join(dir, "bun.lock"),
+  join(dir, "node_modules", LOCK_MARKER),
+];
 
 /** After the doctor's own install: remember the bun.lock it installed from. */
 function markInstalled(dir: string): void {
@@ -226,6 +241,7 @@ export interface DoctorDeps {
   now: () => Date;
   totalmem: () => number;
   freemem: () => number;
+  cpus: () => number;
   uptime: () => number;
   /** `fs.statfs` of an existing path; null when it cannot be read. */
   statfs: (path: string) => StatFs | null;
@@ -235,6 +251,8 @@ export interface DoctorDeps {
   fetch?: UsageFetch;
   /** This process's environment: `$USER` (the Keychain account), `$VOLLEY_CLAUDE_DIR`. */
   env?: Record<string, string | undefined>;
+  /** The Claude account profiles' root (default `<home>/.volley/claude`). */
+  claudeRoot?: string;
 }
 
 export interface DoctorOptions {
@@ -252,6 +270,11 @@ export interface DoctorOptions {
   clone?: boolean;
   /** What the Claude profile is checked against (default: the default modes, no broker URL). */
   profile?: ProfileTarget;
+  /**
+   * The supervisor's `hosts.<name>.volley_dir` (where it launches this machine's agents from):
+   * every volley MCP entry must run it as well as this checkout.
+   */
+  volleyDir?: string;
 }
 
 /** The record's check: no fix text (the doctor that reads a record supplies its own). */
@@ -503,7 +526,16 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
 
   const profile = await gatherProfile(
     sh,
-    { home: deps.home, volleyDir: dir, bun, claude: claudeBin },
+    {
+      home: deps.home,
+      volleyDir: dir,
+      bun,
+      claude: claudeBin,
+      git: gitBin,
+      repo: path,
+      ...(deps.claudeRoot !== undefined ? { claudeRoot: deps.claudeRoot } : {}),
+      ...(opts.volleyDir !== undefined ? { supervisorDir: opts.volleyDir } : {}),
+    },
     opts.profile ?? defaultTarget(),
   );
 
@@ -544,6 +576,7 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       logins,
     },
     machine: {
+      cores: deps.cpus(),
       memory: memoryOf(deps.totalmem(), deps.freemem(), available),
       disk: st !== null ? diskOf(root, st) : null,
       limits: {
@@ -623,14 +656,19 @@ export function reportOf(f: Facts, checks: Check[], at: Date): DoctorReport {
   });
 }
 
-/** Run every check once. */
+/**
+ * Run every check once. The report's `doctor_at` is when the run started: its facts are no older
+ * than that, so a run that began before a `doctor --fix` (or a Repair) and ended after it never
+ * reads as a run from after it.
+ */
 export async function runDoctor(
   deps: DoctorDeps,
   opts: DoctorOptions,
 ): Promise<{ report: DoctorReport; checks: Check[]; facts: Facts }> {
+  const at = deps.now();
   const facts = await gatherFacts(deps, opts);
   const checks = checksOf(facts);
-  return { report: reportOf(facts, checks, deps.now()), checks, facts };
+  return { report: reportOf(facts, checks, at), checks, facts };
 }
 
 /** The record's checks: the report's, without fix text. */
@@ -745,7 +783,11 @@ export async function doctor(io: IO, deps: DoctorDeps, opts: DoctorOptions): Pro
     for (const c of plan.unchecked) {
       lines.push(`· ${c.id}: not checked (the supervisor's requirement is not known here)`);
     }
-    for (const c of plan.run) lines.push(`→ ${c.id}: ${c.fix?.command}`);
+    for (const c of plan.run) {
+      lines.push(`→ ${c.id}: ${c.fix?.command}`);
+      // The edits it makes, named before the yes.
+      for (const a of c.fix?.apply ?? []) lines.push(`    ${a.what}`);
+    }
     for (const c of plan.manual) {
       const hint =
         c.fix?.needsClone === true ? " (or pass --clone to let the doctor clone it)" : "";
@@ -785,6 +827,20 @@ export async function doctor(io: IO, deps: DoctorDeps, opts: DoctorOptions): Pro
             step[2] === "--cwd"
           ) {
             markInstalled(step[3] as string);
+          }
+        }
+        for (const c of plan.run) {
+          if (failed.has(c.id)) continue;
+          for (const a of c.fix?.apply ?? []) {
+            say(scrub(`~ ${a.what}\n`));
+            try {
+              a.run();
+            } catch (e) {
+              const why = e instanceof Error ? e.message : String(e);
+              say(scrub(`✗ ${c.id}: fix failed: ${why}\n`));
+              failed.add(c.id);
+              break;
+            }
           }
         }
         say("\n");

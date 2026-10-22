@@ -94,6 +94,12 @@ export interface Tunables {
   background_wait_max_s: number;
   /** Cap on the doubling gap between `agent_stalled` decisions of one idle cycle. */
   stall_backoff_max_s: number;
+  /** A `blocked` agent no decision names (open, or answered for its status) this long is stalled. */
+  blocked_undecided_stall_ms: number;
+  /** Longest a tool call in flight (PreToolUse, no PostToolUse yet) holds off the silence probe. */
+  tool_in_flight_max_s: number;
+  /** How long a mailbox steer waits for the hooks' ack before an idle agent is woken (WAKE_TEXT). */
+  mailbox_wake_after_ms: number;
   fallback_model: string | null;
   mailbox: { session_expiry_s: number };
   worktree_root: string;
@@ -125,6 +131,12 @@ export interface Tunables {
    */
   agent_mcp: AgentMcp;
   /**
+   * Under `agent_mcp: inherit`, the user's MCP servers that load (by name, copied from the
+   * profile's `.claude.json` and the repository's `.mcp.json` into the agent's mcp.json, which
+   * then launches strict); empty: every one.
+   */
+  agent_mcp_allow: string[];
+  /**
    * The share of a launched agent's context window at which Claude Code compacts: the launch
    * exports `CLAUDE_CODE_AUTO_COMPACT_WINDOW` as that share of the model's window in tokens
    * (src/claude/context-window.ts); 0 exports nothing (Claude Code's own default).
@@ -154,6 +166,11 @@ export interface Tunables {
   archive_ended_after_h: number;
   /** A complete wave is archived as soon as its `wave_complete` decision is answered. */
   archive_on_ack: boolean;
+  /**
+   * After a rate-limited GitHub answer, the wave's pipeline makes no CI call for this long (or a
+   * `Retry-After` in `gh`'s output, if longer; `gh` prints no headers, so rarely).
+   */
+  ci_rate_limit_backoff_ms: number;
 }
 
 /** Who merges a gated PR: volleyd itself (`auto`) or a human (`manual`). */
@@ -233,9 +250,17 @@ export interface FallbackProfile {
 /** Who gets a steering nudge when a wave's PR merges (config `placement.nudge_on_merge`). */
 export type NudgeOnMerge = "files" | "all" | "off";
 
+/** Config `placement.default`: the placement of a wave file that sets none. */
+export type PlacementDefault = "local" | "auto";
+
 /** Automatic placement across machines (config `placement`, SPEC §4.6.15). */
 export interface PlacementConfig {
   nudge_on_merge: NudgeOnMerge;
+  /**
+   * A wave file without `placement:`: `auto` once a paired machine (`hosts.<name>`) is
+   * configured, else `local` (wave-file.ts `defaultPlacement`).
+   */
+  default: PlacementDefault;
   // --- Fleet: placement engine (placement.ts) ---
   /** A machine whose load per core (the higher of the 1- and 5-minute) is above this takes no new placement. */
   load_per_core_max: number;
@@ -388,6 +413,10 @@ export interface TaskState {
   why_waiting?: string;
   /** The remote host the task's agents run on (absent for `local`). */
   host?: string;
+  /** The host the task's agents were spawned on (`agent_spawned`): a plan version never moves it. */
+  host_actual?: string;
+  /** The host the current plan version writes for the task, while it differs from `host_actual`. */
+  host_planned?: string;
   /** Why the task's host, a paired machine, is down (machines.ts); absent while it is up. */
   host_down?: string;
   /** Set while the screen capture of one of the task's agents is backed off (screen-publisher.ts). */
@@ -410,6 +439,8 @@ export interface TaskState {
   }[];
   /** Steers held for the task's next agent (none live when they were sent); absent when 0. */
   queued_steers?: number;
+  /** The task's agent woken for a mailbox message it has not acked yet (`agent_woken`). */
+  steer_unacked?: string;
   /** Alarms on the task that still hold (e.g. merged_unverified_head), with a human line each. */
   alarms?: { alarm: string; message: string }[];
   /** A remediation requested for the task's red head that still holds (a flake awaiting its fixer). */
@@ -489,6 +520,8 @@ export interface WaveState {
   merge_queue?: MergeQueueEntry[] | undefined;
   /** The release train (SPEC §4.6.19), from `release_started` on; absent for a wave without one. */
   release?: ReleaseState;
+  /** Wave-level alarms that hold (`peer_idle_under_load`, SPEC §4.6.15); absent: none. */
+  alarms?: { alarm: string; message: string }[];
   /** When, by whom and why the wave was archived (`volleyd status --all` only). */
   archived?: { at: string; by: string; reason: string };
   updated_at: string;
@@ -578,6 +611,8 @@ export const WAVE_EVENT_TYPES = [
   // A steer to a task with no live agent: held for its next agent (or role), or dropped with it.
   "steering_queued",
   "steering_dropped",
+  "steering_received",
+  "agent_woken",
   "decision_opened",
   "decision_resolved",
   "lease_requested",
@@ -616,6 +651,8 @@ export const WAVE_EVENT_TYPES = [
   "ci_green",
   "pr_head_moved",
   "merged_by_operator",
+  // A PR GitHub reports CONFLICTING (no CI will run on it): its branch-update step starts.
+  "pr_conflicting",
   // Autopilot merging (SPEC §4.6.17): volleyd merged a gated PR at its gated head.
   "merged_by_supervisor",
   // The merge queue (SPEC §4.6.17): a gated task entered or left it; volleyd's merge of it began,
@@ -651,6 +688,9 @@ export const WAVE_EVENT_TYPES = [
   // Autopilot (SPEC §4.6.16): a decision answered from the policy table, or left for the owner.
   "decision_auto_resolved",
   "decision_escalated",
+  // Held decisions (#335): one waits on a task, PR or issue, never escalated; released when it lands.
+  "decision_held",
+  "decision_released",
   // The release train (SPEC §4.6.19): a settled wave whose repo has a playbook starts releasing;
   // each stage is entered, then verified or failed; the owner's `release_go` go completes it.
   "release_started",

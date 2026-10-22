@@ -47,6 +47,36 @@ export function vmStatAvailablePct(out: string, totalBytes: number): number | nu
   return pct((counted * Number(size[1]) * 100) / totalBytes);
 }
 
+/** Cores per supervised agent, and memory (MB) per agent, a paired machine is sized by. */
+const CORES_PER_AGENT = 3;
+const MB_PER_AGENT = 4096;
+/** The bounds of a derived `max_agents`. */
+const AGENTS_MIN = 2;
+const AGENTS_MAX = 16;
+
+/**
+ * A paired machine's `hosts.<name>.max_agents` from its size (SPEC §4.6.15):
+ * `clamp(min(floor(cores / 3), floor(memory_total_mb / 4096)), 2, 16)` — a 32-core / 60 GB box
+ * gets 10, a 10-core / 32 GB laptop 3. null when either figure is unknown (volleyd then uses 4).
+ */
+export function derivedMaxAgents(
+  cores: number | undefined,
+  memoryTotalMb: number | undefined,
+): number | null {
+  if (cores === undefined || memoryTotalMb === undefined) return null;
+  if (!(cores > 0) || !(memoryTotalMb > 0)) return null;
+  const n = Math.min(Math.floor(cores / CORES_PER_AGENT), Math.floor(memoryTotalMb / MB_PER_AGENT));
+  return Math.min(AGENTS_MAX, Math.max(AGENTS_MIN, n));
+}
+
+/** `max_agents 10 (derived from 32 cores, 60 GB)`; null when the size is unknown. */
+export function derivedLine(cores: number, memoryTotalMb: number): string | null {
+  const n = derivedMaxAgents(cores, memoryTotalMb);
+  return n === null
+    ? null
+    : `max_agents ${n} (derived from ${cores} cores, ${Math.round(memoryTotalMb / 1024)} GB)`;
+}
+
 export function diskOf(path: string, st: StatFs): Disk {
   return {
     path,
@@ -75,6 +105,9 @@ export function machineChecks(f: Facts): Check[] {
           },
         },
   ];
+  // What volleyd sizes this machine at when it pairs (an explicit hosts.<name>.max_agents wins).
+  const size = derivedLine(m.cores, m.memory.total_mb);
+  if (size !== null) checks.push({ id: "machine.size", ok: true, severity: "warn", detail: size });
   if (m.disk === null) {
     checks.push({
       id: "machine.disk",
