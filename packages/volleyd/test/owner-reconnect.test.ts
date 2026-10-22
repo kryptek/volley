@@ -3,7 +3,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { registryTopic } from "volley-mcp/topics";
 import { decisionItemId } from "../src/autopilot/inbox";
-import { ControlClient } from "../src/control";
+import { ControlClient, waveStateTopic } from "../src/control";
 import type { Daemon } from "../src/daemon";
 import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
@@ -67,6 +67,27 @@ async function status(agentId: string, type: string) {
     retain: true,
   });
 }
+async function heartbeat(agentId: string) {
+  const env = buildEnvelope({
+    now: () => new Date(clock.now()),
+    agentId,
+    parentId: null,
+    channel: "progress",
+    type: "heartbeat",
+    payload: { source: "volley-mcp" },
+  });
+  await pub.publish(`volley/${NS}/${agentId}/progress`, JSON.stringify(env), {
+    qos: 1,
+    retain: false,
+  });
+}
+/** The retained wave state's `coordinator` (what a Desk opened cold reads). */
+const retainedCoordinator = async () =>
+  (
+    (await t.retained(waveStateTopic(WAVE))) as {
+      payload?: { coordinator?: { state?: string; last_seen?: string } };
+    } | null
+  )?.payload?.coordinator;
 const coordinator = () => daemon.snapshot(WAVE)?.coordinator;
 const reconnects = () => daemon.journalEvents(WAVE).filter((e) => e.type === "owner_reconnected");
 // Not vi.waitFor: the bun test runner (one of CI's two runners) does not provide it.
@@ -162,6 +183,53 @@ describe("a wave owned by a coordinator name", () => {
     daemon = await t.start({ clock });
     await until(() => expect(coordinator()).toMatchObject({ agent_id: "coordinator-b2" }));
     expect(reconnects()).toHaveLength(1);
+  });
+
+  it("a coordinator that only heartbeats keeps its wave, and the retained last_seen advances", async () => {
+    await registry("coordinator-a1");
+    await status("coordinator-a1", "working");
+    await until(() => expect(coordinator()?.state).toBe("working"));
+    // 2 × claim_after_s (1800 s) of heartbeats every 10 min, nothing else.
+    for (let i = 0; i < 6; i++) {
+      clock.sleepHost(600_000);
+      await heartbeat("coordinator-a1");
+      expect((await client.request("status", {})).ok).toBe(true);
+    }
+    const lastBeat = new Date(clock.now()).toISOString();
+    const claim = await client.request("claim", { wave: WAVE, by: "someone-else" });
+    expect(claim.ok).toBe(false);
+    expect(daemon.snapshot(WAVE)?.owner).toBe(NAME);
+    await eventually(async () => (await retainedCoordinator())?.last_seen === lastBeat);
+    expect(await retainedCoordinator()).toMatchObject({ state: "working", last_seen: lastBeat });
+  });
+
+  it("a heartbeat keeps an awaiting_input coordinator awaiting, and advances its last_seen", async () => {
+    await registry("coordinator-a1");
+    await status("coordinator-a1", "working");
+    const env = buildEnvelope({
+      now: () => new Date(clock.now()),
+      agentId: "coordinator-a1",
+      parentId: null,
+      channel: "progress",
+      type: "awaiting_input",
+      payload: { question: "Merge now?" },
+    });
+    await pub.publish(`volley/${NS}/coordinator-a1/progress`, JSON.stringify(env), {
+      qos: 1,
+      retain: false,
+    });
+    await until(() => expect(coordinator()?.state).toBe("awaiting_input"));
+    // volley-mcp beats every VOLLEY_HEARTBEAT_S while the coordinator waits on the owner.
+    clock.sleepHost(600_000);
+    await heartbeat("coordinator-a1");
+    expect((await client.request("status", {})).ok).toBe(true);
+    const lastBeat = new Date(clock.now()).toISOString();
+    await eventually(async () => (await retainedCoordinator())?.last_seen === lastBeat);
+    expect(await retainedCoordinator()).toMatchObject({
+      state: "awaiting_input",
+      last_seen: lastBeat,
+    });
+    expect(coordinator()).toMatchObject({ state: "awaiting_input", question: "Merge now?" });
   });
 
   it("the bound agent answers the name's decision through inbox_answer, as through resolve", async () => {
