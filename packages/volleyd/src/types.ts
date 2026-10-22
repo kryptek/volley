@@ -94,6 +94,8 @@ export interface Tunables {
   background_wait_max_s: number;
   /** Cap on the doubling gap between `agent_stalled` decisions of one idle cycle. */
   stall_backoff_max_s: number;
+  /** Longest a tool call in flight (PreToolUse, no PostToolUse yet) holds off the silence probe. */
+  tool_in_flight_max_s: number;
   /** How long a mailbox steer waits for the hooks' ack before an idle agent is woken (WAKE_TEXT). */
   mailbox_wake_after_ms: number;
   fallback_model: string | null;
