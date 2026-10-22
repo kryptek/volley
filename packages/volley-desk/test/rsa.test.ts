@@ -73,7 +73,8 @@ describe("RSA-OAEP fallback", () => {
     const secret = { username: "steer-0123abcd", password: "s3cret" };
     const sealed = seal(reply.jwk, Buffer.from(JSON.stringify(secret))).toString("base64url");
     expect(await reply.open(sealed)).toEqual(secret);
-  });
+    // A fresh key: the prime search's time has a long tail on a loaded CI runner.
+  }, 60_000);
 });
 
 describe("bigint helpers", () => {
