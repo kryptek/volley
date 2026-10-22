@@ -109,6 +109,10 @@ describe("autopilot merge classifies a refusal (#311)", () => {
     ])
       expect(await refused(stderr)).toEqual({ ok: false, reason: "checks", stderr });
   });
+  it("only double-quoted text is blanked: a single-quoted check name holding 'conflict' reads as behind (fails safe)", async () => {
+    const stderr = "GraphQL: Required status check 'merge-conflict-scan' is expected.";
+    expect(await refused(stderr)).toEqual({ ok: false, reason: "behind", stderr });
+  });
   it("closed or merged, in any case → closed", async () => {
     for (const stderr of [
       "GraphQL: Pull request is closed (mergePullRequest)",

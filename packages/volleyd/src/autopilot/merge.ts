@@ -127,7 +127,10 @@ export function isRefusalReason(v: unknown): v is RefusalReason {
 export function refusalReason(stderr: string): RefusalReason {
   if (/head branch was modified|match-head-commit/i.test(stderr)) return "head_moved";
   // "Base branch was modified": the release branch moved during the merge. Quoted
-  // text (a check's name, e.g. "merge-conflict-scan") never reads as behind.
+  // text (a check's name, e.g. "merge-conflict-scan") never reads as behind. Only
+  // double quotes (GitHub's) are blanked, since apostrophes appear in prose; a name
+  // in single quotes or none can still read as behind, which fails safe: the task
+  // gives up its turn, and updates its branch only if checkRebase counts commits.
   if (
     /base branch was modified|out of date|not up to date|\bbehind\b|\bconflicts?\b|cannot be cleanly created/i.test(
       stderr.replace(/"[^"]*"/g, '""'),

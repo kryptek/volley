@@ -159,11 +159,12 @@ describe("nextToMerge", () => {
     }
   });
 
+  let seq = 0;
+  const fold = (p: TaskPipeline, type: string, data: Record<string, unknown>) =>
+    reducePipeline(p, { seq: ++seq, at: "", type, task: "T1", data } as never, { stages: [] });
+
   it("a late refusal of an older gated head does not change the current refusal's reason (#311)", () => {
     const [A, B] = ["a".repeat(40), "b".repeat(40)];
-    let seq = 0;
-    const fold = (p: TaskPipeline, type: string, data: Record<string, unknown>) =>
-      reducePipeline(p, { seq: ++seq, at: "", type, task: "T1", data } as never, { stages: [] });
     let p = emptyPipeline();
     p = fold(p, "artifact_verified", { role: "gate", head_sha: A });
     p = fold(p, "artifact_verified", { role: "gate", head_sha: B });
@@ -176,28 +177,8 @@ describe("nextToMerge", () => {
 
   it("a PR closed unmerged gives up the turn: no retry can merge it (#311)", () => {
     let p = emptyPipeline();
-    p = reducePipeline(
-      p,
-      {
-        seq: 1,
-        at: "",
-        type: "artifact_verified",
-        task: "T1",
-        data: { role: "gate", head_sha: "a".repeat(40) },
-      } as never,
-      { stages: [] },
-    );
-    p = reducePipeline(
-      p,
-      {
-        seq: 2,
-        at: "",
-        type: "alarm_raised",
-        task: "T1",
-        data: { alarm: "merge_refused", head: "a".repeat(40), reason: "closed" },
-      } as never,
-      { stages: [] },
-    );
+    p = fold(p, "artifact_verified", { role: "gate", head_sha: "a".repeat(40) });
+    p = fold(p, "alarm_raised", { alarm: "merge_refused", head: "a".repeat(40), reason: "closed" });
     expect(p.merge_refusal_reason).toBe("closed");
     expect(refusalEndsTurn(p)).toBe(true);
   });
