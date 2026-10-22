@@ -7,9 +7,11 @@ import {
   checkRebase,
   isInfraFailure,
   prFiles,
+  probeLanded,
   probeMovedHead,
   probeReleaseCi,
   verifyArtifacts,
+  verifyOperatorMerge,
 } from "../src/artifacts";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { type FakeExec, fakeExec } from "./helpers/fake-exec";
@@ -498,6 +500,93 @@ describe("rebase check", () => {
     expect(behind.argvs(["git", "-C", WT, "log"])).toEqual([
       ["git", "-C", WT, "log", "--oneline", `${OTHER}..${TIP}`],
     ]);
+  });
+});
+
+describe("probes from the repo root (the head worktree is gone)", () => {
+  const ROOT = "/repo";
+  const TIP = "3333333333333333333333333333333333333333";
+  const at = { cwd: ROOT, fetch: "refs/pull/7/head" };
+  it("checkRebase fetches the PR head into the repo root first, then answers as in the worktree", async () => {
+    const f = fakeExec()
+      .on(["git", "-C", ROOT, "rev-parse"], { stdout: `${TIP}\n` })
+      .on(["git", "-C", ROOT, "merge-base"], { stdout: `${TIP}\n` });
+    expect(await checkRebase(f.exec, { ...at, head: HEAD, release_branch: "release/w1" })).toEqual({
+      release_sha: TIP,
+      merge_base: TIP,
+      behind: 0,
+    });
+    expect(f.argvs()).toEqual([
+      ["git", "-C", ROOT, "fetch", "origin", "refs/pull/7/head"],
+      ["git", "-C", ROOT, "fetch", "origin", "release/w1"],
+      ["git", "-C", ROOT, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/release/w1"],
+      ["git", "-C", ROOT, "merge-base", HEAD, TIP],
+    ]);
+  });
+
+  it("probeLanded fetches the PR head into the repo root first; an ancestor head has landed", async () => {
+    const f = fakeExec()
+      .on(["git", "-C", ROOT, "rev-parse"], { stdout: `${TIP}\n` })
+      .on(["git", "-C", ROOT, "merge-base", "--is-ancestor"], { code: 0 });
+    expect(
+      await probeLanded(f.exec, { ...at, head: HEAD, release_branch: "release/w1", pr: 7 }),
+    ).toEqual({ ancestor: true, unmatched: [], subjects: [], release_sha: TIP });
+    expect(f.argvs()[0]).toEqual(["git", "-C", ROOT, "fetch", "origin", "refs/pull/7/head"]);
+    expect(f.argvs()).toContainEqual([
+      "git",
+      "-C",
+      ROOT,
+      "merge-base",
+      "--is-ancestor",
+      HEAD,
+      "origin/release/w1",
+    ]);
+  });
+
+  it("probeMovedHead fetches the gated head by sha when the repo root lacks it (a force-push), and not when it has it", async () => {
+    const FROM = "4444444444444444444444444444444444444444";
+    const moved = { ...at, branch: "b", from: FROM, to: TIP };
+    const missing = fakeExec().on(["git", "-C", ROOT, "rev-parse", "--verify"], { code: 1 });
+    await probeMovedHead(missing.exec, moved);
+    expect(missing.argvs(["git", "-C", ROOT, "fetch"])).toContainEqual([
+      "git",
+      "-C",
+      ROOT,
+      "fetch",
+      "origin",
+      FROM,
+    ]);
+    const present = fakeExec();
+    await probeMovedHead(present.exec, moved);
+    expect(present.argvs(["git", "-C", ROOT, "fetch", "origin", FROM])).toEqual([]);
+    // In the worktree the gated head is local: no check, no fetch.
+    const wt = fakeExec();
+    await probeMovedHead(wt.exec, { cwd: WT, branch: "b", from: FROM, to: TIP });
+    expect(wt.argvs(["git", "-C", WT, "rev-parse"])).toEqual([]);
+  });
+
+  it("a failed PR-head fetch is named as such, not left to the next step's error", async () => {
+    const failing = () =>
+      fakeExec().on(["git", "-C", ROOT, "fetch", "origin", "refs/pull/7/head"], {
+        code: 128,
+        stderr: "fatal: couldn't find remote ref refs/pull/7/head\n",
+      });
+    const why =
+      "git fetch origin refs/pull/7/head failed (128): fatal: couldn't find remote ref refs/pull/7/head";
+    await expect(
+      checkRebase(failing().exec, { ...at, head: HEAD, release_branch: "release/w1" }),
+    ).rejects.toThrow(why);
+    await expect(
+      probeLanded(failing().exec, { ...at, head: HEAD, release_branch: "release/w1", pr: 7 }),
+    ).rejects.toThrow(why);
+    expect(
+      await verifyOperatorMerge(failing().exec, {
+        ...at,
+        head: HEAD,
+        sha: TIP,
+        release_branch: "release/w1",
+      }),
+    ).toEqual({ ok: false, error: why });
   });
 });
 

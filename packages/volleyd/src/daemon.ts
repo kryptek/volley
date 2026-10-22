@@ -727,6 +727,34 @@ function spawnFailedTask(d: DecisionRecord): TaskId | null {
 }
 
 /**
+ * Whether a task's worktree is gone: a local task's worktree removed by `volleyd cleanup` (or by
+ * hand), so its git checks move to the repo root. A remote box's worktree is never probed here.
+ * `task` is the definition as ran (`ranTaskDef`); an unplaced `host: auto` task is local, as the
+ * daemon's `execFor` falls back to its own host for one.
+ */
+export function worktreeGone(
+  task: Pick<WaveTask, "host"> | undefined,
+  path: string,
+  exists: (path: string) => boolean = existsSync,
+): boolean {
+  const local = task === undefined || task.host === "local" || task.host === AUTO_HOST;
+  return local && !exists(path);
+}
+
+/**
+ * Task `id`'s definition in the effective plan, on the host its agents were spawned on (its
+ * `host_actual`, #323): a plan version that writes another host for a started task never
+ * moves it. The plan's inline `host:` names the plan's host, not that one: it is dropped.
+ */
+export function ranTaskDef(rec: WaveRecord | undefined, id: TaskId): WaveTask | undefined {
+  const def = rec?.wave?.tasks[id];
+  const actual = rec?.state?.tasks.find((t) => t.id === id)?.host_actual;
+  if (def === undefined || actual === undefined || actual === def.host) return def;
+  const { host_spec: _s, ...rest } = def;
+  return { ...rest, host: actual };
+}
+
+/**
  * The id of a role's `spawn_failed` decision: hashed over its wave, task and role, so two waves
  * with the same task never share one (a `-<n>` suffix keeps a wave's later ones apart).
  */
@@ -4305,17 +4333,9 @@ export class Daemon {
   // Remote hosts (T15): ssh + tmux on a second machine, broker through a reverse tunnel.
   // -------------------------------------------------------------------------------------------
 
-  /**
-   * Task `id`'s definition in the effective plan, on the host its agents were spawned on (its
-   * `host_actual`, #323): a plan version that writes another host for a started task never
-   * moves it. The plan's inline `host:` names the plan's host, not that one: it is dropped.
-   */
+  /** Task `id`'s definition as ran: `ranTaskDef`. */
   private ranDef(rec: WaveRecord | undefined, id: TaskId): WaveTask | undefined {
-    const def = rec?.wave?.tasks[id];
-    const actual = rec?.state?.tasks.find((t) => t.id === id)?.host_actual;
-    if (def === undefined || actual === undefined || actual === def.host) return def;
-    const { host_spec: _s, ...rest } = def;
-    return { ...rest, host: actual };
+    return ranTaskDef(rec, id);
   }
 
   /**
@@ -5669,6 +5689,7 @@ export class Daemon {
           ? this.host.exec
           : this.remoteHost(wave, t).exec;
       },
+      worktreeGone: (task, path) => worktreeGone(this.ranDef(log.record, task), path),
       home: this.opts.home,
       record: () => log.record,
       journal: (ev) => this.append(wave, ev),
@@ -9145,7 +9166,7 @@ export class Daemon {
       if (!r.ok) return { ok: false, error: r.error };
       const full = r.sha;
       // The record describes the commit that merged, and its own CI.
-      const merged_ci = await driver.ciOf(task, driver.headCwd(task), full);
+      const merged_ci = await driver.ciOf(task, full);
       const moved = await this.serial(async () => {
         // The head moved while it was verified: the check describes a head the task left.
         const now = driver.headOf(task);

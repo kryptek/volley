@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
-import { cleanupPlan } from "../src/commands/cleanup";
+import { cleanupPlan, readWave } from "../src/commands/cleanup";
 import { Journal } from "../src/journal";
 import { LAUNCH_COMMAND } from "../src/launch";
 import { retainedTopics } from "../src/retire";
@@ -352,16 +352,21 @@ describe("verify through hook signals (Aedes)", () => {
       expect.arrayContaining(["agent_reaped_by_supervisor", "credentials_revoked"]),
     );
     // cleanup sees only the second attempt as live, and nothing once it is retired too.
+    // --all: T1 is unfinished, which alone would hold its worktree back.
+    const planAll = (home: string) => {
+      const { state, events } = readWave(home, "w1");
+      return cleanupPlan(state, events, { all: true });
+    };
     const j = Journal.open(join(env.home, "waves", "w1"));
     j.append({ type: "wave_submitted", data: { wave: env.wave } });
     for (const e of env.events) j.append(e);
-    expect(cleanupPlan(env.home, "w1").targets[0]?.live).toEqual(["w1-t1-implementer-2"]);
+    expect(planAll(env.home).targets[0]?.live).toEqual(["w1-t1-implementer-2"]);
     j.append({
       type: "agent_retired",
       task: "T1",
       data: { agent_id: "w1-t1-implementer-2", role: "implementer", status: "done" },
     });
-    expect(cleanupPlan(env.home, "w1").targets[0]?.live).toEqual([]);
+    expect(planAll(env.home).targets[0]?.live).toEqual([]);
     const agentJson = JSON.parse(
       readFileSync(join(env.worktree, ".volley", "agent.json"), "utf-8"),
     );
