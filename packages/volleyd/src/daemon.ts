@@ -6350,7 +6350,7 @@ export class Daemon {
       // Blocked: since when no decision names it (an undecided block is a stall). One open, or
       // one answered for this very status (`manual` leaves it blocked), is a decision. Under a
       // suppressed reap that status is the `blocked` before the `reaped`, not the retained one.
-      const blockedAt = retained?.type === "blocked" ? retained.wall_time : a.blockedSeen;
+      const blockedAt = this.blockedAt(a);
       if (status !== "blocked") a.undecidedSince = undefined;
       else if (
         this.openNaming(a.wave, agentId) ||
@@ -6370,6 +6370,15 @@ export class Daemon {
         }),
       );
     }
+  }
+
+  /**
+   * The wall_time of the blocked status liveness judges: the retained one, or under a suppressed
+   * reap the `blocked` before the `reaped`.
+   */
+  private blockedAt(a: Supervised): string | undefined {
+    const retained = a.watch.state.status;
+    return retained?.type === "blocked" ? retained.wall_time : a.blockedSeen;
   }
 
   /** Whether an open decision of the wave names the agent. */
@@ -6506,8 +6515,8 @@ export class Daemon {
             idle_s: x.idle_s,
             asked: x.asked,
             // A block's stall names its status: answered (a steer leaves it blocked), it is decided.
-            ...(x.blocked === true && a.watch.state.status?.type === "blocked"
-              ? { status_at: a.watch.state.status.wall_time }
+            ...(x.blocked === true && this.blockedAt(a) !== undefined
+              ? { status_at: this.blockedAt(a) }
               : {}),
             ...(respawn
               ? {
@@ -6751,6 +6760,13 @@ export class Daemon {
         if (!settled) return this.cancelTask(wave, task, agentId, why);
         // A settled task (or a stale agent's) stays as it is: only the blocked agent is stopped.
         if (a !== undefined) await this.retireRole(wave, agentId, "stopped");
+        return;
+      }
+      if (settled && isRespawnAnswer(answer, d.options)) {
+        // Offered while the task was active; it settled before the answer: nothing to relaunch.
+        this.log(
+          `${wave}/${task}: respawn of ${agentId} (decision ${d.decision_id}) ignored: the task is ${stage ?? "gone"}`,
+        );
         return;
       }
       const respawn =

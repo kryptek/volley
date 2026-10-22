@@ -405,6 +405,45 @@ describe("daemon: a retained blocked always has a decision (the invariant)", () 
     ).toHaveLength(0);
   });
 
+  it("a blocked stall under a suppressed reap, answered with a steer, is not asked again", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ reapGraceMs: 60_000, daemon: { clock } });
+    vi.spyOn(Daemon.prototype as never, "onBlocked").mockResolvedValue(undefined as never);
+    vi.spyOn(Daemon.prototype as never, "blockedInvariant").mockResolvedValue(undefined as never);
+    await s.hook("idle-stop.json");
+    await s.status("blocked", { reason: "stuck" });
+    await s.consumed();
+    const lwt = JSON.stringify(
+      buildEnvelope({
+        agentId: AGENT,
+        parentId: "volleyd",
+        channel: "status",
+        type: "reaped",
+        payload: { reason: "lwt" },
+      }),
+    );
+    await s.agent.publish(buildTopic(NS, AGENT, "status"), lwt, { qos: 1, retain: true });
+    await clock.advance(1000);
+    await s.hook("heartbeat.json");
+    await s.until(() => s.journal().some((e) => e.type === "reap_suppressed"));
+    await s.daemon.tick();
+    await clock.advance(CONFIG_DEFAULTS.blocked_undecided_stall_ms + 1_000);
+    await s.daemon.tick();
+    await s.settled();
+    const stalled = () =>
+      s.journal().filter((e) => e.type === "decision_opened" && e.data.kind === "agent_stalled");
+    expect(stalled()).toHaveLength(1);
+    // The stall names the blocked status liveness judged, not the retained `reaped`.
+    expect(stalled()[0]?.data.status_at).toEqual(expect.any(String));
+    await resolve(stalled()[0]?.data.decision_id as string, "try the other approach");
+    for (let i = 0; i < 3; i++) {
+      await clock.advance(CONFIG_DEFAULTS.blocked_undecided_stall_ms + 1_000);
+      await s.daemon.tick();
+    }
+    await s.settled();
+    expect(stalled()).toHaveLength(1);
+  });
+
   it("a blocked that arrives during an account move is the pipeline's once the move ends", async () => {
     s = await makeSupervisedEnv();
     const moving = (s.daemon as unknown as { moving: Set<string> }).moving;
