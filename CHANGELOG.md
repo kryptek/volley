@@ -2,6 +2,12 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.6.1 — 2026-10-22
+
+### Fixed
+
+- **volleyd: a paired machine starts agents again.** Since 0.6.0 the spawn's MCP approval check reads the worktree's `.mcp.json`; the remote fence denied that `cat`, so every launch on a paired machine failed as an ssh error (`no result`). The fence now allows reading an absolute `<dir>/.mcp.json` with no `..` segment. (#393)
+
 ## 0.6.0 — 2026-10-22
 
 ### Added
