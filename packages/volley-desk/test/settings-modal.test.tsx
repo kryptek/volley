@@ -382,6 +382,21 @@ describe("Settings › Supervisor (global config rows)", () => {
     expect(f.published).toHaveLength(0);
   });
 
+  it("clears a list tunable's over-bounds mark when the retained value changes elsewhere", async () => {
+    const f = fakeClient();
+    const { retain } = setup(createConfigTransport(f.client, { identity: "desk" }));
+    const box = screen.getByRole("textbox", { name: "Agent MCP allow" });
+    fireEvent.change(box, { target: { value: "x".repeat(129) } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    expect(box.getAttribute("aria-invalid")).toBe("true");
+    retain({ ...config, agent_mcp_allow: ["playwright"] });
+    await flush();
+    expect((box as HTMLInputElement).value).toBe("playwright");
+    expect(box.getAttribute("aria-invalid")).toBe("false");
+    expect(box.getAttribute("title")).toBeNull();
+  });
+
   it("sends a switch tunable on a click and a choice tunable on a pick", async () => {
     const f = fakeClient();
     const fleet = { ...config, require_fresh_base: true, placement: { nudge_on_merge: "files" } };

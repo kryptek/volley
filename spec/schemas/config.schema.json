@@ -287,7 +287,7 @@
           "maxItems": 64,
           "items": { "type": "string", "minLength": 1, "maxLength": 128 },
           "default": [],
-          "description": "Under agent_mcp: inherit, the user's MCP servers a launched agent loads, by name (spec section 4.6.4): the supervisor copies each named entry from the profile's ~/.claude.json (user and local scope) and the repository's .mcp.json into the agent's own MCP config and launches it strict, so only those start. Empty: every server, as inherit alone. A name found nowhere is journaled once per wave and skipped. Optional in the retained payload: a supervisor that predates it omits it."
+          "description": "Under agent_mcp: inherit, the user's MCP servers a launched agent loads, by name (spec section 4.6.4): the supervisor copies each named entry from the profile's ~/.claude.json (user and local scope) and the repository's .mcp.json into the agent's own MCP config and launches it strict, so only those start. Empty: every server, as inherit alone. A name found nowhere, unapproved in .mcp.json or of an entry shape volleyd does not copy is skipped and journaled once per wave and machine. Optional in the retained payload: a supervisor that predates it omits it."
         },
         "agent_auto_compact_pct": {
           "type": "integer",

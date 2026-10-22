@@ -204,7 +204,10 @@ function ListControl(p: {
   const current = items.join(", ");
   const [draft, setDraft] = useState(current);
   const [invalid, setInvalid] = useState<string | null>(null);
-  useEffect(() => setDraft(current), [current]);
+  useEffect(() => {
+    setDraft(current);
+    setInvalid(null);
+  }, [current]);
   const commit = () => {
     const next = [...new Set(draft.split(",").map((v) => v.trim()))].filter((v) => v !== "");
     const { maxItems, maxLength } = p;

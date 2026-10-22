@@ -184,7 +184,8 @@ import { AGENT_BRANCH } from "./worktree";
  *     integer in 100000..1000000, never in the env block); a
  *     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
  *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/`, with the
- *     `agent_mcp_allow` entries copied from the box's own config after it (MCP_CONFIG); and
+ *     `agent_mcp_allow` entries copied from the box's own config after it (MCP_CONFIG: shape
+ *     only, whatever their `command` and whatever `agent_mcp` — trusted as the owner's config); and
  *     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
  *     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
  *     login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
