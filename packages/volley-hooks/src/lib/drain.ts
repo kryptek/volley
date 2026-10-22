@@ -19,6 +19,7 @@ import {
   markSuperseded,
   undeliveredDirectives,
 } from "./steering-file";
+import { toolBoundary } from "./work-log";
 
 /** One mailbox message as the drain sees it. */
 export interface MailMessage {
@@ -247,7 +248,8 @@ export function drainsFor(ctx: Pick<HookContext, "event" | "input" | "env">): bo
 }
 
 /**
- * UserPromptSubmit / PostToolUse: resumed if needed, drain + inject + ack, heartbeat. `extra`
+ * UserPromptSubmit / PostToolUse: resumed if needed, drain + inject + ack, heartbeat (a
+ * PostToolUse's carries the call's `tool_use_id` and `tool`: the end of its boundary). `extra`
  * publishes anything else the hook adds on the same session (the work log's activity tick);
  * it runs last, once the drained mail is in STEERING.md and acked, and it fails soft: an
  * error there never changes the hook's output, so it can never lose drained steering.
@@ -262,7 +264,8 @@ export async function drainHook(
     await markWorking(session);
     await ensureHarnessModel(session);
     const mail = drained === null ? null : await processMail(session, drained);
-    await session.heartbeat();
+    // PostToolUse's heartbeat ends the tool call PreToolUse's boundary began (same tool_use_id).
+    await session.heartbeat(ctx.event === "PostToolUse" ? toolBoundary(ctx.input) : {});
     if (extra !== undefined) {
       try {
         await extra(session);
