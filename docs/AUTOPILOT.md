@@ -45,6 +45,15 @@ briefs forbid it and the fence enforces it for volleyd itself.
 - **Questions from sessions**: a Claude picker (`AskUserQuestion`) in any session and a
   coordinator turn that ends on a question.
 
+**Held decisions** do not ask you. A decision you leave open on purpose while something else
+lands (a `ci_failed` whose red check is a flake another task is fixing) can be held on that task,
+PR or issue: `volleyd hold <decision-id> --on T4` (or `#194`, `issue#7`), or **Hold · waiting on…**
+on its Needs-you row. A held item is amber (`Held · waiting on T4 (#194) · 3 h`), never escalated
+and never pulsing, and the digest lists it under `## Held`. volleyd releases it when the blocker
+lands (the task done or cancelled, the PR merged or closed, the issue closed) and it asks you again
+from then; `volleyd release <decision-id>` lifts a hold by hand. Autopilot holds a red head on its
+flake's fixer itself.
+
 Each of these is one item in the **needs-you inbox** and rings your phone once. Answer it
 wherever is closest: the Desk's **Needs you** window (desktop or phone; from any Desk login: the
 owner on any screen), `volleyd inbox answer

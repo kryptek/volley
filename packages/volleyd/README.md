@@ -159,6 +159,8 @@ config.hard_ceiling: must be <= 100
 | `volleyd status [wave] [--all] [--by <id>] [--json]` | Wave state from the daemon, with open decisions, `needs you: N` on waves the caller owns and `alarms: N` (tasks whose spawn failed and has not recovered), and under the header the merge queue (`merge queue: T3 merging · T5 updating · T7, T9 queued`). Archived waves are left out; `--all` lists them too, each with an `archived <at> by <who>: <reason>` line. `--json` prints the exact `wave_state` payload. |
 | `volleyd decisions [wave] [--all]` | Open decisions (with `--all`, resolved ones too): question, options, evidence pointers. |
 | `volleyd resolve <decision-id> <answer> [--rationale <why>] [--wave <w>] [--where <where>]` | Answer a decision (owner only). Its inbox item is answered too, where `--where` says (default `cli`). |
+| `volleyd hold <decision-id> --on <task\|#pr\|issue#n> [--note <why>] [--wave <w>]` | Hold an open decision (owner only): it waits on a task, PR or issue, is never escalated, and is released when that lands ([Held decisions](#held-decisions)). `volleyd inbox hold <item-id> --on …` holds by inbox item. |
+| `volleyd release <decision-id> [--wave <w>]` | Lift a hold by hand (owner only). |
 | `volleyd inbox [--all] [--json]` | The needs-you inbox: everything waiting for a person, one line each ([Needs-you inbox](#needs-you-inbox)). |
 | `volleyd inbox answer <id> <answer> [--where <where>] [--version <n>]` | Answer one item through the referee; a late answer is refused with where the first was given (exit 1). |
 | `volleyd merge <wave> <task>` | Merge one gated task now, at its gated head, through the merge queue's fenced verb (owner only; under `merge: manual` too). Answers with the merge commit, or the refusal ([The merge queue](#the-merge-queue)). |
@@ -677,6 +679,46 @@ disagree, a merge conflict, an agent blocked, a plan change. It is a journal eve
 
 Open decisions survive a restart (they are re-published from the journal), and a restart clears
 the retained topic of every resolved one, in case the daemon died between the two.
+
+### Held decisions
+
+A decision the owner deliberately leaves open while something else lands (a `ci_failed` whose
+red check is a release-branch flake another task's PR is fixing) can be **held** on that
+blocker: a task of the wave (`T4`), a PR (`#194`, `pr#194`) or an issue (`issue#7`).
+
+- **Hold** (`volleyd hold d-… --on T4 [--note "<why>"]`, `volleyd inbox hold <item-id> --on …`, or
+  the Desk's **Hold · waiting on…** on a Needs-you row; owner only, like `resolve`): journals
+  `decision_held { decision_id, kind, on, note?, by }`. The decision stays open and its task stays
+  parked; its retained topic and inbox item carry `held: { on, note?, by, at }` (the item's
+  version does not change, so it can still be answered). A second hold replaces the first. A hold
+  on the decision's own task, an unknown task, or one already `done` or `cancelled` is refused, and
+  so is one on a task that waits on the decision's own (through `after:`, or an open decision of
+  its own held on it): `T4 waits on T1 (T4 → T5 → T1): holding d-… on it would never release`.
+- **Never escalated**: the Desk shows a held item amber, `Held · waiting on T4 (#194) · 3 h`, in
+  the Needs-you window and on its wave and agent windows: never red, never pulsing, never counted
+  in the top-bar pill. `volleyd decisions` prints `held on T4 by <who> since <at>`; the morning
+  digest lists held decisions under `## Held`, not `## Waiting for you`.
+- **Released when the blocker lands**, while the wave is running (a paused or releasing wave's
+  holds wait until it runs again): a task `done` or `cancelled`, checked on every tick; a PR merged
+  or closed (`gh pr view <n> --json state`), an issue closed (`gh issue view <n> --json state`),
+  checked on the merge-check cadence, once per `ci_poll_ms` per hold, beside the queue (a `gh`
+  read that fails is logged by the daemon, `read no state`, and tried again next interval; the
+  daemon log is the only place it shows). A task
+  that is `blocked` or `awaiting_decision` does not release a hold on it, however long it stays
+  so: only `done` or `cancelled` does. `volleyd release d-…` lifts one by hand. Either way
+  `decision_released { decision_id, kind, why, by }` is journaled, `held` is gone from the topic
+  and the item, and the decision is open in its normal tier again: the Desk's escalation timer
+  applies from then, and autopilot's rule for its kind runs again (an escalation it repeats is
+  not journaled twice; a new one rings the notify bridge). A red head re-verifies its head
+  first: its PR's head (`gh pr view <n> --json headRefOid`) and the CI on it are read again, and
+  a `ci_failed` whose head is green now is answered `re-verify` by `volleyd`, so the pipeline
+  verifies it as it is.
+- **Autopilot holds a red head on its flake's fixer**: an open red-head decision (`ci_failed`,
+  or `agent_blocked` on a red head) of a task parked on a flake whose fixer is still at work is
+  held on the fixer task, by `volleyd`, with the note `CI flake in <test>: its fixer <task> is on
+  it`. A decision whose hold was released before is never held again automatically. A fixer that
+  fails (cancelled, blocked) lifts the hold (`decision_released`, `why: escalated: …`) before its
+  red head is escalated to the owner, so the escalation is in plain sight.
 
 **A blocked agent.** An agent of any role (implementer, either reviewer, fixup, rebase or merge)
 that publishes `status: blocked` (SPEC §5.1) gets an `agent_blocked` decision on its task, with

@@ -3,7 +3,7 @@
  * the wave window's header area while the wave has ended or one of the decisions it lists as
  * waiting is still open. One headline (volleyd's summary line), then the three sections: what
  * shipped (PR links), what autopilot handled on its own, and what is waiting for the owner
- * (each decision id opens it), and the failures when there are any.
+ * (each decision id opens it), then the held decisions and the failures when there are any.
  */
 import { plural } from "../../lib/plural";
 import type { DigestPayload, WaveView } from "../../store/types";
@@ -38,6 +38,8 @@ export function digestHeadline(d: DigestPayload): string {
     const kinds = [...new Set(d.waiting.map((w) => w.kind))].join(", ");
     parts.push(`${d.waiting.length} waiting for you (${kinds})`);
   }
+  const held = d.held ?? [];
+  if (held.length > 0) parts.push(`${held.length} held`);
   return `${d.wave} ${VERB[d.trigger]}: ${parts.join(", ")}`;
 }
 
@@ -49,6 +51,7 @@ export interface DigestCardProps {
 
 export function DigestCard({ digest: d, onOpenDecision }: DigestCardProps) {
   const a = d.auto;
+  const held = d.held ?? [];
   return (
     <section className="digest-card" aria-label="Morning digest">
       <p className="digest-head">{digestHeadline(d)}</p>
@@ -112,6 +115,23 @@ export function DigestCard({ digest: d, onOpenDecision }: DigestCardProps) {
             </li>
           ))}
         </ul>
+      )}
+      {held.length > 0 && (
+        <>
+          <h3>Held</h3>
+          <ul>
+            {held.map((h) => (
+              <li key={h.id}>
+                <span className="mono">{h.id}</span>{" "}
+                <span className="dim">
+                  {h.kind}
+                  {h.task !== undefined && ` on ${h.task}`}
+                </span>
+                : waiting on {h.label} <span className="dim">since {h.held_since}</span>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
       {d.failures.length > 0 && (
         <>

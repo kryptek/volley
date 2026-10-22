@@ -47,6 +47,9 @@ export type ControlOp =
   // The needs-you inbox: list its open items, answer one through the referee (autopilot/inbox.ts).
   | "inbox"
   | "inbox_answer"
+  // Held decisions (#335): hold one on a task, PR or issue; lift a hold by hand (decisions.ts).
+  | "hold"
+  | "release"
   // Autopilot's effective policy table (autopilot/policy.ts).
   | "policy"
   // The wave's morning digest, as last published (autopilot/digest.ts).

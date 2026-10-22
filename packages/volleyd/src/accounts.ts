@@ -201,7 +201,12 @@ export function adminRefusal(accounts: Account[], sender: string): string | unde
  * the same list (`DESK_LOGIN_OPS`, packages/volley-desk/src/steer/deskControl.ts); keep the two equal
  * (scripts/desk-ops-sync.test.ts checks it).
  */
-export const DESK_OPS: ReadonlySet<string> = new Set(["inbox_answer", "resolve"]);
+export const DESK_OPS: ReadonlySet<string> = new Set([
+  "inbox_answer",
+  "resolve",
+  "hold",
+  "release",
+]);
 
 /**
  * Why `sender` (the username an ops topic names) may not send a Desk op, or undefined when it is

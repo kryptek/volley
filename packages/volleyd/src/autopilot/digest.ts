@@ -4,6 +4,7 @@
  * daemon publishes it retained on `volley/_waves/<wave>/digest` (digest.schema.json) and pushes
  * `summaryLine` once; `volleyd digest` prints `renderDigestMd`.
  */
+import { type HeldOn, heldLabel } from "../decisions";
 import type { JournalEvent, ReleaseState, TaskId, WaveId, WaveState } from "../types";
 
 /** Why a digest was published. */
@@ -31,6 +32,14 @@ export interface DigestWaiting {
   owner_only: boolean;
 }
 
+/** An open decision that is held (#335): waiting on a task, PR or issue, not on the owner. */
+export interface DigestHeld extends Omit<DigestWaiting, "owner_only"> {
+  on: HeldOn;
+  /** `T4 (#194)`, `PR #12`, `issue #7`. */
+  label: string;
+  held_since: string;
+}
+
 /** The retained digest payload (digest.schema.json). */
 export interface Digest {
   wave: WaveId;
@@ -49,6 +58,8 @@ export interface Digest {
     merges: number;
   };
   waiting: DigestWaiting[];
+  /** Held decisions: open, but waiting on a blocker rather than on the owner. */
+  held: DigestHeld[];
   release?: ReleaseState;
   failures: { task: TaskId; why: string }[];
 }
@@ -69,6 +80,8 @@ export function digestOf(
   const opened = new Map<string, JournalEvent>();
   const ownerOnly = new Set<string>();
   const cancelled = new Map<TaskId, JournalEvent>();
+  /** Each decision's latest decision_held (deleted by its decision_released). */
+  const holds = new Map<string, JournalEvent>();
   const auto: Digest["auto"] = {
     decisions_resolved: 0,
     flakes_fixed: [],
@@ -89,6 +102,12 @@ export function digestOf(
         }
         break;
       }
+      case "decision_held":
+        holds.set(String(d.decision_id), e);
+        break;
+      case "decision_released":
+        holds.delete(String(d.decision_id));
+        break;
       case "task_queued": {
         const title = str(d.title);
         if (e.task !== undefined && title !== undefined) titles.set(e.task, title);
@@ -164,17 +183,24 @@ export function digestOf(
   }
 
   const waiting: DigestWaiting[] = [];
+  const held: DigestHeld[] = [];
   for (const id of state.open_decisions) {
     const e = opened.get(id);
     if (e === undefined) continue;
-    waiting.push({
+    const item = {
       id,
       kind: String(e.data.kind),
       ...(e.task !== undefined ? { task: e.task } : {}),
       question: String(e.data.question ?? ""),
       since: str(e.data.opened_at) ?? e.at,
-      owner_only: ownerOnly.has(id),
-    });
+    };
+    const h = holds.get(id);
+    if (h === undefined) {
+      waiting.push({ ...item, owner_only: ownerOnly.has(id) });
+      continue;
+    }
+    const on = h.data.on as HeldOn;
+    held.push({ ...item, on, label: heldLabel(on, state.tasks), held_since: h.at });
   }
 
   const failures = state.tasks
@@ -196,6 +222,7 @@ export function digestOf(
     shipped,
     auto,
     waiting,
+    held,
     ...(state.release !== undefined ? { release: structuredClone(state.release) } : {}),
     failures,
   };
@@ -228,10 +255,14 @@ export function summaryLine(d: Digest): string {
     const kinds = [...new Set(d.waiting.map((w) => w.kind))].join(", ");
     parts.push(`${d.waiting.length} waiting for you (${kinds})`);
   }
+  if (d.held.length > 0) parts.push(`${d.held.length} held`);
   return `${d.wave} ${VERB[d.trigger]}: ${parts.join(", ")}`;
 }
 
-/** The digest as markdown: `## Shipped`, `## Autopilot handled`, `## Waiting for you` (and `## Failed`). */
+/**
+ * The digest as markdown: `## Shipped`, `## Autopilot handled`, `## Waiting for you` (and
+ * `## Held`, `## Failed`).
+ */
 export function renderDigestMd(d: Digest): string {
   const out = [
     `# ${summaryLine(d)}`,
@@ -267,6 +298,13 @@ export function renderDigestMd(d: Digest): string {
     const on = w.task !== undefined ? ` on ${w.task}` : "";
     const only = w.owner_only ? " (owner only)" : "";
     out.push(`- ${w.id} ${w.kind}${on}${only}: ${w.question}`);
+  }
+  if (d.held.length > 0) {
+    out.push("", "## Held", "");
+    for (const h of d.held) {
+      const on = h.task !== undefined ? ` on ${h.task}` : "";
+      out.push(`- ${h.id} ${h.kind}${on}: waiting on ${h.label} since ${h.held_since}`);
+    }
   }
   if (d.failures.length > 0) {
     out.push("", "## Failed", "");
