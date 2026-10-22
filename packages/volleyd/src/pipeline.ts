@@ -4218,7 +4218,11 @@ export class PipelineDriver {
     if (check.behind === 0) {
       for (const f of p.fixups) {
         if (f.from === undefined || f.worktree === undefined) continue;
-        const r = await io(["git", "-C", f.worktree, "diff", "--stat", f.from, f.to]);
+        // Its own worktree while it is there; else where the gate's checks ran (head fetched).
+        const r =
+          this.deps.worktreeGone?.(v.task, f.worktree) === true
+            ? await git(["git", "-C", where.cwd, "diff", "--stat", f.from, f.to])
+            : await io(["git", "-C", f.worktree, "diff", "--stat", f.from, f.to]);
         // trimEnd only: the first line's leading space is part of git's column alignment.
         if (r.code === 0) diffstats[`${f.from}..${f.to}`] = r.stdout.replace(/^\n+/, "").trimEnd();
       }

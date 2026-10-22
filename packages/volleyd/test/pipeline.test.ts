@@ -788,6 +788,17 @@ describe("pipeline: the fixup's result is durable", () => {
     );
   });
 
+  it("the fixup's worktree gone at the gate: its diffstat is read from the repo root", async () => {
+    await reviewed({ worktreeGone: (_, wt) => wt.includes("fixup") });
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    expect(stage()).toBe("merge_ready");
+    const stats = h.calls.filter((a) => a[0] === "git" && a[3] === "diff" && a[4] === "--stat");
+    expect(stats.map((a) => a[2])).toEqual(["/repo"]);
+    expect(readFileSync(h.task()?.evidence_path as string, "utf-8")).toContain(
+      "```\n src/batch.ts | 4 ++--\n 1 file changed\n```",
+    );
+  });
+
   it("CI red at the fixup's done → re-verify after a fix keeps the resolutions", async () => {
     await reviewed();
     await h.finish("fixup", { head: H2, ci: "red", result: result("fixup-resolved") });
