@@ -145,6 +145,7 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ["mv", "-f", ".claude.json.volleyd.tmp", ".claude.json"],
     ["cat", "/src/r/.git/info/exclude"],
     ["chmod", "600", "/wt/x/.volley/agent.json"],
+    ["chmod", "600", "/wt/x/.volley/mcp.json"],
     ["chmod", "700", "/wt/x/.volley/launch.sh"],
     ["chmod", "600", "/wt/x/ISSUE.md"],
     ["cat", BRIEF],

@@ -654,8 +654,13 @@ async function launchAttempt(
       ...(creds !== undefined ? { broker: creds } : {}),
     });
     // volleyd's own MCP server for the agent: this release's volley-mcp, on this broker (and the
-    // user's servers agent_mcp_allow names).
-    await host.writeFile(mcpConfigPath(ctx.worktree), renderMcpConfig(deps.mcpEntry, mcpExtra));
+    // user's servers agent_mcp_allow names). Owner-only: those copied entries hold the user's
+    // secrets (env tokens, headers).
+    await host.writeFile(
+      mcpConfigPath(ctx.worktree),
+      renderMcpConfig(deps.mcpEntry, mcpExtra),
+      0o600,
+    );
     const compactWindow = autoCompactWindowTokens(task.model, deps.tunables.agent_auto_compact_pct);
     const script = renderLaunchScript({
       hooksDir: deps.hooksDir,

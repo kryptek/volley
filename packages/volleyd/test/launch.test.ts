@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -442,6 +443,8 @@ describe("launch (local cmux host)", () => {
       c: { command: "c-repo" },
       d: { command: "d-local" },
     });
+    // The copied entries carry the user's secrets: owner-only, like agent.json.
+    expect(statSync(join(env.worktree, ".volley", "mcp.json")).mode & 0o777).toBe(0o600);
     const script = readFileSync(join(env.worktree, ".volley", "launch.sh"), "utf-8");
     expect(script).toContain(" --strict-mcp-config ");
     expect(env.events.find((e) => e.type === "agent_spawned")?.data).toMatchObject({

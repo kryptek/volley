@@ -36,7 +36,7 @@ export const mcpConfigPath = (worktree: string) => join(worktree, ".volley", "mc
  * its broker URL, identity and minted credentials from `.volley/agent.json` in its cwd (the
  * worktree), so nothing secret of volleyd's is in this file. `extra`: the user's servers that
  * `agent_mcp_allow` names, copied as they are (an entry may hold the user's own secrets, so the
- * file is never logged); an entry named `volley` never replaces volleyd's.
+ * file is never logged and spawn writes it 0600); an entry named `volley` never replaces volleyd's.
  */
 export function renderMcpConfig(entry: string, extra: Record<string, unknown> = {}): string {
   const { [VOLLEY_MCP_SERVER]: _, ...rest } = extra;
