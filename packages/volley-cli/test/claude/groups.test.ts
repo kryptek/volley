@@ -214,11 +214,12 @@ describe("renderGroups", () => {
     });
     expect(text).toContain("Work · max · Example Org · o•••@example.com");
     expect(text).not.toContain(EMAIL);
-    expect(text).toContain("5-hour 37% (resets in 4h 2m, from this machine 2 m ago)");
-    expect(text).toContain("week 56% (resets in 2d 18h, from this machine 2 m ago)");
+    expect(text).toContain(
+      "  5-hour 37% (resets in 4h 2m) · 7-day 56% (resets in 2d 18h) · Fable — (not read yet)\n  freshest: this machine, 2 min ago\n",
+    );
     expect(text).toMatch(/this machine +work +signed in +waves: w1\n/);
     expect(text).toMatch(
-      /peer-a +default login +signed in +waves: w2 +5-hour 41% 8 m old \(stale\)/,
+      /peer-a +default login +signed in +waves: w2 +5-hour 41% 8 min old \(stale\)/,
     );
   });
 
@@ -249,7 +250,7 @@ describe("renderGroups", () => {
     });
     const text = renderGroups(groupAccounts(r, []), { now: NOW, showEmail: false });
     expect(text).toContain(
-      "Personal · pro · p•••@example.com\n  5-hour —   week —   (no usage yet)\n",
+      "Personal · pro · p•••@example.com\n  5-hour — · 7-day — · Fable — (not read yet)\n",
     );
     expect(text).toMatch(/this machine +personal +signed out/);
     expect(text).toContain("spare (e-mail not reported yet)");
@@ -274,6 +275,79 @@ describe("renderGroups", () => {
       showEmail: false,
     });
     expect(text).not.toContain("NaN");
-    expect(text).toContain("from this machine ? ago");
+    expect(text).toContain("freshest: this machine, ? ago");
+  });
+
+  describe("the Fable window", () => {
+    const at = (min: number) => new Date(NOW - min * 60_000).toISOString();
+    const fable = {
+      pct: 12,
+      resets_at: new Date(NOW + (4 * 24 + 2) * 3_600_000 + 30_000).toISOString(),
+    };
+    const line = (records: UsageRecord[]) =>
+      renderGroups(groupAccounts(result(), records), { now: NOW, showEmail: false });
+
+    it("prints the probe's Fable reading with its reset and age", () => {
+      const probed: UsageRecord = {
+        ...work,
+        model_weekly: { fable },
+        probe: { machine: "hub", state: "ok", attempted_at: at(4), read_at: at(4) },
+      };
+      expect(line([probed, peer])).toContain(
+        "  5-hour 37% (resets in 4h 2m) · 7-day 56% (resets in 2d 18h) · Fable 12% (resets in 4d 2h, read 4 min ago)\n",
+      );
+    });
+
+    it("an ok read beats a newer failed attempt on another machine", () => {
+      const ok: UsageRecord = {
+        ...work,
+        model_weekly: { fable },
+        probe: { machine: "hub", state: "ok", attempted_at: at(2), read_at: at(2) },
+      };
+      const failed: UsageRecord = {
+        ...peer,
+        probe: { machine: "peer-a", state: "error", attempted_at: at(1) },
+      };
+      const [g] = groupAccounts(result(), [ok, failed]);
+      expect(g?.probe).toEqual({
+        machine: "local",
+        state: "ok",
+        attemptedAt: at(2),
+        readAt: at(2),
+      });
+      expect(g?.fable).toEqual(fable);
+    });
+
+    it("takes the figure from the login whose probe it reports, not another's", () => {
+      // peer-a carries a Fable window but no probe; the hub's probe read, with no window.
+      const unprobed: UsageRecord = { ...peer, sampled_at: at(1), model_weekly: { fable } };
+      const probed: UsageRecord = {
+        ...work,
+        probe: { machine: "hub", state: "ok", attempted_at: at(4), read_at: at(4) },
+      };
+      const [g] = groupAccounts(result(), [probed, unprobed]);
+      expect(g?.probe).toMatchObject({ machine: "local", state: "ok" });
+      expect(g?.fable).toBeNull();
+    });
+
+    it("a failed probe prints why, and the last read's age", () => {
+      const expired: UsageRecord = {
+        ...work,
+        model_weekly: { fable },
+        probe: { machine: "hub", state: "expired", attempted_at: at(1), read_at: at(25) },
+      };
+      expect(line([expired])).toContain("Fable — (login expired, last read 25 min ago)");
+      const noCred: UsageRecord = {
+        ...peer,
+        email: EMAIL,
+        probe: { machine: "peer-a", state: "no_credential", attempted_at: at(1) },
+      };
+      expect(line([noCred])).toContain("Fable — (no credential on peer-a)");
+    });
+
+    it("a window whose reset passed prints 0 %", () => {
+      const passed: UsageRecord = { ...work, five_hour: { pct: 37, resets_at: at(1) } };
+      expect(line([passed])).toContain("  5-hour 0% · 7-day 56%");
+    });
   });
 });

@@ -151,20 +151,18 @@ describe("ClaudeAccounts", () => {
     expect(cards).toHaveLength(3);
     const w = within(screen.getByRole("article", { name: "Work" }));
     expect(w.getByText("max")).toHaveClass("chip");
-    const five = w.getByRole("meter", { name: "5-hour window" });
+    const five = w.getByRole("meter", { name: "5-hour" });
     expect(five).toHaveAttribute("aria-valuenow", "91");
     expect(five.closest(".meter")).toHaveTextContent("91%");
     expect(five.closest(".meter")).toHaveTextContent("resets in 4h 4m");
     expect(five.closest(".meter")?.querySelector(".meter-pct")).toHaveClass("meter-hot");
-    const week = w.getByRole("meter", { name: "This week" });
+    const week = w.getByRole("meter", { name: "7-day" });
     expect(week.closest(".meter")).toHaveTextContent("43%");
     expect(week.closest(".meter")).toHaveTextContent("resets in 2d 18h");
     const foot = within(w.getByText("2 agents").closest(".cc-foot") as HTMLElement);
     expect(foot.getByText("waves: w1")).toBeInTheDocument();
     const p = within(screen.getByRole("article", { name: "Personal" }));
-    expect(p.getByRole("meter", { name: "5-hour window" }).closest(".meter")).toHaveTextContent(
-      "12%",
-    );
+    expect(p.getByRole("meter", { name: "5-hour" }).closest(".meter")).toHaveTextContent("12%");
     expect(p.getByText("no waves assigned")).toBeInTheDocument();
   });
 
@@ -427,7 +425,7 @@ describe("ClaudeAccounts review fixes", () => {
       );
       const five = () =>
         within(within(container).getByRole("article", { name: "Work" }))
-          .getByRole("meter", { name: "5-hour window" })
+          .getByRole("meter", { name: "5-hour" })
           .closest(".meter");
       expect(five()).toHaveTextContent("resets in 4h 4m");
       act(() => {
@@ -490,7 +488,7 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     const p = within(cards[0] as HTMLElement);
     expect(p.getByText(/^primary · /)).toHaveTextContent("primary · Claude Code's default login");
     expect(p.queryByText((_, el) => el?.classList.contains("chip") === true)).toBeNull();
-    for (const name of ["5-hour window", "This week"]) {
+    for (const name of ["5-hour", "7-day"]) {
       const m = p.getByRole("meter", { name });
       expect(m).toHaveAttribute("aria-valuetext", "no usage reported yet");
       expect(m.closest(".meter")).toHaveTextContent("no usage reported yet");
@@ -512,7 +510,7 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     );
     const card = screen.getByRole("article", { name: "This machine's Claude login" });
     expect(await within(card).findByText("max")).toHaveClass("chip");
-    expect(within(card).getByRole("meter", { name: "5-hour window" })).toHaveAttribute(
+    expect(within(card).getByRole("meter", { name: "5-hour" })).toHaveAttribute(
       "aria-valuetext",
       "no usage reported yet",
     );
@@ -574,7 +572,7 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     ]);
     const p = within(cards[0] as HTMLElement);
     expect(p.getByText("max")).toHaveClass("chip");
-    expect(p.getByRole("meter", { name: "5-hour window" })).toHaveAttribute("aria-valuenow", "34");
+    expect(p.getByRole("meter", { name: "5-hour" })).toHaveAttribute("aria-valuenow", "34");
     expect(p.getByText("1 agent")).toBeInTheDocument();
   });
 
@@ -789,9 +787,121 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
   it("the meters show the freshest reading and name the stale one with its age", () => {
     render(view({ work: own, "primary@peer-a": peer }));
     const c = within(card());
-    expect(c.getByRole("meter", { name: "5-hour window" })).toHaveAttribute("aria-valuenow", "37");
+    expect(c.getByRole("meter", { name: "5-hour" })).toHaveAttribute("aria-valuenow", "37");
     expect(c.getByText("freshest: this machine, just now")).toBeInTheDocument();
     expect(c.getByText("peer-a's 5-hour reading (41%, 3 h old) is stale")).toBeInTheDocument();
+  });
+
+  it("names a stale weekly reading by its meter's label, 7-day", () => {
+    const week = { pct: 70, resets_at: "2026-10-20T00:00:00.000Z" };
+    render(view({ work: own, "primary@peer-a": { ...peer, weekly: week } }));
+    expect(within(card()).getByText(/^peer-a's 7-day reading \(70%/)).toBeInTheDocument();
+  });
+
+  describe("three meters: 5-hour, 7-day and Fable", () => {
+    const min = (n: number) => new Date(NOW - n * 60_000).toISOString();
+    const fable = { pct: 12, resets_at: "2026-10-22T16:00:00.000Z" };
+    const read = (
+      probe: NonNullable<ClaudeAccountPayload["probe"]>,
+      w: typeof fable | null = fable,
+    ): ClaudeAccountPayload => ({ ...peer, ...(w ? { model_weekly: { fable: w } } : {}), probe });
+    const fableMeter = () => within(card()).getByRole("meter", { name: "Fable (7-day)" });
+
+    it("labels the three meters and reads the Fable figure with its age and machine", () => {
+      render(
+        view({
+          work: own,
+          "primary@peer-a": read({
+            machine: "peer-a",
+            state: "ok",
+            attempted_at: min(4),
+            read_at: min(4),
+          }),
+        }),
+      );
+      const c = within(card());
+      expect(c.getAllByRole("meter").map((m) => m.getAttribute("aria-label"))).toEqual([
+        "5-hour",
+        "7-day",
+        "Fable (7-day)",
+      ]);
+      expect(fableMeter()).toHaveAttribute("aria-valuetext", "12%, read 4 min ago on peer-a");
+      expect(fableMeter().closest(".meter")).toHaveTextContent(
+        "resets in 4d 1h · read 4 min ago on peer-a",
+      );
+    });
+
+    it("before any probe: —, not read yet", () => {
+      render(view({ work: own, "primary@peer-a": peer }));
+      expect(fableMeter()).toHaveAttribute("aria-valuetext", "not read yet");
+      expect(fableMeter().closest(".meter")).toHaveTextContent("—");
+      expect(fableMeter().closest(".meter")).toHaveTextContent("not read yet");
+    });
+
+    it("an expired login reads — with its hint and the last read's age", () => {
+      render(
+        view({
+          work: own,
+          "primary@peer-a": read({
+            machine: "peer-a",
+            state: "expired",
+            attempted_at: min(1),
+            read_at: min(25),
+          }),
+        }),
+      );
+      expect(fableMeter()).toHaveAttribute(
+        "aria-valuetext",
+        "login expired — Claude Code renews it on its next request; last read 25 min ago",
+      );
+      expect(fableMeter().closest(".meter")?.querySelector(".meter-pct")).toHaveTextContent("—");
+    });
+
+    it("each machine row shows the three figures, and an older row its own age", () => {
+      render(
+        view({
+          work: own,
+          "primary@peer-a": read({
+            machine: "peer-a",
+            state: "ok",
+            attempted_at: min(4),
+            read_at: min(4),
+          }),
+        }),
+      );
+      const rows = within(within(card()).getByRole("list", { name: "Machines" })).getAllByRole(
+        "listitem",
+      );
+      for (const r of rows) expect(r).toHaveTextContent("5h 37% · 7d 56% · Fable 12%");
+      expect(rows[0]).not.toHaveTextContent("sampled");
+      expect(rows[1]).toHaveTextContent("sampled 3 h ago");
+    });
+
+    it("a window whose reset passed shows 0 %", () => {
+      const passed = { ...own, five_hour: { pct: 37, resets_at: min(5) } };
+      render(view({ work: passed, "primary@peer-a": peer }));
+      expect(within(card()).getByRole("meter", { name: "5-hour" })).toHaveAttribute(
+        "aria-valuenow",
+        "0",
+      );
+      expect(within(card()).getAllByText(/^5h 0% · 7d 56% · Fable —$/)).toHaveLength(2);
+    });
+
+    it("passes axe with the three meters and the row figures", async () => {
+      render(
+        view({
+          work: own,
+          "primary@peer-a": read({
+            machine: "peer-a",
+            state: "rate_limited",
+            attempted_at: min(1),
+            read_at: min(25),
+          }),
+        }),
+      );
+      const v = await axe.run(document.body, { rules: { "color-contrast": { enabled: false } } });
+      expect(v.violations.map((x) => x.id)).toEqual([]);
+    });
   });
 
   it("a card with no e-mail says so and has no eye button", () => {
@@ -1203,6 +1313,8 @@ describe("Sign in on <machine>: the preset's label and the finished sign-in", ()
     plan: "max",
     fiveHour: null,
     weekly: null,
+    fable: null,
+    probe: null,
     freshest: null,
     members: [],
     stale: [],
@@ -1218,6 +1330,7 @@ describe("Sign in on <machine>: the preset's label and the finished sign-in", ()
     agents: [],
     waves: [],
     isPrimary: false,
+    sampledAt: null,
   });
   const peerB = { name: "peer-b", op: "peer-b", up: true };
 

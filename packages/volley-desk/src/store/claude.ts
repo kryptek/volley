@@ -12,6 +12,9 @@ import type {
   ClaudeAccountPayload,
   DecisionPayload,
   MachinePayload,
+  ModelFamily,
+  ProbeState,
+  UsageProbe,
   UsageWindow,
   WaveView,
 } from "./types";
@@ -45,6 +48,10 @@ export interface AccountInfo {
   weekly: UsageWindow | null;
   /** When its usage record was sampled; `null` for a profile that has not reported. */
   sampledAt: string | null;
+  /** The model-scoped weekly windows its machine's usage probe last read (`{}` until one has). */
+  modelWeekly: Partial<Record<ModelFamily, UsageWindow>>;
+  /** Its machine's newest usage probe attempt; `null` until a probe has reported. */
+  probe: UsageProbe | null;
   signedIn: boolean;
   agents: string[];
   waves: string[];
@@ -99,6 +106,8 @@ export function accountList(
       fiveHour: r.five_hour,
       weekly: r.weekly,
       sampledAt: r.sampled_at,
+      modelWeekly: r.model_weekly ?? {},
+      probe: r.probe ?? null,
       // Its agents are using it.
       signedIn: true,
       agents: r.agents,
@@ -117,6 +126,8 @@ export function accountList(
       fiveHour: null,
       weekly: null,
       sampledAt: null,
+      modelWeekly: {},
+      probe: null,
       signedIn: row.signed_in_at !== undefined,
       agents: [],
       waves: [],
@@ -142,6 +153,8 @@ export interface Member {
   agents: string[];
   waves: string[];
   isPrimary: boolean;
+  /** When this login's own latest sample or probe reading was taken; `null`: none yet. */
+  sampledAt: string | null;
 }
 
 type WindowKey = "five_hour" | "weekly";
@@ -165,11 +178,25 @@ export interface AccountGroup {
   plan: string | null;
   fiveHour: UsageWindow | null;
   weekly: UsageWindow | null;
+  /** The Fable weekly window of the member whose probe `probe` reports; `null`: it read none. */
+  fable: UsageWindow | null;
+  /** The usage probe the Fable meter reports: the freshest read first, else the newest attempt. */
+  probe: ProbeInfo | null;
   freshest: { machine: string; sampledAt: string } | null;
   members: Member[];
   stale: StaleReading[];
   agents: string[];
   waves: string[];
+}
+
+/** A group's usage probe, as its Fable meter reports it. */
+export interface ProbeInfo {
+  /** The member's machine: `local` (volleyd's machine) or a remote host. */
+  machine: string;
+  state: ProbeState;
+  attemptedAt: string;
+  /** The last successful read; `null` while none has succeeded. */
+  readAt: string | null;
 }
 
 /** Two readings of one window agree within a point when their resets agree too. */
@@ -208,6 +235,36 @@ function pickWindow(accounts: AccountInfo[], key: WindowKey) {
 
 const union = (xs: string[][]) => [...new Set(xs.flat())];
 
+/** An ISO time in ms; a missing or unreadable one sorts as the oldest. */
+const ms = (iso: string | null | undefined) => {
+  const t = Date.parse(iso ?? "");
+  return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t;
+};
+/** A sort comparator, newest first, that never answers NaN for two missing times. */
+const desc = (a: number, b: number) => (a === b ? 0 : b > a ? 1 : -1);
+
+/** The member whose probe read last, else the one whose probe attempted last. */
+function probeMember(accounts: AccountInfo[]): AccountInfo | undefined {
+  return accounts
+    .filter((a) => a.probe !== null)
+    .sort(
+      (a, b) =>
+        desc(ms(a.probe?.read_at), ms(b.probe?.read_at)) ||
+        desc(ms(a.probe?.attempted_at), ms(b.probe?.attempted_at)),
+    )[0];
+}
+
+function toProbe(best: AccountInfo | undefined): ProbeInfo | null {
+  if (!best?.probe) return null;
+  const p = best.probe;
+  return {
+    machine: best.machine,
+    state: p.state,
+    attemptedAt: p.attempted_at,
+    readAt: p.read_at ?? null,
+  };
+}
+
 /**
  * The accounts as Anthropic sees them: one group per login e-mail (an account whose e-mail is not
  * reported yet keeps its own group, keyed by its id). A peer's default login takes its e-mail from
@@ -238,6 +295,8 @@ export function accountGroups(
       fiveHour: null,
       weekly: null,
       sampledAt: null,
+      modelWeekly: {},
+      probe: null,
       signedIn: true,
       agents: [],
       waves: [],
@@ -282,6 +341,7 @@ export function accountGroups(
           agents: a.agents,
           waves: a.waves,
           isPrimary: isPrimary(a.id),
+          sampledAt: a.sampledAt,
         }),
       );
     return {
@@ -295,6 +355,9 @@ export function accountGroups(
       plan: newest.find((a) => a.plan)?.plan ?? null,
       fiveHour: five.w,
       weekly: week.w,
+      // The figure comes from the member whose probe it reports, so its label names the right read.
+      fable: probeMember(list)?.modelWeekly.fable ?? null,
+      probe: toProbe(probeMember(list)),
       freshest: fresh ? { machine: fresh.machine, sampledAt: fresh.sampledAt as string } : null,
       members,
       stale: [...five.stale, ...week.stale],
@@ -327,6 +390,8 @@ export function withPrimary(list: AccountInfo[], plan: string | undefined): Acco
           fiveHour: null,
           weekly: null,
           sampledAt: null,
+          modelWeekly: {},
+          probe: null,
           signedIn: true,
           agents: [],
           waves: [],
@@ -504,4 +569,73 @@ export function resetsIn(resetsAt: string | null | undefined, now: number): stri
   if (d > 0) return `${d}d ${h}h`;
   if (h > 0) return `${h}h ${m % 60}m`;
   return `${m}m`;
+}
+
+/** `3 h`, `12 min`, `2 d`: how old a reading is; `null` under a minute. */
+export function readingAge(at: string, now: number): string | null {
+  const m = Math.floor((now - Date.parse(at)) / 60_000);
+  if (!(m >= 1)) return null;
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  return h < 48 ? `${h} h` : `${Math.floor(h / 24)} d`;
+}
+
+/** `4 min ago`, or `just now` under a minute. */
+export function agoText(at: string, now: number): string {
+  const a = readingAge(at, now);
+  return a ? `${a} ago` : "just now";
+}
+
+/** A window's percentage as shown, rounded; one whose reset has passed counts as 0. */
+export function windowPct(w: UsageWindow | null, now: number): number | null {
+  if (w === null) return null;
+  const t = w.resets_at ? Date.parse(w.resets_at) : Number.NaN;
+  return !Number.isNaN(t) && t <= now ? 0 : Math.round(w.pct);
+}
+
+/** The Fable window a group shows: only while its probe's last attempt succeeded. */
+export const fableShown = (g: AccountGroup): UsageWindow | null =>
+  g.probe?.state === "ok" ? g.fable : null;
+
+const PROBE_HINT: Record<Exclude<ProbeState, "ok">, (machine: string) => string> = {
+  expired: () => "login expired — Claude Code renews it on its next request",
+  no_credential: (m) => `no credential on ${machineName(m)}`,
+  rate_limited: () => "rate limited, retrying",
+  rejected: () => "probe failed",
+  error: () => "probe failed",
+};
+
+/**
+ * What the Fable meter says of its reading: `read 4 min ago on peer-a`; while the last attempt
+ * failed, why (`rate limited, retrying; last read 25 min ago`); before any probe, `not read yet`.
+ */
+export function fableHint(probe: ProbeInfo | null, now: number): string {
+  if (probe === null) return "not read yet";
+  if (probe.state === "ok")
+    return `read ${agoText(probe.readAt ?? probe.attemptedAt, now)} on ${machineName(probe.machine)}`;
+  const why = PROBE_HINT[probe.state](probe.machine);
+  return probe.readAt ? `${why}; last read ${agoText(probe.readAt, now)}` : why;
+}
+
+/**
+ * A machine row's compact usage: the account's three figures (`5h 37% · 7d 56% · Fable 12%`) and,
+ * when this login's own latest reading is older than the account's freshest, its age.
+ */
+export function usageTriple(
+  g: AccountGroup,
+  member: Pick<Member, "sampledAt">,
+  now: number,
+): { text: string; sampled: string | null } {
+  const show = (w: UsageWindow | null) => {
+    const pct = windowPct(w, now);
+    return pct === null ? "—" : `${pct}%`;
+  };
+  const text = `5h ${show(g.fiveHour)} · 7d ${show(g.weekly)} · Fable ${show(fableShown(g))}`;
+  const own = member.sampledAt;
+  const older =
+    own !== null &&
+    g.freshest !== null &&
+    ms(own) < ms(g.freshest.sampledAt) &&
+    readingAge(own, now) !== null;
+  return { text, sampled: older ? `sampled ${agoText(own, now)}` : null };
 }

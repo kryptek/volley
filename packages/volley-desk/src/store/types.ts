@@ -403,10 +403,29 @@ export interface ClaudeAccountPayload {
   org?: string;
   five_hour: UsageWindow | null;
   weekly: UsageWindow | null;
+  /** Weekly windows scoped to one model family, as the machine's usage probe last read them. */
+  model_weekly?: Partial<Record<ModelFamily, UsageWindow>>;
+  /** The newest usage probe attempt for this login; absent until a probe has reported. */
+  probe?: UsageProbe;
   agents: string[];
   waves: string[];
   sampled_at: string;
   sampled_by?: string;
+}
+
+/** claude-account.schema.json `model_weekly`'s keys. */
+export type ModelFamily = "fable" | "opus" | "sonnet" | "haiku";
+
+/** claude-account.schema.json `probe.state` (machine.schema.json `claude_logins[].state`). */
+export type ProbeState = "ok" | "expired" | "no_credential" | "rate_limited" | "rejected" | "error";
+
+/** claude-account.schema.json `probe`: how the holding machine's last usage probe went. */
+export interface UsageProbe {
+  machine: string;
+  state: ProbeState;
+  attempted_at: string;
+  /** The last successful read. */
+  read_at?: string;
 }
 
 /**

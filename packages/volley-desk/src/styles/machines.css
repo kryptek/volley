@@ -254,26 +254,6 @@ button.m-local:focus-visible {
 .m-accounts li > .dim:last-child {
   margin-left: auto;
 }
-.m-usage {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  min-width: 0;
-}
-.m-meter {
-  flex: 1;
-  min-width: 40px;
-  height: 5px;
-  border-radius: 3px;
-  background: rgba(255, 255, 255, 0.1);
-  overflow: hidden;
-}
-.m-meter i {
-  display: block;
-  height: 100%;
-  background: #34c759;
-}
 .m-cap {
   display: flex;
   flex-wrap: wrap;

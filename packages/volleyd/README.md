@@ -692,7 +692,9 @@ It also takes each family's `model_weekly` window (kept until a newer reading ha
 `probe { machine, state, attempted_at, read_at? }`, the newest attempt, a failed one included.
 The account record carries `model_weekly` once a family is known and `probe` once a probe has
 reported. `sampled_at` is the newest of sample and reading, and `sampled_by` appears only when
-a statusLine sample set it. The book keeps all of it on disk across restarts.
+a statusLine sample set it. The book keeps all of it on disk across restarts. The Desk's account cards and
+`volley claude list` show the probe's Fable window beside the 5-hour and 7-day ones, with the
+reading's age (or, while the last attempt failed, why, and when it last read).
 
 ---
 

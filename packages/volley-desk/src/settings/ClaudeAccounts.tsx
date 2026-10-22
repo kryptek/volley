@@ -5,10 +5,13 @@
  * reported yet, signed-in peers and this machine's own login (the primary,
  * first and from the start), merged by the login's e-mail (`accountGroups`).
  * A card shows the label, plan chip and organisation, the e-mail masked until
- * its eye button reveals it (never persisted), the 5-hour and weekly meters
- * from the freshest reading (a disagreeing older one named stale), one row per
+ * its eye button reveals it (never persisted), three meters: 5-hour and 7-day
+ * from the freshest reading (a disagreeing older one named stale) and Fable
+ * (7-day) from the freshest usage probe reading, with its age, or why there is
+ * none while the probe's last attempt failed (`fableHint`), one row per
  * configured machine (`accountMatrix`: a filled dot where it holds the account,
- * else **Sign in on <machine>**, which opens Add already at the sign-in step
+ * with the account's three figures compactly and that login's own age when
+ * older, else **Sign in on <machine>**, which opens Add already at the sign-in step
  * with the label `<label> (<machine>)`) under an `on N of M machines` chip,
  * the agents and waves on it, and "Move a wave
  * here…" (its login on this machine, by account id). An open
@@ -49,14 +52,19 @@ import {
   accountMatrix,
   configuredMachines,
   deskAccountGroups,
+  fableHint,
+  fableShown,
   fiveHourLabel,
   machineName,
   moveAnswer,
   moveTargetOf,
   notNowAnswer,
   openLimitDecisions,
+  readingAge,
   resetsIn,
   resolveFields,
+  usageTriple,
+  windowPct,
   withPrimary,
 } from "../store/claude";
 import type {
@@ -198,8 +206,24 @@ export function claudeSummaries({
 const PRIMARY = "primary";
 export { PRIMARY_LABEL };
 
-function Meter({ label, w, now }: { label: string; w: UsageWindow | null; now: number }) {
-  const pct = w === null ? null : Math.round(w.pct);
+/**
+ * One rate-limit window: its percentage (a reset that passed counts as 0), a bar, and when it
+ * resets. `missingHint` says why there is no figure; `ageText` how old the figure is.
+ */
+function Meter({
+  label,
+  w,
+  now,
+  missingHint = "no usage reported yet",
+  ageText,
+}: {
+  label: string;
+  w: UsageWindow | null;
+  now: number;
+  missingHint?: string;
+  ageText?: string;
+}) {
+  const pct = windowPct(w, now);
   const tone = pct === null ? "none" : pct >= METER_HOT ? "hot" : pct >= METER_WARN ? "warn" : "ok";
   const reset = resetsIn(w?.resets_at, now);
   return (
@@ -215,31 +239,49 @@ function Meter({ label, w, now }: { label: string; w: UsageWindow | null; now: n
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={pct ?? 0}
-        aria-valuetext={pct === null ? "no usage reported yet" : `${pct}%`}
+        aria-valuetext={pct === null ? missingHint : ageText ? `${pct}%, ${ageText}` : `${pct}%`}
       >
         <span className={`meter-${tone}`} style={{ width: `${pct ?? 0}%` }} />
       </div>
       <div className="s-hint">
         {pct === null
-          ? "no usage reported yet"
-          : reset
-            ? `resets in ${reset}`
-            : "reset time unknown"}
+          ? missingHint
+          : `${reset ? `resets in ${reset}` : "reset time unknown"}${ageText ? ` · ${ageText}` : ""}`}
       </div>
     </div>
   );
 }
 
-/** `3 h`, `12 min`, `2 d`: how old a reading is; `null` under a minute. */
-function age(at: string, now: number): string | null {
-  const m = Math.floor((now - Date.parse(at)) / 60_000);
-  if (!(m >= 1)) return null;
-  if (m < 60) return `${m} min`;
-  const h = Math.floor(m / 60);
-  return h < 48 ? `${h} h` : `${Math.floor(h / 24)} d`;
+/** An account's three meters: 5-hour and 7-day (the freshest reading), and its Fable week. */
+function Meters({ g, now }: { g: AccountGroup; now: number }) {
+  const fable = fableShown(g);
+  const hint = fableHint(g.probe, now);
+  return (
+    <div className="cc-meters">
+      <Meter label="5-hour" w={g.fiveHour} now={now} />
+      <Meter label="7-day" w={g.weekly} now={now} />
+      <Meter
+        label="Fable (7-day)"
+        w={fable}
+        now={now}
+        missingHint={g.probe?.state === "ok" ? "no Fable window reported" : hint}
+        {...(fable ? { ageText: hint } : {})}
+      />
+    </div>
+  );
 }
 
-const WINDOW_NAME = { five_hour: "5-hour", weekly: "weekly" } as const;
+/** A machine row's compact usage: `5h 37% · 7d 56% · Fable 12%`, and `sampled 3 h ago` when older. */
+export function UsageTriple({ text, sampled }: { text: string; sampled: string | null }) {
+  return (
+    <span className="cc-usage">
+      <span className="mono">{text}</span>
+      {sampled && <span className="dim"> · {sampled}</span>}
+    </span>
+  );
+}
+
+const WINDOW_NAME = { five_hour: "5-hour", weekly: "7-day" } as const;
 
 /** An e-mail masked until its eye button shows it (per mount, never persisted). */
 function MaskedEmail({ email }: { email: string }) {
@@ -351,7 +393,7 @@ function AccountCard({
   const g = row.group;
   const { held, total } = row.coverage;
   const only = g.members.length === 1 ? g.members[0] : undefined;
-  const ago = g.freshest && age(g.freshest.sampledAt, now);
+  const ago = g.freshest && readingAge(g.freshest.sampledAt, now);
   return (
     <article className="claude-card" aria-label={g.label}>
       <div className="cc-head">
@@ -377,8 +419,7 @@ function AccountCard({
         {g.plan && <span className="chip">{g.plan}</span>}
       </div>
       <EmailRow email={g.email} />
-      <Meter label="5-hour window" w={g.fiveHour} now={now} />
-      <Meter label="This week" w={g.weekly} now={now} />
+      <Meters g={g} now={now} />
       {g.members.length > 1 && g.freshest && (
         <div className="cc-fresh">
           <div className="s-hint">
@@ -387,7 +428,7 @@ function AccountCard({
           {g.stale.map((s) => (
             <div key={`${s.machine}-${s.window}`} className="s-hint cc-stale">
               {machineName(s.machine)}'s {WINDOW_NAME[s.window]} reading ({Math.round(s.pct)}%,{" "}
-              {age(s.sampledAt, now) ?? "<1 min"} old) is stale
+              {readingAge(s.sampledAt, now) ?? "<1 min"} old) is stale
             </div>
           ))}
         </div>
@@ -411,6 +452,7 @@ function AccountCard({
               <span className="sr-only">{m.signedIn ? "signed in" : "signed out"}</span>
               <b>{c.name}</b>
               <span className="dim ell">{m.label}</span>
+              <UsageTriple {...usageTriple(g, m, now)} />
               <span className="dim cc-waves">
                 {m.waves.length ? `waves: ${m.waves.join(", ")}` : "no waves"}
               </span>
@@ -807,6 +849,7 @@ export function withSignIns(
         agents: [],
         waves: [],
         isPrimary: false,
+        sampledAt: null,
       },
     ]);
   }

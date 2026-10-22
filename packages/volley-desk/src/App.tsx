@@ -1436,7 +1436,6 @@ export default function App() {
             focus: focusMachine?.name,
             focusSeq: focusMachine?.seq,
             configTransport,
-            accounts: state.claudeAccounts ?? {},
             claude: { groups: claudeGroups, signins: state.signins ?? {}, control },
             agentsOn: agentsOnMachines(
               Object.values(state.waves).flatMap((w) => (w.state ? [w.state] : [])),

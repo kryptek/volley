@@ -6,6 +6,8 @@ import { maskEmail, normalizeEmail } from "volley-mcp/mask";
  * The grouping rule is the Desk's (`accountGroups` in `packages/volley-desk/src/store/claude.ts`):
  * key = the normalised e-mail, else the account id; per window the newest `sampled_at` wins, a
  * tie going to the reading with a known reset; a member's older reading that differs is stale.
+ * The Fable window and its probe come from one login: the one whose probe read last (else whose
+ * probe attempted last), so the figure's age is its own and a failed probe says why there is none.
  */
 
 /** volleyd's own machine (`LOCAL_MACHINE` in its profiles). */
@@ -30,9 +32,30 @@ export interface UsageRecord {
   org?: string;
   five_hour: UsageWindow | null;
   weekly: UsageWindow | null;
+  /** Weekly windows scoped to one model family, as the machine's usage probe last read them. */
+  model_weekly?: Partial<Record<"fable" | "opus" | "sonnet" | "haiku", UsageWindow>>;
+  /** The newest usage probe attempt for this login; absent until a probe has reported. */
+  probe?: {
+    machine: string;
+    state: ProbeState;
+    attempted_at: string;
+    read_at?: string;
+  };
   agents: string[];
   waves: string[];
   sampled_at: string;
+}
+
+/** claude-account.schema.json `probe.state`. */
+export type ProbeState = "ok" | "expired" | "no_credential" | "rate_limited" | "rejected" | "error";
+
+/** A group's usage probe: the login whose probe read last, else whose probe attempted last. */
+export interface Probe {
+  /** The login's machine: `local` or a paired machine's name. */
+  machine: string;
+  state: ProbeState;
+  attemptedAt: string;
+  readAt: string | null;
 }
 
 interface Identity {
@@ -87,6 +110,9 @@ export interface AccountGroup {
   plan: string | null;
   fiveHour: Reading | null;
   weekly: Reading | null;
+  /** The Fable weekly window of the login whose probe `probe` reports; `null`: it read none. */
+  fable: UsageWindow | null;
+  probe: Probe | null;
   stale: Reading[];
   members: Member[];
   /** The configured machines with no login on the account: `local` first, then each peer. */
@@ -192,6 +218,36 @@ function pickWindow(list: Login[], key: WindowKey): { w: Reading | null; stale: 
   return { w: strip(best), stale };
 }
 
+/** An ISO time in ms; a missing or unreadable one sorts as the oldest. */
+const ms = (iso: string | undefined) => {
+  const t = Date.parse(iso ?? "");
+  return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t;
+};
+/** A sort comparator, newest first, that never answers NaN for two missing times. */
+const desc = (a: number, b: number) => (a === b ? 0 : b > a ? 1 : -1);
+
+/** The login whose probe read last, else the one whose probe attempted last. */
+function probeLogin(list: Login[]): Login | undefined {
+  return list
+    .filter((l) => l.record?.probe !== undefined)
+    .sort(
+      (a, b) =>
+        desc(ms(a.record?.probe?.read_at), ms(b.record?.probe?.read_at)) ||
+        desc(ms(a.record?.probe?.attempted_at), ms(b.record?.probe?.attempted_at)),
+    )[0];
+}
+
+function toProbe(best: Login | undefined): Probe | null {
+  const p = best?.record?.probe;
+  if (best === undefined || p === undefined) return null;
+  return {
+    machine: best.machine,
+    state: p.state,
+    attemptedAt: p.attempted_at,
+    readAt: p.read_at ?? null,
+  };
+}
+
 /** The machines volleyd knows of: its own, then every paired machine's record (T0's `machines[]`). */
 const configured = (r: ListResult) => [
   LOCAL_MACHINE,
@@ -237,6 +293,9 @@ export function groupAccounts(r: ListResult, records: UsageRecord[]): AccountGro
       plan: newest.find((l) => l.plan !== undefined)?.plan ?? null,
       fiveHour: five.w,
       weekly: week.w,
+      // The figure comes from the login whose probe it reports, so its age is that read's.
+      fable: probeLogin(list)?.record?.model_weekly?.fable ?? null,
+      probe: toProbe(probeLogin(list)),
       stale: [...five.stale, ...week.stale],
       members,
       missing: machines.filter((name) => !members.some((m) => m.machine === name)),
@@ -244,7 +303,7 @@ export function groupAccounts(r: ListResult, records: UsageRecord[]): AccountGro
   });
 }
 
-const WINDOW_NAME: Record<WindowKey, string> = { five_hour: "5-hour", weekly: "week" };
+const WINDOW_NAME: Record<WindowKey, string> = { five_hour: "5-hour", weekly: "7-day" };
 const where = (machine: string) => (machine === LOCAL_MACHINE ? "this machine" : machine);
 
 /** `4h 2m`, `38m`, `2d 18h`; `null` when the reset is unknown or has passed (the Desk's `resetsIn`). */
@@ -259,24 +318,75 @@ export function resetsIn(resetsAt: string | null, now: number): string | null {
   return `${m}m`;
 }
 
-/** `2 m`, `3 h`, `1 d`: how long ago a reading was sampled; `?` when it does not parse. */
-function age(sampledAt: string, now: number): string {
-  const t = Date.parse(sampledAt);
+/** `2 min`, `3 h`, `1 d`: how old a reading is; `<1 min` under a minute, `?` when it does not parse. */
+function age(at: string, now: number): string {
+  const t = Date.parse(at);
   if (Number.isNaN(t)) return "?";
   const m = Math.max(0, Math.floor((now - t) / 60_000));
-  if (m < 60) return `${m} m`;
+  if (m < 1) return "<1 min";
+  if (m < 60) return `${m} min`;
   if (m < 1440) return `${Math.floor(m / 60)} h`;
   return `${Math.floor(m / 1440)} d`;
 }
 
-const pct = (n: number) => `${Math.round(n)}%`;
+/** `4 min ago`, `just now`. */
+const ago = (at: string, now: number) => {
+  const a = age(at, now);
+  return a === "<1 min" ? "just now" : `${a} ago`;
+};
 
-function windowText(key: WindowKey, w: Reading | null, now: number): string {
-  if (w === null) return `${WINDOW_NAME[key]} —`;
-  const reset = resetsIn(w.resets_at, now);
-  const from = `from ${where(w.machine)} ${age(w.sampledAt, now)} ago`;
-  return `${WINDOW_NAME[key]} ${pct(w.pct)} (${reset !== null ? `resets in ${reset}, ` : ""}${from})`;
+/** A window's percentage; one whose reset has passed counts as 0 (the Desk's `windowPct`). */
+function pct(w: UsageWindow, now: number): string {
+  const t = w.resets_at !== null ? Date.parse(w.resets_at) : Number.NaN;
+  return `${!Number.isNaN(t) && t <= now ? 0 : Math.round(w.pct)}%`;
 }
+
+function windowText(
+  name: string,
+  w: UsageWindow | null,
+  now: number,
+  extra: string[] = [],
+): string {
+  if (w === null) return `${name} —`;
+  const reset = resetsIn(w.resets_at, now);
+  const notes = [...(reset !== null ? [`resets in ${reset}`] : []), ...extra];
+  return `${name} ${pct(w, now)}${notes.length > 0 ? ` (${notes.join(", ")})` : ""}`;
+}
+
+const PROBE_HINT: Record<Exclude<ProbeState, "ok">, (machine: string) => string> = {
+  expired: () => "login expired",
+  no_credential: (m) => `no credential on ${where(m)}`,
+  rate_limited: () => "rate limited, retrying",
+  rejected: () => "probe failed",
+  error: () => "probe failed",
+};
+
+/** `Fable 12% (resets in 4d 2h, read 4 min ago)`, or why there is no figure. */
+function fableText(g: AccountGroup, now: number): string {
+  const p = g.probe;
+  if (p === null) return "Fable — (not read yet)";
+  if (p.state === "ok")
+    return g.fable === null
+      ? "Fable — (no Fable window reported)"
+      : windowText("Fable", g.fable, now, [`read ${ago(p.readAt ?? p.attemptedAt, now)}`]);
+  const why = PROBE_HINT[p.state](p.machine);
+  return `Fable — (${why}${p.readAt !== null ? `, last read ${ago(p.readAt, now)}` : ""})`;
+}
+
+/** The group's three windows on one line: `5-hour 37% (resets in 2h 14m) · 7-day … · Fable …`. */
+function usageLine(g: AccountGroup, now: number): string {
+  return [
+    windowText(WINDOW_NAME.five_hour, g.fiveHour, now),
+    windowText(WINDOW_NAME.weekly, g.weekly, now),
+    fableText(g, now),
+  ].join(" · ");
+}
+
+/** The 5-hour or 7-day reading sampled last: where the line's two figures come from. */
+const freshest = (g: AccountGroup) =>
+  [g.fiveHour, g.weekly]
+    .filter((r): r is Reading => r !== null)
+    .sort((a, b) => desc(ms(a.sampledAt), ms(b.sampledAt)))[0];
 
 const STATE: Record<string, string> = {
   signed_in: "signed in",
@@ -301,10 +411,10 @@ export function renderGroups(
         : [g.label, g.plan, g.org, showEmail ? g.email : maskEmail(g.email)];
     const note = g.email === null ? " (e-mail not reported yet)" : "";
     out += `${head.filter((x) => x !== null).join(" · ")}${note}\n`;
-    out +=
-      g.fiveHour === null && g.weekly === null
-        ? "  5-hour —   week —   (no usage yet)\n"
-        : `  ${windowText("five_hour", g.fiveHour, now)}   ${windowText("weekly", g.weekly, now)}\n`;
+    out += `  ${usageLine(g, now)}\n`;
+    const from = freshest(g);
+    if (from !== undefined)
+      out += `  freshest: ${where(from.machine)}, ${ago(from.sampledAt, now)}\n`;
     for (const m of g.members) {
       const cols = [
         where(m.machine).padEnd(machineW),
@@ -313,7 +423,9 @@ export function renderGroups(
       ];
       if (m.waves.length > 0) cols.push(`waves: ${m.waves.join(", ")}`);
       for (const s of g.stale.filter((x) => x.account === m.account))
-        cols.push(`${WINDOW_NAME[s.window]} ${pct(s.pct)} ${age(s.sampledAt, now)} old (stale)`);
+        cols.push(
+          `${WINDOW_NAME[s.window]} ${Math.round(s.pct)}% ${age(s.sampledAt, now)} old (stale)`,
+        );
       out += `  ${cols.join("   ").trimEnd()}\n`;
       if (m.url !== undefined) out += `    sign in: ${m.url}\n`;
     }
