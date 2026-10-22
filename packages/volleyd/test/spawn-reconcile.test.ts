@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { spawnAgent } from "../src/spawn";
 import type { SpawnError } from "../src/spawn-error";
 import { type SpawnEnv, fakeWatch, makeSpawnEnv } from "./helpers/fake-host";
+import { type Fleet, makeFleet } from "./helpers/fleet-env";
 import { ARTIFACTS_OK, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
 
 const NAME = "w1 T1 implementer";
@@ -165,5 +166,42 @@ describe("an adopted agent under the daemon", () => {
     });
     await env.status("done", { summary: "ok" });
     await env.until(() => env.journal().some((e) => e.type === "agent_retired"));
+  });
+});
+
+describe("a restart with retained blocked statuses on a paired machine", () => {
+  let f: Fleet | undefined;
+  afterEach(async () => {
+    await f?.close();
+    f = undefined;
+  });
+
+  it("three agents blocked on the box while volleyd was down: three decisions after reconcile", async () => {
+    f = await makeFleet();
+    const fleet = f;
+    // One wave per agent, each supervised before the next is submitted.
+    const waves = ["w1", "w2", "w3"];
+    const ids: string[] = [];
+    for (const w of waves) {
+      await fleet.submit(w, "", "  T1: { issue: 42, host: box }\n");
+      await fleet.tick();
+      const id = fleet.agentOf(w, "T1");
+      await fleet.supervised(id);
+      ids.push(id);
+    }
+    await fleet.daemon.stop();
+    for (const id of ids) await fleet.finish(id, "blocked");
+    await fleet.restart();
+    for (let i = 0; i < 3; i++) await fleet.tick();
+    for (const [i, w] of waves.entries()) {
+      // Live and registered, its lock found (a remote task's lock is kept on this machine,
+      // under $VOLLEYD_HOME/hosts/<target>): no drift, watched again.
+      const reconciled = fleet.journal(w).filter((e) => e.type === "reconciled");
+      expect(reconciled.map((e) => e.data.drift)).toEqual([[]]);
+      const opened = fleet
+        .journal(w)
+        .filter((e) => e.type === "decision_opened" && e.data.kind === "agent_blocked");
+      expect(opened.map((e) => e.data.agent_id)).toEqual([ids[i]]);
+    }
   });
 });

@@ -25,6 +25,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   idle_grace_s: 180,
   background_wait_max_s: 7200,
   stall_backoff_max_s: 1800,
+  blocked_undecided_stall_ms: 300_000,
   tool_in_flight_max_s: 7200,
   fallback_model: null,
   mailbox: { session_expiry_s: 604800 },
