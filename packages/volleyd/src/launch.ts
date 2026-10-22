@@ -98,8 +98,9 @@ export function isMcpServerEntry(e: unknown): boolean {
 
 /**
  * `agent_mcp_allow`: the entries `allow` names from `configs` (each a parsed `mcpServers` holder,
- * or null), a later source winning a name, and the names found in none. A name whose only
- * entries are of a shape volleyd does not copy (isMcpServerEntry) is `malformed`, not copied.
+ * or null), a later source winning a name, and the names found in none. A name whose winning
+ * entry is of a shape volleyd does not copy (isMcpServerEntry) is `malformed`, not copied, even
+ * when a broader source has a good one.
  * `volley` is volleyd's own server, so it is neither copied nor missing.
  */
 export function allowedMcpServers(
@@ -115,8 +116,11 @@ export function allowedMcpServers(
     let odd = false;
     for (const { config } of configs) {
       const entry = mcpServersOf(config)[name];
-      if (isMcpServerEntry(entry)) found = entry;
-      else if (entry !== undefined) odd = true;
+      if (entry === undefined) continue;
+      // A narrower scope's entry overrides a broader one even when volleyd cannot copy it, as
+      // Claude Code would use it: the broader entry is never the fallback.
+      odd = !isMcpServerEntry(entry);
+      found = odd ? undefined : entry;
     }
     if (found !== undefined) servers[name] = found;
     else if (odd) malformed.push(name);

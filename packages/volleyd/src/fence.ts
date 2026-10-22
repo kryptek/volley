@@ -2056,9 +2056,9 @@ function newSessionSealed(args: readonly string[], opts: FenceOptions): Verdict 
  * The bash script for `ssh -T <target> bash -s`: `set -euo pipefail`, then one line per step,
  * every word single-quoted (so no path or value is ever shell syntax). A step with a `cwd` runs
  * in a subshell that `cd`s first; a file write runs `base64 -d` under `umask 077` from a quoted
- * heredoc (base64 text cannot contain its delimiter), into a file it first removes (an append
- * excepted), so the content never lands at an existing file's looser mode. The trust compare is fed the same way,
- * through `base64 -d |`. Every other step reads /dev/null: under `bash -s` a step that read its
+ * heredoc (base64 text cannot contain its delimiter), into a file it first removes and then
+ * creates under `set -C` (an append excepted), so the content never lands at an existing file's
+ * looser mode or through a symlink. The trust compare is fed the same way, through `base64 -d |`. Every other step reads /dev/null: under `bash -s` a step that read its
  * stdin would consume the rest of the script.
  */
 export function renderRemoteScript(script: RemoteScript): string {
@@ -2068,9 +2068,11 @@ export function renderRemoteScript(script: RemoteScript): string {
     const cmd = s.argv.map(shq).join(" ");
     if (s.stdout !== undefined) {
       // A whole write removes the file first, so it is created afresh under the umask: an
-      // overwrite never keeps an earlier, looser mode while the new content lands.
+      // overwrite never keeps an earlier, looser mode while the new content lands. Noclobber
+      // makes the create exclusive, so a symlink planted after the rm is refused, not followed.
       const out = shq(s.stdout);
-      const write = s.append === true ? `${cmd} >> ${out}` : `'rm' '-f' ${out} && ${cmd} > ${out}`;
+      const write =
+        s.append === true ? `${cmd} >> ${out}` : `set -C && 'rm' '-f' ${out} && ${cmd} > ${out}`;
       lines.push(`( umask 077 && ${write} ${heredoc(s)}\n)`);
     } else if (s.stdin !== undefined) {
       lines.push(`'base64' '-d' ${heredoc(s).replace("\n", ` | ${cmd}\n`)}`);

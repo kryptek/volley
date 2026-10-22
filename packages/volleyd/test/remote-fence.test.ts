@@ -700,7 +700,7 @@ describe("renderRemoteScript", () => {
       steps: [{ argv: ["base64", "-d"], stdin: b64, stdout: "/wt/x/.volley/agent.json" }],
     });
     expect(script).toContain(
-      `( umask 077 && 'rm' '-f' '/wt/x/.volley/agent.json' && 'base64' '-d' > '/wt/x/.volley/agent.json' <<'VOLLEY_EOF'\n${b64}\nVOLLEY_EOF\n)`,
+      `( umask 077 && set -C && 'rm' '-f' '/wt/x/.volley/agent.json' && 'base64' '-d' > '/wt/x/.volley/agent.json' <<'VOLLEY_EOF'\n${b64}\nVOLLEY_EOF\n)`,
     );
   });
 

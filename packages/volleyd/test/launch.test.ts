@@ -212,7 +212,7 @@ describe("launch.sh", () => {
     ).toEqual({ servers: { b: { command: "b-repo" } }, missing: ["zzz"], malformed: [] });
   });
 
-  it("allowedMcpServers: an entry of a shape a paired machine's fence refuses is skipped as malformed", () => {
+  it("allowedMcpServers: an entry of a shape a paired machine's fence refuses is skipped as malformed, and overrides a broader one", () => {
     const user = {
       mcpServers: {
         good: { command: "g", args: ["x"], env: { T: "t" } },
@@ -236,10 +236,9 @@ describe("launch.sh", () => {
       servers: {
         good: { command: "g", args: ["x"], env: { T: "t" } },
         remote: { url: "https://x", headers: { A: "b" } },
-        both: { command: "repo-bad" },
       },
       missing: [],
-      malformed: ["numArg", "numEnv", "neither"],
+      malformed: ["numArg", "numEnv", "neither", "both"],
     });
   });
 

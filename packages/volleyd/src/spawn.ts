@@ -1239,8 +1239,9 @@ async function userMcpSources(ctx: Ctx): Promise<[McpSource, McpSource, McpSourc
 /**
  * `agent_mcp_allow` names no server the agent's config has: journal
  * `alarm_raised { alarm: "agent_mcp_allow_missing", name, host }` once per wave, name and machine
- * (each machine has its own config; and log it); the spawn goes on without it. `unapproved` are names the worktree's `.mcp.json` has but the
- * profile never approved for the repository, which the message says rather than "no server";
+ * (each machine has its own config), and log it; the spawn goes on without it. `unapproved` are
+ * names the worktree's `.mcp.json` has but the profile never approved for the repository, which
+ * the message says rather than "no server";
  * `malformed` are names whose entry is of a shape volleyd does not copy (isMcpServerEntry).
  */
 async function alarmMissingAllowed(
