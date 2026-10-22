@@ -106,6 +106,26 @@ describe("ConfigStore layering", () => {
     ).toEqual([]);
   });
 
+  it("agent_mcp_allow defaults to [] (every server) and takes distinct server names, globally and per wave", () => {
+    expect(CONFIG_DEFAULTS.agent_mcp_allow).toEqual([]);
+    writeFileSync(join(home, "config.yaml"), "agent_mcp_allow: [migrations]\n");
+    const c = open();
+    expect(c.get("agent_mcp_allow")).toEqual(["migrations"]);
+    c.setWaveOverrides("w1", { agent_mcp: "inherit", agent_mcp_allow: ["a", "plugin:pw:pw"] });
+    expect(c.effective("w1").agent_mcp_allow).toEqual(["a", "plugin:pw:pw"]);
+    expect(c.effective().agent_mcp_allow).toEqual(["migrations"]);
+    for (const bad of [[1], ["a", "a"], [""], "a"]) {
+      expect(
+        c.applyPatch({ agent_mcp_allow: bad } as never, "x").applied,
+        JSON.stringify(bad),
+      ).toBe(false);
+    }
+    expect(c.applyPatch({ agent_mcp_allow: ["b"] }, "x").applied).toBe(true);
+    expect(
+      schemaErrors("config.schema.json", envelope("_waves/_config", "config", c.retainedPayload())),
+    ).toEqual([]);
+  });
+
   it("agent_auto_compact_pct defaults to 85, is bounded 0..100 and layers per wave", () => {
     expect(CONFIG_DEFAULTS.agent_auto_compact_pct).toBe(85);
     const c = open();

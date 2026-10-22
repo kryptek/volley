@@ -430,6 +430,18 @@ describe("remote allow-list (ssh … bash -s)", () => {
       "an entry inside .volley/": renderMcpConfig("/wt/x/.volley/packages/volley-mcp/src/index.ts"),
       "an extra line": `${renderMcpConfig(entry)}\n{}`,
     };
+    // agent_mcp_allow: the box's own allowed servers beside volleyd's `volley`, as rendered.
+    const allowed = renderMcpConfig(entry, { migrations: { command: "npx", args: ["m"] } });
+    expect(() => assertAllowed(SSH, remote(write(allowed)))).not.toThrow();
+    Object.assign(bad, {
+      "extras before volley": JSON.stringify(
+        { mcpServers: { m: { command: "m" }, volley: JSON.parse(allowed).mcpServers.volley } },
+        null,
+        2,
+      ),
+      "an extra that is not an entry": renderMcpConfig(entry, { m: "sh" } as never),
+      "a re-indented copy": JSON.stringify(JSON.parse(allowed)),
+    });
     for (const [why, content] of Object.entries(bad)) {
       expect(() => assertAllowed(SSH, remote(write(content))), why).toThrow(FenceError);
     }

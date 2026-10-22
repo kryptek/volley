@@ -635,6 +635,7 @@ interface SpawnPipelineOptions {
   branch_update?: "merge";
   /** A respawn of a moved or vanished agent: its own MCP servers, not the tunable's now. */
   agent_mcp?: AgentMcp;
+  agent_mcp_allow?: string[];
   /** An account move's resume note, appended to the brief. */
   resumeNote?: string;
   /** An account move of a pipeline role: the attempt whose worktree it continues in. */
@@ -4188,6 +4189,7 @@ export class Daemon {
       tunables: eff,
       owner: log.record.state?.owner ?? null,
       journal: (ev) => this.append(wave, ev),
+      journaled: (match) => log.journal.readAll().some(match),
       now: this.now,
       get openDecisions() {
         return log.record.state?.open_decisions ?? [];

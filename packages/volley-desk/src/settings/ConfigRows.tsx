@@ -185,6 +185,45 @@ function MultiControl(p: {
   );
 }
 
+/** A list of free strings as one comma-separated field; a commit sends the whole new list. */
+function ListControl(p: {
+  row: SchemaRow;
+  value: unknown;
+  disabled: boolean;
+  onCommit: (v: string[]) => void;
+}) {
+  const items = Array.isArray(p.value)
+    ? p.value.filter((v): v is string => typeof v === "string")
+    : [];
+  const current = items.join(", ");
+  const [draft, setDraft] = useState(current);
+  useEffect(() => setDraft(current), [current]);
+  const commit = () => {
+    const next = [...new Set(draft.split(",").map((v) => v.trim()))].filter((v) => v !== "");
+    if (next.join(", ") === current) return;
+    p.onCommit(next);
+  };
+  return (
+    <input
+      className="cfg-text recessed mono"
+      aria-label={p.row.label}
+      value={draft}
+      disabled={p.disabled}
+      placeholder="none"
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+        if (e.key === "Escape") {
+          // Drop the edit; the dialog stays open.
+          e.stopPropagation();
+          setDraft(current);
+        }
+      }}
+    />
+  );
+}
+
 export interface ConfigRowsProps {
   scope: ConfigScope;
   /** The values shown: the retained `_config` (global) or the wave's `effective_config`. */
@@ -366,6 +405,13 @@ export function ConfigRows({
           <MultiControl
             row={row}
             options={c.options}
+            value={shown}
+            disabled={!(writable || draftOnly) || current === undefined}
+            onCommit={(v) => commit(row, v, 0)}
+          />
+        ) : c.kind === "list" ? (
+          <ListControl
+            row={row}
             value={shown}
             disabled={!(writable || draftOnly) || current === undefined}
             onCommit={(v) => commit(row, v, 0)}

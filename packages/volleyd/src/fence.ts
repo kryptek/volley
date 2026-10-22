@@ -176,7 +176,8 @@ import { AGENT_BRANCH } from "./worktree";
  *     `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the profile block, an
  *     integer in 100000..1000000, never in the env block); a
  *     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
- *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/` (MCP_CONFIG); and
+ *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/`, with the
+ *     `agent_mcp_allow` entries copied from the box's own config after it (MCP_CONFIG); and
  *     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
  *     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir (`claude auth
  *     login`, never `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
@@ -1759,12 +1760,17 @@ function isLaunchScript(content: string, worktree: string): boolean {
 
 /**
  * MCP_CONFIG: whether `content` is exactly `renderMcpConfig` of an absolute, clean volley-mcp
- * entry point outside any `.volley/` (claude runs that server for the agent).
+ * entry point outside any `.volley/` (claude runs that server for the agent), plus, after it, the
+ * entries `agent_mcp_allow` copied from the machine's own MCP config (each an object; claude
+ * would start that entry under `agent_mcp: inherit` anyway).
  */
 function isMcpConfig(content: string): boolean {
   let entry: unknown;
+  let extra: Record<string, unknown>;
   try {
-    entry = JSON.parse(content)?.mcpServers?.volley?.args?.[1];
+    const { volley, ...rest } = JSON.parse(content)?.mcpServers ?? {};
+    entry = volley?.args?.[1];
+    extra = rest;
   } catch {
     return false;
   }
@@ -1772,7 +1778,8 @@ function isMcpConfig(content: string): boolean {
     typeof entry === "string" &&
     entry.endsWith(MCP_ENTRY_SUFFIX) &&
     outsideVolley(entry) &&
-    renderMcpConfig(entry) === content
+    Object.values(extra).every((e) => typeof e === "object" && e !== null && !Array.isArray(e)) &&
+    renderMcpConfig(entry, extra) === content
   );
 }
 

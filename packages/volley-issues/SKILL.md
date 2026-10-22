@@ -134,6 +134,8 @@ The three autopilot settings, written into the wave file:
 - `--autopilot on|off` writes `config: { autopilot: { enabled } }` for this wave. `on` lets volleyd answer the routine decisions from its policy table (`volleyd policy` prints it); `off` makes every decision wait for the owner, as before autopilot, and the wave is driven by hand (**Driving a wave by hand**). Left out, the wave follows the supervisor's `autopilot.enabled` (on by default). Ask the user only when they have said they want to steer this wave themselves.
 - `--branch-update merge|rebase` writes `config: { branch_update }`. `merge` is the recommended setting for autopilot waves: volleyd brings a PR branch up to date by merging the release branch in and pushing normally (no force-push of any kind), so nobody's head is rewritten while the wave runs unattended. Left out, the supervisor's `branch_update` applies (`rebase` by default).
 
+The helper writes no MCP setting. When the repository's agents need some of the user's own MCP servers (a migration counter, say), add `agent_mcp: inherit` and `agent_mcp_allow: [<server name>, …]` to the wave file's `config:` by hand: each agent then starts volleyd's `volley` plus only the named servers, not every server in the profile. Without the list `inherit` starts them all; a name volleyd finds nowhere is skipped and journaled once (`agent_mcp_allow_missing`).
+
 The helper's last stderr lines are the submit command and the owner it names:
 
 ```text

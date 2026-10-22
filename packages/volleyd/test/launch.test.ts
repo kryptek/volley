@@ -18,6 +18,7 @@ import {
   LAUNCH_COMMAND,
   MCP_ENTRY,
   VOLLEY_MCP_SERVER,
+  allowedMcpServers,
   hooksSettingsPath,
   mcpConfigPath,
   renderLaunchScript,
@@ -164,6 +165,49 @@ describe("launch.sh", () => {
     expect(() =>
       sealLaunchScript(vars.worktree, script.replace("--strict-mcp-config", "--debug")),
     ).toThrow(FenceError);
+  });
+
+  it("agent_mcp_allow: inherit with an allowlist launches strict, its mcp.json naming the allowed servers", () => {
+    const vars = {
+      hooksDir: "/opt/volley/packages/volley-hooks",
+      model: "claude-opus-5-5",
+      agentId: "w1-t1-implementer-1",
+      worktree: "/wt/w1/T1-implementer",
+    };
+    const strict = renderLaunchScript(vars);
+    // Only the named servers start: claude gets them in mcp.json and loads nothing else.
+    const allowed = renderLaunchScript({ ...vars, agentMcp: "inherit", mcpAllow: ["x"] });
+    expect(allowed).toContain(" --strict-mcp-config ");
+    expect(allowed).toBe(strict);
+    expect(() => sealLaunchScript(vars.worktree, allowed)).not.toThrow();
+    // An empty list is every server, as before.
+    expect(renderLaunchScript({ ...vars, agentMcp: "inherit", mcpAllow: [] })).not.toContain(
+      "--strict-mcp-config",
+    );
+    // volleyd's `volley` comes first and is never replaced by an entry of that name.
+    const migrations = { command: "npx", args: ["migrations-mcp"], env: { TOKEN: "t" } };
+    const cfg = JSON.parse(renderMcpConfig(MCP_ENTRY, { migrations, volley: { command: "evil" } }));
+    expect(cfg).toEqual({
+      mcpServers: { volley: { command: "bun", args: ["run", MCP_ENTRY] }, migrations },
+    });
+    expect(Object.keys(cfg.mcpServers)).toEqual(["volley", "migrations"]);
+  });
+
+  it("allowedMcpServers: the named entries, a later source winning, and the names found nowhere", () => {
+    const user = {
+      mcpServers: { a: { command: "a" }, b: { command: "b-user" }, c: { command: "c" } },
+    };
+    const repo = { mcpServers: { b: { command: "b-repo" } } };
+    expect(
+      allowedMcpServers(
+        ["b", "zzz", "volley"],
+        [
+          { source: "~/.claude.json", config: user },
+          { source: ".mcp.json", config: repo },
+          { source: ".mcp.json", config: null },
+        ],
+      ),
+    ).toEqual({ servers: { b: { command: "b-repo" } }, missing: ["zzz"] });
   });
 
   it("the hooks settings template exists where HOOKS_DIR points", () => {
@@ -338,6 +382,84 @@ describe("launch (local cmux host)", () => {
       ],
     });
     expect(lines).toEqual([expect.stringContaining("'volley-coord'")]);
+  });
+
+  it("agent_mcp_allow: mcp.json holds volley plus the allowed servers (repo's .mcp.json and local scope win), launched strict", async () => {
+    env = await makeSpawnEnv();
+    const lines: string[] = [];
+    env.deps.log = (line) => lines.push(line);
+    env.deps.tunables = {
+      ...env.deps.tunables,
+      agent_mcp: "inherit",
+      agent_mcp_allow: ["b", "c", "d"],
+    };
+    const cfg = JSON.parse(readFileSync(env.claudeJson, "utf-8"));
+    // `claude mcp add` (local scope) keeps a server under the repository's project entry.
+    cfg.projects[env.repo].mcpServers = { d: { command: "d-local" }, a: { command: "a-local" } };
+    cfg.mcpServers = {
+      a: { command: "a" },
+      b: { command: "b", env: { SECRET_TOKEN: "s3cret" } },
+      c: { command: "c-user" },
+    };
+    writeFileSync(env.claudeJson, JSON.stringify(cfg));
+    mkdirSync(env.worktree, { recursive: true });
+    writeFileSync(
+      join(env.worktree, ".mcp.json"),
+      JSON.stringify({ mcpServers: { c: { command: "c-repo" } } }),
+    );
+    expect((await spawnAgent(env.request(), env.deps)).kind).toBe("launched");
+    const mcp = JSON.parse(readFileSync(join(env.worktree, ".volley", "mcp.json"), "utf-8"));
+    expect(mcp.mcpServers).toEqual({
+      volley: { command: "bun", args: ["run", env.deps.mcpEntry] },
+      b: { command: "b", env: { SECRET_TOKEN: "s3cret" } },
+      c: { command: "c-repo" },
+      d: { command: "d-local" },
+    });
+    const script = readFileSync(join(env.worktree, ".volley", "launch.sh"), "utf-8");
+    expect(script).toContain(" --strict-mcp-config ");
+    expect(env.events.find((e) => e.type === "agent_spawned")?.data).toMatchObject({
+      agent_mcp: "inherit",
+      agent_mcp_allow: ["b", "c", "d"],
+    });
+    // The entries' secrets are never journaled or logged: names only.
+    expect(JSON.stringify(env.events)).not.toContain("s3cret");
+    expect(lines.join("\n")).not.toContain("s3cret");
+  });
+
+  it("agent_mcp_allow: a name found nowhere raises one agent_mcp_allow_missing alarm per wave; the spawn goes on", async () => {
+    env = await makeSpawnEnv();
+    env.deps.tunables = { ...env.deps.tunables, agent_mcp: "inherit", agent_mcp_allow: ["zzz"] };
+    env.deps.journaled = (match) => env.events.some((e) => match(e));
+    const out = await spawnAgent(env.request(), env.deps);
+    expect(out.kind).toBe("launched");
+    const mcp = JSON.parse(readFileSync(join(env.worktree, ".volley", "mcp.json"), "utf-8"));
+    expect(Object.keys(mcp.mcpServers)).toEqual(["volley"]);
+    if (out.kind === "launched") out.lock.release();
+    expect((await spawnAgent(env.request({ attempt: 2 }), env.deps)).kind).toBe("launched");
+    const alarms = env.events.filter(
+      (e) => e.type === "alarm_raised" && e.data.alarm === "agent_mcp_allow_missing",
+    );
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0]?.data).toMatchObject({ name: "zzz" });
+  });
+
+  it("agent_mcp_allow on a paired machine reads the box's own ~/.claude.json", async () => {
+    env = await makeSpawnEnv();
+    env.deps.tunables = { ...env.deps.tunables, agent_mcp: "inherit", agent_mcp_allow: ["b"] };
+    env.deps.remoteTrust = {
+      host: "box-a",
+      target: "dev@box-a",
+      read: async () => ({
+        projects: { [realpathSync(env.repo)]: { hasTrustDialogAccepted: true } },
+        mcpServers: { a: { command: "a" }, b: { command: "b-remote" }, c: { command: "c" } },
+      }),
+    };
+    expect((await spawnAgent(env.request(), env.deps)).kind).toBe("launched");
+    const mcp = JSON.parse(readFileSync(join(env.worktree, ".volley", "mcp.json"), "utf-8"));
+    expect(mcp.mcpServers).toEqual({
+      volley: { command: "bun", args: ["run", env.deps.mcpEntry] },
+      b: { command: "b-remote" },
+    });
   });
 
   it("agent_mcp: strict never warns: no user server starts", async () => {

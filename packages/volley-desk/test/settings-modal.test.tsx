@@ -39,6 +39,7 @@ const config: ConfigPayload = {
   fallback_model: "claude-sonnet-5-5",
   mailbox: { session_expiry_s: 604800 },
   worktree_root: "/tmp/volley worktrees",
+  agent_mcp_allow: [],
   spawn_timeout_s: 180,
   wake_grace_s: 120,
 };
@@ -350,6 +351,18 @@ describe("Settings › Supervisor (global config rows)", () => {
     fireEvent.keyDown(box, { key: "Enter" });
     await flush();
     expect(f.published[0]?.envelope.payload).toMatchObject({ patch: { fallback_model: null } });
+  });
+
+  it("sends a list tunable (agent_mcp_allow) on Enter, as distinct trimmed names", async () => {
+    const f = fakeClient();
+    setup(createConfigTransport(f.client, { identity: "desk" }));
+    const box = screen.getByRole("textbox", { name: "Agent MCP allow" });
+    fireEvent.change(box, { target: { value: "migrations, playwright,, migrations " } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    expect(f.published[0]?.envelope.payload).toMatchObject({
+      patch: { agent_mcp_allow: ["migrations", "playwright"] },
+    });
   });
 
   it("sends a switch tunable on a click and a choice tunable on a pick", async () => {

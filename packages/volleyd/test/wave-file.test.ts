@@ -268,6 +268,19 @@ describe("account: (Claude account profiles)", () => {
     );
   });
 
+  it("agent_mcp_allow is a per-wave config override: a list of server names", () => {
+    const w = parseWaveFile(
+      `${HEADER}config:\n  agent_mcp: inherit\n  agent_mcp_allow: [migrations, playwright]\n${TASKS}`,
+    );
+    expect(w.config).toEqual({
+      agent_mcp: "inherit",
+      agent_mcp_allow: ["migrations", "playwright"],
+    });
+    expect(errorsOf(`${HEADER}config:\n  agent_mcp_allow: [1]\n${TASKS}`)[0]).toMatch(
+      /^config\.agent_mcp_allow/,
+    );
+  });
+
   it("agent_auto_compact_pct is a per-wave config override, 0..100", () => {
     const w = parseWaveFile(`${HEADER}config:\n  agent_auto_compact_pct: 70\n${TASKS}`);
     expect(w.config.agent_auto_compact_pct).toBe(70);

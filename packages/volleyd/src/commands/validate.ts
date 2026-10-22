@@ -41,6 +41,10 @@ preview, "if admitted now: T1 → box-a (0.81), T3 → local (0.63)", from the m
 readiness verdicts retained on the broker (VOLLEY_BROKER_URL / VOLLEY_NAMESPACE); the real
 decision is made when the scheduler admits each task.
 
+Under \`agent_mcp: inherit\` (the wave's \`config:\`, else config.yaml's) it prints which MCP
+servers the agents start: "agent_mcp: inherit (allow: migrations, playwright)", or "(every user
+server)" with no \`agent_mcp_allow\`.
+
 It also prints the brief preface every agent of the wave would get — its path, size and sha256
 prefix, or "none" — and fails with BRIEF_PREFACE_TOO_LARGE when the file is over
 brief_preface_max_bytes (the wave's config: value, else $VOLLEYD_HOME/config.yaml's, else the
@@ -57,11 +61,9 @@ RELEASE_PLAYBOOK_INVALID and its path-qualified errors.
  * `$VOLLEYD_HOME/config.yaml` over the default. A file that does not parse is the daemon's to
  * report; validate falls back to the default.
  */
-function globalTunable<K extends "brief_preface_max_bytes" | "require_fresh_base">(
-  env: CommandArgs["env"],
-  key: K,
-  valid: (v: unknown) => boolean,
-): Tunables[K] {
+function globalTunable<
+  K extends "brief_preface_max_bytes" | "require_fresh_base" | "agent_mcp" | "agent_mcp_allow",
+>(env: CommandArgs["env"], key: K, valid: (v: unknown) => boolean): Tunables[K] {
   const fallback = CONFIG_DEFAULTS[key];
   const file = join(volleydHome(env), "config.yaml");
   if (!existsSync(file)) return fallback;
@@ -100,6 +102,25 @@ export function localPinWarnings(wave: Wave, env: CommandArgs["env"]): string {
         `warning: ${id} pins host: local while fleet.local_agents is never; it still runs there (the wave file is explicit)\n`,
     )
     .join("");
+}
+
+/**
+ * `agent_mcp: inherit (allow: a, b)` (or `(every user server)`) when the wave's agents inherit the
+ * user's MCP servers, from the wave's `config:` over config.yaml; empty under `strict`.
+ */
+export function agentMcpLine(wave: Wave, env: CommandArgs["env"]): string {
+  const mode =
+    wave.config.agent_mcp ??
+    globalTunable(env, "agent_mcp", (v) => v === "strict" || v === "inherit");
+  if (mode !== "inherit") return "";
+  const allow =
+    wave.config.agent_mcp_allow ??
+    globalTunable(
+      env,
+      "agent_mcp_allow",
+      (v) => Array.isArray(v) && v.every((n) => typeof n === "string"),
+    );
+  return `agent_mcp: inherit (${allow.length > 0 ? `allow: ${allow.join(", ")}` : "every user server"})\n`;
 }
 
 /** `config.yaml`'s `placement.weights` (none: {}), for the merged all-zero check `run` makes. */
@@ -209,7 +230,7 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
       `ok: wave ${wave.wave} v${wave.version} — ${wave.task_order.length} task(s), ` +
         `critical path ${longest}, release branch ${wave.release_branch}\n` +
         `${env.VOLLEY_AGENT_ID || env.VOLLEY_COORDINATOR ? "" : OWNER_NOTE}` +
-        `${note}${localPinWarnings(wave, env)}${prefaceLine}\n${playbookLine}\n${placement}`,
+        `${note}${localPinWarnings(wave, env)}${agentMcpLine(wave, env)}${prefaceLine}\n${playbookLine}\n${placement}`,
     );
     return EXIT.OK;
   } catch (e) {
