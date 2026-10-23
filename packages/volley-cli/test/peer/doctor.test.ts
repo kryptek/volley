@@ -1123,6 +1123,25 @@ describe("volley peer doctor: many repositories (#435)", () => {
       expect(forRepo(fixed, "repo.origin", "new-owner/name")?.ok).toBe(true);
     });
 
+    it("peer.json naming the old owner, the remote the new one: a warn to update peer.json, never a repoint", async () => {
+      const m = machine({
+        canonical: { "old-owner/name": "new-owner/name", "new-owner/name": "new-owner/name" },
+      });
+      const p = managed(m, "old-owner/name");
+      addClone(m, p, { origin: "git@github.com:new-owner/name.git" });
+      const repos = { "old-owner/name": p };
+      const r = await reportRepos(m, repos);
+      expect(forRepo(r, "repo.origin", "old-owner/name")).toMatchObject({ ok: true });
+      const warn = forRepo(r, "repo.canonical", "old-owner/name");
+      expect(warn).toMatchObject({ ok: false, severity: "warn" });
+      expect(warn?.detail).toContain("peer.json names the old owner or name");
+      expect(warn?.fix).toContain("--repo-add new-owner/name=");
+      m.calls.length = 0;
+      const fixed = await reportRepos(m, repos, { fix: true, yes: true });
+      expect(MUTATING(m).filter((a) => a.includes("set-url"))).toEqual([]);
+      expect(fixed.fixes ?? []).toEqual([]);
+    });
+
     it("a genuinely different repository blocks and is never touched", async () => {
       const { m, repos } = setup("git@github.com:someone/fork.git", {});
       const r = await reportRepos(m, repos);
@@ -1228,6 +1247,19 @@ describe("volley peer doctor: many repositories (#435)", () => {
       });
       const r = await reportRepos(m, { "a/a": p });
       expect(forRepo(r, "tool.java", "a/a")?.detail).toContain("17");
+      expect(r.repos?.[0]?.toolchain).toEqual({ ok: false, missing: [], outdated: ["java"] });
+    });
+
+    it('a GA JDK\'s bare major (`openjdk version "17"`) is still held to the minimum', async () => {
+      const m = machine({
+        extraTools: { java: { version: 'openjdk version "17" 2021-09-14' } },
+      });
+      const p = managed(m, "a/a");
+      addClone(m, p, {
+        origin: "https://github.com/a/a",
+        files: { "build.gradle.kts": "", ".volley/requirements.yaml": 'min:\n  java: "21"\n' },
+      });
+      const r = await reportRepos(m, { "a/a": p });
       expect(r.repos?.[0]?.toolchain).toEqual({ ok: false, missing: [], outdated: ["java"] });
     });
 

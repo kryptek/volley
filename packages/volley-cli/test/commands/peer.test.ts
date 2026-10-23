@@ -2014,6 +2014,12 @@ describe("peer.json's repositories (#435)", () => {
     expect(statSync(peerFile(home)).mode & 0o777).toBe(0o600);
   });
 
+  it("--repo-add <owner/name>=~/<path> expands ~ (the shell does not after =)", async () => {
+    writeCfg({ repos: { [SLUG]: box.repoPath } });
+    await doctorJson(["--repo-add", "d/d=~/code/d"]);
+    expect(peerJson().repos).toEqual({ [SLUG]: box.repoPath, "d/d": join(home, "code", "d") });
+  });
+
   it("a flag-less run (what volley deploy and the service send) reads the map", async () => {
     writeCfg({ repos: { [SLUG]: box.repoPath } });
     const r = await doctorJson([]);

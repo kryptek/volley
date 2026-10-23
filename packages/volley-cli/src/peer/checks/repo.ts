@@ -214,6 +214,28 @@ export function reposChecks(f: Facts): Check[] {
     };
     const renamed = (v: CloneView): Check[] => {
       if (!sameRepository(r.canonical)) return [];
+      const remote = originToSlug(v.origin);
+      if (remote !== undefined && remote.toLowerCase() === r.canonical.configured.toLowerCase()) {
+        // The remote already names GitHub's name: peer.json's slug is the stale one. Repointing
+        // would set the URL origin has, so the person updates peer.json instead.
+        return [
+          {
+            id: "repo.origin",
+            ok: true,
+            severity: "block",
+            detail: `origin ${v.origin}: GitHub's ${r.canonical.configured}`,
+          },
+          {
+            id: "repo.canonical",
+            ok: false,
+            severity: "warn",
+            detail: `peer.json names the old owner or name: ${r.slug} is now ${r.canonical.configured}`,
+            fix: {
+              command: `volley peer doctor --repo-remove ${r.slug} --repo-add ${r.canonical.configured}=${r.path}`,
+            },
+          },
+        ];
+      }
       const url = githubUrl(r.canonical.configured);
       const step = [git ?? "git", "-C", r.path, "remote", "set-url", "origin", url];
       return [

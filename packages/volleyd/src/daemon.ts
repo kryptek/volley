@@ -312,6 +312,7 @@ import {
   machineTopic,
   parseDoctorReport,
   parseMachineFrom,
+  withDoctor,
 } from "./machines";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
 import {
@@ -5672,7 +5673,7 @@ export class Daemon {
   private async foldDoctor(name: string, report: DoctorReport): Promise<void> {
     const prior = this.machines.record(name);
     if (!this.running || prior?.tunnel !== "up") return;
-    const record: MachineRecord = { ...prior, ...doctorFields(report) };
+    const record = withDoctor(prior, report);
     if (!validator("machine.schema.json")(this.envelope(MACHINE_CHANNEL, "machine", record))) {
       this.log(`${name}'s doctor report does not fit machine.schema.json: record left as it was`);
       return;

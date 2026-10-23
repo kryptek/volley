@@ -68,6 +68,11 @@ export function versionOf(out: string): string | null {
   return /(\d+\.\d+(?:\.\d+)?)/.exec(first)?.[1] ?? null;
 }
 
+/** A repository's extra tool's version: `versionOf`, or a quoted bare major (`openjdk version "17"`). */
+export function toolVersionOf(out: string): string | null {
+  return versionOf(out) ?? /"(\d+)"/.exec(out.split("\n")[0] ?? "")?.[1] ?? null;
+}
+
 /**
  * The tag a version names (`0.4.0` → `v0.4.0`); anything else (a sha) as it is. Null for a ref
  * git would read as an option.

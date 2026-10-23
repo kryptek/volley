@@ -303,12 +303,40 @@ export function parseDoctorReport(stdout: string): DoctorReport | null {
   return v as unknown as DoctorReport;
 }
 
+/**
+ * At most `MAX_CHECKS`, in the report's order. Over the cap, the machine-level checks are kept
+ * first, then failing per-repository ones: many repositories never push out a failing `gh.*` or
+ * `claude.*` check, which readiness reads.
+ */
+function keptChecks<C extends { ok: boolean; repo?: string }>(checks: C[]): C[] {
+  if (checks.length <= MAX_CHECKS) return checks;
+  const rank = (c: C) => (c.repo === undefined ? 0 : c.ok ? 2 : 1);
+  const kept = new Set(
+    checks
+      .map((c, i) => ({ c, i }))
+      .sort((a, b) => rank(a.c) - rank(b.c) || a.i - b.i)
+      .slice(0, MAX_CHECKS)
+      .map(({ i }) => i),
+  );
+  return checks.filter((_, i) => kept.has(i));
+}
+
+/**
+ * A doctor run folded into a machine's record: the run's fields replace the record's. A report
+ * without `repo` or `repos` (its last repository removed, or a second one added) clears the
+ * record's, which would otherwise outlive the run until the machine's next heartbeat.
+ */
+export function withDoctor(prior: MachineRecord, r: DoctorReport): MachineRecord {
+  const { repo: _repo, repos: _repos, ...rest } = prior;
+  return { ...rest, ...doctorFields(r) };
+}
+
 /** A report as record fields: the checks without their fix text (a record never carries it). */
 export function doctorFields(r: DoctorReport): Partial<MachineRecord> {
   const pick = <K extends keyof DoctorReport>(k: K) =>
     isObject(r[k]) ? { [k]: r[k] } : ({} as Record<string, never>);
   return {
-    checks: r.checks.slice(0, MAX_CHECKS).map(({ id, ok, severity, detail, repo }) => ({
+    checks: keptChecks(r.checks).map(({ id, ok, severity, detail, repo }) => ({
       id,
       ok,
       severity,

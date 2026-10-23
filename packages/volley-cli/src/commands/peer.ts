@@ -330,7 +330,7 @@ export const managedClone = (home: string, slug: string) =>
 
 /**
  * `<owner/name>` (its managed clone) or `<owner/name>=<path>` (the clone at `path`, adopted):
- * the slug and the clone's absolute path; null for anything else.
+ * the slug and the clone's absolute path (`~` is `home`); null for anything else.
  */
 export function parseRepoSpec(value: string, home: string): { slug: string; path: string } | null {
   const i = value.indexOf("=");
@@ -340,7 +340,8 @@ export function parseRepoSpec(value: string, home: string): { slug: string; path
   const path = value.slice(i + 1);
   // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
   if (path === "" || /[\u0000-\u001f\u007f]/.test(path)) return null;
-  return { slug, path: resolve(path) };
+  // The shell leaves `~` after `=` alone (`o/n=~/x` is no assignment): expand it as a bare path is.
+  return { slug, path: resolve(path.replace(/^~(?=\/|$)/, home)) };
 }
 
 /** `repos` with `add` set (an existing key, in any case, replaced) and `remove` dropped. */

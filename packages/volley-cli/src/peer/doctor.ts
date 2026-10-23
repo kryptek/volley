@@ -23,7 +23,15 @@ import {
   onboardingVersionOf,
 } from "./checks/profiles";
 import { GIT_QUIET, githubSlug, normalizeOrigin, repoChecks, reposChecks } from "./checks/repo";
-import { ON_PATH, binOf, repoToolChecks, toolChecks, toolchainOf, versionOf } from "./checks/tools";
+import {
+  ON_PATH,
+  binOf,
+  repoToolChecks,
+  toolChecks,
+  toolVersionOf,
+  toolchainOf,
+  versionOf,
+} from "./checks/tools";
 import {
   PROFILE_CHECKS,
   type ProfileFacts,
@@ -661,7 +669,7 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       if (at !== null) {
         // java prints its version on stderr, go has no --version.
         const v = await sh([at, t === "java" ? "-version" : t === "go" ? "version" : "--version"]);
-        fact.version = v.code === 0 ? versionOf(`${v.stdout}${v.stderr}`.trim()) : null;
+        fact.version = v.code === 0 ? toolVersionOf(`${v.stdout}${v.stderr}`.trim()) : null;
       }
       extraTools[t] = fact;
     }

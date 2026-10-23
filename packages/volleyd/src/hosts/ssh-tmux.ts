@@ -793,7 +793,9 @@ export class SshTmuxHost implements RemoteHost {
         ...(opts.fix ? ["--fix", "--yes"] : []),
         ...add.flatMap((r) => ["--repo-add", r]),
         ...(opts.repos_remove ?? []).flatMap((r) => ["--repo-remove", r]),
-        // An added repository is cloned from its GitHub URL: no --origin.
+        // An added repository is cloned from its GitHub URL: no --origin. `repos_add` /
+        // `repos_remove` and the legacy `clone` exclude each other: with an add, `clone` is
+        // ignored, and a remove with `clone` makes an argv the fence denies. Pass one or the other.
         ...(opts.fix && add.length > 0
           ? ["--clone"]
           : opts.fix && opts.clone !== undefined
