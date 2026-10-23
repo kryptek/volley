@@ -10,13 +10,16 @@
  * last state update (`stopped 2.8h ago`). That is an approximation of the stop
  * time: volleyd bumps `updated_at` for every journaled event, so one after
  * `wave_stopped` (an agent reaped, a decision resolved) moves it on; the wave
- * state carries no stop time of its own yet. A task volleyd holds for CI (its
- * `why_waiting` reads `CI 3/13 · running: … · ~8 min left`, or `CI pending on
- * <sha> (n/m runs)` without job facts) shows `waiting for CI` (`· 3/13` when
- * its jobs are counted) in the graph, a `waiting for CI` chip in the title and
- * a row under the graph with its pipeline (`implement ✓ · CI ⟳ · review`), the
- * reason and, when no job finished for longer than the slowest job's last
- * duration, `possibly stuck: …` (#415); no agent window is needed for it. On a phone the graph wraps to the window's
+ * state carries no stop time of its own yet. Each graph node and rail segment
+ * says what its task is doing now (`taskActivity`, #451): a running agent
+ * (`implementing`, `reviewing`, `fixing`), else a CI hold, else a merge turn,
+ * else a decision, else the stage. A task volleyd holds for CI with no agent
+ * running (its `why_waiting` is one of volleyd's four hold wordings, `ciPending`)
+ * shows `waiting for CI` (`· 3/13` when its jobs are counted) in the graph, a
+ * `waiting for CI` chip in the title and a row under the graph with the same
+ * words, its pipeline (`implement ✓ · CI ⟳ · review`), the reason and, when no
+ * job finished for longer than the slowest job's last duration, `possibly
+ * stuck: …` (#415); no agent window is needed for it. On a phone the graph wraps to the window's
  * width (`dagWidthFor`). Under the graph each placed task has a host chip
  * whose popover says why it runs there (`HostChips`).
  *
@@ -29,13 +32,14 @@
 import { BubbleChatIcon, Settings02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useState } from "react";
-import { ciPending, ciStuck } from "../../attention";
+import { ciStuck } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
 import { issueHref } from "../../lib/github";
 import { plural } from "../../lib/plural";
 import { RepoChip } from "../../look/RepoChip";
 import { fixerFor, mergeQueueLine } from "../../store/autopilot";
 import type {
+  AgentView,
   CoordinatorState,
   FeedEntry,
   WaveRelease,
@@ -47,6 +51,7 @@ import { Clawd } from "./Clawd";
 import { Dag, type DagNode, HostChips, fixerLabel } from "./Dag";
 import { WaveYaml, taskOrder } from "./WaveYaml";
 import { accentFor } from "./accent";
+import { taskActivity } from "./activity";
 import { STAGE_LABEL, STAGE_WEIGHT, deskStage, wavePct } from "./stages";
 import "../../styles/wave.css";
 
@@ -85,6 +90,8 @@ export interface WaveWindowProps {
   banner?: ReactNode;
   /** The wave's autopilot events (`waveFeed`), shown as a feed under the graph. */
   autopilotFeed?: readonly FeedEntry[] | undefined;
+  /** The Desk's agent records: a task's agent counts as running only while its record is live. */
+  agents?: Readonly<Record<string, AgentView>>;
   /** Children after the wave file (the steering panel). */
   children?: ReactNode;
   /** Highlights the chat glyph while the steering panel is open. */
@@ -231,15 +238,13 @@ export function WaveWindow(p: WaveWindowProps) {
   const ended = s ? ENDED_CHIP[s.status] : undefined;
   // Frozen at the last state update: the supervisor published it when the wave ended.
   const endedAt = Date.parse(s?.updated_at ?? "");
-  const ci = s?.tasks.filter(ciPending) ?? [];
-  const ciLabels = Object.fromEntries(
-    ci.map((t) => {
-      const j = t.pr?.jobs;
-      return [t.id, j && j.total > 0 ? `waiting for CI · ${j.done}/${j.total}` : "waiting for CI"];
-    }),
-  );
   const fixers = tasks.filter((t) => t.fixerFor && !t.cancelled);
   const queue = s?.merge_queue ?? [];
+  const activity = new Map(
+    (s?.tasks ?? []).map((t) => [t.id, taskActivity(t, { agent: (a) => p.agents?.[a], queue })]),
+  );
+  const ci = s?.tasks.filter((t) => activity.get(t.id)?.kind === "ci") ?? [];
+  const labels = Object.fromEntries([...activity].map(([t, a]) => [t, a.node]));
 
   const title = (
     <>
@@ -302,7 +307,7 @@ export function WaveWindow(p: WaveWindowProps) {
           <span
             key={t.id}
             className={`rail-seg st-${t.stage}`}
-            title={`${t.id} · ${STAGE_LABEL[t.stage]}`}
+            title={`${t.id} · ${activity.get(t.id)?.label ?? STAGE_LABEL[t.stage]}`}
           >
             <span style={{ width: `${STAGE_WEIGHT[t.stage] * 100}%` }} />
           </span>
@@ -349,7 +354,7 @@ export function WaveWindow(p: WaveWindowProps) {
               tasks={tasks}
               accent={accent}
               ended={!!ended}
-              labels={ciLabels}
+              labels={labels}
               maxWidth={p.frame.maxWidth === undefined ? undefined : dagWidthFor(p.frame.maxWidth)}
             />
             <HostChips tasks={s.tasks} />
@@ -380,6 +385,7 @@ export function WaveWindow(p: WaveWindowProps) {
                 {ci.map((t) => (
                   <li key={t.id} aria-label={`${t.id} CI pending`}>
                     <span className="mono">{t.id}</span>
+                    <span className="wave-ci-what">{activity.get(t.id)?.label}</span>
                     <span className="wave-ci-pipe">implement ✓ · CI ⟳ · review</span>
                     <span className="dim">{t.why_waiting}</span>
                     {ciStuck(t, now) && <span className="wave-ci-stuck">{ciStuck(t, now)}</span>}

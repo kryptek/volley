@@ -80,7 +80,7 @@ import { usePins } from "./layout/usePins";
 import { plural } from "./lib/plural";
 import { Background, degradeLook, useWebGL } from "./look/Background";
 import { DeskDock } from "./look/DeskDock";
-import { type Tether, Tethers } from "./look/Tethers";
+import { type Tether, type TetherStub, Tethers } from "./look/Tethers";
 import { progressBeat } from "./look/tetherPulses";
 import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
@@ -158,6 +158,7 @@ import { DigestCard, showDigest } from "./windows/wave/DigestCard";
 import { AttentionLine, MachineDown, NeedsYou } from "./windows/wave/NeedsYou";
 import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
+import { taskActivity } from "./windows/wave/activity";
 
 const AGENT_W = AGENT_WIDTH;
 // Sizes until a window has been measured (Frame `onSize`), shared by the
@@ -1120,6 +1121,26 @@ export default function App() {
           beat: progressBeat(a.feed),
         })),
     );
+  // A task held for CI with no agent running has no agent window: a `CI` stub instead (#451).
+  const stubs: TetherStub[] = visible
+    .filter((id) => !ended.has(id) && !anchored(id))
+    .flatMap((id) => {
+      const ws = state.waves[id]?.state;
+      return (ws?.tasks ?? []).flatMap((t) => {
+        const a = taskActivity(t, { agent: (x) => state.agents[x], queue: ws?.merge_queue ?? [] });
+        if (a.kind !== "ci") return [];
+        return [
+          {
+            id: `${id}/${t.id}`,
+            waveId: id,
+            wave: rectOf(id, WAVE_W, WAVE_H),
+            accent: accentOf(id),
+            label: "CI",
+            title: `${t.id} · ${a.label}`,
+          },
+        ];
+      });
+    });
   // Each Needs you row's source window (wave, agent or coordinators) → the Needs you window.
   if (inboxShown && !anchored(INBOX_ID)) {
     const shown = new Set(shownIds());
@@ -1168,7 +1189,7 @@ export default function App() {
         aria-label="Desk canvas: arrow keys pan, + and − zoom, f arranges and fits"
       >
         <World view={view} animating={animating} ref={worldRef}>
-          <Tethers on={look.tethers} tethers={tethers} dragging={dragging} />
+          <Tethers on={look.tethers} tethers={tethers} stubs={stubs} dragging={dragging} />
           {coordsShown && (
             <CoordinatorsWindow
               waves={waveList}
@@ -1288,6 +1309,7 @@ export default function App() {
                 me={me}
                 identity={identity}
                 coordinatorState={coordinator?.state}
+                agents={state.agents}
                 autopilotFeed={state.waveFeed?.[id]}
                 startedAt={startedAt(id)}
                 frame={place(id, frameAttn(waveAttn[id] ?? { tier: "none" }))}

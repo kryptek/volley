@@ -328,30 +328,41 @@ describe("no signal (MCP missing) vs quiet", () => {
     expect(at(NOW + 15 * 60 * S).tier).toBe("you");
   });
 
-  it("a quiet working implementer held for CI is not a stall: no coordinator or you tier", () => {
-    const why = "CI pending on abc1234 (2/5 checks)";
-    const w = wave({
-      tasks: [
-        {
-          id: "T1",
-          issue: 1,
-          stage: "implement",
-          agents: { implementer: "impl-1" },
-          why_waiting: why,
-        },
-      ],
-    });
-    const coordinators = { "coord-1": { id: "coord-1", waves: ["w1"], state: "working" as const } };
-    const impl = agentFrom(
-      "impl-1",
-      [registry("impl-1", NOW - 600 * S), status("impl-1", "working", NOW - 300 * S)],
-      w,
-    );
-    expect(noSignalFor(impl, w, ctx())).toMatchObject({ kind: "quiet" });
-    for (const now of [NOW, NOW + 20 * 60 * S]) {
-      expect(["info", "none"]).toContain(agentAttention(impl, w, ctx({ now, coordinators })).tier);
-    }
-  });
+  it.each([
+    "CI pending on abc1234 (2/5 checks)",
+    "CI 21/22 · running: Backend IT shard 6/6 · ~3 min left",
+    "CI unreadable (no answer), retrying",
+    "CI infra incident: runner outage; re-checking",
+  ])(
+    "a quiet working implementer held for CI (%s) is not a stall: no coordinator or you tier",
+    (why) => {
+      const w = wave({
+        tasks: [
+          {
+            id: "T1",
+            issue: 1,
+            stage: "implement",
+            agents: { implementer: "impl-1" },
+            why_waiting: why,
+          },
+        ],
+      });
+      const coordinators = {
+        "coord-1": { id: "coord-1", waves: ["w1"], state: "working" as const },
+      };
+      const impl = agentFrom(
+        "impl-1",
+        [registry("impl-1", NOW - 600 * S), status("impl-1", "working", NOW - 300 * S)],
+        w,
+      );
+      expect(noSignalFor(impl, w, ctx())).toMatchObject({ kind: "quiet" });
+      for (const now of [NOW, NOW + 20 * 60 * S]) {
+        expect(["info", "none"]).toContain(
+          agentAttention(impl, w, ctx({ now, coordinators })).tier,
+        );
+      }
+    },
+  );
 
   it("AgentWindow shows a quiet agent neutrally: its own status mark and the quiet chip", () => {
     const a = agentFrom("loner", [
