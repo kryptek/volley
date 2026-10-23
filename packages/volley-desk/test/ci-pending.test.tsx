@@ -45,6 +45,26 @@ describe("CI pending", () => {
     expect(t2 && ciPending(t2)).toBe(false);
   });
 
+  it("covers all four of volleyd's hold wordings, and nothing else", () => {
+    const t = (why_waiting: string) => ({
+      id: "T1",
+      issue: 1,
+      stage: "implement" as const,
+      agents: {},
+      why_waiting,
+    });
+    for (const why of [
+      "CI pending on abc1234 (2/5 runs)",
+      "CI 21/22 · running: x",
+      "CI unreadable (no answer), retrying",
+      "CI infra incident: x; re-checking",
+    ]) {
+      expect(ciPending(t(why))).toBe(true);
+    }
+    expect(ciPending(t("CI flake in t: fixer pending"))).toBe(false);
+    expect(ciPending(t("after: T1"))).toBe(false);
+  });
+
   it("the wave window shows the 'waiting for CI' chip and the task row with why_waiting and its pipeline", () => {
     render(<WaveWindow wave={waveView(state())} me={null} now={NOW} frame={frame} />);
     const win = screen.getByRole("region", { name: "w1" });
@@ -143,6 +163,71 @@ describe("CI pending", () => {
     it("without a known duration nothing is called stuck", () => {
       const [t1] = jobsState({ last_done_at: ago(120) }).tasks;
       expect(t1 && ciStuck(t1, NOW)).toBeUndefined();
+    });
+  });
+
+  describe("retired implementer (#451)", () => {
+    const HOLD = "CI 21/22 · running: Backend IT shard 6/6 · ~3 min left";
+    const held = (why?: string, jobs = true) =>
+      waveState({
+        owner: "coord-1",
+        tasks: [
+          {
+            id: "T1",
+            issue: 1,
+            stage: "implement",
+            agents: { implementer: "impl-1" },
+            ...(why ? { why_waiting: why } : {}),
+            pr: {
+              number: 12,
+              url: "https://example.invalid/pr/12",
+              head_sha: "abc1234",
+              ci: "running",
+              ...(jobs
+                ? { jobs: { done: 21, total: 22, running: ["Backend IT shard 6/6"], failed: [] } }
+                : {}),
+            },
+          },
+        ],
+        spec: { version: 1, tasks: { T1: { issue: 1, after: [] } } },
+      });
+    const renderWith = (st: ReturnType<typeof held>, impl: "done" | "working") => {
+      const s = reduceAll(initialState(), [
+        waveMsg(st),
+        registry("impl-1", NOW - 900 * S),
+        status("impl-1", impl, NOW - 300 * S),
+      ]);
+      const w = s.waves.w1;
+      if (!w) throw new Error("no wave");
+      render(<WaveWindow wave={w} me={null} now={NOW} frame={frame} agents={s.agents} />);
+      return screen.getByRole("region", { name: "w1" });
+    };
+
+    it("the node and the task line say waiting for CI with the job count, never implementing", () => {
+      const win = renderWith(held(HOLD), "done");
+      expect(win.querySelector('.dag-node[data-id="T1"] .dag-stage')).toHaveTextContent(
+        /^waiting for CI · 21\/22$/,
+      );
+      const row = within(win).getByRole("listitem", { name: "T1 CI pending" });
+      expect(row).toHaveTextContent("waiting for CI · 21/22 jobs");
+      expect(
+        win.querySelector('.rail-seg[title="T1 · waiting for CI · 21/22 jobs"]'),
+      ).not.toBeNull();
+    });
+
+    it("an unreadable CI poll still reads waiting for CI", () => {
+      const win = renderWith(held("CI unreadable (no answer), retrying", false), "done");
+      expect(win.querySelector('.dag-node[data-id="T1"] .dag-stage')).toHaveTextContent(
+        /^waiting for CI$/,
+      );
+    });
+
+    it("a running implementer reads implementing, with no CI row", () => {
+      const win = renderWith(held(undefined), "working");
+      expect(win.querySelector('.dag-node[data-id="T1"] .dag-stage')).toHaveTextContent(
+        /^implementing$/,
+      );
+      expect(within(win).queryByRole("listitem", { name: "T1 CI pending" })).toBeNull();
     });
   });
 });

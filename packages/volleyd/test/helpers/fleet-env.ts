@@ -11,7 +11,12 @@ import type { DecisionPayload } from "../../src/decisions";
 import type { LaunchSpec } from "../../src/hosts/host";
 import { agentIdFor } from "../../src/identity";
 import { readJournalFile } from "../../src/journal";
-import { MACHINE_CHANNEL, type MachineRecord, machineTopic } from "../../src/machines";
+import {
+  type DoctorReport,
+  MACHINE_CHANNEL,
+  type MachineRecord,
+  machineTopic,
+} from "../../src/machines";
 import type { ReadinessPayload } from "../../src/readiness";
 import type { JournalEvent, TaskState } from "../../src/types";
 import { eventually } from "./broker-wait";
@@ -24,6 +29,7 @@ import {
   type FakeHost,
   type FakeRemoteHost,
   GREEN_DOCTOR,
+  adoptSpec,
   fakeHost,
   fakeRemoteHost,
 } from "./fake-host";
@@ -51,6 +57,8 @@ export interface Fleet {
   local: FakeHost;
   /** The supervisor's fake exec (git, gh): add replies with `on`. */
   exec: FakeExec;
+  /** The supervisor's primary profile's `.claude.json` (its folder trust). */
+  claudeJson: string;
   /**
    * Hold launched sessions (true): an agent launches but does not register until released
    * (false), so it stays launched and unverified.
@@ -73,7 +81,16 @@ export interface Fleet {
   /** The box's LWT: down at once (`disconnect`). */
   lwt: () => Promise<void>;
   tick: (ms?: number) => Promise<void>;
-  submit: (wave: string, head: string, tasks: string, pipeline?: string) => Promise<void>;
+  /** Submit a wave on `repo` (default: the supervisor's `repo`; an `owner/name` slug or a path). */
+  submit: (
+    wave: string,
+    head: string,
+    tasks: string,
+    pipeline?: string,
+    waveRepo?: string,
+  ) => Promise<void>;
+  /** The supervisor's own checkout every wave runs on by default (its `rev-parse` faked). */
+  repo: string;
   /** The live agent's id for `wave/task/role` (its latest attempt). */
   agentOf: (wave: string, task: string, role?: string) => string;
   /** The simulated session publishes its terminal status. */
@@ -90,7 +107,21 @@ export interface Fleet {
 }
 
 export async function makeFleet(
-  o: { extraConfig?: string; localAgents?: "always" | "fallback" | "never" } = {},
+  o: {
+    extraConfig?: string;
+    localAgents?: "always" | "fallback" | "never";
+    /** `fleet.repo_root` (managed clones), absolute. */
+    repoRoot?: string;
+    /** The Claude profiles root (default: the suite's empty one). */
+    claudeRoot?: string;
+    /** The own doctor's report for a run on `repo` (default: GREEN_DOCTOR, whatever the repo). */
+    localDoctor?: (repo: string | null) => DoctorReport;
+    /**
+     * The box's legacy `hosts.box.repo` (default: the supervisor's `repo`); null: none, the box
+     * works on what `repos` / `hosts.box.repos` give it.
+     */
+    boxRepo?: string | null;
+  } = {},
 ): Promise<Fleet> {
   const env = await makeDaemonEnv();
   const dir = realpathSync(env.home);
@@ -134,7 +165,7 @@ export async function makeFleet(
     join(env.home, "config.yaml"),
     // The own machine a candidate like the peer (local_agents: always, unless `localAgents`): the
     // fallback has its own tests.
-    `fleet:\n  local_name: ${LOCAL}\n  local_agents: ${o.localAgents ?? "always"}\nhosts:\n  ${PEER}:\n    target: dev@${PEER}\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n${o.extraConfig ?? ""}`,
+    `fleet:\n  local_name: ${LOCAL}\n  local_agents: ${o.localAgents ?? "always"}\n${o.repoRoot !== undefined ? `  repo_root: ${o.repoRoot}\n` : ""}hosts:\n  ${PEER}:\n    target: dev@${PEER}\n${o.boxRepo === null ? "" : `    repo: ${o.boxRepo ?? repo}\n`}    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n${o.extraConfig ?? ""}`,
   );
   writeFileSync(
     join(env.home, "peers.json"),
@@ -200,10 +231,11 @@ export async function makeFleet(
   const options: Parameters<DaemonEnv["start"]>[0] = {
     clock,
     authExec: auth.exec,
+    ...(o.claudeRoot !== undefined ? { claude: { root: o.claudeRoot } } : {}),
     fleet: {
       version: VERSION,
-      localDoctor: async () => ({
-        ...GREEN_DOCTOR,
+      localDoctor: async (repo) => ({
+        ...(o.localDoctor?.(repo) ?? GREEN_DOCTOR),
         versions: { peer: VERSION, volley: VERSION, bun: "1.3.1", git: "2.43.0" },
       }),
       localPath: () => ({ claude: true, bun: true }),
@@ -218,7 +250,7 @@ export async function makeFleet(
           box = fakeRemoteHost(s, local);
           box.onLaunch = onLaunch;
         }
-        return box;
+        return adoptSpec(box, s);
       },
       credentials: memoryCredentials(),
     },
@@ -301,6 +333,7 @@ export async function makeFleet(
     client,
     local,
     exec: fake,
+    claudeJson,
     holdSessions: (hold) => {
       const pending = held ?? [];
       held = hold ? pending : null;
@@ -333,11 +366,12 @@ export async function makeFleet(
       });
     },
     tick,
-    submit: async (wave, head, tasks, pipeline = "[implement]") => {
+    repo,
+    submit: async (wave, head, tasks, pipeline = "[implement]", waveRepo = repo) => {
       const file = join(env.home, `${wave}.yaml`);
       writeFileSync(
         file,
-        `wave: ${wave}\nrepo: ${repo}\nrelease_branch: release/${wave}\nmodel: claude-opus-5-5\npipeline: ${pipeline}\n${head}tasks:\n${tasks}`,
+        `wave: ${wave}\nrepo: ${waveRepo}\nrelease_branch: release/${wave}\nmodel: claude-opus-5-5\npipeline: ${pipeline}\n${head}tasks:\n${tasks}`,
       );
       const r = await runCli(["run", file], env.env);
       if (r.exitCode !== 0) throw new Error(`run ${wave}: ${r.stderr}`);

@@ -9,7 +9,7 @@ const T0 = "2026-10-20T22:00:00.000Z";
 const NOW = "2026-10-21T07:00:00.000Z";
 
 const wave = parseWaveFile(`wave: w1
-repo: example-org/example-repo
+repo: /path/to/example-repo
 release_branch: release/w1
 model: claude-opus-5-5
 pipeline: [implement, merge_ready]

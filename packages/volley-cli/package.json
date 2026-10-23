@@ -1,6 +1,6 @@
 {
   "name": "volley-cli",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "description": "Volley CLI — `volley pub / sub / wait / list` for shell scripts and CI",
   "license": "Apache-2.0",
@@ -15,6 +15,7 @@
     "./auth/context": "./src/auth/context.ts",
     "./commands/auth": "./src/commands/auth.ts",
     "./commands/desk-serve": "./src/commands/desk-serve.ts",
+    "./commands/repo": "./src/commands/repo.ts",
     "./commands/setup": "./src/commands/setup.ts",
     "./io": "./src/io.ts",
     "./peer/machine": "./src/peer/checks/machine.ts",
@@ -35,7 +36,8 @@
   },
   "dependencies": {
     "volley-mcp": "workspace:*",
-    "volleyd": "workspace:*"
+    "volleyd": "workspace:*",
+    "yaml": "^2.6.0"
   },
   "devDependencies": {
     "aedes": "^0.51.0",

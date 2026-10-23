@@ -22,6 +22,8 @@ export function fakePeerHost(
     claudeSignedIn?: boolean;
     /** The version the doctor reports (default: the checkout's). */
     doctorVersion?: string;
+    /** Extra checks the doctor reports (a repository's own, with `repo`). */
+    extraChecks?: { id: string; ok: boolean; severity: string; detail: string; repo?: string }[];
   },
 ) {
   const volleyDir = tempDir(`volley-deploy-peer-${name}-`);
@@ -68,6 +70,7 @@ export function fakePeerHost(
         severity: "block",
         detail: opts.claudeSignedIn !== false ? "signed in" : "Claude Code is not signed in",
       },
+      ...(opts.extraChecks ?? []),
     ];
     return {
       checks,

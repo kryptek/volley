@@ -14,3 +14,4 @@ siblings; the SPEC lists those one per line, checked against the schemas.
 
 | Reserved | Issue | Topic |
 |---|---|---|
+| `task_admission_returned` | T4 | wave event |

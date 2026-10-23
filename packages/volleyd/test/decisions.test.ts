@@ -27,7 +27,7 @@ import { schemaErrors } from "./helpers/schema";
 const WAVE = "w-decide";
 // B → C is the critical path, so with hard_ceiling 1 only B is admitted and A stays ready.
 const WAVE_YAML = `wave: ${WAVE}
-repo: example-org/example-repo
+repo: /path/to/example-repo
 release_branch: release/${WAVE}
 model: claude-opus-5-5
 pipeline: [implement, merge_ready]

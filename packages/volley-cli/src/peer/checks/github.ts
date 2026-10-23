@@ -1,3 +1,4 @@
+import { isSlug } from "volleyd/repos";
 import type { AuthGh, Check, Facts } from "../doctor";
 
 /**
@@ -18,6 +19,28 @@ export const ghPermission = (out: string): string | null => {
   const first = (out.split("\n")[0] ?? "").trim();
   return /^[A-Z]{1,16}$/.test(first) ? first : null;
 };
+
+/**
+ * GitHub's canonical `owner/name` out of `gh repo view <slug> --json nameWithOwner` (D6): a
+ * renamed or transferred repository answers with its new name. Null for anything else.
+ */
+export const canonicalSlug = (out: string): string | null => {
+  const first = (out.split("\n")[0] ?? "").trim();
+  return isSlug(first) ? first : null;
+};
+
+/**
+ * D6: a clone whose remote names `remote` while the configured repository is another slug is the
+ * same repository only when GitHub reports one `nameWithOwner` for both (it was renamed or
+ * transferred). Unknown (no gh, or GitHub did not answer) is never the same.
+ */
+export const sameRepository = (
+  canonical: { configured: string | null; remote: string | null } | null,
+): canonical is { configured: string; remote: string } =>
+  canonical !== null &&
+  canonical.configured !== null &&
+  canonical.remote !== null &&
+  canonical.configured.toLowerCase() === canonical.remote.toLowerCase();
 
 export function ghState(f: Facts): AuthGh {
   const g = f.github;

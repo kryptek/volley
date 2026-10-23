@@ -539,6 +539,27 @@ describe("reducer — Fleet readiness (SPEC §4.6.15)", () => {
     expect(s.machines?.hub).toEqual(own);
   });
 
+  it("keeps each repository's verdict and the record's clones as volleyd and the box sent them (#438)", () => {
+    const repos = {
+      "example-org/app": { state: "cloning" as const, path: "/srv/app", reasons: [] },
+      "example-org/lib": { state: "blocked" as const, reasons: ["java not installed"] },
+    };
+    const clone = {
+      slug: "example-org/app",
+      path: "/srv/app",
+      exists: false,
+      managed: true,
+      fetched_at: null,
+      toolchain: { ok: false, missing: ["java"], outdated: [] },
+    };
+    const s = apply(
+      readinessMsg(readiness({ repos })),
+      machineMsg(machineRecord({ repos: [clone] })),
+    );
+    expect(s.readiness?.["box-a"]?.repos).toEqual(repos);
+    expect(s.machines?.["box-a"]?.repos).toEqual([clone]);
+  });
+
   it("a resync forgets every verdict until the replay brings them back", () => {
     const s = resync(apply(readinessMsg(readiness())));
     expect(s.readiness).toEqual({});

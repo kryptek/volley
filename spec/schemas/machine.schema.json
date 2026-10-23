@@ -163,9 +163,63 @@
                 }
               }
             },
+            "repos": {
+              "type": "array",
+              "maxItems": 64,
+              "description": "Each repository the machine works on (its peer.json repos, by GitHub owner/name), as its doctor last found it. When exactly one is configured, repo carries it too (for one release).",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["slug", "path", "exists", "managed", "fetched_at", "toolchain"],
+                "properties": {
+                  "slug": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\\.\\.?$)(?![A-Za-z0-9_.-]*\\.git$)[A-Za-z0-9_.-]{1,100}$",
+                    "description": "The repository's GitHub owner/name."
+                  },
+                  "path": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                  "exists": { "type": "boolean" },
+                  "origin": {
+                    "type": "string",
+                    "maxLength": 512,
+                    "pattern": "^[A-Za-z0-9.-]+(:[0-9]{1,5})?/[^\\s@:]+$",
+                    "not": { "pattern": "\\.git$" },
+                    "description": "The clone's origin, normalised as repo.origin is."
+                  },
+                  "managed": {
+                    "type": "boolean",
+                    "description": "true: the managed clone (<repo_root>/<owner>/<name>), whose checked-out default branch the doctor fast-forwards. false: an adopted clone, fetched only."
+                  },
+                  "fetched_at": {
+                    "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }],
+                    "description": "When the clone was last fetched; null when never."
+                  },
+                  "release_branch": { "type": "string", "minLength": 1, "maxLength": 255 },
+                  "toolchain": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["ok", "missing", "outdated"],
+                    "description": "The tools the repository needs (its manifests and .volley/requirements.yaml) that this machine lacks (missing) or has older than the repository's minimum (outdated). Either blocks this repository only.",
+                    "properties": {
+                      "ok": { "type": "boolean" },
+                      "missing": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,31}$" }
+                      },
+                      "outdated": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,31}$" }
+                      }
+                    }
+                  }
+                }
+              }
+            },
             "checks": {
               "type": "array",
-              "maxItems": 32,
+              "maxItems": 128,
               "description": "The doctor's checks, in the order it ran them. Fix text is never in the record: the doctor that reads the record supplies it.",
               "items": {
                 "type": "object",
@@ -182,6 +236,11 @@
                     "type": "string",
                     "maxLength": 200,
                     "description": "One line on what the check found."
+                  },
+                  "repo": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\\.\\.?$)(?![A-Za-z0-9_.-]*\\.git$)[A-Za-z0-9_.-]{1,100}$",
+                    "description": "The repository (owner/name) a per-repository check is about: failing, it blocks that repository only."
                   }
                 }
               }

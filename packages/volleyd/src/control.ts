@@ -86,7 +86,12 @@ export type ControlOp =
   | "peer_remove"
   | "peers"
   // Fleet (F2): the doctor on a paired machine, for an admin (peers.ts doctor).
-  | "peer_doctor";
+  | "peer_doctor"
+  // Repositories (SPEC §4.6.21): add / remove are admin ops; list and status read.
+  | "repo_add"
+  | "repo_remove"
+  | "repo_list"
+  | "repo_status";
 
 /** A decision's answer it cannot apply (resolve, inbox_answer): the refusal's `code`. */
 export const BAD_ANSWER = "BAD_ANSWER";

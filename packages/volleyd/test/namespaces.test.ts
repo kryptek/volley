@@ -22,7 +22,7 @@ const WAVE = "w-ns";
 const WNS = "wave-ns";
 const AGENT = "agent-ns1";
 const yaml = `wave: ${WAVE}
-repo: example-org/example-repo
+repo: /path/to/example-repo
 release_branch: release/${WAVE}
 model: claude-opus-5-5
 namespace: ${WNS}

@@ -2,6 +2,136 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.8.0 — 2026-10-23
+
+### Added
+
+- **volleyd: repositories by `owner/name`.** The config gains `repos.<owner/name>.machines`
+  (`all` or a list of machines), `fleet.repo_root` (default `~/.volley/repos`, managed clones at
+  `<repo_root>/<owner>/<name>`) and `hosts.<name>.repos` (adopted clones). A task's host resolves
+  its clone of the wave's repository from them, with worktrees under
+  `~/.volley/worktrees/<owner>/<name>`; a host with no clone fails the spawn naming
+  `volley repo add`. A wave file's `repo:` may be an `owner/name`, resolved at submit to the
+  supervisor's clone; a relative path of that shape now reads as a slug, so write it `./owner/name`. The deprecated `hosts.<name>.repo` still works and migrates itself, once,
+  when the machine's record reports its clone's origin. (#433)
+- **volley-cli: a paired machine works on many repositories.** `peer.json` gains `repos`
+  (`owner/name` → clone), edited by `volley peer doctor --repo-add <owner/name>[=<path>]` and
+  `--repo-remove <owner/name>` and read by every flag-less run (the service, `volley deploy`);
+  `volley peer join --repo` takes `<owner/name>[=<path>]` (`~` expands in `<path>`), repeatable, and a legacy `repo`
+  migrates into `repos` on the next doctor run. The doctor runs `repo.clone`, `repo.origin` and
+  `repo.fetch` per repository (each check carries `repo`), and `--fix --clone` clones each
+  missing one from `https://github.com/<owner>/<name>.git` with no `--origin`. (#435)
+- **volley-cli: the doctor follows renamed repositories and keeps managed clones current.** A
+  remote naming a renamed or transferred repository passes when GitHub reports one
+  `nameWithOwner` for both and warns `repo.canonical`, which `--fix` repoints and journals in the
+  report's `fixes`; when the remote already has GitHub's name and `peer.json` holds the old one,
+  the warn says to update `peer.json` instead. Any other mismatch still blocks, untouched. `--fix` fetches every repository
+  and fast-forwards (`--ff-only`) a managed clone's clean, checked-out default branch; adopted
+  clones are fetched only. (#435)
+- **volley-cli: per-repository toolchains.** The doctor derives each repository's tools from its
+  manifests (`package.json`, `pom.xml`, `build.gradle*`, `go.mod`, `Cargo.toml`, `pyproject.toml`,
+  `requirements.txt`, `Dockerfile`) plus an optional `.volley/requirements.yaml` (`tools`, `min`),
+  probes only those, and fails `tool.<name>` for that repository alone when one is missing or too
+  old. (#435)
+- **volleyd: the machine record carries `repos[]`** (`slug`, `path`, `exists`, `origin`,
+  `managed`, `fetched_at`, `toolchain`) and each check's `repo`; `RemoteHost.runDoctor` takes
+  `repos_add` / `repos_remove`, which the fence allows as `--repo-add <owner/name>[=<abs path>]`,
+  `--repo-remove <owner/name>` and `--clone`. `repo` stays while exactly one repository is
+  configured. (#435)
+- **volleyd: repositories are added to machines, cloned and trusted for you.** New admin ops
+  `repo_add { slug, machines?, paths? }`, `repo_remove { slug, machines? }`, `repo_list` and
+  `repo_status { slug? }` (SPEC §4.6.21). `repo_add` checks the slug with `gh repo view` (keeping
+  GitHub's canonical name), assigns it in config (`repos.<slug>.machines`, `hosts.<m>.repos` for an
+  adopted path), then on each paired machine runs the doctor with `--repo-add` (and `--fix
+  --clone` while it has no clone) and, once the clone exists, trusts it in the machine's default
+  Claude profile and every signed-in one: adding a repository is the consent, so its agents never
+  stop on `repo_untrusted`. A machine that is down or failing stays `blocked` with the reason and
+  is retried on its next `up`, on a newer doctor report from it, after another doctor run there
+  ends and after Repair; a profile signed in later is trusted for every
+  repository on its machine. `repo_remove` never deletes a clone (the answer names each path).
+  Journaled in `_system` as `repo_added`, `repo_removed`, `repo_clone_run` and `repo_trusted`.
+  `peer_doctor` takes `repos_add` / `repos_remove`. (#437)
+- **volleyd: `remote_repo_missing`'s `add` answer adds the repository to that machine** (as
+  `repo_add` does) before the task is retried. (#437)
+- **volleyd: readiness judges every repository assigned to a machine**, beside the running waves',
+  and shows a `repo_add` in progress there as `cloning` and a failed one as `blocked` with its
+  why. (#437)
+- **volley-cli: `volley repo add <owner/name> [--machine <m>]... [--path <m>=<abs>]... [--wait]`,
+  `volley repo list [--json]`, `volley repo remove <owner/name> [--machine <m>]...` and
+  `volley repo status [<owner/name>] [--json]`.** `--wait` follows every machine until it is
+  `ready` (exit 0) or `blocked` (exit 1). (#437)
+- **volley-desk: Settings › Repositories.** A new section lists every repository config names,
+  linking each to GitHub, with a chip per machine it is assigned to saying where it stands there
+  (`ready`, `cloning…`, `blocked: <why>` with **Repair** inline, `no clone yet`) and the toolchain
+  the machines lack. **Add repository…** checks the `owner/name` as it is typed, adds it to every
+  machine by default (or the ones you tick, adopting an existing clone per machine), sends
+  `repo_add` and follows each machine until it is ready or blocked. **Remove…** names the clone
+  paths it leaves on disk (a clone is never deleted) before it sends `repo_remove`. Every action
+  shows its `volley repo` twin. (#438)
+- **volley-desk: machine cards and Repair per repository.** A machine card lists its repositories
+  read-only with a link to the section; Repair has a row per repository (a **Clone <owner/name>**
+  switch for one without a clone, sent as `peer_doctor`'s `repos_add`, and the tools it lacks), and
+  a per-repository check's fix names its repository and clone. A check the Desk does not know is
+  left to Repair's plan instead of telling you to run `volley peer doctor` by hand. (#438)
+
+### Changed
+
+- **volleyd: readiness and placement are per (machine, repository).** A machine's verdict gains
+  `repos`: each repository by `owner/name` (every running wave's, and every one the machine
+  reports) as `ready`, `blocked` or `absent` with its reasons. A tool a repository needs that the
+  machine lacks blocks that repository only (`java not installed (needed by owner/name)`), never
+  the machine, and the machine-level "repo origin differs from the host's" line is gone.
+  Placement skips a machine without a ready clone of the wave's repository (`no ready clone of
+  owner/name (absent: …)`, also in `volleyd run`'s preview and `why_waiting`), so two waves on two
+  repositories each go where their clone is. The supervisor's own doctor runs once per running
+  wave's clone, folded into one record with `repos[]`; a clone whose run fails keeps its last
+  entry rather than reading as absent. (#436)
+- **volleyd: a remote spawn uses the repository's own clone and worktree root.** volleyd learns a
+  box's home from the managed clones its record reports, so `~/.volley/repos/<owner>/<name>` and
+  `~/.volley/worktrees/<owner>/<name>` work without absolute paths. A missing clone asks `Needs
+  you: <machine> has no clone of <owner/name>. Add it to <machine> (Settings → Repositories, or
+  volley repo add <owner/name> --machine <machine>)?` with `add` / `retry` / `cancel` (`add`
+  answers like `retry` for now). (#436)
+
+### Fixed
+
+- **volley-desk: a task waiting on CI after its agent finished says so.** The graph node, the rail
+  segment and the task row now say what is happening now, not the pipeline stage: a running agent
+  (`implementing`, `reviewing`, `fixing`), else `waiting for CI · 21/22 jobs`, else a merge turn,
+  else `waiting for a decision` (the graph node shortens these two to `merge turn` and `decision`).
+  All four of volleyd's CI-hold wordings count, so an unreadable CI poll no longer flips the node
+  back to `implementing` or reads a quiet held agent as stalled, and a held task with no agent
+  shows a `CI` stub on the wave window's tether side. (#451)
+- **volleyd: a plan version that moves a queued task's host lets placement place it.** A task
+  admitted but not yet spawned whose host a new version changes (`placement: local` → `auto`,
+  `auto` → a named host, a named host → `auto`) gives its admission back: volleyd journals the new
+  `task_admission_returned { task, from_host, to_host }` event, drops its placement, and the next
+  tick admits and places it, instead of failing every launch with `host 'auto' reached the host
+  resolver`. A spawn that still meets an unplaced `auto` host raises the `host_auto_unresolved`
+  alarm and gives its admission back, so the task waits for placement and shows placement's own
+  reason. (#434)
+- **volleyd: a repository assigned only to paired machines no longer runs on the supervisor's.**
+  The supervisor's own checkout of a running wave's repository that config assigns elsewhere is
+  `blocked` there (`<owner/name> is not assigned to <machine>: add it …`), so placement keeps the
+  wave on the machines it was added to. (#439)
+- **volley-cli: `volley deploy` no longer calls a paired machine ineligible over one repository.**
+  A repository's own failing check (a tool it needs) follows the machine's health line instead,
+  as volleyd's readiness judges it. (#439)
+
+### Docs
+
+- **docs: repositories end to end.** `docs/SMOKE-v0.8.md` is the owner smoke for a real paired
+  machine: two repositories added from the Desk, one wave each, a missing tool, `volley deploy`
+  and a removal. The volleyd, volley-cli and Desk READMEs describe a host's clones by
+  `repos` / `hosts.<name>.repos`, with the legacy `hosts.<name>.repo` marked deprecated (it
+  migrates by itself), and `packages/volleyd/test/fleet-repos.test.ts` runs the same scenarios on
+  a supervisor and one fake paired machine. (#439)
+- **docs: v0.8.0 is the compute pool — add a repository once, every machine can run it.** Add an
+  `owner/name` from Settings › Repositories or `volley repo add`, and volleyd clones and trusts it
+  on every paired machine it is assigned to; each wave is then placed on a machine with a ready
+  clone of its repository. `docs/SMOKE-v0.8.md` is this release's owner smoke on a real paired
+  machine. (#440)
+
 ## 0.7.0 — 2026-10-23
 
 ### Added

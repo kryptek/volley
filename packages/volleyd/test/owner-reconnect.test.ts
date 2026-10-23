@@ -19,7 +19,7 @@ import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 const WAVE = "w-named";
 const NAME = "coord-main";
 const yaml = `wave: ${WAVE}
-repo: example-org/example-repo
+repo: /path/to/example-repo
 release_branch: release/${WAVE}
 model: claude-opus-5-5
 pipeline: [implement, merge_ready]

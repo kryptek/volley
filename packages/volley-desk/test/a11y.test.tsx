@@ -157,6 +157,7 @@ describe("axe (jsdom)", () => {
     "Broker accounts",
     "Setup & Security",
     "Machines",
+    "Repositories",
     "About Volley",
   ])(
     "reports no violations in the Settings window's %s section",

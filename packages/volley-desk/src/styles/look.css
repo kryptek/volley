@@ -81,6 +81,18 @@
   stroke-width: 0.9;
   opacity: 0.75;
 }
+/* A held task with no agent (#451): a short cable ending in a static `CI` pill; hover for its title. */
+.tether-stub {
+  pointer-events: auto;
+}
+.tether-stub rect {
+  fill: rgba(251, 191, 36, 0.14);
+  stroke: rgba(251, 191, 36, 0.6);
+}
+.tether-stub text {
+  font: 600 9px var(--f-mono);
+  fill: var(--amber);
+}
 /* An energy pulse: a short bright dash running wave → agent (pathLength = 100). */
 .tether-pulse {
   stroke-width: 3.2;

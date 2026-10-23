@@ -8,6 +8,11 @@
  * `machine.disk`, and the provisioning rows `skills`, `hooks`, `mcp` and
  * `sharing`. `safe` marks the fixes the doctor applies itself under `--fix`
  * (a Desk's Repair); the rest are for the person at that machine.
+ *
+ * A per-repository check (its `repo`, SPEC §4.6.21) names its repository: the
+ * `repo.*` fixes point at that repository's clone, and `tool.<name>` says which
+ * repository needs the tool. A check this table does not know is Repair's: the
+ * person is never told to run the doctor by hand.
  */
 
 export interface MachineFix {
@@ -17,19 +22,36 @@ export interface MachineFix {
   command?: string;
   /** Repair (`peer_doctor { fix: true }`) applies it. */
   safe: boolean;
-  /** It runs only with Repair's **Also clone the wave repo**. */
+  /** It runs only with Repair's clone switch on (the repository's, or **Also clone the wave repo**). */
   needsClone?: boolean;
 }
 
 export interface FixContext {
   machine: string;
-  /** The wave repo's clone on the machine (its record's `repo.path`). */
+  /** The wave repo's clone on the machine (its record's `repo.path`): an older peer's one repo. */
   repo?: string | undefined;
+  /** Each repository's clone on the machine, for its per-repository checks. */
+  repos?: readonly { slug: string; path?: string | undefined }[] | undefined;
 }
 
-type Fixer = (c: FixContext) => MachineFix;
+/** The context one check's fix is worded in: `slug` is the check's repository, when it has one. */
+interface Ctx extends FixContext {
+  slug?: string | undefined;
+}
 
-const repoOf = (c: FixContext) => c.repo ?? "<the repo's clone>";
+type Fixer = (c: Ctx) => MachineFix;
+
+/**
+ * The clone the check is about: its repository's (never the wave repo's, which is another
+ * repository), else the wave repo's.
+ */
+const repoOf = (c: Ctx) =>
+  (c.slug !== undefined
+    ? c.repos?.find((r) => r.slug.toLowerCase() === c.slug?.toLowerCase())?.path
+    : c.repo) ?? "<the repo's clone>";
+
+/** The repository a check is about, in words. */
+const nameOf = (c: Ctx) => c.slug ?? "the wave repo";
 
 const FIXES: Record<string, Fixer> = {
   "volley.installed": () => ({
@@ -41,17 +63,20 @@ const FIXES: Record<string, Fixer> = {
     safe: true,
   }),
   "repo.clone": (c) => ({
-    text: `Repair clones the wave repo to ${repoOf(c)} (with Also clone the wave repo)`,
+    text:
+      c.slug !== undefined
+        ? `Repair clones ${c.slug} to ${repoOf(c)}`
+        : `Repair clones the wave repo to ${repoOf(c)} (with Also clone the wave repo)`,
     safe: true,
     needsClone: true,
   }),
   "repo.origin": (c) => ({
-    text: `point the clone at the wave repo, after checking ${repoOf(c)} is the one you meant`,
+    text: `point the clone at ${nameOf(c)}, after checking ${repoOf(c)} is the one you meant`,
     command: `git -C ${repoOf(c)} remote -v`,
     safe: false,
   }),
   "repo.fetch": (c) => ({
-    text: `check that ${c.machine} can fetch the wave repo (its git credentials or network)`,
+    text: `check that ${c.machine} can fetch ${nameOf(c)} (its git credentials or network)`,
     command: `git -C ${repoOf(c)} fetch origin`,
     safe: false,
   }),
@@ -94,18 +119,25 @@ const onPath = (tool: string, c: FixContext): MachineFix => ({
   safe: false,
 });
 
-/** The fix for a failing check `id` on a machine; an id this Desk does not know points at the doctor. */
-export function fixFor(id: string, c: FixContext): MachineFix {
+/**
+ * The fix for a failing check `id` on a machine; `slug` is the repository a per-repository check
+ * is about (its `repo`). An id this Desk does not know is left to Repair's plan.
+ */
+export function fixFor(id: string, ctx: FixContext, slug?: string): MachineFix {
+  const c: Ctx = { ...ctx, slug };
   const known = FIXES[id];
   if (known) return known(c);
   if (id.startsWith("tool.")) {
     const tool = id.slice("tool.".length);
-    return { text: `install ${tool} on ${c.machine}, on the PATH its agents get`, safe: false };
+    const needed = slug !== undefined ? ` (needed by ${slug})` : "";
+    return {
+      text: `install ${tool} on ${c.machine}${needed}, on the PATH its agents get`,
+      safe: false,
+    };
   }
   if (id.endsWith("_on_path")) return onPath(id.slice(0, -"_on_path".length), c);
   return {
-    text: `run the doctor on ${c.machine} for this check's fix`,
-    command: "volley peer doctor",
+    text: `Repair… runs the doctor on ${c.machine} again; its plan has this check's fix`,
     safe: false,
   };
 }

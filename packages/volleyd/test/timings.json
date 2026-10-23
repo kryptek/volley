@@ -59,6 +59,7 @@
   "test/fence.test.ts": 0.77,
   "test/flake-brief.test.ts": 0.01,
   "test/fleet-name.test.ts": 0.01,
+  "test/fleet-repos.test.ts": 7.2,
   "test/git-lock.test.ts": 1.51,
   "test/github-status.test.ts": 0.02,
   "test/hard-ceiling.test.ts": 4.26,

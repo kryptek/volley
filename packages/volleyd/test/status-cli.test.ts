@@ -479,7 +479,7 @@ describe("volleyd archive and status --all", () => {
       const file = join(home, "w.yaml");
       writeFileSync(
         file,
-        "wave: w-old\nrepo: example-org/example-repo\nrelease_branch: release/x\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n",
+        "wave: w-old\nrepo: /path/to/example-repo\nrelease_branch: release/x\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n",
       );
       const env = { ...t.env, VOLLEY_AGENT_ID: undefined };
       const run = await runCli(["run", file], env);

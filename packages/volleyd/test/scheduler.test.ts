@@ -324,6 +324,28 @@ describe("admitPlacing (a wave that places its tasks)", () => {
     expect(r.held.T3).toBe("control: no start allowed now");
   });
 
+  it("the wave's slug passes through to placement: a machine without its clone holds the task (#436)", () => {
+    const repos = (state: "ready" | "absent") => ({
+      "a/a":
+        state === "ready" ? { state, path: "/path/to/a", reasons: [] } : { state, reasons: ["x"] },
+    });
+    const machines = [
+      view("box-a", { repos: repos("absent") }),
+      view("box-b", { repos: repos("ready"), max_agents: 1 }),
+    ];
+    const r = admitPlacing(
+      ["T1", "T2"],
+      w,
+      { machines, reservations: {} },
+      { ...O, waveSlug: "a/a" },
+      OPEN,
+      () => OPEN,
+      CTX,
+    );
+    expect(r.admit.map((a) => [a.id, a.placement.host])).toEqual([["T1", "box-b"]]);
+    expect(r.held.T2).toBe("no eligible machine: box-a: no ready clone of a/a (absent: x)");
+  });
+
   it("a closed gate (paused, kill switch, a global signal) admits nothing and holds nothing", () => {
     const r = run([view("box-a")], {}, { allow: 0, reasons: ["wave paused"] });
     expect(r).toMatchObject({ admit: [], held: {}, reasons: ["wave paused"] });

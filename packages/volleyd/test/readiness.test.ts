@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { foldHost, hostSamples } from "../src/admission";
 import { DEFAULT_SHARING, readSharing } from "../src/claude/sharing";
-import type { MachineRecord } from "../src/machines";
+import type { MachineRecord, MachineRepo } from "../src/machines";
 import {
   READINESS_CHANNEL,
   type ReadinessInput,
@@ -49,13 +49,25 @@ const record = (over: Partial<MachineRecord> = {}): MachineRecord => ({
   ...over,
 });
 
+const SLUG = "example-org/example-repo";
+
+/** The record's repositories as the daemon passes them (`over.repos` wins). */
+const reposOf = (
+  r: MachineRecord | undefined,
+  wanted: string[] = [SLUG],
+): ReadinessInput["repos"] => ({
+  wanted,
+  records: r?.repos,
+  ...(r?.repo !== undefined ? { legacy: r.repo } : {}),
+});
+
 const input = (over: Partial<ReadinessInput> = {}): ReadinessInput => ({
   name: "box-a",
   record: record(),
   local: false,
   host: { max_agents: 4, drain: false },
   hostVersion: "0.4.0",
-  hostOrigin: "github.com/example-org/example-repo",
+  repos: reposOf("record" in over ? over.record : record()),
   probe: { claude: true, bun: true },
   placed: 0,
   heavy: {},
@@ -132,7 +144,7 @@ describe("readiness (the supervisor's verdict on one machine)", () => {
     });
   });
 
-  it("the supervisor's own doctor run without a wave repo: its repo.* checks do not count", () => {
+  it("the supervisor's own doctor run without a wave repo: its repo.* checks do not block the machine", () => {
     const own = record({
       name: "control",
       kind: "supervisor",
@@ -143,12 +155,11 @@ describe("readiness (the supervisor's verdict on one machine)", () => {
       ],
     });
     const { repo: _none, ...noRepo } = own;
-    const base = { name: "control", local: true, hostOrigin: null };
-    expect(readiness(input({ ...base, record: noRepo, noRepo: true })).reasons).toEqual([]);
-    // Given a repo, a failing clone check blocks as on any machine.
-    expect(readiness(input({ ...base, record: noRepo })).reasons).toEqual([
-      "repo.clone: no wave repo: pass --repo",
-    ]);
+    const r = readiness(
+      input({ name: "control", local: true, record: noRepo, repos: reposOf(noRepo, []) }),
+    );
+    expect(r.reasons).toEqual([]);
+    expect(r.repos).toEqual({});
   });
 
   it("drain: true is ineligible with ineligible_reason draining (and still ready)", () => {
@@ -226,7 +237,7 @@ describe("readiness (the supervisor's verdict on one machine)", () => {
     ]);
   });
 
-  it("GitHub push, Claude sign-in and the repo origin are blockers in plain words", () => {
+  it("GitHub push and Claude sign-in are blockers in plain words; a clone of another repository is not", () => {
     const r = readiness(
       input({
         record: record({
@@ -235,11 +246,10 @@ describe("readiness (the supervisor's verdict on one machine)", () => {
         }),
       }),
     );
-    expect(r.reasons).toEqual([
-      "gh: no write permission on someone/fork",
-      "claude: not signed in",
-      "repo origin differs from the host's (github.com/someone/fork, host: github.com/example-org/example-repo)",
-    ]);
+    // D6: no machine-level origin line; the wave's repository is judged per slug.
+    expect(r.reasons).toEqual(["gh: no write permission on someone/fork", "claude: not signed in"]);
+    expect(r.repos[SLUG]).toMatchObject({ state: "absent" });
+    expect(r.repos["someone/fork"]).toMatchObject({ state: "ready", path: "/srv/repo" });
   });
 
   it("carries requirements (bun, sharing), heavy and usage through", () => {
@@ -273,6 +283,158 @@ describe("readiness (the supervisor's verdict on one machine)", () => {
       ).toEqual([]);
     }
     expect(readinessTopic("box-a")).toBe("volley/_system/machines/box-a/readiness");
+  });
+});
+
+describe("readiness per (machine, repository) (#436)", () => {
+  const toolchain = { ok: true, missing: [], outdated: [] };
+  const repo = (slug: string, over: Partial<MachineRepo> = {}): MachineRepo => ({
+    slug,
+    path: `/path/to/home/volley/repos/${slug}`,
+    exists: true,
+    origin: `github.com/${slug}`,
+    managed: true,
+    fetched_at: "2026-10-19T08:58:00.000Z",
+    toolchain,
+    ...over,
+  });
+  const many = (repos: MachineRepo[], checks: MachineRecord["checks"] = []) => {
+    const { repo: _legacy, ...r } = record({ repos, checks });
+    return r;
+  };
+
+  it("a ready clone and an absent one: each its state, the absent one with its reason", () => {
+    const rec = many([repo("a/a"), repo("b/b", { exists: false })]);
+    const r = readiness(input({ record: rec, repos: reposOf(rec, ["a/a", "b/b"]) }));
+    expect(r.repos["a/a"]).toEqual({
+      state: "ready",
+      path: "/path/to/home/volley/repos/a/a",
+      reasons: [],
+      fetched_at: "2026-10-19T08:58:00.000Z",
+    });
+    expect(r.repos["b/b"]).toMatchObject({
+      state: "absent",
+      reasons: ["no clone of b/b at /path/to/home/volley/repos/b/b"],
+    });
+    // Eligibility is per wave, not per machine: an absent repository does not make it unready.
+    expect(r).toMatchObject({ ready: true, eligible: true, reasons: [] });
+  });
+
+  it("a wanted slug the machine has no entry for is absent, and the machine stays ready", () => {
+    const rec = many([repo("a/a")]);
+    const r = readiness(input({ record: rec, repos: reposOf(rec, ["a/a", "c/c"]) }));
+    expect(r.repos["c/c"]).toEqual({ state: "absent", reasons: ["no clone of c/c on box-a"] });
+    expect(r.ready).toBe(true);
+  });
+
+  it("a clone of a repository config assigns only to other machines is blocked there (#439)", () => {
+    // The supervisor's own checkout of b/b, which a running wave uses: config gives b/b to box-b.
+    const rec = many([repo("a/a"), repo("b/b")]);
+    const r = readiness(
+      input({
+        name: "control",
+        local: true,
+        record: rec,
+        repos: { ...reposOf(rec, ["a/a", "b/b"]), unassigned: ["B/b"] },
+      }),
+    );
+    expect(r.repos["a/a"]).toMatchObject({ state: "ready" });
+    expect(r.repos["b/b"]).toEqual({
+      state: "blocked",
+      path: "/path/to/home/volley/repos/b/b",
+      reasons: [
+        "b/b is not assigned to control: add it (Settings → Repositories, or volley repo add b/b --machine control)",
+      ],
+    });
+    expect(r.ready).toBe(true);
+  });
+
+  it("D5: a missing tool blocks that repository only, with the exact reason", () => {
+    const rec = many(
+      [repo("a/a", { toolchain: { ok: false, missing: ["java"], outdated: [] } }), repo("b/b")],
+      [
+        {
+          id: "tool.java",
+          ok: false,
+          severity: "block",
+          repo: "a/a",
+          detail: "java is not installed (a/a needs it)",
+        },
+      ],
+    );
+    const r = readiness(input({ record: rec, repos: reposOf(rec, ["a/a", "b/b"]) }));
+    expect(r.repos["a/a"]).toMatchObject({
+      state: "blocked",
+      reasons: ["java not installed (needed by a/a)"],
+    });
+    expect(r.repos["b/b"]).toMatchObject({ state: "ready" });
+    // A per-repository check never blocks the machine.
+    expect(r).toMatchObject({ ready: true, reasons: [] });
+  });
+
+  it("an outdated tool and a failing per-repository check block that repository", () => {
+    const rec = many(
+      [repo("a/a", { toolchain: { ok: false, missing: [], outdated: ["node"] } })],
+      [
+        {
+          id: "repo.fetch",
+          ok: false,
+          severity: "block",
+          repo: "a/a",
+          detail: "git fetch failed",
+        },
+        { id: "repo.canonical", ok: false, severity: "warn", repo: "a/a", detail: "renamed" },
+      ],
+    );
+    const r = readiness(input({ record: rec, repos: reposOf(rec, ["a/a"]) }));
+    expect(r.repos["a/a"]).toMatchObject({
+      state: "blocked",
+      reasons: ["repo.fetch: git fetch failed", "node older than required (needed by a/a)"],
+    });
+  });
+
+  it("an older peer's legacy repo maps to its slug through its origin", () => {
+    const r = readiness(input());
+    expect(r.repos).toEqual({
+      [SLUG]: { state: "ready", path: "/srv/repo", reasons: [] },
+    });
+    const missing = record({
+      repo: { path: "/srv/repo", exists: false, origin: `github.com/${SLUG}` },
+      checks: [{ id: "repo.clone", ok: false, severity: "block", detail: "no clone at /srv/repo" }],
+    });
+    const m = readiness(input({ record: missing }));
+    expect(m.repos[SLUG]).toMatchObject({
+      state: "absent",
+      reasons: [`no clone of ${SLUG} at /srv/repo`],
+    });
+    expect(m.ready).toBe(true);
+    // A legacy clone without an origin yet serves any wanted slug, as placement resolves it.
+    const bare = record({ repo: { path: "/srv/repo", exists: true } });
+    expect(readiness(input({ record: bare })).repos[SLUG]).toMatchObject({ state: "ready" });
+  });
+
+  it("gh without push access names the slug from repos[]", () => {
+    const rec = many([repo("a/a")]);
+    const r = readiness(
+      input({
+        record: { ...rec, auth: { gh: "no_write", claude: "signed_in", trust: "ok" } },
+        repos: reposOf(rec, ["a/a"]),
+      }),
+    );
+    expect(r.reasons).toEqual(["gh: no write permission on a/a"]);
+  });
+
+  it("every per-repository verdict validates against readiness.schema.json", () => {
+    const rec = many([
+      repo("a/a", { toolchain: { ok: false, missing: ["java"], outdated: [] } }),
+      repo("b/b", { exists: false }),
+      repo("c/c"),
+    ]);
+    const v = readiness(input({ record: rec, repos: reposOf(rec, ["a/a", "b/b", "c/c", "d/d"]) }));
+    expect(Object.keys(v.repos).sort()).toEqual(["a/a", "b/b", "c/c", "d/d"]);
+    expect(
+      schemaErrors("readiness.schema.json", envelope(READINESS_CHANNEL, "readiness", v)),
+    ).toEqual([]);
   });
 });
 

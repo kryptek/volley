@@ -22,7 +22,28 @@ export interface MachineCheck {
   ok: boolean;
   severity: "block" | "warn";
   detail: string;
+  /** The repository (`owner/name`) a per-repository check is about (#435). */
+  repo?: string;
 }
+
+/** One repository a machine works on, as its doctor last found it (#435). */
+export interface MachineRepo {
+  slug: string;
+  path: string;
+  exists: boolean;
+  origin?: string;
+  /** The managed clone (fast-forwarded by the doctor); false: an adopted one (fetched only). */
+  managed: boolean;
+  fetched_at: string | null;
+  release_branch?: string;
+  /** The tools it needs that the machine lacks or has too old: either blocks it only. */
+  toolchain: { ok: boolean; missing: string[]; outdated: string[] };
+}
+
+/** Most checks a record carries (machine.schema.json's `checks.maxItems`). */
+const MAX_CHECKS = 128;
+/** Most repositories a record carries (machine.schema.json's `repos.maxItems`). */
+const MAX_REPOS = 64;
 
 /** One `machine.schema.json` payload (SPEC §4.6.14, plus the Fleet fields of §4.6.15). */
 export interface MachineRecord {
@@ -63,6 +84,8 @@ export interface MachineRecord {
     release_branch?: string;
     fetched_at?: string | null;
   };
+  /** Each repository the machine works on (peer.json's `repos`). */
+  repos?: MachineRepo[];
   checks?: MachineCheck[];
   /** Each login's usage probe reading (SPEC §4.6.12): numbers and states only. */
   claude_logins?: ProbeLogin[];
@@ -140,12 +163,13 @@ function keepNewerDoctor(incoming: MachineRecord, prior: MachineRecord | undefin
   if (prior?.doctor_at === undefined || incoming.doctor_at === undefined) return incoming;
   // As instants: the schema allows any date-time form (offsets, fraction lengths).
   if (!(Date.parse(incoming.doctor_at) < Date.parse(prior.doctor_at))) return incoming;
-  const { versions, auth, repo, checks, doctor_at } = prior;
+  const { versions, auth, repo, repos, checks, doctor_at } = prior;
   return {
     ...incoming,
     ...(versions !== undefined ? { versions } : {}),
     ...(auth !== undefined ? { auth } : {}),
     ...(repo !== undefined ? { repo } : {}),
+    ...(repos !== undefined ? { repos } : {}),
     ...(checks !== undefined ? { checks } : {}),
     doctor_at,
   };
@@ -255,9 +279,12 @@ export interface DoctorReport {
   versions?: MachineRecord["versions"];
   auth?: MachineRecord["auth"];
   repo?: MachineRecord["repo"];
+  repos?: MachineRepo[];
   memory?: MachineRecord["memory"];
   disk?: MachineRecord["disk"];
   claude_logins?: ProbeLogin[];
+  /** Under `--fix`: the fixes it applied (the report's journal; never in the record). */
+  fixes?: { id: string; repo?: string; command: string; ok: boolean }[];
   doctor_at: string;
 }
 
@@ -276,20 +303,128 @@ export function parseDoctorReport(stdout: string): DoctorReport | null {
   return v as unknown as DoctorReport;
 }
 
+/**
+ * At most `MAX_CHECKS`, in the report's order. Over the cap, the machine-level checks are kept
+ * first, then failing per-repository ones: many repositories never push out a failing `gh.*` or
+ * `claude.*` check, which readiness reads.
+ */
+function keptChecks<C extends { ok: boolean; repo?: string }>(checks: C[]): C[] {
+  if (checks.length <= MAX_CHECKS) return checks;
+  const rank = (c: C) => (c.repo === undefined ? 0 : c.ok ? 2 : 1);
+  const kept = new Set(
+    checks
+      .map((c, i) => ({ c, i }))
+      .sort((a, b) => rank(a.c) - rank(b.c) || a.i - b.i)
+      .slice(0, MAX_CHECKS)
+      .map(({ i }) => i),
+  );
+  return checks.filter((_, i) => kept.has(i));
+}
+
+/**
+ * A doctor run folded into a machine's record: the run's fields replace the record's. A report
+ * without `repo` or `repos` (its last repository removed, or a second one added) clears the
+ * record's, which would otherwise outlive the run until the machine's next heartbeat.
+ */
+export function withDoctor(prior: MachineRecord, r: DoctorReport): MachineRecord {
+  const { repo: _repo, repos: _repos, ...rest } = prior;
+  return { ...rest, ...doctorFields(r) };
+}
+
 /** A report as record fields: the checks without their fix text (a record never carries it). */
 export function doctorFields(r: DoctorReport): Partial<MachineRecord> {
   const pick = <K extends keyof DoctorReport>(k: K) =>
     isObject(r[k]) ? { [k]: r[k] } : ({} as Record<string, never>);
   return {
-    checks: r.checks
-      .slice(0, 32)
-      .map(({ id, ok, severity, detail }) => ({ id, ok, severity, detail })),
+    checks: keptChecks(r.checks).map(({ id, ok, severity, detail, repo }) => ({
+      id,
+      ok,
+      severity,
+      detail,
+      ...(repo !== undefined ? { repo } : {}),
+    })),
     ...pick("versions"),
     ...pick("auth"),
     ...pick("repo"),
+    ...(Array.isArray(r.repos) ? { repos: r.repos.slice(0, MAX_REPOS) } : {}),
     ...pick("memory"),
     ...pick("disk"),
     ...(Array.isArray(r.claude_logins) ? { claude_logins: r.claude_logins.slice(0, 16) } : {}),
     doctor_at: r.doctor_at,
+  };
+}
+
+/**
+ * The supervisor's own doctor (#436) runs once per running wave's clone (`--repo <dir>`); its
+ * reports fold into one: the machine-level fields and checks from the first, and per clone its
+ * `repo.*` checks (tagged with its slug) and one `repos[]` entry, the first clone of a slug
+ * winning. A clone whose slug is unknown (a repository not on GitHub) keeps its checks untagged.
+ * The legacy `repo` is kept only when exactly one clone ran, as a peer's doctor does.
+ */
+export function foldOwnDoctor(
+  runs: { slug?: string | undefined; report: DoctorReport }[],
+): DoctorReport | null {
+  const first = runs[0]?.report;
+  if (first === undefined) return null;
+  const isRepoCheck = (c: { id: string; repo?: string }) =>
+    c.repo !== undefined || c.id.startsWith("repo.");
+  const checks: DoctorReport["checks"] = first.checks.filter((c) => !isRepoCheck(c));
+  const repos: MachineRepo[] = [];
+  for (const { slug, report } of runs) {
+    if (slug !== undefined && repos.some((r) => r.slug.toLowerCase() === slug.toLowerCase())) {
+      continue;
+    }
+    const own = report.checks.filter(isRepoCheck);
+    checks.push(...(slug === undefined ? own : own.map((c) => ({ ...c, repo: c.repo ?? slug }))));
+    if (slug === undefined) continue;
+    const reported = report.repos?.find((r) => r.slug.toLowerCase() === slug.toLowerCase());
+    if (reported !== undefined) repos.push({ ...reported, slug });
+    else if (report.repo !== undefined) {
+      const r = report.repo;
+      repos.push({
+        slug,
+        path: r.path,
+        exists: r.exists,
+        ...(r.origin !== undefined ? { origin: r.origin } : {}),
+        managed: false,
+        fetched_at: r.fetched_at ?? null,
+        ...(r.release_branch !== undefined ? { release_branch: r.release_branch } : {}),
+        // `--repo` runs no per-repository toolchain check: nothing is held against it.
+        toolchain: { ok: true, missing: [], outdated: [] },
+      });
+    }
+  }
+  const { repo: _repo, repos: _repos, checks: _checks, ...rest } = first;
+  return {
+    ...rest,
+    checks,
+    ...(runs.length === 1 && first.repo !== undefined ? { repo: first.repo } : {}),
+    ...(repos.length > 0 ? { repos } : {}),
+  };
+}
+
+/**
+ * The own doctor's clones whose run failed this time (`failed`, by slug) keep what the last
+ * report said of them (#436): their `repos[]` entry and their `repo.*` checks, so a clone the
+ * machine has is never judged absent over a failed run. The legacy `repo` goes once more than
+ * one clone is held.
+ */
+export function carryFailedClones(
+  folded: DoctorReport | null,
+  prior: DoctorReport | null | undefined,
+  failed: string[],
+): DoctorReport | null {
+  if (folded === null || !prior || failed.length === 0) return folded;
+  const same = (a: string) => (b: string) => a.toLowerCase() === b.toLowerCase();
+  const held = (slug: string) => (folded.repos ?? []).some((r) => same(r.slug)(slug));
+  const carry = failed.filter((slug) => !held(slug));
+  const repos = (prior.repos ?? []).filter((r) => carry.some(same(r.slug)));
+  if (repos.length === 0) return folded;
+  const checks = prior.checks.filter((c) => c.repo !== undefined && carry.some(same(c.repo)));
+  const { repo: _repo, ...rest } = folded;
+  return {
+    ...rest,
+    checks: [...folded.checks, ...checks],
+    repos: [...(folded.repos ?? []), ...repos],
   };
 }

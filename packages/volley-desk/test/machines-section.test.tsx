@@ -907,6 +907,71 @@ describe("Settings › Machines", () => {
   });
 });
 
+describe("Machines: each card lists its repositories read-only (#438)", () => {
+  it("a repository per row with where it stands, and a link to Settings › Repositories", async () => {
+    const onOpenRepos = vi.fn();
+    setup({
+      machines: { "box-a": boxA },
+      onOpenRepos,
+      readiness: {
+        "box-a": {
+          name: "box-a",
+          ready: true,
+          reasons: [],
+          drain: false,
+          max_agents: 4,
+          placed: 0,
+          path_ok: { claude: true, bun: true },
+          requirements: { volley: "0.7.0" },
+          heavy: {},
+          usage: { account: null, five_hour_pct: null },
+          eligible: true,
+          checked_at: iso(NOW),
+          repos: {
+            "example-org/app": { state: "ready", path: "/srv/work/app", reasons: [] },
+            "example-org/lib": {
+              state: "blocked",
+              reasons: ["java not installed (needed by example-org/lib)"],
+            },
+          },
+        },
+      },
+    });
+    await act(flush);
+    const list = within(within(card("box-a")).getByRole("list", { name: "Repositories on box-a" }));
+    expect(list.getByRole("listitem", { name: "example-org/app: ready" })).toBeInTheDocument();
+    expect(
+      list.getByRole("listitem", {
+        name: "example-org/lib: blocked: java not installed (needed by example-org/lib)",
+      }),
+    ).toBeInTheDocument();
+    // Read-only: the card adds and removes nothing; the section does.
+    expect(list.queryByRole("button")).toBeNull();
+    fireEvent.click(within(card("box-a")).getByRole("button", { name: "Repositories…" }));
+    expect(onOpenRepos).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Machines: a repository config just assigned shows before any verdict (#438)", () => {
+  it("the card lists it as waiting for volleyd", async () => {
+    setup({
+      machines: { "box-a": boxA },
+      waveConfig: {
+        version: 3,
+        updated_at: iso(NOW),
+        updated_by: "volleyd",
+        hosts: { "box-a": { target: "you@box-a" } },
+        repos: { "example-org/docs": { machines: ["box-a"] } },
+      },
+    });
+    await act(flush);
+    const list = within(within(card("box-a")).getByRole("list", { name: "Repositories on box-a" }));
+    expect(
+      list.getByRole("listitem", { name: "example-org/docs: waiting for volleyd" }),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("Machines: the read-only notice links to an admin sign-in (#328)", () => {
   afterEach(() => localStorage.clear());
 

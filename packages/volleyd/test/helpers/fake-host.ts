@@ -10,7 +10,12 @@ import type {
   WorktreeResult,
   WorktreeSpec,
 } from "../../src/hosts/host";
-import type { RemoteHost, RemoteHostSpec, RemoteRunOptions } from "../../src/hosts/ssh-tmux";
+import type {
+  DoctorRunOptions,
+  RemoteHost,
+  RemoteHostSpec,
+  RemoteRunOptions,
+} from "../../src/hosts/ssh-tmux";
 import type { DoctorReport } from "../../src/machines";
 import type { PathProbe } from "../../src/readiness";
 import type { SpawnDeps, SpawnRequest } from "../../src/spawn";
@@ -353,7 +358,7 @@ export type FakeRemoteHost = FakeHost &
   RemoteHost & {
     answers: FakeRemoteAnswers;
     probes: number;
-    doctorRuns: { fix: boolean; clone?: string }[];
+    doctorRuns: DoctorRunOptions[];
   };
 
 /** A doctor report with every check passing. */
@@ -361,8 +366,18 @@ export const GREEN_DOCTOR: DoctorReport = {
   checks: [{ id: "repo.clone", ok: true, severity: "block", detail: "clone at /srv/repo" }],
   versions: { peer: "0.2.0", volley: "0.2.0", bun: "1.3.1", git: "2.43.0" },
   auth: { gh: "ok", claude: "signed_in", trust: "ok" },
+  repos: [],
   doctor_at: "2026-10-19T09:00:00.000Z",
 };
+
+/**
+ * One fake box behind every spec the daemon resolves for its machine (repo-less for the doctor
+ * and sign-in, per repository for its tasks): the box takes on each spec that names a clone.
+ */
+export function adoptSpec<T extends RemoteHost>(box: T, spec: RemoteHostSpec): T {
+  if (spec.repo !== undefined) Object.assign(box, { spec });
+  return box;
+}
 
 export function fakeRemoteHost(
   spec: RemoteHostSpec,
@@ -384,7 +399,9 @@ export function fakeRemoteHost(
     }),
     repoExists: async () => true,
     tunnelUp: async () => true,
-    readTrust: async () => ({ projects: { [spec.repo]: { hasTrustDialogAccepted: true } } }),
+    readTrust: async () => ({
+      projects: { [h.spec.repo ?? ""]: { hasTrustDialogAccepted: true } },
+    }),
     recordTrust: async () => {},
     readFile: async () => null,
     answers,
@@ -402,7 +419,7 @@ export function fakeRemoteHost(
       if (a instanceof Error) throw a;
       return a;
     },
-    runDoctor: async (opts: { fix: boolean; clone?: string }) => {
+    runDoctor: async (opts: DoctorRunOptions) => {
       h.doctorRuns.push(opts);
       const a = h.answers.doctor ?? GREEN_DOCTOR;
       if (a instanceof Error) throw a;

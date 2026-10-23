@@ -1,13 +1,23 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { parse, stringify } from "yaml";
 import { dateOf, systemClock } from "./clock";
-import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR } from "./config-defaults";
+import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR, REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import { LOCAL_HOST, localMachineName } from "./fleet-name";
 import { type Journal, writeFileAtomic } from "./journal";
+import { originToSlug, slugKey } from "./repos";
 import { type PathError, toPathErrors, validator } from "./schemas";
-import type { ConfigPayload, LocalAgentsMode, Tunables, TunablesPatch, WaveId } from "./types";
+import type {
+  ConfigPayload,
+  LocalAgentsMode,
+  RepoAssignment,
+  Tunables,
+  TunablesPatch,
+  WaveId,
+} from "./types";
+
+type RepoMachines = RepoAssignment["machines"];
 
 /** `$VOLLEYD_HOME`, else `~/.volley/volleyd`. */
 export function volleydHome(env: Record<string, string | undefined>): string {
@@ -393,6 +403,109 @@ export class ConfigStore {
     // A null leaf is how a removal reads in the journal; it is never a valid config_set patch.
     const patch = { hosts: { [name]: null } } as unknown as TunablesPatch;
     return this.commit(nextLayer, merge(this.defaults, nextLayer), patch, previous, by);
+  }
+
+  /**
+   * `repo_add` / `repo_remove` (SPEC §4.6.21): set `repos.<slug>.machines` (null: drop the
+   * repository) and each `hosts.<m>.repos.<slug>` in `paths` (null: drop the adopted path), the
+   * slug as config already spells it. config_set cannot delete a key, so this writes the layer
+   * itself; journaled as one `config_changed` whose removals read as null leaves.
+   */
+  setRepo(
+    slug: string,
+    machines: RepoMachines | null,
+    paths: Record<string, string | null>,
+    by: string,
+  ): PatchResult {
+    const key = slugKey(this.fileLayer.repos, slug) ?? slugKey(this.global.repos, slug) ?? slug;
+    const { [key]: _old, ...otherRepos } = this.fileLayer.repos ?? {};
+    const repos = machines === null ? otherRepos : { ...otherRepos, [key]: { machines } };
+    const hosts = { ...this.fileLayer.hosts };
+    const hostPatch: Record<string, { repos: Record<string, string | null> }> = {};
+    for (const [m, path] of Object.entries(paths)) {
+      const host = hosts[m];
+      if (host === undefined) {
+        return { applied: false, rejected: [{ path: `hosts.${m}`, reason: "not in config.yaml" }] };
+      }
+      const adopted = slugKey(host.repos, key);
+      const { [adopted ?? key]: _was, ...rest } = host.repos ?? {};
+      const next = path === null ? rest : { ...rest, [key]: path };
+      const { repos: _r, ...without } = host;
+      hosts[m] = Object.keys(next).length > 0 ? { ...without, repos: next } : without;
+      hostPatch[m] = { repos: { [key]: path } };
+    }
+    const { repos: _rs, hosts: _hs, ...base } = this.fileLayer;
+    const nextLayer = {
+      ...base,
+      ...(Object.keys(repos).length > 0 ? { repos } : {}),
+      ...(Object.keys(hosts).length > 0 ? { hosts } : {}),
+    } as TunablesPatch;
+    const nextGlobal = merge(this.defaults, nextLayer);
+    const rejected = tunablesErrors(nextGlobal, this.hostname);
+    if (rejected.length > 0) return { applied: false, rejected };
+    const patch = {
+      repos: { [key]: machines === null ? null : { machines } },
+      ...(Object.keys(hostPatch).length > 0 ? { hosts: hostPatch } : {}),
+    } as unknown as TunablesPatch;
+    const previous = {
+      repos: { [key]: this.global.repos[key] ?? null },
+      ...(Object.keys(hostPatch).length > 0
+        ? {
+            hosts: Object.fromEntries(
+              Object.keys(hostPatch).map((m) => [
+                m,
+                { repos: { [key]: this.global.hosts[m]?.repos?.[key] ?? null } },
+              ]),
+            ),
+          }
+        : {}),
+    };
+    return this.commit(nextLayer, nextGlobal, patch, previous, by);
+  }
+
+  /**
+   * D10: a host's legacy `hosts.<name>.repo`, once its machine record reports the clone's
+   * `origin`, becomes `hosts.<name>.repos.<owner/name>` with the machine added to
+   * `repos.<owner/name>.machines` (unless `all`). Its worktrees stay where they were: an unset
+   * `worktree_root` is pinned to the legacy default beside the clone. Idempotent (a host without
+   * `repo` in config.yaml is left alone), and a non-GitHub origin keeps the legacy key. Journaled
+   * as one `config_changed` whose patch sets `repo: null`.
+   */
+  migrateLegacyRepo(name: string, origin: string | null | undefined, by: string): PatchResult {
+    const nothing: PatchResult = { applied: false, rejected: [] };
+    const host = this.fileLayer.hosts?.[name];
+    const found = originToSlug(origin);
+    if (host?.repo === undefined || found === undefined) return nothing;
+    const repo = host.repo;
+    const slug = slugKey(this.global.repos, found) ?? found;
+    const machines = this.global.repos[slug]?.machines ?? [];
+    const assignment =
+      machines === "all" || machines.includes(name) ? undefined : { machines: [...machines, name] };
+    const hostPatch: Plain = {
+      repo: null,
+      // An adopted clone already listed for the slug wins over the legacy one.
+      ...(slugKey(host.repos, slug) === undefined ? { repos: { [slug]: repo } } : {}),
+      ...(host.worktree_root === undefined
+        ? { worktree_root: posix.join(posix.dirname(repo), REMOTE_HOST_DEFAULTS.worktree_dir) }
+        : {}),
+    };
+    const patch = {
+      ...(assignment !== undefined ? { repos: { [slug]: assignment } } : {}),
+      hosts: { [name]: hostPatch },
+    } as unknown as TunablesPatch;
+    const { repo: _legacy, ...rest } = host;
+    const { repo: _null, ...set } = hostPatch;
+    const nextLayer = merge(
+      { ...this.fileLayer, hosts: { ...this.fileLayer.hosts, [name]: rest } },
+      {
+        ...(assignment !== undefined ? { repos: { [slug]: assignment } } : {}),
+        hosts: { [name]: set },
+      },
+    );
+    const nextGlobal = merge(this.defaults, nextLayer);
+    const rejected = tunablesErrors(nextGlobal, this.hostname);
+    if (rejected.length > 0) return { applied: false, rejected };
+    return this.commit(nextLayer, nextGlobal, patch, pick(this.global, patch), by);
   }
 
   /** Write config.yaml atomically, journal `config_changed`, bump `version`, notify listeners. */

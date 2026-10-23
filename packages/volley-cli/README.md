@@ -22,6 +22,7 @@ If you can write a bash one-liner, you can be a Volley agent. The subcommands co
 - [`volley auth`](#volley-auth)
 - [`volley lease`](#volley-lease)
 - [`volley peer`](#volley-peer)
+- [`volley repo`](#volley-repo)
 - [Common patterns](#common-patterns)
   - [Be a one-shot agent in CI](#be-a-one-shot-agent-in-ci)
   - [Background-wait for an agent and react](#background-wait-for-an-agent-and-react)
@@ -65,6 +66,7 @@ volley --help
 | `volley lease`  | Wait for a heavy-operation lease from `volleyd` (`run`, `acquire`, `release`, `status`). See [`volley lease`](#volley-lease) below. |
 | `volley claude` | Claude account profiles on volleyd: `add <label>` (a profile and its sign-in URL), `signin`, `list` (one block per account, by e-mail: masked unless `--show-email`, its machines, the ones it is `not on:`, and freshest usage; `--json` for the raw answer), `list` also marks `next pick` on each login volleyd's next spawn would run under, `sync` (sharing + MCP servers), `balance [--model <m>] [--machine <name>]` (per machine, the signed-in accounts ranked by headroom with their 5-hour, 7-day and Fable figures and agents, an arrow `← fable, opus` on each family's next pick; e-mails masked unless `--show-email`, `--json` for volleyd's answer), `move <agent-id> <acct>` (restart an agent under another account with a resume note). See the volleyd README's "Claude accounts". |
 | `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (doctor, account, tunnel service, trust check, host entry), `doctor` (check this machine, `--fix` the safe things), `run` (the service). See [`volley peer`](#volley-peer) below and the volleyd README's "Paired machines". |
+| `volley repo`   | The repositories volleyd's machines work on: `add <owner/name>` (each paired machine clones it, or adopts `--path`, and trusts it; `--wait` follows them), `remove` (clones kept), `list`, `status`. See [`volley repo`](#volley-repo) below. |
 | `volley setup`  | First-run / repair wizard: broker, accounts, services, phone sign-in QR. See [`volley setup`](#volley-setup) below. |
 | `volley desk serve` | Serve the built Desk from a small static server (the service `volley setup` installs). See [`volley desk serve`](#volley-desk-serve) below. |
 | `volley deploy` | Take this machine's volleyd and Desk services to a release tag: build the Desk, restart, health-check, roll back on failure; then every paired machine. See [`volley deploy`](#volley-deploy) below. |
@@ -194,7 +196,7 @@ A dry run runs only `git status --porcelain`, the current-ref lookup (`git descr
 4. restart `volley peer run` (`systemctl --user restart volley-peer.service`, or `launchctl kickstart -k gui/<uid>/systems.volley.peer` on macOS), which runs its doctor at start;
 5. `bun <volley_dir>/packages/volley-cli/src/cli.ts peer doctor --json`: it must report the tag's version.
 
-Each machine ends with one health line: `box-a: v0.5.0 ✓ eligible`, or `box-a: v0.5.0 ✗ not eligible: <check> (<detail>)` when a block check fails on the new version (left on the tag: going back would not fix it). A machine that fails a step after its checkout goes back to the ref it was at (checkout, install and lock record, restart) and is reported `box-b: failed at install (<why>); rolled back to v0.4.0`; the supervisor and the other machines stay on the tag. A failed deploy of the supervisor touches no paired machine. Every remote command goes through a fence of exact argv shapes per machine (the tag, or the machine's own previous ref, and nothing else).
+Each machine ends with one health line: `box-a: v0.5.0 ✓ eligible`, or `box-a: v0.5.0 ✗ not eligible: <check> (<detail>)` when a block check fails on the new version (left on the tag: going back would not fix it). A repository's own check (one the doctor runs per repository in the machine's `peer.json`, such as a tool the repository needs) never makes the machine ineligible, as volleyd's readiness judges it: it follows the line, `box-a: v0.5.0 ✓ eligible · example-org/widgets blocked: tool.java (java is not installed (example-org/widgets needs it))`, and `volley repo status` shows it too. A machine that fails a step after its checkout goes back to the ref it was at (checkout, install and lock record, restart) and is reported `box-b: failed at install (<why>); rolled back to v0.4.0`; the supervisor and the other machines stay on the tag. A failed deploy of the supervisor touches no paired machine. Every remote command goes through a fence of exact argv shapes per machine (the tag, or the machine's own previous ref, and nothing else).
 
 `--skip-peers` deploys the supervisor only. `--only <machine>` (repeatable) deploys just those paired machines, to the tag the supervisor already runs (it refuses otherwise), and leaves the supervisor alone: the way to retry one machine after fixing it.
 
@@ -307,8 +309,8 @@ account: `volley peer invite` (a one-time code), `volley peer invite --for <name
 re-pairs the paired machine `<name>`), `volley peer list`, `volley peer remove <name> [--drain |
 --now]`. On any machine, `volley peer doctor [--fix]` says whether it can run an agent and fixes
 what it safely can. On the machine to pair: `volley peer join <code> --to <user@supervisor> --repo
-<clone>` (add `--name <name> --replace` with a `--for` code), then the `volley peer run` service it
-installs. join runs `volley peer redeem` on the supervisor's machine as `volley` when that is on its
+<owner/name>[=<clone>]` (repeatable; a bare `--repo <clone>` path is the legacy single clone; add
+`--name <name> --replace` with a `--for` code), then the `volley peer run` service it installs. join runs `volley peer redeem` on the supervisor's machine as `volley` when that is on its
 non-interactive ssh `PATH`, else as `~/.volley/bin/volley` (where `volley setup` installs it; a
 Mac's ssh `PATH` has neither bun nor volley); `--remote-volley <command>` names another.
 
@@ -335,6 +337,9 @@ The one command that says whether this machine can run an agent, and what to do 
 volley peer doctor                       # one line per check: ✓ ok, ! warning, ✗ blocks agents
 volley peer doctor --fix                 # print the plan, ask, apply the safe fixes, check again
 volley peer doctor --fix --yes --clone --origin https://github.com/example-org/example-repo
+volley peer doctor --fix --yes --clone --repo-add example-org/example-repo   # add, then clone it
+volley peer doctor --repo-add example-org/tools=/path/to/tools   # adopt an existing clone
+volley peer doctor --repo-remove example-org/tools               # forget it (the clone stays)
 volley peer doctor --json                # the machine record's doctor fields (SPEC §4.6.15)
 volley peer doctor --sharing '{"skills":"own"}'   # by hand: this profile's sharing modes
 ```
@@ -345,8 +350,10 @@ volley peer doctor --sharing '{"skills":"own"}'   # by hand: this profile's shar
 | `bun_on_path`, `claude_on_path` | warn | **an estimate**: whether the tool resolves on the non-interactive ssh `PATH` volleyd's `ssh <box> bash -s` gets, guessed as sshd's default `PATH` through your login shell's `-c` (sshd's `SetEnv`, `~/.ssh/environment` and `pam_env` are invisible to it). The detail says "estimated"; the supervisor's own probe of the real ssh `PATH` (readiness `path_ok`) decides |
 | `volley.installed` | block | the volley checkout (`--volley-dir`, default the one running) has `node_modules/.bin`, installed from its current `bun.lock` (the doctor's own install records the lockfile's hash in `node_modules/.volley-lock-sha256`, so a `git pull` without a reinstall shows up), and `package.json` agrees with `bun.lock` (`bun install --frozen-lockfile --dry-run`) |
 | `volley.version` | block | the checkout's version is the one the supervisor requires (its readiness verdict's `requirements.volley`, read through the tunnel when this machine is paired) |
-| `repo.clone`, `repo.origin` | block | `--repo` (default `peer.json`'s) is a git clone whose `origin`, normalised to `<host>/<path>`, is `--origin`'s |
+| `repo.clone`, `repo.origin` | block | per repository in `peer.json`'s `repos` (each check names it: `repo.clone (b/b)`), else `--repo` (default `peer.json`'s legacy `repo`): a git clone whose `origin`, normalised to `<host>/<path>`, is the repository's (`github.com/<owner>/<name>`, or `--origin`'s) |
+| `repo.canonical` | warn | a repository's remote names its old owner or name: GitHub (`gh repo view <slug> --json nameWithOwner`) reports the same repository for both; `--fix` repoints `origin` |
 | `repo.fetch` | warn | `origin` (or `origin/<--release>`) answers `git ls-remote` with no prompt of any kind (`GIT_TERMINAL_PROMPT=0`, no askpass, `ssh -o BatchMode=yes`) |
+| `tool.<name>` (a repository's), `repo.requirements` | block, for that repository only | a tool the repository needs (its manifests and `.volley/requirements.yaml`; the volleyd README's "Repository toolchains") is installed and at least its minimum version; the file is valid |
 | `gh.auth` | warn | `gh auth status`, and `gh repo view <owner/repo> --json viewerPermission` is WRITE, MAINTAIN or ADMIN (`auth.gh`: `ok`, `no_write`, `unauthenticated`, `missing`) |
 | `claude.signin` | warn | `claude auth status` (`auth.claude`: `signed_in` with the plan's label, `not_signed_in`, `missing`, `unknown`); while signed in, `auth.claude_email` / `auth.claude_org` are the login's identity from `~/.claude.json`'s `oauthAccount.emailAddress` / `organizationName` (the only two fields of it the doctor reports; identity, never a credential) |
 | `claude.trust` | warn | `~/.claude.json` trusts the repo's folder or a parent (`auth.trust`) |
@@ -380,6 +387,26 @@ package repository on apt), the line that puts Claude Code on the ssh `PATH` (Li
 or an sshd `SetEnv PATH=…`), `gh auth login && gh auth setup-git`, the Claude sign-in, a wrong
 `origin` (explained, never changed), and `package.json` disagreeing with `bun.lock` (local
 edits: `git -C <dir> status`). Exit status 1 while a `block` check fails.
+
+**Repositories.** `peer.json`'s `repos` maps each repository this machine works on, by its
+GitHub `owner/name`, to its clone: the managed one at `~/.volley/repos/<owner>/<name>`
+(`--repo-add <owner/name>`), or one you already have (`--repo-add <owner/name>=<path>`, adopted).
+`--repo-add` and `--repo-remove` (both repeatable) save the map before the run; the supervisor
+sends them over the same ssh channel as its Repair, and the `volley peer run` service re-reads
+the map every heartbeat, so nothing restarts. A flag-less run (what `volley deploy` and the
+service send) checks every repository in it. A legacy `repo` is rewritten into `repos` on the
+next run, keyed by its clone's GitHub origin (a clone whose origin is not GitHub stays `repo`).
+`--clone` (with `--fix`) clones each repository that has no clone yet from
+`https://github.com/<owner>/<name>.git`; no `--origin` is needed. A remote that names the
+repository under its old owner or name (renamed or transferred: GitHub reports the same
+`nameWithOwner` for both) passes `repo.origin` and warns `repo.canonical`; `--fix` repoints
+`origin` and journals it in the report's `fixes`. Any other mismatch blocks and is never changed;
+without `gh`, origins are compared normalised. `--fix` also fetches every repository and, for a
+managed clone whose worktree is clean and on its default branch (`origin/HEAD`), fast-forwards it
+(`git merge --ff-only`); an adopted clone, a dirty or detached one, or one on another branch is
+fetched only. `--json` carries `repos[]` (`slug`, `path`, `exists`, `origin`, `managed`,
+`fetched_at`, `toolchain: { ok, missing, outdated }`), and `repo` too while exactly one
+repository is configured.
 
 **The Claude profile.** The last four rows prepare this machine's own Claude profile the way
 `volley setup` and the packages' installers do locally, so a session you start here has
@@ -471,6 +498,47 @@ the last doctor run's `vm_stat` figure. Available memory has one definition on e
 the supervisor's own included, so placement can compare them (SPEC §4.6.15): memory the kernel
 can hand out without paging anything active out, over total memory (Linux: `MemAvailable`;
 macOS: free + inactive + speculative + purgeable pages).
+
+---
+
+## `volley repo`
+
+The repositories the supervisor's machines work on (SPEC §4.6.21), by GitHub `owner/name`.
+`add` and `remove` are admin ops (an admin account's login, as `volley peer invite`); `list` and
+`status` are reads any login may make.
+
+```sh
+volley repo add example-org/widgets                       # every machine
+volley repo add example-org/widgets --machine box-a --path box-a=/srv/widgets --wait
+volley repo status example-org/widgets
+#   control: ready (/path/to/home/.volley/repos/example-org/widgets)
+#   box-a: cloning
+volley repo list [--json]
+volley repo remove example-org/widgets --machine box-a    # its clone is kept; the path is printed
+```
+
+- `add <owner/name> [--machine <name>]... [--path <name>=<abs path>]... [--wait]`: volleyd checks
+  the repository with `gh repo view` (one GitHub does not know is refused; GitHub's spelling of
+  the name is kept), assigns it to the machines (default: all of them, the supervisor's own
+  included) in its config, and answers. Then, on each paired machine, its doctor adds the
+  repository to that machine's `peer.json` and, while it has no clone, clones it from
+  `https://github.com/<owner>/<name>.git` (`--path` adopts an existing clone there instead); once
+  the clone exists volleyd trusts it in the machine's default Claude profile and every signed-in
+  one, so its agents never stop on the folder-trust question. The supervisor's own machine is
+  never cloned for you: clone it at the printed path (`gh repo clone <owner/name> <path>`) and
+  add it again. A machine that is down, or whose ssh fails, stays `blocked` with the reason and
+  is retried when it is back (or after a Repair). `--wait` asks `repo_status` until every machine
+  is `ready` or `blocked` (`--wait-timeout <s>`, default 900): exit 0 when all are ready, 1 when one
+  is blocked, 124 on the timeout.
+- `remove <owner/name> [--machine <name>]...`: drops the machines (default: all) from the
+  repository's config and from each paired machine's `peer.json`. No clone is ever deleted: the
+  answer lists each one's path.
+- `status [<owner/name>] [--json]`: one line per machine, `<machine>: <state> (<why or path>)`,
+  `state` being `ready`, `cloning`, `blocked` or `absent` — the same lines the Desk shows.
+- `list [--json]`: each configured repository, its machines and adopted paths.
+
+Connection flags as `volley peer`'s (`--broker-url`, `--namespace`, `--username`,
+`--password`, `--timeout`).
 
 ---
 

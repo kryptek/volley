@@ -11,7 +11,9 @@ import {
   redeemToken,
 } from "../src/store/control";
 import type { TokenClient } from "../src/store/mqtt-client";
+import { createPeerOps } from "../src/store/peerOps";
 import type { DeskMessage, Envelope } from "../src/store/types";
+import { fakeOps as fakeAuthOps } from "./helpers/auth-ops";
 
 /** A fake reply key whose "sealed" text is the JSON itself. */
 const plainKey = async (): Promise<ReplyKey> => ({
@@ -252,6 +254,142 @@ describe("the setup-op contract", () => {
       problems: [],
       terminal: [{ summary: "Install volleyd", reason: "r", command: "volley setup" }],
       restarting: true,
+    });
+  });
+});
+
+describe("the repository ops (SPEC §4.6.21)", () => {
+  it("repoAdd sends repo_add { slug, machines, paths } and returns volleyd's canonical answer", async () => {
+    const { ops, calls } = fakeAuthOps({
+      repo_add: () => ({
+        ok: true,
+        result: {
+          slug: "Example-Org/example-repo",
+          url: "https://github.com/Example-Org/example-repo",
+          visibility: "private",
+          machines: ["hub", "box-a"],
+          status: ["hub: cloning (/path/to/repos/Example-Org/example-repo)"],
+        },
+      }),
+    });
+    const peer = createPeerOps(ops, { role: "admin" });
+    await expect(
+      peer.repoAdd("example-org/example-repo", {
+        machines: ["hub", "box-a"],
+        paths: { "box-a": "/srv/work/example-repo" },
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      slug: "Example-Org/example-repo",
+      url: "https://github.com/Example-Org/example-repo",
+      machines: ["hub", "box-a"],
+      status: ["hub: cloning (/path/to/repos/Example-Org/example-repo)"],
+    });
+    expect(calls[0]).toMatchObject({
+      op: "repo_add",
+      fields: {
+        slug: "example-org/example-repo",
+        machines: ["hub", "box-a"],
+        paths: { "box-a": "/srv/work/example-repo" },
+      },
+    });
+    // No machines: volleyd's default, every machine; no paths: none sent.
+    await peer.repoAdd("example-org/other");
+    expect(calls[1]?.fields).toEqual({ slug: "example-org/other", machines: "all" });
+  });
+
+  it("a refused repo_add carries volleyd's reason (gh's, for a repository GitHub does not know)", async () => {
+    const { ops } = fakeAuthOps({
+      repo_add: () => ({ ok: false, error: "GraphQL: Could not resolve to a Repository" }),
+    });
+    await expect(createPeerOps(ops).repoAdd("example-org/nope")).resolves.toEqual({
+      ok: false,
+      error: "GraphQL: Could not resolve to a Repository",
+    });
+  });
+
+  it("repoRemove sends repo_remove and returns the clone paths left on disk", async () => {
+    const { ops, calls } = fakeAuthOps({
+      repo_remove: () => ({
+        ok: true,
+        result: {
+          slug: "example-org/example-repo",
+          machines: ["box-a"],
+          clones: { "box-a": "/srv/work/example-repo" },
+          peers: { "box-a": "removed" },
+        },
+      }),
+    });
+    const peer = createPeerOps(ops);
+    await expect(peer.repoRemove("example-org/example-repo")).resolves.toEqual({
+      ok: true,
+      slug: "example-org/example-repo",
+      machines: ["box-a"],
+      clones: { "box-a": "/srv/work/example-repo" },
+      peers: { "box-a": "removed" },
+    });
+    expect(calls[0]).toMatchObject({
+      op: "repo_remove",
+      fields: { slug: "example-org/example-repo" },
+    });
+    await peer.repoRemove("example-org/example-repo", ["box-a"]);
+    expect(calls[1]?.fields).toEqual({ slug: "example-org/example-repo", machines: ["box-a"] });
+  });
+
+  it("repoList and repoStatus read the configured repositories and where each stands", async () => {
+    const { ops, calls } = fakeAuthOps({
+      repo_list: () => ({
+        ok: true,
+        result: { repos: [{ slug: "example-org/example-repo", machines: "all" }] },
+      }),
+      repo_status: () => ({
+        ok: true,
+        result: {
+          repos: [
+            {
+              slug: "example-org/example-repo",
+              machines: { "box-a": { state: "ready", path: "/srv/r", reasons: [] } },
+              lines: ["box-a: ready (/srv/r)"],
+            },
+          ],
+        },
+      }),
+    });
+    const peer = createPeerOps(ops);
+    await expect(peer.repoList()).resolves.toEqual({
+      ok: true,
+      repos: [{ slug: "example-org/example-repo", machines: "all" }],
+    });
+    await expect(peer.repoStatus("example-org/example-repo")).resolves.toEqual({
+      ok: true,
+      repos: [
+        {
+          slug: "example-org/example-repo",
+          machines: { "box-a": { state: "ready", path: "/srv/r", reasons: [] } },
+          lines: ["box-a: ready (/srv/r)"],
+        },
+      ],
+    });
+    expect(calls.map((c) => [c.op, c.fields])).toEqual([
+      ["repo_list", {}],
+      ["repo_status", { slug: "example-org/example-repo" }],
+    ]);
+  });
+
+  it("Repair's per-repository clone rides peer_doctor's repos_add", async () => {
+    const { ops, calls } = fakeAuthOps({
+      peer_doctor: () => ({ ok: true, result: { checks: [], plan: [] } }),
+    });
+    await createPeerOps(ops).doctor("box-a", {
+      fix: true,
+      clone: true,
+      reposAdd: ["example-org/example-repo", "example-org/lib=/srv/lib"],
+    });
+    expect(calls[0]?.fields).toEqual({
+      name: "box-a",
+      fix: true,
+      clone: true,
+      repos_add: ["example-org/example-repo", "example-org/lib=/srv/lib"],
     });
   });
 });

@@ -13,7 +13,7 @@ describe("matchSections", () => {
     // Supervisor's rows are searched too: Other › Background wait max.
     expect(keys("  Background ")).toEqual(["appearance", "supervisor"]);
     expect(keys("ABOUT")).toEqual(["about"]);
-    expect(keys("")).toHaveLength(10);
+    expect(keys("")).toHaveLength(11);
   });
 
   it("finds Sound by its words; 'theme' still finds Appearance too", () => {
@@ -29,6 +29,13 @@ describe("matchSections", () => {
     expect(keys("repair")).toEqual(["machines"]);
     expect(keys("drain")).toEqual(["machines"]);
     expect(keys("lease pools")).toEqual(["supervisor"]);
+  });
+
+  it("finds Repositories by repository, github and clone", () => {
+    expect(keys("repository")).toEqual(["repos"]);
+    expect(keys("GitHub")).toEqual(["repos"]);
+    expect(keys("clone")).toEqual(["repos"]);
+    expect(keys("repositories")).toEqual(["repos"]);
   });
 });
 
@@ -62,7 +69,7 @@ describe("the sidebar search", () => {
     fireEvent.change(search(), { target: { value: "ceiling" } });
     expect(listed()).toEqual(["Supervisor"]);
     fireEvent.change(search(), { target: { value: "" } });
-    expect(listed()).toHaveLength(10);
+    expect(listed()).toHaveLength(11);
   });
 
   it("says so when nothing matches, and keeps the open section on screen", () => {

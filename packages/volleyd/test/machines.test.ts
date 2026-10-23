@@ -13,12 +13,18 @@ import { assertAllowed } from "../src/fence";
 import type { RemoteHostSpec } from "../src/hosts/ssh-tmux";
 import { readJournalFile } from "../src/journal";
 import {
+  type DoctorReport,
   MACHINE_CHANNEL,
+  type MachineCheck,
   MachineHealth,
   type MachineRecord,
   type MachineStatus,
+  carryFailedClones,
+  doctorFields,
+  foldOwnDoctor,
   machineTopic,
   parseMachine,
+  withDoctor,
 } from "../src/machines";
 import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
@@ -30,6 +36,7 @@ import {
   type FakeHost,
   type FakeRemoteHost,
   GREEN_DOCTOR,
+  adoptSpec,
   fakeHost,
   fakeRemoteHost,
 } from "./helpers/fake-host";
@@ -71,6 +78,160 @@ describe("parseMachine", () => {
     expect(
       parseMachine(machineTopic("box"), envelope({ ...record(), tunnel: "maybe" as "up" })),
     ).toBeNull();
+  });
+});
+
+describe("a record's repositories (#435)", () => {
+  const REPOS: MachineRecord["repos"] = [
+    {
+      slug: "a/a",
+      path: "/path/to/home/.volley/repos/a/a",
+      exists: true,
+      origin: "github.com/a/a",
+      managed: true,
+      fetched_at: "2026-10-19T08:59:00.000Z",
+      toolchain: { ok: false, missing: ["java"], outdated: [] },
+    },
+    {
+      slug: "b/b",
+      path: "/path/to/work/b",
+      exists: false,
+      managed: false,
+      fetched_at: null,
+      release_branch: "release/2026-10-23-repos",
+      toolchain: { ok: true, missing: [], outdated: ["bun"] },
+    },
+  ];
+  const CHECKS: MachineCheck[] = [
+    { id: "repo.clone", ok: true, severity: "block", detail: "clone", repo: "a/a" },
+    { id: "tool.java", ok: false, severity: "block", detail: "java is not installed", repo: "a/a" },
+    { id: "tool.git", ok: true, severity: "block", detail: "git 2.43.0" },
+  ];
+
+  it("round-trips through machine.schema.json: repos[] and each check's repo", () => {
+    const r = record({ repos: REPOS, checks: CHECKS, doctor_at: "2026-10-19T09:00:00.000Z" });
+    expect(schemaErrors("machine.schema.json", JSON.parse(envelope(r)))).toEqual([]);
+    expect(parseMachine(machineTopic("box"), envelope(r))).toEqual(r);
+    for (const bad of [
+      [{ ...REPOS[0], slug: "../x" }],
+      [{ ...REPOS[0], toolchain: { ok: true, missing: ["rm -rf /"], outdated: [] } }],
+      [{ ...REPOS[0], extra: 1 }],
+    ]) {
+      expect(
+        parseMachine(machineTopic("box"), envelope(record({ repos: bad as never }))),
+      ).toBeNull();
+    }
+    const badCheck = [{ ...CHECKS[0], repo: "not a slug" }] as MachineCheck[];
+    expect(parseMachine(machineTopic("box"), envelope(record({ checks: badCheck })))).toBeNull();
+  });
+
+  it("a doctor report's repos and per-repository checks become record fields", () => {
+    const fields = doctorFields({
+      checks: CHECKS.map((c) => ({ ...c, fix: "x" })),
+      repos: REPOS,
+      fixes: [{ id: "repo.canonical", repo: "a/a", ok: true, command: "git remote set-url" }],
+      doctor_at: "2026-10-19T09:00:00.000Z",
+    });
+    expect(fields.checks).toEqual(CHECKS);
+    expect(fields.repos).toEqual(REPOS);
+    // The fixes journal is the report's, never the record's.
+    expect("fixes" in fields).toBe(false);
+  });
+
+  it("a doctor run without repos clears the record's (its last repository removed)", () => {
+    const prior = record({ repos: REPOS, repo: { path: "/path/to/work/b", exists: false } });
+    const after = withDoctor(prior, { checks: [], doctor_at: "2026-10-19T09:01:00.000Z" });
+    expect(after.repos).toBeUndefined();
+    expect(after.repo).toBeUndefined();
+    expect(after.name).toBe("box");
+    expect(withDoctor(prior, { checks: [], repos: REPOS, doctor_at: "x" }).repos).toEqual(REPOS);
+  });
+
+  it("over the checks cap, every machine-level check and the failing per-repository ones stay", () => {
+    const perRepo = Array.from({ length: 150 }, (_, i) => ({
+      id: "repo.clone",
+      ok: i !== 140,
+      severity: "block" as const,
+      detail: `clone ${i}`,
+      repo: `o/r${i}`,
+    }));
+    const machine = { id: "gh.auth", ok: false, severity: "block" as const, detail: "signed out" };
+    const fields = doctorFields({ checks: [...perRepo, machine], doctor_at: "x" });
+    expect(fields.checks).toHaveLength(128);
+    expect(fields.checks?.at(-1)).toEqual(machine);
+    expect(fields.checks?.find((c) => c.repo === "o/r140")).toMatchObject({ ok: false });
+    // The report's order holds.
+    expect(fields.checks?.[0]?.repo).toBe("o/r0");
+  });
+
+  it("a heartbeat carrying an older doctor run keeps the newer run's repos", () => {
+    const health = new MachineHealth({ now: () => 0, onChange: () => {} });
+    health.observe(record({ repos: REPOS, doctor_at: "2026-10-19T09:00:05.000Z" }));
+    health.observe(record({ repos: [], doctor_at: "2026-10-19T08:00:00.000Z" }));
+    expect(health.record("box")?.repos).toEqual(REPOS);
+  });
+});
+
+describe("foldOwnDoctor: the supervisor's own doctor, one run per clone (#436)", () => {
+  const report = (path: string, origin: string, ok = true): DoctorReport => ({
+    checks: [
+      { id: "tool.git", ok: true, severity: "block", detail: "git 2.43" },
+      { id: "repo.clone", ok, severity: "block", detail: ok ? `clone at ${path}` : "no clone" },
+    ],
+    versions: { peer: null, volley: "0.4.0", bun: "1.3.1", git: "2.43.0" },
+    auth: { gh: "ok", claude: "signed_in", trust: "ok" },
+    repo: { path, exists: ok, origin, fetched_at: null },
+    doctor_at: "2026-10-19T09:00:00.000Z",
+  });
+
+  it("folds each clone into repos[], tags its repo.* checks, keeps machine checks once", () => {
+    const r = foldOwnDoctor([
+      { slug: "a/a", report: report("/path/to/a", "github.com/a/a") },
+      { slug: "b/b", report: report("/path/to/b", "github.com/b/b", false) },
+    ]);
+    expect(r?.repo).toBeUndefined();
+    expect(r?.repos?.map((x) => [x.slug, x.path, x.exists, x.managed])).toEqual([
+      ["a/a", "/path/to/a", true, false],
+      ["b/b", "/path/to/b", false, false],
+    ]);
+    expect(r?.checks.map((c) => [c.id, c.repo, c.ok])).toEqual([
+      ["tool.git", undefined, true],
+      ["repo.clone", "a/a", true],
+      ["repo.clone", "b/b", false],
+    ]);
+    expect(r?.auth?.gh).toBe("ok");
+  });
+
+  it("one clone keeps the legacy repo too; no run is null; a slug twice is folded once", () => {
+    const one = foldOwnDoctor([{ slug: "a/a", report: report("/path/to/a", "github.com/a/a") }]);
+    expect(one?.repo?.path).toBe("/path/to/a");
+    expect(foldOwnDoctor([])).toBeNull();
+    const twice = foldOwnDoctor([
+      { slug: "a/a", report: report("/path/to/a", "github.com/a/a") },
+      { slug: "A/A", report: report("/path/to/a2", "github.com/a/a") },
+    ]);
+    expect(twice?.repos).toHaveLength(1);
+  });
+
+  it("a clone whose run failed keeps its last repos[] entry and checks, not absent", () => {
+    const prior = foldOwnDoctor([
+      { slug: "a/a", report: report("/path/to/a", "github.com/a/a") },
+      { slug: "b/b", report: report("/path/to/b", "github.com/b/b", false) },
+    ]);
+    // b/b's run failed this time: only a/a's report folds.
+    const now = foldOwnDoctor([{ slug: "a/a", report: report("/path/to/a2", "github.com/a/a") }]);
+    const r = carryFailedClones(now, prior, ["b/b"]);
+    expect(r?.repos?.map((x) => [x.slug, x.path])).toEqual([
+      ["a/a", "/path/to/a2"],
+      ["b/b", "/path/to/b"],
+    ]);
+    expect(r?.checks.filter((c) => c.repo === "b/b").map((c) => c.ok)).toEqual([false]);
+    // Two clones in all: no legacy single repo.
+    expect(r?.repo).toBeUndefined();
+    // Nothing failed, or nothing to carry: unchanged.
+    expect(carryFailedClones(now, prior, [])).toBe(now);
+    expect(carryFailedClones(now, undefined, ["b/b"])).toBe(now);
+    expect(carryFailedClones(null, prior, ["b/b"])).toBeNull();
   });
 });
 
@@ -328,7 +489,11 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
 
   const verdict = async (name: string) =>
     (await env.retained(`${machineTopic(name)}/readiness`)) as {
-      payload: Record<string, unknown> & { ready: boolean; reasons: string[] };
+      payload: Record<string, unknown> & {
+        ready: boolean;
+        reasons: string[];
+        repos?: Record<string, unknown>;
+      };
     } | null;
   const task = async (wave: string, id: string) => {
     await waits.settled();
@@ -436,7 +601,7 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
         claudeJsonPath: claudeJson,
         remoteHost: (s) => {
           box ??= fakeBox(s, local);
-          return box;
+          return adoptSpec(box, s);
         },
         credentials: memoryCredentials(),
       },
@@ -538,7 +703,7 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
     });
   });
 
-  it("the own doctor runs through the fence without --repo while no wave runs (its repo checks do not count), then with the running wave's repo, whose origin a peer's is compared with", async () => {
+  it("the own doctor runs through the fence without --repo while no wave runs (its repo checks do not count), then with the running wave's repo, which every verdict judges by slug", async () => {
     await eventually(async () => {
       await tick();
       return (await verdict("control"))?.payload.ready === true;
@@ -568,7 +733,12 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
     });
     expect((await verdict("control"))?.payload.ready).toBe(true);
 
-    // A peer whose clone has another origin is not ready, and says so.
+    // The own record carries the wave's clone in repos[], by the slug of its origin (#436).
+    expect((await verdict("control"))?.payload.repos).toMatchObject({
+      "example-org/widgets": { state: "ready", path: repo },
+    });
+
+    // D6: a peer whose clone is of another repository stays ready; the wave's slug is absent there.
     await heartbeat({
       checks: [{ id: "repo.clone", ok: true, severity: "block", detail: "clone" }],
       versions: { peer: FLEET_VERSION, volley: FLEET_VERSION, bun: "1.3.1", git: "2.43.0" },
@@ -578,13 +748,19 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
     });
     await eventually(async () => {
       await tick();
-      return (
-        (await verdict("box"))?.payload.reasons.some((r) => r.startsWith("repo origin")) === true
-      );
+      return (await verdict("box"))?.payload.repos?.["example-org/fork"] !== undefined;
     });
-    expect((await verdict("box"))?.payload.reasons).toEqual([
-      `repo origin differs from the host's (github.com/example-org/fork, host: ${ORIGIN})`,
-    ]);
+    expect((await verdict("box"))?.payload).toMatchObject({
+      ready: true,
+      reasons: [],
+      repos: {
+        "example-org/fork": { state: "ready", path: "/srv/repo" },
+        "example-org/widgets": {
+          state: "absent",
+          reasons: ["no clone of example-org/widgets on box"],
+        },
+      },
+    });
   });
 
   it("Repair's clone runs the box's doctor with --origin: the running wave's origin, as the supervisor's own doctor read it", async () => {
@@ -789,7 +965,7 @@ describe("the supervisor's own record and readiness verdicts (SPEC §4.6.15)", (
         host: fakeHost(),
         remoteHost: (s) => {
           box ??= fakeRemoteHost(s, fakeHost());
-          return box;
+          return adoptSpec(box, s);
         },
         credentials: memoryCredentials(),
       },
@@ -1354,5 +1530,49 @@ describe("a machine that stays down: the machine_down decision (SPEC §4.6.15)",
           (e) => e.type === "steering_sent" && e.data.agent_id === t1 && e.data.type === "cancel",
         ),
     ).toBe(true);
+  });
+});
+
+describe("a local → auto resubmit of an admitted, unspawned task (#434)", () => {
+  let f: Fleet;
+  beforeEach(async () => {
+    f = await makeFleet();
+  });
+  afterEach(async () => {
+    await f.close();
+  });
+
+  it("gives the admission back; the next tick places it on box and spawns it there, never resolving auto", async () => {
+    // Admitted on the supervisor's machine, but its launch is refused: no agent, no spawn under way.
+    f.local.launchOutcome = "refused";
+    await f.submit("w1", "placement: local\n", "  T1: { issue: 42 }\n");
+    await f.tick();
+    await eventually(async () => {
+      await f.tick(0);
+      return f.journal("w1").some((e) => e.type === "spawn_failed" && e.task === "T1");
+    });
+    f.local.launchOutcome = "ok";
+
+    await f.submit("w1", "placement: auto\nplacement_prefer: [box]\n", "  T1: { issue: 42 }\n");
+    expect(f.journal("w1").filter((e) => e.type === "task_admission_returned")).toMatchObject([
+      { task: "T1", data: { task: "T1", from_host: "local", to_host: "auto" } },
+    ]);
+    // Past the refused launch's 30 s backoff, within box's heartbeat timeout.
+    await f.tick(40_000);
+    await eventually(async () => {
+      await f.tick(0);
+      return f.journal("w1").some((e) => e.type === "agent_spawned" && e.task === "T1");
+    });
+    const j = f.journal("w1");
+    expect(j.filter((e) => e.type === "task_placed")).toMatchObject([
+      { task: "T1", data: { host: "box", by: "auto" } },
+    ]);
+    expect(j.find((e) => e.type === "agent_spawned" && e.task === "T1")?.data.host).toBe("box");
+    expect(
+      j.some((e) => e.type === "alarm_raised" && e.data.alarm === "host_auto_unresolved"),
+    ).toBe(false);
+    expect(
+      j.some((e) => typeof e.data.message === "string" && e.data.message.includes("host 'auto'")),
+    ).toBe(false);
   });
 });

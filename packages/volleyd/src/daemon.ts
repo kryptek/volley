@@ -22,7 +22,7 @@ import {
   totalmem,
   uptime,
 } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { BrokerVersionError } from "volley-cli/auth/version";
 import { countLiveAgents } from "volley-cli/setup/broker";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -169,10 +169,14 @@ import {
   ClaudeAccountError,
   LOCAL_MACHINE,
   MOST_HEADROOM,
+  PRIMARY_ACCOUNT,
   type SelectedAccount,
   accountKey,
   claudeRoot,
+  profileDir,
+  readRegistry,
 } from "./claude/profiles";
+import { remoteAccountHost } from "./claude/remote-signin";
 import { ClaudeService, SIGNIN_CHANNEL } from "./claude/service";
 import { type Sharing, readSharing } from "./claude/sharing";
 import {
@@ -258,16 +262,25 @@ import {
   openDecisions,
   openEvent,
   parkedTasks,
+  preconditionKey,
   releaseEvent,
+  remoteRepoMissing,
   renderDecisionsMd,
   resolveEvent,
   taskHoldReleased,
+  trustedKeys,
   waveDecisionId,
   writeDecisionsFile,
 } from "./decisions";
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
-import { TMUX_SIZE, mintConsentToken, mintModelSwitchToken, mintWakeToken } from "./fence";
+import {
+  TMUX_SIZE,
+  isRepoAdd,
+  mintConsentToken,
+  mintModelSwitchToken,
+  mintWakeToken,
+} from "./fence";
 import { LOCAL_HOST } from "./fleet-name";
 import { lockFetches } from "./git-lock";
 import type { Host, TermSize } from "./hosts/host";
@@ -275,6 +288,8 @@ import { LocalCmuxHost } from "./hosts/local-cmux";
 import {
   type RemoteHost,
   type RemoteHostSpec,
+  type RepoRemoteHost,
+  type SlugTarget,
   SshTmuxHost,
   resolveRemoteHost,
   sessionName,
@@ -306,10 +321,13 @@ import {
   MachineHealth,
   type MachineRecord,
   type MachineStatus,
+  carryFailedClones,
   doctorFields,
+  foldOwnDoctor,
   machineTopic,
   parseDoctorReport,
   parseMachineFrom,
+  withDoctor,
 } from "./machines";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
 import {
@@ -348,6 +366,7 @@ import {
   READINESS_CHANNEL,
   type ReadinessInput,
   type ReadinessPayload,
+  type RepoVerdict,
   machineView,
   peerMaxAgents,
   readiness,
@@ -355,7 +374,25 @@ import {
   readinessTopic,
 } from "./readiness";
 import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure } from "./reducer";
-import { readRepoView } from "./repo-visibility";
+import { readRepoView, readSlugView } from "./repo-visibility";
+import {
+  type AddStep,
+  type RepoMachines,
+  addPlan,
+  assignedSlugs,
+  cloneFor,
+  homeFromClones,
+  isSlug,
+  legacyOrigin,
+  pendingRepoRuns,
+  repoStateLine,
+  sameSlug,
+  slugKey,
+  unassignedSlugs,
+  waveSlug,
+  withMachines,
+  withoutMachines,
+} from "./repos";
 import {
   type Admission,
   admit,
@@ -390,7 +427,7 @@ import type {
   WaveTask,
 } from "./types";
 import { SYSTEM_WAVE } from "./types";
-import { type PlacementDefaults, WaveFileError, parseWaveFile } from "./wave-file";
+import { type PlacementDefaults, WaveFileError, parseWaveFile, resolveWaveRepo } from "./wave-file";
 
 import {
   BLOCKED_TASK_CANCELLED,
@@ -502,6 +539,7 @@ import {
   isRepoTrusted,
   readClaudeJson,
   recordRepoTrust,
+  repoRoot,
   trustAskFor,
 } from "./trust";
 import { type AgentWatch, type ProgressFeed, watchAgent } from "./verify";
@@ -780,6 +818,11 @@ const PEER_ADMIN_OPS: ReadonlySet<string> = new Set([
   "peer_invite",
   "peer_remove",
   "peer_doctor",
+  // Repositories (SPEC §4.6.21).
+  "repo_add",
+  "repo_remove",
+  "repo_list",
+  "repo_status",
   // An admin archives any ended wave (SPEC §4.6.20), whoever owns it.
   "archive",
 ]);
@@ -987,6 +1030,9 @@ export const daemonClientId = (namespace: string) =>
   `volley-${DAEMON_AGENT_ID}-daemon-${namespace}`;
 
 type Reply = Omit<ControlResponse, "text" | "acked_type" | "op">;
+
+/** A profile as `repo_trusted` names it: `primary` (the default profile), else its id. */
+const profileName = (dir: string | null) => (dir === null ? PRIMARY_ACCOUNT : posix.basename(dir));
 
 type HandlerResult = Reply & {
   /** Sent instead as the answer once it settles (steer's ack wait), off the serial queue. */
@@ -1393,12 +1439,14 @@ export class Daemon {
   private ownRecord: MachineRecord | undefined;
   private ownRecordAt: number | null = null;
   /**
-   * The supervisor's own doctor: its last report, the repo that run checked (null: none; undefined:
-   * no run finished yet), when it last started, whether it runs now.
+   * The supervisor's own doctor (#436: one run per running wave's clone, folded): its last report,
+   * whether a run has finished yet, each clone's origin as its last run read it (by absolute
+   * path), when it last started, whether it runs now.
    */
   private localReport: DoctorReport | null = null;
-  private localDoctorRepo: string | null | undefined = undefined;
-  /** The repo the last run started with (a failed run is not retried before the next beat). */
+  private localDoctorDone = false;
+  private readonly localOrigins = new Map<string, string | null>();
+  /** The clones the last run started with (a failed run is not retried before the next beat). */
   private localDoctorTried: string | null = null;
   private localDoctorAt: number | null = null;
   private localDoctorRunning = false;
@@ -1416,6 +1464,21 @@ export class Daemon {
   /** Hosts a `peer_doctor` runs on now (one at a time per host), and the requests it answers. */
   private readonly doctoring = new Set<string>();
   private readonly authRunning = new Set<string>();
+  // --- Repositories (SPEC §4.6.21): repo_add's clone and trust runs ---
+  /**
+   * Each machine's `repo_add` runs as readiness shows them, by slug: `cloning` while one runs,
+   * `blocked` with its why once one failed (until its next run).
+   */
+  private readonly repoRuns = new Map<
+    string,
+    Map<string, { state: "cloning" | "blocked"; reasons: string[]; path?: string }>
+  >();
+  /** The folder trust `repo_add` recorded (D4), by `preconditionKey`: `repo_trusted`, replayed. */
+  private repoTrustedKeys = new Set<string>();
+  /** The repo_add runs that met a busy `doctoring` on a machine: run again once it is released. */
+  private readonly afterDoctor = new Map<string, Set<string>>();
+  /** repo_add's runs and sign-in trust writes in flight (`stop` waits for them). */
+  private readonly repoWork = new Set<Promise<void>>();
   /** Each peer's last PATH probe (`path` null: none yet; `error`: ssh failed), by name. */
   private readonly probes = new Map<
     string,
@@ -1485,6 +1548,12 @@ export class Daemon {
     });
     this.leases = replayLeases(this.system.readAll());
     this.version = opts.fleet?.version ?? pkg.version;
+    this.repoTrustedKeys = trustedKeys(this.system.readAll());
+    // A repo_add that had not finished on a machine stays blocked (retried on its next up).
+    for (const [m, slugs] of pendingRepoRuns(this.system.readAll())) {
+      for (const [slug, why] of slugs)
+        this.setRepoRun(m, slug, { state: "blocked", reasons: [why] });
+    }
     for (const e of this.system.readAll()) {
       if (e.type !== "machine_readiness_changed") continue;
       const { name, ready, reasons } = e.data as {
@@ -1539,7 +1608,12 @@ export class Daemon {
       exec: opts.claude?.exec ?? realExec,
       clock: this.time,
       publish: (topic, e) => this.publish(topic, this.envelope(SIGNIN_CHANNEL, e.type, e), false),
-      journal: (ev) => this.appendSystem(ev),
+      journal: async (ev) => {
+        await this.appendSystem(ev);
+        // D4: a profile signed in later gets the folder trust of every repository there.
+        const acct = (ev.data as { acct?: unknown }).acct;
+        if (ev.type === "claude_signin_done" && typeof acct === "string") this.trustSignedIn(acct);
+      },
       log: this.log,
       ...(opts.claude?.signinPollMs !== undefined
         ? { signinPollMs: opts.claude.signinPollMs }
@@ -1825,7 +1899,9 @@ export class Daemon {
           if (!Object.hasOwn(this.config.effective().hosts, name) || record.tunnel === "local") {
             return;
           }
+          const doctorAt = this.machines.record(name)?.doctor_at;
           const keptNewer = this.machines.observe(record, { heard });
+          this.migrateLegacyRepo(name);
           if (record.tunnel === "up" && heard) this.sampleHost(name, record);
           // The box's beat still carries its service's older doctor run: re-assert the newer one
           // (a Repair's) over it, so clients never see the stale checks again.
@@ -1838,6 +1914,9 @@ export class Daemon {
             );
           }
           await this.publishReadiness(name);
+          // A newer doctor report from the box (a clone made by hand, a fix): the repo_add runs
+          // blocked there run again (SPEC §4.6.21). Its unchanged beats retry nothing.
+          if (heard && held?.tunnel === "up" && held.doctor_at !== doctorAt) this.retryRepos(name);
           this.foldLogins(record, name);
           // `primary@<name>`'s usage record carries this record's identity, and its logins'
           // usage probe readings (unchanged: no-op).
@@ -2530,6 +2609,7 @@ export class Daemon {
       await this.reconciling;
       await this.settled();
       await this.localDoctorRun;
+      await Promise.all([...this.repoWork]);
     } finally {
       await this.dynsec?.close();
     }
@@ -2978,7 +3058,7 @@ export class Daemon {
       candidates,
       w,
       this.placementSnapshot(gate, eff),
-      this.placeOptions(eff),
+      this.placeOptions(eff, wave),
       gate,
       (host) => this.hostVerdict(host, eff),
       {
@@ -3059,9 +3139,17 @@ export class Daemon {
     };
   }
 
-  /** `place`'s options under `eff`: the machine filter's, and the own machine's name. */
-  private placeOptions(eff: Tunables): PlaceOptions {
-    return { ...this.filterOptions(eff), localName: this.config.localName() };
+  /**
+   * `place`'s options under `eff` for `wave`: the machine filter's, the own machine's name, and the
+   * wave's repository (`slugOf`, #436), which a machine needs a ready clone of.
+   */
+  private placeOptions(eff: Tunables, wave: WaveId): PlaceOptions {
+    const slug = this.slugOf(wave);
+    return {
+      ...this.filterOptions(eff),
+      localName: this.config.localName(),
+      ...(slug !== undefined ? { waveSlug: slug } : {}),
+    };
   }
 
   /** What placement knows now: the own machine and every configured host, with their verdicts. */
@@ -3240,7 +3328,7 @@ export class Daemon {
     const eff = this.config.effective(wave);
     const gate = admissionFor(rec, this.killSwitch, this.pressure(wave));
     return place({ ...def, host: AUTO_HOST }, w, snap ?? this.placementSnapshot(gate, eff), {
-      ...this.placeOptions(eff),
+      ...this.placeOptions(eff, wave),
       exclude,
     });
   }
@@ -4110,7 +4198,8 @@ export class Daemon {
       this.parkClosed(wave, task);
       throw new Error(`${closed.line}: ${task}'s ${role} waits for its re-place question`);
     }
-    let remote: RemoteHost | undefined;
+    if (this.parkUnplaced(wave, task)) throw new Error(`${task}'s ${role} waits: not placed yet`);
+    let remote: RepoRemoteHost | undefined;
     if (t.host !== "local") {
       try {
         remote = this.remoteHost(wave, t);
@@ -4805,6 +4894,7 @@ export class Daemon {
       namespace: this.opts.namespace,
       brokerUrl: this.opts.brokerUrl,
       claudeJsonPath: this.claudeJsonPath,
+      repoTrusted: (key) => this.repoTrustedKeys.has(key),
       hooksDir: spawner.hooksDir ?? HOOKS_DIR,
       mcpEntry: spawner.mcpEntry ?? MCP_ENTRY,
       mintCredentials: spawner.mintCredentials ?? true,
@@ -4848,9 +4938,14 @@ export class Daemon {
 
   /**
    * Task `t` reached a host resolver as `auto` (never placed, never spawned): an alarm, once per
-   * task per daemon run (the set is in memory), and the caller falls back to the supervisor's own host.
+   * task per daemon run (the set is in memory). `then` says what the caller does instead: by
+   * default it falls back to the supervisor's own host; a spawn waits for placement.
    */
-  private autoHostReached(wave: WaveId, t: WaveTask): boolean {
+  private autoHostReached(
+    wave: WaveId,
+    t: WaveTask,
+    then = "its checks run on the supervisor's own host",
+  ): boolean {
     if (t.host !== AUTO_HOST) return false;
     const key = `${wave}/${t.id}`;
     if (!this.autoHostAlarmed.has(key)) {
@@ -4860,7 +4955,7 @@ export class Daemon {
         task: t.id,
         data: {
           alarm: "host_auto_unresolved",
-          message: `host 'auto' reached the host resolver for ${t.id}: its checks run on the supervisor's own host`,
+          message: `host 'auto' reached the host resolver for ${t.id}: ${then}`,
         },
       }).catch((e: unknown) =>
         this.log(`host_auto_unresolved ${key}: ${e instanceof Error ? e.message : String(e)}`),
@@ -4869,18 +4964,87 @@ export class Daemon {
     return true;
   }
 
-  /** The task's remote host: config `hosts.<name>` ← its inline `host:`. Throws if unresolvable. */
-  private remoteHost(wave: WaveId, t: WaveTask): RemoteHost {
-    if (t.host === AUTO_HOST) throw new Error(`host 'auto' reached the host resolver for ${t.id}`);
-    return this.remoteBySpec(
-      resolveRemoteHost(t.host, t.host_spec, this.config.effective(wave).hosts),
-    );
+  /**
+   * True (with the host_auto_unresolved alarm) when the task's host is still `auto`: a spawn
+   * never resolves `auto`, placement does (#434). An admitted task gives its admission back, so
+   * the next tick places it and why_waiting is placement's; any other is parked `not placed yet`.
+   */
+  private parkUnplaced(wave: WaveId, task: string): boolean {
+    const rec = this.waves.get(wave)?.record;
+    const def = rec?.wave?.tasks[task];
+    if (def === undefined || !this.autoHostReached(wave, def, "it waits to be placed"))
+      return false;
+    const key = `${wave}/${task}`;
+    if (rec?.admitted.includes(task) === true) {
+      this.parked.delete(key);
+      void this.enqueue(async () => {
+        if (!this.waves.get(wave)?.record.admitted.includes(task)) return;
+        await this.append(wave, {
+          type: "task_admission_returned",
+          task,
+          data: { task, from_host: AUTO_HOST, to_host: AUTO_HOST },
+        });
+      });
+      return true;
+    }
+    const reason = `not placed yet: its host is ${AUTO_HOST}`;
+    if (this.parked.get(key) !== reason) {
+      this.parked.set(key, reason);
+      void this.enqueue(() => this.publishState(wave));
+    }
+    return true;
   }
 
-  /** The configured host `name` (no task's inline `host:`), or why it cannot be reached. */
+  /**
+   * The task's remote host: config `hosts.<name>` ← its inline `host:`, resolved for the wave's
+   * repository (its clone of `waveSlug`; a non-GitHub wave: the host's own `repo`). Throws if
+   * unresolvable.
+   */
+  private remoteHost(wave: WaveId, t: WaveTask): RepoRemoteHost {
+    if (t.host === AUTO_HOST) throw new Error(`host 'auto' reached the host resolver for ${t.id}`);
+    const eff = this.config.effective(wave);
+    const slug = this.slugOf(wave);
+    const target: SlugTarget | "legacy" =
+      slug === undefined
+        ? "legacy"
+        : {
+            slug,
+            repos: eff.repos,
+            repo_root: eff.fleet.repo_root,
+            // A managed clone's home-relative path, from the clones the machine reports (#436).
+            home: homeFromClones(eff.fleet.repo_root, this.machines.record(t.host)?.repos),
+            origin: legacyOrigin(
+              this.machines.record(t.host)?.repo,
+              t.host_spec?.repo ?? eff.hosts[t.host]?.repo,
+            ),
+          };
+    // The spec carries its clone, so the host built from it is one repository's.
+    return this.remoteBySpec(
+      resolveRemoteHost(t.host, t.host_spec, eff.hosts, target),
+    ) as RepoRemoteHost;
+  }
+
+  /**
+   * The wave's repository slug (`waveSlug`): its state's `github`, else the supervisor clone's
+   * origin as its own doctor last read it (only when that run checked this wave's clone).
+   */
+  private slugOf(wave: WaveId): string | undefined {
+    const rec = this.waves.get(wave)?.record;
+    if (rec === undefined) return undefined;
+    const repo = rec.wave?.repo;
+    const checked =
+      typeof repo === "string" && repo !== ""
+        ? this.localOrigins.get(resolve(repoDir(repo)))
+        : undefined;
+    return waveSlug(rec, checked);
+  }
+
+  /** The configured host `name` (no task's inline `host:`, no repository), or why it cannot be reached. */
   private remoteFor(name: string): RemoteHost | string {
     try {
-      return this.remoteBySpec(resolveRemoteHost(name, undefined, this.config.effective().hosts));
+      return this.remoteBySpec(
+        resolveRemoteHost(name, undefined, this.config.effective().hosts, "none"),
+      );
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
     }
@@ -4978,6 +5142,7 @@ export class Daemon {
    */
   private parkOnTunnel(wave: WaveId, task: string): boolean {
     if (this.parkClosed(wave, task)) return true;
+    if (this.parkUnplaced(wave, task)) return true;
     const key = `${wave}/${task}`;
     const def = this.waves.get(wave)?.record.wave?.tasks[task];
     let target: string | undefined;
@@ -5084,7 +5249,7 @@ export class Daemon {
       !this.localDoctorRunning &&
       (this.localDoctorAt === null ||
         now - this.localDoctorAt >= beat ||
-        this.localDoctorTried !== this.waveRepo())
+        this.localDoctorTried !== JSON.stringify(this.ownDoctorDirs()))
     ) {
       this.localDoctorRun = this.runLocalDoctor();
     }
@@ -5142,30 +5307,51 @@ export class Daemon {
   }
 
   /**
-   * The supervisor's own doctor (`volley peer doctor --json --repo <the running wave's repo>`); its
-   * report fills the own record. Runs again at once when the running wave's repo changes.
+   * The supervisor's own doctor (`volley peer doctor --json --repo <clone>`), once per running
+   * wave's clone (none running: once without a repo), its reports folded into one
+   * (`foldOwnDoctor`, #436): its machine checks, and each clone as one `repos[]` entry by its
+   * wave's slug. Runs again at once when the running waves' clones change.
    */
   private async runLocalDoctor(): Promise<void> {
     const doctor = this.opts.fleet?.localDoctor;
     if (doctor === undefined) return;
     this.localDoctorRunning = true;
     this.localDoctorAt = this.now();
-    const repo = this.waveRepo();
-    this.localDoctorTried = repo;
+    const dirs = this.ownDoctorDirs();
+    this.localDoctorTried = JSON.stringify(dirs);
     try {
-      const report = await doctor(repo, this.localDoctorAbort.signal).catch((e: unknown) => {
-        this.log(`own doctor failed: ${e instanceof Error ? e.message : String(e)}`);
-        return null;
-      });
-      if (!this.running) return;
+      const runs: { dir: string | null; report: DoctorReport }[] = [];
+      const failed: string[] = [];
+      for (const dir of dirs.length > 0 ? dirs : [null]) {
+        const report = await doctor(dir, this.localDoctorAbort.signal).catch((e: unknown) => {
+          this.log(`own doctor failed: ${e instanceof Error ? e.message : String(e)}`);
+          return null;
+        });
+        if (report !== null) runs.push({ dir, report });
+        else if (dir !== null) {
+          const slug = this.slugOfRepo(dir);
+          if (slug !== undefined) failed.push(slug);
+        }
+        if (!this.running) return;
+      }
       // A failed run settles the verdict too (on the last report, or none).
       await this.enqueue(async () => {
-        if (report !== null) {
-          this.localReport = report;
-          this.localDoctorRepo = repo;
-        } else if (this.localDoctorRepo === undefined) {
-          this.localDoctorRepo = null;
+        for (const { dir, report } of runs) {
+          if (dir !== null) this.localOrigins.set(dir, report.repo?.origin ?? null);
         }
+        // A clone whose run failed keeps what the last report said of it.
+        const folded = carryFailedClones(
+          foldOwnDoctor(
+            runs.map(({ dir, report }) => ({
+              slug: dir !== null ? this.slugOfRepo(dir) : undefined,
+              report,
+            })),
+          ),
+          this.localReport,
+          failed,
+        );
+        if (folded !== null) this.localReport = folded;
+        this.localDoctorDone = true;
         await this.publishOwnRecord();
         await this.publishReadiness(this.config.localName());
       });
@@ -5332,7 +5518,7 @@ export class Daemon {
     if (this.readinessSettled.has(name)) return true;
     let warm: boolean;
     if (isLocal) {
-      warm = this.opts.fleet?.localDoctor === undefined || this.localDoctorRepo !== undefined;
+      warm = this.opts.fleet?.localDoctor === undefined || this.localDoctorDone;
     } else {
       const r = this.machines.record(name);
       const probe = this.probes.get(name);
@@ -5366,6 +5552,8 @@ export class Daemon {
     const probe = this.probes.get(name);
     const downSince = isLocal ? undefined : this.machines.downSince(name);
     const records = accountRecords(this.usage);
+    const record = isLocal ? this.ownRecord : this.machines.record(name);
+    const waves = this.waveSlugs();
     // Its best candidate (the balancing rule's pick there), so one fresh login keeps it eligible;
     // a config default that pins an account here is that account.
     const pin = cfg.claude.default_account;
@@ -5377,7 +5565,7 @@ export class Daemon {
           })[0]?.account ?? null);
     return {
       name,
-      record: isLocal ? this.ownRecord : this.machines.record(name),
+      record,
       local: isLocal,
       // The own machine is capped by hard_ceiling, which caps every supervised agent: its
       // headroom is the ceiling less all of them, wherever they run.
@@ -5391,8 +5579,21 @@ export class Daemon {
               Object.hasOwn(this.peers.removals(), name),
           },
       hostVersion: this.version,
-      hostOrigin: this.waveOrigin(),
-      ...(isLocal && this.localDoctorRepo === null ? { noRepo: true } : {}),
+      // Every running wave's repository, beside every one the machine reports (#436).
+      repos: {
+        wanted: [
+          ...waves,
+          ...assignedSlugs(cfg, name).filter((s) => !waves.some((w) => sameSlug(w, s))),
+        ],
+        records: record?.repos,
+        ...(record?.repo !== undefined ? { legacy: record.repo } : {}),
+        ...(this.repoRuns.has(name)
+          ? { runs: Object.fromEntries(this.repoRuns.get(name) ?? []) }
+          : {}),
+        // The own doctor reports every running wave's clone; a repository config gives only to
+        // other machines is checked out here for the supervisor, not for agents (#439).
+        ...(isLocal ? { unassigned: unassignedSlugs(cfg, name, waves) } : {}),
+      },
       probe: isLocal ? (this.opts.fleet?.localPath ?? pathProbe)() : (probe?.path ?? null),
       ...(!isLocal && probe?.error !== undefined ? { probeError: probe.error } : {}),
       placed: isLocal
@@ -5443,27 +5644,75 @@ export class Daemon {
   }
 
   /**
-   * The running wave's repo's origin (normalised), as the own doctor's last run on that clone
-   * read it: what a peer's clone is compared with, and what Repair's clone clones. Null while no
-   * wave runs, or no run has checked its clone yet (a failed run keeps an earlier wave's report).
+   * The first running wave's repo's origin (normalised), as the own doctor's last run on that
+   * clone read it: what the legacy single-repository Repair's clone clones. Null while no wave
+   * runs, or no run has checked its clone yet.
    */
   private waveOrigin(): string | null {
-    const repo = this.localDoctorRepo;
-    return typeof repo === "string" && repo === this.waveRepo()
-      ? (this.localReport?.repo?.origin ?? null)
-      : null;
+    const repo = this.waveRepo();
+    return repo !== null ? (this.localOrigins.get(repo) ?? null) : null;
   }
 
   /**
-   * The wave repo the supervisor's own clone is checked against: the running wave's (the first by
-   * wave id when several run), as an absolute path; null when no wave runs.
+   * The supervisor's own clones of the running waves' repositories, as absolute paths, by wave id
+   * (each once): what its own doctor checks.
    */
-  private waveRepo(): string | null {
-    const repos = this.runningWaves()
+  private waveRepos(): string[] {
+    const dirs = this.runningWaves()
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([, l]) => l.record.wave?.repo ?? "")
-      .filter((r) => r !== "");
-    return repos[0] !== undefined ? resolve(repoDir(repos[0])) : null;
+      .filter((r) => r !== "")
+      .map((r) => resolve(repoDir(r)));
+    return [...new Set(dirs)];
+  }
+
+  /** The first running wave's clone (`waveRepos`), or null when no wave runs. */
+  private waveRepo(): string | null {
+    return this.waveRepos()[0] ?? null;
+  }
+
+  /**
+   * Every running wave's repository slug (`slugOf`), each once (GitHub's names compared without
+   * case), sorted: the repositories every machine's verdict judges (#436).
+   */
+  private waveSlugs(): string[] {
+    const out: string[] = [];
+    for (const [wave] of this.runningWaves()) {
+      const s = this.slugOf(wave);
+      if (s !== undefined && !out.some((o) => sameSlug(o, s))) out.push(s);
+    }
+    return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  }
+
+  /** The slug of the first running wave whose clone is `dir` (the own doctor's run on it). */
+  private slugOfRepo(dir: string): string | undefined {
+    for (const [wave, l] of this.runningWaves().sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      const repo = l.record.wave?.repo;
+      if (typeof repo === "string" && repo !== "" && resolve(repoDir(repo)) === dir) {
+        return this.slugOf(wave);
+      }
+    }
+    return this.ownAssignedClones().find((c) => c.dir === dir)?.slug;
+  }
+
+  /**
+   * What the own doctor checks: the running waves' clones, then each repository config assigns
+   * the own machine (SPEC §4.6.21), by its clone's path here, each once.
+   */
+  private ownDoctorDirs(): string[] {
+    const dirs = this.waveRepos();
+    for (const c of this.ownAssignedClones()) if (!dirs.includes(c.dir)) dirs.push(c.dir);
+    return dirs;
+  }
+
+  /** The own machine's clone of each repository assigned to it (its managed path here). */
+  private ownAssignedClones(): { slug: string; dir: string }[] {
+    const local = this.config.localName();
+    const cfg = this.config.effective();
+    return assignedSlugs(cfg, local).flatMap((slug) => {
+      const path = cloneFor(cfg, local, slug, { home: homedir() });
+      return path !== undefined ? [{ slug, dir: resolve(path) }] : [];
+    });
   }
 
   /**
@@ -5565,12 +5814,14 @@ export class Daemon {
         try {
           r = await this.peers.runDoctor(run);
         } finally {
-          this.doctoring.delete(run.name);
+          this.doctorDone(run.name);
         }
         const { report, ...reply } = r;
         if (r.ok) this.probes.delete(run.name);
         // Through the queue (record folds and verdicts are its), before the answer goes back.
         if (report !== undefined) await this.enqueue(() => this.foldDoctor(run.name, report));
+        // Repair also retries the repo_add runs blocked there (SPEC §4.6.21).
+        if (r.ok) this.retryRepos(run.name);
         return {
           reply: authReply("peer_doctor", reply),
           journal: {
@@ -5593,14 +5844,646 @@ export class Daemon {
   private async foldDoctor(name: string, report: DoctorReport): Promise<void> {
     const prior = this.machines.record(name);
     if (!this.running || prior?.tunnel !== "up") return;
-    const record: MachineRecord = { ...prior, ...doctorFields(report) };
+    const record = withDoctor(prior, report);
     if (!validator("machine.schema.json")(this.envelope(MACHINE_CHANNEL, "machine", record))) {
       this.log(`${name}'s doctor report does not fit machine.schema.json: record left as it was`);
       return;
     }
     this.machines.observe(record, { heard: false });
+    this.migrateLegacyRepo(name);
     await this.publish(machineTopic(name), this.envelope(MACHINE_CHANNEL, "machine", record), true);
     await this.publishReadiness(name);
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Repositories (SPEC §4.6.21): repo_add / repo_remove / repo_list / repo_status
+  // -------------------------------------------------------------------------------------------
+
+  /** Every machine `all` names: the supervisor's own, then each configured host. */
+  private allMachines(): string[] {
+    const local = this.config.localName();
+    return [local, ...Object.keys(this.config.effective().hosts).filter((n) => n !== local)];
+  }
+
+  /** The machines `machines` names (`all`: every one). */
+  private namedMachines(machines: RepoMachines): string[] {
+    return machines === "all" ? this.allMachines() : machines;
+  }
+
+  /** A request's `machines` (default `all`), checked: each one a machine; or why not. */
+  private requestMachines(v: unknown): { machines: RepoMachines } | { error: string } {
+    if (v === undefined || v === "all") return { machines: "all" };
+    if (!Array.isArray(v) || v.length === 0 || v.some((m) => typeof m !== "string"))
+      return { error: 'machines must be "all" or a list of machine names' };
+    const every = this.allMachines();
+    const unknown = (v as string[]).find((m) => !every.includes(m));
+    if (unknown !== undefined)
+      return { error: `no machine named "${unknown}" (${every.join(", ")})` };
+    return { machines: [...new Set(v as string[])] };
+  }
+
+  /** The profiles root (claude/profiles.ts): where the registry and local profiles live. */
+  private claudeRootDir(): string {
+    return this.opts.claude?.root ?? claudeRoot();
+  }
+
+  /**
+   * `repo_add { slug, machines?, paths? }` (admin): `gh repo view` checks the slug (D6) and gives
+   * its canonical name, config assigns it (D1: `repos.<slug>.machines`, `hosts.<m>.repos` for an
+   * adopted path), then each machine's run starts (`runRepo`); the answer does not wait for them
+   * (`repo_status` follows them).
+   */
+  private repoAdd(p: Record<string, unknown>, sender: string): AuthOutcome | DeferredAuth {
+    const refuse = (error: string) => ({ reply: authReply("repo_add", { ok: false, error }) });
+    const slug = p.slug;
+    if (typeof slug !== "string" || !isSlug(slug))
+      return refuse("slug must be a GitHub <owner/name>");
+    const asked = this.requestMachines(p.machines);
+    if ("error" in asked) return refuse(asked.error);
+    const { machines } = asked;
+    const raw = p.paths ?? {};
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+      return refuse("paths must be an object of machine: absolute path");
+    const paths = raw as Record<string, unknown>;
+    const local = this.config.localName();
+    const hosts = this.config.effective().hosts;
+    for (const [m, path] of Object.entries(paths)) {
+      if (m === local)
+        return refuse(`${m} is the supervisor's own machine: its clone is the managed one`);
+      if (!Object.hasOwn(hosts, m)) return refuse(`no configured host named "${m}"`);
+      if (!this.namedMachines(machines).includes(m))
+        return refuse(`paths names ${m}, which machines does not`);
+      if (typeof path !== "string" || !isRepoAdd(`${slug}=${path}`))
+        return refuse(`paths.${m} must be an absolute path`);
+    }
+    return {
+      later: async () => {
+        const view = await readSlugView(this.host.exec, slug);
+        if (typeof view === "string") return refuse(view);
+        const r = await this.enqueue(() =>
+          this.applyRepoAdd(view.slug, machines, paths as Record<string, string>, sender),
+        );
+        if (r === undefined || typeof r === "string") return refuse(r ?? "repo_add failed");
+        return {
+          reply: authReply("repo_add", {
+            ok: true,
+            result: { ...r, url: view.url, visibility: view.visibility },
+          }),
+        };
+      },
+    };
+  }
+
+  /**
+   * Config for a checked `repo_add` (unchanged when it already says so: a second add is
+   * idempotent), `repo_added`, and each machine's run. Inside the queue.
+   */
+  private async applyRepoAdd(
+    slug: string,
+    machines: RepoMachines,
+    paths: Record<string, string>,
+    by: string,
+  ): Promise<{ slug: string; machines: string[]; status: string[] } | string> {
+    const cfg = this.config.effective();
+    const key = slugKey(cfg.repos, slug);
+    const current = key !== undefined ? cfg.repos[key]?.machines : undefined;
+    const next = withMachines(current, machines);
+    const changed = Object.fromEntries(
+      Object.entries(paths).filter(([m, path]) => {
+        const adopted = cfg.hosts[m]?.repos;
+        return adopted?.[slugKey(adopted, slug) ?? slug] !== path;
+      }),
+    );
+    if (JSON.stringify(next) !== JSON.stringify(current) || Object.keys(changed).length > 0) {
+      const r = this.config.setRepo(key ?? slug, next, changed, by);
+      if (!r.applied) {
+        return `repos.${slug} not set: ${r.rejected.map((e) => `${e.path}: ${e.reason}`).join("; ")}`;
+      }
+    }
+    const spelled = slugKey(this.config.effective().repos, slug) ?? slug;
+    await this.appendSystem({
+      type: "repo_added",
+      data: { by, slug: spelled, machines, ...(Object.keys(paths).length > 0 ? { paths } : {}) },
+    });
+    const names = this.namedMachines(machines);
+    for (const m of names) {
+      // An earlier run's `blocked` is stale now: `cloning` until this run ends (`add --wait`).
+      const run = [...(this.repoRuns.get(m) ?? [])].find(([s]) => sameSlug(s, spelled))?.[1];
+      if (run?.state === "blocked")
+        this.setRepoRun(m, spelled, {
+          state: "cloning",
+          reasons: [],
+          ...(run.path !== undefined ? { path: run.path } : {}),
+        });
+      this.startRepoRun(m, spelled);
+    }
+    return { slug: spelled, machines: names, status: this.repoLines(spelled, names) };
+  }
+
+  /**
+   * A `remote_repo_missing` answered `add`: `slug` (the wave's, canonical already) assigned to
+   * `machine` too, `repo_added`, and its run there. Inside the queue.
+   */
+  private async addRepoTo(machine: string, slug: string, by: string): Promise<void> {
+    if (!this.allMachines().includes(machine)) return;
+    const r = await this.applyRepoAdd(slug, [machine], {}, by);
+    if (typeof r === "string") this.log(`add ${slug} to ${machine}: ${r}`);
+  }
+
+  /** Run `repo_add`'s steps for `slug` on `machine` in the background (`stop` waits for it). */
+  private startRepoRun(machine: string, slug: string): void {
+    if (!this.running) return;
+    const run = this.runRepo(machine, slug).catch((e: unknown) =>
+      this.log(`repo ${slug} on ${machine}: ${e instanceof Error ? e.message : String(e)}`),
+    );
+    this.repoWork.add(run);
+    void run.finally(() => this.repoWork.delete(run));
+  }
+
+  /** `machine`'s steps of adding `slug` (`addPlan`), from config and its record now. */
+  private repoStep(machine: string, slug: string): AddStep {
+    const local = this.config.localName();
+    const root = this.claudeRootDir();
+    const [step] = addPlan(
+      this.config.effective(),
+      local,
+      readRegistry(root).accounts,
+      (m) => (m === local ? this.ownRecord : this.machines.record(m)),
+      slug,
+      [machine],
+      { localHome: homedir(), localDir: (id) => profileDir(root, id) },
+    );
+    return step as AddStep;
+  }
+
+  /**
+   * One machine's `repo_add` run (D3, D4): a paired machine's doctor adds the repository to its
+   * peer.json (`--repo-add`, with `--fix --clone` while it reports no clone) over the `runDoctor`
+   * ssh channel, its report folds into the machine's record, and once the clone exists its folder
+   * trust is recorded in the default profile and every signed-in one there. The supervisor's own
+   * machine is never cloned by volleyd: its clone must exist (`git rev-parse`), then it is trusted
+   * the same way. One run per machine at a time (with Repair's, `doctoring`); a machine down or
+   * failing stays `blocked` with its why, retried on its next `up` and after Repair.
+   */
+  private async runRepo(machine: string, slug: string): Promise<void> {
+    // Removed (repo_remove) since this run was started: nothing to do there any more.
+    if (!this.assigned(machine, slug)) return;
+    if (this.doctoring.has(machine)) {
+      const waiting = this.afterDoctor.get(machine) ?? new Set<string>();
+      if (![...waiting].some((s) => sameSlug(s, slug))) waiting.add(slug);
+      this.afterDoctor.set(machine, waiting);
+      return this.repoFailed(
+        machine,
+        slug,
+        `a doctor run on "${machine}" is in progress: retried after it`,
+      );
+    }
+    const step = this.repoStep(machine, slug);
+    if (step.local) {
+      this.doctoring.add(machine);
+      try {
+        return await this.runLocalRepo(step, slug);
+      } finally {
+        this.doctorDone(machine);
+      }
+    }
+    const record = this.machines.record(machine);
+    if (record === undefined)
+      return this.repoFailed(
+        machine,
+        slug,
+        `no machine record from ${machine} yet: retried when it is up`,
+      );
+    if (record.tunnel !== "up")
+      return this.repoFailed(machine, slug, `${machine} is down: retried when it is back`);
+    const host = this.remoteFor(machine);
+    if (typeof host === "string") return this.repoFailed(machine, slug, host);
+    const keyOf = (root: string, dir: string | null) =>
+      preconditionKey({
+        machine: host.spec.target,
+        root,
+        ...(dir !== null ? { profile: dir } : {}),
+      });
+    // Already cloned and trusted there, nothing failed since: a second add changes nothing.
+    if (
+      !step.clone &&
+      step.path !== undefined &&
+      ![...(this.repoRuns.get(machine)?.keys() ?? [])].some((s) => sameSlug(s, slug)) &&
+      step.profiles.every((d) => this.repoTrustedKeys.has(keyOf(step.path as string, d)))
+    ) {
+      return;
+    }
+    this.doctoring.add(machine);
+    try {
+      if (step.clone) {
+        await this.enqueue(async () => {
+          this.setRepoRun(machine, slug, {
+            state: "cloning",
+            reasons: [],
+            ...(step.path !== undefined ? { path: step.path } : {}),
+          });
+          await this.publishReadiness(machine);
+        });
+      }
+      let report: DoctorReport;
+      try {
+        report = await host.runDoctor({ fix: step.clone, repos_add: [step.repo_add] });
+      } catch (e) {
+        return await this.repoFailed(machine, slug, e instanceof Error ? e.message : String(e));
+      }
+      this.probes.delete(machine);
+      await this.enqueue(() => this.foldDoctor(machine, report));
+      const entry = report.repos?.find((r) => sameSlug(r.slug, slug));
+      if (entry?.exists !== true) {
+        const why = report.checks
+          .filter(
+            (c) =>
+              !c.ok && c.severity === "block" && (c.repo === undefined || sameSlug(c.repo, slug)),
+          )
+          .map((c) => `${c.id}: ${c.detail}`);
+        return await this.repoFailed(
+          machine,
+          slug,
+          `no clone of ${slug} on ${machine} after its doctor ran${why.length > 0 ? ` (${why.join("; ")})` : ""}`,
+          entry?.path,
+        );
+      }
+      // Removed while its doctor ran: no trust is recorded for it.
+      if (!this.assigned(machine, slug)) return;
+      const keys: string[] = [];
+      try {
+        for (const dir of step.profiles) {
+          await host.recordTrust(entry.path, dir ?? undefined);
+          keys.push(keyOf(entry.path, dir));
+        }
+      } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        return await this.repoFailed(
+          machine,
+          slug,
+          `recording trust for ${entry.path}: ${why}`,
+          entry.path,
+        );
+      }
+      await this.repoDone(machine, slug, entry.path, step, keys, step.clone);
+    } finally {
+      this.doctorDone(machine);
+    }
+  }
+
+  /** The supervisor's own machine's run: its clone must be there; then it is trusted. */
+  private async runLocalRepo(step: AddStep, slug: string): Promise<void> {
+    const path = step.path;
+    if (path === undefined)
+      return this.repoFailed(step.machine, slug, `no clone path for ${slug} on ${step.machine}`);
+    let root: string;
+    try {
+      root = await repoRoot(this.host.exec, path);
+    } catch {
+      return this.repoFailed(
+        step.machine,
+        slug,
+        `no clone of ${slug} at ${path} on ${step.machine}: clone it there (gh repo clone ${slug} ${path}), then add it again; volleyd clones only on paired machines`,
+        path,
+      );
+    }
+    const keys: string[] = [];
+    try {
+      for (const dir of step.profiles) {
+        recordRepoTrust(dir === null ? this.claudeJsonPath : join(dir, ".claude.json"), root);
+        keys.push(preconditionKey({ root, ...(dir !== null ? { profile: dir } : {}) }));
+      }
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      return this.repoFailed(step.machine, slug, `recording trust for ${root}: ${why}`, root);
+    }
+    await this.repoDone(step.machine, slug, root, step, keys, false);
+  }
+
+  /** A run that failed: `blocked` with `why` there, `repo_clone_run { ok: false }`. */
+  private async repoFailed(
+    machine: string,
+    slug: string,
+    why: string,
+    path?: string,
+  ): Promise<void> {
+    await this.enqueue(async () => {
+      if (!this.running || !this.assigned(machine, slug)) return;
+      this.setRepoRun(machine, slug, {
+        state: "blocked",
+        reasons: [why],
+        ...(path !== undefined ? { path } : {}),
+      });
+      await this.appendSystem({
+        type: "repo_clone_run",
+        data: {
+          machine,
+          slug,
+          ok: false,
+          cloned: false,
+          error: why,
+          ...(path !== undefined ? { path } : {}),
+        },
+      });
+      await this.publishReadiness(machine);
+    });
+  }
+
+  /** A run that succeeded: the trust it recorded, `repo_clone_run { ok: true }`, its verdict. */
+  private async repoDone(
+    machine: string,
+    slug: string,
+    root: string,
+    step: AddStep,
+    keys: string[],
+    cloned: boolean,
+  ): Promise<void> {
+    await this.enqueue(async () => {
+      if (!this.running || !this.assigned(machine, slug)) return;
+      for (const k of keys) this.repoTrustedKeys.add(k);
+      await this.appendSystem({
+        type: "repo_trusted",
+        data: { machine, repo: slug, root, accounts: step.profiles.map(profileName), keys },
+      });
+      await this.appendSystem({
+        type: "repo_clone_run",
+        data: { machine, slug, ok: true, cloned, path: root },
+      });
+      this.setRepoRun(machine, slug, null);
+      await this.publishReadiness(machine);
+    });
+  }
+
+  /** Whether config still assigns `slug` to `machine` (a repo_remove since ends its run). */
+  private assigned(machine: string, slug: string): boolean {
+    return assignedSlugs(this.config.effective(), machine).some((s) => sameSlug(s, slug));
+  }
+
+  /** Set (null: clear) machine's run of `slug` as readiness shows it. */
+  private setRepoRun(
+    machine: string,
+    slug: string,
+    run: { state: "cloning" | "blocked"; reasons: string[]; path?: string } | null,
+  ): void {
+    const runs = this.repoRuns.get(machine) ?? new Map();
+    const k = [...runs.keys()].find((s) => sameSlug(s, slug)) ?? slug;
+    if (run === null) runs.delete(k);
+    else runs.set(k, run);
+    if (runs.size > 0) this.repoRuns.set(machine, runs);
+    else this.repoRuns.delete(machine);
+  }
+
+  /** `machine`'s doctor run ended: the repo_add runs that waited for it start (SPEC §4.6.21). */
+  private doctorDone(machine: string): void {
+    this.doctoring.delete(machine);
+    const waiting = this.afterDoctor.get(machine);
+    this.afterDoctor.delete(machine);
+    for (const slug of waiting ?? []) this.startRepoRun(machine, slug);
+  }
+
+  /** Retry every `repo_add` run blocked on `machine` (its next `up`, a newer doctor report, Repair). */
+  private retryRepos(machine: string): void {
+    for (const [slug, run] of this.repoRuns.get(machine) ?? []) {
+      if (run.state === "blocked") this.startRepoRun(machine, slug);
+    }
+  }
+
+  /**
+   * A Claude profile signed in (`claude_signin_done`, D4): every repository assigned to its
+   * machine is trusted in that profile, each journaled `repo_trusted`. `acct` is `<id>` (this
+   * machine) or `<id>@<machine>`; `primary` is the machine's default profile.
+   */
+  private trustSignedIn(acct: string): void {
+    const remote = remoteAccountHost(acct);
+    const id = remote?.acct ?? acct;
+    const local = this.config.localName();
+    const machine = remote?.name ?? local;
+    const root = this.claudeRootDir();
+    let dir: string | null = null;
+    if (id !== PRIMARY_ACCOUNT) {
+      const a = readRegistry(root).accounts.find(
+        (x) => x.id === id && x.machine === (remote !== null ? remote.name : LOCAL_MACHINE),
+      );
+      if (a === undefined) return;
+      dir = remote !== null ? (a.dir ?? null) : profileDir(root, id);
+      if (dir === null) return;
+    }
+    const slugs = assignedSlugs(this.config.effective(), machine);
+    if (slugs.length === 0) return;
+    const run = this.trustRepos(machine, slugs, dir, id).catch((e: unknown) =>
+      this.log(`trust after sign-in ${acct}: ${e instanceof Error ? e.message : String(e)}`),
+    );
+    this.repoWork.add(run);
+    void run.finally(() => this.repoWork.delete(run));
+  }
+
+  /** Trust each of `slugs`' clones on `machine` in one profile (`dir`; null: the default). */
+  private async trustRepos(
+    machine: string,
+    slugs: string[],
+    dir: string | null,
+    account: string,
+  ): Promise<void> {
+    const local = machine === this.config.localName();
+    const host = local ? null : this.remoteFor(machine);
+    if (typeof host === "string") return this.log(`trust on ${machine}: ${host}`);
+    for (const slug of slugs) {
+      const path = this.repoStep(machine, slug).path;
+      if (path === undefined) continue;
+      try {
+        let root = path;
+        if (host === null) {
+          root = await repoRoot(this.host.exec, path);
+          recordRepoTrust(dir === null ? this.claudeJsonPath : join(dir, ".claude.json"), root);
+        } else await host.recordTrust(path, dir ?? undefined);
+        const key = preconditionKey({
+          root,
+          ...(host !== null ? { machine: host.spec.target } : {}),
+          ...(dir !== null ? { profile: dir } : {}),
+        });
+        await this.enqueue(async () => {
+          if (!this.running) return;
+          this.repoTrustedKeys.add(key);
+          await this.appendSystem({
+            type: "repo_trusted",
+            data: { machine, repo: slug, root, accounts: [account], keys: [key] },
+          });
+        });
+      } catch (e) {
+        this.log(`trust ${slug} on ${machine}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  /**
+   * `repo_remove { slug, machines? }` (admin, D8): config drops the machines (the repository
+   * once none is left) and their adopted paths; each paired machine's doctor drops it from its
+   * peer.json (`--repo-remove`). No clone is ever deleted: the answer names each one's path.
+   */
+  private repoRemove(p: Record<string, unknown>, sender: string): AuthOutcome | DeferredAuth {
+    const refuse = (error: string) => ({ reply: authReply("repo_remove", { ok: false, error }) });
+    const slug = p.slug;
+    if (typeof slug !== "string" || !isSlug(slug))
+      return refuse("slug must be a GitHub <owner/name>");
+    const asked = this.requestMachines(p.machines);
+    if ("error" in asked) return refuse(asked.error);
+    const { machines } = asked;
+    const cfg = this.config.effective();
+    const key =
+      slugKey(cfg.repos, slug) ??
+      Object.values(cfg.hosts)
+        .map((h) => slugKey(h.repos, slug))
+        .find((k) => k !== undefined);
+    if (key === undefined) return refuse(`${slug} is not a configured repository`);
+    const names = this.namedMachines(machines);
+    // Each clone as it is now (the path stays on disk), before config forgets it.
+    const clones = Object.fromEntries(
+      names.flatMap((m) => {
+        const path = this.repoStep(m, key).path;
+        return path !== undefined && assignedSlugs(cfg, m).some((s) => sameSlug(s, key))
+          ? [[m, path]]
+          : [];
+      }),
+    );
+    const next = withoutMachines(
+      cfg.repos[slugKey(cfg.repos, key) ?? key]?.machines,
+      machines,
+      this.allMachines(),
+    );
+    const drops = Object.fromEntries(
+      names.filter((m) => slugKey(cfg.hosts[m]?.repos, key) !== undefined).map((m) => [m, null]),
+    );
+    const r = this.config.setRepo(key, next, drops, sender);
+    if (!r.applied)
+      return refuse(
+        `repos.${key} not changed: ${r.rejected.map((e) => `${e.path}: ${e.reason}`).join("; ")}`,
+      );
+    for (const m of names) this.setRepoRun(m, key, null);
+    const remote = names.filter((m) => m !== this.config.localName() && Object.hasOwn(clones, m));
+    return {
+      later: async () => {
+        const boxes: Record<string, string> = {};
+        for (const m of remote) boxes[m] = await this.repoRemoveOn(m, key);
+        await this.enqueue(async () => {
+          await this.appendSystem({
+            type: "repo_removed",
+            data: { by: sender, slug: key, machines, clones },
+          });
+          for (const m of names) await this.publishReadiness(m);
+        });
+        return {
+          reply: authReply("repo_remove", {
+            ok: true,
+            result: { slug: key, machines: names, clones, peers: boxes },
+          }),
+        };
+      },
+    };
+  }
+
+  /** `--repo-remove` on one paired machine: `removed`, or why not (its next doctor run says). */
+  private async repoRemoveOn(machine: string, slug: string): Promise<string> {
+    if (this.machines.record(machine)?.tunnel !== "up") return `${machine} is down: not told`;
+    if (this.doctoring.has(machine)) return `a doctor run on "${machine}" is in progress: not told`;
+    const host = this.remoteFor(machine);
+    if (typeof host === "string") return host;
+    this.doctoring.add(machine);
+    try {
+      const report = await host.runDoctor({ fix: false, repos_remove: [slug] });
+      await this.enqueue(() => this.foldDoctor(machine, report));
+      return "removed";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    } finally {
+      this.doctorDone(machine);
+    }
+  }
+
+  /** `repo_list`: each configured repository, its machines and adopted paths. */
+  private repoList(): { ok: true; result: { repos: Record<string, unknown>[] } } {
+    const cfg = this.config.effective();
+    const slugs = Object.keys(cfg.repos);
+    for (const h of Object.values(cfg.hosts)) {
+      for (const s of Object.keys(h.repos ?? {}))
+        if (!slugs.some((o) => sameSlug(o, s))) slugs.push(s);
+    }
+    const repos = slugs.sort().map((slug) => {
+      const adopted = Object.fromEntries(
+        Object.entries(cfg.hosts).flatMap(([m, h]) => {
+          const k = slugKey(h.repos, slug);
+          return k !== undefined ? [[m, h.repos?.[k] as string]] : [];
+        }),
+      );
+      return {
+        slug,
+        machines: cfg.repos[slugKey(cfg.repos, slug) ?? slug]?.machines ?? [],
+        ...(Object.keys(adopted).length > 0 ? { paths: adopted } : {}),
+      };
+    });
+    return { ok: true, result: { repos } };
+  }
+
+  /**
+   * `repo_status { slug? }`: each configured repository (or `slug`) on every machine it is
+   * assigned to, as readiness judges it now, with its line (`repoStateLine`).
+   */
+  private repoStatus(p: Record<string, unknown>): Reply {
+    const want = p.slug;
+    if (want !== undefined && (typeof want !== "string" || !isSlug(want)))
+      return { ok: false, error: "slug must be a GitHub <owner/name>" };
+    const all = (this.repoList().result.repos as { slug: string }[]).map((r) => r.slug);
+    const slugs = want === undefined ? all : all.filter((s) => sameSlug(s, want));
+    if (want !== undefined && slugs.length === 0)
+      return { ok: false, error: `${want} is not a configured repository` };
+    const cfg = this.config.effective();
+    const repos = slugs.map((slug) => {
+      const names = this.allMachines().filter((m) =>
+        assignedSlugs(cfg, m).some((s) => sameSlug(s, slug)),
+      );
+      const verdicts = this.repoVerdicts(slug, names);
+      return { slug, machines: verdicts, lines: names.map((m) => repoStateLine(m, verdicts[m])) };
+    });
+    return { ok: true, result: { repos } };
+  }
+
+  /** `slug` on each of `names` as its verdict judges it now. */
+  private repoVerdicts(slug: string, names: string[]): Record<string, RepoVerdict> {
+    const cfg = this.config.effective();
+    const local = this.config.localName();
+    const extra = this.requirementsExtra();
+    const out: Record<string, RepoVerdict> = {};
+    for (const m of names) {
+      const v = this.machineState(m, m === local, cfg, extra, cfg, this.pressure(GLOBAL)).verdict;
+      const k = Object.keys(v.repos).find((s) => sameSlug(s, slug));
+      if (k !== undefined) out[m] = v.repos[k] as RepoVerdict;
+    }
+    return out;
+  }
+
+  /** Each of `names`' line for `slug` (`repoStateLine`). */
+  private repoLines(slug: string, names: string[]): string[] {
+    const verdicts = this.repoVerdicts(slug, names);
+    return names.map((m) => repoStateLine(m, verdicts[m]));
+  }
+
+  /**
+   * D10: a host whose config.yaml still carries the legacy `hosts.<name>.repo` migrates to
+   * `repos` once its record reports that clone's origin (`ConfigStore.migrateLegacyRepo`). Run on
+   * every fold: records arrive whenever the machine beats, and a migrated host has no `repo`.
+   */
+  private migrateLegacyRepo(name: string): void {
+    // The record's clone must be the one config names: its origin says nothing about another.
+    const origin = legacyOrigin(
+      this.machines.record(name)?.repo,
+      this.config.effective().hosts[name]?.repo,
+    );
+    if (origin === undefined) return;
+    const r = this.config.migrateLegacyRepo(name, origin, "volleyd");
+    if (r.applied) this.log(`hosts.${name}.repo migrated to repos (origin ${origin})`);
+    else if (r.rejected.length > 0) {
+      const why = r.rejected.map((e) => `${e.path}: ${e.reason}`).join("; ");
+      this.log(`hosts.${name}.repo not migrated: ${why}`);
+    }
   }
 
   /**
@@ -5613,7 +6496,11 @@ export class Daemon {
     record: MachineRecord,
   ): Promise<void> {
     if (!this.running) return;
-    if (status === "up") await this.machineBack(name);
+    if (status === "up") {
+      await this.machineBack(name);
+      // A repo_add that could not reach it runs again (SPEC §4.6.21).
+      this.retryRepos(name);
+    }
     for (const [wave, log] of this.waves) {
       const tasks = (log.record.state?.tasks ?? [])
         .filter((t) => t.stage !== "done" && t.stage !== "cancelled")
@@ -5689,7 +6576,7 @@ export class Daemon {
   private async remoteSpawn(
     wave: WaveId,
     task: string,
-    remote: RemoteHost,
+    remote: RepoRemoteHost,
     deps: SpawnDeps,
   ): Promise<{ wave: NonNullable<WaveLog["record"]["wave"]>; deps: Partial<SpawnDeps> }> {
     const log = this.waves.get(wave) as WaveLog;
@@ -5714,14 +6601,26 @@ export class Daemon {
     if (!exists) {
       // Through the decision store: retained topic (the Desk, notify) and the task parks.
       if (openId === undefined) {
+        // A repository on GitHub is added by its slug; a legacy clone is cloned by hand.
+        const ask =
+          spec.slug !== undefined
+            ? remoteRepoMissing(spec.name, spec.slug)
+            : {
+                question: `Needs you: no clone of the repo at ${spec.repo} on ${spec.target}. Clone it there, then retry?`,
+                options: ["retry", "cancel"],
+              };
         await this.openSpawnDecision(wave, {
           kind: "remote_repo_missing",
           id: decisionId,
           task,
-          question: `Needs you: no clone of the repo at ${spec.repo} on ${spec.target}. Clone it there, then retry?`,
-          options: ["retry", "cancel"],
+          ...ask,
           pointers: {},
-          data: { host: spec.name, target: spec.target, repo: spec.repo },
+          data: {
+            host: spec.name,
+            target: spec.target,
+            repo: spec.repo,
+            ...(spec.slug !== undefined ? { slug: spec.slug } : {}),
+          },
         });
       }
       throw new SpawnError("REMOTE_REPO_MISSING", `no clone at ${spec.repo} on ${spec.target}`, {
@@ -8886,6 +9785,14 @@ export class Daemon {
       else await this.releaseGoIfVerified(wave);
     }
     if (d.kind === "remote_repo_missing" && d.task !== null) {
+      // `add`: the repository is added to that one machine (repo_add's run), then retried.
+      const slug = (d as { slug?: unknown }).slug;
+      if (
+        r.answer.trim().toLowerCase() === "add" &&
+        typeof slug === "string" &&
+        d.host !== undefined
+      )
+        await this.addRepoTo(d.host, slug, r.by);
       if (r.answer.trim().toLowerCase() === "cancel") {
         await this.append(wave, {
           type: "task_cancelled",
@@ -9941,6 +10848,10 @@ export class Daemon {
     const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
     if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
     if (op === "peer_doctor") return this.peerDoctor(p, sender);
+    if (op === "repo_add") return this.repoAdd(p, sender);
+    if (op === "repo_remove") return this.repoRemove(p, sender);
+    if (op === "repo_list") return { reply: authReply(op, this.repoList()) };
+    if (op === "repo_status") return { reply: authReply(op, this.repoStatus(p)) };
     if (op === "archive") {
       const wave = typeof p.wave === "string" ? p.wave : "";
       const r = this.archived.has(wave)
@@ -10075,6 +10986,11 @@ export class Daemon {
         return this.peers.join(p, by);
       case "peers":
         return this.peers.list();
+      // Repositories (SPEC §4.6.21): reads anyone who steers may make; add / remove are admin ops.
+      case "repo_list":
+        return this.repoList();
+      case "repo_status":
+        return this.repoStatus(p);
       case "config_get": {
         const wave = typeof p.wave === "string" ? p.wave : undefined;
         if (wave !== undefined && !this.waves.has(wave))
@@ -10119,6 +11035,8 @@ export class Daemon {
       case "peer_invite":
       case "peer_remove":
       case "peer_doctor":
+      case "repo_add":
+      case "repo_remove":
         // The mailbox does not name its sender (anyone who steers can write it).
         return {
           ok: false,
@@ -10337,11 +11255,20 @@ export class Daemon {
       return { ok: false, error: `${op} requires payload.wave_yaml` };
     const source = typeof p.source === "string" ? p.source : undefined;
     try {
-      const wave = parseWaveFile(p.wave_yaml, source, this.placementDefaults());
+      const first = parseWaveFile(p.wave_yaml, source, this.placementDefaults());
       // A known wave: parsed again under its own placement (the file's own placement: still wins).
-      return this.waves.get(wave.wave)?.record.wave == null
-        ? wave
-        : parseWaveFile(p.wave_yaml, source, this.placementDefaults(wave.wave));
+      const wave =
+        this.waves.get(first.wave)?.record.wave == null
+          ? first
+          : parseWaveFile(p.wave_yaml, source, this.placementDefaults(first.wave));
+      // An `owner/name` repo: is the supervisor's own clone of it (D9).
+      return resolveWaveRepo(
+        wave,
+        this.config.effective(),
+        this.config.localName(),
+        homedir(),
+        source,
+      );
     } catch (e) {
       if (e instanceof WaveFileError) return { ok: false, error: e.message, errors: e.errors };
       throw e;

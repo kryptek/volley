@@ -16,6 +16,12 @@ const pct = (n: number) => Math.min(100, Math.max(0, round(n, 1)));
 export const worktreeRoot = (repo: string | null, home: string) =>
   repo !== null ? join(dirname(repo), WORKTREE_DIR) : home;
 
+/**
+ * Where a paired machine's repositories' worktrees go: volleyd's managed worktree root,
+ * `<home>/.volley/worktrees/<owner>/<name>` (repos.ts `managedWorktreeRoot`), one per repository.
+ */
+export const reposWorktreeRoot = (home: string) => join(home, ".volley", "worktrees");
+
 /** `available`: macOS's `vmStatAvailablePct`; otherwise `free` (Linux: MemAvailable) over `total`. */
 export function memoryOf(total: number, free: number, available: number | null = null): Memory {
   return {

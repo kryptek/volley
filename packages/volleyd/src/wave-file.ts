@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { type Node, isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { rewordWeights } from "./config-store";
 import { AUTO_HOST } from "./placement";
+import { type RepoConfig, cloneFor, isSlug } from "./repos";
 import { type PathError, toPathErrors, validator } from "./schemas";
 import type {
   MergeMode,
@@ -105,6 +106,28 @@ export function formatPlacement(p: WavePlacement, paired: number): string {
   if (p.by === "unpaired") return `placement: ${p.placement} (no paired machine)`;
   if (p.placement === "local") return "placement: local (placement.default)";
   return `placement: auto (placement.default; ${paired} paired machine${paired === 1 ? "" : "s"})`;
+}
+
+/**
+ * The wave's `repo:` as the supervisor's clone: an `owner/name` slug resolves to its clone on the
+ * supervisor's own machine `local` (`cloneFor`: adopted, else managed under `fleet.repo_root`,
+ * `~` being `home`); any other value is a path and is kept. A slug with no clone there is a
+ * WaveFileError at `repo`. (A relative path shaped like a slug is written `./owner/name`.)
+ */
+export function resolveWaveRepo(
+  wave: Wave,
+  cfg: RepoConfig,
+  local: string,
+  home: string,
+  source?: string,
+): Wave {
+  if (!isSlug(wave.repo)) return wave;
+  const clone = cloneFor(cfg, local, wave.repo, { home });
+  if (clone === undefined) {
+    const reason = `no clone of ${wave.repo} on ${local}: add it (Settings → Repositories, or volley repo add ${wave.repo} --machine ${local})`;
+    throw new WaveFileError([{ path: "repo", reason }], source);
+  }
+  return { ...wave, repo: clone };
 }
 
 /**

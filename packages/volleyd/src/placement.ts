@@ -1,5 +1,7 @@
 import { LOCAL_HOST } from "./fleet-name";
 import type { MachineRecord } from "./machines";
+import type { RepoVerdict } from "./readiness";
+import { slugKey } from "./repos";
 import type { FallbackProfile, LocalAgentsMode, PlacementConfig, Wave, WaveTask } from "./types";
 
 /**
@@ -47,6 +49,11 @@ export interface MachineView {
   down_since?: number;
   /** Each lease pool that sets `per_machine`: its holders' leases on this machine. */
   heavy: Record<string, { held: number; per_machine: number }>;
+  /**
+   * Its verdict's repositories (readiness.ts, #436): a wave's task goes only where its slug is
+   * `ready`. Undefined: not known (a verdict from before repositories), so not filtered.
+   */
+  repos?: Record<string, RepoVerdict>;
   /** Its best candidate account's 5-hour usage percentage; null: unknown. */
   usage_pct: number | null;
   /** That account (the balancing rule's pick on the machine), when known. */
@@ -73,7 +80,14 @@ export interface Snapshot {
  */
 export type FilterOptions = Pick<
   PlaceOptions,
-  "placement" | "warn_at_pct" | "local_agents" | "fallback" | "now" | "down_grace_ms" | "exclude"
+  | "placement"
+  | "warn_at_pct"
+  | "local_agents"
+  | "fallback"
+  | "now"
+  | "down_grace_ms"
+  | "exclude"
+  | "waveSlug"
 >;
 
 export interface PlaceOptions {
@@ -85,6 +99,11 @@ export interface PlaceOptions {
   warn_at_pct: number;
   /** The supervisor's own machine name (`local` in a wave file). */
   localName: string;
+  /**
+   * The wave's repository (`owner/name`, #436): a machine without a ready clone of it is no
+   * candidate. Unset (a non-GitHub repository): not filtered by repository.
+   */
+  waveSlug?: string;
   /**
    * Machines a re-placement moves the task off (SPEC §4.6.15: a `machine_down` or `respawn on`
    * answer): never chosen, shown as ineligible.
@@ -195,7 +214,8 @@ const seconds = (ms: number) => Math.max(0, Math.round(ms / 1000));
  * any peer. `never`: none. `fallback`: none while any peer is eligible, or a down peer is still
  * within `down_grace_ms` of going down (a tunnel blip never pulls work onto it); otherwise the
  * fallback profile is in force. A peer's eligibility is task-agnostic (`machineIneligible`), so a
- * peer with its heavy slots full still keeps the own machine closed to a heavy task. Readiness
+ * peer with its heavy slots full still keeps the own machine closed to a heavy task; but a peer
+ * without a ready clone of the wave's repository (`waveSlug`) is no eligible peer for its waves. Readiness
  * and placement both read it, so they agree.
  */
 export function localRole(snap: Snapshot, o: FilterOptions): LocalRole {
@@ -208,6 +228,8 @@ export function localRole(snap: Snapshot, o: FilterOptions): LocalRole {
       m,
       why: [
         ...(o.exclude?.includes(m.name) === true ? [EXCLUDED] : []),
+        // A peer without the wave's repository takes none of its tasks: it holds nothing back.
+        ...nonNull(repoIneligible(m, o.waveSlug)),
         ...machineIneligible(m, snap, o),
       ],
     }));
@@ -332,7 +354,26 @@ export function machineIneligible(m: MachineView, snap: Snapshot, o: FilterOptio
   return out;
 }
 
-/** Every reason `m` may not take `task` now: the machine filter, then a heavy task's slots. */
+const nonNull = (s: string | null): string[] => (s === null ? [] : [s]);
+
+/**
+ * Why `m` cannot take a task of the wave's repository (`slug`): `no ready clone of <owner/name>
+ * (<state>: <first reason>)`; null when its clone there is ready, or its verdict does not judge
+ * that repository (a verdict from before repositories, or a preview's wave no running wave
+ * shares: the daemon's verdicts judge every running wave's).
+ */
+export function repoIneligible(m: MachineView, slug: string | undefined): string | null {
+  if (slug === undefined || m.repos === undefined) return null;
+  const key = slugKey(m.repos, slug);
+  const v = key !== undefined ? m.repos[key] : undefined;
+  if (v === undefined || v.state === "ready") return null;
+  return `no ready clone of ${key} (${v.state}: ${v.reasons[0] ?? "no reason given"})`;
+}
+
+/**
+ * Every reason `m` may not take `task` now: the machine filter, the wave's repository, then a
+ * heavy task's slots.
+ */
 function ineligible(
   m: MachineView,
   task: WaveTask,
@@ -342,6 +383,7 @@ function ineligible(
 ): string[] {
   const out = [
     ...(o.exclude?.includes(m.name) === true ? [EXCLUDED] : []),
+    ...nonNull(repoIneligible(m, o.waveSlug)),
     ...machineIneligible(m, snap, o),
   ];
   for (const [pool, held, per] of heavySlots(m, task, wave, snap, o)) {
@@ -490,6 +532,7 @@ export interface VerdictView {
   placed: number;
   heavy: Record<string, { held: number; per_machine: number }>;
   usage: { five_hour_pct: number | null; account?: string | null };
+  repos?: Record<string, RepoVerdict>;
 }
 
 /** A snapshot from the retained machine records and readiness verdicts. */
@@ -512,6 +555,7 @@ export function snapshotFrom(
         max_agents: v?.max_agents ?? 0,
         agents: v?.placed ?? 0,
         heavy: v?.heavy ?? {},
+        ...(v?.repos !== undefined ? { repos: v.repos } : {}),
         usage_pct: v?.usage.five_hour_pct ?? null,
         ...(typeof v?.usage.account === "string" ? { usage_account: v.usage.account } : {}),
         held: [],

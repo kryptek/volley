@@ -22,6 +22,7 @@ import {
   shq,
 } from "./launch";
 import { WAKE_TEXT } from "./liveness";
+import { isSlug } from "./repos";
 import { AGENT_BRANCH } from "./worktree";
 
 /**
@@ -216,8 +217,13 @@ import { AGENT_BRANCH } from "./worktree";
  *   volley peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
  *     <https URL>]] — the machine's doctor
  *     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
- *     credentials or port, isCloneUrl); no other volley argv runs on a box
- *   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
+ *     credentials or port, isCloneUrl); or, for its repositories (#435), after [--fix --yes]
+ *     any number of --repo-add <owner/name>[=ABS] (isSlug; ABS as --supervisor-volley-dir's) and
+ *     --repo-remove <owner/name>, then --clone only under --fix with an add (each added
+ *     repository cloned from https://github.com/<owner>/<name>.git, built on the box, never an
+ *     argv here); no other volley argv runs on a box
+ *   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer or a `repo_add`, SPEC
+ *     §4.6.21: adding a repository to a machine is the owner's consent to trust its clone there):
  *     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
  *     mv -f .claude.json.volleyd.tmp .claude.json — or, for a profile the supervisor created
  *     there, the same three steps on `<home>/.volley/claude/<acct>/.claude.json` and its
@@ -1763,6 +1769,43 @@ const CLONE_URL = /^https:\/\/[a-z0-9.-]+(?:\/[A-Za-z0-9._~-]+)+$/;
 export const isCloneUrl = (url: string): boolean =>
   CLONE_URL.test(url) && !url.split("/").some((seg) => seg === "." || seg === "..");
 
+/** `--repo-add`'s value: `<owner/name>`, or `<owner/name>=<abs path>` (an adopted clone). */
+export const isRepoAdd = (v: string): boolean => {
+  const i = v.indexOf("=");
+  return i < 0 ? isSlug(v) : isSlug(v.slice(0, i)) && isVolleyDir(v.slice(i + 1));
+};
+
+/**
+ * The box's doctor (#435): `peer doctor --json`, then `--fix --yes` or not, then any number of
+ * `--repo-add <owner/name>[=<abs path>]` / `--repo-remove <owner/name>`, then (under --fix, with
+ * at least one add) `--clone`, which clones each added repository from its GitHub URL; or the
+ * legacy single-repo shapes (REMOTE_DOCTOR, REMOTE_DOCTOR_CLONE).
+ */
+function isRemoteDoctor(rest: readonly string[]): boolean {
+  if (REMOTE_DOCTOR.some((shape) => sameArgv(rest, shape))) return true;
+  if (
+    rest.length === REMOTE_DOCTOR_CLONE.length + 1 &&
+    sameArgv(rest.slice(0, -1), REMOTE_DOCTOR_CLONE) &&
+    isCloneUrl(rest.at(-1) ?? "")
+  ) {
+    return true;
+  }
+  const fix = sameArgv(rest.slice(0, 5), REMOTE_DOCTOR[1] as readonly string[]);
+  let i = fix ? 5 : 3;
+  if (!fix && !sameArgv(rest.slice(0, 3), REMOTE_DOCTOR[0] as readonly string[])) return false;
+  let adds = 0;
+  let edits = 0;
+  while (i + 1 < rest.length && (rest[i] === "--repo-add" || rest[i] === "--repo-remove")) {
+    const v = rest[i + 1] as string;
+    if (rest[i] === "--repo-add" ? !isRepoAdd(v) : !isSlug(v)) return false;
+    if (rest[i] === "--repo-add") adds++;
+    edits++;
+    i += 2;
+  }
+  if (i === rest.length) return edits > 0;
+  return fix && adds > 0 && i === rest.length - 1 && rest[i] === "--clone";
+}
+
 const remoteDeny = (v: Verdict): Verdict =>
   v.kind === "allow" ? v : { ...v, verb: `remote ${v.verb}` };
 
@@ -2193,14 +2236,10 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
       // The one remote volley step: elsewhere volley is a local program (`volley auth`).
       const dir = args[3] === SUPERVISOR_VOLLEY_DIR ? (args[4] ?? "") : null;
       const rest = dir !== null ? [...args.slice(0, 3), ...args.slice(5)] : args;
-      return (dir === null || isVolleyDir(dir)) &&
-        (REMOTE_DOCTOR.some((shape) => sameArgv(rest, shape)) ||
-          (rest.length === REMOTE_DOCTOR_CLONE.length + 1 &&
-            sameArgv(rest.slice(0, -1), REMOTE_DOCTOR_CLONE) &&
-            isCloneUrl(rest.at(-1) ?? "")))
+      return (dir === null || isVolleyDir(dir)) && isRemoteDoctor(rest)
         ? ALLOW
         : deny(
-            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--supervisor-volley-dir <abs>] [--fix --yes [--clone --origin <https URL>]])`,
+            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--supervisor-volley-dir <abs>] [--fix --yes] [--repo-add <owner/name>[=<abs>] | --repo-remove <owner/name>]... [--clone | --clone --origin <https URL>])`,
           );
     }
     default: {

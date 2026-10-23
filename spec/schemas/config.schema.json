@@ -331,6 +331,32 @@
           "maxProperties": 32,
           "additionalProperties": { "$ref": "#/$defs/remoteHost" }
         },
+        "repos": {
+          "type": "object",
+          "description": "Repositories by their canonical GitHub owner/name, compared case-insensitively, and the machines holding a clone of each (spec section 4.6.4): machines all (every machine, the supervisor's own included) or a list of machine names (hosts.<name> keys or the supervisor's fleet.local_name). A listed machine's clone is its hosts.<name>.repos entry when it has one, else the managed clone at <fleet.repo_root>/<owner>/<name>. Optional in the retained payload: a supervisor that predates it omits it.",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\\.\\.?$)(?![A-Za-z0-9_.-]*\\.git$)[A-Za-z0-9_.-]{1,100}$"
+          },
+          "maxProperties": 64,
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["machines"],
+            "properties": {
+              "machines": {
+                "oneOf": [
+                  { "const": "all" },
+                  {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "maxItems": 64,
+                    "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$" }
+                  }
+                ]
+              }
+            }
+          }
+        },
         "require_fresh_base": {
           "type": "boolean",
           "default": true,
@@ -492,6 +518,14 @@
                   "description": "Per heavy pool, the leases holders on the supervisor's own machine may hold while it is the fallback; a pool not named here gets 1 when it has a per-machine cap there (per_machine or a per_machine_overrides entry). 0 keeps heavy tasks off it. The Desk offers a row for each pool that sets per_machine; name any other pool in config.yaml."
                 }
               }
+            },
+            "repo_root": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "pattern": "^(~|~/[^\\n\\r]*|/[^\\n\\r]*)$",
+              "default": "~/.volley/repos",
+              "description": "Where managed clones live on every machine: a repository owner/name assigned to a machine (repos.<owner/name>.machines) is cloned at <repo_root>/<owner>/<name> there, a leading ~ being that machine's home (spec section 4.6.4). An adopted clone (hosts.<name>.repos) keeps its own path."
             }
           }
         },
@@ -674,6 +708,19 @@
           "type": "boolean",
           "default": false,
           "description": "true: the host takes no new placements and its running agents finish (spec section 4.6.15)."
+        },
+        "repos": {
+          "type": "object",
+          "description": "Adopted clones on this machine: a repository owner/name to its clone's absolute path there, used in place of the managed path under fleet.repo_root (spec section 4.6.4). Its worktrees are still created under the repository's managed worktree root, unless worktree_root is set.",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\\.\\.?$)(?![A-Za-z0-9_.-]*\\.git$)[A-Za-z0-9_.-]{1,100}$"
+          },
+          "maxProperties": 64,
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 1024,
+            "pattern": "^/[^\\n\\r]*$"
+          }
         }
       },
       "unevaluatedProperties": false
@@ -691,7 +738,8 @@
           "type": "string",
           "maxLength": 1024,
           "pattern": "^/[^\\n\\r]*$",
-          "description": "The wave repository's clone on the remote machine; the release branch is fetched into it before each worktree is cut."
+          "description": "Deprecated: hosts.<name>.repos. The wave repository's clone on the remote machine; the release branch is fetched into it before each worktree is cut. Still accepted; once the machine's record reports the clone's origin, the supervisor migrates it to repos.<owner/name>.machines and hosts.<name>.repos.<owner/name> (spec section 4.6.4).",
+          "deprecated": true
         },
         "worktree_root": {
           "type": "string",

@@ -10,13 +10,18 @@ import {
   mintScriptToken,
   sealLaunchScript,
 } from "../src/fence";
-import { type RemoteHostSpec, SshTmuxHost, resolveRemoteHost } from "../src/hosts/ssh-tmux";
+import {
+  type RepoHostSpec,
+  type SlugTarget,
+  SshTmuxHost,
+  resolveRemoteHost,
+} from "../src/hosts/ssh-tmux";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
 import type { SpawnError } from "../src/spawn-error";
 import { fakeExec } from "./helpers/fake-exec";
 import { FIXTURES } from "./helpers/fake-host";
 
-const SPEC: RemoteHostSpec = {
+const SPEC: RepoHostSpec = {
   name: "box",
   target: "dev@box",
   repo: "/path/to/home/src/repo",
@@ -1049,6 +1054,91 @@ describe("resolveRemoteHost", () => {
       /repo, volley_dir/,
     );
   });
+
+  describe("per repository slug", () => {
+    const ctx = (over: Partial<SlugTarget> = {}): SlugTarget => ({
+      slug: "o/r",
+      repos: {},
+      repo_root: "~/.volley/repos",
+      home: "/path/to/home",
+      ...over,
+    });
+    const box = { target: "dev@box", volley_dir: "/src/volley" };
+
+    it("an adopted clone wins, with the managed worktree root", () => {
+      const spec = resolveRemoteHost(
+        "box",
+        undefined,
+        { box: { ...box, repo: "/legacy", repos: { "O/R": "/adopted/r" } } },
+        ctx({ repos: { "o/r": { machines: "all" } }, origin: "github.com/o/r" }),
+      );
+      expect(spec).toMatchObject({
+        slug: "o/r",
+        repo: "/adopted/r",
+        worktree_root: "/path/to/home/.volley/worktrees/o/r",
+      });
+    });
+
+    it("then the managed clone under repo_root, when repos.<slug>.machines lists the host", () => {
+      expect(
+        resolveRemoteHost(
+          "box",
+          undefined,
+          { box },
+          ctx({ repos: { "o/r": { machines: ["box"] } } }),
+        ),
+      ).toMatchObject({
+        repo: "/path/to/home/.volley/repos/o/r",
+        worktree_root: "/path/to/home/.volley/worktrees/o/r",
+      });
+    });
+
+    it("then a legacy repo, unless the machine's origin is another repository's", () => {
+      const configured = { box: { ...box, repo: "/src/r" } };
+      expect(
+        resolveRemoteHost("box", undefined, configured, ctx({ origin: "github.com/o/r" })),
+      ).toMatchObject({ repo: "/src/r", worktree_root: "/src/.volley-worktrees" });
+      expect(() =>
+        resolveRemoteHost("box", undefined, configured, ctx({ origin: "github.com/o/other" })),
+      ).toThrow(
+        "host 'box' has no clone of o/r: add it (Settings → Repositories, or volley repo add o/r --machine box)",
+      );
+      expect(() => resolveRemoteHost("box", undefined, {}, ctx())).toThrow(/not configured/);
+      expect(() =>
+        resolveRemoteHost("box", undefined, { box }, ctx({ origin: "github.com/o/r" })),
+      ).toThrow(/host 'box' has no clone of o\/r/);
+    });
+
+    it("an explicit worktree_root still wins", () => {
+      expect(
+        resolveRemoteHost(
+          "box",
+          undefined,
+          { box: { ...box, worktree_root: "/wt", repos: { "o/r": "/a" } } },
+          ctx(),
+        ),
+      ).toMatchObject({ repo: "/a", worktree_root: "/wt" });
+    });
+
+    it("a managed path on a machine whose home is unknown is refused", () => {
+      expect(() =>
+        resolveRemoteHost(
+          "box",
+          undefined,
+          { box },
+          ctx({ home: undefined, repos: { "o/r": { machines: "all" } } }),
+        ),
+      ).toThrow(/host 'box'.*home directory/);
+    });
+
+    it("a repo-less spec (doctor, sign-in) needs no clone", () => {
+      const spec = resolveRemoteHost("box", undefined, { box }, "none");
+      expect(spec.repo).toBeUndefined();
+      expect(spec.worktree_root).toBeUndefined();
+      expect(spec.slug).toBeUndefined();
+      expect(spec.target).toBe("dev@box");
+    });
+  });
 });
 
 describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
@@ -1091,6 +1181,21 @@ describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
         ],
         cwd: SPEC.volley_dir,
       },
+    ]);
+  });
+
+  // The fake exec runs the real fence: these argv are allowed on a box.
+  it("runDoctor passes repositories to add (and clone, under fix) or remove (#435)", async () => {
+    const r = remote(() => ({ code: 0, stdout: JSON.stringify(REPORT) }));
+    await r.host.runDoctor({ fix: true, repos_add: ["a/a", "b/b=/srv/b"], repos_remove: ["c/c"] });
+    await r.host.runDoctor({ fix: false, repos_add: ["a/a"] });
+    const dir = ["--supervisor-volley-dir", SPEC.volley_dir];
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      [
+        ...["volley", "peer", "doctor", "--json", ...dir, "--fix", "--yes"],
+        ...["--repo-add", "a/a", "--repo-add", "b/b=/srv/b", "--repo-remove", "c/c", "--clone"],
+      ],
+      ["volley", "peer", "doctor", "--json", ...dir, "--repo-add", "a/a"],
     ]);
   });
 

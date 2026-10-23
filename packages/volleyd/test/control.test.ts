@@ -23,6 +23,7 @@ import {
   type FakeRemoteAnswers,
   type FakeRemoteHost,
   GREEN_DOCTOR,
+  adoptSpec,
   fakeHost,
   fakeRemoteHost,
 } from "./helpers/fake-host";
@@ -474,7 +475,7 @@ describe("peer_doctor (the doctor on a paired machine, for an admin)", () => {
       spawner: {
         remoteHost: (s) => {
           box ??= fakeRemoteHost(s, fakeHost(), answers);
-          return box;
+          return adoptSpec(box, s);
         },
       },
     });

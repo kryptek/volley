@@ -115,6 +115,28 @@ describe("deployPeer", () => {
       "box-a: v0.5.0 ✗ not eligible: claude.signin (Claude Code is not signed in)",
     );
   });
+
+  it("a repository's own failing check leaves the machine eligible and names the repository (#439)", async () => {
+    const h = fakePeerHost("box-a", {
+      head: { tag: "v0.4.0" },
+      extraChecks: [
+        {
+          id: "tool.java",
+          ok: false,
+          severity: "block",
+          repo: "a/a",
+          detail: "java is not installed (a/a needs it)",
+        },
+        // An older doctor's untagged clone check is that clone's too.
+        { id: "repo.fetch", ok: false, severity: "block", detail: "git fetch failed" },
+      ],
+    });
+    const { r } = await run(h);
+    expect(r).toMatchObject({ ok: true, eligible: true });
+    expect(r.line).toBe(
+      "box-a: v0.5.0 ✓ eligible · a/a blocked: tool.java (java is not installed (a/a needs it)) · clone blocked: repo.fetch (git fetch failed)",
+    );
+  });
 });
 
 describe("peerFence", () => {

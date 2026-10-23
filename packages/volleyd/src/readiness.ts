@@ -3,8 +3,9 @@ import { derivedMaxAgents } from "volley-cli/peer/machine";
 import type { Sharing } from "./claude/sharing";
 import { REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import { PATH_PROBE_TOOLS } from "./fence";
-import { type MachineRecord, machineTopic } from "./machines";
+import { type MachineRecord, type MachineRepo, machineTopic } from "./machines";
 import { type FilterOptions, type MachineView, localRole, machineIneligible } from "./placement";
+import { originToSlug, sameSlug } from "./repos";
 import type { LocalAgentsMode } from "./types";
 
 /**
@@ -16,7 +17,10 @@ import type { LocalAgentsMode } from "./types";
  * `ready` is false on a failing `block` check, a volley version other than the supervisor's, a
  * `claude` or `bun` the PATH probe did not find (the supervisor's own probe decides: the doctor's
  * `claude_on_path` / `bun_on_path` only estimate the non-interactive ssh PATH), GitHub without
- * push access or Claude signed out. `eligible` / `ineligible_reason` are placement's own machine
+ * push access or Claude signed out. A repository is judged on its own (`repos`, #436): a clone
+ * that is missing, fails a per-repository check or lacks a tool its repository needs blocks that
+ * repository only, never the machine; placement skips the machine for that repository's waves.
+ * `eligible` / `ineligible_reason` are placement's own machine
  * filter (`machineIneligible`): ready, not draining, under `max_agents`, the machine's own
  * admission open, load per core, memory, disk and usage within the supervisor's thresholds. So a
  * verdict never says `eligible` about a machine placement skips, and its reason is the same line.
@@ -62,13 +66,21 @@ export interface ReadinessInput {
   host: { max_agents: number; drain: boolean };
   /** The supervisor's own volley version: a machine's must match it. */
   hostVersion: string;
-  /** The supervisor's own clone's origin (its doctor's `repo.origin`), when known. */
-  hostOrigin?: string | null;
   /**
-   * The supervisor's own machine whose doctor ran without a wave repo (no wave is running): its
-   * `repo.*` checks say only that no repo was given, so they do not count.
+   * The repositories to judge: `wanted`, every running wave's slug and every one config assigns
+   * the machine, beside every one the record reports (`records`, its `repos[]`; an older peer's
+   * `legacy` single clone, by its origin). `runs`: a `repo_add` in progress (`cloning`) or one
+   * that failed there (`blocked`, its why), by slug, which stands until its next run (SPEC §4.6.21).
+   * `unassigned`: repositories config assigns only to other machines, `blocked` here whatever
+   * clone the machine holds (the supervisor's own checkout of a wave's repository, #439).
    */
-  noRepo?: boolean;
+  repos: {
+    wanted: string[];
+    records: MachineRecord["repos"] | undefined;
+    legacy?: MachineRecord["repo"];
+    runs?: Record<string, { state: "cloning" | "blocked"; reasons: string[]; path?: string }>;
+    unassigned?: string[];
+  };
   /** The last PATH probe; null: not probed yet. */
   probe: PathProbe | null;
   /** Why the last PATH probe could not run (ssh failed, the host is not reachable). */
@@ -97,6 +109,23 @@ export interface ReadinessInput {
   checkedAt: Date;
 }
 
+/**
+ * Where one repository stands on a machine (`ReadinessPayload.repos`). `cloning`: a `repo_add`
+ * is making its clone there (SPEC §4.6.21).
+ */
+export type RepoState = "ready" | "cloning" | "blocked" | "absent";
+
+/** One `readiness.schema.json` `repos` entry. */
+export interface RepoVerdict {
+  state: RepoState;
+  /** The clone's path on the machine, when it has one. */
+  path?: string;
+  /** Why it is not ready; empty when ready. */
+  reasons: string[];
+  /** When its doctor last fetched it. */
+  fetched_at?: string;
+}
+
 /** One `readiness.schema.json` payload. */
 export interface ReadinessPayload {
   name: string;
@@ -109,6 +138,8 @@ export interface ReadinessPayload {
   requirements: { volley: string; bun?: string; sharing?: Sharing };
   heavy: Record<string, { held: number; per_machine: number }>;
   usage: { account: string | null; five_hour_pct: number | null };
+  /** Each repository by its `owner/name`: where it stands on the machine. */
+  repos: Record<string, RepoVerdict>;
   eligible: boolean;
   ineligible_reason?: string;
   /** The supervisor's own machine only: its `fleet.local_agents` mode and whether the fallback is in force. */
@@ -118,9 +149,8 @@ export interface ReadinessPayload {
 
 const line = (s: string) => (s.length > LINE_MAX ? `${s.slice(0, LINE_MAX - 1)}…` : s);
 
-/** `github.com/owner/repo` → `owner/repo` (what `gh` calls it). */
-const slug = (origin: string | undefined) =>
-  origin === undefined ? "the wave repo" : origin.split("/").slice(1).join("/");
+/** Most repositories a verdict carries (readiness.schema.json's `repos.maxProperties`). */
+const REPOS_MAX = 64;
 
 /** Why the PATH an agent gets lacks `tool` (null: not probed yet), in the machine's terms. */
 function pathReasons(probe: PathProbe | null, local: boolean, error?: string): string[] {
@@ -144,7 +174,8 @@ function doctorReasons(r: MachineRecord, i: ReadinessInput): string[] {
   const out: string[] = [];
   // volley.version is the doctor's view of our requirement; the comparison below decides.
   for (const c of r.checks ?? []) {
-    if (i.noRepo === true && c.id.startsWith("repo.")) continue;
+    // A repository's own checks (an older peer's untagged `repo.*` too) judge that repository.
+    if (c.repo !== undefined || c.id.startsWith("repo.")) continue;
     if (!c.ok && c.severity === "block" && c.id !== "volley.version") {
       out.push(`${c.id}: ${c.detail}`);
     }
@@ -159,8 +190,11 @@ function doctorReasons(r: MachineRecord, i: ReadinessInput): string[] {
 function authReasons(r: MachineRecord, i: ReadinessInput): string[] {
   const out: string[] = [];
   const gh = r.auth?.gh;
-  if (gh === "no_write") out.push(`gh: no write permission on ${slug(r.repo?.origin)}`);
-  else if (gh === "unauthenticated") out.push("gh: not signed in");
+  if (gh === "no_write") {
+    const named =
+      i.repos.records?.[0]?.slug ?? originToSlug(i.repos.legacy?.origin) ?? "the wave repo";
+    out.push(`gh: no write permission on ${named}`);
+  } else if (gh === "unauthenticated") out.push("gh: not signed in");
   else if (gh === "missing") out.push("gh: not installed");
   else if (gh === undefined) out.push("gh: no sign-in state in the doctor report");
   const claude = r.auth?.claude;
@@ -168,12 +202,104 @@ function authReasons(r: MachineRecord, i: ReadinessInput): string[] {
   else if (claude === "missing") out.push("claude: not installed");
   else if (claude === "unknown") out.push("claude: sign-in state unknown");
   else if (claude === undefined) out.push("claude: no sign-in state in the doctor report");
-  const origin = r.repo?.origin;
-  const hostOrigin = i.hostOrigin ?? undefined;
-  if (origin !== undefined && hostOrigin !== undefined && origin !== hostOrigin) {
-    out.push(`repo origin differs from the host's (${origin}, host: ${hostOrigin})`);
-  }
   return out;
+}
+
+/** Why a clone that exists is not ready for its repository: its failing block checks, its tools. */
+function repoReasons(
+  slug: string,
+  checks: MachineRecord["checks"],
+  toolchain: MachineRepo["toolchain"] | undefined,
+): string[] {
+  const out = (checks ?? [])
+    // A toolchain's `tool.<name>` checks are said once, from the toolchain below.
+    .filter((c) => !c.ok && c.severity === "block")
+    .filter((c) => toolchain === undefined || !c.id.startsWith("tool."))
+    .map((c) => `${c.id}: ${c.detail}`);
+  for (const t of toolchain?.missing ?? []) out.push(`${t} not installed (needed by ${slug})`);
+  for (const t of toolchain?.outdated ?? [])
+    out.push(`${t} older than required (needed by ${slug})`);
+  return out;
+}
+
+/** One repository's clone on the machine, as the record reports it. */
+function repoVerdict(
+  slug: string,
+  clone: {
+    path: string;
+    exists: boolean;
+    fetched_at?: string | null | undefined;
+    toolchain?: MachineRepo["toolchain"];
+  },
+  checks: MachineRecord["checks"],
+): RepoVerdict {
+  const at = { path: clone.path };
+  const fetched = typeof clone.fetched_at === "string" ? { fetched_at: clone.fetched_at } : {};
+  if (!clone.exists) {
+    return { state: "absent", ...at, reasons: [`no clone of ${slug} at ${clone.path}`] };
+  }
+  const reasons = repoReasons(slug, checks, clone.toolchain);
+  return { state: reasons.length > 0 ? "blocked" : "ready", ...at, reasons, ...fetched };
+}
+
+/**
+ * Each repository on the machine (D6: by canonical slug): every one its record reports, and every
+ * wanted one (absent when it has none). An older peer's single `repo` is its origin's slug; one
+ * without an origin yet serves every wanted slug, as placement resolves its clone.
+ */
+function repoVerdicts(
+  i: Pick<ReadinessInput, "name" | "record" | "repos">,
+): Record<string, RepoVerdict> {
+  const checks = i.record?.checks;
+  const out: Record<string, RepoVerdict> = {};
+  const has = (s: string) => Object.keys(out).some((k) => sameSlug(k, s));
+  for (const r of i.repos.records ?? []) {
+    if (has(r.slug)) continue;
+    out[r.slug] = repoVerdict(
+      r.slug,
+      r,
+      checks?.filter((c) => c.repo !== undefined && sameSlug(c.repo, r.slug)),
+    );
+  }
+  const legacy = i.repos.legacy;
+  const legacySlug = originToSlug(legacy?.origin);
+  // Its checks carry no `repo`: its `repo.*` ones are about that one clone.
+  const legacyChecks = checks?.filter((c) => c.repo === undefined && c.id.startsWith("repo."));
+  if (legacy !== undefined && legacySlug !== undefined && !has(legacySlug)) {
+    out[legacySlug] = repoVerdict(legacySlug, legacy, legacyChecks);
+  }
+  for (const s of [...i.repos.wanted, ...Object.keys(i.repos.runs ?? {})]) {
+    if (has(s)) continue;
+    out[s] =
+      legacy !== undefined && legacy.origin === undefined
+        ? repoVerdict(s, legacy, legacyChecks)
+        : { state: "absent", reasons: [`no clone of ${s} on ${i.name}`] };
+  }
+  // A repo_add's run there says more than the record (until the run that brings it in).
+  for (const [s, run] of Object.entries(i.repos.runs ?? {})) {
+    const k = Object.keys(out).find((o) => sameSlug(o, s)) ?? s;
+    const path = run.path ?? out[k]?.path;
+    out[k] = { state: run.state, ...(path !== undefined ? { path } : {}), reasons: run.reasons };
+  }
+  for (const s of i.repos.unassigned ?? []) {
+    const k = Object.keys(out).find((o) => sameSlug(o, s)) ?? s;
+    const path = out[k]?.path;
+    out[k] = {
+      state: "blocked",
+      ...(path !== undefined ? { path } : {}),
+      reasons: [
+        `${k} is not assigned to ${i.name}: add it (Settings → Repositories, or volley repo add ${k} --machine ${i.name})`,
+      ],
+    };
+  }
+  // Over the cap, the running waves' repositories are kept first.
+  const wanted = (k: string) => i.repos.wanted.some((w) => sameSlug(w, k));
+  return Object.fromEntries(
+    Object.entries(out)
+      .sort(([a], [b]) => Number(wanted(b)) - Number(wanted(a)))
+      .slice(0, REPOS_MAX)
+      .map(([k, v]) => [k, { ...v, reasons: v.reasons.slice(0, REASONS_MAX).map(line) }]),
+  );
 }
 
 /** The blockers, in the order a person fixes them. */
@@ -196,10 +322,32 @@ function blockers(i: ReadinessInput): string[] {
   return out;
 }
 
+/**
+ * Where `slug` stands on machine `name` from its record alone (a placement preview whose wave no
+ * running wave shares, so no verdict judges it yet).
+ */
+export function repoVerdictFromRecord(
+  name: string,
+  record: MachineRecord | undefined,
+  slug: string,
+): RepoVerdict | undefined {
+  const all = repoVerdicts({
+    name,
+    record,
+    repos: {
+      wanted: [slug],
+      records: record?.repos,
+      ...(record?.repo !== undefined ? { legacy: record.repo } : {}),
+    },
+  });
+  return Object.entries(all).find(([k]) => sameSlug(k, slug))?.[1];
+}
+
 /** What placement knows about the machine of `v` (its verdict without the eligibility). */
 export function machineView(
   i: Pick<ReadinessInput, "name" | "local" | "record" | "held" | "localAgents" | "downSince">,
-  v: Pick<ReadinessPayload, "ready" | "reasons" | "drain" | "max_agents" | "placed" | "heavy">,
+  v: Pick<ReadinessPayload, "ready" | "reasons" | "drain" | "max_agents" | "placed" | "heavy"> &
+    Partial<Pick<ReadinessPayload, "repos">>,
   usage: { account: string | null; five_hour_pct: number | null },
 ): MachineView {
   return {
@@ -214,6 +362,7 @@ export function machineView(
     ...(i.localAgents !== undefined ? { local_agents: i.localAgents } : {}),
     ...(i.downSince !== undefined ? { down_since: i.downSince } : {}),
     heavy: v.heavy,
+    ...(v.repos !== undefined ? { repos: v.repos } : {}),
     usage_pct: usage.five_hour_pct,
     ...(usage.account !== null ? { usage_account: usage.account } : {}),
     held: i.held,
@@ -224,6 +373,7 @@ export function machineView(
 export function readiness(i: ReadinessInput): ReadinessPayload {
   const reasons = blockers(i).slice(0, REASONS_MAX).map(line);
   const ready = reasons.length === 0;
+  const repos = repoVerdicts(i);
   const view = machineView(
     i,
     {
@@ -233,6 +383,7 @@ export function readiness(i: ReadinessInput): ReadinessPayload {
       max_agents: i.host.max_agents,
       placed: i.placed,
       heavy: i.heavy,
+      repos,
     },
     i.usage,
   );
@@ -255,6 +406,7 @@ export function readiness(i: ReadinessInput): ReadinessPayload {
     },
     heavy: i.heavy,
     usage: i.usage,
+    repos,
     eligible: ineligible === undefined,
     ...(ineligible !== undefined ? { ineligible_reason: ineligible } : {}),
     ...(role !== null

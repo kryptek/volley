@@ -472,6 +472,8 @@ const ALLOWED: string[][] = [
   ["gh", "repo", "view", "example-org/example-repo", "--json", "visibility"],
   ["gh", "repo", "view", "--json", "visibility"],
   ["gh", "repo", "view", "--json", "nameWithOwner,url,visibility"],
+  // repo_add's check of a slug (SPEC §4.6.21), on the supervisor.
+  ["gh", "repo", "view", "a/a", "--json", "nameWithOwner,url,visibility"],
   ["gh", "pr", "view", "12"],
   ["gh", "pr", "list", "--head", "issue-5"],
   ["gh", "pr", "checks", "12"],

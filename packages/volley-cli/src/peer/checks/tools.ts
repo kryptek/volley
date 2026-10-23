@@ -1,5 +1,6 @@
 import { basename, dirname } from "node:path";
-import type { Check, Facts, ToolFact, ToolName } from "../doctor";
+import type { Check, Facts, RepoFacts, ToolFact, ToolName, Toolchain } from "../doctor";
+import { atLeast } from "../requirements";
 
 /**
  * The toolchain checks: every tool an agent's session or volleyd's remote steps need, whether
@@ -35,7 +36,7 @@ const PACKAGES: Record<"apt" | "dnf", Partial<Record<ToolName, string>>> = {
 };
 
 /** How to install a tool on this machine: printed, never run (the doctor explains, never installs). */
-function installFix(f: Facts, tool: ToolName): string {
+function installFix(f: Facts, tool: string): string {
   if (tool === "bun") return "curl -fsSL https://bun.sh/install | bash";
   if (tool === "claude") return "curl -fsSL https://claude.ai/install.sh | bash";
   if (f.platform === "darwin") {
@@ -48,7 +49,7 @@ function installFix(f: Facts, tool: ToolName): string {
   if (tool === "gh" && f.pkg !== "dnf") {
     return "install gh from GitHub's own package repository: https://cli.github.com (the distribution's package is old or missing)";
   }
-  const name = f.pkg !== null ? PACKAGES[f.pkg][tool] : undefined;
+  const name = f.pkg !== null ? PACKAGES[f.pkg][tool as ToolName] : undefined;
   if (f.pkg !== null && name !== undefined) {
     return `sudo ${f.pkg === "apt" ? "apt-get" : "dnf"} install -y ${name}`;
   }
@@ -65,6 +66,11 @@ export const ON_PATH = ["bun", "claude"] as const satisfies readonly ToolName[];
 export function versionOf(out: string): string | null {
   const first = out.split("\n")[0] ?? "";
   return /(\d+\.\d+(?:\.\d+)?)/.exec(first)?.[1] ?? null;
+}
+
+/** A repository's extra tool's version: `versionOf`, or a quoted bare major (`openjdk version "17"`). */
+export function toolVersionOf(out: string): string | null {
+  return versionOf(out) ?? /"(\d+)"/.exec(out.split("\n")[0] ?? "")?.[1] ?? null;
 }
 
 /**
@@ -147,6 +153,78 @@ export function toolChecks(f: Facts): Check[] {
     }
   }
   return [...checks, ...volleyChecks(f)];
+}
+
+/** A tool a repository needs: one of the doctor's own (`TOOLS`) or one it probed for it. */
+const toolFact = (f: Facts, tool: string): ToolFact | undefined =>
+  Object.hasOwn(f.tools, tool) ? f.tools[tool as ToolName] : f.extraTools[tool];
+
+/** A repository's toolchain on this machine: what it needs that is missing or too old. */
+export function toolchainOf(f: Facts, r: RepoFacts): Toolchain {
+  const missing: string[] = [];
+  const outdated: string[] = [];
+  if (!("error" in r.requirements)) {
+    const { tools, min } = r.requirements;
+    for (const t of tools) {
+      const fact = toolFact(f, t);
+      if (fact === undefined || binOf(fact) === null) missing.push(t);
+      else {
+        // A version the doctor cannot read is not held against the repository.
+        const need = min[t];
+        if (need !== undefined && fact.version !== null && !atLeast(fact.version, need)) {
+          outdated.push(t);
+        }
+      }
+    }
+  }
+  return { ok: missing.length === 0 && outdated.length === 0, missing, outdated };
+}
+
+/**
+ * Each repository's toolchain (#435): a failing `tool.<name>` (block) per tool it needs that is
+ * missing or older than its minimum, carrying `repo` (it blocks that repository only), and a
+ * failing `repo.requirements` for an invalid `.volley/requirements.yaml`. Passing tools add no
+ * check: `repos[].toolchain` says the rest.
+ */
+export function repoToolChecks(f: Facts): Check[] {
+  return f.repos.flatMap((r): Check[] => {
+    if ("error" in r.requirements) {
+      return [
+        {
+          id: "repo.requirements",
+          ok: false,
+          severity: "block",
+          repo: r.slug,
+          detail: r.requirements.error,
+          fix: { command: `fix ${r.path}/.volley/requirements.yaml (keys: tools, min)` },
+        },
+      ];
+    }
+    const { min } = r.requirements;
+    const t = toolchainOf(f, r);
+    return [
+      ...t.missing.map(
+        (name): Check => ({
+          id: `tool.${name}`,
+          ok: false,
+          severity: "block",
+          repo: r.slug,
+          detail: `${name} is not installed (${r.slug} needs it)`,
+          fix: { command: installFix(f, name) },
+        }),
+      ),
+      ...t.outdated.map(
+        (name): Check => ({
+          id: `tool.${name}`,
+          ok: false,
+          severity: "block",
+          repo: r.slug,
+          detail: `${name} ${toolFact(f, name)?.version} is older than ${min[name]} (${r.slug} needs ${name} ${min[name]} or later)`,
+          fix: { command: `upgrade ${name} to ${min[name]} or later` },
+        }),
+      ),
+    ];
+  });
 }
 
 function volleyChecks(f: Facts): Check[] {

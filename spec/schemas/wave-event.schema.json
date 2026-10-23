@@ -22,6 +22,7 @@
             "owner_reconnected",
             "task_queued",
             "task_admitted",
+            "task_admission_returned",
             "task_cancelled",
             "agent_spawned",
             "agent_registered",
@@ -116,7 +117,11 @@
             "issue_unlabeled",
             "issue_commented",
             "issue_closed",
-            "issues_verified"
+            "issues_verified",
+            "repo_added",
+            "repo_removed",
+            "repo_clone_run",
+            "repo_trusted"
           ]
         },
         "payload": {
@@ -252,6 +257,39 @@
                         "minLength": 1,
                         "description": "That decision's one-line reason."
                       }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "task_admission_returned" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["task", "from_host", "to_host"],
+                    "properties": {
+                      "task": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+                      "from_host": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The task's effective host before the version (`local`, `auto` or a host name)."
+                      },
+                      "to_host": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The host the new version writes for it."
+                      },
+                      "plan_version": { "type": "integer", "minimum": 1 }
                     }
                   }
                 }

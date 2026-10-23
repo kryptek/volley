@@ -18,7 +18,7 @@ import {
   sealLaunchScript,
   sealRemoteSigninScript,
 } from "../src/fence";
-import { type RemoteHostSpec, SshTmuxHost } from "../src/hosts/ssh-tmux";
+import { type RepoHostSpec, SshTmuxHost } from "../src/hosts/ssh-tmux";
 import { LAUNCH_COMMAND, renderLaunchScript, renderMcpConfig } from "../src/launch";
 import { WAKE_TEXT } from "../src/liveness";
 import { tempDirForAll } from "./helpers/tmp";
@@ -29,7 +29,7 @@ const SSH = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"];
 const remote = (...steps: RemoteStep[]) => ({ remote: { steps } });
 const step = (...argv: string[]): RemoteStep => ({ argv });
 /** A paired machine, for the SshTmuxHost cases (its ssh argv is what the fence allows). */
-const SSH_SPEC: RemoteHostSpec = {
+const SSH_SPEC: RepoHostSpec = {
   name: "box",
   target: "dev@box",
   repo: "/path/to/home/src/repo",
@@ -1003,6 +1003,71 @@ describe("Fleet steps (F2): the PATH probe and the doctor on a paired machine", 
       ["volley", "auth", "list", "--json"],
     ]) {
       expect(allowed({ argv, cwd: VOLLEY_DIR }), argv.join(" ")).toThrow(FenceError);
+    }
+  });
+
+  it("allows --repo-add <owner/name>[=<abs path>] and --repo-remove <owner/name>, repeatable, then --clone under --fix (#435)", () => {
+    for (const extra of [
+      ["--fix", "--yes", "--repo-add", "a/a", "--repo-add", "b/b=/abs", "--clone"],
+      ["--fix", "--yes", "--repo-add", "a/a"],
+      ["--repo-add", "a/a"],
+      ["--repo-remove", "a/a"],
+      [
+        "--fix",
+        "--yes",
+        "--repo-add",
+        "example-org/example.repo_1=/srv/repos/x",
+        "--repo-remove",
+        "c/c",
+      ],
+    ]) {
+      expect(allowed({ argv: [...DOCTOR, "--json", ...extra], cwd: VOLLEY_DIR })).not.toThrow();
+      const dir = ["--supervisor-volley-dir", VOLLEY_DIR];
+      expect(
+        allowed({ argv: [...DOCTOR, "--json", ...dir, ...extra], cwd: VOLLEY_DIR }),
+      ).not.toThrow();
+    }
+    // The old single-repository form still runs.
+    expect(
+      allowed({
+        argv: [
+          ...DOCTOR,
+          "--json",
+          "--fix",
+          "--yes",
+          "--clone",
+          "--origin",
+          "https://github.com/o/r",
+        ],
+        cwd: VOLLEY_DIR,
+      }),
+    ).not.toThrow();
+  });
+
+  it("refuses a repository that is not <owner/name>[=<abs path>], and --clone without --fix or an add", () => {
+    for (const extra of [
+      ["--repo-add", "../x"],
+      ["--repo-add", "a/a=relative"],
+      ["--repo-add", "a/a=/srv/../etc"],
+      ["--repo-add", "a/a=/srv/a\nid"],
+      ["--repo-add", "a/a="],
+      ["--repo-add", "-u/x"],
+      ["--repo-add", "https://github.com/a/a"],
+      ["--repo-add"],
+      ["--repo-remove", "a/a=/abs"],
+      ["--repo-remove", "../x"],
+      ["--repo-add", "a/a", "--clone"],
+      ["--fix", "--yes", "--clone"],
+      ["--fix", "--yes", "--repo-remove", "a/a", "--clone"],
+      ["--fix", "--yes", "--repo-add", "a/a", "--clone", "--origin", "https://github.com/o/r"],
+      ["--fix", "--yes", "--repo-add", "a/a", "--clone", "--repo-add", "b/b"],
+      ["--repo-add", "a/a", "--fix", "--yes"],
+      ["--fix", "--yes", "--repo-add", "a/a", "--repo", "/"],
+    ]) {
+      expect(
+        allowed({ argv: [...DOCTOR, "--json", ...extra], cwd: VOLLEY_DIR }),
+        extra.join(" "),
+      ).toThrow(FenceError);
     }
   });
 
