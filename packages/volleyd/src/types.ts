@@ -609,6 +609,8 @@ export const WAVE_EVENT_TYPES = [
   "owner_reconnected",
   "task_queued",
   "task_admitted",
+  // A plan version moved a queued task's host (plan-apply.ts): its admission and placement go.
+  "task_admission_returned",
   "task_cancelled",
   "agent_spawned",
   "agent_registered",

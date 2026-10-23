@@ -155,6 +155,103 @@ describe("applyPlan", () => {
     expect(taskOf(after, "T2")?.host_planned).toBeUndefined();
   });
 
+  it("an admitted, unspawned task whose host changes gives its admission back (#434)", () => {
+    const j = midFlight();
+    j.push({ type: "task_admitted", task: "T2", data: {} });
+    const { res, after } = applyTo(j, parseWaveFile(`${text("v1.yaml")}placement: auto\n`));
+    expect(res.events).toContainEqual({
+      type: "task_admission_returned",
+      task: "T2",
+      data: { task: "T2", from_host: "local", to_host: "auto", plan_version: 2 },
+    });
+    // The event follows wave_versioned; a queued task never admitted has nothing to give back.
+    const types = res.events.map((e) => `${e.type}:${e.task ?? ""}`);
+    expect(types.indexOf("task_admission_returned:T2")).toBeGreaterThan(0);
+    expect(types).not.toContain("task_admission_returned:T5");
+    expect(after.admitted).not.toContain("T2");
+    expect(taskOf(after, "T2")?.placement).toBeUndefined();
+    expect(after.wave?.tasks.T2?.host).toBe("auto");
+    // Started tasks keep their host, as before.
+    expect(res.diff.hosts_kept?.map((k) => k.task)).toEqual(["T1", "T3", "T4"]);
+    expect(types.filter((t) => t.startsWith("task_admission_returned"))).toEqual([
+      "task_admission_returned:T2",
+    ]);
+  });
+
+  it("a placed, admitted task whose host changes loses its placement too (#434)", () => {
+    const auto = parseWaveFile(`${text("v1.yaml")}placement: auto\n`);
+    const j = journal();
+    j.push({ type: "wave_submitted", data: { wave: auto, owner: null } });
+    for (const id of auto.task_order) {
+      j.push({ type: "task_queued", task: id, data: { issue: auto.tasks[id]?.issue } });
+    }
+    j.push({
+      type: "task_placed",
+      task: "T2",
+      data: { task: "T2", host: "box", score: 0.8, candidates: [], by: "auto" },
+    });
+    j.push({ type: "task_admitted", task: "T2", data: {} });
+    // Still left to placement: it stays where it was placed, admitted.
+    const reissued = text("v1.yaml").replace("T5: { issue: 105 }", "T5: { issue: 106 }");
+    const same = applyTo(j, parseWaveFile(`${reissued}placement: auto\n`));
+    expect(same.res.events.map((e) => e.type)).not.toContain("task_admission_returned");
+    expect(same.after.admitted).toContain("T2");
+    expect(same.after.wave?.tasks.T2?.host).toBe("box");
+    // Back on the supervisor's machine: the placement goes, and so does the admission.
+    const { res, after } = applyTo(j, V1);
+    expect(res.events).toContainEqual({
+      type: "task_admission_returned",
+      task: "T2",
+      data: { task: "T2", from_host: "box", to_host: "local", plan_version: 3 },
+    });
+    expect(after.admitted).not.toContain("T2");
+    expect(taskOf(after, "T2")?.placement).toBeUndefined();
+    expect(after.wave?.tasks.T2?.host).toBe("local");
+  });
+
+  it("an admitted task named onto a host and then left to placement is placed afresh (#434)", () => {
+    const named = parseWaveFile(
+      `${text("v1.yaml").replace("T2: { issue: 102, after: [T1] }", "T2: { issue: 102, after: [T1], host: box }")}placement: auto\n`,
+    );
+    const j = journal();
+    j.push({ type: "wave_submitted", data: { wave: named, owner: null } });
+    for (const id of named.task_order) {
+      j.push({ type: "task_queued", task: id, data: { issue: named.tasks[id]?.issue } });
+    }
+    j.push({
+      type: "task_placed",
+      task: "T2",
+      data: { task: "T2", host: "box", score: 1, candidates: [], by: "wave_file" },
+    });
+    j.push({ type: "task_admitted", task: "T2", data: {} });
+    const { res, after } = applyTo(j, parseWaveFile(`${text("v1.yaml")}placement: auto\n`));
+    expect(res.events).toContainEqual({
+      type: "task_admission_returned",
+      task: "T2",
+      data: { task: "T2", from_host: "box", to_host: "auto", plan_version: 2 },
+    });
+    expect(after.admitted).not.toContain("T2");
+    expect(taskOf(after, "T2")?.placement).toBeUndefined();
+    expect(after.wave?.tasks.T2?.host).toBe("auto");
+  });
+
+  it("a task with an agent, or one being spawned, keeps its admission (#434)", () => {
+    const j = midFlight();
+    j.push({ type: "task_admitted", task: "T2", data: {} });
+    const rec = replay(j.events);
+    const auto = parseWaveFile(`${text("v1.yaml")}placement: auto\n`);
+    const spawning = applyPlan(rec, auto, {
+      now: NOW,
+      activity: taskActivity(j.events),
+      spawning: ["T2"],
+    });
+    expect(spawning.events.map((e) => e.type)).not.toContain("task_admission_returned");
+    // T3 runs (an agent): its host is kept, its admission stays.
+    const running = applyPlan(rec, auto, { now: NOW, activity: taskActivity(j.events) });
+    expect(running.events.map((e) => e.task)).not.toContain("T3");
+    expect(running.diff.hosts_kept?.map((k) => k.task)).toContain("T3");
+  });
+
   it("removed queued task → cancelled", () => {
     const { res, after } = applyTo(midFlight(), V2);
     expect(res.events).toContainEqual(
