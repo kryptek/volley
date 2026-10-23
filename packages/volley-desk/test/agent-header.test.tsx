@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { LOCAL_MACHINE } from "../src/store/claude";
 import { demoMessages } from "../src/store/fixtures";
 import { initialState, reduceAll } from "../src/store/reducer";
 import type { DeskState, UsagePayload, WaveTask, WaveView } from "../src/store/types";
@@ -158,15 +159,20 @@ describe("agent window header: the machine chip", () => {
     expect(screen.getByRole("button", { name: "Runs on this machine: why here" })).toBeTruthy();
   });
 
-  it("an agent with no placed task has no machine chip", () => {
+  it("an agent of a `placement: local` wave (no host, no placement) reads `this machine`", () => {
     renderHeader(demo());
-    expect(screen.queryByRole("button", { name: /^Runs on/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Runs on this machine: why here" })).toBeTruthy();
   });
 });
 
 describe("agent window header: compact and long titles", () => {
   it("under 420 px it is compact; the picker keeps its name and options, in row 2", () => {
-    const { container } = renderHeader(demo(), { frame: { ...frame, maxWidth: 380 } });
+    // The agent runs on this machine, so the picker lists this machine's accounts only.
+    const local = accounts.map((a) => ({ ...a, machine: LOCAL_MACHINE }));
+    const { container } = renderHeader(demo(), {
+      frame: { ...frame, maxWidth: 380 },
+      accounts: local,
+    });
     expect(container.querySelector("section.win")).toHaveClass("win--compact");
     const pick = screen.getByRole("combobox", { name: "Claude account for T1" });
     expect(pick.querySelectorAll("option")).toHaveLength(2);
