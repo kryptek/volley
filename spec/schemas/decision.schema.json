@@ -59,6 +59,13 @@
               "additionalProperties": { "type": "string", "minLength": 1 },
               "description": "Hover text for some of the options, keyed by the option's text. The spawn decisions (unknown_screen, hooks_auth_failed, mcp_not_registered) explain their third answer, it's running, here."
             },
+            "waiting": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" },
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "Shared-precondition decisions (repo_untrusted): every task whose launch parks on it, the opener first. One answer resumes them all."
+            },
             "pointers": {
               "type": "object",
               "description": "Where the evidence lives. Paths are on the supervisor's host.",

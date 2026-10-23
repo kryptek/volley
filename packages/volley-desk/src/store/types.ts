@@ -310,6 +310,8 @@ export interface DecisionPayload {
   machine?: "down" | "draining" | "removing" | "removed";
   /** Held: waiting on a task, PR or issue (volleyd releases it when that lands). */
   held?: Held;
+  /** A shared-precondition decision (`repo_untrusted`): every task waiting on it, opener first. */
+  waiting?: string[];
 }
 
 // ------------------------------------------------------- config and leases

@@ -58,7 +58,7 @@ import {
   screenWords,
 } from "./screens";
 import { SpawnError } from "./spawn-error";
-import { isRepoTrusted, readClaudeJson, repoRoot, trustDecisionId, trustQuestion } from "./trust";
+import { isRepoTrusted, readClaudeJson, repoRoot, trustAskFor, trustDecisionId } from "./trust";
 import type {
   AgentMcp,
   BranchUpdate,
@@ -226,6 +226,17 @@ export interface SpawnDeps {
    * Resolves with the id it was opened under. Default: journal `decision_opened` as `d.id`.
    */
   openDecision?: (d: SpawnDecision) => Promise<string>;
+  /**
+   * Park this launch on an open shared-precondition decision (repo_untrusted, #418) instead of
+   * opening another: its task is listed in the decision's `waiting` and resumes on its answer.
+   * Default: the launch is only refused (its task is not parked).
+   */
+  joinDecision?: (j: {
+    id: string;
+    task: TaskId;
+    role: string;
+    agent_id?: string;
+  }) => Promise<void>;
   /** Resolve an open decision. Default: journal `decision_resolved` on the spawn's task. */
   resolveDecision?: (id: string, answer: string, by: string) => Promise<void>;
   /** After Enter on an update prompt, how long the original launch may take to continue. */
@@ -393,10 +404,11 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
     const trusted = isRepoTrusted(cfg, ctx.root);
     if (!trusted) {
       if (open !== undefined) {
+        await deps.joinDecision?.({ id: open, task: req.task, role: req.role });
         return { kind: "decision", decision: "repo_untrusted", decisionId: open, opened: false };
       }
       const decisionId = await openDecision(ctx, "repo_untrusted", trustId(ctx), {
-        question: trustAsk(ctx),
+        ...trustAsk(ctx),
         options: ["trust", "cancel"],
         data: trustData(ctx),
       });
@@ -1024,13 +1036,21 @@ async function verifyAndRecover(
 
     const screen = saveScreen(ctx, cur.agentId, result.screen);
     if (result.screen_class === "trust_dialog") {
+      const open = openDecisionFor(deps.openDecisions, trustId(ctx));
+      if (open !== undefined)
+        await deps.joinDecision?.({
+          id: open,
+          task: ctx.req.task,
+          role: ctx.req.role,
+          agent_id: cur.agentId,
+        });
       const decisionId =
-        openDecisionFor(deps.openDecisions, trustId(ctx)) ??
+        open ??
         (await openDecision(ctx, "repo_untrusted", trustId(ctx), {
-          question: trustAsk(ctx),
+          ...trustAsk(ctx),
           options: ["trust", "cancel"],
           screen,
-          data: { ...trustData(ctx), agent_id: cur.agentId },
+          data: trustData(ctx, cur.agentId),
         }));
       return decision(cur, "repo_untrusted", decisionId, screen);
     }
@@ -1342,40 +1362,56 @@ async function resolveDecision(ctx: Ctx, id: string, answer: string, by: string)
   });
 }
 
+/** The Claude profile whose folder trust a spawn needs: the one it is read from. */
+const trustProfileOf = (ctx: Ctx) =>
+  ctx.deps.remoteTrust !== undefined ? remoteProfileOf(ctx.req) : profileDirOf(ctx.req);
+
 /**
  * The repo_untrusted decision id for the spawn's wave and repo root, on the machine it runs on, in
- * the Claude account profile it runs under (each profile has its own folder trust).
+ * the Claude account profile it runs under (each profile has its own folder trust): never the task
+ * or attempt, so every launch needing the same trust shares it (#418).
  */
 const trustId = (ctx: Ctx) =>
-  trustDecisionId(
-    ctx.req.wave.wave,
-    ctx.root,
-    ctx.deps.remoteTrust !== undefined
-      ? remoteProfileOf(ctx.req) !== undefined
-        ? `${ctx.deps.remoteTrust.target}:claude-account:${accountId(ctx.req)}`
-        : ctx.deps.remoteTrust.target
-      : profileDirOf(ctx.req) !== undefined
-        ? `claude-account:${accountId(ctx.req)}`
-        : undefined,
-  );
+  trustDecisionId(ctx.req.wave.wave, ctx.root, {
+    machine: ctx.deps.remoteTrust?.target,
+    profile: trustProfileOf(ctx),
+  });
 
-/** The repo_untrusted question, naming the host and the Claude account where it is answered. */
-const trustAsk = (ctx: Ctx) =>
-  trustQuestion(
-    ctx.root,
-    ctx.deps.remoteTrust?.target,
-    profileDirOf(ctx.req) !== undefined ? accountId(ctx.req) : undefined,
-  );
+/**
+ * The repo_untrusted question, naming the machine and the Claude account where it is answered,
+ * as its opener sees it (the one task waiting); the daemon renders it again as launches join.
+ */
+const trustAsk = (ctx: Ctx) => trustAskFor(trustFacts(ctx), [ctx.req.task], 1);
 
-/** A repo_untrusted decision's facts: the root, and for a remote host where it is trusted. */
-const trustData = (ctx: Ctx): Record<string, unknown> => {
+/** What the question names: the root, the machine by name, the profile's account. */
+const trustFacts = (ctx: Ctx) => ({
+  repo: ctx.root,
+  ...(ctx.deps.remoteTrust !== undefined ? { host: ctx.deps.remoteTrust.host } : {}),
+  ...(trustProfileOf(ctx) !== undefined ? { claude_account: accountId(ctx.req) } : {}),
+});
+
+/**
+ * A repo_untrusted decision's facts: the root, for a remote host where it is trusted, the profile
+ * and account it is answered in, and the launch waiting on it (`agent_id`: raised from its pane).
+ */
+const trustData = (ctx: Ctx, agentId?: string): Record<string, unknown> => {
   const r = ctx.deps.remoteTrust;
   const profile = profileDirOf(ctx.req);
   return {
-    repo: ctx.root,
-    ...(r !== undefined ? { host: r.host, target: r.target } : {}),
+    ...trustFacts(ctx),
+    ...(r !== undefined ? { target: r.target } : {}),
     // Answered in that profile's own .claude.json (daemon.ts trustAnswer).
     ...(profile !== undefined ? { claude_config_dir: profile } : {}),
+    role: ctx.req.role,
+    waiting: [ctx.req.task],
+    launches: [
+      {
+        task: ctx.req.task,
+        role: ctx.req.role,
+        ...(agentId !== undefined ? { agent_id: agentId } : {}),
+      },
+    ],
+    ...(agentId !== undefined ? { agent_id: agentId } : {}),
   };
 };
 

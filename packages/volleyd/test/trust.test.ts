@@ -1,8 +1,15 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { preconditionKey } from "../src/decisions";
 import { spawnAgent } from "../src/spawn";
-import { isRepoTrusted, recordRepoTrust, trustDecisionId } from "../src/trust";
+import {
+  isRepoTrusted,
+  recordRepoTrust,
+  trustCancelHelp,
+  trustDecisionId,
+  trustQuestion,
+} from "../src/trust";
 import { type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
 import { tempDir } from "./helpers/tmp";
 
@@ -97,8 +104,9 @@ describe("spawn: repo trust check", () => {
     expect(opened[0]?.data).toMatchObject({
       decision_id: trustDecisionId("w1", env.repo),
       kind: "repo_untrusted",
-      question: `Needs you: trust ${env.repo} for dispatch?`,
+      question: `Needs you: trust ${env.repo} for dispatch? 1 task is waiting: T1.`,
       options: ["trust", "cancel"],
+      waiting: ["T1"],
     });
     expect(env.host.launches).toEqual([]);
     expect(env.host.worktrees).toEqual([]);
@@ -112,10 +120,47 @@ describe("spawn: repo trust check", () => {
     const a = trustDecisionId("w1", "/repo");
     expect(a).toMatch(/^repo_untrusted-[0-9a-f]{12}$/);
     expect(trustDecisionId("w2", "/repo")).not.toBe(a);
-    expect(trustDecisionId("w2", "/repo", "dev@box")).not.toBe(
-      trustDecisionId("w1", "/repo", "dev@box"),
+    expect(trustDecisionId("w2", "/repo", { machine: "dev@box" })).not.toBe(
+      trustDecisionId("w1", "/repo", { machine: "dev@box" }),
     );
     expect(trustDecisionId("w1", "/repo")).toBe(a);
+  });
+
+  it("the id is keyed by (machine, profile, repo root), never the task or attempt (#418)", () => {
+    const both = trustDecisionId("w1", "/repo", { machine: "dev@box", profile: "/p/acct" });
+    expect(trustDecisionId("w1", "/repo", { machine: "dev@box", profile: "/p/acct" })).toBe(both);
+    expect(trustDecisionId("w1", "/repo", { machine: "dev@box" })).not.toBe(both);
+    expect(trustDecisionId("w1", "/repo", { profile: "/p/acct" })).not.toBe(both);
+    expect(trustDecisionId("w2", "/repo", { machine: "dev@box", profile: "/p/acct" })).not.toBe(
+      both,
+    );
+    expect(trustDecisionId("w1", "/other", { machine: "dev@box", profile: "/p/acct" })).not.toBe(
+      both,
+    );
+    // The key takes neither a task nor an attempt: two of either share it.
+    expect(preconditionKey({ machine: "dev@box", profile: "/p/acct", root: "/repo" })).toBe(
+      preconditionKey({ profile: "/p/acct", machine: "dev@box", root: "/repo" }),
+    );
+    expect(preconditionKey({ root: "/repo" })).not.toBe(
+      preconditionKey({ machine: "dev@box", root: "/repo" }),
+    );
+  });
+
+  it("the question names the machine and account once and lists the waiting tasks", () => {
+    expect(trustQuestion("/repo", undefined, undefined, ["T1"])).toBe(
+      "Needs you: trust /repo for dispatch? 1 task is waiting: T1.",
+    );
+    expect(trustQuestion("/repo", "athena", "work", ["T1", "T2", "T3"])).toBe(
+      "Needs you: trust /repo on athena in Claude account work for dispatch? 3 tasks are waiting: T1, T2, T3.",
+    );
+    const twelve = ["i392", "i416", "i400", "i403", "i397", "i399", "a", "b", "c", "d", "e", "f"];
+    expect(trustQuestion("/repo", "athena", "work", twelve)).toBe(
+      "Needs you: trust /repo on athena in Claude account work for dispatch? 12 tasks are waiting: i392, i416, i400, i403, i397, i399, … (12 tasks).",
+    );
+    expect(trustCancelHelp(1)).toBe(
+      "Cancels only the waiting launch; the tasks keep their other work. Trusting the repo later resumes them.",
+    );
+    expect(trustCancelHelp(12)).toContain("Cancels only the 12 waiting launches");
   });
 
   it("does not re-open the decision while it is open (the wave stays parked)", async () => {
@@ -124,6 +169,21 @@ describe("spawn: repo trust check", () => {
     const out = await spawnAgent(env.request(), env.deps);
     expect(out).toMatchObject({ kind: "decision", decision: "repo_untrusted", opened: false });
     expect(env.events.filter((e) => e.type === "decision_opened")).toEqual([]);
+  });
+
+  it("a launch that finds the decision open joins it: its task waits on it (#418)", async () => {
+    env = await makeSpawnEnv({ trusted: false });
+    const id = trustDecisionId("w1", env.repo);
+    env.openDecisions.push(id);
+    const joins: unknown[] = [];
+    env.deps.joinDecision = async (j) => {
+      joins.push(j);
+    };
+    const out = await spawnAgent({ ...env.request(), task: "T1", role: "spec_reviewer" }, env.deps);
+    expect(out).toMatchObject({ kind: "decision", decisionId: id, opened: false });
+    expect(joins).toEqual([{ id, task: "T1", role: "spec_reviewer" }]);
+    expect(env.events.filter((e) => e.type === "decision_opened")).toEqual([]);
+    expect(env.host.launches).toEqual([]);
   });
 
   it("a trusted repo root proceeds to launch", async () => {

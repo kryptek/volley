@@ -20,7 +20,9 @@ export type SpawnErrorCode =
   | "RETIRE_REFUSED"
   // Claude account profiles (src/claude/): unknown / not signed in / remote, or sharing failed.
   | "CLAUDE_ACCOUNT_UNAVAILABLE"
-  | "CLAUDE_ACCOUNT_PREPARE_FAILED";
+  | "CLAUDE_ACCOUNT_PREPARE_FAILED"
+  // The owner answered a repo_untrusted decision `cancel` (#418): not retried until it is trusted.
+  | "LAUNCH_CANCELLED";
 
 /**
  * A spawn (or retire) step refused. `detail` is journaled with the refusal. A `permanent` refusal

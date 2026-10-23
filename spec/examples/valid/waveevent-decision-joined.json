@@ -1,0 +1,23 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-22T09:12:04.000Z",
+  "channel": "_waves/events",
+  "type": "decision_joined",
+  "payload": {
+    "wave": "w1",
+    "seq": 31,
+    "at": "2026-10-22T09:12:04.000Z",
+    "task": "T2",
+    "data": {
+      "decision_id": "repo_untrusted-7c1e2a9b04d3",
+      "kind": "repo_untrusted",
+      "task": "T2",
+      "role": "implementer",
+      "question": "Needs you: trust /path/to/repo on athena in Claude account work for dispatch? 2 tasks are waiting: T1, T2.",
+      "option_help": {
+        "cancel": "Cancels only the 2 waiting launches; the tasks keep their other work. Trusting the repo later resumes them."
+      }
+    }
+  }
+}

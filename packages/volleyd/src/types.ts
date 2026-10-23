@@ -711,6 +711,8 @@ export const WAVE_EVENT_TYPES = [
   // Held decisions (#335): one waits on a task, PR or issue, never escalated; released when it lands.
   "decision_held",
   "decision_released",
+  // Shared-precondition decisions (#418): one more launch parks on an open one.
+  "decision_joined",
   // The release train (SPEC §4.6.19): a settled wave whose repo has a playbook starts releasing;
   // each stage is entered, then verified or failed; the owner's `release_go` go completes it.
   "release_started",

@@ -4,7 +4,15 @@ import { stepRelease } from "./autopilot/playbook";
 import type { Budget, EscalateWhy } from "./autopilot/policy";
 import { fixerOf } from "./autopilot/remediation";
 import { jobsWhy } from "./ci-jobs";
-import { ARCHIVED_ANSWER, type DecisionRecord, type Held, parksTask } from "./decisions";
+import {
+  ARCHIVED_ANSWER,
+  type DecisionRecord,
+  type Held,
+  decisionCovers,
+  parkedTasks,
+  parksTask,
+  resumeStageOf,
+} from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
 import { AUTO_HOST } from "./placement";
@@ -478,9 +486,9 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         // Parked on a decision: the task stays parked; the stage is where it resumes once its
         // last open decision is resolved.
         for (const d of Object.values(next.decisions)) {
-          if (d.task === task.id && d.resolved === undefined && parksTask(d)) {
-            d.resume_stage = ev.data.stage as TaskStage;
-          }
+          if (d.resolved !== undefined || !parksTask(d) || !decisionCovers(d, task.id)) continue;
+          if (d.task === task.id) d.resume_stage = ev.data.stage as TaskStage;
+          else d.resume_stages = { ...d.resume_stages, [task.id]: ev.data.stage as TaskStage };
         }
         break;
       }
@@ -548,13 +556,36 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       }
       if (task !== undefined && parksTask(d)) {
         // Park the task; a second open decision keeps the stage the first one saved.
-        const parked = Object.values(next.decisions).find(
-          (o) => o.task === task.id && o.resolved === undefined && o.resume_stage !== undefined,
-        );
-        d.resume_stage = parked?.resume_stage ?? task.stage;
+        d.resume_stage = parkedResume(next, task.id) ?? task.stage;
         task.stage = "awaiting_decision";
       }
       next.decisions[id] = d;
+      break;
+    }
+    case "decision_joined": {
+      // One more launch parks on an open shared-precondition decision (#418).
+      const d = next.decisions[ev.data.decision_id as string];
+      if (d === undefined || d.resolved !== undefined || task === undefined) break;
+      const agent = typeof ev.data.agent_id === "string" ? ev.data.agent_id : undefined;
+      d.launches = [
+        ...(d.launches ?? []),
+        {
+          task: task.id,
+          role: String(ev.data.role),
+          ...(agent !== undefined ? { agent_id: agent } : {}),
+        },
+      ];
+      d.waiting = [...new Set([...parkedTasks(d), task.id])];
+      if (typeof ev.data.question === "string") d.question = ev.data.question;
+      if (typeof ev.data.option_help === "object" && ev.data.option_help !== null)
+        d.option_help = ev.data.option_help as Record<string, string>;
+      if (task.id !== d.task && parksTask(d) && d.resume_stages?.[task.id] === undefined) {
+        d.resume_stages = {
+          ...d.resume_stages,
+          [task.id]: parkedResume(next, task.id) ?? task.stage,
+        };
+        task.stage = "awaiting_decision";
+      }
       break;
     }
     case "decision_resolved": {
@@ -571,18 +602,21 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         const raise =
           d.kind === "spawn_budget_exhausted" ? journaledRaise(String(ev.data.answer)) : null;
         if (raise !== null) next.budget_raised = (next.budget_raised ?? 0) + raise;
-        // Only a parking decision keeps the task parked (one opened with `park: false` never does).
-        const stillOpen = state.open_decisions.some((o) => {
-          const x = next.decisions[o];
-          return x !== undefined && x.task === d.task && parksTask(x);
-        });
-        const parked = task !== undefined && task.stage === "awaiting_decision";
-        // An archive's close (SPEC §4.6.20) leaves the task parked: its wave has ended for good.
+        // Only a parking decision keeps a task parked (one opened with `park: false` never does).
+        // A shared-precondition decision parks every task waiting on it: each resumes, unless
+        // another open decision still parks it.
+        // An archive's close (SPEC §4.6.20) leaves its tasks parked: its wave has ended for good.
         const archiveClose =
           d.resolved.answer === ARCHIVED_ANSWER &&
           (state.status === "stopped" || state.status === "complete");
-        if (task !== undefined && parked && parksTask(d) && !stillOpen && !archiveClose) {
-          task.stage = d.resume_stage ?? "queued";
+        for (const tid of parksTask(d) && !archiveClose ? parkedTasks(d) : []) {
+          const t = state.tasks.find((x) => x.id === tid);
+          if (t === undefined || t.stage !== "awaiting_decision") continue;
+          const stillOpen = state.open_decisions.some((o) => {
+            const x = next.decisions[o];
+            return x !== undefined && parksTask(x) && decisionCovers(x, tid);
+          });
+          if (!stillOpen) t.stage = resumeStageOf(d, tid) ?? "queued";
         }
       }
       break;
@@ -784,6 +818,16 @@ function specOf(wave: Wave): NonNullable<WaveState["spec"]> {
   };
 }
 
+/** Where a task already parked on an open decision resumes (a second decision keeps it). */
+function parkedResume(rec: WaveRecord, task: TaskId): TaskStage | undefined {
+  for (const o of Object.values(rec.decisions)) {
+    if (o.resolved !== undefined || !decisionCovers(o, task)) continue;
+    const stage = resumeStageOf(o, task);
+    if (stage !== undefined) return stage;
+  }
+  return undefined;
+}
+
 /**
  * Recompute the fields that follow from task stages, open decisions and spawn failures:
  * waiting_on/why_waiting, last_error/attempt/next_retry_at and gates. (A spawn failure's
@@ -792,7 +836,10 @@ function specOf(wave: Wave): NonNullable<WaveState["spec"]> {
 function derive(state: WaveState, rec: WaveRecord): void {
   const stageOf = new Map(state.tasks.map((t) => [t.id, t.stage]));
   const openOn = (task: TaskId) =>
-    state.open_decisions.filter((id) => rec.decisions[id]?.task === task);
+    state.open_decisions.filter((id) => {
+      const d = rec.decisions[id];
+      return d !== undefined && decisionCovers(d, task);
+    });
   state.tasks = state.tasks.map(
     ({ last_error: _e, attempt: _a, next_retry_at: _n, ...t }): TaskState => {
       const f = latestSpawnFailure(rec, t.id);
