@@ -43,7 +43,8 @@ export function dependents(wave: Wave, task: TaskId): number {
 
 /**
  * The last refusal says the PR cannot merge into the release branch as it stands (behind it, its
- * head moved, retargeted away from it, or closed): the task gives up the merge turn. Any other
+ * head moved, retargeted away from it, or closed), or that it is a draft, which waits for the CI
+ * that starts once it is marked ready (#408): the task gives up the merge turn. Any other
  * refusal (required checks, branch protection, unknown) keeps it, and the merge is tried again up
  * to `merge_retry_max` (#311). A refusal journaled before reasons were recorded counts as `behind`;
  * a late refusal of an older gated head counts for nothing (the reducer records only the current
@@ -56,7 +57,8 @@ export function refusalEndsTurn(p: TaskPipeline): boolean {
     reason === "behind" ||
     reason === "head_moved" ||
     reason === "retargeted" ||
-    reason === "closed"
+    reason === "closed" ||
+    reason === "draft"
   );
 }
 

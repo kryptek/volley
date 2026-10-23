@@ -1,4 +1,6 @@
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
+import { LAUNCHD_LABEL, SYSTEMD_UNIT } from "../commands/peer";
+import { LOCK_MARKER } from "../peer/doctor";
 import { DESK_LABEL } from "../setup/services";
 
 /**
@@ -317,3 +319,35 @@ export const stashName = (now: Date) =>
     .toISOString()
     .replace(/\.\d+Z$/, "Z")
     .replace(/:/g, "-")}`;
+
+// ---------------------------------------------------------------------------------------------
+// Paired machines: the commands the deploy runs on each one over ssh (`peers.ts`)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * After the deploy's `bun install --frozen-lockfile` on a paired machine: record the bun.lock it
+ * installed from, as the doctor's own install does (`LOCK_MARKER`), so the machine's doctor says
+ * `synced`. A shell script, not a `volley` verb, so a rollback to any older release records too.
+ */
+export const RECORD_LOCK_ARGV: readonly string[] = [
+  "sh",
+  "-c",
+  `set -e; if command -v sha256sum >/dev/null 2>&1; then h=$(sha256sum bun.lock); else h=$(shasum -a 256 bun.lock); fi; printf '%s\\n' "\${h%% *}" > node_modules/${LOCK_MARKER}`,
+  "sh",
+];
+
+/** Restart `volley peer run` (the service `volley peer join` installed), on macOS or Linux. */
+export const RESTART_PEER_ARGV: readonly string[] = [
+  "sh",
+  "-c",
+  `if [ "$(uname -s)" = Darwin ]; then launchctl kickstart -k "gui/$(id -u)/${LAUNCHD_LABEL}"; else systemctl --user restart ${SYSTEMD_UNIT}; fi`,
+];
+
+/** The machine's own checkout's `volley peer doctor --json` (its version, not a `volley` on PATH). */
+export const peerDoctorArgv = (volleyDir: string): string[] => [
+  "bun",
+  posix.join(volleyDir, "packages", "volley-cli", "src", "cli.ts"),
+  "peer",
+  "doctor",
+  "--json",
+];

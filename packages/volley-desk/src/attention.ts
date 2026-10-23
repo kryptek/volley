@@ -387,14 +387,34 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
   return infoFor(s.tasks, agentIds, ctx);
 }
 
-/** volleyd holds the task for CI (S7 sets `why_waiting: "CI pending on <sha> (n/m checks)"`). */
+/**
+ * A CI hold's `why_waiting`: `CI 3/13 · running: …` when volleyd counts the head's jobs (#415),
+ * else `CI pending on <sha> (n/m runs)` / `(no run yet)`.
+ */
+const CI_HOLD = /^CI (pending\b|\d+\/\d+ ·)/i;
+
+/** volleyd holds the task for CI (its `why_waiting` is a CI hold, CI_HOLD). */
 export function ciPending(t: WaveTask): boolean {
-  return /^CI pending\b/i.test(t.why_waiting ?? "");
+  return CI_HOLD.test(t.why_waiting ?? "");
+}
+
+/**
+ * A CI hold whose jobs have not moved: no job finished for longer than the slowest job's last
+ * duration (#415). The note in plain words, or undefined.
+ */
+export function ciStuck(t: WaveTask, now: number): string | undefined {
+  const j = t.pr?.jobs;
+  const since = Date.parse(j?.last_done_at ?? "");
+  if (!ciPending(t) || j?.slowest_s === undefined || Number.isNaN(since)) return undefined;
+  const idle = now - since;
+  if (idle <= j.slowest_s * 1000) return undefined;
+  const min = (ms: number) => Math.max(1, Math.round(ms / 60_000));
+  return `possibly stuck: no job finished for ${min(idle)} min (the slowest usually takes ${min(j.slowest_s * 1000)} min)`;
 }
 
 /** A `why_waiting` that is a pipeline hold (CI pending, a lease), never a stall. */
 function isHoldReason(why: string): boolean {
-  return /^CI pending\b/i.test(why) || /lease/i.test(why);
+  return CI_HOLD.test(why) || /lease/i.test(why);
 }
 
 function parseTime(t: string | undefined): number | undefined {
