@@ -161,7 +161,9 @@ export function mergedActions(o: {
   view?: IssueView | null;
 }): GhAction[] {
   const v = o.view ?? undefined;
-  if (v?.state === "CLOSED" || o.ledger.closed.has(o.issue)) return [];
+  // Released: the label came off for good (or the issue is closed), never put back.
+  if (v?.state === "CLOSED" || o.ledger.closed.has(o.issue) || o.ledger.unlabeled.has(o.issue))
+    return [];
   const out: GhAction[] = [];
   const labeled = o.ledger.labeled.has(o.issue) || (v?.labels.includes(MERGED_LABEL) ?? false);
   if (!labeled) out.push({ kind: "ensure_label" }, { kind: "add_label", issue: o.issue });

@@ -86,6 +86,18 @@ describe("mergedActions: a task merged into the release branch", () => {
     ).toEqual([]);
   });
 
+  it("after the release took the label off, it is never put back", () => {
+    const ledger = issueLedger(
+      events([
+        { type: "issue_labeled", task: "T3", data: { issue: 412, label: MERGED_LABEL, pr: 418 } },
+        { type: "issue_unlabeled", task: "T3", data: { issue: 412, label: MERGED_LABEL } },
+      ]),
+    );
+    expect(
+      mergedActions({ wave: WAVE, release_branch: BRANCH, issue: 412, pr: 418, ledger }),
+    ).toEqual([]);
+  });
+
   it("a closed issue (closed by hand) is neither labeled nor commented", () => {
     expect(
       mergedActions({
