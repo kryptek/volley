@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { RefusalReason } from "../src/autopilot/merge";
-import { dependents, nextToMerge, queueOf, refusalEndsTurn } from "../src/autopilot/merge-queue";
+import {
+  type QueueEntry,
+  dependents,
+  nextToMerge,
+  queueOf,
+  refusalEndsTurn,
+} from "../src/autopilot/merge-queue";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "../src/pipeline";
 import type { WaveRecord } from "../src/reducer";
 import type { TaskStage } from "../src/types";
@@ -193,5 +199,52 @@ describe("nextToMerge", () => {
       task: "T1",
     });
     expect(nextToMerge(queues, new Set(["/repo#release/r1"]))).toBeNull();
+  });
+});
+
+describe("the merge train in the queue", () => {
+  /** w1 with a train running over T1 and T2 (and an ended one over T4). */
+  function withTrain() {
+    const rec = record("w1", {
+      T1: { p: queued(1) },
+      T2: { p: queued(2) },
+      T3: { p: queued(3) },
+      T4: { p: queued(4) },
+    });
+    const state = rec.state as NonNullable<WaveRecord["state"]>;
+    state.trains = [
+      { id: "train-1", tasks: ["T4"], state: "failed", since: at(5) },
+      { id: "train-2", tasks: ["T1", "T2"], state: "integrating", since: at(6) },
+    ];
+    return rec;
+  }
+
+  it("shows a running train's members merging, with the train", () => {
+    expect(queueOf(withTrain()).map((e) => [e.task, e.state, e.train])).toEqual([
+      ["T1", "merging", "train-2"],
+      ["T2", "merging", "train-2"],
+      ["T3", "queued", undefined],
+      ["T4", "queued", undefined],
+    ]);
+  });
+
+  it("nextToMerge gives no turn on a branch while a train holds it", () => {
+    // T3 and T4 are gated and outside the train, but the train holds the release branch as a
+    // merge in flight does (SPEC §4.6.23).
+    expect(nextToMerge({ b: queueOf(withTrain()) }, new Set())).toBeNull();
+    const forming: QueueEntry[] = [
+      { wave: "w1", task: "T1", state: "queued", since: at(1), gated: true, train: "train-3" },
+      { wave: "w1", task: "T2", state: "queued", since: at(2), gated: true },
+    ];
+    expect(nextToMerge({ b: forming }, new Set())).toBeNull();
+    // Another branch still takes its turn.
+    const other: QueueEntry[] = [
+      { wave: "w2", task: "T9", state: "queued", since: at(3), gated: true },
+    ];
+    expect(nextToMerge({ b: forming, c: other }, new Set())).toEqual({
+      branch: "c",
+      wave: "w2",
+      task: "T9",
+    });
   });
 });

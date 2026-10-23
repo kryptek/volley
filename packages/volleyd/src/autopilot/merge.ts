@@ -1,12 +1,12 @@
 import type { ExecFn } from "../exec";
-import type { MergeToken } from "../fence";
+import type { MergeToken, TrainToken } from "../fence";
 
 /**
- * Autopilot merging (SPEC §4.6.17): the ONE module that may build `gh pr merge`
- * (test/no-merge.test.ts exempts exactly this file). The argv is the only shape the fence allows,
- * and only with the gate's MergeToken for exactly that PR and head: GitHub refuses the merge when
- * the head moved since the gate (`--match-head-commit`). Never --admin or --auto: a refused merge
- * is reported, not forced.
+ * Autopilot merging (SPEC §4.6.17, the merge train §4.6.23): the ONE module that may build
+ * `gh pr merge` (test/no-merge.test.ts exempts exactly this file). Each argv is the only shape the
+ * fence allows with its token: a squash with the gate's MergeToken, a merge commit with a train's
+ * TrainToken, for exactly that PR and head: GitHub refuses the merge when the head moved since the
+ * gate (`--match-head-commit`). Never --admin or --auto: a refused merge is reported, not forced.
  */
 
 /**
@@ -43,6 +43,11 @@ export function mergeArgv(token: MergeToken, deleteBranch: boolean): string[] {
   ];
 }
 
+/** A merge train's PR, with a merge commit: the member PRs, whose heads it contains, read as merged. */
+export function trainMergeArgv(token: TrainToken): string[] {
+  return ["gh", "pr", "merge", String(token.pr), "--merge", "--match-head-commit", token.head];
+}
+
 /**
  * Merge the token's PR at its head, then read the merge commit back (`gh pr view`). Right before
  * merging, the PR is re-read: `gh pr merge` merges into whatever the PR targets now, so a PR
@@ -56,6 +61,32 @@ export async function mergePr(
   token: MergeToken,
   cwd?: string,
   deleteBranch = false,
+): Promise<MergeOutcome> {
+  return merged(exec, token, mergeArgv(token, deleteBranch), { merge: token }, cwd);
+}
+
+/**
+ * Merge the train's PR at its head with a merge commit (trainMergeArgv), with the same re-read
+ * before and the same outcome as mergePr: a train PR retargeted away from the release branch,
+ * whose head moved, that is closed or a draft is refused without merging.
+ */
+export async function mergeTrain(
+  exec: ExecFn,
+  token: TrainToken,
+  cwd?: string,
+): Promise<MergeOutcome> {
+  return merged(exec, token, trainMergeArgv(token), { train: token }, cwd);
+}
+
+/** The PR one token may merge: its number, its gated head, its release branch. */
+type Target = Pick<MergeToken, "pr" | "head" | "release_branch">;
+
+async function merged(
+  exec: ExecFn,
+  token: Target,
+  argv: string[],
+  fenced: { merge: MergeToken } | { train: TrainToken },
+  cwd: string | undefined,
 ): Promise<MergeOutcome> {
   const where = cwd !== undefined ? { cwd } : {};
   const pre = await exec(
@@ -72,7 +103,7 @@ export async function mergePr(
       reason: why.reason,
       stderr: `not merged: ${why.text || "gh pr view failed"}`,
     };
-  const r = await exec(mergeArgv(token, deleteBranch), { merge: token, ...where });
+  const r = await exec(argv, { ...fenced, ...where });
   if (r.code !== 0) {
     const stderr = (r.stderr || r.stdout).trim();
     return { ok: false, reason: refusalReason(stderr), stderr };
@@ -85,10 +116,7 @@ export async function mergePr(
 }
 
 /** Why the PR as GitHub has it now is not the one the token was minted for; null when it is. */
-function notMergeable(
-  text: string,
-  token: MergeToken,
-): { reason: RefusalReason; text: string } | null {
+function notMergeable(text: string, token: Target): { reason: RefusalReason; text: string } | null {
   let v: { baseRefName?: unknown; headRefOid?: unknown; isDraft?: unknown; state?: unknown };
   try {
     v = (JSON.parse(text) ?? {}) as typeof v;
