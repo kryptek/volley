@@ -1748,7 +1748,42 @@ describe("pipeline: a bundle's Closes lines", () => {
     await h.finish("quality_reviewer", { result: result("quality-p1-elsewhere") });
     const findings = h.spawns.find((s) => s.role === "fixup")?.files["findings.md"] ?? "";
     expect(findings).toContain("## The PR body's Closes lines");
-    expect(findings).toContain("    Closes #99");
+    expect(findings).toContain("\nCloses #99\n");
+  });
+
+  it("still missing and both reviewers approve: the fixup still runs, for the Closes lines alone", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42, #99" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    expect(stage()).toBe("fixup");
+    const findings = h.spawns.find((s) => s.role === "fixup")?.files["findings.md"] ?? "";
+    expect(findings).toContain("## The PR body's Closes lines");
+    expect(findings).toContain('{ "finding": "CLOSES"');
+  });
+
+  it("the fixup's verified PR body is checked again: steered once, then fixed clears closes_missing", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42, #99" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    expect(h.steers.filter((s) => s.role === "fixup" && s.reason === "closes")).toHaveLength(1);
+    expect(stage()).toBe("fixup");
+    const pr = h.world.prs.find((p) => p.number === 7);
+    if (pr !== undefined) pr.body = "Closes #42\nCloses #99";
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    const verified = h.events
+      .filter((e) => e.type === "artifact_verified" && e.data.role === "fixup")
+      .at(-1);
+    expect(verified?.data.closes_missing).toBeUndefined();
+    expect(stage()).toBe("merge_ready");
   });
 
   it("every Closes line present: no steer; a single-issue task is never checked", async () => {

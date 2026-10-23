@@ -130,7 +130,7 @@ export function issueVars(issues: readonly BriefIssue[]): IssueVars {
     issue_titles: issues.map((i) => `- #${i.number} — ${i.title}`).join("\n"),
     issue_heading: `issues ${numbers.map((n) => `#${n}`).join(", ")}`,
     issue_source: "every issue of this bundle, one after another",
-    closes_rule: `This task bundles ${issues.length} issues into one PR: put these lines, each on its own line, in the PR body (GitHub closes only the first issue of a shared line):\n\n${issues.map((i) => `    Closes #${i.number}`).join("\n")}`,
+    closes_rule: `This task bundles ${issues.length} issues into one PR: put these lines, each on its own line, in the PR body (GitHub closes only the first issue of a shared line):\n\n${closes_lines}`,
     fragments: `one fragment per issue, ${numbers.map(fragment).join(" and ")}`,
     issue_rule: `The issue numbers are ${listed} (one bundle, one PR); \`ISSUE.md\` is the authoritative copy of every one of them.`,
   };

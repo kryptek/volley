@@ -524,7 +524,7 @@ export function reducePipeline(
         p.gated_behind = typeof d.behind === "number" ? d.behind : undefined;
       }
       if (role === "fixup") p.directive = undefined;
-      if (role === "implementer")
+      if (role === "implementer" || role === "fixup")
         p.closes_missing = Array.isArray(d.closes_missing)
           ? (d.closes_missing as number[])
           : undefined;
@@ -2186,21 +2186,21 @@ function onVerified(
 }
 
 /**
- * A bundle's implementer PR closes every issue: one `Closes #<n>` line each in its body. Lines
- * missing from a verified PR: the implementer is steered once (`closes`) to add them; after that
- * the PR is accepted with them as `missing`, and the fixup's findings carry them.
+ * A bundle's PR closes every issue: one `Closes #<n>` line each in its body. Lines missing from a
+ * PR the implementer or the fixup verified: that agent is steered once (`closes`) to add them;
+ * after that the PR is accepted with them as `missing`, and the (next) fixup's findings carry them.
  */
 function closesCheck(
   v: PipelineView,
   ev: Extract<PipelineEvent, { kind: "verified" }>,
   run: RoleRun,
 ): { missing: number[]; steer?: PipelineAction } {
-  if (ev.role !== "implementer" || v.issues === undefined || ev.report.kind !== "ok")
-    return { missing: [] };
+  const checked = ev.role === "implementer" || ev.role === "fixup";
+  if (!checked || v.issues === undefined || ev.report.kind !== "ok") return { missing: [] };
   const missing = missingCloses(ev.report.pr.body, v.issues);
   if (missing.length === 0 || run.retired !== undefined || (run.steers.closes ?? 0) >= 1)
     return { missing };
-  const lines = missing.map((n) => `    Closes #${n}`).join("\n");
+  const lines = missing.map((n) => `Closes #${n}`).join("\n");
   return {
     missing,
     steer: {
@@ -3228,8 +3228,8 @@ function askRelaunchAgain(
 /** The findings' note on a bundle's missing `Closes` lines (closesCheck); "" when none are. */
 function closesNote(missing: number[] | undefined): string {
   if (missing === undefined || missing.length === 0) return "";
-  const lines = missing.map((n) => `    Closes #${n}`);
-  return `\n## The PR body's Closes lines\n\nThe PR body still lacks these lines of the bundle, one per issue (GitHub closes only the first issue of a shared line). Add each on its own line (\`gh pr edit\`), and say so in \`how\` as \`CLOSES\`:\n\n${lines.join("\n")}\n`;
+  const lines = missing.map((n) => `Closes #${n}`);
+  return `\n## The PR body's Closes lines\n\nThe PR body still lacks these lines of the bundle, one per issue (GitHub closes only the first issue of a shared line, and none in code). Add each on its own line, unindented (\`gh pr edit\`), and resolve it as \`{ "finding": "CLOSES", "how": "…" }\`:\n\n${lines.join("\n")}\n`;
 }
 
 /** A duration as the owner reads it: `40 s`, `6 min`, `3 h`. */
@@ -3408,9 +3408,11 @@ function enter(v: PipelineView, i: number): PipelineAction[] {
       ];
     }
     // Nothing to fix: skip the fixup (it would only spend a spawn) — unless a moved head's CI
-    // failed: its directive is the fixup's job.
+    // failed, or a bundle's PR still lacks Closes lines: those are the fixup's job.
     const red = v.p.directive?.ci === "red";
-    if (roles.length === 1 && fixupItems(reviews).length === 0 && !red) return enter(v, i + 1);
+    const closes = (v.p.closes_missing ?? []).length > 0;
+    if (roles.length === 1 && fixupItems(reviews).length === 0 && !red && !closes)
+      return enter(v, i + 1);
   }
   return enterStep(v, i, roles);
 }

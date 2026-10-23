@@ -579,16 +579,24 @@ async function failedLogs(
 
 /**
  * The issues of `issues` whose `Closes #<n>` line is missing from a PR body. GitHub closes only
- * the first issue of a shared `Closes #a, #b` line, so each must be on its own line. Pure.
+ * the first issue of a shared `Closes #a, #b` line, so each must be on its own line, and it ignores
+ * one in code (indented four spaces or a tab, or inside a fence). Pure.
  */
 export function missingCloses(body: string | undefined, issues: readonly number[]): number[] {
-  const lines = new Set(
-    (body ?? "")
-      .split(/\r?\n/)
-      .map((l) => /^\s*closes\s+#(\d+)\b/i.exec(l)?.[1])
-      .filter((n) => n !== undefined)
-      .map(Number),
-  );
+  const lines = new Set<number>();
+  let fence: string | undefined;
+  for (const l of (body ?? "").split(/\r?\n/)) {
+    const f = /^ {0,3}(`{3,}|~{3,})/.exec(l)?.[1];
+    if (
+      f !== undefined &&
+      (fence === undefined || (f[0] === fence[0] && f.length >= fence.length))
+    ) {
+      fence = fence === undefined ? f : undefined;
+      continue;
+    }
+    const n = fence === undefined ? /^ {0,3}closes\s+#(\d+)\b/i.exec(l)?.[1] : undefined;
+    if (n !== undefined) lines.add(Number(n));
+  }
   return issues.filter((n) => !lines.has(n));
 }
 

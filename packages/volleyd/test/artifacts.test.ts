@@ -917,6 +917,10 @@ describe("a bundle's Closes lines", () => {
     expect(missingCloses("closes #310\r\n  Closes #3120", [310, 312])).toEqual([312]);
     expect(missingCloses("", [310, 312])).toEqual([310, 312]);
     expect(missingCloses(undefined, [1, 2])).toEqual([1, 2]);
+    // GitHub ignores closing keywords in code: an indented code block or a fence.
+    expect(missingCloses("    Closes #310\n\tCloses #312", [310, 312])).toEqual([310, 312]);
+    expect(missingCloses("```\nCloses #310\n```\nCloses #312", [310, 312])).toEqual([310]);
+    expect(missingCloses("~~~md\nCloses #310\n~~~\n   Closes #312", [310, 312])).toEqual([310]);
   });
 
   it("verifyArtifacts reads the PR body with the PR", async () => {

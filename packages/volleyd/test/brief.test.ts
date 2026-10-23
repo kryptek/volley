@@ -159,7 +159,7 @@ describe("brief templates", () => {
     const brief = renderBrief(loadTemplate("implementer"), bundle);
     expect(brief.split("\n")[0]).toBe("# Implement issues #310, #312");
     expect(brief).toContain("\n- #310 — Retries\n- #312 — Backoff\n");
-    expect(brief).toContain("\n    Closes #310\n    Closes #312\n");
+    expect(brief).toContain("\nCloses #310\nCloses #312\n");
     expect(brief).toContain("each on its own line, in the PR body");
     expect(brief).toContain("`changes/310.<added|changed|fixed|removed|docs>.md`");
     expect(brief).toContain("`changes/312.<added|changed|fixed|removed|docs>.md`");
