@@ -1488,7 +1488,7 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     expect(alarms).toHaveLength(1);
     expect(alarms[0]?.task).toBe("T1");
   });
-  it("an admitted, unplaced auto task's spawn is held (not placed yet), never thrown out of the host resolver (#434)", async () => {
+  it("an admitted, unplaced auto task's spawn is held for placement, never thrown out of the host resolver (#434)", async () => {
     localClaude = false;
     await setup({ drain: true });
     await submit("w10", "placement: auto\n", "  T1: { issue: 42 }\n");
@@ -1509,8 +1509,11 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       { task: "T1", data: { task: "T1", from_host: "auto", to_host: "auto" } },
     ]);
     expect(daemon.record("w10")?.admitted).not.toContain("T1");
+    expect(journal("w10").find(auto)?.data.message).toMatch(/it waits to be placed$/);
+    // why_waiting is placement's own reason, not a stale "not placed yet" park.
+    await tick();
     expect((await state("w10")).tasks.find((t) => t.id === "T1")?.why_waiting).toBe(
-      "not placed yet: its host is auto",
+      "no eligible machine: box: draining",
     );
   });
 });
