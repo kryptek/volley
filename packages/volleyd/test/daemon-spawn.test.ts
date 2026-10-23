@@ -1817,4 +1817,60 @@ ${capped("i315", 315)}${capped("i317", 317)}${capped("i318", 318)}${capped("i322
     const t = daemon.snapshot("wc")?.tasks.find((x) => x.id === "i323");
     expect(t?.why_waiting).toBe("cluster A (hold): 4 in flight or gated (i315, i317, i318, i322)");
   });
+
+  it("the churn fuse (#387): over 3 × its roles holds the cluster, more churn asks once", async () => {
+    await start();
+    let n = 0;
+    const churned = async (k: number) => {
+      for (let i = 0; i < k; i++) {
+        n++;
+        await daemon.recordEvent("wc", {
+          type: "agent_spawned",
+          task: "i315",
+          data: {
+            role: "implementer",
+            agent_id: `wc-i315-implementer-${n + 1}`,
+            attempt: n + 1,
+            churn: true,
+            cause: "retry",
+          },
+        });
+      }
+      await daemon.tick();
+      await daemon.settled();
+    };
+    const decisions = () =>
+      daemon
+        .journalEvents("wc")
+        .filter((e) => e.type === "decision_opened" && e.data.kind === "churn_exhausted");
+    // [implement, merge_ready]: one role, so the fuse is quiet up to 3.
+    await churned(3);
+    expect(daemon.journalEvents("wc").some((e) => e.type === "cluster_strategy_changed")).toBe(
+      false,
+    );
+    await churned(1);
+    const changed = daemon.journalEvents("wc").filter((e) => e.type === "cluster_strategy_changed");
+    expect(changed).toHaveLength(1);
+    expect(changed[0]?.task).toBe("i315");
+    expect(changed[0]?.data).toMatchObject({
+      cluster: "A",
+      to: "hold",
+      churn: 4,
+      why: "i315: 4 churn spawns, more than 3 × its 1 role",
+    });
+    expect(decisions()).toHaveLength(0);
+    // Churn goes on while the cluster is held: one task-level decision.
+    await churned(1);
+    expect(decisions()).toHaveLength(1);
+    expect(decisions()[0]?.task).toBe("i315");
+    expect(decisions()[0]?.data).toMatchObject({
+      cluster: "A",
+      churn: 5,
+      roles: ["implementer"],
+      options: ["hold cluster", "continue", "cancel"],
+    });
+    await churned(2);
+    expect(decisions()).toHaveLength(1);
+    expect(daemon.snapshot("wc")?.tasks.find((t) => t.id === "i315")?.churn).toBe(7);
+  });
 });

@@ -646,11 +646,22 @@ export interface WaveState {
   archived?: { at: string; by: string; reason: string };
   /** The overlap plan (`wave_planned`); absent until planned. Not `plan`: that is the wave file. */
   overlap_plan?: { clusters: PlanCluster[] };
-  /** The wave's spawns so far: a role's first run, or churn. */
-  spawns?: { productive: number; churn: number };
+  /**
+   * The wave's spawns so far: productive (what spends the spawn budget) and churn (spawn-class.ts),
+   * with churn per cause once there is any, and the wave's spawn budget (the daemon's snapshot).
+   */
+  spawns?: { productive: number; churn: number; churn_by?: ChurnBy; budget?: number };
   /** Merge trains, oldest first; absent: none. */
   trains?: MergeTrain[];
   updated_at: string;
+}
+
+/** wave-state `spawns.churn_by` and the digest's `auto.churn`: churn spawns per cause (#387). */
+export interface ChurnBy {
+  branch_updates: number;
+  rereviews: number;
+  retries: number;
+  trains: number;
 }
 
 /** wave-state `merge_queue[]` (SPEC §4.6.1, §4.6.17). */

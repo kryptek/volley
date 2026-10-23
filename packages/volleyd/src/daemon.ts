@@ -80,7 +80,7 @@ import {
 import { ciStateOf } from "./artifacts";
 import { budgetUsed } from "./autopilot/budgets";
 import { carryHandoff, carryPicker } from "./autopilot/carry";
-import { churnOf, strategySwitch } from "./autopilot/churn";
+import { churnFuse, churnOf, fuseQuietUntil, plannedName, strategySwitch } from "./autopilot/churn";
 import { type Digest, type DigestTrigger, digestOf, summaryLine } from "./autopilot/digest";
 import { type GithubStatus, githubStatusCache } from "./autopilot/github-status";
 import {
@@ -401,6 +401,7 @@ import {
   admitPlacing,
   budgetRaise,
   clusterRooms,
+  pipelineRoles,
   spawnBudget,
   spawnsOutstanding,
   spawnsUsed,
@@ -543,6 +544,7 @@ import {
   openDecisionFor,
   spawnAgent,
 } from "./spawn";
+import { type ChurnCause, churnCause, repeatsRun } from "./spawn-class";
 import { SpawnError } from "./spawn-error";
 import {
   type TrustFacts,
@@ -758,6 +760,8 @@ interface SpawnPipelineOptions {
   resumeNote?: string;
   /** An account move of a pipeline role: the attempt whose worktree it continues in. */
   worktreeAttempt?: number;
+  /** The pipeline's churn cause for the spawn (a re-review, a train's role; spawn-class.ts). */
+  cause?: ChurnCause;
 }
 
 /** A spawned agent the daemon watches until it is retired. */
@@ -4272,7 +4276,9 @@ export class Daemon {
       // agent_spawned clears the role's failures: what spawn_recovered reports is read first.
       const prior = log.record.spawnFailures[task]?.[role];
       const deps = this.spawnDeps(wave);
-      const { resumeNote, ...rest } = pipeline;
+      const { resumeNote, cause: asked, ...rest } = pipeline;
+      // A launch after failures retries the role too (spawn_recovered).
+      const churn = this.churnOf(wave, task, role, asked, prior !== undefined);
       // An implementer respawn continues the branch (and PR) an earlier attempt pushed.
       const carried =
         role === "implementer" && rest.start === undefined && rest.worktreeAttempt === undefined
@@ -4295,6 +4301,7 @@ export class Daemon {
         hygiene: log.record.state?.hygiene_level ?? "p1",
         ...(resumeNote !== undefined ? { resumeNote } : {}),
         ...(carried !== undefined ? { continueBranch: carried } : {}),
+        ...(churn !== null ? { churn } : {}),
       };
       if (remote !== undefined) {
         const r = await this.remoteSpawn(wave, task, remote, deps);
@@ -8104,6 +8111,22 @@ export class Daemon {
   }
 
   /**
+   * Whether a spawn of `task`'s `role` is churn, and why (spawn-class.ts): the pipeline's `cause`,
+   * the role's own, or a repeat of the role in its step (`retry`, or a launch after failures).
+   */
+  private churnOf(
+    wave: WaveId,
+    task: TaskId,
+    role: Role,
+    cause: ChurnCause | undefined,
+    afterFailure = false,
+  ): ChurnCause | null {
+    const quick = churnCause({ role, cause, retry: afterFailure });
+    if (quick !== null) return quick;
+    return churnCause({ role, retry: repeatsRun(this.journalEvents(wave), task, role) });
+  }
+
+  /**
    * A pipeline role spawn, through the same lock, launch and verification as the implementer's,
    * under T5's admission verdict, within the wave's spawn budget and only while the wave runs. A
    * hold is silent: the pipeline's next tick asks again.
@@ -8112,7 +8135,12 @@ export class Daemon {
     wave: WaveId,
     task: TaskId,
     role: Role,
-    req: { start?: SpawnStart; files: Record<string, string>; branch_update?: "merge" },
+    req: {
+      start?: SpawnStart;
+      files: Record<string, string>;
+      branch_update?: "merge";
+      cause?: ChurnCause;
+    },
   ): void {
     const rec = this.waves.get(wave)?.record;
     if (this.opts.spawner === undefined || rec?.wave == null) return;
@@ -8121,6 +8149,12 @@ export class Daemon {
     // Its machine takes no new agents: parked until the owner's re-place answer (silent too).
     if (this.parkClosed(wave, task)) return;
     const admission = admissionFor(rec, this.killSwitch, this.pressure(wave));
+    const used = spawnsUsed(rec);
+    const budget = spawnBudget(
+      rec.wave,
+      this.config.effective(wave).spawn_budget_multiplier,
+      rec.budget_raised ?? 0,
+    );
     const hold = roleSpawnHold({
       killSwitch: this.killSwitch,
       running: rec.state?.status === "running",
@@ -8128,12 +8162,13 @@ export class Daemon {
       reasons: admission.reasons,
       live: this.ceilingCount(false).live,
       ceiling: this.config.effective(wave).hard_ceiling,
-      used: spawnsUsed(rec),
-      budget: spawnBudget(
-        rec.wave,
-        this.config.effective(wave).spawn_budget_multiplier,
-        rec.budget_raised ?? 0,
-      ),
+      used,
+      budget,
+      // Churn never spends the budget (#387); classified only when the budget would hold it.
+      churn:
+        used >= budget &&
+        this.churnOf(wave, task, role, req.cause, rec.spawnFailures[task]?.[role] !== undefined) !==
+          null,
     });
     if (hold !== null) {
       this.log(`spawn ${key}: held, ${hold}`);
@@ -9489,6 +9524,13 @@ export class Daemon {
       escalated: ap.escalated,
       budgets: structuredClone(ap.budgets),
     };
+    // What the productive spawns count against (churn never does, #387).
+    if (state.spawns !== undefined && rec.wave != null)
+      state.spawns.budget = spawnBudget(
+        rec.wave,
+        this.config.effective(wave).spawn_budget_multiplier,
+        rec.budget_raised ?? 0,
+      );
     const held = this.heldBack.get(wave) ?? [];
     const candidates = new Set(admissible(rec));
     for (const t of state.tasks) {
@@ -9845,6 +9887,19 @@ export class Daemon {
           if (key.startsWith(`${wave}/${d.task}/`)) this.refused.delete(key);
         }
       }
+    }
+    if (d.kind === "churn_exhausted" && d.task !== null) {
+      const a = r.answer.trim().toLowerCase();
+      if (a === "cancel")
+        await this.append(wave, {
+          type: "task_cancelled",
+          task: d.task,
+          data: { by: r.by, why: `churn exhausted (decision ${id})` },
+        });
+      // The monitor may have let the cluster go since: on hold again. `continue` changes nothing
+      // (the fuse stays quiet until as much churn again, fuseQuietUntil).
+      else if (a === "hold cluster")
+        await this.holdCluster(wave, d.task, `${r.by} answered hold cluster (decision ${id})`);
     }
     if (d.kind === "spawn_budget_exhausted") {
       if (r.answer.trim().toLowerCase() === "cancel") {
@@ -12070,6 +12125,83 @@ export class Daemon {
       });
       this.log(`wave ${wave}: cluster ${c.id} ${change.from} → ${change.to} (${change.why})`);
     }
+    await this.churnFusePass(wave);
+  }
+
+  /**
+   * The churn fuse (#387, autopilot/churn.ts `churnFuse`): a task whose churn spawns are more
+   * than `churn_roles_multiple_max` × its pipeline roles puts its cluster on hold
+   * (`cluster_strategy_changed { churn }`, naming the task); churn that goes on while the cluster
+   * is held opens one task-level `churn_exhausted` decision (hold cluster | continue | cancel).
+   */
+  private async churnFusePass(wave: WaveId): Promise<void> {
+    const log = this.waves.get(wave);
+    const rec = log?.record;
+    if (log === undefined || rec?.wave == null || rec.state == null) return;
+    const events = log.journal.readAll();
+    for (const t of rec.state.tasks) {
+      const churn = t.churn ?? 0;
+      const c = rec.state.overlap_plan?.clusters.find((x) => x.id === t.cluster);
+      if (churn === 0 || c === undefined || rec.wave.tasks[t.id] === undefined) continue;
+      if (t.stage === "done" || t.stage === "cancelled") continue;
+      const roles = pipelineRoles(rec.wave, t.id);
+      const limit = DAEMON_DEFAULTS.churn_roles_multiple_max * roles;
+      const step = churnFuse({
+        churn,
+        roles,
+        held: c.state === "hold",
+        quietUntil: fuseQuietUntil(events, t.id, limit),
+        open: openDecisions(rec).some((d) => d.kind === "churn_exhausted" && d.task === t.id),
+      });
+      if (step === "hold") {
+        await this.holdCluster(
+          wave,
+          t.id,
+          `${t.id}: ${churn} churn spawns, more than ${DAEMON_DEFAULTS.churn_roles_multiple_max} × its ${roles} role${roles === 1 ? "" : "s"}`,
+        );
+      } else if (step === "decide" && t.stage !== "merge_ready") {
+        // A gated task is not parked by a decision: its cluster's hold is the control.
+        const churned = [
+          ...new Set(
+            events
+              .filter((e) => e.type === "agent_spawned" && e.task === t.id && e.data.churn === true)
+              .map((e) => String(e.data.role)),
+          ),
+        ];
+        try {
+          await this.openDecisionNow(
+            wave,
+            {
+              kind: "churn_exhausted",
+              task: t.id,
+              question: `Needs you: ${t.id} churned ${churn} spawns (more than ${DAEMON_DEFAULTS.churn_roles_multiple_max} × its ${roles} pipeline role${roles === 1 ? "" : "s"}: ${churned.join(", ")}) while cluster ${c.id} is on hold. Churn spends no spawn budget. hold cluster: keep the cluster on hold (one member at a time); continue: let it run, asked again only after as much churn again; or cancel the task?`,
+              options: ["hold cluster", "continue", "cancel"],
+            },
+            { cluster: c.id, churn, roles: churned },
+          );
+        } catch (e) {
+          this.log(`churn fuse ${wave}/${t.id}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Put `task`'s cluster on hold for its churn (`cluster_strategy_changed { churn }`, naming the
+   * task), unless it is held already.
+   */
+  private async holdCluster(wave: WaveId, task: TaskId, why: string): Promise<void> {
+    const rec = this.waves.get(wave)?.record;
+    const t = rec?.state?.tasks.find((x) => x.id === task);
+    const c = rec?.state?.overlap_plan?.clusters.find((x) => x.id === t?.cluster);
+    if (t === undefined || c === undefined || c.state === "hold") return;
+    const from = c.state === "planned" ? plannedName(c) : c.state;
+    await this.append(wave, {
+      type: "cluster_strategy_changed",
+      task,
+      data: { cluster: c.id, from, to: "hold", why, churn: t.churn ?? 0 },
+    });
+    this.log(`wave ${wave}: cluster ${c.id} ${from} → hold (${why})`);
   }
 
   /**

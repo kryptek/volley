@@ -257,6 +257,25 @@ describe("pipeline: a CONFLICTING PR is updated before the gate", () => {
     expect(h.task()?.pr?.head_sha).toBe(H3);
   });
 
+  it("the spawn says why it is churn: the rebase a branch update, the review after it a re-review (#387)", async () => {
+    await fixedUpBehind();
+    // The first review round and the fixup of its findings are productive.
+    expect(h.spawns.filter((s) => s.role !== "rebase").map((s) => s.cause)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(h.spawns.find((s) => s.role === "rebase")?.cause).toBe("branch_update");
+    h.world.diffNames[`${H2}..${H3}`] = ["src/api.ts"];
+    await h.finish("rebase", { head: H3, ci: "green" });
+    const specs = h.spawns.filter((s) => s.role === "spec_reviewer");
+    expect(specs.map((s) => s.cause)).toEqual([undefined, "rereview"]);
+    // The step says so too, so a held spawn retried later keeps its cause.
+    const step = h.events.filter((e) => e.type === "stage_entered").at(-1);
+    expect(step?.data).toMatchObject({ roles: ["spec_reviewer"], cause: "rereview" });
+  });
+
   it("a rebase that touched no flagged file goes straight to the gate", async () => {
     await fixedUpBehind();
     h.world.diffNames[`${H2}..${H3}`] = ["README.md"];
@@ -1447,6 +1466,13 @@ describe("roleSpawnHold (what the daemon checks before a role spawn)", () => {
     expect(roleSpawnHold({ ...ok, used: 4 })).toMatch(/spawn budget exhausted \(4\/4\)/);
     expect(roleSpawnHold({ ...ok, live: 1, ceiling: 2 })).toBeNull();
     expect(roleSpawnHold({ ...ok, live: 2, ceiling: 2 })).toMatch(/hard ceiling reached \(2\/2\)/);
+  });
+  it("a churn spawn is never held by the budget, only by the rest (#387)", () => {
+    expect(roleSpawnHold({ ...ok, used: 4, churn: true })).toBeNull();
+    expect(roleSpawnHold({ ...ok, used: 9, churn: true, live: 2, ceiling: 2 })).toMatch(
+      /hard ceiling reached/,
+    );
+    expect(roleSpawnHold({ ...ok, used: 4, churn: true, killSwitch: true })).toMatch(/kill switch/);
   });
 });
 

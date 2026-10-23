@@ -433,6 +433,7 @@ const norm = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
  */
 const CHECKED_KINDS: ReadonlySet<DecisionKind> = new Set([
   "spawn_budget_exhausted",
+  "churn_exhausted",
   "machine_down",
   "repo_untrusted",
 ]);

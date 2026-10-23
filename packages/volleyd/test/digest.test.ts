@@ -192,7 +192,40 @@ describe("digestOf", () => {
       conflicts_resolved: 1,
       retries: 3,
       merges: 2,
+      churn: { branch_updates: 0, rereviews: 0, retries: 0, trains: 0 },
     });
+  });
+
+  it("counts the churn spawns by cause (#387)", () => {
+    const spawn = (task: string, role: string, cause?: string): NewEvent => ({
+      type: "agent_spawned",
+      task,
+      data: {
+        role,
+        agent_id: `w1-${task.toLowerCase()}-${role}`,
+        ...(cause !== undefined ? { churn: true, cause } : {}),
+      },
+    });
+    const d = digestOf(
+      journal(
+        ...events.map(({ seq: _s, at: _a, ...e }) => e),
+        spawn("A", "implementer"),
+        spawn("A", "rebase", "branch_update"),
+        spawn("A", "rebase", "branch_update"),
+        spawn("A", "spec_reviewer", "rereview"),
+        spawn("B", "implementer", "retry"),
+        spawn("train-1", "integrator", "train"),
+      ),
+      reduce(events),
+      NOW,
+      "wave_complete",
+    );
+    expect(d.auto.churn).toEqual({ branch_updates: 2, rereviews: 1, retries: 1, trains: 1 });
+    expect(schemaErrors("digest.schema.json", envelope("_waves/digest", "digest", d))).toEqual([]);
+    expect(summaryLine(d)).toContain(", 5 churn spawns");
+    expect(renderDigestMd(d)).toContain(
+      "- 5 churn spawns (2 branch updates, 1 re-review, 1 retry, 1 train)",
+    );
   });
 
   it("lists open decisions as waiting, owner_only for an owner_only escalation", () => {
@@ -288,6 +321,7 @@ describe("summaryLine", () => {
       conflicts_resolved: 2,
       retries: 0,
       merges: 27,
+      churn: { branch_updates: 0, rereviews: 0, retries: 0, trains: 0 },
     },
     waiting: [{ id: "d-go", kind: "release_go", question: "Go?", since: NOW, owner_only: true }],
     held: [],
@@ -312,6 +346,15 @@ describe("summaryLine", () => {
         waiting: [],
       }),
     ).toBe("w1 stopped: 27 shipped");
+    // Churn only when there was any.
+    expect(summaryLine(base)).not.toContain("churn");
+    expect(
+      summaryLine({
+        ...base,
+        waiting: [],
+        auto: { ...base.auto, churn: { branch_updates: 1, rereviews: 0, retries: 0, trains: 0 } },
+      }),
+    ).toBe("w1 complete: 27 shipped, 3 flakes fixed, 2 conflicts resolved, 1 churn spawn");
   });
 });
 

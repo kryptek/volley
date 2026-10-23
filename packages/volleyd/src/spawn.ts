@@ -59,6 +59,7 @@ import {
   lastOutputNote,
   screenWords,
 } from "./screens";
+import type { ChurnCause } from "./spawn-class";
 import { SpawnError } from "./spawn-error";
 import { isRepoTrusted, readClaudeJson, repoRoot, trustAskFor, trustDecisionId } from "./trust";
 import type {
@@ -165,6 +166,8 @@ export interface SpawnRequest {
    * brief names the branch and the PR open from it, so no second branch or PR is started.
    */
   continueBranch?: string;
+  /** The spawn is churn, and why (spawn-class.ts): journaled `churn: true, cause`. */
+  churn?: ChurnCause;
 }
 
 export interface SpawnDeps {
@@ -894,6 +897,7 @@ async function launchAttempt(
           ? { recovered_from: recovered.from, recovery: recovered.reason }
           : {}),
         ...(adopted ? { adopted: true } : {}),
+        ...(req.churn !== undefined ? { churn: true, cause: req.churn } : {}),
       },
     });
     if (req.role === "implementer" && attempt === 1) {

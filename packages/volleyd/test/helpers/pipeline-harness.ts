@@ -15,6 +15,7 @@ import { agentIdFor } from "../../src/identity";
 import { PipelineDriver, type PipelineEvent, type SpawnStart } from "../../src/pipeline";
 import { type WaveRecord, apply, emptyRecord } from "../../src/reducer";
 import type { HygieneLevel } from "../../src/reviews";
+import type { ChurnCause } from "../../src/spawn-class";
 import type { BranchUpdate, JournalEvent, NewEvent, NudgeOnMerge } from "../../src/types";
 import { parseWaveFile } from "../../src/wave-file";
 import { branchName } from "../../src/worktree";
@@ -141,6 +142,8 @@ export interface Spawned {
   files: Record<string, string>;
   /** How the step tells a rebase role to bring the branch up to date (absent: rebase). */
   branch_update?: BranchUpdate;
+  /** Why the pipeline asked for this spawn, when it is churn (spawn-class.ts). */
+  cause?: ChurnCause;
 }
 
 /** A read of one head's runs: `gh api …/actions/runs?head_sha=` (the supervisor) or `gh run list --commit`. */
@@ -487,6 +490,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     files: Record<string, string> = {},
     update?: BranchUpdate,
     task = "T1",
+    cause?: ChurnCause,
   ) => {
     const key = task === "T1" ? role : `${task}/${role}`;
     const attempt = (attempts[key] ?? 0) + 1;
@@ -503,6 +507,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       ...(start !== undefined ? { start } : {}),
       files,
       ...(update !== undefined ? { branch_update: update } : {}),
+      ...(cause !== undefined ? { cause } : {}),
     });
     if (start !== undefined) world.local[worktree] = start.ref;
     await journal({
@@ -551,7 +556,9 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     record: () => rec,
     journal,
     spawn: async (task, role, req) =>
-      holdSpawns ? null : spawnAgent(role, req.start, req.files, req.branch_update, task),
+      holdSpawns
+        ? null
+        : spawnAgent(role, req.start, req.files, req.branch_update, task, req.cause),
     branchUpdate: () => branchUpdate ?? "rebase",
     ...(o.hygiene !== undefined ? { hygiene: () => o.hygiene as HygieneLevel } : {}),
     ...(o.merge !== undefined ? { mergeMode: () => o.merge as "auto" | "manual" } : {}),

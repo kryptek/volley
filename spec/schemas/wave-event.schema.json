@@ -1190,7 +1190,11 @@
                     "properties": {
                       "churn": {
                         "const": true,
-                        "description": "The spawn is churn: a respawn, a rebase or a fixup an overlap forced, not the role's first run."
+                        "description": "The spawn is churn (spec section 4.6.16): it never spends the spawn budget. Absent: productive."
+                      },
+                      "cause": {
+                        "enum": ["branch_update", "rereview", "train", "retry"],
+                        "description": "Why a churn spawn ran: a branch update (rebase), a review round (or its fixup) a branch update caused, a merge train's spawn, or a relaunch, respawn or retry of a role in its step."
                       },
                       "issues": {
                         "type": "array",
@@ -1282,7 +1286,12 @@
                       "to": {
                         "enum": ["collapse", "chain", "cap", "independent", "hold", "train"]
                       },
-                      "why": { "type": "string", "minLength": 1 }
+                      "why": { "type": "string", "minLength": 1 },
+                      "churn": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "The churn fuse put the cluster on hold (spec section 4.6.16): the churn spawns of the task the event names."
+                      }
                     }
                   }
                 }

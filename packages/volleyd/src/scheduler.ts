@@ -419,10 +419,15 @@ export function budgetRaise(o: {
   return room >= 1 ? Math.min(want, room) : want;
 }
 
-/** Spawns a wave has used or committed to: actual spawns plus admitted tasks not yet spawned. */
+/**
+ * Spawns a wave has used or committed to: productive spawns plus admitted tasks not yet spawned.
+ * Churn (spawn-class.ts) never counts: a merge train's task commits none either.
+ */
 export function spawnsUsed(rec: WaveRecord): number {
-  const spawned = new Set(
-    rec.state?.tasks.filter((t) => Object.keys(t.agents).length > 0).map((t) => t.id) ?? [],
+  const skip = new Set(
+    rec.state?.tasks
+      .filter((t) => Object.keys(t.agents).length > 0 || t.train !== undefined)
+      .map((t) => t.id) ?? [],
   );
-  return rec.spawns + rec.admitted.filter((id) => !spawned.has(id)).length;
+  return rec.spawns + rec.admitted.filter((id) => !skip.has(id)).length;
 }

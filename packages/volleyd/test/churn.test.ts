@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { churnOf, strategyFor, strategySwitch } from "../src/autopilot/churn";
+import {
+  churnFuse,
+  churnOf,
+  fuseQuietUntil,
+  strategyFor,
+  strategySwitch,
+} from "../src/autopilot/churn";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { replay } from "../src/reducer";
 import type { JournalEvent, NewEvent, PlanCluster } from "../src/types";
@@ -207,5 +213,58 @@ describe("strategySwitch (#384): the journaled change, with hysteresis", () => {
       to: "hold",
       why: "a1 updated its branch 2 times in the last 2 h",
     });
+  });
+});
+
+describe("churnFuse (#387): hold the cluster, then ask once", () => {
+  const fuse = (o: Partial<Parameters<typeof churnFuse>[0]> = {}) =>
+    churnFuse({ churn: 0, roles: 2, held: false, quietUntil: 0, open: false, ...o });
+  const max = DAEMON_DEFAULTS.churn_roles_multiple_max;
+
+  it("quiet up to churn_roles_multiple_max × the task's pipeline roles", () => {
+    expect(fuse({ churn: max * 2 })).toBeNull();
+  });
+
+  it("over it: hold the cluster; already on hold: decide; never a second open decision", () => {
+    expect(fuse({ churn: max * 2 + 1 })).toBe("hold");
+    expect(fuse({ churn: max * 2 + 1, held: true })).toBe("decide");
+    expect(fuse({ churn: max * 2 + 5, held: true, open: true })).toBeNull();
+  });
+
+  it("acts once per new churn spawn: quiet until its churn passes quietUntil", () => {
+    expect(fuse({ churn: 7, held: true, quietUntil: 7 })).toBeNull();
+    expect(fuse({ churn: 8, held: true, quietUntil: 7 })).toBe("decide");
+  });
+
+  it("fuseQuietUntil: the limit, then the churn at the last trip; a continue adds the limit", () => {
+    const at = "2026-10-23T09:00:00.000Z";
+    const evs = (extra: NewEvent[]): JournalEvent[] =>
+      extra.map((e, i) => ({ ...e, seq: i + 1, at }));
+    expect(fuseQuietUntil([], "a1", 6)).toBe(6);
+    const held: NewEvent = {
+      type: "cluster_strategy_changed",
+      task: "a1",
+      data: { cluster: "A", from: "cap", to: "hold", why: "x", churn: 7 },
+    };
+    expect(fuseQuietUntil(evs([held]), "a1", 6)).toBe(7);
+    expect(fuseQuietUntil(evs([held]), "a2", 6)).toBe(6);
+    const asked: NewEvent = {
+      type: "decision_opened",
+      task: "a1",
+      data: {
+        decision_id: "d1",
+        kind: "churn_exhausted",
+        cluster: "A",
+        churn: 8,
+        roles: ["rebase"],
+      },
+    };
+    expect(fuseQuietUntil(evs([held, asked]), "a1", 6)).toBe(8);
+    const cont: NewEvent = {
+      type: "decision_resolved",
+      task: "a1",
+      data: { decision_id: "d1", answer: "continue", by: "o" },
+    };
+    expect(fuseQuietUntil(evs([held, asked, cont]), "a1", 6)).toBe(14);
   });
 });

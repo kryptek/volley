@@ -1001,6 +1001,8 @@ autopilot: on
     pr/owner: where the work went, or a clone that is missing, is the owner's call
   terminal_status_lost · always · escalate no_policy · no budget
     terminal/owner: a status the supervisor could not hand over even on recovery: the owner checks the work
+  churn_exhausted · the task's cluster not held by autopilot before (churn:<task>) · hold cluster · churn:<task> (once) · max 1
+    churn_exhausted/hold: churn spends no spawn budget, so its fuse is the control: one member at a time while the cluster is held; churn that goes on anyway is the owner's
 ```
 
 ### Self-healing CI
@@ -1235,7 +1237,9 @@ computes it from the journal (`src/autopilot/digest.ts`, pure) and publishes it 
   `## Closes`.
 - `auto`: `decisions_resolved` (`decision_auto_resolved`), `flakes_fixed` (each landed
   `remediation_closed`: the test, its fixer, the tasks it released), `conflicts_resolved` (rebase
-  steps that verified), `retries` (`spawn_recovered` + `relaunched`), `merges` (PRs volleyd merged).
+  steps that verified), `retries` (`spawn_recovered` + `relaunched`), `merges` (PRs volleyd merged),
+  `churn` (the churn spawns by cause: `branch_updates`, `rereviews`, `retries`, `trains`; see
+  [Spawn budget](#spawn-budget)); the one-line summary names churn only when there was any.
 - `waiting`: the wave's open decisions (`owner_only` when escalated as such); `release` (the
   train's stages, when it has one); `failures`: cancelled tasks and why.
 
@@ -2285,8 +2289,8 @@ namespace.
 
 ### Spawn budget
 
-A wave's spawn budget counts every agent it spawns (retries and reviewers included). Its default
-is enough to finish with no retry at all plus headroom: the roles of every task's pipeline
+A wave's spawn budget counts its productive spawns (reviewers included), never its churn (below).
+Its default is enough to finish with no retry at all plus headroom: the roles of every task's pipeline
 (implement, each review, fixup: 4 for the default pipeline) plus 50% of that for retries (at
 least 2), or `spawn_budget_multiplier` × task count when that is more. A wave file's
 `spawn_budget:` overrides both. Exhaustion is never silent: a spawn the budget holds opens one
@@ -2299,6 +2303,36 @@ for one), so one raise lets every held spawn through. `raise by <n>` (or `raise 
 adds n spawns to the wave's budget (journaled with the answer, so it survives a restart) and the
 next tick spawns; `cancel` cancels the task (a wave-level one stops the wave); any other answer
 is refused (`BAD_ANSWER`).
+
+**Productive and churn spawns** (`src/spawn-class.ts`). A spawn is churn when it only pays for an
+overlap or a failure: a branch update (the `rebase` role), a merge train's (the `integrator`, and
+every role of the train's own task), a review round a branch update caused (the reviewers a rebase
+re-runs, and the fixup of that round), or a relaunch, respawn or retry of a role that already ran
+in its step (a relaunch, a respawn answer, a respawn after a restart, a launch after failed
+ones). Everything else is productive: each role's run in its pipeline, a fixup of findings and the
+review round after it included. The pipeline names the cause on the spawn it asks for, and the
+daemon journals a churn spawn `agent_spawned { churn: true, cause }` (`branch_update`, `rereview`,
+`train`, `retry`). Churn never spends the budget, never opens `spawn_budget_exhausted` and is
+never held by it; the hard ceiling and admission still hold every spawn. The wave state counts
+both, `spawns: { productive, churn, churn_by, budget }` and each task's `churn`, and `volleyd
+status` prints them under the header:
+
+```text
+  spawns: 52 productive / 156 budget · 141 churn (116 branch updates, 25 re-reviews)
+```
+
+The digest's `auto.churn` counts them by cause (`branch_updates`, `rereviews`, `retries`,
+`trains`), and its one-line push summary mentions churn only when there was any.
+
+**The churn fuse.** Uncounted churn is monitored instead. When a task in a cluster of the overlap
+plan has more churn spawns than `churn_roles_multiple_max` (3) × its pipeline roles, its cluster
+goes on `hold` (journaled `cluster_strategy_changed { churn }` naming the task: one member at a
+time). If the cluster is already on hold and the task churns again, one task-level
+`churn_exhausted { cluster, churn, roles }` decision opens (`hold cluster` | `continue` |
+`cancel`; never a second while one is open). `hold cluster` puts the cluster back on hold if the
+churn monitor let it go meanwhile; `continue` keeps the fuse quiet until the task churns as much
+again; `cancel` cancels the task. Autopilot answers `hold cluster` once per task
+(`churn_exhausted/hold`, budget key `churn:<task>`) and escalates the next one to the owner.
 
 ### Retire and cleanup
 

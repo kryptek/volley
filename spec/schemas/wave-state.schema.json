@@ -191,10 +191,16 @@
               "type": "object",
               "additionalProperties": false,
               "required": ["productive", "churn"],
-              "description": "The wave's spawns so far: productive (a role's first run) and churn (a respawn, a rebase or a fixup an overlap forced).",
+              "description": "The wave's spawns so far: productive (what spends the spawn budget) and churn (a branch update, a re-review a branch update caused, a merge train's spawns, or a relaunch, respawn or retry of a role in its step; spec section 4.6.16), with churn per cause once there is any, and the wave's spawn budget.",
               "properties": {
                 "productive": { "type": "integer", "minimum": 0 },
-                "churn": { "type": "integer", "minimum": 0 }
+                "churn": { "type": "integer", "minimum": 0 },
+                "churn_by": { "$ref": "#/$defs/churnBy" },
+                "budget": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "The wave's spawn budget now (raises included)."
+                }
               }
             },
             "trains": {
@@ -235,6 +241,18 @@
     }
   ],
   "$defs": {
+    "churnBy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch_updates", "rereviews", "retries", "trains"],
+      "description": "Churn spawns per cause: branch updates (rebase), re-reviews (a review round, and its fixup, a branch update caused), retries (a relaunch, respawn or retry of a role in its step) and trains (a merge train's spawns).",
+      "properties": {
+        "branch_updates": { "type": "integer", "minimum": 0 },
+        "rereviews": { "type": "integer", "minimum": 0 },
+        "retries": { "type": "integer", "minimum": 0 },
+        "trains": { "type": "integer", "minimum": 0 }
+      }
+    },
     "fixerRemediation": {
       "type": "object",
       "required": ["kind", "test", "test_file", "run_urls", "for"],
@@ -474,7 +492,7 @@
         "churn": {
           "type": "integer",
           "minimum": 0,
-          "description": "The task's churn spawns so far: respawns, rebases and fixups an overlap forced."
+          "description": "The task's churn spawns so far (spawns.churn's, for this task)."
         },
         "train": { "$ref": "#/$defs/trainMembers" }
       }
