@@ -38,6 +38,8 @@ function fakeGitHub() {
   );
   const labels: string[] = [];
   let releasePr: number | null = null;
+  /** `gh pr view`: each PR's state and head branch. */
+  const prs = new Map<number, { state: string; headRefName: string }>();
   const fake: FakeExec = fakeExec();
   const issue = (argv: string[]) => issues.get(Number(argv[3])) as Issue;
   fake
@@ -82,11 +84,18 @@ function fakeGitHub() {
       stdout: JSON.stringify(
         releasePr === null ? [] : [{ number: releasePr, baseRefName: "main" }],
       ),
-    }));
+    }))
+    .on(["gh", "pr", "view"], (argv) => {
+      const p = prs.get(Number(argv[3]));
+      return p === undefined
+        ? { code: 1, stderr: "GraphQL: Could not resolve to a PullRequest" }
+        : { stdout: JSON.stringify(p) };
+    });
   return {
     fake,
     issues,
     labels,
+    prs,
     release: (n: number) => {
       releasePr = n;
     },
@@ -267,9 +276,13 @@ describe("the issue lifecycle in the daemon (#416)", () => {
     await tick();
     expect((gh.issues.get(412) as Issue).state).toBe("OPEN");
     expect(ofType("issues_verified")).toEqual([]);
+    // #414 was closed by the run that failed on #412: verified still lists it as closed.
+    expect((gh.issues.get(414) as Issue).state).toBe("CLOSED");
     await clock.advance(DAEMON_DEFAULTS.ci_poll_ms);
     await tick();
-    expect(ofType("issues_verified")).toHaveLength(1);
+    expect(ofType("issues_verified").map((e) => e.data)).toEqual([
+      { release_pr: 431, closed: [412, 414], left_open: [413] },
+    ]);
     expect((gh.issues.get(412) as Issue).state).toBe("CLOSED");
   });
 
@@ -296,6 +309,20 @@ describe("the issue lifecycle in the daemon (#416)", () => {
     expect((gh.issues.get(414) as Issue).state).toBe("CLOSED");
     expect((gh.issues.get(412) as Issue).labels).toEqual([]);
     expect(ofType("issues_verified")).toEqual([]);
+
+    // Retried once after ci_poll_ms, then only every release_merge_poll_ms: no 60 s loop.
+    const views = () => gh.fake.argvs(["gh", "issue", "view"]).filter((a) => a[3] === "413").length;
+    const first = views();
+    await clock.advance(DAEMON_DEFAULTS.ci_poll_ms);
+    await tick();
+    expect(views()).toBeGreaterThan(first);
+    const second = views();
+    await clock.advance(DAEMON_DEFAULTS.ci_poll_ms);
+    await tick();
+    expect(views()).toBe(second);
+    await clock.advance(DAEMON_DEFAULTS.release_merge_poll_ms);
+    await tick();
+    expect(views()).toBeGreaterThan(second);
   });
 
   it("issues --verify: the check for a release merged by hand, owner only, on a complete wave", async () => {
@@ -317,6 +344,16 @@ describe("the issue lifecycle in the daemon (#416)", () => {
     });
     await tick();
     expect(daemon.record(WAVE)?.state?.status).toBe("complete");
+    // A --pr that is not the release branch's merged PR (a typo) closes nothing.
+    gh.prs.set(76, { state: "MERGED", headRefName: "feature/x" });
+    gh.prs.set(77, { state: "MERGED", headRefName: `release/${WAVE}` });
+    for (const n of [75, 76]) {
+      const typo = await client.request("issues", { wave: WAVE, verify: true, by: OWNER, pr: n });
+      expect(typo.ok).toBe(false);
+      expect(typo.error).toContain(`PR #${n}`);
+    }
+    expect(gh.fake.argvs(["gh", "issue", "close"])).toEqual([]);
+    expect(ofType("issues_verified")).toEqual([]);
     const r = await runCli(["issues", WAVE, "--verify", "--pr", "77", "--by", OWNER], t.env);
     expect(r.stderr).toBe("");
     expect(r.exitCode).toBe(0);

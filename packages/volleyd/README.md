@@ -1181,13 +1181,16 @@ stays open, saying nothing, until the release PR reaches main. volleyd owns that
   branch's merged PR (`gh pr list --head <release> --state merged`, once per
   `release_merge_poll_ms`, 5 minutes, until the wave is archived); `volleyd issues <wave>
   --verify [--pr <n>]` runs the same check now for a release merged by hand (refused unless the
-  wave is `complete`; once verified it answers from the journal unless `--pr` names another PR).
+  wave is `complete`; once verified it answers from the journal unless `--pr` names another PR;
+  a `--pr` that `gh pr view` does not show merged from the release branch is refused).
   Every task's issue is read: a done task's issue still open is closed with the comment `closed
   by the release PR #N (wave <id>)` (`issue_closed`), the label comes off (`issue_unlabeled`),
   and a cancelled task's issue (or a deferred one: not done when the release reached main) stays
   open with one comment `cancelled in wave <id>: <reason>` (`deferred in wave <id>: …`). Once
   every issue was read and every write ran, `issues_verified { release_pr, closed, left_open }`
-  ends it. A `stopped` wave gets no release check: its issues keep `merged-to-release` until
+  ends it (`closed` lists every issue closed against that release PR, earlier failed runs'
+  included). A pass with a failed read or write is retried after `ci_poll_ms`, then once per
+  `release_merge_poll_ms` while it keeps failing (an issue deleted or transferred, say). A `stopped` wave gets no release check: its issues keep `merged-to-release` until
   removed by hand.
 - **On upgrade**: the passes run on every live (unarchived) wave, including one journaled before
   this version, so a finished wave's done tasks' open issues are labeled and commented then (and

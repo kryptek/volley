@@ -118,7 +118,9 @@ import {
   issueRows,
   issueViewArgv,
   mergedActions,
+  mergedFrom,
   parseIssueView,
+  prViewArgv,
   releaseActions,
   releasePrArgv,
   releasedPr,
@@ -1237,6 +1239,8 @@ export class Daemon {
   private readonly issueChecks = new Set<WaveId>();
   /** When a wave's issue work may run again after a failed gh call (ci_poll_ms on). */
   private readonly issueRetryAt = new Map<WaveId, number>();
+  /** Consecutive issue passes that failed, per wave (the retry backs off after the first). */
+  private readonly issueFailures = new Map<WaveId, number>();
   /** `<wave>/<issue>` gh showed needs nothing at its merge (closed by hand): not read again. */
   private readonly issueSettled = new Set<string>();
   /** When each complete wave last looked for its merged release PR (release_merge_poll_ms). */
@@ -10500,8 +10504,20 @@ export class Daemon {
             this.releasePolledAt.delete(wave);
           }
         }
-        if (failed) this.issueRetryAt.set(wave, this.now() + DAEMON_DEFAULTS.ci_poll_ms);
-        else this.issueRetryAt.delete(wave);
+        // Retried once after ci_poll_ms, then every release_merge_poll_ms: an issue gh can never
+        // read (deleted, transferred, a typo) is not looked up every minute until archive.
+        const failures = failed ? (this.issueFailures.get(wave) ?? 0) + 1 : 0;
+        if (failures > 0) {
+          this.issueFailures.set(wave, failures);
+          this.issueRetryAt.set(
+            wave,
+            this.now() +
+              (failures === 1 ? DAEMON_DEFAULTS.ci_poll_ms : DAEMON_DEFAULTS.release_merge_poll_ms),
+          );
+        } else {
+          this.issueFailures.delete(wave);
+          this.issueRetryAt.delete(wave);
+        }
       })()
         .catch((e: unknown) =>
           this.log(`${wave}: issues: ${e instanceof Error ? e.message : String(e)}`),
@@ -10590,7 +10606,6 @@ export class Daemon {
       ledger: issueLedger(this.journalEvents(wave)),
       views,
     });
-    const closed: number[] = [];
     for (const t of tasks) {
       const mine = actions.filter((a) => a.kind !== "ensure_label" && a.issue === t.issue);
       if (mine.length === 0) continue;
@@ -10600,8 +10615,14 @@ export class Daemon {
       });
       await this.journalIssueRun(wave, r);
       failed.push(...r.failed);
-      for (const e of r.events) if (e.type === "issue_closed") closed.push(t.issue);
     }
+    // From the ledger, so an issue an earlier, failed run closed is listed too.
+    const closedBy = new Set(
+      this.journalEvents(wave)
+        .filter((e) => e.type === "issue_closed" && e.data.release_pr === releasePr)
+        .map((e) => e.data.issue),
+    );
+    const closed = tasks.filter((t) => closedBy.has(t.issue)).map((t) => t.issue);
     const left_open = tasks
       .filter((t) => t.stage !== "done" && views.get(t.issue)?.state === "OPEN")
       .map((t) => t.issue);
@@ -10667,6 +10688,15 @@ export class Daemon {
     this.issueChecks.add(w.wave);
     const defer = (async (): Promise<Reply> => {
       const cwd = repoDir(repo);
+      // A PR number given by hand is checked first: a typo must not close every issue.
+      if (typeof pr === "number") {
+        const v = await this.host.exec(prViewArgv(pr), { cwd }).catch(() => null);
+        if (v?.code !== 0 || !mergedFrom(v.stdout, state.release_branch))
+          return {
+            ok: false,
+            error: `PR #${pr} is not a merged pull request from ${state.release_branch}`,
+          };
+      }
       const release = typeof pr === "number" ? pr : await this.releasePr(cwd, state.release_branch);
       if (release === null)
         return {

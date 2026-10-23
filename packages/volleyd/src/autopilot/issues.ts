@@ -86,6 +86,26 @@ export const releasePrArgv = (releaseBranch: string): string[] => [
   "number,baseRefName",
 ];
 
+/** `gh pr view <n>`: whether PR n is merged, and from which branch (`issues --verify --pr`). */
+export const prViewArgv = (pr: number): string[] => [
+  "gh",
+  "pr",
+  "view",
+  String(pr),
+  "--json",
+  "state,headRefName",
+];
+
+/** True when `prViewArgv`'s output is a merged PR from `releaseBranch`. */
+export function mergedFrom(stdout: string, releaseBranch: string): boolean {
+  try {
+    const p = JSON.parse(stdout) as { state?: unknown; headRefName?: unknown } | null;
+    return p?.state === "MERGED" && p.headRefName === releaseBranch;
+  } catch {
+    return false;
+  }
+}
+
 /** The merged release PR's number from `releasePrArgv`'s output: one into a non-release base. */
 export function releasedPr(stdout: string): number | null {
   let list: unknown;
