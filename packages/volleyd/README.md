@@ -1566,6 +1566,36 @@ warning: overlap: w2/T4 and w1/T7 both touch packages/volleyd/src/daemon.ts
 
 Overlap is advisory only; nothing is refused.
 
+### Footprints
+
+`footprintOf(body, tree)` (`src/footprint.ts`, pure) resolves an issue's Files list against the
+repository tree (`readTree` reads it with `git ls-tree -r -l --full-tree <ref>`, read-only through
+the fence) into the files a task is expected to touch, their total size and a confidence, so a
+footprint is never silently empty or full of names that are not paths:
+
+- an entry that is a tree path resolves; a glob (`spec/schemas/*`) or a directory (`docs/`)
+  resolves to the tree paths it matches, and the glob stays in `files` for overlap matching;
+- a bare file name (`types.ts`) or a relative fragment (`helpers/pipeline-harness.ts`,
+  `src/dock/*`) resolves to the unique tree path ending with it inside the last resolved
+  entry's package (`packages/<pkg>/`), else the unique one in the repository; otherwise (no match, or
+  several) it is listed in `unresolved`. In the parser, a bare name beside a path in the same
+  bullet already lands in that path's directory (`config-defaults.ts, types.ts`);
+- an entry marked `(new)`, or under `changes/`, is accepted as a new file (0 bytes);
+- a token with no `/` and no known file extension (`github.slug`, `host.writeFile`,
+  `lease_pools.*.match`) is an identifier, not a file, and is dropped, unless it names a tree
+  file (`mosquitto.conf` resolves like any bare name).
+
+| Confidence | Meaning |
+|---|---|
+| `listed` | a Files section, every entry resolved or new |
+| `resolved` | a Files section, at least one entry resolved, some unresolved |
+| `guessed` | no Files section (or none of it resolved): every backticked token in the body that is a tree path |
+| `none` | nothing |
+
+`bytes` is the sum of the tree sizes of the resolved files. `sharedFiles(a, b, tree)`
+(`src/overlap.ts`) is the overlap test on two footprints: the paths they share, each glob or
+directory expanded against the tree.
+
 ---
 
 ## Configuration
@@ -3792,7 +3822,7 @@ retire for the retired agent's own workspace only):
 
 ALLOW (program by bare name only — never a path):
   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
-    branch --list | branch --track <b> <remote>/<b> | merge-base | show
+    branch --list | branch --track <b> <remote>/<b> | merge-base | show | ls-tree
     worktree add needs -b <new branch> or --detach (never checks out an existing branch), or
     -B only to re-create an agent branch (`<wave>/<task>-<role>-<n>`, worktree.ts
     AGENT_BRANCH — never a release or any other branch); the new branch is never main/master

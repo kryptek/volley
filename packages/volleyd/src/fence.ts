@@ -61,7 +61,7 @@ import { AGENT_BRANCH } from "./worktree";
  *
  * ALLOW (program by bare name only — never a path):
  *   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
- *     branch --list | branch --track <b> <remote>/<b> | merge-base | show
+ *     branch --list | branch --track <b> <remote>/<b> | merge-base | show | ls-tree
  *     worktree add needs -b <new branch> or --detach (never checks out an existing branch), or
  *     -B only to re-create an agent branch (`<wave>/<task>-<role>-<n>`, worktree.ts
  *     AGENT_BRANCH — never a release or any other branch); the new branch is never main/master
@@ -1092,6 +1092,11 @@ const GIT_SPECS: Record<string, OptSpec> = {
   },
   "merge-base": {
     flags: ["--is-ancestor", "--all", "-a", "--octopus", "--independent", "--fork-point"],
+  },
+  // The footprint resolver's tree read (footprint.ts readTree): paths and sizes, nothing else.
+  "ls-tree": {
+    flags: ["-r", "-l", "--long", "--full-tree", "-z", "--name-only", "-t", "-d"],
+    pathspecs: true,
   },
   show: {
     flags: [...DIFF_OUTPUT, "--oneline", "--quiet", "--abbrev-commit"],
