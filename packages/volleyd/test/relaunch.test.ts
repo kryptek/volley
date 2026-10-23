@@ -507,9 +507,7 @@ describe("relaunch of a spawn-type decision", () => {
     await waits.settled();
     expect(daemon.snapshot("w1")?.open_decisions).toEqual([id]);
     await resolve(id, "It's running");
-    const again = await event(
-      (e) => e.type === "decision_opened" && e.data.decision_id !== id,
-    );
+    const again = await event((e) => e.type === "decision_opened" && e.data.decision_id !== id);
     expect(String(again.data.question)).toMatch(/^no live agent found for /);
     expect(journal().some((e) => e.type === "agent_retired" || e.type === "relaunched")).toBe(
       false,
