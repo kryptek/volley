@@ -388,10 +388,12 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
 }
 
 /**
- * A CI hold's `why_waiting`: `CI 3/13 · running: …` when volleyd counts the head's jobs (#415),
- * else `CI pending on <sha> (n/m runs)` / `(no run yet)`.
+ * A CI hold's `why_waiting`, in any of volleyd's four wordings (volleyd/src/reducer.ts is the
+ * source of truth): `CI 3/13 · running: …` when volleyd counts the head's jobs (#415), else
+ * `CI pending on <sha> (n/m runs)` / `(no run yet)`, and while a poll fails
+ * `CI unreadable (…), retrying` or `CI infra incident: …; re-checking` (#451).
  */
-const CI_HOLD = /^CI (pending\b|\d+\/\d+ ·)/i;
+const CI_HOLD = /^CI (pending\b|\d+\/\d+ ·|infra incident\b|unreadable\b)/i;
 
 /** volleyd holds the task for CI (its `why_waiting` is a CI hold, CI_HOLD). */
 export function ciPending(t: WaveTask): boolean {

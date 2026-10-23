@@ -16,6 +16,10 @@
  * arrange or fit do not sway. One `requestAnimationFrame` loop runs only
  * while a sway is live. Under reduced motion, at phone width or with the
  * tethers off nothing moves: no pulses, no sway.
+ *
+ * A task with no agent running and a CI hold has no agent window to cable to,
+ * so it gets a stub (#451): a short static cable from the same anchor ending in
+ * a `CI` pill, stacked 18 px apart per wave, so a missing cable never reads as a stall.
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { useReducedMotion } from "../a11y/motion";
@@ -38,7 +42,22 @@ export interface Tether {
   beat?: number | null;
 }
 
+/** A wave window's task with no agent window, held for CI: drawn as a stub ending in a pill. */
+export interface TetherStub {
+  /** `<wave>/<task>`. */
+  id: string;
+  /** Stubs of one wave stack below each other. */
+  waveId?: string;
+  wave: Pos & { w: number };
+  accent: string;
+  label: string;
+  /** Hover text: `T8 · waiting for CI · 21/22 jobs`. */
+  title?: string;
+}
+
 export const TETHER_WAVE_DY = 120;
+/** Vertical spacing between stubs on one wave window. */
+export const STUB_GAP = 18;
 export const TETHER_AGENT_DY = 26;
 /** Sag as a share of the cable's length, capped at `SAG_MAX` px. */
 export const SAG_FACTOR = 0.06;
@@ -96,9 +115,12 @@ export function Tethers({
   on,
   tethers,
   dragging = null,
+  stubs = [],
 }: {
   on: boolean;
   tethers: readonly Tether[];
+  /** Held tasks with no agent window: a static stub each. */
+  stubs?: readonly TetherStub[];
   /** The window being dragged by its title bar, if any. */
   dragging?: string | null;
 }) {
@@ -217,6 +239,12 @@ export function Tethers({
   });
   const byAgent = new Map(drawn.map((c) => [c.t.id, c]));
   const pulses = still ? [] : pool.current.list();
+  const perWave = new Map<string | undefined, number>();
+  const stubAt = stubs.map((s) => {
+    const k = perWave.get(s.waveId) ?? 0;
+    perWave.set(s.waveId, k + 1);
+    return { s, x: s.wave.x + s.wave.w, y: s.wave.y + TETHER_WAVE_DY + STUB_GAP * k };
+  });
 
   return (
     <svg
@@ -250,6 +278,16 @@ export function Tethers({
             stroke={tint(t.accent, 0.65)}
             transform="translate(0 -1)"
           />
+        </g>
+      ))}
+      {stubAt.map(({ s, x, y }) => (
+        <g key={s.id} className="tether-stub" data-task={s.id} transform={`translate(${x} ${y})`}>
+          {s.title && <title>{s.title}</title>}
+          <path className="tether-core" d="M0,0 h28" stroke={s.accent} />
+          <rect x="28" y="-7" rx="7" width="26" height="14" />
+          <text x="41" y="3.5" textAnchor="middle">
+            {s.label}
+          </text>
         </g>
       ))}
       {!still && (

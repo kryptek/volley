@@ -195,6 +195,9 @@
   gap: 4px 10px;
   align-items: baseline;
 }
+.wave-ci-what {
+  color: var(--amber);
+}
 .wave-ci-pipe {
   color: var(--amber);
   font: 11.5px var(--f-mono);
