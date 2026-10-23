@@ -6,6 +6,10 @@ import { DAEMON_DEFAULTS } from "./config-defaults";
  * mechanical action in verify.ts:
  *
  *   trust_dialog   Claude Code's folder-trust prompt     → decision repo_untrusted
+ *   first_run_theme, first_run_security, bypass_consent
+ *                  Claude Code's first-run screens (theme picker, security notice, bypass-
+ *                  permissions confirmation): a profile never prepared (#400) → the profile is
+ *                  seeded and relaunched once; again → decision unknown_screen, in plain words
  *   update_prompt  a shell/tool "update? [Y/n]" prompt   → Enter, then one relaunch
  *   login          Claude Code asking for a login        → decision unknown_screen
  *   credit_exhausted  a usage-limit / credit prompt     → decision unknown_screen (pre-hook);
@@ -18,6 +22,9 @@ import { DAEMON_DEFAULTS } from "./config-defaults";
  */
 export type ScreenClass =
   | "trust_dialog"
+  | "first_run_theme"
+  | "first_run_security"
+  | "bypass_consent"
   | "update_prompt"
   | "login"
   | "credit_exhausted"
@@ -27,6 +34,11 @@ export type ScreenClass =
   | "unknown";
 
 const PATTERNS: [ScreenClass, RegExp[]][] = [
+  // First: the theme picker and the security notice sit under Claude Code's welcome banner,
+  // which `working` matches too.
+  ["first_run_theme", [/choose the text style that looks best/i, /syntax theme:.*ctrl\+t/i]],
+  ["first_run_security", [/security notes:/i, /due to prompt injection risks/i]],
+  ["bypass_consent", [/running in bypass permissions mode/i, /yes, i accept/i]],
   [
     "trust_dialog",
     [
@@ -67,6 +79,22 @@ const PATTERNS: [ScreenClass, RegExp[]][] = [
   ],
   ["working", [/esc to interrupt/i, /bypass permissions on/i, /welcome to claude code/i, /⏵⏵/]],
 ];
+
+/** The first-run screens, by what the owner sees: `theme picker` and so on. */
+export const FIRST_RUN_SCREENS = {
+  first_run_theme: "theme picker",
+  first_run_security: "security notice",
+  bypass_consent: "bypass-permissions confirmation",
+} as const;
+export type FirstRunScreen = keyof typeof FIRST_RUN_SCREENS;
+
+export const isFirstRunScreen = (c: ScreenClass): c is FirstRunScreen =>
+  Object.hasOwn(FIRST_RUN_SCREENS, c);
+
+/** A screen class in plain words for a decision: a first-run screen's name, else the class. */
+export function screenWords(c: ScreenClass): string {
+  return isFirstRunScreen(c) ? FIRST_RUN_SCREENS[c] : c;
+}
 
 /** A shell waiting for input: the last non-empty line ends in a prompt sign, nothing typed. */
 const SHELL_PROMPT = /[$%#❯➜λ]\s*$/;

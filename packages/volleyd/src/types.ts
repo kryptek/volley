@@ -659,6 +659,8 @@ export const WAVE_EVENT_TYPES = [
   "claude_signin_done",
   "claude_signin_failed",
   "claude_profile_synced",
+  // A profile seeded after its agent stopped on a first-run screen (spawn.ts repairFirstRun).
+  "profile_repaired",
   "agent_account_moved",
   // Account balancing (claude/usage.ts rankAccounts): the account a spawn runs under and why.
   "account_chosen",

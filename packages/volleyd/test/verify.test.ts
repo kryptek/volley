@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
+import { addAccount, profileDir } from "../src/claude/profiles";
 import { cleanupPlan, readWave } from "../src/commands/cleanup";
 import { Journal } from "../src/journal";
 import { LAUNCH_COMMAND } from "../src/launch";
@@ -15,6 +16,7 @@ import { sameModel, watchAgent } from "../src/verify";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { FIXTURES, type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
+import { stubEnv } from "./helpers/with-env";
 
 const NS = "volleyd-test";
 
@@ -426,6 +428,119 @@ describe("verify through hook signals (Aedes)", () => {
     expect(existsSync(out.lock.path)).toBe(false);
     expect(closed).toBeGreaterThan(0);
     expect(env.events.at(-1)).toMatchObject({ type: "alarm_raised" });
+  });
+
+  describe("Claude Code's first-run screens (#400)", () => {
+    let restore: (() => void) | undefined;
+    afterEach(() => {
+      restore?.();
+      restore = undefined;
+    });
+
+    /**
+     * A spawn under profile `work` (registered where the launch fence reads it) whose sessions
+     * show `screens`; the n-th launch's session registers when `registers(n)`.
+     */
+    async function firstRun(screens: string[], registers: (n: number) => boolean) {
+      env = await makeSpawnEnv({ spawnTimeoutS: 0.5, watch });
+      const root = join(env.dir, "claude");
+      restore = stubEnv({ VOLLEY_CLAUDE_DIR: root, VOLLEYD_HOME: join(env.dir, "volleyd") });
+      const dir = profileDir(
+        root,
+        addAccount(root, { label: "work" }, "2026-10-19T00:00:00.000Z").id,
+      );
+      writeFileSync(
+        join(dir, ".claude.json"),
+        JSON.stringify({ projects: { [env.repo]: { hasTrustDialogAccepted: true } } }),
+      );
+      env.host.screens = screens;
+      const seeded: { id: string; dir: string; machine: string }[] = [];
+      env.deps.seedProfile = async (a) => {
+        seeded.push(a);
+        return { ".claude.json": ["hasCompletedOnboarding", "theme"], "settings.json": [] };
+      };
+      let n = 0;
+      env.host.onLaunch = () => {
+        const i = ++n;
+        if (registers(i)) run(sessionStart(`w1-t1-implementer-${i}`));
+      };
+      const out = await spawnAgent(
+        env.request({ account: { id: "work", dir, machine: "local" } }),
+        env.deps,
+      );
+      if (out.kind !== "launched") throw new Error(`expected a launch, got ${out.kind}`);
+      const verified = await drive(out.verified);
+      await verified.watch.close();
+      return { verified, seeded, dir };
+    }
+
+    it("the theme picker: the profile is prepared, profile_repaired journaled, one relaunch in a new workspace", async () => {
+      const { verified, seeded, dir } = await firstRun(
+        [screen("first-run-theme.txt")],
+        (n) => n === 2,
+      );
+      expect(verified).toMatchObject({ kind: "registered", agentId: "w1-t1-implementer-2" });
+      expect(seeded).toEqual([{ id: "work", dir, machine: "local" }]);
+      // The stuck session is closed (never typed into); the relaunch opens a workspace of its own.
+      expect(env.host.closed).toEqual(["workspace:1"]);
+      expect(env.host.texts).toEqual([]);
+      expect(env.host.launches).toHaveLength(2);
+      const repaired = env.events.find((e) => e.type === "profile_repaired");
+      expect(repaired?.data).toEqual({
+        account: "work",
+        machine: "local",
+        keys: { ".claude.json": ["hasCompletedOnboarding", "theme"], "settings.json": [] },
+        agent_id: "w1-t1-implementer-1",
+        screen_class: "first_run_theme",
+      });
+      expect(env.events.find((e) => e.type === "agent_retired")?.data).toMatchObject({
+        agent_id: "w1-t1-implementer-1",
+        status: "superseded",
+      });
+      const spawned = env.events.filter((e) => e.type === "agent_spawned");
+      expect(spawned[1]?.data).toMatchObject({
+        attempt: 2,
+        workspace: "workspace:2",
+        recovered_from: "w1-t1-implementer-1",
+        recovery: "first_run",
+      });
+      expect(env.events.some((e) => e.type === "decision_opened")).toBe(false);
+    });
+
+    it("stuck there again: unknown_screen, in plain words, the terminal's last line never the headline", async () => {
+      const { verified, seeded } = await firstRun([screen("first-run-theme.txt")], () => false);
+      expect(verified).toMatchObject({ kind: "decision", decision: "unknown_screen" });
+      expect(seeded).toHaveLength(1);
+      expect(env.host.launches).toHaveLength(2);
+      const d = env.events.find((e) => e.type === "decision_opened");
+      const question = d?.data.question as string;
+      expect(question).toContain(
+        "w1-t1-implementer-2 is stuck on Claude Code's first-run setup (theme picker) for account work on local.",
+      );
+      expect(question).not.toContain("Syntax theme");
+      expect(question).not.toContain("Last output");
+      expect(d?.data).toMatchObject({ screen_class: "first_run_theme" });
+    });
+
+    it("an update prompt, then a first-run screen: no second relaunch, unknown_screen", async () => {
+      const { verified, seeded } = await firstRun(
+        [screen("update-prompt.txt"), screen("first-run-theme.txt")],
+        () => false,
+      );
+      expect(verified).toMatchObject({ kind: "decision", decision: "unknown_screen" });
+      expect(seeded).toEqual([]);
+      expect(env.events.some((e) => e.type === "profile_repaired")).toBe(false);
+      const d = env.events.find((e) => e.type === "decision_opened");
+      expect(d?.data.question).toContain("already relaunched it once");
+    });
+
+    it("the bypass-permissions confirmation is named as such", async () => {
+      await firstRun([screen("bypass-consent.txt")], () => false);
+      const d = env.events.find((e) => e.type === "decision_opened");
+      expect(d?.data.question).toContain(
+        "is stuck on Claude Code's first-run setup (bypass-permissions confirmation)",
+      );
+    });
   });
 
   it("an unknown screen → unknown_screen decision with the capture path", async () => {

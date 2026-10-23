@@ -16,10 +16,12 @@ import {
   SHARE_ITEMS,
   SharingError,
   applySharing,
+  onboardingEdits,
   parseSharing,
   planSharing,
+  profileReady,
   readSharing,
-  seedOnboarding,
+  seedProfile,
   sharingPath,
   syncMcp,
 } from "../../src/claude/sharing";
@@ -197,23 +199,97 @@ describe("syncMcp: .claude.json is copied per section, never linked", () => {
   });
 });
 
-describe("seedOnboarding", () => {
-  it("marks a fresh profile's onboarding done, keeping its own keys; once", () => {
+describe("seedProfile", () => {
+  const read = (path: string) => JSON.parse(readFileSync(path, "utf-8"));
+
+  it("makes a signed-in profile ready to run unattended, keeping its own keys; once", () => {
     const s = setup();
-    const dst = join(s.profile, ".claude.json");
-    writeFileSync(dst, JSON.stringify({ userID: "u-work" }));
-    expect(seedOnboarding(dst)).toBe(true);
-    expect(JSON.parse(readFileSync(dst, "utf-8"))).toEqual({
-      userID: "u-work",
-      hasCompletedOnboarding: true,
+    const json = join(s.profile, ".claude.json");
+    const settings = join(s.profile, "settings.json");
+    writeFileSync(json, JSON.stringify({ oauthAccount: { emailAddress: "a@b.co" }, userID: "u" }));
+    writeFileSync(settings, JSON.stringify({ model: "opus" }));
+    expect(seedProfile(s.profile, { claudeVersion: "2.0.0" })).toEqual({
+      ".claude.json": ["hasCompletedOnboarding", "lastOnboardingVersion", "theme"],
+      "settings.json": ["skipDangerousModePermissionPrompt"],
     });
-    expect(seedOnboarding(dst)).toBe(false);
+    expect(read(json)).toEqual({
+      oauthAccount: { emailAddress: "a@b.co" },
+      userID: "u",
+      hasCompletedOnboarding: true,
+      lastOnboardingVersion: "2.0.0",
+      theme: "dark",
+    });
+    expect(read(settings)).toEqual({ model: "opus", skipDangerousModePermissionPrompt: true });
+    expect(statSync(settings).mode & 0o777).toBe(0o600);
+    expect(seedProfile(s.profile, { claudeVersion: "2.0.1" })).toEqual({
+      ".claude.json": [],
+      "settings.json": [],
+    });
+    expect(read(json).lastOnboardingVersion).toBe("2.0.0");
   });
 
-  it("refuses a symlinked .claude.json too", () => {
+  it("keeps a theme the owner chose, and writes no version it does not know", () => {
     const s = setup();
-    const dst = join(s.profile, ".claude.json");
-    symlinkSync(s.primaryJson, dst);
-    expect(() => seedOnboarding(dst)).toThrow(/symlink/);
+    const json = join(s.profile, ".claude.json");
+    writeFileSync(json, JSON.stringify({ theme: "light" }));
+    expect(seedProfile(s.profile, {})[".claude.json"]).toEqual(["hasCompletedOnboarding"]);
+    expect(read(json)).toEqual({ theme: "light", hasCompletedOnboarding: true });
+    expect(read(join(s.profile, "settings.json"))).toEqual({
+      skipDangerousModePermissionPrompt: true,
+    });
+  });
+
+  it("refuses a symlinked .claude.json; leaves a linked settings.json to the primary", () => {
+    const s = setup();
+    symlinkSync(s.primaryJson, join(s.profile, ".claude.json"));
+    expect(() => seedProfile(s.profile, {})).toThrow(/symlink/);
+    const t = setup();
+    symlinkSync(join(t.primary, "settings.json"), join(t.profile, "settings.json"));
+    expect(seedProfile(t.profile, {})["settings.json"]).toEqual([]);
+    expect(readFileSync(join(t.primary, "settings.json"), "utf-8")).toBe('{"model":"opus"}\n');
+  });
+
+  it("refuses a settings.json that is not a JSON object, and leaves it as it was", () => {
+    for (const text of ['{ "model": ', "[1]"]) {
+      const s = setup();
+      const settings = join(s.profile, "settings.json");
+      writeFileSync(settings, text);
+      expect(() => seedProfile(s.profile, {})).toThrow(SharingError);
+      expect(readFileSync(settings, "utf-8")).toBe(text);
+    }
+  });
+});
+
+describe("profileReady", () => {
+  it("lists exactly the keys each file still lacks", () => {
+    const s = setup();
+    writeFileSync(
+      join(s.profile, ".claude.json"),
+      JSON.stringify({ hasCompletedOnboarding: true, theme: "dark" }),
+    );
+    expect(profileReady(s.profile)).toEqual({
+      ".claude.json": ["lastOnboardingVersion"],
+      "settings.json": ["skipDangerousModePermissionPrompt"],
+    });
+    seedProfile(s.profile, { claudeVersion: "2.0.0" });
+    expect(profileReady(s.profile)).toEqual({ ".claude.json": [], "settings.json": [] });
+  });
+});
+
+describe("onboardingEdits", () => {
+  it("is the pure edit both a local and a remote write make", () => {
+    expect(onboardingEdits({ a: 1 }, { b: 2 }, "2.1.0")).toEqual({
+      claudeJson: {
+        a: 1,
+        hasCompletedOnboarding: true,
+        lastOnboardingVersion: "2.1.0",
+        theme: "dark",
+      },
+      settings: { b: 2, skipDangerousModePermissionPrompt: true },
+      keys: {
+        ".claude.json": ["hasCompletedOnboarding", "lastOnboardingVersion", "theme"],
+        "settings.json": ["skipDangerousModePermissionPrompt"],
+      },
+    });
   });
 });

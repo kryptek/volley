@@ -1992,7 +1992,20 @@ captured to `$VOLLEYD_HOME/waves/<wave>/screens/` and classified:
 |---|---|
 | `trust_dialog` (folder-trust prompt) | decision `repo_untrusted` — never answered automatically |
 | `update_prompt` (e.g. a shell's `update? [Y/n]`) | press Enter, then see below |
+| `first_run_theme`, `first_run_security`, `bypass_consent` (Claude Code's first-run screens: the theme picker, the security notice, the bypass-permissions confirmation) | an account profile never prepared: its session is closed, the profile seeded (below), `profile_repaired { account, machine, keys, agent_id, screen_class }` journaled, and the agent relaunched once in a new workspace (`agent_spawned { recovery: "first_run" }`); stopped there again (or the primary profile) → decision `unknown_screen` naming the screen in plain words (`… is stuck on Claude Code's first-run setup (theme picker) for account <acct> on <machine>`), the last output kept as `data.last_output` |
 | `login`, `credit_exhausted` (a usage-limit prompt), `working` (Claude up, hooks silent), `shell_prompt`, `empty`, `unknown` | decision `unknown_screen`, pointing at the capture; its question quotes the session's last output (its last non-blank lines, also in the journal's `decision_opened` event as `data.last_output`; not on the retained decision), or says the screen was empty and the session may have ended at once |
+
+**A profile ready to run unattended (#400).** An account profile has its own `.claude.json`, so a
+fresh sign-in leaves Claude Code's first-run screens ahead of its first agent. volleyd writes
+what the default login has: `hasCompletedOnboarding: true`, `lastOnboardingVersion` (`claude
+--version`, else the primary's), a `theme` (`dark`, unless one is set) in `.claude.json`, and
+`skipDangerousModePermissionPrompt: true` in `settings.json` (left alone when it is linked to the
+primary's). It does so when a sign-in completes (on a paired machine through its host, by
+compare-and-swap), before each spawn (a paired machine's through its host; a local one only
+while no agent session runs in the profile, since Claude Code rewrites `.claude.json` from
+memory — otherwise it logs `profile <acct>: onboarding keys missing while <n> session(s) run;
+re-checked at the next spawn`), and after a first-run screen. `volley peer doctor` reports a
+profile still missing them (`claude.profiles`) and `--fix` writes them.
 
 After the Enter the original launch gets `relaunch_settle_ms` (3 s) to continue. If its hook
 signals arrive, or the screen shows anything but a bare shell prompt, the original attempt is
@@ -3542,8 +3555,9 @@ ALLOW (program by bare name only — never a path):
     launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS), including
     `[--strict-mcp-config] --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` (the flag is
     left out only under `agent_mcp: inherit`) — or from a
-    sealed sign-in script (below). The one direct call: `claude auth status` (exactly; it prints
-    a profile's login state and plan, never a credential)
+    sealed sign-in script (below). The direct calls: `claude auth status` (exactly; it prints
+    a profile's login state and plan, never a credential) and `claude --version` (exactly: the
+    version a seeded profile records as its `lastOnboardingVersion`)
   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
@@ -3645,7 +3659,8 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     runs only from a sealed signin.sh) — the one step with an env: `env.CLAUDE_CONFIG_DIR`
     only, only `<abs>/.volley/claude/<acct>` (a profile the supervisor created there),
     rendered as one single-quoted `CLAUDE_CONFIG_DIR=…` before the argv
-  cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
+  cat <path>… — only the files volleyd reads: `.claude.json`, a remote profile's
+    `<home>/.volley/claude/<acct>/settings.json`, a path ending in
     `/info/exclude`, `<dir>/.volley/<name>` for a VOLLEY_READS name, a worktree's
     `<abs dir>/.mcp.json` (no `..` segment), or a sign-in dir's `url`
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
@@ -3679,6 +3694,9 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     mv -f .claude.json.volleyd.tmp .claude.json — or, for a profile the supervisor created
     there, the same three steps on `<home>/.volley/claude/<acct>/.claude.json` and its
     `.claude.json.volleyd.tmp` (absolute paths; the tmp the only other file base64 -d writes)
+  the onboarding seed (RemoteHost.seedProfile, #400): in a profile the supervisor created
+    there, the trust write's steps on its `.claude.json`, and the same on its `settings.json`
+    with `settings.json.volleyd.tmp` (absolute paths); nothing else of the profile
   Every other step's stdin is /dev/null, so no step can read the rest of the script.
 
 OPTIONS: every git and gh subcommand above has an exact option allow-list (GIT_SPECS and
