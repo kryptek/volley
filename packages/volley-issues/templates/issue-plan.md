@@ -93,7 +93,7 @@ Fix every unresolved entry it reports, then read the clusters.
 
 If the batch is small (≤ 8 issues) and the planner would collapse most of it into bundles, file
 one issue per bundle instead: one issue whose sub-headings `T0a`, `T0b` (`## T0a: …`, each with
-its own Done when and Steps) hold the parts, with one Files list that is their union. Fewer
+its own Done when and Files) hold the parts, and whose Files list is their union. Fewer
 issues, one PR, one review. For a larger batch, or parts that share nothing, file one issue per
 task and let the planner bundle.
 

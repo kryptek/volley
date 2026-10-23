@@ -111,7 +111,7 @@ is in the skill's **Planning a batch** section
 them); `volleyd validate` and `volleyd run` print them again, and the wave file starts with them:
 
 ```text
-cluster A: 3 tasks share src/daemon.ts (11k lines, 3 tasks) → 1 bundle (T1), 1 chain (T1 → T4), cap 4 in flight
+cluster A: 3 tasks share src/daemon.ts (11k lines, 3 tasks) → 1 bundle (T1), 1 chain (T1 → T4)
 independent: T2, T5
 expected branch updates: ≤ 2 (was ≤ 5 one at a time)
 footprints: 5 listed, 1 guessed (#313); 1 entry unresolved (T4: helpers.ts)
@@ -120,7 +120,8 @@ footprints: 5 listed, 1 guessed (#313); 1 entry unresolved (T4: helpers.ts)
 - A **cluster** is a group of tasks sharing source files. Inside it, a **bundle** is several
   issues done as one task (one agent, one PR, one review; the digest ships them as
   `#310 + #312 (one PR)`); a **chain** makes one task wait for another (`after:` marked
-  `# chained by the planner`); a **cap** limits how many of the cluster run at once.
+  `# chained by the planner`). A cluster of more than four tasks (after bundling) also ends in
+  `cap 4 in flight`: at most that many of its tasks run at once.
 - **Independent** tasks share nothing and run as usual.
 - **Expected branch updates** is what the plan should cost, against one task per issue.
 - **Footprints** says how well the issues' Files lists resolved. A `guessed` or unresolved one
