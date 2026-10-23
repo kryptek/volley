@@ -1952,8 +1952,9 @@ verification opens `unknown_screen`.
 ### Relaunch decisions
 
 `hooks_auth_failed`, `mcp_not_registered` and `unknown_screen` offer `relaunch` / `cancel` /
-`it's running`, and the answer is acted on: each carries a pipeline marker naming the run it is about (`{ on:
-"relaunch", wave, task, role, attempt, agent_id }`; the daemon's `spawn_failed` carries one too).
+`it's running`, and the answer is acted on: each carries a pipeline marker naming the run it is
+about (`{ on: "relaunch", wave, task, role, attempt, agent_id }`; the daemon's `spawn_failed`
+carries one too).
 An agent whose hooks the broker refused is **paused** as soon as the decision opens (Escape in its
 workspace and a steering "stop: your broker login is being repaired"), so it does no work it
 cannot deliver; nobody is asked to edit credentials by hand.
@@ -1968,7 +1969,9 @@ cannot deliver; nobody is asked to edit credentials by hand.
 - `it's running`: the harmless answer (its hover text, in the decision's `option_help`: "Volley
   checks the agent is alive, then closes this. Nothing is restarted or stopped."). When the agent
   is still the role's run and volleyd heard from it after the decision opened, the decision
-  closes and nothing else happens; otherwise it is asked again as
+  closes and nothing else happens (a paused `hooks_auth_failed` agent gets one steering, "resume:
+  your broker login works again", journaled with `reason: "auth_resumed"`); otherwise it is asked
+  again as
   `no live agent found for <agent> (last heard <ago | never>). <question>`.
 
 **A relaunch decision closes itself once its agent is alive.** The first sign of life the agent
@@ -1977,8 +1980,13 @@ restart does not count) resolves it as `it's running`, `by: "volleyd"`, rational
 own`: its registry entry, any progress (a hook heartbeat, a narration), or a `working`,
 `spawning` or `registered` status. For `mcp_not_registered` the hooks were already heard from, so
 only the agent's MCP server counts there: a progress message not from the hooks, its own
-registration (no `model_source`), or a `spawning` / `registered` status. The same rule decides
-whether an `it's running` answer finds the agent live.
+registration (no `model_source`), or a `spawning` / `registered` status. For `hooks_auth_failed`
+it is the other way round: only the hooks count (a hook heartbeat, the hooks' registry re-publish
+with `model_source`, a `working` status), since the agent's MCP server answering the pause says
+nothing about the refused login. The same rule decides whether an `it's running` answer finds the
+agent live. A sign of life is judged by the sender's clock: one from a machine whose clock runs
+behind the supervisor's can predate the decision and not count, and the card then stays open for
+the owner to answer.
 
 ### Unattended coordinator starts
 

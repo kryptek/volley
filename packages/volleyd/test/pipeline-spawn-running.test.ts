@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { type DecisionRecord, ITS_RUNNING, ITS_RUNNING_HELP } from "../src/decisions";
-import { type PipelineView, emptyPipeline, next } from "../src/pipeline";
+import { AUTH_RESUME, type PipelineView, emptyPipeline, next } from "../src/pipeline";
 
 /**
  * A spawn decision's third answer, `it's running` (#402): on an agent volleyd heard from since
@@ -106,6 +106,19 @@ describe("it's running on a spawn decision", () => {
     v.p.runs.implementer = { agent_id: "w1-t1-implementer-2", steers: {}, accepted: false };
     const acts = resolved(v, "it's running");
     expect(acts[0]?.kind).toBe("decide");
+  });
+
+  it("hooks_auth_failed: the paused agent is told to resume", () => {
+    const d = { ...decision("it's running"), kind: "hooks_auth_failed" } as DecisionRecord;
+    expect(next(view(OPENED + 30_000), { kind: "decision_resolved", decision: d })).toEqual([
+      {
+        kind: "steer",
+        role: "implementer",
+        agent_id: A1,
+        reason: "auth_resumed",
+        text: AUTH_RESUME,
+      },
+    ]);
   });
 
   it("relaunch and cancel behave as before", () => {

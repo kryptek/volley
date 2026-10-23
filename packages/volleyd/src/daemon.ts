@@ -1158,7 +1158,7 @@ export class Daemon {
    * progress, a live status) and `mcp`, one only its MCP server sends. A spawn decision about it
    * closes itself on one sent after it opened (#402).
    */
-  private readonly heardAt = new Map<string, { any: number; mcp?: number }>();
+  private readonly heardAt = new Map<string, { any: number; mcp?: number; hooks?: number }>();
   /** Spawn decisions this process is closing (`<wave>/<id>`): asked once per decision. */
   private readonly closingSpawn = new Set<string>();
   /**
@@ -1940,14 +1940,17 @@ export class Daemon {
   /**
    * `agent` showed it is live at `at` (`mcp`: through its MCP server). Each open spawn decision
    * about it (unknown_screen, hooks_auth_failed, mcp_not_registered) that opened before then is
-   * answered `it's running` by volleyd (#402): the pipeline checks the run and touches nothing.
+   * answered `it's running` by volleyd (#402): the pipeline checks the run and touches nothing
+   * (a paused hooks_auth_failed agent is told to resume).
    */
   private heard(agent: string, at: number, mcp: boolean): void {
     const prev = this.heardAt.get(agent);
     const last = mcp ? Math.max(at, prev?.mcp ?? at) : prev?.mcp;
+    const hooks = mcp ? prev?.hooks : Math.max(at, prev?.hooks ?? at);
     this.heardAt.set(agent, {
       any: Math.max(at, prev?.any ?? at),
       ...(last !== undefined ? { mcp: last } : {}),
+      ...(hooks !== undefined ? { hooks } : {}),
     });
     for (const [wave, log] of this.waves) {
       for (const id of log.record.state?.open_decisions ?? []) {
@@ -1979,12 +1982,16 @@ export class Daemon {
 
   /**
    * When `agent` last showed a spawn decision of `kind` is moot (epoch ms; null: not since this
-   * process started): for mcp_not_registered only its MCP server counts, the hooks already ran.
+   * process started): for mcp_not_registered only its MCP server counts, the hooks already ran;
+   * for hooks_auth_failed only its hooks, which the broker refused (its MCP server answering the
+   * pause steer says nothing about them).
    */
   private heardFrom(agent: string, kind: string): number | null {
     const h = this.heardAt.get(agent);
     if (h === undefined) return null;
-    return kind === "mcp_not_registered" ? (h.mcp ?? null) : h.any;
+    if (kind === "mcp_not_registered") return h.mcp ?? null;
+    if (kind === "hooks_auth_failed") return h.hooks ?? null;
+    return h.any;
   }
 
   /**

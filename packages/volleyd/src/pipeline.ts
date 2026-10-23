@@ -300,7 +300,14 @@ export interface CiHold {
   error?: string;
 }
 
-export type SteerReason = "artifacts" | "result" | "merge_nudge";
+export type SteerReason = "artifacts" | "result" | "merge_nudge" | "auth_resumed";
+
+/**
+ * The steering a role paused for a hooks_auth_failed decision gets once that decision closes as
+ * `it's running`: its hooks reach the broker again, so the pause no longer holds (#402).
+ */
+export const AUTH_RESUME =
+  "resume: your broker login works again. Continue your task where you left off.";
 
 /**
  * What a pipeline decision is about; kept on the decision as `pipeline`. The single mechanism
@@ -2858,7 +2865,7 @@ function decisionFacts(d: DecisionRecord): Record<string, unknown> {
  * A spawn-type decision answered: `relaunch` retires the agent through the delete path and the
  * next advance spawns the same role at the next attempt (the reducer dropped the run); `cancel`
  * retires it and blocks the task with the decision text; `it's running` closes it touching
- * nothing when the agent is live — still the role's run, and heard from since the decision
+ * nothing (a hooks_auth_failed agent is only told to resume its pause) when the agent is live — still the role's run, and heard from since the decision
  * opened — and otherwise asks again, saying so (#402). Anything else is asked again.
  */
 function onRelaunchResolved(
@@ -2879,7 +2886,19 @@ function onRelaunchResolved(
     const run = v.p.runs[m.role];
     const heard = v.heard_from?.(m.agent_id, d.kind) ?? null;
     const current = run?.agent_id === m.agent_id && run.retired === undefined;
-    if (current && heard !== null && heard >= Date.parse(d.opened_at)) return [];
+    if (current && heard !== null && heard >= Date.parse(d.opened_at)) {
+      // A hooks_auth_failed agent was paused when the decision opened: lift the pause.
+      if (d.kind !== "hooks_auth_failed") return [];
+      return [
+        {
+          kind: "steer",
+          role: m.role,
+          agent_id: m.agent_id,
+          reason: "auth_resumed",
+          text: AUTH_RESUME,
+        },
+      ];
+    }
     const ago = heard === null ? "never" : `${agoText((v.now ?? heard) - heard)} ago`;
     return [askRelaunchAgain(v, d, m, `no live agent found for ${m.agent_id} (last heard ${ago})`)];
   }

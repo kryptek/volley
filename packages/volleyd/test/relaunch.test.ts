@@ -14,6 +14,7 @@ import {
 } from "../src/decisions";
 import { agentIdFor } from "../src/identity";
 import { readJournalFile } from "../src/journal";
+import { AUTH_RESUME } from "../src/pipeline";
 import { retainedTopics } from "../src/retire";
 import type { JournalEvent } from "../src/types";
 import { AUTOPILOT_ON, type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
@@ -469,7 +470,23 @@ describe("relaunch of a spawn-type decision", () => {
     await closedOnItsOwn(String(opened.data.decision_id));
   });
 
-  it("answering it's running on a live agent closes it and touches nothing", async () => {
+  it("hooks_auth_failed: the MCP server's narration does not close it, a hooks signal does and resumes the agent", async () => {
+    const opened = await setup("auth");
+    const id = String(opened.data.decision_id);
+    // Its reply to the pause steer comes through its MCP server: the hooks may still be refused.
+    await signals[2]?.[1](A1);
+    await waits.settled();
+    expect(daemon.snapshot("w1")?.open_decisions).toEqual([id]);
+    // The hooks reach the broker now: closed, and the paused agent is told to continue.
+    await signals[1]?.[1](A1);
+    await closedOnItsOwn(id);
+    const resume = await event(
+      (e) => e.type === "steering_sent" && e.data.reason === "auth_resumed",
+    );
+    expect(resume.data).toMatchObject({ agent_id: A1, text: AUTH_RESUME });
+  });
+
+  it("answering it's running on an agent not yet heard from asks again", async () => {
     const opened = await setup("silent");
     // Heard from, but the auto-close is what the answer would do anyway: answer first.
     const id = String(opened.data.decision_id);
