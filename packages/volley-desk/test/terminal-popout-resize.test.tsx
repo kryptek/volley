@@ -173,6 +173,26 @@ describe("TerminalPopout → the agent's terminal size", () => {
     expect(early).toEqual([]);
   });
 
+  it("losing onSize while open (control drops, the screen goes) still hands the terminal back", () => {
+    const sizes: TerminalSize[] = [];
+    const view = popout((s) => sizes.push(s));
+    act(() => vi.advanceTimersByTime(TERMINAL_RESIZE_DEBOUNCE_MS));
+    view.rerender(
+      <TerminalPopout
+        agent={AGENT}
+        wave={undefined}
+        z={1}
+        onClose={() => {}}
+        onRaise={() => {}}
+        fontPx={12}
+        onFont={() => {}}
+      />,
+    );
+    expect(sizes).toEqual([{ cols: 125, rows: 32 }, "launch"]);
+    view.unmount();
+    expect(sizes).toEqual([{ cols: 125, rows: 32 }, "launch"]);
+  });
+
   it("its width no longer follows the screen once it sizes the terminal: no feedback loop", () => {
     const sizes: TerminalSize[] = [];
     const view = popout((s) => sizes.push(s));

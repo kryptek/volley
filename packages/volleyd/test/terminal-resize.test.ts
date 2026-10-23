@@ -238,6 +238,18 @@ describe("terminal_resize", () => {
     expect(host.resizes).toEqual([]);
   });
 
+  it("in a wave owned by someone else it is refused, as steer is", async () => {
+    expect((await client.request("claim", { wave: "w1", by: "coord-a" })).ok).toBe(true);
+    const r = await resize({ cols: 120, rows: 30, by: "someone-else" });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("is owned by coord-a");
+    const ok = resize({ cols: 120, rows: 30, by: "coord-a" });
+    await consumed();
+    await clock.advance(DAEMON_DEFAULTS.terminal_resize_coalesce_ms);
+    expect((await ok).result).toMatchObject({ resized: true, cols: 120 });
+    expect(host.resizes).toEqual([{ workspace: "workspace:1", size: { cols: 120, rows: 30 } }]);
+  });
+
   it("a host that cannot resize (cmux) answers resized: false", async () => {
     host.resize = async (workspace, size) => {
       host.resizes.push({ workspace, size });

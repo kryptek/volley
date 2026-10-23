@@ -10885,8 +10885,8 @@ export class Daemon {
 
   /**
    * `terminal_resize { agent_id, cols, rows | reset: true }` (SPEC §4.6.6): size a live agent's
-   * terminal to the Desk's Terminal popout, or back to its launch size. Cosmetic, so any sender
-   * that may write this mailbox (the steer role) may ask. A burst for one agent is one resize to
+   * terminal to the Desk's Terminal popout, or back to its launch size. Gated like `steer`: in
+   * an owned wave only its owner may ask. A burst for one agent is one resize to
    * its last size, run after the one before it; every request in the burst gets its answer.
    */
   private terminalResize(p: Record<string, unknown>, by: string): HandlerResult {
@@ -10894,6 +10894,10 @@ export class Daemon {
     if (id === "") return { ok: false, error: "terminal_resize requires payload.agent_id" };
     const a = this.supervised.get(id);
     if (a === undefined) return { ok: false, error: `agent '${id}' is not live under volleyd` };
+    const state = this.waves.get(a.wave)?.record.state;
+    const refused =
+      state != null ? guardMutation(state, by, "terminal_resize", this.bindings) : null;
+    if (refused !== null) return { ok: false, error: refused };
     const cell = (n: unknown) =>
       Number.isInteger(n) && (n as number) >= TMUX_SIZE.min && (n as number) <= TMUX_SIZE.max;
     if (p.reset !== true && !(cell(p.cols) && cell(p.rows)))

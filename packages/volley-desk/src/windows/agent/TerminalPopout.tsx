@@ -97,8 +97,9 @@ function useTerminalCells(
   onSize: ((size: TerminalSize) => void) | undefined,
 ) {
   const sent = useRef<string | null>(null);
+  // The last reporter given: a reset still reaches the terminal after `onSize` goes away.
   const report = useRef(onSize);
-  report.current = onSize;
+  if (onSize !== undefined) report.current = onSize;
   const enabled = onSize !== undefined;
   useEffect(() => {
     if (!enabled) return;
@@ -123,6 +124,12 @@ function useTerminalCells(
       observer?.disconnect();
     };
   }, [enabled, fontPx, ref, probe]);
+  // Losing `onSize` while open (control drops, the screen goes) hands the terminal back too.
+  useEffect(() => {
+    if (enabled || sent.current === null) return;
+    sent.current = null;
+    report.current?.("launch");
+  }, [enabled]);
   // Closing (any way: the red light, Escape, the agent leaving) hands the terminal back.
   useEffect(
     () => () => {
