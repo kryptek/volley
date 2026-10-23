@@ -138,9 +138,14 @@ describe("hooks against an authenticating broker — refused", () => {
   it("anonymous (no broker block, no env) rejects with AUTH_FAILED", async () => {
     const dir = makeWorkdir({ agent_id: AGENT, namespace: NS, broker_url: broker.url });
     await rejectsAuth(openSession(agentIdentity(dir), "Stop", {}));
+  });
+
+  it("a coordinator with no credentials at all rejects with NOT_CONFIGURED, not AUTH_FAILED (#407)", async () => {
     const authDir = tempDir("volley-hooks-noauth-");
     mkdirSync(authDir, { recursive: true });
-    await rejectsAuth(lookupRegistry(broker.url, makeWorkdir(), { VOLLEY_AUTH_DIR: authDir }));
+    await expect(
+      lookupRegistry(broker.url, makeWorkdir(), { VOLLEY_AUTH_DIR: authDir }),
+    ).rejects.toMatchObject({ code: "NOT_CONFIGURED" });
   });
 
   it("coordinator lookup uses $VOLLEY_AUTH_DIR/coordinator.json", async () => {

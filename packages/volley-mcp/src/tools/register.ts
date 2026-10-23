@@ -75,6 +75,9 @@ export async function volRegister(
         started_at: new Date().toISOString(),
         ...(config.claudeAccount !== undefined ? { claude_account: config.claudeAccount } : {}),
         ...(coordinator !== undefined ? { coordinator } : {}),
+        // Which session this entry is: hooks sharing the cwd match on these (SPEC §6.2).
+        pid: process.pid,
+        ...(config.surface !== undefined ? { surface: config.surface } : {}),
       },
     }),
     namespace: config.namespace,

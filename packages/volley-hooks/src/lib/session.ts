@@ -4,7 +4,13 @@ import { join } from "node:path";
 import type { BrokerConnectOptions, VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
-import { type ConnectTarget, clearHooksError, connectOpts } from "./auth";
+import {
+  type ConnectTarget,
+  NotConfiguredError,
+  clearHooksError,
+  connectOpts,
+  isAuthFailed,
+} from "./auth";
 import type { Env } from "./hook-io";
 import {
   type HookIdentity,
@@ -39,7 +45,8 @@ export function mqttVersion(env: Env): 4 | 5 {
 /**
  * Every broker connection the hooks open goes through here: credentials resolved for `target`
  * (auth.ts), and a successful connect clears `<stateDir>/hooks-error.json`. A refused CONNACK
- * rejects with `VolleyError` `AUTH_FAILED` (runHook makes it loud).
+ * rejects with `VolleyError` `AUTH_FAILED` (runHook makes it loud), except a coordinator's
+ * anonymous one, which rejects with `NotConfiguredError` (runHook stays silent).
  */
 export async function connectBroker(
   target: ConnectTarget,
@@ -48,27 +55,37 @@ export async function connectBroker(
   broker?: VolleyBroker,
 ): Promise<VolleyBroker> {
   const b = broker ?? new (await loadBroker()).VolleyBroker();
-  await b.connect(connectOpts(target, env, extra));
+  const opts = connectOpts(target, env, extra);
+  try {
+    await b.connect(opts);
+  } catch (e) {
+    // No coordinator credentials anywhere and anonymous refused: this machine has no coordinator.
+    if (isAuthFailed(e) && target.mode === "coordinator" && opts.username === undefined)
+      throw new NotConfiguredError(`no coordinator credentials for ${target.brokerUrl}`);
+    throw e;
+  }
   clearHooksError(target.stateDir);
   return b;
 }
 
 /**
  * Coordinator identity lookup: the retained registry entries whose cwd is `dir`, newest
- * first, each with its retained status type. The registry is read until it goes quiet
- * (not for a fixed total), so a large or remote registry is read in full.
+ * first, each with its retained status type (errors land in `sessionKey`'s state dir). The
+ * registry is read until it goes quiet (not for a fixed total), so a large or remote registry
+ * is read in full.
  */
 export async function lookupRegistry(
   brokerUrl: string,
   dir: string,
   env: Env,
+  sessionKey: string | null = null,
 ): Promise<RegistryCandidate[]> {
   const target = {
     mode: "coordinator" as const,
     projectDir: dir,
     brokerUrl,
     agentId: "volley-hooks",
-    stateDir: coordinatorStateDir(dir, env),
+    stateDir: coordinatorStateDir(dir, env, sessionKey),
   };
   const broker = await connectBroker(target, env);
   try {
@@ -230,6 +247,21 @@ export type RegistryFields = { session_url?: string; workspace?: string; workspa
 interface StoredRegistryFields {
   fields: RegistryFields;
   checked_at?: number;
+  /** Where `workspace` came from (`workspaceSource`): restored only into the same env. */
+  workspace_source?: string;
+}
+
+/**
+ * The env a session's `workspace` comes from: `VOLLEY_WORKSPACE`, else its own cmux
+ * workspace (`CMUX_WORKSPACE_ID`). A remembered `workspace` / `workspace_title` is published
+ * again only by a hook whose env names the same source, so another session's (one that shared
+ * the state file) never reaches this session's registry entry (#392).
+ */
+export function workspaceSource(env: Env): string | undefined {
+  if (env.VOLLEY_WORKSPACE !== undefined && env.VOLLEY_WORKSPACE !== "")
+    return `env:${env.VOLLEY_WORKSPACE}`;
+  const id = env.CMUX_WORKSPACE_ID;
+  return id !== undefined && id !== "" ? `cmux:${id}` : undefined;
 }
 
 const modelPath = (stateDir: string) => join(stateDir, "model.json");
@@ -259,30 +291,46 @@ function readHarnessModel(stateDir: string): HarnessModel | null {
  * the drain hooks can put them back after the MCP server's own register drops them. Written
  * on every SessionStart, empty included, so an earlier session's fields never outlive it.
  */
-export function writeRegistryFields(stateDir: string, fields: RegistryFields): void {
-  writeStoredFields(stateDir, { fields });
+export function writeRegistryFields(stateDir: string, fields: RegistryFields, env: Env): void {
+  const source = workspaceSource(env);
+  writeStoredFields(stateDir, {
+    fields,
+    ...(source !== undefined ? { workspace_source: source } : {}),
+  });
 }
 
 function writeStoredFields(stateDir: string, stored: StoredRegistryFields): void {
   writeFileAtomic(fieldsPath(stateDir), `${JSON.stringify(stored)}\n`);
 }
 
-export function readRegistryFields(stateDir: string): StoredRegistryFields {
+/**
+ * The remembered fields, as this session (`env`) may publish them: `workspace` and a cmux
+ * `workspace_title` only when they were written from this env's `workspaceSource`.
+ */
+export function readRegistryFields(stateDir: string, env: Env): StoredRegistryFields {
   try {
     const raw = JSON.parse(readFileSync(fieldsPath(stateDir), "utf-8")) as {
       fields?: Record<string, unknown>;
       checked_at?: unknown;
+      workspace_source?: unknown;
     };
+    const source = workspaceSource(env);
+    const sameWorkspace = source !== undefined && raw.workspace_source === source;
     const fields: RegistryFields = {};
     for (const k of FIELD_NAMES) {
+      if (k !== "session_url" && !sameWorkspace) continue;
       const v = raw.fields?.[k];
       if (typeof v === "string" && v !== "") fields[k] = v;
     }
+    // A title the session's own env sets is its own; a cmux one belongs to the workspace.
+    const own = boundTitle(env.VOLLEY_WORKSPACE_TITLE);
+    if (!sameWorkspace && own !== undefined) fields.workspace_title = own;
     return {
       fields,
       ...(typeof raw.checked_at === "number" && Number.isFinite(raw.checked_at)
         ? { checked_at: raw.checked_at }
         : {}),
+      ...(source !== undefined ? { workspace_source: source } : {}),
     };
   } catch {
     return { fields: {} };
@@ -299,11 +347,12 @@ export function readRegistryFields(stateDir: string): StoredRegistryFields {
  */
 export async function ensureHarnessModel(
   session: HookSession,
+  env: Env,
   now: () => number = Date.now,
 ): Promise<void> {
   const { stateDir } = session.identity;
   const known = readHarnessModel(stateDir);
-  const stored = readRegistryFields(stateDir);
+  const stored = readRegistryFields(stateDir, env);
   const fields = stored.fields;
   if (known === null && Object.keys(fields).length === 0) return;
   const checkedAt = stored.checked_at ?? known?.checked_at;
@@ -314,7 +363,11 @@ export async function ensureHarnessModel(
     known !== null && (p?.model !== known.model || p?.model_source !== "harness-hook");
   const fieldLost = FIELD_NAMES.some((k) => fields[k] !== undefined && p?.[k] !== fields[k]);
   if (modelLost || fieldLost) await session.republishRegistry(known?.model, fields);
-  writeStoredFields(stateDir, { fields, checked_at: now() });
+  writeStoredFields(stateDir, {
+    fields,
+    checked_at: now(),
+    ...(stored.workspace_source !== undefined ? { workspace_source: stored.workspace_source } : {}),
+  });
 }
 
 /**
