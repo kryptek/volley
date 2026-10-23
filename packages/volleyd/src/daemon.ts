@@ -8878,12 +8878,29 @@ export class Daemon {
   ): Promise<string | null> {
     const a = this.supervised.get(item.agent_id);
     const source = typeof item.source.workspace === "string" ? item.source.workspace : undefined;
-    const workspace = a?.workspace ?? this.registryWorkspaces.get(item.agent_id) ?? source;
+    let workspace = a?.workspace ?? this.registryWorkspaces.get(item.agent_id) ?? source;
     if (workspace === undefined)
       return "volleyd cannot see this session's screen: answer it in its terminal";
     if (a === undefined) {
       const holder = this.workspaceHolder(workspace, item.agent_id);
-      if (holder !== null) return `${workspace} is ${holder}'s screen, not ${item.agent_id}'s`;
+      if (holder !== null) {
+        // The registry can name another session's screen (#392); the workspace the question was
+        // asked from is the session's own, unless that one is someone else's too.
+        const asked =
+          source !== undefined &&
+          source !== workspace &&
+          this.workspaceHolder(source, item.agent_id) === null
+            ? source
+            : undefined;
+        if (asked === undefined) {
+          const from =
+            source !== undefined && source !== workspace
+              ? `; ${item.agent_id} asked from ${source}`
+              : "";
+          return `${workspace} is ${holder}'s screen, not ${item.agent_id}'s${from}: send the answer to its mailbox, or answer it in its terminal`;
+        }
+        workspace = asked;
+      }
     }
     const host = a?.host ?? this.host;
     return carry(

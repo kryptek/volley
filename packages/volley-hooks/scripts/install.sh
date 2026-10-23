@@ -12,6 +12,13 @@
 #   scripts/install.sh --dry-run     print the merged settings instead of writing them
 #   --broker-url <url>               carry VOLLEY_BROKER_URL=<url> in every command's prefix
 #   --namespace <ns>                 carry VOLLEY_NAMESPACE=<ns> in every command's prefix
+#   --force                          install without a coordinator identity (see below)
+#
+# An install into the user-level ~/.claude/settings.json (CLAUDE_SETTINGS unset) needs a
+# coordinator identity on this machine: VOLLEY_AUTH_USERNAME, or the coordinator.json the hooks
+# read (`volley auth init --coordinator-file`). Without one, every session on the machine would
+# run coordinator hooks with nobody to speak for, so the script refuses unless --force (a broker
+# that takes anonymous connects needs none). An explicit CLAUDE_SETTINGS is not checked.
 #
 # CLAUDE_SETTINGS overrides the target file. A timestamped backup is written before changes.
 # The prefix values come from the flags only, never from the environment (a session's own
@@ -21,21 +28,25 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 [--uninstall|--dry-run] [--broker-url <url>] [--namespace <ns>]" >&2
+  echo "usage: $0 [--uninstall|--dry-run] [--broker-url <url>] [--namespace <ns>] [--force]" >&2
   exit 2
 }
 
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+USER_LEVEL=""
+[[ -n "${CLAUDE_SETTINGS:-}" ]] || USER_LEVEL=1
 MODE=install
 BROKER_URL=""
 NAMESPACE=""
+FORCE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --uninstall) MODE=uninstall ;;
     --dry-run) MODE=dry-run ;;
     --broker-url) [[ $# -ge 2 ]] || usage; BROKER_URL="$2"; shift ;;
     --namespace) [[ $# -ge 2 ]] || usage; NAMESPACE="$2"; shift ;;
+    --force) FORCE=1 ;;
     *) usage ;;
   esac
   shift
@@ -58,6 +69,18 @@ fi
 if [[ -n "$NAMESPACE" && ! "$NAMESPACE" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]; then
   echo "install.sh: --namespace must match [a-z0-9][a-z0-9_-]{0,62}" >&2
   exit 2
+fi
+
+if [[ "$MODE" == install && -n "$USER_LEVEL" && -z "$FORCE" ]]; then
+  # Where the hooks look for coordinator.json: resolved by volley-mcp itself, never re-derived.
+  AUTH_PATH="$(HOOKS_DIR="$HOOKS_DIR" bun -e '
+    const { coordinatorAuthPath } = require(require.resolve("volley-mcp/config", { paths: [process.env.HOOKS_DIR] }));
+    process.stdout.write(coordinatorAuthPath(process.env) ?? "");
+  ')"
+  if [[ -z "${VOLLEY_AUTH_USERNAME:-}" && ( -z "$AUTH_PATH" || ! -f "$AUTH_PATH" ) ]]; then
+    echo "install.sh: no coordinator identity on this machine (no VOLLEY_AUTH_USERNAME, no ${AUTH_PATH:-coordinator.json}): run \`volley auth init --coordinator-file\` first, or pass --force to install anyway" >&2
+    exit 1
+  fi
 fi
 
 HOOKS_DIR="$HOOKS_DIR" SETTINGS="$SETTINGS" MODE="$MODE" STATE_ROOT="$STATE_ROOT" BROKER_URL="$BROKER_URL" NAMESPACE="$NAMESPACE" bun -e '

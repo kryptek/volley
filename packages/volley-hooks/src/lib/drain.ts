@@ -262,7 +262,7 @@ export async function drainHook(
   let handedOff = false;
   try {
     await markWorking(session);
-    await ensureHarnessModel(session);
+    await ensureHarnessModel(session, ctx.env);
     const mail = drained === null ? null : await processMail(session, drained);
     // PostToolUse's heartbeat ends the tool call PreToolUse's boundary began (same tool_use_id).
     await session.heartbeat(ctx.event === "PostToolUse" ? toolBoundary(ctx.input) : {});

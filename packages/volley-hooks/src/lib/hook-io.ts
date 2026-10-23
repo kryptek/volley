@@ -6,6 +6,7 @@ import {
   HOOKS_ERROR_FILE,
   type HooksError,
   isAuthFailed,
+  isNotConfigured,
   resolveHooksAuth,
   writeHooksError,
 } from "./auth";
@@ -18,6 +19,7 @@ import {
   readAgentIdentity,
   readRetiredMarker,
   resolveCoordinatorIdentity,
+  sessionKey,
 } from "./identity";
 import { hookTimeoutMs } from "./seq";
 
@@ -141,15 +143,18 @@ export async function invokeHook(
   if (identity === null && coordinatorEnabled(env)) {
     const { lookupRegistry } = await import("./session");
     const startup = event === "SessionStart" && input.source === "startup";
+    // Sessions sharing this directory each keep their own identity and state (#392).
+    const key = sessionKey(input, env);
     trace.target = {
       mode: "coordinator",
       projectDir: dir,
       agentId: "volley-hooks",
       brokerUrl: coordinatorBrokerUrl(env),
-      stateDir: coordinatorStateDir(dir, env),
+      stateDir: coordinatorStateDir(dir, env, key),
     };
-    const lookup = (url: string, d: string) => lookupRegistry(url, d, env);
+    const lookup = (url: string, d: string) => lookupRegistry(url, d, env, key);
     identity = await resolveCoordinatorIdentity(dir, env, lookup, {
+      sessionKey: key,
       refresh: event === "SessionStart",
       // A new session's entry is newer than the session; an older one is a previous session.
       ...(startup ? { notBefore: Date.now() - STARTUP_SKEW_MS } : {}),
@@ -272,7 +277,8 @@ export function reportAuthFailed(
  * (`VOLLEY_HOOKS_TIMEOUT_MS`, default 10 s) bounds how long Claude waits on us. The one
  * exception is a broker refusing the hooks' credentials (`AUTH_FAILED`): it is loud — a stderr
  * line, `hooks-error.json`, exit 1 (a non-blocking error: never 2, which would block the tool
- * call, and never 0, which would look like success).
+ * call, and never 0, which would look like success). Coordinator hooks with no credentials at
+ * all (`NOT_CONFIGURED`) are not that: they exit 0 with nothing printed.
  */
 export async function runHook(event: string, handler: HookHandler): Promise<void> {
   const env = process.env;
@@ -286,6 +292,11 @@ export async function runHook(event: string, handler: HookHandler): Promise<void
   try {
     out = await invokeHook(event, handler, await readStdin(), env, after, trace);
   } catch (e) {
+    // A machine never set up as a coordinator: nothing to report (#407).
+    if (isNotConfigured(e)) {
+      runAfterEmit(after, false);
+      process.exit(0);
+    }
     if (isAuthFailed(e)) {
       const line = reportAuthFailed(event, trace, env, e);
       runAfterEmit(after, false);

@@ -23,6 +23,11 @@ export interface VolleyConfig {
    * SPEC §4.3); absent means `DEFAULT_HEARTBEAT_S`, 0 turns them off.
    */
   heartbeatS?: number;
+  /**
+   * The cmux surface (pane) the server runs in (`CMUX_SURFACE_ID`). Recorded on the registry
+   * entry so the session's hooks find their own entry when several sessions share a cwd.
+   */
+  surface?: string;
 }
 
 /** Default `VOLLEY_HEARTBEAT_S`: a quiet session (one blocked on `volley wait`) still beats. */
@@ -280,6 +285,8 @@ export function loadConfig(
     );
   }
 
+  const surface = oneLine(env.CMUX_SURFACE_ID);
+
   return {
     brokerUrl,
     namespace,
@@ -290,7 +297,13 @@ export function loadConfig(
     // A supervised agent (identity file) is never a coordinator, whatever its shell exported.
     ...(identity === null && env.VOLLEY_COORDINATOR ? { coordinator: env.VOLLEY_COORDINATOR } : {}),
     ...(heartbeatS !== null ? { heartbeatS } : {}),
+    ...(surface !== undefined ? { surface } : {}),
   };
+}
+
+/** A non-blank single-line value, at most 128 characters; anything else is none. */
+function oneLine(v: string | undefined): string | undefined {
+  return v !== undefined && /^[^\s][^\r\n]{0,127}$/.test(v) ? v : undefined;
 }
 
 /** The coordinator name when it is in the agent-id grammar; else an INVALID_AGENT_ID error. */
