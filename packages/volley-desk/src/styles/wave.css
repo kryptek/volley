@@ -248,6 +248,82 @@
   }
 }
 
+/* The overlap plan: cluster hulls and badges, dashed planner chains, the clusters panel and
+   the churn chip. Nothing here animates, so reduced motion keeps every tint. */
+.dag .dag-node rect.dag-hull {
+  fill-opacity: 0.14;
+  stroke: none;
+  stroke-dasharray: none;
+}
+.dag-cluster {
+  font: 600 9.5px var(--f-mono);
+}
+.dag-edge--chain {
+  stroke-dasharray: 5 4;
+}
+.clusters {
+  margin: 8px 0 0;
+}
+.clusters-toggle {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+}
+.clusters-toggle::before {
+  content: "▾ ";
+}
+.clusters-toggle[aria-expanded="false"]::before {
+  content: "▸ ";
+}
+.clusters-rows {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.cluster-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+}
+.cluster-id {
+  font-weight: 600;
+}
+.cluster-hot {
+  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.cluster-hold .cluster-state {
+  color: var(--amber);
+}
+.cluster-train .cluster-state {
+  color: #9fd9ff;
+}
+.cluster-why {
+  flex-basis: 100%;
+}
+.clusters--compact .cluster-row {
+  gap: 0;
+}
+.chip--churn {
+  color: var(--amber);
+  border-color: rgba(251, 191, 36, 0.45);
+}
+.wave-queue a {
+  color: inherit;
+  text-decoration: underline;
+}
+
 /* Where each placed task runs, and why (SPEC §4.6.15 `tasks[].placement`). */
 .host-chips {
   list-style: none;

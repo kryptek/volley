@@ -33,12 +33,13 @@
  * readiness verdict on each (§4.6.15) goes into `readiness` by name.
  *
  * Autopilot (SPEC §4.6.16): of each wave's live `events` mirror only volleyd's
- * `decision_auto_resolved` / `decision_escalated` are kept, in `waveFeed` by
+ * `decision_auto_resolved` / `decision_escalated` and the overlap plan's events (`wave_planned`,
+ * `cluster_strategy_changed`, `train_started` / `_merged` / `_failed`) are kept, in `waveFeed` by
  * wave and in the feeds of the event's task's agents. The account events (`account_chosen`,
  * `agent_account_moved`, §4.6.11) are kept in `accountFeed` by wave: the agent window reads its
  * task role's from there (a choice is journaled before the agent it chose for exists).
  */
-import { AUTOPILOT_EVENTS } from "./autopilot";
+import { WAVE_FEED_EVENTS } from "./autopilot";
 import { ACCOUNT_EVENTS } from "./claude";
 import { pushRecord } from "./machineHistory";
 import {
@@ -478,7 +479,7 @@ function newAgent(
 }
 
 /**
- * An autopilot event from a wave's live `events` mirror (SPEC §4.6.16), taken only from volleyd:
+ * An autopilot or plan event from a wave's live `events` mirror (SPEC §4.6.16), taken only from volleyd:
  * kept in the wave's feed and, when it names a task, in the feeds of that task's agents. Every
  * other journal event is the supervisor's bookkeeping, already folded into the wave state.
  */
@@ -492,7 +493,7 @@ function reduceWaveEvent(state: DeskState, wave: string, m: DeskMessage): DeskSt
     const accountFeed = { ...state.accountFeed, [wave]: [...kept, entry].slice(-FEED_LIMIT) };
     return { ...state, accountFeed };
   }
-  if (!AUTOPILOT_EVENTS.has(env.type)) return state;
+  if (!WAVE_FEED_EVENTS.has(env.type)) return state;
   const prior = state.waveFeed?.[wave] ?? [];
   if (redelivered(prior, env)) return state;
   const feed = [...prior, entry].slice(-FEED_LIMIT);
