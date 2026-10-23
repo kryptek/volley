@@ -20,7 +20,12 @@ import type {
 /** What the chip reads for the supervisor's own machine. */
 export const LOCAL_LABEL = "this machine";
 
-/** A task `host` that names no paired machine: the supervisor's own (`local`) or not yet placed. */
+/**
+ * A task `host` that names no paired machine: the supervisor's own (`local`) or not yet placed
+ * (`auto`). Reading an unplaced `auto` task as local is safe: volleyd's reducer sets `host` and
+ * `placement` in the same step and spawns its agents only after placement, so an agent window
+ * never sees an `auto` task without one.
+ */
 const SUPERVISOR_HOSTS = new Set(["local", "auto"]);
 
 export interface AgentMachine {

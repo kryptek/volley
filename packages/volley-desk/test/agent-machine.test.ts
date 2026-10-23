@@ -64,6 +64,16 @@ describe("machineFor", () => {
     }
   });
 
+  it("a task whose host is `local` but whose placement names a peer runs on that peer", () => {
+    const p = placement();
+    const { agent, wave, state } = setup({ host: "local", placement: p });
+    expect(machineFor(agent, wave, state)).toMatchObject({
+      name: "box-a",
+      local: false,
+      placement: p,
+    });
+  });
+
   it("without a configured local name the supervisor's machine is still local", () => {
     const { agent, wave, state } = setup({});
     expect(machineFor(agent, wave, { ...state, config: null })).toMatchObject({ local: true });
