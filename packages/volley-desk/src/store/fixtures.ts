@@ -1295,6 +1295,7 @@ export function demoDigest(now: number, wave: string): DeskMessage[] {
             merge_sha: hash([t.id]).repeat(5),
             merged_by: i === 2 ? ("operator" as const) : ("supervisor" as const),
           })),
+          closes: ENDED_TASKS.map((t) => t.issue),
           auto: {
             decisions_resolved: 3,
             flakes_fixed: [
@@ -1322,6 +1323,7 @@ export function demoDigest(now: number, wave: string): DeskMessage[] {
               merged_by: "supervisor",
             },
           ],
+          closes: [113],
           auto: {
             decisions_resolved: 2,
             flakes_fixed: [],

@@ -730,6 +730,13 @@ export const WAVE_EVENT_TYPES = [
   "terminal_status_recovered",
   // A draft PR marked ready before the CI gate (SPEC §4.6.8): its full CI runs from `at` (#408).
   "pr_marked_ready",
+  // A wave's issue lifecycle (#416, SPEC §4.6.19): what volleyd did to a task's issue, so a
+  // restart never does it twice; `issues_verified` once the release reached main.
+  "issue_labeled",
+  "issue_unlabeled",
+  "issue_commented",
+  "issue_closed",
+  "issues_verified",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

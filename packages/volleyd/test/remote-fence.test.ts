@@ -54,6 +54,10 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ["rm", "/tmp/x"],
     ["gh", "pr", "merge", "1"],
     ["gh", "api", "repos/o/r"],
+    // The issue lifecycle's writes (#416) run on the supervisor's own machine only.
+    ["gh", "issue", "edit", "4", "--add-label", "merged-to-release"],
+    ["gh", "issue", "comment", "4", "--body", "x <!-- volleyd:merged-to-release wave=w pr=1 -->"],
+    ["gh", "label", "list", "--search", "merged-to-release", "--json", "name"],
     ["bash", "-c", "rm -rf /"],
     ["sh", "-c", "true"],
     ["/usr/bin/git", "status"],
