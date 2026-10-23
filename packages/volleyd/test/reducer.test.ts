@@ -973,4 +973,45 @@ describe("the overlap plan (task_queued, wave_planned; SPEC §4.6.22)", () => {
       footprint: { confidence: "listed" },
     });
   });
+
+  it("a version keeps files the supervisor read, never files the previous file wrote", () => {
+    const file = (files: string) =>
+      parseWaveFile(
+        `wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\ntasks:\n  T1: { issue: 1${files} }\n`,
+      );
+    const versioned = (seq: number, w: ReturnType<typeof file>): JournalEvent => ({
+      seq,
+      at: AT,
+      type: "wave_versioned",
+      data: { wave: { ...w, version: 2 }, plan: { ...w, version: 2 } },
+    });
+    const read = reduce([
+      { seq: 1, at: AT, type: "wave_submitted", data: { wave: file("") } },
+      {
+        seq: 2,
+        at: AT,
+        type: "task_queued",
+        task: "T1",
+        data: { issue: 1, files: ["src/a.ts"], footprint: { confidence: "listed" } },
+      },
+      versioned(3, file("")),
+    ]);
+    expect(read.spec?.tasks.T1?.files).toEqual(["src/a.ts"]);
+    expect(read.spec?.tasks.T1?.footprint).toEqual({ confidence: "listed" });
+
+    const written = file(", files: [src/a.ts]");
+    const dropped = reduce([
+      { seq: 1, at: AT, type: "wave_submitted", data: { wave: written } },
+      {
+        seq: 2,
+        at: AT,
+        type: "task_queued",
+        task: "T1",
+        data: { issue: 1, files: ["src/a.ts"], footprint: { confidence: "listed" } },
+      },
+      versioned(3, file("")),
+    ]);
+    expect(dropped.spec?.tasks.T1).not.toHaveProperty("files");
+    expect(dropped.spec?.tasks.T1).not.toHaveProperty("footprint");
+  });
 });

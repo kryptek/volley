@@ -374,12 +374,14 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       next.overrides = plan.config;
       state.version = plan.version;
       state.release_branch = plan.release_branch;
-      // A footprint the supervisor read for a task the file leaves without `files` is kept.
+      // A footprint the supervisor read for a task the file leaves without `files` is kept; one
+      // the previous file wrote is not (dropping the key drops it).
       const read = state.spec?.tasks ?? {};
       state.spec = specOf(plan);
       for (const [id, t] of Object.entries(state.spec.tasks)) {
         const was = read[id];
         if (t.files !== undefined || was?.files === undefined) continue;
+        if ((before?.tasks[id]?.files ?? []).length > 0) continue;
         t.files = was.files;
         if (was.footprint !== undefined) t.footprint ??= was.footprint;
       }

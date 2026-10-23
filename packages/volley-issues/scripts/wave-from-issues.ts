@@ -396,7 +396,7 @@ export function waveFromIssues(issues: IssueInput[], opts: WaveOptions): WaveRes
       unresolved,
     };
   }
-  // D2: the planner's collapse and chains are written as is; the owner edits the file to differ.
+  // The planner's collapse and chains are written as is; the owner edits the file to differ.
   const plan = planWave({ tasks: tasks.map(({ counted: _c, ...t }) => t), tree });
   const explanation = explain(plan);
   const unitOf = new Map(plan.tasks.flatMap((p) => p.issues.map((i) => [i, p.id] as const)));

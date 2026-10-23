@@ -523,6 +523,16 @@ describe("bundles, footprints and the overlap plan (SPEC §4.6.22)", () => {
     ]);
   });
 
+  it("an after entry is a chain only when the task's why names it, whatever its by", () => {
+    const w = parseWaveFile(
+      fixture("bundle.yaml").replace(
+        '"after i1: they share packages/app/src/pipeline.ts (coupling 0.70) and cannot bundle: over 2 issues"',
+        "edited by hand",
+      ),
+    );
+    expect(w.overlap_plan?.clusters[0]?.strategy).toEqual({ collapse: [["i1"]] });
+  });
+
   it("with the tree, the hot files carry their sizes", () => {
     const w = parseWaveFile(fixture("bundle.yaml"));
     const tree = { "packages/app/src/pipeline.ts": 40_000, "packages/app/src/retry.ts": 800 };

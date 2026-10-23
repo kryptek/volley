@@ -351,15 +351,9 @@ const fileTasks = (wave: Wave): WaveTask[] =>
     return t === undefined || t.synthetic === true ? [] : [t];
   });
 
-/**
- * Whether `t.after`'s `dep` is a chain the planner added: its why names it (`after <dep>: …`),
- * or the task is planned by `chain` with a why that names no task it runs after.
- */
-function chainedAfter(t: WaveTask, dep: TaskId): boolean {
-  const why = t.plan?.why ?? "";
-  if (why.includes(`after ${dep}: `)) return true;
-  return t.plan?.by === "chain" && !/(?:^|; )after \S+: /.test(why);
-}
+/** Whether `t.after`'s `dep` is a chain the planner added: its why names it (`after <dep>: …`). */
+const chainedAfter = (t: WaveTask, dep: TaskId): boolean =>
+  (t.plan?.why ?? "").includes(`after ${dep}: `);
 
 /**
  * The wave file's own overlap plan (SPEC §4.6.22): clusters rebuilt from `plan.cluster` (a bundle
