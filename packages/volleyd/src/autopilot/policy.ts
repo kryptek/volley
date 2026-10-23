@@ -31,7 +31,8 @@ export type CountedBudget =
   | "rereview_max"
   | "question_max"
   | "ci_fixup_max"
-  | "account_move_max";
+  | "account_move_max"
+  | "merge_transient_retry_max";
 
 /** What a counted budget is per: the task, one role of it, or one run (`<task>/<role>/<attempt>`). */
 export type BudgetScope = "task" | "task_role" | "run";
@@ -378,6 +379,17 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     answer: "retry",
     rationale:
       "a draft is marked ready and merged once the CI that starts then passes; a retry does exactly that",
+  },
+  {
+    policy: "merge_refused/transient",
+    kinds: ["merge_refused"],
+    condition:
+      "the last refusal was transient (reason: transient) and the backoff ladder is spent (transient_attempts)",
+    when: (d) => d.reason === "transient" && typeof d.transient_attempts === "number",
+    answer: "retry",
+    budget: { name: "merge_transient_retry_max", per: "task" },
+    rationale:
+      "GitHub was busy or unreachable, not refusing the change: a retry starts the backoff ladder again; a refusal that outlasts it twice is the owner's",
   },
   {
     policy: "pr/owner",

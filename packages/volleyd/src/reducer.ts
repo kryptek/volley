@@ -14,7 +14,7 @@ import {
   resumeStageOf,
 } from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
-import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
+import { type MergeTransient, type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
 import { AUTO_HOST } from "./placement";
 import { asGitHubRepo } from "./repo-visibility";
 import { hygieneLevel } from "./reviews";
@@ -889,6 +889,22 @@ function parkedResume(rec: WaveRecord, task: TaskId): TaskStage | undefined {
 }
 
 /**
+ * A transient refusal's wait, as why_waiting reads it: `GitHub refused the merge transiently
+ * (Merge already in progress); retrying in 2 min (attempt 2 of 4)`.
+ */
+function transientWhy(tr: MergeTransient): string {
+  const what = (tr.stderr ?? "")
+    .split("\n")[0]
+    ?.replace(/^GraphQL:\s*/i, "")
+    .replace(/\s*\(mergePullRequest\)\s*$/i, "")
+    .replace(/[.\s]+$/, "")
+    .slice(0, 80);
+  const s = tr.wait_s ?? 0;
+  const wait = s >= 60 && s % 60 === 0 ? `${s / 60} min` : `${s} s`;
+  return `GitHub refused the merge transiently${what ? ` (${what})` : ""}; retrying in ${wait} (attempt ${tr.attempts} of ${tr.of ?? tr.attempts})`;
+}
+
+/**
  * Recompute the fields that follow from task stages, open decisions and spawn failures:
  * waiting_on/why_waiting, last_error/attempt/next_retry_at and gates. (A spawn failure's
  * why_waiting counts down to its retry, so the daemon adds it when it publishes.)
@@ -1010,6 +1026,21 @@ function derive(state: WaveState, rec: WaveRecord): void {
       t.stage !== "cancelled"
     )
       return { ...t, why_waiting: `PR conflicts with ${state.release_branch}, updating` };
+    // GitHub refused the merge transiently: the wait before the retry (#445).
+    const tr = p?.merge_transient;
+    if (
+      t.stage === "merge_ready" &&
+      tr !== undefined &&
+      tr.head === p?.gated.at(-1) &&
+      tr.wait_s !== undefined
+    ) {
+      const alarms = surfacedAlarms(p);
+      return {
+        ...t,
+        ...(alarms.length > 0 ? { alarms } : {}),
+        why_waiting: transientWhy(tr),
+      };
+    }
     // Queued at the head its reviewers saw, behind the release branch: its turn updates it (#383).
     // `gated_behind` is the count at the gate, not now: merges since then do not change it.
     const n = p?.gated_behind ?? 0;

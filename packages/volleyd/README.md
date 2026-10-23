@@ -922,7 +922,8 @@ left for you, with one push.
 - **Budgets** are per wave and key: `relaunch_max` and `respawn_max` per `<task>/<role>`,
   `nudge_max` and `question_max` per run (`<task>/<role>/<attempt>`), `rereview_max` and
   `ci_fixup_max` (CI fixups, default 2) per task, `account_move_max` (automatic account moves,
-  `agent_account_limit`, default 2) per `<task>/<role>`, and `budget_raise_max`, a multiple of the
+  `agent_account_limit`, default 2) per `<task>/<role>`, `merge_transient_retry_max` (retries of a
+  spent transient-merge ladder, default 1) per task, and `budget_raise_max`, a multiple of the
   wave's derived spawn budget that `raise by <n>` answers may reach. Each is reduced from the
   journal's `decision_auto_resolved` events, so a restart keeps them.
 - **Off**: `volleyd config set autopilot.enabled false` (or a wave's `config: { autopilot: {
@@ -992,6 +993,8 @@ autopilot: on
     merge_conflict/respawn: a fresh rebase (or merge) agent retries the update; a conflict it cannot resolve either is the owner's
   merge_refused · the last refusal: the PR is a draft (reason: draft) and marking it ready has not failed (no ready_failed) · retry · no budget
     merge_refused/draft: a draft is marked ready and merged once the CI that starts then passes; a retry does exactly that
+  merge_refused · the last refusal was transient (reason: transient) and the backoff ladder is spent (transient_attempts) · retry · merge_transient_retry_max per <task> · max 1
+    merge_refused/transient: GitHub was busy or unreachable, not refusing the change: a retry starts the backoff ladder again; a refusal that outlasts it twice is the owner's
   pr_closed, remote_repo_missing · always · escalate no_policy · no budget
     pr/owner: where the work went, or a clone that is missing, is the owner's call
   terminal_status_lost · always · escalate no_policy · no budget
@@ -1741,6 +1744,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `fleet.local_agents`, `fleet.fallback.*` | the next placement ([the supervisor's own machine as a fallback](#the-supervisors-own-machine-as-a-fallback)) | agents already on this machine keep running there; nothing is moved |
 | `autopilot.merge` | the next gate of a wave whose file has no `merge:` ([autopilot merging](#autopilot-merging)) | a gate already entered keeps the mode its evidence names until it is gated again |
 | `autopilot.merge_retry_max` | the next refused merge ([autopilot merging](#autopilot-merging)) | refusals already counted stand |
+| `autopilot.merge_transient_backoff_s` | the next transient refusal ([autopilot merging](#autopilot-merging)) | a `retry_at` already journaled stands |
 | `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
 | `agent_mcp`, `agent_mcp_allow` | spawns after the change | running agents keep the MCP servers they launched with |
 | `agent_auto_compact_pct` | spawns after the change | running agents keep the window they launched with |
@@ -3770,13 +3774,31 @@ In an unattended wave the gate is where work stalls: every merge waited for a pe
   head the task leaves the gate (`blocked`) and decision `merge_refused` asks `retry` (one more
   attempt, at the task's next turn in the merge queue), `manual` (this task goes back to the
   gate and a human merges it) or `cancel`. A new gated head starts the count again. `reason` is
-  what the refusal says: `behind` (out of date with or conflicting with the release branch, or
-  the release branch moved during the merge), `head_moved`, `retargeted`, `closed`, `draft`,
+  what the refusal says: `transient` (below), `behind` (out of date with or conflicting with the
+  release branch), `head_moved`, `retargeted`, `closed`, `draft`,
   `checks` (required checks, branch protection, reviews) or `unknown`. Only `behind`, `head_moved`,
   `retargeted`, `closed` and `draft` give up the merge turn; any other keeps the turn and the gated head, and the
   merge is tried again at the next up-to-date check. No refusal enters a
   branch update by itself: one runs only when the turn's rebase check counts the release branch's
   commits the head lacks (a failed `git fetch` or `git log` is a failed check, never "behind").
+- **Transient refusals (#445).** GitHub busy or unreachable is not GitHub refusing the change:
+  `Merge already in progress`, `Base branch was modified` (its mergeability race: the retry
+  merges, or reads a real `behind`), an `HTTP 5xx`, `Something went wrong`, a truncated JSON
+  answer, a secondary or API rate limit, abuse detection, and transport errors (`dial tcp`,
+  `i/o timeout`, `connection reset`, `TLS handshake timeout`, `unexpected EOF`) read as
+  `transient` (double-quoted check names are blanked first). A transient refusal never counts
+  toward `merge_retry_max`: the task keeps the merge turn and its place, and the merge is retried
+  on the `autopilot.merge_transient_backoff_s` ladder (default `[60, 120, 300, 600]`: attempt n
+  waits entry n), its alarm carrying `retry_at`, `wait_s` and `of`, the task's `why_waiting`
+  reading `GitHub refused the merge transiently (Merge already in progress); retrying in 2 min
+  (attempt 2 of 4)` and its queue entry `refused` with `retry_at`. Neither the turn's rebase
+  check nor the merge runs before `retry_at`; the PR is re-read meanwhile as at any gate, so a
+  PR someone else merged is done and a moved head invalidates the gate (and the ladder), never a
+  blind retry. One refusal more than the ladder has waits opens `merge_refused` with `reason:
+  transient`, `transient_attempts` and `since`; the `merge_refused/transient` row answers `retry`
+  (the ladder starts again) once per task (`autopilot.merge_transient_retry_max`, default 1),
+  so a refusal that outlasts the ladder twice reaches the owner. A new gated head or a
+  non-transient refusal ends the ladder.
 - **Drafts (#408).** A draft PR is not merge-ready, and its repository may skip heavy CI jobs on
   drafts. Verification marks a draft ready (`gh pr ready <n>`, the fence's only PR write besides
   the merge) once its CI is not red, journals `pr_marked_ready { pr, head, at }`, and holds the
