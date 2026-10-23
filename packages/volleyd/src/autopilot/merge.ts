@@ -12,15 +12,17 @@ import type { MergeToken } from "../fence";
 /**
  * Why a merge was refused. Only `behind` (out of date with, or conflicting with, the release
  * branch) and `head_moved` (the PR is no longer at the gated head) say the branch must change
- * before it can merge; `retargeted` and `closed` say it can never merge into it. Those four give up
- * the merge turn (refusalEndsTurn); `checks` (required checks, branch protection) and `unknown`
- * say nothing about the release branch and keep it.
+ * before it can merge; `retargeted` and `closed` say it can never merge into it; `draft` says the
+ * PR is a draft, which the pipeline marks ready and waits for the CI that starts (#408). Those
+ * five give up the merge turn (refusalEndsTurn); `checks` (required checks, branch protection) and
+ * `unknown` say nothing about the release branch and keep it.
  */
 export type RefusalReason =
   | "behind"
   | "head_moved"
   | "retargeted"
   | "closed"
+  | "draft"
   | "checks"
   | "unknown";
 
@@ -44,8 +46,8 @@ export function mergeArgv(token: MergeToken, deleteBranch: boolean): string[] {
 /**
  * Merge the token's PR at its head, then read the merge commit back (`gh pr view`). Right before
  * merging, the PR is re-read: `gh pr merge` merges into whatever the PR targets now, so a PR
- * retargeted away from the token's release branch (or whose head moved, or that cannot be read)
- * is refused without merging. A merge whose commit cannot be read back is still a merge
+ * retargeted away from the token's release branch (or whose head moved, that is a draft, or that
+ * cannot be read) is refused without merging. A merge whose commit cannot be read back is still a merge
  * (`merge_sha: null`); `gh` exiting non-zero (head moved, checks required, branch protection) is
  * `{ ok: false, reason, stderr }` (refusalReason).
  */
@@ -57,7 +59,7 @@ export async function mergePr(
 ): Promise<MergeOutcome> {
   const where = cwd !== undefined ? { cwd } : {};
   const pre = await exec(
-    ["gh", "pr", "view", String(token.pr), "--json", "baseRefName,headRefOid,state"],
+    ["gh", "pr", "view", String(token.pr), "--json", "baseRefName,headRefOid,isDraft,state"],
     where,
   );
   const why =
@@ -87,7 +89,7 @@ function notMergeable(
   text: string,
   token: MergeToken,
 ): { reason: RefusalReason; text: string } | null {
-  let v: { baseRefName?: unknown; headRefOid?: unknown; state?: unknown };
+  let v: { baseRefName?: unknown; headRefOid?: unknown; isDraft?: unknown; state?: unknown };
   try {
     v = (JSON.parse(text) ?? {}) as typeof v;
   } catch {
@@ -105,6 +107,7 @@ function notMergeable(
     };
   if (v.state !== "OPEN")
     return { reason: "closed", text: `PR #${token.pr} is ${String(v.state)}` };
+  if (v.isDraft === true) return { reason: "draft", text: `PR #${token.pr} is still a draft` };
   return null;
 }
 
@@ -114,6 +117,7 @@ const REFUSAL_REASONS: Record<RefusalReason, true> = {
   head_moved: true,
   retargeted: true,
   closed: true,
+  draft: true,
   checks: true,
   unknown: true,
 };
@@ -126,6 +130,8 @@ export function isRefusalReason(v: unknown): v is RefusalReason {
 /** What `gh pr merge`'s refusal says, from its stderr. Pure. */
 export function refusalReason(stderr: string): RefusalReason {
   if (/head branch was modified|match-head-commit/i.test(stderr)) return "head_moved";
+  // "Pull Request is still a draft (mergePullRequest)".
+  if (/\bstill a draft\b/i.test(stderr)) return "draft";
   // "Base branch was modified": the release branch moved during the merge. Quoted
   // text (a check's name, e.g. "merge-conflict-scan") never reads as behind. Only
   // double quotes (GitHub's) are blanked, since apostrophes appear in prose; a name

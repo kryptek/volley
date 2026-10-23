@@ -11,10 +11,12 @@
  * time: volleyd bumps `updated_at` for every journaled event, so one after
  * `wave_stopped` (an agent reaped, a decision resolved) moves it on; the wave
  * state carries no stop time of its own yet. A task volleyd holds for CI (its
- * `why_waiting` reads `CI pending on <sha> (n/m checks)`) shows `waiting for
- * CI` in the graph, a `waiting for CI` chip in the title and a row under the
- * graph with its pipeline (`implement ✓ · CI ⟳ · review`) and the reason; no
- * agent window is needed for it. On a phone the graph wraps to the window's
+ * `why_waiting` reads `CI 3/13 · running: … · ~8 min left`, or `CI pending on
+ * <sha> (n/m runs)` without job facts) shows `waiting for CI` (`· 3/13` when
+ * its jobs are counted) in the graph, a `waiting for CI` chip in the title and
+ * a row under the graph with its pipeline (`implement ✓ · CI ⟳ · review`), the
+ * reason and, when no job finished for longer than the slowest job's last
+ * duration, `possibly stuck: …` (#415); no agent window is needed for it. On a phone the graph wraps to the window's
  * width (`dagWidthFor`). Under the graph each placed task has a host chip
  * whose popover says why it runs there (`HostChips`).
  *
@@ -27,7 +29,7 @@
 import { BubbleChatIcon, Settings02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useState } from "react";
-import { ciPending } from "../../attention";
+import { ciPending, ciStuck } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
 import { issueHref } from "../../lib/github";
 import { plural } from "../../lib/plural";
@@ -230,7 +232,12 @@ export function WaveWindow(p: WaveWindowProps) {
   // Frozen at the last state update: the supervisor published it when the wave ended.
   const endedAt = Date.parse(s?.updated_at ?? "");
   const ci = s?.tasks.filter(ciPending) ?? [];
-  const ciLabels = Object.fromEntries(ci.map((t) => [t.id, "waiting for CI"]));
+  const ciLabels = Object.fromEntries(
+    ci.map((t) => {
+      const j = t.pr?.jobs;
+      return [t.id, j && j.total > 0 ? `waiting for CI · ${j.done}/${j.total}` : "waiting for CI"];
+    }),
+  );
   const fixers = tasks.filter((t) => t.fixerFor && !t.cancelled);
   const queue = s?.merge_queue ?? [];
 
@@ -375,6 +382,7 @@ export function WaveWindow(p: WaveWindowProps) {
                     <span className="mono">{t.id}</span>
                     <span className="wave-ci-pipe">implement ✓ · CI ⟳ · review</span>
                     <span className="dim">{t.why_waiting}</span>
+                    {ciStuck(t, now) && <span className="wave-ci-stuck">{ciStuck(t, now)}</span>}
                   </li>
                 ))}
               </ul>

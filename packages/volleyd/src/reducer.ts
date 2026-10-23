@@ -3,6 +3,7 @@ import { queueOf } from "./autopilot/merge-queue";
 import { stepRelease } from "./autopilot/playbook";
 import type { Budget, EscalateWhy } from "./autopilot/policy";
 import { fixerOf } from "./autopilot/remediation";
+import { jobsWhy } from "./ci-jobs";
 import { ARCHIVED_ANSWER, type DecisionRecord, type Held, parksTask } from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
@@ -860,9 +861,11 @@ function derive(state: WaveState, rec: WaveRecord): void {
         ? `CI infra incident: ${hold.incident ?? "infra-shaped failure"}; re-checking`
         : unreadable
           ? `CI unreadable (${hold.error || "no answer"}), retrying`
-          : hold.checks.total === 0
-            ? `CI pending on ${at} (no run yet)`
-            : `CI pending on ${at} (${hold.checks.done}/${hold.checks.total} checks)`;
+          : hold.jobs !== undefined && hold.jobs.total > 0
+            ? jobsWhy({ ...hold.jobs, ...(hold.eta_s !== undefined ? { eta_s: hold.eta_s } : {}) })
+            : hold.checks.total === 0
+              ? `CI pending on ${at} (no run yet)`
+              : `CI pending on ${at} (${hold.checks.done}/${hold.checks.total} runs)`;
       const pr = hold.pr ?? t.pr;
       return {
         ...t,
@@ -883,6 +886,8 @@ function derive(state: WaveState, rec: WaveRecord): void {
                           ? ("none" as const)
                           : ("running" as const),
                       checks: hold.checks,
+                      ...(hold.jobs !== undefined ? { jobs: hold.jobs } : {}),
+                      ...(hold.eta_s !== undefined ? { eta_s: hold.eta_s } : {}),
                     }),
               },
             }

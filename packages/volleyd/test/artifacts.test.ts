@@ -71,7 +71,7 @@ describe("artifact verification", () => {
       "--state",
       "open",
       "--json",
-      "number,url,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus",
+      "number,url,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus,isDraft",
     ]);
     expect(fake.calls.find((c) => c.argv[1] === "pr")?.opts.cwd).toBe(WT);
     // No CI is consulted for a PR that is not ours.
@@ -163,7 +163,10 @@ describe("artifact verification", () => {
 
     const green = allGood();
     const report = await verifyArtifacts(green.exec, SPEC);
-    expect(green.argvs(["gh", "run", "view"])).toEqual([]);
+    // A green head's jobs are read for their durations (#415), never its logs.
+    expect(green.argvs(["gh", "run", "view"])).toEqual([
+      ["gh", "run", "view", "501", "--json", "jobs"],
+    ]);
     expect(report.kind === "ok" && report.ci).not.toHaveProperty("log");
     expect(report.kind === "ok" && report.ci).not.toHaveProperty("failing_tests");
   });
@@ -296,6 +299,90 @@ describe("artifact verification", () => {
   });
 });
 
+describe("draft PRs: the CI that starts once marked ready (#408)", () => {
+  const READY_AT = "2026-10-22T10:00:00.000Z";
+  const pr = (v: object) => JSON.stringify([{ ...JSON.parse(fx("gh-pr-list-ok.json"))[0], ...v }]);
+  const run = (id: number, createdAt: string, v: object = {}) => ({
+    databaseId: id,
+    name: "CI",
+    workflowName: "CI",
+    workflowDatabaseId: 9,
+    event: "pull_request",
+    status: "completed",
+    conclusion: "success",
+    headSha: HEAD,
+    createdAt,
+    url: `https://github.com/example/repo/actions/runs/${id}`,
+    ...v,
+  });
+  const ready = { ...SPEC, ready: { head: HEAD, at: READY_AT } };
+
+  it("a draft PR is reported as one; a ready one is not", async () => {
+    const draft = await verifyArtifacts(
+      allGood().on(["gh", "pr", "list"], { stdout: pr({ isDraft: true }) }).exec,
+      SPEC,
+    );
+    expect(draft).toMatchObject({ kind: "ok", pr: { draft: true } });
+    const open = await verifyArtifacts(
+      allGood().on(["gh", "pr", "list"], { stdout: pr({ isDraft: false }) }).exec,
+      SPEC,
+    );
+    expect(open.kind === "ok" && "draft" in open.pr).toBe(false);
+  });
+
+  it("marked ready: a green run created before it is not the gate's CI → running", async () => {
+    const fake = allGood().on(["gh", "run", "list"], {
+      stdout: JSON.stringify([run(501, "2026-10-22T09:50:00Z")]),
+    });
+    const report = await verifyArtifacts(fake.exec, ready);
+    expect(report).toMatchObject({ kind: "ok", ci: { state: "running" } });
+    expect(artifactOutcome("T1", "implementer", report)).toMatchObject({
+      kind: "ci_pending",
+      state: "running",
+    });
+  });
+
+  it("marked ready: a run created a few seconds before the mark by GitHub's clock counts (skew)", async () => {
+    const skewed = new Date(
+      Date.parse(READY_AT) - DAEMON_DEFAULTS.ready_skew_ms + 5_000,
+    ).toISOString();
+    const fake = allGood().on(["gh", "run", "list"], {
+      stdout: JSON.stringify([run(502, skewed), run(501, "2026-10-22T09:50:00Z")]),
+    });
+    expect(await verifyArtifacts(fake.exec, ready)).toMatchObject({ ci: { state: "green" } });
+  });
+
+  it("marked ready: the run created after it supersedes the draft's run and is gated on", async () => {
+    const runs = (post: object) =>
+      JSON.stringify([run(502, "2026-10-22T10:00:05Z", post), run(501, "2026-10-22T09:50:00Z")]);
+    const running = allGood().on(["gh", "run", "list"], {
+      stdout: runs({ status: "in_progress", conclusion: null }),
+    });
+    expect(await verifyArtifacts(running.exec, ready)).toMatchObject({ ci: { state: "running" } });
+    const red = allGood()
+      .on(["gh", "run", "list"], { stdout: runs({ conclusion: "failure" }) })
+      .on(["gh", "run", "view"], { stdout: JSON.stringify({ jobs: [] }) });
+    expect(await verifyArtifacts(red.exec, ready)).toMatchObject({ ci: { state: "red" } });
+    const green = await verifyArtifacts(
+      allGood().on(["gh", "run", "list"], { stdout: runs({}) }).exec,
+      ready,
+    );
+    expect(green).toMatchObject({ ci: { state: "green", runs: [{ id: 502 }] } });
+    expect(green.kind === "ok" && green.ci.superseded.map((r) => r.id)).toEqual([501]);
+  });
+
+  it("a mark on another head says nothing about this one", async () => {
+    const fake = allGood().on(["gh", "run", "list"], {
+      stdout: JSON.stringify([run(501, "2026-10-22T09:50:00Z")]),
+    });
+    const report = await verifyArtifacts(fake.exec, {
+      ...SPEC,
+      ready: { head: OTHER, at: READY_AT },
+    });
+    expect(report).toMatchObject({ ci: { state: "green" } });
+  });
+});
+
 describe("superseded runs (latest run per workflow and trigger event wins)", () => {
   const ids = (runs: { id: number }[]) => runs.map((r) => r.id);
 
@@ -314,7 +401,9 @@ describe("superseded runs (latest run per workflow and trigger event wins)", () 
       },
     ]);
     // A superseded run's jobs are never looked at.
-    expect(fake.argvs(["gh", "run", "view"])).toEqual([]);
+    expect(fake.argvs(["gh", "run", "view"])).toEqual([
+      ["gh", "run", "view", "602", "--json", "jobs"],
+    ]);
     const out = artifactOutcome("T1", "implementer", report);
     expect(out.kind).toBe("verified");
     if (out.kind !== "verified") return;
@@ -459,8 +548,9 @@ describe("unreadable CI is unknown, never `none` (#310)", () => {
         ],
       },
     });
-    // The task's exec lists no runs; the supervisor's reads them in the wave repo.
-    expect(fake.argvs(["gh", "run"])).toEqual([]);
+    // The task's exec lists no runs (it reads their jobs, as for a failed run); the supervisor's
+    // reads them in the wave repo.
+    expect(fake.argvs(["gh", "run", "list"])).toEqual([]);
     const [argv] = api.argvs(["gh", "api"]);
     expect(argv?.[2]).toBe(`repos/{owner}/{repo}/actions/runs?head_sha=${HEAD}&per_page=50`);
     expect(api.calls[0]?.opts.cwd).toBe("/repo");
@@ -734,5 +824,86 @@ describe("probeReleaseCi", () => {
     expect(await prFiles(ok.exec, WT, 7)).toContain("packages/volleyd/src/pipeline.ts");
     const broken = fakeExec().on(["gh", "pr", "view"], { code: 1 });
     expect(await prFiles(broken.exec, WT, 7)).toBeNull();
+  });
+});
+
+describe("a running head's jobs (#415)", () => {
+  const T = "2026-10-23T10:00:00Z";
+  const job = (name: string, status: string, conclusion = "") => ({
+    name,
+    status,
+    conclusion,
+    startedAt: status === "queued" ? "0001-01-01T00:00:00Z" : T,
+    completedAt: status === "completed" ? "2026-10-23T10:02:00Z" : "0001-01-01T00:00:00Z",
+  });
+  const running = () => {
+    const runs = JSON.parse(fx("gh-run-list-green.json"));
+    runs[0].status = "in_progress";
+    runs[0].conclusion = "";
+    return JSON.stringify(runs);
+  };
+  const thirteen = [
+    job("lint", "completed", "success"),
+    job("typecheck", "completed", "success"),
+    job("Unit", "completed", "success"),
+    job("Frontend", "in_progress"),
+    ...[1, 2, 3, 4, 5, 6].map((n) => job(`Backend IT shard ${n}/6`, "in_progress")),
+    job("e2e", "in_progress"),
+    job("deploy-preview", "queued"),
+    job("smoke", "queued"),
+  ];
+
+  it("one run of 13 jobs: 3 completed, 8 in progress, 2 queued", async () => {
+    const fake = allGood()
+      .on(["gh", "run", "list"], { stdout: running() })
+      .on(["gh", "run", "view", "501", "--json", "jobs"], {
+        stdout: JSON.stringify({ jobs: thirteen }),
+      });
+    const report = await verifyArtifacts(fake.exec, SPEC);
+    expect(report).toMatchObject({ kind: "ok", ci: { state: "running" } });
+    if (report.kind !== "ok") return;
+    const jobs = report.ci.jobs ?? [];
+    expect(jobs).toHaveLength(13);
+    expect(jobs.filter((j) => j.status === "completed")).toHaveLength(3);
+    expect(jobs.filter((j) => j.status === "in_progress").map((j) => j.name)).toHaveLength(8);
+    expect(jobs[0]).toEqual({
+      workflow: "CI",
+      name: "lint",
+      status: "completed",
+      conclusion: "success",
+      started_at: T,
+      completed_at: "2026-10-23T10:02:00Z",
+      run_done: false,
+    });
+    // GitHub's zero time is no time: a queued job has no start.
+    expect(jobs.at(-1)?.started_at).toBeUndefined();
+  });
+
+  it("a failed job keeps its conclusion; an unreadable jobs answer is no job facts, not unknown CI", async () => {
+    const failed = allGood()
+      .on(["gh", "run", "list"], { stdout: running() })
+      .on(["gh", "run", "view"], {
+        stdout: JSON.stringify({
+          jobs: [job("lint", "completed", "failure"), job("e2e", "in_progress")],
+        }),
+      });
+    const r = await verifyArtifacts(failed.exec, SPEC);
+    expect(r.kind === "ok" && r.ci.jobs?.[0]?.conclusion).toBe("failure");
+    const bad = allGood()
+      .on(["gh", "run", "list"], { stdout: running() })
+      .on(["gh", "run", "view"], { code: 1, stderr: "HTTP 502: Bad Gateway" });
+    const u = await verifyArtifacts(bad.exec, SPEC);
+    expect(u).toMatchObject({ ci: { state: "running" } });
+    expect(u.kind === "ok" && u.ci.jobs).toBeUndefined();
+  });
+
+  it("a green head's jobs are read for their durations (run_done)", async () => {
+    const fake = allGood().on(["gh", "run", "view", "501", "--json", "jobs"], {
+      stdout: JSON.stringify({ jobs: [job("lint", "completed", "success")] }),
+    });
+    const r = await verifyArtifacts(fake.exec, SPEC);
+    expect(r.kind === "ok" && r.ci.jobs).toEqual([
+      expect.objectContaining({ name: "lint", run_done: true }),
+    ]);
   });
 });

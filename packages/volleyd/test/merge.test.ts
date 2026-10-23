@@ -7,7 +7,7 @@ const H = "c".repeat(40);
 const M = "d".repeat(40);
 /** The PR as the gate left it: open, at H, into the token's release branch. */
 const OPEN = JSON.stringify({ state: "OPEN", headRefOid: H, baseRefName: "release/w" });
-const PRE = ["gh", "pr", "view", "7", "--json", "baseRefName,headRefOid,state"];
+const PRE = ["gh", "pr", "view", "7", "--json", "baseRefName,headRefOid,isDraft,state"];
 
 const token = mintMergeToken({
   wave: "w",
@@ -122,6 +122,10 @@ describe("autopilot merge classifies a refusal (#311)", () => {
     ])
       expect(await refused(stderr)).toEqual({ ok: false, reason: "closed", stderr });
   });
+  it("a draft PR → draft (#408)", async () => {
+    const stderr = "GraphQL: Pull Request is still a draft (mergePullRequest)";
+    expect(await refused(stderr)).toEqual({ ok: false, reason: "draft", stderr });
+  });
   it("anything else → unknown", async () => {
     expect(await refused("GraphQL: something odd")).toMatchObject({ reason: "unknown" });
   });
@@ -137,6 +141,11 @@ describe("autopilot merge classifies a refusal (#311)", () => {
     });
     expect(await pre(view({ baseRefName: "main" }))).toMatchObject({ reason: "retargeted" });
     expect(await pre(view({ state: "CLOSED" }))).toMatchObject({ reason: "closed" });
+    expect(await pre(view({ isDraft: true }))).toEqual({
+      ok: false,
+      reason: "draft",
+      stderr: "not merged: PR #7 is still a draft",
+    });
     expect(await pre("", 1)).toMatchObject({ reason: "unknown" });
   });
 });
@@ -158,6 +167,14 @@ describe("autopilot merge re-reads the PR before merging", () => {
     });
     const r = await mergePr(f.exec, token);
     expect(r.ok).toBe(false);
+    expect(f.argvs(["gh", "pr", "merge"])).toEqual([]);
+  });
+
+  it("refuses, without merging, a draft PR (#408)", async () => {
+    const f = fakeExec().on(["gh", "pr", "view"], {
+      stdout: JSON.stringify({ ...JSON.parse(OPEN), isDraft: true }),
+    });
+    expect(await mergePr(f.exec, token)).toMatchObject({ ok: false, reason: "draft" });
     expect(f.argvs(["gh", "pr", "merge"])).toEqual([]);
   });
 
