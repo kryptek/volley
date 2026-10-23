@@ -8,7 +8,13 @@ on:
     # labeled/unlabeled: adding `no-changelog` re-runs the fragment check with the new labels
     # (`gh run rerun` reuses the original event payload, so it never sees a label added later).
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  # Nightly: the full run (both bun versions, the 32-task soak) on main.
+  schedule:
+    - cron: "17 6 * * *"
 
+# A full run is every push (main, release/**), the nightly, a release PR (its head is release/**,
+# or its title starts `release:`) and a PR labelled `ci:full`. Every other PR runs the newest bun
+# only and the 8-task soak: the jobs below spell the condition out (a matrix cannot read `env`).
 jobs:
   validate-schemas:
     name: Schema validation
@@ -79,33 +85,39 @@ jobs:
   test:
     # Every package's suite is `vitest run`, whose bin is a node script: `bun run test` runs the
     # vitest suites on Node. The bun version reaches only `bun install`, `bun test ./scripts` and
-    # the tests that spawn `bun`. The bun-runner job below runs volleyd's suite on bun itself.
-    name: Unit tests (vitest on Node, Aedes; bun ${{ matrix.bun-version }} for install + scripts)
+    # the tests that spawn `bun`. volleyd's suite runs in the sharded job below.
+    name: Unit tests (vitest on Node, every package but volleyd; bun ${{ matrix.bun-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Every bun in engines.bun: a newer bun can break the suite without anything else changing.
-        bun-version: ["1.3", "1.4"]
+        # Every bun in engines.bun on a full run: a newer bun can break the suite without anything
+        # else changing. Other PRs run the newest only.
+        bun-version: ${{ fromJSON((github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || startsWith(github.event.pull_request.title, 'release:') || contains(github.event.pull_request.labels.*.name, 'ci:full')) && '["1.3", "1.4"]' || '["1.4"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ matrix.bun-version }}
       - run: bun install --frozen-lockfile
-      # The root `test` script runs every suite under scripts/check-tmp-leaks.ts: a test that
-      # leaves a temp dir behind fails the job, naming its prefix.
-      - run: bun run test
+      # Under scripts/check-tmp-leaks.ts, like the root `test` script: a test that leaves a temp
+      # dir behind fails the job, naming its prefix.
+      - run: bun scripts/check-tmp-leaks.ts -- bun run test:scripts
+      - run: bun scripts/check-tmp-leaks.ts -- bun run --filter='!volleyd' test
 
-  test-bun-runner:
-    # volleyd runs on bun in production; this is the only job that runs its suite on the bun
-    # runtime, under bun's own test runner. A separate job so it runs in parallel with `test`.
-    name: volleyd unit tests (bun test runner, bun ${{ matrix.bun-version }})
+  test-volleyd:
+    # volleyd's suite, split into shards balanced by the per-file seconds in
+    # packages/volleyd/test/timings.json (scripts/test-shards.ts; a file not timed yet goes to the
+    # shard its path hashes to). Each shard runs its files under vitest on Node and under bun's own
+    # test framework: volleyd runs on bun in production, so this is where its suite meets the bun
+    # runtime. Refresh the timings with `bun scripts/test-shards.ts timings <junit.xml>`.
+    name: volleyd unit tests (shard ${{ matrix.shard }}/4, bun ${{ matrix.bun-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        bun-version: ["1.3", "1.4"]
+        shard: [1, 2, 3, 4]
+        bun-version: ${{ fromJSON((github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || startsWith(github.event.pull_request.title, 'release:') || contains(github.event.pull_request.labels.*.name, 'ci:full')) && '["1.3", "1.4"]' || '["1.4"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -113,34 +125,55 @@ jobs:
           bun-version: ${{ matrix.bun-version }}
       - run: bun install --frozen-lockfile
       # 15 s per test: the budget volleyd's vitest.config.ts declares (bun's default is 5 s).
-      # Under the temp-dir leak guard, like `bun run test`.
-      - run: bun ../../scripts/check-tmp-leaks.ts -- bun test --timeout 15000
+      # Both under the temp-dir leak guard, like `bun run test`.
+      # Step names stay clear of "runner", "checkout", "network", "fetch": volleyd's CI classifier
+      # (artifacts.ts INFRA_STEP) reads a failure in such a step as infrastructure, not a test.
+      - name: Tests on bun (bun test)
+        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:shard ${{ matrix.shard }}/4
+        working-directory: packages/volleyd
+      - name: Tests on Node (vitest)
+        if: ${{ !cancelled() }}
+        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:shard ${{ matrix.shard }}/4 --runner vitest
         working-directory: packages/volleyd
 
   soak:
     # The simulated soak (packages/volleyd/test/soak/): a whole wave through the real daemon with
-    # every injected fault, finishing with only stage_go and release_go asked. Slow by design: it is
-    # the autopilot epic's acceptance gate, not a fast check. A failure prints the journal tail and
-    # the open decisions; re-run it locally with the same SOAK_TASKS and SOAK_SEED.
-    name: Soak (simulated)
+    # every injected fault, finishing with only stage_go and release_go asked. It is the autopilot
+    # epic's acceptance gate. A failure prints the journal tail and the open decisions; re-run it
+    # locally with the same SOAK_TASKS and SOAK_SEED. 8 tasks (the fewest that fit every fault, about
+    # a minute) gate every run; the 32-task soak runs in its own job on full runs.
+    name: Soak (simulated, 8 tasks)
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.3"
       - run: bun install --frozen-lockfile
-      - name: Soak, 8 tasks (gating)
-        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:soak
+      - run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:soak
         working-directory: packages/volleyd
         env:
           SOAK_TASKS: "8"
-      # Reported, not gating, until #269 (the merge_ready invariant opening its decision three
-      # times and spending rereview_max) is fixed: on some runs it leaves one task escalated. Drop
-      # continue-on-error then. Its own timeout (vitest allows 22 min) keeps a slow run inside the
-      # job's, so it cannot time out (and fail) the job the 8-task step gates.
-      - name: Soak, 32 tasks (reported until #269)
+
+  soak-full:
+    # Reported, not gating, until #269 (the merge_ready invariant opening its decision three times
+    # and spending rereview_max) is fixed: on some runs it leaves one task escalated. Drop
+    # continue-on-error then. About 10 minutes, so only on full runs (see the top of this file).
+    name: Soak (simulated, 32 tasks, reported until #269)
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || startsWith(github.event.pull_request.title, 'release:') || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      # On the step, not the job: a job that fails under continue-on-error is still a failed check
+      # on the PR, which volleyd's own CI gate (gh pr checks) reads as red. Its own timeout (vitest
+      # allows 22 min) keeps a slow run inside the job's.
+      - name: Soak, 32 tasks
         continue-on-error: true
         timeout-minutes: 23
         run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:soak
