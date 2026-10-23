@@ -167,6 +167,21 @@ describe.skipIf(process.env.VOLLEYD_SOAK !== "1")(`the soak (${TASKS} tasks, see
             `${task} ${role} respawned`,
           ).toBe(2);
         expect(env.fleet.launches.filter((a) => a.behaviour.kind === "conflict")).toHaveLength(1);
+
+        // Gated at the reviewed head (#383): before a task first queues, a branch update is only
+        // for a CONFLICTING PR or a landed flake fix; a merely behind task waits for its turn.
+        for (const t of [...real, ...fixers]) {
+          const mine = j.filter((e) => e.task === t.id);
+          const queuedAt = mine.findIndex((e) => e.type === "merge_queued");
+          const early = mine
+            .slice(0, queuedAt < 0 ? mine.length : queuedAt)
+            .filter((e) => e.type === "stage_entered" && e.data.rebase === true)
+            .filter((e) => e.data.conflicting !== true && e.data.fix_landed === undefined);
+          expect(
+            early.map((e) => e.seq),
+            `${t.id}: updated before it queued`,
+          ).toEqual([]);
+        }
         expect(
           env.host.screenReads.filter((r) => (r.delayMs ?? 0) > SCREEN_SLOW_MS).length,
           "screen reads over screen_slow_ms",

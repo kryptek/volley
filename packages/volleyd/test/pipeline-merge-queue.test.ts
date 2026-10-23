@@ -128,6 +128,40 @@ describe("merge queue", () => {
     expect(rebasesOf("T1") + rebasesOf("T2") + rebasesOf("T3")).toBe(2);
   });
 
+  it("a task behind before it ever gated is gated, queued, and updated once at its turn (#383)", async () => {
+    h = pipelineHarness({
+      pipeline: "[implement, merge_ready]",
+      merge: "auto",
+      siblings: { T2: null },
+    });
+    await h.start();
+    await h.startTask("T2");
+    for (const t of ["T1", "T2"] as const) {
+      h.openPr(H[t], t, PR[t]);
+      h.world.mergeCommit[PR[t]] = MERGED[PR[t]];
+    }
+    await h.finish("implementer", { task: "T1", head: H.T1, ci: "green" });
+    await h.tick(); // T1 queued and merged: the release tip moves
+    expect(mergedPrs()).toEqual([7]);
+    // T2's implementer pushes a head cut from the old tip: behind before its gate.
+    h.world.mergeBase[H.T2] = R0;
+    await h.finish("implementer", { task: "T2", head: H.T2, ci: "green" });
+    expect(h.task("T2")?.stage).toBe("merge_ready");
+    expect(rebasesOf("T2")).toBe(0);
+    expect(
+      h.events.find(
+        (e) => e.type === "artifact_verified" && e.data.role === "gate" && e.task === "T2",
+      )?.data,
+    ).toMatchObject({ head_sha: H.T2, behind: 2 });
+
+    await h.tick(); // T1 dequeued; T2 queued, takes the turn: updated
+    expect(rebasesOf("T2")).toBe(1);
+    await h.finish("rebase", { task: "T2", head: H2b, ci: "green" });
+    expect(mergedPrs()).toEqual([7, 8]);
+    expect(h.task("T2")?.stage).toBe("done");
+    expect(rebasesOf("T1") + rebasesOf("T2")).toBe(1);
+  });
+
   it("a merge refused as behind releases the branch: the next task goes, the refused one is marked", async () => {
     await threeGated();
     await h.tick(); // T1 merged
@@ -451,8 +485,8 @@ describe("merge_conflict", () => {
     h = pipelineHarness({ pipeline: "[implement, merge_ready]", merge: "auto" });
     await h.start();
     h.openPr(H.T1, "T1", PR.T1);
-    h.world.mergeBase[H.T1] = sha(0xdead); // behind the release tip before it ever gated
-    await h.finish("implementer", { head: H.T1, ci: "green" });
+    // Conflicting with the release tip before it ever gated: updated before the gate (#383).
+    await h.finish("implementer", { head: H.T1, conflicting: true });
     expect(rebasesOf("T1")).toBe(1);
     await h.block("rebase", "CONFLICT (content): merge conflict in src/batch.ts", "T1");
     expect(h.openDecisions().map((d) => d.kind)).toEqual(["agent_blocked"]);

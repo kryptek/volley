@@ -226,7 +226,11 @@ export function renderEvidenceMd(j: EvidenceJson): string {
     "",
     j.merge === "auto"
       ? "volleyd merges this PR itself (merge: auto) at exactly this head; the merge is journaled as merged_by_supervisor."
-      : "volleyd never merges. A human merges this PR after reading the above.",
+      : `volleyd never merges. A human merges this PR after reading the above.${
+          j.behind_by > 0
+            ? ` Behind ${j.behind_by}: update the branch (GitHub's Update branch, or a rebase) before merging.`
+            : ""
+        }`,
     "",
     "## Reviews",
   ];
