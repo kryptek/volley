@@ -101,6 +101,19 @@ export interface WaveTask {
     url: string;
     head_sha?: string;
     ci?: "green" | "red" | "running" | "none";
+    /** While held for CI, when volleyd could read the head's jobs (#415). */
+    jobs?: {
+      done: number;
+      total: number;
+      running: string[];
+      failed: string[];
+      /** The last job's completion; while none is done, the first job's start. */
+      last_done_at?: string;
+      /** The slowest job's last duration in an earlier run of the wave. */
+      slowest_s?: number;
+    };
+    /** Seconds left by volleyd's estimate when the hold was journaled. */
+    eta_s?: number;
   };
   evidence_path?: string;
   /** The remote host the task's agents run on; absent for the supervisor's own machine. */
