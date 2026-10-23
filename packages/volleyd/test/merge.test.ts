@@ -85,9 +85,31 @@ describe("autopilot merge classifies a refusal (#311)", () => {
     ])
       expect(await refused(stderr)).toMatchObject({ ok: false, reason: "behind" });
   });
-  it("the base branch moved during the merge → behind", async () => {
+  it("the base branch moved during the merge → transient: GitHub's mergeability race (#445)", async () => {
     const stderr = "GraphQL: Base branch was modified. Review and try the merge again.";
-    expect(await refused(stderr)).toEqual({ ok: false, reason: "behind", stderr });
+    expect(await refused(stderr)).toEqual({ ok: false, reason: "transient", stderr });
+  });
+  it("GitHub's transient refusals, 5xx, rate limits and transport errors → transient (#445)", async () => {
+    for (const stderr of [
+      "GraphQL: Merge already in progress (mergePullRequest)",
+      "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
+      "HTTP 503: Service Unavailable",
+      "GraphQL: Something went wrong while executing your query.",
+      "unexpected end of JSON input",
+      "GraphQL: You have exceeded a secondary rate limit. Please wait a few minutes.",
+      "You have triggered an abuse detection mechanism.",
+      "HTTP 403: API rate limit exceeded for user ID 1.",
+      "Post https://api.github.com/graphql: dial tcp: lookup api.github.com: i/o timeout",
+      "read tcp: connection reset by peer",
+      "net/http: TLS handshake timeout",
+      "Post https://api.github.com/graphql: unexpected EOF",
+    ])
+      expect(await refused(stderr)).toEqual({ ok: false, reason: "transient", stderr });
+  });
+  it("a check whose name reads transient is still checks: quoted names are blanked first (#445)", async () => {
+    const stderr =
+      'GraphQL: Required status check "merge-already-in-progress-scan" is expected. (mergePullRequest)';
+    expect(await refused(stderr)).toEqual({ ok: false, reason: "checks", stderr });
   });
   it("--match-head-commit refused → head_moved", async () => {
     const stderr = "GraphQL: Head sha didn't match expected head sha (match-head-commit)";

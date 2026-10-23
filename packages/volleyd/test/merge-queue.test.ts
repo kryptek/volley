@@ -181,6 +181,59 @@ describe("nextToMerge", () => {
     expect(refusalEndsTurn(p)).toBe(false);
   });
 
+  it("a transient refusal keeps the turn and never counts as a refusal; the entry shows refused with retry_at (#445)", () => {
+    const A = "a".repeat(40);
+    let p = emptyPipeline();
+    p = fold(p, "artifact_verified", { role: "gate", head_sha: A });
+    const retryAt = at(1);
+    p = fold(p, "alarm_raised", {
+      alarm: "merge_refused",
+      head: A,
+      reason: "transient",
+      stderr: "GraphQL: Merge already in progress (mergePullRequest)",
+      retry_at: retryAt,
+      wait_s: 60,
+      of: 4,
+    });
+    expect(p.merge_refusals ?? 0).toBe(0);
+    expect(p.merge_refusal_reason).toBe("transient");
+    expect(p.merge_transient).toMatchObject({ attempts: 1, head: A, retry_at: retryAt });
+    expect(refusalEndsTurn(p)).toBe(false);
+    p = fold(p, "alarm_raised", { alarm: "merge_refused", head: A, reason: "transient" });
+    expect(p.merge_transient?.attempts).toBe(2);
+    // A non-transient refusal ends the ladder and counts as today.
+    p = fold(p, "alarm_raised", { alarm: "merge_refused", head: A, reason: "checks" });
+    expect(p.merge_transient).toBeUndefined();
+    expect(p.merge_refusals).toBe(1);
+
+    const rec = record("w1", {
+      T1: {
+        p: queued(1, {
+          merge_refusal_reason: "transient",
+          merge_transient: { attempts: 1, head: A, retry_at: retryAt, since: at(0) },
+        }),
+      },
+      T2: { p: queued(2) },
+    });
+    expect(queueOf(rec)[0]).toMatchObject({
+      task: "T1",
+      state: "refused",
+      keepsPlace: true,
+      retry_at: retryAt,
+    });
+    expect(nextToMerge({ b: queueOf(rec) }, new Set())?.task).toBe("T1");
+  });
+
+  it("a new gated head clears the transient ladder (#445)", () => {
+    const [A, B] = ["a".repeat(40), "b".repeat(40)];
+    let p = emptyPipeline();
+    p = fold(p, "artifact_verified", { role: "gate", head_sha: A });
+    p = fold(p, "alarm_raised", { alarm: "merge_refused", head: A, reason: "transient" });
+    expect(p.merge_transient?.attempts).toBe(1);
+    p = fold(p, "artifact_verified", { role: "gate", head_sha: B });
+    expect(p.merge_transient).toBeUndefined();
+  });
+
   it("a PR closed unmerged gives up the turn: no retry can merge it (#311)", () => {
     let p = emptyPipeline();
     p = fold(p, "artifact_verified", { role: "gate", head_sha: "a".repeat(40) });

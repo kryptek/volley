@@ -27,6 +27,8 @@ export interface QueueEntry {
    * checks, unknown): it keeps its place, competing as a `queued` one does (#311).
    */
   keepsPlace?: boolean;
+  /** A `refused` entry GitHub refused transiently: when its merge is retried (#445). */
+  retry_at?: string;
   /**
    * The merge train the entry is a member of while that train forms or runs (SPEC §4.6.23); the
    * entry shows `merging` meanwhile and never takes the ordinary turn.
@@ -51,7 +53,7 @@ export function dependents(wave: Wave, task: TaskId): number {
  * head moved, retargeted away from it, or closed), or that it is a draft, which waits for the CI
  * that starts once it is marked ready (#408): the task gives up the merge turn. Any other
  * refusal (required checks, branch protection, unknown) keeps it, and the merge is tried again up
- * to `merge_retry_max` (#311). A refusal journaled before reasons were recorded counts as `behind`;
+ * to `merge_retry_max` (#311); a transient one keeps it too, retried on its backoff ladder (#445). A refusal journaled before reasons were recorded counts as `behind`;
  * a late refusal of an older gated head counts for nothing (the reducer records only the current
  * head's reason).
  */
@@ -86,7 +88,7 @@ export function queueOf(rec: WaveRecord): QueueEntry[] {
         ? "merging"
         : p.rebasing && t.stage !== "merge_ready"
           ? "updating"
-          : (p.merge_refusals ?? 0) > 0
+          : (p.merge_refusals ?? 0) > 0 || p.merge_transient !== undefined
             ? "refused"
             : "queued";
     entries.push({
@@ -96,6 +98,9 @@ export function queueOf(rec: WaveRecord): QueueEntry[] {
       since: p.queued_at,
       gated: t.stage === "merge_ready",
       ...(qs === "refused" && !refusalEndsTurn(p) ? { keepsPlace: true } : {}),
+      ...(qs === "refused" && p.merge_transient?.retry_at !== undefined
+        ? { retry_at: p.merge_transient.retry_at }
+        : {}),
       ...(train !== undefined ? { train } : {}),
     });
   }

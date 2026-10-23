@@ -15,9 +15,12 @@ import type { MergeToken, TrainToken } from "../fence";
  * before it can merge; `retargeted` and `closed` say it can never merge into it; `draft` says the
  * PR is a draft, which the pipeline marks ready and waits for the CI that starts (#408). Those
  * five give up the merge turn (refusalEndsTurn); `checks` (required checks, branch protection) and
- * `unknown` say nothing about the release branch and keep it.
+ * `unknown` say nothing about the release branch and keep it. `transient` (GitHub busy, a 5xx, a
+ * rate limit, a dropped connection) keeps it too, and is retried on a backoff ladder without
+ * counting as a refusal (#445).
  */
 export type RefusalReason =
+  | "transient"
   | "behind"
   | "head_moved"
   | "retargeted"
@@ -141,6 +144,7 @@ function notMergeable(text: string, token: Target): { reason: RefusalReason; tex
 
 // Keyed by every RefusalReason, so the compiler rejects a reason left out.
 const REFUSAL_REASONS: Record<RefusalReason, true> = {
+  transient: true,
   behind: true,
   head_moved: true,
   retargeted: true,
@@ -155,21 +159,40 @@ export function isRefusalReason(v: unknown): v is RefusalReason {
   return typeof v === "string" && Object.hasOwn(REFUSAL_REASONS, v);
 }
 
+/** GitHub's transient refusals, 5xx answers, rate limits and transport errors. */
+const TRANSIENT = new RegExp(
+  [
+    "merge already in progress",
+    "base branch was modified",
+    "\\bHTTP 5\\d\\d\\b",
+    "something went wrong",
+    "unexpected end of JSON",
+    "secondary rate limit",
+    "abuse detection",
+    "API rate limit exceeded",
+    "dial tcp",
+    "i/o timeout",
+    "connection reset",
+    "TLS handshake timeout",
+    "unexpected EOF",
+  ].join("|"),
+  "i",
+);
+
 /** What `gh pr merge`'s refusal says, from its stderr. Pure. */
 export function refusalReason(stderr: string): RefusalReason {
   if (/head branch was modified|match-head-commit/i.test(stderr)) return "head_moved";
   // "Pull Request is still a draft (mergePullRequest)".
   if (/\bstill a draft\b/i.test(stderr)) return "draft";
-  // "Base branch was modified": the release branch moved during the merge. Quoted
-  // text (a check's name, e.g. "merge-conflict-scan") never reads as behind. Only
-  // double quotes (GitHub's) are blanked, since apostrophes appear in prose; a name
-  // in single quotes or none can still read as behind, which fails safe: the task
-  // gives up its turn, and updates its branch only if checkRebase counts commits.
-  if (
-    /base branch was modified|out of date|not up to date|\bbehind\b|\bconflicts?\b|cannot be cleanly created/i.test(
-      stderr.replace(/"[^"]*"/g, '""'),
-    )
-  )
+  // Quoted text (a check's name, e.g. "merge-conflict-scan") never reads as transient or
+  // behind. Only double quotes (GitHub's) are blanked, since apostrophes appear in prose; a
+  // name in single quotes or none can still read as behind, which fails safe: the task gives
+  // up its turn, and updates its branch only if checkRebase counts commits.
+  const prose = stderr.replace(/"[^"]*"/g, '""');
+  // GitHub busy or unreachable: a retry after a wait merges (#445). "Base branch was modified"
+  // is GitHub's mergeability race: the retry merges, or reads a real `behind`.
+  if (TRANSIENT.test(prose)) return "transient";
+  if (/out of date|not up to date|\bbehind\b|\bconflicts?\b|cannot be cleanly created/i.test(prose))
     return "behind";
   if (/already merged|is (closed|merged)\b/i.test(stderr)) return "closed";
   if (/check|protect|review|approv/i.test(stderr)) return "checks";

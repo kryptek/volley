@@ -656,6 +656,21 @@
               "default": 2,
               "description": "Merges GitHub may refuse at one gated head (the head moved, checks required, branch protection) before the supervisor opens a merge_refused decision."
             },
+            "merge_transient_backoff_s": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1, "maximum": 86400 },
+              "minItems": 1,
+              "maxItems": 20,
+              "default": [60, 120, 300, 600],
+              "description": "The waits in seconds before each retry of a merge the host refused transiently at one gated head (busy, a 5xx, a rate limit, a dropped connection); attempt n waits entry min(n, length). Such refusals never count toward merge_retry_max; one more past the last entry opens the merge_refused decision."
+            },
+            "merge_transient_retry_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 1,
+              "description": "Automatic retry answers to a merge_refused decision whose transient backoff ladder was spent, per task (policy row merge_refused/transient)."
+            },
             "delete_branch": {
               "type": "boolean",
               "default": false,

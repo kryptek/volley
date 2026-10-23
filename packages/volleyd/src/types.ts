@@ -213,6 +213,13 @@ export interface AutopilotConfig {
   merge: MergeMode;
   /** Refused autopilot merges at one gated head before a `merge_refused` decision. */
   merge_retry_max: number;
+  /**
+   * The waits (s) before each retry of a merge GitHub refused transiently at one gated head
+   * (attempt n waits entry min(n, length)); past the last, a `merge_refused` decision.
+   */
+  merge_transient_backoff_s: number[];
+  /** Automatic `retry` answers to a `merge_refused` whose transient ladder was spent, per task. */
+  merge_transient_retry_max: number;
   /** Autopilot merges also delete the PR's head branch (`gh pr merge --delete-branch`). */
   delete_branch: boolean;
   /**

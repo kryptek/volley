@@ -235,6 +235,12 @@ export interface TaskPipeline {
   /** Extra attempts the owner granted (`merge_refused` answered `retry`). */
   merge_retries?: number;
   /**
+   * GitHub's transient refusals in a row at the current gated head (#445): they never count as
+   * `merge_refusals`; the merge is retried at `retry_at`, on the `merge_transient_backoff_s`
+   * ladder. Cleared by a new gated head, a moved head, a non-transient refusal or a `retry`.
+   */
+  merge_transient?: MergeTransient | undefined;
+  /**
    * The gated head whose draft refusal was free (it never used up an attempt) and has not been
    * marked ready since: another draft refusal there counts, so a `gh pr ready` that keeps failing
    * reaches the owner (#408).
@@ -253,6 +259,21 @@ export interface TaskPipeline {
    * flake stopped a step that still has steps after it; `gate`, it stopped a pre-gate update.
    */
   fix_resume?: "next" | "gate" | undefined;
+}
+
+/** The transient refusals of one gated head (TaskPipeline.merge_transient). */
+export interface MergeTransient {
+  attempts: number;
+  head: string;
+  /** The first refusal of the run (the driver's clock). */
+  since: string;
+  /** When the merge is retried; absent once the ladder is spent. */
+  retry_at?: string;
+  /** That wait, and the ladder's length (for why_waiting). */
+  wait_s?: number;
+  of?: number;
+  /** The last refusal's stderr. */
+  stderr?: string;
 }
 
 /** A `remediation_requested` that still holds: a flake on `role`'s red `head` awaits its fixer. */
@@ -514,6 +535,7 @@ export function reducePipeline(
           p.merge_refusals = 0;
           p.merge_refusal_reason = undefined;
           p.merge_retries = 0;
+          p.merge_transient = undefined;
         }
         p.gated_behind = typeof d.behind === "number" ? d.behind : undefined;
       }
@@ -621,6 +643,8 @@ export function reducePipeline(
         p.moved = { from: d.from, to: d.to, during: d.during as TaskStage };
         // The flake was on the old head: the new one is verified on its own.
         if (p.remediation?.head === d.from) p.remediation = undefined;
+        // GitHub's transient refusals were of the old head: the new one starts its own ladder.
+        if (p.merge_transient?.head === d.from) p.merge_transient = undefined;
       }
       if (p.pr === undefined && typeof d.pr === "string" && typeof d.pr_number === "number")
         p.pr = { number: d.pr_number, url: d.pr };
@@ -719,7 +743,21 @@ export function reducePipeline(
     case "alarm_raised": {
       if (typeof d.alarm === "string") p.alarms = { ...p.alarms, [d.alarm]: d };
       // Only a refusal of the current gated head counts: a late one for an older head says nothing.
-      if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1)) {
+      if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1) && d.reason === "transient") {
+        // GitHub busy or unreachable: retried on the backoff ladder, never a counted refusal (#445).
+        const prev = p.merge_transient?.head === d.head ? p.merge_transient : undefined;
+        p.merge_transient = {
+          attempts: (prev?.attempts ?? 0) + 1,
+          head: String(d.head),
+          since: typeof d.since === "string" ? d.since : (prev?.since ?? ev.at),
+          ...(typeof d.retry_at === "string" ? { retry_at: d.retry_at } : {}),
+          ...(typeof d.wait_s === "number" ? { wait_s: d.wait_s } : {}),
+          ...(typeof d.of === "number" ? { of: d.of } : {}),
+          ...(typeof d.stderr === "string" ? { stderr: d.stderr } : {}),
+        };
+        p.merge_refusal_reason = "transient";
+      } else if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1)) {
+        p.merge_transient = undefined;
         p.merge_refusals = (p.merge_refusals ?? 0) + 1;
         p.merge_refusal_reason = isRefusalReason(d.reason) ? d.reason : undefined;
         // A draft is marked ready and merged once its CI passes: it never uses up an attempt,
@@ -743,8 +781,11 @@ export function reducePipeline(
     case "decision_resolved": {
       const m = (ctx.decision as { pipeline?: PipelineMarker } | undefined)?.pipeline;
       const answer = String(d.answer ?? "");
-      if (m?.on === "merge_refused" && isAnswer(answer, "retry"))
+      if (m?.on === "merge_refused" && isAnswer(answer, "retry")) {
         p.merge_retries = (p.merge_retries ?? 0) + 1;
+        // A spent transient ladder starts again.
+        p.merge_transient = undefined;
+      }
       if ((m?.on === "merge_refused" || m?.on === "merge_conflict") && isAnswer(answer, "manual"))
         p.merge_manual = true;
       if (m?.on === "reviewers_disagree")
@@ -845,6 +886,8 @@ export interface PipelineView {
   merge_token?: MergeToken;
   /** `autopilot.merge_retry_max`: refusals before the owner is asked (absent: the default). */
   merge_retry_max?: number;
+  /** `autopilot.merge_transient_backoff_s`: the transient refusals' ladder (absent: the default). */
+  merge_transient_backoff_s?: number[];
   /** `autopilot.incident_wait_max_s`: how long an infra incident is waited out (absent: the default). */
   incident_wait_max_s?: number;
   /**
@@ -1379,8 +1422,26 @@ const autoMergeOn = (v: PipelineView): boolean =>
 const mergeAttempts = (v: PipelineView): number =>
   (v.merge_retry_max ?? CONFIG_DEFAULTS.autopilot.merge_retry_max) + (v.p.merge_retries ?? 0);
 
+/** The transient refusals' backoff ladder (s). */
+const transientLadder = (v: PipelineView): number[] =>
+  v.merge_transient_backoff_s ?? CONFIG_DEFAULTS.autopilot.merge_transient_backoff_s;
+
+/** The gated head's transient refusals, while they are the current head's. */
+const transientOf = (v: PipelineView): MergeTransient | undefined =>
+  v.p.merge_transient?.head === v.p.head ? v.p.merge_transient : undefined;
+
+/** GitHub refused this head transiently once more than the ladder has waits: the owner decides. */
+const transientSpent = (v: PipelineView): boolean =>
+  (transientOf(v)?.attempts ?? 0) > transientLadder(v).length;
+
+/** A transient refusal's wait has not passed: no merge (or turn check) before `retry_at`. */
+export const transientWaiting = (v: PipelineView): boolean => {
+  const at = transientOf(v)?.retry_at;
+  return at !== undefined && v.now !== undefined && v.now < Date.parse(at);
+};
+
 const mergeExhausted = (v: PipelineView): boolean =>
-  autoMergeOn(v) && (v.p.merge_refusals ?? 0) >= mergeAttempts(v);
+  autoMergeOn(v) && ((v.p.merge_refusals ?? 0) >= mergeAttempts(v) || transientSpent(v));
 
 /** At merge_ready under `merge: auto` with no MergeToken for the head: the gate re-mints it. */
 function remintWanted(v: PipelineView): boolean {
@@ -1397,7 +1458,14 @@ function remintWanted(v: PipelineView): boolean {
  * rebase check found it up to date and the gate (re-)minted its token.
  */
 function autoMerge(v: PipelineView): PipelineAction[] {
-  if (v.merge_turn !== "go" || !autoMergeOn(v) || mergeExhausted(v) || remintWanted(v)) return [];
+  if (
+    v.merge_turn !== "go" ||
+    !autoMergeOn(v) ||
+    mergeExhausted(v) ||
+    remintWanted(v) ||
+    transientWaiting(v)
+  )
+    return [];
   return [{ kind: "merge", token: v.merge_token as MergeToken }];
 }
 
@@ -1432,7 +1500,9 @@ function onSupervisorMerged(
 /**
  * GitHub refused the merge (`gh` exit ≠ 0): alarmed, and the PR read at once as today (someone
  * else may have merged it, or its head moved); that read asks the owner once the refusals reach
- * `autopilot.merge_retry_max` (onMergeChecked). Never forced.
+ * `autopilot.merge_retry_max` (onMergeChecked). Never forced. A transient refusal (#445) is not
+ * counted: it carries when the merge is retried (`retry_at`, the ladder's wait for its attempt),
+ * and the read asks the owner only once one more than the ladder's waits came back.
  */
 function onMergeRefused(
   v: PipelineView,
@@ -1440,6 +1510,20 @@ function onMergeRefused(
 ): PipelineAction[] {
   const pr = v.p.pr;
   if (v.stage === "done" || v.stage === "cancelled" || pr === undefined) return [];
+  const prev = v.p.merge_transient?.head === ev.head ? v.p.merge_transient : undefined;
+  const ladder = transientLadder(v);
+  const n = (prev?.attempts ?? 0) + 1;
+  const wait = n <= ladder.length ? ladder[n - 1] : undefined;
+  const transient =
+    ev.reason === "transient" && v.now !== undefined
+      ? {
+          since: prev?.since ?? new Date(v.now).toISOString(),
+          ...(wait !== undefined
+            ? { retry_at: new Date(v.now + wait * 1000).toISOString(), wait_s: wait }
+            : {}),
+          of: ladder.length,
+        }
+      : undefined;
   return [
     {
       kind: "journal",
@@ -1453,7 +1537,8 @@ function onMergeRefused(
           stderr: ev.stderr,
           // Absent: refusalEndsTurn reads it as `behind`, like a refusal journaled before reasons.
           ...(ev.reason !== undefined ? { reason: ev.reason } : {}),
-          attempt: (v.p.merge_refusals ?? 0) + 1,
+          attempt: ev.reason === "transient" ? n : (v.p.merge_refusals ?? 0) + 1,
+          ...transient,
         },
       },
     },
@@ -1553,7 +1638,16 @@ function mergeRefusedDecision(v: PipelineView): PipelineAction[] {
   const readyFailed = v.p.merge_refusal_reason === "draft" && v.p.draft_refused === head;
   const readyErr = v.p.alarms?.pipeline_error;
   const readyWhy = readyErr?.check === "pr_ready" ? `: ${String(readyErr.message ?? "")}` : "";
-  const why = `GitHub refused to merge PR #${pr.number} at ${head.slice(0, 12)} ${v.p.merge_refusals ?? 0} time(s)${last !== "" ? ` (last: ${last})` : ""}${readyFailed ? `; marking the draft ready did not succeed${readyWhy}`.slice(0, DAEMON_DEFAULTS.decision_output_chars) : ""}`;
+  // The transient ladder spent (#445): how often, over how long.
+  const tr = transientSpent(v) ? transientOf(v) : undefined;
+  const over =
+    tr !== undefined && v.now !== undefined
+      ? Math.round((v.now - Date.parse(tr.since)) / 60_000)
+      : undefined;
+  const why =
+    tr !== undefined
+      ? `GitHub refused to merge PR #${pr.number} at ${head.slice(0, 12)} transiently ${tr.attempts} times${over !== undefined ? ` over ${over} min` : ""}${last !== "" ? ` (last: ${last})` : ""}`
+      : `GitHub refused to merge PR #${pr.number} at ${head.slice(0, 12)} ${v.p.merge_refusals ?? 0} time(s)${last !== "" ? ` (last: ${last})` : ""}${readyFailed ? `; marking the draft ready did not succeed${readyWhy}`.slice(0, DAEMON_DEFAULTS.decision_output_chars) : ""}`;
   return [
     // Escalated: the task leaves the gate (a decision cannot park a gated task) until answered.
     {
@@ -1566,17 +1660,19 @@ function mergeRefusedDecision(v: PipelineView): PipelineAction[] {
       decision: {
         kind: "merge_refused",
         task: v.task,
-        question: `${why}. retry: try the merge once more; manual: a human merges this PR (volleyd waits at the gate); or cancel the task?`,
+        question: `${why}. retry: try the merge once more${tr !== undefined ? " (the transient backoff starts again)" : ""}; manual: a human merges this PR (volleyd waits at the gate); or cancel the task?`,
         pointers: { pr: pr.url },
         options: ["retry", "manual", "cancel"],
       },
       // The last refusal's reason: a draft's retry marks it ready first (merge_refused/draft).
       // `ready_failed`: that retry already failed; the owner answers (merge_refused/draft is out).
+      // A spent transient ladder: its attempts and since when (merge_refused/transient).
       ...(v.p.merge_refusal_reason !== undefined
         ? {
             data: {
               reason: v.p.merge_refusal_reason,
               ...(readyFailed ? { ready_failed: true } : {}),
+              ...(tr !== undefined ? { transient_attempts: tr.attempts, since: tr.since } : {}),
             },
           }
         : {}),
@@ -3647,6 +3743,8 @@ export interface PipelineDeps {
   mergeMode?: () => "auto" | "manual";
   /** The wave's `autopilot.merge_retry_max` (default: the config default). */
   mergeRetryMax?: () => number;
+  /** The wave's `autopilot.merge_transient_backoff_s` (default: the config default). */
+  mergeTransientBackoffS?: () => number[];
   /** The wave's `autopilot.incident_wait_max_s` (default: the config default). */
   incidentWaitMaxS?: () => number;
   /** The wave's `ci_rate_limit_backoff_ms` (default: the config default). */
@@ -3846,6 +3944,9 @@ export class PipelineDriver {
       ...(this.deps.mergeRetryMax !== undefined
         ? { merge_retry_max: this.deps.mergeRetryMax() }
         : {}),
+      ...(this.deps.mergeTransientBackoffS !== undefined
+        ? { merge_transient_backoff_s: this.deps.mergeTransientBackoffS() }
+        : {}),
       ...(this.deps.incidentWaitMaxS !== undefined
         ? { incident_wait_max_s: this.deps.incidentWaitMaxS() }
         : {}),
@@ -3980,7 +4081,13 @@ export class PipelineDriver {
       // acquire is idempotent for the holder: it only re-asserts the lock.
       if (holds && this.lock.acquire(branch, key)) {
         // The turn's rebase check did not come back usable (an error, a head that moved): again.
-        if (v.stage === "merge_ready" && !turn.fresh && !this.merging.has(turn.task))
+        // A transient refusal's wait holds it (and the turn) until `retry_at` (#445).
+        if (
+          v.stage === "merge_ready" &&
+          !turn.fresh &&
+          !this.merging.has(turn.task) &&
+          !transientWaiting(v)
+        )
           await this.run(turn.task, [{ kind: "check_rebase" }], false);
         return;
       }
