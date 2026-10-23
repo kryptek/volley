@@ -101,7 +101,10 @@
 # hosts:
 #   buildbox:
 #     target: me@buildbox          # ssh destination ([user@]host or an ssh config alias)
-#     repo: /path/to/repo          # the wave repo's clone there
+#     repo: /path/to/repo          # deprecated (repos: below): the wave repo's clone there;
+#                                  # migrated to repos once the machine reports its origin
+#     repos: { example-org/gadgets: /path/to/gadgets }  # adopted clones there, by GitHub
+#                                  # owner/name (absolute paths)
 #     volley_dir: /path/to/volley
 #     worktree_root: /path/to/worktrees  # default: .volley-worktrees beside repo
 #     tunnel:
@@ -109,6 +112,12 @@
 #       supervise: true            # volleyd keeps `ssh -N -R` up itself
 #     max_agents: 4                # supervised agents it runs at once (1..100); hard_ceiling caps the total
 #     drain: false                 # true: no new placements there; its running agents finish
+
+# Repositories by GitHub owner/name and the machines holding a clone of each (all, or a list of
+# machine names). A listed machine's clone is its hosts.<name>.repos entry, else the managed
+# clone at <fleet.repo_root>/<owner>/<name>. A wave file's repo: may name one. See README
+# "Repositories".
+# repos: {}                      # e.g. { example-org/widgets: { machines: all } }
 
 # --- Fleet: fresh base + merge nudge (README "Base ref", "The pipeline and the merge-ready gate") ---
 # require_fresh_base: true       # a failed `git fetch origin <release>` refuses the spawn (BASE_STALE,
@@ -133,6 +142,8 @@
 #     max_agents: 3              # agents on it at most (hard_ceiling still caps the total)
 #     per_machine: {}            # per heavy pool, its slots, e.g. { js-suite: 1, backend-it: 0 };
 #                                # a pool not named gets 1 when it sets per_machine
+#   repo_root: ~/.volley/repos   # managed clones at <repo_root>/<owner>/<name> on every machine
+#                                # (~: that machine's home)
 
 # --- Autopilot: decisions volleyd answers itself, and merging (README "Autopilot") ---
 # autopilot:

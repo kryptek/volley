@@ -101,7 +101,7 @@ describe("overlap warning at submit (daemon)", () => {
   let daemon: Daemon;
   let client: ControlClient;
   const wave = (id: string, issue: number) => `wave: ${id}
-repo: example-org/example-repo
+repo: /path/to/example-repo
 release_branch: release/${id}
 model: claude-opus-5-5
 pipeline: [implement, merge_ready]

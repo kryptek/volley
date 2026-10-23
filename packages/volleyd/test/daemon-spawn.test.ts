@@ -31,6 +31,7 @@ import {
   type FakeHost,
   type FakeRemoteHost,
   GREEN_DOCTOR,
+  adoptSpec,
   fakeHost,
   fakeRemoteHost,
 } from "./helpers/fake-host";
@@ -760,7 +761,7 @@ describe("placement at admission (SPEC §4.6.15)", () => {
             box = fakeRemoteHost(s, local);
             o.onBox?.(box);
           }
-          return box;
+          return adoptSpec(box, s);
         },
         credentials: memoryCredentials(),
       },

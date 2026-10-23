@@ -1,12 +1,18 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { WaveFileError, defaultPlacement, formatPlacement, parseWaveFile } from "../src/wave-file";
+import {
+  WaveFileError,
+  defaultPlacement,
+  formatPlacement,
+  parseWaveFile,
+  resolveWaveRepo,
+} from "../src/wave-file";
 
 const fixture = (name: string) =>
   readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf-8");
 
 const HEADER = `wave: w1
-repo: example-org/example-repo
+repo: /path/to/example-repo
 release_branch: release/w1
 model: claude-opus-5-5
 pipeline: [implement, merge_ready]
@@ -147,7 +153,7 @@ describe("parseWaveFile", () => {
     expect(branch).toHaveLength(1);
     expect(branch[0]).toMatch(/^release_branch: /);
     const repo = errorsOf(
-      `${HEADER.replace("example-org/example-repo", '"-uq"')}tasks:\n  T1: { issue: 1 }\n`,
+      `${HEADER.replace("/path/to/example-repo", '"-uq"')}tasks:\n  T1: { issue: 1 }\n`,
     );
     expect(repo).toHaveLength(1);
     expect(repo[0]).toMatch(/^repo: /);
@@ -422,5 +428,43 @@ describe("fixtures/waves/placement-auto.yaml", () => {
       ["T3", "local", false],
       ["T4", "auto", false],
     ]);
+  });
+});
+
+describe("resolveWaveRepo: a wave file's repo: may be an owner/name slug (D9)", () => {
+  const cfg = {
+    repos: { "Example-Org/Widgets": { machines: ["control" as string] } },
+    fleet: { repo_root: "~/.volley/repos" },
+    hosts: {},
+  };
+  const wave = (repo: string) =>
+    parseWaveFile(`${HEADER.replace("/path/to/example-repo", repo)}tasks:\n  T1: { issue: 1 }\n`);
+
+  it("a slug resolves to the supervisor's managed clone", () => {
+    expect(resolveWaveRepo(wave("example-org/widgets"), cfg, "control", "/path/to/home").repo).toBe(
+      "/path/to/home/.volley/repos/Example-Org/Widgets",
+    );
+  });
+
+  it("an adopted clone of the slug on the supervisor's machine wins", () => {
+    const adopted = { ...cfg, hosts: { control: { repos: { "example-org/widgets": "/src/w" } } } };
+    expect(
+      resolveWaveRepo(wave("example-org/widgets"), adopted, "control", "/path/to/home").repo,
+    ).toBe("/src/w");
+  });
+
+  it("a path is still a path", () => {
+    for (const p of ["/srv/repo", "~/repos/example", "./example-org/widgets", "r"]) {
+      expect(resolveWaveRepo(wave(p), cfg, "control", "/path/to/home").repo).toBe(p);
+    }
+  });
+
+  it("an unknown slug is a submit error naming volley repo add", () => {
+    expect(() => resolveWaveRepo(wave("someone/else"), cfg, "control", "/path/to/home")).toThrow(
+      "repo: no clone of someone/else on control: add it (Settings → Repositories, or volley repo add someone/else --machine control)",
+    );
+    expect(() =>
+      resolveWaveRepo(wave("example-org/widgets"), cfg, "other", "/path/to/home"),
+    ).toThrow(WaveFileError);
   });
 });

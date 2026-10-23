@@ -691,3 +691,90 @@ describe("placement.weights: never all four at 0 (SPEC §4.6.15)", () => {
     expect(c.waveOverrideErrors({})).toEqual([]);
   });
 });
+
+describe("ConfigStore.migrateLegacyRepo: hosts.<name>.repo → repos (D10)", () => {
+  const LEGACY =
+    "hosts:\n  box-a:\n    target: dev@box-a\n    repo: /srv/work/widgets\n    volley_dir: /opt/volley\n";
+  const journaled = () =>
+    readJournalFile(join(home, "waves", SYSTEM_WAVE, "journal.jsonl")).filter(
+      (e) => e.type === "config_changed",
+    );
+
+  it("moves the clone under its slug, assigns the machine, keeps its worktrees, journals one config_changed", () => {
+    writeFileSync(join(home, "config.yaml"), LEGACY);
+    const c = open();
+    const r = c.migrateLegacyRepo("box-a", "github.com/example-org/widgets", "volleyd");
+    expect(r).toEqual({ applied: true, rejected: [], version: 2 });
+    const eff = c.effective();
+    expect(eff.repos).toEqual({ "example-org/widgets": { machines: ["box-a"] } });
+    expect(eff.hosts["box-a"]).toEqual({
+      target: "dev@box-a",
+      volley_dir: "/opt/volley",
+      repos: { "example-org/widgets": "/srv/work/widgets" },
+      // Where its worktrees already were (the legacy default beside the clone).
+      worktree_root: "/srv/work/.volley-worktrees",
+    });
+    expect(eff.hosts["box-a"]?.repo).toBeUndefined();
+    const evs = journaled();
+    expect(evs).toHaveLength(1);
+    expect(evs[0]?.data).toMatchObject({
+      by: "volleyd",
+      patch: {
+        repos: { "example-org/widgets": { machines: ["box-a"] } },
+        hosts: {
+          "box-a": {
+            repo: null,
+            repos: { "example-org/widgets": "/srv/work/widgets" },
+            worktree_root: "/srv/work/.volley-worktrees",
+          },
+        },
+      },
+      previous: { hosts: { "box-a": { repo: "/srv/work/widgets" } } },
+      version: 2,
+    });
+    // Survives a restart; a second fold changes nothing.
+    const again = open();
+    expect(again.effective().hosts["box-a"]?.repos).toEqual({
+      "example-org/widgets": "/srv/work/widgets",
+    });
+    expect(again.migrateLegacyRepo("box-a", "github.com/example-org/widgets", "volleyd")).toEqual({
+      applied: false,
+      rejected: [],
+    });
+    expect(journaled()).toHaveLength(1);
+  });
+
+  it("adds the machine to an existing assignment, leaves `all` and an explicit worktree_root alone", () => {
+    writeFileSync(
+      join(home, "config.yaml"),
+      `${LEGACY}    worktree_root: /wt\n  box-b:\n    target: dev@box-b\n    repo: /srv/b\n    volley_dir: /opt/volley\nrepos:\n  Example-Org/Widgets: { machines: [mini] }\n  example-org/all: { machines: all }\n`,
+    );
+    const c = open();
+    expect(c.migrateLegacyRepo("box-a", "github.com/example-org/widgets", "volleyd").applied).toBe(
+      true,
+    );
+    expect(c.effective().repos["Example-Org/Widgets"]).toEqual({ machines: ["mini", "box-a"] });
+    expect(c.effective().hosts["box-a"]).toMatchObject({
+      worktree_root: "/wt",
+      repos: { "Example-Org/Widgets": "/srv/work/widgets" },
+    });
+    expect(c.migrateLegacyRepo("box-b", "github.com/example-org/all", "volleyd").applied).toBe(
+      true,
+    );
+    expect(c.effective().repos["example-org/all"]).toEqual({ machines: "all" });
+  });
+
+  it("leaves a host without an origin, a non-GitHub origin, or no repo untouched", () => {
+    writeFileSync(join(home, "config.yaml"), LEGACY);
+    const c = open();
+    for (const origin of [undefined, null, "gitlab.example/o/r"]) {
+      expect(c.migrateLegacyRepo("box-a", origin, "volleyd")).toEqual({
+        applied: false,
+        rejected: [],
+      });
+    }
+    expect(c.migrateLegacyRepo("nobody", "github.com/o/r", "volleyd").applied).toBe(false);
+    expect(readFileSync(join(home, "config.yaml"), "utf-8")).toBe(LEGACY);
+    expect(journaled()).toHaveLength(0);
+  });
+});

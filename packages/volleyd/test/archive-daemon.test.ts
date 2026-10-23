@@ -18,7 +18,7 @@ const WAVE = "w-arch";
 const OWNER = "coord-a";
 const H = 3_600_000;
 const yaml = (wave: string) => `wave: ${wave}
-repo: example-org/example-repo
+repo: /path/to/example-repo
 release_branch: release/${wave}
 model: claude-opus-5-5
 pipeline: [implement, merge_ready]

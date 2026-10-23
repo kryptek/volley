@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { parse, stringify } from "yaml";
 import { dateOf, systemClock } from "./clock";
-import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR } from "./config-defaults";
+import { CONFIG_DEFAULTS, DEFAULTS_AUTHOR, REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import { LOCAL_HOST, localMachineName } from "./fleet-name";
 import { type Journal, writeFileAtomic } from "./journal";
+import { originToSlug, slugKey } from "./repos";
 import { type PathError, toPathErrors, validator } from "./schemas";
 import type { ConfigPayload, LocalAgentsMode, Tunables, TunablesPatch, WaveId } from "./types";
 
@@ -393,6 +394,51 @@ export class ConfigStore {
     // A null leaf is how a removal reads in the journal; it is never a valid config_set patch.
     const patch = { hosts: { [name]: null } } as unknown as TunablesPatch;
     return this.commit(nextLayer, merge(this.defaults, nextLayer), patch, previous, by);
+  }
+
+  /**
+   * D10: a host's legacy `hosts.<name>.repo`, once its machine record reports the clone's
+   * `origin`, becomes `hosts.<name>.repos.<owner/name>` with the machine added to
+   * `repos.<owner/name>.machines` (unless `all`). Its worktrees stay where they were: an unset
+   * `worktree_root` is pinned to the legacy default beside the clone. Idempotent (a host without
+   * `repo` in config.yaml is left alone), and a non-GitHub origin keeps the legacy key. Journaled
+   * as one `config_changed` whose patch sets `repo: null`.
+   */
+  migrateLegacyRepo(name: string, origin: string | null | undefined, by: string): PatchResult {
+    const nothing: PatchResult = { applied: false, rejected: [] };
+    const host = this.fileLayer.hosts?.[name];
+    const found = originToSlug(origin);
+    if (host?.repo === undefined || found === undefined) return nothing;
+    const repo = host.repo;
+    const slug = slugKey(this.global.repos, found) ?? found;
+    const machines = this.global.repos[slug]?.machines ?? [];
+    const assignment =
+      machines === "all" || machines.includes(name) ? undefined : { machines: [...machines, name] };
+    const hostPatch: Plain = {
+      repo: null,
+      // An adopted clone already listed for the slug wins over the legacy one.
+      ...(slugKey(host.repos, slug) === undefined ? { repos: { [slug]: repo } } : {}),
+      ...(host.worktree_root === undefined
+        ? { worktree_root: posix.join(posix.dirname(repo), REMOTE_HOST_DEFAULTS.worktree_dir) }
+        : {}),
+    };
+    const patch = {
+      ...(assignment !== undefined ? { repos: { [slug]: assignment } } : {}),
+      hosts: { [name]: hostPatch },
+    } as unknown as TunablesPatch;
+    const { repo: _legacy, ...rest } = host;
+    const { repo: _null, ...set } = hostPatch;
+    const nextLayer = merge(
+      { ...this.fileLayer, hosts: { ...this.fileLayer.hosts, [name]: rest } },
+      {
+        ...(assignment !== undefined ? { repos: { [slug]: assignment } } : {}),
+        hosts: { [name]: set },
+      },
+    );
+    const nextGlobal = merge(this.defaults, nextLayer);
+    const rejected = tunablesErrors(nextGlobal, this.hostname);
+    if (rejected.length > 0) return { applied: false, rejected };
+    return this.commit(nextLayer, nextGlobal, patch, pick(this.global, patch), by);
   }
 
   /** Write config.yaml atomically, journal `config_changed`, bump `version`, notify listeners. */

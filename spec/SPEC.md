@@ -544,6 +544,7 @@ A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out
 - `agent_auto_compact_pct` — integer 0..100, default 85 (below).
 - `public_hygiene` — `auto` | `on` | `off`, default `auto`: what review roles flag as public hygiene (§4.6.8).
 - `hosts` — default `{}`; `{ <name>: { type?, target, repo, worktree_root?, volley_dir, tunnel?: { remote_port, supervise }, max_agents?, drain? } }`: remote SSH + tmux hosts a wave task names with `host:`, or placement chooses; `<name>` is never `local` or `auto`.
+- `repos` — default `{}`; `{ <owner/name>: { machines: all | [<name>] } }`: repositories by canonical GitHub `owner/name` (compared case-insensitively) and the machines holding a clone of each; a listed machine's clone is its adopted one, `hosts.<name>.repos: { <owner/name>: <absolute path> }`, else the managed one under `fleet.repo_root`; the deprecated `hosts.<name>.repo` is still accepted, and migrated to both once the machine's record reports its clone's origin. A wave file's `repo:` may name one.
 - `require_fresh_base` — boolean, default `true` (§4.6.15).
 - `retire_close_session` — boolean, default `true`: retiring an agent also ends its session (below).
 - `placement.default` — `local` | `auto`, default `auto` (§4.6.15).
@@ -563,6 +564,7 @@ A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out
 - `fleet.local_agents` — default `null` (§4.6.15).
 - `fleet.fallback.max_agents` — default 3 (§4.6.15).
 - `fleet.fallback.per_machine` — default `{}` (§4.6.15).
+- `fleet.repo_root` — default `~/.volley/repos`: managed clones at `<repo_root>/<owner>/<name>` on each machine, `~` being that machine's home.
 - `autopilot.enabled` — boolean, default `true` (§4.6.16).
 - `autopilot.owner_only` — default `[plan_change, repo_untrusted, model_switch, release_go, stage_go]` (§4.6.16).
 - `autopilot.relaunch_max` — default 1 (§4.6.16).

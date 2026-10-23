@@ -18,9 +18,10 @@ import {
 import { fetchFailure, lockedFetch } from "../git-lock";
 import { type DoctorReport, parseDoctorReport } from "../machines";
 import { PATH_TOOLS, type PathProbe, parsePathProbe } from "../readiness";
+import { type MachineFacts, cloneSource, managedWorktreeRoot } from "../repos";
 import { SpawnError } from "../spawn-error";
 import { withTrust } from "../trust";
-import type { RemoteHostConfig } from "../types";
+import type { RemoteHostConfig, Tunables } from "../types";
 import { EXCLUDE_LINES, firstLine, freshBaseFix } from "../worktree";
 import type {
   Host,
@@ -32,24 +33,63 @@ import type {
   WorktreeSpec,
 } from "./host";
 
-/** A remote host with every key resolved (config `hosts.<name>` ← the task's inline `host:`). */
+/**
+ * A remote host with every key resolved (config `hosts.<name>` ← the task's inline `host:`), for
+ * one repository: `slug` and its clone (`repo`) and worktree root there. A repo-less spec (the
+ * doctor, sign-in) has none of the three.
+ */
 export interface RemoteHostSpec {
   name: string;
   target: string;
-  repo: string;
-  worktree_root: string;
+  /** The repository's GitHub `owner/name`; absent for a legacy (non-GitHub) or repo-less spec. */
+  slug?: string;
+  repo?: string;
+  worktree_root?: string;
   volley_dir: string;
   tunnel: { remote_port: number; supervise: boolean };
 }
 
+/** A spec for one repository: its clone and worktree root are always resolved. */
+export type RepoHostSpec = RemoteHostSpec & { repo: string; worktree_root: string };
+
+/** What resolving a host's clone of one repository reads (config `repos`, `fleet.repo_root`). */
+export interface SlugTarget extends MachineFacts {
+  slug: string;
+  repos: Tunables["repos"];
+  repo_root: string;
+}
+
+/**
+ * Which clone a spec resolves: one repository's (`SlugTarget`), the host's own `repo` (`legacy`:
+ * a wave whose repository is not on GitHub) or none (`none`: the doctor and sign-in paths).
+ */
+export type RepoTarget = SlugTarget | "legacy" | "none";
+
+const missingOf = (h: RemoteHostConfig, keys: readonly ("target" | "repo" | "volley_dir")[]) =>
+  keys.filter((k) => h[k] === undefined);
+
 /**
  * Resolve a task's host: the config entry `hosts.<name>`, with the task's inline `host:` layered
- * over it, and defaults for the rest. Throws LAUNCH_FAILED naming what is missing.
+ * over it, and defaults for the rest; its clone and worktree root for `repo` (a slug's, by
+ * `cloneSource`; an inline `repo` wins). Throws LAUNCH_FAILED naming what is missing.
  */
 export function resolveRemoteHost(
   name: string,
   inline: (RemoteHostConfig & { name?: string }) | undefined,
   configured: Record<string, RemoteHostConfig>,
+  repo?: SlugTarget | "legacy",
+): RepoHostSpec;
+export function resolveRemoteHost(
+  name: string,
+  inline: (RemoteHostConfig & { name?: string }) | undefined,
+  configured: Record<string, RemoteHostConfig>,
+  repo: RepoTarget,
+): RemoteHostSpec;
+export function resolveRemoteHost(
+  name: string,
+  inline: (RemoteHostConfig & { name?: string }) | undefined,
+  configured: Record<string, RemoteHostConfig>,
+  repo: RepoTarget = "legacy",
 ): RemoteHostSpec {
   const base = Object.hasOwn(configured, name) ? configured[name] : undefined;
   if (base === undefined && inline === undefined) {
@@ -61,25 +101,74 @@ export function resolveRemoteHost(
     ...over,
     tunnel: { ...base?.tunnel, ...inline?.tunnel },
   };
-  const missing = (["target", "repo", "volley_dir"] as const).filter((k) => h[k] === undefined);
+  const missing = missingOf(
+    h,
+    repo === "legacy" ? ["target", "repo", "volley_dir"] : ["target", "volley_dir"],
+  );
   if (missing.length > 0) {
     throw new SpawnError("LAUNCH_FAILED", `host '${name}' has no ${missing.join(", ")}`, {
       host: name,
       missing,
     });
   }
-  const repo = h.repo as string;
-  return {
+  const spec: RemoteHostSpec = {
     name,
     target: h.target as string,
-    repo,
-    worktree_root:
-      h.worktree_root ?? posix.join(posix.dirname(repo), REMOTE_HOST_DEFAULTS.worktree_dir),
     volley_dir: h.volley_dir as string,
     tunnel: {
       remote_port: h.tunnel?.remote_port ?? REMOTE_HOST_DEFAULTS.remote_port,
       supervise: h.tunnel?.supervise ?? REMOTE_HOST_DEFAULTS.supervise_tunnel,
     },
+  };
+  if (repo === "none") return spec;
+  // A legacy spec (and an inline `repo`) is the host's own clone; any other is a slug's.
+  const slug = repo === "legacy" ? undefined : repo.slug;
+  const clone =
+    repo === "legacy" || over.repo !== undefined
+      ? { path: h.repo as string, kind: "legacy" as const, slug }
+      : cloneSource(
+          {
+            repos: repo.repos,
+            fleet: { repo_root: repo.repo_root },
+            hosts: {
+              [name]: {
+                ...(base?.repo !== undefined ? { repo: base.repo } : {}),
+                ...(h.repos !== undefined ? { repos: h.repos } : {}),
+              },
+            },
+          },
+          name,
+          repo.slug,
+          repo,
+        );
+  if (clone === undefined) {
+    throw new SpawnError(
+      "LAUNCH_FAILED",
+      `host '${name}' has no clone of ${slug}: add it (Settings → Repositories, or volley repo add ${slug} --machine ${name})`,
+      { host: name, slug },
+    );
+  }
+  // A legacy clone keeps its worktrees beside it; any other is under the repository's managed root.
+  const worktree_root =
+    h.worktree_root ??
+    (clone.kind === "legacy" || clone.slug === undefined
+      ? posix.join(posix.dirname(clone.path), REMOTE_HOST_DEFAULTS.worktree_dir)
+      : managedWorktreeRoot(repo === "legacy" ? undefined : repo.home, clone.slug));
+  // Only a managed path can still hold a `~` (an unknown home); config paths are absolute.
+  for (const p of [clone.path, worktree_root]) {
+    if (!p.startsWith("/")) {
+      throw new SpawnError(
+        "LAUNCH_FAILED",
+        `host '${name}': ${p} needs the machine's home directory, which is not known yet; set hosts.${name}.repos.${slug} and hosts.${name}.worktree_root to absolute paths`,
+        { host: name, slug, path: p },
+      );
+    }
+  }
+  return {
+    ...spec,
+    ...(slug !== undefined ? { slug } : {}),
+    repo: clone.path,
+    worktree_root,
   };
 }
 
@@ -124,6 +213,9 @@ export interface RemoteHost extends Host {
    */
   runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport>;
 }
+
+/** A remote host resolved for one repository (`resolveRemoteHost` with a slug, or legacy). */
+export type RepoRemoteHost = RemoteHost & { readonly spec: RepoHostSpec };
 
 /** The fence tokens and bound a `run` may carry. */
 export type RemoteRunOptions = Pick<
@@ -203,7 +295,8 @@ export class SshTmuxHost implements RemoteHost {
       {
         remote: {
           steps,
-          host: { name: this.spec.name, worktree_root: this.spec.worktree_root },
+          // A repo-less spec (doctor, sign-in) has no worktree root: no profile passes the check.
+          host: { name: this.spec.name, worktree_root: this.spec.worktree_root ?? "" },
         },
         timeoutMs: opts.timeoutMs ?? DAEMON_DEFAULTS.remote_exec_timeout_ms,
         ...(opts.consent !== undefined ? { consent: opts.consent } : {}),
@@ -646,9 +739,15 @@ export class SshTmuxHost implements RemoteHost {
 
   /** True when the box has a clone at `repo`, false when git says it has none. */
   async repoExists(): Promise<boolean> {
-    const r = await this.run([
-      { argv: ["git", "-C", this.spec.repo, "rev-parse", "--git-dir"] },
-    ]).catch(this.noResult("repo check"));
+    const repo = this.spec.repo;
+    if (repo === undefined) {
+      throw new SpawnError("LAUNCH_FAILED", `host '${this.name}': no repository to check`, {
+        host: this.name,
+      });
+    }
+    const r = await this.run([{ argv: ["git", "-C", repo, "rev-parse", "--git-dir"] }]).catch(
+      this.noResult("repo check"),
+    );
     if (r === null || transportFailed(r)) throw this.sshFailed("repo check", r);
     return r.code === 0;
   }

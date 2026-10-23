@@ -49,6 +49,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   agent_auto_compact_pct: 85,
   public_hygiene: "auto",
   hosts: {},
+  repos: {},
   // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
   require_fresh_base: true,
   retire_close_session: true,
@@ -66,7 +67,12 @@ export const CONFIG_DEFAULTS: Tunables = {
   },
   // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
   // local_agents null: fallback once any hosts.<name> is configured, else always.
-  fleet: { local_name: null, local_agents: null, fallback: { max_agents: 3, per_machine: {} } },
+  fleet: {
+    local_name: null,
+    local_agents: null,
+    fallback: { max_agents: 3, per_machine: {} },
+    repo_root: "~/.volley/repos",
+  },
   // --- Autopilot: decisions volleyd answers itself (SPEC §4.6.16); merging (SPEC §4.6.17) ---
   autopilot: {
     enabled: true,
@@ -95,15 +101,20 @@ export const CONFIG_DEFAULTS: Tunables = {
 };
 
 /**
- * The defaults a daemon starts from: CONFIG_DEFAULTS, with `worktree_root` under
- * `$VOLLEYD_HOME/worktrees` when VOLLEYD_HOME is set (a second, smoke daemon keeps its
- * worktrees beside its state). config.yaml and per-wave `config:` still override it.
+ * The defaults a daemon starts from: CONFIG_DEFAULTS, with `worktree_root` and
+ * `fleet.repo_root` under `$VOLLEYD_HOME/worktrees` and `$VOLLEYD_HOME/repos` when VOLLEYD_HOME
+ * is set (a second, smoke daemon keeps its worktrees and clones beside its state). config.yaml
+ * and per-wave `config:` still override them.
  */
 export function defaultsFor(env: { VOLLEYD_HOME?: string | undefined }): Tunables {
   const home = env.VOLLEYD_HOME;
   return home === undefined || home === ""
     ? CONFIG_DEFAULTS
-    : { ...CONFIG_DEFAULTS, worktree_root: join(home, "worktrees") };
+    : {
+        ...CONFIG_DEFAULTS,
+        worktree_root: join(home, "worktrees"),
+        fleet: { ...CONFIG_DEFAULTS.fleet, repo_root: join(home, "repos") },
+      };
 }
 
 /** Defaults for a remote host's unset keys (config `hosts.<name>`). */

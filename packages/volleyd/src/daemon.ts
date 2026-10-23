@@ -275,6 +275,8 @@ import { LocalCmuxHost } from "./hosts/local-cmux";
 import {
   type RemoteHost,
   type RemoteHostSpec,
+  type RepoRemoteHost,
+  type SlugTarget,
   SshTmuxHost,
   resolveRemoteHost,
   sessionName,
@@ -356,6 +358,7 @@ import {
 } from "./readiness";
 import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure } from "./reducer";
 import { readRepoView } from "./repo-visibility";
+import { legacyOrigin, waveSlug } from "./repos";
 import {
   type Admission,
   admit,
@@ -390,7 +393,7 @@ import type {
   WaveTask,
 } from "./types";
 import { SYSTEM_WAVE } from "./types";
-import { type PlacementDefaults, WaveFileError, parseWaveFile } from "./wave-file";
+import { type PlacementDefaults, WaveFileError, parseWaveFile, resolveWaveRepo } from "./wave-file";
 
 import {
   BLOCKED_TASK_CANCELLED,
@@ -1826,6 +1829,7 @@ export class Daemon {
             return;
           }
           const keptNewer = this.machines.observe(record, { heard });
+          this.migrateLegacyRepo(name);
           if (record.tunnel === "up" && heard) this.sampleHost(name, record);
           // The box's beat still carries its service's older doctor run: re-assert the newer one
           // (a Repair's) over it, so clients never see the stale checks again.
@@ -4111,7 +4115,7 @@ export class Daemon {
       throw new Error(`${closed.line}: ${task}'s ${role} waits for its re-place question`);
     }
     if (this.parkUnplaced(wave, task)) throw new Error(`${task}'s ${role} waits: not placed yet`);
-    let remote: RemoteHost | undefined;
+    let remote: RepoRemoteHost | undefined;
     if (t.host !== "local") {
       try {
         remote = this.remoteHost(wave, t);
@@ -4906,18 +4910,55 @@ export class Daemon {
     return true;
   }
 
-  /** The task's remote host: config `hosts.<name>` ← its inline `host:`. Throws if unresolvable. */
-  private remoteHost(wave: WaveId, t: WaveTask): RemoteHost {
+  /**
+   * The task's remote host: config `hosts.<name>` ← its inline `host:`, resolved for the wave's
+   * repository (its clone of `waveSlug`; a non-GitHub wave: the host's own `repo`). Throws if
+   * unresolvable.
+   */
+  private remoteHost(wave: WaveId, t: WaveTask): RepoRemoteHost {
     if (t.host === AUTO_HOST) throw new Error(`host 'auto' reached the host resolver for ${t.id}`);
+    const eff = this.config.effective(wave);
+    const slug = this.slugOf(wave);
+    const target: SlugTarget | "legacy" =
+      slug === undefined
+        ? "legacy"
+        : {
+            slug,
+            repos: eff.repos,
+            repo_root: eff.fleet.repo_root,
+            origin: legacyOrigin(
+              this.machines.record(t.host)?.repo,
+              t.host_spec?.repo ?? eff.hosts[t.host]?.repo,
+            ),
+          };
+    // The spec carries its clone, so the host built from it is one repository's.
     return this.remoteBySpec(
-      resolveRemoteHost(t.host, t.host_spec, this.config.effective(wave).hosts),
-    );
+      resolveRemoteHost(t.host, t.host_spec, eff.hosts, target),
+    ) as RepoRemoteHost;
   }
 
-  /** The configured host `name` (no task's inline `host:`), or why it cannot be reached. */
+  /**
+   * The wave's repository slug (`waveSlug`): its state's `github`, else the supervisor clone's
+   * origin as its own doctor last read it (only when that run checked this wave's clone).
+   */
+  private slugOf(wave: WaveId): string | undefined {
+    const rec = this.waves.get(wave)?.record;
+    if (rec === undefined) return undefined;
+    const repo = rec.wave?.repo;
+    const checked =
+      typeof repo === "string" &&
+      repo !== "" &&
+      this.localDoctorRepo === resolve(repoDir(repo)) &&
+      this.localReport?.repo?.origin;
+    return waveSlug(rec, typeof checked === "string" ? checked : undefined);
+  }
+
+  /** The configured host `name` (no task's inline `host:`, no repository), or why it cannot be reached. */
   private remoteFor(name: string): RemoteHost | string {
     try {
-      return this.remoteBySpec(resolveRemoteHost(name, undefined, this.config.effective().hosts));
+      return this.remoteBySpec(
+        resolveRemoteHost(name, undefined, this.config.effective().hosts, "none"),
+      );
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
     }
@@ -5637,8 +5678,29 @@ export class Daemon {
       return;
     }
     this.machines.observe(record, { heard: false });
+    this.migrateLegacyRepo(name);
     await this.publish(machineTopic(name), this.envelope(MACHINE_CHANNEL, "machine", record), true);
     await this.publishReadiness(name);
+  }
+
+  /**
+   * D10: a host whose config.yaml still carries the legacy `hosts.<name>.repo` migrates to
+   * `repos` once its record reports that clone's origin (`ConfigStore.migrateLegacyRepo`). Run on
+   * every fold: records arrive whenever the machine beats, and a migrated host has no `repo`.
+   */
+  private migrateLegacyRepo(name: string): void {
+    // The record's clone must be the one config names: its origin says nothing about another.
+    const origin = legacyOrigin(
+      this.machines.record(name)?.repo,
+      this.config.effective().hosts[name]?.repo,
+    );
+    if (origin === undefined) return;
+    const r = this.config.migrateLegacyRepo(name, origin, "volleyd");
+    if (r.applied) this.log(`hosts.${name}.repo migrated to repos (origin ${origin})`);
+    else if (r.rejected.length > 0) {
+      const why = r.rejected.map((e) => `${e.path}: ${e.reason}`).join("; ");
+      this.log(`hosts.${name}.repo not migrated: ${why}`);
+    }
   }
 
   /**
@@ -5727,7 +5789,7 @@ export class Daemon {
   private async remoteSpawn(
     wave: WaveId,
     task: string,
-    remote: RemoteHost,
+    remote: RepoRemoteHost,
     deps: SpawnDeps,
   ): Promise<{ wave: NonNullable<WaveLog["record"]["wave"]>; deps: Partial<SpawnDeps> }> {
     const log = this.waves.get(wave) as WaveLog;
@@ -10375,11 +10437,20 @@ export class Daemon {
       return { ok: false, error: `${op} requires payload.wave_yaml` };
     const source = typeof p.source === "string" ? p.source : undefined;
     try {
-      const wave = parseWaveFile(p.wave_yaml, source, this.placementDefaults());
+      const first = parseWaveFile(p.wave_yaml, source, this.placementDefaults());
       // A known wave: parsed again under its own placement (the file's own placement: still wins).
-      return this.waves.get(wave.wave)?.record.wave == null
-        ? wave
-        : parseWaveFile(p.wave_yaml, source, this.placementDefaults(wave.wave));
+      const wave =
+        this.waves.get(first.wave)?.record.wave == null
+          ? first
+          : parseWaveFile(p.wave_yaml, source, this.placementDefaults(first.wave));
+      // An `owner/name` repo: is the supervisor's own clone of it (D9).
+      return resolveWaveRepo(
+        wave,
+        this.config.effective(),
+        this.config.localName(),
+        homedir(),
+        source,
+      );
     } catch (e) {
       if (e instanceof WaveFileError) return { ok: false, error: e.message, errors: e.errors };
       throw e;

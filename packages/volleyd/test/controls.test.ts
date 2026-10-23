@@ -25,7 +25,7 @@ import { tempDir } from "./helpers/tmp";
 
 const WAVE = "w-ctl";
 const yaml = (wave: string) => `wave: ${wave}
-repo: example-org/example-repo
+repo: /path/to/example-repo
 release_branch: release/${wave}
 model: claude-opus-5-5
 pipeline: [implement, merge_ready]

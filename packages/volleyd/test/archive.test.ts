@@ -18,7 +18,7 @@ const WAVE = "w-arch";
 const T0 = "2026-10-20T10:00:00.000Z";
 const H = 3_600_000;
 const wave = parseWaveFile(`wave: ${WAVE}
-repo: example-org/example-repo
+repo: /path/to/example-repo
 release_branch: release/${WAVE}
 model: claude-opus-5-5
 pipeline: [implement, merge_ready]
