@@ -94,7 +94,8 @@ import { branchName, expandHome, releaseBranchName, worktreePath } from "./workt
  *   a profile's first-run screen (#400): its workspace closed, the profile seeded
  *                                                                   → profile_repaired, then the
  *     one relaunch as above in a new workspace (recovery: first_run); a second → unknown_screen
- *     (either relaunch is the spawn's only one: an update prompt after it is unknown_screen too)
+ *     (either relaunch is the spawn's only one: an update prompt after it, or a first-run screen
+     after the update-prompt relaunch, is unknown_screen too)
  *   hook signals verified                                           → agent_registered
  *   hooks verified, the MCP server's status missing                 → verify_failed, then
  *     decision_opened (mcp_not_registered)
@@ -710,7 +711,11 @@ async function launchAttempt(
   if (remoteProfile !== undefined && deps.seedProfile !== undefined) {
     await deps
       .seedProfile({ id: accountId(req), dir: remoteProfile, machine: machineOf(ctx) })
-      .catch(() => undefined);
+      .catch((e) =>
+        deps.log?.(
+          `profile ${accountId(req)}: not prepared before its launch on ${machineOf(ctx)}: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      );
   }
 
   const parent = deps.owner ?? SUPERVISOR;
@@ -1022,7 +1027,7 @@ async function verifyAndRecover(
     const cls = result.screen_class;
     if (isFirstRunScreen(cls)) {
       const dir = profileDirOf(ctx.req);
-      if (!repaired && dir !== undefined && deps.seedProfile !== undefined) {
+      if (!recovered && dir !== undefined && deps.seedProfile !== undefined) {
         repaired = true;
         try {
           cur = await repairFirstRun(ctx, cur, issue, cls, dir);
@@ -1036,7 +1041,9 @@ async function verifyAndRecover(
       const last = lastOutput(result.screen);
       const why = repaired
         ? "volleyd prepared the profile and relaunched it once, and it stopped there again"
-        : dir === undefined
+        : recovered
+          ? "volleyd already relaunched it once (after an update prompt): finish Claude Code's setup in that profile"
+          : dir === undefined
           ? "volleyd prepares only the account profiles it signs in: run claude there once and finish its setup"
           : "volleyd cannot prepare the profile here";
       const decisionId = await openDecision(

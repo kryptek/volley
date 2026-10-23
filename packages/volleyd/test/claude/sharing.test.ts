@@ -248,6 +248,16 @@ describe("seedProfile", () => {
     expect(seedProfile(t.profile, {})["settings.json"]).toEqual([]);
     expect(readFileSync(join(t.primary, "settings.json"), "utf-8")).toBe('{"model":"opus"}\n');
   });
+
+  it("refuses a settings.json that is not a JSON object, and leaves it as it was", () => {
+    for (const text of ["{ \"model\": ", "[1]"]) {
+      const s = setup();
+      const settings = join(s.profile, "settings.json");
+      writeFileSync(settings, text);
+      expect(() => seedProfile(s.profile, {})).toThrow(SharingError);
+      expect(readFileSync(settings, "utf-8")).toBe(text);
+    }
+  });
 });
 
 describe("profileReady", () => {

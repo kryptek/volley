@@ -8,7 +8,8 @@
   "bin": { "volleyd": "./src/cli.ts" },
   "exports": {
     "./claude/sharing": "./src/claude/sharing.ts",
-    "./paired-hosts": "./src/paired-hosts.ts"
+    "./paired-hosts": "./src/paired-hosts.ts",
+    "./procs": "./src/procs.ts"
   },
   "scripts": {
     "test": "vitest run",

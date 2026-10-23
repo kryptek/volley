@@ -182,6 +182,23 @@ const readJson = (path: string): Record<string, unknown> | null => {
 };
 
 /**
+ * A profile's `settings.json` object to edit: absent is `{}`; present but not a JSON object
+ * throws, so a hand-edit with a typo is never replaced by the seed's single key.
+ */
+const readSettings = (path: string): Record<string, unknown> => {
+  if (!present(path)) return {};
+  let v: unknown;
+  try {
+    v = JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    v = undefined;
+  }
+  if (typeof v !== "object" || v === null || Array.isArray(v))
+    throw new SharingError(`${path} is not a JSON object; fix it, and volleyd prepares the profile`);
+  return v as Record<string, unknown>;
+};
+
+/**
  * Edit a profile's `.claude.json` under the same mkdir lock Claude Code takes (`<file>.lock/`):
  * read → `edit` (null: nothing to change) → write a temp file (0600) → rename. A lock older than
  * `claude_json_lock_stale_ms` was left by a process that died holding it, and is taken over.
@@ -350,7 +367,7 @@ export function seedProfile(
   );
   const settings = join(profileDir, "settings.json");
   if (!(present(settings) && lstatSync(settings).isSymbolicLink())) {
-    const e = onboardingEdits({}, readJson(settings) ?? {});
+    const e = onboardingEdits({}, readSettings(settings));
     if (e.keys["settings.json"].length > 0) {
       const tmp = `${settings}.volleyd.tmp`;
       writeFileSync(tmp, `${JSON.stringify(e.settings, null, 2)}\n`, { mode: 0o600 });

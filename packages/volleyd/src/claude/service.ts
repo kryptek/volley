@@ -321,6 +321,8 @@ export class ClaudeService {
   private async seedLocal(acct: { id: string; dir: string }): Promise<ProfileKeys | null> {
     const missing = profileReady(acct.dir);
     if (missing[".claude.json"].length === 0 && missing["settings.json"].length === 0) return null;
+    // Fail-open on purpose: a ps that fails counts no session. The worst case is a write a running
+    // session discards, and the first-run repair at launch covers that.
     const running = await sessionsRunningIn(this.d.exec, acct.dir).catch(() => 0);
     if (running > 0) {
       this.d.log(

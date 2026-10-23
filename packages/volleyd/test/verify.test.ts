@@ -522,6 +522,18 @@ describe("verify through hook signals (Aedes)", () => {
       expect(d?.data).toMatchObject({ screen_class: "first_run_theme" });
     });
 
+    it("an update prompt, then a first-run screen: no second relaunch, unknown_screen", async () => {
+      const { verified, seeded } = await firstRun(
+        [screen("update-prompt.txt"), screen("first-run-theme.txt")],
+        () => false,
+      );
+      expect(verified).toMatchObject({ kind: "decision", decision: "unknown_screen" });
+      expect(seeded).toEqual([]);
+      expect(env.events.some((e) => e.type === "profile_repaired")).toBe(false);
+      const d = env.events.find((e) => e.type === "decision_opened");
+      expect(d?.data.question).toContain("already relaunched it once");
+    });
+
     it("the bypass-permissions confirmation is named as such", async () => {
       await firstRun([screen("bypass-consent.txt")], () => false);
       const d = env.events.find((e) => e.type === "decision_opened");

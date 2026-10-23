@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { type ProfileKeys, missingProfileKeys, seedProfile } from "volleyd/claude/sharing";
+import { launchProfileOf, mcpConfigOf, parsePs } from "volleyd/procs";
 import type { Check, Facts } from "../doctor";
 
 /**
@@ -27,26 +28,22 @@ const readObject = (path: string): Record<string, unknown> | null => {
   }
 };
 
-/** A launch script's profile line (volleyd's renderLaunchScript). */
-const LAUNCH_PROFILE = /^export CLAUDE_CONFIG_DIR='((?:[^']|'\\'')*)'$/m;
-const MCP_CONFIG = /(?:^|\s)--mcp-config=(?:'([^']*)'|"([^"]*)"|(\S+))/;
-
 /**
  * The CLAUDE_CONFIG_DIR of each running agent session: `ps` lists them by their
- * `--mcp-config=<worktree>/.volley/mcp.json`, and that worktree's launch.sh names the profile.
+ * `--mcp-config=<worktree>/.volley/mcp.json`, and that worktree's launch.sh names the profile
+ * (parsed as volleyd's sessionsRunningIn does).
  */
 async function runningProfiles(
   sh: (argv: string[]) => Promise<{ code: number; stdout: string }>,
 ): Promise<string[]> {
   const r = await sh(["ps", "-axo", "pid=,command="]);
   if (r.code !== 0) return [];
-  return r.stdout.split("\n").flatMap((line) => {
-    const m = MCP_CONFIG.exec(line);
-    const mcp = m === null ? undefined : (m[1] ?? m[2] ?? m[3]);
-    if (mcp === undefined || mcp === "") return [];
+  return parsePs(r.stdout).flatMap(({ command }) => {
+    const mcp = mcpConfigOf(command);
+    if (mcp === null) return [];
     try {
-      const p = LAUNCH_PROFILE.exec(readFileSync(join(dirname(mcp), "launch.sh"), "utf-8"));
-      return p === null ? [] : [(p[1] as string).replace(/'\\''/g, "'")];
+      const p = launchProfileOf(readFileSync(join(dirname(mcp), "launch.sh"), "utf-8"));
+      return p === null ? [] : [p];
     } catch {
       return [];
     }

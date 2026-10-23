@@ -64,6 +64,12 @@ export async function listAgentProcesses(exec: ExecFn): Promise<(PsEntry & { mcp
 /** A launch script's profile line (launch.ts renderLaunchScript): `export CLAUDE_CONFIG_DIR='…'`. */
 const LAUNCH_PROFILE = /^export CLAUDE_CONFIG_DIR='((?:[^']|'\\'')*)'$/m;
 
+/** The `CLAUDE_CONFIG_DIR` a launch script's text exports, unquoted, or null. Pure. */
+export function launchProfileOf(launchSh: string): string | null {
+  const m = LAUNCH_PROFILE.exec(launchSh);
+  return m === null ? null : (m[1] as string).replace(/'\\''/g, "'");
+}
+
 /**
  * How many agent sessions run in the Claude profile `dir`: the agent processes (by their
  * `--mcp-config=`) whose worktree's `.volley/launch.sh` exports that `CLAUDE_CONFIG_DIR`. A
@@ -73,8 +79,7 @@ export async function sessionsRunningIn(exec: ExecFn, dir: string): Promise<numb
   const procs = await listAgentProcesses(exec);
   return procs.filter((p) => {
     try {
-      const m = LAUNCH_PROFILE.exec(readFileSync(join(dirname(p.mcp), "launch.sh"), "utf-8"));
-      return m !== null && (m[1] as string).replace(/'\\''/g, "'") === dir;
+      return launchProfileOf(readFileSync(join(dirname(p.mcp), "launch.sh"), "utf-8")) === dir;
     } catch {
       return false;
     }
