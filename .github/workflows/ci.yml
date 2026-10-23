@@ -82,7 +82,8 @@ jobs:
 
   ci-reused:
     # A success that names the run it reuses (not a missing check): what a reused push reports.
-    name: CI reused — this tree passed pull_request run ${{ needs.reuse.outputs.run }}
+    # Skipped (PR, main, nightly, no reuse) it lists as plain `CI reused`, not with an empty id.
+    name: ${{ needs.reuse.outputs.run && format('CI reused — this tree passed pull_request run {0}', needs.reuse.outputs.run) || 'CI reused' }}
     needs: reuse
     if: needs.reuse.outputs.run != ''
     runs-on: ubuntu-latest
@@ -191,6 +192,7 @@ jobs:
       - run: bun scripts/check-tmp-leaks.ts -- bun run test:scripts
       # Every other package by name: bun 1.3 ORs `--filter='!a' --filter='!b'` (everything) and
       # bun 1.4 ignores `--filter='!{a,b}'`; a list of names selects the same set on both.
+      # bun matches package.json names: scripts/ci-packages.test.ts holds each directory == its name.
       - name: Unit tests (every package but volleyd and volley-desk)
         run: |
           filters=()
