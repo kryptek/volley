@@ -1460,6 +1460,9 @@ describe("the issue lifecycle's gh writes (#416): exact forms only", () => {
     ["gh", "issue", "close", "412", "--comment", "no marker"],
     ["gh", "issue", "close", "412", "--comment", `x ${M}`, "--reason", "not planned"],
     ["gh", "issue", "comment", "412", "--body", "a comment volleyd did not write"],
+    // The marker is volleyd's shape: on its own line at the end, not anywhere in the body.
+    ["gh", "issue", "comment", "412", "--body", `${M} and text after it`],
+    ["gh", "issue", "comment", "412", "--body", `text ${M}`],
     ["gh", "issue", "comment", "412", "--body-file", "/etc/passwd"],
     ["gh", "issue", "comment", "412", "--edit-last", "--body", M],
     ["gh", "issue", "delete", "412"],

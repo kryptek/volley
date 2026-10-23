@@ -192,10 +192,24 @@ export interface TaskIssue {
 }
 
 /**
+ * One task per issue, in first-seen order: the wave file lets two tasks share an issue, and the
+ * issue gets one outcome. A done task wins over one that is not (the work landed).
+ */
+export function issueOutcomes(tasks: readonly TaskIssue[]): TaskIssue[] {
+  const by = new Map<number, TaskIssue>();
+  for (const t of tasks) {
+    const had = by.get(t.issue);
+    if (had === undefined || (had.stage !== "done" && t.stage === "done")) by.set(t.issue, t);
+  }
+  return [...by.values()];
+}
+
+/**
  * Once the release reached main (`release_pr` merged): every done task's issue still open is
  * closed with a comment, and the label comes off every issue that has it; a cancelled or
  * deferred (not done) task's issue stays open with one comment saying why. An issue gh could not
- * read (`views` lacks it) is left alone: the next check plans it.
+ * read (`views` lacks it) is left alone: the next check plans it. Tasks sharing an issue give it
+ * one outcome (`issueOutcomes`).
  */
 export function releaseActions(o: {
   wave: WaveId;
@@ -205,7 +219,7 @@ export function releaseActions(o: {
   views: ReadonlyMap<number, IssueView>;
 }): GhAction[] {
   const out: GhAction[] = [];
-  for (const t of o.tasks) {
+  for (const t of issueOutcomes(o.tasks)) {
     const v = o.views.get(t.issue);
     if (v === undefined) continue;
     if (t.stage === "done") {

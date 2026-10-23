@@ -273,6 +273,31 @@ describe("the issue lifecycle in the daemon (#416)", () => {
     expect((gh.issues.get(412) as Issue).state).toBe("CLOSED");
   });
 
+  it("an issue gh can never read does not hold the release check back for the others", async () => {
+    gh.fake.on(["gh", "issue", "view"], (argv) => {
+      if (argv[3] === "413") return { code: 1, stderr: "Could not resolve to an issue" };
+      const i = gh.issues.get(Number(argv[3])) as Issue;
+      return {
+        stdout: JSON.stringify({
+          state: i.state,
+          labels: i.labels.map((name) => ({ name })),
+          comments: i.comments.map((body) => ({ body })),
+        }),
+      };
+    });
+    await merge("T3", 418);
+    await merge("T4", 419);
+    await merge("T5", 420);
+    gh.release(431);
+    await tick();
+    expect(daemon.record(WAVE)?.state?.status).toBe("complete");
+    // #413's merged-to-release write failed (not read), yet the others were released.
+    expect((gh.issues.get(412) as Issue).state).toBe("CLOSED");
+    expect((gh.issues.get(414) as Issue).state).toBe("CLOSED");
+    expect((gh.issues.get(412) as Issue).labels).toEqual([]);
+    expect(ofType("issues_verified")).toEqual([]);
+  });
+
   it("issues --verify: the check for a release merged by hand, owner only, on a complete wave", async () => {
     await merge("T3", 418);
     const refused = await client.request("issues", { wave: WAVE, verify: true, by: "someone" });

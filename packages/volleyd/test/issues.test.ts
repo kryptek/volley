@@ -3,6 +3,7 @@ import {
   type IssueView,
   MERGED_LABEL,
   issueLedger,
+  issueOutcomes,
   issueRows,
   mergedActions,
   mergedMarker,
@@ -174,6 +175,32 @@ describe("releaseActions: the release reached main", () => {
       [415, open({ comments: [settledMarker(WAVE, "deferred")] })],
     ]);
     expect(releaseActions({ wave: WAVE, release_pr: 9, tasks, ledger, views })).toEqual([]);
+  });
+
+  it("two tasks on one issue: one outcome for the issue, done winning, each write once", () => {
+    const shared = [
+      { task: "T3", issue: 412, stage: "done" as const, pr: 418 },
+      { task: "T7", issue: 412, stage: "cancelled" as const, why: "folded into T3" },
+      { task: "T8", issue: 412, stage: "done" as const, pr: 422 },
+    ];
+    expect(
+      releaseActions({
+        wave: WAVE,
+        release_pr: 9,
+        tasks: shared,
+        ledger: issueLedger([]),
+        views: new Map([[412, open({ labels: [MERGED_LABEL] })]]),
+      }),
+    ).toEqual([
+      {
+        kind: "close",
+        issue: 412,
+        marker: settledMarker(WAVE, "closed"),
+        comment: `closed by the release PR #9 (wave w1)\n\n${settledMarker(WAVE, "closed")}`,
+      },
+      { kind: "remove_label", issue: 412 },
+    ]);
+    expect(issueOutcomes(shared).map((t) => t.task)).toEqual(["T3"]);
   });
 
   it("an issue gh could not read is left alone", () => {

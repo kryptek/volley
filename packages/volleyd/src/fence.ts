@@ -1360,8 +1360,8 @@ const ISSUE_NUMBER = /^[1-9][0-9]{0,8}$/;
 /** The one label volleyd adds, removes and creates (the issue lifecycle, autopilot/issues.ts). */
 const LIFECYCLE_LABEL = "merged-to-release";
 
-/** The marker every comment volleyd writes on an issue carries (autopilot/issues.ts). */
-const COMMENT_MARKER = /<!-- volleyd:[a-z-]+ wave=[a-z0-9][a-z0-9_-]{0,62}( pr=[0-9]+)? -->/;
+/** The marker every comment volleyd writes on an issue ends with, on a line of its own (autopilot/issues.ts). */
+const COMMENT_MARKER = /\n\n<!-- volleyd:[a-z-]+ wave=[a-z0-9][a-z0-9_-]{0,62}( pr=[0-9]+)? -->$/;
 
 /**
  * The issue lifecycle's writes (#416), each an exact argv: the label added or removed, a comment

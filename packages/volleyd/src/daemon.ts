@@ -114,6 +114,7 @@ import {
   type IssueView,
   type TaskIssue,
   issueLedger,
+  issueOutcomes,
   issueRows,
   issueViewArgv,
   mergedActions,
@@ -10267,7 +10268,8 @@ export class Daemon {
         let failed = false;
         for (const t of merged)
           if (!(await this.issueMerged(wave, cwd, state.release_branch, t))) failed = true;
-        if (release && !failed) {
+        // A merged-to-release write that failed (an issue gh cannot read) holds back no release.
+        if (release) {
           this.releasePolledAt.set(wave, this.now());
           const pr = await this.releasePr(cwd, state.release_branch);
           // A failed write is retried on the ci_poll_ms cadence below, not the release poll's.
@@ -10350,7 +10352,8 @@ export class Daemon {
     releasePr: number,
   ): Promise<{ closed: number[]; left_open: number[]; failed: string[] }> {
     const state = this.waves.get(wave)?.record.state;
-    const tasks = state == null ? [] : taskIssues(this.journalEvents(wave), state.tasks);
+    const tasks =
+      state == null ? [] : issueOutcomes(taskIssues(this.journalEvents(wave), state.tasks));
     const views = new Map<number, IssueView>();
     const failed: string[] = [];
     for (const t of tasks) {
