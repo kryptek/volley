@@ -1157,12 +1157,12 @@ export class Daemon {
   /** Epoch ms of the last progress message seen per agent id (heartbeats, for `claim`). */
   private readonly lastSeen = new Map<string, number>();
   /**
-   * When each agent last showed it is live (epoch ms, its own send time): `any` signal (registry,
-   * progress, a live status), `mcp`, one only its MCP server sends, and `hooks`, one only its
-   * Claude Code hooks send. A spawn decision about it closes itself on one sent after it opened
-   * (#402).
+   * When each agent last showed it is live (epoch ms, its own send time): `past`, a signal that it
+   * got past its start-up screen (a hooks signal, or its MCP server doing more than starting up),
+   * `mcp`, one only its MCP server sends, and `hooks`, one only its Claude Code hooks send. A spawn
+   * decision about it closes itself on one sent after it opened (#402).
    */
-  private readonly heardAt = new Map<string, { any?: number; mcp?: number; hooks?: number }>();
+  private readonly heardAt = new Map<string, { past?: number; mcp?: number; hooks?: number }>();
   /** Spawn decisions this process is closing (`<wave>/<id>`): asked once per decision. */
   private readonly closingSpawn = new Set<string>();
   /**
@@ -1928,9 +1928,11 @@ export class Daemon {
     if (env !== null) {
       // A narration or anything else not from the hooks is the agent's MCP server speaking.
       const hook = (env.payload as { source?: unknown } | null)?.source === "harness-hook";
-      // Waiting at a prompt shows its channel works, not that it got past the screen.
+      // Waiting at a prompt shows its channel works, not that it got past the screen; nor does
+      // the MCP server's heartbeat, which runs from process start whatever the screen.
       const stuck = env.type === "awaiting_input" || env.type === "idle";
-      this.heard(agent, this.lastSeen.get(agent) as number, !hook, stuck);
+      const past = !stuck && (hook || env.type !== "heartbeat");
+      this.heard(agent, this.lastSeen.get(agent) as number, !hook, past);
       this.noteAttention(agent, env);
       this.noteInboxSignal(agent, env);
     }
@@ -1951,16 +1953,16 @@ export class Daemon {
    * `agent` showed it is live at `at` (`mcp`: through its MCP server). Each open spawn decision
    * about it (unknown_screen, hooks_auth_failed, mcp_not_registered) that opened before then is
    * answered `it's running` by volleyd (#402): the pipeline checks the run and touches nothing
-   * (a paused hooks_auth_failed agent is told to resume). A `stuck` sign (waiting at a prompt)
-   * counts for the channel it came through, not as being past its screen (`any`).
+   * (a paused hooks_auth_failed agent is told to resume). A sign that is not `past` its screen
+   * (waiting at a prompt, the MCP server starting up) counts only for the channel it came through.
    */
-  private heard(agent: string, at: number, mcp: boolean, stuck = false): void {
+  private heard(agent: string, at: number, mcp: boolean, past: boolean): void {
     const prev = this.heardAt.get(agent);
     const last = mcp ? Math.max(at, prev?.mcp ?? at) : prev?.mcp;
     const hooks = mcp ? prev?.hooks : Math.max(at, prev?.hooks ?? at);
-    const any = stuck ? prev?.any : Math.max(at, prev?.any ?? at);
+    const screen = past ? Math.max(at, prev?.past ?? at) : prev?.past;
     this.heardAt.set(agent, {
-      ...(any !== undefined ? { any } : {}),
+      ...(screen !== undefined ? { past: screen } : {}),
       ...(last !== undefined ? { mcp: last } : {}),
       ...(hooks !== undefined ? { hooks } : {}),
     });
@@ -1996,14 +1998,14 @@ export class Daemon {
    * When `agent` last showed a spawn decision of `kind` is moot (epoch ms; null: not since this
    * process started): for mcp_not_registered only its MCP server counts, the hooks already ran;
    * for hooks_auth_failed only its hooks, which the broker refused (its MCP server answering the
-   * pause steer says nothing about them).
+   * pause steer says nothing about them); for unknown_screen a sign it got past its screen.
    */
   private heardFrom(agent: string, kind: string): number | null {
     const h = this.heardAt.get(agent);
     if (h === undefined) return null;
     if (kind === "mcp_not_registered") return h.mcp ?? null;
     if (kind === "hooks_auth_failed") return h.hooks ?? null;
-    return h.any ?? null;
+    return h.past ?? null;
   }
 
   /**
@@ -2132,7 +2134,9 @@ export class Daemon {
           const env = parseEnvelope(m.payload);
           // The hooks' re-publish carries `model_source`; the MCP server's own registration not.
           const mcp = (env?.payload as { model_source?: unknown } | undefined)?.model_source;
-          if (env !== null) this.heard(id, this.sentAt(env.wall_time), mcp === undefined);
+          // Only the hooks' entry shows the session got past its screen.
+          if (env !== null)
+            this.heard(id, this.sentAt(env.wall_time), mcp === undefined, mcp !== undefined);
         }
         // Recorded on arrival, not on the queue: the status subscription reads it on arrival.
         const before = this.namedEntries.get(id)?.coordinator;
@@ -2641,11 +2645,13 @@ export class Daemon {
             if (name !== undefined) void this.enqueue(() => this.rebind(name));
           }
           // The hooks' `working` carries their source; any other live status came through its
-          // MCP server (`spawning` / `registered`, or a `working` it published with vol_publish).
+          // MCP server (`spawning` / `registered` at its start-up, which says nothing about the
+          // screen, or a `working` it published with vol_publish).
           if (LIVE_STATUSES.has(env.type)) {
             const hook =
               (env.payload as { source?: unknown } | undefined)?.source === "harness-hook";
-            this.heard(holder, this.sentAt(env.wall_time), !hook);
+            const past = hook || env.type === "working";
+            this.heard(holder, this.sentAt(env.wall_time), !hook, past);
           }
           // A session that ended answers none of its open pickers or handoffs any more.
           if (OWNER_GONE.has(env.type))

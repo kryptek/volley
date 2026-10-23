@@ -110,6 +110,23 @@ describe("it's running on a spawn decision", () => {
     );
   });
 
+  it("hooks_auth_failed: asked again saying its hooks have not reached the broker", () => {
+    const d = { ...decision("it's running"), kind: "hooks_auth_failed" } as DecisionRecord;
+    const ask = next(view(OPENED - 60_000), { kind: "decision_resolved", decision: d })[0];
+    if (ask?.kind !== "decide") throw new Error("expected a decide");
+    expect(ask.decision.question).toBe(
+      `${A1}'s hooks have not reached the broker (last heard 6 min ago). ${QUESTION}`,
+    );
+    // Asked again, the prefix does not stack.
+    const again = next(view(null), {
+      kind: "decision_resolved",
+      decision: { ...d, question: ask.decision.question },
+    })[0];
+    expect(again?.kind === "decide" && again.decision.question).toBe(
+      `${A1}'s hooks have not reached the broker (last heard never). ${QUESTION}`,
+    );
+  });
+
   it("a newer run replaced it: the decision is moot, the stale agent is retired, not asked again", () => {
     // Asking again would be false (the agent is alive) and would loop: each later sign of life
     // from the stale agent closes the card on its own, and the pipeline would open it again.

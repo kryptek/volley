@@ -478,6 +478,30 @@ describe("relaunch of a spawn-type decision", () => {
     expect(host.launches).toHaveLength(1);
   });
 
+  it("unknown_screen stays open while only its MCP server is up (the hooks never arrived)", async () => {
+    const opened = await setup("silent");
+    // volley-mcp starts at process start, whatever screen Claude Code is held at.
+    await live(A1, buildTopic(NS, A1, "progress"), "heartbeat", "progress", {
+      source: "volley-mcp",
+      seq: 1,
+    });
+    await live(A1, buildTopic(NS, A1, "status"), "spawning", "status", {}, true);
+    await live(A1, buildTopic(NS, A1, "status"), "registered", "status", {}, true);
+    await live(
+      A1,
+      registryTopic(A1),
+      "registered",
+      "_system/registry",
+      { capabilities: [], cwd: "/wt", started_at: new Date(clock.now()).toISOString() },
+      true,
+    );
+    await waits.settled();
+    expect(daemon.snapshot("w1")?.open_decisions).toEqual([opened.data.decision_id]);
+    // A narration means the session got past its screen and is calling tools.
+    await signals[2]?.[1](A1);
+    await closedOnItsOwn(String(opened.data.decision_id));
+  });
+
   it("a retained registry entry from before the decision opened does not close it", async () => {
     const opened = await setup("mcp");
     // The hooks' registry entry and heartbeat arrived before it opened: still open.

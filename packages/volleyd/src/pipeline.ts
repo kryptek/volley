@@ -2662,7 +2662,7 @@ const roleLabel = (p: TaskPipeline, role: Role): string =>
 
 /** The prefix a re-ask puts before the original question (dropped before it is asked again). */
 const ASKED_AGAIN =
-  /^(".*?" (is not one of|needs the commit that carries it:) [^.]*|no live agent found for \S+ \([^)]*\))\. /;
+  /^(".*?" (is not one of|needs the commit that carries it:) [^.]*|(no live agent found for \S+|\S+'s hooks have not reached the broker) \([^)]*\))\. /;
 
 function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
   const m = (d as { pipeline?: PipelineMarker }).pipeline;
@@ -3122,7 +3122,12 @@ function onRelaunchResolved(
       ];
     }
     const ago = heard === null ? "never" : `${agoText((v.now ?? heard) - heard)} ago`;
-    return [askRelaunchAgain(v, d, m, `no live agent found for ${m.agent_id} (last heard ${ago})`)];
+    // A hooks_auth_failed agent's MCP server may be answering: only its hooks are missing.
+    const why =
+      d.kind === "hooks_auth_failed"
+        ? `${m.agent_id}'s hooks have not reached the broker (last heard ${ago})`
+        : `no live agent found for ${m.agent_id} (last heard ${ago})`;
+    return [askRelaunchAgain(v, d, m, why)];
   }
   if (isAnswer(answer, "cancel")) {
     return [
