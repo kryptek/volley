@@ -13,8 +13,10 @@ import { ALL_ZERO_WEIGHTS, volleydHome } from "../config-store";
 import { CONFIG_TOPIC, type ControlTarget, resolveControlTarget } from "../control";
 import { exec } from "../exec";
 import { LOCAL_HOST } from "../fleet-name";
+import { type Tree, footprintSummary, readReleaseTree } from "../footprint";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { MACHINES_FILTER, type MachineRecord, parseMachine } from "../machines";
+import { explain } from "../overlap-plan";
 import {
   AUTO_HOST,
   type VerdictView,
@@ -29,8 +31,10 @@ import type { PlacementConfig, Tunables, Wave } from "../types";
 import {
   type PlacementDefaults,
   defaultPlacement,
+  filePlan,
   formatPlacement,
   parseWaveFile,
+  planNotes,
 } from "../wave-file";
 import { checkFreshBase, checkReleaseBranch, expandHome, spawnsLocally } from "../worktree";
 
@@ -61,6 +65,11 @@ And the release playbook (\`playbook:\`, else .volley/release.yaml in the repo):
 playbook: <path> (N stages, M owner-gated)", or "none" (\`playbook: none\`, or no file at the
 default path); an invalid one, or a configured one that does not exist, fails with
 RELEASE_PLAYBOOK_INVALID and its path-qualified errors.
+
+Then the overlap plan (SPEC §4.6.22): the file's own plan in words (its clusters, the independent
+tasks, the expected branch updates), a "note: …" for each place the planner would differ when
+the repo's tree reads here (advisory: the file is kept as written), and the footprint line
+("footprints: 3 listed, 1 guessed (#7)"), or "footprints: none (…)" when no task has files:.
 `;
 
 /**
@@ -178,6 +187,41 @@ export function parseWithPlacement(
   };
 }
 
+/** Printed for a wave none of whose tasks has `files:` (SPEC §4.6.22). */
+export const NO_FOOTPRINTS =
+  "footprints: none (write them with wave-from-issues, or the daemon reads each issue's Files list at run)";
+
+/**
+ * The tree the wave's tasks start from, when its repository is a checkout on this machine
+ * (`repo` as resolved: a path; null otherwise, or when the release branch does not read).
+ */
+export async function waveTree(repo: string, branch: string): Promise<Tree | null> {
+  const dir = expandHome(repo);
+  return existsSync(dir) ? readReleaseTree(exec, dir, branch) : null;
+}
+
+/**
+ * The overlap plan lines `validate` and `run` print after the placement line: `explain` of the
+ * file's own plan (when it has one), then where the planner would differ (`note: …`, with the
+ * tree only: without sizes every coupling is 0), then the footprint line.
+ */
+export function planLines(wave: Wave, tree: Tree | null): string {
+  const tasks = wave.task_order.flatMap((id) => {
+    const t = wave.tasks[id];
+    return t === undefined || t.synthetic === true ? [] : [t];
+  });
+  if (!tasks.some((t) => t.files.length > 0)) return `${NO_FOOTPRINTS}\n`;
+  const out = wave.overlap_plan !== undefined ? explain(filePlan(wave, tree ?? {})) : [];
+  if (tree !== null) out.push(...planNotes(wave, tree).map((n) => `note: ${n}`));
+  const footprints = tasks.map((t) => ({
+    id: t.id,
+    issues: t.issues ?? [t.issue],
+    footprint: t.footprint ?? { confidence: t.files.length > 0 ? "listed" : "none" },
+  }));
+  out.push(footprintSummary(footprints, "inline"));
+  return out.map((l) => `${l}\n`).join("");
+}
+
 /** `config.yaml`'s `placement.weights` (none: {}), for the merged all-zero check `run` makes. */
 function globalWeights(env: CommandArgs["env"]): Partial<PlacementConfig["weights"]> {
   const file = join(volleydHome(env), "config.yaml");
@@ -289,7 +333,7 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
       `ok: wave ${wave.wave} v${wave.version} — ${wave.task_order.length} task(s), ` +
         `critical path ${longest}, release branch ${wave.release_branch}\n` +
         `${env.VOLLEY_AGENT_ID || env.VOLLEY_COORDINATOR ? "" : OWNER_NOTE}` +
-        `${note}${localPinWarnings(wave, env)}${agentMcpLine(wave, env)}${prefaceLine}\n${playbookLine}\n${placementLine}${placement}`,
+        `${note}${localPinWarnings(wave, env)}${agentMcpLine(wave, env)}${prefaceLine}\n${playbookLine}\n${placementLine}${placement}${planLines(wave, await waveTree(wave.repo, wave.release_branch))}`,
     );
     return EXIT.OK;
   } catch (e) {

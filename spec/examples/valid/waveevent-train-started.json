@@ -1,0 +1,27 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-23T09:00:00.000Z",
+  "channel": "_waves/events",
+  "type": "train_started",
+  "payload": {
+    "wave": "w1",
+    "seq": 171,
+    "at": "2026-10-23T09:00:00.000Z",
+    "task": "train-1",
+    "data": {
+      "train": "train-1",
+      "tasks": [
+        "T1",
+        "T2",
+        "T4"
+      ],
+      "heads": {
+        "T1": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+        "T2": "2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c",
+        "T4": "3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d"
+      },
+      "release_sha": "4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e"
+    }
+  }
+}

@@ -146,3 +146,108 @@ describe("spawn budget exhausted", () => {
     await s.event("task_cancelled");
   });
 });
+
+/**
+ * Churn (#387): a rebase, a re-review after one, an integrator, a relaunch or respawn of the same
+ * role never spends the spawn budget nor opens spawn_budget_exhausted; the hard ceiling still
+ * holds every spawn.
+ */
+describe("churn spawns and the spawn budget (#387)", () => {
+  let s: SupervisedEnv;
+  afterEach(async () => s.cleanup());
+
+  const budgetDecisions = () =>
+    s
+      .journal()
+      .filter((e) => e.type === "decision_opened" && e.data.kind === "spawn_budget_exhausted");
+
+  it("a respawn at the budget is journaled as churn, spawns, and opens no decision", async () => {
+    s = await makeSupervisedEnv({ waveExtra: "spawn_budget: 1" });
+    await s.status("blocked", { reason: "stuck" });
+    const opened = await s.event(
+      (e) => e.type === "decision_opened" && e.data.kind === "agent_blocked",
+    );
+    const r = await runCli(
+      ["resolve", String(opened.data.decision_id), "respawn", "--wave", "w1", "--by", "t"],
+      s.env.env,
+    );
+    expect(r.exitCode, r.stderr).toBe(0);
+    const again = await s.event("agent_spawned", 2);
+    expect(again.data).toMatchObject({ role: "implementer", churn: true, cause: "retry" });
+    // The first launch was productive.
+    expect(s.journal().find((e) => e.type === "agent_spawned")?.data.churn).toBeUndefined();
+    await s.daemon.tick();
+    await s.settled();
+    expect(budgetDecisions()).toHaveLength(0);
+    expect(s.daemon.snapshot("w1")?.spawns).toMatchObject({ productive: 1, churn: 1, budget: 1 });
+    expect(s.daemon.snapshot("w1")?.tasks[0]?.churn).toBe(1);
+  });
+
+  it("a wave at its budget still spawns a rebase agent and opens no decision; productive spawns past it do", async () => {
+    // The implementer spends the budget of 1; its PR conflicts and no CI runs on it, so the
+    // pipeline enters the branch-update step at once.
+    const exec: NonNullable<Parameters<typeof makeSupervisedEnv>[0]>["exec"] = ARTIFACTS_OK.map(
+      ([prefix, reply]) => {
+        const p = prefix.join(" ");
+        if (p === "gh pr list")
+          return [
+            prefix,
+            {
+              stdout: JSON.stringify([
+                {
+                  ...JSON.parse((reply as { stdout: string }).stdout)[0],
+                  mergeable: "CONFLICTING",
+                },
+              ]),
+            },
+          ];
+        if (p === "gh run list" || p === "gh api") return [prefix, { stdout: "[]" }];
+        return [prefix, reply];
+      },
+    );
+    s = await makeSupervisedEnv({
+      exec,
+      pipeline: "[implement, spec_review, merge_ready]",
+      waveExtra: "spawn_budget: 1",
+    });
+    await s.status("done");
+    const rebase = await s.event((e) => e.type === "agent_spawned" && e.data.role === "rebase");
+    expect(rebase.data).toMatchObject({ churn: true, cause: "branch_update" });
+    await s.daemon.tick();
+    await s.settled();
+    expect(budgetDecisions()).toHaveLength(0);
+    expect(s.daemon.snapshot("w1")?.spawns).toMatchObject({ productive: 1, churn: 1, budget: 1 });
+    // A productive spawn past the same budget (the reviewer after a verified done) is held and
+    // asks: "spawn budget exhausted" above.
+  });
+
+  it("churn spent no budget: the next productive spawn goes through", async () => {
+    s = await makeSupervisedEnv({
+      exec: ARTIFACTS_OK,
+      pipeline: "[implement, spec_review, merge_ready]",
+      waveExtra: "spawn_budget: 2",
+    });
+    // Three branch updates' agents, journaled as the daemon journals a churn spawn.
+    for (const n of [1, 2, 3])
+      await s.daemon.recordEvent("w1", {
+        type: "agent_spawned",
+        task: "T1",
+        data: {
+          role: "rebase",
+          agent_id: `w1-t1-rebase-${n}`,
+          attempt: n,
+          churn: true,
+          cause: "branch_update",
+        },
+      });
+    await s.status("done");
+    const reviewer = await s.event(
+      (e) => e.type === "agent_spawned" && e.data.role === "spec_reviewer",
+    );
+    expect(reviewer.data.churn).toBeUndefined();
+    await s.daemon.tick();
+    await s.settled();
+    expect(budgetDecisions()).toHaveLength(0);
+    expect(s.daemon.snapshot("w1")?.spawns).toMatchObject({ productive: 2, churn: 3 });
+  });
+});

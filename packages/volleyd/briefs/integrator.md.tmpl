@@ -1,0 +1,44 @@
+# Integrate merge train {{task}}
+
+Several gated PRs of wave `{{wave}}` merge into `{{release_branch}}` as one merge train: you integrate them onto one branch, CI runs once on it, and volleyd merges its PR with a merge commit, which marks every member PR merged. Read `.volley/integrate.md`: it names the release branch and the commit the train starts at, the train branch, and each member in merge order with its PR, its branch, the head it was gated at and the issues it closes.
+
+1. Cut the train branch from `origin/{{release_branch}}` at the commit `.volley/integrate.md` names.
+2. Merge each member at its gated head, in order, with `git merge --no-ff`. Never rebase, never force-push, never amend member commits: each member's gated head must stay an ancestor of the train head, or GitHub cannot mark its PR merged.
+3. Resolve a conflict keeping each PR's intent (each member's issue is linked in `.volley/integrate.md`); change nothing a conflict does not require.
+4. Run the repository's gates on the train head.
+5. Push the train branch and open one PR against `{{release_branch}}` titled `train: {{issues}}` whose body has one `Closes #<issue>` line per member issue, each on its own line:
+
+{{closes_lines}}
+
+A conflict you cannot resolve without changing what a member PR does: push nothing, publish the `integrate` result with that member in `conflicts`, then `blocked` with the member's PR number as `pr` and the conflicting files in `reason` (the owner, or autopilot, drops that member from the train).
+
+## Result contract
+
+Before your `done`, publish `vol_publish(channel="result", type="integrate", payload={ "merged": [<member PR numbers merged, in order>], "conflicts": [{ "pr": <n>, "files": ["<path>"] }], "touched": ["<every file your conflict resolutions changed>"] })`. Your `done` is checked: the train branch on origin must equal this worktree's HEAD, contain every member's gated head and descend from the release commit the train started at, and its PR must target `{{release_branch}}`; CI must be green on it. A member reviewer whose flagged file your resolutions touched reviews the resolution diff.
+
+## Rules
+
+- Work only in this worktree (`{{worktree}}`, branch `{{branch}}`); push only to the train branch `.volley/integrate.md` names.
+- Never push to or merge into `{{release_branch}}` or any default branch, and never push to a member's branch. Never close, edit or merge a member PR.
+- Never force-push, in any form (`--force`, `--force-with-lease`, `+refspec`).
+
+## Volley protocol (mandatory)
+
+You are agent `{{agent_id}}` in namespace `{{namespace}}`, supervised by volleyd (wave `{{wave}}`, task `{{task}}`, role `{{role}}`). Registration, heartbeats and mailbox delivery are handled for you by the session hooks: your identity is in `.volley/agent.json` and is already registered. Do not register again and never edit `.volley/`.
+
+**Narration.** The operator watches you live. Publish on the `progress` channel at least once a minute while you work, and before and after every long command:
+
+    vol_publish(channel="progress", type="narration", payload={ "progress": <0-100>, "msg": "<what you are doing right now>" })
+
+The field is literally `msg`. Pass `payload` as a JSON object, never a JSON string.
+
+**Steering.** A message from your mailbox is injected into your session as `[volley steering]`. When you act on one, reply in prose with an explicit `acknowledged: …` line saying what you will do differently, AND publish `vol_publish(channel="progress", type="steering_acked", correlation_id=<the message id>, payload={ "progress": <current>, "msg": "acknowledged: …" })`. A hook delivering the message is not an acknowledgement; only yours is.
+
+**Terminal status.** When you finish, publish one final `progress` tick at 100 with your one-line summary, then exactly once on channel `status`:
+
+- `type="done"`, payload `{ "summary": "<one line>", "pr_url": "<url, if you opened one>", "worktree": "{{worktree}}", "msg": "<one line>" }`
+- `type="blocked"`, payload `{ "reason": "<one line>", "worktree": "{{worktree}}", "msg": "<one line>" }` when only the owner can unblock you
+- `type="failed"`, payload `{ "reason": "<one line>", "worktree": "{{worktree}}", "msg": "<one line>" }`
+
+Never exit or go idle without the terminal status.
+{{extra}}

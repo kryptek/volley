@@ -12,13 +12,92 @@ on:
   schedule:
     - cron: "17 6 * * *"
 
-# A full run is every push (main, release/**), the nightly, a release PR (its head is release/**,
+# A full run is every push (main, release/**) that runs the suite, the nightly, a release PR (its head is release/**,
 # or its title starts `release:`) and a PR labelled `ci:full`. Every other PR runs the newest bun
 # only and the 8-task soak: the jobs below spell the condition out (a matrix cannot read `env`);
-# its three copies (test, test-volleyd, soak-full) must stay identical.
+# its four copies (test, test-desk, test-volleyd, soak-full) must stay identical.
+#
+# A push to release/** reuses the pull_request run that already tested its tree (#492). Every
+# pull_request run records the tree of its checkout (the PR's merge commit) as an artifact,
+# `tested-tree-<tree sha>` (job `tested-tree`). When the pushed commit is a PR's squash, that PR's
+# newest pull_request run of this workflow passed, and the tree it recorded is the pushed commit's
+# tree (the PR was up to date with its base), the push runs `CI reused — this tree passed
+# pull_request run <id>` instead of the suite: every other job reports `skipped`, the run
+# `success` (scripts/ci-reuse.ts). Anything else — a release commit, a PR merged behind its base,
+# a red or missing run, a lookup error — runs everything. A push to main, the nightly and a
+# pull_request run never reuse, so reuse never chains.
+#
+# Trade-off (accepted): a task PR's run is not a full run, so a reused release/** push gets neither
+# bun 1.3 nor the 32-task soak. Those run for a wave's commits at the release PR (a full run, which
+# never reuses) and on main.
 jobs:
+  tested-tree:
+    # The tree this run tests; on a pull_request, recorded for the push that merges it. A failed
+    # upload means only that the merge's push runs the full suite: never a red PR.
+    name: Tested tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: tree
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+          echo "Tested tree $tree (commit $GITHUB_SHA)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: github.event_name == 'pull_request'
+        env:
+          TREE: ${{ steps.tree.outputs.tree }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: printf 'tree=%s\nmerge=%s\nhead=%s\n' "$TREE" "$GITHUB_SHA" "$HEAD" > tested-tree
+      - if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: tested-tree-${{ steps.tree.outputs.tree }}
+          path: tested-tree
+          retention-days: 7
+          overwrite: true
+
+  reuse:
+    # Only on a push to release/**; skipped elsewhere, and a skipped `reuse` leaves `run` empty,
+    # so every job below runs. A failed lookup is "no reuse", never a skipped suite, and (with
+    # continue-on-error) never a red run: a failed checkout or setup-bun here only runs everything.
+    name: CI reuse lookup
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/')
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.lookup.outputs.run }}
+      url: ${{ steps.lookup.outputs.url }}
+      pr: ${{ steps.lookup.outputs.pr }}
+      tree: ${{ steps.lookup.outputs.tree }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - id: lookup
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/ci-reuse.ts lookup "$GITHUB_SHA" --branch "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+
+  ci-reused:
+    # A success that names the run it reuses (not a missing check): what a reused push reports.
+    # Skipped (PR, main, nightly, no reuse) it lists as plain `CI reused`, not with an empty id.
+    name: ${{ needs.reuse.outputs.run && format('CI reused — this tree passed pull_request run {0}', needs.reuse.outputs.run) || 'CI reused' }}
+    needs: reuse
+    if: needs.reuse.outputs.run != ''
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          PR: ${{ needs.reuse.outputs.pr }}
+          URL: ${{ needs.reuse.outputs.url }}
+          TREE: ${{ needs.reuse.outputs.tree }}
+        run: echo "PR #$PR, run $URL, tree $TREE" | tee -a "$GITHUB_STEP_SUMMARY"
+
   validate-schemas:
     name: Schema validation
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +109,8 @@ jobs:
 
   lint:
     name: Lint
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,6 +155,8 @@ jobs:
 
   typecheck:
     name: Typecheck
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -86,15 +169,17 @@ jobs:
   test:
     # Every package's suite is `vitest run`, whose bin is a node script: `bun run test` runs the
     # vitest suites on Node. The bun version reaches only `bun install`, `bun test ./scripts` and
-    # the tests that spawn `bun`. volleyd's suite runs in the sharded job below.
-    name: Unit tests (vitest on Node, every package but volleyd; bun ${{ matrix.bun-version }})
+    # the tests that spawn `bun`. volleyd's and volley-desk's suites run in the sharded jobs below.
+    name: Unit tests (vitest on Node, every package but volleyd and volley-desk; bun ${{ matrix.bun-version }})
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         # Every bun in engines.bun on a full run: a newer bun can break the suite without anything
         # else changing. Other PRs run the newest only.
-        # Full-run condition: keep in sync with the other copies (test, test-volleyd, soak-full).
+        # Full-run condition: keep in sync with the other copies (test, test-desk, test-volleyd, soak-full).
         bun-version: ${{ fromJSON((github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || startsWith(github.event.pull_request.title, 'release:') || contains(github.event.pull_request.labels.*.name, 'ci:full')) && '["1.3", "1.4"]' || '["1.4"]') }}
     steps:
       - uses: actions/checkout@v4
@@ -105,21 +190,55 @@ jobs:
       # Under scripts/check-tmp-leaks.ts, like the root `test` script: a test that leaves a temp
       # dir behind fails the job, naming its prefix.
       - run: bun scripts/check-tmp-leaks.ts -- bun run test:scripts
-      - run: bun scripts/check-tmp-leaks.ts -- bun run --filter='!volleyd' test
+      # Every other package by name: bun 1.3 ORs `--filter='!a' --filter='!b'` (everything) and
+      # bun 1.4 ignores `--filter='!{a,b}'`; a list of names selects the same set on both.
+      # bun matches package.json names: scripts/ci-packages.test.ts holds each directory == its name.
+      - name: Unit tests (every package but volleyd and volley-desk)
+        run: |
+          filters=()
+          for p in packages/*/; do
+            n=$(basename "$p")
+            [ "$n" = volleyd ] || [ "$n" = volley-desk ] || filters+=("--filter=$n")
+          done
+          bun scripts/check-tmp-leaks.ts -- bun run "${filters[@]}" test
 
-  test-volleyd:
-    # volleyd's suite, split into shards balanced by the per-file seconds in
-    # packages/volleyd/test/timings.json (scripts/test-shards.ts; a file not timed yet goes to the
-    # shard its path hashes to). Each shard runs its files under vitest on Node and under bun's own
-    # test framework: volleyd runs on bun in production, so this is where its suite meets the bun
-    # runtime. Refresh the timings with `bun scripts/test-shards.ts timings <junit.xml>`.
-    name: volleyd unit tests (shard ${{ matrix.shard }}/4, bun ${{ matrix.bun-version }})
+  test-desk:
+    # volley-desk's suite (vitest on Node), in vitest's own shards: it is most of the old `test`
+    # job's time (a11y.test.tsx alone is about two minutes).
+    name: volley-desk unit tests (shard ${{ matrix.shard }}/2, bun ${{ matrix.bun-version }})
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
-        # Full-run condition: keep in sync with the other copies (test, test-volleyd, soak-full).
+        shard: [1, 2]
+        # Full-run condition: keep in sync with the other copies (test, test-desk, test-volleyd, soak-full).
+        bun-version: ${{ fromJSON((github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || startsWith(github.event.pull_request.title, 'release:') || contains(github.event.pull_request.labels.*.name, 'ci:full')) && '["1.3", "1.4"]' || '["1.4"]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ matrix.bun-version }}
+      - run: bun install --frozen-lockfile
+      - run: bun ../../scripts/check-tmp-leaks.ts -- bunx vitest run --shard=${{ matrix.shard }}/2
+        working-directory: packages/volley-desk
+
+  test-volleyd:
+    # volleyd's suite, split into eight shards balanced by the per-file seconds in
+    # packages/volleyd/test/timings.json (scripts/test-shards.ts; a file not timed yet goes to the
+    # shard its path hashes to). Each shard runs its files under vitest on Node and under bun's own
+    # test framework: volleyd runs on bun in production, so this is where its suite meets the bun
+    # runtime. Refresh the timings with `bun scripts/test-shards.ts timings <junit.xml>`.
+    name: volleyd unit tests (shard ${{ matrix.shard }}/8, bun ${{ matrix.bun-version }})
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        # Full-run condition: keep in sync with the other copies (test, test-desk, test-volleyd, soak-full).
         bun-version: ${{ fromJSON((github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || startsWith(github.event.pull_request.title, 'release:') || contains(github.event.pull_request.labels.*.name, 'ci:full')) && '["1.3", "1.4"]' || '["1.4"]') }}
     steps:
       - uses: actions/checkout@v4
@@ -132,11 +251,11 @@ jobs:
       # Step names stay clear of "runner", "checkout", "network", "fetch": volleyd's CI classifier
       # (artifacts.ts INFRA_STEP) reads a failure in such a step as infrastructure, not a test.
       - name: Tests on bun (bun test)
-        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:shard ${{ matrix.shard }}/4
+        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:shard ${{ matrix.shard }}/8
         working-directory: packages/volleyd
       - name: Tests on Node (vitest)
         if: ${{ !cancelled() }}
-        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:shard ${{ matrix.shard }}/4 --runner vitest
+        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:shard ${{ matrix.shard }}/8 --runner vitest
         working-directory: packages/volleyd
 
   soak:
@@ -144,10 +263,14 @@ jobs:
     # every injected fault, finishing with only stage_go and release_go asked. It is the autopilot
     # epic's acceptance gate. A failure prints the journal tail and the open decisions; re-run it
     # locally with the same SOAK_TASKS and SOAK_SEED. 8 tasks (the fewest that fit every fault, about
-    # a minute) gate every run; the 32-task soak runs in its own job on full runs.
-    name: Soak (simulated, 8 tasks)
+    # a minute) gate every run; the 32-task soak runs in its own job on full runs. Then the replay
+    # (test/soak/replay.test.ts): the dogfood batch, baseline vs the overlap planner's wave, with
+    # the overlap epic's targets asserted and the table printed; gating, on every run.
+    name: Soak (simulated, 8 tasks; the replay)
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -158,14 +281,22 @@ jobs:
         working-directory: packages/volleyd
         env:
           SOAK_TASKS: "8"
+      - name: Replay (dogfood-26, baseline vs epic)
+        timeout-minutes: 25
+        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:soak -- replay
+        working-directory: packages/volleyd
+        env:
+          REPLAY: "1"
+          SOAK_SEED: "1"
 
   soak-full:
     # Reported, not gating, until #269 (the merge_ready invariant opening its decision three times
     # and spending rereview_max) is fixed: on some runs it leaves one task escalated. Drop
     # continue-on-error then. About 10 minutes, so only on full runs (see the top of this file).
     name: Soak (simulated, 32 tasks, reported until #269)
-    # Full-run condition: keep in sync with the other copies (test, test-volleyd, soak-full).
-    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || startsWith(github.event.pull_request.title, 'release:') || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    # Full-run condition: keep in sync with the other copies (test, test-desk, test-volleyd, soak-full).
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' && (github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || startsWith(github.event.pull_request.title, 'release:') || contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -185,6 +316,8 @@ jobs:
 
   react-bits:
     name: React Bits allow-list (volley-desk)
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -200,6 +333,8 @@ jobs:
 
   validate-skill:
     name: Skill validation (SKILL.md frontmatter + dispatch)
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -211,6 +346,8 @@ jobs:
 
   check-hooks-template:
     name: Hooks template (every hook command resolves)
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -222,6 +359,8 @@ jobs:
 
   test-integration:
     name: Integration tests (mosquitto)
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -253,6 +392,8 @@ jobs:
 
   test-integration-dynsec:
     name: Integration tests (mosquitto 2.1 Dynamic Security)
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-latest
     env:
       DYNSEC_ADMIN_PASSWORD: ci-dynsec-admin-pw
@@ -322,6 +463,8 @@ jobs:
 
   parity:
     name: Parity test (4 legacy vs 4 volley)
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

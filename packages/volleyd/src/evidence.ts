@@ -30,6 +30,19 @@ export interface EvidenceMove {
   parent?: string;
 }
 
+/**
+ * A merge train's facts (SPEC §4.6.23): its members at the heads it integrated, the release
+ * commit it started at, the conflicts its integrator resolved and the files those resolutions
+ * changed.
+ */
+export interface TrainEvidence {
+  id: TaskId;
+  members: { task: TaskId; pr: number; head: string }[];
+  release_sha: string;
+  conflicts: { pr: number; files: string[] }[];
+  touched: string[];
+}
+
 export interface EvidenceInput {
   wave: WaveId;
   task: TaskId;
@@ -62,6 +75,8 @@ export interface EvidenceInput {
   release: RebaseCheck;
   /** Who merges: volleyd itself (`auto`, SPEC §4.6.17) or a human (`manual`). */
   merge: "auto" | "manual";
+  /** A merge train's package: what it integrated (its PR merges with a merge commit). */
+  train?: TrainEvidence;
   generated_at: string;
 }
 
@@ -109,6 +124,8 @@ export interface EvidenceJson {
   base_sha?: string;
   /** Who merges (absent in a package written before autopilot merging: manual). */
   merge?: "auto" | "manual";
+  /** A merge train's package (SPEC §4.6.23). */
+  train?: TrainEvidence;
   generated_at: string;
 }
 
@@ -186,6 +203,7 @@ export function evidenceJson(e: EvidenceInput): EvidenceJson {
     release_sha: e.release.release_sha,
     ...(e.base_sha !== undefined ? { base_sha: e.base_sha } : {}),
     merge: e.merge,
+    ...(e.train !== undefined ? { train: e.train } : {}),
     generated_at: e.generated_at,
   };
 }
@@ -199,6 +217,20 @@ function releaseLine(j: EvidenceJson): string {
   if (j.base_sha === undefined)
     return j.current_with_release_branch ? current : `${current} (behind by ${j.behind_by})`;
   return `${current} — cut from ${j.base_sha.slice(0, 7)}, ${j.behind_by} behind`;
+}
+
+/** A merge train's members, base, conflicts and resolutions, as the package lists them. */
+function trainLines(t: TrainEvidence): string[] {
+  return [
+    `Merge train \`${t.id}\`, integrated onto \`${t.release_sha}\`:`,
+    "",
+    ...t.members.map((m, i) => `${i + 1}. PR #${m.pr} (${m.task}) at \`${m.head}\``),
+    "",
+    t.conflicts.length === 0
+      ? "No conflict resolved."
+      : `Conflicts resolved: ${t.conflicts.map((c) => `PR #${c.pr} (${c.files.join(", ")})`).join("; ")}; files the resolutions changed: ${t.touched.join(", ") || "(none)"}.`,
+    "",
+  ];
 }
 
 /** The human half. Pure. */
@@ -224,9 +256,16 @@ export function renderEvidenceMd(j: EvidenceJson): string {
     ),
     `- Branch current with release branch: ${releaseLine(j)} (\`${j.release_branch}\` at \`${j.release_sha}\`)`,
     "",
-    j.merge === "auto"
-      ? "volleyd merges this PR itself (merge: auto) at exactly this head; the merge is journaled as merged_by_supervisor."
-      : "volleyd never merges. A human merges this PR after reading the above.",
+    ...(j.train !== undefined ? trainLines(j.train) : []),
+    j.train !== undefined
+      ? "volleyd merges this train's PR itself with a merge commit at exactly this head; every member PR it contains reads as merged (each journaled as merged_by_supervisor via the train)."
+      : j.merge === "auto"
+        ? "volleyd merges this PR itself (merge: auto) at exactly this head; the merge is journaled as merged_by_supervisor."
+        : `volleyd never merges. A human merges this PR after reading the above.${
+            j.behind_by > 0
+              ? ` Behind ${j.behind_by}: update the branch (GitHub's Update branch, or a rebase) before merging.`
+              : ""
+          }`,
     "",
     "## Reviews",
   ];

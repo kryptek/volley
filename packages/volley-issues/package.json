@@ -1,6 +1,6 @@
 {
   "name": "volley-issues",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "description": "Volley dispatch-issues skill — autonomous GH-issue agents coordinating via Volley instead of claude-peers",
   "license": "Apache-2.0",
@@ -14,7 +14,8 @@
   },
   "dependencies": {
     "volley-mcp": "workspace:*",
-    "volley-cli": "workspace:*"
+    "volley-cli": "workspace:*",
+    "volleyd": "workspace:*"
   },
   "devDependencies": {
     "aedes": "^0.51.0",

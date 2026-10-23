@@ -15,11 +15,13 @@ import type { SoakWorld } from "./soak-world";
  * its registration (`observe` is fed the journal) — narrates, performs its role in the soak world and publishes its terminal
  * status over the real broker, the way supervised-env.ts simulates one implementer.
  *
- *   - implementer: commits on its base, pushes its branch and opens the PR (a flake fixer's commit
- *     fixes the flaky test's file);
+ *   - implementer: commits every file of its task's footprint (`files`; else `ROLE_FILE`) on its
+ *     base, pushes its branch and opens the PR (a flake fixer's commit fixes the flaky test's file);
  *   - spec_reviewer / quality_reviewer: publish the scripted review result;
- *   - fixup: commits on the reviewed head and pushes it to the PR branch;
+ *   - fixup: commits on the reviewed head (the footprint's first file) and pushes it to the PR branch;
  *   - rebase: rebases the PR head onto the release tip and pushes it (or reports a conflict);
+ *   - integrator (a merge train): cuts the train branch from the release sha `.volley/integrate.md`
+ *     names, merges each member's gated head into it (`--no-ff`), pushes it and opens the PR;
  *   - release: publishes its stage result.
  *
  * What each launch does instead of its role (stall, fail, a conflict, an unparseable result) is
@@ -78,6 +80,8 @@ export interface FleetOptions {
   behaviour?: (a: Omit<FleetAgent, "behaviour">) => Behaviour;
   /** The flaky test's file: a fixer's commit marks it fixed. */
   flakeFile?: string;
+  /** Each task's footprint (concrete paths): what its implementer commits. Absent: `ROLE_FILE`. */
+  files?: Record<string, string[]>;
   /** The wave clock (envelope wall_time). */
   now: () => number;
 }
@@ -96,6 +100,11 @@ export function fakeFleet(o: FleetOptions) {
   /** What each agent published, in order (type per channel), for assertions. */
   const published: { agent_id: string; channel: string; type: string }[] = [];
   const { now } = o;
+  /** The files a task's agents change: its footprint, else its one role file. */
+  const filesOf = (task: string): string[] => {
+    const f = o.files?.[task] ?? [];
+    return f.length > 0 ? f : [ROLE_FILE(task)];
+  };
 
   const track = <T>(p: Promise<T>): Promise<T> => {
     inflight.add(p);
@@ -228,7 +237,7 @@ export function fakeFleet(o: FleetOptions) {
         const files: Record<string, string> =
           fixer && o.flakeFile !== undefined
             ? { [o.flakeFile]: "fixed" }
-            : { [ROLE_FILE(a.task)]: `${a.task}-${a.attempt}` };
+            : Object.fromEntries(filesOf(a.task).map((f) => [f, `${a.task}-${a.attempt}`]));
         const h = w.commit(head(a), files, fixer ? "fix: the flaky test" : `feat: ${a.task}`);
         w.local[a.cwd] = h;
         w.push(a.branch, h);
@@ -252,7 +261,7 @@ export function fakeFleet(o: FleetOptions) {
       case "fixup": {
         const h = w.commit(
           head(a),
-          { [ROLE_FILE(a.task)]: `${a.task}-fixup-${a.attempt}` },
+          { [filesOf(a.task)[0] as string]: `${a.task}-fixup-${a.attempt}` },
           "fix: review findings",
         );
         w.local[a.cwd] = h;
@@ -278,6 +287,33 @@ export function fakeFleet(o: FleetOptions) {
         w.push(prOf(a.task), h);
         await pub(a.agent_id, "result", "rebase", { summary: "no conflicts" });
         await done(a, `rebased ${a.task}`);
+        return;
+      }
+      case "integrator": {
+        const md = readFileSync(join(a.cwd, ".volley", "integrate.md"), "utf-8");
+        const train = /^Train branch: `([^`]+)`/m.exec(md)?.[1];
+        const base = /^Release branch: `[^`]+` at `([0-9a-f]{40})`/m.exec(md)?.[1];
+        if (train === undefined || base === undefined)
+          throw new Error(
+            `fleet: ${a.agent_id}'s integrate.md names no train branch or release sha`,
+          );
+        const members = [
+          ...md.matchAll(
+            /^\d+\. PR #(\d+) \(task \S+\): branch `[^`]+`, gated head `([0-9a-f]{40})`/gm,
+          ),
+        ].map((m) => ({ pr: Number(m[1]), head: m[2] as string }));
+        let h = base;
+        for (const m of members) h = w.merge(h, m.head, `Merge PR #${m.pr} into the train`);
+        w.local[a.cwd] = h;
+        w.push(train, h);
+        w.openPr(train, `train: ${members.map((m) => `#${m.pr}`).join(", ")}`);
+        prBranch[a.task] = train;
+        await pub(a.agent_id, "result", "integrate", {
+          merged: members.map((m) => m.pr),
+          conflicts: [],
+          touched: [],
+        });
+        await done(a, `integrated ${a.task}`);
         return;
       }
       case "release": {

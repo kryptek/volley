@@ -88,11 +88,14 @@ export const CONFIG_DEFAULTS: Tunables = {
     inbox_answered_ttl_s: 600,
     merge: "auto",
     merge_retry_max: 2,
+    merge_transient_backoff_s: [60, 120, 300, 600],
+    merge_transient_retry_max: 1,
     delete_branch: false,
     reconnect_grace_s: 900,
     incident_wait_max_s: 14_400,
     fix_flake_max: 3,
     digest_min_interval_s: 1800,
+    merge_train: true,
   },
   // --- Archiving (SPEC §4.6.20) ---
   archive_ended_after_h: 24,
@@ -214,6 +217,8 @@ export const DAEMON_DEFAULTS = {
   steer_wait_ack_max_ms: 300_000,
   /** How long the daemon waits for one `gh issue view` (issue Files sections, at submit). */
   issue_fetch_ms: 15_000,
+  /** How long the footprint resolver waits for `git ls-tree -r -l --full-tree <ref>`. */
+  tree_read_ms: 15_000,
   /** How long the daemon waits for `gh repo view --json visibility` (at submit, under `auto`). */
   repo_visibility_ms: 15_000,
   /** How long the CLI collects retained registry entries to auto-detect the caller's agent id. */
@@ -390,4 +395,35 @@ export const DAEMON_DEFAULTS = {
   // --- Fleet: merge nudge (overlap.ts) ---
   /** Touched files a merge nudge names before "and N more" (`merge_nudge_sent` keeps them all). */
   nudge_files_shown: 5,
+  // --- Overlap-aware waves: the planner (overlap-plan.ts) and the merge train ---
+  /** Issues one collapsed task bundles at most: past it the bundle's PR is too big to review. */
+  plan_bundle_issues_max: 4,
+  /** Footprint files one collapsed task covers at most, for the same reason. */
+  plan_bundle_files_max: 16,
+  /** Two tasks sharing at least this share of their footprints are strongly coupled (collapse or chain). */
+  plan_coupling_strong: 0.5,
+  /** A cluster's tasks in flight at once under `cap`: more only churn on its hot files. */
+  plan_cluster_in_flight_max: 4,
+  /** Weight of a shared doc file (`*.md`, `docs/`) against a code file: docs merge cleanly more often. */
+  plan_doc_weight: 0.2,
+  /** Gated PRs one merge train carries at most (`autopilot.merge_train`): a red train bisects them. */
+  train_size_max: 4,
+  /** Churn spawns a task may have, as a multiple of its pipeline roles, before `churn_exhausted`. */
+  churn_roles_multiple_max: 3,
+  // --- Overlap-aware waves: the churn monitor (autopilot/churn.ts) ---
+  /**
+   * A cluster changes strategy (`cluster_strategy_changed`) at most this often: a cluster flapping
+   * between hold and planned would admit and hold the same members every few ticks.
+   */
+  cluster_strategy_min_interval_ms: 1_800_000,
+  /** The window merges and branch updates are counted over (`merges_in_window`, `updates_in_window`). */
+  churn_window_ms: 7_200_000,
+  /** Branch updates of one live member that put its cluster on hold: each one re-runs its reviews. */
+  churn_updates_hold: 2,
+  /** Gated members that, merging slower than `churn_merges_floor` per window, put a cluster on hold. */
+  churn_gated_hold: 3,
+  /** Merges per window below which a cluster with `churn_gated_hold` gated members is churning. */
+  churn_merges_floor: 2,
+  /** Gated members that make a cluster a train (the merge queue forms one under `autopilot.merge_train`). */
+  churn_gated_train: 2,
 } as const;

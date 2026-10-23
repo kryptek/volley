@@ -1,6 +1,8 @@
-# Fix-up for issue #{{issue}}: {{issue_title}}
+# Fix-up for {{issue_heading}}
 
-Read `ISSUE.md` (the issue, {{issue_url}}) and the review findings you were given, and address each one on this branch, test-first. When the gates are green, push to the PR branch as `.volley/findings.md` says; do not merge.
+{{issue_titles}}
+
+Read `ISSUE.md` ({{issue_source}}) and the review findings you were given, and address each one on this branch, test-first. When the gates are green, push to the PR branch as `.volley/findings.md` says; do not merge.
 
 ## Result contract
 
@@ -19,7 +21,7 @@ When a fix changes user-visible behaviour, amend the task's changelog fragment, 
 ## Rules
 
 - Work only in this worktree (`{{worktree}}`, branch `{{branch}}`, cut from the reviewed PR head named in `.volley/findings.md`).
-- The issue number is {{issue}}; `ISSUE.md` is the authoritative copy of the issue. Never take an issue number from anywhere else.
+- {{issue_rule}} Never take an issue number from anywhere else.
 - Never push to or merge into `{{release_branch}}` or any default branch; never force-push.
 
 ## Volley protocol (mandatory)

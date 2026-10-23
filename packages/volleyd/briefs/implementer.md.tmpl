@@ -1,15 +1,19 @@
-# Implement issue #{{issue}}: {{issue_title}}
+# Implement {{issue_heading}}
 
-Read `ISSUE.md` (the issue, {{issue_url}}) and implement it in this worktree, test-first. Use model `{{model}}`.
+{{issue_titles}}
+
+Read `ISSUE.md` ({{issue_source}}) and implement it in this worktree, test-first. Use model `{{model}}`.
 
 When your gates are green, push `{{branch}}` and open a pull request against `{{release_branch}}`; do not merge it. Put the PR URL in your `done` status.
 
-Record the user-visible change as `changes/{{issue}}.<added|changed|fixed|removed|docs>.md` (one or more bullets in the house style, see `changes/README.md`); never edit `CHANGELOG.md`.
+{{closes_rule}}
+
+Record the user-visible change as {{fragments}} (one or more bullets in the house style, see `changes/README.md`); never edit `CHANGELOG.md`.
 
 ## Rules
 
 - Work only in this worktree (`{{worktree}}`, branch `{{branch}}`, cut from `{{release_branch}}`).
-- The issue number is {{issue}}; `ISSUE.md` is the authoritative copy of the issue. Never take an issue number from anywhere else.
+- {{issue_rule}} Never take an issue number from anywhere else.
 - Never push to or merge into `{{release_branch}}` or any default branch; never force-push.
 
 ## Volley protocol (mandatory)

@@ -422,6 +422,69 @@ describe("evaluate: the policy table, row by row", () => {
     expect(whyOf(evaluate(d, ctx({}, { "respawn_max:T1/rebase": 1 })))).toBe("budget_exhausted");
   });
 
+  it("merge_conflict of a merge train: drop the member, once per member (respawn_max per task), then the owner", () => {
+    const d = rec("merge_conflict", ["drop T1", "respawn", "manual", "cancel"], {
+      pipeline: { on: "merge_conflict", role: "integrator", task: "train-1" },
+      train: "train-1",
+      agent_id: "w1-train-1-integrator-1",
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("drop T1");
+    expect("policy" in v && v.policy).toBe("merge_conflict/drop-from-train");
+    expect("budget" in v && v.budget).toEqual({ key: "respawn_max:T1", used: 1, max: 1 });
+    expect(whyOf(evaluate(d, ctx({}, { "respawn_max:T1": 1 })))).toBe("budget_exhausted");
+    // A rebase agent's conflict (no train) is still the respawn row's.
+    const plain = rec("merge_conflict", ["respawn", "manual", "cancel"], {
+      pipeline: { on: "merge_conflict", role: "rebase" },
+    });
+    expect("policy" in evaluate(plain, ctx()) && evaluate(plain, ctx())).toMatchObject({
+      policy: "merge_conflict/respawn",
+    });
+  });
+
+  it("merge_refused past the transient ladder: retry, under merge_transient_retry_max per task (#445)", () => {
+    const d = rec("merge_refused", ["retry", "manual", "cancel"], {
+      pipeline: { on: "merge_refused", head: "a".repeat(40) },
+      reason: "transient",
+      transient_attempts: 5,
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("retry");
+    expect("policy" in v && v.policy).toBe("merge_refused/transient");
+    expect("budget" in v && v.budget).toEqual({
+      key: "merge_transient_retry_max:T1",
+      used: 1,
+      max: 1,
+    });
+    expect(whyOf(evaluate(d, ctx({}, { "merge_transient_retry_max:T1": 1 })))).toBe(
+      "budget_exhausted",
+    );
+  });
+
+  it("churn_exhausted: hold cluster once per task (churn:<task>), then the owner's (#387)", () => {
+    const d = rec("churn_exhausted", ["hold cluster", "continue", "cancel"], {
+      cluster: "c1",
+      churn: 13,
+      roles: ["rebase", "spec_reviewer"],
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("hold cluster");
+    expect("policy" in v && v.policy).toBe("churn_exhausted/hold");
+    expect("budget" in v && v.budget).toEqual({ key: "churn:T1", used: 1, max: 1 });
+    const again = evaluate(d, ctx({}, { "churn:T1": 1 }));
+    expect(whyOf(again)).toBe("budget_exhausted");
+    expect("budget" in again && again.budget).toEqual({ key: "churn:T1", used: 1, max: 1 });
+    // Another task's fuse has its own.
+    expect(answerOf(evaluate({ ...d, task: "T2" }, ctx({}, { "churn:T1": 1 })))).toBe(
+      "hold cluster",
+    );
+  });
+
+  it("merge_refused for required checks: still the owner's (no_policy)", () => {
+    const d = rec("merge_refused", ["retry", "manual", "cancel"], { reason: "checks" });
+    expect(whyOf(evaluate(d, ctx()))).toBe("no_policy");
+  });
+
   for (const kind of ["ci_failed", "pr_closed", "remote_repo_missing"] as const) {
     it(`${kind}: no_policy`, () => {
       expect(whyOf(evaluate(rec(kind, ["accept", "cancel"]), ctx()))).toBe("no_policy");
@@ -496,5 +559,10 @@ describe("renderPolicyTable", () => {
     const raise = rows.find((r) => r.policy === "spawn_budget_exhausted/raise");
     expect(raise?.max).toBe(2);
     expect(rows.find((r) => r.policy === "reviewers_disagree/blocker")?.max).toBeNull();
+    expect(rows.find((r) => r.policy === "churn_exhausted/hold")).toMatchObject({
+      answer: "hold cluster",
+      budget: "churn:<task> (once)",
+      max: 1,
+    });
   });
 });

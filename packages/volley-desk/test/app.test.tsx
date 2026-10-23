@@ -16,19 +16,26 @@ describe("App (demo mode)", () => {
         <App />
       </DeskStoreProvider>,
     );
-    // 5 live waves (the ended one folds under Show finished) + 5 agents + the coordinators
+    // 6 live waves (the ended one folds under Show finished) + 5 agents + the coordinators
     // and Needs-you windows.
-    expect(container.querySelectorAll(".world .win")).toHaveLength(5 + 5 + 2);
+    expect(container.querySelectorAll(".world .win")).toHaveLength(6 + 5 + 2);
     // Agent windows use .t-name too; wave windows are the ones with a dependency graph.
     const waveNames = [...container.querySelectorAll(".world .win")]
       .filter((w) => w.querySelector(".dag"))
       .map((w) => w.querySelector(".t-name")?.textContent);
-    expect(waveNames).toEqual(["status-chip", "ci-speed", "leaderboard", "relaunch", "autopilot"]);
+    expect(waveNames).toEqual([
+      "status-chip",
+      "ci-speed",
+      "leaderboard",
+      "relaunch",
+      "autopilot",
+      "overlap",
+    ]);
     expect(screen.getByRole("region", { name: "status-chip" })).toBeInTheDocument();
     expect(container.querySelectorAll(".world .narr")).toHaveLength(5);
-    expect(container.querySelectorAll(".world .dag")).toHaveLength(5);
+    expect(container.querySelectorAll(".world .dag")).toHaveLength(6);
     expect(screen.getByText("Demo · sample data")).toBeInTheDocument();
-    expect(container.querySelector(".topbar-mid")?.textContent).toContain("6 waves");
+    expect(container.querySelector(".topbar-mid")?.textContent).toContain("7 waves");
   });
 });
 

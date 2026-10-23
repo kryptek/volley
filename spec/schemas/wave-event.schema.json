@@ -121,7 +121,12 @@
             "repo_added",
             "repo_removed",
             "repo_clone_run",
-            "repo_trusted"
+            "repo_trusted",
+            "wave_planned",
+            "cluster_strategy_changed",
+            "train_started",
+            "train_merged",
+            "train_failed"
           ]
         },
         "payload": {
@@ -784,18 +789,20 @@
                 "properties": {
                   "task": {
                     "type": "string",
-                    "pattern": "^fix-[a-z0-9-]{1,50}$",
-                    "description": "A flake's fixer: fix-<slug of its test> (spec section 4.6.16)."
+                    "pattern": "^(fix-[a-z0-9-]{1,50}|train-[1-9][0-9]{0,8})$",
+                    "description": "A flake's fixer: fix-<slug of its test> (spec section 4.6.16); a merge train: train-<n>."
                   },
                   "data": {
                     "type": "object",
-                    "required": ["issue", "synthetic", "title", "remediation"],
-                    "description": "A synthetic task (spec section 4.6.16): added by the supervisor, never by a wave file; issue 0, the wave's pipeline, no after.",
+                    "required": ["issue", "synthetic", "title"],
+                    "oneOf": [{ "required": ["remediation"] }, { "required": ["train"] }],
+                    "description": "A synthetic task (spec section 4.6.16): added by the supervisor, never by a wave file; issue 0, the wave's pipeline, no after. A flake's fixer carries its remediation, a merge train its members.",
                     "properties": {
                       "issue": { "const": 0 },
                       "synthetic": { "const": true },
                       "title": { "type": "string", "minLength": 1 },
-                      "remediation": { "$ref": "wave-state.schema.json#/$defs/fixerRemediation" }
+                      "remediation": { "$ref": "wave-state.schema.json#/$defs/fixerRemediation" },
+                      "train": { "$ref": "wave-state.schema.json#/$defs/trainMembers" }
                     }
                   }
                 }
@@ -1138,6 +1145,235 @@
                           "type": "integer",
                           "minimum": 1
                         }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "task_queued" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "description": "A wave-file task's data may carry its bundled issues, its footprint (files, footprint) and where the overlap plan put it (plan).",
+                    "properties": {
+                      "issues": {
+                        "type": "array",
+                        "minItems": 1,
+                        "uniqueItems": true,
+                        "items": { "type": "integer", "minimum": 1 }
+                      },
+                      "files": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                      "footprint": { "$ref": "wave-file.schema.json#/$defs/footprint" },
+                      "plan": { "$ref": "wave-file.schema.json#/$defs/taskPlan" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "agent_spawned" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "churn": {
+                        "const": true,
+                        "description": "The spawn is churn (spec section 4.6.16): it never spends the spawn budget. Absent: productive."
+                      },
+                      "cause": {
+                        "enum": ["branch_update", "rereview", "train", "retry"],
+                        "description": "Why a churn spawn ran: a branch update (rebase), a review round (or its fixup) a branch update caused, a merge train's spawn, or a relaunch, respawn or retry of a role in its step."
+                      },
+                      "issues": {
+                        "type": "array",
+                        "minItems": 2,
+                        "description": "A bundle's issues as fetched (spec section 4.6.22), the task's issue first; absent for a task with one issue.",
+                        "items": {
+                          "type": "object",
+                          "required": ["number", "title", "url"],
+                          "properties": {
+                            "number": { "type": "integer", "minimum": 1 },
+                            "title": { "type": "string" },
+                            "url": { "type": "string" }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "merged_by_supervisor" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "via": {
+                        "const": "train",
+                        "description": "The task merged as a member of a merge train, in train_pr."
+                      },
+                      "train_pr": { "type": "integer", "minimum": 1 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "wave_planned" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["clusters"],
+                    "description": "The overlap plan for the wave's current version, its clusters as the wave state's overlap_plan carries them.",
+                    "properties": {
+                      "clusters": {
+                        "type": "array",
+                        "items": { "$ref": "wave-state.schema.json#/$defs/planCluster" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "cluster_strategy_changed" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["cluster", "from", "to", "why"],
+                    "description": "A cluster of the overlap plan changed how it runs.",
+                    "properties": {
+                      "cluster": { "type": "string", "minLength": 1 },
+                      "from": {
+                        "enum": ["collapse", "chain", "cap", "independent", "hold", "train"]
+                      },
+                      "to": {
+                        "enum": ["collapse", "chain", "cap", "independent", "hold", "train"]
+                      },
+                      "why": { "type": "string", "minLength": 1 },
+                      "churn": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "The churn fuse put the cluster on hold (spec section 4.6.16): the churn spawns of the task the event names."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "train_started" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["train", "tasks", "heads", "release_sha"],
+                    "description": "A merge train started: its tasks, each one's gated head, and the release branch commit it integrates them onto.",
+                    "properties": {
+                      "train": { "type": "string", "pattern": "^train-[1-9][0-9]{0,8}$" },
+                      "tasks": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" }
+                      },
+                      "heads": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" }
+                      },
+                      "release_sha": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "train_merged" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["train", "pr", "merge_sha", "tasks"],
+                    "description": "A merge train merged in pr as merge_sha, landing every one of its tasks.",
+                    "properties": {
+                      "train": { "type": "string", "pattern": "^train-[1-9][0-9]{0,8}$" },
+                      "pr": { "type": "integer", "minimum": 1 },
+                      "merge_sha": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+                      "tasks": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "train_failed" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["train", "why", "tasks"],
+                    "description": "A merge train failed (a conflict integrating it, or red CI on its head); its tasks go back to the merge queue.",
+                    "properties": {
+                      "train": { "type": "string", "pattern": "^train-[1-9][0-9]{0,8}$" },
+                      "why": { "type": "string", "minLength": 1 },
+                      "tasks": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" }
                       }
                     }
                   }

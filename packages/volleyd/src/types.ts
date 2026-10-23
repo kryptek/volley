@@ -213,6 +213,13 @@ export interface AutopilotConfig {
   merge: MergeMode;
   /** Refused autopilot merges at one gated head before a `merge_refused` decision. */
   merge_retry_max: number;
+  /**
+   * The waits (s) before each retry of a merge GitHub refused transiently at one gated head
+   * (attempt n waits entry n); past the last, a `merge_refused` decision.
+   */
+  merge_transient_backoff_s: number[];
+  /** Automatic `retry` answers to a `merge_refused` whose transient ladder was spent, per task. */
+  merge_transient_retry_max: number;
   /** Autopilot merges also delete the PR's head branch (`gh pr merge --delete-branch`). */
   delete_branch: boolean;
   /**
@@ -232,6 +239,8 @@ export interface AutopilotConfig {
   fix_flake_max: number;
   /** The shortest gap (s) between two digests of one wave with the same trigger. */
   digest_min_interval_s: number;
+  /** The merge queue gates and merges up to `train_size_max` gated PRs as one train. */
+  merge_train: boolean;
 }
 
 /** How the supervisor's own machine takes auto-placed tasks (config `fleet.local_agents`). */
@@ -349,12 +358,70 @@ export interface WaveTask {
   account?: string;
   /** `heavy: true`: placement needs a free per-machine slot in each of the wave's `heavy_pools`. */
   heavy?: boolean;
+  /** Every issue the task closes when it bundles several (contains `issue`). */
+  issues?: number[];
+  /** How `files` was found (the task's footprint). */
+  footprint?: Footprint;
+  /** Where the overlap plan put the task (`plan:`). */
+  plan?: TaskPlan;
   /**
    * Added by the supervisor, never by a wave file (journal-only, `issue: 0`): a flake's fixer
-   * (SPEC §4.6.16), with the remediation it carries out.
+   * (SPEC §4.6.16), with the remediation it carries out, or a merge train (SPEC §4.6.23), with
+   * its members.
    */
   synthetic?: true;
   remediation?: FixerRemediation;
+  train?: TrainMembers;
+}
+
+/** How a task's footprint (`files`) was found. */
+export type FootprintConfidence = "listed" | "resolved" | "guessed" | "none";
+
+/** wave-file `tasks.<id>.footprint`: `unresolved` names matched no path in the tree. */
+export interface Footprint {
+  confidence: FootprintConfidence;
+  unresolved?: string[];
+}
+
+/** wave-file `tasks.<id>.plan`: the task's cluster, the strategy that placed it, and why. */
+export interface TaskPlan {
+  cluster?: string;
+  by?: "collapse" | "chain" | "cap" | "independent";
+  why?: string;
+}
+
+/** How a cluster runs: groups collapsed into one task, `[before, after]` chains, an in-flight cap. */
+export interface PlanStrategy {
+  collapse?: TaskId[][];
+  chain?: [TaskId, TaskId][];
+  cap?: number;
+}
+
+/** wave-state `overlap_plan.clusters[]`: tasks sharing files, the hot files and how they run. */
+export interface PlanCluster {
+  id: string;
+  tasks: TaskId[];
+  hot: { file: string; bytes: number; shared_by: TaskId[] }[];
+  strategy: PlanStrategy;
+  state: "planned" | "hold" | "train";
+  why: string;
+}
+
+/** A merge train's state (wave-state `trains[].state`). */
+export type TrainState = "forming" | "integrating" | "ci" | "gated" | "merged" | "failed";
+
+/** wave-state `trains[]`: gated PRs merged as one. */
+export interface MergeTrain {
+  id: TaskId;
+  pr?: number;
+  tasks: TaskId[];
+  state: TrainState;
+  since: string;
+}
+
+/** A merge train's synthetic task's members: each gated PR at its gated head. */
+export interface TrainMembers {
+  members: { task: TaskId; pr: number; head: string }[];
 }
 
 /**
@@ -401,6 +468,11 @@ export interface Wave {
   merge?: MergeMode;
   /** `playbook:` as written (SPEC §4.6.19): a path, or `none`; absent: `.volley/release.yaml`. */
   playbook?: string;
+  /**
+   * The overlap plan for this version (`wave_planned`); absent until planned. Not `plan`: a
+   * `WaveRecord`'s `plan` is already the versioned wave file.
+   */
+  overlap_plan?: { clusters: PlanCluster[] };
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +488,8 @@ export interface TaskAgents {
   rebase?: string;
   /** A release stage's agent (the `_release` pseudo task's; never a wave task's). */
   release?: string;
+  /** A merge train's integration agent (its synthetic `train-<n>` task's). */
+  integrator?: string;
 }
 
 export interface TaskState {
@@ -483,7 +557,7 @@ export interface TaskState {
     for?: TaskId[];
     outcome?: "landed" | "failed";
   };
-  /** A supervisor-added task (a flake's fixer, SPEC §4.6.16): never from the wave file. */
+  /** A supervisor-added task (a flake's fixer, a merge train): never from the wave file. */
   synthetic?: true;
   evidence_path?: string;
   /** The task's latest spawn failure, while it is not recovered (`spawn_failed`). */
@@ -498,6 +572,12 @@ export interface TaskState {
   base_sha?: string;
   /** Where the task was placed and why (`task_placed`, placement.ts); absent until placed. */
   placement?: TaskPlacement;
+  /** The overlap plan's cluster the task is in. */
+  cluster?: string;
+  /** The task's churn spawns so far (`agent_spawned` with `churn: true`). */
+  churn?: number;
+  /** A merge train's synthetic task: its members. */
+  train?: TrainMembers;
 }
 
 /** wave-state `tasks[].placement` (SPEC §4.6.15). */
@@ -515,7 +595,18 @@ export interface WaveSpec {
   release_branch?: string;
   model?: string;
   pipeline?: PipelineStep[];
-  tasks: Record<TaskId, { issue: number; title?: string; after: TaskId[] }>;
+  tasks: Record<
+    TaskId,
+    {
+      issue: number;
+      title?: string;
+      after: TaskId[];
+      issues?: number[];
+      files?: string[];
+      footprint?: Footprint;
+      plan?: TaskPlan;
+    }
+  >;
 }
 
 export interface WaveState {
@@ -553,7 +644,24 @@ export interface WaveState {
   alarms?: { alarm: string; message: string }[];
   /** When, by whom and why the wave was archived (`volleyd status --all` only). */
   archived?: { at: string; by: string; reason: string };
+  /** The overlap plan (`wave_planned`); absent until planned. Not `plan`: that is the wave file. */
+  overlap_plan?: { clusters: PlanCluster[] };
+  /**
+   * The wave's spawns so far: productive (what spends the spawn budget) and churn (spawn-class.ts),
+   * with churn per cause once there is any, and the wave's spawn budget (the daemon's snapshot).
+   */
+  spawns?: { productive: number; churn: number; churn_by?: ChurnBy; budget?: number };
+  /** Merge trains, oldest first; absent: none. */
+  trains?: MergeTrain[];
   updated_at: string;
+}
+
+/** wave-state `spawns.churn_by` and the digest's `auto.churn`: churn spawns per cause (#387). */
+export interface ChurnBy {
+  branch_updates: number;
+  rereviews: number;
+  retries: number;
+  trains: number;
 }
 
 /** wave-state `merge_queue[]` (SPEC §4.6.1, §4.6.17). */
@@ -760,6 +868,12 @@ export const WAVE_EVENT_TYPES = [
   "repo_removed",
   "repo_clone_run",
   "repo_trusted",
+  // Overlap-aware waves: the overlap plan and its clusters, and the merge train.
+  "wave_planned",
+  "cluster_strategy_changed",
+  "train_started",
+  "train_merged",
+  "train_failed",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

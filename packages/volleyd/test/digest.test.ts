@@ -192,7 +192,40 @@ describe("digestOf", () => {
       conflicts_resolved: 1,
       retries: 3,
       merges: 2,
+      churn: { branch_updates: 0, rereviews: 0, retries: 0, trains: 0 },
     });
+  });
+
+  it("counts the churn spawns by cause (#387)", () => {
+    const spawn = (task: string, role: string, cause?: string): NewEvent => ({
+      type: "agent_spawned",
+      task,
+      data: {
+        role,
+        agent_id: `w1-${task.toLowerCase()}-${role}`,
+        ...(cause !== undefined ? { churn: true, cause } : {}),
+      },
+    });
+    const d = digestOf(
+      journal(
+        ...events.map(({ seq: _s, at: _a, ...e }) => e),
+        spawn("A", "implementer"),
+        spawn("A", "rebase", "branch_update"),
+        spawn("A", "rebase", "branch_update"),
+        spawn("A", "spec_reviewer", "rereview"),
+        spawn("B", "implementer", "retry"),
+        spawn("train-1", "integrator", "train"),
+      ),
+      reduce(events),
+      NOW,
+      "wave_complete",
+    );
+    expect(d.auto.churn).toEqual({ branch_updates: 2, rereviews: 1, retries: 1, trains: 1 });
+    expect(schemaErrors("digest.schema.json", envelope("_waves/digest", "digest", d))).toEqual([]);
+    expect(summaryLine(d)).toContain(", 5 churn spawns (no budget)");
+    expect(renderDigestMd(d)).toContain(
+      "- 5 churn spawns (2 branch updates, 1 re-review, 1 retry, 1 train)",
+    );
   });
 
   it("lists open decisions as waiting, owner_only for an owner_only escalation", () => {
@@ -288,6 +321,7 @@ describe("summaryLine", () => {
       conflicts_resolved: 2,
       retries: 0,
       merges: 27,
+      churn: { branch_updates: 0, rereviews: 0, retries: 0, trains: 0 },
     },
     waiting: [{ id: "d-go", kind: "release_go", question: "Go?", since: NOW, owner_only: true }],
     held: [],
@@ -312,6 +346,17 @@ describe("summaryLine", () => {
         waiting: [],
       }),
     ).toBe("w1 stopped: 27 shipped");
+    // Churn only when there was any.
+    expect(summaryLine(base)).not.toContain("churn");
+    expect(
+      summaryLine({
+        ...base,
+        waiting: [],
+        auto: { ...base.auto, churn: { branch_updates: 1, rereviews: 0, retries: 0, trains: 0 } },
+      }),
+    ).toBe(
+      "w1 complete: 27 shipped, 3 flakes fixed, 2 conflicts resolved, 1 churn spawn (no budget)",
+    );
   });
 });
 
@@ -379,5 +424,116 @@ describe("renderDigestMd", () => {
     expect(md).toContain("## Shipped\n\nNothing shipped.");
     expect(md).toContain("## Waiting for you\n\nNothing is waiting for you.");
     expect(md).not.toContain("## Failed");
+  });
+});
+
+describe("a bundle's digest (several issues, one PR)", () => {
+  const bundleWave = parseWaveFile(`wave: w2
+repo: /path/to/example-repo
+release_branch: release/w2
+model: claude-opus-5-5
+pipeline: [implement, merge_ready]
+tasks:
+  R: { issue: 310, issues: [310, 312], title: "bundle: #310 + #312" }
+  S: { issue: 320 }
+`);
+  const evs = journal(
+    { type: "wave_submitted", data: { wave: bundleWave, owner: "coord-a" } },
+    { type: "task_queued", task: "R", data: { issue: 310, issues: [310, 312] } },
+    { type: "task_queued", task: "S", data: { issue: 320 } },
+    {
+      type: "agent_spawned",
+      task: "R",
+      data: {
+        agent_id: "w2-r-implementer-1",
+        role: "implementer",
+        attempt: 1,
+        issue: { number: 310, title: "Retries", url: "u310" },
+        issues: [
+          { number: 310, title: "Retries", url: "u310" },
+          { number: 312, title: "Backoff", url: "u312" },
+        ],
+      },
+    },
+    { type: "merged_by_supervisor", task: "R", data: { task: "R", pr: 31, merge_sha: "m-r" } },
+    ...merged("R", 31, { via: "supervisor", merge_sha: "m-r" }),
+    ...merged("S", 32, { merge_sha: "m-s" }),
+  );
+  const d = digestOf(evs, reduce(evs), NOW, "wave_complete");
+
+  it("ships one entry per issue of the bundle, sharing its PR", () => {
+    expect(d.shipped).toEqual([
+      {
+        task: "R",
+        issue: 310,
+        title: "Retries",
+        pr: pr(31),
+        merge_sha: "m-r",
+        merged_by: "supervisor",
+      },
+      {
+        task: "R",
+        issue: 312,
+        title: "Backoff",
+        pr: pr(31),
+        merge_sha: "m-r",
+        merged_by: "supervisor",
+      },
+      { task: "S", issue: 320, pr: pr(32), merge_sha: "m-s", merged_by: "github" },
+    ]);
+    expect(d.closes).toEqual([310, 312, 320]);
+    // One PR merged, however many issues it shipped.
+    expect(d.auto.merges).toBe(1);
+    expect(schemaErrors("digest.schema.json", envelope("_waves/digest", "digest", d))).toEqual([]);
+  });
+
+  it("volleyd digest text says `#310 + #312 (one PR)`", () => {
+    const md = renderDigestMd(d);
+    expect(md).toContain(
+      `- R #310 + #312 (one PR): #310 Retries, #312 Backoff; PR #31 ${pr(31).url} (merged by supervisor)`,
+    );
+    expect(md).toContain(`- S (#320): PR #32 ${pr(32).url} (merged by github)`);
+    expect(summaryLine(d)).toMatch(/^w2 complete: 3 shipped/);
+  });
+});
+
+describe("a merge train in the digest (SPEC §4.6.23)", () => {
+  const evs = journal(
+    { type: "wave_submitted", data: { wave, owner: "coord-a" } },
+    { type: "task_queued", task: "A", data: { issue: 11 } },
+    { type: "task_queued", task: "B", data: { issue: 12 } },
+    {
+      type: "task_queued",
+      task: "train-1",
+      data: {
+        issue: 0,
+        synthetic: true,
+        title: "Train: #11, #12",
+        train: {
+          members: [
+            { task: "A", pr: 21, head: "a".repeat(40) },
+            { task: "B", pr: 22, head: "b".repeat(40) },
+          ],
+        },
+      },
+    },
+    ...["A", "B"].flatMap((t, i): NewEvent[] => [
+      {
+        type: "merged_by_supervisor",
+        task: t,
+        data: { task: t, pr: 21 + i, merge_sha: "m-t", by: "volleyd", via: "train", train_pr: 30 },
+      },
+      ...merged(t, 21 + i, { via: "train", merge_sha: "m-t" }),
+    ]),
+    ...merged("train-1", 30, { via: "supervisor", merge_sha: "m-t" }),
+  );
+  const d = digestOf(evs, reduce(evs), NOW, "wave_complete");
+
+  it("ships each member through its own PR, never the train task itself", () => {
+    expect(d.shipped.map((s) => [s.task, s.issue, s.pr.number, s.merged_by])).toEqual([
+      ["A", 11, 21, "supervisor"],
+      ["B", 12, 22, "supervisor"],
+    ]);
+    expect(d.closes).toEqual([11, 12]);
   });
 });

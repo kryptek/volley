@@ -31,7 +31,8 @@ export type CountedBudget =
   | "rereview_max"
   | "question_max"
   | "ci_fixup_max"
-  | "account_move_max";
+  | "account_move_max"
+  | "merge_transient_retry_max";
 
 /** What a counted budget is per: the task, one role of it, or one run (`<task>/<role>/<attempt>`). */
 export type BudgetScope = "task" | "task_role" | "run";
@@ -81,8 +82,14 @@ export interface PolicyRule {
   budget?: { name: CountedBudget; per: BudgetScope };
   /** A rule that checks its own budget (spawn_budget_exhausted's raise, a flake's fixers). */
   decide?: (d: Facts, ctx: PolicyContext, answer: string) => Outcome;
-  /** The budget a `decide` rule checks, as `volleyd policy` prints it, and its tunable. */
-  decide_budget?: { label: string; name: "budget_raise_max" | "fix_flake_max" };
+  /**
+   * The budget a `decide` rule checks, as `volleyd policy` prints it, and its tunable (or its
+   * fixed `max`).
+   */
+  decide_budget?: { label: string } & (
+    | { name: "budget_raise_max" | "fix_flake_max" }
+    | { max: number }
+  );
   rationale: string;
 }
 
@@ -92,6 +99,9 @@ export const QUESTION_ANSWER =
 
 /** The `budget_raise_max` budget key (one per wave). */
 export const RAISE_BUDGET_KEY = "budget_raise_max";
+
+/** The churn fuse's budget key (`churn:<task>`): autopilot holds a task's cluster once. */
+export const churnBudgetKey = (task: string | null): string => `churn:${task ?? "_wave"}`;
 
 const on = (d: Facts): unknown => markerOf(d)?.on;
 const onOneOf =
@@ -361,6 +371,17 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     rationale: "a red head no rule routes and a repository without workflows are the owner's",
   },
   {
+    policy: "merge_conflict/drop-from-train",
+    kinds: ["merge_conflict"],
+    condition: "a merge train's integration (train), within respawn_max per member task",
+    when: (d) => typeof d.train === "string",
+    answer: (d) => `drop ${String(d.task)}`,
+    answer_label: "drop <member>",
+    budget: { name: "respawn_max", per: "task" },
+    rationale:
+      "the train is formed again without the member, which takes an ordinary turn later; a second conflict of it is the owner's",
+  },
+  {
     policy: "merge_conflict/respawn",
     kinds: ["merge_conflict"],
     condition: "within respawn_max per task/role",
@@ -380,6 +401,17 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
       "a draft is marked ready and merged once the CI that starts then passes; a retry does exactly that",
   },
   {
+    policy: "merge_refused/transient",
+    kinds: ["merge_refused"],
+    condition:
+      "the last refusal was transient (reason: transient) and the backoff ladder is spent (transient_attempts)",
+    when: (d) => d.reason === "transient" && typeof d.transient_attempts === "number",
+    answer: "retry",
+    budget: { name: "merge_transient_retry_max", per: "task" },
+    rationale:
+      "GitHub was busy or unreachable, not refusing the change: a retry starts the backoff ladder again; a refusal that outlasts it twice is the owner's",
+  },
+  {
     policy: "pr/owner",
     kinds: ["pr_closed", "remote_repo_missing"],
     condition: "always",
@@ -393,6 +425,22 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     answer: null,
     rationale:
       "a status the supervisor could not hand over even on recovery: the owner checks the work",
+  },
+  {
+    policy: "churn_exhausted/hold",
+    kinds: ["churn_exhausted"],
+    condition: "the task's cluster not held by autopilot before (churn:<task>)",
+    answer: "hold cluster",
+    decide: (d, ctx, answer) => {
+      const key = churnBudgetKey(d.task);
+      const used = ctx.used(key);
+      return used < 1
+        ? { answer, budget: { key, used: used + 1, max: 1 } }
+        : { escalate: "budget_exhausted", budget: { key, used, max: 1 } };
+    },
+    decide_budget: { label: "churn:<task> (once)", max: 1 },
+    rationale:
+      "churn spends no spawn budget, so its fuse is the control: one member at a time while the cluster is held; churn that goes on anyway is the owner's",
   },
 ];
 
@@ -515,7 +563,14 @@ export function renderPolicyTable(rules: readonly PolicyRule[], cfg: AutopilotCo
             : r.budget !== undefined
               ? `${r.budget.name} per ${SCOPE_LABEL[r.budget.per]}`
               : null,
-        max: own !== undefined ? cfg[own.name] : r.budget !== undefined ? cfg[r.budget.name] : null,
+        max:
+          own !== undefined
+            ? "max" in own
+              ? own.max
+              : cfg[own.name]
+            : r.budget !== undefined
+              ? cfg[r.budget.name]
+              : null,
         rationale: r.rationale,
       };
     }),

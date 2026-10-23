@@ -145,6 +145,51 @@ describe("merge-ready evidence package", () => {
     expect(md).toContain("No fixup ran");
   });
 
+  it("under merge: manual a behind head's merge line says to update the branch first (#383)", () => {
+    const input = {
+      wave: "w1",
+      task: "T1",
+      issue: 42,
+      pr: { number: 7, url: "https://github.com/example/repo/pull/7" },
+      head: H2,
+      branch: "w1/T1-implementer-1",
+      release_branch: "release/w1",
+      ci: "green" as const,
+      ci_runs: [],
+      reviews: {},
+      fixups: [],
+      rebases: [],
+      generated_at: "2026-10-18T12:00:00.000Z",
+    };
+    const behind = renderEvidenceMd(
+      evidenceJson({
+        ...input,
+        release: { release_sha: sha(9), merge_base: sha(8), behind: 3 },
+        merge: "manual",
+      }),
+    );
+    expect(behind).toContain(
+      "volleyd never merges. A human merges this PR after reading the above. Behind 3: update the branch (GitHub's Update branch, or a rebase) before merging.",
+    );
+    const current = renderEvidenceMd(
+      evidenceJson({
+        ...input,
+        release: { release_sha: sha(9), merge_base: sha(9), behind: 0 },
+        merge: "manual",
+      }),
+    );
+    expect(current).not.toContain("update the branch");
+    // Under merge: auto volleyd updates it at its merge turn: no instruction for a human.
+    const auto = renderEvidenceMd(
+      evidenceJson({
+        ...input,
+        release: { release_sha: sha(9), merge_base: sha(8), behind: 3 },
+        merge: "auto",
+      }),
+    );
+    expect(auto).not.toContain("update the branch");
+  });
+
   it("with the task's base_sha, the release-branch line says where it was cut from and how far behind", () => {
     const base = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
     const j = evidenceJson({

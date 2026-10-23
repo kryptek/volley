@@ -8,6 +8,7 @@ import {
   fitId,
   layoutDag,
 } from "../src/windows/wave/Dag";
+import { ACCENT_PALETTE } from "../src/windows/wave/accent";
 
 // The epic's example wave file: T0 → T1, T2 → T3.
 const EXAMPLE: DagNode[] = [
@@ -142,5 +143,79 @@ describe("Dag task ids that do not fit", () => {
       <Dag tasks={[{ id: "T9", issue: 0, after: [], stage: "queued" }]} accent="#6ee7f9" />,
     );
     expect(container.querySelector(".dag-node")).not.toHaveTextContent("#0");
+  });
+});
+
+describe("Dag of a planned wave (#388)", () => {
+  const PLANNED: DagNode[] = [
+    {
+      id: "A1",
+      issue: 310,
+      after: [],
+      stage: "implement",
+      cluster: { id: "A", hue: 2, badge: "A · 4/4" },
+      bundle: [{ issue: 312, href: "https://github.com/example-org/example-repo/issues/312" }],
+      issueHref: "https://github.com/example-org/example-repo/issues/310",
+    },
+    {
+      id: "A2",
+      issue: 311,
+      after: ["A1"],
+      stage: "queued",
+      cluster: { id: "A", hue: 2, badge: "A · 4/4" },
+    },
+    {
+      id: "B1",
+      issue: 330,
+      after: [],
+      stage: "queued",
+      cluster: { id: "B", hue: 5, badge: "B · hold" },
+    },
+    {
+      id: "B2",
+      issue: 331,
+      after: ["B1", "A1"],
+      stage: "queued",
+      cluster: { id: "B", hue: 5, badge: "B · hold" },
+      chained: ["B1"],
+    },
+    { id: "C", issue: 340, after: [], stage: "queued" },
+  ];
+
+  it("draws an edge the planner chained dashed, every other edge solid", () => {
+    const l = layoutDag(PLANNED);
+    expect(l.edges.map((e) => [`${e.from}>${e.to}`, !!e.chained])).toEqual([
+      ["A1>A2", false],
+      ["B1>B2", true],
+      ["A1>B2", false],
+    ]);
+    const { container } = render(<Dag tasks={PLANNED} accent="#6ee7f9" />);
+    const dashed = [...container.querySelectorAll(".dag-edge--chain")];
+    expect(dashed).toHaveLength(1);
+    expect(container.querySelectorAll(".dag-edge")).toHaveLength(3);
+  });
+
+  it("tints each cluster's nodes with one palette hue and badges them with the cluster id", () => {
+    const { container } = render(<Dag tasks={PLANNED} accent="#6ee7f9" />);
+    const node = (id: string) => container.querySelector(`.dag-node[data-id="${id}"]`) as Element;
+    const hull = (id: string) => node(id).querySelector(".dag-hull");
+    expect(hull("A1")).toHaveClass("hull-2");
+    expect(hull("A2")?.getAttribute("fill")).toBe(ACCENT_PALETTE[2]);
+    expect(hull("B1")).toHaveClass("hull-5");
+    expect(hull("B1")?.getAttribute("fill")).toBe(ACCENT_PALETTE[5]);
+    expect(hull("C")).toBeNull();
+    expect(node("A1")).toHaveAttribute("data-cluster", "A");
+    expect(node("A1").querySelector(".dag-cluster")?.textContent).toBe("A · 4/4");
+    expect(node("B2").querySelector(".dag-cluster")?.textContent).toBe("B · hold");
+    expect(node("C").querySelector(".dag-cluster")).toBeNull();
+  });
+
+  it("labels a bundle `#310 +1`, links both issues and lists them in the title", () => {
+    const { container } = render(<Dag tasks={PLANNED} accent="#6ee7f9" />);
+    const n = container.querySelector('.dag-node[data-id="A1"]') as Element;
+    expect(n.querySelector(".dag-issue")).toHaveTextContent("#310 +1");
+    expect(n.querySelector("title")?.textContent).toContain("#310, #312");
+    expect(screen.getByRole("link", { name: "Issue #310 on GitHub" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Issue #312 on GitHub" })).toBeInTheDocument();
   });
 });

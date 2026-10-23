@@ -7,6 +7,7 @@ import {
   ROLES,
   briefExtra,
   briefGatePath,
+  issueVars,
   loadTemplate,
   renderBrief,
 } from "../src/brief";
@@ -14,7 +15,7 @@ import { exec } from "../src/exec";
 import { hygieneText } from "../src/reviews";
 import { spawnAgent } from "../src/spawn";
 import { SpawnError } from "../src/spawn-error";
-import { type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
+import { FIXTURES, type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
 
 const VARS: BriefVars = {
   agent_id: "w1-t1-implementer-1",
@@ -55,8 +56,9 @@ describe("brief templates", () => {
       for (const t of ['type="done"', 'type="blocked"', 'type="failed"'])
         expect(brief).toContain(t);
       expect(brief).toContain("w1-t1-implementer-1");
-      // A release stage is no issue's: its brief is the playbook stage's.
-      if (role !== "release") expect(brief).toContain("#42");
+      // A release stage is no issue's: its brief is the playbook stage's; a merge train's
+      // integrator works from `.volley/integrate.md`, whose members carry the issues.
+      if (role !== "release" && role !== "integrator") expect(brief).toContain("#42");
     },
   );
 
@@ -118,6 +120,34 @@ describe("brief templates", () => {
     expect(merge).not.toContain("{{");
   });
 
+  it("the integrator (a merge train): merges each member with --no-ff from integrate.md, one PR, the integrate result", () => {
+    const train = {
+      ...VARS,
+      task: "train-1",
+      role: "integrator" as const,
+      ...issueVars([
+        { number: 310, title: "", url: "" },
+        { number: 312, title: "", url: "" },
+      ]),
+    };
+    const brief = renderBrief(loadTemplate("integrator"), train);
+    expect(brief).toContain(".volley/integrate.md");
+    expect(brief).toContain("git merge --no-ff");
+    expect(brief).toMatch(/never rebase, never force-push, never amend/i);
+    expect(brief).toContain("origin/release/w1");
+    expect(brief).toContain("`train: #310, #312`");
+    expect(brief).toContain("one `Closes #<issue>` line per member issue");
+    expect(brief).toContain('vol_publish(channel="result", type="integrate"');
+    expect(brief).toContain('"merged"');
+    expect(brief).toContain('"conflicts"');
+    expect(brief).toContain('"touched"');
+    expect(brief).not.toContain("{{");
+    // The protocol block is the shared one, byte for byte.
+    const protocol = (b: string) => b.slice(b.indexOf("## Volley protocol (mandatory)"));
+    expect(protocol(brief)).toBe(protocol(renderBrief(loadTemplate("rebase"), train)));
+    expect(brief).toContain("\nCloses #310\nCloses #312\n");
+  });
+
   it("a merge-mode rebase spawn renders the merge brief", async () => {
     const env = await makeSpawnEnv();
     try {
@@ -138,6 +168,56 @@ describe("brief templates", () => {
     } finally {
       env.cleanup();
     }
+  });
+
+  it("a single issue renders byte-identically to the pre-bundle briefs", () => {
+    for (const role of ["implementer", "spec_reviewer", "quality_reviewer", "fixup"] as const)
+      expect(renderBrief(loadTemplate(role), { ...VARS, role })).toBe(
+        readFileSync(join(FIXTURES, "briefs", `${role}-42.md`), "utf-8"),
+      );
+  });
+
+  it("a bundle's implementer brief names every issue, one Closes line each, one fragment each", () => {
+    const bundle = {
+      ...VARS,
+      ...issueVars([
+        { number: 310, title: "Retries", url: "https://github.com/example/repo/issues/310" },
+        { number: 312, title: "Backoff", url: "https://github.com/example/repo/issues/312" },
+      ]),
+    };
+    const brief = renderBrief(loadTemplate("implementer"), bundle);
+    expect(brief.split("\n")[0]).toBe("# Implement issues #310, #312");
+    expect(brief).toContain("\n- #310 — Retries\n- #312 — Backoff\n");
+    expect(brief).toContain("\nCloses #310\nCloses #312\n");
+    expect(brief).toContain("each on its own line, in the PR body");
+    expect(brief).toContain("`changes/310.<added|changed|fixed|removed|docs>.md`");
+    expect(brief).toContain("`changes/312.<added|changed|fixed|removed|docs>.md`");
+    expect(brief).toContain("The issue numbers are 310 and 312");
+    expect(brief).not.toContain("{{");
+    // The protocol block is the single issue's, byte for byte.
+    const protocol = (b: string) => b.slice(b.indexOf("## Volley protocol (mandatory)"));
+    expect(protocol(brief)).toBe(protocol(renderBrief(loadTemplate("implementer"), VARS)));
+    // The reviewers and the fixup list the bundle's issues too.
+    for (const role of ["spec_reviewer", "quality_reviewer", "fixup"] as const) {
+      const b = renderBrief(loadTemplate(role), { ...bundle, role });
+      expect(b).toContain("issues #310, #312");
+      expect(b).toContain("- #312 — Backoff");
+    }
+  });
+
+  it("issueVars: the bundle placeholders", () => {
+    const one = issueVars([{ number: 42, title: "T", url: "u" }]);
+    expect(one).toMatchObject({ issues: "#42", issue_titles: "", closes_lines: "Closes #42" });
+    const two = issueVars([
+      { number: 310, title: "A", url: "a" },
+      { number: 312, title: "B", url: "b" },
+    ]);
+    expect(two).toMatchObject({
+      issue: 310,
+      issues: "#310, #312",
+      issue_titles: "- #310 — A\n- #312 — B",
+      closes_lines: "Closes #310\nCloses #312",
+    });
   });
 
   it("substitutes in one pass (placeholders inside values stay literal)", () => {

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,7 +7,7 @@ import { ranTaskDef, worktreeGone } from "../src/daemon";
 import type { DecisionRecord } from "../src/decisions";
 import type { EvidenceJson } from "../src/evidence";
 import type { ExecFn } from "../src/exec";
-import { roleSpawnHold } from "../src/pipeline";
+import { releaseLockOn, roleSpawnHold } from "../src/pipeline";
 import { eventually } from "./helpers/broker-wait";
 import { FIXTURES } from "./helpers/fake-host";
 import {
@@ -17,6 +17,7 @@ import {
   pipelineHarness,
   sha,
 } from "./helpers/pipeline-harness";
+import { withEnv } from "./helpers/with-env";
 
 const result = (name: string): unknown =>
   JSON.parse(readFileSync(join(FIXTURES, "review-results", `${name}.json`), "utf-8"));
@@ -228,15 +229,15 @@ describe("pipeline: artifacts and CI", () => {
   });
 });
 
-describe("pipeline: rebase before the gate", () => {
-  /** Reviews done, fixup pushed H2 green, and the release branch moved meanwhile. */
+describe("pipeline: a CONFLICTING PR is updated before the gate", () => {
+  /** Reviews done; the fixup pushed H2, which conflicts with the release branch (moved meanwhile). */
   async function fixedUpBehind() {
     await reviewed();
-    h.world.mergeBase[H2] = sha(0xdead);
-    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    // The PR conflicts with the moved release branch: updated before the gate (#383).
+    await h.finish("fixup", { head: H2, conflicting: true, result: result("fixup-resolved") });
   }
 
-  it("release branch moved: a rebase agent starts at the head; touching a flagged file re-runs that reviewer only", async () => {
+  it("PR conflicting with the moved release branch: a rebase agent starts at the head; touching a flagged file re-runs that reviewer only", async () => {
     await fixedUpBehind();
     expect(stage()).toBe("fixup");
     const rebase = h.spawns.find((s) => s.role === "rebase");
@@ -255,6 +256,25 @@ describe("pipeline: rebase before the gate", () => {
     await h.finish("spec_reviewer", { result: result("approve-empty") });
     expect(stage()).toBe("merge_ready");
     expect(h.task()?.pr?.head_sha).toBe(H3);
+  });
+
+  it("the spawn says why it is churn: the rebase a branch update, the review after it a re-review (#387)", async () => {
+    await fixedUpBehind();
+    // The first review round and the fixup of its findings are productive.
+    expect(h.spawns.filter((s) => s.role !== "rebase").map((s) => s.cause)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(h.spawns.find((s) => s.role === "rebase")?.cause).toBe("branch_update");
+    h.world.diffNames[`${H2}..${H3}`] = ["src/api.ts"];
+    await h.finish("rebase", { head: H3, ci: "green" });
+    const specs = h.spawns.filter((s) => s.role === "spec_reviewer");
+    expect(specs.map((s) => s.cause)).toEqual([undefined, "rereview"]);
+    // The step says so too, so a held spawn retried later keeps its cause.
+    const step = h.events.filter((e) => e.type === "stage_entered").at(-1);
+    expect(step?.data).toMatchObject({ roles: ["spec_reviewer"], cause: "rereview" });
   });
 
   it("a rebase that touched no flagged file goes straight to the gate", async () => {
@@ -284,6 +304,107 @@ describe("pipeline: rebase before the gate", () => {
     expect(h.spawns.some((s) => s.role === "rebase")).toBe(false);
     expect(types()).toContain("stage_entered");
     expect(stage()).toBe("merge_ready");
+  });
+});
+
+describe("pipeline: gated at the reviewed head (#383)", () => {
+  const rebases = () =>
+    h.events.filter((e) => e.type === "stage_entered" && e.data.rebase === true);
+
+  /** Reviews done, and the release branch moved (2 commits) before the fixup pushed H2 green. */
+  async function fixedUpBehind(o: HarnessOptions = {}) {
+    await reviewed(o);
+    h.world.mergeBase[H2] = sha(0xdead);
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+  }
+
+  it("a task behind the release branch after its fixup is gated at that head: no update step", async () => {
+    await fixedUpBehind();
+    expect(stage()).toBe("merge_ready");
+    expect(h.spawns.some((s) => s.role === "rebase")).toBe(false);
+    expect(rebases()).toEqual([]);
+    const gate = h.events.find((e) => e.type === "artifact_verified" && e.data.role === "gate");
+    expect(gate?.data).toMatchObject({ head_sha: H2, behind: 2, release_sha: sha(0xbea5e) });
+    expect(h.record().state?.gates).toEqual(["T1"]);
+    // The evidence records how far behind it is, and the fixup's diffstat all the same.
+    const md = readFileSync(h.task()?.evidence_path as string, "utf-8");
+    expect(md).toContain("Branch current with release branch: no");
+    expect(md).toContain("1 file changed");
+    expect(md).toContain(
+      "Behind 2: update the branch (GitHub's Update branch, or a rebase) before merging.",
+    );
+  });
+
+  it("under merge: auto it queues, says why, and is updated only at its merge turn", async () => {
+    const held = new Map<string, string>([["/repo#release/w1", "other/T9"]]);
+    await fixedUpBehind({ merge: "auto", releaseLock: releaseLockOn(held) });
+    expect(stage()).toBe("merge_ready");
+    await h.tick();
+    expect(types()).toContain("merge_queued");
+    expect(rebases()).toEqual([]);
+    expect(h.task()?.why_waiting).toBe(
+      "gated 2 commits behind release/w1; updated at its merge turn",
+    );
+
+    // The other holder lets go: the turn's check finds it behind and updates it, once.
+    held.delete("/repo#release/w1");
+    await h.tick();
+    expect(rebases()).toHaveLength(1);
+    expect(h.spawns.find((s) => s.role === "rebase")?.start).toEqual({ ref: H2, detach: false });
+    expect(h.task()?.why_waiting).toBeUndefined();
+    h.world.diffNames[`${H2}..${H3}`] = ["README.md"];
+    await h.finish("rebase", { head: H3, ci: "green" });
+    expect(types()).toContain("merged_by_supervisor");
+    expect(stage()).toBe("done");
+    // No review round after the gate: the update touched nothing a reviewer flagged.
+    expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
+  });
+
+  it("the replay's baseline (VOLLEYD_REPLAY_BASELINE=1, test-only) updates a behind task before the gate, as before #383", async () => {
+    await withEnv({ VOLLEYD_REPLAY_BASELINE: "1" }, async () => {
+      await fixedUpBehind();
+      expect(rebases()).toHaveLength(1);
+      expect(h.spawns.some((s) => s.role === "rebase")).toBe(true);
+      expect(h.events.some((e) => e.type === "artifact_verified" && e.data.role === "gate")).toBe(
+        false,
+      );
+    });
+  });
+
+  it("the baseline flag is read in one place only: the pipeline's gate-or-update choice", () => {
+    const dir = join(import.meta.dirname, "..", "src");
+    const hits = (readdirSync(dir, { recursive: true }) as string[])
+      .filter((f) => f.endsWith(".ts"))
+      .filter((f) => readFileSync(join(dir, f), "utf-8").includes("VOLLEYD_REPLAY_BASELINE"));
+    expect(hits).toEqual(["pipeline.ts"]);
+    const src = readFileSync(join(dir, "pipeline.ts"), "utf-8");
+    const fn = /\nfunction gateOrUpdate\([\s\S]*?\n}\n/.exec(src)?.[0] ?? "";
+    expect(fn.match(/process\.env/g)).toHaveLength(1);
+    expect(src.match(/process\.env\.VOLLEYD_REPLAY_BASELINE/g)).toHaveLength(1);
+  });
+
+  it("one commit behind reads in the singular", async () => {
+    const held = new Map<string, string>([["/repo#release/w1", "other/T9"]]);
+    await reviewed({ merge: "auto", releaseLock: releaseLockOn(held) });
+    h.world.behindBy = 1;
+    h.world.mergeBase[H2] = sha(0xdead);
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    await h.tick();
+    expect(h.task()?.why_waiting).toBe(
+      "gated 1 commit behind release/w1; updated at its merge turn",
+    );
+  });
+
+  it("a CONFLICTING PR still enters the update step before the gate", async () => {
+    await reviewed();
+    const pr = h.world.prs[0];
+    if (pr === undefined) throw new Error("no PR");
+    pr.mergeable = "CONFLICTING";
+    h.world.mergeBase[H2] = sha(0xdead);
+    await h.finish("fixup", { head: H2, result: result("fixup-resolved") });
+    expect(rebases()).toHaveLength(1);
+    expect(rebases()[0]?.data).toMatchObject({ conflicting: true });
+    expect(h.record().state?.gates).toEqual([]);
   });
 });
 
@@ -338,16 +459,16 @@ describe("pipeline: a CONFLICTING PR (#312)", () => {
 });
 
 describe("pipeline: branch_update: merge (no force-push)", () => {
-  /** As fixedUpBehind, with the `branch_update` tunable set (default `merge`). */
-  async function behindInMergeMode(mode: "merge" | "rebase" = "merge") {
-    h = pipelineHarness({ branchUpdate: mode });
+  /** As fixedUpBehind (a conflicting fixup head), with the `branch_update` tunable set (default `merge`). */
+  async function behindInMergeMode(mode: "merge" | "rebase" = "merge", o: HarnessOptions = {}) {
+    h = pipelineHarness({ branchUpdate: mode, ...o });
     await h.start();
     h.openPr(H1);
     await h.finish("implementer", { head: H1, ci: "green" });
     await h.finish("spec_reviewer", { result: result("spec-p1") });
     await h.finish("quality_reviewer", { result: result("quality-p1-elsewhere") });
-    h.world.mergeBase[H2] = sha(0xdead);
-    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    // The PR conflicts with the moved release branch: updated before the gate (#383).
+    await h.finish("fixup", { head: H2, conflicting: true, result: result("fixup-resolved") });
   }
 
   it("the update step merges the release branch and pushes without force; the merge commit passes verification", async () => {
@@ -421,13 +542,17 @@ describe("pipeline: branch_update: merge (no force-push)", () => {
   });
 
   it("a step after a config change takes the new mode, even straight after a merge step", async () => {
-    await behindInMergeMode();
+    const held = new Map<string, string>([["/repo#release/w1", "other/T9"]]);
+    await behindInMergeMode("merge", { merge: "auto", releaseLock: releaseLockOn(held) });
     h.setBranchUpdate("rebase");
     h.world.ancestor[`${H2}..${H3}`] = true;
     h.world.diffNames[`${H2}..${H3}`] = ["README.md"];
-    // The release branch moved again past the merge commit: another update step.
+    // The release branch moved again past the merge commit: gated behind, updated at its turn.
     h.world.mergeBase[H3] = sha(0xbeef);
     await h.finish("rebase", { head: H3, ci: "green" });
+    expect(stage()).toBe("merge_ready");
+    held.delete("/repo#release/w1");
+    await h.tick();
     const steps = h.spawns.filter((s) => s.role === "rebase");
     expect(steps).toHaveLength(2);
     expect(steps[1]?.branch_update).toBeUndefined();
@@ -898,8 +1023,8 @@ describe("pipeline: decisions", () => {
 describe("pipeline: rebase without CI", () => {
   it("accepting a no-CI rebase head keeps its touched files: a flagged one still re-runs that review", async () => {
     await reviewed();
-    h.world.mergeBase[H2] = sha(0xdead);
-    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    // The PR conflicts with the moved release branch: updated before the gate (#383).
+    await h.finish("fixup", { head: H2, conflicting: true, result: result("fixup-resolved") });
     h.world.diffNames[`${H2}..${H3}`] = ["src/api.ts"];
     await h.finish("rebase", { head: H3 }); // no CI run at all
     h.elapse(DAEMON_DEFAULTS.ci_none_grace_ms + DAEMON_DEFAULTS.ci_poll_ms);
@@ -1366,6 +1491,13 @@ describe("roleSpawnHold (what the daemon checks before a role spawn)", () => {
     expect(roleSpawnHold({ ...ok, live: 1, ceiling: 2 })).toBeNull();
     expect(roleSpawnHold({ ...ok, live: 2, ceiling: 2 })).toMatch(/hard ceiling reached \(2\/2\)/);
   });
+  it("a churn spawn is never held by the budget, only by the rest (#387)", () => {
+    expect(roleSpawnHold({ ...ok, used: 4, churn: true })).toBeNull();
+    expect(roleSpawnHold({ ...ok, used: 9, churn: true, live: 2, ceiling: 2 })).toMatch(
+      /hard ceiling reached/,
+    );
+    expect(roleSpawnHold({ ...ok, used: 4, churn: true, killSwitch: true })).toMatch(/kill switch/);
+  });
 });
 
 describe("pipeline: remediations (respawn an unverifiable agent, fixup a red head)", () => {
@@ -1394,6 +1526,52 @@ describe("pipeline: remediations (respawn an unverifiable agent, fixup a red hea
     const md = h.spawns.find((s) => s.role === "fixup")?.files["findings.md"] ?? "";
     expect(md).toContain("- CI / test: failure");
     expect(md).not.toContain("CI / docs");
+  });
+
+  it("#492: a push run that reuses the PR run (its test jobs skipped) is green and done", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    const at = h.iso(0);
+    const ok = (name: string) => ({
+      name,
+      status: "completed",
+      conclusion: "success",
+      startedAt: at,
+      completedAt: at,
+    });
+    const skipped = (name: string) => ({ ...ok(name), conclusion: "skipped" });
+    const pr = { id: 960, workflow: "CI", event: "pull_request" };
+    const push = { id: 961, workflow: "CI", event: "push" };
+    h.world.jobs[960] = [ok("Lint"), ok("volleyd unit tests (shard 1/8, bun 1.4)")];
+    h.world.jobs[961] = [
+      ok("Tested tree"),
+      ok("CI reused — this tree passed pull_request run 960"),
+      skipped("Lint"),
+      skipped("volleyd unit tests (shard 1/8, bun 1.4)"),
+      skipped("volleyd unit tests (shard 1/8, bun 1.3)"),
+    ];
+    // Every job of the push run has reported; the run itself has not completed yet.
+    h.world.ciRuns[H1] = [
+      { ...pr, status: "completed", conclusion: "success" },
+      { ...push, status: "in_progress", conclusion: "" },
+    ];
+    await h.finish("implementer", { head: H1 });
+    const hold = h.events.find((e) => e.type === "ci_pending");
+    expect(hold?.data.jobs).toMatchObject({ done: 7, total: 7, failed: [] });
+
+    h.world.ciRuns[H1] = [
+      { ...pr, status: "completed", conclusion: "success" },
+      { ...push, status: "completed", conclusion: "success" },
+    ];
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(h.events.find((e) => e.type === "artifact_verified")?.data).toMatchObject({
+      role: "implementer",
+      head_sha: H1,
+    });
+    expect(h.task()?.pr).toMatchObject({ ci: "green" });
+    expect(ciFailed()).toBeUndefined();
   });
 
   it("CI red on the implementer's first head: fixup with the CI directive, then the reviews", async () => {
@@ -1491,8 +1669,8 @@ describe("pipeline: remediations (respawn an unverifiable agent, fixup a red hea
 
   it("CI red on a rebase's head: a CI fixup, and its green head goes to the gate with no re-review", async () => {
     await reviewed();
-    h.world.mergeBase[H2] = sha(0xdead);
-    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    // The PR conflicts with the moved release branch: updated before the gate (#383).
+    await h.finish("fixup", { head: H2, conflicting: true, result: result("fixup-resolved") });
     const rebase = h.spawns.find((s) => s.role === "rebase");
     expect(rebase?.start).toEqual({ ref: H2, detach: false });
     h.world.diffNames[`${H2}..${H3}`] = ["README.md"];
@@ -1628,5 +1806,110 @@ describe("pipeline: remediations (respawn an unverifiable agent, fixup a red hea
     await h.resolve(h.openDecisions()[0]?.decision_id as string, "re-verify");
     expect(h.events.some((e) => e.type === "relaunched")).toBe(false);
     expect(stage()).toBe("spec_review");
+  });
+});
+
+describe("pipeline: a bundle's Closes lines", () => {
+  it("a PR body missing a Closes line: the implementer is steered once, naming it; fixed → accepted", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(h.steers).toEqual([expect.objectContaining({ role: "implementer", reason: "closes" })]);
+    expect(h.steers[0]?.text).toContain("Closes #99");
+    expect(h.steers[0]?.text).not.toContain("Closes #42");
+    expect(h.steers[0]?.text).toMatch(/publish done again/);
+    expect(h.events.some((e) => e.type === "artifact_verified")).toBe(false);
+    // The implementer edits the PR body and reports done again.
+    const pr = h.world.prs.find((p) => p.number === 7);
+    if (pr !== undefined) pr.body = "Closes #42\nCloses #99";
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(h.steers).toHaveLength(1);
+    const verified = h.events.find((e) => e.type === "artifact_verified");
+    expect(verified?.data).toMatchObject({ role: "implementer", head_sha: H1 });
+    expect(verified?.data.closes_missing).toBeUndefined();
+    expect(h.spawns.map((s) => s.role)).toContain("spec_reviewer");
+  });
+
+  it("still missing after the one steer: accepted, and the fixup carries it as a finding note", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42, #99" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(h.steers).toHaveLength(1);
+    const verified = h.events.find((e) => e.type === "artifact_verified");
+    expect(verified?.data).toMatchObject({ role: "implementer", closes_missing: [99] });
+    await h.finish("spec_reviewer", { result: result("spec-p1") });
+    await h.finish("quality_reviewer", { result: result("quality-p1-elsewhere") });
+    const findings = h.spawns.find((s) => s.role === "fixup")?.files["findings.md"] ?? "";
+    expect(findings).toContain("## The PR body's Closes lines");
+    expect(findings).toContain("\nCloses #99\n");
+  });
+
+  it("still missing and both reviewers approve: the fixup still runs, for the Closes lines alone", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42, #99" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    expect(stage()).toBe("fixup");
+    const findings = h.spawns.find((s) => s.role === "fixup")?.files["findings.md"] ?? "";
+    expect(findings).toContain("## The PR body's Closes lines");
+    expect(findings).toContain('{ "finding": "CLOSES"');
+  });
+
+  it("the fixup's verified PR body is checked again: steered once, then fixed clears closes_missing", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42, #99" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    expect(h.steers.filter((s) => s.role === "fixup" && s.reason === "closes")).toHaveLength(1);
+    expect(stage()).toBe("fixup");
+    const pr = h.world.prs.find((p) => p.number === 7);
+    if (pr !== undefined) pr.body = "Closes #42\nCloses #99";
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    const verified = h.events
+      .filter((e) => e.type === "artifact_verified" && e.data.role === "fixup")
+      .at(-1);
+    expect(verified?.data.closes_missing).toBeUndefined();
+    expect(stage()).toBe("merge_ready");
+  });
+
+  it("the fixup's body still missing after its one steer: accepted with closes_missing, no second steer or fixup", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42, #99" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    expect(h.steers.filter((s) => s.role === "fixup" && s.reason === "closes")).toHaveLength(1);
+    const verified = h.events
+      .filter((e) => e.type === "artifact_verified" && e.data.role === "fixup")
+      .at(-1);
+    expect(verified?.data.closes_missing).toEqual([99]);
+    expect(h.spawns.filter((s) => s.role === "fixup")).toHaveLength(1);
+    expect(stage()).toBe("merge_ready");
+  });
+
+  it("every Closes line present: no steer; a single-issue task is never checked", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42\nCloses #99" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(h.steers).toEqual([]);
+    expect(h.events.some((e) => e.type === "artifact_verified")).toBe(true);
+    h.cleanup();
+    await implemented();
+    expect(h.steers).toEqual([]);
   });
 });

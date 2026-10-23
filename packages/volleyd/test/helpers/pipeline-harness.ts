@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { GithubStatus } from "../../src/autopilot/github-status";
+import { trainBranch } from "../../src/autopilot/merge-train";
 import type { Role } from "../../src/brief";
 import {
   type DecisionInput,
@@ -14,6 +15,7 @@ import { agentIdFor } from "../../src/identity";
 import { PipelineDriver, type PipelineEvent, type SpawnStart } from "../../src/pipeline";
 import { type WaveRecord, apply, emptyRecord } from "../../src/reducer";
 import type { HygieneLevel } from "../../src/reviews";
+import type { ChurnCause } from "../../src/spawn-class";
 import type { BranchUpdate, JournalEvent, NewEvent, NudgeOnMerge } from "../../src/types";
 import { parseWaveFile } from "../../src/wave-file";
 import { branchName } from "../../src/worktree";
@@ -48,6 +50,7 @@ export interface World {
     mergeStateStatus?: string;
     /** A draft PR (`gh pr ready <n>` clears it). */
     isDraft?: boolean;
+    body?: string;
   }[];
   /** CI per head (absent: no run). */
   ci: Record<string, "green" | "red" | "running">;
@@ -79,6 +82,8 @@ export interface World {
   cherry: Record<string, string>;
   /** `git log --format=%H %s <base>..<release>`: the release branch's new commits. */
   releaseLog: string;
+  /** `git log --oneline <base>..<release>`: how many commits a head behind it lacks (default 2). */
+  behindBy: number;
   /** `git diff <a> <b>` / `git show --format= <sha>` text per `a..b` / sha. */
   patches: Record<string, string>;
   /** `gh pr view <n> --json files` by PR number (default: fixtures/gh-pr-view-files.json). */
@@ -124,6 +129,8 @@ export interface World {
   mergeRefuse?: string | undefined;
   /** The merge commit per PR number once merged (default sha(0xa11)). */
   mergeCommit: Record<number, string>;
+  /** An event this answers true for is not appended: the journal throws (a full disk). */
+  journalFail?: ((ev: NewEvent) => boolean) | undefined;
 }
 
 export interface Spawned {
@@ -135,6 +142,8 @@ export interface Spawned {
   files: Record<string, string>;
   /** How the step tells a rebase role to bring the branch up to date (absent: rebase). */
   branch_update?: BranchUpdate;
+  /** Why the pipeline asked for this spawn, when it is churn (spawn-class.ts). */
+  cause?: ChurnCause;
 }
 
 /** A read of one head's runs: `gh api …/actions/runs?head_sha=` (the supervisor) or `gh run list --commit`. */
@@ -169,6 +178,8 @@ export interface HarnessOptions {
   merge?: "auto" | "manual";
   /** `autopilot.merge_retry_max` the driver reads (default: the config default). */
   mergeRetryMax?: number;
+  /** `autopilot.merge_transient_backoff_s` the driver reads (default: the config default). */
+  mergeTransientBackoffS?: number[];
   /** GitHub's status page as the driver reads it (default: none read, i.e. unknown). */
   statusPage?: GithubStatus;
   /** `autopilot.incident_wait_max_s` the driver reads (default: the config default). */
@@ -185,6 +196,12 @@ export interface HarnessOptions {
   autopilot?: (d: DecisionRecord) => string | undefined;
   /** The wave file's `repo:` (default: `/repo`). */
   repo?: string;
+  /** T1 bundles these issues (`issues:`, 42 first). */
+  bundle?: number[];
+  /** `autopilot.merge_train` the driver reads (default: absent, i.e. off). */
+  mergeTrain?: boolean;
+  /** `autopilot.ci_fixup_max` the driver reads (default: the config default). */
+  ciFixupMax?: number;
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -197,7 +214,9 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       "model: claude-opus-5-5",
       `pipeline: ${o.pipeline ?? DEFAULT_PIPELINE}`,
       "tasks:",
-      "  T1: { issue: 42 }",
+      o.bundle !== undefined
+        ? `  T1: { issue: 42, issues: [${o.bundle.join(", ")}] }`
+        : "  T1: { issue: 42 }",
       ...Object.entries(o.dependents ?? {}).map(
         ([id, after], i) => `  ${id}: { issue: ${43 + i}, after: [${after.join(", ")}] }`,
       ),
@@ -212,6 +231,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
   const events: JournalEvent[] = [];
   let seq = 0;
   const journal = async (ev: NewEvent) => {
+    if (world.journalFail?.(ev) === true) throw new Error(`journal: cannot append ${ev.type}`);
     const e: JournalEvent = { ...ev, seq: ++seq, at: new Date().toISOString() } as JournalEvent;
     events.push(e);
     rec = apply(rec, e);
@@ -233,6 +253,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     parents: {},
     cherry: {},
     releaseLog: "",
+    behindBy: 2,
     patches: {},
     prView: {},
     prFiles: {},
@@ -298,7 +319,10 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         return out(world.patches[`${rest[0]}..${rest[1]}`] ?? "");
       if (verb === "merge-base")
         return out(`${world.mergeBase[rest[0] as string] ?? world.releaseTip}\n`);
-      if (verb === "log") return out("c1 upstream change\nc2 upstream change\n");
+      if (verb === "log")
+        return out(
+          Array.from({ length: world.behindBy }, (_, i) => `c${i + 1} upstream change\n`).join(""),
+        );
       if (verb === "diff" && rest[0] === "--name-only")
         return out(`${(world.diffNames[`${rest[1]}..${rest[2]}`] ?? []).join("\n")}\n`);
       if (verb === "diff" && rest[0] === "--stat")
@@ -316,6 +340,14 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       world.prState[n] = "MERGED";
       world.mergeCommit[n] ??= sha(0xa11);
       world.releaseTip = world.mergeCommit[n];
+      // A merge commit (a merge train's): every open PR whose head it contains reads as merged.
+      const merged = a[a.indexOf("--match-head-commit") + 1];
+      if (a.includes("--merge"))
+        for (const pr of world.prs)
+          if (world.ancestor[`${pr.headRefOid}..${merged}`] === true && pr.number !== n) {
+            world.prState[pr.number] ??= "MERGED";
+            world.mergeCommit[pr.number] ??= world.mergeCommit[n];
+          }
       return out("");
     }
     if (a[0] === "gh" && a[1] === "pr" && a[2] === "ready") {
@@ -458,6 +490,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     files: Record<string, string> = {},
     update?: BranchUpdate,
     task = "T1",
+    cause?: ChurnCause,
   ) => {
     const key = task === "T1" ? role : `${task}/${role}`;
     const attempt = (attempts[key] ?? 0) + 1;
@@ -474,6 +507,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       ...(start !== undefined ? { start } : {}),
       files,
       ...(update !== undefined ? { branch_update: update } : {}),
+      ...(cause !== undefined ? { cause } : {}),
     });
     if (start !== undefined) world.local[worktree] = start.ref;
     await journal({
@@ -522,17 +556,24 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     record: () => rec,
     journal,
     spawn: async (task, role, req) =>
-      holdSpawns ? null : spawnAgent(role, req.start, req.files, req.branch_update, task),
+      holdSpawns
+        ? null
+        : spawnAgent(role, req.start, req.files, req.branch_update, task, req.cause),
     branchUpdate: () => branchUpdate ?? "rebase",
     ...(o.hygiene !== undefined ? { hygiene: () => o.hygiene as HygieneLevel } : {}),
     ...(o.merge !== undefined ? { mergeMode: () => o.merge as "auto" | "manual" } : {}),
     ...(o.mergeRetryMax !== undefined ? { mergeRetryMax: () => o.mergeRetryMax as number } : {}),
+    ...(o.mergeTransientBackoffS !== undefined
+      ? { mergeTransientBackoffS: () => o.mergeTransientBackoffS as number[] }
+      : {}),
     ...(o.statusPage !== undefined ? { statusPage: async () => o.statusPage as GithubStatus } : {}),
     ...(o.incidentWaitMaxS !== undefined
       ? { incidentWaitMaxS: () => o.incidentWaitMaxS as number }
       : {}),
     ...(o.deleteBranch !== undefined ? { deleteBranch: () => o.deleteBranch as boolean } : {}),
     ...(o.releaseLock !== undefined ? { releaseLock: o.releaseLock } : {}),
+    ...(o.mergeTrain !== undefined ? { mergeTrain: () => o.mergeTrain as boolean } : {}),
+    ...(o.ciFixupMax !== undefined ? { ciFixupMax: () => o.ciFixupMax as number } : {}),
     // One serial queue, like the daemon's: pipeline I/O folds its results back in through it.
     enqueue: (fn) => {
       const p = queue.then(fn);
@@ -610,7 +651,11 @@ export function pipelineHarness(o: HarnessOptions = {}) {
 
   const run = (role: Role, task = "T1") => rec.pipeline[task]?.runs[role];
   const PR_BRANCH = branchName("w1", "T1", "implementer", 1);
-  const prBranch = (task: string) => branchName("w1", task, "implementer", 1);
+  /** A task's PR branch: its implementer's first, or a merge train's integration branch. */
+  const prBranch = (task: string) =>
+    rec.wave?.tasks[task]?.train !== undefined
+      ? trainBranch("w1", task)
+      : branchName("w1", task, "implementer", 1);
 
   const h = {
     home,
@@ -683,8 +728,16 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       await journal({ type: "stage_entered", task: id, data: { stage: "implement" } });
       return agent_id;
     },
+    /**
+     * A merge train's synthetic task is admitted and its integrator starts (the daemon's admission
+     * spawn), with the `.volley/integrate.md` the driver renders for it.
+     */
+    async admitTrain(id: string) {
+      await journal({ type: "task_admitted", task: id, data: {} });
+      return spawnAgent("integrator", undefined, driver.integrateFiles(id), undefined, id);
+    },
     /** The implementer opens its PR once (the first push). */
-    openPr(head: string, task = "T1", number = 7, o: { draft?: boolean } = {}) {
+    openPr(head: string, task = "T1", number = 7, o: { draft?: boolean; body?: string } = {}) {
       world.prs.push({
         number,
         url: `https://github.com/example/repo/pull/${number}`,
@@ -692,6 +745,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         baseRefName: wave.release_branch,
         headRefOid: head,
         ...(o.draft === true ? { isDraft: true } : {}),
+        ...(o.body !== undefined ? { body: o.body } : {}),
       });
     },
     /** The driver's clock as ISO (a run's `createdAt`). */
@@ -702,7 +756,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     },
     /**
      * A role finishes: its worktree is at `head` (pushed to the PR branch unless `push: false`,
-     * CI `ci` on it), and it reports `status` with `result`.
+     * CI `ci` on it), and it reports `status` with `result`. `conflicting`: GitHub reports the PR
+     * CONFLICTING (no CI) while that head is verified, and MERGEABLE again after.
      */
     async finish(
       role: Role,
@@ -713,9 +768,15 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         result?: unknown;
         status?: "done" | "failed";
         task?: string;
+        conflicting?: boolean;
       } = {},
     ) {
       const task = o.task ?? "T1";
+      const prs = world.prs.filter((pr) => pr.headRefName === prBranch(task));
+      if (o.conflicting === true) {
+        if (prs.length === 0) throw new Error(`conflicting: no PR on ${prBranch(task)}`);
+        for (const pr of prs) pr.mergeable = "CONFLICTING";
+      }
       const r = run(role, task);
       if (r === undefined) throw new Error(`no ${role} run`);
       if (o.head !== undefined) {
@@ -734,11 +795,15 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         ...(o.result !== undefined ? { result: o.result } : {}),
       };
       if (o.result !== undefined) lastResult[r.agent_id] = o.result;
-      await driver.handle(task, ev);
-      await settle();
+      try {
+        await driver.handle(task, ev);
+        await settle();
+      } finally {
+        if (o.conflicting === true) for (const pr of prs) pr.mergeable = "MERGEABLE";
+      }
     },
     /** A role's current run publishes `blocked` with `reason` (the agent stays alive). */
-    async block(role: Role, reason: string, task = "T1") {
+    async block(role: Role, reason: string, task = "T1", payload: Record<string, unknown> = {}) {
       const r = run(role, task);
       if (r === undefined) throw new Error(`no ${role} run`);
       await driver.handle(task, {
@@ -746,10 +811,12 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         role,
         agent_id: r.agent_id,
         reason,
-        payload: { reason },
+        payload: { reason, ...payload },
       });
       await driver.settled();
     },
+    /** The driver's I/O and every autopilot answer handed back, until none is left. */
+    settle,
     /** Resolve an open decision and hand the resolution to the pipeline. */
     async resolve(id: string, answer: string, by = "coord-1") {
       const r = resolveEvent(rec, id, { answer, by }, new Date());

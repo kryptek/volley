@@ -43,6 +43,7 @@ export const DECISION_KINDS = [
   "release_go",
   "stage_go",
   "terminal_status_lost",
+  "churn_exhausted",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
@@ -307,8 +308,10 @@ export function openEvent(
     const task = rec.state?.tasks.find((t) => t.id === input.task);
     if (task === undefined) return { error: `unknown task '${input.task}' in wave '${wave}'` };
     // Parking a finished task would re-park dependents it has already released. A blocked agent
-    // on one is still asked about, by a decision that does not park it.
-    const blockedAside = input.kind === "agent_blocked" && input.park === false;
+    // on one, or a merge train's conflict on a gated member (SPEC §4.6.23), is still asked about,
+    // by a decision that does not park it.
+    const blockedAside =
+      (input.kind === "agent_blocked" || input.kind === "merge_conflict") && input.park === false;
     if (SETTLED.has(task.stage) && !blockedAside)
       return {
         error: `task '${input.task}' is ${task.stage}; open a wave-level decision (task: null) instead`,
@@ -430,6 +433,7 @@ const norm = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
  */
 const CHECKED_KINDS: ReadonlySet<DecisionKind> = new Set([
   "spawn_budget_exhausted",
+  "churn_exhausted",
   "machine_down",
   "repo_untrusted",
 ]);

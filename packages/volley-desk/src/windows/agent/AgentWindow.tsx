@@ -92,6 +92,7 @@ export const ROLE_LABEL: Record<Role, string> = {
   quality_reviewer: "quality review",
   fixup: "fixup",
   rebase: "rebase",
+  integrator: "train integrator",
 };
 
 /** Frame props the App supplies; the window fills in the rest. */

@@ -120,6 +120,8 @@ export interface PrRef {
   merge_state?: string;
   /** A draft PR (GitHub's `isDraft`): its repository may skip CI on it until it is ready. */
   draft?: true;
+  /** The PR's body as GitHub reports it (a bundle's `Closes` lines are checked in it). */
+  body?: string;
 }
 
 export type ArtifactReport =
@@ -145,7 +147,7 @@ export type ArtifactReport =
     };
 
 const PR_FIELDS =
-  "number,url,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus,isDraft";
+  "number,url,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus,isDraft,body";
 const RUN_FIELDS =
   "databaseId,name,workflowName,status,conclusion,url,headSha,event,createdAt,workflowDatabaseId";
 /** How many runs on one head the `head_sha` lookup reads. */
@@ -242,6 +244,7 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
             mergeable?: string;
             mergeStateStatus?: string;
             isDraft?: boolean;
+            body?: string;
           }[]
         >(prs.stdout) ?? [])
       : [];
@@ -270,6 +273,7 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
     ...(isMergeable(pr.mergeable) ? { mergeable: pr.mergeable } : {}),
     ...(typeof pr.mergeStateStatus === "string" ? { merge_state: pr.mergeStateStatus } : {}),
     ...(pr.isDraft === true ? { draft: true as const } : {}),
+    ...(typeof pr.body === "string" ? { body: pr.body } : {}),
   };
 
   const ready = spec.ready?.head === head ? spec.ready.at : undefined;
@@ -573,6 +577,31 @@ async function failedLogs(
   return { failing_tests: tests, log: log.slice(-DAEMON_DEFAULTS.ci_log_max_chars) };
 }
 
+/**
+ * The issues of `issues` whose `Closes #<n>` line is missing from a PR body. GitHub closes only
+ * the first issue of a shared `Closes #a, #b` line, so each must be on its own line, and it ignores
+ * one in code (indented four spaces or a tab, or inside a fence). Deliberately stricter than
+ * GitHub, which also honours `Fixes`/`Resolves` and a keyword mid-line: the brief asks for
+ * `Closes` lines, so only a line-start `Closes #<n>` counts. Pure.
+ */
+export function missingCloses(body: string | undefined, issues: readonly number[]): number[] {
+  const lines = new Set<number>();
+  let fence: string | undefined;
+  for (const l of (body ?? "").split(/\r?\n/)) {
+    const f = /^ {0,3}(`{3,}|~{3,})/.exec(l)?.[1];
+    if (
+      f !== undefined &&
+      (fence === undefined || (f[0] === fence[0] && f.length >= fence.length))
+    ) {
+      fence = fence === undefined ? f : undefined;
+      continue;
+    }
+    const n = fence === undefined ? /^ {0,3}closes\s+#(\d+)\b/i.exec(l)?.[1] : undefined;
+    if (n !== undefined) lines.add(Number(n));
+  }
+  return issues.filter((n) => !lines.has(n));
+}
+
 /** What a verification report means for the pipeline. Pure. */
 export function artifactOutcome(
   task: TaskId,
@@ -713,6 +742,65 @@ export async function checkRebase(
   // The merge-base is not the tip, so the tip has commits the head lacks: none listed is no count.
   if (behind === 0) throw new Error(`inconsistent rebase check: ${base}..${tip} lists no commits`);
   return { release_sha: tip, merge_base: base, behind };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The merge train (SPEC §4.6.23): what its integration branch contains
+// ---------------------------------------------------------------------------------------------
+
+/** The release branch's tip on origin, freshly fetched (where a merge train starts). */
+export async function probeReleaseTip(
+  exec: ExecFn,
+  o: { cwd: string; release_branch: string },
+): Promise<string> {
+  const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
+  const fetched = await git("fetch", "origin", o.release_branch);
+  if (fetched.code !== 0)
+    throw new Error(
+      `git fetch origin ${o.release_branch} failed: ${(fetched.stderr || fetched.stdout).trim()}`,
+    );
+  const tip = line(
+    (await git("rev-parse", "--verify", "--quiet", `refs/remotes/origin/${o.release_branch}`))
+      .stdout,
+  );
+  if (tip === "") throw new Error(`origin/${o.release_branch} not found`);
+  return tip;
+}
+
+/** What a merge train's head contains: the members whose gated head it lacks, and its base. */
+export interface TrainHeadFacts {
+  /** Members (tasks) whose gated head is not an ancestor of the train head. */
+  missing: string[];
+  /** The train head descends from the release sha the train started at. */
+  descends: boolean;
+}
+
+/**
+ * Read-only ancestry of a merge train's head (`git merge-base --is-ancestor`): every member's
+ * gated head must be in it, and it must descend from the release tip the train started at. A
+ * commit the checkout does not have (exit 128: never merged in, never fetched) is not an ancestor;
+ * any other failure throws.
+ */
+export async function probeTrainHead(
+  exec: ExecFn,
+  o: {
+    cwd: string;
+    head: string;
+    release_sha: string;
+    members: readonly { task: string; head: string }[];
+  },
+): Promise<TrainHeadFacts> {
+  const ancestor = async (sha: string): Promise<boolean> => {
+    const r = await exec(["git", "-C", o.cwd, "merge-base", "--is-ancestor", sha, o.head]);
+    if (r.code === 0) return true;
+    if (r.code === 1 || r.code === 128) return false;
+    throw new Error(
+      `git merge-base --is-ancestor ${sha} ${o.head} failed (${r.code}): ${line(r.stderr)}`,
+    );
+  };
+  const missing: string[] = [];
+  for (const m of o.members) if (!(await ancestor(m.head))) missing.push(m.task);
+  return { missing, descends: await ancestor(o.release_sha) };
 }
 
 // ---------------------------------------------------------------------------------------------

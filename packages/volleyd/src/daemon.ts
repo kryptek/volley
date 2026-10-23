@@ -80,6 +80,14 @@ import {
 import { ciStateOf } from "./artifacts";
 import { budgetUsed } from "./autopilot/budgets";
 import { carryHandoff, carryPicker } from "./autopilot/carry";
+import {
+  churnFuse,
+  churnOf,
+  fuseQuietUntil,
+  fuseTripped,
+  plannedName,
+  strategySwitch,
+} from "./autopilot/churn";
 import { type Digest, type DigestTrigger, digestOf, summaryLine } from "./autopilot/digest";
 import { type GithubStatus, githubStatusCache } from "./autopilot/github-status";
 import {
@@ -282,6 +290,7 @@ import {
   mintWakeToken,
 } from "./fence";
 import { LOCAL_HOST } from "./fleet-name";
+import { type Tree, footprintOf, readReleaseTree } from "./footprint";
 import { lockFetches } from "./git-lock";
 import type { Host, TermSize } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
@@ -398,6 +407,8 @@ import {
   admit,
   admitPlacing,
   budgetRaise,
+  clusterRooms,
+  pipelineRoles,
   spawnBudget,
   spawnsOutstanding,
   spawnsUsed,
@@ -408,6 +419,7 @@ import { SETUP_OPS, SetupOps, type SetupOpsOptions, type SetupOutcome } from "./
 import type {
   AgentMcp,
   CoordinatorAttention,
+  Footprint,
   GitHubRepo,
   JournalEvent,
   MergeMode,
@@ -427,7 +439,13 @@ import type {
   WaveTask,
 } from "./types";
 import { SYSTEM_WAVE } from "./types";
-import { type PlacementDefaults, WaveFileError, parseWaveFile, resolveWaveRepo } from "./wave-file";
+import {
+  type PlacementDefaults,
+  WaveFileError,
+  filePlan,
+  parseWaveFile,
+  resolveWaveRepo,
+} from "./wave-file";
 
 import {
   BLOCKED_TASK_CANCELLED,
@@ -533,6 +551,7 @@ import {
   openDecisionFor,
   spawnAgent,
 } from "./spawn";
+import { type ChurnCause, churnCause, repeatsRun } from "./spawn-class";
 import { SpawnError } from "./spawn-error";
 import {
   type TrustFacts,
@@ -748,6 +767,8 @@ interface SpawnPipelineOptions {
   resumeNote?: string;
   /** An account move of a pipeline role: the attempt whose worktree it continues in. */
   worktreeAttempt?: number;
+  /** The pipeline's churn cause for the spawn (a re-review, a train's role; spawn-class.ts). */
+  cause?: ChurnCause;
 }
 
 /** A spawned agent the daemon watches until it is retired. */
@@ -1016,7 +1037,11 @@ const BLOCKED_CLASS = "blocked_unhandled";
 
 /** An admitted task still waiting for its first implementer (spawnAdmitted, the hard ceiling). */
 const awaitsImplementer = (t: TaskState): boolean =>
-  t.stage === "queued" && t.agents.implementer === undefined;
+  t.stage === "queued" && t.agents[firstRole(t)] === undefined;
+
+/** The role that starts a task: its implementer, or a merge train's integrator (SPEC §4.6.23). */
+const firstRole = (t: TaskState): "implementer" | "integrator" =>
+  t.train !== undefined ? "integrator" : "implementer";
 
 /** Stages whose task, with no agent live, has a pipeline role still to spawn (the ceiling). */
 const BETWEEN_ROLES: ReadonlySet<TaskStage> = new Set([
@@ -2960,6 +2985,7 @@ export class Daemon {
     for (const wave of this.waves.keys()) {
       await this.settleFixers(wave);
       await this.holdPass(wave);
+      await this.churnPass(wave);
       await this.completeIfSettled(wave);
       await this.releaseGoIfVerified(wave);
     }
@@ -2990,10 +3016,12 @@ export class Daemon {
         hardCeiling: eff.hard_ceiling,
         spawnsUsed: spawnsUsed(rec),
         spawnBudget: spawnBudget(rec.wave, eff.spawn_budget_multiplier, rec.budget_raised ?? 0),
+        clusters: clusterRooms(rec),
       });
       live += verdict.admit.length;
       const before = JSON.stringify(this.heldBack.get(wave) ?? []);
       this.heldBack.set(wave, verdict.reasons);
+      const heldChanged = this.noteHeld(wave, verdict.held);
       for (const task of verdict.admit)
         await this.append(wave, { type: "task_admitted", task, data: {} });
       // Ready tasks the budget holds back: never silent.
@@ -3002,7 +3030,10 @@ export class Daemon {
         verdict.reasons.some((r) => r.startsWith("spawn budget exhausted"))
       )
         await this.budgetExhausted(wave, null);
-      if (verdict.admit.length === 0 && before !== JSON.stringify(verdict.reasons)) {
+      if (
+        heldChanged ||
+        (verdict.admit.length === 0 && before !== JSON.stringify(verdict.reasons))
+      ) {
         await this.publishState(wave);
       }
     }
@@ -3052,7 +3083,6 @@ export class Daemon {
     eff: Tunables,
   ): Promise<{ admitted: number; reasons: string[]; budget: boolean; changed: boolean }> {
     const w = rec.wave as Wave;
-    const prefix = `${wave}/`;
     const gate = admissionFor(rec, this.killSwitch, this.pressure(wave));
     const r = admitPlacing(
       candidates,
@@ -3066,20 +3096,10 @@ export class Daemon {
         hardCeiling: eff.hard_ceiling,
         spawnsUsed: spawnsUsed(rec),
         spawnBudget: spawnBudget(w, eff.spawn_budget_multiplier, rec.budget_raised ?? 0),
+        clusters: clusterRooms(rec),
       },
     );
-    let changed = false;
-    for (const k of [...this.heldTask.keys()]) {
-      if (k.startsWith(prefix) && r.held[k.slice(prefix.length)] === undefined) {
-        this.heldTask.delete(k);
-        changed = true;
-      }
-    }
-    for (const [id, why] of Object.entries(r.held)) {
-      if (this.heldTask.get(`${prefix}${id}`) === why) continue;
-      this.heldTask.set(`${prefix}${id}`, why);
-      changed = true;
-    }
+    const changed = this.noteHeld(wave, r.held);
     for (const { id, placement: p, placed } of r.admit) {
       if (placed && rec.state?.tasks.find((t) => t.id === id)?.placement === undefined) {
         await this.append(wave, {
@@ -3103,6 +3123,27 @@ export class Daemon {
       for (const host of hosts) await this.publishReadiness(host);
     }
     return { admitted: r.admit.length, reasons: r.reasons, budget: r.budget, changed };
+  }
+
+  /**
+   * Remember why admission held each ready task (its why_waiting), and forget the tasks no longer
+   * held. True when anything changed.
+   */
+  private noteHeld(wave: WaveId, held: Record<TaskId, string>): boolean {
+    const prefix = `${wave}/`;
+    let changed = false;
+    for (const k of [...this.heldTask.keys()]) {
+      if (k.startsWith(prefix) && held[k.slice(prefix.length)] === undefined) {
+        this.heldTask.delete(k);
+        changed = true;
+      }
+    }
+    for (const [id, why] of Object.entries(held)) {
+      if (this.heldTask.get(`${prefix}${id}`) === why) continue;
+      this.heldTask.set(`${prefix}${id}`, why);
+      changed = true;
+    }
+    return changed;
   }
 
   /**
@@ -4134,13 +4175,18 @@ export class Daemon {
       if (room <= 0) return;
       const t = rec.state.tasks.find((x) => x.id === id);
       if (t === undefined || !awaitsImplementer(t)) continue;
-      const key = `${wave}/${id}/implementer`;
+      const role = firstRole(t);
+      const key = `${wave}/${id}/${role}`;
       if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) continue;
       if (this.parkOnTunnel(wave, id)) continue;
       room--;
-      void this.startSpawn(wave, id, "implementer").catch((e: unknown) => {
-        this.log(`spawn ${key}: ${e instanceof Error ? e.message : String(e)}`);
-      });
+      // A merge train's integrator gets its `.volley/integrate.md` (the pipeline renders it).
+      const files = role === "integrator" ? this.pipelineFor(wave).integrateFiles(id) : undefined;
+      void this.startSpawn(wave, id, role, files !== undefined ? { files } : {}).catch(
+        (e: unknown) => {
+          this.log(`spawn ${key}: ${e instanceof Error ? e.message : String(e)}`);
+        },
+      );
     }
   }
 
@@ -4237,7 +4283,9 @@ export class Daemon {
       // agent_spawned clears the role's failures: what spawn_recovered reports is read first.
       const prior = log.record.spawnFailures[task]?.[role];
       const deps = this.spawnDeps(wave);
-      const { resumeNote, ...rest } = pipeline;
+      const { resumeNote, cause: asked, ...rest } = pipeline;
+      // A launch after failures retries the role too (spawn_recovered).
+      const churn = this.churnOf(wave, task, role, asked, prior !== undefined);
       // An implementer respawn continues the branch (and PR) an earlier attempt pushed.
       const carried =
         role === "implementer" && rest.start === undefined && rest.worktreeAttempt === undefined
@@ -4260,6 +4308,7 @@ export class Daemon {
         hygiene: log.record.state?.hygiene_level ?? "p1",
         ...(resumeNote !== undefined ? { resumeNote } : {}),
         ...(carried !== undefined ? { continueBranch: carried } : {}),
+        ...(churn !== null ? { churn } : {}),
       };
       if (remote !== undefined) {
         const r = await this.remoteSpawn(wave, task, remote, deps);
@@ -7256,11 +7305,16 @@ export class Daemon {
       mergeMode: () =>
         log.record.wave?.merge ?? (this.config.get("autopilot.merge", wave) as MergeMode),
       mergeRetryMax: () => this.config.get("autopilot.merge_retry_max", wave) as number,
+      mergeTransientBackoffS: () =>
+        this.config.get("autopilot.merge_transient_backoff_s", wave) as number[],
       // --- Self-healing CI (SPEC §4.6.16): an infra incident's wait, GitHub's status page. ---
       incidentWaitMaxS: () => this.config.get("autopilot.incident_wait_max_s", wave) as number,
       ciRateLimitBackoffMs: () => this.config.get("ci_rate_limit_backoff_ms", wave) as number,
       statusPage: this.githubStatus(),
       deleteBranch: () => this.config.get("autopilot.delete_branch", wave) as boolean,
+      // --- The merge train (SPEC §4.6.23): on by default under merge: auto. ---
+      mergeTrain: () => this.config.get("autopilot.merge_train", wave) as boolean,
+      ciFixupMax: () => this.config.get("autopilot.ci_fixup_max", wave) as number,
       releaseLock: releaseLockOn(this.releaseLocks),
       retire: (agentId, status) => this.retireRole(wave, agentId, status),
       nextAgent: (task, role) => {
@@ -7974,7 +8028,7 @@ export class Daemon {
         const t = tasks.get(id);
         if (t === undefined || liveTasks.has(`${wave}/${id}`)) continue;
         if (awaitsImplementer(t)) {
-          if (this.refused.get(`${wave}/${id}/implementer`)?.until === Number.POSITIVE_INFINITY)
+          if (this.refused.get(`${wave}/${id}/${firstRole(t)}`)?.until === Number.POSITIVE_INFINITY)
             continue;
           add(wave);
           launching++;
@@ -8064,6 +8118,22 @@ export class Daemon {
   }
 
   /**
+   * Whether a spawn of `task`'s `role` is churn, and why (spawn-class.ts): the pipeline's `cause`,
+   * the role's own, or a repeat of the role in its step (`retry`, or a launch after failures).
+   */
+  private churnOf(
+    wave: WaveId,
+    task: TaskId,
+    role: Role,
+    cause: ChurnCause | undefined,
+    afterFailure = false,
+  ): ChurnCause | null {
+    const quick = churnCause({ role, cause, retry: afterFailure });
+    if (quick !== null) return quick;
+    return churnCause({ role, retry: repeatsRun(this.journalEvents(wave), task, role) });
+  }
+
+  /**
    * A pipeline role spawn, through the same lock, launch and verification as the implementer's,
    * under T5's admission verdict, within the wave's spawn budget and only while the wave runs. A
    * hold is silent: the pipeline's next tick asks again.
@@ -8072,7 +8142,12 @@ export class Daemon {
     wave: WaveId,
     task: TaskId,
     role: Role,
-    req: { start?: SpawnStart; files: Record<string, string>; branch_update?: "merge" },
+    req: {
+      start?: SpawnStart;
+      files: Record<string, string>;
+      branch_update?: "merge";
+      cause?: ChurnCause;
+    },
   ): void {
     const rec = this.waves.get(wave)?.record;
     if (this.opts.spawner === undefined || rec?.wave == null) return;
@@ -8081,6 +8156,12 @@ export class Daemon {
     // Its machine takes no new agents: parked until the owner's re-place answer (silent too).
     if (this.parkClosed(wave, task)) return;
     const admission = admissionFor(rec, this.killSwitch, this.pressure(wave));
+    const used = spawnsUsed(rec);
+    const budget = spawnBudget(
+      rec.wave,
+      this.config.effective(wave).spawn_budget_multiplier,
+      rec.budget_raised ?? 0,
+    );
     const hold = roleSpawnHold({
       killSwitch: this.killSwitch,
       running: rec.state?.status === "running",
@@ -8088,12 +8169,13 @@ export class Daemon {
       reasons: admission.reasons,
       live: this.ceilingCount(false).live,
       ceiling: this.config.effective(wave).hard_ceiling,
-      used: spawnsUsed(rec),
-      budget: spawnBudget(
-        rec.wave,
-        this.config.effective(wave).spawn_budget_multiplier,
-        rec.budget_raised ?? 0,
-      ),
+      used,
+      budget,
+      // Churn never spends the budget (#387); classified only when the budget would hold it.
+      churn:
+        used >= budget &&
+        this.churnOf(wave, task, role, req.cause, rec.spawnFailures[task]?.[role] !== undefined) !==
+          null,
     });
     if (hold !== null) {
       this.log(`spawn ${key}: held, ${hold}`);
@@ -9449,6 +9531,13 @@ export class Daemon {
       escalated: ap.escalated,
       budgets: structuredClone(ap.budgets),
     };
+    // What the productive spawns count against (churn never does, #387).
+    if (state.spawns !== undefined && rec.wave != null)
+      state.spawns.budget = spawnBudget(
+        rec.wave,
+        this.config.effective(wave).spawn_budget_multiplier,
+        rec.budget_raised ?? 0,
+      );
     const held = this.heldBack.get(wave) ?? [];
     const candidates = new Set(admissible(rec));
     for (const t of state.tasks) {
@@ -9805,6 +9894,19 @@ export class Daemon {
           if (key.startsWith(`${wave}/${d.task}/`)) this.refused.delete(key);
         }
       }
+    }
+    if (d.kind === "churn_exhausted" && d.task !== null) {
+      const a = r.answer.trim().toLowerCase();
+      if (a === "cancel")
+        await this.append(wave, {
+          type: "task_cancelled",
+          task: d.task,
+          data: { by: r.by, why: `churn exhausted (decision ${id})` },
+        });
+      // The monitor may have let the cluster go since: on hold again. `continue` changes nothing
+      // (the fuse stays quiet until as much churn again, fuseQuietUntil).
+      else if (a === "hold cluster")
+        await this.holdCluster(wave, d.task, `${r.by} answered hold cluster (decision ${id})`);
     }
     if (d.kind === "spawn_budget_exhausted") {
       if (r.answer.trim().toLowerCase() === "cancel") {
@@ -11061,31 +11163,37 @@ export class Daemon {
     const missing = await this.releaseBranchMissing(first.wave);
     if (missing !== null) return { ok: false, error: missing };
     const text = p.wave_yaml as string;
-    const fetchFiles = first.existing === undefined && this.opts.issueBody !== undefined;
-    if (!fetchFiles && !this.readsRepo()) {
+    // A first submit reads each footprint the file leaves out (a task without `files:`) from its
+    // issue; the tree is read for those and for the file's own plan's hot-file sizes.
+    const fetchFiles =
+      first.existing === undefined &&
+      this.opts.issueBody !== undefined &&
+      fileTaskIds(first.wave).some((id) => (first.wave.tasks[id]?.files ?? []).length === 0);
+    const readsTree = fetchFiles || first.wave.overlap_plan !== undefined;
+    if (!readsTree && !this.readsRepo()) {
       const visibility = await this.repoVisibility(first.wave);
       return first.existing !== undefined
-        ? this.resubmit(first.existing, first.wave, text, preface, visibility)
-        : this.commitSubmit(first.wave, first.owner, {}, text, preface, visibility);
+        ? this.resubmit(first.existing, first.wave, text, preface, visibility, null)
+        : this.commitSubmit(first.wave, first.owner, NO_FOOTPRINTS, text, preface, visibility);
     }
-    // Fetching issue bodies and the repo's visibility can take seconds: do it off the serial
-    // queue (control ops and ticks, the kill switch included, keep running), then commit inside
-    // it, re-checking what may have changed meanwhile (the kill switch, a racing submit of the
-    // same wave id).
+    // Fetching issue bodies, the tree and the repo's visibility can take seconds: do it off the
+    // serial queue (control ops and ticks, the kill switch included, keep running), then commit
+    // inside it, re-checking what may have changed meanwhile (the kill switch, a racing submit of
+    // the same wave id).
     return {
       ok: true,
       defer: Promise.all([
-        fetchFiles ? this.fetchIssueFiles(first.wave) : {},
+        this.fetchFootprints(first.wave, fetchFiles, readsTree),
         this.repoVisibility(first.wave),
-      ]).then(([files, visibility]) =>
+      ]).then(([read, visibility]) =>
         this.serial(async () => {
           // The daemon may have stopped (and released the home lock) while the fetch ran.
           if (!this.running) return { ok: false, error: "daemon stopping" };
           const again = this.checkSubmit(p);
           if ("refusal" in again) return again.refusal;
           if (again.existing !== undefined)
-            return this.resubmit(again.existing, again.wave, text, preface, visibility);
-          return this.commitSubmit(again.wave, again.owner, files, text, preface, visibility);
+            return this.resubmit(again.existing, again.wave, text, preface, visibility, read.tree);
+          return this.commitSubmit(again.wave, again.owner, read, text, preface, visibility);
         }),
       ),
     };
@@ -11287,12 +11395,13 @@ export class Daemon {
 
   /**
    * Journal a checked wave as plan v1 (the daemon numbers versions; the file's own `version:` is
-   * informational), its tasks (with their issues' Files lists) and overlap warnings.
+   * informational), its tasks (with their footprints: the file's, else the ones read from their
+   * issues), its overlap plan, the footprints that could not be read, and overlap warnings.
    */
   private async commitSubmit(
     submitted: Wave,
     owner: string | null,
-    issueFiles: Record<TaskId, string[]>,
+    read: ReadFootprints,
     text: string,
     preface: { info: BriefPrefaceInfo | null; path: string },
     visibility: VisibilityFacts | null,
@@ -11301,6 +11410,10 @@ export class Daemon {
     const log = WaveLog.open(join(this.opts.home, "waves", wave.wave));
     this.waves.set(wave.wave, log);
     this.observeJournal(wave.wave, log.journal);
+    const issueFiles: Record<TaskId, string[]> = {};
+    for (const [id, f] of Object.entries(read.footprints)) {
+      if ("files" in f && f.files.length > 0) issueFiles[id] = f.files;
+    }
     this.issueFiles.set(wave.wave, issueFiles);
     this.config.setWaveOverrides(wave.wave, wave.config);
     this.storeVersion(this.versionFile(wave.wave, 1), text);
@@ -11316,17 +11429,42 @@ export class Daemon {
       });
     }
     for (const id of wave.task_order) {
-      const files = issueFiles[id];
+      const t = wave.tasks[id];
+      const got = read.footprints[id];
+      // The file's footprint, else the one read from the issue (journal-only: the definition's
+      // `files` stay as written).
+      const files = t !== undefined && t.files.length > 0 ? t.files : (issueFiles[id] ?? []);
+      const footprint =
+        t?.footprint ?? (got !== undefined && "footprint" in got ? got.footprint : undefined);
       await this.append(wave.wave, {
         type: "task_queued",
         task: id,
         data: {
-          issue: wave.tasks[id]?.issue,
-          ...(files !== undefined && files.length > 0 ? { issue_files: files } : {}),
+          issue: t?.issue,
+          ...(t?.issues !== undefined ? { issues: t.issues } : {}),
+          ...(files.length > 0 ? { files } : {}),
+          ...(footprint !== undefined ? { footprint } : {}),
+          ...(t?.plan !== undefined ? { plan: t.plan } : {}),
         },
       });
     }
+    // The file's own overlap plan (SPEC §4.6.22), once for this version, sized from the tree.
+    if (wave.overlap_plan !== undefined) {
+      const clusters = filePlan(wave, read.tree ?? {}).clusters;
+      await this.append(wave.wave, { type: "wave_planned", data: { clusters } });
+    }
     const warnings: string[] = [];
+    // A footprint that could not be read is never silent: the plan does not see that task.
+    for (const id of wave.task_order) {
+      const got = read.footprints[id];
+      if (got === undefined || !("why" in got)) continue;
+      await this.append(wave.wave, {
+        type: "alarm_raised",
+        task: id,
+        data: { alarm: "footprint_unavailable", task: id, why: got.why },
+      });
+      warnings.push(`footprint unavailable for ${id} (#${wave.tasks[id]?.issue}): ${got.why}`);
+    }
     for (const w of this.overlaps(wave.wave)) {
       await this.append(wave.wave, {
         type: "alarm_raised",
@@ -11349,22 +11487,42 @@ export class Daemon {
   }
 
   /**
-   * Each task issue's `Files` section (best effort, in parallel). Advisory: it feeds the overlap
-   * warning only, and is journaled on `task_queued` — never written into the wave definition.
+   * The release branch's tree (once per wave; null when the clone does not read) and, with
+   * `fetch`, each footprint the file leaves out: a task without `files:` gets its issue's Files
+   * list resolved against the tree (`footprintOf`; without a tree, the list as written, `guessed`),
+   * or why it could not be read. In parallel. Journaled on `task_queued`, never written into the
+   * wave definition.
    */
-  private async fetchIssueFiles(
-    wave: ReturnType<typeof parseWaveFile>,
-  ): Promise<Record<TaskId, string[]>> {
-    const fetch = this.opts.issueBody;
-    const out: Record<TaskId, string[]> = {};
-    if (fetch === undefined) return out;
+  private async fetchFootprints(
+    wave: Wave,
+    fetch: boolean,
+    readsTree: boolean,
+  ): Promise<ReadFootprints> {
+    const repo = expandHome(wave.repo);
+    const tree =
+      readsTree && existsSync(repo)
+        ? await readReleaseTree(this.host.exec, repo, wave.release_branch)
+        : null;
+    const issueBody = this.opts.issueBody;
+    const footprints: Record<TaskId, ReadFootprint> = {};
+    if (!fetch || issueBody === undefined) return { tree, footprints };
     await Promise.all(
-      Object.entries(wave.tasks).map(async ([id, t]) => {
-        const body = await fetch(wave.repo, t.issue).catch(() => null);
-        if (body !== null) out[id] = parseFilesSection(body);
+      fileTaskIds(wave).map(async (id) => {
+        const t = wave.tasks[id];
+        if (t === undefined || t.files.length > 0) return;
+        let body: string | null;
+        try {
+          body = await issueBody(wave.repo, t.issue);
+        } catch (e) {
+          const why = e instanceof Error ? e.message : String(e);
+          footprints[id] = { why: `issue #${t.issue} could not be read: ${why}` };
+          return;
+        }
+        if (body === null) footprints[id] = { why: `issue #${t.issue} could not be read` };
+        else footprints[id] = footprintRead(body, tree);
       }),
     );
-    return out;
+    return { tree, footprints };
   }
 
   /** Overlaps between `wave`'s tasks and the unsettled tasks of every other live wave. */
@@ -11374,12 +11532,11 @@ export class Daemon {
         .filter((t) => !unsettledOnly || (t.stage !== "done" && t.stage !== "cancelled"))
         .map((t) => ({
           id: t.id,
-          files: [
-            ...new Set([
-              ...(rec.wave?.tasks[t.id]?.files ?? []),
-              ...(this.issueFiles.get(w)?.[t.id] ?? []),
-            ]),
-          ],
+          // The task definition's files first; the issue's when the file has none.
+          files:
+            (rec.wave?.tasks[t.id]?.files ?? []).length > 0
+              ? (rec.wave?.tasks[t.id]?.files ?? [])
+              : (this.issueFiles.get(w)?.[t.id] ?? []),
         }));
     const self = this.waves.get(wave)?.record;
     if (self === undefined) return [];
@@ -11944,6 +12101,116 @@ export class Daemon {
       return answer();
     })().finally(() => this.issueChecks.delete(w.wave));
     return { ok: true, defer };
+  }
+
+  /**
+   * The churn monitor (autopilot/churn.ts): each cluster of a running wave's overlap plan that
+   * churns anyway switches strategy (`hold`, `train`) or, calm again, goes back to the plan's,
+   * journaled `cluster_strategy_changed` at most once per `cluster_strategy_min_interval_ms`.
+   * Admission reads the cluster's state (`clusterRooms`): on hold its cap is 1.
+   */
+  private async churnPass(wave: WaveId): Promise<void> {
+    const log = this.waves.get(wave);
+    const clusters = log?.record.state?.overlap_plan?.clusters ?? [];
+    if (log === undefined || log.record.state?.status !== "running" || clusters.length === 0)
+      return;
+    const events = log.journal.readAll();
+    const now = this.now();
+    const churn = churnOf(log.record, events, now);
+    let changed = false;
+    for (const c of clusters) {
+      const change = strategySwitch(
+        c,
+        churn,
+        events,
+        now,
+        DAEMON_DEFAULTS.cluster_strategy_min_interval_ms,
+      );
+      if (change === null) continue;
+      await this.append(wave, {
+        type: "cluster_strategy_changed",
+        data: { cluster: c.id, ...change },
+      });
+      changed = true;
+      this.log(`wave ${wave}: cluster ${c.id} ${change.from} → ${change.to} (${change.why})`);
+    }
+    await this.churnFusePass(wave, changed ? log.journal.readAll() : events);
+  }
+
+  /**
+   * The churn fuse (#387, autopilot/churn.ts `churnFuse`): a task whose churn spawns are more
+   * than `churn_roles_multiple_max` × its pipeline roles puts its cluster on hold
+   * (`cluster_strategy_changed { churn }`, naming the task); churn that goes on while the cluster
+   * is held, or after the monitor let the fuse's hold go, opens one task-level `churn_exhausted`
+   * decision (hold cluster | continue | cancel). `events` is the wave's journal as of now.
+   */
+  private async churnFusePass(wave: WaveId, events: readonly JournalEvent[]): Promise<void> {
+    const rec = this.waves.get(wave)?.record;
+    if (rec?.wave == null || rec.state == null) return;
+    for (const t of rec.state.tasks) {
+      const churn = t.churn ?? 0;
+      const c = rec.state.overlap_plan?.clusters.find((x) => x.id === t.cluster);
+      if (churn === 0 || c === undefined || rec.wave.tasks[t.id] === undefined) continue;
+      if (t.stage === "done" || t.stage === "cancelled") continue;
+      const roles = pipelineRoles(rec.wave, t.id);
+      const limit = DAEMON_DEFAULTS.churn_roles_multiple_max * roles;
+      const step = churnFuse({
+        churn,
+        roles,
+        held: c.state === "hold",
+        tripped: fuseTripped(events, t.id),
+        quietUntil: fuseQuietUntil(events, t.id, limit),
+        open: openDecisions(rec).some((d) => d.kind === "churn_exhausted" && d.task === t.id),
+      });
+      if (step === "hold") {
+        await this.holdCluster(
+          wave,
+          t.id,
+          `${t.id}: ${churn} churn spawns, more than ${DAEMON_DEFAULTS.churn_roles_multiple_max} × its ${roles} role${roles === 1 ? "" : "s"}`,
+        );
+      } else if (step === "decide" && t.stage !== "merge_ready") {
+        // A gated task is not parked by a decision: its cluster's hold is the control.
+        const churned = [
+          ...new Set(
+            events
+              .filter((e) => e.type === "agent_spawned" && e.task === t.id && e.data.churn === true)
+              .map((e) => String(e.data.role)),
+          ),
+        ];
+        try {
+          await this.openDecisionNow(
+            wave,
+            {
+              kind: "churn_exhausted",
+              task: t.id,
+              question: `Needs you: ${t.id} churned ${churn} spawns (more than ${DAEMON_DEFAULTS.churn_roles_multiple_max} × its ${roles} pipeline role${roles === 1 ? "" : "s"}: ${churned.join(", ")}) while cluster ${c.id} is on hold. Churn spends no spawn budget. hold cluster: keep the cluster on hold (one member at a time); continue: let it run, asked again only after as much churn again; or cancel the task?`,
+              options: ["hold cluster", "continue", "cancel"],
+            },
+            { cluster: c.id, churn, roles: churned },
+          );
+        } catch (e) {
+          this.log(`churn fuse ${wave}/${t.id}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Put `task`'s cluster on hold for its churn (`cluster_strategy_changed { churn }`, naming the
+   * task), unless it is held already.
+   */
+  private async holdCluster(wave: WaveId, task: TaskId, why: string): Promise<void> {
+    const rec = this.waves.get(wave)?.record;
+    const t = rec?.state?.tasks.find((x) => x.id === task);
+    const c = rec?.state?.overlap_plan?.clusters.find((x) => x.id === t?.cluster);
+    if (t === undefined || c === undefined || c.state === "hold") return;
+    const from = c.state === "planned" ? plannedName(c) : c.state;
+    await this.append(wave, {
+      type: "cluster_strategy_changed",
+      task,
+      data: { cluster: c.id, from, to: "hold", why, churn: t.churn ?? 0 },
+    });
+    this.log(`wave ${wave}: cluster ${c.id} ${from} → hold (${why})`);
   }
 
   /**
@@ -12826,6 +13093,7 @@ export class Daemon {
     text: string,
     preface: { info: BriefPrefaceInfo | null; path: string },
     visibility: VisibilityFacts | null,
+    tree: Tree | null,
   ): Promise<Reply> {
     const rec = log.record;
     const state = rec.state;
@@ -12879,6 +13147,11 @@ export class Daemon {
         });
       }
     }
+    // The new version's own overlap plan, once (SPEC §4.6.22).
+    if (wave.overlap_plan !== undefined) {
+      const clusters = filePlan(wave, tree ?? {}).clusters;
+      await this.append(wave.wave, { type: "wave_planned", data: { clusters } });
+    }
     await this.journalVisibility(wave.wave, visibility);
     // plan_change decisions go through the decision store: journal + retained decision topic.
     for (const d of res.decisions) {
@@ -12924,11 +13197,45 @@ export class Daemon {
   }
 }
 
-/** The `issue_files` each `task_queued` carries, by task. */
+/** What a submit read for each task without `files:`: its footprint, or why it could not. */
+type ReadFootprint = { files: string[]; footprint: Footprint } | { why: string };
+
+/** The release branch's tree as a submit read it, and each footprint it read. */
+interface ReadFootprints {
+  tree: Tree | null;
+  footprints: Record<TaskId, ReadFootprint>;
+}
+
+const NO_FOOTPRINTS: ReadFootprints = { tree: null, footprints: {} };
+
+/** The wave file's own tasks (a supervisor-added fixer aside), in file order. */
+const fileTaskIds = (wave: Wave): TaskId[] =>
+  wave.task_order.filter((id) => wave.tasks[id]?.synthetic !== true);
+
+/**
+ * An issue body's footprint: resolved against the tree, or without one its Files list as
+ * written, `guessed` (no path was checked).
+ */
+function footprintRead(body: string, tree: Tree | null): { files: string[]; footprint: Footprint } {
+  if (tree === null) {
+    const files = parseFilesSection(body);
+    return { files, footprint: { confidence: files.length > 0 ? "guessed" : "none" } };
+  }
+  const fp = footprintOf(body, tree);
+  return {
+    files: fp.files,
+    footprint: {
+      confidence: fp.confidence,
+      ...(fp.unresolved.length > 0 ? { unresolved: fp.unresolved } : {}),
+    },
+  };
+}
+
+/** The files each `task_queued` carries (`issue_files` in journals before footprints), by task. */
 function journaledIssueFiles(events: readonly JournalEvent[]): Record<TaskId, string[]> {
   const out: Record<TaskId, string[]> = {};
   for (const e of events) {
-    const files = e.data.issue_files;
+    const files = e.data.files ?? e.data.issue_files;
     if (e.type === "task_queued" && e.task !== undefined && Array.isArray(files)) {
       out[e.task] = files.filter((f): f is string => typeof f === "string");
     }

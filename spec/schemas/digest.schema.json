@@ -41,7 +41,7 @@
         },
         "shipped": {
           "type": "array",
-          "description": "Tasks whose PR merged, in merge order.",
+          "description": "Tasks whose PR merged, in merge order: a bundle (spec section 4.6.22) once per issue, every entry with the bundle's one PR.",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -106,7 +106,11 @@
               "$ref": "#/$defs/count",
               "description": "Recovered spawns and relaunches."
             },
-            "merges": { "$ref": "#/$defs/count", "description": "PRs the supervisor merged." }
+            "merges": { "$ref": "#/$defs/count", "description": "PRs the supervisor merged." },
+            "churn": {
+              "$ref": "wave-state.schema.json#/$defs/churnBy",
+              "description": "Churn spawns per cause (spec section 4.6.16): they spent no spawn budget. Absent from a supervisor that predates it."
+            }
           }
         },
         "waiting": {

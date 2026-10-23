@@ -1,19 +1,28 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   BRIEF_TITLE_RULES,
+  ISSUE_PLAN_TEMPLATE,
+  PLANNING_HEADING,
+  PLANNING_REFERENCE,
+  REQUIRED_PLANNING,
   REQUIRED_RELEASE_MERGE,
   REQUIRED_SECTIONS,
+  REQUIRED_TEMPLATE,
+  REQUIRED_TEMPLATE_HEADINGS,
   REQUIRED_VOLLEYD_PATH,
   SKILL_VERSION,
   parseSimpleYaml,
+  planningSection,
   releaseMergeSection,
   splitFrontmatter,
   validateBriefTitle,
   validateFrontmatter,
+  validateIssuePlanTemplate,
+  validatePlanning,
   validateReleaseMerge,
   validateSections,
   validateSkill,
@@ -30,7 +39,25 @@ version: ${SKILL_VERSION}
 ---
 `;
 
-const VOLLEYD_NEEDLES = REQUIRED_VOLLEYD_PATH.map((needle) => `- ${needle}\n`).join("");
+const PLANNING_NEEDLES = REQUIRED_PLANNING.map((needle) => `- ${needle}\n`).join("");
+const VOLLEYD_NEEDLES = `${REQUIRED_VOLLEYD_PATH.map((needle) => `- ${needle}\n`).join("")}
+### Step 2: derive dependencies
+
+body
+
+${PLANNING_HEADING}
+
+${PLANNING_NEEDLES}
+### Step 3: write the wave file
+
+See ${PLANNING_REFERENCE}.
+
+### Step 4: validate and submit
+
+See ${PLANNING_REFERENCE}.
+
+### Step 5: submit and leave
+`;
 const RELEASE_NEEDLES = REQUIRED_RELEASE_MERGE.map((needle) => `- ${needle}\n`).join("");
 const ALL_SECTIONS = REQUIRED_SECTIONS.map((h) =>
   h === "## Volleyd path"
@@ -191,6 +218,81 @@ describe("validateBriefTitle (P2-2 regression guard)", () => {
     expect(validateBriefTitle(SHIPPED).errors).toEqual([]);
     const raw = SHIPPED.replace('--name "<brief-title>"', '--name "Issue-<N>: <short-title>"');
     expect(validateBriefTitle(raw).ok).toBe(false);
+  });
+});
+
+describe("validatePlanning (#390: footprints, bundling and the planner)", () => {
+  it("accepts a body whose planning section sits between Step 2 and Step 3", () => {
+    expect(validatePlanning(FULL_OK).errors).toEqual([]);
+  });
+  it.each([...REQUIRED_PLANNING])("flags a planning section that loses %s", (needle) => {
+    expect(validatePlanning(FULL_OK.replace(`- ${needle}\n`, "")).errors).toContain(
+      `planning section must mention: ${needle}`,
+    );
+  });
+  it("flags a missing planning section", () => {
+    const r = validatePlanning(FULL_OK.replace(PLANNING_HEADING, "### Something else"));
+    expect(r.errors).toEqual([`missing the ${PLANNING_HEADING} section`]);
+  });
+  it("flags a planning section that is not between Step 2 and Step 3", () => {
+    const section = planningSection(splitFrontmatter(FULL_OK).body) ?? "";
+    const moved = `${FULL_OK.replace(section, "")}\n${section}`;
+    expect(validatePlanning(moved).errors).toContain(
+      `${PLANNING_HEADING} must sit between Step 2 and Step 3 of the volleyd path`,
+    );
+  });
+  it.each(["### Step 3", "### Step 4"])("flags a %s that does not reference it", (step) => {
+    const body = splitFrontmatter(FULL_OK).body;
+    const at = body.indexOf(step);
+    const stepText = body.slice(at, body.indexOf("### Step", at + 1));
+    const without = FULL_OK.replace(stepText, stepText.replace(PLANNING_REFERENCE, "it"));
+    expect(validatePlanning(without).errors).toContain(
+      `${step} must reference ${PLANNING_REFERENCE}`,
+    );
+  });
+  it("guards the shipped SKILL.md", () => {
+    expect(validatePlanning(SHIPPED).errors).toEqual([]);
+    const section = planningSection(splitFrontmatter(SHIPPED).body) ?? "";
+    expect(section.startsWith(PLANNING_HEADING)).toBe(true);
+    expect(section).not.toContain("### Step 3");
+  });
+});
+
+const TEMPLATE_PATH = fileURLToPath(new URL(`../${ISSUE_PLAN_TEMPLATE}`, import.meta.url));
+
+describe("validateIssuePlanTemplate (#390: the issue-planning brief)", () => {
+  const ok = `# Planning a batch\n\n${REQUIRED_TEMPLATE_HEADINGS.map((h) => `${h}\n\nbody\n`).join("\n")}\n${REQUIRED_TEMPLATE.map((n) => `- ${n}\n`).join("")}`;
+  it("accepts a template with every heading and rule", () => {
+    expect(validateIssuePlanTemplate(ok).errors).toEqual([]);
+  });
+  it("flags a missing template", () => {
+    expect(validateIssuePlanTemplate(null).errors).toEqual([
+      `missing the issue-plan template: ${ISSUE_PLAN_TEMPLATE}`,
+    ]);
+  });
+  it.each([...REQUIRED_TEMPLATE_HEADINGS])("flags a template without %s", (heading) => {
+    expect(validateIssuePlanTemplate(ok.replace(`${heading}\n`, "")).errors).toContain(
+      `issue-plan template must show the plan heading: ${heading}`,
+    );
+  });
+  it.each([...REQUIRED_TEMPLATE])("flags a template that loses %s", (needle) => {
+    expect(validateIssuePlanTemplate(ok.replace(`- ${needle}\n`, "")).errors).toContain(
+      `issue-plan template must mention: ${needle}`,
+    );
+  });
+  it("guards the shipped template", () => {
+    expect(existsSync(TEMPLATE_PATH)).toBe(true);
+    expect(validateIssuePlanTemplate(readFileSync(TEMPLATE_PATH, "utf8")).errors).toEqual([]);
+  });
+  it("the CLI fails a SKILL.md whose directory has no template, and passes the shipped one", () => {
+    const script = fileURLToPath(new URL("../scripts/validate-skill.ts", import.meta.url));
+    const dir = tempDir("volley-issues-skill-");
+    writeFileSync(join(dir, "SKILL.md"), SHIPPED);
+    const bare = spawnSync("bun", ["run", script, join(dir, "SKILL.md")], { encoding: "utf-8" });
+    expect(bare.status).toBe(1);
+    expect(bare.stderr).toContain(`missing the issue-plan template: ${ISSUE_PLAN_TEMPLATE}`);
+    const shipped = fileURLToPath(new URL("../SKILL.md", import.meta.url));
+    expect(spawnSync("bun", ["run", script, shipped], { encoding: "utf-8" }).status).toBe(0);
   });
 });
 

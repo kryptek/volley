@@ -27,6 +27,13 @@ export interface QueueEntry {
    * checks, unknown): it keeps its place, competing as a `queued` one does (#311).
    */
   keepsPlace?: boolean;
+  /** A `refused` entry GitHub refused transiently: when its merge is retried (#445). */
+  retry_at?: string;
+  /**
+   * The merge train the entry is a member of while that train forms or runs (SPEC §4.6.23); the
+   * entry shows `merging` meanwhile and never takes the ordinary turn.
+   */
+  train?: string;
 }
 
 /** Where an entry competes in nextToMerge. */
@@ -46,9 +53,9 @@ export function dependents(wave: Wave, task: TaskId): number {
  * head moved, retargeted away from it, or closed), or that it is a draft, which waits for the CI
  * that starts once it is marked ready (#408): the task gives up the merge turn. Any other
  * refusal (required checks, branch protection, unknown) keeps it, and the merge is tried again up
- * to `merge_retry_max` (#311). A refusal journaled before reasons were recorded counts as `behind`;
- * a late refusal of an older gated head counts for nothing (the reducer records only the current
- * head's reason).
+ * to `merge_retry_max` (#311); a transient one keeps it too, retried on its backoff ladder (#445).
+ * A refusal journaled before reasons were recorded counts as `behind`; a late refusal of an older
+ * gated head counts for nothing (the reducer records only the current head's reason).
  */
 export function refusalEndsTurn(p: TaskPipeline): boolean {
   const reason = p.merge_refusal_reason;
@@ -67,16 +74,21 @@ export function queueOf(rec: WaveRecord): QueueEntry[] {
   const state = rec.state;
   const wave = rec.wave;
   if (state == null || wave == null) return [];
+  const inTrain = new Map<TaskId, string>();
+  for (const tr of state.trains ?? [])
+    if (tr.state !== "merged" && tr.state !== "failed")
+      for (const task of tr.tasks) inTrain.set(task, tr.id);
   const entries: QueueEntry[] = [];
   for (const t of state.tasks) {
     const p = rec.pipeline[t.id];
     if (p?.queued_at === undefined || p.merge_manual === true) continue;
+    const train = inTrain.get(t.id);
     const qs: QueueState =
-      p.merge_inflight === true
+      p.merge_inflight === true || train !== undefined
         ? "merging"
         : p.rebasing && t.stage !== "merge_ready"
           ? "updating"
-          : (p.merge_refusals ?? 0) > 0
+          : (p.merge_refusals ?? 0) > 0 || p.merge_transient !== undefined
             ? "refused"
             : "queued";
     entries.push({
@@ -86,6 +98,10 @@ export function queueOf(rec: WaveRecord): QueueEntry[] {
       since: p.queued_at,
       gated: t.stage === "merge_ready",
       ...(qs === "refused" && !refusalEndsTurn(p) ? { keepsPlace: true } : {}),
+      ...(qs === "refused" && p.merge_transient?.retry_at !== undefined
+        ? { retry_at: p.merge_transient.retry_at }
+        : {}),
+      ...(train !== undefined ? { train } : {}),
     });
   }
   const score = new Map(entries.map((e) => [e.task, dependents(wave, e.task)]));
@@ -128,6 +144,10 @@ function afterFirst(entries: QueueEntry[], wave: Wave): QueueEntry[] {
  * candidate competes by readiness. (Each pipeline driver passes its own wave only: across waves
  * the release-branch lock goes to whichever wave asks first.)
  *
+ * A branch with an entry in a merge train gets no turn: the train merges its members and holds
+ * the release branch as a merge in flight does (the driver asks formTrain first when
+ * `autopilot.merge_train` is on, merge-train.ts).
+ *
  * An ungated (updating) entry is skipped, so a gated entry behind it can go first: the "never
  * ahead of a task it comes after" order holds only because a dependent is admitted after its
  * dependency is done. Stacked PRs (a dependent gated while its dependency still queues) would
@@ -138,7 +158,7 @@ export function nextToMerge(
   inflight: ReadonlySet<string>,
 ): { branch: string; wave: WaveId; task: TaskId } | null {
   for (const [branch, entries] of Object.entries(queues)) {
-    if (inflight.has(branch)) continue;
+    if (inflight.has(branch) || entries.some((e) => e.train !== undefined)) continue;
     for (const state of ["queued", "refused"] as const) {
       const firsts = new Map<WaveId, QueueEntry>();
       for (const e of entries)

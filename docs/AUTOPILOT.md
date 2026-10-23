@@ -25,7 +25,7 @@ the few things only you can answer. This page is the map; each piece links to it
 |---|---|---|
 | Routine decisions | Answered from a reviewable policy table (a relaunch, a second nudge, a disputed P1 treated as a blocker, a spawn-budget raise), within per-wave budgets; every answer is journaled `decision_auto_resolved`. `volleyd policy` prints the table. | [Autopilot](../packages/volleyd/README.md#autopilot) |
 | Red CI | Classified first: own change (a fixup agent with the CI result as its directive), flake (a dedicated `fix-<test>` task whose merge unblocks every PR that waited on it), or infra incident (held and re-checked; never re-run). | [Self-healing CI](../packages/volleyd/README.md#self-healing-ci) |
-| Merging | Under `merge: auto`, each gated PR is squash-merged at exactly the reviewed head, through the authority fence, journaled `merged_by_supervisor`. | [Autopilot merging](../packages/volleyd/README.md#autopilot-merging) |
+| Merging | Under `merge: auto`, each gated PR is squash-merged at exactly the reviewed head, through the authority fence, journaled `merged_by_supervisor`. A transient GitHub refusal (`Merge already in progress`, a 5xx, a rate limit) is retried with backoff, not escalated. | [Autopilot merging](../packages/volleyd/README.md#autopilot-merging) |
 | Merge order and conflicts | The merge queue: dependency order, one merge in flight per release branch, each branch brought up to date (a merge, never a force-push) before its turn. | [The merge queue](../packages/volleyd/README.md#the-merge-queue) |
 | Releasing | Once every task is merged, the playbook's stages run one at a time, each in a supervised agent's shell and verified afterwards. | [The release train](../packages/volleyd/README.md#the-release-train) |
 | Crashed or stalled agents | Relaunched or respawned once, on their own branch and PR. | [Autopilot](../packages/volleyd/README.md#autopilot) |
@@ -96,3 +96,67 @@ w1 complete: 27 shipped, 3 flakes fixed, 2 conflicts resolved, 1 waiting for you
 For the full story of one decision, `volleyd events <wave>` has every journaled event, and
 `volleyd status <wave>` prints `autopilot: on · N auto-resolved · M escalated` under the header.
 ([The morning digest](../packages/volleyd/README.md#the-morning-digest))
+
+## Overlap-aware waves
+
+Tasks that touch the same files collide when they merge: each merge moves the release branch
+under the PRs still waiting, and each of those pays a branch update, a CI run and a review round.
+`/volley-issues` plans around it before you submit, from each issue's Files list (its
+footprint), and volleyd watches it while the wave runs. How to write issues the planner can read
+is in the skill's **Planning a batch** section
+([SKILL.md](../packages/volley-issues/SKILL.md)); the mechanics are in the volleyd README
+([Footprints and the overlap plan](../packages/volleyd/README.md#footprints-and-the-overlap-plan)).
+
+**The plan lines.** The skill prints them before it submits (and `--plan-only` prints only
+them); `volleyd validate` and `volleyd run` print them again, and the wave file starts with them:
+
+```text
+cluster A: 3 tasks share src/daemon.ts (11k lines, 3 tasks) → 1 bundle (T1), 1 chain (T1 → T4)
+independent: T2, T5
+expected branch updates: ≤ 2 (was ≤ 5 one at a time)
+footprints: 5 listed, 1 guessed (#313); 1 entry unresolved (T4: helpers.ts)
+```
+
+- A **cluster** is a group of tasks sharing source files. Inside it, a **bundle** is several
+  issues done as one task (one agent, one PR, one review; the digest ships them as
+  `#310 + #312 (one PR)`); a **chain** makes one task wait for another (`after:` marked
+  `# chained by the planner`). A cluster of more than four tasks (after bundling) also ends in
+  `cap 4 in flight`: at most that many of its tasks run at once.
+- **Independent** tasks share nothing and run as usual.
+- **Expected branch updates** is what the plan should cost, against one task per issue.
+- **Footprints** says how well the issues' Files lists resolved. A `guessed` or unresolved one
+  plans worse: fix the issue's Files list before you submit.
+
+**A hold and a train.** If a cluster churns anyway (its members keep updating their branches, or
+gated PRs pile up without merging), volleyd switches its strategy, at most once per 30 minutes:
+
+- **hold**: one member at a time; the rest wait until the gated ones merge. The Desk badges the
+  cluster's nodes `A · hold`, its row in the wave window's **Clusters** panel reads `hold` with
+  why, and a waiting task's reason is `cluster A (hold): 1 in flight or gated (i315)`.
+- **train**: the merge queue integrates several gated PRs of the cluster onto one branch, gates
+  it once and merges it once (`autopilot.merge_train`, on by default). The merge-queue line in
+  the wave window leads with it, `train-1 (i310, i312, i315) integrating`, linking the train's
+  PR; each member PR reads as merged, and the digest ships each member under its own PR.
+- **planned**: back to the plan once nothing is gated and nobody updated a branch in the window.
+
+Each switch is in the wave's feed (`cluster A → hold: <why>`) and in `volleyd status` on the
+plan line (`plan: cluster A (hold; in flight: i315): …`).
+
+**Churn, and `churn_exhausted`.** Branch updates, the re-reviews they cause, trains and retries
+are **churn**: they never spend the wave's spawn budget, so a churning wave never stops on
+`spawn_budget_exhausted`. The Desk's wave title carries a `churn 12` chip, `volleyd status` prints
+`spawns: 52 productive / 156 budget · 141 churn (…)`, and the digest's **Handled by autopilot**
+counts them. When one task churns far past its pipeline (more than 3× its roles), its cluster
+goes on hold; if it churns again, one `churn_exhausted` decision asks: `hold cluster` (one at a
+time until the gated ones merge), `continue` (let it run as it is) or `cancel` (cancel the task).
+Autopilot answers `hold cluster` once per task; the next one is yours, in **Waiting for you** and
+the Needs you window.
+
+**The two overrides.** The supervisor runs the wave file as written:
+
+- **Edit the wave file** before submitting: delete a chained `after:` to run two tasks in
+  parallel, or remove a task's `issues:` (giving each issue its own task back) to split a bundle.
+  `volleyd validate` prints a `note:` where the planner would have planned differently, and keeps
+  your version.
+- **`--no-plan`** on `/volley-issues` writes one task per issue with the footprints but no
+  bundle, chain or cap. A `Depends on:` in an issue still orders its task.

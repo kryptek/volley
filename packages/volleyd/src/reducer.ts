@@ -1,5 +1,6 @@
 import { type AutopilotRecord, emptyAutopilot, foldAutoResolved } from "./autopilot/budgets";
 import { queueOf } from "./autopilot/merge-queue";
+import { trainBranch } from "./autopilot/merge-train";
 import { stepRelease } from "./autopilot/playbook";
 import type { Budget, EscalateWhy } from "./autopilot/policy";
 import { fixerOf } from "./autopilot/remediation";
@@ -14,20 +15,25 @@ import {
   resumeStageOf,
 } from "./decisions";
 import { LOCAL_HOST } from "./fleet-name";
-import { type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
+import { type MergeTransient, type TaskPipeline, emptyPipeline, reducePipeline } from "./pipeline";
 import { AUTO_HOST } from "./placement";
 import { asGitHubRepo } from "./repo-visibility";
 import { hygieneLevel } from "./reviews";
+import { CHURN_BY_KEY, emptyChurnBy, isChurnCause } from "./spawn-class";
 import type {
   FixerRemediation,
+  Footprint,
   JournalEvent,
+  PlanCluster,
   PublicHygiene,
   RepoVisibility,
   TaskAgents,
   TaskId,
   TaskPlacement,
+  TaskPlan,
   TaskStage,
   TaskState,
+  TrainMembers,
   TunablesPatch,
   Wave,
   WaveState,
@@ -53,7 +59,11 @@ export interface WaveRecord {
   plan?: Wave | null;
   /** Tasks the scheduler has admitted, in admission order. */
   admitted: TaskId[];
-  /** Agents spawned for this wave (retries and reviewers included) — counts against spawn_budget. */
+  /**
+   * Productive agents spawned for this wave (reviewers included) — what counts against
+   * spawn_budget. Churn spawns (`agent_spawned { churn }`, spawn-class.ts) are counted in the
+   * state's `spawns.churn` only.
+   */
   spawns: number;
   /** This wave's `config:` overrides. */
   overrides: TunablesPatch;
@@ -239,6 +249,11 @@ function addSynthetic(
   at: string,
 ): void {
   const w = rec.wave;
+  const train = data.train as TrainMembers | undefined;
+  if (w != null && train !== undefined && w.tasks[id] === undefined) {
+    addTrain(rec, id, data, train);
+    return;
+  }
   const r = data.remediation as FixerRemediation | undefined;
   if (w == null || r === undefined || w.tasks[id] !== undefined) return;
   // A request for the test reduced before the fixer existed (two back to back) joins it too.
@@ -268,6 +283,33 @@ function addSynthetic(
     files: r.test_file !== null ? [r.test_file] : [],
     synthetic: true,
     remediation: { ...r, for: blocked, since: at },
+  };
+  rec.wave = { ...w, tasks: { ...w.tasks, [id]: def }, task_order: [...w.task_order, id] };
+}
+
+/**
+ * A merge train's synthetic task (SPEC §4.6.23) joins the effective plan: issue 0, the pipeline
+ * `[implement, merge_ready]` (its integrator, then the gate), no `after`, its members' files.
+ */
+function addTrain(
+  rec: WaveRecord,
+  id: TaskId,
+  data: Record<string, unknown>,
+  train: TrainMembers,
+): void {
+  const w = rec.wave as Wave;
+  const def: WaveTask = {
+    id,
+    issue: 0,
+    ...(typeof data.title === "string" ? { title: data.title } : {}),
+    after: [],
+    stages: [["implement"], ["merge_ready"]],
+    pipeline: ["implement", "merge_ready"],
+    model: w.model,
+    host: w.placement === AUTO_HOST ? AUTO_HOST : "local",
+    files: [...new Set(train.members.flatMap((m) => w.tasks[m.task]?.files ?? []))],
+    synthetic: true,
+    train: { members: train.members.map((m) => ({ task: m.task, pr: m.pr, head: m.head })) },
   };
   rec.wave = { ...w, tasks: { ...w.tasks, [id]: def }, task_order: [...w.task_order, id] };
 }
@@ -371,11 +413,27 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       next.overrides = plan.config;
       state.version = plan.version;
       state.release_branch = plan.release_branch;
+      // A footprint the supervisor read for a task the file leaves without `files` is kept; one
+      // the previous file wrote is not (dropping the key drops it).
+      const read = state.spec?.tasks ?? {};
       state.spec = specOf(plan);
+      for (const [id, t] of Object.entries(state.spec.tasks)) {
+        const was = read[id];
+        if (t.files !== undefined || was?.files === undefined) continue;
+        if ((before?.tasks[id]?.files ?? []).length > 0) continue;
+        t.files = was.files;
+        if (was.footprint !== undefined) t.footprint ??= was.footprint;
+      }
       Object.assign(state, briefPrefaceOf(ev));
+      // The version's own overlap plan replaces the last one: its `wave_planned` follows, and
+      // none does when it has no plan. Each task sits in the cluster this version puts it in.
+      Reflect.deleteProperty(state, "overlap_plan");
       for (const t of state.tasks) {
         const issue = wave.tasks[t.id]?.issue;
         if (issue !== undefined) t.issue = issue;
+        const cluster = plan.tasks[t.id]?.plan?.cluster;
+        if (cluster !== undefined) t.cluster = cluster;
+        else Reflect.deleteProperty(t, "cluster");
       }
       break;
     }
@@ -389,6 +447,17 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         agents: {},
         ...(next.wave?.tasks[ev.task]?.synthetic === true ? { synthetic: true as const } : {}),
       };
+      // Where the overlap plan put it, and its footprint (the file's, or one the supervisor read).
+      const plan = (ev.data.plan as TaskPlan | undefined) ?? next.wave?.tasks[ev.task]?.plan;
+      if (plan?.cluster !== undefined) queued.cluster = plan.cluster;
+      const spec = state.spec?.tasks[ev.task];
+      if (spec !== undefined) {
+        if (Array.isArray(ev.data.issues)) spec.issues = ev.data.issues as number[];
+        if (Array.isArray(ev.data.files) && ev.data.files.length > 0)
+          spec.files = ev.data.files as string[];
+        if (ev.data.footprint !== undefined) spec.footprint = ev.data.footprint as Footprint;
+        if (plan !== undefined) spec.plan = plan;
+      }
       if (task === undefined) state.tasks.push(queued);
       else if (task.stage === "cancelled") {
         // Re-added by a later plan version, or restarted on a new issue: starts over, on the
@@ -431,6 +500,47 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       }
       break;
     }
+    case "wave_planned":
+      state.overlap_plan = { clusters: (ev.data.clusters as PlanCluster[] | undefined) ?? [] };
+      break;
+    // The merge train (SPEC §4.6.23): one entry per train, its members merging meanwhile.
+    case "train_started": {
+      const id = String(ev.data.train);
+      const tasks = Array.isArray(ev.data.tasks) ? (ev.data.tasks as TaskId[]) : [];
+      state.trains = [...(state.trains ?? []), { id, tasks, state: "integrating", since: ev.at }];
+      // Where its integration starts: the gate checks its head descends from it.
+      if (typeof ev.data.release_sha === "string")
+        next.pipeline[id] = {
+          ...(next.pipeline[id] ?? emptyPipeline()),
+          train_release_sha: ev.data.release_sha,
+        };
+      break;
+    }
+    case "train_merged":
+    case "train_failed": {
+      const tr = state.trains?.find((t) => t.id === ev.data.train);
+      if (tr !== undefined) {
+        tr.state = ev.type === "train_merged" ? "merged" : "failed";
+        tr.since = ev.at;
+        if (typeof ev.data.pr === "number") tr.pr = ev.data.pr;
+      }
+      // A member dropped for its conflict takes an ordinary turn from now on.
+      const dropped = ev.data.dropped;
+      if (typeof dropped === "string" && next.pipeline[dropped] !== undefined)
+        next.pipeline[dropped] = {
+          ...(next.pipeline[dropped] as TaskPipeline),
+          train_dropped: true,
+        };
+      break;
+    }
+    case "cluster_strategy_changed": {
+      // The churn monitor (autopilot/churn.ts) switched how a cluster runs: `hold` or `train`, or
+      // back to the plan's own strategy (`planned`).
+      const c = state.overlap_plan?.clusters.find((x) => x.id === ev.data.cluster);
+      if (c !== undefined)
+        c.state = ev.data.to === "hold" || ev.data.to === "train" ? ev.data.to : "planned";
+      break;
+    }
     case "task_admitted":
       if (ev.task !== undefined && !next.admitted.includes(ev.task)) next.admitted.push(ev.task);
       break;
@@ -464,8 +574,20 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       setTaskHost(next, ev.task, d.local === true ? LOCAL_HOST : d.host);
       break;
     }
-    case "agent_spawned":
-      next.spawns += 1;
+    case "agent_spawned": {
+      // Churn (spawn-class.ts) is counted apart and never spends the spawn budget.
+      const churn = ev.data.churn === true;
+      if (!churn) next.spawns += 1;
+      const was = state.spawns;
+      const by = { ...emptyChurnBy(), ...was?.churn_by };
+      if (churn) by[CHURN_BY_KEY[isChurnCause(ev.data.cause) ? ev.data.cause : "retry"]] += 1;
+      const churned = (was?.churn ?? 0) + (churn ? 1 : 0);
+      state.spawns = {
+        productive: next.spawns,
+        churn: churned,
+        ...(churned > 0 ? { churn_by: by } : {}),
+      };
+      if (churn && task !== undefined) task.churn = (task.churn ?? 0) + 1;
       if (task !== undefined) {
         task.agents[ev.data.role as keyof TaskAgents] = ev.data.agent_id as string;
         if (typeof ev.data.host === "string" && ev.task !== undefined) {
@@ -489,12 +611,17 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       // An implementer launched on a task still queued: it is implementing. spawn.ts journals
       // stage_entered only on attempt 1, so a task whose first launches failed (attempt > 1
       // succeeded) would otherwise stay queued, and its CI, review and merge never start.
-      if (task !== undefined && ev.data.role === "implementer" && task.stage === "queued") {
+      if (
+        task !== undefined &&
+        (ev.data.role === "implementer" || ev.data.role === "integrator") &&
+        task.stage === "queued"
+      ) {
         task.stage = "implement";
       }
       // That spawn launched: its failures are over (spawn_recovered reports them).
       if (ev.task !== undefined) clearSpawnFailure(next, ev.task, String(ev.data.role));
       break;
+    }
     case "stage_entered":
       if (task === undefined) break;
       if (task.stage === "awaiting_decision" && ev.data.stage !== "awaiting_decision") {
@@ -793,14 +920,34 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
   if (ev.task !== undefined && next.wave?.tasks[ev.task] !== undefined) {
     const decision =
       ev.type === "decision_resolved" ? next.decisions[ev.data.decision_id as string] : undefined;
+    const train = next.wave.tasks[ev.task]?.train !== undefined;
     next.pipeline[ev.task] = reducePipeline(next.pipeline[ev.task] ?? emptyPipeline(), ev, {
       stages: next.wave.tasks[ev.task]?.stages ?? [],
       ...(decision !== undefined ? { decision } : {}),
+      ...(train ? { train: { branch: trainBranch(next.wave.wave, ev.task) } } : {}),
     });
+    if (train) stepTrain(state, ev, next.pipeline[ev.task] as TaskPipeline);
   }
 
   derive(state, next);
   return next;
+}
+
+/** A train task's event moves its `trains[]` entry: CI on its head, gated, its PR known. */
+function stepTrain(state: WaveState, ev: JournalEvent, p: TaskPipeline): void {
+  const tr = state.trains?.find((t) => t.id === ev.task);
+  if (tr === undefined || tr.state === "merged" || tr.state === "failed") return;
+  if (p.pr !== undefined) tr.pr = p.pr.number;
+  const to =
+    ev.type === "ci_pending"
+      ? "ci"
+      : ev.type === "artifact_verified" && ev.data.role === "gate"
+        ? "gated"
+        : undefined;
+  if (to !== undefined && tr.state !== to) {
+    tr.state = to;
+    tr.since = ev.at;
+  }
 }
 
 /** wave-state `brief_preface` from a submit / version event (absent in older journals). */
@@ -826,6 +973,10 @@ function specOf(wave: Wave): NonNullable<WaveState["spec"]> {
             issue: t?.issue ?? 0,
             ...(t?.title !== undefined ? { title: t.title } : {}),
             after: t?.after ?? [],
+            ...(t?.issues !== undefined ? { issues: t.issues } : {}),
+            ...(t !== undefined && t.files.length > 0 ? { files: t.files } : {}),
+            ...(t?.footprint !== undefined ? { footprint: t.footprint } : {}),
+            ...(t?.plan !== undefined ? { plan: t.plan } : {}),
           },
         ];
       }),
@@ -841,6 +992,22 @@ function parkedResume(rec: WaveRecord, task: TaskId): TaskStage | undefined {
     if (stage !== undefined) return stage;
   }
   return undefined;
+}
+
+/**
+ * A transient refusal's wait, as why_waiting reads it: `GitHub refused the merge transiently
+ * (Merge already in progress); retrying in 2 min (attempt 2 of 4)`.
+ */
+function transientWhy(tr: MergeTransient): string {
+  const what = (tr.stderr ?? "")
+    .split("\n")[0]
+    ?.replace(/^GraphQL:\s*/i, "")
+    .replace(/\s*\(mergePullRequest\)\s*$/i, "")
+    .replace(/[.\s]+$/, "")
+    .slice(0, 80);
+  const s = tr.wait_s ?? 0;
+  const wait = s >= 60 && s % 60 === 0 ? `${s / 60} min` : `${s} s`;
+  return `GitHub refused the merge transiently${what ? ` (${what})` : ""}; retrying in ${wait} (attempt ${tr.attempts} of ${tr.of ?? tr.attempts})`;
 }
 
 /**
@@ -880,9 +1047,11 @@ function derive(state: WaveState, rec: WaveRecord): void {
   state.tasks = state.tasks.map(({ stage_label: _l, stage_group: _g, ...t }) =>
     withStageGroup(t, rec.pipeline[t.id]),
   );
-  state.tasks = state.tasks.map(({ remediation: _r, ...t }) => {
-    // A fixer carries its remediation (SPEC §4.6.16); a task parked on a flake, until it lands.
+  state.tasks = state.tasks.map(({ remediation: _r, train: _t, ...t }) => {
+    // A fixer carries its remediation (SPEC §4.6.16); a task parked on a flake, until it lands;
+    // a merge train its members (SPEC §4.6.23).
     const f = rec.wave?.tasks[t.id];
+    if (f?.synthetic === true && f.train !== undefined) return { ...t, train: f.train };
     if (f?.synthetic === true && f.remediation !== undefined) {
       const { kind, test, test_file, run_urls, for: blocked, outcome, since } = f.remediation;
       return {
@@ -965,6 +1134,32 @@ function derive(state: WaveState, rec: WaveRecord): void {
       t.stage !== "cancelled"
     )
       return { ...t, why_waiting: `PR conflicts with ${state.release_branch}, updating` };
+    // GitHub refused the merge transiently: the wait before the retry (#445).
+    const tr = p?.merge_transient;
+    if (
+      t.stage === "merge_ready" &&
+      tr !== undefined &&
+      tr.head === p?.gated.at(-1) &&
+      tr.wait_s !== undefined
+    ) {
+      const alarms = surfacedAlarms(p);
+      return {
+        ...t,
+        ...(alarms.length > 0 ? { alarms } : {}),
+        why_waiting: transientWhy(tr),
+      };
+    }
+    // Queued at the head its reviewers saw, behind the release branch: its turn updates it (#383).
+    // `gated_behind` is the count at the gate, not now: merges since then do not change it.
+    const n = p?.gated_behind ?? 0;
+    if (t.stage === "merge_ready" && p?.queued_at !== undefined && n > 0) {
+      const alarms = surfacedAlarms(p);
+      return {
+        ...t,
+        ...(alarms.length > 0 ? { alarms } : {}),
+        why_waiting: `gated ${n} commit${n === 1 ? "" : "s"} behind ${state.release_branch}; updated at its merge turn`,
+      };
+    }
     // A red head awaiting its flake's fixer: say which test.
     // (A fixer's own remediation is what it fixes, not what it waits for: the pipeline's is.)
     const flake = rec.pipeline[t.id]?.remediation;

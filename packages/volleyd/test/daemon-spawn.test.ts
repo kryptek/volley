@@ -14,9 +14,11 @@ import type { Daemon } from "../src/daemon";
 import { decisionTopic } from "../src/decisions";
 import { routedExec } from "../src/git-lock";
 import { makeBufferIO } from "../src/io";
+import { renderIssueMd } from "../src/issue";
 import { readJournalFile } from "../src/journal";
 import { MACHINE_CHANNEL, type MachineRecord, machineTopic } from "../src/machines";
 import type { ReadinessPayload } from "../src/readiness";
+import { spawnAgent } from "../src/spawn";
 import { SpawnError } from "../src/spawn-error";
 import { trustDecisionId } from "../src/trust";
 import type { JournalEvent, TaskState } from "../src/types";
@@ -34,6 +36,7 @@ import {
   adoptSpec,
   fakeHost,
   fakeRemoteHost,
+  makeSpawnEnv,
 } from "./helpers/fake-host";
 import { type EventMatch, type JournalWait, journalWait } from "./helpers/journal-wait";
 import { runCli, withoutOwnerWarning } from "./helpers/run-cli";
@@ -1700,5 +1703,270 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     expect((await state("w10")).tasks.find((t) => t.id === "T1")?.why_waiting).toBe(
       "no eligible machine: box: draining",
     );
+  });
+});
+
+describe("a bundle spawn (several issues in one task)", () => {
+  it("ISSUE.md holds every issue under the bundle header; agent.json and agent_spawned carry issues", async () => {
+    const env = await makeSpawnEnv({
+      issue: 1,
+      bundle: { issues: [1, 2], why: "collapsed #1 + #2: they share src/retry.ts" },
+    });
+    expect((await spawnAgent(env.request(), env.deps)).kind).toBe("launched");
+    expect(env.host.fake.argvs(["gh", "issue", "view"]).map((a) => a[3])).toEqual(["1", "2"]);
+    const md = readFileSync(join(env.worktree, "ISSUE.md"), "utf-8");
+    const issue = (n: number) => ({
+      number: n,
+      title: `Issue ${n}`,
+      body: `Body of ${n}.`,
+      url: `https://github.com/example/repo/issues/${n}`,
+    });
+    expect(md).toBe(
+      renderIssueMd([issue(1), issue(2)], "collapsed #1 + #2: they share src/retry.ts"),
+    );
+    expect(md.startsWith("# Bundle: #1, #2\n")).toBe(true);
+    const agent = JSON.parse(readFileSync(join(env.worktree, ".volley", "agent.json"), "utf-8"));
+    expect(agent.issues).toEqual([1, 2]);
+    expect(schemaErrors("agent-identity.schema.json", agent)).toEqual([]);
+    const brief = readFileSync(join(env.worktree, ".volley", "brief.md"), "utf-8");
+    expect(brief).toMatch(/^# Implement issues #1, #2$/m);
+    expect(env.events.find((e) => e.type === "agent_spawned")?.data).toMatchObject({
+      issue: { number: 1 },
+      issues: [
+        { number: 1, title: "Issue 1", url: "https://github.com/example/repo/issues/1" },
+        { number: 2, title: "Issue 2", url: "https://github.com/example/repo/issues/2" },
+      ],
+    });
+  });
+
+  it("a single-issue spawn's agent.json has no issues and its agent_spawned no issues list", async () => {
+    const env = await makeSpawnEnv();
+    await spawnAgent(env.request(), env.deps);
+    const agent = JSON.parse(readFileSync(join(env.worktree, ".volley", "agent.json"), "utf-8"));
+    expect(agent.issues).toBeUndefined();
+    expect(env.events.find((e) => e.type === "agent_spawned")?.data.issues).toBeUndefined();
+  });
+});
+
+describe("the cluster cap and the churn monitor at run time (#384)", () => {
+  let env: DaemonEnv;
+  let daemon: Daemon;
+  let client: ControlClient;
+  let clock: FakeClock;
+  afterEach(async () => {
+    await client?.close();
+    await env?.cleanup();
+  });
+
+  const capped = (id: string, issue: number) =>
+    `  ${id}: { issue: ${issue}, files: [src/hot.ts], plan: { cluster: A, by: cap, why: "capped: shares src/hot.ts" } }\n`;
+  const WAVE = `wave: wc
+repo: /path/to/example-repo
+release_branch: release/wc
+model: claude-opus-5-5
+pipeline: [implement, merge_ready]
+tasks:
+${capped("i315", 315)}${capped("i317", 317)}${capped("i318", 318)}${capped("i322", 322)}${capped("i323", 323)}`;
+
+  const start = async () => {
+    env = await makeDaemonEnv();
+    clock = fakeClock(Date.parse("2026-10-23T09:00:00.000Z"));
+    daemon = await env.start({ clock });
+    client = await ControlClient.connect(env.broker.url, NS);
+    const res = await client.request("run", { wave_yaml: WAVE });
+    expect(res.error).toBeUndefined();
+    await daemon.tick();
+    await daemon.settled();
+  };
+
+  it("admits four members of cluster A and holds the fifth with the reason", async () => {
+    await start();
+    const admitted = daemon
+      .journalEvents("wc")
+      .filter((e) => e.type === "task_admitted")
+      .map((e) => e.task);
+    expect(admitted).toEqual(["i315", "i317", "i318", "i322"]);
+    const t = daemon.snapshot("wc")?.tasks.find((x) => x.id === "i323");
+    expect(t?.why_waiting).toBe("cluster A: 4 in flight (i315, i317, i318, i322)");
+  });
+
+  it("a member's second branch update journals cluster_strategy_changed once, and the state shows hold", async () => {
+    await start();
+    for (let i = 0; i < 2; i++)
+      await daemon.recordEvent("wc", {
+        type: "stage_entered",
+        task: "i315",
+        data: { stage: "fixup", step: 1, roles: ["rebase"], rebase: true },
+      });
+    await daemon.tick();
+    await daemon.settled();
+    await clock.advance(60_000);
+    await daemon.tick();
+    await daemon.settled();
+    const changed = daemon.journalEvents("wc").filter((e) => e.type === "cluster_strategy_changed");
+    expect(changed.map((e) => e.data)).toEqual([
+      {
+        cluster: "A",
+        from: "cap",
+        to: "hold",
+        why: "i315 updated its branch 2 times in the last 2 h",
+      },
+    ]);
+    expect(daemon.snapshot("wc")?.overlap_plan?.clusters[0]?.state).toBe("hold");
+    // On hold the cap is 1: the fifth member still waits, now on the hold.
+    const t = daemon.snapshot("wc")?.tasks.find((x) => x.id === "i323");
+    expect(t?.why_waiting).toBe("cluster A (hold): 4 in flight or gated (i315, i317, i318, i322)");
+  });
+
+  it("the churn fuse (#387): over 3 × its roles holds the cluster, more churn asks once", async () => {
+    await start();
+    let n = 0;
+    const churned = async (k: number) => {
+      for (let i = 0; i < k; i++) {
+        n++;
+        await daemon.recordEvent("wc", {
+          type: "agent_spawned",
+          task: "i315",
+          data: {
+            role: "implementer",
+            agent_id: `wc-i315-implementer-${n + 1}`,
+            attempt: n + 1,
+            churn: true,
+            cause: "retry",
+          },
+        });
+      }
+      await daemon.tick();
+      await daemon.settled();
+    };
+    const decisions = () =>
+      daemon
+        .journalEvents("wc")
+        .filter((e) => e.type === "decision_opened" && e.data.kind === "churn_exhausted");
+    // [implement, merge_ready]: one role, so the fuse is quiet up to 3.
+    await churned(3);
+    expect(daemon.journalEvents("wc").some((e) => e.type === "cluster_strategy_changed")).toBe(
+      false,
+    );
+    await churned(1);
+    const changed = daemon.journalEvents("wc").filter((e) => e.type === "cluster_strategy_changed");
+    expect(changed).toHaveLength(1);
+    expect(changed[0]?.task).toBe("i315");
+    expect(changed[0]?.data).toMatchObject({
+      cluster: "A",
+      to: "hold",
+      churn: 4,
+      why: "i315: 4 churn spawns, more than 3 × its 1 role",
+    });
+    expect(decisions()).toHaveLength(0);
+    // Churn goes on while the cluster is held: one task-level decision.
+    await churned(1);
+    expect(decisions()).toHaveLength(1);
+    expect(decisions()[0]?.task).toBe("i315");
+    expect(decisions()[0]?.data).toMatchObject({
+      cluster: "A",
+      churn: 5,
+      roles: ["implementer"],
+      options: ["hold cluster", "continue", "cancel"],
+    });
+    await churned(2);
+    expect(decisions()).toHaveLength(1);
+    expect(daemon.snapshot("wc")?.tasks.find((t) => t.id === "i315")?.churn).toBe(7);
+  });
+
+  describe("the churn fuse's loop and answers (#387)", () => {
+    let n = 0;
+    const churned = async (k: number) => {
+      for (let i = 0; i < k; i++) {
+        n++;
+        await daemon.recordEvent("wc", {
+          type: "agent_spawned",
+          task: "i315",
+          data: {
+            role: "implementer",
+            agent_id: `wc-i315-implementer-${n + 1}`,
+            attempt: n + 1,
+            churn: true,
+            cause: "retry",
+          },
+        });
+      }
+      await daemon.tick();
+      await daemon.settled();
+    };
+    const decisions = () =>
+      daemon
+        .journalEvents("wc")
+        .filter((e) => e.type === "decision_opened" && e.data.kind === "churn_exhausted");
+    const cluster = () => daemon.snapshot("wc")?.overlap_plan?.clusters[0]?.state;
+    const stage = () => daemon.snapshot("wc")?.tasks.find((t) => t.id === "i315")?.stage;
+    /** Trip the fuse (hold), let the monitor release the calm cluster, then churn once more. */
+    const asked = async () => {
+      n = 0;
+      await start();
+      await churned(4);
+      expect(cluster()).toBe("hold");
+      await clock.advance(DAEMON_DEFAULTS.cluster_strategy_min_interval_ms + 1);
+      await daemon.tick();
+      await daemon.settled();
+      expect(cluster()).toBe("planned");
+      await churned(1);
+      const d = decisions();
+      expect(d).toHaveLength(1);
+      return String(d[0]?.data.decision_id);
+    };
+    const answer = async (id: string, a: string) => {
+      const r = await client.request("resolve", { decision_id: id, answer: a, by: "owner" });
+      expect(r.error).toBeUndefined();
+      await daemon.tick();
+      await daemon.settled();
+    };
+
+    it("a hold the monitor let go does not loop: more churn asks the owner (Q1)", async () => {
+      await asked();
+      // Not a second fuse hold: the decision is the escalation.
+      const holds = daemon
+        .journalEvents("wc")
+        .filter((e) => e.type === "cluster_strategy_changed" && e.task === "i315");
+      expect(holds).toHaveLength(1);
+    });
+
+    it("cancel: the task is cancelled", async () => {
+      const id = await asked();
+      await answer(id, "Cancel");
+      const c = daemon.journalEvents("wc").find((e) => e.type === "task_cancelled");
+      expect(c?.task).toBe("i315");
+      expect(c?.data).toEqual({ by: "owner", why: `churn exhausted (decision ${id})` });
+      expect(stage()).toBe("cancelled");
+    });
+
+    it("hold cluster: the released cluster is held again, naming the task", async () => {
+      const id = await asked();
+      await answer(id, "hold cluster");
+      expect(cluster()).toBe("hold");
+      const last = daemon
+        .journalEvents("wc")
+        .filter((e) => e.type === "cluster_strategy_changed")
+        .at(-1);
+      expect(last?.task).toBe("i315");
+      expect(last?.data).toMatchObject({
+        to: "hold",
+        why: `owner answered hold cluster (decision ${id})`,
+      });
+    });
+
+    it("continue: quiet until as much churn again, then held, then asked", async () => {
+      const id = await asked();
+      await answer(id, "continue");
+      // Asked at 5 churn, 1 role: quiet up to 5 + 3.
+      await churned(3);
+      expect(decisions()).toHaveLength(1);
+      expect(cluster()).toBe("planned");
+      await churned(1);
+      expect(cluster()).toBe("hold");
+      expect(decisions()).toHaveLength(1);
+      await churned(1);
+      expect(decisions()).toHaveLength(2);
+    });
   });
 });

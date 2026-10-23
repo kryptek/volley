@@ -178,6 +178,53 @@
                 }
               }
             },
+            "overlap_plan": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["clusters"],
+              "description": "The overlap plan: the wave's tasks grouped into clusters by the files they share, and how each cluster is run. Absent for a wave the planner has not planned.",
+              "properties": {
+                "clusters": { "type": "array", "items": { "$ref": "#/$defs/planCluster" } }
+              }
+            },
+            "spawns": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["productive", "churn"],
+              "description": "The wave's spawns so far: productive (what spends the spawn budget) and churn (a branch update, a re-review a branch update caused, a merge train's spawns, or a relaunch, respawn or retry of a role in its step; spec section 4.6.16), with churn per cause once there is any, and the wave's spawn budget.",
+              "properties": {
+                "productive": { "type": "integer", "minimum": 0 },
+                "churn": { "type": "integer", "minimum": 0 },
+                "churn_by": { "$ref": "#/$defs/churnBy" },
+                "budget": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "The wave's spawn budget now (raises included)."
+                }
+              }
+            },
+            "trains": {
+              "type": "array",
+              "description": "Merge trains: gated PRs the merge queue integrates, gates and merges as one. forming: members are being chosen; integrating: their heads are being merged onto the release branch; ci: CI runs on the train's head; gated: green, waiting to merge; merged, failed: ended. since: when it entered its state.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "tasks", "state", "since"],
+                "properties": {
+                  "id": { "type": "string", "pattern": "^train-[1-9][0-9]{0,8}$" },
+                  "pr": { "type": "integer", "minimum": 1 },
+                  "tasks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/$defs/taskId" }
+                  },
+                  "state": {
+                    "enum": ["forming", "integrating", "ci", "gated", "merged", "failed"]
+                  },
+                  "since": { "type": "string", "format": "date-time" }
+                }
+              }
+            },
             "updated_at": { "type": "string", "format": "date-time" }
           }
         }
@@ -194,6 +241,18 @@
     }
   ],
   "$defs": {
+    "churnBy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch_updates", "rereviews", "retries", "trains"],
+      "description": "Churn spawns per cause: branch updates (rebase), re-reviews (a review round, and its fixup, a branch update caused), retries (a relaunch, respawn or retry of a role in its step) and trains (a merge train's spawns).",
+      "properties": {
+        "branch_updates": { "type": "integer", "minimum": 0 },
+        "rereviews": { "type": "integer", "minimum": 0 },
+        "retries": { "type": "integer", "minimum": 0 },
+        "trains": { "type": "integer", "minimum": 0 }
+      }
+    },
     "fixerRemediation": {
       "type": "object",
       "required": ["kind", "test", "test_file", "run_urls", "for"],
@@ -237,7 +296,7 @@
       "required": ["id", "issue", "stage", "agents"],
       "if": { "required": ["synthetic"] },
       "then": {
-        "required": ["remediation"],
+        "oneOf": [{ "required": ["remediation"] }, { "required": ["train"] }],
         "properties": {
           "issue": { "const": 0 },
           "remediation": { "required": ["test_file", "run_urls", "for"] }
@@ -260,7 +319,11 @@
             "spec_reviewer": { "$ref": "#/$defs/agentId" },
             "quality_reviewer": { "$ref": "#/$defs/agentId" },
             "fixup": { "$ref": "#/$defs/agentId" },
-            "rebase": { "$ref": "#/$defs/agentId" }
+            "rebase": { "$ref": "#/$defs/agentId" },
+            "integrator": {
+              "$ref": "#/$defs/agentId",
+              "description": "A merge train's integration agent (its synthetic train-<n> task's)."
+            }
           }
         },
         "waiting_on": { "type": "array", "items": { "type": "string", "minLength": 1 } },
@@ -395,7 +458,7 @@
         },
         "synthetic": {
           "const": true,
-          "description": "A task the supervisor added itself, never from the wave file (spec section 4.6.16): a flake's fixer, fix-<slug>, issue 0, with its remediation. Journal-only: absent from spec."
+          "description": "A task the supervisor added itself, never from the wave file (spec section 4.6.16): a flake's fixer, fix-<slug>, issue 0, with its remediation, or a merge train, train-<n>, with its train. Journal-only: absent from spec."
         },
         "evidence_path": { "type": "string", "minLength": 1 },
         "last_error": {
@@ -420,7 +483,85 @@
         "reviews_skipped_by_plan": {
           "type": "boolean",
           "description": "True once the task reached merge_ready without reviews because its wave-file pipeline lists no review stage (spec section 4.6.8)."
+        },
+        "cluster": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The overlap plan's cluster the task is in (overlap_plan.clusters[].id). A task held for its cluster says why in why_waiting."
+        },
+        "churn": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The task's churn spawns so far (spawns.churn's, for this task)."
+        },
+        "train": { "$ref": "#/$defs/trainMembers" }
+      }
+    },
+    "trainMembers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["members"],
+      "description": "A merge train's synthetic task (train-<n>): the gated PRs it merges as one, each at the head it was gated at.",
+      "properties": {
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["task", "pr", "head"],
+            "properties": {
+              "task": { "$ref": "#/$defs/taskId" },
+              "pr": { "type": "integer", "minimum": 1 },
+              "head": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" }
+            }
+          }
         }
+      }
+    },
+    "planCluster": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tasks", "hot", "strategy", "state", "why"],
+      "description": "One cluster of the overlap plan: its tasks, the files they share (hot: each file, its size and the tasks touching it), the strategy it runs under (collapse: groups of tasks bundled into one; chain: [before, after] pairs; cap: the most tasks in flight at once), its state (planned; hold: nothing new starts; train: its PRs merge as a train) and why, in one line.",
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "tasks": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/taskId" } },
+        "hot": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["file", "bytes", "shared_by"],
+            "properties": {
+              "file": { "type": "string", "minLength": 1 },
+              "bytes": { "type": "integer", "minimum": 0 },
+              "shared_by": { "type": "array", "items": { "$ref": "#/$defs/taskId" } }
+            }
+          }
+        },
+        "strategy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "collapse": {
+              "type": "array",
+              "items": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/taskId" } }
+            },
+            "chain": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": { "$ref": "#/$defs/taskId" }
+              }
+            },
+            "cap": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "state": { "enum": ["planned", "hold", "train"] },
+        "why": { "type": "string" }
       }
     },
     "placement": {
@@ -508,7 +649,16 @@
             "properties": {
               "issue": { "type": "integer", "minimum": 1 },
               "title": { "type": "string" },
-              "after": { "type": "array", "items": { "$ref": "#/$defs/taskId" } }
+              "after": { "type": "array", "items": { "$ref": "#/$defs/taskId" } },
+              "issues": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": { "type": "integer", "minimum": 1 }
+              },
+              "files": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "footprint": { "$ref": "wave-file.schema.json#/$defs/footprint" },
+              "plan": { "$ref": "wave-file.schema.json#/$defs/taskPlan" }
             }
           }
         }

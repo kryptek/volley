@@ -567,7 +567,8 @@
                   "merge_refused",
                   "release_go",
                   "stage_go",
-                  "terminal_status_lost"
+                  "terminal_status_lost",
+                  "churn_exhausted"
                 ]
               },
               "default": [
@@ -655,6 +656,21 @@
               "default": 2,
               "description": "Merges GitHub may refuse at one gated head (the head moved, checks required, branch protection) before the supervisor opens a merge_refused decision."
             },
+            "merge_transient_backoff_s": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1, "maximum": 86400 },
+              "minItems": 1,
+              "maxItems": 20,
+              "default": [60, 120, 300, 600],
+              "description": "The waits in seconds before each retry of a merge the host refused transiently at one gated head (busy, a 5xx, a rate limit, a dropped connection); attempt n waits entry n. Such refusals never count toward merge_retry_max; one more past the last entry opens the merge_refused decision."
+            },
+            "merge_transient_retry_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 1,
+              "description": "Automatic retry answers to a merge_refused decision whose transient backoff ladder was spent, per task (policy row merge_refused/transient)."
+            },
             "delete_branch": {
               "type": "boolean",
               "default": false,
@@ -687,6 +703,11 @@
               "maximum": 86400,
               "default": 1800,
               "description": "The shortest gap between two digests of one wave with the same trigger (spec section 4.6.16): a second escalation inside it publishes no new digest and sends no push."
+            },
+            "merge_train": {
+              "type": "boolean",
+              "default": true,
+              "description": "The merge queue gates and merges up to four gated PRs as one train; false: one PR at a time."
             }
           }
         }

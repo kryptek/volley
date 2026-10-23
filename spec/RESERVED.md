@@ -15,3 +15,8 @@ siblings; the SPEC lists those one per line, checked against the schemas.
 | Reserved | Issue | Topic |
 |---|---|---|
 | `task_admission_returned` | T4 | wave event |
+| `cluster_strategy_changed` | #384 | wave event |
+| `train_started` | #386 | wave event |
+| `train_merged` | #386 | wave event |
+| `train_failed` | #386 | wave event |
+| `churn_exhausted` | #387 | decision kind |

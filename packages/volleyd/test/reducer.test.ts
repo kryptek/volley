@@ -123,6 +123,42 @@ describe("reduce", () => {
     expect(rec.spawns).toBe(1);
   });
 
+  it("a churn spawn counts as churn, wave-wide and on its task, never as productive (#387)", () => {
+    const last = events.at(-1) as JournalEvent;
+    const at = "2026-10-20T10:00:00.000Z";
+    const spawn = (n: number, role: string, extra: Record<string, unknown> = {}): JournalEvent => ({
+      seq: last.seq + n,
+      at,
+      type: "agent_spawned",
+      task: "T1",
+      data: { role, agent_id: `2026-10-20-example-t1-${role}-${n}`, ...extra },
+    });
+    const more = [
+      spawn(1, "implementer"),
+      spawn(2, "rebase", { churn: true, cause: "branch_update" }),
+      spawn(3, "spec_reviewer", { churn: true, cause: "rereview" }),
+      spawn(4, "implementer", { churn: true, cause: "retry" }),
+    ];
+    const before = replay(events);
+    const rec = replay([...events, ...more]);
+    // The budget counts productive spawns only.
+    expect(rec.spawns).toBe(before.spawns + 1);
+    const state = rec.state;
+    expect(state?.spawns).toEqual({
+      productive: before.spawns + 1,
+      churn: 3,
+      churn_by: { branch_updates: 1, rereviews: 1, retries: 1, trains: 0 },
+    });
+    expect(state?.tasks.find((t) => t.id === "T1")?.churn).toBe(3);
+    expect(state?.tasks.find((t) => t.id === "T2")?.churn).toBeUndefined();
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", state)),
+    ).toEqual([]);
+    // Idempotent on replay.
+    const all = [...events, ...more];
+    expect(replay([...all, ...all]).state?.spawns?.churn).toBe(3);
+  });
+
   it("an implementer that launches on a later attempt moves its queued task to implement", () => {
     // spawn.ts journals stage_entered { implement } only on attempt 1; when the first launches
     // fail, the attempt that succeeds must still start the task (else CI, review, merge never run).
@@ -862,5 +898,156 @@ describe("shared-precondition decisions: decision_joined (#418)", () => {
     ]);
     expect(stage(r, "T1")).toBe("queued");
     expect(stage(r, "T2")).toBe("awaiting_decision");
+  });
+});
+
+describe("the overlap plan (task_queued, wave_planned; SPEC §4.6.22)", () => {
+  const wave = parseWaveFile(
+    readFileSync(new URL("./fixtures/bundle.yaml", import.meta.url), "utf-8"),
+  );
+  const AT = "2026-10-23T10:00:00.000Z";
+  const queued = (seq: number, id: string): JournalEvent => {
+    const t = wave.tasks[id];
+    return {
+      seq,
+      at: AT,
+      type: "task_queued",
+      task: id,
+      data: {
+        issue: t?.issue,
+        ...(t?.issues !== undefined ? { issues: t.issues } : {}),
+        files: t?.files,
+        ...(t?.footprint !== undefined ? { footprint: t.footprint } : {}),
+        ...(t?.plan !== undefined ? { plan: t.plan } : {}),
+      },
+    };
+  };
+  const evs: JournalEvent[] = [
+    { seq: 1, at: AT, type: "wave_submitted", data: { wave, owner: "coord" } },
+    queued(2, "i1"),
+    queued(3, "i3"),
+    queued(4, "i4"),
+    {
+      seq: 5,
+      at: AT,
+      type: "wave_planned",
+      data: { clusters: wave.overlap_plan?.clusters ?? [] },
+    },
+  ];
+
+  it("fills state.overlap_plan, spec.tasks[].{issues,files,footprint,plan} and tasks[].cluster", () => {
+    const state = reduce(evs);
+    expect(state.overlap_plan?.clusters.map((c) => c.id)).toEqual(["A"]);
+    expect(state.spec?.tasks.i1).toMatchObject({
+      issue: 1,
+      issues: [1, 2],
+      files: ["packages/app/src/pipeline.ts", "packages/app/src/retry.ts"],
+      footprint: { confidence: "listed" },
+      plan: { cluster: "A", by: "collapse" },
+    });
+    const byId = Object.fromEntries(state.tasks.map((t) => [t.id, t]));
+    expect(byId.i1?.cluster).toBe("A");
+    expect(byId.i3?.cluster).toBe("A");
+    expect(byId.i4).not.toHaveProperty("cluster");
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", state)),
+    ).toEqual([]);
+  });
+
+  it("a later version without a plan clears it; one that moves a task re-clusters it", () => {
+    const strip = (w: typeof wave, cluster?: string) => {
+      const { overlap_plan: _p, ...rest } = w;
+      const tasks = Object.fromEntries(
+        Object.entries(w.tasks).map(([id, t]) => {
+          const { plan: _plan, ...def } = t;
+          return [
+            id,
+            cluster !== undefined && id === "i3"
+              ? { ...t, plan: { cluster, by: "chain" as const, why: "moved" } }
+              : def,
+          ];
+        }),
+      );
+      return { ...rest, version: 2, tasks } as typeof wave;
+    };
+    const v2 = strip(wave);
+    const dropped = reduce([
+      ...evs,
+      { seq: 6, at: AT, type: "wave_versioned", data: { wave: v2, plan: v2 } },
+    ]);
+    expect(dropped.overlap_plan).toBeUndefined();
+    expect(dropped.tasks.some((t) => t.cluster !== undefined)).toBe(false);
+
+    const moved = strip(wave, "B");
+    const after = reduce([
+      ...evs,
+      { seq: 6, at: AT, type: "wave_versioned", data: { wave: moved, plan: moved } },
+    ]);
+    const byId = Object.fromEntries(after.tasks.map((t) => [t.id, t]));
+    expect(byId.i1).not.toHaveProperty("cluster");
+    expect(byId.i3?.cluster).toBe("B");
+  });
+
+  it("files a task_queued carries (the daemon read them) fill a task the file left without", () => {
+    const plain = parseWaveFile(
+      "wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n",
+    );
+    const state = reduce([
+      { seq: 1, at: AT, type: "wave_submitted", data: { wave: plain } },
+      {
+        seq: 2,
+        at: AT,
+        type: "task_queued",
+        task: "T1",
+        data: { issue: 1, files: ["src/a.ts"], footprint: { confidence: "listed" } },
+      },
+    ]);
+    expect(state.spec?.tasks.T1).toEqual({
+      issue: 1,
+      after: [],
+      files: ["src/a.ts"],
+      footprint: { confidence: "listed" },
+    });
+  });
+
+  it("a version keeps files the supervisor read, never files the previous file wrote", () => {
+    const file = (files: string) =>
+      parseWaveFile(
+        `wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\ntasks:\n  T1: { issue: 1${files} }\n`,
+      );
+    const versioned = (seq: number, w: ReturnType<typeof file>): JournalEvent => ({
+      seq,
+      at: AT,
+      type: "wave_versioned",
+      data: { wave: { ...w, version: 2 }, plan: { ...w, version: 2 } },
+    });
+    const read = reduce([
+      { seq: 1, at: AT, type: "wave_submitted", data: { wave: file("") } },
+      {
+        seq: 2,
+        at: AT,
+        type: "task_queued",
+        task: "T1",
+        data: { issue: 1, files: ["src/a.ts"], footprint: { confidence: "listed" } },
+      },
+      versioned(3, file("")),
+    ]);
+    expect(read.spec?.tasks.T1?.files).toEqual(["src/a.ts"]);
+    expect(read.spec?.tasks.T1?.footprint).toEqual({ confidence: "listed" });
+
+    const written = file(", files: [src/a.ts]");
+    const dropped = reduce([
+      { seq: 1, at: AT, type: "wave_submitted", data: { wave: written } },
+      {
+        seq: 2,
+        at: AT,
+        type: "task_queued",
+        task: "T1",
+        data: { issue: 1, files: ["src/a.ts"], footprint: { confidence: "listed" } },
+      },
+      versioned(3, file("")),
+    ]);
+    expect(dropped.spec?.tasks.T1).not.toHaveProperty("files");
+    expect(dropped.spec?.tasks.T1).not.toHaveProperty("footprint");
   });
 });

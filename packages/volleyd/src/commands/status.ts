@@ -1,9 +1,11 @@
 import { parseArgs } from "node:util";
+import { churnCauses } from "../autopilot/digest";
 import { formatBriefPreface } from "../brief";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import type { DecisionPayload } from "../decisions";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { resolveCaller } from "../ownership";
+import { IN_FLIGHT } from "../scheduler";
 import type { TaskState, WaveState } from "../types";
 import { formatDecision } from "./decisions";
 
@@ -199,6 +201,7 @@ export function formatWave(
       ? `  archived ${s.archived.at} by ${s.archived.by}: ${s.archived.reason}\n`
       : "";
   const queue = s.merge_queue !== undefined ? `  ${formatMergeQueue(s.merge_queue)}\n` : "";
+  const spawns = s.spawns !== undefined ? `  ${formatSpawns(s.spawns)}\n` : "";
   // The release train (SPEC §4.6.19): the stage running, awaiting its go or failed, and how far
   // the train is (`release: smoke running (2/4 verified)`).
   const r = s.release;
@@ -213,6 +216,16 @@ export function formatWave(
     r !== undefined
       ? `  release: ${where} (${r.stages.filter((x) => x.state === "verified").length}/${r.stages.length} verified)\n`
       : "";
+  // The overlap plan (SPEC §4.6.22): each cluster, how it runs now, its members in flight, and why.
+  const plan = (s.overlap_plan?.clusters ?? [])
+    .map((c) => {
+      const flying = s.tasks
+        .filter((t) => t.cluster === c.id && IN_FLIGHT.has(t.stage))
+        .map((t) => t.id);
+      const state = flying.length > 0 ? `${c.state}; in flight: ${flying.join(", ")}` : c.state;
+      return `  plan: cluster ${c.id} (${state}): ${c.why}\n`;
+    })
+    .join("");
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {
     const why = t.why_waiting !== undefined ? `  ${t.why_waiting}` : "";
@@ -240,10 +253,12 @@ export function formatWave(
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
   return (
     header +
+    spawns +
     waveAlarmLines +
     archived +
     queue +
     release +
+    plan +
     autopilot +
     preface +
     hygiene +
@@ -251,6 +266,17 @@ export function formatWave(
     rows.join("") +
     decisions.join("")
   );
+}
+
+/**
+ * `spawns: 52 productive / 156 budget · 141 churn (116 branch updates, 25 re-reviews)`: what
+ * spent the spawn budget, and the churn that did not (SPEC §4.6.16), by cause.
+ */
+export function formatSpawns(sp: NonNullable<WaveState["spawns"]>): string {
+  const budget = sp.budget !== undefined ? ` / ${sp.budget} budget` : "";
+  const causes = sp.churn_by !== undefined ? churnCauses(sp.churn_by) : "";
+  const churn = sp.churn > 0 ? ` · ${sp.churn} churn${causes !== "" ? ` (${causes})` : ""}` : "";
+  return `spawns: ${sp.productive} productive${budget}${churn}`;
 }
 
 /**

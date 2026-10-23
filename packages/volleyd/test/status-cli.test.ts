@@ -177,6 +177,112 @@ describe("volleyd status formatting", () => {
     );
   });
 
+  it("prints the spawn budget line: productive against the budget, then churn by cause (#387)", () => {
+    const base = {
+      wave: "w1",
+      version: 1,
+      owner: null,
+      repo: "r",
+      release_branch: "release/w1",
+      status: "running" as const,
+      tasks: [],
+      open_decisions: [],
+      gates: [],
+      updated_at: "2026-10-18T12:00:00.000Z",
+    };
+    const out = formatWave({
+      ...base,
+      spawns: {
+        productive: 52,
+        churn: 141,
+        budget: 156,
+        churn_by: { branch_updates: 116, rereviews: 25, retries: 0, trains: 0 },
+      },
+    });
+    expect(out.split("\n")[1]).toBe(
+      "  spawns: 52 productive / 156 budget · 141 churn (116 branch updates, 25 re-reviews)",
+    );
+    const calm = formatWave({ ...base, spawns: { productive: 3, churn: 0, budget: 18 } });
+    expect(calm.split("\n")[1]).toBe("  spawns: 3 productive / 18 budget");
+    const one = formatWave({
+      ...base,
+      spawns: {
+        productive: 1,
+        churn: 2,
+        churn_by: { branch_updates: 1, rereviews: 0, retries: 1, trains: 0 },
+      },
+    });
+    expect(one.split("\n")[1]).toBe("  spawns: 1 productive · 2 churn (1 branch update, 1 retry)");
+    // A state from before the field: no line.
+    expect(formatWave(base)).not.toContain("spawns:");
+  });
+
+  it("prints one plan: line per cluster of the overlap plan under the header (SPEC §4.6.22)", () => {
+    const out = formatWave({
+      wave: "w1",
+      version: 1,
+      owner: null,
+      repo: "r",
+      release_branch: "release/w1",
+      status: "running",
+      tasks: [{ id: "T1", issue: 101, stage: "queued", agents: {}, cluster: "A" }],
+      open_decisions: [],
+      gates: [],
+      overlap_plan: {
+        clusters: [
+          {
+            id: "A",
+            tasks: ["T1", "T2"],
+            hot: [],
+            strategy: { chain: [["T1", "T2"]] },
+            state: "planned",
+            why: "2 tasks share src/a.ts (2 tasks) → 1 chain (T1 → T2)",
+          },
+        ],
+      },
+      updated_at: "2026-10-18T12:00:00.000Z",
+    });
+    expect(out.split("\n")[1]).toBe(
+      "  plan: cluster A (planned): 2 tasks share src/a.ts (2 tasks) → 1 chain (T1 → T2)",
+    );
+  });
+
+  it("the plan line shows the cluster's state and its members in flight (#384)", () => {
+    const out = formatWave({
+      wave: "w1",
+      version: 1,
+      owner: null,
+      repo: "r",
+      release_branch: "release/w1",
+      status: "running",
+      tasks: [
+        { id: "T1", issue: 101, stage: "implement", agents: {}, cluster: "A" },
+        { id: "T2", issue: 102, stage: "fixup", agents: {}, cluster: "A" },
+        { id: "T3", issue: 103, stage: "merge_ready", agents: {}, cluster: "A" },
+        { id: "T4", issue: 104, stage: "queued", agents: {}, cluster: "A" },
+        { id: "T5", issue: 105, stage: "implement", agents: {} },
+      ],
+      open_decisions: [],
+      gates: [],
+      overlap_plan: {
+        clusters: [
+          {
+            id: "A",
+            tasks: ["T1", "T2", "T3", "T4"],
+            hot: [],
+            strategy: { cap: 4 },
+            state: "hold",
+            why: "4 tasks share src/a.ts → cap 4",
+          },
+        ],
+      },
+      updated_at: "2026-10-18T12:00:00.000Z",
+    });
+    expect(out.split("\n")[1]).toBe(
+      "  plan: cluster A (hold; in flight: T1, T2): 4 tasks share src/a.ts → cap 4",
+    );
+  });
+
   it("a synthetic task reads `fixer for <tasks> (flake: <test>)` (SPEC §4.6.16)", () => {
     const out = formatWave({
       wave: "w1",

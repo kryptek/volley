@@ -2,7 +2,7 @@
 name: volley-issues
 description: Dispatch GitHub issues to autonomous Claude agents, each in its own git worktree and cmux workspace, coordinated via Volley. By default emits a wave file and submits it to the volleyd supervisor; the hand-launched legacy path remains. Replaces the claude-peers/ScheduleWakeup polling loop with sub-5s volley wait notifications. Use when the user asks to dispatch issues, work on issues, or launch agents for issues.
 user_invocable: true
-version: 0.8
+version: 0.9
 ---
 
 # /volley-issues
@@ -15,7 +15,7 @@ There are two dispatch paths (see **Choosing a dispatch path**): the **volleyd p
 
 Before invoking `/volley-issues`:
 
-**This skill is current.** This file declares `version: 0.8` in its frontmatter. From the volley checkout, `bash packages/volley-issues/scripts/install.sh --check` prints the installed and repo versions and exits 1 when `~/.claude/skills/volley-issues` is missing or older (a v0.1 copy knows only the legacy path). Then run `bash packages/volley-issues/scripts/install.sh` (it re-points the skill at the checkout), and restart Claude Code.
+**This skill is current.** This file declares `version: 0.9` in its frontmatter. From the volley checkout, `bash packages/volley-issues/scripts/install.sh --check` prints the installed and repo versions and exits 1 when `~/.claude/skills/volley-issues` is missing or older (a v0.1 copy knows only the legacy path). Then run `bash packages/volley-issues/scripts/install.sh` (it re-points the skill at the checkout), and restart Claude Code.
 
 1. **Mosquitto running.** `brew services start mosquitto`. If any tool call returns `{ code: "BROKER_DOWN" }`, follow the cross-cutting rule from `/volley`'s SKILL.md: print the install hint, stop, do not retry.
 
@@ -111,6 +111,34 @@ Each issue becomes a task named by the task tag its title starts with (`O0: …`
 
 **Reserve shared numbers and names before the children branch.** When an epic's children will each add to the spec (a new section, wave event or decision kind), the epic's first PR reserves them per child in `spec/RESERVED.md`, the way a migration counter reserves numbers: one row per item (`| §4.6.21 | #312 | held decisions |`, or a backticked event or kind name), and each child's ISSUE.md names its reserved items. Sibling PRs then never pick the same number. `bun run check:spec-refs` fails when a reserved section number is taken by a heading on another topic. The child that lands a section, event or kind removes its row in the same PR. Add a new decision kind, event or tunable as its own line in the SPEC's list (`<!-- spec-list: … -->`), never by editing a neighbour's line.
 
+### Planning a batch: footprints and overlap
+
+Issues that touch the same files collide when they merge: every merge moves the release branch under the PRs still waiting, and each of them pays a branch update, a CI run and a review round. The helper plans around that before the wave is written (the overlap plan; volleyd's README, "Footprints and the overlap plan"), but it plans only from what the issues say. Write the issues for it, using `templates/issue-plan.md` as the brief when an agent writes the batch's issues.
+
+1. **The `Files` list is the task's footprint.** Each issue's Files list is the task's footprint: the planner clusters, bundles and chains tasks by the files their lists share, and volleyd caps a cluster in flight by it. Write it so it resolves:
+   - exact repository paths, one per bullet (`packages/volleyd/src/pipeline.ts`, not `pipeline.ts` or "the pipeline");
+   - `(new)` after a file the task creates (`packages/volleyd/src/autopilot/churn.ts` (new));
+   - globs allowed (`spec/schemas/*.json`), and a directory ends in `/`;
+   - no identifiers or function names on their own bullet: `planWave` or `lease_pools.*.match` is not a file and is dropped; put them in parentheses after the path (`packages/volleyd/src/overlap-plan.ts` (`planWave`, `explain`));
+   - tests and docs included (the test files, the README the task updates), since they collide too;
+   - `changes/<issue>.<type>.md` last.
+
+   An entry the helper cannot resolve against the release branch's tree is counted on its `footprints:` line (`1 entry unresolved (T4: helpers.ts)`; `--verbose` lists them all) and an issue with no Files section is `guessed` from its backticked paths: fix the issue, not the wave file.
+
+2. **Look first: `--plan-only`.** Run the helper with `--plan-only` (Step 3's command) before anything is filed or submitted: it prints the plan and the `footprints:` line on stdout and writes nothing. Run it on a draft batch before filing (the issues as JSON, Step 1's shape) to see what the planner would bundle, and again on the filed issues before writing the wave file.
+
+3. **When to bundle at filing time.** If the batch is small (≤ 8 issues) and `--plan-only` shows the planner collapsing most of it into bundles, file one issue per bundle instead of several: one issue whose sub-headings `T0a`, `T0b` (`## T0a: …`, each with its own Done when and Files) hold the parts, and whose Files list is their union. Fewer issues, one PR, one review, and no bundle to read back out of the plan. Keep separate issues when the parts are independent or the batch is large: the planner bundles those itself.
+
+4. **What the plan lines mean, and how to override them.** The helper prints the plan before the submit lines and writes it at the top of the wave file:
+   - `cluster A: 3 tasks share src/daemon.ts (11k lines, 3 tasks) → 1 bundle (T1), 1 chain (T1 → T4)`: three tasks share a hot file; two collapse into one bundled task (its `issues:` lists them), and one waits for the bundle (`after:` marked `# chained by the planner`). A big cluster also says `cap 4 in flight`: at most that many of its tasks run at once;
+   - `independent: T2, T5`: tasks sharing no source file with any other; they run as usual;
+   - `expected branch updates: ≤ 2 (was ≤ 5 one at a time)`: the branch updates the plan expects, against one task per issue;
+   - `footprints: 5 listed, 1 guessed (#313); …`: how each issue's Files list resolved (rule 1).
+
+   The supervisor runs the file as written, so override the plan by editing it: delete a chained `after:` to run the two in parallel, add an `after:` to order two tasks yourself, or remove a task's `issues:` (and give each of its issues its own task back) to split a bundle. `--no-plan` writes the footprints with no bundle, chain or plan at all, one task per issue. `volleyd validate` then prints a `note:` where the planner would have planned differently; it is advisory.
+
+5. **Declare the chain you want.** When two issues are a strong pair the planner cannot bundle (they share a hot file, but one's footprint is only guessed, or together they exceed the bundle's issue or source-file limit), it chains them in an order of its own choosing: the bigger one first. If the order matters, put a `Depends on:` line in the later issue (Step 2): the chain is yours, not the planner's: it survives `--no-plan`, and the planner adds no chain against it.
+
 ### Step 3: write the wave file
 
 The wave id is `<date>-<theme>` (lowercase, `[a-z0-9][a-z0-9_-]*`, at most 63 chars), the same theme as the release branch. The file goes in the repo at `.volley/waves/<date>-<theme>.yaml`:
@@ -139,6 +167,8 @@ The three autopilot settings, written into the wave file:
 The helper writes no MCP setting. When the repository's agents need some of the user's own MCP servers (a migration counter, say), add `agent_mcp: inherit` and `agent_mcp_allow: [<server name>, …]` to the wave file's `config:` by hand: each agent then starts volleyd's `volley` plus only the named servers, not every server in the profile. Without the list `inherit` starts them all; a name volleyd finds nowhere is skipped and journaled once (`agent_mcp_allow_missing`).
 
 `--placement local|auto` pins where the wave's tasks run (`placement:`); left out, the supervisor's `placement.default` decides (`auto` once a machine is paired, so the tasks spread onto it), and `volleyd validate` prints which.
+
+Before the submit lines the helper prints the overlap plan it wrote into the file (a `cluster …` line per group of issues sharing source files, the independent tasks, the expected branch updates) and a `footprints: …` line; bundled issues become one task with `issues:`, and a chained one gets an `after:` marked `# chained by the planner`. `--plan-only` prints just those lines and writes nothing, to look before writing. `--no-plan` writes the footprints without bundling or chaining anything, when the user wants one task per issue. What each line means and how to plan differently is in **Planning a batch** (above); show the user the plan with the generated file.
 
 The helper's last stderr lines are the submit command and the owner it names:
 
@@ -185,6 +215,8 @@ volleyd validate .volley/waves/$WAVE.yaml
 # brief preface: <repo>/.volley/brief-preface.md (<bytes> B, sha256 <12 hex>)
 volleyd run .volley/waves/$WAVE.yaml --owner "$VOLLEY_COORDINATOR"
 ```
+
+`volleyd validate` and `volleyd run` print the file's plan after the placement line (the lines **Planning a batch** explains), and a `note:` where the planner would now plan the file differently: an edit you made, kept as written; read it to the user rather than undoing it.
 
 Ask the user's go-ahead for the submit with the go/no-go picker (**Asking the user**, below) after showing them the wave file and the `volleyd validate` output.
 

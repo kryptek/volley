@@ -6,7 +6,8 @@ import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
 
 /**
  * volleyd never pushes or re-runs CI, and merges only under autopilot merging (`merge: auto`,
- * SPEC §4.6.17): exactly `gh pr merge <n> --squash --match-head-commit <gated head>`, built only
+ * SPEC §4.6.17): exactly `gh pr merge <n> --squash --match-head-commit <gated head>`, or a merge
+ * train's `gh pr merge <n> --merge --match-head-commit <gated head>` (SPEC §4.6.23), built only
  * by src/autopilot/merge.ts. The fence (T3) denies everything else at exec time; this holds the
  * pipeline to it statically (no other source builds such an argv) and dynamically (a fake exec
  * WITHOUT the fence, that would happily run anything, sees only that one merge, and only under
@@ -67,8 +68,8 @@ async function fullPipeline(merge?: "auto" | "manual"): Promise<string> {
   await h.finish("implementer", { head: H1, ci: "green" });
   await h.finish("spec_reviewer", { result: result("spec-p1") });
   await h.finish("quality_reviewer", { result: result("quality-p1-elsewhere") });
-  h.world.mergeBase[H2] = sha(0xdead); // the release branch moved: a rebase runs too
-  await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+  // The PR conflicts with the moved release branch: updated before the gate (#383).
+  await h.finish("fixup", { head: H2, conflicting: true, result: result("fixup-resolved") });
   h.world.diffNames[`${H2}..${H3}`] = ["src/api.ts"];
   await h.finish("rebase", { head: H3, ci: "green" });
   await h.finish("spec_reviewer", { result: result("approve-empty") });
@@ -88,28 +89,28 @@ describe("volleyd merges only behind the fence", () => {
         const prMerge = argv[0] === "gh" && argv[1] === "pr" && argv[2] === "merge";
         if (file === MERGE_MODULE && prMerge) {
           merges++;
-          // Even there: squash at a matched head only, never --admin / --auto / another strategy
-          // (the PR number and head are variables between these literals).
-          expect(argv).toEqual([
-            "gh",
-            "pr",
-            "merge",
-            "--squash",
-            "--match-head-commit",
-            "--delete-branch",
-          ]);
+          // Even there: a squash (the gate's) or a merge commit (a train's) at a matched head
+          // only, never --admin / --auto / --rebase (the PR number and head are variables between
+          // these literals).
+          expect([
+            ["gh", "pr", "merge", "--squash", "--match-head-commit", "--delete-branch"],
+            ["gh", "pr", "merge", "--merge", "--match-head-commit"],
+          ]).toContainEqual(argv);
           continue;
         }
         if (argv.some((w) => FORBIDDEN.includes(w))) offenders.push(`${file}: ${argv.join(" ")}`);
       }
     }
     expect(offenders).toEqual([]);
-    expect(merges).toBe(1); // the exemption is used, by exactly one argv
+    expect(merges).toBe(2); // the exemption is used, by exactly the gate's and the train's argv
     expect(seen).toBeGreaterThan(10); // the scan really sees the argvs (artifacts, worktree, …)
     const merge = readFileSync(MERGE_MODULE, "utf-8");
     expect(merge).toContain('"--squash",\n    "--match-head-commit",');
-    for (const flag of ["--admin", "--auto", '"--merge"', '"--rebase"'])
-      expect(merge.replace(/\/\*[\s\S]*?\*\//g, "")).not.toContain(flag);
+    const code = merge.replace(/\/\*[\s\S]*?\*\//g, "");
+    // "--merge" appears once: in the train's argv, right before its head guard.
+    expect(code.split('"--merge"')).toHaveLength(2);
+    expect(code).toContain('"--merge", "--match-head-commit", token.head]');
+    for (const flag of ["--admin", "--auto", '"--rebase"']) expect(code).not.toContain(flag);
   });
 
   it("the grep catches a forbidden argv (self-test)", () => {

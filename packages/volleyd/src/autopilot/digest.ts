@@ -5,7 +5,8 @@
  * `summaryLine` once; `volleyd digest` prints `renderDigestMd`.
  */
 import { type HeldOn, heldLabel } from "../decisions";
-import type { JournalEvent, ReleaseState, TaskId, WaveId, WaveState } from "../types";
+import { CHURN_BY_KEY, emptyChurnBy, isChurnCause } from "../spawn-class";
+import type { ChurnBy, JournalEvent, ReleaseState, TaskId, WaveId, WaveState } from "../types";
 
 /** Why a digest was published. */
 export type DigestTrigger = "wave_complete" | "release_go" | "escalation" | "stopped";
@@ -61,6 +62,8 @@ export interface Digest {
     retries: number;
     /** PRs volleyd merged itself. */
     merges: number;
+    /** Churn spawns per cause (`agent_spawned { churn }`): they spent no spawn budget. */
+    churn: ChurnBy;
   };
   waiting: DigestWaiting[];
   /** Held decisions: open, but waiting on a blocker rather than on the owner. */
@@ -81,6 +84,8 @@ export function digestOf(
   trigger: DigestTrigger,
 ): Digest {
   const titles = new Map<TaskId, string>();
+  /** A bundle's issue titles, from its latest `agent_spawned { issues }`. */
+  const issueTitles = new Map<number, string>();
   const merges = new Map<TaskId, JournalEvent>();
   const bySupervisor = new Set<TaskId>();
   const byOperator = new Set<TaskId>();
@@ -95,6 +100,7 @@ export function digestOf(
     conflicts_resolved: 0,
     retries: 0,
     merges: 0,
+    churn: emptyChurnBy(),
   };
   for (const e of events) {
     const d = e.data;
@@ -109,6 +115,15 @@ export function digestOf(
         }
         break;
       }
+      case "agent_spawned":
+        for (const i of Array.isArray(d.issues) ? d.issues : []) {
+          const { number, title } = (i ?? {}) as { number?: unknown; title?: unknown };
+          if (typeof number === "number" && typeof title === "string")
+            issueTitles.set(number, title);
+        }
+        if (d.churn === true)
+          auto.churn[CHURN_BY_KEY[isChurnCause(d.cause) ? d.cause : "retry"]] += 1;
+        break;
       case "decision_held":
         holds.set(String(d.decision_id), e);
         break;
@@ -162,7 +177,10 @@ export function digestOf(
   }
 
   const shipped: DigestShipped[] = [];
-  const done = state.tasks.filter((t) => t.stage === "done" && merges.has(t.id));
+  // A merge train ships nothing of its own: its members ship, each through its own PR.
+  const done = state.tasks.filter(
+    (t) => t.stage === "done" && merges.has(t.id) && t.train === undefined,
+  );
   done.sort((a, b) => (merges.get(a.id)?.seq ?? 0) - (merges.get(b.id)?.seq ?? 0));
   for (const t of done) {
     const d = (merges.get(t.id) as JournalEvent).data;
@@ -175,18 +193,26 @@ export function digestOf(
           ? "operator"
           : "github";
     if (merged_by === "supervisor") auto.merges += 1;
-    const title = titles.get(t.id);
-    shipped.push({
-      task: t.id,
-      issue: t.issue,
-      ...(title !== undefined ? { title } : {}),
-      pr: {
-        number: Number(pr.number ?? t.pr?.number ?? 0),
-        url: String(pr.url ?? t.pr?.url ?? ""),
-      },
-      merge_sha: str(d.merge_sha) ?? str(d.sha) ?? null,
-      merged_by,
-    });
+    // A bundle ships each of its issues, all through its one PR.
+    const bundle = state.spec?.tasks[t.id]?.issues;
+    const issues =
+      bundle !== undefined && bundle.length > 1
+        ? [t.issue, ...bundle.filter((n) => n !== t.issue)]
+        : [t.issue];
+    for (const issue of issues) {
+      const title = issues.length > 1 ? issueTitles.get(issue) : titles.get(t.id);
+      shipped.push({
+        task: t.id,
+        issue,
+        ...(title !== undefined ? { title } : {}),
+        pr: {
+          number: Number(pr.number ?? t.pr?.number ?? 0),
+          url: String(pr.url ?? t.pr?.url ?? ""),
+        },
+        merge_sha: str(d.merge_sha) ?? str(d.sha) ?? null,
+        merged_by,
+      });
+    }
   }
 
   const waiting: DigestWaiting[] = [];
@@ -253,6 +279,24 @@ const VERB: Record<DigestTrigger, string> = {
 
 const count = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
 
+/** All churn spawns (absent in a digest from before #387: 0). */
+const churnTotal = (c: ChurnBy | undefined): number =>
+  c === undefined ? 0 : c.branch_updates + c.rereviews + c.retries + c.trains;
+
+/** The causes of churn `c` that are not zero: `116 branch updates, 25 re-reviews`. */
+export function churnCauses(c: ChurnBy): string {
+  const parts: [number, string, string][] = [
+    [c.branch_updates, "branch update", "branch updates"],
+    [c.rereviews, "re-review", "re-reviews"],
+    [c.retries, "retry", "retries"],
+    [c.trains, "train", "trains"],
+  ];
+  return parts
+    .filter(([n]) => n > 0)
+    .map(([n, one, many]) => count(n, one, many))
+    .join(", ");
+}
+
 /**
  * The one-line summary the push carries: `w1 complete: 27 shipped, 3 flakes fixed, 2 conflicts
  * resolved, 1 waiting for you (release_go)`. Counts that are zero are left out (shipped never is).
@@ -264,6 +308,8 @@ export function summaryLine(d: Digest): string {
   const conflicts = d.auto.conflicts_resolved;
   if (conflicts > 0) parts.push(`${count(conflicts, "conflict", "conflicts")} resolved`);
   if (d.auto.retries > 0) parts.push(count(d.auto.retries, "retry", "retries"));
+  const churn = churnTotal(d.auto.churn);
+  if (churn > 0) parts.push(`${count(churn, "churn spawn", "churn spawns")} (no budget)`);
   const answered = d.auto.decisions_resolved;
   if (answered > 0) parts.push(`${count(answered, "decision", "decisions")} answered`);
   if (d.failures.length > 0) parts.push(`${d.failures.length} failed`);
@@ -287,11 +333,22 @@ export function renderDigestMd(d: Digest): string {
   ];
   out.push("", "## Shipped", "");
   if (d.shipped.length === 0) out.push("Nothing shipped.");
-  for (const s of d.shipped) {
-    const title = s.title !== undefined ? ` ${s.title}` : "";
-    out.push(
-      `- ${s.task} (#${s.issue})${title}: PR #${s.pr.number} ${s.pr.url} (merged by ${s.merged_by})`,
-    );
+  // A bundle's issues are consecutive entries of one task: one line, `#310 + #312 (one PR)`.
+  for (let i = 0; i < d.shipped.length; ) {
+    const s = d.shipped[i] as DigestShipped;
+    const group = [s];
+    while (d.shipped[i + group.length]?.task === s.task)
+      group.push(d.shipped[i + group.length] as DigestShipped);
+    i += group.length;
+    const via = `PR #${s.pr.number} ${s.pr.url} (merged by ${s.merged_by})`;
+    if (group.length === 1) {
+      const title = s.title !== undefined ? ` ${s.title}` : "";
+      out.push(`- ${s.task} (#${s.issue})${title}: ${via}`);
+      continue;
+    }
+    const nums = group.map((g) => `#${g.issue}`).join(" + ");
+    const titled = group.map((g) => `#${g.issue}${g.title !== undefined ? ` ${g.title}` : ""}`);
+    out.push(`- ${s.task} ${nums} (one PR): ${titled.join(", ")}; ${via}`);
   }
   if (d.closes.length > 0) {
     out.push("", "## Closes", "", "The release PR's body:", "");
@@ -303,6 +360,9 @@ export function renderDigestMd(d: Digest): string {
   out.push(`- ${count(a.merges, "PR", "PRs")} merged`);
   out.push(`- ${count(a.conflicts_resolved, "conflict", "conflicts")} resolved`);
   out.push(`- ${count(a.retries, "retry", "retries")} (relaunches, recovered spawns)`);
+  const churn = churnTotal(a.churn);
+  if (churn > 0)
+    out.push(`- ${count(churn, "churn spawn", "churn spawns")} (${churnCauses(a.churn)})`);
   out.push(`- ${count(a.flakes_fixed.length, "flake", "flakes")} fixed`);
   for (const f of a.flakes_fixed)
     out.push(

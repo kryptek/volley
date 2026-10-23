@@ -1,0 +1,66 @@
+{
+  "wave": "w1",
+  "repo": "example-org/example-repo",
+  "release_branch": "release/w1",
+  "model": "claude-opus-5-5",
+  "pipeline": [
+    "implement",
+    [
+      "spec_review",
+      "quality_review"
+    ],
+    "fixup",
+    "merge_ready"
+  ],
+  "tasks": {
+    "T1": {
+      "issue": 101,
+      "issues": [
+        101,
+        104
+      ],
+      "title": "Bundle: the Desk's wave card",
+      "files": [
+        "packages/volley-desk/src/wave-card.tsx",
+        "packages/volley-desk/src/wave-card.test.tsx"
+      ],
+      "footprint": {
+        "confidence": "maybe"
+      },
+      "plan": {
+        "cluster": "c1",
+        "by": "collapse",
+        "why": "#101 and #104 both rewrite wave-card.tsx"
+      }
+    },
+    "T2": {
+      "issue": 102,
+      "after": [
+        "T1"
+      ],
+      "files": [
+        "spec/SPEC.md"
+      ],
+      "footprint": {
+        "confidence": "guessed",
+        "unresolved": [
+          "reducer"
+        ]
+      },
+      "plan": {
+        "cluster": "c1",
+        "by": "chain",
+        "why": "shares spec/SPEC.md with T1"
+      }
+    },
+    "T3": {
+      "issue": 103,
+      "footprint": {
+        "confidence": "none"
+      },
+      "plan": {
+        "by": "independent"
+      }
+    }
+  }
+}

@@ -59,6 +59,7 @@ export const TASK_ROLES: readonly (keyof TaskAgents)[] = [
   "fixup",
   "rebase",
   "release",
+  "integrator",
 ];
 
 export const isTaskRole = (r: string): r is keyof TaskAgents =>

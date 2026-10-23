@@ -1,6 +1,6 @@
 {
   "name": "volley-hooks",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "description": "Volley Claude Code hooks \u2014 registry model, mailbox drain + inject + ack, idle/awaiting-input, heartbeats",
   "license": "Apache-2.0",

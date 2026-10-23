@@ -1,0 +1,18 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-23T09:00:00.000Z",
+  "channel": "_waves/events",
+  "type": "cluster_strategy_changed",
+  "payload": {
+    "wave": "w1",
+    "seq": 140,
+    "at": "2026-10-23T09:00:00.000Z",
+    "data": {
+      "cluster": "c1",
+      "from": "chain",
+      "to": "collapse",
+      "why": "T2's footprint grew to every file of T1's"
+    }
+  }
+}

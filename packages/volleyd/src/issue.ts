@@ -48,7 +48,32 @@ export async function fetchIssue(exec: ExecFn, repo: string, issue: number): Pro
   };
 }
 
-/** `ISSUE.md`: title, url, then the body verbatim. */
-export function renderIssueMd(issue: IssueData): string {
-  return `# #${issue.number} — ${issue.title}\n\n${issue.url}\n\n${issue.body}\n`;
+/**
+ * Fetch every issue of a task, in order, each through `fetchIssue`: a bundle's mismatched reply
+ * is refused for its own number, so no wrong issue reaches the brief either.
+ */
+export async function fetchIssues(
+  exec: ExecFn,
+  repo: string,
+  issues: readonly number[],
+): Promise<IssueData[]> {
+  const out: IssueData[] = [];
+  for (const n of issues) out.push(await fetchIssue(exec, repo, n));
+  return out;
+}
+
+/** One issue's section: title, url, then the body verbatim. */
+const issueSection = (issue: IssueData): string =>
+  `# #${issue.number} — ${issue.title}\n\n${issue.url}\n\n${issue.body}\n`;
+
+/**
+ * `ISSUE.md`: one issue's section. A bundle's (several issues) opens with `# Bundle: #a, #b` and
+ * the planner's `why`, then each issue's section, separated by `---` rules.
+ */
+export function renderIssueMd(issues: IssueData | readonly IssueData[], why?: string): string {
+  const list = Array.isArray(issues) ? issues : [issues as IssueData];
+  if (list.length === 1) return issueSection(list[0] as IssueData);
+  const planner = why !== undefined && why !== "" ? ` Planner: ${why}` : "";
+  const header = `# Bundle: ${list.map((i) => `#${i.number}`).join(", ")}\n\nOne task, one PR, for every issue below.${planner}`;
+  return `${[header, ...list.map((i) => issueSection(i).trimEnd())].join("\n\n---\n\n")}\n`;
 }

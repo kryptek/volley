@@ -60,6 +60,15 @@ export interface SoakWorldOptions {
    * it never does; undefined, the seed decides.
    */
   flaky?: (head: string) => boolean | undefined;
+  /** The repository tree (path → bytes) the root commit holds, so task footprints name real files. */
+  tree?: Record<string, number>;
+}
+
+/** A branch update that both sides changed a file in: the rebase resolved it (to the head's side). */
+export interface Conflict {
+  head: string;
+  onto: string;
+  files: string[];
 }
 
 /** What GitHub says when `--match-head-commit` no longer matches. */
@@ -94,7 +103,11 @@ export function soakWorld(o: SoakWorldOptions) {
   };
   const root = mk(
     [],
-    { "README.md": "r0", ...(o.flake ? { [o.flake.file]: "flaky" } : {}) },
+    {
+      ...Object.fromEntries(Object.keys(o.tree ?? {}).map((f) => [f, "t0"])),
+      "README.md": "r0",
+      ...(o.flake ? { [o.flake.file]: "flaky" } : {}),
+    },
     "root",
   );
   /** Branches on origin (the release branch among them). */
@@ -109,6 +122,8 @@ export function soakWorld(o: SoakWorldOptions) {
   const unknown: string[][] = [];
   /** Every merge GitHub performed, in order: PR, head, merge commit. */
   const merges: { pr: number; head: string; sha: string }[] = [];
+  /** Every branch update that conflicted, in order (the world records each one; tests read it). */
+  const conflicts: Conflict[] = [];
   /** The commit that removed the flake (null: still flaky). */
   let fixedBy: string | null = null;
   let runId = 7000;
@@ -196,7 +211,11 @@ export function soakWorld(o: SoakWorldOptions) {
     mk([parent], { ...get(parent).files, ...files }, subject);
 
   /** A merge of `theirs` into `ours` (a `git merge`, no conflicts): theirs' changes since the base. */
-  const merge = (ours: string, theirs: string, subject: string) => {
+  const merge = (ours: string, theirs: string, subject: string) =>
+    mk([ours, theirs], mergedFiles(ours, theirs), subject);
+
+  /** The tree of a merge of `theirs` into `ours`: ours, with theirs' changes since their base. */
+  const mergedFiles = (ours: string, theirs: string) => {
     const base = mergeBase(ours, theirs) as string;
     const files = { ...get(ours).files };
     for (const f of diffNames(base, theirs)) {
@@ -204,13 +223,21 @@ export function soakWorld(o: SoakWorldOptions) {
       if (v === undefined) delete files[f];
       else files[f] = v;
     }
-    return mk([ours, theirs], files, subject);
+    return files;
   };
 
-  /** A rebase of `head` onto `onto`: one commit replaying head's changes since their base. */
+  /**
+   * A rebase of `head` onto `onto`: one commit replaying head's changes since their base. A file
+   * both sides changed is a conflict, recorded in `conflicts` and resolved to the head's side.
+   */
   const rebase = (head: string, onto: string, subject: string) => {
     const base = mergeBase(head, onto) as string;
     const files = { ...get(onto).files };
+    const theirs = new Set(diffNames(base, onto));
+    const both = diffNames(base, head).filter(
+      (f) => theirs.has(f) && get(onto).files[f] !== get(head).files[f],
+    );
+    if (both.length > 0) conflicts.push({ head, onto, files: both });
     for (const f of diffNames(base, head)) {
       const v = get(head).files[f];
       if (v === undefined) delete files[f];
@@ -288,6 +315,27 @@ export function soakWorld(o: SoakWorldOptions) {
     pr.state = "MERGED";
     pr.mergeCommit = s;
     merges.push({ pr: pr.number, head, sha: s });
+    if (fixedBy === null && o.flake !== undefined && get(s).files[o.flake.file] === "fixed")
+      fixedBy = s;
+    return s;
+  };
+
+  /**
+   * A merge commit of PR `pr` at its head onto the release tip (`gh pr merge --merge`, a merge
+   * train's): every other open PR whose head it now contains reads as merged, by that commit.
+   */
+  const mergeCommit = (pr: Pr): string => {
+    const head = pr.headRefOid;
+    const s = mk([tip(), head], mergedFiles(tip(), head), `Merge pull request #${pr.number}`);
+    refs[o.release_branch] = s;
+    pr.state = "MERGED";
+    pr.mergeCommit = s;
+    merges.push({ pr: pr.number, head, sha: s });
+    for (const other of prs)
+      if (other.state === "OPEN" && isAncestor(other.headRefOid, s)) {
+        other.state = "MERGED";
+        other.mergeCommit = s;
+      }
     if (fixedBy === null && o.flake !== undefined && get(s).files[o.flake.file] === "fixed")
       fixedBy = s;
     return s;
@@ -480,7 +528,8 @@ export function soakWorld(o: SoakWorldOptions) {
         return out("", 1, "GraphQL: Pull request is not open (mergePullRequest)");
       if (rest.includes("--match-head-commit") && flag("--match-head-commit") !== pr.headRefOid)
         return out("", 1, HEAD_MOVED_STDERR);
-      squash(pr);
+      if (rest.includes("--merge")) mergeCommit(pr);
+      else squash(pr);
       return out("");
     }
     // A head's runs by head_sha (the supervisor's read): `verb` is the endpoint.
@@ -552,6 +601,7 @@ export function soakWorld(o: SoakWorldOptions) {
     prs,
     runs,
     merges,
+    conflicts,
     unknown,
     issues,
     exec,

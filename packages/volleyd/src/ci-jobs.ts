@@ -43,7 +43,8 @@ const secs = (j: CiJob) =>
 /** Fold the durations of `jobs` whose run completed into `last` (`<workflow>/<job>` → seconds). */
 export function noteJobTimes(last: Map<string, number>, jobs: CiJob[]): void {
   for (const j of jobs) {
-    if (!j.run_done || j.status !== "completed") continue;
+    // A skipped job (a release push reusing its PR run, #492) took no time worth learning.
+    if (!j.run_done || j.status !== "completed" || j.conclusion === "skipped") continue;
     const s = secs(j);
     if (Number.isFinite(s) && s >= 0) last.set(key(j), Math.round(s));
   }

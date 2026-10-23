@@ -1,0 +1,43 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-23T09:00:00.000Z",
+  "channel": "_waves/events",
+  "type": "wave_planned",
+  "payload": {
+    "wave": "w1",
+    "seq": 120,
+    "at": "2026-10-23T09:00:00.000Z",
+    "data": {
+      "clusters": [
+        {
+          "id": "c1",
+          "tasks": [
+            "T1",
+            "T2"
+          ],
+          "hot": [
+            {
+              "file": "spec/SPEC.md",
+              "bytes": 182340,
+              "shared_by": [
+                "T1",
+                "T2"
+              ]
+            }
+          ],
+          "strategy": {
+            "chain": [
+              [
+                "T1",
+                "T2"
+              ]
+            ]
+          },
+          "state": "running",
+          "why": "T1 and T2 both edit spec/SPEC.md (182 KB); T2 starts once T1 merges"
+        }
+      ]
+    }
+  }
+}

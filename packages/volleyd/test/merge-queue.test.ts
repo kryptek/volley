@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { RefusalReason } from "../src/autopilot/merge";
-import { dependents, nextToMerge, queueOf, refusalEndsTurn } from "../src/autopilot/merge-queue";
+import {
+  type QueueEntry,
+  dependents,
+  nextToMerge,
+  queueOf,
+  refusalEndsTurn,
+} from "../src/autopilot/merge-queue";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "../src/pipeline";
 import type { WaveRecord } from "../src/reducer";
 import type { TaskStage } from "../src/types";
@@ -175,6 +181,59 @@ describe("nextToMerge", () => {
     expect(refusalEndsTurn(p)).toBe(false);
   });
 
+  it("a transient refusal keeps the turn and never counts as a refusal; the entry shows refused with retry_at (#445)", () => {
+    const A = "a".repeat(40);
+    let p = emptyPipeline();
+    p = fold(p, "artifact_verified", { role: "gate", head_sha: A });
+    const retryAt = at(1);
+    p = fold(p, "alarm_raised", {
+      alarm: "merge_refused",
+      head: A,
+      reason: "transient",
+      stderr: "GraphQL: Merge already in progress (mergePullRequest)",
+      retry_at: retryAt,
+      wait_s: 60,
+      of: 4,
+    });
+    expect(p.merge_refusals ?? 0).toBe(0);
+    expect(p.merge_refusal_reason).toBe("transient");
+    expect(p.merge_transient).toMatchObject({ attempts: 1, head: A, retry_at: retryAt });
+    expect(refusalEndsTurn(p)).toBe(false);
+    p = fold(p, "alarm_raised", { alarm: "merge_refused", head: A, reason: "transient" });
+    expect(p.merge_transient?.attempts).toBe(2);
+    // A non-transient refusal ends the ladder and counts as today.
+    p = fold(p, "alarm_raised", { alarm: "merge_refused", head: A, reason: "checks" });
+    expect(p.merge_transient).toBeUndefined();
+    expect(p.merge_refusals).toBe(1);
+
+    const rec = record("w1", {
+      T1: {
+        p: queued(1, {
+          merge_refusal_reason: "transient",
+          merge_transient: { attempts: 1, head: A, retry_at: retryAt, since: at(0) },
+        }),
+      },
+      T2: { p: queued(2) },
+    });
+    expect(queueOf(rec)[0]).toMatchObject({
+      task: "T1",
+      state: "refused",
+      keepsPlace: true,
+      retry_at: retryAt,
+    });
+    expect(nextToMerge({ b: queueOf(rec) }, new Set())?.task).toBe("T1");
+  });
+
+  it("a new gated head clears the transient ladder (#445)", () => {
+    const [A, B] = ["a".repeat(40), "b".repeat(40)];
+    let p = emptyPipeline();
+    p = fold(p, "artifact_verified", { role: "gate", head_sha: A });
+    p = fold(p, "alarm_raised", { alarm: "merge_refused", head: A, reason: "transient" });
+    expect(p.merge_transient?.attempts).toBe(1);
+    p = fold(p, "artifact_verified", { role: "gate", head_sha: B });
+    expect(p.merge_transient).toBeUndefined();
+  });
+
   it("a PR closed unmerged gives up the turn: no retry can merge it (#311)", () => {
     let p = emptyPipeline();
     p = fold(p, "artifact_verified", { role: "gate", head_sha: "a".repeat(40) });
@@ -193,5 +252,52 @@ describe("nextToMerge", () => {
       task: "T1",
     });
     expect(nextToMerge(queues, new Set(["/repo#release/r1"]))).toBeNull();
+  });
+});
+
+describe("the merge train in the queue", () => {
+  /** w1 with a train running over T1 and T2 (and an ended one over T4). */
+  function withTrain() {
+    const rec = record("w1", {
+      T1: { p: queued(1) },
+      T2: { p: queued(2) },
+      T3: { p: queued(3) },
+      T4: { p: queued(4) },
+    });
+    const state = rec.state as NonNullable<WaveRecord["state"]>;
+    state.trains = [
+      { id: "train-1", tasks: ["T4"], state: "failed", since: at(5) },
+      { id: "train-2", tasks: ["T1", "T2"], state: "integrating", since: at(6) },
+    ];
+    return rec;
+  }
+
+  it("shows a running train's members merging, with the train", () => {
+    expect(queueOf(withTrain()).map((e) => [e.task, e.state, e.train])).toEqual([
+      ["T1", "merging", "train-2"],
+      ["T2", "merging", "train-2"],
+      ["T3", "queued", undefined],
+      ["T4", "queued", undefined],
+    ]);
+  });
+
+  it("nextToMerge gives no turn on a branch while a train holds it", () => {
+    // T3 and T4 are gated and outside the train, but the train holds the release branch as a
+    // merge in flight does (SPEC §4.6.23).
+    expect(nextToMerge({ b: queueOf(withTrain()) }, new Set())).toBeNull();
+    const forming: QueueEntry[] = [
+      { wave: "w1", task: "T1", state: "queued", since: at(1), gated: true, train: "train-3" },
+      { wave: "w1", task: "T2", state: "queued", since: at(2), gated: true },
+    ];
+    expect(nextToMerge({ b: forming }, new Set())).toBeNull();
+    // Another branch still takes its turn.
+    const other: QueueEntry[] = [
+      { wave: "w2", task: "T9", state: "queued", since: at(3), gated: true },
+    ];
+    expect(nextToMerge({ b: forming, c: other }, new Set())).toEqual({
+      branch: "c",
+      wave: "w2",
+      task: "T9",
+    });
   });
 });

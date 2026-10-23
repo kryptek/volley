@@ -46,7 +46,7 @@ coordinator session.
 - [Autopilot](#autopilot)
   - [The policy table](#the-policy-table)
   - [Self-healing CI](#self-healing-ci) and [the fixer task](#the-fixer-task)
-  - [Autopilot merging](#autopilot-merging) and [the merge queue](#the-merge-queue)
+  - [Autopilot merging](#autopilot-merging), [the merge queue](#the-merge-queue) and [the merge train](#the-merge-train)
   - [The release train](#the-release-train) and [the issue lifecycle](#the-issue-lifecycle)
   - [The needs-you inbox](#needs-you-inbox)
   - [The morning digest](#the-morning-digest)
@@ -57,9 +57,14 @@ coordinator session.
 - [Pause, stop and the kill switch](#pause-stop-and-the-kill-switch)
 - [Archiving](#archiving)
 - [Steering](#steering)
-- [Overlap warnings](#overlap-warnings)
+- [Footprints and the overlap plan](#footprints-and-the-overlap-plan)
+  - [At run time: the cap and the churn monitor](#at-run-time-the-cap-and-the-churn-monitor)
+  - [Overlap warnings](#overlap-warnings)
+  - [Footprints](#footprints)
 - [Configuration](#configuration)
 - [Spawning agents](#spawning-agents)
+  - [Bundles](#bundles)
+  - [Spawn budget](#spawn-budget) (productive and churn spawns, the churn fuse)
 - [Fleet](#fleet)
   - [Fleet: readiness, the supervisor's card, Repair](#fleet-readiness-the-supervisors-card-repair)
   - [Fleet: placement](#fleet-placement)
@@ -72,6 +77,7 @@ coordinator session.
 - [Exit codes](#exit-codes)
 - [Testing: the clock contract](#testing-the-clock-contract)
 - [Testing: the simulated soak](#testing-the-simulated-soak)
+  - [The replay](#the-replay)
 
 ---
 
@@ -111,6 +117,12 @@ tasks:
   T1: { issue: 102, after: [T0] }
   T2: { issue: 103, after: [T0] }
   T3: { issue: 104, after: [T1, T2], pipeline: [implement, merge_ready] }
+  T4:                        # as wave-from-issues writes it (see Footprints and the overlap plan)
+    issue: 105
+    issues: [105, 106]       # a bundle: every issue it closes
+    files: [packages/app/src/pipeline.ts, packages/app/src/retry.ts]
+    footprint: { confidence: listed }
+    plan: { cluster: A, by: collapse, why: "collapsed #105 + #106: …" }
 # optional:
 # version: 1                 # bumped by a versioned re-submission
 # namespace: dispatch        # Volley namespace for the wave's agents
@@ -131,8 +143,9 @@ Per task: `issue` (required), `after`, `pipeline`, `model`, `title`, `host` (whe
 `local`, a configured host's name, an inline ssh host, or `auto` to have volleyd place it; default
 `auto` when the wave's placement is `auto`, else `local`), `heavy` (`true`: placement needs a free per-machine
 slot in each of the wave's `heavy_pools`), `account` (overrides the wave's; see
-[Claude accounts](#claude-accounts)), and `files` (a scheduling hint: paths the task will touch;
-tasks overlapping active ones start later).
+[Claude accounts](#claude-accounts)), `files` (a scheduling hint: paths the task will touch;
+tasks overlapping active ones start later), and the overlap plan's `footprint`, `plan` and `issues`
+([Footprints and the overlap plan](#footprints-and-the-overlap-plan)).
 
 The schema is [`spec/schemas/wave-file.schema.json`](../../spec/schemas/wave-file.schema.json).
 The parser adds the rules a schema cannot express and reports everything with a path:
@@ -217,9 +230,10 @@ and work while the daemon is down; use the wave `_system` for global events (`co
 - **Reducer** (`src/reducer.ts`): pure `reduce(events) → WaveState` in exactly the
   `wave-state.schema.json` payload shape. Re-applying an already-applied `seq` is a no-op.
 - **Scheduler** (`src/scheduler.ts`): `ready` = queued, not admitted, every `after` done; ordered
-  by critical path length (longest downstream chain first), then by `files` overlap with active
-  tasks, then id. `admit` takes an admission verdict `{ allow, reasons }` (pressure-based
-  admission plugs in here later) and never exceeds the hard ceiling or the wave's spawn budget.
+  by critical path length (longest downstream chain first), then id; tasks sharing files are kept
+  apart by their overlap-plan cluster's cap (below), not by the order. `admit` takes an admission
+  verdict `{ allow, reasons }` (pressure-based admission plugs in here later) and never exceeds
+  the hard ceiling or the wave's spawn budget.
   The hard ceiling counts the agents volleyd runs or is starting, across all waves and machines:
   supervised, launched and being verified, spawning (a release stage's agent too), and one slot
   for each admitted task of a running wave with no agent live that will spawn its next one:
@@ -876,11 +890,14 @@ wave meets them (the owner's one-page guide is [`docs/AUTOPILOT.md`](../../docs/
 | Self-healing CI | classifies a red head (own change, flake, infra incident) and routes it; a flake gets a fixer task | [Self-healing CI](#self-healing-ci), [the fixer task](#the-fixer-task) |
 | Autopilot merging | under `merge: auto`, squash-merges each gated PR at exactly its gated head | [Autopilot merging](#autopilot-merging), SPEC §4.6.17 |
 | The merge queue | one merge in flight per release branch, in dependency order, each branch brought up to date first | [The merge queue](#the-merge-queue) |
+| The overlap plan | bundles, chains and caps the tasks that share files; holds or trains a cluster that churns anyway | [Footprints and the overlap plan](#footprints-and-the-overlap-plan), [the cap and the churn monitor](#at-run-time-the-cap-and-the-churn-monitor), SPEC §4.6.22 |
+| The merge train | merges several gated PRs of a release branch at once through one integrated, gated branch | [The merge train](#the-merge-train), SPEC §4.6.23 |
+| Churn accounting | branch updates, re-reviews, trains and retries never spend the spawn budget; the churn fuse holds a cluster | [Spawn budget](#spawn-budget) |
 | The release train | runs the repository's `.volley/release.yaml` stages once every task is merged; ends on the owner's `release_go` | [The release train](#the-release-train), SPEC §4.6.19 |
 | The needs-you inbox | one retained item per thing a person must answer, from any surface; volleyd referees | [Needs-you inbox](#needs-you-inbox), SPEC §4.6.18 |
 | The morning digest | one retained digest and one push per wave: shipped, handled, waiting | [The morning digest](#the-morning-digest) |
 | Stable coordinator identity | a wave owned by `VOLLEY_COORDINATOR` survives its session; reconnects reclaim it | [Ownership and claim](#ownership-and-claim) |
-| The soak | one whole simulated wave, unattended, in CI | [Testing: the simulated soak](#testing-the-simulated-soak) |
+| The soak | one whole simulated wave, unattended, in CI; the replay measures the overlap plan against a baseline | [Testing: the simulated soak](#testing-the-simulated-soak), [the replay](#the-replay) |
 
 Under `merge: manual` volleyd merges nothing and a person merges each gated PR; with
 `autopilot.enabled: false` every decision waits for a person. Either is per wave or global.
@@ -912,7 +929,8 @@ left for you, with one push.
 - **Budgets** are per wave and key: `relaunch_max` and `respawn_max` per `<task>/<role>`,
   `nudge_max` and `question_max` per run (`<task>/<role>/<attempt>`), `rereview_max` and
   `ci_fixup_max` (CI fixups, default 2) per task, `account_move_max` (automatic account moves,
-  `agent_account_limit`, default 2) per `<task>/<role>`, and `budget_raise_max`, a multiple of the
+  `agent_account_limit`, default 2) per `<task>/<role>`, `merge_transient_retry_max` (retries of a
+  spent transient-merge ladder, default 1) per task, and `budget_raise_max`, a multiple of the
   wave's derived spawn budget that `raise by <n>` answers may reach. Each is reduced from the
   journal's `decision_auto_resolved` events, so a restart keeps them.
 - **Off**: `volleyd config set autopilot.enabled false` (or a wave's `config: { autopilot: {
@@ -978,14 +996,20 @@ autopilot: on
     ci_failed/infra-incident: the incident outlasted the wait: the owner decides; volleyd never re-runs CI
   ci_failed · otherwise (ci_none included) · escalate no_policy · no budget
     ci_failed/owner: a red head no rule routes and a repository without workflows are the owner's
+  merge_conflict · a merge train's integration (train), within respawn_max per member task · drop <member> · respawn_max per <task> · max 1
+    merge_conflict/drop-from-train: the train is formed again without the member, which takes an ordinary turn later; a second conflict of it is the owner's
   merge_conflict · within respawn_max per task/role · respawn · respawn_max per <task>/<role> · max 1
     merge_conflict/respawn: a fresh rebase (or merge) agent retries the update; a conflict it cannot resolve either is the owner's
   merge_refused · the last refusal: the PR is a draft (reason: draft) and marking it ready has not failed (no ready_failed) · retry · no budget
     merge_refused/draft: a draft is marked ready and merged once the CI that starts then passes; a retry does exactly that
+  merge_refused · the last refusal was transient (reason: transient) and the backoff ladder is spent (transient_attempts) · retry · merge_transient_retry_max per <task> · max 1
+    merge_refused/transient: GitHub was busy or unreachable, not refusing the change: a retry starts the backoff ladder again; a refusal that outlasts it twice is the owner's
   pr_closed, remote_repo_missing · always · escalate no_policy · no budget
     pr/owner: where the work went, or a clone that is missing, is the owner's call
   terminal_status_lost · always · escalate no_policy · no budget
     terminal/owner: a status the supervisor could not hand over even on recovery: the owner checks the work
+  churn_exhausted · the task's cluster not held by autopilot before (churn:<task>) · hold cluster · churn:<task> (once) · max 1
+    churn_exhausted/hold: churn spends no spawn budget, so its fuse is the control: one member at a time while the cluster is held; churn that goes on anyway is the owner's
 ```
 
 ### Self-healing CI
@@ -1220,7 +1244,9 @@ computes it from the journal (`src/autopilot/digest.ts`, pure) and publishes it 
   `## Closes`.
 - `auto`: `decisions_resolved` (`decision_auto_resolved`), `flakes_fixed` (each landed
   `remediation_closed`: the test, its fixer, the tasks it released), `conflicts_resolved` (rebase
-  steps that verified), `retries` (`spawn_recovered` + `relaunched`), `merges` (PRs volleyd merged).
+  steps that verified), `retries` (`spawn_recovered` + `relaunched`), `merges` (PRs volleyd merged),
+  `churn` (the churn spawns by cause: `branch_updates`, `rereviews`, `retries`, `trains`; see
+  [Spawn budget](#spawn-budget)); the one-line summary names churn only when there was any.
 - `waiting`: the wave's open decisions (`owner_only` when escalated as such); `release` (the
   train's stages, when it has one); `failures`: cancelled tasks and why.
 
@@ -1549,22 +1575,153 @@ journaled, so a client that sends its own mailbox message (the Desk) asks for th
 and then publishes, and the agent gets exactly one message. When there is nothing to interrupt with
 (no hook, no workspace) or it fails, the request still answers `ok` with `interrupted: false`.
 
-## Overlap warnings
+## Footprints and the overlap plan
 
-At submit the daemon reads each task issue's `Files` section (`## Files` / `### Files` heading or
-a `Files:` line; comma lists, brace expansion and package-relative entries are understood) via
+Tasks of one wave that touch the same files collide when they merge. A task's footprint (its
+`files`) says what it will touch; the overlap plan (SPEC §4.6.22) clusters the tasks that share
+source files and runs each cluster so they collide less: strongly coupled tasks collapse into one
+bundled task, a strong pair that cannot bundle chains (one `after` the other), and a big cluster
+is capped in flight.
+
+**In the wave file.** `wave-from-issues` (the `/volley-issues` skill) writes it: each issue's
+Files list resolved against the repository tree at `origin/<release branch>` (`footprintOf`,
+below), then planned (`planWave`). Per task:
+
+| Key | What it holds |
+|---|---|
+| `files` | the footprint: paths and globs |
+| `footprint` | `{ confidence, unresolved? }`: how `files` was found (table below), and the entries that matched no path |
+| `plan` | `{ cluster, by, why }`: the cluster, the strategy (`collapse`, `chain`, `cap`, `independent`) and why |
+| `issues` | a bundle's issues (must contain `issue`; never one another task closes) |
+
+A chain the planner added is an `after:` entry with a comment (`# chained by the planner: shares
+src/pipeline.ts`), and the plan in words heads the file (`# plan: cluster A: …`). Collapse is
+automatic: to plan differently, edit the file (split a bundle into its issues, drop a chain); the
+supervisor keeps it as written. The escape hatches: `--no-plan` writes footprints only (no
+bundle, chain or `plan:`), `--plan-only` prints the plan and writes nothing.
+
+**What `validate` and `run` print**, after the placement line:
+
+```
+cluster A: 3 tasks share src/daemon.ts (11k lines, 3 tasks) → 1 bundle (T1), 1 chain (T1 → T4)
+independent: T2, T5
+expected branch updates: ≤ 2 (was ≤ 5 one at a time)
+note: T6 and T7 run as separate tasks; the planner would bundle them as T6 — kept as written
+footprints: 5 listed, 1 guessed (#313); 1 entry unresolved (T4: helpers.ts)
+```
+
+The first three lines are the file's own plan (`explain`); a `note:` is where the planner
+(`diffPlan`) would plan the file's tasks differently, printed only when the repository's tree
+reads here; the last line counts footprints per issue. A wave with no `files:` on any task prints
+`footprints: none (write them with wave-from-issues, or the daemon reads each issue's Files list at run)`.
+
+**At submit.** For each task without `files:` the daemon reads its issue's Files list via
 `gh issue view` (outside the daemon's serial queue, so a slow GitHub delays only that `run`) and
-compares it, together with the wave file's `files` hints, with the unfinished tasks of every other
-running wave. The issue lists are journaled on each `task_queued` as `data.issue_files` and are
-never merged into the wave definition, so they do not change the scheduler's same-file ordering. Each shared path journals an `alarm_raised` event with
-`data.alarm: "overlap_warning"` (paths and both wave/task ids) and prints a line in the `run`
-output:
+resolves it against the release branch's tree, read once per wave (no tree: the list as written,
+`guessed`). Those files are journaled on `task_queued` and never merged into the wave definition,
+so the definition stays as the file wrote it. An issue that cannot be read journals
+`alarm_raised { alarm: "footprint_unavailable", task, why }` and prints
+`warning: footprint unavailable for T3 (#412): issue #412 could not be read`. Each `task_queued`
+carries `issues`, `files`, `footprint` and `plan`; a version with a plan journals
+`wave_planned { clusters }` right after its tasks queue. The state carries `overlap_plan`,
+`tasks[].cluster` and the keys in `spec.tasks[]`; `volleyd status` prints one
+`plan: cluster A (planned): …` line per cluster under the header.
+
+A bundle runs as one task: one agent, one worktree and one PR for all its issues (see
+[bundles](#bundles) under "Spawning agents").
+
+**Where the rest lives.** The plan is the first of four pieces. At run time the cap holds a
+cluster to its plan and the churn monitor switches a churning cluster to `hold` or `train`
+([below](#at-run-time-the-cap-and-the-churn-monitor)); a cluster on `train` merges through
+[the merge train](#the-merge-train); the branch updates, re-reviews and trains overlap still
+causes are churn spawns, outside [the spawn budget](#spawn-budget), with the churn fuse as the
+backstop; and [the replay](#the-replay) measures the whole against a one-task-per-issue baseline.
+How to write issues whose Files lists plan well is the `/volley-issues` skill's "Planning a
+batch" section; the owner's view is [`docs/AUTOPILOT.md`](../../docs/AUTOPILOT.md#overlap-aware-waves).
+
+### At run time: the cap and the churn monitor
+
+**The cap.** A cluster capped in the plan (`strategy.cap`) runs at most that many members at once.
+A member holds one of its cluster's slots from admission (admitted, not spawned yet) through
+`implement`, the reviews and `fixup`; `merge_ready`, `done`, `cancelled`, an unadmitted `queued`
+task and one parked (`blocked`, `awaiting_decision`) before its implementer started hold none.
+Admission (`admit`, and `admitPlacing` before it places a task) skips a ready member whose cluster
+has no room and holds it with why, which is also the task's `why_waiting`:
+
+```
+cluster A: 4 in flight (i315, i317, i318, i322)
+```
+
+A task in no cluster is unaffected, and so are the tasks after a held one.
+
+**The churn monitor** (`autopilot/churn.ts`, pure) reads the journal each tick: per task, its
+branch updates (`stage_entered { rebase: true }`) and the reviews after one; per cluster, members
+gated (`merge_ready`) and in flight, and the merges and branch updates of the last 2 h
+(`churn_window_ms`). A cluster that churns anyway switches strategy:
+
+| To | When |
+|---|---|
+| `hold` | a live member updated its branch twice in the window (`churn_updates_hold`), or 3 are gated (`churn_gated_hold`) and fewer than 2 merged in the window (`churn_merges_floor`) |
+| `train` | otherwise, 2 are gated (`churn_gated_train`) |
+| `planned` | nothing is gated and no member updated its branch in the window |
+
+Each switch journals `cluster_strategy_changed { cluster, from, to, why }` (`from`/`to` name the
+plan's own strategy for `planned`) and sets the cluster's `state` in `overlap_plan`; a cluster
+switches at most once per 30 min (`cluster_strategy_min_interval_ms`), so it does not flap. On
+`hold` the cluster's cap is 1 and a gated member holds a slot too: queued members wait until the
+gated ones merge (`cluster A (hold): 1 in flight or gated (i315)`). On `train` the cap stays, and the
+merge queue forms [a merge train](#the-merge-train) from the cluster's gated PRs, its members
+first (with `autopilot.merge_train` off the state shows `train` and the queue merges them one at a
+time). `volleyd status` prints the state and the members in
+flight on each plan line: `plan: cluster A (hold; in flight: i315, i317): …`.
+
+Two more switches come from elsewhere: [the churn fuse](#spawn-budget) puts a cluster on `hold`
+when one member's churn spawns pass `churn_roles_multiple_max` × its pipeline roles (and opens
+`churn_exhausted` if it churns again), and a merge train whose own change stays red puts its
+members' clusters on `hold` ([failure](#the-merge-train)).
+
+### Overlap warnings
+
+At submit the daemon also compares each task's files (the wave file's, else the ones read from
+its issue) with the unfinished tasks of every other running wave. Each shared path journals an
+`alarm_raised` event with `data.alarm: "overlap_warning"` (paths and both wave/task ids) and
+prints a line in the `run` output:
 
 ```
 warning: overlap: w2/T4 and w1/T7 both touch packages/volleyd/src/daemon.ts
 ```
 
 Overlap is advisory only; nothing is refused.
+
+### Footprints
+
+`footprintOf(body, tree)` (`src/footprint.ts`, pure) resolves an issue's Files list against the
+repository tree (`readTree` reads it with `git ls-tree -r -l --full-tree <ref>`, read-only through
+the fence) into the files a task is expected to touch, their total size and a confidence, so a
+footprint is never silently empty or full of names that are not paths:
+
+- an entry that is a tree path resolves; a glob (`spec/schemas/*`) or a directory (`docs/`)
+  resolves to the tree paths it matches, and the glob stays in `files` for overlap matching;
+- a bare file name (`types.ts`) or a relative fragment (`helpers/pipeline-harness.ts`,
+  `src/dock/*`) resolves to the unique tree path ending with it inside the last resolved
+  entry's package (`packages/<pkg>/`), else the unique one in the repository; otherwise (no match, or
+  several) it is listed in `unresolved`. In the parser, a bare name beside a path in the same
+  bullet already lands in that path's directory (`config-defaults.ts, types.ts`);
+- an entry marked `(new)`, or under `changes/`, is accepted as a new file (0 bytes);
+- a token with no `/` and no known file extension (`github.slug`, `host.writeFile`,
+  `lease_pools.*.match`) is an identifier, not a file, and is dropped, unless it names a tree
+  file (`mosquitto.conf` resolves like any bare name).
+
+| Confidence | Meaning |
+|---|---|
+| `listed` | a Files section, every entry resolved or new |
+| `resolved` | a Files section, at least one entry resolved, some unresolved |
+| `guessed` | no Files section (or none of it resolved): every backticked token in the body that is a tree path |
+| `none` | nothing |
+
+`bytes` is the sum of the tree sizes of the resolved files. `sharedFiles(a, b, tree)`
+(`src/overlap.ts`) is the overlap test on two footprints: the paths they share, each glob or
+directory expanded against the tree.
 
 ---
 
@@ -1618,6 +1775,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `fleet.local_agents`, `fleet.fallback.*` | the next placement ([the supervisor's own machine as a fallback](#the-supervisors-own-machine-as-a-fallback)) | agents already on this machine keep running there; nothing is moved |
 | `autopilot.merge` | the next gate of a wave whose file has no `merge:` ([autopilot merging](#autopilot-merging)) | a gate already entered keeps the mode its evidence names until it is gated again |
 | `autopilot.merge_retry_max` | the next refused merge ([autopilot merging](#autopilot-merging)) | refusals already counted stand |
+| `autopilot.merge_transient_backoff_s` | the next transient refusal ([autopilot merging](#autopilot-merging)) | a `retry_at` already journaled stands |
 | `branch_update` | rebase steps started after the change | a step already running keeps the mode it started with (its brief, `.volley/rebase.md` and its verification agree) |
 | `agent_mcp`, `agent_mcp_allow` | spawns after the change | running agents keep the MCP servers they launched with |
 | `agent_auto_compact_pct` | spawns after the change | running agents keep the window they launched with |
@@ -1657,6 +1815,16 @@ A refusal releases the lock, revokes credentials minted for the attempt and neve
 The gate runs before credentials are minted, so a rejected brief costs nothing to undo. A
 refused spawn is never silent ([failures and retries](#spawn-failures-and-retries)); `volleyd
 spawn` retries at once. While the kill switch is engaged nothing is spawned.
+
+### Bundles
+
+A task with `issues: [310, 312]` (a bundle, see [Footprints and the overlap plan](#footprints-and-the-overlap-plan))
+gets one agent whose `ISSUE.md` holds every issue, under a `# Bundle: #310, #312` header with the
+plan's `why`, and whose brief names them all, asks for one `Closes #<n>` line per issue (GitHub
+closes only the first issue of a shared line) and one changelog fragment per issue; `agent.json`
+and `agent_spawned` carry `issues`. A verified PR body missing one of those lines steers the
+implementer once (`closes`), after which the PR is accepted and the fixup's `findings.md` names
+the lines still missing; the digest ships each issue, `#310 + #312 (one PR)`.
 
 ### Base ref
 
@@ -2143,8 +2311,8 @@ namespace.
 
 ### Spawn budget
 
-A wave's spawn budget counts every agent it spawns (retries and reviewers included). Its default
-is enough to finish with no retry at all plus headroom: the roles of every task's pipeline
+A wave's spawn budget counts its productive spawns (reviewers included), never its churn (below).
+Its default is enough to finish with no retry at all plus headroom: the roles of every task's pipeline
 (implement, each review, fixup: 4 for the default pipeline) plus 50% of that for retries (at
 least 2), or `spawn_budget_multiplier` × task count when that is more. A wave file's
 `spawn_budget:` overrides both. Exhaustion is never silent: a spawn the budget holds opens one
@@ -2157,6 +2325,39 @@ for one), so one raise lets every held spawn through. `raise by <n>` (or `raise 
 adds n spawns to the wave's budget (journaled with the answer, so it survives a restart) and the
 next tick spawns; `cancel` cancels the task (a wave-level one stops the wave); any other answer
 is refused (`BAD_ANSWER`).
+
+**Productive and churn spawns** (`src/spawn-class.ts`). A spawn is churn when it only pays for an
+overlap or a failure: a branch update (the `rebase` role), a merge train's (the `integrator`, and
+every role of the train's own task), a review round a branch update caused (the reviewers a rebase
+re-runs, and the fixup of that round), or a relaunch, respawn or retry of a role that already ran
+in its step (a relaunch, a respawn answer, a respawn after a restart, a launch after failed
+ones). Everything else is productive: each role's run in its pipeline, a fixup of findings and the
+review round after it included. The pipeline names the cause on the spawn it asks for, and the
+daemon journals a churn spawn `agent_spawned { churn: true, cause }` (`branch_update`, `rereview`,
+`train`, `retry`). Churn never spends the budget, never opens `spawn_budget_exhausted` and is
+never held by it; the hard ceiling and admission still hold every spawn. The wave state counts
+both, `spawns: { productive, churn, churn_by, budget }` and each task's `churn`, and `volleyd
+status` prints them under the header:
+
+```text
+  spawns: 52 productive / 156 budget · 141 churn (116 branch updates, 25 re-reviews)
+```
+
+The digest's `auto.churn` counts them by cause (`branch_updates`, `rereviews`, `retries`,
+`trains`), and its one-line push summary mentions churn only when there was any (`5 churn
+spawns (no budget)`).
+
+**The churn fuse.** Uncounted churn is monitored instead, beside
+[the churn monitor](#at-run-time-the-cap-and-the-churn-monitor)'s own switches. When a task in a
+cluster of the [overlap plan](#footprints-and-the-overlap-plan) has more churn spawns than `churn_roles_multiple_max` (3) × its pipeline roles, its cluster
+goes on `hold` (journaled `cluster_strategy_changed { churn }` naming the task: one member at a
+time). If the cluster is still on hold, or the churn monitor let the fuse's hold go since, and
+the task churns again, one task-level
+`churn_exhausted { cluster, churn, roles }` decision opens (`hold cluster` | `continue` |
+`cancel`; never a second while one is open). `hold cluster` puts the cluster back on hold if the
+churn monitor let it go meanwhile; `continue` keeps the fuse quiet until the task churns as much
+again; `cancel` cancels the task. Autopilot answers `hold cluster` once per task
+(`churn_exhausted/hold`, budget key `churn:<task>`) and escalates the next one to the owner.
 
 ### Retire and cleanup
 
@@ -3463,10 +3664,18 @@ role's run, so the spawn is retried on every tick until it goes through. A role 
 reaped (its LWT, past the reap grace) is handled like a `failed` one: retired, then a
 `respawn` / `cancel` decision.
 
-**Rebase rule.** Before the gate the release branch is fetched and compared with the head's
-merge-base. Moved → a `rebase` agent rebases; its new head must verify (CI green on it) and, if
-the rebase changed a file a reviewer flagged (`git diff --name-only <old> <new>`), only that
-reviewer runs again (then the fixup, if it finds anything), and the check repeats.
+**Rebase rule.** The gate verifies the task at the head its reviewers saw. Before it the release
+branch is fetched and compared with the head's merge-base, and the gate records how far behind
+the head is (the evidence's `release: { release_sha, behind }`, `behind` on the gate's
+`artifact_verified`) without updating it: a task behind is gated, enters `merge_ready` and the
+merge queue, and its `why_waiting` reads `gated 3 commits behind <release branch>; updated at its
+merge turn` while it queues. Only its merge turn brings it up to date ([The merge
+queue](#the-merge-queue)); under `merge: manual` the evidence's merge line says to update the
+branch (GitHub's Update branch, or a rebase) before merging. Two cases still update before the
+gate: a PR GitHub reports CONFLICTING (it gets no CI until it is updated, below) and a landed
+flake fix. The update step itself: a `rebase` agent rebases; its new head must verify (CI green
+on it) and, if the rebase changed a file a reviewer flagged (`git diff --name-only <old> <new>`),
+only that reviewer runs again (then the fixup, if it finds anything), and the check repeats.
 
 **`branch_update: rebase | merge`** (a tunable: `config.yaml`, `config_set` or a wave file's
 `config:`; default `rebase`) is how that step updates the branch. `rebase` is the above: rebase
@@ -3639,13 +3848,31 @@ In an unattended wave the gate is where work stalls: every merge waited for a pe
   head the task leaves the gate (`blocked`) and decision `merge_refused` asks `retry` (one more
   attempt, at the task's next turn in the merge queue), `manual` (this task goes back to the
   gate and a human merges it) or `cancel`. A new gated head starts the count again. `reason` is
-  what the refusal says: `behind` (out of date with or conflicting with the release branch, or
-  the release branch moved during the merge), `head_moved`, `retargeted`, `closed`, `draft`,
+  what the refusal says: `transient` (below), `behind` (out of date with or conflicting with the
+  release branch), `head_moved`, `retargeted`, `closed`, `draft`,
   `checks` (required checks, branch protection, reviews) or `unknown`. Only `behind`, `head_moved`,
   `retargeted`, `closed` and `draft` give up the merge turn; any other keeps the turn and the gated head, and the
   merge is tried again at the next up-to-date check. No refusal enters a
   branch update by itself: one runs only when the turn's rebase check counts the release branch's
   commits the head lacks (a failed `git fetch` or `git log` is a failed check, never "behind").
+- **Transient refusals (#445).** GitHub busy or unreachable is not GitHub refusing the change:
+  `Merge already in progress`, `Base branch was modified` (its mergeability race: the retry
+  merges, or reads a real `behind`), an `HTTP 5xx`, `Something went wrong`, a truncated JSON
+  answer, a secondary or API rate limit, abuse detection, and transport errors (`dial tcp`,
+  `i/o timeout`, `connection reset`, `TLS handshake timeout`, `unexpected EOF`) read as
+  `transient` (double-quoted check names are blanked first). A transient refusal never counts
+  toward `merge_retry_max`: the task keeps the merge turn and its place, and the merge is retried
+  on the `autopilot.merge_transient_backoff_s` ladder (default `[60, 120, 300, 600]`: attempt n
+  waits entry n), its alarm carrying `retry_at`, `wait_s` and `of`, the task's `why_waiting`
+  reading `GitHub refused the merge transiently (Merge already in progress); retrying in 2 min
+  (attempt 2 of 4)` and its queue entry `refused` with `retry_at`. Neither the turn's rebase
+  check nor the merge runs before `retry_at`; the PR is re-read meanwhile as at any gate, so a
+  PR someone else merged is done and a moved head invalidates the gate (and the ladder), never a
+  blind retry. One refusal more than the ladder has waits opens `merge_refused` with `reason:
+  transient`, `transient_attempts` and `since`; the `merge_refused/transient` row answers `retry`
+  (the ladder starts again) once per task (`autopilot.merge_transient_retry_max`, default 1),
+  so a refusal that outlasts the ladder twice reaches the owner. A new gated head or a
+  non-transient refusal ends the ladder.
 - **Drafts (#408).** A draft PR is not merge-ready, and its repository may skip heavy CI jobs on
   drafts. Verification marks a draft ready (`gh pr ready <n>`, the fence's only PR write besides
   the merge) once its CI is not red, journals `pr_marked_ready { pr, head, at }`, and holds the
@@ -3703,14 +3930,17 @@ one at a time, in order, and brings each up to date just before its merge
   the usual rebase step runs under the wave's `branch_update`, its agent pushes, CI runs on the
   new head, the gate checks it again and it merges. Only the front task is updated, after the
   merge before it: a 30-task wave does at most 29 updates, one at a time, never a storm, and the
-  tasks behind keep their gates and evidence meanwhile. **Use `branch_update: merge` for an
-  unattended wave**: it merges the release branch in with a normal push (no force-push, and the
-  history the reviewers saw stays).
+  tasks behind keep their gates and evidence meanwhile. That holds because a task is gated at its
+  reviewed head however far behind it is (an update before the gate raced the merges still to
+  come, so the task was behind again when it came back:
+  [#383](https://github.com/kryptek/volley/issues/383)).
+  **Use `branch_update: merge` for an unattended wave**: it merges the release branch in with a
+  normal push (no force-push, and the history the reviewers saw stays).
 - **Conflicts.** Resolving a conflict is the rebase (or merge) agent's job; its brief
   (`.volley/rebase.md`) says so. An agent that publishes `blocked` on a conflict it cannot
   resolve, or fails, while the task is queued opens decision `merge_conflict` (options
-  `respawn`, `manual`, `cancel`); during a rebase before the gate it is an ordinary
-  `agent_blocked`.
+  `respawn`, `manual`, `cancel`); during an update before the gate (a CONFLICTING PR, a landed
+  flake fix) it is an ordinary `agent_blocked`.
   Autopilot answers `respawn` once per task (`merge_conflict/respawn`, under `respawn_max`), then
   leaves it to the owner; `manual` takes the task out of the queue and leaves it at the gate for a
   person, and the turn passes to the next task.
@@ -3723,6 +3953,89 @@ one at a time, in order, and brings each up to date just before its merge
   commit (`merged_by_supervisor` carries `requested_by`), or with GitHub's refusal, and is refused
   while another task holds the release branch's turn (naming it: that task may be being brought
   up to date, which takes a rebase agent and a CI run).
+
+### The merge train
+
+The queue costs N−1 update rounds for N gated PRs, each one an update, a CI run and a new gate.
+With `autopilot.merge_train` on (the default) volleyd merges several gated PRs at once instead,
+preferring the members of one [overlap-plan cluster](#footprints-and-the-overlap-plan): it
+integrates their gated heads onto one branch, gates that once and merges it once with a merge
+commit, so every member PR reads as merged (SPEC §4.6.23; `src/autopilot/merge-train.ts` is the
+pure formation, `src/autopilot/merge.ts` the merge). The integrator's spawns are churn, outside
+[the spawn budget](#spawn-budget), and [the replay](#the-replay) measures what trains save. The pieces:
+
+- **Formation.** `formTrain(queues, inflight, waves, { size, enabled })` forms a train on a
+  release branch with no merge in flight (no turn holds its lock, no entry is `merging`, no train
+  forms or runs there) whenever at least two of its queued tasks qualify: at `merge_ready`, gated
+  at their current head, with a PR, and not handed to a human (`merge_manual`). It takes the
+  first up to `train_size_max` (4) of them from the front task's wave, in the order `nextToMerge`
+  would take them (queue order, a refused task that loses its place last), with the tasks of the
+  front task's overlap-plan cluster first. A single gated task takes the ordinary
+  turn (`nextToMerge`, unchanged; the driver asks `formTrain` first).
+- **Names.** A train is `train-<n>` (its synthetic task in the wave, n counting the wave's trains
+  from 1), integrated on the branch `volley/train/<wave>-t<n>`, and carries each member's
+  `{ wave, task, pr, head }`.
+- **In the queue.** While a train forms or runs, its members show `merging` in the queue (the
+  entry's `train` names it), and `nextToMerge` gives no ordinary turn on that release branch, to
+  a member or to a gated task outside the train: the train holds the branch.
+- **The fence.** The train's PR merges only with a `TrainToken` over `{ train, pr, head,
+  release_branch, members: [{ task, head }] }`, minted by `mintTrainToken` once the train's
+  evidence is written (checked by identity, like a `MergeToken`). It allows exactly `gh pr merge
+  <n> --merge --match-head-commit <head>` for its PR and head: a merge commit, never `--squash`
+  (and a `MergeToken` never allows `--merge`), never `--admin`, `--auto`, `--rebase` or
+  `--delete-branch`. `mergeTrain(exec, token, cwd?)` reads the PR first, as `mergePr` does, and
+  refuses one retargeted away from the release branch, whose head moved, that is closed or a
+  draft, without merging; a refusal GitHub makes is classified as any merge's.
+- **The train task.** The pipeline driver asks `formTrain` before the ordinary turn and forms the
+  train when its front task was gated behind the release branch (`gated_behind > 0`; one up to
+  date takes the ordinary turn): it locks the release branch under `<wave>/train-<n>`, reads the
+  release tip, and journals `train_started { train, tasks, heads, release_sha }` and `task_queued`
+  for the synthetic task `train-<n>` (`issue: 0`, `synthetic: true`, `title: "Train: #310, #312"`,
+  `train: { members }`), pipeline `[implement, merge_ready]`. The scheduler admits it ahead of
+  ordinary tasks, as a fixer, and places it like any task. The release lock is the train's from
+  `train_started` to `train_merged` / `train_failed`; `volleyd merge` of a member is refused
+  meanwhile, naming the train.
+- **The integrator.** The train's implement step runs the `integrator` role
+  (`briefs/integrator.md.tmpl`), whose `.volley/integrate.md` names the release branch and the
+  commit the train starts at, the train branch, and each member in merge order with its PR,
+  branch, gated head and issues. It cuts the train branch from that commit, `git merge --no-ff`s
+  each member at its gated head (never a rebase, a force-push or an amended member commit),
+  resolves conflicts keeping each PR's intent, runs the gates, pushes, and opens one PR against the
+  release branch titled `train: #310, #312` with one `Closes #<n>` line per member issue. It
+  publishes `result` type `integrate` `{ merged, conflicts: [{ pr, files }], touched }`, then
+  `done`.
+- **Verification.** The integrator's `done` is verified like an implementer's (the branch pushed,
+  the PR open against the release branch, CI on its head: the usual `ci_pending` / `ci_green`
+  hold), plus `probeTrainHead` (`git merge-base --is-ancestor`): every member's gated head must be
+  in the train head, and the head must descend from `release_sha`. A head that lacks a member
+  steers the integrator once, then a fixup on the train branch merges the missing members; one
+  still incomplete (or off its base) fails the train. A red head is classified and fixed up as
+  any task's, the fixup working on the train branch. Once green: if the integrator's `touched`
+  holds a file a member's reviewer flagged, those reviewer roles review the train head, their
+  `.volley/review.md` scoped to the resolution diff (`git show --remerge-diff`), and a blocking
+  finding gets one fixup; otherwise the gate journals `alarm_raised { alarm:
+  "train_reviews_skipped", why: "no conflict resolution touched a flagged file" }`. The gate writes
+  the train's evidence (`train`: members, heads, `release_sha`, conflicts, touched; the CI) and
+  mints the `TrainToken`; the merge is `mergeTrain`.
+- **Completion.** Merged: `train_merged { train, pr, merge_sha, tasks }`; each member journals
+  `merged_by_supervisor { task, pr, head, merge_sha, by, via: "train", train_pr }`, its merged
+  `artifact_verified`, `merge_dequeued { why: merged }` and `stage_entered done`; the train task
+  is `done`. Each member PR is read again: GitHub reports it `MERGED` once the merge contains its
+  head; any other state is `alarm_raised { alarm: "train_member_open", task, pr, train }`, and
+  volleyd never closes it.
+- **Failure.** An integrator `blocked` or `failed` on a member opens `merge_conflict { train }`
+  about that member (it never parks it), options `drop <member>`, `respawn`, `manual`, `cancel`.
+  Autopilot answers `drop <member>` (`merge_conflict/drop-from-train`, `respawn_max` per member
+  task; a second conflict of it is the owner's): `train_failed { dropped }`, and the next tick
+  forms a new train without it; the dropped member keeps its place in the queue and takes an
+  ordinary turn later. `manual` hands the member to a person and fails the train; `cancel` cancels
+  the train task, journaled `train_failed { why: cancelled }`. A train merge refused `behind`,
+  `head_moved`, `closed` or `retargeted` fails the train: `train_failed { why }`, its members
+  `queued` again, and the next tick forms anew from the new tip (a `transient` refusal keeps the
+  lock and retries on the backoff ladder, as any merge). A train whose own change is still red
+  after `autopilot.ci_fixup_max` CI fixups fails, and the overlap-plan clusters of its members are
+  set to `hold` (`cluster_strategy_changed`, why naming the train; see
+  [the churn monitor](#at-run-time-the-cap-and-the-churn-monitor)).
 
 ---
 
@@ -3743,12 +4056,18 @@ DENY (never, consent or not):
   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force)
 
-MERGE (only with a MergeToken, `mintMergeToken`, minted by the pipeline's gate after the
-  evidence package is written, checked by identity like consent tokens): exactly
-    gh pr merge <n> --squash --match-head-commit <sha40> [--delete-branch]
-  with <n> the token's PR and <sha40> its gated head (GitHub refuses the merge if the head
-  moved since the gate). Never --admin, --auto, --merge or --rebase; the token unlocks nothing
-  else (git merge, push and rebase stay denied).
+MERGE (only with a token, checked by identity like consent tokens; either unlocks nothing else:
+  git merge, push and rebase stay denied). Never --admin, --auto or --rebase.
+  - a MergeToken (`mintMergeToken`, minted by the pipeline's gate after the evidence package is
+    written): exactly
+      gh pr merge <n> --squash --match-head-commit <sha40> [--delete-branch]
+    with <n> the token's PR and <sha40> its gated head (GitHub refuses the merge if the head
+    moved since the gate). Never --merge.
+  - a TrainToken (`mintTrainToken`, minted for a merge train after the train's evidence is
+    written): exactly
+      gh pr merge <n> --merge --match-head-commit <sha40>
+    with <n> the train's PR and <sha40> its gated head: a merge commit, so the member PRs, whose
+    heads it contains, read as merged. Never --squash.
 
 CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
 retire for the retired agent's own workspace only):
@@ -3756,7 +4075,7 @@ retire for the retired agent's own workspace only):
 
 ALLOW (program by bare name only — never a path):
   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
-    branch --list | branch --track <b> <remote>/<b> | merge-base | show
+    branch --list | branch --track <b> <remote>/<b> | merge-base | show | ls-tree
     worktree add needs -b <new branch> or --detach (never checks out an existing branch), or
     -B only to re-create an agent branch (`<wave>/<task>-<role>-<n>`, worktree.ts
     AGENT_BRANCH — never a release or any other branch); the new branch is never main/master
@@ -3896,8 +4215,9 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
     (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
-    rebase.md, decisions.md, retired.json — spelled exactly, directly inside `.volley/`, so no
-    write there is a git config, HEAD, gitfile or hook, or a case variant of launch.sh), an
+    rebase.md, integrate.md, decisions.md, retired.json — spelled exactly, directly inside
+    `.volley/`, so no write there is a git config, HEAD, gitfile or hook, or a case variant of
+    launch.sh), an
     absolute path ending in `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`.
     A `.volley/launch.sh` (what the tmux session runs) is written whole, never appended, and
     its content must be exactly `renderLaunchScript` of valid values for that worktree
@@ -4081,8 +4401,9 @@ The pieces, all under `test/`:
   do not touch its file, and the release branch, until a merged commit fixes the file.
 - `helpers/fake-agents.ts`: the fleet. Every launch on the fake host registers the way the MCP
   server and the hooks do; on the next step it narrates, plays its role in the world (implementer:
-  pushes and opens the PR, the flake's fixer fixes the file; reviewers: the review result; fixup:
-  pushes; rebase: pushes the rebased head; release: the stage result) and publishes `done`.
+  commits its task's footprint, or one file of its own, pushes and opens the PR, the flake's fixer
+  fixes the file; reviewers: the review result; fixup: pushes; rebase: pushes the rebased head;
+  release: the stage result) and publishes `done`.
 - `helpers/soak-env.ts`: the daemon, host, world, fleet and owner (a coordinator name), and
   `step()`: the fleet acts, the daemon consumes it, 5 s of wave time pass, the daemon ticks.
 - `soak/scenario.ts`: the faults, as data picked from `SOAK_SEED`: the flake, one stalled
@@ -4113,3 +4434,46 @@ reported, non-gating step.
 
 A bug the soak finds in the daemon is fixed in the daemon, under its own issue; the soak itself
 only changes when the harness (timing, the world's fidelity) is what is wrong.
+
+### The replay
+
+`test/soak/replay.test.ts` replays the dogfood batch (the 26 issues of
+`test/fixtures/replay/dogfood-26.json`, each issue's Files list resolved against
+`test/fixtures/replay/tree.json` by `footprintOf`) through the same harness, twice, with no
+injected faults. The world's tree starts with the fixture's paths, and each task's implementer
+commits every file of its footprint (the fixup touches the first), so tasks that share a file
+conflict when one is updated onto the other; the world records each conflict, and the fake
+rebase resolves it.
+
+- **baseline**: 26 tasks, one per issue, no `after`, `config: { autopilot: { merge_train: false } }`,
+  and `VOLLEYD_REPLAY_BASELINE=1`, which brings back the gate as it was before #383: a task behind
+  the release branch is updated before its gate instead of at its merge turn. The variable is
+  test-only. The pipeline's gate-or-update choice is the only place that reads it, and a test
+  checks that.
+- **epic**: the overlap planner's wave (`planWave`: bundles, chains and cluster caps; see
+  [Footprints and the overlap plan](#footprints-and-the-overlap-plan)), with
+  [the merge train](#the-merge-train) on.
+
+Both waves must reach `wave_complete` with every task `done`. The test measures each wave's
+journal:
+
+- `update_rounds`: branch updates (`stage_entered { rebase: true }`) plus integrator spawns.
+- `merge_rounds`: merges outside a train (`merged_by_supervisor`) plus `train_merged`.
+- `churn_budget_decisions`: `spawn_budget_exhausted` decisions opened while a churn spawn was held
+  (the epic must have none: churn is outside [the spawn budget](#spawn-budget)).
+- `spawns`.
+
+It asserts the epic's targets: `update_rounds` ≤ 0.3 × the baseline's, `merge_rounds` ≤ 0.5 × the
+baseline's, no churn budget decisions, and at most 16 planned tasks. It prints a baseline-vs-epic
+table on every run. CI runs it in the `soak` job after the 8-task soak, as a gating step with
+`SOAK_SEED=1` and its own 25-minute timeout. It is opt-in (`REPLAY=1`), so a plain
+`bun run test:soak` skips it:
+
+```sh
+cd packages/volleyd
+REPLAY=1 SOAK_SEED=1 bun run test:soak -- replay
+```
+
+To regenerate the fixture from the repository's issues and tree (by hand; the output is
+committed), run `bun scripts/replay-fixture.ts [--ref origin/main]` in `packages/volleyd`. It needs
+`gh` signed in.

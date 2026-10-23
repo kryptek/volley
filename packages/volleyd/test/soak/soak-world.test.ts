@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { mergeArgv } from "../../src/autopilot/merge";
-import { mintMergeToken } from "../../src/fence";
+import { mergeArgv, trainMergeArgv } from "../../src/autopilot/merge";
+import { mintMergeToken, mintTrainToken } from "../../src/fence";
 import { fakeExec } from "../helpers/fake-exec";
 import { HEAD_MOVED_STDERR, soakWorld } from "../helpers/soak-world";
 
@@ -89,6 +89,67 @@ describe("the soak world", () => {
     const show = await run("git", "-C", REPO, "show", "--format=", w.tip());
     const whole = await run("git", "-C", REPO, "diff", before, a.headRefOid);
     expect(show.stdout).toBe(whole.stdout);
+  });
+
+  it("a merge train's --merge: a merge commit on the tip, and every member PR it contains reads MERGED", async () => {
+    const { w, run } = world({ rate: 0 });
+    const a = pr(w, "A");
+    const b = pr(w, "B");
+    const c = pr(w, "C");
+    const before = w.tip();
+    // The integrator: the train branch cut from the tip, A and B merged in with --no-ff.
+    const t = w.merge(w.merge(before, a.headRefOid, "Merge A"), b.headRefOid, "Merge B");
+    w.push("volley/train/soak-t1", t);
+    const train = w.openPr("volley/train/soak-t1", "train: #1, #2");
+    const token = mintTrainToken({
+      train: "train-1",
+      pr: train.number,
+      head: t,
+      release_branch: RELEASE,
+      members: [
+        { task: "A", head: a.headRefOid },
+        { task: "B", head: b.headRefOid },
+      ],
+    });
+    const fx = fakeExec().on([], (argv, opts) => w.exec(argv, opts));
+    expect((await fx.exec(trainMergeArgv(token), { train: token })).code).toBe(0);
+    expect(w.get(w.tip()).parents).toEqual([before, t]);
+    expect(train.state).toBe("MERGED");
+    for (const m of [a, b]) {
+      expect(m.state).toBe("MERGED");
+      const view = JSON.parse(
+        (await run("gh", "pr", "view", String(m.number), "--json", "state,mergeCommit")).stdout,
+      );
+      expect(view).toMatchObject({ state: "MERGED", mergeCommit: { oid: w.tip() } });
+    }
+    expect(c.state).toBe("OPEN");
+    expect(w.isAncestor(a.headRefOid, w.tip())).toBe(true);
+    expect(w.merges.map((m) => m.pr)).toEqual([train.number]);
+  });
+
+  it("two tasks touching one file conflict at the second's update: the rebase resolves it, the world records the file", () => {
+    const w = soakWorld({
+      repo: REPO,
+      release_branch: RELEASE,
+      seed: 1,
+      tree: { "src/shared.ts": 100, "src/a.ts": 10 },
+    });
+    // The tree's paths are on the root, so a footprint names files that exist.
+    expect(Object.keys(w.get(w.root).files)).toEqual(
+      expect.arrayContaining(["src/shared.ts", "src/a.ts"]),
+    );
+    const base = w.tip();
+    const b = w.commit(base, { "src/shared.ts": "B-1" }, "feat: B");
+    w.pushRelease({ "src/shared.ts": "A-1", "src/a.ts": "A-1" }, "feat: A (#1)");
+    expect(w.conflicts).toEqual([]);
+    const updated = w.rebase(b, w.tip(), "feat: B");
+    expect(w.conflicts).toEqual([{ head: b, onto: w.tip(), files: ["src/shared.ts"] }]);
+    // Resolved: B's side of the shared file, A's other change kept.
+    expect(w.get(updated).files).toMatchObject({ "src/shared.ts": "B-1", "src/a.ts": "A-1" });
+    // A disjoint update records nothing.
+    const c = w.commit(base, { "src/c.ts": "C-1" }, "feat: C");
+    w.rebase(c, w.tip(), "feat: C");
+    expect(w.conflicts).toHaveLength(1);
   });
 
   it("--match-head-commit with a stale head refuses, and nothing moves", async () => {

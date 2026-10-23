@@ -1,0 +1,22 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-23T09:00:00.000Z",
+  "channel": "_waves/events",
+  "type": "train_failed",
+  "payload": {
+    "wave": "w1",
+    "seq": 180,
+    "at": "2026-10-23T09:00:00.000Z",
+    "task": "train-1",
+    "data": {
+      "train": "train-1",
+      "why": "CI red on the train's head: packages/volleyd test shard 2/4",
+      "tasks": [
+        "T1",
+        "T2",
+        "T4"
+      ]
+    }
+  }
+}

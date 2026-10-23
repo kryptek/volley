@@ -10,6 +10,7 @@ import {
   nudgeText,
   parseFilesSection,
   parsePrFiles,
+  sharedFiles,
 } from "../src/overlap";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { NO_PRESSURE, NS } from "./helpers/daemon-env";
@@ -49,8 +50,46 @@ describe("parseFilesSection", () => {
     ]);
   });
 
+  it("an unclosed parenthesis does not swallow the commas after it", () => {
+    expect(
+      parseFilesSection("## Files\n\n- packages/a/src/x.ts (see note, packages/a/src/types.ts\n"),
+    ).toEqual(["packages/a/src/types.ts"]);
+  });
+
   it("returns [] when the body has no Files section", () => {
     expect(parseFilesSection("# Title\n\nJust prose mentioning `a/b.ts`.\n")).toEqual([]);
+  });
+});
+
+describe("sharedFiles", () => {
+  const tree = {
+    "spec/schemas/a.schema.json": 5,
+    "spec/schemas/b.schema.json": 7,
+    "spec/SPEC.md": 9,
+    "docs/x.md": 1,
+  };
+
+  it("expands a glob on one side against the tree", () => {
+    expect(
+      sharedFiles(["spec/schemas/*"], ["spec/schemas/b.schema.json", "docs/x.md"], tree),
+    ).toEqual(["spec/schemas/b.schema.json"]);
+  });
+
+  it("two globs share the tree paths both match", () => {
+    expect(sharedFiles(["spec/schemas/*"], ["spec/schemas/a*"], tree)).toEqual([
+      "spec/schemas/a.schema.json",
+    ]);
+  });
+
+  it("a directory matches the paths under it; disjoint lists share nothing", () => {
+    expect(sharedFiles(["spec/"], ["spec/SPEC.md"], tree)).toEqual(["spec/SPEC.md"]);
+    expect(sharedFiles(["docs/x.md"], ["spec/SPEC.md"], tree)).toEqual([]);
+  });
+
+  it("a path not in the tree (a new file) still matches itself", () => {
+    expect(sharedFiles(["changes/1.fixed.md"], ["changes/1.fixed.md"], tree)).toEqual([
+      "changes/1.fixed.md",
+    ]);
   });
 });
 
@@ -153,10 +192,9 @@ tasks:
     // definition (whose `files` drive the scheduler's same-file ordering).
     expect(daemon.record("w2")?.wave?.tasks.Y?.files).toEqual([]);
     const queued = daemon.journalEvents("w2").find((e) => e.type === "task_queued");
-    expect(queued?.data.issue_files).toEqual([
-      "packages/widget/src/registry.ts",
-      "docs/registry.md",
-    ]);
+    // No tree at /path/to/example-repo: the Files list as written, guessed (SPEC §4.6.22).
+    expect(queued?.data.files).toEqual(["packages/widget/src/registry.ts", "docs/registry.md"]);
+    expect(queued?.data.footprint).toEqual({ confidence: "guessed" });
     const submitted = daemon.journalEvents("w2").find((e) => e.type === "wave_submitted");
     expect(
       (submitted?.data.wave as { tasks: Record<string, { files: string[] }> }).tasks.Y?.files,
