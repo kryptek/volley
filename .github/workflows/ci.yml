@@ -14,7 +14,8 @@ on:
 
 # A full run is every push (main, release/**), the nightly, a release PR (its head is release/**,
 # or its title starts `release:`) and a PR labelled `ci:full`. Every other PR runs the newest bun
-# only and the 8-task soak: the jobs below spell the condition out (a matrix cannot read `env`).
+# only and the 8-task soak: the jobs below spell the condition out (a matrix cannot read `env`);
+# its three copies (test, test-volleyd, soak-full) must stay identical.
 jobs:
   validate-schemas:
     name: Schema validation
@@ -93,6 +94,7 @@ jobs:
       matrix:
         # Every bun in engines.bun on a full run: a newer bun can break the suite without anything
         # else changing. Other PRs run the newest only.
+        # Full-run condition: keep in sync with the other copies (test, test-volleyd, soak-full).
         bun-version: ${{ fromJSON((github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || startsWith(github.event.pull_request.title, 'release:') || contains(github.event.pull_request.labels.*.name, 'ci:full')) && '["1.3", "1.4"]' || '["1.4"]') }}
     steps:
       - uses: actions/checkout@v4
@@ -117,6 +119,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
+        # Full-run condition: keep in sync with the other copies (test, test-volleyd, soak-full).
         bun-version: ${{ fromJSON((github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || startsWith(github.event.pull_request.title, 'release:') || contains(github.event.pull_request.labels.*.name, 'ci:full')) && '["1.3", "1.4"]' || '["1.4"]') }}
     steps:
       - uses: actions/checkout@v4
@@ -161,6 +164,7 @@ jobs:
     # and spending rereview_max) is fixed: on some runs it leaves one task escalated. Drop
     # continue-on-error then. About 10 minutes, so only on full runs (see the top of this file).
     name: Soak (simulated, 32 tasks, reported until #269)
+    # Full-run condition: keep in sync with the other copies (test, test-volleyd, soak-full).
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || startsWith(github.event.pull_request.title, 'release:') || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-latest
     timeout-minutes: 30

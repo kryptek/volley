@@ -181,4 +181,21 @@ describe("the CLI", () => {
     expect(Object.keys(JSON.parse(text))).toEqual(["test/a.test.ts", "test/b.test.ts"]);
     expect(JSON.parse(text)).toEqual({ "test/a.test.ts": 0.01, "test/b.test.ts": 2.35 });
   });
+
+  test("`timings` merges a partial report: files it lacks keep their time, deleted files drop", () => {
+    const dir = tempDir("vly-shards-");
+    mkdirSync(join(dir, "test"), { recursive: true });
+    for (const f of ["a", "b"]) writeFileSync(join(dir, "test", `${f}.test.ts`), "");
+    writeFileSync(
+      join(dir, "test", "timings.json"),
+      JSON.stringify({ "test/a.test.ts": 5, "test/b.test.ts": 7, "test/gone.test.ts": 9 }),
+    );
+    const xml = join(dir, "junit.xml");
+    writeFileSync(
+      xml,
+      `<testsuites><testcase name="b" time="1.5" file="test/b.test.ts" /></testsuites>`,
+    );
+    expect(run(["timings", xml, "--dir", dir]).code).toBe(0);
+    expect(readTimings(dir)).toEqual({ "test/a.test.ts": 5, "test/b.test.ts": 1.5 });
+  });
 });

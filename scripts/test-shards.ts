@@ -129,13 +129,24 @@ function parseFlags(rest: string[]): Flags | undefined {
   return flags;
 }
 
-/** `timings`: the junit report's per-file seconds, rounded to 0.01 s, into test/timings.json. */
+/**
+ * `timings`: the junit report's per-file seconds, rounded to 0.01 s, merged into
+ * test/timings.json. A file the report lacks (one shard's report, a `-t` run) keeps its time;
+ * a file that no longer exists drops out.
+ */
 function writeTimings(junit: string, dir: string): number {
   const raw = parseJunit(readFileSync(junit, "utf8"));
-  const rounded: Record<string, number> = {};
-  for (const file of Object.keys(raw).sort()) {
-    rounded[file] = Math.max(0.01, Math.round((raw[file] ?? 0) * 100) / 100);
+  const existing = readTimings(dir);
+  const merged: Record<string, number> = {};
+  for (const file of listTestFiles(dir)) {
+    const time = existing[file];
+    if (time !== undefined) merged[file] = time;
   }
+  for (const [file, seconds] of Object.entries(raw)) {
+    merged[file] = Math.max(0.01, Math.round(seconds * 100) / 100);
+  }
+  const rounded: Record<string, number> = {};
+  for (const file of Object.keys(merged).sort()) rounded[file] = merged[file] ?? 0.01;
   writeFileSync(join(dir, TIMINGS), `${JSON.stringify(rounded, null, 2)}\n`);
   return 0;
 }
