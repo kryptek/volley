@@ -43,6 +43,10 @@ afterEach(async () => {
 
 describe("volleyd daemon + control channel", () => {
   it("registers as volleyd with a live retained status and registry entry", async () => {
+    // On a broker volleyd has never used: the startup probe finds no status at all.
+    await t.cleanup();
+    t = await makeDaemonEnv({ neverStarted: true });
+    expect(await t.retained(`volley/${NS}/volleyd/status`)).toBeNull();
     await t.start();
     const status = (await t.retained(`volley/${NS}/volleyd/status`)) as { type: string };
     expect(status.type).toBe("working");

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { VolleyBroker } from "volley-mcp/broker";
+import { buildEnvelope } from "volley-mcp/envelope";
 import { CONFIG_DEFAULTS } from "../../src/config-defaults";
 import { Daemon, type DaemonOptions, type PressureSource } from "../../src/daemon";
 import { type TestBroker, startTestBroker } from "./aedes-broker";
@@ -54,7 +55,16 @@ export interface DaemonEnv {
 }
 
 export async function makeDaemonEnv(
-  o: { broker?: Parameters<typeof startTestBroker>[0] } = {},
+  o: {
+    broker?: Parameters<typeof startTestBroker>[0];
+    /**
+     * Start from a broker volleyd has never used: no retained status, so the first start's
+     * already-running probe waits out its whole `probe_ms`. By default the broker holds the
+     * `done` status a cleanly stopped volleyd leaves (the restart case), which the probe reads
+     * at once: that wait, paid by every daemon test, was most of the suite's time.
+     */
+    neverStarted?: boolean;
+  } = {},
 ): Promise<DaemonEnv> {
   const broker = await startTestBroker(o.broker);
   const home = tempDir("volleyd-home-");
@@ -75,6 +85,19 @@ export async function makeDaemonEnv(
   });
   const reader = new VolleyBroker();
   await reader.connect({ url: broker.url, agentId: "test-reader" });
+  if (o.neverStarted !== true) {
+    const stopped = buildEnvelope({
+      agentId: "volleyd",
+      parentId: null,
+      channel: "status",
+      type: "done",
+      payload: { reason: "shutdown" },
+    });
+    await reader.publish(`volley/${NS}/volleyd/status`, JSON.stringify(stopped), {
+      qos: 1,
+      retain: true,
+    });
+  }
   const retained = async (topic: string): Promise<unknown> => {
     const raw = await reader.queryRetained(topic, 500);
     return raw === null || raw === "" ? null : JSON.parse(raw);
