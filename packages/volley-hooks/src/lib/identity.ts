@@ -11,7 +11,10 @@ import { writeFileAtomic } from "./seq";
 
 /** Who the hooks speak for, and where they keep their state files. */
 export interface HookIdentity {
-  /** `agent`: `.volley/agent.json` (SPEC §6.5). `coordinator`: a registry entry matched by cwd. */
+  /**
+   * `agent`: `.volley/agent.json` (SPEC §6.5). `coordinator`: a registry entry matched by cwd
+   * and, when known, the session's cmux surface.
+   */
   mode: "agent" | "coordinator";
   agentId: string;
   namespace: string;
@@ -74,12 +77,26 @@ export function hooksStateRoot(env: Env): string {
   return env.VOLLEY_HOOKS_STATE_DIR ?? join(homedir(), ".volley", "hooks");
 }
 
-/** Per-project state directory for a coordinator session (its cwd is a user repo: keep out). */
-export function coordinatorStateDir(dir: string, env: Env): string {
-  return join(
-    hooksStateRoot(env),
-    createHash("sha256").update(canonical(dir)).digest("hex").slice(0, 16),
-  );
+/**
+ * Which session a coordinator hook runs in: the hook input's `session_id`, else the cmux
+ * surface (`CMUX_SURFACE_ID`), else null (one key per directory, as before). Several sessions
+ * can share a cwd; each keeps its own identity and state under its own key.
+ */
+export function sessionKey(input: { session_id?: unknown }, env: Env): string | null {
+  if (typeof input.session_id === "string" && input.session_id !== "")
+    return `session:${input.session_id}`;
+  const surface = env.CMUX_SURFACE_ID;
+  return surface !== undefined && surface !== "" ? `surface:${surface}` : null;
+}
+
+/**
+ * Per-session state directory for a coordinator session (its cwd is a user repo: keep out):
+ * keyed by the directory and `key` (`sessionKey`), or by the directory alone without one.
+ */
+export function coordinatorStateDir(dir: string, env: Env, key: string | null = null): string {
+  const h = createHash("sha256").update(canonical(dir));
+  if (key !== null) h.update(`\0${key}`);
+  return join(hooksStateRoot(env), h.digest("hex").slice(0, 16));
 }
 
 function canonical(dir: string): string {
@@ -106,6 +123,8 @@ interface CachedIdentity {
   agent_id: string | null;
   namespace?: string;
   parent_id?: string | null;
+  /** On a miss: the entry this session resolved before, still preferred when it reappears. */
+  pinned?: string;
   fetched_at: number;
 }
 
@@ -122,6 +141,8 @@ export interface RegistryCandidate {
   parentId: string | null;
   startedAt: string;
   status: string | null;
+  /** The cmux surface the entry's MCP server runs in (SPEC §6.2), when it recorded one. */
+  surface?: string;
 }
 
 /** Reads the registry entries for `dir`, newest `started_at` first (it opens a socket). */
@@ -137,7 +158,7 @@ export function registryCandidates(records: RegistryRecord[], dir: string): Regi
   for (const r of records) {
     const env = parseEnvelope(r.payload);
     if (env === null || env.type !== "registered") continue;
-    const p = env.payload as { cwd?: unknown; started_at?: unknown };
+    const p = env.payload as { cwd?: unknown; started_at?: unknown; surface?: unknown };
     if (typeof p.cwd !== "string" || canonical(p.cwd) !== want) continue;
     if (!isValidAgentId(env.agent_id)) continue;
     const ns = env.namespace ?? "default";
@@ -148,27 +169,63 @@ export function registryCandidates(records: RegistryRecord[], dir: string): Regi
       parentId: env.parent_id,
       startedAt: typeof p.started_at === "string" ? p.started_at : "",
       status: null,
+      ...(typeof p.surface === "string" && p.surface !== "" ? { surface: p.surface } : {}),
     });
   }
   return out.sort((a, b) => (a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0));
 }
 
 /**
- * Coordinator identity: the newest registry entry for `dir` whose agent is not gone (status
- * `done`/`failed`/`reaped`). The result — a hit or a miss, including an unreachable broker —
- * is cached in the state directory for 60 s, so a directory with no coordinator costs one
- * lookup a minute. With `notBefore` (SessionStart at startup), an entry older than that is
- * a previous session: look again a few times for this session's own entry (its MCP server
- * starts concurrently), and if none appears return null without caching.
+ * The entry a session's hooks speak for, among the live `candidates` (newest first). Inside
+ * cmux (`CMUX_SURFACE_ID`), the entry recorded from this surface; an entry recorded from
+ * another surface is another session's and never adopted. Then the entry this session
+ * resolved before (`pinned`), so a session that registered first keeps its own entry after a
+ * second session in the same cwd registers. Else the newest.
+ */
+export function pickCandidate(
+  candidates: RegistryCandidate[],
+  env: Env,
+  pinned: string | null,
+): RegistryCandidate | null {
+  const surface = env.CMUX_SURFACE_ID;
+  const mine =
+    surface === undefined || surface === ""
+      ? candidates
+      : candidates.filter((c) => c.surface === undefined || c.surface === surface);
+  return (
+    (surface !== undefined && surface !== ""
+      ? mine.find((c) => c.surface === surface)
+      : undefined) ??
+    mine.find((c) => c.agentId === pinned) ??
+    mine[0] ??
+    null
+  );
+}
+
+/**
+ * Coordinator identity: this session's registry entry for `dir` (`pickCandidate`) whose agent
+ * is not gone (status `done`/`failed`/`reaped`). State lives under `opts.sessionKey`
+ * (`coordinatorStateDir`), so sessions sharing a cwd never share it. The result — a hit or
+ * a miss, including an unreachable broker — is cached in the state directory for 60 s, so a
+ * directory with no coordinator costs one lookup a minute. With `notBefore` (SessionStart at
+ * startup), an entry older than that is a previous session: look again a few times for this
+ * session's own entry (its MCP server starts concurrently), and if none appears return null
+ * without caching.
  */
 export async function resolveCoordinatorIdentity(
   dir: string,
   env: Env,
   lookup: RegistryLookup,
-  opts: { refresh?: boolean; now?: () => number; notBefore?: number; retryDelayMs?: number } = {},
+  opts: {
+    refresh?: boolean;
+    now?: () => number;
+    notBefore?: number;
+    retryDelayMs?: number;
+    sessionKey?: string | null;
+  } = {},
 ): Promise<HookIdentity | null> {
   const now = opts.now ?? Date.now;
-  const stateDir = coordinatorStateDir(dir, env);
+  const stateDir = coordinatorStateDir(dir, env, opts.sessionKey ?? null);
   const brokerUrl = coordinatorBrokerUrl(env);
   const cachePath = join(stateDir, "identity.json");
   const make = (c: { agent_id: string; namespace: string; parent_id: string | null }) => ({
@@ -181,9 +238,12 @@ export async function resolveCoordinatorIdentity(
     stateDir,
   });
 
-  if (opts.refresh !== true) {
-    try {
-      const cached = JSON.parse(readFileSync(cachePath, "utf-8")) as CachedIdentity;
+  let pinned: string | null = null;
+  try {
+    const cached = JSON.parse(readFileSync(cachePath, "utf-8")) as CachedIdentity;
+    const last = cached.agent_id ?? cached.pinned;
+    if (typeof last === "string" && isValidAgentId(last)) pinned = last;
+    if (opts.refresh !== true) {
       if (now() - cached.fetched_at < IDENTITY_TTL_MS) {
         if (cached.agent_id === null) return null;
         if (isValidAgentId(cached.agent_id) && typeof cached.namespace === "string") {
@@ -194,9 +254,9 @@ export async function resolveCoordinatorIdentity(
           });
         }
       }
-    } catch {
-      // no usable cache
     }
+  } catch {
+    // no usable cache
   }
 
   const attempts = opts.notBefore === undefined ? 1 : STARTUP_ATTEMPTS;
@@ -209,12 +269,15 @@ export async function resolveCoordinatorIdentity(
       if (isAuthFailed(e)) throw e;
       candidates = [];
     }
-    const best = candidates.find((c) => c.status === null || !GONE.has(c.status)) ?? null;
-    const stale =
-      best !== null &&
-      opts.notBefore !== undefined &&
-      !(Date.parse(best.startedAt) >= opts.notBefore);
-    if (best !== null && !stale) {
+    const notBefore = opts.notBefore;
+    // At startup an entry older than the session is a previous session's, never this one's.
+    const eligible = candidates.filter(
+      (c) =>
+        (c.status === null || !GONE.has(c.status)) &&
+        (notBefore === undefined || Date.parse(c.startedAt) >= notBefore),
+    );
+    const best = pickCandidate(eligible, env, pinned);
+    if (best !== null) {
       const entry = {
         agent_id: best.agentId,
         namespace: best.namespace,
@@ -225,8 +288,12 @@ export async function resolveCoordinatorIdentity(
     }
     // Cache the miss, unless this is startup in a directory sessions have registered from:
     // this session's own entry may only be moments away.
-    if (candidates.length === 0 || opts.notBefore === undefined) {
-      const miss: CachedIdentity = { agent_id: null, fetched_at: now() };
+    if (pickCandidate(candidates, env, null) === null || notBefore === undefined) {
+      const miss: CachedIdentity = {
+        agent_id: null,
+        ...(pinned !== null ? { pinned } : {}),
+        fetched_at: now(),
+      };
       writeFileAtomic(cachePath, `${JSON.stringify(miss)}\n`);
       return null;
     }

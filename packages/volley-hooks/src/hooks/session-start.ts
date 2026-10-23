@@ -68,7 +68,7 @@ export async function handle(ctx: HookContext): Promise<string | null> {
 
     const fields = registryFields(identity, ctx.env);
     // Remembered for the drain hooks, which put them back after the MCP server's own register.
-    writeRegistryFields(identity.stateDir, fields);
+    writeRegistryFields(identity.stateDir, fields, ctx.env);
     await session.republishRegistry(model, fields);
 
     const statusTopic = session.topic("status");

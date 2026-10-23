@@ -46,6 +46,23 @@ describe("startLifecycle", () => {
     await state.broker.disconnect();
   });
 
+  it("auto-register records the server's pid, and its cmux surface when it has one (#392)", async () => {
+    const plain = await startLifecycle(cfg(tb, "life-pid1"));
+    const bare = JSON.parse(
+      (await plain.broker.queryRetained("volley/_system/registry/life-pid1", 1000)) ?? "{}",
+    );
+    expect(bare.payload.pid).toBe(process.pid);
+    expect(bare.payload).not.toHaveProperty("surface");
+    await plain.broker.disconnect();
+
+    const state = await startLifecycle({ ...cfg(tb, "life-surf"), surface: "surface-a-1" });
+    const reg = JSON.parse(
+      (await state.broker.queryRetained("volley/_system/registry/life-surf", 1000)) ?? "{}",
+    );
+    expect(reg.payload).toMatchObject({ pid: process.pid, surface: "surface-a-1" });
+    await state.broker.disconnect();
+  });
+
   it("publishes spawning before auto-register (sequence is observable to a subscriber attached pre-startLifecycle)", async () => {
     const observer = await mqtt.connectAsync(tb.url, { reconnectPeriod: 0 });
     const seen: string[] = [];

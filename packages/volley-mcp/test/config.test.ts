@@ -309,3 +309,12 @@ describe("VOLLEY_COORDINATOR", () => {
     expect(loadConfig({ VOLLEY_COORDINATOR: "coord-main" }, cwd)).not.toHaveProperty("coordinator");
   });
 });
+
+describe("CMUX_SURFACE_ID", () => {
+  it("is carried as the session's cmux surface (#392); unset, blank or multi-line is none", () => {
+    expect(loadConfig({ CMUX_SURFACE_ID: "surface-a-1" }, "/x").surface).toBe("surface-a-1");
+    expect(loadConfig({}, "/x")).not.toHaveProperty("surface");
+    expect(loadConfig({ CMUX_SURFACE_ID: "" }, "/x")).not.toHaveProperty("surface");
+    expect(loadConfig({ CMUX_SURFACE_ID: "a\nb" }, "/x")).not.toHaveProperty("surface");
+  });
+});

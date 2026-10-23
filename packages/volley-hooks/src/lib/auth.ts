@@ -35,6 +35,24 @@ export class CredentialsError extends VolleyError {
   }
 }
 
+/**
+ * Coordinator hooks on a machine never set up as a coordinator: no `VOLLEY_AUTH_*`, no
+ * `coordinator.json`, and a broker that refuses an anonymous connect. Not an auth failure
+ * worth a line per hook in every session (#407): `runHook` exits 0 silently. Credentials that
+ * exist but are refused stay `AUTH_FAILED`.
+ */
+export class NotConfiguredError extends Error {
+  readonly code = "NOT_CONFIGURED";
+  constructor(message: string) {
+    super(message);
+    this.name = "NotConfiguredError";
+  }
+}
+
+export function isNotConfigured(e: unknown): e is NotConfiguredError {
+  return e instanceof NotConfiguredError;
+}
+
 /** Run a credential resolution; any plain error it throws becomes a `CredentialsError`. */
 function loudly<T>(fn: () => T): T {
   try {
