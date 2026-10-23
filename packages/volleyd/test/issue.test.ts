@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { fetchIssue, renderIssueMd } from "../src/issue";
+import { fetchIssue, fetchIssues, renderIssueMd } from "../src/issue";
 import { spawnAgent } from "../src/spawn";
 import { SpawnError } from "../src/spawn-error";
 import { fakeExec } from "./helpers/fake-exec";
@@ -86,5 +86,64 @@ describe("ISSUE.md", () => {
     const views = env.host.fake.argvs(["gh", "issue", "view"]);
     expect(views).toEqual([["gh", "issue", "view", "42", "--json", "number,title,body,url"]]);
     expect(readFileSync(join(env.worktree, "ISSUE.md"), "utf-8")).toContain("# #42");
+  });
+});
+
+describe("bundles (several issues in one task)", () => {
+  const two = (n: number, title: string) =>
+    JSON.stringify({
+      number: n,
+      title,
+      body: `Body of ${n}.`,
+      url: `https://github.com/example/repo/issues/${n}`,
+    });
+
+  it("fetchIssues fetches each number through fetchIssue, in order", async () => {
+    const fake = fakeExec()
+      .on(["gh", "issue", "view", "310"], { stdout: two(310, "Retries") })
+      .on(["gh", "issue", "view", "312"], { stdout: two(312, "Backoff") });
+    const issues = await fetchIssues(fake.exec, "/w/repo", [310, 312]);
+    expect(issues.map((i) => [i.number, i.title])).toEqual([
+      [310, "Retries"],
+      [312, "Backoff"],
+    ]);
+    expect(fake.calls.map((c) => c.argv[3])).toEqual(["310", "312"]);
+  });
+
+  it("fetchIssues refuses a mismatch on any one number", async () => {
+    const fake = fakeExec()
+      .on(["gh", "issue", "view", "310"], { stdout: two(310, "Retries") })
+      .on(["gh", "issue", "view", "312"], { stdout: two(313, "Wrong") });
+    const err = await fetchIssues(fake.exec, "/w/repo", [310, 312]).catch((e: unknown) => e);
+    expect((err as SpawnError).code).toBe("ISSUE_MISMATCH");
+    expect((err as SpawnError).detail).toEqual({ requested: 312, received: 313 });
+  });
+
+  it("renderIssueMd of two issues: the bundle header, the planner's why, both bodies between rules", () => {
+    const a = JSON.parse(two(310, "Retries"));
+    const b = JSON.parse(two(312, "Backoff"));
+    const md = renderIssueMd([a, b], "collapsed #310 + #312: they share src/retry.ts");
+    expect(md).toBe(
+      [
+        "# Bundle: #310, #312",
+        "",
+        "One task, one PR, for every issue below. Planner: collapsed #310 + #312: they share src/retry.ts",
+        "",
+        "---",
+        "",
+        renderIssueMd(a).trimEnd(),
+        "",
+        "---",
+        "",
+        renderIssueMd(b),
+      ].join("\n"),
+    );
+  });
+
+  it("renderIssueMd of one issue (alone or in a list) is unchanged", () => {
+    const issue = JSON.parse(fixture("gh-issue-42.json"));
+    const today = `# #42 — ${issue.title}\n\n${issue.url}\n\n${issue.body}\n`;
+    expect(renderIssueMd(issue)).toBe(today);
+    expect(renderIssueMd([issue], "ignored for one issue")).toBe(today);
   });
 });

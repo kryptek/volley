@@ -14,9 +14,11 @@ import type { Daemon } from "../src/daemon";
 import { decisionTopic } from "../src/decisions";
 import { routedExec } from "../src/git-lock";
 import { makeBufferIO } from "../src/io";
+import { renderIssueMd } from "../src/issue";
 import { readJournalFile } from "../src/journal";
 import { MACHINE_CHANNEL, type MachineRecord, machineTopic } from "../src/machines";
 import type { ReadinessPayload } from "../src/readiness";
+import { spawnAgent } from "../src/spawn";
 import { SpawnError } from "../src/spawn-error";
 import { trustDecisionId } from "../src/trust";
 import type { JournalEvent, TaskState } from "../src/types";
@@ -34,6 +36,7 @@ import {
   adoptSpec,
   fakeHost,
   fakeRemoteHost,
+  makeSpawnEnv,
 } from "./helpers/fake-host";
 import { type EventMatch, type JournalWait, journalWait } from "./helpers/journal-wait";
 import { runCli, withoutOwnerWarning } from "./helpers/run-cli";
@@ -1700,5 +1703,47 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     expect((await state("w10")).tasks.find((t) => t.id === "T1")?.why_waiting).toBe(
       "no eligible machine: box: draining",
     );
+  });
+});
+
+describe("a bundle spawn (several issues in one task)", () => {
+  it("ISSUE.md holds every issue under the bundle header; agent.json and agent_spawned carry issues", async () => {
+    const env = await makeSpawnEnv({
+      issue: 1,
+      bundle: { issues: [1, 2], why: "collapsed #1 + #2: they share src/retry.ts" },
+    });
+    expect((await spawnAgent(env.request(), env.deps)).kind).toBe("launched");
+    expect(env.host.fake.argvs(["gh", "issue", "view"]).map((a) => a[3])).toEqual(["1", "2"]);
+    const md = readFileSync(join(env.worktree, "ISSUE.md"), "utf-8");
+    const issue = (n: number) => ({
+      number: n,
+      title: `Issue ${n}`,
+      body: `Body of ${n}.`,
+      url: `https://github.com/example/repo/issues/${n}`,
+    });
+    expect(md).toBe(
+      renderIssueMd([issue(1), issue(2)], "collapsed #1 + #2: they share src/retry.ts"),
+    );
+    expect(md.startsWith("# Bundle: #1, #2\n")).toBe(true);
+    const agent = JSON.parse(readFileSync(join(env.worktree, ".volley", "agent.json"), "utf-8"));
+    expect(agent.issues).toEqual([1, 2]);
+    expect(schemaErrors("agent-identity.schema.json", agent)).toEqual([]);
+    const brief = readFileSync(join(env.worktree, ".volley", "brief.md"), "utf-8");
+    expect(brief).toMatch(/^# Implement issues #1, #2$/m);
+    expect(env.events.find((e) => e.type === "agent_spawned")?.data).toMatchObject({
+      issue: { number: 1 },
+      issues: [
+        { number: 1, title: "Issue 1", url: "https://github.com/example/repo/issues/1" },
+        { number: 2, title: "Issue 2", url: "https://github.com/example/repo/issues/2" },
+      ],
+    });
+  });
+
+  it("a single-issue spawn's agent.json has no issues and its agent_spawned no issues list", async () => {
+    const env = await makeSpawnEnv();
+    await spawnAgent(env.request(), env.deps);
+    const agent = JSON.parse(readFileSync(join(env.worktree, ".volley", "agent.json"), "utf-8"));
+    expect(agent.issues).toBeUndefined();
+    expect(env.events.find((e) => e.type === "agent_spawned")?.data.issues).toBeUndefined();
   });
 });

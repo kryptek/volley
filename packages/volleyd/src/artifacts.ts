@@ -120,6 +120,8 @@ export interface PrRef {
   merge_state?: string;
   /** A draft PR (GitHub's `isDraft`): its repository may skip CI on it until it is ready. */
   draft?: true;
+  /** The PR's body as GitHub reports it (a bundle's `Closes` lines are checked in it). */
+  body?: string;
 }
 
 export type ArtifactReport =
@@ -145,7 +147,7 @@ export type ArtifactReport =
     };
 
 const PR_FIELDS =
-  "number,url,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus,isDraft";
+  "number,url,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus,isDraft,body";
 const RUN_FIELDS =
   "databaseId,name,workflowName,status,conclusion,url,headSha,event,createdAt,workflowDatabaseId";
 /** How many runs on one head the `head_sha` lookup reads. */
@@ -242,6 +244,7 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
             mergeable?: string;
             mergeStateStatus?: string;
             isDraft?: boolean;
+            body?: string;
           }[]
         >(prs.stdout) ?? [])
       : [];
@@ -270,6 +273,7 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
     ...(isMergeable(pr.mergeable) ? { mergeable: pr.mergeable } : {}),
     ...(typeof pr.mergeStateStatus === "string" ? { merge_state: pr.mergeStateStatus } : {}),
     ...(pr.isDraft === true ? { draft: true as const } : {}),
+    ...(typeof pr.body === "string" ? { body: pr.body } : {}),
   };
 
   const ready = spec.ready?.head === head ? spec.ready.at : undefined;
@@ -571,6 +575,21 @@ async function failedLogs(
   }
   const log = logs.join("\n");
   return { failing_tests: tests, log: log.slice(-DAEMON_DEFAULTS.ci_log_max_chars) };
+}
+
+/**
+ * The issues of `issues` whose `Closes #<n>` line is missing from a PR body. GitHub closes only
+ * the first issue of a shared `Closes #a, #b` line, so each must be on its own line. Pure.
+ */
+export function missingCloses(body: string | undefined, issues: readonly number[]): number[] {
+  const lines = new Set(
+    (body ?? "")
+      .split(/\r?\n/)
+      .map((l) => /^\s*closes\s+#(\d+)\b/i.exec(l)?.[1])
+      .filter((n) => n !== undefined)
+      .map(Number),
+  );
+  return issues.filter((n) => !lines.has(n));
 }
 
 /** What a verification report means for the pipeline. Pure. */

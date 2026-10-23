@@ -1610,6 +1610,9 @@ carries `issues`, `files`, `footprint` and `plan`; a version with a plan journal
 `tasks[].cluster` and the keys in `spec.tasks[]`; `volleyd status` prints one
 `plan: cluster A (planned): …` line per cluster under the header.
 
+A bundle runs as one task: one agent, one worktree and one PR for all its issues (see
+[bundles](#bundles) under "Spawning agents").
+
 ### Overlap warnings
 
 At submit the daemon also compares each task's files (the wave file's, else the ones read from
@@ -1744,6 +1747,16 @@ A refusal releases the lock, revokes credentials minted for the attempt and neve
 The gate runs before credentials are minted, so a rejected brief costs nothing to undo. A
 refused spawn is never silent ([failures and retries](#spawn-failures-and-retries)); `volleyd
 spawn` retries at once. While the kill switch is engaged nothing is spawned.
+
+### Bundles
+
+A task with `issues: [310, 312]` (a bundle, see [Footprints and the overlap plan](#footprints-and-the-overlap-plan))
+gets one agent whose `ISSUE.md` holds every issue, under a `# Bundle: #310, #312` header with the
+plan's `why`, and whose brief names them all, asks for one `Closes #<n>` line per issue (GitHub
+closes only the first issue of a shared line) and one changelog fragment per issue; `agent.json`
+and `agent_spawned` carry `issues`. A verified PR body missing one of those lines steers the
+implementer once (`closes`), after which the PR is accepted and the fixup's `findings.md` names
+the lines still missing; the digest ships each issue, `#310 + #312 (one PR)`.
 
 ### Base ref
 

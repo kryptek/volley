@@ -381,3 +381,73 @@ describe("renderDigestMd", () => {
     expect(md).not.toContain("## Failed");
   });
 });
+
+describe("a bundle's digest (several issues, one PR)", () => {
+  const bundleWave = parseWaveFile(`wave: w2
+repo: /path/to/example-repo
+release_branch: release/w2
+model: claude-opus-5-5
+pipeline: [implement, merge_ready]
+tasks:
+  R: { issue: 310, issues: [310, 312], title: "bundle: #310 + #312" }
+  S: { issue: 320 }
+`);
+  const evs = journal(
+    { type: "wave_submitted", data: { wave: bundleWave, owner: "coord-a" } },
+    { type: "task_queued", task: "R", data: { issue: 310, issues: [310, 312] } },
+    { type: "task_queued", task: "S", data: { issue: 320 } },
+    {
+      type: "agent_spawned",
+      task: "R",
+      data: {
+        agent_id: "w2-r-implementer-1",
+        role: "implementer",
+        attempt: 1,
+        issue: { number: 310, title: "Retries", url: "u310" },
+        issues: [
+          { number: 310, title: "Retries", url: "u310" },
+          { number: 312, title: "Backoff", url: "u312" },
+        ],
+      },
+    },
+    { type: "merged_by_supervisor", task: "R", data: { task: "R", pr: 31, merge_sha: "m-r" } },
+    ...merged("R", 31, { via: "supervisor", merge_sha: "m-r" }),
+    ...merged("S", 32, { merge_sha: "m-s" }),
+  );
+  const d = digestOf(evs, reduce(evs), NOW, "wave_complete");
+
+  it("ships one entry per issue of the bundle, sharing its PR", () => {
+    expect(d.shipped).toEqual([
+      {
+        task: "R",
+        issue: 310,
+        title: "Retries",
+        pr: pr(31),
+        merge_sha: "m-r",
+        merged_by: "supervisor",
+      },
+      {
+        task: "R",
+        issue: 312,
+        title: "Backoff",
+        pr: pr(31),
+        merge_sha: "m-r",
+        merged_by: "supervisor",
+      },
+      { task: "S", issue: 320, pr: pr(32), merge_sha: "m-s", merged_by: "github" },
+    ]);
+    expect(d.closes).toEqual([310, 312, 320]);
+    // One PR merged, however many issues it shipped.
+    expect(d.auto.merges).toBe(1);
+    expect(schemaErrors("digest.schema.json", envelope("_waves/digest", "digest", d))).toEqual([]);
+  });
+
+  it("volleyd digest text says `#310 + #312 (one PR)`", () => {
+    const md = renderDigestMd(d);
+    expect(md).toContain(
+      `- R #310 + #312 (one PR): #310 Retries, #312 Backoff; PR #31 ${pr(31).url} (merged by supervisor)`,
+    );
+    expect(md).toContain(`- S (#320): PR #32 ${pr(32).url} (merged by github)`);
+    expect(summaryLine(d)).toMatch(/^w2 complete: 3 shipped/);
+  });
+});

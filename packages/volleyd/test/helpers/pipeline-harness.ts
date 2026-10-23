@@ -48,6 +48,7 @@ export interface World {
     mergeStateStatus?: string;
     /** A draft PR (`gh pr ready <n>` clears it). */
     isDraft?: boolean;
+    body?: string;
   }[];
   /** CI per head (absent: no run). */
   ci: Record<string, "green" | "red" | "running">;
@@ -187,6 +188,8 @@ export interface HarnessOptions {
   autopilot?: (d: DecisionRecord) => string | undefined;
   /** The wave file's `repo:` (default: `/repo`). */
   repo?: string;
+  /** T1 bundles these issues (`issues:`, 42 first). */
+  bundle?: number[];
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -199,7 +202,9 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       "model: claude-opus-5-5",
       `pipeline: ${o.pipeline ?? DEFAULT_PIPELINE}`,
       "tasks:",
-      "  T1: { issue: 42 }",
+      o.bundle !== undefined
+        ? `  T1: { issue: 42, issues: [${o.bundle.join(", ")}] }`
+        : "  T1: { issue: 42 }",
       ...Object.entries(o.dependents ?? {}).map(
         ([id, after], i) => `  ${id}: { issue: ${43 + i}, after: [${after.join(", ")}] }`,
       ),
@@ -690,7 +695,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       return agent_id;
     },
     /** The implementer opens its PR once (the first push). */
-    openPr(head: string, task = "T1", number = 7, o: { draft?: boolean } = {}) {
+    openPr(head: string, task = "T1", number = 7, o: { draft?: boolean; body?: string } = {}) {
       world.prs.push({
         number,
         url: `https://github.com/example/repo/pull/${number}`,
@@ -698,6 +703,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         baseRefName: wave.release_branch,
         headRefOid: head,
         ...(o.draft === true ? { isDraft: true } : {}),
+        ...(o.body !== undefined ? { body: o.body } : {}),
       });
     },
     /** The driver's clock as ISO (a run's `createdAt`). */
