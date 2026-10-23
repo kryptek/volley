@@ -79,6 +79,8 @@ export interface World {
   cherry: Record<string, string>;
   /** `git log --format=%H %s <base>..<release>`: the release branch's new commits. */
   releaseLog: string;
+  /** `git log --oneline <base>..<release>`: how many commits a head behind it lacks (default 2). */
+  behindBy: number;
   /** `git diff <a> <b>` / `git show --format= <sha>` text per `a..b` / sha. */
   patches: Record<string, string>;
   /** `gh pr view <n> --json files` by PR number (default: fixtures/gh-pr-view-files.json). */
@@ -233,6 +235,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     parents: {},
     cherry: {},
     releaseLog: "",
+    behindBy: 2,
     patches: {},
     prView: {},
     prFiles: {},
@@ -298,7 +301,10 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         return out(world.patches[`${rest[0]}..${rest[1]}`] ?? "");
       if (verb === "merge-base")
         return out(`${world.mergeBase[rest[0] as string] ?? world.releaseTip}\n`);
-      if (verb === "log") return out("c1 upstream change\nc2 upstream change\n");
+      if (verb === "log")
+        return out(
+          Array.from({ length: world.behindBy }, (_, i) => `c${i + 1} upstream change\n`).join(""),
+        );
       if (verb === "diff" && rest[0] === "--name-only")
         return out(`${(world.diffNames[`${rest[1]}..${rest[2]}`] ?? []).join("\n")}\n`);
       if (verb === "diff" && rest[0] === "--stat")

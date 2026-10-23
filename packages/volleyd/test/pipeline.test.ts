@@ -340,6 +340,18 @@ describe("pipeline: gated at the reviewed head (#383)", () => {
     expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
   });
 
+  it("one commit behind reads in the singular", async () => {
+    const held = new Map<string, string>([["/repo#release/w1", "other/T9"]]);
+    await reviewed({ merge: "auto", releaseLock: releaseLockOn(held) });
+    h.world.behindBy = 1;
+    h.world.mergeBase[H2] = sha(0xdead);
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    await h.tick();
+    expect(h.task()?.why_waiting).toBe(
+      "gated 1 commit behind release/w1; updated at its merge turn",
+    );
+  });
+
   it("a CONFLICTING PR still enters the update step before the gate", async () => {
     await reviewed();
     const pr = h.world.prs[0];

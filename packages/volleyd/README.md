@@ -3742,10 +3742,9 @@ one at a time, in order, and brings each up to date just before its merge
   new head, the gate checks it again and it merges. Only the front task is updated, after the
   merge before it: a 30-task wave does at most 29 updates, one at a time, never a storm, and the
   tasks behind keep their gates and evidence meanwhile. That holds because a task is gated at its
-  reviewed head however far behind it is; before
-  [#383](https://github.com/kryptek/volley/issues/383) a task behind was updated before its gate,
-  so every update raced the merges still to come (one every half hour or so, about as long as an
-  update, its CI and the re-review took), and a task was behind again each time it came back.
+  reviewed head however far behind it is (an update before the gate raced the merges still to
+  come, so the task was behind again when it came back:
+  [#383](https://github.com/kryptek/volley/issues/383)).
   **Use `branch_update: merge` for an unattended wave**: it merges the release branch in with a
   normal push (no force-push, and the history the reviewers saw stays).
 - **Conflicts.** Resolving a conflict is the rebase (or merge) agent's job; its brief
