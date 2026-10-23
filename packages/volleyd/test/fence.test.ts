@@ -122,6 +122,8 @@ const DENIED: string[][] = [
   ["git", "status", "--unknown-flag"],
   ["git", "branch", "--list", "--edit-description"],
   ["git", "merge-base", "--exec", "x"],
+  ["git", "ls-tree", "--output=/tmp/x", "HEAD"],
+  ["git", "ls-tree", "-r", "-l", "--format", "x", "HEAD"],
   ["git", "fetch", "-uq", "sh"],
   // git: subcommand aliases resolve through config, so only exact allowed names pass
   ["git", "st"],
@@ -387,6 +389,9 @@ const ALLOWED: string[][] = [
   ["git", "status", "--porcelain"],
   ["git", "branch", "--list", "issue-*"],
   ["git", "merge-base", "HEAD", "origin/main"],
+  // the footprint resolver's tree read (footprint.ts readTree)
+  ["git", "ls-tree", "-r", "-l", "--full-tree", "origin/release/w1"],
+  ["git", "-C", "/tmp/repo", "ls-tree", "-r", "--long", "-z", "HEAD", "--", "packages/"],
   ["git", "show", "HEAD:README.md"],
   ["git", "-C", "/tmp/repo", "status"],
   ["git", "--no-pager", "log"],

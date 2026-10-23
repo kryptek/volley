@@ -1,5 +1,6 @@
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import { exec } from "./exec";
+import type { Tree } from "./footprint";
 import type { NudgeOnMerge, TaskId, WaveId } from "./types";
 
 /**
@@ -25,20 +26,49 @@ const FILES_LINE = /^\s*(\*\*)?files\s*:\s*(\*\*)?\s*(.*)$/i;
 const BULLET = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.*)$/;
 const PATHISH = /^[\w.@*?{}\-/,]+$/;
 
+/** One entry of a Files list: `raw` as written, `path` after the package-relative rebase. */
+export interface FilesEntry {
+  raw: string;
+  path: string;
+  /** Marked `(new)` in its bullet. */
+  new: boolean;
+}
+
+/**
+ * The extensions a bare token must end in to be a file name: `types.ts` is one, `github.slug`,
+ * `host.writeFile` and `lease_pools.*.match` are identifiers.
+ */
+export const FILE_EXTENSIONS: ReadonlySet<string> = new Set(
+  "ts tsx js jsx mjs cjs json jsonc md mdx yaml yml toml css scss html sh txt svg png jpg wav lock sql py go rs".split(
+    " ",
+  ),
+);
+
+/** A token with a known file extension (its last segment's). */
+export const hasFileExtension = (p: string): boolean =>
+  FILE_EXTENSIONS.has((/\.([^./]+)$/.exec(p)?.[1] ?? "").toLowerCase());
+
 /**
  * The file paths an issue body lists under a `## Files` / `### Files` heading or a `Files:` line.
  * Handles the plan format's quirks: several comma-separated paths in one backtick span, later
- * items relative to the first one's package (`pkg/src/a.ts, src/b.ts`), brace expansion
- * (`src/{a,b}.ts`), `(notes)` and trailing prose. Returns [] when there is no Files section.
+ * items relative to the first one's package (`pkg/src/a.ts, src/b.ts`, and a bare `b.ts` beside
+ * it), brace expansion (`src/{a,b}.ts`), `(notes)` and trailing prose. Returns [] when there is
+ * no Files section.
  */
 export function parseFilesSection(body: string): string[] {
+  return [...new Set((filesEntries(body) ?? []).map((e) => e.path))];
+}
+
+/** The entries of an issue body's Files section(s), in order; null when it has none. */
+export function filesEntries(body: string): FilesEntry[] | null {
   const lines = body.split(/\r?\n/);
-  const out: string[] = [];
+  let out: FilesEntry[] | null = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
     const heading = HEADING.exec(line);
     const inline = heading === null ? FILES_LINE.exec(line) : null;
     if (!(heading !== null && FILES_HEADING.test(heading[1] ?? "")) && inline === null) continue;
+    out ??= [];
     if (inline?.[3]) out.push(...bulletPaths(inline[3]));
     let seen = false;
     for (i += 1; i < lines.length; i++) {
@@ -53,47 +83,75 @@ export function parseFilesSection(body: string): string[] {
       out.push(...bulletPaths(b[1] ?? ""));
     }
   }
-  return [...new Set(out)];
+  return out;
 }
 
-/** The paths in one bullet's text. */
-function bulletPaths(text: string): string[] {
-  const spans = [...text.matchAll(/`([^`]+)`/g)].map((m) => m[1] ?? "");
-  const raw = spans.length > 0 ? spans.join(",") : text.replace(/\s+[—–-]\s+.*$/, "");
-  const items = splitOutsideBraces(raw.replace(/\([^)]*\)/g, ""))
-    .map((s) =>
-      s
+const NEW_MARK = /\(\s*new\b/i;
+
+/** The entries in one bullet's text. A `(new)` marks the span (or item) it follows. */
+function bulletPaths(text: string): FilesEntry[] {
+  const spans = [...text.matchAll(/`([^`]+)`/g)];
+  const chunks =
+    spans.length > 0
+      ? spans.map((m) => {
+          const after = text.slice((m.index ?? 0) + m[0].length).split("`")[0] ?? "";
+          return { text: m[1] ?? "", new: NEW_MARK.test(after) };
+        })
+      : [{ text: text.replace(/\s+[—–-]\s+.*$/, ""), new: false }];
+  const items = chunks
+    .flatMap((c) => splitOutside(c.text).map((s) => ({ s, new: c.new || NEW_MARK.test(s) })))
+    .map((it) => ({
+      new: it.new,
+      s: it.s
+        .replace(/\([^)]*\)/g, "")
         .trim()
         .replace(/^\.\//, "")
         .replace(/[.;:]+$/, ""),
-    )
-    .filter((s) => s !== "" && PATHISH.test(s) && /[/.]/.test(s));
-  const first = items[0];
-  return items.flatMap((item, n) =>
-    expandBraces(n === 0 || first === undefined ? item : rebase(item, first)),
-  );
+    }))
+    .filter((it) => it.s !== "" && PATHISH.test(it.s) && /[/.]/.test(it.s));
+  const first = items[0]?.s;
+  return items.flatMap((item, n) => {
+    const raws = expandBraces(item.s);
+    const paths = expandBraces(n === 0 || first === undefined ? item.s : rebase(item.s, first));
+    return paths.map((path, k) => ({ raw: raws[k] ?? path, path, new: item.new }));
+  });
 }
 
-/** `src/b.ts` after `pkg/x/src/a.ts` → `pkg/x/src/b.ts` (relative to the first item's package). */
+/**
+ * `src/b.ts` after `pkg/x/src/a.ts` → `pkg/x/src/b.ts` (relative to the first item's package);
+ * a bare file name `b.ts` beside it → `pkg/x/src/b.ts` (its directory). An identifier stays.
+ */
 function rebase(item: string, first: string): string {
+  if (!item.includes("/")) {
+    const dir = first.slice(0, first.lastIndexOf("/") + 1);
+    return dir !== "" && !isPattern(first) && hasFileExtension(item) ? `${dir}${item}` : item;
+  }
   const head = item.split("/")[0];
   const segs = first.split("/");
   const at = segs.indexOf(head ?? "");
   return at > 0 ? [...segs.slice(0, at), item].join("/") : item;
 }
 
-function splitOutsideBraces(s: string): string[] {
+/**
+ * Split on commas outside braces and parentheses (a `(note, with commas)` stays whole). An
+ * unclosed `(` does not count, so it cannot swallow the commas after it.
+ */
+function splitOutside(s: string, parens = true): string[] {
   const parts: string[] = [];
   let depth = 0;
+  let open = 0;
   let cur = "";
   for (const ch of s) {
-    if (ch === "{") depth++;
-    if (ch === "}") depth = Math.max(0, depth - 1);
+    if (ch === "{" || (parens && ch === "(")) depth++;
+    if (ch === "}" || (parens && ch === ")")) depth = Math.max(0, depth - 1);
+    if (ch === "(") open++;
+    if (ch === ")") open = Math.max(0, open - 1);
     if (ch === "," && depth === 0) {
       parts.push(cur);
       cur = "";
     } else cur += ch;
   }
+  if (parens && open > 0) return splitOutside(s, false);
   parts.push(cur);
   return parts;
 }
@@ -106,9 +164,9 @@ function expandBraces(p: string): string[] {
   return (m[1] ?? "").split(",").flatMap((alt) => expandBraces(`${pre}${alt.trim()}${post}`));
 }
 
-const isPattern = (p: string) => /[*?]/.test(p) || p.endsWith("/");
+export const isPattern = (p: string): boolean => /[*?]/.test(p) || p.endsWith("/");
 
-function globRe(p: string): RegExp {
+export function globRe(p: string): RegExp {
   const src = p
     .split("**")
     .map((part) =>
@@ -127,6 +185,32 @@ function shared(a: string, b: string): string | null {
   if (isPattern(a) && globRe(a).test(b)) return b;
   if (isPattern(b) && globRe(b).test(a)) return a;
   return null;
+}
+
+/**
+ * The concrete paths two file lists share, each glob or `dir/` expanded against the tree: two
+ * globs share the tree paths both match. A path not in the tree (a new file) matches itself.
+ */
+export function sharedFiles(a: string[], b: string[], tree: Tree): string[] {
+  const paths = Object.keys(tree);
+  const expand = (list: string[]) => [
+    ...new Set(
+      list.flatMap((p) => {
+        if (!isPattern(p)) return [p];
+        const re = globRe(p);
+        return [p, ...paths.filter((t) => re.test(t))];
+      }),
+    ),
+  ];
+  const bs = expand(b);
+  const out = new Set<string>();
+  for (const x of expand(a)) {
+    for (const y of bs) {
+      const p = shared(x, y);
+      if (p !== null && (!isPattern(p) || x === y)) out.add(p);
+    }
+  }
+  return [...out];
 }
 
 /** One warning per (new task, running task) pair that shares at least one path. */
