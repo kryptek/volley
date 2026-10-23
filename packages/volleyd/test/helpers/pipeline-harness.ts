@@ -46,6 +46,8 @@ export interface World {
     /** GitHub's mergeability of the PR (absent: not reported). */
     mergeable?: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
     mergeStateStatus?: string;
+    /** A draft PR (`gh pr ready <n>` clears it). */
+    isDraft?: boolean;
   }[];
   /** CI per head (absent: no run). */
   ci: Record<string, "green" | "red" | "running">;
@@ -53,7 +55,14 @@ export interface World {
   /** Runs on a head; `id` / `workflow` / `event` default to one distinct workflow per run. */
   ciRuns: Record<
     string,
-    { status: string; conclusion: string; id?: number; workflow?: string; event?: string }[]
+    {
+      status: string;
+      conclusion: string;
+      id?: number;
+      workflow?: string;
+      event?: string;
+      createdAt?: string;
+    }[]
   >;
   releaseTip: string;
   /** merge-base(head, releaseTip) per head (default: the release tip, i.e. current). */
@@ -296,6 +305,10 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       world.releaseTip = world.mergeCommit[n];
       return out("");
     }
+    if (a[0] === "gh" && a[1] === "pr" && a[2] === "ready") {
+      for (const pr of world.prs) if (pr.number === Number(a[3])) pr.isDraft = false;
+      return out("");
+    }
     if (a[0] === "gh" && a[1] === "pr" && a[2] === "view" && a.at(-1) === "files") {
       const n = Number(a[3]);
       return out(
@@ -309,6 +322,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         JSON.stringify({
           state,
           headRefOid: world.prs.find((p) => p.number === n)?.headRefOid ?? null,
+          isDraft: world.prs.find((p) => p.number === n)?.isDraft === true,
           mergedAt: state === "MERGED" ? "2026-10-18T13:00:00Z" : null,
           mergeCommit: state === "MERGED" ? { oid: world.mergeCommit[n] ?? sha(0xa11) } : null,
           baseRefName: wave.release_branch,
@@ -340,6 +354,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
               status: r.status,
               conclusion: r.conclusion,
               url: `https://github.com/example/repo/actions/runs/${r.id ?? 900 + i}`,
+              createdAt: r.createdAt,
             }))
           : state === undefined
             ? []
@@ -351,6 +366,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
                   status: state === "running" ? "in_progress" : "completed",
                   conclusion: state === "green" ? "success" : state === "red" ? "failure" : "",
                   url: `https://github.com/example/repo/actions/runs/${head.slice(-4)}`,
+                  createdAt: undefined as string | undefined,
                 },
               ];
       return out(
@@ -366,6 +382,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
                   head_sha: head,
                   event: r.event,
                   run_attempt: 1,
+                  created_at: r.createdAt,
                 }
               : {
                   databaseId: r.id,
@@ -376,6 +393,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
                   conclusion: r.conclusion,
                   headSha: head,
                   url: r.url,
+                  createdAt: r.createdAt,
                 },
           ),
         ),
@@ -641,15 +659,18 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       return agent_id;
     },
     /** The implementer opens its PR once (the first push). */
-    openPr(head: string, task = "T1", number = 7) {
+    openPr(head: string, task = "T1", number = 7, o: { draft?: boolean } = {}) {
       world.prs.push({
         number,
         url: `https://github.com/example/repo/pull/${number}`,
         headRefName: prBranch(task),
         baseRefName: wave.release_branch,
         headRefOid: head,
+        ...(o.draft === true ? { isDraft: true } : {}),
       });
     },
+    /** The driver's clock as ISO (a run's `createdAt`). */
+    iso: (offsetMs = 0) => new Date(clock + offsetMs).toISOString(),
     /** Change the `branch_update` tunable (a config_set): only a step entered later sees it. */
     setBranchUpdate(m: BranchUpdate) {
       branchUpdate = m;

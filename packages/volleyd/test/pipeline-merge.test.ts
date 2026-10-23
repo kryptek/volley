@@ -304,7 +304,7 @@ describe("merge: auto", () => {
     await h.finish("implementer", { head: H, ci: "green" });
     // Retargeted between the turn's gate check and the merge.
     h.world.before = (a) => {
-      if (a[1] === "pr" && a[2] === "view" && a.includes("baseRefName,headRefOid,state"))
+      if (a[1] === "pr" && a[2] === "view" && a.includes("baseRefName,headRefOid,isDraft,state"))
         h.world.prView[7] = { baseRefName: "main" };
     };
     await h.tick();

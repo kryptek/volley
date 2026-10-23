@@ -71,7 +71,7 @@ describe("artifact verification", () => {
       "--state",
       "open",
       "--json",
-      "number,url,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus",
+      "number,url,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus,isDraft",
     ]);
     expect(fake.calls.find((c) => c.argv[1] === "pr")?.opts.cwd).toBe(WT);
     // No CI is consulted for a PR that is not ours.
@@ -293,6 +293,80 @@ describe("artifact verification", () => {
     ]);
     const out = artifactOutcome("T1", "rebase", report);
     expect(out.kind === "verified" && out.event.data.touched).toEqual(["src/a.ts", "src/b.ts"]);
+  });
+});
+
+describe("draft PRs: the CI that starts once marked ready (#408)", () => {
+  const READY_AT = "2026-10-22T10:00:00.000Z";
+  const pr = (v: object) => JSON.stringify([{ ...JSON.parse(fx("gh-pr-list-ok.json"))[0], ...v }]);
+  const run = (id: number, createdAt: string, v: object = {}) => ({
+    databaseId: id,
+    name: "CI",
+    workflowName: "CI",
+    workflowDatabaseId: 9,
+    event: "pull_request",
+    status: "completed",
+    conclusion: "success",
+    headSha: HEAD,
+    createdAt,
+    url: `https://github.com/example/repo/actions/runs/${id}`,
+    ...v,
+  });
+  const ready = { ...SPEC, ready: { head: HEAD, at: READY_AT } };
+
+  it("a draft PR is reported as one; a ready one is not", async () => {
+    const draft = await verifyArtifacts(
+      allGood().on(["gh", "pr", "list"], { stdout: pr({ isDraft: true }) }).exec,
+      SPEC,
+    );
+    expect(draft).toMatchObject({ kind: "ok", pr: { draft: true } });
+    const open = await verifyArtifacts(
+      allGood().on(["gh", "pr", "list"], { stdout: pr({ isDraft: false }) }).exec,
+      SPEC,
+    );
+    expect(open.kind === "ok" && "draft" in open.pr).toBe(false);
+  });
+
+  it("marked ready: a green run created before it is not the gate's CI → running", async () => {
+    const fake = allGood().on(["gh", "run", "list"], {
+      stdout: JSON.stringify([run(501, "2026-10-22T09:50:00Z")]),
+    });
+    const report = await verifyArtifacts(fake.exec, ready);
+    expect(report).toMatchObject({ kind: "ok", ci: { state: "running" } });
+    expect(artifactOutcome("T1", "implementer", report)).toMatchObject({
+      kind: "ci_pending",
+      state: "running",
+    });
+  });
+
+  it("marked ready: the run created after it supersedes the draft's run and is gated on", async () => {
+    const runs = (post: object) =>
+      JSON.stringify([run(502, "2026-10-22T10:00:05Z", post), run(501, "2026-10-22T09:50:00Z")]);
+    const running = allGood().on(["gh", "run", "list"], {
+      stdout: runs({ status: "in_progress", conclusion: null }),
+    });
+    expect(await verifyArtifacts(running.exec, ready)).toMatchObject({ ci: { state: "running" } });
+    const red = allGood()
+      .on(["gh", "run", "list"], { stdout: runs({ conclusion: "failure" }) })
+      .on(["gh", "run", "view"], { stdout: JSON.stringify({ jobs: [] }) });
+    expect(await verifyArtifacts(red.exec, ready)).toMatchObject({ ci: { state: "red" } });
+    const green = await verifyArtifacts(
+      allGood().on(["gh", "run", "list"], { stdout: runs({}) }).exec,
+      ready,
+    );
+    expect(green).toMatchObject({ ci: { state: "green", runs: [{ id: 502 }] } });
+    expect(green.kind === "ok" && green.ci.superseded.map((r) => r.id)).toEqual([501]);
+  });
+
+  it("a mark on another head says nothing about this one", async () => {
+    const fake = allGood().on(["gh", "run", "list"], {
+      stdout: JSON.stringify([run(501, "2026-10-22T09:50:00Z")]),
+    });
+    const report = await verifyArtifacts(fake.exec, {
+      ...SPEC,
+      ready: { head: OTHER, at: READY_AT },
+    });
+    expect(report).toMatchObject({ ci: { state: "green" } });
   });
 });
 

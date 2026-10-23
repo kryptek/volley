@@ -708,6 +708,8 @@ export const WAVE_EVENT_TYPES = [
   "remediation_closed",
   // The morning digest (SPEC §4.6.16): published retained, with its one push.
   "digest_published",
+  // A draft PR marked ready before the CI gate (SPEC §4.6.8): its full CI runs from `at` (#408).
+  "pr_marked_ready",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

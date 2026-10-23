@@ -978,6 +978,8 @@ autopilot: on
     ci_failed/owner: a red head no rule routes and a repository without workflows are the owner's
   merge_conflict · within respawn_max per task/role · respawn · respawn_max per <task>/<role> · max 1
     merge_conflict/respawn: a fresh rebase (or merge) agent retries the update; a conflict it cannot resolve either is the owner's
+  merge_refused · the last refusal: the PR is a draft (reason: draft) · retry · no budget
+    merge_refused/draft: a draft is marked ready and merged once the CI that starts then passes; a retry does exactly that
   pr_closed, remote_repo_missing · always · escalate no_policy · no budget
     pr/owner: where the work went, or a clone that is missing, is the owner's call
 ```
@@ -3309,12 +3311,22 @@ In an unattended wave the gate is where work stalls: every merge waited for a pe
   attempt, at the task's next turn in the merge queue), `manual` (this task goes back to the
   gate and a human merges it) or `cancel`. A new gated head starts the count again. `reason` is
   what the refusal says: `behind` (out of date with or conflicting with the release branch, or
-  the release branch moved during the merge), `head_moved`, `retargeted`, `closed`, `checks`
-  (required checks, branch protection, reviews) or `unknown`. Only `behind`, `head_moved`,
-  `retargeted` and `closed` give up the merge turn; any other keeps the turn and the gated head, and the
+  the release branch moved during the merge), `head_moved`, `retargeted`, `closed`, `draft`,
+  `checks` (required checks, branch protection, reviews) or `unknown`. Only `behind`, `head_moved`,
+  `retargeted`, `closed` and `draft` give up the merge turn; any other keeps the turn and the gated head, and the
   merge is tried again at the next up-to-date check. No refusal enters a
   branch update by itself: one runs only when the turn's rebase check counts the release branch's
   commits the head lacks (a failed `git fetch` or `git log` is a failed check, never "behind").
+- **Drafts (#408).** A draft PR is not merge-ready, and its repository may skip heavy CI jobs on
+  drafts. Verification marks a draft ready (`gh pr ready <n>`, the fence's only PR write besides
+  the merge) once its CI is not red, journals `pr_marked_ready { pr, head, at }`, and holds the
+  head (`ci_pending`) until a run created at or after `at` settles: the draft's own green never
+  gates. A repository whose workflows never run on `ready_for_review` gates on the head's latest
+  runs once `ci_none_grace_ms` passed. A merge refused as `draft` (the pre-merge read saw
+  `isDraft`, or GitHub said `Pull Request is still a draft`) marks it ready the same way and
+  holds the gated head at `merge_ready` (`ci_pending { role: gate }`) until that CI is green,
+  then merges; it never counts toward `merge_retry_max`. Red there opens `ci_failed` (`fixup`,
+  `re-verify` or `cancel`).
 - **When: the merge queue.** Nothing merges at the gate itself: the merge queue below gives one
   task at a time its turn.
 - **`autopilot.delete_branch`** (default `false`) adds `--delete-branch` to the merge.
@@ -3337,12 +3349,12 @@ one at a time, in order, and brings each up to date just before its merge
   `merge: manual` keeps a wave's tasks out of the queue altogether.
 - **Order.** Dependency first: a task more tasks name in their `after` goes first, and a task
   never goes ahead of a queued task it comes after. Then readiness: the task queued earliest. A
-  task GitHub refused as `behind`, `head_moved`, `retargeted` or `closed` goes after the tasks
+  task GitHub refused as `behind`, `head_moved`, `retargeted`, `closed` or `draft` goes after the tasks
   still waiting; one refused for any other reason keeps its place.
 - **One merge in flight per release branch.** The task at the front takes the release branch's
   lock (`<repo>#<release_branch>`, held by the daemon, so two waves on one release branch share
-  it) and keeps it until it merged, GitHub refused it as `behind`, `head_moved`, `retargeted` or
-  `closed`, or it waits for an answer. A task whose turn checks fail
+  it) and keeps it until it merged, GitHub refused it as `behind`, `head_moved`, `retargeted`,
+  `closed` or `draft`, or it waits for an answer. A task whose turn checks fail
   `merge_turn_check_failures_max` (3) times in a row (its PR was retargeted, `gh` keeps failing,
   its worktree is gone; each failure is a `pipeline_error` alarm) gives up the turn and is passed
   over, with the tasks that come after it, while another queued task can go.
@@ -3418,6 +3430,7 @@ ALLOW (program by bare name only — never a path):
     (in any case); fetch takes a remote name or a
     network URL (https, ssh, git, user@host:path — never a local path) and its refspecs only
     write refs/remotes/…
+  gh pr ready <n> [--repo <slug>] (a draft PR marked ready before the CI gate; never --undo)
   gh issue view · gh repo view · gh pr view | list | checks · gh run list | view | watch ·
     gh api (GET only; a relative endpoint — never a URL — and never graphql in any path
     segment; no request headers)

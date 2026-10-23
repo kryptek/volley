@@ -107,7 +107,8 @@
             "inbox_answered",
             "remediation_requested",
             "remediation_closed",
-            "digest_published"
+            "digest_published",
+            "pr_marked_ready"
           ]
         },
         "payload": {
@@ -770,6 +771,31 @@
                       "trigger": {
                         "enum": ["wave_complete", "release_go", "escalation", "stopped"]
                       }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "pr_marked_ready" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["pr", "head", "at"],
+                    "description": "The supervisor marked a draft PR ready for review at head (gh pr ready), so the CI its repository skips on drafts runs; the CI gate on that head then counts only runs created at or after at (spec section 4.6.8).",
+                    "properties": {
+                      "pr": { "type": "integer", "minimum": 1 },
+                      "head": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+                      "at": { "type": "string", "format": "date-time" }
                     }
                   }
                 }
