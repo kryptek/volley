@@ -191,7 +191,10 @@ export interface RemoteHost extends Host {
    * readable `.claude.json`; throws if ssh fails.
    */
   readTrust(configDir?: string): Promise<Record<string, unknown> | null>;
-  /** The owner's `trust` answer, recorded in the box's own `~/.claude.json` (or the profile's). */
+  /**
+   * The owner's `trust` answer (or a `repo_add`'s, SPEC §4.6.21), recorded in the box's own
+   * `~/.claude.json` (or the profile's).
+   */
   recordTrust(root: string, configDir?: string): Promise<void>;
   /**
    * Make a profile the supervisor created on the box ready to run agents unattended (#400): its
@@ -897,7 +900,7 @@ export class SshTmuxHost implements RemoteHost {
    * else, like the local recordRepoTrust: read it, write the new file beside it, and swap it in
    * only if the file is still what was read (`cmp`, then `mv`, in one script). Claude Code
    * rewrites the file often, so a changed file is re-read and the write retried. Called only on
-   * the owner's explicit `trust` answer.
+   * the owner's explicit `trust` answer or a `repo_add` (SPEC §4.6.21).
    */
   async recordTrust(root: string, configDir?: string): Promise<void> {
     // A profile's files by absolute path: a write step does not run in a cwd.

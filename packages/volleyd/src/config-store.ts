@@ -8,7 +8,16 @@ import { LOCAL_HOST, localMachineName } from "./fleet-name";
 import { type Journal, writeFileAtomic } from "./journal";
 import { originToSlug, slugKey } from "./repos";
 import { type PathError, toPathErrors, validator } from "./schemas";
-import type { ConfigPayload, LocalAgentsMode, Tunables, TunablesPatch, WaveId } from "./types";
+import type {
+  ConfigPayload,
+  LocalAgentsMode,
+  RepoAssignment,
+  Tunables,
+  TunablesPatch,
+  WaveId,
+} from "./types";
+
+type RepoMachines = RepoAssignment["machines"];
 
 /** `$VOLLEYD_HOME`, else `~/.volley/volleyd`. */
 export function volleydHome(env: Record<string, string | undefined>): string {
@@ -394,6 +403,64 @@ export class ConfigStore {
     // A null leaf is how a removal reads in the journal; it is never a valid config_set patch.
     const patch = { hosts: { [name]: null } } as unknown as TunablesPatch;
     return this.commit(nextLayer, merge(this.defaults, nextLayer), patch, previous, by);
+  }
+
+  /**
+   * `repo_add` / `repo_remove` (SPEC §4.6.21): set `repos.<slug>.machines` (null: drop the
+   * repository) and each `hosts.<m>.repos.<slug>` in `paths` (null: drop the adopted path), the
+   * slug as config already spells it. config_set cannot delete a key, so this writes the layer
+   * itself; journaled as one `config_changed` whose removals read as null leaves.
+   */
+  setRepo(
+    slug: string,
+    machines: RepoMachines | null,
+    paths: Record<string, string | null>,
+    by: string,
+  ): PatchResult {
+    const key = slugKey(this.fileLayer.repos, slug) ?? slugKey(this.global.repos, slug) ?? slug;
+    const { [key]: _old, ...otherRepos } = this.fileLayer.repos ?? {};
+    const repos = machines === null ? otherRepos : { ...otherRepos, [key]: { machines } };
+    const hosts = { ...this.fileLayer.hosts };
+    const hostPatch: Record<string, { repos: Record<string, string | null> }> = {};
+    for (const [m, path] of Object.entries(paths)) {
+      const host = hosts[m];
+      if (host === undefined) {
+        return { applied: false, rejected: [{ path: `hosts.${m}`, reason: "not in config.yaml" }] };
+      }
+      const adopted = slugKey(host.repos, key);
+      const { [adopted ?? key]: _was, ...rest } = host.repos ?? {};
+      const next = path === null ? rest : { ...rest, [key]: path };
+      const { repos: _r, ...without } = host;
+      hosts[m] = Object.keys(next).length > 0 ? { ...without, repos: next } : without;
+      hostPatch[m] = { repos: { [key]: path } };
+    }
+    const { repos: _rs, hosts: _hs, ...base } = this.fileLayer;
+    const nextLayer = {
+      ...base,
+      ...(Object.keys(repos).length > 0 ? { repos } : {}),
+      ...(Object.keys(hosts).length > 0 ? { hosts } : {}),
+    } as TunablesPatch;
+    const nextGlobal = merge(this.defaults, nextLayer);
+    const rejected = tunablesErrors(nextGlobal, this.hostname);
+    if (rejected.length > 0) return { applied: false, rejected };
+    const patch = {
+      repos: { [key]: machines === null ? null : { machines } },
+      ...(Object.keys(hostPatch).length > 0 ? { hosts: hostPatch } : {}),
+    } as unknown as TunablesPatch;
+    const previous = {
+      repos: { [key]: this.global.repos[key] ?? null },
+      ...(Object.keys(hostPatch).length > 0
+        ? {
+            hosts: Object.fromEntries(
+              Object.keys(hostPatch).map((m) => [
+                m,
+                { repos: { [key]: this.global.hosts[m]?.repos?.[key] ?? null } },
+              ]),
+            ),
+          }
+        : {}),
+    };
+    return this.commit(nextLayer, nextGlobal, patch, previous, by);
   }
 
   /**

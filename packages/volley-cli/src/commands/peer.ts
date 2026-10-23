@@ -478,7 +478,7 @@ export async function runPeer({ argv, env, io }: PeerArgs, deps: PeerDeps): Prom
 // Host side: control queries to volleyd
 // ---------------------------------------------------------------------------------------------
 
-interface Answer {
+export interface Answer {
   ok: boolean;
   error?: string;
   result?: unknown;
@@ -514,11 +514,36 @@ const authReplyTopic = (correlationId: string) => `volley/_system/auth/replies/$
  * `admin`: an admin op, sent on the caller's own account-op topic (only an admin login may
  * publish there, so the coordinator's file never serves).
  */
-async function ask(
+function ask(
   verb: string,
   op: string,
   fields: Record<string, unknown>,
   v: Values,
+  env: Record<string, string | undefined>,
+  io: IO,
+  admin = false,
+): Promise<Answer | ExitCode> {
+  return askVolleyd(`volley peer ${verb}`, op, fields, v, env, io, admin);
+}
+
+/** The connection flags `askVolleyd` reads (each verb's own option table has them). */
+export interface AskFlags {
+  timeout?: string | undefined;
+  namespace?: string | undefined;
+  username?: string | undefined;
+  password?: string | undefined;
+  "broker-url"?: string | undefined;
+}
+
+/**
+ * `ask` for any command (`cmd`: its name in messages, e.g. `volley repo add`): `volley peer`'s,
+ * and `volley repo`'s admin ops (SPEC §4.6.21).
+ */
+export async function askVolleyd(
+  cmd: string,
+  op: string,
+  fields: Record<string, unknown>,
+  v: AskFlags,
   env: Record<string, string | undefined>,
   io: IO,
   admin = false,
@@ -531,7 +556,7 @@ async function ask(
       parsePositiveInt(v.timeout ?? String(PEER_DEFAULTS.answer_timeout_s), "--timeout") * 1000;
     namespace = resolveNamespace(v.namespace, env);
   } catch (e) {
-    io.stderr(`volley peer ${verb}: ${e instanceof Error ? e.message : String(e)}\n`);
+    io.stderr(`${cmd}: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.USAGE;
   }
   try {
@@ -540,12 +565,12 @@ async function ask(
     auth = resolveAuth({ username: v.username, password: v.password }, env);
     if (!admin) auth ??= readCoordinatorAuth(withSetupAuthDir(env));
   } catch (e) {
-    io.stderr(`volley peer ${verb}: ${e instanceof Error ? e.message : String(e)}\n`);
+    io.stderr(`${cmd}: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
   }
   if (admin && auth === null) {
     io.stderr(
-      `volley peer ${verb}: ${ADMIN_ONLY}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD) or set VOLLEY_AUTH_USERNAME and VOLLEY_AUTH_PASSWORD\n`,
+      `${cmd}: ${ADMIN_ONLY}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD) or set VOLLEY_AUTH_USERNAME and VOLLEY_AUTH_PASSWORD\n`,
     );
     return EXIT.USAGE;
   }
@@ -554,7 +579,7 @@ async function ask(
   const notAdmin = admin && auth !== null ? localNotAdmin(auth.username, env) : null;
   if (notAdmin !== null) {
     io.stderr(
-      `volley peer ${verb}: ${notAdmin}; ${ADMIN_ONLY}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD), e.g. the admin account \`volley setup\` created\n`,
+      `${cmd}: ${notAdmin}; ${ADMIN_ONLY}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD), e.g. the admin account \`volley setup\` created\n`,
     );
     return EXIT.USAGE;
   }
@@ -568,7 +593,7 @@ async function ask(
   try {
     const status = await broker.queryRetained(buildTopic(namespace, "volleyd", "status"), PROBE_MS);
     if (status === null || !LIVE.has(parseEnvelope(status)?.type ?? "")) {
-      io.stderr(`volley peer ${verb}: volleyd is not running in namespace '${namespace}'\n`);
+      io.stderr(`${cmd}: volleyd is not running in namespace '${namespace}'\n`);
       return EXIT.ERROR;
     }
     const answer =
@@ -578,11 +603,11 @@ async function ask(
     if (answer === null) {
       // The broker drops an account-op request from any login but an admin's, silently.
       const why = admin ? ` (${ADMIN_ONLY}; is ${auth?.username} one?)` : "";
-      io.stderr(`volley peer ${verb}: volleyd did not answer within ${timeoutMs / 1000} s${why}\n`);
+      io.stderr(`${cmd}: volleyd did not answer within ${timeoutMs / 1000} s${why}\n`);
       return EXIT.TIMEOUT;
     }
     if (!answer.ok) {
-      io.stderr(`volley peer ${verb}: ${answer.error ?? "refused"}\n`);
+      io.stderr(`${cmd}: ${answer.error ?? "refused"}\n`);
       return EXIT.ERROR;
     }
     return answer;

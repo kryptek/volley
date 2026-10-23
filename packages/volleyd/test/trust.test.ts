@@ -193,6 +193,33 @@ describe("spawn: repo trust check", () => {
     expect(env.host.launches).toHaveLength(1);
   });
 
+  it("a root repo_add trusted (its preconditionKey) opens no repo_untrusted, whatever the file says (SPEC §4.6.21)", async () => {
+    env = await makeSpawnEnv({ trusted: false });
+    const asked: string[] = [];
+    const covered = preconditionKey({ root: env.repo });
+    const out = await spawnAgent(env.request(), {
+      ...env.deps,
+      repoTrusted: (key) => {
+        asked.push(key);
+        return key === covered;
+      },
+    });
+    expect(asked).toEqual([covered]);
+    expect(out.kind).toBe("launched");
+    expect(env.events.filter((e) => e.type === "decision_opened")).toEqual([]);
+  });
+
+  it("another machine's or profile's repo_trusted does not cover the spawn", async () => {
+    env = await makeSpawnEnv({ trusted: false });
+    const out = await spawnAgent(env.request(), {
+      ...env.deps,
+      repoTrusted: (key) =>
+        key === preconditionKey({ machine: "dev@box", root: env.repo }) ||
+        key === preconditionKey({ profile: "/p/work", root: env.repo }),
+    });
+    expect(out.kind).toBe("decision");
+  });
+
   it("trust accepted after the decision opened resolves it and proceeds", async () => {
     env = await makeSpawnEnv({ trusted: true });
     env.openDecisions.push(trustDecisionId("w1", env.repo));

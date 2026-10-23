@@ -49,3 +49,45 @@ export async function readRepoView(exec: ExecFn, repo: string): Promise<RepoView
     return { visibility: "unknown" };
   }
 }
+
+/** What `gh repo view <owner/name>` says of a repository being added (`repo_add`, D6). */
+export interface SlugView {
+  /** GitHub's canonical `nameWithOwner` (its spelling, whatever case was asked). */
+  slug: string;
+  url: string;
+  visibility: RepoVisibility;
+}
+
+/**
+ * `gh repo view <slug> --json nameWithOwner,url,visibility` on the supervisor (read-only, through
+ * the fence): the repository exists and its canonical name; or why not, in gh's words.
+ */
+export async function readSlugView(exec: ExecFn, slug: string): Promise<SlugView | string> {
+  let r: Awaited<ReturnType<ExecFn>>;
+  try {
+    r = await exec(["gh", "repo", "view", slug, "--json", "nameWithOwner,url,visibility"], {
+      timeoutMs: DAEMON_DEFAULTS.repo_visibility_ms,
+    });
+  } catch (e) {
+    return `gh repo view ${slug}: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  if (r.timedOut) return `gh repo view ${slug} timed out`;
+  if (r.code !== 0) {
+    const why = r.stderr.trim().split("\n")[0] ?? "";
+    return `gh repo view ${slug}: ${why !== "" ? why : `exit ${r.code}`}`;
+  }
+  try {
+    const out = JSON.parse(r.stdout) as { visibility?: unknown };
+    const github = asGitHubRepo({
+      slug: (out as { nameWithOwner?: unknown }).nameWithOwner,
+      url: (out as { url?: unknown }).url,
+    });
+    if (github === undefined) return `gh repo view ${slug} printed no repository`;
+    const v = typeof out.visibility === "string" ? out.visibility.toLowerCase() : "";
+    const visibility: RepoVisibility =
+      v === "public" || v === "private" || v === "internal" ? v : "unknown";
+    return { slug: github.slug, url: github.url, visibility };
+  } catch {
+    return `gh repo view ${slug} printed no repository`;
+  }
+}

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   type RepoConfig,
   SLUG_PATTERN,
+  addPlan,
   assignedSlugs,
   cloneFor,
   homeFromClones,
@@ -12,9 +13,13 @@ import {
   managedClonePath,
   managedWorktreeRoot,
   originToSlug,
+  pendingRepoRuns,
+  repoStateLine,
   sameSlug,
   slugKey,
   waveSlug,
+  withMachines,
+  withoutMachines,
 } from "../src/repos";
 import { SCHEMAS_DIR } from "../src/schemas";
 import { schemaErrors } from "./helpers/schema";
@@ -228,5 +233,109 @@ describe("repos: waveSlug", () => {
     expect(waveSlug({ state: {} }, "github.com/O/R")).toBe("O/R");
     expect(waveSlug({ state: null }, "gitlab.example/o/r")).toBeUndefined();
     expect(waveSlug({}, null)).toBeUndefined();
+  });
+});
+
+describe("repos: repo_add / repo_remove assignments (SPEC §4.6.21)", () => {
+  it("withMachines: all absorbs a list; lists merge once", () => {
+    expect(withMachines(undefined, ["box"])).toEqual(["box"]);
+    expect(withMachines(["box"], ["box", "b2"])).toEqual(["box", "b2"]);
+    expect(withMachines(["box"], "all")).toBe("all");
+    expect(withMachines("all", ["box"])).toBe("all");
+  });
+
+  it("withoutMachines: all spelled out as every machine; null once none is left", () => {
+    expect(withoutMachines("all", ["box"], ["control", "box"])).toEqual(["control"]);
+    expect(withoutMachines(["box"], ["box"], ["control", "box"])).toBeNull();
+    expect(withoutMachines(["box", "b2"], "all", ["control"])).toBeNull();
+    expect(withoutMachines(undefined, ["box"], ["control"])).toBeNull();
+  });
+
+  it("addPlan: managed or adopted, clone while none is reported, trust in the default and every signed-in profile there", () => {
+    const c = cfg({
+      repos: { "a/a": { machines: "all" } },
+      hosts: { box: { repos: { "a/a": "/srv/mine" } }, b2: {} },
+    });
+    const accounts = [
+      { id: "work", machine: "box", dir: "/h/.volley/claude/work", signed_in_at: "t" },
+      { id: "new", machine: "box", dir: "/h/.volley/claude/new" },
+      { id: "home", machine: "local", signed_in_at: "t" },
+    ];
+    const records = (m: string) =>
+      m === "b2"
+        ? {
+            repos: [
+              {
+                slug: "a/a",
+                path: "/b2/.volley/repos/a/a",
+                exists: true,
+                managed: true,
+              },
+            ],
+          }
+        : undefined;
+    const steps = addPlan(c, "control", accounts, records, "A/a", ["control", "box", "b2"], {
+      localHome: "/me",
+      localDir: (id) => `/me/.volley/claude/${id}`,
+    });
+    expect(steps).toEqual([
+      {
+        machine: "control",
+        local: true,
+        repo_add: "a/a",
+        path: "/me/.volley/repos/a/a",
+        clone: true,
+        profiles: [null, "/me/.volley/claude/home"],
+      },
+      {
+        machine: "box",
+        local: false,
+        repo_add: "a/a=/srv/mine",
+        path: "/srv/mine",
+        clone: true,
+        profiles: [null, "/h/.volley/claude/work"],
+      },
+      {
+        machine: "b2",
+        local: false,
+        repo_add: "a/a",
+        path: "/b2/.volley/repos/a/a",
+        clone: false,
+        profiles: [null],
+      },
+    ]);
+  });
+
+  it("pendingRepoRuns: a failed run stays pending until one succeeds or the repository is removed there", () => {
+    const run = (machine: string, ok: boolean, error?: string) => ({
+      type: "repo_clone_run",
+      data: { machine, slug: "a/a", ok, ...(error !== undefined ? { error } : {}) },
+    });
+    expect(
+      [...pendingRepoRuns([run("box", false, "ssh failed"), run("b2", false, "down")])].map(
+        ([m, s]) => [m, [...s]],
+      ),
+    ).toEqual([
+      ["box", [["a/a", "ssh failed"]]],
+      ["b2", [["a/a", "down"]]],
+    ]);
+    expect(pendingRepoRuns([run("box", false, "x"), run("box", true)]).size).toBe(0);
+    expect(
+      pendingRepoRuns([
+        run("box", false, "x"),
+        { type: "repo_removed", data: { slug: "A/a", machines: ["box"] } },
+      ]).size,
+    ).toBe(0);
+  });
+
+  it("repoStateLine: one line per machine, its reasons or its path", () => {
+    expect(repoStateLine("box", { state: "ready", path: "/srv/a", reasons: [] })).toBe(
+      "box: ready (/srv/a)",
+    );
+    expect(repoStateLine("box", { state: "blocked", reasons: ["ssh failed", "x"] })).toBe(
+      "box: blocked (ssh failed; x)",
+    );
+    expect(repoStateLine("box", { state: "cloning", reasons: [] })).toBe("box: cloning");
+    expect(repoStateLine("box", undefined)).toBe("box: not assigned");
   });
 });

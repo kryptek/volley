@@ -72,6 +72,21 @@ export function preconditionKey(p: { machine?: string; profile?: string; root: s
   return JSON.stringify([p.machine ?? "local", p.profile ?? "default", p.root]);
 }
 
+/**
+ * The shared preconditions `repo_add` met (D4, SPEC §4.6.21): every `preconditionKey` a
+ * `repo_trusted` event recorded, replayed from the `_system` journal. A spawn whose (machine,
+ * profile, root) is among them opens no `repo_untrusted`.
+ */
+export function trustedKeys(events: readonly { type: string; data: unknown }[]): Set<string> {
+  const out = new Set<string>();
+  for (const e of events) {
+    if (e.type !== "repo_trusted") continue;
+    const keys = (e.data as { keys?: unknown }).keys;
+    if (Array.isArray(keys)) for (const k of keys) if (typeof k === "string") out.add(k);
+  }
+  return out;
+}
+
 /** How many waiting task ids a shared-precondition question names before `…`. */
 const WAITING_SHOWN = 6;
 
@@ -120,7 +135,7 @@ export function remoteRepoMissing(
     question: `Needs you: ${machine} has no clone of ${slug}. Add it to ${machine} (Settings → Repositories, or volley repo add ${slug} --machine ${machine})?`,
     options: ["add", "retry", "cancel"],
     option_help: {
-      add: `Add ${slug} to ${machine} first (Settings → Repositories, or volley repo add ${slug} --machine ${machine}); for now add answers like retry: the task is tried again.`,
+      add: `Add ${slug} to ${machine} (as volley repo add ${slug} --machine ${machine} does: clone it there and trust it), then try the task again.`,
       retry: `Try the task on ${machine} again (once its clone of ${slug} is there).`,
       cancel: "Cancel the task.",
     },

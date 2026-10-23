@@ -14,6 +14,4 @@ siblings; the SPEC lists those one per line, checked against the schemas.
 
 | Reserved | Issue | Topic |
 |---|---|---|
-| §4.6.21 | T3 | Repositories |
-| `repo_added`, `repo_removed`, `repo_trusted`, `repo_clone_run` | T3 | system events (like `peer_doctor_run`) |
 | `task_admission_returned` | T4 | wave event |

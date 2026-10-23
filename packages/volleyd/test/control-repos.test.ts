@@ -1,0 +1,446 @@
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { addAccount, markSignedIn } from "../src/claude/profiles";
+import { ControlClient } from "../src/control";
+import { preconditionKey } from "../src/decisions";
+import { readJournalFile } from "../src/journal";
+import type { DoctorReport, MachineRepo } from "../src/machines";
+import { eventually } from "./helpers/broker-wait";
+import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
+import { GREEN_DOCTOR, fakeSigninBox } from "./helpers/fake-host";
+import { type Fleet, LOCAL, PEER, makeFleet } from "./helpers/fleet-env";
+import { journalWait } from "./helpers/journal-wait";
+import { tempDir } from "./helpers/tmp";
+
+/**
+ * Repositories (SPEC §4.6.21): repo_add / repo_remove / repo_list / repo_status end to end, on a
+ * supervisor (`control`) and one paired box over fakes.
+ */
+
+const SLUG = "a/a";
+const BOX_CLONE = "/srv/repos/a/a";
+const BOX_PROFILE = "/path/to/home/.volley/claude/work";
+
+const clone = (slug: string, path: string, exists = true): MachineRepo => ({
+  slug,
+  path,
+  exists,
+  managed: true,
+  fetched_at: null,
+  toolchain: { ok: true, missing: [], outdated: [] },
+});
+/** The box's doctor after an add: its clone of `a/a` at BOX_CLONE (absent: `exists: false`). */
+const reportWith = (repos: MachineRepo[]): DoctorReport => ({
+  ...GREEN_DOCTOR,
+  versions: { peer: "0.4.0", volley: "0.4.0", bun: "1.3.1", git: "2.43.0" },
+  repos,
+});
+
+let f: Fleet;
+/** A fleet `setup` started and no afterEach closed yet. */
+let live = false;
+let localClone: string;
+let claudeRoot: string;
+/** recordTrust calls on the box: the root and the profile dir (undefined: the default). */
+let trusts: { root: string; dir: string | undefined }[];
+
+async function setup(o: { profile?: boolean } = {}): Promise<void> {
+  const base = realpathSync(tempDir("volleyd-repos-"));
+  const repoRoot = join(base, "managed");
+  localClone = join(repoRoot, "a", "a");
+  claudeRoot = join(base, "claude");
+  mkdirSync(claudeRoot, { recursive: true });
+  // The box has one signed-in profile beside its default one.
+  if (o.profile !== false) {
+    addAccount(claudeRoot, { label: "Work", machine: PEER }, "2026-10-19T09:00:00.000Z");
+    markSignedIn(claudeRoot, "work", { dir: BOX_PROFILE }, "2026-10-19T09:00:00.000Z");
+  }
+  f = await makeFleet({
+    repoRoot,
+    claudeRoot,
+    // The own doctor finds the own clone of a/a once it is there.
+    localDoctor: (repo) =>
+      repo === localClone ? { ...GREEN_DOCTOR, repo: { path: repo, exists: true } } : GREEN_DOCTOR,
+  });
+  live = true;
+  f.exec
+    .on(["gh", "repo", "view", SLUG], {
+      stdout: JSON.stringify({
+        nameWithOwner: SLUG,
+        url: `https://github.com/${SLUG}`,
+        visibility: "PUBLIC",
+      }),
+    })
+    .on(["gh", "repo", "view", "no/such"], {
+      code: 1,
+      stderr: "GraphQL: Could not resolve to a Repository with the name 'no/such'.\n",
+    })
+    // The supervisor's own clone is there.
+    .on(["git", "-C", localClone, "rev-parse", "--show-toplevel"], { stdout: `${localClone}\n` });
+  const box = theBox();
+  trusts = [];
+  box.recordTrust = async (root, dir) => {
+    trusts.push({ root, dir });
+  };
+  box.answers.doctor = reportWith([clone(SLUG, BOX_CLONE)]);
+}
+
+/** The fleet's box (created by its first PATH probe, before setup returns). */
+function theBox() {
+  const box = f.box();
+  if (box === undefined) throw new Error("no box");
+  return box;
+}
+
+afterEach(async () => {
+  if (!live) return;
+  live = false;
+  await f.close();
+});
+
+const repoState = async (machine: string, slug = SLUG) =>
+  (await f.verdict(machine))?.repos[slug]?.state;
+const systemTypes = (type: string) => f.system().filter((e) => e.type === type);
+
+describe("repo_add (admin)", () => {
+  it("validates with gh, patches config, runs the box's doctor with the add and a clone, trusts every profile, journals and republishes readiness", async () => {
+    await setup();
+    const r = await f.adminOp({ op: "repo_add", slug: SLUG });
+    expect(r).toMatchObject({
+      ok: true,
+      op: "repo_add",
+      result: { slug: SLUG, machines: [LOCAL, PEER], url: `https://github.com/${SLUG}` },
+    });
+    expect(f.exec.argvs(["gh", "repo", "view"])).toContainEqual([
+      "gh",
+      "repo",
+      "view",
+      SLUG,
+      "--json",
+      "nameWithOwner,url,visibility",
+    ]);
+    const cfg = await f.client.request("config_get", { path: "repos" });
+    expect(cfg.result).toEqual({ [SLUG]: { machines: "all" } });
+
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "ready" && (await repoState(LOCAL)) === "ready";
+    });
+    // The box: added and cloned (no clone reported yet), over the doctor's ssh channel.
+    expect(f.box()?.doctorRuns.at(-1)).toEqual({ fix: true, repos_add: [SLUG] });
+    // Trusted in the box's default profile and in its signed-in profile.
+    expect(trusts).toEqual([
+      { root: BOX_CLONE, dir: undefined },
+      { root: BOX_CLONE, dir: BOX_PROFILE },
+    ]);
+    // The own machine: never cloned by volleyd, its clone trusted in its primary profile.
+    const own = JSON.parse(readFileSync(f.claudeJson, "utf-8")) as {
+      projects: Record<string, { hasTrustDialogAccepted?: boolean }>;
+    };
+    expect(own.projects[localClone]?.hasTrustDialogAccepted).toBe(true);
+
+    expect(systemTypes("repo_added").map((e) => e.data)).toEqual([
+      { by: "admin-1", slug: SLUG, machines: "all" },
+    ]);
+    const runs = systemTypes("repo_clone_run").map((e) => e.data);
+    expect(runs).toContainEqual({
+      machine: PEER,
+      slug: SLUG,
+      ok: true,
+      cloned: true,
+      path: BOX_CLONE,
+    });
+    expect(runs).toContainEqual({
+      machine: LOCAL,
+      slug: SLUG,
+      ok: true,
+      cloned: false,
+      path: localClone,
+    });
+    const box = systemTypes("repo_trusted").find((e) => e.data.machine === PEER);
+    expect(box?.data).toEqual({
+      machine: PEER,
+      repo: SLUG,
+      root: BOX_CLONE,
+      accounts: ["primary", "work"],
+      keys: [
+        preconditionKey({ machine: `dev@${PEER}`, root: BOX_CLONE }),
+        preconditionKey({ machine: `dev@${PEER}`, profile: BOX_PROFILE, root: BOX_CLONE }),
+      ],
+    });
+
+    // repo_status: the same state lines on every machine.
+    const st = await f.adminOp({ op: "repo_status", slug: SLUG });
+    expect(st).toMatchObject({
+      ok: true,
+      result: {
+        repos: [
+          {
+            slug: SLUG,
+            machines: { [LOCAL]: { state: "ready" }, [PEER]: { state: "ready" } },
+            lines: [`${LOCAL}: ready (${localClone})`, `${PEER}: ready (${BOX_CLONE})`],
+          },
+        ],
+      },
+    });
+    // repo_list, on the mailbox too (a read).
+    const list = await f.client.request("repo_list", {});
+    expect(list.result).toEqual({ repos: [{ slug: SLUG, machines: "all" }] });
+
+    // A second add of the same slug changes nothing: no config change, no doctor run.
+    const changes = systemTypes("config_changed").length;
+    const doctorRuns = f.box()?.doctorRuns.length;
+    expect(await f.adminOp({ op: "repo_add", slug: SLUG })).toMatchObject({ ok: true });
+    await f.tick(0);
+    await f.waits.settled();
+    expect(systemTypes("config_changed")).toHaveLength(changes);
+    expect(f.box()?.doctorRuns).toHaveLength(doctorRuns ?? 0);
+    expect(trusts).toHaveLength(2);
+  });
+
+  it("refuses a slug gh does not know, a malformed one, an unknown machine and a path for the own machine, before anything changes", async () => {
+    await setup();
+    expect(await f.adminOp({ op: "repo_add", slug: "no/such" })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("Could not resolve to a Repository"),
+    });
+    expect(await f.adminOp({ op: "repo_add", slug: "https://github.com/a/a" })).toMatchObject({
+      ok: false,
+      error: "slug must be a GitHub <owner/name>",
+    });
+    expect(await f.adminOp({ op: "repo_add", slug: SLUG, machines: ["nope"] })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('no machine named "nope"'),
+    });
+    expect(
+      await f.adminOp({ op: "repo_add", slug: SLUG, paths: { [LOCAL]: "/srv/a" } }),
+    ).toMatchObject({ ok: false, error: expect.stringContaining("supervisor's own machine") });
+    expect(systemTypes("repo_added")).toEqual([]);
+    expect((await f.client.request("config_get", { path: "repos" })).result).toEqual({});
+  });
+
+  it("an adopted path goes to hosts.<m>.repos and the box's doctor adopts it", async () => {
+    await setup();
+    theBox().answers.doctor = reportWith([{ ...clone(SLUG, "/srv/mine"), managed: false }]);
+    const r = await f.adminOp({
+      op: "repo_add",
+      slug: SLUG,
+      machines: [PEER],
+      paths: { [PEER]: "/srv/mine" },
+    });
+    expect(r).toMatchObject({ ok: true, result: { machines: [PEER] } });
+    expect((await f.client.request("config_get", { path: `hosts.${PEER}.repos` })).result).toEqual({
+      [SLUG]: "/srv/mine",
+    });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "ready";
+    });
+    expect(f.box()?.doctorRuns.at(-1)).toEqual({ fix: true, repos_add: [`${SLUG}=/srv/mine`] });
+    expect(trusts.map((t) => t.root)).toEqual(["/srv/mine", "/srv/mine"]);
+  });
+
+  it("a box whose ssh fails stays blocked with the error, and is retried on its next up", async () => {
+    await setup();
+    const box = theBox();
+    box.answers.doctor = new Error("ssh: connect to host box port 22: Connection refused");
+    await f.adminOp({ op: "repo_add", slug: SLUG, machines: [PEER] });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "blocked";
+    });
+    expect((await f.verdict(PEER))?.repos[SLUG]?.reasons).toEqual([
+      "ssh: connect to host box port 22: Connection refused",
+    ]);
+    expect(systemTypes("repo_clone_run").at(-1)?.data).toMatchObject({
+      machine: PEER,
+      slug: SLUG,
+      ok: false,
+      error: "ssh: connect to host box port 22: Connection refused",
+    });
+    expect(trusts).toEqual([]);
+
+    // The box goes down and comes back: the add runs again.
+    box.answers.doctor = reportWith([clone(SLUG, BOX_CLONE)]);
+    await f.lwt();
+    await f.beat();
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "ready";
+    });
+    expect(trusts).toHaveLength(2);
+    expect(systemTypes("repo_clone_run").at(-1)?.data).toMatchObject({ machine: PEER, ok: true });
+  });
+
+  it("the own machine without a clone is blocked with the command to make one", async () => {
+    await setup();
+    f.exec.on(["git", "-C", localClone, "rev-parse", "--show-toplevel"], {
+      code: 128,
+      stderr: "fatal: cannot change to it\n",
+    });
+    await f.adminOp({ op: "repo_add", slug: SLUG, machines: [LOCAL] });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(LOCAL)) === "blocked";
+    });
+    expect((await f.verdict(LOCAL))?.repos[SLUG]?.reasons[0]).toContain(
+      `gh repo clone ${SLUG} ${localClone}`,
+    );
+  });
+
+  it("a spawn into a root repo_add trusted opens no repo_untrusted, even when the box's file does not say so", async () => {
+    // Agents start under the box's default profile.
+    await setup({ profile: false });
+    const box = theBox();
+    // The wave's clone on the box is hosts.box.repo; the add adopts it there.
+    const repo = (await f.client.request("config_get", { path: `hosts.${PEER}.repo` }))
+      .result as string;
+    box.answers.doctor = reportWith([{ ...clone(SLUG, repo), managed: false }]);
+    box.readTrust = async () => ({});
+    await f.adminOp({ op: "repo_add", slug: SLUG, machines: [PEER], paths: { [PEER]: repo } });
+    await eventually(async () => {
+      await f.tick(0);
+      return systemTypes("repo_trusted").length === 1;
+    });
+    await f.submit("w1", "", `  T1: { issue: 42, host: ${PEER} }\n`);
+    await eventually(async () => {
+      await f.tick();
+      return (box.launches.length ?? 0) > 0;
+    });
+    expect(f.journal("w1").filter((e) => e.type === "decision_opened")).toEqual([]);
+  });
+
+  it("a restart keeps what repo_add trusted and what it left blocked", async () => {
+    await setup();
+    theBox().answers.doctor = new Error("ssh: timed out");
+    await f.adminOp({ op: "repo_add", slug: SLUG, machines: [PEER] });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "blocked";
+    });
+    await f.restart();
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "blocked";
+    });
+    expect((await f.verdict(PEER))?.repos[SLUG]?.reasons).toEqual(["ssh: timed out"]);
+  });
+});
+
+describe("repo_remove (admin)", () => {
+  it("drops config and tells the box, never deleting a clone: the answer names its path", async () => {
+    await setup();
+    await f.adminOp({ op: "repo_add", slug: SLUG, machines: [PEER] });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "ready";
+    });
+    const r = await f.adminOp({ op: "repo_remove", slug: SLUG, machines: [PEER] });
+    expect(r).toMatchObject({
+      ok: true,
+      result: {
+        slug: SLUG,
+        machines: [PEER],
+        clones: { [PEER]: BOX_CLONE },
+        peers: { [PEER]: "removed" },
+      },
+    });
+    expect(f.box()?.doctorRuns.at(-1)).toEqual({ fix: false, repos_remove: [SLUG] });
+    expect((await f.client.request("config_get", { path: "repos" })).result).toEqual({});
+    expect(systemTypes("repo_removed").at(-1)?.data).toEqual({
+      by: "admin-1",
+      slug: SLUG,
+      machines: [PEER],
+      clones: { [PEER]: BOX_CLONE },
+    });
+    expect(await f.adminOp({ op: "repo_remove", slug: "b/b" })).toMatchObject({
+      ok: false,
+      error: "b/b is not a configured repository",
+    });
+  });
+
+  it("removing one machine from `all` keeps the others", async () => {
+    await setup();
+    await f.adminOp({ op: "repo_add", slug: SLUG });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "ready";
+    });
+    await f.adminOp({ op: "repo_remove", slug: SLUG, machines: [PEER] });
+    expect((await f.client.request("config_get", { path: "repos" })).result).toEqual({
+      [SLUG]: { machines: [LOCAL] },
+    });
+  });
+
+  it("repo_add and repo_remove are refused on the mailbox (admin ops)", async () => {
+    await setup();
+    expect(await f.client.request("repo_add", { slug: SLUG })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("answered only on volley/_system/auth/ops/"),
+    });
+  });
+});
+
+describe("a profile signed in later (claude_signin_done)", () => {
+  let env: DaemonEnv;
+  afterEach(() => env.cleanup());
+
+  it("trusts every repository assigned to its machine in that profile, one repo_trusted each", async () => {
+    env = await makeDaemonEnv();
+    const PROFILE = "/path/to/home/.volley/claude/work";
+    writeFileSync(
+      join(env.home, "config.yaml"),
+      "hosts:\n  peer-a:\n    target: dev@peer-a\n    volley_dir: /opt/volley\n    repos:\n      a/a: /srv/a\n      b/b: /srv/b\n    tunnel: { remote_port: 21883, supervise: false }\n",
+    );
+    const b = fakeSigninBox({
+      signInAfter: 3,
+      files: {
+        [`${PROFILE}/.claude.json`]: JSON.stringify({
+          userID: "c0ffee",
+          oauthAccount: { emailAddress: "owner@example.com", organizationName: "Example Org" },
+        }),
+      },
+    });
+    const root = join(tempDir("volleyd-claude-"), "claude");
+    const daemon = await env.start({
+      claude: { root, exec: b.exec, signinPollMs: 20, signinTimeoutMs: 5000, forwardSettleMs: 20 },
+      spawner: { remoteExec: b.exec },
+    });
+    const waits = journalWait(env.home, () => daemon);
+    const client = await ControlClient.connect(env.broker.url, NS);
+    try {
+      await client.request("claude_account_add", { label: "Work", machine: "peer-a" });
+      await waits.event("_system", "claude_signin_done");
+      const trusted = () =>
+        readJournalFile(join(env.home, "waves", "_system", "journal.jsonl")).filter(
+          (e) => e.type === "repo_trusted",
+        );
+      await eventually(() => trusted().length === 2);
+      expect(trusted().map((e) => e.data)).toEqual([
+        {
+          machine: "peer-a",
+          repo: "a/a",
+          root: "/srv/a",
+          accounts: ["work"],
+          keys: [preconditionKey({ machine: "dev@peer-a", profile: PROFILE, root: "/srv/a" })],
+        },
+        {
+          machine: "peer-a",
+          repo: "b/b",
+          root: "/srv/b",
+          accounts: ["work"],
+          keys: [preconditionKey({ machine: "dev@peer-a", profile: PROFILE, root: "/srv/b" })],
+        },
+      ]);
+      // Written in that profile's own .claude.json on the box.
+      const cfg = JSON.parse(b.box.files.get(`${PROFILE}/.claude.json`) ?? "{}") as {
+        projects?: Record<string, { hasTrustDialogAccepted?: boolean }>;
+      };
+      expect(cfg.projects?.["/srv/a"]?.hasTrustDialogAccepted).toBe(true);
+      expect(cfg.projects?.["/srv/b"]?.hasTrustDialogAccepted).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+});
