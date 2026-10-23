@@ -22,3 +22,19 @@ export function accentFor(waveId: string): string {
   for (let i = 0; i < waveId.length; i++) h = Math.imul(h ^ waveId.charCodeAt(i), 0x01000193);
   return ACCENT_PALETTE[(h >>> 0) % ACCENT_PALETTE.length] as string;
 }
+
+/**
+ * One palette hue per cluster of a wave's overlap plan, in plan order, skipping the wave's own
+ * accent so a cluster's hull never reads as the wave: cluster id → `ACCENT_PALETTE` index.
+ */
+export function clusterHues(
+  clusters: readonly { id: string }[],
+  waveId: string,
+): Map<string, number> {
+  const own = ACCENT_PALETTE.indexOf(accentFor(waveId));
+  const free = ACCENT_PALETTE.map((_, i) => i).filter((i) => i !== own);
+  return new Map(clusters.map((c, i) => [c.id, free[i % free.length] as number]));
+}
+
+/** A cluster's palette colour from its `clusterHues` index (`ACCENT_PALETTE`, wrapping). */
+export const hueOf = (hue: number): string => ACCENT_PALETTE[hue % ACCENT_PALETTE.length] as string;
