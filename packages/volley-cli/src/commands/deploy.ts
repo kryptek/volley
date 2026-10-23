@@ -458,7 +458,7 @@ reconciles on start.
 Then every paired machine (volleyd's peers.json and hosts.<name>), one at a time over its ssh
 target, in its volley checkout: fetch tags, check the tag out, bun install --frozen-lockfile
 (recording the bun.lock it installed from), restart volley peer run, and run its doctor; one
-health line each (athena: v0.6.4 ✓ eligible). A machine that fails a step after its checkout
+health line each (box-a: v0.6.4 ✓ eligible). A machine that fails a step after its checkout
 goes back to its previous ref (checkout, install, restart) and is named with the step and why;
 the supervisor and the other machines stay on the tag, and the deploy exits 1. A failed deploy
 of the supervisor touches no paired machine.

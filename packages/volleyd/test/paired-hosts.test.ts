@@ -13,7 +13,7 @@ describe("pairedHosts", () => {
       JSON.stringify({
         peers: {
           zeta: { target: "dev@zeta", joined_at: at },
-          athena: { target: "dev@athena-old", joined_at: at },
+          "box-a": { target: "dev@box-a-old", joined_at: at },
           gone: { target: "dev@gone", joined_at: at },
           nodir: { target: "dev@nodir", joined_at: at },
           leaving: { target: "dev@leaving", joined_at: at },
@@ -25,8 +25,8 @@ describe("pairedHosts", () => {
       join(home, "config.yaml"),
       [
         "hosts:",
-        "  athena:",
-        "    target: dev@athena",
+        "  box-a:",
+        "    target: dev@box-a",
         "    volley_dir: /path/to/volley",
         "  zeta:",
         "    volley_dir: /path/to/zeta/volley",
@@ -43,7 +43,7 @@ describe("pairedHosts", () => {
     );
     expect(pairedHosts(home)).toEqual({
       hosts: [
-        { name: "athena", target: "dev@athena", volley_dir: "/path/to/volley" },
+        { name: "box-a", target: "dev@box-a", volley_dir: "/path/to/volley" },
         { name: "zeta", target: "dev@zeta", volley_dir: "/path/to/zeta/volley" },
       ],
       problems: [
@@ -58,12 +58,12 @@ describe("pairedHosts", () => {
     expect(pairedHosts(home)).toEqual({ hosts: [], problems: [] });
     writeFileSync(
       join(home, "peers.json"),
-      JSON.stringify({ peers: { athena: { target: "dev@athena", joined_at: "x" } } }),
+      JSON.stringify({ peers: { "box-a": { target: "dev@box-a", joined_at: "x" } } }),
     );
     writeFileSync(join(home, "config.yaml"), "hosts: [\n");
     const r = pairedHosts(home);
     expect(r.hosts).toEqual([]);
-    expect(r.problems[0]?.name).toBe("athena");
+    expect(r.problems[0]?.name).toBe("box-a");
     expect(r.problems[0]?.why).toContain("config.yaml");
   });
 });

@@ -196,6 +196,8 @@ export const PEER_DEFAULTS = {
   heartbeat_ms: 30_000,
   ssh_connect_timeout_s: 10,
   ssh_alive_interval_s: 15,
+  /** Unanswered keepalives before ssh gives up: a dropped link fails the step, not hangs it. */
+  ssh_alive_count_max: 3,
   answer_timeout_s: 30,
   /** How long join waits for the fresh service's tunnel before leaving registration to it. */
   register_attempts: 10,

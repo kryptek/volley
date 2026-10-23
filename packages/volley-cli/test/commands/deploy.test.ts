@@ -325,8 +325,8 @@ describe("volley deploy", () => {
 
 describe("volley deploy: paired machines", () => {
   const twoPeers = () => [
-    fakePeerHost("athena", { head: { tag: "v0.4.0" } }),
-    fakePeerHost("hermes", { head: { tag: "v0.4.0" } }),
+    fakePeerHost("box-a", { head: { tag: "v0.4.0" } }),
+    fakePeerHost("box-b", { head: { tag: "v0.4.0" } }),
   ];
 
   it("after the supervisor, takes every paired machine to the tag with one health line each", async () => {
@@ -335,32 +335,32 @@ describe("volley deploy: paired machines", () => {
     expect(await m.run(["v0.5.0"])).toBe(0);
     const out = m.io.readStdout();
     // The supervisor first: its restarts precede any peer command.
-    expect(out.indexOf("ok      health-check")).toBeLessThan(out.indexOf("athena: fetch tags"));
+    expect(out.indexOf("ok      health-check")).toBeLessThan(out.indexOf("box-a: fetch tags"));
     for (const p of peers) {
       expect(p.version()).toBe("0.5.0");
       expect(p.synced()).toBe("synced");
       expect(p.state.restarts).toBe(1);
       expect(p.lines().at(-1)).toContain("peer doctor --json");
     }
-    expect(out).toContain("athena: v0.5.0 ✓ eligible\n");
-    expect(out).toContain("hermes: v0.5.0 ✓ eligible\n");
+    expect(out).toContain("box-a: v0.5.0 ✓ eligible\n");
+    expect(out).toContain("box-b: v0.5.0 ✓ eligible\n");
     expect(m.io.readStderr()).toBe("");
   });
 
   it("a machine that fails rolls back alone: the others and the supervisor stay on the tag, exit 1", async () => {
     const peers = twoPeers();
-    const [athena, hermes] = peers as [FakePeer, FakePeer];
-    hermes.fail("bun install --frozen-lockfile", { atVersion: "0.5.0", stderr: "error: no space" });
+    const [boxA, boxB] = peers as [FakePeer, FakePeer];
+    boxB.fail("bun install --frozen-lockfile", { atVersion: "0.5.0", stderr: "error: no space" });
     const m = machine({ head: { tag: "v0.4.0" }, peers });
     expect(await m.run(["v0.5.0"])).toBe(1);
     expect(m.f.versionAt()).toBe("0.5.0");
-    expect(athena.version()).toBe("0.5.0");
-    expect(hermes.version()).toBe("0.4.0");
-    expect(hermes.state.restarts).toBe(1);
+    expect(boxA.version()).toBe("0.5.0");
+    expect(boxB.version()).toBe("0.4.0");
+    expect(boxB.state.restarts).toBe(1);
     const out = m.io.readStdout();
-    expect(out).toContain("athena: v0.5.0 ✓ eligible\n");
-    expect(out).toContain("hermes: failed at install (error: no space); rolled back to v0.4.0\n");
-    expect(m.io.readStderr()).toContain("hermes");
+    expect(out).toContain("box-a: v0.5.0 ✓ eligible\n");
+    expect(out).toContain("box-b: failed at install (error: no space); rolled back to v0.4.0\n");
+    expect(m.io.readStderr()).toContain("box-b");
   });
 
   it("a failed supervisor deploy touches no paired machine", async () => {
@@ -395,21 +395,21 @@ describe("volley deploy: paired machines", () => {
 
   it("--only <machine> deploys that machine alone, once the supervisor runs the tag", async () => {
     const peers = twoPeers();
-    const [athena, hermes] = peers as [FakePeer, FakePeer];
+    const [boxA, boxB] = peers as [FakePeer, FakePeer];
     const m = machine({ head: { tag: "v0.5.0" }, peers });
-    expect(await m.run(["v0.5.0", "--only", "hermes"])).toBe(0);
+    expect(await m.run(["v0.5.0", "--only", "box-b"])).toBe(0);
     expect(m.f.lines().some((l) => l.includes("kickstart"))).toBe(false);
-    expect(athena.ran).toEqual([]);
-    expect(hermes.version()).toBe("0.5.0");
-    expect(m.io.readStdout()).toContain("hermes: v0.5.0 ✓ eligible\n");
+    expect(boxA.ran).toEqual([]);
+    expect(boxB.version()).toBe("0.5.0");
+    expect(m.io.readStdout()).toContain("box-b: v0.5.0 ✓ eligible\n");
     // Not a paired machine, or the supervisor elsewhere: usage errors, nothing runs.
     const n = machine({ head: { tag: "v0.5.0" }, peers: twoPeers() });
     expect(await n.run(["v0.5.0", "--only", "zeus"])).toBe(2);
     expect(n.io.readStderr()).toContain("zeus");
     const o = machine({ head: { tag: "v0.4.0" }, peers: twoPeers() });
-    expect(await o.run(["v0.5.0", "--only", "hermes"])).toBe(2);
+    expect(await o.run(["v0.5.0", "--only", "box-b"])).toBe(2);
     expect(o.io.readStderr()).toContain("the supervisor runs v0.4.0");
-    expect(await o.run(["v0.5.0", "--only", "hermes", "--skip-peers"])).toBe(2);
+    expect(await o.run(["v0.5.0", "--only", "box-b", "--skip-peers"])).toBe(2);
   });
 
   it("a paired machine the deploy cannot reach from the records is named and fails the deploy", async () => {
@@ -420,8 +420,8 @@ describe("volley deploy: paired machines", () => {
       join(vd, "peers.json"),
       JSON.stringify({
         peers: {
-          athena: { target: "dev@athena", joined_at: "x" },
-          hermes: { target: "dev@hermes", joined_at: "x" },
+          "box-a": { target: "dev@box-a", joined_at: "x" },
+          "box-b": { target: "dev@box-b", joined_at: "x" },
           zeus: { target: "dev@zeus", joined_at: "x" },
         },
       }),

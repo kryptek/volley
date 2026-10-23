@@ -18,7 +18,7 @@ const run = async (h: ReturnType<typeof fakePeerHost>, tag = "v0.5.0") => {
 
 describe("deployPeer", () => {
   it("fetches, checks the tag out, installs and records the lock, restarts the service, runs the doctor", async () => {
-    const h = fakePeerHost("athena", { head: { tag: "v0.4.0" } });
+    const h = fakePeerHost("box-a", { head: { tag: "v0.4.0" } });
     const d = h.peer.volleyDir;
     const { r, lines } = await run(h);
     expect(h.lines()).toEqual([
@@ -37,19 +37,19 @@ describe("deployPeer", () => {
     expect(h.version()).toBe("0.5.0");
     // The doctor's own verdict on the deploy's install.
     expect(h.synced()).toBe("synced");
-    expect(r).toMatchObject({ name: "athena", ok: true, eligible: true, from: "v0.4.0" });
-    expect(r.line).toBe("athena: v0.5.0 ✓ eligible");
+    expect(r).toMatchObject({ name: "box-a", ok: true, eligible: true, from: "v0.4.0" });
+    expect(r.line).toBe("box-a: v0.5.0 ✓ eligible");
     expect(lines).toEqual([
-      "ok      athena: fetch tags",
-      "ok      athena: checkout v0.5.0 (detached)",
-      "ok      athena: bun install --frozen-lockfile",
-      "ok      athena: restart volley peer run",
-      "ok      athena: volley peer doctor",
+      "ok      box-a: fetch tags",
+      "ok      box-a: checkout v0.5.0 (detached)",
+      "ok      box-a: bun install --frozen-lockfile",
+      "ok      box-a: restart volley peer run",
+      "ok      box-a: volley peer doctor",
     ]);
   });
 
   it("a failed install checks the previous ref out again, reinstalls and restarts", async () => {
-    const h = fakePeerHost("hermes", { head: { tag: "v0.4.0" } });
+    const h = fakePeerHost("box-b", { head: { tag: "v0.4.0" } });
     h.fail("bun install --frozen-lockfile", {
       atVersion: "0.5.0",
       stderr: "error: lockfile had changes, but lockfile is frozen",
@@ -67,26 +67,26 @@ describe("deployPeer", () => {
     expect(h.synced()).toBe("synced");
     expect(r).toMatchObject({ ok: false, eligible: false, rolledBack: true });
     expect(r.line).toBe(
-      "hermes: failed at install (error: lockfile had changes, but lockfile is frozen); rolled back to v0.4.0",
+      "box-b: failed at install (error: lockfile had changes, but lockfile is frozen); rolled back to v0.4.0",
     );
   });
 
   it("a branch checkout rolls back to its branch", async () => {
-    const h = fakePeerHost("hermes", { head: { branch: "main" } });
+    const h = fakePeerHost("box-b", { head: { branch: "main" } });
     h.fail(
       `bun ${join(h.peer.volleyDir, "packages", "volley-cli", "src", "cli.ts")} peer doctor --json`,
     );
     const { r } = await run(h);
     expect(h.lines()).toContain(`git -C ${h.peer.volleyDir} checkout main --`);
     expect(h.state.head).toEqual({ branch: "main" });
-    expect(r.line).toMatch(/^hermes: failed at doctor \(.*\); rolled back to main$/);
+    expect(r.line).toMatch(/^box-b: failed at doctor \(.*\); rolled back to main$/);
   });
 
   it("a failed fetch or a dirty checkout changes nothing", async () => {
-    const h = fakePeerHost("athena", { head: { tag: "v0.4.0" } });
+    const h = fakePeerHost("box-a", { head: { tag: "v0.4.0" } });
     h.fail(`git -C ${h.peer.volleyDir} fetch --tags origin`, { stderr: "ssh: connect timed out" });
     const { r } = await run(h);
-    expect(r.line).toBe("athena: failed at fetch (ssh: connect timed out); nothing changed");
+    expect(r.line).toBe("box-a: failed at fetch (ssh: connect timed out); nothing changed");
     expect(h.version()).toBe("0.4.0");
     const dirty = fakePeerHost("zeta", { head: { tag: "v0.4.0" }, dirty: " M bun.lock\n" });
     const d = await run(dirty);
@@ -98,27 +98,27 @@ describe("deployPeer", () => {
 
   it("a doctor that names another version fails the machine and rolls it back", async () => {
     // The tag's checkout runs an older volley (its `volley` resolves elsewhere, say).
-    const h = fakePeerHost("athena", { head: { tag: "v0.4.0" }, doctorVersion: "0.4.0" });
+    const h = fakePeerHost("box-a", { head: { tag: "v0.4.0" }, doctorVersion: "0.4.0" });
     const { r } = await run(h);
     expect(r.line).toBe(
-      "athena: failed at doctor (volley peer doctor reports volley 0.4.0, not 0.5.0); rolled back to v0.4.0",
+      "box-a: failed at doctor (volley peer doctor reports volley 0.4.0, not 0.5.0); rolled back to v0.4.0",
     );
     expect(h.version()).toBe("0.4.0");
   });
 
   it("an upgraded machine with a failing check is reported, not rolled back", async () => {
-    const h = fakePeerHost("athena", { head: { tag: "v0.4.0" }, claudeSignedIn: false });
+    const h = fakePeerHost("box-a", { head: { tag: "v0.4.0" }, claudeSignedIn: false });
     const { r } = await run(h);
     expect(h.version()).toBe("0.5.0");
     expect(r).toMatchObject({ ok: true, eligible: false });
     expect(r.line).toBe(
-      "athena: v0.5.0 ✗ not eligible: claude.signin (Claude Code is not signed in)",
+      "box-a: v0.5.0 ✗ not eligible: claude.signin (Claude Code is not signed in)",
     );
   });
 });
 
 describe("peerFence", () => {
-  const peer = { name: "athena", target: "dev@athena", volleyDir: "/path/to/volley" };
+  const peer = { name: "box-a", target: "dev@box-a", volleyDir: "/path/to/volley" };
   const g = (...a: string[]) => ["git", "-C", "/path/to/volley", ...a];
   const fence = peerFence(peer, { tag: "v0.5.0", from: { kind: "branch", name: "main" } });
   const doctor = [
@@ -176,7 +176,7 @@ describe("peerFence", () => {
 
 describe("sshCommand", () => {
   it("sends one quoted command on stdin to a non-interactive bash over ssh", () => {
-    const s = sshCommand("dev@athena", {
+    const s = sshCommand("dev@box-a", {
       argv: ["bun", "install", "--frozen-lockfile"],
       cwd: "/path/to/my volley",
     });
@@ -187,18 +187,22 @@ describe("sshCommand", () => {
       "BatchMode=yes",
       "-o",
       "ConnectTimeout=10",
-      "dev@athena",
+      "-o",
+      "ServerAliveInterval=15",
+      "-o",
+      "ServerAliveCountMax=3",
+      "dev@box-a",
       "bash",
       "-s",
     ]);
     expect(s.input).toBe("cd '/path/to/my volley' && bun install --frozen-lockfile\n");
-    expect(sshCommand("dev@athena", { argv: [...RECORD_LOCK_ARGV] }).input).toContain("sh -c '");
+    expect(sshCommand("dev@box-a", { argv: [...RECORD_LOCK_ARGV] }).input).toContain("sh -c '");
   });
 });
 
 describe("peerPlan", () => {
   it("names each step and its commands, for the dry run", () => {
-    const peer = { name: "athena", target: "dev@athena", volleyDir: "/path/to/volley" };
+    const peer = { name: "box-a", target: "dev@box-a", volleyDir: "/path/to/volley" };
     const steps = peerPlan(peer, { kind: "tag", name: "v0.5.0" }, { fetch: true, doctor: true });
     expect(steps.map((s) => s.id)).toEqual(["fetch", "checkout", "install", "restart", "doctor"]);
     expect(steps[2]?.commands).toEqual([

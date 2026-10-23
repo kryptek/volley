@@ -58,6 +58,10 @@ export function sshCommand(target: string, c: Command): { argv: string[]; input:
       "BatchMode=yes",
       "-o",
       `ConnectTimeout=${PEER_DEFAULTS.ssh_connect_timeout_s}`,
+      "-o",
+      `ServerAliveInterval=${PEER_DEFAULTS.ssh_alive_interval_s}`,
+      "-o",
+      `ServerAliveCountMax=${PEER_DEFAULTS.ssh_alive_count_max}`,
       target,
       "bash",
       "-s",
@@ -171,14 +175,20 @@ export async function deployPeer(
       return { code: -1, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
     }
   };
-  const fail = (step: PeerStepId, why: string, tail: string, from?: Ref): PeerResult => ({
+  const fail = (
+    step: PeerStepId,
+    why: string,
+    tail: string,
+    from?: Ref,
+    rolledBack = false,
+  ): PeerResult => ({
     name: peer.name,
     ok: false,
     eligible: false,
     line: `${peer.name}: failed at ${step} (${why}); ${tail}`,
     ...(from !== undefined ? { from: refLabel(from) } : {}),
     failed: { step, why },
-    rolledBack: tail.startsWith("rolled back"),
+    rolledBack,
   });
 
   // Read-only: local changes, and where the checkout is now.
@@ -244,7 +254,9 @@ export async function deployPeer(
   }
   deps.report(`rolling back ${peer.name} to ${refLabel(from)}`);
   const back = await runSteps(peerPlan(peer, from, { fetch: false, doctor: false }), "rollback: ");
-  if (back === null) return fail(failed.id, failed.why, `rolled back to ${refLabel(from)}`, from);
+  if (back === null) {
+    return fail(failed.id, failed.why, `rolled back to ${refLabel(from)}`, from, true);
+  }
   return fail(
     failed.id,
     failed.why,
