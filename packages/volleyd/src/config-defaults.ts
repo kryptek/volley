@@ -236,6 +236,12 @@ export const DAEMON_DEFAULTS = {
   review_hunk_lines: 10,
   /** How often the pipeline re-checks CI on a head whose runs are still pending. */
   ci_poll_ms: 60_000,
+  /**
+   * How often a complete wave looks for its release branch's merged PR (the release reaching
+   * main), until its task issues are verified (autopilot/issues.ts); a failed issue write is
+   * retried after `ci_poll_ms`.
+   */
+  release_merge_poll_ms: 300_000,
   /** How long a head may have no CI run at all before the pipeline asks the owner. */
   ci_none_grace_ms: 900_000,
   /** Failed checks in a row after which the merge turn's holder passes the turn on (SPEC §4.6.17). */

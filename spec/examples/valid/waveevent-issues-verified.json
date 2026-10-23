@@ -1,0 +1,13 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-22T09:00:00.000Z",
+  "channel": "_waves/events",
+  "type": "issues_verified",
+  "payload": {
+    "wave": "2026-10-20-example",
+    "seq": 830,
+    "at": "2026-10-22T09:00:00.000Z",
+    "data": { "release_pr": 431, "closed": [412], "left_open": [413] }
+  }
+}
