@@ -5,7 +5,8 @@ import App from "../src/App";
 import { fitToArea, panToTopView } from "../src/canvas/useViewport";
 import { ARRANGE_ANIM_MS, FIRST_ARRANGE_MS } from "../src/layout/useAutoArrange";
 import { LOOK_STORAGE_KEY } from "../src/look/useLook";
-import { DeskStoreProvider } from "../src/store/context";
+import { DIGEST_AFTER_MS, DeskStoreProvider } from "../src/store/context";
+import { DIGEST_WAVE } from "../src/store/fixtures";
 import { INBOX_CHROME_H } from "../src/windows/inbox/NeedsYouWindow";
 import { WAVE_W } from "../src/windows/wave/WaveWindow";
 
@@ -36,6 +37,25 @@ const windows = (c: HTMLElement) =>
       `${w.style.left},${w.style.top}`,
     ]),
   );
+
+// jsdom lays nothing out, so a window's height is App's default for its kind (WAVE_H,
+// AGENT_H, machinesH; the list windows' chrome alone, a lower bound).
+const heightOf = (el: HTMLElement) => {
+  const label = el.getAttribute("aria-label") ?? "";
+  if (label === "Machines") return 80 + 76 * Math.max(1, el.querySelectorAll(".mrow-item").length);
+  if (label === "Needs you") return INBOX_CHROME_H;
+  if (label === "Wave coordinators") return 150;
+  return Number.parseFloat(el.style.width) === WAVE_W ? 440 : 470;
+};
+type Box = { x: number; y: number; w: number; h: number };
+const rect = (el: HTMLElement): Box => ({
+  x: Number.parseFloat(el.style.left),
+  y: Number.parseFloat(el.style.top),
+  w: Number.parseFloat(el.style.width),
+  h: heightOf(el),
+});
+const overlaps = (a: Box, b: Box) =>
+  a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 
 describe("opening a window from the dock (#404)", () => {
   const renderApp = () =>
@@ -94,32 +114,87 @@ describe("opening a window from the dock (#404)", () => {
     advance(FIRST_ARRANGE_MS + ARRANGE_ANIM_MS);
     fireEvent.click(dock().getByRole("button", { name: "Machines" }));
     advance(1000);
-    // jsdom lays nothing out, so a window's height is App's default for its kind (WAVE_H,
-    // AGENT_H, machinesH; the list windows' chrome alone, a lower bound).
-    const heightOf = (el: HTMLElement) => {
-      const label = el.getAttribute("aria-label") ?? "";
-      if (label === "Machines")
-        return 80 + 76 * Math.max(1, el.querySelectorAll(".mrow-item").length);
-      if (label === "Needs you") return INBOX_CHROME_H;
-      if (label === "Wave coordinators") return 150;
-      return Number.parseFloat(el.style.width) === WAVE_W ? 440 : 470;
-    };
-    const rect = (el: HTMLElement) => ({
-      x: Number.parseFloat(el.style.left),
-      y: Number.parseFloat(el.style.top),
-      w: Number.parseFloat(el.style.width),
-      h: heightOf(el),
-    });
     const m = rect(screen.getByRole("region", { name: "Machines" }));
     const others = [...container.querySelectorAll<HTMLElement>(".world .win")].filter(
       (el) => el.getAttribute("aria-label") !== "Machines",
     );
     expect(others.length).toBeGreaterThan(0);
     for (const el of others) {
-      const o = rect(el);
-      const overlaps = m.x < o.x + o.w && o.x < m.x + m.w && m.y < o.y + o.h && o.y < m.y + m.h;
-      expect(overlaps, el.getAttribute("aria-label") ?? "").toBe(false);
+      expect(overlaps(m, rect(el)), el.getAttribute("aria-label") ?? "").toBe(false);
     }
+  });
+});
+
+describe("showing a hidden wave again (#397, #404)", () => {
+  it("places its agents right of it, clear of every other window, at the same scale", () => {
+    const { container } = render(
+      <DeskStoreProvider demo>
+        <App />
+      </DeskStoreProvider>,
+    );
+    advance(FIRST_ARRANGE_MS + ARRANGE_ANIM_MS);
+    fireEvent.click(screen.getByRole("button", { name: "Hide leaderboard" }));
+    advance(1000);
+    fireEvent.click(screen.getByRole("button", { name: "Arrange & fit" }));
+    advance(ARRANGE_ANIM_MS);
+    const before = viewOf(container);
+    const others = windows(container);
+    expect(others.size).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Show leaderboard" }));
+    advance(1000);
+    expect(viewOf(container).s).toBe(before.s);
+    const wave = rect(screen.getByRole("region", { name: "leaderboard" }));
+    const shown = [...container.querySelectorAll<HTMLElement>(".world .win")].filter(
+      (el) => !others.has(el),
+    );
+    const agents = shown.filter((el) => el.getAttribute("aria-label") !== "leaderboard");
+    expect(agents.length).toBeGreaterThan(0);
+    for (const el of agents) {
+      expect(rect(el).x, el.getAttribute("aria-label") ?? "").toBeGreaterThanOrEqual(
+        wave.x + wave.w,
+      );
+    }
+    for (const el of shown) {
+      for (const [o, at] of others) {
+        expect(`${o.style.left},${o.style.top}`).toBe(at);
+        expect(
+          overlaps(rect(el), rect(o)),
+          `${el.getAttribute("aria-label")} vs ${o.getAttribute("aria-label")}`,
+        ).toBe(false);
+      }
+    }
+  });
+});
+
+describe("a digest's decision with Needs you closed (#404)", () => {
+  it("opens Needs you at the same scale, its top edge near the top, moving no other window", () => {
+    const { container } = render(
+      <DeskStoreProvider demo>
+        <App />
+      </DeskStoreProvider>,
+    );
+    advance(FIRST_ARRANGE_MS + ARRANGE_ANIM_MS);
+    fireEvent.click(
+      within(screen.getByRole("toolbar", { name: "Dock" })).getByRole("button", {
+        name: "Needs you",
+      }),
+    );
+    advance(DIGEST_AFTER_MS);
+    expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
+    const card = screen.getByRole("region", { name: DIGEST_WAVE });
+    const before = viewOf(container);
+    const others = windows(container);
+    fireEvent.click(card.querySelector("button.digest-id") as Element);
+    advance(1000);
+    const win = screen.getByRole("region", { name: "Needs you" });
+    const v = viewOf(container);
+    expect(v.s).toBe(before.s);
+    const area = fitToArea(SCREEN);
+    const top = v.y + Number.parseFloat(win.style.top) * v.s;
+    expect(top).toBeGreaterThanOrEqual(area.y);
+    expect(top).toBeLessThanOrEqual(area.y + 48);
+    for (const [el, at] of others) expect(`${el.style.left},${el.style.top}`).toBe(at);
   });
 });
 

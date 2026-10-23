@@ -672,6 +672,8 @@ export default function App() {
     const pin = pinOf(id);
     return pin?.mode === "place" ? { x: pin.x, y: pin.y } : moved[id];
   };
+  /** The arrange fit area: a list window (Needs you) is never taller (#397). */
+  const listArea = arrangeArea(screenSize);
   /** A window's default size: the coordinators or Needs you window, a wave window or an agent window. */
   const dims = (id: string) =>
     id === COORDS_ID
@@ -691,8 +693,6 @@ export default function App() {
     ...(machinesShown ? [MACHINES_ID] : []),
   ];
   const bounds = hudBounds(screenSize, narrow);
-  /** The arrange fit area: a list window (Needs you) is never taller (#397). */
-  const listArea = arrangeArea(screenSize);
   /** An anchored window's rect on screen (its measured size, or its default). */
   const hudRect = (id: string): Rect | undefined => {
     const pin = pinOf(id);

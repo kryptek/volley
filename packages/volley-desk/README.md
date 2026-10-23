@@ -60,6 +60,7 @@ Demo mode never opens a broker connection. It starts from the prototype's sample
 
 - Drag empty space to pan. A plain wheel or two-finger scroll also pans.
 - Zoom around the cursor with ⌘/Ctrl + wheel or a trackpad pinch. Scale is clamped to 0.3–1.6.
+- Over a scrolling list (a feed, a terminal, the YAML, the DAG, the Needs-you list, the look picker, a sheet) the wheel scrolls that list and never pans or zooms the canvas, even when the list is too short to scroll.
 - Drag a title bar to move a window. The move is divided by the zoom, so the window tracks the pointer. A pointer-down anywhere on a window brings it to the front.
 - Touch: one finger on empty canvas pans; two fingers pinch-zoom around their midpoint and pan with it, on empty canvas or over a window (anywhere but its title bar, a slider or a text field). Lifting one finger carries on panning with the other, without a jump, if it is on empty canvas.
 

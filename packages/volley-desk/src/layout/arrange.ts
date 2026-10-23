@@ -306,7 +306,7 @@ export function candidates(
  * there are none.
  */
 export function pickBest(scored: readonly { s: number; used: number }[]): number {
-  const top = Math.max(...scored.map((c) => c.s));
+  const top = scored.reduce((m, c) => Math.max(m, c.s), Number.NEGATIVE_INFINITY);
   let best = -1;
   scored.forEach((c, i) => {
     if (c.s < top - EPS) return;
