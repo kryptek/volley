@@ -10,7 +10,15 @@ import {
   reserve,
 } from "./placement";
 import type { WaveRecord } from "./reducer";
-import type { PipelineStage, TaskAgents, TaskId, TaskStage, Wave } from "./types";
+import type {
+  PipelineStage,
+  PlanCluster,
+  TaskAgents,
+  TaskId,
+  TaskStage,
+  TaskState,
+  Wave,
+} from "./types";
 
 /**
  * An admission verdict: how many more agents may start right now, and why not more.
@@ -29,6 +37,8 @@ export interface AdmitContext {
   /** Spawns this wave has used or committed to. */
   spawnsUsed: number;
   spawnBudget: number;
+  /** The overlap plan's clusters and their room (`clusterRooms`); absent: no cluster cap. */
+  clusters?: ClusterRooms;
 }
 
 /** Stages in which an admitted task no longer holds an agent slot. */
@@ -76,18 +86,14 @@ export function activeTasks(rec: WaveRecord): TaskId[] {
 
 /**
  * Tasks that may start: queued, not yet admitted, every `after` dependency done. Ordered by
- * critical path length (longest first), then by how many active tasks share a `files` hint
- * (fewest first), then by id.
+ * critical path length (longest first), then by id. Tasks sharing files are kept apart by their
+ * cluster's cap (`clusterRooms`), not by the order.
  */
 export function ready(rec: WaveRecord): TaskId[] {
   const { wave, state } = rec;
   if (wave === null || state === null || state.status !== "running") return [];
   const stage = new Map(state.tasks.map((t) => [t.id, t.stage]));
   const cp = criticalPaths(wave);
-  const activeFiles = activeTasks(rec).map((id) => new Set(wave.tasks[id]?.files ?? []));
-  const overlap = (id: TaskId) =>
-    activeFiles.filter((files) => (wave.tasks[id]?.files ?? []).some((f) => files.has(f))).length;
-
   return state.tasks
     .filter(
       (t) =>
@@ -96,27 +102,130 @@ export function ready(rec: WaveRecord): TaskId[] {
         (wave.tasks[t.id]?.after ?? []).every((d) => stage.get(d) === "done"),
     )
     .map((t) => t.id)
-    .sort(
-      (a, b) =>
-        (cp[b] ?? 0) - (cp[a] ?? 0) || overlap(a) - overlap(b) || (a < b ? -1 : a > b ? 1 : 0),
-    );
+    .sort((a, b) => (cp[b] ?? 0) - (cp[a] ?? 0) || (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/** Stages in which a cluster member holds one of its cluster's slots (SPEC §4.6.22). */
+export const IN_FLIGHT: ReadonlySet<TaskStage> = new Set([
+  "implement",
+  "spec_review",
+  "quality_review",
+  "fixup",
+]);
+
+/** Each cluster of the overlap plan: who holds its slots, how many it has, how it runs now. */
+export interface ClusterRooms {
+  /** Each clustered task's cluster. */
+  of: Record<TaskId, string>;
+  clusters: Record<string, { cap: number; holding: TaskId[]; state: PlanCluster["state"] }>;
+}
+
+/**
+ * Whether cluster member `t` holds a slot: in a stage from `implement` to `fixup`, admitted and
+ * not spawned yet, or parked (blocked, awaiting a decision) after its implementer started. Under
+ * `hold` a gated member (`merge_ready`) holds one too: queued members wait until it merges.
+ */
+function holdsSlot(rec: WaveRecord, t: TaskState, hold: boolean): boolean {
+  if (IN_FLIGHT.has(t.stage)) return true;
+  if (t.stage === "queued") return rec.admitted.includes(t.id);
+  if (t.stage === "merge_ready") return hold;
+  if (t.stage === "blocked" || t.stage === "awaiting_decision")
+    return t.agents.implementer !== undefined;
+  return false;
+}
+
+/**
+ * The overlap plan's clusters with their effective cap: the plan's `cap` (none: unbounded), 1
+ * under `hold`; `train` keeps the plan's. Empty without a plan.
+ */
+export function clusterRooms(rec: WaveRecord): ClusterRooms {
+  const out: ClusterRooms = { of: {}, clusters: {} };
+  const tasks = new Map(rec.state?.tasks.map((t) => [t.id, t]) ?? []);
+  for (const c of rec.state?.overlap_plan?.clusters ?? []) {
+    const hold = c.state === "hold";
+    const cap = hold ? 1 : (c.strategy.cap ?? Number.POSITIVE_INFINITY);
+    const holding = c.tasks.filter((id) => {
+      const t = tasks.get(id);
+      return t !== undefined && holdsSlot(rec, t, hold);
+    });
+    for (const id of c.tasks) out.of[id] = c.id;
+    out.clusters[c.id] = { cap, holding, state: c.state };
+  }
+  return out;
+}
+
+/** How many more of `cluster`'s members may start now (unbounded: no cap, or no such cluster). */
+export function clusterRoom(rec: WaveRecord, cluster: string): number {
+  const c = clusterRooms(rec).clusters[cluster];
+  return c === undefined ? Number.POSITIVE_INFINITY : Math.max(0, c.cap - c.holding.length);
+}
+
+/**
+ * A gate over the ready tasks in order: `check(id)` is null when the task's cluster has room,
+ * else why it holds the task (`cluster A: 4 in flight (…)`); `take(id)` gives an admitted task
+ * its slot.
+ */
+function clusterGate(rooms: ClusterRooms | undefined): {
+  check: (id: TaskId) => string | null;
+  take: (id: TaskId) => void;
+} {
+  const holding = new Map(
+    Object.entries(rooms?.clusters ?? {}).map(([c, r]) => [c, [...r.holding]]),
+  );
+  return {
+    check: (id) => {
+      const c = rooms?.of[id];
+      const r = c === undefined ? undefined : rooms?.clusters[c];
+      const held = c === undefined ? undefined : holding.get(c);
+      if (c === undefined || r === undefined || held === undefined || held.length < r.cap)
+        return null;
+      const ids = [...held].sort().join(", ");
+      return r.state === "hold"
+        ? `cluster ${c} (hold): ${held.length} in flight or gated (${ids})`
+        : `cluster ${c}: ${held.length} in flight (${ids})`;
+    },
+    take: (id) => {
+      const c = rooms?.of[id];
+      if (c !== undefined) holding.get(c)?.push(id);
+    },
+  };
 }
 
 /**
  * Pick which ready tasks to start: at most `admission.allow`, never past the hard ceiling or the
  * wave's spawn budget. Lowering a limit below current use admits nothing and preempts nothing.
- * `reasons` explains every limit that held a ready task back.
+ * `reasons` explains every limit that held a ready task back; `held` names each ready task its
+ * cluster holds (`clusterRooms`), with why.
  */
 export function admit(
   readyTasks: TaskId[],
   admission: Admission,
   ctx: AdmitContext,
-): { admit: TaskId[]; reasons: string[] } {
+): { admit: TaskId[]; held: Record<TaskId, string>; reasons: string[] } {
   const ceilingRoom = Math.max(0, ctx.hardCeiling - ctx.live);
   const budgetRoom = Math.max(0, ctx.spawnBudget - ctx.spawnsUsed);
-  const n = Math.min(readyTasks.length, Math.max(0, admission.allow), ceilingRoom, budgetRoom);
+  const limit = Math.min(Math.max(0, admission.allow), ceilingRoom, budgetRoom);
+  // A member of a cluster with no room is held with why; the tasks after it are not. Only an
+  // admitted task takes a slot: one the limits trim holds none, so no member is held in its name.
+  const room = clusterGate(ctx.clusters);
+  const held: Record<TaskId, string> = {};
+  const admitted: TaskId[] = [];
+  let eligible = 0;
+  for (const id of readyTasks) {
+    const why = room.check(id);
+    if (why !== null) {
+      held[id] = why;
+      continue;
+    }
+    eligible++;
+    if (admitted.length < limit) {
+      room.take(id);
+      admitted.push(id);
+    }
+  }
+  const n = admitted.length;
   const reasons = [...admission.reasons];
-  if (n < readyTasks.length) {
+  if (n < eligible) {
     if (ceilingRoom <= n) {
       reasons.push(`hard ceiling reached: ${ctx.live + n}/${ctx.hardCeiling} live agents`);
     }
@@ -124,7 +233,7 @@ export function admit(
       reasons.push(`spawn budget exhausted: ${ctx.spawnsUsed + n}/${ctx.spawnBudget} spawns`);
     }
   }
-  return { admit: readyTasks.slice(0, n), reasons };
+  return { admit: admitted, held, reasons };
 }
 
 /** One task `admitPlacing` admitted, and where. */
@@ -141,8 +250,9 @@ export interface PlacedAdmission {
  * its machine: the supervisor's own by the wave's verdict `gate` (its local allowance counted
  * down), a peer by the global signals of `gate` plus its own verdict (`hostGate`). Each admission
  * is reserved in the snapshot, so the next placement sees it (a heavy one takes its slots). A task
- * with no eligible machine, or whose machine holds starts, is `held` with why, and does not stop
- * the tasks after it. A closed gate (paused, kill switch, a global signal) admits nothing.
+ * whose cluster has no room (`clusterRooms`, checked before placement), with no eligible machine,
+ * or whose machine holds starts, is `held` with why, and does not stop the tasks after it. A
+ * closed gate (paused, kill switch, a global signal) admits nothing.
  */
 export function admitPlacing(
   readyTasks: TaskId[],
@@ -169,6 +279,7 @@ export function admitPlacing(
   let s = snap;
   let localLeft = gate.allow;
   let budget = false;
+  const room = clusterGate(ctx.clusters);
   for (const id of readyTasks) {
     const live = ctx.live + admitted.length;
     if (live >= ctx.hardCeiling) {
@@ -183,6 +294,12 @@ export function admitPlacing(
     }
     const def = wave.tasks[id];
     if (def === undefined) continue;
+    // The cluster first: a task its cluster holds is not placed (nor held twice).
+    const why = room.check(id);
+    if (why !== null) {
+      held[id] = why;
+      continue;
+    }
     const p = place(def, wave, s, o);
     if (p.host === null) {
       held[id] = p.why;
@@ -197,6 +314,7 @@ export function admitPlacing(
       continue;
     }
     s = reserve(s, p.host, def, wave);
+    room.take(id);
     admitted.push({ id, placement: p, placed });
     if (local) localLeft--;
   }

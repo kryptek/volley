@@ -135,7 +135,7 @@ describe("pause / resume", () => {
       spawnsUsed: 0,
       spawnBudget: 10,
     });
-    expect(verdict).toEqual({ admit: [], reasons: ["wave paused"] });
+    expect(verdict).toEqual({ admit: [], held: {}, reasons: ["wave paused"] });
     expect(rec.admitted).toEqual(["A"]);
     expect(task("B")?.why_waiting).toBe("wave paused");
 

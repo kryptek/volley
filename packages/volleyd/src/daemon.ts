@@ -80,6 +80,7 @@ import {
 import { ciStateOf } from "./artifacts";
 import { budgetUsed } from "./autopilot/budgets";
 import { carryHandoff, carryPicker } from "./autopilot/carry";
+import { churnOf, strategySwitch } from "./autopilot/churn";
 import { type Digest, type DigestTrigger, digestOf, summaryLine } from "./autopilot/digest";
 import { type GithubStatus, githubStatusCache } from "./autopilot/github-status";
 import {
@@ -399,6 +400,7 @@ import {
   admit,
   admitPlacing,
   budgetRaise,
+  clusterRooms,
   spawnBudget,
   spawnsOutstanding,
   spawnsUsed,
@@ -2968,6 +2970,7 @@ export class Daemon {
     for (const wave of this.waves.keys()) {
       await this.settleFixers(wave);
       await this.holdPass(wave);
+      await this.churnPass(wave);
       await this.completeIfSettled(wave);
       await this.releaseGoIfVerified(wave);
     }
@@ -2998,10 +3001,12 @@ export class Daemon {
         hardCeiling: eff.hard_ceiling,
         spawnsUsed: spawnsUsed(rec),
         spawnBudget: spawnBudget(rec.wave, eff.spawn_budget_multiplier, rec.budget_raised ?? 0),
+        clusters: clusterRooms(rec),
       });
       live += verdict.admit.length;
       const before = JSON.stringify(this.heldBack.get(wave) ?? []);
       this.heldBack.set(wave, verdict.reasons);
+      const heldChanged = this.noteHeld(wave, verdict.held);
       for (const task of verdict.admit)
         await this.append(wave, { type: "task_admitted", task, data: {} });
       // Ready tasks the budget holds back: never silent.
@@ -3010,7 +3015,10 @@ export class Daemon {
         verdict.reasons.some((r) => r.startsWith("spawn budget exhausted"))
       )
         await this.budgetExhausted(wave, null);
-      if (verdict.admit.length === 0 && before !== JSON.stringify(verdict.reasons)) {
+      if (
+        heldChanged ||
+        (verdict.admit.length === 0 && before !== JSON.stringify(verdict.reasons))
+      ) {
         await this.publishState(wave);
       }
     }
@@ -3060,7 +3068,6 @@ export class Daemon {
     eff: Tunables,
   ): Promise<{ admitted: number; reasons: string[]; budget: boolean; changed: boolean }> {
     const w = rec.wave as Wave;
-    const prefix = `${wave}/`;
     const gate = admissionFor(rec, this.killSwitch, this.pressure(wave));
     const r = admitPlacing(
       candidates,
@@ -3074,20 +3081,10 @@ export class Daemon {
         hardCeiling: eff.hard_ceiling,
         spawnsUsed: spawnsUsed(rec),
         spawnBudget: spawnBudget(w, eff.spawn_budget_multiplier, rec.budget_raised ?? 0),
+        clusters: clusterRooms(rec),
       },
     );
-    let changed = false;
-    for (const k of [...this.heldTask.keys()]) {
-      if (k.startsWith(prefix) && r.held[k.slice(prefix.length)] === undefined) {
-        this.heldTask.delete(k);
-        changed = true;
-      }
-    }
-    for (const [id, why] of Object.entries(r.held)) {
-      if (this.heldTask.get(`${prefix}${id}`) === why) continue;
-      this.heldTask.set(`${prefix}${id}`, why);
-      changed = true;
-    }
+    const changed = this.noteHeld(wave, r.held);
     for (const { id, placement: p, placed } of r.admit) {
       if (placed && rec.state?.tasks.find((t) => t.id === id)?.placement === undefined) {
         await this.append(wave, {
@@ -3111,6 +3108,27 @@ export class Daemon {
       for (const host of hosts) await this.publishReadiness(host);
     }
     return { admitted: r.admit.length, reasons: r.reasons, budget: r.budget, changed };
+  }
+
+  /**
+   * Remember why admission held each ready task (its why_waiting), and forget the tasks no longer
+   * held. True when anything changed.
+   */
+  private noteHeld(wave: WaveId, held: Record<TaskId, string>): boolean {
+    const prefix = `${wave}/`;
+    let changed = false;
+    for (const k of [...this.heldTask.keys()]) {
+      if (k.startsWith(prefix) && held[k.slice(prefix.length)] === undefined) {
+        this.heldTask.delete(k);
+        changed = true;
+      }
+    }
+    for (const [id, why] of Object.entries(held)) {
+      if (this.heldTask.get(`${prefix}${id}`) === why) continue;
+      this.heldTask.set(`${prefix}${id}`, why);
+      changed = true;
+    }
+    return changed;
   }
 
   /**
@@ -11340,7 +11358,7 @@ export class Daemon {
       const t = wave.tasks[id];
       const got = read.footprints[id];
       // The file's footprint, else the one read from the issue (journal-only: the definition's
-      // `files` drive the scheduler's same-file ordering and stay as written).
+      // `files` stay as written).
       const files = t !== undefined && t.files.length > 0 ? t.files : (issueFiles[id] ?? []);
       const footprint =
         t?.footprint ?? (got !== undefined && "footprint" in got ? got.footprint : undefined);
@@ -12009,6 +12027,37 @@ export class Daemon {
       return answer();
     })().finally(() => this.issueChecks.delete(w.wave));
     return { ok: true, defer };
+  }
+
+  /**
+   * The churn monitor (autopilot/churn.ts): each cluster of a running wave's overlap plan that
+   * churns anyway switches strategy (`hold`, `train`) or, calm again, goes back to the plan's,
+   * journaled `cluster_strategy_changed` at most once per `cluster_strategy_min_interval_ms`.
+   * Admission reads the cluster's state (`clusterRooms`): on hold its cap is 1.
+   */
+  private async churnPass(wave: WaveId): Promise<void> {
+    const log = this.waves.get(wave);
+    const clusters = log?.record.state?.overlap_plan?.clusters ?? [];
+    if (log === undefined || log.record.state?.status !== "running" || clusters.length === 0)
+      return;
+    const events = log.journal.readAll();
+    const now = this.now();
+    const churn = churnOf(log.record, events, now);
+    for (const c of clusters) {
+      const change = strategySwitch(
+        c,
+        churn,
+        events,
+        now,
+        DAEMON_DEFAULTS.cluster_strategy_min_interval_ms,
+      );
+      if (change === null) continue;
+      await this.append(wave, {
+        type: "cluster_strategy_changed",
+        data: { cluster: c.id, ...change },
+      });
+      this.log(`wave ${wave}: cluster ${c.id} ${change.from} → ${change.to} (${change.why})`);
+    }
   }
 
   /**

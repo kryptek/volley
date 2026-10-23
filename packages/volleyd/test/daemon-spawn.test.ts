@@ -1747,3 +1747,74 @@ describe("a bundle spawn (several issues in one task)", () => {
     expect(env.events.find((e) => e.type === "agent_spawned")?.data.issues).toBeUndefined();
   });
 });
+
+describe("the cluster cap and the churn monitor at run time (#384)", () => {
+  let env: DaemonEnv;
+  let daemon: Daemon;
+  let client: ControlClient;
+  let clock: FakeClock;
+  afterEach(async () => {
+    await client?.close();
+    await env?.cleanup();
+  });
+
+  const capped = (id: string, issue: number) =>
+    `  ${id}: { issue: ${issue}, files: [src/hot.ts], plan: { cluster: A, by: cap, why: "capped: shares src/hot.ts" } }\n`;
+  const WAVE = `wave: wc
+repo: /path/to/example-repo
+release_branch: release/wc
+model: claude-opus-5-5
+pipeline: [implement, merge_ready]
+tasks:
+${capped("i315", 315)}${capped("i317", 317)}${capped("i318", 318)}${capped("i322", 322)}${capped("i323", 323)}`;
+
+  const start = async () => {
+    env = await makeDaemonEnv();
+    clock = fakeClock(Date.parse("2026-10-23T09:00:00.000Z"));
+    daemon = await env.start({ clock });
+    client = await ControlClient.connect(env.broker.url, NS);
+    const res = await client.request("run", { wave_yaml: WAVE });
+    expect(res.error).toBeUndefined();
+    await daemon.tick();
+    await daemon.settled();
+  };
+
+  it("admits four members of cluster A and holds the fifth with the reason", async () => {
+    await start();
+    const admitted = daemon
+      .journalEvents("wc")
+      .filter((e) => e.type === "task_admitted")
+      .map((e) => e.task);
+    expect(admitted).toEqual(["i315", "i317", "i318", "i322"]);
+    const t = daemon.snapshot("wc")?.tasks.find((x) => x.id === "i323");
+    expect(t?.why_waiting).toBe("cluster A: 4 in flight (i315, i317, i318, i322)");
+  });
+
+  it("a member's second branch update journals cluster_strategy_changed once, and the state shows hold", async () => {
+    await start();
+    for (let i = 0; i < 2; i++)
+      await daemon.recordEvent("wc", {
+        type: "stage_entered",
+        task: "i315",
+        data: { stage: "fixup", step: 1, roles: ["rebase"], rebase: true },
+      });
+    await daemon.tick();
+    await daemon.settled();
+    await clock.advance(60_000);
+    await daemon.tick();
+    await daemon.settled();
+    const changed = daemon.journalEvents("wc").filter((e) => e.type === "cluster_strategy_changed");
+    expect(changed.map((e) => e.data)).toEqual([
+      {
+        cluster: "A",
+        from: "cap",
+        to: "hold",
+        why: "i315 updated its branch 2 times in the last 2 h",
+      },
+    ]);
+    expect(daemon.snapshot("wc")?.overlap_plan?.clusters[0]?.state).toBe("hold");
+    // On hold the cap is 1: the fifth member still waits, now on the hold.
+    const t = daemon.snapshot("wc")?.tasks.find((x) => x.id === "i323");
+    expect(t?.why_waiting).toBe("cluster A (hold): 4 in flight or gated (i315, i317, i318, i322)");
+  });
+});
