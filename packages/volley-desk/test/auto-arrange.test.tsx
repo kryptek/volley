@@ -18,101 +18,48 @@ afterEach(() => {
 });
 
 describe("useAutoArrange", () => {
-  type Props = { enabled: boolean; layoutKey: string; hold?: boolean };
-  const setup = (enabled: boolean, layoutKey: string) => {
+  type Props = { enabled: boolean; ready: boolean };
+  const setup = (enabled: boolean, ready = true) => {
     const arrange = vi.fn();
     const hook = renderHook((p: Props) => useAutoArrange({ ...p, arrange }), {
-      initialProps: { enabled, layoutKey } as Props,
+      initialProps: { enabled, ready } as Props,
     });
     return { arrange, ...hook };
   };
 
   it("runs the first layout after 400 ms", () => {
-    const { arrange } = setup(true, "c|w1|a1");
+    const { arrange } = setup(true);
     advance(399);
     expect(arrange).not.toHaveBeenCalled();
     advance(1);
     expect(arrange).toHaveBeenCalledTimes(1);
   });
 
-  it("only the very first schedule waits 400 ms: a key change after mount waits 120 ms", () => {
-    // as in the prototype, the first-layout flag clears when the first timer is set
-    const { arrange, rerender } = setup(true, "");
-    advance(100);
-    rerender({ enabled: true, layoutKey: "c|w1" });
-    advance(119);
+  it("waits for the first windows: the first layout runs 400 ms after ready", () => {
+    const { arrange, rerender } = setup(true, false);
+    advance(1000);
+    expect(arrange).not.toHaveBeenCalled();
+    rerender({ enabled: true, ready: true });
+    advance(399);
     expect(arrange).not.toHaveBeenCalled();
     advance(1);
     expect(arrange).toHaveBeenCalledTimes(1);
-    advance(1000);
-    expect(arrange).toHaveBeenCalledTimes(1);
   });
 
-  it("hold freezes the key: a resync and replay back to the same windows does not arrange", () => {
-    const { arrange, rerender } = setup(true, "c|w1|a1");
+  it("windows opening or closing after the first arrange never arrange again (#404)", () => {
+    const { arrange, rerender } = setup(true);
     advance(400);
     arrange.mockClear();
-    rerender({ enabled: true, layoutKey: "|__unassigned__|a1", hold: true });
+    // a reconnect's resync empties the canvas and the replay fills it again
+    rerender({ enabled: true, ready: false });
     advance(500);
-    rerender({ enabled: true, layoutKey: "c|w1|a1", hold: true });
-    advance(500);
-    rerender({ enabled: true, layoutKey: "c|w1|a1", hold: false });
-    advance(1000);
-    expect(arrange).not.toHaveBeenCalled();
-  });
-
-  it("released with different windows, it arranges once after 120 ms", () => {
-    const { arrange, rerender } = setup(true, "c|w1|a1");
-    advance(400);
-    arrange.mockClear();
-    rerender({ enabled: true, layoutKey: "", hold: true });
-    advance(500);
-    rerender({ enabled: true, layoutKey: "c|w1", hold: false });
-    advance(119);
-    expect(arrange).not.toHaveBeenCalled();
-    advance(1);
-    expect(arrange).toHaveBeenCalledTimes(1);
-    advance(1000);
-    expect(arrange).toHaveBeenCalledTimes(1);
-  });
-
-  it("a new agent window triggers one arrange after 120 ms", () => {
-    const { arrange, rerender } = setup(true, "c|w1|a1");
-    advance(400);
-    arrange.mockClear();
-    rerender({ enabled: true, layoutKey: "c|w1|a1|a2" });
-    advance(119);
-    expect(arrange).not.toHaveBeenCalled();
-    advance(1);
-    expect(arrange).toHaveBeenCalledTimes(1);
-    advance(1000);
-    expect(arrange).toHaveBeenCalledTimes(1);
-  });
-
-  it("changes in quick succession collapse into one arrange", () => {
-    const { arrange, rerender } = setup(true, "c|w1");
-    advance(400);
-    arrange.mockClear();
-    rerender({ enabled: true, layoutKey: "c|w1|a1" });
-    advance(60);
-    rerender({ enabled: true, layoutKey: "c|w1|a1|a2" });
-    advance(119);
-    expect(arrange).not.toHaveBeenCalled();
-    advance(1);
-    expect(arrange).toHaveBeenCalledTimes(1);
-  });
-
-  it("a re-render with the same layout key (a drag, a tick) does not trigger", () => {
-    const { arrange, rerender } = setup(true, "c|w1|a1");
-    advance(400);
-    arrange.mockClear();
-    rerender({ enabled: true, layoutKey: "c|w1|a1" });
+    rerender({ enabled: true, ready: true });
     advance(1000);
     expect(arrange).not.toHaveBeenCalled();
   });
 
   it("a browser resize triggers after 200 ms, debounced", () => {
-    const { arrange } = setup(true, "c|w1");
+    const { arrange } = setup(true);
     advance(400);
     arrange.mockClear();
     act(() => window.dispatchEvent(new Event("resize")));
@@ -124,21 +71,22 @@ describe("useAutoArrange", () => {
     expect(arrange).toHaveBeenCalledTimes(1);
   });
 
-  it("OFF: no arrange on first layout, key changes or resize", () => {
-    const { arrange, rerender } = setup(false, "c|w1");
+  it("OFF: no arrange on first layout or resize", () => {
+    const { arrange } = setup(false);
     advance(1000);
-    rerender({ enabled: false, layoutKey: "c|w1|a1" });
     act(() => window.dispatchEvent(new Event("resize")));
     advance(1000);
     expect(arrange).not.toHaveBeenCalled();
   });
 
   it("turning it back ON arranges", () => {
-    const { arrange, rerender } = setup(false, "c|w1");
-    advance(1000);
-    rerender({ enabled: true, layoutKey: "c|w1" });
+    const { arrange, rerender } = setup(true);
     advance(400);
-    expect(arrange).toHaveBeenCalledTimes(1);
+    rerender({ enabled: false, ready: true });
+    advance(1000);
+    rerender({ enabled: true, ready: true });
+    advance(400);
+    expect(arrange).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -187,34 +135,38 @@ describe("App auto-arrange (demo mode)", () => {
     expect(at("ci-speed")).toEqual(dragged);
   });
 
-  it("hiding a wave re-arranges after 120 ms", () => {
+  it("hiding a wave moves no other window and keeps the view (#404)", () => {
     const { container } = renderApp();
     advance(400 + ARRANGE_ANIM_MS);
+    const before = at("ci-speed");
+    const view = world(container).style.transform;
     fireEvent.click(screen.getByRole("button", { name: "Hide leaderboard" }));
     expect(screen.queryByRole("region", { name: "leaderboard" })).toBeNull();
-    advance(119);
+    advance(1000);
     expect(world(container)).not.toHaveClass("world--anim");
-    advance(1);
-    expect(world(container)).toHaveClass("world--anim");
+    expect(at("ci-speed")).toEqual(before);
+    expect(world(container).style.transform).toBe(view);
   });
 
-  it("a new agent window (the demo's spec reviewer) triggers one arrange after 120 ms", () => {
+  it("a new agent window (the demo's spec reviewer) is placed without an arrange (#404)", () => {
     const { container } = renderApp();
     const windows = () => container.querySelectorAll(".win").length;
     advance(400 + ARRANGE_ANIM_MS);
     const before = windows();
+    const others = [...container.querySelectorAll<HTMLElement>(".win")].map(
+      (w) => [w, w.style.left, w.style.top] as const,
+    );
+    const view = world(container).style.transform;
     // the demo spawns its spec reviewer 22 s after load
     advance(22_000 - 400 - ARRANGE_ANIM_MS);
     expect(windows()).toBe(before + 1);
-    expect(world(container)).not.toHaveClass("world--anim");
-    advance(119);
-    expect(world(container)).not.toHaveClass("world--anim");
-    advance(1);
-    expect(world(container)).toHaveClass("world--anim");
-    advance(ARRANGE_ANIM_MS);
-    expect(world(container)).not.toHaveClass("world--anim");
     advance(1000);
     expect(world(container)).not.toHaveClass("world--anim");
+    expect(world(container).style.transform).toBe(view);
+    for (const [el, left, top] of others) {
+      expect(el.isConnected).toBe(true);
+      expect([el.style.left, el.style.top]).toEqual([left, top]);
+    }
   });
 
   it("OFF: windows stay where they are", () => {

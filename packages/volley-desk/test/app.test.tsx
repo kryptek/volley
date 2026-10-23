@@ -427,26 +427,28 @@ describe("App auto-arrange (live store)", () => {
     expect(world().style.transform).toBe(view);
   });
 
-  it("a window that does not come back after a reconnect re-arranges once settled", async () => {
+  it("a window that does not come back after a reconnect moves no other window (#404)", async () => {
     const c = scriptedClient(advance);
     const { container } = mount(c);
     const world = () => container.querySelector(".world") as HTMLElement;
     await c.deliver(retained());
     await settle();
-    await wait(ARRANGE_ANIM_MS);
+    await wait(FIRST_ARRANGE_MS + ARRANGE_ANIM_MS);
     const bar = screen.getByRole("region", { name: "w1" }).querySelector(".win-bar") as Element;
     fireEvent.pointerDown(bar, { clientX: 100, clientY: 100 });
     fireEvent.pointerMove(bar, { clientX: 300, clientY: 260 });
     fireEvent.pointerUp(bar);
     const dragged = at("w1");
+    const view = world().style.transform;
 
     // impl-1's registry entry is gone: the prune after settling removes its window
     await c.reconnect();
     await c.deliver(retained().filter((m) => !m.topic.endsWith("/impl-1")));
     await settle();
-    await wait(130);
-    expect(world()).toHaveClass("world--anim");
-    expect(at("w1")).not.toEqual(dragged);
+    await wait(300);
+    expect(world()).not.toHaveClass("world--anim");
+    expect(at("w1")).toEqual(dragged);
+    expect(world().style.transform).toBe(view);
   });
 });
 

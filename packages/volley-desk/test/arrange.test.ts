@@ -12,6 +12,7 @@ import {
   candidates,
   fitArea,
   layoutCluster,
+  pickBest,
 } from "../src/layout/arrange";
 
 const box = (id: string, w: number, h: number): Box => ({ id, w, h });
@@ -77,12 +78,20 @@ describe("layoutCluster", () => {
 });
 
 describe("arrange", () => {
-  it("tries agent-column counts 1..max(3, most agents in a cluster) and every row count", () => {
+  it("tries each wave's fewest columns under every target height, and every row count", () => {
     const all = candidates(clusters, screen);
-    // wave-a has 4 agents
-    expect(all.map((c) => [c.cols, c.rows])).toEqual(
-      [1, 2, 3, 4].flatMap((c) => [1, 2, 3].map((r) => [c, r])),
+    // wave-a (4 agents) is 1608 / 836 / 636 / 600 tall in 1-4 columns, wave-b 936 / 500 in 1-2
+    const cols = (c: (typeof all)[number]) => [c.cols["wave-a"], c.cols["wave-b"]];
+    expect(all.map((c) => [...cols(c), c.rows])).toEqual(
+      [
+        [1, 1],
+        [2, 1],
+        [2, 2],
+        [3, 2],
+        [4, 2],
+      ].flatMap((c) => [1, 2, 3].map((r) => [...c, r])),
     );
+    expect(all.every((c) => c.cols.coordinators === 1)).toBe(true);
   });
 
   it("spreads one big cluster across the viewport's aspect instead of a tall strip (owner finding b)", () => {
@@ -134,11 +143,10 @@ describe("arrange", () => {
     const r = arrange(clusters, screen);
     if (!r) throw new Error("no arrangement");
     expect(r.view.s).toBeCloseTo(best);
-    // here the winner is 3 agent columns in 2 rows, clear of the runner-up by more than EPS
-    const win = all.find((c) => c.s === best);
-    expect([win?.cols, win?.rows]).toEqual([3, 2]);
-    const runnerUp = Math.max(...all.filter((c) => c !== win).map((c) => c.s));
-    expect(runnerUp).toBeLessThan(best - 0.005);
+    // here the winner is wave-a in 3 agent columns and wave-b in 2, in 2 rows
+    const win = all[pickBest(all)];
+    expect(win?.s).toBe(best);
+    expect([win?.cols["wave-a"], win?.cols["wave-b"], win?.rows]).toEqual([3, 2, 2]);
     expect(r.place).toEqual(win?.place);
     // and centres it in the fit area below the top bar
     const W = bounds(r.place).W;
@@ -148,26 +156,28 @@ describe("arrange", () => {
   });
 
   it("lays rows of clusters left to right, CGAP apart, in cluster order", () => {
-    const one = candidates(clusters, screen).find((c) => c.cols === 2 && c.rows === 1);
+    const both2 = (c: { cols: Record<string, number> }) =>
+      c.cols["wave-a"] === 2 && c.cols["wave-b"] === 2;
+    const one = candidates(clusters, screen).find((c) => both2(c) && c.rows === 1);
     if (!one) throw new Error("missing candidate");
     expect(one.place.coordinators).toEqual({ x: 0, y: 0 });
     expect(one.place["wave-a"]).toEqual({ x: 430 + CGAP, y: 0 });
     const aw = layoutCluster(waveA, 2).w;
     expect(one.place["wave-b"]).toEqual({ x: 430 + CGAP + aw + CGAP, y: 0 });
-    const two = candidates(clusters, screen).find((c) => c.cols === 2 && c.rows === 2);
+    const two = candidates(clusters, screen).find((c) => both2(c) && c.rows === 2);
     if (!two) throw new Error("missing candidate");
     // two rows of ceil(3 / 2) = 2 clusters: wave-b starts the second row
     const rowH = Math.max(360, layoutCluster(waveA, 2).h);
     expect(two.place["wave-b"]).toEqual({ x: 0, y: rowH + CGAP });
   });
 
-  it("keeps the earlier candidate unless a later one beats it by more than 0.005", () => {
+  it("of candidates within 0.005 of the best scale, the fuller one wins (#397)", () => {
     // one cluster, two agents of equal height: 1 column (taller) vs 2 columns (wider)
-    // are both capped at 1.1 on a big screen, so the 1-column layout stays.
+    // are both capped at 1.1 on a big screen, so the wider 2-column layout wins.
     const big = { width: 10_000, height: 10_000 };
     const cl = { main: box("w", 620, 400), kids: [box("k1", 460, 100), box("k2", 460, 100)] };
-    expect(candidates([cl], big).map((c) => c.s)).toEqual([1.1, 1.1, 1.1]);
-    expect(arrange([cl], big)?.place).toEqual(layoutCluster(cl, 1).at);
+    expect(candidates([cl], big).map((c) => c.s)).toEqual([1.1, 1.1]);
+    expect(arrange([cl], big)?.place).toEqual(layoutCluster(cl, 2).at);
   });
 
   it("caps the scale at 1.1 and floors it at the fit minimum", () => {
@@ -184,8 +194,8 @@ describe("arrange", () => {
     expect(r.view.x).toBeCloseTo(24, 6);
     expect(r.view.s).toBeCloseTo(0.58921792, 6);
     expect(r.view.y).toBeCloseTo(114.041762, 6);
-    const win = candidates(clusters, screen).find((c) => c.cols === 3 && c.rows === 2);
-    expect(r.place).toEqual(win?.place);
+    const all = candidates(clusters, screen);
+    expect(r.place).toEqual(all[pickBest(all)]?.place);
     expect(arrange(clusters, screen, { pinned: {} })).toEqual(r);
   });
 
@@ -212,35 +222,51 @@ describe("arrange", () => {
     const screens = [screen, { width: 1920, height: 1080 }, { width: 390, height: 844 }];
     for (const sc of screens) {
       const portrait = sc.width < sc.height;
-      it(`every candidate keeps them together, one CGAP from the first wave row (${sc.width}px)`, () => {
+      it(`every candidate keeps them together, one CGAP from the waves (${sc.width}px)`, () => {
         let under = 0;
         for (const c of candidates(set, sc)) {
           const p = c.place;
-          const u = p.unassigned;
-          const co = p.coordinators;
-          const a = p["wave-a"];
-          if (!u || !co || !a) throw new Error("not placed");
-          const row = [waveA, waveB].filter((w) => p[w.main.id]?.y === a.y);
-          if (u.y === a.y) {
-            // closing the first row, after its last wave cluster
-            const last = row.at(-1);
-            if (!last) throw new Error("no wave on the row");
-            expect(u.x - end(p, waveIds(last))).toBe(CGAP);
+          const { waves, side } = c.regions;
+          if (!waves || !side) throw new Error("missing region");
+          if (side.y === 0) {
+            // right of the waves region
+            expect(side.x - (waves.x + waves.w)).toBe(CGAP);
           } else {
-            // portrait only: starting the second row, under the first wave
+            // or under it, at its left edge
             under++;
-            expect(portrait).toBe(true);
-            const rowH = Math.max(...row.map((w) => layoutCluster(w, c.cols).h));
-            expect(u).toEqual({ x: 0, y: a.y + rowH + CGAP });
+            expect(side).toMatchObject({ x: 0, y: waves.y + waves.h + CGAP });
+          }
+          // the side windows lie inside the side region; the waves inside theirs
+          for (const id of [...waveIds(unassigned), "coordinators"]) {
+            const at = p[id];
+            if (!at) throw new Error(`${id} not placed`);
+            expect(at.x).toBeGreaterThanOrEqual(side.x);
+            expect(at.y).toBeGreaterThanOrEqual(side.y);
+            expect(at.x + (dims[id]?.w ?? 0)).toBeLessThanOrEqual(side.x + side.w);
+            expect(at.y + (dims[id]?.h ?? 0)).toBeLessThanOrEqual(side.y + side.h);
+          }
+          for (const w of [waveA, waveB]) {
+            for (const id of waveIds(w)) {
+              const at = p[id];
+              if (!at) throw new Error(`${id} not placed`);
+              expect(at.x + (dims[id]?.w ?? 0)).toBeLessThanOrEqual(waves.x + waves.w);
+              expect(at.y + (dims[id]?.h ?? 0)).toBeLessThanOrEqual(waves.y + waves.h);
+            }
           }
           // coordinators: right after the unassigned group, or stacked under it
+          const u = p.unassigned;
+          const co = p.coordinators;
+          if (!u || !co) throw new Error("not placed");
           const uH = layoutCluster(unassigned, 2).h;
           if (co.y === u.y) expect(co.x - end(p, waveIds(unassigned))).toBe(CGAP);
           else expect(co).toEqual({ x: u.x, y: u.y + uH + CGAP });
           // every window is placed, once
           expect(Object.keys(p).sort()).toEqual(Object.keys(dims).sort());
         }
-        expect(under > 0).toBe(portrait);
+        expect(under).toBeGreaterThan(0);
+        // the scale decides: on a portrait screen the side region goes under the waves
+        const best = arrange(set, sc)?.regions;
+        if (portrait) expect(best?.side?.y).toBeGreaterThan(0);
       });
 
       it(`keeps the tethers to unassigned agents short in every candidate (${sc.width}px)`, () => {

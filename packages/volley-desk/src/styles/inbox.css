@@ -13,6 +13,11 @@
 .inbox-tabs {
   overflow-x: auto;
 }
+/* Capped at the fit area's height (#397): the list scrolls inside and keeps its scroll position. */
+.inbox-scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .inbox-list {
   list-style: none;
   margin: 0;

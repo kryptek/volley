@@ -77,7 +77,15 @@ Demo mode never opens a broker connection. It starts from the prototype's sample
 
 ### Arrange & fit
 
-Each visible wave forms a cluster: the wave window with its agents to the right, in task order (then implementer, fixup, rebase, spec review, quality review), each agent dropped into the shortest column. The coordinators window is a cluster of its own, placed first. Arrange tries from 1 agent column up to 3 or the most agents any cluster has, whichever is more, and every number of rows of clusters. It keeps the placement that fits the screen at the largest zoom (capped at 1.1), then animates the windows and the view there. The view frames every window on the canvas, windows pinned in place included (the layout is chosen to fit beside them at the largest zoom); the first fit on load frames them too. So one big wave spreads to the screen's shape instead of a tall strip. Arrange and the coordinators window's go-to zoom out as far as 0.05 to show everything, below the wheel's 0.3 minimum; from there the wheel zooms back in smoothly.
+Arrange lays the canvas out in three regions, left to right, so the eye can scan it by domain:
+
+- **Waves.** Each visible wave forms a cluster: the wave window with its agents to the right, in task order (then implementer, fixup, rebase, spec review, quality review), each agent dropped into the shortest column. Every wave picks its own column count: for each target height, a wave takes the fewest agent columns that keep it within that height, so a big wave spreads out and a small one stays compact. Clusters are laid in rows, and every number of rows is tried.
+- **Side windows** (the unassigned agents, Sessions, Wave coordinators and Machines) form one block packed by size in one or more columns, right next to the waves (or under them, on a portrait screen). They never take a column of their own at the screen edge.
+- **Lists** (Needs you) come last. A list window is never taller than the fit area: its items scroll inside it and it keeps its scroll position, so a long list never sets the layout.
+
+Arrange keeps the placement that fits the screen at the largest zoom (capped at 1.1). Placements whose zoom is within 0.005 of the best count as equal, and the one that fills the most of the screen wins, so a layout never leaves most of the screen empty when a wider one fits at the same zoom. Arrange then animates the windows and the view there. The view frames every window on the canvas, windows pinned in place included (the layout is chosen to fit beside them at the largest zoom); the first fit on load frames them too. Arrange and the coordinators window's go-to zoom out as far as 0.05 to show everything, below the wheel's 0.3 minimum; from there the wheel zooms back in smoothly.
+
+**Opening and closing windows** never re-arranges the canvas or changes the zoom. A window that opens after an arrange (from the dock, a top-bar count, a hidden wave shown again, or a new agent) is placed in free space in its region, nearest the region's top-left corner and clear of every other window (`layout/place.ts`). When you open it yourself, the view pans at the current zoom so its top edge sits near the top of the screen, moving sideways only as far as needed to bring it into view. Closing a window leaves its space free; the next Arrange & fit reclaims it.
 
 ### Finished agents
 
@@ -85,7 +93,7 @@ Agents that finished (`done`, `failed` or `reaped`) more than 10 minutes ago lea
 
 **First load and reconnects.** Every connect subscribes afresh, and the Desk starts holding its retained replay when the broker grants the subscriptions, which is just before the replay arrives, however slow the link. The replay stays out of the store until no retained message has arrived for 80 ms (live ones do not keep it open), or 1.5 s at most. It is then applied in one batch: the first frame sees every registry entry together with its status, and a reconnect's resync lands together with its replay. A hold that a disconnect interrupts applies nothing while offline; the next connect's replay replaces it. While the Desk syncs (the 30 s `syncing…` grace below), an agent with no status yet (its registry entry arrived first, on a slow link) may be finished, so it is not laid out until its status arrives; a window already on the canvas keeps its place through a reconnect. Once synced, an agent that still has no status gets its window with the `no signal` mark (below), unless its registry entry is older than the finished grace and nothing else has been heard from it: that old record is hidden and counted with the finished agents. So a Desk opened against a broker with hundreds of retained finished agents shows only the live ones, from the first frame. `test/fixtures/seed-retained-burst.ts` publishes 300 finished and 3 live agents to a private broker, and `scripts/browser-check/` checks it, and the other Desk-wide behaviours, in a browser.
 
-Auto-arrange (Settings › General) is ON by default and saved per browser (`autoArrange` in the `volley-desk-look` localStorage entry). While it is on, arrange runs 400 ms after the first layout, 120 ms after a window opens or closes, a wave is hidden or shown, or the coordinators window is toggled, and 200 ms after the browser stops resizing. As in the prototype, only the first schedule waits 400 ms; any change after load waits 120 ms. Dragging a window never re-arranges; the next structural change does. A broker reconnect neither re-arranges nor resets the view: while its retained replay settles the layout is held, and only windows that really appeared or went away re-arrange once it has.
+Auto-arrange (Settings › General) is ON by default and saved per browser (`autoArrange` in the `volley-desk-look` localStorage entry). While it is on, arrange runs 400 ms after the first windows have settled onto the canvas, and 200 ms after the browser stops resizing. Nothing else re-arranges: opening or closing a window, hiding or showing a wave, dragging a window and a broker reconnect all leave the other windows and the view where they are. Arrange & fit (the dock, or `f`) arranges whenever you ask.
 
 ### Pinning windows
 
@@ -139,8 +147,9 @@ src/a11y/keys.ts            keyboard: arrow-key pan, +/- zoom, f arrange, Escape
 src/a11y/motion.ts          useReducedMotion (prefers-reduced-motion for JS effects)
 src/styles/responsive.css   phone layout (< 700 px) and the reduced-motion rules
 src/canvas/World.tsx        the transformed world layer (world--anim while arranging)
-src/layout/arrange.ts       pure arrange & fit: per-wave clusters, shortest-column packing,
-                            rows × columns chosen for the largest zoom (port of the prototype)
+src/layout/arrange.ts       pure arrange & fit: waves, side and list regions, per-wave columns,
+                            shortest-column packing, the largest zoom then the fullest layout
+src/layout/place.ts         pure placement of a window opened after an arrange: free space in its region
 src/layout/useAutoArrange.ts auto-arrange triggers (the ON/OFF setting is the look's autoArrange)
 src/layout/pins.ts          pure window pinning: pin modes, screen anchors (corner + offset), the
                             fit area that avoids anchored windows, window keys, the saved layout
