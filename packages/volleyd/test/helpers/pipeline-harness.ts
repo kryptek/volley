@@ -725,7 +725,10 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     ) {
       const task = o.task ?? "T1";
       const prs = world.prs.filter((pr) => pr.headRefName === prBranch(task));
-      if (o.conflicting === true) for (const pr of prs) pr.mergeable = "CONFLICTING";
+      if (o.conflicting === true) {
+        if (prs.length === 0) throw new Error(`conflicting: no PR on ${prBranch(task)}`);
+        for (const pr of prs) pr.mergeable = "CONFLICTING";
+      }
       const r = run(role, task);
       if (r === undefined) throw new Error(`no ${role} run`);
       if (o.head !== undefined) {
