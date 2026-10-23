@@ -3,11 +3,13 @@ import { join } from "node:path";
 import { deskStamp, readBundleVersion, writeDeskStamp } from "../setup/desk-build";
 import { deskEnvLeaks } from "../setup/services";
 import type { SetupExec } from "../setup/step";
+import { isRollbackBranch } from "./fence";
 import {
   type Command,
   type PlanContext,
   type PlanStep,
   type Ref,
+  TAG_RE,
   deployPlan,
   deskDir,
   git,
@@ -61,11 +63,12 @@ export interface DeployResult {
 }
 
 /** The last non-empty line a failed command printed (stderr first). */
-const lastLine = (r: { stdout: string; stderr: string }, argv: readonly string[]) =>
+export const lastLine = (r: { stdout: string; stderr: string }, argv: readonly string[]) =>
   (r.stderr.trim() || r.stdout.trim()).split("\n").at(-1)?.trim() || `\`${argv.join(" ")}\` failed`;
 
 /** A word as a POSIX shell reads it back: bare when it is safe, else single-quoted. */
-const q = (w: string) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(w) ? w : `'${w.replace(/'/g, "'\\''")}'`);
+export const q = (w: string) =>
+  /^[A-Za-z0-9_@%+=:,./-]+$/.test(w) ? w : `'${w.replace(/'/g, "'\\''")}'`;
 const shell = (c: Command) =>
   `${c.cwd !== undefined ? `cd ${q(c.cwd)} && ` : ""}${c.argv.map(q).join(" ")}`;
 
@@ -272,4 +275,21 @@ export async function applyDeploy(ctx: ApplyContext, deps: ApplyDeps): Promise<D
         .flatMap((s) => s.commands.map(shell)),
     },
   });
+}
+
+/**
+ * What HEAD is, for the rollback: its branch first (so it keeps the branch), then the release tag
+ * it is exactly at, else the commit. A branch the fence would not check out again (`fix+x`) and a
+ * non-release tag (`smoke-ok`) are passed over.
+ */
+export async function currentRef(exec: SetupExec, repo: string): Promise<Ref | null> {
+  const branch = await exec(git(repo, "rev-parse", "--abbrev-ref", "HEAD"));
+  const b = branch.stdout.trim();
+  if (branch.code === 0 && b !== "HEAD" && isRollbackBranch(b)) return { kind: "branch", name: b };
+  const tag = await exec(git(repo, "describe", "--tags", "--exact-match", "HEAD"));
+  const t = tag.stdout.trim();
+  if (tag.code === 0 && TAG_RE.test(t)) return { kind: "tag", name: t };
+  const sha = await exec(git(repo, "rev-parse", "HEAD"));
+  const s = sha.stdout.trim();
+  return sha.code === 0 && /^[0-9a-f]{40}$/.test(s) ? { kind: "commit", name: s } : null;
 }
