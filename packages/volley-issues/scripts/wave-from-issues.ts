@@ -455,6 +455,7 @@ export function readRepoTree(repo: string, branch: string, home: string = homedi
     const r = spawnSync("git", ["-C", dir, "ls-tree", "-r", "-l", "--full-tree", ref], {
       encoding: "utf-8",
       maxBuffer: 256 * 1024 * 1024,
+      timeout: 60_000, // a hung git reads as no tree, not a hung script
     });
     if (r.status === 0) return treeFromLsTree(r.stdout);
   }
@@ -543,6 +544,10 @@ function main(argv: string[]): number {
     const why =
       missing.length > 0 ? `missing --${missing.join(", --")}` : "expected one issues file";
     process.stderr.write(`wave-from-issues: ${why}\n${HELP}`);
+    return 2;
+  }
+  if (v["no-plan"] === true && v["plan-only"] === true) {
+    process.stderr.write("wave-from-issues: --no-plan and --plan-only exclude each other\n");
     return 2;
   }
   const satisfiedRaw = (v.satisfied ?? "")

@@ -918,6 +918,12 @@ describe("footprints and the overlap plan (#381)", () => {
     expect(r.stderr).not.toContain("submit:");
   });
 
+  it("CLI --no-plan with --plan-only is a usage error", () => {
+    const r = cli(["--repo", repoWithTree(), "--no-plan", "--plan-only"]);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("wave-from-issues: --no-plan and --plan-only exclude each other\n");
+  });
+
   it("CLI --no-plan writes footprints only", () => {
     const repo = repoWithTree();
     const r = cli(["--repo", repo, "--no-plan"]);

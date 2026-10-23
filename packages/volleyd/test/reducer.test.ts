@@ -918,6 +918,40 @@ describe("the overlap plan (task_queued, wave_planned; SPEC §4.6.22)", () => {
     ).toEqual([]);
   });
 
+  it("a later version without a plan clears it; one that moves a task re-clusters it", () => {
+    const strip = (w: typeof wave, cluster?: string) => {
+      const { overlap_plan: _p, ...rest } = w;
+      const tasks = Object.fromEntries(
+        Object.entries(w.tasks).map(([id, t]) => {
+          const { plan: _plan, ...def } = t;
+          return [
+            id,
+            cluster !== undefined && id === "i3"
+              ? { ...t, plan: { cluster, by: "chain" as const, why: "moved" } }
+              : def,
+          ];
+        }),
+      );
+      return { ...rest, version: 2, tasks } as typeof wave;
+    };
+    const v2 = strip(wave);
+    const dropped = reduce([
+      ...evs,
+      { seq: 6, at: AT, type: "wave_versioned", data: { wave: v2, plan: v2 } },
+    ]);
+    expect(dropped.overlap_plan).toBeUndefined();
+    expect(dropped.tasks.some((t) => t.cluster !== undefined)).toBe(false);
+
+    const moved = strip(wave, "B");
+    const after = reduce([
+      ...evs,
+      { seq: 6, at: AT, type: "wave_versioned", data: { wave: moved, plan: moved } },
+    ]);
+    const byId = Object.fromEntries(after.tasks.map((t) => [t.id, t]));
+    expect(byId.i1).not.toHaveProperty("cluster");
+    expect(byId.i3?.cluster).toBe("B");
+  });
+
   it("files a task_queued carries (the daemon read them) fill a task the file left without", () => {
     const plain = parseWaveFile(
       "wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n",

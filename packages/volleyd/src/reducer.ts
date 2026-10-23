@@ -384,9 +384,15 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         if (was.footprint !== undefined) t.footprint ??= was.footprint;
       }
       Object.assign(state, briefPrefaceOf(ev));
+      // The version's own overlap plan replaces the last one: its `wave_planned` follows, and
+      // none does when it has no plan. Each task sits in the cluster this version puts it in.
+      Reflect.deleteProperty(state, "overlap_plan");
       for (const t of state.tasks) {
         const issue = wave.tasks[t.id]?.issue;
         if (issue !== undefined) t.issue = issue;
+        const cluster = plan.tasks[t.id]?.plan?.cluster;
+        if (cluster !== undefined) t.cluster = cluster;
+        else Reflect.deleteProperty(t, "cluster");
       }
       break;
     }

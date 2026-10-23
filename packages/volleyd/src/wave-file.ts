@@ -186,6 +186,8 @@ export function parseWaveFile(text: string, source?: string, defaults?: Placemen
   // A bundle's `issues`: its own issue among them, each once, and no other task's (SPEC §4.6.22).
   const bundles = bundleErrors(raw);
   if (bundles.length > 0) {
+    // These replace the schema's `uniqueItems` error on `issues` (ajv's "must NOT have duplicate
+    // items"), which says less.
     const reported = new Set(bundles.map((e) => e.path.replace(/\[\d+\]$/, "")));
     for (let i = errors.length - 1; i >= 0; i--) {
       const e = errors[i];
