@@ -983,6 +983,8 @@ autopilot: on
     merge_refused/draft: a draft is marked ready and merged once the CI that starts then passes; a retry does exactly that
   pr_closed, remote_repo_missing · always · escalate no_policy · no budget
     pr/owner: where the work went, or a clone that is missing, is the owner's call
+  terminal_status_lost · always · escalate no_policy · no budget
+    terminal/owner: a status the supervisor could not hand over even on recovery: the owner checks the work
 ```
 
 ### Self-healing CI
@@ -2897,6 +2899,27 @@ the status's `wall_time`), logs `watchdog: <agent> <status> unjournaled for <n>s
 `alarm_cleared` for it once something finally names the agent. A coordinator watching the journal
 learns a task is stuck even when no decision was opened for it.
 
+The alarm is not the end of it (#414). A `done` or `failed` still unhandled
+`terminal_recover_ms` (60 s) after its alarm is recovered, once: volleyd re-reads the agent's
+retained status and hands it to the pipeline as if it had just arrived (the path a restart's
+re-attach takes), journals `terminal_status_recovered { agent_id, status, after_ms }` and logs
+`watchdog: <agent> <status> recovered after <n>s`. A redelivery of the same status (same
+`wall_time`) is never handed over twice. When the agent is no longer supervised, its retained
+status is gone, or the handoff throws again, volleyd opens decision `terminal_status_lost`
+(question names the agent, its status and why; it does not park the task): `accept done` hands
+the status to the pipeline as if it had just arrived, `relaunch` (offered where volleyd can spawn
+the role on an unsettled task) retires the agent as `relaunched` and spawns its role again. An
+`accept done` whose handoff fails too opens a fresh `terminal_status_lost` saying so. A status is
+not recovered while its agent is moving between machines; it is once the move ends. A
+`blocked` is not recovered this way: the blocked invariant below asks about it.
+
+The handoff itself never drops a status silently: a throw inside it (a remote verification step
+the fence denied, a git / gh timeout) is logged and journaled as `alarm_raised { alarm:
+"pipeline_error", check: "status", agent_id, status, message }`, which does not count as handling
+the status, so the watchdog still alarms and recovers it. A `failed` retires its agent before the
+pipeline sees it, so a throw after that leaves the watchdog nothing to recover: volleyd opens
+`terminal_status_lost` at once.
+
 **A blocked agent is always asked about.** The invariant: a supervised agent whose retained
 status is `blocked` has a decision naming it and that status (`agent_id`, `status_at`, the
 status's `wall_time`; answered or still open). It is enforced on the status event, when the watch
@@ -3620,20 +3643,20 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
     (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
-    rebase.md — spelled exactly, directly inside `.volley/`, so no write there is a git
-    config, HEAD, gitfile or hook, or a case variant of launch.sh), an absolute path ending in
-    `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh`
-    (what the tmux session runs) is written whole, never appended, and its content must be
-    exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS: a
-    `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the profile block, an
-    integer in 100000..1000000, never in the env block; its `CLAUDE_CONFIG_DIR`, if any,
-    exactly the `<home>/.volley/claude/<id>` the registry recorded at sign-in for a signed-in
-    profile `<id>` of that host — the script's `host`, SshTmuxHost's spec — with the worktree
-    under that host's `worktree_root`); a
-    `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
-    absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/`, with the
-    `agent_mcp_allow` entries copied from the box's own config after it (MCP_CONFIG: shape
-    only, whatever their `command` and whatever `agent_mcp` — trusted as the owner's config); and
+    rebase.md, decisions.md, retired.json — spelled exactly, directly inside `.volley/`, so no
+    write there is a git config, HEAD, gitfile or hook, or a case variant of launch.sh), an
+    absolute path ending in `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`.
+    A `.volley/launch.sh` (what the tmux session runs) is written whole, never appended, and
+    its content must be exactly `renderLaunchScript` of valid values for that worktree
+    (LAUNCH_SCRIPT_VARS: a `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the
+    profile block, an integer in 100000..1000000, never in the env block; its `CLAUDE_CONFIG_DIR`,
+    if any, exactly the `<home>/.volley/claude/<id>` the registry recorded at sign-in for a
+    signed-in profile `<id>` of that host — the script's `host`, SshTmuxHost's spec — with the
+    worktree under that host's `worktree_root`); a `.volley/mcp.json` (the MCP server claude
+    starts) likewise exactly `renderMcpConfig` of an absolute `…/packages/volley-mcp/src/index.ts`
+    outside any `.volley/`, with the `agent_mcp_allow` entries copied from the box's own config
+    after it (MCP_CONFIG: shape only, whatever their `command` and whatever `agent_mcp` — trusted
+    as the owner's config); and
     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir, or with the
     profile dir `<same abs>/.volley/claude/<same acct>` (`claude auth login`, never

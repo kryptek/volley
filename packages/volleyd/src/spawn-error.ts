@@ -15,6 +15,8 @@ export type SpawnErrorCode =
   // `detail.outcome`: `refused` (nothing was created) or `unknown` (it may have been): Host.launch.
   | "LAUNCH_FAILED"
   | "REMOTE_REPO_MISSING"
+  // The authority fence refused a step on a paired machine: permanent, never retried.
+  | "FENCE_DENIED"
   | "RETIRE_REFUSED"
   // Claude account profiles (src/claude/): unknown / not signed in / remote, or sharing failed.
   | "CLAUDE_ACCOUNT_UNAVAILABLE"

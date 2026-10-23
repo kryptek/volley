@@ -190,20 +190,20 @@ import { AGENT_BRANCH } from "./worktree";
  *   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
  *     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
  *     (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
- *     rebase.md — spelled exactly, directly inside `.volley/`, so no write there is a git
- *     config, HEAD, gitfile or hook, or a case variant of launch.sh), an absolute path ending in
- *     `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh`
- *     (what the tmux session runs) is written whole, never appended, and its content must be
- *     exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS: a
- *     `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the profile block, an
- *     integer in 100000..1000000, never in the env block; its `CLAUDE_CONFIG_DIR`, if any,
- *     exactly the `<home>/.volley/claude/<id>` the registry recorded at sign-in for a signed-in
- *     profile `<id>` of that host — the script's `host`, SshTmuxHost's spec — with the worktree
- *     under that host's `worktree_root`); a
- *     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
- *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/`, with the
- *     `agent_mcp_allow` entries copied from the box's own config after it (MCP_CONFIG: shape
- *     only, whatever their `command` and whatever `agent_mcp` — trusted as the owner's config); and
+ *     rebase.md, decisions.md, retired.json — spelled exactly, directly inside `.volley/`, so no
+ *     write there is a git config, HEAD, gitfile or hook, or a case variant of launch.sh), an
+ *     absolute path ending in `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`.
+ *     A `.volley/launch.sh` (what the tmux session runs) is written whole, never appended, and
+ *     its content must be exactly `renderLaunchScript` of valid values for that worktree
+ *     (LAUNCH_SCRIPT_VARS: a `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the
+ *     profile block, an integer in 100000..1000000, never in the env block; its `CLAUDE_CONFIG_DIR`,
+ *     if any, exactly the `<home>/.volley/claude/<id>` the registry recorded at sign-in for a
+ *     signed-in profile `<id>` of that host — the script's `host`, SshTmuxHost's spec — with the
+ *     worktree under that host's `worktree_root`); a `.volley/mcp.json` (the MCP server claude
+ *     starts) likewise exactly `renderMcpConfig` of an absolute `…/packages/volley-mcp/src/index.ts`
+ *     outside any `.volley/`, with the `agent_mcp_allow` entries copied from the box's own config
+ *     after it (MCP_CONFIG: shape only, whatever their `command` and whatever `agent_mcp` — trusted
+ *     as the owner's config); and
  *     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
  *     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir, or with the
  *     profile dir `<same abs>/.volley/claude/<same acct>` (`claude auth login`, never
@@ -1153,6 +1153,20 @@ function typedTextRefusal(text: string, opts: FenceOptions): string | null {
 
 /** The keys volleyd sends by name: submit, and interrupt. */
 const NAMED_KEYS = new Set(["Enter", "Escape"]);
+
+/**
+ * True when `text` is something the fence ever lets volleyd type or press in an agent's
+ * terminal (with its token, where it needs one): a named or picker key, the launch command, or
+ * the wake line (fence-coverage.test.ts). Anything else is typed only as a token's own text.
+ */
+export function fenceKnowsTypedText(text: string): boolean {
+  return (
+    NAMED_KEYS.has(text) ||
+    (PICKER_KEYS as readonly string[]).includes(text) ||
+    text === LAUNCH_COMMAND ||
+    text === WAKE_TEXT
+  );
+}
 const DOCKER_DENY = new Set([
   "rm",
   "rmi",
@@ -1765,7 +1779,11 @@ const isTrustSwap = (argv: readonly string[]) => {
 const sameArgv = (a: readonly string[], b: readonly string[]) =>
   a.length === b.length && a.every((x, i) => x === b[i]);
 
-/** The files volleyd writes in a worktree's `.volley/` (spawn.ts, pipeline.ts, identity.ts). */
+/**
+ * The files volleyd writes in a worktree's `.volley/` (spawn.ts, pipeline.ts, identity.ts,
+ * decisions.ts, retire.ts). fence-coverage.test.ts fails the build when one of those names a
+ * file this set does not list.
+ */
 const VOLLEY_WRITES = new Set([
   "agent.json",
   "brief.md",
@@ -1775,9 +1793,17 @@ const VOLLEY_WRITES = new Set([
   "findings.md",
   "findings.json",
   "rebase.md",
+  "decisions.md",
+  "retired.json",
 ]);
 /** … and the ones it reads there: those, and the repo's `.volley/brief-extra.md`. */
 const VOLLEY_READS = new Set([...VOLLEY_WRITES, "brief-extra.md"]);
+
+/**
+ * True when the remote fence lets volleyd read or write `<dir>/.volley/<name>`
+ * (fence-coverage.test.ts).
+ */
+export const fenceKnowsVolleyFile = (name: string): boolean => VOLLEY_READS.has(name);
 
 /**
  * `<abs dir>/.volley/<name>` for one of `names` — spelled exactly and directly inside `.volley/`,

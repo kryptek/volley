@@ -723,6 +723,8 @@ export const WAVE_EVENT_TYPES = [
   "remediation_closed",
   // The morning digest (SPEC §4.6.16): published retained, with its one push.
   "digest_published",
+  // The terminal-status watchdog (#414): a dropped done / failed handed over again.
+  "terminal_status_recovered",
   // A draft PR marked ready before the CI gate (SPEC §4.6.8): its full CI runs from `at` (#408).
   "pr_marked_ready",
   // A wave's issue lifecycle (#416, SPEC §4.6.19): what volleyd did to a task's issue, so a
