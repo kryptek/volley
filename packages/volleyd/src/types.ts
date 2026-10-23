@@ -112,6 +112,9 @@ export interface Tunables {
   brief_preface_max_bytes: number;
   wake_grace_s: number;
   screen_tail_interval_s: number;
+  /** A paired machine's tmux session size at launch, in columns and rows (#403). */
+  tmux_cols: number;
+  tmux_rows: number;
   /** After `volleyd stop`, how long agents get to publish a terminal status before they are force-retired. */
   stop_grace_s: number;
   /** Window collecting broker login changes into one Dynamic Security control message. */

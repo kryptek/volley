@@ -1572,6 +1572,13 @@ const REMOTE_PATH = /^\/[^\n\r\0]*$/;
 const BASE64 = /^[A-Za-z0-9+/=\n]*$/;
 /** The only command a remote tmux session may run (renderLaunchScript's script). */
 export const TMUX_LAUNCH_COMMAND = "bash .volley/launch.sh";
+/** The window sizes volleyd gives a remote tmux session (`new-session -x/-y`, `resize-window`). */
+export const TMUX_SIZE = { min: 20, max: 500 } as const;
+/** A column or row count in `TMUX_SIZE`, in plain decimal (no sign, leading zero or exponent). */
+const isTmuxSize = (v: string) =>
+  /^[1-9][0-9]*$/.test(v) && Number(v) >= TMUX_SIZE.min && Number(v) <= TMUX_SIZE.max;
+/** An agent's session as `resize-window` targets it: `=<session>:` (hosts/ssh-tmux.ts sessionName). */
+const AGENT_PANE = /^=[A-Za-z0-9_-]{1,128}:$/;
 
 /** The verdicts for one `ssh` argv: the ssh form itself, then each remote step's. */
 function sshVerdicts(args: readonly string[], opts: FenceOptions): Verdict[] {
@@ -2082,7 +2089,8 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
 const TMUX_SPECS: Record<string, OptSpec> = {
   "new-session": {
     flags: ["-d"],
-    valued: ["-s", "-c"],
+    valued: ["-s", "-c", "-x", "-y"],
+    values: { "-x": isTmuxSize, "-y": isTmuxSize },
     positional: (a) => a === TMUX_LAUNCH_COMMAND,
   },
   "capture-pane": { flags: ["-p", "-J"], valued: ["-t", "-S", "-E"] },
@@ -2123,6 +2131,21 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
     if (tail.length !== 3 || tail[0] !== "-l" || tail[1] !== "--") return deny("tmux send-keys");
     const why = typedTextRefusal(tail[2] ?? "", opts);
     return why === null ? ALLOW : deny(`tmux send-keys (${why})`);
+  }
+  if (sub === "resize-window") {
+    // The Desk's Terminal popout size (#403): exactly `-t =<session>: -x <n> -y <n>`.
+    const [t, target, x, cols, y, rows, ...more] = rest;
+    return t === "-t" &&
+      AGENT_PANE.test(target ?? "") &&
+      x === "-x" &&
+      isTmuxSize(cols ?? "") &&
+      y === "-y" &&
+      isTmuxSize(rows ?? "") &&
+      more.length === 0
+      ? ALLOW
+      : deny(
+          `tmux resize-window (only -t =<session>: -x <n> -y <n>, n ${TMUX_SIZE.min}..${TMUX_SIZE.max})`,
+        );
   }
   if (sub === "new-session" && rest.at(-1) === SIGNIN_COMMAND)
     return remoteSigninSession(rest, opts);

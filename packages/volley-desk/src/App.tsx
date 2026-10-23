@@ -95,6 +95,7 @@ import { useNotifyMirror, useSoundSettings } from "./sounds/settings";
 import { useFlipSound, useSoundManager } from "./sounds/useSoundManager";
 import { ClaimButton } from "./steer/SteerPanel";
 import { routeDeskControl } from "./steer/deskControl";
+import { type TerminalSize, sendTerminalSize } from "./steer/terminalResize";
 import { deskDevice } from "./steer/transport";
 import { useSteering, waveChatTarget } from "./steer/useSteering";
 import {
@@ -1366,6 +1367,10 @@ export default function App() {
                   onRaise={() => popouts.raise(id)}
                   fontPx={popouts.fontPx}
                   onFont={(d) => popouts.setFontPx(popouts.fontPx + d)}
+                  // Only volleyd's agents have a terminal it can size (#403).
+                  {...(control && a.task
+                    ? { onSize: (size: TerminalSize) => sendTerminalSize(control, id, size) }
+                    : {})}
                 />
               );
             })}

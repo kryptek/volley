@@ -244,10 +244,10 @@ import {
 } from "./decisions";
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
-import { mintConsentToken, mintModelSwitchToken, mintWakeToken } from "./fence";
+import { TMUX_SIZE, mintConsentToken, mintModelSwitchToken, mintWakeToken } from "./fence";
 import { LOCAL_HOST } from "./fleet-name";
 import { lockFetches } from "./git-lock";
-import type { Host } from "./hosts/host";
+import type { Host, TermSize } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import {
   type RemoteHost,
@@ -9417,6 +9417,8 @@ export class Daemon {
         return this.archiveOp(p, by);
       case "steer":
         return this.steer(p, by);
+      case "terminal_resize":
+        return this.terminalResize(p, by);
       case "merged":
         return this.mergedOp(p, by);
       case "merge":
@@ -10855,6 +10857,81 @@ export class Daemon {
    * `steer`: a T0 mailbox `steering` to the task's current agent with `seq` and `supersedes` (the
    * previous steer to the task), journaled; the answer waits up to `wait_ack_ms` for the ack.
    */
+  /** Per agent: the resize waiting out its coalescing window, and the one running before it. */
+  private readonly resizes = new Map<
+    string,
+    { size: TermSize | "launch"; answers: ((r: Reply) => void)[]; timer: TimerHandle }
+  >();
+  private readonly resizing = new Map<string, Promise<unknown>>();
+
+  /**
+   * `terminal_resize { agent_id, cols, rows | reset: true }` (SPEC §4.6.6): size a live agent's
+   * terminal to the Desk's Terminal popout, or back to its launch size. Cosmetic, so any sender
+   * that may write this mailbox (the steer role) may ask. A burst for one agent is one resize to
+   * its last size, run after the one before it; every request in the burst gets its answer.
+   */
+  private terminalResize(p: Record<string, unknown>, by: string): HandlerResult {
+    const id = typeof p.agent_id === "string" ? p.agent_id : "";
+    if (id === "") return { ok: false, error: "terminal_resize requires payload.agent_id" };
+    const a = this.supervised.get(id);
+    if (a === undefined) return { ok: false, error: `agent '${id}' is not live under volleyd` };
+    const cell = (n: unknown) =>
+      Number.isInteger(n) && (n as number) >= TMUX_SIZE.min && (n as number) <= TMUX_SIZE.max;
+    if (p.reset !== true && !(cell(p.cols) && cell(p.rows)))
+      return {
+        ok: false,
+        error: `terminal_resize needs cols and rows (integers ${TMUX_SIZE.min}..${TMUX_SIZE.max}) or reset: true`,
+      };
+    const size: TermSize | "launch" =
+      p.reset === true ? "launch" : { cols: p.cols as number, rows: p.rows as number };
+    const answer = new Promise<Reply>((resolve) => {
+      const queued = this.resizes.get(id);
+      if (queued !== undefined) this.time.clearTimeout(queued.timer);
+      const answers = [...(queued?.answers ?? []), resolve];
+      const timer = this.time.setTimeout(
+        () => this.flushResize(id, a.host, a.workspace, by),
+        DAEMON_DEFAULTS.terminal_resize_coalesce_ms,
+      );
+      this.resizes.set(id, { size, answers, timer });
+    });
+    return { ok: true, defer: answer };
+  }
+
+  private flushResize(id: string, host: Host, workspace: string, by: string): void {
+    const queued = this.resizes.get(id);
+    if (queued === undefined) return;
+    this.resizes.delete(id);
+    const { size, answers } = queued;
+    const shown = size === "launch" ? "its launch size" : `${size.cols}×${size.rows}`;
+    const run = (this.resizing.get(id) ?? Promise.resolve())
+      .then(() => host.resize(workspace, size))
+      .then(
+        (resized): Reply => {
+          this.log(
+            resized
+              ? `terminal_resize ${id} → ${shown} by ${by}`
+              : `terminal_resize ${id}: host ${host.name} cannot resize a terminal; ignored`,
+          );
+          return {
+            ok: true,
+            result: { agent_id: id, resized, ...(size === "launch" ? { reset: true } : size) },
+          };
+        },
+        (e: unknown): Reply => {
+          const error = `terminal_resize ${id}: ${e instanceof Error ? e.message : String(e)}`;
+          this.log(error);
+          return { ok: false, error };
+        },
+      );
+    const done = run.then((r) => {
+      for (const answer of answers) answer(r);
+    });
+    this.resizing.set(id, done);
+    void done.then(() => {
+      if (this.resizing.get(id) === done) this.resizing.delete(id);
+    });
+  }
+
   private async steer(p: Record<string, unknown>, by: string): Promise<HandlerResult> {
     const w = this.waveOf(p);
     if ("error" in w) return { ok: false, error: w.error };
