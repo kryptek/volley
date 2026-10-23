@@ -95,6 +95,13 @@ All workspace packages share one version. Dates are release-tag dates.
 
 ### Fixed
 
+- **volley-desk: a task waiting on CI after its agent finished says so.** The graph node, the rail
+  segment and the task row now say what is happening now, not the pipeline stage: a running agent
+  (`implementing`, `reviewing`, `fixing`), else `waiting for CI · 21/22 jobs`, else a merge turn,
+  else `waiting for a decision` (the graph node shortens these two to `merge turn` and `decision`).
+  All four of volleyd's CI-hold wordings count, so an unreadable CI poll no longer flips the node
+  back to `implementing` or reads a quiet held agent as stalled, and a held task with no agent
+  shows a `CI` stub on the wave window's tether side. (#451)
 - **volleyd: a plan version that moves a queued task's host lets placement place it.** A task
   admitted but not yet spawned whose host a new version changes (`placement: local` → `auto`,
   `auto` → a named host, a named host → `auto`) gives its admission back: volleyd journals the new
