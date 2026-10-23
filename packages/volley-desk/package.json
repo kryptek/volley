@@ -1,6 +1,6 @@
 {
   "name": "volley-desk",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "private": true,
   "description": "Volley Desk \u2014 an infinite canvas of live wave and agent windows over MQTT (Vite + React 19 + React Bits)",
   "license": "Apache-2.0",

@@ -2,6 +2,160 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.7.0 — 2026-10-23
+
+### Added
+
+- **volleyd, Desk: a CI hold counts jobs and says how long is left.** `ci_pending` carries
+  `jobs: { done, total, running, failed }` and `eta_s` (the slowest unfinished job's last
+  duration in an earlier completed run of the wave, minus its elapsed time), and `why_waiting`
+  reads `CI 3/13 · running: Backend IT shard 2–6/6 · ~8 min left` instead of `(n/m checks)`
+  counted in workflow runs. The Desk shows the same line and adds `possibly stuck: no job
+  finished for <n> min (the slowest usually takes <m>)` when no job finished for longer than the
+  slowest job's last duration. (#415)
+- **volleyd: volleyd owns a wave's issue lifecycle.** A PR into the release branch closes nothing
+  on GitHub, so the issues of a finished wave used to stay open with nothing on them until the
+  release reached main. Now, when a task merges into the release branch, volleyd labels its issue
+  `merged-to-release` (creating the label if it is missing) and comments once. The digest gains
+  `closes`, and every release stage's brief carries the release PR body's `Closes #N` lines.
+  Once the release branch's PR has merged, volleyd closes every done task's issue that is still
+  open, with a comment naming the release PR, and removes the label. Cancelled and deferred
+  tasks' issues stay open with one comment saying why; tasks sharing an issue give it one outcome,
+  and an issue gh cannot read holds back none of the others (it is retried after a minute, then
+  every 5 minutes). `volleyd issues <wave>` lists each
+  task's issue state; `--verify [--pr <n>]` runs the release check for a release merged by hand,
+  on a complete wave only (once verified, it answers from the journal; a `--pr` that is not a
+  merged PR from the release branch is refused). Each comment carries a
+  marker, so a restart never repeats one. A wave finished before the upgrade and not yet
+  archived gets the same treatment when the upgraded volleyd starts. (#416)
+
+### Changed
+
+- **ci: a PR's checks come back in about 5 minutes instead of 20.** volleyd's suite runs in four
+  shards balanced by measured per-file time (`packages/volleyd/test/timings.json`,
+  `scripts/test-shards.ts`, `bun run test:shard <i>/<n>`), under both bun's runner and vitest. A PR
+  runs the newest bun and the 8-task soak. A full run (pushes to `main` and `release/**`, a nightly,
+  release PRs, and PRs labelled `ci:full`) also runs bun 1.3 and the 32-task soak. Running only
+  the tests of the packages a PR touches is left for a follow-up. (#398)
+- **volleyd tests: a test daemon starts in milliseconds, not a second.** The test broker holds the
+  `done` status a cleanly stopped volleyd leaves, so the startup "already running?" probe no longer
+  waits out its whole `probe_ms` in every daemon test; one test still starts on a broker volleyd
+  has never used. (#398)
+- **volley-desk: opening a window keeps the zoom and pans to it.** A window opened from the
+  dock, a top-bar count or a hidden wave shown again is placed in free space in its region,
+  moves no other window, and the view pans at the current zoom so its top edge sits near the
+  top of the screen. Closing a window moves nothing. Auto-arrange now runs only on first load
+  and after a browser resize; Arrange & fit still arranges on demand. (#404)
+
+### Fixed
+
+- **volley-hooks: sessions sharing a repo directory keep their own coordinator identity.** Each
+  session's hooks keep their state under the session (the hook input's `session_id`, else the
+  cmux surface) instead of the directory, and speak for the registry entry recorded from their own
+  cmux surface (volley-mcp now records `pid` and `surface` on its registry entry), so a second
+  session in the same repo no longer takes over the first one's entry, activity or steering. A
+  remembered `workspace` is republished only from the session's own environment, so a handoff
+  answer reaches the session that asked. (#392)
+- **volleyd: a handoff answer goes to the workspace its question came from** when the session's
+  registry entry names another session's screen; when it cannot, the refusal names that workspace
+  and the Desk's Needs-you row offers **Send to mailbox** instead of a dead Send. (#392)
+- **volley-hooks: coordinator hooks are silent on a machine with no coordinator login.** With no
+  `VOLLEY_AUTH_*` and no `coordinator.json`, a refused anonymous connect is `NOT_CONFIGURED`: every
+  hook exits 0 with nothing printed, instead of an `AUTH_FAILED` line per hook in every session.
+  Credentials that exist but are refused stay loud. `install.sh` refuses a user-level install
+  without a coordinator identity unless `--force`. (#407) (#392)
+- **volley-desk: Arrange & fit uses the whole screen, in regions.** Waves with their agents,
+  then the side windows (unassigned agents, Sessions, Wave coordinators, Machines) right next
+  to them, then Needs you. Each wave picks its own agent column count, Needs you is never
+  taller than the screen (its list scrolls inside), and of layouts at the same zoom the one
+  that fills most of the screen wins, so windows no longer end up in one tall strip. (#397)
+- **volley-desk: an agent of a `placement: local` wave shows its machine chip again.** A wave
+  task with no paired host and no placement runs on the supervisor's own machine, so its agent
+  window reads `this machine`, the same as an auto-placed local agent. (#399)
+- **volleyd: a signed-in Claude account profile is ready to run agents unattended.** Signing an
+  account in, on this machine or a paired one, and every spawn under it now write what the
+  default login has (`hasCompletedOnboarding`, `lastOnboardingVersion`, a `theme` in
+  `.claude.json`; `skipDangerousModePermissionPrompt` in `settings.json`), so agents no longer
+  stall on Claude Code's theme picker, security notice or bypass-permissions confirmation. A
+  local profile is written only while no agent session runs in it, and a `settings.json` that
+  is not a JSON object is refused with a message instead of being replaced. An agent that still lands
+  on one of those screens has its session closed, its profile prepared (`profile_repaired`) and
+  is relaunched once; a second time opens `unknown_screen` naming the screen in plain words
+  (`… is stuck on Claude Code's first-run setup (theme picker) for account <acct> on
+  <machine>`). (#400)
+- **volley-cli: `volley peer doctor` checks the account profiles (`claude.profiles`).** It names
+  each signed-in profile missing those keys, and `--fix` writes them, skipping a profile an
+  agent session runs in until it exits. (#400)
+- **volleyd: a decision's answer reaches a paired machine's agent.** The remote fence now lets
+  volleyd write `.volley/decisions.md` (and a retired agent's `.volley/retired.json`) on a paired
+  machine; before, resolving a remote task's decision logged `FENCE_DENIED: remote file write`
+  and the agent never saw the answer. A new test fails the build when the supervisor reads or
+  writes a `.volley/` file, or types a constant, that the remote fence does not know. (#401)
+- **volleyd: waking an idle agent on a paired machine types the wake line.** `exec` now passes
+  the wake token to the fence, so the wake is no longer refused as `text volleyd never types`.
+  (#406) (#401)
+- **volleyd: a fence denial on a paired machine is reported as itself.** It is no longer
+  reported as `ssh … failed: no result` and retried: the spawn fails once with the denied step
+  (`FENCE_DENIED: remote cat … (read <path> on <target>)`) and opens a decision without
+  retrying. (#406) (#401)
+- **volleyd: a relaunch decision closes itself once its agent is alive, and offers a harmless
+  third answer.** `unknown_screen`, `hooks_auth_failed` and `mcp_not_registered` close on their
+  own (`by: volleyd`, `started on its own`) as soon as the agent they are about registers,
+  publishes progress or a narration (waiting at a prompt or idle does not count), or reports
+  `working`; nothing is relaunched or stopped. `unknown_screen` counts only a sign the session
+  got past its screen (its hooks, or its MCP server doing work), not the MCP server's start-up
+  heartbeat or registration; `hooks_auth_failed` closes only once its hooks reach the broker,
+  and the paused agent is then told to resume. Until then they offer `it's running` beside
+  `relaunch` / `cancel`, which (typed with a straight or curly apostrophe) checks the agent is
+  live and closes the card (retiring the agent if a newer run already replaced it), or keeps it
+  open saying no live agent was found.
+  Decisions carry `option_help`, hover text for their options, which the Desk shows on the
+  button. (#402)
+- **volleyd, desk: the Terminal popout resizes the agent's terminal.** A paired machine's agent
+  now starts in a 220×50 tmux session (`tmux_cols`, `tmux_rows`), not tmux's detached 80×24, and
+  while its Terminal popout is open the Desk sends volleyd the popout's size in cells (debounced,
+  the new `terminal_resize` control op), which runs `tmux resize-window` on that machine, so
+  Claude Code wraps at the popout's width. Closing the popout returns the terminal to its launch
+  size. While it sizes the terminal the popout keeps the width it opened at (or was dragged to)
+  rather than following the screen. A local (cmux) agent's terminal is not resized. (#403)
+- **volley-cli: `volley deploy <tag>` takes every paired machine to the tag.** After the
+  supervisor's health check passes, each paired machine (from volleyd's `peers.json` and
+  `hosts.<name>`) is upgraded over its ssh: fetch, check the tag out, `bun install
+  --frozen-lockfile` with the lock recorded for its doctor, restart `volley peer run`, and a fresh
+  doctor run, with one health line each (`box-a: v0.6.4 ✓ eligible`). A machine that fails rolls
+  back alone to its previous ref and is named with the step and why; the deploy exits 1.
+  `--skip-peers` and `--only <machine>` choose the machines; `--dry-run` prints each one's plan. (#405)
+- **volley-cli: a restarted `volley peer run` publishes a fresh doctor verdict.** It runs the
+  doctor at start and its first heartbeat waits for that run, so readiness never shows the
+  install verdict from before an upgrade. (#405)
+- **volleyd: autopilot merges a draft PR instead of escalating `merge_refused`.** A draft is
+  marked ready (`gh pr ready`, journaled `pr_marked_ready { pr, head, at }`) before the CI gate,
+  and the gate counts only the runs created after the mark (allowing for a little clock skew),
+  so the jobs a repository skips on drafts actually run; a head with no run yet inside the
+  mark's grace is held, not merged. A merge refused because the PR is a draft (`reason: draft`)
+  marks it ready, holds the gated head for that CI and merges once it is green; the first such
+  refusal never uses up `merge_retry_max`, and autopilot's `merge_refused/draft` row answers
+  `retry`. When `gh pr ready` keeps failing, further draft refusals count, and the owner is asked
+  (`ready_failed`, which that row does not answer). (#408)
+- **volleyd: a dropped terminal status is recovered, not just alarmed.** A `done` or `failed`
+  still unhandled `terminal_recover_ms` (60 s) after its `terminal_status_unjournaled` alarm is
+  re-read from the agent's retained status and handed to the pipeline again, journaling
+  `terminal_status_recovered`; when that fails too, decision `terminal_status_lost` names the
+  agent and offers `accept done` / `relaunch` (asked again when `accept done` fails too, and at
+  once when a `failed`'s handoff throws after its agent was retired). A throw in the status
+  handoff (a remote verification step the fence denied, a timeout) is journaled as `pipeline_error { check:
+  "status" }` instead of being dropped, so a task no longer sits with no live agent and its
+  dependents queued until volleyd restarts. (#414)
+- **volleyd: one `repo_untrusted` question per machine, account and repo, not one per task.** A
+  wave's launches into an untrusted folder used to open one identical decision each (12 tasks, 12
+  cards). The decision is now keyed by (machine, Claude profile, repo root): the first launch opens
+  it and every later one, even one racing it in the same tick, joins it (`decision_joined`), parks
+  and is listed in its new `waiting` field. The question names the machine (not its ssh target)
+  and the account once, and how many tasks wait (`… 12 tasks are waiting: i392, i416, …`). One
+  `trust` answer resumes them all. `cancel` now cancels only the waiting launches
+  (`spawn_failed` `LAUNCH_CANCELLED`, no retry): the tasks keep their other work, and the launches
+  start once the repo is trusted. (#418)
+
 ## 0.6.3 — 2026-10-22
 
 ### Fixed
