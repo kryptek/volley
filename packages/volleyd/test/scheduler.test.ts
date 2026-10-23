@@ -179,6 +179,23 @@ describe("the cluster cap (#384)", () => {
     expect(clusterRoom(rec([...gated, strat("hold"), strat("cap")]), "A")).toBe(4);
   });
 
+  it("a member trimmed by the allowance takes no slot, so no member is held in its name", () => {
+    const two = rec(["i315", "i317"].flatMap((id) => at(id, "implement")));
+    const r = run(two);
+    expect(r.admit).toContain("i318");
+    const one = admit(ready(two), { allow: 1, reasons: [] }, ctx({ clusters: clusterRooms(two) }));
+    expect(one.admit).toEqual(["i318"]);
+    expect(one.held).toEqual({});
+    const three = rec(["i315", "i317", "i318"].flatMap((id) => at(id, "implement")));
+    const r3 = admit(
+      ready(three),
+      { allow: 1, reasons: [] },
+      ctx({ clusters: clusterRooms(three) }),
+    );
+    expect(r3.admit).toEqual(["i322"]);
+    expect(r3.held).toEqual({ i323: "cluster A: 4 in flight (i315, i317, i318, i322)" });
+  });
+
   it("tasks without a cluster are unaffected, and no cluster info admits as before", () => {
     const r = admit(ready(rec()), OPEN, ctx());
     expect(r.admit).toHaveLength(7);

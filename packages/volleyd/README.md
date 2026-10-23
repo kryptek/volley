@@ -227,8 +227,9 @@ and work while the daemon is down; use the wave `_system` for global events (`co
   `wave-state.schema.json` payload shape. Re-applying an already-applied `seq` is a no-op.
 - **Scheduler** (`src/scheduler.ts`): `ready` = queued, not admitted, every `after` done; ordered
   by critical path length (longest downstream chain first), then id; tasks sharing files are kept
-  apart by their overlap-plan cluster's cap (below), not by the order. `admit` takes an admission verdict `{ allow, reasons }` (pressure-based
-  admission plugs in here later) and never exceeds the hard ceiling or the wave's spawn budget.
+  apart by their overlap-plan cluster's cap (below), not by the order. `admit` takes an admission
+  verdict `{ allow, reasons }` (pressure-based admission plugs in here later) and never exceeds
+  the hard ceiling or the wave's spawn budget.
   The hard ceiling counts the agents volleyd runs or is starting, across all waves and machines:
   supervised, launched and being verified, spawning (a release stage's agent too), and one slot
   for each admitted task of a running wave with no agent live that will spawn its next one:

@@ -414,7 +414,7 @@ export const DAEMON_DEFAULTS = {
    * between hold and planned would admit and hold the same members every few ticks.
    */
   cluster_strategy_min_interval_ms: 1_800_000,
-  /** The window merges and branch updates are counted over (`merges_last_2h`, `updates_last_2h`). */
+  /** The window merges and branch updates are counted over (`merges_in_window`, `updates_in_window`). */
   churn_window_ms: 7_200_000,
   /** Branch updates of one live member that put its cluster on hold: each one re-runs its reviews. */
   churn_updates_hold: 2,

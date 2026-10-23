@@ -202,20 +202,30 @@ export function admit(
   admission: Admission,
   ctx: AdmitContext,
 ): { admit: TaskId[]; held: Record<TaskId, string>; reasons: string[] } {
-  // A member of a cluster with no room is held with why; the tasks after it are not.
-  const room = clusterGate(ctx.clusters);
-  const held: Record<TaskId, string> = {};
-  const eligible = readyTasks.filter((id) => {
-    const why = room.check(id);
-    if (why !== null) held[id] = why;
-    else room.take(id);
-    return why === null;
-  });
   const ceilingRoom = Math.max(0, ctx.hardCeiling - ctx.live);
   const budgetRoom = Math.max(0, ctx.spawnBudget - ctx.spawnsUsed);
-  const n = Math.min(eligible.length, Math.max(0, admission.allow), ceilingRoom, budgetRoom);
+  const limit = Math.min(Math.max(0, admission.allow), ceilingRoom, budgetRoom);
+  // A member of a cluster with no room is held with why; the tasks after it are not. Only an
+  // admitted task takes a slot: one the limits trim holds none, so no member is held in its name.
+  const room = clusterGate(ctx.clusters);
+  const held: Record<TaskId, string> = {};
+  const admitted: TaskId[] = [];
+  let eligible = 0;
+  for (const id of readyTasks) {
+    const why = room.check(id);
+    if (why !== null) {
+      held[id] = why;
+      continue;
+    }
+    eligible++;
+    if (admitted.length < limit) {
+      room.take(id);
+      admitted.push(id);
+    }
+  }
+  const n = admitted.length;
   const reasons = [...admission.reasons];
-  if (n < eligible.length) {
+  if (n < eligible) {
     if (ceilingRoom <= n) {
       reasons.push(`hard ceiling reached: ${ctx.live + n}/${ctx.hardCeiling} live agents`);
     }
@@ -223,7 +233,7 @@ export function admit(
       reasons.push(`spawn budget exhausted: ${ctx.spawnsUsed + n}/${ctx.spawnBudget} spawns`);
     }
   }
-  return { admit: eligible.slice(0, n), held, reasons };
+  return { admit: admitted, held, reasons };
 }
 
 /** One task `admitPlacing` admitted, and where. */
@@ -241,7 +251,8 @@ export interface PlacedAdmission {
  * down), a peer by the global signals of `gate` plus its own verdict (`hostGate`). Each admission
  * is reserved in the snapshot, so the next placement sees it (a heavy one takes its slots). A task
  * whose cluster has no room (`clusterRooms`, checked before placement), with no eligible machine,
- * or whose machine holds starts, is `held` with why, and does not stop the tasks after it. A closed gate (paused, kill switch, a global signal) admits nothing.
+ * or whose machine holds starts, is `held` with why, and does not stop the tasks after it. A
+ * closed gate (paused, kill switch, a global signal) admits nothing.
  */
 export function admitPlacing(
   readyTasks: TaskId[],

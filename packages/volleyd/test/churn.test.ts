@@ -93,8 +93,8 @@ describe("churnOf (#384)", () => {
     expect(c.clusters.A).toEqual({
       gated: 1,
       in_flight: 2,
-      merges_last_2h: 1,
-      updates_last_2h: 1,
+      merges_in_window: 1,
+      updates_in_window: 1,
     });
   });
 });

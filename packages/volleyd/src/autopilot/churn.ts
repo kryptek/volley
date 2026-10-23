@@ -10,18 +10,24 @@ import type { JournalEvent, PlanCluster, TaskId } from "../types";
  * Pure: the daemon's tick journals the switch (`cluster_strategy_changed`).
  */
 
-/** One task's churn: branch updates (`stage_entered { rebase: true }`) and reviews after one. */
+/**
+ * One task's churn: branch updates (`stage_entered { rebase: true }`) and reviews after one.
+ * `rereviews` is for observability (status, the digest): `strategyFor` reads `updates` only.
+ */
 export interface TaskChurn {
   updates: number;
   rereviews: number;
 }
 
-/** One cluster's churn now: members gated and in flight, merges and updates in the window. */
+/**
+ * One cluster's churn now: members gated and in flight, merges and updates in the window
+ * (`churn_window_ms`). `in_flight` is for observability: `strategyFor` does not read it.
+ */
 export interface ClusterChurn {
   gated: number;
   in_flight: number;
-  merges_last_2h: number;
-  updates_last_2h: number;
+  merges_in_window: number;
+  updates_in_window: number;
 }
 
 export interface Churn {
@@ -69,8 +75,8 @@ export function churnOf(rec: WaveRecord, events: readonly JournalEvent[], now: n
     clusters[c.id] = {
       gated: at.filter((s) => s === "merge_ready").length,
       in_flight: at.filter((s) => s !== undefined && IN_FLIGHT.has(s)).length,
-      merges_last_2h: c.tasks.filter((id) => recentMerges.has(id)).length,
-      updates_last_2h: c.tasks.reduce((n, id) => n + (recentUpdates.get(id) ?? 0), 0),
+      merges_in_window: c.tasks.filter((id) => recentMerges.has(id)).length,
+      updates_in_window: c.tasks.reduce((n, id) => n + (recentUpdates.get(id) ?? 0), 0),
     };
   }
   const settled = [...stage].filter(([, s]) => s === "done" || s === "cancelled").map(([id]) => id);
@@ -78,6 +84,12 @@ export function churnOf(rec: WaveRecord, events: readonly JournalEvent[], now: n
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** The churn window as a why says it: `the last 2 h` (whole hours), else in minutes. */
+function lastWindow(): string {
+  const min = DAEMON_DEFAULTS.churn_window_ms / 60_000;
+  return min % 60 === 0 ? `the last ${min / 60} h` : `the last ${Math.round(min)} min`;
+}
 
 /**
  * The strategy `cluster` should run under now, and why. `hold` when a live member has updated its
@@ -101,16 +113,16 @@ export function strategyFor(
     };
   if (
     stats.gated >= DAEMON_DEFAULTS.churn_gated_hold &&
-    stats.merges_last_2h < DAEMON_DEFAULTS.churn_merges_floor
+    stats.merges_in_window < DAEMON_DEFAULTS.churn_merges_floor
   )
     return {
       strategy: "hold",
-      why: `${stats.gated} gated, ${plural(stats.merges_last_2h, "merge")} in the last 2 h`,
+      why: `${stats.gated} gated, ${plural(stats.merges_in_window, "merge")} in ${lastWindow()}`,
     };
   if (stats.gated >= DAEMON_DEFAULTS.churn_gated_train)
     return { strategy: "train", why: `${stats.gated} gated` };
-  if (stats.gated === 0 && stats.updates_last_2h === 0)
-    return { strategy: "planned", why: "nothing gated, no branch update in the last 2 h" };
+  if (stats.gated === 0 && stats.updates_in_window === 0)
+    return { strategy: "planned", why: `nothing gated, no branch update in ${lastWindow()}` };
   return { strategy: cluster.state, why: "unchanged" };
 }
 
