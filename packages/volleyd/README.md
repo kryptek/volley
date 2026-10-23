@@ -2019,9 +2019,10 @@ verification opens `unknown_screen`.
 
 ### Relaunch decisions
 
-`hooks_auth_failed`, `mcp_not_registered` and `unknown_screen` offer `relaunch` / `cancel`, and
-the answer is acted on: each carries a pipeline marker naming the run it is about (`{ on:
-"relaunch", wave, task, role, attempt, agent_id }`; the daemon's `spawn_failed` carries one too).
+`hooks_auth_failed`, `mcp_not_registered` and `unknown_screen` offer `relaunch` / `cancel` /
+`it's running`, and the answer is acted on: each carries a pipeline marker naming the run it is
+about (`{ on: "relaunch", wave, task, role, attempt, agent_id }`; the daemon's `spawn_failed`
+carries one too).
 An agent whose hooks the broker refused is **paused** as soon as the decision opens (Escape in its
 workspace and a steering "stop: your broker login is being repaired"), so it does no work it
 cannot deliver; nobody is asked to edit credentials by hand.
@@ -2033,6 +2034,36 @@ cannot deliver; nobody is asked to edit credentials by hand.
   agent id, a freshly minted login, `<role>-<n+1>` registering as usual.
 - `cancel`: the agent is retired the same way and the task is `blocked`
   (`stage_entered { stage: "blocked", why }`, the decision text as its `why_waiting`).
+- `it's running`: the harmless answer (its hover text, in the decision's `option_help`: "Volley
+  checks the agent is alive, then closes this. Nothing is restarted or stopped."). When the agent
+  is still the role's run and volleyd heard from it after the decision opened, the decision
+  closes and nothing else happens (a paused `hooks_auth_failed` agent gets one steering, "resume:
+  your broker login works again", journaled with `reason: "auth_resumed"`). When a newer run of
+  the role replaced the agent, the decision is moot: it closes and the stale agent is retired, as
+  `relaunch` does. Otherwise it is asked again as `no live agent found for <agent> (last heard
+  <ago | never>). <question>` (for `hooks_auth_failed`, `<agent>'s hooks have not reached the
+  broker (last heard <ago | never>)`: its MCP server may be answering).
+
+**A relaunch decision closes itself once its agent is alive.** The first sign of life the agent
+sends after the decision opened (by its own `wall_time`, so a retained record replayed after a
+restart does not count) resolves it as `it's running`, `by: "volleyd"`, rationale `started on its
+own`. For `unknown_screen` that is a sign the session got past the screen that held it: any
+signal from its hooks (a hook heartbeat, the hooks' registry re-publish with `model_source`, a
+`working` status), or its MCP server doing work (a narration, a `working` it publishes). The MCP
+server's start-up signals (its heartbeat, its own registration, `spawning` / `registered`) do not
+count: it starts with the process, whatever screen Claude Code is held at. Waiting at a prompt
+(`awaiting_input`, `idle`) never counts. For `mcp_not_registered` the hooks were already heard from, so
+only the agent's MCP server counts there: a progress message not from the hooks, its own
+registration (no `model_source`), or a `spawning` / `registered` status. For `hooks_auth_failed`
+it is the other way round: only the hooks count (a hook heartbeat, the hooks' registry re-publish
+with `model_source`, a `working` status), since the agent's MCP server answering the pause says
+nothing about the refused login. The same rule decides whether an `it's running` answer finds the
+agent live. A sign of life is judged by the sender's clock: one from a machine whose clock runs
+behind the supervisor's can predate the decision and not count, and the card then stays open for
+the owner to answer. One from a machine whose clock runs ahead can, after a supervisor restart,
+replay a retained hooks registry entry or `working` status sent before the decision opened with a
+time after it, and close the card although the session is still at its screen; the agent's
+silence then reopens the question through the usual liveness checks.
 
 ### Unattended coordinator starts
 

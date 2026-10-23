@@ -203,6 +203,31 @@ describe("the Needs you window", () => {
     );
   });
 
+  it("a spawn decision's it's running button carries its hover text (#402)", async () => {
+    const help =
+      "Volley checks the agent is alive, then closes this. Nothing is restarted or stopped.";
+    const spawn: InboxItem = {
+      ...item(DECISION),
+      options: [
+        { label: "relaunch" },
+        { label: "cancel" },
+        { label: "it's running", description: help },
+      ],
+      source: { decision_id: "unknown_screen-w1-a1", decision_kind: "unknown_screen" },
+    };
+    const control = vi.fn(async () => ({ ok: true }));
+    setup({ items: [spawn], control });
+    const btn = within(row(DECISION)).getByRole("button", { name: "it's running" });
+    expect(btn.getAttribute("title")).toBe(help);
+    fireEvent.click(btn);
+    await waitFor(() => expect(control).toHaveBeenCalledTimes(1));
+    expect(control).toHaveBeenCalledWith(
+      "inbox_answer",
+      expect.objectContaining({ id: DECISION, answer: "it's running" }),
+      expect.any(String),
+    );
+  });
+
   it("through the steer transport the answer is one publish to volleyd's mailbox", async () => {
     const publish = vi.fn(async () => {});
     const transport = createSteerTransport(

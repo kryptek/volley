@@ -235,10 +235,12 @@ import {
   type Held,
   type HeldOn,
   ID_RE,
+  ITS_RUNNING,
   LOCAL_FILES,
   MACHINE_DOWN_CANCEL,
   MACHINE_DOWN_REPLACE,
   MACHINE_DOWN_WAIT,
+  SPAWN_DECISION_KINDS,
   attentionPayload,
   checkAnswer,
   decisionPayload,
@@ -1007,6 +1009,15 @@ const waveCompleteDecisionId = (wave: WaveId) => waveDecisionId("wave_complete",
 
 /** Every agent's registry entry: the coordinator names they carry (SPEC §6.2). */
 const REGISTRY_FILTER = "volley/_system/registry/+";
+/** Statuses that show an agent is live: the hooks' `working`, its MCP server's own two. */
+const LIVE_STATUSES: ReadonlySet<string> = new Set(["working", "spawning", "registered"]);
+
+/** The agent a spawn decision is about: kept on it, or on its pipeline marker. */
+function spawnDecisionAgent(d: DecisionRecord): string | undefined {
+  if (typeof d.agent_id === "string") return d.agent_id;
+  const m = (d as { pipeline?: { agent_id?: unknown } }).pipeline;
+  return typeof m?.agent_id === "string" ? m.agent_id : undefined;
+}
 /** The `activity` line a UserPromptSubmit hook publishes for a new prompt (SPEC §4.3). */
 const PROMPT_RECEIVED = "prompt received";
 /** Every agent's progress, in every namespace: the daemon's ONE progress subscription. */
@@ -1162,6 +1173,15 @@ export class Daemon {
   private reconciling: Promise<void> = Promise.resolve();
   /** Epoch ms of the last progress message seen per agent id (heartbeats, for `claim`). */
   private readonly lastSeen = new Map<string, number>();
+  /**
+   * When each agent last showed it is live (epoch ms, its own send time): `past`, a signal that it
+   * got past its start-up screen (a hooks signal, or its MCP server doing more than starting up),
+   * `mcp`, one only its MCP server sends, and `hooks`, one only its Claude Code hooks send. A spawn
+   * decision about it closes itself on one sent after it opened (#402).
+   */
+  private readonly heardAt = new Map<string, { past?: number; mcp?: number; hooks?: number }>();
+  /** Spawn decisions this process is closing (`<wave>/<id>`): asked once per decision. */
+  private readonly closingSpawn = new Set<string>();
   /**
    * When this process started. `lastSeen` is in memory only, so for `claim` every owner counts
    * as seen at least at daemon start: a restart never makes a live owner instantly claimable.
@@ -1929,16 +1949,97 @@ export class Daemon {
     const env = parseEnvelope(raw);
     if (env !== null && isApiSignal(env)) this.apiSignals.push(this.now());
     // A message queued while the daemon was down arrives late: count it from when it was sent.
-    const sent = env !== null ? Date.parse(env.wall_time) : Number.NaN;
-    const now = this.now();
-    this.lastSeen.set(agent, Number.isNaN(sent) ? now : Math.min(now, sent));
-    if (env !== null) this.noteAttention(agent, env);
-    if (env !== null) this.noteInboxSignal(agent, env);
+    this.lastSeen.set(agent, env !== null ? this.sentAt(env.wall_time) : this.now());
+    if (env !== null) {
+      // A narration or anything else not from the hooks is the agent's MCP server speaking.
+      const hook = (env.payload as { source?: unknown } | null)?.source === "harness-hook";
+      // Waiting at a prompt shows its channel works, not that it got past the screen; nor does
+      // the MCP server's heartbeat, which runs from process start whatever the screen.
+      const stuck = env.type === "awaiting_input" || env.type === "idle";
+      const past = !stuck && (hook || env.type !== "heartbeat");
+      this.heard(agent, this.lastSeen.get(agent) as number, !hook, past);
+      this.noteAttention(agent, env);
+      this.noteInboxSignal(agent, env);
+    }
     // The topic names the sender (and is what broker ACLs authorise), so it identifies the acker.
     if (env?.type === "steering_acked" && env.correlation_id !== null) {
       this.acks.acked(env.correlation_id, agent);
       this.mailboxHeard(env.correlation_id, agent);
     }
+  }
+
+  /** A message's send time (`wall_time`), never later than now; now when unreadable. */
+  private sentAt(wallTime: string): number {
+    const t = Date.parse(wallTime);
+    return Number.isNaN(t) ? this.now() : Math.min(t, this.now());
+  }
+
+  /**
+   * `agent` showed it is live at `at` (`mcp`: through its MCP server). Each open spawn decision
+   * about it (unknown_screen, hooks_auth_failed, mcp_not_registered) that opened before then is
+   * answered `it's running` by volleyd (#402): the pipeline checks the run and touches nothing
+   * (a paused hooks_auth_failed agent is told to resume). A sign that is not `past` its screen
+   * (waiting at a prompt, the MCP server starting up) counts only for the channel it came through.
+   */
+  private heard(agent: string, at: number, mcp: boolean, past: boolean): void {
+    const prev = this.heardAt.get(agent);
+    const last = mcp ? Math.max(at, prev?.mcp ?? at) : prev?.mcp;
+    const hooks = mcp ? prev?.hooks : Math.max(at, prev?.hooks ?? at);
+    const screen = past ? Math.max(at, prev?.past ?? at) : prev?.past;
+    this.heardAt.set(agent, {
+      ...(screen !== undefined ? { past: screen } : {}),
+      ...(last !== undefined ? { mcp: last } : {}),
+      ...(hooks !== undefined ? { hooks } : {}),
+    });
+    for (const [wave, log] of this.waves) {
+      for (const id of log.record.state?.open_decisions ?? []) {
+        const d = log.record.decisions[id];
+        if (d !== undefined && spawnDecisionAgent(d) === agent) this.closeIfHeard(wave, d);
+      }
+    }
+  }
+
+  /**
+   * Answer `d` `it's running` as volleyd when it is an open spawn decision whose agent was heard
+   * from since it opened: on each sign of life, and when it opens (a sign processed just before).
+   */
+  private closeIfHeard(wave: WaveId, d: DecisionRecord): void {
+    if (d.resolved !== undefined || !SPAWN_DECISION_KINDS.has(d.kind)) return;
+    const agent = spawnDecisionAgent(d);
+    if (agent === undefined) return;
+    const heard = this.heardFrom(agent, d.kind);
+    if (heard === null || heard < Date.parse(d.opened_at)) return;
+    const id = d.decision_id;
+    const key = `${wave}/${id}`;
+    if (this.closingSpawn.has(key)) return;
+    this.closingSpawn.add(key);
+    void this.enqueue(async () => {
+      try {
+        const open = this.waves.get(wave)?.record.decisions[id];
+        if (open === undefined || open.resolved !== undefined) return;
+        await this.resolveNow(wave, id, {
+          answer: ITS_RUNNING,
+          by: DAEMON_AGENT_ID,
+          rationale: "started on its own",
+        });
+      } finally {
+        this.closingSpawn.delete(key);
+      }
+    });
+  }
+
+  /**
+   * When `agent` last showed a spawn decision of `kind` is moot (epoch ms; null: not since this
+   * process started): for mcp_not_registered only its MCP server counts, the hooks already ran;
+   * for hooks_auth_failed only its hooks, which the broker refused (its MCP server answering the
+   * pause steer says nothing about them); for unknown_screen a sign it got past its screen.
+   */
+  private heardFrom(agent: string, kind: string): number | null {
+    const h = this.heardAt.get(agent);
+    if (h === undefined) return null;
+    if (kind === "mcp_not_registered") return h.mcp ?? null;
+    if (kind === "hooks_auth_failed") return h.hooks ?? null;
+    return h.past ?? null;
   }
 
   /**
@@ -2063,6 +2164,15 @@ export class Daemon {
       await this.broker.subscribeStream(REGISTRY_FILTER, (m) => {
         const id = m.topic.split("/")[3] ?? "";
         const entry = m.payload === "" ? null : parseRegistryEntry(m.payload);
+        if (entry?.agent_id === id) {
+          const env = parseEnvelope(m.payload);
+          // The hooks' re-publish carries `model_source`; the MCP server's own registration not.
+          const modelSource = (env?.payload as { model_source?: unknown } | undefined)
+            ?.model_source;
+          // Only the hooks' entry shows the session got past its screen.
+          const hooks = modelSource !== undefined;
+          if (env !== null) this.heard(id, this.sentAt(env.wall_time), !hooks, hooks);
+        }
         // Recorded on arrival, not on the queue: the status subscription reads it on arrival.
         const before = this.namedEntries.get(id)?.coordinator;
         if (entry?.workspace !== undefined && entry.agent_id === id)
@@ -2570,6 +2680,15 @@ export class Daemon {
           if (prev !== env.type) {
             this.ownerChanged(holder);
             if (name !== undefined) void this.enqueue(() => this.rebind(name));
+          }
+          // The hooks' `working` carries their source; any other live status came through its
+          // MCP server (`spawning` / `registered` at its start-up, which says nothing about the
+          // screen, or a `working` it published with vol_publish).
+          if (LIVE_STATUSES.has(env.type)) {
+            const hook =
+              (env.payload as { source?: unknown } | undefined)?.source === "harness-hook";
+            const past = hook || env.type === "working";
+            this.heard(holder, this.sentAt(env.wall_time), !hook, past);
           }
           // A session that ended answers none of its open pickers or handoffs any more.
           if (OWNER_GONE.has(env.type))
@@ -4460,6 +4579,7 @@ export class Daemon {
         task: d.task,
         question: d.question,
         options: d.options,
+        ...(d.option_help !== undefined ? { option_help: d.option_help } : {}),
         pointers: d.pointers,
         id,
       },
@@ -6025,6 +6145,7 @@ export class Daemon {
       spawn: async (task, role, req) => this.pipelineSpawn(wave, task, role, req),
       branchUpdate: () => this.config.effective(wave).branch_update,
       hygiene: () => log.record.state?.hygiene_level ?? "p1",
+      heardFrom: (agentId, kind) => this.heardFrom(agentId, kind),
       steer: (task, role, agentId, text, reason) =>
         this.deliverSteer(
           wave,
@@ -8384,6 +8505,7 @@ export class Daemon {
     await this.append(wave, { ...r.event, data: { ...extra, ...r.event.data } });
     this.log(`opened ${describeDecision(log.record.decisions[r.id] as DecisionRecord)}`);
     if (settle) await this.settleDecision(wave, r.id);
+    this.closeIfHeard(wave, log.record.decisions[r.id] as DecisionRecord);
     return log.record.decisions[r.id] as DecisionRecord;
   }
 

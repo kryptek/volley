@@ -34,7 +34,12 @@ import type { Role } from "./brief";
 import { type HoldJobs, holdJobs, noteJobTimes } from "./ci-jobs";
 import { systemClock } from "./clock";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "./config-defaults";
-import type { DecisionInput, DecisionRecord } from "./decisions";
+import {
+  type DecisionInput,
+  type DecisionKind,
+  type DecisionRecord,
+  ITS_RUNNING,
+} from "./decisions";
 import { type EvidenceInput, markEvidenceStale, writeEvidence } from "./evidence";
 import type { ExecFn, ExecOptions, ExecResult } from "./exec";
 import { type MergeToken, mintMergeToken } from "./fence";
@@ -314,7 +319,14 @@ export interface CiHold {
   error?: string;
 }
 
-export type SteerReason = "artifacts" | "result" | "merge_nudge";
+export type SteerReason = "artifacts" | "result" | "merge_nudge" | "auth_resumed";
+
+/**
+ * The steering a role paused for a hooks_auth_failed decision gets once that decision closes as
+ * `it's running`: its hooks reach the broker again, so the pause no longer holds (#402).
+ */
+export const AUTH_RESUME =
+  "resume: your broker login works again. Continue your task where you left off.";
 
 /**
  * What a pipeline decision is about; kept on the decision as `pipeline`. The single mechanism
@@ -363,12 +375,15 @@ const RESPAWNABLE: ReadonlySet<PipelineMarker["on"]> = new Set([
   "fixup_result",
 ]);
 
-/** Answers are free text: only an exact option (case and surrounding space aside) counts. */
 /** The answer volleyd closes a task's open decisions with when its PR is seen merged. */
 export const SUPERSEDED_BY_MERGE = "superseded_by_merge";
 
+/**
+ * Answers are free text: only an exact option (case, surrounding space and a typed curly
+ * apostrophe aside) counts.
+ */
 export const isAnswer = (answer: string, option: string): boolean =>
-  answer.trim().toLowerCase() === option;
+  answer.trim().toLowerCase().replace(/[‘’]/g, "'") === option;
 
 export const emptyPipeline = (): TaskPipeline => ({
   step: -1,
@@ -835,6 +850,13 @@ export interface PipelineView {
    * up to date with a MergeToken. Only `go` merges.
    */
   merge_turn?: "check" | "go";
+  /**
+   * When volleyd last heard from an agent in a way that shows a spawn decision of `kind` is moot
+   * (epoch ms; null: never): `it's running` checks it against the decision's `opened_at` (#402).
+   */
+  heard_from?: (agent_id: string, kind: DecisionKind) => number | null;
+  /** Now (epoch ms), for how long ago that was. */
+  now?: number;
 }
 
 /** A blocked agent's status, while its red PR head is classified (onBlocked). */
@@ -2642,7 +2664,8 @@ const roleLabel = (p: TaskPipeline, role: Role): string =>
   role === "rebase" && p.branch_update === "merge" ? "merge (branch update)" : role;
 
 /** The prefix a re-ask puts before the original question (dropped before it is asked again). */
-const ASKED_AGAIN = /^".*?" (is not one of|needs the commit that carries it:) [^.]*\. /;
+const ASKED_AGAIN =
+  /^(".*?" (is not one of|needs the commit that carries it:) [^.]*|(no live agent found for \S+|\S+'s hooks have not reached the broker) \([^)]*\))\. /;
 
 function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
   const m = (d as { pipeline?: PipelineMarker }).pipeline;
@@ -3060,7 +3083,11 @@ function decisionFacts(d: DecisionRecord): Record<string, unknown> {
 /**
  * A spawn-type decision answered: `relaunch` retires the agent through the delete path and the
  * next advance spawns the same role at the next attempt (the reducer dropped the run); `cancel`
- * retires it and blocks the task with the decision text. Anything else is asked again.
+ * retires it and blocks the task with the decision text; `it's running` closes it touching
+ * nothing (a hooks_auth_failed agent is only told to resume its pause) when the agent is live —
+ * still the role's run, and heard from since the decision opened — retires the agent when a
+ * newer run replaced it, and otherwise asks again, saying so (#402). Anything else is asked
+ * again.
  */
 function onRelaunchResolved(
   v: PipelineView,
@@ -3075,6 +3102,35 @@ function onRelaunchResolved(
     if (run !== undefined && run.agent_id !== m.agent_id)
       return [{ kind: "retire", agent_id: m.agent_id, status: "relaunched" }];
     return [{ kind: "relaunch", role: m.role, agent_id: m.agent_id }];
+  }
+  if (isAnswer(answer, ITS_RUNNING)) {
+    const run = v.p.runs[m.role];
+    // Superseded or already retiring: the decision is moot. Asking again would say a live agent
+    // is not, and each later sign of life from it would close and reopen the card.
+    if (run?.agent_id !== m.agent_id)
+      return [{ kind: "retire", agent_id: m.agent_id, status: "relaunched" }];
+    if (run.retired !== undefined) return [];
+    const heard = v.heard_from?.(m.agent_id, d.kind) ?? null;
+    if (heard !== null && heard >= Date.parse(d.opened_at)) {
+      // A hooks_auth_failed agent was paused when the decision opened: lift the pause.
+      if (d.kind !== "hooks_auth_failed") return [];
+      return [
+        {
+          kind: "steer",
+          role: m.role,
+          agent_id: m.agent_id,
+          reason: "auth_resumed",
+          text: AUTH_RESUME,
+        },
+      ];
+    }
+    const ago = heard === null ? "never" : `${agoText((v.now ?? heard) - heard)} ago`;
+    // A hooks_auth_failed agent's MCP server may be answering: only its hooks are missing.
+    const why =
+      d.kind === "hooks_auth_failed"
+        ? `${m.agent_id}'s hooks have not reached the broker (last heard ${ago})`
+        : `no live agent found for ${m.agent_id} (last heard ${ago})`;
+    return [askRelaunchAgain(v, d, m, why)];
   }
   if (isAnswer(answer, "cancel")) {
     return [
@@ -3093,19 +3149,37 @@ function onRelaunchResolved(
       },
     ];
   }
-  return [
-    {
-      kind: "decide",
-      marker: m,
-      decision: {
-        kind: d.kind,
-        task: v.task,
-        question: `"${answer}" is not one of ${(d.options ?? []).join(" / ")}. ${d.question.replace(ASKED_AGAIN, "")}`,
-        pointers: d.pointers,
-        ...(d.options !== undefined ? { options: d.options } : {}),
-      },
+  return [askRelaunchAgain(v, d, m, `"${answer}" is not one of ${(d.options ?? []).join(" / ")}`)];
+}
+
+/** A spawn-type decision asked again, `why` first; its answers and the agent it is about carry over. */
+function askRelaunchAgain(
+  v: PipelineView,
+  d: DecisionRecord,
+  m: PipelineMarker,
+  why: string,
+): PipelineAction {
+  return {
+    kind: "decide",
+    marker: m,
+    decision: {
+      kind: d.kind,
+      task: v.task,
+      question: `${why}. ${d.question.replace(ASKED_AGAIN, "")}`,
+      pointers: d.pointers,
+      ...(d.options !== undefined ? { options: d.options } : {}),
+      ...(d.option_help !== undefined ? { option_help: d.option_help } : {}),
     },
-  ];
+    data: decisionFacts(d),
+  };
+}
+
+/** A duration as the owner reads it: `40 s`, `6 min`, `3 h`. */
+function agoText(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  if (s < 3570) return `${Math.round(s / 60)} min`;
+  return `${Math.round(s / 3600)} h`;
 }
 
 /** The spawn for `role` in the current step: reviewers at the head (detached), others from it. */
@@ -3580,6 +3654,8 @@ export interface PipelineDeps {
    * (`<wave>/<task>`). Default: a lock of this driver's own.
    */
   releaseLock?: ReleaseLock;
+  /** When volleyd last heard from an agent, for a spawn decision of `kind` (PipelineView.heard_from). */
+  heardFrom?: (agent_id: string, kind: DecisionKind) => number | null;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -3767,6 +3843,8 @@ export class PipelineDriver {
         ? { incident_wait_max_s: this.deps.incidentWaitMaxS() }
         : {}),
       ...(this.turn?.task === task ? { merge_turn: this.turn.fresh ? "go" : "check" } : {}),
+      ...(this.deps.heardFrom !== undefined ? { heard_from: this.deps.heardFrom } : {}),
+      now: this.now(),
     };
   }
 

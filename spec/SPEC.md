@@ -334,6 +334,7 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 | `kind` | enum (closed) | One of the decision kinds listed below the table. |
 | `question` | string | What needs answering. |
 | `options` | string[] | Suggested answers (optional; free text is always allowed). |
+| `option_help` | object | Optional: hover text for some of `options`, keyed by the option's text. A client SHOULD show it with the option. |
 | `pointers` | object | `{ diff?, transcript?, screen?, pr? }` — where the evidence lives. |
 | `opened_at` | date-time | |
 | `resolved` | object | `{ answer, by, at }`; required when `type` is `decision_resolved`. |
