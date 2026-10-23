@@ -41,7 +41,7 @@
         },
         "shipped": {
           "type": "array",
-          "description": "Tasks whose PR merged, in merge order.",
+          "description": "Tasks whose PR merged, in merge order: a bundle (spec section 4.6.22) once per issue, every entry with the bundle's one PR.",
           "items": {
             "type": "object",
             "additionalProperties": false,

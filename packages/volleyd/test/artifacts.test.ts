@@ -6,6 +6,7 @@ import {
   artifactOutcome,
   checkRebase,
   isInfraFailure,
+  missingCloses,
   prFiles,
   probeLanded,
   probeMovedHead,
@@ -71,7 +72,7 @@ describe("artifact verification", () => {
       "--state",
       "open",
       "--json",
-      "number,url,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus,isDraft",
+      "number,url,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus,isDraft,body",
     ]);
     expect(fake.calls.find((c) => c.argv[1] === "pr")?.opts.cwd).toBe(WT);
     // No CI is consulted for a PR that is not ours.
@@ -905,5 +906,30 @@ describe("a running head's jobs (#415)", () => {
     expect(r.kind === "ok" && r.ci.jobs).toEqual([
       expect.objectContaining({ name: "lint", run_done: true }),
     ]);
+  });
+});
+
+describe("a bundle's Closes lines", () => {
+  it("missingCloses: one `Closes #<n>` line per issue, each on its own line", () => {
+    expect(missingCloses("Fixes things.\n\nCloses #310\nCloses #312\n", [310, 312])).toEqual([]);
+    // GitHub closes only the first issue of a shared line.
+    expect(missingCloses("Closes #310, #312", [310, 312])).toEqual([312]);
+    expect(missingCloses("closes #310\r\n  Closes #3120", [310, 312])).toEqual([312]);
+    expect(missingCloses("", [310, 312])).toEqual([310, 312]);
+    expect(missingCloses(undefined, [1, 2])).toEqual([1, 2]);
+    // GitHub ignores closing keywords in code: an indented code block or a fence.
+    expect(missingCloses("    Closes #310\n\tCloses #312", [310, 312])).toEqual([310, 312]);
+    expect(missingCloses("```\nCloses #310\n```\nCloses #312", [310, 312])).toEqual([310]);
+    expect(missingCloses("~~~md\nCloses #310\n~~~\n   Closes #312", [310, 312])).toEqual([310]);
+  });
+
+  it("verifyArtifacts reads the PR body with the PR", async () => {
+    const pr = JSON.parse(fx("gh-pr-list-ok.json"));
+    pr[0].body = "Closes #1\nCloses #2";
+    const fake = allGood().on(["gh", "pr", "list"], { stdout: JSON.stringify(pr) });
+    const report = await verifyArtifacts(fake.exec, SPEC);
+    expect(report.kind === "ok" && report.pr.body).toBe("Closes #1\nCloses #2");
+    const list = fake.argvs(["gh", "pr", "list"])[0] ?? [];
+    expect(list[list.indexOf("--json") + 1]?.split(",")).toContain("body");
   });
 });

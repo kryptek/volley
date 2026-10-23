@@ -81,6 +81,8 @@ export function digestOf(
   trigger: DigestTrigger,
 ): Digest {
   const titles = new Map<TaskId, string>();
+  /** A bundle's issue titles, from its latest `agent_spawned { issues }`. */
+  const issueTitles = new Map<number, string>();
   const merges = new Map<TaskId, JournalEvent>();
   const bySupervisor = new Set<TaskId>();
   const byOperator = new Set<TaskId>();
@@ -109,6 +111,13 @@ export function digestOf(
         }
         break;
       }
+      case "agent_spawned":
+        for (const i of Array.isArray(d.issues) ? d.issues : []) {
+          const { number, title } = (i ?? {}) as { number?: unknown; title?: unknown };
+          if (typeof number === "number" && typeof title === "string")
+            issueTitles.set(number, title);
+        }
+        break;
       case "decision_held":
         holds.set(String(d.decision_id), e);
         break;
@@ -175,18 +184,26 @@ export function digestOf(
           ? "operator"
           : "github";
     if (merged_by === "supervisor") auto.merges += 1;
-    const title = titles.get(t.id);
-    shipped.push({
-      task: t.id,
-      issue: t.issue,
-      ...(title !== undefined ? { title } : {}),
-      pr: {
-        number: Number(pr.number ?? t.pr?.number ?? 0),
-        url: String(pr.url ?? t.pr?.url ?? ""),
-      },
-      merge_sha: str(d.merge_sha) ?? str(d.sha) ?? null,
-      merged_by,
-    });
+    // A bundle ships each of its issues, all through its one PR.
+    const bundle = state.spec?.tasks[t.id]?.issues;
+    const issues =
+      bundle !== undefined && bundle.length > 1
+        ? [t.issue, ...bundle.filter((n) => n !== t.issue)]
+        : [t.issue];
+    for (const issue of issues) {
+      const title = issues.length > 1 ? issueTitles.get(issue) : titles.get(t.id);
+      shipped.push({
+        task: t.id,
+        issue,
+        ...(title !== undefined ? { title } : {}),
+        pr: {
+          number: Number(pr.number ?? t.pr?.number ?? 0),
+          url: String(pr.url ?? t.pr?.url ?? ""),
+        },
+        merge_sha: str(d.merge_sha) ?? str(d.sha) ?? null,
+        merged_by,
+      });
+    }
   }
 
   const waiting: DigestWaiting[] = [];
@@ -287,11 +304,22 @@ export function renderDigestMd(d: Digest): string {
   ];
   out.push("", "## Shipped", "");
   if (d.shipped.length === 0) out.push("Nothing shipped.");
-  for (const s of d.shipped) {
-    const title = s.title !== undefined ? ` ${s.title}` : "";
-    out.push(
-      `- ${s.task} (#${s.issue})${title}: PR #${s.pr.number} ${s.pr.url} (merged by ${s.merged_by})`,
-    );
+  // A bundle's issues are consecutive entries of one task: one line, `#310 + #312 (one PR)`.
+  for (let i = 0; i < d.shipped.length; ) {
+    const s = d.shipped[i] as DigestShipped;
+    const group = [s];
+    while (d.shipped[i + group.length]?.task === s.task)
+      group.push(d.shipped[i + group.length] as DigestShipped);
+    i += group.length;
+    const via = `PR #${s.pr.number} ${s.pr.url} (merged by ${s.merged_by})`;
+    if (group.length === 1) {
+      const title = s.title !== undefined ? ` ${s.title}` : "";
+      out.push(`- ${s.task} (#${s.issue})${title}: ${via}`);
+      continue;
+    }
+    const nums = group.map((g) => `#${g.issue}`).join(" + ");
+    const titled = group.map((g) => `#${g.issue}${g.title !== undefined ? ` ${g.title}` : ""}`);
+    out.push(`- ${s.task} ${nums} (one PR): ${titled.join(", ")}; ${via}`);
   }
   if (d.closes.length > 0) {
     out.push("", "## Closes", "", "The release PR's body:", "");

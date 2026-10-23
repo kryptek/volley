@@ -11,6 +11,7 @@ import {
   briefExtraFrom,
   briefExtraPath,
   briefPrefacePath,
+  issueVars,
   loadTemplate,
   readBriefPreface,
   renderBrief,
@@ -35,7 +36,7 @@ import {
   revokeCredentials,
   writeAgentJson,
 } from "./identity";
-import { type IssueData, fetchIssue, renderIssueMd } from "./issue";
+import { type IssueData, fetchIssues, renderIssueMd } from "./issue";
 import {
   LAUNCH_COMMAND,
   allowedMcpServers,
@@ -358,6 +359,8 @@ interface Ctx {
   root: string;
   worktree: string;
   lock?: WorktreeLock;
+  /** A bundle's issues (several, the task's `issue` first); absent: the one issue. */
+  bundle?: IssueData[];
 }
 
 /** The agent id of `req`'s attempt: a release stage's own shape, else the task role's. */
@@ -373,6 +376,18 @@ const stageIssue = (stage: PlaybookStage): IssueData => ({
   body: "",
   url: "",
 });
+
+/**
+ * The task's issue, fetched; a bundle's (`issues:`, several) are all fetched, the task's `issue`
+ * first, and kept on `ctx.bundle` for ISSUE.md, the brief, agent.json and agent_spawned.
+ */
+async function taskIssues(ctx: Ctx): Promise<IssueData> {
+  const { task } = ctx;
+  const numbers = [task.issue, ...(task.issues ?? []).filter((n) => n !== task.issue)];
+  const issues = await fetchIssues(ctx.deps.host.exec, ctx.root, numbers);
+  if (issues.length > 1) ctx.bundle = issues;
+  return issues[0] as IssueData;
+}
 
 /** Run the launch half of a spawn; `verified` carries the rest. Throws SpawnError on refusal. */
 export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<SpawnResult> {
@@ -450,7 +465,7 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
         ? stageIssue(req.stage)
         : task.synthetic === true && task.remediation !== undefined
           ? flakeIssue(task.remediation, task.id)
-          : await fetchIssue(deps.host.exec, ctx.root, task.issue);
+          : await taskIssues(ctx);
     const launched = await launchAttempt(ctx, req.attempt, agentId, issue);
     const lock = ctx.lock;
     return {
@@ -637,7 +652,7 @@ async function launchAttempt(
   if (req.role !== "quality_reviewer" && req.stage === undefined)
     await host.writeFile(
       join(ctx.worktree, "ISSUE.md"),
-      task.synthetic === true ? issue.body : renderIssueMd(issue),
+      task.synthetic === true ? issue.body : renderIssueMd(ctx.bundle ?? issue, task.plan?.why),
     );
   for (const [name, content] of Object.entries(req.files ?? {})) {
     await host.writeFile(join(ctx.worktree, ".volley", name), content);
@@ -689,6 +704,7 @@ async function launchAttempt(
     issue: issue.number,
     issue_title: issue.title,
     issue_url: issue.url,
+    ...(ctx.bundle !== undefined ? issueVars(ctx.bundle) : {}),
     model: task.model,
     repo: ctx.root,
     release_branch: req.wave.release_branch,
@@ -760,6 +776,7 @@ async function launchAttempt(
       role: req.role,
       broker_url: deps.brokerUrl,
       claude_account: accountId(req),
+      ...(ctx.bundle !== undefined ? { issues: ctx.bundle.map((i) => i.number) } : {}),
       ...(creds !== undefined ? { broker: creds } : {}),
     });
     // volleyd's own MCP server for the agent: this release's volley-mcp, on this broker (and the
@@ -859,6 +876,9 @@ async function launchAttempt(
         ...(mcpAllow.length > 0 ? { agent_mcp_allow: [...mcpAllow] } : {}),
         ...(compactWindow !== undefined ? { auto_compact_window: compactWindow } : {}),
         issue: { number: issue.number, title: issue.title, url: issue.url },
+        ...(ctx.bundle !== undefined
+          ? { issues: ctx.bundle.map((i) => ({ number: i.number, title: i.title, url: i.url })) }
+          : {}),
         credentials: creds !== undefined ? "minted" : "none",
         claude_account: accountId(req),
         ...(req.accountChosen !== undefined ? { account_why: req.accountChosen.why } : {}),

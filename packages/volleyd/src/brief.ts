@@ -32,6 +32,26 @@ export interface BriefVars {
   issue: number;
   issue_title: string;
   issue_url: string;
+  /**
+   * The bundle placeholders (issueVars): every issue of the task (`#310, #312`; one issue: `#42`)
+   * and the rest of the set below. Absent: renderBrief fills them from `issue`, `issue_title` and
+   * `issue_url` as a single issue's.
+   */
+  issues?: string;
+  /** A bundle: one `- #<n> — <title>` line per issue; one issue: "". */
+  issue_titles?: string;
+  /** One `Closes #<n>` line per issue. */
+  closes_lines?: string;
+  /** `issue #42: <title>`; a bundle: `issues #310, #312`. */
+  issue_heading?: string;
+  /** What `ISSUE.md` holds: `the issue, <url>`; a bundle: every issue of it. */
+  issue_source?: string;
+  /** A bundle: the PR rule with its `Closes` lines, each on its own line; one issue: "". */
+  closes_rule?: string;
+  /** The changelog fragment(s) to add: one per issue. */
+  fragments?: string;
+  /** The issue-number rule's first sentence. */
+  issue_rule?: string;
   model: string;
   repo: string;
   release_branch: string;
@@ -47,6 +67,73 @@ export interface BriefVars {
   stage_brief: string;
   stage_commands: string;
   stage_verify: string;
+}
+
+/** The fields of an issue a brief names. */
+export interface BriefIssue {
+  number: number;
+  title: string;
+  url: string;
+}
+
+type IssueVars = Required<
+  Pick<
+    BriefVars,
+    | "issue"
+    | "issue_title"
+    | "issue_url"
+    | "issues"
+    | "issue_titles"
+    | "closes_lines"
+    | "issue_heading"
+    | "issue_source"
+    | "closes_rule"
+    | "fragments"
+    | "issue_rule"
+  >
+>;
+
+const fragment = (n: number) => `\`changes/${n}.<added|changed|fixed|removed|docs>.md\``;
+
+/**
+ * The issue placeholders of a task's brief from its issues (the task's `issue` first). One issue
+ * fills them so every template renders exactly as before bundles; a bundle (several issues, one
+ * agent, one PR) names them all, asks for one `Closes` line and one fragment per issue.
+ */
+export function issueVars(issues: readonly BriefIssue[]): IssueVars {
+  const [first] = issues;
+  if (first === undefined) throw new Error("issueVars: a task has at least one issue");
+  const closes_lines = issues.map((i) => `Closes #${i.number}`).join("\n");
+  const base = {
+    issue: first.number,
+    issue_title: first.title,
+    issue_url: first.url,
+    closes_lines,
+  };
+  if (issues.length === 1) {
+    return {
+      ...base,
+      issues: `#${first.number}`,
+      issue_titles: "",
+      issue_heading: `issue #${first.number}: ${first.title}`,
+      issue_source: `the issue, ${first.url}`,
+      closes_rule: "",
+      fragments: fragment(first.number),
+      issue_rule: `The issue number is ${first.number}; \`ISSUE.md\` is the authoritative copy of the issue.`,
+    };
+  }
+  const numbers = issues.map((i) => i.number);
+  const listed = `${numbers.slice(0, -1).join(", ")} and ${numbers.at(-1)}`;
+  return {
+    ...base,
+    issues: numbers.map((n) => `#${n}`).join(", "),
+    issue_titles: issues.map((i) => `- #${i.number} — ${i.title}`).join("\n"),
+    issue_heading: `issues ${numbers.map((n) => `#${n}`).join(", ")}`,
+    issue_source: "every issue of this bundle, one after another",
+    closes_rule: `This task bundles ${issues.length} issues into one PR: put these lines, each on its own line, in the PR body (GitHub closes only the first issue of a shared line):\n\n${closes_lines}`,
+    fragments: `one fragment per issue, ${numbers.map(fragment).join(" and ")}`,
+    issue_rule: `The issue numbers are ${listed} (one bundle, one PR); \`ISSUE.md\` is the authoritative copy of every one of them.`,
+  };
 }
 
 /** The stage placeholders of a brief that is not a release stage's: all empty. */
@@ -81,7 +168,8 @@ export function loadTemplate(
  * `{{hygiene_rule}}` / `{{hygiene_contract}}` under `off`.
  */
 export function renderBrief(template: string, vars: BriefVars): string {
-  const table = vars as unknown as Record<string, string | number>;
+  const single = issueVars([{ number: vars.issue, title: vars.issue_title, url: vars.issue_url }]);
+  const table = { ...single, ...vars } as unknown as Record<string, string | number>;
   const lines: string[] = [];
   let dropped = false;
   for (const line of template.split("\n")) {

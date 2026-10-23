@@ -1712,3 +1712,108 @@ describe("pipeline: remediations (respawn an unverifiable agent, fixup a red hea
     expect(stage()).toBe("spec_review");
   });
 });
+
+describe("pipeline: a bundle's Closes lines", () => {
+  it("a PR body missing a Closes line: the implementer is steered once, naming it; fixed → accepted", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(h.steers).toEqual([expect.objectContaining({ role: "implementer", reason: "closes" })]);
+    expect(h.steers[0]?.text).toContain("Closes #99");
+    expect(h.steers[0]?.text).not.toContain("Closes #42");
+    expect(h.steers[0]?.text).toMatch(/publish done again/);
+    expect(h.events.some((e) => e.type === "artifact_verified")).toBe(false);
+    // The implementer edits the PR body and reports done again.
+    const pr = h.world.prs.find((p) => p.number === 7);
+    if (pr !== undefined) pr.body = "Closes #42\nCloses #99";
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(h.steers).toHaveLength(1);
+    const verified = h.events.find((e) => e.type === "artifact_verified");
+    expect(verified?.data).toMatchObject({ role: "implementer", head_sha: H1 });
+    expect(verified?.data.closes_missing).toBeUndefined();
+    expect(h.spawns.map((s) => s.role)).toContain("spec_reviewer");
+  });
+
+  it("still missing after the one steer: accepted, and the fixup carries it as a finding note", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42, #99" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(h.steers).toHaveLength(1);
+    const verified = h.events.find((e) => e.type === "artifact_verified");
+    expect(verified?.data).toMatchObject({ role: "implementer", closes_missing: [99] });
+    await h.finish("spec_reviewer", { result: result("spec-p1") });
+    await h.finish("quality_reviewer", { result: result("quality-p1-elsewhere") });
+    const findings = h.spawns.find((s) => s.role === "fixup")?.files["findings.md"] ?? "";
+    expect(findings).toContain("## The PR body's Closes lines");
+    expect(findings).toContain("\nCloses #99\n");
+  });
+
+  it("still missing and both reviewers approve: the fixup still runs, for the Closes lines alone", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42, #99" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    expect(stage()).toBe("fixup");
+    const findings = h.spawns.find((s) => s.role === "fixup")?.files["findings.md"] ?? "";
+    expect(findings).toContain("## The PR body's Closes lines");
+    expect(findings).toContain('{ "finding": "CLOSES"');
+  });
+
+  it("the fixup's verified PR body is checked again: steered once, then fixed clears closes_missing", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42, #99" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    expect(h.steers.filter((s) => s.role === "fixup" && s.reason === "closes")).toHaveLength(1);
+    expect(stage()).toBe("fixup");
+    const pr = h.world.prs.find((p) => p.number === 7);
+    if (pr !== undefined) pr.body = "Closes #42\nCloses #99";
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    const verified = h.events
+      .filter((e) => e.type === "artifact_verified" && e.data.role === "fixup")
+      .at(-1);
+    expect(verified?.data.closes_missing).toBeUndefined();
+    expect(stage()).toBe("merge_ready");
+  });
+
+  it("the fixup's body still missing after its one steer: accepted with closes_missing, no second steer or fixup", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42, #99" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    expect(h.steers.filter((s) => s.role === "fixup" && s.reason === "closes")).toHaveLength(1);
+    const verified = h.events
+      .filter((e) => e.type === "artifact_verified" && e.data.role === "fixup")
+      .at(-1);
+    expect(verified?.data.closes_missing).toEqual([99]);
+    expect(h.spawns.filter((s) => s.role === "fixup")).toHaveLength(1);
+    expect(stage()).toBe("merge_ready");
+  });
+
+  it("every Closes line present: no steer; a single-issue task is never checked", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42\nCloses #99" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    expect(h.steers).toEqual([]);
+    expect(h.events.some((e) => e.type === "artifact_verified")).toBe(true);
+    h.cleanup();
+    await implemented();
+    expect(h.steers).toEqual([]);
+  });
+});

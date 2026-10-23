@@ -216,6 +216,11 @@ export interface SpawnEnvOptions {
   issueFixture?: string;
   /** The wave's issue number for T1 (default 42). */
   issue?: number;
+  /**
+   * T1 bundles these issues (`issues:`, its `issue` first) with the planner's `why`; gh answers
+   * each number with a minimal issue of its own.
+   */
+  bundle?: { issues: number[]; why?: string };
   mint?: boolean;
   watch?: SpawnDeps["watch"];
   spawnTimeoutS?: number;
@@ -268,7 +273,9 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
       "model: claude-opus-5-5",
       "pipeline: [implement]",
       "tasks:",
-      `  T1: { issue: ${issue} }`,
+      o.bundle === undefined
+        ? `  T1: { issue: ${issue} }`
+        : `  T1: { issue: ${issue}, issues: [${o.bundle.issues.join(", ")}]${o.bundle.why !== undefined ? `, plan: { by: collapse, why: ${JSON.stringify(o.bundle.why)} }` : ""} }`,
       "",
     ].join("\n"),
   );
@@ -280,6 +287,15 @@ export async function makeSpawnEnv(o: SpawnEnvOptions = {}): Promise<SpawnEnv> {
     })
     .on(["gh", "issue", "view"], {
       stdout: readFileSync(join(FIXTURES, o.issueFixture ?? "gh-issue-42.json"), "utf-8"),
+    });
+  for (const n of o.bundle?.issues ?? [])
+    fake.on(["gh", "issue", "view", String(n)], {
+      stdout: JSON.stringify({
+        number: n,
+        title: `Issue ${n}`,
+        body: `Body of ${n}.`,
+        url: `https://github.com/example/repo/issues/${n}`,
+      }),
     });
   const host = fakeHost(fake);
   const creds = memoryCredentials();

@@ -27,6 +27,8 @@ export interface AgentIdentityFile {
   broker_url: string;
   /** The Claude account profile the agent runs under (`primary`: the default profile). */
   claude_account?: string;
+  /** A bundle's issues (several, one task, one PR); absent for a task with one issue. */
+  issues?: number[];
   broker?: BrokerCredentials;
 }
 

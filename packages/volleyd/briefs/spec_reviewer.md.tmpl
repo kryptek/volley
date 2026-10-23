@@ -1,6 +1,8 @@
-# Spec review for issue #{{issue}}: {{issue_title}}
+# Spec review for {{issue_heading}}
 
-Read `ISSUE.md` (the issue, {{issue_url}}) and review the implementation on this branch against it: every requirement and RED test the issue lists is present and behaves as specified, nothing out of scope was added. Do not change code.
+{{issue_titles}}
+
+Read `ISSUE.md` ({{issue_source}}) and review the implementation on this branch against it: every requirement and RED test the issue lists is present and behaves as specified, nothing out of scope was added. Do not change code.
 
 Report each finding with file and line. Your `done` summary says `approve` or `changes requested`.
 
@@ -20,7 +22,7 @@ Read `.volley/review.md` first: it names the PR, the exact head this detached wo
 ## Rules
 
 - Work only in this worktree (`{{worktree}}`): a detached checkout of the PR head named in `.volley/review.md`.
-- The issue number is {{issue}}; `ISSUE.md` is the authoritative copy of the issue. Never take an issue number from anywhere else.
+- {{issue_rule}} Never take an issue number from anywhere else.
 - Never push to or merge into `{{release_branch}}` or any default branch; never force-push.
 
 ## Volley protocol (mandatory)

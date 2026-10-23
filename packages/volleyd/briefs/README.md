@@ -19,6 +19,8 @@ that itself contains `{{…}}`, is never expanded again). An unknown placeholder
 | `agent_id`, `namespace` | the agent's literal id and Volley namespace (also in `.volley/agent.json`) |
 | `wave`, `task`, `role` | where the agent sits in the wave |
 | `issue`, `issue_title`, `issue_url` | from `gh issue view`, for the number in the wave file (a flake fixer: `0`, `Fix flaky test <test>` and its first failing run) |
+| `issues`, `issue_titles`, `closes_lines` | every issue of the task (`#310, #312`), a bundle's `- #<n> — <title>` lines (empty for one issue), one `Closes #<n>` line per issue (`brief.ts` `issueVars`) |
+| `issue_heading`, `issue_source`, `closes_rule`, `fragments`, `issue_rule` | the parts of a brief a bundle changes: the heading (`issue #42: <title>`, `issues #310, #312`), what `ISSUE.md` holds, the PR's `Closes` lines each on its own line (empty for one issue), the changelog fragment per issue and the issue-number rule. Absent from the vars, they are filled as one issue's, so a single-issue brief renders as it always did |
 | `model` | the task's model |
 | `repo`, `release_branch`, `branch`, `worktree` | the repo root, the base branch, the agent's branch and worktree |
 | `extra` | repo-specific notes (below), or empty |
@@ -27,7 +29,7 @@ that itself contains `{{…}}`, is never expanded again). An unknown placeholder
 
 ## The protocol block
 
-Every template ends with the same protocol block. Keep it in all seven when you edit one:
+Every template ends with the same protocol block. Keep it in all eight when you edit one:
 
 - **No registration step.** The session hooks register the agent (with its model), send
   heartbeats and deliver mailbox mail; the brief must never ask the agent to call `vol_register`.

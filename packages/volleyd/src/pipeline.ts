@@ -18,6 +18,7 @@ import {
   ciReport,
   failedRuns,
   landed,
+  missingCloses,
   prFiles,
   probeLanded,
   probeMovedHead,
@@ -259,6 +260,11 @@ export interface TaskPipeline {
    * flake stopped a step that still has steps after it; `gate`, it stopped a pre-gate update.
    */
   fix_resume?: "next" | "gate" | undefined;
+  /**
+   * A bundle's issues whose `Closes #<n>` line the implementer's PR body still lacked after its
+   * one `closes` steer (`artifact_verified { closes_missing }`): the fixup's findings name them.
+   */
+  closes_missing?: number[] | undefined;
 }
 
 /** The transient refusals of one gated head (TaskPipeline.merge_transient). */
@@ -342,7 +348,7 @@ export interface CiHold {
   error?: string;
 }
 
-export type SteerReason = "artifacts" | "result" | "merge_nudge" | "auth_resumed";
+export type SteerReason = "artifacts" | "result" | "merge_nudge" | "auth_resumed" | "closes";
 
 /**
  * The steering a role paused for a hooks_auth_failed decision gets once that decision closes as
@@ -540,6 +546,10 @@ export function reducePipeline(
         p.gated_behind = typeof d.behind === "number" ? d.behind : undefined;
       }
       if (role === "fixup") p.directive = undefined;
+      if (role === "implementer" || role === "fixup")
+        p.closes_missing = Array.isArray(d.closes_missing)
+          ? (d.closes_missing as unknown[]).filter((n): n is number => typeof n === "number")
+          : undefined;
       if (!isRole(role)) break;
       const run = p.runs[role];
       const from = p.head;
@@ -906,6 +916,8 @@ export interface PipelineView {
   heard_from?: (agent_id: string, kind: DecisionKind) => number | null;
   /** Now (epoch ms), for how long ago that was. */
   now?: number;
+  /** A bundle's issues (several, the wave file's `issues`); absent for a task with one issue. */
+  issues?: number[];
 }
 
 /** A blocked agent's status, while its red PR head is classified (onBlocked). */
@@ -2237,7 +2249,9 @@ function onVerified(
         ...(spawn !== undefined ? [spawn] : []),
       ];
     }
-    case "verified":
+    case "verified": {
+      const closes = closesCheck(v, ev, run);
+      if (closes.steer !== undefined) return [closes.steer];
       return [
         ...(v.p.ci_hold?.role === ev.role
           ? [
@@ -2260,12 +2274,42 @@ function onVerified(
               agent_id: run.agent_id,
               ...(ev.result !== undefined ? { result: ev.result } : {}),
               ...(run.adopt === true ? { adopted: true } : {}),
+              ...(closes.missing.length > 0 ? { closes_missing: closes.missing } : {}),
             },
           },
         },
         ...retireIfLive(run),
       ];
+    }
   }
+}
+
+/**
+ * A bundle's PR closes every issue: one `Closes #<n>` line each in its body. Lines missing from a
+ * PR the implementer or the fixup verified: that agent is steered once (`closes`) to add them;
+ * after that the PR is accepted with them as `missing`, and the (next) fixup's findings carry them.
+ */
+function closesCheck(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "verified" }>,
+  run: RoleRun,
+): { missing: number[]; steer?: PipelineAction } {
+  const checked = ev.role === "implementer" || ev.role === "fixup";
+  if (!checked || v.issues === undefined || ev.report.kind !== "ok") return { missing: [] };
+  const missing = missingCloses(ev.report.pr.body, v.issues);
+  if (missing.length === 0 || run.retired !== undefined || (run.steers.closes ?? 0) >= 1)
+    return { missing };
+  const lines = missing.map((n) => `Closes #${n}`).join("\n");
+  return {
+    missing,
+    steer: {
+      kind: "steer",
+      role: ev.role,
+      agent_id: run.agent_id,
+      reason: "closes",
+      text: `volleyd could not verify your work: PR #${ev.report.pr.number} bundles issues ${v.issues.map((n) => `#${n}`).join(", ")}, and its body lacks a Closes line for ${missing.map((n) => `#${n}`).join(", ")}. GitHub closes only the first issue of a shared line: add these lines, each on its own line, to the PR body (gh pr edit ${ev.report.pr.number} --body …), then publish done again:\n\n${lines}`,
+    },
+  };
 }
 
 /** A pushed head CI has not settled on (running, or no run yet: the owner is asked after the grace). */
@@ -3280,6 +3324,13 @@ function askRelaunchAgain(
   };
 }
 
+/** The findings' note on a bundle's missing `Closes` lines (closesCheck); "" when none are. */
+function closesNote(missing: number[] | undefined): string {
+  if (missing === undefined || missing.length === 0) return "";
+  const lines = missing.map((n) => `Closes #${n}`);
+  return `\n## The PR body's Closes lines\n\nThe PR body still lacks these lines of the bundle, one per issue (GitHub closes only the first issue of a shared line, and none in code). Add each on its own line, unindented (\`gh pr edit\`), and resolve it as \`{ "finding": "CLOSES", "how": "…" }\`:\n\n${lines.join("\n")}\n`;
+}
+
 /** A duration as the owner reads it: `40 s`, `6 min`, `3 h`. */
 function agoText(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -3326,7 +3377,7 @@ function spawnFor(v: PipelineView, role: Role): PipelineAction {
       role,
       start: { ref: head, detach: false },
       files: {
-        "findings.md": `${d !== undefined ? renderDirectiveMd(d) : ""}${renderFindingsMd(items, base)}`,
+        "findings.md": `${d !== undefined ? renderDirectiveMd(d) : ""}${renderFindingsMd(items, base)}${closesNote(v.p.closes_missing)}`,
         "findings.json": `${JSON.stringify(items, null, 2)}\n`,
       },
     };
@@ -3456,9 +3507,11 @@ function enter(v: PipelineView, i: number): PipelineAction[] {
       ];
     }
     // Nothing to fix: skip the fixup (it would only spend a spawn) — unless a moved head's CI
-    // failed: its directive is the fixup's job.
+    // failed, or a bundle's PR still lacks Closes lines: those are the fixup's job.
     const red = v.p.directive?.ci === "red";
-    if (roles.length === 1 && fixupItems(reviews).length === 0 && !red) return enter(v, i + 1);
+    const closes = (v.p.closes_missing ?? []).length > 0;
+    if (roles.length === 1 && fixupItems(reviews).length === 0 && !red && !closes)
+      return enter(v, i + 1);
   }
   return enterStep(v, i, roles);
 }
@@ -3938,6 +3991,7 @@ export class PipelineDriver {
       task,
       stages: wt.stages,
       stage: t.stage,
+      ...(wt.issues !== undefined && wt.issues.length > 1 ? { issues: wt.issues } : {}),
       release_branch: rec.state.release_branch,
       p: rec.pipeline[task] ?? emptyPipeline(),
       ...(this.deps.branchUpdate !== undefined ? { branch_update: this.deps.branchUpdate() } : {}),

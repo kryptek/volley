@@ -32,6 +32,12 @@
       "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
       "description": "The Claude account profile the supervisor launched the agent under (spec section 4.6.11); primary for the default profile."
     },
+    "issues": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "type": "integer", "minimum": 1 },
+      "description": "A bundle's issues (spec section 4.6.22): every issue the agent's one task, and its one PR, closes, the task's issue first. Absent for a task with one issue."
+    },
     "broker": {
       "type": "object",
       "description": "Broker credentials for this agent (spec section 11.5). The supervisor mints them (volley auth add-agent) with username = agent_id. Beats VOLLEY_AUTH_USERNAME / VOLLEY_AUTH_PASSWORD.",
