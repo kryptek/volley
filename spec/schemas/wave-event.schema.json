@@ -108,6 +108,7 @@
             "remediation_requested",
             "remediation_closed",
             "digest_published",
+            "terminal_status_recovered",
             "pr_marked_ready"
           ]
         },
@@ -770,6 +771,35 @@
                     "properties": {
                       "trigger": {
                         "enum": ["wave_complete", "release_go", "escalation", "stopped"]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "terminal_status_recovered" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["agent_id", "status", "after_ms"],
+                    "description": "The supervisor handed an agent's dropped terminal status to its pipeline again, a while after it alarmed on it (spec section 4.6.2).",
+                    "properties": {
+                      "agent_id": { "type": "string", "minLength": 1 },
+                      "status": { "enum": ["done", "failed"] },
+                      "after_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "How long after the status arrived it was recovered."
                       }
                     }
                   }

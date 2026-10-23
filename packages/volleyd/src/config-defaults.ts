@@ -255,6 +255,8 @@ export const DAEMON_DEFAULTS = {
   blocked_reason_max_chars: 500,
   /** A terminal status (done / blocked / failed) nothing in the journal names for this long alarms. */
   terminal_unjournaled_alarm_ms: 60_000,
+  /** After that alarm, a done / failed still unhandled this long is handed over again (#414). */
+  terminal_recover_ms: 60_000,
   /** The tail of a red head's failed-run logs kept on its ci_failed decision (a CI fixup's directive). */
   ci_log_max_chars: 4_000,
   /** Hard bound on each git / gh call of the pipeline; a timeout is "not verified yet". */

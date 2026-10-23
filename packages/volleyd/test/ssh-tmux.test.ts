@@ -866,6 +866,23 @@ describe("SshTmuxHost", () => {
     await expect(down.host.readTrust()).rejects.toMatchObject({ code: "LAUNCH_FAILED" });
   });
 
+  it("a fence denial on the remote path surfaces as itself, permanent, never as an ssh failure", async () => {
+    const r = remote();
+    const err = (await r.host.readFile("/src/r/.volley/secret.md").catch((e) => e)) as SpawnError;
+    expect(err.message).toMatch(/^FENCE_DENIED: remote cat /);
+    expect(err.message).toBe(
+      "FENCE_DENIED: remote cat (only the files volleyd reads) (not permitted for volleyd) (read /src/r/.volley/secret.md on dev@box)",
+    );
+    expect(err.message).not.toContain("no result");
+    expect(err).toMatchObject({ code: "FENCE_DENIED", permanent: true });
+    // Nothing reached ssh: the fence refused the script first.
+    expect(r.fake.calls.filter((c) => c.argv[0] === "ssh")).toEqual([]);
+    // The same for every other path that used to map a rejection to "no answer".
+    await expect(r.host.readTrust("relative/profile")).rejects.toMatchObject({
+      code: "FENCE_DENIED",
+    });
+  });
+
   it("recordTrust: compare-and-swap of the box's ~/.claude.json, keeping everything else", async () => {
     const before = `${JSON.stringify({
       oauthAccount: { token: "secret" },

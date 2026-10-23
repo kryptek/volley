@@ -6,6 +6,8 @@ import type { JournalEvent } from "./types";
  * The daemon raises `terminal_status_unjournaled` for it once, and clears it when the status is
  * finally handled. A `blocked` is handled only by a decision or a retire naming the agent
  * (`decidedAgent`); a `done` or `failed` by any event naming it but noise (`namedAgent`).
+ * A `done` / `failed` still unhandled `terminal_recover_ms` after its alarm is recovered: the
+ * daemon hands its retained status over again (`recoverableTerminals`).
  */
 
 /** The watchdog's own alarm: never counts as the daemon having handled the status. */
@@ -13,6 +15,9 @@ export const TERMINAL_ALARM = "terminal_status_unjournaled";
 
 /** A `blocked` status the daemon could not hand to the pipeline: says why, and asks itself. */
 export const BLOCKED_ALARM = "blocked_unhandled";
+
+/** The daemon's journal entry for a terminal status it recovered after the alarm. */
+export const TERMINAL_RECOVERED = "terminal_status_recovered";
 
 /** Events that name an agent without handling its status. */
 const NOISE: ReadonlySet<string> = new Set(["reconciled", "agent_registered"]);
@@ -54,7 +59,10 @@ export function namedAgent(ev: Pick<JournalEvent, "type" | "data">): string | un
   if (NOISE.has(ev.type)) return undefined;
   if (
     (ev.type === "alarm_raised" || ev.type === "alarm_cleared") &&
-    (ev.data.alarm === TERMINAL_ALARM || ev.data.alarm === BLOCKED_ALARM)
+    (ev.data.alarm === TERMINAL_ALARM ||
+      ev.data.alarm === BLOCKED_ALARM ||
+      // The status handoff's own error: the status is still not handled.
+      (ev.data.alarm === "pipeline_error" && ev.data.check === "status"))
   )
     return undefined;
   return agentOf(ev);
@@ -96,4 +104,30 @@ export function unjournaledTerminals(
       status: t.status,
       since: t.wall_time,
     }));
+}
+
+/** A terminal status's identity: one alarm, one recovery each. */
+export const terminalKey = (t: Pick<TerminalSeen, "agent_id" | "wall_time">): string =>
+  `${t.agent_id}@${t.wall_time}`;
+
+/** The statuses a recovery hands over again (a `blocked` is the blocked invariant's). */
+const RECOVERED_STATUS: ReadonlySet<string> = new Set(["done", "failed"]);
+
+/**
+ * The `done` / `failed` statuses still unhandled `recoverMs` after their alarm. `alarmed`: when
+ * each alarm was raised (epoch ms), by `terminalKey`.
+ */
+export function recoverableTerminals(
+  seen: readonly TerminalSeen[],
+  alarmed: ReadonlyMap<string, number>,
+  lastNamed: ReadonlyMap<string, number>,
+  now: number,
+  recoverMs: number,
+  lastDecided: ReadonlyMap<string, number> = new Map(),
+): TerminalSeen[] {
+  return seen.filter((t) => {
+    if (!RECOVERED_STATUS.has(t.status) || journaledSince(t, lastNamed, lastDecided)) return false;
+    const at = alarmed.get(terminalKey(t));
+    return at !== undefined && now - at >= recoverMs;
+  });
 }

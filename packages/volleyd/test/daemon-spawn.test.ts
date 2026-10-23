@@ -17,6 +17,7 @@ import { makeBufferIO } from "../src/io";
 import { readJournalFile } from "../src/journal";
 import { MACHINE_CHANNEL, type MachineRecord, machineTopic } from "../src/machines";
 import type { ReadinessPayload } from "../src/readiness";
+import { SpawnError } from "../src/spawn-error";
 import { trustDecisionId } from "../src/trust";
 import type { JournalEvent, TaskState } from "../src/types";
 import { addWorktree } from "../src/worktree";
@@ -586,6 +587,8 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       localAgents?: "always" | "fallback" | "never";
       os?: typeof CALM_OS;
       doctor?: Partial<typeof GREEN_DOCTOR>;
+      /** Changes the box's fake host once it is made (before its first spawn). */
+      onBox?: (box: FakeRemoteHost) => void;
     } = {},
   ) {
     env = await makeDaemonEnv();
@@ -630,7 +633,10 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         hooksDir: "/opt/local-hooks",
         claudeJsonPath: claudeJson,
         remoteHost: (s) => {
-          box ??= fakeRemoteHost(s, local);
+          if (box === undefined) {
+            box = fakeRemoteHost(s, local);
+            o.onBox?.(box);
+          }
           return box;
         },
         credentials: memoryCredentials(),
@@ -742,6 +748,41 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         (e) => e.type === "alarm_raised" && e.data.alarm === "decisions_file_unwritten",
       ),
     ).toBe(false);
+  });
+
+  it("a fence-denied read on the box opens one spawn_failed decision at once and schedules no retry", async () => {
+    localClaude = false;
+    const denied = new SpawnError(
+      "FENCE_DENIED",
+      "remote cat /x/.volley/brief-extra.md (only the files volleyd reads)",
+      { host: "box", target: "dev@box" },
+      { permanent: true },
+    );
+    await setup({
+      onBox: (b) => {
+        b.readFile = async () => {
+          throw denied;
+        };
+      },
+    });
+    await submit("w8", "", "  T1: { issue: 42, host: box }\n");
+    await tick();
+    await eventually(async () => journal("w8").some((e) => e.type === "spawn_failed"));
+    const failed = journal("w8").filter((e) => e.type === "spawn_failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.data).toMatchObject({ code: "FENCE_DENIED", next_retry_at: null });
+    expect(String(failed[0]?.data.message)).toContain("remote cat /x/.volley/brief-extra.md");
+    const rec = daemon.record("w8");
+    const open = (rec?.state?.open_decisions ?? [])
+      .map((id) => rec?.decisions[id])
+      .filter((d) => d?.kind === "spawn_failed");
+    expect(open).toHaveLength(1);
+    expect(open[0]?.question).toContain("FENCE_DENIED: remote cat /x/.volley/brief-extra.md");
+    expect(open[0]?.question).toContain("does not retry it");
+    // Later ticks retry nothing: the refusal is the same on every attempt.
+    await tick(60 * 60_000);
+    expect(journal("w8").filter((e) => e.type === "spawn_failed")).toHaveLength(1);
+    expect(box?.launches ?? []).toHaveLength(0);
   });
 
   it("a failed write on the box journals decisions_file_unwritten once, and the decision is still resolved", async () => {

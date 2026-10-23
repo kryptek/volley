@@ -1,22 +1,28 @@
 /**
  * Arrange & fit, ported from the prototype `App.tsx` `arrange()`. Pure: the
- * App hands in the visible clusters (the coordinators window, then each
- * visible wave window with its agents in task order) with their measured
- * sizes, and gets back every window's world position plus the view that fits
- * them. Each cluster packs its agents shortest-column-first to the right of
- * the wave window; for 1 to max(3, the most agents in a cluster) agent
- * columns and every row count, clusters are laid out in rows and the
- * placement with the largest fitting scale wins, so one big cluster spreads
- * to the viewport's aspect instead of a tall strip.
+ * App hands in the visible clusters (each visible wave window with its agents
+ * in task order, the side windows, the list windows) with their measured
+ * sizes, and gets back every window's world position, each region's bounding
+ * box and the view that fits them.
  *
- * Side clusters (the unassigned group, the coordinators window) are not
- * spread over rows with the waves: they form one block, side by side or
- * stacked (unassigned above coordinators), that closes the first row right
- * after its waves and before any overflow row, so it sits next to the waves
- * instead of trailing far behind them. On a portrait screen the block may
- * instead start the second row, under the first wave; the scale decides. A
- * side cluster packs its agents in a near-square block (⌈√n⌉ columns)
- * whatever the waves use, which bounds its tethers.
+ * Windows are laid out in three regions (#397), left to right: the waves
+ * region, the side region next to it and the list region at the end.
+ * - Waves: each cluster packs its agents shortest-column-first to the right of
+ *   the wave window, with a column count of its own: for every target height
+ *   each wave takes the fewest columns that keep it within it, so a big wave
+ *   spreads out and a small one stays compact. Clusters are laid in rows (every
+ *   row count is tried).
+ * - Side (the unassigned group, sessions, the coordinators and Machines
+ *   windows): one block packed by content size in 1 to n columns, right of the
+ *   waves or under them, so it sits next to the waves and never trails at the
+ *   screen edge on its own. A side cluster packs its agents in a near-square
+ *   block (⌈√n⌉ columns), which bounds its tethers.
+ * - List (Needs you): each window capped at the fit area's height
+ *   (`capListHeight`; it scrolls inside), so a long list never sets the
+ *   layout; after the other two regions, or under them.
+ * Candidates are scored by scale first; among those within `EPS` of the best
+ * scale the one using most of the fit area wins (`pickBest`), so equal-scale
+ * layouts pick the wider, fuller one rather than a tall strip.
  *
  * Pinned windows (C12, `pins.ts`) are skipped: a window pinned in place keeps
  * its position and the rest are laid out clear of it (moved right, or down on
@@ -35,9 +41,7 @@ export const CGAP = 96;
 export const ARRANGE_MAX_SCALE = 1.1;
 /** Lowest scale arrange will set (below the wheel-zoom minimum): the fit minimum. */
 export const ARRANGE_MIN_SCALE = FIT_MIN_SCALE;
-/** Agent columns always tried; a cluster with more agents also tries up to one column each. */
-const MIN_MAX_COLS = 3;
-/** A candidate must beat the best so far by this much to replace it. */
+/** Scales within this of the best count as equal: the fuller layout wins among them. */
 const EPS = 0.005;
 
 type Pos = { x: number; y: number };
@@ -51,9 +55,14 @@ export interface Box {
 export interface Cluster {
   main: Box;
   kids: Box[];
-  /** Laid out at the end of the first row, after its waves (see the module comment). */
+  /** In the side region, next to the waves (see the module comment). */
   side?: boolean;
+  /** A list window (Needs you): in the list region, its height capped at the fit area's. */
+  list?: boolean;
 }
+
+/** The regions arrange lays windows out in (see the module comment). */
+export type RegionName = "waves" | "side" | "list";
 
 /** The browser viewport (`window.innerWidth` / `innerHeight`). */
 export interface Screen {
@@ -62,17 +71,27 @@ export interface Screen {
 }
 
 export interface Candidate {
-  cols: number;
+  /** Each wave's agent columns, by its wave window's id. */
+  cols: Record<string, number>;
   rows: number;
   /** Fitting scale, before the floor. */
   s: number;
+  /**
+   * The fraction of the fit area the block's bounding box covers at that scale (the box, not
+   * the windows in it: an L-shaped block with an empty corner scores as its full box).
+   */
+  used: number;
   place: Record<string, Pos>;
   W: number;
   H: number;
+  /** Each region's bounding box (the regions with windows in them). */
+  regions: Partial<Record<RegionName, Rect>>;
 }
 
 export interface Arrangement {
   place: Record<string, Pos>;
+  /** Each region's bounding box in world coordinates, as placed. */
+  regions: Partial<Record<RegionName, Rect>>;
   view: View;
 }
 
@@ -119,7 +138,86 @@ function block(lays: readonly Laid[], across: boolean): Laid {
   return { at, w, h };
 }
 
-/** Every placement arrange considers, in the order it considers them. */
+/** `lays` in `k` columns, each next one into the shortest, CGAP apart: packed by content size. */
+function columns(lays: readonly Laid[], k: number): Laid {
+  const cols: Laid[][] = Array.from({ length: k }, () => []);
+  const hs: number[] = Array(k).fill(0);
+  for (const l of lays) {
+    const i = hs.indexOf(Math.min(...hs));
+    cols[i]?.push(l);
+    hs[i] = (hs[i] ?? 0) + l.h + CGAP;
+  }
+  return block(
+    cols.filter((c) => c.length > 0).map((c) => block(c, false)),
+    true,
+  );
+}
+
+/** Rows of laid-out clusters, CGAP apart, as one block. */
+function grid(rows: readonly (readonly Laid[])[]): Laid {
+  const at: Record<string, Pos> = {};
+  let y = 0;
+  let w = 0;
+  for (const row of rows) {
+    let x = 0;
+    for (const l of row) {
+      for (const [id, p] of Object.entries(l.at)) at[id] = { x: x + p.x, y: y + p.y };
+      x += l.w + CGAP;
+    }
+    w = Math.max(w, x - CGAP);
+    y += Math.max(...row.map((l) => l.h)) + CGAP;
+  }
+  return { at, w, h: y - CGAP };
+}
+
+/** A list window's height on the canvas: never taller than the fit area (it scrolls inside). */
+export const capListHeight = (h: number, area: Rect): number => Math.min(h, area.h);
+
+/**
+ * Each wave's agent columns for every target height: the fewest columns that keep the
+ * cluster within it (all of them when none does), so a big wave spreads and a small one
+ * stays compact; then every wave at the same count, 1 up to the most agents, which adds
+ * the wider layouts that are no shorter. One entry per distinct choice.
+ */
+function columnChoices(waves: readonly Cluster[]): number[][] {
+  const most = (cl: Cluster) => Math.max(1, cl.kids.length);
+  const heights = waves.map((cl) =>
+    Array.from({ length: most(cl) }, (_, i) => layoutCluster(cl, i + 1).h),
+  );
+  const targets = [...new Set(heights.flat())].sort((a, b) => b - a);
+  const seen = new Set<string>();
+  const out: number[][] = [];
+  for (const t of targets) {
+    const cols = heights.map((hs) => {
+      const i = hs.findIndex((h) => h <= t);
+      return i < 0 ? hs.length : i + 1;
+    });
+    const key = cols.join(",");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cols);
+  }
+  for (let c = 1; c <= Math.max(...waves.map(most)); c++) {
+    const cols = waves.map((cl) => Math.min(c, most(cl)));
+    const key = cols.join(",");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cols);
+  }
+  return out;
+}
+
+/** A region's laid-out block placed at `at`, as world positions and its bounding box. */
+const put = (l: Laid, at: Pos, place: Record<string, Pos>): Rect => {
+  for (const [id, p] of Object.entries(l.at)) place[id] = { x: at.x + p.x, y: at.y + p.y };
+  return { ...at, w: l.w, h: l.h };
+};
+
+/**
+ * Every placement arrange considers, in the order it considers them. The count grows as
+ * (column choices) × rows × side columns × the region orders, each a full place map: fine
+ * for today's fleets (10 waves of 10 agents is ~17k), but cap the targets if they grow.
+ */
 export function candidates(
   clusters: readonly Cluster[],
   screen: Screen,
@@ -127,49 +225,94 @@ export function candidates(
 ): Candidate[] {
   const { w: vw, h: vh } = area;
   const out: Candidate[] = [];
-  const waves = clusters.filter((cl) => !cl.side);
+  const waves = clusters.filter((cl) => !cl.side && !cl.list);
   const sides = clusters
-    .filter((cl) => cl.side)
+    .filter((cl) => cl.side && !cl.list)
     .map((cl) => layoutCluster(cl, Math.ceil(Math.sqrt(cl.kids.length))));
-  if (waves.length === 0 && sides.length === 0) return out;
-  // The side block, side by side and (for two or more) stacked.
-  const blocks = sides.length === 0 ? [] : [block(sides, true)];
-  if (sides.length > 1) blocks.push(block(sides, false));
-  // Where it goes: closing the first row, or (portrait, with waves) as the second row.
-  const below = waves.length > 0 && vw < vh ? [false, true] : [false];
-  const maxCols = Math.max(MIN_MAX_COLS, ...waves.map((cl) => cl.kids.length));
-  for (let c = 1; c <= maxCols; c++) {
-    const lays = waves.map((cl) => layoutCluster(cl, c));
+  const lists = clusters
+    .filter((cl) => cl.list)
+    .map((cl) =>
+      layoutCluster({ ...cl, main: { ...cl.main, h: capListHeight(cl.main.h, area) } }, 1),
+    );
+  if (waves.length === 0 && sides.length === 0 && lists.length === 0) return out;
+  // The side region in 1 to n columns; the list region side by side.
+  const sideBlocks = sides.length === 0 ? [null] : sides.map((_, k) => columns(sides, k + 1));
+  const listBlock = lists.length === 0 ? null : block(lists, true);
+  const choices = waves.length === 0 ? [[]] : columnChoices(waves);
+  for (const cols of choices) {
+    const lays = waves.map((cl, i) => layoutCluster(cl, cols[i] ?? 1));
     for (let rows = 1; rows <= Math.max(1, lays.length); rows++) {
       const per = Math.ceil(lays.length / rows);
       const waveRows: Laid[][] = [];
-      for (let r = 0; r === 0 || r * per < lays.length; r++) {
-        waveRows.push(lays.slice(r * per, r * per + per));
-      }
-      for (const side of blocks.length ? blocks : [null]) {
-        for (const under of below) {
-          const grid = waveRows.map((row) => [...row]);
-          if (side && under) grid.splice(1, 0, [side]);
-          else if (side) grid[0]?.push(side);
-          const place: Record<string, Pos> = {};
-          let y = 0;
-          let W = 0;
-          for (const row of grid) {
-            let x = 0;
-            for (const l of row) {
-              for (const [id, p] of Object.entries(l.at)) place[id] = { x: x + p.x, y: y + p.y };
-              x += l.w + CGAP;
+      for (let r = 0; r * per < lays.length; r++) waveRows.push(lays.slice(r * per, r * per + per));
+      const waveBlock = waveRows.length === 0 ? null : grid(waveRows);
+      for (const side of sideBlocks) {
+        // The side region goes right of the waves, or under them.
+        for (const under of waveBlock && side ? [false, true] : [false]) {
+          for (const listUnder of listBlock && (waveBlock || side) ? [false, true] : [false]) {
+            const place: Record<string, Pos> = {};
+            const regions: Partial<Record<RegionName, Rect>> = {};
+            let W = 0;
+            let H = 0;
+            const add = (name: RegionName, l: Laid, at: Pos) => {
+              const r = put(l, at, place);
+              regions[name] = r;
+              W = Math.max(W, r.x + r.w);
+              H = Math.max(H, r.y + r.h);
+            };
+            if (waveBlock) add("waves", waveBlock, { x: 0, y: 0 });
+            if (side) {
+              add(
+                "side",
+                side,
+                !waveBlock ? { x: 0, y: 0 } : under ? { x: 0, y: H + CGAP } : { x: W + CGAP, y: 0 },
+              );
             }
-            W = Math.max(W, x - CGAP);
-            y += Math.max(...row.map((l) => l.h)) + CGAP;
+            if (listBlock) {
+              const empty = W === 0 && H === 0;
+              add(
+                "list",
+                listBlock,
+                empty ? { x: 0, y: 0 } : listUnder ? { x: 0, y: H + CGAP } : { x: W + CGAP, y: 0 },
+              );
+            }
+            const s = Math.min(ARRANGE_MAX_SCALE, vw / W, vh / H);
+            out.push({
+              cols: Object.fromEntries(
+                waves.map((cl, i) => [
+                  cl.main.id,
+                  Math.max(1, Math.min(cols[i] ?? 1, cl.kids.length)),
+                ]),
+              ),
+              rows,
+              s,
+              used: (W * s * H * s) / (vw * vh),
+              place,
+              W,
+              H,
+              regions,
+            });
           }
-          const H = y - CGAP;
-          out.push({ cols: c, rows, s: Math.min(ARRANGE_MAX_SCALE, vw / W, vh / H), place, W, H });
         }
       }
     }
   }
   return out;
+}
+
+/**
+ * The best of scored candidates: the largest scale, then (among those within `EPS` of it)
+ * the largest fraction of the fit area its bounding box covers, then the earliest; -1 when
+ * there are none.
+ */
+export function pickBest(scored: readonly { s: number; used: number }[]): number {
+  const top = scored.reduce((m, c) => Math.max(m, c.s), Number.NEGATIVE_INFINITY);
+  let best = -1;
+  scored.forEach((c, i) => {
+    if (c.s < top - EPS) return;
+    if (best < 0 || c.used > (scored[best]?.used ?? 0)) best = i;
+  });
+  return best;
 }
 
 /**
@@ -238,14 +381,14 @@ export function arrange(
   const pinnedRects = Object.values(pinned);
   const across = area.w >= area.h;
   const ids = new Set([...Object.keys(pinned), ...(opts.skip ?? [])]);
-  let best: { c: Candidate; off: Pos; u: Rect; s: number } | null = null;
-  for (const c of candidates(unpinned(clusters, ids), screen, area)) {
-    // With nothing pinned the offset is (0, 0), the union is the block and the score is `c.s`.
+  const scored = candidates(unpinned(clusters, ids), screen, area).map((c) => {
+    // With nothing pinned the offset is (0, 0), the union is the block and the score is `c`'s.
     const off = clearOf(c.W, c.H, pinnedRects, across);
     const u = union([{ ...off, w: c.W, h: c.H }, ...pinnedRects]);
     const s = Math.min(ARRANGE_MAX_SCALE, area.w / u.w, area.h / u.h);
-    if (!best || s > best.s + EPS) best = { c, off, u, s };
-  }
+    return { c, off, u, s, used: (u.w * s * u.h * s) / (area.w * area.h) };
+  });
+  const best = scored[pickBest(scored)];
   if (!best) return null;
   const { off, u } = best;
   const s = Math.max(ARRANGE_MIN_SCALE, best.s);
@@ -253,8 +396,13 @@ export function arrange(
   for (const [id, p] of Object.entries(best.c.place)) {
     if (!ids.has(id)) place[id] = { x: off.x + p.x, y: off.y + p.y };
   }
+  const regions: Partial<Record<RegionName, Rect>> = {};
+  for (const [name, r] of Object.entries(best.c.regions) as [RegionName, Rect][]) {
+    regions[name] = { ...r, x: off.x + r.x, y: off.y + r.y };
+  }
   return {
     place,
+    regions,
     view: {
       s,
       x: area.x + (area.w - u.w * s) / 2 - u.x * s,
