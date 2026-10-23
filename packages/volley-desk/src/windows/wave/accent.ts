@@ -35,3 +35,6 @@ export function clusterHues(
   const free = ACCENT_PALETTE.map((_, i) => i).filter((i) => i !== own);
   return new Map(clusters.map((c, i) => [c.id, free[i % free.length] as number]));
 }
+
+/** A cluster's palette colour from its `clusterHues` index (`ACCENT_PALETTE`, wrapping). */
+export const hueOf = (hue: number): string => ACCENT_PALETTE[hue % ACCENT_PALETTE.length] as string;

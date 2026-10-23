@@ -1224,6 +1224,7 @@ export function demoPlanned(now = Date.now()): DeskMessage[] {
     task("i331", 331, "queued", { cluster: "B", why_waiting: "cluster B is held" }),
     task("train-1", 0, "implement", {
       synthetic: true,
+      pr: pr(340),
       train: {
         members: [
           { task: "i301", pr: 341, head: "341c0ffee" },

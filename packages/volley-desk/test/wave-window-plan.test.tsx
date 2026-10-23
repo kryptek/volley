@@ -132,8 +132,22 @@ describe("the merge queue line with trains", () => {
     renderWave(planned());
     const line = screen.getByLabelText("Merge queue");
     expect(line).toHaveTextContent("train-1 (i301, i302, i303) integrating · queued i305, i306");
-    const pr = within(line).getByRole("link", { name: "PR #340 on GitHub" });
-    expect(pr).toHaveAttribute("href", "https://github.com/example-org/example-repo/issues/340");
+    const pr = within(line).getByRole("link", { name: /PR #340 on GitHub/ });
+    expect(pr).toHaveAccessibleName("train-1 (i301, i302, i303) integrating, PR #340 on GitHub");
+    expect(pr).toHaveAttribute("href", "https://github.com/example-org/example-repo/pull/340");
+  });
+
+  it("leaves the train unlinked when its task carries no PR URL", () => {
+    const w = planned();
+    const st = w.state as WaveStatePayload;
+    const bare = {
+      ...w,
+      state: { ...st, tasks: st.tasks.map(({ pr: _pr, ...t }) => t) },
+    } as typeof w;
+    renderWave(bare);
+    const line = screen.getByLabelText("Merge queue");
+    expect(line).toHaveTextContent("train-1 (i301, i302, i303) integrating");
+    expect(within(line).queryByRole("link")).toBeNull();
   });
 
   it("formats a train without its ended ones", () => {

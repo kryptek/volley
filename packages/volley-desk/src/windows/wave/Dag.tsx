@@ -26,7 +26,7 @@
 import { useState } from "react";
 import { issueLabel } from "../../lib/github";
 import type { TaskPlacement, WaveTask } from "../../store/types";
-import { ACCENT_PALETTE } from "./accent";
+import { hueOf } from "./accent";
 import { type DeskStage, STAGE_LABEL } from "./stages";
 
 export interface DagNode {
@@ -306,9 +306,6 @@ export function Dag({
     </div>
   );
 }
-
-/** A cluster's palette hue (`ACCENT_PALETTE`, wrapping). */
-const hueOf = (hue: number) => ACCENT_PALETTE[hue % ACCENT_PALETTE.length] as string;
 
 /** The tinted hull behind a clustered node: static, so reduced motion keeps it as is. */
 function ClusterHull({ hue }: { hue: number }) {

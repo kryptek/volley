@@ -41,7 +41,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useState } from "react";
 import { ciStuck } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
-import { issueHref, prLabel } from "../../lib/github";
+import { issueHref, prHref, prLabel } from "../../lib/github";
 import { plural } from "../../lib/plural";
 import { RepoChip } from "../../look/RepoChip";
 import {
@@ -65,7 +65,7 @@ import { Clawd } from "./Clawd";
 import { Clusters } from "./Clusters";
 import { Dag, type DagNode, HostChips, fixerLabel } from "./Dag";
 import { WaveYaml, taskOrder } from "./WaveYaml";
-import { ACCENT_PALETTE, accentFor, clusterHues } from "./accent";
+import { accentFor, clusterHues, hueOf } from "./accent";
 import { taskActivity } from "./activity";
 import { STAGE_LABEL, STAGE_WEIGHT, deskStage, wavePct } from "./stages";
 import "../../styles/wave.css";
@@ -208,6 +208,8 @@ export function dagNodes(s: WaveStatePayload): DagNode[] {
     const named = t?.cluster ?? sp.plan?.cluster;
     const pairs = (named ? clusters.get(named)?.strategy.chain : undefined) ?? [];
     const chainedBy = pairs.filter((p) => p[1] === id).map((p) => p[0] as string);
+    // A chained task whose cluster names no pair ending at it: the planner's chain is all we know, so every
+    // `after` edge is drawn as the planner's.
     const chained = sp.plan?.by === "chain" ? (chainedBy.length ? chainedBy : sp.after) : [];
     const bundle = (sp.issues ?? [])
       .filter((n) => n !== sp.issue)
@@ -260,7 +262,8 @@ function QueueLine({ s }: { s: WaveStatePayload }) {
   const riding = new Set(trains.flatMap((t) => t.tasks));
   const rest = mergeQueueLine((s.merge_queue ?? []).filter((e) => !riding.has(e.task)));
   const parts: ReactNode[] = trains.map((t) => {
-    const href = t.pr === undefined ? null : issueHref(s.github, t.pr);
+    // The link is the synthetic train task's own pr.url, never derived from the train's number.
+    const href = prHref(s.tasks.find((x) => x.id === t.id));
     const text = trainLine(t);
     return href ? (
       <a
@@ -268,7 +271,7 @@ function QueueLine({ s }: { s: WaveStatePayload }) {
         href={href}
         target="_blank"
         rel="noopener noreferrer"
-        aria-label={prLabel(t.pr as number)}
+        aria-label={t.pr === undefined ? undefined : `${text}, ${prLabel(t.pr)}`}
         title={text}
       >
         {text}
@@ -324,10 +327,7 @@ export function WaveWindow(p: WaveWindowProps) {
   const queue = s?.merge_queue ?? [];
   const trains = liveTrains(s?.trains);
   const hues = new Map(
-    [...clusterHues(s?.overlap_plan?.clusters ?? [], id)].map(([c, i]) => [
-      c,
-      ACCENT_PALETTE[i] as string,
-    ]),
+    [...clusterHues(s?.overlap_plan?.clusters ?? [], id)].map(([c, i]) => [c, hueOf(i)]),
   );
   const churn = s?.spawns?.churn ?? 0;
   const activity = new Map(
