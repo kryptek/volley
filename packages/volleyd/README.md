@@ -3736,8 +3736,9 @@ pure formation, `src/autopilot/merge.ts` the merge):
   release branch with no merge in flight (no turn holds its lock, no entry is `merging`, no train
   forms or runs there) whenever at least two of its queued tasks qualify: at `merge_ready`, gated
   at their current head, with a PR, and not handed to a human (`merge_manual`). It takes the
-  first up to `train_size_max` (4) of them from the front task's wave, in queue order, with the
-  tasks of the front task's overlap-plan cluster first. A single gated task takes the ordinary
+  first up to `train_size_max` (4) of them from the front task's wave, in the order `nextToMerge`
+  would take them (queue order, a refused task that loses its place last), with the tasks of the
+  front task's overlap-plan cluster first. A single gated task takes the ordinary
   turn (`nextToMerge`, unchanged; the driver asks `formTrain` first).
 - **Names.** A train is `train-<n>` (its synthetic task in the wave, n counting the wave's trains
   from 1), integrated on the branch `volley/train/<wave>-t<n>`, and carries each member's

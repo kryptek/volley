@@ -38,6 +38,15 @@ const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 /** Where an entry competes, as in nextToMerge: a refused one after the rest unless it keeps its place. */
 const late = (e: QueueEntry): number => (e.state === "refused" && e.keepsPlace !== true ? 1 : 0);
 
+/** A train forms or runs on the release branch (`<repo>#<release_branch>`), queued members or not. */
+const trainRunning = (branch: string, waves: Record<WaveId, WaveRecord>): boolean =>
+  Object.values(waves).some(
+    (rec) =>
+      rec.state != null &&
+      `${rec.state.repo}#${rec.state.release_branch}` === branch &&
+      (rec.state.trains ?? []).some((t) => t.state !== "merged" && t.state !== "failed"),
+  );
+
 /** One past the highest `train-<n>` the wave has started (`state.trains`, one per train_started). */
 function nextTrain(rec: WaveRecord): number {
   let n = 0;
@@ -66,6 +75,7 @@ export function formTrain(
   for (const [branch, entries] of Object.entries(queues)) {
     if (inflight.has(branch)) continue;
     if (entries.some((e) => e.state === "merging" || e.train !== undefined)) continue;
+    if (trainRunning(branch, waves)) continue;
     const ready: Ready[] = [];
     for (const e of entries) {
       const p = waves[e.wave]?.pipeline[e.task];

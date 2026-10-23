@@ -148,6 +148,13 @@ describe("formTrain", () => {
     expect(form(rec)).toBeNull();
   });
 
+  it("a branch whose running train's members left the queue forms no second one", () => {
+    const rec = record("w1", { T1: {}, T2: {}, T3: { queued: 3 }, T4: { queued: 4 } }, [
+      { id: "train-1", tasks: ["T1", "T2"], state: "integrating", since: at(5) },
+    ]);
+    expect(form(rec)).toBeNull();
+  });
+
   it("enabled: false forms none", () => {
     const rec = record("w1", { T1: { queued: 1 }, T2: { queued: 2 } });
     expect(form(rec, { size: 4, enabled: false })).toBeNull();
