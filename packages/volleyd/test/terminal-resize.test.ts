@@ -238,15 +238,14 @@ describe("terminal_resize", () => {
     expect(host.resizes).toEqual([]);
   });
 
-  it("in a wave owned by someone else it is refused, as steer is", async () => {
+  it("is not gated by wave ownership: the Desk resizes in a coordinator-owned wave", async () => {
+    // Deliberate (SPEC §4.6.6): the op only changes wrapping, and the Desk's `by` is not the
+    // coordinator that owns an autopilot wave, so an owner check would make it dead there.
     expect((await client.request("claim", { wave: "w1", by: "coord-a" })).ok).toBe(true);
-    const r = await resize({ cols: 120, rows: 30, by: "someone-else" });
-    expect(r.ok).toBe(false);
-    expect(r.error).toContain("is owned by coord-a");
-    const ok = resize({ cols: 120, rows: 30, by: "coord-a" });
+    const r = resize({ cols: 120, rows: 30, by: "desk" });
     await consumed();
     await clock.advance(DAEMON_DEFAULTS.terminal_resize_coalesce_ms);
-    expect((await ok).result).toMatchObject({ resized: true, cols: 120 });
+    expect((await r).result).toMatchObject({ resized: true, cols: 120 });
     expect(host.resizes).toEqual([{ workspace: "workspace:1", size: { cols: 120, rows: 30 } }]);
   });
 
