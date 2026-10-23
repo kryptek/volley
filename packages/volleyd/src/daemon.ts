@@ -10435,6 +10435,9 @@ export class Daemon {
         ok: false,
         error: `wave '${w.wave}' is not complete (${state.status}); its release has not reached main`,
       };
+    // Already verified against this release: answer from the ledger rather than run it again.
+    const verified = issueLedger(this.journalEvents(w.wave)).verified;
+    if (verified !== undefined && (pr === undefined || pr === verified)) return answer();
     const repo = w.log.record.wave?.repo;
     if (repo === undefined) return { ok: false, error: `wave '${w.wave}' has no repo` };
     if (this.issueChecks.has(w.wave))

@@ -330,6 +330,11 @@ describe("the issue lifecycle in the daemon (#416)", () => {
     expect(ofType("issues_verified").map((e) => e.data)).toEqual([
       { release_pr: 77, closed: [412, 414], left_open: [413] },
     ]);
+    // Already verified: answered from the ledger, no second issues_verified.
+    const again = await client.request("issues", { wave: WAVE, verify: true, by: OWNER });
+    expect(again.ok).toBe(true);
+    expect((again.result as { release_pr: number }).release_pr).toBe(77);
+    expect(ofType("issues_verified")).toHaveLength(1);
   });
 
   it("issues: unknown wave; --pr without --verify is a usage error", async () => {
