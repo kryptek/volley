@@ -1,4 +1,11 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import addFormats from "ajv-formats";
@@ -902,6 +909,28 @@ describe("volley peer doctor: account profiles ready to run agents (#400)", () =
     const fixed = await run(m, { fix: true, yes: true }, { exec });
     expect(fixed.stdout).not.toContain("→ claude.profiles");
     expect(read(join(work, ".claude.json")).hasCompletedOnboarding).toBeUndefined();
+  });
+
+  it("--fix takes over a .claude.json lock a crashed session left behind", async () => {
+    const m = machine();
+    const work = profile(m, "work", {});
+    const lock = join(work, ".claude.json.lock");
+    mkdirSync(lock);
+    const old = new Date(Date.now() - 60 * 60 * 1000);
+    utimesSync(lock, old, old);
+    await run(m, { fix: true, yes: true });
+    expect(read(join(work, ".claude.json")).hasCompletedOnboarding).toBe(true);
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("without a claude on PATH, --fix records the default login's lastOnboardingVersion", async () => {
+    const m = machine({
+      tools: { claude: { path: null, sshPath: null } },
+      claudeJson: { lastOnboardingVersion: "2.0.9" },
+    });
+    const work = profile(m, "work", {});
+    await run(m, { fix: true, yes: true });
+    expect(read(join(work, ".claude.json")).lastOnboardingVersion).toBe("2.0.9");
   });
 
   it("no account profiles: nothing to check", async () => {

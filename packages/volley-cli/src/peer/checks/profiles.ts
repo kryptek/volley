@@ -1,44 +1,12 @@
-import {
-  lstatSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  rmdirSync,
-  writeFileSync,
-} from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { type ProfileKeys, missingProfileKeys, seedProfile } from "volleyd/claude/sharing";
 import type { Check, Facts } from "../doctor";
 
 /**
  * The Claude account profiles under volleyd's profiles root (`~/.volley/claude/<acct>`): each
  * signed-in one is ready to run agents unattended, past Claude Code's first-run screens (#400).
  */
-
-// Kept in step with volleyd's copy (src/claude/sharing.ts): volley-cli cannot import it.
-const ONBOARDING_KEYS = {
-  ".claude.json": ["hasCompletedOnboarding", "lastOnboardingVersion", "theme"],
-  "settings.json": ["skipDangerousModePermissionPrompt"],
-} as const;
-const ONBOARDING_THEME = "dark";
-
-export type ProfileKeys = { ".claude.json": string[]; "settings.json": string[] };
-
-/** The keys `claudeJson` and `settings` still lack, per file. */
-export function missingProfileKeys(
-  claudeJson: Record<string, unknown>,
-  settings: Record<string, unknown>,
-): ProfileKeys {
-  const present = (o: Record<string, unknown>, k: string) =>
-    k === "hasCompletedOnboarding" || k === "skipDangerousModePermissionPrompt"
-      ? o[k] === true
-      : typeof o[k] === "string" && o[k] !== "";
-  return {
-    ".claude.json": ONBOARDING_KEYS[".claude.json"].filter((k) => !present(claudeJson, k)),
-    "settings.json": ONBOARDING_KEYS["settings.json"].filter((k) => !present(settings, k)),
-  };
-}
-// End of the copy kept with volleyd.
 
 export interface AccountProfile {
   id: string;
@@ -85,6 +53,15 @@ async function runningProfiles(
   });
 }
 
+/** A parsed `~/.claude.json`'s `lastOnboardingVersion` (null: none recorded). */
+export function onboardingVersionOf(claudeJson: unknown): string | null {
+  const v =
+    typeof claudeJson === "object" && claudeJson !== null && !Array.isArray(claudeJson)
+      ? (claudeJson as Record<string, unknown>).lastOnboardingVersion
+      : undefined;
+  return typeof v === "string" && v !== "" ? v : null;
+}
+
 /** The signed-in profiles under `root` (a `.claude.json` with an `oauthAccount`), sorted. */
 export async function gatherAccountProfiles(
   sh: (argv: string[]) => Promise<{ code: number; stdout: string }>,
@@ -113,51 +90,6 @@ export async function gatherAccountProfiles(
     ...p,
     sessions: running.filter((d) => d === p.dir).length,
   }));
-}
-
-/** Write JSON through a temp file and a rename (0600: a profile's files hold its login). */
-function writeJson(path: string, value: Record<string, unknown>) {
-  const tmp = `${path}.volley-doctor.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  renameSync(tmp, path);
-}
-
-/**
- * Write a profile's missing keys (the doctor's `--fix`): `.claude.json` under Claude Code's own
- * lock (`<file>.lock/`), `settings.json` unless it is linked to the primary's. A symlinked
- * `.claude.json` is refused: a profile's own is never linked.
- */
-export function seedAccountProfile(dir: string, claudeVersion: string | null): void {
-  const json = join(dir, ".claude.json");
-  if (lstatSync(json).isSymbolicLink()) throw new Error(`${json} is a symlink`);
-  const lock = `${json}.lock`;
-  try {
-    mkdirSync(lock);
-  } catch {
-    throw new Error(`${lock} is held; rerun when no Claude Code session of this profile runs`);
-  }
-  try {
-    const cur = readObject(json) ?? {};
-    const value: Record<string, unknown> = {
-      hasCompletedOnboarding: true,
-      lastOnboardingVersion: claudeVersion ?? undefined,
-      theme: ONBOARDING_THEME,
-    };
-    const add = missingProfileKeys(cur, {})[".claude.json"].filter((k) => value[k] !== undefined);
-    if (add.length > 0)
-      writeJson(json, { ...cur, ...Object.fromEntries(add.map((k) => [k, value[k]])) });
-  } finally {
-    rmdirSync(lock);
-  }
-  const settings = join(dir, "settings.json");
-  let linked = false;
-  try {
-    linked = lstatSync(settings).isSymbolicLink();
-  } catch {}
-  if (linked) return;
-  const cur = readObject(settings) ?? {};
-  if (missingProfileKeys({}, cur)["settings.json"].length > 0)
-    writeJson(settings, { ...cur, skipDangerousModePermissionPrompt: true });
 }
 
 const describeMissing = (m: ProfileKeys) =>
@@ -198,7 +130,8 @@ export function accountProfilesCheck(f: Facts): Check {
         : `${p.id}: not ready to run agents unattended (${describeMissing(p.missing)})`,
     )
     .join("; ");
-  const version = f.tools.claude.version;
+  // as volleyd seeds: Claude Code's version here, else the one the default login recorded
+  const version = f.tools.claude.version ?? f.claude.onboardingVersion;
   return {
     id: "claude.profiles",
     ok: false,
@@ -212,7 +145,9 @@ export function accountProfilesCheck(f: Facts): Check {
             steps: [],
             apply: fixable.map((p) => ({
               what: `${p.dir}: the onboarding keys and the bypass-permissions consent written`,
-              run: () => seedAccountProfile(p.dir, version),
+              run: () => {
+                seedProfile(p.dir, version === null ? {} : { claudeVersion: version });
+              },
             })),
           },
   };

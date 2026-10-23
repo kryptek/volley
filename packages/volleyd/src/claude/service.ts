@@ -291,7 +291,8 @@ export class ClaudeService {
 
   /**
    * Claude Code's version on this machine (`claude --version`), else the one the primary profile
-   * recorded (`lastOnboardingVersion`): what a seeded profile records. Asked once.
+   * recorded (`lastOnboardingVersion`): what a seeded profile records. Asked once it answers;
+   * a lookup that found none is asked again at the next seed.
    */
   claudeVersion(): Promise<string | undefined> {
     this.versionAsk ??= (async () => {
@@ -305,7 +306,11 @@ export class ClaudeService {
       const own = readClaudeJson(this.d.primaryJson)?.lastOnboardingVersion;
       return typeof own === "string" && own !== "" ? own : undefined;
     })();
-    return this.versionAsk;
+    const ask = this.versionAsk;
+    return ask.then((v) => {
+      if (v === undefined && this.versionAsk === ask) this.versionAsk = undefined;
+      return v;
+    });
   }
 
   /**

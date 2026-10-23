@@ -17,6 +17,7 @@ import {
   type AccountProfile,
   accountProfilesCheck,
   gatherAccountProfiles,
+  onboardingVersionOf,
 } from "./checks/profiles";
 import { GIT_QUIET, githubSlug, normalizeOrigin, repoChecks } from "./checks/repo";
 import { ON_PATH, binOf, toolChecks, versionOf } from "./checks/tools";
@@ -197,6 +198,8 @@ export interface Facts {
     logins: ClaudeLogin[] | null;
     /** The signed-in account profiles under volleyd's profiles root (checks/profiles.ts). */
     profiles: AccountProfile[];
+    /** The default profile's `lastOnboardingVersion`: a seed's version when no `claude` answers. */
+    onboardingVersion: string | null;
   };
   machine: {
     /** Logical CPUs (the size a paired machine's derived `max_agents` reads). */
@@ -593,6 +596,7 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       org: identity.org ?? null,
       logins,
       profiles: accountProfiles,
+      onboardingVersion: onboardingVersionOf(claudeJson),
     },
     machine: {
       cores: deps.cpus(),

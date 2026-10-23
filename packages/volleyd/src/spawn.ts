@@ -94,6 +94,7 @@ import { branchName, expandHome, releaseBranchName, worktreePath } from "./workt
  *   a profile's first-run screen (#400): its workspace closed, the profile seeded
  *                                                                   → profile_repaired, then the
  *     one relaunch as above in a new workspace (recovery: first_run); a second → unknown_screen
+ *     (either relaunch is the spawn's only one: an update prompt after it is unknown_screen too)
  *   hook signals verified                                           → agent_registered
  *   hooks verified, the MCP server's status missing                 → verify_failed, then
  *     decision_opened (mcp_not_registered)
@@ -1121,7 +1122,10 @@ async function answerUpdatePrompt(ctx: Ctx, cur: Launched, issue: IssueData): Pr
 /**
  * A first-run screen (#400): close the stuck session first (Claude Code rewrites the profile's
  * `.claude.json` from memory as it exits), seed the profile, journal `profile_repaired`, and
- * relaunch once in a new workspace.
+ * relaunch once in a new workspace. It is the spawn's one recovery: an update prompt on the
+ * relaunched session is then an unknown_screen, not a second relaunch. It is not counted against
+ * `relaunch_max`, which budgets the relaunch decisions policy answers: a task gets at most this
+ * one silent relaunch before a decision shows it to someone.
  */
 async function repairFirstRun(
   ctx: Ctx,
