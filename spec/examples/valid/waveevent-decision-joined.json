@@ -14,7 +14,7 @@
       "kind": "repo_untrusted",
       "task": "T2",
       "role": "implementer",
-      "question": "Needs you: trust /path/to/repo on athena in Claude account work for dispatch? 2 tasks are waiting: T1, T2.",
+      "question": "Needs you: trust /path/to/repo on box in Claude account work for dispatch? 2 tasks are waiting: T1, T2.",
       "option_help": {
         "cancel": "Cancels only the 2 waiting launches; the tasks keep their other work. Trusting the repo later resumes them."
       }

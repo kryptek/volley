@@ -2231,7 +2231,7 @@ same trust joins it instead (`decision_joined { decision_id, kind, task, role, q
 option_help?, agent_id? }`), even one racing it in the same tick (the daemon awaits the open in
 flight, then joins). A joined task parks (`awaiting_decision`, resuming at its own stage), is
 appended to the decision's `waiting`, and the question is rendered again, naming the machine and
-the account once: `Needs you: trust <root> on athena in Claude account work for dispatch? 12 tasks
+the account once: `Needs you: trust <root> on box in Claude account work for dispatch? 12 tasks
 are waiting: i392, i416, i400, i403, i397, i399, … (12 tasks).` The retained decision and its
 inbox item follow. One answer resumes every waiting task:
 

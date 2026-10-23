@@ -4601,7 +4601,7 @@ export class Daemon {
       .readTrust(typeof profile === "string" ? profile : undefined)
       .then((cfg) => {
         if (!isRepoTrusted(cfg, repo) || !this.running) return;
-        if (onTrusted !== undefined) return onTrusted();
+        if (onTrusted !== undefined) return this.enqueue(async () => onTrusted());
         return this.enqueue(async () => {
           const cur = this.waves.get(wave)?.record.decisions[d.decision_id];
           if (cur === undefined || cur.resolved !== undefined) return;

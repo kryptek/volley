@@ -150,12 +150,12 @@ describe("spawn: repo trust check", () => {
     expect(trustQuestion("/repo", undefined, undefined, ["T1"])).toBe(
       "Needs you: trust /repo for dispatch? 1 task is waiting: T1.",
     );
-    expect(trustQuestion("/repo", "athena", "work", ["T1", "T2", "T3"])).toBe(
-      "Needs you: trust /repo on athena in Claude account work for dispatch? 3 tasks are waiting: T1, T2, T3.",
+    expect(trustQuestion("/repo", "box", "work", ["T1", "T2", "T3"])).toBe(
+      "Needs you: trust /repo on box in Claude account work for dispatch? 3 tasks are waiting: T1, T2, T3.",
     );
     const twelve = ["i392", "i416", "i400", "i403", "i397", "i399", "a", "b", "c", "d", "e", "f"];
-    expect(trustQuestion("/repo", "athena", "work", twelve)).toBe(
-      "Needs you: trust /repo on athena in Claude account work for dispatch? 12 tasks are waiting: i392, i416, i400, i403, i397, i399, … (12 tasks).",
+    expect(trustQuestion("/repo", "box", "work", twelve)).toBe(
+      "Needs you: trust /repo on box in Claude account work for dispatch? 12 tasks are waiting: i392, i416, i400, i403, i397, i399, … (12 tasks).",
     );
     expect(trustCancelHelp(1)).toBe(
       "Cancels only the waiting launch; the tasks keep their other work. Trusting the repo later resumes them.",
