@@ -46,12 +46,12 @@ volleyd (the wave supervisor daemon) has the same per-package shape:
 ```sh
 cd packages/volleyd
 bun run test                                   # vitest: pure modules + Aedes-backed daemon/control tests
-bun run test:shard 2/4                         # one CI shard (scripts/test-shards.ts; `--runner vitest` for vitest)
+bun run test:shard 2/8                         # one CI shard (scripts/test-shards.ts; `--runner vitest` for vitest)
 bun src/cli.ts validate test/fixtures/example.yaml
 VOLLEYD_HOME=$(mktemp -d) VOLLEY_BROKER_URL=mqtt://127.0.0.1:<private-port> bun src/cli.ts daemon
 ```
 
-**CI run sizes.** A PR runs the newest bun and the 8-task soak; a *full* run (every push to `main` or `release/**`, the nightly, a release PR, or a PR labelled `ci:full`) adds bun 1.3 and the 32-task soak. volleyd's suite runs in four shards balanced by `packages/volleyd/test/timings.json`; after adding or slowing a test file noticeably, refresh it: `bun test --timeout 15000 --reporter=junit --reporter-outfile=/path/to/junit.xml` in `packages/volleyd`, then `bun ../../scripts/test-shards.ts timings /path/to/junit.xml`. A file not in the table yet still runs, in the shard its path hashes to.
+**CI run sizes.** A PR runs the newest bun and the 8-task soak; a *full* run (every push to `main`, every push to `release/**` that is not reused (below), the nightly, a release PR, or a PR labelled `ci:full`) adds bun 1.3 and the 32-task soak. volleyd's suite runs in eight shards balanced by `packages/volleyd/test/timings.json` (volley-desk's in two vitest shards); after adding or slowing a test file noticeably, refresh it: `bun test --timeout 15000 --reporter=junit --reporter-outfile=/path/to/junit.xml` in `packages/volleyd`, then `bun ../../scripts/test-shards.ts timings /path/to/junit.xml`. A file not in the table yet still runs, in the shard its path hashes to. A push to `release/**` that is a PR's squash, whose tree that PR's newest pull_request run recorded (`tested-tree-<tree>` artifact) and passed, runs only `CI reused — this tree passed pull_request run <id>`, every other job `skipped` (`scripts/ci-reuse.ts`); anything else, and every push to `main`, runs everything. A reused push therefore gets neither bun 1.3 nor the 32-task soak (a task PR's run is not a full run); a wave's commits get those at the release PR, which never reuses, and on `main`.
 
 The mosquitto integration test is opt-in because it needs a real broker on `localhost:1883`. Locally: `brew services start mosquitto`. In CI: a docker mosquitto container is started by `.github/workflows/ci.yml` (`test-integration` job). Without `VOLLEY_INTEGRATION=1` the test self-skips.
 
