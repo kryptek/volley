@@ -369,7 +369,7 @@ describe("App: pinning windows (demo mode)", () => {
     // pin the coordinators window in place far away (not so far that even the fit minimum
     // zoom could not frame it), then reload
     fireEvent.click(pinBtn(coords()));
-    dragBar(coords(), -4000, -4000);
+    dragBar(coords(), -3600, -3600);
     baseline.unmount();
     const again = renderApp();
     // the fit includes it: it zooms out, and the window is on screen

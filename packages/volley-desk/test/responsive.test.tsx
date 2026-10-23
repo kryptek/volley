@@ -91,6 +91,29 @@ describe("phone width (< 700 px)", () => {
   });
 });
 
+describe("the planned wave's clusters panel at phone width (#388)", () => {
+  const panel = (c: HTMLElement) =>
+    c.querySelector<HTMLElement>('.world section[aria-label="Clusters"]');
+
+  it("collapses each row to the cluster id and its state", () => {
+    setWidth(390);
+    const { container } = renderApp();
+    const p = panel(container);
+    expect(p).not.toBeNull();
+    expect(p).toHaveClass("clusters--compact");
+    const rows = [...(p as HTMLElement).querySelectorAll("li")];
+    expect(rows.map((r) => r.textContent)).toEqual(["A · planned", "B · hold"]);
+  });
+
+  it("wide screens show the full rows", () => {
+    setWidth(1200);
+    const { container } = renderApp();
+    const p = panel(container) as HTMLElement;
+    expect(p).not.toHaveClass("clusters--compact");
+    expect(p).toHaveTextContent("cap 4");
+  });
+});
+
 let api: ReturnType<typeof useViewport>;
 function Stage({ initial }: { initial: View }) {
   api = useViewport({ initial });

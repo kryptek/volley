@@ -14,10 +14,12 @@ import type {
   DigestPayload,
   Envelope,
   InboxItem,
+  PlanCluster,
   Role,
   Stage,
   WaveCoordinator,
   WaveStatePayload,
+  WaveTask,
 } from "./types";
 
 export function isDemoMode(search: string, env: Record<string, unknown>): boolean {
@@ -910,6 +912,7 @@ export function demoMessages(now: number, agents = AGENTS.length): DeskMessage[]
     ...machines(now),
     ...WAVES.flatMap((w) => [waveState(w, now), ...decision(w, now)]),
     ...demoAutopilot(now),
+    ...demoPlanned(now),
     endedWave(now),
     ...demoDigest(now, DEMO_ENDED_WAVE),
     ...demoInbox(now),
@@ -1150,6 +1153,182 @@ export function demoAutopilot(now = Date.now()): DeskMessage[] {
       decision_id: "autopilot-stage_go-1",
       kind: "stage_go",
       why: "owner_only",
+    }),
+  ];
+}
+
+/** The demo's planned wave (the overlap plan): two clusters, a bundle, a hold, a train, churn. */
+export const PLANNED_WAVE = "overlap";
+
+/**
+ * A wave the overlap planner planned: cluster A (five tasks on `daemon.ts`, one a bundle closing
+ * #310 and #312, capped at 4 in flight with 4 running) and cluster B (held after its churn ran
+ * out, its second task chained after its first); three independent PRs merging as `train-1`
+ * while two more wait in the queue; and the plan's events in the wave's feed.
+ */
+export function demoPlanned(now = Date.now()): DeskMessage[] {
+  const w = PLANNED_WAVE;
+  const daemon = "packages/volleyd/src/daemon.ts";
+  const pr = (n: number) => ({
+    number: n,
+    url: `${DEMO_GITHUB.url}/pull/${n}`,
+    head_sha: `${n}c0ffee`,
+    ci: "green" as const,
+  });
+  const task = (id: string, issue: number, stage: Stage, over: Partial<WaveTask> = {}) => ({
+    id,
+    issue,
+    stage,
+    agents: {},
+    ...over,
+  });
+  const clusters: PlanCluster[] = [
+    {
+      id: "A",
+      tasks: ["i310", "i315", "i317", "i318", "i320"],
+      hot: [
+        { file: daemon, bytes: 11_234, shared_by: ["i310", "i315", "i317", "i318", "i320"] },
+        { file: "packages/volleyd/src/reducer.ts", bytes: 4_100, shared_by: ["i310", "i317"] },
+      ],
+      strategy: { collapse: [["i310"]], cap: 4 },
+      state: "planned",
+      why: `5 tasks share ${daemon}: capped at 4 in flight`,
+    },
+    {
+      id: "B",
+      tasks: ["i330", "i331"],
+      hot: [
+        {
+          file: "packages/volley-desk/src/App.tsx",
+          bytes: 52_000,
+          shared_by: ["i330", "i331"],
+        },
+      ],
+      strategy: { chain: [["i330", "i331"]] },
+      state: "hold",
+      why: "held: 4 churn spawns rebasing App.tsx",
+    },
+  ];
+  const tasks: WaveTask[] = [
+    task("i301", 301, "merge_ready", { pr: pr(341) }),
+    task("i302", 302, "merge_ready", { pr: pr(342) }),
+    task("i303", 303, "merge_ready", { pr: pr(343) }),
+    task("i305", 305, "merge_ready", { pr: pr(345) }),
+    task("i306", 306, "merge_ready", { pr: pr(346) }),
+    task("i310", 310, "implement", { cluster: "A" }),
+    task("i315", 315, "spec_review", { cluster: "A" }),
+    task("i317", 317, "implement", { cluster: "A" }),
+    task("i318", 318, "fixup", { cluster: "A", churn: 3 }),
+    task("i320", 320, "queued", { cluster: "A", why_waiting: "cluster A: 4 in flight (cap 4)" }),
+    task("i330", 330, "queued", { cluster: "B", churn: 4, why_waiting: "cluster B is held" }),
+    task("i331", 331, "queued", { cluster: "B", why_waiting: "cluster B is held" }),
+    task("train-1", 0, "implement", {
+      synthetic: true,
+      pr: pr(340),
+      train: {
+        members: [
+          { task: "i301", pr: 341, head: "341c0ffee" },
+          { task: "i302", pr: 342, head: "342c0ffee" },
+          { task: "i303", pr: 343, head: "343c0ffee" },
+        ],
+      },
+    }),
+  ];
+  const independent = { by: "independent" as const };
+  const inA = (by: "collapse" | "cap") => ({ cluster: "A", by });
+  const payload: WaveStatePayload = {
+    wave: w,
+    version: 1,
+    owner: "lead",
+    repo: "example-org/example-repo",
+    release_branch: `release/2026-10-23-${w}`,
+    github: DEMO_GITHUB,
+    status: "running",
+    tasks,
+    open_decisions: [],
+    gates: ["i301", "i302", "i303", "i305", "i306"],
+    spec: {
+      version: 1,
+      release_branch: `release/2026-10-23-${w}`,
+      model: MODEL,
+      pipeline: PIPELINE,
+      tasks: {
+        i301: { issue: 301, title: "Train member: lease ttl", after: [], plan: independent },
+        i302: { issue: 302, title: "Train member: drain chip", after: [], plan: independent },
+        i303: { issue: 303, title: "Train member: peer doctor", after: [], plan: independent },
+        i305: { issue: 305, title: "Digest wording", after: [], plan: independent },
+        i306: { issue: 306, title: "Inbox filter", after: [], plan: independent },
+        i310: {
+          issue: 310,
+          title: "Daemon admission + spawn budget",
+          after: [],
+          issues: [310, 312],
+          files: [daemon, "packages/volleyd/src/reducer.ts"],
+          footprint: { confidence: "listed" },
+          plan: { ...inA("collapse"), why: "#310 and #312 rewrite the same admission code" },
+        },
+        i315: { issue: 315, title: "Daemon reconnect", after: [], plan: inA("cap") },
+        i317: { issue: 317, title: "Daemon journal fsync", after: [], plan: inA("cap") },
+        i318: { issue: 318, title: "Daemon control ops", after: [], plan: inA("cap") },
+        i320: { issue: 320, title: "Daemon shutdown", after: [], plan: inA("cap") },
+        i330: {
+          issue: 330,
+          title: "Desk window arrange",
+          after: [],
+          plan: { cluster: "B", by: "independent" },
+        },
+        i331: {
+          issue: 331,
+          title: "Desk window pins",
+          after: ["i330"],
+          plan: { cluster: "B", by: "chain", why: "both rewrite App.tsx's window table" },
+        },
+      },
+    },
+    coordinator: { agent_id: "lead", state: "working", last_seen: iso(now) },
+    autopilot: { enabled: true, auto_resolved: 2, escalated: 0, budgets: {} },
+    merge_queue: [
+      { task: "i305", state: "queued", since: iso(now - 2 * 60_000) },
+      { task: "i306", state: "queued", since: iso(now - 60_000) },
+    ],
+    overlap_plan: { clusters },
+    spawns: { productive: 14, churn: 7 },
+    trains: [
+      {
+        id: "train-1",
+        pr: 340,
+        tasks: ["i301", "i302", "i303"],
+        state: "integrating",
+        since: iso(now - 90_000),
+      },
+    ],
+    updated_at: iso(now),
+  };
+  const event = (type: string, seq: number, data: Record<string, unknown>) => ({
+    topic: `volley/_waves/${w}/events`,
+    envelope: env(SUPERVISOR, "_waves/events", type, { wave: w, seq, at: iso(now), data }, now),
+    receivedAt: now,
+  });
+  return [
+    {
+      topic: `volley/_waves/${w}/state`,
+      envelope: env(SUPERVISOR, "_waves/state", "wave_state", payload, now),
+      receivedAt: now,
+    },
+    event("wave_planned", 3, {
+      clusters: clusters.map((c) => (c.id === "B" ? { ...c, state: "planned" } : c)),
+    }),
+    event("cluster_strategy_changed", 61, {
+      cluster: "B",
+      from: "chain",
+      to: "hold",
+      why: "4 churn spawns rebasing App.tsx",
+    }),
+    event("train_started", 72, {
+      train: "train-1",
+      tasks: ["i301", "i302", "i303"],
+      heads: { i301: "341c0ffee", i302: "342c0ffee", i303: "343c0ffee" },
+      release_sha: "5be0c2a1f9d4",
     }),
   ];
 }
