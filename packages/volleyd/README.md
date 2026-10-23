@@ -1951,8 +1951,8 @@ verification opens `unknown_screen`.
 
 ### Relaunch decisions
 
-`hooks_auth_failed`, `mcp_not_registered` and `unknown_screen` offer `relaunch` / `cancel`, and
-the answer is acted on: each carries a pipeline marker naming the run it is about (`{ on:
+`hooks_auth_failed`, `mcp_not_registered` and `unknown_screen` offer `relaunch` / `cancel` /
+`it's running`, and the answer is acted on: each carries a pipeline marker naming the run it is about (`{ on:
 "relaunch", wave, task, role, attempt, agent_id }`; the daemon's `spawn_failed` carries one too).
 An agent whose hooks the broker refused is **paused** as soon as the decision opens (Escape in its
 workspace and a steering "stop: your broker login is being repaired"), so it does no work it
@@ -1965,6 +1965,20 @@ cannot deliver; nobody is asked to edit credentials by hand.
   agent id, a freshly minted login, `<role>-<n+1>` registering as usual.
 - `cancel`: the agent is retired the same way and the task is `blocked`
   (`stage_entered { stage: "blocked", why }`, the decision text as its `why_waiting`).
+- `it's running`: the harmless answer (its hover text, in the decision's `option_help`: "Volley
+  checks the agent is alive, then closes this. Nothing is restarted or stopped."). When the agent
+  is still the role's run and volleyd heard from it after the decision opened, the decision
+  closes and nothing else happens; otherwise it is asked again as
+  `no live agent found for <agent> (last heard <ago | never>). <question>`.
+
+**A relaunch decision closes itself once its agent is alive.** The first sign of life the agent
+sends after the decision opened (by its own `wall_time`, so a retained record replayed after a
+restart does not count) resolves it as `it's running`, `by: "volleyd"`, rationale `started on its
+own`: its registry entry, any progress (a hook heartbeat, a narration), or a `working`,
+`spawning` or `registered` status. For `mcp_not_registered` the hooks were already heard from, so
+only the agent's MCP server counts there: a progress message not from the hooks, its own
+registration (no `model_source`), or a `spawning` / `registered` status. The same rule decides
+whether an `it's running` answer finds the agent live.
 
 ### Unattended coordinator starts
 

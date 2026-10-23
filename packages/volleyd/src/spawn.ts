@@ -21,7 +21,7 @@ import { autoCompactWindowTokens } from "./claude/context-window";
 import type { Ranked } from "./claude/usage";
 import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
-import { waveDecisionId } from "./decisions";
+import { ITS_RUNNING, ITS_RUNNING_HELP, waveDecisionId } from "./decisions";
 import { mintConsentToken, sealLaunchScript } from "./fence";
 import { lockFetches } from "./git-lock";
 import type { Host, WorktreeResult } from "./hosts/host";
@@ -252,6 +252,9 @@ export interface RemoteTrust {
   read: (configDir?: string) => Promise<Record<string, unknown> | null>;
 }
 
+const SPAWN_OPTIONS = ["relaunch", "cancel", ITS_RUNNING];
+const SPAWN_OPTION_HELP = { [ITS_RUNNING]: ITS_RUNNING_HELP };
+
 /** A decision a spawn opens; `id` is the base id (the store may suffix a re-opened one). */
 export interface SpawnDecision {
   kind: DecisionKind;
@@ -259,6 +262,8 @@ export interface SpawnDecision {
   task: TaskId;
   question: string;
   options: string[];
+  /** Hover text for some of `options`, by option. */
+  option_help?: Record<string, string>;
   pointers: { screen?: string };
   /** Extra facts kept on the decision (`repo` for repo_untrusted, `agent_id`, models). */
   data: Record<string, unknown>;
@@ -950,7 +955,8 @@ async function verifyAndRecover(
         decisionIdFor("mcp_not_registered", ctx.req.wave.wave, cur.agentId),
         {
           question: `Needs you: ${cur.agentId}'s hooks registered, but the agent's MCP server is not on this broker — version skew or wrong broker; see ${mcpConfigPath(ctx.worktree)}. Its status and progress will not reach volleyd. Relaunch it?`,
-          options: ["relaunch", "cancel"],
+          options: SPAWN_OPTIONS,
+          option_help: SPAWN_OPTION_HELP,
           data: { agent_id: cur.agentId, pipeline: relaunchMarker(ctx, cur) },
         },
       );
@@ -964,7 +970,8 @@ async function verifyAndRecover(
         decisionIdFor("hooks_auth_failed", ctx.req.wave.wave, cur.agentId),
         {
           question: `Needs you: the broker refused ${cur.agentId}'s hooks (AUTH_FAILED for ${who}); volleyd paused it. relaunch: retire it (its login deleted), mint a fresh login and start the ${ctx.req.role} again as attempt ${cur.attempt + 1}; or cancel (the task is blocked)?`,
-          options: ["relaunch", "cancel"],
+          options: SPAWN_OPTIONS,
+          option_help: SPAWN_OPTION_HELP,
           data: {
             agent_id: cur.agentId,
             username: result.username,
@@ -1005,7 +1012,8 @@ async function verifyAndRecover(
       decisionIdFor("unknown_screen", ctx.req.wave.wave, cur.agentId),
       {
         question: `Needs you: ${cur.agentId} did not start (screen: ${result.screen_class}).${lastOutputNote(last, deps.host.name !== "local")} Look at its terminal?`,
-        options: ["relaunch", "cancel"],
+        options: SPAWN_OPTIONS,
+        option_help: SPAWN_OPTION_HELP,
         screen,
         data: {
           agent_id: cur.agentId,
@@ -1174,10 +1182,12 @@ async function openDecision(
   d: {
     question: string;
     options: string[];
+    option_help?: Record<string, string>;
     screen?: string | undefined;
     data?: Record<string, unknown>;
   },
 ): Promise<string> {
+  const help = d.option_help !== undefined ? { option_help: d.option_help } : {};
   const pointers = d.screen !== undefined ? { screen: d.screen } : {};
   if (ctx.deps.openDecision !== undefined) {
     return ctx.deps.openDecision({
@@ -1186,6 +1196,7 @@ async function openDecision(
       task: ctx.req.task,
       question: d.question,
       options: d.options,
+      ...help,
       pointers,
       data: d.data ?? {},
     });
@@ -1198,6 +1209,7 @@ async function openDecision(
       kind,
       question: d.question,
       options: d.options,
+      ...help,
       pointers,
       opened_at: stampOf(ctx.deps),
       ...d.data,

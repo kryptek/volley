@@ -116,7 +116,12 @@ export function itemForDecision(
     title: `${humanize(d.kind)} · ${where}`,
     question: d.question,
     ...(d.options !== undefined && d.options.length > 0
-      ? { options: d.options.map((label) => ({ label })) }
+      ? {
+          options: d.options.map((label) => {
+            const description = d.option_help?.[label];
+            return { label, ...(description !== undefined ? { description } : {}) };
+          }),
+        }
       : {}),
     allow_other: true,
     pointers: { ...d.pointers } as Record<string, string>,

@@ -45,6 +45,21 @@ export const DECISION_KINDS = [
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
+/** The spawn decisions whose answer relaunches or cancels the run they are about (#402). */
+export const SPAWN_DECISION_KINDS: ReadonlySet<string> = new Set([
+  "unknown_screen",
+  "hooks_auth_failed",
+  "mcp_not_registered",
+]);
+
+/**
+ * A spawn decision's harmless third answer: volleyd checks the agent is live and closes the
+ * decision, touching nothing; volleyd answers it itself once the agent reports in (#402).
+ */
+export const ITS_RUNNING = "it's running";
+export const ITS_RUNNING_HELP =
+  "Volley checks the agent is alive, then closes this. Nothing is restarted or stopped.";
+
 /** What a held decision waits on (#335): a task of its wave, a PR, an issue. */
 export interface HeldOn {
   task?: TaskId;
@@ -75,6 +90,8 @@ export interface DecisionPayload {
   kind: DecisionKind;
   question: string;
   options?: string[];
+  /** Hover text for some of `options`, by option (the Desk shows it on the option's button). */
+  option_help?: Record<string, string>;
   pointers: DecisionPointers;
   opened_at: string;
   resolved?: { answer: string; by: string; at: string };
@@ -127,6 +144,8 @@ export interface DecisionInput {
   question: string;
   pointers?: DecisionPointers;
   options?: string[];
+  /** Hover text for some of `options`, by option. */
+  option_help?: Record<string, string>;
   /** Optional caller-chosen id (idempotent re-open); default `d-<random>`. */
   id?: string;
   /**
@@ -204,6 +223,9 @@ export function openEvent(
         pointers: input.pointers ?? {},
         ...(input.options !== undefined && input.options.length > 0
           ? { options: input.options }
+          : {}),
+        ...(input.option_help !== undefined && Object.keys(input.option_help).length > 0
+          ? { option_help: input.option_help }
           : {}),
         opened_at: now.toISOString(),
         ...(input.park === false ? { parks: false } : {}),
@@ -495,6 +517,7 @@ export function decisionPayload(d: DecisionRecord): DecisionPayload {
         ? `${escalatedPrefix(d.escalated.why)}${d.question}`
         : d.question,
     ...(d.options !== undefined ? { options: d.options } : {}),
+    ...(d.option_help !== undefined ? { option_help: d.option_help } : {}),
     pointers: d.pointers,
     opened_at: d.opened_at,
     ...(d.resolved !== undefined ? { resolved: d.resolved } : {}),

@@ -53,6 +53,11 @@
             },
             "question": { "type": "string", "minLength": 1 },
             "options": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "option_help": {
+              "type": "object",
+              "additionalProperties": { "type": "string", "minLength": 1 },
+              "description": "Hover text for some of the options, keyed by the option's text. The spawn decisions (unknown_screen, hooks_auth_failed, mcp_not_registered) explain their third answer, it's running, here."
+            },
             "pointers": {
               "type": "object",
               "description": "Where the evidence lives. Paths are on the supervisor's host.",

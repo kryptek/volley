@@ -218,10 +218,12 @@ import {
   type Held,
   type HeldOn,
   ID_RE,
+  ITS_RUNNING,
   LOCAL_FILES,
   MACHINE_DOWN_CANCEL,
   MACHINE_DOWN_REPLACE,
   MACHINE_DOWN_WAIT,
+  SPAWN_DECISION_KINDS,
   attentionPayload,
   checkAnswer,
   decisionPayload,
@@ -987,6 +989,15 @@ const waveCompleteDecisionId = (wave: WaveId) => waveDecisionId("wave_complete",
 
 /** Every agent's registry entry: the coordinator names they carry (SPEC §6.2). */
 const REGISTRY_FILTER = "volley/_system/registry/+";
+/** Statuses that show an agent is live: the hooks' `working`, its MCP server's own two. */
+const LIVE_STATUSES: ReadonlySet<string> = new Set(["working", "spawning", "registered"]);
+
+/** The agent a spawn decision is about: kept on it, or on its pipeline marker. */
+function spawnDecisionAgent(d: DecisionRecord): string | undefined {
+  if (typeof d.agent_id === "string") return d.agent_id;
+  const m = (d as { pipeline?: { agent_id?: unknown } }).pipeline;
+  return typeof m?.agent_id === "string" ? m.agent_id : undefined;
+}
 /** The `activity` line a UserPromptSubmit hook publishes for a new prompt (SPEC §4.3). */
 const PROMPT_RECEIVED = "prompt received";
 /** Every agent's progress, in every namespace: the daemon's ONE progress subscription. */
@@ -1142,6 +1153,14 @@ export class Daemon {
   private reconciling: Promise<void> = Promise.resolve();
   /** Epoch ms of the last progress message seen per agent id (heartbeats, for `claim`). */
   private readonly lastSeen = new Map<string, number>();
+  /**
+   * When each agent last showed it is live (epoch ms, its own send time): `any` signal (registry,
+   * progress, a live status) and `mcp`, one only its MCP server sends. A spawn decision about it
+   * closes itself on one sent after it opened (#402).
+   */
+  private readonly heardAt = new Map<string, { any: number; mcp?: number }>();
+  /** Spawn decisions this process is closing (`<wave>/<id>`): asked once per decision. */
+  private readonly closingSpawn = new Set<string>();
   /**
    * When this process started. `lastSeen` is in memory only, so for `claim` every owner counts
    * as seen at least at daemon start: a restart never makes a live owner instantly claimable.
@@ -1900,6 +1919,9 @@ export class Daemon {
     const sent = env !== null ? Date.parse(env.wall_time) : Number.NaN;
     const now = this.now();
     this.lastSeen.set(agent, Number.isNaN(sent) ? now : Math.min(now, sent));
+    // A narration or anything else not from the hooks is the agent's MCP server speaking.
+    const hook = (env?.payload as { source?: unknown } | undefined)?.source === "harness-hook";
+    this.heard(agent, this.lastSeen.get(agent) as number, !hook);
     if (env !== null) this.noteAttention(agent, env);
     if (env !== null) this.noteInboxSignal(agent, env);
     // The topic names the sender (and is what broker ACLs authorise), so it identifies the acker.
@@ -1907,6 +1929,62 @@ export class Daemon {
       this.acks.acked(env.correlation_id, agent);
       this.mailboxHeard(env.correlation_id, agent);
     }
+  }
+
+  /** A message's send time (`wall_time`), never later than now; now when unreadable. */
+  private sentAt(wallTime: string): number {
+    const t = Date.parse(wallTime);
+    return Number.isNaN(t) ? this.now() : Math.min(t, this.now());
+  }
+
+  /**
+   * `agent` showed it is live at `at` (`mcp`: through its MCP server). Each open spawn decision
+   * about it (unknown_screen, hooks_auth_failed, mcp_not_registered) that opened before then is
+   * answered `it's running` by volleyd (#402): the pipeline checks the run and touches nothing.
+   */
+  private heard(agent: string, at: number, mcp: boolean): void {
+    const prev = this.heardAt.get(agent);
+    const last = mcp ? Math.max(at, prev?.mcp ?? at) : prev?.mcp;
+    this.heardAt.set(agent, {
+      any: Math.max(at, prev?.any ?? at),
+      ...(last !== undefined ? { mcp: last } : {}),
+    });
+    for (const [wave, log] of this.waves) {
+      for (const id of log.record.state?.open_decisions ?? []) {
+        const d = log.record.decisions[id];
+        if (d === undefined || d.resolved !== undefined || !SPAWN_DECISION_KINDS.has(d.kind))
+          continue;
+        if (spawnDecisionAgent(d) !== agent) continue;
+        const heard = this.heardFrom(agent, d.kind);
+        if (heard === null || heard < Date.parse(d.opened_at)) continue;
+        const key = `${wave}/${id}`;
+        if (this.closingSpawn.has(key)) continue;
+        this.closingSpawn.add(key);
+        void this.enqueue(async () => {
+          try {
+            const open = this.waves.get(wave)?.record.decisions[id];
+            if (open === undefined || open.resolved !== undefined) return;
+            await this.resolveNow(wave, id, {
+              answer: ITS_RUNNING,
+              by: DAEMON_AGENT_ID,
+              rationale: "started on its own",
+            });
+          } finally {
+            this.closingSpawn.delete(key);
+          }
+        });
+      }
+    }
+  }
+
+  /**
+   * When `agent` last showed a spawn decision of `kind` is moot (epoch ms; null: not since this
+   * process started): for mcp_not_registered only its MCP server counts, the hooks already ran.
+   */
+  private heardFrom(agent: string, kind: string): number | null {
+    const h = this.heardAt.get(agent);
+    if (h === undefined) return null;
+    return kind === "mcp_not_registered" ? (h.mcp ?? null) : h.any;
   }
 
   /**
@@ -2031,6 +2109,12 @@ export class Daemon {
       await this.broker.subscribeStream(REGISTRY_FILTER, (m) => {
         const id = m.topic.split("/")[3] ?? "";
         const entry = m.payload === "" ? null : parseRegistryEntry(m.payload);
+        if (entry?.agent_id === id) {
+          const env = parseEnvelope(m.payload);
+          // The hooks' re-publish carries `model_source`; the MCP server's own registration not.
+          const mcp = (env?.payload as { model_source?: unknown } | undefined)?.model_source;
+          if (env !== null) this.heard(id, this.sentAt(env.wall_time), mcp === undefined);
+        }
         // Recorded on arrival, not on the queue: the status subscription reads it on arrival.
         const before = this.namedEntries.get(id)?.coordinator;
         if (entry?.workspace !== undefined && entry.agent_id === id)
@@ -2537,6 +2621,9 @@ export class Daemon {
             this.ownerChanged(holder);
             if (name !== undefined) void this.enqueue(() => this.rebind(name));
           }
+          // `working` comes from the hooks; `spawning` / `registered` only from its MCP server.
+          if (LIVE_STATUSES.has(env.type))
+            this.heard(holder, this.sentAt(env.wall_time), env.type !== "working");
           // A session that ended answers none of its open pickers or handoffs any more.
           if (OWNER_GONE.has(env.type))
             void this.enqueue(async () => {
@@ -4417,6 +4504,7 @@ export class Daemon {
         task: d.task,
         question: d.question,
         options: d.options,
+        ...(d.option_help !== undefined ? { option_help: d.option_help } : {}),
         pointers: d.pointers,
         id,
       },
@@ -5980,6 +6068,7 @@ export class Daemon {
       spawn: async (task, role, req) => this.pipelineSpawn(wave, task, role, req),
       branchUpdate: () => this.config.effective(wave).branch_update,
       hygiene: () => log.record.state?.hygiene_level ?? "p1",
+      heardFrom: (agentId, kind) => this.heardFrom(agentId, kind),
       steer: (task, role, agentId, text, reason) =>
         this.deliverSteer(
           wave,

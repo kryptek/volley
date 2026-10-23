@@ -5,7 +5,13 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import type { Daemon } from "../src/daemon";
-import { type DecisionRecord, openEvent, resolveEvent } from "../src/decisions";
+import {
+  type DecisionRecord,
+  ITS_RUNNING,
+  ITS_RUNNING_HELP,
+  openEvent,
+  resolveEvent,
+} from "../src/decisions";
 import { agentIdFor } from "../src/identity";
 import { readJournalFile } from "../src/journal";
 import { retainedTopics } from "../src/retire";
@@ -80,7 +86,7 @@ describe("relaunch of a spawn-type decision", () => {
    * w1 (one task, [implement]) on a fake host and a fake clock. The first launch fails as
    * `first` says; every later launch registers normally.
    */
-  async function setup(first: "auth" | "mcp", autopilot = false) {
+  async function setup(first: "auth" | "mcp" | "silent", autopilot = false) {
     env = await makeDaemonEnv();
     const repo = join(realpathSync(env.home), "repo");
     mkdirSync(repo);
@@ -118,6 +124,8 @@ describe("relaunch of a spawn-type decision", () => {
           );
           return;
         }
+        // Nothing at all (a first-run screen holds it): the screen is read, unknown_screen.
+        if (n === 1 && first === "silent") return;
         if (n === 1 && first === "mcp") {
           // The hooks registered; the agent's MCP server never published a status.
           await registry(id);
@@ -186,7 +194,7 @@ describe("relaunch of a spawn-type decision", () => {
         attempt: 1,
         agent_id: A1,
       },
-      options: ["relaunch", "cancel"],
+      options: ["relaunch", "cancel", ITS_RUNNING],
     });
     // No by-hand credential edits are asked of anyone.
     expect(String(opened.data.question)).not.toMatch(/volley auth add-agent|agent\.json/);
@@ -308,6 +316,204 @@ describe("relaunch of a spawn-type decision", () => {
     expect(reaped.data).toEqual({ agent_id: A1, reason: "credentials_deleted" });
     await event((e) => e.type === "agent_registered" && e.data.agent_id === A2);
     await waits.settled();
+  });
+
+  // -------------------------------------------------------------------------------------------
+  // #402: a spawn decision closes itself once its agent is alive; `it's running` is safe.
+  // -------------------------------------------------------------------------------------------
+
+  /** Publish as `id` with a `wall_time` after the decision opened (the daemon's clock). */
+  const live = (
+    id: string,
+    topic: string,
+    type: string,
+    channel: string,
+    payload: unknown,
+    retain = false,
+  ) =>
+    agent.publish(
+      topic,
+      JSON.stringify({
+        ...buildEnvelope({ agentId: id, parentId: "volleyd", channel, type, payload }),
+        wall_time: new Date(clock.now() + 1_000).toISOString(),
+        ...(channel === "_system/registry" ? { namespace: NS } : {}),
+      }),
+      { qos: 1, retain },
+    );
+
+  /** The decision closed by volleyd, and the agent untouched: not retired, not relaunched. */
+  async function closedOnItsOwn(id: string) {
+    const r = await event((e) => e.type === "decision_resolved" && e.data.decision_id === id);
+    expect(r.data).toMatchObject({
+      answer: "it's running",
+      by: "volleyd",
+      rationale: "started on its own",
+    });
+    await waits.settled();
+    const types = journal().map((e) => e.type);
+    expect(types).not.toContain("relaunched");
+    expect(journal().some((e) => e.type === "agent_retired" && e.data.agent_id === A1)).toBe(false);
+    expect(host.launches).toHaveLength(1);
+    expect(supervisedIds()).toContain(A1);
+    const state = daemon.snapshot("w1");
+    expect(state?.open_decisions).toEqual([]);
+    expect(state?.tasks[0]).toMatchObject({ stage: "implement", agents: { implementer: A1 } });
+  }
+
+  it("unknown_screen offers it's running with its hover text, on the retained decision", async () => {
+    const opened = await setup("silent");
+    expect(opened.data).toMatchObject({
+      kind: "unknown_screen",
+      agent_id: A1,
+      options: ["relaunch", "cancel", ITS_RUNNING],
+      option_help: { [ITS_RUNNING]: ITS_RUNNING_HELP },
+    });
+    expect(ITS_RUNNING).toBe("it's running");
+    expect(ITS_RUNNING_HELP).toBe(
+      "Volley checks the agent is alive, then closes this. Nothing is restarted or stopped.",
+    );
+    const raw = await agent.queryRetained(
+      `volley/_waves/w1/decisions/${String(opened.data.decision_id)}`,
+      500,
+    );
+    const payload = JSON.parse(String(raw)).payload;
+    expect(payload.options).toEqual(["relaunch", "cancel", "it's running"]);
+    expect(payload.option_help).toEqual({ "it's running": ITS_RUNNING_HELP });
+  });
+
+  for (const first of ["auth", "mcp"] as const) {
+    it(`${first === "auth" ? "hooks_auth_failed" : "mcp_not_registered"} offers it's running too`, async () => {
+      const opened = await setup(first);
+      expect(opened.data).toMatchObject({
+        options: ["relaunch", "cancel", ITS_RUNNING],
+        option_help: { [ITS_RUNNING]: ITS_RUNNING_HELP },
+      });
+    });
+  }
+
+  const signals: [string, (id: string) => Promise<void>][] = [
+    [
+      "its registry entry",
+      (id) =>
+        live(
+          id,
+          registryTopic(id),
+          "registered",
+          "_system/registry",
+          {
+            capabilities: [],
+            cwd: "/wt",
+            started_at: new Date(clock.now()).toISOString(),
+            model: "claude-opus-5-5",
+            model_source: "harness-hook",
+          },
+          true,
+        ),
+    ],
+    [
+      "a progress heartbeat",
+      (id) =>
+        live(id, buildTopic(NS, id, "progress"), "heartbeat", "progress", {
+          source: "harness-hook",
+          seq: 2,
+          hook_event: "SessionStart",
+        }),
+    ],
+    [
+      "a narration",
+      (id) =>
+        live(id, buildTopic(NS, id, "progress"), "narration", "progress", {
+          progress: 5,
+          msg: "reading ISSUE.md",
+        }),
+    ],
+    [
+      "a working status",
+      (id) =>
+        live(
+          id,
+          buildTopic(NS, id, "status"),
+          "working",
+          "status",
+          { source: "harness-hook" },
+          true,
+        ),
+    ],
+  ];
+
+  for (const [what, signal] of signals) {
+    it(`unknown_screen closes on its own on ${what}: nothing relaunched`, async () => {
+      const opened = await setup("silent");
+      await signal(A1);
+      await closedOnItsOwn(String(opened.data.decision_id));
+    });
+  }
+
+  it("a retained registry entry from before the decision opened does not close it", async () => {
+    const opened = await setup("mcp");
+    // The hooks' registry entry and heartbeat arrived before it opened: still open.
+    await waits.settled();
+    expect(daemon.snapshot("w1")?.open_decisions).toEqual([opened.data.decision_id]);
+  });
+
+  it("mcp_not_registered: hook signals do not close it, the MCP server's narration does", async () => {
+    const opened = await setup("mcp");
+    await signals[0]?.[1](A1);
+    await signals[1]?.[1](A1);
+    await live(A1, buildTopic(NS, A1, "status"), "working", "status", {
+      source: "harness-hook",
+    });
+    await waits.settled();
+    expect(daemon.snapshot("w1")?.open_decisions).toEqual([opened.data.decision_id]);
+    await signals[2]?.[1](A1);
+    await closedOnItsOwn(String(opened.data.decision_id));
+  });
+
+  it("answering it's running on a live agent closes it and touches nothing", async () => {
+    const opened = await setup("silent");
+    // Heard from, but the auto-close is what the answer would do anyway: answer first.
+    const id = String(opened.data.decision_id);
+    await resolve(id, "it's running");
+    const again = await event(
+      (e) =>
+        e.type === "decision_opened" &&
+        e.data.decision_id !== id &&
+        e.data.kind === "unknown_screen",
+    );
+    // Not heard from since it opened: the card stays open (asked again) and says so.
+    expect(String(again.data.question)).toMatch(
+      new RegExp(`^no live agent found for ${A1} \\(last heard never\\)\\. Needs you: `),
+    );
+    expect(again.data).toMatchObject({
+      agent_id: A1,
+      options: ["relaunch", "cancel", ITS_RUNNING],
+    });
+    await waits.settled();
+    expect(host.launches).toHaveLength(1);
+    expect(journal().some((e) => e.type === "agent_retired")).toBe(false);
+    // Now it reports in: the re-asked card closes on its own.
+    await signals[2]?.[1](A1);
+    const r = await event(
+      (e) => e.type === "decision_resolved" && e.data.decision_id === again.data.decision_id,
+    );
+    expect(r.data).toMatchObject({ answer: "it's running", by: "volleyd" });
+  });
+
+  it("mcp_not_registered: it's running asks again while only the hooks are heard from", async () => {
+    const opened = await setup("mcp");
+    const id = String(opened.data.decision_id);
+    // A hook heartbeat after it opened: the session runs, but its MCP server still is not here.
+    await signals[1]?.[1](A1);
+    await waits.settled();
+    expect(daemon.snapshot("w1")?.open_decisions).toEqual([id]);
+    await resolve(id, "It's running");
+    const again = await event(
+      (e) => e.type === "decision_opened" && e.data.decision_id !== id,
+    );
+    expect(String(again.data.question)).toMatch(/^no live agent found for /);
+    expect(journal().some((e) => e.type === "agent_retired" || e.type === "relaunched")).toBe(
+      false,
+    );
   });
 });
 
