@@ -94,6 +94,7 @@ describe("taskActivity (#451)", () => {
     expect(act(t, {}, q("queued"))).toMatchObject({
       kind: "merge",
       label: "waiting for a merge turn",
+      node: "merge turn",
     });
     expect(act(t, {}, q("merging")).label).toBe("merging");
     expect(act(t, {}, q("updating")).label).toBe("updating");
@@ -105,6 +106,7 @@ describe("taskActivity (#451)", () => {
     expect(act(task({ stage: "awaiting_decision" }))).toMatchObject({
       kind: "decision",
       label: "waiting for a decision",
+      node: "decision",
     });
     expect(act(task({ stage: "blocked" })).label).toBe("waiting for a decision");
     expect(act(task({ stage: "done" }))).toMatchObject({ kind: "ended", label: "merged" });

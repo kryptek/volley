@@ -13,7 +13,7 @@ export type Activity = {
   kind: "agent" | "ci" | "merge" | "decision" | "ended" | "stage";
   /** The task line: `waiting for CI · 21/22 jobs`. */
   label: string;
-  /** The graph node (132 px, ~15 chars beside the issue number): same as label except CI, `waiting for CI · 21/22`. */
+  /** The graph node (132 px, ~15 chars beside the issue number): `waiting for CI · 21/22`, `merge turn`, `decision`; else the label. */
   node: string;
 };
 
@@ -40,10 +40,10 @@ const ROLE_ORDER: readonly [Role, string][] = [
   ["implementer", "implementing"],
 ];
 
-const QUEUE_LABEL: Partial<Record<MergeQueueEntry["state"], string>> = {
-  merging: "merging",
-  updating: "updating",
-  queued: "waiting for a merge turn",
+const QUEUE_LABEL: Partial<Record<MergeQueueEntry["state"], [label: string, node: string]>> = {
+  merging: ["merging", "merging"],
+  updating: ["updating", "updating"],
+  queued: ["waiting for a merge turn", "merge turn"],
 };
 
 const same = (kind: Activity["kind"], label: string): Activity => ({ kind, label, node: label });
@@ -65,8 +65,9 @@ export function taskActivity(t: WaveTask, ctx: ActivityCtx): Activity {
   }
   const turn = ctx.queue?.find((e) => e.task === t.id);
   const q = turn && QUEUE_LABEL[turn.state];
-  if (q) return same("merge", q);
+  if (q) return { kind: "merge", label: q[0], node: q[1] };
   const stage = deskStage(t.stage);
-  if (stage === "decision") return same("decision", "waiting for a decision");
+  if (stage === "decision")
+    return { kind: "decision", label: "waiting for a decision", node: "decision" };
   return same("stage", STAGE_LABEL[stage]);
 }
