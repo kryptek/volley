@@ -281,6 +281,39 @@ describe("the Needs you window", () => {
     expect(r.getByRole("button", { name: /Redis/ })).toBeEnabled();
   });
 
+  it("a handoff refused over the screen offers Send to mailbox, which sends that answer (#392)", async () => {
+    const error =
+      "workspace:7 is coord-other's screen, not sess-9f2's; sess-9f2 asked from workspace:8: send the answer to its mailbox, or answer it in its terminal";
+    const control = vi.fn(async () => ({ ok: false, error }));
+    const mailbox = vi.fn();
+    setup({ control, mailbox });
+    const r = within(row(HANDOFF));
+    fireEvent.click(r.getByRole("button", { name: "Other…" }));
+    fireEvent.change(r.getByRole("textbox", { name: "Your answer" }), {
+      target: { value: "only the new ones" },
+    });
+    fireEvent.click(r.getByRole("button", { name: "Send" }));
+    expect(await r.findByText(error)).toBeInTheDocument();
+    fireEvent.click(r.getByRole("button", { name: "Send to mailbox" }));
+    expect(mailbox).toHaveBeenCalledWith(item(HANDOFF), "only the new ones");
+    expect(
+      await r.findByText(/sent to sess-9f2's mailbox · only the new ones/),
+    ).toBeInTheDocument();
+  });
+
+  it("no Send to mailbox for another failure, or without a mailbox", async () => {
+    const control = vi.fn(async () => ({ ok: false, error: "prompt not idle" }));
+    setup({ control, mailbox: vi.fn() });
+    const r = within(row(HANDOFF));
+    fireEvent.click(r.getByRole("button", { name: "Other…" }));
+    fireEvent.change(r.getByRole("textbox", { name: "Your answer" }), {
+      target: { value: "x" },
+    });
+    fireEvent.click(r.getByRole("button", { name: "Send" }));
+    expect(await r.findByText("prompt not idle")).toBeInTheDocument();
+    expect(r.queryByRole("button", { name: "Send to mailbox" })).toBeNull();
+  });
+
   it("an answered item shows StatusMark with where it was answered, and no options", () => {
     const answered: InboxItem = {
       ...item(DECISION),

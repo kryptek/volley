@@ -117,7 +117,14 @@ describe("vol_register", () => {
     await volRegister(state, { capabilities: ["a"], cwd: "/tmp/x", model: "m" });
     const raw = await state.broker.queryRetained("volley/_system/registry/reg-aaaa", 1000);
     const payload = JSON.parse(raw ?? "{}").payload;
-    expect(Object.keys(payload).sort()).toEqual(["capabilities", "cwd", "model", "started_at"]);
+    // `pid` names the publishing process (SPEC §6.2, #392); no `surface` outside cmux.
+    expect(Object.keys(payload).sort()).toEqual([
+      "capabilities",
+      "cwd",
+      "model",
+      "pid",
+      "started_at",
+    ]);
   });
 
   it("publishes a retained status: registered", async () => {
