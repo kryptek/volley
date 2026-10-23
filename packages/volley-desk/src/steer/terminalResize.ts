@@ -1,6 +1,6 @@
 /**
  * The Terminal popout's size, sent to volleyd (`terminal_resize`, SPEC §4.6.6; #403): a paired
- * machine's agent runs in a detached tmux session that is otherwise 200×50 whatever the popout's
+ * machine's agent runs in a detached tmux session that is otherwise 220×50 whatever the popout's
  * size, so the Desk asks volleyd to resize it to the popout's cells while the popout is open,
  * and to put it back to its launch size (`reset: true`) when the popout closes. Fire and forget:
  * a refusal or no answer only leaves the terminal at its size, so it is never surfaced.

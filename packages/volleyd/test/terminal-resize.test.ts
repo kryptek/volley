@@ -5,11 +5,12 @@ import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
-import { buildEnvelope } from "volley-mcp/envelope";
+import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
 import { ControlClient } from "../src/control";
 import type { Daemon } from "../src/daemon";
+import { eventually } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { fakeExec } from "./helpers/fake-exec";
@@ -143,17 +144,40 @@ describe("terminal_resize", () => {
   });
 
   it("a burst is one resize to the last size, and every request gets the answer", async () => {
-    const burst = [
-      resize({ cols: 100, rows: 30 }),
-      resize({ cols: 140, rows: 36 }),
-      resize({ cols: 181, rows: 49 }),
-    ];
+    // One connection, each publish acknowledged before the next: they reach volleyd in order.
+    const desk = new VolleyBroker();
+    await desk.connect({ url: env.broker.url, agentId: "desk-test" });
+    const acks: unknown[] = [];
+    await desk.subscribeStream(buildTopic(NS, "desk-test", "mailbox"), ({ payload }) => {
+      const e = parseEnvelope(payload);
+      if (e?.type === "ack") acks.push(e.payload);
+    });
+    for (const [cols, rows] of [
+      [100, 30],
+      [140, 36],
+      [181, 49],
+    ]) {
+      const req = buildEnvelope({
+        agentId: "desk-test",
+        parentId: null,
+        channel: "mailbox",
+        type: "query",
+        correlationId: `r-${cols}`,
+        payload: { op: "terminal_resize", text: "resize", agent_id: ID, cols, rows, by: "desk" },
+      });
+      await desk.publish(buildTopic(NS, "volleyd", "mailbox"), JSON.stringify(req), {
+        qos: 1,
+        retain: false,
+      });
+    }
     await consumed();
     expect(host.resizes).toEqual([]);
     await clock.advance(DAEMON_DEFAULTS.terminal_resize_coalesce_ms);
-    const answers = await Promise.all(burst);
+    await eventually(() => acks.length === 3);
+    await desk.disconnect();
     expect(host.resizes).toEqual([{ workspace: "workspace:1", size: { cols: 181, rows: 49 } }]);
-    for (const a of answers) expect(a.result).toMatchObject({ resized: true, cols: 181 });
+    for (const a of acks)
+      expect(a).toMatchObject({ ok: true, result: { resized: true, cols: 181 } });
   });
 
   it("refuses an unknown agent and a size out of bounds, resizing nothing", async () => {

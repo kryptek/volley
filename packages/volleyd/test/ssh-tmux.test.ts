@@ -131,7 +131,7 @@ describe("SshTmuxHost", () => {
         "new-session",
         "-d",
         "-x",
-        "200",
+        "220",
         "-y",
         "50",
         "-s",
@@ -177,7 +177,7 @@ describe("SshTmuxHost", () => {
     ).toEqual([
       ["tmux", "resize-window", "-t", "=w1-T1-implementer:", "-x", "180", "-y", "48"],
       ["tmux", "resize-window", "-t", "=w1-T1-implementer:", "-x", "160", "-y", "40"],
-      ["tmux", "resize-window", "-t", "=w2-T9-reviewer:", "-x", "200", "-y", "50"],
+      ["tmux", "resize-window", "-t", "=w2-T9-reviewer:", "-x", "220", "-y", "50"],
     ]);
   });
 

@@ -2206,7 +2206,7 @@ through `base64 -d`. The spawn steps are those of the local host, with these dif
 | Worktree | `git -C <repo> fetch origin <release_branch>` (one fetch into the box's clone at a time, the same lock and ref-lock retry as on this machine: [base ref](#base-ref)), then `worktree add … origin/<release_branch>` on the box; no clone at `repo` → decision `remote_repo_missing` naming the path (an ssh failure is not "no clone": the spawn is refused with `LAUNCH_FAILED` and retried with backoff) |
 | Brief | `.volley/brief-extra.md` is read from the box's clone; the [brief preface](#brief-preface) on volleyd's host |
 | Identity | minted on the daemon's machine; `agent.json` carries `broker_url: mqtt://127.0.0.1:<remote_port>` |
-| Launch | `launch.sh` exports `VOLLEY_HOOKS_DIR=<volley_dir>/packages/volley-hooks` and, for tooling that reads env, `VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE`, `VOLLEY_AGENT_ID` (the identity file still wins); started with `tmux new-session -d -x <tmux_cols> -y <tmux_rows> -s <wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'` (200×50 by default; detached, tmux would make it 80×24). Never `--mcp-config` |
+| Launch | `launch.sh` exports `VOLLEY_HOOKS_DIR=<volley_dir>/packages/volley-hooks` and, for tooling that reads env, `VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE`, `VOLLEY_AGENT_ID` (the identity file still wins); started with `tmux new-session -d -x <tmux_cols> -y <tmux_rows> -s <wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'` (220×50 by default; detached, tmux would make it 80×24). Never `--mcp-config` |
 | Screen | `tmux capture-pane -p -t =<session>: -S-<lines>`; keys via `tmux send-keys`; screen tails publish `source: "tmux"` |
 | Terminal size | `terminal_resize` (the Desk's Terminal popout) runs `tmux resize-window -t =<session>: -x <cols> -y <rows>`; `reset: true` returns the session to its launch size. A local (cmux) agent's terminal is not resized: the op answers `resized: false` |
 | Verify / retire | identical: the hook signals arrive over the tunnel; retire revokes the credentials and clears the topics |
@@ -3521,7 +3521,8 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
   git — the local git policy (worktree add | fetch | rev-parse | … ; worktree remove = CONSENT)
   gh issue view
   tmux new-session -d [-x <n> -y <n>] -s <name> -c <dir> 'bash .volley/launch.sh' (that
-    command only, with the LaunchToken sealed for <dir>; n in 20..500) | new-session -d -s volley-signin-<acct> -c <dir>
+    command only, with the LaunchToken sealed for <dir>; n in 20..500) |
+    new-session -d -s volley-signin-<acct> -c <dir>
     'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
     `sealRemoteSigninScript`) | capture-pane | has-session |
     send-keys -t <t> Enter|Escape (Up|Down|Space: PICKER) | send-keys -t <t> -l -- <TYPED_TEXT> |

@@ -37,7 +37,7 @@ export const CONFIG_DEFAULTS: Tunables = {
   brief_preface_max_bytes: 16384,
   wake_grace_s: 120,
   screen_tail_interval_s: 5,
-  tmux_cols: 200,
+  tmux_cols: 220,
   tmux_rows: 50,
   stop_grace_s: 30,
   dynsec_batch_ms: 50,

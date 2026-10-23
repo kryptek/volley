@@ -160,12 +160,14 @@ import { AGENT_BRANCH } from "./worktree";
  * REMOTE (one step of a RemoteScript; the same DENY list applies first):
  *   git — the local git policy (worktree add | fetch | rev-parse | … ; worktree remove = CONSENT)
  *   gh issue view
- *   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
- *     the LaunchToken sealed for <dir>) | new-session -d -s volley-signin-<acct> -c <dir>
+ *   tmux new-session -d [-x <n> -y <n>] -s <name> -c <dir> 'bash .volley/launch.sh' (that
+ *     command only, with the LaunchToken sealed for <dir>; n in 20..500) |
+ *     new-session -d -s volley-signin-<acct> -c <dir>
  *     'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
  *     `sealRemoteSigninScript`) | capture-pane | has-session |
  *     send-keys -t <t> Enter|Escape (Up|Down|Space: PICKER) | send-keys -t <t> -l -- <TYPED_TEXT> |
- *     show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
+ *     resize-window -t =<session>: -x <n> -y <n> (exactly; n in 20..500: the Desk's Terminal
+ *     popout) | show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
  *     PATH, from printenv, then the server's own dirs) —
  *     kill-session -t volley-signin-<acct> (no consent: a sign-in session holds no agent's
  *     work) — any other kill-session = CONSENT; no other tmux global option

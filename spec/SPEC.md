@@ -516,7 +516,7 @@ A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out
 - `brief_preface_max_bytes` — default 16384 (§4.6.9).
 - `wake_grace_s` — default 120.
 - `screen_tail_interval_s` — default 5 (§4.6.6).
-- `tmux_cols` — 20 to 500, default 200: the columns of a paired machine's tmux session at launch, and again when the client that resized it lets it go (`terminal_resize`, §4.6.6).
+- `tmux_cols` — 20 to 500, default 220: the columns of a paired machine's tmux session at launch, and again when the client that resized it lets it go (`terminal_resize`, §4.6.6).
 - `tmux_rows` — 20 to 500, default 50: the rows of that session, likewise.
 - `stop_grace_s` — default 30.
 - `dynsec_batch_ms` — default 50.
