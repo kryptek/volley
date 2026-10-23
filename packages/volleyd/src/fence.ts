@@ -182,11 +182,12 @@ import { AGENT_BRANCH } from "./worktree";
  *   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
  *     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
  *     (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
- *     rebase.md, decisions.md, retired.json — spelled exactly, directly inside `.volley/`, so no write there is a git
- *     config, HEAD, gitfile or hook, or a case variant of launch.sh), an absolute path ending in
- *     `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh`
- *     (what the tmux session runs) is written whole, never appended, and its content must be
- *     exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS: a
+ *     rebase.md, decisions.md, retired.json — spelled exactly, directly inside `.volley/`, so no
+ *     write there is a git config, HEAD, gitfile or hook, or a case variant of launch.sh), an
+ *     absolute path ending in `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`.
+ *     A `.volley/launch.sh` (what the tmux session runs) is written whole, never appended, and
+ *     its content must be exactly `renderLaunchScript` of valid values for that worktree
+ *     (LAUNCH_SCRIPT_VARS: a
  *     `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the profile block, an
  *     integer in 100000..1000000, never in the env block; its `CLAUDE_CONFIG_DIR`, if any,
  *     exactly the `<home>/.volley/claude/<id>` the registry recorded at sign-in for a signed-in
@@ -1728,7 +1729,10 @@ const VOLLEY_WRITES = new Set([
 /** … and the ones it reads there: those, and the repo's `.volley/brief-extra.md`. */
 const VOLLEY_READS = new Set([...VOLLEY_WRITES, "brief-extra.md"]);
 
-/** True when the remote fence lets volleyd read or write `<dir>/.volley/<name>` (fence-coverage.test.ts). */
+/**
+ * True when the remote fence lets volleyd read or write `<dir>/.volley/<name>`
+ * (fence-coverage.test.ts).
+ */
 export const fenceKnowsVolleyFile = (name: string): boolean => VOLLEY_READS.has(name);
 
 /**

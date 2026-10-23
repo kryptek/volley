@@ -563,9 +563,10 @@ export class SshTmuxHost implements RemoteHost {
   }
 
   /**
-   * A rejected `run` (the step `what`) as no result (sshFailed reports it as an ssh failure, which is retried) —
-   * except a fence denial, which is rethrown as itself: a step the fence refuses is refused on
-   * every retry, so it is permanent and names the denied step, never "no result".
+   * A rejected `run` (the step `what`) as no result, which each caller treats as it treats an
+   * ssh failure (a spawn step reports it through sshFailed and is retried; a best-effort check
+   * gives up) — except a fence denial, rethrown as a permanent FENCE_DENIED SpawnError: a step
+   * the fence refuses is refused on every retry, so it names the denied step, never "no result".
    */
   private noResult(what: string): (e: unknown) => null {
     return (e) => {
@@ -652,7 +653,10 @@ export class SshTmuxHost implements RemoteHost {
     return report;
   }
 
-  /** The tunnel check: something listens on the box's `127.0.0.1:<remote_port>`. */
+  /**
+   * The tunnel check: something listens on the box's `127.0.0.1:<remote_port>`. False when ssh
+   * fails; rejects with FENCE_DENIED only if the fence ever refuses the `nc -z` step.
+   */
   async tunnelUp(): Promise<boolean> {
     const port = String(this.spec.tunnel.remote_port);
     const r = await this.run([{ argv: ["nc", "-z", "127.0.0.1", port] }], {

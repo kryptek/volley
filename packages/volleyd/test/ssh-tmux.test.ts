@@ -790,7 +790,9 @@ describe("SshTmuxHost", () => {
     const r = remote();
     const err = (await r.host.readFile("/src/r/.volley/secret.md").catch((e) => e)) as SpawnError;
     expect(err.message).toMatch(/^FENCE_DENIED: remote cat /);
-    expect(err.message).toContain("/src/r/.volley/secret.md");
+    expect(err.message).toBe(
+      "FENCE_DENIED: remote cat (only the files volleyd reads) (not permitted for volleyd) (read /src/r/.volley/secret.md on dev@box)",
+    );
     expect(err.message).not.toContain("no result");
     expect(err).toMatchObject({ code: "FENCE_DENIED", permanent: true });
     // Nothing reached ssh: the fence refused the script first.

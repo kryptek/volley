@@ -277,6 +277,7 @@ describe("remote allow-list (ssh … bash -s)", () => {
       "/wt/x/.volley/findings.json",
       "/wt/x/.volley/rebase.md",
       "/wt/x/.volley/decisions.md",
+      "/wt/x/.volley/retired.json",
       "/src/r/.git/info/exclude",
       ".claude.json.volleyd.tmp",
     ]) {
