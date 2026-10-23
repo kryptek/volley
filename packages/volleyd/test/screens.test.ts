@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { classifyScreen, modelFromScreen, shellsRunning } from "../src/screens";
+import { classifyScreen, modelFromScreen, screenWords, shellsRunning } from "../src/screens";
 import { FIXTURES } from "./helpers/fake-host";
 
 const screen = (name: string) => readFileSync(join(FIXTURES, "screens", name), "utf-8");
@@ -15,6 +15,9 @@ describe("classifyScreen", () => {
     ["working.txt", "working"],
     ["shell-prompt.txt", "shell_prompt"],
     ["credit-exhausted.txt", "credit_exhausted"],
+    ["first-run-theme.txt", "first_run_theme"],
+    ["first-run-security.txt", "first_run_security"],
+    ["bypass-consent.txt", "bypass_consent"],
   ])("%s → %s", (file, cls) => {
     expect(classifyScreen(screen(file))).toBe(cls);
   });
@@ -28,6 +31,21 @@ describe("classifyScreen", () => {
 
   it("an unreadable screen is empty", () => {
     expect(classifyScreen(null)).toBe("empty");
+  });
+});
+
+describe("screenWords", () => {
+  it("names Claude Code's first-run screens in plain words", () => {
+    expect(screenWords("first_run_theme")).toBe("theme picker");
+    expect(screenWords("first_run_security")).toBe("security notice");
+    expect(screenWords("bypass_consent")).toBe("bypass-permissions confirmation");
+  });
+
+  it("a running session's own text is not a first-run screen", () => {
+    expect(classifyScreen(screen("working.txt"))).toBe("working");
+    expect(
+      classifyScreen("● I picked the dark mode theme for the docs\n⏵⏵ bypass permissions on"),
+    ).toBe("working");
   });
 });
 

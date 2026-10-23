@@ -117,6 +117,12 @@ describe("spawn under a Claude account", () => {
         return { projects: { [env.repo]: { hasTrustDialogAccepted: true } } };
       },
     };
+    // The profile is made ready there, through its machine's host (#400), before the launch.
+    const seeded: string[] = [];
+    env.deps.seedProfile = async (a) => {
+      seeded.push(`${a.id}@${a.machine}:${a.dir}:${env.host.launches.length}`);
+      return { ".claude.json": [], "settings.json": [] };
+    };
     const out = await spawnAgent(
       env.request({ account: { id: "work", dir, machine: "peer-a" } }),
       env.deps,
@@ -125,6 +131,7 @@ describe("spawn under a Claude account", () => {
     const script = readFileSync(join(env.worktree, ".volley", "launch.sh"), "utf-8");
     expect(script).toContain(`export CLAUDE_CONFIG_DIR='${dir}'`);
     expect(prepared).toEqual([]);
+    expect(seeded).toEqual([`work@peer-a:${dir}:0`]);
     expect(reads[0]).toBe(dir);
   });
 

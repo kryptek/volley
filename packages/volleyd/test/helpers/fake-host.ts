@@ -470,7 +470,14 @@ export function fakeSigninBox(o: SigninBoxOptions = {}) {
       if (s.stdout !== undefined) {
         box.files.set(s.stdout, Buffer.from(s.stdin ?? "", "base64").toString("utf-8"));
       } else if (p === "printenv") out += `${home}\n`;
-      else if (p === "tmux" && a[0] === "new-session") {
+      else if (p === "mv") {
+        // the compare-and-swap's last step: the temp file becomes the file
+        const [, from, to] = a as [string, string, string];
+        const f = box.files.get(from);
+        if (f === undefined) return { code: 1 };
+        box.files.set(to, f);
+        box.files.delete(from);
+      } else if (p === "tmux" && a[0] === "new-session") {
         if (o.noTmux === true)
           return { code: 127, stderr: "bash: line 3: tmux: command not found\n" };
         box.session = true;

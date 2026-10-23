@@ -1,4 +1,11 @@
-import { readFileSync, readdirSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import addFormats from "ajv-formats";
@@ -825,3 +832,114 @@ describe("volley peer doctor: Claude usage", () => {
     expect(r.claude_logins[0]?.note).toBe("x [redacted]");
   });
 });
+
+describe("volley peer doctor: account profiles ready to run agents (#400)", () => {
+  /** A profile under `~/.volley/claude/<id>`, signed in, with what `json` and `settings` hold. */
+  const profile = (
+    m: FakePeerMachine,
+    id: string,
+    json: Record<string, unknown>,
+    settings?: Record<string, unknown>,
+  ) => {
+    const dir = join(m.home, ".volley", "claude", id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, ".claude.json"),
+      JSON.stringify({ oauthAccount: { emailAddress: `${id}@example.com` }, ...json }),
+    );
+    if (settings !== undefined) writeFileSync(join(dir, "settings.json"), JSON.stringify(settings));
+    return dir;
+  };
+  const READY = { hasCompletedOnboarding: true, lastOnboardingVersion: "2.0.0", theme: "dark" };
+  const read = (path: string) => JSON.parse(readFileSync(path, "utf-8"));
+
+  it("reports the unready profile's missing keys; --fix --yes writes them and the check passes", async () => {
+    const m = machine();
+    profile(m, "home", READY, { skipDangerousModePermissionPrompt: true });
+    const work = profile(m, "work", { theme: "light" }, { model: "opus" });
+    // a profile that was never signed in is not one agents run in
+    mkdirSync(join(m.home, ".volley", "claude", "spare"), { recursive: true });
+    const before = check(await report(m), "claude.profiles");
+    expect(before?.ok).toBe(false);
+    expect(before?.severity).toBe("warn");
+    expect(before?.detail).toBe(
+      "work: not ready to run agents unattended (.claude.json: hasCompletedOnboarding, lastOnboardingVersion; settings.json: skipDangerousModePermissionPrompt)",
+    );
+    expect(before?.fix).toBe("volley peer doctor --fix");
+
+    const fixed = await run(m, { fix: true, yes: true });
+    expect(fixed.stdout).toContain("→ claude.profiles: volley peer doctor --fix");
+    expect(read(join(work, ".claude.json"))).toEqual({
+      oauthAccount: { emailAddress: "work@example.com" },
+      theme: "light",
+      hasCompletedOnboarding: true,
+      lastOnboardingVersion: "2.0.14",
+    });
+    expect(read(join(work, "settings.json"))).toEqual({
+      model: "opus",
+      skipDangerousModePermissionPrompt: true,
+    });
+    const after = check(await report(m), "claude.profiles");
+    expect(after?.ok).toBe(true);
+    expect(after?.detail).toBe("2 account profiles ready to run agents unattended");
+  });
+
+  it("a profile with a running session is skipped: rerun when they exit", async () => {
+    const m = machine();
+    const work = profile(m, "work", {});
+    const wt = join(m.root, "wt", "w1", "T1-implementer");
+    mkdirSync(join(wt, ".volley"), { recursive: true });
+    writeFileSync(
+      join(wt, ".volley", "launch.sh"),
+      `#!/bin/bash\nexport CLAUDE_CONFIG_DIR='${work}'\nexec claude\n`,
+    );
+    const ps = (argv: readonly string[]) =>
+      argv[0] === "ps"
+        ? Promise.resolve({
+            code: 0,
+            stdout: ` 4242 claude --model x --mcp-config=${wt}/.volley/mcp.json -- go\n`,
+            stderr: "",
+            timedOut: false,
+          })
+        : null;
+    const exec: DoctorDeps["exec"] = (argv, o) => ps(argv) ?? m.exec(argv, o);
+    const c = check(await report2(m, { exec }), "claude.profiles");
+    expect(c?.ok).toBe(false);
+    expect(c?.detail).toContain("work: skipped: 1 session(s) running — rerun when they exit");
+    const fixed = await run(m, { fix: true, yes: true }, { exec });
+    expect(fixed.stdout).not.toContain("→ claude.profiles");
+    expect(read(join(work, ".claude.json")).hasCompletedOnboarding).toBeUndefined();
+  });
+
+  it("--fix takes over a .claude.json lock a crashed session left behind", async () => {
+    const m = machine();
+    const work = profile(m, "work", {});
+    const lock = join(work, ".claude.json.lock");
+    mkdirSync(lock);
+    const old = new Date(Date.now() - 60 * 60 * 1000);
+    utimesSync(lock, old, old);
+    await run(m, { fix: true, yes: true });
+    expect(read(join(work, ".claude.json")).hasCompletedOnboarding).toBe(true);
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("without a claude on PATH, --fix records the default login's lastOnboardingVersion", async () => {
+    const m = machine({
+      tools: { claude: { path: null, sshPath: null } },
+      claudeJson: { lastOnboardingVersion: "2.0.9" },
+    });
+    const work = profile(m, "work", {});
+    await run(m, { fix: true, yes: true });
+    expect(read(join(work, ".claude.json")).lastOnboardingVersion).toBe("2.0.9");
+  });
+
+  it("no account profiles: nothing to check", async () => {
+    const c = check(await report(machine()), "claude.profiles");
+    expect(c).toMatchObject({ ok: true, detail: "no Claude account profiles on this machine" });
+  });
+});
+
+const report2 = async (m: FakePeerMachine, over: Partial<DoctorDeps>) => {
+  const r = await run(m, { json: true }, over);
+  return JSON.parse(r.stdout) as DoctorReport;
+};

@@ -354,6 +354,7 @@ volley peer doctor --sharing '{"skills":"own"}'   # by hand: this profile's shar
 | `hooks` | warn | `packages/volley-hooks/scripts/install.sh --dry-run`, run with `CLAUDE_SETTINGS=~/.claude/settings.json`, `--broker-url` at the tunnel's port and `--namespace` (when not `default`), prints exactly the profile's `settings.json` (what `volley setup` checks locally; `settings.json: own`: left as is) |
 | `mcp` | block (warn when only the broker, the namespace or the registration is off) | `~/.claude.json`'s `mcpServers.volley` runs this checkout's `packages/volley-mcp/src/index.ts` with bun, with `VOLLEY_BROKER_URL` at the tunnel's port and the peer's namespace (`mcp: own`: left as is); so does every other `volley` entry on the machine: each Claude account profile's under the Volley home (`~/.volley/claude/<acct>/.claude.json`, or `$VOLLEY_CLAUDE_DIR`) and the wave repo's `.mcp.json` (`account profile acct-b runs /path/to/old-checkout`; `--fix` re-points the entry at this checkout and keeps its other keys, except a `.mcp.json` git tracks, which is yours to update in the repo); and with `--supervisor-volley-dir` (volleyd's Repair passes the box's `volley_dir`), this checkout is that one (else the row names both and the fix is the doctor in that checkout) |
 | `sharing` | warn | the three rows above follow the sharing modes (SPEC §4.6.11): `--sharing`, else the supervisor's readiness `requirements.sharing`, read through the tunnel, else the defaults; the detail names where they came from and which items are left as is |
+| `claude.profiles` | warn | every signed-in Claude account profile under the Volley home (`~/.volley/claude/<acct>`, or `$VOLLEY_CLAUDE_DIR`) is ready to run agents unattended, past Claude Code's first-run screens: `hasCompletedOnboarding`, `lastOnboardingVersion` and `theme` in its `.claude.json`, `skipDangerousModePermissionPrompt` in its `settings.json` (`work: not ready to run agents unattended (…)` names the missing keys). `--fix` writes them (`lastOnboardingVersion` from `claude --version`; a theme already set and a `settings.json` linked to the primary's are kept); a profile an agent session runs in is `skipped: <n> session(s) running — rerun when they exit`, as Claude Code rewrites its `.claude.json` from memory |
 | `machine.memory`, `machine.disk` | warn | available memory (Linux: `MemAvailable`; macOS: `vm_stat`'s free + inactive + speculative + purgeable pages, as free pages alone under-count), free space where the worktrees go (`<repo>/../.volley-worktrees`) |
 
 Every probe runs a tool by its absolute path (the copy on the estimated ssh `PATH`, else the
@@ -367,7 +368,8 @@ fail.
 v<version> && bun install --frozen-lockfile`) and, with `--clone` and `--origin`, one `git clone`
 into an empty `--repo` (`git clone -- <url> <path>`, prompt-free like `repo.fetch`). A step two
 fixes share runs once, at its last place, so a fresh checkout behind the supervisor gets `fetch`,
-`checkout`, then the install. It prints its plan (on stderr under `--json`) and asks first unless
+`checkout`, then the install. `claude.profiles`' fix writes the missing keys into each
+profile no agent session runs in. It prints its plan (on stderr under `--json`) and asks first unless
 `--yes`, checks everything again afterwards, and a second run reports each of those as "already
 done" (`volley.version` says "not checked" while the supervisor's requirement is unknown).
 Everything else is printed for you to run: installing a tool (`brew install …` on macOS,

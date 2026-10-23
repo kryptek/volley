@@ -83,8 +83,9 @@ import { AGENT_BRANCH } from "./worktree";
  *     launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS), including
  *     `[--strict-mcp-config] --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` (the flag is
  *     left out only under `agent_mcp: inherit`) — or from a
- *     sealed sign-in script (below). The one direct call: `claude auth status` (exactly; it prints
- *     a profile's login state and plan, never a credential)
+ *     sealed sign-in script (below). The direct calls: `claude auth status` (exactly; it prints
+ *     a profile's login state and plan, never a credential) and `claude --version` (exactly: the
+ *     version a seeded profile records as its `lastOnboardingVersion`)
  *   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
  *     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
  *     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
@@ -186,7 +187,8 @@ import { AGENT_BRANCH } from "./worktree";
  *     runs only from a sealed signin.sh) — the one step with an env: `env.CLAUDE_CONFIG_DIR`
  *     only, only `<abs>/.volley/claude/<acct>` (a profile the supervisor created there),
  *     rendered as one single-quoted `CLAUDE_CONFIG_DIR=…` before the argv
- *   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
+ *   cat <path>… — only the files volleyd reads: `.claude.json`, a remote profile's
+ *     `<home>/.volley/claude/<acct>/settings.json`, a path ending in
  *     `/info/exclude`, `<dir>/.volley/<name>` for a VOLLEY_READS name, a worktree's
  *     `<abs dir>/.mcp.json` (no `..` segment), or a sign-in dir's `url`
  *   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
@@ -220,6 +222,9 @@ import { AGENT_BRANCH } from "./worktree";
  *     mv -f .claude.json.volleyd.tmp .claude.json — or, for a profile the supervisor created
  *     there, the same three steps on `<home>/.volley/claude/<acct>/.claude.json` and its
  *     `.claude.json.volleyd.tmp` (absolute paths; the tmp the only other file base64 -d writes)
+ *   the onboarding seed (RemoteHost.seedProfile, #400): in a profile the supervisor created
+ *     there, the trust write's steps on its `.claude.json`, and the same on its `settings.json`
+ *     with `settings.json.volleyd.tmp` (absolute paths); nothing else of the profile
  *   Every other step's stdin is /dev/null, so no step can read the rest of the script.
  *
  * OPTIONS: every git and gh subcommand above has an exact option allow-list (GIT_SPECS and
@@ -1243,8 +1248,9 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
       return cmux(args, opts);
     case "claude":
       // claude starts only from `.volley/launch.sh` or a sealed sign-in script (see the header);
-      // the one direct call reads a profile's login state.
-      return args.length === 2 && args[0] === "auth" && args[1] === "status"
+      // the direct calls read a profile's login state and Claude Code's version.
+      return (args.length === 2 && args[0] === "auth" && args[1] === "status") ||
+        sameArgv(args, ["--version"])
         ? ALLOW
         : deny("claude (only from .volley/launch.sh)");
     case "tmux":
@@ -1770,24 +1776,37 @@ const TRUST_SWAP = ["mv", "-f", REMOTE_CLAUDE_JSON_TMP, REMOTE_CLAUDE_JSON];
 /** The trust write's files in a profile the supervisor created on the box (absolute paths). */
 const profileTrustFile = (path: string, name: string) =>
   path.endsWith(`/${name}`) && isRemoteProfileDir(path.slice(0, -(name.length + 1)));
+/** A remote profile's `settings.json`, which its onboarding seed writes (RemoteHost.seedProfile). */
+export const REMOTE_SETTINGS_JSON = "settings.json";
+export const REMOTE_SETTINGS_JSON_TMP = "settings.json.volleyd.tmp";
+/** The files a remote profile's compare-and-swap writes, each with its temp file. */
+const PROFILE_SWAPS: readonly (readonly [string, string])[] = [
+  [REMOTE_CLAUDE_JSON, REMOTE_CLAUDE_JSON_TMP],
+  [REMOTE_SETTINGS_JSON, REMOTE_SETTINGS_JSON_TMP],
+];
 const isTrustCompare = (argv: readonly string[]) =>
   sameArgv(argv, TRUST_COMPARE) ||
   (sameArgv(argv.slice(0, 3), ["cmp", "-s", "-"]) &&
     argv.length === 4 &&
-    profileTrustFile(argv[3] as string, REMOTE_CLAUDE_JSON));
+    PROFILE_SWAPS.some(([file]) => profileTrustFile(argv[3] as string, file)));
 const isTrustSwap = (argv: readonly string[]) => {
   if (sameArgv(argv, TRUST_SWAP)) return true;
-  const [mv, f, tmp, json] = argv;
+  const [mv, f, tmp, dst] = argv;
   return (
     argv.length === 4 &&
     mv === "mv" &&
     f === "-f" &&
     typeof tmp === "string" &&
-    typeof json === "string" &&
-    profileTrustFile(json, REMOTE_CLAUDE_JSON) &&
-    tmp === `${json.slice(0, -REMOTE_CLAUDE_JSON.length)}${REMOTE_CLAUDE_JSON_TMP}`
+    typeof dst === "string" &&
+    PROFILE_SWAPS.some(
+      ([file, temp]) =>
+        profileTrustFile(dst, file) && tmp === `${dst.slice(0, -file.length)}${temp}`,
+    )
   );
 };
+/** A remote profile's temp file for one of its compare-and-swap writes. */
+const profileSwapTmp = (path: string) =>
+  PROFILE_SWAPS.some(([, temp]) => profileTrustFile(path, temp));
 const sameArgv = (a: readonly string[], b: readonly string[]) =>
   a.length === b.length && a.every((x, i) => x === b[i]);
 
@@ -1834,7 +1853,7 @@ function volleyPath(path: string, names: ReadonlySet<string>, endings: readonly 
 function writablePath(path: string): boolean {
   return (
     path === REMOTE_CLAUDE_JSON_TMP ||
-    profileTrustFile(path, REMOTE_CLAUDE_JSON_TMP) ||
+    profileSwapTmp(path) ||
     volleyPath(path, VOLLEY_WRITES, ["/ISSUE.md", "/info/exclude"])
   );
 }
@@ -1843,6 +1862,7 @@ function writablePath(path: string): boolean {
 function readablePath(path: string): boolean {
   return (
     path === REMOTE_CLAUDE_JSON ||
+    profileTrustFile(path, REMOTE_SETTINGS_JSON) ||
     volleyPath(path, VOLLEY_READS, ["/info/exclude"]) ||
     worktreeMcpJson(path)
   );
@@ -2066,8 +2086,7 @@ function remoteStep(step: RemoteStep, opts: FenceOptions): Verdict {
       step.stdout !== undefined &&
       writablePath(step.stdout) &&
       (step.append !== true ||
-        (step.stdout !== REMOTE_CLAUDE_JSON_TMP &&
-          !profileTrustFile(step.stdout, REMOTE_CLAUDE_JSON_TMP)));
+        (step.stdout !== REMOTE_CLAUDE_JSON_TMP && !profileSwapTmp(step.stdout)));
     if (!write)
       return deny("remote file write (base64 -d of base64 text to a file volleyd writes only)");
     const path = step.stdout ?? "";

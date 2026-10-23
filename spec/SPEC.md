@@ -439,6 +439,7 @@ A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out
 - `claude_signin_done`
 - `claude_signin_failed`
 - `claude_profile_synced`
+- `profile_repaired` — `{ account, machine, keys, agent_id, screen_class }`: an agent stopped on one of Claude Code's first-run screens; the supervisor closed its session, wrote the profile's missing onboarding keys (`keys`, per file) and relaunches it once
 - `agent_account_moved`
 - `relaunched`
 - `ci_pending` — `{ role, sha, checks, jobs?, eta_s?, next_poll_at, pr }`: the task is held for CI on `sha` (§4.6.8)
