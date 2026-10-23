@@ -309,6 +309,7 @@ import {
   MachineHealth,
   type MachineRecord,
   type MachineStatus,
+  carryFailedClones,
   doctorFields,
   foldOwnDoctor,
   machineTopic,
@@ -5249,12 +5250,17 @@ export class Daemon {
     this.localDoctorTried = JSON.stringify(dirs);
     try {
       const runs: { dir: string | null; report: DoctorReport }[] = [];
+      const failed: string[] = [];
       for (const dir of dirs.length > 0 ? dirs : [null]) {
         const report = await doctor(dir, this.localDoctorAbort.signal).catch((e: unknown) => {
           this.log(`own doctor failed: ${e instanceof Error ? e.message : String(e)}`);
           return null;
         });
         if (report !== null) runs.push({ dir, report });
+        else if (dir !== null) {
+          const slug = this.slugOfRepo(dir);
+          if (slug !== undefined) failed.push(slug);
+        }
         if (!this.running) return;
       }
       // A failed run settles the verdict too (on the last report, or none).
@@ -5262,11 +5268,16 @@ export class Daemon {
         for (const { dir, report } of runs) {
           if (dir !== null) this.localOrigins.set(dir, report.repo?.origin ?? null);
         }
-        const folded = foldOwnDoctor(
-          runs.map(({ dir, report }) => ({
-            slug: dir !== null ? this.slugOfRepo(dir) : undefined,
-            report,
-          })),
+        // A clone whose run failed keeps what the last report said of it.
+        const folded = carryFailedClones(
+          foldOwnDoctor(
+            runs.map(({ dir, report }) => ({
+              slug: dir !== null ? this.slugOfRepo(dir) : undefined,
+              report,
+            })),
+          ),
+          this.localReport,
+          failed,
         );
         if (folded !== null) this.localReport = folded;
         this.localDoctorDone = true;

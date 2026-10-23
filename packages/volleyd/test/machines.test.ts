@@ -19,6 +19,7 @@ import {
   MachineHealth,
   type MachineRecord,
   type MachineStatus,
+  carryFailedClones,
   doctorFields,
   foldOwnDoctor,
   machineTopic,
@@ -210,6 +211,27 @@ describe("foldOwnDoctor: the supervisor's own doctor, one run per clone (#436)",
       { slug: "A/A", report: report("/path/to/a2", "github.com/a/a") },
     ]);
     expect(twice?.repos).toHaveLength(1);
+  });
+
+  it("a clone whose run failed keeps its last repos[] entry and checks, not absent", () => {
+    const prior = foldOwnDoctor([
+      { slug: "a/a", report: report("/path/to/a", "github.com/a/a") },
+      { slug: "b/b", report: report("/path/to/b", "github.com/b/b", false) },
+    ]);
+    // b/b's run failed this time: only a/a's report folds.
+    const now = foldOwnDoctor([{ slug: "a/a", report: report("/path/to/a2", "github.com/a/a") }]);
+    const r = carryFailedClones(now, prior, ["b/b"]);
+    expect(r?.repos?.map((x) => [x.slug, x.path])).toEqual([
+      ["a/a", "/path/to/a2"],
+      ["b/b", "/path/to/b"],
+    ]);
+    expect(r?.checks.filter((c) => c.repo === "b/b").map((c) => c.ok)).toEqual([false]);
+    // Two clones in all: no legacy single repo.
+    expect(r?.repo).toBeUndefined();
+    // Nothing failed, or nothing to carry: unchanged.
+    expect(carryFailedClones(now, prior, [])).toBe(now);
+    expect(carryFailedClones(now, undefined, ["b/b"])).toBe(now);
+    expect(carryFailedClones(null, prior, ["b/b"])).toBeNull();
   });
 });
 

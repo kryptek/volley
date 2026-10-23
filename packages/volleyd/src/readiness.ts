@@ -103,7 +103,10 @@ export interface ReadinessInput {
   checkedAt: Date;
 }
 
-/** Where one repository stands on a machine (`ReadinessPayload.repos`). */
+/**
+ * Where one repository stands on a machine (`ReadinessPayload.repos`). `cloning` is reserved for
+ * a clone being made (T3's clone orchestration); `repoVerdicts` never produces it yet.
+ */
 export type RepoState = "ready" | "cloning" | "blocked" | "absent";
 
 /** One `readiness.schema.json` `repos` entry. */

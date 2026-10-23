@@ -2623,7 +2623,8 @@ the running waves' repos change. volleyd is no peer (it has no `peer.json`), so 
 running wave's clone (each clone once, by wave id) and folds the reports into one record: the
 machine-level checks of the first run, and per clone its `repo.*` checks (tagged with the wave's
 `owner/name`) and one `repos[]` entry (`managed: false`; a `--repo` run checks no toolchain, so
-none is held against it). With no wave running it runs once without `--repo`. A clone's `repo.*`
+none is held against it); a clone whose run fails keeps what the last report said of it. With no
+wave running it runs once without `--repo`. A clone's `repo.*`
 checks judge that repository only, never the machine (see Readiness). `versions.volley` is
 volleyd's own version. The name is never a configured host's: `config_set` (or `config.yaml`)
 that would make `fleet.local_name` equal a `hosts.<name>` key, or a host key equal the derived
@@ -2681,8 +2682,8 @@ machine whose clone of the wave's repository is not `ready`, with the line `inel
 clone of <owner/name> (<state>: <first reason>)` (`volleyd run`'s preview and the task's
 `why_waiting` show it); under `local_agents: fallback` such a peer does not keep the supervisor's
 own machine closed to that wave. `requirements` is what a machine's doctor checks against:
-volleyd's version, the bun the running wave's repo asks for (the same repo as the own doctor's;
-`engines.bun`, else `packageManager`) when it names one, and the Claude profile sharing modes of `sharing.yaml`.
+volleyd's version, the bun the first running wave's repo (by wave id) asks for
+(`engines.bun`, else `packageManager`) when it names one, and the Claude profile sharing modes of `sharing.yaml`.
 
 The verdict is re-computed on every tick, on each folded record, on a config change and after a
 probe; it is re-published when anything but `checked_at` changed, and otherwise every

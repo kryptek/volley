@@ -402,3 +402,29 @@ export function foldOwnDoctor(
     ...(repos.length > 0 ? { repos } : {}),
   };
 }
+
+/**
+ * The own doctor's clones whose run failed this time (`failed`, by slug) keep what the last
+ * report said of them (#436): their `repos[]` entry and their `repo.*` checks, so a clone the
+ * machine has is never judged absent over a failed run. The legacy `repo` goes once more than
+ * one clone is held.
+ */
+export function carryFailedClones(
+  folded: DoctorReport | null,
+  prior: DoctorReport | null | undefined,
+  failed: string[],
+): DoctorReport | null {
+  if (folded === null || !prior || failed.length === 0) return folded;
+  const same = (a: string) => (b: string) => a.toLowerCase() === b.toLowerCase();
+  const held = (slug: string) => (folded.repos ?? []).some((r) => same(r.slug)(slug));
+  const carry = failed.filter((slug) => !held(slug));
+  const repos = (prior.repos ?? []).filter((r) => carry.some(same(r.slug)));
+  if (repos.length === 0) return folded;
+  const checks = prior.checks.filter((c) => c.repo !== undefined && carry.some(same(c.repo)));
+  const { repo: _repo, ...rest } = folded;
+  return {
+    ...rest,
+    checks: [...folded.checks, ...checks],
+    repos: [...(folded.repos ?? []), ...repos],
+  };
+}
