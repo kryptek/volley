@@ -3572,16 +3572,15 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     absolute path ending in `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`.
     A `.volley/launch.sh` (what the tmux session runs) is written whole, never appended, and
     its content must be exactly `renderLaunchScript` of valid values for that worktree
-    (LAUNCH_SCRIPT_VARS: a
-    `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the profile block, an
-    integer in 100000..1000000, never in the env block; its `CLAUDE_CONFIG_DIR`, if any,
-    exactly the `<home>/.volley/claude/<id>` the registry recorded at sign-in for a signed-in
-    profile `<id>` of that host — the script's `host`, SshTmuxHost's spec — with the worktree
-    under that host's `worktree_root`); a
-    `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
-    absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/`, with the
-    `agent_mcp_allow` entries copied from the box's own config after it (MCP_CONFIG: shape
-    only, whatever their `command` and whatever `agent_mcp` — trusted as the owner's config); and
+    (LAUNCH_SCRIPT_VARS: a `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the
+    profile block, an integer in 100000..1000000, never in the env block; its `CLAUDE_CONFIG_DIR`,
+    if any, exactly the `<home>/.volley/claude/<id>` the registry recorded at sign-in for a
+    signed-in profile `<id>` of that host — the script's `host`, SshTmuxHost's spec — with the
+    worktree under that host's `worktree_root`); a `.volley/mcp.json` (the MCP server claude
+    starts) likewise exactly `renderMcpConfig` of an absolute `…/packages/volley-mcp/src/index.ts`
+    outside any `.volley/`, with the `agent_mcp_allow` entries copied from the box's own config
+    after it (MCP_CONFIG: shape only, whatever their `command` and whatever `agent_mcp` — trusted
+    as the owner's config); and
     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir, or with the
     profile dir `<same abs>/.volley/claude/<same acct>` (`claude auth login`, never
