@@ -7264,6 +7264,8 @@ export class Daemon {
       mergeMode: () =>
         log.record.wave?.merge ?? (this.config.get("autopilot.merge", wave) as MergeMode),
       mergeRetryMax: () => this.config.get("autopilot.merge_retry_max", wave) as number,
+      mergeTransientBackoffS: () =>
+        this.config.get("autopilot.merge_transient_backoff_s", wave) as number[],
       // --- Self-healing CI (SPEC §4.6.16): an infra incident's wait, GitHub's status page. ---
       incidentWaitMaxS: () => this.config.get("autopilot.incident_wait_max_s", wave) as number,
       ciRateLimitBackoffMs: () => this.config.get("ci_rate_limit_backoff_ms", wave) as number,

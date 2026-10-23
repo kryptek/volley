@@ -85,9 +85,31 @@ describe("autopilot merge classifies a refusal (#311)", () => {
     ])
       expect(await refused(stderr)).toMatchObject({ ok: false, reason: "behind" });
   });
-  it("the base branch moved during the merge → behind", async () => {
+  it("the base branch moved during the merge → transient: GitHub's mergeability race (#445)", async () => {
     const stderr = "GraphQL: Base branch was modified. Review and try the merge again.";
-    expect(await refused(stderr)).toEqual({ ok: false, reason: "behind", stderr });
+    expect(await refused(stderr)).toEqual({ ok: false, reason: "transient", stderr });
+  });
+  it("GitHub's transient refusals, 5xx, rate limits and transport errors → transient (#445)", async () => {
+    for (const stderr of [
+      "GraphQL: Merge already in progress (mergePullRequest)",
+      "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
+      "HTTP 503: Service Unavailable",
+      "GraphQL: Something went wrong while executing your query.",
+      "unexpected end of JSON input",
+      "GraphQL: You have exceeded a secondary rate limit. Please wait a few minutes.",
+      "You have triggered an abuse detection mechanism.",
+      "HTTP 403: API rate limit exceeded for user ID 1.",
+      "Post https://api.github.com/graphql: dial tcp: lookup api.github.com: i/o timeout",
+      "read tcp: connection reset by peer",
+      "net/http: TLS handshake timeout",
+      "Post https://api.github.com/graphql: unexpected EOF",
+    ])
+      expect(await refused(stderr)).toEqual({ ok: false, reason: "transient", stderr });
+  });
+  it("a check whose name reads transient is still checks: quoted names are blanked first (#445)", async () => {
+    const stderr =
+      'GraphQL: Required status check "merge-already-in-progress-scan" is expected. (mergePullRequest)';
+    expect(await refused(stderr)).toEqual({ ok: false, reason: "checks", stderr });
   });
   it("--match-head-commit refused → head_moved", async () => {
     const stderr = "GraphQL: Head sha didn't match expected head sha (match-head-commit)";
@@ -130,8 +152,8 @@ describe("autopilot merge classifies a refusal (#311)", () => {
     expect(await refused("GraphQL: something odd")).toMatchObject({ reason: "unknown" });
   });
   it("the pre-merge read: head moved, retargeted, closed, unreadable", async () => {
-    const pre = async (stdout: string, code = 0) =>
-      mergePr(fakeExec().on(PRE, { stdout, code, stderr: "rate limited" }).exec, token);
+    const pre = async (stdout: string, code = 0, stderr = "rate limited") =>
+      mergePr(fakeExec().on(PRE, { stdout, code, stderr }).exec, token);
     const view = (v: object) =>
       JSON.stringify({ state: "OPEN", headRefOid: H, baseRefName: "release/w", ...v });
     expect(await pre(view({ headRefOid: M }))).toEqual({
@@ -147,6 +169,13 @@ describe("autopilot merge classifies a refusal (#311)", () => {
       stderr: "not merged: PR #7 is still a draft",
     });
     expect(await pre("", 1)).toMatchObject({ reason: "unknown" });
+    // The re-read failing on a GitHub blip is transient too, so it never counts toward
+    // merge_retry_max (#445).
+    expect(await pre("", 1, "HTTP 502: Bad Gateway")).toMatchObject({ reason: "transient" });
+    expect(await pre("", 1, "dial tcp: i/o timeout")).toMatchObject({ reason: "transient" });
+    expect(await pre("", 1, "API rate limit exceeded for user")).toMatchObject({
+      reason: "transient",
+    });
   });
 });
 

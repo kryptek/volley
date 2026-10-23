@@ -28,6 +28,8 @@ const config: ConfigPayload = {
     inbox_answered_ttl_s: 600,
     merge: "auto",
     merge_retry_max: 2,
+    // merge_transient_backoff_s, a list of integers, has no row: it is set in config.yaml.
+    merge_transient_retry_max: 1,
     delete_branch: false,
     reconnect_grace_s: 900,
     incident_wait_max_s: 14_400,

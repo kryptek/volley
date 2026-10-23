@@ -422,6 +422,30 @@ describe("evaluate: the policy table, row by row", () => {
     expect(whyOf(evaluate(d, ctx({}, { "respawn_max:T1/rebase": 1 })))).toBe("budget_exhausted");
   });
 
+  it("merge_refused past the transient ladder: retry, under merge_transient_retry_max per task (#445)", () => {
+    const d = rec("merge_refused", ["retry", "manual", "cancel"], {
+      pipeline: { on: "merge_refused", head: "a".repeat(40) },
+      reason: "transient",
+      transient_attempts: 5,
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("retry");
+    expect("policy" in v && v.policy).toBe("merge_refused/transient");
+    expect("budget" in v && v.budget).toEqual({
+      key: "merge_transient_retry_max:T1",
+      used: 1,
+      max: 1,
+    });
+    expect(whyOf(evaluate(d, ctx({}, { "merge_transient_retry_max:T1": 1 })))).toBe(
+      "budget_exhausted",
+    );
+  });
+
+  it("merge_refused for required checks: still the owner's (no_policy)", () => {
+    const d = rec("merge_refused", ["retry", "manual", "cancel"], { reason: "checks" });
+    expect(whyOf(evaluate(d, ctx()))).toBe("no_policy");
+  });
+
   for (const kind of ["ci_failed", "pr_closed", "remote_repo_missing"] as const) {
     it(`${kind}: no_policy`, () => {
       expect(whyOf(evaluate(rec(kind, ["accept", "cancel"]), ctx()))).toBe("no_policy");

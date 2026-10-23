@@ -172,6 +172,8 @@ export interface HarnessOptions {
   merge?: "auto" | "manual";
   /** `autopilot.merge_retry_max` the driver reads (default: the config default). */
   mergeRetryMax?: number;
+  /** `autopilot.merge_transient_backoff_s` the driver reads (default: the config default). */
+  mergeTransientBackoffS?: number[];
   /** GitHub's status page as the driver reads it (default: none read, i.e. unknown). */
   statusPage?: GithubStatus;
   /** `autopilot.incident_wait_max_s` the driver reads (default: the config default). */
@@ -538,6 +540,9 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     ...(o.hygiene !== undefined ? { hygiene: () => o.hygiene as HygieneLevel } : {}),
     ...(o.merge !== undefined ? { mergeMode: () => o.merge as "auto" | "manual" } : {}),
     ...(o.mergeRetryMax !== undefined ? { mergeRetryMax: () => o.mergeRetryMax as number } : {}),
+    ...(o.mergeTransientBackoffS !== undefined
+      ? { mergeTransientBackoffS: () => o.mergeTransientBackoffS as number[] }
+      : {}),
     ...(o.statusPage !== undefined ? { statusPage: async () => o.statusPage as GithubStatus } : {}),
     ...(o.incidentWaitMaxS !== undefined
       ? { incidentWaitMaxS: () => o.incidentWaitMaxS as number }
