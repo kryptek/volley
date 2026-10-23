@@ -108,7 +108,8 @@
             "remediation_requested",
             "remediation_closed",
             "digest_published",
-            "terminal_status_recovered"
+            "terminal_status_recovered",
+            "pr_marked_ready"
           ]
         },
         "payload": {
@@ -800,6 +801,76 @@
                         "minimum": 0,
                         "description": "How long after the status arrived it was recovered."
                       }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "ci_pending" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["role", "sha", "checks"],
+                    "description": "The supervisor holds the task for CI on sha: its runs completed and all of them (checks), and, when the head's jobs could be read, the same for its jobs with the running and failed job names (jobs) and the estimated seconds left (eta_s, absent without an estimate) (spec section 4.6.8).",
+                    "properties": {
+                      "role": { "type": "string", "minLength": 1 },
+                      "sha": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+                      "checks": {
+                        "type": "object",
+                        "required": ["done", "total"],
+                        "properties": {
+                          "done": { "type": "integer", "minimum": 0 },
+                          "total": { "type": "integer", "minimum": 0 }
+                        }
+                      },
+                      "jobs": {
+                        "type": "object",
+                        "required": ["done", "total", "running", "failed"],
+                        "properties": {
+                          "done": { "type": "integer", "minimum": 0 },
+                          "total": { "type": "integer", "minimum": 0 },
+                          "running": { "type": "array", "items": { "type": "string" } },
+                          "failed": { "type": "array", "items": { "type": "string" } },
+                          "last_done_at": { "type": "string", "format": "date-time" },
+                          "slowest_s": { "type": "integer", "minimum": 0 }
+                        }
+                      },
+                      "eta_s": { "type": "integer", "minimum": 0 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "pr_marked_ready" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["pr", "head", "at"],
+                    "description": "The supervisor marked a draft PR ready for review at head (gh pr ready), so the CI its repository skips on drafts runs; the CI gate on that head then counts only runs created at or after at (spec section 4.6.8).",
+                    "properties": {
+                      "pr": { "type": "integer", "minimum": 1 },
+                      "head": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+                      "at": { "type": "string", "format": "date-time" }
                     }
                   }
                 }

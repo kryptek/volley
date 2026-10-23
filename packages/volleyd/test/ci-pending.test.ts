@@ -5,8 +5,9 @@ import { type Harness, pipelineHarness, sha } from "./helpers/pipeline-harness";
 
 /**
  * After an implementer's done the pipeline holds for CI; that hold is visible: `ci_pending
- * { sha, checks: { done, total }, next_poll_at }` journaled (once per change), the task's
- * why_waiting `CI pending on <sha7> (n/m checks)`, and `pr: { ci: running, checks }` in the
+ * { sha, checks: { done, total }, jobs, eta_s?, next_poll_at }` journaled (once per change), the
+ * task's why_waiting `CI n/m · running: <jobs> · ~k min left` (#415; `CI pending on <sha7> (n/m
+ * runs)` when its jobs cannot be read), and `pr: { ci: running, checks, jobs }` in the
  * state `status --json` prints. CI green → `ci_green`, the hold cleared, reviewers spawn.
  */
 
@@ -45,15 +46,18 @@ describe("CI pending is visible", () => {
       role: "implementer",
       sha: H1,
       checks: { done: 2, total: 5 },
+      jobs: { done: 2, total: 5, running: ["check-3", "check-5"], failed: [] },
       pr: { number: 7 },
     });
+    // No earlier completed run of these workflows in the wave: no estimate.
+    expect(ev?.data).not.toHaveProperty("eta_s");
     // The harness driver's clock starts at 12:00; the next re-check is one ci_poll_ms on.
     expect(ev?.data.next_poll_at).toBe(
       new Date(Date.parse("2026-10-18T12:00:00.000Z") + DAEMON_DEFAULTS.ci_poll_ms).toISOString(),
     );
     const t = h.task();
     expect(t?.stage).toBe("implement");
-    expect(t?.why_waiting).toBe(`CI pending on ${H1.slice(0, 7)} (2/5 checks)`);
+    expect(t?.why_waiting).toBe("CI 2/5 · running: check-3, check-5");
     expect(t?.pr).toMatchObject({
       number: 7,
       head_sha: H1,
@@ -61,9 +65,7 @@ describe("CI pending is visible", () => {
       checks: { done: 2, total: 5 },
     });
     // `volleyd status` prints the same.
-    expect(formatWave(h.record().state as never)).toContain(
-      `CI pending on ${H1.slice(0, 7)} (2/5 checks)`,
-    );
+    expect(formatWave(h.record().state as never)).toContain("CI 2/5 · running: check-3, check-5");
     // The implementer is retired: the hold is the pipeline's, not the agent's.
     expect(h.run("implementer")?.retired).toBe("done");
   });
@@ -81,7 +83,7 @@ describe("CI pending is visible", () => {
     const evs = h.events.filter((e) => e.type === "ci_pending");
     expect(evs).toHaveLength(2);
     expect(evs[1]?.data.checks).toEqual({ done: 3, total: 5 });
-    expect(h.task()?.why_waiting).toBe(`CI pending on ${H1.slice(0, 7)} (3/5 checks)`);
+    expect(h.task()?.why_waiting).toBe("CI 3/5 · running: check-5");
   });
 
   it("a change in a superseded run only journals nothing; its run is not counted", async () => {
@@ -93,7 +95,7 @@ describe("CI pending is visible", () => {
     h.world.ciRuns[H1] = [...twoOfFive, { ...run("completed", "cancelled"), ...stale }];
     await recheck();
     expect(h.events.filter((e) => e.type === "ci_pending")).toHaveLength(1);
-    expect(h.task()?.why_waiting).toBe(`CI pending on ${H1.slice(0, 7)} (2/5 checks)`);
+    expect(h.task()?.why_waiting).toBe("CI 2/5 · running: check-3, check-5");
     expect(h.openDecisions()).toEqual([]);
   });
 
@@ -123,6 +125,53 @@ describe("CI pending is visible", () => {
     expect(h.events.some((e) => e.type === "ci_green")).toBe(false);
     expect(h.task()?.pr).toMatchObject({ number: 7, ci: "red" });
     expect(h.task()?.why_waiting).toContain("awaiting decision");
+  });
+});
+
+describe("a hold counts jobs and estimates what is left (#415)", () => {
+  it("jobs that cannot be read: the runs are counted instead", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    h.world.ciRuns[H1] = twoOfFive;
+    h.world.runJobs = "<html>oops";
+    await h.finish("implementer", { head: H1 });
+    expect(h.events.find((e) => e.type === "ci_pending")?.data).not.toHaveProperty("jobs");
+    expect(h.task()?.why_waiting).toBe(`CI pending on ${H1.slice(0, 7)} (2/5 runs)`);
+  });
+
+  it("a job of the same workflow in an earlier completed run gives the estimate", async () => {
+    h = pipelineHarness({ siblings: { T2: null } });
+    await h.start();
+    const at = (min: number) => h.iso(min * 60_000);
+    const done = (name: string, from: number, to: number) => ({
+      name,
+      status: "completed",
+      conclusion: "success",
+      startedAt: at(from),
+      completedAt: at(to),
+    });
+    // T1's head: CI green; its `e2e` job took 12 min.
+    h.openPr(H1);
+    h.world.ciRuns[H1] = [{ id: 950, workflow: "CI", status: "completed", conclusion: "success" }];
+    h.world.jobs[950] = [done("lint", -20, -19), done("e2e", -20, -8)];
+    await h.finish("implementer", { head: H1 });
+    // T2's head runs the same workflow: its e2e started 4 min ago → ~8 min left.
+    await h.startTask("T2");
+    h.openPr(H2, "T2", 8);
+    h.world.ciRuns[H2] = [{ id: 951, workflow: "CI", status: "in_progress", conclusion: "" }];
+    h.world.jobs[951] = [
+      done("lint", -4, -3),
+      { name: "e2e", status: "in_progress", conclusion: "", startedAt: at(-4) },
+    ];
+    await h.finish("implementer", { head: H2, task: "T2" });
+    const ev = h.events.find((e) => e.type === "ci_pending" && e.task === "T2");
+    expect(ev?.data).toMatchObject({
+      jobs: { done: 1, total: 2, running: ["e2e"], failed: [], slowest_s: 720 },
+      eta_s: 480,
+    });
+    expect(h.task("T2")?.why_waiting).toBe("CI 1/2 · running: e2e · ~8 min left");
+    expect(h.task("T2")?.pr).toMatchObject({ jobs: { done: 1, total: 2 }, eta_s: 480 });
   });
 });
 

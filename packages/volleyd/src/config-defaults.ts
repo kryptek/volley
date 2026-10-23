@@ -238,6 +238,11 @@ export const DAEMON_DEFAULTS = {
   ci_poll_ms: 60_000,
   /** How long a head may have no CI run at all before the pipeline asks the owner. */
   ci_none_grace_ms: 900_000,
+  /**
+   * Clock skew allowed between volleyd and GitHub when a run's `createdAt` is compared with a
+   * draft's ready mark (#408): a run created up to this long before the mark counts as after it.
+   */
+  ready_skew_ms: 30_000,
   /** Failed checks in a row after which the merge turn's holder passes the turn on (SPEC §4.6.17). */
   merge_turn_check_failures_max: 3,
   /** Bound on the advance rounds one pipeline observation may trigger (a guard, never reached). */

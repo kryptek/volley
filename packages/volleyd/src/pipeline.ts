@@ -1,6 +1,7 @@
 import {
   type ArtifactOutcome,
   type ArtifactReport,
+  type CiFacts,
   type CiRun,
   type CiState,
   type GitAt,
@@ -30,6 +31,7 @@ import { type GithubStatus, STATUS_UNKNOWN } from "./autopilot/github-status";
 import { type RefusalReason, isRefusalReason, mergePr } from "./autopilot/merge";
 import { type QueueEntry, nextToMerge, queueOf, refusalEndsTurn } from "./autopilot/merge-queue";
 import type { Role } from "./brief";
+import { type HoldJobs, holdJobs, noteJobTimes } from "./ci-jobs";
 import { systemClock } from "./clock";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "./config-defaults";
 import type { DecisionInput, DecisionRecord } from "./decisions";
@@ -199,6 +201,11 @@ export interface TaskPipeline {
   ci_hold?: CiHold | undefined;
   /** The PR head moved after a gate (`pr_head_moved`), until the owner's answer. */
   moved?: MovedHead | undefined;
+  /**
+   * The draft PR was marked ready at `head` (`pr_marked_ready`, at `at`): CI on that head counts
+   * only from `at` (#408). `green`: that CI passed (the head's verification, or the gate's hold).
+   */
+  ready?: { head: string; at: string; green?: true } | undefined;
   /** A moved head answered `accept`, until the accept's verification moves the task's head there. */
   accepting?: string | undefined;
   /** Every head the task was gated at (evidence head history). */
@@ -220,6 +227,12 @@ export interface TaskPipeline {
   merge_refusal_reason?: RefusalReason | undefined;
   /** Extra attempts the owner granted (`merge_refused` answered `retry`). */
   merge_retries?: number;
+  /**
+   * The gated head whose draft refusal was free (it never used up an attempt) and has not been
+   * marked ready since: another draft refusal there counts, so a `gh pr ready` that keeps failing
+   * reaches the owner (#408).
+   */
+  draft_refused?: string | undefined;
   /** The owner answered a `merge_refused` decision `manual`: a human merges this task. */
   merge_manual?: boolean;
   /** When the task entered the merge queue (`merge_queued`), until it left it (`merge_dequeued`). */
@@ -279,10 +292,16 @@ export interface Directive {
 
 /** A `ci_pending` event's facts: whose head, how far its runs are, when it is checked again. */
 export interface CiHold {
-  /** The role whose pushed head is held; `moved` for a head pushed outside the pipeline. */
-  role: Role | "moved";
+  /**
+   * The role whose pushed head is held; `moved` for a head pushed outside the pipeline; `gate`
+   * for the gated head marked ready at the merge (its full CI, #408).
+   */
+  role: Role | "moved" | "gate";
   sha: string;
   checks: { done: number; total: number };
+  /** The head's jobs, when they could be read (#415): `ci_pending.jobs` and `eta_s`. */
+  jobs?: Omit<HoldJobs, "eta_s">;
+  eta_s?: number;
   next_poll_at: string;
   pr?: { number: number; url: string };
   /**
@@ -322,7 +341,8 @@ export interface PipelineMarker {
     | "pr_closed"
     | "pr_head_moved"
     | "merge_refused"
-    | "merge_conflict";
+    | "merge_conflict"
+    | "ready_ci";
   role?: Role;
   head?: string;
   /** ci_none on a rebase: the files it changed, for the re-review rule if the head is accepted. */
@@ -487,6 +507,9 @@ export function reducePipeline(
         run.accepted = true;
         if (PUBLISHING_ROLES.has(role) && typeof d.head_sha === "string") run.head = d.head_sha;
       }
+      // Verified with the CI that started once the PR was marked ready.
+      if (PUBLISHING_ROLES.has(role) && p.ready !== undefined && d.head_sha === p.ready.head)
+        p.ready.green = true;
       // A review of a head an accepted release merge already moved on from holds at the moved head
       // (reviewHolds): it does not take the task's head back (#270).
       if (typeof d.head_sha === "string" && !(isReviewerRole(role) && acceptedFrom(p, d.head_sha)))
@@ -588,11 +611,13 @@ export function reducePipeline(
       // CI is running (or held) again for the role: its head is not a parked flake any more, and
       // the hold's re-polls must not be skipped for a fixer.
       if (p.remediation?.role === role) p.remediation = undefined;
-      if ((isRole(role) || role === "moved") && typeof d.sha === "string")
+      if ((isRole(role) || role === "moved" || role === "gate") && typeof d.sha === "string")
         p.ci_hold = {
           role,
           sha: d.sha,
           checks: d.checks as CiHold["checks"],
+          ...(d.jobs !== undefined ? { jobs: d.jobs as NonNullable<CiHold["jobs"]> } : {}),
+          ...(typeof d.eta_s === "number" ? { eta_s: d.eta_s } : {}),
           next_poll_at: String(d.next_poll_at),
           ...(d.pr !== undefined ? { pr: d.pr as NonNullable<CiHold["pr"]> } : {}),
           ...(d.reason === "infra_incident"
@@ -606,6 +631,17 @@ export function reducePipeline(
             ? { reason: "ci_unreadable" as const, error: String(d.error ?? "") }
             : {}),
         };
+      break;
+    case "pr_marked_ready":
+      // The first mark at a head holds until its CI passed (a draft again after that is marked
+      // anew): a run created after it is that head's full CI.
+      if (
+        typeof d.head === "string" &&
+        typeof d.at === "string" &&
+        (p.ready?.head !== d.head || p.ready.green === true)
+      )
+        p.ready = { head: d.head, at: d.at };
+      if (p.draft_refused === d.head) p.draft_refused = undefined;
       break;
     case "pr_conflicting": {
       // GitHub runs no CI on the head: no hold. The update step starts from it (never verified).
@@ -639,6 +675,11 @@ export function reducePipeline(
     case "ci_green":
     case "decision_opened":
     case "task_cancelled":
+      // The gated head's full CI passed after it was marked ready: it may merge (with those runs).
+      if (ev.type === "ci_green" && role === "gate" && d.sha === p.ready?.head && p.ready) {
+        p.ready.green = true;
+        if (Array.isArray(d.ci_runs)) p.ci_runs = d.ci_runs as CiRun[];
+      }
       // Settled, or someone is asked about it: the hold is over.
       p.ci_hold = undefined;
       if (ev.type === "task_cancelled") {
@@ -663,6 +704,12 @@ export function reducePipeline(
       if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1)) {
         p.merge_refusals = (p.merge_refusals ?? 0) + 1;
         p.merge_refusal_reason = isRefusalReason(d.reason) ? d.reason : undefined;
+        // A draft is marked ready and merged once its CI passes: it never uses up an attempt,
+        // unless the mark after the last free one never landed.
+        if (d.reason === "draft" && p.draft_refused !== d.head) {
+          p.merge_retries = (p.merge_retries ?? 0) + 1;
+          p.draft_refused = String(d.head);
+        }
       }
       // volleyd's merge ended without merging (refused, or `gh` could not run).
       if (d.alarm === "merge_refused" || (d.alarm === "pipeline_error" && d.check === "merge"))
@@ -878,6 +925,8 @@ export type PipelineEvent =
         | "check_landed"
         | "moved_ci"
         | "merge"
+        | "pr_ready"
+        | "ready_ci"
         | "classify";
       role?: Role;
       agent_id?: string;
@@ -905,6 +954,16 @@ export type PipelineEvent =
   | { kind: "supervisor_merged"; sha: string | null; head: string; by?: string }
   /** Autopilot merging: `gh pr merge` exited non-zero for `head` (moved, checks, protection). */
   | { kind: "merge_refused"; stderr: string; head: string; reason?: RefusalReason }
+  /** `gh pr ready` marked the draft PR ready at `head`; `at` (ISO) was taken before it ran. */
+  | { kind: "pr_readied"; pr: number; head: string; at: string }
+  /** CI on the gated head marked ready (the merge found a draft), from the mark on (#408). */
+  | {
+      kind: "ready_ci";
+      head: string;
+      ci: CiFacts;
+      pr: { number: number; url: string };
+      at: number;
+    }
   /**
    * Self-healing CI (SPEC §4.6.16): the fixer of the flake `test` merged and released the task
    * (`remediation_closed`): it takes the fix from the release branch and is verified again.
@@ -979,6 +1038,10 @@ export type PipelineAction =
   | { kind: "evidence_stale"; from: string; to: string }
   /** The task's PR merged: nudge the wave's running implementers it overlaps (SPEC §4.6.15). */
   | { kind: "merge_nudge" }
+  /** `gh pr ready <pr>`: a draft PR at `head` marked ready, journaled `pr_marked_ready` (#408). */
+  | { kind: "pr_ready"; pr: number; head: string }
+  /** At merge_ready: CI on the gated head marked ready, from the mark on. */
+  | { kind: "check_ready_ci" }
   | { kind: "gate"; check: RebaseCheck; diffstats: Record<string, string> };
 
 /** Stages in which the pipeline does nothing for the task. */
@@ -1032,6 +1095,26 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
       return onSupervisorMerged(v, ev);
     case "merge_refused":
       return onMergeRefused(v, ev);
+    case "pr_readied":
+      // The first mark at a head is the one CI is counted from, until that CI passed.
+      if (
+        v.stage === "done" ||
+        v.stage === "cancelled" ||
+        (v.p.ready?.head === ev.head && v.p.ready.green !== true)
+      )
+        return [];
+      return [
+        {
+          kind: "journal",
+          event: {
+            type: "pr_marked_ready",
+            task: v.task,
+            data: { pr: ev.pr, head: ev.head, at: ev.at },
+          },
+        },
+      ];
+    case "ready_ci":
+      return onReadyCi(v, ev);
     case "fix_landed":
       // Its parked flake is this test's: the next advance takes the fix (landedFix).
       return v.p.remediation?.test === ev.test ? advance(v) : [];
@@ -1345,7 +1428,87 @@ function onMergeRefused(
         },
       },
     },
+    // A draft: marked ready, and merged once the CI that starts then passes (onReadyCi).
+    ...(ev.reason === "draft" ? [{ kind: "pr_ready" as const, pr: pr.number, head: ev.head }] : []),
     { kind: "check_merged" },
+  ];
+}
+
+/** At merge_ready, the gated head was marked ready and its full CI has not passed yet (#408). */
+const readyHeld = (v: PipelineView): boolean =>
+  v.p.ready !== undefined && v.p.ready.head === v.p.head && v.p.ready.green !== true;
+
+/**
+ * CI on the gated head marked ready at the merge (#408). Green: the merge goes on, with those
+ * runs (none at all: the head was accepted without CI at its verification). Running, not started
+ * yet or unreadable: a visible hold. Red: the full CI failed where the draft's passed, so the
+ * owner is asked: fixup, re-verify (fixed or re-run by hand) or cancel.
+ */
+function onReadyCi(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "ready_ci" }>,
+): PipelineAction[] {
+  if (v.stage !== "merge_ready" || !readyHeld(v) || ev.head !== v.p.head) return [];
+  const { ci, head, pr } = ev;
+  // No run yet inside the mark's grace: GitHub has not created the runs the mark starts.
+  const awaited = ci.state === "none" && readyMark(v.p.ready, ev.at).ready !== undefined;
+  if (ci.state === "green" || (ci.state === "none" && !awaited))
+    return [
+      {
+        kind: "journal",
+        event: {
+          type: "ci_green",
+          task: v.task,
+          data: {
+            role: "gate",
+            sha: head,
+            ci_runs: ci.runs,
+            ...(v.p.ci_hold?.role === "gate" ? { from_checks: v.p.ci_hold.checks } : {}),
+          },
+        },
+      },
+    ];
+  if (ci.state !== "red")
+    return holdFor(
+      v,
+      "gate",
+      head,
+      ci,
+      pr,
+      ev.at,
+      ci.state === "unknown" ? (ci.error ?? "") : undefined,
+    );
+  const urls = failedRuns(ci.runs).map((r) => r.url);
+  const jobs = ci.failed_jobs.length > 0 ? ci.failed_jobs.join(", ") : "(no job details)";
+  const why = `CI failed on ${head.slice(0, 12)} (PR #${pr.number}) once the draft was marked ready`;
+  const role = headRole(v.p);
+  return [
+    // Escalated: the task leaves the gate (a decision cannot park a gated task) until answered.
+    {
+      kind: "journal",
+      event: { type: "stage_entered", task: v.task, data: { stage: "blocked", why } },
+    },
+    {
+      kind: "decide",
+      marker: { on: "ready_ci", head, ...(role !== undefined ? { role } : {}) },
+      decision: {
+        kind: "ci_failed",
+        task: v.task,
+        question: `${why}: ${urls.join(" ")} — failed jobs: ${jobs}. The draft's CI skipped these jobs. fixup: a fixup agent at ${head.slice(0, 12)} with the CI result as its directive; re-verify: you fixed or re-ran it; or cancel?`,
+        pointers: { pr: pr.url },
+        options: ["fixup", "re-verify", "cancel"],
+      },
+      data: {
+        head_sha: head,
+        run_urls: urls,
+        failed_jobs: ci.failed_jobs,
+        failing_tests: ci.failing_tests ?? [],
+        log: ci.log ?? "",
+        ci_runs: ci.runs,
+        ...(role !== undefined ? { role } : {}),
+        pr,
+      },
+    },
   ];
 }
 
@@ -1357,7 +1520,11 @@ function mergeRefusedDecision(v: PipelineView): PipelineAction[] {
     0,
     DAEMON_DEFAULTS.decision_output_chars,
   );
-  const why = `GitHub refused to merge PR #${pr.number} at ${head.slice(0, 12)} ${v.p.merge_refusals ?? 0} time(s)${last !== "" ? ` (last: ${last})` : ""}`;
+  // A draft refused again with no mark since the free refusal: `gh pr ready` did not take.
+  const readyFailed = v.p.merge_refusal_reason === "draft" && v.p.draft_refused === head;
+  const readyErr = v.p.alarms?.pipeline_error;
+  const readyWhy = readyErr?.check === "pr_ready" ? `: ${String(readyErr.message ?? "")}` : "";
+  const why = `GitHub refused to merge PR #${pr.number} at ${head.slice(0, 12)} ${v.p.merge_refusals ?? 0} time(s)${last !== "" ? ` (last: ${last})` : ""}${readyFailed ? `; marking the draft ready did not succeed${readyWhy}`.slice(0, DAEMON_DEFAULTS.decision_output_chars) : ""}`;
   return [
     // Escalated: the task leaves the gate (a decision cannot park a gated task) until answered.
     {
@@ -1374,6 +1541,16 @@ function mergeRefusedDecision(v: PipelineView): PipelineAction[] {
         pointers: { pr: pr.url },
         options: ["retry", "manual", "cancel"],
       },
+      // The last refusal's reason: a draft's retry marks it ready first (merge_refused/draft).
+      // `ready_failed`: that retry already failed; the owner answers (merge_refused/draft is out).
+      ...(v.p.merge_refusal_reason !== undefined
+        ? {
+            data: {
+              reason: v.p.merge_refusal_reason,
+              ...(readyFailed ? { ready_failed: true } : {}),
+            },
+          }
+        : {}),
     },
   ];
 }
@@ -1470,7 +1647,7 @@ function onMovedCi(
       v,
       "moved",
       ev.to,
-      ci.runs,
+      { runs: ci.runs },
       ev.pr,
       ev.at,
       ci.state === "unknown" ? (ci.error ?? "") : undefined,
@@ -1833,6 +2010,19 @@ function onVerified(
     ev.report.remote_head !== hold.sha
   )
     return headMovedAtGate(v, ev.report.remote_head, v.p.head ?? hold.sha, hold.pr);
+  // A draft PR is not merge-ready, and its repository may skip CI jobs on drafts: it is marked
+  // ready, and its head held until the CI that starts then settles (#408). A red draft is fixed
+  // first, as any red head.
+  if (
+    ev.report.kind === "ok" &&
+    ev.report.pr.draft === true &&
+    (out.kind === "verified" || out.kind === "ci_pending")
+  )
+    return [
+      ...ciPending(v, ev, ev.report.head),
+      { kind: "pr_ready", pr: ev.report.pr.number, head: ev.report.head },
+      ...retireIfLive(run),
+    ];
   switch (out.kind) {
     case "missing": {
       if (run.retired === undefined && (run.steers.artifacts ?? 0) < 1) {
@@ -2002,32 +2192,45 @@ function ciPending(
   const { number, url } = ev.report.pr;
   const ci = ev.report.ci;
   const unreadable = ci.state === "unknown" ? (ci.error ?? "") : undefined;
-  return holdFor(v, ev.role, head, ci.runs, { number, url }, ev.at, unreadable);
+  return holdFor(v, ev.role, head, ci, { number, url }, ev.at, unreadable);
 }
 
 /**
- * Journal `ci_pending` for `role`'s head (once per change of head, counts or readability; an
- * unreadable answer's error text, which may carry request ids, is not a change).
- * `unreadable`: the runs could not be read (why): the hold says `reason: ci_unreadable`.
+ * Journal `ci_pending` for `role`'s head (once per change of head, counts, running or failed jobs
+ * or readability; an unreadable answer's error text, which may carry request ids, is not a
+ * change, nor is a new estimate alone). `unreadable`: the runs could not be read (why): the hold
+ * says `reason: ci_unreadable`. `ci.hold_jobs` (the driver's): the head's jobs, with `eta_s`.
  */
 function holdFor(
   v: PipelineView,
-  role: Role | "moved",
+  role: Role | "moved" | "gate",
   head: string,
-  runs: CiRun[],
+  ci: Pick<CiFacts, "runs" | "hold_jobs">,
   pr: { number: number; url: string },
   at: number | undefined,
   unreadable?: string,
 ): PipelineAction[] {
+  const { runs } = ci;
   const checks = { done: runs.filter((r) => r.status === "completed").length, total: runs.length };
+  const read = unreadable === undefined ? ci.hold_jobs : undefined;
+  const { eta_s, ...jobs } = read ?? { eta_s: undefined };
   const hold = v.p.ci_hold;
   const reason = unreadable !== undefined ? "ci_unreadable" : undefined;
+  const sameJobs = (a: CiHold["jobs"], b: CiHold["jobs"]) =>
+    a === undefined || b === undefined
+      ? a === b
+      : a.done === b.done &&
+        a.total === b.total &&
+        a.running.join("\n") === b.running.join("\n") &&
+        a.failed.join("\n") === b.failed.join("\n");
   if (
     hold?.role === role &&
     hold.sha === head &&
     hold.reason === reason &&
     (unreadable !== undefined ||
-      (hold.checks.done === checks.done && hold.checks.total === checks.total))
+      (hold.checks.done === checks.done &&
+        hold.checks.total === checks.total &&
+        sameJobs(hold.jobs, read !== undefined ? (jobs as CiHold["jobs"]) : undefined)))
   )
     return [];
   return [
@@ -2040,6 +2243,8 @@ function holdFor(
           role,
           sha: head,
           checks,
+          ...(read !== undefined ? { jobs } : {}),
+          ...(eta_s !== undefined ? { eta_s } : {}),
           ...(at !== undefined
             ? { next_poll_at: new Date(at + DAEMON_DEFAULTS.ci_poll_ms).toISOString() }
             : {}),
@@ -2664,6 +2869,16 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
         },
       ];
     }
+    case "ready_ci":
+      // The gated head's full CI failed once marked ready: a fixup at it, or back to the gate.
+      if (isAnswer(answer, "fixup")) return ciFixup(v, d, m);
+      if (!isAnswer(answer, "re-verify")) return reask();
+      return [
+        {
+          kind: "journal",
+          event: { type: "stage_entered", task: v.task, data: { stage: "merge_ready" } },
+        },
+      ];
     case "merge_ready_invariant": {
       if (!isAnswer(answer, "rereview")) return reask();
       const c = mergeReadyCheck(v.stages, v.p);
@@ -2724,8 +2939,9 @@ function ciFixup(v: PipelineView, d: DecisionRecord, m: PipelineMarker): Pipelin
   const head = m.head;
   const run = role !== undefined ? v.p.runs[role] : undefined;
   // Verified meanwhile (a re-run turned it green), or the role relaunched (a new run): the red
-  // head is no longer the task's.
-  if (role === undefined || head === undefined || run?.accepted === true) return [];
+  // head is no longer the task's. A gated head marked ready (`ready_ci`) was verified as a draft.
+  if (role === undefined || head === undefined) return [];
+  if (m.on === "ready_ci" ? head !== v.p.head : run?.accepted === true) return [];
   if (m.agent_id !== undefined && run?.agent_id !== m.agent_id) return [];
   const strings = (k: string): string[] =>
     Array.isArray(x[k])
@@ -2982,7 +3198,9 @@ function advance(v: PipelineView): PipelineAction[] {
   // A gated task becomes done once its PR merged: by volleyd under `merge: auto` (at its merge
   // turn), else a human.
   if (v.stage === "merge_ready" && p.pr !== undefined)
-    return [...autoMerge(v), { kind: "check_merged" }];
+    return readyHeld(v)
+      ? [{ kind: "check_ready_ci" }, { kind: "check_merged" }]
+      : [...autoMerge(v), { kind: "check_merged" }];
   if (IDLE.has(v.stage) || p.step < 0) return [];
   // The flake's fixer merged: update the branch from the release branch first.
   if (p.remediation?.landed === true) return landedFix(v, p.remediation);
@@ -3428,6 +3646,21 @@ function askKey(task: TaskId, m: PipelineMarker | undefined): string | undefined
   return m?.on === "merge_ready_invariant" ? `${task}/merge_ready_invariant/${m.head}` : undefined;
 }
 
+/**
+ * The mark CI on a head marked ready is counted from (verifyArtifacts `ready`), until
+ * `ci_none_grace_ms` passed: a repository whose workflows never run on `ready_for_review` then
+ * gates on the head's latest runs, as for any PR. None once that CI passed.
+ */
+function readyMark(
+  r: TaskPipeline["ready"],
+  now: number,
+): { ready?: { head: string; at: string } } {
+  if (r === undefined || r.green === true) return {};
+  return now - Date.parse(r.at) < DAEMON_DEFAULTS.ci_none_grace_ms
+    ? { ready: { head: r.head, at: r.at } }
+    : {};
+}
+
 /** Executes the interpreter's actions for one wave. Call it from one serial queue. */
 export class PipelineDriver {
   /** Last level-triggered re-check per `<task>/<what>` (verify, check_rebase, check_merged). */
@@ -3441,6 +3674,11 @@ export class PipelineDriver {
    * whose probe met it, which carries the `github_rate_limited` alarm until a probe succeeds.
    */
   private readonly ciBackoff = new Map<string, { retry_at: number; task: TaskId }>();
+  /**
+   * The last duration in seconds of each `<workflow>/<job>` in a completed run of this wave
+   * (process-local: after a restart there is no estimate until a run completes again), #415.
+   */
+  private readonly jobSecs = new Map<string, number>();
   /** Checks whose I/O is running beside the queue, by `<task>/<what>[/<agent>]`; one per key. */
   private readonly inflight = new Set<string>();
   /** Every check until its result has been folded back in (what `settled` waits for). */
@@ -4013,6 +4251,20 @@ export class PipelineDriver {
           );
           break;
         }
+        case "pr_ready": {
+          // Beside the queue; a draft still reported is marked again at the next check.
+          const key = `${task}/pr_ready`;
+          this.beside(task, key, { what: "pr_ready" }, () => this.markReady(task, a.pr, a.head));
+          break;
+        }
+        case "check_ready_ci": {
+          const v = this.view(task);
+          const key = `${task}/ready_ci`;
+          if (v?.p.ready === undefined || this.inflight.has(key) || this.ciBackedOff()) break;
+          if (!eventDriven && !this.due(key)) break;
+          this.beside(task, key, { what: "ready_ci" }, () => this.readyCheck(v));
+          break;
+        }
         case "watch_head": {
           const v = this.view(task);
           const key = `${task}/watch_head`;
@@ -4084,8 +4336,15 @@ export class PipelineDriver {
    */
   private async noteCi(
     task: TaskId,
-    ci: { state: CiState; error?: string; rate_limited?: RateLimited },
+    ci: { state: CiState; error?: string; rate_limited?: RateLimited } & Partial<
+      Pick<CiFacts, "jobs" | "hold_jobs">
+    >,
   ): Promise<void> {
+    // A head's jobs: a completed run's durations are kept for the next run's estimate.
+    if (ci.jobs !== undefined) {
+      noteJobTimes(this.jobSecs, ci.jobs);
+      ci.hold_jobs = holdJobs(ci.jobs, this.jobSecs, this.now());
+    }
     const repo = this.repoKey();
     const b = this.ciBackoff.get(repo);
     if (ci.rate_limited !== undefined) {
@@ -4203,6 +4462,7 @@ export class PipelineDriver {
       ...(since !== undefined ? { since } : {}),
       ...(run.adopt === true ? { adopt: true } : {}),
       ...(via !== undefined ? { runs_via: via } : {}),
+      ...readyMark(v.p.ready, this.now()),
     });
     if (report.kind === "ok") await this.noteCi(task, report.ci);
     // A merge-mode update moves the branch forward: a head that does not descend from the step's
@@ -4622,6 +4882,29 @@ export class PipelineDriver {
     const view = r.code === 0 ? parsePrView(r.stdout) : null;
     if (view?.state !== "OPEN" || typeof view.headRefOid !== "string") return null;
     return { kind: "pr_head", head: view.headRefOid, expected: v.p.head as string };
+  }
+
+  /**
+   * Beside the queue: `gh pr ready <pr>` from the repo root (ghExec), so the CI its repository
+   * skips on drafts runs (#408). The time is taken first: a run the mark starts is never before it.
+   */
+  private async markReady(task: TaskId, pr: number, head: string): Promise<PipelineEvent> {
+    const at = new Date(this.now()).toISOString();
+    const r = await this.ghExec(task)(["gh", "pr", "ready", String(pr)]);
+    if (r.code !== 0) throw new Error(`gh pr ready ${pr} failed: ${(r.stderr || r.stdout).trim()}`);
+    return { kind: "pr_readied", pr, head, at };
+  }
+
+  /** Beside the queue, at merge_ready: CI on the gated head marked ready, from the mark on. */
+  private async readyCheck(v: PipelineView): Promise<PipelineEvent | null> {
+    const { ready, pr, head } = v.p;
+    const cwd = this.ghCwd() ?? this.headWorktree(v.p);
+    if (ready === undefined || pr === undefined || head !== ready.head || cwd === undefined)
+      return null;
+    const at = readyMark(ready, this.now()).ready?.at;
+    const ci = await redHeadCi(this.ghExec(v.task), cwd, head, this.runsVia(), at);
+    await this.noteCi(v.task, ci);
+    return { kind: "ready_ci", head, ci, pr, at: this.now() };
   }
 
   /** Beside the queue: CI on a moved head, its failing tests, and the diff from the gated head. */
