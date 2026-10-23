@@ -79,7 +79,13 @@ export type Stage =
   | "cancelled";
 
 /** Pipeline roles as they appear in `tasks[].agents` (a test keeps them in step with the schema). */
-export type Role = "implementer" | "spec_reviewer" | "quality_reviewer" | "fixup" | "rebase";
+export type Role =
+  | "implementer"
+  | "spec_reviewer"
+  | "quality_reviewer"
+  | "fixup"
+  | "rebase"
+  | "integrator";
 
 export const ROLES: readonly Role[] = [
   "implementer",
@@ -87,6 +93,7 @@ export const ROLES: readonly Role[] = [
   "quality_reviewer",
   "fixup",
   "rebase",
+  "integrator",
 ];
 
 export interface WaveTask {

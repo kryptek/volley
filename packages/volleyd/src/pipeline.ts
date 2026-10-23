@@ -13,6 +13,7 @@ import {
   type ReleaseMerge,
   type RunsVia,
   type SupersededRun,
+  type TrainHeadFacts,
   artifactOutcome,
   checkRebase,
   ciReport,
@@ -23,14 +24,18 @@ import {
   probeLanded,
   probeMovedHead,
   probeReleaseCi,
+  probeReleaseTip,
+  probeTrainHead,
   redHeadCi,
   verifyArtifacts,
   verifyOperatorMerge,
 } from "./artifacts";
+import { plannedName } from "./autopilot/churn";
 import { type ClassifyResult, classify } from "./autopilot/ci-classify";
 import { type GithubStatus, STATUS_UNKNOWN } from "./autopilot/github-status";
-import { type RefusalReason, isRefusalReason, mergePr } from "./autopilot/merge";
+import { type RefusalReason, isRefusalReason, mergePr, mergeTrain } from "./autopilot/merge";
 import { type QueueEntry, nextToMerge, queueOf, refusalEndsTurn } from "./autopilot/merge-queue";
+import { type Train, formTrain, trainBranch, trainTitle } from "./autopilot/merge-train";
 import type { Role } from "./brief";
 import { type HoldJobs, holdJobs, noteJobTimes } from "./ci-jobs";
 import { systemClock } from "./clock";
@@ -43,7 +48,7 @@ import {
 } from "./decisions";
 import { type EvidenceInput, markEvidenceStale, writeEvidence } from "./evidence";
 import type { ExecFn, ExecOptions, ExecResult } from "./exec";
-import { type MergeToken, mintMergeToken } from "./fence";
+import { type MergeToken, type TrainToken, mintMergeToken, mintTrainToken } from "./fence";
 import { type RunningImplementer, nudgeTargets, nudgeText, parsePrFiles } from "./overlap";
 import { isRespawnAnswer } from "./recovery";
 import type { WaveRecord } from "./reducer";
@@ -70,6 +75,7 @@ import type {
   NewEvent,
   NudgeOnMerge,
   PipelineStage,
+  PlanCluster,
   TaskId,
   TaskStage,
   WaveId,
@@ -93,9 +99,11 @@ import { expandHome } from "./worktree";
  *     control ops or shutdown.
  *
  * volleyd never pushes or re-runs CI, and merges only under autopilot merging (`merge: auto`,
- * SPEC §4.6.17): the one `merge` action, with the gate's MergeToken, runs exactly
- * `gh pr merge <n> --squash --match-head-commit <gated head>` (src/autopilot/merge.ts). Every
- * other command the driver runs is a read-only verb of artifacts.ts (test/no-merge.test.ts).
+ * SPEC §4.6.17): the `merge` action, with the gate's MergeToken, runs exactly
+ * `gh pr merge <n> --squash --match-head-commit <gated head>`, and a merge train's
+ * `merge_train`, with its TrainToken, `gh pr merge <n> --merge --match-head-commit <head>`
+ * (src/autopilot/merge.ts; SPEC §4.6.23). Every other command the driver runs is a read-only
+ * verb of artifacts.ts (test/no-merge.test.ts).
  */
 
 /** Stage → the role that runs it. */
@@ -115,10 +123,45 @@ const ROLE_STAGE: Record<Role, TaskStage> = {
   rebase: "fixup",
   // The release train's role (SPEC §4.6.19): never in a task's pipeline (isRole excludes it).
   release: "done",
+  // A merge train's (SPEC §4.6.23): its synthetic task's implement step.
+  integrator: "implement",
 };
 
 /** Roles whose `done` claims pushed commits on the PR branch (checked by artifacts.ts). */
-const PUBLISHING_ROLES: ReadonlySet<Role> = new Set(["implementer", "fixup", "rebase"]);
+const PUBLISHING_ROLES: ReadonlySet<Role> = new Set([
+  "implementer",
+  "fixup",
+  "rebase",
+  "integrator",
+]);
+
+/**
+ * A merge train integrator's `result` (`type: "integrate"`): the member PRs it merged, the
+ * conflicts it resolved and every file those resolutions changed (SPEC §4.6.23).
+ */
+export interface IntegrateResult {
+  merged: number[];
+  conflicts: { pr: number; files: string[] }[];
+  touched: string[];
+}
+
+/** An integrator's retained `result` payload, or null when it is not an integrate result. */
+export function parseIntegrateResult(payload: unknown): IntegrateResult | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const x = payload as Record<string, unknown>;
+  const nums = (v: unknown) =>
+    Array.isArray(v) && v.every((n) => Number.isSafeInteger(n) && (n as number) > 0);
+  const strs = (v: unknown) => Array.isArray(v) && v.every((f) => typeof f === "string");
+  const conflicts = x.conflicts ?? [];
+  if (!nums(x.merged) || !strs(x.touched ?? []) || !Array.isArray(conflicts)) return null;
+  const cs: IntegrateResult["conflicts"] = [];
+  for (const c of conflicts as unknown[]) {
+    const y = (typeof c === "object" && c !== null ? c : {}) as Record<string, unknown>;
+    if (!Number.isSafeInteger(y.pr) || !strs(y.files ?? [])) return null;
+    cs.push({ pr: y.pr as number, files: (y.files ?? []) as string[] });
+  }
+  return { merged: x.merged as number[], conflicts: cs, touched: (x.touched ?? []) as string[] };
+}
 
 /** One role's agent in the current step. */
 export interface RoleRun {
@@ -265,6 +308,16 @@ export interface TaskPipeline {
    * one `closes` steer (`artifact_verified { closes_missing }`): the fixup's findings name them.
    */
   closes_missing?: number[] | undefined;
+  /** A merge train's task (SPEC §4.6.23): the release commit its integration starts at. */
+  train_release_sha?: string;
+  /** A merge train's task: its integrator's verified result. */
+  integrate?: IntegrateResult | undefined;
+  /** A merge train's task: the members its head lacked, for the fixup that merges them. */
+  train_missing?: TaskId[] | undefined;
+  /** CI fixups the task ran (a fixup step entered with a red directive). */
+  ci_fixups?: number;
+  /** A member dropped from a merge train for its conflict: it takes an ordinary turn. */
+  train_dropped?: true;
 }
 
 /** The transient refusals of one gated head (TaskPipeline.merge_transient). */
@@ -433,11 +486,11 @@ export const emptyPipeline = (): TaskPipeline => ({
 const isRole = (r: unknown): r is Role =>
   typeof r === "string" && r !== "release" && r in ROLE_STAGE;
 
-/** The pipeline at its implement step, keeping the implementer's run. */
-function enterImplement(p: TaskPipeline, stages: PipelineStage[][]): void {
+/** The pipeline at its implement step (a merge train's: its integrator), keeping the run. */
+function enterImplement(p: TaskPipeline, stages: PipelineStage[][], train = false): void {
   const i = stages.findIndex((g) => g.includes("implement"));
   p.step = i >= 0 ? i : 0;
-  p.roles = ["implementer"];
+  p.roles = [train ? "integrator" : "implementer"];
   p.rebasing = false;
   p.branch_update = undefined;
   p.conflicting = undefined;
@@ -451,11 +504,16 @@ function enterImplement(p: TaskPipeline, stages: PipelineStage[][]): void {
 export function reducePipeline(
   p: TaskPipeline,
   ev: JournalEvent,
-  ctx: { stages: PipelineStage[][]; decision?: DecisionRecord },
+  ctx: { stages: PipelineStage[][]; decision?: DecisionRecord; train?: { branch: string } },
 ): TaskPipeline {
   const d = ev.data;
   const role = d.role;
+  const train = ctx.train !== undefined;
   switch (ev.type) {
+    case "task_queued":
+      // A merge train's PR is opened from its integration branch (SPEC §4.6.23).
+      if (ctx.train !== undefined) p.branch = ctx.train.branch;
+      break;
     case "agent_spawned":
       if (!isRole(role)) break;
       p.runs[role] = {
@@ -470,7 +528,8 @@ export function reducePipeline(
       // The implementer launched but the pipeline never started: spawn.ts journals
       // stage_entered { implement } only on attempt 1, so a task whose first launches failed
       // starts here (#409), as that event would have started it.
-      if (role === "implementer" && p.step < 0) enterImplement(p, ctx.stages);
+      if ((role === "implementer" || role === "integrator") && p.step < 0)
+        enterImplement(p, ctx.stages, train);
       break;
     case "stage_entered":
       p.why = typeof d.why === "string" ? d.why : undefined;
@@ -491,12 +550,22 @@ export function reducePipeline(
         p.conflicting = p.rebasing && d.conflicting === true ? true : undefined;
         p.rereview = [];
         if (typeof d.review_round === "number") p.round = d.review_round;
-        if (typeof d.directive === "object" && d.directive !== null) ciFixupEntered(p, d);
+        if (typeof d.directive === "object" && d.directive !== null) {
+          ciFixupEntered(p, d);
+          if ((d.directive as Directive).ci === "red") p.ci_fixups = (p.ci_fixups ?? 0) + 1;
+        }
+        // A merge train's head that lacks members: the fixup merges them, from that head.
+        p.train_missing = Array.isArray(d.train_missing)
+          ? (d.train_missing as unknown[]).filter((t): t is TaskId => typeof t === "string")
+          : undefined;
+        if (p.train_missing !== undefined && typeof d.head === "string") p.head = d.head;
+        if (p.train_missing !== undefined && p.pr === undefined && typeof d.pr === "object")
+          p.pr = d.pr as { number: number; url: string };
         for (const r of p.roles) delete p.runs[r];
         p.remediation = undefined;
       } else if (d.stage === "implement") {
         // Journaled by the spawn itself, after its agent_spawned: keep that run.
-        enterImplement(p, ctx.stages);
+        enterImplement(p, ctx.stages, train);
       }
       break;
     case "merge_queued":
@@ -546,6 +615,8 @@ export function reducePipeline(
         p.gated_behind = typeof d.behind === "number" ? d.behind : undefined;
       }
       if (role === "fixup") p.directive = undefined;
+      if (role === "integrator" && typeof d.integrate === "object" && d.integrate !== null)
+        p.integrate = d.integrate as IntegrateResult;
       if (role === "implementer" || role === "fixup")
         p.closes_missing = Array.isArray(d.closes_missing)
           ? (d.closes_missing as unknown[]).filter((n): n is number => typeof n === "number")
@@ -918,6 +989,40 @@ export interface PipelineView {
   now?: number;
   /** A bundle's issues (several, the wave file's `issues`); absent for a task with one issue. */
   issues?: number[];
+  /** A merge train's synthetic task (SPEC §4.6.23); absent for any other task. */
+  train?: TrainView;
+}
+
+/** One member of a merge train, as its integrator and the gate see it. */
+export interface TrainMemberView {
+  task: TaskId;
+  pr: number;
+  /** Its PR's URL (from the member's verified PR). */
+  url: string;
+  /** The gated head the train integrates. */
+  head: string;
+  /** Its PR branch. */
+  branch: string;
+  /** The issues it closes (a bundle's every issue), each with its URL when known. */
+  issues: { number: number; url: string }[];
+}
+
+/** A merge train's task, as the driver reads it from the record (PipelineView.train). */
+export interface TrainView {
+  /** The integration branch (`volley/train/<wave>-t<n>`). */
+  branch: string;
+  /** The release commit the train started at (`train_started.release_sha`). */
+  release_sha: string;
+  /** In merge order. */
+  members: TrainMemberView[];
+  /** Every file a member's reviewer flagged, by reviewer role (the rereview rule). */
+  flagged: Partial<Record<ReviewerRole, string[]>>;
+  /** The gate's TrainToken for the current head (process-local, like a MergeToken). */
+  token?: TrainToken;
+  /** `autopilot.ci_fixup_max`: CI fixups before a red train fails. */
+  ci_fixup_max: number;
+  /** The overlap plan's clusters any member is in (put on hold when the train's CI fails). */
+  clusters: PlanCluster[];
 }
 
 /** A blocked agent's status, while its red PR head is classified (onBlocked). */
@@ -967,6 +1072,10 @@ export type PipelineEvent =
       waited_ms?: number;
       /** When the check ran (epoch ms on the driver's clock): the next one is a ci_poll_ms on. */
       at?: number;
+      /** A merge train's head: which members it lacks, and whether it descends from its base. */
+      train?: TrainHeadFacts;
+      /** A merge train integrator's reported result. */
+      integrate?: IntegrateResult;
     }
   /** Before the gate: the release branch checked at `head`; `diffstats` per fixup `from..to`. */
   | { kind: "rebase_checked"; head: string; check: RebaseCheck; diffstats: Record<string, string> }
@@ -1051,7 +1160,9 @@ export type PipelineEvent =
    * Self-healing CI (SPEC §4.6.16): the fixer of the flake `test` merged and released the task
    * (`remediation_closed`): it takes the fix from the release branch and is verified again.
    */
-  | { kind: "fix_landed"; test: string };
+  | { kind: "fix_landed"; test: string }
+  /** A merge train merged: the member PRs GitHub does not report merged (SPEC §4.6.23). */
+  | { kind: "members_checked"; open: { task: TaskId; pr: number }[] };
 
 /** CI on a merged head that is not the gated one; `unknown` when it could not be read. */
 export type MergedCi = CiState;
@@ -1080,7 +1191,7 @@ export type PipelineAction =
       files: Record<string, string>;
       branch_update?: "merge";
     }
-  | { kind: "verify"; role: Role; result?: FixupResult }
+  | { kind: "verify"; role: Role; result?: FixupResult; integrate?: IntegrateResult }
   /**
    * Classify a red head before anyone is asked: the PR's files, the release branch's CI, GitHub's
    * status page (`report`: the red verification; `blocked`: a blocked agent's, whose PR head the
@@ -1111,6 +1222,10 @@ export type PipelineAction =
   | { kind: "check_merged" }
   /** Autopilot merging: merge the gated PR at exactly the token's head (src/autopilot/merge.ts). */
   | { kind: "merge"; token: MergeToken }
+  /** A merge train's PR, with a merge commit at exactly the TrainToken's head (SPEC §4.6.23). */
+  | { kind: "merge_train"; token: TrainToken }
+  /** A merge train merged: read each member PR again (GitHub marks it merged). */
+  | { kind: "check_members" }
   /** The PR closed unmerged: look for its head on the release branch (read-only git). */
   | { kind: "check_landed" }
   /** At a review gate: read the PR's head (rate-limited to ci_poll_ms). */
@@ -1151,6 +1266,12 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
     case "rebase_checked":
       // Merged meanwhile (`volleyd merge` during the merge turn's check): nothing to update.
       if (v.stage === "cancelled" || v.stage === "done" || ev.head !== v.p.head) return [];
+      // A merge train is gated as it is: it holds the release branch, and a refusal of its merge
+      // (behind, say) fails it, to be formed again from the new tip (SPEC §4.6.23).
+      if (v.train !== undefined)
+        return v.stage === "merge_ready" && v.train.token?.head === v.p.head
+          ? []
+          : [{ kind: "gate", check: ev.check, diffstats: ev.diffstats }];
       // Gated already: only the task holding the merge turn is checked again, so it merges up to
       // date with the release branch (re-gated, which re-mints a token a restart lost), or is
       // brought up to date first (a release branch that moved is rebased onto).
@@ -1205,6 +1326,18 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
     case "fix_landed":
       // Its parked flake is this test's: the next advance takes the fix (landedFix).
       return v.p.remediation?.test === ev.test ? advance(v) : [];
+    case "members_checked":
+      // GitHub marks a member merged when the train's merge contains its head; one it does not
+      // is the owner's to look at, never closed by volleyd.
+      return ev.open.map((o) => ({
+        kind: "alarm" as const,
+        key: `${o.task}/train_member_open/${v.task}`,
+        event: {
+          type: "alarm_raised" as const,
+          task: o.task,
+          data: { alarm: "train_member_open", task: o.task, pr: o.pr, train: v.task },
+        },
+      }));
   }
 }
 
@@ -1319,6 +1452,7 @@ function invariantViolation(
 
 /** The end of the pipeline: the rebase check and gate when the invariant holds (no polling else). */
 function toGate(v: PipelineView): PipelineAction[] {
+  if (v.train !== undefined) return trainToGate(v, v.train);
   const c = mergeReadyCheck(v.stages, v.p);
   return c.ok ? [{ kind: "check_rebase" }] : invariantViolation(v, c);
 }
@@ -1381,6 +1515,7 @@ function onMergeChecked(
   const { view } = ev;
   const { pr, head } = v.p;
   if (v.stage === "done" || v.stage === "cancelled" || pr === undefined) return [];
+  if (v.train !== undefined) return trainMergeChecked(v, v.train, view);
   // A human merged the PR, in whatever stage the task is (its open decisions were closed first).
   if (view.state === "MERGED" && view.baseRefName === v.release_branch) {
     const merged = typeof view.headRefOid === "string" ? view.headRefOid : undefined;
@@ -1492,6 +1627,9 @@ function onSupervisorMerged(
   const { pr, head } = v.p;
   if (v.stage === "done" || v.stage === "cancelled" || pr === undefined || ev.head !== head)
     return [];
+  // A train's merge commit not read back: the PR, read now, names it (onMergeChecked).
+  if (v.train !== undefined)
+    return ev.sha !== null ? trainMerged(v, v.train, ev.sha) : [{ kind: "check_merged" }];
   return [
     {
       kind: "journal",
@@ -1539,24 +1677,29 @@ function onMergeRefused(
           of: ladder.length,
         }
       : undefined;
-  return [
-    {
-      kind: "journal",
-      event: {
-        type: "alarm_raised",
-        task: v.task,
-        data: {
-          alarm: "merge_refused",
-          pr: pr.url,
-          head: ev.head,
-          stderr: ev.stderr,
-          // Absent: refusalEndsTurn reads it as `behind`, like a refusal journaled before reasons.
-          ...(ev.reason !== undefined ? { reason: ev.reason } : {}),
-          attempt: ev.reason === "transient" ? n : (v.p.merge_refusals ?? 0) + 1,
-          ...transient,
-        },
+  const alarm: PipelineAction = {
+    kind: "journal",
+    event: {
+      type: "alarm_raised",
+      task: v.task,
+      data: {
+        alarm: "merge_refused",
+        pr: pr.url,
+        head: ev.head,
+        stderr: ev.stderr,
+        // Absent: refusalEndsTurn reads it as `behind`, like a refusal journaled before reasons.
+        ...(ev.reason !== undefined ? { reason: ev.reason } : {}),
+        attempt: ev.reason === "transient" ? n : (v.p.merge_refusals ?? 0) + 1,
+        ...transient,
       },
     },
+  };
+  // A train refused as behind, moved, closed or retargeted fails: its members queue again and
+  // the next tick forms a train from the release branch as it is now (SPEC §4.6.23).
+  if (v.train !== undefined && ev.reason !== undefined && TRAIN_ENDS.has(ev.reason))
+    return [alarm, ...trainFailed(v, v.train, ev.reason)];
+  return [
+    alarm,
     // A draft: marked ready, and merged once the CI that starts then passes (onReadyCi).
     ...(ev.reason === "draft" ? [{ kind: "pr_ready" as const, pr: pr.number, head: ev.head }] : []),
     { kind: "check_merged" },
@@ -2038,7 +2181,7 @@ function onDone(
   if (ev.status === "failed" && mergeConflict(v, ev.role))
     return [
       { kind: "retire", agent_id: ev.agent_id },
-      mergeConflictDecision(v, ev.agent_id, ev.why ?? "failed"),
+      mergeConflictDecision(v, ev.agent_id, ev.why ?? "failed", ev.result),
     ];
   if (ev.status === "failed") {
     return [
@@ -2124,6 +2267,10 @@ function onDone(
       },
     ];
   }
+  if (ev.role === "integrator") {
+    const integrate = parseIntegrateResult(ev.result);
+    return [{ kind: "verify", role: ev.role, ...(integrate !== null ? { integrate } : {}) }];
+  }
   if (PUBLISHING_ROLES.has(ev.role)) return [{ kind: "verify", role: ev.role }];
   return [{ kind: "retire", agent_id: ev.agent_id }];
 }
@@ -2135,6 +2282,14 @@ function onVerified(
   const run = v.p.runs[ev.role];
   if (run === undefined || run.agent_id !== ev.agent_id || run.accepted || v.stage === "cancelled")
     return [];
+  // A merge train's head must contain every member and descend from where the train started.
+  if (
+    v.train !== undefined &&
+    ev.train !== undefined &&
+    ev.report.kind === "ok" &&
+    (ev.train.missing.length > 0 || !ev.train.descends)
+  )
+    return trainIncomplete(v, v.train, ev, run, ev.report, ev.train);
   const out = artifactOutcome(v.task, ev.role, ev.report);
   const head = ev.report.kind === "ok" ? ev.report.head : undefined;
   // In the CI hold of a role that is done (its push is in), the PR branch moved: a push from
@@ -2273,6 +2428,7 @@ function onVerified(
               ...out.event.data,
               agent_id: run.agent_id,
               ...(ev.result !== undefined ? { result: ev.result } : {}),
+              ...(ev.integrate !== undefined ? { integrate: ev.integrate } : {}),
               ...(run.adopt === true ? { adopted: true } : {}),
               ...(closes.missing.length > 0 ? { closes_missing: closes.missing } : {}),
             },
@@ -2463,6 +2619,15 @@ function onClassified(
   const head = ev.report.head;
   const marker: PipelineMarker = { on: "ci_failed", role: ev.role, agent_id: ev.agent_id, head };
   const data = { ...out.data, classification: r.classification, evidence: r.evidence };
+  // A train whose own change stays red after its CI fixups fails, and its clusters hold.
+  const fixups = v.p.ci_fixups ?? 0;
+  if (v.train !== undefined && r.classification === "own_change" && fixups >= v.train.ci_fixup_max)
+    return trainFailed(
+      v,
+      v.train,
+      `CI red on the train head ${head.slice(0, 12)} after ${fixups} CI fixup(s) (ci_fixup_max ${v.train.ci_fixup_max})`,
+      { hold: true },
+    );
   switch (r.classification) {
     case "own_change":
       return [{ kind: "decide", marker, decision: out.decision, data }];
@@ -2727,13 +2892,15 @@ function onBlocked(
     payload: ev.payload,
     ...(ev.at !== undefined ? { status_at: ev.at } : {}),
   };
-  if (mergeConflict(v, ev.role))
-    return [
-      {
-        ...mergeConflictDecision(v, ev.agent_id, `is blocked: ${clipReason(ev.reason)}`),
-        data: blockedFacts(ev.agent_id, blocked),
-      },
-    ];
+  if (mergeConflict(v, ev.role)) {
+    const d = mergeConflictDecision(
+      v,
+      ev.agent_id,
+      `is blocked: ${clipReason(ev.reason)}`,
+      ev.payload,
+    );
+    return [{ ...d, data: { ...d.data, ...blockedFacts(ev.agent_id, blocked) } }];
+  }
   // About a failing test, with a PR branch to look at: is its head red, and whose is it?
   if (CI_REASON.test(ev.reason) && v.p.branch !== undefined)
     return [{ kind: "classify_ci", role: ev.role, agent_id: ev.agent_id, blocked }];
@@ -2787,13 +2954,16 @@ const blockedFacts = (agentId: string, b: BlockedStatus): Record<string, unknown
  * before the gate (the task was never queued) is an ordinary blocked agent.
  */
 const mergeConflict = (v: PipelineView, role: Role): boolean =>
-  role === "rebase" && v.p.rebasing && v.merge === "auto" && v.p.queued_at !== undefined;
+  (role === "rebase" && v.p.rebasing && v.merge === "auto" && v.p.queued_at !== undefined) ||
+  (role === "integrator" && v.train !== undefined);
 
 function mergeConflictDecision(
   v: PipelineView,
   agentId: string,
   what: string,
+  payload?: unknown,
 ): Extract<PipelineAction, { kind: "decide" }> {
+  if (v.train !== undefined) return trainConflictDecision(v, v.train, agentId, what, payload);
   const label = roleLabel(v.p, "rebase");
   return {
     kind: "decide",
@@ -2820,7 +2990,8 @@ const ASKED_AGAIN =
 function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
   const m = (d as { pipeline?: PipelineMarker }).pipeline;
   const answer = d.resolved?.answer ?? "";
-  if (m === undefined || d.task !== v.task) return [];
+  // A merge train's conflict is asked about its member, and answered by the train (m.task).
+  if (m === undefined || (m.task ?? d.task) !== v.task) return [];
   // Merged meanwhile (`volleyd merged`, GitHub): no answer brings a done task back.
   if (v.stage === "done") return [];
   if (m.on === "relaunch") return onRelaunchResolved(v, d, m, answer);
@@ -3024,6 +3195,7 @@ function onResolved(v: PipelineView, d: DecisionRecord): PipelineAction[] {
         },
       ];
     case "merge_conflict": {
+      if (v.train !== undefined) return trainConflictAnswer(v, v.train, d, m, answer);
       const agent = (d as { agent_id?: unknown }).agent_id;
       const live = run !== undefined && run.agent_id === agent && !run.accepted;
       // respawn: a fresh rebase (or merge) agent at the next attempt.
@@ -3343,6 +3515,8 @@ function agoText(ms: number): string {
 function spawnFor(v: PipelineView, role: Role): PipelineAction {
   const head = v.p.head;
   if (role === "implementer") return { kind: "spawn", role, files: {} };
+  if (role === "integrator")
+    return { kind: "spawn", role, files: v.train !== undefined ? integrateFiles(v, v.train) : {} };
   if (head === undefined) {
     // Unreachable with today's wave grammar: a non-implementer role before any verified head.
     return {
@@ -3363,9 +3537,24 @@ function spawnFor(v: PipelineView, role: Role): PipelineAction {
       kind: "spawn",
       role,
       start: { ref: head, detach: true },
-      files: { "review.md": renderReviewMd(role, base) },
+      files: {
+        "review.md":
+          v.train !== undefined
+            ? renderTrainReviewMd(role, base, v.p.integrate)
+            : renderReviewMd(role, base),
+      },
     };
   }
+  if (role === "fixup" && v.train !== undefined && v.p.train_missing !== undefined)
+    return {
+      kind: "spawn",
+      role,
+      start: { ref: head, detach: false },
+      files: {
+        "findings.md": renderTrainMissingMd(v, v.train, v.p.train_missing),
+        "findings.json": "[]\n",
+      },
+    };
   if (role === "fixup") {
     const d = v.p.directive;
     const items =
@@ -3431,7 +3620,10 @@ function advance(v: PipelineView): PipelineAction[] {
   if (v.stage === "merge_ready" && p.pr !== undefined)
     return readyHeld(v)
       ? [{ kind: "check_ready_ci" }, { kind: "check_merged" }]
-      : [...autoMerge(v), { kind: "check_merged" }];
+      : [
+          ...(v.train !== undefined ? trainMerge(v, v.train) : autoMerge(v)),
+          { kind: "check_merged" },
+        ];
   if (IDLE.has(v.stage) || p.step < 0) return [];
   // The flake's fixer merged: update the branch from the release branch first.
   if (p.remediation?.landed === true) return landedFix(v, p.remediation);
@@ -3742,6 +3934,413 @@ function renderMergeMd(c: BriefCtx): string {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The merge train (SPEC §4.6.23): its synthetic task's integration, gate, merge and outcome
+// ---------------------------------------------------------------------------------------------
+
+/** Refusals that end a train: its branch must change before it could merge. */
+const TRAIN_ENDS: ReadonlySet<RefusalReason> = new Set([
+  "behind",
+  "head_moved",
+  "closed",
+  "retargeted",
+]);
+
+/**
+ * The train's head is verified: the member reviewers whose flagged files a conflict resolution
+ * touched review the resolution diff (a blocking finding gets one fixup); with none, the gate
+ * alarms `train_reviews_skipped`. Then the rebase check and the gate.
+ */
+function trainToGate(v: PipelineView, t: TrainView): PipelineAction[] {
+  const { p } = v;
+  const touched = p.integrate?.touched ?? [];
+  const roles = REVIEWER_ROLES.filter((r) => (t.flagged[r] ?? []).some((f) => touched.includes(f)));
+  const step = Math.max(p.step, 0);
+  const pending = roles.filter((r) => {
+    const rv = p.reviews[r];
+    return rv === undefined || !reviewHolds(p, rv);
+  });
+  if (pending.length > 0) return enterStep(v, step, pending);
+  if (roles.length === 0)
+    return [
+      {
+        kind: "alarm",
+        key: `${v.task}/train_reviews_skipped`,
+        event: {
+          type: "alarm_raised",
+          task: v.task,
+          data: {
+            alarm: "train_reviews_skipped",
+            why: "no conflict resolution touched a flagged file",
+          },
+        },
+      },
+      { kind: "check_rebase" },
+    ];
+  // A blocking finding on the resolutions: one fixup of this review round.
+  const fixed = p.fixups.some((f) => f.round === p.round);
+  if (fixupItems(roundReviews(p)).length > 0 && !fixed) return enterStep(v, step, ["fixup"]);
+  return [{ kind: "check_rebase" }];
+}
+
+/**
+ * The train's merge verb at merge_ready: with the gate's TrainToken for its head (a restart lost
+ * it: the gate again), under the same refusal budget and transient backoff as any merge.
+ */
+function trainMerge(v: PipelineView, t: TrainView): PipelineAction[] {
+  if (mergeExhausted(v) || transientWaiting(v)) return [];
+  const token = t.token;
+  if (token === undefined || token.head !== v.p.head || token.pr !== v.p.pr?.number)
+    return [{ kind: "check_rebase" }];
+  return [{ kind: "merge_train", token }];
+}
+
+/**
+ * The train's PR merged as `sha`: `train_merged`, then each member merged by the supervisor via
+ * the train (its merge record, out of the queue, done), then the train task itself; each member
+ * PR is read again (GitHub marks it merged when the merge contains its head).
+ */
+function trainMerged(v: PipelineView, t: TrainView, sha: string): PipelineAction[] {
+  const pr = v.p.pr;
+  if (pr === undefined) return [];
+  const tasks = t.members.map((m) => m.task);
+  const journal = (event: NewEvent): PipelineAction => ({ kind: "journal", event });
+  return [
+    journal({
+      type: "train_merged",
+      data: { train: v.task, pr: pr.number, merge_sha: sha, tasks },
+    }),
+    ...t.members.flatMap((m) => [
+      journal({
+        type: "merged_by_supervisor",
+        task: m.task,
+        data: {
+          task: m.task,
+          pr: m.pr,
+          head: m.head,
+          merge_sha: sha,
+          by: "volleyd",
+          via: "train",
+          train_pr: pr.number,
+        },
+      }),
+      journal({
+        type: "artifact_verified",
+        task: m.task,
+        data: {
+          role: "merged",
+          pr: { number: m.pr, url: m.url, head_sha: m.head, ci: "green" },
+          head_sha: m.head,
+          via: "train",
+          train: v.task,
+          train_pr: pr.number,
+          merge_sha: sha,
+        },
+      }),
+      journal({ type: "merge_dequeued", task: m.task, data: { task: m.task, why: "merged" } }),
+      journal({ type: "stage_entered", task: m.task, data: { stage: "done", merged: true } }),
+    ]),
+    ...mergedActions(v, { via: "supervisor", merge_sha: sha }),
+    { kind: "check_members" },
+  ];
+}
+
+/** The train's PR as GitHub has it: merged (by volleyd or anyone), or no longer mergeable. */
+function trainMergeChecked(v: PipelineView, t: TrainView, view: PrView): PipelineAction[] {
+  const merged = view.mergeCommit?.oid;
+  if (view.state === "MERGED" && view.baseRefName === v.release_branch)
+    return typeof merged === "string" ? trainMerged(v, t, merged) : [];
+  if (v.stage !== "merge_ready") return [];
+  if (view.state === "CLOSED") return trainFailed(v, t, "closed");
+  if (typeof view.headRefOid === "string" && view.headRefOid !== v.p.head)
+    return trainFailed(v, t, "head_moved");
+  return mergeExhausted(v) ? mergeRefusedDecision(v) : [];
+}
+
+/**
+ * The train failed: `train_failed`, its agents stopped and its task cancelled; its members, no
+ * longer in a running train, queue again (a `dropped` member for an ordinary turn only). `hold`:
+ * its CI could not be fixed, so the clusters its members are in run one at a time (T6's hold).
+ */
+function trainFailed(
+  v: PipelineView,
+  t: TrainView,
+  why: string,
+  o: { dropped?: TaskId; hold?: true } = {},
+): PipelineAction[] {
+  const tasks = t.members.map((m) => m.task);
+  return [
+    {
+      kind: "journal",
+      event: {
+        type: "train_failed",
+        data: {
+          train: v.task,
+          why,
+          tasks,
+          ...(o.dropped !== undefined ? { dropped: o.dropped } : {}),
+        },
+      },
+    },
+    ...Object.values(v.p.runs).flatMap((run) => retireIfLive(run, "stopped")),
+    {
+      kind: "journal",
+      event: {
+        type: "task_cancelled",
+        task: v.task,
+        data: { by: "volleyd", why: `merge train failed: ${why}` },
+      },
+    },
+    ...(o.hold === true
+      ? t.clusters
+          .filter((c) => c.state !== "hold")
+          .map(
+            (c): PipelineAction => ({
+              kind: "journal",
+              event: {
+                type: "cluster_strategy_changed",
+                data: {
+                  cluster: c.id,
+                  from: c.state === "planned" ? plannedName(c) : c.state,
+                  to: "hold",
+                  why: `merge train ${v.task} failed: ${why}`,
+                },
+              },
+            }),
+          )
+      : []),
+  ];
+}
+
+/**
+ * The train's head lacks a member's gated head (or does not descend from the commit the train
+ * started at): its integrator is steered once; then a fixup on the train branch merges the
+ * missing members. Still incomplete after that (or not on its base at all): the train fails.
+ */
+function trainIncomplete(
+  v: PipelineView,
+  t: TrainView,
+  ev: Extract<PipelineEvent, { kind: "verified" }>,
+  run: RoleRun,
+  report: OkReport,
+  facts: TrainHeadFacts,
+): PipelineAction[] {
+  const head = report.head;
+  const missing = t.members.filter((m) => facts.missing.includes(m.task));
+  const what = [
+    ...(missing.length > 0
+      ? [
+          `lacks ${missing.map((m) => `PR #${m.pr} (${m.task}) at ${m.head.slice(0, 12)}`).join(", ")}`,
+        ]
+      : []),
+    ...(!facts.descends
+      ? [
+          `does not descend from ${t.release_sha.slice(0, 12)}, where the train started on ${v.release_branch}`,
+        ]
+      : []),
+  ].join(" and ");
+  if (ev.role === "integrator" && run.retired === undefined && (run.steers.artifacts ?? 0) < 1)
+    return [
+      {
+        kind: "steer",
+        role: ev.role,
+        agent_id: run.agent_id,
+        reason: "artifacts",
+        text: `volleyd could not verify your work: the train head ${head.slice(0, 12)} ${what}. Merge each missing member at its gated head with \`git merge --no-ff\` as \`.volley/integrate.md\` says (never rebase, never force-push), push the train branch, then publish done again.`,
+      },
+    ];
+  if (ev.role !== "integrator" || !facts.descends)
+    return [
+      ...retireIfLive(run),
+      ...trainFailed(v, t, `the train head ${head.slice(0, 12)} ${what}`),
+    ];
+  const pr = { number: report.pr.number, url: report.pr.url };
+  const after: PipelineView = {
+    ...v,
+    p: { ...v.p, head, pr: v.p.pr ?? pr, train_missing: facts.missing },
+  };
+  return [
+    ...retireIfLive(run),
+    ...enterStep(after, Math.max(v.p.step, 0), ["fixup"], {
+      train_missing: facts.missing,
+      head,
+      pr,
+    }),
+  ];
+}
+
+/** The member a blocked or failed integrator names: its `pr` or `task`, a `#<pr>`, its result. */
+function conflictMember(
+  t: TrainView,
+  what: string,
+  payload: unknown,
+  integrate?: IntegrateResult,
+): TrainMemberView {
+  const x = (typeof payload === "object" && payload !== null ? payload : {}) as Record<
+    string,
+    unknown
+  >;
+  const byPr = (n: unknown) => t.members.find((m) => m.pr === Number(n));
+  const named =
+    byPr(x.pr) ??
+    t.members.find((m) => m.task === x.task) ??
+    [...what.matchAll(/#(\d+)/g)].map((m) => byPr(m[1])).find((m) => m !== undefined) ??
+    byPr(integrate?.conflicts[0]?.pr) ??
+    t.members.find((m) => !(integrate?.merged ?? []).includes(m.pr));
+  return named ?? (t.members[0] as TrainMemberView);
+}
+
+/**
+ * The integrator could not merge a member (it is blocked, or failed): `merge_conflict` about
+ * that member, for the train (`train`; it never parks the gated member). `drop <member>`: the
+ * train is formed again without it; respawn: a fresh integrator; manual: a person merges the
+ * member, and the train goes on without it; cancel: the train.
+ */
+function trainConflictDecision(
+  v: PipelineView,
+  t: TrainView,
+  agentId: string,
+  what: string,
+  payload: unknown,
+): Extract<PipelineAction, { kind: "decide" }> {
+  const m = conflictMember(t, what, payload, v.p.integrate);
+  return {
+    kind: "decide",
+    marker: { on: "merge_conflict", role: "integrator", task: v.task },
+    decision: {
+      kind: "merge_conflict",
+      task: m.task,
+      question: `${agentId} (integrator of merge train ${v.task}) ${what}: PR #${m.pr} (${m.task}) could not be merged into the train. drop ${m.task}: the train is formed again without it, and it takes an ordinary turn later; respawn: a fresh integrator; manual: a person merges PR #${m.pr} (it leaves the merge queue) and the train is formed again without it; or cancel the train?`,
+      pointers: { pr: m.url },
+      options: [`drop ${m.task}`, "respawn", "manual", "cancel"],
+      park: false,
+    },
+    data: { agent_id: agentId, train: v.task },
+  };
+}
+
+/** A train's merge_conflict answered (cancel is every decision's: the train task is cancelled). */
+function trainConflictAnswer(
+  v: PipelineView,
+  t: TrainView,
+  d: DecisionRecord,
+  m: PipelineMarker,
+  answer: string,
+): PipelineAction[] {
+  const member = d.task as TaskId;
+  const run = v.p.runs.integrator;
+  const agent = (d as { agent_id?: unknown }).agent_id;
+  const ours = run !== undefined && run.agent_id === agent;
+  // drop / manual: trainFailed stops the integrator (with every other live run of the train).
+  if (isAnswer(answer, `drop ${member}`.toLowerCase()))
+    return trainFailed(v, t, `${member} dropped (its conflict)`, { dropped: member });
+  if (isRespawnAnswer(answer, d.options))
+    return ours && !run.accepted
+      ? [{ kind: "relaunch", role: "integrator", agent_id: run.agent_id }]
+      : [];
+  // manual: the reducer handed the member to a person (it leaves the queue); the train goes.
+  if (isAnswer(answer, "manual")) return trainFailed(v, t, `${member} handed to a person`);
+  return [
+    {
+      kind: "decide",
+      marker: m,
+      decision: {
+        kind: d.kind,
+        task: member,
+        question: `"${answer}" is not one of ${(d.options ?? []).join(" / ")}. ${d.question.replace(ASKED_AGAIN, "")}`,
+        pointers: d.pointers,
+        ...(d.options !== undefined ? { options: d.options } : {}),
+        park: false,
+      },
+      data: { ...decisionFacts(d), train: v.task },
+    },
+  ];
+}
+
+/** The integrator's inputs: `.volley/integrate.md`. */
+function integrateFiles(v: PipelineView, t: TrainView): Record<string, string> {
+  return { "integrate.md": renderIntegrateMd(v, t) };
+}
+
+/**
+ * `.volley/integrate.md`: the release branch and the commit the train starts at, the train
+ * branch, and each member in merge order with its PR, branch, gated head and issues; the
+ * commands, the PR's title and its `Closes` lines.
+ */
+function renderIntegrateMd(v: PipelineView, t: TrainView): string {
+  const issues = t.members.flatMap((m) => m.issues);
+  return [
+    `# Integrate merge train ${v.task}`,
+    "",
+    `Release branch: \`${v.release_branch}\` at \`${t.release_sha}\`.`,
+    `Train branch: \`${t.branch}\` (cut it from \`${t.release_sha}\`; push only there).`,
+    "",
+    "## Members, in merge order",
+    "",
+    ...t.members.map(
+      (m, i) =>
+        `${i + 1}. PR #${m.pr} (task ${m.task}): branch \`${m.branch}\`, gated head \`${m.head}\`; closes ${m.issues.map((x) => `#${x.number}${x.url !== "" ? ` (${x.url})` : ""}`).join(", ") || "no issue"} — ${m.url}`,
+    ),
+    "",
+    "## Commands",
+    "",
+    `    git fetch origin ${v.release_branch} ${t.members.map((m) => m.branch).join(" ")}`,
+    `    git checkout -B ${t.branch} ${t.release_sha}`,
+    ...t.members.map(
+      (m) => `    git merge --no-ff --no-edit ${m.head}   # PR #${m.pr} (${m.task})`,
+    ),
+    "    # resolve conflicts keeping each PR's intent; run the repository's gates",
+    `    git push origin HEAD:${t.branch}`,
+    `    gh pr create --base ${v.release_branch} --head ${t.branch} --title "train: ${issues.map((x) => `#${x.number}`).join(", ")}" --body-file <the Closes lines below>`,
+    "",
+    "The PR body: one line per member issue, each on its own line:",
+    "",
+    ...issues.map((x) => `Closes #${x.number}`),
+    "",
+    "Merge each member at its gated head, never a later commit of its branch: those are what was reviewed. Never rebase, never force-push, never amend a member's commits.",
+    "",
+  ].join("\n");
+}
+
+/**
+ * `.volley/review.md` of a member reviewer on the train head: only the conflict resolutions,
+ * in the files they changed (`git show --remerge-diff` of each merge commit).
+ */
+function renderTrainReviewMd(role: ReviewerRole, c: BriefCtx, r?: IntegrateResult): string {
+  const files = r?.touched ?? [];
+  return [
+    "# What to review",
+    "",
+    `A merge train (PR ${c.pr_url}, branch \`${c.pr_branch}\`) merged member PRs your role reviewed before; resolving their conflicts changed files a ${role.replace("_", " ")} flagged. This worktree is a detached checkout of exactly \`${c.head}\`.`,
+    "",
+    `Review only the conflict resolutions, in ${files.map((f) => `\`${f}\``).join(", ") || "the files they changed"}:`,
+    "",
+    `    git log --merges --format=%H origin/${c.release_branch}..${c.head}`,
+    `    git show --remerge-diff <each merge> -- ${files.join(" ")}`,
+    "",
+    "The members themselves were reviewed and gated: a finding is about what a resolution changed.",
+    "",
+    "Report through the result contract in your brief (`result` channel, type `review`) before your `done`.",
+    "",
+  ].join("\n");
+}
+
+/** `.volley/findings.md` of a train's fixup: merge the members its head lacks. */
+function renderTrainMissingMd(v: PipelineView, t: TrainView, missing: TaskId[]): string {
+  const ms = t.members.filter((m) => missing.includes(m.task));
+  const at = (v.p.head ?? "").slice(0, 12);
+  return [
+    "# Directive: the merge train lacks members",
+    "",
+    `The train head \`${at}\` (branch \`${t.branch}\`, this worktree) does not contain every member's gated head. Merge each of these at its gated head with \`git merge --no-ff --no-edit <head>\`, in this order, resolving conflicts keeping each PR's intent; run the repository's gates; then \`git push origin HEAD:${t.branch}\` (a normal push: never rebase, never force-push).`,
+    "",
+    ...ms.map((m) => `- PR #${m.pr} (${m.task}): branch \`${m.branch}\`, gated head \`${m.head}\``),
+    "",
+    'Publish your result with `{ "finding": "TRAIN", "how": "…" }` among `resolved`.',
+    "",
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------------------------
 // The driver
 // ---------------------------------------------------------------------------------------------
 
@@ -3809,6 +4408,10 @@ export interface PipelineDeps {
   statusPage?: () => Promise<GithubStatus>;
   /** The wave's `autopilot.delete_branch` (default: false). */
   deleteBranch?: () => boolean;
+  /** The wave's `autopilot.merge_train` (default: off). */
+  mergeTrain?: () => boolean;
+  /** The wave's `autopilot.ci_fixup_max`: a train's CI fixups before it fails (default: config). */
+  ciFixupMax?: () => number;
   /**
    * The merge turn of a release branch (`<repo>#<release_branch>`), shared by every wave on this
    * daemon: `acquire` succeeds when the branch is free or already held by `key`
@@ -3947,6 +4550,13 @@ export class PipelineDriver {
   /** Tasks whose `gh pr merge` this driver runs (from `merge_started` until its outcome is in). */
   private readonly merging = new Set<TaskId>();
   /**
+   * The TrainToken each merge train's gate minted (process-local, like the MergeTokens: a restart
+   * re-runs the train's gate to mint it again). Only `gate()` adds one.
+   */
+  private readonly trainTokens = new Map<TaskId, TrainToken>();
+  /** The merge train holding (or forming on) this wave's release branch: its lock key. */
+  private trainLock: { branch: string; key: string; forming?: Train } | undefined;
+  /**
    * The merge_ready invariant decisions this driver asked (`askKey`) whose answer it has not
    * handled yet. Autopilot answers one inside `decide`, but the answer reaches the pipeline later,
    * on the queue: until then the task is not parked, and the advances after the decide would ask
@@ -4009,8 +4619,54 @@ export class PipelineDriver {
         : {}),
       ...(this.turn?.task === task ? { merge_turn: this.turn.fresh ? "go" : "check" } : {}),
       ...(this.deps.heardFrom !== undefined ? { heard_from: this.deps.heardFrom } : {}),
+      ...(wt.train !== undefined ? { train: this.trainView(task, rec) } : {}),
       now: this.now(),
     };
+  }
+
+  /** A merge train's task as the interpreter reads it (PipelineView.train). */
+  private trainView(task: TaskId, rec: WaveRecord): TrainView {
+    const def = rec.wave?.tasks[task];
+    const flagged: Partial<Record<ReviewerRole, string[]>> = {};
+    const members = (def?.train?.members ?? []).map((m): TrainMemberView => {
+      const p = rec.pipeline[m.task];
+      for (const r of REVIEWER_ROLES)
+        flagged[r] = [...new Set([...(flagged[r] ?? []), ...(p?.flagged[r] ?? [])])];
+      const t = rec.wave?.tasks[m.task];
+      const pr = p?.pr?.number === m.pr ? p.pr : undefined;
+      const url = pr?.url ?? "";
+      const base = url.replace(/\/pull\/\d+$/, "");
+      return {
+        task: m.task,
+        pr: m.pr,
+        url,
+        head: m.head,
+        branch: p?.branch ?? "",
+        issues: [...new Set(t?.issues ?? (t !== undefined ? [t.issue] : []))].map((n) => ({
+          number: n,
+          url: base !== "" && base !== url ? `${base}/issues/${n}` : "",
+        })),
+      };
+    });
+    const ids = new Set(members.map((m) => m.task));
+    const token = this.trainTokens.get(task);
+    return {
+      branch: trainBranch(this.wave, task),
+      release_sha: rec.pipeline[task]?.train_release_sha ?? "",
+      members,
+      flagged,
+      ...(token !== undefined ? { token } : {}),
+      ci_fixup_max: this.deps.ciFixupMax?.() ?? CONFIG_DEFAULTS.autopilot.ci_fixup_max,
+      clusters: (rec.state?.overlap_plan?.clusters ?? []).filter((c) =>
+        c.tasks.some((x) => ids.has(x)),
+      ),
+    };
+  }
+
+  /** A merge train's `.volley/integrate.md` (the daemon's admission spawn writes it). */
+  integrateFiles(task: TaskId): Record<string, string> {
+    const v = this.view(task);
+    return v?.train !== undefined ? integrateFiles(v, v.train) : {};
   }
 
   /** The merge mode the pipeline acts on: the wave file's `merge:`, else `autopilot.merge`. */
@@ -4019,7 +4675,13 @@ export class PipelineDriver {
   }
 
   /** Handle one observation, then advance until the task settles. */
-  async handle(task: TaskId, ev: PipelineEvent): Promise<void> {
+  async handle(about: TaskId, ev: PipelineEvent): Promise<void> {
+    // A decision asked about one task for another (a merge train's conflict, about its member)
+    // is answered by the task its marker names.
+    const task =
+      ev.kind === "decision_resolved"
+        ? ((ev.decision as { pipeline?: PipelineMarker }).pipeline?.task ?? about)
+        : about;
     const v = this.view(task);
     if (v === null) return;
     // Its answer is handled now: a re-ask, or a later breach, asks again.
@@ -4122,6 +4784,8 @@ export class PipelineDriver {
       });
     }
     const queue = queueOf(this.deps.record());
+    // A merge train holds the release branch from train_started to its end (SPEC §4.6.23).
+    if (await this.holdTrain(branch)) return;
     const turn = this.turn;
     if (turn !== undefined) {
       const key = `${this.wave}/${turn.task}`;
@@ -4154,6 +4818,7 @@ export class PipelineDriver {
     }
     for (const t of this.passedOver)
       if (!queue.some((e) => e.task === t)) this.passedOver.delete(t);
+    if (this.formTrain(branch, queue)) return;
     const n =
       nextToMerge({ [branch]: this.withoutPassedOver(queue) }, new Set()) ??
       nextToMerge({ [branch]: queue }, new Set());
@@ -4162,6 +4827,147 @@ export class PipelineDriver {
     this.passedOver.delete(n.task);
     this.turn = { task: n.task, branch, refusals, fresh: false, failures: 0 };
     await this.run(n.task, [{ kind: "check_rebase" }], true);
+  }
+
+  /**
+   * A merge train that runs holds the release branch (its lock, under the train's key); one that
+   * ended frees it, and a train whose task was cancelled (its conflict answered `cancel`) is
+   * journaled failed here. True while a train runs or forms: no ordinary turn meanwhile.
+   */
+  private async holdTrain(branch: string): Promise<boolean> {
+    const rec = this.deps.record();
+    const running = (rec.state?.trains ?? []).find(
+      (t) => t.state !== "merged" && t.state !== "failed",
+    );
+    if (running !== undefined) {
+      const stage = rec.state?.tasks.find((t) => t.id === running.id)?.stage;
+      if (stage !== "cancelled") {
+        const key = `${this.wave}/${running.id}`;
+        this.lock.acquire(branch, key);
+        this.trainLock = { branch, key };
+        return true;
+      }
+      await this.deps.journal({
+        type: "train_failed",
+        data: { train: running.id, why: "cancelled", tasks: running.tasks },
+      });
+    }
+    if (this.trainLock?.forming !== undefined) return true;
+    if (this.trainLock !== undefined) this.lock.release(this.trainLock.branch, this.trainLock.key);
+    this.trainLock = undefined;
+    return false;
+  }
+
+  /**
+   * Under `autopilot.merge_train`, the train formTrain picks forms instead of the ordinary turn
+   * when its front task is behind the release branch (owner decision D3: two or more gated, the
+   * front behind): the release branch is locked for it, its tip read beside the queue, then
+   * `train_started` and its synthetic task `train-<n>` are journaled (trainStarted).
+   */
+  private formTrain(branch: string, queue: QueueEntry[]): boolean {
+    if (this.deps.mergeTrain?.() !== true || this.mergeMode() !== "auto") return false;
+    const rec = this.deps.record();
+    const cwd = this.ghCwd();
+    if (cwd === undefined) return false;
+    const t = formTrain(
+      { [branch]: this.withoutPassedOver(queue) },
+      new Set(),
+      { [this.wave]: rec },
+      { size: DAEMON_DEFAULTS.train_size_max, enabled: true },
+    );
+    const front = t?.members[0];
+    if (t === null || front === undefined || (rec.pipeline[front.task]?.gated_behind ?? 0) === 0)
+      return false;
+    const key = `${this.wave}/${t.id}`;
+    if (!this.lock.acquire(branch, key)) return false;
+    this.trainLock = { branch, key, forming: t };
+    const release = rec.state?.release_branch ?? t.release_branch;
+    const p: Promise<void> = probeReleaseTip(this.timed(this.deps.exec), {
+      cwd,
+      release_branch: release,
+    })
+      .then(
+        (sha) =>
+          this.deps.enqueue(() =>
+            this.trainStarted(t, sha).catch((e: unknown) => {
+              this.dropForming(t);
+              throw e;
+            }),
+          ),
+        (e: unknown) =>
+          this.deps.enqueue(async () => {
+            this.deps.log?.(`pipeline ${this.wave} ${t.id}: ${String(e)}`);
+            this.dropForming(t);
+          }),
+      )
+      .catch((e: unknown) => this.deps.log?.(`pipeline ${this.wave} ${t.id}: ${String(e)}`))
+      .finally(() => this.chains.delete(p));
+    this.chains.add(p);
+    return true;
+  }
+
+  /** The train `t` formed but never started (its tip unread, its start not journaled): unlock. */
+  private dropForming(t: Train): void {
+    const held = this.trainLock;
+    if (held?.forming?.id !== t.id) return;
+    this.lock.release(held.branch, held.key);
+    this.trainLock = undefined;
+  }
+
+  /**
+   * On the queue, with the release tip read: the train starts if its members are still gated at
+   * the heads it was formed with (`train_started`, then its synthetic task `train-<n>`, which the
+   * scheduler admits ahead of ordinary tasks and whose integrator does the merging).
+   */
+  private async trainStarted(t: Train, sha: string): Promise<void> {
+    const held = this.trainLock;
+    if (held?.forming?.id !== t.id) return;
+    const rec = this.deps.record();
+    const still = t.members.every((m) => {
+      const p = rec.pipeline[m.task];
+      const stage = rec.state?.tasks.find((x) => x.id === m.task)?.stage;
+      return stage === "merge_ready" && p?.head === m.head && p.queued_at !== undefined;
+    });
+    if (!still) {
+      this.lock.release(held.branch, held.key);
+      this.trainLock = undefined;
+      return;
+    }
+    const tasks = t.members.map((m) => m.task);
+    const issues = t.members.flatMap((m) => {
+      const d = rec.wave?.tasks[m.task];
+      return d?.issues ?? (d !== undefined ? [d.issue] : []);
+    });
+    await this.deps.journal({
+      type: "train_started",
+      data: {
+        train: t.id,
+        tasks,
+        heads: Object.fromEntries(t.members.map((m) => [m.task, m.head])),
+        release_sha: sha,
+      },
+    });
+    await this.deps.journal({
+      type: "task_queued",
+      task: t.id,
+      data: {
+        issue: 0,
+        synthetic: true,
+        title: trainTitle(issues),
+        train: { members: t.members.map((m) => ({ task: m.task, pr: m.pr, head: m.head })) },
+      },
+    });
+    this.trainLock = { branch: held.branch, key: held.key };
+    this.deps.log?.(
+      `pipeline ${this.wave}: ${t.id} formed (${tasks.join(", ")}) at ${sha.slice(0, 7)}`,
+    );
+  }
+
+  /** The running merge train `task` is a member of, if any. */
+  private trainOf(task: TaskId): string | undefined {
+    return (this.deps.record().state?.trains ?? []).find(
+      (t) => t.state !== "merged" && t.state !== "failed" && t.tasks.includes(task),
+    )?.id;
   }
 
   /** The queue without the passed-over tasks and the tasks after them (they never go first). */
@@ -4229,6 +5035,11 @@ export class PipelineDriver {
   ): Promise<{ v: PipelineView; token: MergeToken; branch: string; own: boolean } | string> {
     const v = this.view(task);
     if (v === null) return `unknown task '${task}'`;
+    const train = this.trainOf(task);
+    if (train !== undefined)
+      return `task '${task}' is in merge train ${train}: it merges with the train's PR (try again if the train fails)`;
+    if (v.train !== undefined)
+      return `task '${task}' is a merge train: its PR merges with a merge commit at its turn, never with \`volleyd merge\``;
     const { pr, head } = v.p;
     if (
       v.stage !== "merge_ready" ||
@@ -4286,6 +5097,7 @@ export class PipelineDriver {
   /** Drop a finished task's rate-limit and no-CI bookkeeping (the maps stay bounded). */
   private forget(task: TaskId): void {
     this.mergeTokens.delete(task);
+    this.trainTokens.delete(task);
     for (const m of [this.lastCheck, this.noCiSince])
       for (const k of m.keys()) if (k.startsWith(`${task}/`)) m.delete(k);
     for (const k of this.asking) if (k.startsWith(`${task}/`)) this.asking.delete(k);
@@ -4418,7 +5230,7 @@ export class PipelineDriver {
           if (!eventDriven && !this.due(key)) break;
           this.lastCheck.set(key, this.now());
           this.beside(task, key, { what: "verify", role: a.role, agent_id: agent }, () =>
-            this.verify(task, a.role, agent, a.result),
+            this.verify(task, a.role, agent, a.result, a.integrate),
           );
           break;
         }
@@ -4498,6 +5310,40 @@ export class PipelineDriver {
               return this.supersedeOnMerge(task, ev);
             },
           );
+          break;
+        }
+        case "merge_train": {
+          // As `merge`, under the train's hold on the release branch (SPEC §4.6.23).
+          const key = `${task}/merge`;
+          if (this.inflight.has(key) || this.inflight.has(`${task}/check_merged`)) break;
+          if (this.merging.has(task)) break;
+          if (!eventDriven && !this.due(key)) break;
+          if (eventDriven) this.lastCheck.set(key, this.now());
+          const branch = this.branchKey();
+          if (branch === null || !this.lock.acquire(branch, `${this.wave}/${task}`)) break;
+          this.merging.add(task);
+          await this.deps.journal({
+            type: "merge_started",
+            task,
+            data: { task, pr: a.token.pr, head: a.token.head },
+          });
+          progressed = true;
+          this.beside(
+            task,
+            key,
+            { what: "merge" },
+            () => this.mergeTrainPr(a.token),
+            (ev) => {
+              this.merging.delete(task);
+              return this.supersedeOnMerge(task, ev);
+            },
+          );
+          break;
+        }
+        case "check_members": {
+          const key = `${task}/check_members`;
+          if (this.inflight.has(key)) break;
+          this.beside(task, key, { what: "check_merged" }, () => this.membersCheck(task));
           break;
         }
         case "pr_ready": {
@@ -4636,7 +5482,11 @@ export class PipelineDriver {
   /** The worktree whose HEAD is the PR head: the run that verified it, else the implementer's. */
   private headWorktree(p: TaskPipeline): string | undefined {
     const r = headRole(p);
-    return (r !== undefined ? p.runs[r]?.worktree : undefined) ?? p.runs.implementer?.worktree;
+    return (
+      (r !== undefined ? p.runs[r]?.worktree : undefined) ??
+      p.runs.implementer?.worktree ??
+      p.runs.integrator?.worktree
+    );
   }
 
   /** The wave's repo root on this machine: where the pipeline's GitHub reads run. */
@@ -4696,6 +5546,7 @@ export class PipelineDriver {
     role: Role,
     agentId: string,
     result?: FixupResult,
+    integrate?: IntegrateResult,
   ): Promise<PipelineEvent | null> {
     const v = this.view(task);
     const run = v?.p.runs[role];
@@ -4759,15 +5610,41 @@ export class PipelineDriver {
       // Unreadable time is not no-CI time: a later `none` starts the clock over.
       this.noCiSince.delete(`${task}/${report.head}`);
     }
+    // A merge train's head: every member's gated head in it, on the commit it started at.
+    const train =
+      v.train !== undefined && report.kind === "ok"
+        ? await probeTrainHead(this.io(task), {
+            cwd: run.worktree,
+            head: report.head,
+            release_sha: v.train.release_sha,
+            members: v.train.members,
+          })
+        : undefined;
     return {
       kind: "verified",
       role,
       agent_id: agentId,
       report,
       ...(result !== undefined ? { result } : {}),
+      ...(integrate !== undefined ? { integrate } : {}),
+      ...(train !== undefined ? { train } : {}),
       ...(waited !== undefined ? { waited_ms: waited } : {}),
       at: this.now(),
     };
+  }
+
+  /** Beside the queue: each member PR of a merged train, as GitHub reports it now. */
+  private async membersCheck(task: TaskId): Promise<PipelineEvent | null> {
+    const v = this.view(task);
+    if (v?.train === undefined) return null;
+    const open: { task: TaskId; pr: number }[] = [];
+    for (const m of v.train.members) {
+      const r = await this.ghExec(task)(["gh", "pr", "view", String(m.pr), "--json", "state"]);
+      const view = r.code === 0 ? parsePrView(r.stdout) : null;
+      // Unreadable is not open: only a PR GitHub reports as something else is alarmed.
+      if (view !== null && view.state !== "MERGED") open.push({ task: m.task, pr: m.pr });
+    }
+    return { kind: "members_checked", open };
   }
 
   /**
@@ -5285,6 +6162,37 @@ export class PipelineDriver {
       : { kind: "merge_refused", stderr: r.stderr, head: token.head, reason: r.reason };
   }
 
+  /** A merge train's PR with a merge commit, from the wave's repo (the supervisor's act). */
+  private async mergeTrainPr(token: TrainToken): Promise<PipelineEvent | null> {
+    const repo = this.deps.record().state?.repo;
+    const r = await mergeTrain(
+      this.timed(this.deps.exec),
+      token,
+      repo != null ? expandHome(repo) : undefined,
+    );
+    return r.ok
+      ? { kind: "supervisor_merged", sha: r.merge_sha, head: token.head }
+      : { kind: "merge_refused", stderr: r.stderr, head: token.head, reason: r.reason };
+  }
+
+  /** A merge train's TrainToken for its PR at `head`; none (logged) when the fence refuses one. */
+  private mintTrain(task: TaskId, v: PipelineView, t: TrainView): TrainToken | undefined {
+    const { pr, head } = v.p;
+    if (pr === undefined || head === undefined) return undefined;
+    try {
+      return mintTrainToken({
+        train: task,
+        pr: pr.number,
+        head,
+        release_branch: v.release_branch,
+        members: t.members.map((m) => ({ task: m.task, head: m.head })),
+      });
+    } catch (e) {
+      this.deps.log?.(`pipeline ${this.wave}/${task} train token: ${String(e)}`);
+      return undefined;
+    }
+  }
+
   /**
    * Write the evidence package and enter merge_ready; under `merge: auto` mint the MergeToken
    * for exactly this PR and head (the only place one is minted). Re-run at merge_ready (a
@@ -5313,7 +6221,13 @@ export class PipelineDriver {
         ? findDisagreements(reviewsOfRound(p, ruled.round))
         : [];
     const baseSha = rec.state?.tasks.find((t) => t.id === task)?.base_sha;
-    const token = v.merge === "auto" ? this.mintFor(task, pr.number, head, v) : undefined;
+    // A merge train merges with its TrainToken (a merge commit), never a squash's MergeToken.
+    const train = v.train;
+    const token =
+      v.merge === "auto" && train === undefined
+        ? this.mintFor(task, pr.number, head, v)
+        : undefined;
+    const trainToken = train !== undefined ? this.mintTrain(task, v, train) : undefined;
     const input: EvidenceInput = {
       wave: this.wave,
       task,
@@ -5335,12 +6249,24 @@ export class PipelineDriver {
         : {}),
       ...(baseSha !== undefined ? { base_sha: baseSha } : {}),
       release: check,
-      merge: token !== undefined ? "auto" : "manual",
+      merge: (token ?? trainToken) !== undefined ? "auto" : "manual",
+      ...(train !== undefined
+        ? {
+            train: {
+              id: task,
+              members: train.members.map((m) => ({ task: m.task, pr: m.pr, head: m.head })),
+              release_sha: train.release_sha,
+              conflicts: p.integrate?.conflicts ?? [],
+              touched: p.integrate?.touched ?? [],
+            },
+          }
+        : {}),
       generated_at: new Date(this.now()).toISOString(),
     };
     const paths = writeEvidence(this.deps.home, input);
     // Usable only once the evidence that describes its head is written.
     if (token !== undefined) this.mergeTokens.set(task, token);
+    if (trainToken !== undefined) this.trainTokens.set(task, trainToken);
     // The merge turn's task, gated up to date with the release branch: it may merge now. (Gated
     // behind, it is not: its turn's own check brings it up to date first.)
     if (token !== undefined && this.turn?.task === task && check.behind === 0)

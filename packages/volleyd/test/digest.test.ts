@@ -451,3 +451,44 @@ tasks:
     expect(summaryLine(d)).toMatch(/^w2 complete: 3 shipped/);
   });
 });
+
+describe("a merge train in the digest (SPEC §4.6.23)", () => {
+  const evs = journal(
+    { type: "wave_submitted", data: { wave, owner: "coord-a" } },
+    { type: "task_queued", task: "A", data: { issue: 11 } },
+    { type: "task_queued", task: "B", data: { issue: 12 } },
+    {
+      type: "task_queued",
+      task: "train-1",
+      data: {
+        issue: 0,
+        synthetic: true,
+        title: "Train: #11, #12",
+        train: {
+          members: [
+            { task: "A", pr: 21, head: "a".repeat(40) },
+            { task: "B", pr: 22, head: "b".repeat(40) },
+          ],
+        },
+      },
+    },
+    ...["A", "B"].flatMap((t, i): NewEvent[] => [
+      {
+        type: "merged_by_supervisor",
+        task: t,
+        data: { task: t, pr: 21 + i, merge_sha: "m-t", by: "volleyd", via: "train", train_pr: 30 },
+      },
+      ...merged(t, 21 + i, { via: "train", merge_sha: "m-t" }),
+    ]),
+    ...merged("train-1", 30, { via: "supervisor", merge_sha: "m-t" }),
+  );
+  const d = digestOf(evs, reduce(evs), NOW, "wave_complete");
+
+  it("ships each member through its own PR, never the train task itself", () => {
+    expect(d.shipped.map((s) => [s.task, s.issue, s.pr.number, s.merged_by])).toEqual([
+      ["A", 11, 21, "supervisor"],
+      ["B", 12, 22, "supervisor"],
+    ]);
+    expect(d.closes).toEqual([11, 12]);
+  });
+});

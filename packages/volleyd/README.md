@@ -989,6 +989,8 @@ autopilot: on
     ci_failed/infra-incident: the incident outlasted the wait: the owner decides; volleyd never re-runs CI
   ci_failed · otherwise (ci_none included) · escalate no_policy · no budget
     ci_failed/owner: a red head no rule routes and a repository without workflows are the owner's
+  merge_conflict · a merge train's integration (train), within respawn_max per member task · drop <member> · respawn_max per <task> · max 1
+    merge_conflict/drop-from-train: the train is formed again without the member, which takes an ordinary turn later; a second conflict of it is the owner's
   merge_conflict · within respawn_max per task/role · respawn · respawn_max per <task>/<role> · max 1
     merge_conflict/respawn: a fresh rebase (or merge) agent retries the update; a conflict it cannot resolve either is the owner's
   merge_refused · the last refusal: the PR is a draft (reason: draft) and marking it ready has not failed (no ready_failed) · retry · no budget
@@ -3923,6 +3925,55 @@ pure formation, `src/autopilot/merge.ts` the merge):
   `--delete-branch`. `mergeTrain(exec, token, cwd?)` reads the PR first, as `mergePr` does, and
   refuses one retargeted away from the release branch, whose head moved, that is closed or a
   draft, without merging; a refusal GitHub makes is classified as any merge's.
+- **The train task.** The pipeline driver asks `formTrain` before the ordinary turn and forms the
+  train when its front task was gated behind the release branch (`gated_behind > 0`; one up to
+  date takes the ordinary turn): it locks the release branch under `<wave>/train-<n>`, reads the
+  release tip, and journals `train_started { train, tasks, heads, release_sha }` and `task_queued`
+  for the synthetic task `train-<n>` (`issue: 0`, `synthetic: true`, `title: "Train: #310, #312"`,
+  `train: { members }`), pipeline `[implement, merge_ready]`. The scheduler admits it ahead of
+  ordinary tasks, as a fixer, and places it like any task. The release lock is the train's from
+  `train_started` to `train_merged` / `train_failed`; `volleyd merge` of a member is refused
+  meanwhile, naming the train.
+- **The integrator.** The train's implement step runs the `integrator` role
+  (`briefs/integrator.md.tmpl`), whose `.volley/integrate.md` names the release branch and the
+  commit the train starts at, the train branch, and each member in merge order with its PR,
+  branch, gated head and issues. It cuts the train branch from that commit, `git merge --no-ff`s
+  each member at its gated head (never a rebase, a force-push or an amended member commit),
+  resolves conflicts keeping each PR's intent, runs the gates, pushes, and opens one PR against the
+  release branch titled `train: #310, #312` with one `Closes #<n>` line per member issue. It
+  publishes `result` type `integrate` `{ merged, conflicts: [{ pr, files }], touched }`, then
+  `done`.
+- **Verification.** The integrator's `done` is verified like an implementer's (the branch pushed,
+  the PR open against the release branch, CI on its head: the usual `ci_pending` / `ci_green`
+  hold), plus `probeTrainHead` (`git merge-base --is-ancestor`): every member's gated head must be
+  in the train head, and the head must descend from `release_sha`. A head that lacks a member
+  steers the integrator once, then a fixup on the train branch merges the missing members; one
+  still incomplete (or off its base) fails the train. A red head is classified and fixed up as
+  any task's, the fixup working on the train branch. Once green: if the integrator's `touched`
+  holds a file a member's reviewer flagged, those reviewer roles review the train head, their
+  `.volley/review.md` scoped to the resolution diff (`git show --remerge-diff`), and a blocking
+  finding gets one fixup; otherwise the gate journals `alarm_raised { alarm:
+  "train_reviews_skipped", why: "no conflict resolution touched a flagged file" }`. The gate writes
+  the train's evidence (`train`: members, heads, `release_sha`, conflicts, touched; the CI) and
+  mints the `TrainToken`; the merge is `mergeTrain`.
+- **Completion.** Merged: `train_merged { train, pr, merge_sha, tasks }`; each member journals
+  `merged_by_supervisor { task, pr, head, merge_sha, by, via: "train", train_pr }`, its merged
+  `artifact_verified`, `merge_dequeued { why: merged }` and `stage_entered done`; the train task
+  is `done`. Each member PR is read again: GitHub reports it `MERGED` once the merge contains its
+  head; any other state is `alarm_raised { alarm: "train_member_open", task, pr, train }`, and
+  volleyd never closes it.
+- **Failure.** An integrator `blocked` or `failed` on a member opens `merge_conflict { train }`
+  about that member (it never parks it), options `drop <member>`, `respawn`, `manual`, `cancel`.
+  Autopilot answers `drop <member>` (`merge_conflict/drop-from-train`, `respawn_max` per member
+  task; a second conflict of it is the owner's): `train_failed { dropped }`, and the next tick
+  forms a new train without it; the dropped member keeps its place in the queue and takes an
+  ordinary turn later. `manual` hands the member to a person and fails the train; `cancel` cancels
+  the train task, journaled `train_failed { why: cancelled }`. A train merge refused `behind`,
+  `head_moved`, `closed` or `retargeted` fails the train: `train_failed { why }`, its members
+  `queued` again, and the next tick forms anew from the new tip (a `transient` refusal keeps the
+  lock and retries on the backoff ladder, as any merge). A train whose own change is still red
+  after `autopilot.ci_fixup_max` CI fixups fails, and the overlap-plan clusters of its members are
+  set to `hold` (`cluster_strategy_changed`, why naming the train).
 
 ---
 
@@ -4102,8 +4153,9 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
     (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
-    rebase.md, decisions.md, retired.json — spelled exactly, directly inside `.volley/`, so no
-    write there is a git config, HEAD, gitfile or hook, or a case variant of launch.sh), an
+    rebase.md, integrate.md, decisions.md, retired.json — spelled exactly, directly inside
+    `.volley/`, so no write there is a git config, HEAD, gitfile or hook, or a case variant of
+    launch.sh), an
     absolute path ending in `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`.
     A `.volley/launch.sh` (what the tmux session runs) is written whole, never appended, and
     its content must be exactly `renderLaunchScript` of valid values for that worktree

@@ -362,6 +362,17 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     rationale: "a red head no rule routes and a repository without workflows are the owner's",
   },
   {
+    policy: "merge_conflict/drop-from-train",
+    kinds: ["merge_conflict"],
+    condition: "a merge train's integration (train), within respawn_max per member task",
+    when: (d) => typeof d.train === "string",
+    answer: (d) => `drop ${String(d.task)}`,
+    answer_label: "drop <member>",
+    budget: { name: "respawn_max", per: "task" },
+    rationale:
+      "the train is formed again without the member, which takes an ordinary turn later; a second conflict of it is the owner's",
+  },
+  {
     policy: "merge_conflict/respawn",
     kinds: ["merge_conflict"],
     condition: "within respawn_max per task/role",

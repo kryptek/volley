@@ -301,7 +301,11 @@
             "spec_reviewer": { "$ref": "#/$defs/agentId" },
             "quality_reviewer": { "$ref": "#/$defs/agentId" },
             "fixup": { "$ref": "#/$defs/agentId" },
-            "rebase": { "$ref": "#/$defs/agentId" }
+            "rebase": { "$ref": "#/$defs/agentId" },
+            "integrator": {
+              "$ref": "#/$defs/agentId",
+              "description": "A merge train's integration agent (its synthetic train-<n> task's)."
+            }
           }
         },
         "waiting_on": { "type": "array", "items": { "type": "string", "minLength": 1 } },

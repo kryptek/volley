@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { flakeIssue } from "./autopilot/flake-brief";
+import { trainIssue, trainIssues } from "./autopilot/merge-train";
 import type { PlaybookStage } from "./autopilot/playbook";
 import { releaseWaveTask, stageBriefVars } from "./autopilot/release-train";
 import {
@@ -465,7 +466,9 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
         ? stageIssue(req.stage)
         : task.synthetic === true && task.remediation !== undefined
           ? flakeIssue(task.remediation, task.id)
-          : await taskIssues(ctx);
+          : task.synthetic === true && task.train !== undefined
+            ? trainIssue(req.wave, task.id)
+            : await taskIssues(ctx);
     const launched = await launchAttempt(ctx, req.attempt, agentId, issue);
     const lock = ctx.lock;
     return {
@@ -705,6 +708,10 @@ async function launchAttempt(
     issue_title: issue.title,
     issue_url: issue.url,
     ...(ctx.bundle !== undefined ? issueVars(ctx.bundle) : {}),
+    // A merge train's integrator: its PR's `Closes` lines are every member's issues.
+    ...(task.train !== undefined && trainIssues(req.wave, task.id).length > 0
+      ? issueVars(trainIssues(req.wave, task.id).map((n) => ({ number: n, title: "", url: "" })))
+      : {}),
     model: task.model,
     repo: ctx.root,
     release_branch: req.wave.release_branch,

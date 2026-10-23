@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { GithubStatus } from "../../src/autopilot/github-status";
+import { trainBranch } from "../../src/autopilot/merge-train";
 import type { Role } from "../../src/brief";
 import {
   type DecisionInput,
@@ -127,6 +128,8 @@ export interface World {
   mergeRefuse?: string | undefined;
   /** The merge commit per PR number once merged (default sha(0xa11)). */
   mergeCommit: Record<number, string>;
+  /** An event this answers true for is not appended: the journal throws (a full disk). */
+  journalFail?: ((ev: NewEvent) => boolean) | undefined;
 }
 
 export interface Spawned {
@@ -192,6 +195,10 @@ export interface HarnessOptions {
   repo?: string;
   /** T1 bundles these issues (`issues:`, 42 first). */
   bundle?: number[];
+  /** `autopilot.merge_train` the driver reads (default: absent, i.e. off). */
+  mergeTrain?: boolean;
+  /** `autopilot.ci_fixup_max` the driver reads (default: the config default). */
+  ciFixupMax?: number;
 }
 
 export function pipelineHarness(o: HarnessOptions = {}) {
@@ -221,6 +228,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
   const events: JournalEvent[] = [];
   let seq = 0;
   const journal = async (ev: NewEvent) => {
+    if (world.journalFail?.(ev) === true) throw new Error(`journal: cannot append ${ev.type}`);
     const e: JournalEvent = { ...ev, seq: ++seq, at: new Date().toISOString() } as JournalEvent;
     events.push(e);
     rec = apply(rec, e);
@@ -329,6 +337,14 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       world.prState[n] = "MERGED";
       world.mergeCommit[n] ??= sha(0xa11);
       world.releaseTip = world.mergeCommit[n];
+      // A merge commit (a merge train's): every open PR whose head it contains reads as merged.
+      const merged = a[a.indexOf("--match-head-commit") + 1];
+      if (a.includes("--merge"))
+        for (const pr of world.prs)
+          if (world.ancestor[`${pr.headRefOid}..${merged}`] === true && pr.number !== n) {
+            world.prState[pr.number] ??= "MERGED";
+            world.mergeCommit[pr.number] ??= world.mergeCommit[n];
+          }
       return out("");
     }
     if (a[0] === "gh" && a[1] === "pr" && a[2] === "ready") {
@@ -549,6 +565,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       : {}),
     ...(o.deleteBranch !== undefined ? { deleteBranch: () => o.deleteBranch as boolean } : {}),
     ...(o.releaseLock !== undefined ? { releaseLock: o.releaseLock } : {}),
+    ...(o.mergeTrain !== undefined ? { mergeTrain: () => o.mergeTrain as boolean } : {}),
+    ...(o.ciFixupMax !== undefined ? { ciFixupMax: () => o.ciFixupMax as number } : {}),
     // One serial queue, like the daemon's: pipeline I/O folds its results back in through it.
     enqueue: (fn) => {
       const p = queue.then(fn);
@@ -626,7 +644,11 @@ export function pipelineHarness(o: HarnessOptions = {}) {
 
   const run = (role: Role, task = "T1") => rec.pipeline[task]?.runs[role];
   const PR_BRANCH = branchName("w1", "T1", "implementer", 1);
-  const prBranch = (task: string) => branchName("w1", task, "implementer", 1);
+  /** A task's PR branch: its implementer's first, or a merge train's integration branch. */
+  const prBranch = (task: string) =>
+    rec.wave?.tasks[task]?.train !== undefined
+      ? trainBranch("w1", task)
+      : branchName("w1", task, "implementer", 1);
 
   const h = {
     home,
@@ -699,6 +721,14 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       await journal({ type: "stage_entered", task: id, data: { stage: "implement" } });
       return agent_id;
     },
+    /**
+     * A merge train's synthetic task is admitted and its integrator starts (the daemon's admission
+     * spawn), with the `.volley/integrate.md` the driver renders for it.
+     */
+    async admitTrain(id: string) {
+      await journal({ type: "task_admitted", task: id, data: {} });
+      return spawnAgent("integrator", undefined, driver.integrateFiles(id), undefined, id);
+    },
     /** The implementer opens its PR once (the first push). */
     openPr(head: string, task = "T1", number = 7, o: { draft?: boolean; body?: string } = {}) {
       world.prs.push({
@@ -766,7 +796,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       }
     },
     /** A role's current run publishes `blocked` with `reason` (the agent stays alive). */
-    async block(role: Role, reason: string, task = "T1") {
+    async block(role: Role, reason: string, task = "T1", payload: Record<string, unknown> = {}) {
       const r = run(role, task);
       if (r === undefined) throw new Error(`no ${role} run`);
       await driver.handle(task, {
@@ -774,10 +804,12 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         role,
         agent_id: r.agent_id,
         reason,
-        payload: { reason },
+        payload: { reason, ...payload },
       });
       await driver.settled();
     },
+    /** The driver's I/O and every autopilot answer handed back, until none is left. */
+    settle,
     /** Resolve an open decision and hand the resolution to the pipeline. */
     async resolve(id: string, answer: string, by = "coord-1") {
       const r = resolveEvent(rec, id, { answer, by }, new Date());

@@ -104,7 +104,8 @@ describe.skipIf(process.env.VOLLEYD_SOAK !== "1")(`the soak (${TASKS} tasks, see
         const state = env.daemon.snapshot(WAVE);
         const tasks = state?.tasks ?? [];
         const real = tasks.filter((t) => t.synthetic !== true);
-        const fixers = tasks.filter((t) => t.synthetic === true);
+        const fixers = tasks.filter((t) => t.synthetic === true && t.remediation !== undefined);
+        const trains = tasks.filter((t) => t.synthetic === true && t.train !== undefined);
         expect(real.map((t) => t.id)).toEqual(sc.tasks);
 
         // Every task merged by the supervisor, and the fixer too.
@@ -117,6 +118,20 @@ describe.skipIf(process.env.VOLLEYD_SOAK !== "1")(`the soak (${TASKS} tasks, see
         const fixer = fixers[0]?.id as string;
         expect(merged.has(fixer)).toBe(true);
         expect(env.world.fixedBy()).not.toBeNull();
+
+        // Merge trains formed and merged (SPEC §4.6.23): each with its members done via the train.
+        const trainMerged = of(j, "train_merged");
+        expect(trainMerged.length, "a merge train merged").toBeGreaterThanOrEqual(1);
+        for (const e of trainMerged) {
+          expect(trains.find((t) => t.id === e.data.train)?.stage).toBe("done");
+          for (const m of e.data.tasks as string[])
+            expect(
+              of(j, "merged_by_supervisor").some(
+                (x) => x.task === m && x.data.via === "train" && x.data.train_pr === e.data.pr,
+              ),
+              `${m} merged via ${e.data.train}`,
+            ).toBe(true);
+        }
 
         // The fix released every task the flake blocked.
         const blocked = new Set(
@@ -209,7 +224,10 @@ describe.skipIf(process.env.VOLLEYD_SOAK !== "1")(`the soak (${TASKS} tasks, see
             stage: "done",
             pr: x.pr.number,
           });
-        expect(listed.size).toBe(digest.shipped.length);
+        // A merge train is a row of its own (its PR), and ships nothing itself.
+        for (const t of trains)
+          expect(listed.get(t.id)?.stage, `status row of ${t.id}`).toBe("done");
+        expect(listed.size).toBe(digest.shipped.length + trains.length);
         expect(status.stdout).toContain(
           `autopilot: on · ${digest.auto.decisions_resolved} auto-resolved`,
         );

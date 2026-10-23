@@ -15,6 +15,7 @@ export const ROLES = [
   "fixup",
   "rebase",
   "release",
+  "integrator",
 ] as const;
 export type Role = (typeof ROLES)[number];
 

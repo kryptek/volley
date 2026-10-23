@@ -25,6 +25,8 @@ const ROLE_STEP: Record<Role, number> = {
   fixup: 2,
   // The rebase agent fixes the branch up after the release branch moved: the fixup step.
   rebase: 2,
+  // A merge train's integrator implements its train task.
+  integrator: 0,
 };
 
 export function Pipeline({
