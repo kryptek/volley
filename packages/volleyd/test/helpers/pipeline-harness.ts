@@ -128,6 +128,8 @@ export interface World {
   mergeRefuse?: string | undefined;
   /** The merge commit per PR number once merged (default sha(0xa11)). */
   mergeCommit: Record<number, string>;
+  /** An event this answers true for is not appended: the journal throws (a full disk). */
+  journalFail?: ((ev: NewEvent) => boolean) | undefined;
 }
 
 export interface Spawned {
@@ -226,6 +228,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
   const events: JournalEvent[] = [];
   let seq = 0;
   const journal = async (ev: NewEvent) => {
+    if (world.journalFail?.(ev) === true) throw new Error(`journal: cannot append ${ev.type}`);
     const e: JournalEvent = { ...ev, seq: ++seq, at: new Date().toISOString() } as JournalEvent;
     events.push(e);
     rec = apply(rec, e);

@@ -444,3 +444,109 @@ describe("merge train: failure", () => {
     expect(existsSync(gate()?.data.evidence_path as string)).toBe(true);
   });
 });
+
+describe("merge train: a conflict's other answers", () => {
+  /** The integrator blocked on member two, the merge_conflict left open for the owner. */
+  async function blockedOnT2(o: HarnessOptions = {}) {
+    await threeGatedBehind(o);
+    await trainStarted();
+    await h.block("integrator", "PR #8 conflicts in src/batch.ts", TRAIN, { pr: 8 });
+    const d = h.openDecisions().find((x) => x.kind === "merge_conflict");
+    expect(d).toMatchObject({ task: "T2", train: TRAIN });
+    return d?.decision_id as string;
+  }
+
+  it("respawn: a fresh integrator on the same train; nothing fails", async () => {
+    const id = await blockedOnT2();
+    const agent = h.run("integrator", TRAIN)?.agent_id as string;
+    await h.resolve(id, "respawn");
+    expect(h.retired).toContainEqual({ agent_id: agent, status: "relaunched" });
+    const integrators = h.spawns.filter((s) => s.task === TRAIN && s.role === "integrator");
+    expect(integrators).toHaveLength(2);
+    expect(h.run("integrator", TRAIN)?.agent_id).not.toBe(agent);
+    expect(ofType("train_failed")).toEqual([]);
+    expect(h.record().state?.trains?.[0]?.state).toBe("integrating");
+  });
+
+  it("manual: the member goes to a person, the train fails (its integrator retired once) and re-forms without it", async () => {
+    const id = await blockedOnT2();
+    const agent = h.run("integrator", TRAIN)?.agent_id as string;
+    await h.resolve(id, "manual");
+    expect(ofType("train_failed").map((e) => e.data)).toEqual([
+      expect.objectContaining({ train: TRAIN, tasks: ["T1", "T2", "T3"] }),
+    ]);
+    expect(h.retired.filter((r) => r.agent_id === agent)).toEqual([
+      { agent_id: agent, status: "stopped" },
+    ]);
+    expect(h.task(TRAIN)?.stage).toBe("cancelled");
+    expect(queue().map((e) => e.task)).not.toContain("T2");
+    await h.tick();
+    expect(ofType("train_started").map((e) => [e.data.train, e.data.tasks])).toEqual([
+      [TRAIN, ["T1", "T2", "T3"]],
+      ["train-2", ["T1", "T3"]],
+    ]);
+  });
+
+  it("drop: its integrator is retired once", async () => {
+    const id = await blockedOnT2();
+    const agent = h.run("integrator", TRAIN)?.agent_id as string;
+    await h.resolve(id, "drop T2");
+    expect(ofType("train_failed")[0]?.data).toMatchObject({ dropped: "T2" });
+    expect(h.retired.filter((r) => r.agent_id === agent)).toEqual([
+      { agent_id: agent, status: "stopped" },
+    ]);
+  });
+
+  it("cancel: the train task is cancelled; the next tick journals train_failed (cancelled) and frees the lock", async () => {
+    const held = new Map<string, string>();
+    const id = await blockedOnT2({ releaseLock: releaseLockOn(held) });
+    await h.resolve(id, "cancel");
+    expect(h.task(TRAIN)?.stage).toBe("cancelled");
+    await h.tick();
+    expect(ofType("train_failed").map((e) => e.data)).toEqual([
+      { train: TRAIN, why: "cancelled", tasks: ["T1", "T2", "T3"] },
+    ]);
+    expect(h.record().state?.trains?.[0]?.state).toBe("failed");
+    expect(held.get("/repo#release/w1")).not.toBe(`w1/${TRAIN}`);
+  });
+});
+
+describe("merge train: the release lock on the way in and out", () => {
+  it("train_started fails to journal: the lock is freed, and a later tick forms the train", async () => {
+    const held = new Map<string, string>();
+    await threeGatedBehind({ releaseLock: releaseLockOn(held) });
+    let fail = true;
+    h.world.journalFail = (ev) => fail && ev.type === "train_started";
+    await h.tick();
+    expect(ofType("train_started")).toEqual([]);
+    expect(held.has("/repo#release/w1")).toBe(false);
+    fail = false;
+    await h.tick();
+    expect(ofType("train_started").map((e) => e.data.train)).toEqual([TRAIN]);
+    expect(held.get("/repo#release/w1")).toBe(`w1/${TRAIN}`);
+  });
+
+  it("a transient refusal of the train's merge (#445): the lock is kept, retried after the backoff, merged", async () => {
+    const held = new Map<string, string>();
+    await threeGatedBehind({ releaseLock: releaseLockOn(held) });
+    await trainStarted();
+    contains(TH, ["T1", "T2", "T3"]);
+    h.world.mergeRefuse = "GraphQL: Merge already in progress (mergePullRequest)";
+    await h.finish("integrator", { task: TRAIN, head: TH, ci: "green", result: RESULT });
+    expect(mergeCalls()).toHaveLength(1);
+    expect(ofType("train_failed")).toEqual([]);
+    expect(h.openDecisions()).toEqual([]);
+    expect(
+      ofType("alarm_raised").find((e) => e.data.alarm === "merge_refused")?.data,
+    ).toMatchObject({ reason: "transient", attempt: 1 });
+    await h.tick();
+    expect(held.get("/repo#release/w1")).toBe(`w1/${TRAIN}`);
+
+    h.world.mergeRefuse = undefined;
+    h.elapse(60_000);
+    await h.tick();
+    expect(mergeCalls()).toHaveLength(2);
+    expect(ofType("train_merged")).toHaveLength(1);
+    for (const t of ["T1", "T2", "T3", TRAIN]) expect(h.task(t)?.stage).toBe("done");
+  });
+});

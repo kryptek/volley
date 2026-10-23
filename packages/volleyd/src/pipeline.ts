@@ -4230,19 +4230,15 @@ function trainConflictAnswer(
   const run = v.p.runs.integrator;
   const agent = (d as { agent_id?: unknown }).agent_id;
   const ours = run !== undefined && run.agent_id === agent;
-  const stop: PipelineAction[] =
-    ours && run.retired === undefined
-      ? [{ kind: "retire", agent_id: run.agent_id, status: "stopped" }]
-      : [];
+  // drop / manual: trainFailed stops the integrator (with every other live run of the train).
   if (isAnswer(answer, `drop ${member}`.toLowerCase()))
-    return [...stop, ...trainFailed(v, t, `${member} dropped (its conflict)`, { dropped: member })];
+    return trainFailed(v, t, `${member} dropped (its conflict)`, { dropped: member });
   if (isRespawnAnswer(answer, d.options))
     return ours && !run.accepted
       ? [{ kind: "relaunch", role: "integrator", agent_id: run.agent_id }]
       : [];
   // manual: the reducer handed the member to a person (it leaves the queue); the train goes.
-  if (isAnswer(answer, "manual"))
-    return [...stop, ...trainFailed(v, t, `${member} handed to a person`)];
+  if (isAnswer(answer, "manual")) return trainFailed(v, t, `${member} handed to a person`);
   return [
     {
       kind: "decide",
@@ -4891,19 +4887,31 @@ export class PipelineDriver {
       release_branch: release,
     })
       .then(
-        (sha) => this.deps.enqueue(() => this.trainStarted(t, sha)),
+        (sha) =>
+          this.deps.enqueue(() =>
+            this.trainStarted(t, sha).catch((e: unknown) => {
+              this.dropForming(t);
+              throw e;
+            }),
+          ),
         (e: unknown) =>
           this.deps.enqueue(async () => {
             this.deps.log?.(`pipeline ${this.wave} ${t.id}: ${String(e)}`);
-            if (this.trainLock?.forming?.id !== t.id) return;
-            this.lock.release(branch, key);
-            this.trainLock = undefined;
+            this.dropForming(t);
           }),
       )
       .catch((e: unknown) => this.deps.log?.(`pipeline ${this.wave} ${t.id}: ${String(e)}`))
       .finally(() => this.chains.delete(p));
     this.chains.add(p);
     return true;
+  }
+
+  /** The train `t` formed but never started (its tip unread, its start not journaled): unlock. */
+  private dropForming(t: Train): void {
+    const held = this.trainLock;
+    if (held?.forming?.id !== t.id) return;
+    this.lock.release(held.branch, held.key);
+    this.trainLock = undefined;
   }
 
   /**
