@@ -353,6 +353,7 @@ export function SettingsWindow(p: SettingsWindowProps) {
                 onAdmin={setPeerAdmin}
                 onOpenSetting={openSetting}
                 onOpenRepos={() => setSec("repos")}
+                waveConfig={p.config}
               />
             )}
             {sec === "repos" && (

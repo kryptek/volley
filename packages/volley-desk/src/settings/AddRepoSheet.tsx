@@ -71,7 +71,11 @@ export function AddRepoSheet({ ops, machines, localName, readiness, onClose }: A
     }),
   );
   const problem = slugProblem(slug);
-  const pathBad = chosen.some((m) => adopt[m]?.on && pathProblem(adopt[m]?.path ?? "") !== null);
+  // A ticked existing clone needs its path: left empty, the machine would quietly clone instead.
+  const pathBad = chosen.some((m) => {
+    const p = adopt[m]?.on ? adopt[m]?.path.trim() : undefined;
+    return p !== undefined && (p === "" || pathProblem(p) !== null);
+  });
   const valid = slug.trim() !== "" && problem === null && chosen.length > 0 && !pathBad;
 
   const toggle = (m: string) =>

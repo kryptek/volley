@@ -254,6 +254,13 @@ describe("machineFixes per repository", () => {
     expect(fixFor("claude.trust", ctx, APP)?.command).toBe("cd /srv/work/app && claude");
   });
 
+  it("a repository with no clone yet never borrows the wave repo's path", () => {
+    const c = { machine: "box-a", repo: "/srv/work/wave", repos: [{ slug: APP }] };
+    expect(fixFor("repo.clone", c, LIB)?.text).toBe(`Repair clones ${LIB} to <the repo's clone>`);
+    expect(fixFor("repo.fetch", c, APP)?.command).toBe("git -C <the repo's clone> fetch origin");
+    expect(fixFor("repo.fetch", c)?.command).toBe("git -C /srv/work/wave fetch origin");
+  });
+
   it("tool.<name> names the repository that needs it", () => {
     expect(fixFor("tool.java", ctx, LIB)?.text).toBe(
       `install java on box-a (needed by ${LIB}), on the PATH its agents get`,

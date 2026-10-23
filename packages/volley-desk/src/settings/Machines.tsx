@@ -45,6 +45,7 @@ import {
 import { type AdminStatus, type PeerOps, joinCommand, pairingSupported } from "../store/peerOps";
 import type {
   ClaudeSignin,
+  ConfigPayload,
   MachinePayload,
   ReadinessPayload,
   WaveStatePayload,
@@ -103,6 +104,8 @@ export interface MachinesProps {
   onOpenSetting?: ((path: string) => void) | undefined;
   /** Open Settings › Repositories (a card's Repositories… link). */
   onOpenRepos?: (() => void) | undefined;
+  /** volleyd's config (`_waves/_config`): the repositories it assigns to each machine. */
+  waveConfig?: ConfigPayload | null | undefined;
   /** The Claude account groups (App's `deskAccountGroups`), the sign-ins and volleyd's control. */
   claude?: {
     groups: AccountGroup[];
@@ -639,6 +642,7 @@ export function Machines(p: MachinesProps) {
         self && p.onOpenSetting ? () => p.onOpenSetting?.("fleet.local_agents") : undefined
       }
       onOpenRepos={p.onOpenRepos}
+      waveConfig={p.waveConfig}
     />
   );
 

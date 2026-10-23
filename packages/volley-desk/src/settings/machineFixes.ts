@@ -41,13 +41,14 @@ interface Ctx extends FixContext {
 
 type Fixer = (c: Ctx) => MachineFix;
 
-/** The clone the check is about: its repository's, else the wave repo's. */
+/**
+ * The clone the check is about: its repository's (never the wave repo's, which is another
+ * repository), else the wave repo's.
+ */
 const repoOf = (c: Ctx) =>
   (c.slug !== undefined
     ? c.repos?.find((r) => r.slug.toLowerCase() === c.slug?.toLowerCase())?.path
-    : undefined) ??
-  c.repo ??
-  "<the repo's clone>";
+    : c.repo) ?? "<the repo's clone>";
 
 /** The repository a check is about, in words. */
 const nameOf = (c: Ctx) => c.slug ?? "the wave repo";

@@ -96,6 +96,17 @@ describe("Add repository sheet", () => {
     });
   });
 
+  it("an existing clone ticked with no path keeps Add disabled", () => {
+    setup();
+    type(APP);
+    fireEvent.click(sheet().getByRole("checkbox", { name: "Use an existing clone on box-a" }));
+    expect(addButton()).toBeDisabled();
+    fireEvent.change(sheet().getByRole("textbox", { name: "Existing clone on box-a" }), {
+      target: { value: "/srv/work/app" },
+    });
+    expect(addButton()).toBeEnabled();
+  });
+
   it("no machine checked: nothing to add to", () => {
     setup();
     type(APP);

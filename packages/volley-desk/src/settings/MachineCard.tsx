@@ -28,7 +28,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { maskEmail } from "../lib/email";
 import { plural } from "../lib/plural";
 import { type PeerInvite, type PeerOps, joinCommand } from "../store/peerOps";
-import type { MachinePayload, ReadinessPayload } from "../store/types";
+import type { ConfigPayload, MachinePayload, ReadinessPayload } from "../store/types";
 import { UsageTriple } from "./ClaudeAccounts";
 import { CheckRows, CopyCommand } from "./MachineRows";
 import { RemoveMachineSheet } from "./RemoveMachineSheet";
@@ -433,13 +433,15 @@ export interface MachineCardProps {
   onOpenLocalAgents?: (() => void) | undefined;
   /** Open Settings › Repositories. */
   onOpenRepos?: (() => void) | undefined;
+  /** volleyd's config: a repository it assigns here shows before any verdict or record has it. */
+  waveConfig?: ConfigPayload | null | undefined;
 }
 
 export function MachineCard(p: MachineCardProps) {
   const { m, r, now, ops } = p;
   const [open, setOpen] = useState<Open>(null);
   const down = m.tunnel === "down";
-  const repos = reposOnMachine(m.name, null, m, r);
+  const repos = reposOnMachine(m.name, p.waveConfig ?? null, m, r);
   const ctx = { machine: m.name, repo: m.repo?.path, repos };
   const pairing = p.admin && !p.self && ops !== null;
   return (

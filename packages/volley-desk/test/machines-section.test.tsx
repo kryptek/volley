@@ -952,6 +952,26 @@ describe("Machines: each card lists its repositories read-only (#438)", () => {
   });
 });
 
+describe("Machines: a repository config just assigned shows before any verdict (#438)", () => {
+  it("the card lists it as waiting for volleyd", async () => {
+    setup({
+      machines: { "box-a": boxA },
+      waveConfig: {
+        version: 3,
+        updated_at: iso(NOW),
+        updated_by: "volleyd",
+        hosts: { "box-a": { target: "you@box-a" } },
+        repos: { "example-org/docs": { machines: ["box-a"] } },
+      },
+    });
+    await act(flush);
+    const list = within(within(card("box-a")).getByRole("list", { name: "Repositories on box-a" }));
+    expect(
+      list.getByRole("listitem", { name: "example-org/docs: waiting for volleyd" }),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("Machines: the read-only notice links to an admin sign-in (#328)", () => {
   afterEach(() => localStorage.clear());
 
