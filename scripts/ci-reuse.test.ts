@@ -212,3 +212,11 @@ describe("the CLI", () => {
     expect(cli(["frobnicate"], gh).code).toBe(2);
   });
 });
+
+describe("ci.yml's reuse lookup", () => {
+  test("a failure in the lookup job is no reuse, never a red run", async () => {
+    const text = await Bun.file(join(import.meta.dir, "../.github/workflows/ci.yml")).text();
+    const ci = Bun.YAML.parse(text) as { jobs: Record<string, { "continue-on-error"?: boolean }> };
+    expect(ci.jobs.reuse?.["continue-on-error"]).toBe(true);
+  });
+});

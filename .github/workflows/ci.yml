@@ -12,7 +12,7 @@ on:
   schedule:
     - cron: "17 6 * * *"
 
-# A full run is every push (main, release/**), the nightly, a release PR (its head is release/**,
+# A full run is every push (main, release/**) that runs the suite, the nightly, a release PR (its head is release/**,
 # or its title starts `release:`) and a PR labelled `ci:full`. Every other PR runs the newest bun
 # only and the 8-task soak: the jobs below spell the condition out (a matrix cannot read `env`);
 # its four copies (test, test-desk, test-volleyd, soak-full) must stay identical.
@@ -26,6 +26,10 @@ on:
 # `success` (scripts/ci-reuse.ts). Anything else — a release commit, a PR merged behind its base,
 # a red or missing run, a lookup error — runs everything. A push to main, the nightly and a
 # pull_request run never reuse, so reuse never chains.
+#
+# Trade-off (accepted): a task PR's run is not a full run, so a reused release/** push gets neither
+# bun 1.3 nor the 32-task soak. Those run for a wave's commits at the release PR (a full run, which
+# never reuses) and on main.
 jobs:
   tested-tree:
     # The tree this run tests; on a pull_request, recorded for the push that merges it. A failed
@@ -55,9 +59,11 @@ jobs:
 
   reuse:
     # Only on a push to release/**; skipped elsewhere, and a skipped `reuse` leaves `run` empty,
-    # so every job below runs. A failed lookup is "no reuse", never a skipped suite.
+    # so every job below runs. A failed lookup is "no reuse", never a skipped suite, and (with
+    # continue-on-error) never a red run: a failed checkout or setup-bun here only runs everything.
     name: CI reuse lookup
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/')
+    continue-on-error: true
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.lookup.outputs.run }}
