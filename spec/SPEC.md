@@ -368,7 +368,7 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 - `merge_refused` — asks about a task the host refused to merge `autopilot.merge_retry_max` times at one gated head (`retry` | `manual` | `cancel`); §4.6.17.
 - `release_go` — wave-level, offers `go` and `hold`, and carries `stages` (each playbook stage as `{ name, evidence? }`, `evidence` being where its evidence lives); §4.6.19.
 - `stage_go` — wave-level, offers `go`, `skip` and `hold`, and carries `stage` (the owner-gated stage it asks about) and `stages` (the stages verified before it, as `release_go`'s); §4.6.19.
-- `terminal_status_lost` — an agent's terminal status (`done` | `failed`) the supervisor could not hand to its pipeline, even on recovery; carries `agent_id`, `role`, `status`, `status_at` and `why`, does not park the task, and offers `accept done` (apply the status as if it had just arrived) and, where the supervisor can spawn the role, `relaunch`.
+- `terminal_status_lost` — an agent's terminal status (`done` | `failed`) the supervisor could not hand to its pipeline, even on recovery; carries `agent_id`, `role`, `status`, `status_at` and `why`, does not park the task, and offers `accept done` (apply the published status, `done` or `failed`, as if it had just arrived) and, where the supervisor can spawn the role, `relaunch`.
 <!-- /spec-list -->
 
 A decision that offers `respawn` for an agent whose host is down or not eligible (§4.6.15) also offers `respawn on <best>`, `<best>` being the best eligible machine when it opened; on a host closed to new agents it offers `respawn on <best>` instead of `respawn`.

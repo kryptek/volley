@@ -252,6 +252,40 @@ describe("daemon: a dropped terminal status (#414)", () => {
     expect(lostOpened()).toHaveLength(1);
   });
 
+  it("a done the pipeline retired before it threw is not asked about", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({
+      daemon: { clock },
+      exec: ARTIFACTS_OK,
+      pipeline: "[implement, spec_review]",
+    });
+    // The pipeline accepts and retires the done; its next action (the next stage) throws.
+    const d = s.daemon as unknown as {
+      pipelineFor(w: string): PipelineDriver;
+      retireRole(w: string, agentId: string, status: string): Promise<void>;
+    };
+    const real = d.pipelineFor.bind(d);
+    d.pipelineFor = (w) => {
+      const p = real(w);
+      return Object.assign(Object.create(p), {
+        handle: async (task: string, ev: PipelineEvent) => {
+          if (ev.kind !== "agent_done") return p.handle(task, ev);
+          await d.retireRole(w, AGENT, "done");
+          throw new Error("spawn failed");
+        },
+      });
+    };
+    await s.status("done", { summary: "ok" });
+    await s.consumed();
+    await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    expect(
+      s.journal().some((e) => e.type === "alarm_raised" && e.data.alarm === "pipeline_error"),
+    ).toBe(true);
+    await pass(clock, late);
+    await pass(clock, recover);
+    expect(lostOpened()).toHaveLength(0);
+  });
+
   it("accept done whose handoff throws again asks again", async () => {
     const clock = fakeClock(Date.now());
     s = await makeSupervisedEnv({ daemon: { clock } });
