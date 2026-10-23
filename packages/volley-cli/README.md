@@ -67,7 +67,7 @@ volley --help
 | `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (doctor, account, tunnel service, trust check, host entry), `doctor` (check this machine, `--fix` the safe things), `run` (the service). See [`volley peer`](#volley-peer) below and the volleyd README's "Paired machines". |
 | `volley setup`  | First-run / repair wizard: broker, accounts, services, phone sign-in QR. See [`volley setup`](#volley-setup) below. |
 | `volley desk serve` | Serve the built Desk from a small static server (the service `volley setup` installs). See [`volley desk serve`](#volley-desk-serve) below. |
-| `volley deploy` | Take this machine's volleyd and Desk services to a release tag: build the Desk, restart, health-check, roll back on failure. See [`volley deploy`](#volley-deploy) below. |
+| `volley deploy` | Take this machine's volleyd and Desk services to a release tag: build the Desk, restart, health-check, roll back on failure; then every paired machine. See [`volley deploy`](#volley-deploy) below. |
 
 Each has its own `--help`:
 
@@ -184,9 +184,21 @@ On a failure after the checkout it repeats the checkout, install, build, restart
 dry run: nothing changed
 ```
 
-A dry run runs only `git status --porcelain`, the current-ref lookup (`git describe --tags --exact-match HEAD`, then `git rev-parse`) and `git tag --list 'v*'`; it never fetches, so a tag not fetched yet is shown as such.
+A dry run runs only `git status --porcelain`, the current-ref lookup (`git describe --tags --exact-match HEAD`, then `git rev-parse`) and `git tag --list 'v*'`; it never fetches, so a tag not fetched yet is shown as such. It also prints each paired machine's plan, and runs nothing on any of them.
 
-Exit codes: `0` deployed, `1` failed (rolled back, or the by-hand commands printed), `2` usage (including no service manager, or `--repo` without a `bun.lock`), `3` local changes in the services checkout.
+**Paired machines.** Once the supervisor's health check passes, the deploy takes every paired machine to the same tag, one at a time. The machines come from volleyd's records on the supervisor (`$VOLLEYD_HOME/peers.json`, less any being removed, and each one's `hosts.<name>` in `config.yaml` for its ssh target and `volley_dir`); a machine missing either is reported `<name>: skipped (<why>)`. On each, over `ssh -T -o BatchMode=yes <target> bash -s` (one quoted command per connection, on stdin), in its volley checkout:
+
+1. `git status --porcelain` (local changes: `failed at status`, nothing changed) and the ref it is at;
+2. `git fetch --tags origin`, then `git checkout --detach <tag>`;
+3. `bun install --frozen-lockfile`, then record the `bun.lock` it installed from in `node_modules/.volley-lock-sha256` (what the doctor's own install records), so the machine's doctor says the dependencies are installed;
+4. restart `volley peer run` (`systemctl --user restart volley-peer.service`, or `launchctl kickstart -k gui/<uid>/systems.volley.peer` on macOS), which runs its doctor at start;
+5. `bun <volley_dir>/packages/volley-cli/src/cli.ts peer doctor --json`: it must report the tag's version.
+
+Each machine ends with one health line: `athena: v0.5.0 ✓ eligible`, or `athena: v0.5.0 ✗ not eligible: <check> (<detail>)` when a block check fails on the new version (left on the tag: going back would not fix it). A machine that fails a step after its checkout goes back to the ref it was at (checkout, install and lock record, restart) and is reported `hermes: failed at install (<why>); rolled back to v0.4.0`; the supervisor and the other machines stay on the tag. A failed deploy of the supervisor touches no paired machine. Every remote command goes through a fence of exact argv shapes per machine (the tag, or the machine's own previous ref, and nothing else).
+
+`--skip-peers` deploys the supervisor only. `--only <machine>` (repeatable) deploys just those paired machines, to the tag the supervisor already runs (it refuses otherwise), and leaves the supervisor alone: the way to retry one machine after fixing it.
+
+Exit codes: `0` deployed (and every paired machine eligible), `1` failed (rolled back, or the by-hand commands printed; or a paired machine failed, was skipped or is not eligible), `2` usage (including no service manager, `--repo` without a `bun.lock`, an `--only` name that is not paired, or `--only` while the supervisor runs another tag), `3` local changes in the services checkout.
 
 ---
 
@@ -435,7 +447,10 @@ reads every 10 minutes (its doctor's interval) and the supervisor's machine ever
 pairing code is used, so the code stays valid while you fix things (it prints the exact
 `volley peer doctor --fix --repo …` to run); `warn` checks, the ssh `PATH` estimate among them,
 are printed and the join goes on. `volley peer run` (whose service file carries the `PATH` the
-join ran with) runs it every `PEER_DEFAULTS.doctor_interval_s` (600 s, on a monotonic clock),
+join ran with) runs it once at start, and its first heartbeat waits up to
+`PEER_DEFAULTS.first_doctor_wait_ms` (45 s) for that run, so a service restarted on a new version
+(`volley deploy` restarts it) publishes a fresh verdict, never the last one before the restart.
+It runs it again every `PEER_DEFAULTS.doctor_interval_s` (600 s, on a monotonic clock),
 and at once on the next heartbeat when something the result depends on changed: the volley
 checkout's `package.json`, `bun.lock` or `node_modules/.volley-lock-sha256` (a checkout update,
 a `bun install`; a stat per beat), or `~/.volley/peer-doctor-ran`, which every `volley peer

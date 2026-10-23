@@ -210,6 +210,11 @@ export const PEER_DEFAULTS = {
    * is given up (the last result stays) so the next interval can start a fresh one.
    */
   doctor_timeout_ms: 300_000,
+  /**
+   * At start (a restart after an upgrade, say), the first heartbeat waits this long for the
+   * doctor's first run, so the first record carries a fresh verdict; a slower run follows it.
+   */
+  first_doctor_wait_ms: 45_000,
   /** How long the doctor waits for the supervisor's retained readiness verdict (its requirements). */
   readiness_wait_ms: 1_000,
   /** The doctor's Claude usage probe: one call per login at most this often, its backoff cap and timeout. */
@@ -1472,7 +1477,7 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
   // stat per beat). Readiness follows the machine, never the service's uptime: a checkout update,
   // a `bun install` or a `volley peer doctor --fix` re-runs the doctor on the next beat.
   let doctoredOn: string | null = null;
-  const startDoctor = (b: VolleyBroker) => {
+  const startDoctor = (b: VolleyBroker): Promise<void> => {
     doctoring = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
@@ -1483,7 +1488,7 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
       // Never what keeps the process alive after the service stops.
       timer.unref?.();
     });
-    void Promise.race([peerDoctor(deps, cfg, b), timeout])
+    return Promise.race([peerDoctor(deps, cfg, b), timeout])
       .then(async (r) => {
         report = r;
         if (stop.signal.aborted || broker === null) return;
@@ -1512,9 +1517,23 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
           !doctoring &&
           (now - doctorAt >= PEER_DEFAULTS.doctor_interval_s * 1000 || inputs !== doctoredOn)
         ) {
+          const first = doctorAt === Number.NEGATIVE_INFINITY;
           doctorAt = now;
           doctoredOn = inputs;
-          startDoctor(broker);
+          const run = startDoctor(broker);
+          // The first run, at start: the first record waits a little for it, so readiness never
+          // carries the last run before this start (a stale install verdict after an upgrade).
+          if (first) {
+            const waited = new AbortController();
+            const stopWaiting = () => waited.abort();
+            stop.signal.addEventListener("abort", stopWaiting);
+            await Promise.race([
+              run,
+              deps.sleep(PEER_DEFAULTS.first_doctor_wait_ms, waited.signal).catch(() => {}),
+            ]);
+            waited.abort();
+            stop.signal.removeEventListener("abort", stopWaiting);
+          }
         }
         await broker.publish(
           machineTopic(cfg.name),

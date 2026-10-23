@@ -5,14 +5,20 @@ import { parseArgs } from "node:util";
 import type { BrokerAuth } from "volley-mcp/config";
 import { resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
 import { volleydHome } from "../auth/context";
-import { applyDeploy } from "../deploy/apply";
-import { deployFence, isRollbackBranch } from "../deploy/fence";
+import { applyDeploy, currentRef } from "../deploy/apply";
+import { deployFence } from "../deploy/fence";
 import { deskHealthy, volleydHealthy } from "../deploy/health";
 import {
+  type PairedPeer,
+  type PeerResult,
+  deployPeer,
+  pairedPeers,
+  peerPlan,
+  sshCommand,
+} from "../deploy/peers";
+import {
   DEPLOY,
-  type Ref,
   type ServicesInstall,
-  TAG_RE,
   deployPlan,
   git,
   normaliseTag,
@@ -26,7 +32,7 @@ import {
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { readSetupInstall } from "../setup/journal";
-import type { SetupExec } from "../setup/step";
+import type { ExecResult, SetupExec } from "../setup/step";
 import { findRepoRoot } from "./dash";
 import { DESK_PORT } from "./desk-serve";
 
@@ -34,7 +40,8 @@ import { DESK_PORT } from "./desk-serve";
  * `volley deploy [<tag>|--latest] [--dry-run]`: take the checkout this machine's volleyd and Desk
  * services run from to a release tag, build the Desk, self-check, restart both services,
  * health-check, and roll back to the previous ref on a failure. Waves survive the restart
- * (volleyd reconciles on start); the deploy sends volleyd no control op.
+ * (volleyd reconciles on start); the deploy sends volleyd no control op. Then every paired
+ * machine (`deploy/peers.ts`) over its ssh: a machine that fails rolls back alone.
  */
 
 export interface DeployDeps {
@@ -56,14 +63,17 @@ export interface DeployDeps {
     namespace: string;
     since: Date;
   }) => Promise<string | null>;
+  /** One command on a paired machine (real: `ssh <target> bash -s` through `exec`). */
+  remote: (peer: PairedPeer, c: { argv: string[]; cwd?: string }) => Promise<ExecResult>;
 }
 
 const wait = { timeoutMs: DEPLOY.health_timeout_ms, pollMs: DEPLOY.poll_ms };
 
 async function realDeployDeps(env: Record<string, string | undefined>): Promise<DeployDeps> {
   const { realSetupDeps } = await import("./setup");
+  const exec = realSetupDeps(env).exec;
   return {
-    exec: realSetupDeps(env).exec,
+    exec,
     platform: process.platform,
     uid: process.getuid?.() ?? 0,
     home: env.HOME ?? homedir(),
@@ -72,6 +82,10 @@ async function realDeployDeps(env: Record<string, string | undefined>): Promise<
     now: () => new Date(),
     deskHealthy: (base, version) => deskHealthy(base, version, wait),
     volleydHealthy: (o) => volleydHealthy({ ...o, ...wait }),
+    remote: (peer, c) => {
+      const s = sshCommand(peer.target, c);
+      return exec(s.argv, { input: s.input });
+    },
   };
 }
 
@@ -105,6 +119,8 @@ export async function deploy({ argv, env, io, deps: given }: DeployArgs): Promis
         latest: { type: "boolean" },
         "dry-run": { type: "boolean" },
         "force-clean": { type: "boolean" },
+        "skip-peers": { type: "boolean" },
+        only: { type: "string", multiple: true },
         repo: { type: "string" },
         "desk-port": { type: "string" },
         "broker-url": { type: "string" },
@@ -152,6 +168,9 @@ export async function deploy({ argv, env, io, deps: given }: DeployArgs): Promis
   ) {
     return usage("--desk-port must be a port number (1..65535)");
   }
+  const only = (v.only as string[] | undefined) ?? [];
+  const skipPeers = v["skip-peers"] === true;
+  if (only.length > 0 && skipPeers) return usage("--only and --skip-peers exclude each other");
   let brokerUrl: string;
   let auth: BrokerAuth | null;
   let namespace: string;
@@ -173,6 +192,23 @@ export async function deploy({ argv, env, io, deps: given }: DeployArgs): Promis
   if (services === null) {
     io.stderr(`volley deploy: no service manager known here (${deps.platform})\n`);
     return EXIT.USAGE;
+  }
+
+  // The paired machines, from volleyd's records on this machine.
+  const paired: ReturnType<typeof pairedPeers> = skipPeers
+    ? { peers: [], problems: [] }
+    : pairedPeers(volleydHome(env));
+  let { peers, problems } = paired;
+  if (only.length > 0) {
+    const known = [...peers.map((p) => p.name), ...problems.map((p) => p.name)];
+    const unknown = only.filter((n) => !known.includes(n));
+    if (unknown.length > 0) {
+      return usage(
+        `--only ${unknown.join(", ")}: not a paired machine (${known.length > 0 ? `paired: ${known.join(", ")}` : "none is paired"})`,
+      );
+    }
+    peers = peers.filter((p) => only.includes(p.name));
+    problems = problems.filter((p) => only.includes(p.name));
   }
 
   // The services checkout: --repo, else the one volleyd's installed unit runs, else this one.
@@ -217,6 +253,34 @@ export async function deploy({ argv, env, io, deps: given }: DeployArgs): Promis
 
   io.stdout(`services checkout: ${repo} (${source})\n`);
   for (const n of notes) io.stdout(`${n}\n`);
+
+  // --only: those paired machines alone, to the tag the supervisor already runs.
+  if (only.length > 0) {
+    const at = await currentRef(exec, repo);
+    let tag = requested;
+    if (requested === "latest") {
+      const listed = await exec(git(repo, "tag", "--list", "v*"));
+      try {
+        tag = resolveTag(
+          listed.stdout.split("\n").map((t) => t.trim()),
+          "latest",
+        );
+      } catch (e) {
+        return usage(e instanceof Error ? e.message : String(e));
+      }
+    }
+    if (at === null || at.kind !== "tag" || at.name !== tag) {
+      return usage(
+        `--only deploys paired machines only, to the tag the supervisor runs: the supervisor runs ${at === null ? "an unknown ref" : refLabel(at)}, not ${tag}; deploy it first (without --only)`,
+      );
+    }
+    if (v["dry-run"] === true) {
+      printPeerPlans(io, peers, problems, tag);
+      io.stdout("dry run: nothing changed\n");
+      return EXIT.OK;
+    }
+    return (await deployPeers(io, deps, peers, problems, tag)) ? EXIT.OK : EXIT.ERROR;
+  }
 
   // Read-only: local changes, and where the checkout is now.
   const status = await exec(git(repo, "status", "--porcelain"));
@@ -277,8 +341,10 @@ export async function deploy({ argv, env, io, deps: given }: DeployArgs): Promis
       if (s.detail !== undefined) io.stdout(`       (${s.detail})\n`);
     });
     io.stdout(
-      `On a failure after the checkout it repeats the checkout, install, build, restarts and health-check at ${refLabel(from)}.\ndry run: nothing changed\n`,
+      `On a failure after the checkout it repeats the checkout, install, build, restarts and health-check at ${refLabel(from)}.\n`,
     );
+    printPeerPlans(io, peers, problems, target);
+    io.stdout("dry run: nothing changed\n");
     return EXIT.OK;
   }
 
@@ -305,7 +371,7 @@ export async function deploy({ argv, env, io, deps: given }: DeployArgs): Promis
   if (stashed) io.stdout(`stashed the local changes as ${stash} (git stash list shows it)\n`);
   if (r.ok) {
     io.stdout(`deployed ${r.to} (was ${r.from}); waves continue (volleyd reconciles on start)\n`);
-    return EXIT.OK;
+    return (await deployPeers(io, deps, peers, problems, r.to)) ? EXIT.OK : EXIT.ERROR;
   }
   const failed = r.failed as { step: string; why: string };
   const head = `volley deploy: ${r.to} failed at ${failed.step} (${failed.why})`;
@@ -320,31 +386,82 @@ export async function deploy({ argv, env, io, deps: given }: DeployArgs): Promis
   return EXIT.ERROR;
 }
 
+/** The dry run's plan for each paired machine. */
+function printPeerPlans(
+  io: IO,
+  peers: PairedPeer[],
+  problems: { name: string; why: string }[],
+  tag: string,
+): void {
+  if (peers.length === 0 && problems.length === 0) return;
+  io.stdout("then, on each paired machine (over ssh), in order:\n");
+  for (const p of peers) {
+    io.stdout(`  ${p.name} (${p.target}, ${p.volleyDir}):\n`);
+    io.stdout("       (read-only: git status, and the ref it is at)\n");
+    peerPlan(p, { kind: "tag", name: tag }, { fetch: true, doctor: true }).forEach((s, i) => {
+      io.stdout(`    ${i + 1}. ${s.title}\n`);
+      for (const c of s.commands) {
+        io.stdout(`       $ ${c.cwd !== undefined ? `cd ${c.cwd} && ` : ""}${c.argv.join(" ")}\n`);
+      }
+    });
+  }
+  for (const p of problems) io.stdout(`  ${p.name}: would be skipped (${p.why})\n`);
+  io.stdout(
+    "A machine that fails after its checkout goes back to its previous ref (checkout, install, restart); the others stay on the tag.\n",
+  );
+}
+
 /**
- * What HEAD is, for the rollback: its branch first (so it keeps the branch), then the release tag
- * it is exactly at, else the commit. A branch the fence would not check out again (`fix+x`) and a
- * non-release tag (`smoke-ok`) are passed over.
+ * The paired machines, one at a time, after the supervisor's deploy passed: a health line each.
+ * True when every machine is on `tag` and eligible.
  */
-async function currentRef(exec: SetupExec, repo: string): Promise<Ref | null> {
-  const branch = await exec(git(repo, "rev-parse", "--abbrev-ref", "HEAD"));
-  const b = branch.stdout.trim();
-  if (branch.code === 0 && b !== "HEAD" && isRollbackBranch(b)) return { kind: "branch", name: b };
-  const tag = await exec(git(repo, "describe", "--tags", "--exact-match", "HEAD"));
-  const t = tag.stdout.trim();
-  if (tag.code === 0 && TAG_RE.test(t)) return { kind: "tag", name: t };
-  const sha = await exec(git(repo, "rev-parse", "HEAD"));
-  const s = sha.stdout.trim();
-  return sha.code === 0 && /^[0-9a-f]{40}$/.test(s) ? { kind: "commit", name: s } : null;
+async function deployPeers(
+  io: IO,
+  deps: DeployDeps,
+  peers: PairedPeer[],
+  problems: { name: string; why: string }[],
+  tag: string,
+): Promise<boolean> {
+  if (peers.length === 0 && problems.length === 0) return true;
+  io.stdout(`paired machines: ${[...peers, ...problems].map((p) => p.name).join(", ")}\n`);
+  const results: PeerResult[] = [];
+  for (const p of peers) {
+    results.push(
+      await deployPeer(p, tag, {
+        remote: (c) => deps.remote(p, c),
+        report: (l) => io.stdout(`${l}\n`),
+      }),
+    );
+  }
+  for (const r of results) io.stdout(`${r.line}\n`);
+  for (const p of problems) io.stdout(`${p.name}: skipped (${p.why})\n`);
+  const behind = [
+    ...results.filter((r) => !r.eligible).map((r) => r.name),
+    ...problems.map((p) => p.name),
+  ];
+  if (behind.length === 0) return true;
+  io.stderr(
+    `volley deploy: ${behind.length} of ${results.length + problems.length} paired machines not eligible on ${tag}: ${behind.join(", ")}\n`,
+  );
+  return false;
 }
 
 export const DEPLOY_HELP = `Usage: volley deploy (<tag> | --latest) [--dry-run] [--force-clean] [--repo <dir>]
-                     [--desk-port <n>]
+                     [--desk-port <n>] [--skip-peers | --only <machine>...]
 
 Take the checkout this machine's volleyd and Desk services run from to a release tag: fetch
 tags, check the tag out (detached), bun install --frozen-lockfile, build the Desk, self-check,
 restart both services, health-check. A failure after the checkout repeats those steps at the
 previous branch (or tag, when HEAD was detached) and exits 1. Running waves continue: volleyd
 reconciles on start.
+
+Then every paired machine (volleyd's peers.json and hosts.<name>), one at a time over its ssh
+target, in its volley checkout: fetch tags, check the tag out, bun install --frozen-lockfile
+(recording the bun.lock it installed from), restart volley peer run, and run its doctor; one
+health line each (athena: v0.6.4 ✓ eligible). A machine that fails a step after its checkout
+goes back to its previous ref (checkout, install, restart) and is named with the step and why;
+the supervisor and the other machines stay on the tag, and the deploy exits 1. A failed deploy
+of the supervisor touches no paired machine.
 
 The services checkout is the one volleyd's installed service runs (its launchd plist or systemd
 unit); with none installed, the checkout this volley runs from. A checkout with local changes is
@@ -356,11 +473,15 @@ Options:
   --dry-run         Print every step and command; run only the read-only ones (no fetch)
   --force-clean     Stash local changes first (git stash push -u -m ${DEPLOY.stash_prefix}<time>)
   --repo <dir>      Deploy into this checkout instead of the services'
+  --skip-peers      Deploy this machine only
+  --only <machine>  Deploy this paired machine only (repeatable), to the tag this machine
+                    already runs; this machine is not touched
   --desk-port <n>   The Desk's port for the health check (default: setup's, else ${DESK_PORT})
   --broker-url <url>, --namespace <ns>, --username <u>, --password <pw>
                     Where volleyd's health is read (as for volley list)
   -h, --help        Show this help and exit
 
-Exit codes: 0 deployed, 1 failed (rolled back, or the by-hand commands printed), 2 usage,
+Exit codes: 0 deployed (every paired machine eligible), 1 failed (rolled back, or the by-hand
+commands printed; or a paired machine failed, was skipped or is not eligible), 2 usage,
 3 local changes in the services checkout.
 `;
