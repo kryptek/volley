@@ -39,6 +39,7 @@ import {
   runService,
   tunnelArgv,
 } from "../../src/commands/peer";
+import { RECORD_LOCK_ARGV } from "../../src/deploy/peers";
 import { EXIT } from "../../src/exit-codes";
 import { makeBufferIO } from "../../src/io";
 import { lockHash } from "../../src/peer/doctor";
@@ -1348,6 +1349,8 @@ describe("volley peer run (the service)", () => {
       between?: (beat: number) => void | Promise<void>;
       deps?: (d: PeerDeps) => void;
       over?: Partial<PeerDeps>;
+      /** How long (real ms) the first beat's wait for the start-up doctor lasts (default 0). */
+      firstDoctorWait?: number;
     } = {},
   ) {
     const start = Date.parse("2026-10-19T09:00:00.000Z");
@@ -1357,7 +1360,17 @@ describe("volley peer run (the service)", () => {
     const d = deps(f.exec, {
       now: () => new Date(t),
       monotonic: () => t - start,
-      sleep: async (ms) => {
+      sleep: async (ms, signal) => {
+        if (ms === PEER_DEFAULTS.first_doctor_wait_ms && opts.firstDoctorWait !== undefined) {
+          await new Promise<void>((r) => {
+            const t = setTimeout(r, opts.firstDoctorWait);
+            signal?.addEventListener("abort", () => {
+              clearTimeout(t);
+              r();
+            });
+          });
+          return;
+        }
         if (ms !== PEER_DEFAULTS.heartbeat_ms) return;
         const last = ++n >= beats;
         await new Promise((r) => setTimeout(r, last ? 300 : 30));
@@ -1405,8 +1418,9 @@ describe("volley peer run (the service)", () => {
       .map((e) => e?.payload as Record<string, unknown>);
     expect(up.length).toBeGreaterThanOrEqual(3);
     for (const raw of records) expectValidRecord(raw);
-    // The first beat goes out before the doctor finishes (it never waits on it); the record
-    // published when the doctor finishes, and every beat after, carries its result.
+    // Here the first beat's wait for the start-up doctor ends at once (the fake sleep), so it may
+    // go out before the doctor finishes; the record published when the doctor finishes, and
+    // every beat after, carries its result.
     const doctored = up.filter((p) => p.doctor_at !== undefined);
     expect(doctored.length).toBeGreaterThanOrEqual(1);
     expect(up.at(-1)?.doctor_at).toBeDefined();
@@ -1557,6 +1571,52 @@ describe("volley peer run (the service)", () => {
     expect(last.versions).toMatchObject({ peer: "0.5.0", volley: "0.5.0" });
     expect(last.doctor_at).not.toBe("2026-10-19T09:00:00.000Z");
     expect(last.checks?.find((c) => c.id === "volley.installed")).toMatchObject({ ok: true });
+  });
+
+  it("runs the doctor at start: the first up record carries a fresh run, never none", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", {});
+    const { records } = await heartbeats(
+      2,
+      fakeExec(() => undefined),
+      { firstDoctorWait: 5_000 },
+    );
+    const up = records
+      .map((r) => parseEnvelope(r)?.payload as Record<string, unknown>)
+      .filter((p) => p?.tunnel === "up");
+    expect(up[0]?.doctor_at).toBe("2026-10-19T09:00:00.000Z");
+    expect(up[0]?.checks).toBeDefined();
+  });
+
+  it("a stale bun.lock verdict clears on restart after the deploy's install records the lock", async () => {
+    writeCfg({ repo: box.repoPath });
+    await readiness("volleyd", {});
+    const marker = join(box.volleyDir, "node_modules", ".volley-lock-sha256");
+    // Installed by hand: the marker names another bun.lock.
+    writeFileSync(marker, "0".repeat(64));
+    const installed = (records: string[]) =>
+      (
+        records
+          .map((r) => parseEnvelope(r)?.payload as Record<string, unknown>)
+          .find((p) => p?.tunnel === "up")?.checks as { id: string; ok: boolean }[] | undefined
+      )?.find((c) => c.id === "volley.installed");
+    const before = await heartbeats(
+      1,
+      fakeExec(() => undefined),
+      { firstDoctorWait: 5_000 },
+    );
+    expect(installed(before.records)).toMatchObject({ ok: false });
+    // What `volley deploy` runs on the machine after its `bun install --frozen-lockfile`.
+    const [cmd, ...args] = RECORD_LOCK_ARGV;
+    const r = spawnSync(cmd as string, args, { cwd: box.volleyDir, encoding: "utf-8" });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readFileSync(marker, "utf-8")).toBe(`${lockHash(box.volleyDir)}\n`);
+    const after = await heartbeats(
+      1,
+      fakeExec(() => undefined),
+      { firstDoctorWait: 5_000 },
+    );
+    expect(installed(after.records)).toMatchObject({ ok: true });
   });
 
   it("only the lock marker changing (bun install by hand) re-runs the doctor on the next beat", async () => {
