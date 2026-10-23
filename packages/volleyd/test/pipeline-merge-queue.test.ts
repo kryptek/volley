@@ -341,6 +341,130 @@ describe("merge queue", () => {
   });
 });
 
+describe("transient merge refusals (#445)", () => {
+  const IN_PROGRESS = "GraphQL: Merge already in progress (mergePullRequest)";
+  const refusedAlarms = () => h.events.filter((e) => e.data.alarm === "merge_refused");
+  const openOf = (kind: string) => h.openDecisions().filter((d) => d.kind === kind);
+  const openedData = (kind: string) =>
+    h.events.filter((e) => e.type === "decision_opened" && e.data.kind === kind).at(-1)?.data;
+
+  it("a transient refusal then success: retried after the backoff, merged, no decision", async () => {
+    await threeGated();
+    h.world.mergeRefuse = IN_PROGRESS;
+    await h.tick(); // T1's merge is refused transiently
+    expect(mergedPrs()).toEqual([7]);
+    const alarm = refusedAlarms()[0]?.data;
+    expect(alarm).toMatchObject({ reason: "transient", attempt: 1, head: H.T1, wait_s: 60, of: 4 });
+    expect(Date.parse(String(alarm?.retry_at))).toBeGreaterThan(0);
+    expect(h.openDecisions()).toEqual([]);
+    expect(h.task("T1")?.stage).toBe("merge_ready");
+    expect(queue()[0]).toMatchObject({ task: "T1", state: "refused" });
+    expect(h.task("T1")?.why_waiting).toBe(
+      "GitHub refused the merge transiently (Merge already in progress); retrying in 1 min (attempt 1 of 4)",
+    );
+
+    h.world.mergeRefuse = undefined;
+    h.elapse(30_000);
+    await h.tick(); // before retry_at: no second gh pr merge, and the turn is kept
+    expect(mergedPrs()).toEqual([7]);
+    expect(rebasesOf("T2") + rebasesOf("T3")).toBe(0);
+
+    h.elapse(30_000);
+    await h.tick(); // retry_at passed: re-read, re-gated, merged
+    expect(mergedPrs()).toEqual([7, 7]);
+    expect(h.task("T1")?.stage).toBe("done");
+    expect(rebasesOf("T1")).toBe(0);
+    expect(h.record().pipeline.T1?.merge_refusals ?? 0).toBe(0);
+    expect(h.openDecisions()).toEqual([]);
+  });
+
+  it("a refusal that persists past the ladder opens merge_refused with the transient data", async () => {
+    await threeGated();
+    h.world.mergeRefuse = IN_PROGRESS;
+    await h.tick(); // attempt 1
+    for (const [n, wait] of [
+      [2, 60],
+      [3, 120],
+      [4, 300],
+      [5, 600],
+    ] as const) {
+      h.elapse(wait * 1000 - 1000);
+      await h.tick();
+      expect(mergeCalls()).toHaveLength(n - 1);
+      h.elapse(1000);
+      await h.tick();
+      expect(mergeCalls()).toHaveLength(n);
+      if (n < 5) expect(h.openDecisions()).toEqual([]);
+    }
+    expect(refusedAlarms().map((e) => e.data.attempt)).toEqual([1, 2, 3, 4, 5]);
+    expect(h.task("T1")?.stage).toBe("awaiting_decision");
+    expect(
+      h.events.some(
+        (e) => e.type === "stage_entered" && e.task === "T1" && e.data.stage === "blocked",
+      ),
+    ).toBe(true);
+    const [d] = openOf("merge_refused");
+    expect(openedData("merge_refused")).toMatchObject({
+      reason: "transient",
+      transient_attempts: 5,
+      since: "2026-10-18T12:00:00.000Z",
+    });
+    expect(d?.question).toContain("transiently 5 times over 18 min");
+    expect(d?.question).toContain("Merge already in progress");
+
+    // retry restarts the ladder: the next refusal waits 60 s again, with no decision.
+    await h.resolve(d?.decision_id as string, "retry");
+    expect(h.record().pipeline.T1?.merge_transient).toBeUndefined();
+    // A transient retry restarts the ladder only: it grants no counted attempt to a later refusal.
+    expect(h.record().pipeline.T1?.merge_retries ?? 0).toBe(0);
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(mergeCalls()).toHaveLength(6);
+    expect(refusedAlarms().at(-1)?.data).toMatchObject({ attempt: 1, wait_s: 60 });
+    expect(openOf("merge_refused")).toEqual([]);
+  });
+
+  it("the PR merged by someone else while waiting: done, never retried", async () => {
+    await threeGated();
+    h.world.mergeRefuse = IN_PROGRESS;
+    await h.tick();
+    h.world.prState[7] = "MERGED";
+    h.elapse(30_000);
+    await h.tick();
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(h.task("T1")?.stage).toBe("done");
+    expect(mergedPrs().filter((n) => n === 7)).toHaveLength(1);
+  });
+
+  it("the head moved while waiting: pr_head_moved, the ladder cleared, never retried at it", async () => {
+    await threeGated();
+    h.world.mergeRefuse = IN_PROGRESS;
+    await h.tick();
+    h.world.prView[7] = { headRefOid: sha(0x1002) };
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(ofType("pr_head_moved").map((e) => e.task)).toEqual(["T1"]);
+    expect(h.record().pipeline.T1?.merge_transient).toBeUndefined();
+    expect(mergedPrs()).toEqual([7]);
+  });
+
+  it("a checks refusal after a transient one counts toward merge_retry_max as today", async () => {
+    await threeGated({ mergeRetryMax: 1 });
+    h.world.mergeRefuse = IN_PROGRESS;
+    await h.tick();
+    expect(h.openDecisions()).toEqual([]);
+    h.world.mergeRefuse = "Pull request is not mergeable: required checks";
+    h.elapse(60_000);
+    await h.tick();
+    expect(mergedPrs()).toEqual([7, 7]);
+    expect(h.record().pipeline.T1?.merge_refusals).toBe(1);
+    expect(h.record().pipeline.T1?.merge_transient).toBeUndefined();
+    expect(openOf("merge_refused")).toHaveLength(1);
+    expect(openedData("merge_refused")).toMatchObject({ reason: "checks" });
+  });
+});
+
 describe("mergeNow (volleyd merge)", () => {
   const BRANCH = "/repo#release/w1";
 
