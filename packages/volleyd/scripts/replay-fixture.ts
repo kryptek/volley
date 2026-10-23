@@ -29,7 +29,7 @@ const run = (cmd: string, args: string[]) =>
   execFileSync(cmd, args, { cwd: pkg, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 
 const inRepo = (f: string) => !/^[/~]/.test(f) && !f.split("/").includes("..");
-/** A title quoting a home directory (`/home/me`) names the placeholder the repository uses. */
+/** A home directory quoted in a title becomes the placeholder the repository uses, `/path/to/home`. */
 const masked = (title: string) =>
   title.replace(/(?<!\w)\/(?:Users|home)\/[A-Za-z][A-Za-z0-9_-]*/g, "/path/to/home");
 
