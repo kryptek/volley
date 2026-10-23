@@ -316,6 +316,9 @@ export interface DecisionPayload {
 
 // ------------------------------------------------------- config and leases
 
+/** `repos.<owner/name>.machines`: every machine, or these by name. */
+export type RepoMachines = "all" | string[];
+
 /** How the supervisor's own machine takes auto-placed tasks (`fleet.local_agents`). */
 export type LocalAgentsMode = "always" | "fallback" | "never";
 
@@ -355,8 +358,22 @@ export interface Tunables {
   claude?: { default_account?: string | null; warn_at_pct?: number };
   /** The share of an agent's context window at which it compacts (SPEC §4.6.4). */
   agent_auto_compact_pct?: number;
-  /** Remote hosts (SPEC §4.6.4); the Desk reads their names and caps. */
-  hosts?: Record<string, { max_agents?: number; drain?: boolean; [key: string]: unknown }>;
+  /** Remote hosts (SPEC §4.6.4); the Desk reads their names, caps and adopted clones. */
+  hosts?: Record<
+    string,
+    {
+      max_agents?: number;
+      drain?: boolean;
+      /** Adopted clones on the machine: `owner/name` → absolute path (SPEC §4.6.21). */
+      repos?: Record<string, string>;
+      [key: string]: unknown;
+    }
+  >;
+  /**
+   * Repositories by `owner/name` and the machines holding a clone of each (SPEC §4.6.21): `all`
+   * or a list of machine names. Absent from a supervisor that predates repositories.
+   */
+  repos?: Record<string, { machines: RepoMachines }>;
   /** Autopilot (SPEC §4.6.16–17); absent from a supervisor that predates it. */
   autopilot?: {
     enabled?: boolean;
@@ -373,6 +390,8 @@ export interface Tunables {
    */
   fleet?: {
     local_name?: string | null;
+    /** Where managed clones live on every machine (`~` is that machine's home). */
+    repo_root?: string;
     local_agents?: LocalAgentsMode | null;
     fallback?: { max_agents?: number; per_machine?: Record<string, number> };
   };
@@ -496,6 +515,22 @@ export interface MachineCheck {
   /** `block`: failing makes the machine not ready; `warn`: shown only. */
   severity: "block" | "warn";
   detail: string;
+  /** The repository (`owner/name`) a per-repository check is about: failing, it blocks that one only. */
+  repo?: string;
+}
+
+/** machine.schema.json `repos[]`: one repository's clone on a machine, as its doctor found it. */
+export interface MachineRepo {
+  slug: string;
+  path: string;
+  exists: boolean;
+  origin?: string;
+  /** `true`: the managed clone (`<repo_root>/<owner>/<name>`); `false`: an adopted one. */
+  managed: boolean;
+  fetched_at: string | null;
+  release_branch?: string;
+  /** The tools the repository needs that the machine lacks or has too old. */
+  toolchain: { ok: boolean; missing: string[]; outdated: string[] };
 }
 
 /**
@@ -539,8 +574,23 @@ export interface MachinePayload {
     release_branch?: string;
     fetched_at?: string | null;
   };
+  /** Each repository the machine works on (SPEC §4.6.14); absent from an older peer. */
+  repos?: MachineRepo[];
   checks?: MachineCheck[];
   doctor_at?: string;
+}
+
+/** Where one repository stands on a machine (readiness.schema.json `repos`, SPEC §4.6.21). */
+export type RepoState = "ready" | "cloning" | "blocked" | "absent";
+
+/** readiness.schema.json `repos.<owner/name>`. */
+export interface RepoVerdict {
+  state: RepoState;
+  /** The clone's path on the machine, when it has one. */
+  path?: string;
+  /** What keeps it from being ready there; empty when ready. */
+  reasons: string[];
+  fetched_at?: string;
 }
 
 /**
@@ -568,6 +618,8 @@ export interface ReadinessPayload {
    * mode, whether the fallback profile is in force, and why.
    */
   local_agents?: { mode: LocalAgentsMode; active: boolean; why?: string };
+  /** Each repository on the machine, by `owner/name` (absent from a supervisor before them). */
+  repos?: Record<string, RepoVerdict>;
 }
 
 /** inbox-item.schema.json payload.kind. */

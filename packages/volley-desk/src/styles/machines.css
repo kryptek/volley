@@ -375,3 +375,151 @@ button.m-local:focus-visible {
 .m-phone summary {
   cursor: pointer;
 }
+
+/* Settings › Repositories (and a machine card's read-only list): a row per repository, a chip
+   per machine coloured by where it stands there; the theme's tokens, so both looks follow. */
+.repos-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.repo {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.repo:last-child {
+  border-bottom: 0;
+}
+.repo-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.repo-slug {
+  color: var(--ink);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.repo-tools {
+  flex: 1;
+  min-width: 0;
+}
+.repo-chips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.repo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  font-size: 11.5px;
+  padding: 2px 4px 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--mute);
+}
+.repo-chip--ready {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+.repo-chip--cloning {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 40%, transparent);
+}
+.repo-chip--blocked {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 40%, transparent);
+}
+.repo-chip b {
+  flex: none;
+  color: var(--ink);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.repo-chip .ell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.repo-chip .spinner {
+  width: 10px;
+  height: 10px;
+}
+.repo-repair {
+  padding: 1px 8px;
+  font-size: 11px;
+}
+.repo-empty {
+  padding: 12px;
+}
+.repo-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.repo-machines {
+  border: 0;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.repo-machine {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.repo-machine input[type="text"],
+.repo-machine input:not([type]) {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.repo-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.repo-row-head {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.repo-state--ready {
+  color: var(--ok);
+}
+.repo-state--cloning {
+  color: var(--amber);
+}
+.repo-state--blocked,
+.repo-state--absent {
+  color: var(--bad);
+}
+.m-repos-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+  min-width: 0;
+}
+.m-repos-block .repo-chips {
+  align-self: stretch;
+}
+@media (prefers-reduced-motion: reduce) {
+  .repo-chip .spinner {
+    animation: none;
+  }
+}

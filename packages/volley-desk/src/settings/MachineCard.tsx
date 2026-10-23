@@ -18,6 +18,10 @@
  * carries the local agents chip (`fleet.local_agents` from volleyd's verdict:
  * `always`, `never`, `fallback`, or `fallback · active` while no paired machine
  * is eligible), titled with volleyd's why; a click opens the setting.
+ *
+ * Its repositories (SPEC §4.6.21) are listed read-only, each with where it stands there
+ * (volleyd's verdict), with **Repositories…** opening Settings › Repositories, where they are
+ * added and removed. Repair's sheet has a row per repository.
  */
 
 import { type ReactNode, useEffect, useState } from "react";
@@ -30,6 +34,7 @@ import { CheckRows, CopyCommand } from "./MachineRows";
 import { RemoveMachineSheet } from "./RemoveMachineSheet";
 import { RepairSheet } from "./RepairSheet";
 import type { ConfigAck, ConfigTransport } from "./configTransport";
+import { type RepoOnMachine, reposOnMachine, stateText } from "./repos";
 
 /** volleyd's default `hosts.<name>.max_agents` (SPEC §4.6.15). */
 export const DEFAULT_MAX_AGENTS = 4;
@@ -223,6 +228,46 @@ function AccountRows({
   );
 }
 
+/** The machine's repositories, read-only, and the way to the section that changes them. */
+function RepoList({
+  name,
+  repos,
+  onOpen,
+}: {
+  name: string;
+  repos: readonly RepoOnMachine[];
+  onOpen?: (() => void) | undefined;
+}) {
+  return (
+    <div className="m-repos-block">
+      <div className="s-hint">Repositories</div>
+      {repos.length > 0 && (
+        <ul className="repo-chips" aria-label={`Repositories on ${name}`}>
+          {repos.map((r) => {
+            const text = stateText(r, "waiting for volleyd");
+            return (
+              <li
+                key={r.slug}
+                className={`repo-chip repo-chip--${r.state ?? "none"}`}
+                aria-label={`${r.slug}: ${text}`}
+                title={r.reasons.join("\n") || r.path}
+              >
+                <b className="mono">{r.slug}</b>
+                <span className="ell">{text}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {onOpen && (
+        <button type="button" className="btn m-repos-link" onClick={onOpen}>
+          Repositories…
+        </button>
+      )}
+    </div>
+  );
+}
+
 /** `hosts.<name>.max_agents` (1–100): set through volleyd's config_set. */
 export function CapEditor({
   name,
@@ -386,13 +431,16 @@ export interface MachineCardProps {
   onCountdown?: (on: boolean) => void;
   /** The local agents chip's click (own card only): open the `fleet.local_agents` setting. */
   onOpenLocalAgents?: (() => void) | undefined;
+  /** Open Settings › Repositories. */
+  onOpenRepos?: (() => void) | undefined;
 }
 
 export function MachineCard(p: MachineCardProps) {
   const { m, r, now, ops } = p;
   const [open, setOpen] = useState<Open>(null);
   const down = m.tunnel === "down";
-  const ctx = { machine: m.name, repo: m.repo?.path };
+  const repos = reposOnMachine(m.name, null, m, r);
+  const ctx = { machine: m.name, repo: m.repo?.path, repos };
   const pairing = p.admin && !p.self && ops !== null;
   return (
     <article
@@ -425,6 +473,9 @@ export function MachineCard(p: MachineCardProps) {
       {p.accountRows && p.accountRows.length > 0 && (
         <AccountRows name={m.name} rows={p.accountRows} onSignInOn={p.onSignInOn} />
       )}
+      {(repos.length > 0 || p.onOpenRepos) && (
+        <RepoList name={m.name} repos={repos} onOpen={p.onOpenRepos} />
+      )}
       {m.checks && m.checks.length > 0 && (
         <CheckRows checks={m.checks} ctx={ctx} label={`Checks on ${m.name}`} />
       )}
@@ -456,7 +507,13 @@ export function MachineCard(p: MachineCardProps) {
         />
       )}
       {pairing && open === "repair" && (
-        <RepairSheet machine={m.name} ops={ops} repo={m.repo?.path} onClose={() => setOpen(null)} />
+        <RepairSheet
+          machine={m.name}
+          ops={ops}
+          repo={m.repo?.path}
+          repos={repos}
+          onClose={() => setOpen(null)}
+        />
       )}
       {pairing && open === "remove" && (
         <RemoveMachineSheet

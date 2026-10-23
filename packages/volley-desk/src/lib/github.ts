@@ -41,3 +41,17 @@ export const issueLabel = (n: number | string): string => `Issue #${n} on GitHub
 
 /** The accessible name of a PR link (`PR #7 on GitHub`). */
 export const prLabel = (n: number | string): string => `PR #${n} on GitHub`;
+
+/**
+ * A repository's GitHub `owner/name` as config and the doctor name it (machine.schema.json `slug`):
+ * never a URL, a host or a `.git` suffix. Its twin is volleyd's `isSlug` (packages/volleyd/src/repos.ts).
+ */
+const REPO_SLUG =
+  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/(?!\.\.?$)(?![A-Za-z0-9_.-]*\.git$)[A-Za-z0-9_.-]{1,100}$/;
+
+export const isRepoSlug = (v: unknown): v is string => typeof v === "string" && REPO_SLUG.test(v);
+
+/** The repository's page on GitHub; null for anything that is not an `owner/name`. */
+export function repoHref(slug: unknown): string | null {
+  return isRepoSlug(slug) ? `https://github.com/${slug}` : null;
+}

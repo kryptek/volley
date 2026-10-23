@@ -9,6 +9,7 @@ import {
   AiBrain01Icon,
   ComputerIcon,
   DashboardSpeed01Icon,
+  GithubIcon,
   InformationCircleIcon,
   Key01Icon,
   PaintBoardIcon,
@@ -28,6 +29,7 @@ export type SectionKey =
   | "claude"
   | "accounts"
   | "machines"
+  | "repos"
   | "setup"
   | "about";
 
@@ -190,6 +192,14 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     group: 1,
     keywords:
       "peer pair add machine tunnel host fleet ready readiness doctor repair re-pair drain remove max agents cap",
+  },
+  {
+    key: "repos",
+    label: "Repositories",
+    icon: GithubIcon,
+    tint: "#6e7681",
+    group: 1,
+    keywords: "repository github clone owner/name toolchain trust",
   },
   {
     key: "setup",
