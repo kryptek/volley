@@ -47,7 +47,7 @@ coordinator session.
   - [The policy table](#the-policy-table)
   - [Self-healing CI](#self-healing-ci) and [the fixer task](#the-fixer-task)
   - [Autopilot merging](#autopilot-merging) and [the merge queue](#the-merge-queue)
-  - [The release train](#the-release-train)
+  - [The release train](#the-release-train) and [the issue lifecycle](#the-issue-lifecycle)
   - [The needs-you inbox](#needs-you-inbox)
   - [The morning digest](#the-morning-digest)
   - [The soak](#testing-the-simulated-soak)
@@ -167,6 +167,7 @@ config.hard_ceiling: must be <= 100
 | `volleyd merge <wave> <task>` | Merge one gated task now, at its gated head, through the merge queue's fenced verb (owner only; under `merge: manual` too). Answers with the merge commit, or the refusal ([The merge queue](#the-merge-queue)). |
 | `volleyd policy [wave] [--json]` | Autopilot's effective policy table: the decisions volleyd answers itself, with each budget ([Autopilot](#autopilot)). `--json` prints `{ rules, config }`. |
 | `volleyd digest <wave> [--json]` | The wave's morning digest as last published: `## Shipped`, `## Autopilot handled`, `## Waiting for you` (and `## Failed`) ([The morning digest](#the-morning-digest)). `--json` prints the retained payload. |
+| `volleyd issues <wave> [--verify [--pr <n>]] [--json]` | Each task's issue, one line per task: `T3 #412 merged-to-release (PR #418)`, `closed`, `open`, `cancelled: <why>` or `deferred` ([The issue lifecycle](#the-issue-lifecycle)). `--verify` (owner only, a `complete` wave only) runs the release-to-main check now, for a release merged by hand: against `--pr <n>`, or the release branch's merged PR. |
 | `volleyd claim <wave> [--by <id>]` | Take over a wave whose owner is gone. Needs an identity. |
 | `volleyd pause <wave>` / `resume <wave>` | Stop / restart admissions (owner only); running agents carry on. |
 | `volleyd stop <wave>` | Stop a wave (owner only): no admissions, `cancel` to every running agent. |
@@ -1160,6 +1161,51 @@ rules as any pipeline role. The stages run **serially**, in playbook order:
   stops it and fails the stage (the owner is asked as above); `respawn` runs the stage again at
   the next attempt.
 
+### The issue lifecycle
+
+GitHub closes an issue from `Closes #N` only when the PR merges into the default branch, so a
+task's PR into the release branch closes nothing: without help every issue of a finished wave
+stays open, saying nothing, until the release PR reaches main. volleyd owns that lifecycle
+(`src/autopilot/issues.ts`: pure planners and the gh runner; no coordinator has to remember it):
+
+- **At a task's merge** (its merge into the release branch verified): its issue gets the label
+  `merged-to-release` (created first when `gh label list` lacks it; never `--force`) and one
+  comment: ``Merged into `release/<wave>` in PR #N; closes when the release reaches main.``
+  Journaled as `issue_labeled` and `issue_commented`. A synthetic task (issue 0) and an issue
+  closed by hand are left alone.
+- **At wave complete**: the digest's `closes` lists the done tasks' issues (a cancelled task's
+  never), `release_started` carries it, and every release stage's `.volley/stage.md` has a
+  `## Release PR body` section with one `Closes #N` line per issue, so the release PR body is
+  generated, not hand-written.
+- **When the release reaches main**: while the wave is `complete` volleyd looks for the release
+  branch's merged PR (`gh pr list --head <release> --state merged`, once per
+  `release_merge_poll_ms`, 5 minutes, until the wave is archived); `volleyd issues <wave>
+  --verify [--pr <n>]` runs the same check now for a release merged by hand (refused unless the
+  wave is `complete`; once verified it answers from the journal unless `--pr` names another PR;
+  a `--pr` that `gh pr view` does not show merged from the release branch is refused).
+  Every task's issue is read: a done task's issue still open is closed with the comment `closed
+  by the release PR #N (wave <id>)` (`issue_closed`), the label comes off (`issue_unlabeled`),
+  and a cancelled task's issue (or a deferred one: not done when the release reached main) stays
+  open with one comment `cancelled in wave <id>: <reason>` (`deferred in wave <id>: …`). Once
+  every issue was read and every write ran, `issues_verified { release_pr, closed, left_open }`
+  ends it (`closed` lists every issue closed against that release PR, earlier failed runs'
+  included). A pass with a failed read or write is retried after `ci_poll_ms`, then once per
+  `release_merge_poll_ms` while it keeps failing (an issue deleted or transferred, say). A `stopped` wave gets no release check: its issues keep `merged-to-release` until
+  removed by hand.
+- **On upgrade**: the passes run on every live (unarchived) wave, including one journaled before
+  this version, so a finished wave's done tasks' open issues are labeled and commented then (and
+  closed, if its release already merged).
+- **Idempotent.** Every comment carries a marker (`<!-- volleyd:merged-to-release wave=<id>
+  pr=<n> -->`, `<!-- volleyd:closed wave=<id> -->`, …), and the issue is read
+  (`gh issue view <n> --json state,labels,comments`) before each write: neither a restart nor a
+  journal that lost an event labels or comments twice. A failed gh call is not journaled; the
+  wave's issue work (the release check included) is retried after `ci_poll_ms`.
+- **The fence** allows exactly these writes, on the supervisor's own machine only:
+  `gh issue edit <n> --add-label|--remove-label merged-to-release`, `gh issue comment <n> --body`
+  and `gh issue close <n> --comment` with a text carrying volleyd's marker, `gh label list
+  --search merged-to-release --json name` and `gh label create merged-to-release --description
+  <text> --color <hex>` ([The authority fence](#the-authority-fence)).
+
 ### The morning digest
 
 An unattended wave journals hundreds of events; in the morning the owner wants one answer. volleyd
@@ -1168,6 +1214,9 @@ computes it from the journal (`src/autopilot/digest.ts`, pure) and publishes it 
 
 - `shipped`: each merged task with its issue, title, PR, merge sha and `merged_by` (`supervisor`
   for autopilot merging, `operator` for `volleyd merged` or a merge outside GitHub, `github`).
+- `closes`: the shipped tasks' issues, each once, in merge order: the release PR's `Closes #N`
+  lines ([The issue lifecycle](#the-issue-lifecycle)); `volleyd digest` prints them under
+  `## Closes`.
 - `auto`: `decisions_resolved` (`decision_auto_resolved`), `flakes_fixed` (each landed
   `remediation_closed`: the test, its fixer, the tasks it released), `conflicts_resolved` (rebase
   steps that verified), `retries` (`spawn_recovered` + `relaunched`), `merges` (PRs volleyd merged).
@@ -3485,6 +3534,13 @@ ALLOW (program by bare name only — never a path):
   gh issue view · gh repo view · gh pr view | list | checks · gh run list | view | watch ·
     gh api (GET only; a relative endpoint — never a URL — and never graphql in any path
     segment; no request headers)
+  the issue lifecycle (autopilot/issues.ts), exactly, <n> a positive issue number:
+    gh issue edit <n> --add-label merged-to-release | --remove-label merged-to-release ·
+    gh issue comment <n> --body <text> · gh issue close <n> --comment <text> (<text> carrying
+    a `<!-- volleyd:… wave=… -->` marker: only volleyd's own comments) ·
+    gh label list --search merged-to-release --json name ·
+    gh label create merged-to-release --description <text> --color <6 hex> (never --force);
+    never on a paired machine
   cmux — exact argv shapes only, because cmux types into an agent's shell:
     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
       with the LaunchToken of the `.volley/launch.sh` volleyd sealed in exactly <dir>

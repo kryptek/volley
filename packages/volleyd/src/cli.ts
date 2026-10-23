@@ -36,6 +36,7 @@ Commands:
   steer       Send mailbox steering to a task's agent and report the ack
   merge       Merge one gated task now, at its gated head (owner only)
   merged      Record a gated task merged outside GitHub's merge button (verified; owner only)
+  issues      Each task's issue state; --verify closes them once the release reached main
 
 Global flags (daemon/install/run/diff/status/config and the wave controls):
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -77,6 +78,7 @@ const COMMANDS: Record<string, () => Promise<Command>> = {
   steer: async () => (await import("./commands/steer")).steer,
   merge: async () => (await import("./commands/merge")).merge,
   merged: async () => (await import("./commands/merged")).merged,
+  issues: async () => (await import("./commands/issues")).issues,
 };
 
 export async function main(args: CommandArgs): Promise<ExitCode> {

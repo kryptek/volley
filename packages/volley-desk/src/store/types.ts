@@ -624,6 +624,8 @@ export interface DigestPayload {
     merge_sha: string | null;
     merged_by: "supervisor" | "operator" | "github";
   }[];
+  /** The shipped tasks' issues: the release PR's `Closes #…` lines (absent: older volleyd). */
+  closes?: number[];
   auto: {
     decisions_resolved: number;
     flakes_fixed: { test: string; fixer: string; prs_released: number }[];

@@ -26,6 +26,7 @@
         "generated_at",
         "trigger",
         "shipped",
+        "closes",
         "auto",
         "waiting",
         "failures"
@@ -65,6 +66,12 @@
               }
             }
           }
+        },
+        "closes": {
+          "type": "array",
+          "description": "The shipped tasks' issues, each once, in merge order: the release PR's Closes #N lines (a PR into the release branch closes nothing). A cancelled task's issue is never in it. See spec section 4.6.19.",
+          "items": { "type": "integer", "minimum": 1 },
+          "uniqueItems": true
         },
         "auto": {
           "type": "object",

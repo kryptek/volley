@@ -63,6 +63,8 @@ export type ControlOp =
   | "steer"
   // The owner's merge outside GitHub's merge button, verified (pipeline.ts verifyMerge).
   | "merged"
+  // A wave's task issues; `verify`: the release-to-main check (autopilot/issues.ts).
+  | "issues"
   // The owner merges one gated task now, through the merge queue's verb (pipeline.ts mergeNow).
   | "merge"
   // Heavy-operation leases and spawn admission (leases.ts, admission.ts).

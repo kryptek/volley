@@ -173,6 +173,18 @@ describe("digestOf", () => {
     ]);
   });
 
+  it("closes (#416): the done tasks' issues in merge order; not a cancelled one's, not a fixer's issue 0", () => {
+    expect(digest.closes).toEqual([11, 12, 13]);
+    const md = renderDigestMd(digest);
+    expect(md).toContain("## Closes");
+    expect(md.match(/^ {4}Closes #\d+$/gm)).toEqual([
+      "    Closes #11",
+      "    Closes #12",
+      "    Closes #13",
+    ]);
+    expect(md).not.toContain("Closes #14");
+  });
+
   it("counts what autopilot handled", () => {
     expect(digest.auto).toEqual({
       decisions_resolved: 2,
@@ -269,6 +281,7 @@ describe("summaryLine", () => {
       merge_sha: null,
       merged_by: "supervisor" as const,
     })),
+    closes: Array.from({ length: 27 }, (_, i) => i + 1),
     auto: {
       decisions_resolved: 0,
       flakes_fixed: [1, 2, 3].map((i) => ({ test: `t${i}`, fixer: `fix-t${i}`, prs_released: 1 })),

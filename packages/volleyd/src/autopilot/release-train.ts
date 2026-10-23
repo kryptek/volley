@@ -178,10 +178,32 @@ export function stageBriefVars(
   };
 }
 
+/**
+ * The release PR's `Closes #N` lines (#416): one per done task's issue (`release_started`'s
+ * `closes`). A task's PR into the release branch closes nothing; the release PR does.
+ */
+export const closesLines = (closes: readonly number[]): string[] =>
+  closes.map((n) => `Closes #${n}`);
+
+/** The stage brief's release PR body section (none: no issue to close). */
+function releasePrBodyText(releaseBranch: string, closes: readonly number[]): string[] {
+  if (closes.length === 0) return [];
+  return [
+    "## Release PR body",
+    "",
+    `A pull request into \`${releaseBranch}\` closes no issue: the release PR (\`${releaseBranch}\` into the default branch) closes them. If this stage opens that PR, its body carries these lines, each exactly as written (volleyd generated them from the wave's done tasks; a cancelled task's issue is not among them):`,
+    "",
+    "```",
+    ...closesLines(closes),
+    "```",
+    "",
+  ];
+}
+
 /** `.volley/stage.md`: the stage's brief, its commands in order, the facts to leave true, the contract. */
 export function renderStageMd(
   stage: PlaybookStage,
-  ctx: { wave: WaveId; release_branch: string; attempt: number },
+  ctx: { wave: WaveId; release_branch: string; attempt: number; closes?: readonly number[] },
 ): string {
   return [
     `# Release stage \`${stage.name}\` (wave ${ctx.wave}, attempt ${ctx.attempt})`,
@@ -198,6 +220,7 @@ export function renderStageMd(
     "",
     stageVerifyText(stage, ctx.release_branch),
     "",
+    ...releasePrBodyText(ctx.release_branch, ctx.closes ?? []),
     "## Result contract",
     "",
     "Before your `done`, publish what you ran and what it produced:",

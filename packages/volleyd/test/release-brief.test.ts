@@ -56,6 +56,22 @@ describe("renderStageMd", () => {
     expect(md).not.toContain("volley lease acquire");
   });
 
+  it("the release PR body (#416): one Closes line per done task's issue; none without any", () => {
+    const md = renderStageMd(BUMP, {
+      wave: "w1",
+      release_branch: "release/w1",
+      attempt: 1,
+      closes: [412, 414],
+    });
+    const at = md.indexOf("## Release PR body");
+    expect(at).toBeGreaterThan(md.indexOf("## Verified after your done"));
+    expect(at).toBeLessThan(md.indexOf("## Result contract"));
+    expect(md.match(/^Closes #\d+$/gm)).toEqual(["Closes #412", "Closes #414"]);
+    const none = renderStageMd(BUMP, { wave: "w1", release_branch: "release/w1", attempt: 1 });
+    expect(none).not.toContain("## Release PR body");
+    expect(none).not.toContain("Closes #");
+  });
+
   it("a heavy stage takes its lease first", () => {
     const md = renderStageMd(TAG, { wave: "w1", release_branch: "release/w1", attempt: 2 });
     expect(md).toContain("`volley lease acquire --pool deploy`");

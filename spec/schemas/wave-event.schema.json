@@ -110,7 +110,12 @@
             "remediation_closed",
             "digest_published",
             "terminal_status_recovered",
-            "pr_marked_ready"
+            "pr_marked_ready",
+            "issue_labeled",
+            "issue_unlabeled",
+            "issue_commented",
+            "issue_closed",
+            "issues_verified"
           ]
         },
         "payload": {
@@ -872,6 +877,192 @@
                       "pr": { "type": "integer", "minimum": 1 },
                       "head": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
                       "at": { "type": "string", "format": "date-time" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "issue_labeled"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["issue", "label"],
+                    "description": "The supervisor labeled a done task's issue merged-to-release when its PR merged into the release branch (spec section 4.6.19).",
+                    "properties": {
+                      "issue": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "label": {
+                        "const": "merged-to-release"
+                      },
+                      "pr": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "issue_unlabeled"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["issue", "label"],
+                    "description": "The supervisor removed the merged-to-release label once the release reached the default branch (spec section 4.6.19).",
+                    "properties": {
+                      "issue": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "label": {
+                        "const": "merged-to-release"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "issue_commented"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["issue", "marker"],
+                    "description": "The supervisor commented on a task's issue; the comment carries marker, so it is never made twice (spec section 4.6.19).",
+                    "properties": {
+                      "issue": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "marker": {
+                        "type": "string",
+                        "pattern": "^<!-- volleyd:[a-z-]+ wave=[a-z0-9][a-z0-9_-]{0,62}( pr=[0-9]+)? -->$"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "issue_closed"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["issue"],
+                    "description": "The supervisor closed a done task's issue the release PR left open (spec section 4.6.19).",
+                    "properties": {
+                      "issue": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "marker": {
+                        "type": "string",
+                        "pattern": "^<!-- volleyd:[a-z-]+ wave=[a-z0-9][a-z0-9_-]{0,62}( pr=[0-9]+)? -->$"
+                      },
+                      "release_pr": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "issues_verified"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["release_pr", "closed", "left_open"],
+                    "description": "The release reached the default branch in release_pr and every task's issue was checked: closed lists the issues the supervisor closed, left_open the cancelled or deferred tasks' issues it left open (spec section 4.6.19).",
+                    "properties": {
+                      "release_pr": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "closed": {
+                        "type": "array",
+                        "items": {
+                          "type": "integer",
+                          "minimum": 1
+                        }
+                      },
+                      "left_open": {
+                        "type": "array",
+                        "items": {
+                          "type": "integer",
+                          "minimum": 1
+                        }
+                      }
                     }
                   }
                 }
