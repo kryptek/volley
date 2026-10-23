@@ -9,8 +9,12 @@
     "wave": "w1",
     "task": "T1",
     "kind": "repo_untrusted",
-    "question": "Needs you: trust /path/to/repo for dispatch?",
+    "question": "Needs you: trust /path/to/repo for dispatch? 3 tasks are waiting: T1, T2, T3.",
     "options": ["trust", "cancel"],
+    "option_help": {
+      "cancel": "Cancels only the 3 waiting launches; the tasks keep their other work. Trusting the repo later resumes them."
+    },
+    "waiting": ["T1", "T2", "T3"],
     "pointers": {},
     "opened_at": "2026-10-18T15:20:00.000Z"
   }

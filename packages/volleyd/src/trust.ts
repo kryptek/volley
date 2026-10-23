@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DAEMON_DEFAULTS } from "./config-defaults";
-import { waveDecisionId } from "./decisions";
+import { preconditionKey, waitingLine, waveDecisionId } from "./decisions";
 import type { ExecFn } from "./exec";
 import { SpawnError } from "./spawn-error";
 import type { WaveId } from "./types";
@@ -136,14 +136,61 @@ function writeTrusted(claudeJsonPath: string, root: string): string {
 }
 
 /**
- * One `repo_untrusted` decision per wave and repo root (a wave's spawns into it all park on it),
- * per machine: a remote host's clone (`target`) is trusted in its own `~/.claude.json`, so it never
- * shares an id with a local clone at the same path.
+ * The `repo_untrusted` decision id: one per wave and (machine, Claude profile, repo root), never
+ * per task or attempt (#418). A paired machine's clone (`machine`: its ssh target) is trusted in its
+ * own `~/.claude.json` and a profile (`profile`: its config dir) in its own `.claude.json`, so
+ * neither shares an id with the supervisor's primary at the same path.
  */
-export function trustDecisionId(wave: WaveId, root: string, target?: string): string {
-  return waveDecisionId("repo_untrusted", wave, target === undefined ? root : `${target}:${root}`);
+export function trustDecisionId(
+  wave: WaveId,
+  root: string,
+  scope: { machine?: string | undefined; profile?: string | undefined } = {},
+): string {
+  return waveDecisionId(
+    "repo_untrusted",
+    wave,
+    preconditionKey({
+      root,
+      ...(scope.machine !== undefined ? { machine: scope.machine } : {}),
+      ...(scope.profile !== undefined ? { profile: scope.profile } : {}),
+    }),
+  );
 }
 
-/** The decision's question, as the owner sees it. */
-export const trustQuestion = (root: string, target?: string, account?: string) =>
-  `Needs you: trust ${root}${target !== undefined ? ` on ${target}` : ""}${account !== undefined ? ` in Claude account ${account}` : ""} for dispatch?`;
+/**
+ * The decision's question, as the owner sees it: the repo, the machine by name and the Claude
+ * account where it is answered, and every task waiting on it.
+ */
+export const trustQuestion = (
+  root: string,
+  machine: string | undefined,
+  account: string | undefined,
+  waiting: readonly string[],
+) =>
+  `Needs you: trust ${root}${machine !== undefined ? ` on ${machine}` : ""}${account !== undefined ? ` in Claude account ${account}` : ""} for dispatch?${waitingLine(waiting)}`;
+
+/** The decision's `cancel` hover text: what it cancels (the waiting launches) and what it keeps. */
+export function trustCancelHelp(launches: number): string {
+  const what = launches === 1 ? "the waiting launch" : `the ${launches} waiting launches`;
+  return `Cancels only ${what}; the tasks keep their other work. Trusting the repo later resumes them.`;
+}
+
+/** The facts a `repo_untrusted` decision keeps to render its question again. */
+export interface TrustFacts {
+  repo?: unknown;
+  host?: unknown;
+  claude_account?: unknown;
+}
+
+/** An open `repo_untrusted` decision's question and hover text for `waiting` tasks / `launches`. */
+export function trustAskFor(
+  d: TrustFacts,
+  waiting: readonly string[],
+  launches: number,
+): { question: string; option_help: Record<string, string> } {
+  const str = (v: unknown) => (typeof v === "string" && v !== "" ? v : undefined);
+  return {
+    question: trustQuestion(str(d.repo) ?? "the repo", str(d.host), str(d.claude_account), waiting),
+    option_help: { cancel: trustCancelHelp(launches) },
+  };
+}

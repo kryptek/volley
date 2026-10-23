@@ -97,6 +97,7 @@
             "decision_escalated",
             "decision_held",
             "decision_released",
+            "decision_joined",
             "release_started",
             "release_stage_entered",
             "release_stage_verified",
@@ -541,6 +542,43 @@
                         "type": "string",
                         "minLength": 1
                       }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "decision_joined" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["decision_id", "kind", "task", "role", "question"],
+                    "properties": {
+                      "decision_id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+                      },
+                      "kind": { "type": "string", "minLength": 1 },
+                      "task": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+                      },
+                      "role": { "type": "string", "minLength": 1 },
+                      "question": { "type": "string", "minLength": 1 },
+                      "option_help": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string", "minLength": 1 }
+                      },
+                      "agent_id": { "type": "string", "minLength": 1 }
                     }
                   }
                 }

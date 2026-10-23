@@ -240,6 +240,8 @@ import {
   MACHINE_DOWN_CANCEL,
   MACHINE_DOWN_REPLACE,
   MACHINE_DOWN_WAIT,
+  type ParkedLaunch,
+  SHARED_PRECONDITION_KINDS,
   SPAWN_DECISION_KINDS,
   attentionPayload,
   checkAnswer,
@@ -251,9 +253,11 @@ import {
   heldLabel,
   heldOnFrom,
   holdEvent,
+  joinEvent,
   machineDownInput,
   openDecisions,
   openEvent,
+  parkedTasks,
   releaseEvent,
   renderDecisionsMd,
   resolveEvent,
@@ -493,7 +497,13 @@ import {
   spawnAgent,
 } from "./spawn";
 import { SpawnError } from "./spawn-error";
-import { isRepoTrusted, readClaudeJson, recordRepoTrust } from "./trust";
+import {
+  type TrustFacts,
+  isRepoTrusted,
+  readClaudeJson,
+  recordRepoTrust,
+  trustAskFor,
+} from "./trust";
 import { type AgentWatch, type ProgressFeed, watchAgent } from "./verify";
 import {
   BLOCKED_ALARM,
@@ -776,6 +786,7 @@ const PEER_ADMIN_OPS: ReadonlySet<string> = new Set([
 
 /** A task's why_waiting while its spawn failure is unrecovered. */
 function spawnFailedWhy(f: SpawnFailure, now: number): string {
+  if (f.code === "LAUNCH_CANCELLED") return `${f.message}; it starts once the repo is trusted`;
   if (f.next_retry_at === null) {
     return `spawn failed: ${f.code} — retries stopped after ${f.attempt} attempt${f.attempt === 1 ? "" : "s"}`;
   }
@@ -786,6 +797,22 @@ function spawnFailedWhy(f: SpawnFailure, now: number): string {
 /** A `spawn_failed` decision's answers: retry at once (no backoff), or cancel the task. */
 const SPAWN_FAILED_OPTIONS = ["retry now", "stop task"];
 const SPAWN_STOP_ANSWER = "stop task";
+/** The role a spawn decision's launch is for (`data.role`; an implementer's by default). */
+const roleOf = (data: { role?: unknown }): Role =>
+  typeof data.role === "string" ? (data.role as Role) : "implementer";
+
+/**
+ * A shared-precondition decision's question and hover text, rendered for its `waiting` tasks and
+ * `launches` count: what `decision_joined` journals (one renderer per SHARED_PRECONDITION_KINDS).
+ */
+function sharedAsk(
+  d: DecisionRecord,
+  waiting: readonly TaskId[],
+  launches: number,
+): { question: string; option_help: Record<string, string> } {
+  return trustAskFor(d as DecisionRecord & TrustFacts, waiting, launches);
+}
+
 /** The task a `spawn_failed` decision is about (a release stage's is wave-level: `_release`). */
 function spawnFailedTask(d: DecisionRecord): TaskId | null {
   const on = (d as { pipeline?: { on?: unknown; task?: unknown } }).pipeline;
@@ -1337,6 +1364,17 @@ export class Daemon {
   private readonly launching = new Map<string, { wave: WaveId; task: TaskId; role: Role }>();
   /** Decisions a launch's verification opened, settled once that launch is supervised. */
   private readonly unsettled = new Map<string, Array<{ wave: WaveId; id: string }>>();
+  /**
+   * Shared-precondition decisions being opened now, by `<wave>/<base id>`: a launch that needs
+   * the same precondition meanwhile waits for it and joins it (#418).
+   */
+  private readonly openingShared = new Map<string, Promise<string>>();
+  /**
+   * Launches a `repo_untrusted` `cancel` refused (`<wave>/<task>/<role>`), by the decision whose
+   * trust they wait on: lifted once that repo is trusted (resolveTrustedRepos). In memory only:
+   * after a restart they are launched again (and ask again if still untrusted).
+   */
+  private readonly cancelledLaunches = new Map<string, { wave: WaveId; decision: string }>();
   /** A remove-now's agents told to stop, by id: when (their grace counts from it). */
   private readonly evicted = new Map<string, number>();
   /** Since when a configured host has been seen draining (`hosts.<name>.drain`). */
@@ -1628,6 +1666,7 @@ export class Daemon {
       // stopped retries stay stopped.
       for (const [task, roles] of Object.entries(log.record.spawnFailures)) {
         for (const f of Object.values(roles)) {
+          if (f.code === "LAUNCH_CANCELLED") continue;
           const until =
             f.next_retry_at === null ? Number.POSITIVE_INFINITY : Date.parse(f.next_retry_at);
           this.refused.set(`${wave}/${task}/${f.role}`, { n: f.attempt, until });
@@ -4508,6 +4547,31 @@ export class Daemon {
         });
       }
     }
+    // Launches a `cancel` refused start again once their repo is trusted (#418).
+    const seen = new Set<string>();
+    for (const [key, c] of [...this.cancelledLaunches]) {
+      const d = this.waves.get(c.wave)?.record.decisions[c.decision];
+      if (d === undefined) {
+        this.cancelledLaunches.delete(key);
+        continue;
+      }
+      if (seen.has(c.decision)) continue;
+      seen.add(c.decision);
+      const root = (d as { repo?: unknown }).repo;
+      if (typeof root !== "string") continue;
+      if (typeof (d as { target?: unknown }).target === "string") {
+        this.checkRemoteTrust(c.wave, d, root, () => this.liftCancelled(c.decision));
+        continue;
+      }
+      const profile = (d as { claude_config_dir?: unknown }).claude_config_dir;
+      let here: Record<string, unknown> | null;
+      if (typeof profile === "string") here = readClaudeJson(join(profile, ".claude.json"));
+      else {
+        cfg ??= readClaudeJson(this.claudeJsonPath);
+        here = cfg;
+      }
+      if (isRepoTrusted(here, expandHome(root))) this.liftCancelled(c.decision);
+    }
   }
 
   /**
@@ -4515,7 +4579,12 @@ export class Daemon {
    * the repo (the owner accepted the dialog there). Throttled per decision; the ssh read runs
    * beside the serial queue and only the resolution is queued.
    */
-  private checkRemoteTrust(wave: WaveId, d: DecisionRecord, repo: string): void {
+  private checkRemoteTrust(
+    wave: WaveId,
+    d: DecisionRecord,
+    repo: string,
+    onTrusted?: () => void,
+  ): void {
     const now = this.now();
     const c = this.trustChecks.get(d.decision_id);
     if (
@@ -4532,6 +4601,7 @@ export class Daemon {
       .readTrust(typeof profile === "string" ? profile : undefined)
       .then((cfg) => {
         if (!isRepoTrusted(cfg, repo) || !this.running) return;
+        if (onTrusted !== undefined) return this.enqueue(async () => onTrusted());
         return this.enqueue(async () => {
           const cur = this.waves.get(wave)?.record.decisions[d.decision_id];
           if (cur === undefined || cur.resolved !== undefined) return;
@@ -4569,6 +4639,113 @@ export class Daemon {
    * verified only once it is supervised, so a relaunch never retires an agent not yet watched.
    */
   private async openSpawnDecision(wave: WaveId, d: SpawnDecision): Promise<string> {
+    if (!SHARED_PRECONDITION_KINDS.has(d.kind)) return this.openSpawnDecisionNow(wave, d);
+    // A shared precondition (#418): one open decision per key, which every later launch joins.
+    // Spawns run concurrently, so one still being opened is awaited and joined too.
+    const agent = typeof d.data.agent_id === "string" ? { agent_id: d.data.agent_id } : {};
+    const join = async (id: string) => {
+      await this.joinDecision(wave, { id, task: d.task, role: roleOf(d.data), ...agent });
+      return id;
+    };
+    const key = `${wave}/${d.id}`;
+    const opening = this.openingShared.get(key);
+    if (opening !== undefined) return join(await opening);
+    const open = openDecisionFor(this.waves.get(wave)?.record.state?.open_decisions ?? [], d.id);
+    if (open !== undefined) return join(open);
+    const p = this.openSpawnDecisionNow(wave, d);
+    this.openingShared.set(key, p);
+    try {
+      return await p;
+    } finally {
+      this.openingShared.delete(key);
+    }
+  }
+
+  /**
+   * Park one more launch on an open shared-precondition decision (`decision_joined`): its task is
+   * listed in `waiting` and parks; the question is rendered again for every waiting task, and the
+   * retained decision and its inbox item follow once it was published. A launch already on it,
+   * or a task that cannot park, is left as it is.
+   */
+  private async joinDecision(
+    wave: WaveId,
+    j: { id: string; task: TaskId; role: string; agent_id?: string },
+  ): Promise<void> {
+    const log = this.waves.get(wave);
+    const d = log?.record.decisions[j.id];
+    if (log === undefined || d === undefined) return;
+    const waiting = [...new Set([...parkedTasks(d), j.task])];
+    const launches = (d.launches?.length ?? parkedTasks(d).length) + 1;
+    const r = joinEvent(log.record, j.id, { ...j, ...sharedAsk(d, waiting, launches) });
+    if ("already" in r) return;
+    if ("error" in r) {
+      this.log(`join ${j.id} (${j.task}'s ${j.role}): ${r.error}`);
+      return;
+    }
+    await this.append(wave, r.event);
+    const cur = log.record.decisions[j.id] as DecisionRecord;
+    this.log(`${j.task}'s ${j.role} waits on ${j.id} (${cur.waiting?.length ?? 1} tasks waiting)`);
+    // Not settled yet: settleDecision publishes it, and opens its item, as it is by then.
+    const item = this.inbox.get(decisionItemId(wave, j.id));
+    if (item === undefined || item.answered !== undefined) return;
+    await this.publishDecision(wave, cur);
+    const fresh = itemForDecision(decisionPayload(cur), this.config.effective(wave).autopilot);
+    const next = {
+      ...item,
+      question: fresh.question,
+      ...(fresh.options !== undefined ? { options: fresh.options } : {}),
+    };
+    this.inbox.set(item.id, next);
+    await this.publishInboxItem(next);
+  }
+
+  /**
+   * A `repo_untrusted` decision answered `cancel` (#418): only the launches waiting on it are
+   * cancelled, never the tasks' other work. Each is journaled `spawn_failed` (`LAUNCH_CANCELLED`,
+   * no retry, no spawn_failed decision) and refused until the repo is trusted; an agent left on
+   * the trust dialog is retired. The tasks were unparked to their stage by the resolution.
+   */
+  private async onTrustCancelled(wave: WaveId, d: DecisionRecord, by: string): Promise<void> {
+    const f = d as DecisionRecord & TrustFacts;
+    const str = (v: unknown) => (typeof v === "string" && v !== "" ? v : undefined);
+    const host = str(f.host);
+    const acct = str(f.claude_account);
+    const what = `${str(f.repo) ?? "the repo"} is untrusted${host !== undefined ? ` on ${host}` : ""}${acct !== undefined ? ` in Claude account ${acct}` : ""}`;
+    const launches: ParkedLaunch[] =
+      d.launches ?? (d.task !== null ? [{ task: d.task, role: roleOf(d) }] : []);
+    for (const l of launches) {
+      const key = `${wave}/${l.task}/${l.role}`;
+      this.refused.set(key, { n: 1, until: Number.POSITIVE_INFINITY });
+      this.cancelledLaunches.set(key, { wave, decision: d.decision_id });
+      await this.append(wave, {
+        type: "spawn_failed",
+        task: l.task,
+        data: {
+          code: "LAUNCH_CANCELLED",
+          message: `${by} cancelled the launch: ${what}`,
+          role: l.role,
+          attempt: 1,
+          spawn_attempt: this.agentAttempt(wave, l.task, l.role as Role),
+          next_retry_at: null,
+        },
+      });
+      if (l.agent_id !== undefined) await this.retireAny(wave, l.agent_id, "stopped");
+    }
+    this.log(`${d.decision_id}: ${by} cancelled ${launches.length} waiting launch(es): ${what}`);
+  }
+
+  /** The launches a `cancel` refused for `decision`'s trust may start again: it is trusted now. */
+  private liftCancelled(decision: string): void {
+    for (const [key, c] of this.cancelledLaunches) {
+      if (c.decision !== decision) continue;
+      this.cancelledLaunches.delete(key);
+      this.refused.delete(key);
+      this.log(`${key}: its repo is trusted now; the cancelled launch starts again`);
+    }
+  }
+
+  /** `openSpawnDecision` for a decision about one launch (or a shared one's opener). */
+  private async openSpawnDecisionNow(wave: WaveId, d: SpawnDecision): Promise<string> {
     const decisions = this.waves.get(wave)?.record.decisions ?? {};
     let id = d.id;
     for (let n = 2; decisions[id] !== undefined; n++) id = `${d.id}-${n}`;
@@ -4649,6 +4826,7 @@ export class Daemon {
       publishRetained: (topic, payload) =>
         this.broker.publish(topic, payload, { qos: 1, retain: true }),
       openDecision: (d) => this.openSpawnDecision(wave, d),
+      joinDecision: (j) => this.joinDecision(wave, j),
       prepareAccount: async (a) => {
         await this.claude.prepare(a);
       },
@@ -8698,6 +8876,8 @@ export class Daemon {
     if (refused !== null && (d as { pipeline?: unknown }).pipeline === undefined)
       await this.askAgainRefused(wave, d, r.answer, refused);
     if (d.kind === "machine_down") await this.onMachineDownResolved(wave, d);
+    if (d.kind === "repo_untrusted" && r.answer.trim().toLowerCase() === "cancel")
+      await this.onTrustCancelled(wave, d, r.by);
     if (d.kind === "terminal_status_lost") await this.onTerminalLostResolved(wave, d);
     if (d.kind === "release_go") {
       // go: the release is the owner's, and done. Anything else holds it: asked again.

@@ -802,7 +802,7 @@ disagree, a merge conflict, an agent blocked, a plan change. It is a journal eve
   | --- | --- |
   | `spawn_budget_exhausted` | `raise by <n>` (any n ≥ 1; `raise <n>` is read as `raise by <n>` and journaled so), `cancel` |
   | `machine_down` | its options only: `wait`, `re-place queued tasks`, `cancel` |
-  | `repo_untrusted` | `trust`, `cancel` |
+  | `repo_untrusted` | `trust` (records the trust, resumes every waiting launch), `cancel` (cancels only the waiting launches, never the tasks' other work) |
 
   For example `volleyd resolve <id> raise` is refused with `"raise" is not one of raise by 12 /
   cancel (write "raise by <n>")`. A pipeline's own decisions keep asking again themselves.
@@ -1642,7 +1642,7 @@ lists every key with its default and example pools, commented out.
 
 | # | Step | Module | Refusal (journaled as `alarm_raised { code }`) |
 |---|---|---|---|
-| 0 | **Repo trust**: is the repo root trusted in `~/.claude.json` (`projects[<root>].hasTrustDialogAccepted`, or a parent's)? | `trust.ts` | untrusted → decision `repo_untrusted` ("Needs you: trust `<repo>` for dispatch?"), the wave's spawns park on it |
+| 0 | **Repo trust**: is the repo root trusted in `~/.claude.json` (`projects[<root>].hasTrustDialogAccepted`, or a parent's)? | `trust.ts` | untrusted → decision `repo_untrusted` ("Needs you: trust `<repo>` for dispatch? 1 task is waiting: T1."), one per machine, profile and repo: every later spawn needing it joins it and parks |
 | 1 | **Lock** `$VOLLEYD_HOME/locks/<worktree-hash>.lock`, `O_EXCL` | `locks.ts` | `SPAWN_LOCKED` |
 | 2 | **Worktree** `git -C <repo> worktree add <worktree_root>/<wave>/<task>-<role> -b <wave>/<task>-<role>-<attempt> <base>`, `<base>` the release branch as origin has it ([base ref](#base-ref)); `.volley/` and `/ISSUE.md` appended to the repo's `info/exclude` once | `worktree.ts` | `BASE_STALE`, `BASE_UNREACHABLE`, `RELEASE_BRANCH_MISSING`, `WORKTREE_FAILED` |
 | 3 | **ISSUE.md** from `gh issue view <n> --json number,title,body,url`, `<n>` from the wave file only | `issue.ts` | `ISSUE_MISMATCH`, `ISSUE_FETCH_FAILED` |
@@ -2223,6 +2223,31 @@ Accepting the dialog by hand in any worktree of the repo works too: every tick r
 open `repo_untrusted` decisions, resolves those whose repo is now trusted, and the parked spawns
 resume.
 
+**One question per precondition (#418).** A `repo_untrusted` decision is about a shared
+precondition, not a task: its id is keyed by the machine (ssh target, or the supervisor's own),
+the Claude profile and the repo root (`trustDecisionId` → `preconditionKey`), never the task or
+attempt. The first launch that finds the folder untrusted opens it; every later launch needing the
+same trust joins it instead (`decision_joined { decision_id, kind, task, role, question,
+option_help?, agent_id? }`), even one racing it in the same tick (the daemon awaits the open in
+flight, then joins). A joined task parks (`awaiting_decision`, resuming at its own stage), is
+appended to the decision's `waiting`, and the question is rendered again, naming the machine and
+the account once: `Needs you: trust <root> on box in Claude account work for dispatch? 12 tasks
+are waiting: i392, i416, i400, i403, i397, i399, … (12 tasks).` The retained decision and its
+inbox item follow. One answer resumes every waiting task:
+
+- `trust` (or the dialog accepted by hand) records the trust once and unparks them all; the next
+  tick launches each.
+- `cancel` cancels only the waiting launches: each is journaled `spawn_failed { code:
+  LAUNCH_CANCELLED, next_retry_at: null }` (no `spawn_failed` decision), an agent left on the
+  trust dialog is retired, and the tasks keep their stage, PR and other roles; their
+  `why_waiting` says whose cancel and which repo, machine and account. Once the repo is trusted
+  the tick's trust re-read lifts the refusal and the launches start. The refusal is in memory: a
+  restart launches them again (and, still untrusted, asks one new question).
+
+A launch that hits the folder after its decision was resolved opens a fresh one (`<id>-2`), which
+later launches join. `SHARED_PRECONDITION_KINDS` (decisions.ts) gates the join path and the
+multi-task unpark; a kind joins it by giving its decisions a key and a question renderer.
+
 
 ### Credential sweep
 
@@ -2310,8 +2335,9 @@ through `base64 -d`. The spawn steps are those of the local host, with these dif
 | Cleanup | `volleyd cleanup --yes` kills the tmux session and runs `git worktree remove` on the box, both with the consent token; its lines end in `on <target>`, and a worktree already gone from the box is reported `gone`, so a re-run is a no-op |
 
 **Trust on the box.** A remote clone is trusted in the box's own `~/.claude.json`, never the
-daemon machine's, and its `repo_untrusted` decision id is keyed by target and root (a local and
-a remote clone at the same path never share one). Answering it with `volleyd resolve <id>
+daemon machine's, and its `repo_untrusted` decision id is keyed by target, Claude profile and root
+(a local and a remote clone at the same path never share one; two tasks on the box needing the
+same trust share it, and its question names the machine, not its ssh target). Answering it with `volleyd resolve <id>
 trust` writes that one key on the box over the same `bash -s` transport: read the file, write
 the new one beside it (`~/.claude.json.volleyd.tmp`, mode 0600), and swap it in only if the file
 is still what was read (`cmp`, then `mv`), retrying when Claude Code rewrote it meanwhile. A box
