@@ -56,6 +56,14 @@ export interface LaunchSpec {
   command: string;
   /** The sealed `.volley/launch.sh` in `cwd` (sealLaunchScript): the fence starts it only so. */
   launch?: LaunchToken;
+  /** The terminal's size at launch (`tmux_cols` × `tmux_rows`); hosts that cannot size ignore it. */
+  size?: TermSize;
+}
+
+/** A terminal's size in character cells. */
+export interface TermSize {
+  cols: number;
+  rows: number;
 }
 
 /** What ending a retired agent's session did (SPEC §4.6.4, journaled `agent_session_closed`). */
@@ -100,6 +108,12 @@ export interface Host {
   sendKeys(workspace: string, key: string, tokens?: TypedTextTokens): Promise<void>;
   /** Type text into the workspace (no trailing Enter), with the token the fence needs for it. */
   sendText(workspace: string, text: string, tokens?: TypedTextTokens): Promise<void>;
+  /**
+   * Resize the workspace's terminal to `size`, or back to its launch size (`"launch"`): the
+   * Desk's Terminal popout (#403). False when this host has no way to (cmux); rejects when the
+   * resize failed.
+   */
+  resize(workspace: string, size: TermSize | "launch"): Promise<boolean>;
   /**
    * Close the workspace. Destructive: only with consent from `volleyd cleanup --yes`, or a
    * retire's for the retired agent's own workspace.

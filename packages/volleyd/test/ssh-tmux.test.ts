@@ -130,6 +130,10 @@ describe("SshTmuxHost", () => {
         "tmux",
         "new-session",
         "-d",
+        "-x",
+        "220",
+        "-y",
+        "50",
         "-s",
         "w1-T1-implementer",
         "-c",
@@ -137,6 +141,82 @@ describe("SshTmuxHost", () => {
         "bash .volley/launch.sh",
       ],
     ]);
+  });
+
+  it("launch opens the session at the spec's size (tmux_cols × tmux_rows), not tmux's 80×24", async () => {
+    const r = remote((s) => (argvIs("tmux", "has-session")(s) ? { code: 1 } : undefined));
+    await r.host.launch({
+      cwd: "/wt",
+      name: "w1 T1 implementer",
+      command: LAUNCH_COMMAND,
+      launch: sealed("/wt"),
+      size: { cols: 160, rows: 40 },
+    });
+    const ns = r.steps().find((s) => s.argv[1] === "new-session");
+    expect(ns?.argv.slice(0, 7)).toEqual(["tmux", "new-session", "-d", "-x", "160", "-y", "40"]);
+  });
+
+  it("resize: tmux resize-window to a size, or back to the session's launch size", async () => {
+    const r = remote((s) => (argvIs("tmux", "has-session")(s) ? { code: 1 } : undefined));
+    await r.host.launch({
+      cwd: "/wt",
+      name: "w1 T1 implementer",
+      command: LAUNCH_COMMAND,
+      launch: sealed("/wt"),
+      size: { cols: 160, rows: 40 },
+    });
+    await r.host.resize("w1-T1-implementer", { cols: 180, rows: 48 });
+    await r.host.resize("w1-T1-implementer", "launch");
+    // A session this host did not launch (a daemon restart): the default launch size.
+    await r.host.resize("w2-T9-reviewer", "launch");
+    expect(
+      r
+        .steps()
+        .filter((s) => s.argv[1] === "resize-window")
+        .map((s) => s.argv),
+    ).toEqual([
+      ["tmux", "resize-window", "-t", "=w1-T1-implementer:", "-x", "180", "-y", "48"],
+      ["tmux", "resize-window", "-t", "=w1-T1-implementer:", "-x", "160", "-y", "40"],
+      ["tmux", "resize-window", "-t", "=w2-T9-reviewer:", "-x", "220", "-y", "50"],
+    ]);
+  });
+
+  it("a closed or ended session forgets its launch size", async () => {
+    const r = remote((s) => (argvIs("tmux", "has-session")(s) ? { code: 1 } : undefined));
+    for (const name of ["w1 T1 implementer", "w1 T2 implementer"])
+      await r.host.launch({
+        cwd: "/wt",
+        name,
+        command: LAUNCH_COMMAND,
+        launch: sealed("/wt"),
+        size: { cols: 160, rows: 40 },
+      });
+    await r.host.close("w1-T1-implementer", mintConsentToken("volleyd cleanup w1 --yes"));
+    await r.host.endSession("w1-T2-implementer", "/wt", mintConsentToken("retire w1-t2"));
+    await r.host.resize("w1-T1-implementer", "launch");
+    await r.host.resize("w1-T2-implementer", "launch");
+    expect(
+      r
+        .steps()
+        .filter((s) => s.argv[1] === "resize-window")
+        .map((s) => s.argv.slice(4)),
+    ).toEqual([
+      ["-x", "220", "-y", "50"],
+      ["-x", "220", "-y", "50"],
+    ]);
+  });
+
+  it("resize clamps to the fence's bounds and rejects when tmux refuses", async () => {
+    const r = remote((s) =>
+      argvIs("tmux", "resize-window")(s) && s.argv[3] === "=gone:"
+        ? { code: 1, stderr: "can't find session: gone" }
+        : undefined,
+    );
+    await r.host.resize("w1-T1-implementer", { cols: 5, rows: 9000 });
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      ["tmux", "resize-window", "-t", "=w1-T1-implementer:", "-x", "20", "-y", "500"],
+    ]);
+    await expect(r.host.resize("gone", { cols: 100, rows: 30 })).rejects.toThrow(/find session/);
   });
 
   /** A launch on a box whose ssh PATH is `ssh` and whose tmux server has `server` (null: none). */

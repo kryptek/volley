@@ -261,10 +261,10 @@ import {
 } from "./decisions";
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
-import { mintConsentToken, mintModelSwitchToken, mintWakeToken } from "./fence";
+import { TMUX_SIZE, mintConsentToken, mintModelSwitchToken, mintWakeToken } from "./fence";
 import { LOCAL_HOST } from "./fleet-name";
 import { lockFetches } from "./git-lock";
-import type { Host } from "./hosts/host";
+import type { Host, TermSize } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import {
   type RemoteHost,
@@ -2348,6 +2348,8 @@ export class Daemon {
     this.stopGrace.clear();
     for (const t of this.reconnectTimers.values()) this.time.clearTimeout(t);
     this.reconnectTimers.clear();
+    // A resize still in its coalescing window never reaches the host once halted.
+    for (const id of [...this.resizes.keys()]) this.dropResize(id, "volleyd is stopping");
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
@@ -5697,6 +5699,7 @@ export class Daemon {
     const log = a !== undefined ? this.waves.get(a.wave) : undefined;
     if (a === undefined || log === undefined) return;
     this.supervised.delete(agentId);
+    this.dropResize(agentId, `agent '${agentId}' retired`);
     this.lastWokenAt.delete(agentId);
     this.wakeTyped.delete(agentId);
     for (const [id, w] of this.wakes) if (w.agent === agentId) this.disarmWake(id);
@@ -9700,6 +9703,8 @@ export class Daemon {
         return this.archiveOp(p, by);
       case "steer":
         return this.steer(p, by);
+      case "terminal_resize":
+        return this.terminalResize(p, by);
       case "merged":
         return this.mergedOp(p, by);
       case "issues":
@@ -11399,6 +11404,90 @@ export class Daemon {
         { seq: q.seq, ...(q.supersedes !== undefined ? { supersedes: q.supersedes } : {}) },
       );
     }
+  }
+
+  /** Per agent: the resize waiting out its coalescing window, and the one running before it. */
+  private readonly resizes = new Map<
+    string,
+    { size: TermSize | "launch"; answers: ((r: Reply) => void)[]; timer: TimerHandle }
+  >();
+  private readonly resizing = new Map<string, Promise<unknown>>();
+
+  /**
+   * `terminal_resize { agent_id, cols, rows | reset: true }` (SPEC §4.6.6): size a live agent's
+   * terminal to the Desk's Terminal popout, or back to its launch size. Cosmetic, so any sender
+   * that may write this mailbox (the steer role) may ask. A burst for one agent is one resize to
+   * its last size, run after the one before it; every request in the burst gets its answer.
+   */
+  private terminalResize(p: Record<string, unknown>, by: string): HandlerResult {
+    const id = typeof p.agent_id === "string" ? p.agent_id : "";
+    if (id === "") return { ok: false, error: "terminal_resize requires payload.agent_id" };
+    const a = this.supervised.get(id);
+    if (a === undefined) return { ok: false, error: `agent '${id}' is not live under volleyd` };
+    const cell = (n: unknown) =>
+      Number.isInteger(n) && (n as number) >= TMUX_SIZE.min && (n as number) <= TMUX_SIZE.max;
+    if (p.reset !== true && !(cell(p.cols) && cell(p.rows)))
+      return {
+        ok: false,
+        error: `terminal_resize needs cols and rows (integers ${TMUX_SIZE.min}..${TMUX_SIZE.max}) or reset: true`,
+      };
+    const size: TermSize | "launch" =
+      p.reset === true ? "launch" : { cols: p.cols as number, rows: p.rows as number };
+    const answer = new Promise<Reply>((resolve) => {
+      const queued = this.resizes.get(id);
+      if (queued !== undefined) this.time.clearTimeout(queued.timer);
+      const answers = [...(queued?.answers ?? []), resolve];
+      const timer = this.time.setTimeout(
+        () => this.flushResize(id, a.host, a.workspace, by),
+        DAEMON_DEFAULTS.terminal_resize_coalesce_ms,
+      );
+      this.resizes.set(id, { size, answers, timer });
+    });
+    return { ok: true, defer: answer };
+  }
+
+  /** Drop the agent's resize still in its coalescing window: its session is going away. */
+  private dropResize(id: string, error: string): void {
+    const queued = this.resizes.get(id);
+    if (queued === undefined) return;
+    this.resizes.delete(id);
+    this.time.clearTimeout(queued.timer);
+    for (const answer of queued.answers) answer({ ok: false, error });
+  }
+
+  private flushResize(id: string, host: Host, workspace: string, by: string): void {
+    const queued = this.resizes.get(id);
+    if (queued === undefined) return;
+    this.resizes.delete(id);
+    const { size, answers } = queued;
+    const shown = size === "launch" ? "its launch size" : `${size.cols}×${size.rows}`;
+    const run = (this.resizing.get(id) ?? Promise.resolve())
+      .then(() => host.resize(workspace, size))
+      .then(
+        (resized): Reply => {
+          this.log(
+            resized
+              ? `terminal_resize ${id} → ${shown} by ${by}`
+              : `terminal_resize ${id}: host ${host.name} cannot resize a terminal; ignored`,
+          );
+          return {
+            ok: true,
+            result: { agent_id: id, resized, ...(size === "launch" ? { reset: true } : size) },
+          };
+        },
+        (e: unknown): Reply => {
+          const error = `terminal_resize ${id}: ${e instanceof Error ? e.message : String(e)}`;
+          this.log(error);
+          return { ok: false, error };
+        },
+      );
+    const done = run.then((r) => {
+      for (const answer of answers) answer(r);
+    });
+    this.resizing.set(id, done);
+    void done.then(() => {
+      if (this.resizing.get(id) === done) this.resizing.delete(id);
+    });
   }
 
   /**

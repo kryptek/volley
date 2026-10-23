@@ -37,6 +37,8 @@ export const CONFIG_DEFAULTS: Tunables = {
   brief_preface_max_bytes: 16384,
   wake_grace_s: 120,
   screen_tail_interval_s: 5,
+  tmux_cols: 220,
+  tmux_rows: 50,
   stop_grace_s: 30,
   dynsec_batch_ms: 50,
   credential_sweep_interval_s: 600,
@@ -195,6 +197,8 @@ export const DAEMON_DEFAULTS = {
   trust_write_attempts: 5,
   /** How long `steer` waits for the recipient's `steering_acked` before reporting `delivered`. */
   steer_wait_ack_ms: 30_000,
+  /** A burst of `terminal_resize` requests for one agent within this long is one resize (#403). */
+  terminal_resize_coalesce_ms: 150,
   /** Upper bound on a caller's `wait_ack_ms`, so a steer cannot park a waiter indefinitely. */
   steer_wait_ack_max_ms: 300_000,
   /** How long the daemon waits for one `gh issue view` (issue Files sections, at submit). */

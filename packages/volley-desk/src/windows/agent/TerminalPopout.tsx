@@ -11,11 +11,17 @@
  * open and the canvas stays usable, but Tab is kept inside, focus goes back to
  * the ⤢ that opened it, and Escape (`useDeskKeys` in the App) closes the
  * topmost. Below `NARROW_PX` it is a full-screen sheet with no drag or resize.
+ * With `onSize` it reports the text box's size in cells once it holds for
+ * `TERMINAL_RESIZE_DEBOUNCE_MS` (on open, on a resize, on a text size change),
+ * and `"launch"` when it closes: volleyd sizes the agent's terminal to match
+ * (#403), so its program wraps at the popout's width. Its width then stays
+ * where it opened (or where it was dragged) rather than following the screen.
  */
-import { type PointerEvent, useEffect, useRef, useState } from "react";
+import { type PointerEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../../a11y/keys";
 import type { NoSignal } from "../../attention";
 import { NARROW_PX } from "../../canvas/useViewport";
+import { TERMINAL_RESIZE_DEBOUNCE_MS, type TerminalSize } from "../../steer/terminalResize";
 import type { AgentView, WaveView } from "../../store/types";
 import { ROLE_LABEL, terminalProps } from "./AgentWindow";
 import { Terminal } from "./Terminal";
@@ -41,6 +47,100 @@ export const POPOUT_CHROME_PX = 56;
 export const popoutWidth = (cols: number): string =>
   `min(calc(100vw - 32px), calc(${cols}ch + ${POPOUT_CHROME_PX}px))`;
 
+/** The cell counts volleyd accepts for a terminal (its `terminal_resize` bounds). */
+export const TERMINAL_CELLS = { min: 20, max: 500 } as const;
+/** The terminal's line height, as a multiple of its text size (`.term` in agent.css). */
+const LINE_HEIGHT = 1.55;
+
+/**
+ * The cells a text box of `box` px holds at `cell` px per cell, less the caret's row; null
+ * when nothing is laid out (a cell or the box measures 0).
+ */
+export function fitCells(
+  box: { width: number; height: number },
+  cell: { width: number; height: number },
+): { cols: number; rows: number } | null {
+  if (!(cell.width > 0 && cell.height > 0 && box.width > 0 && box.height > 0)) return null;
+  const fit = (n: number) =>
+    Math.max(TERMINAL_CELLS.min, Math.min(TERMINAL_CELLS.max, Math.floor(n)));
+  return { cols: fit(box.width / cell.width), rows: fit(box.height / cell.height - 1) };
+}
+
+/** The text box of the popout's terminal and one cell of its font, in px. */
+function measure(
+  term: HTMLElement,
+  probe: HTMLElement,
+  fontPx: number,
+): { cols: number; rows: number } | null {
+  const cs = getComputedStyle(term);
+  const px = (v: string) => Number.parseFloat(v) || 0;
+  const lineHeight = px(cs.lineHeight) || fontPx * LINE_HEIGHT;
+  const box = {
+    width: term.clientWidth - px(cs.paddingLeft) - px(cs.paddingRight),
+    height: term.clientHeight - px(cs.paddingTop) - px(cs.paddingBottom),
+  };
+  // The probe is PROBE_CHARS zeros in the terminal's font: one cell is a tenth of it.
+  const cell = { width: probe.getBoundingClientRect().width / PROBE_CHARS, height: lineHeight };
+  return fitCells(box, cell);
+}
+
+const PROBE_CHARS = 10;
+
+/**
+ * Report the terminal's size in cells to `onSize` once it holds for the debounce, on open and
+ * whenever the box or the text size changes; `"launch"` on unmount, if a size was sent.
+ */
+function useTerminalCells(
+  ref: { current: HTMLElement | null },
+  probe: { current: HTMLElement | null },
+  fontPx: number,
+  onSize: ((size: TerminalSize) => void) | undefined,
+) {
+  const sent = useRef<string | null>(null);
+  // The last reporter given: a reset still reaches the terminal after `onSize` goes away.
+  const report = useRef(onSize);
+  useLayoutEffect(() => {
+    if (onSize !== undefined) report.current = onSize;
+  });
+  const enabled = onSize !== undefined;
+  useEffect(() => {
+    if (!enabled) return;
+    const term = ref.current?.querySelector<HTMLElement>(".term--popout");
+    if (!term) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const size = probe.current ? measure(term, probe.current, fontPx) : null;
+        const key = size && `${size.cols}x${size.rows}`;
+        if (size === null || key === sent.current) return;
+        sent.current = key;
+        report.current?.(size);
+      }, TERMINAL_RESIZE_DEBOUNCE_MS);
+    };
+    schedule();
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(schedule) : null;
+    observer?.observe(term);
+    return () => {
+      clearTimeout(timer);
+      observer?.disconnect();
+    };
+  }, [enabled, fontPx, ref, probe]);
+  // Losing `onSize` while open (control drops, the screen goes) hands the terminal back too.
+  useEffect(() => {
+    if (enabled || sent.current === null) return;
+    sent.current = null;
+    report.current?.("launch");
+  }, [enabled]);
+  // Closing (any way: the red light, Escape, the agent leaving) hands the terminal back.
+  useEffect(
+    () => () => {
+      if (sent.current !== null) report.current?.("launch");
+    },
+    [],
+  );
+}
+
 /** The screen's widest line in code points (a powerline glyph is one column), at least 80. */
 export function columns(lines: readonly string[] | undefined): number {
   return Math.max(MIN_COLS, ...(lines ?? []).map((l) => [...l].length));
@@ -59,6 +159,8 @@ export interface TerminalPopoutProps {
   fontPx: number;
   /** Adds `delta` px to the shared text size (the owner clamps it to 9–20). */
   onFont: (delta: number) => void;
+  /** The terminal's size in cells, debounced; `"launch"` once it closes (`terminal_resize`). */
+  onSize?: (size: TerminalSize) => void;
 }
 
 export function TerminalPopout({
@@ -71,8 +173,11 @@ export function TerminalPopout({
   onRaise,
   fontPx,
   onFont,
+  onSize,
 }: TerminalPopoutProps) {
   const ref = useRef<HTMLDivElement>(null);
+  const probe = useRef<HTMLSpanElement>(null);
+  useTerminalCells(ref, probe, fontPx, onSize);
   const sheet = window.innerWidth < NARROW_PX;
   const [pos, setPos] = useState(() => ({
     x: ORIGIN.x + cascade * POPOUT_CASCADE_PX,
@@ -90,7 +195,11 @@ export function TerminalPopout({
 
   const task = agent.task;
   const role = agent.role ? ROLE_LABEL[agent.role] : null;
-  const cols = columns(agent.screen?.lines);
+  // While it sizes the terminal, the window keeps the width it opened at (or the user's drag):
+  // following the screen, which follows the window, would ratchet a 1-cell short measurement
+  // down to 80 columns (#403).
+  const [openCols] = useState(() => columns(agent.screen?.lines));
+  const cols = onSize ? openCols : columns(agent.screen?.lines);
 
   const down = (e: PointerEvent<HTMLDivElement>) => {
     // The traffic lights and the size buttons are controls, not handles.
@@ -188,6 +297,9 @@ export function TerminalPopout({
         className="term--popout"
         style={{ fontSize: `${fontPx}px` }}
       />
+      <span ref={probe} className="popout-probe" style={{ fontSize: `${fontPx}px` }} aria-hidden>
+        {"0".repeat(PROBE_CHARS)}
+      </span>
     </div>
   );
 }
