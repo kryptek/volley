@@ -436,10 +436,12 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
       repo,
       host: "box",
       target: "dev@box",
-      decision_id: trustDecisionId("w1", repo, "dev@box"),
+      decision_id: trustDecisionId("w1", repo, { machine: "dev@box" }),
     });
     // The local and the remote clone at one path never share a decision.
-    expect(trustDecisionId("w1", repo, "dev@box")).not.toBe(trustDecisionId("w1", repo));
+    expect(trustDecisionId("w1", repo, { machine: "dev@box" })).not.toBe(
+      trustDecisionId("w1", repo),
+    );
     // The local file (which trusts nothing) neither resolves nor re-opens it.
     for (let i = 0; i < 3; i++) {
       await clock.advance(60_000);
@@ -462,6 +464,40 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
     expect(box.launches).toHaveLength(1);
     expect(opens()).toHaveLength(1);
     expect(readFileSync(localClaudeJson, "utf-8")).toBe(localBefore);
+  });
+
+  it("two tasks on one box share one repo_untrusted decision naming the machine; `trust` resumes both (#418)", async () => {
+    box.tunnel = true;
+    box.trusted = false;
+    // Launch only: two sessions signalling at once are more than this test needs.
+    box.onLaunch = () => {};
+    await submit("w1", "  T1: { issue: 42, host: box }\n  T2: { issue: 42, host: box }\n");
+    await tickUntil(() => journal("w1").filter((e) => e.type === "decision_joined").length === 1);
+    await waits.settled();
+    const opens = journal("w1").filter((e) => e.type === "decision_opened");
+    expect(opens).toHaveLength(1);
+    const id = opens[0]?.data.decision_id as string;
+    expect(id).toBe(trustDecisionId("w1", repo, { machine: "dev@box" }));
+    const d = daemon.record("w1")?.decisions[id];
+    expect(d?.waiting?.slice().sort()).toEqual(["T1", "T2"]);
+    // The machine by name, never its ssh target.
+    expect(d?.question).toMatch(
+      new RegExp(
+        `^Needs you: trust ${repo} on box for dispatch\\? 2 tasks are waiting: T[12], T[12]\\.$`,
+      ),
+    );
+    expect(d?.question).not.toContain("dev@box");
+    expect(box.launches).toHaveLength(0);
+
+    const r = await runCli(["resolve", id, "trust", "--by", "tester"], env.env);
+    expect(r.exitCode).toBe(0);
+    expect(box.trustRecorded).toEqual([repo]);
+    await tickUntil(() => journal("w1").filter((e) => e.type === "agent_spawned").length === 2);
+    expect(box.launches.map((l) => l.name).sort()).toEqual([
+      "w1 T1 implementer",
+      "w1 T2 implementer",
+    ]);
+    expect(journal("w1").filter((e) => e.type === "decision_opened")).toHaveLength(1);
   });
 
   it("a remote repo_untrusted decision resolves itself once the dialog is accepted on the box", async () => {

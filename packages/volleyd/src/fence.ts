@@ -61,9 +61,17 @@ import { AGENT_BRANCH } from "./worktree";
  *     (in any case); fetch takes a remote name or a
  *     network URL (https, ssh, git, user@host:path — never a local path) and its refspecs only
  *     write refs/remotes/…
+ *   gh pr ready <n> [--repo <slug>] (a draft PR marked ready before the CI gate; never --undo)
  *   gh issue view · gh repo view · gh pr view | list | checks · gh run list | view | watch ·
  *     gh api (GET only; a relative endpoint — never a URL — and never graphql in any path
  *     segment; no request headers)
+ *   the issue lifecycle (autopilot/issues.ts), exactly, <n> a positive issue number:
+ *     gh issue edit <n> --add-label merged-to-release | --remove-label merged-to-release ·
+ *     gh issue comment <n> --body <text> · gh issue close <n> --comment <text> (<text> carrying
+ *     a `<!-- volleyd:… wave=… -->` marker: only volleyd's own comments) ·
+ *     gh label list --search merged-to-release --json name ·
+ *     gh label create merged-to-release --description <text> --color <6 hex> (never --force);
+ *     never on a paired machine
  *   cmux — exact argv shapes only, because cmux types into an agent's shell:
  *     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
  *       with the LaunchToken of the `.volley/launch.sh` volleyd sealed in exactly <dir>
@@ -75,8 +83,9 @@ import { AGENT_BRANCH } from "./worktree";
  *     launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS), including
  *     `[--strict-mcp-config] --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` (the flag is
  *     left out only under `agent_mcp: inherit`) — or from a
- *     sealed sign-in script (below). The one direct call: `claude auth status` (exactly; it prints
- *     a profile's login state and plan, never a credential)
+ *     sealed sign-in script (below). The direct calls: `claude auth status` (exactly; it prints
+ *     a profile's login state and plan, never a credential) and `claude --version` (exactly: the
+ *     version a seeded profile records as its `lastOnboardingVersion`)
  *   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
  *     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
  *     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
@@ -160,12 +169,14 @@ import { AGENT_BRANCH } from "./worktree";
  * REMOTE (one step of a RemoteScript; the same DENY list applies first):
  *   git — the local git policy (worktree add | fetch | rev-parse | … ; worktree remove = CONSENT)
  *   gh issue view
- *   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
- *     the LaunchToken sealed for <dir>) | new-session -d -s volley-signin-<acct> -c <dir>
+ *   tmux new-session -d [-x <n> -y <n>] -s <name> -c <dir> 'bash .volley/launch.sh' (that
+ *     command only, with the LaunchToken sealed for <dir>; n in 20..500) |
+ *     new-session -d -s volley-signin-<acct> -c <dir>
  *     'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
  *     `sealRemoteSigninScript`) | capture-pane | has-session |
  *     send-keys -t <t> Enter|Escape (Up|Down|Space: PICKER) | send-keys -t <t> -l -- <TYPED_TEXT> |
- *     show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
+ *     resize-window -t =<session>: -x <n> -y <n> (exactly; n in 20..500: the Desk's Terminal
+ *     popout) | show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
  *     PATH, from printenv, then the server's own dirs) —
  *     kill-session -t volley-signin-<acct> (no consent: a sign-in session holds no agent's
  *     work) — any other kill-session = CONSENT; no other tmux global option
@@ -176,26 +187,27 @@ import { AGENT_BRANCH } from "./worktree";
  *     runs only from a sealed signin.sh) — the one step with an env: `env.CLAUDE_CONFIG_DIR`
  *     only, only `<abs>/.volley/claude/<acct>` (a profile the supervisor created there),
  *     rendered as one single-quoted `CLAUDE_CONFIG_DIR=…` before the argv
- *   cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
+ *   cat <path>… — only the files volleyd reads: `.claude.json`, a remote profile's
+ *     `<home>/.volley/claude/<acct>/settings.json`, a path ending in
  *     `/info/exclude`, `<dir>/.volley/<name>` for a VOLLEY_READS name, a worktree's
  *     `<abs dir>/.mcp.json` (no `..` segment), or a sign-in dir's `url`
  *   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
  *     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
  *     (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
- *     rebase.md — spelled exactly, directly inside `.volley/`, so no write there is a git
- *     config, HEAD, gitfile or hook, or a case variant of launch.sh), an absolute path ending in
- *     `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh`
- *     (what the tmux session runs) is written whole, never appended, and its content must be
- *     exactly `renderLaunchScript` of valid values for that worktree (LAUNCH_SCRIPT_VARS: a
- *     `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the profile block, an
- *     integer in 100000..1000000, never in the env block; its `CLAUDE_CONFIG_DIR`, if any,
- *     exactly the `<home>/.volley/claude/<id>` the registry recorded at sign-in for a signed-in
- *     profile `<id>` of that host — the script's `host`, SshTmuxHost's spec — with the worktree
- *     under that host's `worktree_root`); a
- *     `.volley/mcp.json` (the MCP server claude starts) likewise exactly `renderMcpConfig` of an
- *     absolute `…/packages/volley-mcp/src/index.ts` outside any `.volley/`, with the
- *     `agent_mcp_allow` entries copied from the box's own config after it (MCP_CONFIG: shape
- *     only, whatever their `command` and whatever `agent_mcp` — trusted as the owner's config); and
+ *     rebase.md, decisions.md, retired.json — spelled exactly, directly inside `.volley/`, so no
+ *     write there is a git config, HEAD, gitfile or hook, or a case variant of launch.sh), an
+ *     absolute path ending in `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`.
+ *     A `.volley/launch.sh` (what the tmux session runs) is written whole, never appended, and
+ *     its content must be exactly `renderLaunchScript` of valid values for that worktree
+ *     (LAUNCH_SCRIPT_VARS: a `CLAUDE_CODE_AUTO_COMPACT_WINDOW` export only on the line after the
+ *     profile block, an integer in 100000..1000000, never in the env block; its `CLAUDE_CONFIG_DIR`,
+ *     if any, exactly the `<home>/.volley/claude/<id>` the registry recorded at sign-in for a
+ *     signed-in profile `<id>` of that host — the script's `host`, SshTmuxHost's spec — with the
+ *     worktree under that host's `worktree_root`); a `.volley/mcp.json` (the MCP server claude
+ *     starts) likewise exactly `renderMcpConfig` of an absolute `…/packages/volley-mcp/src/index.ts`
+ *     outside any `.volley/`, with the `agent_mcp_allow` entries copied from the box's own config
+ *     after it (MCP_CONFIG: shape only, whatever their `command` and whatever `agent_mcp` — trusted
+ *     as the owner's config); and
  *     a paired machine's sign-in dir `<abs>/.volley/signin/<acct>/` (src/claude/remote-signin.ts):
  *     `signin.sh` exactly `renderSigninScript` for that dir with no profile dir, or with the
  *     profile dir `<same abs>/.volley/claude/<same acct>` (`claude auth login`, never
@@ -210,6 +222,9 @@ import { AGENT_BRANCH } from "./worktree";
  *     mv -f .claude.json.volleyd.tmp .claude.json — or, for a profile the supervisor created
  *     there, the same three steps on `<home>/.volley/claude/<acct>/.claude.json` and its
  *     `.claude.json.volleyd.tmp` (absolute paths; the tmp the only other file base64 -d writes)
+ *   the onboarding seed (RemoteHost.seedProfile, #400): in a profile the supervisor created
+ *     there, the trust write's steps on its `.claude.json`, and the same on its `settings.json`
+ *     with `settings.json.volleyd.tmp` (absolute paths); nothing else of the profile
  *   Every other step's stdin is /dev/null, so no step can read the rest of the script.
  *
  * OPTIONS: every git and gh subcommand above has an exact option allow-list (GIT_SPECS and
@@ -1145,6 +1160,20 @@ function typedTextRefusal(text: string, opts: FenceOptions): string | null {
 
 /** The keys volleyd sends by name: submit, and interrupt. */
 const NAMED_KEYS = new Set(["Enter", "Escape"]);
+
+/**
+ * True when `text` is something the fence ever lets volleyd type or press in an agent's
+ * terminal (with its token, where it needs one): a named or picker key, the launch command, or
+ * the wake line (fence-coverage.test.ts). Anything else is typed only as a token's own text.
+ */
+export function fenceKnowsTypedText(text: string): boolean {
+  return (
+    NAMED_KEYS.has(text) ||
+    (PICKER_KEYS as readonly string[]).includes(text) ||
+    text === LAUNCH_COMMAND ||
+    text === WAKE_TEXT
+  );
+}
 const DOCKER_DENY = new Set([
   "rm",
   "rmi",
@@ -1219,8 +1248,9 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
       return cmux(args, opts);
     case "claude":
       // claude starts only from `.volley/launch.sh` or a sealed sign-in script (see the header);
-      // the one direct call reads a profile's login state.
-      return args.length === 2 && args[0] === "auth" && args[1] === "status"
+      // the direct calls read a profile's login state and Claude Code's version.
+      return (args.length === 2 && args[0] === "auth" && args[1] === "status") ||
+        sameArgv(args, ["--version"])
         ? ALLOW
         : deny("claude (only from .volley/launch.sh)");
     case "tmux":
@@ -1347,9 +1377,60 @@ function git(args: string[]): Verdict {
   return v.kind === "allow" && sub === "fetch" ? fetchPositionals(rest) : v;
 }
 
+/** An issue number as gh takes it: a positive decimal, never an option. */
+const ISSUE_NUMBER = /^[1-9][0-9]{0,8}$/;
+
+/** The one label volleyd adds, removes and creates (the issue lifecycle, autopilot/issues.ts). */
+const LIFECYCLE_LABEL = "merged-to-release";
+
+/** The marker every comment volleyd writes on an issue ends with, on a line of its own (autopilot/issues.ts). */
+const COMMENT_MARKER = /\n\n<!-- volleyd:[a-z-]+ wave=[a-z0-9][a-z0-9_-]{0,62}( pr=[0-9]+)? -->$/;
+
+/**
+ * The issue lifecycle's writes (#416), each an exact argv: the label added or removed, a comment
+ * or a closing comment that carries volleyd's marker, the label listed or created. Null: not one
+ * of them (the read-only allow-list decides).
+ */
+function issueLifecycle(args: string[]): Verdict | null {
+  const [verb = "", sub = "", n = "", flag = "", value = ""] = args;
+  const two = `${verb} ${sub}`;
+  if (two === "issue edit" || two === "issue comment" || two === "issue close") {
+    const shape =
+      args.length === 5 &&
+      ISSUE_NUMBER.test(n) &&
+      (two === "issue edit"
+        ? (flag === "--add-label" || flag === "--remove-label") && value === LIFECYCLE_LABEL
+        : flag === (two === "issue comment" ? "--body" : "--comment") &&
+          COMMENT_MARKER.test(value));
+    return shape ? ALLOW : deny(`gh ${two} (only the issue lifecycle's exact forms)`);
+  }
+  if (two === "label list")
+    return args.length === 6 &&
+      n === "--search" &&
+      flag === LIFECYCLE_LABEL &&
+      value === "--json" &&
+      args[5] === "name"
+      ? ALLOW
+      : deny("gh label list (only --search merged-to-release --json name)");
+  if (two === "label create")
+    return args.length === 7 &&
+      n === LIFECYCLE_LABEL &&
+      flag === "--description" &&
+      value !== "" &&
+      !value.startsWith("-") &&
+      args[5] === "--color" &&
+      /^[0-9a-f]{6}$/.test(args[6] ?? "")
+      ? ALLOW
+      : deny("gh label create (only merged-to-release, with a description and a hex color)");
+  return null;
+}
+
 function gh(args: string[], opts: FenceOptions): Verdict {
   const two = args.slice(0, 2).join(" ");
   if (two === "pr merge") return mergeVerdict(args, opts.merge);
+  if (two === "pr ready") return readyVerdict(args.slice(2));
+  const lifecycle = issueLifecycle(args);
+  if (lifecycle !== null) return lifecycle;
   if (two === "workflow run" || two === "repo delete") return deny(`gh ${two}`);
   if (args[0] === "api") {
     const v = checkArgs("gh api", args.slice(1), {
@@ -1365,6 +1446,18 @@ function gh(args: string[], opts: FenceOptions): Verdict {
   return spec === undefined
     ? deny(`gh ${two}`.trim())
     : checkArgs(`gh ${two}`, args.slice(2), spec);
+}
+
+/**
+ * `gh pr ready <n> [--repo <slug>]`, exactly: a draft PR marked ready for review, so the CI its
+ * repository skips on drafts runs before the gate (#408). Never `--undo`, never another option.
+ */
+function readyVerdict(args: string[]): Verdict {
+  if (!/^[1-9][0-9]*$/.test(args[0] ?? "")) return deny("gh pr ready (not one PR number)");
+  return checkArgs("gh pr ready", args.slice(1), {
+    valued: ["--repo", "-R"],
+    positional: () => false,
+  });
 }
 
 /** The HTTP method `gh api` would use: an explicit -X/--method, else POST when fields are sent. */
@@ -1572,6 +1665,16 @@ const REMOTE_PATH = /^\/[^\n\r\0]*$/;
 const BASE64 = /^[A-Za-z0-9+/=\n]*$/;
 /** The only command a remote tmux session may run (renderLaunchScript's script). */
 export const TMUX_LAUNCH_COMMAND = "bash .volley/launch.sh";
+/** The window sizes volleyd gives a remote tmux session (`new-session -x/-y`, `resize-window`). */
+export const TMUX_SIZE = { min: 20, max: 500 } as const;
+/** A column or row count in `TMUX_SIZE`, in plain decimal (no sign, leading zero or exponent). */
+const isTmuxSize = (v: string) =>
+  /^[1-9][0-9]*$/.test(v) && Number(v) >= TMUX_SIZE.min && Number(v) <= TMUX_SIZE.max;
+/**
+ * A session as `resize-window` targets it: `=<session>:` (hosts/ssh-tmux.ts sessionName). Any
+ * session name matches, a `volley-signin-*` terminal too; resizing one is only cosmetic.
+ */
+const AGENT_PANE = /^=[A-Za-z0-9_-]{1,128}:$/;
 
 /** The verdicts for one `ssh` argv: the ssh form itself, then each remote step's. */
 function sshVerdicts(args: readonly string[], opts: FenceOptions): Verdict[] {
@@ -1673,28 +1776,45 @@ const TRUST_SWAP = ["mv", "-f", REMOTE_CLAUDE_JSON_TMP, REMOTE_CLAUDE_JSON];
 /** The trust write's files in a profile the supervisor created on the box (absolute paths). */
 const profileTrustFile = (path: string, name: string) =>
   path.endsWith(`/${name}`) && isRemoteProfileDir(path.slice(0, -(name.length + 1)));
+/** A remote profile's `settings.json`, which its onboarding seed writes (RemoteHost.seedProfile). */
+export const REMOTE_SETTINGS_JSON = "settings.json";
+export const REMOTE_SETTINGS_JSON_TMP = "settings.json.volleyd.tmp";
+/** The files a remote profile's compare-and-swap writes, each with its temp file. */
+const PROFILE_SWAPS: readonly (readonly [string, string])[] = [
+  [REMOTE_CLAUDE_JSON, REMOTE_CLAUDE_JSON_TMP],
+  [REMOTE_SETTINGS_JSON, REMOTE_SETTINGS_JSON_TMP],
+];
 const isTrustCompare = (argv: readonly string[]) =>
   sameArgv(argv, TRUST_COMPARE) ||
   (sameArgv(argv.slice(0, 3), ["cmp", "-s", "-"]) &&
     argv.length === 4 &&
-    profileTrustFile(argv[3] as string, REMOTE_CLAUDE_JSON));
+    PROFILE_SWAPS.some(([file]) => profileTrustFile(argv[3] as string, file)));
 const isTrustSwap = (argv: readonly string[]) => {
   if (sameArgv(argv, TRUST_SWAP)) return true;
-  const [mv, f, tmp, json] = argv;
+  const [mv, f, tmp, dst] = argv;
   return (
     argv.length === 4 &&
     mv === "mv" &&
     f === "-f" &&
     typeof tmp === "string" &&
-    typeof json === "string" &&
-    profileTrustFile(json, REMOTE_CLAUDE_JSON) &&
-    tmp === `${json.slice(0, -REMOTE_CLAUDE_JSON.length)}${REMOTE_CLAUDE_JSON_TMP}`
+    typeof dst === "string" &&
+    PROFILE_SWAPS.some(
+      ([file, temp]) =>
+        profileTrustFile(dst, file) && tmp === `${dst.slice(0, -file.length)}${temp}`,
+    )
   );
 };
+/** A remote profile's temp file for one of its compare-and-swap writes. */
+const profileSwapTmp = (path: string) =>
+  PROFILE_SWAPS.some(([, temp]) => profileTrustFile(path, temp));
 const sameArgv = (a: readonly string[], b: readonly string[]) =>
   a.length === b.length && a.every((x, i) => x === b[i]);
 
-/** The files volleyd writes in a worktree's `.volley/` (spawn.ts, pipeline.ts, identity.ts). */
+/**
+ * The files volleyd writes in a worktree's `.volley/` (spawn.ts, pipeline.ts, identity.ts,
+ * decisions.ts, retire.ts). fence-coverage.test.ts fails the build when one of those names a
+ * file this set does not list.
+ */
 const VOLLEY_WRITES = new Set([
   "agent.json",
   "brief.md",
@@ -1704,9 +1824,17 @@ const VOLLEY_WRITES = new Set([
   "findings.md",
   "findings.json",
   "rebase.md",
+  "decisions.md",
+  "retired.json",
 ]);
 /** … and the ones it reads there: those, and the repo's `.volley/brief-extra.md`. */
 const VOLLEY_READS = new Set([...VOLLEY_WRITES, "brief-extra.md"]);
+
+/**
+ * True when the remote fence lets volleyd read or write `<dir>/.volley/<name>`
+ * (fence-coverage.test.ts).
+ */
+export const fenceKnowsVolleyFile = (name: string): boolean => VOLLEY_READS.has(name);
 
 /**
  * `<abs dir>/.volley/<name>` for one of `names` — spelled exactly and directly inside `.volley/`,
@@ -1725,7 +1853,7 @@ function volleyPath(path: string, names: ReadonlySet<string>, endings: readonly 
 function writablePath(path: string): boolean {
   return (
     path === REMOTE_CLAUDE_JSON_TMP ||
-    profileTrustFile(path, REMOTE_CLAUDE_JSON_TMP) ||
+    profileSwapTmp(path) ||
     volleyPath(path, VOLLEY_WRITES, ["/ISSUE.md", "/info/exclude"])
   );
 }
@@ -1734,6 +1862,7 @@ function writablePath(path: string): boolean {
 function readablePath(path: string): boolean {
   return (
     path === REMOTE_CLAUDE_JSON ||
+    profileTrustFile(path, REMOTE_SETTINGS_JSON) ||
     volleyPath(path, VOLLEY_READS, ["/info/exclude"]) ||
     worktreeMcpJson(path)
   );
@@ -1957,8 +2086,7 @@ function remoteStep(step: RemoteStep, opts: FenceOptions): Verdict {
       step.stdout !== undefined &&
       writablePath(step.stdout) &&
       (step.append !== true ||
-        (step.stdout !== REMOTE_CLAUDE_JSON_TMP &&
-          !profileTrustFile(step.stdout, REMOTE_CLAUDE_JSON_TMP)));
+        (step.stdout !== REMOTE_CLAUDE_JSON_TMP && !profileSwapTmp(step.stdout)));
     if (!write)
       return deny("remote file write (base64 -d of base64 text to a file volleyd writes only)");
     const path = step.stdout ?? "";
@@ -2007,7 +2135,11 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
       // run list): verifying an agent's PR on a paired machine reads them there. No `gh api` at all
       // on a remote box; merges, workflow runs and deletes stay denied (no tokens: a merge is
       // never authorized on a paired machine).
-      return args[0] === "api" ? deny("gh api (not on a remote machine)") : gh(args, {});
+      // The issue lifecycle's writes run on the supervisor's own machine only.
+      if (args[0] === "api") return deny("gh api (not on a remote machine)");
+      return issueLifecycle(args) !== null
+        ? deny(`gh ${args.slice(0, 2).join(" ")} (not on a remote machine)`)
+        : gh(args, {});
     case "tmux":
       return tmux(args, opts);
     case "mkdir":
@@ -2082,7 +2214,8 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
 const TMUX_SPECS: Record<string, OptSpec> = {
   "new-session": {
     flags: ["-d"],
-    valued: ["-s", "-c"],
+    valued: ["-s", "-c", "-x", "-y"],
+    values: { "-x": isTmuxSize, "-y": isTmuxSize },
     positional: (a) => a === TMUX_LAUNCH_COMMAND,
   },
   "capture-pane": { flags: ["-p", "-J"], valued: ["-t", "-S", "-E"] },
@@ -2123,6 +2256,21 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
     if (tail.length !== 3 || tail[0] !== "-l" || tail[1] !== "--") return deny("tmux send-keys");
     const why = typedTextRefusal(tail[2] ?? "", opts);
     return why === null ? ALLOW : deny(`tmux send-keys (${why})`);
+  }
+  if (sub === "resize-window") {
+    // The Desk's Terminal popout size (#403): exactly `-t =<session>: -x <n> -y <n>`.
+    const [t, target, x, cols, y, rows, ...more] = rest;
+    return t === "-t" &&
+      AGENT_PANE.test(target ?? "") &&
+      x === "-x" &&
+      isTmuxSize(cols ?? "") &&
+      y === "-y" &&
+      isTmuxSize(rows ?? "") &&
+      more.length === 0
+      ? ALLOW
+      : deny(
+          `tmux resize-window (only -t =<session>: -x <n> -y <n>, n ${TMUX_SIZE.min}..${TMUX_SIZE.max})`,
+        );
   }
   if (sub === "new-session" && rest.at(-1) === SIGNIN_COMMAND)
     return remoteSigninSession(rest, opts);
@@ -2202,16 +2350,25 @@ function remoteSigninSession(args: readonly string[], opts: FenceOptions): Verdi
 
 /**
  * `tmux new-session … -c <dir> 'bash .volley/launch.sh'`: the command is required, and <dir> is
- * the worktree of a sealed launch script (tmux keeps the last `-c`, so does this).
+ * the worktree of a sealed launch script (tmux keeps the last `-c`, so does this). A launch size
+ * is a pair: `-x` and `-y` together or neither.
  */
 function newSessionSealed(args: readonly string[], opts: FenceOptions): Verdict {
   let cwd: string | undefined;
+  const size = new Set<string>();
   for (let i = 0; i < args.length; i++) {
     const a = args[i] ?? "";
     if (a === "-c") cwd = args[++i];
     else if (a.startsWith("-c")) cwd = a.slice(2);
+    else if (a.startsWith("-x") || a.startsWith("-y")) {
+      size.add(a.slice(0, 2));
+      if (a.length === 2) i++;
+    } else if (a === "-s") i++;
   }
-  return args.at(-1) === TMUX_LAUNCH_COMMAND && cwd !== undefined && sealedFor(opts, cwd)
+  return args.at(-1) === TMUX_LAUNCH_COMMAND &&
+    size.size !== 1 &&
+    cwd !== undefined &&
+    sealedFor(opts, cwd)
     ? ALLOW
     : deny("tmux new-session (only in the worktree of a sealed launch script)");
 }

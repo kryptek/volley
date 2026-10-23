@@ -15,10 +15,14 @@ export type SpawnErrorCode =
   // `detail.outcome`: `refused` (nothing was created) or `unknown` (it may have been): Host.launch.
   | "LAUNCH_FAILED"
   | "REMOTE_REPO_MISSING"
+  // The authority fence refused a step on a paired machine: permanent, never retried.
+  | "FENCE_DENIED"
   | "RETIRE_REFUSED"
   // Claude account profiles (src/claude/): unknown / not signed in / remote, or sharing failed.
   | "CLAUDE_ACCOUNT_UNAVAILABLE"
-  | "CLAUDE_ACCOUNT_PREPARE_FAILED";
+  | "CLAUDE_ACCOUNT_PREPARE_FAILED"
+  // The owner answered a repo_untrusted decision `cancel` (#418): not retried until it is trusted.
+  | "LAUNCH_CANCELLED";
 
 /**
  * A spawn (or retire) step refused. `detail` is journaled with the refusal. A `permanent` refusal

@@ -6,6 +6,8 @@ import {
   type TerminalSeen,
   decidedAgent,
   namedAgent,
+  recoverableTerminals,
+  terminalKey,
   unjournaledTerminals,
 } from "../src/watchdog";
 
@@ -68,6 +70,43 @@ describe("unjournaledTerminals", () => {
   });
 });
 
+describe("recoverableTerminals", () => {
+  const RECOVER = DAEMON_DEFAULTS.terminal_recover_ms;
+  const alarmedAt = T0 + 61_000;
+  const alarmed = (t: TerminalSeen) => new Map([[terminalKey(t), alarmedAt]]);
+
+  it("an alarmed done is listed once terminal_recover_ms has passed since its alarm, not before", () => {
+    const t = seen("done");
+    expect(
+      recoverableTerminals([t], alarmed(t), new Map(), alarmedAt + RECOVER - 1, RECOVER),
+    ).toEqual([]);
+    expect(recoverableTerminals([t], alarmed(t), new Map(), alarmedAt + RECOVER, RECOVER)).toEqual([
+      t,
+    ]);
+  });
+
+  it("a status journaled about since is never listed", () => {
+    const t = seen("done");
+    const named = new Map([[A, 11]]);
+    expect(recoverableTerminals([t], alarmed(t), named, alarmedAt + RECOVER, RECOVER)).toEqual([]);
+  });
+
+  it("a status never alarmed, or alarmed for another wall_time, is not listed", () => {
+    const t = seen("failed");
+    const now = alarmedAt + RECOVER;
+    expect(recoverableTerminals([t], new Map(), new Map(), now, RECOVER)).toEqual([]);
+    const other = alarmed(seen("failed", { wall_time: "2026-10-18T11:00:00.000Z" }));
+    expect(recoverableTerminals([t], other, new Map(), now, RECOVER)).toEqual([]);
+  });
+
+  it("a blocked is not: the blocked invariant asks about it", () => {
+    const t = seen("blocked");
+    expect(recoverableTerminals([t], alarmed(t), new Map(), alarmedAt + RECOVER, RECOVER)).toEqual(
+      [],
+    );
+  });
+});
+
 describe("namedAgent", () => {
   it("agent_id, else a relaunch's from_agent", () => {
     expect(namedAgent({ type: "artifact_verified", data: { agent_id: A } })).toBe(A);
@@ -83,6 +122,15 @@ describe("namedAgent", () => {
       namedAgent({ type: "alarm_cleared", data: { alarm: TERMINAL_ALARM, agent_id: A } }),
     ).toBeUndefined();
     expect(namedAgent({ type: "alarm_raised", data: { alarm: "other", agent_id: A } })).toBe(A);
+  });
+
+  it("the status handoff's own pipeline_error is not handling the status", () => {
+    expect(
+      namedAgent({
+        type: "alarm_raised",
+        data: { alarm: "pipeline_error", check: "status", agent_id: A, message: "x" },
+      }),
+    ).toBeUndefined();
   });
 
   it("a registration, a reconcile or a blocked_unhandled alarm is not handling the status", () => {

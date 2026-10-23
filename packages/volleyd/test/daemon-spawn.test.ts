@@ -17,6 +17,7 @@ import { makeBufferIO } from "../src/io";
 import { readJournalFile } from "../src/journal";
 import { MACHINE_CHANNEL, type MachineRecord, machineTopic } from "../src/machines";
 import type { ReadinessPayload } from "../src/readiness";
+import { SpawnError } from "../src/spawn-error";
 import { trustDecisionId } from "../src/trust";
 import type { JournalEvent, TaskState } from "../src/types";
 import { addWorktree } from "../src/worktree";
@@ -84,6 +85,8 @@ describe("daemon spawn loop", () => {
       freshBase?: boolean;
       /** Extra per-wave `config:` entries. */
       config?: string;
+      /** The wave's tasks (default: T1 alone), each on issue 42. */
+      tasks?: string[];
     } = {},
   ) {
     env = await makeDaemonEnv();
@@ -200,7 +203,7 @@ describe("daemon spawn loop", () => {
     const wave = join(env.home, "w1.yaml");
     writeFileSync(
       wave,
-      `wave: w1\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 42 }\nconfig: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
+      `wave: w1\nrepo: ${repo}\nrelease_branch: release/w1\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n${(o.tasks ?? ["T1"]).map((t) => `  ${t}: { issue: 42 }\n`).join("")}config: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }\n`,
     );
     const r = await runCli(["run", wave], env.env);
     expect(r.exitCode).toBe(0);
@@ -476,6 +479,127 @@ describe("daemon spawn loop", () => {
     expect(daemon.record("w1")?.state?.tasks[0]?.stage).toBe("implement");
   });
 
+  describe("one repo_untrusted decision per (machine, profile, repo) (#418)", () => {
+    const TASKS = ["T1", "T2", "T3", "T4"];
+    const ofType = (type: string) => journal().filter((e) => e.type === type);
+    const stageOf = (id: string) => daemon.record("w1")?.state?.tasks.find((t) => t.id === id);
+
+    /** Four tasks launched at once into an untrusted repo: one decision, three joins. */
+    async function parked(): Promise<string> {
+      await setup({ trusted: false, tasks: TASKS });
+      // Launch only: four sessions publishing at once would race this fixture's single agent id.
+      host.onLaunch = () => {};
+      await event("decision_joined", 3);
+      await waits.settled();
+      return ofType("decision_opened")[0]?.data.decision_id as string;
+    }
+
+    it("N launches needing the same trust open exactly one decision listing all N", async () => {
+      const id = await parked();
+      expect(ofType("decision_opened")).toHaveLength(1);
+      expect(ofType("decision_opened")[0]?.data).toMatchObject({ kind: "repo_untrusted", repo });
+      expect(id).toBe(trustDecisionId("w1", repo));
+      expect(ofType("decision_joined")).toHaveLength(3);
+      expect(daemon.record("w1")?.state?.open_decisions).toEqual([id]);
+      for (const t of TASKS) expect(stageOf(t)?.stage).toBe("awaiting_decision");
+      expect(host.launches).toEqual([]);
+      const retained = (await env.retained(decisionTopic("w1", id))) as {
+        payload: { waiting: string[]; question: string; option_help: Record<string, string> };
+      };
+      expect([...retained.payload.waiting].sort()).toEqual(TASKS);
+      expect(retained.payload.question).toBe(
+        `Needs you: trust ${repo} for dispatch? 4 tasks are waiting: ${retained.payload.waiting.join(", ")}.`,
+      );
+      expect(retained.payload.option_help.cancel).toContain("Cancels only the 4 waiting launches");
+      expect(schemaErrors("decision.schema.json", retained)).toEqual([]);
+      // Later ticks neither re-open nor re-join it.
+      await daemon.tick();
+      await waits.settled();
+      expect(ofType("decision_opened")).toHaveLength(1);
+      expect(ofType("decision_joined")).toHaveLength(3);
+    });
+
+    it("one `trust` answer records the trust once and resumes every parked launch", async () => {
+      const id = await parked();
+      const r = await runCli(["resolve", id, "trust", "--by", "tester"], env.env);
+      expect(r.exitCode).toBe(0);
+      expect(JSON.parse(readFileSync(claudeJson, "utf-8")).projects[repo]).toEqual({
+        hasTrustDialogAccepted: true,
+      });
+      for (const t of TASKS) expect(stageOf(t)?.stage).toBe("queued");
+      await daemon.tick();
+      await event("agent_spawned", 4);
+      await waits.settled();
+      expect(host.launches).toHaveLength(4);
+      expect(
+        ofType("agent_spawned")
+          .map((e) => e.task)
+          .sort(),
+      ).toEqual(TASKS);
+      expect(ofType("decision_opened")).toHaveLength(1);
+    });
+
+    it("`cancel` cancels only the launches; trusting the repo later launches them all", async () => {
+      const id = await parked();
+      const r = await runCli(["resolve", id, "cancel", "--by", "tester"], env.env);
+      expect(r.exitCode).toBe(0);
+      await waits.settled();
+      const failed = ofType("spawn_failed");
+      expect(failed.map((e) => e.task).sort()).toEqual(TASKS);
+      for (const f of failed)
+        expect(f.data).toMatchObject({
+          code: "LAUNCH_CANCELLED",
+          next_retry_at: null,
+          role: "implementer",
+          message: `tester cancelled the launch: ${repo} is untrusted`,
+        });
+      // No spawn_failed decision, and no task cancelled: each keeps its stage.
+      expect(ofType("decision_opened")).toHaveLength(1);
+      expect(ofType("task_cancelled")).toEqual([]);
+      for (const t of TASKS) {
+        expect(stageOf(t)?.stage).toBe("queued");
+        expect(daemon.snapshot("w1")?.tasks.find((x) => x.id === t)?.why_waiting).toBe(
+          `tester cancelled the launch: ${repo} is untrusted; it starts once the repo is trusted`,
+        );
+      }
+      // Nothing launches, and nothing asks again, while the repo stays untrusted.
+      await daemon.tick();
+      await daemon.tick();
+      await waits.settled();
+      expect(host.launches).toEqual([]);
+      expect(ofType("decision_opened")).toHaveLength(1);
+      // Trusted by hand: the next tick lifts the refusals and the one after launches all four.
+      writeFileSync(
+        claudeJson,
+        JSON.stringify({ projects: { [repo]: { hasTrustDialogAccepted: true } } }),
+      );
+      await daemon.tick();
+      await daemon.tick();
+      await event("agent_spawned", 4);
+      await waits.settled();
+      expect(host.launches).toHaveLength(4);
+    });
+
+    it("a launch after the decision resolved opens a fresh one, which later launches join", async () => {
+      const id = await parked();
+      expect((await runCli(["resolve", id, "cancel", "--by", "tester"], env.env)).exitCode).toBe(0);
+      await waits.settled();
+      // `volleyd spawn` lifts the refusal: T2's launch hits the untrusted repo again.
+      await runCli(["spawn", "w1", "T2", "--json"], env.env);
+      await waits.settled();
+      const opens = ofType("decision_opened");
+      expect(opens.map((e) => e.data.decision_id)).toEqual([id, `${id}-2`]);
+      expect(opens[1]?.task).toBe("T2");
+      await runCli(["spawn", "w1", "T3", "--json"], env.env);
+      await waits.settled();
+      expect(ofType("decision_opened")).toHaveLength(2);
+      const joins = ofType("decision_joined").filter((e) => e.data.decision_id === `${id}-2`);
+      expect(joins.map((e) => e.task)).toEqual(["T3"]);
+      expect(daemon.record("w1")?.decisions[`${id}-2`]?.waiting).toEqual(["T2", "T3"]);
+      expect(host.launches).toEqual([]);
+    });
+  });
+
   it("stop interrupts the agent in its workspace; the kill switch refuses spawns", async () => {
     await setup();
     await event("agent_registered");
@@ -586,6 +710,8 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       localAgents?: "always" | "fallback" | "never";
       os?: typeof CALM_OS;
       doctor?: Partial<typeof GREEN_DOCTOR>;
+      /** Changes the box's fake host once it is made (before its first spawn). */
+      onBox?: (box: FakeRemoteHost) => void;
     } = {},
   ) {
     env = await makeDaemonEnv();
@@ -630,7 +756,10 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         hooksDir: "/opt/local-hooks",
         claudeJsonPath: claudeJson,
         remoteHost: (s) => {
-          box ??= fakeRemoteHost(s, local);
+          if (box === undefined) {
+            box = fakeRemoteHost(s, local);
+            o.onBox?.(box);
+          }
           return box;
         },
         credentials: memoryCredentials(),
@@ -742,6 +871,41 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         (e) => e.type === "alarm_raised" && e.data.alarm === "decisions_file_unwritten",
       ),
     ).toBe(false);
+  });
+
+  it("a fence-denied read on the box opens one spawn_failed decision at once and schedules no retry", async () => {
+    localClaude = false;
+    const denied = new SpawnError(
+      "FENCE_DENIED",
+      "remote cat /x/.volley/brief-extra.md (only the files volleyd reads)",
+      { host: "box", target: "dev@box" },
+      { permanent: true },
+    );
+    await setup({
+      onBox: (b) => {
+        b.readFile = async () => {
+          throw denied;
+        };
+      },
+    });
+    await submit("w8", "", "  T1: { issue: 42, host: box }\n");
+    await tick();
+    await eventually(async () => journal("w8").some((e) => e.type === "spawn_failed"));
+    const failed = journal("w8").filter((e) => e.type === "spawn_failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.data).toMatchObject({ code: "FENCE_DENIED", next_retry_at: null });
+    expect(String(failed[0]?.data.message)).toContain("remote cat /x/.volley/brief-extra.md");
+    const rec = daemon.record("w8");
+    const open = (rec?.state?.open_decisions ?? [])
+      .map((id) => rec?.decisions[id])
+      .filter((d) => d?.kind === "spawn_failed");
+    expect(open).toHaveLength(1);
+    expect(open[0]?.question).toContain("FENCE_DENIED: remote cat /x/.volley/brief-extra.md");
+    expect(open[0]?.question).toContain("does not retry it");
+    // Later ticks retry nothing: the refusal is the same on every attempt.
+    await tick(60 * 60_000);
+    expect(journal("w8").filter((e) => e.type === "spawn_failed")).toHaveLength(1);
+    expect(box?.launches ?? []).toHaveLength(0);
   });
 
   it("a failed write on the box journals decisions_file_unwritten once, and the decision is still resolved", async () => {

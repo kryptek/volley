@@ -111,6 +111,23 @@ import {
   withHeld,
 } from "./autopilot/inbox";
 import {
+  type IssueView,
+  type TaskIssue,
+  issueLedger,
+  issueOutcomes,
+  issueRows,
+  issueViewArgv,
+  mergedActions,
+  mergedFrom,
+  parseIssueView,
+  prViewArgv,
+  releaseActions,
+  releasePrArgv,
+  releasedPr,
+  runIssueActions,
+  taskIssues,
+} from "./autopilot/issues";
+import {
   DEFAULT_PLAYBOOK,
   PlaybookError,
   type PlaybookStage,
@@ -218,10 +235,14 @@ import {
   type Held,
   type HeldOn,
   ID_RE,
+  ITS_RUNNING,
   LOCAL_FILES,
   MACHINE_DOWN_CANCEL,
   MACHINE_DOWN_REPLACE,
   MACHINE_DOWN_WAIT,
+  type ParkedLaunch,
+  SHARED_PRECONDITION_KINDS,
+  SPAWN_DECISION_KINDS,
   attentionPayload,
   checkAnswer,
   decisionPayload,
@@ -232,9 +253,11 @@ import {
   heldLabel,
   heldOnFrom,
   holdEvent,
+  joinEvent,
   machineDownInput,
   openDecisions,
   openEvent,
+  parkedTasks,
   releaseEvent,
   renderDecisionsMd,
   resolveEvent,
@@ -244,10 +267,10 @@ import {
 } from "./decisions";
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
-import { mintConsentToken, mintModelSwitchToken, mintWakeToken } from "./fence";
+import { TMUX_SIZE, mintConsentToken, mintModelSwitchToken, mintWakeToken } from "./fence";
 import { LOCAL_HOST } from "./fleet-name";
 import { lockFetches } from "./git-lock";
-import type { Host } from "./hosts/host";
+import type { Host, TermSize } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import {
   type RemoteHost,
@@ -474,16 +497,25 @@ import {
   spawnAgent,
 } from "./spawn";
 import { SpawnError } from "./spawn-error";
-import { isRepoTrusted, readClaudeJson, recordRepoTrust } from "./trust";
+import {
+  type TrustFacts,
+  isRepoTrusted,
+  readClaudeJson,
+  recordRepoTrust,
+  trustAskFor,
+} from "./trust";
 import { type AgentWatch, type ProgressFeed, watchAgent } from "./verify";
 import {
   BLOCKED_ALARM,
   TERMINAL_ALARM,
+  TERMINAL_RECOVERED,
   type TerminalSeen,
   WATCHED_STATUS,
   decidedAgent,
   journaledSince,
   namedAgent,
+  recoverableTerminals,
+  terminalKey,
   unjournaledTerminals,
 } from "./watchdog";
 import {
@@ -754,6 +786,7 @@ const PEER_ADMIN_OPS: ReadonlySet<string> = new Set([
 
 /** A task's why_waiting while its spawn failure is unrecovered. */
 function spawnFailedWhy(f: SpawnFailure, now: number): string {
+  if (f.code === "LAUNCH_CANCELLED") return `${f.message}; it starts once the repo is trusted`;
   if (f.next_retry_at === null) {
     return `spawn failed: ${f.code} — retries stopped after ${f.attempt} attempt${f.attempt === 1 ? "" : "s"}`;
   }
@@ -764,6 +797,22 @@ function spawnFailedWhy(f: SpawnFailure, now: number): string {
 /** A `spawn_failed` decision's answers: retry at once (no backoff), or cancel the task. */
 const SPAWN_FAILED_OPTIONS = ["retry now", "stop task"];
 const SPAWN_STOP_ANSWER = "stop task";
+/** The role a spawn decision's launch is for (`data.role`; an implementer's by default). */
+const roleOf = (data: { role?: unknown }): Role =>
+  typeof data.role === "string" ? (data.role as Role) : "implementer";
+
+/**
+ * A shared-precondition decision's question and hover text, rendered for its `waiting` tasks and
+ * `launches` count: what `decision_joined` journals (one renderer per SHARED_PRECONDITION_KINDS).
+ */
+function sharedAsk(
+  d: DecisionRecord,
+  waiting: readonly TaskId[],
+  launches: number,
+): { question: string; option_help: Record<string, string> } {
+  return trustAskFor(d as DecisionRecord & TrustFacts, waiting, launches);
+}
+
 /** The task a `spawn_failed` decision is about (a release stage's is wave-level: `_release`). */
 function spawnFailedTask(d: DecisionRecord): TaskId | null {
   const on = (d as { pipeline?: { on?: unknown; task?: unknown } }).pipeline;
@@ -987,6 +1036,15 @@ const waveCompleteDecisionId = (wave: WaveId) => waveDecisionId("wave_complete",
 
 /** Every agent's registry entry: the coordinator names they carry (SPEC §6.2). */
 const REGISTRY_FILTER = "volley/_system/registry/+";
+/** Statuses that show an agent is live: the hooks' `working`, its MCP server's own two. */
+const LIVE_STATUSES: ReadonlySet<string> = new Set(["working", "spawning", "registered"]);
+
+/** The agent a spawn decision is about: kept on it, or on its pipeline marker. */
+function spawnDecisionAgent(d: DecisionRecord): string | undefined {
+  if (typeof d.agent_id === "string") return d.agent_id;
+  const m = (d as { pipeline?: { agent_id?: unknown } }).pipeline;
+  return typeof m?.agent_id === "string" ? m.agent_id : undefined;
+}
 /** The `activity` line a UserPromptSubmit hook publishes for a new prompt (SPEC §4.3). */
 const PROMPT_RECEIVED = "prompt received";
 /** Every agent's progress, in every namespace: the daemon's ONE progress subscription. */
@@ -1143,6 +1201,15 @@ export class Daemon {
   /** Epoch ms of the last progress message seen per agent id (heartbeats, for `claim`). */
   private readonly lastSeen = new Map<string, number>();
   /**
+   * When each agent last showed it is live (epoch ms, its own send time): `past`, a signal that it
+   * got past its start-up screen (a hooks signal, or its MCP server doing more than starting up),
+   * `mcp`, one only its MCP server sends, and `hooks`, one only its Claude Code hooks send. A spawn
+   * decision about it closes itself on one sent after it opened (#402).
+   */
+  private readonly heardAt = new Map<string, { past?: number; mcp?: number; hooks?: number }>();
+  /** Spawn decisions this process is closing (`<wave>/<id>`): asked once per decision. */
+  private readonly closingSpawn = new Set<string>();
+  /**
    * When this process started. `lastSeen` is in memory only, so for `claim` every owner counts
    * as seen at least at daemon start: a restart never makes a live owner instantly claimable.
    */
@@ -1215,6 +1282,16 @@ export class Daemon {
   private readonly heldChecks = new Set<string>();
   /** When each held decision's PR / issue was last checked (`<wave>/<id>`): once per ci_poll_ms. */
   private readonly heldCheckedAt = new Map<string, number>();
+  /** Waves whose issue lifecycle gh is working on now (#416): one pass per wave at a time. */
+  private readonly issueChecks = new Set<WaveId>();
+  /** When a wave's issue work may run again after a failed gh call (ci_poll_ms on). */
+  private readonly issueRetryAt = new Map<WaveId, number>();
+  /** Consecutive issue passes that failed, per wave (the retry backs off after the first). */
+  private readonly issueFailures = new Map<WaveId, number>();
+  /** `<wave>/<issue>` gh showed needs nothing at its merge (closed by hand): not read again. */
+  private readonly issueSettled = new Set<string>();
+  /** When each complete wave last looked for its merged release PR (release_merge_poll_ms). */
+  private readonly releasePolledAt = new Map<WaveId, number>();
   /** Each wave's pipeline driver (T6), created on first use. */
   private readonly pipelines = new Map<WaveId, PipelineDriver>();
   /** The release train's stage driver per releasing wave (SPEC §4.6.19). */
@@ -1235,8 +1312,10 @@ export class Daemon {
   private readonly lastDecided = new Map<string, number>();
   /** `<wave>/<task>` of each task whose host reached a resolver as `auto` (one alarm each per daemon run). */
   private readonly autoHostAlarmed = new Set<string>();
-  /** `<agent>@<wall_time>` of each terminal status the watchdog has alarmed on. */
-  private readonly terminalAlarmed = new Set<string>();
+  /** When the watchdog alarmed on each terminal status (epoch ms), by `<agent>@<wall_time>`. */
+  private readonly terminalAlarmed = new Map<string, number>();
+  /** `<agent>@<wall_time>` of each alarmed terminal status the watchdog has tried to recover. */
+  private readonly terminalRecovered = new Set<string>();
   /** Answered control requests by `<sender>/<correlation_id>`, for QoS 1 redelivery. */
   private readonly answered = new Map<string, ControlResponse>();
   /** Requests whose answer is deferred (steer's ack wait), by the same key. */
@@ -1285,6 +1364,17 @@ export class Daemon {
   private readonly launching = new Map<string, { wave: WaveId; task: TaskId; role: Role }>();
   /** Decisions a launch's verification opened, settled once that launch is supervised. */
   private readonly unsettled = new Map<string, Array<{ wave: WaveId; id: string }>>();
+  /**
+   * Shared-precondition decisions being opened now, by `<wave>/<base id>`: a launch that needs
+   * the same precondition meanwhile waits for it and joins it (#418).
+   */
+  private readonly openingShared = new Map<string, Promise<string>>();
+  /**
+   * Launches a `repo_untrusted` `cancel` refused (`<wave>/<task>/<role>`), by the decision whose
+   * trust they wait on: lifted once that repo is trusted (resolveTrustedRepos). In memory only:
+   * after a restart they are launched again (and ask again if still untrusted).
+   */
+  private readonly cancelledLaunches = new Map<string, { wave: WaveId; decision: string }>();
   /** A remove-now's agents told to stop, by id: when (their grace counts from it). */
   private readonly evicted = new Map<string, number>();
   /** Since when a configured host has been seen draining (`hosts.<name>.drain`). */
@@ -1576,6 +1666,7 @@ export class Daemon {
       // stopped retries stay stopped.
       for (const [task, roles] of Object.entries(log.record.spawnFailures)) {
         for (const f of Object.values(roles)) {
+          if (f.code === "LAUNCH_CANCELLED") continue;
           const until =
             f.next_retry_at === null ? Number.POSITIVE_INFINITY : Date.parse(f.next_retry_at);
           this.refused.set(`${wave}/${task}/${f.role}`, { n: f.attempt, until });
@@ -1897,16 +1988,97 @@ export class Daemon {
     const env = parseEnvelope(raw);
     if (env !== null && isApiSignal(env)) this.apiSignals.push(this.now());
     // A message queued while the daemon was down arrives late: count it from when it was sent.
-    const sent = env !== null ? Date.parse(env.wall_time) : Number.NaN;
-    const now = this.now();
-    this.lastSeen.set(agent, Number.isNaN(sent) ? now : Math.min(now, sent));
-    if (env !== null) this.noteAttention(agent, env);
-    if (env !== null) this.noteInboxSignal(agent, env);
+    this.lastSeen.set(agent, env !== null ? this.sentAt(env.wall_time) : this.now());
+    if (env !== null) {
+      // A narration or anything else not from the hooks is the agent's MCP server speaking.
+      const hook = (env.payload as { source?: unknown } | null)?.source === "harness-hook";
+      // Waiting at a prompt shows its channel works, not that it got past the screen; nor does
+      // the MCP server's heartbeat, which runs from process start whatever the screen.
+      const stuck = env.type === "awaiting_input" || env.type === "idle";
+      const past = !stuck && (hook || env.type !== "heartbeat");
+      this.heard(agent, this.lastSeen.get(agent) as number, !hook, past);
+      this.noteAttention(agent, env);
+      this.noteInboxSignal(agent, env);
+    }
     // The topic names the sender (and is what broker ACLs authorise), so it identifies the acker.
     if (env?.type === "steering_acked" && env.correlation_id !== null) {
       this.acks.acked(env.correlation_id, agent);
       this.mailboxHeard(env.correlation_id, agent);
     }
+  }
+
+  /** A message's send time (`wall_time`), never later than now; now when unreadable. */
+  private sentAt(wallTime: string): number {
+    const t = Date.parse(wallTime);
+    return Number.isNaN(t) ? this.now() : Math.min(t, this.now());
+  }
+
+  /**
+   * `agent` showed it is live at `at` (`mcp`: through its MCP server). Each open spawn decision
+   * about it (unknown_screen, hooks_auth_failed, mcp_not_registered) that opened before then is
+   * answered `it's running` by volleyd (#402): the pipeline checks the run and touches nothing
+   * (a paused hooks_auth_failed agent is told to resume). A sign that is not `past` its screen
+   * (waiting at a prompt, the MCP server starting up) counts only for the channel it came through.
+   */
+  private heard(agent: string, at: number, mcp: boolean, past: boolean): void {
+    const prev = this.heardAt.get(agent);
+    const last = mcp ? Math.max(at, prev?.mcp ?? at) : prev?.mcp;
+    const hooks = mcp ? prev?.hooks : Math.max(at, prev?.hooks ?? at);
+    const screen = past ? Math.max(at, prev?.past ?? at) : prev?.past;
+    this.heardAt.set(agent, {
+      ...(screen !== undefined ? { past: screen } : {}),
+      ...(last !== undefined ? { mcp: last } : {}),
+      ...(hooks !== undefined ? { hooks } : {}),
+    });
+    for (const [wave, log] of this.waves) {
+      for (const id of log.record.state?.open_decisions ?? []) {
+        const d = log.record.decisions[id];
+        if (d !== undefined && spawnDecisionAgent(d) === agent) this.closeIfHeard(wave, d);
+      }
+    }
+  }
+
+  /**
+   * Answer `d` `it's running` as volleyd when it is an open spawn decision whose agent was heard
+   * from since it opened: on each sign of life, and when it opens (a sign processed just before).
+   */
+  private closeIfHeard(wave: WaveId, d: DecisionRecord): void {
+    if (d.resolved !== undefined || !SPAWN_DECISION_KINDS.has(d.kind)) return;
+    const agent = spawnDecisionAgent(d);
+    if (agent === undefined) return;
+    const heard = this.heardFrom(agent, d.kind);
+    if (heard === null || heard < Date.parse(d.opened_at)) return;
+    const id = d.decision_id;
+    const key = `${wave}/${id}`;
+    if (this.closingSpawn.has(key)) return;
+    this.closingSpawn.add(key);
+    void this.enqueue(async () => {
+      try {
+        const open = this.waves.get(wave)?.record.decisions[id];
+        if (open === undefined || open.resolved !== undefined) return;
+        await this.resolveNow(wave, id, {
+          answer: ITS_RUNNING,
+          by: DAEMON_AGENT_ID,
+          rationale: "started on its own",
+        });
+      } finally {
+        this.closingSpawn.delete(key);
+      }
+    });
+  }
+
+  /**
+   * When `agent` last showed a spawn decision of `kind` is moot (epoch ms; null: not since this
+   * process started): for mcp_not_registered only its MCP server counts, the hooks already ran;
+   * for hooks_auth_failed only its hooks, which the broker refused (its MCP server answering the
+   * pause steer says nothing about them); for unknown_screen a sign it got past its screen.
+   */
+  private heardFrom(agent: string, kind: string): number | null {
+    const h = this.heardAt.get(agent);
+    if (h === undefined) return null;
+    if (kind === "mcp_not_registered") return h.mcp ?? null;
+    if (kind === "hooks_auth_failed") return h.hooks ?? null;
+    return h.past ?? null;
   }
 
   /**
@@ -2031,6 +2203,15 @@ export class Daemon {
       await this.broker.subscribeStream(REGISTRY_FILTER, (m) => {
         const id = m.topic.split("/")[3] ?? "";
         const entry = m.payload === "" ? null : parseRegistryEntry(m.payload);
+        if (entry?.agent_id === id) {
+          const env = parseEnvelope(m.payload);
+          // The hooks' re-publish carries `model_source`; the MCP server's own registration not.
+          const modelSource = (env?.payload as { model_source?: unknown } | undefined)
+            ?.model_source;
+          // Only the hooks' entry shows the session got past its screen.
+          const hooks = modelSource !== undefined;
+          if (env !== null) this.heard(id, this.sentAt(env.wall_time), !hooks, hooks);
+        }
         // Recorded on arrival, not on the queue: the status subscription reads it on arrival.
         const before = this.namedEntries.get(id)?.coordinator;
         if (entry?.workspace !== undefined && entry.agent_id === id)
@@ -2316,6 +2497,8 @@ export class Daemon {
     this.stopGrace.clear();
     for (const t of this.reconnectTimers.values()) this.time.clearTimeout(t);
     this.reconnectTimers.clear();
+    // A resize still in its coalescing window never reaches the host once halted.
+    for (const id of [...this.resizes.keys()]) this.dropResize(id, "volleyd is stopping");
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
@@ -2537,6 +2720,15 @@ export class Daemon {
             this.ownerChanged(holder);
             if (name !== undefined) void this.enqueue(() => this.rebind(name));
           }
+          // The hooks' `working` carries their source; any other live status came through its
+          // MCP server (`spawning` / `registered` at its start-up, which says nothing about the
+          // screen, or a `working` it published with vol_publish).
+          if (LIVE_STATUSES.has(env.type)) {
+            const hook =
+              (env.payload as { source?: unknown } | undefined)?.source === "harness-hook";
+            const past = hook || env.type === "working";
+            this.heard(holder, this.sentAt(env.wall_time), !hook, past);
+          }
           // A session that ended answers none of its open pickers or handoffs any more.
           if (OWNER_GONE.has(env.type))
             void this.enqueue(async () => {
@@ -2739,6 +2931,8 @@ export class Daemon {
       // Every wave, paused or stopped too: a running remote agent's reap waits on its tunnel's
       // check, which must not go stale.
       for (const wave of this.waves.keys()) this.checkTunnels(wave);
+      // The issue lifecycle (#416): gh beside the queue, on the wave's own repo.
+      for (const wave of this.waves.keys()) this.issuesPass(wave);
       for (const wave of this.waves.keys()) this.spawnAdmitted(wave);
       // Level-triggered pipeline work: retry held role spawns, re-check pending CI, see merges.
       // Its git / gh checks run beside the queue; one wave's error never skips the others.
@@ -3575,9 +3769,16 @@ export class Daemon {
     const train = this.releasePlaybook(wave);
     if (typeof train === "object" && train !== null) {
       const { path, sha256, playbook } = train;
+      // The release PR's Closes lines (#416): the done tasks' issues, as the digest lists them.
+      const { closes } = digestOf(
+        this.journalEvents(wave),
+        state,
+        dateOf(this.time).toISOString(),
+        "wave_complete",
+      );
       await this.append(wave, {
         type: "release_started",
-        data: { done, cancelled, playbook: { path, sha256, stages: playbook.stages } },
+        data: { done, cancelled, closes, playbook: { path, sha256, stages: playbook.stages } },
       });
       this.log(`wave ${wave} releasing: ${playbook.stages.map((s) => s.name).join(", ")}`);
       await this.releaseAdvance(wave);
@@ -4346,6 +4547,31 @@ export class Daemon {
         });
       }
     }
+    // Launches a `cancel` refused start again once their repo is trusted (#418).
+    const seen = new Set<string>();
+    for (const [key, c] of [...this.cancelledLaunches]) {
+      const d = this.waves.get(c.wave)?.record.decisions[c.decision];
+      if (d === undefined) {
+        this.cancelledLaunches.delete(key);
+        continue;
+      }
+      if (seen.has(c.decision)) continue;
+      seen.add(c.decision);
+      const root = (d as { repo?: unknown }).repo;
+      if (typeof root !== "string") continue;
+      if (typeof (d as { target?: unknown }).target === "string") {
+        this.checkRemoteTrust(c.wave, d, root, () => this.liftCancelled(c.decision));
+        continue;
+      }
+      const profile = (d as { claude_config_dir?: unknown }).claude_config_dir;
+      let here: Record<string, unknown> | null;
+      if (typeof profile === "string") here = readClaudeJson(join(profile, ".claude.json"));
+      else {
+        cfg ??= readClaudeJson(this.claudeJsonPath);
+        here = cfg;
+      }
+      if (isRepoTrusted(here, expandHome(root))) this.liftCancelled(c.decision);
+    }
   }
 
   /**
@@ -4353,7 +4579,12 @@ export class Daemon {
    * the repo (the owner accepted the dialog there). Throttled per decision; the ssh read runs
    * beside the serial queue and only the resolution is queued.
    */
-  private checkRemoteTrust(wave: WaveId, d: DecisionRecord, repo: string): void {
+  private checkRemoteTrust(
+    wave: WaveId,
+    d: DecisionRecord,
+    repo: string,
+    onTrusted?: () => void,
+  ): void {
     const now = this.now();
     const c = this.trustChecks.get(d.decision_id);
     if (
@@ -4370,6 +4601,7 @@ export class Daemon {
       .readTrust(typeof profile === "string" ? profile : undefined)
       .then((cfg) => {
         if (!isRepoTrusted(cfg, repo) || !this.running) return;
+        if (onTrusted !== undefined) return this.enqueue(async () => onTrusted());
         return this.enqueue(async () => {
           const cur = this.waves.get(wave)?.record.decisions[d.decision_id];
           if (cur === undefined || cur.resolved !== undefined) return;
@@ -4407,6 +4639,113 @@ export class Daemon {
    * verified only once it is supervised, so a relaunch never retires an agent not yet watched.
    */
   private async openSpawnDecision(wave: WaveId, d: SpawnDecision): Promise<string> {
+    if (!SHARED_PRECONDITION_KINDS.has(d.kind)) return this.openSpawnDecisionNow(wave, d);
+    // A shared precondition (#418): one open decision per key, which every later launch joins.
+    // Spawns run concurrently, so one still being opened is awaited and joined too.
+    const agent = typeof d.data.agent_id === "string" ? { agent_id: d.data.agent_id } : {};
+    const join = async (id: string) => {
+      await this.joinDecision(wave, { id, task: d.task, role: roleOf(d.data), ...agent });
+      return id;
+    };
+    const key = `${wave}/${d.id}`;
+    const opening = this.openingShared.get(key);
+    if (opening !== undefined) return join(await opening);
+    const open = openDecisionFor(this.waves.get(wave)?.record.state?.open_decisions ?? [], d.id);
+    if (open !== undefined) return join(open);
+    const p = this.openSpawnDecisionNow(wave, d);
+    this.openingShared.set(key, p);
+    try {
+      return await p;
+    } finally {
+      this.openingShared.delete(key);
+    }
+  }
+
+  /**
+   * Park one more launch on an open shared-precondition decision (`decision_joined`): its task is
+   * listed in `waiting` and parks; the question is rendered again for every waiting task, and the
+   * retained decision and its inbox item follow once it was published. A launch already on it,
+   * or a task that cannot park, is left as it is.
+   */
+  private async joinDecision(
+    wave: WaveId,
+    j: { id: string; task: TaskId; role: string; agent_id?: string },
+  ): Promise<void> {
+    const log = this.waves.get(wave);
+    const d = log?.record.decisions[j.id];
+    if (log === undefined || d === undefined) return;
+    const waiting = [...new Set([...parkedTasks(d), j.task])];
+    const launches = (d.launches?.length ?? parkedTasks(d).length) + 1;
+    const r = joinEvent(log.record, j.id, { ...j, ...sharedAsk(d, waiting, launches) });
+    if ("already" in r) return;
+    if ("error" in r) {
+      this.log(`join ${j.id} (${j.task}'s ${j.role}): ${r.error}`);
+      return;
+    }
+    await this.append(wave, r.event);
+    const cur = log.record.decisions[j.id] as DecisionRecord;
+    this.log(`${j.task}'s ${j.role} waits on ${j.id} (${cur.waiting?.length ?? 1} tasks waiting)`);
+    // Not settled yet: settleDecision publishes it, and opens its item, as it is by then.
+    const item = this.inbox.get(decisionItemId(wave, j.id));
+    if (item === undefined || item.answered !== undefined) return;
+    await this.publishDecision(wave, cur);
+    const fresh = itemForDecision(decisionPayload(cur), this.config.effective(wave).autopilot);
+    const next = {
+      ...item,
+      question: fresh.question,
+      ...(fresh.options !== undefined ? { options: fresh.options } : {}),
+    };
+    this.inbox.set(item.id, next);
+    await this.publishInboxItem(next);
+  }
+
+  /**
+   * A `repo_untrusted` decision answered `cancel` (#418): only the launches waiting on it are
+   * cancelled, never the tasks' other work. Each is journaled `spawn_failed` (`LAUNCH_CANCELLED`,
+   * no retry, no spawn_failed decision) and refused until the repo is trusted; an agent left on
+   * the trust dialog is retired. The tasks were unparked to their stage by the resolution.
+   */
+  private async onTrustCancelled(wave: WaveId, d: DecisionRecord, by: string): Promise<void> {
+    const f = d as DecisionRecord & TrustFacts;
+    const str = (v: unknown) => (typeof v === "string" && v !== "" ? v : undefined);
+    const host = str(f.host);
+    const acct = str(f.claude_account);
+    const what = `${str(f.repo) ?? "the repo"} is untrusted${host !== undefined ? ` on ${host}` : ""}${acct !== undefined ? ` in Claude account ${acct}` : ""}`;
+    const launches: ParkedLaunch[] =
+      d.launches ?? (d.task !== null ? [{ task: d.task, role: roleOf(d) }] : []);
+    for (const l of launches) {
+      const key = `${wave}/${l.task}/${l.role}`;
+      this.refused.set(key, { n: 1, until: Number.POSITIVE_INFINITY });
+      this.cancelledLaunches.set(key, { wave, decision: d.decision_id });
+      await this.append(wave, {
+        type: "spawn_failed",
+        task: l.task,
+        data: {
+          code: "LAUNCH_CANCELLED",
+          message: `${by} cancelled the launch: ${what}`,
+          role: l.role,
+          attempt: 1,
+          spawn_attempt: this.agentAttempt(wave, l.task, l.role as Role),
+          next_retry_at: null,
+        },
+      });
+      if (l.agent_id !== undefined) await this.retireAny(wave, l.agent_id, "stopped");
+    }
+    this.log(`${d.decision_id}: ${by} cancelled ${launches.length} waiting launch(es): ${what}`);
+  }
+
+  /** The launches a `cancel` refused for `decision`'s trust may start again: it is trusted now. */
+  private liftCancelled(decision: string): void {
+    for (const [key, c] of this.cancelledLaunches) {
+      if (c.decision !== decision) continue;
+      this.cancelledLaunches.delete(key);
+      this.refused.delete(key);
+      this.log(`${key}: its repo is trusted now; the cancelled launch starts again`);
+    }
+  }
+
+  /** `openSpawnDecision` for a decision about one launch (or a shared one's opener). */
+  private async openSpawnDecisionNow(wave: WaveId, d: SpawnDecision): Promise<string> {
     const decisions = this.waves.get(wave)?.record.decisions ?? {};
     let id = d.id;
     for (let n = 2; decisions[id] !== undefined; n++) id = `${d.id}-${n}`;
@@ -4417,6 +4756,7 @@ export class Daemon {
         task: d.task,
         question: d.question,
         options: d.options,
+        ...(d.option_help !== undefined ? { option_help: d.option_help } : {}),
         pointers: d.pointers,
         id,
       },
@@ -4486,9 +4826,11 @@ export class Daemon {
       publishRetained: (topic, payload) =>
         this.broker.publish(topic, payload, { qos: 1, retain: true }),
       openDecision: (d) => this.openSpawnDecision(wave, d),
+      joinDecision: (j) => this.joinDecision(wave, j),
       prepareAccount: async (a) => {
-        this.claude.prepare(a);
+        await this.claude.prepare(a);
       },
+      seedProfile: (a) => this.claude.seedProfile(a),
       resolveDecision: async (id, answer, by) => {
         await this.resolveNow(wave, id, { answer, by });
       },
@@ -5502,7 +5844,7 @@ export class Daemon {
       if (at !== undefined && at === a.finalSeen) return;
       a.finalSeen = at;
       // A `done` is a claim: the pipeline checks it before the agent is retired (T6).
-      void this.enqueue(() => this.onFinal(agentId, type));
+      void this.enqueue(() => this.handOverFinal(agentId, type));
     };
     watch.onStatus((type) => check(type));
     if (watch.state.status !== null) check(watch.state.status.type, false);
@@ -5655,6 +5997,7 @@ export class Daemon {
     const log = a !== undefined ? this.waves.get(a.wave) : undefined;
     if (a === undefined || log === undefined) return;
     this.supervised.delete(agentId);
+    this.dropResize(agentId, `agent '${agentId}' retired`);
     this.lastWokenAt.delete(agentId);
     this.wakeTyped.delete(agentId);
     for (const [id, w] of this.wakes) if (w.agent === agentId) this.disarmWake(id);
@@ -5980,6 +6323,7 @@ export class Daemon {
       spawn: async (task, role, req) => this.pipelineSpawn(wave, task, role, req),
       branchUpdate: () => this.config.effective(wave).branch_update,
       hygiene: () => log.record.state?.hygiene_level ?? "p1",
+      heardFrom: (agentId, kind) => this.heardFrom(agentId, kind),
       steer: (task, role, agentId, text, reason) =>
         this.deliverSteer(
           wave,
@@ -6038,11 +6382,12 @@ export class Daemon {
   /**
    * A supervised agent's final status. `failed` (and an accepted `reaped`) retires it at once and
    * tells the pipeline it failed; `done` goes to the pipeline, which verifies the claim (steering
-   * the agent while it is still live) and retires it.
+   * the agent while it is still live) and retires it. Returns whether the status was handed over
+   * (not when the agent is unsupervised or moving).
    */
-  private async onFinal(agentId: string, type: string, why?: string): Promise<void> {
+  private async onFinal(agentId: string, type: string, why?: string): Promise<boolean> {
     const a = this.supervised.get(agentId);
-    if (a === undefined || this.moving.has(agentId)) return;
+    if (a === undefined || this.moving.has(agentId)) return false;
     if (type !== "done") await this.retire(agentId, type);
     const raw = await this.broker
       .queryRetained(buildTopic(a.namespace, agentId, "result"), DAEMON_DEFAULTS.probe_ms)
@@ -6056,7 +6401,7 @@ export class Daemon {
         ...(result !== undefined ? { result } : {}),
         ...(why !== undefined ? { why } : {}),
       });
-      return;
+      return true;
     }
     await this.pipelineFor(a.wave).handle(a.task, {
       kind: "agent_done",
@@ -6066,6 +6411,62 @@ export class Daemon {
       ...(result !== undefined ? { result } : {}),
       ...(why !== undefined ? { why } : {}),
     });
+    return true;
+  }
+
+  /**
+   * `onFinal`, guarded: a throw (a remote verification step the fence denied, a timeout) is
+   * journaled as `pipeline_error { check: "status" }` and the status stays with the watchdog,
+   * which hands it over again (`recoverTerminal`). A `failed` is retired before its handoff, so a
+   * throw leaves the watchdog nothing to recover and the owner is asked at once; a `done` the
+   * pipeline accepted and retired before its next step threw was handled, and is not. Returns
+   * `"handed"`, `"skipped"` (the agent is unsupervised or moving) or the error. `again` is the
+   * decision an `accept done` answered (`askTerminalLost`).
+   */
+  private async handOverFinal(
+    agentId: string,
+    type: string,
+    again?: string,
+  ): Promise<"handed" | "skipped" | Error> {
+    const a = this.supervised.get(agentId);
+    const wallTime = a?.watch.state.status?.wall_time;
+    try {
+      return (await this.onFinal(agentId, type)) ? "handed" : "skipped";
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      this.log(`status ${agentId} ${type}: handoff failed: ${err.message}`);
+      if (a !== undefined && this.waves.has(a.wave))
+        await this.append(a.wave, {
+          type: "alarm_raised",
+          ...(a.task !== RELEASE_TASK ? { task: a.task } : {}),
+          data: {
+            alarm: "pipeline_error",
+            check: "status",
+            agent_id: agentId,
+            status: type,
+            message: err.message,
+          },
+        }).catch(() => {});
+      if (
+        a !== undefined &&
+        type !== "done" &&
+        !this.supervised.has(agentId) &&
+        this.waves.has(a.wave)
+      )
+        await this.askTerminalLost(
+          {
+            wave: a.wave,
+            agent_id: agentId,
+            role: a.role,
+            task: a.task,
+            status: type,
+            wall_time: this.terminals.get(agentId)?.wall_time ?? wallTime ?? "",
+          },
+          `the pipeline failed after the agent was retired: ${err.message}`,
+          again,
+        );
+      return err;
+    }
   }
 
   /**
@@ -6283,14 +6684,16 @@ export class Daemon {
   /**
    * The terminal-status watchdog (watchdog.ts): a terminal status nothing was journaled about
    * within `terminal_unjournaled_alarm_ms` raises one alarm; the first event naming the agent
-   * afterwards clears it.
+   * afterwards clears it. A `done` / `failed` still unhandled `terminal_recover_ms` after the
+   * alarm is recovered once (`recoverTerminal`); a recovery that fails asks the owner.
    */
   private async watchTerminals(): Promise<void> {
     const seen = [...this.terminals.values()];
     for (const t of seen) {
       if (!journaledSince(t, this.lastNamed, this.lastDecided)) continue;
       this.terminals.delete(t.agent_id);
-      const key = `${t.agent_id}@${t.wall_time}`;
+      const key = terminalKey(t);
+      this.terminalRecovered.delete(key);
       if (!this.terminalAlarmed.delete(key) || !this.waves.has(t.wave)) continue;
       await this.append(t.wave, {
         type: "alarm_cleared",
@@ -6314,7 +6717,7 @@ export class Daemon {
         this.terminals.delete(u.agent_id);
         continue;
       }
-      this.terminalAlarmed.add(key);
+      this.terminalAlarmed.set(key, this.now());
       this.log(
         `watchdog: ${u.agent_id} ${u.status} unjournaled for ${Math.round((this.now() - t.seen_at) / 1000)}s`,
       );
@@ -6324,6 +6727,163 @@ export class Daemon {
         data: { alarm: TERMINAL_ALARM, ...u },
       });
     }
+    const due = recoverableTerminals(
+      [...this.terminals.values()],
+      this.terminalAlarmed,
+      this.lastNamed,
+      this.now(),
+      DAEMON_DEFAULTS.terminal_recover_ms,
+      this.lastDecided,
+    );
+    for (const t of due) {
+      const key = terminalKey(t);
+      const w = this.terminals.get(t.agent_id);
+      if (w === undefined || this.terminalRecovered.has(key) || !this.waves.has(w.wave)) continue;
+      // A move in flight holds the status (onFinal skips it): recover once the move ends.
+      if (this.moving.has(t.agent_id)) continue;
+      this.terminalRecovered.add(key);
+      await this.recoverTerminal(w);
+    }
+  }
+
+  /**
+   * Recover a dropped terminal status: re-read the agent's retained status and hand it to the
+   * pipeline as if it had just arrived (the path a restart's re-attach takes), journaling
+   * `terminal_status_recovered`. When the status is gone or the handoff throws again, open
+   * `terminal_status_lost` (`accept done` | `relaunch`).
+   */
+  private async recoverTerminal(t: TerminalSeen & { wave: WaveId }): Promise<void> {
+    const a = this.supervised.get(t.agent_id);
+    let why: string | undefined;
+    if (a === undefined) why = "the agent is no longer supervised";
+    else {
+      const raw = await this.broker
+        .queryRetained(buildTopic(a.namespace, t.agent_id, "status"), DAEMON_DEFAULTS.probe_ms)
+        .catch(() => null);
+      const env = raw !== null && raw !== "" ? parseEnvelope(raw) : null;
+      if (env?.type !== t.status || env.wall_time !== t.wall_time)
+        why = "its retained status is gone";
+      else {
+        const r = await this.handOverFinal(t.agent_id, t.status);
+        // Retired by the failing handoff: handOverFinal asked already (a failed), or the pipeline
+        // had accepted it (a done).
+        if (r instanceof Error && !this.supervised.has(t.agent_id)) return;
+        if (r instanceof Error) why = `the pipeline failed again: ${r.message}`;
+        else if (r === "skipped") why = "the agent is no longer supervised";
+      }
+    }
+    if (why === undefined) {
+      const after = this.now() - t.seen_at;
+      this.log(`watchdog: ${t.agent_id} ${t.status} recovered after ${Math.round(after / 1000)}s`);
+      await this.append(t.wave, {
+        type: TERMINAL_RECOVERED,
+        ...(t.task !== RELEASE_TASK ? { task: t.task } : {}),
+        data: { agent_id: t.agent_id, status: t.status, after_ms: after },
+      });
+      return;
+    }
+    this.log(`watchdog: ${t.agent_id} ${t.status} not recovered: ${why}`);
+    await this.askTerminalLost(t, why);
+  }
+
+  /**
+   * Open `terminal_status_lost` for a status volleyd could not hand to the pipeline. `again` (the
+   * decision a failed `accept done` answered) keys a fresh one, so the owner is asked again.
+   */
+  private async askTerminalLost(
+    t: Pick<TerminalSeen, "agent_id" | "role" | "task" | "status" | "wall_time"> & { wave: WaveId },
+    why: string,
+    again?: string,
+  ): Promise<void> {
+    const stage = this.waves.get(t.wave)?.record.state?.tasks.find((x) => x.id === t.task)?.stage;
+    const onTask = stage !== undefined && !SETTLED_STAGES.has(stage);
+    const relaunch = onTask && this.opts.spawner !== undefined;
+    await this.openDecisionNow(
+      t.wave,
+      {
+        kind: "terminal_status_lost",
+        task: onTask ? t.task : null,
+        id: waveDecisionId(
+          "terminal_status_lost",
+          t.wave,
+          t.agent_id,
+          t.wall_time,
+          ...(again !== undefined ? [again] : []),
+        ),
+        question: `Needs you: ${t.agent_id} (${t.task}) published ${t.status}, and volleyd could not hand it to the pipeline (${why}). accept done: apply the published ${t.status} as if it had just arrived${relaunch ? `; or relaunch: stop it and start the ${t.role} again` : ""}?`,
+        options: relaunch ? ["accept done", "relaunch"] : ["accept done"],
+        park: false,
+      },
+      { agent_id: t.agent_id, role: t.role, status: t.status, status_at: t.wall_time, why },
+    ).catch((e: unknown) =>
+      this.log(`terminal_status_lost ${t.agent_id}: ${e instanceof Error ? e.message : String(e)}`),
+    );
+  }
+
+  /**
+   * The owner answered `terminal_status_lost`. `accept done`: the status goes to the pipeline as
+   * if it had just arrived. `relaunch`: the agent is retired as relaunched and its role spawned.
+   */
+  private async onTerminalLostResolved(wave: WaveId, d: DecisionRecord): Promise<void> {
+    const x = d as unknown as Record<string, unknown>;
+    const agentId = typeof x.agent_id === "string" ? x.agent_id : undefined;
+    const status = typeof x.status === "string" ? x.status : "done";
+    if (agentId === undefined || d.resolved === undefined) return;
+    const ans = d.resolved.answer.trim().toLowerCase();
+    const a = this.supervised.get(agentId);
+    if (ans === "accept done") {
+      const role = isRole(String(x.role)) ? (String(x.role) as Role) : undefined;
+      const task = a?.task ?? d.task;
+      const again = async (why: string) => {
+        const r = a?.role ?? role;
+        if (r === undefined) {
+          this.log(`terminal_status_lost ${agentId}: ${why}; no role to ask about`);
+          return;
+        }
+        await this.askTerminalLost(
+          {
+            wave,
+            agent_id: agentId,
+            role: r,
+            task: task ?? RELEASE_TASK,
+            status,
+            wall_time: typeof x.status_at === "string" ? x.status_at : "",
+          },
+          why,
+          d.decision_id,
+        );
+      };
+      if (a !== undefined) {
+        const r = await this.handOverFinal(agentId, status, d.decision_id);
+        // Retired by the failing handoff: handOverFinal asked again (a failed), or it was accepted.
+        if (r instanceof Error && this.supervised.has(agentId))
+          await again(`accept done failed: ${r.message}`);
+        else if (r === "skipped") await again("accept done found the agent moving");
+        return;
+      }
+      if (d.task === null || role === undefined) {
+        this.log(`terminal_status_lost ${agentId}: accept done has no task to apply it to`);
+        return;
+      }
+      try {
+        await this.pipelineFor(wave).handle(d.task, {
+          kind: "agent_done",
+          role,
+          agent_id: agentId,
+          status: status === "done" ? "done" : "failed",
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.log(`terminal_status_lost ${agentId}: accept done failed: ${msg}`);
+        await again(`accept done failed: ${msg}`);
+      }
+      return;
+    }
+    if (ans !== "relaunch" || d.task === null || !isRole(String(x.role))) return;
+    if (this.opts.spawner === undefined) return;
+    if (a !== undefined) await this.retireRole(wave, agentId, "relaunched");
+    else await this.retireGone(wave, d.task, agentId, x);
+    this.respawnRole(wave, d.task, agentId, String(x.role) as Role);
   }
 
   /**
@@ -6585,11 +7145,18 @@ export class Daemon {
       return;
     }
     const attempt = this.agentAttempt(wave, RELEASE_TASK, "release", stage.name);
+    const started = this.journalEvents(wave)
+      .filter((e) => e.type === "release_started")
+      .at(-1);
+    const closes = Array.isArray(started?.data.closes)
+      ? (started.data.closes as unknown[]).filter((n): n is number => typeof n === "number")
+      : [];
     const files = {
       "stage.md": renderStageMd(stage, {
         wave,
         release_branch: rec.state.release_branch,
         attempt,
+        closes,
       }),
     };
     void this.startSpawn(wave, RELEASE_TASK, "release", { stage, files }).catch((e: unknown) => {
@@ -8116,6 +8683,7 @@ export class Daemon {
     await this.append(wave, { ...r.event, data: { ...extra, ...r.event.data } });
     this.log(`opened ${describeDecision(log.record.decisions[r.id] as DecisionRecord)}`);
     if (settle) await this.settleDecision(wave, r.id);
+    this.closeIfHeard(wave, log.record.decisions[r.id] as DecisionRecord);
     return log.record.decisions[r.id] as DecisionRecord;
   }
 
@@ -8308,6 +8876,9 @@ export class Daemon {
     if (refused !== null && (d as { pipeline?: unknown }).pipeline === undefined)
       await this.askAgainRefused(wave, d, r.answer, refused);
     if (d.kind === "machine_down") await this.onMachineDownResolved(wave, d);
+    if (d.kind === "repo_untrusted" && r.answer.trim().toLowerCase() === "cancel")
+      await this.onTrustCancelled(wave, d, r.by);
+    if (d.kind === "terminal_status_lost") await this.onTerminalLostResolved(wave, d);
     if (d.kind === "release_go") {
       // go: the release is the owner's, and done. Anything else holds it: asked again.
       if (r.answer.trim().toLowerCase() === "go")
@@ -8878,12 +9449,29 @@ export class Daemon {
   ): Promise<string | null> {
     const a = this.supervised.get(item.agent_id);
     const source = typeof item.source.workspace === "string" ? item.source.workspace : undefined;
-    const workspace = a?.workspace ?? this.registryWorkspaces.get(item.agent_id) ?? source;
+    let workspace = a?.workspace ?? this.registryWorkspaces.get(item.agent_id) ?? source;
     if (workspace === undefined)
       return "volleyd cannot see this session's screen: answer it in its terminal";
     if (a === undefined) {
       const holder = this.workspaceHolder(workspace, item.agent_id);
-      if (holder !== null) return `${workspace} is ${holder}'s screen, not ${item.agent_id}'s`;
+      if (holder !== null) {
+        // The registry can name another session's screen (#392); the workspace the question was
+        // asked from is the session's own, unless that one is someone else's too.
+        const asked =
+          source !== undefined &&
+          source !== workspace &&
+          this.workspaceHolder(source, item.agent_id) === null
+            ? source
+            : undefined;
+        if (asked === undefined) {
+          const from =
+            source !== undefined && source !== workspace
+              ? `; ${item.agent_id} asked from ${source}`
+              : "";
+          return `${workspace} is ${holder}'s screen, not ${item.agent_id}'s${from}: send the answer to its mailbox, or answer it in its terminal`;
+        }
+        workspace = asked;
+      }
     }
     const host = a?.host ?? this.host;
     return carry(
@@ -9417,8 +10005,12 @@ export class Daemon {
         return this.archiveOp(p, by);
       case "steer":
         return this.steer(p, by);
+      case "terminal_resize":
+        return this.terminalResize(p, by);
       case "merged":
         return this.mergedOp(p, by);
+      case "issues":
+        return this.issuesOp(p, by);
       case "merge":
         return this.mergeOp(p, by);
       case "status": {
@@ -10162,6 +10754,271 @@ export class Daemon {
     await this.publishInboxItem(next);
   }
 
+  // -------------------------------------------------------------------------------------------
+  // The issue lifecycle (#416, autopilot/issues.ts, SPEC §4.6.19)
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * On every tick, per wave, beside the queue: each task merged into the release branch gets its
+   * issue labeled and commented once; once a complete wave's release branch merged (its release
+   * PR, looked for once per release_merge_poll_ms), every task's issue is verified. What ran is
+   * journaled on the queue, so a restart plans only what is left.
+   */
+  private issuesPass(wave: WaveId): void {
+    const log = this.waves.get(wave);
+    const state = log?.record.state;
+    const repo = log?.record.wave?.repo;
+    if (log === undefined || state == null || repo === undefined || this.issueChecks.has(wave))
+      return;
+    const retry = this.issueRetryAt.get(wave);
+    if (retry !== undefined && this.now() < retry) return;
+    const events = this.journalEvents(wave);
+    const ledger = issueLedger(events);
+    const tasks = taskIssues(events, state.tasks);
+    const merged = tasks.filter(
+      (t) =>
+        t.stage === "done" &&
+        t.pr !== undefined &&
+        !this.issueSettled.has(`${wave}/${t.issue}`) &&
+        mergedActions({
+          wave,
+          release_branch: state.release_branch,
+          issue: t.issue,
+          pr: t.pr,
+          ledger,
+        }).length > 0,
+    );
+    const polled = this.releasePolledAt.get(wave);
+    const release =
+      ledger.verified === undefined &&
+      state.status === "complete" &&
+      tasks.some((t) => t.stage === "done") &&
+      (polled === undefined || this.now() - polled >= DAEMON_DEFAULTS.release_merge_poll_ms);
+    if (merged.length === 0 && !release) return;
+    this.issueChecks.add(wave);
+    void this.track(
+      (async () => {
+        const cwd = repoDir(repo);
+        let failed = false;
+        for (const t of merged)
+          if (!(await this.issueMerged(wave, cwd, state.release_branch, t))) failed = true;
+        // A merged-to-release write that failed (an issue gh cannot read) holds back no release.
+        if (release) {
+          this.releasePolledAt.set(wave, this.now());
+          const pr = await this.releasePr(cwd, state.release_branch);
+          // A failed write is retried on the ci_poll_ms cadence below, not the release poll's.
+          if (pr !== null && (await this.verifyIssues(wave, cwd, pr)).failed.length > 0) {
+            failed = true;
+            this.releasePolledAt.delete(wave);
+          }
+        }
+        // Retried once after ci_poll_ms, then every release_merge_poll_ms: an issue gh can never
+        // read (deleted, transferred, a typo) is not looked up every minute until archive.
+        const failures = failed ? (this.issueFailures.get(wave) ?? 0) + 1 : 0;
+        if (failures > 0) {
+          this.issueFailures.set(wave, failures);
+          this.issueRetryAt.set(
+            wave,
+            this.now() +
+              (failures === 1 ? DAEMON_DEFAULTS.ci_poll_ms : DAEMON_DEFAULTS.release_merge_poll_ms),
+          );
+        } else {
+          this.issueFailures.delete(wave);
+          this.issueRetryAt.delete(wave);
+        }
+      })()
+        .catch((e: unknown) =>
+          this.log(`${wave}: issues: ${e instanceof Error ? e.message : String(e)}`),
+        )
+        .finally(() => this.issueChecks.delete(wave)),
+    );
+  }
+
+  /** An issue as gh reads it, or null (logged) when it could not. */
+  private async readIssue(wave: WaveId, cwd: string, issue: number): Promise<IssueView | null> {
+    const r = await this.host.exec(issueViewArgv(issue), { cwd }).catch(() => null);
+    const v = r?.code === 0 ? parseIssueView(r.stdout) : null;
+    if (v === null)
+      this.log(`${wave}: issue #${issue} not read: ${r?.stderr.trim() || "gh printed no issue"}`);
+    return v;
+  }
+
+  /** Journal what a run of issue actions did, on the queue; false when any of them failed. */
+  private async journalIssueRun(
+    wave: WaveId,
+    r: { events: NewEvent[]; failed: string[] },
+  ): Promise<boolean> {
+    await this.enqueue(async () => {
+      for (const ev of r.events) await this.append(wave, ev);
+    });
+    for (const f of r.failed) this.log(`${wave}: issues: ${f}`);
+    return r.failed.length === 0;
+  }
+
+  /** Label and comment a merged task's issue (what is left of it); false when not all of it ran. */
+  private async issueMerged(
+    wave: WaveId,
+    cwd: string,
+    releaseBranch: string,
+    t: TaskIssue,
+  ): Promise<boolean> {
+    // GitHub is read first: a marker comment there (a journal that lost its event) is not repeated.
+    const view = await this.readIssue(wave, cwd, t.issue);
+    if (view === null || t.pr === undefined) return false;
+    const actions = mergedActions({
+      wave,
+      release_branch: releaseBranch,
+      issue: t.issue,
+      pr: t.pr,
+      ledger: issueLedger(this.journalEvents(wave)),
+      view,
+    });
+    if (actions.length === 0) {
+      this.issueSettled.add(`${wave}/${t.issue}`);
+      return true;
+    }
+    const r = await runIssueActions(this.host.exec, cwd, actions, { task: t.task, pr: t.pr });
+    return this.journalIssueRun(wave, r);
+  }
+
+  /** The release branch's merged PR (the release reached main), or null. */
+  private async releasePr(cwd: string, releaseBranch: string): Promise<number | null> {
+    const r = await this.host.exec(releasePrArgv(releaseBranch), { cwd }).catch(() => null);
+    return r?.code === 0 ? releasedPr(r.stdout) : null;
+  }
+
+  /**
+   * The release reached main in `releasePr`: close every done task's issue it left open, take the
+   * label off, comment once on each cancelled or deferred task's issue (left open). Journals
+   * `issues_verified` once every issue was read and every write ran.
+   */
+  private async verifyIssues(
+    wave: WaveId,
+    cwd: string,
+    releasePr: number,
+  ): Promise<{ closed: number[]; left_open: number[]; failed: string[] }> {
+    const state = this.waves.get(wave)?.record.state;
+    const tasks =
+      state == null ? [] : issueOutcomes(taskIssues(this.journalEvents(wave), state.tasks));
+    const views = new Map<number, IssueView>();
+    const failed: string[] = [];
+    for (const t of tasks) {
+      const v = await this.readIssue(wave, cwd, t.issue);
+      if (v !== null) views.set(t.issue, v);
+      else failed.push(`issue #${t.issue} not read`);
+    }
+    const actions = releaseActions({
+      wave,
+      release_pr: releasePr,
+      tasks,
+      ledger: issueLedger(this.journalEvents(wave)),
+      views,
+    });
+    for (const t of tasks) {
+      const mine = actions.filter((a) => a.kind !== "ensure_label" && a.issue === t.issue);
+      if (mine.length === 0) continue;
+      const r = await runIssueActions(this.host.exec, cwd, mine, {
+        task: t.task,
+        release_pr: releasePr,
+      });
+      await this.journalIssueRun(wave, r);
+      failed.push(...r.failed);
+    }
+    // From the ledger, so an issue an earlier, failed run closed is listed too.
+    const closedBy = new Set(
+      this.journalEvents(wave)
+        .filter((e) => e.type === "issue_closed" && e.data.release_pr === releasePr)
+        .map((e) => e.data.issue),
+    );
+    const closed = tasks.filter((t) => closedBy.has(t.issue)).map((t) => t.issue);
+    const left_open = tasks
+      .filter((t) => t.stage !== "done" && views.get(t.issue)?.state === "OPEN")
+      .map((t) => t.issue);
+    if (failed.length === 0) {
+      await this.enqueue(async () => {
+        await this.append(wave, {
+          type: "issues_verified",
+          data: { release_pr: releasePr, closed, left_open },
+        });
+      });
+      this.log(
+        `${wave}: release PR #${releasePr} reached main: closed ${closed.map((n) => `#${n}`).join(", ") || "none"}; left open ${left_open.map((n) => `#${n}`).join(", ") || "none"}`,
+      );
+    }
+    return { closed, left_open, failed };
+  }
+
+  /**
+   * `issues`: each task's issue state (`volleyd issues <wave>`), from the journal. With `verify`
+   * (owner only): the release-to-main check now, for a release merged by hand: against `pr`, or
+   * the release branch's merged PR gh finds.
+   */
+  private issuesOp(p: Record<string, unknown>, by: string): HandlerResult {
+    const w = this.waveOf(p);
+    if ("error" in w) return { ok: false, error: w.error };
+    const state = w.log.record.state as WaveState;
+    const answer = (): Reply => {
+      const events = this.journalEvents(w.wave);
+      const ledger = issueLedger(events);
+      const rows = issueRows(taskIssues(events, state.tasks), ledger, {
+        released: ledger.verified !== undefined,
+      });
+      return {
+        ok: true,
+        result: {
+          wave: w.wave,
+          release_branch: state.release_branch,
+          release_pr: ledger.verified ?? null,
+          issues: rows,
+        },
+      };
+    };
+    if (p.verify !== true) return answer();
+    const pr = p.pr;
+    if (pr !== undefined && (typeof pr !== "number" || !Number.isInteger(pr) || pr < 1))
+      return { ok: false, error: "issues --pr takes a pull request number" };
+    const refused = guardMutation(state, by, "issues --verify", this.bindings);
+    if (refused !== null) return { ok: false, error: refused };
+    // Only a complete wave's release can have reached main: verifying earlier would defer tasks
+    // still in flight and end the release poll for good.
+    if (state.status !== "complete")
+      return {
+        ok: false,
+        error: `wave '${w.wave}' is not complete (${state.status}); its release has not reached main`,
+      };
+    // Already verified against this release: answer from the ledger rather than run it again.
+    const verified = issueLedger(this.journalEvents(w.wave)).verified;
+    if (verified !== undefined && (pr === undefined || pr === verified)) return answer();
+    const repo = w.log.record.wave?.repo;
+    if (repo === undefined) return { ok: false, error: `wave '${w.wave}' has no repo` };
+    if (this.issueChecks.has(w.wave))
+      return { ok: false, error: `wave '${w.wave}''s issues are being checked; try again shortly` };
+    this.issueChecks.add(w.wave);
+    const defer = (async (): Promise<Reply> => {
+      const cwd = repoDir(repo);
+      // A PR number given by hand is checked first: a typo must not close every issue.
+      if (typeof pr === "number") {
+        const v = await this.host.exec(prViewArgv(pr), { cwd }).catch(() => null);
+        if (v?.code !== 0 || !mergedFrom(v.stdout, state.release_branch))
+          return {
+            ok: false,
+            error: `PR #${pr} is not a merged pull request from ${state.release_branch}`,
+          };
+      }
+      const release = typeof pr === "number" ? pr : await this.releasePr(cwd, state.release_branch);
+      if (release === null)
+        return {
+          ok: false,
+          error: `no merged pull request from ${state.release_branch} found; pass --pr <n>`,
+        };
+      const r = await this.verifyIssues(w.wave, cwd, release);
+      if (r.failed.length > 0)
+        return { ok: false, error: `issues not all verified: ${r.failed.join("; ")}` };
+      return answer();
+    })().finally(() => this.issueChecks.delete(w.wave));
+    return { ok: true, defer };
+  }
+
   /**
    * On every tick, per wave: autopilot holds each red head waiting on its flake's fixer
    * (`autoHolds`), a hold on a task that is done or cancelled is released, and holds on PRs and
@@ -10849,6 +11706,90 @@ export class Daemon {
         { seq: q.seq, ...(q.supersedes !== undefined ? { supersedes: q.supersedes } : {}) },
       );
     }
+  }
+
+  /** Per agent: the resize waiting out its coalescing window, and the one running before it. */
+  private readonly resizes = new Map<
+    string,
+    { size: TermSize | "launch"; answers: ((r: Reply) => void)[]; timer: TimerHandle }
+  >();
+  private readonly resizing = new Map<string, Promise<unknown>>();
+
+  /**
+   * `terminal_resize { agent_id, cols, rows | reset: true }` (SPEC §4.6.6): size a live agent's
+   * terminal to the Desk's Terminal popout, or back to its launch size. Cosmetic, so any sender
+   * that may write this mailbox (the steer role) may ask. A burst for one agent is one resize to
+   * its last size, run after the one before it; every request in the burst gets its answer.
+   */
+  private terminalResize(p: Record<string, unknown>, by: string): HandlerResult {
+    const id = typeof p.agent_id === "string" ? p.agent_id : "";
+    if (id === "") return { ok: false, error: "terminal_resize requires payload.agent_id" };
+    const a = this.supervised.get(id);
+    if (a === undefined) return { ok: false, error: `agent '${id}' is not live under volleyd` };
+    const cell = (n: unknown) =>
+      Number.isInteger(n) && (n as number) >= TMUX_SIZE.min && (n as number) <= TMUX_SIZE.max;
+    if (p.reset !== true && !(cell(p.cols) && cell(p.rows)))
+      return {
+        ok: false,
+        error: `terminal_resize needs cols and rows (integers ${TMUX_SIZE.min}..${TMUX_SIZE.max}) or reset: true`,
+      };
+    const size: TermSize | "launch" =
+      p.reset === true ? "launch" : { cols: p.cols as number, rows: p.rows as number };
+    const answer = new Promise<Reply>((resolve) => {
+      const queued = this.resizes.get(id);
+      if (queued !== undefined) this.time.clearTimeout(queued.timer);
+      const answers = [...(queued?.answers ?? []), resolve];
+      const timer = this.time.setTimeout(
+        () => this.flushResize(id, a.host, a.workspace, by),
+        DAEMON_DEFAULTS.terminal_resize_coalesce_ms,
+      );
+      this.resizes.set(id, { size, answers, timer });
+    });
+    return { ok: true, defer: answer };
+  }
+
+  /** Drop the agent's resize still in its coalescing window: its session is going away. */
+  private dropResize(id: string, error: string): void {
+    const queued = this.resizes.get(id);
+    if (queued === undefined) return;
+    this.resizes.delete(id);
+    this.time.clearTimeout(queued.timer);
+    for (const answer of queued.answers) answer({ ok: false, error });
+  }
+
+  private flushResize(id: string, host: Host, workspace: string, by: string): void {
+    const queued = this.resizes.get(id);
+    if (queued === undefined) return;
+    this.resizes.delete(id);
+    const { size, answers } = queued;
+    const shown = size === "launch" ? "its launch size" : `${size.cols}×${size.rows}`;
+    const run = (this.resizing.get(id) ?? Promise.resolve())
+      .then(() => host.resize(workspace, size))
+      .then(
+        (resized): Reply => {
+          this.log(
+            resized
+              ? `terminal_resize ${id} → ${shown} by ${by}`
+              : `terminal_resize ${id}: host ${host.name} cannot resize a terminal; ignored`,
+          );
+          return {
+            ok: true,
+            result: { agent_id: id, resized, ...(size === "launch" ? { reset: true } : size) },
+          };
+        },
+        (e: unknown): Reply => {
+          const error = `terminal_resize ${id}: ${e instanceof Error ? e.message : String(e)}`;
+          this.log(error);
+          return { ok: false, error };
+        },
+      );
+    const done = run.then((r) => {
+      for (const answer of answers) answer(r);
+    });
+    this.resizing.set(id, done);
+    void done.then(() => {
+      if (this.resizing.get(id) === done) this.resizing.delete(id);
+    });
   }
 
   /**

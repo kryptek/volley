@@ -370,11 +370,29 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
       "a fresh rebase (or merge) agent retries the update; a conflict it cannot resolve either is the owner's",
   },
   {
+    policy: "merge_refused/draft",
+    kinds: ["merge_refused"],
+    condition:
+      "the last refusal: the PR is a draft (reason: draft) and marking it ready has not failed (no ready_failed)",
+    when: (d) => d.reason === "draft" && d.ready_failed !== true,
+    answer: "retry",
+    rationale:
+      "a draft is marked ready and merged once the CI that starts then passes; a retry does exactly that",
+  },
+  {
     policy: "pr/owner",
     kinds: ["pr_closed", "remote_repo_missing"],
     condition: "always",
     answer: null,
     rationale: "where the work went, or a clone that is missing, is the owner's call",
+  },
+  {
+    policy: "terminal/owner",
+    kinds: ["terminal_status_lost"],
+    condition: "always",
+    answer: null,
+    rationale:
+      "a status the supervisor could not hand over even on recovery: the owner checks the work",
   },
 ];
 

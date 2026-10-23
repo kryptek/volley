@@ -42,8 +42,78 @@ export const DECISION_KINDS = [
   "merge_refused",
   "release_go",
   "stage_go",
+  "terminal_status_lost",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
+
+/** The spawn decisions whose answer relaunches or cancels the run they are about (#402). */
+export const SPAWN_DECISION_KINDS: ReadonlySet<string> = new Set([
+  "unknown_screen",
+  "hooks_auth_failed",
+  "mcp_not_registered",
+]);
+
+/**
+ * Decisions about a shared precondition, not a task (#418): one open decision per precondition
+ * (`preconditionKey`), which every launch that needs it joins (`decision_joined`) instead of
+ * opening its own. Each joined task parks on it, is listed in `waiting`, and resumes on its one
+ * answer. A kind joins the set by giving its decisions a key and a question renderer that lists
+ * the waiting tasks (trust.ts `trustQuestion`).
+ */
+export const SHARED_PRECONDITION_KINDS: ReadonlySet<string> = new Set<DecisionKind>([
+  "repo_untrusted",
+]);
+
+/**
+ * What a shared precondition is about, never the task or the attempt that hit it: the machine
+ * (an ssh target, or `local`), the Claude profile (its config dir, or `default`) and the repo root.
+ */
+export function preconditionKey(p: { machine?: string; profile?: string; root: string }): string {
+  return JSON.stringify([p.machine ?? "local", p.profile ?? "default", p.root]);
+}
+
+/** How many waiting task ids a shared-precondition question names before `…`. */
+const WAITING_SHOWN = 6;
+
+/** ` 1 task is waiting: T1.`, ` 12 tasks are waiting: a, b, c, d, e, f, … (12 tasks).` */
+export function waitingLine(waiting: readonly string[]): string {
+  const n = waiting.length;
+  if (n === 0) return "";
+  if (n === 1) return ` 1 task is waiting: ${waiting[0]}.`;
+  const shown = waiting.slice(0, WAITING_SHOWN).join(", ");
+  return ` ${n} tasks are waiting: ${n > WAITING_SHOWN ? `${shown}, … (${n} tasks)` : shown}.`;
+}
+
+/**
+ * The tasks an open decision parks: its own and, for a shared precondition, every task that
+ * joined it (the opener first).
+ */
+export function parkedTasks(d: Pick<DecisionRecord, "task" | "kind" | "waiting">): TaskId[] {
+  const joined = SHARED_PRECONDITION_KINDS.has(d.kind) ? (d.waiting ?? []) : [];
+  return [...new Set([...(d.task !== null ? [d.task] : []), ...joined])];
+}
+
+/** Whether decision `d` is about task `task` (its own, or a shared one it waits on). */
+export const decisionCovers = (
+  d: Pick<DecisionRecord, "task" | "kind" | "waiting">,
+  task: TaskId,
+): boolean => parkedTasks(d).includes(task);
+
+/**
+ * The stage task `task` resumes at once `d` (and every other decision parking it) is resolved:
+ * the opener's `resume_stage`, a joined task's own.
+ */
+export function resumeStageOf(d: DecisionRecord, task: TaskId): TaskStage | undefined {
+  return task === d.task ? d.resume_stage : d.resume_stages?.[task];
+}
+
+/**
+ * A spawn decision's harmless third answer: volleyd checks the agent is live and closes the
+ * decision, touching nothing; volleyd answers it itself once the agent reports in (#402).
+ */
+export const ITS_RUNNING = "it's running";
+export const ITS_RUNNING_HELP =
+  "Volley checks the agent is alive, then closes this. Nothing is restarted or stopped.";
 
 /** What a held decision waits on (#335): a task of its wave, a PR, an issue. */
 export interface HeldOn {
@@ -75,6 +145,8 @@ export interface DecisionPayload {
   kind: DecisionKind;
   question: string;
   options?: string[];
+  /** Hover text for some of `options`, by option (the Desk shows it on the option's button). */
+  option_help?: Record<string, string>;
   pointers: DecisionPointers;
   opened_at: string;
   resolved?: { answer: string; by: string; at: string };
@@ -105,12 +177,28 @@ export interface DecisionPayload {
   stages?: { name: string; evidence?: string }[];
   /** Held: waiting on a task, PR or issue (`decision_held`), until it lands or is released. */
   held?: Held;
+  /**
+   * A shared-precondition decision (repo_untrusted, #418): every task whose launch parks on it,
+   * the opener first.
+   */
+  waiting?: TaskId[];
+}
+
+/** A launch parked on a shared-precondition decision: its task, role and (pane-raised) agent. */
+export interface ParkedLaunch {
+  task: TaskId;
+  role: string;
+  agent_id?: string;
 }
 
 /** What the reducer keeps per decision: the payload plus what resolving needs. */
 export interface DecisionRecord extends DecisionPayload {
   /** The task's stage when the decision opened; restored when its last open decision resolves. */
   resume_stage?: TaskStage;
+  /** A shared-precondition decision: where each joined task (not the opener) resumes. */
+  resume_stages?: Record<TaskId, TaskStage>;
+  /** A shared-precondition decision: every launch parked on it (its `cancel` cancels these). */
+  launches?: ParkedLaunch[];
   /** `false`: opened with `park: false`, the task keeps running while it is open. */
   parks?: boolean;
   rationale?: string;
@@ -127,6 +215,8 @@ export interface DecisionInput {
   question: string;
   pointers?: DecisionPointers;
   options?: string[];
+  /** Hover text for some of `options`, by option. */
+  option_help?: Record<string, string>;
   /** Optional caller-chosen id (idempotent re-open); default `d-<random>`. */
   id?: string;
   /**
@@ -205,8 +295,55 @@ export function openEvent(
         ...(input.options !== undefined && input.options.length > 0
           ? { options: input.options }
           : {}),
+        ...(input.option_help !== undefined && Object.keys(input.option_help).length > 0
+          ? { option_help: input.option_help }
+          : {}),
         opened_at: now.toISOString(),
         ...(input.park === false ? { parks: false } : {}),
+      },
+    },
+  };
+}
+
+/**
+ * The `decision_joined` event: one more launch parks on an open shared-precondition decision, and
+ * its question is re-rendered (`question`, `option_help`) to list every waiting task. `{ already }`
+ * when that launch (task and role) is on it already, or an error. Pure.
+ */
+export function joinEvent(
+  rec: WaveRecord,
+  id: string,
+  j: {
+    task: TaskId;
+    role: string;
+    question: string;
+    option_help?: Record<string, string>;
+    agent_id?: string;
+  },
+): { event: NewEvent } | { already: DecisionRecord } | { error: string } {
+  const wave = rec.state?.wave;
+  const d = rec.decisions[id];
+  if (d === undefined) return { error: `unknown decision '${id}' in wave '${wave}'` };
+  if (d.resolved !== undefined) return { error: `decision '${id}' is resolved already` };
+  if (!SHARED_PRECONDITION_KINDS.has(d.kind))
+    return { error: `a ${d.kind} decision is about one task: '${id}' cannot be joined` };
+  const task = rec.state?.tasks.find((t) => t.id === j.task);
+  if (task === undefined) return { error: `unknown task '${j.task}' in wave '${wave}'` };
+  if (SETTLED.has(task.stage) && task.id !== d.task)
+    return { error: `task '${j.task}' is ${task.stage}: it cannot park on '${id}'` };
+  if ((d.launches ?? []).some((l) => l.task === j.task && l.role === j.role)) return { already: d };
+  return {
+    event: {
+      type: "decision_joined",
+      task: j.task,
+      data: {
+        decision_id: id,
+        kind: d.kind,
+        task: j.task,
+        role: j.role,
+        question: j.question,
+        ...(j.option_help !== undefined ? { option_help: j.option_help } : {}),
+        ...(j.agent_id !== undefined ? { agent_id: j.agent_id } : {}),
       },
     },
   };
@@ -495,10 +632,14 @@ export function decisionPayload(d: DecisionRecord): DecisionPayload {
         ? `${escalatedPrefix(d.escalated.why)}${d.question}`
         : d.question,
     ...(d.options !== undefined ? { options: d.options } : {}),
+    ...(d.option_help !== undefined ? { option_help: d.option_help } : {}),
     pointers: d.pointers,
     opened_at: d.opened_at,
     ...(d.resolved !== undefined ? { resolved: d.resolved } : {}),
     ...(d.held !== undefined && d.resolved === undefined ? { held: d.held } : {}),
+    ...(SHARED_PRECONDITION_KINDS.has(d.kind) && Array.isArray(d.waiting) && d.waiting.length > 0
+      ? { waiting: d.waiting }
+      : {}),
     ...str("host"),
     ...str("target"),
     ...str("repo"),

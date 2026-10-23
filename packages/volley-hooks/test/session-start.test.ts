@@ -326,20 +326,22 @@ esac
   });
 
   it("a drain hook restores workspace_title and model_source after the MCP server re-registers", async () => {
-    await start({
+    const own = {
       VOLLEY_WORKSPACE_TITLE: "release triage",
       VOLLEY_SESSION_URL: "https://claude.example.test/session/1",
       VOLLEY_WORKSPACE: "workspace:7",
-    });
+    };
+    await start(own);
     // The MCP server's own register replaces the whole entry.
     await publishRegistry(client, COORD, "default", {
       capabilities: ["coordinates"],
       cwd: cdir,
       started_at: "2026-10-18T10:00:00.000Z",
     });
+    // Every hook of a session runs in the session's own environment.
     const run = await runHook("post-tool-use", fixture("post-tool-use.json", cdir), {
       cwd: cdir,
-      env,
+      env: { ...env, ...own },
     });
     expect(run.exitCode).toBe(0);
     const reg = await retainedEnvelope(client, registryTopic(COORD));
@@ -364,7 +366,10 @@ esac
       cwd: cdir,
       started_at: "2026-10-18T10:00:00.000Z",
     });
-    await runHook("post-tool-use", fixture("post-tool-use.json", cdir), { cwd: cdir, env });
+    await runHook("post-tool-use", fixture("post-tool-use.json", cdir), {
+      cwd: cdir,
+      env: { ...env, VOLLEY_WORKSPACE_TITLE: "no model here" },
+    });
     const reg = await retainedEnvelope(client, registryTopic(COORD));
     expect(reg.payload).toMatchObject({ workspace_title: "no model here" });
   });
@@ -382,5 +387,122 @@ esac
     });
     const reg = await retainedEnvelope(client, registryTopic(AGENT));
     expect(reg.payload).not.toHaveProperty("workspace_title");
+  });
+});
+
+describe("sessions sharing a cwd (#392)", () => {
+  const A = "coordinator-aaaa";
+  const B = "coordinator-bbbb";
+  let cdir: string;
+  let env: Record<string, string>;
+
+  beforeEach(async () => {
+    cdir = makeWorkdir();
+    env = {
+      VOLLEY_HOOKS_COORDINATOR: "1",
+      VOLLEY_BROKER_URL: broker.url,
+      VOLLEY_HOOKS_STATE_DIR: tempDir("volley-hooks-state-"),
+    };
+    const now = Date.now();
+    // A registered first; B, in another cmux workspace of the same repo, registered after it.
+    await publishRegistry(client, A, "default", {
+      capabilities: [],
+      cwd: cdir,
+      started_at: new Date(now - 5_000).toISOString(),
+      surface: "surface-a",
+      workspace: "workspace:1",
+    });
+    await publishRegistry(client, B, "default", {
+      capabilities: [],
+      cwd: cdir,
+      started_at: new Date(now - 1_000).toISOString(),
+      surface: "surface-b",
+      workspace: "workspace:2",
+    });
+    for (const id of [A, B])
+      await publishEnvelope(
+        client,
+        buildTopic("default", id, "status"),
+        { agentId: id, parentId: null, channel: "status", type: "working", payload: {} },
+        { qos: 1, retain: true },
+      );
+  });
+
+  const sessionA = { CMUX_SURFACE_ID: "surface-a", VOLLEY_WORKSPACE: "workspace:1" };
+  const sessionB = { CMUX_SURFACE_ID: "surface-b", VOLLEY_WORKSPACE: "workspace:2" };
+
+  it("SessionStart in A after B registered publishes on A's entry; B's still names B's workspace", async () => {
+    const run = await runHook(
+      "session-start",
+      fixture("session-start-compact.json", cdir, { session_id: "session-a" }),
+      { cwd: cdir, env: { ...env, ...sessionA } },
+    );
+    expect(run.exitCode).toBe(0);
+    const a = await retainedEnvelope(client, registryTopic(A));
+    const b = await retainedEnvelope(client, registryTopic(B));
+    expect(a.payload).toMatchObject({ workspace: "workspace:1", model_source: "harness-hook" });
+    expect(b.payload).toMatchObject({ workspace: "workspace:2" });
+    expect(b.payload).not.toHaveProperty("model_source");
+  });
+
+  it("each session's drain publishes on its own entry, from its own state", async () => {
+    for (const [sid, own] of [
+      ["session-a", sessionA],
+      ["session-b", sessionB],
+    ] as const) {
+      await runHook(
+        "session-start",
+        fixture("session-start-compact.json", cdir, { session_id: sid }),
+        { cwd: cdir, env: { ...env, ...own } },
+      );
+    }
+    // Both MCP servers re-register, dropping the hooks' fields.
+    for (const [id, surface] of [
+      [A, "surface-a"],
+      [B, "surface-b"],
+    ] as const)
+      await publishRegistry(client, id, "default", {
+        capabilities: [],
+        cwd: cdir,
+        started_at: new Date().toISOString(),
+        surface,
+      });
+    await runHook(
+      "post-tool-use",
+      fixture("post-tool-use.json", cdir, { session_id: "session-a" }),
+      {
+        cwd: cdir,
+        env: { ...env, ...sessionA },
+      },
+    );
+    const a = await retainedEnvelope(client, registryTopic(A));
+    const b = await retainedEnvelope(client, registryTopic(B));
+    expect(a.payload).toMatchObject({ workspace: "workspace:1" });
+    expect(b.payload).not.toHaveProperty("workspace");
+  });
+
+  it("a drain never republishes a workspace remembered from another environment", async () => {
+    await runHook(
+      "session-start",
+      fixture("session-start-compact.json", cdir, { session_id: "session-a" }),
+      { cwd: cdir, env: { ...env, CMUX_SURFACE_ID: "surface-a", VOLLEY_WORKSPACE: "workspace:2" } },
+    );
+    await publishRegistry(client, A, "default", {
+      capabilities: [],
+      cwd: cdir,
+      started_at: new Date().toISOString(),
+      surface: "surface-a",
+    });
+    // The same state dir, now read by a hook whose own env names another workspace.
+    await runHook(
+      "post-tool-use",
+      fixture("post-tool-use.json", cdir, { session_id: "session-a" }),
+      {
+        cwd: cdir,
+        env: { ...env, CMUX_SURFACE_ID: "surface-a", CMUX_WORKSPACE_ID: "uuid-of-workspace-1" },
+      },
+    );
+    const a = await retainedEnvelope(client, registryTopic(A));
+    expect(a.payload).not.toHaveProperty("workspace");
   });
 });

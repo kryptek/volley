@@ -1,0 +1,14 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-22T07:00:00.000Z",
+  "channel": "_waves/events",
+  "type": "issue_labeled",
+  "payload": {
+    "wave": "2026-10-20-example",
+    "seq": 512,
+    "at": "2026-10-22T07:00:00.000Z",
+    "task": "T3",
+    "data": { "issue": 412, "label": "bug" }
+  }
+}

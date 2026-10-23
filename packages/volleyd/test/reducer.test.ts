@@ -748,3 +748,119 @@ describe("a journaled raise on replay (#315)", () => {
     expect(raised.budget_raised).toBe(120);
   });
 });
+
+describe("shared-precondition decisions: decision_joined (#418)", () => {
+  const wave = parseWaveFile(
+    "wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n  T2: { issue: 2 }\n  T3: { issue: 3 }\n",
+  );
+  const AT = "2026-10-22T10:00:00.000Z";
+  let seq = 0;
+  const ev = (type: string, task: string | undefined, data: Record<string, unknown>) =>
+    ({ seq: ++seq, at: AT, type, ...(task !== undefined ? { task } : {}), data }) as JournalEvent;
+  const base = () => {
+    seq = 0;
+    return [
+      ev("wave_submitted", undefined, { wave }),
+      ev("task_queued", "T1", { issue: 1 }),
+      ev("task_queued", "T2", { issue: 2 }),
+      ev("task_queued", "T3", { issue: 3 }),
+      // T3 is reviewing: its reviewer launch is what hits the dialog.
+      ev("stage_entered", "T3", { stage: "spec_review" }),
+    ];
+  };
+  const opened = (id: string, kind = "repo_untrusted") =>
+    ev("decision_opened", "T1", {
+      decision_id: id,
+      kind,
+      question: "Needs you: trust /srv/repo for dispatch? 1 task is waiting: T1.",
+      options: ["trust", "cancel"],
+      waiting: ["T1"],
+      launches: [{ task: "T1", role: "implementer" }],
+    });
+  const joined = (id: string, task: string, role: string, question: string) =>
+    ev("decision_joined", task, { decision_id: id, kind: "repo_untrusted", task, role, question });
+  const resolved = (id: string, answer: string) =>
+    ev("decision_resolved", "T1", { decision_id: id, answer, by: "owner" });
+  const stage = (r: ReturnType<typeof replay>, id: string) =>
+    r.state?.tasks.find((t) => t.id === id)?.stage;
+
+  it("is a wave event whose data validates against the schema", () => {
+    base();
+    const e = joined("repo_untrusted-abc", "T2", "implementer", "q? 2 tasks are waiting: T1, T2.");
+    expect(
+      schemaErrors(
+        "wave-event.schema.json",
+        envelope("_waves/events", e.type, {
+          wave: "w1",
+          seq: e.seq,
+          at: e.at,
+          task: e.task,
+          data: e.data,
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("appends to waiting (no duplicates), replaces the question and parks each joined task", () => {
+    const evs = [
+      ...base(),
+      opened("d1"),
+      joined("d1", "T2", "implementer", "q2"),
+      joined("d1", "T3", "reviewer", "q3"),
+      joined("d1", "T2", "implementer", "q3 again"),
+    ];
+    const r = replay(evs);
+    const d = r.decisions.d1;
+    expect(d?.waiting).toEqual(["T1", "T2", "T3"]);
+    expect(d?.question).toBe("q3 again");
+    expect(["T1", "T2", "T3"].map((t) => stage(r, t))).toEqual([
+      "awaiting_decision",
+      "awaiting_decision",
+      "awaiting_decision",
+    ]);
+    expect(d?.resume_stages).toEqual({ T2: "queued", T3: "spec_review" });
+    const t3 = r.state?.tasks.find((t) => t.id === "T3");
+    expect(t3?.waiting_on).toEqual(["d1"]);
+    expect(t3?.why_waiting).toBe("awaiting decision d1");
+  });
+
+  it("one answer unparks every waiting task to its own stage", () => {
+    const r = replay([
+      ...base(),
+      opened("d1"),
+      joined("d1", "T2", "implementer", "q2"),
+      joined("d1", "T3", "reviewer", "q3"),
+      resolved("d1", "trust"),
+    ]);
+    expect(["T1", "T2", "T3"].map((t) => stage(r, t))).toEqual(["queued", "queued", "spec_review"]);
+    expect(r.state?.open_decisions).toEqual([]);
+  });
+
+  it("a joined task another open decision still parks stays parked", () => {
+    const r = replay([
+      ...base(),
+      opened("d1"),
+      joined("d1", "T2", "implementer", "q2"),
+      ev("decision_opened", "T2", { decision_id: "x2", kind: "agent_question", question: "?" }),
+      resolved("d1", "trust"),
+    ]);
+    expect(stage(r, "T1")).toBe("queued");
+    expect(stage(r, "T2")).toBe("awaiting_decision");
+  });
+
+  it("a decision about one task never unparks another, even with a stray waiting list", () => {
+    const r = replay([
+      ...base(),
+      ev("decision_opened", "T2", { decision_id: "x2", kind: "agent_question", question: "?" }),
+      ev("decision_opened", "T1", {
+        decision_id: "x1",
+        kind: "agent_question",
+        question: "?",
+        waiting: ["T1", "T2"],
+      }),
+      ev("decision_resolved", "T1", { decision_id: "x1", answer: "ok", by: "owner" }),
+    ]);
+    expect(stage(r, "T1")).toBe("queued");
+    expect(stage(r, "T2")).toBe("awaiting_decision");
+  });
+});

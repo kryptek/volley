@@ -1,14 +1,19 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
-import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "../config-defaults";
+import { type ProfileKeys, onboardingEdits } from "../claude/sharing";
+import { CONFIG_DEFAULTS, DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "../config-defaults";
 import type { ExecFn, ExecOptions, ExecResult } from "../exec";
 import {
   type ConsentToken,
+  FenceError,
   REMOTE_CLAUDE_JSON,
   REMOTE_CLAUDE_JSON_TMP,
+  REMOTE_SETTINGS_JSON,
+  REMOTE_SETTINGS_JSON_TMP,
   type RemoteStep,
   TMUX_LAUNCH_COMMAND,
+  TMUX_SIZE,
 } from "../fence";
 import { fetchFailure, lockedFetch } from "../git-lock";
 import { type DoctorReport, parseDoctorReport } from "../machines";
@@ -21,6 +26,7 @@ import type {
   Host,
   LaunchSpec,
   SessionEnd,
+  TermSize,
   TypedTextTokens,
   WorktreeResult,
   WorktreeSpec,
@@ -98,6 +104,12 @@ export interface RemoteHost extends Host {
   readTrust(configDir?: string): Promise<Record<string, unknown> | null>;
   /** The owner's `trust` answer, recorded in the box's own `~/.claude.json` (or the profile's). */
   recordTrust(root: string, configDir?: string): Promise<void>;
+  /**
+   * Make a profile the supervisor created on the box ready to run agents unattended (#400): its
+   * onboarding keys and bypass consent (claude/sharing.ts onboardingEdits). Returns the keys it
+   * wrote, per file; throws if ssh fails or the profile has no readable `.claude.json`.
+   */
+  seedProfile(configDir: string, claudeVersion?: string): Promise<ProfileKeys>;
   /** A file on the box; null when it does not exist; throws when ssh fails. */
   readFile(path: string): Promise<string | null>;
   /**
@@ -450,8 +462,24 @@ export class SshTmuxHost implements RemoteHost {
       });
     });
     await this.syncTmuxPath();
+    // Detached, tmux would size it 80×24 (its default-size) and nothing would ever widen it.
+    const size = tmuxSize(spec.size ?? DEFAULT_SIZE);
     const r = await this.run(
-      [{ argv: ["tmux", "new-session", "-d", "-s", session, "-c", spec.cwd, TMUX_LAUNCH_COMMAND] }],
+      [
+        {
+          argv: [
+            "tmux",
+            "new-session",
+            "-d",
+            ...sizeArgs(size),
+            "-s",
+            session,
+            "-c",
+            spec.cwd,
+            TMUX_LAUNCH_COMMAND,
+          ],
+        },
+      ],
       spec.launch !== undefined ? { launch: spec.launch } : {},
     ).catch((e: unknown) => {
       throw fail(`tmux new-session: ${e instanceof Error ? e.message : String(e)}`, {
@@ -466,7 +494,31 @@ export class SshTmuxHost implements RemoteHost {
         { exit: r.code, candidate: session, outcome: lost ? "unknown" : "refused" },
       );
     }
+    this.launchSizes.set(session, size);
     return { workspace: session };
+  }
+
+  /** Each session's size at launch, what `resize(…, "launch")` returns it to. */
+  private readonly launchSizes = new Map<string, TermSize>();
+
+  /**
+   * `tmux resize-window`: Claude Code re-wraps on the SIGWINCH. A session launched before a
+   * daemon restart goes back to the default launch size.
+   */
+  async resize(workspace: string, size: TermSize | "launch"): Promise<boolean> {
+    const to =
+      size === "launch"
+        ? (this.launchSizes.get(workspace) ?? tmuxSize(DEFAULT_SIZE))
+        : tmuxSize(size);
+    const r = await this.run([
+      { argv: ["tmux", "resize-window", "-t", pane(workspace), ...sizeArgs(to)] },
+    ]);
+    if (r.code !== 0) {
+      throw new Error(
+        `tmux resize-window on ${this.spec.target}: ${r.timedOut ? "timed out" : r.stderr.trim()}`,
+      );
+    }
+    return true;
   }
 
   async findWorkspace(name: string, candidate?: string): Promise<string | null> {
@@ -486,11 +538,11 @@ export class SshTmuxHost implements RemoteHost {
    */
   private async syncTmuxPath(): Promise<void> {
     const dirs = (path: string) => path.split(":").filter((d) => d.startsWith("/"));
-    const r = await this.run([{ argv: ["printenv", "PATH"] }]).catch(() => null);
+    const r = await this.run([{ argv: ["printenv", "PATH"] }]).catch(this.noResult("PATH sync"));
     const ssh = r?.code === 0 && !r.stdout.trim().includes("\n") ? dirs(r.stdout.trim()) : [];
     if (ssh.length === 0) return;
     const shown = await this.run([{ argv: ["tmux", "show-environment", "-g", "PATH"] }]).catch(
-      () => null,
+      this.noResult("PATH sync"),
     );
     const line = shown?.code === 0 ? shown.stdout.trim() : "";
     // `PATH=<dirs>`; `-PATH` (removed) or anything else: the server has no PATH to keep.
@@ -499,7 +551,7 @@ export class SshTmuxHost implements RemoteHost {
     const merged = [...new Set([...ssh, ...server])];
     if (merged.length === server.length) return;
     await this.run([{ argv: ["tmux", "set-environment", "-g", "PATH", merged.join(":")] }]).catch(
-      () => null,
+      this.noResult("PATH sync"),
     );
   }
 
@@ -521,7 +573,7 @@ export class SshTmuxHost implements RemoteHost {
   async readScreen(workspace: string, lines: number): Promise<string | null> {
     const r = await this.run([
       { argv: ["tmux", "capture-pane", "-p", "-t", pane(workspace), `-S-${lines}`] },
-    ]).catch(() => null);
+    ]).catch(this.noResult("read-screen"));
     if (r === null || r.code !== 0) return null;
     // capture-pane prints the whole pane, blank rows included: keep the last `lines` up to the
     // last row with text, like cmux read-screen --lines.
@@ -543,6 +595,7 @@ export class SshTmuxHost implements RemoteHost {
 
   async close(workspace: string, consent: ConsentToken): Promise<void> {
     await this.run([{ argv: ["tmux", "kill-session", "-t", `=${workspace}`] }], { consent });
+    this.launchSizes.delete(workspace);
   }
 
   /** `kill-session`: tmux ends the pane's process group, so no process is signalled here. */
@@ -558,7 +611,28 @@ export class SshTmuxHost implements RemoteHost {
       (r) => r.code === 0 && !r.timedOut,
       () => false,
     );
+    if (closed) this.launchSizes.delete(workspace);
     return { closed, pids: [], how: closed ? "kill-session" : "none" };
+  }
+
+  /**
+   * A rejected `run` (the step `what`) as no result, which each caller treats as it treats an
+   * ssh failure (a spawn step reports it through sshFailed and is retried; a best-effort check
+   * gives up) — except a fence denial, rethrown as a permanent FENCE_DENIED SpawnError: a step
+   * the fence refuses is refused on every retry, so it names the denied step, never "no result".
+   */
+  private noResult(what: string): (e: unknown) => null {
+    return (e) => {
+      if (e instanceof FenceError) {
+        throw new SpawnError(
+          "FENCE_DENIED",
+          `${e.message.slice(`${e.code}: `.length)} (${what} on ${this.spec.target})`,
+          { host: this.name, target: this.spec.target, verb: e.verb },
+          { permanent: true },
+        );
+      }
+      return null;
+    };
   }
 
   /** A transient refusal for an ssh failure: the spawn backs off, no decision is opened. */
@@ -574,13 +648,13 @@ export class SshTmuxHost implements RemoteHost {
   async repoExists(): Promise<boolean> {
     const r = await this.run([
       { argv: ["git", "-C", this.spec.repo, "rev-parse", "--git-dir"] },
-    ]).catch(() => null);
+    ]).catch(this.noResult("repo check"));
     if (r === null || transportFailed(r)) throw this.sshFailed("repo check", r);
     return r.code === 0;
   }
 
   async readFile(path: string): Promise<string | null> {
-    const r = await this.run([{ argv: ["cat", path] }]).catch(() => null);
+    const r = await this.run([{ argv: ["cat", path] }]).catch(this.noResult(`read ${path}`));
     if (r === null || transportFailed(r)) throw this.sshFailed(`read ${path}`, r);
     return r.code === 0 ? r.stdout : null;
   }
@@ -588,7 +662,7 @@ export class SshTmuxHost implements RemoteHost {
   async probePath(): Promise<PathProbe> {
     const r = await this.run([{ argv: ["command", "-v", ...PATH_TOOLS] }], {
       timeoutMs: DAEMON_DEFAULTS.path_probe_timeout_ms,
-    }).catch(() => null);
+    }).catch(this.noResult("PATH probe"));
     if (r === null || transportFailed(r)) throw this.sshFailed("PATH probe", r);
     // `command -v` exits 1 when a name is missing: what it printed is the answer either way.
     return parsePathProbe(r.stdout);
@@ -608,7 +682,7 @@ export class SshTmuxHost implements RemoteHost {
       // Through run, not exec: `volley` is otherwise a local program (LOCAL_PROGRAMS).
       return this.run([{ argv, cwd: this.spec.volley_dir }], {
         timeoutMs: DAEMON_DEFAULTS.peer_doctor_timeout_ms,
-      }).catch(() => null);
+      }).catch(this.noResult("doctor"));
     };
     // The box's volley_dir: every volley MCP entry there must run it (agents are launched from
     // it). A volley older than the flag refuses it: its doctor then runs without.
@@ -632,12 +706,15 @@ export class SshTmuxHost implements RemoteHost {
     return report;
   }
 
-  /** The tunnel check: something listens on the box's `127.0.0.1:<remote_port>`. */
+  /**
+   * The tunnel check: something listens on the box's `127.0.0.1:<remote_port>`. False when ssh
+   * fails; rejects with FENCE_DENIED only if the fence ever refuses the `nc -z` step.
+   */
   async tunnelUp(): Promise<boolean> {
     const port = String(this.spec.tunnel.remote_port);
     const r = await this.run([{ argv: ["nc", "-z", "127.0.0.1", port] }], {
       timeoutMs: DAEMON_DEFAULTS.tunnel_check_timeout_ms,
-    }).catch(() => null);
+    }).catch(this.noResult("tunnel check"));
     return r?.code === 0 && !r.timedOut;
   }
 
@@ -676,7 +753,7 @@ export class SshTmuxHost implements RemoteHost {
       configDir === undefined
         ? await this.readFile(REMOTE_CLAUDE_JSON)
         : await this.run([{ argv: ["cat", REMOTE_CLAUDE_JSON], cwd: configDir }])
-            .catch(() => null)
+            .catch(this.noResult(`read ${configDir}`))
             .then((r) => {
               if (r === null || transportFailed(r)) throw this.sshFailed(`read ${configDir}`, r);
               return r.code === 0 ? r.stdout : null;
@@ -719,11 +796,93 @@ export class SshTmuxHost implements RemoteHost {
         { argv: ["cmp", "-s", "-", json], stdin: b64(cur.text) },
         { argv: ["base64", "-d"], stdin: b64(next), stdout: tmp },
         { argv: ["mv", "-f", tmp, json] },
-      ]).catch(() => null);
+      ]).catch(this.noResult("trust write"));
       if (r === null || transportFailed(r)) throw this.sshFailed("trust write", r);
       if (r.code === 0) return;
     }
     throw new Error(`~/.claude.json on ${this.spec.target} kept changing; trust not recorded`);
+  }
+
+  /**
+   * RemoteHost.seedProfile: the profile's `.claude.json` and `settings.json`, each by
+   * compare-and-swap. The version is the box's own (its default profile's
+   * `lastOnboardingVersion`), else `claudeVersion` (the supervisor's).
+   */
+  async seedProfile(configDir: string, claudeVersion?: string): Promise<ProfileKeys> {
+    const settingsPath = posix.join(configDir, REMOTE_SETTINGS_JSON);
+    const readSettings = async (): Promise<{
+      text: string | null;
+      cfg: Record<string, unknown>;
+    }> => {
+      const r = await this.run([{ argv: ["cat", settingsPath] }]).catch(
+        this.noResult(`read ${settingsPath}`),
+      );
+      if (r === null || transportFailed(r)) throw this.sshFailed(`read ${settingsPath}`, r);
+      if (r.code !== 0) return { text: null, cfg: {} };
+      try {
+        const cfg = JSON.parse(r.stdout) as unknown;
+        if (typeof cfg === "object" && cfg !== null && !Array.isArray(cfg))
+          return { text: r.stdout, cfg: cfg as Record<string, unknown> };
+      } catch {}
+      // Not a JSON object: Claude Code would not read it either; left to the owner.
+      throw new Error(`${settingsPath} on ${this.spec.target} is not a JSON object`);
+    };
+    // The box's own Claude Code version, as its default profile recorded it; else the caller's.
+    const own = (await this.readClaudeJsonText().catch(() => null))?.cfg.lastOnboardingVersion;
+    const version = typeof own === "string" && own !== "" ? own : claudeVersion;
+    const keys: ProfileKeys = { ".claude.json": [], "settings.json": [] };
+    keys[".claude.json"] = await this.swap(
+      posix.join(configDir, REMOTE_CLAUDE_JSON),
+      posix.join(configDir, REMOTE_CLAUDE_JSON_TMP),
+      async () => {
+        const cur = await this.readClaudeJsonText(configDir);
+        if (cur === null)
+          throw new Error(
+            `no readable ${posix.join(configDir, REMOTE_CLAUDE_JSON)} on ${this.spec.target}: sign the account in first`,
+          );
+        const e = onboardingEdits(cur.cfg, {}, version);
+        return { text: cur.text, next: e.claudeJson, keys: e.keys[".claude.json"] };
+      },
+    );
+    keys["settings.json"] = await this.swap(
+      settingsPath,
+      posix.join(configDir, REMOTE_SETTINGS_JSON_TMP),
+      async () => {
+        const cur = await readSettings();
+        const e = onboardingEdits({}, cur.cfg);
+        return { text: cur.text, next: e.settings, keys: e.keys["settings.json"] };
+      },
+    );
+    return keys;
+  }
+
+  /**
+   * Compare-and-swap one profile file (recordTrust's way): `read` it, write `next` beside it and
+   * `mv` it in only if the file is still what was read; a file that changed is re-read and the
+   * write retried. A file that did not exist (`text` null) is written whole. Returns the keys
+   * written; nothing to write, nothing is run.
+   */
+  private async swap(
+    path: string,
+    tmp: string,
+    read: () => Promise<{ text: string | null; next: Record<string, unknown>; keys: string[] }>,
+  ): Promise<string[]> {
+    for (let i = 0; i < DAEMON_DEFAULTS.trust_write_attempts; i++) {
+      const cur = await read();
+      if (cur.keys.length === 0) return [];
+      const r = await this.run([
+        ...(cur.text !== null ? [{ argv: ["cmp", "-s", "-", path], stdin: b64(cur.text) }] : []),
+        {
+          argv: ["base64", "-d"],
+          stdin: b64(`${JSON.stringify(cur.next, null, 2)}\n`),
+          stdout: tmp,
+        },
+        { argv: ["mv", "-f", tmp, path] },
+      ]).catch(this.noResult(`write ${path}`));
+      if (r === null || transportFailed(r)) throw this.sshFailed(`write ${path}`, r);
+      if (r.code === 0) return cur.keys;
+    }
+    throw new Error(`${path} on ${this.spec.target} kept changing; not written`);
   }
 }
 
@@ -736,6 +895,17 @@ export function sessionName(title: string): string {
 
 /** The session's current pane, matched exactly (`=` stops tmux's prefix matching). */
 const pane = (session: string) => `=${session}:`;
+
+/** A session's size when the spawn names none (the tunables' defaults). */
+const DEFAULT_SIZE: TermSize = { cols: CONFIG_DEFAULTS.tmux_cols, rows: CONFIG_DEFAULTS.tmux_rows };
+
+/** `size` in whole cells, inside the fence's bounds. */
+function tmuxSize(size: TermSize): TermSize {
+  const fit = (n: number) => Math.max(TMUX_SIZE.min, Math.min(TMUX_SIZE.max, Math.round(n)));
+  return { cols: fit(size.cols), rows: fit(size.rows) };
+}
+
+const sizeArgs = (s: TermSize) => ["-x", String(s.cols), "-y", String(s.rows)];
 
 /** A full commit id (what a reviewer or fixup starts from), not a branch name. */
 function isCommitSha(ref: string): boolean {

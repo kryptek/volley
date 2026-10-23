@@ -18,6 +18,7 @@ import {
   sealLaunchScript,
   sealRemoteSigninScript,
 } from "../src/fence";
+import { type RemoteHostSpec, SshTmuxHost } from "../src/hosts/ssh-tmux";
 import { LAUNCH_COMMAND, renderLaunchScript, renderMcpConfig } from "../src/launch";
 import { WAKE_TEXT } from "../src/liveness";
 import { tempDirForAll } from "./helpers/tmp";
@@ -27,6 +28,15 @@ import { stubEnv } from "./helpers/with-env";
 const SSH = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"];
 const remote = (...steps: RemoteStep[]) => ({ remote: { steps } });
 const step = (...argv: string[]): RemoteStep => ({ argv });
+/** A paired machine, for the SshTmuxHost cases (its ssh argv is what the fence allows). */
+const SSH_SPEC: RemoteHostSpec = {
+  name: "box",
+  target: "dev@box",
+  repo: "/path/to/home/src/repo",
+  worktree_root: "/path/to/home/wt",
+  volley_dir: "/path/to/home/src/volley",
+  tunnel: { remote_port: 21883, supervise: true },
+};
 /** The command a remote tmux session runs. */
 const TMUX_LAUNCH = "bash .volley/launch.sh";
 /** A file volleyd reads on a remote host (an allowed `cat`). */
@@ -44,6 +54,10 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ["rm", "/tmp/x"],
     ["gh", "pr", "merge", "1"],
     ["gh", "api", "repos/o/r"],
+    // The issue lifecycle's writes (#416) run on the supervisor's own machine only.
+    ["gh", "issue", "edit", "4", "--add-label", "merged-to-release"],
+    ["gh", "issue", "comment", "4", "--body", "x <!-- volleyd:merged-to-release wave=w pr=1 -->"],
+    ["gh", "label", "list", "--search", "merged-to-release", "--json", "name"],
     ["bash", "-c", "rm -rf /"],
     ["sh", "-c", "true"],
     ["/usr/bin/git", "status"],
@@ -266,6 +280,8 @@ describe("remote allow-list (ssh … bash -s)", () => {
       "/wt/x/.volley/findings.md",
       "/wt/x/.volley/findings.json",
       "/wt/x/.volley/rebase.md",
+      "/wt/x/.volley/decisions.md",
+      "/wt/x/.volley/retired.json",
       "/src/r/.git/info/exclude",
       ".claude.json.volleyd.tmp",
     ]) {
@@ -291,6 +307,8 @@ describe("remote allow-list (ssh … bash -s)", () => {
       "/src/r/.volley/w/.git",
       "/src/r/.volley/x/src/hooks/session-start.ts",
       "/wt/x/.volley/sub/agent.json",
+      "/wt/x/.volley/other.md",
+      "/wt/x/.volley/Decisions.md",
       // … nor a case variant of one (a case-insensitive file system opens launch.sh)
       "/wt/x/.volley/Launch.sh",
       "/wt/x/.volley/launch.SH",
@@ -585,6 +603,88 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ).toThrow(FenceError);
   });
 
+  it("tmux resize-window: exactly -t =<session>: -x <20..500> -y <20..500>", () => {
+    const allowed = (...argv: string[]) => assertAllowed(SSH, remote(step("tmux", ...argv)));
+    expect(() =>
+      allowed("resize-window", "-t", "=w1-T1-implementer:", "-x", "180", "-y", "48"),
+    ).not.toThrow();
+    expect(() =>
+      allowed("resize-window", "-t", "=w1-T1-implementer-2:", "-x", "20", "-y", "500"),
+    ).not.toThrow();
+    for (const argv of [
+      ["resize-window", "-t", "=w1-T1-implementer:", "-x", "10", "-y", "48"],
+      ["resize-window", "-t", "=w1-T1-implementer:", "-x", "9999", "-y", "48"],
+      ["resize-window", "-t", "=w1-T1-implementer:", "-x", "180", "-y", "19"],
+      ["resize-window", "-t", "=w1-T1-implementer:", "-x", "0180", "-y", "48"],
+      ["resize-window", "-t", "=w1-T1-implementer:", "-x", "1e2", "-y", "48"],
+      ["resize-window", "-t", "w1-T1-implementer:", "-x", "180", "-y", "48"],
+      ["resize-window", "-t", "=w1-T1-implementer", "-x", "180", "-y", "48"],
+      ["resize-window", "-t", "=w1.T1:", "-x", "180", "-y", "48"],
+      ["resize-window", "-t", "=w1-T1-implementer:", "-y", "48", "-x", "180"],
+      ["resize-window", "-t", "=w1-T1-implementer:", "-x", "180"],
+      ["resize-window", "-t", "=w1-T1-implementer:", "-x", "180", "-y", "48", "-A"],
+      ["resize-window", "-A", "-t", "=w1-T1-implementer:", "-x", "180", "-y", "48"],
+      ["resize-pane", "-t", "=w1-T1-implementer:", "-x", "180", "-y", "48"],
+    ]) {
+      expect(() => allowed(...argv), argv.join(" ")).toThrow(FenceError);
+    }
+  });
+
+  it("tmux new-session takes the launch size -x/-y (20..500), still only for a sealed script", () => {
+    const launch = sealLaunchScript(
+      "/wt/x",
+      renderLaunchScript({
+        hooksDir: "/path/to/home/src/volley/packages/volley-hooks",
+        model: "claude-opus-5-5",
+        agentId: "w1-t1-implementer-1",
+        worktree: "/wt/x",
+      }),
+    );
+    const session = (x: string, y: string) =>
+      step(
+        "tmux",
+        "new-session",
+        "-d",
+        "-x",
+        x,
+        "-y",
+        y,
+        "-s",
+        "w1-T1-implementer",
+        "-c",
+        "/wt/x",
+        TMUX_LAUNCH,
+      );
+    expect(() => assertAllowed(SSH, { ...remote(session("200", "50")), launch })).not.toThrow();
+    expect(() => assertAllowed(SSH, { ...remote(session("200", "50")) })).toThrow(FenceError);
+    for (const [x, y] of [
+      ["19", "50"],
+      ["200", "501"],
+      ["200", "-1"],
+      ["2x", "50"],
+    ] as const) {
+      expect(() => assertAllowed(SSH, { ...remote(session(x, y)), launch }), `${x}x${y}`).toThrow(
+        FenceError,
+      );
+    }
+    // The size is a pair: one of -x/-y alone is refused.
+    const half = (flag: string) =>
+      step(
+        "tmux",
+        "new-session",
+        "-d",
+        flag,
+        "200",
+        "-s",
+        "w1-T1-implementer",
+        "-c",
+        "/wt/x",
+        TMUX_LAUNCH,
+      );
+    for (const flag of ["-x", "-y"])
+      expect(() => assertAllowed(SSH, { ...remote(half(flag)), launch }), flag).toThrow(FenceError);
+  });
+
   it("tmux send-keys Up|Down|Space and a picker's or handoff's text only with their tokens", () => {
     const key = (k: string) => step("tmux", "send-keys", "-t", "=w1-T1-implementer:", k);
     const text = (t: string) =>
@@ -784,6 +884,31 @@ describe("exec + the remote fence", () => {
     const r = await exec(SSH, { env, remote: script });
     expect(r.code).toBe(0);
     expect(readFileSync(marker, "utf-8")).toBe(renderRemoteScript(script));
+  });
+
+  it("a wake typed through SshTmuxHost passes exec's fence once per token (#406)", async () => {
+    const host = new SshTmuxHost(SSH_SPEC, (argv, o) => exec(argv, { ...o, env }));
+    const wake = mintWakeToken();
+    await host.sendText("w1-t1-implementer-1", WAKE_TEXT, { wake });
+    expect(existsSync(marker)).toBe(true);
+    await host.sendKeys("w1-t1-implementer-1", "Enter");
+    rmSync(marker, { force: true });
+    await expect(host.sendText("w1-t1-implementer-1", WAKE_TEXT, { wake })).rejects.toThrow(
+      "a wake is typed once",
+    );
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("a handoff answer typed through SshTmuxHost passes exec's fence once per token", async () => {
+    const host = new SshTmuxHost(SSH_SPEC, (argv, o) => exec(argv, { ...o, env }));
+    const handoff = mintHandoffToken({ item_id: "h-a1-8", version: 1, text: "ok, go ahead" });
+    await host.sendText("w1-t1-implementer-1", "ok, go ahead", { handoff });
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker, { force: true });
+    await expect(host.sendText("w1-t1-implementer-1", "ok, go ahead", { handoff })).rejects.toThrow(
+      "typed once",
+    );
+    expect(existsSync(marker)).toBe(false);
   });
 
   it("refuses a raw input next to a fenced script (the checked script is the one that runs)", async () => {
@@ -1233,6 +1358,43 @@ describe("a profile on a paired machine in its launch.sh (account balancing)", (
       ),
       step("mv", "-f", "/tmp/.claude.json.volleyd.tmp", "/tmp/.claude.json"),
     ])
+      expect(() => assertAllowed(SSH, remote(bad))).toThrow(FenceError);
+  });
+
+  it("the onboarding seed: that profile's settings.json read and written like its .claude.json (#400)", () => {
+    const b = (t: string) => Buffer.from(t).toString("base64");
+    const steps: RemoteStep[] = [
+      step("cat", `${DIR}/settings.json`),
+      { argv: ["cmp", "-s", "-", `${DIR}/settings.json`], stdin: b("{}") },
+      {
+        argv: ["base64", "-d"],
+        stdin: b('{"skipDangerousModePermissionPrompt":true}'),
+        stdout: `${DIR}/settings.json.volleyd.tmp`,
+      },
+      step("mv", "-f", `${DIR}/settings.json.volleyd.tmp`, `${DIR}/settings.json`),
+    ];
+    for (const s of steps) expect(() => assertAllowed(SSH, remote(s))).not.toThrow();
+    for (const bad of [
+      step("cat", `${DIR}/anything-else.json`),
+      step("cat", "/path/to/home/.claude/settings.json"),
+      { argv: ["cmp", "-s", "-", `${DIR}/anything-else.json`], stdin: b("{}") },
+      { argv: ["base64", "-d"], stdin: b("{}"), stdout: `${DIR}/anything-else.json` },
+      { argv: ["base64", "-d"], stdin: b("{}"), stdout: `${DIR}/settings.json` },
+      {
+        argv: ["base64", "-d"],
+        stdin: b("{}"),
+        stdout: `${DIR}/settings.json.volleyd.tmp`,
+        append: true,
+      },
+      step("mv", "-f", `${DIR}/settings.json.volleyd.tmp`, `${DIR}/.claude.json`),
+      step(
+        "mv",
+        "-f",
+        `${DIR}/settings.json.volleyd.tmp`,
+        "/path/to/home/.volley/claude/x/settings.json",
+      ),
+      step("mv", "-f", "/tmp/settings.json.volleyd.tmp", "/tmp/settings.json"),
+    ] as RemoteStep[])
       expect(() => assertAllowed(SSH, remote(bad))).toThrow(FenceError);
   });
 });

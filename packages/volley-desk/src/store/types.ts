@@ -101,6 +101,19 @@ export interface WaveTask {
     url: string;
     head_sha?: string;
     ci?: "green" | "red" | "running" | "none";
+    /** While held for CI, when volleyd could read the head's jobs (#415). */
+    jobs?: {
+      done: number;
+      total: number;
+      running: string[];
+      failed: string[];
+      /** The last job's completion; while none is done, the first job's start. */
+      last_done_at?: string;
+      /** The slowest job's last duration in an earlier run of the wave. */
+      slowest_s?: number;
+    };
+    /** Seconds left by volleyd's estimate when the hold was journaled. */
+    eta_s?: number;
   };
   evidence_path?: string;
   /** The remote host the task's agents run on; absent for the supervisor's own machine. */
@@ -250,6 +263,7 @@ export const DECISION_KINDS = [
   "merge_refused",
   "release_go",
   "stage_go",
+  "terminal_status_lost",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
@@ -296,6 +310,8 @@ export interface DecisionPayload {
   machine?: "down" | "draining" | "removing" | "removed";
   /** Held: waiting on a task, PR or issue (volleyd releases it when that lands). */
   held?: Held;
+  /** A shared-precondition decision (`repo_untrusted`): every task waiting on it, opener first. */
+  waiting?: string[];
 }
 
 // ------------------------------------------------------- config and leases
@@ -610,6 +626,8 @@ export interface DigestPayload {
     merge_sha: string | null;
     merged_by: "supervisor" | "operator" | "github";
   }[];
+  /** The shipped tasks' issues: the release PR's `Closes #…` lines (absent: older volleyd). */
+  closes?: number[];
   auto: {
     decisions_resolved: number;
     flakes_fixed: { test: string; fixer: string; prs_released: number }[];

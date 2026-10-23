@@ -30,6 +30,8 @@ import "../../styles/inbox.css";
 
 export const INBOX_ID = "inbox";
 export const INBOX_W = 460;
+/** The window's height less its list: the title bar, the filter tabs and the closing note. */
+export const INBOX_CHROME_H = 130;
 /** How long a cleared row takes to fade out. */
 export const LEAVE_MS = 600;
 
@@ -47,7 +49,14 @@ export interface NeedsYouWindowProps {
   control: SteerTransport["control"] | null;
   /** This device, for `where.device` (`deskDevice`). */
   device: string;
+  /** Deliver an answer to the item's session as a mailbox message; null without credentials. */
+  mailbox?: ((item: InboxItem, text: string) => void) | null;
   narrow?: boolean;
+  /**
+   * The tallest the window gets on the canvas (#397: the fit area's height); the list
+   * scrolls inside, keeping its own scroll position.
+   */
+  maxHeight?: number;
   /** The Desk's origin, for evidence files (default: this page's). */
   origin?: string;
   loadEvidence?: LoadEvidence;
@@ -148,7 +157,13 @@ export function NeedsYouWindow(p: NeedsYouWindowProps) {
             accent="#ff7a59"
           />
         </div>
-        <div {...tabPanelProps(id, filter)}>
+        <div
+          {...tabPanelProps(id, filter)}
+          className="inbox-scroll"
+          {...(p.maxHeight !== undefined
+            ? { style: { maxHeight: Math.max(0, p.maxHeight - INBOX_CHROME_H) }, tabIndex: 0 }
+            : {})}
+        >
           {shown.length === 0 ? (
             <p className="inbox-empty dim">
               {p.items.length === 0 ? "Nothing needs you." : "Nothing here under this filter."}
@@ -163,6 +178,7 @@ export function NeedsYouWindow(p: NeedsYouWindowProps) {
                   live={p.live?.[item.id]}
                   wave={item.wave !== undefined ? p.waves?.[item.wave] : undefined}
                   control={p.control}
+                  mailbox={p.mailbox ? (text) => p.mailbox?.(item, text) : null}
                   device={p.device}
                   {...(p.now !== undefined ? { now: p.now } : {})}
                   leaving={gone}

@@ -1,9 +1,17 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { exec } from "../src/exec";
-import { mcpConfigOf, parsePs, reapUnder, stopProcesses, underRoot } from "../src/procs";
+import type { ExecFn } from "../src/exec";
+import {
+  mcpConfigOf,
+  parsePs,
+  reapUnder,
+  sessionsRunningIn,
+  stopProcesses,
+  underRoot,
+} from "../src/procs";
 import { tempDir } from "./helpers/tmp";
 
 /** The reaper that stops a retired agent's claude process, matched on its `--mcp-config=` argv. */
@@ -63,6 +71,35 @@ describe("procs (pure)", () => {
       [2, "SIGTERM"],
       [2, "SIGKILL"],
     ]);
+  });
+});
+
+describe("sessionsRunningIn", () => {
+  it("counts the agent sessions whose launch.sh runs them in that profile", async () => {
+    const root = tempDir("volleyd-procs-");
+    const wt = (name: string, profile: string | null) => {
+      mkdirSync(join(root, name, ".volley"), { recursive: true });
+      writeFileSync(
+        join(root, name, ".volley", "launch.sh"),
+        `#!/bin/bash\n${profile !== null ? `export CLAUDE_CONFIG_DIR='${profile}'\n` : ""}exec claude\n`,
+      );
+      return join(root, name, ".volley", "mcp.json");
+    };
+    const a = wt("a", "/p/claude/work");
+    const b = wt("b", "/p/claude/work");
+    const c = wt("c", "/p/claude/home");
+    const d = wt("d", null);
+    const ps: ExecFn = async () => ({
+      code: 0,
+      stdout: [a, b, c, d, `${root}/gone/.volley/mcp.json`]
+        .map((m, i) => ` ${100 + i} claude --mcp-config=${m} -- go`)
+        .join("\n"),
+      stderr: "",
+      timedOut: false,
+    });
+    expect(await sessionsRunningIn(ps, "/p/claude/work")).toBe(2);
+    expect(await sessionsRunningIn(ps, "/p/claude/home")).toBe(1);
+    expect(await sessionsRunningIn(ps, "/p/claude/none")).toBe(0);
   });
 });
 

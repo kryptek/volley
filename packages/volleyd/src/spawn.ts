@@ -18,10 +18,11 @@ import {
   withPreface,
 } from "./brief";
 import { autoCompactWindowTokens } from "./claude/context-window";
+import type { ProfileKeys } from "./claude/sharing";
 import type { Ranked } from "./claude/usage";
 import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
-import { waveDecisionId } from "./decisions";
+import { ITS_RUNNING, ITS_RUNNING_HELP, waveDecisionId } from "./decisions";
 import { mintConsentToken, sealLaunchScript } from "./fence";
 import { lockFetches } from "./git-lock";
 import type { Host, WorktreeResult } from "./hosts/host";
@@ -48,9 +49,16 @@ import {
 import { type AgentProbe, type WorktreeLock, acquireLock, lockPath } from "./locks";
 import { reapAndRevoke, retainedTopics } from "./retire";
 import { type HygieneLevel, hygieneText } from "./reviews";
-import { classifyScreen, lastOutput, lastOutputNote } from "./screens";
+import {
+  type FirstRunScreen,
+  classifyScreen,
+  isFirstRunScreen,
+  lastOutput,
+  lastOutputNote,
+  screenWords,
+} from "./screens";
 import { SpawnError } from "./spawn-error";
-import { isRepoTrusted, readClaudeJson, repoRoot, trustDecisionId, trustQuestion } from "./trust";
+import { isRepoTrusted, readClaudeJson, repoRoot, trustAskFor, trustDecisionId } from "./trust";
 import type {
   AgentMcp,
   BranchUpdate,
@@ -83,6 +91,11 @@ import { branchName, expandHome, releaseBranchName, worktreePath } from "./workt
  *     agent_spawned { adopted }; or launch_orphan_closed / spawn_identity_burned, then the refusal
  *   the one relaunch after an update prompt (spawn_recovered)      → agent_retired { superseded }
  *     for the first attempt, then agent_spawned { recovered_from } (typed into the same workspace)
+ *   a profile's first-run screen (#400): its workspace closed, the profile seeded
+ *                                                                   → profile_repaired, then the
+ *     one relaunch as above in a new workspace (recovery: first_run); a second → unknown_screen
+ *     (either relaunch is the spawn's only one: an update prompt after it, or a first-run screen
+     after the update-prompt relaunch, is unknown_screen too)
  *   hook signals verified                                           → agent_registered
  *   hooks verified, the MCP server's status missing                 → verify_failed, then
  *     decision_opened (mcp_not_registered)
@@ -187,7 +200,7 @@ export interface SpawnDeps {
     | "agent_mcp"
     | "agent_auto_compact_pct"
   > &
-    Partial<Pick<Tunables, "require_fresh_base" | "agent_mcp_allow">>;
+    Partial<Pick<Tunables, "require_fresh_base" | "agent_mcp_allow" | "tmux_cols" | "tmux_rows">>;
   /** The wave owner: the agents' parent (default volleyd). */
   owner: string | null;
   journal: (ev: NewEvent) => unknown | Promise<unknown>;
@@ -213,6 +226,17 @@ export interface SpawnDeps {
    * Resolves with the id it was opened under. Default: journal `decision_opened` as `d.id`.
    */
   openDecision?: (d: SpawnDecision) => Promise<string>;
+  /**
+   * Park this launch on an open shared-precondition decision (repo_untrusted, #418) instead of
+   * opening another: its task is listed in the decision's `waiting` and resumes on its answer.
+   * Default: the launch is only refused (its task is not parked).
+   */
+  joinDecision?: (j: {
+    id: string;
+    task: TaskId;
+    role: string;
+    agent_id?: string;
+  }) => Promise<void>;
   /** Resolve an open decision. Default: journal `decision_resolved` on the spawn's task. */
   resolveDecision?: (id: string, answer: string, by: string) => Promise<void>;
   /** After Enter on an update prompt, how long the original launch may take to continue. */
@@ -224,6 +248,13 @@ export interface SpawnDeps {
    * servers sync). A rejection refuses the spawn (CLAUDE_ACCOUNT_PREPARE_FAILED).
    */
   prepareAccount?: (account: { id: string; dir: string }) => Promise<void>;
+  /**
+   * Make a Claude account profile ready to run agents unattended (claude/service.ts seedProfile)
+   * on the machine it lives on: a paired machine's before each launch there (prepareAccount is
+   * this machine's), and any profile after its agent stopped on a first-run screen. Resolves with
+   * the keys it wrote, per file.
+   */
+  seedProfile?: (account: { id: string; dir: string; machine: string }) => Promise<ProfileKeys>;
   /**
    * The daemon's clock (epoch ms): lock staleness, lock and decision stamps, so they compare
    * against the agent heartbeats the daemon records on it. Default: the system clock.
@@ -252,6 +283,9 @@ export interface RemoteTrust {
   read: (configDir?: string) => Promise<Record<string, unknown> | null>;
 }
 
+const SPAWN_OPTIONS = ["relaunch", "cancel", ITS_RUNNING];
+const SPAWN_OPTION_HELP = { [ITS_RUNNING]: ITS_RUNNING_HELP };
+
 /** A decision a spawn opens; `id` is the base id (the store may suffix a re-opened one). */
 export interface SpawnDecision {
   kind: DecisionKind;
@@ -259,6 +293,8 @@ export interface SpawnDecision {
   task: TaskId;
   question: string;
   options: string[];
+  /** Hover text for some of `options`, by option. */
+  option_help?: Record<string, string>;
   pointers: { screen?: string };
   /** Extra facts kept on the decision (`repo` for repo_untrusted, `agent_id`, models). */
   data: Record<string, unknown>;
@@ -368,10 +404,11 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
     const trusted = isRepoTrusted(cfg, ctx.root);
     if (!trusted) {
       if (open !== undefined) {
+        await deps.joinDecision?.({ id: open, task: req.task, role: req.role });
         return { kind: "decision", decision: "repo_untrusted", decisionId: open, opened: false };
       }
       const decisionId = await openDecision(ctx, "repo_untrusted", trustId(ctx), {
-        question: trustAsk(ctx),
+        ...trustAsk(ctx),
         options: ["trust", "cancel"],
         data: trustData(ctx),
       });
@@ -436,6 +473,9 @@ const accountId = (req: SpawnRequest) => req.account?.id ?? "primary";
 
 /** A Claude account profile's directory, or undefined for the primary. */
 const profileDirOf = (req: SpawnRequest) => req.account?.dir ?? undefined;
+
+/** The machine an agent runs on, by name: its account's, else its host's (`local`). */
+const machineOf = (ctx: Ctx) => ctx.req.account?.machine ?? ctx.deps.host.name;
 
 /** A profile on a paired machine: its dir there (nothing of it is on this machine). */
 const remoteProfileOf = (req: SpawnRequest) =>
@@ -520,7 +560,7 @@ async function launchAttempt(
   attempt: number,
   agentId: string,
   issue: IssueData,
-  recovered?: { from: string; reason: string; workspace: string },
+  recovered?: { from: string; reason: string; workspace?: string },
 ): Promise<Launched> {
   const { req, deps, task } = ctx;
   const { host } = deps;
@@ -682,6 +722,18 @@ async function launchAttempt(
       );
     }
   }
+  // A paired machine's profile: only its onboarding seed, through that machine's host. Best
+  // effort: a profile it could not reach stops on a first-run screen, which is repaired then.
+  const remoteProfile = remoteProfileOf(req);
+  if (remoteProfile !== undefined && deps.seedProfile !== undefined) {
+    await deps
+      .seedProfile({ id: accountId(req), dir: remoteProfile, machine: machineOf(ctx) })
+      .catch((e) =>
+        deps.log?.(
+          `profile ${accountId(req)}: not prepared before its launch on ${machineOf(ctx)}: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      );
+  }
 
   const parent = deps.owner ?? SUPERVISOR;
   let creds: BrokerCredentials | undefined;
@@ -742,7 +794,7 @@ async function launchAttempt(
     let workspace: string;
     let adopted = false;
     try {
-      if (recovered !== undefined) {
+      if (recovered?.workspace !== undefined) {
         // The relaunch reuses the workspace (never a second session in one worktree): its shell
         // is back at a bare prompt, so the launch command is typed there.
         workspace = recovered.workspace;
@@ -754,11 +806,14 @@ async function launchAttempt(
           name: launchName(req, attempt),
           command: LAUNCH_COMMAND,
           launch,
+          ...(deps.tunables.tmux_cols !== undefined && deps.tunables.tmux_rows !== undefined
+            ? { size: { cols: deps.tunables.tmux_cols, rows: deps.tunables.tmux_rows } }
+            : {}),
         }));
       }
     } catch (e) {
       const found =
-        recovered === undefined && launchOutcomeUnknown(e)
+        recovered?.workspace === undefined && launchOutcomeUnknown(e)
           ? await reconcileLaunch(ctx, { agentId, attempt, watch, error: e })
           : null;
       if (found === null) {
@@ -923,6 +978,7 @@ async function verifyAndRecover(
 ): Promise<SpawnOutcome> {
   const { deps, task } = ctx;
   let cur = first;
+  let repaired = false;
   for (let recovered = false; ; recovered = true) {
     const result = await verifyRegistration({
       watch: cur.watch,
@@ -950,7 +1006,8 @@ async function verifyAndRecover(
         decisionIdFor("mcp_not_registered", ctx.req.wave.wave, cur.agentId),
         {
           question: `Needs you: ${cur.agentId}'s hooks registered, but the agent's MCP server is not on this broker — version skew or wrong broker; see ${mcpConfigPath(ctx.worktree)}. Its status and progress will not reach volleyd. Relaunch it?`,
-          options: ["relaunch", "cancel"],
+          options: SPAWN_OPTIONS,
+          option_help: SPAWN_OPTION_HELP,
           data: { agent_id: cur.agentId, pipeline: relaunchMarker(ctx, cur) },
         },
       );
@@ -964,7 +1021,8 @@ async function verifyAndRecover(
         decisionIdFor("hooks_auth_failed", ctx.req.wave.wave, cur.agentId),
         {
           question: `Needs you: the broker refused ${cur.agentId}'s hooks (AUTH_FAILED for ${who}); volleyd paused it. relaunch: retire it (its login deleted), mint a fresh login and start the ${ctx.req.role} again as attempt ${cur.attempt + 1}; or cancel (the task is blocked)?`,
-          options: ["relaunch", "cancel"],
+          options: SPAWN_OPTIONS,
+          option_help: SPAWN_OPTION_HELP,
           data: {
             agent_id: cur.agentId,
             username: result.username,
@@ -978,15 +1036,64 @@ async function verifyAndRecover(
 
     const screen = saveScreen(ctx, cur.agentId, result.screen);
     if (result.screen_class === "trust_dialog") {
+      const open = openDecisionFor(deps.openDecisions, trustId(ctx));
+      if (open !== undefined)
+        await deps.joinDecision?.({
+          id: open,
+          task: ctx.req.task,
+          role: ctx.req.role,
+          agent_id: cur.agentId,
+        });
       const decisionId =
-        openDecisionFor(deps.openDecisions, trustId(ctx)) ??
+        open ??
         (await openDecision(ctx, "repo_untrusted", trustId(ctx), {
-          question: trustAsk(ctx),
+          ...trustAsk(ctx),
           options: ["trust", "cancel"],
           screen,
-          data: { ...trustData(ctx), agent_id: cur.agentId },
+          data: trustData(ctx, cur.agentId),
         }));
       return decision(cur, "repo_untrusted", decisionId, screen);
+    }
+    const cls = result.screen_class;
+    if (isFirstRunScreen(cls)) {
+      const dir = profileDirOf(ctx.req);
+      if (!recovered && dir !== undefined && deps.seedProfile !== undefined) {
+        repaired = true;
+        try {
+          cur = await repairFirstRun(ctx, cur, issue, cls, dir);
+        } catch (e) {
+          await cur.watch.close();
+          await refuse(ctx, e);
+          throw e;
+        }
+        continue;
+      }
+      const last = lastOutput(result.screen);
+      const why = repaired
+        ? "volleyd prepared the profile and relaunched it once, and it stopped there again"
+        : recovered
+          ? "volleyd already relaunched it once (after an update prompt): finish Claude Code's setup in that profile"
+          : dir === undefined
+            ? "volleyd prepares only the account profiles it signs in: run claude there once and finish its setup"
+            : "volleyd cannot prepare the profile here";
+      const decisionId = await openDecision(
+        ctx,
+        "unknown_screen",
+        decisionIdFor("unknown_screen", ctx.req.wave.wave, cur.agentId),
+        {
+          // The screen in plain words; the terminal's last line stays a pointer (last_output).
+          question: `Needs you: ${cur.agentId} is stuck on Claude Code's first-run setup (${screenWords(cls)}) for account ${accountId(ctx.req)} on ${machineOf(ctx)}. ${why}. Relaunch it?`,
+          options: ["relaunch", "cancel"],
+          screen,
+          data: {
+            agent_id: cur.agentId,
+            screen_class: cls,
+            ...(last !== null ? { last_output: last } : {}),
+            pipeline: relaunchMarker(ctx, cur),
+          },
+        },
+      );
+      return decision(cur, "unknown_screen", decisionId, screen);
     }
     if (result.screen_class === "update_prompt" && !recovered) {
       try {
@@ -1005,7 +1112,8 @@ async function verifyAndRecover(
       decisionIdFor("unknown_screen", ctx.req.wave.wave, cur.agentId),
       {
         question: `Needs you: ${cur.agentId} did not start (screen: ${result.screen_class}).${lastOutputNote(last, deps.host.name !== "local")} Look at its terminal?`,
-        options: ["relaunch", "cancel"],
+        options: SPAWN_OPTIONS,
+        option_help: SPAWN_OPTION_HELP,
         screen,
         data: {
           agent_id: cur.agentId,
@@ -1050,11 +1158,46 @@ async function answerUpdatePrompt(ctx: Ctx, cur: Launched, issue: IssueData): Pr
 }
 
 /**
- * The one relaunch after an update prompt: the first attempt is retired as `superseded`
- * (credentials revoked, retained records cleared, lock kept), then attempt+1 gets a new identity
- * in the same worktree, lock and workspace.
+ * A first-run screen (#400): close the stuck session first (Claude Code rewrites the profile's
+ * `.claude.json` from memory as it exits), seed the profile, journal `profile_repaired`, and
+ * relaunch once in a new workspace. It is the spawn's one recovery: an update prompt on the
+ * relaunched session is then an unknown_screen, not a second relaunch. It is not counted against
+ * `relaunch_max`, which budgets the relaunch decisions policy answers: a task gets at most this
+ * one silent relaunch before a decision shows it to someone.
  */
-async function relaunch(ctx: Ctx, prev: Launched, issue: IssueData): Promise<Launched> {
+async function repairFirstRun(
+  ctx: Ctx,
+  cur: Launched,
+  issue: IssueData,
+  cls: FirstRunScreen,
+  dir: string,
+): Promise<Launched> {
+  const { deps, req } = ctx;
+  const seed = deps.seedProfile as NonNullable<SpawnDeps["seedProfile"]>;
+  const machine = machineOf(ctx);
+  // A session volleyd itself just opened, whose agent never started.
+  await deps.host.close(cur.workspace, mintConsentToken(`first-run relaunch ${cur.agentId}`));
+  const keys = await seed({ id: accountId(req), dir, machine });
+  await deps.journal({
+    type: "profile_repaired",
+    task: req.task,
+    data: { account: accountId(req), machine, keys, agent_id: cur.agentId, screen_class: cls },
+  });
+  return relaunch(ctx, cur, issue, "first_run");
+}
+
+/**
+ * The one relaunch after an update prompt (or a first-run repair): the first attempt is retired
+ * as `superseded` (credentials revoked, retained records cleared, lock kept), then attempt+1 gets
+ * a new identity in the same worktree and lock — in the same workspace after an update prompt,
+ * a new one after a first-run repair (its stuck session was closed).
+ */
+async function relaunch(
+  ctx: Ctx,
+  prev: Launched,
+  issue: IssueData,
+  reason: "update_prompt" | "first_run" = "update_prompt",
+): Promise<Launched> {
   const { req, deps } = ctx;
   await prev.watch.close();
   // A stalled attempt may still be connected: delete its login through the delete path (`reaped`
@@ -1096,8 +1239,8 @@ async function relaunch(ctx: Ctx, prev: Launched, issue: IssueData): Promise<Lau
   ctx.lock?.update({ attempt, agent_id: agentId });
   return launchAttempt(ctx, attempt, agentId, issue, {
     from: prev.agentId,
-    reason: "update_prompt",
-    workspace: prev.workspace,
+    reason,
+    ...(reason === "update_prompt" ? { workspace: prev.workspace } : {}),
   });
 }
 
@@ -1174,10 +1317,12 @@ async function openDecision(
   d: {
     question: string;
     options: string[];
+    option_help?: Record<string, string>;
     screen?: string | undefined;
     data?: Record<string, unknown>;
   },
 ): Promise<string> {
+  const help = d.option_help !== undefined ? { option_help: d.option_help } : {};
   const pointers = d.screen !== undefined ? { screen: d.screen } : {};
   if (ctx.deps.openDecision !== undefined) {
     return ctx.deps.openDecision({
@@ -1186,6 +1331,7 @@ async function openDecision(
       task: ctx.req.task,
       question: d.question,
       options: d.options,
+      ...help,
       pointers,
       data: d.data ?? {},
     });
@@ -1198,6 +1344,7 @@ async function openDecision(
       kind,
       question: d.question,
       options: d.options,
+      ...help,
       pointers,
       opened_at: stampOf(ctx.deps),
       ...d.data,
@@ -1215,40 +1362,56 @@ async function resolveDecision(ctx: Ctx, id: string, answer: string, by: string)
   });
 }
 
+/** The Claude profile whose folder trust a spawn needs: the one it is read from. */
+const trustProfileOf = (ctx: Ctx) =>
+  ctx.deps.remoteTrust !== undefined ? remoteProfileOf(ctx.req) : profileDirOf(ctx.req);
+
 /**
  * The repo_untrusted decision id for the spawn's wave and repo root, on the machine it runs on, in
- * the Claude account profile it runs under (each profile has its own folder trust).
+ * the Claude account profile it runs under (each profile has its own folder trust): never the task
+ * or attempt, so every launch needing the same trust shares it (#418).
  */
 const trustId = (ctx: Ctx) =>
-  trustDecisionId(
-    ctx.req.wave.wave,
-    ctx.root,
-    ctx.deps.remoteTrust !== undefined
-      ? remoteProfileOf(ctx.req) !== undefined
-        ? `${ctx.deps.remoteTrust.target}:claude-account:${accountId(ctx.req)}`
-        : ctx.deps.remoteTrust.target
-      : profileDirOf(ctx.req) !== undefined
-        ? `claude-account:${accountId(ctx.req)}`
-        : undefined,
-  );
+  trustDecisionId(ctx.req.wave.wave, ctx.root, {
+    machine: ctx.deps.remoteTrust?.target,
+    profile: trustProfileOf(ctx),
+  });
 
-/** The repo_untrusted question, naming the host and the Claude account where it is answered. */
-const trustAsk = (ctx: Ctx) =>
-  trustQuestion(
-    ctx.root,
-    ctx.deps.remoteTrust?.target,
-    profileDirOf(ctx.req) !== undefined ? accountId(ctx.req) : undefined,
-  );
+/**
+ * The repo_untrusted question, naming the machine and the Claude account where it is answered,
+ * as its opener sees it (the one task waiting); the daemon renders it again as launches join.
+ */
+const trustAsk = (ctx: Ctx) => trustAskFor(trustFacts(ctx), [ctx.req.task], 1);
 
-/** A repo_untrusted decision's facts: the root, and for a remote host where it is trusted. */
-const trustData = (ctx: Ctx): Record<string, unknown> => {
+/** What the question names: the root, the machine by name, the profile's account. */
+const trustFacts = (ctx: Ctx) => ({
+  repo: ctx.root,
+  ...(ctx.deps.remoteTrust !== undefined ? { host: ctx.deps.remoteTrust.host } : {}),
+  ...(trustProfileOf(ctx) !== undefined ? { claude_account: accountId(ctx.req) } : {}),
+});
+
+/**
+ * A repo_untrusted decision's facts: the root, for a remote host where it is trusted, the profile
+ * and account it is answered in, and the launch waiting on it (`agent_id`: raised from its pane).
+ */
+const trustData = (ctx: Ctx, agentId?: string): Record<string, unknown> => {
   const r = ctx.deps.remoteTrust;
   const profile = profileDirOf(ctx.req);
   return {
-    repo: ctx.root,
-    ...(r !== undefined ? { host: r.host, target: r.target } : {}),
+    ...trustFacts(ctx),
+    ...(r !== undefined ? { target: r.target } : {}),
     // Answered in that profile's own .claude.json (daemon.ts trustAnswer).
     ...(profile !== undefined ? { claude_config_dir: profile } : {}),
+    role: ctx.req.role,
+    waiting: [ctx.req.task],
+    launches: [
+      {
+        task: ctx.req.task,
+        role: ctx.req.role,
+        ...(agentId !== undefined ? { agent_id: agentId } : {}),
+      },
+    ],
+    ...(agentId !== undefined ? { agent_id: agentId } : {}),
   };
 };
 

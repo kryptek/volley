@@ -1,0 +1,20 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-22T10:00:00.000Z",
+  "channel": "_waves/decisions",
+  "type": "decision_opened",
+  "payload": {
+    "decision_id": "unknown_screen-w1-w1-t1-implementer-1",
+    "wave": "w1",
+    "task": "T1",
+    "kind": "unknown_screen",
+    "question": "Needs you: w1-t1-implementer-1 did not start (screen: working). Look at its terminal?",
+    "options": ["relaunch", "cancel", "it's running"],
+    "option_help": {
+      "it's running": "Volley checks the agent is alive, then closes this. Nothing is restarted or stopped."
+    },
+    "pointers": {},
+    "opened_at": "2026-10-22T10:00:00.000Z"
+  }
+}

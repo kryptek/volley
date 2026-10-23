@@ -12,7 +12,7 @@ import {
   whereLabel,
 } from "../src/autopilot/inbox";
 import { CONFIG_DEFAULTS } from "../src/config-defaults";
-import type { DecisionPayload } from "../src/decisions";
+import { type DecisionPayload, ITS_RUNNING, ITS_RUNNING_HELP } from "../src/decisions";
 import type { JournalEvent } from "../src/types";
 import { envelope, schemaErrors } from "./helpers/schema";
 
@@ -62,6 +62,29 @@ describe("inbox records (SPEC §4.6.18)", () => {
     expect(go.owner_only).toBe(true);
     expect(go.title).toBe("Release go · w1");
     expect(go).not.toHaveProperty("task");
+  });
+
+  it("itemForDecision: an option's hover text (option_help) is its description (#402)", () => {
+    const item = itemForDecision(
+      {
+        ...disagree,
+        kind: "unknown_screen",
+        options: ["relaunch", "cancel", ITS_RUNNING],
+        option_help: { [ITS_RUNNING]: ITS_RUNNING_HELP },
+      },
+      cfg,
+    );
+    expect(item.options).toEqual([
+      { label: "relaunch" },
+      { label: "cancel" },
+      { label: "it's running", description: ITS_RUNNING_HELP },
+    ]);
+    expect(
+      schemaErrors(
+        "inbox-item.schema.json",
+        envelope(INBOX_CHANNEL, inboxEnvelopeType(item), item),
+      ),
+    ).toEqual([]);
   });
 
   it("itemForDecision keeps the agent the decision is about", () => {

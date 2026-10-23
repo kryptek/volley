@@ -199,6 +199,9 @@
   color: var(--amber);
   font: 11.5px var(--f-mono);
 }
+.wave-ci-stuck {
+  color: var(--amber);
+}
 
 /* Autopilot (SPEC §4.6.16–19): its chip, the merge queue, the release train and fixer tasks. */
 .chip--autopilot {

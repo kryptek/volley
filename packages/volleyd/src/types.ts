@@ -112,6 +112,9 @@ export interface Tunables {
   brief_preface_max_bytes: number;
   wake_grace_s: number;
   screen_tail_interval_s: number;
+  /** A paired machine's tmux session size at launch, in columns and rows (#403). */
+  tmux_cols: number;
+  tmux_rows: number;
   /** After `volleyd stop`, how long agents get to publish a terminal status before they are force-retired. */
   stop_grace_s: number;
   /** Window collecting broker login changes into one Dynamic Security control message. */
@@ -428,6 +431,21 @@ export interface TaskState {
     ci?: "green" | "red" | "running" | "none";
     /** While the pipeline holds for CI on `head_sha`: its runs completed / all of them. */
     checks?: { done: number; total: number };
+    /**
+     * While held, when the head's jobs could be read (#415): done / total, the running and failed
+     * job names, the last job's completion (the first start while none is done) and the slowest
+     * job's last duration in an earlier run of the wave.
+     */
+    jobs?: {
+      done: number;
+      total: number;
+      running: string[];
+      failed: string[];
+      last_done_at?: string;
+      slowest_s?: number;
+    };
+    /** While held: the estimated seconds left when the hold was journaled; absent: no estimate. */
+    eta_s?: number;
   };
   /** While a parallel stage group runs: its label (`review (spec + quality)`); `stage` stays the enum. */
   stage_label?: string;
@@ -641,6 +659,8 @@ export const WAVE_EVENT_TYPES = [
   "claude_signin_done",
   "claude_signin_failed",
   "claude_profile_synced",
+  // A profile seeded after its agent stopped on a first-run screen (spawn.ts repairFirstRun).
+  "profile_repaired",
   "agent_account_moved",
   // Account balancing (claude/usage.ts rankAccounts): the account a spawn runs under and why.
   "account_chosen",
@@ -691,6 +711,8 @@ export const WAVE_EVENT_TYPES = [
   // Held decisions (#335): one waits on a task, PR or issue, never escalated; released when it lands.
   "decision_held",
   "decision_released",
+  // Shared-precondition decisions (#418): one more launch parks on an open one.
+  "decision_joined",
   // The release train (SPEC §4.6.19): a settled wave whose repo has a playbook starts releasing;
   // each stage is entered, then verified or failed; the owner's `release_go` go completes it.
   "release_started",
@@ -708,6 +730,17 @@ export const WAVE_EVENT_TYPES = [
   "remediation_closed",
   // The morning digest (SPEC §4.6.16): published retained, with its one push.
   "digest_published",
+  // The terminal-status watchdog (#414): a dropped done / failed handed over again.
+  "terminal_status_recovered",
+  // A draft PR marked ready before the CI gate (SPEC §4.6.8): its full CI runs from `at` (#408).
+  "pr_marked_ready",
+  // A wave's issue lifecycle (#416, SPEC §4.6.19): what volleyd did to a task's issue, so a
+  // restart never does it twice; `issues_verified` once the release reached main.
+  "issue_labeled",
+  "issue_unlabeled",
+  "issue_commented",
+  "issue_closed",
+  "issues_verified",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

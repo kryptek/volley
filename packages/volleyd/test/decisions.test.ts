@@ -7,14 +7,17 @@ import type { Daemon } from "../src/daemon";
 import {
   type DecisionRecord,
   MACHINE_DOWN_OPTIONS,
+  SHARED_PRECONDITION_KINDS,
   checkAnswer,
   decisionPayload,
   decisionTopic,
   describeDecision,
   machineDownInput,
+  parkedTasks,
   raiseBy,
   renderDecisionsMd,
   validateAnswer,
+  waitingLine,
   waveDecisionId,
 } from "../src/decisions";
 import { ready } from "../src/scheduler";
@@ -378,6 +381,75 @@ describe("decisionPayload", () => {
         correlation_id: null,
       }),
     ).toEqual([]);
+  });
+});
+
+describe("shared-precondition decisions (#418)", () => {
+  const rec = {
+    decision_id: "repo_untrusted-abc",
+    wave: "w1",
+    task: "T1",
+    kind: "repo_untrusted" as const,
+    question: "Needs you: trust /srv/repo for dispatch? 2 tasks are waiting: T1, T2.",
+    options: ["trust", "cancel"],
+    pointers: {},
+    opened_at: "2026-10-22T10:00:00.000Z",
+    repo: "/srv/repo",
+    waiting: ["T1", "T2"],
+    // internal facts kept on the record
+    launches: [
+      { task: "T1", role: "implementer" },
+      { task: "T2", role: "implementer" },
+    ],
+    resume_stages: { T2: "queued" as const },
+    claude_account: "work",
+    claude_config_dir: "/p/work",
+  };
+
+  it("publishes waiting and strips the launches it parks", () => {
+    const p = decisionPayload(rec);
+    expect(p.waiting).toEqual(["T1", "T2"]);
+    expect(Object.keys(p)).not.toContain("launches");
+    expect(Object.keys(p)).not.toContain("resume_stages");
+    expect(Object.keys(p)).not.toContain("claude_account");
+    expect(
+      schemaErrors("decision.schema.json", {
+        schema_version: "0.1",
+        agent_id: "volleyd",
+        parent_id: null,
+        wall_time: "2026-10-22T10:00:00.000Z",
+        channel: "_waves/decisions",
+        type: "decision_opened",
+        payload: p,
+        correlation_id: null,
+      }),
+    ).toEqual([]);
+    // Only a shared-precondition kind carries it.
+    expect(decisionPayload({ ...rec, kind: "agent_question" }).waiting).toBeUndefined();
+  });
+
+  it("parks its opener and every waiting task; another kind parks its own task only", () => {
+    expect(parkedTasks(rec)).toEqual(["T1", "T2"]);
+    expect(parkedTasks({ ...rec, kind: "agent_question" })).toEqual(["T1"]);
+    expect(SHARED_PRECONDITION_KINDS.has("repo_untrusted")).toBe(true);
+  });
+
+  it("names the first six waiting tasks, then how many", () => {
+    expect(waitingLine([])).toBe("");
+    expect(waitingLine(["T1"])).toBe(" 1 task is waiting: T1.");
+    expect(waitingLine(["a", "b", "c", "d", "e", "f"])).toBe(
+      " 6 tasks are waiting: a, b, c, d, e, f.",
+    );
+    expect(waitingLine(["a", "b", "c", "d", "e", "f", "g"])).toBe(
+      " 7 tasks are waiting: a, b, c, d, e, f, … (7 tasks).",
+    );
+  });
+
+  it("validateAnswer is unchanged: trust / cancel only", () => {
+    expect(validateAnswer("repo_untrusted", ["trust", "cancel"], "Cancel")).toEqual({
+      answer: "cancel",
+    });
+    expect("refused" in validateAnswer("repo_untrusted", ["trust", "cancel"], "later")).toBe(true);
   });
 });
 

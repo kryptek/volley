@@ -64,6 +64,7 @@
             "claude_signin_done",
             "claude_signin_failed",
             "claude_profile_synced",
+            "profile_repaired",
             "agent_account_moved",
             "account_chosen",
             "relaunched",
@@ -96,6 +97,7 @@
             "decision_escalated",
             "decision_held",
             "decision_released",
+            "decision_joined",
             "release_started",
             "release_stage_entered",
             "release_stage_verified",
@@ -107,7 +109,14 @@
             "inbox_answered",
             "remediation_requested",
             "remediation_closed",
-            "digest_published"
+            "digest_published",
+            "terminal_status_recovered",
+            "pr_marked_ready",
+            "issue_labeled",
+            "issue_unlabeled",
+            "issue_commented",
+            "issue_closed",
+            "issues_verified"
           ]
         },
         "payload": {
@@ -542,6 +551,43 @@
         },
         {
           "if": {
+            "properties": { "type": { "const": "decision_joined" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["decision_id", "kind", "task", "role", "question"],
+                    "properties": {
+                      "decision_id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+                      },
+                      "kind": { "type": "string", "minLength": 1 },
+                      "task": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+                      },
+                      "role": { "type": "string", "minLength": 1 },
+                      "question": { "type": "string", "minLength": 1 },
+                      "option_help": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string", "minLength": 1 }
+                      },
+                      "agent_id": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
             "properties": { "type": { "const": "decision_escalated" } },
             "required": ["type"]
           },
@@ -769,6 +815,291 @@
                     "properties": {
                       "trigger": {
                         "enum": ["wave_complete", "release_go", "escalation", "stopped"]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "terminal_status_recovered" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["agent_id", "status", "after_ms"],
+                    "description": "The supervisor handed an agent's dropped terminal status to its pipeline again, a while after it alarmed on it (spec section 4.6.2).",
+                    "properties": {
+                      "agent_id": { "type": "string", "minLength": 1 },
+                      "status": { "enum": ["done", "failed"] },
+                      "after_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "How long after the status arrived it was recovered."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "ci_pending" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["role", "sha", "checks"],
+                    "description": "The supervisor holds the task for CI on sha: its runs completed and all of them (checks), and, when the head's jobs could be read, the same for its jobs with the running and failed job names (jobs) and the estimated seconds left (eta_s, absent without an estimate) (spec section 4.6.8).",
+                    "properties": {
+                      "role": { "type": "string", "minLength": 1 },
+                      "sha": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+                      "checks": {
+                        "type": "object",
+                        "required": ["done", "total"],
+                        "properties": {
+                          "done": { "type": "integer", "minimum": 0 },
+                          "total": { "type": "integer", "minimum": 0 }
+                        }
+                      },
+                      "jobs": {
+                        "type": "object",
+                        "required": ["done", "total", "running", "failed"],
+                        "properties": {
+                          "done": { "type": "integer", "minimum": 0 },
+                          "total": { "type": "integer", "minimum": 0 },
+                          "running": { "type": "array", "items": { "type": "string" } },
+                          "failed": { "type": "array", "items": { "type": "string" } },
+                          "last_done_at": { "type": "string", "format": "date-time" },
+                          "slowest_s": { "type": "integer", "minimum": 0 }
+                        }
+                      },
+                      "eta_s": { "type": "integer", "minimum": 0 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "pr_marked_ready" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["task", "data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["pr", "head", "at"],
+                    "description": "The supervisor marked a draft PR ready for review at head (gh pr ready), so the CI its repository skips on drafts runs; the CI gate on that head then counts only runs created at or after at (spec section 4.6.8).",
+                    "properties": {
+                      "pr": { "type": "integer", "minimum": 1 },
+                      "head": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+                      "at": { "type": "string", "format": "date-time" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "issue_labeled"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["issue", "label"],
+                    "description": "The supervisor labeled a done task's issue merged-to-release when its PR merged into the release branch (spec section 4.6.19).",
+                    "properties": {
+                      "issue": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "label": {
+                        "const": "merged-to-release"
+                      },
+                      "pr": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "issue_unlabeled"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["issue", "label"],
+                    "description": "The supervisor removed the merged-to-release label once the release reached the default branch (spec section 4.6.19).",
+                    "properties": {
+                      "issue": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "label": {
+                        "const": "merged-to-release"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "issue_commented"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["issue", "marker"],
+                    "description": "The supervisor commented on a task's issue; the comment carries marker, so it is never made twice (spec section 4.6.19).",
+                    "properties": {
+                      "issue": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "marker": {
+                        "type": "string",
+                        "pattern": "^<!-- volleyd:[a-z-]+ wave=[a-z0-9][a-z0-9_-]{0,62}( pr=[0-9]+)? -->$"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "issue_closed"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["issue"],
+                    "description": "The supervisor closed a done task's issue the release PR left open (spec section 4.6.19).",
+                    "properties": {
+                      "issue": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "marker": {
+                        "type": "string",
+                        "pattern": "^<!-- volleyd:[a-z-]+ wave=[a-z0-9][a-z0-9_-]{0,62}( pr=[0-9]+)? -->$"
+                      },
+                      "release_pr": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "issues_verified"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["release_pr", "closed", "left_open"],
+                    "description": "The release reached the default branch in release_pr and every task's issue was checked: closed lists the issues the supervisor closed, left_open the cancelled or deferred tasks' issues it left open (spec section 4.6.19).",
+                    "properties": {
+                      "release_pr": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "closed": {
+                        "type": "array",
+                        "items": {
+                          "type": "integer",
+                          "minimum": 1
+                        }
+                      },
+                      "left_open": {
+                        "type": "array",
+                        "items": {
+                          "type": "integer",
+                          "minimum": 1
+                        }
                       }
                     }
                   }

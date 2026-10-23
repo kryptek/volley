@@ -130,6 +130,10 @@ describe("SshTmuxHost", () => {
         "tmux",
         "new-session",
         "-d",
+        "-x",
+        "220",
+        "-y",
+        "50",
         "-s",
         "w1-T1-implementer",
         "-c",
@@ -137,6 +141,82 @@ describe("SshTmuxHost", () => {
         "bash .volley/launch.sh",
       ],
     ]);
+  });
+
+  it("launch opens the session at the spec's size (tmux_cols × tmux_rows), not tmux's 80×24", async () => {
+    const r = remote((s) => (argvIs("tmux", "has-session")(s) ? { code: 1 } : undefined));
+    await r.host.launch({
+      cwd: "/wt",
+      name: "w1 T1 implementer",
+      command: LAUNCH_COMMAND,
+      launch: sealed("/wt"),
+      size: { cols: 160, rows: 40 },
+    });
+    const ns = r.steps().find((s) => s.argv[1] === "new-session");
+    expect(ns?.argv.slice(0, 7)).toEqual(["tmux", "new-session", "-d", "-x", "160", "-y", "40"]);
+  });
+
+  it("resize: tmux resize-window to a size, or back to the session's launch size", async () => {
+    const r = remote((s) => (argvIs("tmux", "has-session")(s) ? { code: 1 } : undefined));
+    await r.host.launch({
+      cwd: "/wt",
+      name: "w1 T1 implementer",
+      command: LAUNCH_COMMAND,
+      launch: sealed("/wt"),
+      size: { cols: 160, rows: 40 },
+    });
+    await r.host.resize("w1-T1-implementer", { cols: 180, rows: 48 });
+    await r.host.resize("w1-T1-implementer", "launch");
+    // A session this host did not launch (a daemon restart): the default launch size.
+    await r.host.resize("w2-T9-reviewer", "launch");
+    expect(
+      r
+        .steps()
+        .filter((s) => s.argv[1] === "resize-window")
+        .map((s) => s.argv),
+    ).toEqual([
+      ["tmux", "resize-window", "-t", "=w1-T1-implementer:", "-x", "180", "-y", "48"],
+      ["tmux", "resize-window", "-t", "=w1-T1-implementer:", "-x", "160", "-y", "40"],
+      ["tmux", "resize-window", "-t", "=w2-T9-reviewer:", "-x", "220", "-y", "50"],
+    ]);
+  });
+
+  it("a closed or ended session forgets its launch size", async () => {
+    const r = remote((s) => (argvIs("tmux", "has-session")(s) ? { code: 1 } : undefined));
+    for (const name of ["w1 T1 implementer", "w1 T2 implementer"])
+      await r.host.launch({
+        cwd: "/wt",
+        name,
+        command: LAUNCH_COMMAND,
+        launch: sealed("/wt"),
+        size: { cols: 160, rows: 40 },
+      });
+    await r.host.close("w1-T1-implementer", mintConsentToken("volleyd cleanup w1 --yes"));
+    await r.host.endSession("w1-T2-implementer", "/wt", mintConsentToken("retire w1-t2"));
+    await r.host.resize("w1-T1-implementer", "launch");
+    await r.host.resize("w1-T2-implementer", "launch");
+    expect(
+      r
+        .steps()
+        .filter((s) => s.argv[1] === "resize-window")
+        .map((s) => s.argv.slice(4)),
+    ).toEqual([
+      ["-x", "220", "-y", "50"],
+      ["-x", "220", "-y", "50"],
+    ]);
+  });
+
+  it("resize clamps to the fence's bounds and rejects when tmux refuses", async () => {
+    const r = remote((s) =>
+      argvIs("tmux", "resize-window")(s) && s.argv[3] === "=gone:"
+        ? { code: 1, stderr: "can't find session: gone" }
+        : undefined,
+    );
+    await r.host.resize("w1-T1-implementer", { cols: 5, rows: 9000 });
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      ["tmux", "resize-window", "-t", "=w1-T1-implementer:", "-x", "20", "-y", "500"],
+    ]);
+    await expect(r.host.resize("gone", { cols: 100, rows: 30 })).rejects.toThrow(/find session/);
   });
 
   /** A launch on a box whose ssh PATH is `ssh` and whose tmux server has `server` (null: none). */
@@ -786,6 +866,23 @@ describe("SshTmuxHost", () => {
     await expect(down.host.readTrust()).rejects.toMatchObject({ code: "LAUNCH_FAILED" });
   });
 
+  it("a fence denial on the remote path surfaces as itself, permanent, never as an ssh failure", async () => {
+    const r = remote();
+    const err = (await r.host.readFile("/src/r/.volley/secret.md").catch((e) => e)) as SpawnError;
+    expect(err.message).toMatch(/^FENCE_DENIED: remote cat /);
+    expect(err.message).toBe(
+      "FENCE_DENIED: remote cat (only the files volleyd reads) (not permitted for volleyd) (read /src/r/.volley/secret.md on dev@box)",
+    );
+    expect(err.message).not.toContain("no result");
+    expect(err).toMatchObject({ code: "FENCE_DENIED", permanent: true });
+    // Nothing reached ssh: the fence refused the script first.
+    expect(r.fake.calls.filter((c) => c.argv[0] === "ssh")).toEqual([]);
+    // The same for every other path that used to map a rejection to "no answer".
+    await expect(r.host.readTrust("relative/profile")).rejects.toMatchObject({
+      code: "FENCE_DENIED",
+    });
+  });
+
   it("recordTrust: compare-and-swap of the box's ~/.claude.json, keeping everything else", async () => {
     const before = `${JSON.stringify({
       oauthAccount: { token: "secret" },
@@ -833,6 +930,70 @@ describe("SshTmuxHost", () => {
       /run claude there once/,
     );
     expect(none.steps().some(argvIs("mv"))).toBe(false);
+  });
+
+  it("seedProfile: a profile's onboarding keys and settings.json, compare-and-swap by absolute path (#400)", async () => {
+    const P = "/path/to/home/.volley/claude/work";
+    const profile = `${JSON.stringify({ oauthAccount: { emailAddress: "a@b.co" } })}\n`;
+    const r = remote((s) =>
+      argvIs("cat", ".claude.json")(s)
+        ? { stdout: profile }
+        : argvIs("cat", `${P}/settings.json`)(s)
+          ? { code: 1, stderr: "No such file" }
+          : undefined,
+    );
+    expect(await r.host.seedProfile(P, "2.0.0")).toEqual({
+      ".claude.json": ["hasCompletedOnboarding", "lastOnboardingVersion", "theme"],
+      "settings.json": ["skipDangerousModePermissionPrompt"],
+    });
+    const decode = (st: { stdin?: string } | undefined) =>
+      JSON.parse(Buffer.from(st?.stdin ?? "", "base64").toString());
+    const json = r
+      .scripts()
+      .find((x) => x?.steps.some(argvIs("mv", "-f", `${P}/.claude.json.volleyd.tmp`)));
+    expect(json?.steps.map((x) => x.argv)).toEqual([
+      ["cmp", "-s", "-", `${P}/.claude.json`],
+      ["base64", "-d"],
+      ["mv", "-f", `${P}/.claude.json.volleyd.tmp`, `${P}/.claude.json`],
+    ]);
+    expect(decode(json?.steps[1])).toEqual({
+      oauthAccount: { emailAddress: "a@b.co" },
+      hasCompletedOnboarding: true,
+      lastOnboardingVersion: "2.0.0",
+      theme: "dark",
+    });
+    // No settings.json yet: written whole (there is nothing to compare against).
+    const settings = r
+      .scripts()
+      .find((x) => x?.steps.some(argvIs("mv", "-f", `${P}/settings.json.volleyd.tmp`)));
+    expect(settings?.steps.map((x) => x.argv)).toEqual([
+      ["base64", "-d"],
+      ["mv", "-f", `${P}/settings.json.volleyd.tmp`, `${P}/settings.json`],
+    ]);
+    expect(settings?.steps[0]?.stdout).toBe(`${P}/settings.json.volleyd.tmp`);
+    expect(decode(settings?.steps[0])).toEqual({ skipDangerousModePermissionPrompt: true });
+  });
+
+  it("seedProfile writes nothing to a ready profile", async () => {
+    const P = "/path/to/home/.volley/claude/work";
+    const r = remote((s) =>
+      argvIs("cat", ".claude.json")(s)
+        ? {
+            stdout: JSON.stringify({
+              hasCompletedOnboarding: true,
+              lastOnboardingVersion: "1.0.0",
+              theme: "light",
+            }),
+          }
+        : argvIs("cat", `${P}/settings.json`)(s)
+          ? { stdout: '{"skipDangerousModePermissionPrompt":true}' }
+          : undefined,
+    );
+    expect(await r.host.seedProfile(P, "2.0.0")).toEqual({
+      ".claude.json": [],
+      "settings.json": [],
+    });
+    expect(r.steps().some(argvIs("mv"))).toBe(false);
   });
 
   it("exec routes credentials and the brief gate to the daemon's machine, the rest remote", async () => {

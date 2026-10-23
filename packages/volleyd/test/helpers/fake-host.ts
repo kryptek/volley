@@ -3,7 +3,13 @@ import { dirname, join } from "node:path";
 import { CONFIG_DEFAULTS } from "../../src/config-defaults";
 import type { ExecFn, ExecOptions, ExecResult } from "../../src/exec";
 import { type ConsentToken, type RemoteStep, assertAllowed } from "../../src/fence";
-import type { Host, LaunchSpec, WorktreeResult, WorktreeSpec } from "../../src/hosts/host";
+import type {
+  Host,
+  LaunchSpec,
+  TermSize,
+  WorktreeResult,
+  WorktreeSpec,
+} from "../../src/hosts/host";
 import type { RemoteHost, RemoteHostSpec, RemoteRunOptions } from "../../src/hosts/ssh-tmux";
 import type { DoctorReport } from "../../src/machines";
 import type { PathProbe } from "../../src/readiness";
@@ -24,6 +30,8 @@ export interface FakeHost extends Host {
   screenReads: { workspace: string; lines: number; delayMs?: number }[];
   keys: { workspace: string; key: string }[];
   texts: { workspace: string; text: string }[];
+  /** Terminal resizes (the Desk's popout), in order. */
+  resizes: { workspace: string; size: TermSize | "launch" }[];
   /** Workspaces closed (retire, cleanup). */
   closed: string[];
   /** Sessions ended (retire): the workspace (null: unknown) and worktree it was asked about. */
@@ -71,6 +79,7 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
     screenReads: [],
     keys: [],
     texts: [],
+    resizes: [],
     closed: [],
     sessionsEnded: [],
     workspaceTitles: {},
@@ -137,6 +146,10 @@ export function fakeHost(fake: FakeExec = fakeExec()): FakeHost {
       if (tokens.picker !== undefined || tokens.handoff !== undefined || tokens.wake !== undefined)
         assertAllowed(["cmux", "send", "--workspace", workspace, text], tokens);
       host.texts.push({ workspace, text });
+    },
+    async resize(workspace, size) {
+      host.resizes.push({ workspace, size });
+      return true;
     },
     async close(workspace: string, _consent: ConsentToken) {
       host.closed.push(workspace);
@@ -457,7 +470,14 @@ export function fakeSigninBox(o: SigninBoxOptions = {}) {
       if (s.stdout !== undefined) {
         box.files.set(s.stdout, Buffer.from(s.stdin ?? "", "base64").toString("utf-8"));
       } else if (p === "printenv") out += `${home}\n`;
-      else if (p === "tmux" && a[0] === "new-session") {
+      else if (p === "mv") {
+        // the compare-and-swap's last step: the temp file becomes the file
+        const [, from, to] = a as [string, string, string];
+        const f = box.files.get(from);
+        if (f === undefined) return { code: 1 };
+        box.files.set(to, f);
+        box.files.delete(from);
+      } else if (p === "tmux" && a[0] === "new-session") {
         if (o.noTmux === true)
           return { code: 127, stderr: "bash: line 3: tmux: command not found\n" };
         box.session = true;
