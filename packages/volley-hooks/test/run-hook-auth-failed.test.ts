@@ -91,6 +91,34 @@ describe("runHook: AUTH_FAILED is loud", () => {
     expect((await stop()).exitCode).toBe(1);
   });
 
+  it("coordinator mode with no credentials at all is not set up: every hook is silent (#407)", async () => {
+    const dir = makeWorkdir();
+    const stateRoot = makeWorkdir();
+    // No VOLLEY_AUTH_*, and VOLLEY_AUTH_DIR (hookEnv's empty temp dir) has no coordinator.json.
+    const env = {
+      VOLLEY_HOOKS_COORDINATOR: "1",
+      VOLLEY_BROKER_URL: broker.url,
+      VOLLEY_HOOKS_STATE_DIR: stateRoot,
+    };
+    for (const [name, fx] of [
+      ["session-start", "session-start-startup.json"],
+      ["user-prompt-submit", "user-prompt-submit.json"],
+      ["post-tool-use", "post-tool-use.json"],
+      ["stop", "stop.json"],
+    ] as const) {
+      const run = await runHook(name, fixture(fx, dir), { cwd: dir, env });
+      expect(run.exitCode, name).toBe(0);
+      expect(run.stdout, name).toBe("");
+      expect(run.stderr, name).toBe("");
+    }
+    const stateDir = coordinatorStateDir(
+      dir,
+      hookEnv(env),
+      "session:7c984d76-0e0e-40d5-b9f1-777e9c0e6caa",
+    );
+    expect(existsSync(join(stateDir, "hooks-error.json"))).toBe(false);
+  });
+
   it("pre-tool-use-lease: a refused lease-pool read is loud (exit 1, never 2), the tool call is not blocked", async () => {
     const dir = makeWorkdir(agentJson("wrong"));
     const run = await runHook("pre-tool-use-lease", fixture("pre-tool-use-bash.json", dir), {
@@ -126,7 +154,11 @@ describe("runHook: unusable credential files are loud too", () => {
     expect(lines[0]).toMatch(ERROR_LINE);
     expect(lines[0]).toContain(join(authDir, "coordinator.json"));
     expect(lines[0]).toMatch(pathPattern);
-    const stateDir = coordinatorStateDir(dir, hookEnv(env));
+    const stateDir = coordinatorStateDir(
+      dir,
+      hookEnv(env),
+      "session:7c984d76-0e0e-40d5-b9f1-777e9c0e6caa",
+    );
     const err = JSON.parse(readFileSync(join(stateDir, "hooks-error.json"), "utf-8"));
     expect(err).toMatchObject({ code: "AUTH_FAILED", hook_event: "Stop", username: null });
     // Not cached as "no coordinator here": the next run is just as loud.

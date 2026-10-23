@@ -60,6 +60,17 @@
               "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
               "description": "The stable coordinator name the session acts as (spec section 6.2, VOLLEY_COORDINATOR): a wave owned by this name follows the newest live session carrying it."
             },
+            "pid": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "The publisher's process id (spec section 6.2)."
+            },
+            "surface": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "description": "The terminal pane the session runs in (spec section 6.2), e.g. cmux's CMUX_SURFACE_ID: hooks sharing a cwd match their own entry on it."
+            },
             "started_at": { "type": "string", "format": "date-time" }
           }
         }

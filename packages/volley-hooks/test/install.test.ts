@@ -21,6 +21,45 @@ type Settings = { hooks: Record<string, { matcher?: string; hooks: { command: st
 const read = (p: string) => JSON.parse(readFileSync(p, "utf-8")) as Settings;
 
 describe("scripts/install.sh", () => {
+  /** The user-level install (hookEnv drops CLAUDE_SETTINGS): ~/.claude/settings.json under `home`. */
+  const userLevel = (home: string, extra: Record<string, string>, ...args: string[]) =>
+    execFileSync(join(PACKAGE_ROOT, "scripts", "install.sh"), args, {
+      env: hookEnv({ HOME: home, VOLLEY_HOOKS_STATE_DIR: join(home, "st"), ...extra }),
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+  it("user-level: refuses without a coordinator identity, naming --force, and writes nothing (#407)", () => {
+    const home = tempDir("volley-hooks-home-");
+    const settings = join(home, ".claude", "settings.json");
+    let err = "";
+    let status = 0;
+    try {
+      userLevel(home, {});
+    } catch (e) {
+      status = (e as { status: number }).status;
+      err = String((e as { stderr: string }).stderr);
+    }
+    expect(status).not.toBe(0);
+    expect(err).toContain("--force");
+    expect(existsSync(settings)).toBe(false);
+
+    userLevel(home, {}, "--force");
+    expect(Object.keys(read(settings).hooks)).toContain("Stop");
+  });
+
+  it("user-level: VOLLEY_AUTH_USERNAME or a coordinator.json is an identity", () => {
+    const home = tempDir("volley-hooks-home-");
+    userLevel(home, { VOLLEY_AUTH_USERNAME: "coordinator" });
+    expect(Object.keys(read(join(home, ".claude", "settings.json")).hooks)).toContain("Stop");
+
+    const other = tempDir("volley-hooks-home-");
+    const authDir = tempDir("volley-hooks-auth-");
+    writeFileSync(join(authDir, "coordinator.json"), JSON.stringify({ username: "coordinator" }));
+    userLevel(other, { VOLLEY_AUTH_DIR: authDir });
+    expect(Object.keys(read(join(other, ".claude", "settings.json")).hooks)).toContain("Stop");
+  });
+
   it("merges the hooks with the package path and coordinator mode, keeping other settings", () => {
     const dir = tempDir("volley-hooks-install-");
     const settings = join(dir, "settings.json");
