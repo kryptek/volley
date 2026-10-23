@@ -16,7 +16,6 @@ siblings; the SPEC lists those one per line, checked against the schemas.
 |---|---|---|
 | `task_admission_returned` | T4 | wave event |
 | §4.6.22 | #381 | Footprints and the overlap plan |
-| §4.6.23 | #386 | Merge train |
 | `wave_planned` | #381 | wave event |
 | `cluster_strategy_changed` | #384 | wave event |
 | `train_started` | #386 | wave event |
