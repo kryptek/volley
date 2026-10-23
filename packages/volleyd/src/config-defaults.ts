@@ -215,6 +215,8 @@ export const DAEMON_DEFAULTS = {
   steer_wait_ack_max_ms: 300_000,
   /** How long the daemon waits for one `gh issue view` (issue Files sections, at submit). */
   issue_fetch_ms: 15_000,
+  /** How long the footprint resolver waits for `git ls-tree -r -l --full-tree <ref>`. */
+  tree_read_ms: 15_000,
   /** How long the daemon waits for `gh repo view --json visibility` (at submit, under `auto`). */
   repo_visibility_ms: 15_000,
   /** How long the CLI collects retained registry entries to auto-detect the caller's agent id. */
