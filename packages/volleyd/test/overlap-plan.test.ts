@@ -1,13 +1,7 @@
 import { describe, expect, it } from "vitest";
-import {
-  type PlanTask,
-  type Tree,
-  coupling,
-  diffPlan,
-  explain,
-  planWave,
-  sharedFiles,
-} from "../src/overlap-plan";
+import type { Tree } from "../src/footprint";
+import { sharedFiles } from "../src/overlap";
+import { type PlanTask, coupling, diffPlan, explain, planWave } from "../src/overlap-plan";
 import type { FootprintConfidence } from "../src/types";
 
 const TREE: Tree = {
@@ -192,7 +186,7 @@ describe("planWave: collapse", () => {
 });
 
 describe("planWave: chains, independents and caps", () => {
-  it("skips a chain that would cycle with a declared after, and says why", () => {
+  it("adds no chain against a declared after, and says the after already orders them", () => {
     const plan = planWave({
       tasks: [
         task(1, ["src/a.ts", "src/big.ts"], { confidence: "guessed", after: ["i2"] }),
@@ -202,7 +196,8 @@ describe("planWave: chains, independents and caps", () => {
     });
     expect(byId(plan, "i1")?.after).toEqual(["i2"]);
     expect(byId(plan, "i2")?.after).toEqual([]);
-    expect(byId(plan, "i2")?.plan.why).toContain("cycle");
+    expect(byId(plan, "i2")?.plan.why).toContain("a declared after already runs i2 before i1");
+    expect(byId(plan, "i2")?.plan.why).not.toContain("parallel");
     expect(plan.clusters[0]?.strategy.chain).toBeUndefined();
   });
 
@@ -351,6 +346,28 @@ describe("diffPlan", () => {
       "i2 and i3 run as separate tasks; the planner would bundle them as i2 — kept as written",
       "i1 and i2 share src/a.ts and run in parallel; the planner would chain them — kept as written",
       "i4 is planned by cap; the planner would plan it independent — kept as written",
+    ]);
+  });
+
+  it("names the paths a glob shares in a dropped chain", () => {
+    const globbed = planWave({
+      tasks: [
+        task(1, ["src/a.ts", "src/big.ts"], { confidence: "guessed" }),
+        task(2, ["src/*.ts", "src/c.ts"]),
+      ],
+      tree: TREE,
+    });
+    expect(globbed.clusters[0]?.strategy.chain).toEqual([["i2", "i1"]]);
+    expect(
+      diffPlan(
+        [
+          { id: "i1", issue: 1, after: [] },
+          { id: "i2", issue: 2, after: [] },
+        ],
+        globbed,
+      ),
+    ).toEqual([
+      "i2 and i1 share src/a.ts, src/big.ts and run in parallel; the planner would chain them — kept as written",
     ]);
   });
 

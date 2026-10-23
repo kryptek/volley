@@ -1,4 +1,6 @@
 import { DAEMON_DEFAULTS } from "./config-defaults";
+import type { Tree } from "./footprint";
+import { globRe, isPattern, sharedFiles } from "./overlap";
 import type { Footprint, PlanCluster, PlanStrategy, TaskId, TaskPlan } from "./types";
 
 /**
@@ -8,9 +10,7 @@ import type { Footprint, PlanCluster, PlanStrategy, TaskId, TaskPlan } from "./t
  * carries a one-line why. Pure: the tree (path → bytes) is passed in.
  */
 export type { PlanCluster, PlanStrategy, TaskPlan } from "./types";
-
-/** The repository tree: every path and its size in bytes. */
-export type Tree = Record<string, number>;
+export type { Tree } from "./footprint";
 
 export interface PlanTask {
   id: TaskId;
@@ -64,22 +64,10 @@ const isTestFile = (p: string) =>
  */
 export const isBundleFile = (p: string) => isSourceFile(p) && !isTestFile(p);
 
-const isPattern = (p: string) => /[*?]/.test(p) || p.endsWith("/");
-
-function globRe(p: string): RegExp {
-  const src = p
-    .split("**")
-    .map((part) =>
-      part
-        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-        .replace(/\*/g, "[^/]*")
-        .replace(/\?/g, "[^/]"),
-    )
-    .join(".*");
-  return new RegExp(`^${src}${p.endsWith("/") ? ".*" : ""}$`);
-}
-
-/** A file list resolved against the tree: its concrete paths, and the patterns among them. */
+/**
+ * A file list resolved against the tree once per task: its concrete paths, and the patterns among
+ * them (`globRe`/`isPattern` are the footprint matcher's, so the planner and `sharedFiles` agree).
+ */
 interface Expanded {
   paths: Set<string>;
   patterns: RegExp[];
@@ -104,11 +92,6 @@ const covers = (x: Expanded, p: string) => x.paths.has(p) || x.patterns.some((re
 
 function shared(a: Expanded, b: Expanded): string[] {
   return [...new Set([...a.paths, ...b.paths])].filter((p) => covers(a, p) && covers(b, p)).sort();
-}
-
-/** The concrete paths two file lists share; a glob or `dir/` matches the tree paths under it. */
-export function sharedFiles(a: string[], b: string[], tree: Tree): string[] {
-  return shared(expand(a, tree), expand(b, tree));
 }
 
 const bytesOf = (tree: Tree, p: string) => tree[p] ?? 0;
@@ -263,12 +246,10 @@ export function planWave(input: { tasks: PlanTask[]; tree: Tree }): Plan {
     if (files.size > DAEMON_DEFAULTS.plan_bundle_files_max) {
       return `over ${DAEMON_DEFAULTS.plan_bundle_files_max} source files (tests aside)`;
     }
-    const merged = (id: TaskId) => (unit(id) === v ? u : unit(id));
-    const g = edges(merged);
-    const sccFree = [...g.keys()].every(
-      (k) => ![...(g.get(k) ?? [])].some((d) => reaches(g, d, k)),
-    );
-    return sccFree ? null : "a declared after runs between them";
+    // Any cycle the merge makes runs through the merged unit.
+    const g = edges((id) => (unit(id) === v ? u : unit(id)));
+    const cycles = [...(g.get(u) ?? [])].some((d) => reaches(g, d, u));
+    return cycles ? "a declared after runs between them" : null;
   }
 
   // Collapse: strong pairs, highest coupling first, merge while the bundle fits.
@@ -315,11 +296,12 @@ export function planWave(input: { tasks: PlanTask[]; tree: Tree }): Plan {
     ) as [TaskId, TaskId];
     const what = `share ${fileList(p.files, tree)} (coupling ${fmtC(p.c)}) and cannot bundle: ${p.reason}`;
     const g = edges(unit);
-    if (reaches(g, second, first)) continue; // already ordered
+    if (reaches(g, second, first)) continue; // already ordered, bigger first
     if (reaches(g, first, second)) {
-      const cycle = "chaining them would cycle with an existing after, so they run in parallel";
-      note(first, `strongly coupled with ${second}: ${what}; ${cycle}`);
-      note(second, `strongly coupled with ${first}: ${what}; ${cycle}`);
+      // The chain would cycle: a declared after already orders them, smaller first.
+      const ordered = `a declared after already runs ${second} before ${first}, so no chain is added`;
+      note(first, `strongly coupled with ${second}: ${what}; ${ordered}`);
+      note(second, `strongly coupled with ${first}: ${what}; ${ordered}`);
       continue;
     }
     chains.push([first, second]);
@@ -469,7 +451,7 @@ function lines(bytes: number): string {
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 /** `20 tasks share src/daemon.ts (11k lines, 14 tasks), … → 5 bundles (…), 2 chains (…), cap 4 in flight`. */
-function clusterWhy(c: PlanCluster, issues: number): string {
+function clusterWhy(c: PlanCluster, taskCount: number): string {
   const hot = c.hot.map((h) => `${h.file} (${lines(h.bytes)}, ${h.shared_by.length} tasks)`);
   const how: string[] = [];
   const { collapse, chain, cap } = c.strategy;
@@ -485,7 +467,7 @@ function clusterWhy(c: PlanCluster, issues: number): string {
   }
   if (cap !== undefined) how.push(`cap ${cap} in flight`);
   if (how.length === 0) how.push("run in parallel");
-  return `${issues} tasks share ${hot.join(", ")} → ${how.join(", ")}`;
+  return `${taskCount} tasks share ${hot.join(", ")} → ${how.join(", ")}`;
 }
 
 /**
@@ -570,9 +552,13 @@ export function diffPlan(fileTasks: FileTask[], plan: Plan): string[] {
       const fb = pb !== undefined ? fileOf.get(pb.issue) : undefined;
       if (pa === undefined || pb === undefined || fa === undefined || fb === undefined) continue;
       if (fa.id === fb.id || dependsOn(fb, fa) || dependsOn(fa, fb)) continue;
-      const files = pa.files.filter((f) => isSourceFile(f) && pb.files.includes(f));
+      // No tree here: a glob still matches the other side's paths, and two globs only themselves.
+      const files = sharedFiles(pa.files, pb.files, {}).filter(isSourceFile).sort();
       const more = files.length - SHOWN_FILES;
-      const share = `${files.slice(0, SHOWN_FILES).join(", ")}${more > 0 ? ` +${more} more` : ""}`;
+      const share =
+        files.length === 0
+          ? `files of cluster ${c.id}`
+          : `${files.slice(0, SHOWN_FILES).join(", ")}${more > 0 ? ` +${more} more` : ""}`;
       out.push(
         `${fa.id} and ${fb.id} share ${share} and run in parallel; the planner would chain them — ${kept}`,
       );
