@@ -29,11 +29,11 @@ export interface ResolvedFootprint {
  * Resolve an issue body's Files list against the tree:
  * - a tree path resolves; a glob or `dir/` resolves to the tree paths it matches (kept too);
  * - a bare file name or a relative fragment (`types.ts`, `helpers/x.ts`, `src/dock/*`) resolves
- *   to the unique tree path ending with it inside the previous entry's package (`packages/<p>/`),
+ *   to the unique tree path ending with it inside the last resolved package (`packages/<p>/`),
  *   else the unique one repo-wide, else goes to `unresolved`;
  * - an entry marked `(new)`, or under `changes/`, is accepted as a new file;
- * - a token with no `/` and no file extension (`github.slug`, `lease_pools.*.match`) is an
- *   identifier and is dropped.
+ * - a token with no `/` and no known file extension (`github.slug`, `lease_pools.*.match`) that
+ *   names no tree file is an identifier and is dropped.
  * `listed`: every entry resolved or new; `resolved`: some did not; `guessed`: no Files section
  * (or none of it resolved), so the backticked tree paths in the body; `none`: nothing.
  */
@@ -43,14 +43,16 @@ export function footprintOf(body: string, tree: Tree): ResolvedFootprint {
   const unresolved: string[] = [];
   let pkg: string | null = null;
   for (const e of filesEntries(body) ?? []) {
-    if (!e.raw.includes("/") && !hasFileExtension(e.raw)) continue; // an identifier
     const got = resolveEntry(e, tree, paths, pkg);
+    // No `/` and no known extension: an identifier, unless it names a tree file (`x.conf`).
+    const identifier = !e.raw.includes("/") && !hasFileExtension(e.raw);
+    if (identifier && !got?.some((f) => Object.hasOwn(tree, f))) continue;
     if (got === null) {
       if (!unresolved.includes(e.raw)) unresolved.push(e.raw);
       continue;
     }
     for (const f of got) files.add(f);
-    pkg = packageOf(got[0] ?? "");
+    pkg = packageOf(got[0] ?? "") ?? pkg;
   }
   if (files.size === 0) {
     const guess = guessed(body, tree);
@@ -139,8 +141,8 @@ export function treeFromLsTree(stdout: string): Tree {
 function unquote(p: string): string {
   if (!(p.startsWith('"') && p.endsWith('"') && p.length >= 2)) return p;
   const bytes: number[] = [];
-  const s = p.slice(1, -1);
   const ESC: Record<string, number> = { n: 10, t: 9, r: 13, a: 7, b: 8, f: 12, v: 11 };
+  const s = Array.from(p.slice(1, -1)); // code points, so a raw surrogate pair stays whole
   for (let i = 0; i < s.length; i++) {
     const ch = s[i] ?? "";
     if (ch !== "\\") {
@@ -148,7 +150,7 @@ function unquote(p: string): string {
       continue;
     }
     const next = s[i + 1] ?? "";
-    const oct = /^[0-7]{3}/.exec(s.slice(i + 1));
+    const oct = /^[0-7]{3}/.exec(s.slice(i + 1, i + 4).join(""));
     if (oct !== null) {
       bytes.push(Number.parseInt(oct[0], 8));
       i += 3;

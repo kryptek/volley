@@ -155,6 +155,25 @@ describe("footprintOf: the rules (delta.md)", () => {
     });
   });
 
+  it("a bare name with an unlisted extension that is a tree path is kept, not dropped as an identifier", () => {
+    const t: Tree = { ...tree, "config/mosquitto.conf": 8, ".gitignore": 4 };
+    expect(footprintOf("## Files\n\n- `.gitignore`\n- `mosquitto.conf`\n- `x.conf`\n", t)).toEqual({
+      files: [".gitignore", "config/mosquitto.conf"],
+      confidence: "listed",
+      unresolved: [],
+      bytes: 12,
+    });
+  });
+
+  it("a bare name keeps the last package in scope across an entry outside packages/", () => {
+    const fp = footprintOf(
+      "## Files\n\n- `packages/beta/src/main.ts`\n- `changes/1.added.md`\n- `types.ts`\n",
+      tree,
+    );
+    expect(fp.files).toContain("packages/beta/src/types.ts");
+    expect(fp.confidence).toBe("listed");
+  });
+
   it("a Files section whose entries all fail to resolve falls back to the guess, else none", () => {
     expect(footprintOf("## Files\n\n- `nowhere.ts`\n", tree)).toEqual({
       files: [],
@@ -187,6 +206,12 @@ describe("treeFromLsTree / readTree", () => {
     "160000 commit 3333333333333333333333333333333333333333       -\tvendor/sub\n" +
     "120000 blob 4444444444444444444444444444444444444444      12\tlink\n" +
     '100644 blob 5555555555555555555555555555555555555555       3\t"docs/\\303\\251t\\303\\251.md"\n';
+
+  it("unquotes a C-quoted path that also carries raw non-ASCII characters", () => {
+    const line =
+      '100644 blob 6666666666666666666666666666666666666666       1\t"a\\tb-\u{1F600}.md"\n';
+    expect(treeFromLsTree(line)).toEqual({ "a\tb-\u{1F600}.md": 1 });
+  });
 
   it("maps each blob to its size, skipping submodules and unquoting C-quoted paths", () => {
     expect(treeFromLsTree(LS)).toEqual({

@@ -132,19 +132,26 @@ function rebase(item: string, first: string): string {
   return at > 0 ? [...segs.slice(0, at), item].join("/") : item;
 }
 
-/** Split on commas outside braces and parentheses (a `(note, with commas)` stays whole). */
-function splitOutside(s: string): string[] {
+/**
+ * Split on commas outside braces and parentheses (a `(note, with commas)` stays whole). An
+ * unclosed `(` does not count, so it cannot swallow the commas after it.
+ */
+function splitOutside(s: string, parens = true): string[] {
   const parts: string[] = [];
   let depth = 0;
+  let open = 0;
   let cur = "";
   for (const ch of s) {
-    if (ch === "{" || ch === "(") depth++;
-    if (ch === "}" || ch === ")") depth = Math.max(0, depth - 1);
+    if (ch === "{" || (parens && ch === "(")) depth++;
+    if (ch === "}" || (parens && ch === ")")) depth = Math.max(0, depth - 1);
+    if (ch === "(") open++;
+    if (ch === ")") open = Math.max(0, open - 1);
     if (ch === "," && depth === 0) {
       parts.push(cur);
       cur = "";
     } else cur += ch;
   }
+  if (parens && open > 0) return splitOutside(s, false);
   parts.push(cur);
   return parts;
 }

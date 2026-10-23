@@ -1576,13 +1576,14 @@ footprint is never silently empty or full of names that are not paths:
 - an entry that is a tree path resolves; a glob (`spec/schemas/*`) or a directory (`docs/`)
   resolves to the tree paths it matches, and the glob stays in `files` for overlap matching;
 - a bare file name (`types.ts`) or a relative fragment (`helpers/pipeline-harness.ts`,
-  `src/dock/*`) resolves to the unique tree path ending with it inside the previous entry's
-  package (`packages/<pkg>/`), else the unique one in the repository; otherwise (no match, or
+  `src/dock/*`) resolves to the unique tree path ending with it inside the last resolved
+  entry's package (`packages/<pkg>/`), else the unique one in the repository; otherwise (no match, or
   several) it is listed in `unresolved`. In the parser, a bare name beside a path in the same
   bullet already lands in that path's directory (`config-defaults.ts, types.ts`);
 - an entry marked `(new)`, or under `changes/`, is accepted as a new file (0 bytes);
-- a token with no `/` and no file extension (`github.slug`, `host.writeFile`,
-  `lease_pools.*.match`) is an identifier, not a file, and is dropped.
+- a token with no `/` and no known file extension (`github.slug`, `host.writeFile`,
+  `lease_pools.*.match`) is an identifier, not a file, and is dropped, unless it names a tree
+  file (`mosquitto.conf` resolves like any bare name).
 
 | Confidence | Meaning |
 |---|---|

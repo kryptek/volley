@@ -50,6 +50,12 @@ describe("parseFilesSection", () => {
     ]);
   });
 
+  it("an unclosed parenthesis does not swallow the commas after it", () => {
+    expect(
+      parseFilesSection("## Files\n\n- packages/a/src/x.ts (see note, packages/a/src/types.ts\n"),
+    ).toEqual(["packages/a/src/types.ts"]);
+  });
+
   it("returns [] when the body has no Files section", () => {
     expect(parseFilesSection("# Title\n\nJust prose mentioning `a/b.ts`.\n")).toEqual([]);
   });
