@@ -4114,6 +4114,7 @@ export class Daemon {
       this.parkClosed(wave, task);
       throw new Error(`${closed.line}: ${task}'s ${role} waits for its re-place question`);
     }
+    if (this.parkUnplaced(wave, task)) throw new Error(`${task}'s ${role} waits: not placed yet`);
     let remote: RepoRemoteHost | undefined;
     if (t.host !== "local") {
       try {
@@ -4852,9 +4853,14 @@ export class Daemon {
 
   /**
    * Task `t` reached a host resolver as `auto` (never placed, never spawned): an alarm, once per
-   * task per daemon run (the set is in memory), and the caller falls back to the supervisor's own host.
+   * task per daemon run (the set is in memory). `then` says what the caller does instead: by
+   * default it falls back to the supervisor's own host; a spawn waits for placement.
    */
-  private autoHostReached(wave: WaveId, t: WaveTask): boolean {
+  private autoHostReached(
+    wave: WaveId,
+    t: WaveTask,
+    then = "its checks run on the supervisor's own host",
+  ): boolean {
     if (t.host !== AUTO_HOST) return false;
     const key = `${wave}/${t.id}`;
     if (!this.autoHostAlarmed.has(key)) {
@@ -4864,11 +4870,42 @@ export class Daemon {
         task: t.id,
         data: {
           alarm: "host_auto_unresolved",
-          message: `host 'auto' reached the host resolver for ${t.id}: its checks run on the supervisor's own host`,
+          message: `host 'auto' reached the host resolver for ${t.id}: ${then}`,
         },
       }).catch((e: unknown) =>
         this.log(`host_auto_unresolved ${key}: ${e instanceof Error ? e.message : String(e)}`),
       );
+    }
+    return true;
+  }
+
+  /**
+   * True (with the host_auto_unresolved alarm) when the task's host is still `auto`: a spawn
+   * never resolves `auto`, placement does (#434). An admitted task gives its admission back, so
+   * the next tick places it and why_waiting is placement's; any other is parked `not placed yet`.
+   */
+  private parkUnplaced(wave: WaveId, task: string): boolean {
+    const rec = this.waves.get(wave)?.record;
+    const def = rec?.wave?.tasks[task];
+    if (def === undefined || !this.autoHostReached(wave, def, "it waits to be placed"))
+      return false;
+    const key = `${wave}/${task}`;
+    if (rec?.admitted.includes(task) === true) {
+      this.parked.delete(key);
+      void this.enqueue(async () => {
+        if (!this.waves.get(wave)?.record.admitted.includes(task)) return;
+        await this.append(wave, {
+          type: "task_admission_returned",
+          task,
+          data: { task, from_host: AUTO_HOST, to_host: AUTO_HOST },
+        });
+      });
+      return true;
+    }
+    const reason = `not placed yet: its host is ${AUTO_HOST}`;
+    if (this.parked.get(key) !== reason) {
+      this.parked.set(key, reason);
+      void this.enqueue(() => this.publishState(wave));
     }
     return true;
   }
@@ -5016,6 +5053,7 @@ export class Daemon {
    */
   private parkOnTunnel(wave: WaveId, task: string): boolean {
     if (this.parkClosed(wave, task)) return true;
+    if (this.parkUnplaced(wave, task)) return true;
     const key = `${wave}/${task}`;
     const def = this.waves.get(wave)?.record.wave?.tasks[task];
     let target: string | undefined;

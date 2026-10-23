@@ -5,6 +5,7 @@ import {
   resolveEvent,
   waveDecisionId,
 } from "./decisions";
+import { AUTO_HOST } from "./placement";
 import { type HostKept, type PlanDiff, diffPlans } from "./plan-diff";
 import { type WaveRecord, plannedHostConflict, startedHost } from "./reducer";
 import type { JournalEvent, NewEvent, TaskId, TaskState, Wave, WaveTask } from "./types";
@@ -21,6 +22,8 @@ import type { JournalEvent, NewEvent, TaskId, TaskState, Wave, WaveTask } from "
  *   issue changed, in flight → the agents keep the old issue; decision plan_change "restart / let finish"
  *   pipeline / model changed → applies to stages not yet started (running agents keep theirs)
  *   host changed, started   → the task keeps the host it runs on (`diff.hosts_kept` says so)
+ *   host changed, admitted   → task_admission_returned: no longer admitted or placed, so the next
+ *                              tick admits (and places) it on its new host
  *
  * "Queued" means not started: still `queued` with no agent spawned and no spawn under way (an
  * admitted task waiting for its spawn slot is still queued, and gives its admission back).
@@ -250,6 +253,7 @@ export function applyPlan(rec: WaveRecord, submitted: Wave, ctx: PlanContext): P
 
   const tasks: Record<TaskId, WaveTask> = {};
   const hostsKept: HostKept[] = [];
+  const returned: NewEvent[] = [];
   for (const id of plan.task_order) {
     const t = plan.tasks[id] as WaveTask;
     const cur = current.tasks[id];
@@ -267,6 +271,22 @@ export function applyPlan(rec: WaveRecord, submitted: Wave, ctx: PlanContext): P
       // A placed task the plan still leaves to placement is where `auto` put it: nothing kept.
       if (st !== undefined && plannedHostConflict(t.host, ran, st) !== undefined)
         hostsKept.push({ task: id, kept: ran, planned: t.host, running: p === "in_flight" });
+    }
+    // Admitted, not started: it was admitted (and maybe placed) for its old host, so it gives the
+    // admission back. A placed task the plan still leaves to placement stays where it was placed.
+    const stillAuto = prevPlan.tasks[id]?.host === AUTO_HOST && t.host === AUTO_HOST;
+    if (
+      p === "queued" &&
+      rec.admitted.includes(id) &&
+      cur !== undefined &&
+      cur.host !== t.host &&
+      !stillAuto
+    ) {
+      returned.push({
+        type: "task_admission_returned",
+        task: id,
+        data: { task: id, from_host: cur.host, to_host: t.host, plan_version: N },
+      });
     }
 
     const issueD = latestPlanDecision(rec, id, "issue");
@@ -314,7 +334,7 @@ export function applyPlan(rec: WaveRecord, submitted: Wave, ctx: PlanContext): P
     tasks[id] = { ...t, after: t.after.filter((d) => order.includes(d)) };
   }
 
-  const head: NewEvent[] = [];
+  const head: NewEvent[] = [...returned];
   for (const id of diff.removed) {
     if (phase(id) === "queued") {
       head.push({

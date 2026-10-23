@@ -1357,3 +1357,47 @@ describe("a machine that stays down: the machine_down decision (SPEC §4.6.15)",
     ).toBe(true);
   });
 });
+
+describe("a local → auto resubmit of an admitted, unspawned task (#434)", () => {
+  let f: Fleet;
+  beforeEach(async () => {
+    f = await makeFleet();
+  });
+  afterEach(async () => {
+    await f.close();
+  });
+
+  it("gives the admission back; the next tick places it on box and spawns it there, never resolving auto", async () => {
+    // Admitted on the supervisor's machine, but its launch is refused: no agent, no spawn under way.
+    f.local.launchOutcome = "refused";
+    await f.submit("w1", "placement: local\n", "  T1: { issue: 42 }\n");
+    await f.tick();
+    await eventually(async () => {
+      await f.tick(0);
+      return f.journal("w1").some((e) => e.type === "spawn_failed" && e.task === "T1");
+    });
+    f.local.launchOutcome = "ok";
+
+    await f.submit("w1", "placement: auto\nplacement_prefer: [box]\n", "  T1: { issue: 42 }\n");
+    expect(f.journal("w1").filter((e) => e.type === "task_admission_returned")).toMatchObject([
+      { task: "T1", data: { task: "T1", from_host: "local", to_host: "auto" } },
+    ]);
+    // Past the refused launch's 30 s backoff, within box's heartbeat timeout.
+    await f.tick(40_000);
+    await eventually(async () => {
+      await f.tick(0);
+      return f.journal("w1").some((e) => e.type === "agent_spawned" && e.task === "T1");
+    });
+    const j = f.journal("w1");
+    expect(j.filter((e) => e.type === "task_placed")).toMatchObject([
+      { task: "T1", data: { host: "box", by: "auto" } },
+    ]);
+    expect(j.find((e) => e.type === "agent_spawned" && e.task === "T1")?.data.host).toBe("box");
+    expect(
+      j.some((e) => e.type === "alarm_raised" && e.data.alarm === "host_auto_unresolved"),
+    ).toBe(false);
+    expect(
+      j.some((e) => typeof e.data.message === "string" && e.data.message.includes("host 'auto'")),
+    ).toBe(false);
+  });
+});

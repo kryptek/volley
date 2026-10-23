@@ -1489,4 +1489,32 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     expect(alarms).toHaveLength(1);
     expect(alarms[0]?.task).toBe("T1");
   });
+  it("an admitted, unplaced auto task's spawn is held for placement, never thrown out of the host resolver (#434)", async () => {
+    localClaude = false;
+    await setup({ drain: true });
+    await submit("w10", "placement: auto\n", "  T1: { issue: 42 }\n");
+    await tick();
+    // A journal from before #434: admitted while its host was `local`, then left to placement.
+    // biome-ignore lint/suspicious/noExplicitAny: journaling an admission the scheduler never made
+    await (daemon as any).append("w10", { type: "task_admitted", task: "T1", data: {} });
+    await tick();
+    await tick();
+    const auto = (e: { type: string; data: Record<string, unknown> }) =>
+      e.type === "alarm_raised" && e.data.alarm === "host_auto_unresolved";
+    await eventually(async () => journal("w10").some(auto));
+    expect(journal("w10").filter(auto)).toHaveLength(1);
+    expect(journal("w10").some((e) => e.type === "spawn_failed")).toBe(false);
+    expect(journal("w10").some((e) => e.data.code === "LAUNCH_FAILED")).toBe(false);
+    // It gives its admission back: placement (no machine is eligible here) is what places it.
+    expect(journal("w10").filter((e) => e.type === "task_admission_returned")).toMatchObject([
+      { task: "T1", data: { task: "T1", from_host: "auto", to_host: "auto" } },
+    ]);
+    expect(daemon.record("w10")?.admitted).not.toContain("T1");
+    expect(journal("w10").find(auto)?.data.message).toMatch(/it waits to be placed$/);
+    // why_waiting is placement's own reason, not a stale "not placed yet" park.
+    await tick();
+    expect((await state("w10")).tasks.find((t) => t.id === "T1")?.why_waiting).toBe(
+      "no eligible machine: box: draining",
+    );
+  });
 });
