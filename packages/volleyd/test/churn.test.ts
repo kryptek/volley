@@ -3,6 +3,7 @@ import {
   churnFuse,
   churnOf,
   fuseQuietUntil,
+  fuseTripped,
   strategyFor,
   strategySwitch,
 } from "../src/autopilot/churn";
@@ -218,7 +219,15 @@ describe("strategySwitch (#384): the journaled change, with hysteresis", () => {
 
 describe("churnFuse (#387): hold the cluster, then ask once", () => {
   const fuse = (o: Partial<Parameters<typeof churnFuse>[0]> = {}) =>
-    churnFuse({ churn: 0, roles: 2, held: false, quietUntil: 0, open: false, ...o });
+    churnFuse({
+      churn: 0,
+      roles: 2,
+      held: false,
+      tripped: false,
+      quietUntil: 0,
+      open: false,
+      ...o,
+    });
   const max = DAEMON_DEFAULTS.churn_roles_multiple_max;
 
   it("quiet up to churn_roles_multiple_max × the task's pipeline roles", () => {
@@ -229,6 +238,36 @@ describe("churnFuse (#387): hold the cluster, then ask once", () => {
     expect(fuse({ churn: max * 2 + 1 })).toBe("hold");
     expect(fuse({ churn: max * 2 + 1, held: true })).toBe("decide");
     expect(fuse({ churn: max * 2 + 5, held: true, open: true })).toBeNull();
+  });
+
+  it("its hold already let go by the monitor (tripped): decide, never hold again (Q1)", () => {
+    expect(fuse({ churn: 8, tripped: true, quietUntil: 7 })).toBe("decide");
+    expect(fuse({ churn: 8, tripped: true, quietUntil: 7, open: true })).toBeNull();
+  });
+
+  it("fuseTripped: the task's last fuse act was a hold, not a decision since", () => {
+    const at = "2026-10-23T09:00:00.000Z";
+    const evs = (extra: NewEvent[]): JournalEvent[] =>
+      extra.map((e, i) => ({ ...e, seq: i + 1, at }));
+    const held: NewEvent = {
+      type: "cluster_strategy_changed",
+      task: "a1",
+      data: { cluster: "A", from: "cap", to: "hold", why: "x", churn: 7 },
+    };
+    const released: NewEvent = {
+      type: "cluster_strategy_changed",
+      data: { cluster: "A", from: "hold", to: "cap", why: "calm" },
+    };
+    const asked: NewEvent = {
+      type: "decision_opened",
+      task: "a1",
+      data: { decision_id: "d1", kind: "churn_exhausted", cluster: "A", churn: 8, roles: [] },
+    };
+    expect(fuseTripped([], "a1")).toBe(false);
+    expect(fuseTripped(evs([held, released]), "a1")).toBe(true);
+    expect(fuseTripped(evs([held, released]), "a2")).toBe(false);
+    expect(fuseTripped(evs([held, released, asked]), "a1")).toBe(false);
+    expect(fuseTripped(evs([held, released, asked, held]), "a1")).toBe(true);
   });
 
   it("acts once per new churn spawn: quiet until its churn passes quietUntil", () => {

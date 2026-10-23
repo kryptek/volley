@@ -222,7 +222,7 @@ describe("digestOf", () => {
     );
     expect(d.auto.churn).toEqual({ branch_updates: 2, rereviews: 1, retries: 1, trains: 1 });
     expect(schemaErrors("digest.schema.json", envelope("_waves/digest", "digest", d))).toEqual([]);
-    expect(summaryLine(d)).toContain(", 5 churn spawns");
+    expect(summaryLine(d)).toContain(", 5 churn spawns (no budget)");
     expect(renderDigestMd(d)).toContain(
       "- 5 churn spawns (2 branch updates, 1 re-review, 1 retry, 1 train)",
     );
@@ -354,7 +354,9 @@ describe("summaryLine", () => {
         waiting: [],
         auto: { ...base.auto, churn: { branch_updates: 1, rereviews: 0, retries: 0, trains: 0 } },
       }),
-    ).toBe("w1 complete: 27 shipped, 3 flakes fixed, 2 conflicts resolved, 1 churn spawn");
+    ).toBe(
+      "w1 complete: 27 shipped, 3 flakes fixed, 2 conflicts resolved, 1 churn spawn (no budget)",
+    );
   });
 });
 

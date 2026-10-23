@@ -309,7 +309,7 @@ export function summaryLine(d: Digest): string {
   if (conflicts > 0) parts.push(`${count(conflicts, "conflict", "conflicts")} resolved`);
   if (d.auto.retries > 0) parts.push(count(d.auto.retries, "retry", "retries"));
   const churn = churnTotal(d.auto.churn);
-  if (churn > 0) parts.push(count(churn, "churn spawn", "churn spawns"));
+  if (churn > 0) parts.push(`${count(churn, "churn spawn", "churn spawns")} (no budget)`);
   const answered = d.auto.decisions_resolved;
   if (answered > 0) parts.push(`${count(answered, "decision", "decisions")} answered`);
   if (d.failures.length > 0) parts.push(`${d.failures.length} failed`);

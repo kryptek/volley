@@ -183,6 +183,44 @@ describe("churn spawns and the spawn budget (#387)", () => {
     expect(s.daemon.snapshot("w1")?.tasks[0]?.churn).toBe(1);
   });
 
+  it("a wave at its budget still spawns a rebase agent and opens no decision; productive spawns past it do", async () => {
+    // The implementer spends the budget of 1; its PR conflicts and no CI runs on it, so the
+    // pipeline enters the branch-update step at once.
+    const exec: NonNullable<Parameters<typeof makeSupervisedEnv>[0]>["exec"] = ARTIFACTS_OK.map(
+      ([prefix, reply]) => {
+        const p = prefix.join(" ");
+        if (p === "gh pr list")
+          return [
+            prefix,
+            {
+              stdout: JSON.stringify([
+                {
+                  ...JSON.parse((reply as { stdout: string }).stdout)[0],
+                  mergeable: "CONFLICTING",
+                },
+              ]),
+            },
+          ];
+        if (p === "gh run list" || p === "gh api") return [prefix, { stdout: "[]" }];
+        return [prefix, reply];
+      },
+    );
+    s = await makeSupervisedEnv({
+      exec,
+      pipeline: "[implement, spec_review, merge_ready]",
+      waveExtra: "spawn_budget: 1",
+    });
+    await s.status("done");
+    const rebase = await s.event((e) => e.type === "agent_spawned" && e.data.role === "rebase");
+    expect(rebase.data).toMatchObject({ churn: true, cause: "branch_update" });
+    await s.daemon.tick();
+    await s.settled();
+    expect(budgetDecisions()).toHaveLength(0);
+    expect(s.daemon.snapshot("w1")?.spawns).toMatchObject({ productive: 1, churn: 1, budget: 1 });
+    // A productive spawn past the same budget (the reviewer after a verified done) is held and
+    // asks: "spawn budget exhausted" above.
+  });
+
   it("churn spent no budget: the next productive spawn goes through", async () => {
     s = await makeSupervisedEnv({
       exec: ARTIFACTS_OK,

@@ -169,19 +169,36 @@ export type FuseStep = "hold" | "decide" | null;
 /**
  * The churn fuse (SPEC §4.6.16): churn spends no spawn budget, so a task whose churn spawns are
  * more than `churn_roles_multiple_max` × its pipeline `roles` (and more than `quietUntil`, the
- * churn it last acted on) puts its cluster on `hold`; churn that goes on while the cluster is held
- * opens one `churn_exhausted` decision, never a second while one is `open`. Pure.
+ * churn it last acted on) puts its cluster on `hold`; churn that goes on while the cluster is held,
+ * or after the monitor let the fuse's own hold go (`tripped`), opens one `churn_exhausted`
+ * decision, never a second while one is `open`. Pure.
  */
 export function churnFuse(o: {
   churn: number;
   roles: number;
   held: boolean;
+  tripped: boolean;
   quietUntil: number;
   open: boolean;
 }): FuseStep {
   const limit = DAEMON_DEFAULTS.churn_roles_multiple_max * o.roles;
   if (o.churn <= limit || o.churn <= o.quietUntil || o.open) return null;
-  return o.held ? "decide" : "hold";
+  return o.held || o.tripped ? "decide" : "hold";
+}
+
+/**
+ * Whether `task`'s fuse last acted with a hold (`cluster_strategy_changed { churn }` naming it)
+ * and has opened no `churn_exhausted` decision since: the monitor may let that hold go once the
+ * cluster is calm, and the fuse must then ask rather than hold again.
+ */
+export function fuseTripped(events: readonly JournalEvent[], task: TaskId): boolean {
+  let tripped = false;
+  for (const e of events) {
+    if (e.task !== task) continue;
+    if (e.type === "cluster_strategy_changed" && typeof e.data.churn === "number") tripped = true;
+    else if (e.type === "decision_opened" && e.data.kind === "churn_exhausted") tripped = false;
+  }
+  return tripped;
 }
 
 /**

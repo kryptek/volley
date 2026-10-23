@@ -1873,4 +1873,100 @@ ${capped("i315", 315)}${capped("i317", 317)}${capped("i318", 318)}${capped("i322
     expect(decisions()).toHaveLength(1);
     expect(daemon.snapshot("wc")?.tasks.find((t) => t.id === "i315")?.churn).toBe(7);
   });
+
+  describe("the churn fuse's loop and answers (#387)", () => {
+    let n = 0;
+    const churned = async (k: number) => {
+      for (let i = 0; i < k; i++) {
+        n++;
+        await daemon.recordEvent("wc", {
+          type: "agent_spawned",
+          task: "i315",
+          data: {
+            role: "implementer",
+            agent_id: `wc-i315-implementer-${n + 1}`,
+            attempt: n + 1,
+            churn: true,
+            cause: "retry",
+          },
+        });
+      }
+      await daemon.tick();
+      await daemon.settled();
+    };
+    const decisions = () =>
+      daemon
+        .journalEvents("wc")
+        .filter((e) => e.type === "decision_opened" && e.data.kind === "churn_exhausted");
+    const cluster = () => daemon.snapshot("wc")?.overlap_plan?.clusters[0]?.state;
+    const stage = () => daemon.snapshot("wc")?.tasks.find((t) => t.id === "i315")?.stage;
+    /** Trip the fuse (hold), let the monitor release the calm cluster, then churn once more. */
+    const asked = async () => {
+      n = 0;
+      await start();
+      await churned(4);
+      expect(cluster()).toBe("hold");
+      await clock.advance(DAEMON_DEFAULTS.cluster_strategy_min_interval_ms + 1);
+      await daemon.tick();
+      await daemon.settled();
+      expect(cluster()).toBe("planned");
+      await churned(1);
+      const d = decisions();
+      expect(d).toHaveLength(1);
+      return String(d[0]?.data.decision_id);
+    };
+    const answer = async (id: string, a: string) => {
+      const r = await client.request("resolve", { decision_id: id, answer: a, by: "owner" });
+      expect(r.error).toBeUndefined();
+      await daemon.tick();
+      await daemon.settled();
+    };
+
+    it("a hold the monitor let go does not loop: more churn asks the owner (Q1)", async () => {
+      await asked();
+      // Not a second fuse hold: the decision is the escalation.
+      const holds = daemon
+        .journalEvents("wc")
+        .filter((e) => e.type === "cluster_strategy_changed" && e.task === "i315");
+      expect(holds).toHaveLength(1);
+    });
+
+    it("cancel: the task is cancelled", async () => {
+      const id = await asked();
+      await answer(id, "Cancel");
+      const c = daemon.journalEvents("wc").find((e) => e.type === "task_cancelled");
+      expect(c?.task).toBe("i315");
+      expect(c?.data).toEqual({ by: "owner", why: `churn exhausted (decision ${id})` });
+      expect(stage()).toBe("cancelled");
+    });
+
+    it("hold cluster: the released cluster is held again, naming the task", async () => {
+      const id = await asked();
+      await answer(id, "hold cluster");
+      expect(cluster()).toBe("hold");
+      const last = daemon
+        .journalEvents("wc")
+        .filter((e) => e.type === "cluster_strategy_changed")
+        .at(-1);
+      expect(last?.task).toBe("i315");
+      expect(last?.data).toMatchObject({
+        to: "hold",
+        why: `owner answered hold cluster (decision ${id})`,
+      });
+    });
+
+    it("continue: quiet until as much churn again, then held, then asked", async () => {
+      const id = await asked();
+      await answer(id, "continue");
+      // Asked at 5 churn, 1 role: quiet up to 5 + 3.
+      await churned(3);
+      expect(decisions()).toHaveLength(1);
+      expect(cluster()).toBe("planned");
+      await churned(1);
+      expect(cluster()).toBe("hold");
+      expect(decisions()).toHaveLength(1);
+      await churned(1);
+      expect(decisions()).toHaveLength(2);
+    });
+  });
 });

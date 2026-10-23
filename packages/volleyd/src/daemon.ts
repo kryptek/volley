@@ -80,7 +80,14 @@ import {
 import { ciStateOf } from "./artifacts";
 import { budgetUsed } from "./autopilot/budgets";
 import { carryHandoff, carryPicker } from "./autopilot/carry";
-import { churnFuse, churnOf, fuseQuietUntil, plannedName, strategySwitch } from "./autopilot/churn";
+import {
+  churnFuse,
+  churnOf,
+  fuseQuietUntil,
+  fuseTripped,
+  plannedName,
+  strategySwitch,
+} from "./autopilot/churn";
 import { type Digest, type DigestTrigger, digestOf, summaryLine } from "./autopilot/digest";
 import { type GithubStatus, githubStatusCache } from "./autopilot/github-status";
 import {
@@ -12110,6 +12117,7 @@ export class Daemon {
     const events = log.journal.readAll();
     const now = this.now();
     const churn = churnOf(log.record, events, now);
+    let changed = false;
     for (const c of clusters) {
       const change = strategySwitch(
         c,
@@ -12123,22 +12131,22 @@ export class Daemon {
         type: "cluster_strategy_changed",
         data: { cluster: c.id, ...change },
       });
+      changed = true;
       this.log(`wave ${wave}: cluster ${c.id} ${change.from} → ${change.to} (${change.why})`);
     }
-    await this.churnFusePass(wave);
+    await this.churnFusePass(wave, changed ? log.journal.readAll() : events);
   }
 
   /**
    * The churn fuse (#387, autopilot/churn.ts `churnFuse`): a task whose churn spawns are more
    * than `churn_roles_multiple_max` × its pipeline roles puts its cluster on hold
    * (`cluster_strategy_changed { churn }`, naming the task); churn that goes on while the cluster
-   * is held opens one task-level `churn_exhausted` decision (hold cluster | continue | cancel).
+   * is held, or after the monitor let the fuse's hold go, opens one task-level `churn_exhausted`
+   * decision (hold cluster | continue | cancel). `events` is the wave's journal as of now.
    */
-  private async churnFusePass(wave: WaveId): Promise<void> {
-    const log = this.waves.get(wave);
-    const rec = log?.record;
-    if (log === undefined || rec?.wave == null || rec.state == null) return;
-    const events = log.journal.readAll();
+  private async churnFusePass(wave: WaveId, events: readonly JournalEvent[]): Promise<void> {
+    const rec = this.waves.get(wave)?.record;
+    if (rec?.wave == null || rec.state == null) return;
     for (const t of rec.state.tasks) {
       const churn = t.churn ?? 0;
       const c = rec.state.overlap_plan?.clusters.find((x) => x.id === t.cluster);
@@ -12150,6 +12158,7 @@ export class Daemon {
         churn,
         roles,
         held: c.state === "hold",
+        tripped: fuseTripped(events, t.id),
         quietUntil: fuseQuietUntil(events, t.id, limit),
         open: openDecisions(rec).some((d) => d.kind === "churn_exhausted" && d.task === t.id),
       });

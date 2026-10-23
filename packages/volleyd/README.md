@@ -2322,12 +2322,14 @@ status` prints them under the header:
 ```
 
 The digest's `auto.churn` counts them by cause (`branch_updates`, `rereviews`, `retries`,
-`trains`), and its one-line push summary mentions churn only when there was any.
+`trains`), and its one-line push summary mentions churn only when there was any (`5 churn
+spawns (no budget)`).
 
 **The churn fuse.** Uncounted churn is monitored instead. When a task in a cluster of the overlap
 plan has more churn spawns than `churn_roles_multiple_max` (3) × its pipeline roles, its cluster
 goes on `hold` (journaled `cluster_strategy_changed { churn }` naming the task: one member at a
-time). If the cluster is already on hold and the task churns again, one task-level
+time). If the cluster is still on hold, or the churn monitor let the fuse's hold go since, and
+the task churns again, one task-level
 `churn_exhausted { cluster, churn, roles }` decision opens (`hold cluster` | `continue` |
 `cancel`; never a second while one is open). `hold cluster` puts the cluster back on hold if the
 churn monitor let it go meanwhile; `continue` keeps the fuse quiet until the task churns as much
