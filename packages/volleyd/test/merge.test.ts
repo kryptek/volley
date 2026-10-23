@@ -233,6 +233,7 @@ describe("autopilot merge: the merge train's merge commit", () => {
     ["retargeted", { state: "OPEN", headRefOid: T, baseRefName: "main" }, "retargeted"],
     ["moved", { state: "OPEN", headRefOid: H, baseRefName: "release/w" }, "head_moved"],
     ["closed", { state: "CLOSED", headRefOid: T, baseRefName: "release/w" }, "closed"],
+    ["draft", { state: "OPEN", headRefOid: T, baseRefName: "release/w", isDraft: true }, "draft"],
   ] as const) {
     it(`refuses a ${what} train PR before merging`, async () => {
       const f = fakeExec().on(TPRE, { stdout: JSON.stringify(pr) });

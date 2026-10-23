@@ -139,8 +139,9 @@ function afterFirst(entries: QueueEntry[], wave: Wave): QueueEntry[] {
  * candidate competes by readiness. (Each pipeline driver passes its own wave only: across waves
  * the release-branch lock goes to whichever wave asks first.)
  *
- * An entry in a merge train is skipped: the train merges it (the driver asks formTrain first
- * when `autopilot.merge_train` is on, merge-train.ts).
+ * A branch with an entry in a merge train gets no turn: the train merges its members and holds
+ * the release branch as a merge in flight does (the driver asks formTrain first when
+ * `autopilot.merge_train` is on, merge-train.ts).
  *
  * An ungated (updating) entry is skipped, so a gated entry behind it can go first: the "never
  * ahead of a task it comes after" order holds only because a dependent is admitted after its
@@ -152,12 +153,11 @@ export function nextToMerge(
   inflight: ReadonlySet<string>,
 ): { branch: string; wave: WaveId; task: TaskId } | null {
   for (const [branch, entries] of Object.entries(queues)) {
-    if (inflight.has(branch)) continue;
+    if (inflight.has(branch) || entries.some((e) => e.train !== undefined)) continue;
     for (const state of ["queued", "refused"] as const) {
       const firsts = new Map<WaveId, QueueEntry>();
       for (const e of entries)
-        if (e.gated && e.train === undefined && rank(e) === state && !firsts.has(e.wave))
-          firsts.set(e.wave, e);
+        if (e.gated && rank(e) === state && !firsts.has(e.wave)) firsts.set(e.wave, e);
       const best = [...firsts.values()].sort((a, b) => cmp(a.since, b.since))[0];
       if (best !== undefined) return { branch, wave: best.wave, task: best.task };
     }

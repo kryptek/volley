@@ -356,11 +356,16 @@ export function mintTrainToken(t: TrainToken): TrainToken {
     throw new FenceError(`gh pr merge ${t.pr}`, "not a PR number");
   if (!SHA40.test(t.head))
     throw new FenceError(`gh pr merge --match-head-commit ${t.head}`, "not a full commit sha");
-  if (t.members.length === 0)
-    throw new FenceError("gh pr merge (train)", "a train without members");
-  for (const m of t.members)
+  if (t.release_branch === "")
+    throw new FenceError("gh pr merge (train)", "a train without a release branch");
+  if (new Set(t.members.map((m) => m.task)).size < 2)
+    throw new FenceError("gh pr merge (train)", "a train of fewer than two distinct members");
+  for (const m of t.members) {
+    if (m.task === "")
+      throw new FenceError("gh pr merge (train member)", "a member without a task");
     if (!SHA40.test(m.head))
       throw new FenceError(`gh pr merge (train member ${m.task})`, "not a full commit sha");
+  }
   const token = Object.freeze({
     train: t.train,
     pr: t.pr,

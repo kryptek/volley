@@ -1447,9 +1447,29 @@ describe("train token (the merge train)", () => {
     expect(() => mintTrainToken({ ...base, members: [{ task: "T1", head: "abc" }] })).toThrow(
       FenceError,
     );
+    const two = [
+      { task: "T1", head: M1 },
+      { task: "T2", head: M2 },
+    ];
+    expect(() => mintTrainToken({ ...base, train: "t1", members: two })).toThrow(FenceError);
+    expect(() => mintTrainToken({ ...base, members: [{ task: "T1", head: M1 }] })).toThrow(
+      /fewer than two/,
+    );
     expect(() =>
-      mintTrainToken({ ...base, train: "t1", members: [{ task: "T1", head: M1 }] }),
-    ).toThrow(FenceError);
+      mintTrainToken({
+        ...base,
+        members: [
+          { task: "T1", head: M1 },
+          { task: "T1", head: M2 },
+        ],
+      }),
+    ).toThrow(/fewer than two/);
+    expect(() =>
+      mintTrainToken({ ...base, members: [{ task: "", head: M1 }, two[1] as (typeof two)[1]] }),
+    ).toThrow(/without a task/);
+    expect(() => mintTrainToken({ ...base, release_branch: "", members: two })).toThrow(
+      /release branch/,
+    );
   });
 });
 

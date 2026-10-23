@@ -228,16 +228,23 @@ describe("the merge train in the queue", () => {
     ]);
   });
 
-  it("nextToMerge skips entries in a train", () => {
-    expect(nextToMerge({ b: queueOf(withTrain()) }, new Set())).toEqual({
-      branch: "b",
-      wave: "w1",
-      task: "T3",
-    });
+  it("nextToMerge gives no turn on a branch while a train holds it", () => {
+    // T3 and T4 are gated and outside the train, but the train holds the release branch as a
+    // merge in flight does (SPEC §4.6.23).
+    expect(nextToMerge({ b: queueOf(withTrain()) }, new Set())).toBeNull();
     const forming: QueueEntry[] = [
       { wave: "w1", task: "T1", state: "queued", since: at(1), gated: true, train: "train-3" },
       { wave: "w1", task: "T2", state: "queued", since: at(2), gated: true },
     ];
-    expect(nextToMerge({ b: forming }, new Set())?.task).toBe("T2");
+    expect(nextToMerge({ b: forming }, new Set())).toBeNull();
+    // Another branch still takes its turn.
+    const other: QueueEntry[] = [
+      { wave: "w2", task: "T9", state: "queued", since: at(3), gated: true },
+    ];
+    expect(nextToMerge({ b: forming, c: other }, new Set())).toEqual({
+      branch: "c",
+      wave: "w2",
+      task: "T9",
+    });
   });
 });

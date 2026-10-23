@@ -187,4 +187,16 @@ describe("formTrain", () => {
     expect(form(rec, { size: 2, enabled: true })?.members).toHaveLength(2);
     expect(form(rec, { size: 1, enabled: true })).toBeNull();
   });
+
+  it("a refused entry that lost its turn goes last and is not the front; one that keeps its place is not moved", () => {
+    const rec = record("w1", {
+      T1: { queued: 1, cluster: "c1", p: { merge_refusals: 1, merge_refusal_reason: "behind" } },
+      T2: { queued: 2, cluster: "c2" },
+      T3: { queued: 3, cluster: "c1" },
+      T4: { queued: 4, p: { merge_refusals: 1, merge_refusal_reason: "checks" } },
+    });
+    // The front is T2 (T1 lost its turn), so c2 leads; T1 comes after every other member.
+    expect(form(rec)?.members.map((m) => m.task)).toEqual(["T2", "T3", "T4", "T1"]);
+    expect(queueOf(rec).find((e) => e.task === "T4")?.keepsPlace).toBe(true);
+  });
 });

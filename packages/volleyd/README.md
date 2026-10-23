@@ -3774,7 +3774,8 @@ pure formation, `src/autopilot/merge.ts` the merge):
   from 1), integrated on the branch `volley/train/<wave>-t<n>`, and carries each member's
   `{ wave, task, pr, head }`.
 - **In the queue.** While a train forms or runs, its members show `merging` in the queue (the
-  entry's `train` names it) and `nextToMerge` never gives one of them the ordinary turn.
+  entry's `train` names it), and `nextToMerge` gives no ordinary turn on that release branch, to
+  a member or to a gated task outside the train: the train holds the branch.
 - **The fence.** The train's PR merges only with a `TrainToken` over `{ train, pr, head,
   release_branch, members: [{ task, head }] }`, minted by `mintTrainToken` once the train's
   evidence is written (checked by identity, like a `MergeToken`). It allows exactly `gh pr merge
