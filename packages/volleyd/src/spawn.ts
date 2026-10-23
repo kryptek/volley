@@ -187,7 +187,7 @@ export interface SpawnDeps {
     | "agent_mcp"
     | "agent_auto_compact_pct"
   > &
-    Partial<Pick<Tunables, "require_fresh_base" | "agent_mcp_allow">>;
+    Partial<Pick<Tunables, "require_fresh_base" | "agent_mcp_allow" | "tmux_cols" | "tmux_rows">>;
   /** The wave owner: the agents' parent (default volleyd). */
   owner: string | null;
   journal: (ev: NewEvent) => unknown | Promise<unknown>;
@@ -759,6 +759,9 @@ async function launchAttempt(
           name: launchName(req, attempt),
           command: LAUNCH_COMMAND,
           launch,
+          ...(deps.tunables.tmux_cols !== undefined && deps.tunables.tmux_rows !== undefined
+            ? { size: { cols: deps.tunables.tmux_cols, rows: deps.tunables.tmux_rows } }
+            : {}),
         }));
       }
     } catch (e) {

@@ -47,6 +47,11 @@ export interface Digest {
   generated_at: string;
   trigger: DigestTrigger;
   shipped: DigestShipped[];
+  /**
+   * The shipped tasks' issues, in merge order (#416): the release PR's `Closes #…` lines, since a
+   * task's PR into the release branch closes nothing. Cancelled tasks are never in it.
+   */
+  closes: number[];
   auto: {
     decisions_resolved: number;
     flakes_fixed: { test: string; fixer: TaskId; prs_released: number }[];
@@ -222,6 +227,7 @@ export function digestOf(
     generated_at: now,
     trigger,
     shipped,
+    closes: closesOf(shipped),
     auto,
     waiting,
     held,
@@ -232,6 +238,11 @@ export function digestOf(
       : {}),
   };
 }
+
+/** The issues a release closes: each shipped task's, once, in merge order. */
+export const closesOf = (shipped: readonly Pick<DigestShipped, "issue">[]): number[] => [
+  ...new Set(shipped.map((s) => s.issue).filter((n) => n > 0)),
+];
 
 const VERB: Record<DigestTrigger, string> = {
   wave_complete: "complete",
@@ -281,6 +292,10 @@ export function renderDigestMd(d: Digest): string {
     out.push(
       `- ${s.task} (#${s.issue})${title}: PR #${s.pr.number} ${s.pr.url} (merged by ${s.merged_by})`,
     );
+  }
+  if (d.closes.length > 0) {
+    out.push("", "## Closes", "", "The release PR's body:", "");
+    for (const n of d.closes) out.push(`    Closes #${n}`);
   }
   const a = d.auto;
   out.push("", "## Autopilot handled", "");

@@ -54,6 +54,8 @@
 # brief_preface_max_bytes: 16384  # largest brief preface; a larger one refuses run / the spawn
 # wake_grace_s: 120
 # screen_tail_interval_s: 5     # seconds between captures of each live agent's terminal (screen topic)
+# tmux_cols: 220                # a paired machine's tmux session size at launch (and after the
+# tmux_rows: 50                 # Desk's Terminal popout closes); 20..500 each
 # stop_grace_s: 30              # after `volleyd stop`: seconds agents get to end; then force-retired
 # dynsec_batch_ms: 50           # window collecting simultaneous mints / deletes into ONE broker
 #                               # control message (one Dynamic Security state-file rewrite)

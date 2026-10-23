@@ -152,6 +152,11 @@ export class LocalCmuxHost implements Host {
     await this.cmux(["cmux", "send", "--workspace", workspace, text], tokens);
   }
 
+  /** cmux has no verb to resize a workspace's terminal: its window's size is the user's. */
+  async resize(): Promise<boolean> {
+    return false;
+  }
+
   async close(workspace: string, consent: ConsentToken): Promise<void> {
     // Bounded: a slow cmux must not hold a retire (or cleanup) forever.
     const r = await this.cmux(["cmux", "close-workspace", "--workspace", workspace], {

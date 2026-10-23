@@ -1427,3 +1427,75 @@ describe("pickers and handoffs: Up/Down/Space and typed answers need the inbox i
     );
   });
 });
+
+describe("the issue lifecycle's gh writes (#416): exact forms only", () => {
+  const M = "<!-- volleyd:merged-to-release wave=w1 pr=418 -->";
+  const allowed: string[][] = [
+    ["gh", "issue", "view", "412", "--json", "state,labels,comments"],
+    ["gh", "issue", "edit", "412", "--add-label", "merged-to-release"],
+    ["gh", "issue", "edit", "412", "--remove-label", "merged-to-release"],
+    ["gh", "issue", "comment", "412", "--body", `Merged into \`release/w1\` in PR #418.\n\n${M}`],
+    ["gh", "issue", "close", "412", "--comment", `closed by the release PR #9\n\n${M}`],
+    ["gh", "label", "list", "--search", "merged-to-release", "--json", "name"],
+    [
+      "gh",
+      "label",
+      "create",
+      "merged-to-release",
+      "--description",
+      "Merged into a release branch",
+      "--color",
+      "0e8a16",
+    ],
+    [
+      "gh",
+      "pr",
+      "list",
+      "--head",
+      "release/w1",
+      "--state",
+      "merged",
+      "--json",
+      "number,baseRefName",
+    ],
+  ];
+  const denied: string[][] = [
+    ["gh", "issue", "edit", "412", "--title", "x"],
+    ["gh", "issue", "edit", "412", "--add-label", "bug"],
+    ["gh", "issue", "edit", "412", "--remove-label", "bug"],
+    ["gh", "issue", "edit", "412", "--add-label", "merged-to-release", "--title", "x"],
+    ["gh", "issue", "edit", "-1", "--add-label", "merged-to-release"],
+    ["gh", "issue", "edit", "412", "--add-label=merged-to-release"],
+    ["gh", "issue", "close", "412"],
+    ["gh", "issue", "close", "412", "--comment", "no marker"],
+    ["gh", "issue", "close", "412", "--comment", `x ${M}`, "--reason", "not planned"],
+    ["gh", "issue", "comment", "412", "--body", "a comment volleyd did not write"],
+    // The marker is volleyd's shape: on its own line at the end, not anywhere in the body.
+    ["gh", "issue", "comment", "412", "--body", `${M} and text after it`],
+    ["gh", "issue", "comment", "412", "--body", `text ${M}`],
+    ["gh", "issue", "comment", "412", "--body-file", "/etc/passwd"],
+    ["gh", "issue", "comment", "412", "--edit-last", "--body", M],
+    ["gh", "issue", "delete", "412"],
+    ["gh", "issue", "reopen", "412"],
+    ["gh", "label", "delete", "merged-to-release"],
+    ["gh", "label", "create", "bug", "--description", "x", "--color", "0e8a16"],
+    ["gh", "label", "create", "merged-to-release", "--force"],
+    ["gh", "label", "create", "merged-to-release", "--description", "x", "--color", "red"],
+    ["gh", "label", "edit", "merged-to-release", "--name", "x"],
+    ["gh", "label", "list", "--web"],
+  ];
+  it.each(allowed.map((a) => [a.slice(0, 4).join(" "), a]))("allows %s", (_l, argv) => {
+    expect(() => assertAllowed(argv as string[])).not.toThrow();
+  });
+  it.each(denied.map((a) => [a.join(" "), a]))("denies %s", (_l, argv) => {
+    expect(() => assertAllowed(argv as string[])).toThrow(FenceError);
+  });
+  it("never on a paired machine: the writes run on the supervisor's own", () => {
+    const step = { argv: ["gh", "issue", "edit", "412", "--add-label", "merged-to-release"] };
+    expect(() =>
+      assertAllowed(["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"], {
+        remote: { steps: [step] },
+      }),
+    ).toThrow(FenceError);
+  });
+});

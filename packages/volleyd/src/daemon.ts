@@ -111,6 +111,23 @@ import {
   withHeld,
 } from "./autopilot/inbox";
 import {
+  type IssueView,
+  type TaskIssue,
+  issueLedger,
+  issueOutcomes,
+  issueRows,
+  issueViewArgv,
+  mergedActions,
+  mergedFrom,
+  parseIssueView,
+  prViewArgv,
+  releaseActions,
+  releasePrArgv,
+  releasedPr,
+  runIssueActions,
+  taskIssues,
+} from "./autopilot/issues";
+import {
   DEFAULT_PLAYBOOK,
   PlaybookError,
   type PlaybookStage,
@@ -246,10 +263,10 @@ import {
 } from "./decisions";
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
-import { mintConsentToken, mintModelSwitchToken, mintWakeToken } from "./fence";
+import { TMUX_SIZE, mintConsentToken, mintModelSwitchToken, mintWakeToken } from "./fence";
 import { LOCAL_HOST } from "./fleet-name";
 import { lockFetches } from "./git-lock";
-import type { Host } from "./hosts/host";
+import type { Host, TermSize } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
 import {
   type RemoteHost,
@@ -1238,6 +1255,16 @@ export class Daemon {
   private readonly heldChecks = new Set<string>();
   /** When each held decision's PR / issue was last checked (`<wave>/<id>`): once per ci_poll_ms. */
   private readonly heldCheckedAt = new Map<string, number>();
+  /** Waves whose issue lifecycle gh is working on now (#416): one pass per wave at a time. */
+  private readonly issueChecks = new Set<WaveId>();
+  /** When a wave's issue work may run again after a failed gh call (ci_poll_ms on). */
+  private readonly issueRetryAt = new Map<WaveId, number>();
+  /** Consecutive issue passes that failed, per wave (the retry backs off after the first). */
+  private readonly issueFailures = new Map<WaveId, number>();
+  /** `<wave>/<issue>` gh showed needs nothing at its merge (closed by hand): not read again. */
+  private readonly issueSettled = new Set<string>();
+  /** When each complete wave last looked for its merged release PR (release_merge_poll_ms). */
+  private readonly releasePolledAt = new Map<WaveId, number>();
   /** Each wave's pipeline driver (T6), created on first use. */
   private readonly pipelines = new Map<WaveId, PipelineDriver>();
   /** The release train's stage driver per releasing wave (SPEC §4.6.19). */
@@ -2423,6 +2450,8 @@ export class Daemon {
     this.stopGrace.clear();
     for (const t of this.reconnectTimers.values()) this.time.clearTimeout(t);
     this.reconnectTimers.clear();
+    // A resize still in its coalescing window never reaches the host once halted.
+    for (const id of [...this.resizes.keys()]) this.dropResize(id, "volleyd is stopping");
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
@@ -2855,6 +2884,8 @@ export class Daemon {
       // Every wave, paused or stopped too: a running remote agent's reap waits on its tunnel's
       // check, which must not go stale.
       for (const wave of this.waves.keys()) this.checkTunnels(wave);
+      // The issue lifecycle (#416): gh beside the queue, on the wave's own repo.
+      for (const wave of this.waves.keys()) this.issuesPass(wave);
       for (const wave of this.waves.keys()) this.spawnAdmitted(wave);
       // Level-triggered pipeline work: retry held role spawns, re-check pending CI, see merges.
       // Its git / gh checks run beside the queue; one wave's error never skips the others.
@@ -3691,9 +3722,16 @@ export class Daemon {
     const train = this.releasePlaybook(wave);
     if (typeof train === "object" && train !== null) {
       const { path, sha256, playbook } = train;
+      // The release PR's Closes lines (#416): the done tasks' issues, as the digest lists them.
+      const { closes } = digestOf(
+        this.journalEvents(wave),
+        state,
+        dateOf(this.time).toISOString(),
+        "wave_complete",
+      );
       await this.append(wave, {
         type: "release_started",
-        data: { done, cancelled, playbook: { path, sha256, stages: playbook.stages } },
+        data: { done, cancelled, closes, playbook: { path, sha256, stages: playbook.stages } },
       });
       this.log(`wave ${wave} releasing: ${playbook.stages.map((s) => s.name).join(", ")}`);
       await this.releaseAdvance(wave);
@@ -5772,6 +5810,7 @@ export class Daemon {
     const log = a !== undefined ? this.waves.get(a.wave) : undefined;
     if (a === undefined || log === undefined) return;
     this.supervised.delete(agentId);
+    this.dropResize(agentId, `agent '${agentId}' retired`);
     this.lastWokenAt.delete(agentId);
     this.wakeTyped.delete(agentId);
     for (const [id, w] of this.wakes) if (w.agent === agentId) this.disarmWake(id);
@@ -6919,11 +6958,18 @@ export class Daemon {
       return;
     }
     const attempt = this.agentAttempt(wave, RELEASE_TASK, "release", stage.name);
+    const started = this.journalEvents(wave)
+      .filter((e) => e.type === "release_started")
+      .at(-1);
+    const closes = Array.isArray(started?.data.closes)
+      ? (started.data.closes as unknown[]).filter((n): n is number => typeof n === "number")
+      : [];
     const files = {
       "stage.md": renderStageMd(stage, {
         wave,
         release_branch: rec.state.release_branch,
         attempt,
+        closes,
       }),
     };
     void this.startSpawn(wave, RELEASE_TASK, "release", { stage, files }).catch((e: unknown) => {
@@ -9769,8 +9815,12 @@ export class Daemon {
         return this.archiveOp(p, by);
       case "steer":
         return this.steer(p, by);
+      case "terminal_resize":
+        return this.terminalResize(p, by);
       case "merged":
         return this.mergedOp(p, by);
+      case "issues":
+        return this.issuesOp(p, by);
       case "merge":
         return this.mergeOp(p, by);
       case "status": {
@@ -10514,6 +10564,271 @@ export class Daemon {
     await this.publishInboxItem(next);
   }
 
+  // -------------------------------------------------------------------------------------------
+  // The issue lifecycle (#416, autopilot/issues.ts, SPEC §4.6.19)
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * On every tick, per wave, beside the queue: each task merged into the release branch gets its
+   * issue labeled and commented once; once a complete wave's release branch merged (its release
+   * PR, looked for once per release_merge_poll_ms), every task's issue is verified. What ran is
+   * journaled on the queue, so a restart plans only what is left.
+   */
+  private issuesPass(wave: WaveId): void {
+    const log = this.waves.get(wave);
+    const state = log?.record.state;
+    const repo = log?.record.wave?.repo;
+    if (log === undefined || state == null || repo === undefined || this.issueChecks.has(wave))
+      return;
+    const retry = this.issueRetryAt.get(wave);
+    if (retry !== undefined && this.now() < retry) return;
+    const events = this.journalEvents(wave);
+    const ledger = issueLedger(events);
+    const tasks = taskIssues(events, state.tasks);
+    const merged = tasks.filter(
+      (t) =>
+        t.stage === "done" &&
+        t.pr !== undefined &&
+        !this.issueSettled.has(`${wave}/${t.issue}`) &&
+        mergedActions({
+          wave,
+          release_branch: state.release_branch,
+          issue: t.issue,
+          pr: t.pr,
+          ledger,
+        }).length > 0,
+    );
+    const polled = this.releasePolledAt.get(wave);
+    const release =
+      ledger.verified === undefined &&
+      state.status === "complete" &&
+      tasks.some((t) => t.stage === "done") &&
+      (polled === undefined || this.now() - polled >= DAEMON_DEFAULTS.release_merge_poll_ms);
+    if (merged.length === 0 && !release) return;
+    this.issueChecks.add(wave);
+    void this.track(
+      (async () => {
+        const cwd = repoDir(repo);
+        let failed = false;
+        for (const t of merged)
+          if (!(await this.issueMerged(wave, cwd, state.release_branch, t))) failed = true;
+        // A merged-to-release write that failed (an issue gh cannot read) holds back no release.
+        if (release) {
+          this.releasePolledAt.set(wave, this.now());
+          const pr = await this.releasePr(cwd, state.release_branch);
+          // A failed write is retried on the ci_poll_ms cadence below, not the release poll's.
+          if (pr !== null && (await this.verifyIssues(wave, cwd, pr)).failed.length > 0) {
+            failed = true;
+            this.releasePolledAt.delete(wave);
+          }
+        }
+        // Retried once after ci_poll_ms, then every release_merge_poll_ms: an issue gh can never
+        // read (deleted, transferred, a typo) is not looked up every minute until archive.
+        const failures = failed ? (this.issueFailures.get(wave) ?? 0) + 1 : 0;
+        if (failures > 0) {
+          this.issueFailures.set(wave, failures);
+          this.issueRetryAt.set(
+            wave,
+            this.now() +
+              (failures === 1 ? DAEMON_DEFAULTS.ci_poll_ms : DAEMON_DEFAULTS.release_merge_poll_ms),
+          );
+        } else {
+          this.issueFailures.delete(wave);
+          this.issueRetryAt.delete(wave);
+        }
+      })()
+        .catch((e: unknown) =>
+          this.log(`${wave}: issues: ${e instanceof Error ? e.message : String(e)}`),
+        )
+        .finally(() => this.issueChecks.delete(wave)),
+    );
+  }
+
+  /** An issue as gh reads it, or null (logged) when it could not. */
+  private async readIssue(wave: WaveId, cwd: string, issue: number): Promise<IssueView | null> {
+    const r = await this.host.exec(issueViewArgv(issue), { cwd }).catch(() => null);
+    const v = r?.code === 0 ? parseIssueView(r.stdout) : null;
+    if (v === null)
+      this.log(`${wave}: issue #${issue} not read: ${r?.stderr.trim() || "gh printed no issue"}`);
+    return v;
+  }
+
+  /** Journal what a run of issue actions did, on the queue; false when any of them failed. */
+  private async journalIssueRun(
+    wave: WaveId,
+    r: { events: NewEvent[]; failed: string[] },
+  ): Promise<boolean> {
+    await this.enqueue(async () => {
+      for (const ev of r.events) await this.append(wave, ev);
+    });
+    for (const f of r.failed) this.log(`${wave}: issues: ${f}`);
+    return r.failed.length === 0;
+  }
+
+  /** Label and comment a merged task's issue (what is left of it); false when not all of it ran. */
+  private async issueMerged(
+    wave: WaveId,
+    cwd: string,
+    releaseBranch: string,
+    t: TaskIssue,
+  ): Promise<boolean> {
+    // GitHub is read first: a marker comment there (a journal that lost its event) is not repeated.
+    const view = await this.readIssue(wave, cwd, t.issue);
+    if (view === null || t.pr === undefined) return false;
+    const actions = mergedActions({
+      wave,
+      release_branch: releaseBranch,
+      issue: t.issue,
+      pr: t.pr,
+      ledger: issueLedger(this.journalEvents(wave)),
+      view,
+    });
+    if (actions.length === 0) {
+      this.issueSettled.add(`${wave}/${t.issue}`);
+      return true;
+    }
+    const r = await runIssueActions(this.host.exec, cwd, actions, { task: t.task, pr: t.pr });
+    return this.journalIssueRun(wave, r);
+  }
+
+  /** The release branch's merged PR (the release reached main), or null. */
+  private async releasePr(cwd: string, releaseBranch: string): Promise<number | null> {
+    const r = await this.host.exec(releasePrArgv(releaseBranch), { cwd }).catch(() => null);
+    return r?.code === 0 ? releasedPr(r.stdout) : null;
+  }
+
+  /**
+   * The release reached main in `releasePr`: close every done task's issue it left open, take the
+   * label off, comment once on each cancelled or deferred task's issue (left open). Journals
+   * `issues_verified` once every issue was read and every write ran.
+   */
+  private async verifyIssues(
+    wave: WaveId,
+    cwd: string,
+    releasePr: number,
+  ): Promise<{ closed: number[]; left_open: number[]; failed: string[] }> {
+    const state = this.waves.get(wave)?.record.state;
+    const tasks =
+      state == null ? [] : issueOutcomes(taskIssues(this.journalEvents(wave), state.tasks));
+    const views = new Map<number, IssueView>();
+    const failed: string[] = [];
+    for (const t of tasks) {
+      const v = await this.readIssue(wave, cwd, t.issue);
+      if (v !== null) views.set(t.issue, v);
+      else failed.push(`issue #${t.issue} not read`);
+    }
+    const actions = releaseActions({
+      wave,
+      release_pr: releasePr,
+      tasks,
+      ledger: issueLedger(this.journalEvents(wave)),
+      views,
+    });
+    for (const t of tasks) {
+      const mine = actions.filter((a) => a.kind !== "ensure_label" && a.issue === t.issue);
+      if (mine.length === 0) continue;
+      const r = await runIssueActions(this.host.exec, cwd, mine, {
+        task: t.task,
+        release_pr: releasePr,
+      });
+      await this.journalIssueRun(wave, r);
+      failed.push(...r.failed);
+    }
+    // From the ledger, so an issue an earlier, failed run closed is listed too.
+    const closedBy = new Set(
+      this.journalEvents(wave)
+        .filter((e) => e.type === "issue_closed" && e.data.release_pr === releasePr)
+        .map((e) => e.data.issue),
+    );
+    const closed = tasks.filter((t) => closedBy.has(t.issue)).map((t) => t.issue);
+    const left_open = tasks
+      .filter((t) => t.stage !== "done" && views.get(t.issue)?.state === "OPEN")
+      .map((t) => t.issue);
+    if (failed.length === 0) {
+      await this.enqueue(async () => {
+        await this.append(wave, {
+          type: "issues_verified",
+          data: { release_pr: releasePr, closed, left_open },
+        });
+      });
+      this.log(
+        `${wave}: release PR #${releasePr} reached main: closed ${closed.map((n) => `#${n}`).join(", ") || "none"}; left open ${left_open.map((n) => `#${n}`).join(", ") || "none"}`,
+      );
+    }
+    return { closed, left_open, failed };
+  }
+
+  /**
+   * `issues`: each task's issue state (`volleyd issues <wave>`), from the journal. With `verify`
+   * (owner only): the release-to-main check now, for a release merged by hand: against `pr`, or
+   * the release branch's merged PR gh finds.
+   */
+  private issuesOp(p: Record<string, unknown>, by: string): HandlerResult {
+    const w = this.waveOf(p);
+    if ("error" in w) return { ok: false, error: w.error };
+    const state = w.log.record.state as WaveState;
+    const answer = (): Reply => {
+      const events = this.journalEvents(w.wave);
+      const ledger = issueLedger(events);
+      const rows = issueRows(taskIssues(events, state.tasks), ledger, {
+        released: ledger.verified !== undefined,
+      });
+      return {
+        ok: true,
+        result: {
+          wave: w.wave,
+          release_branch: state.release_branch,
+          release_pr: ledger.verified ?? null,
+          issues: rows,
+        },
+      };
+    };
+    if (p.verify !== true) return answer();
+    const pr = p.pr;
+    if (pr !== undefined && (typeof pr !== "number" || !Number.isInteger(pr) || pr < 1))
+      return { ok: false, error: "issues --pr takes a pull request number" };
+    const refused = guardMutation(state, by, "issues --verify", this.bindings);
+    if (refused !== null) return { ok: false, error: refused };
+    // Only a complete wave's release can have reached main: verifying earlier would defer tasks
+    // still in flight and end the release poll for good.
+    if (state.status !== "complete")
+      return {
+        ok: false,
+        error: `wave '${w.wave}' is not complete (${state.status}); its release has not reached main`,
+      };
+    // Already verified against this release: answer from the ledger rather than run it again.
+    const verified = issueLedger(this.journalEvents(w.wave)).verified;
+    if (verified !== undefined && (pr === undefined || pr === verified)) return answer();
+    const repo = w.log.record.wave?.repo;
+    if (repo === undefined) return { ok: false, error: `wave '${w.wave}' has no repo` };
+    if (this.issueChecks.has(w.wave))
+      return { ok: false, error: `wave '${w.wave}''s issues are being checked; try again shortly` };
+    this.issueChecks.add(w.wave);
+    const defer = (async (): Promise<Reply> => {
+      const cwd = repoDir(repo);
+      // A PR number given by hand is checked first: a typo must not close every issue.
+      if (typeof pr === "number") {
+        const v = await this.host.exec(prViewArgv(pr), { cwd }).catch(() => null);
+        if (v?.code !== 0 || !mergedFrom(v.stdout, state.release_branch))
+          return {
+            ok: false,
+            error: `PR #${pr} is not a merged pull request from ${state.release_branch}`,
+          };
+      }
+      const release = typeof pr === "number" ? pr : await this.releasePr(cwd, state.release_branch);
+      if (release === null)
+        return {
+          ok: false,
+          error: `no merged pull request from ${state.release_branch} found; pass --pr <n>`,
+        };
+      const r = await this.verifyIssues(w.wave, cwd, release);
+      if (r.failed.length > 0)
+        return { ok: false, error: `issues not all verified: ${r.failed.join("; ")}` };
+      return answer();
+    })().finally(() => this.issueChecks.delete(w.wave));
+    return { ok: true, defer };
+  }
+
   /**
    * On every tick, per wave: autopilot holds each red head waiting on its flake's fixer
    * (`autoHolds`), a hold on a task that is done or cancelled is released, and holds on PRs and
@@ -11201,6 +11516,90 @@ export class Daemon {
         { seq: q.seq, ...(q.supersedes !== undefined ? { supersedes: q.supersedes } : {}) },
       );
     }
+  }
+
+  /** Per agent: the resize waiting out its coalescing window, and the one running before it. */
+  private readonly resizes = new Map<
+    string,
+    { size: TermSize | "launch"; answers: ((r: Reply) => void)[]; timer: TimerHandle }
+  >();
+  private readonly resizing = new Map<string, Promise<unknown>>();
+
+  /**
+   * `terminal_resize { agent_id, cols, rows | reset: true }` (SPEC §4.6.6): size a live agent's
+   * terminal to the Desk's Terminal popout, or back to its launch size. Cosmetic, so any sender
+   * that may write this mailbox (the steer role) may ask. A burst for one agent is one resize to
+   * its last size, run after the one before it; every request in the burst gets its answer.
+   */
+  private terminalResize(p: Record<string, unknown>, by: string): HandlerResult {
+    const id = typeof p.agent_id === "string" ? p.agent_id : "";
+    if (id === "") return { ok: false, error: "terminal_resize requires payload.agent_id" };
+    const a = this.supervised.get(id);
+    if (a === undefined) return { ok: false, error: `agent '${id}' is not live under volleyd` };
+    const cell = (n: unknown) =>
+      Number.isInteger(n) && (n as number) >= TMUX_SIZE.min && (n as number) <= TMUX_SIZE.max;
+    if (p.reset !== true && !(cell(p.cols) && cell(p.rows)))
+      return {
+        ok: false,
+        error: `terminal_resize needs cols and rows (integers ${TMUX_SIZE.min}..${TMUX_SIZE.max}) or reset: true`,
+      };
+    const size: TermSize | "launch" =
+      p.reset === true ? "launch" : { cols: p.cols as number, rows: p.rows as number };
+    const answer = new Promise<Reply>((resolve) => {
+      const queued = this.resizes.get(id);
+      if (queued !== undefined) this.time.clearTimeout(queued.timer);
+      const answers = [...(queued?.answers ?? []), resolve];
+      const timer = this.time.setTimeout(
+        () => this.flushResize(id, a.host, a.workspace, by),
+        DAEMON_DEFAULTS.terminal_resize_coalesce_ms,
+      );
+      this.resizes.set(id, { size, answers, timer });
+    });
+    return { ok: true, defer: answer };
+  }
+
+  /** Drop the agent's resize still in its coalescing window: its session is going away. */
+  private dropResize(id: string, error: string): void {
+    const queued = this.resizes.get(id);
+    if (queued === undefined) return;
+    this.resizes.delete(id);
+    this.time.clearTimeout(queued.timer);
+    for (const answer of queued.answers) answer({ ok: false, error });
+  }
+
+  private flushResize(id: string, host: Host, workspace: string, by: string): void {
+    const queued = this.resizes.get(id);
+    if (queued === undefined) return;
+    this.resizes.delete(id);
+    const { size, answers } = queued;
+    const shown = size === "launch" ? "its launch size" : `${size.cols}×${size.rows}`;
+    const run = (this.resizing.get(id) ?? Promise.resolve())
+      .then(() => host.resize(workspace, size))
+      .then(
+        (resized): Reply => {
+          this.log(
+            resized
+              ? `terminal_resize ${id} → ${shown} by ${by}`
+              : `terminal_resize ${id}: host ${host.name} cannot resize a terminal; ignored`,
+          );
+          return {
+            ok: true,
+            result: { agent_id: id, resized, ...(size === "launch" ? { reset: true } : size) },
+          };
+        },
+        (e: unknown): Reply => {
+          const error = `terminal_resize ${id}: ${e instanceof Error ? e.message : String(e)}`;
+          this.log(error);
+          return { ok: false, error };
+        },
+      );
+    const done = run.then((r) => {
+      for (const answer of answers) answer(r);
+    });
+    this.resizing.set(id, done);
+    void done.then(() => {
+      if (this.resizing.get(id) === done) this.resizing.delete(id);
+    });
   }
 
   /**

@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
-import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "../config-defaults";
+import { CONFIG_DEFAULTS, DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "../config-defaults";
 import type { ExecFn, ExecOptions, ExecResult } from "../exec";
 import {
   type ConsentToken,
@@ -10,6 +10,7 @@ import {
   REMOTE_CLAUDE_JSON_TMP,
   type RemoteStep,
   TMUX_LAUNCH_COMMAND,
+  TMUX_SIZE,
 } from "../fence";
 import { fetchFailure, lockedFetch } from "../git-lock";
 import { type DoctorReport, parseDoctorReport } from "../machines";
@@ -22,6 +23,7 @@ import type {
   Host,
   LaunchSpec,
   SessionEnd,
+  TermSize,
   TypedTextTokens,
   WorktreeResult,
   WorktreeSpec,
@@ -451,8 +453,24 @@ export class SshTmuxHost implements RemoteHost {
       });
     });
     await this.syncTmuxPath();
+    // Detached, tmux would size it 80×24 (its default-size) and nothing would ever widen it.
+    const size = tmuxSize(spec.size ?? DEFAULT_SIZE);
     const r = await this.run(
-      [{ argv: ["tmux", "new-session", "-d", "-s", session, "-c", spec.cwd, TMUX_LAUNCH_COMMAND] }],
+      [
+        {
+          argv: [
+            "tmux",
+            "new-session",
+            "-d",
+            ...sizeArgs(size),
+            "-s",
+            session,
+            "-c",
+            spec.cwd,
+            TMUX_LAUNCH_COMMAND,
+          ],
+        },
+      ],
       spec.launch !== undefined ? { launch: spec.launch } : {},
     ).catch((e: unknown) => {
       throw fail(`tmux new-session: ${e instanceof Error ? e.message : String(e)}`, {
@@ -467,7 +485,31 @@ export class SshTmuxHost implements RemoteHost {
         { exit: r.code, candidate: session, outcome: lost ? "unknown" : "refused" },
       );
     }
+    this.launchSizes.set(session, size);
     return { workspace: session };
+  }
+
+  /** Each session's size at launch, what `resize(…, "launch")` returns it to. */
+  private readonly launchSizes = new Map<string, TermSize>();
+
+  /**
+   * `tmux resize-window`: Claude Code re-wraps on the SIGWINCH. A session launched before a
+   * daemon restart goes back to the default launch size.
+   */
+  async resize(workspace: string, size: TermSize | "launch"): Promise<boolean> {
+    const to =
+      size === "launch"
+        ? (this.launchSizes.get(workspace) ?? tmuxSize(DEFAULT_SIZE))
+        : tmuxSize(size);
+    const r = await this.run([
+      { argv: ["tmux", "resize-window", "-t", pane(workspace), ...sizeArgs(to)] },
+    ]);
+    if (r.code !== 0) {
+      throw new Error(
+        `tmux resize-window on ${this.spec.target}: ${r.timedOut ? "timed out" : r.stderr.trim()}`,
+      );
+    }
+    return true;
   }
 
   async findWorkspace(name: string, candidate?: string): Promise<string | null> {
@@ -544,6 +586,7 @@ export class SshTmuxHost implements RemoteHost {
 
   async close(workspace: string, consent: ConsentToken): Promise<void> {
     await this.run([{ argv: ["tmux", "kill-session", "-t", `=${workspace}`] }], { consent });
+    this.launchSizes.delete(workspace);
   }
 
   /** `kill-session`: tmux ends the pane's process group, so no process is signalled here. */
@@ -559,6 +602,7 @@ export class SshTmuxHost implements RemoteHost {
       (r) => r.code === 0 && !r.timedOut,
       () => false,
     );
+    if (closed) this.launchSizes.delete(workspace);
     return { closed, pids: [], how: closed ? "kill-session" : "none" };
   }
 
@@ -760,6 +804,17 @@ export function sessionName(title: string): string {
 
 /** The session's current pane, matched exactly (`=` stops tmux's prefix matching). */
 const pane = (session: string) => `=${session}:`;
+
+/** A session's size when the spawn names none (the tunables' defaults). */
+const DEFAULT_SIZE: TermSize = { cols: CONFIG_DEFAULTS.tmux_cols, rows: CONFIG_DEFAULTS.tmux_rows };
+
+/** `size` in whole cells, inside the fence's bounds. */
+function tmuxSize(size: TermSize): TermSize {
+  const fit = (n: number) => Math.max(TMUX_SIZE.min, Math.min(TMUX_SIZE.max, Math.round(n)));
+  return { cols: fit(size.cols), rows: fit(size.rows) };
+}
+
+const sizeArgs = (s: TermSize) => ["-x", String(s.cols), "-y", String(s.rows)];
 
 /** A full commit id (what a reviewer or fixup starts from), not a branch name. */
 function isCommitSha(ref: string): boolean {

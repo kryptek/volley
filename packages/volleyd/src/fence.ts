@@ -65,6 +65,13 @@ import { AGENT_BRANCH } from "./worktree";
  *   gh issue view · gh repo view · gh pr view | list | checks · gh run list | view | watch ·
  *     gh api (GET only; a relative endpoint — never a URL — and never graphql in any path
  *     segment; no request headers)
+ *   the issue lifecycle (autopilot/issues.ts), exactly, <n> a positive issue number:
+ *     gh issue edit <n> --add-label merged-to-release | --remove-label merged-to-release ·
+ *     gh issue comment <n> --body <text> · gh issue close <n> --comment <text> (<text> carrying
+ *     a `<!-- volleyd:… wave=… -->` marker: only volleyd's own comments) ·
+ *     gh label list --search merged-to-release --json name ·
+ *     gh label create merged-to-release --description <text> --color <6 hex> (never --force);
+ *     never on a paired machine
  *   cmux — exact argv shapes only, because cmux types into an agent's shell:
  *     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
  *       with the LaunchToken of the `.volley/launch.sh` volleyd sealed in exactly <dir>
@@ -161,12 +168,14 @@ import { AGENT_BRANCH } from "./worktree";
  * REMOTE (one step of a RemoteScript; the same DENY list applies first):
  *   git — the local git policy (worktree add | fetch | rev-parse | … ; worktree remove = CONSENT)
  *   gh issue view
- *   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
- *     the LaunchToken sealed for <dir>) | new-session -d -s volley-signin-<acct> -c <dir>
+ *   tmux new-session -d [-x <n> -y <n>] -s <name> -c <dir> 'bash .volley/launch.sh' (that
+ *     command only, with the LaunchToken sealed for <dir>; n in 20..500) |
+ *     new-session -d -s volley-signin-<acct> -c <dir>
  *     'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
  *     `sealRemoteSigninScript`) | capture-pane | has-session |
  *     send-keys -t <t> Enter|Escape (Up|Down|Space: PICKER) | send-keys -t <t> -l -- <TYPED_TEXT> |
- *     show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
+ *     resize-window -t =<session>: -x <n> -y <n> (exactly; n in 20..500: the Desk's Terminal
+ *     popout) | show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
  *     PATH, from printenv, then the server's own dirs) —
  *     kill-session -t volley-signin-<acct> (no consent: a sign-in session holds no agent's
  *     work) — any other kill-session = CONSENT; no other tmux global option
@@ -1362,10 +1371,60 @@ function git(args: string[]): Verdict {
   return v.kind === "allow" && sub === "fetch" ? fetchPositionals(rest) : v;
 }
 
+/** An issue number as gh takes it: a positive decimal, never an option. */
+const ISSUE_NUMBER = /^[1-9][0-9]{0,8}$/;
+
+/** The one label volleyd adds, removes and creates (the issue lifecycle, autopilot/issues.ts). */
+const LIFECYCLE_LABEL = "merged-to-release";
+
+/** The marker every comment volleyd writes on an issue ends with, on a line of its own (autopilot/issues.ts). */
+const COMMENT_MARKER = /\n\n<!-- volleyd:[a-z-]+ wave=[a-z0-9][a-z0-9_-]{0,62}( pr=[0-9]+)? -->$/;
+
+/**
+ * The issue lifecycle's writes (#416), each an exact argv: the label added or removed, a comment
+ * or a closing comment that carries volleyd's marker, the label listed or created. Null: not one
+ * of them (the read-only allow-list decides).
+ */
+function issueLifecycle(args: string[]): Verdict | null {
+  const [verb = "", sub = "", n = "", flag = "", value = ""] = args;
+  const two = `${verb} ${sub}`;
+  if (two === "issue edit" || two === "issue comment" || two === "issue close") {
+    const shape =
+      args.length === 5 &&
+      ISSUE_NUMBER.test(n) &&
+      (two === "issue edit"
+        ? (flag === "--add-label" || flag === "--remove-label") && value === LIFECYCLE_LABEL
+        : flag === (two === "issue comment" ? "--body" : "--comment") &&
+          COMMENT_MARKER.test(value));
+    return shape ? ALLOW : deny(`gh ${two} (only the issue lifecycle's exact forms)`);
+  }
+  if (two === "label list")
+    return args.length === 6 &&
+      n === "--search" &&
+      flag === LIFECYCLE_LABEL &&
+      value === "--json" &&
+      args[5] === "name"
+      ? ALLOW
+      : deny("gh label list (only --search merged-to-release --json name)");
+  if (two === "label create")
+    return args.length === 7 &&
+      n === LIFECYCLE_LABEL &&
+      flag === "--description" &&
+      value !== "" &&
+      !value.startsWith("-") &&
+      args[5] === "--color" &&
+      /^[0-9a-f]{6}$/.test(args[6] ?? "")
+      ? ALLOW
+      : deny("gh label create (only merged-to-release, with a description and a hex color)");
+  return null;
+}
+
 function gh(args: string[], opts: FenceOptions): Verdict {
   const two = args.slice(0, 2).join(" ");
   if (two === "pr merge") return mergeVerdict(args, opts.merge);
   if (two === "pr ready") return readyVerdict(args.slice(2));
+  const lifecycle = issueLifecycle(args);
+  if (lifecycle !== null) return lifecycle;
   if (two === "workflow run" || two === "repo delete") return deny(`gh ${two}`);
   if (args[0] === "api") {
     const v = checkArgs("gh api", args.slice(1), {
@@ -1600,6 +1659,16 @@ const REMOTE_PATH = /^\/[^\n\r\0]*$/;
 const BASE64 = /^[A-Za-z0-9+/=\n]*$/;
 /** The only command a remote tmux session may run (renderLaunchScript's script). */
 export const TMUX_LAUNCH_COMMAND = "bash .volley/launch.sh";
+/** The window sizes volleyd gives a remote tmux session (`new-session -x/-y`, `resize-window`). */
+export const TMUX_SIZE = { min: 20, max: 500 } as const;
+/** A column or row count in `TMUX_SIZE`, in plain decimal (no sign, leading zero or exponent). */
+const isTmuxSize = (v: string) =>
+  /^[1-9][0-9]*$/.test(v) && Number(v) >= TMUX_SIZE.min && Number(v) <= TMUX_SIZE.max;
+/**
+ * A session as `resize-window` targets it: `=<session>:` (hosts/ssh-tmux.ts sessionName). Any
+ * session name matches, a `volley-signin-*` terminal too; resizing one is only cosmetic.
+ */
+const AGENT_PANE = /^=[A-Za-z0-9_-]{1,128}:$/;
 
 /** The verdicts for one `ssh` argv: the ssh form itself, then each remote step's. */
 function sshVerdicts(args: readonly string[], opts: FenceOptions): Verdict[] {
@@ -2047,7 +2116,11 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
       // run list): verifying an agent's PR on a paired machine reads them there. No `gh api` at all
       // on a remote box; merges, workflow runs and deletes stay denied (no tokens: a merge is
       // never authorized on a paired machine).
-      return args[0] === "api" ? deny("gh api (not on a remote machine)") : gh(args, {});
+      // The issue lifecycle's writes run on the supervisor's own machine only.
+      if (args[0] === "api") return deny("gh api (not on a remote machine)");
+      return issueLifecycle(args) !== null
+        ? deny(`gh ${args.slice(0, 2).join(" ")} (not on a remote machine)`)
+        : gh(args, {});
     case "tmux":
       return tmux(args, opts);
     case "mkdir":
@@ -2122,7 +2195,8 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
 const TMUX_SPECS: Record<string, OptSpec> = {
   "new-session": {
     flags: ["-d"],
-    valued: ["-s", "-c"],
+    valued: ["-s", "-c", "-x", "-y"],
+    values: { "-x": isTmuxSize, "-y": isTmuxSize },
     positional: (a) => a === TMUX_LAUNCH_COMMAND,
   },
   "capture-pane": { flags: ["-p", "-J"], valued: ["-t", "-S", "-E"] },
@@ -2163,6 +2237,21 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
     if (tail.length !== 3 || tail[0] !== "-l" || tail[1] !== "--") return deny("tmux send-keys");
     const why = typedTextRefusal(tail[2] ?? "", opts);
     return why === null ? ALLOW : deny(`tmux send-keys (${why})`);
+  }
+  if (sub === "resize-window") {
+    // The Desk's Terminal popout size (#403): exactly `-t =<session>: -x <n> -y <n>`.
+    const [t, target, x, cols, y, rows, ...more] = rest;
+    return t === "-t" &&
+      AGENT_PANE.test(target ?? "") &&
+      x === "-x" &&
+      isTmuxSize(cols ?? "") &&
+      y === "-y" &&
+      isTmuxSize(rows ?? "") &&
+      more.length === 0
+      ? ALLOW
+      : deny(
+          `tmux resize-window (only -t =<session>: -x <n> -y <n>, n ${TMUX_SIZE.min}..${TMUX_SIZE.max})`,
+        );
   }
   if (sub === "new-session" && rest.at(-1) === SIGNIN_COMMAND)
     return remoteSigninSession(rest, opts);
@@ -2242,16 +2331,25 @@ function remoteSigninSession(args: readonly string[], opts: FenceOptions): Verdi
 
 /**
  * `tmux new-session … -c <dir> 'bash .volley/launch.sh'`: the command is required, and <dir> is
- * the worktree of a sealed launch script (tmux keeps the last `-c`, so does this).
+ * the worktree of a sealed launch script (tmux keeps the last `-c`, so does this). A launch size
+ * is a pair: `-x` and `-y` together or neither.
  */
 function newSessionSealed(args: readonly string[], opts: FenceOptions): Verdict {
   let cwd: string | undefined;
+  const size = new Set<string>();
   for (let i = 0; i < args.length; i++) {
     const a = args[i] ?? "";
     if (a === "-c") cwd = args[++i];
     else if (a.startsWith("-c")) cwd = a.slice(2);
+    else if (a.startsWith("-x") || a.startsWith("-y")) {
+      size.add(a.slice(0, 2));
+      if (a.length === 2) i++;
+    } else if (a === "-s") i++;
   }
-  return args.at(-1) === TMUX_LAUNCH_COMMAND && cwd !== undefined && sealedFor(opts, cwd)
+  return args.at(-1) === TMUX_LAUNCH_COMMAND &&
+    size.size !== 1 &&
+    cwd !== undefined &&
+    sealedFor(opts, cwd)
     ? ALLOW
     : deny("tmux new-session (only in the worktree of a sealed launch script)");
 }

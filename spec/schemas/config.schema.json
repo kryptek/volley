@@ -234,6 +234,18 @@
           "maximum": 3600,
           "description": "Seconds between captures of each live agent's terminal for its retained screen topic (spec section 4.6.6)."
         },
+        "tmux_cols": {
+          "type": "integer",
+          "minimum": 20,
+          "maximum": 500,
+          "description": "Columns of a paired machine's tmux session at launch, and when the Desk's Terminal popout closes (spec section 4.6.4)."
+        },
+        "tmux_rows": {
+          "type": "integer",
+          "minimum": 20,
+          "maximum": 500,
+          "description": "Rows of a paired machine's tmux session at launch, and when the Desk's Terminal popout closes (spec section 4.6.4)."
+        },
         "stop_grace_s": {
           "type": "integer",
           "minimum": 0,

@@ -112,6 +112,9 @@ export interface Tunables {
   brief_preface_max_bytes: number;
   wake_grace_s: number;
   screen_tail_interval_s: number;
+  /** A paired machine's tmux session size at launch, in columns and rows (#403). */
+  tmux_cols: number;
+  tmux_rows: number;
   /** After `volleyd stop`, how long agents get to publish a terminal status before they are force-retired. */
   stop_grace_s: number;
   /** Window collecting broker login changes into one Dynamic Security control message. */
@@ -727,6 +730,13 @@ export const WAVE_EVENT_TYPES = [
   "terminal_status_recovered",
   // A draft PR marked ready before the CI gate (SPEC §4.6.8): its full CI runs from `at` (#408).
   "pr_marked_ready",
+  // A wave's issue lifecycle (#416, SPEC §4.6.19): what volleyd did to a task's issue, so a
+  // restart never does it twice; `issues_verified` once the release reached main.
+  "issue_labeled",
+  "issue_unlabeled",
+  "issue_commented",
+  "issue_closed",
+  "issues_verified",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

@@ -18,6 +18,7 @@
         "merged_by": "somebody"
       }
     ],
+    "closes": [101],
     "auto": { "decisions_resolved": 0, "flakes_fixed": [], "conflicts_resolved": 0, "retries": 0, "merges": 0 },
     "waiting": [],
     "failures": []
