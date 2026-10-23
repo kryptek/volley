@@ -47,6 +47,8 @@ export interface NeedsYouWindowProps {
   control: SteerTransport["control"] | null;
   /** This device, for `where.device` (`deskDevice`). */
   device: string;
+  /** Deliver an answer to the item's session as a mailbox message; null without credentials. */
+  mailbox?: ((item: InboxItem, text: string) => void) | null;
   narrow?: boolean;
   /** The Desk's origin, for evidence files (default: this page's). */
   origin?: string;
@@ -163,6 +165,7 @@ export function NeedsYouWindow(p: NeedsYouWindowProps) {
                   live={p.live?.[item.id]}
                   wave={item.wave !== undefined ? p.waves?.[item.wave] : undefined}
                   control={p.control}
+                  mailbox={p.mailbox ? (text) => p.mailbox?.(item, text) : null}
                   device={p.device}
                   {...(p.now !== undefined ? { now: p.now } : {})}
                   leaving={gone}
