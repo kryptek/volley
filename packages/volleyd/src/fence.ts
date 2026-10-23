@@ -182,7 +182,7 @@ import { AGENT_BRANCH } from "./worktree";
  *   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
  *     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
  *     (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
- *     rebase.md — spelled exactly, directly inside `.volley/`, so no write there is a git
+ *     rebase.md, decisions.md, retired.json — spelled exactly, directly inside `.volley/`, so no write there is a git
  *     config, HEAD, gitfile or hook, or a case variant of launch.sh), an absolute path ending in
  *     `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh`
  *     (what the tmux session runs) is written whole, never appended, and its content must be
@@ -1145,6 +1145,20 @@ function typedTextRefusal(text: string, opts: FenceOptions): string | null {
 
 /** The keys volleyd sends by name: submit, and interrupt. */
 const NAMED_KEYS = new Set(["Enter", "Escape"]);
+
+/**
+ * True when `text` is something the fence ever lets volleyd type or press in an agent's
+ * terminal (with its token, where it needs one): a named or picker key, the launch command, or
+ * the wake line (fence-coverage.test.ts). Anything else is typed only as a token's own text.
+ */
+export function fenceKnowsTypedText(text: string): boolean {
+  return (
+    NAMED_KEYS.has(text) ||
+    (PICKER_KEYS as readonly string[]).includes(text) ||
+    text === LAUNCH_COMMAND ||
+    text === WAKE_TEXT
+  );
+}
 const DOCKER_DENY = new Set([
   "rm",
   "rmi",
@@ -1694,7 +1708,11 @@ const isTrustSwap = (argv: readonly string[]) => {
 const sameArgv = (a: readonly string[], b: readonly string[]) =>
   a.length === b.length && a.every((x, i) => x === b[i]);
 
-/** The files volleyd writes in a worktree's `.volley/` (spawn.ts, pipeline.ts, identity.ts). */
+/**
+ * The files volleyd writes in a worktree's `.volley/` (spawn.ts, pipeline.ts, identity.ts,
+ * decisions.ts, retire.ts). fence-coverage.test.ts fails the build when one of those names a
+ * file this set does not list.
+ */
 const VOLLEY_WRITES = new Set([
   "agent.json",
   "brief.md",
@@ -1704,9 +1722,14 @@ const VOLLEY_WRITES = new Set([
   "findings.md",
   "findings.json",
   "rebase.md",
+  "decisions.md",
+  "retired.json",
 ]);
 /** … and the ones it reads there: those, and the repo's `.volley/brief-extra.md`. */
 const VOLLEY_READS = new Set([...VOLLEY_WRITES, "brief-extra.md"]);
+
+/** True when the remote fence lets volleyd read or write `<dir>/.volley/<name>` (fence-coverage.test.ts). */
+export const fenceKnowsVolleyFile = (name: string): boolean => VOLLEY_READS.has(name);
 
 /**
  * `<abs dir>/.volley/<name>` for one of `names` — spelled exactly and directly inside `.volley/`,

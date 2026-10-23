@@ -3539,7 +3539,7 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
     077, and only to the files volleyd writes: `<dir>/.volley/<name>` for a VOLLEY_WRITES name
     (agent.json, brief.md, launch.sh, mcp.json, review.md, findings.md, findings.json,
-    rebase.md — spelled exactly, directly inside `.volley/`, so no write there is a git
+    rebase.md, decisions.md, retired.json — spelled exactly, directly inside `.volley/`, so no write there is a git
     config, HEAD, gitfile or hook, or a case variant of launch.sh), an absolute path ending in
     `/ISSUE.md` or `/info/exclude`, or `~/.claude.json.volleyd.tmp`. A `.volley/launch.sh`
     (what the tmux session runs) is written whole, never appended, and its content must be
