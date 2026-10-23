@@ -188,7 +188,7 @@ cd volley
 bun install
 ```
 
-Need [Bun](https://bun.sh)? `curl -fsSL https://bun.sh/install | bash`. Volley supports Bun **1.3 and 1.4** (`engines.bun` is `>=1.3 <1.5`). CI tests both on a full run (every push, the nightly, a release PR, or a PR labelled `ci:full`), and the newest on every other PR: it installs with that bun and runs volleyd's suite under `bun test` (bun's own runner, on bun) in four shards balanced by `packages/volleyd/test/timings.json`; the packages' vitest suites run on Node.
+Need [Bun](https://bun.sh)? `curl -fsSL https://bun.sh/install | bash`. Volley supports Bun **1.3 and 1.4** (`engines.bun` is `>=1.3 <1.5`). CI tests both on a full run (every push, the nightly, a release PR, or a PR labelled `ci:full`), and the newest on every other PR: it installs with that bun and runs volleyd's suite under `bun test` (bun's own runner, on bun) in eight shards balanced by `packages/volleyd/test/timings.json`; the packages' vitest suites run on Node (volley-desk's in two shards). A release-branch push whose tree its PR's run already passed reuses that run instead of running the suite again.
 
 ### 4. Register the MCP server with Claude Code
 

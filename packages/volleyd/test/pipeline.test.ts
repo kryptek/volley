@@ -1528,6 +1528,52 @@ describe("pipeline: remediations (respawn an unverifiable agent, fixup a red hea
     expect(md).not.toContain("CI / docs");
   });
 
+  it("#492: a push run that reuses the PR run (its test jobs skipped) is green and done", async () => {
+    h = pipelineHarness();
+    await h.start();
+    h.openPr(H1);
+    const at = h.iso(0);
+    const ok = (name: string) => ({
+      name,
+      status: "completed",
+      conclusion: "success",
+      startedAt: at,
+      completedAt: at,
+    });
+    const skipped = (name: string) => ({ ...ok(name), conclusion: "skipped" });
+    const pr = { id: 960, workflow: "CI", event: "pull_request" };
+    const push = { id: 961, workflow: "CI", event: "push" };
+    h.world.jobs[960] = [ok("Lint"), ok("volleyd unit tests (shard 1/8, bun 1.4)")];
+    h.world.jobs[961] = [
+      ok("Tested tree"),
+      ok("CI reused — this tree passed pull_request run 960"),
+      skipped("Lint"),
+      skipped("volleyd unit tests (shard 1/8, bun 1.4)"),
+      skipped("volleyd unit tests (shard 1/8, bun 1.3)"),
+    ];
+    // Every job of the push run has reported; the run itself has not completed yet.
+    h.world.ciRuns[H1] = [
+      { ...pr, status: "completed", conclusion: "success" },
+      { ...push, status: "in_progress", conclusion: "" },
+    ];
+    await h.finish("implementer", { head: H1 });
+    const hold = h.events.find((e) => e.type === "ci_pending");
+    expect(hold?.data.jobs).toMatchObject({ done: 7, total: 7, failed: [] });
+
+    h.world.ciRuns[H1] = [
+      { ...pr, status: "completed", conclusion: "success" },
+      { ...push, status: "completed", conclusion: "success" },
+    ];
+    h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
+    await h.tick();
+    expect(h.events.find((e) => e.type === "artifact_verified")?.data).toMatchObject({
+      role: "implementer",
+      head_sha: H1,
+    });
+    expect(h.task()?.pr).toMatchObject({ ci: "green" });
+    expect(ciFailed()).toBeUndefined();
+  });
+
   it("CI red on the implementer's first head: fixup with the CI directive, then the reviews", async () => {
     h = pipelineHarness();
     await h.start();

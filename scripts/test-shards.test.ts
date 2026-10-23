@@ -145,6 +145,17 @@ describe("volleyd's committed timings", () => {
     // A handful of new, untimed files is fine (they shard by hash); a stale table is not.
     expect(missing.length).toBeLessThanOrEqual(10);
   });
+
+  test("split the way CI splits them (8 shards), every file runs once and no shard is heavy", () => {
+    const timings = readTimings(VOLLEYD);
+    const files = listTestFiles(VOLLEYD);
+    const shards = assignShards(files, timings, 8);
+    expect(shards).toHaveLength(8);
+    expect(shards.flat().sort()).toEqual(files);
+    const l = loads(shards, timings);
+    const mean = l.reduce((a, b) => a + b, 0) / l.length;
+    expect(Math.max(...l)).toBeLessThanOrEqual(mean * 1.2);
+  });
 });
 
 describe("the CLI", () => {

@@ -89,6 +89,42 @@ describe("noteJobTimes", () => {
     ]);
     expect([...last]).toEqual([["CI/a", 300]]);
   });
+
+  it("#492: a skipped job (a release push reusing its PR run) is no estimate of its next run", () => {
+    const last = new Map([["CI/shard 1/8", 140]]);
+    noteJobTimes(last, [
+      job("shard 1/8", "completed", {
+        conclusion: "skipped",
+        run_done: true,
+        started_at: iso(T0),
+        completed_at: iso(T0),
+      }),
+      job("Tested tree", "completed", {
+        run_done: true,
+        started_at: iso(T0),
+        completed_at: iso(T0 + 10_000),
+      }),
+    ]);
+    expect([...last]).toEqual([
+      ["CI/shard 1/8", 140],
+      ["CI/Tested tree", 10],
+    ]);
+  });
+});
+
+describe("holdJobs on a reused run (#492)", () => {
+  it("skipped jobs count as done and none as failed", () => {
+    const at = { started_at: iso(T0), completed_at: iso(T0) };
+    const jobs = [
+      job("Tested tree", "completed", at),
+      job("CI reused — this tree passed pull_request run 1", "completed", at),
+      job("shard 1/8", "completed", { ...at, conclusion: "skipped" }),
+      job("Lint", "completed", { ...at, conclusion: "skipped" }),
+    ];
+    const j = holdJobs(jobs, new Map(), T0);
+    expect(j).toMatchObject({ done: 4, total: 4, failed: [], running: [] });
+    expect(jobsWhy(j)).toBe("CI 4/4 · queued");
+  });
 });
 
 describe("collapseJobNames", () => {
