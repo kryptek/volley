@@ -1159,7 +1159,7 @@ export class Daemon {
    * Claude Code hooks send. A spawn decision about it closes itself on one sent after it opened
    * (#402).
    */
-  private readonly heardAt = new Map<string, { any: number; mcp?: number; hooks?: number }>();
+  private readonly heardAt = new Map<string, { any?: number; mcp?: number; hooks?: number }>();
   /** Spawn decisions this process is closing (`<wave>/<id>`): asked once per decision. */
   private readonly closingSpawn = new Set<string>();
   /**
@@ -1920,11 +1920,15 @@ export class Daemon {
     const sent = env !== null ? Date.parse(env.wall_time) : Number.NaN;
     const now = this.now();
     this.lastSeen.set(agent, Number.isNaN(sent) ? now : Math.min(now, sent));
-    // A narration or anything else not from the hooks is the agent's MCP server speaking.
-    const hook = (env?.payload as { source?: unknown } | undefined)?.source === "harness-hook";
-    this.heard(agent, this.lastSeen.get(agent) as number, !hook);
-    if (env !== null) this.noteAttention(agent, env);
-    if (env !== null) this.noteInboxSignal(agent, env);
+    if (env !== null) {
+      // A narration or anything else not from the hooks is the agent's MCP server speaking.
+      const hook = (env.payload as { source?: unknown } | null)?.source === "harness-hook";
+      // Waiting at a prompt shows its channel works, not that it got past the screen.
+      const stuck = env.type === "awaiting_input" || env.type === "idle";
+      this.heard(agent, this.lastSeen.get(agent) as number, !hook, stuck);
+      this.noteAttention(agent, env);
+      this.noteInboxSignal(agent, env);
+    }
     // The topic names the sender (and is what broker ACLs authorise), so it identifies the acker.
     if (env?.type === "steering_acked" && env.correlation_id !== null) {
       this.acks.acked(env.correlation_id, agent);
@@ -1942,14 +1946,16 @@ export class Daemon {
    * `agent` showed it is live at `at` (`mcp`: through its MCP server). Each open spawn decision
    * about it (unknown_screen, hooks_auth_failed, mcp_not_registered) that opened before then is
    * answered `it's running` by volleyd (#402): the pipeline checks the run and touches nothing
-   * (a paused hooks_auth_failed agent is told to resume).
+   * (a paused hooks_auth_failed agent is told to resume). A `stuck` sign (waiting at a prompt)
+   * counts for the channel it came through, not as being past its screen (`any`).
    */
-  private heard(agent: string, at: number, mcp: boolean): void {
+  private heard(agent: string, at: number, mcp: boolean, stuck = false): void {
     const prev = this.heardAt.get(agent);
     const last = mcp ? Math.max(at, prev?.mcp ?? at) : prev?.mcp;
     const hooks = mcp ? prev?.hooks : Math.max(at, prev?.hooks ?? at);
+    const any = stuck ? prev?.any : Math.max(at, prev?.any ?? at);
     this.heardAt.set(agent, {
-      any: Math.max(at, prev?.any ?? at),
+      ...(any !== undefined ? { any } : {}),
       ...(last !== undefined ? { mcp: last } : {}),
       ...(hooks !== undefined ? { hooks } : {}),
     });
@@ -1992,7 +1998,7 @@ export class Daemon {
     if (h === undefined) return null;
     if (kind === "mcp_not_registered") return h.mcp ?? null;
     if (kind === "hooks_auth_failed") return h.hooks ?? null;
-    return h.any;
+    return h.any ?? null;
   }
 
   /**

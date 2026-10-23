@@ -450,6 +450,34 @@ describe("relaunch of a spawn-type decision", () => {
     });
   }
 
+  it("unknown_screen stays open while the agent only waits at a prompt or sends garbage", async () => {
+    const opened = await setup("silent");
+    // A permission dialog or an idle prompt is the kind of stuck session the card is about.
+    await live(A1, buildTopic(NS, A1, "progress"), "awaiting_input", "progress", {
+      source: "harness-hook",
+      hook_event: "Notification",
+      notification_type: "permission_prompt",
+    });
+    await live(A1, buildTopic(NS, A1, "progress"), "idle", "progress", {
+      source: "harness-hook",
+      hook_event: "Stop",
+    });
+    await agent.publish(buildTopic(NS, A1, "progress"), "not an envelope", {
+      qos: 1,
+      retain: false,
+    });
+    await waits.settled();
+    // (The permission prompt raises its own Needs-you item beside it.)
+    expect(daemon.snapshot("w1")?.open_decisions).toContain(opened.data.decision_id);
+    // A real sign of life still closes it.
+    await signals[2]?.[1](A1);
+    const r = await event(
+      (e) => e.type === "decision_resolved" && e.data.decision_id === opened.data.decision_id,
+    );
+    expect(r.data).toMatchObject({ answer: "it's running", by: "volleyd" });
+    expect(host.launches).toHaveLength(1);
+  });
+
   it("a retained registry entry from before the decision opened does not close it", async () => {
     const opened = await setup("mcp");
     // The hooks' registry entry and heartbeat arrived before it opened: still open.
