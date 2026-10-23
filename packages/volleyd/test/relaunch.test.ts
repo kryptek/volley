@@ -486,6 +486,14 @@ describe("relaunch of a spawn-type decision", () => {
     expect(resume.data).toMatchObject({ agent_id: A1, text: AUTH_RESUME });
   });
 
+  it("hooks_auth_failed: a working status its MCP server publishes does not close it", async () => {
+    const opened = await setup("auth");
+    // vol_publish carries no `source`: only the hooks' working status says they reach the broker.
+    await live(A1, buildTopic(NS, A1, "status"), "working", "status", {});
+    await waits.settled();
+    expect(daemon.snapshot("w1")?.open_decisions).toEqual([opened.data.decision_id]);
+  });
+
   it("answering it's running on an agent not yet heard from asks again", async () => {
     const opened = await setup("silent");
     // Heard from, but the auto-close is what the answer would do anyway: answer first.

@@ -3170,7 +3170,7 @@ function askRelaunchAgain(
 function agoText(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return `${s} s`;
-  if (s < 3600) return `${Math.round(s / 60)} min`;
+  if (s < 3570) return `${Math.round(s / 60)} min`;
   return `${Math.round(s / 3600)} h`;
 }
 

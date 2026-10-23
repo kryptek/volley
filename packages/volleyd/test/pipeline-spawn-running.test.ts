@@ -80,6 +80,15 @@ describe("it's running on a spawn decision", () => {
     expect(acts.some((a) => a.kind === "retire" || a.kind === "relaunch")).toBe(false);
   });
 
+  it("just under an hour ago reads as 1 h, not 60 min", () => {
+    const heard = OPENED - 60_000;
+    const acts = resolved(view(heard, { now: heard + 3_580_000 }), "it's running");
+    const ask = acts[0];
+    expect(ask?.kind === "decide" && ask.decision.question).toBe(
+      `no live agent found for ${A1} (last heard 1 h ago). ${QUESTION}`,
+    );
+  });
+
   it("never heard from: last heard never", () => {
     const acts = resolved(view(null), "it's running");
     const ask = acts[0];

@@ -2629,9 +2629,13 @@ export class Daemon {
             this.ownerChanged(holder);
             if (name !== undefined) void this.enqueue(() => this.rebind(name));
           }
-          // `working` comes from the hooks; `spawning` / `registered` only from its MCP server.
-          if (LIVE_STATUSES.has(env.type))
-            this.heard(holder, this.sentAt(env.wall_time), env.type !== "working");
+          // The hooks' `working` carries their source; any other live status came through its
+          // MCP server (`spawning` / `registered`, or a `working` it published with vol_publish).
+          if (LIVE_STATUSES.has(env.type)) {
+            const hook =
+              (env.payload as { source?: unknown } | undefined)?.source === "harness-hook";
+            this.heard(holder, this.sentAt(env.wall_time), !hook);
+          }
           // A session that ended answers none of its open pickers or handoffs any more.
           if (OWNER_GONE.has(env.type))
             void this.enqueue(async () => {
