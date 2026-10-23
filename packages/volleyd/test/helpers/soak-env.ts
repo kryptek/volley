@@ -7,7 +7,8 @@ import { CONFIG_DEFAULTS } from "../../src/config-defaults";
 import { ControlClient } from "../../src/control";
 import type { Daemon } from "../../src/daemon";
 import { readJournalFile } from "../../src/journal";
-import type { JournalEvent } from "../../src/types";
+import { isPattern } from "../../src/overlap";
+import type { Footprint, JournalEvent, TaskPlan } from "../../src/types";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./daemon-env";
 import { type Behaviour, type Fleet, type FleetAgent, fakeFleet } from "./fake-agents";
 import { type FakeClock, fakeClock, flushMicrotasks } from "./fake-clock";
@@ -28,9 +29,27 @@ export const RELEASE = `release/${WAVE}`;
 export const OWNER = "coord-soak";
 export const SOAK_PIPELINE = "[implement, [spec_review, quality_review], fixup, merge_ready]";
 
+/**
+ * A task with a footprint: its implementer commits every file of it (the concrete paths; a glob
+ * or `dir/` is only written to the wave file). The rest is written to the wave file as given.
+ */
+export interface SoakTask {
+  id: string;
+  /** Default: 300 + its index. */
+  issue?: number;
+  files: string[];
+  after?: string[];
+  /** A bundle's issues (the planner's). */
+  issues?: number[];
+  footprint?: Footprint;
+  plan?: TaskPlan;
+}
+
 export interface SoakEnvOptions {
-  /** Task ids (each gets issue 300 + its index). */
-  tasks: string[];
+  /** Task ids (each gets issue 300 + its index), or tasks with footprints. */
+  tasks: (string | SoakTask)[];
+  /** The repository tree (path → bytes) the world starts with: footprints resolve to it. */
+  tree?: Record<string, number>;
   seed?: number;
   flake?: Flake;
   /** The flake per head over the seed (soak-world.ts `flaky`). */
@@ -109,7 +128,9 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
     seed: o.seed ?? 1,
     ...(o.flake !== undefined ? { flake: o.flake } : {}),
     ...(o.flaky !== undefined ? { flaky: o.flaky } : {}),
+    ...(o.tree !== undefined ? { tree: o.tree } : {}),
   });
+  const tasks = o.tasks.map((t): SoakTask => (typeof t === "string" ? { id: t, files: [] } : t));
   /** The daemon's log lines. */
   const logs: string[] = [];
   const fx = fakeExec().on([], (argv, opts) => world.exec(argv, opts));
@@ -145,6 +166,7 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
       release_branch: RELEASE,
       ...(o.behaviour !== undefined ? { behaviour: o.behaviour } : {}),
       ...(o.flake !== undefined ? { flakeFile: o.flake.file } : {}),
+      files: Object.fromEntries(tasks.map((t) => [t.id, t.files.filter((f) => !isPattern(f))])),
       now: () => clock.now(),
     });
 
@@ -239,7 +261,14 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
       await flushMicrotasks();
     };
 
-    const tasks = o.tasks.map((t, i) => `  ${t}: { issue: ${300 + i} }`).join("\n");
+    // A JSON object is a YAML flow map.
+    const taskLines = tasks
+      .map((t, i) => {
+        const { id, issue, files, ...rest } = t;
+        const entry = { issue: issue ?? 300 + i, ...(files.length > 0 ? { files } : {}), ...rest };
+        return `  ${id}: ${JSON.stringify(entry)}`;
+      })
+      .join("\n");
     const yaml = [
       `wave: ${WAVE}`,
       `repo: ${repo}`,
@@ -249,7 +278,7 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
       "merge: auto",
       ...(o.waveExtra !== undefined ? [o.waveExtra] : []),
       "tasks:",
-      tasks,
+      taskLines,
       `config: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }`,
       "",
     ].join("\n");

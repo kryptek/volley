@@ -85,6 +85,36 @@ describe("the fake fleet (one task)", () => {
   );
 });
 
+describe("the fake fleet with footprints", () => {
+  it("an implementer commits every file of its task's footprint; the fixup touches the first", async () => {
+    s = await makeSoakEnv({
+      tasks: [{ id: "T1", issue: 42, files: ["src/a.ts", "src/b.ts"] }],
+      tree: { "src/a.ts": 10, "src/b.ts": 20, "src/c.ts": 30 },
+      behaviour: (a) =>
+        a.role === "spec_reviewer" && a.nth === 1
+          ? { kind: "work", findings: [{ severity: "P1", file: "src/a.ts", text: "a gap" }] }
+          : { kind: "work" },
+    });
+    const env = s;
+    expect(env.daemon.snapshot(WAVE)?.tasks.find((t) => t.id === "T1")?.issue).toBe(42);
+    await env.until(
+      () => env.fleet.launches.some((a) => a.role === "spec_reviewer"),
+      "the reviewers' launch",
+    );
+    const w = env.world;
+    const implemented = w.refs[env.fleet.prBranch.T1 as string] as string;
+    expect(w.diffNames(w.root, implemented)).toEqual(["src/a.ts", "src/b.ts"]);
+    expect(w.get(implemented).files).toMatchObject({ "src/a.ts": "T1-1", "src/b.ts": "T1-1" });
+    await env.until(
+      () => env.fleet.launches.some((a) => a.role === "fixup" && a.acted),
+      "the fixup",
+    );
+    await env.step();
+    const fixed = w.refs[env.fleet.prBranch.T1 as string] as string;
+    expect(w.diffNames(implemented, fixed)).toEqual(["src/a.ts"]);
+  });
+});
+
 describe("the soak env's wall-clock budget", () => {
   it("until() past the deadline throws with the report, before vitest's timeout can", async () => {
     s = await makeSoakEnv({ tasks: ["T1"], deadline: Date.now() });
