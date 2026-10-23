@@ -1044,8 +1044,8 @@ async function verifyAndRecover(
         : recovered
           ? "volleyd already relaunched it once (after an update prompt): finish Claude Code's setup in that profile"
           : dir === undefined
-          ? "volleyd prepares only the account profiles it signs in: run claude there once and finish its setup"
-          : "volleyd cannot prepare the profile here";
+            ? "volleyd prepares only the account profiles it signs in: run claude there once and finish its setup"
+            : "volleyd cannot prepare the profile here";
       const decisionId = await openDecision(
         ctx,
         "unknown_screen",

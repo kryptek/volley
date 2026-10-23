@@ -194,7 +194,9 @@ const readSettings = (path: string): Record<string, unknown> => {
     v = undefined;
   }
   if (typeof v !== "object" || v === null || Array.isArray(v))
-    throw new SharingError(`${path} is not a JSON object; fix it, and volleyd prepares the profile`);
+    throw new SharingError(
+      `${path} is not a JSON object; fix it, and volleyd prepares the profile`,
+    );
   return v as Record<string, unknown>;
 };
 

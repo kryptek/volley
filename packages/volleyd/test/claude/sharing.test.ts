@@ -250,7 +250,7 @@ describe("seedProfile", () => {
   });
 
   it("refuses a settings.json that is not a JSON object, and leaves it as it was", () => {
-    for (const text of ["{ \"model\": ", "[1]"]) {
+    for (const text of ['{ "model": ', "[1]"]) {
       const s = setup();
       const settings = join(s.profile, "settings.json");
       writeFileSync(settings, text);
