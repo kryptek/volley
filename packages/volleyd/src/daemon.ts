@@ -4110,6 +4110,7 @@ export class Daemon {
       this.parkClosed(wave, task);
       throw new Error(`${closed.line}: ${task}'s ${role} waits for its re-place question`);
     }
+    if (this.parkUnplaced(wave, task)) throw new Error(`${task}'s ${role} waits: not placed yet`);
     let remote: RemoteHost | undefined;
     if (t.host !== "local") {
       try {
@@ -4869,6 +4870,34 @@ export class Daemon {
     return true;
   }
 
+  /**
+   * True (and `not placed yet` kept for why_waiting, with the host_auto_unresolved alarm) when
+   * the task's host is still `auto`: a spawn never resolves `auto`, placement does (#434). An
+   * admitted task gives its admission back, so the next tick places it.
+   */
+  private parkUnplaced(wave: WaveId, task: string): boolean {
+    const rec = this.waves.get(wave)?.record;
+    const def = rec?.wave?.tasks[task];
+    if (def === undefined || !this.autoHostReached(wave, def)) return false;
+    if (rec?.admitted.includes(task) === true) {
+      void this.enqueue(async () => {
+        if (!this.waves.get(wave)?.record.admitted.includes(task)) return;
+        await this.append(wave, {
+          type: "task_admission_returned",
+          task,
+          data: { task, from_host: AUTO_HOST, to_host: AUTO_HOST },
+        });
+      });
+    }
+    const key = `${wave}/${task}`;
+    const reason = `not placed yet: its host is ${AUTO_HOST}`;
+    if (this.parked.get(key) !== reason) {
+      this.parked.set(key, reason);
+      void this.enqueue(() => this.publishState(wave));
+    }
+    return true;
+  }
+
   /** The task's remote host: config `hosts.<name>` ← its inline `host:`. Throws if unresolvable. */
   private remoteHost(wave: WaveId, t: WaveTask): RemoteHost {
     if (t.host === AUTO_HOST) throw new Error(`host 'auto' reached the host resolver for ${t.id}`);
@@ -4978,6 +5007,7 @@ export class Daemon {
    */
   private parkOnTunnel(wave: WaveId, task: string): boolean {
     if (this.parkClosed(wave, task)) return true;
+    if (this.parkUnplaced(wave, task)) return true;
     const key = `${wave}/${task}`;
     const def = this.waves.get(wave)?.record.wave?.tasks[task];
     let target: string | undefined;

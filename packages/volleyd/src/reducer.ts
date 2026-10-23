@@ -434,6 +434,19 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     case "task_admitted":
       if (ev.task !== undefined && !next.admitted.includes(ev.task)) next.admitted.push(ev.task);
       break;
+    case "task_admission_returned":
+      // A plan version moved an admitted, unspawned task's host (plan-apply.ts): the scheduler
+      // admits it again, and places it afresh when its new host is `auto`.
+      if (ev.task !== undefined) next.admitted = next.admitted.filter((id) => id !== ev.task);
+      state.tasks = state.tasks.map(({ placement: _p, ...t }) =>
+        t.id === ev.task || _p === undefined ? t : { ...t, placement: _p },
+      );
+      if (ev.task !== undefined) {
+        // `wave_versioned` kept a placed task's host; the plan's own host is the task's again.
+        const written = next.plan?.tasks[ev.task];
+        if (written !== undefined) keepTaskHost(next, ev.task, written.host, written);
+      }
+      break;
     case "task_placed": {
       // Placement (SPEC §4.6.15): the effective plan runs every role of the task there (`local`
       // for the supervisor's own machine), and the state shows where and why.

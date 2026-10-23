@@ -1,0 +1,14 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-23T10:04:00.000Z",
+  "channel": "_waves/events",
+  "type": "task_admission_returned",
+  "payload": {
+    "wave": "w1",
+    "seq": 21,
+    "at": "2026-10-23T10:04:00.000Z",
+    "task": "T2",
+    "data": { "task": "T2", "from_host": "local", "to_host": "auto", "plan_version": 2 }
+  }
+}
