@@ -207,11 +207,25 @@ export interface RemoteHost extends Host {
    */
   probePath(): Promise<PathProbe>;
   /**
-   * `volley peer doctor --json --supervisor-volley-dir <volley_dir> [--fix --yes [--clone
-   * --origin <clone>]]` on the box, in its volley checkout: the parsed report. `clone` (with `fix`) is the wave repo's URL the doctor clones
-   * where the box's clone is missing. Throws when ssh fails or the doctor printed no report.
+   * `volley peer doctor --json --supervisor-volley-dir <volley_dir> [--fix --yes] [--repo-add
+   * <owner/name>[=<abs path>]]... [--repo-remove <owner/name>]... [--clone [--origin <clone>]]`
+   * on the box, in its volley checkout: the parsed report. `clone` (with `fix`) is the wave
+   * repo's URL the doctor clones where the box's clone is missing (the legacy single repo);
+   * `repos_add` / `repos_remove` edit the box's peer.json repositories, and with `fix` each
+   * added one without a clone is cloned. Throws when ssh fails or the doctor printed no report.
    */
-  runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport>;
+  runDoctor(opts: DoctorRunOptions): Promise<DoctorReport>;
+}
+
+/** What a doctor run on a box is asked to do (`RemoteHost.runDoctor`). */
+export interface DoctorRunOptions {
+  fix: boolean;
+  /** The legacy single repo's clone URL (`--clone --origin`), with `fix`. */
+  clone?: string;
+  /** `<owner/name>` or `<owner/name>=<abs path>`: repositories to add to the box's peer.json. */
+  repos_add?: string[];
+  /** `<owner/name>`: repositories to remove from it. */
+  repos_remove?: string[];
 }
 
 /** A remote host resolved for one repository (`resolveRemoteHost` with a slug, or legacy). */
@@ -767,7 +781,8 @@ export class SshTmuxHost implements RemoteHost {
     return parsePathProbe(r.stdout);
   }
 
-  async runDoctor(opts: { fix: boolean; clone?: string }): Promise<DoctorReport> {
+  async runDoctor(opts: DoctorRunOptions): Promise<DoctorReport> {
+    const add = opts.repos_add ?? [];
     const doctorRun = (dir: string[]) => {
       const argv = [
         "volley",
@@ -776,7 +791,14 @@ export class SshTmuxHost implements RemoteHost {
         "--json",
         ...dir,
         ...(opts.fix ? ["--fix", "--yes"] : []),
-        ...(opts.fix && opts.clone !== undefined ? ["--clone", "--origin", opts.clone] : []),
+        ...add.flatMap((r) => ["--repo-add", r]),
+        ...(opts.repos_remove ?? []).flatMap((r) => ["--repo-remove", r]),
+        // An added repository is cloned from its GitHub URL: no --origin.
+        ...(opts.fix && add.length > 0
+          ? ["--clone"]
+          : opts.fix && opts.clone !== undefined
+            ? ["--clone", "--origin", opts.clone]
+            : []),
       ];
       // Through run, not exec: `volley` is otherwise a local program (LOCAL_PROGRAMS).
       return this.run([{ argv, cwd: this.spec.volley_dir }], {

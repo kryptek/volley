@@ -14,9 +14,11 @@ import type { RemoteHostSpec } from "../src/hosts/ssh-tmux";
 import { readJournalFile } from "../src/journal";
 import {
   MACHINE_CHANNEL,
+  type MachineCheck,
   MachineHealth,
   type MachineRecord,
   type MachineStatus,
+  doctorFields,
   machineTopic,
   parseMachine,
 } from "../src/machines";
@@ -72,6 +74,71 @@ describe("parseMachine", () => {
     expect(
       parseMachine(machineTopic("box"), envelope({ ...record(), tunnel: "maybe" as "up" })),
     ).toBeNull();
+  });
+});
+
+describe("a record's repositories (#435)", () => {
+  const REPOS: MachineRecord["repos"] = [
+    {
+      slug: "a/a",
+      path: "/path/to/home/.volley/repos/a/a",
+      exists: true,
+      origin: "github.com/a/a",
+      managed: true,
+      fetched_at: "2026-10-19T08:59:00.000Z",
+      toolchain: { ok: false, missing: ["java"], outdated: [] },
+    },
+    {
+      slug: "b/b",
+      path: "/path/to/work/b",
+      exists: false,
+      managed: false,
+      fetched_at: null,
+      release_branch: "release/2026-10-23-repos",
+      toolchain: { ok: true, missing: [], outdated: ["bun"] },
+    },
+  ];
+  const CHECKS: MachineCheck[] = [
+    { id: "repo.clone", ok: true, severity: "block", detail: "clone", repo: "a/a" },
+    { id: "tool.java", ok: false, severity: "block", detail: "java is not installed", repo: "a/a" },
+    { id: "tool.git", ok: true, severity: "block", detail: "git 2.43.0" },
+  ];
+
+  it("round-trips through machine.schema.json: repos[] and each check's repo", () => {
+    const r = record({ repos: REPOS, checks: CHECKS, doctor_at: "2026-10-19T09:00:00.000Z" });
+    expect(schemaErrors("machine.schema.json", JSON.parse(envelope(r)))).toEqual([]);
+    expect(parseMachine(machineTopic("box"), envelope(r))).toEqual(r);
+    for (const bad of [
+      [{ ...REPOS[0], slug: "../x" }],
+      [{ ...REPOS[0], toolchain: { ok: true, missing: ["rm -rf /"], outdated: [] } }],
+      [{ ...REPOS[0], extra: 1 }],
+    ]) {
+      expect(
+        parseMachine(machineTopic("box"), envelope(record({ repos: bad as never }))),
+      ).toBeNull();
+    }
+    const badCheck = [{ ...CHECKS[0], repo: "not a slug" }] as MachineCheck[];
+    expect(parseMachine(machineTopic("box"), envelope(record({ checks: badCheck })))).toBeNull();
+  });
+
+  it("a doctor report's repos and per-repository checks become record fields", () => {
+    const fields = doctorFields({
+      checks: CHECKS.map((c) => ({ ...c, fix: "x" })),
+      repos: REPOS,
+      fixes: [{ id: "repo.canonical", repo: "a/a", ok: true, command: "git remote set-url" }],
+      doctor_at: "2026-10-19T09:00:00.000Z",
+    });
+    expect(fields.checks).toEqual(CHECKS);
+    expect(fields.repos).toEqual(REPOS);
+    // The fixes journal is the report's, never the record's.
+    expect("fixes" in fields).toBe(false);
+  });
+
+  it("a heartbeat carrying an older doctor run keeps the newer run's repos", () => {
+    const health = new MachineHealth({ now: () => 0, onChange: () => {} });
+    health.observe(record({ repos: REPOS, doctor_at: "2026-10-19T09:00:05.000Z" }));
+    health.observe(record({ repos: [], doctor_at: "2026-10-19T08:00:00.000Z" }));
+    expect(health.record("box")?.repos).toEqual(REPOS);
   });
 });
 

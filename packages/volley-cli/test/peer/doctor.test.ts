@@ -6,7 +6,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import addFormats from "ajv-formats";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -25,6 +25,7 @@ import {
 import { VM_STAT_MAC_16GB } from "../fixtures/vm-stat";
 import { FAKE_TOKEN, storeLogins, usageEndpoint } from "../helpers/fake-logins";
 import {
+  type FakeClone,
   type FakeMachineOptions,
   type FakePeerMachine,
   fakePeerMachine,
@@ -943,3 +944,304 @@ const report2 = async (m: FakePeerMachine, over: Partial<DoctorDeps>) => {
   const r = await run(m, { json: true }, over);
   return JSON.parse(r.stdout) as DoctorReport;
 };
+
+describe("volley peer doctor: many repositories (#435)", () => {
+  const managed = (m: FakePeerMachine, slug: string) => join(m.home, ".volley", "repos", slug);
+  /** `volley peer doctor` with peer.json's `repos` map (no legacy --repo). */
+  async function runRepos(
+    m: FakePeerMachine,
+    repos: Record<string, string>,
+    opts: Partial<DoctorOptions> = {},
+  ) {
+    const io = makeBufferIO();
+    const exit = await doctor(io, m.deps(), { repos, ...opts });
+    return { exit, stdout: io.readStdout(), stderr: io.readStderr() };
+  }
+  const reportRepos = async (
+    m: FakePeerMachine,
+    repos: Record<string, string>,
+    opts: Partial<DoctorOptions> = {},
+  ) => JSON.parse((await runRepos(m, repos, { ...opts, json: true })).stdout) as DoctorReport;
+  /** A git clone at `path` on the box, with `files` at its root. */
+  const addClone = (m: FakePeerMachine, path: string, c: FakeClone) => {
+    mkdirSync(join(path, ".git"), { recursive: true });
+    for (const [f, text] of Object.entries(c.files ?? {})) {
+      mkdirSync(dirname(join(path, f)), { recursive: true });
+      writeFileSync(join(path, f), text);
+    }
+    m.clones.set(path, {
+      isGit: true,
+      origin: c.origin,
+      branch: c.branch === undefined ? "main" : c.branch,
+      default: c.default === undefined ? "main" : c.default,
+      dirty: c.dirty ?? false,
+    });
+  };
+  const checksOf = (r: DoctorReport, id: string) => r.checks.filter((c) => c.id === id);
+  const forRepo = (r: DoctorReport, id: string, repo: string) =>
+    r.checks.find((c) => c.id === id && c.repo === repo);
+
+  it("runs the repo checks per repository: a missing clone fails for that repository only", async () => {
+    const m = machine();
+    const repos = { "a/a": managed(m, "a/a"), "b/b": managed(m, "b/b") };
+    addClone(m, repos["a/a"], { origin: "git@github.com:a/a.git" });
+    const r = await reportRepos(m, repos);
+    expect(forRepo(r, "repo.clone", "a/a")).toMatchObject({ ok: true, severity: "block" });
+    expect(forRepo(r, "repo.origin", "a/a")).toMatchObject({ ok: true });
+    expect(forRepo(r, "repo.clone", "b/b")).toMatchObject({ ok: false, severity: "block" });
+    expect(forRepo(r, "repo.clone", "b/b")?.detail).toContain(repos["b/b"]);
+    // Ids are unchanged: one of each per repository, each naming it.
+    expect(checksOf(r, "repo.clone").map((c) => c.repo)).toEqual(["a/a", "b/b"]);
+    expect(r.repos).toEqual([
+      {
+        slug: "a/a",
+        path: repos["a/a"],
+        exists: true,
+        origin: "github.com/a/a",
+        managed: true,
+        fetched_at: null,
+        toolchain: { ok: true, missing: [], outdated: [] },
+      },
+      {
+        slug: "b/b",
+        path: repos["b/b"],
+        exists: false,
+        managed: true,
+        fetched_at: null,
+        toolchain: { ok: true, missing: [], outdated: [] },
+      },
+    ]);
+    // Two repositories: no legacy single `repo`.
+    expect(r.repo).toBeUndefined();
+  });
+
+  it("exactly one repository also fills the legacy `repo` (kept for one release)", async () => {
+    const m = machine();
+    const adopted = join(m.root, "work", "a");
+    addClone(m, adopted, { origin: "https://github.com/a/a" });
+    const r = await reportRepos(m, { "a/a": adopted });
+    expect(r.repos?.[0]).toMatchObject({ slug: "a/a", path: adopted, managed: false });
+    expect(r.repo).toEqual({
+      path: adopted,
+      exists: true,
+      origin: "github.com/a/a",
+      fetched_at: null,
+    });
+  });
+
+  it("--fix --clone clones every repository without a clone, from its GitHub URL (no --origin)", async () => {
+    const m = machine();
+    const repos = { "a/a": managed(m, "a/a"), "b/b": managed(m, "b/b") };
+    const r = await runRepos(m, repos, { fix: true, yes: true, clone: true });
+    const clones = MUTATING(m).filter((a) => a.includes("clone"));
+    expect(clones).toEqual(
+      ["a/a", "b/b"].map((s) => [
+        "env",
+        "GIT_TERMINAL_PROMPT=0",
+        "GIT_ASKPASS=",
+        "SSH_ASKPASS=",
+        "GIT_SSH_COMMAND=ssh -o BatchMode=yes",
+        "/usr/bin/git",
+        "clone",
+        "--",
+        `https://github.com/${s}.git`,
+        repos[s as "a/a"],
+      ]),
+    );
+    expect(r.stdout).not.toContain("✗ repo.clone");
+  });
+
+  it("a fix that fails for one repository does not stop the same fix for another", async () => {
+    const m = machine();
+    const repos = { "a/a": managed(m, "a/a"), "b/b": managed(m, "b/b") };
+    const exec = m.exec;
+    const r = await (async () => {
+      const io = makeBufferIO();
+      await doctor(
+        io,
+        m.deps({
+          exec: async (argv, o) =>
+            argv.includes("clone") && argv.includes(repos["a/a"])
+              ? { code: 128, stdout: "", stderr: "fatal: could not read\n" }
+              : exec(argv, o),
+        }),
+        { repos, fix: true, yes: true, clone: true },
+      );
+      return io.readStdout();
+    })();
+    expect(r).toContain("✗ repo.clone (a/a): fix failed (exit 128)");
+    expect(m.clones.has(repos["b/b"])).toBe(true);
+  });
+
+  describe("canonical origin (D6)", () => {
+    const setup = (origin: string, canonical: Record<string, string | null>) => {
+      const m = machine({ canonical });
+      const p = managed(m, "new-owner/name");
+      addClone(m, p, { origin });
+      return { m, repos: { "new-owner/name": p }, p };
+    };
+
+    it("a remote naming the transferred repository's old owner: ok, with a warn; --fix repoints it, journaled", async () => {
+      const { m, repos, p } = setup("git@github.com:old-owner/name.git", {
+        "old-owner/name": "new-owner/name",
+        "new-owner/name": "new-owner/name",
+      });
+      const r = await reportRepos(m, repos);
+      expect(forRepo(r, "repo.origin", "new-owner/name")).toMatchObject({ ok: true });
+      const warn = forRepo(r, "repo.canonical", "new-owner/name");
+      expect(warn).toMatchObject({ ok: false, severity: "warn" });
+      expect(warn?.detail).toContain("remote names the old owner");
+      expect(MUTATING(m).filter((a) => a.includes("set-url"))).toEqual([]);
+      // One gh repo view per slug per run.
+      const views = m.ran("gh", "repo", "view").filter((a) => a.includes("nameWithOwner"));
+      expect(views.map((a) => a[3]).sort()).toEqual(["new-owner/name", "old-owner/name"]);
+
+      m.calls.length = 0;
+      const fixed = await reportRepos(m, repos, { fix: true, yes: true });
+      expect(MUTATING(m).filter((a) => a.includes("set-url"))).toEqual([
+        [
+          "/usr/bin/git",
+          "-C",
+          p,
+          "remote",
+          "set-url",
+          "origin",
+          "https://github.com/new-owner/name.git",
+        ],
+      ]);
+      expect(fixed.fixes).toEqual([
+        expect.objectContaining({
+          id: "repo.canonical",
+          repo: "new-owner/name",
+          ok: true,
+          command: expect.stringContaining(
+            "remote set-url origin https://github.com/new-owner/name.git",
+          ),
+        }),
+      ]);
+      expect(forRepo(fixed, "repo.canonical", "new-owner/name")).toBeUndefined();
+      expect(forRepo(fixed, "repo.origin", "new-owner/name")?.ok).toBe(true);
+    });
+
+    it("a genuinely different repository blocks and is never touched", async () => {
+      const { m, repos } = setup("git@github.com:someone/fork.git", {});
+      const r = await reportRepos(m, repos);
+      const c = forRepo(r, "repo.origin", "new-owner/name");
+      expect(c).toMatchObject({ ok: false, severity: "block" });
+      expect(c?.detail).toContain("github.com/someone/fork");
+      m.calls.length = 0;
+      await runRepos(m, repos, { fix: true, yes: true });
+      expect(MUTATING(m).filter((a) => a.includes("set-url"))).toEqual([]);
+    });
+
+    it("without gh, origins are compared normalised: the old owner's remote blocks", async () => {
+      const { m, repos } = setup("git@github.com:old-owner/name.git", {
+        "old-owner/name": "new-owner/name",
+      });
+      m.tools.gh.path = null;
+      m.tools.gh.sshPath = null;
+      const r = await reportRepos(m, repos);
+      expect(forRepo(r, "repo.origin", "new-owner/name")).toMatchObject({ ok: false });
+      expect(m.ran("gh")).toEqual([]);
+    });
+  });
+
+  describe("fast-forward only (D7)", () => {
+    const one = (clone: Partial<FakeClone>, where: "managed" | "adopted" = "managed") => {
+      const m = machine();
+      const p = where === "managed" ? managed(m, "a/a") : join(m.root, "work", "a");
+      addClone(m, p, { origin: "https://github.com/a/a", ...clone });
+      return { m, p };
+    };
+    const gitRuns = (m: FakePeerMachine, p: string) =>
+      MUTATING(m)
+        .concat(m.ran("git").filter((a) => a.includes("merge")))
+        .filter((a) => a.includes(p) && (a.includes("fetch") || a.includes("merge")))
+        .map((a) => a.slice(a.indexOf("-C") + 2));
+
+    it("a clean managed clone on its default branch is fetched, then fast-forwarded", async () => {
+      const { m, p } = one({});
+      await runRepos(m, { "a/a": p }, { fix: true, yes: true });
+      expect(gitRuns(m, p)).toEqual([
+        ["fetch", "--quiet", "origin"],
+        ["merge", "--ff-only", "--quiet", "origin/main"],
+      ]);
+    });
+
+    it("dirty, detached, off its default branch, or adopted: fetched only", async () => {
+      for (const [clone, where] of [
+        [{ dirty: true }, "managed"],
+        [{ branch: null }, "managed"],
+        [{ branch: "feature" }, "managed"],
+        [{ default: null }, "managed"],
+        [{}, "adopted"],
+      ] as const) {
+        const { m, p } = one(clone, where);
+        await runRepos(m, { "a/a": p }, { fix: true, yes: true });
+        expect(gitRuns(m, p), JSON.stringify([clone, where])).toEqual([
+          ["fetch", "--quiet", "origin"],
+        ]);
+        box?.cleanup();
+        box = null;
+      }
+    });
+
+    it("without --fix nothing is fetched", async () => {
+      const { m, p } = one({});
+      await runRepos(m, { "a/a": p });
+      expect(gitRuns(m, p)).toEqual([]);
+    });
+  });
+
+  describe("toolchain (ex-T5)", () => {
+    it("a tool one repository needs fails for that repository only; repos[].toolchain is filled", async () => {
+      const m = machine({ extraTools: { mvn: { version: "Apache Maven 3.9.6" } } });
+      const pa = managed(m, "a/a");
+      const pb = managed(m, "b/b");
+      addClone(m, pa, { origin: "https://github.com/a/a", files: { "pom.xml": "<project/>" } });
+      addClone(m, pb, {
+        origin: "https://github.com/b/b",
+        files: { "package.json": JSON.stringify({ packageManager: "bun@1.3.0" }) },
+      });
+      const r = await reportRepos(m, { "a/a": pa, "b/b": pb });
+      expect(forRepo(r, "tool.java", "a/a")).toMatchObject({ ok: false, severity: "block" });
+      expect(forRepo(r, "tool.java", "a/a")?.detail).toContain("a/a");
+      expect(r.checks.filter((c) => c.repo === "b/b" && !c.ok)).toEqual([]);
+      expect(r.repos?.map((x) => [x.slug, x.toolchain])).toEqual([
+        ["a/a", { ok: false, missing: ["java"], outdated: [] }],
+        ["b/b", { ok: true, missing: [], outdated: [] }],
+      ]);
+      // The machine-level tool checks stay as they were.
+      expect(check(r, "tool.git")).toMatchObject({ ok: true });
+      // A tool no repository needs is never probed.
+      expect(m.calls.some((c) => c.argv.join(" ").includes("cargo"))).toBe(false);
+    });
+
+    it("an older tool than a repository's minimum is outdated", async () => {
+      const m = machine({
+        extraTools: { java: { version: 'openjdk version "11.0.22" 2024-01-16' } },
+      });
+      const p = managed(m, "a/a");
+      addClone(m, p, {
+        origin: "https://github.com/a/a",
+        files: { "build.gradle.kts": "", ".volley/requirements.yaml": 'min:\n  java: "17"\n' },
+      });
+      const r = await reportRepos(m, { "a/a": p });
+      expect(forRepo(r, "tool.java", "a/a")?.detail).toContain("17");
+      expect(r.repos?.[0]?.toolchain).toEqual({ ok: false, missing: [], outdated: ["java"] });
+    });
+
+    it("an invalid .volley/requirements.yaml blocks that repository with a clear error", async () => {
+      const m = machine();
+      const p = managed(m, "a/a");
+      addClone(m, p, {
+        origin: "https://github.com/a/a",
+        files: { ".volley/requirements.yaml": "toolz: [java]\n" },
+      });
+      const r = await reportRepos(m, { "a/a": p });
+      const c = forRepo(r, "repo.requirements", "a/a");
+      expect(c).toMatchObject({ ok: false, severity: "block" });
+      expect(c?.detail).toContain("toolz");
+    });
+  });
+});

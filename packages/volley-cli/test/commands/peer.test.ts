@@ -1967,6 +1967,132 @@ describe("volley peer doctor (the verb)", () => {
   });
 });
 
+describe("peer.json's repositories (#435)", () => {
+  const SLUG = "example-org/example-repo";
+  const writeCfg = (over: Record<string, unknown> = {}) => {
+    mkdirSync(join(home, ".volley"), { recursive: true });
+    writeFileSync(
+      peerFile(home),
+      JSON.stringify({
+        name: "box-a",
+        host: "dev@host",
+        target: "dev@box-a",
+        namespace: "default",
+        broker: { host: "127.0.0.1", port: 1883 },
+        remote_port: 21883,
+        username: "box-a",
+        password: "peer-secret",
+        joined_at: "2026-10-19T09:00:00.000Z",
+        ...over,
+      }),
+      { mode: 0o600 },
+    );
+  };
+  const peerJson = () => JSON.parse(readFileSync(peerFile(home), "utf-8")) as PeerConfig;
+  const doctorJson = async (argv: string[]) => {
+    const f = fakeExec(() => undefined);
+    const r = await run(["doctor", "--json", ...argv], deps(f.exec));
+    return { ...r, f, report: r.exitCode === 2 ? null : JSON.parse(r.stdout) };
+  };
+  type Row = { id: string; ok: boolean; repo?: string; detail: string };
+  const forRepo = (r: { checks: Row[] }, id: string, repo: string) =>
+    r.checks.find((c) => c.id === id && c.repo === repo);
+  const managedPath = (slug: string) => join(home, ".volley", "repos", slug);
+
+  it("--repo-add <owner/name> adds a managed clone; =<path> adopts one; --repo-remove drops it", async () => {
+    writeCfg({ repos: { [SLUG]: box.repoPath } });
+    const added = await doctorJson(["--repo-add", "c/c"]);
+    expect(added.exitCode).toBe(1);
+    expect(peerJson().repos).toEqual({ [SLUG]: box.repoPath, "c/c": managedPath("c/c") });
+    expect(forRepo(added.report, "repo.clone", "c/c")).toMatchObject({ ok: false });
+    expect(forRepo(added.report, "repo.clone", SLUG)).toMatchObject({ ok: true });
+
+    const other = join(box.root, "work", "d");
+    await doctorJson(["--repo-add", `d/d=${other}`, "--repo-remove", "C/C"]);
+    expect(peerJson().repos).toEqual({ [SLUG]: box.repoPath, "d/d": other });
+    // peer.json keeps its mode: it holds the peer's password.
+    expect(statSync(peerFile(home)).mode & 0o777).toBe(0o600);
+  });
+
+  it("a flag-less run (what volley deploy and the service send) reads the map", async () => {
+    writeCfg({ repos: { [SLUG]: box.repoPath } });
+    const r = await doctorJson([]);
+    expect(r.report.repos.map((x: { slug: string }) => x.slug)).toEqual([SLUG]);
+    expect(forRepo(r.report, "repo.origin", SLUG)).toMatchObject({ ok: true });
+    // Exactly one repository: the legacy `repo` too.
+    expect(r.report.repo.path).toBe(box.repoPath);
+  });
+
+  it("a legacy `repo` migrates into `repos` on the first doctor run; a non-GitHub origin stays", async () => {
+    writeCfg({ repo: box.repoPath });
+    await doctorJson([]);
+    const cfg = peerJson();
+    expect(cfg.repos).toEqual({ [SLUG]: box.repoPath });
+    expect(cfg.repo).toBeUndefined();
+
+    box.state.origin = "ssh://git@git.example.com/team/repo.git";
+    writeCfg({ repo: box.repoPath });
+    const r = await doctorJson([]);
+    expect(peerJson().repo).toBe(box.repoPath);
+    expect(peerJson().repos).toBeUndefined();
+    expect(r.report.repo.path).toBe(box.repoPath);
+  });
+
+  it("refuses a --repo-add or --repo-remove that is not owner/name[=<path>]", async () => {
+    writeCfg({ repos: { [SLUG]: box.repoPath } });
+    for (const argv of [
+      ["--repo-add", "../x"],
+      ["--repo-add", "a"],
+      ["--repo-add", "a/b/c"],
+      ["--repo-add", "a/a="],
+      ["--repo-add", "https://github.com/a/a"],
+      ["--repo-remove", "a/a=/srv/a"],
+    ]) {
+      const r = await doctorJson(argv);
+      expect(r.exitCode, argv.join(" ")).toBe(2);
+      expect(r.stderr).toContain(argv[0] as string);
+    }
+    expect(peerJson().repos).toEqual({ [SLUG]: box.repoPath });
+  });
+
+  it("--fix --clone clones an added repository without --origin", async () => {
+    writeCfg({ repos: { [SLUG]: box.repoPath } });
+    const r = await run(
+      ["doctor", "--json", "--fix", "--yes", "--clone", "--repo-add", "c/c"],
+      deps(fakeExec(() => undefined).exec),
+    );
+    expect(r.stderr).not.toContain("--origin");
+    expect(box.clones.has(managedPath("c/c"))).toBe(true);
+    expect(box.clones.get(managedPath("c/c"))?.origin).toBe("https://github.com/c/c.git");
+  });
+
+  it("join --repo takes <owner/name>[=<path>], repeatable, and writes peer.json's repos", async () => {
+    const f = fakeExec(hostSsh({ stdout: `${JSON.stringify(JOINED)}\n` }));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", `${SLUG}=${box.repoPath}`],
+      deps(f.exec),
+    );
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    const cfg = peerJson();
+    expect(cfg.repos).toEqual({ [SLUG]: box.repoPath });
+    expect(cfg.repo).toBeUndefined();
+    // One repository: the supervisor still learns its path (hosts.<name>.repo) for one release.
+    const script = f.calls.find((c) => c.input?.includes("peer redeem"))?.input as string;
+    expect(redeemRequest(script).request.repo).toBe(box.repoPath);
+  });
+
+  it("join --repo with a bare path still works (the legacy single clone)", async () => {
+    const f = fakeExec(hostSsh({ stdout: `${JSON.stringify(JOINED)}\n` }));
+    const r = await run(
+      ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath],
+      deps(f.exec),
+    );
+    expect(r.exitCode).toBe(0);
+    expect(peerJson().repo).toBe(box.repoPath);
+  });
+});
+
 describe("the real dependencies", () => {
   it("report the checkout's package.json version", () => {
     const file = fileURLToPath(new URL("../../package.json", import.meta.url));

@@ -1184,6 +1184,21 @@ describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
     ]);
   });
 
+  // The fake exec runs the real fence: these argv are allowed on a box.
+  it("runDoctor passes repositories to add (and clone, under fix) or remove (#435)", async () => {
+    const r = remote(() => ({ code: 0, stdout: JSON.stringify(REPORT) }));
+    await r.host.runDoctor({ fix: true, repos_add: ["a/a", "b/b=/srv/b"], repos_remove: ["c/c"] });
+    await r.host.runDoctor({ fix: false, repos_add: ["a/a"] });
+    const dir = ["--supervisor-volley-dir", SPEC.volley_dir];
+    expect(r.steps().map((s) => s.argv)).toEqual([
+      [
+        ...["volley", "peer", "doctor", "--json", ...dir, "--fix", "--yes"],
+        ...["--repo-add", "a/a", "--repo-add", "b/b=/srv/b", "--repo-remove", "c/c", "--clone"],
+      ],
+      ["volley", "peer", "doctor", "--json", ...dir, "--repo-add", "a/a"],
+    ]);
+  });
+
   it("runDoctor on a volley older than --supervisor-volley-dir runs the doctor again without it", async () => {
     let n = 0;
     const r = remote(() =>

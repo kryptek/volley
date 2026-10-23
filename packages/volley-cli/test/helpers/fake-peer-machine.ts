@@ -76,6 +76,36 @@ export interface FakeMachineOptions {
   /** `vm_stat`'s output (macOS memory); the default reads 42% available on 16 GB. */
   vmStat?: string;
   profile?: FakeProfile;
+  /** More clones, by path: the per-repository doctor's (#435). */
+  clones?: Record<string, FakeClone>;
+  /**
+   * `gh repo view <slug> --json nameWithOwner`: lower-cased slug → the name GitHub reports (null:
+   * not found). A slug not listed reports itself.
+   */
+  canonical?: Record<string, string | null>;
+  /** Tools beyond the doctor's own (`java`, `mvn`…): absent unless listed. */
+  extraTools?: Record<string, Partial<FakeTool>>;
+}
+
+/** A git clone on the box. */
+export interface FakeClone {
+  origin: string;
+  /** The checked-out branch; null: a detached HEAD. Default `main`. */
+  branch?: string | null;
+  /** `origin/HEAD`'s branch (default `main`); null: none. */
+  default?: string | null;
+  /** `git status --porcelain` prints something. */
+  dirty?: boolean;
+  /** Files at the clone's root (its manifests). */
+  files?: Record<string, string>;
+}
+
+interface CloneState {
+  isGit: boolean;
+  origin: string;
+  branch: string | null;
+  default: string | null;
+  dirty: boolean;
 }
 
 export interface Call {
@@ -154,7 +184,28 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
     installed: opts.volleyInstalled ?? true,
     isGit: (opts.repo ?? "clone") === "clone",
     origin: opts.origin ?? "git@github.com:example-org/example-repo.git",
+    branch: "main" as string | null,
+    default: "main" as string | null,
+    dirty: false,
   };
+  /** Every clone but the wave repo's (`state`), by path. */
+  const clones = new Map<string, CloneState>();
+  for (const [path, c] of Object.entries(opts.clones ?? {})) {
+    mkdirSync(join(path, ".git"), { recursive: true });
+    for (const [f, text] of Object.entries(c.files ?? {})) {
+      mkdirSync(dirname(join(path, f)), { recursive: true });
+      writeFileSync(join(path, f), text);
+    }
+    clones.set(path, {
+      isGit: true,
+      origin: c.origin,
+      branch: c.branch === undefined ? "main" : c.branch,
+      default: c.default === undefined ? "main" : c.default,
+      dirty: c.dirty ?? false,
+    });
+  }
+  const cloneAt = (path: string | undefined): CloneState | undefined =>
+    path === repoPath ? state : path !== undefined ? clones.get(path) : undefined;
   if (state.installed) {
     mkdirSync(join(volleyDir, "node_modules", ".bin"), { recursive: true });
     // What the doctor's own install leaves behind: the hash of the bun.lock it installed.
@@ -235,6 +286,10 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
       ...(opts.tools?.[t] ?? {}),
     };
   }
+  const extra: Record<string, FakeTool> = {};
+  for (const [t, o] of Object.entries(opts.extraTools ?? {})) {
+    extra[t] = { path: `/usr/bin/${t}`, sshPath: `/usr/bin/${t}`, version: `${t} 1.0.0`, ...o };
+  }
   const gh = { signedIn: true, user: "octocat", permission: "WRITE", ...(opts.gh ?? {}) };
   const plant = opts.plant;
   const calls: Call[] = [];
@@ -255,7 +310,12 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
         const m = managers[name];
         return m === null || m === undefined ? { code: 1 } : { stdout: `${m}\n` };
       }
-      const t = name !== undefined ? tools[name as ToolName] : undefined;
+      const t =
+        name === undefined
+          ? undefined
+          : Object.hasOwn(tools, name)
+            ? tools[name as ToolName]
+            : extra[name];
       const p = t === undefined ? null : ssh ? t.sshPath : t.path;
       return p === null ? { code: 1 } : { stdout: `${p}\n` };
     };
@@ -269,6 +329,11 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
       return tool.path === null && tool.sshPath === null
         ? { code: 127, stderr: `${cmd}: not found` }
         : { stdout: `${tool.version}\n` };
+    }
+    const more = Object.hasOwn(extra, cmd) ? extra[cmd] : undefined;
+    if (more !== undefined && /^-{0,2}version$/.test(a[0] ?? "")) {
+      // java prints its version on stderr.
+      return cmd === "java" ? { stderr: `${more.version}\n` } : { stdout: `${more.version}\n` };
     }
     if (cmd === "bun" && a[0] === "install") {
       if (opts.lockDrift === true) {
@@ -340,19 +405,42 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
           : null;
     if (git !== null) {
       const sub = git[0] === "-C" ? git.slice(2) : git;
+      const c = cloneAt(git[0] === "-C" ? git[1] : undefined);
       if (sub[0] === "checkout") {
         checkout((sub.at(-1) as string).replace(/^v/, ""));
         return {};
       }
-      if (sub[0] === "rev-parse") return state.isGit ? { stdout: "true\n" } : { code: 128 };
-      if (sub[0] === "remote") return state.isGit ? { stdout: `${state.origin}\n` } : { code: 2 };
+      if (sub[0] === "rev-parse") return c?.isGit === true ? { stdout: "true\n" } : { code: 128 };
+      if (sub[0] === "remote" && sub[1] === "set-url") {
+        if (c === undefined) return { code: 2 };
+        c.origin = sub.at(-1) as string;
+        return {};
+      }
+      if (sub[0] === "remote") return c?.isGit === true ? { stdout: `${c.origin}\n` } : { code: 2 };
+      if (sub[0] === "symbolic-ref") {
+        if (sub.includes("HEAD") && !sub.includes("refs/remotes/origin/HEAD")) {
+          return c?.branch != null ? { stdout: `${c.branch}\n` } : { code: 1 };
+        }
+        return c?.default != null ? { stdout: `origin/${c.default}\n` } : { code: 128 };
+      }
+      if (sub[0] === "status") return { stdout: c?.dirty === true ? " M README.md\n" : "" };
       if (sub[0] === "ls-remote") return { code: (opts.fetchable ?? true) ? 0 : 2 };
       if (sub[0] === "ls-files") return { code: opts.trackedMcpJson === true ? 0 : 1 };
       if (sub[0] === "clone") {
         const [url, path] = sub.slice(1).filter((w) => w !== "--");
         mkdirSync(join(path as string, ".git"), { recursive: true });
-        state.isGit = true;
-        state.origin = url as string;
+        if (path === repoPath) {
+          state.isGit = true;
+          state.origin = url as string;
+        } else {
+          clones.set(path as string, {
+            isGit: true,
+            origin: url as string,
+            branch: "main",
+            default: "main",
+            dirty: false,
+          });
+        }
         return {};
       }
       return {};
@@ -366,6 +454,14 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
       }
       if (a[0] === "api" && a[1] === "user")
         return gh.signedIn ? { stdout: `${gh.user}\n` } : { code: 1 };
+      if (a[0] === "repo" && a[1] === "view" && a.includes("nameWithOwner")) {
+        const slug = a[2] as string;
+        const known = opts.canonical ?? {};
+        const name = Object.hasOwn(known, slug.toLowerCase()) ? known[slug.toLowerCase()] : slug;
+        return name === null || name === undefined
+          ? { code: 1, stderr: `GraphQL: Could not resolve to a Repository (${slug})\n` }
+          : { stdout: `${name}\n` };
+      }
       if (a[0] === "repo" && a[1] === "view") return { stdout: `${gh.permission}\n` };
     }
     if (cmd === "claude" && a[0] === "auth") {
@@ -456,7 +552,9 @@ export function fakePeerMachine(opts: FakeMachineOptions = {}) {
     readClaudeJson,
     repoPath,
     tools,
+    extra,
     state,
+    clones,
     exec,
     calls,
     deps,

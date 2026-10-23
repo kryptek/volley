@@ -10,7 +10,12 @@ import type {
   WorktreeResult,
   WorktreeSpec,
 } from "../../src/hosts/host";
-import type { RemoteHost, RemoteHostSpec, RemoteRunOptions } from "../../src/hosts/ssh-tmux";
+import type {
+  DoctorRunOptions,
+  RemoteHost,
+  RemoteHostSpec,
+  RemoteRunOptions,
+} from "../../src/hosts/ssh-tmux";
 import type { DoctorReport } from "../../src/machines";
 import type { PathProbe } from "../../src/readiness";
 import type { SpawnDeps, SpawnRequest } from "../../src/spawn";
@@ -353,7 +358,7 @@ export type FakeRemoteHost = FakeHost &
   RemoteHost & {
     answers: FakeRemoteAnswers;
     probes: number;
-    doctorRuns: { fix: boolean; clone?: string }[];
+    doctorRuns: DoctorRunOptions[];
   };
 
 /** A doctor report with every check passing. */
@@ -361,6 +366,7 @@ export const GREEN_DOCTOR: DoctorReport = {
   checks: [{ id: "repo.clone", ok: true, severity: "block", detail: "clone at /srv/repo" }],
   versions: { peer: "0.2.0", volley: "0.2.0", bun: "1.3.1", git: "2.43.0" },
   auth: { gh: "ok", claude: "signed_in", trust: "ok" },
+  repos: [],
   doctor_at: "2026-10-19T09:00:00.000Z",
 };
 
@@ -413,7 +419,7 @@ export function fakeRemoteHost(
       if (a instanceof Error) throw a;
       return a;
     },
-    runDoctor: async (opts: { fix: boolean; clone?: string }) => {
+    runDoctor: async (opts: DoctorRunOptions) => {
       h.doctorRuns.push(opts);
       const a = h.answers.doctor ?? GREEN_DOCTOR;
       if (a instanceof Error) throw a;

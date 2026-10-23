@@ -1,15 +1,18 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { CONFIG_DEFAULTS } from "volleyd/config-defaults";
+import { managedClonePath, originToSlug, sameSlug } from "volleyd/repos";
 import type { PeerExec } from "../commands/peer";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { claudeChecks, isRepoTrusted, loginIdentity, parseClaudeStatus } from "./checks/claude";
-import { ghPermission, ghState, ghUser, githubChecks } from "./checks/github";
+import { canonicalSlug, ghPermission, ghState, ghUser, githubChecks } from "./checks/github";
 import {
   diskOf,
   machineChecks,
   memoryOf,
+  reposWorktreeRoot,
   vmStatAvailablePct,
   worktreeRoot,
 } from "./checks/machine";
@@ -19,8 +22,8 @@ import {
   gatherAccountProfiles,
   onboardingVersionOf,
 } from "./checks/profiles";
-import { GIT_QUIET, githubSlug, normalizeOrigin, repoChecks } from "./checks/repo";
-import { ON_PATH, binOf, toolChecks, versionOf } from "./checks/tools";
+import { GIT_QUIET, githubSlug, normalizeOrigin, repoChecks, reposChecks } from "./checks/repo";
+import { ON_PATH, binOf, repoToolChecks, toolChecks, toolchainOf, versionOf } from "./checks/tools";
 import {
   PROFILE_CHECKS,
   type ProfileFacts,
@@ -29,6 +32,7 @@ import {
   gatherProfile,
   profileChecks,
 } from "./provision";
+import { type Requirements, requirementsOf } from "./requirements";
 import {
   type ClaudeLogin,
   PROBE_FAMILIES,
@@ -68,6 +72,8 @@ export const DOCTOR_DEFAULTS = {
   /** Each probe's limit (a fix's own commands get `fix_timeout_ms`). */
   exec_timeout_ms: 20_000,
   fix_timeout_ms: 600_000,
+  /** `gh repo view <slug> --json nameWithOwner` (a repository's canonical name, D6). */
+  gh_view_timeout_ms: 15_000,
   /**
    * sshd's default PATH for a non-interactive session (Debian/Ubuntu's OpenSSH; macOS's): what
    * volleyd's `ssh <box> bash -s` starts from before the login shell's non-interactive startup.
@@ -84,6 +90,7 @@ const FIXABLE: string[] = [
   "volley.installed",
   "volley.version",
   "repo.clone",
+  "repo.canonical",
   ...PROFILE_CHECKS,
   "claude.profiles",
 ];
@@ -115,6 +122,8 @@ export interface Fix {
   needsClone?: boolean;
   /** Edits the doctor makes itself under `--fix`, after the steps (never in the report). */
   apply?: { what: string; run: () => void }[];
+  /** The steps run under `--fix` even while the check passes (fetching a repository, D7). */
+  refresh?: boolean;
 }
 
 export interface Check {
@@ -123,7 +132,34 @@ export interface Check {
   severity: Severity;
   /** One line on what the check found (at most 200 characters). */
   detail: string;
+  /** The repository (`owner/name`) a per-repository check is about. */
+  repo?: string;
   fix?: Fix;
+}
+
+/** A configured repository's clone (peer.json's `repos`), as the doctor found it. */
+export interface RepoFacts {
+  slug: string;
+  path: string;
+  /** At its managed path (`<repo_root>/<owner>/<name>`); else adopted: fetched, never moved. */
+  managed: boolean;
+  exists: boolean;
+  empty: boolean;
+  isGit: boolean;
+  origin: string | null;
+  fetchable: boolean | null;
+  fetchedAt: string | null;
+  /**
+   * GitHub's canonical `owner/name` for the configured slug and for the remote's (D6), asked only
+   * when the two differ and gh is signed in; null otherwise (or when GitHub did not answer).
+   */
+  canonical: { configured: string | null; remote: string | null } | null;
+  /** The checked-out branch (null: detached), `origin/HEAD`'s branch, and a clean worktree. */
+  head: string | null;
+  defaultBranch: string | null;
+  clean: boolean;
+  /** Its toolchain (requirements.ts), or why its requirements file is invalid. */
+  requirements: Requirements | { error: string };
 }
 
 export interface Memory {
@@ -168,6 +204,10 @@ export interface Facts {
     version: string | null;
     required: string | null;
   };
+  /** peer.json's repositories, by slug (empty: the legacy single `repo`). */
+  repos: RepoFacts[];
+  /** The tools a repository needs beyond `TOOLS` (`java`, `mvn`…), probed only when needed. */
+  extraTools: Record<string, ToolFact>;
   repo: {
     path: string | null;
     exists: boolean;
@@ -272,8 +312,13 @@ export interface DoctorDeps {
 }
 
 export interface DoctorOptions {
-  /** This machine's clone of the wave repo. */
+  /** This machine's clone of the wave repo (the legacy single repository). */
   repo?: string;
+  /**
+   * peer.json's repositories: `owner/name` → its clone's absolute path. Non-empty, every repo
+   * check runs per repository and `repo` is ignored.
+   */
+  repos?: Record<string, string>;
   /** The wave repo's URL: compared with the clone's origin, and what `--clone` clones. */
   origin?: string;
   /** The release branch to check is fetchable. */
@@ -299,6 +344,34 @@ export interface RecordCheck {
   ok: boolean;
   severity: Severity;
   detail: string;
+  repo?: string;
+}
+
+/** A repository's toolchain on this machine: the tools it needs that are missing or too old. */
+export interface Toolchain {
+  ok: boolean;
+  missing: string[];
+  outdated: string[];
+}
+
+/** One configured repository, as the machine record carries it (`repos[]`). */
+export interface RepoReport {
+  slug: string;
+  path: string;
+  exists: boolean;
+  origin?: string;
+  managed: boolean;
+  fetched_at: string | null;
+  release_branch?: string;
+  toolchain: Toolchain;
+}
+
+/** A fix `--fix` applied: the report's journal of what changed (never in the record). */
+export interface FixRecord {
+  id: string;
+  repo?: string;
+  command: string;
+  ok: boolean;
 }
 
 /** `--json`: exactly the machine record's doctor fields, plus each failing check's fix text. */
@@ -321,10 +394,13 @@ export interface DoctorReport {
     release_branch?: string;
     fetched_at: string | null;
   };
+  repos?: RepoReport[];
   memory: Memory;
   disk?: Disk;
   /** Each signed-in login's usage windows: numbers and states only (SPEC §4.6.14). */
   claude_logins?: ClaudeLogin[];
+  /** Under `--fix`: each fix it applied to a failing check, and whether it worked. */
+  fixes?: FixRecord[];
   doctor_at: string;
 }
 
@@ -370,10 +446,8 @@ function readJson(file: string): unknown {
 }
 
 export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promise<Facts> {
-  const sh = (argv: string[]) =>
-    deps
-      .exec(argv, { timeoutMs: DOCTOR_DEFAULTS.exec_timeout_ms })
-      .catch(() => ({ code: -1, stdout: "", stderr: "" }));
+  const sh = (argv: string[], timeoutMs: number = DOCTOR_DEFAULTS.exec_timeout_ms) =>
+    deps.exec(argv, { timeoutMs }).catch(() => ({ code: -1, stdout: "", stderr: "" }));
   const found = async (argv: string[]) => {
     const r = await sh(argv);
     const p = firstLine(r.stdout);
@@ -436,36 +510,53 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     }
   }
 
-  // The wave repo's clone.
+  // A clone: there, a git work tree, its origin, fetchable without a prompt, last fetched.
+  const clone = async (at: string, release: string | null) => {
+    const exists = existsSync(at);
+    let empty = false;
+    if (exists) {
+      try {
+        empty = statSync(at).isDirectory() && readdirSync(at).length === 0;
+      } catch {}
+    }
+    const isGit =
+      exists &&
+      !empty &&
+      gitBin !== null &&
+      firstLine((await sh([gitBin, "-C", at, "rev-parse", "--is-inside-work-tree"])).stdout) ===
+        "true";
+    let origin: string | null = null;
+    let fetchable: boolean | null = null;
+    let fetchedAt: string | null = null;
+    if (isGit && gitBin !== null) {
+      const r = await sh([gitBin, "-C", at, "remote", "get-url", "origin"]);
+      origin = r.code === 0 ? normalizeOrigin(firstLine(r.stdout)) : null;
+      const ref = release !== null ? `refs/heads/${release}` : "HEAD";
+      fetchable =
+        (await sh([...GIT_QUIET, gitBin, "-C", at, "ls-remote", "--exit-code", "origin", ref]))
+          .code === 0;
+      try {
+        fetchedAt = statSync(join(at, ".git", "FETCH_HEAD")).mtime.toISOString();
+      } catch {}
+    }
+    return { exists, empty, isGit, origin, fetchable, fetchedAt };
+  };
+
+  // The wave repo's clone (the legacy single repository).
   const path = opts.repo !== undefined ? resolve(opts.repo) : null;
-  const exists = path !== null && existsSync(path);
-  let empty = false;
-  if (exists) {
-    try {
-      empty = statSync(path).isDirectory() && readdirSync(path).length === 0;
-    } catch {}
-  }
-  const isGit =
-    exists &&
-    !empty &&
-    gitBin !== null &&
-    firstLine((await sh([gitBin, "-C", path, "rev-parse", "--is-inside-work-tree"])).stdout) ===
-      "true";
-  let origin: string | null = null;
-  let fetchable: boolean | null = null;
-  let fetchedAt: string | null = null;
   const release = opts.release ?? null;
-  if (isGit && gitBin !== null) {
-    const r = await sh([gitBin, "-C", path, "remote", "get-url", "origin"]);
-    origin = r.code === 0 ? normalizeOrigin(firstLine(r.stdout)) : null;
-    const ref = release !== null ? `refs/heads/${release}` : "HEAD";
-    fetchable =
-      (await sh([...GIT_QUIET, gitBin, "-C", path, "ls-remote", "--exit-code", "origin", ref]))
-        .code === 0;
-    try {
-      fetchedAt = statSync(join(path, ".git", "FETCH_HEAD")).mtime.toISOString();
-    } catch {}
-  }
+  const legacy =
+    path !== null
+      ? await clone(path, release)
+      : {
+          exists: false,
+          empty: false,
+          isGit: false,
+          origin: null,
+          fetchable: null,
+          fetchedAt: null,
+        };
+  const { exists, empty, isGit, origin, fetchable, fetchedAt } = legacy;
   const expected = opts.origin !== undefined ? normalizeOrigin(opts.origin) : null;
 
   // GitHub.
@@ -475,7 +566,12 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     signedIn && ghBin !== null
       ? ghUser((await sh([ghBin, "api", "user", "--jq", ".login"])).stdout)
       : null;
-  const slug = githubSlug(origin ?? expected);
+  // peer.json's repositories, sorted by slug (the first is the one gh.auth checks push access to).
+  const configured = Object.entries(opts.repos ?? {}).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  const slug =
+    configured.length > 0 ? (configured[0]?.[0] ?? null) : githubSlug(origin ?? expected);
   const permission =
     signedIn && ghBin !== null && slug !== null
       ? ghPermission(
@@ -494,6 +590,83 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
         )
       : null;
 
+  // Each repository: its clone, GitHub's canonical names when its remote names another (D6:
+  // one `gh repo view` per slug per run), its branch state (D7) and its toolchain.
+  const canonicals = new Map<string, string | null>();
+  const canonicalOf = async (s: string): Promise<string | null> => {
+    const key = s.toLowerCase();
+    if (!canonicals.has(key)) {
+      const r =
+        signedIn && ghBin !== null
+          ? await sh(
+              [ghBin, "repo", "view", s, "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+              DOCTOR_DEFAULTS.gh_view_timeout_ms,
+            )
+          : null;
+      canonicals.set(key, r !== null && r.code === 0 ? canonicalSlug(r.stdout) : null);
+    }
+    return canonicals.get(key) ?? null;
+  };
+  const managedRoot = CONFIG_DEFAULTS.fleet.repo_root;
+  const repos: RepoFacts[] = [];
+  for (const [repoSlug, repoPath] of configured) {
+    const at = resolve(repoPath);
+    const c = await clone(at, null);
+    const managed = at === resolve(managedClonePath(managedRoot, repoSlug, deps.home));
+    const remote = originToSlug(c.origin);
+    const canonical =
+      remote !== undefined && !sameSlug(remote, repoSlug) && signedIn && ghBin !== null
+        ? { configured: await canonicalOf(repoSlug), remote: await canonicalOf(remote) }
+        : null;
+    let head: string | null = null;
+    let defaultBranch: string | null = null;
+    let clean = false;
+    if (c.isGit && managed && gitBin !== null) {
+      const h = await sh([gitBin, "-C", at, "symbolic-ref", "--short", "-q", "HEAD"]);
+      head = h.code === 0 && firstLine(h.stdout) !== "" ? firstLine(h.stdout) : null;
+      const d = await sh([gitBin, "-C", at, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+      const ref = firstLine(d.stdout);
+      defaultBranch = d.code === 0 && ref.startsWith("origin/") ? ref.slice(7) || null : null;
+      const st = await sh([gitBin, "-C", at, "status", "--porcelain"]);
+      clean = st.code === 0 && st.stdout.trim() === "";
+    }
+    let requirements: RepoFacts["requirements"] = { tools: [], min: {} };
+    if (c.isGit) {
+      try {
+        requirements = requirementsOf(at);
+      } catch (e) {
+        requirements = { error: e instanceof Error ? e.message : String(e) };
+      }
+    }
+    repos.push({
+      slug: repoSlug,
+      path: at,
+      managed,
+      ...c,
+      canonical,
+      head,
+      defaultBranch,
+      clean,
+      requirements,
+    });
+  }
+  // The tools a repository needs beyond the doctor's own: only those, each probed once.
+  const extraTools: Record<string, ToolFact> = {};
+  for (const r of repos) {
+    if ("error" in r.requirements) continue;
+    for (const t of r.requirements.tools) {
+      if ((TOOLS as readonly string[]).includes(t) || Object.hasOwn(extraTools, t)) continue;
+      const at = await found(["sh", "-c", `command -v ${t}`]);
+      const fact: ToolFact = { path: at, sshPath: at, version: null };
+      if (at !== null) {
+        // java prints its version on stderr, go has no --version.
+        const v = await sh([at, t === "java" ? "-version" : t === "go" ? "version" : "--version"]);
+        fact.version = v.code === 0 ? versionOf(`${v.stdout}${v.stderr}`.trim()) : null;
+      }
+      extraTools[t] = fact;
+    }
+  }
+
   // Claude Code: sign-in state and folder trust.
   let claude: { state: AuthClaude; plan: string | null } = { state: "missing", plan: null };
   if (claudeBin !== null) {
@@ -503,12 +676,18 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
   // One parse of ~/.claude.json: the trust table and the login's identity, nothing else of it.
   const claudeJsonFile = join(deps.home, ".claude.json");
   const claudeJson = existsSync(claudeJsonFile) ? readJson(claudeJsonFile) : undefined;
+  // Trust: every repository's folder (or the legacy clone's).
+  const trustPaths = repos.length > 0 ? repos.map((r) => r.path) : path !== null ? [path] : [];
   let trust: AuthTrust = "unknown";
-  if (path !== null) {
+  if (trustPaths.length > 0) {
     if (!existsSync(claudeJsonFile)) trust = "missing";
     else
       trust =
-        claudeJson === undefined ? "unknown" : isRepoTrusted(claudeJson, path) ? "ok" : "missing";
+        claudeJson === undefined
+          ? "unknown"
+          : trustPaths.every((p) => isRepoTrusted(claudeJson, p))
+            ? "ok"
+            : "missing";
   }
   const identity = loginIdentity(
     typeof claudeJson === "object" && claudeJson !== null && !Array.isArray(claudeJson)
@@ -521,7 +700,8 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
   let available: number | null = null;
   if (deps.platform === "darwin")
     available = vmStatAvailablePct((await sh(["vm_stat"])).stdout, deps.totalmem());
-  const root = worktreeRoot(path, deps.home);
+  // Managed repositories' worktrees go under ~/.volley/worktrees; the legacy clone's beside it.
+  const root = repos.length > 0 ? reposWorktreeRoot(deps.home) : worktreeRoot(path, deps.home);
   const st = deps.statfs(nearestExisting(root));
 
   // The usage probe: each login read on this machine, numbers only out.
@@ -553,7 +733,8 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       bun,
       claude: claudeBin,
       git: gitBin,
-      repo: path,
+      // The wave repo's `.mcp.json`: the one repository's, when there is exactly one.
+      repo: repos.length > 0 ? (repos.length === 1 ? (repos[0]?.path ?? null) : null) : path,
       ...(deps.claudeRoot !== undefined ? { claudeRoot: deps.claudeRoot } : {}),
       ...(opts.volleyDir !== undefined ? { supervisorDir: opts.volleyDir } : {}),
     },
@@ -566,6 +747,8 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
     pkg,
     peerVersion: deps.version,
     tools,
+    extraTools,
+    repos,
     volley: {
       dir,
       installed,
@@ -618,7 +801,8 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
 export function checksOf(f: Facts): Check[] {
   return [
     ...toolChecks(f),
-    ...repoChecks(f),
+    // peer.json's repositories, each check carrying `repo`; else the legacy single clone.
+    ...(f.repos.length > 0 ? [...reposChecks(f), ...repoToolChecks(f)] : repoChecks(f)),
     ...githubChecks(f),
     ...claudeChecks(f),
     ...profileChecks(f.profile),
@@ -636,6 +820,7 @@ export function reportOf(f: Facts, checks: Check[], at: Date): DoctorReport {
       ok: c.ok,
       severity: c.severity,
       detail: c.detail,
+      ...(c.repo !== undefined ? { repo: c.repo } : {}),
       ...(!c.ok && c.fix !== undefined ? { fix: c.fix.command } : {}),
     })),
     versions: {
@@ -662,7 +847,7 @@ export function reportOf(f: Facts, checks: Check[], at: Date): DoctorReport {
         ? { claude_org: f.claude.org }
         : {}),
     },
-    ...(r.path !== null
+    ...(r.path !== null && f.repos.length === 0
       ? {
           repo: {
             path: r.path,
@@ -671,6 +856,32 @@ export function reportOf(f: Facts, checks: Check[], at: Date): DoctorReport {
             ...(r.release !== null ? { release_branch: r.release } : {}),
             fetched_at: r.fetchedAt,
           },
+        }
+      : {}),
+    // Exactly one repository: the legacy `repo` too, for one release (SPEC §4.6.14).
+    ...(f.repos.length === 1 && f.repos[0] !== undefined
+      ? {
+          repo: {
+            path: f.repos[0].path,
+            exists: f.repos[0].exists,
+            ...(f.repos[0].origin !== null ? { origin: f.repos[0].origin } : {}),
+            fetched_at: f.repos[0].fetchedAt,
+          },
+        }
+      : {}),
+    ...(f.repos.length > 0
+      ? {
+          repos: f.repos.map(
+            (x): RepoReport => ({
+              slug: x.slug,
+              path: x.path,
+              exists: x.exists,
+              ...(x.origin !== null ? { origin: x.origin } : {}),
+              managed: x.managed,
+              fetched_at: x.fetchedAt,
+              toolchain: toolchainOf(f, x),
+            }),
+          ),
         }
       : {}),
     memory: f.machine.memory,
@@ -697,7 +908,13 @@ export async function runDoctor(
 
 /** The record's checks: the report's, without fix text. */
 export const recordChecks = (r: DoctorReport): RecordCheck[] =>
-  r.checks.map(({ id, ok, severity, detail }) => ({ id, ok, severity, detail }));
+  r.checks.map(({ id, ok, severity, detail, repo }) => ({
+    id,
+    ok,
+    severity,
+    detail,
+    ...(repo !== undefined ? { repo } : {}),
+  }));
 
 /** A failing `block` check: the machine cannot run an agent until it is fixed. */
 export const blocking = (r: DoctorReport) =>
@@ -705,6 +922,10 @@ export const blocking = (r: DoctorReport) =>
 
 const mark = (c: { ok: boolean; severity: Severity }) =>
   c.ok ? "✓" : c.severity === "block" ? "✗" : "!";
+
+/** A check's name in the output: its id, and the repository it is about. */
+const nameOf = (c: { id: string; repo?: string }) =>
+  c.repo !== undefined ? `${c.id} (${c.repo})` : c.id;
 
 /**
  * One line per check (`✓` / `!` / `✗`), the fix under a failing one, and a closing line naming
@@ -714,7 +935,7 @@ export function renderHuman(checks: DoctorReport["checks"]): string {
   const lines = checks
     .map(
       (c) =>
-        `${mark(c)} ${c.id}: ${c.detail}\n${!c.ok && c.fix !== undefined ? `    fix: ${c.fix}\n` : ""}`,
+        `${mark(c)} ${nameOf(c)}: ${c.detail}\n${!c.ok && c.fix !== undefined ? `    fix: ${c.fix}\n` : ""}`,
     )
     .join("");
   const needed = checks.filter((c) => !c.ok && NEEDED_FOR_READY.includes(c.id)).map((c) => c.id);
@@ -781,7 +1002,10 @@ export interface FixPlan {
 export function planFixes(checks: Check[], opts: DoctorOptions): FixPlan {
   const plan: FixPlan = { done: [], unchecked: [], run: [], manual: [] };
   for (const c of checks) {
-    if (c.ok) {
+    if (c.ok && c.fix?.refresh === true && c.fix.steps !== undefined) {
+      // A refresh (fetching a repository): run under --fix while the check passes.
+      plan.run.push(c);
+    } else if (c.ok) {
       if (c.id === "volley.version" && (opts.requiredVolley ?? null) === null) {
         plan.unchecked.push(c);
       } else if (FIXABLE.includes(c.id)) plan.done.push(c);
@@ -803,19 +1027,19 @@ export async function doctor(io: IO, deps: DoctorDeps, opts: DoctorOptions): Pro
     const say = (s: string) => (opts.json === true ? io.stderr(s) : io.stdout(s));
     const plan = planFixes(checks, opts);
     const lines: string[] = [];
-    for (const c of plan.done) lines.push(`✓ ${c.id}: already done`);
+    for (const c of plan.done) lines.push(`✓ ${nameOf(c)}: already done`);
     for (const c of plan.unchecked) {
       lines.push(`· ${c.id}: not checked (the supervisor's requirement is not known here)`);
     }
     for (const c of plan.run) {
-      lines.push(`→ ${c.id}: ${c.fix?.command}`);
+      lines.push(`→ ${nameOf(c)}: ${c.fix?.command}`);
       // The edits it makes, named before the yes.
       for (const a of c.fix?.apply ?? []) lines.push(`    ${a.what}`);
     }
     for (const c of plan.manual) {
       const hint =
         c.fix?.needsClone === true ? " (or pass --clone to let the doctor clone it)" : "";
-      lines.push(`${mark(c)} ${c.id}: run it yourself: ${c.fix?.command}${hint}`);
+      lines.push(`${mark(c)} ${nameOf(c)}: run it yourself: ${c.fix?.command}${hint}`);
     }
     say(`Fixes:\n${scrub(lines.join("\n"))}\n\n`);
     if (plan.run.length > 0) {
@@ -833,18 +1057,21 @@ export async function doctor(io: IO, deps: DoctorDeps, opts: DoctorOptions): Pro
         const todo = all.filter(
           ({ step }, i) => !all.slice(i + 1).some((later) => key(later.step) === key(step)),
         );
+        // Per check and repository: one repository's failed clone never skips another's.
         const failed = new Set<string>();
         for (const { c, step } of todo) {
           // A failed step stops the rest of its own fix (a checkout's install needs the checkout).
-          if (failed.has(c.id)) continue;
+          if (failed.has(nameOf(c))) continue;
           say(scrub(`$ ${step.join(" ")}\n`));
           const r = await deps
             .exec(step, { timeoutMs: DOCTOR_DEFAULTS.fix_timeout_ms })
             .catch((e: unknown) => ({ code: -1, stdout: "", stderr: String(e) }));
           if (r.code !== 0) {
             const why = r.stderr.trim().split("\n").pop() ?? "";
-            say(scrub(`✗ ${c.id}: fix failed (exit ${r.code})${why !== "" ? `: ${why}` : ""}\n`));
-            failed.add(c.id);
+            say(
+              scrub(`✗ ${nameOf(c)}: fix failed (exit ${r.code})${why !== "" ? `: ${why}` : ""}\n`),
+            );
+            failed.add(nameOf(c));
           } else if (
             basename(step[0] ?? "") === "bun" &&
             step[1] === "install" &&
@@ -854,21 +1081,33 @@ export async function doctor(io: IO, deps: DoctorDeps, opts: DoctorOptions): Pro
           }
         }
         for (const c of plan.run) {
-          if (failed.has(c.id)) continue;
+          if (failed.has(nameOf(c))) continue;
           for (const a of c.fix?.apply ?? []) {
             say(scrub(`~ ${a.what}\n`));
             try {
               a.run();
             } catch (e) {
               const why = e instanceof Error ? e.message : String(e);
-              say(scrub(`✗ ${c.id}: fix failed: ${why}\n`));
-              failed.add(c.id);
+              say(scrub(`✗ ${nameOf(c)}: fix failed: ${why}\n`));
+              failed.add(nameOf(c));
               break;
             }
           }
         }
         say("\n");
         ({ report, checks } = await runDoctor(deps, opts));
+        // The journal: each repair it applied (a refresh, passing already, is routine).
+        const fixes = plan.run
+          .filter((c) => !c.ok)
+          .map(
+            (c): FixRecord => ({
+              id: c.id,
+              ...(c.repo !== undefined ? { repo: c.repo } : {}),
+              command: c.fix?.command ?? "",
+              ok: !failed.has(nameOf(c)),
+            }),
+          );
+        if (fixes.length > 0) report = { ...report, fixes: scrub(fixes) };
       }
     }
   }
