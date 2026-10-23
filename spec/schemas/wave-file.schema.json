@@ -174,14 +174,14 @@
         "files": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 },
-          "description": "Scheduling hint: paths or globs the task is expected to touch; overlapping tasks are started later. The task's footprint (T1); written by the planner."
+          "description": "Scheduling hint: paths or globs the task is expected to touch; overlapping tasks are started later. It is also the task's footprint, the files the overlap plan reads."
         },
         "issues": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
           "items": { "type": "integer", "minimum": 1 },
-          "description": "Every GitHub issue the task closes, when it bundles several; must contain issue (the parser enforces it)."
+          "description": "Every GitHub issue the task closes, when it bundles several; must contain issue."
         },
         "footprint": { "$ref": "#/$defs/footprint" },
         "plan": { "$ref": "#/$defs/taskPlan" }

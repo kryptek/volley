@@ -205,7 +205,7 @@
                 "additionalProperties": false,
                 "required": ["id", "tasks", "state", "since"],
                 "properties": {
-                  "id": { "$ref": "#/$defs/taskId" },
+                  "id": { "type": "string", "pattern": "^train-[1-9][0-9]{0,8}$" },
                   "pr": { "type": "integer", "minimum": 1 },
                   "tasks": {
                     "type": "array",
@@ -278,7 +278,7 @@
       "required": ["id", "issue", "stage", "agents"],
       "if": { "required": ["synthetic"] },
       "then": {
-        "anyOf": [{ "required": ["remediation"] }, { "required": ["train"] }],
+        "oneOf": [{ "required": ["remediation"] }, { "required": ["train"] }],
         "properties": {
           "issue": { "const": 0 },
           "remediation": { "required": ["test_file", "run_urls", "for"] }
@@ -628,7 +628,12 @@
               "issue": { "type": "integer", "minimum": 1 },
               "title": { "type": "string" },
               "after": { "type": "array", "items": { "$ref": "#/$defs/taskId" } },
-              "issues": { "type": "array", "items": { "type": "integer", "minimum": 1 } },
+              "issues": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": { "type": "integer", "minimum": 1 }
+              },
               "files": { "type": "array", "items": { "type": "string", "minLength": 1 } },
               "footprint": { "$ref": "wave-file.schema.json#/$defs/footprint" },
               "plan": { "$ref": "wave-file.schema.json#/$defs/taskPlan" }
