@@ -79,6 +79,8 @@ export interface World {
   cherry: Record<string, string>;
   /** `git log --format=%H %s <base>..<release>`: the release branch's new commits. */
   releaseLog: string;
+  /** `git log --oneline <base>..<release>`: how many commits a head behind it lacks (default 2). */
+  behindBy: number;
   /** `git diff <a> <b>` / `git show --format= <sha>` text per `a..b` / sha. */
   patches: Record<string, string>;
   /** `gh pr view <n> --json files` by PR number (default: fixtures/gh-pr-view-files.json). */
@@ -233,6 +235,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     parents: {},
     cherry: {},
     releaseLog: "",
+    behindBy: 2,
     patches: {},
     prView: {},
     prFiles: {},
@@ -298,7 +301,10 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         return out(world.patches[`${rest[0]}..${rest[1]}`] ?? "");
       if (verb === "merge-base")
         return out(`${world.mergeBase[rest[0] as string] ?? world.releaseTip}\n`);
-      if (verb === "log") return out("c1 upstream change\nc2 upstream change\n");
+      if (verb === "log")
+        return out(
+          Array.from({ length: world.behindBy }, (_, i) => `c${i + 1} upstream change\n`).join(""),
+        );
       if (verb === "diff" && rest[0] === "--name-only")
         return out(`${(world.diffNames[`${rest[1]}..${rest[2]}`] ?? []).join("\n")}\n`);
       if (verb === "diff" && rest[0] === "--stat")
@@ -702,7 +708,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     },
     /**
      * A role finishes: its worktree is at `head` (pushed to the PR branch unless `push: false`,
-     * CI `ci` on it), and it reports `status` with `result`.
+     * CI `ci` on it), and it reports `status` with `result`. `conflicting`: GitHub reports the PR
+     * CONFLICTING (no CI) while that head is verified, and MERGEABLE again after.
      */
     async finish(
       role: Role,
@@ -713,9 +720,15 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         result?: unknown;
         status?: "done" | "failed";
         task?: string;
+        conflicting?: boolean;
       } = {},
     ) {
       const task = o.task ?? "T1";
+      const prs = world.prs.filter((pr) => pr.headRefName === prBranch(task));
+      if (o.conflicting === true) {
+        if (prs.length === 0) throw new Error(`conflicting: no PR on ${prBranch(task)}`);
+        for (const pr of prs) pr.mergeable = "CONFLICTING";
+      }
       const r = run(role, task);
       if (r === undefined) throw new Error(`no ${role} run`);
       if (o.head !== undefined) {
@@ -734,8 +747,12 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         ...(o.result !== undefined ? { result: o.result } : {}),
       };
       if (o.result !== undefined) lastResult[r.agent_id] = o.result;
-      await driver.handle(task, ev);
-      await settle();
+      try {
+        await driver.handle(task, ev);
+        await settle();
+      } finally {
+        if (o.conflicting === true) for (const pr of prs) pr.mergeable = "MERGEABLE";
+      }
     },
     /** A role's current run publishes `blocked` with `reason` (the agent stays alive). */
     async block(role: Role, reason: string, task = "T1") {

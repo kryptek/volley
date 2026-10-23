@@ -68,8 +68,8 @@ async function fullPipeline(merge?: "auto" | "manual"): Promise<string> {
   await h.finish("implementer", { head: H1, ci: "green" });
   await h.finish("spec_reviewer", { result: result("spec-p1") });
   await h.finish("quality_reviewer", { result: result("quality-p1-elsewhere") });
-  h.world.mergeBase[H2] = sha(0xdead); // the release branch moved: a rebase runs too
-  await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+  // The PR conflicts with the moved release branch: updated before the gate (#383).
+  await h.finish("fixup", { head: H2, conflicting: true, result: result("fixup-resolved") });
   h.world.diffNames[`${H2}..${H3}`] = ["src/api.ts"];
   await h.finish("rebase", { head: H3, ci: "green" });
   await h.finish("spec_reviewer", { result: result("approve-empty") });

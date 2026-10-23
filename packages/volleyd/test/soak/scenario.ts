@@ -96,6 +96,7 @@ export function behaviour(
     if (a.nth === 1 && a.task === sc.unparseable && a.role === "spec_reviewer")
       return { kind: "unparseable" };
     // The merge queue's first branch update hits a conflict it cannot resolve; its respawn succeeds.
+    // (A task behind is gated and updated only at its merge turn, #383: that is its first update.)
     if (a.role === "rebase" && !conflicted && queuedUpdate(journal(), a.task)) {
       conflicted = true;
       return { kind: "conflict", file: `src/${a.task.toLowerCase()}.ts` };

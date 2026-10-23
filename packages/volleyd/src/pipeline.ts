@@ -215,6 +215,8 @@ export interface TaskPipeline {
   accepting?: string | undefined;
   /** Every head the task was gated at (evidence head history). */
   gated: string[];
+  /** How far behind its release branch the last gate found the task (#383: updated at its turn). */
+  gated_behind?: number | undefined;
   /** What the next fixup must do about a moved head (the CI failure, the diff), until it is verified. */
   directive?: Directive | undefined;
   /** The commit the task's PR merged as (its `artifact_verified { role: merged }`), once merged. */
@@ -513,6 +515,7 @@ export function reducePipeline(
           p.merge_refusal_reason = undefined;
           p.merge_retries = 0;
         }
+        p.gated_behind = typeof d.behind === "number" ? d.behind : undefined;
       }
       if (role === "fixup") p.directive = undefined;
       if (!isRole(role)) break;
@@ -1094,7 +1097,11 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
       // date with the release branch (re-gated, which re-mints a token a restart lost), or is
       // brought up to date first (a release branch that moved is rebased onto).
       if (v.stage === "merge_ready" && v.merge_turn === undefined) return [];
-      return ev.check.behind === 0 ? guardedGate(v, ev) : enterRebase(v);
+      // Before its turn a task is gated at the head its reviewers saw, however far behind: an
+      // update now would only be stale again by its turn, and re-reviewed for nothing (#383).
+      return ev.check.behind === 0 || v.merge_turn === undefined
+        ? guardedGate(v, ev)
+        : enterRebase(v);
     case "head_moved":
       return onHeadMoved(v, ev);
     case "merge_checked":
@@ -4740,18 +4747,17 @@ export class PipelineDriver {
     }
     const { exec: git, ...where } = at;
     const check = await checkRebase(git, { ...where, head, release_branch: v.release_branch });
+    // Behind or not, the gate's evidence carries them (a task is gated behind until its turn).
     const diffstats: Record<string, string> = {};
-    if (check.behind === 0) {
-      for (const f of p.fixups) {
-        if (f.from === undefined || f.worktree === undefined) continue;
-        // Its own worktree while it is there; else where the gate's checks ran (head fetched).
-        const r =
-          this.deps.worktreeGone?.(v.task, f.worktree) === true
-            ? await git(["git", "-C", where.cwd, "diff", "--stat", f.from, f.to])
-            : await io(["git", "-C", f.worktree, "diff", "--stat", f.from, f.to]);
-        // trimEnd only: the first line's leading space is part of git's column alignment.
-        if (r.code === 0) diffstats[`${f.from}..${f.to}`] = r.stdout.replace(/^\n+/, "").trimEnd();
-      }
+    for (const f of p.fixups) {
+      if (f.from === undefined || f.worktree === undefined) continue;
+      // Its own worktree while it is there; else where the gate's checks ran (head fetched).
+      const r =
+        this.deps.worktreeGone?.(v.task, f.worktree) === true
+          ? await git(["git", "-C", where.cwd, "diff", "--stat", f.from, f.to])
+          : await io(["git", "-C", f.worktree, "diff", "--stat", f.from, f.to]);
+      // trimEnd only: the first line's leading space is part of git's column alignment.
+      if (r.code === 0) diffstats[`${f.from}..${f.to}`] = r.stdout.replace(/^\n+/, "").trimEnd();
     }
     return { kind: "rebase_checked", head, check, diffstats };
   }
@@ -5171,8 +5177,10 @@ export class PipelineDriver {
     const paths = writeEvidence(this.deps.home, input);
     // Usable only once the evidence that describes its head is written.
     if (token !== undefined) this.mergeTokens.set(task, token);
-    // The merge turn's task, gated up to date with the release branch: it may merge now.
-    if (token !== undefined && this.turn?.task === task) this.turn.fresh = true;
+    // The merge turn's task, gated up to date with the release branch: it may merge now. (Gated
+    // behind, it is not: its turn's own check brings it up to date first.)
+    if (token !== undefined && this.turn?.task === task && check.behind === 0)
+      this.turn.fresh = true;
     if (v.stage === "merge_ready" && p.gated.at(-1) === head) return;
     await this.deps.journal({
       type: "artifact_verified",
