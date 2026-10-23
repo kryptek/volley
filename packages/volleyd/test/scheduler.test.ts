@@ -8,6 +8,8 @@ import {
   admit,
   admitPlacing,
   budgetRaise,
+  clusterRoom,
+  clusterRooms,
   criticalPaths,
   ready,
   spawnBudget,
@@ -71,7 +73,7 @@ describe("ready", () => {
     expect(ready(rec)).toEqual(["T2"]);
   });
 
-  it("orders by critical path length first, then file overlap with active tasks, then id", () => {
+  it("orders by critical path length first, then id (the cluster cap replaces file overlap)", () => {
     const wave = parseWaveFile(`wave: w2
 repo: r
 release_branch: release/w2
@@ -84,12 +86,145 @@ tasks:
   Z: { issue: 4 }
   Y: { issue: 5, after: [Z] }
 `);
-    // Z leads a chain of 2, so it goes first; A/B/C tie on 1 and nothing is active yet, so the
-    // tie falls through to id order.
+    // Z leads a chain of 2, so it goes first; A/B/C tie on 1, so the tie falls through to id order.
     expect(ready(record(wave))).toEqual(["Z", "A", "B", "C"]);
-    // With A admitted (active, touching src/shared.ts), B overlaps and sorts after C.
+    // A shared files hint with an active task no longer reorders: B stays ahead of C.
     const rec = record(wave, [{ type: "task_admitted", task: "A", data: {} }]);
-    expect(ready(rec)).toEqual(["Z", "C", "B"]);
+    expect(ready(rec)).toEqual(["Z", "B", "C"]);
+  });
+});
+
+describe("the cluster cap (#384)", () => {
+  const capped = (id: string, issue: number) =>
+    `  ${id}: { issue: ${issue}, files: [src/hot.ts], plan: { cluster: A, by: cap, why: "capped: shares src/hot.ts" } }\n`;
+  const wave = parseWaveFile(
+    `wave: wc\nrepo: r\nrelease_branch: release/wc\nmodel: m\npipeline: [implement, spec_review, merge_ready]\ntasks:\n${capped("i315", 315)}${capped("i317", 317)}${capped("i318", 318)}${capped("i322", 322)}${capped("i323", 323)}  u1: { issue: 1, files: [src/other.ts] }\n  u2: { issue: 2, files: [src/other.ts] }\n`,
+  );
+  const planned: NewEvent = {
+    type: "wave_planned",
+    data: { clusters: wave.overlap_plan?.clusters ?? [] },
+  };
+  const rec = (extra: NewEvent[] = []) => record(wave, [planned, ...extra]);
+  const at = (task: string, stage: string): NewEvent[] => [
+    { type: "task_admitted", task, data: {} },
+    { type: "agent_spawned", task, data: { role: "implementer", agent_id: `${task}-1` } },
+    { type: "stage_entered", task, data: { stage } },
+  ];
+  const run = (r: WaveRecord, over: Partial<Parameters<typeof admit>[2]> = {}) =>
+    admit(ready(r), OPEN, ctx({ clusters: clusterRooms(r), ...over }));
+
+  it("the plan caps cluster A at 4", () => {
+    expect(wave.overlap_plan?.clusters[0]?.strategy.cap).toBe(4);
+  });
+
+  it("admits four of five ready members and holds the fifth, saying which four are in flight", () => {
+    const r = run(rec());
+    expect(r.admit).toEqual(["i315", "i317", "i318", "i322", "u1", "u2"]);
+    expect(r.held).toEqual({ i323: "cluster A: 4 in flight (i315, i317, i318, i322)" });
+  });
+
+  it("clusterRoom counts members between implement and fixup; merge_ready, done and queued hold none", () => {
+    expect(clusterRoom(rec(), "A")).toBe(4);
+    const busy = rec([
+      ...at("i315", "implement"),
+      ...at("i317", "fixup"),
+      ...at("i318", "merge_ready"),
+    ]);
+    expect(clusterRoom(busy, "A")).toBe(2);
+    // An admitted member not spawned yet already holds its slot.
+    expect(clusterRoom(rec([{ type: "task_admitted", task: "i322", data: {} }]), "A")).toBe(3);
+    // Unknown cluster or no cap: unbounded.
+    expect(clusterRoom(rec(), "B")).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("a member at merge_ready frees its slot", () => {
+    const full = rec(["i315", "i317", "i318", "i322"].flatMap((id) => at(id, "implement")));
+    expect(run(full).admit).toEqual(["u1", "u2"]);
+    expect(run(full).held).toEqual({ i323: "cluster A: 4 in flight (i315, i317, i318, i322)" });
+    const freed = rec([
+      ...["i315", "i317", "i318"].flatMap((id) => at(id, "implement")),
+      ...at("i322", "merge_ready"),
+    ]);
+    expect(run(freed).admit).toEqual(["i323", "u1", "u2"]);
+    expect(run(freed).held).toEqual({});
+  });
+
+  it("a member blocked before implement holds no slot; one blocked after it does", () => {
+    const before: NewEvent[] = [
+      { type: "task_admitted", task: "i315", data: {} },
+      { type: "stage_entered", task: "i315", data: { stage: "blocked", why: "x" } },
+    ];
+    expect(clusterRoom(rec(before), "A")).toBe(4);
+    const after: NewEvent[] = [
+      ...at("i315", "implement"),
+      { type: "stage_entered", task: "i315", data: { stage: "blocked", why: "x" } },
+    ];
+    expect(clusterRoom(rec(after), "A")).toBe(3);
+  });
+
+  it("on hold the cap is 1 and gated members hold slots too; train keeps the cap", () => {
+    const strat = (to: string): NewEvent => ({
+      type: "cluster_strategy_changed",
+      data: { cluster: "A", from: "cap", to, why: "churn" },
+    });
+    const gated = [...at("i315", "merge_ready")];
+    expect(clusterRoom(rec([...gated, strat("hold")]), "A")).toBe(0);
+    expect(run(rec([...gated, strat("hold")])).held).toEqual({
+      i317: "cluster A (hold): 1 in flight or gated (i315)",
+      i318: "cluster A (hold): 1 in flight or gated (i315)",
+      i322: "cluster A (hold): 1 in flight or gated (i315)",
+      i323: "cluster A (hold): 1 in flight or gated (i315)",
+    });
+    expect(clusterRoom(rec([...gated, strat("train")]), "A")).toBe(4);
+    expect(clusterRoom(rec([...gated, strat("hold"), strat("cap")]), "A")).toBe(4);
+  });
+
+  it("tasks without a cluster are unaffected, and no cluster info admits as before", () => {
+    const r = admit(ready(rec()), OPEN, ctx());
+    expect(r.admit).toHaveLength(7);
+    expect(r.held).toEqual({});
+  });
+
+  it("admitPlacing holds a member with no room before placing it", () => {
+    const r = rec();
+    const view: MachineView = {
+      name: "control",
+      local: true,
+      record: {
+        name: "control",
+        os: "linux",
+        cores: 16,
+        tunnel: "local",
+        load: [1, 1, 1],
+        agents: 0,
+        memory: { total_mb: 65536, available_pct: 70 },
+        last_seen: "2026-10-19T09:00:00.000Z",
+      },
+      ready: true,
+      reasons: [],
+      drain: false,
+      max_agents: 10,
+      agents: 0,
+      heavy: {},
+      usage_pct: null,
+      held: [],
+    };
+    const p = admitPlacing(
+      ready(r),
+      wave,
+      { machines: [view], reservations: {} },
+      {
+        placement: CONFIG_DEFAULTS.placement,
+        warn_at_pct: CONFIG_DEFAULTS.claude.warn_at_pct,
+        localName: "control",
+      },
+      OPEN,
+      () => OPEN,
+      { ...ctx(), clusters: clusterRooms(r) },
+    );
+    expect(p.admit.map((a) => a.id)).toEqual(["i315", "i317", "i318", "i322", "u1", "u2"]);
+    expect(p.held).toEqual({ i323: "cluster A: 4 in flight (i315, i317, i318, i322)" });
+    expect(p.snapshot.reservations).toEqual({ control: 6 });
   });
 });
 
@@ -131,7 +266,11 @@ describe("synthetic tasks (a flake's fixer, SPEC §4.6.16)", () => {
 
 describe("admit", () => {
   it("admits everything ready when nothing limits it", () => {
-    expect(admit(["T1", "T2"], OPEN, ctx())).toEqual({ admit: ["T1", "T2"], reasons: [] });
+    expect(admit(["T1", "T2"], OPEN, ctx())).toEqual({
+      admit: ["T1", "T2"],
+      held: {},
+      reasons: [],
+    });
   });
 
   it("admits only one with allow: 1, in ready order", () => {
@@ -145,12 +284,16 @@ describe("admit", () => {
     expect(r.admit).toEqual(["T1"]);
     expect(r.reasons).toEqual(["hard ceiling reached: 12/12 live agents"]);
     const none = admit(["T1"], OPEN, ctx({ live: 12 }));
-    expect(none).toEqual({ admit: [], reasons: ["hard ceiling reached: 12/12 live agents"] });
+    expect(none).toEqual({
+      admit: [],
+      held: {},
+      reasons: ["hard ceiling reached: 12/12 live agents"],
+    });
   });
 
   it("never goes negative when the ceiling is lowered below live agents (no preemption)", () => {
     const r = admit(["T1"], OPEN, ctx({ live: 5, hardCeiling: 2 }));
-    expect(r).toEqual({ admit: [], reasons: ["hard ceiling reached: 5/2 live agents"] });
+    expect(r).toEqual({ admit: [], held: {}, reasons: ["hard ceiling reached: 5/2 live agents"] });
   });
 
   it("stops at the wave's spawn budget with a reason", () => {

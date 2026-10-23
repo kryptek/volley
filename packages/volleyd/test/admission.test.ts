@@ -181,7 +181,11 @@ describe("decide + the T3 runaway fuse", () => {
       spawnsUsed: 0,
       spawnBudget: 9,
     });
-    expect(r).toEqual({ admit: ["T1", "T2"], reasons: ["hard ceiling reached: 2/2 live agents"] });
+    expect(r).toEqual({
+      admit: ["T1", "T2"],
+      held: {},
+      reasons: ["hard ceiling reached: 2/2 live agents"],
+    });
   });
 });
 

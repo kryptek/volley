@@ -1,0 +1,146 @@
+import { DAEMON_DEFAULTS } from "../config-defaults";
+import type { WaveRecord } from "../reducer";
+import { IN_FLIGHT } from "../scheduler";
+import type { JournalEvent, PlanCluster, TaskId } from "../types";
+
+/**
+ * The churn monitor (SPEC §4.6.22): how much the overlap plan's clusters churn at run time — each
+ * task's branch updates and the re-reviews they cost, each cluster's gated members and merges —
+ * reduced from the wave's journal, and the strategy a cluster that churns anyway switches to.
+ * Pure: the daemon's tick journals the switch (`cluster_strategy_changed`).
+ */
+
+/** One task's churn: branch updates (`stage_entered { rebase: true }`) and reviews after one. */
+export interface TaskChurn {
+  updates: number;
+  rereviews: number;
+}
+
+/** One cluster's churn now: members gated and in flight, merges and updates in the window. */
+export interface ClusterChurn {
+  gated: number;
+  in_flight: number;
+  merges_last_2h: number;
+  updates_last_2h: number;
+}
+
+export interface Churn {
+  tasks: Record<TaskId, TaskChurn>;
+  clusters: Record<string, ClusterChurn>;
+  /** Tasks done or cancelled: their updates no longer put a cluster on hold. */
+  settled: TaskId[];
+}
+
+/** How a cluster runs: as planned, on hold (one member at a time), or as a merge train. */
+export type ClusterStrategy = PlanCluster["state"];
+
+const REVIEW = new Set(["spec_review", "quality_review"]);
+const MERGED = new Set(["merged_by_supervisor", "merged_by_operator"]);
+
+/** The wave's churn from its journal `events` and record, its windows ending at `now` (epoch ms). */
+export function churnOf(rec: WaveRecord, events: readonly JournalEvent[], now: number): Churn {
+  const since = now - DAEMON_DEFAULTS.churn_window_ms;
+  const tasks: Record<TaskId, TaskChurn> = {};
+  for (const t of rec.state?.tasks ?? []) tasks[t.id] = { updates: 0, rereviews: 0 };
+  /** Tasks whose branch was updated since their last review started. */
+  const updated = new Set<TaskId>();
+  const recentUpdates = new Map<TaskId, number>();
+  const recentMerges = new Set<TaskId>();
+  for (const e of events) {
+    const id = e.task;
+    if (id === undefined) continue;
+    const recent = Date.parse(e.at) > since;
+    if (e.type === "stage_entered" && e.data.rebase === true) {
+      const t = tasks[id];
+      if (t !== undefined) t.updates++;
+      updated.add(id);
+      if (recent) recentUpdates.set(id, (recentUpdates.get(id) ?? 0) + 1);
+    } else if (e.type === "stage_entered" && REVIEW.has(String(e.data.stage))) {
+      const t = tasks[id];
+      if (t !== undefined && updated.delete(id)) t.rereviews++;
+    } else if (MERGED.has(e.type) && recent) {
+      recentMerges.add(id);
+    }
+  }
+  const stage = new Map(rec.state?.tasks.map((t) => [t.id, t.stage]) ?? []);
+  const clusters: Record<string, ClusterChurn> = {};
+  for (const c of rec.state?.overlap_plan?.clusters ?? []) {
+    const at = c.tasks.map((id) => stage.get(id));
+    clusters[c.id] = {
+      gated: at.filter((s) => s === "merge_ready").length,
+      in_flight: at.filter((s) => s !== undefined && IN_FLIGHT.has(s)).length,
+      merges_last_2h: c.tasks.filter((id) => recentMerges.has(id)).length,
+      updates_last_2h: c.tasks.reduce((n, id) => n + (recentUpdates.get(id) ?? 0), 0),
+    };
+  }
+  const settled = [...stage].filter(([, s]) => s === "done" || s === "cancelled").map(([id]) => id);
+  return { tasks, clusters, settled };
+}
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The strategy `cluster` should run under now, and why. `hold` when a live member has updated its
+ * branch `churn_updates_hold` times, or `churn_gated_hold` members are gated and fewer than
+ * `churn_merges_floor` merged in the window; else `train` with `churn_gated_train` gated; back to
+ * `planned` once nothing is gated and no member updated in the window; else as it is.
+ */
+export function strategyFor(
+  cluster: PlanCluster,
+  churn: Churn,
+): { strategy: ClusterStrategy; why: string } {
+  const stats = churn.clusters[cluster.id];
+  if (stats === undefined) return { strategy: cluster.state, why: "not in the plan" };
+  const churning = cluster.tasks
+    .filter((id) => !churn.settled.includes(id))
+    .find((id) => (churn.tasks[id]?.updates ?? 0) >= DAEMON_DEFAULTS.churn_updates_hold);
+  if (churning !== undefined)
+    return {
+      strategy: "hold",
+      why: `${churning} updated its branch ${churn.tasks[churning]?.updates} times`,
+    };
+  if (
+    stats.gated >= DAEMON_DEFAULTS.churn_gated_hold &&
+    stats.merges_last_2h < DAEMON_DEFAULTS.churn_merges_floor
+  )
+    return {
+      strategy: "hold",
+      why: `${stats.gated} gated, ${plural(stats.merges_last_2h, "merge")} in the last 2 h`,
+    };
+  if (stats.gated >= DAEMON_DEFAULTS.churn_gated_train)
+    return { strategy: "train", why: `${stats.gated} gated` };
+  if (stats.gated === 0 && stats.updates_last_2h === 0)
+    return { strategy: "planned", why: "nothing gated, no branch update in the last 2 h" };
+  return { strategy: cluster.state, why: "unchanged" };
+}
+
+/** The plan's own strategy for `cluster`, as `cluster_strategy_changed` names it. */
+export function plannedName(cluster: PlanCluster): "collapse" | "chain" | "cap" | "independent" {
+  const s = cluster.strategy;
+  if (s.cap !== undefined) return "cap";
+  if (s.chain !== undefined && s.chain.length > 0) return "chain";
+  if (s.collapse !== undefined && s.collapse.length > 0) return "collapse";
+  return "independent";
+}
+
+/**
+ * The `cluster_strategy_changed` data to journal for `cluster` now, or null: none when its
+ * strategy stays, or when it last changed less than `minIntervalMs` before `now` (hysteresis). A
+ * `planned` strategy is named by the plan's own (`plannedName`).
+ */
+export function strategySwitch(
+  cluster: PlanCluster,
+  churn: Churn,
+  events: readonly JournalEvent[],
+  now: number,
+  minIntervalMs: number,
+): { from: string; to: string; why: string } | null {
+  const next = strategyFor(cluster, churn);
+  if (next.strategy === cluster.state) return null;
+  const last = [...events]
+    .reverse()
+    .find((e) => e.type === "cluster_strategy_changed" && e.data.cluster === cluster.id);
+  if (last !== undefined && now - Date.parse(last.at) < minIntervalMs) return null;
+  const name = (s: ClusterStrategy) => (s === "planned" ? plannedName(cluster) : s);
+  return { from: name(cluster.state), to: name(next.strategy), why: next.why };
+}

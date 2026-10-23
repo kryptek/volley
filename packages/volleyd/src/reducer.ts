@@ -464,6 +464,14 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     case "wave_planned":
       state.overlap_plan = { clusters: (ev.data.clusters as PlanCluster[] | undefined) ?? [] };
       break;
+    case "cluster_strategy_changed": {
+      // The churn monitor (autopilot/churn.ts) switched how a cluster runs: `hold` or `train`, or
+      // back to the plan's own strategy (`planned`).
+      const c = state.overlap_plan?.clusters.find((x) => x.id === ev.data.cluster);
+      if (c !== undefined)
+        c.state = ev.data.to === "hold" || ev.data.to === "train" ? ev.data.to : "planned";
+      break;
+    }
     case "task_admitted":
       if (ev.task !== undefined && !next.admitted.includes(ev.task)) next.admitted.push(ev.task);
       break;
