@@ -3714,7 +3714,9 @@ expect((await waits.event("w1", "spawn_failed", 2)).data).toMatchObject({ attemp
 
 ## Testing: the simulated soak
 
-`bun run test:soak` (its own `vitest.soak.config.ts`; CI's `soak` job) runs one whole wave
+`bun run test:soak` (its own `vitest.soak.config.ts`; CI's `soak` job with `SOAK_TASKS=8` on
+every run, and `soak-full` with 32 tasks on full runs: pushes, the nightly, release PRs and PRs
+labelled `ci:full`) runs one whole wave
 unattended: `SOAK_TASKS` tasks (default 32) through the real `Daemon` on Aedes, autopilot on and
 merging automatically, on a fake clock, with the wave's own two-stage release playbook (the second
 stage owner-gated). Its acceptance: the wave reaches `releasing`, then `release_go`; every task is
