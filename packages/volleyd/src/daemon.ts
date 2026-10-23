@@ -2316,6 +2316,12 @@ export class Daemon {
     this.stopGrace.clear();
     for (const t of this.reconnectTimers.values()) this.time.clearTimeout(t);
     this.reconnectTimers.clear();
+    // A resize still in its coalescing window never reaches the host once halted.
+    for (const r of this.resizes.values()) {
+      this.time.clearTimeout(r.timer);
+      for (const answer of r.answers) answer({ ok: false, error: "volleyd is stopping" });
+    }
+    this.resizes.clear();
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
@@ -10853,10 +10859,6 @@ export class Daemon {
     }
   }
 
-  /**
-   * `steer`: a T0 mailbox `steering` to the task's current agent with `seq` and `supersedes` (the
-   * previous steer to the task), journaled; the answer waits up to `wait_ack_ms` for the ack.
-   */
   /** Per agent: the resize waiting out its coalescing window, and the one running before it. */
   private readonly resizes = new Map<
     string,
@@ -10932,6 +10934,10 @@ export class Daemon {
     });
   }
 
+  /**
+   * `steer`: a T0 mailbox `steering` to the task's current agent with `seq` and `supersedes` (the
+   * previous steer to the task), journaled; the answer waits up to `wait_ack_ms` for the ack.
+   */
   private async steer(p: Record<string, unknown>, by: string): Promise<HandlerResult> {
     const w = this.waveOf(p);
     if ("error" in w) return { ok: false, error: w.error };

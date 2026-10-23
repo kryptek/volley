@@ -180,6 +180,43 @@ describe("terminal_resize", () => {
       expect(a).toMatchObject({ ok: true, result: { resized: true, cols: 181 } });
   });
 
+  it("a resize flushed while the one before it is still running waits for it", async () => {
+    const order: string[] = [];
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    host.resize = async (workspace, size) => {
+      const shown = size === "launch" ? "launch" : `${size.cols}`;
+      order.push(`start ${shown}`);
+      if (size !== "launch" && size.cols === 100) await held;
+      host.resizes.push({ workspace, size });
+      order.push(`end ${shown}`);
+      return true;
+    };
+    const first = resize({ cols: 100, rows: 30 });
+    await consumed();
+    await clock.advance(DAEMON_DEFAULTS.terminal_resize_coalesce_ms);
+    await eventually(() => order.length === 1);
+    const second = resize({ reset: true });
+    await consumed();
+    await clock.advance(DAEMON_DEFAULTS.terminal_resize_coalesce_ms);
+    expect(order).toEqual(["start 100"]);
+    release();
+    expect((await first).result).toMatchObject({ cols: 100 });
+    expect((await second).result).toMatchObject({ reset: true });
+    expect(order).toEqual(["start 100", "end 100", "start launch", "end launch"]);
+  });
+
+  it("stopping drops a resize still in its coalescing window", async () => {
+    // A stopped volleyd publishes no answer; the request itself times out.
+    void resize({ cols: 120, rows: 30 }).catch(() => {});
+    await consumed();
+    await daemon.stop();
+    await clock.advance(DAEMON_DEFAULTS.terminal_resize_coalesce_ms * 2);
+    expect(host.resizes).toEqual([]);
+  });
+
   it("refuses an unknown agent and a size out of bounds, resizing nothing", async () => {
     const unknown = await client.request("terminal_resize", {
       agent_id: "nobody-1",

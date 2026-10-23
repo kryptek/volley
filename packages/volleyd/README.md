@@ -1547,7 +1547,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `spawn_retry_max_s`, `spawn_retry_max` | the next failed spawn | a retry already scheduled keeps its time |
 | `brief_preface_max_bytes` | the next `run` and the next spawn | briefs already written untouched |
 | `screen_tail_interval_s` | each agent's next screen capture | — |
-| `tmux_cols`, `tmux_rows` | paired-machine launches after the change, and the next popout close | running sessions keep their launch size |
+| `tmux_cols`, `tmux_rows` | paired-machine launches after the change | running sessions keep their launch size, and a popout close returns a session to that size (to the built-in 220×50 for one launched before a daemon restart) |
 | `stop_grace_s` | the next `stop` | a grace already running keeps its length |
 | `autopilot.reconnect_grace_s` | the next wave-state publish ([ownership](#ownership-and-claim)) | — |
 | `autopilot.incident_wait_max_s` | the next re-check of a red head held for an infra incident | a hold already running keeps its start |

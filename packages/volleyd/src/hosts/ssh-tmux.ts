@@ -585,6 +585,7 @@ export class SshTmuxHost implements RemoteHost {
 
   async close(workspace: string, consent: ConsentToken): Promise<void> {
     await this.run([{ argv: ["tmux", "kill-session", "-t", `=${workspace}`] }], { consent });
+    this.launchSizes.delete(workspace);
   }
 
   /** `kill-session`: tmux ends the pane's process group, so no process is signalled here. */
@@ -600,6 +601,7 @@ export class SshTmuxHost implements RemoteHost {
       (r) => r.code === 0 && !r.timedOut,
       () => false,
     );
+    if (closed) this.launchSizes.delete(workspace);
     return { closed, pids: [], how: closed ? "kill-session" : "none" };
   }
 

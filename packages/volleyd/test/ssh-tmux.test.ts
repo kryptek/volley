@@ -181,6 +181,31 @@ describe("SshTmuxHost", () => {
     ]);
   });
 
+  it("a closed or ended session forgets its launch size", async () => {
+    const r = remote((s) => (argvIs("tmux", "has-session")(s) ? { code: 1 } : undefined));
+    for (const name of ["w1 T1 implementer", "w1 T2 implementer"])
+      await r.host.launch({
+        cwd: "/wt",
+        name,
+        command: LAUNCH_COMMAND,
+        launch: sealed("/wt"),
+        size: { cols: 160, rows: 40 },
+      });
+    await r.host.close("w1-T1-implementer", mintConsentToken("volleyd cleanup w1 --yes"));
+    await r.host.endSession("w1-T2-implementer", "/wt", mintConsentToken("retire w1-t2"));
+    await r.host.resize("w1-T1-implementer", "launch");
+    await r.host.resize("w1-T2-implementer", "launch");
+    expect(
+      r
+        .steps()
+        .filter((s) => s.argv[1] === "resize-window")
+        .map((s) => s.argv.slice(4)),
+    ).toEqual([
+      ["-x", "220", "-y", "50"],
+      ["-x", "220", "-y", "50"],
+    ]);
+  });
+
   it("resize clamps to the fence's bounds and rejects when tmux refuses", async () => {
     const r = remote((s) =>
       argvIs("tmux", "resize-window")(s) && s.argv[3] === "=gone:"
