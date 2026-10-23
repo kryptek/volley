@@ -1155,8 +1155,9 @@ export class Daemon {
   private readonly lastSeen = new Map<string, number>();
   /**
    * When each agent last showed it is live (epoch ms, its own send time): `any` signal (registry,
-   * progress, a live status) and `mcp`, one only its MCP server sends. A spawn decision about it
-   * closes itself on one sent after it opened (#402).
+   * progress, a live status), `mcp`, one only its MCP server sends, and `hooks`, one only its
+   * Claude Code hooks send. A spawn decision about it closes itself on one sent after it opened
+   * (#402).
    */
   private readonly heardAt = new Map<string, { any: number; mcp?: number; hooks?: number }>();
   /** Spawn decisions this process is closing (`<wave>/<id>`): asked once per decision. */

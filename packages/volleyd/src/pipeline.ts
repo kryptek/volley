@@ -2865,8 +2865,10 @@ function decisionFacts(d: DecisionRecord): Record<string, unknown> {
  * A spawn-type decision answered: `relaunch` retires the agent through the delete path and the
  * next advance spawns the same role at the next attempt (the reducer dropped the run); `cancel`
  * retires it and blocks the task with the decision text; `it's running` closes it touching
- * nothing (a hooks_auth_failed agent is only told to resume its pause) when the agent is live — still the role's run, and heard from since the decision
- * opened — and otherwise asks again, saying so (#402). Anything else is asked again.
+ * nothing (a hooks_auth_failed agent is only told to resume its pause) when the agent is live —
+ * still the role's run, and heard from since the decision opened — retires the agent when a
+ * newer run replaced it, and otherwise asks again, saying so (#402). Anything else is asked
+ * again.
  */
 function onRelaunchResolved(
   v: PipelineView,
@@ -2884,9 +2886,13 @@ function onRelaunchResolved(
   }
   if (isAnswer(answer, ITS_RUNNING)) {
     const run = v.p.runs[m.role];
+    // Superseded or already retiring: the decision is moot. Asking again would say a live agent
+    // is not, and each later sign of life from it would close and reopen the card.
+    if (run?.agent_id !== m.agent_id)
+      return [{ kind: "retire", agent_id: m.agent_id, status: "relaunched" }];
+    if (run.retired !== undefined) return [];
     const heard = v.heard_from?.(m.agent_id, d.kind) ?? null;
-    const current = run?.agent_id === m.agent_id && run.retired === undefined;
-    if (current && heard !== null && heard >= Date.parse(d.opened_at)) {
+    if (heard !== null && heard >= Date.parse(d.opened_at)) {
       // A hooks_auth_failed agent was paused when the decision opened: lift the pause.
       if (d.kind !== "hooks_auth_failed") return [];
       return [

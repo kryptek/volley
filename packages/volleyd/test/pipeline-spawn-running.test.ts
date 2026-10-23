@@ -101,11 +101,26 @@ describe("it's running on a spawn decision", () => {
     );
   });
 
-  it("a newer run replaced it: not live, asked again", () => {
+  it("a newer run replaced it: the decision is moot, the stale agent is retired, not asked again", () => {
+    // Asking again would be false (the agent is alive) and would loop: each later sign of life
+    // from the stale agent closes the card on its own, and the pipeline would open it again.
     const v = view(OPENED + 30_000);
     v.p.runs.implementer = { agent_id: "w1-t1-implementer-2", steers: {}, accepted: false };
-    const acts = resolved(v, "it's running");
-    expect(acts[0]?.kind).toBe("decide");
+    expect(resolved(v, "it's running")).toEqual([
+      { kind: "retire", agent_id: A1, status: "relaunched" },
+    ]);
+    // Same when the reducer already dropped the run.
+    const gone = view(OPENED + 30_000);
+    gone.p.runs = {};
+    expect(resolved(gone, "it's running")).toEqual([
+      { kind: "retire", agent_id: A1, status: "relaunched" },
+    ]);
+  });
+
+  it("its run is already being retired: closed, nothing more to do", () => {
+    const v = view(OPENED + 30_000);
+    v.p.runs.implementer = { agent_id: A1, steers: {}, accepted: false, retired: "stopped" };
+    expect(resolved(v, "it's running")).toEqual([]);
   });
 
   it("hooks_auth_failed: the paused agent is told to resume", () => {

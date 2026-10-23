@@ -1970,9 +1970,10 @@ cannot deliver; nobody is asked to edit credentials by hand.
   checks the agent is alive, then closes this. Nothing is restarted or stopped."). When the agent
   is still the role's run and volleyd heard from it after the decision opened, the decision
   closes and nothing else happens (a paused `hooks_auth_failed` agent gets one steering, "resume:
-  your broker login works again", journaled with `reason: "auth_resumed"`); otherwise it is asked
-  again as
-  `no live agent found for <agent> (last heard <ago | never>). <question>`.
+  your broker login works again", journaled with `reason: "auth_resumed"`). When a newer run of
+  the role replaced the agent, the decision is moot: it closes and the stale agent is retired, as
+  `relaunch` does. Otherwise it is asked again as `no live agent found for <agent> (last heard
+  <ago | never>). <question>`.
 
 **A relaunch decision closes itself once its agent is alive.** The first sign of life the agent
 sends after the decision opened (by its own `wall_time`, so a retained record replayed after a
