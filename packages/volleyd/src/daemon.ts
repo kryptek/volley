@@ -1474,6 +1474,8 @@ export class Daemon {
   >();
   /** The folder trust `repo_add` recorded (D4), by `preconditionKey`: `repo_trusted`, replayed. */
   private repoTrustedKeys = new Set<string>();
+  /** The repo_add runs that met a busy `doctoring` on a machine: run again once it is released. */
+  private readonly afterDoctor = new Map<string, Set<string>>();
   /** repo_add's runs and sign-in trust writes in flight (`stop` waits for them). */
   private readonly repoWork = new Set<Promise<void>>();
   /** Each peer's last PATH probe (`path` null: none yet; `error`: ssh failed), by name. */
@@ -1896,6 +1898,7 @@ export class Daemon {
           if (!Object.hasOwn(this.config.effective().hosts, name) || record.tunnel === "local") {
             return;
           }
+          const doctorAt = this.machines.record(name)?.doctor_at;
           const keptNewer = this.machines.observe(record, { heard });
           this.migrateLegacyRepo(name);
           if (record.tunnel === "up" && heard) this.sampleHost(name, record);
@@ -1910,6 +1913,9 @@ export class Daemon {
             );
           }
           await this.publishReadiness(name);
+          // A newer doctor report from the box (a clone made by hand, a fix): the repo_add runs
+          // blocked there run again (SPEC §4.6.21). Its unchanged beats retry nothing.
+          if (heard && held?.tunnel === "up" && held.doctor_at !== doctorAt) this.retryRepos(name);
           this.foldLogins(record, name);
           // `primary@<name>`'s usage record carries this record's identity, and its logins'
           // usage probe readings (unchanged: no-op).
@@ -5546,6 +5552,7 @@ export class Daemon {
     const downSince = isLocal ? undefined : this.machines.downSince(name);
     const records = accountRecords(this.usage);
     const record = isLocal ? this.ownRecord : this.machines.record(name);
+    const waves = this.waveSlugs();
     // Its best candidate (the balancing rule's pick there), so one fresh login keeps it eligible;
     // a config default that pins an account here is that account.
     const pin = cfg.claude.default_account;
@@ -5574,8 +5581,8 @@ export class Daemon {
       // Every running wave's repository, beside every one the machine reports (#436).
       repos: {
         wanted: [
-          ...this.waveSlugs(),
-          ...assignedSlugs(cfg, name).filter((s) => !this.waveSlugs().some((w) => sameSlug(w, s))),
+          ...waves,
+          ...assignedSlugs(cfg, name).filter((s) => !waves.some((w) => sameSlug(w, s))),
         ],
         records: record?.repos,
         ...(record?.repo !== undefined ? { legacy: record.repo } : {}),
@@ -5803,7 +5810,7 @@ export class Daemon {
         try {
           r = await this.peers.runDoctor(run);
         } finally {
-          this.doctoring.delete(run.name);
+          this.doctorDone(run.name);
         }
         const { report, ...reply } = r;
         if (r.ok) this.probes.delete(run.name);
@@ -5955,7 +5962,17 @@ export class Daemon {
       data: { by, slug: spelled, machines, ...(Object.keys(paths).length > 0 ? { paths } : {}) },
     });
     const names = this.namedMachines(machines);
-    for (const m of names) this.startRepoRun(m, spelled);
+    for (const m of names) {
+      // An earlier run's `blocked` is stale now: `cloning` until this run ends (`add --wait`).
+      const run = [...(this.repoRuns.get(m) ?? [])].find(([s]) => sameSlug(s, spelled))?.[1];
+      if (run?.state === "blocked")
+        this.setRepoRun(m, spelled, {
+          state: "cloning",
+          reasons: [],
+          ...(run.path !== undefined ? { path: run.path } : {}),
+        });
+      this.startRepoRun(m, spelled);
+    }
     return { slug: spelled, machines: names, status: this.repoLines(spelled, names) };
   }
 
@@ -6005,7 +6022,12 @@ export class Daemon {
    * failing stays `blocked` with its why, retried on its next `up` and after Repair.
    */
   private async runRepo(machine: string, slug: string): Promise<void> {
+    // Removed (repo_remove) since this run was started: nothing to do there any more.
+    if (!this.assigned(machine, slug)) return;
     if (this.doctoring.has(machine)) {
+      const waiting = this.afterDoctor.get(machine) ?? new Set<string>();
+      if (![...waiting].some((s) => sameSlug(s, slug))) waiting.add(slug);
+      this.afterDoctor.set(machine, waiting);
       return this.repoFailed(
         machine,
         slug,
@@ -6018,7 +6040,7 @@ export class Daemon {
       try {
         return await this.runLocalRepo(step, slug);
       } finally {
-        this.doctoring.delete(machine);
+        this.doctorDone(machine);
       }
     }
     const record = this.machines.record(machine);
@@ -6042,7 +6064,7 @@ export class Daemon {
     if (
       !step.clone &&
       step.path !== undefined &&
-      this.repoRuns.get(machine)?.has(slug) !== true &&
+      ![...(this.repoRuns.get(machine)?.keys() ?? [])].some((s) => sameSlug(s, slug)) &&
       step.profiles.every((d) => this.repoTrustedKeys.has(keyOf(step.path as string, d)))
     ) {
       return;
@@ -6082,6 +6104,8 @@ export class Daemon {
           entry?.path,
         );
       }
+      // Removed while its doctor ran: no trust is recorded for it.
+      if (!this.assigned(machine, slug)) return;
       const keys: string[] = [];
       try {
         for (const dir of step.profiles) {
@@ -6099,7 +6123,7 @@ export class Daemon {
       }
       await this.repoDone(machine, slug, entry.path, step, keys, step.clone);
     } finally {
-      this.doctoring.delete(machine);
+      this.doctorDone(machine);
     }
   }
 
@@ -6140,7 +6164,7 @@ export class Daemon {
     path?: string,
   ): Promise<void> {
     await this.enqueue(async () => {
-      if (!this.running) return;
+      if (!this.running || !this.assigned(machine, slug)) return;
       this.setRepoRun(machine, slug, {
         state: "blocked",
         reasons: [why],
@@ -6171,7 +6195,7 @@ export class Daemon {
     cloned: boolean,
   ): Promise<void> {
     await this.enqueue(async () => {
-      if (!this.running) return;
+      if (!this.running || !this.assigned(machine, slug)) return;
       for (const k of keys) this.repoTrustedKeys.add(k);
       await this.appendSystem({
         type: "repo_trusted",
@@ -6184,6 +6208,11 @@ export class Daemon {
       this.setRepoRun(machine, slug, null);
       await this.publishReadiness(machine);
     });
+  }
+
+  /** Whether config still assigns `slug` to `machine` (a repo_remove since ends its run). */
+  private assigned(machine: string, slug: string): boolean {
+    return assignedSlugs(this.config.effective(), machine).some((s) => sameSlug(s, slug));
   }
 
   /** Set (null: clear) machine's run of `slug` as readiness shows it. */
@@ -6200,7 +6229,15 @@ export class Daemon {
     else this.repoRuns.delete(machine);
   }
 
-  /** Retry every `repo_add` run blocked on `machine` (its next `up`, after Repair). */
+  /** `machine`'s doctor run ended: the repo_add runs that waited for it start (SPEC §4.6.21). */
+  private doctorDone(machine: string): void {
+    this.doctoring.delete(machine);
+    const waiting = this.afterDoctor.get(machine);
+    this.afterDoctor.delete(machine);
+    for (const slug of waiting ?? []) this.startRepoRun(machine, slug);
+  }
+
+  /** Retry every `repo_add` run blocked on `machine` (its next `up`, a newer doctor report, Repair). */
   private retryRepos(machine: string): void {
     for (const [slug, run] of this.repoRuns.get(machine) ?? []) {
       if (run.state === "blocked") this.startRepoRun(machine, slug);
@@ -6354,7 +6391,7 @@ export class Daemon {
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
     } finally {
-      this.doctoring.delete(machine);
+      this.doctorDone(machine);
     }
   }
 

@@ -273,6 +273,129 @@ describe("repo_add (admin)", () => {
     expect(systemTypes("repo_clone_run").at(-1)?.data).toMatchObject({ machine: PEER, ok: true });
   });
 
+  it("a second add that meets the first's run on the box runs once that run ends", async () => {
+    await setup();
+    f.exec.on(["gh", "repo", "view", "b/b"], {
+      stdout: JSON.stringify({
+        nameWithOwner: "b/b",
+        url: "https://github.com/b/b",
+        visibility: "PUBLIC",
+      }),
+    });
+    const box = theBox();
+    let release = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const both = reportWith([clone(SLUG, BOX_CLONE), clone("b/b", "/srv/repos/b/b")]);
+    box.answers.doctor = async () => {
+      await held;
+      return both;
+    };
+    await f.adminOp({ op: "repo_add", slug: SLUG, machines: [PEER] });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "cloning";
+    });
+    await f.adminOp({ op: "repo_add", slug: "b/b", machines: [PEER] });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER, "b/b")) === "blocked";
+    });
+    box.answers.doctor = both;
+    release();
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "ready" && (await repoState(PEER, "b/b")) === "ready";
+    });
+    expect(box.doctorRuns.map((r) => r.repos_add)).toEqual([[SLUG], ["b/b"]]);
+  });
+
+  it("a blocked run runs again once the box reports a newer doctor run (a clone made by hand)", async () => {
+    await setup();
+    const box = theBox();
+    box.answers.doctor = reportWith([clone(SLUG, BOX_CLONE, false)]);
+    await f.adminOp({ op: "repo_add", slug: SLUG, machines: [PEER] });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "blocked";
+    });
+    const runs = box.doctorRuns.length;
+    // A beat carrying the same doctor run retries nothing (30 s on: its verdict is republished).
+    await f.tick(29_500);
+    await f.beat();
+    await f.waits.settled();
+    expect(box.doctorRuns).toHaveLength(runs);
+    // The owner cloned it by hand: the box's next doctor run reports it.
+    box.answers.doctor = reportWith([clone(SLUG, BOX_CLONE)]);
+    await f.beat({ doctor_at: "2026-10-23T12:00:00.000Z", repos: [clone(SLUG, BOX_CLONE)] });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "ready";
+    });
+    expect(trusts).toHaveLength(2);
+  });
+
+  it("an add again after a failure shows the new run, not the old blocked, until it ends", async () => {
+    await setup();
+    const box = theBox();
+    box.answers.doctor = new Error("ssh: timed out");
+    await f.adminOp({ op: "repo_add", slug: SLUG, machines: [PEER] });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "blocked";
+    });
+    let release = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    box.answers.doctor = async () => {
+      await held;
+      return reportWith([clone(SLUG, BOX_CLONE)]);
+    };
+    await f.adminOp({ op: "repo_add", slug: SLUG, machines: [PEER] });
+    const st = await f.adminOp({ op: "repo_status", slug: SLUG });
+    expect(st).toMatchObject({
+      result: { repos: [{ machines: { [PEER]: { state: "cloning" } } }] },
+    });
+    release();
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "ready";
+    });
+  });
+
+  it("a run still in flight when its repository is removed records nothing and is not retried", async () => {
+    await setup();
+    const box = theBox();
+    let release = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    box.answers.doctor = async () => {
+      await held;
+      return reportWith([clone(SLUG, BOX_CLONE)]);
+    };
+    await f.adminOp({ op: "repo_add", slug: SLUG, machines: [PEER] });
+    await eventually(async () => {
+      await f.tick(0);
+      return (await repoState(PEER)) === "cloning";
+    });
+    await f.adminOp({ op: "repo_remove", slug: SLUG });
+    release();
+    await f.tick(0);
+    await f.waits.settled();
+    expect(trusts).toEqual([]);
+    expect(systemTypes("repo_trusted")).toEqual([]);
+    expect(systemTypes("repo_clone_run").filter((e) => e.data.ok === true)).toEqual([]);
+    // Its next up adds nothing back to the box.
+    const runs = box.doctorRuns.length;
+    await f.lwt();
+    await f.beat();
+    await f.waits.settled();
+    expect(box.doctorRuns).toHaveLength(runs);
+  });
+
   it("the own machine without a clone is blocked with the command to make one", async () => {
     await setup();
     f.exec.on(["git", "-C", localClone, "rev-parse", "--show-toplevel"], {

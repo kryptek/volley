@@ -2762,8 +2762,12 @@ the mailbox); `volley repo` sends them.
   it is trusted the same way (`recordRepoTrust`), and the own doctor checks every repository
   assigned to it on its next run. Every run is journaled `repo_clone_run { machine, slug, ok,
   cloned, path?, error? }`; a failed one leaves the machine's `repos.<slug>` `blocked` with the
-  reason (replayed from the journal on restart) and is retried on the machine's next `up` record
-  and after a successful Repair there. A machine already cloned and trusted is not run again.
+  reason (replayed from the journal on restart) and is retried on the machine's next `up` record,
+  on a heartbeat carrying a newer doctor run (`doctor_at`), when the doctor run it met there ends
+  and after a successful Repair there. A machine already cloned and trusted is not run again; a
+  run whose repository was removed meanwhile records nothing. An add again marks a `blocked`
+  machine `cloning` before it answers, so `volley repo add --wait` never reads the old run's
+  reason. `stop` waits for every run in flight, a box's `--clone` over ssh included.
 - A `repo_trusted` key is the `repo_untrusted` decision's (`preconditionKey({ machine, profile,
   root })`): a spawn whose key one covers opens no `repo_untrusted` (`SpawnDeps.repoTrusted`).
   `claude_signin_done` for a profile trusts every repository assigned to its machine in it (one
