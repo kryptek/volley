@@ -38,8 +38,8 @@ async function runningRole(role: Role, update?: BranchUpdate): Promise<string> {
   await h.finish("quality_reviewer", { result: result("quality-p1-elsewhere") });
   if (role === "fixup") return "fixup";
   // The release branch moved: the update step runs after the fixup.
-  h.world.mergeBase[H2] = sha(0xdead);
-  await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+  // The PR conflicts with the moved release branch: updated before the gate (#383).
+  await h.finish("fixup", { head: H2, conflicting: true, result: result("fixup-resolved") });
   return "fixup";
 }
 

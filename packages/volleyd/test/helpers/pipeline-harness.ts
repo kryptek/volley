@@ -702,7 +702,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     },
     /**
      * A role finishes: its worktree is at `head` (pushed to the PR branch unless `push: false`,
-     * CI `ci` on it), and it reports `status` with `result`.
+     * CI `ci` on it), and it reports `status` with `result`. `conflicting`: GitHub reports the PR
+     * CONFLICTING (no CI) while that head is verified, and MERGEABLE again after.
      */
     async finish(
       role: Role,
@@ -713,9 +714,12 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         result?: unknown;
         status?: "done" | "failed";
         task?: string;
+        conflicting?: boolean;
       } = {},
     ) {
       const task = o.task ?? "T1";
+      const prs = world.prs.filter((pr) => pr.headRefName === prBranch(task));
+      if (o.conflicting === true) for (const pr of prs) pr.mergeable = "CONFLICTING";
       const r = run(role, task);
       if (r === undefined) throw new Error(`no ${role} run`);
       if (o.head !== undefined) {
@@ -736,6 +740,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       if (o.result !== undefined) lastResult[r.agent_id] = o.result;
       await driver.handle(task, ev);
       await settle();
+      if (o.conflicting === true) for (const pr of prs) pr.mergeable = "MERGEABLE";
     },
     /** A role's current run publishes `blocked` with `reason` (the agent stays alive). */
     async block(role: Role, reason: string, task = "T1") {

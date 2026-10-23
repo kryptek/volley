@@ -3463,10 +3463,18 @@ role's run, so the spawn is retried on every tick until it goes through. A role 
 reaped (its LWT, past the reap grace) is handled like a `failed` one: retired, then a
 `respawn` / `cancel` decision.
 
-**Rebase rule.** Before the gate the release branch is fetched and compared with the head's
-merge-base. Moved → a `rebase` agent rebases; its new head must verify (CI green on it) and, if
-the rebase changed a file a reviewer flagged (`git diff --name-only <old> <new>`), only that
-reviewer runs again (then the fixup, if it finds anything), and the check repeats.
+**Rebase rule.** The gate verifies the task at the head its reviewers saw. Before it the release
+branch is fetched and compared with the head's merge-base, and the gate records how far behind
+the head is (the evidence's `release: { release_sha, behind }`, `behind` on the gate's
+`artifact_verified`) without updating it: a task behind is gated, enters `merge_ready` and the
+merge queue, and its `why_waiting` reads `gated 3 commits behind <release branch>; updated at its
+merge turn` while it queues. Only its merge turn brings it up to date ([The merge
+queue](#the-merge-queue)); under `merge: manual` the evidence's merge line says to update the
+branch (GitHub's Update branch, or a rebase) before merging. Two cases still update before the
+gate: a PR GitHub reports CONFLICTING (it gets no CI until it is updated, below) and a landed
+flake fix. The update step itself: a `rebase` agent rebases; its new head must verify (CI green
+on it) and, if the rebase changed a file a reviewer flagged (`git diff --name-only <old> <new>`),
+only that reviewer runs again (then the fixup, if it finds anything), and the check repeats.
 
 **`branch_update: rebase | merge`** (a tunable: `config.yaml`, `config_set` or a wave file's
 `config:`; default `rebase`) is how that step updates the branch. `rebase` is the above: rebase
@@ -3703,14 +3711,18 @@ one at a time, in order, and brings each up to date just before its merge
   the usual rebase step runs under the wave's `branch_update`, its agent pushes, CI runs on the
   new head, the gate checks it again and it merges. Only the front task is updated, after the
   merge before it: a 30-task wave does at most 29 updates, one at a time, never a storm, and the
-  tasks behind keep their gates and evidence meanwhile. **Use `branch_update: merge` for an
+  tasks behind keep their gates and evidence meanwhile. That holds because a task is gated at its
+  reviewed head however far behind it is; before
+  [#383](https://github.com/kryptek/volley/issues/383) a task behind was updated before its gate,
+  so every update raced the merges still to come (one every half hour or so, about as long as an
+  update, its CI and the re-review took), and a task was behind again each time it came back. **Use `branch_update: merge` for an
   unattended wave**: it merges the release branch in with a normal push (no force-push, and the
   history the reviewers saw stays).
 - **Conflicts.** Resolving a conflict is the rebase (or merge) agent's job; its brief
   (`.volley/rebase.md`) says so. An agent that publishes `blocked` on a conflict it cannot
   resolve, or fails, while the task is queued opens decision `merge_conflict` (options
-  `respawn`, `manual`, `cancel`); during a rebase before the gate it is an ordinary
-  `agent_blocked`.
+  `respawn`, `manual`, `cancel`); during an update before the gate (a CONFLICTING PR, a landed
+  flake fix) it is an ordinary `agent_blocked`.
   Autopilot answers `respawn` once per task (`merge_conflict/respawn`, under `respawn_max`), then
   leaves it to the owner; `manual` takes the task out of the queue and leaves it at the gate for a
   person, and the turn passes to the next task.

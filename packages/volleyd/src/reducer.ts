@@ -965,6 +965,16 @@ function derive(state: WaveState, rec: WaveRecord): void {
       t.stage !== "cancelled"
     )
       return { ...t, why_waiting: `PR conflicts with ${state.release_branch}, updating` };
+    // Queued at the head its reviewers saw, behind the release branch: its turn updates it (#383).
+    if (t.stage === "merge_ready" && p?.queued_at !== undefined && (p.gated_behind ?? 0) > 0) {
+      const n = p.gated_behind as number;
+      const alarms = surfacedAlarms(p);
+      return {
+        ...t,
+        ...(alarms.length > 0 ? { alarms } : {}),
+        why_waiting: `gated ${n} commit${n === 1 ? "" : "s"} behind ${state.release_branch}; updated at its merge turn`,
+      };
+    }
     // A red head awaiting its flake's fixer: say which test.
     // (A fixer's own remediation is what it fixes, not what it waits for: the pipeline's is.)
     const flake = rec.pipeline[t.id]?.remediation;
