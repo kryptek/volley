@@ -411,17 +411,43 @@ function bundleFootprint(ms: PlanTask[]): Footprint {
   return fp;
 }
 
+/**
+ * A cluster as a wave file states it (`plan.cluster` on its tasks): its hot files from the tasks'
+ * `files` against the tree (bytes 0 without one) and its why, worded as `planWave` words it.
+ * `issues`: how many issues its tasks close (a bundle counts each).
+ */
+export function clusterFrom(
+  id: string,
+  tasks: { id: TaskId; files: string[] }[],
+  strategy: PlanStrategy,
+  tree: Tree,
+  issues: number,
+): PlanCluster {
+  const ex = new Map(tasks.map((t) => [t.id, expand(t.files, tree)]));
+  const hot = hotFiles(tasks, (t) => ex.get(t.id) as Expanded, tree);
+  const cluster: PlanCluster = {
+    id,
+    tasks: tasks.map((t) => t.id),
+    hot,
+    strategy,
+    state: "planned",
+    why: "",
+  };
+  cluster.why = clusterWhy(cluster, issues);
+  return cluster;
+}
+
 /** The cluster's top files by bytes × tasks sharing them (source files shared by two or more). */
-function hotFiles(
-  comp: PlanTask[],
-  exOf: (t: PlanTask) => Expanded,
+function hotFiles<T extends { id: TaskId }>(
+  comp: T[],
+  exOf: (t: T) => Expanded,
   tree: Tree,
 ): PlanCluster["hot"] {
   const sharers = new Map<string, Set<TaskId>>();
   for (let i = 0; i < comp.length; i++) {
     for (let j = i + 1; j < comp.length; j++) {
-      const a = comp[i] as PlanTask;
-      const b = comp[j] as PlanTask;
+      const a = comp[i] as T;
+      const b = comp[j] as T;
       for (const f of shared(exOf(a), exOf(b)).filter(isSourceFile)) {
         const s = sharers.get(f) ?? new Set<TaskId>();
         s.add(a.id).add(b.id);
@@ -452,7 +478,10 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 /** `20 tasks share src/daemon.ts (11k lines, 14 tasks), … → 5 bundles (…), 2 chains (…), cap 4 in flight`. */
 function clusterWhy(c: PlanCluster, taskCount: number): string {
-  const hot = c.hot.map((h) => `${h.file} (${lines(h.bytes)}, ${h.shared_by.length} tasks)`);
+  // A file the tree does not size (a new file, or no tree at hand) shows its sharers only.
+  const hot = c.hot.map(
+    (h) => `${h.file} (${h.bytes > 0 ? `${lines(h.bytes)}, ` : ""}${h.shared_by.length} tasks)`,
+  );
   const how: string[] = [];
   const { collapse, chain, cap } = c.strategy;
   if (collapse !== undefined) {

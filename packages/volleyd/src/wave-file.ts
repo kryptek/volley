@@ -1,16 +1,31 @@
 import { readFile } from "node:fs/promises";
 import { type Node, isMap, isScalar, isSeq, parseDocument } from "yaml";
+import { DAEMON_DEFAULTS } from "./config-defaults";
 import { rewordWeights } from "./config-store";
+import type { Tree } from "./footprint";
+import {
+  type FileTask,
+  type Plan,
+  type PlanTask,
+  type PlannedTask,
+  clusterFrom,
+  diffPlan,
+  planWave,
+} from "./overlap-plan";
 import { AUTO_HOST } from "./placement";
 import { type RepoConfig, cloneFor, isSlug } from "./repos";
 import { type PathError, toPathErrors, validator } from "./schemas";
 import type {
+  Footprint,
   MergeMode,
   PipelineStage,
   PipelineStep,
   PlacementDefault,
+  PlanCluster,
+  PlanStrategy,
   RemoteHostConfig,
   TaskId,
+  TaskPlan,
   TunablesPatch,
   Wave,
   WaveTask,
@@ -41,6 +56,9 @@ interface RawTask {
   files?: string[];
   account?: string;
   heavy?: boolean;
+  issues?: number[];
+  footprint?: Footprint;
+  plan?: TaskPlan;
 }
 
 interface RawWave {
@@ -165,6 +183,17 @@ export function parseWaveFile(text: string, source?: string, defaults?: Placemen
       reason: "lease pools are machine-global; set them in volleyd's global config, not per wave",
     });
   }
+  // A bundle's `issues`: its own issue among them, each once, and no other task's (SPEC §4.6.22).
+  const bundles = bundleErrors(raw);
+  if (bundles.length > 0) {
+    const reported = new Set(bundles.map((e) => e.path.replace(/\[\d+\]$/, "")));
+    for (let i = errors.length - 1; i >= 0; i--) {
+      const e = errors[i];
+      if (e !== undefined && reported.has(e.path) && e.reason.includes("duplicate"))
+        errors.splice(i, 1);
+    }
+    errors.push(...bundles);
+  }
   if (errors.length > 0) fail(errors);
 
   const w = raw as RawWave;
@@ -246,9 +275,13 @@ function normalise(w: RawWave, placement: "auto" | "local"): Wave {
       files: t.files ?? [],
       ...(t.account !== undefined ? { account: t.account } : {}),
       ...(t.heavy === true ? { heavy: true } : {}),
+      ...(t.issues !== undefined ? { issues: t.issues } : {}),
+      ...(t.footprint !== undefined ? { footprint: t.footprint } : {}),
+      ...(t.plan !== undefined ? { plan: t.plan } : {}),
     };
   }
-  return {
+  const planned = Object.values(w.tasks).some((t) => t.plan !== undefined);
+  const wave: Wave = {
     wave: w.wave,
     version: w.version ?? 1,
     repo: w.repo,
@@ -270,6 +303,138 @@ function normalise(w: RawWave, placement: "auto" | "local"): Wave {
     ...(w.merge !== undefined ? { merge: w.merge } : {}),
     ...(w.playbook !== undefined ? { playbook: w.playbook } : {}),
   };
+  // The file's own overlap plan, as written: the Desk and `validate` read it before any run.
+  if (planned) wave.overlap_plan = { clusters: filePlan(wave).clusters };
+  return wave;
+}
+
+/**
+ * `tasks.<id>.issues` errors: it must contain the task's `issue`, name each issue once, and name
+ * none another task closes (its `issue`, or in its `issues`).
+ */
+function bundleErrors(raw: unknown): PathError[] {
+  const tasks = (raw as { tasks?: unknown } | null)?.tasks;
+  if (tasks === null || typeof tasks !== "object") return [];
+  const entries = Object.entries(tasks as Record<string, { issue?: unknown; issues?: unknown }>);
+  // Who closes each issue: its task's `issue` first, then the first bundle naming it.
+  const owner = new Map<unknown, TaskId>();
+  for (const [id, t] of entries) if (!owner.has(t?.issue)) owner.set(t?.issue, id);
+  for (const [id, t] of entries) {
+    for (const i of Array.isArray(t?.issues) ? t.issues : []) if (!owner.has(i)) owner.set(i, id);
+  }
+  const out: PathError[] = [];
+  for (const [id, t] of entries) {
+    if (!Array.isArray(t?.issues)) continue;
+    const path = `tasks.${id}.issues`;
+    if (!t.issues.includes(t.issue)) out.push({ path, reason: `must include issue ${t.issue}` });
+    t.issues.forEach((i, k) => {
+      if ((t.issues as unknown[]).indexOf(i) < k) {
+        out.push({ path: `${path}[${k}]`, reason: `duplicate issue #${i}` });
+      } else if (owner.get(i) !== id) {
+        out.push({ path: `${path}[${k}]`, reason: `issue #${i} is also tasks.${owner.get(i)}'s` });
+      }
+    });
+  }
+  return out;
+}
+
+/** A task's footprint as written; without one, `listed` when it has `files`, else `none`. */
+const footprintOf = (t: WaveTask): Footprint =>
+  t.footprint ?? { confidence: t.files.length > 0 ? "listed" : "none" };
+
+/** The wave's own tasks (a supervisor-added fixer aside), in file order. */
+const fileTasks = (wave: Wave): WaveTask[] =>
+  wave.task_order.flatMap((id) => {
+    const t = wave.tasks[id];
+    return t === undefined || t.synthetic === true ? [] : [t];
+  });
+
+/**
+ * Whether `t.after`'s `dep` is a chain the planner added: its why names it (`after <dep>: …`),
+ * or the task is planned by `chain` with a why that names no task it runs after.
+ */
+function chainedAfter(t: WaveTask, dep: TaskId): boolean {
+  const why = t.plan?.why ?? "";
+  if (why.includes(`after ${dep}: `)) return true;
+  return t.plan?.by === "chain" && !/(?:^|; )after \S+: /.test(why);
+}
+
+/**
+ * The wave file's own overlap plan (SPEC §4.6.22): clusters rebuilt from `plan.cluster` (a bundle
+ * is a collapse, an `after` the planner added a chain, more tasks than
+ * `plan_cluster_in_flight_max` a cap), each with its hot files sized from `tree` (0 without one).
+ * `explain` words it as it words `planWave`'s.
+ */
+export function filePlan(wave: Wave, tree: Tree = {}): Plan {
+  const tasks: PlannedTask[] = fileTasks(wave).map((t) => ({
+    id: t.id,
+    issue: t.issue,
+    issues: t.issues ?? [t.issue],
+    ...(t.title !== undefined ? { title: t.title } : {}),
+    after: t.after,
+    files: t.files,
+    footprint: footprintOf(t),
+    plan: {
+      ...(t.plan?.cluster !== undefined ? { cluster: t.plan.cluster } : {}),
+      by: t.plan?.by ?? "independent",
+      why: t.plan?.why ?? "",
+    },
+  }));
+  const groups = new Map<string, PlannedTask[]>();
+  for (const t of tasks) {
+    const c = t.plan.cluster;
+    if (c !== undefined) groups.set(c, [...(groups.get(c) ?? []), t]);
+  }
+  const ids = [...groups.keys()].sort((a, b) => a.length - b.length || a.localeCompare(b));
+  const clusters: PlanCluster[] = ids.map((id) => {
+    const members = [...(groups.get(id) ?? [])].sort((a, b) => a.issue - b.issue);
+    const inCluster = new Set(members.map((m) => m.id));
+    const strategy: PlanStrategy = {};
+    const collapse = members.filter((m) => m.issues.length > 1).map((m) => [m.id]);
+    if (collapse.length > 0) strategy.collapse = collapse;
+    const chain = members.flatMap((m) =>
+      m.after
+        .filter((d) => inCluster.has(d) && chainedAfter(wave.tasks[m.id] as WaveTask, d))
+        .map((d): [TaskId, TaskId] => [d, m.id]),
+    );
+    if (chain.length > 0) strategy.chain = chain;
+    const max = DAEMON_DEFAULTS.plan_cluster_in_flight_max;
+    if (members.length > max || members.some((m) => m.plan.by === "cap")) strategy.cap = max;
+    const issues = members.reduce((n, m) => n + m.issues.length, 0);
+    return clusterFrom(id, members, strategy, tree, issues);
+  });
+  return { tasks, clusters };
+}
+
+/**
+ * Where the file's bundles, `after` and `plan` differ from what the planner would do over its
+ * tasks and `tree` (`diffPlan`'s notes; advisory, the file is kept as written). A bundle in the
+ * file plans as one task, closing each of its issues.
+ */
+export function planNotes(wave: Wave, tree: Tree): string[] {
+  const own = fileTasks(wave);
+  const input: PlanTask[] = own.map((t) => ({
+    id: t.id,
+    issue: t.issue,
+    ...(t.title !== undefined ? { title: t.title } : {}),
+    files: t.files,
+    footprint: footprintOf(t),
+    after: t.after,
+  }));
+  const plan = planWave({ tasks: input, tree });
+  const bundleOf = new Map(own.map((t) => [t.issue, t.issues ?? [t.issue]]));
+  const tasks = plan.tasks.map((p) => ({
+    ...p,
+    issues: [...new Set(p.issues.flatMap((i) => bundleOf.get(i) ?? [i]))].sort((a, b) => a - b),
+  }));
+  const asWritten: FileTask[] = own.map((t) => ({
+    id: t.id,
+    issue: t.issue,
+    ...(t.issues !== undefined ? { issues: t.issues } : {}),
+    after: t.after,
+    ...(t.plan !== undefined ? { plan: t.plan } : {}),
+  }));
+  return diffPlan(asWritten, { tasks, clusters: plan.clusters });
 }
 
 /**

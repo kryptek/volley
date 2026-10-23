@@ -213,6 +213,10 @@ export function formatWave(
     r !== undefined
       ? `  release: ${where} (${r.stages.filter((x) => x.state === "verified").length}/${r.stages.length} verified)\n`
       : "";
+  // The overlap plan (SPEC §4.6.22): each cluster, how it runs now and why.
+  const plan = (s.overlap_plan?.clusters ?? [])
+    .map((c) => `  plan: cluster ${c.id} (${c.state}): ${c.why}\n`)
+    .join("");
   const idW = Math.max(...s.tasks.map((t) => t.id.length), 2);
   const rows = s.tasks.map((t) => {
     const why = t.why_waiting !== undefined ? `  ${t.why_waiting}` : "";
@@ -244,6 +248,7 @@ export function formatWave(
     archived +
     queue +
     release +
+    plan +
     autopilot +
     preface +
     hygiene +

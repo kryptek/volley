@@ -192,10 +192,9 @@ tasks:
     // definition (whose `files` drive the scheduler's same-file ordering).
     expect(daemon.record("w2")?.wave?.tasks.Y?.files).toEqual([]);
     const queued = daemon.journalEvents("w2").find((e) => e.type === "task_queued");
-    expect(queued?.data.issue_files).toEqual([
-      "packages/widget/src/registry.ts",
-      "docs/registry.md",
-    ]);
+    // No tree at /path/to/example-repo: the Files list as written, guessed (SPEC §4.6.22).
+    expect(queued?.data.files).toEqual(["packages/widget/src/registry.ts", "docs/registry.md"]);
+    expect(queued?.data.footprint).toEqual({ confidence: "guessed" });
     const submitted = daemon.journalEvents("w2").find((e) => e.type === "wave_submitted");
     expect(
       (submitted?.data.wave as { tasks: Record<string, { files: string[] }> }).tasks.Y?.files,

@@ -1,10 +1,13 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { explain } from "../src/overlap-plan";
 import {
   WaveFileError,
   defaultPlacement,
+  filePlan,
   formatPlacement,
   parseWaveFile,
+  planNotes,
   resolveWaveRepo,
 } from "../src/wave-file";
 
@@ -466,5 +469,81 @@ describe("resolveWaveRepo: a wave file's repo: may be an owner/name slug (D9)", 
     expect(() =>
       resolveWaveRepo(wave("example-org/widgets"), cfg, "other", "/path/to/home"),
     ).toThrow(WaveFileError);
+  });
+});
+
+describe("bundles, footprints and the overlap plan (SPEC §4.6.22)", () => {
+  const task = (body: string) => `${HEADER}tasks:\n  i1: ${body}\n  i9: { issue: 9 }\n`;
+
+  it("issues without the task's issue is refused at tasks.<id>.issues", () => {
+    expect(errorsOf(task("{ issue: 1, issues: [2, 3] }"))).toEqual([
+      "tasks.i1.issues: must include issue 1",
+    ]);
+  });
+
+  it("a duplicate issue in issues, or one another task closes, is refused with its path", () => {
+    expect(errorsOf(task("{ issue: 1, issues: [1, 2, 2] }"))).toEqual([
+      "tasks.i1.issues[2]: duplicate issue #2",
+    ]);
+    expect(errorsOf(task("{ issue: 1, issues: [1, 9] }"))).toEqual([
+      "tasks.i1.issues[1]: issue #9 is also tasks.i9's",
+    ]);
+  });
+
+  it("footprint and plan are parsed onto the task; a task without them has neither", () => {
+    const w = parseWaveFile(fixture("bundle.yaml"));
+    expect(w.tasks.i1?.issues).toEqual([1, 2]);
+    expect(w.tasks.i1?.footprint).toEqual({ confidence: "listed" });
+    expect(w.tasks.i3?.footprint).toEqual({ confidence: "resolved", unresolved: ["helpers.ts"] });
+    expect(w.tasks.i3?.plan?.by).toBe("chain");
+    expect(w.tasks.i4?.plan).toEqual({ by: "independent", why: "shares no source file" });
+    const plain = parseWaveFile(task("{ issue: 1 }"));
+    expect(plain.tasks.i1).not.toHaveProperty("issues");
+    expect(plain.tasks.i1).not.toHaveProperty("footprint");
+    expect(plain.tasks.i1).not.toHaveProperty("plan");
+    expect(plain).not.toHaveProperty("overlap_plan");
+  });
+
+  it("fixtures/bundle.yaml: the wave's overlap plan is rebuilt from plan.cluster and after", () => {
+    const w = parseWaveFile(fixture("bundle.yaml"));
+    expect(w.overlap_plan?.clusters).toEqual([
+      {
+        id: "A",
+        tasks: ["i1", "i3"],
+        hot: [{ file: "packages/app/src/pipeline.ts", bytes: 0, shared_by: ["i1", "i3"] }],
+        strategy: { collapse: [["i1"]], chain: [["i1", "i3"]] },
+        state: "planned",
+        why: "3 tasks share packages/app/src/pipeline.ts (2 tasks) → 1 bundle (i1), 1 chain (i1 → i3)",
+      },
+    ]);
+    expect(explain(filePlan(w))).toEqual([
+      "cluster A: 3 tasks share packages/app/src/pipeline.ts (2 tasks) → 1 bundle (i1), 1 chain (i1 → i3)",
+      "independent: i4",
+      "expected branch updates: ≤ 2 (was ≤ 3 one at a time)",
+    ]);
+  });
+
+  it("with the tree, the hot files carry their sizes", () => {
+    const w = parseWaveFile(fixture("bundle.yaml"));
+    const tree = { "packages/app/src/pipeline.ts": 40_000, "packages/app/src/retry.ts": 800 };
+    expect(filePlan(w, tree).clusters[0]?.hot).toEqual([
+      { file: "packages/app/src/pipeline.ts", bytes: 40_000, shared_by: ["i1", "i3"] },
+    ]);
+    expect(filePlan(w, tree).clusters[0]?.why).toContain("pipeline.ts (1k lines, 2 tasks)");
+  });
+
+  it("planNotes: where the file's own plan differs from the planner's (advisory)", () => {
+    const text = `${HEADER}tasks:
+  i1: { issue: 1, files: [src/big.ts, src/a.ts], footprint: { confidence: listed } }
+  i2: { issue: 2, files: [src/big.ts, src/b.ts], footprint: { confidence: listed } }
+`;
+    const tree = { "src/big.ts": 40_000, "src/a.ts": 100, "src/b.ts": 100 };
+    expect(planNotes(parseWaveFile(text), tree)).toEqual([
+      "i1 and i2 run as separate tasks; the planner would bundle them as i1 — kept as written",
+    ]);
+    // The generated bundle is what the planner would do: no note.
+    expect(planNotes(parseWaveFile(fixture("bundle.yaml")), {})).not.toContainEqual(
+      expect.stringContaining("i1 bundles"),
+    );
   });
 });

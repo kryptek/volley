@@ -864,3 +864,79 @@ describe("shared-precondition decisions: decision_joined (#418)", () => {
     expect(stage(r, "T2")).toBe("awaiting_decision");
   });
 });
+
+describe("the overlap plan (task_queued, wave_planned; SPEC §4.6.22)", () => {
+  const wave = parseWaveFile(
+    readFileSync(new URL("./fixtures/bundle.yaml", import.meta.url), "utf-8"),
+  );
+  const AT = "2026-10-23T10:00:00.000Z";
+  const queued = (seq: number, id: string): JournalEvent => {
+    const t = wave.tasks[id];
+    return {
+      seq,
+      at: AT,
+      type: "task_queued",
+      task: id,
+      data: {
+        issue: t?.issue,
+        ...(t?.issues !== undefined ? { issues: t.issues } : {}),
+        files: t?.files,
+        ...(t?.footprint !== undefined ? { footprint: t.footprint } : {}),
+        ...(t?.plan !== undefined ? { plan: t.plan } : {}),
+      },
+    };
+  };
+  const evs: JournalEvent[] = [
+    { seq: 1, at: AT, type: "wave_submitted", data: { wave, owner: "coord" } },
+    queued(2, "i1"),
+    queued(3, "i3"),
+    queued(4, "i4"),
+    {
+      seq: 5,
+      at: AT,
+      type: "wave_planned",
+      data: { clusters: wave.overlap_plan?.clusters ?? [] },
+    },
+  ];
+
+  it("fills state.overlap_plan, spec.tasks[].{issues,files,footprint,plan} and tasks[].cluster", () => {
+    const state = reduce(evs);
+    expect(state.overlap_plan?.clusters.map((c) => c.id)).toEqual(["A"]);
+    expect(state.spec?.tasks.i1).toMatchObject({
+      issue: 1,
+      issues: [1, 2],
+      files: ["packages/app/src/pipeline.ts", "packages/app/src/retry.ts"],
+      footprint: { confidence: "listed" },
+      plan: { cluster: "A", by: "collapse" },
+    });
+    const byId = Object.fromEntries(state.tasks.map((t) => [t.id, t]));
+    expect(byId.i1?.cluster).toBe("A");
+    expect(byId.i3?.cluster).toBe("A");
+    expect(byId.i4).not.toHaveProperty("cluster");
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", state)),
+    ).toEqual([]);
+  });
+
+  it("files a task_queued carries (the daemon read them) fill a task the file left without", () => {
+    const plain = parseWaveFile(
+      "wave: w1\nrepo: /srv/repo\nrelease_branch: release/w1\nmodel: m\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n",
+    );
+    const state = reduce([
+      { seq: 1, at: AT, type: "wave_submitted", data: { wave: plain } },
+      {
+        seq: 2,
+        at: AT,
+        type: "task_queued",
+        task: "T1",
+        data: { issue: 1, files: ["src/a.ts"], footprint: { confidence: "listed" } },
+      },
+    ]);
+    expect(state.spec?.tasks.T1).toEqual({
+      issue: 1,
+      after: [],
+      files: ["src/a.ts"],
+      footprint: { confidence: "listed" },
+    });
+  });
+});

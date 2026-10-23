@@ -8,7 +8,14 @@ import { resolveCaller } from "../ownership";
 import { formatDiff } from "../plan-diff";
 import type { Wave, WaveState } from "../types";
 import { formatWave } from "./status";
-import { parseWithPlacement, placementDefaults, places, previewPlacement } from "./validate";
+import {
+  parseWithPlacement,
+  placementDefaults,
+  places,
+  planLines,
+  previewPlacement,
+  waveTree,
+} from "./validate";
 
 const HELP = `Usage: volleyd run <wave.yaml> [--owner <name|agent-id>] [--json] [--broker-url <url>] [--namespace <ns>]
 
@@ -28,6 +35,8 @@ Preview the diff with \`volleyd diff <wave> <wave.yaml>\`.
 A wave that places tasks (\`placement: auto\`, or a task's \`host: auto\`) also prints where its
 tasks would go if admitted now (as \`volleyd validate\` does; a later version only when its file
 sets placement:); each is placed at admission.
+It prints the overlap plan lines \`volleyd validate\` prints (SPEC §4.6.22), and a warning for each
+task without files: whose issue the daemon could not read (footprint_unavailable).
 `;
 
 /** Printed when `run` submits a wave with no owner (SPEC §4.6.20). */
@@ -102,6 +111,11 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
       parsed.values.json !== true && preview
         ? await previewPlacement(wave, target, state.github?.slug)
         : "";
+    // The overlap plan as validate prints it; the tree from the clone the daemon resolved `repo:` to.
+    const plan =
+      parsed.values.json === true
+        ? ""
+        : planLines(wave, await waveTree(state.repo, wave.release_branch));
     if (parsed.values.json === true) {
       io.stdout(`${JSON.stringify(state, null, 2)}\n`);
       io.stderr(warnings);
@@ -109,12 +123,12 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
       // A later version without placement: keeps the wave's own (SPEC §4.6.15): no default line.
       const placed = placementFromFile ? placementLine : "";
       io.stdout(
-        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${warnings}${playbookLine}${placed}${placement}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
+        `submitted wave ${state.wave} plan v${res.plan.version}\n${formatDiff(res.plan.diff)}${warnings}${playbookLine}${placed}${placement}${plan}${formatWave(state, { decisions: res.plan.decisions ?? [] })}`,
       );
     } else {
       const auto = owner.auto ? " (auto)" : "";
       io.stdout(
-        `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${warnings}${playbookLine}${placementLine}${placement}${formatWave(state)}`,
+        `submitted wave ${state.wave} (${state.tasks.length} tasks)\nowner: ${state.owner ?? "none"}${auto}\n${warnings}${playbookLine}${placementLine}${placement}${plan}${formatWave(state)}`,
       );
     }
     return EXIT.OK;

@@ -57,7 +57,9 @@ coordinator session.
 - [Pause, stop and the kill switch](#pause-stop-and-the-kill-switch)
 - [Archiving](#archiving)
 - [Steering](#steering)
-- [Overlap warnings](#overlap-warnings)
+- [Footprints and the overlap plan](#footprints-and-the-overlap-plan)
+  - [Overlap warnings](#overlap-warnings)
+  - [Footprints](#footprints)
 - [Configuration](#configuration)
 - [Spawning agents](#spawning-agents)
 - [Fleet](#fleet)
@@ -111,6 +113,12 @@ tasks:
   T1: { issue: 102, after: [T0] }
   T2: { issue: 103, after: [T0] }
   T3: { issue: 104, after: [T1, T2], pipeline: [implement, merge_ready] }
+  T4:                        # as wave-from-issues writes it (see Footprints and the overlap plan)
+    issue: 105
+    issues: [105, 106]       # a bundle: every issue it closes
+    files: [packages/app/src/pipeline.ts, packages/app/src/retry.ts]
+    footprint: { confidence: listed }
+    plan: { cluster: A, by: collapse, why: "collapsed #105 + #106: …" }
 # optional:
 # version: 1                 # bumped by a versioned re-submission
 # namespace: dispatch        # Volley namespace for the wave's agents
@@ -131,8 +139,9 @@ Per task: `issue` (required), `after`, `pipeline`, `model`, `title`, `host` (whe
 `local`, a configured host's name, an inline ssh host, or `auto` to have volleyd place it; default
 `auto` when the wave's placement is `auto`, else `local`), `heavy` (`true`: placement needs a free per-machine
 slot in each of the wave's `heavy_pools`), `account` (overrides the wave's; see
-[Claude accounts](#claude-accounts)), and `files` (a scheduling hint: paths the task will touch;
-tasks overlapping active ones start later).
+[Claude accounts](#claude-accounts)), `files` (a scheduling hint: paths the task will touch;
+tasks overlapping active ones start later), and the overlap plan's `footprint`, `plan` and `issues`
+([Footprints and the overlap plan](#footprints-and-the-overlap-plan)).
 
 The schema is [`spec/schemas/wave-file.schema.json`](../../spec/schemas/wave-file.schema.json).
 The parser adds the rules a schema cannot express and reports everything with a path:
@@ -1549,16 +1558,64 @@ journaled, so a client that sends its own mailbox message (the Desk) asks for th
 and then publishes, and the agent gets exactly one message. When there is nothing to interrupt with
 (no hook, no workspace) or it fails, the request still answers `ok` with `interrupted: false`.
 
-## Overlap warnings
+## Footprints and the overlap plan
 
-At submit the daemon reads each task issue's `Files` section (`## Files` / `### Files` heading or
-a `Files:` line; comma lists, brace expansion and package-relative entries are understood) via
+Tasks of one wave that touch the same files collide when they merge. A task's footprint (its
+`files`) says what it will touch; the overlap plan (SPEC §4.6.22) clusters the tasks that share
+source files and runs each cluster so they collide less: strongly coupled tasks collapse into one
+bundled task, a strong pair that cannot bundle chains (one `after` the other), and a big cluster
+is capped in flight.
+
+**In the wave file.** `wave-from-issues` (the `/volley-issues` skill) writes it: each issue's
+Files list resolved against the repository tree at `origin/<release branch>` (`footprintOf`,
+below), then planned (`planWave`). Per task:
+
+| Key | What it holds |
+|---|---|
+| `files` | the footprint: paths and globs |
+| `footprint` | `{ confidence, unresolved? }`: how `files` was found (table below), and the entries that matched no path |
+| `plan` | `{ cluster, by, why }`: the cluster, the strategy (`collapse`, `chain`, `cap`, `independent`) and why |
+| `issues` | a bundle's issues (must contain `issue`; never one another task closes) |
+
+A chain the planner added is an `after:` entry with a comment (`# chained by the planner: shares
+src/pipeline.ts`), and the plan in words heads the file (`# plan: cluster A: …`). Collapse is
+automatic: to plan differently, edit the file (split a bundle into its issues, drop a chain); the
+supervisor keeps it as written. The escape hatches: `--no-plan` writes footprints only (no
+bundle, chain or `plan:`), `--plan-only` prints the plan and writes nothing.
+
+**What `validate` and `run` print**, after the placement line:
+
+```
+cluster A: 3 tasks share src/daemon.ts (11k lines, 3 tasks) → 1 bundle (T1), 1 chain (T1 → T4)
+independent: T2, T5
+expected branch updates: ≤ 2 (was ≤ 5 one at a time)
+note: T6 and T7 run as separate tasks; the planner would bundle them as T6 — kept as written
+footprints: 5 listed, 1 guessed (#313); 1 entry unresolved (T4: helpers.ts)
+```
+
+The first three lines are the file's own plan (`explain`); a `note:` is where the planner
+(`diffPlan`) would plan the file's tasks differently, printed only when the repository's tree
+reads here; the last line counts footprints per issue. A wave with no `files:` on any task prints
+`footprints: none (write them with wave-from-issues, or the daemon reads each issue's Files list at run)`.
+
+**At submit.** For each task without `files:` the daemon reads its issue's Files list via
 `gh issue view` (outside the daemon's serial queue, so a slow GitHub delays only that `run`) and
-compares it, together with the wave file's `files` hints, with the unfinished tasks of every other
-running wave. The issue lists are journaled on each `task_queued` as `data.issue_files` and are
-never merged into the wave definition, so they do not change the scheduler's same-file ordering. Each shared path journals an `alarm_raised` event with
-`data.alarm: "overlap_warning"` (paths and both wave/task ids) and prints a line in the `run`
-output:
+resolves it against the release branch's tree, read once per wave (no tree: the list as written,
+`guessed`). Those files are journaled on `task_queued` and never merged into the wave definition,
+so they do not change the scheduler's same-file ordering. An issue that cannot be read journals
+`alarm_raised { alarm: "footprint_unavailable", task, why }` and prints
+`warning: footprint unavailable for T3 (#412): issue #412 could not be read`. Each `task_queued`
+carries `issues`, `files`, `footprint` and `plan`; a version with a plan journals
+`wave_planned { clusters }` right after its tasks queue. The state carries `overlap_plan`,
+`tasks[].cluster` and the keys in `spec.tasks[]`; `volleyd status` prints one
+`plan: cluster A (planned): …` line per cluster under the header.
+
+### Overlap warnings
+
+At submit the daemon also compares each task's files (the wave file's, else the ones read from
+its issue) with the unfinished tasks of every other running wave. Each shared path journals an
+`alarm_raised` event with `data.alarm: "overlap_warning"` (paths and both wave/task ids) and
+prints a line in the `run` output:
 
 ```
 warning: overlap: w2/T4 and w1/T7 both touch packages/volleyd/src/daemon.ts
