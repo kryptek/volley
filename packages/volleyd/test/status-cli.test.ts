@@ -207,6 +207,42 @@ describe("volleyd status formatting", () => {
     );
   });
 
+  it("the plan line shows the cluster's state and its members in flight (#384)", () => {
+    const out = formatWave({
+      wave: "w1",
+      version: 1,
+      owner: null,
+      repo: "r",
+      release_branch: "release/w1",
+      status: "running",
+      tasks: [
+        { id: "T1", issue: 101, stage: "implement", agents: {}, cluster: "A" },
+        { id: "T2", issue: 102, stage: "fixup", agents: {}, cluster: "A" },
+        { id: "T3", issue: 103, stage: "merge_ready", agents: {}, cluster: "A" },
+        { id: "T4", issue: 104, stage: "queued", agents: {}, cluster: "A" },
+        { id: "T5", issue: 105, stage: "implement", agents: {} },
+      ],
+      open_decisions: [],
+      gates: [],
+      overlap_plan: {
+        clusters: [
+          {
+            id: "A",
+            tasks: ["T1", "T2", "T3", "T4"],
+            hot: [],
+            strategy: { cap: 4 },
+            state: "hold",
+            why: "4 tasks share src/a.ts → cap 4",
+          },
+        ],
+      },
+      updated_at: "2026-10-18T12:00:00.000Z",
+    });
+    expect(out.split("\n")[1]).toBe(
+      "  plan: cluster A (hold; in flight: T1, T2): 4 tasks share src/a.ts → cap 4",
+    );
+  });
+
   it("a synthetic task reads `fixer for <tasks> (flake: <test>)` (SPEC §4.6.16)", () => {
     const out = formatWave({
       wave: "w1",

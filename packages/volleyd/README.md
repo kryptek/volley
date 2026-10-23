@@ -226,9 +226,10 @@ and work while the daemon is down; use the wave `_system` for global events (`co
 - **Reducer** (`src/reducer.ts`): pure `reduce(events) → WaveState` in exactly the
   `wave-state.schema.json` payload shape. Re-applying an already-applied `seq` is a no-op.
 - **Scheduler** (`src/scheduler.ts`): `ready` = queued, not admitted, every `after` done; ordered
-  by critical path length (longest downstream chain first), then by `files` overlap with active
-  tasks, then id. `admit` takes an admission verdict `{ allow, reasons }` (pressure-based
-  admission plugs in here later) and never exceeds the hard ceiling or the wave's spawn budget.
+  by critical path length (longest downstream chain first), then id; tasks sharing files are kept
+  apart by their overlap-plan cluster's cap (below), not by the order. `admit` takes an admission
+  verdict `{ allow, reasons }` (pressure-based admission plugs in here later) and never exceeds
+  the hard ceiling or the wave's spawn budget.
   The hard ceiling counts the agents volleyd runs or is starting, across all waves and machines:
   supervised, launched and being verified, spawning (a release stage's agent too), and one slot
   for each admitted task of a running wave with no agent live that will spawn its next one:
@@ -1605,13 +1606,48 @@ reads here; the last line counts footprints per issue. A wave with no `files:` o
 `gh issue view` (outside the daemon's serial queue, so a slow GitHub delays only that `run`) and
 resolves it against the release branch's tree, read once per wave (no tree: the list as written,
 `guessed`). Those files are journaled on `task_queued` and never merged into the wave definition,
-so they do not change the scheduler's same-file ordering. An issue that cannot be read journals
+so the definition stays as the file wrote it. An issue that cannot be read journals
 `alarm_raised { alarm: "footprint_unavailable", task, why }` and prints
 `warning: footprint unavailable for T3 (#412): issue #412 could not be read`. Each `task_queued`
 carries `issues`, `files`, `footprint` and `plan`; a version with a plan journals
 `wave_planned { clusters }` right after its tasks queue. The state carries `overlap_plan`,
 `tasks[].cluster` and the keys in `spec.tasks[]`; `volleyd status` prints one
 `plan: cluster A (planned): …` line per cluster under the header.
+
+### At run time: the cap and the churn monitor
+
+**The cap.** A cluster capped in the plan (`strategy.cap`) runs at most that many members at once.
+A member holds one of its cluster's slots from admission (admitted, not spawned yet) through
+`implement`, the reviews and `fixup`; `merge_ready`, `done`, `cancelled`, an unadmitted `queued`
+task and one parked (`blocked`, `awaiting_decision`) before its implementer started hold none.
+Admission (`admit`, and `admitPlacing` before it places a task) skips a ready member whose cluster
+has no room and holds it with why, which is also the task's `why_waiting`:
+
+```
+cluster A: 4 in flight (i315, i317, i318, i322)
+```
+
+A task in no cluster is unaffected, and so are the tasks after a held one.
+
+**The churn monitor** (`autopilot/churn.ts`, pure) reads the journal each tick: per task, its
+branch updates (`stage_entered { rebase: true }`) and the reviews after one; per cluster, members
+gated (`merge_ready`) and in flight, and the merges and branch updates of the last 2 h
+(`churn_window_ms`). A cluster that churns anyway switches strategy:
+
+| To | When |
+|---|---|
+| `hold` | a live member updated its branch twice in the window (`churn_updates_hold`), or 3 are gated (`churn_gated_hold`) and fewer than 2 merged in the window (`churn_merges_floor`) |
+| `train` | otherwise, 2 are gated (`churn_gated_train`) |
+| `planned` | nothing is gated and no member updated its branch in the window |
+
+Each switch journals `cluster_strategy_changed { cluster, from, to, why }` (`from`/`to` name the
+plan's own strategy for `planned`) and sets the cluster's `state` in `overlap_plan`; a cluster
+switches at most once per 30 min (`cluster_strategy_min_interval_ms`), so it does not flap. On
+`hold` the cluster's cap is 1 and a gated member holds a slot too: queued members wait until the
+gated ones merge (`cluster A (hold): 1 in flight or gated (i315)`). On `train` the cap stays; the
+merge queue forms a train from the cluster's gated PRs when `autopilot.merge_train` is on (until
+it does, the state just shows `train`). `volleyd status` prints the state and the members in
+flight on each plan line: `plan: cluster A (hold; in flight: i315, i317): …`.
 
 ### Overlap warnings
 

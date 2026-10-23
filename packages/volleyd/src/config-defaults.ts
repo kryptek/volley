@@ -410,4 +410,20 @@ export const DAEMON_DEFAULTS = {
   train_size_max: 4,
   /** Churn spawns a task may have, as a multiple of its pipeline roles, before `churn_exhausted`. */
   churn_roles_multiple_max: 3,
+  // --- Overlap-aware waves: the churn monitor (autopilot/churn.ts) ---
+  /**
+   * A cluster changes strategy (`cluster_strategy_changed`) at most this often: a cluster flapping
+   * between hold and planned would admit and hold the same members every few ticks.
+   */
+  cluster_strategy_min_interval_ms: 1_800_000,
+  /** The window merges and branch updates are counted over (`merges_in_window`, `updates_in_window`). */
+  churn_window_ms: 7_200_000,
+  /** Branch updates of one live member that put its cluster on hold: each one re-runs its reviews. */
+  churn_updates_hold: 2,
+  /** Gated members that, merging slower than `churn_merges_floor` per window, put a cluster on hold. */
+  churn_gated_hold: 3,
+  /** Merges per window below which a cluster with `churn_gated_hold` gated members is churning. */
+  churn_merges_floor: 2,
+  /** Gated members that make a cluster a train (the merge queue forms one under `autopilot.merge_train`). */
+  churn_gated_train: 2,
 } as const;
