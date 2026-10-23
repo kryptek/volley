@@ -662,7 +662,7 @@
               "minItems": 1,
               "maxItems": 20,
               "default": [60, 120, 300, 600],
-              "description": "The waits in seconds before each retry of a merge the host refused transiently at one gated head (busy, a 5xx, a rate limit, a dropped connection); attempt n waits entry min(n, length). Such refusals never count toward merge_retry_max; one more past the last entry opens the merge_refused decision."
+              "description": "The waits in seconds before each retry of a merge the host refused transiently at one gated head (busy, a 5xx, a rate limit, a dropped connection); attempt n waits entry n. Such refusals never count toward merge_retry_max; one more past the last entry opens the merge_refused decision."
             },
             "merge_transient_retry_max": {
               "type": "integer",

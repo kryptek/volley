@@ -96,10 +96,15 @@ async function merged(
     ["gh", "pr", "view", String(token.pr), "--json", "baseRefName,headRefOid,isDraft,state"],
     where,
   );
+  const failed = (pre.stderr || pre.stdout).trim();
+  // A re-read that failed on a GitHub blip (5xx, rate limit, transport) is transient (#445).
   const why =
     pre.code === 0
       ? notMergeable(pre.stdout, token)
-      : { reason: "unknown" as const, text: (pre.stderr || pre.stdout).trim() };
+      : {
+          reason: TRANSIENT.test(failed) ? ("transient" as const) : ("unknown" as const),
+          text: failed,
+        };
   if (why !== null)
     return {
       ok: false,

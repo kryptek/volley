@@ -782,6 +782,8 @@ export function reducePipeline(
       const m = (ctx.decision as { pipeline?: PipelineMarker } | undefined)?.pipeline;
       const answer = String(d.answer ?? "");
       if (m?.on === "merge_refused" && isAnswer(answer, "retry")) {
+        // Counted for any retry, a transient one too: each answer buys one more counted attempt
+        // at this head, which is what the owner (or the policy row) granted.
         p.merge_retries = (p.merge_retries ?? 0) + 1;
         // A spent transient ladder starts again.
         p.merge_transient = undefined;

@@ -152,8 +152,8 @@ describe("autopilot merge classifies a refusal (#311)", () => {
     expect(await refused("GraphQL: something odd")).toMatchObject({ reason: "unknown" });
   });
   it("the pre-merge read: head moved, retargeted, closed, unreadable", async () => {
-    const pre = async (stdout: string, code = 0) =>
-      mergePr(fakeExec().on(PRE, { stdout, code, stderr: "rate limited" }).exec, token);
+    const pre = async (stdout: string, code = 0, stderr = "rate limited") =>
+      mergePr(fakeExec().on(PRE, { stdout, code, stderr }).exec, token);
     const view = (v: object) =>
       JSON.stringify({ state: "OPEN", headRefOid: H, baseRefName: "release/w", ...v });
     expect(await pre(view({ headRefOid: M }))).toEqual({
@@ -169,6 +169,13 @@ describe("autopilot merge classifies a refusal (#311)", () => {
       stderr: "not merged: PR #7 is still a draft",
     });
     expect(await pre("", 1)).toMatchObject({ reason: "unknown" });
+    // The re-read failing on a GitHub blip is transient too, so it never counts toward
+    // merge_retry_max (#445).
+    expect(await pre("", 1, "HTTP 502: Bad Gateway")).toMatchObject({ reason: "transient" });
+    expect(await pre("", 1, "dial tcp: i/o timeout")).toMatchObject({ reason: "transient" });
+    expect(await pre("", 1, "API rate limit exceeded for user")).toMatchObject({
+      reason: "transient",
+    });
   });
 });
 
