@@ -12,7 +12,8 @@
  * keys. A pointer pan or pinch never renders per move: it writes the world
  * element's transform (`worldRef`) once per animation frame and commits
  * `view` when a finger lifts (pointer up or cancel). The wheel, `zoomAt`,
- * `panBy` and `fitTo` set `view` directly. Phones (< `NARROW_PX`) start zoomed out and clamp window widths
+ * `panBy`, `fitTo` and `panToTop` (a window just opened, #404: the view pans to
+ * it at the current scale) set `view` directly. Phones (< `NARROW_PX`) start zoomed out and clamp window widths
  * (`clampWindowWidth`).
  */
 import type React from "react";
@@ -47,13 +48,30 @@ const CHROME = ".look, .dock-wrap, .topbar, .modal-scrim";
  */
 const NO_PINCH = ".win-bar, input, select, textarea, [contenteditable], [role='slider']";
 /** Wheel inside these scrolls the content instead of the canvas. */
-const NO_WHEEL = ".feed, .term, .yaml, .dag-scroll, .look, .modal";
+const NO_WHEEL = ".feed, .term, .yaml, .dag-scroll, .inbox-scroll, .look, .modal";
 
 /** Below this viewport width the Desk is in its phone layout. */
 export const NARROW_PX = 700;
 /** The screen area `fitTo` frames into by default: below the top bar, above the dock band. */
 export function fitToArea(screen: { width: number; height: number }): Rect {
   return { x: 0, y: 70, w: screen.width, h: screen.height - 170 };
+}
+
+/** How far below the fit area's top edge `panToTop` puts a window's top edge, and its side margin. */
+export const PAN_MARGIN = 24;
+
+/**
+ * The view panned, at its scale, so world rect `r` has its top edge `margin` below the
+ * area's top and its left edge in view: x moves only when the rect is not fully in view
+ * across, and then by the least that shows as much of it as fits, left edge first.
+ */
+export function panToTopView(v: View, r: Rect, a: Rect, margin = PAN_MARGIN): View {
+  const left = v.x + r.x * v.s;
+  const right = left + r.w * v.s;
+  const lo = a.x + margin;
+  const hi = a.x + a.w - margin;
+  const dx = left < lo ? lo - left : right > hi ? Math.max(hi - right, lo - left) : 0;
+  return { s: v.s, x: v.x + dx, y: a.y + margin - r.y * v.s };
 }
 
 /** The widest a window gets on a phone (the agent window's width). */
@@ -177,6 +195,11 @@ export function useViewport(opts: { initial?: View } = {}) {
     });
   }, []);
 
+  const panToTop = useCallback((r: Rect, area?: Rect) => {
+    const a = area ?? fitToArea({ width: window.innerWidth, height: window.innerHeight });
+    setView((v) => panToTopView(v, r, a));
+  }, []);
+
   useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
@@ -243,5 +266,5 @@ export function useViewport(opts: { initial?: View } = {}) {
     onPointerCancel: release,
   };
 
-  return { view, setView, zoomAt, panBy, fitTo, stageRef, worldRef, stageHandlers };
+  return { view, setView, zoomAt, panBy, fitTo, panToTop, stageRef, worldRef, stageHandlers };
 }
