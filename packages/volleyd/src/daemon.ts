@@ -388,6 +388,7 @@ import {
   repoStateLine,
   sameSlug,
   slugKey,
+  unassignedSlugs,
   waveSlug,
   withMachines,
   withoutMachines,
@@ -5589,6 +5590,9 @@ export class Daemon {
         ...(this.repoRuns.has(name)
           ? { runs: Object.fromEntries(this.repoRuns.get(name) ?? []) }
           : {}),
+        // The own doctor reports every running wave's clone; a repository config gives only to
+        // other machines is checked out here for the supervisor, not for agents (#439).
+        ...(isLocal ? { unassigned: unassignedSlugs(cfg, name, waves) } : {}),
       },
       probe: isLocal ? (this.opts.fleet?.localPath ?? pathProbe)() : (probe?.path ?? null),
       ...(!isLocal && probe?.error !== undefined ? { probeError: probe.error } : {}),

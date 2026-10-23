@@ -81,7 +81,16 @@ export interface Fleet {
   /** The box's LWT: down at once (`disconnect`). */
   lwt: () => Promise<void>;
   tick: (ms?: number) => Promise<void>;
-  submit: (wave: string, head: string, tasks: string, pipeline?: string) => Promise<void>;
+  /** Submit a wave on `repo` (default: the supervisor's `repo`; an `owner/name` slug or a path). */
+  submit: (
+    wave: string,
+    head: string,
+    tasks: string,
+    pipeline?: string,
+    waveRepo?: string,
+  ) => Promise<void>;
+  /** The supervisor's own checkout every wave runs on by default (its `rev-parse` faked). */
+  repo: string;
   /** The live agent's id for `wave/task/role` (its latest attempt). */
   agentOf: (wave: string, task: string, role?: string) => string;
   /** The simulated session publishes its terminal status. */
@@ -107,6 +116,11 @@ export async function makeFleet(
     claudeRoot?: string;
     /** The own doctor's report for a run on `repo` (default: GREEN_DOCTOR, whatever the repo). */
     localDoctor?: (repo: string | null) => DoctorReport;
+    /**
+     * The box's legacy `hosts.box.repo` (default: the supervisor's `repo`); null: none, the box
+     * works on what `repos` / `hosts.box.repos` give it.
+     */
+    boxRepo?: string | null;
   } = {},
 ): Promise<Fleet> {
   const env = await makeDaemonEnv();
@@ -151,7 +165,7 @@ export async function makeFleet(
     join(env.home, "config.yaml"),
     // The own machine a candidate like the peer (local_agents: always, unless `localAgents`): the
     // fallback has its own tests.
-    `fleet:\n  local_name: ${LOCAL}\n  local_agents: ${o.localAgents ?? "always"}\n${o.repoRoot !== undefined ? `  repo_root: ${o.repoRoot}\n` : ""}hosts:\n  ${PEER}:\n    target: dev@${PEER}\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n${o.extraConfig ?? ""}`,
+    `fleet:\n  local_name: ${LOCAL}\n  local_agents: ${o.localAgents ?? "always"}\n${o.repoRoot !== undefined ? `  repo_root: ${o.repoRoot}\n` : ""}hosts:\n  ${PEER}:\n    target: dev@${PEER}\n${o.boxRepo === null ? "" : `    repo: ${o.boxRepo ?? repo}\n`}    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n${o.extraConfig ?? ""}`,
   );
   writeFileSync(
     join(env.home, "peers.json"),
@@ -352,11 +366,12 @@ export async function makeFleet(
       });
     },
     tick,
-    submit: async (wave, head, tasks, pipeline = "[implement]") => {
+    repo,
+    submit: async (wave, head, tasks, pipeline = "[implement]", waveRepo = repo) => {
       const file = join(env.home, `${wave}.yaml`);
       writeFileSync(
         file,
-        `wave: ${wave}\nrepo: ${repo}\nrelease_branch: release/${wave}\nmodel: claude-opus-5-5\npipeline: ${pipeline}\n${head}tasks:\n${tasks}`,
+        `wave: ${wave}\nrepo: ${waveRepo}\nrelease_branch: release/${wave}\nmodel: claude-opus-5-5\npipeline: ${pipeline}\n${head}tasks:\n${tasks}`,
       );
       const r = await runCli(["run", file], env.env);
       if (r.exitCode !== 0) throw new Error(`run ${wave}: ${r.stderr}`);

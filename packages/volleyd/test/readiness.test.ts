@@ -327,6 +327,28 @@ describe("readiness per (machine, repository) (#436)", () => {
     expect(r.ready).toBe(true);
   });
 
+  it("a clone of a repository config assigns only to other machines is blocked there (#439)", () => {
+    // The supervisor's own checkout of b/b, which a running wave uses: config gives b/b to box-b.
+    const rec = many([repo("a/a"), repo("b/b")]);
+    const r = readiness(
+      input({
+        name: "control",
+        local: true,
+        record: rec,
+        repos: { ...reposOf(rec, ["a/a", "b/b"]), unassigned: ["B/b"] },
+      }),
+    );
+    expect(r.repos["a/a"]).toMatchObject({ state: "ready" });
+    expect(r.repos["b/b"]).toEqual({
+      state: "blocked",
+      path: "/path/to/home/volley/repos/b/b",
+      reasons: [
+        "b/b is not assigned to control: add it (Settings → Repositories, or volley repo add b/b --machine control)",
+      ],
+    });
+    expect(r.ready).toBe(true);
+  });
+
   it("D5: a missing tool blocks that repository only, with the exact reason", () => {
     const rec = many(
       [repo("a/a", { toolchain: { ok: false, missing: ["java"], outdated: [] } }), repo("b/b")],

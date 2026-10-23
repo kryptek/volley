@@ -15,6 +15,7 @@
     "./auth/context": "./src/auth/context.ts",
     "./commands/auth": "./src/commands/auth.ts",
     "./commands/desk-serve": "./src/commands/desk-serve.ts",
+    "./commands/repo": "./src/commands/repo.ts",
     "./commands/setup": "./src/commands/setup.ts",
     "./io": "./src/io.ts",
     "./peer/machine": "./src/peer/checks/machine.ts",
