@@ -464,8 +464,7 @@ export function fakeSigninBox(o: SigninBoxOptions = {}) {
         if (f === undefined) return { code: 1 };
         box.files.set(to, f);
         box.files.delete(from);
-      }
-      else if (p === "tmux" && a[0] === "new-session") {
+      } else if (p === "tmux" && a[0] === "new-session") {
         if (o.noTmux === true)
           return { code: 127, stderr: "bash: line 3: tmux: command not found\n" };
         box.session = true;

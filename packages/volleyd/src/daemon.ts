@@ -4489,6 +4489,7 @@ export class Daemon {
       prepareAccount: async (a) => {
         await this.claude.prepare(a);
       },
+      seedProfile: (a) => this.claude.seedProfile(a),
       resolveDecision: async (id, answer, by) => {
         await this.resolveNow(wave, id, { answer, by });
       },

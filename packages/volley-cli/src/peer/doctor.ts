@@ -13,6 +13,11 @@ import {
   vmStatAvailablePct,
   worktreeRoot,
 } from "./checks/machine";
+import {
+  type AccountProfile,
+  accountProfilesCheck,
+  gatherAccountProfiles,
+} from "./checks/profiles";
 import { GIT_QUIET, githubSlug, normalizeOrigin, repoChecks } from "./checks/repo";
 import { ON_PATH, binOf, toolChecks, versionOf } from "./checks/tools";
 import {
@@ -74,7 +79,13 @@ export const DOCTOR_DEFAULTS = {
 } as const;
 
 /** The checks a `--fix` can make pass by itself: each reports "already done" when it passes. */
-const FIXABLE: string[] = ["volley.installed", "volley.version", "repo.clone", ...PROFILE_CHECKS];
+const FIXABLE: string[] = [
+  "volley.installed",
+  "volley.version",
+  "repo.clone",
+  ...PROFILE_CHECKS,
+  "claude.profiles",
+];
 
 /**
  * Warn checks that do not hold up a join but that the supervisor's readiness still needs (SPEC
@@ -184,6 +195,8 @@ export interface Facts {
     org: string | null;
     /** Each login's usage probe (usage-probe.ts); null when the doctor has no fetch to call it. */
     logins: ClaudeLogin[] | null;
+    /** The signed-in account profiles under volleyd's profiles root (checks/profiles.ts). */
+    profiles: AccountProfile[];
   };
   machine: {
     /** Logical CPUs (the size a paired machine's derived `max_agents` reads). */
@@ -524,6 +537,11 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
           deps.now(),
         ).catch(() => null);
 
+  const accountProfiles = await gatherAccountProfiles(
+    sh,
+    deps.claudeRoot ?? join(deps.home, ".volley", "claude"),
+  );
+
   const profile = await gatherProfile(
     sh,
     {
@@ -574,6 +592,7 @@ export async function gatherFacts(deps: DoctorDeps, opts: DoctorOptions): Promis
       email: identity.email ?? null,
       org: identity.org ?? null,
       logins,
+      profiles: accountProfiles,
     },
     machine: {
       cores: deps.cpus(),
@@ -599,6 +618,7 @@ export function checksOf(f: Facts): Check[] {
     ...githubChecks(f),
     ...claudeChecks(f),
     ...profileChecks(f.profile),
+    accountProfilesCheck(f),
     ...machineChecks(f),
   ].map((c) => ({ ...c, detail: c.detail.slice(0, 200) }));
 }

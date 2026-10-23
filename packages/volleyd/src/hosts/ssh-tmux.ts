@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
+import { type ProfileKeys, onboardingEdits } from "../claude/sharing";
 import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "../config-defaults";
 import type { ExecFn, ExecOptions, ExecResult } from "../exec";
 import {
@@ -17,7 +18,6 @@ import { fetchFailure, lockedFetch } from "../git-lock";
 import { type DoctorReport, parseDoctorReport } from "../machines";
 import { PATH_TOOLS, type PathProbe, parsePathProbe } from "../readiness";
 import { SpawnError } from "../spawn-error";
-import { type ProfileKeys, onboardingEdits } from "../claude/sharing";
 import { withTrust } from "../trust";
 import type { RemoteHostConfig } from "../types";
 import { EXCLUDE_LINES, firstLine, freshBaseFix } from "../worktree";

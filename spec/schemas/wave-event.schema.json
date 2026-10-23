@@ -64,6 +64,7 @@
             "claude_signin_done",
             "claude_signin_failed",
             "claude_profile_synced",
+            "profile_repaired",
             "agent_account_moved",
             "account_chosen",
             "relaunched",
