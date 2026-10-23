@@ -85,7 +85,14 @@ describe("the remote fence covers what the supervisor touches on a paired machin
 
   it("finds the names it is meant to find (the scan is not vacuous)", () => {
     const all = new Set(SOURCES.flatMap((f) => [...volleyNames(src(f))]));
-    for (const n of ["decisions.md", "agent.json", "brief.md", "findings.json", "retired.json"]) {
+    for (const n of [
+      "decisions.md",
+      "agent.json",
+      "brief.md",
+      "findings.json",
+      "retired.json",
+      "integrate.md",
+    ]) {
       expect(all.has(n), n).toBe(true);
     }
     expect(fenceKnowsVolleyFile("other.md")).toBe(false);

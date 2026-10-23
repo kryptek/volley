@@ -422,6 +422,26 @@ describe("evaluate: the policy table, row by row", () => {
     expect(whyOf(evaluate(d, ctx({}, { "respawn_max:T1/rebase": 1 })))).toBe("budget_exhausted");
   });
 
+  it("merge_conflict of a merge train: drop the member, once per member (respawn_max per task), then the owner", () => {
+    const d = rec("merge_conflict", ["drop T1", "respawn", "manual", "cancel"], {
+      pipeline: { on: "merge_conflict", role: "integrator", task: "train-1" },
+      train: "train-1",
+      agent_id: "w1-train-1-integrator-1",
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("drop T1");
+    expect("policy" in v && v.policy).toBe("merge_conflict/drop-from-train");
+    expect("budget" in v && v.budget).toEqual({ key: "respawn_max:T1", used: 1, max: 1 });
+    expect(whyOf(evaluate(d, ctx({}, { "respawn_max:T1": 1 })))).toBe("budget_exhausted");
+    // A rebase agent's conflict (no train) is still the respawn row's.
+    const plain = rec("merge_conflict", ["respawn", "manual", "cancel"], {
+      pipeline: { on: "merge_conflict", role: "rebase" },
+    });
+    expect("policy" in evaluate(plain, ctx()) && evaluate(plain, ctx())).toMatchObject({
+      policy: "merge_conflict/respawn",
+    });
+  });
+
   it("merge_refused past the transient ladder: retry, under merge_transient_retry_max per task (#445)", () => {
     const d = rec("merge_refused", ["retry", "manual", "cancel"], {
       pipeline: { on: "merge_refused", head: "a".repeat(40) },

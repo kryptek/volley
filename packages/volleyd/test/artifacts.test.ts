@@ -11,6 +11,8 @@ import {
   probeLanded,
   probeMovedHead,
   probeReleaseCi,
+  probeReleaseTip,
+  probeTrainHead,
   verifyArtifacts,
   verifyOperatorMerge,
 } from "../src/artifacts";
@@ -931,5 +933,72 @@ describe("a bundle's Closes lines", () => {
     expect(report.kind === "ok" && report.pr.body).toBe("Closes #1\nCloses #2");
     const list = fake.argvs(["gh", "pr", "list"])[0] ?? [];
     expect(list[list.indexOf("--json") + 1]?.split(",")).toContain("body");
+  });
+});
+
+describe("merge train probes (SPEC §4.6.23)", () => {
+  const TIP = "3333333333333333333333333333333333333333";
+  const M1 = "4444444444444444444444444444444444444444";
+  const M2 = "5555555555555555555555555555555555555555";
+  it("probeTrainHead: which members' gated heads the train head lacks, and whether it descends from the release sha", async () => {
+    const x = fakeExec()
+      .on(["git", "-C", WT, "merge-base", "--is-ancestor", M1, HEAD], { code: 0 })
+      .on(["git", "-C", WT, "merge-base", "--is-ancestor", M2, HEAD], { code: 1 })
+      .on(["git", "-C", WT, "merge-base", "--is-ancestor", TIP, HEAD], { code: 0 });
+    expect(
+      await probeTrainHead(x.exec, {
+        cwd: WT,
+        head: HEAD,
+        release_sha: TIP,
+        members: [
+          { task: "T1", head: M1 },
+          { task: "T2", head: M2 },
+        ],
+      }),
+    ).toEqual({ missing: ["T2"], descends: true });
+  });
+
+  it("probeTrainHead: a member commit the worktree does not have is missing; any other failure throws", async () => {
+    const unknown = fakeExec()
+      .on(["git", "-C", WT, "merge-base", "--is-ancestor", M1, HEAD], {
+        code: 128,
+        stderr: `fatal: Not a valid commit name ${M1}`,
+      })
+      .on(["git", "-C", WT, "merge-base", "--is-ancestor", TIP, HEAD], { code: 1 });
+    expect(
+      await probeTrainHead(unknown.exec, {
+        cwd: WT,
+        head: HEAD,
+        release_sha: TIP,
+        members: [{ task: "T1", head: M1 }],
+      }),
+    ).toEqual({ missing: ["T1"], descends: false });
+    const broken = fakeExec().on(["git", "-C", WT, "merge-base"], {
+      code: 129,
+      stderr: "usage",
+    });
+    await expect(
+      probeTrainHead(broken.exec, {
+        cwd: WT,
+        head: HEAD,
+        release_sha: TIP,
+        members: [{ task: "T1", head: M1 }],
+      }),
+    ).rejects.toThrow(/merge-base --is-ancestor/);
+  });
+
+  it("probeReleaseTip: fetches the release branch and reads its tip; a failed fetch throws", async () => {
+    const ok = fakeExec().on(["git", "-C", "/repo", "rev-parse"], { stdout: `${TIP}\n` });
+    expect(await probeReleaseTip(ok.exec, { cwd: "/repo", release_branch: "release/w1" })).toBe(
+      TIP,
+    );
+    expect(ok.argvs()).toEqual([
+      ["git", "-C", "/repo", "fetch", "origin", "release/w1"],
+      ["git", "-C", "/repo", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/release/w1"],
+    ]);
+    const bad = fakeExec().on(["git", "-C", "/repo", "fetch"], { code: 128, stderr: "no route" });
+    await expect(
+      probeReleaseTip(bad.exec, { cwd: "/repo", release_branch: "release/w1" }),
+    ).rejects.toThrow(/fetch/);
   });
 });

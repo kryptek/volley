@@ -366,10 +366,12 @@ export interface WaveTask {
   plan?: TaskPlan;
   /**
    * Added by the supervisor, never by a wave file (journal-only, `issue: 0`): a flake's fixer
-   * (SPEC §4.6.16), with the remediation it carries out.
+   * (SPEC §4.6.16), with the remediation it carries out, or a merge train (SPEC §4.6.23), with
+   * its members.
    */
   synthetic?: true;
   remediation?: FixerRemediation;
+  train?: TrainMembers;
 }
 
 /** How a task's footprint (`files`) was found. */
@@ -486,6 +488,8 @@ export interface TaskAgents {
   rebase?: string;
   /** A release stage's agent (the `_release` pseudo task's; never a wave task's). */
   release?: string;
+  /** A merge train's integration agent (its synthetic `train-<n>` task's). */
+  integrator?: string;
 }
 
 export interface TaskState {
@@ -553,7 +557,7 @@ export interface TaskState {
     for?: TaskId[];
     outcome?: "landed" | "failed";
   };
-  /** A supervisor-added task (a flake's fixer, SPEC §4.6.16): never from the wave file. */
+  /** A supervisor-added task (a flake's fixer, a merge train): never from the wave file. */
   synthetic?: true;
   evidence_path?: string;
   /** The task's latest spawn failure, while it is not recovered (`spawn_failed`). */

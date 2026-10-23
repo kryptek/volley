@@ -171,7 +171,10 @@ export function digestOf(
   }
 
   const shipped: DigestShipped[] = [];
-  const done = state.tasks.filter((t) => t.stage === "done" && merges.has(t.id));
+  // A merge train ships nothing of its own: its members ship, each through its own PR.
+  const done = state.tasks.filter(
+    (t) => t.stage === "done" && merges.has(t.id) && t.train === undefined,
+  );
   done.sort((a, b) => (merges.get(a.id)?.seq ?? 0) - (merges.get(b.id)?.seq ?? 0));
   for (const t of done) {
     const d = (merges.get(t.id) as JournalEvent).data;

@@ -20,6 +20,8 @@ import type { SoakWorld } from "./soak-world";
  *   - spec_reviewer / quality_reviewer: publish the scripted review result;
  *   - fixup: commits on the reviewed head and pushes it to the PR branch;
  *   - rebase: rebases the PR head onto the release tip and pushes it (or reports a conflict);
+ *   - integrator (a merge train): cuts the train branch from the release sha `.volley/integrate.md`
+ *     names, merges each member's gated head into it (`--no-ff`), pushes it and opens the PR;
  *   - release: publishes its stage result.
  *
  * What each launch does instead of its role (stall, fail, a conflict, an unparseable result) is
@@ -278,6 +280,33 @@ export function fakeFleet(o: FleetOptions) {
         w.push(prOf(a.task), h);
         await pub(a.agent_id, "result", "rebase", { summary: "no conflicts" });
         await done(a, `rebased ${a.task}`);
+        return;
+      }
+      case "integrator": {
+        const md = readFileSync(join(a.cwd, ".volley", "integrate.md"), "utf-8");
+        const train = /^Train branch: `([^`]+)`/m.exec(md)?.[1];
+        const base = /^Release branch: `[^`]+` at `([0-9a-f]{40})`/m.exec(md)?.[1];
+        if (train === undefined || base === undefined)
+          throw new Error(
+            `fleet: ${a.agent_id}'s integrate.md names no train branch or release sha`,
+          );
+        const members = [
+          ...md.matchAll(
+            /^\d+\. PR #(\d+) \(task \S+\): branch `[^`]+`, gated head `([0-9a-f]{40})`/gm,
+          ),
+        ].map((m) => ({ pr: Number(m[1]), head: m[2] as string }));
+        let h = base;
+        for (const m of members) h = w.merge(h, m.head, `Merge PR #${m.pr} into the train`);
+        w.local[a.cwd] = h;
+        w.push(train, h);
+        w.openPr(train, `train: ${members.map((m) => `#${m.pr}`).join(", ")}`);
+        prBranch[a.task] = train;
+        await pub(a.agent_id, "result", "integrate", {
+          merged: members.map((m) => m.pr),
+          conflicts: [],
+          touched: [],
+        });
+        await done(a, `integrated ${a.task}`);
         return;
       }
       case "release": {

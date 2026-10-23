@@ -1,5 +1,6 @@
+import type { IssueData } from "../issue";
 import type { WaveRecord } from "../reducer";
-import type { TaskId, WaveId } from "../types";
+import type { TaskId, Wave, WaveId } from "../types";
 import type { QueueEntry } from "./merge-queue";
 
 /**
@@ -29,6 +30,17 @@ export interface Train {
   /** In merge order: the front task's cluster first, then queue order. */
   members: TrainMember[];
 }
+
+/** A merge train's synthetic task id (`train-<n>`). */
+export const TRAIN_ID = /^train-[1-9][0-9]{0,8}$/;
+
+/** The integration branch of the wave's train `id` (`train-<n>`): `volley/train/<wave>-t<n>`. */
+export const trainBranch = (wave: WaveId, id: TaskId): string =>
+  `volley/train/${wave}-t${id.replace(/^train-/, "")}`;
+
+/** The train task's title: `Train: #310, #312, #315` (each member's issues, in merge order). */
+export const trainTitle = (issues: readonly number[]): string =>
+  `Train: ${issues.map((n) => `#${n}`).join(", ")}`;
 
 type Ready = { e: QueueEntry; member: TrainMember };
 
@@ -63,7 +75,8 @@ function nextTrain(rec: WaveRecord): number {
  * running). Its members are the first up to `size` qualifying entries of the front task's wave:
  * at `merge_ready`, gated at their current head, with a PR, not handed to a human
  * (`merge_manual`) and in no train, ordered as nextToMerge orders them, with the entries of the
- * front task's cluster first. Fewer than two qualify: no train (the ordinary turn).
+ * front task's cluster first. A task dropped from an earlier train (its conflict) never
+ * qualifies again. Fewer than two qualify: no train (the ordinary turn).
  */
 export function formTrain(
   queues: Record<string, QueueEntry[]>,
@@ -79,7 +92,9 @@ export function formTrain(
     const ready: Ready[] = [];
     for (const e of entries) {
       const p = waves[e.wave]?.pipeline[e.task];
-      if (!e.gated || p === undefined || p.merge_manual === true) continue;
+      // A member dropped from an earlier train takes an ordinary turn instead (SPEC §4.6.23).
+      if (!e.gated || p === undefined || p.merge_manual === true || p.train_dropped === true)
+        continue;
       if (p.pr === undefined || p.head === undefined || !p.gated.includes(p.head)) continue;
       ready.push({ e, member: { wave: e.wave, task: e.task, pr: p.pr.number, head: p.head } });
     }
@@ -109,10 +124,49 @@ export function formTrain(
     const n = nextTrain(rec);
     return {
       id: `train-${n}`,
-      branch: `volley/train/${front.e.wave}-t${n}`,
+      branch: trainBranch(front.e.wave, `train-${n}`),
       release_branch: rec.state.release_branch,
       members,
     };
   }
   return null;
+}
+
+/**
+ * A train's `ISSUE.md` (no GitHub issue backs it): what it is and its members with their issues;
+ * `.volley/integrate.md` carries the heads and the commands. The IssueData its integrator's spawn
+ * uses in place of `gh issue view` (issue 0).
+ */
+export function trainIssue(wave: Wave, id: TaskId): IssueData {
+  const def = wave.tasks[id];
+  const members = def?.train?.members ?? [];
+  const lines = members.map((m) => {
+    const t = wave.tasks[m.task];
+    const issues = t?.issues ?? (t !== undefined ? [t.issue] : []);
+    return `- PR #${m.pr} (task \`${m.task}\`), closing ${issues.map((n) => `#${n}`).join(", ") || "no issue"}`;
+  });
+  const title = def?.title ?? `Train ${id}`;
+  return {
+    number: 0,
+    title,
+    url: "",
+    body: `# ${title}
+
+Synthetic task \`${id}\`, added by volleyd: a merge train (no GitHub issue backs it). This file is the issue.
+
+Its members' gated PRs merge into \`${wave.release_branch}\` as one: integrated onto \`${trainBranch(wave.wave, id)}\`, gated once, merged with a merge commit. \`.volley/integrate.md\` names each member's branch and gated head, and the commands.
+
+## Members, in merge order
+
+${lines.join("\n")}
+`,
+  };
+}
+
+/** Every issue a train's members close, in merge order (its brief's `Closes` lines). */
+export function trainIssues(wave: Wave, id: TaskId): number[] {
+  return (wave.tasks[id]?.train?.members ?? []).flatMap((m) => {
+    const t = wave.tasks[m.task];
+    return t?.issues ?? (t !== undefined ? [t.issue] : []);
+  });
 }

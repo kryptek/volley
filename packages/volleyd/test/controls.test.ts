@@ -778,6 +778,7 @@ describe("controls (pure)", () => {
       "fixup",
       "rebase",
       "release",
+      "integrator",
     ]);
   });
 

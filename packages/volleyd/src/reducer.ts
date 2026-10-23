@@ -1,5 +1,6 @@
 import { type AutopilotRecord, emptyAutopilot, foldAutoResolved } from "./autopilot/budgets";
 import { queueOf } from "./autopilot/merge-queue";
+import { trainBranch } from "./autopilot/merge-train";
 import { stepRelease } from "./autopilot/playbook";
 import type { Budget, EscalateWhy } from "./autopilot/policy";
 import { fixerOf } from "./autopilot/remediation";
@@ -31,6 +32,7 @@ import type {
   TaskPlan,
   TaskStage,
   TaskState,
+  TrainMembers,
   TunablesPatch,
   Wave,
   WaveState,
@@ -242,6 +244,11 @@ function addSynthetic(
   at: string,
 ): void {
   const w = rec.wave;
+  const train = data.train as TrainMembers | undefined;
+  if (w != null && train !== undefined && w.tasks[id] === undefined) {
+    addTrain(rec, id, data, train);
+    return;
+  }
   const r = data.remediation as FixerRemediation | undefined;
   if (w == null || r === undefined || w.tasks[id] !== undefined) return;
   // A request for the test reduced before the fixer existed (two back to back) joins it too.
@@ -271,6 +278,33 @@ function addSynthetic(
     files: r.test_file !== null ? [r.test_file] : [],
     synthetic: true,
     remediation: { ...r, for: blocked, since: at },
+  };
+  rec.wave = { ...w, tasks: { ...w.tasks, [id]: def }, task_order: [...w.task_order, id] };
+}
+
+/**
+ * A merge train's synthetic task (SPEC §4.6.23) joins the effective plan: issue 0, the pipeline
+ * `[implement, merge_ready]` (its integrator, then the gate), no `after`, its members' files.
+ */
+function addTrain(
+  rec: WaveRecord,
+  id: TaskId,
+  data: Record<string, unknown>,
+  train: TrainMembers,
+): void {
+  const w = rec.wave as Wave;
+  const def: WaveTask = {
+    id,
+    issue: 0,
+    ...(typeof data.title === "string" ? { title: data.title } : {}),
+    after: [],
+    stages: [["implement"], ["merge_ready"]],
+    pipeline: ["implement", "merge_ready"],
+    model: w.model,
+    host: w.placement === AUTO_HOST ? AUTO_HOST : "local",
+    files: [...new Set(train.members.flatMap((m) => w.tasks[m.task]?.files ?? []))],
+    synthetic: true,
+    train: { members: train.members.map((m) => ({ task: m.task, pr: m.pr, head: m.head })) },
   };
   rec.wave = { ...w, tasks: { ...w.tasks, [id]: def }, task_order: [...w.task_order, id] };
 }
@@ -464,6 +498,36 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
     case "wave_planned":
       state.overlap_plan = { clusters: (ev.data.clusters as PlanCluster[] | undefined) ?? [] };
       break;
+    // The merge train (SPEC §4.6.23): one entry per train, its members merging meanwhile.
+    case "train_started": {
+      const id = String(ev.data.train);
+      const tasks = Array.isArray(ev.data.tasks) ? (ev.data.tasks as TaskId[]) : [];
+      state.trains = [...(state.trains ?? []), { id, tasks, state: "integrating", since: ev.at }];
+      // Where its integration starts: the gate checks its head descends from it.
+      if (typeof ev.data.release_sha === "string")
+        next.pipeline[id] = {
+          ...(next.pipeline[id] ?? emptyPipeline()),
+          train_release_sha: ev.data.release_sha,
+        };
+      break;
+    }
+    case "train_merged":
+    case "train_failed": {
+      const tr = state.trains?.find((t) => t.id === ev.data.train);
+      if (tr !== undefined) {
+        tr.state = ev.type === "train_merged" ? "merged" : "failed";
+        tr.since = ev.at;
+        if (typeof ev.data.pr === "number") tr.pr = ev.data.pr;
+      }
+      // A member dropped for its conflict takes an ordinary turn from now on.
+      const dropped = ev.data.dropped;
+      if (typeof dropped === "string" && next.pipeline[dropped] !== undefined)
+        next.pipeline[dropped] = {
+          ...(next.pipeline[dropped] as TaskPipeline),
+          train_dropped: true,
+        };
+      break;
+    }
     case "cluster_strategy_changed": {
       // The churn monitor (autopilot/churn.ts) switched how a cluster runs: `hold` or `train`, or
       // back to the plan's own strategy (`planned`).
@@ -530,7 +594,11 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       // An implementer launched on a task still queued: it is implementing. spawn.ts journals
       // stage_entered only on attempt 1, so a task whose first launches failed (attempt > 1
       // succeeded) would otherwise stay queued, and its CI, review and merge never start.
-      if (task !== undefined && ev.data.role === "implementer" && task.stage === "queued") {
+      if (
+        task !== undefined &&
+        (ev.data.role === "implementer" || ev.data.role === "integrator") &&
+        task.stage === "queued"
+      ) {
         task.stage = "implement";
       }
       // That spawn launched: its failures are over (spawn_recovered reports them).
@@ -834,14 +902,34 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
   if (ev.task !== undefined && next.wave?.tasks[ev.task] !== undefined) {
     const decision =
       ev.type === "decision_resolved" ? next.decisions[ev.data.decision_id as string] : undefined;
+    const train = next.wave.tasks[ev.task]?.train !== undefined;
     next.pipeline[ev.task] = reducePipeline(next.pipeline[ev.task] ?? emptyPipeline(), ev, {
       stages: next.wave.tasks[ev.task]?.stages ?? [],
       ...(decision !== undefined ? { decision } : {}),
+      ...(train ? { train: { branch: trainBranch(next.wave.wave, ev.task) } } : {}),
     });
+    if (train) stepTrain(state, ev, next.pipeline[ev.task] as TaskPipeline);
   }
 
   derive(state, next);
   return next;
+}
+
+/** A train task's event moves its `trains[]` entry: CI on its head, gated, its PR known. */
+function stepTrain(state: WaveState, ev: JournalEvent, p: TaskPipeline): void {
+  const tr = state.trains?.find((t) => t.id === ev.task);
+  if (tr === undefined || tr.state === "merged" || tr.state === "failed") return;
+  if (p.pr !== undefined) tr.pr = p.pr.number;
+  const to =
+    ev.type === "ci_pending"
+      ? "ci"
+      : ev.type === "artifact_verified" && ev.data.role === "gate"
+        ? "gated"
+        : undefined;
+  if (to !== undefined && tr.state !== to) {
+    tr.state = to;
+    tr.since = ev.at;
+  }
 }
 
 /** wave-state `brief_preface` from a submit / version event (absent in older journals). */
@@ -941,9 +1029,11 @@ function derive(state: WaveState, rec: WaveRecord): void {
   state.tasks = state.tasks.map(({ stage_label: _l, stage_group: _g, ...t }) =>
     withStageGroup(t, rec.pipeline[t.id]),
   );
-  state.tasks = state.tasks.map(({ remediation: _r, ...t }) => {
-    // A fixer carries its remediation (SPEC §4.6.16); a task parked on a flake, until it lands.
+  state.tasks = state.tasks.map(({ remediation: _r, train: _t, ...t }) => {
+    // A fixer carries its remediation (SPEC §4.6.16); a task parked on a flake, until it lands;
+    // a merge train its members (SPEC §4.6.23).
     const f = rec.wave?.tasks[t.id];
+    if (f?.synthetic === true && f.train !== undefined) return { ...t, train: f.train };
     if (f?.synthetic === true && f.remediation !== undefined) {
       const { kind, test, test_file, run_urls, for: blocked, outcome, since } = f.remediation;
       return {

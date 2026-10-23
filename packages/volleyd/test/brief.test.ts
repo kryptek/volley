@@ -56,8 +56,9 @@ describe("brief templates", () => {
       for (const t of ['type="done"', 'type="blocked"', 'type="failed"'])
         expect(brief).toContain(t);
       expect(brief).toContain("w1-t1-implementer-1");
-      // A release stage is no issue's: its brief is the playbook stage's.
-      if (role !== "release") expect(brief).toContain("#42");
+      // A release stage is no issue's: its brief is the playbook stage's; a merge train's
+      // integrator works from `.volley/integrate.md`, whose members carry the issues.
+      if (role !== "release" && role !== "integrator") expect(brief).toContain("#42");
     },
   );
 
@@ -117,6 +118,34 @@ describe("brief templates", () => {
     );
     expect(merge).not.toMatch(/vol_register/);
     expect(merge).not.toContain("{{");
+  });
+
+  it("the integrator (a merge train): merges each member with --no-ff from integrate.md, one PR, the integrate result", () => {
+    const train = {
+      ...VARS,
+      task: "train-1",
+      role: "integrator" as const,
+      ...issueVars([
+        { number: 310, title: "", url: "" },
+        { number: 312, title: "", url: "" },
+      ]),
+    };
+    const brief = renderBrief(loadTemplate("integrator"), train);
+    expect(brief).toContain(".volley/integrate.md");
+    expect(brief).toContain("git merge --no-ff");
+    expect(brief).toMatch(/never rebase, never force-push, never amend/i);
+    expect(brief).toContain("origin/release/w1");
+    expect(brief).toContain("`train: #310, #312`");
+    expect(brief).toContain("one `Closes #<issue>` line per member issue");
+    expect(brief).toContain('vol_publish(channel="result", type="integrate"');
+    expect(brief).toContain('"merged"');
+    expect(brief).toContain('"conflicts"');
+    expect(brief).toContain('"touched"');
+    expect(brief).not.toContain("{{");
+    // The protocol block is the shared one, byte for byte.
+    const protocol = (b: string) => b.slice(b.indexOf("## Volley protocol (mandatory)"));
+    expect(protocol(brief)).toBe(protocol(renderBrief(loadTemplate("rebase"), train)));
+    expect(brief).toContain("\nCloses #310\nCloses #312\n");
   });
 
   it("a merge-mode rebase spawn renders the merge brief", async () => {

@@ -1026,7 +1026,11 @@ const BLOCKED_CLASS = "blocked_unhandled";
 
 /** An admitted task still waiting for its first implementer (spawnAdmitted, the hard ceiling). */
 const awaitsImplementer = (t: TaskState): boolean =>
-  t.stage === "queued" && t.agents.implementer === undefined;
+  t.stage === "queued" && t.agents[firstRole(t)] === undefined;
+
+/** The role that starts a task: its implementer, or a merge train's integrator (SPEC §4.6.23). */
+const firstRole = (t: TaskState): "implementer" | "integrator" =>
+  t.train !== undefined ? "integrator" : "implementer";
 
 /** Stages whose task, with no agent live, has a pipeline role still to spawn (the ceiling). */
 const BETWEEN_ROLES: ReadonlySet<TaskStage> = new Set([
@@ -4160,13 +4164,18 @@ export class Daemon {
       if (room <= 0) return;
       const t = rec.state.tasks.find((x) => x.id === id);
       if (t === undefined || !awaitsImplementer(t)) continue;
-      const key = `${wave}/${id}/implementer`;
+      const role = firstRole(t);
+      const key = `${wave}/${id}/${role}`;
       if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) continue;
       if (this.parkOnTunnel(wave, id)) continue;
       room--;
-      void this.startSpawn(wave, id, "implementer").catch((e: unknown) => {
-        this.log(`spawn ${key}: ${e instanceof Error ? e.message : String(e)}`);
-      });
+      // A merge train's integrator gets its `.volley/integrate.md` (the pipeline renders it).
+      const files = role === "integrator" ? this.pipelineFor(wave).integrateFiles(id) : undefined;
+      void this.startSpawn(wave, id, role, files !== undefined ? { files } : {}).catch(
+        (e: unknown) => {
+          this.log(`spawn ${key}: ${e instanceof Error ? e.message : String(e)}`);
+        },
+      );
     }
   }
 
@@ -7289,6 +7298,9 @@ export class Daemon {
       ciRateLimitBackoffMs: () => this.config.get("ci_rate_limit_backoff_ms", wave) as number,
       statusPage: this.githubStatus(),
       deleteBranch: () => this.config.get("autopilot.delete_branch", wave) as boolean,
+      // --- The merge train (SPEC §4.6.23): on by default under merge: auto. ---
+      mergeTrain: () => this.config.get("autopilot.merge_train", wave) as boolean,
+      ciFixupMax: () => this.config.get("autopilot.ci_fixup_max", wave) as number,
       releaseLock: releaseLockOn(this.releaseLocks),
       retire: (agentId, status) => this.retireRole(wave, agentId, status),
       nextAgent: (task, role) => {
@@ -8002,7 +8014,7 @@ export class Daemon {
         const t = tasks.get(id);
         if (t === undefined || liveTasks.has(`${wave}/${id}`)) continue;
         if (awaitsImplementer(t)) {
-          if (this.refused.get(`${wave}/${id}/implementer`)?.until === Number.POSITIVE_INFINITY)
+          if (this.refused.get(`${wave}/${id}/${firstRole(t)}`)?.until === Number.POSITIVE_INFINITY)
             continue;
           add(wave);
           launching++;

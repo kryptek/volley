@@ -1,10 +1,14 @@
 # Agent briefs
 
 One template per role volleyd spawns: `implementer`, `spec_reviewer`, `quality_reviewer`,
-`fixup`, `rebase`, `release` (a release playbook stage's agent, SPEC §4.6.19), plus `rebase-merge.md.tmpl`, the rebase role's brief when its step runs under
+`fixup`, `rebase`, `release` (a release playbook stage's agent, SPEC §4.6.19), `integrator`
+(a merge train's, SPEC §4.6.23), plus `rebase-merge.md.tmpl`, the rebase role's brief when its step runs under
 `branch_update: merge` (merge the release branch in, a normal push, never a force-push), and
 `flake-fixer.md.tmpl`, the implementer's brief for a synthetic flake-fixer task (no issue: its
-`ISSUE.md` is the root-cause brief, `src/autopilot/flake-brief.ts`). At
+`ISSUE.md` is the root-cause brief, `src/autopilot/flake-brief.ts`), and `integrator.md.tmpl`,
+the merge train's integration agent (SPEC §4.6.23: it merges each member's gated head into the
+train branch with `--no-ff` from `.volley/integrate.md` and opens the train's one PR; its
+`issues` / `closes_lines` are every member's issues). At
 spawn, `src/brief.ts` renders `<role>.md.tmpl` (or that variant) into the agent's
 `.volley/brief.md`, below the repo's brief preface (if any); `launch.sh` passes that file to
 `claude` as its prompt, so the brief never appears in an argv.
@@ -29,7 +33,7 @@ that itself contains `{{…}}`, is never expanded again). An unknown placeholder
 
 ## The protocol block
 
-Every template ends with the same protocol block. Keep it in all eight when you edit one:
+Every template ends with the same protocol block. Keep it in all nine when you edit one:
 
 - **No registration step.** The session hooks register the agent (with its model), send
   heartbeats and deliver mailbox mail; the brief must never ask the agent to call `vol_register`.
@@ -48,11 +52,14 @@ Pipeline roles get their inputs as files the spawn writes into `.volley/` before
 `review.md` (reviewers: the PR, the exact head of their detached worktree, the diff command),
 `findings.md` + `findings.json` (fixup: every finding, numbered `S1…`/`Q1…`, the trivial-only
 rule and the push line), `rebase.md` (rebase: the commands and the one lease-guarded push;
-under `branch_update: merge`, the merge and its normal push).
+under `branch_update: merge`, the merge and its normal push), `integrate.md` (integrator: the
+release commit the train starts at, the train branch, each member's PR, branch, gated head and
+issues, the commands and the PR's `Closes` lines).
 Reviewers and the fixup publish a retained `result` before `done` — `type: "review"` with
 `{ findings, verdict, hygiene?: { checked: true, findings } }`, `type: "fixup"` with
 `{ resolved: [{ finding, how }] }` (`spec/schemas/review-result.schema.json`); the templates
-spell out that contract. Both reviewer templates carry the hygiene check through
+spell out that contract. The integrator publishes `type: "integrate"` with
+`{ merged, conflicts: [{ pr, files }], touched }`. Both reviewer templates carry the hygiene check through
 `{{hygiene_rule}}` / `{{hygiene_contract}}`, whatever the repo's preface says: for a public
 repository (or one whose visibility could not be read) the P1 line (`reviews.ts`
 `HYGIENE_CHECK`: person names, local usernames, machine paths, private hostnames or IPs in the

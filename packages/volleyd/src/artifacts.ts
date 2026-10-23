@@ -745,6 +745,65 @@ export async function checkRebase(
 }
 
 // ---------------------------------------------------------------------------------------------
+// The merge train (SPEC §4.6.23): what its integration branch contains
+// ---------------------------------------------------------------------------------------------
+
+/** The release branch's tip on origin, freshly fetched (where a merge train starts). */
+export async function probeReleaseTip(
+  exec: ExecFn,
+  o: { cwd: string; release_branch: string },
+): Promise<string> {
+  const git = (...args: string[]) => exec(["git", "-C", o.cwd, ...args]);
+  const fetched = await git("fetch", "origin", o.release_branch);
+  if (fetched.code !== 0)
+    throw new Error(
+      `git fetch origin ${o.release_branch} failed: ${(fetched.stderr || fetched.stdout).trim()}`,
+    );
+  const tip = line(
+    (await git("rev-parse", "--verify", "--quiet", `refs/remotes/origin/${o.release_branch}`))
+      .stdout,
+  );
+  if (tip === "") throw new Error(`origin/${o.release_branch} not found`);
+  return tip;
+}
+
+/** What a merge train's head contains: the members whose gated head it lacks, and its base. */
+export interface TrainHeadFacts {
+  /** Members (tasks) whose gated head is not an ancestor of the train head. */
+  missing: string[];
+  /** The train head descends from the release sha the train started at. */
+  descends: boolean;
+}
+
+/**
+ * Read-only ancestry of a merge train's head (`git merge-base --is-ancestor`): every member's
+ * gated head must be in it, and it must descend from the release tip the train started at. A
+ * commit the checkout does not have (exit 128: never merged in, never fetched) is not an ancestor;
+ * any other failure throws.
+ */
+export async function probeTrainHead(
+  exec: ExecFn,
+  o: {
+    cwd: string;
+    head: string;
+    release_sha: string;
+    members: readonly { task: string; head: string }[];
+  },
+): Promise<TrainHeadFacts> {
+  const ancestor = async (sha: string): Promise<boolean> => {
+    const r = await exec(["git", "-C", o.cwd, "merge-base", "--is-ancestor", sha, o.head]);
+    if (r.code === 0) return true;
+    if (r.code === 1 || r.code === 128) return false;
+    throw new Error(
+      `git merge-base --is-ancestor ${sha} ${o.head} failed (${r.code}): ${line(r.stderr)}`,
+    );
+  };
+  const missing: string[] = [];
+  for (const m of o.members) if (!(await ancestor(m.head))) missing.push(m.task);
+  return { missing, descends: await ancestor(o.release_sha) };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Merges outside GitHub's merge button (a local squash + push closes the PR with mergedAt: null)
 // ---------------------------------------------------------------------------------------------
 

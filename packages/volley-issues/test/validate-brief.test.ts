@@ -37,6 +37,7 @@ describe("validate-brief.sh", () => {
       "fixup.md.tmpl",
       "flake-fixer.md.tmpl",
       "implementer.md.tmpl",
+      "integrator.md.tmpl",
       "quality_reviewer.md.tmpl",
       "rebase-merge.md.tmpl",
       "rebase.md.tmpl",
