@@ -123,6 +123,42 @@ describe("reduce", () => {
     expect(rec.spawns).toBe(1);
   });
 
+  it("a churn spawn counts as churn, wave-wide and on its task, never as productive (#387)", () => {
+    const last = events.at(-1) as JournalEvent;
+    const at = "2026-10-20T10:00:00.000Z";
+    const spawn = (n: number, role: string, extra: Record<string, unknown> = {}): JournalEvent => ({
+      seq: last.seq + n,
+      at,
+      type: "agent_spawned",
+      task: "T1",
+      data: { role, agent_id: `2026-10-20-example-t1-${role}-${n}`, ...extra },
+    });
+    const more = [
+      spawn(1, "implementer"),
+      spawn(2, "rebase", { churn: true, cause: "branch_update" }),
+      spawn(3, "spec_reviewer", { churn: true, cause: "rereview" }),
+      spawn(4, "implementer", { churn: true, cause: "retry" }),
+    ];
+    const before = replay(events);
+    const rec = replay([...events, ...more]);
+    // The budget counts productive spawns only.
+    expect(rec.spawns).toBe(before.spawns + 1);
+    const state = rec.state;
+    expect(state?.spawns).toEqual({
+      productive: before.spawns + 1,
+      churn: 3,
+      churn_by: { branch_updates: 1, rereviews: 1, retries: 1, trains: 0 },
+    });
+    expect(state?.tasks.find((t) => t.id === "T1")?.churn).toBe(3);
+    expect(state?.tasks.find((t) => t.id === "T2")?.churn).toBeUndefined();
+    expect(
+      schemaErrors("wave-state.schema.json", envelope("_waves/state", "wave_state", state)),
+    ).toEqual([]);
+    // Idempotent on replay.
+    const all = [...events, ...more];
+    expect(replay([...all, ...all]).state?.spawns?.churn).toBe(3);
+  });
+
   it("an implementer that launches on a later attempt moves its queued task to implement", () => {
     // spawn.ts journals stage_entered { implement } only on attempt 1; when the first launches
     // fail, the attempt that succeeds must still start the task (else CI, review, merge never run).

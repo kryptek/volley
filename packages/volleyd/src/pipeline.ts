@@ -69,6 +69,7 @@ import {
   renderFindingsMd,
   resultSteerText,
 } from "./reviews";
+import { type ChurnCause, churnCause } from "./spawn-class";
 import type {
   BranchUpdate,
   JournalEvent,
@@ -303,6 +304,11 @@ export interface TaskPipeline {
    * flake stopped a step that still has steps after it; `gate`, it stopped a pre-gate update.
    */
   fix_resume?: "next" | "gate" | undefined;
+  /**
+   * The current review round was caused by a branch update, not by findings (`stage_entered {
+   * cause: rereview }`): its reviewers and the fixup of it are churn (spawn-class.ts).
+   */
+  review_cause?: "rereview" | undefined;
   /**
    * A bundle's issues whose `Closes #<n>` line the implementer's PR body still lacked after its
    * one `closes` steer (`artifact_verified { closes_missing }`): the fixup's findings name them.
@@ -549,7 +555,10 @@ export function reducePipeline(
         p.branch_update = p.rebasing && d.branch_update === "merge" ? "merge" : undefined;
         p.conflicting = p.rebasing && d.conflicting === true ? true : undefined;
         p.rereview = [];
-        if (typeof d.review_round === "number") p.round = d.review_round;
+        if (typeof d.review_round === "number") {
+          p.round = d.review_round;
+          p.review_cause = d.cause === "rereview" ? "rereview" : undefined;
+        }
         if (typeof d.directive === "object" && d.directive !== null) {
           ciFixupEntered(p, d);
           if ((d.directive as Directive).ci === "red") p.ci_fixups = (p.ci_fixups ?? 0) + 1;
@@ -1190,6 +1199,8 @@ export type PipelineAction =
       start?: SpawnStart;
       files: Record<string, string>;
       branch_update?: "merge";
+      /** The spawn is churn, and why (spawn-class.ts); absent: productive. */
+      cause?: ChurnCause;
     }
   | { kind: "verify"; role: Role; result?: FixupResult; integrate?: IntegrateResult }
   /**
@@ -3511,8 +3522,25 @@ function agoText(ms: number): string {
   return `${Math.round(s / 3600)} h`;
 }
 
-/** The spawn for `role` in the current step: reviewers at the head (detached), others from it. */
+/**
+ * The spawn for `role` in the current step: reviewers at the head (detached), others from it,
+ * with its churn cause when it is churn (spawn-class.ts): a merge train's, a branch update's, or
+ * a review round a branch update caused (its fixup too, unless a moved head's directive drives it).
+ */
 function spawnFor(v: PipelineView, role: Role): PipelineAction {
+  const a = spawnOf(v, role);
+  if (a.kind !== "spawn") return a;
+  const rereview =
+    v.p.review_cause === "rereview" &&
+    (isReviewerRole(role) || (role === "fixup" && v.p.directive === undefined));
+  const cause = churnCause({
+    role,
+    cause: v.train !== undefined ? "train" : rereview ? "rereview" : undefined,
+  });
+  return cause !== null ? { ...a, cause } : a;
+}
+
+function spawnOf(v: PipelineView, role: Role): PipelineAction {
   const head = v.p.head;
   if (role === "implementer") return { kind: "spawn", role, files: {} };
   if (role === "integrator")
@@ -3654,7 +3682,8 @@ function advance(v: PipelineView): PipelineAction[] {
       const i = v.stages.findIndex((g) =>
         g.some((s) => p.rereview.includes(STAGE_ROLE[s] as ReviewerRole)),
       );
-      if (i >= 0) return enterStep(v, i, p.rereview);
+      // A round the branch update caused, not findings: churn (spawn-class.ts).
+      if (i >= 0) return enterStep(v, i, p.rereview, { cause: "rereview" });
     }
     // A flake's fix taken mid-pipeline: on from the step it stopped (its reviews still to run).
     return p.fix_resume === "next" ? enter(v, p.step + 1) : toGate(v);
@@ -3716,8 +3745,19 @@ function enterStep(
 ): PipelineAction[] {
   const reviewing = roles.some(isReviewerRole);
   const stage = ROLE_STAGE[roles[0] as Role];
-  // spawnFor reads the round the step starts (fixup: the round it fixes).
-  const after: PipelineView = { ...v, p: { ...v.p, round: reviewing ? v.p.round + 1 : v.p.round } };
+  // spawnFor reads the round the step starts (fixup: the round it fixes) and what caused it.
+  const after: PipelineView = {
+    ...v,
+    p: {
+      ...v.p,
+      round: reviewing ? v.p.round + 1 : v.p.round,
+      review_cause: reviewing
+        ? extra.cause === "rereview"
+          ? "rereview"
+          : undefined
+        : v.p.review_cause,
+    },
+  };
   return [
     {
       kind: "journal",
@@ -4363,7 +4403,12 @@ export interface PipelineDeps {
   spawn: (
     task: TaskId,
     role: Role,
-    req: { start?: SpawnStart; files: Record<string, string>; branch_update?: "merge" },
+    req: {
+      start?: SpawnStart;
+      files: Record<string, string>;
+      branch_update?: "merge";
+      cause?: ChurnCause;
+    },
   ) => Promise<unknown>;
   steer: (
     task: TaskId,
@@ -4453,8 +4498,9 @@ class IoTimeout extends Error {}
 /**
  * What the daemon checks before a pipeline role spawn (the implementer's spawn is admitted per
  * task by the scheduler): the kill switch, the wave running, T5's admission verdict, the hard
- * ceiling (`live`: the agents running or starting, no held slot) and the wave's spawn budget.
- * Null: spawn now; a reason: hold it (the next tick asks again). Pure.
+ * ceiling (`live`: the agents running or starting, no held slot) and the wave's spawn budget,
+ * which never holds a churn spawn (#387). Null: spawn now; a reason: hold it (the next tick asks
+ * again). Pure.
  */
 export function roleSpawnHold(o: {
   killSwitch: boolean;
@@ -4465,13 +4511,16 @@ export function roleSpawnHold(o: {
   ceiling?: number;
   used: number;
   budget: number;
+  /** A churn spawn (spawn-class.ts): never held by the budget. */
+  churn?: boolean;
 }): string | null {
   if (o.killSwitch) return "kill switch engaged";
   if (!o.running) return "wave not running";
   if (o.admission < 1) return `admission closed: ${(o.reasons ?? []).join(", ") || "no capacity"}`;
   if (o.live !== undefined && o.ceiling !== undefined && o.live >= o.ceiling)
     return `hard ceiling reached (${o.live}/${o.ceiling})`;
-  if (o.used >= o.budget) return `spawn budget exhausted (${o.used}/${o.budget})`;
+  if (o.churn !== true && o.used >= o.budget)
+    return `spawn budget exhausted (${o.used}/${o.budget})`;
   return null;
 }
 
@@ -5184,6 +5233,7 @@ export class PipelineDriver {
             ...(a.start !== undefined ? { start: a.start } : {}),
             files: a.files,
             ...(a.branch_update !== undefined ? { branch_update: a.branch_update } : {}),
+            ...(a.cause !== undefined ? { cause: a.cause } : {}),
           });
           break;
         case "steer": {

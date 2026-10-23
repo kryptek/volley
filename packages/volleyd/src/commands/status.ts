@@ -1,4 +1,5 @@
 import { parseArgs } from "node:util";
+import { churnCauses } from "../autopilot/digest";
 import { formatBriefPreface } from "../brief";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import type { DecisionPayload } from "../decisions";
@@ -200,6 +201,7 @@ export function formatWave(
       ? `  archived ${s.archived.at} by ${s.archived.by}: ${s.archived.reason}\n`
       : "";
   const queue = s.merge_queue !== undefined ? `  ${formatMergeQueue(s.merge_queue)}\n` : "";
+  const spawns = s.spawns !== undefined ? `  ${formatSpawns(s.spawns)}\n` : "";
   // The release train (SPEC §4.6.19): the stage running, awaiting its go or failed, and how far
   // the train is (`release: smoke running (2/4 verified)`).
   const r = s.release;
@@ -251,6 +253,7 @@ export function formatWave(
     .map((d) => `  ? ${formatDecision(d).trimEnd().replace(/\n/g, "\n    ")}\n`);
   return (
     header +
+    spawns +
     waveAlarmLines +
     archived +
     queue +
@@ -263,6 +266,17 @@ export function formatWave(
     rows.join("") +
     decisions.join("")
   );
+}
+
+/**
+ * `spawns: 52 productive / 156 budget · 141 churn (116 branch updates, 25 re-reviews)`: what
+ * spent the spawn budget, and the churn that did not (SPEC §4.6.16), by cause.
+ */
+export function formatSpawns(sp: NonNullable<WaveState["spawns"]>): string {
+  const budget = sp.budget !== undefined ? ` / ${sp.budget} budget` : "";
+  const causes = sp.churn_by !== undefined ? churnCauses(sp.churn_by) : "";
+  const churn = sp.churn > 0 ? ` · ${sp.churn} churn${causes !== "" ? ` (${causes})` : ""}` : "";
+  return `spawns: ${sp.productive} productive${budget}${churn}`;
 }
 
 /**

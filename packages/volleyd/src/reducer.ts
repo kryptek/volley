@@ -19,6 +19,7 @@ import { type MergeTransient, type TaskPipeline, emptyPipeline, reducePipeline }
 import { AUTO_HOST } from "./placement";
 import { asGitHubRepo } from "./repo-visibility";
 import { hygieneLevel } from "./reviews";
+import { CHURN_BY_KEY, emptyChurnBy, isChurnCause } from "./spawn-class";
 import type {
   FixerRemediation,
   Footprint,
@@ -58,7 +59,11 @@ export interface WaveRecord {
   plan?: Wave | null;
   /** Tasks the scheduler has admitted, in admission order. */
   admitted: TaskId[];
-  /** Agents spawned for this wave (retries and reviewers included) — counts against spawn_budget. */
+  /**
+   * Productive agents spawned for this wave (reviewers included) — what counts against
+   * spawn_budget. Churn spawns (`agent_spawned { churn }`, spawn-class.ts) are counted in the
+   * state's `spawns.churn` only.
+   */
   spawns: number;
   /** This wave's `config:` overrides. */
   overrides: TunablesPatch;
@@ -569,8 +574,20 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       setTaskHost(next, ev.task, d.local === true ? LOCAL_HOST : d.host);
       break;
     }
-    case "agent_spawned":
-      next.spawns += 1;
+    case "agent_spawned": {
+      // Churn (spawn-class.ts) is counted apart and never spends the spawn budget.
+      const churn = ev.data.churn === true;
+      if (!churn) next.spawns += 1;
+      const was = state.spawns;
+      const by = { ...emptyChurnBy(), ...was?.churn_by };
+      if (churn) by[CHURN_BY_KEY[isChurnCause(ev.data.cause) ? ev.data.cause : "retry"]] += 1;
+      const churned = (was?.churn ?? 0) + (churn ? 1 : 0);
+      state.spawns = {
+        productive: next.spawns,
+        churn: churned,
+        ...(churned > 0 ? { churn_by: by } : {}),
+      };
+      if (churn && task !== undefined) task.churn = (task.churn ?? 0) + 1;
       if (task !== undefined) {
         task.agents[ev.data.role as keyof TaskAgents] = ev.data.agent_id as string;
         if (typeof ev.data.host === "string" && ev.task !== undefined) {
@@ -604,6 +621,7 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       // That spawn launched: its failures are over (spawn_recovered reports them).
       if (ev.task !== undefined) clearSpawnFailure(next, ev.task, String(ev.data.role));
       break;
+    }
     case "stage_entered":
       if (task === undefined) break;
       if (task.stage === "awaiting_decision" && ev.data.stage !== "awaiting_decision") {

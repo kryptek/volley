@@ -15,6 +15,7 @@ import {
   spawnBudget,
   spawnsOutstanding,
 } from "../src/scheduler";
+import { churnCause, repeatsRun } from "../src/spawn-class";
 import type { JournalEvent, NewEvent, Wave } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
 
@@ -509,5 +510,69 @@ describe("admitPlacing (a wave that places its tasks)", () => {
   it("a closed gate (paused, kill switch, a global signal) admits nothing and holds nothing", () => {
     const r = run([view("box-a")], {}, { allow: 0, reasons: ["wave paused"] });
     expect(r).toMatchObject({ admit: [], held: {}, reasons: ["wave paused"] });
+  });
+});
+
+describe("spawn classification: productive or churn (#387)", () => {
+  const at = "2026-10-20T09:00:00.000Z";
+  const log = (evs: NewEvent[]): JournalEvent[] => evs.map((e, i) => ({ ...e, seq: i + 1, at }));
+  const spawned = (task: string, role: string, n = 1): NewEvent => ({
+    type: "agent_spawned",
+    task,
+    data: { role, agent_id: `w1-${task.toLowerCase()}-${role}-${n}` },
+  });
+  const step = (task: string, roles: string[], extra: Record<string, unknown> = {}): NewEvent => ({
+    type: "stage_entered",
+    task,
+    data: { stage: roles[0], step: 1, roles, ...extra },
+  });
+
+  it("a rebase is a branch update and an integrator a train, whatever came before", () => {
+    expect(churnCause({ role: "rebase" })).toBe("branch_update");
+    expect(churnCause({ role: "integrator" })).toBe("train");
+  });
+
+  it("a review round a branch update caused is a re-review; one findings caused is productive", () => {
+    expect(churnCause({ role: "spec_reviewer", cause: "rereview" })).toBe("rereview");
+    expect(churnCause({ role: "fixup", cause: "rereview" })).toBe("rereview");
+    expect(churnCause({ role: "spec_reviewer" })).toBeNull();
+    // A fixup of the findings, and the reviewers' next round after it: productive.
+    expect(churnCause({ role: "fixup" })).toBeNull();
+    expect(churnCause({ role: "implementer" })).toBeNull();
+  });
+
+  it("a relaunch, respawn or retry of the same role in the same step is a retry", () => {
+    expect(churnCause({ role: "implementer", retry: true })).toBe("retry");
+    expect(churnCause({ role: "spec_reviewer", retry: true })).toBe("retry");
+    // A role that churns anyway keeps its own cause.
+    expect(churnCause({ role: "rebase", retry: true })).toBe("branch_update");
+  });
+
+  it("repeatsRun: an earlier spawn of the role since its step started", () => {
+    const first = log([
+      spawned("T1", "implementer"),
+      { type: "stage_entered", task: "T1", data: { stage: "implement" } },
+    ]);
+    expect(repeatsRun(first, "T1", "implementer")).toBe(true);
+    expect(repeatsRun(first, "T2", "implementer")).toBe(false);
+    expect(repeatsRun([], "T1", "implementer")).toBe(false);
+    // The review step: each reviewer's first run is not a repeat, a second one is.
+    const review = log([
+      spawned("T1", "implementer"),
+      step("T1", ["spec_reviewer", "quality_reviewer"]),
+      spawned("T1", "spec_reviewer"),
+    ]);
+    expect(repeatsRun(review, "T1", "spec_reviewer")).toBe(true);
+    expect(repeatsRun(review, "T1", "quality_reviewer")).toBe(false);
+    // The next round's step starts the role afresh.
+    const round2 = log([
+      ...review.map(({ seq: _s, at: _a, ...e }) => e as NewEvent),
+      step("T1", ["fixup"]),
+      spawned("T1", "fixup"),
+      step("T1", ["spec_reviewer"]),
+    ]);
+    expect(repeatsRun(round2, "T1", "spec_reviewer")).toBe(false);
+    // The release train's stages are not pipeline steps: never a repeat here.
+    expect(repeatsRun(log([spawned("_release", "release")]), "_release", "release")).toBe(false);
   });
 });

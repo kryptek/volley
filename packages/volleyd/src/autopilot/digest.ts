@@ -5,7 +5,8 @@
  * `summaryLine` once; `volleyd digest` prints `renderDigestMd`.
  */
 import { type HeldOn, heldLabel } from "../decisions";
-import type { JournalEvent, ReleaseState, TaskId, WaveId, WaveState } from "../types";
+import { CHURN_BY_KEY, emptyChurnBy, isChurnCause } from "../spawn-class";
+import type { ChurnBy, JournalEvent, ReleaseState, TaskId, WaveId, WaveState } from "../types";
 
 /** Why a digest was published. */
 export type DigestTrigger = "wave_complete" | "release_go" | "escalation" | "stopped";
@@ -61,6 +62,8 @@ export interface Digest {
     retries: number;
     /** PRs volleyd merged itself. */
     merges: number;
+    /** Churn spawns per cause (`agent_spawned { churn }`): they spent no spawn budget. */
+    churn: ChurnBy;
   };
   waiting: DigestWaiting[];
   /** Held decisions: open, but waiting on a blocker rather than on the owner. */
@@ -97,6 +100,7 @@ export function digestOf(
     conflicts_resolved: 0,
     retries: 0,
     merges: 0,
+    churn: emptyChurnBy(),
   };
   for (const e of events) {
     const d = e.data;
@@ -117,6 +121,8 @@ export function digestOf(
           if (typeof number === "number" && typeof title === "string")
             issueTitles.set(number, title);
         }
+        if (d.churn === true)
+          auto.churn[CHURN_BY_KEY[isChurnCause(d.cause) ? d.cause : "retry"]] += 1;
         break;
       case "decision_held":
         holds.set(String(d.decision_id), e);
@@ -273,6 +279,24 @@ const VERB: Record<DigestTrigger, string> = {
 
 const count = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
 
+/** All churn spawns (absent in a digest from before #387: 0). */
+const churnTotal = (c: ChurnBy | undefined): number =>
+  c === undefined ? 0 : c.branch_updates + c.rereviews + c.retries + c.trains;
+
+/** The causes of churn `c` that are not zero: `116 branch updates, 25 re-reviews`. */
+export function churnCauses(c: ChurnBy): string {
+  const parts: [number, string, string][] = [
+    [c.branch_updates, "branch update", "branch updates"],
+    [c.rereviews, "re-review", "re-reviews"],
+    [c.retries, "retry", "retries"],
+    [c.trains, "train", "trains"],
+  ];
+  return parts
+    .filter(([n]) => n > 0)
+    .map(([n, one, many]) => count(n, one, many))
+    .join(", ");
+}
+
 /**
  * The one-line summary the push carries: `w1 complete: 27 shipped, 3 flakes fixed, 2 conflicts
  * resolved, 1 waiting for you (release_go)`. Counts that are zero are left out (shipped never is).
@@ -284,6 +308,8 @@ export function summaryLine(d: Digest): string {
   const conflicts = d.auto.conflicts_resolved;
   if (conflicts > 0) parts.push(`${count(conflicts, "conflict", "conflicts")} resolved`);
   if (d.auto.retries > 0) parts.push(count(d.auto.retries, "retry", "retries"));
+  const churn = churnTotal(d.auto.churn);
+  if (churn > 0) parts.push(`${count(churn, "churn spawn", "churn spawns")} (no budget)`);
   const answered = d.auto.decisions_resolved;
   if (answered > 0) parts.push(`${count(answered, "decision", "decisions")} answered`);
   if (d.failures.length > 0) parts.push(`${d.failures.length} failed`);
@@ -334,6 +360,9 @@ export function renderDigestMd(d: Digest): string {
   out.push(`- ${count(a.merges, "PR", "PRs")} merged`);
   out.push(`- ${count(a.conflicts_resolved, "conflict", "conflicts")} resolved`);
   out.push(`- ${count(a.retries, "retry", "retries")} (relaunches, recovered spawns)`);
+  const churn = churnTotal(a.churn);
+  if (churn > 0)
+    out.push(`- ${count(churn, "churn spawn", "churn spawns")} (${churnCauses(a.churn)})`);
   out.push(`- ${count(a.flakes_fixed.length, "flake", "flakes")} fixed`);
   for (const f of a.flakes_fixed)
     out.push(

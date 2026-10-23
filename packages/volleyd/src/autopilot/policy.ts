@@ -82,8 +82,14 @@ export interface PolicyRule {
   budget?: { name: CountedBudget; per: BudgetScope };
   /** A rule that checks its own budget (spawn_budget_exhausted's raise, a flake's fixers). */
   decide?: (d: Facts, ctx: PolicyContext, answer: string) => Outcome;
-  /** The budget a `decide` rule checks, as `volleyd policy` prints it, and its tunable. */
-  decide_budget?: { label: string; name: "budget_raise_max" | "fix_flake_max" };
+  /**
+   * The budget a `decide` rule checks, as `volleyd policy` prints it, and its tunable (or its
+   * fixed `max`).
+   */
+  decide_budget?: { label: string } & (
+    | { name: "budget_raise_max" | "fix_flake_max" }
+    | { max: number }
+  );
   rationale: string;
 }
 
@@ -93,6 +99,9 @@ export const QUESTION_ANSWER =
 
 /** The `budget_raise_max` budget key (one per wave). */
 export const RAISE_BUDGET_KEY = "budget_raise_max";
+
+/** The churn fuse's budget key (`churn:<task>`): autopilot holds a task's cluster once. */
+export const churnBudgetKey = (task: string | null): string => `churn:${task ?? "_wave"}`;
 
 const on = (d: Facts): unknown => markerOf(d)?.on;
 const onOneOf =
@@ -417,6 +426,22 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     rationale:
       "a status the supervisor could not hand over even on recovery: the owner checks the work",
   },
+  {
+    policy: "churn_exhausted/hold",
+    kinds: ["churn_exhausted"],
+    condition: "the task's cluster not held by autopilot before (churn:<task>)",
+    answer: "hold cluster",
+    decide: (d, ctx, answer) => {
+      const key = churnBudgetKey(d.task);
+      const used = ctx.used(key);
+      return used < 1
+        ? { answer, budget: { key, used: used + 1, max: 1 } }
+        : { escalate: "budget_exhausted", budget: { key, used, max: 1 } };
+    },
+    decide_budget: { label: "churn:<task> (once)", max: 1 },
+    rationale:
+      "churn spends no spawn budget, so its fuse is the control: one member at a time while the cluster is held; churn that goes on anyway is the owner's",
+  },
 ];
 
 /** The facts a rule looked at, journaled as `decision_auto_resolved.evidence`. */
@@ -538,7 +563,14 @@ export function renderPolicyTable(rules: readonly PolicyRule[], cfg: AutopilotCo
             : r.budget !== undefined
               ? `${r.budget.name} per ${SCOPE_LABEL[r.budget.per]}`
               : null,
-        max: own !== undefined ? cfg[own.name] : r.budget !== undefined ? cfg[r.budget.name] : null,
+        max:
+          own !== undefined
+            ? "max" in own
+              ? own.max
+              : cfg[own.name]
+            : r.budget !== undefined
+              ? cfg[r.budget.name]
+              : null,
         rationale: r.rationale,
       };
     }),

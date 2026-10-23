@@ -461,6 +461,25 @@ describe("evaluate: the policy table, row by row", () => {
     );
   });
 
+  it("churn_exhausted: hold cluster once per task (churn:<task>), then the owner's (#387)", () => {
+    const d = rec("churn_exhausted", ["hold cluster", "continue", "cancel"], {
+      cluster: "c1",
+      churn: 13,
+      roles: ["rebase", "spec_reviewer"],
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("hold cluster");
+    expect("policy" in v && v.policy).toBe("churn_exhausted/hold");
+    expect("budget" in v && v.budget).toEqual({ key: "churn:T1", used: 1, max: 1 });
+    const again = evaluate(d, ctx({}, { "churn:T1": 1 }));
+    expect(whyOf(again)).toBe("budget_exhausted");
+    expect("budget" in again && again.budget).toEqual({ key: "churn:T1", used: 1, max: 1 });
+    // Another task's fuse has its own.
+    expect(answerOf(evaluate({ ...d, task: "T2" }, ctx({}, { "churn:T1": 1 })))).toBe(
+      "hold cluster",
+    );
+  });
+
   it("merge_refused for required checks: still the owner's (no_policy)", () => {
     const d = rec("merge_refused", ["retry", "manual", "cancel"], { reason: "checks" });
     expect(whyOf(evaluate(d, ctx()))).toBe("no_policy");
@@ -540,5 +559,10 @@ describe("renderPolicyTable", () => {
     const raise = rows.find((r) => r.policy === "spawn_budget_exhausted/raise");
     expect(raise?.max).toBe(2);
     expect(rows.find((r) => r.policy === "reviewers_disagree/blocker")?.max).toBeNull();
+    expect(rows.find((r) => r.policy === "churn_exhausted/hold")).toMatchObject({
+      answer: "hold cluster",
+      budget: "churn:<task> (once)",
+      max: 1,
+    });
   });
 });
