@@ -59,8 +59,10 @@ import {
   CGAP,
   type Cluster,
   GAP,
+  type RegionName,
   fitArea as arrangeArea,
   arrange as arrangeLayout,
+  capListHeight,
 } from "./layout/arrange";
 import {
   type Pin,
@@ -72,6 +74,7 @@ import {
   screenPos,
   windowKeys,
 } from "./layout/pins";
+import { placeInRegion } from "./layout/place";
 import { ARRANGE_ANIM_MS, useAutoArrange } from "./layout/useAutoArrange";
 import { usePins } from "./layout/usePins";
 import { plural } from "./lib/plural";
@@ -142,7 +145,7 @@ import {
   CoordinatorsWindow,
   ENDED_LABEL,
 } from "./windows/coordinators/CoordinatorsWindow";
-import { INBOX_ID, INBOX_W, NeedsYouWindow } from "./windows/inbox/NeedsYouWindow";
+import { INBOX_CHROME_H, INBOX_ID, INBOX_W, NeedsYouWindow } from "./windows/inbox/NeedsYouWindow";
 import { inboxSources, liveLine, needsPerson, sourceWindow } from "./windows/inbox/inboxFilters";
 import {
   MACHINES_ID,
@@ -205,7 +208,7 @@ type Pos = { x: number; y: number };
 /** Rough coordinators window height for the initial fit: header + one row per wave and supervisor + note. */
 const coordsH = (rows: number) => 150 + 66 * rows;
 /** Rough Needs you window height for the initial fit: header and tabs + one card per item. */
-const inboxH = (rows: number) => 130 + 150 * rows;
+const inboxH = (rows: number) => INBOX_CHROME_H + 150 * rows;
 /** Rough Machines window height for the initial fit: header + one two-line row per machine. */
 const machinesH = (rows: number) => 80 + 76 * Math.max(1, rows);
 /** How often the Machines window's clock ticks while it is open (sparklines and `last seen`). */
@@ -322,6 +325,7 @@ export default function App() {
     zoomAt,
     panBy,
     fitTo: fitView,
+    panToTop: panView,
     stageRef,
     worldRef,
     stageHandlers,
@@ -341,6 +345,13 @@ export default function App() {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const { z, focus } = useFocusOrder();
   const [moved, setMoved] = useState<Record<string, Pos>>({});
+  /**
+   * Each region's bounding box from the last arrange (#397); null until one ran. A window
+   * opened after it is placed in free space in its region (`place.ts`), moving no other.
+   */
+  const regions = useRef<Partial<Record<RegionName, Rect>> | null>(null);
+  /** Windows the owner just opened: the view pans to each once it is placed (#404). */
+  const panPending = useRef(new Set<string>());
   const [me] = useState(() => meFromSearch(window.location.search));
   const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
   /** Ended waves put back on the canvas one by one (the coordinators window's Show). */
@@ -544,6 +555,42 @@ export default function App() {
   // auto-arrange is off) must not land under one placed before it. Placed windows first,
   // then the rest in layout order; resolved once per render.
   let slots: Record<string, Pos> | null = null;
+  const parentOf: Record<string, string> = {};
+  for (const [g, list] of Object.entries(groups)) for (const a of list) parentOf[a.id] = g;
+  /**
+   * Where a window opened after an arrange looks for free space: an agent right of its
+   * wave (or group) window, within that region; a wave in the waves region; the side
+   * windows in the side region; Needs you in the list region. A region the last arrange
+   * did not have starts right of every window on the canvas.
+   */
+  const regionFor = (id: string, at: Record<string, Pos>, taken: readonly Rect[]): Rect => {
+    const r = regions.current ?? {};
+    const { w, h } = sizeOf(id, dims(id).w, dims(id).h);
+    const parent = parentOf[id];
+    const kind: RegionName =
+      id === INBOX_ID
+        ? "list"
+        : id === COORDS_ID || id === MACHINES_ID || isLooseGroup(parent ?? id)
+          ? "side"
+          : "waves";
+    const bound = r[kind];
+    const head = parent !== undefined ? at[parent] : undefined;
+    if (parent !== undefined && head) {
+      const x = head.x + sizeOf(parent, WAVE_W, WAVE_H).w + GAP;
+      return bound
+        ? {
+            x,
+            y: head.y,
+            w: Math.max(w, bound.x + bound.w - x),
+            h: Math.max(h, bound.y + bound.h - head.y),
+          }
+        : { x, y: head.y, w, h };
+    }
+    if (bound) return bound;
+    const right = Math.max(0, ...taken.map((t) => t.x + t.w + CGAP));
+    const top = taken.length ? Math.min(...taken.map((t) => t.y)) : 0;
+    return { x: right, y: top, w, h };
+  };
   const slotOf = (id: string): Pos => {
     if (slots === null) {
       const out: Record<string, Pos> = {};
@@ -554,6 +601,12 @@ export default function App() {
         const b = { id, ...dims(id) };
         const { w, h } = sizeOf(b.id, b.w, b.h);
         const at = placedAt(b.id) ?? layout[b.id] ?? { x: 0, y: 0 };
+        if (!isPlaced(b.id) && regions.current !== null) {
+          const p = placeInRegion(regionFor(b.id, out, taken), { w, h }, taken);
+          out[b.id] = p;
+          taken.push({ ...p, w, h });
+          continue;
+        }
         let y = at.y;
         if (!isPlaced(b.id)) {
           const hit = () =>
@@ -619,12 +672,14 @@ export default function App() {
     const pin = pinOf(id);
     return pin?.mode === "place" ? { x: pin.x, y: pin.y } : moved[id];
   };
+  /** The arrange fit area: a list window (Needs you) is never taller (#397). */
+  const listArea = arrangeArea(screenSize);
   /** A window's default size: the coordinators or Needs you window, a wave window or an agent window. */
   const dims = (id: string) =>
     id === COORDS_ID
       ? { w: COORDS_W, h: coordsH(coordsRows) }
       : id === INBOX_ID
-        ? { w: INBOX_W, h: inboxH(inboxItems.length) }
+        ? { w: INBOX_W, h: capListHeight(inboxH(inboxItems.length), listArea) }
         : id === MACHINES_ID
           ? { w: MACHINES_W, h: machinesH(machines.length) }
           : waveIds.includes(id)
@@ -650,6 +705,9 @@ export default function App() {
   /** Fit the view to world rects, leaving room for the windows anchored to the screen. */
   const fitTo = (rs: readonly Rect[]) =>
     fitView(rs, avoidAnchored(fitToArea(screenSize), hudRects()));
+  /** Pan, at the current scale, to a window: its top edge near the top of the screen (#404). */
+  const panTo = (id: string) =>
+    panView(rectOf(id, dims(id).w, dims(id).h), avoidAnchored(fitToArea(screenSize), hudRects()));
   /** The pin toggle: unpinned, then pinned in place, then anchored to the screen, then unpinned. */
   const cyclePin = (id: string) => {
     const key = keyOf(id);
@@ -762,7 +820,7 @@ export default function App() {
         ? [{ main: sizeOf(COORDS_ID, COORDS_W, coordsH(coordsRows)), kids: [], side: true }]
         : []),
       ...(inboxShown
-        ? [{ main: sizeOf(INBOX_ID, INBOX_W, inboxH(inboxItems.length)), kids: [], side: true }]
+        ? [{ main: sizeOf(INBOX_ID, INBOX_W, dims(INBOX_ID).h), kids: [], list: true }]
         : []),
       ...(machinesShown
         ? [
@@ -788,6 +846,7 @@ export default function App() {
       skip: new Set(shownNow.filter(anchored)),
     });
     if (!r) return;
+    regions.current = r.regions;
     setAnimating(true);
     setMoved((m) => ({ ...m, ...r.place }));
     // An ended wave just shown: fit to it in its new place rather than to everything.
@@ -809,28 +868,40 @@ export default function App() {
     clearTimeout(animEnd.current);
     animEnd.current = setTimeout(() => setAnimating(false), ARRANGE_ANIM_MS);
   };
-  // A window anchored to the screen leaves the canvas (or comes back): that re-arranges too.
-  const layoutKey = [
-    coordsShown ? "c" : "",
-    inboxShown ? "i" : "",
-    machinesShown ? "m" : "",
-    ...visible,
-    ...visible.flatMap((id) => (groups[id] ?? []).map((a) => a.id)),
-    ...shownIds()
-      .filter(anchored)
-      .map((id) => `@${id}`),
-  ].join("|");
-  // A reconnect's resync empties the waves and the replay rebuilds them: hold the
-  // key until it settles, so only windows that really came or went re-arrange.
-  // The first connect (and demo load) settles too, but arranges as data arrives.
-  const settledOnce = useRef(false);
-  if (!settling) settledOnce.current = true;
-  useAutoArrange({
-    enabled: autoArrange,
-    layoutKey,
-    arrange,
-    hold: settling && settledOnce.current,
+  // Auto-arrange lays the canvas out once, when the first windows are on it (a live store's
+  // first replay lands in one batch), and
+  // after a browser resize (#404). A window opened later is placed in free space in its
+  // region and the view pans to it if the owner opened it; a close leaves its space free.
+  useAutoArrange({ enabled: autoArrange, ready: rects.length > 0, arrange });
+  useEffect(() => {
+    // Keep each new window where it was first placed: later opens must not move it.
+    if (regions.current !== null) {
+      const fresh = shownIds().filter((id) => !anchored(id) && placedAt(id) === undefined);
+      if (fresh.length > 0) {
+        setMoved((m) => ({ ...m, ...Object.fromEntries(fresh.map((id) => [id, slotOf(id)])) }));
+      }
+    }
+    const shown = new Set(shownIds());
+    for (const id of panPending.current) {
+      panPending.current.delete(id);
+      if (shown.has(id) && !anchored(id)) panTo(id);
+    }
   });
+  /** The owner opens a window: placed afresh in free space, and the view pans to it. */
+  const opened = (ids: readonly string[], pan: string) => {
+    setMoved((m) => {
+      if (!ids.some((id) => id in m)) return m;
+      const next = { ...m };
+      for (const id of ids) delete next[id];
+      return next;
+    });
+    panPending.current.add(pan);
+  };
+  /** A dock or top-bar toggle: opening places the window and pans to it; closing moves nothing. */
+  const toggleWindow = (id: string, open: boolean, set: (o: boolean) => void) => {
+    if (!open) opened([id], id);
+    set(!open);
+  };
   // Settings, General, Reset layout: arrange once the cleared pins have rendered.
   const [resetTick, setResetTick] = useState(0);
   const arrangeNow = useRef(arrange);
@@ -954,12 +1025,15 @@ export default function App() {
       next.delete(wave);
       return next;
     });
-  const toggle = (wave: string) =>
+  const toggle = (wave: string) => {
+    // Shown again: the wave and its agents are placed afresh and the view pans to it.
+    if (hidden.has(wave)) opened([wave, ...(groups[wave] ?? []).map((a) => a.id)], wave);
     setHidden((h) => {
       const next = new Set(h);
       if (!next.delete(wave)) next.add(wave);
       return next;
     });
+  };
   /** Fit to a window: a wave with its agents, else the window alone. */
   const fitWindow = (id: string) => {
     if (anchored(id)) {
@@ -972,8 +1046,9 @@ export default function App() {
   };
   /** The pill's go-to for an inbox item: the Needs you window. */
   const goToInbox = () => {
-    setInboxOpen(true);
-    fitWindow(INBOX_ID);
+    // Closed: opening it keeps the zoom and pans to it (#404); open: fit to it.
+    if (!inboxShown) toggleWindow(INBOX_ID, false, setInboxOpen);
+    else fitWindow(INBOX_ID);
   };
   /** A row's go-to: its source window (a wave, an agent or the coordinators window). */
   const goToSource = (item: InboxItem) => {
@@ -1154,6 +1229,7 @@ export default function App() {
               device={deskDevice(narrow)}
               narrow={narrow}
               frame={place(INBOX_ID)}
+              maxHeight={listArea.h}
               onClose={() => setInboxOpen(false)}
               onGoTo={goToSource}
               onShow={(i) => {
@@ -1401,7 +1477,7 @@ export default function App() {
           if (first) goTo(first);
         }}
         coordsOpen={coordsOpen}
-        onToggleCoords={() => setCoordsOpen((o) => !o)}
+        onToggleCoords={() => toggleWindow(COORDS_ID, coordsOpen, setCoordsOpen)}
         notify={notify}
         setNotify={setNotify}
         compact={narrow}
@@ -1411,13 +1487,13 @@ export default function App() {
 
       <DeskDock
         coordsOpen={coordsOpen}
-        onToggleCoords={() => setCoordsOpen((o) => !o)}
+        onToggleCoords={() => toggleWindow(COORDS_ID, coordsOpen, setCoordsOpen)}
         needsYou={targets.filter((t) => t.kind !== "inbox").length}
         inboxOpen={inboxOpen}
-        onToggleInbox={() => setInboxOpen((o) => !o)}
+        onToggleInbox={() => toggleWindow(INBOX_ID, inboxOpen, setInboxOpen)}
         inboxNeedsYou={inboxNeedsYou}
         machinesOpen={machinesOpen}
-        onToggleMachines={() => setMachinesOpen((o) => !o)}
+        onToggleMachines={() => toggleWindow(MACHINES_ID, machinesOpen, setMachinesOpen)}
         machinesDown={machines.filter((m) => m.dot === "down").length}
         tethers={look.tethers}
         onToggleTethers={() => setLook({ tethers: !look.tethers })}
