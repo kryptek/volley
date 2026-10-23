@@ -13,12 +13,20 @@
  * side through its own gutter), so it never crosses another node. Without one
  * (the desktop) it is one band in a horizontally scrolling container.
  *
+ * A planned wave's nodes (the overlap plan) carry their cluster: every node of
+ * one cluster sits on a hull tinted with that cluster's palette hue, with a
+ * badge naming it (`A`, `A · 4/4` while capped, `A · hold` while held). A
+ * bundle (one task closing several issues) reads `#310 +1` in its corner, each
+ * issue a link and the whole list in its tooltip; an `after` the planner
+ * chained is drawn dashed.
+ *
  * `HostChips` lists, under the graph, the machine each placed task runs on
  * and why (SPEC §4.6.15 `tasks[].placement`).
  */
 import { useState } from "react";
 import { issueLabel } from "../../lib/github";
 import type { TaskPlacement, WaveTask } from "../../store/types";
+import { ACCENT_PALETTE } from "./accent";
 import { type DeskStage, STAGE_LABEL } from "./stages";
 
 export interface DagNode {
@@ -33,23 +41,37 @@ export interface DagNode {
   issueHref?: string;
   /** A synthetic fixer task (SPEC §4.6.16): the tasks it fixes; drawn with a wrench. */
   fixerFor?: string[];
+  /** The overlap plan's cluster: `hue` indexes `ACCENT_PALETTE`, `badge` is what the node shows. */
+  cluster?: { id: string; hue: number; badge: string };
+  /** A bundle's other issues (beyond `issue`), each with its link when the wave has `github`. */
+  bundle?: { issue: number; href?: string }[];
+  /** The `after` entries the planner chained: their edges are drawn dashed. */
+  chained?: string[];
 }
 
 /** `fixer for T3, T7` (just `fixer` when the supervisor names no task). */
 export const fixerLabel = (fixes: readonly string[]) =>
   fixes.length ? `fixer for ${fixes.join(", ")}` : "fixer";
 
-/** A node's tooltip: its title, or what a fixer fixes; else the id itself when the node elides it. */
+/** A bundle's issues, its own first: `#310, #312`. */
+const bundleList = (t: DagNode) =>
+  [t.issue, ...(t.bundle ?? []).map((b) => b.issue)].map((n) => `#${n}`).join(", ");
+
+/**
+ * A node's tooltip: its title, or what a fixer fixes, and a bundle's issues; else the id itself
+ * when the node elides it.
+ */
 function nodeTip(t: DagNode): string | undefined {
   if (t.fixerFor) return `${t.id} · ${fixerLabel(t.fixerFor)}`;
-  if (t.title) return `${t.id} · ${t.title}`;
-  return fitId(t.id) === t.id ? undefined : t.id;
+  const parts = [t.title, t.bundle?.length ? bundleList(t) : undefined].filter(Boolean);
+  if (parts.length) return [t.id, ...parts].join(" · ");
+  return fitId(t.id, idFit(t)) === t.id ? undefined : t.id;
 }
 
 export interface DagLayout {
   cols: number;
   nodes: (DagNode & { col: number; row: number; x: number; y: number })[];
-  edges: { from: string; to: string; d: string }[];
+  edges: { from: string; to: string; d: string; chained?: boolean }[];
   width: number;
   height: number;
 }
@@ -66,14 +88,23 @@ export const DAG_NODE_H = H;
 export const DAG_ID_CHAR_PX = 7.8;
 /** Characters of id that fit between the node's 10 px insets. */
 const ID_FIT = Math.floor((W - 20) / DAG_ID_CHAR_PX);
+/** A `.dag-cluster` badge character's advance: 9.5px mono. */
+const BADGE_CHAR_PX = 5.8;
+
+/** Characters of the node's id that fit beside its cluster badge, if it has one. */
+const idFit = (t: DagNode) =>
+  t.cluster
+    ? Math.max(4, Math.floor((W - 26 - t.cluster.badge.length * BADGE_CHAR_PX) / DAG_ID_CHAR_PX))
+    : ID_FIT;
 
 /**
- * A task id that fits its node: as is when it does, else `head…tail` (the first 6 and the
- * last 5 characters), as a flake-fixer's `fix-<slug>` id can run to 44. The node's tooltip
- * keeps the full id.
+ * A task id that fits its node (`fit` characters): as is when it does, else `head…tail` (the
+ * first 6 and the last 5 characters), as a flake-fixer's `fix-<slug>` id can run to 44; beside a
+ * cluster badge, where fewer fit, its head and `…`. The node's tooltip keeps the full id.
  */
-export function fitId(id: string): string {
-  return id.length <= ID_FIT ? id : `${id.slice(0, 6)}…${id.slice(-5)}`;
+export function fitId(id: string, fit = ID_FIT): string {
+  if (id.length <= fit) return id;
+  return fit >= 12 ? `${id.slice(0, 6)}…${id.slice(-5)}` : `${id.slice(0, fit - 1)}…`;
 }
 
 /** The width of `n` columns side by side. */
@@ -138,6 +169,7 @@ export function layoutDag(tasks: readonly DagNode[], maxWidth?: number): DagLayo
   const gutter = (i: number, x: number) =>
     i < fit - 1 ? x + W + GX / 2 : i > 0 ? x - GX / 2 : x + W + 2;
   const edges: DagLayout["edges"] = [];
+  const chain = (t: DagNode, a: string) => (t.chained?.includes(a) ? { chained: true } : {});
   for (const e of nodes) {
     for (const a of e.after) {
       const s = at.get(a);
@@ -153,7 +185,7 @@ export function layoutDag(tasks: readonly DagNode[], maxWidth?: number): DagLayo
         let d = `M${exit},${s.y + H / 2} H${gs} V${gap}`;
         if (e.row === 0) d += ` H${e.x + W / 2} V${e.y}`;
         else d += ` H${ge} V${e.y + H / 2} H${ge > e.x ? e.x + W : e.x}`;
-        edges.push({ from: a, to: e.id, d });
+        edges.push({ from: a, to: e.id, d, ...chain(e, a) });
         continue;
       }
       const x1 = s.x + W;
@@ -164,6 +196,7 @@ export function layoutDag(tasks: readonly DagNode[], maxWidth?: number): DagLayo
         from: a,
         to: e.id,
         d: `M${x1},${y1} C${x1 + GX / 2},${y1} ${x2 - GX / 2},${y2} ${x2},${y2}`,
+        ...chain(e, a),
       });
     }
   }
@@ -207,7 +240,11 @@ export function Dag({
         aria-label="Task dependency graph"
       >
         {l.edges.map((e) => (
-          <path key={`${e.from}>${e.to}`} d={e.d} className="dag-edge" />
+          <path
+            key={`${e.from}>${e.to}`}
+            d={e.d}
+            className={`dag-edge${e.chained ? " dag-edge--chain" : ""}`}
+          />
         ))}
         {l.nodes.map((t) => (
           <g
@@ -216,12 +253,25 @@ export function Dag({
             className={`dag-node st-${t.cancelled ? "cancelled" : t.stage}`}
             data-col={t.col}
             data-id={t.id}
+            {...(t.cluster ? { "data-cluster": t.cluster.id } : {})}
           >
             {nodeTip(t) && <title>{nodeTip(t)}</title>}
+            {t.cluster && <ClusterHull hue={t.cluster.hue} />}
             <rect width={W} height={H} rx="9" />
             <text x="10" y="18" className="dag-id" fill={accent}>
-              {fitId(t.id)}
+              {fitId(t.id, idFit(t))}
             </text>
+            {t.cluster && (
+              <text
+                x={W - 8}
+                y="15"
+                textAnchor="end"
+                className="dag-cluster"
+                fill={hueOf(t.cluster.hue)}
+              >
+                {t.cluster.badge}
+              </text>
+            )}
             <text x="10" y="34" className="dag-stage">
               {t.cancelled ? "cancelled" : (labels[t.id] ?? STAGE_LABEL[t.stage])}
             </text>
@@ -230,6 +280,8 @@ export function Dag({
               <text x={W - 10} y="34" textAnchor="end" className="dag-fixer">
                 🔧
               </text>
+            ) : t.issue > 0 && t.bundle?.length ? (
+              <BundleLabel t={t} />
             ) : t.issue > 0 && t.issueHref ? (
               <a
                 href={t.issueHref}
@@ -252,6 +304,58 @@ export function Dag({
         ))}
       </svg>
     </div>
+  );
+}
+
+/** A cluster's palette hue (`ACCENT_PALETTE`, wrapping). */
+const hueOf = (hue: number) => ACCENT_PALETTE[hue % ACCENT_PALETTE.length] as string;
+
+/** The tinted hull behind a clustered node: static, so reduced motion keeps it as is. */
+function ClusterHull({ hue }: { hue: number }) {
+  return (
+    <rect
+      className={`dag-hull hull-${hue}`}
+      x={-5}
+      y={-5}
+      width={W + 10}
+      height={H + 10}
+      rx="12"
+      fill={hueOf(hue)}
+    />
+  );
+}
+
+const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
+
+/**
+ * A bundle's corner label, `#310 +1`: its own issue and, on `+N`, the next; every further issue
+ * has its own (textless) link, reached by keyboard and named for assistive tech. The tooltip
+ * lists them all.
+ */
+function BundleLabel({ t }: { t: DagNode }) {
+  const extra = t.bundle ?? [];
+  const link = (n: number, href: string | undefined, text: string) =>
+    href ? (
+      <a
+        key={n}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={issueLabel(n)}
+        className="dag-issue-link"
+        onClick={stop}
+      >
+        <tspan>{text}</tspan>
+      </a>
+    ) : (
+      <tspan key={n}>{text}</tspan>
+    );
+  return (
+    <text x={W - 10} y="34" textAnchor="end" className="dag-issue">
+      {link(t.issue, t.issueHref, `#${t.issue}`)}
+      <tspan> </tspan>
+      {extra.map((b, i) => link(b.issue, b.href, i === 0 ? `+${extra.length}` : ""))}
+    </text>
   );
 }
 

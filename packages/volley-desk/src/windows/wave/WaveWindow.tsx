@@ -28,16 +28,30 @@
  * queue as one line (`merging T3 · updating T5 · queued T7, T9`), the release
  * train's stages while the wave is `releasing`, the synthetic fixer tasks (a
  * wrench, `fixer for T3, T7`) and the wave's autopilot events as a feed.
+ *
+ * The overlap plan (wave-state `overlap_plan`, `spawns`, `trains`): the graph tints each
+ * cluster's nodes and badges them (`Dag`), labels a bundle `#310 +1` and dashes the edges the
+ * planner chained; under it the clusters panel (`Clusters`); the merge queue line leads with its
+ * running trains (`train-1 (T2, T4) integrating · queued T7`), each linking its PR; the title
+ * carries a `churn 12` chip while the wave has churn spawns. A merge train's synthetic task
+ * (`train-<n>`) stays out of the graph and the rail: the queue line shows it.
  */
 import { BubbleChatIcon, Settings02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useState } from "react";
 import { ciStuck } from "../../attention";
 import { Frame, type FrameProps } from "../../canvas/Frame";
-import { issueHref } from "../../lib/github";
+import { issueHref, prLabel } from "../../lib/github";
 import { plural } from "../../lib/plural";
 import { RepoChip } from "../../look/RepoChip";
-import { fixerFor, mergeQueueLine } from "../../store/autopilot";
+import {
+  clusterBadge,
+  fixerFor,
+  inFlight,
+  liveTrains,
+  mergeQueueLine,
+  trainLine,
+} from "../../store/autopilot";
 import type {
   AgentView,
   CoordinatorState,
@@ -48,9 +62,10 @@ import type {
 } from "../../store/types";
 import { Feed } from "../agent/Feed";
 import { Clawd } from "./Clawd";
+import { Clusters } from "./Clusters";
 import { Dag, type DagNode, HostChips, fixerLabel } from "./Dag";
 import { WaveYaml, taskOrder } from "./WaveYaml";
-import { accentFor } from "./accent";
+import { ACCENT_PALETTE, accentFor, clusterHues } from "./accent";
 import { taskActivity } from "./activity";
 import { STAGE_LABEL, STAGE_WEIGHT, deskStage, wavePct } from "./stages";
 import "../../styles/wave.css";
@@ -151,7 +166,10 @@ export function IconBtn(p: {
 /**
  * Graph nodes in wave-file order (`taskOrder`). A cancelled task the spec still
  * lists is flagged `cancelled`; one the spec no longer lists was removed by a
- * plan change and is dropped. With the state's `github`, each node links its issue.
+ * plan change and is dropped, as is a merge train's synthetic task. With the
+ * state's `github`, each node links its issue (a bundle's every issue). With
+ * an overlap plan, a clustered node carries its cluster's hue and badge, and
+ * a task the planner chained marks the `after` entries its chain added.
  */
 export function dagNodes(s: WaveStatePayload): DagNode[] {
   const spec = s.spec?.tasks ?? {};
@@ -160,11 +178,20 @@ export function dagNodes(s: WaveStatePayload): DagNode[] {
     const h = issueHref(s.github, n);
     return h !== null ? { issueHref: h } : {};
   };
+  const clusters = new Map((s.overlap_plan?.clusters ?? []).map((c) => [c.id, c]));
+  const hues = clusterHues(s.overlap_plan?.clusters ?? [], s.wave);
+  const cluster = (named: string | undefined): Pick<DagNode, "cluster"> => {
+    const c = named === undefined ? undefined : clusters.get(named);
+    if (!c) return {};
+    const flying = s.tasks.filter((t) => (t.cluster ?? spec[t.id]?.plan?.cluster) === c.id);
+    const badge = clusterBadge(c, flying.filter(inFlight).length);
+    return { cluster: { id: c.id, hue: hues.get(c.id) ?? 0, badge } };
+  };
   return taskOrder(s).flatMap((id): DagNode[] => {
     const t = state.get(id);
     const sp = spec[id];
     if (!sp) {
-      if (!t || t.stage === "cancelled") return [];
+      if (!t || t.stage === "cancelled" || t.train) return [];
       const fixes = fixerFor(t);
       return [
         {
@@ -174,9 +201,20 @@ export function dagNodes(s: WaveStatePayload): DagNode[] {
           stage: deskStage(t.stage),
           ...(fixes ? { fixerFor: fixes } : {}),
           ...href(t.issue),
+          ...cluster(t.cluster),
         },
       ];
     }
+    const named = t?.cluster ?? sp.plan?.cluster;
+    const pairs = (named ? clusters.get(named)?.strategy.chain : undefined) ?? [];
+    const chainedBy = pairs.filter((p) => p[1] === id).map((p) => p[0] as string);
+    const chained = sp.plan?.by === "chain" ? (chainedBy.length ? chainedBy : sp.after) : [];
+    const bundle = (sp.issues ?? [])
+      .filter((n) => n !== sp.issue)
+      .map((n) => ({
+        issue: n,
+        ...(issueHref(s.github, n) ? { href: issueHref(s.github, n) as string } : {}),
+      }));
     return [
       {
         id,
@@ -186,6 +224,9 @@ export function dagNodes(s: WaveStatePayload): DagNode[] {
         ...(sp.title ? { title: sp.title } : {}),
         ...(t?.stage === "cancelled" ? { cancelled: true } : {}),
         ...href(sp.issue),
+        ...cluster(named),
+        ...(bundle.length ? { bundle } : {}),
+        ...(chained.length ? { chained } : {}),
       },
     ];
   });
@@ -201,6 +242,47 @@ export function autopilotChip(a: NonNullable<WaveStatePayload["autopilot"]>): st
 /** The chip in a compact window: `⚙ 4 · ↑ 1` (auto-resolved, escalated), or `⚙ off`. */
 export function autopilotTokens(a: NonNullable<WaveStatePayload["autopilot"]>): string {
   return a.enabled ? `⚙ ${a.auto_resolved} · ↑ ${a.escalated}` : "⚙ off";
+}
+
+/** The header chip's title: `7 churn · 14 productive spawns`, then each churning task's count. */
+export function churnTitle(s: WaveStatePayload): string {
+  const sp = s.spawns ?? { productive: 0, churn: 0 };
+  const per = s.tasks.filter((t) => (t.churn ?? 0) > 0).map((t) => `${t.id}: ${t.churn}`);
+  return [`${sp.churn} churn · ${sp.productive} productive spawns`, ...per].join("\n");
+}
+
+/**
+ * The merge queue line: the running trains first (`train-1 (T2, T4) integrating`, the id linking
+ * the train's PR), then the queue without the trains' members (`merging T3 · queued T7, T9`).
+ */
+function QueueLine({ s }: { s: WaveStatePayload }) {
+  const trains = liveTrains(s.trains);
+  const riding = new Set(trains.flatMap((t) => t.tasks));
+  const rest = mergeQueueLine((s.merge_queue ?? []).filter((e) => !riding.has(e.task)));
+  const parts: ReactNode[] = trains.map((t) => {
+    const href = t.pr === undefined ? null : issueHref(s.github, t.pr);
+    const text = trainLine(t);
+    return href ? (
+      <a
+        key={t.id}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={prLabel(t.pr as number)}
+        title={text}
+      >
+        {text}
+      </a>
+    ) : (
+      <span key={t.id}>{text}</span>
+    );
+  });
+  if (rest) parts.push(<span key="queue">{rest}</span>);
+  return (
+    <p className="wave-queue" aria-label="Merge queue">
+      <span className="dim">merge queue</span> {parts.flatMap((p, i) => (i ? [" · ", p] : [p]))}
+    </p>
+  );
 }
 
 /** The release train's stages as plain rows (the inbox's release item draws the Stepper). */
@@ -240,6 +322,14 @@ export function WaveWindow(p: WaveWindowProps) {
   const endedAt = Date.parse(s?.updated_at ?? "");
   const fixers = tasks.filter((t) => t.fixerFor && !t.cancelled);
   const queue = s?.merge_queue ?? [];
+  const trains = liveTrains(s?.trains);
+  const hues = new Map(
+    [...clusterHues(s?.overlap_plan?.clusters ?? [], id)].map(([c, i]) => [
+      c,
+      ACCENT_PALETTE[i] as string,
+    ]),
+  );
+  const churn = s?.spawns?.churn ?? 0;
   const activity = new Map(
     (s?.tasks ?? []).map((t) => [t.id, taskActivity(t, { agent: (a) => p.agents?.[a], queue })]),
   );
@@ -267,6 +357,11 @@ export function WaveWindow(p: WaveWindowProps) {
           <span className="ap-short" aria-hidden="true">
             {autopilotTokens(s.autopilot)}
           </span>
+        </span>
+      )}
+      {s && churn > 0 && (
+        <span className="chip chip--churn" title={churnTitle(s)}>
+          churn {churn}
         </span>
       )}
       {!ended && ci.length > 0 && (
@@ -357,12 +452,13 @@ export function WaveWindow(p: WaveWindowProps) {
               labels={labels}
               maxWidth={p.frame.maxWidth === undefined ? undefined : dagWidthFor(p.frame.maxWidth)}
             />
+            <Clusters
+              clusters={s.overlap_plan?.clusters}
+              hues={hues}
+              compact={p.frame.maxWidth !== undefined}
+            />
             <HostChips tasks={s.tasks} />
-            {!ended && queue.length > 0 && (
-              <p className="wave-queue" aria-label="Merge queue">
-                <span className="dim">merge queue</span> {mergeQueueLine(queue)}
-              </p>
-            )}
+            {!ended && (queue.length > 0 || trains.length > 0) && <QueueLine s={s} />}
             {s.status === "releasing" && s.release && <TrainRows release={s.release} />}
             {fixers.length > 0 && (
               <ul className="wave-fixers" aria-label="Fixer tasks">

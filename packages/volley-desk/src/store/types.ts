@@ -129,6 +129,12 @@ export interface WaveTask {
   synthetic?: boolean | { for?: string[]; [key: string]: unknown };
   /** What a synthetic task remediates; `for` names the tasks it fixes. */
   remediation?: { for?: string[]; [key: string]: unknown };
+  /** The overlap plan's cluster the task is in (`overlap_plan.clusters[].id`). */
+  cluster?: string;
+  /** The task's churn spawns so far: respawns, rebases and fixups an overlap forced. */
+  churn?: number;
+  /** A merge train's synthetic task (`train-<n>`): the gated PRs it merges as one. */
+  train?: { members: { task: string; pr: number; head: string }[] };
   [key: string]: unknown;
 }
 
@@ -152,12 +158,57 @@ export interface TaskPlacement {
 
 export type PipelineStep = string | string[];
 
+/** wave-file `footprint`: how the task's files were found. */
+export interface TaskFootprint {
+  confidence: "listed" | "resolved" | "guessed" | "none";
+  unresolved?: string[];
+}
+
+/** wave-file `plan`: where the overlap plan put the task, how its cluster runs and why. */
+export interface TaskPlan {
+  cluster?: string;
+  by?: "collapse" | "chain" | "cap" | "independent";
+  why?: string;
+}
+
+export interface WaveSpecTask {
+  issue: number;
+  title?: string;
+  after: string[];
+  /** Every issue the task closes, when it bundles several (contains `issue`). */
+  issues?: number[];
+  files?: string[];
+  footprint?: TaskFootprint;
+  plan?: TaskPlan;
+}
+
 export interface WaveSpec {
   version: number;
   release_branch?: string;
   model?: string;
   pipeline?: PipelineStep[];
-  tasks: Record<string, { issue: number; title?: string; after: string[] }>;
+  tasks: Record<string, WaveSpecTask>;
+}
+
+/** wave-state `$defs/planCluster`: one cluster of the overlap plan. */
+export interface PlanCluster {
+  id: string;
+  tasks: string[];
+  /** The files its tasks share: each file, its size and the tasks touching it. */
+  hot: { file: string; bytes: number; shared_by: string[] }[];
+  /** collapse: groups bundled into one task; chain: [before, after] pairs; cap: most in flight. */
+  strategy: { collapse?: string[][]; chain?: string[][]; cap?: number };
+  state: "planned" | "hold" | "train";
+  why: string;
+}
+
+/** wave-state `trains[]`: gated PRs the merge queue integrates, gates and merges as one. */
+export interface WaveTrain {
+  id: string;
+  pr?: number;
+  tasks: string[];
+  state: "forming" | "integrating" | "ci" | "gated" | "merged" | "failed";
+  since: string;
 }
 
 /**
@@ -233,6 +284,12 @@ export interface WaveStatePayload {
   merge_queue?: MergeQueueEntry[];
   /** Absent for a wave without a release train. */
   release?: WaveRelease;
+  /** The overlap plan; absent for a wave the planner has not planned. */
+  overlap_plan?: { clusters: PlanCluster[] };
+  /** Spawns so far: productive (a role's first run) and churn (forced by an overlap). */
+  spawns?: { productive: number; churn: number };
+  /** Merge trains, in the order the queue formed them. */
+  trains?: WaveTrain[];
   updated_at: string;
   [key: string]: unknown;
 }
