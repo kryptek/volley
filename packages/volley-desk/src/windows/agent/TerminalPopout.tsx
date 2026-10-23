@@ -14,7 +14,8 @@
  * With `onSize` it reports the text box's size in cells once it holds for
  * `TERMINAL_RESIZE_DEBOUNCE_MS` (on open, on a resize, on a text size change),
  * and `"launch"` when it closes: volleyd sizes the agent's terminal to match
- * (#403), so its program wraps at the popout's width.
+ * (#403), so its program wraps at the popout's width. Its width then stays
+ * where it opened (or where it was dragged) rather than following the screen.
  */
 import { type PointerEvent, useEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../../a11y/keys";
@@ -185,7 +186,11 @@ export function TerminalPopout({
 
   const task = agent.task;
   const role = agent.role ? ROLE_LABEL[agent.role] : null;
-  const cols = columns(agent.screen?.lines);
+  // While it sizes the terminal, the window keeps the width it opened at (or the user's drag):
+  // following the screen, which follows the window, would ratchet a 1-cell short measurement
+  // down to 80 columns (#403).
+  const [openCols] = useState(() => columns(agent.screen?.lines));
+  const cols = onSize ? openCols : columns(agent.screen?.lines);
 
   const down = (e: PointerEvent<HTMLDivElement>) => {
     // The traffic lights and the size buttons are controls, not handles.

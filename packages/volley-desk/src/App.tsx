@@ -1380,8 +1380,8 @@ export default function App() {
                   onRaise={() => popouts.raise(id)}
                   fontPx={popouts.fontPx}
                   onFont={(d) => popouts.setFontPx(popouts.fontPx + d)}
-                  // Only volleyd's agents have a terminal it can size (#403).
-                  {...(control && a.task
+                  // Only volleyd's agents on a paired machine (tmux) have a terminal it can size (#403).
+                  {...(control && a.task && a.screen?.source === "tmux"
                     ? { onSize: (size: TerminalSize) => sendTerminalSize(control, id, size) }
                     : {})}
                 />

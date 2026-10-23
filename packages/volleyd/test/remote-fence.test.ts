@@ -649,6 +649,22 @@ describe("remote allow-list (ssh … bash -s)", () => {
         FenceError,
       );
     }
+    // The size is a pair: one of -x/-y alone is refused.
+    const half = (flag: string) =>
+      step(
+        "tmux",
+        "new-session",
+        "-d",
+        flag,
+        "200",
+        "-s",
+        "w1-T1-implementer",
+        "-c",
+        "/wt/x",
+        TMUX_LAUNCH,
+      );
+    for (const flag of ["-x", "-y"])
+      expect(() => assertAllowed(SSH, { ...remote(half(flag)), launch }), flag).toThrow(FenceError);
   });
 
   it("tmux send-keys Up|Down|Space and a picker's or handoff's text only with their tokens", () => {

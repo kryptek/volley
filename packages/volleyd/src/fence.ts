@@ -2227,16 +2227,25 @@ function remoteSigninSession(args: readonly string[], opts: FenceOptions): Verdi
 
 /**
  * `tmux new-session … -c <dir> 'bash .volley/launch.sh'`: the command is required, and <dir> is
- * the worktree of a sealed launch script (tmux keeps the last `-c`, so does this).
+ * the worktree of a sealed launch script (tmux keeps the last `-c`, so does this). A launch size
+ * is a pair: `-x` and `-y` together or neither.
  */
 function newSessionSealed(args: readonly string[], opts: FenceOptions): Verdict {
   let cwd: string | undefined;
+  const size = new Set<string>();
   for (let i = 0; i < args.length; i++) {
     const a = args[i] ?? "";
     if (a === "-c") cwd = args[++i];
     else if (a.startsWith("-c")) cwd = a.slice(2);
+    else if (a.startsWith("-x") || a.startsWith("-y")) {
+      size.add(a.slice(0, 2));
+      if (a.length === 2) i++;
+    } else if (a === "-s") i++;
   }
-  return args.at(-1) === TMUX_LAUNCH_COMMAND && cwd !== undefined && sealedFor(opts, cwd)
+  return args.at(-1) === TMUX_LAUNCH_COMMAND &&
+    size.size !== 1 &&
+    cwd !== undefined &&
+    sealedFor(opts, cwd)
     ? ALLOW
     : deny("tmux new-session (only in the worktree of a sealed launch script)");
 }

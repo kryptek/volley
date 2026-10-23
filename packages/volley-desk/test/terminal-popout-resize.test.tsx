@@ -18,7 +18,7 @@ const AGENT = {
   task: "T1",
   role: "implementer",
   screen: {
-    lines: ["hello"],
+    lines: ["x".repeat(120)],
     captured_at: "2026-10-22T00:00:00Z",
     workspace: "w",
     hash: "h",
@@ -171,6 +171,34 @@ describe("TerminalPopout → the agent's terminal size", () => {
     popout((s) => early.push(s)).unmount();
     act(() => vi.advanceTimersByTime(TERMINAL_RESIZE_DEBOUNCE_MS));
     expect(early).toEqual([]);
+  });
+
+  it("its width no longer follows the screen once it sizes the terminal: no feedback loop", () => {
+    const sizes: TerminalSize[] = [];
+    const view = popout((s) => sizes.push(s));
+    const dialog = view.getByRole("dialog");
+    const opened = dialog.style.width;
+    expect(opened).toContain("120ch");
+    act(() => vi.advanceTimersByTime(TERMINAL_RESIZE_DEBOUNCE_MS));
+    // The agent redraws at the reported width (and at a narrower one): the window keeps its size,
+    // so the measurement, and the report, hold.
+    for (const width of [125, 90]) {
+      view.rerender(
+        <TerminalPopout
+          agent={{ ...AGENT, screen: { ...AGENT.screen, lines: ["x".repeat(width)] } } as AgentView}
+          wave={undefined}
+          z={1}
+          onClose={() => {}}
+          onRaise={() => {}}
+          fontPx={12}
+          onFont={() => {}}
+          onSize={(s) => sizes.push(s)}
+        />,
+      );
+      act(() => vi.advanceTimersByTime(TERMINAL_RESIZE_DEBOUNCE_MS));
+      expect(dialog.style.width).toBe(opened);
+    }
+    expect(sizes).toEqual([{ cols: 125, rows: 32 }]);
   });
 
   it("is volleyd's terminal_resize op: cols/rows, or reset", () => {
