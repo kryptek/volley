@@ -852,6 +852,70 @@ describe("SshTmuxHost", () => {
     expect(none.steps().some(argvIs("mv"))).toBe(false);
   });
 
+  it("seedProfile: a profile's onboarding keys and settings.json, compare-and-swap by absolute path (#400)", async () => {
+    const P = "/path/to/home/.volley/claude/work";
+    const profile = `${JSON.stringify({ oauthAccount: { emailAddress: "a@b.co" } })}\n`;
+    const r = remote((s) =>
+      argvIs("cat", ".claude.json")(s)
+        ? { stdout: profile }
+        : argvIs("cat", `${P}/settings.json`)(s)
+          ? { code: 1, stderr: "No such file" }
+          : undefined,
+    );
+    expect(await r.host.seedProfile(P, "2.0.0")).toEqual({
+      ".claude.json": ["hasCompletedOnboarding", "lastOnboardingVersion", "theme"],
+      "settings.json": ["skipDangerousModePermissionPrompt"],
+    });
+    const decode = (st: { stdin?: string } | undefined) =>
+      JSON.parse(Buffer.from(st?.stdin ?? "", "base64").toString());
+    const json = r
+      .scripts()
+      .find((x) => x?.steps.some(argvIs("mv", "-f", `${P}/.claude.json.volleyd.tmp`)));
+    expect(json?.steps.map((x) => x.argv)).toEqual([
+      ["cmp", "-s", "-", `${P}/.claude.json`],
+      ["base64", "-d"],
+      ["mv", "-f", `${P}/.claude.json.volleyd.tmp`, `${P}/.claude.json`],
+    ]);
+    expect(decode(json?.steps[1])).toEqual({
+      oauthAccount: { emailAddress: "a@b.co" },
+      hasCompletedOnboarding: true,
+      lastOnboardingVersion: "2.0.0",
+      theme: "dark",
+    });
+    // No settings.json yet: written whole (there is nothing to compare against).
+    const settings = r
+      .scripts()
+      .find((x) => x?.steps.some(argvIs("mv", "-f", `${P}/settings.json.volleyd.tmp`)));
+    expect(settings?.steps.map((x) => x.argv)).toEqual([
+      ["base64", "-d"],
+      ["mv", "-f", `${P}/settings.json.volleyd.tmp`, `${P}/settings.json`],
+    ]);
+    expect(settings?.steps[0]?.stdout).toBe(`${P}/settings.json.volleyd.tmp`);
+    expect(decode(settings?.steps[0])).toEqual({ skipDangerousModePermissionPrompt: true });
+  });
+
+  it("seedProfile writes nothing to a ready profile", async () => {
+    const P = "/path/to/home/.volley/claude/work";
+    const r = remote((s) =>
+      argvIs("cat", ".claude.json")(s)
+        ? {
+            stdout: JSON.stringify({
+              hasCompletedOnboarding: true,
+              lastOnboardingVersion: "1.0.0",
+              theme: "light",
+            }),
+          }
+        : argvIs("cat", `${P}/settings.json`)(s)
+          ? { stdout: '{"skipDangerousModePermissionPrompt":true}' }
+          : undefined,
+    );
+    expect(await r.host.seedProfile(P, "2.0.0")).toEqual({
+      ".claude.json": [],
+      "settings.json": [],
+    });
+    expect(r.steps().some(argvIs("mv"))).toBe(false);
+  });
+
   it("exec routes credentials and the brief gate to the daemon's machine, the rest remote", async () => {
     const r = remote((s) => (argvIs("cat")(s) ? { stdout: "the brief\n" } : undefined));
     r.fake.on(["volley", "auth", "list"], { stdout: '{"accounts":[]}' });

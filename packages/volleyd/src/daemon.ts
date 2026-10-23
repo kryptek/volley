@@ -4487,7 +4487,7 @@ export class Daemon {
         this.broker.publish(topic, payload, { qos: 1, retain: true }),
       openDecision: (d) => this.openSpawnDecision(wave, d),
       prepareAccount: async (a) => {
-        this.claude.prepare(a);
+        await this.claude.prepare(a);
       },
       resolveDecision: async (id, answer, by) => {
         await this.resolveNow(wave, id, { answer, by });

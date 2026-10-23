@@ -5,6 +5,7 @@ import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn } from "../exec";
 import type { RemoteHost } from "../hosts/ssh-tmux";
 import type { MachineRecord } from "../machines";
+import { sessionsRunningIn } from "../procs";
 import { readClaudeJson } from "../trust";
 import type { NewEvent } from "../types";
 import { type LoginIdentity, loginIdentity, readLoginIdentity } from "./identity";
@@ -28,12 +29,14 @@ import {
   runRemoteSignin,
 } from "./remote-signin";
 import {
+  type ProfileKeys,
   type ShareResult,
   SharingError,
   applySharing,
   planSharing,
+  profileReady,
   readSharing,
-  seedOnboarding,
+  seedProfile,
   syncMcp,
 } from "./sharing";
 import { SUPERSEDED, type SigninEvent, parseAuthStatus, profileEnv, runSignin } from "./signin";
@@ -131,6 +134,7 @@ export class ClaudeService {
   private primaryAsk: Promise<void> | undefined;
   /** Each paired machine's HOME, once a sign-in there learned it: where its profiles are. */
   private readonly homes = new Map<string, string>();
+  private versionAsk: Promise<string | undefined> | undefined;
   constructor(private readonly d: ClaudeServiceDeps) {
     // real clock: the default when the daemon injects no clock
     this.clock = d.clock ?? systemClock;
@@ -270,16 +274,105 @@ export class ClaudeService {
   }
 
   /**
-   * Sharing (sharing.yaml), the onboarding seed and, for `mcp: copy`, the MCP servers sync:
-   * before every spawn.
+   * Sharing (sharing.yaml), the onboarding seed (seedLocal) and, for `mcp: copy`, the MCP servers
+   * sync: before every spawn.
    */
-  prepare(acct: { id: string; dir: string }): { shared: ShareResult[]; mcp_servers?: number } {
+  async prepare(acct: {
+    id: string;
+    dir: string;
+  }): Promise<{ shared: ShareResult[]; mcp_servers?: number }> {
     const sharing = readSharing(this.d.root);
     const shared = applySharing(planSharing(sharing, this.primaryDir, acct.dir));
-    seedOnboarding(join(acct.dir, ".claude.json"));
+    await this.seedLocal(acct);
     if (sharing.mcp !== "copy") return { shared };
     const mcp = syncMcp(this.d.primaryJson, join(acct.dir, ".claude.json"));
     return { shared, mcp_servers: mcp.servers.length };
+  }
+
+  /**
+   * Claude Code's version on this machine (`claude --version`), else the one the primary profile
+   * recorded (`lastOnboardingVersion`): what a seeded profile records. Asked once.
+   */
+  claudeVersion(): Promise<string | undefined> {
+    this.versionAsk ??= (async () => {
+      try {
+        const r = await this.d.exec(["claude", "--version"], {
+          timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms,
+        });
+        const v = /\b\d+\.\d+\.\d+\S*/.exec(r.stdout)?.[0];
+        if (r.code === 0 && v !== undefined) return v;
+      } catch {} // no `claude` here
+      const own = readClaudeJson(this.d.primaryJson)?.lastOnboardingVersion;
+      return typeof own === "string" && own !== "" ? own : undefined;
+    })();
+    return this.versionAsk;
+  }
+
+  /**
+   * Make a local profile ready to run agents unattended (sharing.ts seedProfile) unless it is,
+   * and only while no agent session runs in it: Claude Code rewrites `.claude.json` from memory,
+   * so a write under a running session would be lost. Null: nothing to do, or put off.
+   */
+  private async seedLocal(acct: { id: string; dir: string }): Promise<ProfileKeys | null> {
+    const missing = profileReady(acct.dir);
+    if (missing[".claude.json"].length === 0 && missing["settings.json"].length === 0) return null;
+    const running = await sessionsRunningIn(this.d.exec, acct.dir).catch(() => 0);
+    if (running > 0) {
+      this.d.log(
+        `profile ${acct.id}: onboarding keys missing while ${running} session(s) run; re-checked at the next spawn`,
+      );
+      return null;
+    }
+    const v = await this.claudeVersion();
+    return seedProfile(acct.dir, v !== undefined ? { claudeVersion: v } : {});
+  }
+
+  /**
+   * Seed a profile on the machine it lives on: a local one in place, a paired machine's through
+   * its host (RemoteHost.seedProfile). Its agent's session must have ended: callers are a
+   * sign-in that just completed, a spawn before its launch, and the first-run repair after the
+   * stuck session was closed. Returns the keys written, per file.
+   */
+  async seedProfile(acct: { id: string; dir: string; machine: string }): Promise<ProfileKeys> {
+    const v = await this.claudeVersion();
+    if (acct.machine === LOCAL_MACHINE)
+      return seedProfile(acct.dir, v !== undefined ? { claudeVersion: v } : {});
+    const host = this.d.remote?.(acct.machine) ?? `no paired machine '${acct.machine}'`;
+    if (typeof host === "string") throw new Error(host);
+    return host.seedProfile(acct.dir, v);
+  }
+
+  /** After a sign-in: seed the profile, and say why not (the sign-in itself stands). */
+  private async seedAfterSignin(acct: { id: string; dir: string; machine: string }) {
+    try {
+      const keys = await this.seedProfile(acct);
+      const all = [...keys[".claude.json"], ...keys["settings.json"]];
+      if (all.length > 0) this.d.log(`profile ${acct.id}: prepared (${all.join(", ")})`);
+    } catch (e) {
+      this.d.log(
+        `profile ${acct.id}: not prepared after its sign-in: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  /** A local profile's sign-in run, which prepares the profile once it is signed in. */
+  private localSignin(acct: string) {
+    return (r: SigninRun) =>
+      runSignin({
+        ...r,
+        exec: this.d.exec,
+        root: this.d.root,
+        acct,
+        publish: async (e) => {
+          if (e.type === "claude_signin_done")
+            await this.seedAfterSignin({
+              id: acct,
+              dir: profileDir(this.d.root, acct),
+              machine: LOCAL_MACHINE,
+            });
+          await r.publish(e);
+        },
+      });
   }
 
   /**
@@ -394,9 +487,7 @@ export class ClaudeService {
       data: { acct: acct.id, label: acct.label, machine: acct.machine, by },
     });
     if (host !== null) return this.remoteProfileSignin(acct, host, by, { account: acct });
-    return this.answerSignin(acct.id, by, { account: acct }, (r) =>
-      runSignin({ ...r, exec: this.d.exec, root: this.d.root, acct: acct.id }),
-    );
+    return this.answerSignin(acct.id, by, { account: acct }, this.localSignin(acct.id));
   }
 
   /**
@@ -452,9 +543,7 @@ export class ClaudeService {
         ok: false,
         error: `Claude account '${acct}' is already signed in; to sign it in as another Claude account, run \`CLAUDE_CONFIG_DIR=${dir} claude auth logout\` first`,
       };
-    return this.answerSignin(acct, by, {}, (r) =>
-      runSignin({ ...r, exec: this.d.exec, root: this.d.root, acct }),
-    );
+    return this.answerSignin(acct, by, {}, this.localSignin(acct));
   }
 
   /**
@@ -517,6 +606,13 @@ export class ClaudeService {
               { ...facts, ...(home !== undefined ? { dir: remoteProfileDir(home, a.id) } : {}) },
               new Date(r.now()).toISOString(),
             );
+            // Its sign-in session has ended: nothing runs in the profile yet.
+            if (home !== undefined)
+              await this.seedAfterSignin({
+                id: a.id,
+                dir: remoteProfileDir(home, a.id),
+                machine: a.machine,
+              });
           }
           await r.publish(e);
         },
@@ -606,7 +702,7 @@ export class ClaudeService {
       return { ok: false, error: `unknown Claude account '${want}' on this machine` };
     const out: Record<string, unknown>[] = [];
     for (const a of accounts) {
-      const r = this.prepare({ id: a.id, dir: profileDir(this.d.root, a.id) });
+      const r = await this.prepare({ id: a.id, dir: profileDir(this.d.root, a.id) });
       const shared = Object.fromEntries(r.shared.map((s) => [s.item, s.result]));
       await this.d.journal({
         type: "claude_profile_synced",

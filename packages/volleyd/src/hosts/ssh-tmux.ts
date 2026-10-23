@@ -8,6 +8,8 @@ import {
   FenceError,
   REMOTE_CLAUDE_JSON,
   REMOTE_CLAUDE_JSON_TMP,
+  REMOTE_SETTINGS_JSON,
+  REMOTE_SETTINGS_JSON_TMP,
   type RemoteStep,
   TMUX_LAUNCH_COMMAND,
 } from "../fence";
@@ -15,6 +17,7 @@ import { fetchFailure, lockedFetch } from "../git-lock";
 import { type DoctorReport, parseDoctorReport } from "../machines";
 import { PATH_TOOLS, type PathProbe, parsePathProbe } from "../readiness";
 import { SpawnError } from "../spawn-error";
+import { type ProfileKeys, onboardingEdits } from "../claude/sharing";
 import { withTrust } from "../trust";
 import type { RemoteHostConfig } from "../types";
 import { EXCLUDE_LINES, firstLine, freshBaseFix } from "../worktree";
@@ -99,6 +102,12 @@ export interface RemoteHost extends Host {
   readTrust(configDir?: string): Promise<Record<string, unknown> | null>;
   /** The owner's `trust` answer, recorded in the box's own `~/.claude.json` (or the profile's). */
   recordTrust(root: string, configDir?: string): Promise<void>;
+  /**
+   * Make a profile the supervisor created on the box ready to run agents unattended (#400): its
+   * onboarding keys and bypass consent (claude/sharing.ts onboardingEdits). Returns the keys it
+   * wrote, per file; throws if ssh fails or the profile has no readable `.claude.json`.
+   */
+  seedProfile(configDir: string, claudeVersion?: string): Promise<ProfileKeys>;
   /** A file on the box; null when it does not exist; throws when ssh fails. */
   readFile(path: string): Promise<string | null>;
   /**
@@ -748,6 +757,88 @@ export class SshTmuxHost implements RemoteHost {
       if (r.code === 0) return;
     }
     throw new Error(`~/.claude.json on ${this.spec.target} kept changing; trust not recorded`);
+  }
+
+  /**
+   * RemoteHost.seedProfile: the profile's `.claude.json` and `settings.json`, each by
+   * compare-and-swap. The version is the box's own (its default profile's
+   * `lastOnboardingVersion`), else `claudeVersion` (the supervisor's).
+   */
+  async seedProfile(configDir: string, claudeVersion?: string): Promise<ProfileKeys> {
+    const settingsPath = posix.join(configDir, REMOTE_SETTINGS_JSON);
+    const readSettings = async (): Promise<{
+      text: string | null;
+      cfg: Record<string, unknown>;
+    }> => {
+      const r = await this.run([{ argv: ["cat", settingsPath] }]).catch(
+        this.noResult(`read ${settingsPath}`),
+      );
+      if (r === null || transportFailed(r)) throw this.sshFailed(`read ${settingsPath}`, r);
+      if (r.code !== 0) return { text: null, cfg: {} };
+      try {
+        const cfg = JSON.parse(r.stdout) as unknown;
+        if (typeof cfg === "object" && cfg !== null && !Array.isArray(cfg))
+          return { text: r.stdout, cfg: cfg as Record<string, unknown> };
+      } catch {}
+      // Not a JSON object: Claude Code would not read it either; left to the owner.
+      throw new Error(`${settingsPath} on ${this.spec.target} is not a JSON object`);
+    };
+    // The box's own Claude Code version, as its default profile recorded it; else the caller's.
+    const own = (await this.readClaudeJsonText().catch(() => null))?.cfg.lastOnboardingVersion;
+    const version = typeof own === "string" && own !== "" ? own : claudeVersion;
+    const keys: ProfileKeys = { ".claude.json": [], "settings.json": [] };
+    keys[".claude.json"] = await this.swap(
+      posix.join(configDir, REMOTE_CLAUDE_JSON),
+      posix.join(configDir, REMOTE_CLAUDE_JSON_TMP),
+      async () => {
+        const cur = await this.readClaudeJsonText(configDir);
+        if (cur === null)
+          throw new Error(
+            `no readable ${posix.join(configDir, REMOTE_CLAUDE_JSON)} on ${this.spec.target}: sign the account in first`,
+          );
+        const e = onboardingEdits(cur.cfg, {}, version);
+        return { text: cur.text, next: e.claudeJson, keys: e.keys[".claude.json"] };
+      },
+    );
+    keys["settings.json"] = await this.swap(
+      settingsPath,
+      posix.join(configDir, REMOTE_SETTINGS_JSON_TMP),
+      async () => {
+        const cur = await readSettings();
+        const e = onboardingEdits({}, cur.cfg);
+        return { text: cur.text, next: e.settings, keys: e.keys["settings.json"] };
+      },
+    );
+    return keys;
+  }
+
+  /**
+   * Compare-and-swap one profile file (recordTrust's way): `read` it, write `next` beside it and
+   * `mv` it in only if the file is still what was read; a file that changed is re-read and the
+   * write retried. A file that did not exist (`text` null) is written whole. Returns the keys
+   * written; nothing to write, nothing is run.
+   */
+  private async swap(
+    path: string,
+    tmp: string,
+    read: () => Promise<{ text: string | null; next: Record<string, unknown>; keys: string[] }>,
+  ): Promise<string[]> {
+    for (let i = 0; i < DAEMON_DEFAULTS.trust_write_attempts; i++) {
+      const cur = await read();
+      if (cur.keys.length === 0) return [];
+      const r = await this.run([
+        ...(cur.text !== null ? [{ argv: ["cmp", "-s", "-", path], stdin: b64(cur.text) }] : []),
+        {
+          argv: ["base64", "-d"],
+          stdin: b64(`${JSON.stringify(cur.next, null, 2)}\n`),
+          stdout: tmp,
+        },
+        { argv: ["mv", "-f", tmp, path] },
+      ]).catch(this.noResult(`write ${path}`));
+      if (r === null || transportFailed(r)) throw this.sshFailed(`write ${path}`, r);
+      if (r.code === 0) return cur.keys;
+    }
+    throw new Error(`${path} on ${this.spec.target} kept changing; not written`);
   }
 }
 

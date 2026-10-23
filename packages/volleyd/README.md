@@ -3460,8 +3460,9 @@ ALLOW (program by bare name only — never a path):
     launch commands above run; its options are pinned (LAUNCH_SCRIPT_VARS), including
     `[--strict-mcp-config] --mcp-config=<worktree>/.volley/mcp.json -- <prompt>` (the flag is
     left out only under `agent_mcp: inherit`) — or from a
-    sealed sign-in script (below). The one direct call: `claude auth status` (exactly; it prints
-    a profile's login state and plan, never a credential)
+    sealed sign-in script (below). The direct calls: `claude auth status` (exactly; it prints
+    a profile's login state and plan, never a credential) and `claude --version` (exactly: the
+    version a seeded profile records as its `lastOnboardingVersion`)
   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
@@ -3561,7 +3562,8 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     runs only from a sealed signin.sh) — the one step with an env: `env.CLAUDE_CONFIG_DIR`
     only, only `<abs>/.volley/claude/<acct>` (a profile the supervisor created there),
     rendered as one single-quoted `CLAUDE_CONFIG_DIR=…` before the argv
-  cat <path>… — only the files volleyd reads: `.claude.json`, a path ending in
+  cat <path>… — only the files volleyd reads: `.claude.json`, a remote profile's
+    `<home>/.volley/claude/<acct>/settings.json`, a path ending in
     `/info/exclude`, `<dir>/.volley/<name>` for a VOLLEY_READS name, a worktree's
     `<abs dir>/.mcp.json` (no `..` segment), or a sign-in dir's `url`
   base64 -d — the only step that redirects to a file, from base64 text on stdin, under umask
@@ -3595,6 +3597,9 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     mv -f .claude.json.volleyd.tmp .claude.json — or, for a profile the supervisor created
     there, the same three steps on `<home>/.volley/claude/<acct>/.claude.json` and its
     `.claude.json.volleyd.tmp` (absolute paths; the tmp the only other file base64 -d writes)
+  the onboarding seed (RemoteHost.seedProfile, #400): in a profile the supervisor created
+    there, the trust write's steps on its `.claude.json`, and the same on its `settings.json`
+    with `settings.json.volleyd.tmp` (absolute paths); nothing else of the profile
   Every other step's stdin is /dev/null, so no step can read the rest of the script.
 
 OPTIONS: every git and gh subcommand above has an exact option allow-list (GIT_SPECS and

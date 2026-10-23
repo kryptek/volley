@@ -65,6 +65,7 @@ async function setup(opts: { signInAfter?: number; primary?: Record<string, unkn
   );
   let polls = 0;
   const fx = fakeExec()
+    .on(["claude", "--version"], { stdout: "2.0.14 (Claude Code)\n" })
     .on(["tmux", "new-session"], (argv) => {
       writeFileSync(join(argv[6] as string, "url"), CALLBACK);
       return {};
@@ -135,6 +136,18 @@ describe("claude_* control ops", () => {
       });
       // non-retained: nothing left on the topic
       expect(await env.retained("volley/_system/claude/work/signin")).toBeNull();
+
+      // The signed-in profile is ready to run agents unattended (#400).
+      const profile = join(t.root, "work");
+      expect(JSON.parse(readFileSync(join(profile, ".claude.json"), "utf-8"))).toMatchObject({
+        oauthAccount: { emailAddress: "owner@example.com" },
+        hasCompletedOnboarding: true,
+        lastOnboardingVersion: "2.0.14",
+        theme: "dark",
+      });
+      expect(JSON.parse(readFileSync(join(profile, "settings.json"), "utf-8"))).toMatchObject({
+        skipDangerousModePermissionPrompt: true,
+      });
 
       const list = await t.client.request("claude_accounts", {});
       const accounts = (list.result as { accounts: Record<string, unknown>[] }).accounts;
@@ -624,6 +637,17 @@ describe("claude_account_add on a paired machine (<acct>@<name>)", () => {
       });
       // the profile's dir there is recorded: the launch fence admits exactly it for peer-a
       expect(readRegistry(t.root).accounts[0]?.dir).toBe(PROFILE);
+      // ...and the profile is ready to run agents unattended (#400): onboarding done, a theme,
+      // the bypass consent, written there by compare-and-swap; the login is kept.
+      const json = JSON.parse(t.b.box.files.get(`${PROFILE}/.claude.json`) ?? "{}");
+      expect(json).toMatchObject({
+        oauthAccount: { emailAddress: "owner@example.com" },
+        hasCompletedOnboarding: true,
+        theme: "dark",
+      });
+      expect(JSON.parse(t.b.box.files.get(`${PROFILE}/settings.json`) ?? "{}")).toEqual({
+        skipDangerousModePermissionPrompt: true,
+      });
       const journal = readFileSync(join(env.home, "waves", "_system", "journal.jsonl"), "utf-8");
       expect(journal).not.toContain("oauth/authorize");
       expect(journal).not.toContain("@example.com");

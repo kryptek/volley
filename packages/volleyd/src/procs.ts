@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { type Clock, sleep, systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
@@ -59,6 +59,26 @@ export async function listAgentProcesses(exec: ExecFn): Promise<(PsEntry & { mcp
     const mcp = mcpConfigOf(p.command);
     return mcp === null || p.pid === process.pid ? [] : [{ ...p, mcp }];
   });
+}
+
+/** A launch script's profile line (launch.ts renderLaunchScript): `export CLAUDE_CONFIG_DIR='…'`. */
+const LAUNCH_PROFILE = /^export CLAUDE_CONFIG_DIR='((?:[^']|'\\'')*)'$/m;
+
+/**
+ * How many agent sessions run in the Claude profile `dir`: the agent processes (by their
+ * `--mcp-config=`) whose worktree's `.volley/launch.sh` exports that `CLAUDE_CONFIG_DIR`. A
+ * session started by hand under the profile is not counted.
+ */
+export async function sessionsRunningIn(exec: ExecFn, dir: string): Promise<number> {
+  const procs = await listAgentProcesses(exec);
+  return procs.filter((p) => {
+    try {
+      const m = LAUNCH_PROFILE.exec(readFileSync(join(dirname(p.mcp), "launch.sh"), "utf-8"));
+      return m !== null && (m[1] as string).replace(/'\\''/g, "'") === dir;
+    } catch {
+      return false;
+    }
+  }).length;
 }
 
 export interface StopOptions {

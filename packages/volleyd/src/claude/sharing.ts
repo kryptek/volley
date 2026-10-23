@@ -251,17 +251,112 @@ export function syncMcp(
 }
 
 /**
- * Mark a profile's onboarding done (`hasCompletedOnboarding: true`) unless it already is: a fresh
- * profile has a sign-in but not this, and an agent's first session would stop at onboarding.
+ * What a profile needs to run an agent unattended, past Claude Code's first-run screens (#400):
+ * in `.claude.json` the onboarding done (`hasCompletedOnboarding`, `lastOnboardingVersion`: the
+ * theme picker and the security notice) and a `theme`; in `settings.json` the bypass-permissions
+ * consent (`skipDangerousModePermissionPrompt`), which every agent's launch asks for.
  */
-export function seedOnboarding(
-  profileJson: string,
-  opts: { lockAttempts?: number; lockWaitMs?: number; lockStaleMs?: number } = {},
-): boolean {
-  return editClaudeJson(
-    profileJson,
-    (cur) =>
-      cur.hasCompletedOnboarding === true ? null : { ...cur, hasCompletedOnboarding: true },
-    opts,
+export const ONBOARDING_KEYS = {
+  ".claude.json": ["hasCompletedOnboarding", "lastOnboardingVersion", "theme"],
+  "settings.json": ["skipDangerousModePermissionPrompt"],
+} as const;
+/** The theme a seeded profile gets when it has none (any value passes the picker). */
+export const ONBOARDING_THEME = "dark";
+
+export type ProfileKeys = { ".claude.json": string[]; "settings.json": string[] };
+
+/**
+ * The keys `claudeJson` and `settings` (parsed; `{}` when absent) still lack, per file. Pure:
+ * the doctor's `claude.profiles` check and a remote seed apply the same rule.
+ */
+export function missingProfileKeys(
+  claudeJson: Record<string, unknown>,
+  settings: Record<string, unknown>,
+): ProfileKeys {
+  const present = (o: Record<string, unknown>, k: string) =>
+    k === "hasCompletedOnboarding" || k === "skipDangerousModePermissionPrompt"
+      ? o[k] === true
+      : typeof o[k] === "string" && o[k] !== "";
+  return {
+    ".claude.json": ONBOARDING_KEYS[".claude.json"].filter((k) => !present(claudeJson, k)),
+    "settings.json": ONBOARDING_KEYS["settings.json"].filter((k) => !present(settings, k)),
+  };
+}
+
+/**
+ * The seed as a pure edit: each file with its missing keys added (a version only when one is
+ * known; a theme the owner chose is kept) and the keys written, per file. A file with nothing
+ * to add comes back unchanged.
+ */
+export function onboardingEdits(
+  claudeJson: Record<string, unknown>,
+  settings: Record<string, unknown>,
+  claudeVersion?: string,
+): { claudeJson: Record<string, unknown>; settings: Record<string, unknown>; keys: ProfileKeys } {
+  const missing = missingProfileKeys(claudeJson, settings);
+  const value: Record<string, unknown> = {
+    hasCompletedOnboarding: true,
+    lastOnboardingVersion: claudeVersion,
+    theme: ONBOARDING_THEME,
+    skipDangerousModePermissionPrompt: true,
+  };
+  const add = (cur: Record<string, unknown>, keys: string[]) => {
+    const written = keys.filter((k) => value[k] !== undefined);
+    return { next: { ...cur, ...Object.fromEntries(written.map((k) => [k, value[k]])) }, written };
+  };
+  const j = add(claudeJson, missing[".claude.json"]);
+  const st = add(settings, missing["settings.json"]);
+  return {
+    claudeJson: j.next,
+    settings: st.next,
+    keys: { ".claude.json": j.written, "settings.json": st.written },
+  };
+}
+
+/** The keys a local profile still lacks, per file (`profileReady(dir)` all empty: ready). */
+export function profileReady(profileDir: string): ProfileKeys {
+  return missingProfileKeys(
+    readJson(join(profileDir, ".claude.json")) ?? {},
+    readJson(join(profileDir, "settings.json")) ?? {},
   );
+}
+
+/**
+ * Make a local profile ready to run agents unattended (onboardingEdits): `.claude.json` under its
+ * lock (editClaudeJson; a symlink throws), `settings.json` through a temp file and a rename. A
+ * `settings.json` linked to the primary's (`settings.json: linked`) is the primary's own and is
+ * left as is. Returns the keys it wrote, per file (all empty: nothing to do). Claude Code
+ * rewrites `.claude.json` from memory, so callers seed only while no session runs in the profile.
+ */
+export function seedProfile(
+  profileDir: string,
+  opts: {
+    claudeVersion?: string;
+    lockAttempts?: number;
+    lockWaitMs?: number;
+    lockStaleMs?: number;
+  } = {},
+): ProfileKeys {
+  const { claudeVersion, ...lock } = opts;
+  const keys: ProfileKeys = { ".claude.json": [], "settings.json": [] };
+  editClaudeJson(
+    join(profileDir, ".claude.json"),
+    (cur) => {
+      const e = onboardingEdits(cur, {}, claudeVersion);
+      keys[".claude.json"] = e.keys[".claude.json"];
+      return e.keys[".claude.json"].length > 0 ? e.claudeJson : null;
+    },
+    lock,
+  );
+  const settings = join(profileDir, "settings.json");
+  if (!(present(settings) && lstatSync(settings).isSymbolicLink())) {
+    const e = onboardingEdits({}, readJson(settings) ?? {});
+    if (e.keys["settings.json"].length > 0) {
+      const tmp = `${settings}.volleyd.tmp`;
+      writeFileSync(tmp, `${JSON.stringify(e.settings, null, 2)}\n`, { mode: 0o600 });
+      renameSync(tmp, settings);
+      keys["settings.json"] = e.keys["settings.json"];
+    }
+  }
+  return keys;
 }

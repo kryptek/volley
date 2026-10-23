@@ -1274,4 +1274,41 @@ describe("a profile on a paired machine in its launch.sh (account balancing)", (
     ])
       expect(() => assertAllowed(SSH, remote(bad))).toThrow(FenceError);
   });
+
+  it("the onboarding seed: that profile's settings.json read and written like its .claude.json (#400)", () => {
+    const b = (t: string) => Buffer.from(t).toString("base64");
+    const steps: RemoteStep[] = [
+      step("cat", `${DIR}/settings.json`),
+      { argv: ["cmp", "-s", "-", `${DIR}/settings.json`], stdin: b("{}") },
+      {
+        argv: ["base64", "-d"],
+        stdin: b('{"skipDangerousModePermissionPrompt":true}'),
+        stdout: `${DIR}/settings.json.volleyd.tmp`,
+      },
+      step("mv", "-f", `${DIR}/settings.json.volleyd.tmp`, `${DIR}/settings.json`),
+    ];
+    for (const s of steps) expect(() => assertAllowed(SSH, remote(s))).not.toThrow();
+    for (const bad of [
+      step("cat", `${DIR}/anything-else.json`),
+      step("cat", "/path/to/home/.claude/settings.json"),
+      { argv: ["cmp", "-s", "-", `${DIR}/anything-else.json`], stdin: b("{}") },
+      { argv: ["base64", "-d"], stdin: b("{}"), stdout: `${DIR}/anything-else.json` },
+      { argv: ["base64", "-d"], stdin: b("{}"), stdout: `${DIR}/settings.json` },
+      {
+        argv: ["base64", "-d"],
+        stdin: b("{}"),
+        stdout: `${DIR}/settings.json.volleyd.tmp`,
+        append: true,
+      },
+      step("mv", "-f", `${DIR}/settings.json.volleyd.tmp`, `${DIR}/.claude.json`),
+      step(
+        "mv",
+        "-f",
+        `${DIR}/settings.json.volleyd.tmp`,
+        "/path/to/home/.volley/claude/x/settings.json",
+      ),
+      step("mv", "-f", "/tmp/settings.json.volleyd.tmp", "/tmp/settings.json"),
+    ] as RemoteStep[])
+      expect(() => assertAllowed(SSH, remote(bad))).toThrow(FenceError);
+  });
 });

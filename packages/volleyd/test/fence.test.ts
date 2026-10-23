@@ -261,7 +261,7 @@ const DENIED: string[][] = [
   ["cmux", "list-workspaces", "--json", "--evil"],
   ["cmux", "ping", "x"],
   ["claude", "--dangerously-skip-permissions", "--model", "claude-opus-5-5"],
-  ["claude", "--version"],
+  ["claude", "--version", "--debug"],
   ["claude"],
   // P2-6 (b): fetch may only write remote-tracking refs; worktree add never checks out main
   ["git", "fetch", "origin", "+HEAD:refs/heads/main"],
@@ -356,6 +356,8 @@ const DENIED: string[][] = [
 
 const ALLOWED: string[][] = [
   ["ps", "-axo", "pid=,command="],
+  // The version a seeded profile records (#400); nothing else runs claude directly but auth status.
+  ["claude", "--version"],
   ["mosquitto", "-h"],
   ["volley", "auth", "list", "--json"],
   ["volley", "auth", "add", "phone", "--role", "steer", "--json"],
