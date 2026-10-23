@@ -7,7 +7,8 @@
   "type": "module",
   "bin": { "volleyd": "./src/cli.ts" },
   "exports": {
-    "./claude/sharing": "./src/claude/sharing.ts"
+    "./claude/sharing": "./src/claude/sharing.ts",
+    "./paired-hosts": "./src/paired-hosts.ts"
   },
   "scripts": {
     "test": "vitest run",
