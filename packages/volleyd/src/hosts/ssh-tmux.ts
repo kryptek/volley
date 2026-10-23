@@ -5,6 +5,7 @@ import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "../config-defaults";
 import type { ExecFn, ExecOptions, ExecResult } from "../exec";
 import {
   type ConsentToken,
+  FenceError,
   REMOTE_CLAUDE_JSON,
   REMOTE_CLAUDE_JSON_TMP,
   type RemoteStep,
@@ -486,11 +487,11 @@ export class SshTmuxHost implements RemoteHost {
    */
   private async syncTmuxPath(): Promise<void> {
     const dirs = (path: string) => path.split(":").filter((d) => d.startsWith("/"));
-    const r = await this.run([{ argv: ["printenv", "PATH"] }]).catch(() => null);
+    const r = await this.run([{ argv: ["printenv", "PATH"] }]).catch(this.noResult("PATH sync"));
     const ssh = r?.code === 0 && !r.stdout.trim().includes("\n") ? dirs(r.stdout.trim()) : [];
     if (ssh.length === 0) return;
     const shown = await this.run([{ argv: ["tmux", "show-environment", "-g", "PATH"] }]).catch(
-      () => null,
+      this.noResult("PATH sync"),
     );
     const line = shown?.code === 0 ? shown.stdout.trim() : "";
     // `PATH=<dirs>`; `-PATH` (removed) or anything else: the server has no PATH to keep.
@@ -499,7 +500,7 @@ export class SshTmuxHost implements RemoteHost {
     const merged = [...new Set([...ssh, ...server])];
     if (merged.length === server.length) return;
     await this.run([{ argv: ["tmux", "set-environment", "-g", "PATH", merged.join(":")] }]).catch(
-      () => null,
+      this.noResult("PATH sync"),
     );
   }
 
@@ -521,7 +522,7 @@ export class SshTmuxHost implements RemoteHost {
   async readScreen(workspace: string, lines: number): Promise<string | null> {
     const r = await this.run([
       { argv: ["tmux", "capture-pane", "-p", "-t", pane(workspace), `-S-${lines}`] },
-    ]).catch(() => null);
+    ]).catch(this.noResult("read-screen"));
     if (r === null || r.code !== 0) return null;
     // capture-pane prints the whole pane, blank rows included: keep the last `lines` up to the
     // last row with text, like cmux read-screen --lines.
@@ -561,6 +562,26 @@ export class SshTmuxHost implements RemoteHost {
     return { closed, pids: [], how: closed ? "kill-session" : "none" };
   }
 
+  /**
+   * A rejected `run` (the step `what`) as no result, which each caller treats as it treats an
+   * ssh failure (a spawn step reports it through sshFailed and is retried; a best-effort check
+   * gives up) — except a fence denial, rethrown as a permanent FENCE_DENIED SpawnError: a step
+   * the fence refuses is refused on every retry, so it names the denied step, never "no result".
+   */
+  private noResult(what: string): (e: unknown) => null {
+    return (e) => {
+      if (e instanceof FenceError) {
+        throw new SpawnError(
+          "FENCE_DENIED",
+          `${e.message.slice(`${e.code}: `.length)} (${what} on ${this.spec.target})`,
+          { host: this.name, target: this.spec.target, verb: e.verb },
+          { permanent: true },
+        );
+      }
+      return null;
+    };
+  }
+
   /** A transient refusal for an ssh failure: the spawn backs off, no decision is opened. */
   private sshFailed(what: string, r: ExecResult | null): SpawnError {
     const why = r === null ? "no result" : r.timedOut ? "timed out" : r.stderr.trim();
@@ -574,13 +595,13 @@ export class SshTmuxHost implements RemoteHost {
   async repoExists(): Promise<boolean> {
     const r = await this.run([
       { argv: ["git", "-C", this.spec.repo, "rev-parse", "--git-dir"] },
-    ]).catch(() => null);
+    ]).catch(this.noResult("repo check"));
     if (r === null || transportFailed(r)) throw this.sshFailed("repo check", r);
     return r.code === 0;
   }
 
   async readFile(path: string): Promise<string | null> {
-    const r = await this.run([{ argv: ["cat", path] }]).catch(() => null);
+    const r = await this.run([{ argv: ["cat", path] }]).catch(this.noResult(`read ${path}`));
     if (r === null || transportFailed(r)) throw this.sshFailed(`read ${path}`, r);
     return r.code === 0 ? r.stdout : null;
   }
@@ -588,7 +609,7 @@ export class SshTmuxHost implements RemoteHost {
   async probePath(): Promise<PathProbe> {
     const r = await this.run([{ argv: ["command", "-v", ...PATH_TOOLS] }], {
       timeoutMs: DAEMON_DEFAULTS.path_probe_timeout_ms,
-    }).catch(() => null);
+    }).catch(this.noResult("PATH probe"));
     if (r === null || transportFailed(r)) throw this.sshFailed("PATH probe", r);
     // `command -v` exits 1 when a name is missing: what it printed is the answer either way.
     return parsePathProbe(r.stdout);
@@ -608,7 +629,7 @@ export class SshTmuxHost implements RemoteHost {
       // Through run, not exec: `volley` is otherwise a local program (LOCAL_PROGRAMS).
       return this.run([{ argv, cwd: this.spec.volley_dir }], {
         timeoutMs: DAEMON_DEFAULTS.peer_doctor_timeout_ms,
-      }).catch(() => null);
+      }).catch(this.noResult("doctor"));
     };
     // The box's volley_dir: every volley MCP entry there must run it (agents are launched from
     // it). A volley older than the flag refuses it: its doctor then runs without.
@@ -632,12 +653,15 @@ export class SshTmuxHost implements RemoteHost {
     return report;
   }
 
-  /** The tunnel check: something listens on the box's `127.0.0.1:<remote_port>`. */
+  /**
+   * The tunnel check: something listens on the box's `127.0.0.1:<remote_port>`. False when ssh
+   * fails; rejects with FENCE_DENIED only if the fence ever refuses the `nc -z` step.
+   */
   async tunnelUp(): Promise<boolean> {
     const port = String(this.spec.tunnel.remote_port);
     const r = await this.run([{ argv: ["nc", "-z", "127.0.0.1", port] }], {
       timeoutMs: DAEMON_DEFAULTS.tunnel_check_timeout_ms,
-    }).catch(() => null);
+    }).catch(this.noResult("tunnel check"));
     return r?.code === 0 && !r.timedOut;
   }
 
@@ -676,7 +700,7 @@ export class SshTmuxHost implements RemoteHost {
       configDir === undefined
         ? await this.readFile(REMOTE_CLAUDE_JSON)
         : await this.run([{ argv: ["cat", REMOTE_CLAUDE_JSON], cwd: configDir }])
-            .catch(() => null)
+            .catch(this.noResult(`read ${configDir}`))
             .then((r) => {
               if (r === null || transportFailed(r)) throw this.sshFailed(`read ${configDir}`, r);
               return r.code === 0 ? r.stdout : null;
@@ -719,7 +743,7 @@ export class SshTmuxHost implements RemoteHost {
         { argv: ["cmp", "-s", "-", json], stdin: b64(cur.text) },
         { argv: ["base64", "-d"], stdin: b64(next), stdout: tmp },
         { argv: ["mv", "-f", tmp, json] },
-      ]).catch(() => null);
+      ]).catch(this.noResult("trust write"));
       if (r === null || transportFailed(r)) throw this.sshFailed("trust write", r);
       if (r.code === 0) return;
     }

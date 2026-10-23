@@ -50,9 +50,38 @@ describe("machineFor", () => {
     expect(machineFor(agent, wave, state)).toMatchObject({ name: LOCAL, local: true });
   });
 
-  it("a task with neither host nor placement gives null", () => {
+  it("a task with neither host nor placement (a `placement: local` wave) runs on the supervisor", () => {
     const { agent, wave, state } = setup({});
-    expect(machineFor(agent, wave, state)).toBeNull();
+    expect(machineFor(agent, wave, state)).toMatchObject({ name: LOCAL, local: true });
+  });
+
+  it("a task whose host is `local` or `auto` with no placement runs on the supervisor", () => {
+    for (const host of ["local", "auto"]) {
+      const { agent, wave, state } = setup({ host });
+      const m = machineFor(agent, wave, state);
+      expect(m).toMatchObject({ name: LOCAL, local: true });
+      expect(m).not.toHaveProperty("placement");
+    }
+  });
+
+  it("a task whose host is `local` but whose placement names a peer runs on that peer", () => {
+    const p = placement();
+    const { agent, wave, state } = setup({ host: "local", placement: p });
+    expect(machineFor(agent, wave, state)).toMatchObject({
+      name: "box-a",
+      local: false,
+      placement: p,
+    });
+  });
+
+  it("without a configured local name the supervisor's machine is still local", () => {
+    const { agent, wave, state } = setup({});
+    expect(machineFor(agent, wave, { ...state, config: null })).toMatchObject({ local: true });
+  });
+
+  it("a task on a peer with no placement keeps that peer", () => {
+    const { agent, wave, state } = setup({ host: "box-a" });
+    expect(machineFor(agent, wave, state)).toMatchObject({ name: "box-a", local: false });
   });
 
   it("an agent with no wave task gives null", () => {
