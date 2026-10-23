@@ -248,7 +248,7 @@ export async function deployPeer(
     // Each repository's failing checks follow the machine's line.
     const repos = failing
       .filter(repoCheck)
-      .map((c) => `${c.repo !== undefined ? `${c.repo} blocked: ` : ""}${c.id} (${c.detail})`)
+      .map((c) => `${c.repo ?? "clone"} blocked: ${c.id} (${c.detail})`)
       .map((l) => ` · ${l}`)
       .join("");
     return {

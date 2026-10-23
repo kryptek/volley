@@ -291,7 +291,8 @@ describe("a legacy hosts.box.repo (D10) and a local → auto resubmit (D11)", ()
     expect(f.journal("wa").filter((e) => e.type === "task_admission_returned")).toMatchObject([
       { task: "T1", data: { from_host: "local", to_host: "auto" } },
     ]);
-    // Past the refused launch's backoff, within the box's heartbeat timeout.
+    // Past the refused launch's backoff (spawn_retry_base_ms, 30 s), within the box's
+    // heartbeat timeout (machine_down_after_ms, 90 s).
     await f.tick(40_000);
     expect(await spawned("wa")).toBe(PEER);
     expect(

@@ -134,7 +134,7 @@ describe("deployPeer", () => {
     const { r } = await run(h);
     expect(r).toMatchObject({ ok: true, eligible: true });
     expect(r.line).toBe(
-      "box-a: v0.5.0 ✓ eligible · a/a blocked: tool.java (java is not installed (a/a needs it)) · repo.fetch (git fetch failed)",
+      "box-a: v0.5.0 ✓ eligible · a/a blocked: tool.java (java is not installed (a/a needs it)) · clone blocked: repo.fetch (git fetch failed)",
     );
   });
 });

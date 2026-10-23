@@ -158,6 +158,6 @@ RESULTS (<date>, release head <sha>):
   4. smoke-b on the box, Mac blocked "not assigned"; smoke-a placed (where, why):
   5. java missing: smoke-a off the box, smoke-b still there:
   6. deploy: box eligible, both repositories as before:
-  7. remove smoke-b: clone kept, waves wait:
+  7. remove smoke-b: clone kept, new smoke-b wave on the Mac:
   Issues found:
 ```
