@@ -42,6 +42,7 @@ export const DECISION_KINDS = [
   "merge_refused",
   "release_go",
   "stage_go",
+  "terminal_status_lost",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 

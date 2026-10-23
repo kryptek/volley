@@ -48,7 +48,8 @@
                 "machine_down",
                 "merge_refused",
                 "release_go",
-                "stage_go"
+                "stage_go",
+                "terminal_status_lost"
               ]
             },
             "question": { "type": "string", "minLength": 1 },
