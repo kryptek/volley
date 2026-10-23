@@ -1139,6 +1139,19 @@ export default function App() {
               waves={state.waves}
               now={now}
               control={control}
+              mailbox={
+                steering.transport && !demo
+                  ? (i, text) =>
+                      steering.transport?.send(
+                        {
+                          agentId: i.agent_id,
+                          namespace: state.agents[i.agent_id]?.namespace ?? "default",
+                          coordinator: true,
+                        },
+                        text,
+                      )
+                  : null
+              }
               device={deskDevice(narrow)}
               narrow={narrow}
               frame={place(INBOX_ID)}

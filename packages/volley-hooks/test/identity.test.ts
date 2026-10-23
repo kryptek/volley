@@ -15,9 +15,11 @@ import { handle as userPromptSubmit } from "../src/hooks/user-prompt-submit";
 import { invokeHook } from "../src/lib/hook-io";
 import {
   coordinatorEnabled,
+  coordinatorStateDir,
   projectDirOf,
   readAgentIdentity,
   resolveCoordinatorIdentity,
+  sessionKey,
 } from "../src/lib/identity";
 import { startTestBroker } from "./helpers/aedes-broker";
 import { HOOK_NAMES, fixture, hookEnv, makeWorkdir, runHook } from "./helpers/hooks";
@@ -276,6 +278,126 @@ describe("coordinator identity", () => {
     // Not cached: the next hook looks again (and, outside startup, takes the live entry).
     expect((await resolveCoordinatorIdentity(dir, env, lookup))?.agentId).toBe("coordinator-old1");
     expect(lookups).toBe(after + 1);
+  });
+
+  describe("sessions sharing a cwd (#392)", () => {
+    const at = (
+      agentId: string,
+      startedAt: string,
+      surface?: string,
+    ): ReturnType<typeof live> & { surface?: string } => ({
+      ...live(agentId, startedAt),
+      ...(surface !== undefined ? { surface } : {}),
+    });
+    const A = at("coordinator-aaaa", "2026-10-22T10:00:00.000Z", "surface-a");
+    const B = at("coordinator-bbbb", "2026-10-22T10:05:00.000Z", "surface-b");
+
+    it("the session key is the hook input's session_id, else the cmux surface, else none", () => {
+      expect(sessionKey({ session_id: "s1" }, { CMUX_SURFACE_ID: "x" })).toBe("session:s1");
+      expect(sessionKey({}, { CMUX_SURFACE_ID: "x" })).toBe("surface:x");
+      expect(sessionKey({ session_id: "" }, {})).toBeNull();
+    });
+
+    it("each session resolves its own entry by surface and keeps its own state dir", async () => {
+      const { dir, env } = setup();
+      const lookup = async () => [B, A];
+      const a = await resolveCoordinatorIdentity(
+        dir,
+        { ...env, CMUX_SURFACE_ID: "surface-a" },
+        lookup,
+        {
+          refresh: true,
+          sessionKey: "session:a",
+        },
+      );
+      const b = await resolveCoordinatorIdentity(
+        dir,
+        { ...env, CMUX_SURFACE_ID: "surface-b" },
+        lookup,
+        {
+          refresh: true,
+          sessionKey: "session:b",
+        },
+      );
+      expect(a?.agentId).toBe("coordinator-aaaa");
+      expect(b?.agentId).toBe("coordinator-bbbb");
+      expect(a?.stateDir).not.toBe(b?.stateDir);
+      expect(a?.stateDir).toBe(coordinatorStateDir(dir, env, "session:a"));
+    });
+
+    it("never adopts an entry recorded from another surface", async () => {
+      const { dir, env } = setup();
+      const id = await resolveCoordinatorIdentity(
+        dir,
+        { ...env, CMUX_SURFACE_ID: "surface-a" },
+        async () => [B],
+        { refresh: true, sessionKey: "session:a" },
+      );
+      expect(id).toBeNull();
+    });
+
+    it("at startup, another surface's entry alone does not cache a miss: it waits for its own", async () => {
+      const { dir, env } = setup();
+      const b = at("coordinator-bbbb", "2026-10-22T10:05:01.000Z", "surface-b");
+      let lookups = 0;
+      const lookup = async () => {
+        lookups++;
+        return lookups < 2 ? [A] : [b, A];
+      };
+      const benv = { ...env, CMUX_SURFACE_ID: "surface-b" };
+      const id = await resolveCoordinatorIdentity(dir, benv, lookup, {
+        refresh: true,
+        notBefore: Date.parse("2026-10-22T09:59:00.000Z"),
+        retryDelayMs: 0,
+        sessionKey: "session:b",
+      });
+      expect(id?.agentId).toBe("coordinator-bbbb");
+      expect(lookups).toBe(2);
+    });
+
+    it("without cmux, a session keeps the entry it resolved first after a newer one appears", async () => {
+      const { dir, env } = setup();
+      const a0 = at("coordinator-aaaa", "2026-10-22T10:00:00.000Z");
+      const b0 = at("coordinator-bbbb", "2026-10-22T10:05:00.000Z");
+      let entries = [a0];
+      const lookup = async () => entries;
+      const first = await resolveCoordinatorIdentity(dir, env, lookup, { sessionKey: "session:a" });
+      expect(first?.agentId).toBe("coordinator-aaaa");
+      entries = [b0, a0];
+      const again = await resolveCoordinatorIdentity(dir, env, lookup, {
+        refresh: true,
+        sessionKey: "session:a",
+      });
+      expect(again?.agentId).toBe("coordinator-aaaa");
+      // A new session in the same cwd takes the newest.
+      const other = await resolveCoordinatorIdentity(dir, env, lookup, {
+        refresh: true,
+        sessionKey: "session:b",
+      });
+      expect(other?.agentId).toBe("coordinator-bbbb");
+    });
+
+    it("the pin survives a cached miss (a broker that was briefly unreachable)", async () => {
+      const { dir, env } = setup();
+      const a0 = at("coordinator-aaaa", "2026-10-22T10:00:00.000Z");
+      const b0 = at("coordinator-bbbb", "2026-10-22T10:05:00.000Z");
+      let entries: (typeof a0)[] = [a0];
+      const lookup = async () => entries;
+      const opts = { refresh: true, sessionKey: "session:a" };
+      await resolveCoordinatorIdentity(dir, env, lookup, opts);
+      entries = [];
+      expect(await resolveCoordinatorIdentity(dir, env, lookup, opts)).toBeNull();
+      entries = [b0, a0];
+      expect((await resolveCoordinatorIdentity(dir, env, lookup, opts))?.agentId).toBe(
+        "coordinator-aaaa",
+      );
+    });
+
+    it("without a session key the directory key still applies", async () => {
+      const { dir, env } = setup();
+      const id = await resolveCoordinatorIdentity(dir, env, async () => [A]);
+      expect(id?.stateDir).toBe(coordinatorStateDir(dir, env));
+    });
   });
 
   it("two hook runs in a non-matching cwd open one broker connection, not two", async () => {
