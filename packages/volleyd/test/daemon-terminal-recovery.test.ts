@@ -6,7 +6,12 @@ import { TERMINAL_ALARM } from "../src/watchdog";
 import { NS } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
 import { runCli } from "./helpers/run-cli";
-import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervised-env";
+import {
+  AGENT,
+  ARTIFACTS_OK,
+  type SupervisedEnv,
+  makeSupervisedEnv,
+} from "./helpers/supervised-env";
 
 /**
  * A terminal status the daemon dropped is recovered, not just alarmed (#414): the handoff's throw
@@ -163,6 +168,102 @@ describe("daemon: a dropped terminal status (#414)", () => {
     expect(
       s.journal().some((e) => e.type === "steering_sent" && e.data.reason === "artifacts"),
     ).toBe(true);
+  });
+
+  it("a recovered done advances the task: its next stage's agent is launched", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({
+      daemon: { clock },
+      exec: ARTIFACTS_OK,
+      pipeline: "[implement, spec_review]",
+    });
+    failDone(1);
+    await s.status("done", { summary: "ok" });
+    await s.consumed();
+    expect(
+      s.journal().some((e) => e.type === "stage_entered" && e.data.stage === "spec_review"),
+    ).toBe(false);
+    await pass(clock, late);
+    await pass(clock, recover);
+    expect(of("terminal_status_recovered")).toHaveLength(1);
+    await s.event((e) => e.type === "stage_entered" && e.data.stage === "spec_review");
+    await s.event("agent_spawned", 2);
+  });
+
+  it("a status is not recovered while its agent is moving, and is once the move ends", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    const seen = failDone(1);
+    await s.status("done", { summary: "ok" });
+    await s.consumed();
+    await pass(clock, late);
+    const moving = (s.daemon as unknown as { moving: Set<string> }).moving;
+    moving.add(AGENT);
+    await pass(clock, recover);
+    expect(of("terminal_status_recovered")).toHaveLength(0);
+    expect(lostOpened()).toHaveLength(0);
+    expect(seen.calls).toHaveLength(1);
+    moving.delete(AGENT);
+    await pass(clock, 1_000);
+    expect(seen.calls).toHaveLength(2);
+    expect(of("terminal_status_recovered")).toHaveLength(1);
+  });
+
+  it("a status whose retained copy is gone opens terminal_status_lost", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    const seen = failDone(1);
+    await s.status("done", { summary: "ok" });
+    await s.consumed();
+    await pass(clock, late);
+    const real = s.daemon as unknown as {
+      broker: { queryRetained(t: string, ms: number): Promise<string | null> };
+    };
+    const q = real.broker.queryRetained.bind(real.broker);
+    vi.spyOn(real.broker, "queryRetained").mockImplementation(async (t, ms) =>
+      t === buildTopic(NS, AGENT, "status") ? null : q(t, ms),
+    );
+    await pass(clock, recover);
+    expect(seen.calls).toHaveLength(1);
+    expect(of("terminal_status_recovered")).toHaveLength(0);
+    const [opened] = lostOpened();
+    expect(opened?.data).toMatchObject({ agent_id: AGENT, status: "done" });
+    expect(String(opened?.data.why)).toContain("retained status is gone");
+  });
+
+  it("a failed whose handoff throws after retire asks the owner, and accept done hands it over", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    const seen = failDone(1);
+    await s.status("failed", { reason: "broke" });
+    await s.consumed();
+    await s.event((e) => e.type === "agent_retired" && e.data.agent_id === AGENT);
+    const err = s
+      .journal()
+      .find((e) => e.type === "alarm_raised" && e.data.alarm === "pipeline_error");
+    expect(err?.task).toBe("T1");
+    expect(err?.data).toMatchObject({ check: "status", agent_id: AGENT, status: "failed" });
+    const [opened] = lostOpened();
+    expect(opened?.task).toBe("T1");
+    expect(opened?.data).toMatchObject({ agent_id: AGENT, role: "implementer", status: "failed" });
+    await resolve(opened?.data.decision_id as string, "accept done");
+    expect(seen.calls).toHaveLength(2);
+    expect(seen.calls[1]).toMatchObject({ kind: "agent_done", agent_id: AGENT, status: "failed" });
+    expect(lostOpened()).toHaveLength(1);
+  });
+
+  it("accept done whose handoff throws again asks again", async () => {
+    const clock = fakeClock(Date.now());
+    s = await makeSupervisedEnv({ daemon: { clock } });
+    const { seen, id } = await lost(clock);
+    seen.fails = Number.POSITIVE_INFINITY;
+    await resolve(id, "accept done");
+    expect(seen.calls).toHaveLength(3);
+    const all = lostOpened();
+    expect(all).toHaveLength(2);
+    expect(all[1]?.data.decision_id).not.toBe(id);
+    expect(all[1]?.data).toMatchObject({ agent_id: AGENT, status: "done" });
+    expect(String(all[1]?.data.why)).toContain("verify denied by the fence");
   });
 
   it("relaunch: the agent is retired as relaunched and its role launched again", async () => {

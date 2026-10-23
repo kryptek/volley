@@ -6043,11 +6043,12 @@ export class Daemon {
   /**
    * A supervised agent's final status. `failed` (and an accepted `reaped`) retires it at once and
    * tells the pipeline it failed; `done` goes to the pipeline, which verifies the claim (steering
-   * the agent while it is still live) and retires it.
+   * the agent while it is still live) and retires it. Returns whether the status was handed over
+   * (not when the agent is unsupervised or moving).
    */
-  private async onFinal(agentId: string, type: string, why?: string): Promise<void> {
+  private async onFinal(agentId: string, type: string, why?: string): Promise<boolean> {
     const a = this.supervised.get(agentId);
-    if (a === undefined || this.moving.has(agentId)) return;
+    if (a === undefined || this.moving.has(agentId)) return false;
     if (type !== "done") await this.retire(agentId, type);
     const raw = await this.broker
       .queryRetained(buildTopic(a.namespace, agentId, "result"), DAEMON_DEFAULTS.probe_ms)
@@ -6061,7 +6062,7 @@ export class Daemon {
         ...(result !== undefined ? { result } : {}),
         ...(why !== undefined ? { why } : {}),
       });
-      return;
+      return true;
     }
     await this.pipelineFor(a.wave).handle(a.task, {
       kind: "agent_done",
@@ -6071,21 +6072,29 @@ export class Daemon {
       ...(result !== undefined ? { result } : {}),
       ...(why !== undefined ? { why } : {}),
     });
+    return true;
   }
 
   /**
    * `onFinal`, guarded: a throw (a remote verification step the fence denied, a timeout) is
    * journaled as `pipeline_error { check: "status" }` and the status stays with the watchdog,
-   * which hands it over again (`recoverTerminal`). Returns the error, if any.
+   * which hands it over again (`recoverTerminal`). A throw after the agent was retired (a
+   * `failed`) leaves the watchdog nothing to recover, so it asks the owner at once. Returns
+   * `"handed"`, `"skipped"` (the agent is unsupervised or moving) or the error. `again` is the
+   * decision an `accept done` answered (`askTerminalLost`).
    */
-  private async handOverFinal(agentId: string, type: string): Promise<Error | undefined> {
+  private async handOverFinal(
+    agentId: string,
+    type: string,
+    again?: string,
+  ): Promise<"handed" | "skipped" | Error> {
+    const a = this.supervised.get(agentId);
+    const wallTime = a?.watch.state.status?.wall_time;
     try {
-      await this.onFinal(agentId, type);
-      return undefined;
+      return (await this.onFinal(agentId, type)) ? "handed" : "skipped";
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
       this.log(`status ${agentId} ${type}: handoff failed: ${err.message}`);
-      const a = this.supervised.get(agentId);
       if (a !== undefined && this.waves.has(a.wave))
         await this.append(a.wave, {
           type: "alarm_raised",
@@ -6098,6 +6107,19 @@ export class Daemon {
             message: err.message,
           },
         }).catch(() => {});
+      if (a !== undefined && !this.supervised.has(agentId) && this.waves.has(a.wave))
+        await this.askTerminalLost(
+          {
+            wave: a.wave,
+            agent_id: agentId,
+            role: a.role,
+            task: a.task,
+            status: type,
+            wall_time: this.terminals.get(agentId)?.wall_time ?? wallTime ?? "",
+          },
+          `the pipeline failed after the agent was retired: ${err.message}`,
+          again,
+        );
       return err;
     }
   }
@@ -6372,6 +6394,8 @@ export class Daemon {
       const key = terminalKey(t);
       const w = this.terminals.get(t.agent_id);
       if (w === undefined || this.terminalRecovered.has(key) || !this.waves.has(w.wave)) continue;
+      // A move in flight holds the status (onFinal skips it): recover once the move ends.
+      if (this.moving.has(t.agent_id)) continue;
       this.terminalRecovered.add(key);
       await this.recoverTerminal(w);
     }
@@ -6395,8 +6419,11 @@ export class Daemon {
       if (env?.type !== t.status || env.wall_time !== t.wall_time)
         why = "its retained status is gone";
       else {
-        const err = await this.handOverFinal(t.agent_id, t.status);
-        if (err !== undefined) why = `the pipeline failed again: ${err.message}`;
+        const r = await this.handOverFinal(t.agent_id, t.status);
+        // Retired by the failing handoff: handOverFinal asked already.
+        if (r instanceof Error && !this.supervised.has(t.agent_id)) return;
+        if (r instanceof Error) why = `the pipeline failed again: ${r.message}`;
+        else if (r === "skipped") why = "the agent is no longer supervised";
       }
     }
     if (why === undefined) {
@@ -6410,6 +6437,18 @@ export class Daemon {
       return;
     }
     this.log(`watchdog: ${t.agent_id} ${t.status} not recovered: ${why}`);
+    await this.askTerminalLost(t, why);
+  }
+
+  /**
+   * Open `terminal_status_lost` for a status volleyd could not hand to the pipeline. `again` (the
+   * decision a failed `accept done` answered) keys a fresh one, so the owner is asked again.
+   */
+  private async askTerminalLost(
+    t: Pick<TerminalSeen, "agent_id" | "role" | "task" | "status" | "wall_time"> & { wave: WaveId },
+    why: string,
+    again?: string,
+  ): Promise<void> {
     const stage = this.waves.get(t.wave)?.record.state?.tasks.find((x) => x.id === t.task)?.stage;
     const onTask = stage !== undefined && !SETTLED_STAGES.has(stage);
     const relaunch = onTask && this.opts.spawner !== undefined;
@@ -6418,7 +6457,13 @@ export class Daemon {
       {
         kind: "terminal_status_lost",
         task: onTask ? t.task : null,
-        id: waveDecisionId("terminal_status_lost", t.wave, t.agent_id, t.wall_time),
+        id: waveDecisionId(
+          "terminal_status_lost",
+          t.wave,
+          t.agent_id,
+          t.wall_time,
+          ...(again !== undefined ? [again] : []),
+        ),
         question: `Needs you: ${t.agent_id} (${t.task}) published ${t.status}, and volleyd could not hand it to the pipeline (${why}). accept done: apply the status as if it had just arrived${relaunch ? `; or relaunch: stop it and start the ${t.role} again` : ""}?`,
         options: relaunch ? ["accept done", "relaunch"] : ["accept done"],
         park: false,
@@ -6441,17 +6486,45 @@ export class Daemon {
     const ans = d.resolved.answer.trim().toLowerCase();
     const a = this.supervised.get(agentId);
     if (ans === "accept done") {
+      const role = String(x.role);
+      const task = a?.task ?? d.task;
+      const again = (why: string) =>
+        this.askTerminalLost(
+          {
+            wave,
+            agent_id: agentId,
+            role: (a?.role ?? role) as Role,
+            task: task ?? RELEASE_TASK,
+            status,
+            wall_time: typeof x.status_at === "string" ? x.status_at : "",
+          },
+          why,
+          d.decision_id,
+        );
       if (a !== undefined) {
-        await this.handOverFinal(agentId, status);
+        const r = await this.handOverFinal(agentId, status, d.decision_id);
+        // Retired by the failing handoff: handOverFinal asked again already.
+        if (r instanceof Error && this.supervised.has(agentId))
+          await again(`accept done failed: ${r.message}`);
+        else if (r === "skipped") await again("accept done found the agent moving");
         return;
       }
-      if (d.task === null || !isRole(String(x.role))) return;
-      await this.pipelineFor(wave).handle(d.task, {
-        kind: "agent_done",
-        role: String(x.role) as Role,
-        agent_id: agentId,
-        status: status === "done" ? "done" : "failed",
-      });
+      if (d.task === null || !isRole(role)) {
+        this.log(`terminal_status_lost ${agentId}: accept done has no task to apply it to`);
+        return;
+      }
+      try {
+        await this.pipelineFor(wave).handle(d.task, {
+          kind: "agent_done",
+          role,
+          agent_id: agentId,
+          status: status === "done" ? "done" : "failed",
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.log(`terminal_status_lost ${agentId}: accept done failed: ${msg}`);
+        await again(`accept done failed: ${msg}`);
+      }
       return;
     }
     if (ans !== "relaunch" || d.task === null || !isRole(String(x.role))) return;

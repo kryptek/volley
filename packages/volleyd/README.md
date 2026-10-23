@@ -2860,13 +2860,17 @@ re-attach takes), journals `terminal_status_recovered { agent_id, status, after_
 status is gone, or the handoff throws again, volleyd opens decision `terminal_status_lost`
 (question names the agent, its status and why; it does not park the task): `accept done` hands
 the status to the pipeline as if it had just arrived, `relaunch` (offered where volleyd can spawn
-the role on an unsettled task) retires the agent as `relaunched` and spawns its role again. A
+the role on an unsettled task) retires the agent as `relaunched` and spawns its role again. An
+`accept done` whose handoff fails too opens a fresh `terminal_status_lost` saying so. A status is
+not recovered while its agent is moving between machines; it is once the move ends. A
 `blocked` is not recovered this way: the blocked invariant below asks about it.
 
 The handoff itself never drops a status silently: a throw inside it (a remote verification step
 the fence denied, a git / gh timeout) is logged and journaled as `alarm_raised { alarm:
 "pipeline_error", check: "status", agent_id, status, message }`, which does not count as handling
-the status, so the watchdog still alarms and recovers it.
+the status, so the watchdog still alarms and recovers it. A `failed` retires its agent before the
+pipeline sees it, so a throw after that leaves the watchdog nothing to recover: volleyd opens
+`terminal_status_lost` at once.
 
 **A blocked agent is always asked about.** The invariant: a supervised agent whose retained
 status is `blocked` has a decision naming it and that status (`agent_id`, `status_at`, the
