@@ -70,6 +70,12 @@ It also installs the [usage statusLine](#usage-statusline); a `statusLine` you a
 saved to `<state root>/statusline-chain.json` and keeps drawing your status line, and
 `--uninstall` puts it back. `CLAUDE_SETTINGS` points it at a different file.
 
+Installing into the user-level `~/.claude/settings.json` needs a coordinator identity on the
+machine (`VOLLEY_AUTH_USERNAME`, or the `coordinator.json` described under
+[Broker credentials](#broker-credentials)): without one the script refuses and names `--force`,
+which installs anyway (for a broker that takes anonymous connects). An explicit
+`CLAUDE_SETTINGS` is not checked.
+
 `--broker-url <url>` and `--namespace <ns>` add `VOLLEY_BROKER_URL=<url>` and
 `VOLLEY_NAMESPACE=<ns>` to every command's prefix (after `VOLLEY_HOOKS_COORDINATOR=1`), so the
 hooks use that broker and namespace from every session on the machine: a prefix assignment
@@ -87,7 +93,7 @@ installer refuses a URL that carries one.
 | Mode | When | Speaks as | State directory |
 |---|---|---|---|
 | agent | `<project>/.volley/agent.json` exists (SPEC §6.5) | its `agent_id`, resolved exactly like the MCP server (file beats `VOLLEY_*` env) | `<project>/.volley/` |
-| coordinator | no `agent.json` and `VOLLEY_HOOKS_COORDINATOR=1` | the newest retained registry entry whose `payload.cwd` is the project dir and whose retained status is not `done`/`failed`/`reaped` (the MCP server auto-registers at startup); looked up once a minute (a miss is cached the same way), refreshed on `SessionStart`. At startup an entry older than the session is a previous session's: the hook looks again a few times for this session's own entry and adopts none if it does not appear | `~/.volley/hooks/<hash of project dir>/` |
+| coordinator | no `agent.json` and `VOLLEY_HOOKS_COORDINATOR=1` | this session's retained registry entry whose `payload.cwd` is the project dir and whose retained status is not `done`/`failed`/`reaped` (the MCP server auto-registers at startup): inside cmux, the entry whose `surface` is the session's own `CMUX_SURFACE_ID` (an entry recorded from another surface is never adopted); else the entry this session resolved before; else the newest. Looked up once a minute (a miss is cached the same way), refreshed on `SessionStart`. At startup an entry older than the session is a previous session's: the hook looks again a few times for this session's own entry and adopts none if it does not appear | `~/.volley/hooks/<hash of project dir and session>/`: one per session (the hook input's `session_id`, else `CMUX_SURFACE_ID`), so sessions sharing a directory never share identity, activity or steering state |
 | none | neither | nothing: exit 0, empty stdout, no socket | — |
 
 The project dir is `$CLAUDE_PROJECT_DIR`, falling back to the hook input's `cwd`. An
@@ -106,7 +112,10 @@ resolved per mode (`src/lib/auth.ts`):
 | agent | the `broker` block of `.volley/agent.json` (minted by the supervisor), then `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD` — exactly as the MCP server in the same worktree resolves them |
 | coordinator | `VOLLEY_AUTH_USERNAME` / `VOLLEY_AUTH_PASSWORD`, then `$VOLLEY_AUTH_DIR/coordinator.json` (`{ "username", "password" }`, mode 0600) |
 
-Neither: the hooks connect anonymously, which only an open broker accepts. Write the coordinator
+Neither: the hooks connect anonymously, which only an open broker accepts. When the broker
+refuses that anonymous connect, the machine is simply not set up as a coordinator
+(`NOT_CONFIGURED`): every hook exits 0 with nothing printed and no error file, so a machine with
+the hooks installed but no coordinator login stays quiet. Write the coordinator
 file with `volley setup` or `volley auth init --coordinator-file` (`--force` rotates the login and the file), so an
 `install.sh` setup keeps no password in `settings.json`. Without `VOLLEY_AUTH_DIR` the file is
 looked for where `volley auth` keeps its files by default (`<mosquitto etc dir>/volley/`). A
@@ -352,15 +361,18 @@ With `install.sh`, an interactive session publishes what a dashboard needs to sh
   registry entry. SessionStart remembers `session_url`, `workspace` and `workspace_title` in
   `registry-fields.json`; at most every 30 s a drain hook (`UserPromptSubmit` / `PostToolUse`)
   re-publishes the entry when it lacks the harness model or any of them, keeping the rest of
-  the MCP server's entry.
+  the MCP server's entry. A remembered `workspace` (and a cmux `workspace_title`) is put back only
+  by a hook whose own environment names the same workspace (`VOLLEY_WORKSPACE`, else
+  `CMUX_WORKSPACE_ID`), so one session's workspace never lands on another session's entry.
 
 `session_url` comes from `VOLLEY_SESSION_URL` (a hook cannot derive it, see below); `workspace` from
 `VOLLEY_WORKSPACE`, else `cmux identify` (`caller.workspace_ref`) when running inside cmux. The
 coordinator's own mailbox is drained too, so acks for messages it sent land in its context.
 
-**Coordinator id.** The hooks take no id of their own: they publish as the newest live registry
-entry whose `cwd` is the session's directory, which is the id the session's MCP server
-registered. That server builds it from `VOLLEY_AGENT_ID` (a prefix, plus a fresh `-xxxx`), so
+**Coordinator id.** The hooks take no id of their own: they publish as the session's own live
+registry entry for its directory (see [Identity](#identity)), which is the id the session's MCP server
+registered; the server records its `pid` and, inside cmux, its `surface` there, so several
+sessions in one repo each find their own. That server builds it from `VOLLEY_AGENT_ID` (a prefix, plus a fresh `-xxxx`), so
 the user-scope registration must set `"VOLLEY_AGENT_ID": "coordinator"` in its `env` (the full
 `claude mcp add-json` line is in the
 [root README](../../README.md#4-register-the-mcp-server-with-claude-code)).
@@ -443,7 +455,7 @@ connections only (SPEC §4.4).
 
 In the state directory: `seq` (fsync'd counter) + `seq.lock`, `drain.lock`, `STEERING.md`,
 `steering.snapshot.md`, `activity.json` (last activity, so the next hook knows to publish
-`resumed`), `config.json` (expiry cache), `lease-pools.json` (lease-pool cache), `model.json` (the harness-reported model), `registry-fields.json` (`{ "fields": { "session_url"?, "workspace"?, "workspace_title"? }, "checked_at"? }`: SessionStart's registry fields and the drain hooks' last registry check),
+`resumed`), `config.json` (expiry cache), `lease-pools.json` (lease-pool cache), `model.json` (the harness-reported model), `registry-fields.json` (`{ "fields": { "session_url"?, "workspace"?, "workspace_title"? }, "checked_at"?, "workspace_source"? }`: SessionStart's registry fields and the drain hooks' last registry check),
 `hooks-error.json` (the last refused CONNECT or unusable credentials, until the next successful connect), `usage.json` (the last usage published),
 `work-log.json` + `work-log.lock` (the [work log](#work-log-activity-ticks)'s session, tool-call count and rate limit) and, for
 coordinators, `identity.json` (registry lookup cache, hit or miss). For agents this is `.volley/`, which supervisors keep out of commits (SPEC §6.5).

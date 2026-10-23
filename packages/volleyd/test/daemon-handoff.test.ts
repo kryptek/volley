@@ -342,6 +342,49 @@ describe("needs-you inbox: coordinator handoffs (SPEC §4.6.18)", () => {
     expect(s.host.texts).toEqual([]);
   });
 
+  /** A retained registry entry for `agent` naming `workspace`. */
+  const entry = (agent: string, workspace: string) =>
+    s.agent.publish(
+      registryTopic(agent),
+      JSON.stringify({
+        ...buildEnvelope({
+          agentId: agent,
+          parentId: null,
+          channel: "_system/registry",
+          type: "registered",
+          payload: { cwd: "/repo", started_at: new Date().toISOString(), workspace },
+        }),
+        namespace: NS,
+      }),
+      { qos: 1, retain: true },
+    );
+
+  it("a registry entry naming another session's screen: the answer goes to the workspace it asked from (#392)", async () => {
+    s = await makeSupervisedEnv();
+    // Two sessions in one repo: coord-1's entry was given coord-other's workspace:7.
+    await entry("coord-other", "workspace:7");
+    await entry(COORD, "workspace:7");
+    const item = await handoff(32, "workspace:8");
+    s.host.screens = [asked()];
+    const r = await answer(item.id, "go");
+    expect(r.error).toBeUndefined();
+    expect(s.host.texts).toEqual([{ workspace: "workspace:8", text: "go" }]);
+  });
+
+  it("the refusal names the workspace the session asked from and offers its mailbox", async () => {
+    s = await makeSupervisedEnv();
+    await entry("coord-other", "workspace:7");
+    await entry("coord-third", "workspace:8");
+    await entry(COORD, "workspace:7");
+    const item = await handoff(33, "workspace:8");
+    s.host.screens = [asked()];
+    const r = await answer(item.id, "go");
+    expect(r.error).toContain("workspace:7 is coord-other's screen, not coord-1's");
+    expect(r.error).toContain("coord-1 asked from workspace:8");
+    expect(r.error).toContain("mailbox");
+    expect(s.host.texts).toEqual([]);
+  });
+
   it("the next prompt, or the session ending, closes an open picker too", async () => {
     s = await makeSupervisedEnv();
     const picker = (t: string, seq: number) =>
