@@ -42,12 +42,18 @@ import { AGENT_BRANCH } from "./worktree";
  *   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
  *   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force)
  *
- * MERGE (only with a MergeToken, `mintMergeToken`, minted by the pipeline's gate after the
- *   evidence package is written, checked by identity like consent tokens): exactly
- *     gh pr merge <n> --squash --match-head-commit <sha40> [--delete-branch]
- *   with <n> the token's PR and <sha40> its gated head (GitHub refuses the merge if the head
- *   moved since the gate). Never --admin, --auto, --merge or --rebase; the token unlocks nothing
- *   else (git merge, push and rebase stay denied).
+ * MERGE (only with a token, checked by identity like consent tokens; either unlocks nothing else:
+ *   git merge, push and rebase stay denied). Never --admin, --auto or --rebase.
+ *   - a MergeToken (`mintMergeToken`, minted by the pipeline's gate after the evidence package is
+ *     written): exactly
+ *       gh pr merge <n> --squash --match-head-commit <sha40> [--delete-branch]
+ *     with <n> the token's PR and <sha40> its gated head (GitHub refuses the merge if the head
+ *     moved since the gate). Never --merge.
+ *   - a TrainToken (`mintTrainToken`, minted for a merge train after the train's evidence is
+ *     written): exactly
+ *       gh pr merge <n> --merge --match-head-commit <sha40>
+ *     with <n> the train's PR and <sha40> its gated head: a merge commit, so the member PRs, whose
+ *     heads it contains, read as merged. Never --squash.
  *
  * CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
  * retire for the retired agent's own workspace only):
@@ -325,14 +331,75 @@ export function mintMergeToken(t: MergeToken): MergeToken {
   return token;
 }
 
-/** `gh pr merge <n> --squash --match-head-commit <head> [--delete-branch]`, exactly, for the token's n and head. */
-function mergeVerdict(args: readonly string[], token: MergeToken | undefined): Verdict {
-  if (token === undefined || !merges.has(token)) return deny("gh pr merge");
-  const exact = ["pr", "merge", String(token.pr), "--squash", "--match-head-commit", token.head];
-  const ok =
+const trains = new WeakSet<object>();
+
+/**
+ * Permission to merge one merge train's PR, with a merge commit, at exactly its gated head (the
+ * merge train, SPEC §4.6.23): `members` are the gated PRs' tasks at the heads the train
+ * integrated. Only `mintTrainToken` creates one (checked by identity).
+ */
+export interface TrainToken {
+  readonly train: string;
+  readonly pr: number;
+  readonly head: string;
+  readonly release_branch: string;
+  readonly members: readonly { readonly task: string; readonly head: string }[];
+}
+
+const TRAIN_ID = /^train-[1-9][0-9]{0,8}$/;
+
+/** Callers: the merge train's driver, after the train's evidence is written. */
+export function mintTrainToken(t: TrainToken): TrainToken {
+  if (!TRAIN_ID.test(t.train))
+    throw new FenceError(`gh pr merge (train ${t.train})`, "not a train id");
+  if (!Number.isSafeInteger(t.pr) || t.pr <= 0)
+    throw new FenceError(`gh pr merge ${t.pr}`, "not a PR number");
+  if (!SHA40.test(t.head))
+    throw new FenceError(`gh pr merge --match-head-commit ${t.head}`, "not a full commit sha");
+  if (t.release_branch === "")
+    throw new FenceError("gh pr merge (train)", "a train without a release branch");
+  if (new Set(t.members.map((m) => m.task)).size < 2)
+    throw new FenceError("gh pr merge (train)", "a train of fewer than two distinct members");
+  for (const m of t.members) {
+    if (m.task === "")
+      throw new FenceError("gh pr merge (train member)", "a member without a task");
+    if (!SHA40.test(m.head))
+      throw new FenceError(`gh pr merge (train member ${m.task})`, "not a full commit sha");
+  }
+  const token = Object.freeze({
+    train: t.train,
+    pr: t.pr,
+    head: t.head,
+    release_branch: t.release_branch,
+    members: Object.freeze(t.members.map((m) => Object.freeze({ task: m.task, head: m.head }))),
+  });
+  trains.add(token);
+  return token;
+}
+
+/**
+ * `gh pr merge <n> --squash --match-head-commit <head> [--delete-branch]` for a MergeToken's n and
+ * head, or `gh pr merge <n> --merge --match-head-commit <head>` for a TrainToken's, exactly.
+ */
+function mergeVerdict(
+  args: readonly string[],
+  token: MergeToken | undefined,
+  train: TrainToken | undefined,
+): Verdict {
+  const squash = token !== undefined && merges.has(token);
+  const commit = train !== undefined && trains.has(train);
+  if (!squash && !commit) return deny("gh pr merge");
+  const is = (exact: readonly string[], extra?: string) =>
     (args.length === exact.length ||
-      (args.length === exact.length + 1 && args[exact.length] === "--delete-branch")) &&
+      (extra !== undefined && args.length === exact.length + 1 && args[exact.length] === extra)) &&
     exact.every((a, i) => args[i] === a);
+  const ok =
+    (squash &&
+      is(
+        ["pr", "merge", String(token.pr), "--squash", "--match-head-commit", token.head],
+        "--delete-branch",
+      )) ||
+    (commit && is(["pr", "merge", String(train.pr), "--merge", "--match-head-commit", train.head]));
   return ok ? ALLOW : deny("gh pr merge (not the gated PR at its gated head)");
 }
 
@@ -764,6 +831,8 @@ export interface FenceOptions {
   launch?: LaunchToken;
   /** For `gh pr merge`: the gate's token for exactly that PR and head. */
   merge?: MergeToken;
+  /** For a merge train's `gh pr merge --merge`: the train's token for exactly its PR and head. */
+  train?: TrainToken;
   /** For typing `/model <id>`: the approved switch. */
   modelSwitch?: ModelSwitchToken;
   /** For Up/Down/Space and a picker's Other text: the inbox item's picker answer. */
@@ -1438,7 +1507,7 @@ function issueLifecycle(args: string[]): Verdict | null {
 
 function gh(args: string[], opts: FenceOptions): Verdict {
   const two = args.slice(0, 2).join(" ");
-  if (two === "pr merge") return mergeVerdict(args, opts.merge);
+  if (two === "pr merge") return mergeVerdict(args, opts.merge, opts.train);
   if (two === "pr ready") return readyVerdict(args.slice(2));
   const lifecycle = issueLifecycle(args);
   if (lifecycle !== null) return lifecycle;
