@@ -244,7 +244,9 @@ export type IssueRowState = "open" | "merged-to-release" | "closed" | "cancelled
 /**
  * `volleyd issues <wave>`: each task's issue state from the journal, one line each
  * (`T3 #412 merged-to-release (PR #418)`). After the release (`released`) a task not done is
- * `deferred`.
+ * `deferred`. The rows are the journal's view, not GitHub's: `closed` is a done task's issue once
+ * the release was verified (an issue reopened by hand still reads `closed`), and `open` a done
+ * task's issue whose label has not been added yet.
  */
 export function issueRows(
   tasks: readonly TaskIssue[],

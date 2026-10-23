@@ -10253,8 +10253,11 @@ export class Daemon {
         if (release && !failed) {
           this.releasePolledAt.set(wave, this.now());
           const pr = await this.releasePr(cwd, state.release_branch);
-          if (pr !== null && (await this.verifyIssues(wave, cwd, pr)).failed.length > 0)
+          // A failed write is retried on the ci_poll_ms cadence below, not the release poll's.
+          if (pr !== null && (await this.verifyIssues(wave, cwd, pr)).failed.length > 0) {
             failed = true;
+            this.releasePolledAt.delete(wave);
+          }
         }
         if (failed) this.issueRetryAt.set(wave, this.now() + DAEMON_DEFAULTS.ci_poll_ms);
         else this.issueRetryAt.delete(wave);
@@ -10405,6 +10408,13 @@ export class Daemon {
       return { ok: false, error: "issues --pr takes a pull request number" };
     const refused = guardMutation(state, by, "issues --verify", this.bindings);
     if (refused !== null) return { ok: false, error: refused };
+    // Only a complete wave's release can have reached main: verifying earlier would defer tasks
+    // still in flight and end the release poll for good.
+    if (state.status !== "complete")
+      return {
+        ok: false,
+        error: `wave '${w.wave}' is not complete (${state.status}); its release has not reached main`,
+      };
     const repo = w.log.record.wave?.repo;
     if (repo === undefined) return { ok: false, error: `wave '${w.wave}' has no repo` };
     if (this.issueChecks.has(w.wave))

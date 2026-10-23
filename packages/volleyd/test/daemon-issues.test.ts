@@ -244,25 +244,67 @@ describe("the issue lifecycle in the daemon (#416)", () => {
     );
   });
 
-  it("issues --verify: the check for a release merged by hand, owner only", async () => {
-    await pause();
+  it("a write that failed at the release is retried after ci_poll_ms, not release_merge_poll_ms", async () => {
     await merge("T3", 418);
+    await merge("T5", 420);
+    await daemon.recordEvent(WAVE, {
+      type: "task_cancelled",
+      task: "T4",
+      data: { by: OWNER, why: "superseded by T3" },
+    });
+    gh.release(431);
+    let fail = true;
+    gh.fake.on(["gh", "issue", "close"], (argv) => {
+      if (fail) {
+        fail = false;
+        return { code: 1, stderr: "HTTP 502" };
+      }
+      const i = gh.issues.get(Number(argv[3])) as Issue;
+      i.state = "CLOSED";
+      i.comments.push(argv[5] as string);
+      return {};
+    });
     await tick();
+    expect((gh.issues.get(412) as Issue).state).toBe("OPEN");
+    expect(ofType("issues_verified")).toEqual([]);
+    await clock.advance(DAEMON_DEFAULTS.ci_poll_ms);
+    await tick();
+    expect(ofType("issues_verified")).toHaveLength(1);
+    expect((gh.issues.get(412) as Issue).state).toBe("CLOSED");
+  });
+
+  it("issues --verify: the check for a release merged by hand, owner only, on a complete wave", async () => {
+    await merge("T3", 418);
     const refused = await client.request("issues", { wave: WAVE, verify: true, by: "someone" });
     expect(refused.ok).toBe(false);
     expect(refused.error).toContain("owned by coord-a");
+    // Not complete: tasks still in flight are not settled as if the release had reached main.
+    const early = await client.request("issues", { wave: WAVE, verify: true, by: OWNER, pr: 77 });
+    expect(early.ok).toBe(false);
+    expect(early.error).toContain("not complete");
+    expect(ofType("issues_verified")).toEqual([]);
 
+    await merge("T5", 420);
+    await daemon.recordEvent(WAVE, {
+      type: "task_cancelled",
+      task: "T4",
+      data: { by: OWNER, why: "superseded by T3" },
+    });
+    await tick();
+    expect(daemon.record(WAVE)?.state?.status).toBe("complete");
     const r = await runCli(["issues", WAVE, "--verify", "--pr", "77", "--by", OWNER], t.env);
     expect(r.stderr).toBe("");
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain(`${WAVE} (release/${WAVE}): released in PR #77`);
     expect(r.stdout).toContain("T3 #412 closed (PR #418)");
-    // T4 and T5 never finished: deferred, their issues open with one comment each.
-    expect(r.stdout).toContain("T4 #413 deferred");
+    expect(r.stdout).toContain("T4 #413 cancelled: superseded by T3");
     expect((gh.issues.get(413) as Issue).comments).toEqual([
-      `deferred in wave ${WAVE}: not done when the release reached main (stage queued)\n\n${settledMarker(WAVE, "deferred")}`,
+      `cancelled in wave ${WAVE}: superseded by T3\n\n${settledMarker(WAVE, "cancelled")}`,
     ]);
     expect((gh.issues.get(413) as Issue).state).toBe("OPEN");
+    expect(ofType("issues_verified").map((e) => e.data)).toEqual([
+      { release_pr: 77, closed: [412, 414], left_open: [413] },
+    ]);
   });
 
   it("issues: unknown wave; --pr without --verify is a usage error", async () => {
