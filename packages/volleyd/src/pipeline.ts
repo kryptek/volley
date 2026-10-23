@@ -548,7 +548,7 @@ export function reducePipeline(
       if (role === "fixup") p.directive = undefined;
       if (role === "implementer" || role === "fixup")
         p.closes_missing = Array.isArray(d.closes_missing)
-          ? (d.closes_missing as number[])
+          ? (d.closes_missing as unknown[]).filter((n): n is number => typeof n === "number")
           : undefined;
       if (!isRole(role)) break;
       const run = p.runs[role];

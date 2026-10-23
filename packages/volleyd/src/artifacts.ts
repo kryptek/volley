@@ -580,7 +580,9 @@ async function failedLogs(
 /**
  * The issues of `issues` whose `Closes #<n>` line is missing from a PR body. GitHub closes only
  * the first issue of a shared `Closes #a, #b` line, so each must be on its own line, and it ignores
- * one in code (indented four spaces or a tab, or inside a fence). Pure.
+ * one in code (indented four spaces or a tab, or inside a fence). Deliberately stricter than
+ * GitHub, which also honours `Fixes`/`Resolves` and a keyword mid-line: the brief asks for
+ * `Closes` lines, so only a line-start `Closes #<n>` counts. Pure.
  */
 export function missingCloses(body: string | undefined, issues: readonly number[]): number[] {
   const lines = new Set<number>();

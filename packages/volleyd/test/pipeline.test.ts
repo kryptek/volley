@@ -1786,6 +1786,25 @@ describe("pipeline: a bundle's Closes lines", () => {
     expect(stage()).toBe("merge_ready");
   });
 
+  it("the fixup's body still missing after its one steer: accepted with closes_missing, no second steer or fixup", async () => {
+    h = pipelineHarness({ bundle: [42, 99] });
+    await h.start();
+    h.openPr(H1, "T1", 7, { body: "Closes #42, #99" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("implementer", { head: H1, ci: "green" });
+    await h.finish("spec_reviewer", { result: result("approve-empty") });
+    await h.finish("quality_reviewer", { result: result("approve-empty") });
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    await h.finish("fixup", { head: H2, ci: "green", result: result("fixup-resolved") });
+    expect(h.steers.filter((s) => s.role === "fixup" && s.reason === "closes")).toHaveLength(1);
+    const verified = h.events
+      .filter((e) => e.type === "artifact_verified" && e.data.role === "fixup")
+      .at(-1);
+    expect(verified?.data.closes_missing).toEqual([99]);
+    expect(h.spawns.filter((s) => s.role === "fixup")).toHaveLength(1);
+    expect(stage()).toBe("merge_ready");
+  });
+
   it("every Closes line present: no steer; a single-issue task is never checked", async () => {
     h = pipelineHarness({ bundle: [42, 99] });
     await h.start();
