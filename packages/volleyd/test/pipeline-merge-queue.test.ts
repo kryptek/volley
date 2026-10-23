@@ -415,6 +415,8 @@ describe("transient merge refusals (#445)", () => {
     // retry restarts the ladder: the next refusal waits 60 s again, with no decision.
     await h.resolve(d?.decision_id as string, "retry");
     expect(h.record().pipeline.T1?.merge_transient).toBeUndefined();
+    // A transient retry restarts the ladder only: it grants no counted attempt to a later refusal.
+    expect(h.record().pipeline.T1?.merge_retries ?? 0).toBe(0);
     h.elapse(DAEMON_DEFAULTS.ci_poll_ms);
     await h.tick();
     expect(mergeCalls()).toHaveLength(6);
