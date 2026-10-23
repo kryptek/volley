@@ -2331,6 +2331,48 @@ the origin of the clone at that path (a GitHub one), volleyd moves it to
 `all`), pins an unset `worktree_root` to where its worktrees already were, and journals one
 `config_changed` (`by: volleyd`). A non-GitHub origin keeps the `repo` key.
 
+**On the box, `peer.json`'s `repos`** lists the repositories the machine works on
+(`owner/name` → its clone), which `volley peer doctor --repo-add <owner/name>[=<path>]` and
+`--repo-remove <owner/name>` edit (the volley-cli README's `volley peer doctor`). The doctor runs
+its `repo.*` checks per repository (each check carries `repo`), clones a missing one under
+`--fix --clone`, repoints a remote that names a renamed or transferred repository (only when
+GitHub reports one `nameWithOwner` for both), fetches each under `--fix` and fast-forwards a
+managed clone's clean, checked-out default branch. Its report (and so the machine record)
+carries `repos[]`: `slug`, `path`, `exists`, `origin`, `managed`, `fetched_at` and `toolchain`.
+
+#### Repository toolchains
+
+Each repository's clone says what an agent working in it needs. The doctor on the box derives the
+tools from the manifests at the clone's root and probes only those (with `command -v`, then their
+version):
+
+| At the clone's root | Tools |
+|---|---|
+| `package.json` | `bun` when its `packageManager` is `bun@<v>` (minimum `<v>`) or a `bun.lock` is there; else `node` |
+| `pom.xml` | `java` and `mvn` (`java` only with a `mvnw`) |
+| `build.gradle`, `build.gradle.kts`, `mvnw` | `java` |
+| `go.mod` | `go` (minimum: its `go <version>` line) |
+| `Cargo.toml` | `cargo` |
+| `pyproject.toml`, `requirements.txt` | `python3` |
+| `Dockerfile`, `docker-compose*` | `docker` |
+
+An optional `.volley/requirements.yaml` in the repository adds tools and sets minimum versions;
+its `min` wins over a manifest's, and any other key is an error (the doctor's
+`repo.requirements` check names it):
+
+```yaml
+# .volley/requirements.yaml
+tools: [docker, jq]   # tool names, as command -v finds them
+min:
+  java: "17"          # digits and dots; a minimum also requires the tool
+```
+
+A tool that is missing, or older than its minimum, fails `tool.<name>` with `repo: <owner/name>`
+and fills that repository's `toolchain.missing` / `toolchain.outdated`: it blocks that
+repository only. The machine-level `tool.<name>` checks (`bun git gh tmux nc base64 cmp
+claude`) are unchanged. The file is read on the box by the doctor itself, never through the
+fence.
+
 **Prerequisites on the box** (volleyd does not provision it): `bash`, `bun`, `claude` (logged
 in), `gh` (authenticated, for `gh issue view`), `git`, `tmux`, `nc`, `base64`, `cmp`, a clone of
 the wave repo at `repo` (its `origin` must have the release branch) and a volley checkout at
@@ -3789,7 +3831,11 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
   volley peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
     <https URL>]] — the machine's doctor
     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
-    credentials or port, isCloneUrl); no other volley argv runs on a box
+    credentials or port, isCloneUrl); or, for its repositories (#435), after [--fix --yes]
+    any number of --repo-add <owner/name>[=ABS] (isSlug; ABS as --supervisor-volley-dir's) and
+    --repo-remove <owner/name>, then --clone only under --fix with an add (each added
+    repository cloned from https://github.com/<owner>/<name>.git, built on the box, never an
+    argv here); no other volley argv runs on a box
   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
     mv -f .claude.json.volleyd.tmp .claude.json — or, for a profile the supervisor created

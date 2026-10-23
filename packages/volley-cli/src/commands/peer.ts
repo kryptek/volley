@@ -27,6 +27,8 @@ import { VolleyError } from "volley-mcp/errors";
 import { buildTopic } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { type Sharing, parseSharing } from "volleyd/claude/sharing";
+import { CONFIG_DEFAULTS } from "volleyd/config-defaults";
+import { isSlug, managedClonePath, originToSlug, slugKey } from "volleyd/repos";
 import pkg from "../../package.json";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
 import { withSetupAuthDir } from "../auth/coordinator-login";
@@ -35,7 +37,7 @@ import { openClient, reportConnectError } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { isRepoTrusted } from "../peer/checks/claude";
-import { diskOf, memoryOf, worktreeRoot } from "../peer/checks/machine";
+import { diskOf, memoryOf, reposWorktreeRoot, worktreeRoot } from "../peer/checks/machine";
 import {
   type DoctorDeps,
   type DoctorOptions,
@@ -44,6 +46,7 @@ import {
   doctor,
   doctorInputs,
   looksSecret,
+  normalizeOrigin,
   recordChecks,
   renderHuman,
   runDoctor,
@@ -91,9 +94,11 @@ const HELP = `Usage:
                                                gets a respawn question), then remove it
   On the machine to pair:
     volley peer join <code> --to <host> [--name <name>] [--target <user@this-machine>]
-                     [--repo <path>] [--volley-dir <path>] [--port <port>]
+                     [--repo <owner/name>[=<path>] | --repo <path>]... [--volley-dir <path>]
+                     [--port <port>]
                      [--remote-volley <command>] [--no-service] [--replace]
     volley peer doctor [--fix] [--yes] [--json] [--repo <path>] [--clone]
+                       [--repo-add <owner/name>[=<path>]]... [--repo-remove <owner/name>]...
                        [--origin <url>] [--release <branch>] [--volley-dir <path>]
                        [--sharing <json>] [--supervisor-volley-dir <path>]
                                                Check this machine; --fix applies the safe fixes
@@ -106,7 +111,10 @@ join options:
   --name <name>            This machine's name (default: its short hostname, lower-cased)
   --target <user@host>     How the supervisor's machine reaches this one over ssh
                            (default: $USER@<hostname>)
-  --repo <path>            This machine's clone of the wave repository
+  --repo <owner/name>[=<path>]
+                           A repository this machine works on (repeatable): its managed clone
+                           at ~/.volley/repos/<owner>/<name>, or the clone at <path>; a bare
+                           <path> (one, written /…, ./… or ~/…) is the legacy single clone
   --volley-dir <path>      This machine's volley checkout (default: the one running this command)
   --port <port>            Port on this machine's 127.0.0.1 that reaches the broker (default 21883)
   --remote-volley <cmd>    How to run volley on the supervisor's machine (default: volley when
@@ -124,8 +132,14 @@ doctor options:
                            yourself
   --yes                    Do not ask before applying them
   --json                   The report as JSON (the machine record's doctor fields)
-  --repo <path>            This machine's clone of the wave repo (default: peer.json's)
-  --clone                  With --fix: clone the wave repo at --repo when nothing is there
+  --repo <path>            Check this one clone instead of peer.json's repositories
+  --repo-add <owner/name>[=<path>]
+                           Add a repository to peer.json (repeatable): its managed clone at
+                           ~/.volley/repos/<owner>/<name>, or adopt the clone at <path>
+  --repo-remove <owner/name>
+                           Remove a repository from peer.json (repeatable; its clone is kept)
+  --clone                  With --fix: clone each repository that has no clone yet (from
+                           https://github.com/<owner>/<name>.git), or the wave repo at --repo
   --origin <url>           The wave repo's URL: compared with the clone's origin, cloned by --clone
   --release <branch>       Check this branch is fetchable from origin
   --sharing <json>         The Claude profile's sharing modes, e.g. '{"skills":"own"}' (default:
@@ -149,7 +163,9 @@ const OPTIONS = {
   to: { type: "string" },
   name: { type: "string" },
   target: { type: "string" },
-  repo: { type: "string" },
+  repo: { type: "string", multiple: true },
+  "repo-add": { type: "string", multiple: true },
+  "repo-remove": { type: "string", multiple: true },
   "volley-dir": { type: "string" },
   port: { type: "string" },
   "remote-volley": { type: "string" },
@@ -180,6 +196,8 @@ const OWNED_BY: Partial<Record<keyof typeof OPTIONS, string[]>> = {
   fix: ["doctor"],
   yes: ["doctor"],
   clone: ["doctor"],
+  "repo-add": ["doctor"],
+  "repo-remove": ["doctor"],
   origin: ["doctor"],
   release: ["doctor"],
   sharing: ["doctor"],
@@ -291,8 +309,82 @@ export interface PeerConfig {
   remote_port: number;
   username: string;
   password: string;
+  /** The legacy single clone: rewritten into `repos` by the next doctor run (#435). */
   repo?: string;
+  /** The repositories this machine works on: `owner/name` → its clone's absolute path. */
+  repos?: Record<string, string>;
   joined_at: string;
+}
+
+/** Write peer.json (mode 0600: it holds the peer's password). */
+export function writePeerConfig(home: string, cfg: PeerConfig): void {
+  const file = peerFile(home);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(file, 0o600);
+}
+
+/** A repository's managed clone on this machine: `~/.volley/repos/<owner>/<name>`. */
+export const managedClone = (home: string, slug: string) =>
+  managedClonePath(CONFIG_DEFAULTS.fleet.repo_root, slug, home);
+
+/**
+ * `<owner/name>` (its managed clone) or `<owner/name>=<path>` (the clone at `path`, adopted):
+ * the slug and the clone's absolute path (`~` is `home`); null for anything else.
+ */
+export function parseRepoSpec(value: string, home: string): { slug: string; path: string } | null {
+  const i = value.indexOf("=");
+  const slug = i < 0 ? value : value.slice(0, i);
+  if (!isSlug(slug)) return null;
+  if (i < 0) return { slug, path: managedClone(home, slug) };
+  const path = value.slice(i + 1);
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
+  if (path === "" || /[\u0000-\u001f\u007f]/.test(path)) return null;
+  // The shell leaves `~` after `=` alone (`o/n=~/x` is no assignment): expand it as a bare path is.
+  return { slug, path: resolve(path.replace(/^~(?=\/|$)/, home)) };
+}
+
+/** `repos` with `add` set (an existing key, in any case, replaced) and `remove` dropped. */
+export function editRepos(
+  repos: Record<string, string>,
+  add: { slug: string; path: string }[],
+  remove: string[],
+): Record<string, string> {
+  const out = { ...repos };
+  for (const a of add) {
+    const k = slugKey(out, a.slug);
+    if (k !== undefined) delete out[k];
+    out[a.slug] = a.path;
+  }
+  for (const r of remove) {
+    const k = slugKey(out, r);
+    if (k !== undefined) delete out[k];
+  }
+  return out;
+}
+
+/**
+ * A legacy `repo` (one clone, by path) as `repos`: keyed by the slug of its clone's GitHub origin
+ * and written back to peer.json. A clone whose origin is not GitHub (or unreadable) stays `repo`.
+ */
+export async function migrateRepo(deps: PeerDeps, cfg: PeerConfig): Promise<PeerConfig> {
+  if (cfg.repo === undefined || Object.keys(cfg.repos ?? {}).length > 0) return cfg;
+  const r = await deps
+    .exec(["git", "-C", cfg.repo, "remote", "get-url", "origin"], {
+      timeoutMs: PEER_DEFAULTS.remote_exec_timeout_ms,
+    })
+    .catch(() => null);
+  const url = r?.code === 0 ? (r.stdout.split("\n")[0] ?? "").trim() : "";
+  const slug = originToSlug(normalizeOrigin(url));
+  if (slug === undefined) return cfg;
+  const { repo, ...rest } = cfg;
+  const next: PeerConfig = { ...rest, repos: { [slug]: repo } };
+  try {
+    writePeerConfig(deps.home, next);
+  } catch {
+    return cfg;
+  }
+  return next;
 }
 
 export const peerFile = (home: string) => join(home, ".volley", "peer.json");
@@ -800,7 +892,28 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
     }
   }
   const volleyDir = resolve(v["volley-dir"] ?? deps.volleyDir);
-  const repo = v.repo !== undefined ? resolve(v.repo) : undefined;
+  // --repo: <owner/name>[=<path>] (repeatable), or one bare path (the legacy single clone).
+  let repo: string | undefined;
+  let repos: Record<string, string> = {};
+  for (const value of v.repo ?? []) {
+    const bare = !value.includes("=") && (/^[/.~]/.test(value) || !isSlug(value));
+    if (bare) {
+      if (repo !== undefined || (v.repo ?? []).length > 1) {
+        return fail(
+          "--repo takes one bare path, or any number of <owner/name>[=<path>]",
+          EXIT.USAGE,
+        );
+      }
+      repo = resolve(value.replace(/^~(?=\/|$)/, deps.home));
+      continue;
+    }
+    const spec = parseRepoSpec(value, deps.home);
+    if (spec === null) return fail(`--repo "${value}" is not <owner/name>[=<path>]`, EXIT.USAGE);
+    repos = editRepos(repos, [spec], []);
+  }
+  const slugs = Object.keys(repos);
+  // One repository: the supervisor still learns its clone (hosts.<name>.repo) for one release.
+  const legacyRepo = repo ?? (slugs.length === 1 ? repos[slugs[0] as string] : undefined);
   const target = v.target ?? `${deps.user()}@${deps.hostname()}`;
   if (target === "" || target.startsWith("-") || /\s/.test(target)) {
     return fail("--target must be an ssh destination (user@host)", EXIT.USAGE);
@@ -812,6 +925,7 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
     { ...deps, volleyDir },
     {
       ...(repo !== undefined ? { repo } : {}),
+      ...(slugs.length > 0 ? { repos } : {}),
       // The profile is checked against the tunnel this join sets up.
       profile: {
         ...peerProfile(null, null, "defaults"),
@@ -826,7 +940,9 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
     io.stdout(renderHuman(failing));
     const doctorCmd = [
       "volley peer doctor --fix",
-      `--repo ${repo !== undefined ? sq(repo) : "<path>"}`,
+      ...(slugs.length > 0
+        ? ["--clone", ...slugs.map((s) => `--repo-add ${sq(`${s}=${repos[s] as string}`)}`)]
+        : [`--repo ${repo !== undefined ? sq(repo) : "<path>"}`]),
       ...(v["volley-dir"] !== undefined ? [`--volley-dir ${sq(volleyDir)}`] : []),
     ].join(" ");
     return fail(
@@ -855,7 +971,7 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
     name,
     target,
     volley_dir: volleyDir,
-    ...(repo !== undefined ? { repo } : {}),
+    ...(legacyRepo !== undefined ? { repo: legacyRepo } : {}),
     port,
     os: deps.platform,
     cores: deps.cpus(),
@@ -917,12 +1033,11 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
     username: joined.username,
     password: joined.password,
     ...(repo !== undefined ? { repo } : {}),
+    ...(slugs.length > 0 ? { repos } : {}),
     joined_at: deps.now().toISOString(),
   };
   const file = peerFile(deps.home);
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
-  chmodSync(file, 0o600);
+  writePeerConfig(deps.home, cfg);
   io.stdout(`Paired as ${cfg.name}: account and hosts.${cfg.name} created on ${host}.\n`);
   io.stdout(`Wrote ${file}.\n`);
 
@@ -942,7 +1057,8 @@ async function join_(code: string, v: Values, io: IO, deps: PeerDeps): Promise<E
   }
 
   // 5. Claude Code's folder trust for the repo (T4: an untrusted repo opens repo_untrusted).
-  printTrust(io, deps, repo, cfg.name);
+  if (slugs.length > 0) for (const s of slugs) printTrust(io, deps, repos[s], cfg.name);
+  else printTrust(io, deps, repo, cfg.name);
 
   // The pairing is done on the host either way: say how to finish, or how to start over.
   if (serviceError !== undefined) {
@@ -1228,7 +1344,11 @@ async function agentCount(deps: PeerDeps): Promise<number> {
  * (without fix text), `claude_logins` and `doctor_at`.
  */
 function fleetFields(deps: PeerDeps, cfg: PeerConfig, d: DoctorReport | null) {
-  const root = worktreeRoot(cfg.repo ?? null, deps.home);
+  // Managed repositories' worktrees, else beside the legacy clone.
+  const root =
+    Object.keys(cfg.repos ?? {}).length > 0
+      ? reposWorktreeRoot(deps.home)
+      : worktreeRoot(cfg.repo ?? null, deps.home);
   let st: ReturnType<PeerDeps["statfs"]> = null;
   for (let p = root; st === null; p = dirname(p)) {
     if (existsSync(p)) st = deps.statfs(p);
@@ -1249,6 +1369,7 @@ function fleetFields(deps: PeerDeps, cfg: PeerConfig, d: DoctorReport | null) {
           versions: d.versions,
           auth: d.auth,
           ...(d.repo !== undefined ? { repo: d.repo } : {}),
+          ...(d.repos !== undefined ? { repos: d.repos } : {}),
           checks: recordChecks(d),
           ...(d.claude_logins !== undefined ? { claude_logins: d.claude_logins } : {}),
           doctor_at: d.doctor_at,
@@ -1359,11 +1480,40 @@ async function peerDoctor(
 ): Promise<DoctorReport> {
   const req = broker !== null ? await requirements(broker, cfg.name) : null;
   const { report } = await runDoctor(deps, {
-    ...(cfg.repo !== undefined ? { repo: cfg.repo } : {}),
+    ...repoOptions(cfg),
     requiredVolley: req?.volley ?? null,
     profile: peerProfile(cfg, req?.sharing ?? null, "supervisor"),
   });
   return report;
+}
+
+/** The doctor's repositories from peer.json: its `repos`, else its legacy `repo`. */
+const repoOptions = (cfg: PeerConfig): Pick<DoctorOptions, "repo" | "repos"> =>
+  Object.keys(cfg.repos ?? {}).length > 0
+    ? { repos: cfg.repos as Record<string, string> }
+    : cfg.repo !== undefined
+      ? { repo: cfg.repo }
+      : {};
+
+/**
+ * peer.json's repositories as they are now (the doctor verb edits them; the service re-reads
+ * them every heartbeat, so no restart), a legacy `repo` migrated into `repos`. The rest of `cfg`
+ * (the account, the tunnel) is what the service started with.
+ */
+async function freshRepos(deps: PeerDeps, cfg: PeerConfig): Promise<PeerConfig> {
+  let disk: PeerConfig;
+  try {
+    disk = readPeerConfig(deps.home);
+  } catch {
+    return cfg;
+  }
+  const { repo, repos } = await migrateRepo(deps, disk);
+  const { repo: _r, repos: _rs, ...rest } = cfg;
+  return {
+    ...rest,
+    ...(repo !== undefined ? { repo } : {}),
+    ...(repos !== undefined ? { repos } : {}),
+  };
 }
 
 /** Publish the record once (join's registration), waiting a little for the fresh tunnel. */
@@ -1512,6 +1662,7 @@ export async function runService(io: IO, deps: PeerDeps, signal?: AbortSignal): 
   try {
     while (!stop.signal.aborted) {
       try {
+        cfg = await freshRepos(deps, cfg);
         broker ??= await connectPeer(deps, cfg, report);
         const now = deps.monotonic();
         const inputs = doctorWatch(deps);
@@ -1604,6 +1755,26 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
     io.stderr("volley peer doctor: --clone needs --fix\n");
     return EXIT.USAGE;
   }
+  if ((v.repo ?? []).length > 1) {
+    io.stderr("volley peer doctor: --repo takes one path (--repo-add adds repositories)\n");
+    return EXIT.USAGE;
+  }
+  const add: { slug: string; path: string }[] = [];
+  for (const value of v["repo-add"] ?? []) {
+    const spec = parseRepoSpec(value, deps.home);
+    if (spec === null) {
+      io.stderr(`volley peer doctor: --repo-add "${value}" is not <owner/name>[=<path>]\n`);
+      return EXIT.USAGE;
+    }
+    add.push(spec);
+  }
+  const remove = v["repo-remove"] ?? [];
+  for (const value of remove) {
+    if (!isSlug(value)) {
+      io.stderr(`volley peer doctor: --repo-remove "${value}" is not <owner/name>\n`);
+      return EXIT.USAGE;
+    }
+  }
   const supervisorDir = v["supervisor-volley-dir"];
   if (supervisorDir !== undefined && !isAbsolute(supervisorDir)) {
     io.stderr("volley peer doctor: --supervisor-volley-dir must be an absolute path\n");
@@ -1626,6 +1797,19 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
   try {
     if (existsSync(peerFile(deps.home))) cfg = readPeerConfig(deps.home);
   } catch {}
+  // peer.json's repositories: a legacy `repo` migrated, then this run's adds and removes saved.
+  if (cfg !== null) cfg = await migrateRepo(deps, cfg);
+  const edited = add.length > 0 || remove.length > 0;
+  const repos = editRepos(cfg?.repos ?? {}, add, remove);
+  if (edited && cfg !== null) {
+    const { repos: _old, ...rest } = cfg;
+    cfg = { ...rest, ...(Object.keys(repos).length > 0 ? { repos } : {}) };
+    writePeerConfig(deps.home, cfg);
+  } else if (edited) {
+    io.stderr(
+      "volley peer doctor: this machine is not paired (no peer.json): --repo-add and --repo-remove apply to this run only\n",
+    );
+  }
   let req: { volley: string | null; sharing: Sharing | null } = { volley: null, sharing: null };
   let tunnelUp = false;
   if (cfg !== null) {
@@ -1637,9 +1821,16 @@ async function doctorVerb(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> 
     }
   }
   const required = req.volley;
-  const repo = v.repo ?? cfg?.repo;
+  // --repo checks that one clone; else peer.json's repositories (or its legacy clone).
+  const flagRepo = v.repo?.[0];
   const opts: DoctorOptions = {
-    ...(repo !== undefined ? { repo: resolve(repo) } : {}),
+    ...(flagRepo !== undefined
+      ? { repo: resolve(flagRepo) }
+      : Object.keys(repos).length > 0
+        ? { repos }
+        : cfg?.repo !== undefined
+          ? { repo: resolve(cfg.repo) }
+          : {}),
     ...(v.origin !== undefined ? { origin: v.origin } : {}),
     ...(v.release !== undefined ? { release: v.release } : {}),
     requiredVolley: required,

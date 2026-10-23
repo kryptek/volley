@@ -307,8 +307,8 @@ account: `volley peer invite` (a one-time code), `volley peer invite --for <name
 re-pairs the paired machine `<name>`), `volley peer list`, `volley peer remove <name> [--drain |
 --now]`. On any machine, `volley peer doctor [--fix]` says whether it can run an agent and fixes
 what it safely can. On the machine to pair: `volley peer join <code> --to <user@supervisor> --repo
-<clone>` (add `--name <name> --replace` with a `--for` code), then the `volley peer run` service it
-installs. join runs `volley peer redeem` on the supervisor's machine as `volley` when that is on its
+<owner/name>[=<clone>]` (repeatable; a bare `--repo <clone>` path is the legacy single clone; add
+`--name <name> --replace` with a `--for` code), then the `volley peer run` service it installs. join runs `volley peer redeem` on the supervisor's machine as `volley` when that is on its
 non-interactive ssh `PATH`, else as `~/.volley/bin/volley` (where `volley setup` installs it; a
 Mac's ssh `PATH` has neither bun nor volley); `--remote-volley <command>` names another.
 
@@ -335,6 +335,9 @@ The one command that says whether this machine can run an agent, and what to do 
 volley peer doctor                       # one line per check: ✓ ok, ! warning, ✗ blocks agents
 volley peer doctor --fix                 # print the plan, ask, apply the safe fixes, check again
 volley peer doctor --fix --yes --clone --origin https://github.com/example-org/example-repo
+volley peer doctor --fix --yes --clone --repo-add example-org/example-repo   # add, then clone it
+volley peer doctor --repo-add example-org/tools=/path/to/tools   # adopt an existing clone
+volley peer doctor --repo-remove example-org/tools               # forget it (the clone stays)
 volley peer doctor --json                # the machine record's doctor fields (SPEC §4.6.15)
 volley peer doctor --sharing '{"skills":"own"}'   # by hand: this profile's sharing modes
 ```
@@ -345,8 +348,10 @@ volley peer doctor --sharing '{"skills":"own"}'   # by hand: this profile's shar
 | `bun_on_path`, `claude_on_path` | warn | **an estimate**: whether the tool resolves on the non-interactive ssh `PATH` volleyd's `ssh <box> bash -s` gets, guessed as sshd's default `PATH` through your login shell's `-c` (sshd's `SetEnv`, `~/.ssh/environment` and `pam_env` are invisible to it). The detail says "estimated"; the supervisor's own probe of the real ssh `PATH` (readiness `path_ok`) decides |
 | `volley.installed` | block | the volley checkout (`--volley-dir`, default the one running) has `node_modules/.bin`, installed from its current `bun.lock` (the doctor's own install records the lockfile's hash in `node_modules/.volley-lock-sha256`, so a `git pull` without a reinstall shows up), and `package.json` agrees with `bun.lock` (`bun install --frozen-lockfile --dry-run`) |
 | `volley.version` | block | the checkout's version is the one the supervisor requires (its readiness verdict's `requirements.volley`, read through the tunnel when this machine is paired) |
-| `repo.clone`, `repo.origin` | block | `--repo` (default `peer.json`'s) is a git clone whose `origin`, normalised to `<host>/<path>`, is `--origin`'s |
+| `repo.clone`, `repo.origin` | block | per repository in `peer.json`'s `repos` (each check names it: `repo.clone (b/b)`), else `--repo` (default `peer.json`'s legacy `repo`): a git clone whose `origin`, normalised to `<host>/<path>`, is the repository's (`github.com/<owner>/<name>`, or `--origin`'s) |
+| `repo.canonical` | warn | a repository's remote names its old owner or name: GitHub (`gh repo view <slug> --json nameWithOwner`) reports the same repository for both; `--fix` repoints `origin` |
 | `repo.fetch` | warn | `origin` (or `origin/<--release>`) answers `git ls-remote` with no prompt of any kind (`GIT_TERMINAL_PROMPT=0`, no askpass, `ssh -o BatchMode=yes`) |
+| `tool.<name>` (a repository's), `repo.requirements` | block, for that repository only | a tool the repository needs (its manifests and `.volley/requirements.yaml`; the volleyd README's "Repository toolchains") is installed and at least its minimum version; the file is valid |
 | `gh.auth` | warn | `gh auth status`, and `gh repo view <owner/repo> --json viewerPermission` is WRITE, MAINTAIN or ADMIN (`auth.gh`: `ok`, `no_write`, `unauthenticated`, `missing`) |
 | `claude.signin` | warn | `claude auth status` (`auth.claude`: `signed_in` with the plan's label, `not_signed_in`, `missing`, `unknown`); while signed in, `auth.claude_email` / `auth.claude_org` are the login's identity from `~/.claude.json`'s `oauthAccount.emailAddress` / `organizationName` (the only two fields of it the doctor reports; identity, never a credential) |
 | `claude.trust` | warn | `~/.claude.json` trusts the repo's folder or a parent (`auth.trust`) |
@@ -380,6 +385,26 @@ package repository on apt), the line that puts Claude Code on the ssh `PATH` (Li
 or an sshd `SetEnv PATH=…`), `gh auth login && gh auth setup-git`, the Claude sign-in, a wrong
 `origin` (explained, never changed), and `package.json` disagreeing with `bun.lock` (local
 edits: `git -C <dir> status`). Exit status 1 while a `block` check fails.
+
+**Repositories.** `peer.json`'s `repos` maps each repository this machine works on, by its
+GitHub `owner/name`, to its clone: the managed one at `~/.volley/repos/<owner>/<name>`
+(`--repo-add <owner/name>`), or one you already have (`--repo-add <owner/name>=<path>`, adopted).
+`--repo-add` and `--repo-remove` (both repeatable) save the map before the run; the supervisor
+sends them over the same ssh channel as its Repair, and the `volley peer run` service re-reads
+the map every heartbeat, so nothing restarts. A flag-less run (what `volley deploy` and the
+service send) checks every repository in it. A legacy `repo` is rewritten into `repos` on the
+next run, keyed by its clone's GitHub origin (a clone whose origin is not GitHub stays `repo`).
+`--clone` (with `--fix`) clones each repository that has no clone yet from
+`https://github.com/<owner>/<name>.git`; no `--origin` is needed. A remote that names the
+repository under its old owner or name (renamed or transferred: GitHub reports the same
+`nameWithOwner` for both) passes `repo.origin` and warns `repo.canonical`; `--fix` repoints
+`origin` and journals it in the report's `fixes`. Any other mismatch blocks and is never changed;
+without `gh`, origins are compared normalised. `--fix` also fetches every repository and, for a
+managed clone whose worktree is clean and on its default branch (`origin/HEAD`), fast-forwards it
+(`git merge --ff-only`); an adopted clone, a dirty or detached one, or one on another branch is
+fetched only. `--json` carries `repos[]` (`slug`, `path`, `exists`, `origin`, `managed`,
+`fetched_at`, `toolchain: { ok, missing, outdated }`), and `repo` too while exactly one
+repository is configured.
 
 **The Claude profile.** The last four rows prepare this machine's own Claude profile the way
 `volley setup` and the packages' installers do locally, so a session you start here has

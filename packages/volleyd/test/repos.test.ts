@@ -62,6 +62,12 @@ describe("repos: slugs (owner/name)", () => {
     const t = schema.$defs.tunableProperties.properties;
     expect(t.repos.propertyNames.pattern).toBe(SLUG_PATTERN);
     expect(schema.$defs.remoteHost.properties.repos.propertyNames.pattern).toBe(SLUG_PATTERN);
+    // The machine record's repositories and per-repository checks (#435).
+    const machine = readFileSync(join(SCHEMAS_DIR, "machine.schema.json"), "utf-8");
+    const slugs = [...machine.matchAll(/"pattern": ("\^\[A-Za-z0-9\]\(\?:[^\n]*?\$")/g)].map((m) =>
+      JSON.parse(m[1] as string),
+    );
+    expect(slugs).toEqual([SLUG_PATTERN, SLUG_PATTERN]);
   });
 
   it("the schema takes repos, fleet.repo_root and hosts.<m>.repos", () => {

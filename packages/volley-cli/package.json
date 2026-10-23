@@ -35,7 +35,8 @@
   },
   "dependencies": {
     "volley-mcp": "workspace:*",
-    "volleyd": "workspace:*"
+    "volleyd": "workspace:*",
+    "yaml": "^2.6.0"
   },
   "devDependencies": {
     "aedes": "^0.51.0",
