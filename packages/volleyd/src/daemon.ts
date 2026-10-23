@@ -1949,9 +1949,7 @@ export class Daemon {
     const env = parseEnvelope(raw);
     if (env !== null && isApiSignal(env)) this.apiSignals.push(this.now());
     // A message queued while the daemon was down arrives late: count it from when it was sent.
-    const sent = env !== null ? Date.parse(env.wall_time) : Number.NaN;
-    const now = this.now();
-    this.lastSeen.set(agent, Number.isNaN(sent) ? now : Math.min(now, sent));
+    this.lastSeen.set(agent, env !== null ? this.sentAt(env.wall_time) : this.now());
     if (env !== null) {
       // A narration or anything else not from the hooks is the agent's MCP server speaking.
       const hook = (env.payload as { source?: unknown } | null)?.source === "harness-hook";
@@ -1996,29 +1994,38 @@ export class Daemon {
     for (const [wave, log] of this.waves) {
       for (const id of log.record.state?.open_decisions ?? []) {
         const d = log.record.decisions[id];
-        if (d === undefined || d.resolved !== undefined || !SPAWN_DECISION_KINDS.has(d.kind))
-          continue;
-        if (spawnDecisionAgent(d) !== agent) continue;
-        const heard = this.heardFrom(agent, d.kind);
-        if (heard === null || heard < Date.parse(d.opened_at)) continue;
-        const key = `${wave}/${id}`;
-        if (this.closingSpawn.has(key)) continue;
-        this.closingSpawn.add(key);
-        void this.enqueue(async () => {
-          try {
-            const open = this.waves.get(wave)?.record.decisions[id];
-            if (open === undefined || open.resolved !== undefined) return;
-            await this.resolveNow(wave, id, {
-              answer: ITS_RUNNING,
-              by: DAEMON_AGENT_ID,
-              rationale: "started on its own",
-            });
-          } finally {
-            this.closingSpawn.delete(key);
-          }
-        });
+        if (d !== undefined && spawnDecisionAgent(d) === agent) this.closeIfHeard(wave, d);
       }
     }
+  }
+
+  /**
+   * Answer `d` `it's running` as volleyd when it is an open spawn decision whose agent was heard
+   * from since it opened: on each sign of life, and when it opens (a sign processed just before).
+   */
+  private closeIfHeard(wave: WaveId, d: DecisionRecord): void {
+    if (d.resolved !== undefined || !SPAWN_DECISION_KINDS.has(d.kind)) return;
+    const agent = spawnDecisionAgent(d);
+    if (agent === undefined) return;
+    const heard = this.heardFrom(agent, d.kind);
+    if (heard === null || heard < Date.parse(d.opened_at)) return;
+    const id = d.decision_id;
+    const key = `${wave}/${id}`;
+    if (this.closingSpawn.has(key)) return;
+    this.closingSpawn.add(key);
+    void this.enqueue(async () => {
+      try {
+        const open = this.waves.get(wave)?.record.decisions[id];
+        if (open === undefined || open.resolved !== undefined) return;
+        await this.resolveNow(wave, id, {
+          answer: ITS_RUNNING,
+          by: DAEMON_AGENT_ID,
+          rationale: "started on its own",
+        });
+      } finally {
+        this.closingSpawn.delete(key);
+      }
+    });
   }
 
   /**
@@ -2160,10 +2167,11 @@ export class Daemon {
         if (entry?.agent_id === id) {
           const env = parseEnvelope(m.payload);
           // The hooks' re-publish carries `model_source`; the MCP server's own registration not.
-          const mcp = (env?.payload as { model_source?: unknown } | undefined)?.model_source;
+          const modelSource = (env?.payload as { model_source?: unknown } | undefined)
+            ?.model_source;
           // Only the hooks' entry shows the session got past its screen.
-          if (env !== null)
-            this.heard(id, this.sentAt(env.wall_time), mcp === undefined, mcp !== undefined);
+          const hooks = modelSource !== undefined;
+          if (env !== null) this.heard(id, this.sentAt(env.wall_time), !hooks, hooks);
         }
         // Recorded on arrival, not on the queue: the status subscription reads it on arrival.
         const before = this.namedEntries.get(id)?.coordinator;
@@ -8497,6 +8505,7 @@ export class Daemon {
     await this.append(wave, { ...r.event, data: { ...extra, ...r.event.data } });
     this.log(`opened ${describeDecision(log.record.decisions[r.id] as DecisionRecord)}`);
     if (settle) await this.settleDecision(wave, r.id);
+    this.closeIfHeard(wave, log.record.decisions[r.id] as DecisionRecord);
     return log.record.decisions[r.id] as DecisionRecord;
   }
 

@@ -85,9 +85,14 @@ describe("relaunch of a spawn-type decision", () => {
 
   /**
    * w1 (one task, [implement]) on a fake host and a fake clock. The first launch fails as
-   * `first` says; every later launch registers normally.
+   * `first` says; every later launch registers normally. `duringScreenRead` runs while volleyd
+   * reads the silent agent's screen, after its spawn window closed and before the decision opens.
    */
-  async function setup(first: "auth" | "mcp" | "silent", autopilot = false) {
+  async function setup(
+    first: "auth" | "mcp" | "silent",
+    autopilot = false,
+    duringScreenRead?: () => Promise<void>,
+  ) {
     env = await makeDaemonEnv();
     const repo = join(realpathSync(env.home), "repo");
     mkdirSync(repo);
@@ -108,6 +113,10 @@ describe("relaunch of a spawn-type decision", () => {
       });
     creds = memoryCredentials();
     host = fakeHost(fake);
+    if (duringScreenRead !== undefined) {
+      host.readScreenDelayMs = 1;
+      host.sleep = duringScreenRead;
+    }
     let launches = 0;
     host.onLaunch = (spec) => {
       const n = ++launches;
@@ -449,6 +458,16 @@ describe("relaunch of a spawn-type decision", () => {
       await closedOnItsOwn(String(opened.data.decision_id));
     });
   }
+
+  it("unknown_screen closes on a narration that arrived while volleyd read the screen", async () => {
+    // Sent (and processed) at the instant the decision opens, before decision_opened is journaled.
+    const opened = await setup("silent", false, async () => {
+      await signals[2]?.[1](A1);
+      // broker round-trip: the narration reaches the daemon while the screen read is in flight.
+      await new Promise((r) => setTimeout(r, 300));
+    });
+    await closedOnItsOwn(String(opened.data.decision_id));
+  });
 
   it("unknown_screen stays open while the agent only waits at a prompt or sends garbage", async () => {
     const opened = await setup("silent");
