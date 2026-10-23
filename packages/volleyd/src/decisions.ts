@@ -108,6 +108,26 @@ export function resumeStageOf(d: DecisionRecord, task: TaskId): TaskStage | unde
 }
 
 /**
+ * `remote_repo_missing` (#436): a machine has no clone of the wave's repository. The question
+ * names the slug and both ways to add it; `add` answers like `retry` until the supervisor can add
+ * the repository itself, which its help says.
+ */
+export function remoteRepoMissing(
+  machine: string,
+  slug: string,
+): { question: string; options: string[]; option_help: Record<string, string> } {
+  return {
+    question: `Needs you: ${machine} has no clone of ${slug}. Add it to ${machine} (Settings → Repositories, or volley repo add ${slug} --machine ${machine})?`,
+    options: ["add", "retry", "cancel"],
+    option_help: {
+      add: `Add ${slug} to ${machine} first (Settings → Repositories, or volley repo add ${slug} --machine ${machine}); for now add answers like retry: the task is tried again.`,
+      retry: `Try the task on ${machine} again (once its clone of ${slug} is there).`,
+      cancel: "Cancel the task.",
+    },
+  };
+}
+
+/**
  * A spawn decision's harmless third answer: volleyd checks the agent is live and closes the
  * decision, touching nothing; volleyd answers it itself once the agent reports in (#402).
  */

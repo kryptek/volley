@@ -14,10 +14,33 @@
     "drain": false,
     "max_agents": 4,
     "placed": 0,
-    "path_ok": { "claude": false, "bun": true },
-    "requirements": { "volley": "0.4.0" },
+    "path_ok": {
+      "claude": false,
+      "bun": true
+    },
+    "requirements": {
+      "volley": "0.4.0"
+    },
     "heavy": {},
-    "usage": { "account": null, "five_hour_pct": null },
+    "usage": {
+      "account": null,
+      "five_hour_pct": null
+    },
+    "repos": {
+      "example-org/example-repo": {
+        "state": "blocked",
+        "path": "/path/to/repo",
+        "reasons": [
+          "java not installed (needed by example-org/example-repo)"
+        ]
+      },
+      "example-org/other": {
+        "state": "absent",
+        "reasons": [
+          "no clone of example-org/other on box-b"
+        ]
+      }
+    },
     "eligible": false,
     "ineligible_reason": "not ready: claude is not on the non-interactive ssh PATH",
     "checked_at": "2026-10-19T09:30:05.000Z"

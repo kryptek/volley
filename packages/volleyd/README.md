@@ -2318,8 +2318,10 @@ That pin is host-wide: once a box's legacy `repo` migrates, every repository's w
 stay under that `.volley-worktrees` until you unset `hosts.box.worktree_root`. A host with none
 of them fails the spawn: `host 'box' has no clone of <owner/name>: add it (Settings →
 Repositories, or volley repo add <owner/name> --machine box)`. A wave whose repository
-is not on GitHub uses the host's `repo` as before. A managed path on a box whose home directory
-volleyd does not know yet fails the spawn too; give that box absolute `repos` and `worktree_root`.
+is not on GitHub uses the host's `repo` as before. volleyd learns a box's home directory from the
+managed clones its record reports (`repos[].path`, under a `~/…` `repo_root`); a managed path on
+a box whose home it does not know yet fails the spawn too; give that box absolute `repos` and
+`worktree_root`.
 
 A wave file's `repo:` may be an `owner/name` too: at submit it becomes the supervisor's own clone
 of it (its `hosts.<fleet.local_name>.repos` entry, else the managed path), and a name with none is
@@ -2411,7 +2413,7 @@ through `base64 -d`. The spawn steps are those of the local host, with these dif
 |---|---|
 | Repo trust | the box's own `~/.claude.json`, read at every spawn (only the trust bits); an untrusted repo opens `repo_untrusted` with `host` and `target` (see below) |
 | Lock | `$VOLLEYD_HOME/hosts/<target>/locks/` — keyed by target and worktree path |
-| Worktree | `git -C <repo> fetch origin <release_branch>` (one fetch into the box's clone at a time, the same lock and ref-lock retry as on this machine: [base ref](#base-ref)), then `worktree add … origin/<release_branch>` on the box; no clone at `repo` → decision `remote_repo_missing` naming the path (an ssh failure is not "no clone": the spawn is refused with `LAUNCH_FAILED` and retried with backoff) |
+| Worktree | `git -C <repo> fetch origin <release_branch>` (one fetch into the box's clone at a time, the same lock and ref-lock retry as on this machine: [base ref](#base-ref)), then `worktree add … origin/<release_branch>` on the box; no clone at `repo` → decision `remote_repo_missing`: `Needs you: box has no clone of <owner/name>. Add it to box (Settings → Repositories, or volley repo add <owner/name> --machine box)?` with `add` / `retry` / `cancel` (`add` answers like `retry` for now: add the repository first; a repository not on GitHub names the path, with `retry` / `cancel`) (an ssh failure is not "no clone": the spawn is refused with `LAUNCH_FAILED` and retried with backoff) |
 | Brief | `.volley/brief-extra.md` is read from the box's clone; the [brief preface](#brief-preface) on volleyd's host |
 | Identity | minted on the daemon's machine; `agent.json` carries `broker_url: mqtt://127.0.0.1:<remote_port>` |
 | Launch | `launch.sh` exports `VOLLEY_HOOKS_DIR=<volley_dir>/packages/volley-hooks` and, for tooling that reads env, `VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE`, `VOLLEY_AGENT_ID` (the identity file still wins); started with `tmux new-session -d -x <tmux_cols> -y <tmux_rows> -s <wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'` (220×50 by default; detached, tmux would make it 80×24). Never `--mcp-config` |
@@ -2614,13 +2616,16 @@ computes and publishes today; placement itself uses these verdicts.
 when that is `null`, the host name's first label lowercased (`MacBook-Pro.local` is
 `macbook-pro`; a reserved result becomes `supervisor`). The retained config carries the resolved
 name, never `null`. `load`, `cores`, `memory` and `uptime_s` are read live from the OS, `agents`
-is its live supervised agents, and the rest (`checks`, `versions`, `auth`, `repo`, `disk`,
+is its live supervised agents, and the rest (`checks`, `versions`, `auth`, `repos`, `disk`,
 `doctor_at`) comes from its own doctor: `volleyd daemon` runs `volley peer doctor --json --repo
 <repo>` locally (fenced: that argv only, never `--fix`) at start, every heartbeat, and at once when
-the running wave's repo changes. volleyd is no peer (it has no `peer.json`), so `<repo>` is the
-running wave's repo (the first by wave id when several run); with no wave running it runs without
-`--repo`, and the report's `repo.*` checks, which then only say that no repo was given, do not
-count against its own machine (nor is any origin compared). `versions.volley` is
+the running waves' repos change. volleyd is no peer (it has no `peer.json`), so it runs once per
+running wave's clone (each clone once, by wave id) and folds the reports into one record: the
+machine-level checks of the first run, and per clone its `repo.*` checks (tagged with the wave's
+`owner/name`) and one `repos[]` entry (`managed: false`; a `--repo` run checks no toolchain, so
+none is held against it); a clone whose run fails keeps what the last report said of it. With no
+wave running it runs once without `--repo`. A clone's `repo.*`
+checks judge that repository only, never the machine (see Readiness). `versions.volley` is
 volleyd's own version. The name is never a configured host's: `config_set` (or `config.yaml`)
 that would make `fleet.local_name` equal a `hosts.<name>` key, or a host key equal the derived
 name, is refused, and so is `peer_join` under that name.
@@ -2637,6 +2642,11 @@ publishes there):
   "requirements": { "volley": "0.4.0", "bun": "1.3.0", "sharing": { "skills": "linked", "...": "..." } },
   "heavy": { "build": { "held": 1, "per_machine": 2 } },
   "usage": { "account": "main@box-a", "five_hour_pct": 42 },
+  "repos": {
+    "example-org/widgets": { "state": "ready", "path": "/path/to/home/.volley/repos/example-org/widgets",
+                             "reasons": [], "fetched_at": "2026-10-19T08:58:00.000Z" },
+    "example-org/gadgets": { "state": "blocked", "path": "/path/to/gadgets",
+                             "reasons": ["java not installed (needed by example-org/gadgets)"] } },
   "eligible": false, "ineligible_reason": "volley 0.3.0 on box-a, host runs 0.4.0",
   "checked_at": "2026-10-19T09:00:00.000Z" }
 ```
@@ -2644,8 +2654,16 @@ publishes there):
 `ready` is false while anything blocks an agent there, each said in one plain line: no record
 yet, the tunnel down, no doctor report (`no doctor report: run volley peer doctor`), a failing
 `block` check, a volley version other than volleyd's, `claude` or `bun` missing from the PATH an
-agent gets, GitHub without push access (`gh: no write permission on <owner/repo>`), Claude signed
-out (`claude: not signed in`), or a clone whose origin differs from the supervisor's. The PATH
+agent gets, GitHub without push access (`gh: no write permission on <owner/name>`, the first
+repository the record reports), or Claude signed out (`claude: not signed in`). A repository is
+never a machine blocker: `repos` judges each one on its own, by `owner/name` — every running
+wave's, and every one the machine's record reports (an older peer's single `repo` by its origin's
+slug; one without an origin yet stands for every running wave's). `ready`: its clone exists and
+passes its checks; `blocked`: a failing per-repository `block` check (`repo.fetch: …`) or a tool
+it needs that is missing or too old (`java not installed (needed by owner/name)`, `node older than
+required (needed by owner/name)`); `absent`: no clone (`no clone of owner/name on box-a`);
+`cloning` is reserved for a clone being made. A machine whose clone of `example-org/gadgets` is
+blocked stays `ready` and runs `example-org/widgets` tasks. The PATH
 is volleyd's own probe: for a peer, `command -v claude bun` as a fenced step of the same
 `ssh -T <target> bash -s` that runs `launch.sh`, at most every `path_probe_interval_ms` (5 min)
 while its record is up; the doctor's own `claude_on_path` / `bun_on_path` only estimate that PATH
@@ -2659,9 +2677,13 @@ volleyd's config: ready, not draining (`ineligible_reason: "draining"`), `placed
 within the thresholds (see Fleet: placement). `ineligible_reason` is the machine's placement
 candidate line without `ineligible: `, so the verdict never says `eligible` about a machine
 placement skips; a blocker of `ready` reads `<reason> (readiness)` there. Only a heavy task's
-slots are per task: they show in `heavy`. `requirements` is what a machine's doctor checks against:
-volleyd's version, the bun the running wave's repo asks for (the same repo as the own doctor's;
-`engines.bun`, else `packageManager`) when it names one, and the Claude profile sharing modes of `sharing.yaml`.
+slots and the wave's repository are per task: they show in `heavy` and `repos`. Placement skips a
+machine whose clone of the wave's repository is not `ready`, with the line `ineligible: no ready
+clone of <owner/name> (<state>: <first reason>)` (`volleyd run`'s preview and the task's
+`why_waiting` show it); under `local_agents: fallback` such a peer does not keep the supervisor's
+own machine closed to that wave. `requirements` is what a machine's doctor checks against:
+volleyd's version, the bun the first running wave's repo (by wave id) asks for
+(`engines.bun`, else `packageManager`) when it names one, and the Claude profile sharing modes of `sharing.yaml`.
 
 The verdict is re-computed on every tick, on each folded record, on a config change and after a
 probe; it is re-published when anything but `checked_at` changed, and otherwise every

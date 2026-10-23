@@ -11,7 +11,10 @@
     "drain": false,
     "max_agents": 4,
     "placed": 2,
-    "path_ok": { "claude": true, "bun": true },
+    "path_ok": {
+      "claude": true,
+      "bun": true
+    },
     "requirements": {
       "volley": "0.4.0",
       "bun": "1.3.0",
@@ -25,8 +28,24 @@
         "mcp": "copy"
       }
     },
-    "heavy": { "backend-it": { "held": 1, "per_machine": 1 } },
-    "usage": { "account": "primary@box-a", "five_hour_pct": 34 },
+    "heavy": {
+      "backend-it": {
+        "held": 1,
+        "per_machine": 1
+      }
+    },
+    "usage": {
+      "account": "primary@box-a",
+      "five_hour_pct": 34
+    },
+    "repos": {
+      "example-org/example-repo": {
+        "state": "ready",
+        "path": "/path/to/repo",
+        "reasons": [],
+        "fetched_at": "2026-10-19T08:58:00.000Z"
+      }
+    },
     "eligible": true,
     "checked_at": "2026-10-19T09:30:05.000Z"
   }

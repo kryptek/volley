@@ -353,3 +353,78 @@ export function doctorFields(r: DoctorReport): Partial<MachineRecord> {
     doctor_at: r.doctor_at,
   };
 }
+
+/**
+ * The supervisor's own doctor (#436) runs once per running wave's clone (`--repo <dir>`); its
+ * reports fold into one: the machine-level fields and checks from the first, and per clone its
+ * `repo.*` checks (tagged with its slug) and one `repos[]` entry, the first clone of a slug
+ * winning. A clone whose slug is unknown (a repository not on GitHub) keeps its checks untagged.
+ * The legacy `repo` is kept only when exactly one clone ran, as a peer's doctor does.
+ */
+export function foldOwnDoctor(
+  runs: { slug?: string | undefined; report: DoctorReport }[],
+): DoctorReport | null {
+  const first = runs[0]?.report;
+  if (first === undefined) return null;
+  const isRepoCheck = (c: { id: string; repo?: string }) =>
+    c.repo !== undefined || c.id.startsWith("repo.");
+  const checks: DoctorReport["checks"] = first.checks.filter((c) => !isRepoCheck(c));
+  const repos: MachineRepo[] = [];
+  for (const { slug, report } of runs) {
+    if (slug !== undefined && repos.some((r) => r.slug.toLowerCase() === slug.toLowerCase())) {
+      continue;
+    }
+    const own = report.checks.filter(isRepoCheck);
+    checks.push(...(slug === undefined ? own : own.map((c) => ({ ...c, repo: c.repo ?? slug }))));
+    if (slug === undefined) continue;
+    const reported = report.repos?.find((r) => r.slug.toLowerCase() === slug.toLowerCase());
+    if (reported !== undefined) repos.push({ ...reported, slug });
+    else if (report.repo !== undefined) {
+      const r = report.repo;
+      repos.push({
+        slug,
+        path: r.path,
+        exists: r.exists,
+        ...(r.origin !== undefined ? { origin: r.origin } : {}),
+        managed: false,
+        fetched_at: r.fetched_at ?? null,
+        ...(r.release_branch !== undefined ? { release_branch: r.release_branch } : {}),
+        // `--repo` runs no per-repository toolchain check: nothing is held against it.
+        toolchain: { ok: true, missing: [], outdated: [] },
+      });
+    }
+  }
+  const { repo: _repo, repos: _repos, checks: _checks, ...rest } = first;
+  return {
+    ...rest,
+    checks,
+    ...(runs.length === 1 && first.repo !== undefined ? { repo: first.repo } : {}),
+    ...(repos.length > 0 ? { repos } : {}),
+  };
+}
+
+/**
+ * The own doctor's clones whose run failed this time (`failed`, by slug) keep what the last
+ * report said of them (#436): their `repos[]` entry and their `repo.*` checks, so a clone the
+ * machine has is never judged absent over a failed run. The legacy `repo` goes once more than
+ * one clone is held.
+ */
+export function carryFailedClones(
+  folded: DoctorReport | null,
+  prior: DoctorReport | null | undefined,
+  failed: string[],
+): DoctorReport | null {
+  if (folded === null || !prior || failed.length === 0) return folded;
+  const same = (a: string) => (b: string) => a.toLowerCase() === b.toLowerCase();
+  const held = (slug: string) => (folded.repos ?? []).some((r) => same(r.slug)(slug));
+  const carry = failed.filter((slug) => !held(slug));
+  const repos = (prior.repos ?? []).filter((r) => carry.some(same(r.slug)));
+  if (repos.length === 0) return folded;
+  const checks = prior.checks.filter((c) => c.repo !== undefined && carry.some(same(c.repo)));
+  const { repo: _repo, ...rest } = folded;
+  return {
+    ...rest,
+    checks: [...folded.checks, ...checks],
+    repos: [...(folded.repos ?? []), ...repos],
+  };
+}

@@ -6,6 +6,7 @@ import {
   type PlaceOptions,
   type Snapshot,
   type VerdictView,
+  machineIneligible,
   needsPlacement,
   peerIdleUnderLoad,
   place,
@@ -13,7 +14,7 @@ import {
   reserve,
   snapshotFrom,
 } from "../src/placement";
-import { type ReadinessInput, machineView, readiness } from "../src/readiness";
+import { type ReadinessInput, type RepoVerdict, machineView, readiness } from "../src/readiness";
 import { parseWaveFile } from "../src/wave-file";
 
 /**
@@ -397,7 +398,7 @@ describe("one machine filter: the readiness verdict agrees with placement", () =
     local: false,
     host: { max_agents: 4, drain: false },
     hostVersion: "0.4.0",
-    hostOrigin: "github.com/example-org/example-repo",
+    repos: { wanted: ["example-org/example-repo"], records: undefined, legacy: ok.repo },
     probe: { claude: true, bun: true },
     placed: 0,
     heavy: {},
@@ -512,6 +513,93 @@ describe("place: tasks that name their host", () => {
   });
 });
 
+describe("placement per (machine, repository) (#436)", () => {
+  const repos = (
+    states: Record<string, "ready" | "absent" | "blocked">,
+  ): Record<string, RepoVerdict> =>
+    Object.fromEntries(
+      Object.entries(states).map(([slug, state]) => [
+        slug,
+        state === "ready"
+          ? { state, path: `/path/to/${slug}`, reasons: [] }
+          : state === "absent"
+            ? { state, reasons: [`no clone of ${slug} on the machine`] }
+            : {
+                state,
+                path: `/path/to/${slug}`,
+                reasons: [`java not installed (needed by ${slug})`],
+              },
+      ]),
+    );
+  // box-b is the better machine by headroom: only the repository keeps it out.
+  const two = () =>
+    snap(
+      machine("box-a", { repos: repos({ "a/a": "ready", "b/b": "absent" }), agents: 2 }),
+      machine("box-b", { repos: repos({ "a/a": "absent", "b/b": "ready" }) }),
+    );
+
+  it("a machine without a ready clone of the wave's slug is ineligible with the exact reason", () => {
+    const r = place(task(), AUTO, two(), { ...OPTS, waveSlug: "a/a" });
+    expect(r.host).toBe("box-a");
+    expect(r.candidates.find((c) => c.host === "box-b")?.line).toBe(
+      "ineligible: no ready clone of a/a (absent: no clone of a/a on the machine)",
+    );
+  });
+
+  it("a second wave for the other slug places on the other machine", () => {
+    expect(place(task(), AUTO, two(), { ...OPTS, waveSlug: "b/b" }).host).toBe("box-b");
+    // The slug matches case-insensitively (GitHub's names do).
+    expect(place(task(), AUTO, two(), { ...OPTS, waveSlug: "B/B" }).host).toBe("box-b");
+  });
+
+  it("a blocked clone names its state and first reason; no slug or no repos view: no filter", () => {
+    const s = snap(machine("box-a", { repos: repos({ "a/a": "blocked" }) }));
+    const r = place(task(), AUTO, s, { ...OPTS, waveSlug: "a/a" });
+    expect(r).toMatchObject({
+      host: null,
+      why: "no eligible machine: box-a: no ready clone of a/a (blocked: java not installed (needed by a/a))",
+    });
+    expect(place(task(), AUTO, s, OPTS).host).toBe("box-a");
+    expect(place(task(), AUTO, snap(machine("box-a")), { ...OPTS, waveSlug: "a/a" }).host).toBe(
+      "box-a",
+    );
+  });
+
+  it("a machine whose repos view lacks the slug is not filtered: unknown, as in a preview", () => {
+    // The daemon's verdicts judge every running wave's slug; a preview's wave may not be running.
+    const s = snap(machine("box-a", { repos: repos({ "b/b": "ready" }) }));
+    expect(place(task(), AUTO, s, { ...OPTS, waveSlug: "a/a" }).host).toBe("box-a");
+  });
+
+  it("the machine filter itself stays task-agnostic: the verdict's eligible ignores repositories", () => {
+    const s = two();
+    const b = s.machines[1] as MachineView;
+    expect(machineIneligible(b, s, OPTS)).toEqual([]);
+  });
+
+  it("preview reads repos from the verdicts and prints the reason", () => {
+    const verdict = (name: string, r: VerdictView["repos"]): VerdictView => ({
+      name,
+      ready: true,
+      reasons: [],
+      drain: false,
+      max_agents: 4,
+      placed: 0,
+      heavy: {},
+      usage: { five_hour_pct: 34 },
+      ...(r !== undefined ? { repos: r } : {}),
+    });
+    const snapshot = snapshotFrom(
+      [record("box-a"), record("box-b")],
+      [verdict("box-a", repos({ "a/a": "absent" })), verdict("box-b", repos({ "a/a": "absent" }))],
+      LOCAL,
+    );
+    expect(preview(AUTO, snapshot, { ...OPTS, waveSlug: "a/a" })).toBe(
+      "if admitted now: T1 → waiting (no eligible machine: box-a: no ready clone of a/a (absent: no clone of a/a on the machine)), T2 → waiting (no eligible machine: box-a: no ready clone of a/a (absent: no clone of a/a on the machine))",
+    );
+  });
+});
+
 describe("preview", () => {
   const verdict = (name: string, over: Partial<VerdictView> = {}): VerdictView => ({
     name,
@@ -613,6 +701,23 @@ describe("fleet.local_agents: the supervisor's own machine as a fallback (SPEC �
     expect(place(task(), AUTO, snap(laptop(), peer), { ...FB, local_agents: "always" }).host).toBe(
       LOCAL,
     );
+  });
+
+  it("a peer without a ready clone of the wave's slug does not keep the laptop closed (#436)", () => {
+    const peer = peerUp({
+      repos: { "a/a": { state: "absent", reasons: ["no clone of a/a on box-a"] } },
+    });
+    const laptopWith = laptop({
+      repos: { "a/a": { state: "ready", path: "/path/to/a", reasons: [] } },
+    });
+    const r = place(task(), AUTO, snap(laptopWith, peer), { ...FB, waveSlug: "a/a" });
+    expect(r.host).toBe(LOCAL);
+    if (r.host === null) throw new Error("unplaced");
+    expect(r.candidates[0]?.line).toMatch(
+      /^local \(fallback: no peer eligible: box-a: no ready clone of a\/a \(absent: no clone of a\/a on box-a\)\)/,
+    );
+    // Another repository's wave still goes to the peer.
+    expect(place(task(), AUTO, snap(laptopWith, peer), FB).host).toBe("box-a");
   });
 
   it("the peer full in the tick: the next admission falls back to the laptop", () => {
