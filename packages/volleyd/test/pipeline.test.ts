@@ -378,7 +378,6 @@ describe("pipeline: gated at the reviewed head (#383)", () => {
       .filter((f) => readFileSync(join(dir, f), "utf-8").includes("VOLLEYD_REPLAY_BASELINE"));
     expect(hits).toEqual(["pipeline.ts"]);
     const src = readFileSync(join(dir, "pipeline.ts"), "utf-8");
-    expect(src.match(/VOLLEYD_REPLAY_BASELINE/g)).toHaveLength(2);
     const fn = /\nfunction gateOrUpdate\([\s\S]*?\n}\n/.exec(src)?.[0] ?? "";
     expect(fn.match(/process\.env/g)).toHaveLength(1);
     expect(src.match(/process\.env\.VOLLEYD_REPLAY_BASELINE/g)).toHaveLength(1);

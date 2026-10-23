@@ -13,7 +13,8 @@ import { stubEnv } from "../helpers/with-env";
  * before its gate as before #383) and the epic (the overlap planner's wave: bundles, chains and
  * cluster caps, the merge train on). It measures branch-update and merge rounds from each journal
  * and asserts the epic's targets against the baseline. Opt-in: `REPLAY=1 bun run test:soak --
- * replay` (it prints the table on every run); SOAK_SEED replays a run.
+ * replay` (it prints the table on every run); SOAK_SEED replays a run. The epic test reads the
+ * baseline's metrics, so it runs after the baseline in this file: `-t epic` alone fails by design.
  */
 
 const SEED = Number(process.env.SOAK_SEED ?? 1);

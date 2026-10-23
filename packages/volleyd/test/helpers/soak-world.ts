@@ -122,7 +122,7 @@ export function soakWorld(o: SoakWorldOptions) {
   const unknown: string[][] = [];
   /** Every merge GitHub performed, in order: PR, head, merge commit. */
   const merges: { pr: number; head: string; sha: string }[] = [];
-  /** Every branch update that conflicted, in order (the replay counts them). */
+  /** Every branch update that conflicted, in order (the world records each one; tests read it). */
   const conflicts: Conflict[] = [];
   /** The commit that removed the flake (null: still flaky). */
   let fixedBy: string | null = null;
