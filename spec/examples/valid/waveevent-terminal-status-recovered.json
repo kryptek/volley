@@ -1,0 +1,14 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-22T12:02:10.000Z",
+  "channel": "_waves/events",
+  "type": "terminal_status_recovered",
+  "payload": {
+    "wave": "2026-10-20-example",
+    "seq": 512,
+    "at": "2026-10-22T12:02:10.000Z",
+    "task": "T1",
+    "data": { "agent_id": "2026-10-20-example-t1-fixup-2", "status": "done", "after_ms": 130000 }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-22T12:02:10.000Z",
+  "channel": "_waves/decisions",
+  "type": "decision_opened",
+  "payload": {
+    "decision_id": "terminal_status_lost-0a1b2c3d4e5f",
+    "wave": "w1",
+    "task": "T1",
+    "kind": "terminal_status_lost",
+    "question": "Needs you: w1-t1-fixup-2 (T1) published done, and volleyd could not hand it to the pipeline (the pipeline failed again: verify timed out). accept done: apply the status as if it had just arrived; or relaunch: stop it and start the fixup again?",
+    "options": ["accept done", "relaunch"],
+    "pointers": {},
+    "opened_at": "2026-10-22T12:02:10.000Z"
+  }
+}

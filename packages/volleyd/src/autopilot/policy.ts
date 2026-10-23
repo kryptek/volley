@@ -376,6 +376,14 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     answer: null,
     rationale: "where the work went, or a clone that is missing, is the owner's call",
   },
+  {
+    policy: "terminal/owner",
+    kinds: ["terminal_status_lost"],
+    condition: "always",
+    answer: null,
+    rationale:
+      "a status the supervisor could not hand over even on recovery: the owner checks the work",
+  },
 ];
 
 /** The facts a rule looked at, journaled as `decision_auto_resolved.evidence`. */

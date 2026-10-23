@@ -708,6 +708,8 @@ export const WAVE_EVENT_TYPES = [
   "remediation_closed",
   // The morning digest (SPEC §4.6.16): published retained, with its one push.
   "digest_published",
+  // The terminal-status watchdog (#414): a dropped done / failed handed over again.
+  "terminal_status_recovered",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];
