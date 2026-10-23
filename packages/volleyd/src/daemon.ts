@@ -8892,8 +8892,13 @@ export class Daemon {
           this.workspaceHolder(source, item.agent_id) === null
             ? source
             : undefined;
-        if (asked === undefined)
-          return `${workspace} is ${holder}'s screen, not ${item.agent_id}'s${source !== undefined && source !== workspace ? `; ${item.agent_id} asked from ${source}` : ""}: send the answer to its mailbox, or answer it in its terminal`;
+        if (asked === undefined) {
+          const from =
+            source !== undefined && source !== workspace
+              ? `; ${item.agent_id} asked from ${source}`
+              : "";
+          return `${workspace} is ${holder}'s screen, not ${item.agent_id}'s${from}: send the answer to its mailbox, or answer it in its terminal`;
+        }
         workspace = asked;
       }
     }

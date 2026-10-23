@@ -70,8 +70,9 @@ export async function connectBroker(
 
 /**
  * Coordinator identity lookup: the retained registry entries whose cwd is `dir`, newest
- * first, each with its retained status type (errors land in `sessionKey`'s state dir). The registry is read until it goes quiet
- * (not for a fixed total), so a large or remote registry is read in full.
+ * first, each with its retained status type (errors land in `sessionKey`'s state dir). The
+ * registry is read until it goes quiet (not for a fixed total), so a large or remote registry
+ * is read in full.
  */
 export async function lookupRegistry(
   brokerUrl: string,

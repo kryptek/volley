@@ -287,8 +287,9 @@ export async function resolveCoordinatorIdentity(
       return make(entry);
     }
     // Cache the miss, unless this is startup in a directory sessions have registered from:
-    // this session's own entry may only be moments away.
-    if (pickCandidate(candidates, env, null) === null || notBefore === undefined) {
+    // this session's own entry may only be moments away (even when every entry so far is
+    // another surface's).
+    if (candidates.length === 0 || notBefore === undefined) {
       const miss: CachedIdentity = {
         agent_id: null,
         ...(pinned !== null ? { pinned } : {}),

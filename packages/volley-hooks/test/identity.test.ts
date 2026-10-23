@@ -336,6 +336,25 @@ describe("coordinator identity", () => {
       expect(id).toBeNull();
     });
 
+    it("at startup, another surface's entry alone does not cache a miss: it waits for its own", async () => {
+      const { dir, env } = setup();
+      const b = at("coordinator-bbbb", "2026-10-22T10:05:01.000Z", "surface-b");
+      let lookups = 0;
+      const lookup = async () => {
+        lookups++;
+        return lookups < 2 ? [A] : [b, A];
+      };
+      const benv = { ...env, CMUX_SURFACE_ID: "surface-b" };
+      const id = await resolveCoordinatorIdentity(dir, benv, lookup, {
+        refresh: true,
+        notBefore: Date.parse("2026-10-22T09:59:00.000Z"),
+        retryDelayMs: 0,
+        sessionKey: "session:b",
+      });
+      expect(id?.agentId).toBe("coordinator-bbbb");
+      expect(lookups).toBe(2);
+    });
+
     it("without cmux, a session keeps the entry it resolved first after a newer one appears", async () => {
       const { dir, env } = setup();
       const a0 = at("coordinator-aaaa", "2026-10-22T10:00:00.000Z");
