@@ -217,6 +217,18 @@ describe("terminal_resize", () => {
     expect(host.resizes).toEqual([]);
   });
 
+  it("retiring the agent drops a resize still in its coalescing window", async () => {
+    const r = resize({ cols: 120, rows: 30 });
+    await consumed();
+    await pub(buildTopic(NS, ID, "status"), "failed", "status", { reason: "test" });
+    await waits.event("w1", "agent_retired");
+    await clock.advance(DAEMON_DEFAULTS.terminal_resize_coalesce_ms * 2);
+    const answer = await r;
+    expect(answer.ok).toBe(false);
+    expect(answer.error).toMatch(/retired/);
+    expect(host.resizes).toEqual([]);
+  });
+
   it("refuses an unknown agent and a size out of bounds, resizing nothing", async () => {
     const unknown = await client.request("terminal_resize", {
       agent_id: "nobody-1",

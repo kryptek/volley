@@ -2317,11 +2317,7 @@ export class Daemon {
     for (const t of this.reconnectTimers.values()) this.time.clearTimeout(t);
     this.reconnectTimers.clear();
     // A resize still in its coalescing window never reaches the host once halted.
-    for (const r of this.resizes.values()) {
-      this.time.clearTimeout(r.timer);
-      for (const answer of r.answers) answer({ ok: false, error: "volleyd is stopping" });
-    }
-    this.resizes.clear();
+    for (const id of [...this.resizes.keys()]) this.dropResize(id, "volleyd is stopping");
     this.screens.clear();
     this.tunnelsStopped = this.tunnels.stop();
     for (const a of this.supervised.values()) {
@@ -5661,6 +5657,7 @@ export class Daemon {
     const log = a !== undefined ? this.waves.get(a.wave) : undefined;
     if (a === undefined || log === undefined) return;
     this.supervised.delete(agentId);
+    this.dropResize(agentId, `agent '${agentId}' retired`);
     this.lastWokenAt.delete(agentId);
     this.wakeTyped.delete(agentId);
     for (const [id, w] of this.wakes) if (w.agent === agentId) this.disarmWake(id);
@@ -10914,6 +10911,15 @@ export class Daemon {
       this.resizes.set(id, { size, answers, timer });
     });
     return { ok: true, defer: answer };
+  }
+
+  /** Drop the agent's resize still in its coalescing window: its session is going away. */
+  private dropResize(id: string, error: string): void {
+    const queued = this.resizes.get(id);
+    if (queued === undefined) return;
+    this.resizes.delete(id);
+    this.time.clearTimeout(queued.timer);
+    for (const answer of queued.answers) answer({ ok: false, error });
   }
 
   private flushResize(id: string, host: Host, workspace: string, by: string): void {
