@@ -1664,7 +1664,10 @@ export const TMUX_SIZE = { min: 20, max: 500 } as const;
 /** A column or row count in `TMUX_SIZE`, in plain decimal (no sign, leading zero or exponent). */
 const isTmuxSize = (v: string) =>
   /^[1-9][0-9]*$/.test(v) && Number(v) >= TMUX_SIZE.min && Number(v) <= TMUX_SIZE.max;
-/** An agent's session as `resize-window` targets it: `=<session>:` (hosts/ssh-tmux.ts sessionName). */
+/**
+ * A session as `resize-window` targets it: `=<session>:` (hosts/ssh-tmux.ts sessionName). Any
+ * session name matches, a `volley-signin-*` terminal too; resizing one is only cosmetic.
+ */
 const AGENT_PANE = /^=[A-Za-z0-9_-]{1,128}:$/;
 
 /** The verdicts for one `ssh` argv: the ssh form itself, then each remote step's. */
