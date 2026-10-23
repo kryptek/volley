@@ -127,6 +127,31 @@ describe("the soak world", () => {
     expect(w.merges.map((m) => m.pr)).toEqual([train.number]);
   });
 
+  it("two tasks touching one file conflict at the second's update: the rebase resolves it, the world records the file", () => {
+    const w = soakWorld({
+      repo: REPO,
+      release_branch: RELEASE,
+      seed: 1,
+      tree: { "src/shared.ts": 100, "src/a.ts": 10 },
+    });
+    // The tree's paths are on the root, so a footprint names files that exist.
+    expect(Object.keys(w.get(w.root).files)).toEqual(
+      expect.arrayContaining(["src/shared.ts", "src/a.ts"]),
+    );
+    const base = w.tip();
+    const b = w.commit(base, { "src/shared.ts": "B-1" }, "feat: B");
+    w.pushRelease({ "src/shared.ts": "A-1", "src/a.ts": "A-1" }, "feat: A (#1)");
+    expect(w.conflicts).toEqual([]);
+    const updated = w.rebase(b, w.tip(), "feat: B");
+    expect(w.conflicts).toEqual([{ head: b, onto: w.tip(), files: ["src/shared.ts"] }]);
+    // Resolved: B's side of the shared file, A's other change kept.
+    expect(w.get(updated).files).toMatchObject({ "src/shared.ts": "B-1", "src/a.ts": "A-1" });
+    // A disjoint update records nothing.
+    const c = w.commit(base, { "src/c.ts": "C-1" }, "feat: C");
+    w.rebase(c, w.tip(), "feat: C");
+    expect(w.conflicts).toHaveLength(1);
+  });
+
   it("--match-head-commit with a stale head refuses, and nothing moves", async () => {
     const { w, mergeAt } = world({ rate: 0 });
     const a = pr(w, "A");

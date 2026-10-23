@@ -1287,11 +1287,7 @@ export function next(v: PipelineView, ev: PipelineEvent): PipelineAction[] {
       // date with the release branch (re-gated, which re-mints a token a restart lost), or is
       // brought up to date first (a release branch that moved is rebased onto).
       if (v.stage === "merge_ready" && v.merge_turn === undefined) return [];
-      // Before its turn a task is gated at the head its reviewers saw, however far behind: an
-      // update now would only be stale again by its turn, and re-reviewed for nothing (#383).
-      return ev.check.behind === 0 || v.merge_turn === undefined
-        ? guardedGate(v, ev)
-        : enterRebase(v);
+      return gateOrUpdate(v, ev);
     case "head_moved":
       return onHeadMoved(v, ev);
     case "merge_checked":
@@ -1466,6 +1462,23 @@ function toGate(v: PipelineView): PipelineAction[] {
   if (v.train !== undefined) return trainToGate(v, v.train);
   const c = mergeReadyCheck(v.stages, v.p);
   return c.ok ? [{ kind: "check_rebase" }] : invariantViolation(v, c);
+}
+
+/**
+ * A rebase check's outcome: up to date, gated. Behind, before its turn a task is gated at the head
+ * its reviewers saw, however far behind: an update now would only be stale again by its turn, and
+ * re-reviewed for nothing (#383); at its turn it is updated. `VOLLEYD_REPLAY_BASELINE=1` is
+ * test-only (the replay soak's baseline, test/soak/replay.test.ts): every behind task is updated
+ * before the gate, as before #383. Nothing else reads it.
+ */
+function gateOrUpdate(
+  v: PipelineView,
+  ev: Extract<PipelineEvent, { kind: "rebase_checked" }>,
+): PipelineAction[] {
+  const baseline = process.env.VOLLEYD_REPLAY_BASELINE === "1";
+  return ev.check.behind === 0 || (v.merge_turn === undefined && !baseline)
+    ? guardedGate(v, ev)
+    : enterRebase(v);
 }
 
 /** The gate, behind the merge_ready invariant (see invariantViolation). */

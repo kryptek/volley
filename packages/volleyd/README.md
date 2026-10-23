@@ -4375,8 +4375,9 @@ The pieces, all under `test/`:
   do not touch its file, and the release branch, until a merged commit fixes the file.
 - `helpers/fake-agents.ts`: the fleet. Every launch on the fake host registers the way the MCP
   server and the hooks do; on the next step it narrates, plays its role in the world (implementer:
-  pushes and opens the PR, the flake's fixer fixes the file; reviewers: the review result; fixup:
-  pushes; rebase: pushes the rebased head; release: the stage result) and publishes `done`.
+  commits its task's footprint, or one file of its own, pushes and opens the PR, the flake's fixer
+  fixes the file; reviewers: the review result; fixup: pushes; rebase: pushes the rebased head;
+  release: the stage result) and publishes `done`.
 - `helpers/soak-env.ts`: the daemon, host, world, fleet and owner (a coordinator name), and
   `step()`: the fleet acts, the daemon consumes it, 5 s of wave time pass, the daemon ticks.
 - `soak/scenario.ts`: the faults, as data picked from `SOAK_SEED`: the flake, one stalled
@@ -4407,3 +4408,44 @@ reported, non-gating step.
 
 A bug the soak finds in the daemon is fixed in the daemon, under its own issue; the soak itself
 only changes when the harness (timing, the world's fidelity) is what is wrong.
+
+### The replay
+
+`test/soak/replay.test.ts` replays the dogfood batch (the 26 issues of
+`test/fixtures/replay/dogfood-26.json`, each issue's Files list resolved against
+`test/fixtures/replay/tree.json` by `footprintOf`) through the same harness, twice, with no
+injected faults. The world's tree starts with the fixture's paths, and each task's implementer
+commits every file of its footprint (the fixup touches the first), so tasks that share a file
+conflict when one is updated onto the other; the world records each conflict, and the fake
+rebase resolves it.
+
+- **baseline**: 26 tasks, one per issue, no `after`, `config: { autopilot: { merge_train: false } }`,
+  and `VOLLEYD_REPLAY_BASELINE=1`, which brings back the gate as it was before #383: a task behind
+  the release branch is updated before its gate instead of at its merge turn. The variable is
+  test-only. The pipeline's gate-or-update choice is the only place that reads it, and a test
+  checks that.
+- **epic**: the overlap planner's wave (`planWave`: bundles, chains and cluster caps), with the
+  merge train on.
+
+Both waves must reach `wave_complete` with every task `done`. The test measures each wave's
+journal:
+
+- `update_rounds`: branch updates (`stage_entered { rebase: true }`) plus integrator spawns.
+- `merge_rounds`: merges outside a train (`merged_by_supervisor`) plus `train_merged`.
+- `churn_budget_decisions`: `spawn_budget_exhausted` decisions opened while a churn spawn was held.
+- `spawns`.
+
+It asserts the epic's targets: `update_rounds` ≤ 0.3 × the baseline's, `merge_rounds` ≤ 0.5 × the
+baseline's, no churn budget decisions, and at most 16 planned tasks. It prints a baseline-vs-epic
+table on every run. CI runs it in the `soak` job after the 8-task soak, as a gating step with
+`SOAK_SEED=1` and its own 25-minute timeout. It is opt-in (`REPLAY=1`), so a plain
+`bun run test:soak` skips it:
+
+```sh
+cd packages/volleyd
+REPLAY=1 SOAK_SEED=1 bun run test:soak -- replay
+```
+
+To regenerate the fixture from the repository's issues and tree (by hand; the output is
+committed), run `bun scripts/replay-fixture.ts [--ref origin/main]` in `packages/volleyd`. It needs
+`gh` signed in.

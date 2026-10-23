@@ -144,10 +144,12 @@ jobs:
     # every injected fault, finishing with only stage_go and release_go asked. It is the autopilot
     # epic's acceptance gate. A failure prints the journal tail and the open decisions; re-run it
     # locally with the same SOAK_TASKS and SOAK_SEED. 8 tasks (the fewest that fit every fault, about
-    # a minute) gate every run; the 32-task soak runs in its own job on full runs.
-    name: Soak (simulated, 8 tasks)
+    # a minute) gate every run; the 32-task soak runs in its own job on full runs. Then the replay
+    # (test/soak/replay.test.ts): the dogfood batch, baseline vs the overlap planner's wave, with
+    # the overlap epic's targets asserted and the table printed; gating, on every run.
+    name: Soak (simulated, 8 tasks; the replay)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -158,6 +160,13 @@ jobs:
         working-directory: packages/volleyd
         env:
           SOAK_TASKS: "8"
+      - name: Replay (dogfood-26, baseline vs epic)
+        timeout-minutes: 25
+        run: bun ../../scripts/check-tmp-leaks.ts -- bun run test:soak -- replay
+        working-directory: packages/volleyd
+        env:
+          REPLAY: "1"
+          SOAK_SEED: "1"
 
   soak-full:
     # Reported, not gating, until #269 (the merge_ready invariant opening its decision three times

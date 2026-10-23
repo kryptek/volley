@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,6 +17,7 @@ import {
   pipelineHarness,
   sha,
 } from "./helpers/pipeline-harness";
+import { withEnv } from "./helpers/with-env";
 
 const result = (name: string): unknown =>
   JSON.parse(readFileSync(join(FIXTURES, "review-results", `${name}.json`), "utf-8"));
@@ -357,6 +358,30 @@ describe("pipeline: gated at the reviewed head (#383)", () => {
     expect(stage()).toBe("done");
     // No review round after the gate: the update touched nothing a reviewer flagged.
     expect(h.spawns.filter((s) => s.role === "spec_reviewer")).toHaveLength(1);
+  });
+
+  it("the replay's baseline (VOLLEYD_REPLAY_BASELINE=1, test-only) updates a behind task before the gate, as before #383", async () => {
+    await withEnv({ VOLLEYD_REPLAY_BASELINE: "1" }, async () => {
+      await fixedUpBehind();
+      expect(rebases()).toHaveLength(1);
+      expect(h.spawns.some((s) => s.role === "rebase")).toBe(true);
+      expect(h.events.some((e) => e.type === "artifact_verified" && e.data.role === "gate")).toBe(
+        false,
+      );
+    });
+  });
+
+  it("the baseline flag is read in one place only: the pipeline's gate-or-update choice", () => {
+    const dir = join(import.meta.dirname, "..", "src");
+    const hits = (readdirSync(dir, { recursive: true }) as string[])
+      .filter((f) => f.endsWith(".ts"))
+      .filter((f) => readFileSync(join(dir, f), "utf-8").includes("VOLLEYD_REPLAY_BASELINE"));
+    expect(hits).toEqual(["pipeline.ts"]);
+    const src = readFileSync(join(dir, "pipeline.ts"), "utf-8");
+    expect(src.match(/VOLLEYD_REPLAY_BASELINE/g)).toHaveLength(2);
+    const fn = /\nfunction gateOrUpdate\([\s\S]*?\n}\n/.exec(src)?.[0] ?? "";
+    expect(fn.match(/process\.env/g)).toHaveLength(1);
+    expect(src.match(/process\.env\.VOLLEYD_REPLAY_BASELINE/g)).toHaveLength(1);
   });
 
   it("one commit behind reads in the singular", async () => {
