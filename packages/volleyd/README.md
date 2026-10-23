@@ -3715,9 +3715,9 @@ one at a time, in order, and brings each up to date just before its merge
   reviewed head however far behind it is; before
   [#383](https://github.com/kryptek/volley/issues/383) a task behind was updated before its gate,
   so every update raced the merges still to come (one every half hour or so, about as long as an
-  update, its CI and the re-review took), and a task was behind again each time it came back. **Use `branch_update: merge` for an
-  unattended wave**: it merges the release branch in with a normal push (no force-push, and the
-  history the reviewers saw stays).
+  update, its CI and the re-review took), and a task was behind again each time it came back.
+  **Use `branch_update: merge` for an unattended wave**: it merges the release branch in with a
+  normal push (no force-push, and the history the reviewers saw stays).
 - **Conflicts.** Resolving a conflict is the rebase (or merge) agent's job; its brief
   (`.volley/rebase.md`) says so. An agent that publishes `blocked` on a conflict it cannot
   resolve, or fails, while the task is queued opens decision `merge_conflict` (options

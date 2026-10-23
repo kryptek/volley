@@ -228,7 +228,7 @@ describe("pipeline: artifacts and CI", () => {
   });
 });
 
-describe("pipeline: rebase before the gate", () => {
+describe("pipeline: a CONFLICTING PR is updated before the gate", () => {
   /** Reviews done; the fixup pushed H2, which conflicts with the release branch (moved meanwhile). */
   async function fixedUpBehind() {
     await reviewed();
@@ -236,7 +236,7 @@ describe("pipeline: rebase before the gate", () => {
     await h.finish("fixup", { head: H2, conflicting: true, result: result("fixup-resolved") });
   }
 
-  it("release branch moved: a rebase agent starts at the head; touching a flagged file re-runs that reviewer only", async () => {
+  it("PR conflicting with the moved release branch: a rebase agent starts at the head; touching a flagged file re-runs that reviewer only", async () => {
     await fixedUpBehind();
     expect(stage()).toBe("fixup");
     const rebase = h.spawns.find((s) => s.role === "rebase");

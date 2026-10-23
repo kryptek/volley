@@ -738,9 +738,12 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         ...(o.result !== undefined ? { result: o.result } : {}),
       };
       if (o.result !== undefined) lastResult[r.agent_id] = o.result;
-      await driver.handle(task, ev);
-      await settle();
-      if (o.conflicting === true) for (const pr of prs) pr.mergeable = "MERGEABLE";
+      try {
+        await driver.handle(task, ev);
+        await settle();
+      } finally {
+        if (o.conflicting === true) for (const pr of prs) pr.mergeable = "MERGEABLE";
+      }
     },
     /** A role's current run publishes `blocked` with `reason` (the agent stays alive). */
     async block(role: Role, reason: string, task = "T1") {
