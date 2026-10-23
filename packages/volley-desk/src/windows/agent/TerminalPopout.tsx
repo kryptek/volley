@@ -17,7 +17,7 @@
  * (#403), so its program wraps at the popout's width. Its width then stays
  * where it opened (or where it was dragged) rather than following the screen.
  */
-import { type PointerEvent, useEffect, useRef, useState } from "react";
+import { type PointerEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../../a11y/keys";
 import type { NoSignal } from "../../attention";
 import { NARROW_PX } from "../../canvas/useViewport";
@@ -99,7 +99,9 @@ function useTerminalCells(
   const sent = useRef<string | null>(null);
   // The last reporter given: a reset still reaches the terminal after `onSize` goes away.
   const report = useRef(onSize);
-  if (onSize !== undefined) report.current = onSize;
+  useLayoutEffect(() => {
+    if (onSize !== undefined) report.current = onSize;
+  });
   const enabled = onSize !== undefined;
   useEffect(() => {
     if (!enabled) return;
