@@ -69,8 +69,10 @@ export interface RemoteHostConfig {
   type?: "ssh";
   /** ssh destination, `[user@]host`. */
   target?: string;
-  /** The wave repo's clone on the remote machine (absolute). */
+  /** The wave repo's clone on the remote machine (absolute). Deprecated: `repos` (migrated once). */
   repo?: string;
+  /** Adopted clones on the remote machine: `owner/name` → its absolute path. */
+  repos?: Record<string, string>;
   worktree_root?: string;
   /** The volley checkout on the remote machine (its volley-hooks is `$VOLLEY_HOOKS_DIR`). */
   volley_dir?: string;
@@ -151,6 +153,8 @@ export interface Tunables {
    */
   public_hygiene: PublicHygiene;
   hosts: Record<string, RemoteHostConfig>;
+  /** Repositories by GitHub `owner/name`, and the machines that hold a clone of each. */
+  repos: Record<string, RepoAssignment>;
   // --- Fleet: fresh base + merge nudge (SPEC §4.6.15) ---
   /** A failed release-branch fetch refuses the spawn (BASE_STALE) instead of cutting from the host's last copy. */
   require_fresh_base: boolean;
@@ -240,6 +244,13 @@ export interface FleetConfig {
   local_agents: LocalAgentsMode | null;
   /** The own machine's profile while it is the fallback (no paired machine eligible). */
   fallback: FallbackProfile;
+  /** Where managed clones live on each machine (`<repo_root>/<owner>/<name>`; `~` is its home). */
+  repo_root: string;
+}
+
+/** Config `repos.<owner/name>`: the machines holding a clone (`all`: every machine). */
+export interface RepoAssignment {
+  machines: "all" | string[];
 }
 
 /** Config `fleet.fallback`. */

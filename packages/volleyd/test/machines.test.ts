@@ -30,6 +30,7 @@ import {
   type FakeHost,
   type FakeRemoteHost,
   GREEN_DOCTOR,
+  adoptSpec,
   fakeHost,
   fakeRemoteHost,
 } from "./helpers/fake-host";
@@ -436,7 +437,7 @@ describe("machine health in the daemon: down parks the host's spawns, back resum
         claudeJsonPath: claudeJson,
         remoteHost: (s) => {
           box ??= fakeBox(s, local);
-          return box;
+          return adoptSpec(box, s);
         },
         credentials: memoryCredentials(),
       },
@@ -789,7 +790,7 @@ describe("the supervisor's own record and readiness verdicts (SPEC §4.6.15)", (
         host: fakeHost(),
         remoteHost: (s) => {
           box ??= fakeRemoteHost(s, fakeHost());
-          return box;
+          return adoptSpec(box, s);
         },
         credentials: memoryCredentials(),
       },

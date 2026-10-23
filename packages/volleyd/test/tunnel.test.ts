@@ -7,7 +7,7 @@ import { buildTopic, registryTopic } from "volley-mcp/topics";
 import { cleanupWave } from "../src/commands/cleanup";
 import type { Daemon } from "../src/daemon";
 import type { ExecFn } from "../src/exec";
-import type { RemoteHost, RemoteHostSpec } from "../src/hosts/ssh-tmux";
+import type { RemoteHostSpec, RepoHostSpec, RepoRemoteHost } from "../src/hosts/ssh-tmux";
 import { type TunnelExit, TunnelSupervisor, tunnelArgv } from "../src/hosts/tunnel";
 import { makeBufferIO } from "../src/io";
 import { readJournalFile } from "../src/journal";
@@ -25,7 +25,7 @@ import { runCli } from "./helpers/run-cli";
 /** How many virtual-time steps `tickUntil` takes before it gives up (deterministic, not a deadline). */
 const MAX_TICKS = 40;
 
-interface FakeRemote extends Omit<FakeHost, "readFile">, RemoteHost {
+interface FakeRemote extends Omit<FakeHost, "readFile">, RepoRemoteHost {
   tunnel: boolean;
   tunnelChecks: number;
   /** The box's own folder trust for its repo (its ~/.claude.json). */
@@ -43,7 +43,7 @@ interface FakeRemote extends Omit<FakeHost, "readFile">, RemoteHost {
  * A remote host on fakes: files land in a temp dir. The tunnel check (`nc -z` on the box) answers
  * when a squatter holds the port, or when `tunnel` is set and the daemon started the forward.
  */
-function fakeRemote(spec: RemoteHostSpec, local: FakeHost, forwarded: () => boolean): FakeRemote {
+function fakeRemote(spec: RepoHostSpec, local: FakeHost, forwarded: () => boolean): FakeRemote {
   const h = fakeHost(local.fake) as unknown as FakeRemote;
   Object.assign(h, {
     name: spec.name,
@@ -204,7 +204,7 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
         stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
       });
     local = fakeHost(fake);
-    const spec: RemoteHostSpec = {
+    const spec: RepoHostSpec = {
       name: "box",
       target: "dev@box",
       repo,
@@ -217,7 +217,9 @@ describe("remote host tunnel: park, resume, never touch running agents", () => {
       let b = boxes.get(s.tunnel.remote_port);
       if (b === undefined) {
         const port = `${s.tunnel.remote_port}:`;
-        b = fakeRemote(s, local, () => tunnelCalls.some((c) => c[3]?.startsWith(port)));
+        b = fakeRemote(s as RepoHostSpec, local, () =>
+          tunnelCalls.some((c) => c[3]?.startsWith(port)),
+        );
         b.onLaunch = (l) => {
           const [wave, task] = l.name.split(" ");
           const session = signal(`${wave}-${task?.toLowerCase()}-implementer-1`);

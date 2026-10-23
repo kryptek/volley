@@ -7,7 +7,7 @@ import { runCli } from "./helpers/run-cli";
 
 const WAVE = "w1";
 const YAML = `wave: ${WAVE}
-repo: example-org/example-repo
+repo: /path/to/example-repo
 release_branch: release/${WAVE}
 model: claude-opus-5-5
 pipeline: [implement, merge_ready]

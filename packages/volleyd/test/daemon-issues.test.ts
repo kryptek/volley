@@ -15,7 +15,7 @@ import { schemaErrors } from "./helpers/schema";
 const WAVE = "w-iss";
 const OWNER = "coord-a";
 const YAML = `wave: ${WAVE}
-repo: example-org/example-repo
+repo: /path/to/example-repo
 release_branch: release/${WAVE}
 model: claude-opus-5-5
 pipeline: [implement, merge_ready]

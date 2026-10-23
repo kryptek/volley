@@ -1608,6 +1608,8 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `dynsec_batch_ms` | the next batch of broker login changes | — |
 | `credential_sweep_interval_s` | after the next sweep | — |
 | `hosts` | spawns after the change (and the next tunnel check) | running agents and their tunnels untouched |
+| `repos`, `hosts.<name>.repos` | spawns and submits after the change ([repositories](#repositories)) | running agents keep the clone and worktree they started in |
+| `fleet.repo_root` | spawns and submits after the change ([repositories](#repositories)) | clones already made stay where they are |
 | `claude.default_account` | spawns after the change | running agents keep their account (move one with `agent_move_account`) |
 | `require_fresh_base` | spawns after the change ([base ref](#base-ref)) | worktrees already cut untouched |
 | `retire_close_session` | retires after the change ([retire and cleanup](#retire-and-cleanup)) | sessions already kept open stay open |
@@ -2286,6 +2288,46 @@ tasks:
   T1: { issue: 102, host: box }
   T2: { issue: 103, host: { type: ssh, name: box, tunnel: { remote_port: 2883 } } }
 ```
+
+#### Repositories
+
+A machine's clone of a repository is found by the repository's GitHub `owner/name` (compared
+case-insensitively), not by one `repo` path per host:
+
+```yaml
+# $VOLLEYD_HOME/config.yaml
+repos:
+  example-org/widgets: { machines: all }        # or a list: [box, mini]
+fleet:
+  repo_root: ~/.volley/repos                    # default; ~ is each machine's own home
+hosts:
+  box:
+    target: dev@box.example
+    volley_dir: /path/to/volley
+    repos:
+      example-org/gadgets: /path/to/gadgets     # an adopted clone keeps its own path
+```
+
+For a task on `box` in a wave whose repository is `owner/name` (its state's `github.slug`, else
+the supervisor clone's `origin`), the clone is, in order: `hosts.box.repos.<owner/name>`; the
+managed clone `<repo_root>/<owner>/<name>` when `repos.<owner/name>.machines` includes `box`;
+the deprecated `hosts.box.repo`, unless the machine's record reports that clone's origin as
+another repository. Its worktrees go under `~/.volley/worktrees/<owner>/<name>` on the box
+(`hosts.box.worktree_root` still wins; a legacy `repo` keeps `.volley-worktrees` beside it). A
+host with none of them fails the spawn: `host 'box' has no clone of <owner/name>: add it
+(Settings → Repositories, or volley repo add <owner/name> --machine box)`. A wave whose repository
+is not on GitHub uses the host's `repo` as before. A managed path on a box whose home directory
+volleyd does not know yet fails the spawn too; give that box absolute `repos` and `worktree_root`.
+
+A wave file's `repo:` may be an `owner/name` too: at submit it becomes the supervisor's own clone
+of it (its `hosts.<fleet.local_name>.repos` entry, else the managed path), and a name with none is
+refused. A relative path shaped like `owner/name` is written `./owner/name`.
+
+**The legacy `hosts.<name>.repo` migrates by itself.** The first time a machine's record reports
+the origin of the clone at that path (a GitHub one), volleyd moves it to
+`hosts.<name>.repos.<owner/name>`, adds the machine to `repos.<owner/name>.machines` (unless it is
+`all`), pins an unset `worktree_root` to where its worktrees already were, and journals one
+`config_changed` (`by: volleyd`). A non-GitHub origin keeps the `repo` key.
 
 **Prerequisites on the box** (volleyd does not provision it): `bash`, `bun`, `claude` (logged
 in), `gh` (authenticated, for `gh issue view`), `git`, `tmux`, `nc`, `base64`, `cmp`, a clone of

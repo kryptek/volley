@@ -670,7 +670,7 @@ describe("volleyd daemon: lease requests over MQTT", () => {
       );
       expect(set.applied).toBe(true);
       const wave = `wave: w-hosts
-repo: example-org/example-repo
+repo: /path/to/example-repo
 release_branch: release/w-hosts
 model: claude-opus-5-5
 pipeline: [implement, merge_ready]
@@ -732,7 +732,7 @@ tasks:
       );
       expect(set.applied).toBe(true);
       const wave = `wave: w-local
-repo: example-org/example-repo
+repo: /path/to/example-repo
 release_branch: release/w-local
 model: claude-opus-5-5
 pipeline: [implement, merge_ready]

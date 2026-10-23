@@ -11,7 +11,7 @@ import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "./helpers/supervis
 // #322: the hard ceiling counts the agents volleyd runs or is starting, never a task's stage.
 
 const yaml = (wave: string, tasks: string[], config = "") => `wave: ${wave}
-repo: example-org/example-repo
+repo: /path/to/example-repo
 release_branch: release/${wave}
 model: claude-opus-5-5
 pipeline: [implement, merge_ready]

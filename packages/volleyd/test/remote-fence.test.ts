@@ -18,7 +18,7 @@ import {
   sealLaunchScript,
   sealRemoteSigninScript,
 } from "../src/fence";
-import { type RemoteHostSpec, SshTmuxHost } from "../src/hosts/ssh-tmux";
+import { type RepoHostSpec, SshTmuxHost } from "../src/hosts/ssh-tmux";
 import { LAUNCH_COMMAND, renderLaunchScript, renderMcpConfig } from "../src/launch";
 import { WAKE_TEXT } from "../src/liveness";
 import { tempDirForAll } from "./helpers/tmp";
@@ -29,7 +29,7 @@ const SSH = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"];
 const remote = (...steps: RemoteStep[]) => ({ remote: { steps } });
 const step = (...argv: string[]): RemoteStep => ({ argv });
 /** A paired machine, for the SshTmuxHost cases (its ssh argv is what the fence allows). */
-const SSH_SPEC: RemoteHostSpec = {
+const SSH_SPEC: RepoHostSpec = {
   name: "box",
   target: "dev@box",
   repo: "/path/to/home/src/repo",

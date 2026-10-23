@@ -364,6 +364,15 @@ export const GREEN_DOCTOR: DoctorReport = {
   doctor_at: "2026-10-19T09:00:00.000Z",
 };
 
+/**
+ * One fake box behind every spec the daemon resolves for its machine (repo-less for the doctor
+ * and sign-in, per repository for its tasks): the box takes on each spec that names a clone.
+ */
+export function adoptSpec<T extends RemoteHost>(box: T, spec: RemoteHostSpec): T {
+  if (spec.repo !== undefined) Object.assign(box, { spec });
+  return box;
+}
+
 export function fakeRemoteHost(
   spec: RemoteHostSpec,
   local: FakeHost,
@@ -384,7 +393,9 @@ export function fakeRemoteHost(
     }),
     repoExists: async () => true,
     tunnelUp: async () => true,
-    readTrust: async () => ({ projects: { [spec.repo]: { hasTrustDialogAccepted: true } } }),
+    readTrust: async () => ({
+      projects: { [h.spec.repo ?? ""]: { hasTrustDialogAccepted: true } },
+    }),
     recordTrust: async () => {},
     readFile: async () => null,
     answers,

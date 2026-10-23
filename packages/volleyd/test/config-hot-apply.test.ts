@@ -94,6 +94,23 @@ describe("config_set hot-apply", () => {
     expect(ack).toMatchObject({ ok: true, applied: true, rejected: [], acked_type: "query" });
   });
 
+  it("round-trips repos and fleet.repo_root through config_set and the retained config", async () => {
+    const ack = await configSet({
+      repos: { "example-org/widgets": { machines: "all" } },
+      fleet: { repo_root: "/srv/repos" },
+    });
+    expect(ack).toMatchObject({ ok: true, applied: true, rejected: [] });
+    const v2 = await config();
+    expect(v2.payload).toMatchObject({
+      version: 2,
+      repos: { "example-org/widgets": { machines: "all" } },
+      fleet: { repo_root: "/srv/repos" },
+    });
+    expect(schemaErrors("config.schema.json", v2)).toEqual([]);
+    const bad = await configSet({ repos: { "https://github.com/o/r": { machines: "all" } } });
+    expect(bad).toMatchObject({ applied: false });
+  });
+
   it("rejects unknown keys and out-of-bounds values as a whole; nothing changes", async () => {
     const unknown = await configSet({ hard_ceiling: 5, bogus: 1 });
     expect(unknown).toMatchObject({

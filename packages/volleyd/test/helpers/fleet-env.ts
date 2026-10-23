@@ -24,6 +24,7 @@ import {
   type FakeHost,
   type FakeRemoteHost,
   GREEN_DOCTOR,
+  adoptSpec,
   fakeHost,
   fakeRemoteHost,
 } from "./fake-host";
@@ -218,7 +219,7 @@ export async function makeFleet(
           box = fakeRemoteHost(s, local);
           box.onLaunch = onLaunch;
         }
-        return box;
+        return adoptSpec(box, s);
       },
       credentials: memoryCredentials(),
     },
