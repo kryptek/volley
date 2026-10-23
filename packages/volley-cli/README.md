@@ -22,6 +22,7 @@ If you can write a bash one-liner, you can be a Volley agent. The subcommands co
 - [`volley auth`](#volley-auth)
 - [`volley lease`](#volley-lease)
 - [`volley peer`](#volley-peer)
+- [`volley repo`](#volley-repo)
 - [Common patterns](#common-patterns)
   - [Be a one-shot agent in CI](#be-a-one-shot-agent-in-ci)
   - [Background-wait for an agent and react](#background-wait-for-an-agent-and-react)
@@ -65,6 +66,7 @@ volley --help
 | `volley lease`  | Wait for a heavy-operation lease from `volleyd` (`run`, `acquire`, `release`, `status`). See [`volley lease`](#volley-lease) below. |
 | `volley claude` | Claude account profiles on volleyd: `add <label>` (a profile and its sign-in URL), `signin`, `list` (one block per account, by e-mail: masked unless `--show-email`, its machines, the ones it is `not on:`, and freshest usage; `--json` for the raw answer), `list` also marks `next pick` on each login volleyd's next spawn would run under, `sync` (sharing + MCP servers), `balance [--model <m>] [--machine <name>]` (per machine, the signed-in accounts ranked by headroom with their 5-hour, 7-day and Fable figures and agents, an arrow `← fable, opus` on each family's next pick; e-mails masked unless `--show-email`, `--json` for volleyd's answer), `move <agent-id> <acct>` (restart an agent under another account with a resume note). See the volleyd README's "Claude accounts". |
 | `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (doctor, account, tunnel service, trust check, host entry), `doctor` (check this machine, `--fix` the safe things), `run` (the service). See [`volley peer`](#volley-peer) below and the volleyd README's "Paired machines". |
+| `volley repo`   | The repositories volleyd's machines work on: `add <owner/name>` (each paired machine clones it, or adopts `--path`, and trusts it; `--wait` follows them), `remove` (clones kept), `list`, `status`. See [`volley repo`](#volley-repo) below. |
 | `volley setup`  | First-run / repair wizard: broker, accounts, services, phone sign-in QR. See [`volley setup`](#volley-setup) below. |
 | `volley desk serve` | Serve the built Desk from a small static server (the service `volley setup` installs). See [`volley desk serve`](#volley-desk-serve) below. |
 | `volley deploy` | Take this machine's volleyd and Desk services to a release tag: build the Desk, restart, health-check, roll back on failure; then every paired machine. See [`volley deploy`](#volley-deploy) below. |
@@ -496,6 +498,47 @@ the last doctor run's `vm_stat` figure. Available memory has one definition on e
 the supervisor's own included, so placement can compare them (SPEC §4.6.15): memory the kernel
 can hand out without paging anything active out, over total memory (Linux: `MemAvailable`;
 macOS: free + inactive + speculative + purgeable pages).
+
+---
+
+## `volley repo`
+
+The repositories the supervisor's machines work on (SPEC §4.6.21), by GitHub `owner/name`.
+`add` and `remove` are admin ops (an admin account's login, as `volley peer invite`); `list` and
+`status` are reads any login may make.
+
+```sh
+volley repo add example-org/widgets                       # every machine
+volley repo add example-org/widgets --machine box-a --path box-a=/srv/widgets --wait
+volley repo status example-org/widgets
+#   control: ready (/path/to/home/.volley/repos/example-org/widgets)
+#   box-a: cloning
+volley repo list [--json]
+volley repo remove example-org/widgets --machine box-a    # its clone is kept; the path is printed
+```
+
+- `add <owner/name> [--machine <name>]... [--path <name>=<abs path>]... [--wait]`: volleyd checks
+  the repository with `gh repo view` (one GitHub does not know is refused; GitHub's spelling of
+  the name is kept), assigns it to the machines (default: all of them, the supervisor's own
+  included) in its config, and answers. Then, on each paired machine, its doctor adds the
+  repository to that machine's `peer.json` and, while it has no clone, clones it from
+  `https://github.com/<owner>/<name>.git` (`--path` adopts an existing clone there instead); once
+  the clone exists volleyd trusts it in the machine's default Claude profile and every signed-in
+  one, so its agents never stop on the folder-trust question. The supervisor's own machine is
+  never cloned for you: clone it at the printed path (`gh repo clone <owner/name> <path>`) and
+  add it again. A machine that is down, or whose ssh fails, stays `blocked` with the reason and
+  is retried when it is back (or after a Repair). `--wait` asks `repo_status` until every machine
+  is `ready` or `blocked` (`--wait-timeout <s>`, default 900): exit 0 when all are ready, 1 when one
+  is blocked, 124 on the timeout.
+- `remove <owner/name> [--machine <name>]...`: drops the machines (default: all) from the
+  repository's config and from each paired machine's `peer.json`. No clone is ever deleted: the
+  answer lists each one's path.
+- `status [<owner/name>] [--json]`: one line per machine, `<machine>: <state> (<why or path>)`,
+  `state` being `ready`, `cloning`, `blocked` or `absent` — the same lines the Desk shows.
+- `list [--json]`: each configured repository, its machines and adopted paths.
+
+Connection flags as `volley peer`'s (`--broker-url`, `--namespace`, `--username`,
+`--password`, `--timeout`).
 
 ---
 

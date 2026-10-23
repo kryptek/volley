@@ -1,0 +1,9 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volley-cli-4c2e7a",
+  "wall_time": "2026-10-23T12:05:00.000Z",
+  "channel": "_system/auth",
+  "type": "query",
+  "correlation_id": "0b7e2c41-5d9a-4f3e-9c18-6a2d4e8f1b0c",
+  "payload": { "op": "repo_add", "slug": "https://github.com/example-org/widgets" }
+}

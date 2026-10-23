@@ -1,0 +1,22 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-23T12:07:30.000Z",
+  "channel": "_waves/events",
+  "type": "repo_trusted",
+  "payload": {
+    "wave": "_system",
+    "seq": 43,
+    "at": "2026-10-23T12:07:30.000Z",
+    "data": {
+      "machine": "box-a",
+      "repo": "example-org/widgets",
+      "root": "/path/to/home/.volley/repos/example-org/widgets",
+      "accounts": ["primary", "work"],
+      "keys": [
+        "[\"dev@box-a\",\"default\",\"/path/to/home/.volley/repos/example-org/widgets\"]",
+        "[\"dev@box-a\",\"/path/to/home/.volley/claude/work\",\"/path/to/home/.volley/repos/example-org/widgets\"]"
+      ]
+    }
+  }
+}

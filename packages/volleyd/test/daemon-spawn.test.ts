@@ -1062,13 +1062,19 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       expect(journal("w2").some((e) => e.type === "task_placed")).toBe(false);
     });
 
-    it("remote_repo_missing names the slug and the two ways to add it; add answers like retry", async () => {
+    it("remote_repo_missing names the slug and the two ways to add it; add runs repo_add for that machine, then retries", async () => {
       localClaude = false;
       let clone = false;
       await setup({
         repos: true,
         onBox: (b) => {
           b.repoExists = async () => clone;
+          // The box's doctor, once the add ran there: its clone of a/a.
+          b.answers.doctor = async () => ({
+            ...GREEN_DOCTOR,
+            versions: { peer: VERSION, volley: VERSION, bun: "1.3.1", git: "2.43.0" },
+            repos: boxRepos ?? [],
+          });
         },
       });
       await submit("w1", "", "  T1: { issue: 42, host: box }\n");
@@ -1087,8 +1093,10 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         options: ["add", "retry", "cancel"],
       });
       const help = opened?.data.option_help as Record<string, string>;
-      expect(help.add).toMatch(/retry/);
-      // `add` requeues the task like retry: the clone is there now, so it spawns.
+      expect(help.add).toBe(
+        "Add a/a to box (as volley repo add a/a --machine box does: clone it there and trust it), then try the task again.",
+      );
+      // `add` adds the repository to box (repo_add's run) and requeues the task: it spawns.
       clone = true;
       const r = await client.request("resolve", {
         decision_id: opened?.data.decision_id as string,
@@ -1099,6 +1107,19 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       await eventually(async () => {
         await tick();
         return spawnedOn("w1") !== undefined;
+      });
+      const added = readJournalFile(join(env.home, "waves", "_system", "journal.jsonl")).find(
+        (e) => e.type === "repo_added",
+      );
+      expect(added?.data).toEqual({ by: "tester", slug: "a/a", machines: ["box"] });
+      // Its run on box: the doctor adds it there (the clone is reported, so no clone runs).
+      await eventually(async () => {
+        await tick(0);
+        return (box?.doctorRuns ?? []).some((r) => r.repos_add?.[0] === "a/a");
+      });
+      expect(box?.doctorRuns.find((r) => r.repos_add !== undefined)).toEqual({
+        fix: false,
+        repos_add: ["a/a"],
       });
     });
   });

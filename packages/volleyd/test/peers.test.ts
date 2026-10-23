@@ -10,7 +10,7 @@ import { ControlClient } from "../src/control";
 import { Daemon } from "../src/daemon";
 import { readJournalFile } from "../src/journal";
 import type { MachineRecord } from "../src/machines";
-import { PeerService, cloneUrl, isPairingCode, normalizeCode } from "../src/peers";
+import { PeerService, cloneUrl, doctorRepos, isPairingCode, normalizeCode } from "../src/peers";
 import type { NewEvent, RemoteHostConfig } from "../src/types";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
 import { eventually } from "./helpers/broker-wait";
@@ -738,6 +738,28 @@ describe("cloneUrl (what Repair's clone passes the box's doctor as --origin)", (
       "github.com/../r",
     ]) {
       expect(cloneUrl(o), String(o)).toBeNull();
+    }
+  });
+});
+
+describe("doctorRepos (a doctor request's repos_add / repos_remove, SPEC §4.6.21)", () => {
+  it("takes slugs and slug=absolute-path adds, or slug removes; one or the other", () => {
+    expect(doctorRepos({})).toEqual({});
+    expect(doctorRepos({ repos_add: ["a/a", "b/b=/srv/b"] })).toEqual({
+      repos_add: ["a/a", "b/b=/srv/b"],
+    });
+    expect(doctorRepos({ repos_remove: ["a/a"] })).toEqual({ repos_remove: ["a/a"] });
+    expect(doctorRepos({ repos_add: ["a/a"], repos_remove: ["b/b"] })).toBe(
+      "repos_add and repos_remove exclude each other: one run adds or removes",
+    );
+    for (const bad of [
+      { repos_add: [] },
+      { repos_add: "a/a" },
+      { repos_add: ["https://github.com/a/a"] },
+      { repos_add: ["a/a=relative"] },
+      { repos_remove: ["a/a=/srv/a"] },
+    ]) {
+      expect(typeof doctorRepos(bad), JSON.stringify(bad)).toBe("string");
     }
   });
 });

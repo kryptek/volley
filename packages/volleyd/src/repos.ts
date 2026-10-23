@@ -176,3 +176,153 @@ export function waveSlug(
 ): string | undefined {
   return rec.state?.github?.slug ?? originToSlug(origin);
 }
+
+/** `repos.<slug>.machines`: every machine, or these by name. */
+export type RepoMachines = "all" | string[];
+
+/** `current` with `add` assigned too (`all` absorbs any list). */
+export function withMachines(current: RepoMachines | undefined, add: RepoMachines): RepoMachines {
+  if (current === "all" || add === "all") return "all";
+  return [...new Set([...(current ?? []), ...add])];
+}
+
+/**
+ * `current` without `remove` (`all`: every machine), `every` naming the machines `all` stands for;
+ * null when none is left (the repository leaves config).
+ */
+export function withoutMachines(
+  current: RepoMachines | undefined,
+  remove: RepoMachines,
+  every: readonly string[],
+): RepoMachines | null {
+  if (remove === "all" || current === undefined) return null;
+  const left = (current === "all" ? every : current).filter((m) => !remove.includes(m));
+  return left.length > 0 ? left : null;
+}
+
+/** A Claude account profile as the registry lists it (claude/profiles.ts `ClaudeAccount`). */
+export interface ProfileFacts {
+  id: string;
+  /** `local` for the supervisor's own machine, else the paired machine's name. */
+  machine: string;
+  /** A paired machine's profile dir there (recorded at sign-in). */
+  dir?: string | undefined;
+  signed_in_at?: string | undefined;
+}
+
+/** One machine's part of a `repo_add` (`addPlan`). */
+export interface AddStep {
+  machine: string;
+  /** The supervisor's own machine. */
+  local: boolean;
+  /** The box doctor's `--repo-add`: `<owner/name>` (managed) or `<owner/name>=<abs>` (adopted). */
+  repo_add: string;
+  /** The clone's path when config or the machine's record tells it. */
+  path?: string;
+  /** No clone reported there yet: the doctor runs with `--fix --clone`. */
+  clone: boolean;
+  /**
+   * The Claude profiles whose folder trust the clone gets (D4): null is the machine's default
+   * profile, else a signed-in profile's config dir.
+   */
+  profiles: (string | null)[];
+}
+
+/**
+ * Each machine's steps of a `repo_add` of `slug` (D4, D6): adopt `paths[m]` or the managed clone,
+ * clone it where the machine's record reports none, and trust it in the default profile and in
+ * every signed-in profile there. Pure: config as it will be once the add is applied.
+ */
+export function addPlan(
+  cfg: RepoConfig,
+  local: string,
+  accounts: readonly ProfileFacts[],
+  records: (machine: string) => { repos?: readonly MachineRepoFacts[] | undefined } | undefined,
+  slug: string,
+  machines: readonly string[],
+  o: { localHome?: string; localDir: (id: string) => string },
+): AddStep[] {
+  return machines.map((machine) => {
+    const isLocal = machine === local;
+    const reported = records(machine)?.repos?.find((r) => sameSlug(r.slug, slug));
+    const home = isLocal
+      ? o.localHome
+      : homeFromClones(cfg.fleet.repo_root, records(machine)?.repos);
+    const source = cloneSource(cfg, machine, slug, { home });
+    const path =
+      reported?.path ??
+      (source !== undefined && posix.isAbsolute(source.path) ? source.path : undefined);
+    const profiles = accounts
+      .filter((a) => a.signed_in_at !== undefined && (a.machine === "local") === isLocal)
+      .filter((a) => isLocal || a.machine === machine)
+      .flatMap((a) => (isLocal ? [o.localDir(a.id)] : a.dir !== undefined ? [a.dir] : []));
+    return {
+      machine,
+      local: isLocal,
+      repo_add:
+        source?.kind === "adopted" ? `${source.slug}=${source.path}` : (source?.slug ?? slug),
+      ...(path !== undefined ? { path } : {}),
+      clone: reported?.exists !== true,
+      profiles: [null, ...profiles],
+    };
+  });
+}
+
+/** What `addPlan` reads of a machine record's `repos[]` entry (machines.ts `MachineRepo`). */
+export interface MachineRepoFacts {
+  slug: string;
+  path: string;
+  exists: boolean;
+  managed: boolean;
+}
+
+/** Where a repository stands on one machine, as readiness says it (`RepoVerdict`). */
+export interface RepoStateFacts {
+  state: "ready" | "cloning" | "blocked" | "absent";
+  path?: string | undefined;
+  reasons: readonly string[];
+}
+
+/**
+ * One machine's line for a repository (`repo_status`, `volley repo status`, the Desk):
+ * `box: ready (/srv/a)`, `box: cloning`, `box: blocked (why; why)`, `box: absent (why)`.
+ */
+export function repoStateLine(machine: string, v: RepoStateFacts | undefined): string {
+  if (v === undefined) return `${machine}: not assigned`;
+  const why = v.reasons.length > 0 ? v.reasons.join("; ") : v.path;
+  return `${machine}: ${v.state}${why !== undefined ? ` (${why})` : ""}`;
+}
+
+/**
+ * The `repo_add` runs not finished on a machine, by machine and slug, with the last run's why:
+ * each `repo_clone_run` that failed and no later one that succeeded, nor a `repo_removed` there
+ * since. Replayed from the `_system` journal, so a restart retries them too.
+ */
+export function pendingRepoRuns(
+  events: readonly { type: string; data: unknown }[],
+): Map<string, Map<string, string>> {
+  const out = new Map<string, Map<string, string>>();
+  const drop = (m: string, slug: string) => {
+    const k = [...(out.get(m)?.keys() ?? [])].find((s) => sameSlug(s, slug));
+    if (k !== undefined) out.get(m)?.delete(k);
+    if (out.get(m)?.size === 0) out.delete(m);
+  };
+  for (const e of events) {
+    const d = e.data as Record<string, unknown>;
+    if (
+      e.type === "repo_clone_run" &&
+      typeof d.machine === "string" &&
+      typeof d.slug === "string"
+    ) {
+      drop(d.machine, d.slug);
+      if (d.ok !== true) {
+        const why = typeof d.error === "string" ? d.error : "the last run failed";
+        out.set(d.machine, (out.get(d.machine) ?? new Map()).set(d.slug, why));
+      }
+    } else if (e.type === "repo_removed" && typeof d.slug === "string") {
+      const machines = d.machines === "all" ? [...out.keys()] : (d.machines as string[]);
+      for (const m of Array.isArray(machines) ? machines : []) drop(m, d.slug);
+    }
+  }
+  return out;
+}

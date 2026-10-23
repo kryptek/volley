@@ -22,7 +22,8 @@ import type { WaveId } from "./types";
  * its hooks do not run, so a launch there would look like a silent failure. volleyd checks the
  * repo root before the first spawn and, when untrusted, opens a `repo_untrusted` decision
  * instead of launching. It never accepts the dialog on its own: `recordRepoTrust` is called only
- * on the owner's explicit `trust` answer.
+ * on the owner's explicit `trust` answer, or for a clone the owner added with `repo_add` (that add
+ * is the consent, SPEC §4.6.21).
  */
 
 /** The repo's top-level directory (`git rev-parse --show-toplevel`), through the fence. */
@@ -77,8 +78,9 @@ const fileStamp = (path: string) => {
 };
 
 /**
- * Record the owner's explicit `trust` answer: set `projects[root].hasTrustDialogAccepted` to
- * true and change nothing else in the file. Never called without that answer. Claude Code
+ * Record the owner's explicit `trust` answer (or a `repo_add`'s, SPEC §4.6.21): set
+ * `projects[root].hasTrustDialogAccepted` to true and change nothing else in the file. Never
+ * called without one of them. Claude Code
  * rewrites `~/.claude.json` often, so the file is re-checked just before the rename and the
  * whole read-modify-write is retried if it changed, rather than dropping that write.
  * `hooks.beforeRename` is a test seam.

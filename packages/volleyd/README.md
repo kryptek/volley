@@ -2718,7 +2718,9 @@ with 12 agents on peers and a ceiling of 12 it is `"12/12 agents"`.
 
 **Repair (`peer_doctor`).** An admin (the account-op topic and admin check of `peer_remove`;
 refused on the mailbox) asks volleyd to run the doctor on a configured host:
-`{ op: "peer_doctor", name, fix?, clone? }`. volleyd runs `volley peer doctor --json
+`{ op: "peer_doctor", name, fix?, clone?, repos_add?, repos_remove? }` (`repos_add` /
+`repos_remove`: `--repo-add` / `--repo-remove` for each, one list or the other; with `repos_add`,
+`clone` passes `--clone` alone and needs no origin). volleyd runs `volley peer doctor --json
 --supervisor-volley-dir <volley_dir>` (so every volley MCP entry on the box is checked against
 the checkout agents are launched from; a volley older than the flag refuses it, and the doctor
 runs again without), plus `--fix --yes` with `fix: true` and `--clone --origin <url>` with `clone: true` (which needs `fix`),
@@ -2740,6 +2742,44 @@ heartbeat whose `doctor_at` is older than the record's keeps the newer run's doc
 a Repair the box's PATH is probed again on the next re-compute. Repair runs the bare `volley` of
 the box's non-interactive ssh PATH: on a box whose PATH probe finds no `bun` (and so no
 `volley`), fix the PATH first, or Repair answers only `volley: command not found`.
+
+**Repositories (`repo_add`, `repo_remove`, `repo_list`, `repo_status`, SPEC §4.6.21).** Admin ops
+on the account-op topic beside `peer_doctor` (`repo_list` and `repo_status` are also answered on
+the mailbox); `volley repo` sends them.
+
+- `repo_add { slug, machines?, paths? }` runs `gh repo view <slug> --json
+  nameWithOwner,url,visibility` on the supervisor (refused with gh's reason; the canonical
+  `nameWithOwner` is kept), patches `repos.<slug>.machines` (`all` by default) and each adopted
+  `hosts.<m>.repos.<slug>` through the config store (`config_changed`; nothing when unchanged),
+  journals `repo_added` and answers with each machine's state line. Each machine's run then goes on
+  in the background: a paired machine's doctor runs with `--repo-add <slug>[=<path>]` (plus
+  `--fix --yes --clone` while its record reports no clone, its state `cloning` meanwhile) over
+  `RemoteHost.runDoctor`, through the same one-run-per-host gate as Repair; the report is folded
+  into the record; once the clone exists its trust is recorded in the box's default `.claude.json`
+  and in every signed-in profile's there (`RemoteHost.recordTrust`, the owner-answer write) and
+  journaled `repo_trusted { machine, repo, root, accounts, keys }`. The supervisor's own machine is
+  never cloned: its clone must already be a git repository (`git rev-parse --show-toplevel`), then
+  it is trusted the same way (`recordRepoTrust`), and the own doctor checks every repository
+  assigned to it on its next run. Every run is journaled `repo_clone_run { machine, slug, ok,
+  cloned, path?, error? }`; a failed one leaves the machine's `repos.<slug>` `blocked` with the
+  reason (replayed from the journal on restart) and is retried on the machine's next `up` record,
+  on a heartbeat carrying a newer doctor run (`doctor_at`), when the doctor run it met there ends
+  and after a successful Repair there. A machine already cloned and trusted is not run again; a
+  run whose repository was removed meanwhile records nothing. An add again marks a `blocked`
+  machine `cloning` before it answers, so `volley repo add --wait` never reads the old run's
+  reason. `stop` waits for every run in flight, a box's `--clone` over ssh included.
+- A `repo_trusted` key is the `repo_untrusted` decision's (`preconditionKey({ machine, profile,
+  root })`): a spawn whose key one covers opens no `repo_untrusted` (`SpawnDeps.repoTrusted`).
+  `claude_signin_done` for a profile trusts every repository assigned to its machine in it (one
+  `repo_trusted` each). A `remote_repo_missing` answered `add` runs `repo_add` for that machine.
+- `repo_remove { slug, machines? }` drops the machines (and adopted paths) from config, tells each
+  paired machine whose tunnel is up (`--repo-remove`), journals `repo_removed { by, slug,
+  machines, clones }` and answers `{ slug, machines, clones, peers }`: no clone is deleted.
+- `repo_list` answers `{ repos: [{ slug, machines, paths? }] }`; `repo_status { slug? }` answers
+  `{ repos: [{ slug, machines: { <m>: { state, path?, reasons } }, lines }] }`, the verdict entries
+  as readiness judges them now and one `repoStateLine` per machine.
+- Readiness judges every repository assigned to a machine (not only the running waves'), and a
+  `repo_add` run's `cloning` / `blocked` stands in its verdict until the run that settles it.
 
 ---
 
@@ -3858,7 +3898,8 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     --repo-remove <owner/name>, then --clone only under --fix with an add (each added
     repository cloned from https://github.com/<owner>/<name>.git, built on the box, never an
     argv here); no other volley argv runs on a box
-  the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
+  the trust write (RemoteHost.recordTrust, on the owner's `trust` answer or a `repo_add`, SPEC
+    §4.6.21: adding a repository to a machine is the owner's consent to trust its clone there):
     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
     mv -f .claude.json.volleyd.tmp .claude.json — or, for a profile the supervisor created
     there, the same three steps on `<home>/.volley/claude/<acct>/.claude.json` and its

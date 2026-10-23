@@ -38,6 +38,10 @@
                 "admin_token",
                 "desk_password",
                 "peer_doctor",
+                "repo_add",
+                "repo_remove",
+                "repo_list",
+                "repo_status",
                 "archive",
                 "inbox_answer",
                 "resolve",
@@ -112,6 +116,51 @@
             "clone": {
               "type": "boolean",
               "description": "peer_doctor: with fix, also `--clone --origin <the running wave's origin>` (clone the wave repo where the host's clone is missing). Needs fix: true; refused while the wave repo's origin is not known."
+            },
+            "repos_add": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}(=/[^\\n\\r]*)?$"
+              },
+              "description": "peer_doctor: `--repo-add` each `<owner/name>` or `<owner/name>=<absolute path>` (an adopted clone) to the machine's peer.json; with fix and clone, each one without a clone is cloned from its GitHub URL (spec section 4.6.21). Excludes repos_remove."
+            },
+            "repos_remove": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": { "$ref": "#/$defs/slug" },
+              "description": "peer_doctor: `--repo-remove` each `<owner/name>` from the machine's peer.json (its clone is kept). Excludes repos_add."
+            },
+            "slug": {
+              "$ref": "#/$defs/slug",
+              "description": "repo_add / repo_remove / repo_status: the repository's GitHub owner/name (spec section 4.6.21)."
+            },
+            "machines": {
+              "oneOf": [
+                { "const": "all" },
+                {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 64,
+                  "uniqueItems": true,
+                  "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$" }
+                }
+              ],
+              "description": "repo_add / repo_remove: the machines (configured hosts or the supervisor's own name), or all (the default)."
+            },
+            "paths": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": { "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$" },
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 1024,
+                "pattern": "^/[^\\n\\r]*$"
+              },
+              "description": "repo_add: a paired machine's existing clone to adopt (hosts.<machine>.repos), by machine name; absolute paths there."
             },
             "step": {
               "enum": ["detect", "security", "accounts", "services", "phone"],
@@ -290,6 +339,19 @@
               "if": {
                 "properties": {
                   "op": {
+                    "enum": ["repo_add", "repo_remove"]
+                  }
+                }
+              },
+              "then": {
+                "required": ["op", "slug"],
+                "properties": {}
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "op": {
                     "const": "archive"
                   }
                 }
@@ -364,6 +426,10 @@
     }
   ],
   "$defs": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\\.\\.?$)(?![A-Za-z0-9_.-]*\\.git$)[A-Za-z0-9_.-]{1,100}$"
+    },
     "reply_key": {
       "type": "object",
       "required": ["kty", "n", "e"],

@@ -1,0 +1,19 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-23T12:07:29.000Z",
+  "channel": "_waves/events",
+  "type": "repo_clone_run",
+  "payload": {
+    "wave": "_system",
+    "seq": 44,
+    "at": "2026-10-23T12:07:29.000Z",
+    "data": {
+      "machine": "box-a",
+      "slug": "example-org/widgets",
+      "ok": false,
+      "cloned": false,
+      "error": "box-a is down: retried when it is back"
+    }
+  }
+}

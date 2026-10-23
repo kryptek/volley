@@ -222,7 +222,8 @@ import { AGENT_BRANCH } from "./worktree";
  *     --repo-remove <owner/name>, then --clone only under --fix with an add (each added
  *     repository cloned from https://github.com/<owner>/<name>.git, built on the box, never an
  *     argv here); no other volley argv runs on a box
- *   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer only):
+ *   the trust write (RemoteHost.recordTrust, on the owner's `trust` answer or a `repo_add`, SPEC
+ *     §4.6.21: adding a repository to a machine is the owner's consent to trust its clone there):
  *     cmp -s - .claude.json (base64 of the file as read, on stdin) ·
  *     mv -f .claude.json.volleyd.tmp .claude.json — or, for a profile the supervisor created
  *     there, the same three steps on `<home>/.volley/claude/<acct>/.claude.json` and its
@@ -1769,7 +1770,7 @@ export const isCloneUrl = (url: string): boolean =>
   CLONE_URL.test(url) && !url.split("/").some((seg) => seg === "." || seg === "..");
 
 /** `--repo-add`'s value: `<owner/name>`, or `<owner/name>=<abs path>` (an adopted clone). */
-const isRepoAdd = (v: string): boolean => {
+export const isRepoAdd = (v: string): boolean => {
   const i = v.indexOf("=");
   return i < 0 ? isSlug(v) : isSlug(v.slice(0, i)) && isVolleyDir(v.slice(i + 1));
 };

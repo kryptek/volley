@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-23T12:05:00.000Z",
+  "channel": "_system/auth",
+  "type": "query",
+  "correlation_id": "0b7e2c41-5d9a-4f3e-9c18-6a2d4e8f1b0a",
+  "payload": {
+    "op": "peer_doctor",
+    "name": "box-a",
+    "fix": true,
+    "clone": true,
+    "repos_add": ["example-org/widgets", "example-org/tools=/srv/tools"]
+  }
+}

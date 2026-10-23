@@ -20,6 +20,7 @@ Subcommands:
   lease    Heavy-operation leases from volleyd (run, acquire, release, status)
   claude   Claude account profiles on volleyd (add, signin, list, sync, move)
   peer     Pair machines with volleyd's (invite, join, list, remove)
+  repo     Repositories on volleyd's machines (add, list, remove, status)
   setup    First-run / repair wizard: broker, accounts, services, phone sign-in QR
   desk     Serve the built Volley Desk (desk serve) for phones and the setup service
   deploy   Deploy a release tag to this machine's volleyd and Desk services
@@ -72,6 +73,8 @@ async function loadSubcommand(name: string): Promise<Subcommand | null> {
       return (await import("./commands/claude")).claude as Subcommand;
     case "peer":
       return (await import("./commands/peer")).peer as Subcommand;
+    case "repo":
+      return (await import("./commands/repo")).repo as Subcommand;
     case "setup":
       return (await import("./commands/setup")).setup as Subcommand;
     case "desk":

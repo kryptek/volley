@@ -22,7 +22,7 @@ import type { ProfileKeys } from "./claude/sharing";
 import type { Ranked } from "./claude/usage";
 import { systemClock } from "./clock";
 import { DAEMON_DEFAULTS } from "./config-defaults";
-import { ITS_RUNNING, ITS_RUNNING_HELP, waveDecisionId } from "./decisions";
+import { ITS_RUNNING, ITS_RUNNING_HELP, preconditionKey, waveDecisionId } from "./decisions";
 import { mintConsentToken, sealLaunchScript } from "./fence";
 import { lockFetches } from "./git-lock";
 import type { Host, WorktreeResult } from "./hosts/host";
@@ -181,6 +181,11 @@ export interface SpawnDeps {
    * `claudeJsonPath`; its repo_untrusted decisions carry `host` and `target`.
    */
   remoteTrust?: RemoteTrust;
+  /**
+   * Whether a `repo_add` recorded the folder trust this (machine, profile, root) needs, by its
+   * `preconditionKey` (D4): such a spawn opens no `repo_untrusted`. Default: none did.
+   */
+  repoTrusted?: (key: string) => boolean;
   /** `packages/volley-hooks` ($VOLLEY_HOOKS_DIR). */
   hooksDir: string;
   /** `packages/volley-mcp/src/index.ts` on the agent's host: its `.volley/mcp.json` server. */
@@ -397,11 +402,15 @@ export async function spawnAgent(req: SpawnRequest, deps: SpawnDeps): Promise<Sp
     // 0. Repo trust, before anything is created.
     ctx.root = await repoRoot(deps.host.exec, repo);
     const open = openDecisionFor(deps.openDecisions, trustId(ctx));
-    const cfg =
-      deps.remoteTrust !== undefined
-        ? await deps.remoteTrust.read(remoteProfileOf(ctx.req))
-        : readClaudeJson(claudeJsonOf(ctx));
-    const trusted = isRepoTrusted(cfg, ctx.root);
+    // A clone `repo_add` trusted (D4, SPEC §4.6.21) never opens the shared decision.
+    const trusted =
+      deps.repoTrusted?.(trustKey(ctx)) === true ||
+      isRepoTrusted(
+        deps.remoteTrust !== undefined
+          ? await deps.remoteTrust.read(remoteProfileOf(ctx.req))
+          : readClaudeJson(claudeJsonOf(ctx)),
+        ctx.root,
+      );
     if (!trusted) {
       if (open !== undefined) {
         await deps.joinDecision?.({ id: open, task: req.task, role: req.role });
@@ -1376,6 +1385,17 @@ const trustId = (ctx: Ctx) =>
     machine: ctx.deps.remoteTrust?.target,
     profile: trustProfileOf(ctx),
   });
+
+/** The (machine, profile, root) the spawn needs trusted, as `preconditionKey` names it. */
+const trustKey = (ctx: Ctx) => {
+  const machine = ctx.deps.remoteTrust?.target;
+  const profile = trustProfileOf(ctx);
+  return preconditionKey({
+    root: ctx.root,
+    ...(machine !== undefined ? { machine } : {}),
+    ...(profile !== undefined ? { profile } : {}),
+  });
+};
 
 /**
  * The repo_untrusted question, naming the machine and the Claude account where it is answered,

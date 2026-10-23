@@ -754,6 +754,12 @@ export const WAVE_EVENT_TYPES = [
   "issue_commented",
   "issue_closed",
   "issues_verified",
+  // Repositories (SPEC §4.6.21): an admin's `repo_add` / `repo_remove`, each machine's clone run,
+  // and the folder trust the add recorded there, in the `_system` journal.
+  "repo_added",
+  "repo_removed",
+  "repo_clone_run",
+  "repo_trusted",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

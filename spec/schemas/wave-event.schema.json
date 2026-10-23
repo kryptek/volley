@@ -117,7 +117,11 @@
             "issue_unlabeled",
             "issue_commented",
             "issue_closed",
-            "issues_verified"
+            "issues_verified",
+            "repo_added",
+            "repo_removed",
+            "repo_clone_run",
+            "repo_trusted"
           ]
         },
         "payload": {

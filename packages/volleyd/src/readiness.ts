@@ -67,13 +67,16 @@ export interface ReadinessInput {
   /** The supervisor's own volley version: a machine's must match it. */
   hostVersion: string;
   /**
-   * The repositories to judge: `wanted`, every running wave's slug, beside every one the record
-   * reports (`records`, its `repos[]`; an older peer's `legacy` single clone, by its origin).
+   * The repositories to judge: `wanted`, every running wave's slug and every one config assigns
+   * the machine, beside every one the record reports (`records`, its `repos[]`; an older peer's
+   * `legacy` single clone, by its origin). `runs`: a `repo_add` in progress (`cloning`) or one
+   * that failed there (`blocked`, its why), by slug, which stands until its next run (SPEC §4.6.21).
    */
   repos: {
     wanted: string[];
     records: MachineRecord["repos"] | undefined;
     legacy?: MachineRecord["repo"];
+    runs?: Record<string, { state: "cloning" | "blocked"; reasons: string[]; path?: string }>;
   };
   /** The last PATH probe; null: not probed yet. */
   probe: PathProbe | null;
@@ -104,8 +107,8 @@ export interface ReadinessInput {
 }
 
 /**
- * Where one repository stands on a machine (`ReadinessPayload.repos`). `cloning` is reserved for
- * a clone being made (T3's clone orchestration); `repoVerdicts` never produces it yet.
+ * Where one repository stands on a machine (`ReadinessPayload.repos`). `cloning`: a `repo_add`
+ * is making its clone there (SPEC §4.6.21).
  */
 export type RepoState = "ready" | "cloning" | "blocked" | "absent";
 
@@ -262,12 +265,18 @@ function repoVerdicts(
   if (legacy !== undefined && legacySlug !== undefined && !has(legacySlug)) {
     out[legacySlug] = repoVerdict(legacySlug, legacy, legacyChecks);
   }
-  for (const s of i.repos.wanted) {
+  for (const s of [...i.repos.wanted, ...Object.keys(i.repos.runs ?? {})]) {
     if (has(s)) continue;
     out[s] =
       legacy !== undefined && legacy.origin === undefined
         ? repoVerdict(s, legacy, legacyChecks)
         : { state: "absent", reasons: [`no clone of ${s} on ${i.name}`] };
+  }
+  // A repo_add's run there says more than the record (until the run that brings it in).
+  for (const [s, run] of Object.entries(i.repos.runs ?? {})) {
+    const k = Object.keys(out).find((o) => sameSlug(o, s)) ?? s;
+    const path = run.path ?? out[k]?.path;
+    out[k] = { state: run.state, ...(path !== undefined ? { path } : {}), reasons: run.reasons };
   }
   // Over the cap, the running waves' repositories are kept first.
   const wanted = (k: string) => i.repos.wanted.some((w) => sameSlug(w, k));

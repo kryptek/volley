@@ -7,9 +7,10 @@ import { listAccounts, replyKey, seal, volleyAuth } from "./accounts";
 import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import type { PatchResult } from "./config-store";
 import type { ExecFn } from "./exec";
-import { isCloneUrl } from "./fence";
+import { isCloneUrl, isRepoAdd } from "./fence";
 import type { RemoteHost } from "./hosts/ssh-tmux";
 import type { DoctorReport, MachineRecord } from "./machines";
+import { isSlug } from "./repos";
 import type { PathError } from "./schemas";
 import type { NewEvent, RemoteHostConfig } from "./types";
 
@@ -435,17 +436,21 @@ export class PeerService {
     const fix = p.fix === true;
     const clone = p.clone === true;
     if (clone && !fix) return refuse("clone needs fix: true (the doctor clones only as a fix)");
+    const repos = doctorRepos(p);
+    if (typeof repos === "string") return refuse(repos);
     if (!Object.hasOwn(this.deps.hosts(), name))
       return refuse(`no configured host named "${name}"`);
-    const url = clone ? cloneUrl(origin) : null;
-    if (clone && url === null) {
+    // An added repository is cloned from its slug's GitHub URL (the box builds it): no origin.
+    const bySlug = repos.repos_add !== undefined;
+    const url = clone && !bySlug ? cloneUrl(origin) : null;
+    if (clone && !bySlug && url === null) {
       return refuse(
         `the wave repo's origin is not known (${origin === null ? "no running wave's clone reports one" : `${origin} cannot be cloned over https`}): clone it on "${name}" by hand, or repair while the wave runs`,
       );
     }
     const host = this.deps.remote?.(name) ?? "remote hosts are not available";
     if (typeof host === "string") return refuse(host);
-    return { name, fix, clone, host, ...(url !== null ? { origin: url } : {}) };
+    return { name, fix, clone, host, ...(url !== null ? { origin: url } : {}), ...repos };
   }
 
   /**
@@ -457,10 +462,17 @@ export class PeerService {
     fix,
     host,
     origin,
+    repos_add,
+    repos_remove,
   }: DoctorRun): Promise<PeerReply & { report?: DoctorReport }> {
     let report: DoctorReport;
     try {
-      report = await host.runDoctor({ fix, ...(origin !== undefined ? { clone: origin } : {}) });
+      report = await host.runDoctor({
+        fix,
+        ...(origin !== undefined ? { clone: origin } : {}),
+        ...(repos_add !== undefined ? { repos_add } : {}),
+        ...(repos_remove !== undefined ? { repos_remove } : {}),
+      });
     } catch (e) {
       return refuse(e instanceof Error ? e.message : String(e));
     }
@@ -575,6 +587,41 @@ export interface DoctorRun {
   host: RemoteHost;
   /** With `clone`: the URL the doctor clones from (`--origin`). */
   origin?: string;
+  /** `<owner/name>[=<abs>]`: repositories added to the box's peer.json (`--repo-add`). */
+  repos_add?: string[];
+  /** `<owner/name>`: repositories removed from it (`--repo-remove`). */
+  repos_remove?: string[];
+}
+
+/** Most repositories one doctor run adds or removes. */
+const DOCTOR_REPOS_MAX = 64;
+
+/**
+ * A doctor request's `repos_add` (`<owner/name>` or `<owner/name>=<abs path>`) and `repos_remove`
+ * (`<owner/name>`), checked as the fence checks the argv they become; or why not. An add and a
+ * remove exclude each other (the box's argv takes one or the other beside `--clone`).
+ */
+export function doctorRepos(p: Fields): Pick<DoctorRun, "repos_add" | "repos_remove"> | string {
+  const list = (key: string, ok: (v: string) => boolean): string[] | undefined | string => {
+    const v = p[key];
+    if (v === undefined) return undefined;
+    if (!Array.isArray(v) || v.length === 0 || v.length > DOCTOR_REPOS_MAX)
+      return `${key} must be a list of 1 to ${DOCTOR_REPOS_MAX} repositories`;
+    for (const r of v) {
+      if (typeof r !== "string" || !ok(r)) return `${key}: "${String(r)}" is not a repository`;
+    }
+    return v as string[];
+  };
+  const add = list("repos_add", isRepoAdd);
+  if (typeof add === "string") return add;
+  const remove = list("repos_remove", isSlug);
+  if (typeof remove === "string") return remove;
+  if (add !== undefined && remove !== undefined)
+    return "repos_add and repos_remove exclude each other: one run adds or removes";
+  return {
+    ...(add !== undefined ? { repos_add: add } : {}),
+    ...(remove !== undefined ? { repos_remove: remove } : {}),
+  };
 }
 
 /**
