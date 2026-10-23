@@ -27,10 +27,10 @@ export function CheckRows({
     <ul className="m-checks" aria-label={label}>
       {checks.map((c) => {
         const state = c.ok ? "ok" : c.severity;
-        const fix = c.ok ? null : fixFor(c.id, ctx);
+        const fix = c.ok ? null : fixFor(c.id, ctx, c.repo);
         return (
           <li
-            key={c.id}
+            key={`${c.id}:${c.repo ?? ""}`}
             className={`m-check m-check--${state}`}
             aria-label={`${c.id}: ${c.detail}`}
           >

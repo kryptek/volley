@@ -217,7 +217,7 @@ describe("search reaches into groups", () => {
   it("matchGroups and groupOf name the group a query hits", () => {
     expect(matchGroups("rationale")).toEqual([{ section: "autopilot", group: "policy" }]);
     expect(matchSections("quiet hours").map((s) => s.key)).toContain("sound");
-    expect(matchSections("")).toHaveLength(10);
+    expect(matchSections("")).toHaveLength(11);
     expect(groupOf(sectionDef("supervisor"), "ceiling")).toBe("admission");
     expect(groupOf(sectionDef("supervisor"), "")).toBeUndefined();
     expect(groupOf(sectionDef("supervisor"), "supervisor")).toBeUndefined();

@@ -76,7 +76,11 @@ describe("machineFixes", () => {
     expect(fixFor("hooks", ctx)).toMatchObject({ safe: true });
     expect(fixFor("tool.tmux", ctx)?.text).toMatch(/install tmux on box-a/);
     expect(fixFor("bun_on_path", ctx)?.text).toMatch(/non-interactive ssh PATH/);
-    expect(fixFor("something.new", ctx)?.command).toBe("volley peer doctor");
+    // Never "run the doctor by hand": Repair runs it.
+    expect(fixFor("something.new", ctx)).toEqual({
+      text: "Repair… runs the doctor on box-a again; its plan has this check's fix",
+      safe: false,
+    });
   });
 });
 

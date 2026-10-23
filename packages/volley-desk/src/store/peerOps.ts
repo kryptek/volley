@@ -10,7 +10,10 @@
  * https or localhost and `lib/rsa.ts`'s on a plain-http LAN page.
  *
  * `peer_doctor` (a Desk's Repair) is an admin op on the same channel; its run
- * can take minutes, so it waits far longer than the others.
+ * can take minutes, so it waits far longer than the others. So are the
+ * repository ops (§4.6.21, Settings › Repositories): `repo_add`, `repo_remove`,
+ * `repo_list` and `repo_status`; `repo_add` answers once config is patched, and
+ * each machine's clone then shows in its readiness verdict.
  *
  * The broker grants an account-op topic only to an admin account, for its own
  * username, so a non-admin's request is dropped and nothing ever answers it.
@@ -22,6 +25,7 @@
  * publish) is neither, and is not kept: the next ask asks again.
  */
 import { type AuthAnswer, type AuthOps, rememberRole } from "./control";
+import type { RepoMachines, RepoVerdict } from "./types";
 
 /** The wait `volley peer invite` / `remove` use too: volleyd checks the account registry first. */
 export const AUTH_OP_TIMEOUT_MS = 30_000;
@@ -52,11 +56,42 @@ export interface DoctorCheck {
   severity: "block" | "warn";
   detail: string;
   fix?: string;
+  /** The repository (`owner/name`) a per-repository check is about. */
+  repo?: string;
 }
 
 /** `peer_doctor`'s answer: the report's checks and, for a dry run, the plan of what a fix would do. */
 export type DoctorAnswer =
   | { ok: true; checks: DoctorCheck[]; plan: DoctorCheck[]; doctorAt?: string }
+  | { ok: false; error: string };
+
+/** `repo_add`'s answer: the canonical slug GitHub gave, its URL, the machines and their lines. */
+export type RepoAddResult =
+  | { ok: true; slug: string; url: string; machines: string[]; status: string[] }
+  | { ok: false; error: string };
+
+/** `repo_remove`'s answer: each clone left on disk (by machine), and what each machine said. */
+export type RepoRemoveResult =
+  | {
+      ok: true;
+      slug: string;
+      machines: string[];
+      clones: Record<string, string>;
+      peers: Record<string, string>;
+    }
+  | { ok: false; error: string };
+
+/** `repo_list`'s answer: every repository config names. */
+export type RepoListResult =
+  | { ok: true; repos: { slug: string; machines: RepoMachines; paths?: Record<string, string> }[] }
+  | { ok: false; error: string };
+
+/** `repo_status`'s answer: each repository's verdict entry per machine, and one line each. */
+export type RepoStatusResult =
+  | {
+      ok: true;
+      repos: { slug: string; machines: Record<string, RepoVerdict>; lines: string[] }[];
+    }
   | { ok: false; error: string };
 
 /** What `admin()` found: a definite yes or no, or volleyd did not answer. */
@@ -78,8 +113,23 @@ export interface PeerOps {
    * its agents to finish first; `now` stops them.
    */
   remove(name: string, mode?: "drain" | "now"): Promise<PeerRemoveResult>;
-  /** Run the machine's doctor over ssh (`peer_doctor`): a dry run, or its safe fixes. */
-  doctor(name: string, opts: { fix: boolean; clone?: boolean }): Promise<DoctorAnswer>;
+  /**
+   * Run the machine's doctor over ssh (`peer_doctor`): a dry run, or its safe fixes. `reposAdd`
+   * (`<owner/name>` or `<owner/name>=<path>`) with `clone` clones those repositories there.
+   */
+  doctor(
+    name: string,
+    opts: { fix: boolean; clone?: boolean; reposAdd?: string[] },
+  ): Promise<DoctorAnswer>;
+  /** Add a repository to every machine (or these), adopting existing clones at `paths`. */
+  repoAdd(
+    slug: string,
+    opts?: { machines?: RepoMachines; paths?: Record<string, string> },
+  ): Promise<RepoAddResult>;
+  /** Remove a repository from every machine (or these); its clones stay on disk. */
+  repoRemove(slug: string, machines?: string[]): Promise<RepoRemoveResult>;
+  repoList(): Promise<RepoListResult>;
+  repoStatus(slug?: string): Promise<RepoStatusResult>;
 }
 
 /**
@@ -105,6 +155,16 @@ export function joinCommand(code: string, to: string, repair?: string): string {
 }
 
 const asChecks = (v: unknown): DoctorCheck[] => (Array.isArray(v) ? (v as DoctorCheck[]) : []);
+
+const asStrings = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+
+const asRecord = (v: unknown): Record<string, string> =>
+  typeof v === "object" && v !== null && !Array.isArray(v)
+    ? Object.fromEntries(
+        Object.entries(v).filter((e): e is [string, string] => typeof e[1] === "string"),
+      )
+    : {};
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -190,8 +250,12 @@ export function createPeerOps(
         ? { ok: true, removing: r.removing, agents: typeof r.agents === "number" ? r.agents : 0 }
         : { ok: true };
     },
-    async doctor(name, { fix, clone = false }) {
-      const a = await ask("peer_doctor", { name, fix, clone }, DOCTOR_TIMEOUT_MS);
+    async doctor(name, { fix, clone = false, reposAdd }) {
+      const a = await ask(
+        "peer_doctor",
+        { name, fix, clone, ...(reposAdd?.length ? { repos_add: reposAdd } : {}) },
+        DOCTOR_TIMEOUT_MS,
+      );
       if (!a.ok) return { ok: false, error: refusal(a, `the doctor on ${name}`) };
       const r = (a.result ?? {}) as { checks?: unknown; plan?: unknown; doctor_at?: unknown };
       return {
@@ -200,6 +264,47 @@ export function createPeerOps(
         plan: asChecks(r.plan),
         ...(typeof r.doctor_at === "string" ? { doctorAt: r.doctor_at } : {}),
       };
+    },
+    async repoAdd(slug, { machines = "all", paths } = {}) {
+      const fields = {
+        slug,
+        machines,
+        ...(paths && Object.keys(paths).length > 0 ? { paths } : {}),
+      };
+      const a = await ask("repo_add", fields, timeoutMs);
+      if (!a.ok) return { ok: false, error: refusal(a, `adding ${slug}`) };
+      const r = (a.result ?? {}) as Record<string, unknown>;
+      return {
+        ok: true,
+        slug: typeof r.slug === "string" ? r.slug : slug,
+        url: typeof r.url === "string" ? r.url : `https://github.com/${slug}`,
+        machines: asStrings(r.machines),
+        status: asStrings(r.status),
+      };
+    },
+    async repoRemove(slug, machines) {
+      const a = await ask("repo_remove", { slug, ...(machines ? { machines } : {}) }, timeoutMs);
+      if (!a.ok) return { ok: false, error: refusal(a, `removing ${slug}`) };
+      const r = (a.result ?? {}) as Record<string, unknown>;
+      return {
+        ok: true,
+        slug: typeof r.slug === "string" ? r.slug : slug,
+        machines: asStrings(r.machines),
+        clones: asRecord(r.clones),
+        peers: asRecord(r.peers),
+      };
+    },
+    async repoList() {
+      const a = await ask("repo_list", {}, timeoutMs);
+      if (!a.ok) return { ok: false, error: refusal(a, "the repository list") };
+      const r = (a.result ?? {}) as { repos?: unknown };
+      return { ok: true, repos: Array.isArray(r.repos) ? r.repos : [] };
+    },
+    async repoStatus(slug) {
+      const a = await ask("repo_status", slug ? { slug } : {}, timeoutMs);
+      if (!a.ok) return { ok: false, error: refusal(a, "the repository status") };
+      const r = (a.result ?? {}) as { repos?: unknown };
+      return { ok: true, repos: Array.isArray(r.repos) ? r.repos : [] };
     },
   };
 }

@@ -5,8 +5,8 @@
  * broker account and the sections in three groups with coloured icon tiles;
  * Sign out and Switch account… sit under the account (`AccountButtons`);
  * the main pane shows the picked section (General, Sound, Appearance, Supervisor,
- * Claude accounts & usage, Broker accounts, Machines, Setup & Security,
- * About). A long section (Supervisor, Autopilot, Sound, Claude accounts) drills
+ * Claude accounts & usage, Broker accounts, Machines, Repositories, Setup &
+ * Security, About). A long section (Supervisor, Autopilot, Sound, Claude accounts) drills
  * into groups (`GroupNav`): its list of group rows, then a group's page under a
  * `‹ Section` back control; a search hit inside a group opens that group.
  * Escape, the close button and a scrim click close it (Escape in a search box with a
@@ -35,6 +35,7 @@ import { ClaudeAccounts, type ClaudeAccountsProps } from "./ClaudeAccounts";
 import { General } from "./General";
 import { useGroupNav } from "./GroupNav";
 import { Machines, type MachinesProps } from "./Machines";
+import { Repositories } from "./Repositories";
 import { Setup, useAdminRole } from "./Setup";
 import { Sound, type SoundSectionProps } from "./Sound";
 import { Supervisor, supervisorGroupOf } from "./Supervisor";
@@ -351,6 +352,17 @@ export function SettingsWindow(p: SettingsWindowProps) {
                 {...(p.machines ?? { machines: {}, hubUp: false, ops: null })}
                 onAdmin={setPeerAdmin}
                 onOpenSetting={openSetting}
+                onOpenRepos={() => setSec("repos")}
+                waveConfig={p.config}
+              />
+            )}
+            {sec === "repos" && (
+              <Repositories
+                config={p.config}
+                machines={p.machines?.machines ?? {}}
+                readiness={p.machines?.readiness ?? {}}
+                ops={p.machines?.ops ?? null}
+                hubUp={p.machines?.hubUp ?? false}
               />
             )}
             {sec === "setup" && (

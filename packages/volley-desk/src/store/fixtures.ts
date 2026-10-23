@@ -530,6 +530,11 @@ function globals(now: number): DeskMessage[] {
       "box-b": { target: "owner@box-b", tunnel: { remote_port: 21884, supervise: false } },
     },
     fleet: { local_name: LOCAL_MACHINE },
+    // Settings › Repositories (SPEC §4.6.21): the wave repo everywhere, a second on box-a only.
+    repos: {
+      "example-org/example-repo": { machines: "all" },
+      "example-org/docs-site": { machines: ["box-a"] },
+    },
     claude: { default_account: "most_headroom", warn_at_pct: 90 },
   };
   const since = iso(now - 20 * 60_000);
@@ -837,16 +842,40 @@ function machines(now: number, step = 0): DeskMessage[] {
     checked_at: iso(now - 4_000),
     ...over,
   });
+  const repos = (over: Record<string, unknown>) => ({
+    "example-org/example-repo": { state: "ready", path: "/srv/work/example-repo", reasons: [] },
+    ...over,
+  });
   const verdicts = [
     verdict(LOCAL_MACHINE, {
+      repos: repos({
+        "example-org/example-repo": { state: "ready", path: "/path/to/repo", reasons: [] },
+      }),
       max_agents: 12,
       placed: 5,
       eligible: false,
       ineligible_reason: `memory available ${localMemory}% (min 20%)`,
       usage: { account: "primary", five_hour_pct: 64 },
     }),
-    verdict("box-a", { max_agents: 6, placed: 2, ...overload(records[1] as MachineLoad) }),
+    verdict("box-a", {
+      max_agents: 6,
+      placed: 2,
+      repos: repos({
+        "example-org/docs-site": {
+          state: "blocked",
+          path: "/path/to/home/.volley/repos/example-org/docs-site",
+          reasons: ["hugo not installed (needed by example-org/docs-site)"],
+        },
+      }),
+      ...overload(records[1] as MachineLoad),
+    }),
     verdict("box-b", {
+      repos: repos({
+        "example-org/example-repo": {
+          state: "blocked",
+          reasons: ["box-b is down: retried when it is back"],
+        },
+      }),
       ready: false,
       eligible: false,
       reasons: ["tunnel down: no heartbeat for 90 s"],

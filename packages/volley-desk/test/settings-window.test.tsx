@@ -123,10 +123,17 @@ describe("SettingsWindow", () => {
       ),
     ).toEqual([
       ["General", "Sound", "Appearance"],
-      ["Supervisor", "Autopilot", "Claude accounts & usage", "Broker accounts", "Machines"],
+      [
+        "Supervisor",
+        "Autopilot",
+        "Claude accounts & usage",
+        "Broker accounts",
+        "Machines",
+        "Repositories",
+      ],
       ["Setup & Security", "About Volley"],
     ]);
-    expect(SETTINGS_SECTIONS).toHaveLength(10);
+    expect(SETTINGS_SECTIONS).toHaveLength(11);
     expect(heading()).toHaveTextContent("General");
     expect(sidebar().getByRole("button", { name: "General" })).toHaveAttribute(
       "aria-current",
@@ -512,6 +519,10 @@ describe("SettingsWindow", () => {
       invite: vi.fn(),
       remove: vi.fn(),
       doctor: vi.fn(),
+      repoAdd: vi.fn(),
+      repoRemove: vi.fn(),
+      repoList: vi.fn(),
+      repoStatus: vi.fn(),
     };
     render(
       <Harness

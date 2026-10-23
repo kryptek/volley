@@ -45,6 +45,7 @@ import {
 import { type AdminStatus, type PeerOps, joinCommand, pairingSupported } from "../store/peerOps";
 import type {
   ClaudeSignin,
+  ConfigPayload,
   MachinePayload,
   ReadinessPayload,
   WaveStatePayload,
@@ -60,6 +61,7 @@ import {
 import { CheckRows, CopyCommand } from "./MachineRows";
 import { RepairSheet } from "./RepairSheet";
 import type { ConfigTransport } from "./configTransport";
+import { reposOnMachine } from "./repos";
 import "../styles/machines.css";
 
 const MACHINES_TINT = "#34c759";
@@ -100,6 +102,10 @@ export interface MachinesProps {
   focusSeq?: number | undefined;
   /** Open a Settings › Supervisor row by its config path (the local agents chip). */
   onOpenSetting?: ((path: string) => void) | undefined;
+  /** Open Settings › Repositories (a card's Repositories… link). */
+  onOpenRepos?: (() => void) | undefined;
+  /** volleyd's config (`_waves/_config`): the repositories it assigns to each machine. */
+  waveConfig?: ConfigPayload | null | undefined;
   /** The Claude account groups (App's `deskAccountGroups`), the sign-ins and volleyd's control. */
   claude?: {
     groups: AccountGroup[];
@@ -148,7 +154,7 @@ function useNow(fixed: number | undefined, ms: number): number {
  * Whether `ops` may pair: what is already known at once, else `null` until
  * volleyd answers. Asked again when volleyd comes up, since no answer is kept.
  */
-function useAdmin(ops: PeerOps | null, hubUp: boolean): AdminStatus | null {
+export function useAdmin(ops: PeerOps | null, hubUp: boolean): AdminStatus | null {
   const [admin, setAdmin] = useState<AdminStatus | null>(() => (ops ? ops.known() : "not-admin"));
   useEffect(() => {
     if (!ops) {
@@ -283,7 +289,8 @@ function AddMachine({
   const step = joined ? 3 + after : s.phase === "waiting" ? 2 : 1;
   const rec = joined ? machines[joined] : undefined;
   const verdict = joined ? readiness[joined] : undefined;
-  const ctx = { machine: joined ?? "", repo: rec?.repo?.path };
+  const repos = joined ? reposOnMachine(joined, null, rec, verdict) : [];
+  const ctx = { machine: joined ?? "", repo: rec?.repo?.path, repos };
   const currentCap = verdict?.max_agents ?? DEFAULT_MAX_AGENTS;
   const capValue = Number(cap ?? currentCap);
   const capValid = Number.isInteger(capValue) && capValue >= 1 && capValue <= 100;
@@ -447,6 +454,7 @@ function AddMachine({
               machine={joined}
               ops={ops}
               repo={rec?.repo?.path}
+              repos={repos}
               onClose={() => setRepairing(false)}
             />
           )}
@@ -633,6 +641,8 @@ export function Machines(p: MachinesProps) {
       onOpenLocalAgents={
         self && p.onOpenSetting ? () => p.onOpenSetting?.("fleet.local_agents") : undefined
       }
+      onOpenRepos={p.onOpenRepos}
+      waveConfig={p.waveConfig}
     />
   );
 
