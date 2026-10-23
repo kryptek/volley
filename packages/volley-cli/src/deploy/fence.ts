@@ -1,5 +1,15 @@
 import { join } from "node:path";
-import { DEPLOY, type ServiceUnit, TAG_RE, deskDir } from "./plan";
+import {
+  type Command,
+  DEPLOY,
+  RECORD_LOCK_ARGV,
+  RESTART_PEER_ARGV,
+  type Ref,
+  type ServiceUnit,
+  TAG_RE,
+  deskDir,
+  peerDoctorArgv,
+} from "./plan";
 
 /** What the deploy's exec may run: the fence's inputs. */
 export interface DeployFenceInputs {
@@ -50,5 +60,48 @@ export function deployFence({ repo, bun, services }: DeployFenceInputs) {
       is(bun, volleydCli, "validate", fixture) ||
       restarts.includes(argv.join("\0"));
     if (!ok) throw new Error(`volley deploy does not run \`${argv.join(" ")}\``);
+  };
+}
+
+/** A paired machine as the deploy reaches it: its name, ssh target and volley checkout. */
+export interface PairedPeer {
+  name: string;
+  target: string;
+  volleyDir: string;
+}
+
+/**
+ * The fence over the commands `volley deploy` runs on a paired machine: the read-only git queries,
+ * the fetch, a checkout of `tag` or of the ref the machine was at (`from`, its rollback), the
+ * install and its lock record in the machine's volley checkout, the service restart and the
+ * doctor. Throws on any other command (so never another branch, `git reset`, or `rm`).
+ */
+export function peerFence(peer: PairedPeer, refs: { tag: string; from: Ref | null }) {
+  const dir = peer.volleyDir;
+  const same = (a: readonly string[], b: readonly string[]) =>
+    a.length === b.length && a.every((w, i) => w === b[i]);
+  const from = refs.from;
+  return (c: Command): void => {
+    const g =
+      c.argv[0] === "git" && c.argv[1] === "-C" && c.argv[2] === dir ? c.argv.slice(3) : null;
+    const gis = (...want: string[]) => g !== null && same(g, want);
+    const inDir = c.cwd === dir;
+    const ok =
+      gis("status", "--porcelain") ||
+      gis("rev-parse", "--abbrev-ref", "HEAD") ||
+      gis("rev-parse", "HEAD") ||
+      gis("describe", "--tags", "--exact-match", "HEAD") ||
+      gis("fetch", "--tags", "origin") ||
+      gis("checkout", "--detach", refs.tag) ||
+      (from !== null &&
+        (from.kind === "branch"
+          ? gis("checkout", from.name, "--") && isRollbackBranch(from.name)
+          : gis("checkout", "--detach", from.name) &&
+            (TAG_RE.test(from.name) || SHA_RE.test(from.name)))) ||
+      (same(c.argv, ["bun", "install", "--frozen-lockfile"]) && inDir) ||
+      (same(c.argv, RECORD_LOCK_ARGV) && inDir) ||
+      same(c.argv, RESTART_PEER_ARGV) ||
+      (same(c.argv, peerDoctorArgv(dir)) && inDir);
+    if (!ok) throw new Error(`volley deploy does not run \`${c.argv.join(" ")}\` on ${peer.name}`);
   };
 }
