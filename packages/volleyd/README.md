@@ -46,7 +46,7 @@ coordinator session.
 - [Autopilot](#autopilot)
   - [The policy table](#the-policy-table)
   - [Self-healing CI](#self-healing-ci) and [the fixer task](#the-fixer-task)
-  - [Autopilot merging](#autopilot-merging) and [the merge queue](#the-merge-queue)
+  - [Autopilot merging](#autopilot-merging), [the merge queue](#the-merge-queue) and [the merge train](#the-merge-train)
   - [The release train](#the-release-train) and [the issue lifecycle](#the-issue-lifecycle)
   - [The needs-you inbox](#needs-you-inbox)
   - [The morning digest](#the-morning-digest)
@@ -58,10 +58,13 @@ coordinator session.
 - [Archiving](#archiving)
 - [Steering](#steering)
 - [Footprints and the overlap plan](#footprints-and-the-overlap-plan)
+  - [At run time: the cap and the churn monitor](#at-run-time-the-cap-and-the-churn-monitor)
   - [Overlap warnings](#overlap-warnings)
   - [Footprints](#footprints)
 - [Configuration](#configuration)
 - [Spawning agents](#spawning-agents)
+  - [Bundles](#bundles)
+  - [Spawn budget](#spawn-budget) (productive and churn spawns, the churn fuse)
 - [Fleet](#fleet)
   - [Fleet: readiness, the supervisor's card, Repair](#fleet-readiness-the-supervisors-card-repair)
   - [Fleet: placement](#fleet-placement)
@@ -74,6 +77,7 @@ coordinator session.
 - [Exit codes](#exit-codes)
 - [Testing: the clock contract](#testing-the-clock-contract)
 - [Testing: the simulated soak](#testing-the-simulated-soak)
+  - [The replay](#the-replay)
 
 ---
 
@@ -886,11 +890,14 @@ wave meets them (the owner's one-page guide is [`docs/AUTOPILOT.md`](../../docs/
 | Self-healing CI | classifies a red head (own change, flake, infra incident) and routes it; a flake gets a fixer task | [Self-healing CI](#self-healing-ci), [the fixer task](#the-fixer-task) |
 | Autopilot merging | under `merge: auto`, squash-merges each gated PR at exactly its gated head | [Autopilot merging](#autopilot-merging), SPEC §4.6.17 |
 | The merge queue | one merge in flight per release branch, in dependency order, each branch brought up to date first | [The merge queue](#the-merge-queue) |
+| The overlap plan | bundles, chains and caps the tasks that share files; holds or trains a cluster that churns anyway | [Footprints and the overlap plan](#footprints-and-the-overlap-plan), [the cap and the churn monitor](#at-run-time-the-cap-and-the-churn-monitor), SPEC §4.6.22 |
+| The merge train | merges several gated PRs of a release branch at once through one integrated, gated branch | [The merge train](#the-merge-train), SPEC §4.6.23 |
+| Churn accounting | branch updates, re-reviews, trains and retries never spend the spawn budget; the churn fuse holds a cluster | [Spawn budget](#spawn-budget) |
 | The release train | runs the repository's `.volley/release.yaml` stages once every task is merged; ends on the owner's `release_go` | [The release train](#the-release-train), SPEC §4.6.19 |
 | The needs-you inbox | one retained item per thing a person must answer, from any surface; volleyd referees | [Needs-you inbox](#needs-you-inbox), SPEC §4.6.18 |
 | The morning digest | one retained digest and one push per wave: shipped, handled, waiting | [The morning digest](#the-morning-digest) |
 | Stable coordinator identity | a wave owned by `VOLLEY_COORDINATOR` survives its session; reconnects reclaim it | [Ownership and claim](#ownership-and-claim) |
-| The soak | one whole simulated wave, unattended, in CI | [Testing: the simulated soak](#testing-the-simulated-soak) |
+| The soak | one whole simulated wave, unattended, in CI; the replay measures the overlap plan against a baseline | [Testing: the simulated soak](#testing-the-simulated-soak), [the replay](#the-replay) |
 
 Under `merge: manual` volleyd merges nothing and a person merges each gated PR; with
 `autopilot.enabled: false` every decision waits for a person. Either is per wave or global.
@@ -1623,6 +1630,15 @@ carries `issues`, `files`, `footprint` and `plan`; a version with a plan journal
 A bundle runs as one task: one agent, one worktree and one PR for all its issues (see
 [bundles](#bundles) under "Spawning agents").
 
+**Where the rest lives.** The plan is the first of four pieces. At run time the cap holds a
+cluster to its plan and the churn monitor switches a churning cluster to `hold` or `train`
+([below](#at-run-time-the-cap-and-the-churn-monitor)); a cluster on `train` merges through
+[the merge train](#the-merge-train); the branch updates, re-reviews and trains overlap still
+causes are churn spawns, outside [the spawn budget](#spawn-budget), with the churn fuse as the
+backstop; and [the replay](#the-replay) measures the whole against a one-task-per-issue baseline.
+How to write issues whose Files lists plan well is the `/volley-issues` skill's "Planning a
+batch" section; the owner's view is [`docs/AUTOPILOT.md`](../../docs/AUTOPILOT.md#overlap-aware-waves).
+
 ### At run time: the cap and the churn monitor
 
 **The cap.** A cluster capped in the plan (`strategy.cap`) runs at most that many members at once.
@@ -1653,10 +1669,16 @@ Each switch journals `cluster_strategy_changed { cluster, from, to, why }` (`fro
 plan's own strategy for `planned`) and sets the cluster's `state` in `overlap_plan`; a cluster
 switches at most once per 30 min (`cluster_strategy_min_interval_ms`), so it does not flap. On
 `hold` the cluster's cap is 1 and a gated member holds a slot too: queued members wait until the
-gated ones merge (`cluster A (hold): 1 in flight or gated (i315)`). On `train` the cap stays; the
-merge queue forms a train from the cluster's gated PRs when `autopilot.merge_train` is on (until
-it does, the state just shows `train`). `volleyd status` prints the state and the members in
+gated ones merge (`cluster A (hold): 1 in flight or gated (i315)`). On `train` the cap stays, and the
+merge queue forms [a merge train](#the-merge-train) from the cluster's gated PRs, its members
+first (with `autopilot.merge_train` off the state shows `train` and the queue merges them one at a
+time). `volleyd status` prints the state and the members in
 flight on each plan line: `plan: cluster A (hold; in flight: i315, i317): …`.
+
+Two more switches come from elsewhere: [the churn fuse](#spawn-budget) puts a cluster on `hold`
+when one member's churn spawns pass `churn_roles_multiple_max` × its pipeline roles (and opens
+`churn_exhausted` if it churns again), and a merge train whose own change stays red puts its
+members' clusters on `hold` ([failure](#the-merge-train)).
 
 ### Overlap warnings
 
@@ -2325,8 +2347,9 @@ The digest's `auto.churn` counts them by cause (`branch_updates`, `rereviews`, `
 `trains`), and its one-line push summary mentions churn only when there was any (`5 churn
 spawns (no budget)`).
 
-**The churn fuse.** Uncounted churn is monitored instead. When a task in a cluster of the overlap
-plan has more churn spawns than `churn_roles_multiple_max` (3) × its pipeline roles, its cluster
+**The churn fuse.** Uncounted churn is monitored instead, beside
+[the churn monitor](#at-run-time-the-cap-and-the-churn-monitor)'s own switches. When a task in a
+cluster of the [overlap plan](#footprints-and-the-overlap-plan) has more churn spawns than `churn_roles_multiple_max` (3) × its pipeline roles, its cluster
 goes on `hold` (journaled `cluster_strategy_changed { churn }` naming the task: one member at a
 time). If the cluster is still on hold, or the churn monitor let the fuse's hold go since, and
 the task churns again, one task-level
@@ -3934,10 +3957,12 @@ one at a time, in order, and brings each up to date just before its merge
 ### The merge train
 
 The queue costs N−1 update rounds for N gated PRs, each one an update, a CI run and a new gate.
-With `autopilot.merge_train` on (the default) volleyd merges several gated PRs at once instead: it
+With `autopilot.merge_train` on (the default) volleyd merges several gated PRs at once instead,
+preferring the members of one [overlap-plan cluster](#footprints-and-the-overlap-plan): it
 integrates their gated heads onto one branch, gates that once and merges it once with a merge
 commit, so every member PR reads as merged (SPEC §4.6.23; `src/autopilot/merge-train.ts` is the
-pure formation, `src/autopilot/merge.ts` the merge):
+pure formation, `src/autopilot/merge.ts` the merge). The integrator's spawns are churn, outside
+[the spawn budget](#spawn-budget), and [the replay](#the-replay) measures what trains save. The pieces:
 
 - **Formation.** `formTrain(queues, inflight, waves, { size, enabled })` forms a train on a
   release branch with no merge in flight (no turn holds its lock, no entry is `merging`, no train
@@ -4009,7 +4034,8 @@ pure formation, `src/autopilot/merge.ts` the merge):
   `queued` again, and the next tick forms anew from the new tip (a `transient` refusal keeps the
   lock and retries on the backoff ladder, as any merge). A train whose own change is still red
   after `autopilot.ci_fixup_max` CI fixups fails, and the overlap-plan clusters of its members are
-  set to `hold` (`cluster_strategy_changed`, why naming the train).
+  set to `hold` (`cluster_strategy_changed`, why naming the train; see
+  [the churn monitor](#at-run-time-the-cap-and-the-churn-monitor)).
 
 ---
 
@@ -4424,15 +4450,17 @@ rebase resolves it.
   the release branch is updated before its gate instead of at its merge turn. The variable is
   test-only. The pipeline's gate-or-update choice is the only place that reads it, and a test
   checks that.
-- **epic**: the overlap planner's wave (`planWave`: bundles, chains and cluster caps), with the
-  merge train on.
+- **epic**: the overlap planner's wave (`planWave`: bundles, chains and cluster caps; see
+  [Footprints and the overlap plan](#footprints-and-the-overlap-plan)), with
+  [the merge train](#the-merge-train) on.
 
 Both waves must reach `wave_complete` with every task `done`. The test measures each wave's
 journal:
 
 - `update_rounds`: branch updates (`stage_entered { rebase: true }`) plus integrator spawns.
 - `merge_rounds`: merges outside a train (`merged_by_supervisor`) plus `train_merged`.
-- `churn_budget_decisions`: `spawn_budget_exhausted` decisions opened while a churn spawn was held.
+- `churn_budget_decisions`: `spawn_budget_exhausted` decisions opened while a churn spawn was held
+  (the epic must have none: churn is outside [the spawn budget](#spawn-budget)).
 - `spawns`.
 
 It asserts the epic's targets: `update_rounds` ≤ 0.3 × the baseline's, `merge_rounds` ≤ 0.5 × the
