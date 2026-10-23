@@ -101,6 +101,19 @@ describe("ConfigStore layering", () => {
     expect(c.get("placement.default", "w2")).toBe("auto");
   });
 
+  it("autopilot.merge_train: true by default, layers like any tunable, refused when not a boolean", () => {
+    expect(CONFIG_DEFAULTS.autopilot.merge_train).toBe(true);
+    expect(open().get("autopilot.merge_train")).toBe(true);
+    writeFileSync(join(home, "config.yaml"), "autopilot:\n  merge_train: false\n");
+    const c = open();
+    c.setWaveOverrides("w1", { autopilot: { merge_train: true } });
+    expect(c.get("autopilot.merge_train", "w1")).toBe(true);
+    expect(c.get("autopilot.merge_train", "w2")).toBe(false);
+    const r = c.applyPatch({ autopilot: { merge_train: "yes" } } as never, "x");
+    expect(r.applied).toBe(false);
+    expect(r.rejected.map((e) => e.path)).toEqual(["autopilot.merge_train"]);
+  });
+
   it("rejects an unknown path in get()", () => {
     expect(() => open().get("nope")).toThrow(/unknown config path 'nope'/);
   });

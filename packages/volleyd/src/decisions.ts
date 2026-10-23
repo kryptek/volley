@@ -43,6 +43,7 @@ export const DECISION_KINDS = [
   "release_go",
   "stage_go",
   "terminal_status_lost",
+  "churn_exhausted",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 

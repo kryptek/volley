@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-23T09:00:00.000Z",
+  "channel": "_waves/events",
+  "type": "task_queued",
+  "payload": {
+    "wave": "w1",
+    "seq": 170,
+    "at": "2026-10-23T09:00:00.000Z",
+    "task": "train-1",
+    "data": {
+      "issue": 0,
+      "synthetic": true,
+      "title": "Merge train 1: T1, T2, T4",
+      "train": {
+        "members": []
+      }
+    }
+  }
+}

@@ -567,7 +567,8 @@
                   "merge_refused",
                   "release_go",
                   "stage_go",
-                  "terminal_status_lost"
+                  "terminal_status_lost",
+                  "churn_exhausted"
                 ]
               },
               "default": [
@@ -687,6 +688,11 @@
               "maximum": 86400,
               "default": 1800,
               "description": "The shortest gap between two digests of one wave with the same trigger (spec section 4.6.16): a second escalation inside it publishes no new digest and sends no push."
+            },
+            "merge_train": {
+              "type": "boolean",
+              "default": true,
+              "description": "The merge queue gates and merges up to four gated PRs as one train; false: one PR at a time."
             }
           }
         }
