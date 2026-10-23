@@ -76,7 +76,10 @@ export interface Candidate {
   rows: number;
   /** Fitting scale, before the floor. */
   s: number;
-  /** The fraction of the fit area the block covers at that scale. */
+  /**
+   * The fraction of the fit area the block's bounding box covers at that scale (the box, not
+   * the windows in it: an L-shaped block with an empty corner scores as its full box).
+   */
   used: number;
   place: Record<string, Pos>;
   W: number;
@@ -210,7 +213,11 @@ const put = (l: Laid, at: Pos, place: Record<string, Pos>): Rect => {
   return { ...at, w: l.w, h: l.h };
 };
 
-/** Every placement arrange considers, in the order it considers them. */
+/**
+ * Every placement arrange considers, in the order it considers them. The count grows as
+ * (column choices) × rows × side columns × the region orders, each a full place map: fine
+ * for today's fleets (10 waves of 10 agents is ~17k), but cap the targets if they grow.
+ */
 export function candidates(
   clusters: readonly Cluster[],
   screen: Screen,
@@ -295,7 +302,8 @@ export function candidates(
 
 /**
  * The best of scored candidates: the largest scale, then (among those within `EPS` of it)
- * the largest fraction of the fit area used, then the earliest; -1 when there are none.
+ * the largest fraction of the fit area its bounding box covers, then the earliest; -1 when
+ * there are none.
  */
 export function pickBest(scored: readonly { s: number; used: number }[]): number {
   const top = Math.max(...scored.map((c) => c.s));

@@ -6,6 +6,8 @@ import { fitToArea, panToTopView } from "../src/canvas/useViewport";
 import { ARRANGE_ANIM_MS, FIRST_ARRANGE_MS } from "../src/layout/useAutoArrange";
 import { LOOK_STORAGE_KEY } from "../src/look/useLook";
 import { DeskStoreProvider } from "../src/store/context";
+import { INBOX_CHROME_H } from "../src/windows/inbox/NeedsYouWindow";
+import { WAVE_W } from "../src/windows/wave/WaveWindow";
 
 const advance = (ms: number) => act(() => vi.advanceTimersByTime(ms));
 const SCREEN = { width: 1600, height: 1000 };
@@ -92,17 +94,31 @@ describe("opening a window from the dock (#404)", () => {
     advance(FIRST_ARRANGE_MS + ARRANGE_ANIM_MS);
     fireEvent.click(dock().getByRole("button", { name: "Machines" }));
     advance(1000);
+    // jsdom lays nothing out, so a window's height is App's default for its kind (WAVE_H,
+    // AGENT_H, machinesH; the list windows' chrome alone, a lower bound).
+    const heightOf = (el: HTMLElement) => {
+      const label = el.getAttribute("aria-label") ?? "";
+      if (label === "Machines")
+        return 80 + 76 * Math.max(1, el.querySelectorAll(".mrow-item").length);
+      if (label === "Needs you") return INBOX_CHROME_H;
+      if (label === "Wave coordinators") return 150;
+      return Number.parseFloat(el.style.width) === WAVE_W ? 440 : 470;
+    };
     const rect = (el: HTMLElement) => ({
       x: Number.parseFloat(el.style.left),
       y: Number.parseFloat(el.style.top),
-      w: el.offsetWidth || Number.parseFloat(el.style.width) || 0,
+      w: Number.parseFloat(el.style.width),
+      h: heightOf(el),
     });
     const m = rect(screen.getByRole("region", { name: "Machines" }));
-    for (const el of container.querySelectorAll<HTMLElement>(".world .win")) {
-      if (el.getAttribute("aria-label") === "Machines") continue;
+    const others = [...container.querySelectorAll<HTMLElement>(".world .win")].filter(
+      (el) => el.getAttribute("aria-label") !== "Machines",
+    );
+    expect(others.length).toBeGreaterThan(0);
+    for (const el of others) {
       const o = rect(el);
-      // not at the same spot as any other window
-      expect(o.x === m.x && o.y === m.y).toBe(false);
+      const overlaps = m.x < o.x + o.w && o.x < m.x + m.w && m.y < o.y + o.h && o.y < m.y + m.h;
+      expect(overlaps, el.getAttribute("aria-label") ?? "").toBe(false);
     }
   });
 });
