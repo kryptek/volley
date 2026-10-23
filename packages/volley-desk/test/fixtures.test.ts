@@ -9,10 +9,12 @@ import {
   DEMO_ENDED_WAVE,
   DIGEST_WAVE,
   NARRATION_POOL,
+  PLANNED_WAVE,
   demoAgentCount,
   demoAutopilot,
   demoDigest,
   demoMessages,
+  demoPlanned,
   demoReviewer,
   demoState,
   isDemoMode,
@@ -30,9 +32,9 @@ import {
 const NOW = Date.parse("2026-10-18T15:00:00.000Z");
 
 describe("fixtures — demo state", () => {
-  it("produces 6 waves (3 stock, 2 autopilot, 1 ended) and 5 agents, all assigned", () => {
+  it("produces 7 waves (3 stock, 2 autopilot, 1 planned, 1 ended) and 5 agents, all assigned", () => {
     const s = demoState(NOW);
-    expect(Object.keys(s.waves)).toHaveLength(6);
+    expect(Object.keys(s.waves)).toHaveLength(7);
     expect(Object.keys(s.agents)).toHaveLength(5);
     expect(agentsByWave(s)[UNASSIGNED]).toEqual([]);
     for (const w of Object.values(s.waves)) expect(w.state?.spec).toBeDefined();
@@ -152,7 +154,7 @@ describe("fixtures — sized demo (?demo=1&agents=N, for the 20-agent fps check)
   it("adds working agents on a load wave, all assigned, keeping the stock demo", () => {
     const s = demoState(NOW, 20);
     expect(Object.keys(s.agents)).toHaveLength(20);
-    expect(Object.keys(s.waves)).toHaveLength(7);
+    expect(Object.keys(s.waves)).toHaveLength(8);
     expect(agentsByWave(s)[UNASSIGNED]).toEqual([]);
     const stock = demoState(NOW);
     for (const id of Object.keys(stock.agents)) expect(s.agents[id]).toBeDefined();
@@ -263,5 +265,42 @@ describe("fixtures — autopilot", () => {
       "decision_auto_resolved",
       "decision_escalated",
     ]);
+  });
+});
+
+describe("fixtures — the overlap plan (#388)", () => {
+  const s = demoState(NOW);
+  const st = s.waves[PLANNED_WAVE]?.state;
+
+  it("demo mode shows a planned wave with two clusters, a bundle, a hold, a train and churn", () => {
+    expect(st?.overlap_plan?.clusters.map((c) => [c.id, c.state])).toEqual([
+      ["A", "planned"],
+      ["B", "hold"],
+    ]);
+    expect(Object.values(st?.spec?.tasks ?? {}).some((t) => (t.issues?.length ?? 0) > 1)).toBe(
+      true,
+    );
+    expect(st?.trains?.[0]?.state).toBe("integrating");
+    expect(st?.tasks.some((t) => t.train)).toBe(true);
+    expect(st?.spawns?.churn).toBeGreaterThan(0);
+  });
+
+  it("its state and events validate against their schemas", () => {
+    const SCHEMAS = path.resolve(__dirname, "../../../spec/schemas");
+    const ajv = new Ajv2020({ allErrors: true, strict: false });
+    addFormats(ajv);
+    for (const f of readdirSync(SCHEMAS).filter((n) => n.endsWith(".schema.json"))) {
+      ajv.addSchema(JSON.parse(readFileSync(path.join(SCHEMAS, f), "utf8")), f);
+    }
+    const msgs = demoPlanned(NOW);
+    expect(msgs.length).toBeGreaterThan(1);
+    for (const m of msgs) {
+      const schema = m.topic.endsWith("/state")
+        ? "wave-state.schema.json"
+        : "wave-event.schema.json";
+      const validate = ajv.getSchema(schema);
+      if (!validate) throw new Error(`missing ${schema}`);
+      expect(validate(m.envelope), `${m.topic}: ${ajv.errorsText(validate.errors)}`).toBe(true);
+    }
   });
 });
