@@ -385,6 +385,7 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `stop` | `wave` or `all: true`, `by` | `{ wave, status, changed, cancelled }` / `{ kill_switch, stopped }` |
 | `archive` | `wave`, `by`, `dry_run?` | `{ wave, status: "archived", closed }`; with `dry_run`: `{ wave, status, would_close }` |
 | `steer` | `wave`, `task`, `text`, `by`, `role?`, `wait_ack_ms?`, `urgent?`, `escape_only?` | `{ agent_id, role, message_id, seq, supersedes?, delivery, received, acked, acked_by?, woke?, interrupted? }`; with `escape_only`: `{ wave, task, agent_id, role, escape_only: true, interrupted }` |
+| `terminal_resize` | `agent_id`, `cols` + `rows` (integers 20..500) or `reset: true`, `by` | `{ agent_id, resized, cols, rows }` or `{ agent_id, resized, reset: true }`, once the burst's resize ran; any sender that may write the mailbox (it is cosmetic); a burst for one agent within 150 ms is one resize to its last size; `resized: false` on a host that cannot resize (cmux) |
 | `admission` | — | the retained admission summary (null before the first sample) |
 | `spawn` | `wave`, `task`, `role?` (default `implementer`) | `{ kind: "launched", agent_id, workspace, worktree }`, or the spawn's decision `{ kind, decision, decision_id }`; outside admission. A failure carries `{ code, lock }` |
 | `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, email?, org?, dir?, signin: { state, url?, flow?, attach? } }], primary: { plan?, email?, org? }, machines: [{ name, kind?, claude, plan?, email?, org?, tunnel }], remote_signins, sharing }` |
@@ -1599,6 +1600,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `spawn_retry_max_s`, `spawn_retry_max` | the next failed spawn | a retry already scheduled keeps its time |
 | `brief_preface_max_bytes` | the next `run` and the next spawn | briefs already written untouched |
 | `screen_tail_interval_s` | each agent's next screen capture | — |
+| `tmux_cols`, `tmux_rows` | paired-machine launches after the change | running sessions keep their launch size, and a popout close returns a session to that size (to the built-in 220×50 for one launched before a daemon restart) |
 | `stop_grace_s` | the next `stop` | a grace already running keeps its length |
 | `autopilot.reconnect_grace_s` | the next wave-state publish ([ownership](#ownership-and-claim)) | — |
 | `autopilot.incident_wait_max_s` | the next re-check of a red head held for an infra incident | a hold already running keeps its start |
@@ -2257,8 +2259,9 @@ through `base64 -d`. The spawn steps are those of the local host, with these dif
 | Worktree | `git -C <repo> fetch origin <release_branch>` (one fetch into the box's clone at a time, the same lock and ref-lock retry as on this machine: [base ref](#base-ref)), then `worktree add … origin/<release_branch>` on the box; no clone at `repo` → decision `remote_repo_missing` naming the path (an ssh failure is not "no clone": the spawn is refused with `LAUNCH_FAILED` and retried with backoff) |
 | Brief | `.volley/brief-extra.md` is read from the box's clone; the [brief preface](#brief-preface) on volleyd's host |
 | Identity | minted on the daemon's machine; `agent.json` carries `broker_url: mqtt://127.0.0.1:<remote_port>` |
-| Launch | `launch.sh` exports `VOLLEY_HOOKS_DIR=<volley_dir>/packages/volley-hooks` and, for tooling that reads env, `VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE`, `VOLLEY_AGENT_ID` (the identity file still wins); started with `tmux new-session -d -s <wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'`. Never `--mcp-config` |
+| Launch | `launch.sh` exports `VOLLEY_HOOKS_DIR=<volley_dir>/packages/volley-hooks` and, for tooling that reads env, `VOLLEY_BROKER_URL`, `VOLLEY_NAMESPACE`, `VOLLEY_AGENT_ID` (the identity file still wins); started with `tmux new-session -d -x <tmux_cols> -y <tmux_rows> -s <wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'` (220×50 by default; detached, tmux would make it 80×24). Never `--mcp-config` |
 | Screen | `tmux capture-pane -p -t =<session>: -S-<lines>`; keys via `tmux send-keys`; screen tails publish `source: "tmux"` |
+| Terminal size | `terminal_resize` (the Desk's Terminal popout) runs `tmux resize-window -t =<session>: -x <cols> -y <rows>`; `reset: true` returns the session to its launch size. A local (cmux) agent's terminal is not resized: the op answers `resized: false`. The size is clamped to 20..500 cells, so a popout shorter than about 21 lines asks for 20 rows and its last lines sit below the fold until scrolled. `resize-window` sets the window's `window-size` to `manual` (tmux ≥ 3.1), so once a popout has resized it the session no longer follows the size of a client attached over ssh |
 | Verify / retire | identical: the hook signals arrive over the tunnel; retire revokes the credentials and clears the topics |
 | Cleanup | `volleyd cleanup --yes` kills the tmux session and runs `git worktree remove` on the box, both with the consent token; its lines end in `on <target>`, and a worktree already gone from the box is reported `gone`, so a re-run is a no-op |
 
@@ -3624,12 +3627,14 @@ SSH (remote hosts, src/hosts/ssh-tmux.ts) — three forms only:
 REMOTE (one step of a RemoteScript; the same DENY list applies first):
   git — the local git policy (worktree add | fetch | rev-parse | … ; worktree remove = CONSENT)
   gh issue view
-  tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
-    the LaunchToken sealed for <dir>) | new-session -d -s volley-signin-<acct> -c <dir>
+  tmux new-session -d [-x <n> -y <n>] -s <name> -c <dir> 'bash .volley/launch.sh' (that
+    command only, with the LaunchToken sealed for <dir>; n in 20..500) |
+    new-session -d -s volley-signin-<acct> -c <dir>
     'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
     `sealRemoteSigninScript`) | capture-pane | has-session |
     send-keys -t <t> Enter|Escape (Up|Down|Space: PICKER) | send-keys -t <t> -l -- <TYPED_TEXT> |
-    show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
+    resize-window -t =<session>: -x <n> -y <n> (exactly; n in 20..500: the Desk's Terminal
+    popout) | show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
     PATH, from printenv, then the server's own dirs) —
     kill-session -t volley-signin-<acct> (no consent: a sign-in session holds no agent's
     work) — any other kill-session = CONSENT; no other tmux global option

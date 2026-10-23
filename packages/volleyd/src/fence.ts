@@ -168,12 +168,14 @@ import { AGENT_BRANCH } from "./worktree";
  * REMOTE (one step of a RemoteScript; the same DENY list applies first):
  *   git — the local git policy (worktree add | fetch | rev-parse | … ; worktree remove = CONSENT)
  *   gh issue view
- *   tmux new-session -d -s <name> -c <dir> 'bash .volley/launch.sh' (that command only, with
- *     the LaunchToken sealed for <dir>) | new-session -d -s volley-signin-<acct> -c <dir>
+ *   tmux new-session -d [-x <n> -y <n>] -s <name> -c <dir> 'bash .volley/launch.sh' (that
+ *     command only, with the LaunchToken sealed for <dir>; n in 20..500) |
+ *     new-session -d -s volley-signin-<acct> -c <dir>
  *     'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
  *     `sealRemoteSigninScript`) | capture-pane | has-session |
  *     send-keys -t <t> Enter|Escape (Up|Down|Space: PICKER) | send-keys -t <t> -l -- <TYPED_TEXT> |
- *     show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
+ *     resize-window -t =<session>: -x <n> -y <n> (exactly; n in 20..500: the Desk's Terminal
+ *     popout) | show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
  *     PATH, from printenv, then the server's own dirs) —
  *     kill-session -t volley-signin-<acct> (no consent: a sign-in session holds no agent's
  *     work) — any other kill-session = CONSENT; no other tmux global option
@@ -1657,6 +1659,16 @@ const REMOTE_PATH = /^\/[^\n\r\0]*$/;
 const BASE64 = /^[A-Za-z0-9+/=\n]*$/;
 /** The only command a remote tmux session may run (renderLaunchScript's script). */
 export const TMUX_LAUNCH_COMMAND = "bash .volley/launch.sh";
+/** The window sizes volleyd gives a remote tmux session (`new-session -x/-y`, `resize-window`). */
+export const TMUX_SIZE = { min: 20, max: 500 } as const;
+/** A column or row count in `TMUX_SIZE`, in plain decimal (no sign, leading zero or exponent). */
+const isTmuxSize = (v: string) =>
+  /^[1-9][0-9]*$/.test(v) && Number(v) >= TMUX_SIZE.min && Number(v) <= TMUX_SIZE.max;
+/**
+ * A session as `resize-window` targets it: `=<session>:` (hosts/ssh-tmux.ts sessionName). Any
+ * session name matches, a `volley-signin-*` terminal too; resizing one is only cosmetic.
+ */
+const AGENT_PANE = /^=[A-Za-z0-9_-]{1,128}:$/;
 
 /** The verdicts for one `ssh` argv: the ssh form itself, then each remote step's. */
 function sshVerdicts(args: readonly string[], opts: FenceOptions): Verdict[] {
@@ -2183,7 +2195,8 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
 const TMUX_SPECS: Record<string, OptSpec> = {
   "new-session": {
     flags: ["-d"],
-    valued: ["-s", "-c"],
+    valued: ["-s", "-c", "-x", "-y"],
+    values: { "-x": isTmuxSize, "-y": isTmuxSize },
     positional: (a) => a === TMUX_LAUNCH_COMMAND,
   },
   "capture-pane": { flags: ["-p", "-J"], valued: ["-t", "-S", "-E"] },
@@ -2224,6 +2237,21 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
     if (tail.length !== 3 || tail[0] !== "-l" || tail[1] !== "--") return deny("tmux send-keys");
     const why = typedTextRefusal(tail[2] ?? "", opts);
     return why === null ? ALLOW : deny(`tmux send-keys (${why})`);
+  }
+  if (sub === "resize-window") {
+    // The Desk's Terminal popout size (#403): exactly `-t =<session>: -x <n> -y <n>`.
+    const [t, target, x, cols, y, rows, ...more] = rest;
+    return t === "-t" &&
+      AGENT_PANE.test(target ?? "") &&
+      x === "-x" &&
+      isTmuxSize(cols ?? "") &&
+      y === "-y" &&
+      isTmuxSize(rows ?? "") &&
+      more.length === 0
+      ? ALLOW
+      : deny(
+          `tmux resize-window (only -t =<session>: -x <n> -y <n>, n ${TMUX_SIZE.min}..${TMUX_SIZE.max})`,
+        );
   }
   if (sub === "new-session" && rest.at(-1) === SIGNIN_COMMAND)
     return remoteSigninSession(rest, opts);
@@ -2303,16 +2331,25 @@ function remoteSigninSession(args: readonly string[], opts: FenceOptions): Verdi
 
 /**
  * `tmux new-session … -c <dir> 'bash .volley/launch.sh'`: the command is required, and <dir> is
- * the worktree of a sealed launch script (tmux keeps the last `-c`, so does this).
+ * the worktree of a sealed launch script (tmux keeps the last `-c`, so does this). A launch size
+ * is a pair: `-x` and `-y` together or neither.
  */
 function newSessionSealed(args: readonly string[], opts: FenceOptions): Verdict {
   let cwd: string | undefined;
+  const size = new Set<string>();
   for (let i = 0; i < args.length; i++) {
     const a = args[i] ?? "";
     if (a === "-c") cwd = args[++i];
     else if (a.startsWith("-c")) cwd = a.slice(2);
+    else if (a.startsWith("-x") || a.startsWith("-y")) {
+      size.add(a.slice(0, 2));
+      if (a.length === 2) i++;
+    } else if (a === "-s") i++;
   }
-  return args.at(-1) === TMUX_LAUNCH_COMMAND && cwd !== undefined && sealedFor(opts, cwd)
+  return args.at(-1) === TMUX_LAUNCH_COMMAND &&
+    size.size !== 1 &&
+    cwd !== undefined &&
+    sealedFor(opts, cwd)
     ? ALLOW
     : deny("tmux new-session (only in the worktree of a sealed launch script)");
 }

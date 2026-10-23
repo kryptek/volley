@@ -603,6 +603,88 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ).toThrow(FenceError);
   });
 
+  it("tmux resize-window: exactly -t =<session>: -x <20..500> -y <20..500>", () => {
+    const allowed = (...argv: string[]) => assertAllowed(SSH, remote(step("tmux", ...argv)));
+    expect(() =>
+      allowed("resize-window", "-t", "=w1-T1-implementer:", "-x", "180", "-y", "48"),
+    ).not.toThrow();
+    expect(() =>
+      allowed("resize-window", "-t", "=w1-T1-implementer-2:", "-x", "20", "-y", "500"),
+    ).not.toThrow();
+    for (const argv of [
+      ["resize-window", "-t", "=w1-T1-implementer:", "-x", "10", "-y", "48"],
+      ["resize-window", "-t", "=w1-T1-implementer:", "-x", "9999", "-y", "48"],
+      ["resize-window", "-t", "=w1-T1-implementer:", "-x", "180", "-y", "19"],
+      ["resize-window", "-t", "=w1-T1-implementer:", "-x", "0180", "-y", "48"],
+      ["resize-window", "-t", "=w1-T1-implementer:", "-x", "1e2", "-y", "48"],
+      ["resize-window", "-t", "w1-T1-implementer:", "-x", "180", "-y", "48"],
+      ["resize-window", "-t", "=w1-T1-implementer", "-x", "180", "-y", "48"],
+      ["resize-window", "-t", "=w1.T1:", "-x", "180", "-y", "48"],
+      ["resize-window", "-t", "=w1-T1-implementer:", "-y", "48", "-x", "180"],
+      ["resize-window", "-t", "=w1-T1-implementer:", "-x", "180"],
+      ["resize-window", "-t", "=w1-T1-implementer:", "-x", "180", "-y", "48", "-A"],
+      ["resize-window", "-A", "-t", "=w1-T1-implementer:", "-x", "180", "-y", "48"],
+      ["resize-pane", "-t", "=w1-T1-implementer:", "-x", "180", "-y", "48"],
+    ]) {
+      expect(() => allowed(...argv), argv.join(" ")).toThrow(FenceError);
+    }
+  });
+
+  it("tmux new-session takes the launch size -x/-y (20..500), still only for a sealed script", () => {
+    const launch = sealLaunchScript(
+      "/wt/x",
+      renderLaunchScript({
+        hooksDir: "/path/to/home/src/volley/packages/volley-hooks",
+        model: "claude-opus-5-5",
+        agentId: "w1-t1-implementer-1",
+        worktree: "/wt/x",
+      }),
+    );
+    const session = (x: string, y: string) =>
+      step(
+        "tmux",
+        "new-session",
+        "-d",
+        "-x",
+        x,
+        "-y",
+        y,
+        "-s",
+        "w1-T1-implementer",
+        "-c",
+        "/wt/x",
+        TMUX_LAUNCH,
+      );
+    expect(() => assertAllowed(SSH, { ...remote(session("200", "50")), launch })).not.toThrow();
+    expect(() => assertAllowed(SSH, { ...remote(session("200", "50")) })).toThrow(FenceError);
+    for (const [x, y] of [
+      ["19", "50"],
+      ["200", "501"],
+      ["200", "-1"],
+      ["2x", "50"],
+    ] as const) {
+      expect(() => assertAllowed(SSH, { ...remote(session(x, y)), launch }), `${x}x${y}`).toThrow(
+        FenceError,
+      );
+    }
+    // The size is a pair: one of -x/-y alone is refused.
+    const half = (flag: string) =>
+      step(
+        "tmux",
+        "new-session",
+        "-d",
+        flag,
+        "200",
+        "-s",
+        "w1-T1-implementer",
+        "-c",
+        "/wt/x",
+        TMUX_LAUNCH,
+      );
+    for (const flag of ["-x", "-y"])
+      expect(() => assertAllowed(SSH, { ...remote(half(flag)), launch }), flag).toThrow(FenceError);
+  });
+
   it("tmux send-keys Up|Down|Space and a picker's or handoff's text only with their tokens", () => {
     const key = (k: string) => step("tmux", "send-keys", "-t", "=w1-T1-implementer:", k);
     const text = (t: string) =>

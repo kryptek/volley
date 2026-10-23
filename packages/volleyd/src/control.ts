@@ -61,6 +61,8 @@ export type ControlOp =
   // Retire an ended wave (archive.ts); also an admin op on the account-op topic.
   | "archive"
   | "steer"
+  // The Desk's Terminal popout sizes the agent's terminal (#403; hosts/ssh-tmux.ts resize).
+  | "terminal_resize"
   // The owner's merge outside GitHub's merge button, verified (pipeline.ts verifyMerge).
   | "merged"
   // A wave's task issues; `verify`: the release-to-main check (autopilot/issues.ts).

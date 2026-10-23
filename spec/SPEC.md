@@ -524,6 +524,8 @@ A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out
 - `brief_preface_max_bytes` — default 16384 (§4.6.9).
 - `wake_grace_s` — default 120.
 - `screen_tail_interval_s` — default 5 (§4.6.6).
+- `tmux_cols` — 20 to 500, default 220: the columns of a paired machine's tmux session at launch; a change applies to later launches only (`terminal_resize`, §4.6.6).
+- `tmux_rows` — 20 to 500, default 50: the rows of that session, likewise.
 - `stop_grace_s` — default 30.
 - `dynsec_batch_ms` — default 50.
 - `credential_sweep_interval_s` — default 600 (§4.6.13).
@@ -615,6 +617,8 @@ Heavy operations (integration test suites, builds, browsers) are gated by machin
 #### 4.6.6 Screen channel
 
 `screen` is a reserved per-agent channel in addition to those in §4.1: QoS 0, **retained**, published by a supervisor *on the agent's behalf* (the envelope `agent_id` is the supervisor; the topic's `<agent_id>` segment names the agent). `payload: { lines (≤ 40 strings), captured_at, workspace, hash, source }` is the tail of the agent's terminal (`source` is the capture mechanism, a closed enum: `cmux` for the supervisor's own host, `tmux` for a remote SSH + tmux host); publishers SHOULD skip captures whose `hash` is unchanged. The supervisor clears the topic when the agent is retired. A supervisor whose capture is slow or failing SHOULD back off and set `tasks[].screen_stale` in the wave state (§4.6.1) until a capture succeeds in time. Agents MUST NOT publish their own `screen` channel.
+
+**Terminal size.** A client showing an agent's screen larger than the agent's terminal MAY ask the supervisor to resize it with the mailbox control op `terminal_resize { agent_id, cols, rows }` (each an integer, 20 to 500), or `terminal_resize { agent_id, reset: true }` to return it to its launch size (the `tmux_cols` × `tmux_rows` in effect when it launched, §4.6.4; a supervisor that no longer knows that size, e.g. after a restart, MAY use the default) when it stops showing it. The op changes only how the agent's output wraps, so any sender that may write the supervisor's mailbox may send it (no wave ownership check); the supervisor MUST refuse an agent it does not supervise and a size out of bounds. A supervisor SHOULD coalesce a burst of requests for one agent to the last one. On a remote SSH + tmux host the reference supervisor runs `tmux resize-window -t =<session>: -x <cols> -y <rows>` (its sessions start at the launch size, never tmux's 80×24 default); a host with no way to resize (cmux) answers `ok` with `result.resized: false`. The agent's program re-wraps its output on the resulting SIGWINCH.
 
 #### 4.6.7 Spawn admission
 
