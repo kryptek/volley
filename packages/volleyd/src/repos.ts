@@ -167,6 +167,23 @@ export function assignedSlugs(cfg: RepoConfig, machine: string): string[] {
 }
 
 /**
+ * Of `slugs`, those config names (in `repos`, or adopted on a host) without assigning them to
+ * `machine` (nor adopting a clone there): repositories other machines work on. A slug config
+ * does not name is not one.
+ */
+export function unassignedSlugs(
+  cfg: RepoConfig,
+  machine: string,
+  slugs: readonly string[],
+): string[] {
+  const mine = assignedSlugs(cfg, machine);
+  const named = (s: string) =>
+    slugKey(cfg.repos, s) !== undefined ||
+    Object.values(cfg.hosts).some((h) => slugKey(h?.repos, s) !== undefined);
+  return slugs.filter((s) => named(s) && !mine.some((m) => sameSlug(m, s)));
+}
+
+/**
  * A wave's repository slug: its state's `github.slug` (`gh repo view` at submit), else the
  * supervisor clone's normalised `origin` mapped to a slug; undefined for a non-GitHub repository.
  */

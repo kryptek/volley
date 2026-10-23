@@ -2278,9 +2278,9 @@ inline or as an entry of the config's `hosts` map (an inline `host:` is layered 
 hosts:
   box:
     target: dev@box.example          # ssh destination ([user@]host or an ssh config alias)
-    repo: /path/to/repo              # the wave repo's clone on the box
     volley_dir: /path/to/volley      # a volley checkout on the box (its hooks)
-    # worktree_root: /path/to/worktrees   (default: beside repo)
+    # repos: { example-org/widgets: /path/to/widgets }   an adopted clone (else the managed one)
+    # worktree_root: /path/to/worktrees   (default: ~/.volley/worktrees/<owner>/<name>)
     # tunnel: { remote_port: 21883, supervise: true }
 
 # wave file
@@ -2323,9 +2323,25 @@ managed clones its record reports (`repos[].path`, under a `~/…` `repo_root`);
 a box whose home it does not know yet fails the spawn too; give that box absolute `repos` and
 `worktree_root`.
 
+Which clone a box uses for a task comes from `repos` and `hosts.<name>.repos` (below); the
+`repo:` key of a host is deprecated (one path per host, from before repositories) and migrates by
+itself.
+
 A wave file's `repo:` may be an `owner/name` too: at submit it becomes the supervisor's own clone
 of it (its `hosts.<fleet.local_name>.repos` entry, else the managed path), and a name with none is
 refused. A relative path shaped like `owner/name` is written `./owner/name`.
+
+**The supervisor's own machine runs a repository's agents only when it is assigned there.** The
+supervisor always needs its own checkout of a wave's repository (the wave's `repo:`; volleyd
+fetches, merges and cuts its local worktrees there). For a repository config names (`repos`, or
+an adopted clone on a host) without assigning it to the supervisor's machine, that checkout is
+the supervisor's alone: its readiness says `blocked (<owner/name> is not assigned to <machine>:
+add it (Settings → Repositories, or volley repo add <owner/name> --machine <machine>))`, and
+placement keeps the wave's tasks on the machines it is assigned to (a task that names
+`host: local` still runs there). Such a wave names that checkout by path in its `repo:`, since
+an `owner/name` resolves only to a clone the supervisor's machine is assigned. A repository config
+does not name (a single-repository setup from before repositories) runs on the supervisor's
+machine as before.
 
 **The legacy `hosts.<name>.repo` migrates by itself.** The first time a machine's record reports
 the origin of the clone at that path (a GitHub one), volleyd moves it to
@@ -2478,6 +2494,11 @@ volley peer doctor --repo ~/src/example-repo     # optional: join runs it anyway
 volley peer join ABCD-EFGH --to dev@supervisor --repo ~/src/example-repo
 ```
 
+`--repo` takes `<owner/name>[=<clone>]` too, repeatable (the managed clone under
+`~/.volley/repos`, or the clone at `<clone>`); a bare path, as above, is the legacy single clone,
+which volleyd migrates to `hosts.<name>.repos` by itself. More repositories are added later from
+the supervisor (Settings → Repositories, or `volley repo add`; see [Repositories](#repositories)).
+
 `join` first runs `volley peer doctor` (the volley-cli README's "`volley peer doctor`": tools and
 their versions, `claude` and `bun` on the non-interactive ssh `PATH`, the volley checkout, the
 clone and its origin, GitHub push access, the Claude sign-in and folder trust, memory and disk).
@@ -2504,12 +2525,14 @@ account named after the machine (`--name`, default its short hostname) and adds
 hosts:
   box-a:
     target: dev@box-a           # --target: how this machine reaches the new one (default $USER@<hostname>)
-    repo: /path/to/repo
     volley_dir: /path/to/volley
     tunnel: { remote_port: 21883, supervise: false }   # the machine keeps its own tunnel
 ```
 
-so a wave file can say `host: box-a` at once (volleyd also records the name in
+(a bare `--repo <clone>` path, the legacy single clone, also writes `repo: <clone>` there, which
+migrates to `hosts.box-a.repos.<owner/name>` once the machine's record reports its origin; the
+volley-cli README's "`volley peer`"), so a wave file can say `host: box-a` at once (volleyd also
+records the name in
 `$VOLLEYD_HOME/peers.json`). The machine then writes `~/.volley/peer.json` (mode 0600: it holds
 the peer password), installs `volley peer run` as a user service, prints whether Claude Code
 trusts `--repo` there (it or a parent folder; an untrusted one opens `repo_untrusted` at the
@@ -2662,8 +2685,10 @@ slug; one without an origin yet stands for every running wave's). `ready`: its c
 passes its checks; `blocked`: a failing per-repository `block` check (`repo.fetch: …`) or a tool
 it needs that is missing or too old (`java not installed (needed by owner/name)`, `node older than
 required (needed by owner/name)`); `absent`: no clone (`no clone of owner/name on box-a`);
-`cloning` is reserved for a clone being made. A machine whose clone of `example-org/gadgets` is
-blocked stays `ready` and runs `example-org/widgets` tasks. The PATH
+`cloning` while a `repo_add` run makes the clone there. On the supervisor's own machine, a running
+wave's repository config assigns only to other machines is `blocked` (`<owner/name> is not
+assigned to <machine>: …`, see [Repositories](#repositories)). A machine whose clone of
+`example-org/gadgets` is blocked stays `ready` and runs `example-org/widgets` tasks. The PATH
 is volleyd's own probe: for a peer, `command -v claude bun` as a fenced step of the same
 `ssh -T <target> bash -s` that runs `launch.sh`, at most every `path_probe_interval_ms` (5 min)
 while its record is up; the doctor's own `claude_on_path` / `bun_on_path` only estimate that PATH

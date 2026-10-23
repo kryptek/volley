@@ -71,12 +71,15 @@ export interface ReadinessInput {
    * the machine, beside every one the record reports (`records`, its `repos[]`; an older peer's
    * `legacy` single clone, by its origin). `runs`: a `repo_add` in progress (`cloning`) or one
    * that failed there (`blocked`, its why), by slug, which stands until its next run (SPEC §4.6.21).
+   * `unassigned`: repositories config assigns only to other machines, `blocked` here whatever
+   * clone the machine holds (the supervisor's own checkout of a wave's repository, #439).
    */
   repos: {
     wanted: string[];
     records: MachineRecord["repos"] | undefined;
     legacy?: MachineRecord["repo"];
     runs?: Record<string, { state: "cloning" | "blocked"; reasons: string[]; path?: string }>;
+    unassigned?: string[];
   };
   /** The last PATH probe; null: not probed yet. */
   probe: PathProbe | null;
@@ -277,6 +280,17 @@ function repoVerdicts(
     const k = Object.keys(out).find((o) => sameSlug(o, s)) ?? s;
     const path = run.path ?? out[k]?.path;
     out[k] = { state: run.state, ...(path !== undefined ? { path } : {}), reasons: run.reasons };
+  }
+  for (const s of i.repos.unassigned ?? []) {
+    const k = Object.keys(out).find((o) => sameSlug(o, s)) ?? s;
+    const path = out[k]?.path;
+    out[k] = {
+      state: "blocked",
+      ...(path !== undefined ? { path } : {}),
+      reasons: [
+        `${k} is not assigned to ${i.name}: add it (Settings → Repositories, or volley repo add ${k} --machine ${i.name})`,
+      ],
+    };
   }
   // Over the cap, the running waves' repositories are kept first.
   const wanted = (k: string) => i.repos.wanted.some((w) => sameSlug(w, k));

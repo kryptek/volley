@@ -144,7 +144,15 @@ interface DoctorCheck {
   ok: boolean;
   severity: string;
   detail: string;
+  /** The repository the check is about (a per-repository check, SPEC §4.6.21). */
+  repo?: string;
 }
+
+/**
+ * A repository's own check (an older doctor's untagged `repo.*` too): it blocks that repository
+ * there, never the machine, as readiness judges it (SPEC §4.6.15).
+ */
+const repoCheck = (c: DoctorCheck): boolean => c.repo !== undefined || c.id.startsWith("repo.");
 
 /** The doctor's `--json` report, as far as the deploy reads it; null when it printed none. */
 function parseReport(stdout: string): { volley: unknown; checks: DoctorCheck[] } | null {
@@ -235,15 +243,22 @@ export async function deployPeer(
     "",
   );
   if (failed === null) {
-    const bad = checks.find((c) => c.severity === "block" && !c.ok);
+    const failing = checks.filter((c) => c.severity === "block" && !c.ok);
+    const bad = failing.find((c) => !repoCheck(c));
+    // Each repository's failing checks follow the machine's line.
+    const repos = failing
+      .filter(repoCheck)
+      .map((c) => `${c.repo ?? "clone"} blocked: ${c.id} (${c.detail})`)
+      .map((l) => ` · ${l}`)
+      .join("");
     return {
       name: peer.name,
       ok: true,
       eligible: bad === undefined,
       line:
         bad === undefined
-          ? `${peer.name}: ${tag} ✓ eligible`
-          : `${peer.name}: ${tag} ✗ not eligible: ${bad.id} (${bad.detail})`,
+          ? `${peer.name}: ${tag} ✓ eligible${repos}`
+          : `${peer.name}: ${tag} ✗ not eligible: ${bad.id} (${bad.detail})${repos}`,
       from: refLabel(from),
       rolledBack: false,
     };

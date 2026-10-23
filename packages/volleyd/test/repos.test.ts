@@ -17,6 +17,7 @@ import {
   repoStateLine,
   sameSlug,
   slugKey,
+  unassignedSlugs,
   waveSlug,
   withMachines,
   withoutMachines,
@@ -211,6 +212,17 @@ describe("repos: assignedSlugs", () => {
     expect(assignedSlugs(c, "box")).toEqual(["o/adopted", "o/all", "o/listed"]);
     expect(assignedSlugs(c, "mini")).toEqual(["o/all", "o/other"]);
     expect(assignedSlugs(cfg(), "box")).toEqual([]);
+  });
+
+  it("unassignedSlugs: configured slugs given to other machines only, any spelling (#439)", () => {
+    const c = cfg({
+      repos: { "o/all": { machines: "all" }, "o/other": { machines: ["mini"] } },
+      hosts: { box: { repos: { "o/adopted": "/a" } } },
+    });
+    expect(unassignedSlugs(c, "box", ["O/Other", "o/all", "o/adopted", "o/unknown"])).toEqual([
+      "O/Other",
+    ]);
+    expect(unassignedSlugs(c, "mini", ["o/other", "o/adopted"])).toEqual(["o/adopted"]);
   });
 
   it("names an adopted clone of an assigned slug once", () => {
