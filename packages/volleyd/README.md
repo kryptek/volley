@@ -2313,9 +2313,11 @@ the supervisor clone's `origin`), the clone is, in order: `hosts.box.repos.<owne
 managed clone `<repo_root>/<owner>/<name>` when `repos.<owner/name>.machines` includes `box`;
 the deprecated `hosts.box.repo`, unless the machine's record reports that clone's origin as
 another repository. Its worktrees go under `~/.volley/worktrees/<owner>/<name>` on the box
-(`hosts.box.worktree_root` still wins; a legacy `repo` keeps `.volley-worktrees` beside it). A
-host with none of them fails the spawn: `host 'box' has no clone of <owner/name>: add it
-(Settings → Repositories, or volley repo add <owner/name> --machine box)`. A wave whose repository
+(`hosts.box.worktree_root` still wins; a legacy `repo` keeps `.volley-worktrees` beside it).
+That pin is host-wide: once a box's legacy `repo` migrates, every repository's worktrees on it
+stay under that `.volley-worktrees` until you unset `hosts.box.worktree_root`. A host with none
+of them fails the spawn: `host 'box' has no clone of <owner/name>: add it (Settings →
+Repositories, or volley repo add <owner/name> --machine box)`. A wave whose repository
 is not on GitHub uses the host's `repo` as before. A managed path on a box whose home directory
 volleyd does not know yet fails the spawn too; give that box absolute `repos` and `worktree_root`.
 

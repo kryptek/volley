@@ -358,7 +358,7 @@ import {
 } from "./readiness";
 import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure } from "./reducer";
 import { readRepoView } from "./repo-visibility";
-import { waveSlug } from "./repos";
+import { legacyOrigin, waveSlug } from "./repos";
 import {
   type Admission,
   admit,
@@ -4926,7 +4926,10 @@ export class Daemon {
             slug,
             repos: eff.repos,
             repo_root: eff.fleet.repo_root,
-            origin: this.machines.record(t.host)?.repo?.origin,
+            origin: legacyOrigin(
+              this.machines.record(t.host)?.repo,
+              t.host_spec?.repo ?? eff.hosts[t.host]?.repo,
+            ),
           };
     // The spec carries its clone, so the host built from it is one repository's.
     return this.remoteBySpec(
@@ -5686,14 +5689,14 @@ export class Daemon {
    * every fold: records arrive whenever the machine beats, and a migrated host has no `repo`.
    */
   private migrateLegacyRepo(name: string): void {
-    const seen = this.machines.record(name)?.repo;
-    const legacy = this.config.effective().hosts[name]?.repo;
-    if (seen?.origin === undefined || legacy === undefined) return;
     // The record's clone must be the one config names: its origin says nothing about another.
-    const trim = (p: string) => p.replace(/(.)\/+$/, "$1");
-    if (trim(seen.path) !== trim(legacy)) return;
-    const r = this.config.migrateLegacyRepo(name, seen.origin, "volleyd");
-    if (r.applied) this.log(`hosts.${name}.repo migrated to repos (origin ${seen.origin})`);
+    const origin = legacyOrigin(
+      this.machines.record(name)?.repo,
+      this.config.effective().hosts[name]?.repo,
+    );
+    if (origin === undefined) return;
+    const r = this.config.migrateLegacyRepo(name, origin, "volleyd");
+    if (r.applied) this.log(`hosts.${name}.repo migrated to repos (origin ${origin})`);
     else if (r.rejected.length > 0) {
       const why = r.rejected.map((e) => `${e.path}: ${e.reason}`).join("; ");
       this.log(`hosts.${name}.repo not migrated: ${why}`);

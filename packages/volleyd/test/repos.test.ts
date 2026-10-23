@@ -7,6 +7,7 @@ import {
   assignedSlugs,
   cloneFor,
   isSlug,
+  legacyOrigin,
   managedClonePath,
   managedWorktreeRoot,
   originToSlug,
@@ -26,7 +27,7 @@ const cfg = (over: Partial<RepoConfig> = {}): RepoConfig => ({
 
 describe("repos: slugs (owner/name)", () => {
   it("accepts owner/name only", () => {
-    for (const s of ["kryptek/volley", "Owner/Name", "a-b/c.d_e", "o/x.y-z"]) {
+    for (const s of ["example-org/widgets", "Owner/Name", "a-b/c.d_e", "o/x.y-z"]) {
       expect(isSlug(s)).toBe(true);
     }
     for (const s of [
@@ -65,7 +66,7 @@ describe("repos: slugs (owner/name)", () => {
 
   it("the schema takes repos, fleet.repo_root and hosts.<m>.repos", () => {
     const ok = {
-      repos: { "kryptek/volley": { machines: "all" }, "o/r": { machines: ["box", "mini"] } },
+      repos: { "example-org/widgets": { machines: "all" }, "o/r": { machines: ["box", "mini"] } },
       fleet: { repo_root: "/srv/repos" },
       hosts: { box: { target: "dev@box", volley_dir: "/v", repos: { "o/r": "/src/r" } } },
     };
@@ -89,7 +90,7 @@ describe("repos: slugs (owner/name)", () => {
 describe("repos: originToSlug", () => {
   it("maps a normalised github.com origin to its slug", () => {
     expect(originToSlug("github.com/Owner/Name")).toBe("Owner/Name");
-    expect(originToSlug("github.com/kryptek/volley")).toBe("kryptek/volley");
+    expect(originToSlug("github.com/example-org/widgets")).toBe("example-org/widgets");
   });
 
   it("is undefined for any other origin", () => {
@@ -152,6 +153,18 @@ describe("repos: cloneFor precedence", () => {
 
   it("is undefined for a machine with none of them", () => {
     expect(cloneFor(cfg(), "box", "o/r", { home })).toBeUndefined();
+  });
+});
+
+describe("repos: legacyOrigin", () => {
+  it("is the record's origin only when its clone is the host's legacy repo", () => {
+    const seen = { path: "/src/r/", origin: "github.com/o/r" };
+    expect(legacyOrigin(seen, "/src/r")).toBe("github.com/o/r");
+    expect(legacyOrigin({ path: "/src/r" }, "/src/r/")).toBeUndefined();
+    // Another clone's origin says nothing about the legacy one.
+    expect(legacyOrigin(seen, "/src/other")).toBeUndefined();
+    expect(legacyOrigin(seen, undefined)).toBeUndefined();
+    expect(legacyOrigin(undefined, "/src/r")).toBeUndefined();
   });
 });
 

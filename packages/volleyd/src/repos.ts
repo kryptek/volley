@@ -70,6 +70,21 @@ export interface MachineFacts {
   origin?: string | null | undefined;
 }
 
+const trimPath = (p: string): string => p.replace(/(.)\/+$/, "$1");
+
+/**
+ * The origin a machine record reports for `legacy` (its `hosts.<m>.repo`): the record's
+ * `repo.origin` only when the record's clone is that path; another clone's origin says nothing
+ * about it.
+ */
+export function legacyOrigin(
+  seen: { path: string; origin?: string | undefined } | undefined,
+  legacy: string | undefined,
+): string | undefined {
+  if (seen === undefined || legacy === undefined) return undefined;
+  return trimPath(seen.path) === trimPath(legacy) ? seen.origin : undefined;
+}
+
 /** True when `repos.<slug>.machines` assigns the repository to `machine`. */
 function assigned(cfg: Pick<RepoConfig, "repos">, machine: string, slug: string): boolean {
   const key = slugKey(cfg.repos, slug);
@@ -102,7 +117,8 @@ export function cloneSource(
     const managed = managedClonePath(cfg.fleet.repo_root, canonical, facts.home);
     return { path: managed, kind: "managed", slug: canonical };
   }
-  // An origin not reported yet (records arrive asynchronously) does not rule the legacy clone out.
+  // No origin (not reported yet, as records arrive asynchronously, or a clone without one) does
+  // not rule the legacy clone out: it serves any slug, as the one clone per host did before repos.
   const origin = facts.origin;
   const legacy = origin == null ? slug : originToSlug(origin);
   if (host?.repo !== undefined && legacy !== undefined && sameSlug(legacy, slug)) {
