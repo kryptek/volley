@@ -215,6 +215,10 @@ describe("skill version", () => {
     const { frontmatter } = splitFrontmatter(SHIPPED);
     expect(parseSimpleYaml(frontmatter ?? "").version).toBe(SKILL_VERSION);
   });
+  it("the Prerequisites prose names the same version as the frontmatter", () => {
+    const declared = [...SHIPPED.matchAll(/declares `version: ([\d.]+)`/g)].map((m) => m[1]);
+    expect(declared).toEqual([SKILL_VERSION]);
+  });
 });
 
 describe("install.sh --check", () => {
