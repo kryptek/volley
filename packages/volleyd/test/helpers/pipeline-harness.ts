@@ -46,6 +46,8 @@ export interface World {
     /** GitHub's mergeability of the PR (absent: not reported). */
     mergeable?: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
     mergeStateStatus?: string;
+    /** A draft PR (`gh pr ready <n>` clears it). */
+    isDraft?: boolean;
   }[];
   /** CI per head (absent: no run). */
   ci: Record<string, "green" | "red" | "running">;
@@ -53,7 +55,14 @@ export interface World {
   /** Runs on a head; `id` / `workflow` / `event` default to one distinct workflow per run. */
   ciRuns: Record<
     string,
-    { status: string; conclusion: string; id?: number; workflow?: string; event?: string }[]
+    {
+      status: string;
+      conclusion: string;
+      id?: number;
+      workflow?: string;
+      event?: string;
+      createdAt?: string;
+    }[]
   >;
   releaseTip: string;
   /** merge-base(head, releaseTip) per head (default: the release tip, i.e. current). */
@@ -78,12 +87,22 @@ export interface World {
   prView: Record<number, Record<string, unknown>>;
   /** `gh run view <id> --json jobs` (default: one failed `test` job). */
   runJobs?: string;
+  /**
+   * `gh run view <id> --json jobs` per run id (overrides `runJobs`). Default for a run that is
+   * not red: one job named after its workflow, with the run's status and conclusion.
+   */
+  jobs: Record<
+    number,
+    { name: string; status: string; conclusion: string; startedAt?: string; completedAt?: string }[]
+  >;
   /** `gh run view <id> --log-failed`. */
   runLog: string;
   /** `gh run view <id> --log-failed` per run id (overrides `runLog`). */
   runLogs: Record<number, string>;
   /** `gh run list --branch <release>`: the release branch's runs, as JSON (default none). */
   releaseRuns: string;
+  /** Set: `gh pr ready` exits 1 with this stderr (the PR stays a draft). */
+  readyError?: string | undefined;
   /** Set: every read of a head's runs (`gh api …/actions/runs?head_sha=`, `gh run list --commit`) exits 1 with this stderr. */
   ciError?: string | undefined;
   /** Set: `gh run list --branch <release>` exits 1 with this stderr. */
@@ -205,6 +224,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     prs: [],
     ci: {},
     ciRuns: {},
+    jobs: {},
     releaseTip: sha(0xbea5e),
     mergeBase: {},
     prState: {},
@@ -230,6 +250,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     stderr: "",
     timedOut: false,
   });
+  /** The runs the last head-runs read listed, by id (the default `gh run view --json jobs`). */
+  const listed = new Map<number, { name: string; status: string; conclusion: string }>();
   const exec: ExecFn = async (argv, opts = {}) => {
     if (o.fence !== false) assertAllowed(argv, opts);
     calls.push([...argv]);
@@ -296,6 +318,11 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       world.releaseTip = world.mergeCommit[n];
       return out("");
     }
+    if (a[0] === "gh" && a[1] === "pr" && a[2] === "ready") {
+      if (world.readyError !== undefined) return { ...out(""), code: 1, stderr: world.readyError };
+      for (const pr of world.prs) if (pr.number === Number(a[3])) pr.isDraft = false;
+      return out("");
+    }
     if (a[0] === "gh" && a[1] === "pr" && a[2] === "view" && a.at(-1) === "files") {
       const n = Number(a[3]);
       return out(
@@ -309,6 +336,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
         JSON.stringify({
           state,
           headRefOid: world.prs.find((p) => p.number === n)?.headRefOid ?? null,
+          isDraft: world.prs.find((p) => p.number === n)?.isDraft === true,
           mergedAt: state === "MERGED" ? "2026-10-18T13:00:00Z" : null,
           mergeCommit: state === "MERGED" ? { oid: world.mergeCommit[n] ?? sha(0xa11) } : null,
           baseRefName: wave.release_branch,
@@ -340,6 +368,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
               status: r.status,
               conclusion: r.conclusion,
               url: `https://github.com/example/repo/actions/runs/${r.id ?? 900 + i}`,
+              createdAt: r.createdAt,
             }))
           : state === undefined
             ? []
@@ -351,8 +380,10 @@ export function pipelineHarness(o: HarnessOptions = {}) {
                   status: state === "running" ? "in_progress" : "completed",
                   conclusion: state === "green" ? "success" : state === "red" ? "failure" : "",
                   url: `https://github.com/example/repo/actions/runs/${head.slice(-4)}`,
+                  createdAt: undefined as string | undefined,
                 },
               ];
+      for (const r of rows) listed.set(r.id, r);
       return out(
         JSON.stringify(
           rows.map((r) =>
@@ -366,6 +397,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
                   head_sha: head,
                   event: r.event,
                   run_attempt: 1,
+                  created_at: r.createdAt,
                 }
               : {
                   databaseId: r.id,
@@ -376,6 +408,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
                   conclusion: r.conclusion,
                   headSha: head,
                   url: r.url,
+                  createdAt: r.createdAt,
                 },
           ),
         ),
@@ -383,7 +416,17 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     }
     if (a[0] === "gh" && a[1] === "run" && a[2] === "view") {
       if (a.includes("--log-failed")) return out(world.runLogs[Number(a[3])] ?? world.runLog);
+      const id = Number(a[3]);
+      const own = world.jobs[id];
+      if (own !== undefined) return out(JSON.stringify({ jobs: own }));
       if (world.runJobs !== undefined) return out(world.runJobs);
+      const row = listed.get(id);
+      if (row !== undefined && !(row.status === "completed" && row.conclusion !== "success"))
+        return out(
+          JSON.stringify({
+            jobs: [{ name: row.name, status: row.status, conclusion: row.conclusion }],
+          }),
+        );
       return out(
         JSON.stringify({
           jobs: [
@@ -641,15 +684,18 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       return agent_id;
     },
     /** The implementer opens its PR once (the first push). */
-    openPr(head: string, task = "T1", number = 7) {
+    openPr(head: string, task = "T1", number = 7, o: { draft?: boolean } = {}) {
       world.prs.push({
         number,
         url: `https://github.com/example/repo/pull/${number}`,
         headRefName: prBranch(task),
         baseRefName: wave.release_branch,
         headRefOid: head,
+        ...(o.draft === true ? { isDraft: true } : {}),
       });
     },
+    /** The driver's clock as ISO (a run's `createdAt`). */
+    iso: (offsetMs = 0) => new Date(clock + offsetMs).toISOString(),
     /** Change the `branch_update` tunable (a config_set): only a step entered later sees it. */
     setBranchUpdate(m: BranchUpdate) {
       branchUpdate = m;

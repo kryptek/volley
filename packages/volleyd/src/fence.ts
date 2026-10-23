@@ -61,6 +61,7 @@ import { AGENT_BRANCH } from "./worktree";
  *     (in any case); fetch takes a remote name or a
  *     network URL (https, ssh, git, user@host:path — never a local path) and its refspecs only
  *     write refs/remotes/…
+ *   gh pr ready <n> [--repo <slug>] (a draft PR marked ready before the CI gate; never --undo)
  *   gh issue view · gh repo view · gh pr view | list | checks · gh run list | view | watch ·
  *     gh api (GET only; a relative endpoint — never a URL — and never graphql in any path
  *     segment; no request headers)
@@ -1352,6 +1353,7 @@ function git(args: string[]): Verdict {
 function gh(args: string[], opts: FenceOptions): Verdict {
   const two = args.slice(0, 2).join(" ");
   if (two === "pr merge") return mergeVerdict(args, opts.merge);
+  if (two === "pr ready") return readyVerdict(args.slice(2));
   if (two === "workflow run" || two === "repo delete") return deny(`gh ${two}`);
   if (args[0] === "api") {
     const v = checkArgs("gh api", args.slice(1), {
@@ -1367,6 +1369,18 @@ function gh(args: string[], opts: FenceOptions): Verdict {
   return spec === undefined
     ? deny(`gh ${two}`.trim())
     : checkArgs(`gh ${two}`, args.slice(2), spec);
+}
+
+/**
+ * `gh pr ready <n> [--repo <slug>]`, exactly: a draft PR marked ready for review, so the CI its
+ * repository skips on drafts runs before the gate (#408). Never `--undo`, never another option.
+ */
+function readyVerdict(args: string[]): Verdict {
+  if (!/^[1-9][0-9]*$/.test(args[0] ?? "")) return deny("gh pr ready (not one PR number)");
+  return checkArgs("gh pr ready", args.slice(1), {
+    valued: ["--repo", "-R"],
+    positional: () => false,
+  });
 }
 
 /** The HTTP method `gh api` would use: an explicit -X/--method, else POST when fields are sent. */

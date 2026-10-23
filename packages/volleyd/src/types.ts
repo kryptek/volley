@@ -431,6 +431,21 @@ export interface TaskState {
     ci?: "green" | "red" | "running" | "none";
     /** While the pipeline holds for CI on `head_sha`: its runs completed / all of them. */
     checks?: { done: number; total: number };
+    /**
+     * While held, when the head's jobs could be read (#415): done / total, the running and failed
+     * job names, the last job's completion (the first start while none is done) and the slowest
+     * job's last duration in an earlier run of the wave.
+     */
+    jobs?: {
+      done: number;
+      total: number;
+      running: string[];
+      failed: string[];
+      last_done_at?: string;
+      slowest_s?: number;
+    };
+    /** While held: the estimated seconds left when the hold was journaled; absent: no estimate. */
+    eta_s?: number;
   };
   /** While a parallel stage group runs: its label (`review (spec + quality)`); `stage` stays the enum. */
   stage_label?: string;
@@ -711,6 +726,8 @@ export const WAVE_EVENT_TYPES = [
   "remediation_closed",
   // The morning digest (SPEC §4.6.16): published retained, with its one push.
   "digest_published",
+  // A draft PR marked ready before the CI gate (SPEC §4.6.8): its full CI runs from `at` (#408).
+  "pr_marked_ready",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];

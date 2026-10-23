@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { ciPending, waveAttention } from "../src/attention";
+import { ciPending, ciStuck, waveAttention } from "../src/attention";
 import { initialState, reduceAll } from "../src/store/reducer";
 import { WaveWindow } from "../src/windows/wave/WaveWindow";
 import { NOW, S, registry, status, waveMsg, waveState, waveView } from "./helpers/desk-msgs";
@@ -78,5 +78,71 @@ describe("CI pending", () => {
   it("no chip when nothing waits for CI", () => {
     render(<WaveWindow wave={waveView(waveState())} me={null} now={NOW} frame={frame} />);
     expect(screen.queryAllByText("waiting for CI")).toHaveLength(0);
+  });
+
+  describe("jobs (#415)", () => {
+    const JOBS = "CI 3/13 · running: Backend IT shard 2–6/6 · ~8 min left";
+    const jobsState = (o: { last_done_at: string; slowest_s?: number }) =>
+      waveState({
+        owner: "coord-1",
+        tasks: [
+          {
+            id: "T1",
+            issue: 1,
+            stage: "implement",
+            agents: {},
+            why_waiting: JOBS,
+            pr: {
+              number: 12,
+              url: "https://example.invalid/pr/12",
+              head_sha: "abc1234",
+              ci: "running",
+              jobs: {
+                done: 3,
+                total: 13,
+                running: ["Backend IT shard 2/6"],
+                failed: [],
+                ...o,
+              },
+              eta_s: 480,
+            },
+          },
+        ],
+        spec: { version: 1, tasks: { T1: { issue: 1, after: [] } } },
+      });
+    const ago = (min: number) => new Date(NOW - min * 60_000).toISOString();
+
+    it("a job-counted hold is CI pending; the graph label and the row show the job text", () => {
+      const s = jobsState({ last_done_at: ago(2), slowest_s: 900 });
+      const [t1] = s.tasks;
+      expect(t1 && ciPending(t1)).toBe(true);
+      render(<WaveWindow wave={waveView(s)} me={null} now={NOW} frame={frame} />);
+      const win = screen.getByRole("region", { name: "w1" });
+      const node = win.querySelector('.dag-node[data-id="T1"]');
+      expect(node).toHaveTextContent("waiting for CI · 3/13");
+      const row = within(win).getByRole("listitem", { name: "T1 CI pending" });
+      expect(row).toHaveTextContent(JOBS);
+      expect(row).not.toHaveTextContent("possibly stuck");
+    });
+
+    it("no job finished for longer than the slowest job's last duration: possibly stuck, in plain words", () => {
+      const s = jobsState({ last_done_at: ago(25), slowest_s: 900 });
+      const [t1] = s.tasks;
+      expect(t1 && ciStuck(t1, NOW)).toBe(
+        "possibly stuck: no job finished for 25 min (the slowest usually takes 15 min)",
+      );
+      render(<WaveWindow wave={waveView(s)} me={null} now={NOW} frame={frame} />);
+      const row = within(screen.getByRole("region", { name: "w1" })).getByRole("listitem", {
+        name: "T1 CI pending",
+      });
+      expect(row).toHaveTextContent(
+        "possibly stuck: no job finished for 25 min (the slowest usually takes 15 min)",
+      );
+    });
+
+    it("without a known duration nothing is called stuck", () => {
+      const [t1] = jobsState({ last_done_at: ago(120) }).tasks;
+      expect(t1 && ciStuck(t1, NOW)).toBeUndefined();
+    });
   });
 });

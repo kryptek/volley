@@ -979,6 +979,8 @@ autopilot: on
     ci_failed/owner: a red head no rule routes and a repository without workflows are the owner's
   merge_conflict · within respawn_max per task/role · respawn · respawn_max per <task>/<role> · max 1
     merge_conflict/respawn: a fresh rebase (or merge) agent retries the update; a conflict it cannot resolve either is the owner's
+  merge_refused · the last refusal: the PR is a draft (reason: draft) and marking it ready has not failed (no ready_failed) · retry · no budget
+    merge_refused/draft: a draft is marked ready and merged once the CI that starts then passes; a retry does exactly that
   pr_closed, remote_repo_missing · always · escalate no_policy · no budget
     pr/owner: where the work went, or a clone that is missing, is the owner's call
 ```
@@ -3058,14 +3060,25 @@ own head that still conflicts waits like any head with no CI (past the grace the
 the PR still conflicts with the release branch). `mergeable: UNKNOWN` (GitHub still
 computing) counts as running: re-polled, no clock. The hold is visible: entering it (and
 every change of head or counts) journals `ci_pending { role, sha, checks: { done, total },
-next_poll_at, pr }`, the task's `why_waiting` reads `CI pending on <sha7> (n/m checks)` and its
+next_poll_at, pr }`, the task's `why_waiting` reads `CI pending on <sha7> (n/m runs)` and its
 `pr` carries `{ number, head_sha, ci: running, checks }` (what `volleyd status --json` prints);
-CI green journals `ci_green` and clears it.
+CI green journals `ci_green` and clears it. When the head's jobs can be read (`gh run view <id>
+--json jobs`, one call per run, while it runs and once it is green), the hold counts jobs, not
+runs (#415): `ci_pending` also carries `jobs: { done, total, running, failed, last_done_at?,
+slowest_s? }` and `eta_s`, and `why_waiting` reads `CI 3/13 · running: Backend IT shard 2–6/6 ·
+~8 min left` (shards collapse into a range; at most four names, then `+n more`; `failed: …`
+when a job failed while others run). The estimate is the slowest unfinished job's last duration
+in an earlier completed run of the same workflow in this wave, minus its elapsed time; volleyd
+keeps those durations in memory, so after a restart (or for a job it has not seen finish) there
+is no estimate and the `· ~… left` part is absent. A change of counts or of the running or
+failed jobs journals the hold again; a new estimate alone does not. The Desk shows the same
+line and, when no job finished for longer than `slowest_s`, `possibly stuck: no job finished
+for <n> min (the slowest usually takes <m>)`.
 
 **Reading CI.** A head's runs are read with one call that lists no workflows, `gh api
 repos/{owner}/{repo}/actions/runs?head_sha=<head>&per_page=50`, which volleyd runs itself in the
 wave repo (as it runs a merge), whatever machine the task is on; `gh run view <id> --json jobs`
-is read for failed runs only. Without a wave repo it falls back to `gh run list --commit` in the
+is read for failed runs, and for every run of a held or green head (its jobs, above). Without a wave repo it falls back to `gh run list --commit` in the
 task's worktree. An answer that cannot be read (a non-zero exit, output that is not JSON) is CI
 state `unknown`, never "no CI": it opens no decision, neither starts nor advances the
 `ci_none_grace_ms` clock, and is re-polled like running CI. The hold journals `ci_pending {
@@ -3312,12 +3325,26 @@ In an unattended wave the gate is where work stalls: every merge waited for a pe
   attempt, at the task's next turn in the merge queue), `manual` (this task goes back to the
   gate and a human merges it) or `cancel`. A new gated head starts the count again. `reason` is
   what the refusal says: `behind` (out of date with or conflicting with the release branch, or
-  the release branch moved during the merge), `head_moved`, `retargeted`, `closed`, `checks`
-  (required checks, branch protection, reviews) or `unknown`. Only `behind`, `head_moved`,
-  `retargeted` and `closed` give up the merge turn; any other keeps the turn and the gated head, and the
+  the release branch moved during the merge), `head_moved`, `retargeted`, `closed`, `draft`,
+  `checks` (required checks, branch protection, reviews) or `unknown`. Only `behind`, `head_moved`,
+  `retargeted`, `closed` and `draft` give up the merge turn; any other keeps the turn and the gated head, and the
   merge is tried again at the next up-to-date check. No refusal enters a
   branch update by itself: one runs only when the turn's rebase check counts the release branch's
   commits the head lacks (a failed `git fetch` or `git log` is a failed check, never "behind").
+- **Drafts (#408).** A draft PR is not merge-ready, and its repository may skip heavy CI jobs on
+  drafts. Verification marks a draft ready (`gh pr ready <n>`, the fence's only PR write besides
+  the merge) once its CI is not red, journals `pr_marked_ready { pr, head, at }`, and holds the
+  head (`ci_pending`) until a run created at or after `at` settles: the draft's own green never
+  gates. A repository whose workflows never run on `ready_for_review` gates on the head's latest
+  runs once `ci_none_grace_ms` passed. A merge refused as `draft` (the pre-merge read saw
+  `isDraft`, or GitHub said `Pull Request is still a draft`) marks it ready the same way and
+  holds the gated head at `merge_ready` (`ci_pending { role: gate }`) until that CI is green,
+  then merges; that first draft refusal never counts toward `merge_retry_max`. While no mark
+  has landed since (`gh pr ready` failed: a token without write scope, a `gh` error), each further
+  draft refusal at that head counts, so the owner is asked once they run out; that decision
+  carries `ready_failed: true`, which the `merge_refused/draft` row does not answer. Inside the
+  mark's `ci_none_grace_ms` a head with no run yet is held too (GitHub has not created the runs
+  the mark starts). Red there opens `ci_failed` (`fixup`, `re-verify` or `cancel`).
 - **When: the merge queue.** Nothing merges at the gate itself: the merge queue below gives one
   task at a time its turn.
 - **`autopilot.delete_branch`** (default `false`) adds `--delete-branch` to the merge.
@@ -3340,12 +3367,12 @@ one at a time, in order, and brings each up to date just before its merge
   `merge: manual` keeps a wave's tasks out of the queue altogether.
 - **Order.** Dependency first: a task more tasks name in their `after` goes first, and a task
   never goes ahead of a queued task it comes after. Then readiness: the task queued earliest. A
-  task GitHub refused as `behind`, `head_moved`, `retargeted` or `closed` goes after the tasks
+  task GitHub refused as `behind`, `head_moved`, `retargeted`, `closed` or `draft` goes after the tasks
   still waiting; one refused for any other reason keeps its place.
 - **One merge in flight per release branch.** The task at the front takes the release branch's
   lock (`<repo>#<release_branch>`, held by the daemon, so two waves on one release branch share
-  it) and keeps it until it merged, GitHub refused it as `behind`, `head_moved`, `retargeted` or
-  `closed`, or it waits for an answer. A task whose turn checks fail
+  it) and keeps it until it merged, GitHub refused it as `behind`, `head_moved`, `retargeted`,
+  `closed` or `draft`, or it waits for an answer. A task whose turn checks fail
   `merge_turn_check_failures_max` (3) times in a row (its PR was retargeted, `gh` keeps failing,
   its worktree is gone; each failure is a `pipeline_error` alarm) gives up the turn and is passed
   over, with the tasks that come after it, while another queued task can go.
@@ -3421,6 +3448,7 @@ ALLOW (program by bare name only — never a path):
     (in any case); fetch takes a remote name or a
     network URL (https, ssh, git, user@host:path — never a local path) and its refspecs only
     write refs/remotes/…
+  gh pr ready <n> [--repo <slug>] (a draft PR marked ready before the CI gate; never --undo)
   gh issue view · gh repo view · gh pr view | list | checks · gh run list | view | watch ·
     gh api (GET only; a relative endpoint — never a URL — and never graphql in any path
     segment; no request headers)
