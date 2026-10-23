@@ -18,6 +18,7 @@ import {
   sealLaunchScript,
   sealRemoteSigninScript,
 } from "../src/fence";
+import { type RemoteHostSpec, SshTmuxHost } from "../src/hosts/ssh-tmux";
 import { LAUNCH_COMMAND, renderLaunchScript, renderMcpConfig } from "../src/launch";
 import { WAKE_TEXT } from "../src/liveness";
 import { tempDirForAll } from "./helpers/tmp";
@@ -27,6 +28,15 @@ import { stubEnv } from "./helpers/with-env";
 const SSH = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"];
 const remote = (...steps: RemoteStep[]) => ({ remote: { steps } });
 const step = (...argv: string[]): RemoteStep => ({ argv });
+/** A paired machine, for the SshTmuxHost cases (its ssh argv is what the fence allows). */
+const SSH_SPEC: RemoteHostSpec = {
+  name: "box",
+  target: "dev@box",
+  repo: "/path/to/home/src/repo",
+  worktree_root: "/path/to/home/wt",
+  volley_dir: "/path/to/home/src/volley",
+  tunnel: { remote_port: 21883, supervise: true },
+};
 /** The command a remote tmux session runs. */
 const TMUX_LAUNCH = "bash .volley/launch.sh";
 /** A file volleyd reads on a remote host (an allowed `cat`). */
@@ -266,6 +276,8 @@ describe("remote allow-list (ssh … bash -s)", () => {
       "/wt/x/.volley/findings.md",
       "/wt/x/.volley/findings.json",
       "/wt/x/.volley/rebase.md",
+      "/wt/x/.volley/decisions.md",
+      "/wt/x/.volley/retired.json",
       "/src/r/.git/info/exclude",
       ".claude.json.volleyd.tmp",
     ]) {
@@ -291,6 +303,8 @@ describe("remote allow-list (ssh … bash -s)", () => {
       "/src/r/.volley/w/.git",
       "/src/r/.volley/x/src/hooks/session-start.ts",
       "/wt/x/.volley/sub/agent.json",
+      "/wt/x/.volley/other.md",
+      "/wt/x/.volley/Decisions.md",
       // … nor a case variant of one (a case-insensitive file system opens launch.sh)
       "/wt/x/.volley/Launch.sh",
       "/wt/x/.volley/launch.SH",
@@ -784,6 +798,31 @@ describe("exec + the remote fence", () => {
     const r = await exec(SSH, { env, remote: script });
     expect(r.code).toBe(0);
     expect(readFileSync(marker, "utf-8")).toBe(renderRemoteScript(script));
+  });
+
+  it("a wake typed through SshTmuxHost passes exec's fence once per token (#406)", async () => {
+    const host = new SshTmuxHost(SSH_SPEC, (argv, o) => exec(argv, { ...o, env }));
+    const wake = mintWakeToken();
+    await host.sendText("w1-t1-implementer-1", WAKE_TEXT, { wake });
+    expect(existsSync(marker)).toBe(true);
+    await host.sendKeys("w1-t1-implementer-1", "Enter");
+    rmSync(marker, { force: true });
+    await expect(host.sendText("w1-t1-implementer-1", WAKE_TEXT, { wake })).rejects.toThrow(
+      "a wake is typed once",
+    );
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("a handoff answer typed through SshTmuxHost passes exec's fence once per token", async () => {
+    const host = new SshTmuxHost(SSH_SPEC, (argv, o) => exec(argv, { ...o, env }));
+    const handoff = mintHandoffToken({ item_id: "h-a1-8", version: 1, text: "ok, go ahead" });
+    await host.sendText("w1-t1-implementer-1", "ok, go ahead", { handoff });
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker, { force: true });
+    await expect(host.sendText("w1-t1-implementer-1", "ok, go ahead", { handoff })).rejects.toThrow(
+      "typed once",
+    );
+    expect(existsSync(marker)).toBe(false);
   });
 
   it("refuses a raw input next to a fenced script (the checked script is the one that runs)", async () => {
