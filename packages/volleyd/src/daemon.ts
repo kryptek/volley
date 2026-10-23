@@ -259,6 +259,7 @@ import {
   openEvent,
   parkedTasks,
   releaseEvent,
+  remoteRepoMissing,
   renderDecisionsMd,
   resolveEvent,
   taskHoldReleased,
@@ -309,6 +310,7 @@ import {
   type MachineRecord,
   type MachineStatus,
   doctorFields,
+  foldOwnDoctor,
   machineTopic,
   parseDoctorReport,
   parseMachineFrom,
@@ -359,7 +361,7 @@ import {
 } from "./readiness";
 import { type SpawnFailure, type WaveRecord, isAdditiveSteer, latestSpawnFailure } from "./reducer";
 import { readRepoView } from "./repo-visibility";
-import { legacyOrigin, waveSlug } from "./repos";
+import { homeFromClones, legacyOrigin, sameSlug, waveSlug } from "./repos";
 import {
   type Admission,
   admit,
@@ -1397,12 +1399,14 @@ export class Daemon {
   private ownRecord: MachineRecord | undefined;
   private ownRecordAt: number | null = null;
   /**
-   * The supervisor's own doctor: its last report, the repo that run checked (null: none; undefined:
-   * no run finished yet), when it last started, whether it runs now.
+   * The supervisor's own doctor (#436: one run per running wave's clone, folded): its last report,
+   * whether a run has finished yet, each clone's origin as its last run read it (by absolute
+   * path), when it last started, whether it runs now.
    */
   private localReport: DoctorReport | null = null;
-  private localDoctorRepo: string | null | undefined = undefined;
-  /** The repo the last run started with (a failed run is not retried before the next beat). */
+  private localDoctorDone = false;
+  private readonly localOrigins = new Map<string, string | null>();
+  /** The clones the last run started with (a failed run is not retried before the next beat). */
   private localDoctorTried: string | null = null;
   private localDoctorAt: number | null = null;
   private localDoctorRunning = false;
@@ -2983,7 +2987,7 @@ export class Daemon {
       candidates,
       w,
       this.placementSnapshot(gate, eff),
-      this.placeOptions(eff),
+      this.placeOptions(eff, wave),
       gate,
       (host) => this.hostVerdict(host, eff),
       {
@@ -3064,9 +3068,17 @@ export class Daemon {
     };
   }
 
-  /** `place`'s options under `eff`: the machine filter's, and the own machine's name. */
-  private placeOptions(eff: Tunables): PlaceOptions {
-    return { ...this.filterOptions(eff), localName: this.config.localName() };
+  /**
+   * `place`'s options under `eff` for `wave`: the machine filter's, the own machine's name, and the
+   * wave's repository (`slugOf`, #436), which a machine needs a ready clone of.
+   */
+  private placeOptions(eff: Tunables, wave: WaveId): PlaceOptions {
+    const slug = this.slugOf(wave);
+    return {
+      ...this.filterOptions(eff),
+      localName: this.config.localName(),
+      ...(slug !== undefined ? { waveSlug: slug } : {}),
+    };
   }
 
   /** What placement knows now: the own machine and every configured host, with their verdicts. */
@@ -3245,7 +3257,7 @@ export class Daemon {
     const eff = this.config.effective(wave);
     const gate = admissionFor(rec, this.killSwitch, this.pressure(wave));
     return place({ ...def, host: AUTO_HOST }, w, snap ?? this.placementSnapshot(gate, eff), {
-      ...this.placeOptions(eff),
+      ...this.placeOptions(eff, wave),
       exclude,
     });
   }
@@ -4927,6 +4939,8 @@ export class Daemon {
             slug,
             repos: eff.repos,
             repo_root: eff.fleet.repo_root,
+            // A managed clone's home-relative path, from the clones the machine reports (#436).
+            home: homeFromClones(eff.fleet.repo_root, this.machines.record(t.host)?.repos),
             origin: legacyOrigin(
               this.machines.record(t.host)?.repo,
               t.host_spec?.repo ?? eff.hosts[t.host]?.repo,
@@ -4947,11 +4961,10 @@ export class Daemon {
     if (rec === undefined) return undefined;
     const repo = rec.wave?.repo;
     const checked =
-      typeof repo === "string" &&
-      repo !== "" &&
-      this.localDoctorRepo === resolve(repoDir(repo)) &&
-      this.localReport?.repo?.origin;
-    return waveSlug(rec, typeof checked === "string" ? checked : undefined);
+      typeof repo === "string" && repo !== ""
+        ? this.localOrigins.get(resolve(repoDir(repo)))
+        : undefined;
+    return waveSlug(rec, checked);
   }
 
   /** The configured host `name` (no task's inline `host:`, no repository), or why it cannot be reached. */
@@ -5164,7 +5177,7 @@ export class Daemon {
       !this.localDoctorRunning &&
       (this.localDoctorAt === null ||
         now - this.localDoctorAt >= beat ||
-        this.localDoctorTried !== this.waveRepo())
+        this.localDoctorTried !== JSON.stringify(this.waveRepos()))
     ) {
       this.localDoctorRun = this.runLocalDoctor();
     }
@@ -5222,30 +5235,41 @@ export class Daemon {
   }
 
   /**
-   * The supervisor's own doctor (`volley peer doctor --json --repo <the running wave's repo>`); its
-   * report fills the own record. Runs again at once when the running wave's repo changes.
+   * The supervisor's own doctor (`volley peer doctor --json --repo <clone>`), once per running
+   * wave's clone (none running: once without a repo), its reports folded into one
+   * (`foldOwnDoctor`, #436): its machine checks, and each clone as one `repos[]` entry by its
+   * wave's slug. Runs again at once when the running waves' clones change.
    */
   private async runLocalDoctor(): Promise<void> {
     const doctor = this.opts.fleet?.localDoctor;
     if (doctor === undefined) return;
     this.localDoctorRunning = true;
     this.localDoctorAt = this.now();
-    const repo = this.waveRepo();
-    this.localDoctorTried = repo;
+    const dirs = this.waveRepos();
+    this.localDoctorTried = JSON.stringify(dirs);
     try {
-      const report = await doctor(repo, this.localDoctorAbort.signal).catch((e: unknown) => {
-        this.log(`own doctor failed: ${e instanceof Error ? e.message : String(e)}`);
-        return null;
-      });
-      if (!this.running) return;
+      const runs: { dir: string | null; report: DoctorReport }[] = [];
+      for (const dir of dirs.length > 0 ? dirs : [null]) {
+        const report = await doctor(dir, this.localDoctorAbort.signal).catch((e: unknown) => {
+          this.log(`own doctor failed: ${e instanceof Error ? e.message : String(e)}`);
+          return null;
+        });
+        if (report !== null) runs.push({ dir, report });
+        if (!this.running) return;
+      }
       // A failed run settles the verdict too (on the last report, or none).
       await this.enqueue(async () => {
-        if (report !== null) {
-          this.localReport = report;
-          this.localDoctorRepo = repo;
-        } else if (this.localDoctorRepo === undefined) {
-          this.localDoctorRepo = null;
+        for (const { dir, report } of runs) {
+          if (dir !== null) this.localOrigins.set(dir, report.repo?.origin ?? null);
         }
+        const folded = foldOwnDoctor(
+          runs.map(({ dir, report }) => ({
+            slug: dir !== null ? this.slugOfRepo(dir) : undefined,
+            report,
+          })),
+        );
+        if (folded !== null) this.localReport = folded;
+        this.localDoctorDone = true;
         await this.publishOwnRecord();
         await this.publishReadiness(this.config.localName());
       });
@@ -5412,7 +5436,7 @@ export class Daemon {
     if (this.readinessSettled.has(name)) return true;
     let warm: boolean;
     if (isLocal) {
-      warm = this.opts.fleet?.localDoctor === undefined || this.localDoctorRepo !== undefined;
+      warm = this.opts.fleet?.localDoctor === undefined || this.localDoctorDone;
     } else {
       const r = this.machines.record(name);
       const probe = this.probes.get(name);
@@ -5446,6 +5470,7 @@ export class Daemon {
     const probe = this.probes.get(name);
     const downSince = isLocal ? undefined : this.machines.downSince(name);
     const records = accountRecords(this.usage);
+    const record = isLocal ? this.ownRecord : this.machines.record(name);
     // Its best candidate (the balancing rule's pick there), so one fresh login keeps it eligible;
     // a config default that pins an account here is that account.
     const pin = cfg.claude.default_account;
@@ -5457,7 +5482,7 @@ export class Daemon {
           })[0]?.account ?? null);
     return {
       name,
-      record: isLocal ? this.ownRecord : this.machines.record(name),
+      record,
       local: isLocal,
       // The own machine is capped by hard_ceiling, which caps every supervised agent: its
       // headroom is the ceiling less all of them, wherever they run.
@@ -5471,8 +5496,12 @@ export class Daemon {
               Object.hasOwn(this.peers.removals(), name),
           },
       hostVersion: this.version,
-      hostOrigin: this.waveOrigin(),
-      ...(isLocal && this.localDoctorRepo === null ? { noRepo: true } : {}),
+      // Every running wave's repository, beside every one the machine reports (#436).
+      repos: {
+        wanted: this.waveSlugs(),
+        records: record?.repos,
+        ...(record?.repo !== undefined ? { legacy: record.repo } : {}),
+      },
       probe: isLocal ? (this.opts.fleet?.localPath ?? pathProbe)() : (probe?.path ?? null),
       ...(!isLocal && probe?.error !== undefined ? { probeError: probe.error } : {}),
       placed: isLocal
@@ -5523,27 +5552,55 @@ export class Daemon {
   }
 
   /**
-   * The running wave's repo's origin (normalised), as the own doctor's last run on that clone
-   * read it: what a peer's clone is compared with, and what Repair's clone clones. Null while no
-   * wave runs, or no run has checked its clone yet (a failed run keeps an earlier wave's report).
+   * The first running wave's repo's origin (normalised), as the own doctor's last run on that
+   * clone read it: what the legacy single-repository Repair's clone clones. Null while no wave
+   * runs, or no run has checked its clone yet.
    */
   private waveOrigin(): string | null {
-    const repo = this.localDoctorRepo;
-    return typeof repo === "string" && repo === this.waveRepo()
-      ? (this.localReport?.repo?.origin ?? null)
-      : null;
+    const repo = this.waveRepo();
+    return repo !== null ? (this.localOrigins.get(repo) ?? null) : null;
   }
 
   /**
-   * The wave repo the supervisor's own clone is checked against: the running wave's (the first by
-   * wave id when several run), as an absolute path; null when no wave runs.
+   * The supervisor's own clones of the running waves' repositories, as absolute paths, by wave id
+   * (each once): what its own doctor checks.
    */
-  private waveRepo(): string | null {
-    const repos = this.runningWaves()
+  private waveRepos(): string[] {
+    const dirs = this.runningWaves()
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([, l]) => l.record.wave?.repo ?? "")
-      .filter((r) => r !== "");
-    return repos[0] !== undefined ? resolve(repoDir(repos[0])) : null;
+      .filter((r) => r !== "")
+      .map((r) => resolve(repoDir(r)));
+    return [...new Set(dirs)];
+  }
+
+  /** The first running wave's clone (`waveRepos`), or null when no wave runs. */
+  private waveRepo(): string | null {
+    return this.waveRepos()[0] ?? null;
+  }
+
+  /**
+   * Every running wave's repository slug (`slugOf`), each once (GitHub's names compared without
+   * case), sorted: the repositories every machine's verdict judges (#436).
+   */
+  private waveSlugs(): string[] {
+    const out: string[] = [];
+    for (const [wave] of this.runningWaves()) {
+      const s = this.slugOf(wave);
+      if (s !== undefined && !out.some((o) => sameSlug(o, s))) out.push(s);
+    }
+    return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  }
+
+  /** The slug of the first running wave whose clone is `dir` (the own doctor's run on it). */
+  private slugOfRepo(dir: string): string | undefined {
+    for (const [wave, l] of this.runningWaves().sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      const repo = l.record.wave?.repo;
+      if (typeof repo === "string" && repo !== "" && resolve(repoDir(repo)) === dir) {
+        return this.slugOf(wave);
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -5815,12 +5872,19 @@ export class Daemon {
     if (!exists) {
       // Through the decision store: retained topic (the Desk, notify) and the task parks.
       if (openId === undefined) {
+        // A repository on GitHub is added by its slug; a legacy clone is cloned by hand.
+        const ask =
+          spec.slug !== undefined
+            ? remoteRepoMissing(spec.name, spec.slug)
+            : {
+                question: `Needs you: no clone of the repo at ${spec.repo} on ${spec.target}. Clone it there, then retry?`,
+                options: ["retry", "cancel"],
+              };
         await this.openSpawnDecision(wave, {
           kind: "remote_repo_missing",
           id: decisionId,
           task,
-          question: `Needs you: no clone of the repo at ${spec.repo} on ${spec.target}. Clone it there, then retry?`,
-          options: ["retry", "cancel"],
+          ...ask,
           pointers: {},
           data: { host: spec.name, target: spec.target, repo: spec.repo },
         });

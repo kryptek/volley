@@ -625,7 +625,12 @@ describe("placement at admission (SPEC §4.6.15)", () => {
   let clock: FakeClock;
   let waits: JournalWait;
   let repo: string;
-  /** Whether the supervisor's own agents' PATH has claude and bun (false: it is not ready). */
+  /** A second repository's clone on the supervisor (`setup({ repos: true })`: b/b; repo is a/a). */
+  let repo2: string;
+  /** The box record's `repos[]` (`setup({ repos: true })`: a/a and b/b, managed). */
+  let boxRepos: MachineRecord["repos"];
+  /** The box's home (its managed clones under `.volley/repos`; on the local disk, like the fake). */
+  let boxHome: string;
   let localClaude: boolean;
   /** The daemon's log lines. */
   let logs: string[];
@@ -652,6 +657,7 @@ describe("placement at admission (SPEC §4.6.15)", () => {
     auth: { gh: "ok", claude: "signed_in", trust: "ok" },
     doctor_at: GREEN_DOCTOR.doctor_at,
     last_seen: new Date(clock.now()).toISOString(),
+    ...(boxRepos !== undefined ? { repos: boxRepos } : {}),
     ...over,
   });
   const heartbeat = async (over: Partial<MachineRecord> = {}) => {
@@ -692,15 +698,16 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         payload: { tasks: TaskState[] };
       }
     ).payload;
-  const submit = async (wave: string, head: string, tasks: string) => {
+  const submit = async (wave: string, head: string, tasks: string, at = repo) => {
     const file = join(env.home, `${wave}.yaml`);
     writeFileSync(
       file,
-      `wave: ${wave}\nrepo: ${repo}\nrelease_branch: release/${wave}\nmodel: claude-opus-5-5\npipeline: [implement, spec_review]\n${head}tasks:\n${tasks}`,
+      `wave: ${wave}\nrepo: ${at}\nrelease_branch: release/${wave}\nmodel: claude-opus-5-5\npipeline: [implement, spec_review]\n${head}tasks:\n${tasks}`,
     );
     const r = await runCli(["run", file], env.env);
     expect(withoutOwnerWarning(r.stderr)).toBe("");
     expect(r.exitCode).toBe(0);
+    return r.stdout;
   };
 
   async function setup(
@@ -713,29 +720,73 @@ describe("placement at admission (SPEC §4.6.15)", () => {
       doctor?: Partial<typeof GREEN_DOCTOR>;
       /** Changes the box's fake host once it is made (before its first spawn). */
       onBox?: (box: FakeRemoteHost) => void;
+      /**
+       * Two repositories (#436): repo is a/a and repo2 b/b on GitHub, both assigned to the box
+       * (managed clones under its default repo_root), which has no legacy `repo`.
+       */
+      repos?: boolean;
     } = {},
   ) {
     env = await makeDaemonEnv();
     const dir = realpathSync(env.home);
     repo = join(dir, "repo");
+    repo2 = join(dir, "repo2");
     mkdirSync(repo);
+    mkdirSync(repo2);
     box = undefined;
-    const fake = fakeExec()
-      .on(["git", "-C", repo, "rev-parse", "--show-toplevel"], { stdout: `${repo}\n` })
-      .on(["git", "-C", repo, "rev-parse", "--verify"], { stdout: `${"1".repeat(40)}\n` })
-      .on(["git", "-C", repo, "fetch"], {})
-      .on(["gh", "issue", "view"], {
-        stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
+    boxHome = join(dir, "box-home");
+    boxRepos =
+      o.repos === true
+        ? ["a/a", "b/b"].map((slug) => ({
+            slug,
+            path: join(boxHome, ".volley", "repos", slug),
+            exists: true,
+            origin: `github.com/${slug}`,
+            managed: true,
+            fetched_at: "2026-10-19T08:58:00.000Z",
+            toolchain: { ok: true, missing: [], outdated: [] },
+          }))
+        : undefined;
+    const slugOf: Record<string, string> = { [repo]: "a/a", [repo2]: "b/b" };
+    const fake = fakeExec();
+    // The box's managed clones answer git like the supervisor's own (one fake exec for both).
+    const managed = ["a/a", "b/b"].map((slug) => join(boxHome, ".volley", "repos", slug));
+    for (const r of [repo, repo2, ...managed]) {
+      fake
+        .on(["git", "-C", r, "rev-parse", "--show-toplevel"], { stdout: `${r}\n` })
+        .on(["git", "-C", r, "rev-parse", "--verify"], { stdout: `${"1".repeat(40)}\n` })
+        .on(["git", "-C", r, "fetch"], {});
+    }
+    if (o.repos === true) {
+      fake.on(["gh", "repo", "view"], (_argv, opts) => {
+        const slug = slugOf[opts.cwd ?? ""];
+        return slug === undefined
+          ? { code: 1, stderr: "not a GitHub repository" }
+          : {
+              stdout: JSON.stringify({
+                nameWithOwner: slug,
+                url: `https://github.com/${slug}`,
+                visibility: "PRIVATE",
+              }),
+            };
       });
+    }
+    fake.on(["gh", "issue", "view"], {
+      stdout: readFileSync(join(FIXTURES, "gh-issue-42.json"), "utf-8"),
+    });
     local = fakeHost(fake);
     const claudeJson = join(dir, "local-claude.json");
     writeFileSync(
       claudeJson,
       `${JSON.stringify({ projects: { [repo]: { hasTrustDialogAccepted: true } } })}\n`,
     );
+    const boxClone =
+      o.repos === true ? "" : `    repo: ${repo}\n    worktree_root: ${join(dir, "remote-wt")}\n`;
+    const repos =
+      o.repos === true ? "repos:\n  a/a: { machines: [box] }\n  b/b: { machines: [box] }\n" : "";
     writeFileSync(
       join(env.home, "config.yaml"),
-      `fleet:\n  local_name: control\n${o.localAgents !== undefined ? `  local_agents: ${o.localAgents}\n` : ""}hosts:\n  box:\n    target: dev@box\n    repo: ${repo}\n    volley_dir: /opt/volley\n    worktree_root: ${join(dir, "remote-wt")}\n    tunnel: { remote_port: 21883, supervise: false }\n${o.drain === true ? "    drain: true\n" : ""}${o.extraConfig ?? ""}`,
+      `fleet:\n  local_name: control\n${o.localAgents !== undefined ? `  local_agents: ${o.localAgents}\n` : ""}${repos}hosts:\n  box:\n    target: dev@box\n${boxClone}    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n${o.drain === true ? "    drain: true\n" : ""}${o.extraConfig ?? ""}`,
     );
     clock = fakeClock(1_000_000);
     logs = [];
@@ -937,6 +988,118 @@ describe("placement at admission (SPEC §4.6.15)", () => {
         path: join(worktree, ".volley", "decisions.md"),
         error: "ssh: connect to host box port 22: Connection refused",
       },
+    });
+  });
+
+  describe("per (machine, repository) (#436)", () => {
+    const spawnedOn = (wave: string) =>
+      journal(wave).find((e) => e.type === "agent_spawned")?.data as
+        | { host: string; worktree: string; remote?: { target: string; repo: string } }
+        | undefined;
+
+    it("a remote spawn cuts its worktree in the slug's clone and managed worktree root", async () => {
+      localClaude = false;
+      await setup({ repos: true });
+      await submit("w1", "", "  T1: { issue: 42, host: box }\n");
+      await tick();
+      await eventually(async () => spawnedOn("w1") !== undefined);
+      const s = spawnedOn("w1");
+      expect(s?.remote).toEqual({
+        target: "dev@box",
+        repo: join(boxHome, ".volley", "repos", "a/a"),
+      });
+      expect(s?.worktree).toBe(
+        join(boxHome, ".volley", "worktrees", "a/a", "w1", "T1-implementer"),
+      );
+    });
+
+    it("two waves on two slugs each spawn into their own clone on one box", async () => {
+      localClaude = false;
+      await setup({ repos: true });
+      await submit("w1", "placement: auto\n", "  T1: { issue: 42 }\n");
+      await submit("w2", "placement: auto\n", "  T1: { issue: 42 }\n", repo2);
+      await tick();
+      await eventually(async () => {
+        await tick(0);
+        return spawnedOn("w1") !== undefined && spawnedOn("w2") !== undefined;
+      });
+      expect(spawnedOn("w1")?.remote?.repo).toBe(join(boxHome, ".volley", "repos", "a/a"));
+      expect(spawnedOn("w2")?.remote?.repo).toBe(join(boxHome, ".volley", "repos", "b/b"));
+      expect(spawnedOn("w2")?.worktree).toBe(
+        join(boxHome, ".volley", "worktrees", "b/b", "w2", "T1-implementer"),
+      );
+      // The box's verdict judges both running waves' repositories.
+      expect((await verdict("box"))?.payload.repos).toMatchObject({
+        "a/a": { state: "ready" },
+        "b/b": { state: "ready" },
+      });
+    });
+
+    it("a box without a clone of the wave's slug is skipped by placement, with the reason", async () => {
+      localClaude = false;
+      await setup({ repos: true });
+      await beat({ repos: (boxRepos ?? []).filter((r) => r.slug === "a/a") });
+      const out = await submit("w2", "", "  T1: { issue: 42, host: auto }\n", repo2);
+      // run's preview judges the box from its record: no verdict judges b/b before it runs.
+      expect(out).toContain(
+        "T1 → waiting (no eligible machine: box: no ready clone of b/b (absent: no clone of b/b on box))",
+      );
+      await tick();
+      await eventually(async () => {
+        await tick(0);
+        return (await verdict("box"))?.payload.repos["b/b"] !== undefined;
+      });
+      expect((await verdict("box"))?.payload).toMatchObject({
+        ready: true,
+        eligible: true,
+        repos: { "b/b": { state: "absent", reasons: ["no clone of b/b on box"] } },
+      });
+      await tick();
+      const t1 = (await state("w2")).tasks.find((t) => t.id === "T1");
+      expect(t1?.why_waiting).toBe(
+        "no eligible machine: box: no ready clone of b/b (absent: no clone of b/b on box)",
+      );
+      expect(journal("w2").some((e) => e.type === "task_placed")).toBe(false);
+    });
+
+    it("remote_repo_missing names the slug and the two ways to add it; add answers like retry", async () => {
+      localClaude = false;
+      let clone = false;
+      await setup({
+        repos: true,
+        onBox: (b) => {
+          b.repoExists = async () => clone;
+        },
+      });
+      await submit("w1", "", "  T1: { issue: 42, host: box }\n");
+      await tick();
+      await eventually(async () =>
+        journal("w1").some(
+          (e) => e.type === "decision_opened" && e.data.kind === "remote_repo_missing",
+        ),
+      );
+      const opened = journal("w1").find(
+        (e) => e.type === "decision_opened" && e.data.kind === "remote_repo_missing",
+      );
+      expect(opened?.data).toMatchObject({
+        question:
+          "Needs you: box has no clone of a/a. Add it to box (Settings → Repositories, or volley repo add a/a --machine box)?",
+        options: ["add", "retry", "cancel"],
+      });
+      const help = opened?.data.option_help as Record<string, string>;
+      expect(help.add).toMatch(/retry/);
+      // `add` requeues the task like retry: the clone is there now, so it spawns.
+      clone = true;
+      const r = await client.request("resolve", {
+        decision_id: opened?.data.decision_id as string,
+        answer: "add",
+        by: "tester",
+      });
+      expect(r).toMatchObject({ ok: true });
+      await eventually(async () => {
+        await tick();
+        return spawnedOn("w1") !== undefined;
+      });
     });
   });
 

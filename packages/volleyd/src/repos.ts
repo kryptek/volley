@@ -51,6 +51,25 @@ export function managedClonePath(root: string, slug: string, home?: string): str
   return posix.join(underHome(root, home), slug);
 }
 
+/**
+ * A machine's home from the managed clones its record reports (#436): a managed clone sits at
+ * `<repo_root>/<owner>/<name>` with `repo_root` expanded on the machine, so a home-relative
+ * `repo_root` (`~/…`) leaves the home as the rest of its path. Undefined when no clone tells.
+ */
+export function homeFromClones(
+  root: string,
+  clones: readonly { slug: string; path: string; managed: boolean }[] | undefined,
+): string | undefined {
+  if (root !== "~" && !root.startsWith("~/")) return undefined;
+  for (const c of clones ?? []) {
+    if (!c.managed) continue;
+    const tail = posix.join("/", root.slice(1), c.slug);
+    const path = trimPath(c.path);
+    if (path.endsWith(tail) && path.length > tail.length) return path.slice(0, -tail.length);
+  }
+  return undefined;
+}
+
 /** A repository's worktree root on a machine: `<home>/.volley/worktrees/<owner>/<name>`. */
 export function managedWorktreeRoot(home: string | undefined, slug: string): string {
   return posix.join(home ?? "~", ".volley", "worktrees", slug);

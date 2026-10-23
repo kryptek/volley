@@ -6,6 +6,7 @@ import {
   SLUG_PATTERN,
   assignedSlugs,
   cloneFor,
+  homeFromClones,
   isSlug,
   legacyOrigin,
   managedClonePath,
@@ -106,6 +107,24 @@ describe("repos: originToSlug", () => {
     expect(originToSlug("https://github.com/o/r")).toBeUndefined();
     expect(originToSlug(undefined)).toBeUndefined();
     expect(originToSlug(null)).toBeUndefined();
+  });
+});
+
+describe("repos: a machine's home from its managed clones (#436)", () => {
+  const clone = (slug: string, path: string, managed = true) => ({ slug, path, managed });
+  it("strips the managed clone's <repo_root>/<owner>/<name> off its reported path", () => {
+    expect(
+      homeFromClones("~/.volley/repos", [clone("a/a", "/path/to/home/.volley/repos/a/a")]),
+    ).toBe("/path/to/home");
+    expect(homeFromClones("~", [clone("a/a", "/path/to/home/a/a")])).toBe("/path/to/home");
+  });
+  it("nothing to derive: an absolute repo_root, an adopted clone, a path that does not fit, none", () => {
+    expect(homeFromClones("/srv/repos", [clone("a/a", "/srv/repos/a/a")])).toBeUndefined();
+    expect(
+      homeFromClones("~/.volley/repos", [clone("a/a", "/path/to/home/.volley/repos/a/a", false)]),
+    ).toBeUndefined();
+    expect(homeFromClones("~/.volley/repos", [clone("a/a", "/elsewhere/a/a")])).toBeUndefined();
+    expect(homeFromClones("~/.volley/repos", undefined)).toBeUndefined();
   });
 });
 

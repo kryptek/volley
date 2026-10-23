@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { VolleyBroker } from "volley-mcp/broker";
 import { parseEnvelope } from "volley-mcp/envelope";
@@ -22,6 +22,8 @@ import {
   preview as placementPreview,
   snapshotFrom,
 } from "../placement";
+import { repoVerdictFromRecord } from "../readiness";
+import { slugKey } from "../repos";
 import { criticalPaths } from "../scheduler";
 import type { PlacementConfig, Tunables, Wave } from "../types";
 import {
@@ -298,6 +300,15 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
 
 // --- Fleet (F3): placement preview, shared with `run` ---
 
+/**
+ * The repository whose clone on the supervisor's own machine is `repo` (its verdict's `repos`):
+ * a wave file's repository without asking GitHub, when a running wave shares the clone.
+ */
+function slugByClone(own: VerdictView | undefined, repo: string): string | undefined {
+  const dir = resolve(expandHome(repo));
+  return Object.entries(own?.repos ?? {}).find(([, v]) => v.path === dir)?.[0];
+}
+
 /** Whether the wave has a task the supervisor places. */
 export const places = (wave: Wave): boolean =>
   wave.task_order.some((id) => {
@@ -310,8 +321,14 @@ export const places = (wave: Wave): boolean =>
  * made at admission), from what the supervisor retains on the broker: its effective config
  * (`fleet.local_name`, `placement`, `claude.warn_at_pct`), every machine record and every
  * readiness verdict it published. Read-only; a broker or supervisor that cannot be read says so.
+ * The wave's repository (`slug`, #436; unset: the supervisor's own verdict's repository whose
+ * clone is the wave's `repo`) filters out machines without a ready clone of it.
  */
-export async function previewPlacement(wave: Wave, target: ControlTarget): Promise<string> {
+export async function previewPlacement(
+  wave: Wave,
+  target: ControlTarget,
+  slug?: string,
+): Promise<string> {
   const broker = new VolleyBroker();
   try {
     await broker.connect({
@@ -357,7 +374,27 @@ export async function previewPlacement(wave: Wave, target: ControlTarget): Promi
       weights: { ...base.weights, ...over.weights },
     };
     const localName = cfg.fleet?.local_name ?? "";
+    const waveSlug =
+      slug ??
+      slugByClone(
+        verdicts.find((v) => v.name === localName),
+        wave.repo,
+      );
+    if (waveSlug !== undefined) {
+      // A peer's verdict that does not judge the wave's repository yet (no running wave shares
+      // it): judged from its record. The own machine holds the wave's clone.
+      for (const v of verdicts) {
+        if (v.name === localName || slugKey(v.repos, waveSlug) !== undefined) continue;
+        const r = repoVerdictFromRecord(
+          v.name,
+          records.find((x) => x.name === v.name),
+          waveSlug,
+        );
+        if (r !== undefined) v.repos = { ...v.repos, [waveSlug]: r };
+      }
+    }
     const line = placementPreview(wave, snapshotFrom(records, verdicts, localName), {
+      ...(waveSlug !== undefined ? { waveSlug } : {}),
       placement,
       warn_at_pct:
         wave.config.claude?.warn_at_pct ??

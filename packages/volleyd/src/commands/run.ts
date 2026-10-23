@@ -99,7 +99,9 @@ export async function run({ argv, env, io }: CommandArgs): Promise<ExitCode> {
     // version without placement: keeps the wave's own, which this parse cannot know: no preview.
     const preview = places(wave) && (res.plan === undefined || placementFromFile);
     const placement =
-      parsed.values.json !== true && preview ? await previewPlacement(wave, target) : "";
+      parsed.values.json !== true && preview
+        ? await previewPlacement(wave, target, state.github?.slug)
+        : "";
     if (parsed.values.json === true) {
       io.stdout(`${JSON.stringify(state, null, 2)}\n`);
       io.stderr(warnings);
