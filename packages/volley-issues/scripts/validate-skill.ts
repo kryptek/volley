@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 export interface ValidationResult {
   ok: boolean;
@@ -60,6 +61,115 @@ export const REQUIRED_VOLLEYD_PATH = [
   "AskUserQuestion",
   "`go`, `hold`, `cancel`",
 ] as const;
+
+/**
+ * The planning section (#390): between Step 2 and Step 3 of the volleyd path, it tells the planner
+ * that a task's Files list is the footprint the overlap planner relies on and how to write one,
+ * when to bundle at filing time, and how to override the plan. Steps 3 and 4 point at it.
+ */
+export const PLANNING_HEADING = "### Planning a batch: footprints and overlap";
+
+/** How Steps 3 and 4 name the planning section. */
+export const PLANNING_REFERENCE = "**Planning a batch**";
+
+/** Strings the planning section must name verbatim: its five rules and `--plan-only`. */
+export const REQUIRED_PLANNING = [
+  // (1) the Files list is the footprint, and how to write it
+  "is the task's footprint",
+  "one per bullet",
+  "`(new)`",
+  "globs",
+  "in parentheses after the path",
+  "`changes/<issue>.<type>.md` last",
+  // (2) look before filing or submitting
+  "--plan-only",
+  // (3) bundle at filing time
+  "When to bundle at filing time",
+  "`T0a`, `T0b`",
+  // (4) what the plan lines mean, and the overrides
+  "`after:`",
+  "`issues:`",
+  "--no-plan",
+  // (5) a strong pair the planner would chain
+  "`Depends on:`",
+  "the chain is yours, not the planner's",
+] as const;
+
+/** The issue-planning brief, relative to the skill's directory. */
+export const ISSUE_PLAN_TEMPLATE = "templates/issue-plan.md";
+
+/** The plan format's headings, as the template shows them. */
+export const REQUIRED_TEMPLATE_HEADINGS = [
+  "## Problem",
+  "## Done when",
+  "## Design facts",
+  "## Files",
+  "## Steps",
+  "## Out of scope",
+  "## Gates",
+] as const;
+
+/** Strings the template must name verbatim: the header line and the rules it carries. */
+export const REQUIRED_TEMPLATE = [
+  "REQUIRED SUB-SKILL",
+  "`(new)`",
+  "in parentheses after the path",
+  "`changes/<issue>.<type>.md` last",
+  "--plan-only",
+  "`T0a`, `T0b`",
+  "`Depends on:`",
+  "Public-repo hygiene",
+] as const;
+
+/** The body text from the planning heading up to the next `### ` or `## ` heading, or null. */
+export function planningSection(body: string): string | null {
+  const at = body.indexOf(`${PLANNING_HEADING}\n`);
+  if (at === -1) return null;
+  const rest = body.slice(at + PLANNING_HEADING.length);
+  const end = /^#{2,3} /m.exec(rest);
+  return body.slice(at, at + PLANNING_HEADING.length + (end?.index ?? rest.length));
+}
+
+export function validatePlanning(source: string): ValidationResult {
+  const body = splitFrontmatter(source).body;
+  const section = planningSection(body);
+  if (section === null) return { ok: false, errors: [`missing the ${PLANNING_HEADING} section`] };
+  const errors: string[] = REQUIRED_PLANNING.filter((needle) => !section.includes(needle)).map(
+    (needle) => `planning section must mention: ${needle}`,
+  );
+  const path = volleydPathSection(body) ?? "";
+  const at = path.indexOf(section);
+  const step2 = path.indexOf("### Step 2");
+  const step3 = path.indexOf("### Step 3");
+  if (at === -1 || step2 === -1 || step3 === -1 || !(step2 < at && at < step3)) {
+    errors.push(`${PLANNING_HEADING} must sit between Step 2 and Step 3 of the volleyd path`);
+  }
+  for (const step of ["### Step 3", "### Step 4"]) {
+    const from = path.indexOf(step);
+    const next = path.indexOf("### ", from + step.length);
+    const text = from === -1 ? "" : path.slice(from, next === -1 ? undefined : next);
+    if (!text.includes(PLANNING_REFERENCE)) {
+      errors.push(`${step} must reference ${PLANNING_REFERENCE}`);
+    }
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+/** The template's text, or null when it does not exist. */
+export function validateIssuePlanTemplate(source: string | null): ValidationResult {
+  if (source === null) {
+    return { ok: false, errors: [`missing the issue-plan template: ${ISSUE_PLAN_TEMPLATE}`] };
+  }
+  const errors = [
+    ...REQUIRED_TEMPLATE_HEADINGS.filter((h) => !new RegExp(`^${h}\\b`, "m").test(source)).map(
+      (h) => `issue-plan template must show the plan heading: ${h}`,
+    ),
+    ...REQUIRED_TEMPLATE.filter((needle) => !source.includes(needle)).map(
+      (needle) => `issue-plan template must mention: ${needle}`,
+    ),
+  ];
+  return { ok: errors.length === 0, errors };
+}
 
 /**
  * Strings the `## Release branch merge` section must name verbatim (#313): CI's changelog guards
@@ -223,6 +333,7 @@ export function validateSkill(source: string): ValidationResult {
     validateVolleydPath(source),
     validateReleaseMerge(source),
     validateBriefTitle(source),
+    validatePlanning(source),
   ];
   return { ok: results.every((r) => r.ok), errors: results.flatMap((r) => r.errors) };
 }
@@ -233,7 +344,12 @@ if (import.meta.main) {
     process.stderr.write("usage: bun run validate-skill.ts <path-to-SKILL.md>\n");
     process.exit(2);
   }
-  const result = validateSkill(readFileSync(path, "utf8"));
+  const template = join(dirname(path), ISSUE_PLAN_TEMPLATE);
+  const results = [
+    validateSkill(readFileSync(path, "utf8")),
+    validateIssuePlanTemplate(existsSync(template) ? readFileSync(template, "utf8") : null),
+  ];
+  const result = { ok: results.every((r) => r.ok), errors: results.flatMap((r) => r.errors) };
   if (result.ok) {
     process.stdout.write(`SKILL.md OK (${path})\n`);
     process.exit(0);
