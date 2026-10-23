@@ -15,7 +15,7 @@ import {
 import { formatDiff } from "../src/plan-diff";
 import { type WaveRecord, replay } from "../src/reducer";
 import { spawnAgent } from "../src/spawn";
-import type { JournalEvent, NewEvent, TaskState, Wave } from "../src/types";
+import type { JournalEvent, NewEvent, TaskState, Wave, WaveTask } from "../src/types";
 import { parseWaveFile } from "../src/wave-file";
 import { type DaemonEnv, makeDaemonEnv } from "./helpers/daemon-env";
 import { type SpawnEnv, makeSpawnEnv } from "./helpers/fake-host";
@@ -325,6 +325,38 @@ describe("applyPlan", () => {
     );
     expect(taskOf(after, "T6")?.stage).toBe("queued");
     expect(taskOf(after, "T2")).toMatchObject({ waiting_on: ["T6"], why_waiting: "after: T6" });
+  });
+
+  it("a task a later version adds is queued with the file's issues, files, footprint and plan", () => {
+    const t6 = V2.tasks.T6 as WaveTask;
+    const v2: Wave = {
+      ...V2,
+      tasks: {
+        ...V2.tasks,
+        T6: {
+          ...t6,
+          issues: [106, 107],
+          files: ["src/six.ts"],
+          footprint: { confidence: "listed" },
+          plan: { by: "independent", why: "shares no source file" },
+        },
+      },
+    };
+    const { res } = applyTo(midFlight(), v2);
+    expect(res.events).toContainEqual(
+      expect.objectContaining({
+        type: "task_queued",
+        task: "T6",
+        data: {
+          issue: 106,
+          issues: [106, 107],
+          files: ["src/six.ts"],
+          footprint: { confidence: "listed" },
+          plan: { by: "independent", why: "shares no source file" },
+          plan_version: 2,
+        },
+      }),
+    );
   });
 
   it("issue changed on an in-flight task → decision; the agent keeps the old issue", () => {

@@ -140,6 +140,8 @@ The helper writes no MCP setting. When the repository's agents need some of the 
 
 `--placement local|auto` pins where the wave's tasks run (`placement:`); left out, the supervisor's `placement.default` decides (`auto` once a machine is paired, so the tasks spread onto it), and `volleyd validate` prints which.
 
+Before the submit lines the helper prints the overlap plan it wrote into the file (a `cluster …` line per group of issues sharing source files, the independent tasks, the expected branch updates) and a `footprints: …` line; bundled issues become one task with `issues:`, and a chained one gets an `after:` marked `# chained by the planner`. `--plan-only` prints just those lines and writes nothing, to look before writing. `--no-plan` writes the footprints without bundling or chaining anything, when the user wants one task per issue.
+
 The helper's last stderr lines are the submit command and the owner it names:
 
 ```text

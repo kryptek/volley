@@ -282,6 +282,7 @@ import {
   mintWakeToken,
 } from "./fence";
 import { LOCAL_HOST } from "./fleet-name";
+import { type Tree, footprintOf, readReleaseTree } from "./footprint";
 import { lockFetches } from "./git-lock";
 import type { Host, TermSize } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
@@ -408,6 +409,7 @@ import { SETUP_OPS, SetupOps, type SetupOpsOptions, type SetupOutcome } from "./
 import type {
   AgentMcp,
   CoordinatorAttention,
+  Footprint,
   GitHubRepo,
   JournalEvent,
   MergeMode,
@@ -427,7 +429,13 @@ import type {
   WaveTask,
 } from "./types";
 import { SYSTEM_WAVE } from "./types";
-import { type PlacementDefaults, WaveFileError, parseWaveFile, resolveWaveRepo } from "./wave-file";
+import {
+  type PlacementDefaults,
+  WaveFileError,
+  filePlan,
+  parseWaveFile,
+  resolveWaveRepo,
+} from "./wave-file";
 
 import {
   BLOCKED_TASK_CANCELLED,
@@ -11061,31 +11069,37 @@ export class Daemon {
     const missing = await this.releaseBranchMissing(first.wave);
     if (missing !== null) return { ok: false, error: missing };
     const text = p.wave_yaml as string;
-    const fetchFiles = first.existing === undefined && this.opts.issueBody !== undefined;
-    if (!fetchFiles && !this.readsRepo()) {
+    // A first submit reads each footprint the file leaves out (a task without `files:`) from its
+    // issue; the tree is read for those and for the file's own plan's hot-file sizes.
+    const fetchFiles =
+      first.existing === undefined &&
+      this.opts.issueBody !== undefined &&
+      fileTaskIds(first.wave).some((id) => (first.wave.tasks[id]?.files ?? []).length === 0);
+    const readsTree = fetchFiles || first.wave.overlap_plan !== undefined;
+    if (!readsTree && !this.readsRepo()) {
       const visibility = await this.repoVisibility(first.wave);
       return first.existing !== undefined
-        ? this.resubmit(first.existing, first.wave, text, preface, visibility)
-        : this.commitSubmit(first.wave, first.owner, {}, text, preface, visibility);
+        ? this.resubmit(first.existing, first.wave, text, preface, visibility, null)
+        : this.commitSubmit(first.wave, first.owner, NO_FOOTPRINTS, text, preface, visibility);
     }
-    // Fetching issue bodies and the repo's visibility can take seconds: do it off the serial
-    // queue (control ops and ticks, the kill switch included, keep running), then commit inside
-    // it, re-checking what may have changed meanwhile (the kill switch, a racing submit of the
-    // same wave id).
+    // Fetching issue bodies, the tree and the repo's visibility can take seconds: do it off the
+    // serial queue (control ops and ticks, the kill switch included, keep running), then commit
+    // inside it, re-checking what may have changed meanwhile (the kill switch, a racing submit of
+    // the same wave id).
     return {
       ok: true,
       defer: Promise.all([
-        fetchFiles ? this.fetchIssueFiles(first.wave) : {},
+        this.fetchFootprints(first.wave, fetchFiles, readsTree),
         this.repoVisibility(first.wave),
-      ]).then(([files, visibility]) =>
+      ]).then(([read, visibility]) =>
         this.serial(async () => {
           // The daemon may have stopped (and released the home lock) while the fetch ran.
           if (!this.running) return { ok: false, error: "daemon stopping" };
           const again = this.checkSubmit(p);
           if ("refusal" in again) return again.refusal;
           if (again.existing !== undefined)
-            return this.resubmit(again.existing, again.wave, text, preface, visibility);
-          return this.commitSubmit(again.wave, again.owner, files, text, preface, visibility);
+            return this.resubmit(again.existing, again.wave, text, preface, visibility, read.tree);
+          return this.commitSubmit(again.wave, again.owner, read, text, preface, visibility);
         }),
       ),
     };
@@ -11287,12 +11301,13 @@ export class Daemon {
 
   /**
    * Journal a checked wave as plan v1 (the daemon numbers versions; the file's own `version:` is
-   * informational), its tasks (with their issues' Files lists) and overlap warnings.
+   * informational), its tasks (with their footprints: the file's, else the ones read from their
+   * issues), its overlap plan, the footprints that could not be read, and overlap warnings.
    */
   private async commitSubmit(
     submitted: Wave,
     owner: string | null,
-    issueFiles: Record<TaskId, string[]>,
+    read: ReadFootprints,
     text: string,
     preface: { info: BriefPrefaceInfo | null; path: string },
     visibility: VisibilityFacts | null,
@@ -11301,6 +11316,10 @@ export class Daemon {
     const log = WaveLog.open(join(this.opts.home, "waves", wave.wave));
     this.waves.set(wave.wave, log);
     this.observeJournal(wave.wave, log.journal);
+    const issueFiles: Record<TaskId, string[]> = {};
+    for (const [id, f] of Object.entries(read.footprints)) {
+      if ("files" in f && f.files.length > 0) issueFiles[id] = f.files;
+    }
     this.issueFiles.set(wave.wave, issueFiles);
     this.config.setWaveOverrides(wave.wave, wave.config);
     this.storeVersion(this.versionFile(wave.wave, 1), text);
@@ -11316,17 +11335,42 @@ export class Daemon {
       });
     }
     for (const id of wave.task_order) {
-      const files = issueFiles[id];
+      const t = wave.tasks[id];
+      const got = read.footprints[id];
+      // The file's footprint, else the one read from the issue (journal-only: the definition's
+      // `files` drive the scheduler's same-file ordering and stay as written).
+      const files = t !== undefined && t.files.length > 0 ? t.files : (issueFiles[id] ?? []);
+      const footprint =
+        t?.footprint ?? (got !== undefined && "footprint" in got ? got.footprint : undefined);
       await this.append(wave.wave, {
         type: "task_queued",
         task: id,
         data: {
-          issue: wave.tasks[id]?.issue,
-          ...(files !== undefined && files.length > 0 ? { issue_files: files } : {}),
+          issue: t?.issue,
+          ...(t?.issues !== undefined ? { issues: t.issues } : {}),
+          ...(files.length > 0 ? { files } : {}),
+          ...(footprint !== undefined ? { footprint } : {}),
+          ...(t?.plan !== undefined ? { plan: t.plan } : {}),
         },
       });
     }
+    // The file's own overlap plan (SPEC §4.6.22), once for this version, sized from the tree.
+    if (wave.overlap_plan !== undefined) {
+      const clusters = filePlan(wave, read.tree ?? {}).clusters;
+      await this.append(wave.wave, { type: "wave_planned", data: { clusters } });
+    }
     const warnings: string[] = [];
+    // A footprint that could not be read is never silent: the plan does not see that task.
+    for (const id of wave.task_order) {
+      const got = read.footprints[id];
+      if (got === undefined || !("why" in got)) continue;
+      await this.append(wave.wave, {
+        type: "alarm_raised",
+        task: id,
+        data: { alarm: "footprint_unavailable", task: id, why: got.why },
+      });
+      warnings.push(`footprint unavailable for ${id} (#${wave.tasks[id]?.issue}): ${got.why}`);
+    }
     for (const w of this.overlaps(wave.wave)) {
       await this.append(wave.wave, {
         type: "alarm_raised",
@@ -11349,22 +11393,42 @@ export class Daemon {
   }
 
   /**
-   * Each task issue's `Files` section (best effort, in parallel). Advisory: it feeds the overlap
-   * warning only, and is journaled on `task_queued` — never written into the wave definition.
+   * The release branch's tree (once per wave; null when the clone does not read) and, with
+   * `fetch`, each footprint the file leaves out: a task without `files:` gets its issue's Files
+   * list resolved against the tree (`footprintOf`; without a tree, the list as written, `guessed`),
+   * or why it could not be read. In parallel. Journaled on `task_queued`, never written into the
+   * wave definition.
    */
-  private async fetchIssueFiles(
-    wave: ReturnType<typeof parseWaveFile>,
-  ): Promise<Record<TaskId, string[]>> {
-    const fetch = this.opts.issueBody;
-    const out: Record<TaskId, string[]> = {};
-    if (fetch === undefined) return out;
+  private async fetchFootprints(
+    wave: Wave,
+    fetch: boolean,
+    readsTree: boolean,
+  ): Promise<ReadFootprints> {
+    const repo = expandHome(wave.repo);
+    const tree =
+      readsTree && existsSync(repo)
+        ? await readReleaseTree(this.host.exec, repo, wave.release_branch)
+        : null;
+    const issueBody = this.opts.issueBody;
+    const footprints: Record<TaskId, ReadFootprint> = {};
+    if (!fetch || issueBody === undefined) return { tree, footprints };
     await Promise.all(
-      Object.entries(wave.tasks).map(async ([id, t]) => {
-        const body = await fetch(wave.repo, t.issue).catch(() => null);
-        if (body !== null) out[id] = parseFilesSection(body);
+      fileTaskIds(wave).map(async (id) => {
+        const t = wave.tasks[id];
+        if (t === undefined || t.files.length > 0) return;
+        let body: string | null;
+        try {
+          body = await issueBody(wave.repo, t.issue);
+        } catch (e) {
+          const why = e instanceof Error ? e.message : String(e);
+          footprints[id] = { why: `issue #${t.issue} could not be read: ${why}` };
+          return;
+        }
+        if (body === null) footprints[id] = { why: `issue #${t.issue} could not be read` };
+        else footprints[id] = footprintRead(body, tree);
       }),
     );
-    return out;
+    return { tree, footprints };
   }
 
   /** Overlaps between `wave`'s tasks and the unsettled tasks of every other live wave. */
@@ -11374,12 +11438,11 @@ export class Daemon {
         .filter((t) => !unsettledOnly || (t.stage !== "done" && t.stage !== "cancelled"))
         .map((t) => ({
           id: t.id,
-          files: [
-            ...new Set([
-              ...(rec.wave?.tasks[t.id]?.files ?? []),
-              ...(this.issueFiles.get(w)?.[t.id] ?? []),
-            ]),
-          ],
+          // The task definition's files first; the issue's when the file has none.
+          files:
+            (rec.wave?.tasks[t.id]?.files ?? []).length > 0
+              ? (rec.wave?.tasks[t.id]?.files ?? [])
+              : (this.issueFiles.get(w)?.[t.id] ?? []),
         }));
     const self = this.waves.get(wave)?.record;
     if (self === undefined) return [];
@@ -12826,6 +12889,7 @@ export class Daemon {
     text: string,
     preface: { info: BriefPrefaceInfo | null; path: string },
     visibility: VisibilityFacts | null,
+    tree: Tree | null,
   ): Promise<Reply> {
     const rec = log.record;
     const state = rec.state;
@@ -12879,6 +12943,11 @@ export class Daemon {
         });
       }
     }
+    // The new version's own overlap plan, once (SPEC §4.6.22).
+    if (wave.overlap_plan !== undefined) {
+      const clusters = filePlan(wave, tree ?? {}).clusters;
+      await this.append(wave.wave, { type: "wave_planned", data: { clusters } });
+    }
     await this.journalVisibility(wave.wave, visibility);
     // plan_change decisions go through the decision store: journal + retained decision topic.
     for (const d of res.decisions) {
@@ -12924,11 +12993,45 @@ export class Daemon {
   }
 }
 
-/** The `issue_files` each `task_queued` carries, by task. */
+/** What a submit read for each task without `files:`: its footprint, or why it could not. */
+type ReadFootprint = { files: string[]; footprint: Footprint } | { why: string };
+
+/** The release branch's tree as a submit read it, and each footprint it read. */
+interface ReadFootprints {
+  tree: Tree | null;
+  footprints: Record<TaskId, ReadFootprint>;
+}
+
+const NO_FOOTPRINTS: ReadFootprints = { tree: null, footprints: {} };
+
+/** The wave file's own tasks (a supervisor-added fixer aside), in file order. */
+const fileTaskIds = (wave: Wave): TaskId[] =>
+  wave.task_order.filter((id) => wave.tasks[id]?.synthetic !== true);
+
+/**
+ * An issue body's footprint: resolved against the tree, or without one its Files list as
+ * written, `guessed` (no path was checked).
+ */
+function footprintRead(body: string, tree: Tree | null): { files: string[]; footprint: Footprint } {
+  if (tree === null) {
+    const files = parseFilesSection(body);
+    return { files, footprint: { confidence: files.length > 0 ? "guessed" : "none" } };
+  }
+  const fp = footprintOf(body, tree);
+  return {
+    files: fp.files,
+    footprint: {
+      confidence: fp.confidence,
+      ...(fp.unresolved.length > 0 ? { unresolved: fp.unresolved } : {}),
+    },
+  };
+}
+
+/** The files each `task_queued` carries (`issue_files` in journals before footprints), by task. */
 function journaledIssueFiles(events: readonly JournalEvent[]): Record<TaskId, string[]> {
   const out: Record<TaskId, string[]> = {};
   for (const e of events) {
-    const files = e.data.issue_files;
+    const files = e.data.files ?? e.data.issue_files;
     if (e.type === "task_queued" && e.task !== undefined && Array.isArray(files)) {
       out[e.task] = files.filter((f): f is string => typeof f === "string");
     }

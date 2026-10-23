@@ -177,6 +177,36 @@ describe("volleyd status formatting", () => {
     );
   });
 
+  it("prints one plan: line per cluster of the overlap plan under the header (SPEC §4.6.22)", () => {
+    const out = formatWave({
+      wave: "w1",
+      version: 1,
+      owner: null,
+      repo: "r",
+      release_branch: "release/w1",
+      status: "running",
+      tasks: [{ id: "T1", issue: 101, stage: "queued", agents: {}, cluster: "A" }],
+      open_decisions: [],
+      gates: [],
+      overlap_plan: {
+        clusters: [
+          {
+            id: "A",
+            tasks: ["T1", "T2"],
+            hot: [],
+            strategy: { chain: [["T1", "T2"]] },
+            state: "planned",
+            why: "2 tasks share src/a.ts (2 tasks) → 1 chain (T1 → T2)",
+          },
+        ],
+      },
+      updated_at: "2026-10-18T12:00:00.000Z",
+    });
+    expect(out.split("\n")[1]).toBe(
+      "  plan: cluster A (planned): 2 tasks share src/a.ts (2 tasks) → 1 chain (T1 → T2)",
+    );
+  });
+
   it("a synthetic task reads `fixer for <tasks> (flake: <test>)` (SPEC §4.6.16)", () => {
     const out = formatWave({
       wave: "w1",

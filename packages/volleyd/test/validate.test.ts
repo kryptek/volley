@@ -526,3 +526,73 @@ describe("volleyd validate: a task pinned to local under fleet.local_agents: nev
     expect(localPinWarnings(fallback, homeWith("fleet:\n  local_agents: never\n"))).toBe("");
   });
 });
+
+describe("volleyd validate: footprints and the overlap plan (SPEC §4.6.22)", () => {
+  const fixture = new URL("./fixtures/bundle.yaml", import.meta.url).pathname;
+
+  it("prints the file's own plan after the placement line, then the footprint line", async () => {
+    const r = await runCli(["validate", fixture]);
+    expect(r.exitCode).toBe(0);
+    const out = r.stdout.split("\n");
+    const at = out.findIndex((l) => l.startsWith("placement: "));
+    expect(at).toBeGreaterThan(0);
+    expect(out.slice(at + 1, at + 5)).toEqual([
+      "cluster A: 3 tasks share packages/app/src/pipeline.ts (2 tasks) → 1 bundle (i1), 1 chain (i1 → i3)",
+      "independent: i4",
+      "expected branch updates: ≤ 2 (was ≤ 3 one at a time)",
+      "footprints: 3 listed, 1 resolved; 1 entry unresolved (i3: helpers.ts)",
+    ]);
+  });
+
+  it("a wave with no files: on any task says where footprints come from", async () => {
+    const dir = tempDir("volleyd-validate-fp-");
+    const file = join(dir, "w.yaml");
+    writeFileSync(
+      file,
+      "wave: w1\nrepo: /path/to/example-repo\nrelease_branch: release/x\nmodel: claude-opus-5-5\npipeline: [implement]\ntasks:\n  T1: { issue: 1 }\n",
+    );
+    const r = await runCli(["validate", file]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "footprints: none (write them with wave-from-issues, or the daemon reads each issue's Files list at run)\n",
+    );
+    expect(r.stdout).not.toContain("expected branch updates");
+  });
+
+  it("with the repository's tree, notes where the file differs from the planner (kept as written)", async () => {
+    const dir = realpathSync(tempDir("volleyd-validate-plan-"));
+    const repo = join(dir, "repo");
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src/big.ts"), "x".repeat(40_000));
+    writeFileSync(join(repo, "src/a.ts"), "a");
+    writeFileSync(join(repo, "src/b.ts"), "b");
+    git(repo, "init", "--quiet", "-b", "release/x");
+    git(repo, "add", ".");
+    git(
+      repo,
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@example.com",
+      "commit",
+      "--quiet",
+      "-m",
+      "i",
+    );
+    const file = join(dir, "w.yaml");
+    writeFileSync(
+      file,
+      `wave: w1\nrepo: ${repo}\nrelease_branch: release/x\nmodel: claude-opus-5-5\npipeline: [implement]\nconfig: { require_fresh_base: false }\ntasks:
+  i1: { issue: 1, files: [src/big.ts, src/a.ts], footprint: { confidence: listed } }
+  i2: { issue: 2, files: [src/big.ts, src/b.ts], footprint: { confidence: listed } }
+`,
+    );
+    const r = await runCli(["validate", file]);
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "note: i1 and i2 run as separate tasks; the planner would bundle them as i1 — kept as written\n",
+    );
+    expect(r.stdout).toContain("footprints: 2 listed\n");
+  });
+});
