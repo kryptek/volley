@@ -2047,7 +2047,10 @@ with `model_source`, a `working` status), since the agent's MCP server answering
 nothing about the refused login. The same rule decides whether an `it's running` answer finds the
 agent live. A sign of life is judged by the sender's clock: one from a machine whose clock runs
 behind the supervisor's can predate the decision and not count, and the card then stays open for
-the owner to answer.
+the owner to answer. One from a machine whose clock runs ahead can, after a supervisor restart,
+replay a retained hooks registry entry or `working` status sent before the decision opened with a
+time after it, and close the card although the session is still at its screen; the agent's
+silence then reopens the question through the usual liveness checks.
 
 ### Unattended coordinator starts
 

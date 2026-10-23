@@ -503,8 +503,9 @@ describe("relaunch of a spawn-type decision", () => {
   });
 
   it("a retained registry entry from before the decision opened does not close it", async () => {
+    // setup("mcp") has the session publish the hooks' registry entry (with model_source) and a
+    // hook heartbeat right at launch, before the spawn window opens the decision: both predate it.
     const opened = await setup("mcp");
-    // The hooks' registry entry and heartbeat arrived before it opened: still open.
     await waits.settled();
     expect(daemon.snapshot("w1")?.open_decisions).toEqual([opened.data.decision_id]);
   });

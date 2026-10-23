@@ -62,6 +62,8 @@ describe("it's running on a spawn decision", () => {
     expect(resolved(view(OPENED + 30_000), "it's running")).toEqual([]);
     // Lenient on case and spacing, like every other answer.
     expect(resolved(view(OPENED + 30_000), "  It's Running ")).toEqual([]);
+    // A typed curly apostrophe (macOS smart quotes) is the same answer.
+    expect(resolved(view(OPENED + 30_000), "it’s running")).toEqual([]);
   });
 
   it("not heard from since it opened: asked again, saying no live agent was found", () => {

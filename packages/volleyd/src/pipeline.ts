@@ -375,12 +375,15 @@ const RESPAWNABLE: ReadonlySet<PipelineMarker["on"]> = new Set([
   "fixup_result",
 ]);
 
-/** Answers are free text: only an exact option (case and surrounding space aside) counts. */
 /** The answer volleyd closes a task's open decisions with when its PR is seen merged. */
 export const SUPERSEDED_BY_MERGE = "superseded_by_merge";
 
+/**
+ * Answers are free text: only an exact option (case, surrounding space and a typed curly
+ * apostrophe aside) counts.
+ */
 export const isAnswer = (answer: string, option: string): boolean =>
-  answer.trim().toLowerCase() === option;
+  answer.trim().toLowerCase().replace(/[‘’]/g, "'") === option;
 
 export const emptyPipeline = (): TaskPipeline => ({
   step: -1,
