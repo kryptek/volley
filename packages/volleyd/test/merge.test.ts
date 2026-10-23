@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { mergeArgv, mergePr } from "../src/autopilot/merge";
-import { mintMergeToken } from "../src/fence";
+import { mergeArgv, mergePr, mergeTrain, trainMergeArgv } from "../src/autopilot/merge";
+import { mintMergeToken, mintTrainToken } from "../src/fence";
 import { fakeExec } from "./helpers/fake-exec";
 
 const H = "c".repeat(40);
@@ -183,5 +183,68 @@ describe("autopilot merge re-reads the PR before merging", () => {
     const r = await mergePr(f.exec, token);
     expect(r).toMatchObject({ ok: false });
     expect(f.argvs(["gh", "pr", "merge"])).toEqual([]);
+  });
+});
+
+describe("autopilot merge: the merge train's merge commit", () => {
+  const T = "e".repeat(40);
+  const TPRE = ["gh", "pr", "view", "9", "--json", "baseRefName,headRefOid,isDraft,state"];
+  const TOPEN = JSON.stringify({ state: "OPEN", headRefOid: T, baseRefName: "release/w" });
+  const train = mintTrainToken({
+    train: "train-1",
+    pr: 9,
+    head: T,
+    release_branch: "release/w",
+    members: [
+      { task: "T1", head: H },
+      { task: "T2", head: M },
+    ],
+  });
+
+  it("builds exactly the fenced merge-commit argv", () => {
+    expect(trainMergeArgv(train)).toEqual([
+      "gh",
+      "pr",
+      "merge",
+      "9",
+      "--merge",
+      "--match-head-commit",
+      T,
+    ]);
+  });
+
+  it("merges with the train token, then reads the merge commit back", async () => {
+    const f = fakeExec()
+      .on(["gh", "pr", "view"], {
+        stdout: JSON.stringify({ state: "MERGED", mergeCommit: { oid: M } }),
+      })
+      .on(TPRE, { stdout: TOPEN });
+    expect(await mergeTrain(f.exec, train, "/wt")).toEqual({ ok: true, merge_sha: M });
+    expect(f.argvs()).toEqual([
+      TPRE,
+      ["gh", "pr", "merge", "9", "--merge", "--match-head-commit", T],
+      ["gh", "pr", "view", "9", "--json", "mergeCommit,state"],
+    ]);
+    expect(f.calls[1]?.opts).toMatchObject({ train, cwd: "/wt" });
+    expect(f.calls[1]?.opts).not.toHaveProperty("merge");
+  });
+
+  for (const [what, pr, reason] of [
+    ["retargeted", { state: "OPEN", headRefOid: T, baseRefName: "main" }, "retargeted"],
+    ["moved", { state: "OPEN", headRefOid: H, baseRefName: "release/w" }, "head_moved"],
+    ["closed", { state: "CLOSED", headRefOid: T, baseRefName: "release/w" }, "closed"],
+  ] as const) {
+    it(`refuses a ${what} train PR before merging`, async () => {
+      const f = fakeExec().on(TPRE, { stdout: JSON.stringify(pr) });
+      const r = await mergeTrain(f.exec, train);
+      expect(r).toMatchObject({ ok: false, reason });
+      expect(f.argvs()).toEqual([TPRE]);
+    });
+  }
+
+  it("a refused train merge is classified like any merge", async () => {
+    const stderr = "Pull request is not mergeable: the base branch is out of date";
+    const f = fakeExec().on(TPRE, { stdout: TOPEN }).on(["gh", "pr", "merge"], { code: 1, stderr });
+    expect(await mergeTrain(f.exec, train)).toEqual({ ok: false, reason: "behind", stderr });
   });
 });

@@ -25,6 +25,7 @@ import {
   mintScriptToken,
   mintSetupToken,
   mintSigninForwardToken,
+  mintTrainToken,
   mintWakeToken,
   sealLaunchScript,
 } from "../src/fence";
@@ -1345,6 +1346,105 @@ describe("merge token (autopilot merging)", () => {
   it("refuses to mint over a short head or a non-positive PR", () => {
     expect(() => token(7, "abc1234")).toThrow(FenceError);
     expect(() => token(0)).toThrow(FenceError);
+  });
+});
+
+describe("train token (the merge train)", () => {
+  const H = "a".repeat(40);
+  const H2 = "b".repeat(40);
+  const M1 = "1".repeat(40);
+  const M2 = "2".repeat(40);
+  const train = (pr = 7, head = H) =>
+    mintTrainToken({
+      train: "train-1",
+      pr,
+      head,
+      release_branch: "release/x",
+      members: [
+        { task: "T1", head: M1 },
+        { task: "T2", head: M2 },
+      ],
+    });
+  const TRAIN = ["gh", "pr", "merge", "7", "--merge", "--match-head-commit", H];
+
+  it("the merge-commit argv is denied without a token and with a MergeToken", () => {
+    expect(() => assertAllowed(TRAIN)).toThrow(/FENCE_DENIED: gh pr merge/);
+    const merge = mintMergeToken({
+      wave: "w",
+      task: "T1",
+      pr: 7,
+      head: H,
+      release_branch: "release/x",
+    });
+    expect(() => assertAllowed(TRAIN, { merge })).toThrow(FenceError);
+  });
+
+  it("allows exactly the train's PR at exactly its head, with a merge commit", () => {
+    expect(() => assertAllowed(TRAIN, { train: train() })).not.toThrow();
+  });
+
+  it("denies another PR, another head, squash, other strategies, admin/auto and loose shapes", () => {
+    expect(() => assertAllowed(TRAIN, { train: train(8) })).toThrow(FenceError);
+    expect(() => assertAllowed(TRAIN, { train: train(7, H2) })).toThrow(FenceError);
+    const t = train();
+    const variants: string[][] = [
+      ["gh", "pr", "merge", "7", "--squash", "--match-head-commit", H],
+      ["gh", "pr", "merge", "7", "--rebase", "--match-head-commit", H],
+      [...TRAIN, "--admin"],
+      [...TRAIN, "--auto"],
+      [...TRAIN, "--delete-branch"],
+      [...TRAIN, "--squash"],
+      ["gh", "pr", "merge", "7", "--merge"],
+      ["gh", "pr", "merge", "7", "--merge", "--match-head-commit", H.slice(0, 7)],
+      ["gh", "pr", "merge", "7", "--merge", `--match-head-commit=${H}`],
+      ["gh", "pr", "merge", "--merge", "--match-head-commit", H, "7"],
+      ["gh", "pr", "merge", "07", "--merge", "--match-head-commit", H],
+    ];
+    for (const argv of variants)
+      expect(() => assertAllowed(argv, { train: t }), argv.join(" ")).toThrow(FenceError);
+  });
+
+  it("a train token unlocks nothing else", () => {
+    const t = train();
+    for (const argv of [
+      ["git", "merge", "x"],
+      ["git", "push"],
+      ["git", "rebase", "main"],
+      ["gh", "workflow", "run", "ci"],
+    ])
+      expect(() => assertAllowed(argv, { train: t }), argv.join(" ")).toThrow(FenceError);
+  });
+
+  it("is checked by identity: a token not from mintTrainToken is refused", async () => {
+    const forged = {
+      train: "train-1",
+      pr: 7,
+      head: H,
+      release_branch: "release/x",
+      members: [{ task: "T1", head: M1 }],
+    } as unknown as ReturnType<typeof mintTrainToken>;
+    expect(() => assertAllowed(TRAIN, { train: forged })).toThrow(FenceError);
+    await expect(exec(TRAIN, { train: forged })).rejects.toThrow(FenceError);
+  });
+
+  it("is frozen, members included", () => {
+    const t = train();
+    expect(Object.isFrozen(t)).toBe(true);
+    expect(Object.isFrozen(t.members)).toBe(true);
+    expect(Object.isFrozen(t.members[0])).toBe(true);
+  });
+
+  it("refuses to mint over a bad PR, head, train id or members", () => {
+    expect(() => train(7, "abc1234")).toThrow(FenceError);
+    expect(() => train(0)).toThrow(FenceError);
+    const base = { train: "train-1", pr: 7, head: H, release_branch: "release/x" };
+    expect(() => mintTrainToken({ ...base, members: [] })).toThrow(FenceError);
+    expect(() => mintTrainToken({ ...base, members: [{ task: "T1", head: "abc" }] })).toThrow(
+      FenceError,
+    );
+    expect(() =>
+      mintTrainToken({ ...base, train: "t1", members: [{ task: "T1", head: M1 }] }),
+    ).toThrow(FenceError);
   });
 });
 

@@ -3724,6 +3724,35 @@ one at a time, in order, and brings each up to date just before its merge
   while another task holds the release branch's turn (naming it: that task may be being brought
   up to date, which takes a rebase agent and a CI run).
 
+### The merge train
+
+The queue costs N−1 update rounds for N gated PRs, each one an update, a CI run and a new gate.
+With `autopilot.merge_train` on (the default) volleyd merges several gated PRs at once instead: it
+integrates their gated heads onto one branch, gates that once and merges it once with a merge
+commit, so every member PR reads as merged (SPEC §4.6.23; `src/autopilot/merge-train.ts` is the
+pure formation, `src/autopilot/merge.ts` the merge):
+
+- **Formation.** `formTrain(queues, inflight, waves, { size, enabled })` forms a train on a
+  release branch with no merge in flight (no turn holds its lock, no entry is `merging`, no train
+  forms or runs there) whenever at least two of its queued tasks qualify: at `merge_ready`, gated
+  at their current head, with a PR, and not handed to a human (`merge_manual`). It takes the
+  first up to `train_size_max` (4) of them from the front task's wave, in queue order, with the
+  tasks of the front task's overlap-plan cluster first. A single gated task takes the ordinary
+  turn (`nextToMerge`, unchanged; the driver asks `formTrain` first).
+- **Names.** A train is `train-<n>` (its synthetic task in the wave, n counting the wave's trains
+  from 1), integrated on the branch `volley/train/<wave>-t<n>`, and carries each member's
+  `{ wave, task, pr, head }`.
+- **In the queue.** While a train forms or runs, its members show `merging` in the queue (the
+  entry's `train` names it) and `nextToMerge` never gives one of them the ordinary turn.
+- **The fence.** The train's PR merges only with a `TrainToken` over `{ train, pr, head,
+  release_branch, members: [{ task, head }] }`, minted by `mintTrainToken` once the train's
+  evidence is written (checked by identity, like a `MergeToken`). It allows exactly `gh pr merge
+  <n> --merge --match-head-commit <head>` for its PR and head: a merge commit, never `--squash`
+  (and a `MergeToken` never allows `--merge`), never `--admin`, `--auto`, `--rebase` or
+  `--delete-branch`. `mergeTrain(exec, token, cwd?)` reads the PR first, as `mergePr` does, and
+  refuses one retargeted away from the release branch, whose head moved, that is closed or a
+  draft, without merging; a refusal GitHub makes is classified as any merge's.
+
 ---
 
 ## The authority fence
@@ -3743,12 +3772,18 @@ DENY (never, consent or not):
   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force)
 
-MERGE (only with a MergeToken, `mintMergeToken`, minted by the pipeline's gate after the
-  evidence package is written, checked by identity like consent tokens): exactly
-    gh pr merge <n> --squash --match-head-commit <sha40> [--delete-branch]
-  with <n> the token's PR and <sha40> its gated head (GitHub refuses the merge if the head
-  moved since the gate). Never --admin, --auto, --merge or --rebase; the token unlocks nothing
-  else (git merge, push and rebase stay denied).
+MERGE (only with a token, checked by identity like consent tokens; either unlocks nothing else:
+  git merge, push and rebase stay denied). Never --admin, --auto or --rebase.
+  - a MergeToken (`mintMergeToken`, minted by the pipeline's gate after the evidence package is
+    written): exactly
+      gh pr merge <n> --squash --match-head-commit <sha40> [--delete-branch]
+    with <n> the token's PR and <sha40> its gated head (GitHub refuses the merge if the head
+    moved since the gate). Never --merge.
+  - a TrainToken (`mintTrainToken`, minted for a merge train after the train's evidence is
+    written): exactly
+      gh pr merge <n> --merge --match-head-commit <sha40>
+    with <n> the train's PR and <sha40> its gated head: a merge commit, so the member PRs, whose
+    heads it contains, read as merged. Never --squash.
 
 CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
 retire for the retired agent's own workspace only):

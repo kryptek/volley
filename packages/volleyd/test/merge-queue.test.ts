@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { RefusalReason } from "../src/autopilot/merge";
-import { dependents, nextToMerge, queueOf, refusalEndsTurn } from "../src/autopilot/merge-queue";
+import {
+  type QueueEntry,
+  dependents,
+  nextToMerge,
+  queueOf,
+  refusalEndsTurn,
+} from "../src/autopilot/merge-queue";
 import { type TaskPipeline, emptyPipeline, reducePipeline } from "../src/pipeline";
 import type { WaveRecord } from "../src/reducer";
 import type { TaskStage } from "../src/types";
@@ -193,5 +199,45 @@ describe("nextToMerge", () => {
       task: "T1",
     });
     expect(nextToMerge(queues, new Set(["/repo#release/r1"]))).toBeNull();
+  });
+});
+
+describe("the merge train in the queue", () => {
+  /** w1 with a train running over T1 and T2 (and an ended one over T4). */
+  function withTrain() {
+    const rec = record("w1", {
+      T1: { p: queued(1) },
+      T2: { p: queued(2) },
+      T3: { p: queued(3) },
+      T4: { p: queued(4) },
+    });
+    const state = rec.state as NonNullable<WaveRecord["state"]>;
+    state.trains = [
+      { id: "train-1", tasks: ["T4"], state: "failed", since: at(5) },
+      { id: "train-2", tasks: ["T1", "T2"], state: "integrating", since: at(6) },
+    ];
+    return rec;
+  }
+
+  it("shows a running train's members merging, with the train", () => {
+    expect(queueOf(withTrain()).map((e) => [e.task, e.state, e.train])).toEqual([
+      ["T1", "merging", "train-2"],
+      ["T2", "merging", "train-2"],
+      ["T3", "queued", undefined],
+      ["T4", "queued", undefined],
+    ]);
+  });
+
+  it("nextToMerge skips entries in a train", () => {
+    expect(nextToMerge({ b: queueOf(withTrain()) }, new Set())).toEqual({
+      branch: "b",
+      wave: "w1",
+      task: "T3",
+    });
+    const forming: QueueEntry[] = [
+      { wave: "w1", task: "T1", state: "queued", since: at(1), gated: true, train: "train-3" },
+      { wave: "w1", task: "T2", state: "queued", since: at(2), gated: true },
+    ];
+    expect(nextToMerge({ b: forming }, new Set())?.task).toBe("T2");
   });
 });
