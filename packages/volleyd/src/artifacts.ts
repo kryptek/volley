@@ -452,9 +452,7 @@ async function ciOn(
     }
   }
   const all =
-    jobs && (state === "running" || state === "green")
-      ? await runJobs(exec, cwd, own)
-      : null;
+    jobs && (state === "running" || state === "green") ? await runJobs(exec, cwd, own) : null;
   return {
     state,
     runs,
