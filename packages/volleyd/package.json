@@ -7,10 +7,12 @@
   "type": "module",
   "bin": { "volleyd": "./src/cli.ts" },
   "exports": {
-    "./claude/sharing": "./src/claude/sharing.ts"
+    "./claude/sharing": "./src/claude/sharing.ts",
+    "./paired-hosts": "./src/paired-hosts.ts"
   },
   "scripts": {
     "test": "vitest run",
+    "test:shard": "bun ../../scripts/test-shards.ts run",
     "test:soak": "vitest run --config vitest.soak.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

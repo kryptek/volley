@@ -16,6 +16,10 @@
  * credentials, the `volleyd inbox hold` command to copy). A held row shows the amber
  * `Held · waiting on T4 (#194) · 3 h` line and a Release button (`release { item }`); its
  * options still answer it.
+ *
+ * A handoff volleyd cannot type into its session's screen (the screen is another session's, or
+ * volleyd cannot see it) offers **Send to mailbox**: the same answer as a mailbox message to the
+ * session, which reads it at its next turn.
  */
 import { CenterFocusIcon, EyeIcon, ViewOffIcon } from "@hugeicons/core-free-icons";
 import { type ReactNode, useState } from "react";
@@ -33,6 +37,8 @@ import { ReleaseItem, type ReleaseItemProps } from "./ReleaseItem";
 import { whereLabel } from "./inboxFilters";
 
 const REFUSED_ANSWERED = /^already answered on (.+)$/;
+/** volleyd could not reach the session's screen: another session's, or one it cannot see. */
+const REFUSED_SCREEN = /'s screen/;
 
 /** The CLI fallback for a Desk without broker credentials (D4's copyable-command pattern). */
 export function answerCommand(id: string, answer: string): string {
@@ -85,12 +91,14 @@ export interface InboxRowProps {
   onGoTo?: (() => void) | undefined;
   onShow?: (() => void) | undefined;
   onDismiss: () => void;
+  /** Deliver `text` to the item's session as a mailbox message; null without credentials. */
+  mailbox?: ((text: string) => void) | null | undefined;
 }
 
 type Sent =
   | { state: "idle" }
   | { state: "sending"; answer: string }
-  | { state: "error"; error: string }
+  | { state: "error"; error: string; answer: string }
   | { state: "answered"; label: string };
 
 export function InboxRow(p: InboxRowProps) {
@@ -124,9 +132,17 @@ export function InboxRow(p: InboxRowProps) {
     setSent(
       REFUSED_ANSWERED.test(error)
         ? { state: "answered", label: error }
-        : { state: "error", error },
+        : { state: "error", error, answer },
     );
   };
+
+  const toMailbox =
+    sent.state === "error" &&
+    item.kind === "handoff" &&
+    p.mailbox &&
+    REFUSED_SCREEN.test(sent.error)
+      ? { mailbox: p.mailbox, answer: sent.answer }
+      : null;
 
   /** `hold { item, on }` or `release { item }` through volleyd; the retained item follows. */
   const holdOp = async (op: "hold" | "release", on?: HeldOn): Promise<boolean> => {
@@ -278,6 +294,22 @@ export function InboxRow(p: InboxRowProps) {
           <p className="inbox-error" role="alert">
             {sent.error}
           </p>
+        )}
+        {toMailbox !== null && (
+          <button
+            type="button"
+            className={`coord-btn ${btn}`}
+            onClick={() => {
+              toMailbox.mailbox(toMailbox.answer);
+              setOther(null);
+              setSent({
+                state: "answered",
+                label: `sent to ${item.agent_id}'s mailbox · ${toMailbox.answer}`,
+              });
+            }}
+          >
+            Send to mailbox
+          </button>
         )}
         {command !== null && (
           <div className="inbox-cmd">
