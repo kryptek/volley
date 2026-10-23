@@ -33,6 +33,7 @@ const config: ConfigPayload = {
     incident_wait_max_s: 14_400,
     fix_flake_max: 3,
     digest_min_interval_s: 1800,
+    merge_train: true,
   },
 };
 

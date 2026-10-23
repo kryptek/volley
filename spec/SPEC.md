@@ -373,6 +373,7 @@ A decision is a question only a human (or the owning coordinator) can answer. It
 - `release_go` — wave-level, offers `go` and `hold`, and carries `stages` (each playbook stage as `{ name, evidence? }`, `evidence` being where its evidence lives); §4.6.19.
 - `stage_go` — wave-level, offers `go`, `skip` and `hold`, and carries `stage` (the owner-gated stage it asks about) and `stages` (the stages verified before it, as `release_go`'s); §4.6.19.
 - `terminal_status_lost` — an agent's terminal status (`done` | `failed`) the supervisor could not hand to its pipeline, even on recovery; carries `agent_id`, `role`, `status`, `status_at` and `why`, does not park the task, and offers `accept done` (apply the published status, `done` or `failed`, as if it had just arrived) and, where the supervisor can spawn the role, `relaunch`.
+- `churn_exhausted` — task-level; a task's churn spawns (respawns, rebases and fixups an overlap forced) ran out; carries `cluster`, `churn` and `roles`, with the options `hold cluster`, `continue` and `cancel`.
 <!-- /spec-list -->
 
 A decision that offers `respawn` for an agent whose host is down or not eligible (§4.6.15) also offers `respawn on <best>`, `<best>` being the best eligible machine when it opened; on a host closed to new agents it offers `respawn on <best>` instead of `respawn`.
@@ -499,6 +500,11 @@ A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out
 - `repo_removed` — `{ by, slug, machines, clones }`, in `_system` (§4.6.21)
 - `repo_clone_run` — `{ machine, slug, ok, cloned, path?, error? }`, in `_system` (§4.6.21)
 - `repo_trusted` — `{ machine, repo, root, accounts, keys }`, in `_system` (§4.6.21)
+- `wave_planned` — `{ clusters }`, as the wave state's `overlap_plan` carries them: the overlap plan for the wave's version
+- `cluster_strategy_changed` — `{ cluster, from, to, why }`: a cluster of the overlap plan changed how it runs
+- `train_started` — `{ train, tasks, heads, release_sha }`: a merge train integrates its tasks' gated heads onto the release branch
+- `train_merged` — `{ train, pr, merge_sha, tasks }`: a merge train merged, landing its tasks
+- `train_failed` — `{ train, why, tasks }`: a merge train failed; its tasks go back to the merge queue
 <!-- /spec-list -->
 
 #### 4.6.4 Supervisor config
@@ -587,6 +593,7 @@ A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out
 - `autopilot.incident_wait_max_s` — default 14400, 60..86400: how long a red head classified as an infra incident is held before its `ci_failed` decision (§4.6.16).
 - `autopilot.fix_flake_max` — default 3, 0..20: the flake fixers one wave may add (§4.6.16).
 - `autopilot.digest_min_interval_s` — default 1800, 0..86400 (§4.6.16).
+- `autopilot.merge_train` — boolean, default `true`: the merge queue gates and merges up to four gated PRs as one train.
 <!-- /spec-list -->
 
 A boolean has no bounds; an enum (`nudge_on_merge`) is bounded by its values.

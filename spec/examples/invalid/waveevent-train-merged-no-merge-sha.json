@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-23T09:00:00.000Z",
+  "channel": "_waves/events",
+  "type": "train_merged",
+  "payload": {
+    "wave": "w1",
+    "seq": 188,
+    "at": "2026-10-23T09:00:00.000Z",
+    "data": {
+      "train": "train-1",
+      "pr": 212,
+      "tasks": [
+        "T1",
+        "T2",
+        "T4"
+      ]
+    }
+  }
+}

@@ -174,8 +174,37 @@
         "files": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 },
-          "description": "Scheduling hint: paths or globs the task is expected to touch; overlapping tasks are started later."
-        }
+          "description": "Scheduling hint: paths or globs the task is expected to touch; overlapping tasks are started later. The task's footprint (T1); written by the planner."
+        },
+        "issues": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1 },
+          "description": "Every GitHub issue the task closes, when it bundles several; must contain issue (the parser enforces it)."
+        },
+        "footprint": { "$ref": "#/$defs/footprint" },
+        "plan": { "$ref": "#/$defs/taskPlan" }
+      }
+    },
+    "footprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["confidence"],
+      "description": "How the task's files were found: listed (its issue lists them), resolved (bare names resolved against the tree), guessed (inferred), none (unknown). unresolved: the names that matched no path.",
+      "properties": {
+        "confidence": { "enum": ["listed", "resolved", "guessed", "none"] },
+        "unresolved": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "taskPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Where the overlap plan put the task: its cluster, how the cluster is run (collapse: bundled into one task; chain: after another; cap: a limit on the cluster's tasks in flight; independent: no overlap) and why.",
+      "properties": {
+        "cluster": { "type": "string", "minLength": 1 },
+        "by": { "enum": ["collapse", "chain", "cap", "independent"] },
+        "why": { "type": "string" }
       }
     }
   }

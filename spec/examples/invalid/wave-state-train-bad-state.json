@@ -1,0 +1,241 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-18T14:02:11.000Z",
+  "channel": "_waves/state",
+  "type": "wave_state",
+  "payload": {
+    "wave": "w1",
+    "version": 1,
+    "owner": "coordinator-ab12",
+    "repo": "example-org/example-repo",
+    "release_branch": "release/2026-10-18-example",
+    "status": "running",
+    "tasks": [
+      {
+        "id": "T1",
+        "issue": 101,
+        "stage": "done",
+        "agents": {
+          "implementer": "w1-t1-implementer-1"
+        },
+        "cluster": "c1"
+      },
+      {
+        "id": "T2",
+        "issue": 102,
+        "stage": "merge_ready",
+        "agents": {
+          "implementer": "w1-t2-implementer-1"
+        },
+        "pr": {
+          "number": 8,
+          "url": "https://github.com/example-org/example-repo/pull/8",
+          "head_sha": "5be0c2a1f9d4",
+          "ci": "green"
+        },
+        "evidence_path": "waves/w1/evidence/T2.md",
+        "cluster": "c1",
+        "churn": 2
+      },
+      {
+        "id": "T3",
+        "issue": 103,
+        "stage": "queued",
+        "agents": {},
+        "cluster": "c2",
+        "why_waiting": "cluster c2 is held: its churn budget ran out (T3 and T5 both edit packages/volleyd/src/daemon.ts)"
+      },
+      {
+        "id": "T4",
+        "issue": 104,
+        "stage": "merge_ready",
+        "agents": {
+          "implementer": "w1-t4-implementer-1"
+        },
+        "evidence_path": "waves/w1/evidence/T4.md",
+        "cluster": "c1"
+      },
+      {
+        "id": "train-1",
+        "issue": 0,
+        "stage": "implement",
+        "agents": {},
+        "synthetic": true,
+        "train": {
+          "members": [
+            {
+              "task": "T2",
+              "pr": 8,
+              "head": "5be0c2a1f9d4"
+            },
+            {
+              "task": "T4",
+              "pr": 10,
+              "head": "8c1d2e3f4a5b"
+            }
+          ]
+        }
+      }
+    ],
+    "open_decisions": [],
+    "gates": [
+      "T2",
+      "T4"
+    ],
+    "spec": {
+      "version": 1,
+      "release_branch": "release/2026-10-18-example",
+      "model": "claude-opus-5-5",
+      "pipeline": [
+        "implement",
+        [
+          "spec_review",
+          "quality_review"
+        ],
+        "fixup",
+        "merge_ready"
+      ],
+      "tasks": {
+        "T1": {
+          "issue": 101,
+          "title": "SPEC + schemas",
+          "after": []
+        },
+        "T2": {
+          "issue": 102,
+          "title": "Hooks package",
+          "after": [],
+          "issues": [
+            102,
+            105
+          ],
+          "files": [
+            "packages/volley-hooks/src/hooks.ts"
+          ],
+          "footprint": {
+            "confidence": "listed"
+          },
+          "plan": {
+            "cluster": "c1",
+            "by": "collapse",
+            "why": "#102 and #105 both rewrite hooks.ts"
+          }
+        },
+        "T3": {
+          "issue": 103,
+          "title": "Daemon foundation",
+          "after": []
+        },
+        "T4": {
+          "issue": 104,
+          "title": "CLI",
+          "after": [
+            "T1"
+          ],
+          "files": [
+            "spec/SPEC.md"
+          ],
+          "footprint": {
+            "confidence": "guessed",
+            "unresolved": [
+              "cli"
+            ]
+          },
+          "plan": {
+            "cluster": "c1",
+            "by": "chain"
+          }
+        }
+      }
+    },
+    "coordinator": {
+      "agent_id": "coordinator-ab12",
+      "state": "working",
+      "last_seen": "2026-10-18T14:02:00.000Z"
+    },
+    "effective_config": {
+      "hard_ceiling": 12,
+      "spawn_budget_multiplier": 3
+    },
+    "brief_preface": {
+      "path": "/srv/example-repo/.volley/brief-preface.md",
+      "sha256": "3f8a1c6e0b9d2f47a5e8c1d06b3e9f2a7c4d8e1f0a6b5c2d9e3f7a1b8c4d0e6f",
+      "bytes": 912
+    },
+    "updated_at": "2026-10-18T14:02:11.000Z",
+    "overlap_plan": {
+      "clusters": [
+        {
+          "id": "c1",
+          "tasks": [
+            "T1",
+            "T2",
+            "T4"
+          ],
+          "hot": [
+            {
+              "file": "spec/SPEC.md",
+              "bytes": 182340,
+              "shared_by": [
+                "T1",
+                "T4"
+              ]
+            }
+          ],
+          "strategy": {
+            "collapse": [
+              [
+                "T2"
+              ]
+            ],
+            "chain": [
+              [
+                "T1",
+                "T4"
+              ]
+            ]
+          },
+          "state": "train",
+          "why": "T1 and T4 both edit spec/SPEC.md; T4 starts once T1 merges"
+        },
+        {
+          "id": "c2",
+          "tasks": [
+            "T3"
+          ],
+          "hot": [
+            {
+              "file": "packages/volleyd/src/daemon.ts",
+              "bytes": 401220,
+              "shared_by": [
+                "T3"
+              ]
+            }
+          ],
+          "strategy": {
+            "cap": 1
+          },
+          "state": "hold",
+          "why": "churn budget ran out"
+        }
+      ]
+    },
+    "spawns": {
+      "productive": 6,
+      "churn": 3
+    },
+    "trains": [
+      {
+        "id": "train-1",
+        "pr": 12,
+        "tasks": [
+          "T2",
+          "T4"
+        ],
+        "state": "queued",
+        "since": "2026-10-18T14:00:00.000Z"
+      }
+    ]
+  }
+}

@@ -93,6 +93,7 @@ export const CONFIG_DEFAULTS: Tunables = {
     incident_wait_max_s: 14_400,
     fix_flake_max: 3,
     digest_min_interval_s: 1800,
+    merge_train: true,
   },
   // --- Archiving (SPEC §4.6.20) ---
   archive_ended_after_h: 24,
@@ -390,4 +391,19 @@ export const DAEMON_DEFAULTS = {
   // --- Fleet: merge nudge (overlap.ts) ---
   /** Touched files a merge nudge names before "and N more" (`merge_nudge_sent` keeps them all). */
   nudge_files_shown: 5,
+  // --- Overlap-aware waves: the planner (overlap-plan.ts) and the merge train ---
+  /** Issues one collapsed task bundles at most: past it the bundle's PR is too big to review. */
+  plan_bundle_issues_max: 4,
+  /** Footprint files one collapsed task covers at most, for the same reason. */
+  plan_bundle_files_max: 16,
+  /** Two tasks sharing at least this share of their footprints are strongly coupled (collapse or chain). */
+  plan_coupling_strong: 0.5,
+  /** A cluster's tasks in flight at once under `cap`: more only churn on its hot files. */
+  plan_cluster_in_flight_max: 4,
+  /** Weight of a shared doc file (`*.md`, `docs/`) against a code file: docs merge cleanly more often. */
+  plan_doc_weight: 0.2,
+  /** Gated PRs one merge train carries at most (`autopilot.merge_train`): a red train bisects them. */
+  train_size_max: 4,
+  /** Churn spawns a task may have, as a multiple of its pipeline roles, before `churn_exhausted`. */
+  churn_roles_multiple_max: 3,
 } as const;

@@ -49,7 +49,8 @@
                 "merge_refused",
                 "release_go",
                 "stage_go",
-                "terminal_status_lost"
+                "terminal_status_lost",
+                "churn_exhausted"
               ]
             },
             "question": { "type": "string", "minLength": 1 },
@@ -214,6 +215,28 @@
               "enum": ["down", "draining", "removing", "removed"],
               "description": "machine_down: what is wrong with the host (absent: down). draining, removing and removed: nothing new starts there (spec section 4.6.15)."
             },
+            "cluster": {
+              "type": "string",
+              "minLength": 1,
+              "description": "churn_exhausted: the overlap plan's cluster the task is in."
+            },
+            "churn": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "churn_exhausted: the task's churn spawns so far (respawns, rebases and fixups an overlap forced)."
+            },
+            "roles": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 },
+              "description": "churn_exhausted: the roles that churned."
+            },
+            "train": {
+              "type": "string",
+              "pattern": "^train-[1-9][0-9]{0,8}$",
+              "description": "merge_conflict: the merge train whose integration hit the conflict."
+            },
             "resolved": {
               "type": "object",
               "required": ["answer", "by", "at"],
@@ -239,6 +262,16 @@
               },
               "then": {
                 "required": ["agent_id", "role", "acct", "window", "pct", "resets_at", "suggested"],
+                "properties": { "task": { "type": "string" } }
+              }
+            },
+            {
+              "if": {
+                "properties": { "kind": { "const": "churn_exhausted" } },
+                "required": ["kind"]
+              },
+              "then": {
+                "required": ["cluster", "churn", "roles"],
                 "properties": { "task": { "type": "string" } }
               }
             }

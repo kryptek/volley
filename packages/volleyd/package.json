@@ -9,6 +9,8 @@
   "exports": {
     "./claude/sharing": "./src/claude/sharing.ts",
     "./config-defaults": "./src/config-defaults.ts",
+    "./footprint": "./src/footprint.ts",
+    "./overlap-plan": "./src/overlap-plan.ts",
     "./paired-hosts": "./src/paired-hosts.ts",
     "./procs": "./src/procs.ts",
     "./repos": "./src/repos.ts"

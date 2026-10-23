@@ -1,0 +1,29 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-23T11:00:00.000Z",
+  "channel": "_waves/decisions",
+  "type": "decision_opened",
+  "payload": {
+    "decision_id": "w1-t2-churn_exhausted-1",
+    "wave": "w1",
+    "task": "T2",
+    "kind": "churn_exhausted",
+    "question": "T2 has spawned 7 churn agents (conflict respawns and rebases) in cluster c1. Hold the cluster, continue, or cancel T2?",
+    "options": [
+      "hold cluster",
+      "continue",
+      "cancel"
+    ],
+    "pointers": {
+      "pr": "https://github.com/example-org/example-repo/pull/203"
+    },
+    "opened_at": "2026-10-23T11:00:00.000Z",
+    "churn": 7,
+    "roles": [
+      "implementer",
+      "fixup",
+      "rebase"
+    ]
+  }
+}
