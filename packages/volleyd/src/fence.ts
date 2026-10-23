@@ -65,6 +65,13 @@ import { AGENT_BRANCH } from "./worktree";
  *   gh issue view · gh repo view · gh pr view | list | checks · gh run list | view | watch ·
  *     gh api (GET only; a relative endpoint — never a URL — and never graphql in any path
  *     segment; no request headers)
+ *   the issue lifecycle (autopilot/issues.ts), exactly, <n> a positive issue number:
+ *     gh issue edit <n> --add-label merged-to-release | --remove-label merged-to-release ·
+ *     gh issue comment <n> --body <text> · gh issue close <n> --comment <text> (<text> carrying
+ *     a `<!-- volleyd:… wave=… -->` marker: only volleyd's own comments) ·
+ *     gh label list --search merged-to-release --json name ·
+ *     gh label create merged-to-release --description <text> --color <6 hex> (never --force);
+ *     never on a paired machine
  *   cmux — exact argv shapes only, because cmux types into an agent's shell:
  *     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
  *       with the LaunchToken of the `.volley/launch.sh` volleyd sealed in exactly <dir>
@@ -1362,10 +1369,60 @@ function git(args: string[]): Verdict {
   return v.kind === "allow" && sub === "fetch" ? fetchPositionals(rest) : v;
 }
 
+/** An issue number as gh takes it: a positive decimal, never an option. */
+const ISSUE_NUMBER = /^[1-9][0-9]{0,8}$/;
+
+/** The one label volleyd adds, removes and creates (the issue lifecycle, autopilot/issues.ts). */
+const LIFECYCLE_LABEL = "merged-to-release";
+
+/** The marker every comment volleyd writes on an issue ends with, on a line of its own (autopilot/issues.ts). */
+const COMMENT_MARKER = /\n\n<!-- volleyd:[a-z-]+ wave=[a-z0-9][a-z0-9_-]{0,62}( pr=[0-9]+)? -->$/;
+
+/**
+ * The issue lifecycle's writes (#416), each an exact argv: the label added or removed, a comment
+ * or a closing comment that carries volleyd's marker, the label listed or created. Null: not one
+ * of them (the read-only allow-list decides).
+ */
+function issueLifecycle(args: string[]): Verdict | null {
+  const [verb = "", sub = "", n = "", flag = "", value = ""] = args;
+  const two = `${verb} ${sub}`;
+  if (two === "issue edit" || two === "issue comment" || two === "issue close") {
+    const shape =
+      args.length === 5 &&
+      ISSUE_NUMBER.test(n) &&
+      (two === "issue edit"
+        ? (flag === "--add-label" || flag === "--remove-label") && value === LIFECYCLE_LABEL
+        : flag === (two === "issue comment" ? "--body" : "--comment") &&
+          COMMENT_MARKER.test(value));
+    return shape ? ALLOW : deny(`gh ${two} (only the issue lifecycle's exact forms)`);
+  }
+  if (two === "label list")
+    return args.length === 6 &&
+      n === "--search" &&
+      flag === LIFECYCLE_LABEL &&
+      value === "--json" &&
+      args[5] === "name"
+      ? ALLOW
+      : deny("gh label list (only --search merged-to-release --json name)");
+  if (two === "label create")
+    return args.length === 7 &&
+      n === LIFECYCLE_LABEL &&
+      flag === "--description" &&
+      value !== "" &&
+      !value.startsWith("-") &&
+      args[5] === "--color" &&
+      /^[0-9a-f]{6}$/.test(args[6] ?? "")
+      ? ALLOW
+      : deny("gh label create (only merged-to-release, with a description and a hex color)");
+  return null;
+}
+
 function gh(args: string[], opts: FenceOptions): Verdict {
   const two = args.slice(0, 2).join(" ");
   if (two === "pr merge") return mergeVerdict(args, opts.merge);
   if (two === "pr ready") return readyVerdict(args.slice(2));
+  const lifecycle = issueLifecycle(args);
+  if (lifecycle !== null) return lifecycle;
   if (two === "workflow run" || two === "repo delete") return deny(`gh ${two}`);
   if (args[0] === "api") {
     const v = checkArgs("gh api", args.slice(1), {
@@ -2047,7 +2104,11 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
       // run list): verifying an agent's PR on a paired machine reads them there. No `gh api` at all
       // on a remote box; merges, workflow runs and deletes stay denied (no tokens: a merge is
       // never authorized on a paired machine).
-      return args[0] === "api" ? deny("gh api (not on a remote machine)") : gh(args, {});
+      // The issue lifecycle's writes run on the supervisor's own machine only.
+      if (args[0] === "api") return deny("gh api (not on a remote machine)");
+      return issueLifecycle(args) !== null
+        ? deny(`gh ${args.slice(0, 2).join(" ")} (not on a remote machine)`)
+        : gh(args, {});
     case "tmux":
       return tmux(args, opts);
     case "mkdir":
