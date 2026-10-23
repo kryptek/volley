@@ -372,8 +372,9 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
   {
     policy: "merge_refused/draft",
     kinds: ["merge_refused"],
-    condition: "the last refusal: the PR is a draft (reason: draft)",
-    when: (d) => d.reason === "draft",
+    condition:
+      "the last refusal: the PR is a draft (reason: draft) and marking it ready has not failed (no ready_failed)",
+    when: (d) => d.reason === "draft" && d.ready_failed !== true,
     answer: "retry",
     rationale:
       "a draft is marked ready and merged once the CI that starts then passes; a retry does exactly that",

@@ -461,6 +461,7 @@ const ALLOWED: string[][] = [
   ],
   ["gh", "run", "list", "--branch=release/x", "--limit", "20"],
   ["gh", "run", "view", "123", "--log-failed"],
+  ["gh", "run", "view", "99", "--json", "jobs"],
   ["gh", "run", "watch", "123", "--exit-status"],
   ["gh", "pr", "ready", "12"],
   ["gh", "pr", "ready", "12", "--repo", "o/r"],

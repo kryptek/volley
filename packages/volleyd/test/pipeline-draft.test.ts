@@ -123,7 +123,7 @@ describe("a draft PR at the CI gate (#408)", () => {
 
 describe("autopilot merge of a draft PR (#408)", () => {
   /** Gated on H (not a draft), then made a draft before its merge turn. */
-  async function draftAtMerge() {
+  async function draftAtMerge(before?: () => void) {
     h = pipelineHarness({ pipeline: "[implement, merge_ready]", merge: "auto" });
     await h.start();
     h.openPr(H);
@@ -132,6 +132,7 @@ describe("autopilot merge of a draft PR (#408)", () => {
     expect(h.task()?.stage).toBe("merge_ready");
     const pr = h.world.prs[0];
     if (pr !== undefined) pr.isDraft = true;
+    before?.();
     await h.tick();
   }
 
@@ -210,6 +211,57 @@ describe("autopilot merge of a draft PR (#408)", () => {
     expect((d as unknown as { pipeline: { on: string } }).pipeline.on).toBe("ready_ci");
     expect(h.task()?.stage).toBe("awaiting_decision");
     expect(mergeCalls()).toEqual([]);
+  });
+
+  it("no run yet after the mark, inside its grace: held, not merged (the CI it starts is awaited)", async () => {
+    // A head with no run at all once it is a draft again (workflows on ready_for_review only).
+    await draftAtMerge(() => {
+      h.world.ciRuns[H] = [];
+    });
+    expect(readyCalls()).toEqual([["gh", "pr", "ready", "7"]]);
+    // GitHub has not created the runs the mark starts yet: the gate holds, never green on `none`.
+    for (let i = 0; i < 3; i++) await due();
+    expect(mergeCalls()).toEqual([]);
+    expect(of("ci_green").some((e) => e.data.role === "gate")).toBe(false);
+    expect(h.record().pipeline.T1?.ci_hold).toMatchObject({ role: "gate", sha: H });
+    expect(h.task()?.why_waiting).toBe(`CI pending on ${H.slice(0, 7)} (no run yet)`);
+    // The run the mark started passes: merged.
+    h.world.ciRuns[H] = [
+      {
+        id: 904,
+        workflow: "CI",
+        status: "completed",
+        conclusion: "success",
+        createdAt: afterMark(1_000),
+      },
+    ];
+    for (let i = 0; i < 3; i++) await due();
+    expect(mergeCalls()).toHaveLength(1);
+  });
+
+  it("`gh pr ready` keeps failing: the refusals count, then the owner is asked (no auto retry)", async () => {
+    // The first refusal is free; its mark fails, and so does every one after it.
+    await draftAtMerge(() => {
+      h.world.readyError =
+        "GraphQL: Resource not accessible by integration (markPullRequestReadyForReview)";
+    });
+    for (let i = 0; i < 8; i++) await due();
+    expect(mergeCalls()).toEqual([]);
+    expect(of("pr_marked_ready").length).toBeLessThanOrEqual(1);
+    const [d] = h.openDecisions();
+    expect(d).toMatchObject({ kind: "merge_refused" });
+    expect(d?.question).toContain("marking the draft ready did not succeed");
+    const opened = of("decision_opened").find((e) => e.data.kind === "merge_refused");
+    expect(opened?.data).toMatchObject({ reason: "draft", ready_failed: true });
+    // The merge_refused/draft row (retry) does not answer it: marking it ready already failed.
+    const row = POLICY_TABLE.find((r) => r.policy === "merge_refused/draft");
+    expect(row?.when?.(opened?.data as never, {} as never)).toBe(false);
+    // Bounded: no further refusals while the owner decides.
+    const refusals = of("alarm_raised").filter((e) => e.data.alarm === "merge_refused").length;
+    for (let i = 0; i < 4; i++) await due();
+    expect(of("alarm_raised").filter((e) => e.data.alarm === "merge_refused")).toHaveLength(
+      refusals,
+    );
   });
 
   it("the autopilot policy table has the merge_refused/draft row", () => {

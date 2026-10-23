@@ -978,7 +978,7 @@ autopilot: on
     ci_failed/owner: a red head no rule routes and a repository without workflows are the owner's
   merge_conflict · within respawn_max per task/role · respawn · respawn_max per <task>/<role> · max 1
     merge_conflict/respawn: a fresh rebase (or merge) agent retries the update; a conflict it cannot resolve either is the owner's
-  merge_refused · the last refusal: the PR is a draft (reason: draft) · retry · no budget
+  merge_refused · the last refusal: the PR is a draft (reason: draft) and marking it ready has not failed (no ready_failed) · retry · no budget
     merge_refused/draft: a draft is marked ready and merged once the CI that starts then passes; a retry does exactly that
   pr_closed, remote_repo_missing · always · escalate no_policy · no budget
     pr/owner: where the work went, or a clone that is missing, is the owner's call
@@ -3057,14 +3057,25 @@ own head that still conflicts waits like any head with no CI (past the grace the
 the PR still conflicts with the release branch). `mergeable: UNKNOWN` (GitHub still
 computing) counts as running: re-polled, no clock. The hold is visible: entering it (and
 every change of head or counts) journals `ci_pending { role, sha, checks: { done, total },
-next_poll_at, pr }`, the task's `why_waiting` reads `CI pending on <sha7> (n/m checks)` and its
+next_poll_at, pr }`, the task's `why_waiting` reads `CI pending on <sha7> (n/m runs)` and its
 `pr` carries `{ number, head_sha, ci: running, checks }` (what `volleyd status --json` prints);
-CI green journals `ci_green` and clears it.
+CI green journals `ci_green` and clears it. When the head's jobs can be read (`gh run view <id>
+--json jobs`, one call per run, while it runs and once it is green), the hold counts jobs, not
+runs (#415): `ci_pending` also carries `jobs: { done, total, running, failed, last_done_at?,
+slowest_s? }` and `eta_s`, and `why_waiting` reads `CI 3/13 · running: Backend IT shard 2–6/6 ·
+~8 min left` (shards collapse into a range; at most four names, then `+n more`; `failed: …`
+when a job failed while others run). The estimate is the slowest unfinished job's last duration
+in an earlier completed run of the same workflow in this wave, minus its elapsed time; volleyd
+keeps those durations in memory, so after a restart (or for a job it has not seen finish) there
+is no estimate and the `· ~… left` part is absent. A change of counts or of the running or
+failed jobs journals the hold again; a new estimate alone does not. The Desk shows the same
+line and, when no job finished for longer than `slowest_s`, `possibly stuck: no job finished
+for <n> min (the slowest usually takes <m>)`.
 
 **Reading CI.** A head's runs are read with one call that lists no workflows, `gh api
 repos/{owner}/{repo}/actions/runs?head_sha=<head>&per_page=50`, which volleyd runs itself in the
 wave repo (as it runs a merge), whatever machine the task is on; `gh run view <id> --json jobs`
-is read for failed runs only. Without a wave repo it falls back to `gh run list --commit` in the
+is read for failed runs, and for every run of a held or green head (its jobs, above). Without a wave repo it falls back to `gh run list --commit` in the
 task's worktree. An answer that cannot be read (a non-zero exit, output that is not JSON) is CI
 state `unknown`, never "no CI": it opens no decision, neither starts nor advances the
 `ci_none_grace_ms` clock, and is re-polled like running CI. The hold journals `ci_pending {
@@ -3325,8 +3336,12 @@ In an unattended wave the gate is where work stalls: every merge waited for a pe
   runs once `ci_none_grace_ms` passed. A merge refused as `draft` (the pre-merge read saw
   `isDraft`, or GitHub said `Pull Request is still a draft`) marks it ready the same way and
   holds the gated head at `merge_ready` (`ci_pending { role: gate }`) until that CI is green,
-  then merges; it never counts toward `merge_retry_max`. Red there opens `ci_failed` (`fixup`,
-  `re-verify` or `cancel`).
+  then merges; that first draft refusal never counts toward `merge_retry_max`. While no mark
+  has landed since (`gh pr ready` failed: a token without write scope, a `gh` error), each further
+  draft refusal at that head counts, so the owner is asked once they run out; that decision
+  carries `ready_failed: true`, which the `merge_refused/draft` row does not answer. Inside the
+  mark's `ci_none_grace_ms` a head with no run yet is held too (GitHub has not created the runs
+  the mark starts). Red there opens `ci_failed` (`fixup`, `re-verify` or `cancel`).
 - **When: the merge queue.** Nothing merges at the gate itself: the merge queue below gives one
   task at a time its turn.
 - **`autopilot.delete_branch`** (default `false`) adds `--delete-branch` to the merge.

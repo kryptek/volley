@@ -324,6 +324,24 @@
                 "done": { "type": "integer", "minimum": 0 },
                 "total": { "type": "integer", "minimum": 0 }
               }
+            },
+            "jobs": {
+              "type": "object",
+              "required": ["done", "total", "running", "failed"],
+              "description": "While held, when the head's jobs could be read: jobs completed and all of them, the running and failed job names, the last job's completion (the first job's start while none is done) and the slowest job's last duration in an earlier completed run of the wave.",
+              "properties": {
+                "done": { "type": "integer", "minimum": 0 },
+                "total": { "type": "integer", "minimum": 0 },
+                "running": { "type": "array", "items": { "type": "string" } },
+                "failed": { "type": "array", "items": { "type": "string" } },
+                "last_done_at": { "type": "string", "format": "date-time" },
+                "slowest_s": { "type": "integer", "minimum": 0 }
+              }
+            },
+            "eta_s": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "While held: the seconds left by the estimate when the hold was journaled (the slowest unfinished job's last duration minus its elapsed time); absent when there is no estimate."
             }
           }
         },

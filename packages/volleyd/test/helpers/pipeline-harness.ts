@@ -87,12 +87,22 @@ export interface World {
   prView: Record<number, Record<string, unknown>>;
   /** `gh run view <id> --json jobs` (default: one failed `test` job). */
   runJobs?: string;
+  /**
+   * `gh run view <id> --json jobs` per run id (overrides `runJobs`). Default for a run that is
+   * not red: one job named after its workflow, with the run's status and conclusion.
+   */
+  jobs: Record<
+    number,
+    { name: string; status: string; conclusion: string; startedAt?: string; completedAt?: string }[]
+  >;
   /** `gh run view <id> --log-failed`. */
   runLog: string;
   /** `gh run view <id> --log-failed` per run id (overrides `runLog`). */
   runLogs: Record<number, string>;
   /** `gh run list --branch <release>`: the release branch's runs, as JSON (default none). */
   releaseRuns: string;
+  /** Set: `gh pr ready` exits 1 with this stderr (the PR stays a draft). */
+  readyError?: string | undefined;
   /** Set: every read of a head's runs (`gh api …/actions/runs?head_sha=`, `gh run list --commit`) exits 1 with this stderr. */
   ciError?: string | undefined;
   /** Set: `gh run list --branch <release>` exits 1 with this stderr. */
@@ -214,6 +224,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     prs: [],
     ci: {},
     ciRuns: {},
+    jobs: {},
     releaseTip: sha(0xbea5e),
     mergeBase: {},
     prState: {},
@@ -239,6 +250,8 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     stderr: "",
     timedOut: false,
   });
+  /** The runs the last head-runs read listed, by id (the default `gh run view --json jobs`). */
+  const listed = new Map<number, { name: string; status: string; conclusion: string }>();
   const exec: ExecFn = async (argv, opts = {}) => {
     if (o.fence !== false) assertAllowed(argv, opts);
     calls.push([...argv]);
@@ -306,6 +319,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
       return out("");
     }
     if (a[0] === "gh" && a[1] === "pr" && a[2] === "ready") {
+      if (world.readyError !== undefined) return { ...out(""), code: 1, stderr: world.readyError };
       for (const pr of world.prs) if (pr.number === Number(a[3])) pr.isDraft = false;
       return out("");
     }
@@ -369,6 +383,7 @@ export function pipelineHarness(o: HarnessOptions = {}) {
                   createdAt: undefined as string | undefined,
                 },
               ];
+      for (const r of rows) listed.set(r.id, r);
       return out(
         JSON.stringify(
           rows.map((r) =>
@@ -401,7 +416,17 @@ export function pipelineHarness(o: HarnessOptions = {}) {
     }
     if (a[0] === "gh" && a[1] === "run" && a[2] === "view") {
       if (a.includes("--log-failed")) return out(world.runLogs[Number(a[3])] ?? world.runLog);
+      const id = Number(a[3]);
+      const own = world.jobs[id];
+      if (own !== undefined) return out(JSON.stringify({ jobs: own }));
       if (world.runJobs !== undefined) return out(world.runJobs);
+      const row = listed.get(id);
+      if (row !== undefined && !(row.status === "completed" && row.conclusion !== "success"))
+        return out(
+          JSON.stringify({
+            jobs: [{ name: row.name, status: row.status, conclusion: row.conclusion }],
+          }),
+        );
       return out(
         JSON.stringify({
           jobs: [

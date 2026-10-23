@@ -31,6 +31,7 @@ import { type GithubStatus, STATUS_UNKNOWN } from "./autopilot/github-status";
 import { type RefusalReason, isRefusalReason, mergePr } from "./autopilot/merge";
 import { type QueueEntry, nextToMerge, queueOf, refusalEndsTurn } from "./autopilot/merge-queue";
 import type { Role } from "./brief";
+import { type HoldJobs, holdJobs, noteJobTimes } from "./ci-jobs";
 import { systemClock } from "./clock";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "./config-defaults";
 import type { DecisionInput, DecisionRecord } from "./decisions";
@@ -226,6 +227,12 @@ export interface TaskPipeline {
   merge_refusal_reason?: RefusalReason | undefined;
   /** Extra attempts the owner granted (`merge_refused` answered `retry`). */
   merge_retries?: number;
+  /**
+   * The gated head whose draft refusal was free (it never used up an attempt) and has not been
+   * marked ready since: another draft refusal there counts, so a `gh pr ready` that keeps failing
+   * reaches the owner (#408).
+   */
+  draft_refused?: string | undefined;
   /** The owner answered a `merge_refused` decision `manual`: a human merges this task. */
   merge_manual?: boolean;
   /** When the task entered the merge queue (`merge_queued`), until it left it (`merge_dequeued`). */
@@ -292,6 +299,9 @@ export interface CiHold {
   role: Role | "moved" | "gate";
   sha: string;
   checks: { done: number; total: number };
+  /** The head's jobs, when they could be read (#415): `ci_pending.jobs` and `eta_s`. */
+  jobs?: Omit<HoldJobs, "eta_s">;
+  eta_s?: number;
   next_poll_at: string;
   pr?: { number: number; url: string };
   /**
@@ -606,6 +616,8 @@ export function reducePipeline(
           role,
           sha: d.sha,
           checks: d.checks as CiHold["checks"],
+          ...(d.jobs !== undefined ? { jobs: d.jobs as NonNullable<CiHold["jobs"]> } : {}),
+          ...(typeof d.eta_s === "number" ? { eta_s: d.eta_s } : {}),
           next_poll_at: String(d.next_poll_at),
           ...(d.pr !== undefined ? { pr: d.pr as NonNullable<CiHold["pr"]> } : {}),
           ...(d.reason === "infra_incident"
@@ -629,6 +641,7 @@ export function reducePipeline(
         (p.ready?.head !== d.head || p.ready.green === true)
       )
         p.ready = { head: d.head, at: d.at };
+      if (p.draft_refused === d.head) p.draft_refused = undefined;
       break;
     case "pr_conflicting": {
       // GitHub runs no CI on the head: no hold. The update step starts from it (never verified).
@@ -691,8 +704,12 @@ export function reducePipeline(
       if (d.alarm === "merge_refused" && d.head === p.gated?.at(-1)) {
         p.merge_refusals = (p.merge_refusals ?? 0) + 1;
         p.merge_refusal_reason = isRefusalReason(d.reason) ? d.reason : undefined;
-        // A draft is marked ready and merged once its CI passes: it never uses up an attempt.
-        if (d.reason === "draft") p.merge_retries = (p.merge_retries ?? 0) + 1;
+        // A draft is marked ready and merged once its CI passes: it never uses up an attempt,
+        // unless the mark after the last free one never landed.
+        if (d.reason === "draft" && p.draft_refused !== d.head) {
+          p.merge_retries = (p.merge_retries ?? 0) + 1;
+          p.draft_refused = String(d.head);
+        }
       }
       // volleyd's merge ended without merging (refused, or `gh` could not run).
       if (d.alarm === "merge_refused" || (d.alarm === "pipeline_error" && d.check === "merge"))
@@ -1433,7 +1450,9 @@ function onReadyCi(
 ): PipelineAction[] {
   if (v.stage !== "merge_ready" || !readyHeld(v) || ev.head !== v.p.head) return [];
   const { ci, head, pr } = ev;
-  if (ci.state === "green" || ci.state === "none")
+  // No run yet inside the mark's grace: GitHub has not created the runs the mark starts.
+  const awaited = ci.state === "none" && readyMark(v.p.ready, ev.at).ready !== undefined;
+  if (ci.state === "green" || (ci.state === "none" && !awaited))
     return [
       {
         kind: "journal",
@@ -1454,7 +1473,7 @@ function onReadyCi(
       v,
       "gate",
       head,
-      ci.runs,
+      ci,
       pr,
       ev.at,
       ci.state === "unknown" ? (ci.error ?? "") : undefined,
@@ -1501,7 +1520,11 @@ function mergeRefusedDecision(v: PipelineView): PipelineAction[] {
     0,
     DAEMON_DEFAULTS.decision_output_chars,
   );
-  const why = `GitHub refused to merge PR #${pr.number} at ${head.slice(0, 12)} ${v.p.merge_refusals ?? 0} time(s)${last !== "" ? ` (last: ${last})` : ""}`;
+  // A draft refused again with no mark since the free refusal: `gh pr ready` did not take.
+  const readyFailed = v.p.merge_refusal_reason === "draft" && v.p.draft_refused === head;
+  const readyErr = v.p.alarms?.pipeline_error;
+  const readyWhy = readyErr?.check === "pr_ready" ? `: ${String(readyErr.message ?? "")}` : "";
+  const why = `GitHub refused to merge PR #${pr.number} at ${head.slice(0, 12)} ${v.p.merge_refusals ?? 0} time(s)${last !== "" ? ` (last: ${last})` : ""}${readyFailed ? `; marking the draft ready did not succeed${readyWhy}`.slice(0, DAEMON_DEFAULTS.decision_output_chars) : ""}`;
   return [
     // Escalated: the task leaves the gate (a decision cannot park a gated task) until answered.
     {
@@ -1519,8 +1542,14 @@ function mergeRefusedDecision(v: PipelineView): PipelineAction[] {
         options: ["retry", "manual", "cancel"],
       },
       // The last refusal's reason: a draft's retry marks it ready first (merge_refused/draft).
+      // `ready_failed`: that retry already failed; the owner answers (merge_refused/draft is out).
       ...(v.p.merge_refusal_reason !== undefined
-        ? { data: { reason: v.p.merge_refusal_reason } }
+        ? {
+            data: {
+              reason: v.p.merge_refusal_reason,
+              ...(readyFailed ? { ready_failed: true } : {}),
+            },
+          }
         : {}),
     },
   ];
@@ -1618,7 +1647,7 @@ function onMovedCi(
       v,
       "moved",
       ev.to,
-      ci.runs,
+      { runs: ci.runs },
       ev.pr,
       ev.at,
       ci.state === "unknown" ? (ci.error ?? "") : undefined,
@@ -2163,32 +2192,45 @@ function ciPending(
   const { number, url } = ev.report.pr;
   const ci = ev.report.ci;
   const unreadable = ci.state === "unknown" ? (ci.error ?? "") : undefined;
-  return holdFor(v, ev.role, head, ci.runs, { number, url }, ev.at, unreadable);
+  return holdFor(v, ev.role, head, ci, { number, url }, ev.at, unreadable);
 }
 
 /**
- * Journal `ci_pending` for `role`'s head (once per change of head, counts or readability; an
- * unreadable answer's error text, which may carry request ids, is not a change).
- * `unreadable`: the runs could not be read (why): the hold says `reason: ci_unreadable`.
+ * Journal `ci_pending` for `role`'s head (once per change of head, counts, running or failed jobs
+ * or readability; an unreadable answer's error text, which may carry request ids, is not a
+ * change, nor is a new estimate alone). `unreadable`: the runs could not be read (why): the hold
+ * says `reason: ci_unreadable`. `ci.hold_jobs` (the driver's): the head's jobs, with `eta_s`.
  */
 function holdFor(
   v: PipelineView,
   role: Role | "moved" | "gate",
   head: string,
-  runs: CiRun[],
+  ci: Pick<CiFacts, "runs" | "hold_jobs">,
   pr: { number: number; url: string },
   at: number | undefined,
   unreadable?: string,
 ): PipelineAction[] {
+  const { runs } = ci;
   const checks = { done: runs.filter((r) => r.status === "completed").length, total: runs.length };
+  const read = unreadable === undefined ? ci.hold_jobs : undefined;
+  const { eta_s, ...jobs } = read ?? { eta_s: undefined };
   const hold = v.p.ci_hold;
   const reason = unreadable !== undefined ? "ci_unreadable" : undefined;
+  const sameJobs = (a: CiHold["jobs"], b: CiHold["jobs"]) =>
+    a === undefined || b === undefined
+      ? a === b
+      : a.done === b.done &&
+        a.total === b.total &&
+        a.running.join("\n") === b.running.join("\n") &&
+        a.failed.join("\n") === b.failed.join("\n");
   if (
     hold?.role === role &&
     hold.sha === head &&
     hold.reason === reason &&
     (unreadable !== undefined ||
-      (hold.checks.done === checks.done && hold.checks.total === checks.total))
+      (hold.checks.done === checks.done &&
+        hold.checks.total === checks.total &&
+        sameJobs(hold.jobs, read !== undefined ? (jobs as CiHold["jobs"]) : undefined)))
   )
     return [];
   return [
@@ -2201,6 +2243,8 @@ function holdFor(
           role,
           sha: head,
           checks,
+          ...(read !== undefined ? { jobs } : {}),
+          ...(eta_s !== undefined ? { eta_s } : {}),
           ...(at !== undefined
             ? { next_poll_at: new Date(at + DAEMON_DEFAULTS.ci_poll_ms).toISOString() }
             : {}),
@@ -3630,6 +3674,11 @@ export class PipelineDriver {
    * whose probe met it, which carries the `github_rate_limited` alarm until a probe succeeds.
    */
   private readonly ciBackoff = new Map<string, { retry_at: number; task: TaskId }>();
+  /**
+   * The last duration in seconds of each `<workflow>/<job>` in a completed run of this wave
+   * (process-local: after a restart there is no estimate until a run completes again), #415.
+   */
+  private readonly jobSecs = new Map<string, number>();
   /** Checks whose I/O is running beside the queue, by `<task>/<what>[/<agent>]`; one per key. */
   private readonly inflight = new Set<string>();
   /** Every check until its result has been folded back in (what `settled` waits for). */
@@ -4287,8 +4336,15 @@ export class PipelineDriver {
    */
   private async noteCi(
     task: TaskId,
-    ci: { state: CiState; error?: string; rate_limited?: RateLimited },
+    ci: { state: CiState; error?: string; rate_limited?: RateLimited } & Partial<
+      Pick<CiFacts, "jobs" | "hold_jobs">
+    >,
   ): Promise<void> {
+    // A head's jobs: a completed run's durations are kept for the next run's estimate.
+    if (ci.jobs !== undefined) {
+      noteJobTimes(this.jobSecs, ci.jobs);
+      ci.hold_jobs = holdJobs(ci.jobs, this.jobSecs, this.now());
+    }
     const repo = this.repoKey();
     const b = this.ciBackoff.get(repo);
     if (ci.rate_limited !== undefined) {

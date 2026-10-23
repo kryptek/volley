@@ -428,6 +428,21 @@ export interface TaskState {
     ci?: "green" | "red" | "running" | "none";
     /** While the pipeline holds for CI on `head_sha`: its runs completed / all of them. */
     checks?: { done: number; total: number };
+    /**
+     * While held, when the head's jobs could be read (#415): done / total, the running and failed
+     * job names, the last job's completion (the first start while none is done) and the slowest
+     * job's last duration in an earlier run of the wave.
+     */
+    jobs?: {
+      done: number;
+      total: number;
+      running: string[];
+      failed: string[];
+      last_done_at?: string;
+      slowest_s?: number;
+    };
+    /** While held: the estimated seconds left when the hold was journaled; absent: no estimate. */
+    eta_s?: number;
   };
   /** While a parallel stage group runs: its label (`review (spec + quality)`); `stage` stays the enum. */
   stage_label?: string;

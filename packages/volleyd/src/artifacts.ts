@@ -1,3 +1,4 @@
+import type { CiJob, HoldJobs } from "./ci-jobs";
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { DecisionInput } from "./decisions";
 import type { ExecFn, ExecResult } from "./exec";
@@ -96,6 +97,13 @@ export interface CiFacts {
   /** Unknown only: the failed call's first stderr line, and whether it was a rate limit. */
   error?: string;
   rate_limited?: RateLimited;
+  /**
+   * Running or green, when asked for (ciOn `jobs`): every job of the head's runs, from `gh run
+   * view <id> --json jobs` (#415). Absent when a run's jobs could not be read.
+   */
+  jobs?: CiJob[];
+  /** `jobs` summed up for a CI hold, with its estimate (the pipeline driver's noteCi). */
+  hold_jobs?: HoldJobs;
 }
 
 /** GitHub's mergeability of a PR; `UNKNOWN` while it is still computing it. */
@@ -265,7 +273,7 @@ export async function verifyArtifacts(exec: ExecFn, spec: ArtifactSpec): Promise
   };
 
   const ready = spec.ready?.head === head ? spec.ready.at : undefined;
-  const ci = await ciOn(exec, spec.cwd, head, spec.runs_via, ready);
+  const ci = await ciOn(exec, spec.cwd, head, spec.runs_via, ready, true);
   // GitHub has not caught up with the push yet: the PR's checks are not this head's.
   if (pr.headRefOid !== head && ci.state !== "red" && ci.state !== "unknown") ci.state = "running";
   // GitHub is still computing whether the PR conflicts (it runs no CI on a conflicting one):
@@ -387,6 +395,7 @@ async function ciOn(
   head: string,
   via?: RunsVia,
   readyAt?: string,
+  jobs = false,
 ): Promise<CiFacts> {
   const raw = await listRuns(exec, cwd, head, via);
   if (!Array.isArray(raw)) return unreadable(raw, "gh run list");
@@ -404,8 +413,10 @@ async function ciOn(
   const failed = own.filter((x) => x.status === "completed" && FAILED.has(x.conclusion ?? ""));
   // A run created before the mark is the draft's CI: green there says nothing about the jobs
   // the repository skips on drafts.
+  // volleyd's clock may run ahead of GitHub's: a run the mark started may read as just before it.
+  const from = readyAt === undefined ? 0 : Date.parse(readyAt) - DAEMON_DEFAULTS.ready_skew_ms;
   const sinceReady =
-    readyAt === undefined || own.some((x) => Date.parse(x.createdAt ?? "") >= Date.parse(readyAt));
+    readyAt === undefined || own.some((x) => Date.parse(x.createdAt ?? "") >= from);
   const state: CiState =
     runs.length === 0
       ? "none"
@@ -440,9 +451,14 @@ async function ciOn(
       });
     }
   }
+  const all =
+    jobs && (state === "running" || state === "green")
+      ? await runJobs(exec, cwd, own)
+      : null;
   return {
     state,
     runs,
+    ...(all !== null ? { jobs: all } : {}),
     superseded: superseded.map((x) => ({
       id: x.databaseId,
       url: x.url,
@@ -451,6 +467,49 @@ async function ciOn(
     failed_jobs: failedJobs,
     infra: state === "red" ? isInfraFailure(failed, jobSteps) : null,
   };
+}
+
+/** GitHub's time for a job that has not started (or finished) yet. */
+const ZERO_TIME = /^0001-/;
+
+/**
+ * Every job of `runs` (`gh run view <id> --json jobs`, one call per run), or null when one of
+ * them cannot be read: the hold then says nothing about jobs, CI is not made unknown by it.
+ */
+async function runJobs(exec: ExecFn, cwd: string, runs: RawRun[]): Promise<CiJob[] | null> {
+  const out: CiJob[] = [];
+  const time = (t: string | undefined) =>
+    t !== undefined && t !== "" && !ZERO_TIME.test(t) ? t : undefined;
+  for (const run of runs) {
+    const v = await exec(["gh", "run", "view", String(run.databaseId), "--json", "jobs"], { cwd });
+    const view =
+      v.code === 0
+        ? parseJson<{
+            jobs?: {
+              name: string;
+              status: string;
+              conclusion: string;
+              startedAt?: string;
+              completedAt?: string;
+            }[];
+          }>(v.stdout)
+        : null;
+    if (view === null || typeof view !== "object" || !Array.isArray(view.jobs)) return null;
+    for (const j of view.jobs) {
+      const started = time(j.startedAt);
+      const completed = time(j.completedAt);
+      out.push({
+        workflow: run.workflowName ?? run.name,
+        name: j.name,
+        status: j.status,
+        conclusion: j.conclusion === "" ? null : (j.conclusion ?? null),
+        ...(started !== undefined ? { started_at: started } : {}),
+        ...(completed !== undefined ? { completed_at: completed } : {}),
+        run_done: run.status === "completed",
+      });
+    }
+  }
+  return out;
 }
 
 /**
@@ -836,7 +895,7 @@ export async function redHeadCi(
   via?: RunsVia,
   readyAt?: string,
 ): Promise<CiFacts> {
-  const ci = await ciOn(exec, cwd, head, via, readyAt);
+  const ci = await ciOn(exec, cwd, head, via, readyAt, true);
   if (ci.state === "red") Object.assign(ci, await failedLogs(exec, cwd, ci.runs));
   return ci;
 }

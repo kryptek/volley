@@ -298,7 +298,7 @@ Every message on these topics is a standard envelope (§3) whose `agent_id` is t
 | `tasks[].queued_steers` | integer | Steering messages held for the task's next agent because none was live when they were sent (§4.4); absent when none are held. |
 | `tasks[].steer_unacked` | string | The task's agent the supervisor woke (`agent_woken`, §4.6.4) for a mailbox message its hooks have not acked yet; absent once acked or the agent is retired. |
 | `tasks[].last_error`, `attempt`, `next_retry_at` | object, integer, date-time \| null | While a spawn of the task has failed and that role has not spawned since: `last_error` `{ code, message, at }`, `attempt` (failed attempts in a row) and `next_retry_at` (the supervisor's next automatic retry; `null` once it stopped retrying). Failures are counted per role (two roles of one step may fail at once); these fields show the most recent one. Absent otherwise. |
-| `tasks[].pr` | object | `{ number, url, head_sha?, ci?, checks? }`; `ci` is `green` \| `red` \| `running` \| `none`. While the supervisor holds the task for CI on `head_sha`, `ci` is `running` and `checks` is `{ done, total }` (its CI runs completed, and all of them); `why_waiting` then reads e.g. `CI pending on <sha7> (2/5 checks)`. While it holds a red head for an infra incident (§4.6.16), `ci` is `red` and `why_waiting` reads `CI infra incident: <what>; re-checking`. |
+| `tasks[].pr` | object | `{ number, url, head_sha?, ci?, checks?, jobs?, eta_s? }`; `ci` is `green` \| `red` \| `running` \| `none`. While the supervisor holds the task for CI on `head_sha`, `ci` is `running` and `checks` is `{ done, total }` (its CI runs completed, and all of them). When it could read the head's jobs, `jobs` is `{ done, total, running, failed, last_done_at?, slowest_s? }` (jobs completed and all of them, the running and failed job names, the last job's completion — the first job's start while none is done — and the slowest job's last duration in an earlier completed run of the wave) and `eta_s` the seconds left by its estimate (absent without one); `why_waiting` then reads e.g. `CI 3/13 · running: Backend IT shard 2–6/6 · ~8 min left`, or without jobs `CI pending on <sha7> (2/5 runs)`. While it holds a red head for an infra incident (§4.6.16), `ci` is `red` and `why_waiting` reads `CI infra incident: <what>; re-checking`. |
 | `tasks[].reviews_skipped_by_plan` | boolean | `true` once the task reached `merge_ready` without reviews because its wave-file pipeline lists no review stage (§4.6.8); absent otherwise. |
 | `tasks[].stage_label`, `stage_group` | string, object[] | While a parallel stage group runs (e.g. both reviews at once): its label (e.g. `review (spec + quality)`) and one `{ role, agent_id?, state }` per role, `state` being `pending` \| `running` \| `done` \| `retired`. `stage` stays the group's first stage (the enum is unchanged). Absent otherwise. |
 | `tasks[].alarms` | object[] | Alarms on the task that still hold, each `{ alarm, message }` with a human-readable `message` — e.g. `merged_unverified_head` (`merged with an unverified head: gated <sha7>, merged <sha7>`), whose message is also the task's `why_waiting`. Absent when none holds. |
@@ -439,7 +439,7 @@ A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out
 - `claude_profile_synced`
 - `agent_account_moved`
 - `relaunched`
-- `ci_pending`
+- `ci_pending` — `{ role, sha, checks, jobs?, eta_s?, next_poll_at, pr }`: the task is held for CI on `sha` (§4.6.8)
 - `ci_green`
 - `pr_head_moved`
 - `merged_by_operator`
