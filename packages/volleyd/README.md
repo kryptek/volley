@@ -1636,7 +1636,7 @@ gated (`merge_ready`) and in flight, and the merges and branch updates of the la
 
 | To | When |
 |---|---|
-| `hold` | a live member updated its branch twice (`churn_updates_hold`), or 3 are gated (`churn_gated_hold`) and fewer than 2 merged in the window (`churn_merges_floor`) |
+| `hold` | a live member updated its branch twice in the window (`churn_updates_hold`), or 3 are gated (`churn_gated_hold`) and fewer than 2 merged in the window (`churn_merges_floor`) |
 | `train` | otherwise, 2 are gated (`churn_gated_train`) |
 | `planned` | nothing is gated and no member updated its branch in the window |
 

@@ -70,8 +70,8 @@ describe("churnOf (#384)", () => {
       update("a1"),
       ...start("a2"),
     ]);
-    expect(c.tasks.a1).toEqual({ updates: 2, rereviews: 1 });
-    expect(c.tasks.a2).toEqual({ updates: 0, rereviews: 0 });
+    expect(c.tasks.a1).toEqual({ updates: 2, updates_in_window: 2, rereviews: 1 });
+    expect(c.tasks.a2).toEqual({ updates: 0, updates_in_window: 0, rereviews: 0 });
   });
 
   it("per cluster: gated, in flight, merges and updates in the last 2 h", () => {
@@ -110,7 +110,17 @@ describe("strategyFor (#384)", () => {
     const two = churn([...start("a1"), update("a1"), update("a1")]);
     expect(strategyFor(two.cluster, two.c)).toEqual({
       strategy: "hold",
-      why: "a1 updated its branch 2 times",
+      why: "a1 updated its branch 2 times in the last 2 h",
+    });
+  });
+
+  it("a live member's 2 updates outside the window: no hold, back to planned (Q1)", () => {
+    const old = churn([...start("a1"), update("a1", T0 - 3 * HOUR), update("a1", T0 - 2 * HOUR)]);
+    expect(old.c.tasks.a1).toEqual({ updates: 2, updates_in_window: 0, rereviews: 0 });
+    const held = { ...old.cluster, state: "hold" as const };
+    expect(strategyFor(held, old.c)).toEqual({
+      strategy: "planned",
+      why: "nothing gated, no branch update in the last 2 h",
     });
   });
 
@@ -173,7 +183,7 @@ describe("strategySwitch (#384): the journaled change, with hysteresis", () => {
     expect(strategySwitch(cluster, c, evs, now, MIN)).toEqual({
       from: "cap",
       to: "hold",
-      why: "a1 updated its branch 2 times",
+      why: "a1 updated its branch 2 times in the last 2 h",
     });
   });
 
@@ -195,7 +205,7 @@ describe("strategySwitch (#384): the journaled change, with hysteresis", () => {
     expect(strategySwitch(later.cluster, later.c, later.evs, later.now, MIN)).toEqual({
       from: "train",
       to: "hold",
-      why: "a1 updated its branch 2 times",
+      why: "a1 updated its branch 2 times in the last 2 h",
     });
   });
 });

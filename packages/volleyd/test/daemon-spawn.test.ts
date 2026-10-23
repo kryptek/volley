@@ -1760,7 +1760,12 @@ ${capped("i315", 315)}${capped("i317", 317)}${capped("i318", 318)}${capped("i322
     await daemon.settled();
     const changed = daemon.journalEvents("wc").filter((e) => e.type === "cluster_strategy_changed");
     expect(changed.map((e) => e.data)).toEqual([
-      { cluster: "A", from: "cap", to: "hold", why: "i315 updated its branch 2 times" },
+      {
+        cluster: "A",
+        from: "cap",
+        to: "hold",
+        why: "i315 updated its branch 2 times in the last 2 h",
+      },
     ]);
     expect(daemon.snapshot("wc")?.overlap_plan?.clusters[0]?.state).toBe("hold");
     // On hold the cap is 1: the fifth member still waits, now on the hold.

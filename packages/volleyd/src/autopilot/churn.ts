@@ -11,11 +11,13 @@ import type { JournalEvent, PlanCluster, TaskId } from "../types";
  */
 
 /**
- * One task's churn: branch updates (`stage_entered { rebase: true }`) and reviews after one.
- * `rereviews` is for observability (status, the digest): `strategyFor` reads `updates` only.
+ * One task's churn: branch updates (`stage_entered { rebase: true }`), in all and in the window
+ * (`churn_window_ms`), and reviews after one. `updates` and `rereviews` are for observability
+ * (status, the digest): `strategyFor` reads `updates_in_window` only.
  */
 export interface TaskChurn {
   updates: number;
+  updates_in_window: number;
   rereviews: number;
 }
 
@@ -47,7 +49,8 @@ const MERGED = new Set(["merged_by_supervisor", "merged_by_operator"]);
 export function churnOf(rec: WaveRecord, events: readonly JournalEvent[], now: number): Churn {
   const since = now - DAEMON_DEFAULTS.churn_window_ms;
   const tasks: Record<TaskId, TaskChurn> = {};
-  for (const t of rec.state?.tasks ?? []) tasks[t.id] = { updates: 0, rereviews: 0 };
+  for (const t of rec.state?.tasks ?? [])
+    tasks[t.id] = { updates: 0, updates_in_window: 0, rereviews: 0 };
   /** Tasks whose branch was updated since their last review started. */
   const updated = new Set<TaskId>();
   const recentUpdates = new Map<TaskId, number>();
@@ -58,7 +61,10 @@ export function churnOf(rec: WaveRecord, events: readonly JournalEvent[], now: n
     const recent = Date.parse(e.at) > since;
     if (e.type === "stage_entered" && e.data.rebase === true) {
       const t = tasks[id];
-      if (t !== undefined) t.updates++;
+      if (t !== undefined) {
+        t.updates++;
+        if (recent) t.updates_in_window++;
+      }
       updated.add(id);
       if (recent) recentUpdates.set(id, (recentUpdates.get(id) ?? 0) + 1);
     } else if (e.type === "stage_entered" && REVIEW.has(String(e.data.stage))) {
@@ -93,7 +99,7 @@ function lastWindow(): string {
 
 /**
  * The strategy `cluster` should run under now, and why. `hold` when a live member has updated its
- * branch `churn_updates_hold` times, or `churn_gated_hold` members are gated and fewer than
+ * branch `churn_updates_hold` times in the window, or `churn_gated_hold` members are gated and fewer than
  * `churn_merges_floor` merged in the window; else `train` with `churn_gated_train` gated; back to
  * `planned` once nothing is gated and no member updated in the window; else as it is.
  */
@@ -105,11 +111,11 @@ export function strategyFor(
   if (stats === undefined) return { strategy: cluster.state, why: "not in the plan" };
   const churning = cluster.tasks
     .filter((id) => !churn.settled.includes(id))
-    .find((id) => (churn.tasks[id]?.updates ?? 0) >= DAEMON_DEFAULTS.churn_updates_hold);
+    .find((id) => (churn.tasks[id]?.updates_in_window ?? 0) >= DAEMON_DEFAULTS.churn_updates_hold);
   if (churning !== undefined)
     return {
       strategy: "hold",
-      why: `${churning} updated its branch ${churn.tasks[churning]?.updates} times`,
+      why: `${churning} updated its branch ${churn.tasks[churning]?.updates_in_window} times in ${lastWindow()}`,
     };
   if (
     stats.gated >= DAEMON_DEFAULTS.churn_gated_hold &&
