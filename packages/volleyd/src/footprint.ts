@@ -1,7 +1,7 @@
 import { DAEMON_DEFAULTS } from "./config-defaults";
 import type { ExecFn } from "./exec";
 import { type FilesEntry, filesEntries, globRe, hasFileExtension, isPattern } from "./overlap";
-import type { FootprintConfidence } from "./types";
+import type { Footprint, FootprintConfidence } from "./types";
 
 /**
  * A task's footprint: the files it is expected to touch and how they were found (wave-file
@@ -169,4 +169,56 @@ export async function readTree(exec: ExecFn, repo: string, ref: string): Promise
     timeoutMs: DAEMON_DEFAULTS.tree_read_ms,
   });
   return r.code === 0 && !r.timedOut && r.truncated !== true ? treeFromLsTree(r.stdout) : null;
+}
+
+/**
+ * The tree a wave's tasks start from: `origin/<branch>` in `repo`, else the local `<branch>`;
+ * null when neither reads (not a checkout, no such branch).
+ */
+export async function readReleaseTree(
+  exec: ExecFn,
+  repo: string,
+  branch: string,
+): Promise<Tree | null> {
+  return (await readTree(exec, repo, `origin/${branch}`)) ?? readTree(exec, repo, branch);
+}
+
+/** One task's footprint, as `footprintSummary` counts it: once per issue it closes. */
+export interface FootprintOf {
+  id: string;
+  issues: number[];
+  footprint: Footprint;
+}
+
+const CONFIDENCES: FootprintConfidence[] = ["listed", "resolved", "guessed", "none"];
+
+/**
+ * `footprints: 24 listed, 2 guessed (#333, #313); 11 entries unresolved (…)`: how many issues'
+ * footprints have each confidence (the weak ones named), and the entries that matched no path,
+ * listed (`inline`: `T3: a.ts, b; T5: c`) or left to a flag (`hint`: the text in parentheses).
+ */
+export function footprintSummary(tasks: FootprintOf[], unresolved: { hint: string } | "inline") {
+  const counts = new Map<FootprintConfidence, number[]>();
+  for (const t of tasks) {
+    const c = t.footprint.confidence;
+    counts.set(c, [...(counts.get(c) ?? []), ...t.issues]);
+  }
+  const parts = CONFIDENCES.flatMap((c) => {
+    const issues = counts.get(c) ?? [];
+    if (issues.length === 0) return [];
+    const named =
+      c === "guessed" || c === "none" ? ` (${issues.map((i) => `#${i}`).join(", ")})` : "";
+    return [`${issues.length} ${c}${named}`];
+  });
+  const missed = tasks.filter((t) => (t.footprint.unresolved ?? []).length > 0);
+  const n = missed.reduce((k, t) => k + (t.footprint.unresolved?.length ?? 0), 0);
+  let tail = "";
+  if (n > 0) {
+    const which =
+      unresolved === "inline"
+        ? missed.map((t) => `${t.id}: ${(t.footprint.unresolved ?? []).join(", ")}`).join("; ")
+        : unresolved.hint;
+    tail = `; ${n} ${n === 1 ? "entry" : "entries"} unresolved (${which})`;
+  }
+  return `footprints: ${parts.join(", ")}${tail}`;
 }

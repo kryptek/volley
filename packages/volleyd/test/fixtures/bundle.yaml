@@ -1,0 +1,30 @@
+# A wave file as wave-from-issues writes it: footprints, a bundle and the overlap plan.
+# plan: cluster A: 3 tasks share packages/app/src/pipeline.ts (1k lines, 2 tasks) → 1 bundle (i1), 1 chain (i1 → i3)
+# plan: independent: i4
+# plan: expected branch updates: ≤ 2 (was ≤ 3 one at a time)
+wave: w-bundle
+repo: /path/to/example-repo
+release_branch: release/w-bundle
+model: claude-opus-5-5
+pipeline: [implement, merge_ready]
+tasks:
+  i1:
+    issue: 1
+    issues: [1, 2]
+    title: "bundle: #1 + #2 — Pipeline retries"
+    files: ["packages/app/src/pipeline.ts", "packages/app/src/retry.ts"]
+    footprint: { confidence: listed }
+    plan: { cluster: A, by: collapse, why: "collapsed #1 + #2: i1 + i2 share packages/app/src/pipeline.ts (coupling 0.90)" }
+  i3:
+    issue: 3
+    title: Pipeline timeouts
+    after: [i1]  # chained by the planner: shares packages/app/src/pipeline.ts
+    files: ["packages/app/src/pipeline.ts", "packages/app/test/pipeline.test.ts"]
+    footprint: { confidence: resolved, unresolved: [helpers.ts] }
+    plan: { cluster: A, by: chain, why: "after i1: they share packages/app/src/pipeline.ts (coupling 0.70) and cannot bundle: over 2 issues" }
+  i4:
+    issue: 4
+    title: Docs
+    files: ["docs/guide.md"]
+    footprint: { confidence: listed }
+    plan: { by: independent, why: shares no source file }

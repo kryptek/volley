@@ -20,12 +20,15 @@ import { asGitHubRepo } from "./repo-visibility";
 import { hygieneLevel } from "./reviews";
 import type {
   FixerRemediation,
+  Footprint,
   JournalEvent,
+  PlanCluster,
   PublicHygiene,
   RepoVisibility,
   TaskAgents,
   TaskId,
   TaskPlacement,
+  TaskPlan,
   TaskStage,
   TaskState,
   TunablesPatch,
@@ -371,11 +374,27 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       next.overrides = plan.config;
       state.version = plan.version;
       state.release_branch = plan.release_branch;
+      // A footprint the supervisor read for a task the file leaves without `files` is kept; one
+      // the previous file wrote is not (dropping the key drops it).
+      const read = state.spec?.tasks ?? {};
       state.spec = specOf(plan);
+      for (const [id, t] of Object.entries(state.spec.tasks)) {
+        const was = read[id];
+        if (t.files !== undefined || was?.files === undefined) continue;
+        if ((before?.tasks[id]?.files ?? []).length > 0) continue;
+        t.files = was.files;
+        if (was.footprint !== undefined) t.footprint ??= was.footprint;
+      }
       Object.assign(state, briefPrefaceOf(ev));
+      // The version's own overlap plan replaces the last one: its `wave_planned` follows, and
+      // none does when it has no plan. Each task sits in the cluster this version puts it in.
+      Reflect.deleteProperty(state, "overlap_plan");
       for (const t of state.tasks) {
         const issue = wave.tasks[t.id]?.issue;
         if (issue !== undefined) t.issue = issue;
+        const cluster = plan.tasks[t.id]?.plan?.cluster;
+        if (cluster !== undefined) t.cluster = cluster;
+        else Reflect.deleteProperty(t, "cluster");
       }
       break;
     }
@@ -389,6 +408,17 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         agents: {},
         ...(next.wave?.tasks[ev.task]?.synthetic === true ? { synthetic: true as const } : {}),
       };
+      // Where the overlap plan put it, and its footprint (the file's, or one the supervisor read).
+      const plan = (ev.data.plan as TaskPlan | undefined) ?? next.wave?.tasks[ev.task]?.plan;
+      if (plan?.cluster !== undefined) queued.cluster = plan.cluster;
+      const spec = state.spec?.tasks[ev.task];
+      if (spec !== undefined) {
+        if (Array.isArray(ev.data.issues)) spec.issues = ev.data.issues as number[];
+        if (Array.isArray(ev.data.files) && ev.data.files.length > 0)
+          spec.files = ev.data.files as string[];
+        if (ev.data.footprint !== undefined) spec.footprint = ev.data.footprint as Footprint;
+        if (plan !== undefined) spec.plan = plan;
+      }
       if (task === undefined) state.tasks.push(queued);
       else if (task.stage === "cancelled") {
         // Re-added by a later plan version, or restarted on a new issue: starts over, on the
@@ -431,6 +461,9 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
       }
       break;
     }
+    case "wave_planned":
+      state.overlap_plan = { clusters: (ev.data.clusters as PlanCluster[] | undefined) ?? [] };
+      break;
     case "task_admitted":
       if (ev.task !== undefined && !next.admitted.includes(ev.task)) next.admitted.push(ev.task);
       break;
@@ -826,6 +859,10 @@ function specOf(wave: Wave): NonNullable<WaveState["spec"]> {
             issue: t?.issue ?? 0,
             ...(t?.title !== undefined ? { title: t.title } : {}),
             after: t?.after ?? [],
+            ...(t?.issues !== undefined ? { issues: t.issues } : {}),
+            ...(t !== undefined && t.files.length > 0 ? { files: t.files } : {}),
+            ...(t?.footprint !== undefined ? { footprint: t.footprint } : {}),
+            ...(t?.plan !== undefined ? { plan: t.plan } : {}),
           },
         ];
       }),

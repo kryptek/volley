@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { parseWaveFile } from "volleyd/wave-file";
 import {
   BRIEF_PREFACE_TEMPLATE,
   DEFAULT_BRIEF_PREFACE,
@@ -55,6 +56,15 @@ function volleydValidate(yaml: string): { code: number | null; out: string } {
 const noCoordinator = Object.fromEntries(
   Object.entries(process.env).filter(([k]) => k !== "VOLLEY_COORDINATOR"),
 );
+
+/** What the CLI prints about THREE's footprints and plan when --repo has no tree. */
+const NO_TREE_THREE = [
+  `no tree: footprints unresolved (${OPTS.repo} has no origin/${OPTS.releaseBranch} or ${OPTS.releaseBranch})`,
+  "independent: i101, i102, i103",
+  "expected branch updates: ≤ 0 (was ≤ 2 one at a time)",
+  "footprints: 3 none (#101, #102, #103)",
+  "",
+].join("\n");
 
 /** What the CLI prints after a clean run with VOLLEY_COORDINATOR unset. */
 const submitLines = (file: string) =>
@@ -451,7 +461,7 @@ describe("wave-from-issues CLI", () => {
       ],
       { encoding: "utf-8", env: noCoordinator },
     );
-    expect(r.stderr).toBe(submitLines(out));
+    expect(r.stderr).toBe(`${NO_TREE_THREE}${submitLines(out)}`);
     expect(r.status).toBe(0);
     const v = spawnSync("bun", [VOLLEYD_CLI, "validate", out], { encoding: "utf-8" });
     expect(v.status).toBe(0);
@@ -487,7 +497,7 @@ describe("wave-from-issues CLI", () => {
       ],
       { encoding: "utf-8", env: noCoordinator },
     );
-    expect(r.stderr).toBe(submitLines(out));
+    expect(r.stderr).toBe(`${NO_TREE_THREE}${submitLines(out)}`);
     expect(r.status).toBe(0);
     const yaml = readFileSync(out, "utf-8");
     expect(yaml).toContain('placement: "auto"\n');
@@ -518,7 +528,7 @@ describe("wave-from-issues CLI", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('merge: "auto"\n');
     expect(r.stderr).toBe(
-      'submit: volleyd run <wave.yaml> --owner "$VOLLEY_COORDINATOR"\nowner: coord-main (VOLLEY_COORDINATOR)\n',
+      `${NO_TREE_THREE}submit: volleyd run <wave.yaml> --owner "$VOLLEY_COORDINATOR"\nowner: coord-main (VOLLEY_COORDINATOR)\n`,
     );
   });
 
@@ -620,7 +630,7 @@ describe("wave-from-issues CLI", () => {
       ],
       { encoding: "utf-8", env: noCoordinator },
     );
-    expect(r.stderr).toBe(submitLines("<wave.yaml>"));
+    expect(r.stderr).toContain(submitLines("<wave.yaml>"));
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("after: [i7]");
   });
@@ -741,5 +751,200 @@ describe("brief preface", () => {
     expect(second.status).toBe(0);
     expect(readFileSync(file, "utf-8")).toBe("edited\n");
     expect(second.stderr).toContain(`brief preface: ${file} (kept)`);
+  });
+});
+
+describe("footprints and the overlap plan (#381)", () => {
+  const files = (...paths: string[]) =>
+    `### Files\n\n${paths.map((p) => `- \`${p}\``).join("\n")}\n`;
+  const P = "packages/app/src";
+  const FIVE: IssueInput[] = [
+    {
+      number: 101,
+      title: "Retry policy",
+      body: `${files(`${P}/pipeline.ts`, `${P}/retry.ts`)}\nDepends on: none\n`,
+    },
+    {
+      number: 102,
+      title: "Timeouts",
+      body: `${files(`${P}/pipeline.ts`, `${P}/timeout.ts`)}\nDepends on: none\n`,
+    },
+    {
+      number: 103,
+      title: "Backoff",
+      body: `${files(`${P}/pipeline.ts`, `${P}/backoff.ts`)}\nDepends on: none\n`,
+    },
+    {
+      number: 104,
+      title: "Engine core",
+      body: `${files(`${P}/engine.ts`, `${P}/core.ts`, "helpers.ts")}\nDepends on: none\n`,
+    },
+    {
+      number: 105,
+      title: "Engine notes",
+      body: `Only \`${P}/engine.ts\` changes.\n\nDepends on: none\n`,
+    },
+  ];
+  const TREE: Record<string, number> = {
+    [`${P}/pipeline.ts`]: 40_000,
+    [`${P}/retry.ts`]: 400,
+    [`${P}/timeout.ts`]: 400,
+    [`${P}/backoff.ts`]: 400,
+    [`${P}/engine.ts`]: 40_000,
+    [`${P}/core.ts`]: 400,
+  };
+
+  /** A git checkout of TREE on the release branch. */
+  function repoWithTree(): string {
+    const repo = join(tmp(), `repo-${Math.random().toString(36).slice(2)}`);
+    for (const [f, n] of Object.entries(TREE)) {
+      mkdirSync(join(repo, f, ".."), { recursive: true });
+      writeFileSync(join(repo, f), "x".repeat(n));
+    }
+    const git = (...a: string[]) => spawnSync("git", ["-C", repo, ...a], { encoding: "utf-8" });
+    git("init", "--quiet", "-b", OPTS.releaseBranch);
+    git("add", ".");
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--quiet", "-m", "i");
+    return repo;
+  }
+
+  const cli = (args: string[], issues: IssueInput[] = FIVE) => {
+    const input = join(tmp(), `five-${Math.random().toString(36).slice(2)}.json`);
+    writeFileSync(input, JSON.stringify(issues));
+    return spawnSync(
+      "bun",
+      [
+        HELPER_CLI,
+        input,
+        "--wave",
+        OPTS.wave,
+        "--release-branch",
+        OPTS.releaseBranch,
+        "--model",
+        OPTS.model,
+        ...args,
+      ],
+      { encoding: "utf-8", env: noCoordinator },
+    );
+  };
+
+  it("three issues sharing a large file become one bundle with issues, files, footprint and plan", () => {
+    const { yaml, explanation } = waveFromIssues(FIVE, { ...OPTS, tree: TREE });
+    const w = parseWaveFile(yaml);
+    expect(w.task_order).toEqual(["i101", "i104", "i105"]);
+    const b = w.tasks.i101;
+    expect(b?.issues).toEqual([101, 102, 103]);
+    expect(b?.title).toBe("bundle: #101 + #102 + #103 — Retry policy");
+    expect(b?.files).toEqual([
+      `${P}/pipeline.ts`,
+      `${P}/retry.ts`,
+      `${P}/timeout.ts`,
+      `${P}/backoff.ts`,
+    ]);
+    expect(b?.footprint).toEqual({ confidence: "listed" });
+    expect(b?.plan).toMatchObject({ cluster: "A", by: "collapse" });
+    expect(w.tasks.i104?.footprint).toEqual({ confidence: "resolved", unresolved: ["helpers.ts"] });
+    expect(w.tasks.i105?.footprint).toEqual({ confidence: "guessed" });
+    // The header comment holds the explanation, and the parsed file plans the same clusters.
+    for (const line of explanation) expect(yaml).toContain(`# plan: ${line}\n`);
+    expect(explanation[0]).toBe(
+      `cluster A: 3 tasks share ${P}/pipeline.ts (1k lines, 3 tasks) → 1 bundle (i101+i102+i103)`,
+    );
+    expect(w.overlap_plan?.clusters.map((c) => [c.id, c.strategy])).toEqual([
+      ["A", { collapse: [["i101"]] }],
+      ["B", { chain: [["i104", "i105"]] }],
+    ]);
+    expect(volleydValidate(yaml).code).toBe(0);
+  });
+
+  it("a chained pair: the added after: carries the planner's comment", () => {
+    const { yaml } = waveFromIssues(FIVE, { ...OPTS, tree: TREE });
+    expect(yaml).toContain(`    after: [i104]  # chained by the planner: shares ${P}/engine.ts\n`);
+    expect(parseWaveFile(yaml).tasks.i105?.after).toEqual(["i104"]);
+  });
+
+  it("a declared after keeps its line without the comment", () => {
+    const issues = FIVE.map((i) =>
+      i.number === 105 ? { ...i, body: i.body.replace("Depends on: none", "Depends on: #101") } : i,
+    );
+    const { yaml } = waveFromIssues(issues, { ...OPTS, tree: TREE });
+    expect(yaml).toContain(
+      `    after: [i101, i104]  # chained by the planner: i104 shares ${P}/engine.ts\n`,
+    );
+  });
+
+  it("noPlan: footprints only — no bundle, no plan, no added after", () => {
+    const { yaml, explanation } = waveFromIssues(FIVE, { ...OPTS, tree: TREE, noPlan: true });
+    const w = parseWaveFile(yaml);
+    expect(w.task_order).toEqual(["i101", "i102", "i103", "i104", "i105"]);
+    expect(w.tasks.i102?.files).toEqual([`${P}/pipeline.ts`, `${P}/timeout.ts`]);
+    expect(w.tasks.i102?.footprint).toEqual({ confidence: "listed" });
+    expect(yaml).not.toContain("plan:");
+    expect(yaml).not.toContain("issues:");
+    expect(w.tasks.i105?.after).toEqual([]);
+    expect(explanation).toEqual([]);
+  });
+
+  it("CLI: reads the tree from --repo, writes the file, prints the plan and the footprint line", () => {
+    const repo = repoWithTree();
+    const out = join(tmp(), "five.yaml");
+    const r = cli(["--repo", repo, "--out", out]);
+    expect(r.status).toBe(0);
+    const yaml = readFileSync(out, "utf-8");
+    expect(parseWaveFile(yaml).tasks.i101?.issues).toEqual([101, 102, 103]);
+    expect(r.stderr).toContain(
+      `cluster A: 3 tasks share ${P}/pipeline.ts (1k lines, 3 tasks) → 1 bundle (i101+i102+i103)\n`,
+    );
+    expect(r.stderr).toContain(
+      "footprints: 3 listed, 1 resolved, 1 guessed (#105); 1 entry unresolved (run with --verbose to list)\n",
+    );
+    expect(r.stderr).not.toContain("no tree");
+    const v = cli(["--repo", repo, "--verbose"]);
+    expect(v.stderr).toContain("unresolved: #104: helpers.ts\n");
+  });
+
+  it("CLI --plan-only prints the explanation and writes nothing", () => {
+    const repo = repoWithTree();
+    const out = join(tmp(), "plan-only.yaml");
+    const r = cli(["--repo", repo, "--out", out, "--plan-only"]);
+    expect(r.status).toBe(0);
+    expect(existsSync(out)).toBe(false);
+    expect(existsSync(join(repo, DEFAULT_BRIEF_PREFACE))).toBe(false);
+    expect(r.stdout).toContain(
+      `cluster B: 2 tasks share ${P}/engine.ts (1k lines, 2 tasks) → 1 chain (i104 → i105)\n`,
+    );
+    expect(r.stdout).toContain("expected branch updates: ");
+    expect(r.stdout).not.toContain("tasks:");
+    expect(r.stderr).not.toContain("submit:");
+  });
+
+  it("CLI --no-plan with --plan-only is a usage error", () => {
+    const r = cli(["--repo", repoWithTree(), "--no-plan", "--plan-only"]);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("wave-from-issues: --no-plan and --plan-only exclude each other\n");
+  });
+
+  it("CLI --no-plan writes footprints only", () => {
+    const repo = repoWithTree();
+    const r = cli(["--repo", repo, "--no-plan"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("  i102:\n");
+    expect(r.stdout).not.toContain("plan:");
+    expect(r.stderr).not.toContain("cluster A");
+    expect(r.stderr).toContain("footprints: 3 listed, 1 resolved, 1 guessed (#105); 1 entry");
+  });
+
+  it("CLI: a --repo with no git tree leaves footprints unresolved, says so, and exits 0", () => {
+    const r = cli(["--repo", OPTS.repo]);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain(
+      `no tree: footprints unresolved (${OPTS.repo} has no origin/${OPTS.releaseBranch} or ${OPTS.releaseBranch})\n`,
+    );
+    const w = parseWaveFile(r.stdout);
+    expect(w.tasks.i101?.footprint).toEqual({
+      confidence: "none",
+      unresolved: [`${P}/pipeline.ts`, `${P}/retry.ts`],
+    });
+    expect(w.tasks.i101?.files).toEqual([]);
   });
 });

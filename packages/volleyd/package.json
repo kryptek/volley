@@ -10,10 +10,12 @@
     "./claude/sharing": "./src/claude/sharing.ts",
     "./config-defaults": "./src/config-defaults.ts",
     "./footprint": "./src/footprint.ts",
+    "./overlap": "./src/overlap.ts",
     "./overlap-plan": "./src/overlap-plan.ts",
     "./paired-hosts": "./src/paired-hosts.ts",
     "./procs": "./src/procs.ts",
-    "./repos": "./src/repos.ts"
+    "./repos": "./src/repos.ts",
+    "./wave-file": "./src/wave-file.ts"
   },
   "scripts": {
     "test": "vitest run",

@@ -500,7 +500,7 @@ A supervisor MUST refuse (and journal nothing for) an answer it cannot carry out
 - `repo_removed` — `{ by, slug, machines, clones }`, in `_system` (§4.6.21)
 - `repo_clone_run` — `{ machine, slug, ok, cloned, path?, error? }`, in `_system` (§4.6.21)
 - `repo_trusted` — `{ machine, repo, root, accounts, keys }`, in `_system` (§4.6.21)
-- `wave_planned` — `{ clusters }`, as the wave state's `overlap_plan` carries them: the overlap plan for the wave's version
+- `wave_planned` — `{ clusters }`, as the wave state's `overlap_plan` carries them: the overlap plan for the wave's version (§4.6.22)
 - `cluster_strategy_changed` — `{ cluster, from, to, why }`: a cluster of the overlap plan changed how it runs
 - `train_started` — `{ train, tasks, heads, release_sha }`: a merge train integrates its tasks' gated heads onto the release branch
 - `train_merged` — `{ train, pr, merge_sha, tasks }`: a merge train merged, landing its tasks
@@ -884,7 +884,15 @@ A supervisor treats its machines as a pool for every repository it works on: con
 
 #### 4.6.22 Footprints and the overlap plan
 
-Reserved (`spec/RESERVED.md`); specified by its own change.
+A wave's tasks that touch the same files collide when they merge: each one after the first updates its branch, and a big shared file can turn a wave into a queue of conflicts. A task's *footprint* says which files it is expected to touch; the *overlap plan* groups tasks by the source files they share into clusters, and runs each cluster so they collide less: strongly coupled tasks are *collapsed* into one task (a bundle), a strong pair that cannot bundle is *chained* (one after the other), and a big cluster is *capped* in flight.
+
+**Wave-file keys.** Per task (`wave-file.schema.json`): `files` (the footprint: paths and globs), `footprint: { confidence, unresolved? }` (how `files` was found: `listed`, every entry of the issue's Files list resolved against the repository tree; `resolved`, some did not, named in `unresolved`; `guessed`, no Files list, so the tree paths the issue body names; `none`, nothing), `plan: { cluster?, by, why }` (the cluster, the strategy that placed the task: `collapse`, `chain`, `cap` or `independent`, and why in one line) and, for a bundle, `issues` (every issue it closes; it MUST contain `issue`, MUST NOT repeat one and MUST NOT name an issue another task closes, each refused with a path-qualified error). A file's own plan is read from these keys: tasks with the same `plan.cluster` form a cluster, a bundle is a collapse, an `after` entry whose `why` names it (`after <task>: …`) is a chain, and a cluster with more tasks than `plan_cluster_in_flight_max` is capped.
+
+**Writing the plan.** A generator of wave files from issues (the reference one is `wave-from-issues`) SHOULD resolve each issue's Files list against the tree of the release branch (`origin/<branch>`, else the local branch; with neither, every footprint is unresolved and it says so), plan the wave, and write `files`, `footprint`, `plan`, `issues` and the chains' `after` into the file, with the plan in words as a header comment. Collapse is automatic: there is no confirmation step, and the owner edits the generated file to plan differently. It SHOULD offer footprints without a plan (no bundle, chain or `plan`), and the plan without a file.
+
+**Validate and run.** A supervisor's `validate` and `run` SHOULD print, after the placement line, the file's own plan in words (one line per cluster, the independent tasks, the expected branch updates), one `note: …` per place where the planner would plan the file's tasks differently (advisory: the file is kept as written; only when the tree can be read), and the footprint line (`footprints: 24 listed, 2 guessed (#333, #313); 11 entries unresolved (…)`, counted per issue), or `footprints: none (…)` when no task has `files`.
+
+**At submit.** For each task without `files`, the supervisor reads its issue's Files list and resolves it against the release branch's tree (read once per wave; without one, the list is kept as written, `guessed`). Those files are journaled, never written into the wave definition. Footprints are read on the first submit only: a task a later version adds without `files` has none, and raises no alarm. An issue that cannot be read is never silent: the supervisor journals `alarm_raised { alarm: "footprint_unavailable", task, why }` and `run` prints a warning. Each `task_queued` of a wave-file task carries `issues` (a bundle), `files` (the file's, else the ones read), `footprint` and `plan`. Right after the tasks queue, once per plan version that has a plan, the supervisor journals `wave_planned { clusters }`, the file's own clusters with their hot files sized from the tree. The wave state carries the plan in `overlap_plan`, each task's cluster in `tasks[].cluster`, and the keys above in `spec.tasks[]`; `status` prints one `plan:` line per cluster under the wave's header.
 
 #### 4.6.23 Merge train
 

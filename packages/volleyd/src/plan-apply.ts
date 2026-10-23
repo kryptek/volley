@@ -347,10 +347,19 @@ export function applyPlan(rec: WaveRecord, submitted: Wave, ctx: PlanContext): P
   for (const id of diff.added) {
     const p = phase(id);
     if (p === "absent" || p === "cancelled") {
+      // As a first submit's task_queued: the file's issues, files, footprint and plan (SPEC §4.6.22).
+      const t = plan.tasks[id];
       head.push({
         type: "task_queued",
         task: id,
-        data: { issue: plan.tasks[id]?.issue, plan_version: N },
+        data: {
+          issue: t?.issue,
+          ...(t?.issues !== undefined ? { issues: t.issues } : {}),
+          ...(t !== undefined && t.files.length > 0 ? { files: t.files } : {}),
+          ...(t?.footprint !== undefined ? { footprint: t.footprint } : {}),
+          ...(t?.plan !== undefined ? { plan: t.plan } : {}),
+          plan_version: N,
+        },
       });
     }
   }
