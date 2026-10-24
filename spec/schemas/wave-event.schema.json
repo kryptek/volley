@@ -234,7 +234,11 @@
                               ]
                             },
                             "model_weekly_pct": { "type": "number", "minimum": 0, "maximum": 100 },
-                            "agents": { "type": "integer", "minimum": 0 },
+                            "agents": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "description": "The agents counted against it: equal to in_flight; spec section 4.6.12."
+                            },
                             "headroom": {
                               "oneOf": [
                                 { "type": "number", "minimum": 0, "maximum": 100 },

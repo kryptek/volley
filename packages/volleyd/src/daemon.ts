@@ -210,6 +210,7 @@ import {
   agentLimitDecisions,
   bookState,
   emptyBook,
+  expireAgents,
   foldProbe,
   foldUsage,
   forgetAgent,
@@ -1535,6 +1536,11 @@ export class Daemon {
   private usage: UsageBook;
   /** Every spawned agent's wave and host (from `agent_spawned`): where its usage belongs. */
   private readonly spawnedAgents = new Map<string, { wave: WaveId; host: string }>();
+  /**
+   * Set once the restart reconciliation is done: until then a supervised agent may not be watched
+   * again yet, so `expireUsageAgents` would take its old sample for a dead session's.
+   */
+  private agentsSettled = false;
   // --- Fleet (F6): down, drain and remove-now ---
   /** Agents launched and still being verified (not supervised yet), by id. */
   private readonly launching = new Map<string, { wave: WaveId; task: TaskId; role: Role }>();
@@ -2202,9 +2208,13 @@ export class Daemon {
     void this.drainLoop(AUTH_OPS_FILTER, (m) => this.onAuthRequest(m.topic, m.payload));
     void this.drainLoop(TOKEN_REDEEM_FILTER, (m) => this.onAuthRequest(m.topic, m.payload));
     // Beside the queue: its broker/git/GitHub probes take seconds and control ops must not wait.
-    this.reconciling = this.reconcileAll().catch((e: unknown) =>
-      this.log(`reconcile: ${e instanceof Error ? e.message : String(e)}`),
-    );
+    this.reconciling = this.reconcileAll()
+      .catch((e: unknown) => this.log(`reconcile: ${e instanceof Error ? e.message : String(e)}`))
+      .then(() => {
+        // Supervision is back: the retained samples of agents nobody runs may expire now.
+        this.agentsSettled = true;
+        void this.enqueue(() => this.usagePass());
+      });
 
     await this.publish(
       this.statusTopic,
@@ -10666,7 +10676,9 @@ export class Daemon {
    * re-publish the records that changed, then open any `account_limit` decision it calls for.
    * A sample is the agent's own (the envelope's `agent_id` is the topic's); its wave and host are
    * its spawn's (journaled, so known after a restart and before it is supervised), and its account
-   * record the one `sampleAccount` names for that host.
+   * record the one `sampleAccount` names for that host. A session the daemon does not supervise
+   * (the owner's interactive `coordinator-*` sessions) folds the same way: its windows are the
+   * account's spend; its place in the record's `agents` ends with `expireAgents` (`usagePass`).
    */
   private async onUsage(topic: string, raw: string): Promise<void> {
     const [, ns, agent] = topic.split("/");
@@ -10686,7 +10698,7 @@ export class Daemon {
       // Supervised agents only: ones still launching spend too, so the learned rate runs a
       // little high while launches verify (the EMA and the rate cap bound it).
       const agents = this.agentsOnAccount(account).length;
-      const s = { agent, wave: spawn?.wave ?? null, account, payload: p };
+      const s = { agent, wave: spawn?.wave ?? null, account, payload: p, ns };
       this.usage = foldUsage(this.usage, s, agents);
       // its own sample counts it from now on: the pick's reservation is spent
       this.reserved.release(agent);
@@ -10793,8 +10805,26 @@ export class Daemon {
       .sort();
   }
 
+  /**
+   * Forget the agents whose latest sample is older than `AGENT_SAMPLE_TTL_MS` and that the daemon
+   * neither supervises nor is launching, and clear their retained `usage` topics so a restart does
+   * not bring them back (the clearing's own `onUsage` finds them gone). Not before the restart
+   * reconciliation is done (`agentsSettled`). Agents are not persisted: no file write.
+   */
+  private async expireUsageAgents(): Promise<void> {
+    if (!this.agentsSettled) return;
+    const live = (id: string) => this.supervised.has(id) || this.launching.has(id);
+    const next = expireAgents(this.usage, this.now(), live);
+    if (next === this.usage) return;
+    const gone = Object.entries(this.usage.agents).filter(([id]) => next.agents[id] === undefined);
+    this.usage = next;
+    for (const [id, a] of gone)
+      await this.clearRetained(buildTopic(a.ns ?? this.opts.namespace, id, "usage"));
+  }
+
   /** Re-publish the account records that changed, then open the `account_limit`s they call for. */
   private async usagePass(): Promise<void> {
+    await this.expireUsageAgents();
     const records = accountRecords(this.usage);
     for (const rec of Object.values(records)) {
       const payload = { ...publishedRecord(rec), ...this.claude.describe(rec.account) };

@@ -150,6 +150,13 @@ export const RATE_MIN_SAMPLES = 2;
 export const RATE_MIN_GAP_MS = 5 * 60_000;
 /** The weight of a new observation in the learned rate (an exponential moving average). */
 export const RATE_EMA_ALPHA = 0.3;
+/**
+ * How long an agent stays on its account's record after its latest sample, unless the supervisor
+ * supervises or is launching it (`expireAgents`). The statusLine publisher writes after every
+ * assistant message, so a session silent for an hour is not spending; an interactive session or a
+ * dead one leaves the record then. Not a tunable: nothing but the record's `agents` reads it.
+ */
+export const AGENT_SAMPLE_TTL_MS = 60 * 60_000;
 const RATE_MAX = 100;
 
 /**
@@ -158,8 +165,20 @@ const RATE_MAX = 100;
  * at which its agents spend each window, learned from consecutive samples.
  */
 export interface UsageBook {
-  /** Each agent's account, wave and the model of its latest sample. */
-  agents: Record<string, { account: string; wave: string | null; model?: string | null }>;
+  /**
+   * Each agent's account, wave and the model of its latest sample, that sample's `captured_at`,
+   * and the namespace of its usage topic (to clear it when the agent expires).
+   */
+  agents: Record<
+    string,
+    {
+      account: string;
+      wave: string | null;
+      model?: string | null;
+      sampled_at: string;
+      ns?: string;
+    }
+  >;
   accounts: Record<
     string,
     {
@@ -248,10 +267,11 @@ function learnAll(
  */
 export function foldUsage(
   book: UsageBook,
-  s: { agent: string; wave: string | null; account: string; payload: UsagePayload },
+  s: { agent: string; wave: string | null; account: string; payload: UsagePayload; ns?: string },
   agents = 0,
 ): UsageBook {
   const at = s.payload.captured_at;
+  const seen = book.agents[s.agent]?.sampled_at;
   const prev = book.accounts[s.account];
   const latest = prev === undefined || newer(at, prev.sampled_at);
   const five = pickWindow(prev?.five_hour ?? null, s.payload.rate_limits.five_hour, at);
@@ -267,7 +287,13 @@ export function foldUsage(
   return {
     agents: {
       ...book.agents,
-      [s.agent]: { account: s.account, wave: s.wave, model: s.payload.model },
+      [s.agent]: {
+        account: s.account,
+        wave: s.wave,
+        model: s.payload.model,
+        sampled_at: seen !== undefined && !newer(at, seen) ? seen : at,
+        ...(s.ns !== undefined ? { ns: s.ns } : {}),
+      },
     },
     accounts: {
       ...book.accounts,
@@ -460,6 +486,24 @@ export function forgetAgent(book: UsageBook, agent: string): UsageBook {
   return { ...book, agents };
 }
 
+/**
+ * The book without the agents whose latest sample is older than `AGENT_SAMPLE_TTL_MS` at `now`,
+ * except the ones `keep` names (supervised or launching: a long tool call is not a dead session).
+ * The accounts are untouched (their windows are the account's). The same book when nothing goes.
+ */
+export function expireAgents(
+  book: UsageBook,
+  now: number,
+  keep: (id: string) => boolean,
+): UsageBook {
+  const stale = (id: string, at: string) => now - Date.parse(at) > AGENT_SAMPLE_TTL_MS && !keep(id);
+  const gone = Object.entries(book.agents).filter(([id, a]) => stale(id, a.sampled_at));
+  if (gone.length === 0) return book;
+  const agents = { ...book.agents };
+  for (const [id] of gone) delete agents[id];
+  return { ...book, agents };
+}
+
 /** An account every machine has whatever the registry says: its own login, `primary[@<name>]`. */
 export const isMachineLogin = (acct: string) =>
   acct === PRIMARY_ACCOUNT || acct.startsWith(`${PRIMARY_ACCOUNT}@`);
@@ -547,6 +591,7 @@ export interface Ranked {
   weekly_pct: number | null;
   /** The model family's weekly window, when the model has a family and the account reported it. */
   model_weekly_pct?: number;
+  /** The agents counted against it: `in_flight` (not the sessions its record lists). */
   agents: number;
   /** Its pace: the smallest over its windows (1 is on pace); null: it reported no window. */
   score: number | null;
@@ -612,18 +657,28 @@ export function paceOf(
   return ((100 - pct) * length) / (100 * hoursUntil(resetsAt, now, length));
 }
 
-/** `52m`, `4h 10m`, `4h`, `2d 4h`, `3d`; `now` once it has passed; `unknown` for no reset time. */
-export function untilLabel(resetsAt: string | null, now: number): string {
-  if (resetsAt === null) return "unknown";
+/** `52m`, `4h 10m`, `4h`, `2d 4h`, `3d`; null when no future reset is known (none, or passed). */
+export function untilLabel(resetsAt: string | null, now: number): string | null {
+  if (resetsAt === null) return null;
   const ms = Date.parse(resetsAt) - now;
-  if (!Number.isFinite(ms)) return "unknown";
-  if (ms <= 0) return "now";
+  if (!Number.isFinite(ms) || ms <= 0) return null;
   const m = Math.ceil(ms / 60_000);
   const d = Math.floor(m / 1440);
   const h = Math.floor((m % 1440) / 60);
   const two = (a: string, b: number, unit: string) => (b > 0 ? `${a} ${b}${unit}` : a);
   if (d > 0) return two(`${d}d`, h, "h");
   return h > 0 ? two(`${h}h`, m % 60, "m") : `${m % 60}m`;
+}
+
+/**
+ * A window's room left, as `volley claude balance` and the pick's `why` print it: `5h 18% left in
+ * 52m` with a future reset; without one (none known, or passed: the window restarted), `5h unused`
+ * when the whole window is left, else `7d 68% left`.
+ */
+export function roomLeft(window: string, left: number, resetsAt: string | null, now: number) {
+  const until = untilLabel(resetsAt, now);
+  if (until !== null) return `${window} ${round(left)}% left in ${until}`;
+  return round(left) >= 100 ? `${window} unused` : `${window} ${round(left)}% left`;
 }
 
 /**
@@ -640,7 +695,7 @@ export function untilLabel(resetsAt: string | null, now: number): string {
  * then the rest (the cap orders, it never refuses); each group by score, highest first (so an
  * over-cap account goes by pace too, not by how far over it is), an account with no usage data
  * counting as on pace (1). Scores within `tie_band_pct` percent of a band's leader form a band,
- * ordered by fewer agents (sampled or in flight, the more), then signed-in profiles before the primary (interactive sessions use
+ * ordered by fewer agents in flight, then signed-in profiles before the primary (interactive sessions use
  * the owner's own login without reporting usage, so its silence says least), then candidate
  * order. Every candidate is returned.
  */
@@ -654,7 +709,10 @@ export interface RankBalance {
   reserve_h?: number;
   agent_cost_pct_h?: number;
   agent_cost_weekly_pct_h?: number;
-  /** Agents in flight on an account (running and reserved); default: its sampled agents. */
+  /**
+   * Agents in flight on an account (supervised, launching and reserved); default: its sampled
+   * agents. A candidate's `agents` and its tie-break load are this number.
+   */
   in_flight?: (account: string) => number;
 }
 
@@ -716,7 +774,7 @@ export function rankAccounts(
       five_hour_pct: pctOf("five_hour"),
       weekly_pct: pctOf("weekly"),
       ...(model !== null ? { model_weekly_pct: model } : {}),
-      agents: a?.agents.length ?? 0,
+      agents: n,
       score: bind?.score ?? null,
       binding: bind?.kind ?? null,
       eligible: ws.every((w) => w.projected < cap),
@@ -727,8 +785,7 @@ export function rankAccounts(
     };
     // `primary@<name>` is a paired machine's own login: last there too
     const primaryLast = account.split("@")[0] === PRIMARY_ACCOUNT ? 1 : 0;
-    // fewer agents: its sampled ones, or its agents in flight when more (a same-pass pick)
-    return { r, i, primaryLast, s: r.score ?? 1, load: Math.max(r.agents, n) };
+    return { r, i, primaryLast, s: r.score ?? 1, load: n };
   });
   type Row = (typeof rows)[number];
   const ordered = (group: Row[]): Row[] => {
