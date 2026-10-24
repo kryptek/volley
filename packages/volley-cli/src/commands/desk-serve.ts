@@ -8,8 +8,6 @@ import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { deskStamp, parseBrokerHost, readBundleVersion, readDeskStamp } from "../setup/desk-build";
 import type { SetupDeps } from "../setup/step";
-
-export { parseBrokerHost } from "../setup/desk-build";
 import { findRepoRoot } from "./dash";
 
 /**

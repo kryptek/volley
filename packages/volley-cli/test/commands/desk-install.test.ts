@@ -79,6 +79,18 @@ describe("volley desk install | uninstall", () => {
       expect(m.execCalls.slice(calls).every(READ_ONLY)).toBe(true);
     });
 
+    it("an install that does not take records nothing", async () => {
+      const inner = m.deps.exec;
+      m.deps.exec = async (argv, o) =>
+        argv.join(" ") === "systemctl --user is-active volley-desk.service"
+          ? { code: 3, stdout: "inactive\n", stderr: "" }
+          : inner(argv, o);
+      const r = await run(["install", "--port", "5300", "--broker-host", "box-a"]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("still not in place");
+      expect(existsSync(join(m.ctx.volleydHome, "setup.json"))).toBe(false);
+    });
+
     it("without --broker-host the unit has no flag and the record drops it", async () => {
       expect((await run(["install", "--port", "5300", "--broker-host", "box-a"])).code).toBe(0);
       expect((await run(["install", "--port", "5300"])).code).toBe(0);

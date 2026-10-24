@@ -149,8 +149,8 @@ export async function deskInstall({
       return EXIT.ERROR;
     }
   }
-  recordDeskInstall(ctx, { port: p, brokerHost });
   if (plan.changes.length === 0) {
+    recordDeskInstall(ctx, { port: p, brokerHost });
     io.stdout(`The Desk is already installed on 0.0.0.0:${p}.\n`);
     return EXIT.OK;
   }
@@ -159,6 +159,7 @@ export async function deskInstall({
     for (const l of left) io.stderr(`volley desk install: ${l}\n`);
     return EXIT.ERROR;
   }
+  recordDeskInstall(ctx, { port: p, brokerHost });
   io.stdout(`Installed the Desk on 0.0.0.0:${p}.\n`);
   return EXIT.OK;
 }

@@ -409,7 +409,18 @@ describe("volley desk serve --broker-host: /desk-config.json", () => {
   });
 
   it("a scheme, a path, a port or a login in --broker-host exits 2; so does a bad ws port", async () => {
-    for (const bad of ["ws://box-a", "box-a/x", "box-a:9001", "me@box-a", "", "box a", "[box-a]"]) {
+    for (const bad of [
+      "ws://box-a",
+      "box-a/x",
+      "box-a:9001",
+      "me@box-a",
+      "",
+      "box a",
+      "[box-a]",
+      ":::",
+      "1:2:3",
+      "[::1:]",
+    ]) {
       const io = makeBufferIO();
       expect(
         await desk({ argv: ["serve", "--root", root, "--broker-host", bad], env: {}, io }),

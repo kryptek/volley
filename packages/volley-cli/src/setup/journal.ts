@@ -181,6 +181,23 @@ export function readBrokerHost(volleydHome: string): string | null {
   }
 }
 
+/**
+ * setup.json's `desk_port`, read on its own like `broker_host`: a record `volley desk install`
+ * wrote on a machine no `volley setup` has finished on. Null when there is none.
+ */
+export function readDeskPort(volleydHome: string): number | null {
+  try {
+    const port = (
+      JSON.parse(readFileSync(setupInstallFile(volleydHome), "utf-8")) as { desk_port?: unknown }
+    ).desk_port;
+    return typeof port === "number" && Number.isInteger(port) && port > 0 && port < 65_536
+      ? port
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The Desk's broker host for `ctx`: its own (null: none), else the record's. */
 export const deskBrokerHost = (ctx: SetupContext): string | null =>
   ctx.brokerHost !== undefined ? ctx.brokerHost : readBrokerHost(ctx.volleydHome);

@@ -17,6 +17,7 @@ import { checkDeps, checkExit, checkReport, checkSteps, renderCheck } from "../s
 import { planClaudeCode } from "../setup/claude-code";
 import {
   appendSetupLog,
+  readDeskPort,
   readSetupInstall,
   setupLogFile,
   writeSetupInstall,
@@ -270,7 +271,10 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     return EXIT.USAGE;
   }
   const portText =
-    str("desk-port") ?? String((fromRecord ? saved.desk_port : undefined) ?? DESK_PORT);
+    str("desk-port") ??
+    String(
+      (fromRecord ? saved.desk_port : saved === null ? readDeskPort(home) : undefined) ?? DESK_PORT,
+    );
   if (!/^\d+$/.test(portText) || Number(portText) < 1 || Number(portText) > 65_535) {
     io.stderr("volley setup: --desk-port must be a port number (1..65535)\n");
     return EXIT.USAGE;

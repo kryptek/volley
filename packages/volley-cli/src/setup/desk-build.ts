@@ -77,6 +77,14 @@ export function readBundleVersion(dist: string): string | null {
  */
 export function parseBrokerHost(text: string): string | null {
   const v6 = /^\[([0-9A-Fa-f:.]+)\]$/.exec(text)?.[1] ?? text;
-  if (v6.includes(":")) return /^[0-9A-Fa-f:.]+$/.test(v6) && v6.split(":").length > 2 ? v6 : null;
+  if (v6.includes(":")) {
+    if (!/^[0-9A-Fa-f:.]+$/.test(v6)) return null;
+    try {
+      new URL(`http://[${v6}]/`); // the WHATWG parser checks the address itself
+      return v6;
+    } catch {
+      return null;
+    }
+  }
   return /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/.test(text) ? text : null;
 }

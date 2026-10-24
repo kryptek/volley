@@ -262,6 +262,17 @@ describe("volley setup", () => {
     expect(JSON.parse(readFileSync(file, "utf-8"))).toEqual(recorded);
   });
 
+  it("keeps the port of a record only `volley desk install` wrote (no layout yet)", async () => {
+    const file = join(m.ctx.volleydHome, "setup.json");
+    mkdirSync(m.ctx.volleydHome, { recursive: true });
+    writeFileSync(file, '{"desk_port":5300,"broker_host":"box-a"}\n');
+    expect((await run(["--yes", "--lan"])).code).toBe(0);
+    expect(JSON.parse(readFileSync(file, "utf-8"))).toMatchObject({
+      desk_port: 5300,
+      broker_host: "box-a",
+    });
+  });
+
   it("records nothing for a run that stops before it finishes", async () => {
     m.auth.mosquittoVersion = async () => null;
     const r = await run(["--yes"]);
