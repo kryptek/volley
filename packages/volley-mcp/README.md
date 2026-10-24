@@ -153,7 +153,7 @@ bun run test:integration     # opt-in — real mosquitto required (sets VOLLEY_I
 bun run typecheck            # tsc --noEmit
 ```
 
-The integration test (`test/integration/mosquitto.test.ts`) is opt-in because it needs a real broker on `localhost:1883` (or `VOLLEY_BROKER_URL`). It also covers MQTT v5 persistent sessions, which the Aedes unit-test broker does not support. Locally: `docker run -d -p 1883:1883 -v "$PWD/packages/volley-mcp/test/integration/mosquitto.conf:/mosquitto/config/mosquitto.conf" eclipse-mosquitto:2` from the repo root, with the anonymous test config CI uses (the broker `volley setup` secured refuses anonymous clients). Without `VOLLEY_INTEGRATION=1` it self-skips.
+The integration test (`test/integration/mosquitto.test.ts`) is opt-in because it needs a real broker on `localhost:1883` (or `VOLLEY_BROKER_URL`). It also covers MQTT v5 persistent sessions, which the Aedes unit-test broker does not support. Locally: `docker run -d -p 1883:1883 -v "$PWD/packages/volley-mcp/test/integration/mosquitto.conf:/mosquitto/config/mosquitto.conf" eclipse-mosquitto:2` from the repo root, with the anonymous test config CI uses (the broker `volley setup` secured refuses anonymous clients). On a machine `volley setup` already set up, that broker holds 1883: publish another port (`-p 1884:1883`) and set `VOLLEY_BROKER_URL=mqtt://127.0.0.1:1884`. Without `VOLLEY_INTEGRATION=1` it self-skips.
 
 To iterate on a single test:
 

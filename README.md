@@ -153,7 +153,9 @@ which ends with a 1-issue test wave merged on a scratch repository: proof the wh
 
 and two sign-ins in your browser, **Claude Code** and **GitHub**, each only when you are signed
 out. Before it changes anything, each step shows what it will change and asks
-`Apply these changes …? [y/N]`. You copy no password: setup wires the logins itself.
+`Apply these <n> changes (…)? [y/N]`: type `y`, because Enter answers no and setup stops
+without changing anything (`volley setup --yes` applies every step without asking). You copy no
+password: setup wires the logins itself.
 
 **When it finishes** it prints `Setup complete in <m> m <s> s (…)` with the test wave's PR, and:
 

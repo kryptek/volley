@@ -204,6 +204,19 @@ describe("the install docs", () => {
     expect(flags.filter((f) => !install.includes(`\`${f}`))).toEqual([]);
   });
 
+  test("the per-step confirm is quoted as setup prints it, and says `y`", () => {
+    // packages/volley-cli/src/commands/setup.ts: `Apply this change (…)?` / `Apply these <n> changes (…)?`
+    for (const f of ["README.md", "docs/INSTALL.md", "docs/SMOKE-v0.11.md"]) {
+      const text = read(f);
+      expect({ f, stale: /Apply these changes\b/.test(text) }).toEqual({ f, stale: false });
+      expect({ f, quoted: text.includes("Apply these <n> changes (") }).toEqual({
+        f,
+        quoted: true,
+      });
+    }
+    expect(quickstart(read("README.md"))).toMatch(/type `y`/);
+  });
+
   test("docs/SMOKE-v0.11.md part A is written: steps with Pass lines and a results block", () => {
     const smoke = read("docs/SMOKE-v0.11.md");
     const partA = smoke.slice(smoke.indexOf("## Part A"), smoke.indexOf("## Part B"));

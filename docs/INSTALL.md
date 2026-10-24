@@ -85,7 +85,8 @@ README's [`volley setup`](../packages/volley-cli/README.md#volley-setup) has eve
 
 and two sign-ins, Claude Code (`claude auth login`) and GitHub (`gh auth login --web`), each
 in your browser and only when signed out. Before applying a step's changes it also asks
-`Apply these changes (<step>)? [y/N]`: type `y`. `volley setup --yes` asks nothing. You copy no
+`Apply these <n> changes (<step>)? [y/N]` (`Apply this change (<step>)?` for one): type `y`;
+Enter answers no and stops setup with nothing changed. `volley setup --yes` asks nothing. You copy no
 secret by hand: the services and the MCP server read their logins from files setup writes, and
 the Desk signs you in through a one-time link.
 
