@@ -1,6 +1,6 @@
 # Desk browser checks
 
-Playwright scripts for the Desk behaviours jsdom can't show: the first frame against a broker holding hundreds of retained agents, text selection, how each window style draws, window pinning, pan performance on a phone, the agent windows' Clawd characters, the current-step effects, and the theme token layer and its text contrast. They are not part of `bun run test`, and the workspace has no Playwright dependency. Each check loads Playwright from the directory it is run in.
+Playwright scripts for the Desk behaviours jsdom can't show: the first frame against a broker holding hundreds of retained agents, text selection, how each window style draws, window pinning, pan performance on a phone, the agent windows' Clawd characters, the current-step effects, the theme token layer and its text contrast, and the release matrix of every theme against the current-step effects. They are not part of `bun run test`, and the workspace has no Playwright dependency. Each check loads Playwright from the directory it is run in.
 
 Use a **private** broker on ports of your own. Never point them at a shared or live broker.
 
@@ -28,11 +28,12 @@ node $CHECKS/selection.mjs <out dir>       # canvas and chrome drags select noth
 node $CHECKS/pinning.mjs <out dir>         # anchor the coordinators top-left: arrange, pan, resize, reload; pin a wave in place
 node $CHECKS/styles-audit.mjs <out dir>    # every window style: box, hover overflow, paint under the body
 node $CHECKS/sheet.mjs <out dir>           # the comparison sheet from the audit
-node $CHECKS/pan-perf.mjs <out dir> [tag]  # demo, no broker: phone pan frame times (4x CPU) and backdrop filters, desktop window crop
+node $CHECKS/pan-perf.mjs <out dir> [tag] [fx] [theme]  # demo, no broker: phone pan frame times (4x CPU) and backdrop filters, desktop window crop; fx and theme set the look (budget: p95 < 33 ms, median < 20 ms)
 node $CHECKS/popovers.mjs <out dir>        # demo, no seeding: the why-here cards on screen, outside every window, at desktop, phone, zoomed out
 node $CHECKS/clawd.mjs <out dir>           # demo, no seeding: each agent window's Clawd, title bars as tall as Classic, no glow on a phone, still under reduced motion
 node $CHECKS/step-fx.mjs <out dir> [tag] [fx...]  # demo: each current-step effect's idle and pan frame times on a phone (4x CPU) and desktop, the agent window crops, still under reduced motion; budget phone idle p95 < 20 ms, pan p95 < 33 ms
 node $CHECKS/themes.mjs <out dir> [tag] [theme...]  # demo: agent, wave, dock, Needs you, Settings and sign-in crops per theme (a light one with Clawd and Classic), the computed tokens and the centre check; axe color-contrast and the measured text contrast (text-contrast.mjs) per view; fails on text below AA beyond Volley's own or a centre-check miss
+node $CHECKS/themes.mjs <out dir> [tag] --matrix [theme...]  # demo: the release matrix, every theme × Glint, Aurora, Liquid, Classic × desktop and phone with motion on: tokens, agent / running and ended wave / Appearance / sign-in crops, axe color-contrast; then reduced motion, Volley and Lighter × nine effects, the current step still; writes matrix-<tag>.json and the sheet matrix-<tag>.html; fails on any violation, missing cell or moving step
 ```
 
 Re-run `seed-waves.mjs` before `styles-audit.mjs`, because the seeded wave goes stale and grows a banner. Each check prints a JSON report and writes its screenshots to the output directory. Stop the broker and the dev server afterwards.
