@@ -52,10 +52,12 @@ linux_host() {
   # Tracked and untracked files, not what .gitignore excludes (node_modules, results).
   (cd "$REPO" && git ls-files -co --exclude-standard -z | tar --null -T - -cf -) |
     docker exec -i "$name" bash -c 'mkdir -p ~/volley && tar -C ~/volley -xf -' || exit 1
-  docker exec -e LAYER1_LABEL="$distro" -e LAYER1_OUT=/home/owner/layer1-results "$name" \
-    bash /home/owner/volley/scripts/install-tests/run-layer1.sh inside
+  # The image's user's home (its HOME), where the checkout and the results live.
+  home=$(docker exec "$name" printenv HOME) || exit 1
+  docker exec -e LAYER1_LABEL="$distro" -e LAYER1_OUT="$home/layer1-results" "$name" \
+    bash "$home/volley/scripts/install-tests/run-layer1.sh" inside
   code=$?
-  docker cp "$name:/home/owner/layer1-results/." "$OUT/" || code=1
+  docker cp "$name:$home/layer1-results/." "$OUT/" || code=1
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f "$OUT/summary.md" ]; then
     cat "$OUT/summary.md" >>"$GITHUB_STEP_SUMMARY"
   fi

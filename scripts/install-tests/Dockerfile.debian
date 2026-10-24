@@ -44,6 +44,5 @@ RUN ldconfig \
     >/mosquitto/config/mosquitto.conf \
   && chown -R owner:owner /mosquitto
 USER owner
-WORKDIR /home/owner
 ENV USER=owner
 CMD ["sleep", "infinity"]

@@ -180,8 +180,9 @@ main() {
       done
       ;;
     show)
-      [ "$prop" = MainPID ] && [ -n "$value" ] && [ ${#units[@]} -eq 1 ] ||
+      if [ "$prop" != MainPID ] || [ -z "$value" ] || [ ${#units[@]} -ne 1 ]; then
         fail "show supports only -p MainPID --value <unit>"
+      fi
       pid_of "${units[0]}" || printf '0'
       printf '\n'
       ;;
