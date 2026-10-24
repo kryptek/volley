@@ -70,8 +70,9 @@ describe("theme registry", () => {
   });
 
   it("falls back to Volley for an id without an entry", () => {
-    expect(themeById("dracula").id).toBe(
-      THEMES.some((t) => t.id === "dracula") ? "dracula" : "volley",
+    // Material Lighter is listed in the picker but has no entry until #368.
+    expect(themeById("lighter").id).toBe(
+      THEMES.some((t) => t.id === "lighter") ? "lighter" : "volley",
     );
     expect(themeById("neon").id).toBe("volley");
   });

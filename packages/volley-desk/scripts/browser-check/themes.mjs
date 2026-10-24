@@ -191,3 +191,6 @@ for (const theme of themes) {
 await b.close();
 writeFileSync(join(out, `themes-${tag}.json`), `${JSON.stringify(report, null, 2)}\n`);
 console.log(JSON.stringify(report, null, 2));
+const misses = Object.entries(report).filter(([, r]) => r.centre && !r.centre.pass);
+for (const [key, r] of misses) console.error(`centre check missed: ${key} ${JSON.stringify(r.centre)}`);
+if (misses.length) process.exitCode = 1;
