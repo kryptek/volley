@@ -135,6 +135,8 @@ function connectClient(
 /** Thin wrapper over an MQTT client — the only module in volley-mcp that imports `mqtt`. */
 export class VolleyBroker {
   private client: MqttClient | null = null;
+  /** Each connection's close, for the publishes still waiting on an ack (`publish`). */
+  private readonly closings = new WeakMap<MqttClient, Promise<"closed">>();
   /**
    * Per-connection routing. MQTT holds ONE subscription per filter per client — a second
    * SUBSCRIBE replaces the first and an UNSUBSCRIBE removes it for everyone — so a single
@@ -485,13 +487,35 @@ export class VolleyBroker {
     });
   }
 
+  /**
+   * Publish, resolved once the broker acknowledged it (QoS 1). A publish still unacknowledged
+   * when the connection closes fails with BROKER_DOWN: the client never reconnects, and mqtt.js
+   * keeps a persistent session's QoS 1 publishes for a reconnect, so it would never settle.
+   */
   async publish(
     topic: string,
     payload: string,
     opts: { qos: 0 | 1; retain: boolean },
   ): Promise<void> {
     const client = this.requireClient();
-    await client.publishAsync(topic, payload, { qos: opts.qos, retain: opts.retain });
+    const sent = client
+      .publishAsync(topic, payload, { qos: opts.qos, retain: opts.retain })
+      .then(() => "sent" as const);
+    if ((await Promise.race([sent, this.closedOf(client)])) === "closed")
+      throw new VolleyError(
+        "BROKER_DOWN",
+        `broker connection closed before the publish on ${topic} was acknowledged`,
+      );
+  }
+
+  /** Resolves once `client`'s connection closes (one listener per connection). */
+  private closedOf(client: MqttClient): Promise<"closed"> {
+    let closed = this.closings.get(client);
+    if (closed === undefined) {
+      closed = new Promise((resolve) => client.once("close", () => resolve("closed")));
+      this.closings.set(client, closed);
+    }
+    return closed;
   }
 
   /**

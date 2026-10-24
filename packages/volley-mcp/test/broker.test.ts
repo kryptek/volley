@@ -1,3 +1,4 @@
+import { type Socket, createServer } from "node:net";
 import mqtt from "mqtt";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "../src/broker";
@@ -409,6 +410,61 @@ describe("VolleyBroker subscribeStream", () => {
     await expect(b.subscribeStream("volley/test/dead/+", () => {})).rejects.toMatchObject({
       code: "BROKER_DOWN",
     });
+  });
+});
+
+describe("VolleyBroker publish when the connection closes", () => {
+  /**
+   * A broker that accepts the CONNECT and never acknowledges anything after it (a broker
+   * stopped mid-publish): `drop` closes the connection with the publish still unacknowledged.
+   */
+  async function silentBroker() {
+    const sockets: Socket[] = [];
+    const server = createServer((sock) => {
+      sockets.push(sock);
+      // CONNACK, session not present, accepted (MQTT 3.1.1).
+      sock.once("data", () => sock.write(Buffer.from([0x20, 0x02, 0x00, 0x00])));
+      sock.on("error", () => {});
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const { port } = server.address() as { port: number };
+    return {
+      url: `mqtt://127.0.0.1:${port}`,
+      drop: () => {
+        for (const s of sockets) s.destroy();
+      },
+      close: () => new Promise<void>((r) => server.close(() => r())),
+    };
+  }
+
+  it("a QoS 1 publish in flight on a persistent session fails with BROKER_DOWN instead of waiting forever", async () => {
+    const sb = await silentBroker();
+    const b = new VolleyBroker();
+    try {
+      await b.connect({
+        url: sb.url,
+        agentId: "a",
+        clientId: "volley-a-test",
+        cleanSession: false,
+      });
+      const pending = b.publish("volley/t/a/status", "{}", { qos: 1, retain: true });
+      const settled = pending.then(
+        () => "acked",
+        (e: unknown) => e,
+      );
+      await new Promise((r) => setTimeout(r, 50));
+      sb.drop();
+      const e = await settled;
+      expect(e).toBeInstanceOf(VolleyError);
+      expect((e as VolleyError).code).toBe("BROKER_DOWN");
+      // Nothing more is sent on the closed connection.
+      await expect(b.publish("volley/t/a/status", "{}", { qos: 1, retain: true })).rejects.toThrow(
+        /dropped/,
+      );
+    } finally {
+      b.simulateCrash();
+      await sb.close();
+    }
   });
 });
 
