@@ -903,7 +903,9 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
     render(view({ work: own, "primary@box": { ...peer, account: "primary@box" } }));
     const c = within(screen.getByRole("article", { name: "primary@box" }));
     // read-only: nothing can ask volleyd for it
-    expect(c.getByText("no reading yet", { selector: ".s-hint:not(.cc-updated)" })).toBeInTheDocument();
+    expect(
+      c.getByText("no reading yet", { selector: ".s-hint:not(.cc-updated)" }),
+    ).toBeInTheDocument();
     expect(c.queryByText(/doctor/i)).toBeNull();
     expect(c.queryByRole("button", { name: /email/ })).toBeNull();
   });
