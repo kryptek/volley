@@ -220,3 +220,26 @@ describe("ci.yml's reuse lookup", () => {
     expect(ci.jobs.reuse?.["continue-on-error"]).toBe(true);
   });
 });
+
+describe("ci.yml's run: steps", () => {
+  const read = () => Bun.file(join(import.meta.dir, "../.github/workflows/ci.yml")).text();
+
+  test("ci-reused reports the whole line", async () => {
+    const ci = Bun.YAML.parse(await read()) as {
+      jobs: Record<string, { steps?: { run?: string }[] }>;
+    };
+    const run = ci.jobs["ci-reused"]?.steps?.[0]?.run;
+    expect(run).toContain('tee -a "$GITHUB_STEP_SUMMARY"');
+    expect(run).toContain("tree $TREE");
+  });
+
+  test("no run: step loses its tail to a YAML comment", async () => {
+    // A plain scalar ends at ` #`: the rest of the line is a comment, not part of the command.
+    // Only plain scalars: the lookahead sits after all the blanks, so a quoted or block value is skipped.
+    const plain = [
+      ...(await read()).matchAll(/^[ \t]*(?:- )?run:[ \t]+(?![\s"'|>])(.*\S)[ \t]*$/gm),
+    ].map((m) => m[1]);
+    expect(plain.length).toBeGreaterThan(0);
+    expect(plain.filter((value) => /[ \t]#/.test(value ?? ""))).toEqual([]);
+  });
+});
