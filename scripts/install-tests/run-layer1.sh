@@ -164,7 +164,12 @@ common_checks() {
   say "No secrets in the logs"
   collect_secrets
   scan "$OUT/setup.log" "$OUT/volleyd.log" "$OUT/desk.log" \
-    "$OUT/unknown.jsonl" "$OUT/setup-rerun.log" || fail "a log holds a secret (the lines above)"
+    "$OUT/unknown.jsonl" "$OUT/setup-rerun.log"
+  case $? in
+    0) ;;
+    1) fail "a log holds a secret (the lines above)" ;;
+    *) fail "the secret scan could not run (the line above)" ;;
+  esac
 
   say "The summary"
   GITHUB_STEP_SUMMARY="$OUT/summary.md" metrics summary --label "$label" \

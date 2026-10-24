@@ -37,7 +37,9 @@ Linux, inside the container as `owner`:
 macOS runs the same, with the install script piped into `sh` as `curl … | sh` does (Homebrew is
 on the runner; no cmux, so tmux), `--layout` left to setup, and also checks that launchd has
 `systems.volley.volleyd` and `systems.volley.desk` and that the `volley-broker` keychain item
-exists (by exit code only).
+exists (by exit code only). One row may differ: under `--no-lan` setup keeps the Mac's
+WebSocket listener on loopback, so the `phone` row may be `skipped` (`--allow-skipped phone`);
+`pending` or `blocked` there still fails.
 
 Every check that fails prints `FAIL: …`; the run goes on to collect the rest and exits 1 at the
 end, printing setup's output with the secrets redacted.

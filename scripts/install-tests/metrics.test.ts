@@ -230,6 +230,17 @@ describe("secrets in the logs", () => {
     expect(`${bad.stdout}${bad.stderr}`).not.toContain(PW);
   });
 
+  test("scan exits 2 on a secrets file it cannot read, not 1", () => {
+    const dir = tempDir("volley-layer1-");
+    const creds = join(dir, "broker.json");
+    writeFileSync(creds, "{ not json");
+    const log = join(dir, "volleyd.log");
+    writeFileSync(log, "volleyd up\n");
+    const r = run(["scan", "--secrets", creds, log]);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(`cannot read ${creds}`);
+  });
+
   test("redact replaces the known secrets and token-shaped text", () => {
     expect(redact(`pw ${PW} and ghp_ABCDEFGHIJKLMNOPQRSTUVWX`, [PW])).toBe(
       "pw [redacted] and [redacted]",

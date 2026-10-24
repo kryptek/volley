@@ -221,6 +221,8 @@ export function redact(text: string, secrets: readonly string[]): string {
 // The command
 
 class UsageError extends Error {}
+/** A --secrets file scan or redact cannot read: exit 2, never 1 (scan's "a log holds a secret"). */
+class InputError extends Error {}
 
 function readJson(path: string): unknown {
   try {
@@ -240,8 +242,16 @@ function args(argv: string[], options: NonNullable<ParseArgsConfig["options"]>) 
 
 const secretsOf = (files: unknown) =>
   ((files as string[] | undefined) ?? []).flatMap((f) =>
-    existsSync(f) ? secretsFrom(readJson(f)) : [],
+    existsSync(f) ? secretsFrom(readSecrets(f)) : [],
   );
+
+function readSecrets(path: string): unknown {
+  try {
+    return readJson(path);
+  } catch (e) {
+    throw new InputError(e instanceof Error ? e.message : String(e));
+  }
+}
 
 function main(argv: string[]): number {
   const [verb, ...rest] = argv;
@@ -306,6 +316,6 @@ if (import.meta.main) {
     process.exitCode = main(process.argv.slice(2));
   } catch (e) {
     process.stderr.write(`metrics.ts: ${e instanceof Error ? e.message : String(e)}\n`);
-    process.exitCode = e instanceof UsageError ? 2 : 1;
+    process.exitCode = e instanceof UsageError || e instanceof InputError ? 2 : 1;
   }
 }
