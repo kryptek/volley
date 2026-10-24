@@ -21,9 +21,13 @@ export const localSessionName = (title: string) => `volley-${sessionName(title)}
 
 /** Exit 127: the shell found no `tmux` to run. */
 const NOT_FOUND = 127;
-/** What `volley setup` and the owner do about a missing tmux. */
+/** What `volley setup` and the owner do about a missing tmux (setup's `tmuxInstallLine` lines). */
 const INSTALL_TMUX =
-  "Install tmux (macOS: `brew install tmux`; Debian/Ubuntu: `sudo apt install tmux`), then run `volley setup --check`.";
+  "Install tmux (macOS: `brew install tmux`; Debian, Ubuntu: `sudo apt-get install -y tmux`; Fedora: `sudo dnf install -y tmux`), then run `volley setup --check`.";
+const NOT_INSTALLED = `tmux is not installed. ${INSTALL_TMUX}`;
+
+/** exec spawns without a shell, so a missing tmux rejects with ENOENT rather than exiting 127. */
+const isNotFound = (e: unknown) => (e as NodeJS.ErrnoException | null)?.code === "ENOENT";
 
 /** tmux's answer for a session (or server) that is not there. */
 const GONE = /can't find session|session not found|no server running|error connecting to/i;
@@ -73,7 +77,10 @@ export class LocalTmuxHost implements Host {
     }
     const base = localSessionName(spec.name);
     const session = await this.freeSession(base).catch((e: unknown) => {
-      throw fail(`tmux: ${e instanceof Error ? e.message : String(e)}`, { candidate: base });
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg === NOT_INSTALLED)
+        throw fail(`volleyd cannot open a tmux session: ${msg}`, { candidate: base });
+      throw fail(`tmux: ${msg}`, { candidate: base });
     });
     // Detached, tmux would size it 80×24 (its default-size) and nothing would ever widen it.
     const size = tmuxSize(spec.size ?? DEFAULT_SIZE);
@@ -94,6 +101,8 @@ export class LocalTmuxHost implements Host {
         ...(spec.launch !== undefined ? { launch: spec.launch } : {}),
       },
     ).catch((e: unknown) => {
+      if (isNotFound(e))
+        throw fail(`volleyd cannot open a tmux session: ${NOT_INSTALLED}`, { candidate: session });
       throw fail(`tmux new-session: ${e instanceof Error ? e.message : String(e)}`, {
         candidate: session,
         // The fence refusing it means nothing ran; anything else may have started tmux.
@@ -103,7 +112,7 @@ export class LocalTmuxHost implements Host {
     if (r.code !== 0 || r.timedOut) {
       throw fail(
         r.code === NOT_FOUND
-          ? `volleyd cannot open a tmux session: tmux is not installed. ${INSTALL_TMUX}`
+          ? `volleyd cannot open a tmux session: ${NOT_INSTALLED}`
           : `tmux new-session failed: ${r.timedOut ? "timed out" : r.stderr.trim()}`,
         {
           exit: r.code,
@@ -142,6 +151,8 @@ export class LocalTmuxHost implements Host {
   private async hasSession(session: string): Promise<boolean> {
     const r = await this.exec(["tmux", "has-session", "-t", `=${session}`], {
       timeoutMs: DAEMON_DEFAULTS.workspace_lookup_timeout_ms,
+    }).catch((e: unknown) => {
+      throw isNotFound(e) ? new Error(NOT_INSTALLED) : e;
     });
     // 1: no such session, or no server at all; anything else is tmux failing to answer.
     if (r.timedOut || (r.code !== 0 && r.code !== 1)) throw tmuxFailed("has-session", r);
@@ -221,7 +232,7 @@ export class LocalTmuxHost implements Host {
 }
 
 function tmuxFailed(what: string, r: ExecResult): Error {
-  if (r.code === NOT_FOUND) return new Error(`tmux is not installed. ${INSTALL_TMUX}`);
+  if (r.code === NOT_FOUND) return new Error(NOT_INSTALLED);
   return new Error(
     `tmux ${what} failed: ${r.timedOut ? "timed out" : r.stderr.trim() || `exit ${r.code}`}`,
   );

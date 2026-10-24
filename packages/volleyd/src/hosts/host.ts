@@ -1,5 +1,6 @@
 import type { ExecFn } from "../exec";
 import type { ConsentToken, FenceOptions, LaunchToken } from "../fence";
+import type { LocalTerminal } from "../types";
 
 /**
  * The fence tokens typed text and keys need (src/fence.ts TYPED_TEXT, PICKER): a sealed launch, a
@@ -130,7 +131,7 @@ export interface Host {
     consent: ConsentToken,
   ): Promise<SessionEnd>;
   /** The screen channel's `source` for this host's captures (default `cmux`). */
-  readonly screenSource?: string;
+  readonly screenSource?: LocalTerminal;
   /**
    * Read a file on the host (null when it does not exist). Remote hosts only: without it, files
    * such as `.volley/brief-extra.md` are read from the daemon's own filesystem.

@@ -1829,6 +1829,8 @@ export class Daemon {
     try {
       await assertNotRunning(opts);
       d = new Daemon(opts, release);
+      // fleet.local_terminal is read when the supervisor starts (SPEC §4.6.4), not at first use.
+      void d.host;
       await d.connect();
       return d;
     } catch (e) {

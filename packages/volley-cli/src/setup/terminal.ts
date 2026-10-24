@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -523,9 +524,14 @@ export function writeLocalTerminal(volleydHome: string, terminal: LocalTerminal)
   const before = existsSync(file) ? readFileSync(file, "utf-8") : "";
   const after = withLocalTerminal(before, terminal);
   mkdirSync(volleydHome, { recursive: true, mode: 0o700 });
-  const tmp = `${file}.tmp`;
-  writeFileSync(tmp, after);
-  renameSync(tmp, file);
+  const tmp = `${file}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, after);
+    renameSync(tmp, file);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
   return file;
 }
 
@@ -598,7 +604,9 @@ export async function planTerminal(ctx: SetupContext): Promise<StepPlan> {
   }
   if (current !== null && current !== chosen) {
     plan.found.push(
-      `${file} chose ${current}, which is not installed here: volleyd starts local agents in ${chosen} instead`,
+      mac
+        ? `${file} chose ${current}, which is not installed here: volleyd starts local agents in ${chosen} instead`
+        : `${file} names a terminal volleyd does not run on Linux: volleyd starts local agents in ${chosen} instead`,
     );
   }
   plan.found.push(

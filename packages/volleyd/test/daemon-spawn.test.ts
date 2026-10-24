@@ -63,6 +63,8 @@ describe("daemon spawn loop", () => {
   const sessions = new Set<Promise<void>>();
   /** With `local`: the terminals the daemon built its local host for. */
   let built: string[] = [];
+  /** `built` as it stood when `env.start` returned, before the wave was submitted. */
+  let builtAtStart: string[] = [];
   /** With `freshBase`: while true, `git fetch origin release/w1` fails (offline). */
   let fetchFails = false;
   /** With `freshBase`: the next spawn's fetch loses a ref-lock race to another git process. */
@@ -230,6 +232,7 @@ describe("daemon spawn loop", () => {
         credentials: creds,
       },
     });
+    builtAtStart = [...built];
     waits = journalWait(env.home, () => daemon);
     const wave = join(env.home, "w1.yaml");
     writeFileSync(
@@ -518,6 +521,14 @@ describe("daemon spawn loop", () => {
       expect(spawned?.data).toMatchObject({ host: "local", terminal: "tmux" });
       await event("agent_registered");
       await waits.settled();
+    });
+
+    it("is resolved when the daemon starts (SPEC §4.6.4), not at the first spawn", async () => {
+      await setup({ local: { terminal: "tmux", platform: "linux", cmux: false } });
+      expect(builtAtStart).toEqual(["tmux"]);
+      await event("agent_registered");
+      await waits.settled();
+      expect(built).toEqual(["tmux"]);
     });
 
     it("cmux: the local host is the cmux one", async () => {

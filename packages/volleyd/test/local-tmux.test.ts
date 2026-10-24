@@ -139,6 +139,29 @@ describe("LocalTmuxHost", () => {
     expect(err.message).toContain("volley setup");
   });
 
+  it("a tmux the exec cannot spawn (ENOENT) says what to install", async () => {
+    const enoent = () => {
+      throw Object.assign(new Error("spawn tmux ENOENT"), { code: "ENOENT" });
+    };
+    const launchErr = async (fake: ReturnType<typeof fakeExec>) =>
+      (await new LocalTmuxHost(fake.exec).launch(spec()).catch((e: unknown) => e)) as SpawnError;
+    // The first has-session finds no tmux binary.
+    let err = await launchErr(fakeExec().on(["tmux"], enoent));
+    expect(err.code).toBe("LAUNCH_FAILED");
+    expect(err.message).toContain("tmux is not installed");
+    expect(err.message).toContain("sudo apt-get install -y tmux");
+    expect(err.detail.outcome).toBe("refused");
+    // tmux vanished between has-session and new-session: nothing ran.
+    err = await launchErr(
+      fakeExec().on(["tmux", "has-session"], noSession).on(["tmux", "new-session"], enoent),
+    );
+    expect(err.message).toContain("tmux is not installed");
+    expect(err.detail.outcome).toBe("refused");
+    await expect(
+      new LocalTmuxHost(fakeExec().on(["tmux"], enoent).exec).findWorkspace("w1 T1 implementer"),
+    ).rejects.toThrow("tmux is not installed");
+  });
+
   it("serializes launches: one new-session in flight at a time", async () => {
     let release = () => {};
     const gate = new Promise<void>((r) => {

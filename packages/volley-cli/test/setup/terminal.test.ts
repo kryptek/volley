@@ -534,12 +534,15 @@ describe("setup: the terminal (cmux, tmux)", () => {
       expect(words(p)).not.toMatch(/cmux/i);
       for (const c of p.changes) await c.apply();
       expect(readFileSync(config(), "utf-8")).toBe("fleet:\n  local_terminal: tmux\n");
-      // An explicit cmux there (copied from a Mac) is not installed here: tmux, saying why.
+      // An explicit cmux there (copied from a Mac) does not run here: tmux, saying why, still
+      // without naming cmux.
       writeFileSync(config(), "fleet:\n  local_terminal: cmux\n");
       const moved = await planTerminal(m.ctx);
       expect(moved.found[0]).toBe(
-        `${config()} chose cmux, which is not installed here: volleyd starts local agents in tmux instead`,
+        `${config()} names a terminal volleyd does not run on Linux: volleyd starts local agents in tmux instead`,
       );
+      // Only the diff of the owner's own file still shows it.
+      expect([...moved.found, moved.row].join("\n")).not.toMatch(/cmux/i);
       expect(moved.changes).toHaveLength(1);
     });
 
