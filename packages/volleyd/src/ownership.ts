@@ -1,19 +1,17 @@
 import { parseEnvelope } from "volley-mcp/envelope";
 import { isValidAgentId } from "volley-mcp/topics";
 import { DAEMON_AGENT_ID } from "./control";
+import { OWNER_GONE, type Presence } from "./presence";
 import type { WaveId } from "./types";
 
 /**
  * Wave ownership: one coordinator per wave is the single writer. Mutating control ops (resolve,
  * pause, resume, stop, steer, re-run) need `by == owner`; anyone else first claims the wave,
- * which succeeds only when the owner is gone. The owner is an agent id or a stable coordinator
+ * which succeeds only when the owner is offline (presence.ts). The owner is an agent id or a stable coordinator
  * name (`VOLLEY_COORDINATOR`, SPEC §6.2) bound to the newest live session carrying it, so a
  * restarted MCP server (a new agent id) keeps its waves. Pure: the daemon gathers the owner's
- * status, registry entry, last heartbeat and binding and passes them in.
+ * presence and binding and passes them in.
  */
-
-/** Owner statuses after which the wave is free to claim. */
-const GONE = new Set(["reaped", "done", "failed"]);
 
 /** A coordinator name's binding: the agent acting under it, since when, and its last status. */
 export interface Binding {
@@ -35,7 +33,7 @@ export function bindOwner(
   name: string,
 ): string | null {
   const live = entries
-    .filter((e) => e.coordinator === name && !GONE.has(statuses.get(e.agent_id) ?? ""))
+    .filter((e) => e.coordinator === name && !OWNER_GONE.has(statuses.get(e.agent_id) ?? ""))
     .sort((a, b) => (b.started_at ?? "").localeCompare(a.started_at ?? ""));
   return live[0]?.agent_id ?? null;
 }
@@ -51,7 +49,7 @@ export function guardMutation(
   const binding = bindings.get(state.owner);
   const bound = binding?.agent_id;
   // A bound agent that went away keeps the binding (for `reconnecting`) but no longer acts.
-  if (bound === by && !GONE.has(binding?.status ?? "")) return null;
+  if (bound === by && !OWNER_GONE.has(binding?.status ?? "")) return null;
   const owner = bound !== undefined ? `${state.owner} (via ${bound})` : state.owner;
   return `wave '${state.wave}' is owned by ${owner}; '${op}' as ${by} is refused (claim it with \`volleyd claim ${state.wave}\` once ${state.owner} is gone)`;
 }
@@ -59,64 +57,58 @@ export function guardMutation(
 export interface ClaimInput {
   owner: string | null;
   by: string;
-  /** The owner's retained status: its type and wall_time. */
-  status: { type: string; at: string } | null;
-  /** When the owner's registry entry was (re)published. */
-  registryAt: string | null;
-  /**
-   * Epoch ms of the owner's last progress/heartbeat the daemon saw — or, when it has seen none,
-   * when the daemon started (its memory of heartbeats does not survive a restart).
-   */
-  heartbeatAt: number | null;
-  /** When the owner got the wave (its `wave_submitted` or latest `owner_claimed`). */
-  ownedSince: string;
-  now: number;
-  claimAfterS: number;
   /**
    * When the owner is a coordinator name: the agent bound to it (null before any has). The
-   * status, registry and heartbeat fields then describe that agent, and its terminal status does
-   * not free the wave at once: the name may reconnect under a new agent id.
+   * presence then is that agent's, and going offline frees the wave only past `graceMs`: the name
+   * may reconnect under a new agent id.
    */
   bound?: string | null;
+  /** The owner's presence (presence.ts), from its retained status. */
+  presence: Presence;
+  /** When it went offline (epoch ms); null when unknown (it never had a status). */
+  awayAt: number | null;
+  /** `autopilot.reconnect_grace_s`, in ms. */
+  graceMs: number;
+  now: number;
 }
 
 /**
- * May `by` take the wave over? Yes when it is unowned or already `by`'s, when the owner's status
- * is reaped/done/failed, or when nothing has been heard from the owner (registry, status,
- * heartbeat) for `claim_after_s`. The time ownership began counts as a sighting, so an owner the
- * broker has never seen is claimable only after `claim_after_s` too.
+ * May `by` take the wave over? Yes when it is unowned or already `by`'s, or when the owner is
+ * offline (SPEC §7.5) — for a coordinator name, offline past the reconnect grace, so a wave shown
+ * `reconnecting` is never claimable. Silence never frees a wave: a quiet connected owner keeps it.
  */
 export function claimVerdict(
   c: ClaimInput,
 ): { ok: true; why: string } | { ok: false; reason: string } {
   if (c.owner === null) return { ok: true, why: "wave has no owner" };
   if (c.owner === c.by) return { ok: true, why: `${c.by} already owns it` };
-  if (c.bound !== undefined && c.bound !== null && c.bound === c.by)
+  const bound = c.bound ?? undefined;
+  if (bound !== undefined && bound === c.by)
     return { ok: true, why: `${c.by} already owns it as ${c.owner}` };
-  const owner = c.bound !== undefined && c.bound !== null ? `${c.owner} (via ${c.bound})` : c.owner;
-  if (c.bound === undefined && c.status !== null && GONE.has(c.status.type))
-    return { ok: true, why: `owner ${c.owner} is ${c.status.type}` };
-  const seen = [
-    c.status?.at,
-    c.registryAt ?? undefined,
-    c.heartbeatAt !== null ? new Date(c.heartbeatAt).toISOString() : undefined,
-    c.ownedSince,
-  ]
-    .map((t) => (t !== undefined ? Date.parse(t) : Number.NaN))
-    .filter((t) => !Number.isNaN(t));
-  const last = seen.length > 0 ? Math.max(...seen) : c.now;
-  const silentS = Math.max(0, Math.floor((c.now - last) / 1000));
-  if (silentS >= c.claimAfterS)
+  const owner = bound !== undefined ? `${c.owner} (via ${bound})` : c.owner;
+  if (c.presence === "online")
     return {
-      ok: true,
-      why: `owner ${owner} silent for ${silentS}s (claim_after_s ${c.claimAfterS})`,
+      ok: false,
+      reason: `wave is owned by ${owner}, online; claim allowed once its session is gone (the will fired or it shut down)`,
     };
+  if (c.awayAt === null) return { ok: true, why: `owner ${owner} offline (no status)` };
+  const since = new Date(c.awayAt).toISOString();
+  if (bound === undefined || c.now - c.awayAt >= c.graceMs)
+    return { ok: true, why: `owner ${owner} offline since ${since}` };
   return {
     ok: false,
     reason:
-      `wave is owned by ${owner} (${c.status?.type ?? "no status"}, last seen ${silentS}s ago); ` +
-      `claim allowed once it is reaped/done or silent for claim_after_s=${c.claimAfterS}s`,
+      `wave is owned by ${owner}, reconnecting (gone ${span(c.now - c.awayAt)} ago, grace ${span(c.graceMs)}); ` +
+      `claim allowed at ${new Date(c.awayAt + c.graceMs).toISOString()} unless it reconnects`,
   };
+}
+
+/** A duration in a refusal: `40s`, `3m`, `2h`. */
+function span(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  return `${Math.round(s / 3600)}h`;
 }
 
 /** The registry fields owner auto-detection needs. */
@@ -193,7 +185,7 @@ function sessionsIn(
         (caller.namespace === undefined || e.namespace === caller.namespace) &&
         e.cwd !== undefined &&
         inCwd(e.cwd) &&
-        !GONE.has(statuses.get(e.agent_id) ?? ""),
+        !OWNER_GONE.has(statuses.get(e.agent_id) ?? ""),
     )
     .sort(
       (a, b) =>

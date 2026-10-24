@@ -85,12 +85,6 @@ describe("Gooey Nav tabs", () => {
     expect(document.activeElement).toBe(tab(TERM));
   });
 
-  it("the active tab's ink is the theme's on-pill ink", () => {
-    const { container } = renderAgent();
-    const nav = container.querySelector(".gooey-tabs") as HTMLElement;
-    expect(nav.style.getPropertyValue("--gn-active-ink")).toBe("var(--on-hi)");
-  });
-
   it("a click selects a tab", () => {
     renderAgent();
     fireEvent.click(tab(TERM));

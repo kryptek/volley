@@ -45,7 +45,6 @@
                 "spawn_budget_multiplier",
                 "lease_pools",
                 "admission",
-                "claim_after_s",
                 "heartbeat_alarm_s",
                 "fallback_model",
                 "mailbox",
@@ -114,13 +113,6 @@
             "ci_queue_max": { "type": "integer", "minimum": 0, "maximum": 1000 },
             "hysteresis_samples": { "type": "integer", "minimum": 1, "maximum": 100 }
           }
-        },
-        "claim_after_s": {
-          "type": "integer",
-          "minimum": 60,
-          "maximum": 604800,
-          "default": 1800,
-          "description": "Seconds a wave owner may be gone before another coordinator may claim the wave."
         },
         "heartbeat_alarm_s": {
           "type": "integer",

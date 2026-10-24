@@ -3,8 +3,10 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope } from "volley-mcp/envelope";
 import { registryTopic } from "volley-mcp/topics";
 import { decisionItemId } from "../src/autopilot/inbox";
+import { formatWave } from "../src/commands/status";
 import { ControlClient, waveStateTopic } from "../src/control";
 import type { Daemon } from "../src/daemon";
+import type { WaveState } from "../src/types";
 import { eventually, until } from "./helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "./helpers/daemon-env";
 import { type FakeClock, fakeClock } from "./helpers/fake-clock";
@@ -85,7 +87,7 @@ async function heartbeat(agentId: string) {
 const retainedCoordinator = async () =>
   (
     (await t.retained(waveStateTopic(WAVE))) as {
-      payload?: { coordinator?: { state?: string; last_seen?: string } };
+      payload?: { coordinator?: { presence?: string; state?: string; last_seen?: string } };
     } | null
   )?.payload?.coordinator;
 const coordinator = () => daemon.snapshot(WAVE)?.coordinator;
@@ -146,6 +148,7 @@ describe("a wave owned by a coordinator name", () => {
     // The same session comes back under a new agent id: the name follows it.
     clock.sleepHost(60_000);
     await registry("coordinator-b2");
+    await status("coordinator-b2", "registered");
     await until(() => expect(reconnects()).toHaveLength(1));
     expect(reconnects()[0]?.data).toEqual({
       owner: NAME,
@@ -181,22 +184,29 @@ describe("a wave owned by a coordinator name", () => {
     expect(reconnects()).toHaveLength(1);
   });
 
-  it("a coordinator that only heartbeats keeps its wave, and the retained last_seen advances", async () => {
+  it("a quiet connected owner stays online and nothing re-publishes the state", async () => {
     await registry("coordinator-a1");
     await status("coordinator-a1", "working");
-    await until(() => expect(coordinator()?.state).toBe("working"));
-    // 2 × claim_after_s (1800 s) of heartbeats every 10 min, nothing else.
-    for (let i = 0; i < 6; i++) {
-      clock.sleepHost(600_000);
-      await heartbeat("coordinator-a1");
+    await until(() =>
+      expect(coordinator()).toMatchObject({ presence: "online", state: "working" }),
+    );
+    expect((await client.request("status", {})).ok).toBe(true);
+    let published = 0;
+    const stop = await pub.subscribeStream(waveStateTopic(WAVE), () => {
+      published++;
+    });
+    // The retained state arrives on subscribe.
+    await until(() => expect(published).toBeGreaterThan(0));
+    published = 0;
+    // 2 h in 10-minute steps, the owner silent (its MCP server's heartbeat included).
+    for (let i = 0; i < 12; i++) {
+      await clock.advance(600_000);
       expect((await client.request("status", {})).ok).toBe(true);
     }
-    const lastBeat = new Date(clock.now()).toISOString();
-    const claim = await client.request("claim", { wave: WAVE, by: "someone-else" });
-    expect(claim.ok).toBe(false);
-    expect(daemon.snapshot(WAVE)?.owner).toBe(NAME);
-    await eventually(async () => (await retainedCoordinator())?.last_seen === lastBeat);
-    expect(await retainedCoordinator()).toMatchObject({ state: "working", last_seen: lastBeat });
+    await stop();
+    expect(published).toBe(0);
+    expect(coordinator()).toMatchObject({ presence: "online", state: "working" });
+    expect(await retainedCoordinator()).toMatchObject({ presence: "online", state: "working" });
   });
 
   it("a heartbeat keeps an awaiting_input coordinator awaiting, and advances its last_seen", async () => {
@@ -220,12 +230,12 @@ describe("a wave owned by a coordinator name", () => {
     await heartbeat("coordinator-a1");
     expect((await client.request("status", {})).ok).toBe(true);
     const lastBeat = new Date(clock.now()).toISOString();
-    await eventually(async () => (await retainedCoordinator())?.last_seen === lastBeat);
-    expect(await retainedCoordinator()).toMatchObject({
+    expect(coordinator()).toMatchObject({
       state: "awaiting_input",
+      question: "Merge now?",
       last_seen: lastBeat,
     });
-    expect(coordinator()).toMatchObject({ state: "awaiting_input", question: "Merge now?" });
+    expect(await retainedCoordinator()).toMatchObject({ state: "awaiting_input" });
   });
 
   it("the bound agent answers the name's decision through inbox_answer, as through resolve", async () => {
@@ -274,7 +284,7 @@ describe("a wave owned by a coordinator name", () => {
     expect(reconnects()).toHaveLength(0);
   });
 
-  it("turns gone once the bound agent stays away past reconnect_grace_s", async () => {
+  it("turns away once the bound agent stays away past reconnect_grace_s", async () => {
     await registry("coordinator-a1");
     await status("coordinator-a1", "working");
     await until(() => expect(coordinator()?.state).toBe("working"));
@@ -284,9 +294,84 @@ describe("a wave owned by a coordinator name", () => {
     expect(coordinator()?.state).toBe("reconnecting");
     await clock.advance(2_000);
     await until(() =>
-      expect(coordinator()).toMatchObject({ agent_id: "coordinator-a1", state: "gone" }),
+      expect(coordinator()).toMatchObject({
+        agent_id: "coordinator-a1",
+        presence: "offline",
+        state: "away",
+      }),
     );
     expect(reconnects()).toHaveLength(0);
+  });
+
+  it("the will fires: reconnecting, away, gone while a decision waits, away, then online again", async () => {
+    // The coordinator's MCP server, its will its retained `reaped` (SPEC §7.5).
+    const mcp = new VolleyBroker();
+    const reaped = buildEnvelope({
+      now: () => new Date(clock.now()),
+      agentId: "coordinator-a1",
+      parentId: null,
+      channel: "status",
+      type: "reaped",
+      payload: {},
+    });
+    await mcp.connect({
+      url: t.broker.url,
+      agentId: "coordinator-a1",
+      willTopic: `volley/${NS}/coordinator-a1/status`,
+      willPayload: JSON.stringify(reaped),
+    });
+    await registry("coordinator-a1");
+    await status("coordinator-a1", "working");
+    await until(() =>
+      expect(coordinator()).toMatchObject({ presence: "online", state: "working" }),
+    );
+    const published: { presence: string; state: string }[] = [];
+    const stop = await pub.subscribeStream(waveStateTopic(WAVE), (m) => {
+      const c = (
+        JSON.parse(m.payload) as { payload?: { coordinator?: { presence: string; state: string } } }
+      ).payload?.coordinator;
+      if (c !== undefined) published.push({ presence: c.presence, state: c.state });
+    });
+    try {
+      mcp.simulateCrash();
+      await until(() =>
+        expect(published.at(-1)).toEqual({ presence: "offline", state: "reconnecting" }),
+      );
+      await clock.advance(901_000);
+      await until(() => expect(published.at(-1)).toEqual({ presence: "offline", state: "away" }));
+
+      // Something only the owner answers opens: gone on that publish.
+      const d = await daemon.openDecision(WAVE, {
+        kind: "plan_change",
+        task: "A",
+        question: "Split A?",
+        pointers: {},
+      });
+      await until(() => expect(published.at(-1)).toEqual({ presence: "offline", state: "gone" }));
+      const decisions = Object.values(daemon.record(WAVE)?.decisions ?? {});
+      const line = formatWave(daemon.snapshot(WAVE) as WaveState, { decisions }).split("\n")[0];
+      expect(line).toContain("owner: coord-main (via coordinator-a1) · gone · 1 decision waits");
+
+      // The owner answers from another screen (the CLI, as the name).
+      const resolved = await client.request("resolve", {
+        wave: WAVE,
+        decision_id: d.decision_id,
+        answer: "no",
+        by: NAME,
+      });
+      expect(resolved.error).toBeUndefined();
+      await until(() => expect(published.at(-1)).toEqual({ presence: "offline", state: "away" }));
+
+      // The same coordinator, a new session under the name.
+      await registry("coordinator-b2");
+      await status("coordinator-b2", "working");
+      await until(() => expect(published.at(-1)).toEqual({ presence: "online", state: "working" }));
+      await until(() => expect(reconnects()).toHaveLength(1));
+    } finally {
+      await stop();
+    }
+    // Never gone while autopilot alone answered nothing and nothing waited.
+    expect(published.slice(0, 2).map((p) => p.state)).not.toContain("gone");
   });
 
   it("the CLI's coordinator name owns the wave; a re-submission by the bound agent is accepted", async () => {
@@ -303,7 +388,7 @@ describe("a wave owned by a coordinator name", () => {
 });
 
 describe("a coordinator name across a daemon restart", () => {
-  it("a bound agent that ended long before the restart reads gone at once", async () => {
+  it("a bound agent that ended long before the restart reads offline and away at once", async () => {
     await registry("coordinator-a1");
     await status("coordinator-a1", "working");
     await until(() => expect(coordinator()?.state).toBe("working"));
@@ -312,7 +397,27 @@ describe("a coordinator name across a daemon restart", () => {
     clock.sleepHost(3_600_000);
     daemon = await t.start({ clock });
     await until(() =>
-      expect(coordinator()).toMatchObject({ agent_id: "coordinator-a1", state: "gone" }),
+      expect(coordinator()).toMatchObject({
+        agent_id: "coordinator-a1",
+        presence: "offline",
+        state: "away",
+      }),
+    );
+  });
+
+  it("a restart with the retained reaped in place publishes offline from the replay", async () => {
+    await registry("coordinator-a1");
+    await status("coordinator-a1", "working");
+    await until(() => expect(coordinator()?.presence).toBe("online"));
+    await daemon.stop();
+    await status("coordinator-a1", "reaped");
+    daemon = await t.start({ clock });
+    await until(() => expect(coordinator()?.agent_id).toBe("coordinator-a1"));
+    expect(coordinator()?.presence).toBe("offline");
+    await eventually(
+      async () =>
+        ((await retainedCoordinator()) as { presence?: string } | undefined)?.presence ===
+        "offline",
     );
   });
 
@@ -333,7 +438,7 @@ describe("a coordinator name across a daemon restart", () => {
     // The same session's entry, replayed late: it started before its `done`.
     await registry("coordinator-a1", NAME, startedAt);
     await until(() =>
-      expect(coordinator()).toMatchObject({ agent_id: "coordinator-a1", state: "gone" }),
+      expect(coordinator()).toMatchObject({ agent_id: "coordinator-a1", state: "away" }),
     );
   });
 
@@ -349,7 +454,7 @@ describe("a coordinator name across a daemon restart", () => {
     await until(() => expect(namedEntries().has("coordinator-a1")).toBe(true));
     expect(statusOf().has("coordinator-a1")).toBe(false);
     expect(coordinator()?.agent_id).toBe("coordinator-a1");
-    expect(coordinator()?.state).not.toBe("gone");
+    expect(coordinator()?.state).not.toMatch(/^(gone|away)$/);
   });
 
   it("a reconnect journals nothing in a stopped wave", async () => {
@@ -363,5 +468,92 @@ describe("a coordinator name across a daemon restart", () => {
     await registry("coordinator-b2");
     await until(() => expect(coordinator()?.agent_id).toBe("coordinator-b2"));
     expect(reconnects()).toHaveLength(0);
+  });
+});
+
+describe("a wave owned by a plain agent id", () => {
+  it("its will fired: away at once (no grace), gone while a decision waits", async () => {
+    const PLAIN = "w-plain";
+    const res = await client.request("run", {
+      wave_yaml: yaml.replaceAll(WAVE, PLAIN),
+      owner: "coordinator-p1",
+    });
+    expect(res.error).toBeUndefined();
+    const plain = () => daemon.snapshot(PLAIN)?.coordinator;
+    await status("coordinator-p1", "working");
+    await until(() => expect(plain()).toMatchObject({ presence: "online", state: "working" }));
+    await status("coordinator-p1", "reaped");
+    await until(() => expect(plain()).toMatchObject({ presence: "offline", state: "away" }));
+    await daemon.openDecision(PLAIN, {
+      kind: "plan_change",
+      task: "A",
+      question: "Split A?",
+      pointers: {},
+    });
+    await until(() => expect(plain()).toMatchObject({ presence: "offline", state: "gone" }));
+  });
+});
+
+describe("claiming a wave by its owner's presence", () => {
+  it("a coordinator name's offline binding is refused inside the grace, with when, and allowed after", async () => {
+    await registry("coordinator-a1");
+    await status("coordinator-a1", "working");
+    await until(() => expect(coordinator()?.presence).toBe("online"));
+    await status("coordinator-a1", "reaped");
+    const goneAt = clock.now();
+    await until(() => expect(coordinator()?.state).toBe("reconnecting"));
+    await clock.advance(180_000);
+    const early = await client.request("claim", { wave: WAVE, by: "someone-else" });
+    expect(early.ok).toBe(false);
+    expect(early.error).toBe(
+      `wave '${WAVE}': wave is owned by ${NAME} (via coordinator-a1), reconnecting (gone 3m ago, grace 15m); claim allowed at ${new Date(goneAt + 900_000).toISOString()} unless it reconnects`,
+    );
+    await clock.advance(720_000);
+    await until(() => expect(coordinator()?.state).toBe("away"));
+    const later = await client.request("claim", { wave: WAVE, by: "someone-else" });
+    expect(later.error).toBeUndefined();
+    expect(later.result).toMatchObject({ owner: "someone-else", previous: NAME });
+    expect((later.result as { why: string }).why).toBe(
+      `owner ${NAME} (via coordinator-a1) offline since ${new Date(goneAt).toISOString()}`,
+    );
+  });
+
+  it("a name whose new session bound meanwhile is refused as online", async () => {
+    await registry("coordinator-a1");
+    await status("coordinator-a1", "working");
+    await until(() => expect(coordinator()?.presence).toBe("online"));
+    await status("coordinator-a1", "reaped");
+    await until(() => expect(coordinator()?.state).toBe("reconnecting"));
+    await registry("coordinator-b2");
+    await status("coordinator-b2", "registered");
+    await until(() => expect(coordinator()).toMatchObject({ agent_id: "coordinator-b2" }));
+    await clock.advance(3_600_000);
+    const res = await client.request("claim", { wave: WAVE, by: "someone-else" });
+    expect(res.error).toContain(`owned by ${NAME} (via coordinator-b2), online`);
+  });
+
+  it("a quiet connected owner is refused after 2 h", async () => {
+    await registry("coordinator-a1");
+    await status("coordinator-a1", "working");
+    await until(() => expect(coordinator()?.presence).toBe("online"));
+    await clock.advance(2 * 3_600_000);
+    const res = await client.request("claim", { wave: WAVE, by: "someone-else" });
+    expect(res.error).toContain(`owned by ${NAME} (via coordinator-a1), online`);
+  });
+
+  it("a plain agent-id owner whose will fired is claimable at once", async () => {
+    const PLAIN = "w-plain-claim";
+    const run = await client.request("run", {
+      wave_yaml: yaml.replaceAll(WAVE, PLAIN),
+      owner: "coordinator-p1",
+    });
+    expect(run.error).toBeUndefined();
+    await status("coordinator-p1", "working");
+    await until(() => expect(daemon.snapshot(PLAIN)?.coordinator?.presence).toBe("online"));
+    await status("coordinator-p1", "reaped");
+    await until(() => expect(daemon.snapshot(PLAIN)?.coordinator?.presence).toBe("offline"));
+    const res = await client.request("claim", { wave: PLAIN, by: "someone-else" });
+    expect(res.error).toBeUndefined();
+    expect(daemon.snapshot(PLAIN)?.owner).toBe("someone-else");
   });
 });

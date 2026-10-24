@@ -76,7 +76,9 @@ interface TaskDef {
 interface WaveDef {
   id: string;
   owner: string;
-  coordinator: Omit<WaveCoordinator, "agent_id" | "last_seen"> & { lastSeenMin: number };
+  coordinator: Omit<WaveCoordinator, "agent_id" | "last_seen" | "presence"> & {
+    lastSeenMin: number;
+  };
   status: WaveStatePayload["status"];
   releaseBranch: string;
   /** The account its new agents start under (wave-state `account`); absent: balanced. */
@@ -285,7 +287,15 @@ function waveState(w: WaveDef, now: number, tasks: TaskDef[] = w.tasks): DeskMes
         tasks.map((t) => [t.id, { issue: t.issue, title: t.title, after: t.after }]),
       ),
     },
-    coordinator: { agent_id: w.owner, ...coordinator, last_seen: iso(now - lastSeenMin * 60_000) },
+    coordinator: {
+      agent_id: w.owner,
+      presence:
+        coordinator.state === "working" || coordinator.state === "awaiting_input"
+          ? "online"
+          : "offline",
+      ...coordinator,
+      last_seen: iso(now - lastSeenMin * 60_000),
+    },
     account: w.account ?? { pinned: null, source: "balanced" },
     updated_at: iso(now),
   };
@@ -519,7 +529,6 @@ function globals(now: number): DeskMessage[] {
       ci_queue_max: 10,
       hysteresis_samples: 3,
     },
-    claim_after_s: 1800,
     heartbeat_alarm_s: 600,
     fallback_model: MODEL,
     mailbox: { session_expiry_s: 604800 },
@@ -1201,7 +1210,12 @@ export function demoAutopilot(now = Date.now()): DeskMessage[] {
   const reconnecting = base("relaunch", {
     tasks: [task("T1", 201, "implement")],
     spec: { version: 1, tasks: { T1: { issue: 201, title: "Grace window", after: [] } } },
-    coordinator: { agent_id: "lead-a7", state: "reconnecting", last_seen: iso(now - 3 * 60_000) },
+    coordinator: {
+      agent_id: "lead-a7",
+      presence: "offline",
+      state: "reconnecting",
+      last_seen: iso(now - 3 * 60_000),
+    },
     autopilot: { enabled: true, auto_resolved: 0, escalated: 0, budgets: {} },
   });
   const train = base("autopilot", {
@@ -1234,7 +1248,7 @@ export function demoAutopilot(now = Date.now()): DeskMessage[] {
         T9: { issue: 214, title: "Train stages", after: ["T5"] },
       },
     },
-    coordinator: { agent_id: "lead", state: "working", last_seen: iso(now) },
+    coordinator: { agent_id: "lead", presence: "online", state: "working", last_seen: iso(now) },
     autopilot: {
       enabled: true,
       auto_resolved: 4,
@@ -1420,7 +1434,7 @@ export function demoPlanned(now = Date.now()): DeskMessage[] {
         },
       },
     },
-    coordinator: { agent_id: "lead", state: "working", last_seen: iso(now) },
+    coordinator: { agent_id: "lead", presence: "online", state: "working", last_seen: iso(now) },
     autopilot: { enabled: true, auto_resolved: 2, escalated: 0, budgets: {} },
     merge_queue: [
       { task: "i305", state: "queued", since: iso(now - 2 * 60_000) },

@@ -89,7 +89,6 @@ export interface Tunables {
   spawn_budget_multiplier: number;
   lease_pools: Record<string, LeasePoolConfig>;
   admission: AdmissionConfig;
-  claim_after_s: number;
   heartbeat_alarm_s: number;
   idle_grace_s: number;
   /** Longest idle (from its start) that any own-work evidence (`background_wait`, lease, shells, worktree writes) holds off the nudge. */
@@ -710,13 +709,16 @@ export interface AutopilotState {
 }
 
 /**
- * wave-state `coordinator` (SPEC §4.6.1): the owning coordinator's attention state. For an owner
- * that is a coordinator name, `agent_id` is the agent bound to it, and `reconnecting` means that
- * agent went away less than `autopilot.reconnect_grace_s` ago.
+ * wave-state `coordinator` (SPEC §4.6.1): the owning coordinator's presence and attention state
+ * (presence.ts). For an owner that is a coordinator name, `agent_id` is the agent bound to it, and
+ * `reconnecting` means that agent went away less than `autopilot.reconnect_grace_s` ago. An
+ * offline owner is `gone` while something only it can answer waits, else `away`.
  */
 export interface CoordinatorAttention {
   agent_id: string;
-  state: "working" | "awaiting_input" | "reconnecting" | "gone";
+  /** From the owner's retained status: offline once its will fired or it shut down. */
+  presence: "online" | "offline";
+  state: "working" | "awaiting_input" | "reconnecting" | "away" | "gone";
   question?: string;
   session_url?: string;
   workspace?: string;

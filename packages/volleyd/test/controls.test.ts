@@ -881,12 +881,30 @@ describe("CLI", () => {
     expect(status.stdout).toContain("steer queued (2)");
   });
 
-  it("claim needs an identity and is refused while the owner may be alive", async () => {
+  it("claim needs an identity and is refused while the owner is online", async () => {
     const anonymous = await runCli(["claim", WAVE], env());
     expect(anonymous.exitCode).toBe(1);
     expect(anonymous.stderr).toContain("claim needs an identity");
-    // coord-a has never been seen by the broker: not claimable until it is gone.
-    expect((await runCli(["claim", WAVE], as("coord-b"))).stderr).toContain("owned by coord-a");
+    // coord-a's retained status is live: not claimable until its session is gone.
+    const pub = new VolleyBroker();
+    await pub.connect({ url: broker.url, agentId: "coord-a" });
+    await pub.publish(
+      `volley/${NS}/coord-a/status`,
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "coord-a",
+          parentId: null,
+          channel: "status",
+          type: "working",
+          payload: {},
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    await pub.disconnect();
+    expect((await runCli(["claim", WAVE], as("coord-b"))).stderr).toContain(
+      "owned by coord-a, online",
+    );
   });
 
   it("claim takes over once the owner is reaped", async () => {

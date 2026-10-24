@@ -352,7 +352,7 @@ describe("Settings › Supervisor (global config rows)", () => {
     const { show } = setup(null);
     expect(within(rowOf("Spawn budget")).getByText("3×")).toBeInTheDocument();
     show("attention");
-    expect(within(rowOf("Claim after")).getByText("1800 s")).toBeInTheDocument();
+    expect(within(rowOf("Heartbeat alarm")).getByText("600 s")).toBeInTheDocument();
   });
 
   it("sends a text tunable on Enter, empty meaning null when the schema allows it", async () => {

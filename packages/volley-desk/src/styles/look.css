@@ -14,7 +14,7 @@
 .bg-dim {
   position: absolute;
   inset: 0;
-  background: var(--bg-dim);
+  background: #05060b;
   pointer-events: none;
 }
 .bg-fallback {
@@ -91,7 +91,7 @@
 }
 .tether-stub text {
   font: 600 9px var(--f-mono);
-  fill: var(--amber-text);
+  fill: var(--amber);
 }
 /* An energy pulse: a short bright dash running wave → agent (pathLength = 100). */
 .tether-pulse {
@@ -362,14 +362,4 @@
 }
 .dock-account-menu:focus {
   outline: none;
-}
-/* The light tone: React Bits' Gooey Nav and Specular Button default to light text (their dark
-   sets, written inline); on a light theme they take the theme's ink. A Specular Button on a
-   colour of its own (`PrimaryAction`, the sign-in button's gradient frame) keeps its text. */
-html[data-tone="light"] .gooey-nav__list {
-  --gn-ink: var(--ink);
-  --gn-muted: var(--mute);
-}
-html[data-tone="light"] :not(.action-spec, .spec-wrap) > .specular-button {
-  color: var(--ink);
 }

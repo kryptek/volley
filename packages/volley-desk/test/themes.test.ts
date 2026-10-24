@@ -17,7 +17,6 @@ import {
   themeById,
 } from "../src/look/themes";
 import { LOOK0 } from "../src/look/useLook";
-import { ACCENT_PALETTE, NEUTRAL_ACCENT } from "../src/windows/wave/accent";
 
 describe("color", () => {
   it("computes WCAG contrast", () => {
@@ -113,37 +112,6 @@ describe("theme registry", () => {
   }
 });
 
-describe("Material Lighter (#368)", () => {
-  const t = themeById("lighter");
-  const { v } = t;
-
-  it("is the light entry", () => {
-    expect(t.id).toBe("lighter");
-    expect(t.tone).toBe("light");
-    expect(v).toMatchObject({ dim: "#5e6c73", link: "#4f6b98", cur1: "#00798a", cur2: "#005662" });
-    expect(v.accText).toBe("#006974");
-  });
-
-  it("gives every semantic colour a text tint that reaches AA on every surface", () => {
-    for (const ink of ["hotInk", "amberInk", "okInk", "badInk", "infoInk", "mineInk"] as const) {
-      const c = v[ink];
-      expect(c, ink).toBeDefined();
-      for (const s of SURFACES) {
-        expect(contrast(c ?? "", v[s]), `${ink} on ${s}`).toBeGreaterThanOrEqual(4.5);
-      }
-    }
-  });
-
-  it("darkens every wave accent to AA text (the --acc-ink recipe)", () => {
-    for (const acc of [...ACCENT_PALETTE, NEUTRAL_ACCENT]) {
-      const ink = oklabMix(acc, "#000000", 0.55);
-      for (const s of SURFACES) {
-        expect(contrast(ink, v[s]), `${acc} on ${s}`).toBeGreaterThanOrEqual(4.5);
-      }
-    }
-  });
-});
-
 const html = () => document.documentElement;
 const stub: ThemeDef = {
   id: "dracula",
@@ -187,14 +155,6 @@ describe("applyTheme", () => {
     for (const p of ["--t-acc-hi", "--t-acc-lo", "--cur1", "--cur2", "--acc-text", "--hot-ink"]) {
       expect(OWNED_PROPERTIES).toContain(p);
     }
-  });
-
-  it("Material Lighter sets the light tone and colour scheme", () => {
-    applyTheme("lighter");
-    expect(html().dataset.theme).toBe("lighter");
-    expect(html().dataset.tone).toBe("light");
-    expect(html().style.colorScheme).toBe("light");
-    expect(html().style.getPropertyValue("--ok-ink")).toBe("#1b5e20");
   });
 
   it("applyLookToDocument with the default look is a no-op", () => {

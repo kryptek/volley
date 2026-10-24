@@ -1455,30 +1455,57 @@ agent may do everything the owner may, any other is refused. When a new agent bi
 that owns waves, volleyd journals `owner_reconnected { owner, agent_id, previous_agent_id }` in
 each unfinished one and re-publishes their state — nothing is claimed, ownership does not move, so one
 session keeps all its waves across restarts. The wave state's `coordinator.agent_id` is the bound
-agent; when it goes away (terminal status, or its LWT) with no other agent binding the name,
-`coordinator.state` is `reconnecting` for `autopilot.reconnect_grace_s` (default 900), then
-`gone`. Until another agent binds the name, the binding stays on that departed agent id (that is
+agent. Until another agent binds the name, the binding stays on a departed agent id (that is
 what lets the state read `reconnecting`), but its id is no longer accepted for the name: only the
-name itself, or the next agent to bind it, may act. `volleyd status` prints such an owner as `owner: coord-main (via coordinator-c7d9)`.
+name itself, or the next agent to bind it, may act.
+
+**The owner's presence.** `coordinator.presence` is the owner's retained status read as presence
+(SPEC §7.5): `online` while it is live, `offline` once its connection's will turned it `reaped`,
+it shut down (`done`, `failed`, a `blocked` with `reason: "shutdown"`), or before any status. No
+heartbeat or timer keeps it fresh — a quiet connected owner stays `online` however long it says
+nothing — and the wave state is re-published only when something that can move it changes: a
+status, a decision opened, escalated or resolved, an inbox item, a gate, the end of the grace.
+`coordinator.state` follows (`presence.ts`):
+
+| presence | state | when |
+|---|---|---|
+| online | `working` / `awaiting_input` | its attention (an `awaiting_input` progress until anything else but `idle` or `heartbeat`) |
+| offline | `reconnecting` | a coordinator name whose bound agent went away less than `autopilot.reconnect_grace_s` (default 900) ago; never an agent-id owner, which nothing can rebind |
+| offline | `gone` | past that, while something in the wave only the owner can answer waits: an open, unheld decision autopilot escalated (every open unheld one with autopilot off), an open owner-only inbox item, a merge-ready gate under `merge: manual` |
+| offline | `away` | past that, with nothing waiting: autopilot runs the wave |
+
+A decision autopilot answers is resolved in the tick it opens, never escalated in between, so an
+autopilot wave does not flicker to `gone`. `last_seen` is the newest of the owner's status time,
+its binding time and its last progress; for an offline owner, when it went away. `volleyd status`
+prints the owner with its presence:
+
+```
+owner: coord-main (via coordinator-c7d9) · online
+owner: coord-main (via coordinator-c7d9) · away (autopilot) · last seen 2h ago
+owner: coord-main (via coordinator-c7d9) · away · last seen 5m ago      (autopilot off)
+owner: coord-main (via coordinator-c7d9) · gone · 1 decision waits for you
+owner: coord-main (via coordinator-c7d9) · reconnecting
+```
 
 An unowned wave's decisions have nobody to answer them, so `volleyd run` warns when it submits
 one (`warning: wave <id> has no owner: …`) and `volleyd validate` notes that `run` needs an owner.
 Such a wave is still archived automatically once it has ended ([Archiving](#archiving)).
 
-`volleyd claim <wave>` hands the wave to the caller when the owner is gone: its retained status
-is `reaped`, `done` or `failed`, or nothing has been heard from it — registry entry, status,
-any event on its `progress` channel (heartbeats) — for `claim_after_s` (config, read at claim
-time, so a `volleyd config set claim_after_s …` applies to the next claim). Otherwise the claim
-is refused, naming the owner. A claim is journaled as `owner_claimed { owner, previous, why }`.
-For a coordinator-name owner, liveness is the newest binding's — never an agent id the name has
-left — and a bound agent that went away frees the wave only after `claim_after_s`, since it may
-come back under a new id. The two timers are independent: with `claim_after_s` shorter than
-`autopilot.reconnect_grace_s`, a wave still shown `reconnecting` can already be claimed.
+`volleyd claim <wave>` hands the wave to the caller exactly when the owner is offline (its
+presence, above): an agent-id owner at once, a coordinator name once its newest binding has been
+offline past `autopilot.reconnect_grace_s` — never an agent id the name has left. So a wave shown
+`reconnecting` is never claimable; `away` and `gone` are. Silence never frees a wave: a quiet
+connected owner keeps it. Otherwise the claim is refused, naming the owner and why:
 
-Silence is never measured from before the owner got the wave (its `wave_submitted` or latest
-`owner_claimed`) or from before the daemon started, because heartbeats are remembered in memory
-only: an owner the broker has never seen, or one the daemon has not heard from since a restart,
-becomes claimable only after a full `claim_after_s`. A claim must name a stable identity (`--by`,
+```
+wave is owned by coord-main (via coordinator-c7d9), online; claim allowed once its session is gone (the will fired or it shut down)
+wave is owned by coord-main (via coordinator-c7d9), reconnecting (gone 3m ago, grace 15m); claim allowed at 2026-10-18T14:12:00.000Z unless it reconnects
+```
+
+A claim is journaled as `owner_claimed { owner, previous, why }` (`why`: `owner coord-main
+offline since <time>`). `claim_after_s` is retired: a stored `claim_after_s` (in `config.yaml` or a
+wave file's `config:`) is dropped with one log line, and `volleyd config set claim_after_s` is
+refused. A claim must name a stable identity (`--by`,
 `VOLLEY_AGENT_ID`, a registered session or `VOLLEY_COORDINATOR`); the CLI's own per-invocation id is never used.
 
 ## Pause, stop and the kill switch
@@ -1796,7 +1823,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `hard_ceiling`, `spawn_budget_multiplier` | next admission tick (immediately after the change) | never preempted; a limit below current use only stops new admissions |
 | `admission.*` | next admission tick | never preempted |
 | `lease_pools` | next lease grant | a pool shrunk below its holders stops granting until holders release; no holder is preempted |
-| `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `background_wait_max_s`, `stall_backoff_max_s`, `blocked_undecided_stall_ms`, `tool_in_flight_max_s`, `wake_grace_s` | next monitor tick | — |
+| `heartbeat_alarm_s`, `idle_grace_s`, `background_wait_max_s`, `stall_backoff_max_s`, `blocked_undecided_stall_ms`, `tool_in_flight_max_s`, `wake_grace_s` | next monitor tick | — |
 | `mailbox_wake_after_ms` | mailbox messages sent after the change | a wake already armed keeps its window |
 | `fallback_model` | decisions opened after the change | open decisions keep their offer |
 | `mailbox.session_expiry_s` | new connections only | existing sessions keep their expiry until they reconnect |
@@ -2268,7 +2295,7 @@ restart does not count) resolves it as `it's running`, `by: "volleyd"`, rational
 own`. For `unknown_screen` that is a sign the session got past the screen that held it: any
 signal from its hooks (a hook heartbeat, the hooks' registry re-publish with `model_source`, a
 `working` status), or its MCP server doing work (a narration, a `working` it publishes). The MCP
-server's start-up signals (its heartbeat, its own registration, `spawning` / `registered`) do not
+server's start-up signals (its own registration, `spawning` / `registered`) do not
 count: it starts with the process, whatever screen Claude Code is held at. Waiting at a prompt
 (`awaiting_input`, `idle`) never counts. For `mcp_not_registered` the hooks were already heard from, so
 only the agent's MCP server counts there: a progress message not from the hooks, its own

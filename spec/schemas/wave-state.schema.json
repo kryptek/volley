@@ -677,11 +677,12 @@
     },
     "coordinator": {
       "type": "object",
-      "description": "Owner coordinator attention state, maintained by the supervisor from the owner's registry and progress topics. For an owner that is a coordinator name (spec section 6.2), agent_id is the agent bound to it and reconnecting means that agent went away less than autopilot.reconnect_grace_s ago.",
-      "required": ["agent_id", "state", "last_seen"],
+      "description": "Owner coordinator presence and attention state, maintained by the supervisor from the owner's registry, status and progress topics. presence is read from the owner's retained status (spec section 7.5): offline once its will fired or it shut down, or before any status. For an owner that is a coordinator name (spec section 6.2), agent_id is the agent bound to it and reconnecting means that agent went away less than autopilot.reconnect_grace_s ago. Past that (at once for an agent-id owner) an offline owner is gone while something only it can answer waits in the wave, else away (autopilot runs the wave).",
+      "required": ["agent_id", "presence", "state", "last_seen"],
       "properties": {
         "agent_id": { "$ref": "#/$defs/agentId" },
-        "state": { "enum": ["working", "awaiting_input", "reconnecting", "gone"] },
+        "presence": { "enum": ["online", "offline"] },
+        "state": { "enum": ["working", "awaiting_input", "reconnecting", "away", "gone"] },
         "question": { "type": "string" },
         "session_url": { "type": "string", "format": "uri" },
         "workspace": { "type": "string" },

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { type Node, isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { DAEMON_DEFAULTS } from "./config-defaults";
-import { rewordWeights } from "./config-store";
+import { dropRetired, rewordWeights } from "./config-store";
 import type { Tree } from "./footprint";
 import {
   type FileTask,
@@ -152,7 +152,13 @@ export function resolveWaveRepo(
  * Parse wave-file YAML, validate it (schema + structural rules) and normalise it. `defaults`
  * decides a wave without `placement:` (`defaultPlacement`); without it such a wave is `local`.
  */
-export function parseWaveFile(text: string, source?: string, defaults?: PlacementDefaults): Wave {
+export function parseWaveFile(
+  text: string,
+  source?: string,
+  defaults?: PlacementDefaults,
+  /** Gets a line per retired key dropped from the file's `config:` (`config.<why>`). */
+  notes?: string[],
+): Wave {
   const fail = (errors: PathError[]): never => {
     throw new WaveFileError(errors, source);
   };
@@ -166,6 +172,13 @@ export function parseWaveFile(text: string, source?: string, defaults?: Placemen
 
   const errors = duplicateKeys(doc.contents, "");
   const raw = doc.toJS() as unknown;
+  // A retired tunable in `config:` no longer means anything: dropped, with a note, not an error.
+  const top = raw as { config?: unknown } | null;
+  if (typeof top === "object" && top !== null && !Array.isArray(top)) {
+    const kept = dropRetired(top.config);
+    if (kept.retired.length > 0) top.config = kept.patch;
+    notes?.push(...kept.retired.map((why) => `config.${why}`));
+  }
   const validate = validator("wave-file.schema.json");
   if (!validate(raw)) {
     errors.push(...toPathErrors(validate.errors).map(rewordWaveId).map(rewordWeights));

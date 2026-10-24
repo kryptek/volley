@@ -54,6 +54,24 @@ type Plain = Record<string, unknown>;
 const isPlain = (v: unknown): v is Plain =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
+/**
+ * Tunables that no longer exist, each with why. A stored one (config.yaml, a wave's `config:`)
+ * is dropped with that line logged; `config_set` refuses it with the same line.
+ */
+export const RETIRED_KEYS: Readonly<Record<string, string>> = {
+  claim_after_s:
+    "claim_after_s is retired: a wave is claimable once its owner's session is gone (SPEC §7.5)",
+};
+
+/** `patch` without its retired keys, and why each one it had is gone. */
+export function dropRetired<T>(patch: T): { patch: T; retired: string[] } {
+  if (!isPlain(patch)) return { patch, retired: [] };
+  const keys = Object.keys(patch).filter((k) => Object.hasOwn(RETIRED_KEYS, k));
+  if (keys.length === 0) return { patch, retired: [] };
+  const kept = Object.fromEntries(Object.entries(patch).filter(([k]) => !keys.includes(k)));
+  return { patch: kept as T, retired: keys.map((k) => RETIRED_KEYS[k] as string) };
+}
+
 /** Deep merge: plain objects merge key by key; arrays, scalars and null replace. */
 function merge<T>(base: T, over: unknown): T {
   if (!isPlain(base) || !isPlain(over)) return (over === undefined ? base : over) as T;
@@ -261,6 +279,8 @@ export class ConfigStore {
     defaults?: Tunables;
     /** Tests: the host name `fleet.local_name: null` derives from (default: the machine's). */
     hostname?: string;
+    /** Where a retired key dropped from config.yaml is reported (default: stderr). */
+    log?: (line: string) => void;
   }): ConfigStore {
     const defaults = opts.defaults ?? CONFIG_DEFAULTS;
     const host = opts.hostname ?? hostname();
@@ -275,7 +295,9 @@ export class ConfigStore {
           { path: "(root)", reason: `invalid YAML: ${(e as Error).message}` },
         ]);
       }
-      layer = (parsed ?? {}) as TunablesPatch;
+      const kept = dropRetired((parsed ?? {}) as TunablesPatch);
+      for (const why of kept.retired) (opts.log ?? console.error)(`${file}: ${why}`);
+      layer = kept.patch;
       // The file is a patch over the defaults: what must be valid is the merged result.
       const errors = tunablesErrors(isPlain(layer) ? merge(defaults, layer) : layer, host);
       if (errors.length > 0) throw new ConfigError(file, errors);
@@ -300,7 +322,8 @@ export class ConfigStore {
 
   /** Register (or replace) a wave's `config:` overrides. Validated by the wave-file schema. */
   setWaveOverrides(wave: WaveId, overrides: TunablesPatch): void {
-    this.waves.set(wave, overrides);
+    // A wave journaled before a key retired still carries it: it no longer means anything.
+    this.waves.set(wave, dropRetired(overrides).patch);
   }
 
   clearWave(wave: WaveId): void {
@@ -377,7 +400,13 @@ export class ConfigStore {
     if (!isPlain(patch)) rejected.push(...errorsFor(TUNABLES, patch));
     else if (Object.keys(patch).length === 0)
       rejected.push({ path: "(root)", reason: "patch must set at least 1 key" });
-    else rejected.push(...emptyObjects(patch));
+    else {
+      for (const k of Object.keys(patch))
+        if (Object.hasOwn(RETIRED_KEYS, k))
+          rejected.push({ path: k, reason: RETIRED_KEYS[k] as string });
+      if (rejected.length > 0) return { applied: false, rejected };
+      rejected.push(...emptyObjects(patch));
+    }
     const nextLayer = merge(this.fileLayer, patch);
     const nextGlobal = merge(this.defaults, nextLayer);
     if (rejected.length === 0) rejected.push(...tunablesErrors(nextGlobal, this.hostname));

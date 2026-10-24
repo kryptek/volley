@@ -54,7 +54,7 @@
   align-items: center;
 }
 .ny-copied {
-  color: var(--ok-text);
+  color: var(--ok);
   font-size: 12px;
 }
 .ny-fallback {
@@ -289,7 +289,7 @@
   padding: 0;
   border: 0;
   background: none;
-  color: var(--t-acc-ink);
+  color: var(--t-acc);
   font: inherit;
   cursor: pointer;
   text-decoration: underline;
@@ -342,13 +342,4 @@
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
-}
-html[data-tone="light"] .ny-pill {
-  color: var(--hot-ink);
-}
-/* The light tone: a coordinator that needs you says so in the coral ink (desk.css `.chip`, which
-   loads after this file, otherwise paints every status chip --mute; on a coral-tinted row that
-   misses AA on white). */
-html[data-tone="light"] .st-chip--needs {
-  color: var(--hot-ink);
 }

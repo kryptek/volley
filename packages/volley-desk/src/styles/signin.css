@@ -8,7 +8,7 @@
   position: fixed;
   inset: 0;
   z-index: 50;
-  background: var(--signin-ground);
+  background: #05060c;
   overflow: hidden;
 }
 .signin-bg {
@@ -31,9 +31,9 @@
   pointer-events: none;
   background: radial-gradient(
     ellipse at 50% 45%,
-    transparent 0%,
-    var(--signin-vignette-a) 55%,
-    var(--signin-vignette-b) 100%
+    rgba(5, 6, 12, 0) 0%,
+    rgba(5, 6, 12, 0.35) 55%,
+    rgba(5, 6, 12, 0.85) 100%
   );
 }
 .signin-screen {
@@ -95,7 +95,7 @@
   font-family: var(--f-mono);
   font-size: 14px;
   font-weight: 400;
-  color: var(--t-acc-ink);
+  color: var(--t-acc);
   letter-spacing: 0;
 }
 .signin-sub {
@@ -119,11 +119,8 @@
   color: var(--mute);
   padding: 4px 10px;
   border-radius: 999px;
-  background: var(--signin-pill);
+  background: rgba(0, 0, 0, 0.35);
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6), 0 1px 0 rgba(255, 255, 255, 0.06);
-}
-html[data-tone="light"] .signin-broker {
-  box-shadow: inset 0 1px 2px var(--shade), 0 1px 0 var(--hl);
 }
 .signin-broker .dot {
   flex: none;
@@ -165,10 +162,7 @@ html[data-tone="light"] .signin-broker {
   transition: box-shadow 0.18s ease, border-color 0.18s ease;
 }
 .f3d input::placeholder {
-  color: color-mix(in srgb, var(--mute) 40%, transparent);
-}
-html[data-tone="light"] .f3d input {
-  border-color: color-mix(in srgb, var(--mute) 45%, transparent);
+  color: rgba(163, 171, 192, 0.4);
 }
 .f3d input:focus {
   border-color: color-mix(in srgb, var(--t-acc) 55%, transparent);

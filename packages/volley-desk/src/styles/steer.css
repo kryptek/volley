@@ -103,7 +103,7 @@
   cursor: default;
 }
 .steer-ro-copied {
-  color: var(--ok-text);
+  color: var(--ok);
   font-size: 12px;
 }
 .steer-ro-fallback {

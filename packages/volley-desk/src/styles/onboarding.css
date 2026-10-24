@@ -45,7 +45,7 @@
 .wiz-stepper .stepper__badge[data-status="attention"] {
   background: var(--amber);
   box-shadow: none;
-  color: var(--on-amber);
+  color: #1a1204;
 }
 .kv {
   display: grid;
@@ -124,7 +124,7 @@
   display: flex;
   align-items: baseline;
   gap: 8px;
-  color: var(--ok-ink);
+  color: #7ee2a0;
 }
 .dim {
   color: var(--dim);
@@ -197,7 +197,7 @@
   border-color: color-mix(in srgb, var(--hot) 45%, transparent);
 }
 .role--steer {
-  color: var(--info-ink);
+  color: #8be9fd;
   border-color: color-mix(in srgb, var(--t-acc) 45%, transparent);
 }
 .role--sup {
@@ -213,7 +213,7 @@
 }
 /* A device admin sign-in not seen for over a day (Broker accounts). */
 .role--stale {
-  color: var(--amber-text);
+  color: var(--amber);
   border-color: color-mix(in srgb, var(--amber) 45%, transparent);
 }
 .stale-note {
@@ -328,7 +328,7 @@
 }
 .pill-ok {
   background: rgba(52, 199, 89, 0.18);
-  color: var(--ok-ink);
+  color: #7ee2a0;
 }
 .pill-warn {
   background: rgba(255, 159, 10, 0.18);

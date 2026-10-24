@@ -83,7 +83,6 @@ import { DeskDock } from "./look/DeskDock";
 import { type Tether, type TetherStub, Tethers } from "./look/Tethers";
 import { applyLookToDocument } from "./look/applyLook";
 import { progressBeat } from "./look/tetherPulses";
-import { themeById } from "./look/themes";
 import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
@@ -1586,7 +1585,6 @@ export default function App() {
         onZoom={(f) => zoomAt(f)}
         settingsOpen={deskSettings !== null}
         onToggleSettings={() => setDeskSettings((s) => (s === null ? "general" : null))}
-        tone={themeById(look.theme).tone}
         {...(account !== null
           ? {
               account: {

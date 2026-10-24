@@ -45,21 +45,6 @@ async function agentStatus(agentId: string, type: string) {
     retain: true,
   });
 }
-async function heartbeat(agentId: string, sentAt?: Date) {
-  const env = buildEnvelope({
-    now: () => sentAt ?? new Date(clock.now()),
-    agentId,
-    parentId: null,
-    channel: "progress",
-    type: "heartbeat",
-    payload: { source: "harness-hook", seq: 1, hook_event: "PostToolUse" },
-  });
-  // QoS 1: once the broker acks it, it is on the daemon's connection ahead of any later request.
-  await pub.publish(`volley/${NS}/${agentId}/progress`, JSON.stringify(env), {
-    qos: 1,
-    retain: false,
-  });
-}
 /** Move the daemon's wall clock (its timers stay put; MQTT runs on real time). */
 function advanceClock(ms: number) {
   clock.sleepHost(ms);
@@ -138,72 +123,35 @@ describe("wave ownership", () => {
     expect(daemon.snapshot(WAVE)?.owner).toBe("coord-a");
   });
 
-  it("refuses claim while the owner is working with a fresh heartbeat (stale status and registry)", async () => {
+  it("refuses claim of a quiet connected owner after 2 h of silence", async () => {
     await agentRegistry("coord-a", "/work");
     await agentStatus("coord-a", "working");
-    advanceClock(TWO_HOURS); // registry, status, submit and daemon start are now 2 h old
-    // Without the heartbeat the owner is claimable…
-    const now = clock.now();
-    const probe = claimVerdict({
-      owner: "coord-a",
-      by: "coord-b",
-      status: { type: "working", at: new Date(now - TWO_HOURS).toISOString() },
-      registryAt: new Date(now - TWO_HOURS).toISOString(),
-      heartbeatAt: now - TWO_HOURS,
-      ownedSince: new Date(now - TWO_HOURS).toISOString(),
-      now,
-      claimAfterS: 1800,
-    });
-    expect(probe.ok).toBe(true);
-    // …but one heartbeat on its progress channel, seen by the daemon, keeps it alive.
-    await heartbeat("coord-a");
     await settle();
+    for (let i = 0; i < 12; i++) advanceClock(600_000);
     const res = await client.request("claim", { wave: WAVE, by: "coord-b" });
     expect(res.ok).toBe(false);
-    expect(res.error).toMatch(/owned by coord-a .*last seen 0s ago/);
+    expect(res.error).toContain("owned by coord-a, online; claim allowed once its session is gone");
     expect(daemon.snapshot(WAVE)?.owner).toBe("coord-a");
   });
 
-  it("a heartbeat counts from its envelope wall_time, not its (late) arrival", async () => {
-    await agentRegistry("coord-a", "/work");
-    await agentStatus("coord-a", "working");
-    const sent = new Date(clock.now());
-    advanceClock(TWO_HOURS);
-    // A progress message queued while the daemon was down, delivered 2 h after it was sent.
-    await heartbeat("coord-a", sent);
-    await settle();
+  it("an owner the broker has never seen is offline: claimable at once", async () => {
+    // coord-a has no registry entry and no status.
     const res = await client.request("claim", { wave: WAVE, by: "coord-b" });
     expect(res.error).toBeUndefined();
-    expect(daemon.snapshot(WAVE)?.owner).toBe("coord-b");
+    expect(res.result).toMatchObject({ owner: "coord-b", previous: "coord-a" });
+    expect((res.result as { why: string }).why).toBe("owner coord-a offline (no status)");
   });
 
-  it("refuses claim of an owner the broker has never seen until claim_after_s has passed", async () => {
-    // coord-a has no registry entry, no status and no heartbeat.
-    const early = await client.request("claim", { wave: WAVE, by: "coord-b" });
-    expect(early.ok).toBe(false);
-    expect(early.error).toContain("owned by coord-a");
-    advanceClock(1801_000);
-    const later = await client.request("claim", { wave: WAVE, by: "coord-b" });
-    expect(later.error).toBeUndefined();
-    expect(later.result).toMatchObject({ owner: "coord-b", previous: "coord-a" });
-    expect((later.result as { why: string }).why).toMatch(/silent for 18\d\ds/);
-  });
-
-  it("after a daemon restart, a live owner is not claimable until claim_after_s has passed", async () => {
+  it("after a daemon restart, a live owner's retained status keeps it unclaimable", async () => {
     await agentRegistry("coord-a", "/work");
     await agentStatus("coord-a", "working");
-    advanceClock(TWO_HOURS); // the owner lives on heartbeats only…
-    await heartbeat("coord-a");
     await settle();
-    await daemon.stop(); // …and the restarted daemon has not seen one yet
+    await daemon.stop();
+    advanceClock(TWO_HOURS);
     daemon = await t.start({ clock });
     const res = await client.request("claim", { wave: WAVE, by: "coord-b" });
     expect(res.ok).toBe(false);
-    expect(res.error).toContain("owned by coord-a");
-    advanceClock(1801_000); // still silent past claim_after_s after the restart → claimable
-    const later = await client.request("claim", { wave: WAVE, by: "coord-b" });
-    expect(later.error).toBeUndefined();
-    expect(daemon.snapshot(WAVE)?.owner).toBe("coord-b");
+    expect(res.error).toContain("owned by coord-a, online");
   });
 
   it("refuses a claim that carries no caller identity", async () => {
@@ -241,12 +189,16 @@ describe("wave ownership", () => {
     expect((await client.request("pause", { wave: WAVE, by: "coord-b" })).ok).toBe(true);
   });
 
-  it("claim succeeds when the owner's registry entry is older than claim_after_s with no heartbeat", async () => {
+  it("claim succeeds at once when the owner's will fired, naming when", async () => {
     await agentRegistry("coord-a", "/work");
-    advanceClock(TWO_HOURS);
+    await agentStatus("coord-a", "working");
+    await settle();
+    const at = new Date(clock.now()).toISOString();
+    await agentStatus("coord-a", "reaped");
+    await settle();
     const res = await client.request("claim", { wave: WAVE, by: "coord-b" });
     expect(res.error).toBeUndefined();
-    expect(daemon.snapshot(WAVE)?.owner).toBe("coord-b");
+    expect((res.result as { why: string }).why).toBe(`owner coord-a offline since ${at}`);
   });
 
   it("refuses run of a wave id already running under another owner", async () => {
@@ -258,7 +210,6 @@ describe("wave ownership", () => {
 
 describe("ownership (pure)", () => {
   const now = Date.parse("2026-10-18T12:00:00.000Z");
-  const fresh = "2026-10-18T11:59:00.000Z";
 
   it("guardMutation: owner or unowned may act; anyone else is refused", () => {
     expect(guardMutation({ wave: "w", owner: "a" }, "a", "pause")).toBeNull();
@@ -268,76 +219,27 @@ describe("ownership (pure)", () => {
     );
   });
 
-  it("claimVerdict: terminal status, silence past claim_after_s, and fresh heartbeats", () => {
-    const stale = "2026-10-18T10:00:00.000Z";
-    const base = { owner: "a", by: "b", now, claimAfterS: 1800, ownedSince: stale };
-    expect(
-      claimVerdict({
-        ...base,
-        status: { type: "reaped", at: fresh },
-        registryAt: fresh,
-        heartbeatAt: null,
-      }).ok,
-    ).toBe(true);
-    expect(
-      claimVerdict({
-        ...base,
-        status: { type: "done", at: fresh },
-        registryAt: fresh,
-        heartbeatAt: null,
-      }).ok,
-    ).toBe(true);
-    const working = claimVerdict({
-      ...base,
-      status: { type: "working", at: fresh },
-      registryAt: fresh,
-      heartbeatAt: null,
+  it("claimVerdict: an offline owner is claimable, an online one never", () => {
+    const base = { owner: "a", by: "b", now, graceMs: 900_000 };
+    const offline = claimVerdict({ ...base, presence: "offline", awayAt: now - 1000 });
+    expect(offline).toEqual({
+      ok: true,
+      why: `owner a offline since ${new Date(now - 1000).toISOString()}`,
     });
-    expect(working.ok).toBe(false);
-    expect(working.ok === false && working.reason).toContain("owned by a");
-    expect(
-      claimVerdict({
-        ...base,
-        status: { type: "working", at: stale },
-        registryAt: stale,
-        heartbeatAt: null,
-      }).ok,
-    ).toBe(true);
-    // A heartbeat keeps a stale registry entry alive.
-    expect(
-      claimVerdict({
-        ...base,
-        status: { type: "working", at: stale },
-        registryAt: stale,
-        heartbeatAt: now - 1000,
-      }).ok,
-    ).toBe(false);
-    // Nothing known about the owner: silence counts from when it got the wave.
-    expect(claimVerdict({ ...base, status: null, registryAt: null, heartbeatAt: null }).ok).toBe(
-      true,
-    );
-    expect(
-      claimVerdict({
-        ...base,
-        ownedSince: fresh,
-        status: null,
-        registryAt: null,
-        heartbeatAt: null,
-      }).ok,
-    ).toBe(false);
+    // No status ever: offline, and claimable at once.
+    expect(claimVerdict({ ...base, presence: "offline", awayAt: null })).toEqual({
+      ok: true,
+      why: "owner a offline (no status)",
+    });
+    const online = claimVerdict({ ...base, presence: "online", awayAt: null });
+    expect(online).toEqual({
+      ok: false,
+      reason:
+        "wave is owned by a, online; claim allowed once its session is gone (the will fired or it shut down)",
+    });
     // Unowned waves and the owner re-claiming always succeed.
-    expect(
-      claimVerdict({ ...base, owner: null, status: null, registryAt: null, heartbeatAt: null }).ok,
-    ).toBe(true);
-    expect(
-      claimVerdict({
-        ...base,
-        by: "a",
-        status: { type: "working", at: fresh },
-        registryAt: fresh,
-        heartbeatAt: null,
-      }).ok,
-    ).toBe(true);
+    expect(claimVerdict({ ...base, owner: null, presence: "offline", awayAt: null }).ok).toBe(true);
+    expect(claimVerdict({ ...base, by: "a", presence: "online", awayAt: null }).ok).toBe(true);
   });
 
   it("detectOwner: VOLLEY_AGENT_ID first, else the newest top-level session in the caller's cwd", () => {
@@ -454,7 +356,6 @@ describe("ownership (pure)", () => {
 describe("coordinator names (pure)", () => {
   const now = Date.parse("2026-10-18T12:00:00.000Z");
   const fresh = "2026-10-18T11:59:00.000Z";
-  const stale = "2026-10-18T10:00:00.000Z";
   const named = (agent_id: string, started_at: string, coordinator = "coord-main") => ({
     agent_id,
     parent_id: null,
@@ -515,49 +416,31 @@ describe("coordinator names (pure)", () => {
     }
   });
 
-  it("claimVerdict: a bound live agent keeps the name; a binding gone past claim_after_s frees it", () => {
+  it("claimVerdict: a bound live agent keeps the name; an offline binding frees it past the grace", () => {
     const base = {
       owner: "coord-main",
       by: "coord-other",
       now,
-      claimAfterS: 1800,
-      ownedSince: stale,
+      graceMs: 900_000,
       bound: "coordinator-b2",
     };
-    const live = claimVerdict({
-      ...base,
-      status: { type: "working", at: fresh },
-      registryAt: fresh,
-      heartbeatAt: null,
+    const live = claimVerdict({ ...base, presence: "online", awayAt: null });
+    expect(live.ok === false && live.reason).toBe(
+      "wave is owned by coord-main (via coordinator-b2), online; claim allowed once its session is gone (the will fired or it shut down)",
+    );
+    // The bound agent went away 3 min ago: it may reconnect within the grace.
+    const away = now - 180_000;
+    expect(claimVerdict({ ...base, presence: "offline", awayAt: away })).toEqual({
+      ok: false,
+      reason: `wave is owned by coord-main (via coordinator-b2), reconnecting (gone 3m ago, grace 15m); claim allowed at ${new Date(away + 900_000).toISOString()} unless it reconnects`,
     });
-    expect(live.ok).toBe(false);
-    expect(live.ok === false && live.reason).toContain("coordinator-b2");
-    // The bound agent just went away: it may reconnect, so the name is not free at once.
-    expect(
-      claimVerdict({
-        ...base,
-        status: { type: "reaped", at: fresh },
-        registryAt: stale,
-        heartbeatAt: null,
-      }).ok,
-    ).toBe(false);
-    expect(
-      claimVerdict({
-        ...base,
-        status: { type: "reaped", at: stale },
-        registryAt: stale,
-        heartbeatAt: null,
-      }).ok,
-    ).toBe(true);
+    expect(claimVerdict({ ...base, presence: "offline", awayAt: now - 900_000 })).toEqual({
+      ok: true,
+      why: `owner coord-main (via coordinator-b2) offline since ${new Date(now - 900_000).toISOString()}`,
+    });
     // The bound agent itself already owns it.
     expect(
-      claimVerdict({
-        ...base,
-        by: "coordinator-b2",
-        status: { type: "working", at: fresh },
-        registryAt: fresh,
-        heartbeatAt: null,
-      }).ok,
+      claimVerdict({ ...base, by: "coordinator-b2", presence: "online", awayAt: null }).ok,
     ).toBe(true);
   });
 

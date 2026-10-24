@@ -44,9 +44,6 @@
 .narr-enc {
   color: color-mix(in srgb, var(--acc) 80%, white);
 }
-html[data-tone="light"] .narr-enc {
-  color: var(--acc-ink);
-}
 /* Tabs: React Bits Gooey Nav (look/GooeyTabs.tsx, D10) in a recessed track; the goo is the accent. */
 .gooey-tabs {
   align-self: flex-start;
@@ -95,21 +92,21 @@ html[data-tone="light"] .narr-enc {
 }
 .env-type {
   font: 11px var(--f-mono);
-  color: var(--syn-key);
+  color: #8fb4ff;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .ch-mailbox .env-type {
-  color: var(--syn-mail);
+  color: #f0a6ff;
 }
 .ch-status .env-type {
-  color: var(--syn-val);
+  color: #f0d58a;
 }
 .ch-result .env-type {
-  color: var(--syn-ok);
+  color: var(--ok);
 }
 .env-msg {
-  color: var(--code-msg);
+  color: #d5dbea;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -117,7 +114,7 @@ html[data-tone="light"] .narr-enc {
 .env-json {
   margin: 0 9px 8px;
   font: 11px / 1.5 var(--f-mono);
-  color: var(--code-json);
+  color: #b9c3da;
   border-radius: 8px;
   padding: 8px;
   overflow-x: auto;
@@ -133,13 +130,13 @@ html[data-tone="light"] .narr-enc {
   color: var(--ink);
 }
 .tl-ok {
-  color: var(--ok-text);
+  color: var(--ok);
 }
 .tl-bad {
-  color: var(--bad-ink);
+  color: #ff8f7a;
 }
 .caret {
-  color: var(--acc-ink);
+  color: var(--acc);
   animation: blink 1s steps(1) infinite;
 }
 @keyframes blink {
@@ -192,7 +189,7 @@ html[data-tone="light"] .narr-enc {
   background: color-mix(in srgb, var(--amber) 10%, transparent);
 }
 .ch-registry .env-type {
-  color: var(--syn-reg);
+  color: #c4b5fd;
 }
 .feed--empty,
 .term-empty {
@@ -210,9 +207,9 @@ html[data-tone="light"] .narr-enc {
   font: 10.5px var(--f-ui);
   padding: 1px 7px;
   border-radius: 999px;
-  color: var(--amber-text);
+  color: var(--amber);
   border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent);
-  background: color-mix(in srgb, var(--panel-solid) 90%, transparent);
+  background: rgba(15, 17, 27, 0.9);
 }
 .term--stale .tl {
   opacity: 0.6;
@@ -339,7 +336,7 @@ html[data-tone="light"] .narr-enc {
 }
 .acct-err {
   font-size: 11px;
-  color: var(--bad-ink);
+  color: #ff8f86;
   max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -377,10 +374,10 @@ html[data-tone="light"] .narr-enc {
   background: #ff453a;
 }
 .ctx--hot .mono {
-  color: var(--bad-ink);
+  color: #ff8f86;
 }
 .ctx--warn .mono {
-  color: var(--amber-ink);
+  color: #ffd60a;
 }
 /* From 70% the bar pulses (the colour stays); faster once red. */
 @keyframes ctx-pulse {
@@ -432,7 +429,7 @@ html[data-tone="light"] .narr-enc {
 .a-link {
   flex: none;
   font-size: 12px;
-  color: var(--acc-ink);
+  color: var(--acc);
   text-decoration: none;
 }
 a.a-link:hover {
@@ -450,7 +447,7 @@ a.a-link:hover {
 }
 /* No progress of its own for 10 minutes: amber, like a coordinator-handling item. */
 .chip--stale {
-  color: var(--amber-text);
+  color: var(--amber);
   border-color: color-mix(in srgb, var(--amber) 55%, transparent);
   background: color-mix(in srgb, var(--amber) 12%, transparent);
 }

@@ -37,7 +37,6 @@
 #   ci_queue_max: 10               # queued workflow runs of the wave's repo (`gh api`)
 #   hysteresis_samples: 3
 
-# claim_after_s: 1800
 # heartbeat_alarm_s: 600        # no heartbeat this long while working -> screen check
 # idle_grace_s: 180             # turn ended without a terminal status -> one steer, then a decision
 # background_wait_max_s: 7200   # an idle agent showing its own work (background task, lease, shells, writes) is left alone this long
