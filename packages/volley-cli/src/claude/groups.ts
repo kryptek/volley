@@ -5,9 +5,12 @@ import { maskEmail, normalizeEmail } from "volley-mcp/mask";
  * login e-mail), one member per machine holding it, and per usage window the freshest reading.
  * The grouping rule is the Desk's (`accountGroups` in `packages/volley-desk/src/store/claude.ts`):
  * key = the normalised e-mail, else the account id; per window the newest `sampled_at` wins, a
- * tie going to the reading with a known reset; a member's older reading that differs is stale.
- * The Fable window and its probe come from one login: the one whose probe read last (else whose
- * probe attempted last), so the figure's age is its own and a failed probe says why there is none.
+ * tie going to the reading with a known reset. A group is headed by its registry label (this
+ * machine's profile, else the earliest in registry order, less a trailing ` (<machine>)`), else
+ * its masked e-mail. The Fable window and its probe come from one login: the one whose probe read
+ * last (else whose probe attempted last), so the figure's age is its own and a failed probe says
+ * why there is none. A profile that never finished its sign-in is no group: it is listed under
+ * `waiting for sign-in:` (`pendingProfiles`).
  */
 
 /** volleyd's own machine (`LOCAL_MACHINE` in its profiles). */
@@ -15,8 +18,8 @@ const LOCAL_MACHINE = "local";
 /** Claude Code's default profile: `primary` here, `primary@<name>` on a paired machine. */
 const PRIMARY = "primary";
 const DEFAULT_LOGIN = "default login";
-/** Two readings of one window agree within a point when their resets agree too. */
-const STALE_PCT = 1;
+/** The label volleyd's Add suggests for a machine's own login: never a group's name. */
+const NEW_PROFILE = "Claude login";
 
 export interface UsageWindow {
   pct: number;
@@ -73,6 +76,8 @@ export interface ListResult {
     machine: string;
     /** Absent for a profile on a paired machine until a sign-in there learned its HOME. */
     dir?: string;
+    /** When its sign-in finished; absent while it never has. */
+    signed_in_at?: string;
     signin: { state: string; url?: string };
   } & Identity)[];
   primary?: Identity;
@@ -113,7 +118,6 @@ export interface AccountGroup {
   /** The Fable weekly window of the login whose probe `probe` reports; `null`: it read none. */
   fable: UsageWindow | null;
   probe: Probe | null;
-  stale: Reading[];
   members: Member[];
   /** The configured machines with no login on the account: `local` first, then each peer. */
   missing: string[];
@@ -139,9 +143,25 @@ const identity = (a: Identity, b?: Identity): Identity => ({
   ...pick(a, b, "org"),
 });
 
+/** A registry row as `claude_accounts` lists it. */
+export type Profile = ListResult["accounts"][number];
+
+const profileKey = (a: Pick<Profile, "id" | "machine">) =>
+  a.machine === LOCAL_MACHINE ? a.id : `${a.id}@${a.machine}`;
+
+/**
+ * The profiles waiting for sign-in: never signed in and no usage record (the Desk's
+ * `pendingProfiles`). Each is a line under `waiting for sign-in:`, never a group.
+ */
+export function pendingProfiles(r: ListResult, records: UsageRecord[]): Profile[] {
+  const used = new Set(records.map((x) => x.account));
+  return r.accounts.filter((a) => a.signed_in_at === undefined && !used.has(profileKey(a)));
+}
+
 /** Every login volleyd knows of: registry rows, this machine's primary, paired machines' primaries. */
 function logins(r: ListResult, records: UsageRecord[]): Login[] {
   const byId = new Map(records.map((x) => [x.account, x]));
+  const pending = new Set(pendingProfiles(r, records));
   const out: Login[] = [];
   const add = (l: Omit<Login, "record" | "waves">) => {
     const record = byId.get(l.account);
@@ -154,9 +174,9 @@ function logins(r: ListResult, records: UsageRecord[]): Login[] {
     });
   };
   for (const a of r.accounts) {
-    const account = a.machine === LOCAL_MACHINE ? a.id : `${a.id}@${a.machine}`;
+    if (pending.has(a)) continue;
     add({
-      account,
+      account: profileKey(a),
       machine: a.machine,
       label: a.id,
       profileLabel: a.label,
@@ -192,7 +212,8 @@ function logins(r: ListResult, records: UsageRecord[]): Login[] {
   return out;
 }
 
-function pickWindow(list: Login[], key: WindowKey): { w: Reading | null; stale: Reading[] } {
+/** Per window, the reading sampled last; a tie goes to the one with a known reset. */
+function pickWindow(list: Login[], key: WindowKey): Reading | null {
   const readings = list.flatMap((l): (Reading & { t: number })[] => {
     const w = l.record?.[key];
     if (l.record === undefined || w === null || w === undefined) return [];
@@ -208,14 +229,26 @@ function pickWindow(list: Login[], key: WindowKey): { w: Reading | null; stale: 
     ];
   });
   readings.sort((a, b) => b.t - a.t || Number(b.resets_at !== null) - Number(a.resets_at !== null));
-  const strip = ({ t: _t, ...r }: Reading & { t: number }): Reading => r;
   const best = readings[0];
-  if (best === undefined) return { w: null, stale: [] };
-  const stale = readings
-    .slice(1)
-    .filter((r) => Math.abs(r.pct - best.pct) > STALE_PCT || r.resets_at !== best.resets_at)
-    .map(strip);
-  return { w: strip(best), stale };
+  if (best === undefined) return null;
+  const { t: _t, ...reading } = best;
+  return reading;
+}
+
+/**
+ * A group's name: the registry label of its profiles (this machine's, else the earliest in
+ * registry order), less a trailing ` (<one of its machines>)`; `null` when none has one of its
+ * own (only default logins, or Add's `Claude login`).
+ */
+function profileName(list: Login[], hosts: Set<string>): string | null {
+  const named = list.filter((l) => l.profileLabel !== undefined);
+  const chosen = named.find((l) => l.machine === LOCAL_MACHINE) ?? named[0];
+  const label = chosen?.profileLabel;
+  if (label === undefined) return null;
+  const suffix = / \(([^()]+)\)$/.exec(label);
+  const name =
+    suffix !== null && hosts.has(suffix[1] as string) ? label.slice(0, suffix.index) : label;
+  return name === "" || name === NEW_PROFILE ? null : name;
 }
 
 /** An ISO time in ms; a missing or unreadable one sorts as the oldest. */
@@ -256,6 +289,8 @@ const configured = (r: ListResult) => [
 
 export function groupAccounts(r: ListResult, records: UsageRecord[]): AccountGroup[] {
   const machines = configured(r);
+  // A label made by Add names its machine by host: the supervisor's own name included.
+  const supervisor = (r.machines ?? []).filter((m) => m.kind === "supervisor").map((m) => m.name);
   const byKey = new Map<string, Login[]>();
   for (const l of logins(r, records)) {
     const key = l.email !== undefined ? normalizeEmail(l.email) : l.account;
@@ -264,8 +299,6 @@ export function groupAccounts(r: ListResult, records: UsageRecord[]): AccountGro
   return [...byKey].map(([key, list]) => {
     const newest = [...list].sort((a, b) => time(b) - time(a));
     const email = list.find((l) => l.email !== undefined)?.email?.trim() ?? null;
-    const five = pickWindow(list, "five_hour");
-    const week = pickWindow(list, "weekly");
     const members = [...list]
       .sort(
         (a, b) =>
@@ -286,17 +319,16 @@ export function groupAccounts(r: ListResult, records: UsageRecord[]): AccountGro
       key,
       email,
       org: newest.find((l) => l.org !== undefined)?.org ?? null,
-      // Never the key: for a group of default logins it is the e-mail, which must stay masked.
+      // Never the bare key: for a group of default logins it is the e-mail, which stays masked.
       label:
-        newest.find((l) => l.profileLabel !== undefined)?.profileLabel ??
-        (email !== null ? DEFAULT_LOGIN : key),
+        profileName(list, new Set([...list.map((l) => l.machine), ...supervisor])) ??
+        (email !== null ? maskEmail(email) : key),
       plan: newest.find((l) => l.plan !== undefined)?.plan ?? null,
-      fiveHour: five.w,
-      weekly: week.w,
+      fiveHour: pickWindow(list, "five_hour"),
+      weekly: pickWindow(list, "weekly"),
       // The figure comes from the login whose probe it reports, so its age is that read's.
       fable: probeLogin(list)?.record?.model_weekly?.fable ?? null,
       probe: toProbe(probeLogin(list)),
-      stale: [...five.stale, ...week.stale],
       members,
       missing: machines.filter((name) => !members.some((m) => m.machine === name)),
     };
@@ -395,8 +427,9 @@ const STATE: Record<string, string> = {
 };
 
 /**
- * The groups as `volley claude list` prints them; e-mails masked unless `showEmail`, and a
- * `next pick` on each login `nextPick` says volleyd's next spawn there would run under.
+ * The groups as `volley claude list` prints them; e-mails masked unless `showEmail`, a
+ * `next pick` on each login `nextPick` says volleyd's next spawn there would run under, and the
+ * `pending` profiles under `waiting for sign-in:`.
  */
 export function renderGroups(
   groups: AccountGroup[],
@@ -404,7 +437,13 @@ export function renderGroups(
     now,
     showEmail,
     nextPick = () => false,
-  }: { now: number; showEmail: boolean; nextPick?: (account: string) => boolean },
+    pending = [],
+  }: {
+    now: number;
+    showEmail: boolean;
+    nextPick?: (account: string) => boolean;
+    pending?: Profile[];
+  },
 ): string {
   const rows = groups.flatMap((g) => g.members);
   const machineW = Math.max(0, ...rows.map((m) => where(m.machine).length));
@@ -412,16 +451,17 @@ export function renderGroups(
   const stateW = Math.max(0, ...rows.map((m) => (STATE[m.state] ?? m.state).length));
   let out = "";
   for (const g of groups) {
+    const address = g.email === null ? null : showEmail ? g.email : maskEmail(g.email);
+    // A group named only by its masked e-mail is headed by the address once.
     const head =
-      g.email === null
-        ? [g.key, g.plan]
-        : [g.label, g.plan, g.org, showEmail ? g.email : maskEmail(g.email)];
+      g.email !== null && g.label === maskEmail(g.email)
+        ? [address, g.plan, g.org]
+        : [g.label, g.plan, g.org, address];
     const note = g.email === null ? " (e-mail not reported yet)" : "";
     out += `${head.filter((x) => x !== null).join(" · ")}${note}\n`;
     out += `  ${usageLine(g, now)}\n`;
     const from = freshest(g);
-    if (from !== undefined)
-      out += `  freshest: ${where(from.machine)}, ${ago(from.sampledAt, now)}\n`;
+    if (from !== undefined) out += `  last updated: ${ago(from.sampledAt, now)}\n`;
     for (const m of g.members) {
       const cols = [
         where(m.machine).padEnd(machineW),
@@ -429,15 +469,18 @@ export function renderGroups(
         (STATE[m.state] ?? m.state).padEnd(stateW),
       ];
       if (m.waves.length > 0) cols.push(`waves: ${m.waves.join(", ")}`);
-      for (const s of g.stale.filter((x) => x.account === m.account))
-        cols.push(
-          `${WINDOW_NAME[s.window]} ${Math.round(s.pct)}% ${age(s.sampledAt, now)} old (stale)`,
-        );
       if (nextPick(m.account)) cols.push("next pick");
       out += `  ${cols.join("   ").trimEnd()}\n`;
       if (m.url !== undefined) out += `    sign in: ${m.url}\n`;
     }
     if (g.missing.length > 0) out += `  not on: ${g.missing.map(where).join(", ")}\n`;
+  }
+  if (pending.length > 0) {
+    out += "waiting for sign-in:\n";
+    for (const a of pending) {
+      out += `  ${a.id} · ${a.label} · on ${where(a.machine)}\n`;
+      if (a.signin.url !== undefined) out += `    sign in: ${a.signin.url}\n`;
+    }
   }
   return out;
 }

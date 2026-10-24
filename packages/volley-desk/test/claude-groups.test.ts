@@ -12,12 +12,16 @@ import {
   choicesFor,
   configuredMachines,
   fableHint,
+  lastUpdated,
+  machineRows,
   moveTargetOf,
   nextPicks,
   openLimitDecisions,
+  pendingProfiles,
   picksLine,
   usageTriple,
 } from "../src/store/claude";
+import type { RegistryAccount } from "../src/store/claude";
 import type {
   ClaudeAccountPayload,
   DecisionPayload,
@@ -84,10 +88,6 @@ describe("accountGroups", () => {
     expect(g?.fiveHour).toEqual(work.five_hour);
     expect(g?.weekly).toEqual(work.weekly);
     expect(g?.freshest).toEqual({ machine: "local", sampledAt: work.sampled_at });
-    // peer-a's 5-hour reading differs; its weekly agrees (same pct, same reset).
-    expect(g?.stale).toEqual([
-      { machine: "peer-a", window: "five_hour", pct: 41, sampledAt: peer.sampled_at },
-    ]);
     expect(g?.members).toEqual([
       {
         account: "work",
@@ -114,31 +114,18 @@ describe("accountGroups", () => {
     expect(g?.waves).toEqual(["w1", "w2"]);
   });
 
-  it("with the peer's sample newer, its reading wins and this machine's is flagged", () => {
+  it("with the peer's sample newer, its reading wins; no reading is called stale", () => {
     const newer = { ...peer, sampled_at: "2026-10-18T14:10:00.000Z" };
     const [g] = groups({ work, "primary@peer-a": newer });
     expect(g?.fiveHour).toEqual(newer.five_hour);
     expect(g?.freshest).toEqual({ machine: "peer-a", sampledAt: newer.sampled_at });
-    expect(g?.stale).toEqual([
-      { machine: "local", window: "five_hour", pct: 37, sampledAt: work.sampled_at },
-    ]);
+    expect(g).not.toHaveProperty("stale");
   });
 
   it("a same-time tie goes to the reading with a known reset", () => {
     const tie = { ...peer, sampled_at: work.sampled_at, five_hour: { pct: 37, resets_at: null } };
     const [g] = groups({ "primary@peer-a": tie, work });
     expect(g?.fiveHour).toEqual(work.five_hour);
-    expect(g?.stale).toEqual([
-      { machine: "peer-a", window: "five_hour", pct: 37, sampledAt: work.sampled_at },
-    ]);
-  });
-
-  it("a reading within a point with the same reset is not stale", () => {
-    const close = {
-      ...peer,
-      five_hour: { pct: 37.8, resets_at: work.five_hour?.resets_at ?? null },
-    };
-    expect(groups({ work, "primary@peer-a": close })[0]?.stale).toEqual([]);
   });
 
   it("a record without an e-mail keeps its own card", () => {
@@ -164,7 +151,6 @@ describe("accountGroups", () => {
     const [g, ...rest] = groups({ work });
     expect(rest).toEqual([]);
     expect(g?.members.map((m) => m.account)).toEqual(["work", "primary@peer-a"]);
-    expect(g?.stale).toEqual([]);
   });
 
   it("a peer signed out on its machine record shows signed out", () => {
@@ -198,7 +184,7 @@ describe("accountGroups", () => {
     };
     // A registry profile with no usage record yet, listed between the two sampled logins.
     const [ra, rb, rn] = accountList({ a, b }, [
-      { id: "n", label: "N", machine: "local", email: EMAIL },
+      { id: "n", label: "N", machine: "local", email: EMAIL, signed_in_at: work.sampled_at },
     ]);
     const [g] = accountGroups(
       [ra, rn, rb].filter((x) => x !== undefined),
@@ -207,7 +193,8 @@ describe("accountGroups", () => {
     );
     expect(g?.fiveHour?.pct).toBe(50);
     expect(g?.freshest).toEqual({ machine: "local", sampledAt: b.sampled_at });
-    expect(g?.label).toBe("B");
+    // The registry's own profile names the group.
+    expect(g?.label).toBe("N");
   });
 
   it("the e-mail keeps its reported spelling; the key is normalised", () => {
@@ -226,6 +213,123 @@ describe("accountGroups", () => {
   it("pickers keep listing every account id once", () => {
     const list = accountList({ work, "primary@peer-a": peer });
     expect(accountChoices(list).map((c) => c.id)).toEqual(["work", "primary@peer-a"]);
+  });
+});
+
+describe("one clean card per account (#496)", () => {
+  const TEAM = "team@example.com";
+  const SIGNED = "2026-10-18T12:00:00.000Z";
+  const teamRec = (account: string, sampled_at: string): ClaudeAccountPayload => ({
+    account,
+    five_hour: { pct: 8, resets_at: null },
+    weekly: null,
+    agents: [],
+    waves: [],
+    sampled_at,
+  });
+  const row = (id: string, label: string, machine: string, extra: Partial<RegistryAccount> = {}) =>
+    ({ id, label, machine, email: TEAM, signed_in_at: SIGNED, ...extra }) as RegistryAccount;
+  /** The row with no finished sign-in. */
+  const unsigned = ({ signed_in_at: _, ...r }: RegistryAccount): RegistryAccount => r;
+
+  it("keys a paired machine's registry row <id>@<machine>: one account, not two", () => {
+    const rec = teamRec("team@box-a", "2026-10-18T14:05:30.000Z");
+    const list = accountList({ "team@box-a": rec }, [row("team", "Team account (box-a)", "box-a")]);
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({
+      id: "team@box-a",
+      machine: "box-a",
+      sampledAt: rec.sampled_at,
+      signedIn: true,
+      email: TEAM,
+    });
+  });
+
+  it("with a local team record too, the group holds exactly the two logins", () => {
+    const records = {
+      team: teamRec("team", "2026-10-18T14:04:00.000Z"),
+      "team@box-a": teamRec("team@box-a", "2026-10-18T14:05:30.000Z"),
+    };
+    const registry = [
+      row("team", "Team account", "local"),
+      row("team", "Team account (box-a)", "box-a"),
+    ];
+    const gs = accountGroups(accountList(records, registry), {}, "hub");
+    expect(gs).toHaveLength(1);
+    expect(gs[0]?.members.map((m) => [m.account, m.machine])).toEqual([
+      ["team", "local"],
+      ["team@box-a", "box-a"],
+    ]);
+    expect(gs[0]?.label).toBe("Team account");
+  });
+
+  it("the label: the registry label, less a machine suffix; Add's Claude login is no name", () => {
+    const primary = { ...teamRec("primary", SIGNED), email: TEAM };
+    const login = row("claude-login", "Claude login (box-a)", "box-a");
+    expect(accountGroups(accountList({ primary }, [login]), {}, "hub")[0]?.label).toBe(
+      "t•••@example.com",
+    );
+    const solo = accountList({}, [row("work", "Work (box-a)", "box-a")]);
+    expect(accountGroups(solo, {}, "hub")[0]?.label).toBe("Work");
+    // A suffix naming no machine of the group is part of the name.
+    const odd = accountList({}, [row("work", "Work (2024)", "box-a")]);
+    expect(accountGroups(odd, {}, "hub")[0]?.label).toBe("Work (2024)");
+  });
+
+  it("the label: this machine's profile first, else the earliest in registry order", () => {
+    const rows = [row("t-b", "Team B (box-b)", "box-b"), row("t-a", "Team A (box-a)", "box-a")];
+    expect(accountGroups(accountList({}, rows), {}, "hub")[0]?.label).toBe("Team B");
+    const local = [...rows, row("t", "Team here", "local")];
+    expect(accountGroups(accountList({}, local), {}, "hub")[0]?.label).toBe("Team here");
+  });
+
+  it("machineRows: one row per configured machine; two profiles on box-a are one row", () => {
+    const registry = [
+      row("team", "Team account", "box-a"),
+      row("team-2", "Team account (box-a)", "box-a"),
+      unsigned(row("old", "Team account (gone)", "gone")),
+    ];
+    const records = { "old@gone": teamRec("old@gone", SIGNED) };
+    const [g] = accountGroups(accountList(records, registry), {}, "hub");
+    const configured = configuredMachines(["box-a", "box-b"], {}, "hub");
+    expect(g && machineRows(g, configured)).toEqual([
+      { name: "this machine", op: "local", up: true, state: "missing", labels: [] },
+      {
+        name: "box-a",
+        op: "box-a",
+        up: true,
+        state: "signed_in",
+        labels: ["Team account", "Team account (box-a)"],
+      },
+      { name: "box-b", op: "box-b", up: true, state: "missing", labels: [] },
+      // A member on a machine no longer configured comes last.
+      { name: "gone", op: "gone", up: true, state: "signed_out", labels: ["Team account (gone)"] },
+    ]);
+  });
+
+  it("lastUpdated: the freshest reading's age; just now under a minute; null with none", () => {
+    const now = Date.parse("2026-10-18T14:10:00.000Z");
+    const at = (sampled: string) =>
+      accountGroups(accountList({ team: teamRec("team", sampled) }), {}, "hub")[0] as never;
+    expect(lastUpdated(at("2026-10-18T14:06:00.000Z"), now)).toBe("4 min ago");
+    expect(lastUpdated(at("2026-10-18T14:09:30.000Z"), now)).toBe("just now");
+    const [none] = accountGroups(accountList({}, [row("team", "Team", "local")]), {}, "hub");
+    expect(none && lastUpdated(none, now)).toBeNull();
+  });
+
+  it("pendingProfiles: no finished sign-in and no record; accountList leaves them out", () => {
+    const pending = unsigned(
+      row("pending-work", "Work (box-a)", "box-a", {
+        signin: { state: "pending", url: "https://claude.com/cai/oauth/authorize?state=x" },
+      }),
+    );
+    const done = row("team", "Team", "local");
+    // A row with a record is in use, whatever its registry entry says.
+    const used = unsigned(row("used", "Used", "box-a"));
+    const records = { "used@box-a": teamRec("used@box-a", SIGNED) };
+    const registry = [pending, done, used];
+    expect(pendingProfiles(registry, records)).toEqual([pending]);
+    expect(accountList(records, registry).map((a) => a.id)).toEqual(["used@box-a", "team"]);
   });
 });
 

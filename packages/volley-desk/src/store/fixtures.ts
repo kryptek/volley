@@ -7,6 +7,7 @@
  * `&agents=N` (dev only) adds working agents on a `load-test` wave, for the
  * 20-agent fps check.
  */
+import type { RegistryAccount } from "./claude";
 import { initialState, reduceAll } from "./reducer";
 import type {
   DeskMessage,
@@ -641,7 +642,99 @@ function loadMessages(extra: number, now: number): DeskMessage[] {
   ];
 }
 
-/** Two Claude accounts' usage records and the agents' context samples (SPEC §4.6.12). */
+/** The owner's own Claude login: this machine's and box-a's default login. */
+const OWNER_EMAIL = "owner@example.com";
+const SIGNED_IN_AT = "2026-10-01T09:00:00.000Z";
+
+/**
+ * volleyd's profile registry as the demo's `claude_accounts` answers it: Work and Personal here,
+ * the Team account on this machine and on box-a (one account, two machines), and a profile on
+ * box-a still waiting for its sign-in.
+ */
+export const DEMO_CLAUDE_REGISTRY: RegistryAccount[] = [
+  {
+    id: "work",
+    label: "Work",
+    machine: "local",
+    plan: "max",
+    email: "work@example.com",
+    signed_in_at: SIGNED_IN_AT,
+  },
+  {
+    id: "team",
+    label: "Team account",
+    machine: "local",
+    plan: "team",
+    email: "team@example.com",
+    org: "Example Org",
+    signed_in_at: SIGNED_IN_AT,
+  },
+  {
+    id: "team",
+    label: "Team account (box-a)",
+    machine: "box-a",
+    plan: "team",
+    email: "team@example.com",
+    org: "Example Org",
+    signed_in_at: SIGNED_IN_AT,
+  },
+  {
+    id: "personal",
+    label: "Personal",
+    machine: "local",
+    plan: "pro",
+    email: "personal@example.com",
+    signed_in_at: SIGNED_IN_AT,
+  },
+  {
+    id: "pending-work",
+    label: "Work (box-a)",
+    machine: "box-a",
+    signin: { state: "pending", url: "https://claude.com/cai/oauth/authorize?state=demo" },
+  },
+];
+
+/** The demo's `claude_accounts` answer: the registry, the primary, the machines it reads. */
+export function demoClaudeAccounts() {
+  return {
+    root: "/path/to/home/.volley/claude",
+    accounts: DEMO_CLAUDE_REGISTRY,
+    primary: { plan: "max", email: OWNER_EMAIL },
+    machines: [
+      { name: LOCAL_MACHINE, kind: "supervisor", claude: "signed_in", email: OWNER_EMAIL },
+      { name: "box-a", kind: "peer", claude: "signed_in", plan: "max", email: OWNER_EMAIL },
+      { name: "box-b", kind: "peer", claude: "unknown" },
+    ],
+    sharing: { mcp: "copy" },
+  };
+}
+
+/** The demo's `claude_balance` answer: per machine, the account each family's next spawn takes. */
+export function demoClaudeBalance() {
+  const candidate = (account: string, five: number, weekly: number) => ({
+    account,
+    headroom: 100 - five,
+    five_hour_pct: five,
+    weekly_pct: weekly,
+    agents: 0,
+  });
+  return {
+    machines: [
+      {
+        name: "local",
+        candidates: [candidate("team", 8, 15), candidate("personal", 12, 22)],
+        picks: { fable: "team", opus: "team", sonnet: "personal", haiku: "personal" },
+      },
+      {
+        name: "box-a",
+        candidates: [candidate("team@box-a", 8, 15)],
+        picks: { fable: "team@box-a", opus: "team@box-a", sonnet: "team@box-a", haiku: null },
+      },
+    ],
+  };
+}
+
+/** The Claude accounts' usage records and the agents' context samples (SPEC §4.6.12). */
 function claudeUsage(now: number): DeskMessage[] {
   const win = (pct: number, inMin: number) => ({ pct, resets_at: iso(now + inMin * 60_000) });
   const accounts = [
@@ -663,6 +756,35 @@ function claudeUsage(now: number): DeskMessage[] {
       agents: ["ci-speed-t3b-implementer-1"],
       waves: ["ci-speed"],
     },
+    {
+      account: "team",
+      label: "Team account",
+      plan: "team",
+      email: "team@example.com",
+      five_hour: win(8, 190),
+      weekly: win(15, 3 * 1440),
+      agents: [],
+      waves: [],
+      sampled_at: iso(now - 120_000),
+    },
+    {
+      // The Team account's login on box-a: the fresher reading, and the usage probe's.
+      account: "team@box-a",
+      label: "Team account (box-a)",
+      plan: "team",
+      email: "team@example.com",
+      five_hour: win(8, 190),
+      weekly: win(15, 3 * 1440),
+      model_weekly: { fable: win(6, 3 * 1440) },
+      probe: {
+        machine: "box-a",
+        state: "ok",
+        attempted_at: iso(now - 30_000),
+        read_at: iso(now - 30_000),
+      },
+      agents: [],
+      waves: [],
+    },
   ];
   const samples: [string, string, number, number][] = [
     ["status-chip-t1-fixup-1", "work", 143_000, 200_000],
@@ -676,7 +798,7 @@ function claudeUsage(now: number): DeskMessage[] {
         "volleyd",
         "_system/claude-accounts",
         "claude_account",
-        { ...a, sampled_at: iso(now - 30_000) },
+        { sampled_at: iso(now - 30_000), ...a },
         now,
       ),
       receivedAt: now,
@@ -783,7 +905,14 @@ function machines(now: number, step = 0): DeskMessage[] {
     memory: { total_mb: 65_536, available_pct },
     disk: { path: "/srv/work", free_gb: 312, free_pct: 64 },
     versions: { peer: "0.3.1", volley: "0.3.1", bun: "1.3.2", git: "2.47.0", claude: "2.1.0" },
-    auth: { gh: "ok", claude: "signed_in", trust: trust ? "ok" : "missing" },
+    auth: {
+      gh: "ok",
+      claude: "signed_in",
+      trust: trust ? "ok" : "missing",
+      // The owner's own login, on this machine and on box-a alike.
+      claude_email: OWNER_EMAIL,
+      claude_plan: "max",
+    },
     repo: { path: repo, exists: true, origin: "github.com/example-org/example-repo" },
     checks: checks(trust),
     doctor_at: iso(now - 60_000),

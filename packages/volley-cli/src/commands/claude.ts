@@ -6,7 +6,13 @@ import { buildTopic } from "volley-mcp/topics";
 import { randomSuffix } from "volley-mcp/util";
 import { parsePositiveInt, resolveAuth, resolveBrokerUrl, resolveNamespace } from "../args";
 import { type BalanceAnswer, isNextPick, printBalance } from "../claude/balance";
-import { type ListResult, type UsageRecord, groupAccounts, renderGroups } from "../claude/groups";
+import {
+  type ListResult,
+  type UsageRecord,
+  groupAccounts,
+  pendingProfiles,
+  renderGroups,
+} from "../claude/groups";
 import { connectAsClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
@@ -413,12 +419,15 @@ function printList(
   balance: BalanceAnswer | null,
 ): void {
   const groups = groupAccounts(r, records);
-  if (groups.length === 0) io.stdout(`no Claude account profiles under ${r.root}\n`);
+  const pending = pendingProfiles(r, records);
+  if (groups.length === 0 && pending.length === 0)
+    io.stdout(`no Claude account profiles under ${r.root}\n`);
   io.stdout(
     renderGroups(groups, {
       now: Date.now(),
       showEmail,
       nextPick: (account) => isNextPick(balance, account),
+      pending,
     }),
   );
   io.stdout(

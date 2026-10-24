@@ -658,6 +658,7 @@
   border: 1px solid rgba(255, 255, 255, 0.08);
   text-align: left;
   min-width: 0;
+  container-type: inline-size;
 }
 .claude-card--add {
   align-items: center;
@@ -700,8 +701,10 @@
 .cc-email .icon-btn[aria-pressed="true"] {
   color: var(--ink);
 }
-.cc-stale {
-  color: #ffd60a;
+/* The address wraps rather than truncating: nothing on the card is cut off at any width. */
+.cc-email .ell {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .cc-machines {
   display: flex;
@@ -714,11 +717,19 @@
 }
 .cc-machines li {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   min-width: 0;
 }
-.cc-machines .cc-waves {
+.cc-machines li > b,
+.cc-machines li > .dim {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/* A machine row's sign-in state, at its end. */
+.cc-machines .cc-state,
+.m-accounts .cc-state {
   margin-left: auto;
   flex: none;
 }
@@ -740,6 +751,7 @@
 }
 .cc-signin {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   margin-left: auto;
@@ -749,32 +761,26 @@
   padding: 2px 8px;
   font-size: 11.5px;
 }
-/* `on 2 of 3 machines`: amber while a configured machine misses the account. */
-.cc-head .chip + .chip {
-  margin-left: 0;
-}
-.chip--gap {
-  color: var(--amber);
-  border-color: color-mix(in srgb, var(--amber) 55%, transparent);
-  background: color-mix(in srgb, var(--amber) 12%, transparent);
-}
-.cc-foot {
+/* Add to another machine…, Rename, Remove, and `Last updated` at the end; they wrap. */
+.cc-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
+  align-items: center;
+  gap: 6px;
 }
-/* From volleyd's claude_balance: the families that pick this account next, and the machine row. */
-.cc-picks {
-  flex-basis: 100%;
-  color: var(--ok);
-}
-.cc-machines .cc-next {
+.cc-actions .btn {
   flex: none;
-  font-size: 10.5px;
-  color: var(--ok);
-  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
+.cc-updated {
+  margin-left: auto;
+  align-self: flex-end;
+}
+/* The profiles waiting for sign-in: a row each, under the cards. */
+.cc-pending {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
 }
 /* The three meters: 5-hour, 7-day and Fable (7-day), side by side while the card is wide. */
 .cc-meters {
@@ -782,18 +788,20 @@
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 10px;
 }
-/* A machine row's `5h 37% · 7d 56% · Fable 12%`, and `sampled 3 h ago` when it is older. */
-.cc-usage {
-  flex: none;
-  font-size: 11.5px;
-  white-space: nowrap;
-}
-.cc-machines .cc-usage,
-.m-accounts .cc-usage {
-  margin-left: auto;
-}
-.cc-machines .cc-usage + .cc-waves {
-  margin-left: 0;
+/* A narrow card: the plan chip on its own line, the meters one per row. */
+@container (max-width: 360px) {
+  .cc-head {
+    flex-wrap: wrap;
+  }
+  .cc-head .min0 {
+    flex: 1 1 calc(100% - 40px);
+  }
+  .cc-head .chip {
+    margin-left: 38px;
+  }
+  .cc-meters {
+    grid-template-columns: 1fr;
+  }
 }
 .meter-top {
   display: flex;
@@ -831,13 +839,11 @@
 .meter-pct.meter-hot {
   color: #ff8f86;
 }
-.cc-move,
 .modal-acct {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.cc-move select,
 .modal-acct select {
   flex: 1;
   min-width: 0;
@@ -1170,13 +1176,6 @@
   cursor: default;
   opacity: 0.55;
 }
-.cc-move {
-  flex-wrap: wrap;
-}
-.cc-move .btn {
-  flex: none;
-}
-
 /* Sign out and Switch account… under the account (Settings' sidebar, the Dock's account menu). */
 .ms-account {
   flex-wrap: wrap;
