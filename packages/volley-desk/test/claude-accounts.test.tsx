@@ -1474,12 +1474,19 @@ describe("ClaudeAccounts › rename, remove and the live registry (#497)", () =>
   );
   const fetches = (control: ReturnType<typeof vi.fn>) =>
     control.mock.calls.filter(([op]) => op === "claude_accounts").length;
+  /** The registry fetched once and its answer rendered: a click before that sees no registry. */
+  const fetched = async (control: ReturnType<typeof vi.fn>) => {
+    await waitFor(() => expect(fetches(control)).toBe(1));
+    await act(async () => {
+      await Promise.all(control.mock.results.map((r) => r.value));
+    });
+  };
   const card = (name = "Work") => screen.getByRole("article", { name });
 
   it("a raised rev fetches the registry again; a row it no longer has leaves, with no remount", async () => {
     const v = volleyd([row("work", "local")]);
     const r = render(view({ work: own }, v.fn));
-    await waitFor(() => expect(fetches(v.control)).toBe(1));
+    await fetched(v.control);
     expect(card()).toBeInTheDocument();
     // volleyd removed it: its record cleared, the registry without it, the signal raised.
     v.reg.rows = [];
@@ -1494,7 +1501,7 @@ describe("ClaudeAccounts › rename, remove and the live registry (#497)", () =>
   it("Rename: ✎ opens a field holding the name; Enter sends claude_account_rename; the new name shows after the rev", async () => {
     const v = volleyd([row("work", "local"), row("work-box-a", "box-a")]);
     const r = render(view({ work: own }, v.fn));
-    await waitFor(() => expect(fetches(v.control)).toBe(1));
+    await fetched(v.control);
     fireEvent.click(within(card()).getByRole("button", { name: "Rename Work" }));
     const field = within(card()).getByRole("textbox", { name: "New name for Work" });
     expect(field).toHaveValue("Work");
@@ -1518,7 +1525,7 @@ describe("ClaudeAccounts › rename, remove and the live registry (#497)", () =>
       claude_account_rename: { ok: false, error: "'primary' is reserved; pick another name" },
     });
     render(view({ work: own }, v.fn));
-    await waitFor(() => expect(fetches(v.control)).toBe(1));
+    await fetched(v.control);
     fireEvent.click(within(card()).getByRole("button", { name: "Rename Work" }));
     const field = within(card()).getByRole("textbox", { name: "New name for Work" });
     fireEvent.change(field, { target: { value: "Something" } });
@@ -1543,7 +1550,7 @@ describe("ClaudeAccounts › rename, remove and the live registry (#497)", () =>
   it("Remove…: the sheet names the machine and the masked e-mail; Confirm sends the op", async () => {
     const v = volleyd([row("work", "local")]);
     render(view({ work: own }, v.fn));
-    await waitFor(() => expect(fetches(v.control)).toBe(1));
+    await fetched(v.control);
     fireEvent.click(within(card()).getByRole("button", { name: "Remove Work…" }));
     const sheet = within(screen.getByRole("dialog", { name: "Remove Work" }));
     expect(sheet.queryByRole("radio")).toBeNull();
@@ -1571,7 +1578,7 @@ describe("ClaudeAccounts › rename, remove and the live registry (#497)", () =>
       },
     });
     render(view({ work: own }, v.fn));
-    await waitFor(() => expect(fetches(v.control)).toBe(1));
+    await fetched(v.control);
     fireEvent.click(within(card()).getByRole("button", { name: "Remove Work…" }));
     const sheet = within(screen.getByRole("dialog", { name: "Remove Work" }));
     const radios = sheet.getAllByRole("radio");
@@ -1599,7 +1606,7 @@ describe("ClaudeAccounts › rename, remove and the live registry (#497)", () =>
   it("this machine's own login has no Rename and no Remove", async () => {
     const v = volleyd([row("work", "local")]);
     render(view({ work: own }, v.fn));
-    await waitFor(() => expect(fetches(v.control)).toBe(1));
+    await fetched(v.control);
     const primary = within(screen.getByRole("article", { name: "This machine's Claude login" }));
     expect(primary.queryByRole("button", { name: /^Rename/ })).toBeNull();
     expect(primary.queryByRole("button", { name: /^Remove/ })).toBeNull();
@@ -1637,7 +1644,7 @@ describe("ClaudeAccounts › rename, remove and the live registry (#497)", () =>
   it("passes axe with the remove sheet open, and with the rename field open", async () => {
     const v = volleyd([row("work", "local"), row("work-box-a", "box-a")]);
     render(view({ work: own }, v.fn));
-    await waitFor(() => expect(fetches(v.control)).toBe(1));
+    await fetched(v.control);
     fireEvent.click(within(card()).getByRole("button", { name: "Remove Work…" }));
     const rules = { rules: { "color-contrast": { enabled: false } } };
     expect((await axe.run(document.body, rules)).violations.map((x) => x.id)).toEqual([]);

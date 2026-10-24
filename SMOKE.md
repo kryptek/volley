@@ -4,7 +4,7 @@ This file collects feature-level smoke recipes that span multiple packages — t
 
 **Next release:** deploy the tag to the supervisor's machine with `volley deploy v<X.Y.Z>` (after a `--dry-run`), then confirm the Desk shows the new version in Settings › About, `volley desk serve`'s log has no stale-build warning, and `volleyd status` answers. See [`volley deploy`](#deploying-a-release-volley-deploy) below.
 
-**v0.5.0** (Autopilot: an unattended night against a scratch repository, merges by the supervisor, a planted flake fixed, the release train, the digest and the Needs you window on the phone) is [Plan 13](#plan-13--autopilot-v050) below. **v0.4.0** (the Fleet: pairing from the Desk, doctor and Repair, signing a paired machine in to Claude, automatic placement, a machine going down, overloaded and removed) is [Plan 12](#plan-12--fleet-v040) below. **v0.3.0** (onboarding: `volley setup`, the Desk's setup wizard and sign-in links, pairing, Claude accounts) is [Plan 11](#plan-11--onboarding-v030) below. **v0.2.0** (volleyd, volley-hooks, broker auth, the Desk) has its own owner smoke path: [`docs/SMOKE-v0.2.md`](docs/SMOKE-v0.2.md).
+**Presence (#483)** (an owner who leaves has nothing to keep alive: reconnecting, away, gone only when something waits, back online by name) is [Presence](#presence-483) below. **v0.5.0** (Autopilot: an unattended night against a scratch repository, merges by the supervisor, a planted flake fixed, the release train, the digest and the Needs you window on the phone) is [Plan 13](#plan-13--autopilot-v050) below. **v0.4.0** (the Fleet: pairing from the Desk, doctor and Repair, signing a paired machine in to Claude, automatic placement, a machine going down, overloaded and removed) is [Plan 12](#plan-12--fleet-v040) below. **v0.3.0** (onboarding: `volley setup`, the Desk's setup wizard and sign-in links, pairing, Claude accounts) is [Plan 11](#plan-11--onboarding-v030) below. **v0.2.0** (volleyd, volley-hooks, broker auth, the Desk) has its own owner smoke path: [`docs/SMOKE-v0.2.md`](docs/SMOKE-v0.2.md).
 
 ---
 
@@ -21,6 +21,57 @@ Owner checklist on the supervisor's machine, once per release tag (about 5 minut
 4. `volleyd status` answers; a wave that was running before the deploy is still running.
 5. Optional, rollback: in a scratch clone, break the Desk build of a test tag and deploy it with
    `--repo <clone>`: the deploy reports the failed step and `rolled back to <previous>`.
+
+---
+
+## Presence (#483)
+
+**Done means:** an owner who leaves has nothing to keep alive. The Desk and `volleyd status` read
+the coordinator's presence from its MCP connection's will: `reconnecting`, then `away
+(autopilot)`, `gone` only while something waits that only the owner can answer, and back to
+`online` as soon as a session with the same `VOLLEY_COORDINATOR` connects. A connected session
+that stays quiet stays `Working`. About 15 minutes for steps 1–4 (step 5 runs on its own for two
+hours), with an autopilot wave running against a scratch repository and the Desk open. The
+owner's guide is [`docs/AUTOPILOT.md`](docs/AUTOPILOT.md#presence-nothing-to-keep-alive).
+
+Before you start, shorten the grace so the plan fits: `volleyd config set
+autopilot.reconnect_grace_s 120` (restore it afterwards with `volleyd config set
+autopilot.reconnect_grace_s 900`). Remove any cron job, launchd agent or scheduled prompt left
+over from an earlier release that republishes the coordinator's status; nothing below needs one.
+
+- [ ] **1. Leave.** End the coordinator's Claude Code session (`/exit`), or restart its MCP
+  server. **Pass:** at once on `/exit` (within about 90 s, the MQTT keepalive × 1.5, if the
+  connection just drops) the Desk's coordinators window reads `Coordinator reconnecting · 0m`
+  with a neutral `reconnecting` chip and no `claim it`, and `volleyd status <wave>` prints
+  `owner: <name> (via <agent id>) · reconnecting`. After `reconnect_grace_s` the row reads `Owner
+  away · autopilot · last seen 2m ago`, with no Needs-you banner and nothing ringing, and `volleyd
+  status <wave>` prints `· away (autopilot) · last seen …`. Note both times.
+- [ ] **2. No claim while reconnecting.** Repeat step 1 and, inside the grace, run `volleyd claim
+  <wave> --by smoke`. **Pass:** refused, `wave is owned by <name> (via <agent id>), reconnecting
+  (gone <n>m ago, grace 2m); claim allowed at <time> unless it reconnects`; the wave keeps its
+  owner.
+- [ ] **3. Gone only when something waits.** While away, open an owner-only decision (e.g. let
+  the release train reach its `release_go`, or open a `stage_go`). **Pass:** the row turns `No
+  coordinator · claim it` with a `needs you` chip, the wave window shows the Needs-you banner, the
+  phone rings once, and `volleyd status <wave>` prints `· gone · 1 decision waits for you`. Answer
+  it from the Desk's Needs-you window: the row goes back to `Owner away · autopilot`.
+- [ ] **4. Come back.** Start a Claude Code session whose MCP server has the same
+  `VOLLEY_COORDINATOR`. **Pass:** within seconds the row reads `Working` and `volleyd status
+  <wave>` prints `· online`; `volleyd events <wave> --cursor smoke` shows `owner_reconnected {
+  owner, agent_id, previous_agent_id }`; nothing was claimed.
+- [ ] **5. Quiet is not gone.** Leave that session connected and idle for two hours. **Pass:**
+  `volley sub --pattern 'volley/+/<agent id>/progress' --timeout 7200` prints nothing (exit
+  `124`: the session published nothing to stay present), and the row stays `Working` throughout.
+
+### Results
+
+| Step | Time | Result | Notes |
+|---|---|---|---|
+| 1. leave: reconnecting at / away at | | | |
+| 2. claim refused while reconnecting | | | |
+| 3. gone with a decision; away after answering | | | |
+| 4. online, `owner_reconnected` | | | |
+| 5. two hours quiet: nothing published, still `Working` | | | |
 
 ---
 
@@ -102,8 +153,9 @@ the inbox: `volleyd inbox` lists nothing open.
   session submits, prints the wave id and where to watch it, and does not start a per-event
   loop.
 - [ ] End the coordinator session (`/exit`). **Pass:** `volleyd status <wave>` still names the
-  coordinator name as owner; the Desk shows the coordinator as reconnecting, then gone, and the
-  wave keeps running (no `claim it` needed). Note the time: this is the start of the run.
+  coordinator name as owner; the Desk shows the coordinator as reconnecting, then away
+  (autopilot), and the wave keeps running (no `claim it` needed). Note the time: this is the
+  start of the run.
 - [ ] Go to bed. Leave the Mac awake and on the network; leave the phone where it can ring.
 
 ### (b) Overnight, without you (check in the morning)
@@ -180,7 +232,7 @@ wall time: submit <hh:mm> → last merge <hh:mm> → release_go <hh:mm> (<h> h <
 ```
 OWNER RESULTS (<date>, release head <sha>, scratch repository created for the run):
   before: policy table shown (CLI, Desk); inbox empty:
-  (a) picker in terminal + Desk row flipped: / session ended, wave kept running, reconnecting → gone:
+  (a) picker in terminal + Desk row flipped: / session ended, wave kept running, reconnecting → away:
   (b) merges by supervisor __/__: / flake fixer task merged, waiting PRs released: / conflict updated by merge, no force-push:
       auto-resolved __, none rang: / pushes overnight __:
   (c) digest = push = card: / phone layout: / stage_go from the phone, tag pushed: / release_go from the phone, late answer refused:
