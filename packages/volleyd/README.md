@@ -788,9 +788,10 @@ away; a `null` `resets_at` counts as a full window away. The account's `score` i
 pace and `binding` the window that sets it: the tightest window decides, so a 95% 5-hour window
 loses to a comfortable one however much weekly room is expiring. An account is `eligible` while
 every window it reported is under `claude.balance.cap_pct` (default 97). Eligible accounts come
-first, then the rest (the least over first: the cap orders, it never refuses a spawn; the
-all-hot `account_limit` below is the notification). Each group goes by score, highest first; an
-account with no usage at all counts as on pace (1). Scores within `claude.balance.tie_band_pct`
+first, then the rest (the cap orders, it never refuses a spawn; the all-hot `account_limit`
+below is the notification). Each group goes by score, highest first, so among over-cap accounts
+the one whose window resets soonest for its room goes first, not the least over; an account
+with no usage at all counts as on pace (1). Scores within `claude.balance.tie_band_pct`
 (default 10) percent of a band's leader count as equal and go to fewer agents, then signed-in
 profiles before the primary (its interactive use goes unreported), then candidate order. Both
 tunables are the supervisor's (`volleyd config set claude.balance.cap_pct=95`); a wave's own
@@ -815,10 +816,10 @@ moving, or a second time for the same task role, account, window and `resets_at`
 wave's `config:` can override it), each running wave with agents on that account whose account
 is pinned (its task, its `account:` or `claude.default_account` names one) gets one wave-level
 `account_limit` decision: `acct`, `pct`, `resets_at`, and `suggested`, the account the rank
-rule puts first among those under the threshold in both windows, else a signed-in account that
-has not reported 5-hour usage yet (labelled "no usage yet", or "no 5-hour usage yet" when it has
-reported weekly usage; a signed-in profile before `primary`, whose interactive use goes
-unreported; none: only `not now`), with
+rule puts first among those under the threshold in both windows, a signed-in account that has
+not reported 5-hour usage yet ranking among them as on pace (labelled "no usage yet", or
+"no 5-hour usage yet" when it has reported weekly usage; none under the threshold: only
+`not now`), with
 the options `move wave <w> to <suggested>` and `not now`. It is not asked again while open,
 nor for the same window once answered. **Nothing switches on its own.**
 Answering `move wave <w> to <acct>` (any signed-in account, not only the suggestion; an unusable

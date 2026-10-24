@@ -23,6 +23,7 @@ import {
   rankAccounts,
   restoreBook,
   sampleAccount,
+  untilLabel,
   waveAccount,
   waveAccountMoves,
 } from "../../src/claude/usage";
@@ -226,7 +227,15 @@ describe("rankAccounts", () => {
     expect(ranked[1]?.eligible).toBe(false);
   });
 
-  it("every candidate over the cap still ranks, least over first, none dropped", () => {
+  it("over-cap accounts go by pace too, not by how far over they are", () => {
+    // b is further over, but its window resets in 10 minutes; a's must last 4.5 hours
+    const accounts = recs({ a: { five: win(97.5, 4.5) }, b: { five: win(99, 10 / 60) } });
+    const ranked = rankAccounts(accounts, ["a", "b"], o);
+    expect(order(ranked)).toEqual(["b", "a"]);
+    expect(ranked.every((x) => !x.eligible)).toBe(true);
+  });
+
+  it("every candidate over the cap still ranks by pace, none dropped", () => {
     const accounts = recs({
       a: { five: win(98, 1) },
       b: { five: win(99, 1) },
@@ -357,6 +366,19 @@ describe("rankAccounts", () => {
       "work",
     ]);
     expect(order(rankAccounts(accounts, ["primary", "fresh"], o))).toEqual(["fresh", "primary"]);
+  });
+});
+
+describe("untilLabel", () => {
+  it("prints the two largest units, dropping a zero second one", () => {
+    const at = (min: number) => new Date(NOW + min * 60_000).toISOString();
+    expect(untilLabel(at(52), NOW)).toBe("52m");
+    expect(untilLabel(at(250), NOW)).toBe("4h 10m");
+    expect(untilLabel(at(240), NOW)).toBe("4h");
+    expect(untilLabel(at(52 * 60), NOW)).toBe("2d 4h");
+    expect(untilLabel(at(3 * 1440), NOW)).toBe("3d");
+    expect(untilLabel(at(-1), NOW)).toBe("now");
+    expect(untilLabel(null, NOW)).toBe("unknown");
   });
 });
 
@@ -579,6 +601,24 @@ describe("limitDecisions under balancing", () => {
         existing: [{ wave: "w1", acct: "work", resets_at: RESETS, open: false }],
       }),
     ).toEqual([]);
+  });
+
+  it("names the account the spawns' own claude.balance puts first, not the defaults'", () => {
+    // primary's weekly window is at 97.5%: over the default cap, under a 99% one
+    let b = fold(emptyBook(), "a1", "w1", sample("work", 96, at));
+    b = fold(b, "a2", "w1", sample("primary", 91, at, 97.5));
+    const base = {
+      accounts: accountRecords(b),
+      warnAtPct: 90,
+      candidates: ["primary", "work"],
+      existing: [],
+      now: NOW,
+      balanced: () => true,
+    };
+    expect(limitDecisions(base)[0]?.extra.acct).toBe("work");
+    const out = limitDecisions({ ...base, balance: { cap_pct: 99, tie_band_pct: 10 } });
+    expect(out[0]?.extra.acct).toBe("primary");
+    expect(out[0]?.input.question).toContain("the one the balance puts first (primary, 91%)");
   });
 
   it("keeps today's move-wave decision for a pinned (unbalanced) wave", () => {

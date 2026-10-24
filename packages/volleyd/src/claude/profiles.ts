@@ -406,16 +406,23 @@ function balanceLine(
         : "5h";
   const left = (r: Ranked) =>
     `${r.binding === "five_hour" ? "" : `${label(r.binding)} `}${pct(r.binding_left ?? 0)} left, resets in ${untilLabel(r.binding_resets_at, o.now)}`;
-  const overCap = (r: Ranked) => {
+  // the first window at or over the cap, with its reset when it is the binding one (the only
+  // reset a ranked row carries)
+  const overWindow = (r: Ranked, withReset: boolean) => {
     const windows: [Ranked["binding"], number | null | undefined][] = [
       ["five_hour", r.five_hour_pct],
       ["weekly", r.weekly_pct],
       ["model_weekly", r.model_weekly_pct],
     ];
     const [kind, p] = windows.find(([, p]) => p != null && p >= o.cap) ?? [r.binding, null];
-    const figure = p != null ? ` (${label(kind)} ${pct(p)})` : "";
-    return `over the ${o.cap}% cap${figure}`;
+    if (p == null) return "";
+    const reset =
+      withReset && kind === r.binding
+        ? `, resets in ${untilLabel(r.binding_resets_at, o.now)}`
+        : "";
+    return ` (${label(kind)} ${pct(p)}${reset})`;
   };
+  const overCap = (r: Ranked) => `over the ${o.cap}% cap${overWindow(r, false)}`;
   const other = (r: Ranked) =>
     r.binding === null
       ? `${r.account} no usage yet`
@@ -428,6 +435,6 @@ function balanceLine(
       ? `${id}: no usage yet (balanced) on ${machine}`
       : best.eligible
         ? `${id}: ${left(best)} (use it or lose it) on ${machine}`
-        : `${id}: over the ${o.cap}% cap, least over on ${machine} (${label(best.binding)} ${pct(100 - (best.binding_left ?? 0))}, resets in ${untilLabel(best.binding_resets_at, o.now)})`;
+        : `${id}: over the ${o.cap}% cap, least over on ${machine}${overWindow(best, true)}`;
   return [head, ...rest.map(other)].join("; ");
 }

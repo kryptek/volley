@@ -10756,6 +10756,7 @@ export class Daemon {
       balanced: (w) => this.balanced(w),
       existing,
       now: this.now(),
+      balance: this.config.effective().claude.balance,
     })) {
       const status = this.waves.get(lim.wave)?.record.state?.status;
       if (status === undefined || status === "complete" || status === "stopped") continue;
@@ -10822,6 +10823,7 @@ export class Daemon {
       warnAtPct: (w) => this.config.effective(w).claude.warn_at_pct,
       existing,
       now: this.now(),
+      balance: this.config.effective().claude.balance,
     })) {
       await this.openDecisionNow(lim.wave, lim.input, lim.extra).catch((e: unknown) =>
         this.log(

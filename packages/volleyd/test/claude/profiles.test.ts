@@ -281,7 +281,7 @@ describe("selectAccount: task > wave > config default > primary", () => {
     });
     const one = selectAccount(r, reg, { now: T, capPct: 97 }, () => [pick, over]);
     expect(one.why).toBe(
-      "work: 7d 60% left, resets in 3d 0h (use it or lose it) on local; spare over the 97% cap (5h 98%)",
+      "work: 7d 60% left, resets in 3d (use it or lose it) on local; spare over the 97% cap (5h 98%)",
     );
     const primary = row("primary", {
       headroom: 1,
@@ -298,6 +298,20 @@ describe("selectAccount: task > wave > config default > primary", () => {
     ]);
     expect(all.why).toBe(
       "work: over the 97% cap, least over on local (5h 98%, resets in 1h 2m); primary over the 97% cap (5h 99%)",
+    );
+    // the head names the window over the cap, not the binding one when they differ
+    const weeklyBinds = row("work", {
+      headroom: 2,
+      five_hour_pct: 98,
+      weekly_pct: 50,
+      score: 0.58,
+      binding: "weekly",
+      eligible: false,
+      binding_left: 50,
+      binding_resets_at: at(6 * 1440),
+    });
+    expect(selectAccount(r, reg, { now: T, capPct: 97 }, () => [weeklyBinds, primary]).why).toBe(
+      "work: over the 97% cap, least over on local (5h 98%); primary over the 97% cap (5h 99%)",
     );
     // the cap figure is the option's
     expect(selectAccount(r, reg, { now: T, capPct: 90 }, () => [pick, over]).why).toContain(
