@@ -358,7 +358,9 @@ function chromeBackground(chrome: string): string {
 /** The colour stops of a chrome's depth gradient (`--win-body`, D10). */
 function bodyStops(chrome: string): string[] {
   const m = chromeRule(chrome).match(/--win-body:\s*([^;]+);/);
-  return m ? [...(m[1] as string).matchAll(/rgba?\([^)]+\)|#[0-9a-f]{6}/gi)].map((x) => x[0]) : [];
+  // The stops are tokens (desk.css :root, the Volley theme): resolve them first.
+  const body = (m?.[1] ?? "").replace(/var\(--([a-z0-9-]+)\)/g, (_, n: string) => token(n));
+  return [...body.matchAll(/rgba?\([^)]+\)|#[0-9a-f]{6}/gi)].map((x) => x[0]);
 }
 
 describe("contrast (WCAG AA, 4.5:1 for text)", () => {

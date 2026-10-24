@@ -13,7 +13,7 @@
   gap: 6px;
   padding: 12px;
   border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--hl);
   background: rgba(255, 255, 255, 0.045);
   text-align: left;
   min-width: 0;
@@ -30,7 +30,7 @@
 }
 .machine--add:hover {
   color: var(--ink);
-  border-color: rgba(110, 231, 249, 0.5);
+  border-color: color-mix(in srgb, var(--t-acc) 50%, transparent);
 }
 .m-head {
   display: flex;
@@ -55,7 +55,7 @@ button.m-local {
 button.m-local:hover,
 button.m-local:focus-visible {
   color: var(--ink);
-  border-color: rgba(110, 231, 249, 0.5);
+  border-color: color-mix(in srgb, var(--t-acc) 50%, transparent);
 }
 .m-local--active {
   color: #ffd27a;
@@ -81,7 +81,7 @@ button.m-local:focus-visible {
   gap: 8px;
   margin-top: 4px;
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--hl);
 }
 .m-confirm .s-hint {
   margin: 0;
@@ -108,7 +108,7 @@ button.m-local:focus-visible {
   margin: 12px 0 0;
 }
 .pair--machine {
-  border-color: rgba(110, 231, 249, 0.35);
+  border-color: color-mix(in srgb, var(--t-acc) 35%, transparent);
 }
 .pair--machine .ny-actions {
   display: flex;

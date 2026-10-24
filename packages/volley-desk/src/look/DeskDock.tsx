@@ -124,8 +124,8 @@ export function DeskDock(p: DeskDockProps) {
         magnification={62}
         baseItemSize={44}
         panelHeight={60}
-        accentColor="#6ee7f9"
-        badgeColor="#ff7a59"
+        accentColor="var(--t-acc)"
+        badgeColor="var(--hot)"
         showLabels
       />
       {p.account?.open && (

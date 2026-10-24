@@ -68,7 +68,7 @@
 /* Desk additions: refused / superseded messages and the read-only fallback. */
 .ack-err {
   font-size: 12px;
-  color: #ffb4a1;
+  color: var(--hot-ink);
 }
 .ack-note {
   font-size: 12px;

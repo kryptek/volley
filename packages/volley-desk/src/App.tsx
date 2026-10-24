@@ -81,6 +81,7 @@ import { plural } from "./lib/plural";
 import { Background, degradeLook, useWebGL } from "./look/Background";
 import { DeskDock } from "./look/DeskDock";
 import { type Tether, type TetherStub, Tethers } from "./look/Tethers";
+import { applyLookToDocument } from "./look/applyLook";
 import { progressBeat } from "./look/tetherPulses";
 import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
@@ -423,6 +424,8 @@ export default function App() {
   // What this browser can render; the saved look keeps the owner's picks for one that has WebGL.
   const look = degradeLook(saved, webgl, lite);
   useFlipSound(saved.tethers, "tethers_on", "tethers_off", emitSound);
+  // main.tsx applied the stored theme before the first paint; a change applies live.
+  useEffect(() => applyLookToDocument({ theme: look.theme }), [look.theme]);
   /** The Settings window's section while it is open; setup once after an admin token sign-in. */
   const [deskSettings, setDeskSettings] = useState<SectionKey | null>(() =>
     takeFirstRun() ? "setup" : null,

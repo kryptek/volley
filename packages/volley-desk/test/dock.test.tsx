@@ -7,6 +7,7 @@ import { SignInGate } from "../src/auth/SignInGate";
 import { LOOK_STORAGE_KEY } from "../src/look/useLook";
 import { CREDENTIALS_STORAGE_KEY, DeskStoreProvider } from "../src/store/context";
 import { connectingFactory } from "./helpers/desk-msgs";
+import { resolveTokens } from "./helpers/tokens";
 
 beforeEach(() => {
   localStorage.clear();
@@ -49,7 +50,7 @@ describe("the dock", () => {
     expect(at).toBeGreaterThanOrEqual(0);
     const rule = css.slice(at, css.indexOf("}", at));
     expect(rule).toMatch(/background: linear-gradient\( ?160deg/);
-    expect(rule).toMatch(/inset 0 1px 0 rgba\(255, 255, 255, 0\.18\)/);
+    expect(resolveTokens(rule)).toMatch(/inset 0 1px 0 rgba\(255, 255, 255, 0\.18\)/);
     expect(rule).toMatch(/var\(--win-shadow\)/);
   });
 
