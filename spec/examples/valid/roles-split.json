@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "parent_id": null,
+  "wall_time": "2026-10-24T09:00:00.000Z",
+  "channel": "_system/roles",
+  "type": "roles",
+  "correlation_id": null,
+  "payload": {
+    "broker": {
+      "machine": "box-a",
+      "address": { "ssh": "owner@box-a.lan", "mqtt_port": 1883, "ws_port": 9001 },
+      "lan": true
+    },
+    "supervisor": { "machine": "box-a" },
+    "desk": { "machine": "mac", "url": "http://192.0.2.20:5199" },
+    "version": 3,
+    "updated_at": "2026-10-24T10:12:44.000Z",
+    "updated_by": "admin"
+  }
+}

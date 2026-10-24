@@ -1,0 +1,5 @@
+#!/bin/sh
+case "${1:-}" in
+  -u) printf '%s\n' "${STUB_UID:-1000}" ;;
+  *) printf 'uid=%s\n' "${STUB_UID:-1000}" ;;
+esac

@@ -1,0 +1,3 @@
+#!/bin/sh
+printf '%s\n' "bash" >>"$STUB_LOG"
+exec /bin/sh "$@"

@@ -1,0 +1,10 @@
+#!/bin/sh
+printf '%s\n' "bun $*" >>"$STUB_LOG"
+if [ "${1:-}" = install ]; then mkdir -p node_modules; exit 0; fi
+case "$*" in
+  *" setup --help")
+    printf 'Usage: volley setup [options]\n  --yes\n'
+    [ -n "${STUB_SETUP_UNINSTALL:-}" ] && printf '  --uninstall  Remove the services\n'
+    ;;
+esac
+exit 0

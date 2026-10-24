@@ -129,7 +129,13 @@
             "cluster_strategy_changed",
             "train_started",
             "train_merged",
-            "train_failed"
+            "train_failed",
+            "roles_changed",
+            "role_move_started",
+            "role_move_step",
+            "role_move_completed",
+            "role_move_failed",
+            "role_rolled_back"
           ]
         },
         "payload": {
@@ -1407,6 +1413,152 @@
                         "minItems": 1,
                         "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$" }
                       }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "roles_changed" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["by", "roles"],
+                    "description": "In _system: the roles record (volley/_system/roles) differs from the last one journaled; roles is the new record's payload.",
+                    "properties": {
+                      "by": { "type": "string", "minLength": 1 },
+                      "roles": { "$ref": "roles.schema.json#/allOf/1/properties/payload" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "role_move_started" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["by", "move_id", "role", "from", "to"],
+                    "description": "In _system: a role move began.",
+                    "properties": {
+                      "by": { "type": "string", "minLength": 1 },
+                      "move_id": { "$ref": "role-move.schema.json#/$defs/move_id" },
+                      "role": { "enum": ["broker", "supervisor", "desk"] },
+                      "from": { "$ref": "roles.schema.json#/$defs/machine" },
+                      "to": { "$ref": "roles.schema.json#/$defs/machine" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "role_move_step" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["move_id", "step", "status"],
+                    "description": "In _system: one step of a role move changed status.",
+                    "properties": {
+                      "move_id": { "$ref": "role-move.schema.json#/$defs/move_id" },
+                      "step": { "type": "string", "minLength": 1 },
+                      "status": { "enum": ["running", "ok", "failed", "skipped"] },
+                      "line": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "role_move_completed" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["by", "move_id", "role", "from", "to"],
+                    "description": "In _system: a role move passed its health check; the record names the new machine.",
+                    "properties": {
+                      "by": { "type": "string", "minLength": 1 },
+                      "move_id": { "$ref": "role-move.schema.json#/$defs/move_id" },
+                      "role": { "enum": ["broker", "supervisor", "desk"] },
+                      "from": { "$ref": "roles.schema.json#/$defs/machine" },
+                      "to": { "$ref": "roles.schema.json#/$defs/machine" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "role_move_failed" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["by", "move_id", "role", "error", "rolled_back"],
+                    "description": "In _system: a role move failed; rolled_back says whether its automatic rollback restored the old machine.",
+                    "properties": {
+                      "by": { "type": "string", "minLength": 1 },
+                      "move_id": { "$ref": "role-move.schema.json#/$defs/move_id" },
+                      "role": { "enum": ["broker", "supervisor", "desk"] },
+                      "step": { "type": "string" },
+                      "error": { "type": "string", "minLength": 1 },
+                      "rolled_back": { "type": "boolean" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "role_rolled_back" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "payload": {
+                "required": ["data"],
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "required": ["by", "move_id", "role", "to"],
+                    "description": "In _system: a completed move was undone by hand (role_rollback); to is the machine the role is back on.",
+                    "properties": {
+                      "by": { "type": "string", "minLength": 1 },
+                      "move_id": { "$ref": "role-move.schema.json#/$defs/move_id" },
+                      "role": { "enum": ["broker", "supervisor", "desk"] },
+                      "to": { "$ref": "roles.schema.json#/$defs/machine" }
                     }
                   }
                 }
