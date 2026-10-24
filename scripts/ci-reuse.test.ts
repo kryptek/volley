@@ -235,10 +235,11 @@ describe("ci.yml's run: steps", () => {
 
   test("no run: step loses its tail to a YAML comment", async () => {
     // A plain scalar ends at ` #`: the rest of the line is a comment, not part of the command.
-    const plain = [...(await read()).matchAll(/^\s*(?:- )?run:\s*(?!["'|>])(.*\S)\s*$/gm)].map(
+    // Only plain scalars: the lookahead sits after all the blanks, so a quoted or block value is skipped.
+    const plain = [...(await read()).matchAll(/^[ \t]*(?:- )?run:[ \t]+(?![\s"'|>])(.*\S)[ \t]*$/gm)].map(
       (m) => m[1],
     );
     expect(plain.length).toBeGreaterThan(0);
-    expect(plain.filter((value) => value?.includes(" #"))).toEqual([]);
+    expect(plain.filter((value) => /[ \t]#/.test(value ?? ""))).toEqual([]);
   });
 });
