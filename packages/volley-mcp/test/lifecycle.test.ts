@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import mqtt from "mqtt";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "../src/broker";
@@ -138,7 +140,9 @@ describe("presence (SPEC §7.5)", () => {
     });
     observer.on("message", (t, p) => {
       const env = JSON.parse(p.toString());
-      seen.push(`${t.split("/").slice(3).join("/")}:${env.type ?? ""}`);
+      seen.push(
+        t.startsWith("volley/test/") ? `${t.split("/").slice(3).join("/")}:${env.type ?? ""}` : t,
+      );
       if (t === "volley/test/idle-aaaa/status" && env.type === "registered") registered();
     });
     await observer.subscribeAsync(
@@ -153,11 +157,34 @@ describe("presence (SPEC §7.5)", () => {
       "status:spawning",
       "status:registered",
     ]);
-    expect(seen.filter((s) => !s.startsWith("status:"))).toHaveLength(1);
+    expect(seen.filter((s) => !s.startsWith("status:"))).toEqual([
+      "volley/_system/registry/idle-aaaa",
+    ]);
     expect(seen).toHaveLength(3);
 
     await shutdownLifecycle(state);
     await observer.endAsync();
+  });
+
+  it("lifecycle.ts arms no timer (the will is the only liveness signal)", () => {
+    const src = readFileSync(
+      fileURLToPath(new URL("../src/lifecycle.ts", import.meta.url)),
+      "utf8",
+    );
+    expect(src).not.toMatch(/\bset(Interval|Timeout)\(/);
+  });
+
+  it("a blocked left by a clean shutdown carries reason shutdown, so it reads offline", async () => {
+    const state = await startLifecycle(cfg(tb, "idle-bbbb"));
+    await shutdownLifecycle(state, "blocked");
+    const reader = new VolleyBroker();
+    await reader.connect({ url: tb.url, agentId: "idle-bbbb-reader" });
+    const retained = JSON.parse(
+      (await reader.queryRetained("volley/test/idle-bbbb/status", 1000)) ?? "{}",
+    );
+    expect(retained.type).toBe("blocked");
+    expect(retained.payload.reason).toBe("shutdown");
+    await reader.disconnect();
   });
 });
 

@@ -112,7 +112,7 @@ After step 4 the agent is fully visible in `vol_list_agents` everywhere. No manu
 
 On clean shutdown (SIGINT/SIGTERM): publishes a terminal `done` status, then `DISCONNECT`s — which suppresses the LWT.
 
-**Presence** (SPEC §7.5) is the retained status topic and nothing else. The agent is online from `spawning` / `registered` (published on connect) until its status is `reaped` (the broker fires the will when the connection drops), `done` or `failed`. Nothing periodic is sent: an idle connected server publishes nothing after `registered`, and the MQTT keepalive that detects a dead connection is the client library's (60 s, SPEC §7.3). `VOLLEY_HEARTBEAT_S`, which once set a `progress` heartbeat interval, is retired: it is ignored, with one line on stderr (#483).
+**Presence** (SPEC §7.5) is the retained status topic and nothing else. The agent is online from `spawning` / `registered` (published on connect) until its status is `reaped` (the broker fires the will when the connection drops), `done`, `failed`, or a `blocked` with `reason: "shutdown"` (what `shutdownLifecycle(state, "blocked")` leaves: the clean DISCONNECT suppressed the will, so the reason marks it offline). A `blocked` with any other reason is a live agent awaiting guidance. Nothing periodic is sent: an idle connected server publishes nothing after `registered`, and the MQTT keepalive that detects a dead connection is the client library's (60 s, SPEC §7.3). `VOLLEY_HEARTBEAT_S`, which once set a `progress` heartbeat interval, is retired: it is ignored, with one line on stderr (#483).
 
 ---
 
