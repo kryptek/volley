@@ -1,0 +1,7 @@
+#!/bin/sh
+printf '%s\n' "brew $*" >>"$STUB_LOG"
+if [ "${1:-}" = install ]; then
+  shift
+  for f in "$@"; do "$STUB_FIXTURES/provide" "${f##*/}" "$STUB_BIN"; done
+fi
+exit 0

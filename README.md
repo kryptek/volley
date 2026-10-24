@@ -135,6 +135,8 @@ That's it. Everything else in the spec is a refinement.
 
 ## Quickstart (5 minutes, fresh Mac)
 
+> **One command (macOS, Ubuntu/Debian):** `curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh` installs the prerequisites and Volley at the latest release tag, then runs `volley setup` (`… | sh -s -- --help` for the options). The steps below are the same by hand.
+
 > All commands assume macOS with [Homebrew](https://brew.sh). Linux works too — substitute your package manager. Windows: WSL recommended.
 
 ### 1. Install Homebrew (skip if you already have it)

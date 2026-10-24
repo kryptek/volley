@@ -1,0 +1,25 @@
+#!/bin/sh
+printf '%s\n' "curl $*" >>"$STUB_LOG"
+out='' url=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift ;;
+    -*) ;;
+    *) url=$1 ;;
+  esac
+  shift
+done
+installer() { printf '#!/bin/sh\nprintf "%%s\\n" "installer %s" >>"$STUB_LOG"\n"$STUB_FIXTURES/provide" %s "%s"\n' "$1" "$1" "$2"; }
+body() {
+  case "$url" in *"${STUB_CURL_FAIL:-//none//}"*) printf 'curl: (22) The requested URL returned error: 404\n' >&2; exit 22 ;; esac
+  case "$url" in
+    https://api.github.com/repos/kryptek/volley/tags*)
+      printf '[\n  {"name": "v0.9.0", "commit": {}},\n  {"name": "v0.10.0", "commit": {}},\n  {"name": "v0.2.1", "commit": {}}\n]\n' ;;
+    https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh) installer brew "$STUB_BIN" ;;
+    https://bun.sh/install) installer bun "$HOME/.bun/bin" ;;
+    https://claude.ai/install.sh) installer claude "$HOME/.local/bin" ;;
+    https://cli.github.com/packages/githubcli-archive-keyring.gpg) printf 'keyring\n' ;;
+    *) printf 'curl stub: no response for %s\n' "$url" >&2; exit 22 ;;
+  esac
+}
+if [ -n "$out" ]; then body >"$out"; else body; fi
