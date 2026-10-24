@@ -429,9 +429,19 @@ export async function probeLogin(deps: ProbeDeps, login: Login, now: Date): Prom
   return loginOf(memo);
 }
 
-/** Every login this machine holds, probed at once: 16 slow logins cost one timeout, not 16. */
-export async function probeLogins(deps: ProbeDeps, now: Date): Promise<ClaudeLogin[]> {
-  return Promise.all(findLogins(deps.home, deps.env).map((login) => probeLogin(deps, login, now)));
+/**
+ * Every login this machine holds, probed at once: 16 slow logins cost one timeout, not 16. `only`:
+ * that one login (`default` or a profile id), none when this machine does not hold it.
+ */
+export async function probeLogins(
+  deps: ProbeDeps,
+  now: Date,
+  o: { only?: string } = {},
+): Promise<ClaudeLogin[]> {
+  const logins = findLogins(deps.home, deps.env).filter(
+    (l) => o.only === undefined || l.profile === o.only,
+  );
+  return Promise.all(logins.map((login) => probeLogin(deps, login, now)));
 }
 
 /** The real request: fetch with a timeout and no redirects. */

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn } from "../exec";
 import { sealSigninScript } from "../fence";
-import { readLoginIdentity } from "./identity";
+import { type LoginIdentity, loginIdentity, readLoginIdentity } from "./identity";
 import { markSignedIn, profileDir } from "./profiles";
 import {
   BROWSER_HELPER,
@@ -27,7 +27,8 @@ import {
  *             `manual_code` — no `$BROWSER` call, so the URL it printed: the page then shows a
  *               code to paste into that terminal (`attach`), never into anything of Volley's.
  *   done    → `claude auth status` (polled) reports `loggedIn` → `claude_signin_done`, the
- *             registry entry gets `signed_in_at` and the plan label; the session is killed.
+ *             registry entry gets `signed_in_at`, the plan label and the login's identity (the
+ *             status's, else `.claude.json`'s); the session is killed.
  *   failed  → the login exited first, the timeout passed, or tmux is missing.
  *
  * volleyd sees an authorize URL and the plan label, never a code, a token or a Keychain item.
@@ -95,8 +96,13 @@ export function signinFlow(url: string): SigninFlow {
     : "manual_code";
 }
 
-/** `claude auth status` JSON: whether the profile is logged in, and its plan label. */
-export function parseAuthStatus(stdout: string): { loggedIn: boolean; plan?: string } | null {
+/**
+ * `claude auth status` JSON: whether the profile is logged in, its plan label, and the login's
+ * e-mail and org when it says them (`email`, `orgName`; checked as `.claude.json`'s are).
+ */
+export function parseAuthStatus(
+  stdout: string,
+): ({ loggedIn: boolean; plan?: string } & LoginIdentity) | null {
   let raw: unknown;
   try {
     raw = JSON.parse(stdout);
@@ -104,12 +110,33 @@ export function parseAuthStatus(stdout: string): { loggedIn: boolean; plan?: str
     return null;
   }
   if (typeof raw !== "object" || raw === null) return null;
-  const s = raw as { loggedIn?: unknown; subscriptionType?: unknown };
+  const s = raw as {
+    loggedIn?: unknown;
+    subscriptionType?: unknown;
+    email?: unknown;
+    orgName?: unknown;
+  };
+  const loggedIn = s.loggedIn === true;
   return {
-    loggedIn: s.loggedIn === true,
+    loggedIn,
     ...(typeof s.subscriptionType === "string" ? { plan: s.subscriptionType } : {}),
+    ...(loggedIn
+      ? loginIdentity({ oauthAccount: { emailAddress: s.email, organizationName: s.orgName } })
+      : {}),
   };
 }
+
+/**
+ * A signed-in login's identity: what `claude auth status` said, else (no e-mail there) what the
+ * profile's `.claude.json` records.
+ */
+export const statusIdentity = (
+  status: LoginIdentity,
+  file: () => LoginIdentity | Promise<LoginIdentity>,
+): LoginIdentity | Promise<LoginIdentity> =>
+  status.email !== undefined
+    ? { email: status.email, ...(status.org !== undefined ? { org: status.org } : {}) }
+    : file();
 
 /** The profile's env for a `claude` child: the caller's, minus every credential variable. */
 export function profileEnv(
@@ -214,7 +241,7 @@ export async function runSignin(d: SigninDeps): Promise<SigninEvent> {
     if (s?.loggedIn === true) {
       const facts = {
         ...(s.plan !== undefined ? { plan: s.plan } : {}),
-        ...readLoginIdentity(join(configDir, ".claude.json")),
+        ...(await statusIdentity(s, () => readLoginIdentity(join(configDir, ".claude.json")))),
       };
       markSignedIn(d.root, d.acct, facts, new Date(d.now()).toISOString());
       return finish({ type: "claude_signin_done", acct: d.acct, ...facts });

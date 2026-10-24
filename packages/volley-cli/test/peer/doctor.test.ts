@@ -790,6 +790,56 @@ describe("volley peer doctor: Claude usage", () => {
     ).toEqual([]);
   });
 
+  it("--probe-login <profile> runs only that login's probe and reports it in claude_logins", async () => {
+    const m = machine({ trusted: true });
+    storeLogins(m.home, { default: NOW + 3_600_000, work: NOW + 3_600_000 });
+    const api = usageEndpoint();
+    const before = m.calls.length;
+    const io = makeBufferIO();
+    const exit = await doctor(io, m.deps({ fetch: api.fetch, env: { USER: "dev" } }), {
+      json: true,
+      probeLogin: "work",
+    });
+    expect(exit).toBe(0);
+    const out = JSON.parse(io.readStdout()) as Record<string, unknown>;
+    expect(Object.keys(out).sort()).toEqual(["claude_logins", "doctor_at"]);
+    expect(out.claude_logins).toEqual([expect.objectContaining({ profile: "work", state: "ok" })]);
+    // one request, for that login; none of the checks ran (no git, gh, bun)
+    expect(api.requests).toHaveLength(1);
+    expect(api.requests[0]?.["User-Agent"]).toBe("claude-code/2.0.14");
+    const ran = m.calls.slice(before).map((c) => basename(c.argv[0] ?? ""));
+    expect(ran.filter((p) => ["git", "gh", "bun"].includes(p))).toEqual([]);
+  });
+
+  it("--probe-login of a login this machine does not hold: refused, nothing probed, an empty report", async () => {
+    const m = machine({ trusted: true });
+    storeLogins(m.home, { default: NOW + 3_600_000 });
+    const api = usageEndpoint();
+    const io = makeBufferIO();
+    const exit = await doctor(io, m.deps({ fetch: api.fetch, env: { USER: "dev" } }), {
+      json: true,
+      probeLogin: "nope",
+    });
+    expect(exit).toBe(1);
+    expect(io.readStderr()).toMatch(/no Claude login 'nope' on this machine/);
+    expect(api.requests).toHaveLength(0);
+    // volleyd reads no report as a volley too old for the flag, and would run the whole doctor
+    expect(JSON.parse(io.readStdout())).toEqual({
+      claude_logins: [],
+      doctor_at: new Date(NOW).toISOString(),
+    });
+  });
+
+  it("--probe-login with no usage probe to call says so, not that the login is missing", async () => {
+    const m = machine({ trusted: true });
+    storeLogins(m.home, { default: NOW + 3_600_000 });
+    const io = makeBufferIO();
+    const exit = await doctor(io, m.deps({ env: { USER: "dev" } }), { probeLogin: "default" });
+    expect(exit).toBe(1);
+    expect(io.readStderr()).toMatch(/the usage probe is not available here/);
+    expect(io.readStderr()).not.toMatch(/no Claude login/);
+  });
+
   it("the human output has one usage line per login: ok with its age, expired with why", async () => {
     const m = machine({ trusted: true });
     storeLogins(m.home, { default: NOW + 3_600_000, work: NOW - 1 });

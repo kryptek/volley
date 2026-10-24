@@ -79,6 +79,7 @@ export type ControlOp =
   | "claude_account_rename"
   | "claude_account_remove"
   | "claude_signin"
+  | "claude_prime"
   | "claude_sync"
   | "claude_balance"
   | "agent_move_account"

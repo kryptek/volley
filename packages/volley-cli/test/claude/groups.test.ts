@@ -305,11 +305,11 @@ describe("renderGroups", () => {
     const groups = groupAccounts(r, []);
     expect(groups.map((g) => g.key)).toEqual(["p@example.com", "nomail"]);
     const text = renderGroups(groups, { now: NOW, showEmail: false, pending });
-    expect(text).toContain(
-      "Personal · pro · p•••@example.com\n  5-hour — · 7-day — · Fable — (not read yet)\n",
-    );
+    // a login with no reading or no e-mail yet: `reading…` (volleyd primes it), never a command
+    expect(text).toContain("Personal · pro · p•••@example.com\n  reading…\n");
     expect(text).toMatch(/this machine +personal +signed out/);
-    expect(text).toContain("No mail (e-mail not reported yet)");
+    expect(text).toContain("No mail (reading…)");
+    expect(text).not.toMatch(/doctor|volley peer|run `/i);
     expect(text).not.toContain("last updated:");
     expect(
       text.endsWith(

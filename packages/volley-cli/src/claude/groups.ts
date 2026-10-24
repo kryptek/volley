@@ -393,6 +393,9 @@ const PROBE_HINT: Record<Exclude<ProbeState, "ok">, (machine: string) => string>
   error: () => "probe failed",
 };
 
+/** What a login with no e-mail or reading yet shows: volleyd is reading it. */
+const READING = "reading…";
+
 /** `Fable 12% (resets in 4d 2h, read 4 min ago)`, or why there is no figure. */
 function fableText(g: AccountGroup, now: number): string {
   const p = g.probe;
@@ -407,6 +410,8 @@ function fableText(g: AccountGroup, now: number): string {
 
 /** The group's three windows on one line: `5-hour 37% (resets in 2h 14m) · 7-day … · Fable …`. */
 function usageLine(g: AccountGroup, now: number): string {
+  // Nothing read yet: volleyd primes a login it signed in, so the reading is on its way.
+  if (g.fiveHour === null && g.weekly === null && g.probe === null) return READING;
   return [
     windowText(WINDOW_NAME.five_hour, g.fiveHour, now),
     windowText(WINDOW_NAME.weekly, g.weekly, now),
@@ -457,7 +462,7 @@ export function renderGroups(
       g.email !== null && g.label === maskEmail(g.email)
         ? [address, g.plan, g.org]
         : [g.label, g.plan, g.org, address];
-    const note = g.email === null ? " (e-mail not reported yet)" : "";
+    const note = g.email === null ? ` (${READING})` : "";
     out += `${head.filter((x) => x !== null).join(" · ")}${note}\n`;
     out += `  ${usageLine(g, now)}\n`;
     const from = freshest(g);

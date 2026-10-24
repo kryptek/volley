@@ -5,7 +5,8 @@
  * `steering_acked` (a coordinator: `resumed`). A daemon control request gets
  * an `ok` ack (an urgent interrupt answers `interrupted: true`;
  * `claude_accounts` and `claude_balance` answer from the demo's Claude
- * registry, so Settings › Claude accounts has profiles to show;
+ * registry, so Settings › Claude accounts has profiles to show, and a card's
+ * `claude_prime` is answered `ok`;
  * `claude_account_rename` and `claude_account_remove` change that registry,
  * clear a removed profile's usage record and raise the demo's registry-changed
  * signal, so the demo shows the new name and the card leaving; `wave_account_set`
@@ -29,13 +30,14 @@ const DEMO_OPS: ReadonlySet<string> = new Set([
   "claude_balance",
   "claude_account_rename",
   "claude_account_remove",
+  "claude_prime",
   "wave_account_set",
 ]);
 
 /**
  * The demo's control: `claude_accounts`, `claude_balance`, `claude_account_rename`,
- * `claude_account_remove` and `wave_account_set` reach the demo client; any other op is
- * refused here, so nothing else in the demo pretends to act.
+ * `claude_account_remove`, `claude_prime` and `wave_account_set` reach the demo client; any
+ * other op is refused here, so nothing else in the demo pretends to act.
  */
 export function demoReadControl(control: SteerTransport["control"]): SteerTransport["control"] {
   return (op, fields, text, timeoutMs) =>

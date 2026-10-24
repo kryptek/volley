@@ -955,6 +955,23 @@ describe("Fleet steps (F2): the PATH probe and the doctor on a paired machine", 
     }
   });
 
+  it("a prime's probe on the box: `peer doctor --json --probe-login <profile>`, nothing more", () => {
+    for (const profile of ["default", "team", "work_2"])
+      expect(
+        allowed({ argv: [...DOCTOR, "--json", "--probe-login", profile], cwd: VOLLEY_DIR }),
+      ).not.toThrow();
+    for (const argv of [
+      [...DOCTOR, "--json", "--probe-login"],
+      [...DOCTOR, "--json", "--probe-login", "../x"],
+      [...DOCTOR, "--json", "--probe-login", "Team"],
+      [...DOCTOR, "--json", "--probe-login", "team", "--fix", "--yes"],
+      [...DOCTOR, "--json", "--fix", "--yes", "--probe-login", "team"],
+      [...DOCTOR, "--probe-login", "team", "--json"],
+    ]) {
+      expect(allowed({ argv, cwd: VOLLEY_DIR }), argv.join(" ")).toThrow(FenceError);
+    }
+  });
+
   it("--supervisor-volley-dir takes one absolute path, right after --json", () => {
     for (const argv of [
       [...DOCTOR, "--json", "--supervisor-volley-dir"],
@@ -1093,6 +1110,15 @@ describe("Fleet steps (F2): the PATH probe and the doctor on a paired machine", 
     expect(() => assertAllowed([...DOCTOR, "--repo", "/srv/repo", "--json"])).toThrow(FenceError);
     expect(() => assertAllowed([...DOCTOR, "--json", "--repo"])).toThrow(FenceError);
     expect(() => assertAllowed(["volley", "peer", "remove", "box-a"])).toThrow(FenceError);
+    // a prime's probe: one login's reading
+    expect(() => assertAllowed([...DOCTOR, "--json", "--probe-login", "team"])).not.toThrow();
+    for (const bad of ["", "-x", "Team", "a/b"])
+      expect(() => assertAllowed([...DOCTOR, "--json", "--probe-login", bad]), bad).toThrow(
+        FenceError,
+      );
+    expect(() =>
+      assertAllowed([...DOCTOR, "--json", "--probe-login", "team", "--repo", "/srv/repo"]),
+    ).toThrow(FenceError);
   });
 });
 
