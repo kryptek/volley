@@ -54,7 +54,9 @@
   content: none;
 }
 
-/* glossy bars: the agent footer bar and the rail's segments, with a slow glint on the bar */
+/* glossy bars: the agent footer bar and the rail's segments, with a slow glint on the bar.
+   The rail's segments get fx-done / fx-cur from the wave window in T2; until then these
+   .rail-seg rules match nothing. */
 .bar > span,
 .rail-seg > span.fx-cur {
   background: linear-gradient(180deg, var(--t-acc-hi), var(--t-acc));
@@ -306,11 +308,11 @@
   background: var(--ok);
 }
 
-/* ---------- still frames ---------- */
 /* ---------- touch screens: the box-shadow effects, measured over budget on a phone ---------- */
-/* scripts/browser-check/step-fx.mjs put Pulse and Ember over the phone's idle budget (p95 33 ms,
-   4x CPU): Pulse's halo becomes an inner ring that fades (opacity only), Ember's underglow is
-   static. Desktop keeps the full effect. */
+/* scripts/browser-check/step-fx.mjs put Pulse and Ember over the phone's idle budget (p95 < 20 ms
+   at 4x CPU): Pulse's halo becomes an inner ring that fades (opacity only), Ember's underglow is
+   static (its ::after flick, opacity and transform only, still runs). Desktop keeps the full
+   effect. */
 @media (hover: none) and (pointer: coarse) {
   [data-fx="pulse"] .fx-cur {
     animation: none;
@@ -338,6 +340,7 @@
   }
 }
 
+/* ---------- still frames ---------- */
 /* `[data-fx] …` matches the effects' own specificity (and comes after them), so the still frame wins. */
 @media (prefers-reduced-motion: reduce) {
   .fx-cur,

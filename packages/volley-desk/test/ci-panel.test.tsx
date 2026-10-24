@@ -2,7 +2,7 @@
 // window like an agent window; it replaces the tiny `CI` stub pill of #451.
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { GAP } from "../src/layout/arrange";
@@ -192,6 +192,19 @@ describe("CI panel in the Desk", () => {
     expect(cable(container, "w1/ci/T1")).not.toBeNull();
     expect(cable(container, "w1/ci/T2")).not.toBeNull();
     expect([b.style.left, b.style.top]).not.toEqual([a.style.left, a.style.top]);
+  });
+
+  it("leaves with its wave when the wave is hidden and comes back when it is shown", () => {
+    const { container, emit } = mount();
+    emit(waveMsg(waveState({ tasks: [held()] })));
+    expect(screen.getByRole("region", { name: "T1 CI" })).toBeInTheDocument();
+    const row = container.querySelector('.coord-list > li[aria-label="w1"]') as HTMLElement;
+    fireEvent.click(within(row).getByRole("button", { name: "Hide w1" }));
+    expect(screen.queryByRole("region", { name: "T1 CI" })).toBeNull();
+    expect(cable(container, "w1/ci/T1")).toBeNull();
+    fireEvent.click(within(row).getByRole("button", { name: "Show w1" }));
+    expect(screen.getByRole("region", { name: "T1 CI" })).toBeInTheDocument();
+    expect(cable(container, "w1/ci/T1")).not.toBeNull();
   });
 });
 
