@@ -1,0 +1,49 @@
+# Layer 1's fresh Ubuntu machine (scripts/install-tests/README.md): a non-root user `owner` with
+# password-less sudo and mosquitto 2.1 built from source, nothing else. install.sh brings the
+# rest (git, tmux, curl, bun, gh, Claude Code). Containers have no systemd, so `systemctl` is the
+# stand-in. CI caches the image by this file's content.
+ARG BASE=ubuntu:24.04
+
+FROM ${BASE} AS mosquitto
+ARG MOSQUITTO_VERSION=2.1.2
+ARG MOSQUITTO_SHA256=fd905380691ac65ea5a93779e8214941829e3d6e038d5edff9eac5fd74cbed02
+RUN apt-get update \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential ca-certificates cmake curl libargon2-dev libcjson-dev libsqlite3-dev libssl-dev \
+  && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN curl -fsSL "https://mosquitto.org/files/source/mosquitto-${MOSQUITTO_VERSION}.tar.gz" -o m.tar.gz \
+  && echo "${MOSQUITTO_SHA256}  m.tar.gz" | sha256sum -c - \
+  && tar xzf m.tar.gz \
+  && cmake -S "mosquitto-${MOSQUITTO_VERSION}" -B out -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr/local -DWITH_DOCS=OFF -DWITH_TESTS=OFF -DWITH_CTRL_SHELL=OFF \
+    -DWITH_LTO=OFF \
+  && cmake --build out -j "$(nproc)" \
+  && DESTDIR=/stage cmake --install out
+
+FROM ${BASE}
+RUN apt-get update \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    libargon2-1 libcjson1 libsqlite3-0 libssl3t64 sudo \
+  && rm -rf /var/lib/apt/lists/*
+# The binaries and libraries only: example configs in /usr/local/etc/mosquitto would make setup
+# take that directory (Homebrew's on Intel) for the broker's, as the eclipse-mosquitto image never does.
+COPY --from=mosquitto /stage/usr/local/ /usr/local/
+RUN rm -rf /usr/local/etc/mosquitto
+COPY systemctl-stand-in.sh /usr/local/bin/systemctl
+# The `container` layout (packages/volley-cli/src/auth/config.ts) names the plugin here.
+RUN ldconfig \
+  && plugin=$(find /usr/local/lib* -name mosquitto_dynamic_security.so | head -n 1) \
+  && test -n "$plugin" && ln -s "$plugin" /usr/lib/mosquitto_dynamic_security.so \
+  && chmod 755 /usr/local/bin/systemctl \
+  && useradd --create-home --shell /bin/bash owner \
+  && printf 'owner ALL=(ALL) NOPASSWD:ALL\n' >/etc/sudoers.d/owner \
+  && chmod 440 /etc/sudoers.d/owner \
+  && mkdir -p /mosquitto/config /mosquitto/data /mosquitto/log \
+  && printf 'listener 1883\nlistener 9001\nprotocol websockets\nallow_anonymous true\npersistence true\npersistence_location /mosquitto/data/\n' \
+    >/mosquitto/config/mosquitto.conf \
+  && chown -R owner:owner /mosquitto
+USER owner
+WORKDIR /home/owner
+ENV USER=owner
+CMD ["sleep", "infinity"]
