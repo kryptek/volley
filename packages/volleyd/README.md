@@ -754,7 +754,8 @@ end of its brief. A reviewer, fixup or rebase keeps its start point and its own 
 with the `.volley/` inputs it was given. The move is replayed from the journal, so later spawns of that task role keep
 the new account. An agent that does not stop is not respawned (`ACCOUNT_MOVE_STOP_TIMEOUT`
 alarm): two sessions never share a worktree. Autopilot moves an agent only by answering an
-`agent_account_limit` decision (below), under `autopilot.account_move_max`.
+`agent_account_limit` decision (below: at the warn level, or at the limit), under
+`autopilot.account_move_max`.
 
 ### Usage metering
 
@@ -811,6 +812,28 @@ Autopilot answers `move <agent> to <suggested>` (`agent_account_limit/move`, bud
 for an agent whose task, wave or `claude.default_account` names an account, one already
 moving, or a second time for the same task role, account, window and `resets_at` (after
 `not now` the next waits for the reset).
+
+**Limit hit** (B4). An agent that hits its usage limit (`credit_exhausted`: the hooks'
+`class: "credit"`, or the usage-limit prompt on a silent agent's screen) first marks its account
+at the limit: `markLimitHit` folds `five_hour = { pct: 100, resets_at }` into the usage book
+(`resets_at` the window's known reset while it is ahead, else 5 hours on) as a reading of that
+moment (never older than the reading it replaces, so a sample from a machine whose clock runs
+ahead cannot hide it), so a later sample or probe replaces it and `usage.json` keeps it across a
+restart. The mark is always the 5-hour window: when the 7-day or model-family weekly limit is what
+was hit, it lapses at the 5-hour reset and the question names that reset, until a real sample
+reports the weekly window. An agent already being moved gets no decision (its respawn lands on
+the other account anyway). volleyd
+journals `alarm_raised { alarm: "account_limit_hit", agent_id, acct, resets_at, source }` and
+re-publishes the record: new spawns rank the account last until the reset, and its other agents
+get their own warn-level decision. Then, when another account on the agent's machine has room
+(`suggestedMove`, the same pick as above), it opens `agent_account_limit` with `class:
+"credit_exhausted"`, `pct: 100`, `source` (`hook` / `screen`, the capture as a pointer) and
+`move <agent> to <suggested>` / `not now` (the agent waits at the prompt; Claude Code resumes it
+at the reset). Autopilot answers the move (`agent_account_limit/move-exhausted`, the same
+`account_move_max` per task role); spent, it escalates `budget_exhausted` and the decision waits
+for you. A pinned task is moved too: the pin cannot be honoured while its account is at the limit,
+and the question and `why` (`hit the usage limit of <acct> by <by>; pinned to <acct>, which is at
+its limit`) say so. No account with room: `model_switch`, as before (below).
 
 **Pinned waves.** When an account's 5-hour window reaches `claude.warn_at_pct` (default 90; a
 wave's `config:` can override it), each running wave with agents on that account whose account
@@ -1019,7 +1042,7 @@ left for you, with one push.
 - **Budgets** are per wave and key: `relaunch_max` and `respawn_max` per `<task>/<role>`,
   `nudge_max` and `question_max` per run (`<task>/<role>/<attempt>`), `rereview_max` and
   `ci_fixup_max` (CI fixups, default 2) per task, `account_move_max` (automatic account moves,
-  `agent_account_limit`, default 2) per `<task>/<role>`, `merge_transient_retry_max` (retries of a
+  `agent_account_limit` at the warn level or at the limit, default 2) per `<task>/<role>`, `merge_transient_retry_max` (retries of a
   spent transient-merge ladder, default 1) per task, and `budget_raise_max`, a multiple of the
   wave's derived spawn budget that `raise by <n>` answers may reach. Each is reduced from the
   journal's `decision_auto_resolved` events, so a restart keeps them.
@@ -1064,6 +1087,8 @@ autopilot: on
     spawn_budget_exhausted/raise: retries are the normal cost of a long wave
   machine_down · re-place queued tasks offered · re-place queued tasks · no budget
     machine_down/re-place: nothing is lost by re-placing a queued task
+  agent_account_limit · class === "credit_exhausted" && suggested !== null · move <agent> to <suggested> · account_move_max per <task>/<role> · max 2
+    agent_account_limit/move-exhausted: the account is at its limit and another login on the machine has room; the move restarts the session with a resume note
   agent_account_limit · suggested !== null · move <agent> to <suggested> · account_move_max per <task>/<role> · max 2
     agent_account_limit/move: the account is at the warn level and another login on the machine has room; the move restarts the session with a resume note
   agent_account_limit · suggested === null · not now · no budget
@@ -3737,10 +3762,10 @@ agent's retained status. All rules are pure functions; the daemon carries out th
 | still idle `idle_grace_s` after that steer | decision `agent_stalled` (options `nudge again`, `respawn`, `stop task`) | `respawn` stops the agent (a mailbox `cancel` and an interrupt), retires it `relaunched` and spawns its role at the next attempt (an implementer continues its pushed branch and PR; a fixup or rebase starts again from the head with the same `.volley/` inputs); any other answer is steered to the agent and counts as the next nudge; each further decision of the same idle waits twice as long after the answer (`idle_grace_s` × 2, × 4, …, at most `stall_backoff_max_s`, default 30 min) and says how many times it asked; `resumed` resets the count, so an agent the answer wakes starts again from one grace at its next idle; `stop task` cancels it |
 | `idle` while the agent waits on its own work: the hooks' `background_wait` (a background shell still running), a lease it holds or waits on, a terminal footer counting running shells, or (local agents) a file under its worktree written within `idle_grace_s` (`.git`, `.volley`, `node_modules`, `target`, `build`, `dist`, `.venv`, `.next`, `coverage`, `.turbo` skipped; at most 2000 entries walked, a larger tree gives no write evidence); none of it counts once the idle is older than `background_wait_max_s` (default 2 h), so a shell that never exits still ends in a nudge | nothing: no steer, no `agent_stalled`; the task's `why_waiting` says `idle N min: <reason>` (e.g. `waiting on its own background task`, `holds lease <pool>`, `waits on lease <pool>`, `2 shells still running`, `worktree written in the last 3 min`) | — |
 | `idle_prompt` while a question or credit prompt is open | nothing: still a wait on the human (never a "continue" steer or an `agent_stalled`) | — |
-| `awaiting_input` with `class: "credit"` (`quota_auto_resume_*`) | `credit_exhausted` at once → decision `model_switch` (below) | the switch |
+| `awaiting_input` with `class: "credit"` (`quota_auto_resume_*`) | `credit_exhausted` at once → the account is marked at its limit; decision `agent_account_limit` (`class: credit_exhausted`) when another account on the machine has room ([Limit hit](#usage-metering)), else `model_switch` (below) | the move, or the switch |
 | a tool call in flight: the hooks' `PreToolUse` boundary (`activity` with `tool_use_id`) seen, its `PostToolUse` (the `heartbeat` with the same `tool_use_id`) not yet | not silence: no screen read, no decision, however long a foreground test suite or `gh run watch` runs; parallel calls are tracked per `tool_use_id`, so the one that ends first leaves the others in flight; the silence clock restarts at the last `PostToolUse` (or the turn's Stop or next prompt). A call that fails (Claude Code's `PostToolUseFailure`, which the hooks do not register) or a turn interrupted without a Stop leaves the call in flight until the next prompt, so a stuck screen then waits for `tool_in_flight_max_s`. Past `tool_in_flight_max_s` (default 2 h) a screen that has not changed for `heartbeat_alarm_s` falls back to the rows below, and only to `screen_static` | — |
 | no hook signal for `heartbeat_alarm_s` (default 10 min) while the status is `working` and no tool is in flight | read the screen (bounded, once per tick until decided) and classify it: | |
-| ↳ the credit prompt (`screens.ts` `credit_exhausted`) | decision `model_switch` with the capture | the switch |
+| ↳ the credit prompt (`screens.ts` `credit_exhausted`) | as above, with the capture: `agent_account_limit` when an account has room, else `model_switch` | the move, or the switch |
 | ↳ readable and changing (two reads differ, or the screen-tail capture changed since the last hook signal) | held one more `heartbeat_alarm_s` window (a silence that ends by itself, a hook signal, opens nothing); still changing at its end, with no hook signal and no tool in flight — 20 min by default — decision `unknown_screen`, `class: "hooks_silent"`: "hooks may be broken by a harness update"; unchanged across it, `screen_static` | — |
 | ↳ readable and unchanged on a second read | decision `unknown_screen`, `class: "screen_static"` | — |
 | ↳ unreadable, pane gone | `alarm_raised { alarm: "crash_candidate" }` only: wait for the LWT. Nothing is killed because a pane or process cannot be seen | — |
@@ -3804,7 +3829,8 @@ topic) and answers `stop task` the same way: a `cancel` to the agent, an interru
 `question pending (decision d-…)`, `stalled: credit prompt (decision d-…)`, `hooks silent 12 min`,
 `stalled: idle 9 min (decision d-…)`, `idle 4 min: nudged to continue`.
 
-**Model switch (`src/recovery.ts`).** `credit_exhausted` opens `model_switch` with the options
+**Model switch (`src/recovery.ts`).** `credit_exhausted` with no other account on the agent's
+machine that has room (else the limit-hit `agent_account_limit` above) opens `model_switch` with the options
 `switch to <fallback_model>`, `wait`, `stop task` (`fallback_model` from the config store, read
 when the decision opens; null → `wait` / `stop task` only). Nothing is typed into the agent's
 terminal before the decision is resolved. On `switch to <m>` (or `switch`, meaning the fallback)

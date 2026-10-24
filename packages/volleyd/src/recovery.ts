@@ -7,9 +7,12 @@ import { type AgentWatch, sameModel } from "./verify";
 
 /**
  * Approval-gated recovery from credit exhaustion. A `credit_exhausted` signal (the hooks'
- * `class: "credit"`, or the credit prompt on a silent agent's screen) opens a `model_switch`
- * decision offering `switch to <fallback_model>` / `wait` / `stop task`. Nothing is typed into
- * the agent's terminal until the decision is resolved with a switch: then `/model <m>` + Enter,
+ * `class: "credit"`, or the credit prompt on a silent agent's screen) marks the agent's account
+ * at its limit; when another signed-in account on its machine has room it opens a limit-hit
+ * `agent_account_limit` instead (claude/usage.ts limitHitDecision: autopilot moves the agent);
+ * otherwise it opens a `model_switch` decision offering `switch to <fallback_model>` / `wait` /
+ * `stop task`. Nothing is typed into the agent's terminal until that decision is resolved with a
+ * switch: then `/model <m>` + Enter,
  * verified by the hooks' PostModelSwitch registry re-publish (`model == m`). A switch that is not
  * verified re-opens the decision with the screen capture. The same recovery fires at most
  * `recovery_max_per_window` times per agent per `recovery_window_ms`; past that the decision
@@ -180,11 +183,12 @@ export function parseSwitchAnswer(
 const within = (e: JournalEvent, now: number) =>
   now - Date.parse(e.at) < DAEMON_DEFAULTS.recovery_window_ms;
 
-/** Credit-exhaustion decisions opened for `agentId` within the recovery window. */
+/** Credit-exhaustion `model_switch` decisions opened for `agentId` within the recovery window. */
 export function creditOccurrences(events: readonly JournalEvent[], agentId: string, now: number) {
   return events.filter(
     (e) =>
       e.type === "decision_opened" &&
+      e.data.kind === "model_switch" &&
       e.data.class === CREDIT_CLASS &&
       e.data.agent_id === agentId &&
       within(e, now),

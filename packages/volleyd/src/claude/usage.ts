@@ -810,6 +810,138 @@ function agentWindows(
 }
 
 /**
+ * Where an agent on `acct` would move: `rankAccounts`' first pick among the machine's other
+ * `candidates` under `warnAtPct` in every window that counts for `model` (an unreported one counts
+ * as room), else undefined. No ranking of its own.
+ */
+export function suggestedMove(o: {
+  accounts: Record<string, AccountUsage>;
+  acct: string;
+  candidates: readonly string[];
+  model: string | null;
+  warnAtPct: number;
+  now: number;
+  balance?: RankBalance;
+}): Ranked | undefined {
+  const family = familyOf(o.model);
+  const roomy = o.candidates.filter(
+    (c) =>
+      c !== o.acct && agentWindows(o.accounts[c], family, o.now).every((w) => w.pct < o.warnAtPct),
+  );
+  return rankAccounts(o.accounts, roomy, { ...o.balance, model: o.model, now: o.now })[0];
+}
+
+/** `alarm_raised.alarm` journaled when an agent hits its account's usage limit. */
+export const LIMIT_HIT_ALARM = "account_limit_hit";
+
+const FIVE_HOURS_MS = 5 * 3_600_000;
+
+/**
+ * The reset of `account`'s 5-hour window when an agent hits its limit at `at`: the book's, if
+ * still ahead, else 5 hours on.
+ */
+export function limitHitResetsAt(book: UsageBook, o: { account: string; at: string }): string {
+  const known = book.accounts[o.account]?.five_hour?.resets_at ?? null;
+  return known !== null && Date.parse(known) > Date.parse(o.at)
+    ? known
+    : new Date(Date.parse(o.at) + FIVE_HOURS_MS).toISOString();
+}
+
+/**
+ * An agent hit `account`'s usage limit at `at`: its 5-hour window reads 100% until
+ * `limitHitResetsAt`. Always applied: stamped no older than the window it replaces (a sample from a
+ * machine whose clock runs ahead of ours can carry a later `at`), so only a later sample or probe
+ * reading replaces it; `bookState` keeps it.
+ */
+export function markLimitHit(book: UsageBook, o: { account: string; at: string }): UsageBook {
+  const prev = book.accounts[o.account];
+  const seen = prev?.five_hour?.at;
+  const at = seen !== undefined && newer(seen, o.at) ? seen : o.at;
+  return {
+    ...book,
+    accounts: {
+      ...book.accounts,
+      [o.account]: {
+        ...prev,
+        five_hour: { pct: 100, resets_at: limitHitResetsAt(book, o), at },
+        weekly: prev?.weekly ?? null,
+        sampled_at: prev?.sampled_at ?? o.at,
+      },
+    },
+  };
+}
+
+/** The question's pin note for a pinned agent moved off an account at its limit. */
+export const pinNote = (acct: string) => `pinned to ${acct}, which is at its limit`;
+
+/**
+ * The `agent_account_limit` decision (`class: credit_exhausted`) for an agent that hit its
+ * account's usage limit: move it to `suggestedMove`'s pick, or `not now` (Claude Code resumes it
+ * by itself at the reset). A pinned agent gets it too: the pin cannot be honoured. Null when no
+ * other account on its machine has room (the caller opens `model_switch`). Never parks.
+ */
+export function limitHitDecision(o: {
+  accounts: Record<string, AccountUsage>;
+  agent: AgentOnAccount;
+  candidates: readonly string[];
+  warnAtPct: number;
+  resets_at: string;
+  source: "hook" | "screen";
+  text: string | null;
+  screen?: string;
+  now: number;
+  balance?: RankBalance;
+}): { input: DecisionInput; extra: LimitHitExtra } | null {
+  const ag = o.agent;
+  const best = suggestedMove({
+    accounts: o.accounts,
+    acct: ag.acct,
+    candidates: o.candidates,
+    model: ag.model,
+    warnAtPct: o.warnAtPct,
+    now: o.now,
+    ...(o.balance !== undefined ? { balance: o.balance } : {}),
+  });
+  if (best === undefined) return null;
+  const how =
+    o.source === "hook"
+      ? "the hooks reported a usage-limit prompt"
+      : "a usage-limit prompt is on its screen";
+  const pin = ag.pinned ? ` Its task is ${pinNote(ag.acct)}: the pin cannot be honoured.` : "";
+  return {
+    input: {
+      kind: "agent_account_limit",
+      task: ag.task,
+      question: `Needs you: ${ag.agent_id} (${ag.task}/${ag.role}) hit the usage limit of Claude account ${ag.acct} (${how}). Move it to ${best.account} (${usageLabel(best, familyOf(ag.model))})? The session restarts with a resume note. not now: it waits at the prompt and resumes by itself when the window resets at ${o.resets_at}.${pin}`,
+      options: [agentMoveAnswer(ag.agent_id, best.account), NOT_NOW],
+      park: false,
+      pointers: o.screen !== undefined ? { screen: o.screen } : {},
+    },
+    extra: {
+      agent_id: ag.agent_id,
+      role: ag.role,
+      acct: ag.acct,
+      window: "five_hour",
+      pct: 100,
+      resets_at: o.resets_at,
+      suggested: best.account,
+      class: LIMIT_HIT_CLASS,
+      source: o.source,
+      ...(o.text !== null ? { text: o.text } : {}),
+    },
+  };
+}
+
+/** `class` of the limit-hit `agent_account_limit` (recovery.ts CREDIT_CLASS: the same signal). */
+export const LIMIT_HIT_CLASS = "credit_exhausted";
+
+export type LimitHitExtra = AgentLimitDecision["extra"] & {
+  class: typeof LIMIT_HIT_CLASS;
+  source: "hook" | "screen";
+  text?: string;
+};
+
+/**
  * The `agent_account_limit` decisions to open (D2): for each supervised agent whose account's
  * live 5-hour, 7-day or model-family weekly window is at or over its wave's `warnAtPct`, unless
  * its task or wave pins an account, it is already moving, or a decision for the same task, role,
@@ -843,13 +975,15 @@ export function agentLimitDecisions(o: {
         e.resets_at === hit.resets_at,
     );
     if (seen) continue;
-    const roomy = o
-      .candidates(ag.machine)
-      .filter(
-        (c) =>
-          c !== ag.acct && agentWindows(o.accounts[c], family, o.now).every((w) => w.pct < warn),
-      );
-    const best = rankAccounts(o.accounts, roomy, { ...o.balance, model: ag.model, now: o.now })[0];
+    const best = suggestedMove({
+      accounts: o.accounts,
+      acct: ag.acct,
+      candidates: o.candidates(ag.machine),
+      model: ag.model,
+      warnAtPct: warn,
+      now: o.now,
+      ...(o.balance !== undefined ? { balance: o.balance } : {}),
+    });
     const suggested = best?.account ?? null;
     const resets = hit.resets_at !== null ? ` (resets ${hit.resets_at})` : "";
     const at = hit.resets_at !== null ? ` at ${hit.resets_at}` : "";
