@@ -43,7 +43,7 @@
 .modal-body .s-group h3 {
   font-family: var(--f-display);
   font-size: 13px;
-  color: var(--acc);
+  color: var(--acc-ink);
 }
 .modal-global {
   margin-left: auto;
@@ -98,7 +98,7 @@
   font-family: var(--f-mono);
 }
 .cfg-ack--ok {
-  color: var(--ok);
+  color: var(--ok-text);
 }
 .cfg-ack--bad {
   color: #ff8f7a;
@@ -299,7 +299,7 @@
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  background: #1e1f24;
+  background: var(--sheet-fill);
 }
 .ms-head {
   display: flex;
@@ -427,6 +427,11 @@
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 10px;
   overflow: hidden;
+}
+/* The light tone: a card is the sheet's off-white with a visible edge (white tints vanish on white). */
+html[data-tone="light"] .s-card {
+  background: var(--win2);
+  border-color: var(--line);
 }
 .s-foot {
   margin: 6px 4px 0;
@@ -870,13 +875,13 @@
   background: #ff453a;
 }
 .meter-pct.meter-ok {
-  color: #7ee2a0;
+  color: var(--ok-ink);
 }
 .meter-pct.meter-warn {
-  color: #ffd60a;
+  color: var(--amber-ink);
 }
 .meter-pct.meter-hot {
-  color: #ff8f86;
+  color: var(--bad-ink);
 }
 .pair {
   display: flex;
@@ -933,7 +938,7 @@
 .s-error {
   margin: 6px 0;
   font-size: 12.5px;
-  color: #ff8f86;
+  color: var(--bad-ink);
 }
 
 /* Settings › Sound: theme cards with their audition chips, the per-event play buttons. */
@@ -941,7 +946,7 @@
   border: 0;
   padding: 0;
   background: none;
-  color: var(--t-acc);
+  color: var(--t-acc-ink);
   font: inherit;
   cursor: pointer;
   text-decoration: underline;

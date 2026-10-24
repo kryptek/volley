@@ -5,7 +5,7 @@
  * `train`) and why. The heading collapses and expands the list. In a compact window (a phone)
  * each row is just the id and the state. A wave without a plan shows nothing.
  */
-import { useState } from "react";
+import { type CSSProperties, useState } from "react";
 import { plural } from "../../lib/plural";
 import { strategyLine } from "../../store/autopilot";
 import type { PlanCluster } from "../../store/types";
@@ -46,7 +46,10 @@ export function Clusters({
             const hue = hues.get(c.id);
             return (
               <li key={c.id} className={`cluster-row cluster-${c.state}`}>
-                <span className="mono cluster-id" style={hue ? { color: hue } : undefined}>
+                <span
+                  className="mono cluster-id"
+                  style={hue ? ({ "--hue": hue } as CSSProperties) : undefined}
+                >
                   {c.id}
                 </span>
                 {compact ? (

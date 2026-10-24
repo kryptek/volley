@@ -81,10 +81,10 @@
   margin-left: auto;
 }
 .lvl--warn {
-  color: var(--amber);
+  color: var(--amber-text);
 }
 .lvl--bad {
-  color: var(--bad);
+  color: var(--bad-text);
 }
 .mrow-specs {
   font-size: 11.5px;

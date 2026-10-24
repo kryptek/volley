@@ -48,6 +48,36 @@ describe("desk.css :root is the Volley theme", () => {
   });
 });
 
+describe("the light tone (#368)", () => {
+  it("accent-coloured text reads --acc-ink: the accent itself, darkened on a light theme", () => {
+    expect(block(":root").get("--acc-ink")).toMatch(/^var\(--acc[,)]/);
+    expect(block('html[data-tone="light"]').get("--acc-ink")).toMatch(
+      /^color-mix\(in oklab, var\(--acc[,)].* 55%, black\)$/,
+    );
+  });
+
+  it("dark ink on amber is a token on both tones", () => {
+    expect(block(":root").get("--on-amber")).toBe("#1a1204");
+  });
+
+  it("the near-duplicate text tints are gone (unified onto the *-ink tokens)", () => {
+    for (const f of readdirSync(STYLES).filter((f) => f.endsWith(".css"))) {
+      const css = read(f);
+      for (const tint of ["#7ee2a0", "#ff9d85", "#8be9fd", "#ffd27a", "#ffd60a", "#1a1204"]) {
+        if (f === "desk.css" && tint === "#1a1204") continue;
+        expect(css.toLowerCase().includes(tint), `${tint} in ${f}`).toBe(false);
+      }
+      expect(css, `${f}: #ff6961 as text`).not.toMatch(/(^|[\s;{])color:\s*#ff6961/i);
+    }
+  });
+
+  it("no accent is text without going through --acc-ink", () => {
+    for (const f of readdirSync(STYLES).filter((f) => f.endsWith(".css"))) {
+      expect(read(f), f).not.toMatch(/(^|[\s;{])color:\s*var\(--acc[,)]/);
+    }
+  });
+});
+
 describe("colour literals in the Desk's stylesheets", () => {
   it("only go down (the ratchet)", () => {
     const count = readdirSync(STYLES)
@@ -58,8 +88,9 @@ describe("colour literals in the Desk's stylesheets", () => {
           (readFileSync(join(STYLES, f), "utf8").match(/#[0-9a-f]{3,8}\b|rgba?\(/gi) ?? []).length,
         0,
       );
-    // 409 before the token layer (#365). This ceiling only ever goes down: re-point a literal to a
-    // token (or the themed block) rather than raising it.
-    expect(count).toBeLessThanOrEqual(297);
+    // 409 before the token layer (#365), 297 after it, 276 after the light tone (#368). This
+    // ceiling only ever goes down: re-point a literal to a token (or the themed block) rather
+    // than raising it.
+    expect(count).toBeLessThanOrEqual(276);
   });
 });
