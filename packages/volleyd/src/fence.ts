@@ -1573,6 +1573,13 @@ function exactly(argv: readonly string[], allowed: readonly (readonly string[])[
 
 /** Throw `FenceError` unless the policy above allows `argv`. */
 export function assertAllowed(argv: readonly string[], opts: FenceOptions = {}): void {
+  // Before every other branch: a sealed script or a setup token gets no askpass env either.
+  if (opts.machineAdd === undefined && asksPass(opts.env)) {
+    throw new FenceError(
+      `${argv.slice(0, 2).join(" ")} with an askpass env`,
+      "only a machine_add password step names an askpass helper",
+    );
+  }
   if (
     opts.script !== undefined &&
     scripts.has(opts.script) &&
@@ -1594,12 +1601,6 @@ export function assertAllowed(argv: readonly string[], opts: FenceOptions = {}):
       : deny(`${argv.slice(0, 2).join(" ")} (a machine-add token volleyd did not mint)`);
     if (v.kind !== "allow") throw new FenceError(v.verb, "not permitted for volleyd");
     return;
-  }
-  if (asksPass(opts.env)) {
-    throw new FenceError(
-      `${argv.slice(0, 2).join(" ")} with an askpass env`,
-      "only a machine_add password step names an askpass helper",
-    );
   }
   const prog = argv[0];
   const verdicts = prog === "ssh" ? sshVerdicts(argv.slice(1), opts) : [evaluate(argv, opts)];

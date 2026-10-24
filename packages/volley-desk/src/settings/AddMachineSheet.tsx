@@ -31,7 +31,7 @@ const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 export const isBoxAddress = (v: string): boolean => ADDRESS_RE.test(v);
 
 type Phase =
-  | { k: "form"; error?: string }
+  | { k: "form" }
   | { k: "running" }
   | { k: "done"; answer: Extract<MachineAddAnswer, { ok: true }> }
   | { k: "failed"; error: string };
@@ -42,13 +42,17 @@ interface StepView {
   lines: string[];
 }
 
-/** Every step, with the rows that arrived: a step before the latest is done. */
-function stepViews(rows: readonly MachineAddRow[], ended: boolean): StepView[] {
+/**
+ * Every step, with the rows that arrived: a step before the latest is done. A failed run fails
+ * its latest step even when only the answer said so (the Desk's own timeout, an unsent request).
+ */
+function stepViews(rows: readonly MachineAddRow[], phase: Phase["k"]): StepView[] {
   const latest = rows.reduce((n, r) => Math.max(n, r.step), 0);
+  const ended = phase !== "running";
   return STEPS.map((title, i) => {
     const n = i + 1;
     const mine = rows.filter((r) => r.step === n);
-    const failed = mine.some((r) => r.state === "failed");
+    const failed = mine.some((r) => r.state === "failed") || (phase === "failed" && n === latest);
     return {
       title: mine[0]?.title ?? title,
       state: failed
@@ -222,9 +226,9 @@ export function AddMachineSheet({
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
-          {((tried && problem) || phase.error) && (
+          {tried && problem && (
             <p className="s-error m-add-hint" role="alert">
-              {phase.error ?? problem}
+              {problem}
             </p>
           )}
           <div className="ny-actions m-add-hint">
@@ -240,7 +244,7 @@ export function AddMachineSheet({
     );
   }
 
-  const views = stepViews(rows, phase.k !== "running");
+  const views = stepViews(rows, phase.k);
   return (
     <MachineSheet label={label} onClose={onClose} closable={!running}>
       <div aria-live="polite">

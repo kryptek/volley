@@ -2009,6 +2009,28 @@ describe("MACHINE ADD (machine_add, with its token and nothing else)", () => {
     // An empty one is no askpass.
     expect(() => assertAllowed(["git", "status"], { env: { SSH_ASKPASS: "" } })).not.toThrow();
   });
+
+  it("a sealed script or a setup token does not escape the askpass env rule", () => {
+    const gate = mintScriptToken("/path/to/home/.volley/volleyd/brief-gate");
+    const setup = mintSetupToken({
+      restart: "brew services restart mosquitto",
+      ctrl: null,
+      repoRoot: "/src/volley",
+      bun: "/usr/local/bin/bun",
+      home,
+      uid: 501,
+    });
+    for (const e of [{ SSH_ASKPASS: askpass }, { SUDO_ASKPASS: askpass }]) {
+      expect(() => assertAllowed([gate.path], { script: gate, env: e })).toThrow(FenceError);
+      expect(() =>
+        assertAllowed(["brew", "services", "restart", "mosquitto"], { setup, env: e }),
+      ).toThrow(FenceError);
+    }
+    expect(() => assertAllowed([gate.path], { script: gate })).not.toThrow();
+    expect(() =>
+      assertAllowed(["brew", "services", "restart", "mosquitto"], { setup }),
+    ).not.toThrow();
+  });
 });
 
 describe("MACHINE ADD's own argv match volley-cli's", () => {

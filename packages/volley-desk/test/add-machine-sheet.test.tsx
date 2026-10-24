@@ -205,6 +205,17 @@ describe("AddMachineSheet: the run", () => {
     expect(field(/^Password/)).toHaveValue("");
   });
 
+  it("a failure only the answer carries marks the running step failed, never ✓", async () => {
+    const { push, answer } = await start();
+    await push(row(1, "ssh", "✓ key-based ssh to dev@box-a"));
+    await push(row(2, "Volley", "→ install.sh --peer"));
+    await answer({ ok: false, error: "volleyd did not answer within 1500s" });
+    const items = stepItems();
+    expect(items[0]).toHaveAttribute("data-state", "ok");
+    expect(items[1]).toHaveAttribute("data-state", "failed");
+    expect(items[2]).toHaveAttribute("data-state", "pending");
+  });
+
   it.each(["volley", "lighter"])("passes axe in the %s theme, form and run", async (theme) => {
     document.documentElement.dataset.theme = theme;
     try {
@@ -274,6 +285,57 @@ describe("peerOps.machineAdd", () => {
     expect(calls[0]?.opts?.timeoutMs).toBe(MACHINE_ADD_TIMEOUT_MS);
     expect(rows).toEqual([{ step: 1, total: 7, title: "ssh", state: "running" }]);
     expect(a).toMatchObject({ ok: true, name: "box-a", ready: true });
+  });
+
+  it("onProgress: each row restarts the deadline, so a long run that streams rows is not cut off", async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Set<(m: DeskMessage) => void>();
+      const published: Envelope[] = [];
+      const client = {
+        publish: vi.fn(async (_t: string, payload: string) => {
+          published.push(JSON.parse(payload) as Envelope);
+        }),
+        onMessage: (h: (m: DeskMessage) => void) => {
+          handlers.add(h);
+          return () => handlers.delete(h);
+        },
+      };
+      const auth = createAuthOps(client as never, {
+        identity: "admin-1",
+        replyKey: async () => ({ jwk: { kty: "RSA", n: "n", e: "AQAB" }, open: async () => ({}) }),
+      });
+      const pending = auth.request("machine_add", {}, { timeoutMs: 1000, onProgress: () => {} });
+      await vi.advanceTimersByTimeAsync(0);
+      const cid = published[0]?.correlation_id as string;
+      const deliver = (type: string, payload: Record<string, unknown>) => {
+        const envelope = {
+          schema_version: "0.1",
+          agent_id: "volleyd",
+          parent_id: null,
+          channel: "_system/auth",
+          type,
+          wall_time: "2026-10-24T12:00:00.000Z",
+          correlation_id: cid,
+          payload,
+        } as Envelope;
+        for (const h of [...handlers])
+          h({ topic: `volley/_system/auth/replies/${cid}`, envelope } as DeskMessage);
+      };
+      // Three rows 800 ms apart: 2.4 s in all, past the 1 s deadline, never 1 s without a row.
+      for (let i = 1; i <= 3; i++) {
+        await vi.advanceTimersByTimeAsync(800);
+        deliver("progress", { step: i });
+      }
+      deliver("ack", { ok: true });
+      await expect(pending).resolves.toMatchObject({ ok: true });
+      // A silence as long as the deadline still fails it.
+      const quiet = auth.request("machine_add", {}, { timeoutMs: 1000, onProgress: () => {} });
+      await vi.advanceTimersByTimeAsync(1000);
+      await expect(quiet).resolves.toMatchObject({ ok: false, unanswered: true });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("onProgress: the request hands volleyd's progress envelopes for it to the caller", async () => {

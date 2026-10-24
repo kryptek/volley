@@ -149,6 +149,7 @@ describe("parseMachineAdd", () => {
       {},
       { address: "-oProxyCommand=x", auth: { key: "/k" } },
       { address: "dev@box a", auth: { key: "/k" } },
+      { address: "box-a", auth: { key: "/k" } },
       { address: ADDRESS },
       { address: ADDRESS, auth: {} },
       { address: ADDRESS, auth: { key: "/k", password_ref: "x" } },

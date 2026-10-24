@@ -122,7 +122,7 @@ export function defaultMachineName(host: string): string {
 /** The request's fields, checked (an error's text otherwise). */
 export function parseMachineAdd(p: Record<string, unknown>): MachineAddRequest | string {
   const { address, auth, sudo_ref: sudo, name } = p;
-  if (typeof address !== "string" || !isSshTarget(address)) {
+  if (typeof address !== "string" || !address.includes("@") || !isSshTarget(address)) {
     return "address must be an ssh destination (user@host)";
   }
   const a = (typeof auth === "object" && auth !== null ? auth : {}) as Record<string, unknown>;
@@ -263,7 +263,7 @@ export async function runMachineAdd(
   if (r === null) {
     return {
       ok: false,
-      error: `step ${step} (${title}): ${failure ?? "the run stopped"}`,
+      error: `${step > 0 ? `step ${step} (${title}): ` : ""}${failure ?? "the run stopped"}`,
       ...(step > 0 ? { step } : {}),
     };
   }

@@ -65,10 +65,9 @@ import type { NewEvent, RemoteHostConfig } from "./types";
 const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_RE = new RegExp(`^[${ALPHABET}]{4}-[${ALPHABET}]{4}$`);
 /**
- * Names a peer may not take: the two a wave file's `host:` reserves (the daemon's own host, and
+ * Names no machine takes: the two a wave file's `host:` reserves (the daemon's own host, and
  * `auto` for placement, SPEC §4.6.15) and the fixed broker identities.
  */
-/** Names no machine takes: a wave file's `host:` words and the fixed identities. */
 export const RESERVED_NAMES: ReadonlySet<string> = new Set([
   "local",
   "auto",

@@ -37,7 +37,8 @@ export const FIXED_IDENTITIES: ReadonlySet<string> = new Set(["desk", "coordinat
 export const DOCTOR_TIMEOUT_MS = 16 * 60_000;
 /**
  * `machine_add` runs every step of `volley machine add` on a bare box (install.sh may apt-get and
- * build for minutes): volleyd bounds each step at 20 minutes, and its rows show the run is alive.
+ * build for minutes): volleyd bounds each step at 20 minutes. The wait is for silence: each row
+ * restarts it, so a run of several long steps is not cut off.
  */
 export const MACHINE_ADD_TIMEOUT_MS = 25 * 60_000;
 /** volleyd's `peer_code_ttl_s` default: how long a code lasts when an answer leaves it out. */

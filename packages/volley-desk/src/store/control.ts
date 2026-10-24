@@ -477,7 +477,7 @@ export interface AuthRequestOptions {
   onLate?: (answer: AuthAnswer) => void;
   /**
    * Called with each `progress` envelope volleyd publishes for this request before its answer
-   * (a long op's rows: `machine_add`).
+   * (a long op's rows: `machine_add`). Each one restarts `timeoutMs`.
    */
   onProgress?: (payload: Record<string, unknown>) => void;
 }
@@ -559,7 +559,7 @@ export function createAuthOps(
           let off = () => {};
           let settled = false;
           let late: ReturnType<typeof setTimeout> | undefined;
-          const timer = setTimeout(() => {
+          const expire = () => {
             settled = true;
             resolve({
               failed: {
@@ -571,7 +571,8 @@ export function createAuthOps(
             // Keep listening for a late answer only when someone will take it.
             if (onLate === undefined) off();
             else late = setTimeout(() => off(), lateMs);
-          }, timeoutMs);
+          };
+          let timer = setTimeout(expire, timeoutMs);
           function done(r: { answer: Record<string, unknown> } | { failed: AuthAnswer }) {
             clearTimeout(timer);
             clearTimeout(late);
@@ -589,6 +590,9 @@ export function createAuthOps(
             if (!settled && onProgress !== undefined) {
               const row = answerOf(m.envelope, correlationId, "progress");
               if (row !== null) {
+                // A row shows the run is alive: the deadline is for silence, not the whole run.
+                clearTimeout(timer);
+                timer = setTimeout(expire, timeoutMs);
                 onProgress(row);
                 return;
               }
