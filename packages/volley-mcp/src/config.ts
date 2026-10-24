@@ -19,19 +19,11 @@ export interface VolleyConfig {
    */
   coordinator?: string;
   /**
-   * Seconds between the server's `progress` heartbeats while registered (`VOLLEY_HEARTBEAT_S`,
-   * SPEC §4.3); absent means `DEFAULT_HEARTBEAT_S`, 0 turns them off.
-   */
-  heartbeatS?: number;
-  /**
    * The cmux surface (pane) the server runs in (`CMUX_SURFACE_ID`). Recorded on the registry
    * entry so the session's hooks find their own entry when several sessions share a cwd.
    */
   surface?: string;
 }
-
-/** Default `VOLLEY_HEARTBEAT_S`: a quiet session (one blocked on `volley wait`) still beats. */
-export const DEFAULT_HEARTBEAT_S = 300;
 
 /** MQTT username/password for brokers that require authentication (SPEC §11.5). */
 export interface BrokerAuth {
@@ -240,11 +232,13 @@ export function resolveBrokerAuth(
 
 /**
  * Read configuration from `<cwd>/.volley/agent.json` (if present), then the environment, then
- * defaults. A key set in the identity file beats its env var. `env`/`cwd` are injectable for tests.
+ * defaults. A key set in the identity file beats its env var. `env`/`cwd` are injectable for tests;
+ * `warn` receives one line per ignored setting (default: stderr).
  */
 export function loadConfig(
   env: Record<string, string | undefined> = process.env,
   cwd: string = process.cwd(),
+  warn: (line: string) => void = (line) => process.stderr.write(`${line}\n`),
 ): VolleyConfig {
   const identity = readAssignedIdentity(cwd);
 
@@ -278,10 +272,9 @@ export function loadConfig(
 
   const auth = identity?.auth ?? authFromEnv(env);
 
-  const heartbeatS = env.VOLLEY_HEARTBEAT_S !== undefined ? Number(env.VOLLEY_HEARTBEAT_S) : null;
-  if (heartbeatS !== null && !(Number.isFinite(heartbeatS) && heartbeatS >= 0)) {
-    throw new Error(
-      `VOLLEY_HEARTBEAT_S "${env.VOLLEY_HEARTBEAT_S}" must be a number of seconds (0 turns heartbeats off)`,
+  if (env.VOLLEY_HEARTBEAT_S !== undefined) {
+    warn(
+      "VOLLEY_HEARTBEAT_S is retired (#483): presence is the connection's will; no heartbeats are sent",
     );
   }
 
@@ -296,7 +289,6 @@ export function loadConfig(
     ...(identity?.claudeAccount !== undefined ? { claudeAccount: identity.claudeAccount } : {}),
     // A supervised agent (identity file) is never a coordinator, whatever its shell exported.
     ...(identity === null && env.VOLLEY_COORDINATOR ? { coordinator: env.VOLLEY_COORDINATOR } : {}),
-    ...(heartbeatS !== null ? { heartbeatS } : {}),
     ...(surface !== undefined ? { surface } : {}),
   };
 }
