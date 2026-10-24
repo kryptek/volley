@@ -511,9 +511,12 @@ describe("Layer 4: vm-pair.sh", () => {
     expect(vmsLeft(w)).toEqual([]);
   });
 
+  // Two polls run out here (the wave's placement, the service's stop), each busy for the whole cap:
+  // a 1 s cap and a longer timeout keep it inside a slow CI runner's budget.
   test("a task placed elsewhere, or a peer service still running after removal, fails", () => {
     const w = world();
     const r = run(w, "vm-pair.sh", [], {
+      env: { VM_MAX_WAIT_S: "1" },
       rules: [
         [
           "volleyd events hello-peer",
@@ -529,7 +532,7 @@ describe("Layer 4: vm-pair.sh", () => {
       "FAIL: volley-peer.service still runs on the peer after volley peer remove",
     );
     expect(vmsLeft(w)).toEqual([]);
-  });
+  }, 15_000);
 
   test("refuses to start when either VM's name exists, launching neither", () => {
     const w = world();
