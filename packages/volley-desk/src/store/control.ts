@@ -305,9 +305,10 @@ function authEnvelope(r: {
 function answerOf(
   env: Partial<Envelope> | null,
   correlationId: string,
+  type: "ack" | "progress" = "ack",
 ): Record<string, unknown> | null {
   // Only volleyd may answer (SPEC §4.4); the ACL lets no one else write the answer topics.
-  if (env?.agent_id !== DAEMON_AGENT_ID || env.type !== "ack") return null;
+  if (env?.agent_id !== DAEMON_AGENT_ID || env.type !== type) return null;
   if (env.correlation_id !== correlationId) return null;
   const p = env.payload;
   return typeof p === "object" && p !== null ? (p as Record<string, unknown>) : null;
@@ -474,6 +475,11 @@ export interface AuthRequestOptions {
    * as usual, so a single-use token is never dropped.
    */
   onLate?: (answer: AuthAnswer) => void;
+  /**
+   * Called with each `progress` envelope volleyd publishes for this request before its answer
+   * (a long op's rows: `machine_add`). Each one restarts `timeoutMs`.
+   */
+  onProgress?: (payload: Record<string, unknown>) => void;
 }
 
 export interface AuthOps {
@@ -533,7 +539,7 @@ export function createAuthOps(
 
   return {
     identity: opts.identity,
-    async request(op, fields = {}, { timeoutMs = timeout, onLate } = {}) {
+    async request(op, fields = {}, { timeoutMs = timeout, onLate, onProgress } = {}) {
       let k: ReplyKey;
       try {
         k = await replyKey();
@@ -553,7 +559,7 @@ export function createAuthOps(
           let off = () => {};
           let settled = false;
           let late: ReturnType<typeof setTimeout> | undefined;
-          const timer = setTimeout(() => {
+          const expire = () => {
             settled = true;
             resolve({
               failed: {
@@ -565,7 +571,8 @@ export function createAuthOps(
             // Keep listening for a late answer only when someone will take it.
             if (onLate === undefined) off();
             else late = setTimeout(() => off(), lateMs);
-          }, timeoutMs);
+          };
+          let timer = setTimeout(expire, timeoutMs);
           function done(r: { answer: Record<string, unknown> } | { failed: AuthAnswer }) {
             clearTimeout(timer);
             clearTimeout(late);
@@ -580,6 +587,16 @@ export function createAuthOps(
           // Listen before publishing so a fast answer is not missed.
           off = client.onMessage((m) => {
             if (m.topic !== replies) return;
+            if (!settled && onProgress !== undefined) {
+              const row = answerOf(m.envelope, correlationId, "progress");
+              if (row !== null) {
+                // A row shows the run is alive: the deadline is for silence, not the whole run.
+                clearTimeout(timer);
+                timer = setTimeout(expire, timeoutMs);
+                onProgress(row);
+                return;
+              }
+            }
             const p = answerOf(m.envelope, correlationId);
             if (p !== null) done({ answer: p });
           });

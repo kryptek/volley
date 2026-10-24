@@ -938,3 +938,39 @@ describe("deskMovedTo: the banner on the Desk's old address", () => {
     expect(deskMovedTo(undefined, done, "http://localhost:5199")).toBeNull();
   });
 });
+
+describe("Add a bare machine… (machine_add)", () => {
+  it("an admin opens the sheet from the section; it sends machine_add and closes on Done", async () => {
+    const { ops } = setup({
+      signIn: (m) => (
+        <button type="button" className="btn btn--blue">
+          Sign in on {m}
+        </button>
+      ),
+    });
+    await act(flush);
+    fireEvent.click(screen.getByRole("button", { name: "Add a bare machine…" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Add a bare machine" }));
+    fireEvent.change(dialog.getByLabelText("Address"), { target: { value: "dev@box-c" } });
+    fireEvent.change(dialog.getByLabelText("Password", { selector: "input[type=password]" }), {
+      target: { value: "hunter2" },
+    });
+    await act(async () => {
+      fireEvent.click(dialog.getByRole("button", { name: "Add dev@box-c" }));
+    });
+    expect(ops.machineAdd).toHaveBeenCalledWith(
+      { address: "dev@box-c", password: "hunter2" },
+      expect.any(Function),
+    );
+    const done = within(screen.getByRole("dialog"));
+    expect(done.getByRole("heading", { name: "box-a is ready for agents" })).toBeInTheDocument();
+    fireEvent.click(done.getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("is not offered to a read-only session", async () => {
+    setup({ ops: null });
+    await act(flush);
+    expect(screen.queryByRole("button", { name: "Add a bare machine…" })).toBeNull();
+  });
+});

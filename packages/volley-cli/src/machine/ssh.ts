@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PEER_DEFAULTS } from "../commands/peer";
 import { sshCommand } from "../deploy/peers";
@@ -28,13 +29,14 @@ export const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 /** The argv of every batch step: `sshCommand`'s, the script on stdin. */
 export const batchArgv = (target: string): string[] => sshCommand(target, { argv: [] }).argv;
 
-const connectTimeout = `ConnectTimeout=${PEER_DEFAULTS.ssh_connect_timeout_s}`;
+/** Read when used, not at import: commands/peer may still be loading (volleyd imports this too). */
+const connectTimeout = () => `ConnectTimeout=${PEER_DEFAULTS.ssh_connect_timeout_s}`;
 
 /** The one interactive connect: runs `command` (the key install), prompts are ssh's. */
 export const connectArgv = (target: string, command: string): string[] => [
   "ssh",
   "-o",
-  connectTimeout,
+  connectTimeout(),
   target,
   command,
 ];
@@ -44,7 +46,7 @@ export const ttyArgv = (target: string, command: string): string[] => [
   "ssh",
   "-t",
   "-o",
-  connectTimeout,
+  connectTimeout(),
   target,
   command,
 ];
@@ -60,6 +62,20 @@ export const keygenArgv = (home: string): string[] => [
   "-f",
   join(home, ".ssh", "id_ed25519"),
 ];
+
+/** This machine's ssh host keys, `<type> <base64>` each (a box's known_hosts gets them). */
+export function readHostKeys(dir = join("/etc", "ssh")): string[] {
+  return ["ed25519", "ecdsa", "rsa"].flatMap((t) => {
+    const f = join(dir, `ssh_host_${t}_key.pub`);
+    if (!existsSync(f)) return [];
+    try {
+      const [type, key] = readFileSync(f, "utf-8").trim().split(/\s+/);
+      return type !== undefined && key !== undefined ? [`${type} ${key}`] : [];
+    } catch {
+      return [];
+    }
+  });
+}
 
 /** A Mac's Remote Login (sshd) as launchd has it: exit 0 when it is on. */
 export const REMOTE_LOGIN_ARGV = ["launchctl", "print", "system/com.openssh.sshd"] as const;
@@ -102,6 +118,8 @@ export interface MachineFenceInputs {
   /** argv that runs this volley CLI (the Claude sign-in goes through volleyd, as `volley claude add`). */
   volleyArgv: readonly string[];
   scripts: Scripts;
+  /** Every batch step's argv (default `batchArgv(target)`; volleyd's fenced form when headless). */
+  batch?: readonly string[];
 }
 
 /**
@@ -110,8 +128,14 @@ export interface MachineFenceInputs {
  * this machine's key creation; a Mac's Remote Login check; and the box's Claude sign-in through
  * volleyd. Throws on anything else.
  */
-export function machineFence({ target, name, home, volleyArgv, scripts }: MachineFenceInputs) {
-  const batch = batchArgv(target);
+export function machineFence({
+  target,
+  name,
+  home,
+  volleyArgv,
+  scripts,
+  batch = batchArgv(target),
+}: MachineFenceInputs) {
   const same = (argv: readonly string[], want: readonly string[]) =>
     argv.length === want.length && want.every((w, i) => argv[i] === w);
   const claudeAdd = [...volleyArgv, "claude", "add", name, "--machine", name, "--wait"];

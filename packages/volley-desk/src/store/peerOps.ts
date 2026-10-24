@@ -25,7 +25,7 @@
  * publish) is neither, and is not kept: the next ask asks again.
  */
 import { type AuthAnswer, type AuthOps, rememberRole } from "./control";
-import type { RepoMachines, RepoVerdict } from "./types";
+import type { MachineAddRow, RepoMachines, RepoVerdict } from "./types";
 
 /** The wait `volley peer invite` / `remove` use too: volleyd checks the account registry first. */
 export const AUTH_OP_TIMEOUT_MS = 30_000;
@@ -35,6 +35,12 @@ export const ADMIN_PROBE_TIMEOUT_MS = 5000;
 export const FIXED_IDENTITIES: ReadonlySet<string> = new Set(["desk", "coordinator", "volleyd"]);
 /** A doctor run can take minutes (a fix may check out and install volley): volleyd's own limit is 15. */
 export const DOCTOR_TIMEOUT_MS = 16 * 60_000;
+/**
+ * `machine_add` runs every step of `volley machine add` on a bare box (install.sh may apt-get and
+ * build for minutes): volleyd bounds each step at 20 minutes. The wait is for silence: each row
+ * restarts it, so a run of several long steps is not cut off.
+ */
+export const MACHINE_ADD_TIMEOUT_MS = 25 * 60_000;
 /** volleyd's `peer_code_ttl_s` default: how long a code lasts when an answer leaves it out. */
 const CODE_TTL_S = 600;
 
@@ -94,6 +100,25 @@ export type RepoStatusResult =
     }
   | { ok: false; error: string };
 
+/** What Add a bare machine sends (`machine_add`): the box, a password or a key file, sudo, a name. */
+export type MachineAddRequest = {
+  address: string;
+  sudo?: string;
+  name?: string;
+} & ({ password: string; key?: never } | { key: string; password?: never });
+
+/** `machine_add`'s answer: the machine's readiness from its doctor, and its two sign-ins. */
+export type MachineAddAnswer =
+  | {
+      ok: true;
+      name: string;
+      target: string;
+      ready: boolean;
+      signin: { gh: boolean; claude: boolean };
+      checks: DoctorCheck[];
+    }
+  | { ok: false; error: string };
+
 /** What `admin()` found: a definite yes or no, or volleyd did not answer. */
 export type AdminStatus = "admin" | "not-admin" | "no-answer";
 
@@ -130,6 +155,14 @@ export interface PeerOps {
   repoRemove(slug: string, machines?: string[]): Promise<RepoRemoveResult>;
   repoList(): Promise<RepoListResult>;
   repoStatus(slug?: string): Promise<RepoStatusResult>;
+  /**
+   * Make a bare box a paired machine (`machine_add`): volleyd runs `volley machine add`'s steps
+   * over ssh, each row handed to `onRow` as it happens. The passwords go to volleyd only.
+   */
+  machineAdd(
+    req: MachineAddRequest,
+    onRow: (row: MachineAddRow) => void,
+  ): Promise<MachineAddAnswer>;
 }
 
 /**
@@ -167,6 +200,19 @@ const asRecord = (v: unknown): Record<string, string> =>
     : {};
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+/** A `machine_add` progress payload as a row (`op` dropped), or null when it is not one. */
+function asRow(p: Record<string, unknown>): MachineAddRow | null {
+  const { step, total, title, state, line } = p;
+  if (typeof step !== "number" || typeof title !== "string") return null;
+  return {
+    step,
+    total: typeof total === "number" ? total : 7,
+    title,
+    state: state === "failed" ? "failed" : "running",
+    ...(typeof line === "string" ? { line } : {}),
+  };
+}
 
 export function createPeerOps(
   auth: AuthOps,
@@ -299,6 +345,34 @@ export function createPeerOps(
       if (!a.ok) return { ok: false, error: refusal(a, "the repository list") };
       const r = (a.result ?? {}) as { repos?: unknown };
       return { ok: true, repos: Array.isArray(r.repos) ? r.repos : [] };
+    },
+    async machineAdd(req, onRow) {
+      const fields = {
+        address: req.address,
+        auth: req.key !== undefined ? { key: req.key } : { password_ref: req.password },
+        ...(req.sudo ? { sudo_ref: req.sudo } : {}),
+        ...(req.name ? { name: req.name } : {}),
+      };
+      const a = await auth
+        .request("machine_add", fields, {
+          timeoutMs: MACHINE_ADD_TIMEOUT_MS,
+          onProgress: (p) => {
+            const row = asRow(p);
+            if (row) onRow(row);
+          },
+        })
+        .catch((err: unknown): AuthAnswer => ({ ok: false, error: message(err), unsent: true }));
+      if (!a.ok) return { ok: false, error: refusal(a, `adding ${req.address}`) };
+      const r = (a.result ?? {}) as Record<string, unknown>;
+      const signin = (r.signin ?? {}) as { gh?: unknown; claude?: unknown };
+      return {
+        ok: true,
+        name: typeof r.name === "string" ? r.name : "",
+        target: typeof r.target === "string" ? r.target : req.address,
+        ready: r.ready === true,
+        signin: { gh: signin.gh === true, claude: signin.claude === true },
+        checks: asChecks(r.checks),
+      };
     },
     async repoStatus(slug) {
       const a = await ask("repo_status", slug ? { slug } : {}, timeoutMs);

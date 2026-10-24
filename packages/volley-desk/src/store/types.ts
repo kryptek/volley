@@ -728,6 +728,18 @@ export interface RepoVerdict {
 }
 
 /**
+ * One progress row of a `machine_add` run (SPEC §4.6.14), a `progress` envelope on the op's
+ * reply topic before its answer: a step starting (no `line`), a line of it, or its failure.
+ */
+export interface MachineAddRow {
+  step: number;
+  total: number;
+  title: string;
+  state: "running" | "failed";
+  line?: string;
+}
+
+/**
  * readiness.schema.json payload: volleyd's verdict on a machine, on
  * `volley/_system/machines/<name>/readiness` (SPEC §4.6.15).
  */

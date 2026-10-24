@@ -909,6 +909,8 @@ export const WAVE_EVENT_TYPES = [
   "role_rolled_back",
   // Machine roles (SPEC §4.6.14): `peer_retarget` re-pointed a paired machine's tunnel.
   "peer_retargeted",
+  // Fleet (SPEC §4.6.14): an admin's `machine_add` made a bare box a paired machine (or failed).
+  "machine_added",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];
