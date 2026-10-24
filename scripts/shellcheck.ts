@@ -1,10 +1,10 @@
 /**
- * `bun run lint`'s shell step: shellcheck over install.sh. A contributor without shellcheck gets a
- * notice and a pass; CI (which installs it) requires it.
+ * `bun run lint`'s shell step: shellcheck over install.sh and the release tarball script. A
+ * contributor without shellcheck gets a notice and a pass; CI (which installs it) requires it.
  */
 import { join } from "node:path";
 
-const FILES = ["install.sh"];
+const FILES = ["install.sh", "scripts/packaging/tarball.sh"];
 const root = join(import.meta.dir, "..");
 
 const shellcheck = Bun.which("shellcheck");
