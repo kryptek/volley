@@ -793,7 +793,8 @@ room until the window resets).
 where they are, and a task naming its own `account:` keeps it. An unknown or not signed-in
 account is refused, as a `move wave` answer is. It journals `wave_account_moved { from, to, by }`
 (`null`: balanced); when an open `account_limit` offers `move wave <w> to <acct>`, the request
-answers it instead (`decision_id` on the event). The wave state's `account: { pinned, source,
+answers it instead (`decision_id` on the event). Any other pick (`null`, or an account the
+decision does not offer) leaves that `account_limit` open: answer it `not now` from its banner. The wave state's `account: { pinned, source,
 moved_from? }` says where the wave's new agents start (`source`: `wave`, `config` or
 `balanced`).
 
