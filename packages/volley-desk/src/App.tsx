@@ -1042,10 +1042,12 @@ export default function App() {
     Object.values(state.waves).map((w) => [w.id, coordinatorFor(w, ctx)]),
   );
   // The coordinators window's chip, as in the prototype: live waves whose coordinator is not
-  // working (a reconnecting one is coming back by itself: not counted).
+  // working (a reconnecting one is coming back by itself, an away one waits on nobody: not counted).
   const notWorking = waveList.filter((w) => {
     const c = coordinators[w.id]?.state;
-    return !ENDED_LABEL[w.state?.status ?? ""] && c !== "working" && c !== "reconnecting";
+    return (
+      !ENDED_LABEL[w.state?.status ?? ""] && c !== "working" && c !== "reconnecting" && c !== "away"
+    );
   }).length;
 
   const show = (wave: string) =>

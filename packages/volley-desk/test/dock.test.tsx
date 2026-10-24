@@ -115,7 +115,8 @@ describe("the dock", () => {
       Number(dock().getByRole("button", { name }).textContent?.match(/\d+/)?.[0] ?? 0);
     expect(badge("Wave coordinators")).toBeGreaterThan(0);
     expect(badge("Needs you")).toBeGreaterThan(0);
-    expect(badge("Wave coordinators") + badge("Needs you")).toBe(n);
+    // Less the releasing wave's decision item: its wave (owner gone) already counts for it.
+    expect(badge("Wave coordinators") + badge("Needs you") - 1).toBe(n);
   });
 
   it("tethers toggle from the dock; Settings opens and closes the Settings window", () => {

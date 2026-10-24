@@ -49,6 +49,7 @@ import {
   type ClaudeAccountPayload,
   type ClaudeSignin,
   type ConfigPayload,
+  type CoordinatorState,
   type CoordinatorView,
   type DecisionPayload,
   type DeskMessage,
@@ -84,6 +85,8 @@ const AGENT_CHANNELS = ["status", "progress", "result", "mailbox", "screen"] as 
 type AgentChannel = (typeof AGENT_CHANNELS)[number];
 
 const TERMINAL_STATUS = new Set(["done", "failed", "reaped"]);
+/** Coordinator states only the supervisor decides, from the owner's presence (SPEC §4.6.1). */
+const PRESENCE_STATES = new Set<CoordinatorState>(["reconnecting", "away", "gone"]);
 
 /** volleyd's agent id, and the ids of its control clients (`volleyd-cli-<suffix>`). */
 const SUPERVISOR_ID = /^volleyd(-|$)/;
@@ -1028,10 +1031,14 @@ export function waitsOnPerson(att: AgentAttention | null): boolean {
 /**
  * Coordinator state per wave owner. A wave the Desk itself owns (it claimed
  * it, so the owner is `state.self`) is coordinated by the person at this Desk:
- * `working`. Otherwise the owner's own topics win when they say
- * something (a terminal status → `gone`, an outstanding `awaiting_input`, or
- * a `resumed`); otherwise the supervisor's `coordinator` view from the wave
- * state is used; otherwise a known agent is `working` and an unseen one `gone`.
+ * `working`. The supervisor's `reconnecting`, `away` and `gone` (its reading
+ * of the owner's presence) are the view as they stand. Otherwise the owner's
+ * own topics win when they say something (an outstanding `awaiting_input`, or
+ * a `resumed`; a terminal status is `gone` only when the wave state carries no
+ * `coordinator`, else the supervisor's state stands until it republishes);
+ * otherwise the supervisor's `coordinator` view is used; otherwise a known
+ * agent is `working` and an unseen one `gone`. The view is per owner (its
+ * first wave's): attention reads each wave's own presence state.
  */
 function withCoordinators(state: DeskState): DeskState {
   const coordinators: Record<string, CoordinatorView> = {};
@@ -1057,11 +1064,20 @@ function withCoordinators(state: DeskState): DeskState {
     if (id === state.self) {
       // The Desk claimed the wave: the person at this Desk coordinates it (it has no agent).
       view = { id, waves: [w.id], state: "working" };
-    } else if (s.coordinator?.state === "reconnecting") {
-      // The supervisor's call (its grace, its flip to gone): the bound agent's terminal status is why.
-      view = { id, waves: [w.id], state: "reconnecting", ...fallbacks };
+    } else if (sup && PRESENCE_STATES.has(sup.state)) {
+      // The supervisor's call from the owner's presence (its grace, away, gone): never the Desk's.
+      view = { id, waves: [w.id], state: sup.state, ...fallbacks };
     } else if (a?.status && TERMINAL_STATUS.has(a.status.type)) {
-      view = { id, waves: [w.id], state: "gone", ...fallbacks };
+      // Ended: only a supervisor that publishes no `coordinator` leaves gone to the Desk.
+      view = sup
+        ? {
+            id,
+            waves: [w.id],
+            state: sup.state,
+            ...fallbacks,
+            ...optional("question", sup.question),
+          }
+        : { id, waves: [w.id], state: "gone", ...fallbacks };
     } else if (a?.attention && !waitsOnPerson(a.attention)) {
       // Idle with a background wait armed: it wakes on the wave's events, nobody has to answer.
       view = { id, waves: [w.id], state: "working", waitingOnEvents: true, ...fallbacks };

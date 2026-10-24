@@ -25,6 +25,18 @@ import { accentFor } from "../src/windows/wave/accent";
 
 const NOW = Date.parse("2026-10-21T12:00:00.000Z");
 const STATE = reduceAll(initialState(), [...demoAutopilot(NOW), ...demoInbox(NOW)]);
+/** The same, with the `autopilot` wave's owner back online: its decision is the coordinator's. */
+const LIVE: DeskState = (() => {
+  const w = STATE.waves.autopilot;
+  if (!w?.state?.coordinator) throw new Error("demo autopilot wave has no coordinator");
+  const coordinator = {
+    ...w.state.coordinator,
+    presence: "online" as const,
+    state: "working" as const,
+  };
+  const live = { ...w, state: { ...w.state, coordinator } };
+  return { ...STATE, waves: { ...STATE.waves, autopilot: live } };
+})();
 const CTX = { now: NOW };
 const ITEMS = Object.values(STATE.inbox ?? {});
 const item = (id: string) => ITEMS.find((i) => i.id === id) as InboxItem;
@@ -33,7 +45,7 @@ const PICKER = "p-coord-a1b2c3-toolu_01AbCdEf";
 const HANDOFF = "h-sess-9f2-12";
 const RELEASE = "r-autopilot-publish";
 
-const tiersOf = (items: readonly InboxItem[], state: DeskState = STATE): Record<string, Tier> =>
+const tiersOf = (items: readonly InboxItem[], state: DeskState = LIVE): Record<string, Tier> =>
   Object.fromEntries(items.map((i) => [i.id, inboxAttention(i, state, ctxFrom(state, CTX)).tier]));
 
 const frame: NeedsYouWindowProps["frame"] = {
@@ -78,10 +90,19 @@ describe("inbox attention (attention.ts)", () => {
     expect(t[DECISION]).toBe("coordinator");
   });
 
+  it("a wave decision needs you while the wave's owner is gone (the demo's releasing wave)", () => {
+    expect(tiersOf(ITEMS, STATE)[DECISION]).toBe("you");
+    expect(
+      inboxNeedsYou(STATE, CTX)
+        .map((i) => i.id)
+        .sort(),
+    ).toEqual([DECISION, HANDOFF, PICKER, RELEASE].sort());
+  });
+
   it("a wave decision needs you once it waited escalate_after_min, or the wave is mine", () => {
-    const late = inboxAttention(item(DECISION), STATE, ctxFrom(STATE, { now: NOW + 20 * 60_000 }));
+    const late = inboxAttention(item(DECISION), LIVE, ctxFrom(LIVE, { now: NOW + 20 * 60_000 }));
     expect(late.tier).toBe("you");
-    const mine = inboxAttention(item(DECISION), STATE, ctxFrom(STATE, { now: NOW, me: "lead" }));
+    const mine = inboxAttention(item(DECISION), LIVE, ctxFrom(LIVE, { now: NOW, me: "lead" }));
     expect(mine.tier).toBe("you");
   });
 
@@ -96,7 +117,7 @@ describe("inbox attention (attention.ts)", () => {
 
   it("inboxNeedsYou lists the open items a person must answer", () => {
     expect(
-      inboxNeedsYou(STATE, CTX)
+      inboxNeedsYou(LIVE, CTX)
         .map((i) => i.id)
         .sort(),
     ).toEqual([HANDOFF, PICKER, RELEASE].sort());

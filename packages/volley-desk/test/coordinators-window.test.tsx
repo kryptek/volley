@@ -6,6 +6,7 @@ import type { CoordinatorState, WaveView } from "../src/store/types";
 import {
   CoordinatorsWindow,
   type CoordinatorsWindowProps,
+  waveChip,
 } from "../src/windows/coordinators/CoordinatorsWindow";
 
 function wave(id: string, owner: string): WaveView {
@@ -346,6 +347,44 @@ describe("a coordinator reconnecting", () => {
     expect(within(r).queryByText(/claim it/)).toBeNull();
     expect(within(r).queryByText("needs you")).toBeNull();
     expect(r).toHaveClass("st-reconnecting");
+  });
+});
+
+describe("an owner away (autopilot runs the wave)", () => {
+  const NOW = Date.parse("2026-10-18T12:00:00.000Z");
+  const base = wave("overnight", "lead");
+  const w = (enabled: boolean): WaveView => ({
+    ...base,
+    state: base.state && {
+      ...base.state,
+      coordinator: {
+        agent_id: "lead",
+        presence: "offline",
+        state: "away",
+        last_seen: new Date(NOW - 2 * 3_600_000).toISOString(),
+      },
+      autopilot: { enabled, auto_resolved: 0, escalated: 0, budgets: {} },
+    },
+  });
+  const away: EffectiveCoordinator = { id: "lead", state: "away", lastSeen: NOW - 2 * 3_600_000 };
+
+  it("reads `Owner away · autopilot · last seen 2h ago` with a neutral chip and no claim it", () => {
+    setup({ waves: [w(true)], coordinators: { overnight: away }, needsYou: 0, now: NOW });
+    const r = row("overnight");
+    expect(within(r).getByText("Owner away · autopilot · last seen 2h ago")).toBeInTheDocument();
+    expect(within(r).getByText("away")).toHaveClass("st-chip--away");
+    expect(within(r).queryByText(/claim it/)).toBeNull();
+    expect(within(r).queryByText("needs you")).toBeNull();
+    expect(r).toHaveClass("st-away");
+  });
+
+  it("without autopilot reads `Owner away · last seen 2h ago`", () => {
+    setup({ waves: [w(false)], coordinators: { overnight: away }, needsYou: 0, now: NOW });
+    expect(within(row("overnight")).getByText("Owner away · last seen 2h ago")).toBeInTheDocument();
+  });
+
+  it("waveChip is `away`, never `needs`", () => {
+    expect(waveChip(w(true), away)).toBe("away");
   });
 });
 

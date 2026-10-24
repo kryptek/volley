@@ -313,6 +313,33 @@ describe("NeedsYou (coordinator reconnecting)", () => {
   });
 });
 
+describe("NeedsYou (owner away, autopilot runs the wave)", () => {
+  it("shows no banner: nothing waits on the owner, there is nothing to claim", () => {
+    const { container } = render(
+      <NeedsYou
+        wave="overnight"
+        coordinator={{ id: "lead", state: "away", lastSeen: NOW - 2 * 3_600_000 }}
+        openDecisions={1}
+        now={NOW}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("gone still renders the claim banner, aged from last_seen", () => {
+    render(
+      <NeedsYou
+        wave="overnight"
+        coordinator={{ id: "lead", state: "gone", lastSeen: NOW - 2 * 3_600_000 }}
+        openDecisions={1}
+        now={NOW}
+      />,
+    );
+    expect(screen.getByText(/Needs you: no coordinator for 120 min/)).toBeInTheDocument();
+    expect(screen.getByText(/volleyd claim overnight/)).toBeInTheDocument();
+  });
+});
+
 describe("AccountLimit (a wave's account_limit decision)", () => {
   const acct = (id: string, label: string, five: number | null, weekly = 20): AccountInfo => ({
     id,

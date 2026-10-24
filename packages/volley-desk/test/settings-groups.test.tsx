@@ -23,7 +23,6 @@ const config: ConfigPayload = {
   hard_ceiling: 12,
   spawn_budget_multiplier: 3,
   lease_pools: { build: { capacity: 2, ttl_s: 1800, match: ["npm run build"] } },
-  claim_after_s: 1800,
   heartbeat_alarm_s: 600,
   fallback_model: "claude-sonnet-5-5",
   spawn_timeout_s: 180,
@@ -142,7 +141,7 @@ describe("Settings sections drill into groups (#286)", () => {
 
     fireEvent.click(row("Attention"));
     const search = screen.getByRole("searchbox", { name: "Search settings" });
-    fireEvent.change(search, { target: { value: "claim" } });
+    fireEvent.change(search, { target: { value: "heartbeat" } });
     fireEvent.keyDown(search, { key: "Escape" });
     expect(search).toHaveValue("");
     expect(heading()).toHaveTextContent("Attention");
@@ -226,7 +225,7 @@ describe("search reaches into groups", () => {
 
   it("sectionOfPath places a deep link's row", () => {
     expect(sectionOfPath("fleet.local_agents")).toBe("Admission");
-    expect(sectionOfPath("claim_after_s")).toBe("Attention");
+    expect(sectionOfPath("heartbeat_alarm_s")).toBe("Attention");
     expect(sectionOfPath("lease_pools.build.capacity")).toBe("Leases");
     expect(sectionOfPath("agent_auto_compact_pct")).toBe("Other");
   });
@@ -308,7 +307,7 @@ describe("summaries", () => {
     const s = supervisorSummaries({ config, leases });
     expect(s.leases).toBe("2 pools · 1/4 held");
     expect(s.admission).toBe("ceiling 12 · budget 3×");
-    expect(s.attention).toBe("claim 30 min · heartbeat 10 min");
+    expect(s.attention).toBe("heartbeat 10 min");
     expect(s.recovery).toBe("claude-sonnet-5-5 · spawn 3 min");
     expect(s.other).toMatch(/^\d+ settings?$/);
     expect(supervisorSummaries({ config: null, leases: {} }).leases).toBe("No pools");

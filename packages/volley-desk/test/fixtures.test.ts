@@ -86,9 +86,10 @@ describe("fixtures — demo state", () => {
       Object.values(s.coordinators)
         .map((c) => c.state)
         .sort(),
-      // The ended wave's coordinator is gone too (it signed off), which needs nobody; the two
-      // autopilot waves share one owner, reconnecting.
-    ).toEqual(["awaiting_input", "gone", "gone", "reconnecting", "working"]);
+      // The ended wave's coordinator is gone too (it signed off), which needs nobody; `lead`
+      // owns the releasing (gone) and planned (away) waves, `relay` the reconnecting one. The
+      // store keeps one view per owner; the waves' own states are checked below.
+    ).toEqual(["awaiting_input", "gone", "gone", "gone", "reconnecting", "working"]);
     const waiting = Object.values(s.coordinators).find((c) => c.state === "awaiting_input");
     expect(waiting?.question).toMatch(/merge/i);
   });
@@ -252,6 +253,40 @@ describe("fixtures — schema validity", () => {
   });
 });
 
+describe("fixtures — owner presence", () => {
+  const s = demoState(NOW);
+  const ctx = { now: NOW, me: null, config: null, coordinators: s.coordinators, agents: s.agents };
+
+  it("every demo wave's coordinator carries presence", () => {
+    const waves = Object.values(s.waves).filter((w) => w.state?.coordinator);
+    expect(waves.length).toBeGreaterThan(5);
+    for (const w of waves) {
+      expect(w.state?.coordinator?.presence, w.id).toMatch(/^(online|offline)$/);
+    }
+  });
+
+  it("has one wave whose owner is away while autopilot runs it", () => {
+    const away = Object.values(s.waves).filter((w) => coordinatorFor(w, ctx).state === "away");
+    expect(away.map((w) => w.id)).toEqual([PLANNED_WAVE]);
+    const w = away[0] as NonNullable<(typeof away)[0]>;
+    expect(w.state?.autopilot?.enabled).toBe(true);
+    expect(NOW - Date.parse(w.state?.coordinator?.last_seen ?? "")).toBe(2 * 3_600_000);
+    expect(waveAttention(w, ctx)).toEqual({
+      tier: "info",
+      reason: "Owner away · autopilot runs this wave",
+    });
+  });
+
+  it("a wave with an open owner-only inbox item is never away", () => {
+    for (const item of Object.values(s.inbox ?? {})) {
+      if (!item.owner_only || item.answered || item.wave === undefined) continue;
+      const w = s.waves[item.wave];
+      if (!w) continue;
+      expect(coordinatorFor(w, ctx).state, item.id).not.toBe("away");
+    }
+  });
+});
+
 describe("fixtures — autopilot", () => {
   const s = reduceAll(initialState(), demoAutopilot(NOW));
 
@@ -264,6 +299,14 @@ describe("fixtures — autopilot", () => {
       tier: "info",
       reason: "Coordinator reconnecting · 3m",
     });
+  });
+
+  it("has a releasing wave whose owner is gone: its owner-only release item waits", () => {
+    const w = s.waves.autopilot;
+    const ctx = { now: NOW, me: null, config: null, coordinators: s.coordinators, agents: {} };
+    expect(w?.state?.coordinator).toMatchObject({ presence: "offline", state: "gone" });
+    expect(coordinatorFor(w as NonNullable<typeof w>, ctx).state).toBe("gone");
+    expect(waveAttention(w as NonNullable<typeof w>, ctx).tier).toBe("you");
   });
 
   it("has a releasing wave with a merge queue, a train, a fixer and both autopilot events", () => {

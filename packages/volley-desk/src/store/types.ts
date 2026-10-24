@@ -219,10 +219,12 @@ export interface WaveTrain {
 }
 
 /**
- * `reconnecting`: the agent bound to a coordinator-name owner went away less than
- * `autopilot.reconnect_grace_s` ago (SPEC §4.6.1); the supervisor flips it to `gone`.
+ * The supervisor's call for an offline owner (SPEC §4.6.1): `reconnecting` while the agent bound
+ * to a coordinator-name owner went away less than `autopilot.reconnect_grace_s` ago; past that,
+ * `gone` while something only the owner can answer waits in the wave, else `away` (autopilot runs
+ * it). The Desk never derives any of the three from silence.
  */
-export type CoordinatorState = "working" | "awaiting_input" | "reconnecting" | "gone";
+export type CoordinatorState = "working" | "awaiting_input" | "reconnecting" | "away" | "gone";
 
 export interface WaveCoordinator {
   agent_id: string;
@@ -425,7 +427,6 @@ export interface Tunables {
     ci_queue_max?: number;
     hysteresis_samples?: number;
   };
-  claim_after_s?: number;
   heartbeat_alarm_s?: number;
   fallback_model?: string | null;
   mailbox?: { session_expiry_s?: number };
