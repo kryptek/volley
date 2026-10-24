@@ -68,7 +68,7 @@
             "agents": {
               "type": "array",
               "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
-              "description": "Agents whose latest sample is on this account."
+              "description": "Agents whose latest sample is on this account and recent: a session the supervisor does not supervise is forgotten an hour after its last sample (spec section 4.6.12)."
             },
             "waves": {
               "type": "array",

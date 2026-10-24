@@ -424,7 +424,7 @@ describe("volley claude", () => {
             headroom: 60,
             five_hour_pct: 12,
             weekly_pct: 40,
-            agents: 2,
+            agents: 3,
             score: 1.7,
             binding: "five_hour",
             eligible: true,
@@ -438,7 +438,7 @@ describe("volley claude", () => {
             headroom: 40,
             five_hour_pct: 60,
             weekly_pct: 20,
-            agents: 1,
+            agents: 0,
             score: 0.9,
             binding: "weekly",
             eligible: true,
@@ -458,7 +458,7 @@ describe("volley claude", () => {
             headroom: 2,
             five_hour_pct: 98,
             weekly_pct: 30,
-            agents: 3,
+            agents: 1,
             score: 0.1,
             binding: "five_hour",
             eligible: false,
@@ -476,6 +476,55 @@ describe("volley claude", () => {
           },
         ],
         picks: { fable: "work@peer-a", opus: "work@peer-a", sonnet: null, haiku: null },
+      },
+      {
+        // #562: no future reset known (none reported, or passed)
+        name: "peer-b",
+        candidates: [
+          {
+            account: "idle@peer-b",
+            headroom: 100,
+            five_hour_pct: 0,
+            weekly_pct: 32,
+            agents: 0,
+            score: 1,
+            binding: "five_hour",
+            eligible: true,
+            binding_left: 100,
+            binding_resets_at: null,
+            in_flight: 0,
+            projected_pct: 0,
+          },
+          {
+            account: "weekly@peer-b",
+            headroom: 68,
+            five_hour_pct: 0,
+            weekly_pct: 32,
+            agents: 0,
+            score: 0.68,
+            binding: "weekly",
+            eligible: true,
+            binding_left: 68,
+            binding_resets_at: null,
+            in_flight: 0,
+            projected_pct: 32,
+          },
+          {
+            account: "rolled@peer-b",
+            headroom: 100,
+            five_hour_pct: 0,
+            weekly_pct: 34,
+            agents: 0,
+            score: 1,
+            binding: "five_hour",
+            eligible: true,
+            binding_left: 100,
+            binding_resets_at: iso(5 * 60_000),
+            in_flight: 0,
+            projected_pct: 0,
+          },
+        ],
+        picks: { fable: null, opus: null, sonnet: null, haiku: null },
       },
     ],
   };
@@ -523,16 +572,22 @@ describe("volley claude", () => {
     const lines = r.stdout.split("\n");
     expect(lines[0]).toBe("this machine");
     expect(lines[1]).toMatch(
-      /^ {2}work +o•••@example\.com +5h 12% +7d 40% +Fable 30% +5h 88% left in 5[23]m \(62% after 3 in flight\) +2 agents +← fable, opus$/,
+      /^ {2}work +o•••@example\.com +5h 12% +7d 40% +Fable 30% +5h 88% left in 5[23]m \(62% after 3 in flight\) +3 agents +← fable, opus$/,
     );
     expect(lines[2]).toMatch(
-      /^ {2}primary +5h 60% +7d 20% +Fable — +7d 80% left in 2d 4h +1 agent +← sonnet, haiku$/,
+      /^ {2}primary +5h 60% +7d 20% +Fable — +7d 80% left in 2d 4h +0 agents +← sonnet, haiku$/,
     );
     expect(lines[3]).toBe("peer-a");
     expect(lines[4]).toMatch(
-      /^ {2}primary@peer-a +5h 98% +7d 30% +Fable — +over cap \(100% after 1 in flight\) +3 agents$/,
+      /^ {2}primary@peer-a +5h 98% +7d 30% +Fable — +over cap \(100% after 1 in flight\) +1 agent$/,
     );
     expect(lines[5]).toMatch(/^ {2}work@peer-a +no usage yet +2 agents +← fable, opus$/);
+    // #562: no future reset known reads as the room, without a time
+    expect(lines[6]).toBe("peer-b");
+    expect(lines[7]).toMatch(/^ {2}idle@peer-b +5h 0% +7d 32% +Fable — +5h unused +0 agents$/);
+    expect(lines[8]).toMatch(/^ {2}weekly@peer-b +5h 0% +7d 32% +Fable — +7d 68% left +0 agents$/);
+    expect(lines[9]).toMatch(/^ {2}rolled@peer-b +5h 0% +7d 34% +Fable — +5h unused +0 agents$/);
+    expect(r.stdout).not.toMatch(/left in (unknown|now)/);
     expect(r.stdout).not.toContain("owner@example.com");
     await v.b.disconnect();
   });
@@ -550,7 +605,7 @@ describe("volley claude", () => {
     const r = await run(["balance", "--model", "claude-fable-1"]);
     expect(r.exitCode).toBe(0);
     expect(v.seen[0]).toMatchObject({ op: "claude_balance", model: "claude-fable-1" });
-    expect(r.stdout.match(/← claude-fable-1/g)).toHaveLength(2);
+    expect(r.stdout.match(/← claude-fable-1/g)).toHaveLength(3);
     await run(["balance", "--machine", "peer-a"]);
     expect(v.seen.at(-1)).toMatchObject({ op: "claude_balance", machine: "peer-a" });
     await v.b.disconnect();

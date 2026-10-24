@@ -793,11 +793,12 @@ first, then the rest (the cap orders, it never refuses a spawn; the all-hot `acc
 below is the notification). Each group goes by score, highest first, so among over-cap accounts
 the one whose window resets soonest for its room goes first, not the least over; an account
 with no usage at all counts as on pace (1). Scores within `claude.balance.tie_band_pct`
-(default 10) percent of a band's leader count as equal and go to fewer agents, then signed-in
+(default 10) percent of a band's leader count as equal and go to fewer agents in flight, then signed-in
 profiles before the primary (its interactive use goes unreported), then candidate order. Both
 tunables are the supervisor's (`volleyd config set claude.balance.cap_pct=95`); a wave's own
 `config:` does not change them. `account_chosen` candidates carry `score`, `binding`,
-`eligible`, `binding_left`, `binding_resets_at`, `in_flight` and `projected_pct`; `headroom`,
+`eligible`, `binding_left`, `binding_resets_at`, `in_flight` and `projected_pct` (their `agents`
+equals `in_flight`); `headroom`,
 `five_hour_pct`, `weekly_pct` and `binding_left` keep their sampled meaning for the readers that
 show the sample.
 
@@ -819,8 +820,15 @@ windows) stand in: deliberately a busy agent on a Max-tier plan. The rates live 
 `claude-usage.json` beside the windows (an older file restores without them) and stay off the
 retained record. With the defaults twelve picks over accounts at 95% / 40% / 10% (5-hour, resets
 in 3 h) go 0 / 5 / 7, and a pick's `why` shows the projection:
-`work: 18% left (12% after 3 in flight), resets in 52m (use it or lose it) on local`. Ties in a
-band go to fewer agents counting the ones in flight, so even an all-over-cap pass spreads.
+`work: 18% left (12% after 3 in flight), resets in 52m (use it or lose it) on local`; with no
+future reset known (none reported, or passed) the room has no time: `work: 5h unused on local`,
+`work: 7d 68% left on local`. Ties in a band go to fewer agents in flight, so even an
+all-over-cap pass spreads. The account record's `agents` are not counted: they include sessions
+volleyd does not supervise (the owner's interactive `coordinator-*` sessions publish usage too).
+Such a session still moves its account's windows, but volleyd forgets it an hour after its last
+sample (`AGENT_SAMPLE_TTL_MS` in `claude/usage.ts`, not a tunable) and clears its retained
+`usage` topic, so a restart does not bring it back; a supervised or launching agent stays however
+old its sample, and a restart waits for reconciliation before expiring any.
 
 **Running agents** (D2). When an account a supervised agent runs under reaches the wave's
 `claude.warn_at_pct` in a window that counts for it (5-hour, 7-day, or its model family's weekly

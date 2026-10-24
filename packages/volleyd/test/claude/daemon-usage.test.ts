@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
-import { usageAccountTopic } from "../../src/claude/usage";
+import { AGENT_SAMPLE_TTL_MS, usageAccountTopic } from "../../src/claude/usage";
 import { ControlClient } from "../../src/control";
 import { Journal } from "../../src/journal";
 import { MACHINE_CHANNEL, machineTopic } from "../../src/machines";
@@ -438,6 +438,89 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
     // A wave move cannot reach a remote host's agents: its window opens no decision.
     await s.consumed();
     expect(s.journal().filter(limitOpened)).toEqual([]);
+  }, 20_000);
+});
+
+describe("interactive and stale sessions on an account (#562)", () => {
+  const COORD = "coordinator-ab12";
+  const probes: ReconcileProbes = {
+    branch: async (_repo, branch) => ({ name: branch, exists: true, head: "abc123" }),
+    pr: async () => null,
+  };
+  let control: ControlClient | undefined;
+  afterEach(async () => {
+    await control?.close();
+    control = undefined;
+  });
+
+  /** The local primary's `claude_balance` candidate. */
+  async function primaryCandidate(): Promise<Record<string, unknown> | undefined> {
+    control ??= await ControlClient.connect(s.env.broker.url, NS);
+    const r = await control.request("claude_balance", { machine: "local" });
+    expect(r.ok, r.error).toBe(true);
+    const [m] = (r.result as { machines: { candidates: Record<string, unknown>[] }[] }).machines;
+    return m?.candidates.find((c) => c.account === "primary");
+  }
+
+  const retained = async (agent: string) =>
+    (await s.agent.queryRetained(buildTopic(NS, agent, "usage"), 300)) ?? "";
+
+  it("a coordinator session moves the windows, never counts as an agent, and leaves the record an hour after its last sample", async () => {
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+    const clock = fakeClock(T0);
+    s = await makeSupervisedEnv({
+      waveExtra: "account: primary",
+      daemon: { claude: { root, primaryDir: primary }, clock },
+    });
+    // two interactive sessions on the primary: on its record, not counted by the balance
+    await publishUsage(COORD, usage("primary", 19));
+    await publishUsage("coordinator-cd34", usage("primary", 20));
+    const rec = await recordWhen("primary", (r) => (r.agents as string[]).length === 2);
+    expect(rec).toMatchObject({
+      five_hour: { pct: 20 },
+      agents: [COORD, "coordinator-cd34"],
+      waves: [],
+    });
+    // only the supervised agent counts (through its spawn's account, before it samples)
+    expect(await primaryCandidate()).toMatchObject({ agents: 1, in_flight: 1 });
+
+    // the supervised agent samples: it counts, the session does not
+    await publishUsage(AGENT, usage("primary", 22));
+    await recordWhen("primary", (r) => (r.agents as string[]).includes(AGENT));
+    expect(await primaryCandidate()).toMatchObject({ agents: 1, in_flight: 1 });
+
+    // an hour and a minute later, a pass: the session goes, the supervised agent (as old) stays
+    clock.sleepHost(AGENT_SAMPLE_TTL_MS + 60_000);
+    await publishUsage(AGENT, usage("primary", 25));
+    const after = await recordWhen(
+      "primary",
+      (r) => !(r.agents as string[]).includes(COORD) && (r.five_hour as { pct: number }).pct === 25,
+    );
+    expect(after).toMatchObject({ agents: [AGENT], waves: ["w1"] });
+    await eventually(async () => (await retained(COORD)) === "");
+    expect(await retained("coordinator-cd34")).toBe("");
+    expect(await retained(AGENT)).not.toBe("");
+  }, 20_000);
+
+  it("a stale coordinator sample retained across a restart is not listed and its topic is cleared", async () => {
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+    const clock = fakeClock(T0);
+    s = await makeSupervisedEnv({
+      waveExtra: "account: primary",
+      daemon: { claude: { root, primaryDir: primary }, clock },
+    });
+    await s.daemon.stop();
+    await publishUsage(COORD, usage("primary", 40));
+    await publishUsage(AGENT, usage("primary", 41));
+    clock.sleepHost(AGENT_SAMPLE_TTL_MS + 60_000);
+
+    const second = await s.restart({ reconcile: probes });
+    await second.reconciled();
+    await eventually(async () => (await retained(COORD)) === "");
+    const rec = await recordWhen("primary", (r) => !(r.agents as string[]).includes(COORD));
+    // the windows still folded (the session's spend is the account's); the supervised one stays
+    expect(rec).toMatchObject({ agents: [AGENT], five_hour: { pct: 41 } });
+    expect(await primaryCandidate()).toMatchObject({ agents: 1, in_flight: 1 });
   }, 20_000);
 });
 
