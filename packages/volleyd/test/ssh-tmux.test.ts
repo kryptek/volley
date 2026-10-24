@@ -14,6 +14,7 @@ import {
   type RepoHostSpec,
   type SlugTarget,
   SshTmuxHost,
+  classifyRevParse,
   resolveRemoteHost,
 } from "../src/hosts/ssh-tmux";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
@@ -849,6 +850,66 @@ describe("SshTmuxHost", () => {
       const err = await host.repoExists().catch((e: unknown) => e as SpawnError);
       expect(err).toMatchObject({ code: "LAUNCH_FAILED", detail: { target: "dev@box" } });
     }
+  });
+
+  it("probeClone reads the clone's root, then its origin, as two scripts (repo_probe)", async () => {
+    const r = remote((s) =>
+      argvIs("git", "-C", "/srv/example-repo", "rev-parse", "--show-toplevel")(s)
+        ? { stdout: "/srv/example-repo\n" }
+        : argvIs("git", "-C", "/srv/example-repo", "remote", "get-url", "origin")(s)
+          ? { stdout: "https://github.com/Example-Org/Example-Repo.git\n" }
+          : undefined,
+    );
+    expect(await r.host.probeClone("/srv/example-repo")).toEqual({
+      state: "found",
+      root: "/srv/example-repo",
+      origin: "https://github.com/Example-Org/Example-Repo.git",
+      slug: "example-org/example-repo",
+    });
+    expect(r.scripts().map((s) => s?.steps.map((st) => st.argv))).toEqual([
+      [["git", "-C", "/srv/example-repo", "rev-parse", "--show-toplevel"]],
+      [["git", "-C", "/srv/example-repo", "remote", "get-url", "origin"]],
+    ]);
+  });
+
+  it("probeClone: a missing folder, not a git clone, no origin, and a throw when ssh fails", async () => {
+    const answer = (rev: Partial<ExecResult>, origin: Partial<ExecResult> = {}) =>
+      remote((s) => (argvIs("git", "-C", "/srv/nope", "rev-parse")(s) ? rev : origin)).host;
+    const missing = {
+      code: 128,
+      stderr: "fatal: cannot change to '/srv/nope': No such file or directory\n",
+    };
+    expect(await answer(missing).probeClone("/srv/nope")).toEqual({ state: "missing" });
+    const notGit = {
+      code: 128,
+      stderr: "fatal: not a git repository (or any of the parent directories): .git\n",
+    };
+    expect(await answer(notGit).probeClone("/srv/nope")).toEqual({ state: "not_git" });
+    const noOrigin = { code: 2, stderr: "error: No such remote 'origin'\n" };
+    expect(await answer({ stdout: "/srv/nope\n" }, noOrigin).probeClone("/srv/nope")).toEqual({
+      state: "no_origin",
+      root: "/srv/nope",
+    });
+    const down = { code: 255, stderr: "ssh: connect to host box port 22: Connection refused" };
+    await expect(answer(down).probeClone("/srv/nope")).rejects.toThrow(/Connection refused/);
+    await expect(answer({ stdout: "/srv/nope\n" }, down).probeClone("/srv/nope")).rejects.toThrow(
+      /Connection refused/,
+    );
+  });
+
+  it("classifyRevParse names what git's rev-parse said", () => {
+    expect(classifyRevParse({ code: 0, stdout: "/srv/r\n", stderr: "", timedOut: false })).toEqual({
+      state: "found",
+      root: "/srv/r",
+    });
+    const no = (stderr: string) =>
+      classifyRevParse({ code: 128, stdout: "", stderr, timedOut: false });
+    expect(no("fatal: cannot change to '/srv/x': No such file or directory")).toEqual({
+      state: "missing",
+    });
+    expect(no("fatal: not a git repository (or any parent up to mount point /)")).toEqual({
+      state: "not_git",
+    });
   });
 
   it("readFile: the file, null when there is none, a throw when ssh fails", async () => {

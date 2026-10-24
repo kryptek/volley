@@ -66,7 +66,8 @@ import { AGENT_BRANCH } from "./worktree";
  *
  * ALLOW (program by bare name only — never a path):
  *   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
- *     branch --list | branch --track <b> <remote>/<b> | merge-base | show | ls-tree
+ *     branch --list | branch --track <b> <remote>/<b> | merge-base | show | ls-tree |
+ *     remote get-url origin (exactly: repo_probe's reading; every other `git remote` is denied)
  *     worktree add needs -b <new branch> or --detach (never checks out an existing branch), or
  *     -B only to re-create an agent branch (`<wave>/<task>-<role>-<n>`, worktree.ts
  *     AGENT_BRANCH — never a release or any other branch); the new branch is never main/master
@@ -1760,6 +1761,12 @@ function git(args: string[]): Verdict {
     const v = checkArgs("git worktree add", rest.slice(1), spec);
     return v.kind === "allow" ? worktreeAddBranch(rest.slice(1)) : v;
   }
+  // repo_probe's origin reading (SPEC §4.6.21): exactly `remote get-url origin`, never a write.
+  if (sub === "remote") {
+    return rest.length === 2 && rest[0] === "get-url" && rest[1] === "origin"
+      ? ALLOW
+      : deny(`git remote ${rest[0] ?? ""}`.trim());
+  }
   if (sub === "branch" && rest[0] === "--track") return trackingBranch(rest.slice(1));
   if (sub === "branch" && !rest.includes("--list") && !rest.includes("-l")) {
     return deny("git branch (without --list)");
@@ -2400,10 +2407,13 @@ const CLONE_URL = /^https:\/\/[a-z0-9.-]+(?:\/[A-Za-z0-9._~-]+)+$/;
 export const isCloneUrl = (url: string): boolean =>
   CLONE_URL.test(url) && !url.split("/").some((seg) => seg === "." || seg === "..");
 
+/** An adopted clone's path (`--repo-add`'s, `repo_probe`'s): absolute, no `..`, no control character. */
+export const isRepoAddPath = (p: string): boolean => isVolleyDir(p);
+
 /** `--repo-add`'s value: `<owner/name>`, or `<owner/name>=<abs path>` (an adopted clone). */
 export const isRepoAdd = (v: string): boolean => {
   const i = v.indexOf("=");
-  return i < 0 ? isSlug(v) : isSlug(v.slice(0, i)) && isVolleyDir(v.slice(i + 1));
+  return i < 0 ? isSlug(v) : isSlug(v.slice(0, i)) && isRepoAddPath(v.slice(i + 1));
 };
 
 /**

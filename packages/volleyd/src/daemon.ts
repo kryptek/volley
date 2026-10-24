@@ -299,6 +299,7 @@ import {
   SERVICE_LABEL,
   TMUX_SIZE,
   isRepoAdd,
+  isRepoAddPath,
   mintConsentToken,
   mintModelSwitchToken,
   mintWakeToken,
@@ -914,6 +915,7 @@ const PEER_ADMIN_OPS: ReadonlySet<string> = new Set([
   "repo_remove",
   "repo_list",
   "repo_status",
+  "repo_probe",
   // An admin archives any ended wave (SPEC §4.6.20), whoever owns it.
   "archive",
 ]);
@@ -6442,6 +6444,38 @@ export class Daemon {
   }
 
   /**
+   * `repo_probe { machine, path }` (admin): what is at `path` on a paired machine — its clone's
+   * root and origin (`probeClone`), so the Desk can say before an add whether an adopted clone is
+   * the repository being added. A reading: nothing is journaled and no config changes. Its ssh
+   * round-trip is awaited outside the queue.
+   */
+  private repoProbe(p: Record<string, unknown>): AuthOutcome | DeferredAuth {
+    const refuse = (error: string) => ({ reply: authReply("repo_probe", { ok: false, error }) });
+    const { machine, path } = p;
+    if (typeof machine !== "string" || machine === "") return refuse("machine must be a host name");
+    if (machine === this.config.localName())
+      return refuse(`${machine} is the supervisor's own machine: its clone is the managed one`);
+    if (!Object.hasOwn(this.config.effective().hosts, machine))
+      return refuse(`no configured host named "${machine}"`);
+    if (typeof path !== "string" || !isRepoAddPath(path))
+      return refuse("path must be an absolute path");
+    const host = this.remoteFor(machine);
+    if (typeof host === "string") return refuse(host);
+    return {
+      later: async () => {
+        try {
+          const found = await host.probeClone(path);
+          return {
+            reply: authReply("repo_probe", { ok: true, result: { machine, path, ...found } }),
+          };
+        } catch (e) {
+          return refuse(e instanceof Error ? e.message : String(e));
+        }
+      },
+    };
+  }
+
+  /**
    * Config for a checked `repo_add` (unchanged when it already says so: a second add is
    * idempotent), `repo_added`, and each machine's run. Inside the queue.
    */
@@ -11578,6 +11612,7 @@ export class Daemon {
     if (op === "repo_remove") return this.repoRemove(p, sender);
     if (op === "repo_list") return { reply: authReply(op, this.repoList()) };
     if (op === "repo_status") return { reply: authReply(op, this.repoStatus(p)) };
+    if (op === "repo_probe") return this.repoProbe(p);
     if (op === "archive") {
       const wave = typeof p.wave === "string" ? p.wave : "";
       const r = this.archived.has(wave)
@@ -12078,6 +12113,7 @@ export class Daemon {
       case "peer_retarget":
       case "repo_add":
       case "repo_remove":
+      case "repo_probe":
       // Machine roles (SPEC §4.6.24): admin ops, never on the mailbox.
       case "role_plan":
       case "role_move":

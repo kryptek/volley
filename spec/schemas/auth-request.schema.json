@@ -46,6 +46,7 @@
                 "repo_remove",
                 "repo_list",
                 "repo_status",
+                "repo_probe",
                 "role_plan",
                 "role_move",
                 "role_rollback",
@@ -168,6 +169,17 @@
                 "pattern": "^/[^\\n\\r]*$"
               },
               "description": "repo_add: a paired machine's existing clone to adopt (hosts.<machine>.repos), by machine name; absolute paths there."
+            },
+            "machine": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_.-]{0,62}$",
+              "description": "repo_probe: the paired machine (a configured host, never the supervisor's own) whose path is read (spec section 4.6.21)."
+            },
+            "path": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^/[^\\n\\r]*$",
+              "description": "repo_probe: the adopted-clone path read on the machine, as repo_add's paths take it (absolute, no `..` segment, no control character)."
             },
             "step": {
               "enum": ["detect", "security", "accounts", "services", "phone"],
@@ -463,6 +475,19 @@
               },
               "then": {
                 "required": ["op", "slug"],
+                "properties": {}
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "op": {
+                    "const": "repo_probe"
+                  }
+                }
+              },
+              "then": {
+                "required": ["op", "machine", "path"],
                 "properties": {}
               }
             },
