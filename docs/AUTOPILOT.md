@@ -9,7 +9,8 @@ the few things only you can answer. This page is the map; each piece links to it
 - **A coordinator name.** Set `VOLLEY_COORDINATOR` (e.g. `coord-main`) in the volley MCP
   registration's `env` and in your shell profile (root README, Quickstart step 4). The wave is
   owned by the name, not by the session, so the session can end and any later session with the
-  same name answers for it.
+  same name answers for it. Nothing needs to run to keep it present: see
+  [Presence](#presence-nothing-to-keep-alive) below.
 - **`/volley-issues`, or `volleyd run <wave.yaml> --owner "$VOLLEY_COORDINATOR"`.** The skill
   writes `merge: auto` and `branch_update: merge` into the wave file by default and leaves once
   the wave is submitted ([volley-issues README](../packages/volley-issues/README.md)).
@@ -18,6 +19,30 @@ the few things only you can answer. This page is the map; each piece links to it
   one the wave simply completes. ([The release train](../packages/volleyd/README.md#the-release-train))
 - **A phone that gets the Desk's notifications** (open the Desk on it once and allow
   notifications), or `volley notify` with a webhook to a push service.
+
+## Presence: nothing to keep alive
+
+Your presence is the volley MCP server's broker connection. Its will flips the session offline
+the moment the connection drops (the session ended, the laptop slept, the MCP server
+restarted); a session that is connected but quiet for hours is still online. Nothing has to be
+published to stay present.
+
+What the Desk's coordinators window and `volleyd status` show once you have left:
+
+- **`Coordinator reconnecting`** (`· reconnecting` in `volleyd status`): for
+  `autopilot.reconnect_grace_s` (default 15 minutes) after the session went away. The wave
+  cannot be claimed yet; a restarted MCP server picks it straight back up.
+- **`Owner away · autopilot · last seen 2h ago`** (`· away (autopilot) · last seen 2h ago`):
+  past the grace, with nothing waiting on you. Autopilot runs the wave; no banner, nothing rings.
+- **`No coordinator · claim it`** (`· gone · 1 decision waits for you`): only while something
+  only you can answer waits (an escalated or owner-only decision, an owner-only inbox item, a gate
+  under `merge: manual`). The Needs-you banner appears and your phone rings once. Answer it from
+  the Desk or the CLI and the row goes back to away.
+
+Coming back is starting a session whose MCP server has the same `VOLLEY_COORDINATOR`: it is
+online within seconds, volleyd journals `owner_reconnected`, and nothing needs claiming. No cron
+job, launchd agent or scheduled prompt is needed to look alive; if one is left over from an
+earlier release (a periodic status republish, say), remove it.
 
 ## What runs unattended
 
