@@ -2,8 +2,10 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EffectiveCoordinator } from "../src/attention";
 import { Frame } from "../src/canvas/Frame";
+import type { AccountInfo } from "../src/store/claude";
 import type { DecisionPayload } from "../src/store/types";
 import {
+  AccountLimit,
   AttentionLine,
   COPY_RESET_MS,
   MachineDown,
@@ -308,5 +310,115 @@ describe("NeedsYou (coordinator reconnecting)", () => {
       />,
     );
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe("AccountLimit (a wave's account_limit decision)", () => {
+  const acct = (id: string, label: string, five: number | null, weekly = 20): AccountInfo => ({
+    id,
+    label,
+    machine: "local",
+    plan: null,
+    email: null,
+    org: null,
+    fiveHour: five === null ? null : { pct: five, resets_at: null },
+    weekly: { pct: weekly, resets_at: null },
+    sampledAt: null,
+    modelWeekly: {},
+    probe: null,
+    signedIn: true,
+    agents: [],
+    waves: [],
+  });
+  const accounts = [acct("work", "Work", 91), acct("personal", "Personal", 12)];
+  const limit: DecisionPayload = {
+    decision_id: "d-7k2m9q4x",
+    wave: "w1",
+    task: null,
+    kind: "account_limit",
+    question: "Needs you: Claude account work is at 91% of its 5-hour window.",
+    options: ["move wave w1 to personal", "not now"],
+    opened_at: "2026-10-18T11:59:00.000Z",
+    acct: "work",
+    pct: 91,
+    resets_at: "2026-10-18T13:30:00.000Z",
+    suggested: "personal",
+  };
+  const banner = () => screen.getByRole("status", { name: "Claude account limit" });
+
+  it("offers Move to <suggested> and Not now; Move answers with the move wave option", async () => {
+    const answer = vi.fn(async () => ({ ok: true }));
+    render(<AccountLimit decision={limit} accounts={accounts} now={NOW} onAnswer={answer} />);
+    expect(banner()).toHaveTextContent("Needs you: Work is at 91% of its 5-hour window");
+    expect(banner()).toHaveTextContent(
+      "Move wave w1 to Personal (12% used)? New agents start on Personal",
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Move to Personal" }));
+    });
+    expect(answer).toHaveBeenCalledWith("move wave w1 to personal");
+  });
+
+  it("Not now answers with the decision's not-now option", async () => {
+    const answer = vi.fn(async () => ({ ok: true }));
+    render(<AccountLimit decision={limit} accounts={accounts} now={NOW} onAnswer={answer} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Not now" }));
+    });
+    expect(answer).toHaveBeenCalledWith("not now");
+  });
+
+  it("a suggestion with no usage yet says so; one the Desk has no record of says nothing", () => {
+    const fresh = { ...limit, suggested: "fresh", options: ["move wave w1 to fresh", "not now"] };
+    const { rerender } = render(
+      <AccountLimit
+        decision={fresh}
+        accounts={[...accounts, { ...acct("fresh", "Fresh", null), weekly: null }]}
+        now={NOW}
+      />,
+    );
+    expect(banner()).toHaveTextContent("Move wave w1 to Fresh (no usage yet)?");
+    rerender(
+      <AccountLimit decision={{ ...fresh, suggested: "ghost" }} accounts={accounts} now={NOW} />,
+    );
+    expect(banner()).toHaveTextContent("Move wave w1 to ghost? New agents");
+    expect(banner()).not.toHaveTextContent("usage");
+  });
+
+  it("no suggestion: only Not now, and when the window resets", () => {
+    render(
+      <AccountLimit
+        decision={{ ...limit, suggested: null, options: ["not now"] }}
+        accounts={accounts}
+        now={NOW}
+        onAnswer={vi.fn(async () => ({ ok: true }))}
+      />,
+    );
+    expect(banner()).toHaveTextContent(
+      "No other account has headroom for wave w1; the window resets in 1h 30m",
+    );
+    expect(screen.queryByRole("button", { name: /Move to/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Not now" })).toBeInTheDocument();
+  });
+
+  it("disabled while an answer is in flight; a refused answer says why; read-only has no buttons", async () => {
+    let release: (v: { ok: boolean; error?: string }) => void = () => {};
+    const answer = vi.fn(
+      () =>
+        new Promise<{ ok: boolean; error?: string }>((r) => {
+          release = r;
+        }),
+    );
+    const { rerender } = render(
+      <AccountLimit decision={limit} accounts={accounts} now={NOW} onAnswer={answer} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Move to Personal" }));
+    expect(screen.getByRole("button", { name: "Not now" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Move to Personal" }));
+    expect(answer).toHaveBeenCalledTimes(1);
+    await act(async () => release({ ok: false, error: "already on Claude account 'personal'" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("already on Claude account 'personal'");
+    rerender(<AccountLimit decision={limit} accounts={accounts} now={NOW} />);
+    expect(screen.queryByRole("button")).toBeNull();
   });
 });

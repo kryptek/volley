@@ -249,9 +249,7 @@ describe("the other grouped sections", () => {
     const control = vi.fn(
       async (): Promise<ControlReply> => ({ ok: true, result: { rules: RULES } }),
     );
-    render(
-      <Harness initial="autopilot" claude={{ accounts: {}, signins: {}, waves: {}, control }} />,
-    );
+    render(<Harness initial="autopilot" claude={{ accounts: {}, signins: {}, control }} />);
     expect(rowNames("Autopilot")).toEqual(["Tunables", "Policy table"]);
     expect(row("Tunables")).toHaveAccessibleDescription("on · 5 owner-only · merge auto");
     await act(async () => {});
@@ -357,12 +355,14 @@ describe("summaries", () => {
   });
 
   it("claudeSummaries", () => {
-    expect(
-      claudeSummaries({ accounts: 3, needsYou: 1, defaultLabel: "Most headroom", warnAt: 90 }),
-    ).toEqual({ accounts: "3 accounts · 1 needs you", defaults: "Most headroom · warn at 90%" });
-    expect(
-      claudeSummaries({ accounts: 1, needsYou: 0, defaultLabel: "Primary", warnAt: 80 }).accounts,
-    ).toBe("1 account");
+    // A wave's account limit is its window's: the section summary carries no needs-you.
+    expect(claudeSummaries({ accounts: 3, defaultLabel: "Most headroom", warnAt: 90 })).toEqual({
+      accounts: "3 accounts",
+      defaults: "Most headroom · warn at 90%",
+    });
+    expect(claudeSummaries({ accounts: 1, defaultLabel: "Primary", warnAt: 80 }).accounts).toBe(
+      "1 account",
+    );
   });
 });
 

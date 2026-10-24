@@ -593,6 +593,16 @@ describe("wave moves", () => {
     expect(waveAccount("work", moves)).toBe("primary");
     expect(waveAccount("other", moves)).toBe("other");
   });
+
+  it("chains only the moves that answered an account_limit, never a wave_account_set", () => {
+    const set: JournalEvent = {
+      seq: 1,
+      at: "2026-10-18T14:00:00.000Z",
+      type: "wave_account_moved",
+      data: { from: "primary", to: "team", by: "o" },
+    };
+    expect(waveAccountMoves([set])).toEqual([]);
+  });
 });
 
 describe("the usage probe (foldProbe)", () => {

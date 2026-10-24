@@ -202,6 +202,7 @@ import {
   forgetAgent,
   isMachineLogin,
   limitDecisions,
+  moveAnswer,
   parseAgentMoveAnswer,
   parseMoveAnswer,
   parseUsage,
@@ -436,6 +437,7 @@ import type {
   Tunables,
   TunablesPatch,
   Wave,
+  WaveAccount,
   WaveId,
   WaveState,
   WaveTask,
@@ -4561,6 +4563,25 @@ export class Daemon {
       const sel = this.claude.select({ task: move.to, machine, model });
       return withCandidates({ ...sel, source: "move", why: move.why });
     }
+    // The wave was moved (`wave_account_set`, an account_limit answer): a task naming no account
+    // of its own starts under the wave's new one, or balances (`to: null`). An account the task's
+    // machine has no profile of leaves that task to the wave file and the config default.
+    const pin = this.waves.get(wave)?.record.account_pin;
+    if (pin !== undefined && (t.account === undefined || t.account === MOST_HEADROOM)) {
+      try {
+        const sel = this.claude.select({
+          ...(pin.to !== null ? { wave: pin.to } : {}),
+          configDefault: null,
+          machine,
+          model,
+        });
+        return withCandidates(
+          pin.to !== null ? { ...sel, why: `wave ${wave} moved to ${pin.to}` } : sel,
+        );
+      } catch (e) {
+        if (!(e instanceof ClaudeAccountError) || pin.to === null) throw e;
+      }
+    }
     const sel = this.claude.select({
       ...(t.account !== undefined ? { task: t.account } : {}),
       ...(w.account !== undefined ? { wave: w.account } : {}),
@@ -4568,8 +4589,9 @@ export class Daemon {
       machine,
       model,
     });
-    // An answered account_limit moved the wave: its new agents start under the other account
-    // (an agent moved on its own keeps its own move).
+    // An answered account_limit moved the wave: a task naming the account it left starts under
+    // the other one (an agent moved on its own keeps its own move; a `wave_account_set` that
+    // answered no decision leaves a task naming its own account on it).
     const to = machine === LOCAL_MACHINE ? waveAccount(sel.id, waveAccountMoves(events)) : sel.id;
     if (to === sel.id) return withCandidates(sel);
     return withCandidates({
@@ -4583,9 +4605,7 @@ export class Daemon {
   private balanced(wave: WaveId): boolean {
     const w = this.waves.get(wave)?.record.wave;
     if (w === undefined || w === null) return false;
-    if (w.account !== undefined && w.account !== MOST_HEADROOM) return false;
-    const def = this.config.effective(wave).claude.default_account;
-    if (def !== null && def !== MOST_HEADROOM) return false;
+    if (this.waveAccountState(wave).pinned !== null) return false;
     return Object.values(w.tasks).every(
       (t) => t.account === undefined || t.account === MOST_HEADROOM,
     );
@@ -4599,11 +4619,29 @@ export class Daemon {
     const w = this.waves.get(wave)?.record.wave;
     const named = (a: string | null | undefined) =>
       a !== undefined && a !== null && a !== MOST_HEADROOM;
-    return (
-      named(w?.tasks[task]?.account) ||
-      named(w?.account) ||
-      named(this.config.effective(wave).claude.default_account)
-    );
+    return named(w?.tasks[task]?.account) || this.waveAccountState(wave).pinned !== null;
+  }
+
+  /**
+   * wave-state `account` (SPEC §4.6.1): the wave's last move (`wave_account_moved`), else its
+   * wave file's `account:`, else `claude.default_account`, else balanced.
+   */
+  private waveAccountState(wave: WaveId): WaveAccount {
+    const rec = this.waves.get(wave)?.record ?? this.archived.get(wave)?.record;
+    const named = (a: string | null | undefined): a is string =>
+      a !== undefined && a !== null && a !== MOST_HEADROOM;
+    const pin = rec?.account_pin;
+    if (pin !== undefined)
+      return {
+        pinned: pin.to,
+        source: pin.to !== null ? "wave" : "balanced",
+        ...(pin.from !== null ? { moved_from: pin.from } : {}),
+      };
+    const own = rec?.wave?.account;
+    if (named(own)) return { pinned: own, source: "wave" };
+    const def = this.config.effective(wave).claude.default_account;
+    if (named(def)) return { pinned: def, source: "config" };
+    return { pinned: null, source: "balanced" };
   }
 
   /** The `local` host agents run on. */
@@ -9618,6 +9656,7 @@ export class Daemon {
     }
     const coordinator = state.owner !== null ? this.coordinatorFor(state.owner) : undefined;
     if (coordinator !== undefined) state.coordinator = coordinator;
+    state.account = this.waveAccountState(wave);
     return state;
   }
 
@@ -9995,6 +10034,83 @@ export class Daemon {
       });
       return { decision: d, already_resolved: false };
     }
+  }
+
+  /**
+   * `wave_account_set { wave, acct | null }` (SPEC §4.6.11): the account the wave's agents not yet
+   * spawned start under (null: balanced); running agents finish where they are. Refused, like a
+   * `move wave` answer, for an account a spawn could not use. Journals `wave_account_moved`; a
+   * pick an open `account_limit` offers (`move wave <wave> to <acct>`) is its answer instead.
+   */
+  private async waveAccountSet(p: Record<string, unknown>, by: string): Promise<Reply> {
+    const wave = typeof p.wave === "string" ? p.wave : "";
+    const log = this.waves.get(wave);
+    if (log === undefined) return { ok: false, error: `unknown wave '${wave}'` };
+    const acct = p.acct;
+    if (acct !== null && (typeof acct !== "string" || acct === ""))
+      return {
+        ok: false,
+        error: "wave_account_set requires payload.acct: a Claude account, or null for balanced",
+      };
+    if (acct !== null) {
+      const why = this.unusableAccount(wave, acct);
+      if (why !== null) return { ok: false, error: why };
+    }
+    const before = this.waveAccountState(wave);
+    const result = () => ({ wave, account: this.waveAccountState(wave) });
+    if (before.pinned === acct) return { ok: true, result: { ...result(), unchanged: true } };
+    const asked =
+      acct === null
+        ? undefined
+        : Object.values(log.record.decisions).find(
+            (d) =>
+              d.kind === "account_limit" &&
+              d.resolved === undefined &&
+              (d.options ?? []).includes(moveAnswer(wave, acct)),
+          );
+    if (asked !== undefined && acct !== null) {
+      try {
+        const r = await this.answerDecision(wave, asked.decision_id, {
+          answer: moveAnswer(wave, acct),
+          by,
+        });
+        if ("refused" in r) return { ok: false, error: r.refused };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+      return { ok: true, result: { ...result(), decision_id: asked.decision_id } };
+    }
+    await this.append(wave, {
+      type: "wave_account_moved",
+      data: { from: before.pinned, to: acct, by },
+    });
+    this.log(
+      `wave ${wave}: new agents start ${acct === null ? "balanced" : `under Claude account ${acct}`} (was ${before.pinned ?? "balanced"})`,
+    );
+    return { ok: true, result: result() };
+  }
+
+  /**
+   * Why a spawn of `wave` could not start under `acct` (null: it could): an unknown or not
+   * signed-in account, or one kept on no machine the wave's tasks run on.
+   */
+  private unusableAccount(wave: WaveId, acct: string): string | null {
+    const tasks = Object.values(this.waves.get(wave)?.record.wave?.tasks ?? {});
+    const machines = new Set([
+      LOCAL_MACHINE,
+      ...tasks.map((t) => t.host).filter((h) => h !== "local" && h !== AUTO_HOST),
+    ]);
+    let first: string | null = null;
+    for (const machine of machines) {
+      try {
+        this.claude.select({ task: acct, machine });
+        return null;
+      } catch (e) {
+        if (!(e instanceof ClaudeAccountError)) throw e;
+        first ??= e.message;
+      }
+    }
+    return first;
   }
 
   /**
@@ -11176,6 +11292,8 @@ export class Daemon {
         return this.claude.sync(p, by);
       case "agent_move_account":
         return { ok: true, defer: this.moveAccount(p, by) };
+      case "wave_account_set":
+        return this.waveAccountSet(p, by);
       // Machines + pairing (peers.ts): the code is a join's credential; the reply_key's holder
       // gets the secret. Invite and remove are admin ops, answered only on the account-op topic.
       case "peer_join":

@@ -68,6 +68,7 @@ import {
   type SteeringReceipts,
   type SupervisorView,
   type UsagePayload,
+  type WaveAccount,
   type WaveStatePayload,
   type WaveView,
   type WorkLog,
@@ -970,7 +971,14 @@ function reduceWave(state: DeskState, id: string, m: DeskMessage): DeskState {
     };
   }
   const payload = m.envelope.payload as WaveStatePayload;
-  waves[id] = { id, decisions: {}, ...waves[id], state: payload, receivedAt: m.receivedAt };
+  const { account: _was, ...prev } = waves[id] ?? { id, decisions: {} };
+  const account = waveAccountOf(payload.account);
+  waves[id] = {
+    ...prev,
+    state: payload,
+    receivedAt: m.receivedAt,
+    ...(account !== undefined ? { account } : {}),
+  };
   // Sticky: an agent keeps its wave after the task's role slot moves on to a new agent.
   const agents: Record<string, AgentView> = {};
   for (const a of Object.values(state.agents)) {
@@ -978,6 +986,20 @@ function reduceWave(state: DeskState, id: string, m: DeskMessage): DeskState {
     agents[a.id] = where ? { ...a, ...where } : a;
   }
   return { ...state, waves, agents };
+}
+
+/** A wave state's `account`, when it is well formed (an older volleyd sends none). */
+function waveAccountOf(raw: unknown): WaveAccount | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const a = raw as Record<string, unknown>;
+  const pinned = typeof a.pinned === "string" ? a.pinned : a.pinned === null ? null : undefined;
+  if (pinned === undefined) return undefined;
+  if (a.source !== "wave" && a.source !== "config" && a.source !== "balanced") return undefined;
+  return {
+    pinned,
+    source: a.source,
+    ...(typeof a.moved_from === "string" ? { moved_from: a.moved_from } : {}),
+  };
 }
 
 function reduceDecision(state: DeskState, wave: string, id: string, m: DeskMessage): DeskState {

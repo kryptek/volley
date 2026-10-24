@@ -94,6 +94,11 @@ export interface WaveRecord {
   /** Spawns added to the wave's budget by `raise by N` answers (spawn_budget_exhausted). */
   budget_raised?: number;
   /**
+   * The wave's last `wave_account_moved` (SPEC §4.6.11): the account its new agents start under
+   * (`to`, null: balanced) and the one it left; absent until the wave is moved.
+   */
+  account_pin?: { to: string | null; from: string | null };
+  /**
    * The agent last journaled as bound to the wave's coordinator-name owner (`owner_reconnected`),
    * so a daemon restart replaying the registry does not journal the same reconnect again; null
    * once a claim gave the wave another owner.
@@ -498,6 +503,14 @@ export function apply(rec: WaveRecord, ev: JournalEvent): WaveRecord {
         const parked = next.pipeline[id]?.remediation;
         if (parked !== undefined && parked.test === ev.data.test) parked.landed = true;
       }
+      break;
+    }
+    case "wave_account_moved": {
+      const { from, to } = ev.data as { from?: unknown; to?: unknown };
+      next.account_pin = {
+        to: typeof to === "string" ? to : null,
+        from: typeof from === "string" ? from : null,
+      };
       break;
     }
     case "wave_planned":

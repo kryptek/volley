@@ -18,6 +18,7 @@ import type {
   PlanCluster,
   Role,
   Stage,
+  WaveAccount,
   WaveCoordinator,
   WaveStatePayload,
   WaveTask,
@@ -78,6 +79,8 @@ interface WaveDef {
   coordinator: Omit<WaveCoordinator, "agent_id" | "last_seen"> & { lastSeenMin: number };
   status: WaveStatePayload["status"];
   releaseBranch: string;
+  /** The account its new agents start under (wave-state `account`); absent: balanced. */
+  account?: WaveAccount;
   tasks: TaskDef[];
   decision?: {
     task: string;
@@ -101,6 +104,8 @@ const WAVES: WaveDef[] = [
     },
     status: "running",
     releaseBranch: "release/2026-10-20-status-chip",
+    // Pinned to the Team account (the demo registry's): its window's chip names it.
+    account: { pinned: "team", source: "wave" },
     tasks: [
       { id: "T0", issue: 101, title: "Status chip data contract", after: [], stage: "done" },
       {
@@ -281,6 +286,7 @@ function waveState(w: WaveDef, now: number, tasks: TaskDef[] = w.tasks): DeskMes
       ),
     },
     coordinator: { agent_id: w.owner, ...coordinator, last_seen: iso(now - lastSeenMin * 60_000) },
+    account: w.account ?? { pinned: null, source: "balanced" },
     updated_at: iso(now),
   };
   return {

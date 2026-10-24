@@ -114,6 +114,7 @@ import {
   accountList,
   agentLimitFor,
   deskAccountGroups,
+  isWaveLimit,
   resolveFields,
 } from "./store/claude";
 import { useDesk } from "./store/context";
@@ -162,7 +163,7 @@ import {
   machineRows,
 } from "./windows/machines/MachinesWindow";
 import { DigestCard, showDigest } from "./windows/wave/DigestCard";
-import { AttentionLine, MachineDown, NeedsYou } from "./windows/wave/NeedsYou";
+import { AccountLimit, AttentionLine, MachineDown, NeedsYou } from "./windows/wave/NeedsYou";
 import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
 import { taskActivity } from "./windows/wave/activity";
@@ -463,6 +464,17 @@ export default function App() {
     () => (demoTransport ? demoReadControl(demoTransport.control) : control),
     [demoTransport, control],
   );
+  // The wave window's account dropdown: volleyd's `wave_account_set`, or the demo's answer. It
+  // asks volleyd's registry once it is first focused, so profiles with no usage yet are listed.
+  const waveAccountControl = demoTransport ? registryControl : control;
+  const [waveRegistryWanted, setWaveRegistryWanted] = useState(false);
+  const waveRegistry = useClaudeRegistry(
+    waveRegistryWanted ? registryControl : null,
+    registryKeyOf(state.claudeRegistryRev, signinsDone(state.signins)),
+  );
+  useEffect(() => {
+    if (waveRegistry.accounts.length) setRegistry(waveRegistry.accounts);
+  }, [waveRegistry]);
   // Settings › Machines lists every Claude account on each machine: it asks volleyd's registry
   // while it is open (Settings › Claude accounts asks on its own).
   const machinesRegistry = useClaudeRegistry(
@@ -1349,6 +1361,26 @@ export default function App() {
                       />
                     )}
                     {openDecisions(wave)
+                      .filter(isWaveLimit)
+                      .map((d) => (
+                        <AccountLimit
+                          key={d.decision_id}
+                          decision={d}
+                          accounts={accounts}
+                          now={now}
+                          onAnswer={
+                            control
+                              ? (answer) =>
+                                  control(
+                                    "resolve",
+                                    resolveFields(d, answer),
+                                    `volleyd resolve ${d.decision_id}`,
+                                  )
+                              : undefined
+                          }
+                        />
+                      ))}
+                    {openDecisions(wave)
                       .filter((d) => d.kind === "machine_down")
                       .map((d) => (
                         <MachineDown
@@ -1373,6 +1405,14 @@ export default function App() {
                   </>
                 }
                 onSettings={setSettings}
+                accounts={accounts}
+                {...(waveAccountControl
+                  ? {
+                      onSetAccount: (acct: string | null) =>
+                        waveAccountControl("wave_account_set", { wave: id, acct }),
+                      onAccountsWanted: () => setWaveRegistryWanted(true),
+                    }
+                  : {})}
               >
                 {steerOpen === id &&
                   steering.panel({
@@ -1585,7 +1625,6 @@ export default function App() {
           claude={{
             accounts: state.claudeAccounts ?? {},
             signins: state.signins ?? {},
-            waves: state.waves,
             control,
             registryControl,
             registryRev: state.claudeRegistryRev,
@@ -1673,8 +1712,6 @@ export default function App() {
       {settings !== null && state.waves[settings] && (
         <SettingsModal
           wave={state.waves[settings]}
-          accounts={accounts}
-          control={control}
           onClose={() => setSettings(null)}
           onOpenGlobal={() => {
             setSettings(null);

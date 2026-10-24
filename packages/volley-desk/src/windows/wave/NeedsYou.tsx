@@ -11,6 +11,10 @@
  * why it cannot take work, the wave's tasks there, and its options with
  * `re-place queued tasks` pre-selected (the owner's default); nothing is
  * re-placed until someone answers.
+ *
+ * `AccountLimit` is a wave's `account_limit` decision (SPEC §4.6.12): the account at the warn
+ * level and, with a suggestion, `Move to <suggested>` (the decision's `move wave` answer) and
+ * `Not now`; with none, only `Not now`. The wave's account chip answers it too.
  */
 import {
   Alert02Icon,
@@ -22,6 +26,14 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useState } from "react";
 import type { Attn, EffectiveCoordinator } from "../../attention";
 import { issueHref, issueLabel } from "../../lib/github";
+import {
+  type AccountInfo,
+  accountName,
+  fiveHourLabel,
+  moveAnswer,
+  notNowAnswer,
+  resetsIn,
+} from "../../store/claude";
 import type { DecisionPayload, GitHubRepo } from "../../store/types";
 import "../../styles/attention.css";
 
@@ -258,6 +270,91 @@ export function MachineDown({
             onClick={() => void answer()}
           >
             Answer
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A wave's open `account_limit`: Move to the suggestion, or Not now. */
+export function AccountLimit({
+  decision: d,
+  accounts = [],
+  now,
+  onAnswer,
+}: {
+  decision: DecisionPayload;
+  /** The Claude accounts the Desk knows: the names, and the suggestion's 5-hour figure. */
+  accounts?: readonly AccountInfo[];
+  now: number;
+  /** Sends the answer (volleyd `resolve`); absent when the Desk is read-only. */
+  onAnswer?: ((answer: string) => Promise<{ ok: boolean; error?: string }>) | undefined;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const name = (id: string | null | undefined) => (id ? accountName(accounts, id) : "");
+  const suggested = d.suggested ?? null;
+  const target = suggested !== null ? accounts.find((a) => a.id === suggested) : undefined;
+  const answer = async (text: string) => {
+    if (!onAnswer || busy) return;
+    setBusy(true);
+    setError(null);
+    const r = await onAnswer(text);
+    setBusy(false);
+    if (!r.ok) setError(r.error ?? "volleyd refused the answer");
+  };
+  const resets = resetsIn(d.resets_at, now);
+  return (
+    // biome-ignore lint/a11y/useSemanticElements: a banner live region (as in the prototype), not a form <output>
+    <div className="needs-you" role="status" aria-label="Claude account limit">
+      <div className="ny-head">
+        <Icon i={Alert02Icon} s={14} /> Needs you: {name(d.acct)} is at {Math.round(d.pct ?? 0)}% of
+        its 5-hour window
+      </div>
+      <p className="ny-q">
+        {suggested !== null ? (
+          <>
+            Move wave <b>{d.wave}</b> to <b>{name(suggested)}</b>
+            {/* nothing until the Desk has the account (its record may arrive later) */}
+            {target === undefined
+              ? ""
+              : target.fiveHour
+                ? ` (${Math.round(target.fiveHour.pct)}% used)`
+                : ` (${fiveHourLabel(null, target.weekly?.pct ?? null)})`}
+            ? New agents start on {name(suggested)}; running agents finish where they are.
+          </>
+        ) : (
+          <>
+            No other account has headroom for wave <b>{d.wave}</b>
+            {resets ? `; the window resets in ${resets}` : ""}.
+          </>
+        )}
+      </p>
+      {error && (
+        <p className="s-error" role="alert">
+          {error}
+        </p>
+      )}
+      {onAnswer && (
+        <div className="ny-actions">
+          {suggested !== null && (
+            <button
+              type="button"
+              className="btn btn--hot"
+              disabled={busy}
+              onClick={() => void answer(moveAnswer(d.wave, suggested))}
+            >
+              Move to {name(suggested)}
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn"
+            disabled={busy}
+            onClick={() => void answer(notNowAnswer(d))}
+          >
+            Not now
           </button>
         </div>
       )}

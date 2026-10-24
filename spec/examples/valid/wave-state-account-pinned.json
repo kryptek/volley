@@ -1,0 +1,39 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-19T10:00:00.000Z",
+  "channel": "_waves/state",
+  "type": "wave_state",
+  "payload": {
+    "wave": "w1",
+    "version": 1,
+    "owner": "coordinator-ab12",
+    "repo": "example-org/example-repo",
+    "release_branch": "release/w1",
+    "status": "running",
+    "tasks": [
+      {
+        "id": "T1",
+        "issue": 101,
+        "stage": "implement",
+        "agents": {
+          "implementer": "w1-t1-implementer-1"
+        }
+      },
+      {
+        "id": "T2",
+        "issue": 102,
+        "stage": "queued",
+        "agents": {}
+      }
+    ],
+    "open_decisions": [],
+    "gates": [],
+    "account": {
+      "pinned": "team",
+      "source": "wave",
+      "moved_from": "primary"
+    },
+    "updated_at": "2026-10-19T10:00:00.000Z"
+  }
+}

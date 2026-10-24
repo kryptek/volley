@@ -82,6 +82,8 @@ export type ControlOp =
   | "claude_sync"
   | "claude_balance"
   | "agent_move_account"
+  // A wave's account for its agents not yet spawned (null: balanced; SPEC §4.6.11).
+  | "wave_account_set"
   // Machines + pairing (peers.ts).
   | "peer_invite"
   | "peer_join"

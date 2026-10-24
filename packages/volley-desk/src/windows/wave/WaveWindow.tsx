@@ -35,6 +35,13 @@
  * running trains (`train-1 (T2, T4) integrating · queued T7`), each linking its PR; the title
  * carries a `churn 12` chip while the wave has churn spawns. A merge train's synthetic task
  * (`train-<n>`) stays out of the graph and the rail: the queue line shows it.
+ *
+ * The wave's Claude account (wave-state `account`, SPEC §4.6.1): an `Account: Balanced` /
+ * `Account: <name>` chip (the registry label) above the graph and, when the Desk can steer, a
+ * dropdown `Balanced (default) | <each account on the wave's machines>` beside it. Picking one
+ * sends `wave_account_set`: the wave's agents not yet spawned start there, running ones finish
+ * where they are (the confirm line says so). An open wave-level `account_limit` preselects its
+ * suggestion, and Switch answers it with that pick. An older volleyd (no `account`) shows none.
  */
 import { BubbleChatIcon, Settings02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -52,6 +59,14 @@ import {
   mergeQueueLine,
   trainLine,
 } from "../../store/autopilot";
+import {
+  type AccountInfo,
+  accountName,
+  isWaveLimit,
+  openLimitDecisions,
+  waveAccountChoices,
+  waveMachines,
+} from "../../store/claude";
 import type {
   AgentView,
   CoordinatorState,
@@ -107,6 +122,12 @@ export interface WaveWindowProps {
   autopilotFeed?: readonly FeedEntry[] | undefined;
   /** The Desk's agent records: a task's agent counts as running only while its record is live. */
   agents?: Readonly<Record<string, AgentView>>;
+  /** The Claude accounts the Desk knows (usage records + registry): the account chip's names. */
+  accounts?: readonly AccountInfo[];
+  /** `wave_account_set` for the wave (`null`: balanced); absent = read-only (the chip only). */
+  onSetAccount?: (acct: string | null) => Promise<{ ok: boolean; error?: string }>;
+  /** The dropdown was focused: the Desk may ask volleyd's registry for the accounts. */
+  onAccountsWanted?: () => void;
   /** Children after the wave file (the steering panel). */
   children?: ReactNode;
   /** Highlights the chat glyph while the steering panel is open. */
@@ -305,6 +326,111 @@ function TrainRows({ release }: { release: WaveRelease }) {
   );
 }
 
+/** The dropdown's value for Balanced (`wave_account_set { acct: null }`). */
+const BALANCED = "";
+
+/**
+ * The wave's account: the chip and, when the Desk can steer, the dropdown, the Switch an open
+ * `account_limit`'s preselected suggestion needs, and the confirm line once volleyd took a pick.
+ */
+function WaveAccountRow({
+  wave,
+  accounts,
+  onSet,
+  onWanted,
+}: {
+  wave: WaveView;
+  accounts: readonly AccountInfo[];
+  onSet: WaveWindowProps["onSetAccount"];
+  onWanted: WaveWindowProps["onAccountsWanted"];
+}) {
+  const account = wave.account;
+  const pinned = account?.pinned ?? null;
+  const limit = openLimitDecisions({ [wave.id]: wave }).find(isWaveLimit);
+  const suggested = limit?.suggested ?? null;
+  const [picked, setPicked] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // The account volleyd took (null: balanced); undefined while there is no pick to confirm.
+  const [done, setDone] = useState<string | null | undefined>(undefined);
+  const [error, setError] = useState<string | null>(null);
+  // A new account from volleyd ends the local pick: the chip and the dropdown follow it.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset on the published account only
+  useEffect(() => setPicked(null), [pinned]);
+  if (account === undefined) return null;
+  const name = (id: string | null) => (id === null ? "Balanced" : accountName(accounts, id));
+  const current = pinned ?? BALANCED;
+  const preselect = suggested !== null && suggested !== pinned ? suggested : null;
+  const value = picked ?? preselect ?? current;
+  const doneName = done === null ? "the account with the most headroom" : name(done ?? null);
+  const choices = waveAccountChoices(accounts, waveMachines(wave.state));
+  // The current account (and a suggestion) stays listed even before the Desk knows its record.
+  for (const id of [pinned, preselect])
+    if (id !== null && !choices.some((c) => c.id === id)) choices.push({ id, label: name(id) });
+  const send = async (v: string) => {
+    if (!onSet) return;
+    const acct = v === BALANCED ? null : v;
+    setPicked(v);
+    setBusy(true);
+    setError(null);
+    setDone(undefined);
+    const r = await onSet(acct);
+    setBusy(false);
+    if (r.ok) setDone(acct);
+    else {
+      setPicked(null);
+      setError(r.error ?? "volleyd refused the account");
+    }
+  };
+  return (
+    <div className="wave-acct">
+      <span
+        className="chip chip--acct"
+        title={`New agents of ${wave.id} start under ${pinned === null ? "the account with the most headroom" : name(pinned)}`}
+      >
+        Account: {name(pinned)}
+      </span>
+      {onSet && (
+        <select
+          className="wave-acct-pick"
+          aria-label={`Claude account for new agents of ${wave.id}`}
+          value={value}
+          disabled={busy}
+          onFocus={onWanted}
+          onChange={(e) => void send(e.target.value)}
+        >
+          <option value={BALANCED}>Balanced (default)</option>
+          {choices.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.label}
+            </option>
+          ))}
+        </select>
+      )}
+      {onSet && preselect !== null && picked === null && (
+        <button
+          type="button"
+          className="btn btn--sm btn--hot"
+          disabled={busy}
+          onClick={() => void send(preselect)}
+        >
+          Switch
+        </button>
+      )}
+      {/* Only while the published account is still the pick: a later move makes it stale. */}
+      {done !== undefined && done === pinned && (
+        <output className="wave-acct-note">
+          New agents start on {doneName}; running ones finish where they are.
+        </output>
+      )}
+      {error !== null && (
+        <span className="s-error" role="alert">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function WaveWindow(p: WaveWindowProps) {
   const now = useNow(p.now);
   const s = p.wave.state;
@@ -441,6 +567,12 @@ export function WaveWindow(p: WaveWindowProps) {
       footer={footer}
     >
       {p.banner}
+      <WaveAccountRow
+        wave={p.wave}
+        accounts={p.accounts ?? []}
+        onSet={p.onSetAccount}
+        onWanted={p.onAccountsWanted}
+      />
       {s ? (
         <div className={`wave-grid${ended ? " wave-ended" : ""}`}>
           <div className="min0">

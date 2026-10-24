@@ -1,6 +1,12 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { CoordinatorState, WaveStatePayload, WaveView } from "../src/store/types";
+import type { AccountInfo } from "../src/store/claude";
+import type {
+  CoordinatorState,
+  DecisionPayload,
+  WaveStatePayload,
+  WaveView,
+} from "../src/store/types";
 import { WaveWindow, type WaveWindowProps } from "../src/windows/wave/WaveWindow";
 import { ACCENT_PALETTE, accentFor } from "../src/windows/wave/accent";
 
@@ -273,5 +279,157 @@ describe("WaveWindow: GitHub", () => {
     expect(container.querySelector(".chip--repo")).toBeNull();
     expect(screen.queryByRole("link", { name: /on GitHub/ })).toBeNull();
     expect(container.querySelector(".dag-issue")).toHaveTextContent("#101");
+  });
+});
+
+describe("WaveWindow: the wave's Claude account (#499)", () => {
+  const acct = (id: string, label: string, machine = "local"): AccountInfo => ({
+    id,
+    label,
+    machine,
+    plan: null,
+    email: null,
+    org: null,
+    fiveHour: null,
+    weekly: null,
+    sampledAt: null,
+    modelWeekly: {},
+    probe: null,
+    signedIn: true,
+    agents: [],
+    waves: [],
+  });
+  const accounts = [
+    acct("team", "Team account"),
+    acct("personal", "Personal"),
+    acct("team@box-a", "Team account (box-a)", "box-a"),
+    acct("gpu@box-b", "GPU box", "box-b"),
+    { ...acct("fresh", "Fresh"), signedIn: false },
+  ];
+  const limit: DecisionPayload = {
+    decision_id: "status-chip-account_limit-1",
+    wave: "status-chip",
+    task: null,
+    kind: "account_limit",
+    question: "Needs you: Claude account team is at 91% of its 5-hour window.",
+    options: ["move wave status-chip to personal", "not now"],
+    opened_at: "2026-10-18T12:00:00Z",
+    acct: "team",
+    pct: 91,
+    resets_at: null,
+    suggested: "personal",
+  };
+  const on = (account: WaveView["account"], decisions: WaveView["decisions"] = {}): WaveView => {
+    const w = wave();
+    const state = w.state as WaveStatePayload;
+    // T1 runs on box-a: that machine's accounts are the wave's too.
+    const tasks = state.tasks.map((t) => (t.id === "T1" ? { ...t, host: "box-a" } : t));
+    return {
+      ...w,
+      state: { ...state, tasks },
+      decisions: { ...w.decisions, ...decisions },
+      ...(account ? { account } : {}),
+    };
+  };
+  const pick = () =>
+    screen.getByRole("combobox", { name: "Claude account for new agents of status-chip" });
+
+  it("a balanced wave reads Account: Balanced; a pinned one names its account by its label", () => {
+    const { rerender } = renderWave({ wave: on({ pinned: null, source: "balanced" }), accounts });
+    expect(screen.getByText("Account: Balanced")).toHaveClass("chip");
+    rerender(
+      <WaveWindow
+        wave={on({ pinned: "team", source: "wave" })}
+        me={null}
+        frame={frame}
+        accounts={accounts}
+      />,
+    );
+    expect(screen.getByText("Account: Team account")).toBeInTheDocument();
+    expect(screen.queryByText(/Account: team$/)).toBeNull();
+  });
+
+  it("the dropdown lists Balanced (default) and the wave's machines' signed-in accounts by name", () => {
+    renderWave({
+      wave: on({ pinned: "team", source: "wave" }),
+      accounts,
+      onSetAccount: vi.fn(async () => ({ ok: true })),
+    });
+    expect(pick()).toHaveValue("team");
+    expect(
+      within(pick())
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual(["Balanced (default)", "Team account", "Personal"]);
+  });
+
+  it("picking sends wave_account_set and shows the confirm line until the account moves on", async () => {
+    const set = vi.fn(async () => ({ ok: true }));
+    const view = (account: WaveView["account"]) => (
+      <WaveWindow
+        wave={on(account)}
+        me={null}
+        frame={frame}
+        accounts={accounts}
+        onSetAccount={set}
+      />
+    );
+    const { rerender } = renderWave({
+      wave: on({ pinned: null, source: "balanced" }),
+      accounts,
+      onSetAccount: set,
+    });
+    await act(async () => {
+      fireEvent.change(pick(), { target: { value: "personal" } });
+    });
+    expect(set).toHaveBeenCalledWith("personal");
+    const line = "New agents start on Personal; running ones finish where they are.";
+    rerender(view({ pinned: "personal", source: "wave" }));
+    expect(screen.getByText(line)).toBeInTheDocument();
+    // Another client moves the wave: the line would name a stale account, so it goes.
+    rerender(view({ pinned: "team", source: "wave", moved_from: "personal" }));
+    expect(screen.queryByText(line)).toBeNull();
+    await act(async () => {
+      fireEvent.change(pick(), { target: { value: "" } });
+    });
+    expect(set).toHaveBeenLastCalledWith(null);
+  });
+
+  it("a refused pick says why and leaves the dropdown on the wave's account", async () => {
+    const set = vi.fn(async () => ({ ok: false, error: "unknown Claude account 'personal'" }));
+    renderWave({ wave: on({ pinned: "team", source: "wave" }), accounts, onSetAccount: set });
+    await act(async () => {
+      fireEvent.change(pick(), { target: { value: "personal" } });
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("unknown Claude account 'personal'");
+    expect(pick()).toHaveValue("team");
+  });
+
+  it("a read-only Desk shows the chip only", () => {
+    renderWave({ wave: on({ pinned: "team", source: "wave" }), accounts });
+    expect(screen.getByText("Account: Team account")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /Claude account/ })).toBeNull();
+  });
+
+  it("an open account_limit preselects its suggestion; Switch answers it with that pick", async () => {
+    const set = vi.fn(async () => ({ ok: true }));
+    renderWave({
+      wave: on({ pinned: "team", source: "wave" }, { [limit.decision_id]: limit }),
+      accounts,
+      onSetAccount: set,
+    });
+    expect(screen.getByText("Account: Team account")).toBeInTheDocument();
+    expect(pick()).toHaveValue("personal");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Switch" }));
+    });
+    expect(set).toHaveBeenCalledWith("personal");
+    expect(screen.queryByRole("button", { name: "Switch" })).toBeNull();
+  });
+
+  it("an older volleyd's state (no account) still renders, without the chip", () => {
+    renderWave({ wave: on(undefined), accounts, onSetAccount: vi.fn() });
+    expect(screen.getByText("Dependency graph")).toBeInTheDocument();
+    expect(screen.queryByText(/^Account:/)).toBeNull();
   });
 });

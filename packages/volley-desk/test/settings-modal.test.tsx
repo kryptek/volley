@@ -550,6 +550,14 @@ describe("SettingsModal (a wave's settings)", () => {
     expect(screen.queryByText(/Pick a new value/)).not.toBeInTheDocument();
   });
 
+  it("has no account row: the wave's account is its window's chip", () => {
+    const w = wave();
+    renderModal({ ...w, account: { pinned: "team", source: "wave" } });
+    expect(screen.queryByText("Claude account")).toBeNull();
+    expect(screen.queryByRole("combobox", { name: /Move wave/ })).toBeNull();
+    expect(document.querySelector(".modal-acct")).toBeNull();
+  });
+
   it("shows only a note while the wave has no effective config", () => {
     const { state, ...rest } = wave();
     const { effective_config: _, ...bare } = state as NonNullable<WaveView["state"]>;
