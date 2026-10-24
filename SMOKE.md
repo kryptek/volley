@@ -40,12 +40,12 @@ autopilot.reconnect_grace_s 900`). Remove any cron job, launchd agent or schedul
 over from an earlier release that republishes the coordinator's status; nothing below needs one.
 
 - [ ] **1. Leave.** End the coordinator's Claude Code session (`/exit`), or restart its MCP
-  server. **Pass:** within about 90 s (the MQTT keepalive × 1.5) the Desk's coordinators window
-  reads `Coordinator reconnecting · 0m` with a neutral `reconnecting` chip and no `claim it`, and
-  `volleyd status <wave>` prints `owner: <name> (via <agent id>) · reconnecting`. After
-  `reconnect_grace_s` the row reads `Owner away · autopilot · last seen 2m ago`, with no Needs-you
-  banner and nothing ringing, and `volleyd status <wave>` prints `· away (autopilot) · last seen
-  …`. Note both times.
+  server. **Pass:** at once on `/exit` (within about 90 s, the MQTT keepalive × 1.5, if the
+  connection just drops) the Desk's coordinators window reads `Coordinator reconnecting · 0m`
+  with a neutral `reconnecting` chip and no `claim it`, and `volleyd status <wave>` prints
+  `owner: <name> (via <agent id>) · reconnecting`. After `reconnect_grace_s` the row reads `Owner
+  away · autopilot · last seen 2m ago`, with no Needs-you banner and nothing ringing, and `volleyd
+  status <wave>` prints `· away (autopilot) · last seen …`. Note both times.
 - [ ] **2. No claim while reconnecting.** Repeat step 1 and, inside the grace, run `volleyd claim
   <wave> --by smoke`. **Pass:** refused, `wave is owned by <name> (via <agent id>), reconnecting
   (gone <n>m ago, grace 2m); claim allowed at <time> unless it reconnects`; the wave keeps its
@@ -154,7 +154,8 @@ the inbox: `volleyd inbox` lists nothing open.
   loop.
 - [ ] End the coordinator session (`/exit`). **Pass:** `volleyd status <wave>` still names the
   coordinator name as owner; the Desk shows the coordinator as reconnecting, then away
-  (autopilot), and the wave keeps running (no `claim it` needed). Note the time: this is the start of the run.
+  (autopilot), and the wave keeps running (no `claim it` needed). Note the time: this is the
+  start of the run.
 - [ ] Go to bed. Leave the Mac awake and on the network; leave the phone where it can ring.
 
 ### (b) Overnight, without you (check in the morning)
