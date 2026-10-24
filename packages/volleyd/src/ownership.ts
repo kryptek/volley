@@ -7,9 +7,9 @@ import type { WaveId } from "./types";
 /**
  * Wave ownership: one coordinator per wave is the single writer. Mutating control ops (resolve,
  * pause, resume, stop, steer, re-run) need `by == owner`; anyone else first claims the wave,
- * which succeeds only when the owner is offline (presence.ts). The owner is an agent id or a stable coordinator
- * name (`VOLLEY_COORDINATOR`, SPEC §6.2) bound to the newest live session carrying it, so a
- * restarted MCP server (a new agent id) keeps its waves. Pure: the daemon gathers the owner's
+ * which succeeds only when the owner is offline (presence.ts). The owner is an agent id or a
+ * stable coordinator name (`VOLLEY_COORDINATOR`, SPEC §6.2) bound to the newest live session
+ * carrying it, so a restarted MCP server (a new agent id) keeps its waves. Pure: the daemon gathers the owner's
  * presence and binding and passes them in.
  */
 
@@ -103,12 +103,13 @@ export function claimVerdict(
   };
 }
 
-/** A duration in a refusal: `40s`, `3m`, `2h`. */
-function span(ms: number): string {
+/** A duration, as a claim refusal and the status owner line say it: `40s`, `3m`, `2h`, `3d`. */
+export function span(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return `${s}s`;
   if (s < 3600) return `${Math.round(s / 60)}m`;
-  return `${Math.round(s / 3600)}h`;
+  if (s < 86_400) return `${Math.round(s / 3600)}h`;
+  return `${Math.round(s / 86_400)}d`;
 }
 
 /** The registry fields owner auto-detection needs. */

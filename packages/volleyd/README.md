@@ -1484,6 +1484,7 @@ owner: coord-main (via coordinator-c7d9) · online
 owner: coord-main (via coordinator-c7d9) · away (autopilot) · last seen 2h ago
 owner: coord-main (via coordinator-c7d9) · away · last seen 5m ago      (autopilot off)
 owner: coord-main (via coordinator-c7d9) · gone · 1 decision waits for you
+owner: coord-main (via coordinator-c7d9) · gone · something waits for you   (a gate or inbox item)
 owner: coord-main (via coordinator-c7d9) · reconnecting
 ```
 

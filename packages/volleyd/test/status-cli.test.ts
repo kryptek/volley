@@ -511,7 +511,10 @@ describe("volleyd status formatting", () => {
       escalated: { why: "owner_only" },
     };
     expect(head(gone, { decisions: [d1] })).toContain(`${via} · gone · 1 decision waits for you`);
-    expect(head(gone)).toContain(`${via} · gone · decisions wait for you`);
+    // Gone over a gate or an inbox item (no open decision): the line names no decisions.
+    expect(head(gone)).toContain(`${via} · gone · something waits for you`);
+    const gateOnly = { ...at("offline", "gone", "2026-10-18T13:00:00.000Z"), open_decisions: [] };
+    expect(head(gateOnly)).toContain(`${via} · gone · something waits for you  tasks:`);
   });
 
   it("shows a task's queued steers", () => {

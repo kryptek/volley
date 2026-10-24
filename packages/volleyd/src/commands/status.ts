@@ -5,7 +5,7 @@ import { systemClock } from "../clock";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import type { DecisionPayload } from "../decisions";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
-import { resolveCaller } from "../ownership";
+import { resolveCaller, span } from "../ownership";
 import { IN_FLIGHT } from "../scheduler";
 import type { TaskState, WaveState } from "../types";
 import { formatDecision } from "./decisions";
@@ -127,7 +127,8 @@ export function formatLocalAgents(l: LocalAgentsView): string {
 /**
  * The owner line's presence suffix (SPEC §4.6.1 `coordinator`): `· online`, `· reconnecting`,
  * `· away (autopilot) · last seen 2h ago` (`· away` with autopilot off) or `· gone` with what
- * waits for the owner (the open escalated decisions of the wave, when `decisions` has them).
+ * waits for the owner: the open escalated decisions of the wave, when `decisions` has them, else
+ * `something waits for you` (a gate under `merge: manual` or an owner-only inbox item).
  */
 function ownerPresence(s: WaveState, decisions: readonly DecisionPayload[], now: number): string {
   const c = s.coordinator;
@@ -145,7 +146,7 @@ function ownerPresence(s: WaveState, decisions: readonly DecisionPayload[], now:
     ).length;
     return waiting > 0
       ? ` · gone · ${waiting} decision${waiting === 1 ? " waits" : "s wait"} for you`
-      : " · gone · decisions wait for you";
+      : " · gone · something waits for you";
   }
   const autopilot = s.autopilot?.enabled === true ? " (autopilot)" : "";
   return ` · away${autopilot} · last seen ${agoText(now - Date.parse(c.last_seen))}`;
@@ -153,11 +154,7 @@ function ownerPresence(s: WaveState, decisions: readonly DecisionPayload[], now:
 
 /** How long ago, as the owner line says it: `40s ago`, `5m ago`, `2h ago`, `3d ago`. */
 function agoText(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  if (s < 86_400) return `${Math.round(s / 3600)}h ago`;
-  return `${Math.round(s / 86_400)}d ago`;
+  return `${span(ms)} ago`;
 }
 
 function parseStatus(argv: string[]) {
