@@ -1,4 +1,5 @@
 #!/bin/sh
+[ -n "${VOLLEY_BROKER:-}" ] && printf '%s\n' "env VOLLEY_BROKER=$VOLLEY_BROKER" >>"$STUB_LOG"
 printf '%s\n' "bun $*" >>"$STUB_LOG"
 if [ "${1:-}" = install ]; then mkdir -p node_modules; exit 0; fi
 case "$*" in

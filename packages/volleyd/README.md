@@ -1698,10 +1698,9 @@ and publishes it retained on `volley/_system/roles` at start (`volley role statu
 ### Moving a role
 
 `role_plan`, `role_move` and `role_rollback` are admin ops on the account-op topic (the mailbox
-refuses them). volleyd moves the **Desk** and the **supervisor**; moving the broker (#470) is
-not implemented yet and is refused.
+refuses them). volleyd moves the **Desk**, the **supervisor** and the **broker**.
 
-- **`role_plan { role, to, port?, terminal? }`** plans fresh and changes nothing: the steps, each
+- **`role_plan { role, to, port?, terminal?, address?, lan? }`** plans fresh and changes nothing: the steps, each
   with the machine it runs on, what blocks the move (`blocked: [{ why, fix? }]`), `warnings`,
   `after` (what changes for you) and a `plan_id`, a digest of every step's machine and exact
   command.
@@ -1788,6 +1787,64 @@ supervisor rotate it again (`volley auth rotate volleyd --json`, written to `bro
 the broker connection it lost is fatal then, so the service manager starts it again with the new
 login and the failed move republished. After a `done`, `role_rollback { move_id }` (on the new
 supervisor, within 7 days) moves the supervisor back the same way.
+
+#### Moving the broker
+
+`role_plan { role: "broker", to: "box-a", address?: "owner@box-a.lan", lan?: true }` moves the
+MQTT broker from this machine to a paired one, with every login it holds; every machine is then
+re-pointed at it. `address` is the ssh destination every tunnel reaches box-a at (default its
+`hosts.box-a.target`); `lan` whether its WebSocket listener (9001) is open to the LAN there
+(default the record's). What blocks it:
+
+- **A fleet that is not quiet** (as for the supervisor; `drain: true` waits for it).
+- **Here**: the broker not on this machine (a broker already moved comes back with
+  `role_rollback` first), no install recorded by `volley setup` (`setup.json`), a container's
+  broker, a state file or admin login volleyd cannot read, or a port other than 1883. On macOS,
+  volleyd's launchd service must name `mqtt://127.0.0.1:1883` already (`volleyd install
+  --broker-url mqtt://127.0.0.1:1883`): its plist is read only when it is loaded.
+- **The target**: not paired, down, behind the supervisor's version, or no mosquitto 2.1 there
+  (one probe, `volley broker probe`, prints its layout and version).
+- **ssh to `address`** from this machine and from every other paired machine (one `ssh -n -o
+  BatchMode=yes <address> true` each; a paired machine that is down blocks, since its tunnel
+  could not be re-pointed), and with `lan`, box-a's port 9001 reachable from here (anonymous
+  refused or accepted, never unreachable).
+
+On a target whose mosquitto is root's (`snap`, `etc`), the plan's `terminal` names the command
+you run there while the move waits (up to 30 minutes): `sudo volley broker receive
+~/.volley/roles/broker/bundle.tgz --lan`. The plan warns that the broker leaves the supervisor's
+machine (moving the supervisor too is a second move). The steps:
+
+| Step | Where | What |
+|---|---|---|
+| `stop` | here | the broker stopped through its layout: `brew services stop mosquitto`, `sudo -n snap stop mosquitto` or `sudo -n systemctl stop mosquitto` (a sudo rule without a password); undone by the same `start` |
+| `bundle` | here | the Dynamic Security state file, its admin login and `lan`, tarred into the move's directory; mosquitto's persistence never travels, so the new broker starts with no retained message |
+| `copy` | box-a | the bundle as base64 on the script's stdin to `~/.volley/roles/broker/bundle.tgz` |
+| `receive` | box-a | `volley broker receive <bundle> --lan\|--no-lan` (or the owner's sudo step, waited for with `--check`): `mosquitto 2.1.x: N logins` |
+| `tunnel` | here | `volley broker tunnel --to <address> --port 1883 --name <here> --broker-port 1883`: this machine's own `ssh -L` to box-a at the old broker's port (a tunnel-only `peer.json`, `heartbeat: false`); volleyd's systemd unit pointed at `mqtt://127.0.0.1:1883` if it named another URL; undone by `volley broker tunnel --off` |
+| `health` | here | volleyd logs in through the tunnel, reads the broker's version (its dynsec admin login), and both listeners refuse anonymous clients (the WebSocket one checked from here with `lan`); 6 tries, 5 s apart |
+| `retarget-N` | each paired machine | `volley broker tunnel --show` (the tunnel it had, kept for a rollback), then `peer_retarget` at `address` (box-a itself: `tunnel: none`, port 1883); each must come `up` through the new broker within 120 s |
+| `desk` | the Desk's machine | `volley desk install --port <p> --broker-host <box-a>` (idempotent) |
+| `record` | here | `broker: { machine: box-a, address: { ssh: <address>, mqtt_port: 1883, ws_port: 9001 }, lan }` |
+
+`role_move` answers as the move starts, `{ move_id, status: "running", handing_over: true }`, a
+second before `stop`: stopping the broker ends every connection, volleyd's and yours. volleyd
+runs the move without one (its own lost connection waits for the move), then exits so its
+service manager starts it again through the tunnel: it republishes every retained topic it owns,
+the move's record included, so `volley role status` and the moves topic show the outcome once you
+reconnect. A failing step undoes the ones done, in reverse: every machine back on the tunnel it
+had, the Desk told the old host, the tunnel down, the old broker started; the move ends `failed`
+with `rolled_back: true`. `role_rollback { move_id }` does the same from the move's record within
+7 days (the old state file was never removed). The broker on box-a keeps running afterwards:
+stop it there.
+
+**Your sessions afterwards.** Every machine, the Desk and volleyd are re-pointed; your own Claude
+Code sessions on this machine are not (their MCP server and hooks name the broker URL they were
+set up with). Re-register them through this machine's tunnel, the one line the plan's `after`
+prints:
+
+```sh
+volley setup --step claude-code --broker-url mqtt://127.0.0.1:1883
+```
 
 ## Footprints and the overlap plan
 
@@ -2937,6 +2994,23 @@ The wave state labels remote tasks with `host` (the host's name), so the Desk ca
 agent runs.
 
 ### Paired machines (`volley peer`)
+
+**One command.** From the daemon's machine, as an admin account, a bare box reachable over ssh
+becomes a ready paired machine:
+
+```sh
+VOLLEY_AUTH_USERNAME=<admin> VOLLEY_AUTH_PASSWORD=... \
+  volley machine add dev@box-a       # install, pair, sign in, doctor; prints the readiness row
+```
+
+It installs this machine's key on the box (one interactive ssh: the prompt is ssh's), installs
+Volley there in peer mode at this machine's release tag (`install.sh --peer`: no broker, no Desk),
+runs `volley setup --peer` (the sign-ins, the Claude profile, the terminal, `volley peer run` as
+the service), authorizes the box's key here, pairs it with a code bound to its name (`peer_invite
+{ for }`, redeemed by `volley peer join` there), signs it in to GitHub and Claude (the remote
+sign-in below), and prints `volley peer doctor`'s verdict; exit 1 when it is not ready. A rerun
+changes nothing and prints the row. The volley-cli README's "`volley machine add`" has each step.
+The rest of this section is what it does, by hand.
 
 Pairing does the remote-host recipe above (account, tunnel, trust, host entry) with one code
 (SPEC §4.6.14). On the daemon's machine, as an admin account (`invite` and `remove` are admin
@@ -4451,6 +4525,12 @@ MACHINE ROLES (SPEC §4.6.24; roles/), each one exact shape, here:
   --from <name> [--local-terminal cmux|tmux] [--local-agents never] [--broker-url
   mqtt://127.0.0.1:<n>]; ssh -n -o BatchMode=yes -o ConnectTimeout=<s> <dest> true (the
   ssh-back probe); base64 -d to that bundle path (the copy).
+  A broker move's, here: brew services stop|start mosquitto · sudo -n snap|systemctl
+  stop|start mosquitto (the old broker, through its layout) · volley broker tunnel --to <dest>
+  --port <n> --name <name> --broker-port <n> | --off (the own tunnel) · systemctl --user
+  daemon-reload (volleyd's unit rewritten) · the ssh probe above, to the new address; and as
+  REMOTE steps: volley broker probe · volley broker receive <abs>/.volley/roles/broker/bundle.tgz
+  --lan|--no-lan|--check · volley broker tunnel --show.
 
 SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.

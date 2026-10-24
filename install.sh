@@ -25,7 +25,9 @@ it is safe: what is already there is left alone.
 Options:
   --version vX.Y.Z   Install this release tag (default: $VOLLEY_VERSION, else the latest tag)
   --source <dir>     Use this Volley checkout instead of cloning one (CI tests its own)
-  --peer             Pass --peer to `volley setup` (this machine joins a supervisor's fleet)
+  --peer             This machine joins a supervisor's fleet: no broker (mosquitto is neither
+                     installed nor checked), no Homebrew tap; `volley setup --peer` runs with
+                     VOLLEY_BROKER=skip
   --no-setup         Stop before `volley setup`; it prints the command to run
   --check            Print each prerequisite as found or missing; exit 1 if any is missing.
                      Changes nothing
@@ -156,6 +158,13 @@ mosquitto_ok() {
   [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -ge 1 ]; }
 }
 
+# The prerequisites for this platform (a peer runs no broker).
+platform_tools() {
+  if [ "$PLATFORM" = macos ]; then tools=$MAC_TOOLS; else tools=$LINUX_TOOLS; fi
+  if [ -n "$PEER" ]; then tools=$(printf '%s' "$tools" | sed 's/ *mosquitto//'); fi
+  printf '%s' "$tools"
+}
+
 present() {
   case "$1" in
     ca-certificates) dpkg -s ca-certificates >/dev/null 2>&1 ;;
@@ -166,9 +175,8 @@ present() {
 
 check() {
   say "Platform: $PLATFORM_NAME"
-  if [ "$PLATFORM" = macos ]; then tools=$MAC_TOOLS; else tools=$LINUX_TOOLS; fi
   missing=0
-  for t in $tools; do
+  for t in $(platform_tools); do
     if present "$t"; then
       where=$(command -v "$t" 2>/dev/null || true)
       [ "$t" = mosquitto ] && where="$(mosquitto_version), $where"
@@ -233,6 +241,8 @@ brew_volley() {
 # the formula brings bun, mosquitto, gh, git, tmux. A failed brew install stops the install.
 install_brew_volley() {
   BREW=''
+  # A peer's checkout is at the supervisor's tag; the formula would bring a broker too.
+  [ -z "$PEER" ] || return 1
   [ -z "$SOURCE$VERSION" ] || return 1
   [ ! -e "$BIN/volley" ] || return 1
   brew info "$TAP_FORMULA" >/dev/null 2>&1 || return 1
@@ -256,7 +266,8 @@ install_macos() {
     return 0
   fi
   formulas=''
-  for t in bun mosquitto gh git tmux; do
+  for t in $(platform_tools); do
+    case "$t" in brew | claude) continue ;; esac
     have "$t" || formulas="$formulas $(brew_formula "$t")"
   done
   if [ -n "$formulas" ]; then
@@ -301,7 +312,7 @@ install_linux() {
   have gh || need_gh=1
   # Only when no mosquitto is there: a snap broker next to an older one cannot bind 1883.
   need_snap=''
-  if ! have mosquitto && snapd_active; then need_snap=1; fi
+  if [ -z "$PEER" ] && ! have mosquitto && snapd_active; then need_snap=1; fi
 
   if [ -n "$apt_pkgs$need_gh$need_snap" ] && [ "$(id -u)" != 0 ]; then
     have sudo || die "sudo is needed to install the missing packages, and it is not installed."
@@ -351,7 +362,7 @@ install_linux() {
     as_root apt-get install -y gh
   fi
 
-  if mosquitto_ok; then
+  if [ -n "$PEER" ] || mosquitto_ok; then
     :
   elif [ -n "$need_snap" ]; then
     say "Installing mosquitto with snap..."
@@ -488,6 +499,8 @@ chain_setup() {
     say "Volley is installed. Next: $shown $*"
   elif tty_ok; then
     say "Running $shown $*"
+    # A peer's setup has no broker to find (its broker is the supervisor's, through the tunnel).
+    [ -n "$PEER" ] && export VOLLEY_BROKER=skip
     exec "$cmd" "$@" <"$TTY"
   else
     say "Volley is installed. No terminal to run setup on; run: $shown $*"
@@ -500,7 +513,7 @@ chain_setup() {
 remove_units() {
   if [ "$PLATFORM" = macos ]; then
     uid=$(id -u)
-    for label in systems.volley.volleyd systems.volley.desk; do
+    for label in systems.volley.volleyd systems.volley.desk systems.volley.peer; do
       plist="$HOME/Library/LaunchAgents/$label.plist"
       [ -e "$plist" ] || continue
       launchctl bootout "gui/$uid/$label" 2>/dev/null || true
@@ -510,7 +523,7 @@ remove_units() {
   else
     dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
     removed=''
-    for unit in volleyd.service volley-desk.service; do
+    for unit in volleyd.service volley-desk.service volley-peer.service; do
       [ -e "$dir/$unit" ] || continue
       systemctl --user disable --now "$unit" 2>/dev/null || true
       rm -f "$dir/$unit"

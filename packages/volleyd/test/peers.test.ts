@@ -417,12 +417,28 @@ describe("PeerService (pairing codes, peer accounts, host registration)", () => 
       expect(r).toMatchObject({ ok: false, error: expect.stringContaining("--replace") });
     });
 
-    it("invite --for names a paired machine", async () => {
-      for (const name of ["box-a", "Bad Name"]) {
+    it("invite --for names a paired machine or a new one, never a host configured by hand", async () => {
+      hosts = { "by-hand": { target: "dev@x" } };
+      for (const name of ["by-hand", "Bad Name"]) {
         const r = await peers.invite({ reply_key: REPLY_KEY, for: name }, "admin-1");
         expect(r).toMatchObject({ ok: false });
       }
+      expect(
+        (await peers.invite({ reply_key: REPLY_KEY, for: "by-hand" }, "admin-1")).error,
+      ).toContain("configured by hand");
       expect(codes).toHaveLength(2);
+    });
+
+    it("a --for code for a new name pairs it (volley machine add), and only it, without replace (#462)", async () => {
+      const code = await inviteFor("box-a");
+      const other = await peers.join(joinFields(code, { name: "box-b" }), "cli");
+      expect(other).toMatchObject({ ok: false, error: expect.stringContaining("box-a only") });
+      const r = await peers.join(joinFields(code), "cli");
+      expect(r.ok, r.error).toBe(true);
+      expect(auth.argvs(["volley", "auth", "add"])).toHaveLength(1);
+      expect(Object.keys(hosts)).toEqual(["box-a"]);
+      expect(events.at(-1)).toMatchObject({ type: "peer_joined", data: { name: "box-a" } });
+      expect((events.at(-1)?.data as Record<string, unknown>).replaced).toBeUndefined();
     });
 
     it("replace never touches an account that is not a peer", async () => {

@@ -15,6 +15,7 @@
     "./paired-hosts": "./src/paired-hosts.ts",
     "./procs": "./src/procs.ts",
     "./repos": "./src/repos.ts",
+    "./roles/sheet": "./src/roles/sheet.ts",
     "./wave-file": "./src/wave-file.ts"
   },
   "scripts": {

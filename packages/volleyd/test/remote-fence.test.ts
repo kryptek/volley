@@ -1567,6 +1567,47 @@ describe("machine roles (#460, #466, #469): the REMOTE steps of peer_retarget an
       expect(allowed(V(...a)), a.join(" ")).toThrow(FenceError);
   });
 
+  it("a broker move's steps on a paired machine (#470): probe, receive, the tunnel shown", () => {
+    const bundle = "/path/to/home/.volley/roles/broker/bundle.tgz";
+    for (const a of [
+      ["broker", "probe"],
+      ["broker", "receive", bundle, "--lan"],
+      ["broker", "receive", bundle, "--no-lan"],
+      ["broker", "receive", bundle, "--check"],
+      ["broker", "tunnel", "--show"],
+    ])
+      expect(allowed(V(...a)), a.join(" ")).not.toThrow();
+    for (const a of [
+      ["broker", "probe", "--layout", "etc"],
+      ["broker", "receive", bundle],
+      ["broker", "receive", "/tmp/bundle.tgz", "--lan"],
+      ["broker", "receive", "/path/to/home/.volley/roles/m-1/bundle.tgz", "--lan"],
+      ["broker", "receive", bundle, "--layout", "snap"],
+      ["broker", "tunnel", "--off"],
+      [
+        "broker",
+        "tunnel",
+        "--to",
+        "dev@box",
+        "--port",
+        "1883",
+        "--name",
+        "a",
+        "--broker-port",
+        "1883",
+      ],
+    ])
+      expect(allowed(V(...a)), a.join(" ")).toThrow(FenceError);
+    // The bundle's write there goes to the same path.
+    expect(
+      allowed({
+        argv: ["base64", "-d"],
+        stdin: Buffer.from("x").toString("base64"),
+        stdout: bundle,
+      }),
+    ).not.toThrow();
+  });
+
   it("a supervisor move's receive, the re-pairing join, the ssh-back probe and the bundle write", () => {
     const bundle = "/path/to/home/.volley/roles/m-1/bundle.tgz";
     for (const a of [

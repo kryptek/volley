@@ -1,8 +1,16 @@
 import { randomBytes } from "node:crypto";
 import { replyKey, seal } from "../accounts";
 import { DAEMON_DEFAULTS } from "../config-defaults";
+import { isSshDestination } from "../peers";
 import type { RoleDeps } from "./deps";
-import { type MoveResult, type RoleMoves, type RolePlan, planWire } from "./engine";
+import {
+  type MoveRecord,
+  type MoveResult,
+  type RoleMoves,
+  type RolePlan,
+  planWire,
+} from "./engine";
+import { type BrokerDeps, type BrokerKept, brokerRollbackSteps, planBroker } from "./plan-broker";
 import { type DeskIssued, deskSteps, planDesk } from "./plan-desk";
 import { type SupervisorDeps, planSupervisor } from "./plan-supervisor";
 import { MACHINE_ROLES, type MachineRole } from "./record";
@@ -17,7 +25,8 @@ import { MACHINE_ROLES, type MachineRole } from "./record";
  *
  * A supervisor move answers as soon as it starts (`handing_over: true`, the `restarting: true`
  * pattern of `setup_apply`): its receive rotates this supervisor's login, so no answer could
- * follow. Its progress is the moves topic, which the new supervisor goes on publishing. While
+ * follow. A broker move (and its rollback) answers the same way, and starts a moment after the
+ * answer: its first step stops the broker every connection, the answer's included, runs through. Its progress is the moves topic, which the new supervisor goes on publishing. While
  * the fleet is not quiet it is refused, or with `drain: true` it waits (`planning`, nothing new
  * admitted: `draining`) and starts at the first tick that finds the fleet quiet.
  */
@@ -38,6 +47,8 @@ export interface RoleOpsDeps {
   deps: () => RoleDeps | string;
   /** What only a supervisor move needs. */
   supervisor: () => SupervisorDeps;
+  /** What only a broker move needs. */
+  broker: () => BrokerDeps;
   moves: RoleMoves;
   /**
    * A move run in the background (a supervisor move) ended here: handed over, done or failed.
@@ -45,6 +56,8 @@ export interface RoleOpsDeps {
    */
   finished: (moveId: string, r: MoveResult) => Promise<void>;
   log: (line: string) => void;
+  /** The daemon's clock (a broker move's answer goes out before it starts). */
+  sleep: (ms: number) => Promise<void>;
 }
 
 /** A `role_move { drain: true }` waiting for a quiet fleet. */
@@ -71,6 +84,8 @@ export function newMoveId(role: string, now: Date): string {
 export class RoleOps {
   private waiting: Waiting | null = null;
   private ticking = false;
+  /** A broker move answered and about to start (`role_broker_reply_ms`). */
+  private starting: string | null = null;
 
   constructor(private readonly o: RoleOpsDeps) {}
 
@@ -148,11 +163,16 @@ export class RoleOps {
     if (p.terminal !== undefined && p.terminal !== "cmux" && p.terminal !== "tmux")
       return 'terminal must be "cmux" or "tmux"';
     if (p.drain !== undefined && typeof p.drain !== "boolean") return "drain must be true or false";
+    if (p.address !== undefined && !isSshDestination(p.address))
+      return "address must be an ssh destination ([user@]host, never starting with -)";
+    if (p.lan !== undefined && typeof p.lan !== "boolean") return "lan must be true or false";
     return {
       role: p.role as MachineRole,
       to: p.to,
       ...(typeof p.port === "number" ? { port: p.port } : {}),
       ...(p.terminal === "cmux" || p.terminal === "tmux" ? { terminal: p.terminal } : {}),
+      ...(typeof p.address === "string" ? { address: p.address } : {}),
+      ...(typeof p.lan === "boolean" ? { lan: p.lan } : {}),
     };
   }
 
@@ -174,7 +194,12 @@ export class RoleOps {
         ...(req.terminal !== undefined ? { terminal: req.terminal } : {}),
         by,
       });
-    return `moving the ${req.role} is not supported by this supervisor yet`;
+    return planBroker(d, this.o.broker(), {
+      to: req.to,
+      ...(req.address !== undefined ? { address: req.address } : {}),
+      ...(req.lan !== undefined ? { lan: req.lan } : {}),
+      by,
+    });
   }
 
   /**
@@ -182,17 +207,29 @@ export class RoleOps {
    * this supervisor unloads itself.
    */
   private background(plan: RolePlan, moveId: string, by: string, rollsBack?: string): void {
-    void this.o.moves
-      .run({
-        move_id: moveId,
-        role: plan.role,
-        from: plan.from,
-        to: plan.to,
-        by,
-        steps: plan.steps,
-        ...(plan.kept !== undefined ? { kept: plan.kept } : {}),
-        ...(rollsBack !== undefined ? { rolls_back: rollsBack } : {}),
-      })
+    // A broker move stops the broker its answer travels through: the answer goes out first.
+    const first =
+      plan.role === "broker"
+        ? (() => {
+            this.starting = moveId;
+            return this.o.sleep(DAEMON_DEFAULTS.role_broker_reply_ms).finally(() => {
+              this.starting = null;
+            });
+          })()
+        : Promise.resolve();
+    void first
+      .then(() =>
+        this.o.moves.run({
+          move_id: moveId,
+          role: plan.role,
+          from: plan.from,
+          to: plan.to,
+          by,
+          steps: plan.steps,
+          ...(plan.kept !== undefined ? { kept: plan.kept } : {}),
+          ...(rollsBack !== undefined ? { rolls_back: rollsBack } : {}),
+        }),
+      )
       .then((r) => this.o.finished(moveId, r))
       .catch((e: unknown) =>
         this.o.log(`roles: ${moveId}: ${e instanceof Error ? e.message : String(e)}`),
@@ -237,7 +274,7 @@ export class RoleOps {
       });
       return { ok: true, result: { move_id: moveId, status: "planning" } };
     }
-    if (plan.role === "supervisor") {
+    if (plan.role === "supervisor" || plan.role === "broker") {
       this.background(plan, moveId, by);
       return { ok: true, result: { move_id: moveId, status: "running", handing_over: true } };
     }
@@ -257,6 +294,7 @@ export class RoleOps {
   private busy(): string | null {
     return (
       this.o.moves.refusal() ??
+      (this.starting !== null ? `a role move is in progress: ${this.starting}` : null) ??
       (this.waiting !== null
         ? `a role move is waiting for a quiet fleet: ${this.waiting.move_id}`
         : null)
@@ -283,6 +321,7 @@ export class RoleOps {
     const busy = this.busy();
     if (busy !== null) return refuse(busy);
     if (rec.role === "supervisor") return this.rollbackSupervisor(d, rec, by);
+    if (rec.role === "broker") return this.rollbackBroker(d, rec, by);
     if (rec.role !== "desk")
       return refuse(`rolling back a ${rec.role} move is not supported by this supervisor yet`);
     if (rec.kept === undefined) return refuse(`move ${id} kept nothing to roll back to`);
@@ -346,9 +385,48 @@ export class RoleOps {
     this.background(plan, moveId, by, rec.move_id);
     return { ok: true, result: { move_id: moveId, rolls_back: rec.move_id, handing_over: true } };
   }
+
+  /**
+   * A broker move rolled back: the broker goes back to the supervisor's machine from the move's
+   * record (its `kept`: the old layout, every paired machine's tunnel before the move), answered as
+   * it starts like the move itself.
+   */
+  private rollbackBroker(d: RoleDeps, rec: MoveRecord, by: string): RoleReply {
+    const kept = rec.kept as unknown as BrokerKept | undefined;
+    if (kept === undefined || kept.peers === undefined)
+      return refuse(`move ${rec.move_id} kept nothing to roll back to`);
+    if (d.roles.broker.machine !== rec.to)
+      return refuse(
+        `the broker runs on ${d.roles.broker.machine} now, not ${rec.to}: not rolled back`,
+      );
+    if (rec.from !== d.localName)
+      return refuse(
+        `the broker came from ${rec.from}, not this supervisor's machine (${d.localName}): not rolled back`,
+      );
+    const moveId = newMoveId("broker", d.now());
+    const plan: RolePlan = {
+      role: "broker",
+      from: rec.to,
+      to: rec.from,
+      steps: brokerRollbackSteps(d, this.o.broker(), rec, kept, by),
+      blocked: [],
+      warnings: [],
+      terminal: [],
+      after: [],
+    };
+    this.background(plan, moveId, by, rec.move_id);
+    return { ok: true, result: { move_id: moveId, rolls_back: rec.move_id, handing_over: true } };
+  }
 }
 
-type Request = { role: MachineRole; to: string; port?: number; terminal?: "cmux" | "tmux" };
+type Request = {
+  role: MachineRole;
+  to: string;
+  port?: number;
+  terminal?: "cmux" | "tmux";
+  address?: string;
+  lan?: boolean;
+};
 
 const retentionDays = () => Math.round(DAEMON_DEFAULTS.role_move_retention_ms / 86_400_000);
 

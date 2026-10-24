@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import {
   chmodSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -43,7 +42,7 @@ export interface BundleSources {
 export interface Manifest {
   version: 1;
   move_id: string;
-  role: "supervisor";
+  role: "supervisor" | "broker";
   from: string;
   to: string;
   with_broker: boolean;
@@ -113,21 +112,60 @@ export async function makeBundle(
   src: BundleSources,
   o: { move_id: string; from: string; to: string; with_broker: boolean; dir: string },
 ): Promise<{ path: string; manifest: Manifest }> {
+  const files = travelSet(src, o.move_id, o.with_broker).map(({ path, from }) => ({
+    path,
+    data: readFileSync(from),
+  }));
+  return pack(exec, files, { ...o, role: "supervisor" });
+}
+
+/**
+ * A broker move's bundle (SPEC §4.6.24; `volley broker receive` reads it): the old broker's
+ * Dynamic Security state file (`broker/<its name>`), its admin login (`auth/admin.json`) and the
+ * move's choices (`broker/choices.json`: `lan`). mosquitto's persistence DB never travels: the
+ * new broker starts empty.
+ */
+export async function makeBrokerBundle(
+  exec: ExecFn,
+  src: { stateFile: string; adminFile: string; lan: boolean },
+  o: { move_id: string; from: string; to: string; dir: string },
+): Promise<{ path: string; manifest: Manifest }> {
+  const files = [
+    { path: `broker/${basename(src.stateFile)}`, data: readFileSync(src.stateFile) },
+    { path: "broker/choices.json", data: Buffer.from(`${JSON.stringify({ lan: src.lan })}\n`) },
+    { path: "auth/admin.json", data: readFileSync(src.adminFile) },
+  ];
+  return pack(exec, files, { ...o, role: "broker", with_broker: true });
+}
+
+/** Stage `files` and their manifest under `dir/stage`, tar them to `dir/bundle.tgz` (0600). */
+async function pack(
+  exec: ExecFn,
+  entries: { path: string; data: Buffer }[],
+  o: {
+    move_id: string;
+    from: string;
+    to: string;
+    with_broker: boolean;
+    dir: string;
+    role: Manifest["role"];
+  },
+): Promise<{ path: string; manifest: Manifest }> {
   const stage = join(o.dir, "stage");
   rmSync(stage, { recursive: true, force: true });
   mkdirSync(stage, { recursive: true, mode: 0o700 });
   try {
-    const files = travelSet(src, o.move_id, o.with_broker).map(({ path, from }) => {
+    const files = entries.map(({ path, data }) => {
       const to = join(stage, path);
       mkdirSync(dirname(to), { recursive: true, mode: 0o700 });
-      copyFileSync(from, to);
+      writeFileSync(to, data, { mode: 0o600 });
       chmodSync(to, 0o600);
-      return { path, sha256: createHash("sha256").update(readFileSync(to)).digest("hex") };
+      return { path, sha256: createHash("sha256").update(data).digest("hex") };
     });
     const manifest: Manifest = {
       version: 1,
       move_id: o.move_id,
-      role: "supervisor",
+      role: o.role,
       from: o.from,
       to: o.to,
       with_broker: o.with_broker,

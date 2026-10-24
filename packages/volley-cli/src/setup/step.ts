@@ -152,6 +152,12 @@ export interface SetupContext {
    * (the page uses its own host). Unset: setup.json's `broker_host`.
    */
   brokerHost?: string | null;
+  /**
+   * `volley setup --peer`: a machine that joins a supervisor's fleet. No broker of its own: the
+   * Claude Code step sets the profile up only (skills, hooks at the tunnel; no coordinator), and
+   * the service is `volley peer run`.
+   */
+  peer?: true;
   /** What the run counts (setup-metrics.json): the sign-in step reports each sign-in it ran. */
   metrics?: { signIn: () => void };
 }
@@ -180,7 +186,8 @@ export type StepName =
   | "claude-code"
   | "terminal"
   | "services"
-  | "phone";
+  | "phone"
+  | "peer-service";
 
 export interface StepPlan {
   step: StepName;
@@ -248,6 +255,11 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
         line === lsofArgv(portOf(argv[2], "-iTCP:")).join(" ")) ||
       (a0 === "ss" && argv.length === 9 && line === ssArgv(portOf(argv[8], ":")).join(" ")) ||
       line === "systemctl --user show -p MainPID --value volley-desk.service" ||
+      // `volley setup --peer`'s service (the unit writers of `volley peer join`).
+      (a0 === "loginctl" &&
+        a1 === "enable-linger" &&
+        argv.length === 3 &&
+        /^[\w.-]+$/.test(a2 ?? "")) ||
       // `volley desk uninstall`.
       line === "systemctl --user disable --now volley-desk.service" ||
       // cmux, reached the way volleyd's service reaches it (outside cmux; output to a file).

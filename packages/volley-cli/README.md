@@ -21,6 +21,7 @@ If you can write a bash one-liner, you can be a Volley agent. The subcommands co
 - [`volley notify`](#volley-notify)
 - [`volley auth`](#volley-auth)
 - [`volley lease`](#volley-lease)
+- [`volley machine add`](#volley-machine-add)
 - [`volley peer`](#volley-peer)
 - [`volley repo`](#volley-repo)
 - [Common patterns](#common-patterns)
@@ -66,9 +67,11 @@ volley --help
 | `volley lease`  | Wait for a heavy-operation lease from `volleyd` (`run`, `acquire`, `release`, `status`). See [`volley lease`](#volley-lease) below. |
 | `volley claude` | Claude account profiles on volleyd: `add <label>` (a profile and its sign-in URL), `signin`, `list` (one block per account, by e-mail: masked unless `--show-email`, its machines, the ones it is `not on:`, and freshest usage; `--json` for the raw answer), `list` also marks `next pick` on each login volleyd's next spawn would run under, `sync` (sharing + MCP servers), `balance [--model <m>] [--machine <name>]` (per machine, the signed-in accounts ranked by headroom with their 5-hour, 7-day and Fable figures and agents, an arrow `← fable, opus` on each family's next pick; e-mails masked unless `--show-email`, `--json` for volleyd's answer), `move <agent-id> <acct>` (restart an agent under another account with a resume note). See the volleyd README's "Claude accounts". |
 | `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (doctor, account, tunnel service, trust check, host entry), `doctor` (check this machine, `--fix` the safe things), `run` (the service). See [`volley peer`](#volley-peer) below and the volleyd README's "Paired machines". |
+| `volley machine` | `add <user@host>`: make a bare box a ready paired machine from the supervisor's, over ssh (install in peer mode, pair, sign in, doctor). See [`volley machine add`](#volley-machine-add) below. |
 | `volley repo`   | The repositories volleyd's machines work on: `add <owner/name>` (each paired machine clones it, or adopts `--path`, and trusts it; `--wait` follows them), `remove` (clones kept), `list`, `status`. See [`volley repo`](#volley-repo) below. |
 | `volley setup`  | First-run / repair wizard: broker, accounts, services, phone sign-in QR. See [`volley setup`](#volley-setup) below. |
 | `volley desk serve` | Serve the built Desk from a small static server (the service `volley setup` installs); `volley desk install`, `uninstall` and `check` install it as a service on its own. See [`volley desk serve`](#volley-desk-serve) below. |
+| `volley broker` | A broker move's machine-side steps (volleyd runs them over ssh): `receive <bundle>` (set this machine's mosquitto up with the moved broker's logins), `probe`, `tunnel` (the supervisor's own tunnel to it). See [Moving the broker](#moving-the-broker-volley-broker) below. |
 | `volley deploy` | Take this machine's volleyd and Desk services to a release tag: build the Desk, restart, health-check, roll back on failure; then every paired machine. See [`volley deploy`](#volley-deploy) below. |
 
 Each has its own `--help`:
@@ -134,6 +137,8 @@ volley setup --check: broker mqtt://localhost:1883, brew-arm64 layout, auth dir 
 `--check --json` prints exactly `{ "version", "steps": [{ "name", "title", "status", "changes", "blocked"?, "skipped"? }], "setup_at" }` on stdout and nothing else (`changes` holds the summaries; `setup_at` is when `setup.log` last had a line, or null), for CI.
 
 **Metrics.** Every run (one that stops too) writes `$VOLLEYD_HOME/setup-metrics.json` (0600; `metrics` in `setup.json` points at it): `{ started_at, finished_at, wall_ms, questions, sign_ins, sudo_prompts, steps: [{ name, ms, changes }] }`. `questions` counts only what a person saw (each confirmation, the LAN question, a hidden prompt, the coordinator name: 0 under `--yes`), `sign_ins` the browser sign-ins it ran, `sudo_prompts` each command it ran through `sudo` at a terminal. Counts and step names only, scrubbed of anything token-shaped all the same. The last line reports them: `Setup complete in 2 m 5 s (1 question, 2 sign-ins, 0 sudo)`.
+
+**`--peer`.** A machine that joins a supervisor's fleet (`install.sh --peer`, `volley machine add`) has no broker, accounts, Desk or phone of its own: `volley setup --peer` runs four steps, never mentions any of those, and writes no `setup.json` (the supervisor's install record). **Sign-ins** as above; **Claude Code** for the profile only: the skills, and the hooks with `VOLLEY_BROKER_URL` at the tunnel `volley peer join` sets up (`mqtt://127.0.0.1:<port>`, `remote_port` in `~/.volley/peer.json`, else 21883), no coordinator name and no MCP registration; **Terminal** as above; and **Peer service**: `volley peer run` as the user service in place of volleyd, written by the same unit writers as `volley peer join` (a `systemd --user` unit `volley-peer.service` with lingering, or the launchd agent `systems.volley.peer`), with the services' fixed `PATH`. Before the machine is paired it is skipped (`peer run` needs `peer.json`; join installs the service). `--step` takes `signin`, `claude-code`, `terminal`, `peer-service`; the broker's, accounts' and Desk's flags (`--lan`, `--layout`, `--broker-url`, `--desk-port`, …) are refused. `install.sh --peer` runs it with `VOLLEY_BROKER=skip`.
 
 **From the Desk.** Settings › Setup & Security runs the same steps through volleyd (`setup_plan` / `setup_apply`, SPEC §4.6.10), all but Sign-ins, Claude Code and Terminal (a browser sign-in, your Claude Code profile and the coordinator name are a terminal's: run `volley setup --step signin --step claude-code` there): its Services step makes the Terminal step's cmux check instead, and the terminal is recorded only by `volley setup` in a terminal. volleyd runs these planners and steps itself, writes the same `setup.log` lines (with `by: "desk:<admin>"`), and seals the one-time admin token to the browser instead of printing it. It needs an admin already (an admin token redeemed, or a secured broker), so a brand-new anonymous broker's first run (broker + security) is this command. A change only a terminal can make (anything under `sudo`, volleyd's own service, the macOS keychain) is shown in the Desk with the exact command to run here.
 
@@ -339,12 +344,70 @@ Files live in `--dir` (env `VOLLEY_AUTH_DIR`; default `<mosquitto config dir>/vo
 
 ---
 
+## `volley machine add`
+
+One command on the supervisor's machine makes a bare box (macOS or Ubuntu/Debian, reachable over
+ssh) a ready paired machine:
+
+```sh
+volley machine add dev@box-a                 # --name (default: box-a), --hub dev@192.0.2.20, --no-signin
+```
+
+It runs as an admin account (the pairing code is an admin op, as `volley peer invite` is) and goes
+in seven steps, each skipped when it is in place:
+
+1. **ssh**: key-based ssh to the box. Without it, one interactive `ssh` on your terminal (any
+   password or host-key prompt is ssh's own, never Volley's) whose only action appends this
+   machine's public key to the box's `~/.ssh/authorized_keys` (a key is created first with
+   `ssh-keygen -t ed25519` when this machine has none). Every later step is `ssh -T -o
+   BatchMode=yes … <user@host> bash -s` with its script on stdin, the shape `volley deploy` uses.
+2. **Volley**: `install.sh --peer --version <this machine's tag> --no-setup`, sent on stdin: no
+   broker, no Desk, the checkout at the supervisor's release so the doctor's `volley.version`
+   check passes. When the box lacks what only sudo installs (git, tmux, curl or gh on Linux;
+   Homebrew on a Mac), that is announced first, and the installer is copied over and run with
+   `ssh -t`, so sudo's prompt comes on your terminal.
+3. **Setup**: `volley setup --peer --yes` on the box (the volley-cli README's `--peer`).
+4. **ssh back**: `volley peer join` reaches this machine over ssh, so the box's key (created
+   there when it has none) goes into this machine's `~/.ssh/authorized_keys`, shown as a change,
+   and this machine's host keys into the box's `~/.ssh/known_hosts`. On a Mac, Remote Login must
+   be on: the step checks it (`launchctl print system/com.openssh.sshd`) and stops with how to
+   turn it on.
+5. **Pairing**: a code bound to the box's name (`peer_invite { for: <name> }`, as `volley peer
+   invite --for <name>`), redeemed on the box with `volley peer join <code> --to <hub> --name
+   <name> --target <user@host>` (`--replace` when this machine has the name paired but the box
+   lost its `peer.json`). The code is never printed: the join's own output is relayed with it
+   redacted.
+6. **Sign-ins**: GitHub with `gh auth login --web --git-protocol https && gh auth setup-git` over
+   `ssh -t`, Claude through volleyd's remote sign-in (`volley claude add <name> --machine <name>
+   --wait`, which prints the link to open on any device). Only what the doctor finds signed out;
+   `--no-signin` defers both.
+7. **Doctor**: `volley peer doctor --json` on the box, printed as one row:
+
+```text
+box-a (dev@box-a): ready ✓
+  tools        ✓ volley 0.11.0, bun 1.3.2, git 2.43.0, tmux 3.4, gh 2.62.0, claude 2.0.14
+  gh           ✓ signed in
+  claude       ✓ signed in (max)
+  trust        – no repository yet
+  repositories – none yet: the hub's repositories for all machines arrive with its clone orchestration (…)
+```
+
+and a `fix:` line under it for each failing check that has one. It exits 0 when the box is
+ready, 1 when it is not (or a step failed), 2 on a usage error. Repositories need no flag: this
+machine's repositories assigned to `all` machines reach the box through the clone orchestration;
+`volley repo add <owner/name> --machines <name>` adds one for it alone. A rerun on a paired box
+changes nothing (no install, setup, key or code) and prints the row; upgrading a paired box is
+`volley deploy`. Every command it runs here goes through a fence: the batch ssh with a script it
+rendered itself, the connect and `ssh -t` with a command it rendered, `ssh-keygen` for this
+machine's key, the Remote Login check, and `volley claude add` for that one name.
+
 ## `volley peer`
 
 Pairs a second machine with `volleyd`'s, so waves can run agents there (SPEC §4.6.14; the volleyd
 README's "Paired machines" has the whole walk-through). On the supervisor's machine, as an admin
 account: `volley peer invite` (a one-time code), `volley peer invite --for <name>` (a code that
-re-pairs the paired machine `<name>`), `volley peer list`, `volley peer remove <name> [--drain |
+joins as `<name>` only: it re-pairs the paired machine `<name>`, or pairs a new one, as `volley
+machine add` does), `volley peer list`, `volley peer remove <name> [--drain |
 --now]`. On any machine, `volley peer doctor [--fix]` says whether it can run an agent and fixes
 what it safely can. On the machine to pair: `volley peer join <code> --to <user@supervisor> --repo
 <owner/name>[=<clone>]` (repeatable; a bare `--repo <clone>` path is the legacy single clone; add
@@ -619,6 +682,63 @@ With no record (volleyd has never run against this broker) it exits 1 with
 `no roles record: is volleyd running?`. `--timeout <s>` (default 2) bounds the wait for the
 retained record; `--broker-url`, `--username` and `--password` as everywhere.
 
+### `volley role move` and `volley role rollback`
+
+```sh
+volley role move broker     --to <machine> [--address <ssh destination>] [--lan|--no-lan] [--drain] [--dry-run] [--yes]
+volley role move supervisor --to <machine> [--drain] [--dry-run] [--yes]
+volley role move desk       --to <machine> [--port 5199] [--dry-run] [--yes]
+volley role rollback <move_id>
+```
+
+Admin ops, sent as `volley peer invite` sends its own (an admin login: `--username <admin>`,
+password in `VOLLEY_AUTH_PASSWORD`; a login this machine's account registry says is not an admin
+is refused before anything connects). `move` asks volleyd for a plan (`role_plan`) and prints its
+sheet — the same text the Desk shows: the steps with the machine each runs on, what blocks the
+move and how to fix it, the commands only a terminal can run, and what changes afterwards:
+
+```text
+$ volley role move desk --to box-a --dry-run
+Move the desk from mac to box-a (plan 3f2a…)
+
+Steps:
+  1. on box-a: Install the Desk on box-a
+  2. on box-a: Check the new Desk answers
+  3. on mac: Record the Desk on box-a
+  4. on mac: Sign in at the new address
+  5. on mac: Stop the old Desk (kept for a rollback)
+
+Afterwards:
+  · every device signs in again at http://box-a.lan:5199
+```
+
+`--dry-run` stops there: exit 0, or 1 when the plan is blocked. Otherwise it asks once (`--yes`
+skips the question), sends `role_move` with the plan's `plan_id` (a plan that changed meanwhile
+is refused, `plan changed …`, exit 1: run it again), and streams the move's retained topic
+`volley/_system/roles/moves/<move_id>` one line per step until it ends:
+
+```text
+✓ Install the Desk on box-a (box-a)
+✓ Check the new Desk answers (box-a)
+✓ Record the Desk on box-a (mac)
+✓ Sign in at the new address (mac)
+✓ Stop the old Desk (kept for a rollback) (mac)
+the desk runs on box-a (undo: volley role rollback desk-20261024-091500-3c1d)
+sign in at the Desk's new address: http://box-a.lan:5199/#signin=…
+```
+
+A failed move prints the step that failed (`✗ …`) and that every step done was undone; exit 1.
+A supervisor move goes on streaming through the hand-over: the topic is retained and the new
+supervisor continues it. A broker move stops the broker the stream is connected to: the CLI reads
+the topic again over a fresh connection every few seconds until the supervisor, back through the
+new broker, republishes it. A broker move whose new machine is not the supervisor's prints the
+follow-on command (`volley role move supervisor --to <machine>`). `--drain` (broker, supervisor)
+lets a move wait for a quiet fleet instead of being refused; nothing new is admitted meanwhile.
+`volley role rollback <move_id>` undoes a done move within 7 days, as a new move the other way,
+streamed the same way. `--timeout <s>` bounds the wait for volleyd (default 30 s for the plan;
+a whole move 900 s for the Desk, 1200 s for the broker, 1800 s for the supervisor): exit 124
+when it passes.
+
 ### Moving the supervisor to another machine
 
 An admin moves the supervisor (`volleyd` and its home) to a paired machine with the `role_plan` /
@@ -655,11 +775,59 @@ received; 1 nothing changed; 3 a step after the rotation failed and was undone, 
 has a password the old machine does not know (the old supervisor rotates it again).
 
 Waves stopped for the move replay as `stopped` on the new machine: continue one with
-`volleyd resume <wave>`. Within 7 days, the admin op `role_rollback { move_id }` moves the
-supervisor back as a new supervisor move (a `volley role rollback` verb is still to come): a fresh
+`volleyd resume <wave>`. Within 7 days, `volley role rollback <move_id>` (the admin op
+`role_rollback { move_id }`) moves the supervisor back as a new supervisor move: a fresh
 bundle of the current home travels back, so what changed since the move goes with it. The move
 undone is marked `rolled_back` at that hand-over; a rollback that fails leaves it `done`. After
 7 days the move's record is removed.
+
+### Moving the broker: `volley broker`
+
+`volley role move broker --to box-a [--address <ssh destination>] [--lan|--no-lan]` moves the
+broker, with every login it holds, from the supervisor's machine to a paired one, and re-points
+every machine, the Desk and volleyd at it (the volleyd README's "Moving the broker" has the
+steps). The new broker starts with no retained message: mosquitto's persistence does not travel.
+volleyd runs the machine-side half with `volley broker`, which you run yourself only when the
+plan says so:
+
+```sh
+volley broker receive <bundle> [--lan|--no-lan] [--layout <name>]   # on the broker's new machine
+volley broker receive <bundle> --check     # exit 0 once this bundle was received here
+volley broker probe [--layout <name>]      # {"layout":"brew-arm64","needs_root":false,"mosquitto":"2.1.2"}
+volley broker tunnel --to <ssh destination> --port <n> --name <machine> [--broker-port <n>]
+volley broker tunnel --off | --show
+```
+
+- **`receive`** checks the bundle first (its manifest, every sha256, a state file that is
+  Dynamic Security JSON): a refusal writes nothing. It then places the state file at the
+  layout's path and the admin login in the auth dir (each file it replaces kept as
+  `<file>.before-<move_id>`), and runs `volley setup`'s Security step on them, never a second
+  implementation: the config as `volley auth init` writes it (`--lan`: the WebSocket listener
+  on every interface; default: the move's choice in the bundle), the layout's restart, both
+  listeners checked to refuse anonymous clients. Its last line is `mosquitto 2.1.x: N logins`.
+  On a root-owned install (`snap`, `etc`) without root it exits 2 with the line to run:
+
+  ```
+  $ volley broker receive /path/to/home/.volley/roles/broker/bundle.tgz --lan
+  volley broker receive: this install (snap) keeps the broker's config and state file as root's: run `sudo volley broker receive /path/to/home/.volley/roles/broker/bundle.tgz --lan`
+  ```
+
+  The move's sheet shows that command under *Run in a terminal*, and the move waits for it.
+- **`tunnel`** is the supervisor machine's own tunnel to the moved broker: `--to` writes
+  `peer.json` (a tunnel-only one, `heartbeat: false`, when there is none), restarts the peer
+  service with `volley peer retarget` and waits for the port; `--off` puts back what `--to`
+  replaced; `--show` prints a paired machine's tunnel (`{"host","remote_port","tunnel"}`), which
+  the move keeps for a rollback.
+
+After the move, your Claude Code sessions on the old broker's machine still name the broker URL
+they were set up with. Re-register them through that machine's tunnel:
+
+```sh
+volley setup --step claude-code --broker-url mqtt://127.0.0.1:1883
+```
+
+`volley role rollback <move_id>` within 7 days starts the old broker again (its state file was
+never removed) and puts every machine back on the tunnel it had; stop the broker on box-a there.
 
 ---
 

@@ -595,6 +595,78 @@ describe("chaining into volley setup", () => {
   });
 });
 
+describe("--peer: a machine that joins a supervisor's fleet (no broker, no Desk)", () => {
+  const LINUX_PEER = LINUX_ALL.filter((t) => t !== "mosquitto");
+  const MAC_PEER = MAC_ALL.filter((t) => t !== "mosquitto");
+
+  test("a fresh Ubuntu: no mosquitto from snap, and no mosquitto advice", () => {
+    const w = world("ubuntu", ["curl"], { STUB_SNAPD: "active" });
+    const r = run(w, ["--peer", "--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(has(r, "sudo snap")).toEqual([]);
+    expect(r.out).not.toContain("snap install mosquitto");
+    expect(r.out).not.toContain("mosquitto is not installed");
+    expect(has(r, "apt-get install")).toEqual([
+      "apt-get install -y git tmux ca-certificates unzip",
+      "apt-get install -y gh",
+    ]);
+    expect(installers(r)).toEqual(["installer bun", "installer claude"]);
+    expect(r.out).toContain("Next: ~/.volley/bin/volley setup --peer");
+  });
+
+  test("a fresh Mac: brew installs no mosquitto, and the tap (which brings one) is not used", () => {
+    const w = world("macos-arm64", ["curl", "git"], { STUB_BREW_TAP: "1" });
+    const r = run(w, ["--peer", "--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(has(r, "brew info")).toEqual([]);
+    expect(has(r, "brew install")).toEqual(["brew install oven-sh/bun/bun gh tmux"]);
+    expect(has(r, "git clone")).toHaveLength(1);
+  });
+
+  test("--check does not count mosquitto", () => {
+    for (const [p, tools] of [
+      ["ubuntu", LINUX_PEER],
+      ["macos-arm64", MAC_PEER],
+    ] as const) {
+      const w = world(p, [...tools]);
+      const r = run(w, ["--peer", "--check"]);
+      expect(r.code).toBe(0);
+      expect(r.out).not.toContain("mosquitto");
+    }
+  });
+
+  test("setup runs with --peer and VOLLEY_BROKER=skip", () => {
+    const w = world("ubuntu", LINUX_PEER, { VOLLEY_INSTALL_TTY: "/dev/null" });
+    const r = run(w, ["--peer", "--version", "v0.9.0"]);
+    expect(r.code).toBe(0);
+    expect(has(r, "git clone")).toEqual([
+      expect.stringContaining("--branch v0.9.0") as unknown as string,
+    ]);
+    expect(r.calls.slice(-2)).toEqual([
+      "env VOLLEY_BROKER=skip",
+      `bun ${cli(src(w), "volley-cli")} setup --peer`,
+    ]);
+  });
+
+  test("a plain install does not set VOLLEY_BROKER", () => {
+    const w = world("ubuntu", LINUX_ALL, { VOLLEY_INSTALL_TTY: "/dev/null" });
+    const r = run(w);
+    expect(has(r, "env VOLLEY_BROKER")).toEqual([]);
+  });
+
+  test("--uninstall removes the peer service too", () => {
+    const w = world("ubuntu", LINUX_PEER);
+    run(w, ["--peer", "--no-setup"]);
+    const unit = join(w.home, ".config", "systemd", "user", "volley-peer.service");
+    mkdirSync(join(unit, ".."), { recursive: true });
+    writeFileSync(unit, "[Unit]\n");
+    const r = run(w, ["--uninstall"]);
+    expect(r.code).toBe(0);
+    expect(existsSync(unit)).toBe(false);
+    expect(r.out).toContain("Removed volley-peer.service");
+  });
+});
+
 describe("--check", () => {
   test("lists found and missing, exits 1, changes nothing", () => {
     const w = world("ubuntu", ["git", "curl", "bun"]);

@@ -88,7 +88,7 @@ export const checkExit = (rows: readonly CheckRow[]): 0 | 1 =>
 const MARK: Record<CheckStatus, string> = { done: "✓", pending: "→", blocked: "✗", skipped: "–" };
 
 /** The rows as the terminal shows them. */
-export function renderCheck(rows: readonly CheckRow[]): string {
+export function renderCheck(rows: readonly CheckRow[], command = "volley setup"): string {
   const width = Math.max(...rows.map((r) => r.title.length));
   const out: string[] = [];
   for (const r of rows) {
@@ -108,7 +108,7 @@ export function renderCheck(rows: readonly CheckRow[]): string {
     "",
     pending + blocked === 0
       ? "Nothing is missing."
-      : `${[pending > 0 ? `${pending} pending` : "", blocked > 0 ? `${blocked} blocked` : ""].filter((s) => s !== "").join(", ")}: run \`volley setup\` to apply.`,
+      : `${[pending > 0 ? `${pending} pending` : "", blocked > 0 ? `${blocked} blocked` : ""].filter((s) => s !== "").join(", ")}: run \`${command}\` to apply.`,
     "",
   );
   return out.join("\n");

@@ -20,11 +20,14 @@ Subcommands:
   lease    Heavy-operation leases from volleyd (run, acquire, release, status)
   claude   Claude account profiles on volleyd (add, signin, list, sync, move)
   peer     Pair machines with volleyd's (invite, join, list, remove)
+  machine  Add a bare box as a paired machine over ssh: install, pair, sign in, doctor (add)
   repo     Repositories on volleyd's machines (add, list, remove, status)
-  role     Machine roles: which machine runs the broker, the supervisor, the Desk (status)
+  role     Machine roles: which machine runs the broker, the supervisor, the Desk (status, move, rollback)
+  broker   A broker move's steps on a machine (receive, probe, tunnel; volleyd runs them over ssh)
   setup    First-run / repair wizard: broker, accounts, services, phone sign-in QR
   desk     The built Volley Desk: serve it, install it as a service (serve, install, uninstall, check)
   deploy   Deploy a release tag to this machine's volleyd and Desk services
+  sim      The simulator: fake claude and gh for a wave without an account (env, reset)
 
 Global flags:
   --broker-url <url>   MQTT broker URL (env: VOLLEY_BROKER_URL; default: mqtt://localhost:1883)
@@ -74,16 +77,22 @@ async function loadSubcommand(name: string): Promise<Subcommand | null> {
       return (await import("./commands/claude")).claude as Subcommand;
     case "peer":
       return (await import("./commands/peer")).peer as Subcommand;
+    case "machine":
+      return (await import("./commands/machine")).machine as Subcommand;
     case "repo":
       return (await import("./commands/repo")).repo as Subcommand;
     case "role":
       return (await import("./commands/role")).role as Subcommand;
+    case "broker":
+      return (await import("./commands/broker-receive")).broker as Subcommand;
     case "setup":
       return (await import("./commands/setup")).setup as Subcommand;
     case "desk":
       return (await import("./commands/desk-serve")).desk as Subcommand;
     case "deploy":
       return (await import("./commands/deploy")).deploy as Subcommand;
+    case "sim":
+      return (await import("./commands/sim")).sim as Subcommand;
     default:
       return null;
   }
