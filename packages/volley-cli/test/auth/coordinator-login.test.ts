@@ -11,6 +11,8 @@ import {
   readSavedCoordinatorFile,
   savedCoordinatorLogin,
   savedLoginSource,
+  useSavedLogin,
+  withSetupCoordinator,
 } from "../../src/auth/coordinator-login";
 import { tempDir } from "../helpers/tmp";
 
@@ -233,5 +235,45 @@ describe("the coordinator login on the supervisor machine", () => {
       expect(resolveAuth({}, env, dir, undefined, d)).toBeNull();
       expect(resolveAuth({}, env, dir, "mqtt://broker.example:1883", d)).toBeNull();
     });
+  });
+});
+
+describe("the coordinator name `volley setup` saved", () => {
+  const record = (home: string, extra: Record<string, unknown>) => {
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, "setup.json"),
+      JSON.stringify({
+        layout: "brew-arm64",
+        config: "/path/to/mosquitto.conf",
+        state_file: "/path/to/dynamic-security.json",
+        auth_dir: "/path/to/auth",
+        ...extra,
+      }),
+    );
+  };
+
+  it("fills VOLLEY_COORDINATOR from setup.json when the env sets none; the env's wins; never for an agent", () => {
+    const home = tempDir("volley-coord-name-");
+    record(home, { coordinator: "coord-saved" });
+    const env = { VOLLEYD_HOME: home };
+    // Off until an entry point opts in.
+    expect(withSetupCoordinator(env, home)).toEqual({ env, saved: null });
+    useSavedLogin(fileSavedLoginDeps);
+    try {
+      expect(withSetupCoordinator(env, home)).toEqual({
+        env: { ...env, VOLLEY_COORDINATOR: "coord-saved" },
+        saved: "coord-saved",
+      });
+      const named = { ...env, VOLLEY_COORDINATOR: "coord-env" };
+      expect(withSetupCoordinator(named, home)).toEqual({ env: named, saved: null });
+      const agent = { ...env, VOLLEY_AGENT_ID: "worker" };
+      expect(withSetupCoordinator(agent, home).saved).toBeNull();
+      // A name outside the grammar is not one setup saved.
+      record(home, { coordinator: "Not Valid" });
+      expect(withSetupCoordinator(env, home).saved).toBeNull();
+    } finally {
+      useSavedLogin(null);
+    }
   });
 });

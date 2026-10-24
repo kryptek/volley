@@ -1,19 +1,32 @@
 import {
   existsSync,
-  lstatSync,
   readFileSync,
   readdirSync,
-  realpathSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { DEFAULT_SHARING, type Sharing } from "volleyd/claude/sharing";
 import type { Check, Fix } from "./doctor";
+import {
+  MCP_TAIL,
+  type SkillFact,
+  VOLLEY_SKILLS,
+  installedBrokerUrl,
+  installedPrefix,
+  realOf,
+  skillState,
+  volleyEntryIn,
+  volleyMcpArg,
+  withoutLogin,
+} from "./profile-checks";
 
-export { DEFAULT_SHARING, type Sharing };
+export { DEFAULT_SHARING, type Sharing, type SkillFact, installedBrokerUrl, withoutLogin };
+
+/** The skills the doctor checks: the two a coordinator's waves need (`volley setup` links all three). */
+const SKILLS = VOLLEY_SKILLS.filter((s) => s.name !== "volley-wait");
 
 /**
  * The machine's own Claude profile (`~/.claude` of the user running the doctor, and the MCP
@@ -53,12 +66,6 @@ export const defaultTarget = (): ProfileTarget => ({
   from: "defaults",
 });
 
-/** The skills this checkout installs: `~/.claude/skills/<name>` → `packages/<pkg>`. */
-const SKILLS = [
-  { name: "volley", pkg: "volley-skill" },
-  { name: "volley-issues", pkg: "volley-issues" },
-] as const;
-
 /** The env keys the doctor's MCP registration sets: any other is the person's own. */
 const MCP_ENV = ["VOLLEY_AGENT_ID", "VOLLEY_NAMESPACE", "VOLLEY_BROKER_URL"];
 /** The agent id prefix the doctor registers; another one is the person's own. */
@@ -66,19 +73,6 @@ const MCP_AGENT_ID = "coordinator";
 
 /** The PATH the hooks installer runs with besides bun's folder (a service's PATH may lack bun). */
 const BASE_PATH = "/usr/bin:/bin";
-
-export interface SkillFact {
-  name: string;
-  /** `~/.claude/skills/<name>`. */
-  at: string;
-  pkg: string;
-  installer: string;
-  /**
-   * linked: resolves to `pkg`; elsewhere: a link to another folder; broken: a link to nothing;
-   * stray: a folder of its own.
-   */
-  state: "linked" | "elsewhere" | "broken" | "stray" | "absent";
-}
 
 export interface ProfileFacts {
   home: string;
@@ -142,89 +136,6 @@ export interface McpScope {
 }
 
 type Sh = (argv: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
-
-const realOf = (p: string) => {
-  try {
-    return realpathSync(p);
-  } catch {
-    return resolve(p);
-  }
-};
-
-function skillState(at: string, pkg: string): SkillFact["state"] {
-  let st: ReturnType<typeof lstatSync>;
-  try {
-    st = lstatSync(at);
-  } catch {
-    return "absent";
-  }
-  if (!st.isSymbolicLink()) return "stray";
-  if (!existsSync(at)) return "broken";
-  return realOf(at) === realOf(pkg) ? "linked" : "elsewhere";
-}
-
-/** `url` without a login (`user:pw@`), and whether it had one. */
-export function withoutLogin(url: string): { url: string; dropped: boolean } {
-  const m = /^([a-z]+:\/\/)[^/@]*@(.*)$/i.exec(url);
-  return m === null ? { url, dropped: false } : { url: `${m[1]}${m[2]}`, dropped: true };
-}
-
-/** The broker URL the Volley hooks in `settings` carry (`VOLLEY_BROKER_URL=<url>` in their prefix). */
-export const installedBrokerUrl = (settings: string) =>
-  installedPrefix(settings, "VOLLEY_BROKER_URL");
-
-/** A variable the Volley hooks in `settings` carry in their prefix (`<name>=<value>`). */
-function installedPrefix(settings: string, name: string): string | null {
-  let j: { hooks?: unknown; statusLine?: { command?: unknown } };
-  try {
-    j = JSON.parse(settings);
-  } catch {
-    return null;
-  }
-  const commands: unknown[] = [j?.statusLine?.command];
-  if (typeof j?.hooks === "object" && j.hooks !== null) {
-    for (const groups of Object.values(j.hooks)) {
-      if (!Array.isArray(groups)) continue;
-      for (const g of groups) {
-        const hs = (g as { hooks?: unknown } | null)?.hooks;
-        for (const h of Array.isArray(hs) ? hs : []) {
-          commands.push((h as { command?: unknown } | null)?.command);
-        }
-      }
-    }
-  }
-  for (const c of commands) {
-    if (typeof c !== "string" || !c.includes("/volley-hooks/src/")) continue;
-    const m = new RegExp(`^(?:[A-Z_]+=\\S* )*?${name}=(\\S+) `).exec(c);
-    if (m !== null) return m[1] as string;
-  }
-  return null;
-}
-
-/** The tail of a volley-mcp entry path after the checkout. */
-const MCP_TAIL = "/packages/volley-mcp/src/index.ts";
-
-/** The arg naming a volley-mcp entry (any checkout's), and that checkout. */
-function volleyMcpArg(args: unknown): { arg: string; ran: string } | null {
-  if (!Array.isArray(args)) return null;
-  const arg = args.find((a): a is string => typeof a === "string" && a.endsWith(MCP_TAIL));
-  return arg !== undefined ? { arg, ran: arg.slice(0, -MCP_TAIL.length) } : null;
-}
-
-/** `mcpServers.volley` in a Claude config file: undefined when the file cannot be read. */
-function volleyEntryIn(file: string): Record<string, unknown> | null | undefined {
-  let j: unknown;
-  try {
-    j = JSON.parse(readFileSync(file, "utf-8"));
-  } catch {
-    return undefined;
-  }
-  if (typeof j !== "object" || j === null || Array.isArray(j)) return undefined;
-  const servers = (j as { mcpServers?: unknown }).mcpServers;
-  if (typeof servers !== "object" || servers === null) return null;
-  const v = Object.hasOwn(servers, "volley") ? (servers as { volley: unknown }).volley : null;
-  return typeof v === "object" && v !== null ? (v as Record<string, unknown>) : null;
-}
 
 function mcpScope(label: string, file: string, entry: string): McpScope | null {
   if (!existsSync(file)) return null;

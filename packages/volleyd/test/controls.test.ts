@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fileSavedLoginDeps, useSavedLogin } from "volley-cli/auth/coordinator-login";
 import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { ControlClient } from "../src/control";
@@ -799,6 +800,41 @@ describe("controls (pure)", () => {
 describe("CLI", () => {
   const env = () => ({ VOLLEY_BROKER_URL: broker.url, VOLLEY_NAMESPACE: NS, VOLLEYD_HOME: home });
   const as = (id: string) => ({ ...env(), VOLLEY_AGENT_ID: id });
+
+  it("run without --owner uses the coordinator name `volley setup` saved, and says so", async () => {
+    writeFileSync(
+      join(home, "setup.json"),
+      JSON.stringify({
+        layout: "brew-arm64",
+        config: "/path/to/mosquitto.conf",
+        state_file: "/path/to/dynamic-security.json",
+        auth_dir: "/path/to/auth",
+        coordinator: "coord-saved",
+      }),
+    );
+    const file = join(home, "saved.yaml");
+    writeFileSync(file, yaml("w-saved"));
+    // Not an agent's worktree, and the saved-login fallback on (as volleyd's entry point turns it).
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(home);
+    useSavedLogin(fileSavedLoginDeps);
+    try {
+      const r = await runCli(["run", file], env());
+      expect(r.stdout).toContain(
+        "owner: coord-saved (auto: the coordinator name `volley setup` saved)",
+      );
+      expect(daemon.snapshot("w-saved")?.owner).toBe("coord-saved");
+      // The env's name wins over the saved one.
+      writeFileSync(join(home, "env.yaml"), yaml("w-env"));
+      const e = await runCli(["run", join(home, "env.yaml")], {
+        ...env(),
+        VOLLEY_COORDINATOR: "coord-env",
+      });
+      expect(e.stdout).toContain("owner: coord-env (auto)\n");
+    } finally {
+      useSavedLogin(null);
+      cwd.mockRestore();
+    }
+  });
 
   it("run --owner / auto owner, and refuses a different owner re-running the wave", async () => {
     const file = join(home, "other.yaml");

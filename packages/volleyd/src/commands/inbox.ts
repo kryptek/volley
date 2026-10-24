@@ -1,4 +1,5 @@
 import { parseArgs } from "node:util";
+import { withSetupCoordinator } from "volley-cli/auth/coordinator-login";
 import { type InboxItem, parseWhereLabel, whereLabel } from "../autopilot/inbox";
 import { BAD_ANSWER, type ControlTarget, resolveControlTarget, withClient } from "../control";
 import { heldLabel, parseHeldOn } from "../decisions";
@@ -114,7 +115,7 @@ export async function inbox({ argv, env, io }: CommandArgs): Promise<ExitCode> {
     if (on === null) return usage("hold needs --on <task|#pr|issue#n>");
     return withClient(target, io, "volleyd inbox hold", async (client) => {
       const flag = typeof values.by === "string" ? values.by : undefined;
-      const caller = (await resolveCaller(client, flag, env))?.id ?? null;
+      const caller = (await resolveCaller(client, flag, withSetupCoordinator(env).env))?.id ?? null;
       const res = await client.request(
         "hold",
         {
@@ -160,7 +161,7 @@ export async function inbox({ argv, env, io }: CommandArgs): Promise<ExitCode> {
       version = item.version;
     }
     const flag = typeof values.by === "string" ? values.by : undefined;
-    const caller = (await resolveCaller(client, flag, env))?.id ?? null;
+    const caller = (await resolveCaller(client, flag, withSetupCoordinator(env).env))?.id ?? null;
     const res = await client.request(
       "inbox_answer",
       { id, version, answer: answer.join(" "), where, ...(caller !== null ? { by: caller } : {}) },

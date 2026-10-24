@@ -13,13 +13,17 @@ import { askHidden } from "../hidden-input";
 import type { IO } from "../io";
 import { planAccounts, planPhone } from "../setup/accounts";
 import { countLiveAgents, planDetect, planSecurity, probeAnonymous } from "../setup/broker";
+import { checkDeps, checkExit, checkReport, checkSteps, renderCheck } from "../setup/check";
+import { planClaudeCode } from "../setup/claude-code";
 import {
   appendSetupLog,
   readSetupInstall,
   setupLogFile,
   writeSetupInstall,
 } from "../setup/journal";
+import { SetupMeter, completeLine, setupMetricsFile, writeSetupMetrics } from "../setup/metrics";
 import { planServices } from "../setup/services";
+import { planSignin, simulatedExec } from "../setup/signin";
 import {
   type Planner,
   type SetupContext,
@@ -38,7 +42,7 @@ import { DESK_PORT } from "./desk-serve";
 export { type HiddenInput, hiddenKeys } from "../hidden-input";
 
 /**
- * `volley setup`: the first-run (and repair) wizard. Six steps, each planned (what it found,
+ * `volley setup`: the first-run (and repair) wizard. Eight steps, each planned (what it found,
  * what it would change), shown, confirmed (or `--yes`), applied, then checked:
  *
  *   1. Broker    find mosquitto (install, version, what the listeners do, running agents)
@@ -47,21 +51,28 @@ export { type HiddenInput, hiddenKeys } from "../hidden-input";
  *                anonymous clients
  *   3. Accounts  the shared roles and the fixed identities (existing ones kept, drifted roles
  *                offered `migrate --roles`), credential files, the keychain, a one-time admin token
- *   4. Terminal  the terminal volleyd starts local agents in: cmux (macOS, when installed; its
+ *   4. Sign-ins  Claude Code and GitHub signed in (a browser each), the checkout readable by
+ *                Claude Code (`permissions.additionalDirectories`)
+ *   5. Claude Code  the coordinator name, the volley MCP server registered without a secret,
+ *                the skills, the hooks
+ *   6. Terminal  the terminal volleyd starts local agents in: cmux (macOS, when installed; its
  *                socket checked the way the service reaches it) or tmux, put on record in
  *                config.yaml (`fleet.local_terminal`) and setup.json
- *   5. Services  `volley` + `volleyd` installed in ~/.volley/bin, volleyd, the hooks for
+ *   7. Services  `volley` + `volleyd` installed in ~/.volley/bin, volleyd, the hooks for
  *                coordinator sessions, the Desk built and served
- *   6. Phone     a one-time steer sign-in link as a QR code
+ *   8. Phone     a one-time steer sign-in link as a QR code
  *
  * Idempotent: a rerun plans nothing for what is in place. Every step is journaled to
- * $VOLLEYD_HOME/setup.log (summaries only, never a secret).
+ * $VOLLEYD_HOME/setup.log (summaries only, never a secret); every run's cost to
+ * setup-metrics.json. `--check` plans every step and reports it, changing and asking nothing.
  */
 
 const STEPS: [StepName, Planner][] = [
   ["detect", planDetect],
   ["security", planSecurity],
   ["accounts", planAccounts],
+  ["signin", planSignin],
+  ["claude-code", planClaudeCode],
   ["terminal", planTerminal],
   ["services", planServices],
   ["phone", planPhone],
@@ -105,32 +116,40 @@ function findBun(path: string): string {
   return process.execPath;
 }
 
+/** A command run for real: argv only, never a shell. */
+const spawnExec: SetupDeps["exec"] = (argv, opts) =>
+  new Promise((resolve) => {
+    const [bin, ...args] = argv;
+    // Without input, stdin stays the terminal's: sudo or a service manager may prompt. A
+    // browser sign-in gets the whole terminal.
+    const child = spawn(bin as string, args, {
+      stdio:
+        opts?.tty === true
+          ? "inherit"
+          : [opts?.input !== undefined ? "pipe" : "inherit", "pipe", "pipe"],
+      ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
+      ...(opts?.env !== undefined ? { env: opts.env as NodeJS.ProcessEnv } : {}),
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d: Buffer) => {
+      stdout += d.toString();
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      stderr += d.toString();
+    });
+    child.on("error", (e) => resolve({ code: 127, stdout, stderr: e.message }));
+    child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    if (opts?.input !== undefined) {
+      child.stdin?.on("error", () => {}); // the command exited early: its code says why
+      child.stdin?.end(opts.input);
+    }
+  });
+
 export const realSetupDeps = (env: Record<string, string | undefined>): SetupDeps => ({
   auth: realAuthDeps,
-  exec: (argv, opts) =>
-    new Promise((resolve) => {
-      const [bin, ...args] = argv;
-      // Without input, stdin stays the terminal's: sudo or a service manager may prompt.
-      const child = spawn(bin as string, args, {
-        stdio: [opts?.input !== undefined ? "pipe" : "inherit", "pipe", "pipe"],
-        ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
-        ...(opts?.env !== undefined ? { env: opts.env as NodeJS.ProcessEnv } : {}),
-      });
-      let stdout = "";
-      let stderr = "";
-      child.stdout?.on("data", (d: Buffer) => {
-        stdout += d.toString();
-      });
-      child.stderr?.on("data", (d: Buffer) => {
-        stderr += d.toString();
-      });
-      child.on("error", (e) => resolve({ code: 127, stdout, stderr: e.message }));
-      child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
-      if (opts?.input !== undefined) {
-        child.stdin?.on("error", () => {}); // the command exited early: its code says why
-        child.stdin?.end(opts.input);
-      }
-    }),
+  // VOLLEY_SIMULATED=1 (the soak, CI): the sign-ins are answered by fakes and nothing opens.
+  exec: env.VOLLEY_SIMULATED === "1" ? simulatedExec(spawnExec) : spawnExec,
   probeAnonymous: (url) => probeAnonymous(url),
   liveAgents: async (url, creds) => {
     const b = await openClient(url, creds);
@@ -152,6 +171,16 @@ export const realSetupDeps = (env: Record<string, string | undefined>): SetupDep
   },
   interactive: process.stdin.isTTY === true,
   askSecret: (prompt) => askHidden(prompt),
+  ask: async (prompt) => {
+    if (process.stdin.isTTY !== true) return null;
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      return (await rl.question(prompt)).trim();
+    } finally {
+      rl.close();
+    }
+  },
+  hostname: () => hostname(),
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   platform: process.platform,
   uid: process.getuid?.() ?? 0,
@@ -168,6 +197,9 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       options: {
         yes: { type: "boolean", short: "y" },
         repair: { type: "boolean" },
+        check: { type: "boolean" },
+        json: { type: "boolean" },
+        "show-email": { type: "boolean" },
         lan: { type: "boolean" },
         "no-lan": { type: "boolean" },
         step: { type: "string", multiple: true },
@@ -192,6 +224,17 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     return EXIT.OK;
   }
   const str = (k: string) => values[k] as string | undefined;
+  const check = values.check === true;
+  if (check && (values.yes === true || values.repair === true)) {
+    io.stderr(
+      `volley setup: --check changes nothing: it does not take ${values.yes === true ? "--yes" : "--repair"}\n`,
+    );
+    return EXIT.USAGE;
+  }
+  if (values.json === true && !check) {
+    io.stderr("volley setup: --json is for --check\n");
+    return EXIT.USAGE;
+  }
   const given = injected ?? realSetupDeps(env);
   const invoker = given.auth.invokingUser(env);
   const sudoHome = typeof invoker === "object" && invoker !== null ? invoker.home : undefined;
@@ -238,7 +281,13 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     return EXIT.USAGE;
   }
 
-  const url = resolveBrokerUrl(str("broker-url"), env);
+  // The broker: --broker-url, else the env's, else the one the last finished run used.
+  const url = resolveBrokerUrl(
+    str("broker-url"),
+    env.VOLLEY_BROKER_URL === undefined && saved?.broker_url !== undefined
+      ? { ...env, VOLLEY_BROKER_URL: saved.broker_url }
+      : env,
+  );
   const listeners = listenerUrls(url);
   if ("error" in listeners) {
     io.stderr(`volley setup: ${listeners.error}\n`);
@@ -246,7 +295,10 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   }
   // Every command goes through the fence: the exact commands the steps run, nothing else.
   const fence = setupFence({ restart: layout.restart, repoRoot: given.repoRoot, bun: given.bun });
-  const deps: SetupDeps = { ...given, exec: fencedExec(given.exec, fence) };
+  // What the run costs the person, counted around what they see (a check asks nothing).
+  const meter = new SetupMeter(() => io.now());
+  const seen = check ? checkDeps(given) : meter.wrap(given);
+  const deps: SetupDeps = { ...seen, exec: fencedExec(seen.exec, fence) };
   const auth: AuthContext = {
     dir:
       str("dir") ??
@@ -272,7 +324,25 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     ...(values.lan === true ? { lan: true } : values["no-lan"] === true ? { lan: false } : {}),
     deskHost: str("desk-host") ?? deps.lanHost(),
     deskPort: Number(portText),
+    ...(check ? { check: true } : {}),
+    ...(str("broker-url") !== undefined ? { brokerFlag: str("broker-url") as string } : {}),
+    ...(values["show-email"] === true ? { showEmail: true } : {}),
+    metrics: { signIn: () => meter.signIn() },
   };
+  const steps = STEPS.filter(([n]) => only.length === 0 || only.includes(n));
+
+  if (check) {
+    const rows = await checkSteps(ctx, steps);
+    if (values.json === true) {
+      io.stdout(`${JSON.stringify(checkReport(rows, ctx.volleydHome), null, 2)}\n`);
+    } else {
+      io.stdout(
+        `volley setup --check: broker ${url}, ${layout.name} layout, auth dir ${auth.dir}\n`,
+      );
+      io.stdout(renderCheck(rows));
+    }
+    return checkExit(rows) === 0 ? EXIT.OK : EXIT.ERROR;
+  }
 
   const logFile = setupLogFile(ctx.volleydHome);
   const journal = (step: StepName, event: string, summary?: string) =>
@@ -285,13 +355,27 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   // A run that stops once the Terminal step has checked cmux (often at the cmux change itself:
   // the runs where its mode matters most) still records the mode it found, and replaces an
   // earlier run's; and the terminal it put on record.
+  const metricsFile = setupMetricsFile(ctx.volleydHome);
+  let endStep: (changes: number) => void = () => {};
+  // The changes the current step applied before it stopped: what its metrics record.
+  let applied = 0;
   const stopped = () => {
-    if (ctx.cmuxSocketMode !== undefined || ctx.terminal !== undefined) writeSetupInstall(ctx);
+    endStep(applied);
+    writeSetupMetrics(ctx, meter.done());
+    if (
+      ctx.cmuxSocketMode !== undefined ||
+      ctx.terminal !== undefined ||
+      ctx.coordinator !== undefined
+    ) {
+      writeSetupInstall(ctx, metricsFile);
+    }
     return EXIT.ERROR;
   };
   const skipped: string[] = [];
-  for (const [i, [name, planner]] of STEPS.entries()) {
-    if (only.length > 0 && !only.includes(name)) continue;
+  for (const [name, planner] of steps) {
+    const i = STEPS.findIndex(([n]) => n === name);
+    endStep = meter.begin(name);
+    applied = 0;
     let plan: StepPlan;
     try {
       plan = await planner(ctx);
@@ -311,11 +395,13 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       journal(name, "skipped", plan.skipped);
       io.stdout(`  – skipped: ${plan.skipped}\n`);
       skipped.push(plan.title);
+      endStep(0);
       continue;
     }
     if (plan.changes.length === 0) {
       journal(name, "done");
       io.stdout("  ✓ already done\n");
+      endStep(0);
       continue;
     }
     journal(name, "planned", plan.changes.map((c) => c.summary).join("; "));
@@ -337,6 +423,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       try {
         const lines = await c.apply();
         journal(name, "applied", c.summary);
+        applied++;
         io.stdout(`  ✓ ${c.summary}\n`);
         for (const l of lines) if (l !== "") io.stdout(`${indent(l)}\n`);
       } catch (e) {
@@ -356,18 +443,23 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     }
     for (const line of plan.verified ?? []) io.stdout(`  ✓ ${line}\n`);
     journal(name, "verified");
+    endStep(n);
   }
   // A finished run's install: what volleyd plans the Desk's setup with, a later run's default.
-  writeSetupInstall(ctx);
+  const metrics = meter.done();
+  writeSetupMetrics(ctx, metrics);
+  writeSetupInstall(ctx, metricsFile);
   io.stdout(
     [
       "",
       skipped.length === 0
-        ? "Setup complete."
+        ? completeLine(metrics)
         : `Setup finished, except the step${skipped.length === 1 ? "" : "s"} skipped above (${skipped.join(", ")}): see there for why and what to run.`,
-      "Coordinator sessions: VOLLEY_AUTH_USERNAME=coordinator with the password in",
-      `${join(auth.dir, "coordinator.json")}, in the MCP server's env. The volley and volleyd`,
-      "commands on this machine use that login on their own (keychain, then coordinator.json).",
+      "Coordinator sessions log in with coordinator.json from the auth dir",
+      `(${join(auth.dir, "coordinator.json")}): the MCP registration names the dir, never a`,
+      "password. The volley and volleyd commands on this machine use that login on their own",
+      "(keychain, then coordinator.json).",
+      `Metrics: ${metricsFile}.`,
       `Journal: ${logFile}. Rerun \`volley setup --repair\` any time to check and fix.`,
       "",
     ].join("\n"),
@@ -376,8 +468,9 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
 }
 
 export const SETUP_HELP = `Usage: volley setup [--yes] [--repair] [options]
+       volley setup --check [--json] [--step <name>]...
 
-First-run (and repair) wizard: six steps, each showing what it found and what it will change
+First-run (and repair) wizard: eight steps, each showing what it found and what it will change
 before changing anything.
 
   1. Broker    find mosquitto (>= 2.1), its listeners, the running agents
@@ -391,7 +484,15 @@ before changing anything.
                (existing logins kept; drifted roles offered \`volley auth migrate --roles\`),
                their credential files, a copy of the coordinator's login in the macOS
                keychain, and a one-time admin token for the Desk (printed here only)
-  4. Terminal  where volleyd starts local agents: cmux on a Mac that has it (checked the
+  4. Sign-ins  Claude Code and GitHub signed in (each opens your browser: \`claude auth
+               login\`, \`gh auth login --web\` then \`gh auth setup-git\`), and Claude Code
+               allowed to read this checkout (permissions.additionalDirectories, the old
+               settings.json backed up); skipped under --yes with nobody at the terminal
+  5. Claude Code  the coordinator name (asked once, saved in setup.json), the volley MCP server
+               registered at user scope with no password in it (its login is coordinator.json
+               in the auth dir it names; an entry with settings of your own is left as is),
+               the volley, volley-issues and volley-wait skills, the Volley hooks
+  6. Terminal  where volleyd starts local agents: cmux on a Mac that has it (checked the
                way volleyd's service reaches it; the socket password it needs is asked for,
                hidden), else tmux (stops, printing the install line, when tmux is missing);
                recorded as fleet.local_terminal in $VOLLEYD_HOME/config.yaml
@@ -400,25 +501,34 @@ before changing anything.
                --user), the Volley hooks for coordinator sessions (your status line keeps
                working), the Desk built and served by \`volley desk serve\` on 0.0.0.0:${DESK_PORT}
                (stops if another program listens on that port)
-  6. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
+  8. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
                when a phone cannot reach the WebSocket listener (LAN access off)
 
 Rerunning changes nothing that is in place. The one-time admin token and the phone's link
 count as in place while they are pending or once redeemed: a rerun after they expired unused
-issues new ones. Every step is journaled to $VOLLEYD_HOME/setup.log.
+issues new ones. Every step is journaled to $VOLLEYD_HOME/setup.log, and every run's cost (wall
+time, questions, sign-ins, sudo prompts, each step's time) to $VOLLEYD_HOME/setup-metrics.json.
+
+--check plans every step without changing or asking anything and prints each as done, pending
+(with the changes a run would make), blocked (and why) or skipped (and why); it exits 0 only
+when nothing is pending or blocked. --json prints that as { version, steps, setup_at } for CI.
 
 Options:
   -y, --yes            Apply every step without asking
   --repair             Check and fix only: no new admin token, no phone link
+  --check              Report what is missing; change nothing (not with --yes or --repair)
+  --json               With --check: the report as JSON on stdout
+  --show-email         The Sign-ins step names the Claude login's e-mail
   --lan                Open the WebSocket listener (9001) to your network (for the phone)
   --no-lan             Keep it on this machine only (the default under --yes)
-  --step <name>        Only this step (repeatable): detect, security, accounts, terminal,
-                       services, phone
+  --step <name>        Only this step (repeatable): detect, security, accounts, signin,
+                       claude-code, terminal, services, phone
   --dir <dir>          The auth dir (env: VOLLEY_AUTH_DIR; default <mosquitto config dir>/volley)
   --layout <name>      brew-arm64 | brew-intel | snap | etc | container (default: detected)
   --config <path>      The mosquitto.conf to manage (default: the layout's)
   --state-file <path>  The Dynamic Security state file (default: the layout's)
-  --broker-url <url>   The broker, mqtt:// (env: VOLLEY_BROKER_URL; default mqtt://localhost:1883)
+  --broker-url <url>   The broker, mqtt:// (env: VOLLEY_BROKER_URL; default: the last run's, else
+                       mqtt://localhost:1883); re-points the MCP registration and the hooks
   --desk-host <host>   The address in the phone's link (default: this machine's LAN address)
   --desk-port <n>      The Desk's port (default ${DESK_PORT})
   -h, --help           Show this help and exit
