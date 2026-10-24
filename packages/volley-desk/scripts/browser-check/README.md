@@ -31,7 +31,7 @@ node $CHECKS/sheet.mjs <out dir>           # the comparison sheet from the audit
 node $CHECKS/pan-perf.mjs <out dir> [tag]  # demo, no broker: phone pan frame times (4x CPU) and backdrop filters, desktop window crop
 node $CHECKS/popovers.mjs <out dir>        # demo, no seeding: the why-here cards on screen, outside every window, at desktop, phone, zoomed out
 node $CHECKS/clawd.mjs <out dir>           # demo, no seeding: each agent window's Clawd, title bars as tall as Classic, no glow on a phone, still under reduced motion
-node $CHECKS/themes.mjs <out dir> [tag] [theme...]  # demo: agent, wave, dock, Needs you, Settings and sign-in crops per theme (a light one with Clawd and Classic) and the computed tokens; axe color-contrast and the measured text contrast (text-contrast.mjs) per view; fails on text below AA beyond Volley's own
+node $CHECKS/themes.mjs <out dir> [tag] [theme...]  # demo: agent, wave, dock, Needs you, Settings and sign-in crops per theme (a light one with Clawd and Classic), the computed tokens and the centre check; axe color-contrast and the measured text contrast (text-contrast.mjs) per view; fails on text below AA beyond Volley's own or a centre-check miss
 ```
 
 Re-run `seed-waves.mjs` before `styles-audit.mjs`, because the seeded wave goes stale and grows a banner. Each check prints a JSON report and writes its screenshots to the output directory. Stop the broker and the dev server afterwards.

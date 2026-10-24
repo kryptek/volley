@@ -66,6 +66,11 @@
     );
   }
 
+  /* No per-button WebGL (issue 417): SpecularButton renders flat here and never draws its light canvas. */
+  .specular-button .specular-button__light {
+    display: none;
+  }
+
   /* The Needs-you pulse animates opacity (a compositor animation), not a box-shadow repaint. */
   .win-attn-pulse {
     animation: none;
