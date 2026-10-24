@@ -1,6 +1,6 @@
 /**
- * `bun run lint`'s shell step: shellcheck over install.sh, the release tarball script and Layer 1's
- * scripts. A contributor without shellcheck gets a notice and a pass; CI (which installs it)
+ * `bun run lint`'s shell step: shellcheck over install.sh, the release tarball script and the install
+ * tests' scripts (Layers 1–4, and the stand-ins Layers 2–4 are tested against). A contributor without shellcheck gets a notice and a pass; CI (which installs it)
  * requires it.
  */
 import { join } from "node:path";
@@ -10,6 +10,17 @@ const FILES = [
   "scripts/packaging/tarball.sh",
   "scripts/install-tests/run-layer1.sh",
   "scripts/install-tests/systemctl-stand-in.sh",
+  "scripts/install-tests/lib.sh",
+  "scripts/install-tests/vm-linux.sh",
+  "scripts/install-tests/vm-macos.sh",
+  "scripts/install-tests/vm-pair.sh",
+  "scripts/install-tests/run-layer2.sh",
+  "scripts/install-tests/run-layer3.sh",
+  "scripts/install-tests/run-layer4.sh",
+  "scripts/install-tests/stubs/multipass",
+  "scripts/install-tests/stubs/tart",
+  "scripts/install-tests/stubs/ssh",
+  "scripts/install-tests/stubs/gh",
 ];
 const root = join(import.meta.dir, "..");
 

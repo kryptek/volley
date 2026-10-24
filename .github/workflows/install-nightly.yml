@@ -1,0 +1,139 @@
+name: Install (nightly)
+
+# Layers 2–4 of the one-command install's tests (scripts/install-tests/README.md), nightly on the
+# owner's machines as self-hosted runners: fresh Ubuntu 24.04 and Debian 13 VMs with systemd
+# through multipass (Layer 2: real services, a reboot), fresh macOS VMs through Tart (Layer 3: both
+# install paths, launchd, the keychain, the Desk), and a hub VM pairing a peer VM (Layer 4:
+# `volley machine add`, readiness, a task placed on the peer, removal). Each job's metrics table
+# lands in its step summary; a failing job opens or comments on the one issue labelled
+# `install-tests`.
+#
+# Never on pull_request: a public repository must not run a PR's code on self-hosted runners. The
+# schedule runs the default branch; a dispatch runs the branch it names (and, with `version`,
+# that release instead of the checkout).
+
+on:
+  schedule:
+    - cron: "41 7 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Install this release tag (vX.Y.Z) instead of the checkout"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  # The tracking issue (lib.sh's track_failure).
+  issues: write
+
+concurrency:
+  group: install-nightly
+  cancel-in-progress: false
+
+env:
+  VERSION_INPUT: ${{ inputs.version }}
+  VM_TRACK_ISSUE: "1"
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  linux-vm:
+    name: Layer 2 (${{ matrix.distro }})
+    if: github.repository == 'kryptek/volley'
+    runs-on: [self-hosted, volley-linux-vm]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      # One Linux box: one VM run at a time.
+      max-parallel: 1
+      matrix:
+        distro: [ubuntu-24.04, debian-13]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: A fresh VM, install, set up, reboot, check
+        env:
+          VM_OUT: ${{ runner.temp }}/layer2-${{ matrix.distro }}
+          DISTRO: ${{ matrix.distro }}
+        run: |
+          args=()
+          if [ -n "$VERSION_INPUT" ]; then
+            [[ $VERSION_INPUT =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must be vX.Y.Z" >&2; exit 2; }
+            args=(--version "$VERSION_INPUT")
+          fi
+          bash scripts/install-tests/run-layer2.sh "$DISTRO" ${args[@]+"${args[@]}"}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: layer2-${{ matrix.distro }}
+          # The raw transcript (unredacted) never leaves the machine.
+          path: |
+            ${{ runner.temp }}/layer2-${{ matrix.distro }}
+            !${{ runner.temp }}/layer2-${{ matrix.distro }}/transcript.raw
+          if-no-files-found: ignore
+          retention-days: 14
+
+  macos-tart:
+    name: Layer 3 (macos-${{ matrix.path }})
+    if: github.repository == 'kryptek/volley'
+    runs-on: [self-hosted, volley-macos-tart]
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      # One Mac: one VM run at a time.
+      max-parallel: 1
+      matrix:
+        path: [curl, brew]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: A fresh macOS VM, install, set up, restart, check
+        env:
+          VM_OUT: ${{ runner.temp }}/layer3-${{ matrix.path }}
+          INSTALL_PATH: ${{ matrix.path }}
+        run: |
+          args=()
+          if [ -n "$VERSION_INPUT" ]; then
+            [[ $VERSION_INPUT =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must be vX.Y.Z" >&2; exit 2; }
+            args=(--version "$VERSION_INPUT")
+          fi
+          bash scripts/install-tests/run-layer3.sh "$INSTALL_PATH" ${args[@]+"${args[@]}"}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: layer3-${{ matrix.path }}
+          # The raw transcript (unredacted) never leaves the machine.
+          path: |
+            ${{ runner.temp }}/layer3-${{ matrix.path }}
+            !${{ runner.temp }}/layer3-${{ matrix.path }}/transcript.raw
+          if-no-files-found: ignore
+          retention-days: 14
+
+  pair:
+    name: Layer 4 (pair)
+    if: github.repository == 'kryptek/volley'
+    runs-on: [self-hosted, volley-linux-vm]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: A hub VM, a peer VM, pair, place a task, remove
+        env:
+          VM_OUT: ${{ runner.temp }}/layer4
+        run: |
+          args=()
+          if [ -n "$VERSION_INPUT" ]; then
+            [[ $VERSION_INPUT =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must be vX.Y.Z" >&2; exit 2; }
+            args=(--version "$VERSION_INPUT")
+          fi
+          bash scripts/install-tests/run-layer4.sh ${args[@]+"${args[@]}"}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: layer4-pair
+          # The raw transcript (unredacted) never leaves the machine.
+          path: |
+            ${{ runner.temp }}/layer4
+            !${{ runner.temp }}/layer4/transcript.raw
+          if-no-files-found: ignore
+          retention-days: 14

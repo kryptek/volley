@@ -1,13 +1,23 @@
 /**
- * Layer 1's results (scripts/install-tests/README.md): what one fresh install cost, checked
- * against the one-command install's targets and rendered for the job's step summary.
+ * The install tests' results (scripts/install-tests/README.md): what one fresh install cost,
+ * checked against the one-command install's targets and rendered for the job's step summary.
  *
  *   bun scripts/install-tests/metrics.ts summary --label <name> --metrics <setup-metrics.json>
  *       --check <check.json> [--yes] [--first-wave] [--total-ms <n>] [--allow-skipped <step>]...
+ *       [--layer <n>] [--timing <name>=<ms>]... [--out <metrics.json>]
  *     The table on stdout (and appended to $GITHUB_STEP_SUMMARY); exit 1 when setup's wall time
  *     or the install's end to end is over 15 minutes, setup asked a question under --yes, a
  *     `volley setup --check --json` row is not done (or skipped, for a step --allow-skipped
- *     names), or (--first-wave) the test wave did not merge.
+ *     names), (--first-wave) the test wave did not merge, or a timing with a target
+ *     (`TIMING_TARGETS`) is over it. --out writes the run's metrics as JSON.
+ *
+ *   bun scripts/install-tests/metrics.ts verdict status --boot <epoch s>     (stdin: `volley sub`)
+ *   bun scripts/install-tests/metrics.ts verdict ready --name <machine>      (stdin: `volley sub`)
+ *   bun scripts/install-tests/metrics.ts verdict wave --status <file> --events <file>
+ *       --task <id> --host <machine>
+ *     The VM layers' checks (Layers 2–4): exit 0 when volleyd's retained status is `working` and
+ *     newer than the boot; when the machine's readiness verdict is ready; when the wave is
+ *     complete, its task done and placed on that machine. Otherwise exit 1, the reason on stderr.
  *
  *   bun scripts/install-tests/metrics.ts scan [--secrets <credentials.json>]... <log>...
  *     Exit 1 when a log line holds token- or password-shaped text or one of the secrets in the
@@ -19,10 +29,18 @@
  *
  * Exit 2 on a usage error.
  */
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { type ParseArgsConfig, parseArgs } from "node:util";
 
 export const WALL_TARGET_MS = 15 * 60 * 1000;
+
+/** The VM layers' timings that have a target: one over it fails the run. Others are reported. */
+export const TIMING_TARGETS: Readonly<Record<string, number>> = {
+  /** `volley setup --check` green again after a reboot (Layers 2 and 3). */
+  reboot_check_ms: 2 * 60 * 1000,
+  /** `volley machine add` to the peer's readiness verdict ready (Layer 4). */
+  pair_ready_ms: 10 * 60 * 1000,
+};
 
 /** What `$VOLLEYD_HOME/setup-metrics.json` holds (packages/volley-cli/src/setup/metrics.ts). */
 export interface SetupMetrics {
@@ -57,7 +75,8 @@ const wall = (ms: number) => {
   const s = Math.round(ms / 1000);
   return `${Math.floor(s / 60)} m ${s % 60} s`;
 };
-const TARGET = wall(WALL_TARGET_MS).replace(/ 0 s$/, "");
+const target = (ms: number) => wall(ms).replace(/ 0 s$/, "");
+const TARGET = target(WALL_TARGET_MS);
 const mark = (ok: boolean) => (ok ? "✅" : "❌");
 
 export function evaluate(input: {
@@ -72,6 +91,10 @@ export function evaluate(input: {
   totalMs?: number;
   /** Steps whose row may be skipped on this platform (`--no-lan` on a Mac skips the phone). */
   allowSkipped?: readonly string[];
+  /** The layer the run belongs to (the heading); 1 when absent. */
+  layer?: number;
+  /** The VM layers' timings, in milliseconds by name; `TIMING_TARGETS` holds their targets. */
+  timings?: Readonly<Record<string, number>>;
 }): Evaluation {
   const { metrics: m, check } = input;
   const failures: string[] = [];
@@ -139,9 +162,16 @@ export function evaluate(input: {
     checkOk,
   );
 
+  for (const [name, ms] of Object.entries(input.timings ?? {})) {
+    const max = TIMING_TARGETS[name];
+    const ok = max === undefined || ms <= max;
+    if (!ok) failures.push(`${name} was ${wall(ms)}, over the ${target(max)} target`);
+    row(`\`${name}\``, wall(ms), max === undefined ? "—" : `≤ ${target(max)}`, ok);
+  }
+
   const steps = m.steps.map((s) => `| ${s.name} | ${(s.ms / 1000).toFixed(1)} s | ${s.changes} |`);
   const markdown = [
-    `### Layer 1: ${input.label} ${mark(failures.length === 0)}`,
+    `### Layer ${input.layer ?? 1}: ${input.label} ${mark(failures.length === 0)}`,
     "",
     "| Metric | Value | Target | |",
     "| --- | --- | --- | --- |",
@@ -151,6 +181,84 @@ export function evaluate(input: {
     ...(failures.length > 0 ? ["**Failed:**", "", ...failures.map((f) => `- ${f}`), ""] : []),
   ].join("\n");
   return { failures, markdown };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The VM layers' verdicts: each null when the check holds, else why not.
+
+/** The envelope of the last JSON line `volley sub` printed (`{ topic, envelope }`), or null. */
+function lastEnvelope(text: string): Record<string, unknown> | null {
+  const lines = text.split("\n").filter((l) => l.trim() !== "");
+  for (const l of lines.reverse()) {
+    try {
+      const e = (JSON.parse(l) as { envelope?: unknown }).envelope;
+      if (typeof e === "object" && e !== null) return e as Record<string, unknown>;
+    } catch {}
+  }
+  return null;
+}
+
+/** volleyd's retained status, as `volley sub` printed it: `working`, and published after the boot. */
+export function statusVerdict(sub: string, bootEpochS: number): string | null {
+  const e = lastEnvelope(sub);
+  if (e === null) return "no retained status from volleyd";
+  if (e.type !== "working") return `volleyd's status is ${String(e.type)}, not working`;
+  const at = Date.parse(String(e.wall_time));
+  if (!Number.isFinite(at)) return "volleyd's status has no wall_time";
+  if (at < bootEpochS * 1000) {
+    return `volleyd's status (${String(e.wall_time)}) is older than the boot (${new Date(bootEpochS * 1000).toISOString()})`;
+  }
+  return null;
+}
+
+/** The supervisor's readiness verdict on `name` (`volley/_system/machines/<name>/readiness`). */
+export function readyVerdict(sub: string, name: string): string | null {
+  const e = lastEnvelope(sub);
+  const p = (e?.payload ?? null) as { name?: unknown; ready?: unknown; reasons?: unknown } | null;
+  if (p === null) return `no readiness verdict on ${name} yet`;
+  if (p.name !== name) return `the readiness verdict is on ${String(p.name)}, not ${name}`;
+  if (p.ready === true) return null;
+  const reasons = Array.isArray(p.reasons) ? p.reasons.map(String).join("; ") : "";
+  return `${name} is not ready${reasons ? ` (${reasons})` : ""}`;
+}
+
+/**
+ * A wave that ran on a paired machine: `volleyd status <wave> --json` complete with `task` done,
+ * and its journal (`volleyd events`, one event per line) placing that task on `host`.
+ */
+export function waveVerdict(input: {
+  status: string;
+  events: string;
+  task: string;
+  host: string;
+}): string | null {
+  let st: { status?: unknown; tasks?: { id?: unknown; stage?: unknown }[] };
+  try {
+    st = JSON.parse(input.status);
+  } catch {
+    return "volleyd status printed no JSON";
+  }
+  const t = (st.tasks ?? []).find((x) => x.id === input.task);
+  if (t === undefined) return `the wave has no task ${input.task}`;
+  if (st.status !== "complete" || t.stage !== "done") {
+    return `the wave is ${String(st.status)}, ${input.task} is ${String(t.stage)}`;
+  }
+  const placed = input.events
+    .split("\n")
+    .flatMap((l) => {
+      try {
+        return [
+          JSON.parse(l) as { type?: unknown; task?: unknown; data?: Record<string, unknown> },
+        ];
+      } catch {
+        return [];
+      }
+    })
+    .filter((ev) => ev.type === "task_placed" && (ev.data?.task ?? ev.task) === input.task);
+  if (placed.length === 0) return `no task_placed for ${input.task}`;
+  const host = placed.at(-1)?.data?.host;
+  if (host !== input.host) return `${input.task} was placed on ${String(host)}, not ${input.host}`;
+  return null;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -264,6 +372,9 @@ function main(argv: string[]): number {
       "first-wave": { type: "boolean" },
       "allow-skipped": { type: "string", multiple: true },
       "total-ms": { type: "string" },
+      layer: { type: "string" },
+      timing: { type: "string", multiple: true },
+      out: { type: "string" },
     });
     const { label, metrics, check } = values as Record<string, string | undefined>;
     if (label === undefined || metrics === undefined || check === undefined) {
@@ -272,19 +383,42 @@ function main(argv: string[]): number {
     const total = values["total-ms"] as string | undefined;
     if (total !== undefined && !/^\d+$/.test(total))
       throw new UsageError("--total-ms takes milliseconds");
+    const layer = values.layer as string | undefined;
+    if (layer !== undefined && !/^[1-9]$/.test(layer)) throw new UsageError("--layer takes 1..9");
+    const timings: Record<string, number> = {};
+    for (const t of (values.timing as string[] | undefined) ?? []) {
+      const m = /^([a-z][a-z0-9_]*)=(\d+)$/.exec(t);
+      if (m?.[1] === undefined) throw new UsageError(`--timing takes <name>=<ms>, not "${t}"`);
+      timings[m[1]] = Number(m[2]);
+    }
+    const setup = readJson(metrics) as SetupMetrics;
     const r = evaluate({
       label,
-      metrics: readJson(metrics) as SetupMetrics,
+      metrics: setup,
       check: readJson(check) as CheckReport,
       yes: values.yes === true,
       firstWave: values["first-wave"] === true,
       allowSkipped: (values["allow-skipped"] as string[] | undefined) ?? [],
       ...(total !== undefined ? { totalMs: Number(total) } : {}),
+      ...(layer !== undefined ? { layer: Number(layer) } : {}),
+      timings,
     });
     process.stdout.write(`${r.markdown}\n`);
+    const out = values.out as string | undefined;
+    if (out !== undefined) {
+      const run = {
+        label,
+        layer: Number(layer ?? 1),
+        ...(total !== undefined ? { total_ms: Number(total) } : {}),
+        timings,
+        setup,
+        failures: r.failures,
+      };
+      writeFileSync(out, `${JSON.stringify(run, null, 2)}\n`);
+    }
     const summary = process.env.GITHUB_STEP_SUMMARY;
     if (summary) appendFileSync(summary, `${r.markdown}\n`);
-    for (const f of r.failures) process.stderr.write(`layer 1 (${label}): ${f}\n`);
+    for (const f of r.failures) process.stderr.write(`layer ${layer ?? 1} (${label}): ${f}\n`);
     return r.failures.length === 0 ? 0 : 1;
   }
   if (verb === "scan") {
@@ -308,7 +442,46 @@ function main(argv: string[]): number {
     process.stdout.write(redact(readFileSync(0, "utf8"), secretsOf(values.secrets)));
     return 0;
   }
-  throw new UsageError(`unknown command: ${verb ?? "(none)"}; use summary, scan or redact`);
+  if (verb === "verdict") return verdict(rest);
+  throw new UsageError(
+    `unknown command: ${verb ?? "(none)"}; use summary, scan, redact or verdict`,
+  );
+}
+
+function verdict(argv: string[]): number {
+  const [kind, ...rest] = argv;
+  const { values } = args(rest, {
+    boot: { type: "string" },
+    name: { type: "string" },
+    status: { type: "string" },
+    events: { type: "string" },
+    task: { type: "string" },
+    host: { type: "string" },
+  });
+  const v = values as Record<string, string | undefined>;
+  let why: string | null;
+  if (kind === "status") {
+    if (v.boot === undefined || !/^\d+$/.test(v.boot))
+      throw new UsageError("verdict status needs --boot <epoch seconds>");
+    why = statusVerdict(readFileSync(0, "utf8"), Number(v.boot));
+  } else if (kind === "ready") {
+    if (v.name === undefined) throw new UsageError("verdict ready needs --name");
+    why = readyVerdict(readFileSync(0, "utf8"), v.name);
+  } else if (kind === "wave") {
+    if (v.status === undefined || v.events === undefined || v.task === undefined || !v.host)
+      throw new UsageError("verdict wave needs --status, --events, --task and --host");
+    why = waveVerdict({
+      status: readFileSync(v.status, "utf8"),
+      events: existsSync(v.events) ? readFileSync(v.events, "utf8") : "",
+      task: v.task,
+      host: v.host,
+    });
+  } else {
+    throw new UsageError(`unknown verdict: ${kind ?? "(none)"}; use status, ready or wave`);
+  }
+  if (why === null) return 0;
+  process.stderr.write(`${why}\n`);
+  return 1;
 }
 
 if (import.meta.main) {

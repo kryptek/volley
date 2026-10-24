@@ -1,0 +1,15 @@
+#cloud-config
+# The Layer 2 and 4 VMs (scripts/install-tests/README.md): one user, `volley`, with password-less
+# sudo and bash, reachable over ssh with the run's key only (lib.sh writes it in for @PUBKEY@).
+# Nothing else: the run installs Volley the way a person would.
+users:
+  - name: volley
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    ssh_authorized_keys:
+      - "@PUBKEY@"
+ssh_pwauth: false
+disable_root: true
+# git and curl: what install.sh needs before it installs the rest.
+packages: [git, curl, ca-certificates]
