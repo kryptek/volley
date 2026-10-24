@@ -84,6 +84,91 @@ describe("theme registry", () => {
     expect(d.accText).toBe(d.accHi);
   });
 
+  // The ten dark palettes (#369), pinned to the approved values so a typo cannot pass silently.
+  const DARK_PINS: [string, Record<string, string>][] = [
+    ["oceanic", { acc: "#009688", bg: "#1e272c", ink: "#eeffff", dim: "#98afb6" }],
+    [
+      "darker",
+      {
+        acc: "#ff9800",
+        bg: "#1a1a1a",
+        ink: "#eeffff",
+        dim: "#8d9191",
+        onHi: "#2b1600",
+        cur1: "#ad6200",
+        cur2: "#7a4400",
+      },
+    ],
+    ["palenight", { acc: "#ab47bc", bg: "#202331", ink: "#eeffff", dim: "#929db9" }],
+    [
+      "deepocean",
+      {
+        acc: "#84ffff",
+        bg: "#090b10",
+        ink: "#eeffff",
+        dim: "#7a8498",
+        onAcc: "#041a1a",
+        onHi: "#041a1a",
+        cur1: "#84ffff",
+        cur2: "#45cfcf",
+      },
+    ],
+    ["dracula", { acc: "#bd93f9", bg: "#21222c", ink: "#f8f8f2", dim: "#94a0c0", onHi: "#1c0f33" }],
+    ["nightowl", { acc: "#7e57c2", bg: "#011627", ink: "#d6deeb", dim: "#718da4" }],
+    ["onedark", { acc: "#61afef", bg: "#21252b", ink: "#e6e9ef", dim: "#979da7", onHi: "#08223a" }],
+    ["github", { acc: "#2f81f7", bg: "#010409", ink: "#f0f6fc", dim: "#7d8590" }],
+    [
+      "monokai",
+      {
+        acc: "#ffd866",
+        bg: "#221f22",
+        ink: "#fcfcfa",
+        dim: "#9c9b9b",
+        onAcc: "#2d2a2e",
+        onHi: "#2d2a2e",
+        cur1: "#ffd866",
+        cur2: "#d9b34a",
+      },
+    ],
+    ["solarized", { acc: "#268bd2", bg: "#00212b", ink: "#eee8d5", dim: "#949f9c" }],
+  ];
+  const DERIVED_CUR1: Record<string, string> = {
+    oceanic: "#226c67",
+    github: "#235298",
+    nightowl: "#4c3c7f",
+  };
+
+  describe.each(DARK_PINS)("the %s palette", (id, pins) => {
+    it("has its own entry, dark, with every required token as a colour", () => {
+      const t = themeById(id);
+      expect(t.id).toBe(id);
+      expect(t.tone).toBe("dark");
+      expect(t.name).toBe(THEME_LABEL.find(([i]) => i === id)?.[1]);
+      for (const k of REQUIRED_TOKENS) expect(() => parseColor(t.v[k] ?? ""), k).not.toThrow();
+    });
+    it("pins the approved values", () => {
+      const { v } = themeById(id);
+      for (const [k, want] of Object.entries(pins)) {
+        expect(v[k as keyof typeof v], k).toBe(want);
+      }
+      const derived = DERIVED_CUR1[id];
+      if (derived) {
+        expect(v.cur1).toBeUndefined();
+        expect(deriveTokens(themeById(id)).cur1).toBe(derived);
+      }
+    });
+  });
+
+  it("has an entry for every id the picker lists but Lighter (#368)", () => {
+    for (const id of THEME_IDS) {
+      if (id !== "lighter")
+        expect(
+          THEMES.some((t) => t.id === id),
+          id,
+        ).toBe(true);
+    }
+  });
+
   for (const t of THEMES) {
     describe(`${t.id} reaches WCAG AA`, () => {
       const { v } = t;
