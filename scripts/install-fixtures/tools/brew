@@ -1,6 +1,7 @@
 #!/bin/sh
 printf '%s\n' "brew $*" >>"$STUB_LOG"
-# Volley's tap formula is known when $STUB_BREW_TAP is set; installed, it lives in $STUB_STATE/brew.
+# Volley's tap formula is known when $STUB_BREW_TAP is set (its install fails when
+# $STUB_BREW_TAP_FAIL is); installed, it lives in $STUB_STATE/brew.
 tap=kryptek/volley/volley
 prefix="$STUB_STATE/brew"
 case "${1:-}" in
@@ -23,6 +24,10 @@ case "${1:-}" in
     shift
     for f in "$@"; do
       if [ "$f" = "$tap" ]; then
+        if [ -n "${STUB_BREW_TAP_FAIL:-}" ]; then
+          printf 'Error: %s: failed to download resource\n' "$tap" >&2
+          exit 1
+        fi
         "$STUB_FIXTURES/provide" volley "$prefix/bin"
         "$STUB_FIXTURES/provide" volleyd "$prefix/bin"
       else

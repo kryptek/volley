@@ -241,6 +241,30 @@ describe("macOS: the Homebrew tap", () => {
     expect(again.out).toContain(`Next: ${join(prefix(w), "bin", "volley")} setup`);
   });
 
+  test("a failed brew install of the tap stops the install: no setup, nothing reported done", () => {
+    const w = world("macos-arm64", MAC_ALL, { STUB_BREW_TAP: "1", STUB_BREW_TAP_FAIL: "1" });
+    for (const args of [[], ["--no-setup"]]) {
+      const r = run(w, args);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain(`brew install ${TAP} failed`);
+      expect(r.out).not.toContain("Volley is installed");
+      expect(r.calls).not.toContain("volley setup");
+      expect(existsSync(join(prefix(w), "bin", "volley"))).toBe(false);
+    }
+  });
+
+  test("a Mac with a curl-path install keeps it: no brew install, no second Volley", () => {
+    const w = world("macos-arm64", MAC_ALL);
+    run(w, ["--no-setup"]);
+    expect(existsSync(join(w.home, ".volley", "bin", "volley"))).toBe(true);
+    const r = run(w, ["--no-setup"], { STUB_BREW_TAP: "1" });
+    expect(r.code).toBe(0);
+    expect(has(r, "brew info")).toEqual([]);
+    expect(has(r, "brew install")).toEqual([]);
+    expect(existsSync(join(prefix(w), "bin", "volley"))).toBe(false);
+    expect(r.out).toContain("Next: ~/.volley/bin/volley setup");
+  });
+
   test("a brew that does not know the tap: the curl path (clone, shims)", () => {
     const w = world("macos-arm64", MAC_ALL);
     const r = run(w, ["--no-setup"]);

@@ -29,7 +29,8 @@ class Volley < Formula
   def caveats
     <<~EOS
       Run `volley setup` next: it configures the broker, installs volleyd and the Desk as
-      launchd services and signs you in.
+      launchd services and signs you in. Run it again after each `brew upgrade volley`:
+      it rebuilds the Desk for the new version and restarts the services.
     EOS
   end
 

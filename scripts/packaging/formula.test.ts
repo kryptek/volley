@@ -48,6 +48,7 @@ describe("the formula", () => {
   test("the caveats say to run volley setup", () => {
     const caveats = template.match(/def caveats\n([\s\S]*?)\n {2}end\n/)?.[1] ?? "";
     expect(caveats).toContain("volley setup");
+    expect(caveats).toMatch(/after\s+(each|every)\s+`brew\s+upgrade/);
   });
 
   test("rendered for a version: the release asset's url and its sha256, no token left", () => {
@@ -257,6 +258,10 @@ describe("the release workflow", () => {
 
   test("runs on a v* tag", () => {
     expect(yml).toMatch(/on:\n {2}push:\n {4}tags: \["v\*"\]\n/);
+  });
+
+  test("refuses a tag that is not the root package.json's version (the formula's test reads it)", () => {
+    expect(yml).toContain(`[ "$(jq -r .version package.json)" = "\${GITHUB_REF_NAME#v}" ]`);
   });
 
   test("installs the lockfile's tree with macOS's natives, tars it and uploads both assets", () => {

@@ -5,8 +5,7 @@
  *
  * The release workflow runs it with the tarball's sha256 and pushes the result to the tap.
  */
-import { writeFileSync } from "node:fs";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const FORMULA = join(import.meta.dir, "..", "..", "packaging", "homebrew", "volley.rb");

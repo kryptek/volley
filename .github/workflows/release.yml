@@ -33,6 +33,9 @@ jobs:
             v[0-9]*.[0-9]*.[0-9]*) echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT" ;;
             *) echo "::error::$GITHUB_REF_NAME is not a release tag (vX.Y.Z)"; exit 1 ;;
           esac
+          # The formula's test checks `volley --version` (package.json) against its version.
+          [ "$(jq -r .version package.json)" = "${GITHUB_REF_NAME#v}" ] ||
+            { echo "::error::$GITHUB_REF_NAME does not match package.json's version $(jq -r .version package.json)"; exit 1; }
       # The formula is for macOS: the natives (esbuild, rollup, biome) of both Mac architectures.
       - run: bun install --frozen-lockfile --os darwin --cpu '*'
       - id: tarball

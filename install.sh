@@ -18,9 +18,9 @@ Installs Volley's prerequisites (Homebrew on macOS; git, tmux, curl, bun, gh, mo
 and Claude Code, each only when missing), clones Volley at a release tag into ~/.volley/src,
 writes the `volley` and `volleyd` commands into ~/.volley/bin, adds that directory to PATH in
 your shell's startup file once, then runs `volley setup`. On macOS, when Homebrew resolves
-Volley's tap (kryptek/volley/volley) and neither --version nor --source is given, it runs
-`brew install kryptek/volley/volley` instead of the clone. Rerunning it is safe: what is already
-there is left alone.
+Volley's tap (kryptek/volley/volley), neither --version nor --source is given and ~/.volley/bin
+has no volley yet, it runs `brew install kryptek/volley/volley` instead of the clone. Rerunning
+it is safe: what is already there is left alone.
 
 Options:
   --version vX.Y.Z   Install this release tag (default: $VOLLEY_VERSION, else the latest tag)
@@ -228,19 +228,21 @@ brew_volley() {
   [ "$PLATFORM" = macos ] && have brew && brew list --versions "$TAP_FORMULA" >/dev/null 2>&1
 }
 
-# Sets BREW (Volley comes from the tap) when brew resolves the formula and no tag or checkout was
-# asked for (the formula is the newest release); the formula brings bun, mosquitto, gh, git, tmux.
+# Sets BREW (Volley comes from the tap) when brew resolves the formula, no tag or checkout was
+# asked for (the formula is the newest release) and no curl-path install is there to shadow it;
+# the formula brings bun, mosquitto, gh, git, tmux. A failed brew install stops the install.
 install_brew_volley() {
   BREW=''
   [ -z "$SOURCE$VERSION" ] || return 1
+  [ ! -e "$BIN/volley" ] || return 1
   brew info "$TAP_FORMULA" >/dev/null 2>&1 || return 1
-  BREW=1
   if brew_volley; then
-    say "Volley is installed with brew ($TAP_FORMULA); \`brew upgrade $TAP_FORMULA\` updates it."
+    say "Volley is installed with brew ($TAP_FORMULA); \`brew upgrade $TAP_FORMULA\`, then \`volley setup\`, updates it."
   else
     say "brew install $TAP_FORMULA"
-    brew install "$TAP_FORMULA"
+    brew install "$TAP_FORMULA" || die "brew install $TAP_FORMULA failed; rerun once it is fixed."
   fi
+  BREW=1
 }
 
 install_macos() {
