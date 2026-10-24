@@ -57,6 +57,8 @@ export interface AccountInfo {
   signedIn: boolean;
   agents: string[];
   waves: string[];
+  /** Its row's place in the registry (`claude_accounts` order); absent: not a registry profile. */
+  registryOrder?: number;
 }
 
 /**
@@ -92,14 +94,33 @@ function hostOf(account: string): string {
   return at < 0 ? LOCAL_MACHINE : account.slice(at + 1);
 }
 
-/** The usage records merged over the registry rows: records first, then registry-only accounts. */
+/** A registry row's usage-record key: `<id>` here, `<id>@<machine>` on a paired machine. */
+export const registryKey = (row: Pick<RegistryAccount, "id" | "machine">) =>
+  row.machine === LOCAL_MACHINE ? row.id : `${row.id}@${row.machine}`;
+
+/**
+ * The profiles waiting for sign-in: registry rows that never finished one and have no usage
+ * record. Each is a row of its own, never a card.
+ */
+export function pendingProfiles(
+  registry: readonly RegistryAccount[],
+  records: Record<string, ClaudeAccountPayload> | undefined,
+): RegistryAccount[] {
+  return registry.filter((r) => r.signed_in_at === undefined && !records?.[registryKey(r)]);
+}
+
+/**
+ * The usage records merged over the registry rows (each by its usage-record key, so a paired
+ * machine's profile is one account): records first, then registry-only accounts; a profile
+ * waiting for sign-in is left out (`pendingProfiles`).
+ */
 export function accountList(
   records: Record<string, ClaudeAccountPayload> | undefined,
   registry: readonly RegistryAccount[] = [],
 ): AccountInfo[] {
-  const reg = new Map(registry.map((r) => [r.id, r]));
+  const reg = new Map(registry.map((r, i) => [registryKey(r), { row: r, order: i }]));
   const out: AccountInfo[] = Object.values(records ?? {}).map((r) => {
-    const row = reg.get(r.account);
+    const { row, order } = reg.get(r.account) ?? {};
     return {
       id: r.account,
       label: r.label ?? row?.label ?? r.account,
@@ -112,16 +133,18 @@ export function accountList(
       sampledAt: r.sampled_at,
       modelWeekly: r.model_weekly ?? {},
       probe: r.probe ?? null,
-      // Its agents are using it.
-      signedIn: true,
+      // Its agents are using it, unless the registry says it is signed out now.
+      signedIn: row === undefined || row.signed_in_at !== undefined,
       agents: r.agents,
       waves: r.waves,
+      ...(order !== undefined ? { registryOrder: order } : {}),
     };
   });
-  for (const row of registry) {
-    if (records?.[row.id]) continue;
+  const pending = new Set(pendingProfiles(registry, records));
+  registry.forEach((row, order) => {
+    if (records?.[registryKey(row)] || pending.has(row)) return;
     out.push({
-      id: row.id,
+      id: registryKey(row),
       label: row.label,
       machine: row.machine,
       plan: row.plan ?? null,
@@ -135,8 +158,9 @@ export function accountList(
       signedIn: row.signed_in_at !== undefined,
       agents: [],
       waves: [],
+      registryOrder: order,
     });
-  }
+  });
   return out;
 }
 
@@ -163,14 +187,6 @@ export interface Member {
 
 type WindowKey = "five_hour" | "weekly";
 
-/** A member's reading not chosen for a window, because a fresher one disagrees with it. */
-export interface StaleReading {
-  machine: string;
-  window: WindowKey;
-  pct: number;
-  sampledAt: string;
-}
-
 /** One Anthropic account: every login on it, on every machine, merged by e-mail. */
 export interface AccountGroup {
   /** The normalised e-mail, else the lone account's id (its e-mail is not reported yet). */
@@ -188,7 +204,6 @@ export interface AccountGroup {
   probe: ProbeInfo | null;
   freshest: { machine: string; sampledAt: string } | null;
   members: Member[];
-  stale: StaleReading[];
   agents: string[];
   waves: string[];
 }
@@ -203,9 +218,6 @@ export interface ProbeInfo {
   readAt: string | null;
 }
 
-/** Two readings of one window agree within a point when their resets agree too. */
-const STALE_PCT = 1;
-
 /** A record's sample time; one with no (or an unreadable) sample sorts as the oldest. */
 const sampledAt = (a: AccountInfo) => {
   const t = Date.parse(a.sampledAt ?? "");
@@ -215,26 +227,42 @@ const sampledAt = (a: AccountInfo) => {
 const newestFirst = (a: AccountInfo, b: AccountInfo) => sampledAt(b) - sampledAt(a) || 0;
 
 /**
- * Per window, the member whose record was sampled last among those carrying it (volleyd's
- * `foldUsage` rule); a tie goes to the one with a known reset. The others that disagree with it
- * are stale.
+ * Per window, the reading of the member whose record was sampled last among those carrying it
+ * (volleyd's `foldUsage` rule); a tie goes to the one with a known reset.
  */
-function pickWindow(accounts: AccountInfo[], key: WindowKey) {
+function pickWindow(accounts: AccountInfo[], key: WindowKey): UsageWindow | null {
   const of = (a: AccountInfo) => (key === "five_hour" ? a.fiveHour : a.weekly);
-  const carrying = accounts.filter((a) => of(a) !== null && a.sampledAt !== null);
-  const best = [...carrying].sort(
+  const best = accounts
+    .filter((a) => of(a) !== null && a.sampledAt !== null)
+    .sort(
+      (a, b) =>
+        newestFirst(a, b) || Number(of(b)?.resets_at != null) - Number(of(a)?.resets_at != null),
+    )[0];
+  return best ? of(best) : null;
+}
+
+/** A profile label volleyd's Add suggests for a machine's own login: never a card's name. */
+export const NEW_PROFILE = "Claude login";
+
+/**
+ * A group's name: the registry label of its profiles (this machine's, else the earliest in
+ * registry order), less a trailing ` (<one of the group's machines>)`; `null` when none has
+ * one of its own (only default logins, or Add's `Claude login`).
+ */
+function profileName(list: AccountInfo[], localName: string | undefined): string | null {
+  const profiles = list.filter((a) => !isPrimary(a.id) && a.label !== a.id);
+  const order = (a: AccountInfo) => a.registryOrder ?? Number.POSITIVE_INFINITY;
+  const chosen = [...profiles].sort(
     (a, b) =>
-      newestFirst(a, b) || Number(of(b)?.resets_at != null) - Number(of(a)?.resets_at != null),
+      Number(b.machine === LOCAL_MACHINE) - Number(a.machine === LOCAL_MACHINE) ||
+      (order(a) === order(b) ? 0 : order(a) < order(b) ? -1 : 1),
   )[0];
-  const w = best ? of(best) : null;
-  const stale: StaleReading[] = [];
-  for (const a of carrying) {
-    const r = of(a);
-    if (a === best || r === null || w === null) continue;
-    if (Math.abs(r.pct - w.pct) > STALE_PCT || r.resets_at !== w.resets_at)
-      stale.push({ machine: a.machine, window: key, pct: r.pct, sampledAt: a.sampledAt as string });
-  }
-  return { w, stale };
+  if (chosen === undefined) return null;
+  const hosts = new Set([...list.map((a) => a.machine), ...(localName ? [localName] : [])]);
+  const suffix = / \(([^()]+)\)$/.exec(chosen.label);
+  const name =
+    suffix && hosts.has(suffix[1] as string) ? chosen.label.slice(0, suffix.index) : chosen.label;
+  return name === "" || name === NEW_PROFILE ? null : name;
 }
 
 const union = (xs: string[][]) => [...new Set(xs.flat())];
@@ -325,10 +353,7 @@ export function accountGroups(
   return [...byKey].map(([key, list]) => {
     const email = list.find((a) => a.email)?.email?.trim() ?? null;
     const newest = [...list].sort(newestFirst);
-    const five = pickWindow(list, "five_hour");
-    const week = pickWindow(list, "weekly");
     const fresh = newest.find((a) => a.sampledAt !== null);
-    const profile = newest.find((a) => !isPrimary(a.id) && a.label !== a.id);
     const localPrimary = list.find((a) => a.id === PRIMARY);
     const members = [...list]
       .sort(
@@ -353,18 +378,16 @@ export function accountGroups(
       email,
       org: newest.find((a) => a.org)?.org ?? null,
       label:
-        profile?.label ??
-        localPrimary?.label ??
-        (email ? maskEmail(email) : (newest[0]?.label ?? key)),
+        profileName(list, localName) ??
+        (email ? maskEmail(email) : (localPrimary?.label ?? newest[0]?.label ?? key)),
       plan: newest.find((a) => a.plan)?.plan ?? null,
-      fiveHour: five.w,
-      weekly: week.w,
+      fiveHour: pickWindow(list, "five_hour"),
+      weekly: pickWindow(list, "weekly"),
       // The figure comes from the member whose probe it reports, so its label names the right read.
       fable: probeMember(list)?.modelWeekly.fable ?? null,
       probe: toProbe(probeMember(list)),
       freshest: fresh ? { machine: fresh.machine, sampledAt: fresh.sampledAt as string } : null,
       members,
-      stale: [...five.stale, ...week.stale],
       agents: union(list.map((a) => a.agents)),
       waves: union(list.map((a) => a.waves)),
     };
@@ -524,6 +547,52 @@ export function accountMatrix(
       rows,
     };
   });
+}
+
+/** A machine's sign-in state for one account: what a card's machine row says. */
+export type MachineState = "signed_in" | "signed_out" | "missing";
+
+/** One row of an account card's machine list. */
+export interface MachineRow {
+  name: string;
+  op: string;
+  up: boolean;
+  /** Signed in when any of its logins there is; `missing`: none there. */
+  state: MachineState;
+  /** The labels of its logins there (`default login` for the machine's own), in member order. */
+  labels: string[];
+}
+
+/**
+ * An account's machine list: one row per configured machine, in configured order, however many
+ * of its logins are there; then one per machine no longer configured that still holds one.
+ */
+export function machineRows(
+  group: AccountGroup,
+  configured: readonly MatrixMachine[],
+): MachineRow[] {
+  const row = (name: string, op: string, up: boolean): MachineRow => {
+    const here = group.members.filter((m) => m.machine === op);
+    return {
+      name,
+      op,
+      up,
+      state:
+        here.length === 0 ? "missing" : here.some((m) => m.signedIn) ? "signed_in" : "signed_out",
+      labels: here.map((m) => m.label),
+    };
+  };
+  const ops = new Set(configured.map((m) => m.op));
+  const rest = [...new Set(group.members.map((m) => m.machine))].filter((op) => !ops.has(op));
+  return [
+    ...configured.map((m) => row(m.name, m.op, m.up)),
+    ...rest.map((op) => row(machineName(op), op, true)),
+  ];
+}
+
+/** `4 min ago`, `just now`: how old the account's freshest reading is; `null` with none. */
+export function lastUpdated(group: AccountGroup, now: number): string | null {
+  return group.freshest ? agoText(group.freshest.sampledAt, now) : null;
 }
 
 /** The account a group's Use-for answers with: its login on volleyd's own machine, if any. */

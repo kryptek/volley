@@ -557,12 +557,18 @@ volley claude move <agent-id> work  # stop an agent and respawn it under another
 
 `volley claude list` groups the logins the way the Desk's Claude accounts cards do: one block per
 Anthropic account, keyed by the login's e-mail (masked as `o•••@example.com` unless
-`--show-email`; an account whose e-mail is not reported yet gets its own block, headed by its id),
+`--show-email`). A block is headed by the registry label of its profiles (this machine's, else
+the earliest in registry order, less a trailing ` (<machine>)`; Add's own `Claude login` names
+nothing), else by the masked e-mail, then the plan and organisation; an account whose e-mail is
+not reported yet gets its own block. Under the heading come the account's three windows (per
+window the freshest reading among its retained usage records,
+`volley/_system/claude-accounts/<acct>`), a `last updated: 4 min ago` line from that reading, and
 one line per machine holding it (this machine's profiles and default login, each paired
-machine's), and per usage window the freshest reading among its retained usage records
-(`volley/_system/claude-accounts/<acct>`), with where it came from and how old it is. A member's
-older reading that disagrees is marked `(stale)`. A block missing a machine (this machine, or a
-paired machine in the answer's `machines[]`) ends with `not on: peer-b`. `--json` prints the `claude_accounts` answer
+machine's) with its sign-in state. A paired machine's profile is matched to its record as
+`<id>@<machine>`, so it is listed once. A block missing a machine (this machine, or a paired
+machine in the answer's `machines[]`) ends with `not on: peer-b`. A profile that never finished its
+sign-in (no `signed_in_at` and no usage record) is no block: it is listed under
+`waiting for sign-in:` with its sign-in link. `--json` prints the `claude_accounts` answer
 with the records it read as `records`.
 
 **Sign-in.** `claude_account_add` creates the directory (`0700`) and registry entry, then runs

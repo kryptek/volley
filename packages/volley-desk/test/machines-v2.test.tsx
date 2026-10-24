@@ -592,14 +592,14 @@ describe("Settings › Machines v2: the machine card's Claude accounts", () => {
         name: "Sign in on box-a with Personal",
       }),
     ).toBeEnabled();
-    // The default login's sign-in button stays; the usage is the held account's triple.
+    // The default login's sign-in button stays; a row says its sign-in state, never a figure.
     expect(card("box-a").getByRole("button", { name: "Sign in on box-a" })).toBeInTheDocument();
-    expect(held).toHaveTextContent("5h 42% · 7d — · Fable —");
-    expect(missing).not.toHaveTextContent("5h");
+    expect(held).toHaveTextContent("signed in");
+    for (const row of block()) expect(row.textContent).not.toMatch(/%|5h|7d|Fable/);
     expect(card("box-a").queryByRole("meter")).toBeNull();
   });
 
-  it("a held account's triple carries the Fable figure and this login's age when older", async () => {
+  it("a held account's row names the account and its state only, no figures or ages", async () => {
     const at = (min: number) => iso(NOW - min * 60_000);
     const machines = { "box-a": machineRecord() };
     const records = {
@@ -630,8 +630,9 @@ describe("Settings › Machines v2: the machine card's Claude accounts", () => {
     });
     await act(flush);
     const [row] = block();
-    expect(row).toHaveTextContent("5h 37% · 7d 56% · Fable 12%");
-    expect(row).toHaveTextContent("sampled 3 h ago");
+    expect(row).toHaveTextContent("Work");
+    expect(row).toHaveTextContent("signed in");
+    expect(row?.textContent).not.toMatch(/%|sampled|ago/);
   });
 
   it("Sign in on box-a opens the sign-in for that account there", async () => {
