@@ -24,7 +24,9 @@ import {
 } from "node:os";
 import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { BrokerVersionError } from "volley-cli/auth/version";
+import { DESK_PORT } from "volley-cli/commands/desk-serve";
 import { countLiveAgents } from "volley-cli/setup/broker";
+import { readSetupInstall } from "volley-cli/setup/journal";
 import { VolleyBroker } from "volley-mcp/broker";
 import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
@@ -225,6 +227,7 @@ import {
   type ControlResponse,
   DAEMON_AGENT_ID,
   LEASE_REQUESTS_FILTER,
+  ROLES_TOPIC,
   leasePoolTopic,
   waveDigestTopic,
   waveEventsTopic,
@@ -408,6 +411,7 @@ import {
   withMachines,
   withoutMachines,
 } from "./repos";
+import { type RolesRecord, readRoles, sameRoles } from "./roles/record";
 import {
   type Admission,
   admit,
@@ -2020,6 +2024,7 @@ export class Daemon {
 
     await this.publishConfig();
     await this.publishArchiveIndex();
+    await this.publishRoles();
     // An archived wave's retained topics, in case a crash came between journaling wave_archived
     // and clearing them (a clear is not a re-publish, SPEC §4.6.20).
     for (const [wave, log] of this.archived) {
@@ -4188,6 +4193,43 @@ export class Daemon {
       state.archived = { at, by, reason };
     }
     return state;
+  }
+
+  /**
+   * The machine roles record (SPEC §4.6.24): `$VOLLEYD_HOME/roles.json` (on the first start, all
+   * three roles on this machine), journaled `roles_changed` in `_system` when it differs from the
+   * last one journaled, and published retained. An invalid file is logged and left as it is; the
+   * last journaled record is published instead.
+   */
+  private async publishRoles(): Promise<void> {
+    const last = this.system
+      .readAll()
+      .filter((e) => e.type === "roles_changed")
+      .at(-1)?.data.roles as RolesRecord | undefined;
+    const localName = this.config.localName();
+    const setup = readSetupInstall(this.opts.home);
+    const deskHost = setup?.desk_host ?? "localhost";
+    const read = readRoles(
+      this.opts.home,
+      { localName, hosts: Object.keys(this.config.effective().hosts) },
+      {
+        machine: localName,
+        mqttPort: brokerAddress(this.opts.brokerUrl).port,
+        wsPort: DAEMON_DEFAULTS.ws_default_port,
+        lan: setup?.lan ?? false,
+        deskUrl: `http://${deskHost.includes(":") ? `[${deskHost}]` : deskHost}:${setup?.desk_port ?? DESK_PORT}`,
+        now: dateOf(this.time).toISOString(),
+      },
+    );
+    if (!read.ok) this.log(`roles: ${read.error}; the record stays as last journaled`);
+    const record = read.ok ? read.record : last;
+    if (record === undefined) return;
+    if (last === undefined || !sameRoles(last, record))
+      await this.appendSystem({
+        type: "roles_changed",
+        data: { by: record.updated_by, roles: record },
+      });
+    await this.publish(ROLES_TOPIC, this.envelope("_system/roles", "roles", record), true);
   }
 
   /** The retained `volley/_waves/_archive` index, newest first (archive_index_max entries). */
