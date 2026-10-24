@@ -22,6 +22,7 @@ import {
   mintMergeToken,
   mintModelSwitchToken,
   mintPickerToken,
+  mintProfileRemoveToken,
   mintScriptToken,
   mintSetupToken,
   mintSigninForwardToken,
@@ -1279,6 +1280,49 @@ describe("the sign-in forward (F8): `ssh -N -L` only with the token a remote sig
     expect(() => assertAllowed(["ssh", "-T", TARGET, "bash", "-s"], { forward })).toThrow(
       FenceError,
     );
+  });
+});
+
+describe("removing a paired machine's profile: `rm -rf` only with its removal token", () => {
+  const ssh = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"];
+  const DIR = "/path/to/home/.volley/claude/team";
+  const rm = (argv: string[], profileRemove?: ReturnType<typeof mintProfileRemoveToken>) => () =>
+    assertAllowed(ssh, {
+      remote: { steps: [{ argv }] },
+      ...(profileRemove !== undefined ? { profileRemove } : {}),
+    });
+
+  it("allows exactly rm -rf <home>/.volley/claude/<acct> with the token for that dir", () => {
+    expect(rm(["rm", "-rf", DIR], mintProfileRemoveToken(DIR))).not.toThrow();
+  });
+
+  it("denies it without the token, with another dir's, a forged one, or any other spelling", () => {
+    const token = mintProfileRemoveToken(DIR);
+    expect(rm(["rm", "-rf", DIR])).toThrow(FenceError);
+    expect(
+      rm(["rm", "-rf", DIR], mintProfileRemoveToken("/path/to/home/.volley/claude/other")),
+    ).toThrow(FenceError);
+    expect(rm(["rm", "-rf", DIR], { dir: DIR })).toThrow(FenceError);
+    for (const argv of [
+      ["rm", "-r", "-f", DIR],
+      ["rm", "-fr", DIR],
+      ["rm", "-rf", `${DIR}/`],
+      ["rm", "-rf", DIR, "/"],
+      ["rm", DIR],
+    ])
+      expect(rm(argv, token), argv.join(" ")).toThrow(FenceError);
+    // never a local rm -rf, token or not
+    expect(() => assertAllowed(["rm", "-rf", DIR], { profileRemove: token })).toThrow(FenceError);
+  });
+
+  it("mints only for a profile dir the supervisor creates on a box", () => {
+    for (const dir of [
+      "/srv/odd",
+      "/path/to/home/.volley/claude",
+      "/h/.volley/claude/../x",
+      "rel/.volley/claude/a",
+    ])
+      expect(() => mintProfileRemoveToken(dir), dir).toThrow(FenceError);
   });
 });
 

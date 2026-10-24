@@ -17,6 +17,7 @@ import {
   parseAgentMoveAnswer,
   parseMoveAnswer,
   parseUsage,
+  pruneBook,
   rankAccounts,
   restoreBook,
   sampleAccount,
@@ -700,5 +701,41 @@ describe("the usage probe (foldProbe)", () => {
         payload: { ...rec, model_weekly: { gpt: w(1) } },
       }),
     ).not.toEqual([]);
+  });
+});
+
+describe("pruneBook", () => {
+  const win = (pct: number) => ({ pct, resets_at: null, at: "2026-10-24T12:00:00.000Z" });
+  const acct = (pct: number) => ({
+    five_hour: win(pct),
+    weekly: null,
+    sampled_at: "2026-10-24T12:00:00.000Z",
+  });
+  const book: UsageBook = {
+    agents: {
+      a1: { account: "team", wave: "w" },
+      a2: { account: "old", wave: "w" },
+      a3: { account: "primary@box-a", wave: null },
+    },
+    accounts: {
+      primary: acct(1),
+      "primary@box-a": acct(2),
+      team: acct(3),
+      "team@box-a": acct(4),
+      old: acct(5),
+      "old@box-b": acct(6),
+    },
+  };
+
+  it("drops the accounts the registry lacks; keeps primary and primary@<name>; keeps their agents", () => {
+    const next = pruneBook(book, new Set(["team", "team@box-a"]));
+    expect(Object.keys(next.accounts)).toEqual(["primary", "primary@box-a", "team", "team@box-a"]);
+    expect(Object.keys(next.agents)).toEqual(["a1", "a3"]);
+    expect(next.accounts.team).toEqual(book.accounts.team);
+  });
+
+  it("is the same book when nothing is pruned", () => {
+    const all = new Set(["team", "team@box-a", "old", "old@box-b"]);
+    expect(pruneBook(book, all)).toBe(book);
   });
 });

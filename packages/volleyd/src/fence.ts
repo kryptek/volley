@@ -40,7 +40,8 @@ import { AGENT_BRANCH } from "./worktree";
  *   infrastructure CLIs: terraform, terragrunt, kubectl, helm, aws, gcloud, gsutil, az, pulumi,
  *     ansible, ansible-playbook, eksctl, doctl, flyctl
  *   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
- *   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force)
+ *   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force), except the one REMOTE
+ *     step a ProfileRemoveToken unlocks (below)
  *
  * MERGE (only with a token, checked by identity like consent tokens; either unlocks nothing else:
  *   git merge, push and rebase stay denied). Never --admin, --auto or --rebase.
@@ -190,6 +191,8 @@ import { AGENT_BRANCH } from "./worktree";
  *   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
  *     chmod 700 <home>/.volley/claude/<acct> (a remote profile dir: the only chmod on a
  *     directory) · nc -z 127.0.0.1 <port> · printenv PATH | HOME
+ *   rm -rf <home>/.volley/claude/<acct> (exactly, only with the ProfileRemoveToken
+ *     `mintProfileRemoveToken` minted for exactly that dir: a person's `claude_account_remove`)
  *   claude auth status (exactly: the box's login state and plan, never a credential; a login
  *     runs only from a sealed signin.sh) — the one step with an env: `env.CLAUDE_CONFIG_DIR`
  *     only, only `<abs>/.volley/claude/<acct>` (a profile the supervisor created there),
@@ -696,6 +699,26 @@ export function mintSigninForwardToken(
   return token;
 }
 
+const profileRemovals = new WeakSet<object>();
+
+/**
+ * Permission to remove one profile the supervisor created on a paired machine:
+ * `rm -rf <home>/.volley/claude/<acct>` as one REMOTE step, exactly that dir. Only
+ * `mintProfileRemoveToken` creates one (checked by identity). Callers: claude/service.ts remove.
+ */
+export interface ProfileRemoveToken {
+  readonly dir: string;
+}
+
+/** Mint the removal token for `dir`; throws `FenceError` unless it is a remote profile dir. */
+export function mintProfileRemoveToken(dir: string): ProfileRemoveToken {
+  if (!isRemoteProfileDir(dir))
+    throw new FenceError("remote rm -rf", "only <home>/.volley/claude/<acct>");
+  const token = Object.freeze({ dir });
+  profileRemovals.add(token);
+  return token;
+}
+
 const setups = new WeakSet<object>();
 
 /** What one setup run may execute: `setupFence`'s inputs for the detected layout, Desk-safe. */
@@ -846,6 +869,8 @@ export interface FenceOptions {
   signin?: SigninToken;
   /** For the sign-in forward (`ssh -N -L`): the token a remote sign-in minted. */
   forward?: SigninForwardToken;
+  /** For a remote `rm -rf <home>/.volley/claude/<acct>`: the removal's token for that dir. */
+  profileRemove?: ProfileRemoveToken;
   /** A setup step for the Desk (setup-ops.ts): only the SETUP rows, and nothing else. */
   setup?: SetupToken;
   /** The command's working directory; only the SETUP rows read it (the Desk build). */
@@ -2283,6 +2308,15 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
           )
         ? ALLOW
         : deny("chmod (only <3 octal digits> <a file volleyd writes>…)");
+    case "rm": {
+      const t = opts.profileRemove;
+      return t !== undefined &&
+        profileRemovals.has(t) &&
+        isRemoteProfileDir(t.dir) &&
+        sameArgv(args, ["-rf", t.dir])
+        ? ALLOW
+        : deny("rm -rf (only <home>/.volley/claude/<acct>, with its removal token)");
+    }
     case "printenv":
       // The PATH an ssh session gets on the box, for its tmux server (SshTmuxHost.launch), and
       // its HOME, where a sign-in's dir is (remote-signin.ts).

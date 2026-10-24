@@ -13,6 +13,7 @@ import {
   parseSigninUrl,
   signinFlow,
   signinSession,
+  stoppedReason,
 } from "./signin";
 import {
   BROWSER_HELPER,
@@ -232,7 +233,7 @@ export async function runRemoteSignin(d: RemoteSigninDeps): Promise<SigninEvent>
   let published = false;
   for (let poll = 1; ; poll++) {
     if (aborted()) {
-      if (d.signal?.reason !== SUPERSEDED) return fail("the supervisor stopped");
+      if (d.signal?.reason !== SUPERSEDED) return fail(stoppedReason(d.signal));
       return superseded();
     }
     if (!published) {

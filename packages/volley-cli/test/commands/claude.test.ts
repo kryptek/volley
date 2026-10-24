@@ -485,6 +485,69 @@ describe("volley claude", () => {
     await v.b.disconnect();
   });
 
+  it("rename sends claude_account_rename { acct, label } and prints the profiles renamed", async () => {
+    const v = await fakeVolleyd(tb.url, (_op, p) =>
+      p.acct === "team"
+        ? {
+            ok: true,
+            result: { acct: "team", label: "Team account", renamed: ["team", "team@box-a"] },
+          }
+        : { ok: false, error: "unknown Claude account 'zz'" },
+    );
+    const ok = await run(["rename", "team", "Team account"]);
+    expect(ok.stderr).toBe("");
+    expect(v.seen[0]).toMatchObject({
+      op: "claude_account_rename",
+      acct: "team",
+      label: "Team account",
+    });
+    expect(ok.stdout).toBe("renamed team → Team account (2 profiles)\n");
+    const bad = await run(["rename", "zz", "x"]);
+    expect(bad.exitCode).toBe(1);
+    expect(bad.stderr).toContain("unknown Claude account 'zz'");
+    await v.b.disconnect();
+  });
+
+  it("remove sends claude_account_remove { acct } and says what happened to the directory", async () => {
+    const v = await fakeVolleyd(tb.url, (_op, p) =>
+      p.acct === "team"
+        ? { ok: true, result: { acct: "team@box-a", machine: "box-a", dir_removed: true } }
+        : p.acct === "odd"
+          ? {
+              ok: true,
+              result: {
+                acct: "odd@box-a",
+                machine: "box-a",
+                dir_removed: false,
+                dir_left: "/srv/odd is not under /path/to/home/.volley/claude/",
+              },
+            }
+          : { ok: false, error: "claude.default_account names 'work'; change Defaults first" },
+    );
+    const ok = await run(["remove", "team"]);
+    expect(ok.stderr).toBe("");
+    expect(v.seen[0]).toMatchObject({ op: "claude_account_remove", acct: "team" });
+    expect(ok.stdout).toBe("removed team (box-a); profile directory removed\n");
+    const left = await run(["remove", "odd"]);
+    expect(left.stdout).toBe(
+      "removed odd (box-a); profile directory left in place: /srv/odd is not under /path/to/home/.volley/claude/\n",
+    );
+    const bad = await run(["remove", "work"]);
+    expect(bad.exitCode).toBe(1);
+    expect(bad.stderr).toContain("change Defaults first");
+    await v.b.disconnect();
+  });
+
+  it("rename and remove usage; the HELP lines", async () => {
+    expect((await run(["rename", "team"])).exitCode).toBe(EXIT.USAGE);
+    expect((await run(["rename"])).exitCode).toBe(EXIT.USAGE);
+    expect((await run(["remove"])).exitCode).toBe(EXIT.USAGE);
+    expect((await run(["remove", "a", "b"])).exitCode).toBe(EXIT.USAGE);
+    const help = (await run(["--help"])).stdout;
+    expect(help).toMatch(/volley claude rename <acct> <label>\s+\S/);
+    expect(help).toMatch(/volley claude remove <acct>\s+\S/);
+  });
+
   it("usage errors and a missing volleyd", async () => {
     expect((await run(["add"])).exitCode).toBe(2);
     expect((await run(["frob"])).exitCode).toBe(2);

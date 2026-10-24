@@ -26,7 +26,8 @@ export interface ClaudeArgs {
 /**
  * `volley claude`: Claude account profiles on the volleyd supervisor. Each verb is one control
  * query on volleyd's mailbox (`claude_accounts`, `claude_account_add`, `claude_signin`,
- * `claude_sync`, `claude_balance`, `agent_move_account`), answered with an `ack` on this client's
+ * `claude_sync`, `claude_account_rename`, `claude_account_remove`, `claude_balance`,
+ * `agent_move_account`), answered with an `ack` on this client's
  * own mailbox. `list` also reads every account's retained usage record, to show each Anthropic
  * account once, and asks `claude_balance` to mark the logins the next spawn would pick.
  * Signing in happens in the browser, through Claude Code's own flow: this command prints the
@@ -41,6 +42,10 @@ const HELP = `Usage:
                                                           Per machine, the accounts ranked by headroom
                                                           and which one each model family picks next
   volley claude sync [<acct>]                             Re-apply sharing.yaml, re-sync MCP servers
+  volley claude rename <acct> <label>                     Rename an account (every profile of its login)
+  volley claude remove <acct>                             Remove a profile: its directory, usage record
+                                                          and registry entry (<acct>@<name> for one
+                                                          on a paired machine)
   volley claude move <agent-id> <acct>                    Stop an agent and respawn it under <acct>
                                                           (an account of the agent's own machine:
                                                           for a paired machine, a profile kept for it)
@@ -168,6 +173,16 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
       op = "claude_sync";
       fields = pos[0] !== undefined ? { acct: pos[0] } : {};
       break;
+    case "rename":
+      if (pos.length !== 2) return usage("needs <acct> <label>");
+      op = "claude_account_rename";
+      fields = { acct: pos[0], label: pos[1] };
+      break;
+    case "remove":
+      if (pos.length !== 1) return usage("needs exactly one <acct>");
+      op = "claude_account_remove";
+      fields = { acct: pos[0] };
+      break;
     case "move":
       if (pos.length !== 2) return usage("needs <agent-id> <acct>");
       op = "agent_move_account";
@@ -265,6 +280,20 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
         r.agent_id !== null
           ? `moved: ${pos[0]} → ${r.agent_id} under Claude account ${r.to}\n`
           : `moved: ${pos[0]} stopped; its respawn under ${r.to} waits on decision ${r.decision}\n`,
+      );
+      return EXIT.OK;
+    }
+    if (verb === "rename") {
+      const r = answer.result as { label: string; renamed: string[] };
+      const n = r.renamed.length;
+      io.stdout(`renamed ${pos[0]} → ${r.label} (${n} profile${n === 1 ? "" : "s"})\n`);
+      return EXIT.OK;
+    }
+    if (verb === "remove") {
+      const r = answer.result as { machine: string; dir_removed: boolean; dir_left?: string };
+      const where = r.machine === "local" ? "this machine" : r.machine;
+      io.stdout(
+        `removed ${pos[0]} (${where}); ${r.dir_removed ? "profile directory removed" : `profile directory left in place: ${r.dir_left ?? "not removed"}`}\n`,
       );
       return EXIT.OK;
     }

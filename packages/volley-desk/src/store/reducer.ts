@@ -115,6 +115,7 @@ export type Route =
   | { kind: "admission" }
   | { kind: "claudeAccount"; acct: string }
   | { kind: "signin"; acct: string }
+  | { kind: "claudeRegistry" }
   | { kind: "usage"; agentId: string }
   | { kind: "machine"; name: string }
   | { kind: "readiness"; name: string }
@@ -132,6 +133,7 @@ export function routeTopic(topic: string): Route | null {
     if (p.length === 3 && b === "admission") return { kind: "admission" };
     if (p.length === 4 && b === "claude-accounts" && c) return { kind: "claudeAccount", acct: c };
     if (p.length === 5 && b === "claude" && c && d === "signin") return { kind: "signin", acct: c };
+    if (p.length === 4 && b === "claude" && c === "registry") return { kind: "claudeRegistry" };
     if (p.length === 4 && b === "machines" && c) return { kind: "machine", name: c };
     if (p.length === 5 && b === "machines" && c && d === "readiness") {
       return { kind: "readiness", name: c };
@@ -236,6 +238,12 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
       };
     case "signin":
       return reduceSignin(state, route.acct, m);
+    case "claudeRegistry": {
+      // Only volleyd's; the Settings sections ask claude_accounts again when it changes.
+      const rev = (m.envelope?.payload as { rev?: unknown } | undefined)?.rev;
+      if (m.envelope?.agent_id !== "volleyd" || typeof rev !== "number") return state;
+      return { ...state, claudeRegistryRev: rev };
+    }
     case "machine":
       return reduceMachine(state, route.name, m);
     case "readiness":

@@ -38,6 +38,11 @@ import {
  * touching the shared tmux session or URL file and publishes nothing (both are the new one's).
  */
 export const SUPERSEDED = "superseded";
+/** The abort reason of a sign-in whose profile `claude_account_remove` removed. */
+export const REMOVED = "removed";
+/** Why a sign-in stopped by `signal` (not superseded) failed. */
+export const stoppedReason = (signal: AbortSignal | undefined) =>
+  signal?.reason === REMOVED ? "the profile was removed" : "the supervisor stopped";
 
 export const signinSession = (acct: string) => `volley-signin-${acct}`;
 export const signinDir = (root: string, acct: string) => join(root, ".signin", acct);
@@ -178,7 +183,7 @@ export async function runSignin(d: SigninDeps): Promise<SigninEvent> {
     if (d.signal?.aborted === true)
       return d.signal.reason === SUPERSEDED
         ? { type: "claude_signin_failed", acct: d.acct, reason: "superseded by a newer sign-in" }
-        : fail("the supervisor stopped");
+        : fail(stoppedReason(d.signal));
     if (!published) {
       let file: string | null = null;
       try {

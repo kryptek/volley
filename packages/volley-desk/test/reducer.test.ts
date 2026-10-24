@@ -616,3 +616,27 @@ describe("reducer — archived waves (SPEC §4.6.20)", () => {
     expect(routeTopic("volley/_waves/_archive")).toEqual({ kind: "archive" });
   });
 });
+
+describe("reducer — the Claude registry-changed signal", () => {
+  const signal = (rev: number, agentId = "volleyd") =>
+    msg("volley/_system/claude/registry", {
+      ...example("clauderegistry-changed"),
+      agent_id: agentId,
+      payload: { rev, at: "2026-10-24T12:00:00.000Z" },
+    });
+
+  it("routes the four-segment topic, apart from the per-account sign-in", () => {
+    expect(routeTopic("volley/_system/claude/registry")).toEqual({ kind: "claudeRegistry" });
+    expect(routeTopic("volley/_system/claude/work/signin")).toEqual({
+      kind: "signin",
+      acct: "work",
+    });
+  });
+
+  it("keeps volleyd's rev; another publisher's is ignored", () => {
+    expect(apply(signal(3)).claudeRegistryRev).toBe(3);
+    expect(apply(signal(3), signal(9, "intruder")).claudeRegistryRev).toBe(3);
+    expect(apply(signal(3), signal(0)).claudeRegistryRev).toBe(0);
+    expect(initialState().claudeRegistryRev).toBeUndefined();
+  });
+});

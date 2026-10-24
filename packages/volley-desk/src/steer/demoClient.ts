@@ -5,29 +5,37 @@
  * `steering_acked` (a coordinator: `resumed`). A daemon control request gets
  * an `ok` ack (an urgent interrupt answers `interrupted: true`;
  * `claude_accounts` and `claude_balance` answer from the demo's Claude
- * registry, so Settings › Claude accounts has profiles to show; `wave_account_set`
+ * registry, so Settings › Claude accounts has profiles to show;
+ * `claude_account_rename` and `claude_account_remove` change that registry,
+ * clear a removed profile's usage record and raise the demo's registry-changed
+ * signal, so the demo shows the new name and the card leaving; `wave_account_set`
  * re-publishes the demo wave's state with its new `account`, as volleyd would). Timings
  * follow the prototype (1.1 s delivered, 2.6 s acked).
  */
-import { demoClaudeAccounts, demoClaudeBalance } from "../store/fixtures";
+import { registryKey } from "../store/claude";
+import { DEMO_CLAUDE_REGISTRY, demoClaudeAccounts, demoClaudeBalance } from "../store/fixtures";
 import type { DeskMessage, Envelope, WaveAccount, WaveStatePayload } from "../store/types";
 import { DAEMON_AGENT_ID, type SteerClient, type SteerTransport } from "./transport";
 
 export const DEMO_IDENTITY = "desk";
 
 /**
- * The control ops the demo answers with data of its own: reads, which change nothing, and the
- * wave's account, which changes only the demo's own wave state.
+ * The control ops the demo answers with data of its own: the registry's reads, the rename
+ * and remove it acts out on its own copy of the registry, and the wave's account, which
+ * changes only the demo's own wave state.
  */
 const DEMO_OPS: ReadonlySet<string> = new Set([
   "claude_accounts",
   "claude_balance",
+  "claude_account_rename",
+  "claude_account_remove",
   "wave_account_set",
 ]);
 
 /**
- * The demo's control: `claude_accounts`, `claude_balance` and `wave_account_set` reach the demo
- * client; any other op is refused here, so nothing else in the demo pretends to act.
+ * The demo's control: `claude_accounts`, `claude_balance`, `claude_account_rename`,
+ * `claude_account_remove` and `wave_account_set` reach the demo client; any other op is
+ * refused here, so nothing else in the demo pretends to act.
  */
 export function demoReadControl(control: SteerTransport["control"]): SteerTransport["control"] {
   return (op, fields, text, timeoutMs) =>
@@ -58,10 +66,31 @@ export function createDemoSteerClient(
   waveState: (wave: string) => WaveStatePayload | null = () => null,
 ): SteerClient {
   const handlers = new Set<(m: DeskMessage) => void>();
-  const emit = (topic: string, envelope: Envelope) => {
+  const emit = (topic: string, envelope: Envelope | null) => {
     const m: DeskMessage = { topic, envelope, receivedAt: now() };
     apply([m]);
     for (const h of handlers) h(m);
+  };
+  /** The demo's own registry: a rename or remove changes it, and its signal's rev. */
+  let registry = DEMO_CLAUDE_REGISTRY.map((r) => ({ ...r }));
+  let rev = 0;
+  /** Act out a rename or remove; what volleyd would answer, and what it clears. */
+  const edit = (req: { op?: unknown; acct?: unknown; label?: unknown }) => {
+    const acct = String(req.acct ?? "");
+    const row = registry.find((r) => registryKey(r) === acct);
+    if (row === undefined) return { result: undefined, cleared: null };
+    if (req.op === "claude_account_rename") {
+      const label = String(req.label ?? "").trim();
+      const same = (r: (typeof registry)[number]) =>
+        r === row || (row.email !== undefined && r.email === row.email);
+      registry = registry.map((r) => (same(r) ? { ...r, label } : r));
+      return {
+        result: { acct, label, renamed: registry.filter(same).map(registryKey) },
+        cleared: null,
+      };
+    }
+    registry = registry.filter((r) => r !== row);
+    return { result: { acct, machine: row.machine, dir_removed: true }, cleared: acct };
   };
   const reply = (
     from: string,
@@ -95,15 +124,17 @@ export function createDemoSteerClient(
           req?.op === "wave_account_set" && typeof req.wave === "string"
             ? waveState(req.wave)
             : null;
+        const editing = req?.op === "claude_account_rename" || req?.op === "claude_account_remove";
+        const edited = editing ? edit(req as Record<string, unknown>) : null;
         // An urgent steer's interrupt (escape_only) "presses Escape" in the demo.
         const result =
           req?.escape_only === true
             ? { interrupted: true }
             : req?.op === "claude_accounts"
-              ? demoClaudeAccounts()
+              ? { ...demoClaudeAccounts(), accounts: registry }
               : req?.op === "claude_balance"
                 ? demoClaudeBalance()
-                : undefined;
+                : edited?.result;
         const answer = { text: "ACKED", ok: true, ...(result ? { result } : {}) };
         setTimeout(() => {
           // The new account is in the wave state before the answer, as volleyd journals first.
@@ -119,6 +150,18 @@ export function createDemoSteerClient(
               ),
             );
           emit(self, reply(DAEMON_AGENT_ID, ns, "mailbox", "ack", answer, id));
+          if (edited?.result === undefined) return;
+          // What volleyd does next: the removed profile's record cleared, the signal raised.
+          if (edited.cleared !== null)
+            emit(`volley/_system/claude-accounts/${edited.cleared}`, null);
+          rev++;
+          emit(
+            "volley/_system/claude/registry",
+            reply(DAEMON_AGENT_ID, ns, "_system/claude", "claude_registry_changed", {
+              rev,
+              at: new Date(now()).toISOString(),
+            }),
+          );
         }, CONTROL_MS);
         return;
       }

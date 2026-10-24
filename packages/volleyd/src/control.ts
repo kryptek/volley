@@ -76,6 +76,8 @@ export type ControlOp =
   // Claude account profiles (claude/service.ts, claude/move.ts).
   | "claude_accounts"
   | "claude_account_add"
+  | "claude_account_rename"
+  | "claude_account_remove"
   | "claude_signin"
   | "claude_sync"
   | "claude_balance"

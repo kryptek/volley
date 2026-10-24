@@ -407,6 +407,8 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `claude_account_add` | `label`, `machine?` (a paired machine: the profile is created and signed in there, as `<acct>@<machine>`), `by` | answered once the sign-in URL is known: `{ account, acct, topic, url, flow, attach }` |
 | `claude_signin` | `acct` (a registry account, `primary@<name>` or `<acct>@<name>`), `by` | the same, for an existing profile |
 | `claude_sync` | `acct?`, `by` | `{ synced: [{ acct, shared, mcp_servers? }] }` |
+| `claude_account_rename` | `acct` (`<acct>` or `<acct>@<name>`), `label`, `by` | `{ acct, label, renamed: [<acct>…] }`; refused for an empty or reserved label, the primary or an unknown account |
+| `claude_account_remove` | `acct` (`<acct>` or `<acct>@<name>`), `by` | `{ acct, machine, dir_removed, dir_left? }`; refused while an agent, a running wave or `claude.default_account` uses the profile |
 | `agent_move_account` | `agent`, `acct`, `by` | answered after the respawn: `{ agent_id, decision?, from, to }` |
 
 `run` also takes `owner` and answers with `warnings: [...]` (overlap lines). `status` without a
@@ -551,6 +553,9 @@ volley claude signin work           # sign an existing profile in again
 volley claude list                  # one block per account (by e-mail): machines, usage, sharing
 volley claude list --show-email     # … with the e-mail unmasked (--json: the raw answer + records)
 volley claude sync [work]           # re-apply sharing.yaml, re-sync the MCP servers
+volley claude rename work "Work account"  # rename the account (every profile of its login)
+volley claude remove work           # remove a profile: its dir, usage record and registry entry
+volley claude remove work@peer-a    # … one kept on a paired machine
 volley claude balance               # per machine: accounts ranked by headroom, each family's next pick
 volley claude balance --model claude-opus-5-5 --machine peer-a  # … for one model on one machine
 volley claude move <agent-id> work  # stop an agent and respawn it under another account
@@ -571,6 +576,30 @@ machine in the answer's `machines[]`) ends with `not on: peer-b`. A profile that
 sign-in (no `signed_in_at` and no usage record) is no block: it is listed under
 `waiting for sign-in:` with its sign-in link. `--json` prints the `claude_accounts` answer
 with the records it read as `records`.
+
+**Rename and remove.** `claude_account_rename { acct, label }` relabels every profile of the
+account's login (one e-mail) on every machine, or the one profile while it has no e-mail yet;
+the label is checked as `add` checks it, the ids stay, and the usage records carry the new label
+from the next publish. `claude_account_remove { acct }` is refused, with why, while a supervised
+agent runs under the profile, a running wave pins it (`account:` on the wave or a task) or
+`claude.default_account` names it (change Defaults first). Otherwise it stops the profile's
+pending sign-in, removes its directory — here with `rmSync`, only under the profiles root (never
+through a link out of it); on a paired machine `rm -rf <home>/.volley/claude/<acct>` as one REMOTE
+step, which only a `ProfileRemoveToken` minted for exactly that dir admits, and only when that is
+the dir the registry recorded (else the answer's `dir_left` says why it was left in place) —
+then drops the registry entry, the usage-book entry and the retained record. Neither signs the
+login out at Anthropic (Volley never holds the credential). The `_system` journal records
+`claude_account_renamed { acct, from, to, by }` and `claude_account_removed { acct, machine, by,
+dir_removed }`.
+
+**The registry-changed signal.** After every add, rename, remove, finished sign-in and sync, and
+at start, volleyd publishes `claude_registry_changed { rev, at }` retained on
+`volley/_system/claude/registry` (`rev` 0 at start, one more per change): the Desk asks
+`claude_accounts` again whenever it changes. At start (after the book is restored, before the
+first records go out) and on every change volleyd prunes the usage book to the registry
+(`pruneBook`: `primary` and `primary@<name>` always stay) and clears the retained records of the
+accounts it dropped, and of any record on `volley/_system/claude-accounts/+` it has no account
+for.
 
 **Sign-in.** `claude_account_add` creates the directory (`0700`) and registry entry, then runs
 `claude auth login` under that `CLAUDE_CONFIG_DIR` in a detached tmux session
@@ -4071,7 +4100,8 @@ DENY (never, consent or not):
   infrastructure CLIs: terraform, terragrunt, kubectl, helm, aws, gcloud, gsutil, az, pulumi,
     ansible, ansible-playbook, eksctl, doctl, flyctl
   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
-  rm -rf (any spelling that combines -r/-R/--recursive with -f/--force)
+  rm -rf (any spelling that combines -r/-R/--recursive with -f/--force), except the one REMOTE
+    step a ProfileRemoveToken unlocks (below)
 
 MERGE (only with a token, checked by identity like consent tokens; either unlocks nothing else:
   git merge, push and rebase stay denied). Never --admin, --auto or --rebase.
@@ -4221,6 +4251,8 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
     chmod 700 <home>/.volley/claude/<acct> (a remote profile dir: the only chmod on a
     directory) · nc -z 127.0.0.1 <port> · printenv PATH | HOME
+  rm -rf <home>/.volley/claude/<acct> (exactly, only with the ProfileRemoveToken
+    `mintProfileRemoveToken` minted for exactly that dir: a person's `claude_account_remove`)
   claude auth status (exactly: the box's login state and plan, never a credential; a login
     runs only from a sealed signin.sh) — the one step with an env: `env.CLAUDE_CONFIG_DIR`
     only, only `<abs>/.volley/claude/<acct>` (a profile the supervisor created there),

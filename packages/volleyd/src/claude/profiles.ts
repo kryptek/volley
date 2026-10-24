@@ -177,6 +177,45 @@ export function markSignedIn(
   return next;
 }
 
+/** A registry entry by id; throws for the primary (never in the registry) or an unknown id. */
+function entryOf(reg: ClaudeRegistry, id: string, verb: string): number {
+  if (id === PRIMARY_ACCOUNT || id === MOST_HEADROOM)
+    throw new ClaudeAccountError(`'${id}' is not a profile Volley keeps; it cannot be ${verb}`);
+  const i = reg.accounts.findIndex((a) => a.id === id);
+  if (i === -1) throw new ClaudeAccountError(`unknown Claude account '${id}'`);
+  return i;
+}
+
+/**
+ * Relabel an account: every profile of its login (the same e-mail) on every machine, or the lone
+ * profile while it has no e-mail yet. Validated as `addAccount` validates a label (non-empty, not
+ * a reserved id); the ids stay. Returns the profiles relabelled.
+ */
+export function renameAccount(root: string, id: string, label: string): ClaudeAccount[] {
+  const next = label.trim();
+  if (next === "") throw new ClaudeAccountError("a Claude account's name cannot be empty");
+  const asId = accountIdFor(next);
+  if (asId === PRIMARY_ACCOUNT || asId === MOST_HEADROOM)
+    throw new ClaudeAccountError(`'${asId}' is reserved; pick another name`);
+  const reg = readRegistry(root);
+  const target = reg.accounts[entryOf(reg, id, "renamed")] as ClaudeAccount;
+  const email = target.email?.toLowerCase();
+  const same = (a: ClaudeAccount) =>
+    a.id === id || (email !== undefined && a.email?.toLowerCase() === email);
+  const accounts = reg.accounts.map((a) => (same(a) ? { ...a, label: next } : a));
+  writeRegistry(root, { version: 1, accounts });
+  return accounts.filter(same);
+}
+
+/** Drop one profile's registry entry (its directory is the caller's, on its machine). */
+export function removeAccount(root: string, id: string): ClaudeAccount {
+  const reg = readRegistry(root);
+  const i = entryOf(reg, id, "removed");
+  const gone = reg.accounts[i] as ClaudeAccount;
+  writeRegistry(root, { version: 1, accounts: reg.accounts.filter((_, j) => j !== i) });
+  return gone;
+}
+
 /**
  * Where an agent's account came from: its task, its wave, the config default, the balancing rule
  * (`balance`), an account move (`move`), or nothing to choose from (`default`: the primary alone).
