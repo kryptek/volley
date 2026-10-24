@@ -5,6 +5,7 @@ import { readRegistry } from "../../src/claude/profiles";
 import { ClaudeService } from "../../src/claude/service";
 import { SshTmuxHost } from "../../src/hosts/ssh-tmux";
 import type { NewEvent } from "../../src/types";
+import { flushMicrotasks } from "../helpers/fake-clock";
 import { fakeExec } from "../helpers/fake-exec";
 import { fakeSigninBox } from "../helpers/fake-host";
 import { tempDir } from "../helpers/tmp";
@@ -72,6 +73,7 @@ function world(uses: Uses = {}, o: { boxDown?: boolean } = {}) {
     .on(["claude", "auth", "status"], { code: 1, stdout: JSON.stringify({ loggedIn: false }) });
   const journal: NewEvent[] = [];
   const changed: number[] = [];
+  let t = 0;
   const service = new ClaudeService({
     root,
     primaryJson: join(base, ".claude.json"),
@@ -81,7 +83,12 @@ function world(uses: Uses = {}, o: { boxDown?: boolean } = {}) {
       journal.push(ev);
     },
     log: () => {},
-    sleep: () => new Promise((r) => setTimeout(r, 2)),
+    // the sign-in's polls on a clock of their own: each wait is one macrotask turn
+    now: () => t,
+    sleep: async (ms) => {
+      t += ms;
+      await flushMicrotasks(1);
+    },
     signinPollMs: 2,
     signinTimeoutMs: 60_000,
     remote: (name) =>
@@ -223,6 +230,17 @@ describe("ClaudeService.remove: a profile on a paired machine", () => {
     );
     expect(w.rmSteps()).toEqual([]);
     expect(w.ids()).not.toContain("odd@box-a");
+  });
+
+  it("a recorded dir naming another profile's directory is never removed", async () => {
+    const w = world();
+    const reg = JSON.parse(readFileSync(join(w.root, "accounts.json"), "utf-8"));
+    reg.accounts[3].dir = `${HOME}/.volley/claude/team`;
+    writeFileSync(join(w.root, "accounts.json"), JSON.stringify(reg));
+    const r = await w.service.remove({ acct: "odd@box-a" }, "owner-1");
+    expect(r).toMatchObject({ ok: true, result: { dir_removed: false } });
+    expect((r.result as { dir_left: string }).dir_left).toMatch(/not this profile's directory/);
+    expect(w.rmSteps()).toEqual([]);
   });
 
   it("an unreachable machine: the entry goes, the dir is left in place with the reason", async () => {

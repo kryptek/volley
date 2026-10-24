@@ -20,7 +20,6 @@ import {
   accountKey,
   addAccount,
   canonicalRoot,
-  isValidAccountId,
   machineCandidates,
   markSignedIn,
   profileDir,
@@ -921,9 +920,10 @@ export class ClaudeService {
       return `the home directory on ${a.machine} is not known`;
     this.homes.set(a.machine, home);
     const under = `${remoteProfileDir(home, "")}/`;
-    const id = dir.startsWith(under) ? dir.slice(under.length) : "";
-    if (!isValidAccountId(id) || remoteProfileDir(home, id) !== dir)
-      return `${dir} is not under ${under}`;
+    if (!dir.startsWith(under)) return `${dir} is not under ${under}`;
+    // Only its own: never another profile's directory a bad record names.
+    if (dir !== remoteProfileDir(home, a.id))
+      return `${dir} is not this profile's directory (${remoteProfileDir(home, a.id)})`;
     try {
       const r = await host.run([{ argv: ["rm", "-rf", dir] }], {
         profileRemove: mintProfileRemoveToken(dir),
