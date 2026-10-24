@@ -203,7 +203,7 @@
               "minLength": 1,
               "maxLength": 255,
               "pattern": "^[^-\\s][^\\s]*$",
-              "description": "role_plan / role_move (broker): the ssh destination every machine's tunnel reaches the broker at (default: the target's hosts.<name>.target)."
+              "description": "role_plan / role_move (broker): the ssh destination every machine's tunnel reaches the broker at (default: the target's hosts.<name>.target); peer_retarget: the ssh destination the machine's tunnel reaches the broker's machine at from now on (spec section 4.6.14)."
             },
             "terminal": {
               "enum": ["cmux", "tmux"],
@@ -213,7 +213,11 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 65535,
-              "description": "role_plan / role_move (desk): the port the Desk serves on at its new machine (default 5199)."
+              "description": "role_plan / role_move (desk): the port the Desk serves on at its new machine (default 5199); peer_retarget: the machine's tunnel port on its loopback (1024..65535; default: the one it has, or with tunnel none the broker's port)."
+            },
+            "tunnel": {
+              "enum": ["ssh", "none"],
+              "description": "peer_retarget: ssh (the machine keeps its own tunnel to address) or none (the broker runs on that machine itself; spec section 4.6.14)."
             },
             "drain": {
               "type": "boolean",
@@ -293,6 +297,13 @@
                   "properties": { "drain": { "const": true }, "now": { "const": true } },
                   "required": ["drain", "now"]
                 }
+              }
+            },
+            {
+              "if": { "properties": { "op": { "const": "peer_retarget" } } },
+              "then": {
+                "required": ["op", "name", "address"],
+                "properties": { "port": { "minimum": 1024 } }
               }
             },
             {

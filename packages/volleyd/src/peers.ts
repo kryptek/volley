@@ -25,7 +25,10 @@ import type { NewEvent, RemoteHostConfig } from "./types";
  *     (`volley auth add`), adds `hosts.<name>` with `tunnel.supervise: false` (the machine keeps
  *     its own tunnel as a service) and `max_agents` derived from `cores` and `memory_total_mb`
  *     (`derivedMaxAgents`; unknown: unset), records the name in `$VOLLEYD_HOME/peers.json`, and
- *     answers with the broker's address and the sealed `{username, password}`.
+ *     answers with the broker's address and the sealed `{username, password}`. The address is
+ *     the roles record's (SPEC §4.6.24: the broker's port on its machine). `tunnel: "none"`
+ *     (the broker runs on the joining machine itself) answers `remote_port` = that port and
+ *     writes it to `hosts.<name>.tunnel.remote_port`: agents there reach it on their own loopback.
  *   - `peer_invite {reply_key, ttl_s?, for}` → a code bound to the paired machine `for`: it
  *     re-pairs that machine only. `peer_join {..., name: <for>, replace: true}` with it rotates the
  *     peer account's password and rewrites `hosts.<name>` (the join's fields; a hand-set
@@ -40,6 +43,10 @@ import type { NewEvent, RemoteHostConfig } from "./types";
  *     `{name, now: true}` likewise, but the daemon stops those agents (`stop_grace_s`) and opens
  *     their respawn decisions first. With no live agent either removes at once.
  *   - `peers` → the paired machines' records and names.
+ *   - `peer_retarget {name, address, port?, tunnel?}` → runs `volley peer retarget --to <address>
+ *     [--port <n>] [--tunnel ssh|none]` on the configured host `name` over ssh (its tunnel then
+ *     reaches the broker at its new address) and waits for the machine's record to come `up`
+ *     through it (`peer_retarget_grace_ms`). A new port is written to `hosts.<name>.tunnel`.
  *   - `peer_doctor {name, fix?, clone?}` → runs `volley peer doctor --json [--fix --yes
  *     [--clone --origin <url>]]` on the configured host `name` over ssh (the Desk's Repair) and
  *     answers with the doctor's report; without `fix`, also its `plan` (each failing check with
@@ -131,6 +138,14 @@ const refuse = (error: string): PeerReply => ({ ok: false, error });
 /** A finite number field, else undefined. */
 const num = (x: unknown): number | undefined =>
   typeof x === "number" && Number.isFinite(x) ? x : undefined;
+/** An ssh destination, as the fence takes one (`[user@]host`, never an option). */
+const SSH_DESTINATION = /^[A-Za-z0-9_][A-Za-z0-9_.-]*(@[A-Za-z0-9_][A-Za-z0-9_.-]*)?$/;
+export const isSshDestination = (d: unknown): d is string =>
+  typeof d === "string" && d.length <= 255 && SSH_DESTINATION.test(d);
+/** How a paired machine reaches the broker: its own ssh tunnel, or none (the broker is there). */
+export type PeerTunnel = "ssh" | "none";
+const isPort = (p: unknown): p is number =>
+  typeof p === "number" && Number.isInteger(p) && p >= 1024 && p <= 65535;
 const isAbsolute = (p: unknown): p is string =>
   typeof p === "string" && p.startsWith("/") && !/[\n\r]/.test(p) && p.length <= 1024;
 
@@ -185,6 +200,31 @@ export class PeerService {
     };
   }
 
+  /**
+   * A code bound to machine `name`, minted by the supervisor for itself (a supervisor move's new
+   * supervisor re-pairs the old machine, which it never paired): the same hashed entry `invite
+   * --for` keeps, journaled as `peer_invited` (never the code).
+   */
+  mintFor(name: string, by: string): string {
+    const code = (this.deps.randomCode ?? newPairingCode)();
+    const salt = randomBytes(16);
+    const expiresAt = new Date(
+      this.deps.now() + DAEMON_DEFAULTS.peer_code_ttl_s * 1000,
+    ).toISOString();
+    this.write([
+      ...this.live(),
+      {
+        salt: salt.toString("base64url"),
+        hash: hashCode(code, salt).toString("base64url"),
+        expires_at: expiresAt,
+        by,
+        for: name,
+      },
+    ]);
+    this.deps.journal({ type: "peer_invited", data: { by, expires_at: expiresAt, for: name } });
+    return code;
+  }
+
   async join(p: Fields, by: string): Promise<PeerReply> {
     const name = p.name;
     if (typeof name !== "string" || !isValidAgentId(name) || RESERVED_NAMES.has(name)) {
@@ -202,8 +242,13 @@ export class PeerService {
     for (const k of ["repo", "worktree_root"] as const) {
       if (p[k] !== undefined && !isAbsolute(p[k])) return refuse(`${k} must be an absolute path`);
     }
-    const port = p.port ?? REMOTE_HOST_DEFAULTS.remote_port;
-    if (typeof port !== "number" || !Number.isInteger(port) || port < 1024 || port > 65535) {
+    if (p.tunnel !== undefined && p.tunnel !== "ssh" && p.tunnel !== "none") {
+      return refuse('tunnel must be "ssh" or "none"');
+    }
+    const broker = this.deps.broker();
+    // No tunnel: the broker is on this machine, so its agents reach it at its own port.
+    const port = p.tunnel === "none" ? broker.port : (p.port ?? REMOTE_HOST_DEFAULTS.remote_port);
+    if (!isPort(port)) {
       return refuse("port must be a whole number in 1024..65535");
     }
     const key = replyKey(p.reply_key);
@@ -284,6 +329,7 @@ export class PeerService {
         ...(typeof p.memory_total_mb === "number" ? { memory_total_mb: p.memory_total_mb } : {}),
         ...(sized !== null ? { max_agents: sized } : {}),
         ...(replacing ? { replaced: true } : {}),
+        ...(p.tunnel === "none" ? { tunnel: "none" } : {}),
       },
     });
     return {
@@ -291,8 +337,9 @@ export class PeerService {
       result: {
         name,
         namespace: this.deps.namespace,
-        broker: this.deps.broker(),
+        broker,
         remote_port: port,
+        ...(p.tunnel === "none" ? { tunnel: "none" } : {}),
       },
       sealed: seal(key, { username, password }),
     };
@@ -483,6 +530,100 @@ export class PeerService {
     };
   }
 
+  /**
+   * `peer_retarget`'s request, checked before anything runs: the host to run it on, or the
+   * refusal. The run (`runRetarget`) waits on ssh and on the box's record, so the daemon awaits
+   * it outside its queue.
+   */
+  retargetRequest(p: Fields): PeerReply | RetargetRun {
+    const name = p.name;
+    if (typeof name !== "string" || !isValidAgentId(name)) {
+      return refuse("name must match [a-z0-9][a-z0-9_-]{0,62}");
+    }
+    if (!isSshDestination(p.address)) {
+      return refuse("address must be an ssh destination ([user@]host, never starting with -)");
+    }
+    if (p.port !== undefined && !isPort(p.port)) {
+      return refuse("port must be a whole number in 1024..65535");
+    }
+    if (p.tunnel !== undefined && p.tunnel !== "ssh" && p.tunnel !== "none") {
+      return refuse('tunnel must be "ssh" or "none"');
+    }
+    if (!Object.hasOwn(this.deps.hosts(), name))
+      return refuse(`no configured host named "${name}"`);
+    const host = this.deps.remote?.(name) ?? "remote hosts are not available";
+    if (typeof host === "string") return refuse(host);
+    const tunnel = p.tunnel as PeerTunnel | undefined;
+    // No tunnel: the box's agents reach the broker at its own port there.
+    const port = tunnel === "none" ? (p.port ?? this.deps.broker().port) : p.port;
+    return {
+      name,
+      address: p.address,
+      host,
+      ...(port !== undefined ? { port: port as number } : {}),
+      ...(tunnel !== undefined ? { tunnel } : {}),
+    };
+  }
+
+  /**
+   * Run a checked `peer_retarget` on its box, then wait for its record `up` (`up`: resolves true
+   * once a record newer than the run's start says so, false after the grace). A new port goes to
+   * `hosts.<name>.tunnel.remote_port`, so agents launched there use it.
+   */
+  async runRetarget(
+    run: RetargetRun,
+    by: string,
+    up: (name: string, since: number) => Promise<boolean>,
+  ): Promise<PeerReply> {
+    const since = this.deps.now();
+    const argv = retargetArgv(run);
+    let r: Awaited<ReturnType<RemoteHost["run"]>>;
+    try {
+      r = await run.host.run([{ argv, cwd: run.host.spec.volley_dir }], {
+        timeoutMs: DAEMON_DEFAULTS.peer_retarget_timeout_ms,
+      });
+    } catch (e) {
+      return refuse(e instanceof Error ? e.message : String(e));
+    }
+    if (r.code !== 0) {
+      const why = (r.stderr.trim() || r.stdout.trim()).split("\n").pop() ?? "";
+      return refuse(`volley peer retarget on "${run.name}" failed: ${why || `exit ${r.code}`}`);
+    }
+    if (run.port !== undefined) {
+      const tunnel = { ...this.deps.hosts()[run.name]?.tunnel, remote_port: run.port };
+      const applied = this.deps.setHost(run.name, { tunnel } as RemoteHostConfig, by);
+      if (!applied.applied) {
+        const why = applied.rejected.map((e) => `${e.path}: ${e.reason}`).join("; ");
+        return refuse(`hosts.${run.name}.tunnel rejected: ${why}`);
+      }
+    }
+    if (!(await up(run.name, since))) {
+      return refuse(
+        `"${run.name}" retargeted its tunnel to ${run.address}, but its record did not come up through it within ${Math.round(DAEMON_DEFAULTS.peer_retarget_grace_ms / 1000)} s`,
+      );
+    }
+    this.deps.journal({
+      type: "peer_retargeted",
+      data: {
+        by,
+        name: run.name,
+        address: run.address,
+        ...(run.port !== undefined ? { port: run.port } : {}),
+        ...(run.tunnel !== undefined ? { tunnel: run.tunnel } : {}),
+      },
+    });
+    return {
+      ok: true,
+      result: {
+        name: run.name,
+        address: run.address,
+        ...(run.port !== undefined ? { port: run.port } : {}),
+        ...(run.tunnel !== undefined ? { tunnel: run.tunnel } : {}),
+        up: true,
+      },
+    };
+  }
+
   list(): PeerReply {
     const paired = Object.keys(this.paired());
     return {
@@ -577,6 +718,29 @@ export class PeerService {
   private write(codes: StoredCode[]): void {
     writeJson(this.deps.file, { codes });
   }
+}
+
+/** A checked `peer_retarget` request (`retargetRequest`), ready to run. */
+export interface RetargetRun {
+  name: string;
+  /** The ssh destination the box's tunnel reaches the broker's machine at. */
+  address: string;
+  host: RemoteHost;
+  port?: number;
+  tunnel?: PeerTunnel;
+}
+
+/** `volley peer retarget --to <address> [--port <n>] [--tunnel ssh|none]`: the box's one step. */
+export function retargetArgv(run: Pick<RetargetRun, "address" | "port" | "tunnel">): string[] {
+  return [
+    "volley",
+    "peer",
+    "retarget",
+    "--to",
+    run.address,
+    ...(run.port !== undefined ? ["--port", String(run.port)] : []),
+    ...(run.tunnel !== undefined ? ["--tunnel", run.tunnel] : []),
+  ];
 }
 
 /** A checked `peer_doctor` request (`doctorRequest`), ready to run. */

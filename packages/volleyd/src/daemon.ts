@@ -8,14 +8,17 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
+import { createServer } from "node:net";
 import {
   availableParallelism,
   freemem,
   homedir,
+  hostname,
   loadavg,
   arch as osArch,
   platform,
@@ -23,7 +26,9 @@ import {
   uptime,
 } from "node:os";
 import { delimiter, dirname, isAbsolute, join, posix, resolve } from "node:path";
+import { realAuthDeps } from "volley-cli/auth/context";
 import { BrokerVersionError } from "volley-cli/auth/version";
+import { defaultAuthDir } from "volley-cli/commands/auth";
 import { DESK_PORT } from "volley-cli/commands/desk-serve";
 import { countLiveAgents } from "volley-cli/setup/broker";
 import { readSetupInstall } from "volley-cli/setup/journal";
@@ -291,6 +296,7 @@ import {
 import { DynsecControl, DynsecCredentials, brokerControl } from "./dynsec";
 import { type ExecFn, exec as realExec } from "./exec";
 import {
+  SERVICE_LABEL,
   TMUX_SIZE,
   isRepoAdd,
   mintConsentToken,
@@ -414,7 +420,13 @@ import {
   withMachines,
   withoutMachines,
 } from "./repos";
-import { type RolesRecord, readRoles, sameRoles } from "./roles/record";
+import type { RoleDeps } from "./roles/deps";
+import { hostOf } from "./roles/deps";
+import { type MovePayload, type MoveResult, RoleMoves } from "./roles/engine";
+import { markContinued, pendingHandovers, resumeRecord, resumeSteps } from "./roles/handover";
+import { ROLE_OPS, RoleOps } from "./roles/ops";
+import type { SupervisorDeps } from "./roles/plan-supervisor";
+import { type RolesRecord, readRoles, sameRoles, writeRoles } from "./roles/record";
 import {
   type Admission,
   admit,
@@ -492,6 +504,7 @@ import {
   type ClockState,
   type PendingReap,
   type TimerHandle,
+  sleep as clockSleep,
   dateOf,
   heartbeatSuppresses,
   holdReap,
@@ -877,6 +890,7 @@ const PEER_ADMIN_OPS: ReadonlySet<string> = new Set([
   "peer_invite",
   "peer_remove",
   "peer_doctor",
+  "peer_retarget",
   // Repositories (SPEC §4.6.21).
   "repo_add",
   "repo_remove",
@@ -1463,6 +1477,17 @@ export class Daemon {
   private readonly claude: ClaudeService;
   /** Paired machines (peers.ts) and their heartbeats (machines.ts). */
   private readonly peers: PeerService;
+  /** Called with every heard machine record, after it is folded in (`machineUp`). */
+  private readonly recordWaiters = new Set<(name: string, record: MachineRecord) => void>();
+  /** The machine roles record as last published (SPEC §4.6.24); null before the first. */
+  private roles: RolesRecord | null = null;
+  /** Machine role moves (SPEC §4.6.24): one at a time, kept for a rollback. */
+  private readonly moves: RoleMoves;
+  private readonly roleOps: RoleOps;
+  /** A supervisor move this supervisor is handing itself over in: losing the broker is expected. */
+  private handingOver: string | null = null;
+  /** The broker connection lost during a hand-over: fatal once the hand-over ends. */
+  private deferredFail: Error | null = null;
   /** `setup_plan` / `setup_apply` (setup-ops.ts), answered beside the serial queue. */
   private readonly setupOps: SetupOps;
   /** Setup requests being answered (topic/correlation id): a re-delivery waits for the answer. */
@@ -1751,7 +1776,11 @@ export class Daemon {
       file: join(opts.home, "peer-codes.json"),
       pairedFile: join(opts.home, "peers.json"),
       namespace: opts.namespace,
-      broker: () => brokerAddress(opts.brokerUrl),
+      // The broker's port on its machine as the roles record names it (SPEC §4.6.24).
+      broker: () => ({
+        host: brokerAddress(opts.brokerUrl).host,
+        port: this.roles?.broker.address.mqtt_port ?? brokerAddress(opts.brokerUrl).port,
+      }),
       hosts: () => this.config.effective().hosts,
       setHost: (name, host, by) => this.config.applyPatch({ hosts: { [name]: host } }, by),
       removeHost: (name, by) => this.config.removeHost(name, by),
@@ -1768,6 +1797,26 @@ export class Daemon {
       remote: (name) => this.remoteFor(name),
       machines: () => this.machines.all(),
       journal: (ev) => this.appendSystem(ev),
+    });
+    this.moves = new RoleMoves({
+      home: opts.home,
+      now: () => dateOf(this.time),
+      publish: (m: MovePayload) =>
+        this.publish(
+          moveTopic(m.move_id),
+          this.envelope("_system/roles/moves", "role_move", m),
+          true,
+        ),
+      clear: (id) => this.clearRetained(moveTopic(id)),
+      journal: (ev) => this.appendSystem(ev),
+      log: this.log,
+    });
+    this.roleOps = new RoleOps({
+      deps: () => this.roleDeps(),
+      supervisor: () => this.supervisorDeps(),
+      moves: this.moves,
+      finished: (id, r) => this.moveFinished(id, r),
+      log: this.log,
     });
     this.killSwitch = killSwitchEngaged(this.system.readAll());
     this.screens = new ScreenPublisher({
@@ -1994,6 +2043,7 @@ export class Daemon {
           }
           const doctorAt = this.machines.record(name)?.doctor_at;
           const keptNewer = this.machines.observe(record, { heard });
+          if (heard) for (const w of [...this.recordWaiters]) w(name, record);
           this.migrateLegacyRepo(name);
           if (record.tunnel === "up" && heard) this.sampleHost(name, record);
           // The box's beat still carries its service's older doctor run: re-assert the newer one
@@ -2047,6 +2097,10 @@ export class Daemon {
     await this.publishConfig();
     await this.publishArchiveIndex();
     await this.publishRoles();
+    // Role moves kept past the retention window go, with their retained topics (SPEC §4.6.24);
+    // the rest are published again (a failed hand-over's record was written while offline).
+    await this.moves.sweep();
+    await this.moves.republish();
     // An archived wave's retained topics, in case a crash came between journaling wave_archived
     // and clearing them (a clear is not a re-publish, SPEC §4.6.20).
     for (const [wave, log] of this.archived) {
@@ -2111,6 +2165,8 @@ export class Daemon {
       this.envelope("status", "working", { waves: this.waves.size }),
       true,
     );
+    // A supervisor move handed to this machine goes on here, now that this start is done.
+    void this.track(this.continueHandovers());
 
     const tickMs = this.opts.tickMs ?? DAEMON_DEFAULTS.tick_ms;
     if (tickMs > 0) {
@@ -2692,6 +2748,15 @@ export class Daemon {
   /** Die on our own: drop the dead connection, free the home lock, resolve `closed`. */
   private fail(reason: Error): void {
     if (!this.running) return;
+    // A hand-over's receive rotates volleyd's login, which drops this connection: the move's
+    // remaining steps here (an ssh round-trip) finish first (moveFinished).
+    if (this.handingOver !== null) {
+      this.log(
+        `broker connection lost during the hand-over ${this.handingOver}: ${reason.message}`,
+      );
+      this.deferredFail ??= reason;
+      return;
+    }
     this.log(`fatal: ${reason.message}`);
     this.halt();
     this.broker.simulateCrash(); // the socket is already gone; this resets the client state
@@ -3055,6 +3120,8 @@ export class Daemon {
    * lowering one never un-admits anything.
    */
   private async tickNow(): Promise<void> {
+    // A role move waiting for a quiet fleet (SPEC §4.6.24): planned and started beside the queue.
+    if (this.roleOps.draining()) void this.roleOps.tick();
     await this.sweepInbox();
     await this.sweepMachines();
     await this.machineDownPass();
@@ -3094,13 +3161,17 @@ export class Daemon {
         continue;
       }
       // --- end Fleet (F3) ---
-      const verdict = admit(candidates, admissionFor(rec, this.killSwitch, this.pressure(wave)), {
-        live,
-        hardCeiling: eff.hard_ceiling,
-        spawnsUsed: spawnsUsed(rec),
-        spawnBudget: spawnBudget(rec.wave, eff.spawn_budget_multiplier, rec.budget_raised ?? 0),
-        clusters: clusterRooms(rec),
-      });
+      const verdict = admit(
+        candidates,
+        admissionFor(rec, this.closedToNew(), this.pressure(wave)),
+        {
+          live,
+          hardCeiling: eff.hard_ceiling,
+          spawnsUsed: spawnsUsed(rec),
+          spawnBudget: spawnBudget(rec.wave, eff.spawn_budget_multiplier, rec.budget_raised ?? 0),
+          clusters: clusterRooms(rec),
+        },
+      );
       live += verdict.admit.length;
       const before = JSON.stringify(this.heldBack.get(wave) ?? []);
       this.heldBack.set(wave, verdict.reasons);
@@ -3166,7 +3237,7 @@ export class Daemon {
     eff: Tunables,
   ): Promise<{ admitted: number; reasons: string[]; budget: boolean; changed: boolean }> {
     const w = rec.wave as Wave;
-    const gate = admissionFor(rec, this.killSwitch, this.pressure(wave));
+    const gate = admissionFor(rec, this.closedToNew(), this.pressure(wave));
     const r = admitPlacing(
       candidates,
       w,
@@ -3450,7 +3521,7 @@ export class Daemon {
     const def = w?.tasks[task];
     if (rec === undefined || w == null || def === undefined) return null;
     const eff = this.config.effective(wave);
-    const gate = admissionFor(rec, this.killSwitch, this.pressure(wave));
+    const gate = admissionFor(rec, this.closedToNew(), this.pressure(wave));
     return place({ ...def, host: AUTO_HOST }, w, snap ?? this.placementSnapshot(gate, eff), {
       ...this.placeOptions(eff, wave),
       exclude,
@@ -3638,7 +3709,7 @@ export class Daemon {
     for (const id of ids) {
       if (!waiting.has(id)) continue;
       snap ??= this.placementSnapshot(
-        admissionFor(rec, this.killSwitch, this.pressure(wave)),
+        admissionFor(rec, this.closedToNew(), this.pressure(wave)),
         this.config.effective(wave),
       );
       const p = this.placeAway(wave, id, [name], snap);
@@ -3684,7 +3755,7 @@ export class Daemon {
     if (answer === MACHINE_DOWN_REPLACE) {
       const eff = this.config.effective(wave);
       let snap = this.placementSnapshot(
-        admissionFor(rec, this.killSwitch, this.pressure(wave)),
+        admissionFor(rec, this.closedToNew(), this.pressure(wave)),
         eff,
       );
       const moved = new Set<string>();
@@ -4247,6 +4318,7 @@ export class Daemon {
     if (!read.ok) this.log(`roles: ${read.error}; the record stays as last journaled`);
     const record = read.ok ? read.record : last;
     if (record === undefined) return;
+    this.roles = record;
     if (last === undefined || !sameRoles(last, record))
       await this.appendSystem({
         type: "roles_changed",
@@ -5543,7 +5615,7 @@ export class Daemon {
         continue;
       }
       if (!local) continue;
-      const gate = admissionFor(log.record, this.killSwitch, this.pressure(wave));
+      const gate = admissionFor(log.record, this.closedToNew(), this.pressure(wave));
       const idle = peerIdleUnderLoad(this.placementSnapshot(gate, cfg), { placement });
       if (idle !== null) {
         this.peerIdleWarned.set(wave, "raised");
@@ -6129,6 +6201,56 @@ export class Daemon {
         };
       },
     };
+  }
+
+  /**
+   * `peer_retarget` (admin, peers.ts, SPEC §4.6.14): checked inside the queue, its ssh run and the
+   * wait for the box's record `up` through the new tunnel awaited outside it. One run per box at
+   * a time, with Repair's (`doctoring`): both rewrite its peer.json.
+   */
+  private peerRetarget(p: Record<string, unknown>, sender: string): AuthOutcome | DeferredAuth {
+    const req = this.peers.retargetRequest(p);
+    if (!("host" in req)) return { reply: authReply("peer_retarget", req) };
+    if (this.doctoring.has(req.name)) {
+      return {
+        reply: authReply("peer_retarget", {
+          ok: false,
+          error: `a retarget or doctor run on "${req.name}" is already in progress`,
+        }),
+      };
+    }
+    this.doctoring.add(req.name);
+    return {
+      later: async () => {
+        try {
+          const r = await this.peers.runRetarget(req, sender, (name, since) =>
+            this.machineUp(name, since, DAEMON_DEFAULTS.peer_retarget_grace_ms),
+          );
+          return { reply: authReply("peer_retarget", r) };
+        } finally {
+          this.doctorDone(req.name);
+        }
+      },
+    };
+  }
+
+  /**
+   * Resolves true once machine `name` publishes an `up` record whose `last_seen` is `since` or
+   * later (a heartbeat, not our own republish), false after `ms` on the daemon's clock.
+   */
+  private machineUp(name: string, since: number, ms: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const done = (up: boolean) => {
+        this.recordWaiters.delete(waiter);
+        this.time.clearTimeout(timer);
+        resolve(up);
+      };
+      const waiter = (n: string, r: MachineRecord) => {
+        if (n === name && r.tunnel === "up" && Date.parse(r.last_seen) >= since) done(true);
+      };
+      this.recordWaiters.add(waiter);
+      const timer = this.time.setTimeout(() => done(false), ms);
+    });
   }
 
   /**
@@ -8405,7 +8527,7 @@ export class Daemon {
     if (this.spawning.has(key) || (this.refused.get(key)?.until ?? 0) > this.now()) return;
     // Its machine takes no new agents: parked until the owner's re-place answer (silent too).
     if (this.parkClosed(wave, task)) return;
-    const admission = admissionFor(rec, this.killSwitch, this.pressure(wave));
+    const admission = admissionFor(rec, this.closedToNew(), this.pressure(wave));
     const used = spawnsUsed(rec);
     const budget = spawnBudget(
       rec.wave,
@@ -11228,15 +11350,17 @@ export class Daemon {
             .pop();
         out = DESK_OPS.has(payload.op as string)
           ? await this.deskOp(exec, sender, payload)
-          : PEER_ADMIN_OPS.has(payload.op as string)
-            ? await this.peerAdminOp(exec, sender, payload)
-            : await accountOp(
-                exec,
-                sender,
-                payload,
-                lastSeen,
-                new Date(this.startedAt).toISOString(),
-              );
+          : ROLE_OPS.has(payload.op as string)
+            ? await this.roleOp(exec, sender, payload)
+            : PEER_ADMIN_OPS.has(payload.op as string)
+              ? await this.peerAdminOp(exec, sender, payload)
+              : await accountOp(
+                  exec,
+                  sender,
+                  payload,
+                  lastSeen,
+                  new Date(this.startedAt).toISOString(),
+                );
       }
     } catch (e) {
       out = failed(e);
@@ -11354,6 +11478,7 @@ export class Daemon {
     const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
     if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
     if (op === "peer_doctor") return this.peerDoctor(p, sender);
+    if (op === "peer_retarget") return this.peerRetarget(p, sender);
     if (op === "repo_add") return this.repoAdd(p, sender);
     if (op === "repo_remove") return this.repoRemove(p, sender);
     if (op === "repo_list") return { reply: authReply(op, this.repoList()) };
@@ -11374,6 +11499,191 @@ export class Daemon {
       await this.evict(p.name as string, sender);
     const { rejected: _r, ...answer } = r;
     return { reply: authReply(op, answer) };
+  }
+
+  /**
+   * `role_plan` / `role_move` / `role_rollback` (SPEC §4.6.24) from `sender`: the account ops'
+   * admin check, then roles/ops.ts. A plan probes the target over ssh and a move runs for
+   * minutes, so both are answered outside the queue.
+   */
+  private async roleOp(
+    exec: ExecFn,
+    sender: string,
+    p: Record<string, unknown>,
+  ): Promise<AuthOutcome | DeferredAuth> {
+    const op = p.op as string;
+    const accounts = await listAccounts(exec);
+    const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
+    if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
+    return {
+      later: async () => ({ reply: authReply(op, await this.roleOps.handle(op, p, sender)) }),
+    };
+  }
+
+  /** What the role planners read and run (roles/deps.ts), or why there is nothing yet. */
+  private roleDeps(): RoleDeps | string {
+    const roles = this.roles;
+    if (roles === null) return "no machine roles record yet: is the supervisor started?";
+    const hosts = this.config.effective().hosts;
+    const localName = this.config.localName();
+    const localHost = readSetupInstall(this.opts.home)?.desk_host ?? hostname();
+    const brokerMachine = roles.broker.machine;
+    const brokerTarget = hosts[brokerMachine]?.target;
+    return {
+      localName,
+      hosts,
+      paired: (name) => Object.hasOwn(this.peers.paired(), name),
+      record: (name) => (name === localName ? this.ownRecord : this.machines.record(name)),
+      version: this.version,
+      roles,
+      remote: (name) => this.remoteFor(name),
+      exec: this.opts.authExec ?? realExec,
+      platform: this.opts.fleet?.os?.platform?.() ?? platform(),
+      uid: process.getuid?.() ?? 0,
+      home: process.env.HOME ?? homedir(),
+      volleydHome: this.opts.home,
+      brokerHost:
+        brokerMachine === localName || brokerTarget === undefined
+          ? localHost
+          : hostOf(brokerTarget),
+      localHost,
+      localPortBusy: (port) =>
+        new Promise((resolve) => {
+          const s = createServer();
+          s.once("error", () => resolve(true));
+          s.listen(port, () => s.close(() => resolve(false)));
+        }),
+      writeRoles: async (r) => {
+        writeRoles(this.opts.home, r);
+        await this.enqueue(() => this.publishRoles());
+      },
+      now: () => dateOf(this.time),
+      sleep: (ms) => clockSleep(this.time, ms),
+    };
+  }
+
+  /** Nothing new is admitted: the kill switch, or a role move waiting for a quiet fleet. */
+  private closedToNew(): boolean {
+    return this.killSwitch || this.roleOps.draining();
+  }
+
+  /** What only a supervisor move needs (roles/plan-supervisor.ts). */
+  private supervisorDeps(): SupervisorDeps {
+    const exec = this.opts.authExec ?? realExec;
+    return {
+      busyWaves: () =>
+        [...this.waves]
+          .map(([wave, log]) => ({ wave, status: log.record.state?.status ?? "running" }))
+          .filter(({ status }) =>
+            ["running", "paused", "awaiting_decision", "releasing"].includes(status),
+          ),
+      liveAgents: () => {
+        const local = this.config.localName();
+        return [local, ...Object.keys(this.config.effective().hosts)].flatMap((machine) =>
+          this.agentsOn(machine).map((agent_id) => ({ agent_id, machine })),
+        );
+      },
+      bundle: {
+        volleydHome: this.opts.home,
+        authDir:
+          process.env.VOLLEY_AUTH_DIR ??
+          readSetupInstall(this.opts.home)?.auth_dir ??
+          defaultAuthDir(realAuthDeps.layout()),
+        claudeRoot: this.opts.claude?.root ?? claudeRoot(),
+      },
+      volleyDir: dirname(dirname(HOOKS_DIR)),
+      rotateOwn: async () => {
+        const r = await exec(["volley", "auth", "rotate", DAEMON_AGENT_ID, "--json"]);
+        let password: unknown;
+        try {
+          password = (JSON.parse(r.stdout) as { password?: unknown }).password;
+        } catch {}
+        if (r.code !== 0 || typeof password !== "string")
+          throw new Error(`volley auth rotate ${DAEMON_AGENT_ID}: exit ${r.code}`);
+        const file = join(this.opts.home, "broker.json");
+        writeFileSync(
+          `${file}.tmp`,
+          `${JSON.stringify({ username: DAEMON_AGENT_ID, password })}\n`,
+          {
+            mode: 0o600,
+          },
+        );
+        renameSync(`${file}.tmp`, file);
+        this.log("roles: rotated volleyd's login after the failed receive (broker.json written)");
+      },
+      handingOver: (id) => {
+        this.handingOver = id;
+      },
+    };
+  }
+
+  /**
+   * A role move run in the background ended here. A supervisor move that handed over unloads
+   * this supervisor's own service; one that failed ends the hand-over, and a broker connection
+   * lost meanwhile (the receive rotated volleyd's login) is fatal now: the service manager starts
+   * this supervisor again, with the login `rotateOwn` wrote.
+   */
+  private async moveFinished(moveId: string, r: MoveResult): Promise<void> {
+    if (this.handingOver !== moveId) return;
+    if (r.ok && r.status === "running") {
+      const exec = this.opts.authExec ?? realExec;
+      const platformNow = this.opts.fleet?.os?.platform?.() ?? platform();
+      const stop =
+        platformNow === "darwin"
+          ? ["launchctl", "bootout", `gui/${process.getuid?.() ?? 0}/${SERVICE_LABEL}`]
+          : ["systemctl", "--user", "stop", "volleyd.service"];
+      this.log(`roles: ${moveId} handed over; unloading this supervisor (${stop.join(" ")})`);
+      await exec(stop).catch((e: unknown) =>
+        this.log(`roles: ${stop.join(" ")}: ${e instanceof Error ? e.message : String(e)}`),
+      );
+      return;
+    }
+    this.handingOver = null;
+    const lost = this.deferredFail;
+    this.deferredFail = null;
+    if (lost !== null) this.fail(lost);
+  }
+
+  /**
+   * At start: a supervisor move handed to this machine (its handover.json came in the bundle)
+   * goes on here, under the same id (roles/handover.ts).
+   */
+  private async continueHandovers(): Promise<void> {
+    for (const h of pendingHandovers(this.opts.home, this.config.localName())) {
+      const d = this.roleDeps();
+      if (typeof d === "string") {
+        this.log(`roles: hand-over ${h.move_id} not continued: ${d}`);
+        continue;
+      }
+      markContinued(this.opts.home, h);
+      this.log(`roles: continuing the hand-over ${h.move_id} from ${h.from}`);
+      const steps = resumeSteps(
+        d,
+        {
+          ownStatus: async () => {
+            const raw = await this.broker.queryRetained(this.statusTopic, DAEMON_DEFAULTS.probe_ms);
+            return raw === null ? null : (parseEnvelope(raw)?.type ?? null);
+          },
+          mintCode: (name, by) => this.peers.mintFor(name, by),
+          remoteAt: (spec) => this.remoteBySpec(spec),
+        },
+        h,
+      );
+      await this.moves
+        .run({
+          move_id: h.move_id,
+          role: "supervisor",
+          from: h.from,
+          to: h.to,
+          by: h.by,
+          steps,
+          resume: resumeRecord(h, h.by, dateOf(this.time)),
+          ...(h.record?.rolls_back !== undefined ? { rolls_back: h.record.rolls_back } : {}),
+        })
+        .catch((e: unknown) =>
+          this.log(`roles: hand-over ${h.move_id}: ${e instanceof Error ? e.message : String(e)}`),
+        );
+    }
   }
 
   private async handle(
@@ -11554,8 +11864,13 @@ export class Daemon {
       case "peer_invite":
       case "peer_remove":
       case "peer_doctor":
+      case "peer_retarget":
       case "repo_add":
       case "repo_remove":
+      // Machine roles (SPEC §4.6.24): admin ops, never on the mailbox.
+      case "role_plan":
+      case "role_move":
+      case "role_rollback":
         // The mailbox does not name its sender (anyone who steers can write it).
         return {
           ok: false,
@@ -13729,6 +14044,9 @@ function loadWaves(home: string): WaveLog[] {
 
 /** A remote host's forward (tunnelKey): what its tunnel and tunnel check are keyed by. */
 const forwardOf = (h: RemoteHost) => tunnelKey(h.spec.target, h.spec.tunnel.remote_port);
+
+/** A role move's retained progress topic (SPEC §4.6.24). */
+const moveTopic = (moveId: string) => `${ROLES_TOPIC}/moves/${moveId}`;
 
 /** The broker's host and port as this machine reaches it (a paired machine's tunnel target). */
 function brokerAddress(url: string): { host: string; port: number } {

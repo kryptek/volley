@@ -907,6 +907,8 @@ export const WAVE_EVENT_TYPES = [
   "role_move_completed",
   "role_move_failed",
   "role_rolled_back",
+  // Machine roles (SPEC §4.6.14): `peer_retarget` re-pointed a paired machine's tunnel.
+  "peer_retargeted",
 ] as const;
 
 export type WaveEventType = (typeof WAVE_EVENT_TYPES)[number];
