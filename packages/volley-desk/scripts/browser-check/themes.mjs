@@ -23,10 +23,9 @@
 // the computed `--ground`, `--t-acc` and `--cur1`, crops the whole Desk (desktop), the first agent
 // window, a running wave window (status-chip), the ended one (onboarding, brought back with
 // Show), Settings › Appearance (and its Current step cards at desktop) and the sign-in card, and
-// counts axe's
-// `color-contrast` violations on the canvas, Appearance and the sign-in card. Then the
-// still-frame pass: reduced motion, Volley and Material Lighter × all nine effects, two shots of
-// the current step 400 ms apart, byte-equal. Writes <out>/matrix-<tag>.json, the sheet
+// counts axe's `color-contrast` violations on the canvas, Appearance and the sign-in card. Then
+// the still-frame pass: reduced motion, Volley and Material Lighter × all nine effects, two shots
+// of the current step 400 ms apart, byte-equal. Writes <out>/matrix-<tag>.json, the sheet
 // <out>/matrix-<tag>.html (one row per theme, one column per effect × device, the crops beside
 // it) and <out>/matrix-<theme>-<fx>-<device>-<what>-<tag>.png; fails on any violation, a missing
 // cell or crop, or a step that moves under reduced motion.
@@ -196,7 +195,7 @@ const ALL_THEMES = [
   "solarized",
 ];
 const MATRIX_FX = ["glint", "aurora", "liquid", "classic"];
-// `STEP_FX` in src/look/useLook.ts: the still-frame pass runs every one.
+// `STEP_FX_LABEL` in src/look/options.ts: the still-frame pass runs every one.
 const ALL_FX = [
   "glint",
   "pulse",
@@ -302,6 +301,9 @@ async function matrixCell(theme, fx, device, viewport) {
     await audit("signin", signin.page);
   } else {
     cell.crops.signin = "skipped: the dev server signed in on its own";
+    console.error(
+      `${theme}/${fx}/${device}: WARNING sign-in card not audited (${cell.crops.signin})`,
+    );
   }
   await signin.ctx.close();
   return cell;
@@ -310,14 +312,17 @@ async function matrixCell(theme, fx, device, viewport) {
 /** Under reduced motion the current step is its first keyframe: two shots 400 ms apart match. */
 async function stillCell(theme, fx) {
   const { ctx, page } = await open(theme, "clawd", DESKTOP, "desktop", true, { fx });
-  await page.locator(".world .pipe li.fx-cur").first().waitFor({ timeout: 30000 });
-  await page.waitForTimeout(1500);
-  const cur = page.locator(".world .pipe li.fx-cur").first();
-  const a = await cur.screenshot();
-  await page.waitForTimeout(400);
-  const c = await cur.screenshot();
-  await ctx.close();
-  return a.equals(c);
+  try {
+    await page.locator(".world .pipe li.fx-cur").first().waitFor({ timeout: 30000 });
+    await page.waitForTimeout(1500);
+    const cur = page.locator(".world .pipe li.fx-cur").first();
+    const a = await cur.screenshot();
+    await page.waitForTimeout(400);
+    const c = await cur.screenshot();
+    return a.equals(c);
+  } finally {
+    await ctx.close();
+  }
 }
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -341,7 +346,10 @@ function matrixSheet(m) {
     .map((t) => `<tr><th>${esc(t)}</th>${cols.map(([fx, d]) => td(t, fx, d)).join("")}</tr>`)
     .join("");
   const still = Object.entries(m.still)
-    .map(([k, v]) => `<span class="${v ? "" : "bad"}">${esc(k)}: ${v ? "still" : "MOVES"}</span>`)
+    .map(
+      ([k, v]) =>
+        `<span class="${v === true ? "" : "bad"}">${esc(k)}: ${v === true ? "still" : v === false ? "MOVES" : esc(v)}</span>`,
+    )
     .join(" · ");
   return `<!doctype html><meta charset="utf-8"><title>Theme × effect matrix (${esc(m.tag)})</title><style>
 body{margin:0;padding:20px;background:#0b0c14;color:#e8ecf4;font:12px system-ui,sans-serif}
@@ -373,8 +381,17 @@ async function matrix() {
     ),
   );
   await pool(jobs, Number(process.env.MATRIX_JOBS ?? 3));
+  // A still cell that throws is recorded as its error (not still), so the run still reports.
   for (const theme of STILL_THEMES)
-    for (const fx of ALL_FX) m.still[`${theme}/${fx}`] = await stillCell(theme, fx);
+    for (const fx of ALL_FX) {
+      const key = `${theme}/${fx}`;
+      try {
+        m.still[key] = await stillCell(theme, fx);
+      } catch (e) {
+        m.still[key] = `error: ${e.message.split("\n")[0]}`;
+        console.error(`still ${key}: ${m.still[key]}`);
+      }
+    }
   m.expected = jobs.length;
   m.violations = Object.values(m.cells).reduce((n, c) => n + c.violations, 0);
   m.missingCrops = Object.values(m.cells).reduce(
@@ -383,10 +400,17 @@ async function matrix() {
   );
   writeFileSync(join(out, `matrix-${tag}.json`), `${JSON.stringify(m, null, 2)}\n`);
   writeFileSync(join(out, `matrix-${tag}.html`), matrixSheet(m));
-  const moving = Object.entries(m.still).filter(([, v]) => !v);
+  const moving = Object.entries(m.still).filter(([, v]) => v !== true);
   console.log(
-    `matrix: ${Object.keys(m.cells).length}/${m.expected} cells; axe color-contrast violations: ${m.violations}; missing crops: ${m.missingCrops}; moving under reduced motion: ${moving.map(([k]) => k).join(", ") || "none"}`,
+    `matrix: ${Object.keys(m.cells).length}/${m.expected} cells; axe color-contrast violations: ${m.violations}; missing crops: ${m.missingCrops}; moving (or failed) under reduced motion: ${moving.map(([k]) => k).join(", ") || "none"}`,
   );
+  const skipped = Object.values(m.cells).filter((c) =>
+    c.crops.signin?.startsWith("skipped"),
+  ).length;
+  if (skipped > 0)
+    console.log(
+      `WARNING: the sign-in card was not audited in ${skipped} cells (the dev server signed in on its own)`,
+    );
   console.log(`sheet → ${join(out, `matrix-${tag}.html`)}`);
   const bad =
     m.violations > 0 ||
