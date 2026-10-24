@@ -22,6 +22,30 @@ import type {
   WaveView,
 } from "../src/store/types";
 
+// The demo client, passed through: a test can feed the demo store (`demoFeed.apply`) and count
+// what the Desk asks volleyd's registry (`demoFeed.asks`).
+const demoFeed = vi.hoisted(() => ({
+  apply: null as ((msgs: DeskMessage[]) => void) | null,
+  asks: [] as string[],
+}));
+vi.mock("../src/steer/demoClient", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/steer/demoClient")>();
+  return {
+    ...real,
+    createDemoSteerClient: (apply: (msgs: DeskMessage[]) => void, ...rest: unknown[]) => {
+      demoFeed.apply = apply;
+      return (real.createDemoSteerClient as (...a: unknown[]) => unknown)(apply, ...rest);
+    },
+    demoReadControl: (control: Parameters<typeof real.demoReadControl>[0]) => {
+      const read = real.demoReadControl(control);
+      return ((op, ...rest) => {
+        demoFeed.asks.push(op);
+        return read(op, ...rest);
+      }) as typeof read;
+    },
+  };
+});
+
 const NOW = Date.parse("2026-10-18T14:06:00.000Z");
 /** When a registry profile finished its sign-in. */
 const SIGNED = "2026-10-18T12:00:00.000Z";
@@ -1820,6 +1844,46 @@ describe("the demo Desk: remove a profile, and every Settings section follows (#
 
       fireEvent.click(settings.getByRole("button", { name: /^Machines/ }));
       await waitFor(() => expect(teamOnBoxA()).toHaveClass("gap"));
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
+  });
+
+  it("Settings › Machines, left open, asks volleyd's registry again when the rev rises", async () => {
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      value: () => {},
+      configurable: true,
+    });
+    try {
+      render(
+        <DeskStoreProvider demo>
+          <App />
+        </DeskStoreProvider>,
+      );
+      const dock = within(screen.getByRole("toolbar", { name: "Dock" }));
+      fireEvent.click(dock.getByRole("button", { name: "Machines" }));
+      fireEvent.click(screen.getByRole("button", { name: "box-a: open in Settings › Machines" }));
+      screen.getByRole("list", { name: "Claude accounts on box-a" });
+      const asked = () => demoFeed.asks.filter((op) => op === "claude_accounts").length;
+      await waitFor(() => expect(asked()).toBeGreaterThan(0));
+      const before = asked();
+      const signal = (rev: number): DeskMessage => ({
+        topic: "volley/_system/claude/registry",
+        envelope: {
+          schema_version: "0.1",
+          agent_id: "volleyd",
+          channel: "_system/claude",
+          type: "claude_registry_changed",
+          wall_time: new Date().toISOString(),
+          namespace: "default",
+          payload: { rev, at: new Date().toISOString() },
+        },
+        receivedAt: Date.now(),
+      });
+      act(() => demoFeed.apply?.([signal(41)]));
+      await waitFor(() => expect(asked()).toBe(before + 1));
+      // Settings › Machines stayed open throughout: no remount asked it
+      expect(screen.getByRole("list", { name: "Claude accounts on box-a" })).toBeInTheDocument();
     } finally {
       Reflect.deleteProperty(Element.prototype, "scrollIntoView");
     }

@@ -65,7 +65,7 @@ describe("ClaudeService.rename", () => {
     expect(w.journal).toEqual([
       {
         type: "claude_account_renamed",
-        data: { acct: "team@box-a", from: "Team", to: "Team account", by: "owner-1" },
+        data: { acct: "team", from: "Team", to: "Team account", by: "owner-1" },
       },
     ]);
     expect(w.service.rev).toBe(1);

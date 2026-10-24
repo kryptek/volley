@@ -135,6 +135,26 @@ describe("ClaudeService.remove: refused while the profile is in use", () => {
     expect(w.ids()).toEqual(ALL);
   });
 
+  it("an agent spawned under it while the pending sign-in stops: refused, nothing removed", async () => {
+    // the first check sees no agent; one is supervised under `solo` by the time the abort is done
+    let reads = 0;
+    const uses: Uses = {
+      get agents() {
+        reads += 1;
+        return reads > 1 ? { solo: ["w1-t2-implementer-1"] } : {};
+      },
+    };
+    const w = world(uses);
+    mkdirSync(join(w.root, "solo"), { recursive: true });
+    await w.service.signin({ acct: "solo" }, "owner-1");
+    const r = await w.service.remove({ acct: "solo" }, "owner-1");
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/w1-t2-implementer-1/);
+    expect(w.ids()).toEqual(ALL);
+    expect(existsSync(join(w.root, "solo"))).toBe(true);
+    expect(w.removed()).toEqual([]);
+  });
+
   it("an unknown account and the primary are refused", async () => {
     const w = world();
     expect((await w.service.remove({ acct: "nope" }, "owner-1")).error).toMatch(/unknown/);
@@ -176,8 +196,19 @@ describe("ClaudeService.remove: a local profile", () => {
     symlinkSync(outside, dir);
     const r = await w.service.remove({ acct: "team-here" }, "owner-1");
     expect(r).toMatchObject({ ok: true, result: { dir_removed: false } });
-    expect((r.result as { dir_left: string }).dir_left).toMatch(/outside/);
+    expect((r.result as { dir_left: string }).dir_left).toMatch(/is a symbolic link/);
     expect(readFileSync(join(outside, "keep.txt"), "utf-8")).toBe("mine\n");
+    expect(w.ids()).not.toContain("team-here@local");
+  });
+
+  it("a profile dir that is a dangling link is left in place, and says it is a link", async () => {
+    const w = world();
+    const dir = join(w.root, "team-here");
+    rmSync(dir, { recursive: true });
+    symlinkSync(join(w.base, "gone"), dir);
+    const r = await w.service.remove({ acct: "team-here" }, "owner-1");
+    expect(r).toMatchObject({ ok: true, result: { dir_removed: false } });
+    expect((r.result as { dir_left: string }).dir_left).toMatch(/is a symbolic link/);
     expect(w.ids()).not.toContain("team-here@local");
   });
 

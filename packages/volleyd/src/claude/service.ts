@@ -801,18 +801,20 @@ export class ClaudeService {
     if (acct.split("@")[0] === PRIMARY_ACCOUNT)
       return { ok: false, error: `'${acct}' is the machine's own login; it cannot be renamed` };
     let renamed: ClaudeAccount[];
-    let from: string;
+    let a: ClaudeAccount | undefined;
     try {
-      const a = this.entry(acct);
+      a = this.entry(acct);
       if (a === undefined) return { ok: false, error: `unknown Claude account '${acct}'` };
-      from = a.label;
       renamed = renameAccount(this.d.root, a.id, label);
     } catch (e) {
       if (e instanceof ClaudeAccountError) return { ok: false, error: e.message };
       throw e;
     }
     const to = label.trim();
-    await this.d.journal({ type: "claude_account_renamed", data: { acct, from, to, by } });
+    await this.d.journal({
+      type: "claude_account_renamed",
+      data: { acct: a.id, from: a.label, to, by },
+    });
     await this.changed();
     return { ok: true, result: { acct, label: to, renamed: renamed.map(signinKey) } };
   }
@@ -832,9 +834,9 @@ export class ClaudeService {
 
   /**
    * `claude_account_remove { acct, by }`: refused while the profile is in use; else its pending
-   * sign-in is aborted, its profile directory removed on its machine (here only under the root;
-   * on a paired machine only `<home>/.volley/claude/<acct>`, over the fence), and its registry
-   * entry dropped. `dir_left` says why a directory was left in place.
+   * sign-in is aborted, its registry entry dropped, and its profile directory removed on its
+   * machine (here only under the root; on a paired machine only `<home>/.volley/claude/<acct>`,
+   * over the fence). `dir_left` says why a directory was left in place.
    */
   async remove(p: Record<string, unknown>, by: string): Promise<Reply> {
     const acct = typeof p.acct === "string" ? p.acct : "";
@@ -856,15 +858,20 @@ export class ClaudeService {
       pending.abort.abort(REMOVED);
       await pending.done;
     }
-    const left = await (a.machine === LOCAL_MACHINE
-      ? this.removeLocalDir(a)
-      : this.removeRemoteDir(a));
+    // This answer is deferred (off the serial queue): an agent may have been spawned under the
+    // profile while the sign-in stopped. Check again, then drop the entry before the directory
+    // goes, so nothing can pick the profile while its directory is being removed.
+    const late = this.inUse(a, acct);
+    if (late !== null) return { ok: false, error: late };
     try {
       removeAccount(this.d.root, a.id);
     } catch (e) {
       if (e instanceof ClaudeAccountError) return { ok: false, error: e.message };
       throw e;
     }
+    const left = await (a.machine === LOCAL_MACHINE
+      ? this.removeLocalDir(a)
+      : this.removeRemoteDir(a));
     if (a.machine !== LOCAL_MACHINE && left !== null) this.d.log(`profile ${acct}: ${left}`);
     const dirRemoved = left === null;
     await this.d.journal({
@@ -887,11 +894,11 @@ export class ClaudeService {
   private removeLocalDir(a: ClaudeAccount): string | null {
     const root = canonicalRoot(this.d.root);
     const dir = profileDir(root, a.id);
-    if (!existsSync(dir) && !isLink(dir)) return null;
+    if (isLink(dir)) return `${dir} is a symbolic link; only a directory under ${root} is removed`;
+    if (!existsSync(dir)) return null;
     try {
       const real = realpathSync(dir);
-      if (isLink(dir) || !real.startsWith(`${realpathSync(root)}/`))
-        return `${dir} leads outside ${root}`;
+      if (!real.startsWith(`${realpathSync(root)}/`)) return `${dir} leads outside ${root}`;
       rmSync(dir, { recursive: true, force: true });
       return null;
     } catch (e) {
