@@ -93,9 +93,9 @@ describe("the clusters panel", () => {
 describe("the dependency graph of a planned wave", () => {
   it("labels a bundle `#310 +1`, with the full list in its title and each issue linked", () => {
     const { container } = renderWave(planned());
-    const node = container.querySelector('.dag-node[data-id="i310"]') as SVGGElement;
+    const node = container.querySelector('.dag-node[data-id="i310"]') as HTMLElement;
     expect(node.querySelector(".dag-issue")).toHaveTextContent("#310 +1");
-    expect(node.querySelector("title")).toHaveTextContent("#310, #312");
+    expect(node.getAttribute("title")).toContain("#310, #312");
     const links = [...node.querySelectorAll("a")].map((a) => a.getAttribute("href"));
     expect(links).toEqual([
       "https://github.com/example-org/example-repo/issues/310",

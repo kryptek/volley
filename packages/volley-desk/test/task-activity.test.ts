@@ -52,7 +52,7 @@ describe("taskActivity (#451)", () => {
     expect(act(held(HOLD, JOBS), { "impl-1": "done" })).toEqual({
       kind: "ci",
       label: "waiting for CI · 21/22 jobs",
-      node: "waiting for CI · 21/22",
+      node: "CI · 21/22",
     });
   });
 
@@ -64,7 +64,7 @@ describe("taskActivity (#451)", () => {
       expect(act(held(why), { "impl-1": "done" })).toEqual({
         kind: "ci",
         label: "waiting for CI",
-        node: "waiting for CI",
+        node: "CI pending",
       });
     }
   });

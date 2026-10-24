@@ -433,3 +433,37 @@ describe("WaveWindow: the wave's Claude account (#499)", () => {
     expect(screen.queryByText(/^Account:/)).toBeNull();
   });
 });
+
+describe("rail depth (#367)", () => {
+  it("a merged task's segment is done, a running one current, a decision's neither", () => {
+    const { container } = renderWave();
+    const spans = [...container.querySelectorAll(".rail-seg > span")];
+    expect(spans.map((s) => s.getAttribute("class"))).toEqual([
+      "fx-done",
+      "fx-cur",
+      "fx-cur",
+      null,
+    ]);
+    expect(screen.getByRole("progressbar", { name: "status-chip progress" })).toHaveAttribute(
+      "aria-valuenow",
+      "88",
+    );
+  });
+
+  it("the graph's nodes take the same states as the rail", () => {
+    const { container } = renderWave();
+    const cls = (id: string) => container.querySelector(`.dag-node[data-id="${id}"]`);
+    expect(cls("T0")).toHaveClass("fx-done");
+    expect(cls("T1")).toHaveClass("fx-cur");
+    expect(cls("T3")).not.toBeNull();
+    expect(cls("T3")?.className).not.toMatch(/\bfx-/);
+  });
+
+  it("an ended wave's rail and graph are flat", () => {
+    const w = wave();
+    if (w.state) w.state.status = "stopped";
+    const { container } = render(<WaveWindow wave={w} me={null} frame={frame} />);
+    expect(container.querySelector('.rail-seg [class*="fx-"]')).toBeNull();
+    expect(container.querySelector('.dag [class*="fx-"]')).toBeNull();
+  });
+});

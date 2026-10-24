@@ -2,8 +2,9 @@
  * What a task is doing now, for its graph node and its task line (#451). The stage alone
  * misleads: `implement` lasts until CI is green, long after the implementer pushed and retired.
  * First match wins: an agent running (`implementing`, `reviewing`, `fixing`, `rebasing`); no agent
- * and a CI hold (`waiting for CI · 21/22 jobs`); a merge turn; a decision; merged or cancelled
- * (checked first, they are final); else the stage label. Pure, no React.
+ * and a CI hold (`waiting for CI · 21/22 jobs`, `CI · 21/22` on the node); a merge turn; a
+ * decision; merged or cancelled (checked first, they are final); else the stage label. Pure, no
+ * React.
  */
 import { ciPending } from "../../attention";
 import type { AgentView, MergeQueueEntry, Role, WaveTask } from "../../store/types";
@@ -13,7 +14,7 @@ export type Activity = {
   kind: "agent" | "ci" | "merge" | "decision" | "ended" | "stage";
   /** The task line: `waiting for CI · 21/22 jobs`. */
   label: string;
-  /** The graph node (132 px, ~15 chars beside the issue number): `waiting for CI · 21/22`, `merge turn`, `decision`; else the label. */
+  /** The graph node (132 px, the room left of the issue number): `CI · 21/22`, `CI pending`, `merge turn`, `decision`; else the label. */
   node: string;
 };
 
@@ -58,10 +59,10 @@ export function taskActivity(t: WaveTask, ctx: ActivityCtx): Activity {
   if (ciPending(t)) {
     const j = t.pr?.jobs;
     if (j && j.total > 0) {
-      const node = `waiting for CI · ${j.done}/${j.total}`;
-      return { kind: "ci", label: `${node} jobs`, node };
+      const n = `${j.done}/${j.total}`;
+      return { kind: "ci", label: `waiting for CI · ${n} jobs`, node: `CI · ${n}` };
     }
-    return same("ci", "waiting for CI");
+    return { kind: "ci", label: "waiting for CI", node: "CI pending" };
   }
   const turn = ctx.queue?.find((e) => e.task === t.id);
   const q = turn && QUEUE_LABEL[turn.state];

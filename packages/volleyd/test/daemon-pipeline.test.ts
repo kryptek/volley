@@ -84,6 +84,9 @@ describe("daemon → pipeline", () => {
       daemon: { clock },
       pipeline: "[implement, spec_review, merge_ready]",
     });
+    // Its result first: onFinal and retire each read it back, and a missing one waits out
+    // probe_ms (real time), twice, inside the wait for spec_review below.
+    await s.pub(buildTopic(NS, AGENT, "result"), "result", "result", { summary: "ok" });
     await s.status("done");
     await s.event((e) => e.type === "stage_entered" && e.data.stage === "spec_review");
     await s.settled();

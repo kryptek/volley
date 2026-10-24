@@ -13,11 +13,13 @@
  * state carries no stop time of its own yet. Each graph node and rail segment
  * says what its task is doing now (`taskActivity`, #451): a running agent
  * (`implementing`, `reviewing`, `fixing`), else a CI hold, else a merge turn,
- * else a decision, else the stage. A task volleyd holds for CI with no agent
- * running (its `why_waiting` is one of volleyd's four hold wordings, `ciPending`)
- * shows `waiting for CI` (`· 3/13` when its jobs are counted) in the graph, a
- * `waiting for CI` chip in the title and a row under the graph with the same
- * words, its pipeline (`implement ✓ · CI ⟳ · review`), the reason and, when no
+ * else a decision, else the stage; both take the depth states (`stageState`):
+ * merged raised, running with the current-step effect, an ended wave flat. A
+ * task volleyd holds for CI with no agent running (its `why_waiting` is one of
+ * volleyd's four hold wordings, `ciPending`) shows `CI pending` (`CI · 3/13`
+ * when its jobs are counted) in the graph, with the full line in the node's
+ * tooltip, a `waiting for CI` chip in the title and a row under the graph with
+ * the same words, its pipeline (`implement ✓ · CI ⟳ · review`), the reason and, when no
  * job finished for longer than the slowest job's last duration, `possibly
  * stuck: …` (#415); no agent window is needed for it. On a phone the graph wraps to the window's
  * width (`dagWidthFor`). Under the graph each placed task has a host chip
@@ -78,7 +80,7 @@ import type {
 import { Feed } from "../agent/Feed";
 import { Clawd } from "./Clawd";
 import { Clusters } from "./Clusters";
-import { Dag, type DagNode, HostChips, fixerLabel } from "./Dag";
+import { Dag, type DagNode, HostChips, fixerLabel, stageState } from "./Dag";
 import { WaveYaml, taskOrder } from "./WaveYaml";
 import { accentFor, clusterHues, hueOf } from "./accent";
 import { taskActivity } from "./activity";
@@ -461,6 +463,7 @@ export function WaveWindow(p: WaveWindowProps) {
   );
   const ci = s?.tasks.filter((t) => activity.get(t.id)?.kind === "ci") ?? [];
   const labels = Object.fromEntries([...activity].map(([t, a]) => [t, a.node]));
+  const status = Object.fromEntries([...activity].map(([t, a]) => [t, a.label]));
 
   const title = (
     <>
@@ -524,15 +527,22 @@ export function WaveWindow(p: WaveWindowProps) {
         aria-valuemax={100}
         aria-label={`${id} progress`}
       >
-        {live.map((t) => (
-          <span
-            key={t.id}
-            className={`rail-seg st-${t.stage}`}
-            title={`${t.id} · ${activity.get(t.id)?.label ?? STAGE_LABEL[t.stage]}`}
-          >
-            <span style={{ width: `${STAGE_WEIGHT[t.stage] * 100}%` }} />
-          </span>
-        ))}
+        {live.map((t) => {
+          const fx = stageState(t.stage, false, !!ended);
+          return (
+            <span
+              key={t.id}
+              className={`rail-seg st-${t.stage}`}
+              title={`${t.id} · ${activity.get(t.id)?.label ?? STAGE_LABEL[t.stage]}`}
+            >
+              {/* A queued segment is empty: only done and running ones take a state. */}
+              <span
+                className={fx === "done" || fx === "cur" ? `fx-${fx}` : undefined}
+                style={{ width: `${STAGE_WEIGHT[t.stage] * 100}%` }}
+              />
+            </span>
+          );
+        })}
       </div>
       <div className="rail-meta">
         <span className="rail-pct">{pct}%</span>
@@ -582,6 +592,7 @@ export function WaveWindow(p: WaveWindowProps) {
               accent={accent}
               ended={!!ended}
               labels={labels}
+              status={status}
               maxWidth={p.frame.maxWidth === undefined ? undefined : dagWidthFor(p.frame.maxWidth)}
             />
             <Clusters
