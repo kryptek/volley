@@ -1,0 +1,355 @@
+/*
+ * The depth states and the nine current-step effects (#366), keyed off `data-fx` on <html>
+ * (`look/applyLook.ts`). `fx-done` / `fx-cur` / `fx-future` sit beside the classes a component
+ * already sets (`done`, `cur`, `held`). Animates transform, opacity, background / mask position
+ * and the registered `--ang` only, plus box-shadow in Pulse and Ember (measured on a phone by
+ * `scripts/browser-check/step-fx.mjs`). `test/step-fx.test.ts` holds the contract.
+ */
+/* The current step's conic angle (Aurora). */
+@property --ang {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+/* ---------- depth, whatever the effect (Classic turns it off below) ---------- */
+.fx-future,
+.fx-done,
+.fx-cur {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+.fx-future {
+  color: var(--dim);
+  background: var(--pit);
+  box-shadow: inset 0 2px 5px var(--shade), 0 1px 0 var(--hl);
+}
+.fx-done {
+  color: color-mix(in oklab, var(--ok) 55%, var(--ink));
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--ok) 22%, transparent),
+    color-mix(in srgb, var(--ok) 6%, transparent)
+  );
+  border: 1px solid color-mix(in srgb, var(--ok) 25%, transparent);
+  box-shadow: inset 0 1px 0 var(--hl), 0 2px 6px -3px var(--shade);
+}
+.fx-done::before {
+  content: "✓ ";
+  color: var(--ok);
+  font-weight: 700;
+}
+.fx-cur {
+  color: var(--on-acc);
+  font-weight: 700;
+  background: linear-gradient(180deg, var(--cur1), var(--cur2));
+  border: 1px solid color-mix(in srgb, var(--t-acc-hi) 60%, transparent);
+  box-shadow: inset 0 1px 0 var(--hl-strong), inset 0 -2px 0 rgba(0, 0, 0, 0.25), 0 6px 16px -6px
+    color-mix(in srgb, var(--t-acc) 65%, transparent);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
+}
+/* A rail segment is a bar, not a label: no check mark, no text shadow. */
+.rail-seg > .fx-done::before {
+  content: none;
+}
+
+/* glossy bars: the agent footer bar and the rail's segments, with a slow glint on the bar.
+   The rail's segments get fx-done / fx-cur from the wave window in T2; until then these
+   .rail-seg rules match nothing. */
+.bar > span,
+.rail-seg > span.fx-cur {
+  background: linear-gradient(180deg, var(--t-acc-hi), var(--t-acc));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  position: relative;
+  overflow: hidden;
+}
+.rail-seg > span.fx-done {
+  background: linear-gradient(180deg, color-mix(in oklab, var(--ok) 60%, white), var(--ok));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55), 0 0 6px -1px
+    color-mix(in srgb, var(--ok) 60%, transparent);
+}
+.bar > span::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.6) 50%,
+    transparent 70%
+  );
+  transform: translateX(-120%);
+  animation: barglint 3.2s ease-in-out infinite;
+}
+@keyframes barglint {
+  60%,
+  100% {
+    transform: translateX(120%);
+  }
+}
+
+/* ---------- the nine effects (on .fx-cur) ---------- */
+/* 1 Glint */
+[data-fx="glint"] .fx-cur::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  z-index: -1;
+  background: linear-gradient(
+    105deg,
+    transparent 35%,
+    rgba(255, 255, 255, 0.55) 48%,
+    rgba(255, 255, 255, 0.15) 54%,
+    transparent 65%
+  );
+  transform: translateX(-130%);
+  animation: glint 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes glint {
+  55%,
+  100% {
+    transform: translateX(130%);
+  }
+}
+/* 2 Pulse (box-shadow: the one measured exception, see the performance rule) */
+[data-fx="pulse"] .fx-cur {
+  animation: pulse 1.8s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    box-shadow: inset 0 1px 0 var(--hl-strong), 0 0 0 0 transparent, 0 6px 16px -6px
+      color-mix(in srgb, var(--t-acc) 60%, transparent);
+  }
+  50% {
+    box-shadow: inset 0 1px 0 var(--hl-strong), 0 0 0 4px
+      color-mix(in srgb, var(--t-acc) 20%, transparent), 0 0 22px 2px
+      color-mix(in srgb, var(--t-acc) 55%, transparent);
+  }
+}
+/* 3 Aurora */
+[data-fx="aurora"] .fx-cur {
+  border: 2px solid transparent;
+  background: linear-gradient(180deg, var(--cur1), var(--cur2)) padding-box,
+    conic-gradient(from var(--ang), var(--t-acc-hi), #a78bfa, #f472b6, #fbbf24, var(--t-acc-hi))
+    border-box;
+  animation: spin 3s linear infinite;
+}
+@keyframes spin {
+  to {
+    --ang: 360deg;
+  }
+}
+/* 4 Scanline (transform, not top) */
+[data-fx="scan"] .fx-cur::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 40%;
+  z-index: -1;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    color-mix(in srgb, var(--t-acc-hi) 60%, transparent),
+    transparent
+  );
+  transform: translateY(-112%);
+  animation: scan 1.6s linear infinite;
+}
+@keyframes scan {
+  to {
+    transform: translateY(263%);
+  }
+}
+/* 5 Ember (box-shadow: the second measured exception) */
+[data-fx="ember"] .fx-cur {
+  background: linear-gradient(180deg, #2a1f36, #3a1a12);
+  border-color: rgba(253, 186, 116, 0.6);
+  animation: ember 1.3s ease-in-out infinite alternate;
+}
+[data-fx="ember"] .fx-cur::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 70%;
+  z-index: -1;
+  background: radial-gradient(
+    60% 90% at 50% 120%,
+    rgba(251, 146, 60, 0.85),
+    rgba(217, 119, 87, 0.3) 50%,
+    transparent 75%
+  );
+  animation: flick 0.9s steps(3) infinite alternate;
+}
+@keyframes ember {
+  from {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 6px 14px -6px rgba(251, 146, 60, 0.6);
+  }
+  to {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 6px 22px -4px rgba(251, 146, 60, 0.95);
+  }
+}
+@keyframes flick {
+  from {
+    opacity: 0.7;
+    transform: scaleY(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scaleY(1.1);
+  }
+}
+/* 6 Liquid */
+[data-fx="liquid"] .fx-cur {
+  background: var(--cur2);
+}
+[data-fx="liquid"] .fx-cur::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  top: 30%;
+  z-index: -1;
+  background: var(--t-acc);
+  opacity: 0.85;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 20' preserveAspectRatio='none'%3E%3Cpath d='M0 10 Q15 2 30 10 T60 10 T90 10 T120 10 V20 H0Z'/%3E%3C/svg%3E")
+    0 0 / 120px 100% repeat-x;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 20' preserveAspectRatio='none'%3E%3Cpath d='M0 10 Q15 2 30 10 T60 10 T90 10 T120 10 V20 H0Z'/%3E%3C/svg%3E")
+    0 0 / 120px 100% repeat-x;
+  animation: wave 2.2s linear infinite;
+}
+[data-fx="liquid"] .fx-cur::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(180deg, transparent 55%, var(--t-acc) 55%);
+  opacity: 0.55;
+}
+@keyframes wave {
+  to {
+    -webkit-mask-position: 120px 0;
+    mask-position: 120px 0;
+  }
+}
+/* 7 Circuit */
+[data-fx="circuit"] .fx-cur {
+  border: 2px dashed transparent;
+  background: linear-gradient(180deg, var(--cur1), var(--cur2)) padding-box,
+    repeating-linear-gradient(90deg, var(--t-acc-hi) 0 8px, transparent 8px 14px) border-box;
+  background-size: auto, 28px 100%;
+  animation: march 0.7s linear infinite;
+}
+@keyframes march {
+  to {
+    background-position: 0 0, 28px 0;
+  }
+}
+/* 8 Prism */
+[data-fx="prism"] .fx-cur {
+  background: linear-gradient(115deg, #0f766e, #5b21b6, #be185d, #b45309, #0f766e) 0 50% / 400% 100%;
+  border-color: rgba(255, 255, 255, 0.4);
+  animation: prism 4s linear infinite;
+}
+[data-fx="prism"] .fx-cur::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(
+    105deg,
+    transparent 40%,
+    rgba(255, 255, 255, 0.35) 50%,
+    transparent 60%
+  );
+  transform: translateX(-130%);
+  animation: glint 3s ease-in-out infinite;
+}
+@keyframes prism {
+  to {
+    background-position: 400% 50%;
+  }
+}
+/* 9 Classic: today's flat look, depth off */
+[data-fx="classic"] :is(.fx-future, .fx-done, .fx-cur),
+[data-fx="classic"] .bar > span,
+[data-fx="classic"] .rail-seg > span {
+  box-shadow: none;
+  text-shadow: none;
+}
+[data-fx="classic"] .fx-done::before {
+  content: none;
+}
+[data-fx="classic"] .bar > span::after {
+  content: none;
+}
+[data-fx="classic"] .fx-future {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--dim);
+}
+[data-fx="classic"] .fx-done {
+  background: color-mix(in srgb, var(--acc) 8%, transparent);
+  border-color: transparent;
+  color: var(--mute);
+}
+[data-fx="classic"] .fx-cur {
+  background: color-mix(in srgb, var(--acc) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--acc) 60%, transparent);
+  color: var(--ink);
+  font-weight: 600;
+}
+[data-fx="classic"] .bar > span,
+[data-fx="classic"] .rail-seg > span.fx-cur {
+  background: var(--acc);
+}
+[data-fx="classic"] .rail-seg > span.fx-done {
+  background: var(--ok);
+}
+
+/* ---------- touch screens: the box-shadow effects, measured over budget on a phone ---------- */
+/* scripts/browser-check/step-fx.mjs put Pulse and Ember over the phone's idle budget (p95 < 20 ms
+   at 4x CPU): Pulse's halo becomes an inner ring that fades (opacity only), Ember's underglow is
+   static (its ::after flick, opacity and transform only, still runs). Desktop keeps the full
+   effect. */
+@media (hover: none) and (pointer: coarse) {
+  [data-fx="pulse"] .fx-cur {
+    animation: none;
+  }
+  [data-fx="pulse"] .fx-cur::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--t-acc-hi) 70%, transparent), inset 0 0 12px
+      color-mix(in srgb, var(--t-acc) 60%, transparent);
+    opacity: 0.25;
+    animation: pulsering 1.8s ease-in-out infinite;
+  }
+  [data-fx="ember"] .fx-cur {
+    animation: none;
+    box-shadow: inset 0 1px 0 color-mix(in srgb, white 25%, transparent), 0 6px 18px -5px
+      color-mix(in srgb, #fb923c 80%, transparent);
+  }
+}
+@keyframes pulsering {
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ---------- still frames ---------- */
+/* `[data-fx] …` matches the effects' own specificity (and comes after them), so the still frame wins. */
+@media (prefers-reduced-motion: reduce) {
+  .fx-cur,
+  .fx-cur::before,
+  .fx-cur::after,
+  [data-fx] .fx-cur,
+  [data-fx] .fx-cur::before,
+  [data-fx] .fx-cur::after,
+  .bar > span::after {
+    animation: none;
+  }
+}

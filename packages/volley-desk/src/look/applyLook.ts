@@ -4,7 +4,8 @@
  * `:root` block of `styles/desk.css` is Volley); every other theme first
  * removes what a previous one wrote. `main.tsx` calls `applyLookToDocument`
  * before the first render (the sign-in card is themed too) and `App` again on
- * every change.
+ * every change. The current step's effect is always written as `data-fx` (the
+ * effects in `styles/stepfx.css` key off it, Glint included).
  */
 import { TOKEN_PROPERTY, type ThemeDef, type ThemeTokens, themeById } from "./themes";
 import type { Look } from "./useLook";
@@ -40,6 +41,7 @@ export function applyTheme(id: string): void {
   else applyThemeTokens(def);
 }
 
-export function applyLookToDocument(look: Pick<Look, "theme">): void {
+export function applyLookToDocument(look: Pick<Look, "theme" | "fx">): void {
   applyTheme(look.theme);
+  document.documentElement.dataset.fx = look.fx;
 }

@@ -283,7 +283,14 @@ describe("applyTheme", () => {
     expect(html().style.getPropertyValue("--ok-ink")).toBe("#1b5e20");
   });
 
-  it("applyLookToDocument with the default look is a no-op", () => {
+  it("applyLookToDocument always writes the current-step effect as data-fx", () => {
+    applyLookToDocument({ ...LOOK0, fx: "aurora" });
+    expect(html().dataset.fx).toBe("aurora");
+    applyLookToDocument({ ...LOOK0, fx: "glint" });
+    expect(html().dataset.fx).toBe("glint");
+  });
+
+  it("applyLookToDocument with the default look writes no theme", () => {
     applyLookToDocument({ ...LOOK0, theme: "volley" });
     expect(html().style.length).toBe(0);
     expect(html().getAttribute("data-theme")).toBeNull();
