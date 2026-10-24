@@ -66,6 +66,7 @@ The `volleyd` supervisor owns everything the legacy path does by hand: worktrees
 
 - Prerequisites 1–4 above (broker, volley-mcp, shell credentials, coordinator registered). The coordinator name (`$VOLLEY_COORDINATOR`, Prerequisites step 2: in the MCP registration's `env` and exported in the shell) becomes the wave's **owner**; without one, the auto-suffixed `agent_id` from Prerequisites step 4 does, and is lost when the MCP server restarts: then the session cannot leave (Step 5), so set the name before submitting.
 - `volleyd status` exits 0 (see Choosing a dispatch path). Use the same `VOLLEY_BROKER_URL` / `--namespace` the daemon uses, and run on the daemon's host with the daemon's `VOLLEYD_HOME`: `volleyd events` and `volleyd ack` read the journal there directly, not over the broker.
+- **The supervisor may not be on this machine.** The supervisor (and the broker) can be moved to another machine of the pool. Run `volley role status`: when its `supervisor` line names another machine, `volleyd status`, `volleyd run` and the other ops still work from here over the broker, but `volleyd events` and `volleyd ack` read the journal on the supervisor's machine: run those there (`ssh <machine>`). A wave's `repo:` path must exist on that machine too, so name the repository by `owner/name`. When its `broker` line names another machine, this machine reaches it through its tunnel: a session set up before the move re-registers with `volley setup --step claude-code --broker-url mqtt://127.0.0.1:1883`.
 - A release branch the wave's PRs target: create or reuse one exactly as in **Batch setup** step 1, after the **Global open-PR check**. A wave always has a release branch, even for one issue.
 - Repo-specific brief extras live in the repo, not in this skill: put the **Migration number reservation** block (or any other per-repo notes) in `<repo>/.volley/brief-extra.md` (kept out of git); volleyd appends it to every brief it renders. Run the migration counter init (**Batch setup** step 2) yourself before submitting if the repo uses it. volleyd's briefs already carry the narration contract. To enforce it anyway (say, against a customised template), install the skill's gate as volleyd's brief gate: `ln -s <skill-dir>/scripts/validate-brief.sh "${VOLLEYD_HOME:-$HOME/.volley/volleyd}/brief-gate"`. volleyd refuses to launch an agent whose brief fails it. The gate accepts volleyd's own briefs: their session hooks register the agent, so the brief's "already registered" line stands in for the legacy `vol_register` step (volleyd briefs must never ask the agent to register). Do not "fix" a refused volleyd brief by appending `brief/NARRATION_BLOCK.txt`: its step 1 is `vol_register`.
 
@@ -129,13 +130,15 @@ bun run <skill-dir>/scripts/wave-from-issues.ts /tmp/wave-issues.json \
   --wave "$WAVE" \
   --repo "$(git rev-parse --show-toplevel)" \
   --release-branch release/$WAVE \
-  --model claude-opus-4-7 \
+  --model <model> \
   --repo-slug "$(gh repo view --json nameWithOwner -q .nameWithOwner)" \
   [--satisfied 5,6] [--namespace example-dispatch] \
   [--pipeline '["implement",["spec_review","quality_review"],"fixup","merge_ready"]'] \
   --merge auto --autopilot on --branch-update merge \
   --out .volley/waves/$WAVE.yaml
 ```
+
+`<model>` is the model the wave's agents run: Volley's default is `DEFAULT_MODEL` in `packages/volleyd/src/config-defaults.ts` (the model `volley setup`'s test wave runs), unless the user names another.
 
 The three autopilot settings, written into the wave file:
 

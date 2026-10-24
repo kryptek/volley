@@ -707,6 +707,12 @@ export interface DaemonOptions {
   /** `machine_add`'s hub (machine-add.ts; tests): default the real machine. */
   machineAdd?: Partial<MachineAddEnv>;
   /**
+   * A broker move's links (roles/plan-broker.ts; tests): volleyd's login at a URL (the health
+   * check's, and each re-pointed machine's record read through it), the anonymous probe and
+   * volleyd's own unit re-pointed. Default: a real login, setup's probe, the systemd user unit.
+   */
+  roleBroker?: Partial<Pick<BrokerDeps, "connect" | "probeAnonymous" | "unitUrl">>;
+  /**
    * How often to prune expired one-time token logins (`volley auth list --json`); 0 disables.
    * Default: `token_prune_ms` when the daemon has broker credentials (`auth`), else 0.
    */
@@ -11734,6 +11740,7 @@ export class Daemon {
       moving: (id) => {
         this.brokerMoving = id;
       },
+      ...this.opts.roleBroker,
     };
   }
 

@@ -22,6 +22,8 @@
     "./machine/ssh": "./src/machine/ssh.ts",
     "./peer/machine": "./src/peer/checks/machine.ts",
     "./setup/accounts": "./src/setup/accounts.ts",
+    "./setup/first-wave": "./src/setup/first-wave.ts",
+    "./setup/first-wave-repo": "./src/setup/first-wave-repo.ts",
     "./setup/broker": "./src/setup/broker.ts",
     "./setup/terminal": "./src/setup/terminal.ts",
     "./setup/journal": "./src/setup/journal.ts",

@@ -66,6 +66,10 @@ export const SETUP_OPS: ReadonlySet<string> = new Set([
   "desk_password",
 ]);
 
+// The Desk's wizard runs these. The terminal's others stay there: the sign-ins open a browser,
+// Claude Code's profile and the Terminal are the user's, and the test wave (`first-wave`) runs
+// for up to 15 minutes against GitHub with the coordinator's login: `volley setup --step
+// first-wave` in a terminal.
 const STEPS: [StepName, Planner][] = [
   ["detect", planDetect],
   ["security", planSecurity],

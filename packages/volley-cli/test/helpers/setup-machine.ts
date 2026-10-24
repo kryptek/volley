@@ -13,6 +13,7 @@ import { basename, join } from "node:path";
 import { LAYOUTS, type Layout } from "../../src/auth/config";
 import type { AuthContext } from "../../src/auth/context";
 import { type BufferIO, makeBufferIO } from "../../src/io";
+import type { WaveView } from "../../src/setup/first-wave";
 import type {
   AnonymousProbe,
   ExecResult,
@@ -103,7 +104,40 @@ export interface FakeMachine {
   asked: string[];
   /** The user's ~/.claude.json. */
   claudeJson: string;
+  /** The test wave's world: GitHub's answers, the clone's origin, the wave states read in turn. */
+  firstWave: FirstWaveWorld;
+  /** The fake clock (`deps.now`): `sleep` advances it. */
+  clock: number;
 }
+
+export interface FirstWaveWorld {
+  /** The GitHub owner `gh repo view` reports. */
+  owner: string;
+  /** `git remote get-url origin` of any clone (null: it has none). */
+  origin: string | null;
+  /** The number `gh issue create` gives the next issue. */
+  nextIssue: number;
+  /** The states `waveState` returns, in turn (the last one then repeats). */
+  states: WaveView[];
+  /** Where `volley repo add` clones it (`fleet.repo_root`). */
+  repoRoot: string;
+  /** An exit code for the command whose argv starts with this (a failure to inject). */
+  fail?: { prefix: string; code: number; stderr: string };
+  /** The wave ids `volleyd run` accepted: a second submit of one is refused, as the daemon does. */
+  submitted: Set<string>;
+}
+
+export const HELLO_PR = "https://github.com/octo-volley/volley-hello-aaaa/pull/1";
+
+/** A wave that runs one state, then completes with its PR merged. */
+export const MERGING: WaveView[] = [
+  { status: "running", tasks: [{ id: "T1", stage: "implement" }], open_decisions: [] },
+  {
+    status: "complete",
+    tasks: [{ id: "T1", stage: "done", pr: { url: HELLO_PR, number: 1 } }],
+    open_decisions: [],
+  },
+];
 
 export function fakeMachine(
   fake: FakeDynsec,
@@ -143,6 +177,15 @@ export function fakeMachine(
     typed: [],
     asked: [],
     claudeJson: join(home, ".claude.json"),
+    firstWave: {
+      owner: "octo-volley",
+      origin: "https://github.com/octo-volley/existing.git",
+      nextIssue: 7,
+      states: [...MERGING],
+      repoRoot: join(home, ".volley", "repos"),
+      submitted: new Set(),
+    },
+    clock: NOW,
     loaded: new Set(),
     active: new Set(),
     settingsFile,
@@ -153,6 +196,7 @@ export function fakeMachine(
   } as unknown as FakeMachine;
 
   const volleydCli = join(repo, "packages", "volleyd", "src", "cli.ts");
+  const volleyCli = join(repo, "packages", "volley-cli", "src", "cli.ts");
   const volleydPlist = join(home, "Library", "LaunchAgents", "systems.volley.volleyd.plist");
   const hooksInstall = join(repo, "packages", "volley-hooks", "scripts", "install.sh");
 
@@ -162,6 +206,58 @@ export function fakeMachine(
     m.execInputs.push(o?.input);
     m.execEnvs.push(o?.env);
     const line = a.join(" ");
+    const fw = m.firstWave;
+    if (fw.fail !== undefined && line.startsWith(fw.fail.prefix)) {
+      return { code: fw.fail.code, stdout: "", stderr: fw.fail.stderr };
+    }
+    // The test wave: gh's repository and issue, git in the clone, volley repo, volleyd.
+    if (a[0] === "gh" && a[1] === "repo" && a[2] === "create" && o?.cwd !== undefined) {
+      mkdirSync(join(o.cwd, a[3] as string), { recursive: true });
+      return ok(`https://github.com/${fw.owner}/${a[3]}\n`);
+    }
+    if (a[0] === "gh" && a[1] === "repo" && a[2] === "view" && o?.cwd !== undefined) {
+      return ok(`${fw.owner}/${basename(o.cwd)}\n`);
+    }
+    if (a[0] === "gh" && a[1] === "issue" && a[2] === "create") {
+      return ok(`https://github.com/${a[4]}/issues/${fw.nextIssue++}\n`);
+    }
+    if (a[0] === "git" && a[1] === "-C") {
+      if (a[3] === "remote") {
+        return fw.origin === null
+          ? { code: 2, stdout: "", stderr: "error: No such remote 'origin'" }
+          : ok(`${fw.origin}\n`);
+      }
+      return ok();
+    }
+    if (a[0] === "bun" && a[1] === volleyCli && a[2] === "repo") {
+      const clone = join(fw.repoRoot, a[4] as string);
+      if (a[3] === "add") {
+        mkdirSync(join(clone, ".git"), { recursive: true });
+        return ok(`Added ${a[4]} (private) to studio.\n  studio: ready (${clone})\n`);
+      }
+      return ok(
+        JSON.stringify({
+          repos: [
+            { slug: a[4], machines: { studio: { state: "ready", path: clone, reasons: [] } } },
+          ],
+        }),
+      );
+    }
+    if (a[0] === "bun" && a[1] === volleydCli && a[2] === "validate") return ok();
+    if (a[0] === "bun" && a[1] === volleydCli && a[2] === "run") {
+      // The daemon takes a second submit of a wave id as a new version of that wave, which an
+      // ended wave refuses: the step must give every run its own id.
+      const id = /^wave: (\S+)$/m.exec(readText(a[3] as string) ?? "")?.[1] ?? "";
+      if (fw.submitted.has(id)) {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: `wave '${id}' is complete; a new version applies only to a live wave`,
+        };
+      }
+      fw.submitted.add(id);
+      return ok();
+    }
     if (line === layout.restart) {
       auth.adminUp = true;
       m.anonymous = { tcp: "refused", ws: "refused" };
@@ -321,7 +417,17 @@ export function fakeMachine(
       m.secretPrompts.push(prompt);
       return m.secrets.shift() ?? null;
     },
-    sleep: async () => {},
+    sleep: async (ms) => {
+      m.clock += ms;
+    },
+    now: () => m.clock,
+    random: () => 0,
+    // A wave volleyd was never given has no state.
+    waveState: async (wave: string) =>
+      !m.firstWave.submitted.has(wave)
+        ? null
+        : ((m.firstWave.states.length > 1 ? m.firstWave.states.shift() : m.firstWave.states[0]) ??
+          null),
     platform: opts.platform ?? "darwin",
     uid: 501,
     lanHost: () => "desk.example",
