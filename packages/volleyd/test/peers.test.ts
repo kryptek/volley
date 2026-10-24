@@ -1,5 +1,5 @@
 import { constants, generateKeyPairSync, privateDecrypt, randomUUID } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -1142,5 +1142,167 @@ describe("peer_remove { drain | now } (SPEC §4.6.14, §4.6.15)", () => {
     expect(r).toMatchObject({ ok: true, result: { revoked: true, host_removed: true } });
     expect(types()).toContain("peer_removed");
     expect(types()).not.toContain("peer_drain_started");
+  });
+});
+
+describe("every machine through its own tunnel (#460): peer_join from the roles record, peer_retarget", () => {
+  let fleet: Fleet;
+  beforeEach(async () => {
+    fleet = await makeFleet();
+  });
+  afterEach(async () => {
+    await fleet.close();
+  });
+
+  /** A roles record with the broker on `box` at MQTT port `port` (read at the next start). */
+  async function brokerOnBox(port: number) {
+    writeFileSync(
+      join(fleet.env.home, "roles.json"),
+      `${JSON.stringify({
+        broker: {
+          machine: "box",
+          address: { ssh: "dev@box", mqtt_port: port, ws_port: 9001 },
+          lan: false,
+        },
+        supervisor: { machine: "control" },
+        desk: { machine: "control", url: "http://localhost:5199" },
+        version: 2,
+        updated_at: "2026-10-24T09:00:00.000Z",
+        updated_by: "admin-1",
+      })}\n`,
+    );
+    await fleet.restart();
+  }
+
+  async function code(): Promise<string> {
+    const a = await fleet.adminOp({ op: "peer_invite", reply_key: REPLY_KEY });
+    expect(a?.ok).toBe(true);
+    return unseal(a?.sealed).code as string;
+  }
+
+  const join_ = async (extra: Record<string, unknown>) =>
+    fleet.client.request("peer_join", {
+      code: await code(),
+      name: "box-c",
+      target: "dev@box-c",
+      volley_dir: "/opt/volley",
+      reply_key: REPLY_KEY,
+      ...extra,
+    });
+
+  it("peer_join answers the broker's port from the roles record", async () => {
+    await brokerOnBox(1884);
+    const a = await join_({});
+    expect(a.error).toBeUndefined();
+    expect((a.result as { broker: unknown }).broker).toMatchObject({ port: 1884 });
+    expect((a.result as { remote_port: number }).remote_port).toBe(
+      REMOTE_HOST_DEFAULTS.remote_port,
+    );
+  });
+
+  it("tunnel: none answers remote_port = the broker's port and writes it to hosts.<name>.tunnel", async () => {
+    await brokerOnBox(1884);
+    const a = await join_({ tunnel: "none", port: 21999 });
+    expect(a.ok).toBe(true);
+    expect(a.result).toMatchObject({ remote_port: 1884, tunnel: "none" });
+    const hosts = (await fleet.client.request("config_get", { path: "hosts" })).result as Record<
+      string,
+      RemoteHostConfig
+    >;
+    expect(hosts["box-c"]?.tunnel).toEqual({ remote_port: 1884, supervise: false });
+    expect(fleet.system().find((e) => e.type === "peer_joined")?.data).toMatchObject({
+      name: "box-c",
+      tunnel: "none",
+    });
+    expect((await join_({ tunnel: "socks" })).error).toMatch(/tunnel must be "ssh" or "none"/);
+  });
+
+  const sshScripts = () =>
+    fleet.exec.calls
+      .filter((c) => c.argv[0] === "ssh" && c.opts.remote !== undefined)
+      .map((c) => c.opts.remote?.steps.map((s) => s.argv.join(" ")) ?? []);
+
+  it("peer_retarget refuses an unknown host and an option-looking address before running anything", async () => {
+    const before = sshScripts().length;
+    expect(
+      (await fleet.adminOp({ op: "peer_retarget", name: "nope", address: "dev@box-a" }))?.error,
+    ).toBe('no configured host named "nope"');
+    expect(
+      (await fleet.adminOp({ op: "peer_retarget", name: "box", address: "-oProxyCommand=sh" }))
+        ?.error,
+    ).toMatch(/address must be an ssh destination/);
+    expect(
+      (await fleet.adminOp({ op: "peer_retarget", name: "box", address: "dev@a", port: 80 }))
+        ?.error,
+    ).toMatch(/port must be/);
+    expect(sshScripts().length).toBe(before);
+  });
+
+  it("peer_retarget runs `volley peer retarget` on the box and answers once its record comes up", async () => {
+    const answer = fleet.adminOp({
+      op: "peer_retarget",
+      name: "box",
+      address: "owner@box-a.lan",
+      port: 21884,
+    });
+    await eventually(async () =>
+      sshScripts().some((s) =>
+        s.includes("volley peer retarget --to owner@box-a.lan --port 21884"),
+      ),
+    );
+    // The box's first heartbeat through its new tunnel.
+    const box = new VolleyBroker();
+    await box.connect({ url: fleet.env.broker.url, agentId: "box" });
+    const record: MachineRecord = {
+      name: "box",
+      os: "linux",
+      cores: 16,
+      tunnel: "up",
+      load: [0, 0, 0],
+      agents: 0,
+      last_seen: new Date(fleet.clock.now()).toISOString(),
+    };
+    await box.publish(
+      "volley/_system/machines/box",
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "box",
+          parentId: null,
+          channel: "_system/machines",
+          type: "machine",
+          payload: record,
+        }),
+      ),
+      { qos: 1, retain: true },
+    );
+    await box.disconnect();
+    const a = await answer;
+    expect(a?.ok).toBe(true);
+    expect(a?.result).toMatchObject({
+      name: "box",
+      address: "owner@box-a.lan",
+      port: 21884,
+      up: true,
+    });
+    const hosts = (await fleet.client.request("config_get", { path: "hosts" })).result as Record<
+      string,
+      RemoteHostConfig
+    >;
+    expect(hosts.box?.tunnel?.remote_port).toBe(21884);
+    expect(fleet.system().find((e) => e.type === "peer_retargeted")?.data).toMatchObject({
+      by: "admin-1",
+      name: "box",
+      address: "owner@box-a.lan",
+      port: 21884,
+    });
+  });
+
+  it("peer_retarget answers ok: false when the record never comes up within the grace", async () => {
+    const answer = fleet.adminOp({ op: "peer_retarget", name: "box", address: "owner@box-a.lan" });
+    await eventually(async () => sshScripts().some((s) => s.some((l) => l.includes("retarget"))));
+    await fleet.clock.advance(DAEMON_DEFAULTS.peer_retarget_grace_ms + 1000);
+    const a = await answer;
+    expect(a?.ok).toBe(false);
+    expect(a?.error).toMatch(/did not come up through it/);
   });
 });

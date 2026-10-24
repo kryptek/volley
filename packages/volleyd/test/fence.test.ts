@@ -1821,3 +1821,81 @@ describe("the issue lifecycle's gh writes (#416): exact forms only", () => {
     ).toThrow(FenceError);
   });
 });
+
+describe("machine roles (#466, #469): the LOCAL commands of a role move", () => {
+  const ok =
+    (...argv: string[]) =>
+    () =>
+      assertAllowed(argv);
+  const home = process.env.HOME ?? homedir();
+
+  it("unloads and reloads the Desk's own service only (launchd and systemd)", () => {
+    expect(ok("launchctl", "bootout", "gui/501/systems.volley.desk")).not.toThrow();
+    expect(
+      ok(
+        "launchctl",
+        "bootstrap",
+        "gui/501",
+        join(home, "Library", "LaunchAgents", "systems.volley.desk.plist"),
+      ),
+    ).not.toThrow();
+    for (const v of ["stop", "start"]) {
+      expect(ok("systemctl", "--user", v, "volley-desk.service")).not.toThrow();
+      expect(ok("systemctl", "--user", v, "volleyd.service")).not.toThrow();
+    }
+    for (const argv of [
+      ["launchctl", "bootout", "gui/501/systems.volley.peer"],
+      ["launchctl", "bootstrap", "gui/501", "/tmp/systems.volley.desk.plist"],
+      ["systemctl", "--user", "disable", "volley-desk.service"],
+      ["systemctl", "--user", "stop", "sshd.service"],
+      ["systemctl", "stop", "volleyd.service"],
+    ])
+      expect(ok(...argv), argv.join(" ")).toThrow(FenceError);
+  });
+
+  it("the bundle's tar: -czf <abs .tgz> -C <abs> --files-from <abs>, nothing else", () => {
+    expect(
+      ok(
+        "tar",
+        "-czf",
+        "/h/roles/m-1/bundle.tgz",
+        "-C",
+        "/h/roles/m-1/stage",
+        "--files-from",
+        "/h/roles/m-1/files.txt",
+      ),
+    ).not.toThrow();
+    for (const argv of [
+      ["tar", "-xzf", "/h/b.tgz", "-C", "/", "--files-from", "/h/l"],
+      ["tar", "-czf", "b.tgz", "-C", "/h", "--files-from", "/h/l"],
+      ["tar", "-czf", "/h/b.tgz", "-C", "/h/../etc", "--files-from", "/h/l"],
+      [
+        "tar",
+        "-czf",
+        "/h/b.tgz",
+        "-C",
+        "/h",
+        "--files-from",
+        "/h/l",
+        "--checkpoint-action=exec=sh",
+      ],
+    ])
+      expect(ok(...argv), argv.join(" ")).toThrow(FenceError);
+  });
+
+  it("a Desk move to the supervisor's own machine: volley desk install | uninstall | check", () => {
+    expect(
+      ok("volley", "desk", "install", "--port", "5199", "--broker-host", "studio.lan"),
+    ).not.toThrow();
+    expect(ok("volley", "desk", "uninstall")).not.toThrow();
+    expect(
+      ok("volley", "desk", "check", "--url", "http://127.0.0.1:5199", "--version", "0.11.0"),
+    ).not.toThrow();
+    expect(ok("volley", "desk", "serve", "--host", "0.0.0.0")).toThrow(FenceError);
+    // A role move's remote-only verbs never run here.
+    expect(ok("volley", "peer", "retarget", "--to", "box")).toThrow(FenceError);
+    expect(
+      ok("volley", "role", "receive", "supervisor", "/h/.volley/roles/m/bundle.tgz", "--from", "a"),
+    ).toThrow(FenceError);
+  });
+});

@@ -140,6 +140,22 @@ import { AGENT_BRANCH } from "./worktree";
  *   pressure samplers, exact argv only: sysctl -n kern.memorystatus_vm_pressure_level ·
  *     memory_pressure (no arguments: report only) · docker info --format {{json .}}
  *
+ * MACHINE ROLES (SPEC §4.6.24; roles/), each one exact shape, here:
+ *   launchctl bootout gui/<uid>/systems.volley.desk · launchctl bootstrap gui/<uid>
+ *     $HOME/Library/LaunchAgents/systems.volley.desk.plist · systemctl --user stop | start
+ *     volley-desk.service | volleyd.service (a Desk move unloads the old Desk; the old supervisor
+ *     unloads itself after a hand-over)
+ *   tar -czf <abs>.tgz -C <abs> --files-from <abs>   (a supervisor move's bundle; never -x)
+ *   volley desk install --port <n> --broker-host <host> · volley desk uninstall ·
+ *     volley desk check --url http://127.0.0.1:<n> --version <v>   (a Desk move to this machine)
+ *   and as REMOTE steps on a paired machine (below): the same three `volley desk` verbs;
+ *   volley peer retarget --to <dest> [--port <n>] [--tunnel ssh|none] (peer_retarget);
+ *   volley peer join <code> --to <dest> --name <name> --target <dest> --tunnel none (the old
+ *   supervisor re-paired); volley role receive supervisor <abs>/.volley/roles/<move_id>/bundle.tgz
+ *   --from <name> [--local-terminal cmux|tmux] [--local-agents never] [--broker-url
+ *   mqtt://127.0.0.1:<n>]; ssh -n -o BatchMode=yes -o ConnectTimeout=<s> <dest> true (the
+ *   ssh-back probe); base64 -d to that bundle path (the copy).
+ *
  * SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
  *   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
  *
@@ -937,6 +953,12 @@ export interface RemoteScript {
 export interface ProfileHost {
   name: string;
   worktree_root: string;
+  /**
+   * The port its agents reach the broker at on its loopback (`hosts.<name>.tunnel.remote_port`:
+   * its tunnel's end, or with `tunnel: none` the broker's own port, SPEC §4.6.14): the one
+   * `VOLLEY_BROKER_URL` its launch.sh may name. Absent: any loopback port.
+   */
+  broker_port?: number;
 }
 
 export interface FenceOptions {
@@ -1464,6 +1486,10 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
       return args.length === 1 && args[0] === "-h" ? ALLOW : deny("mosquitto (only -h)");
     case "launchctl":
       return launchctl(args);
+    case "systemctl":
+      return systemctl(args);
+    case "tar":
+      return tar(args);
     case "ps":
       return exactly(argv, [PS_ARGV]);
     case "sysctl":
@@ -1828,6 +1854,9 @@ function volley(args: string[]): Verdict {
   if (group === "auth" && verb !== undefined && ACCOUNT_SHAPES[verb] !== undefined) {
     return ACCOUNT_SHAPES[verb](args.slice(2)) ? ALLOW : deny(`${name} ${args.slice(2).join(" ")}`);
   }
+  // A Desk move to (or back to) the supervisor's own machine (SPEC §4.6.24).
+  if (group === "desk")
+    return isDeskVerb(args.slice(1)) ? ALLOW : deny(`${name} (not a Desk move's)`);
   return deny(name);
 }
 
@@ -1837,6 +1866,7 @@ export const plistPath = (home: string) =>
 const plistFile = () => plistPath(process.env.HOME ?? homedir());
 
 function launchctl(args: string[]): Verdict {
+  if (isDeskLaunchctl(args)) return ALLOW;
   const [sub, ...rest] = args;
   const opts = rest.filter((a) => a.startsWith("-"));
   const target = rest.filter((a) => !a.startsWith("-"));
@@ -1851,6 +1881,160 @@ function launchctl(args: string[]): Verdict {
       target.length === 1 &&
       new RegExp(`^gui/[0-9]+/${SERVICE_LABEL.replace(/\./g, "\\.")}$`).test(target[0] ?? ""));
   return ok ? ALLOW : deny(`launchctl ${sub ?? ""}`.trim());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Machine roles (SPEC §4.6.14 peer_retarget, §4.6.24): the commands a role move runs
+// ---------------------------------------------------------------------------------------------
+
+/** A port in 1..65535, as an argv element. */
+const isPortArg = (p: string | undefined) =>
+  p !== undefined && /^[1-9][0-9]{0,4}$/.test(p) && Number(p) <= 65535;
+/** A bare host `volley desk install --broker-host` takes: a name or an IPv4 address. */
+const BARE_HOST = /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/;
+/** A version `volley desk check --version` compares with (the supervisor's own). */
+const VERSION_ARG = /^[0-9][0-9A-Za-z.+-]{0,63}$/;
+/** A pairing code as `peer_invite` makes one (peers.ts ALPHABET). */
+const PAIRING_CODE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}$/;
+/** A move's id (role-move.schema.json `$defs/move_id`). */
+const MOVE_ID = "[A-Za-z0-9][A-Za-z0-9_-]{0,63}";
+/** Where a supervisor move copies its bundle on the target: `<abs>/.volley/roles/<move_id>/bundle.tgz`. */
+const BUNDLE_PATH = new RegExp(`^/[^\\n\\r\\0]*/\\.volley/roles/${MOVE_ID}/bundle\\.tgz$`);
+export const isBundlePath = (p: string): boolean => BUNDLE_PATH.test(p) && absPath(p);
+
+/**
+ * `volley desk install --port <n> --broker-host <host>` · `volley desk uninstall` ·
+ * `volley desk check --url http://127.0.0.1:<n> --version <v>` (args after `desk`): a Desk
+ * move's steps, here or on its target.
+ */
+function isDeskVerb(a: readonly string[]): boolean {
+  const [verb, ...rest] = a;
+  if (verb === "uninstall") return rest.length === 0;
+  if (verb === "install")
+    return (
+      rest.length === 4 &&
+      rest[0] === "--port" &&
+      isPortArg(rest[1]) &&
+      rest[2] === "--broker-host" &&
+      BARE_HOST.test(rest[3] ?? "")
+    );
+  if (verb === "check") {
+    const m = /^http:\/\/127\.0\.0\.1:([0-9]{1,5})$/.exec(rest[1] ?? "");
+    return (
+      rest.length === 4 &&
+      rest[0] === "--url" &&
+      m !== null &&
+      isPortArg(m[1]) &&
+      rest[2] === "--version" &&
+      VERSION_ARG.test(rest[3] ?? "")
+    );
+  }
+  return false;
+}
+
+/**
+ * The volley steps a role move runs on a paired machine (args after `volley`), each one exact
+ * shape: `peer retarget --to <dest> [--port <n>] [--tunnel ssh|none]` (`peer_retarget`), `peer join
+ * <code> --to <dest> --name <name> --target <dest> --tunnel none` (a supervisor move re-pairing the
+ * old machine), the Desk's verbs (`isDeskVerb`), and `role receive supervisor <bundle> --from
+ * <name> [--local-terminal cmux|tmux] [--local-agents never] [--broker-url mqtt://127.0.0.1:<n>]`.
+ */
+export function isRoleRemoteVolley(a: readonly string[]): boolean {
+  const [group, verb, ...rest] = a;
+  if (group === "desk") return isDeskVerb(a.slice(1));
+  if (group === "peer" && verb === "retarget") {
+    if (rest[0] !== "--to" || !SSH_TARGET.test(rest[1] ?? "")) return false;
+    let i = 2;
+    if (rest[i] === "--port" && isPortArg(rest[i + 1]) && Number(rest[i + 1]) >= 1024) i += 2;
+    if (rest[i] === "--tunnel" && (rest[i + 1] === "ssh" || rest[i + 1] === "none")) i += 2;
+    return i === rest.length;
+  }
+  if (group === "peer" && verb === "join")
+    return (
+      rest.length === 9 &&
+      PAIRING_CODE.test(rest[0] ?? "") &&
+      rest[1] === "--to" &&
+      SSH_TARGET.test(rest[2] ?? "") &&
+      rest[3] === "--name" &&
+      AGENT_ID.test(rest[4] ?? "") &&
+      rest[5] === "--target" &&
+      SSH_TARGET.test(rest[6] ?? "") &&
+      rest[7] === "--tunnel" &&
+      rest[8] === "none"
+    );
+  if (group === "role" && verb === "receive") {
+    if (rest[0] !== "supervisor" || !isBundlePath(rest[1] ?? "")) return false;
+    if (rest[2] !== "--from" || !AGENT_ID.test(rest[3] ?? "")) return false;
+    let i = 4;
+    if (rest[i] === "--local-terminal" && (rest[i + 1] === "cmux" || rest[i + 1] === "tmux"))
+      i += 2;
+    if (rest[i] === "--local-agents" && rest[i + 1] === "never") i += 2;
+    if (rest[i] === "--broker-url" && TUNNEL_BROKER_URL.test(rest[i + 1] ?? "")) i += 2;
+    return i === rest.length;
+  }
+  return false;
+}
+
+/**
+ * The ssh-back probe a supervisor move's plan runs on its target, once per other paired machine:
+ * `ssh -n -o BatchMode=yes -o ConnectTimeout=<s> <dest> true` (args after `ssh`).
+ */
+function isSshBackProbe(a: readonly string[]): boolean {
+  return (
+    a.length === 7 &&
+    a[0] === "-n" &&
+    a[1] === "-o" &&
+    a[2] === "BatchMode=yes" &&
+    a[3] === "-o" &&
+    /^ConnectTimeout=[1-9][0-9]?$/.test(a[4] ?? "") &&
+    SSH_TARGET.test(a[5] ?? "") &&
+    a[6] === "true"
+  );
+}
+
+/** The Desk's launchd service, unloaded and reloaded by a Desk move here (args after launchctl). */
+function isDeskLaunchctl(a: readonly string[]): boolean {
+  const home = process.env.HOME ?? homedir();
+  return (
+    (a.length === 2 &&
+      a[0] === "bootout" &&
+      /^gui\/[0-9]+\/systems\.volley\.desk$/.test(a[1] ?? "")) ||
+    (a.length === 3 &&
+      a[0] === "bootstrap" &&
+      /^gui\/[0-9]+$/.test(a[1] ?? "") &&
+      a[2] === join(home, "Library", "LaunchAgents", `${DESK_SERVICE}.plist`))
+  );
+}
+
+/**
+ * systemd user units a role move stops and starts here: the Desk's (`stop` | `start`
+ * volley-desk.service, a Desk move) and volleyd's own (`stop` | `start` volleyd.service, the
+ * old supervisor unloading itself, or put back after a failed hand-over).
+ */
+function systemctl(args: string[]): Verdict {
+  const ok =
+    args.length === 3 &&
+    args[0] === "--user" &&
+    (args[1] === "stop" || args[1] === "start") &&
+    (args[2] === DESK_UNIT || args[2] === VOLLEYD_UNIT);
+  return ok ? ALLOW : deny(`systemctl ${args.slice(0, 2).join(" ")}`.trim());
+}
+
+/**
+ * `tar -czf <out>.tgz -C <dir> --files-from <list>`: a supervisor move's bundle (roles/bundle.ts),
+ * every path absolute and clean. Never extracts (`-x`): the target's `volley role receive` does.
+ */
+function tar(args: string[]): Verdict {
+  const ok =
+    args.length === 6 &&
+    args[0] === "-czf" &&
+    absPath(args[1] ?? "") &&
+    (args[1] ?? "").endsWith(".tgz") &&
+    args[2] === "-C" &&
+    absPath(args[3] ?? "") &&
+    args[4] === "--files-from" &&
+    absPath(args[5] ?? "");
+  return ok ? ALLOW : deny(`tar ${args[0] ?? ""}`.trim());
 }
 
 function isRecursiveForce(args: string[]): boolean {
@@ -2119,6 +2303,7 @@ function volleyPath(path: string, names: ReadonlySet<string>, endings: readonly 
 function writablePath(path: string): boolean {
   return (
     path === REMOTE_CLAUDE_JSON_TMP ||
+    isBundlePath(path) ||
     profileSwapTmp(path) ||
     volleyPath(path, VOLLEY_WRITES, ["/ISSUE.md", "/info/exclude"])
   );
@@ -2157,14 +2342,23 @@ const LAUNCH_ENV_KEYS = ["VOLLEY_BROKER_URL", "VOLLEY_NAMESPACE", "VOLLEY_AGENT_
 /** The broker as a remote agent sees it: the reverse tunnel's end on the box's loopback. */
 const TUNNEL_BROKER_URL = /^mqtt:\/\/127\.0\.0\.1:[0-9]{1,5}$/;
 
-/** The env block: none (local), or exactly the three keys for this agent through the tunnel. */
-function launchEnvAllowed(env: Record<string, string>, agentId: string): boolean {
+/**
+ * The env block: none (local), or exactly the three keys for this agent through the tunnel; on a
+ * host whose broker port is known, `VOLLEY_BROKER_URL` names exactly that port.
+ */
+function launchEnvAllowed(
+  env: Record<string, string>,
+  agentId: string,
+  host?: ProfileHost,
+): boolean {
   const keys = Object.keys(env);
   if (keys.length === 0) return true;
+  const url = env.VOLLEY_BROKER_URL ?? "";
   return (
     keys.length === LAUNCH_ENV_KEYS.length &&
     keys.every((k, i) => k === LAUNCH_ENV_KEYS[i]) &&
-    TUNNEL_BROKER_URL.test(env.VOLLEY_BROKER_URL ?? "") &&
+    TUNNEL_BROKER_URL.test(url) &&
+    (host?.broker_port === undefined || url === `mqtt://127.0.0.1:${host.broker_port}`) &&
     AGENT_ID.test(env.VOLLEY_NAMESPACE ?? "") &&
     env.VOLLEY_AGENT_ID === agentId
   );
@@ -2289,7 +2483,7 @@ function isLaunchScript(content: string, worktree: string, host?: ProfileHost): 
     outsideVolley(vars.hooksDir) &&
     MODEL_ID.test(vars.model) &&
     AGENT_ID.test(vars.agentId) &&
-    launchEnvAllowed(env, vars.agentId) &&
+    launchEnvAllowed(env, vars.agentId, host) &&
     renderLaunchScript(vars) === content
   );
 }
@@ -2466,8 +2660,14 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
         args.slice(1).every((n) => (PATH_PROBE_TOOLS as readonly string[]).includes(n))
         ? ALLOW
         : deny(`command (only -v ${PATH_PROBE_TOOLS.join(" ")})`);
+    case "ssh":
+      return isSshBackProbe(args)
+        ? ALLOW
+        : deny("ssh (only -n -o BatchMode=yes -o ConnectTimeout=<s> <dest> true)");
     case "volley": {
-      // The one remote volley step: elsewhere volley is a local program (`volley auth`).
+      // A role move's steps (SPEC §4.6.24) and peer_retarget's (§4.6.14).
+      if (isRoleRemoteVolley(args)) return ALLOW;
+      // The doctor: elsewhere volley is a local program (`volley auth`).
       const dir = args[3] === SUPERVISOR_VOLLEY_DIR ? (args[4] ?? "") : null;
       const rest = dir !== null ? [...args.slice(0, 3), ...args.slice(5)] : args;
       return (dir === null || isVolleyDir(dir)) && isRemoteDoctor(rest)

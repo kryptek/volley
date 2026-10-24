@@ -17,6 +17,10 @@ const NO_RECORD = "no roles record: is volleyd running?";
 
 const HELP = `Usage:
   volley role status [--json]        Which machine runs the broker, the supervisor and the Desk
+  volley role receive supervisor <bundle> --from <old machine> [--local-terminal cmux|tmux]
+                      [--local-agents never] [--broker-url <url>]
+                                     The new machine's half of a supervisor move (volleyd runs it
+                                     over ssh; \`volley role receive --help\` for more)
 
 Options:
   --json               The record as JSON
@@ -40,6 +44,10 @@ interface RolesPayload {
 }
 
 export async function role({ argv, env, io }: RoleArgs): Promise<ExitCode> {
+  // Its own options and help (role-receive.ts).
+  if (argv[0] === "receive") {
+    return (await import("./role-receive")).receive({ argv: argv.slice(1), env, io });
+  }
   let parsed: ReturnType<typeof parseArgs>;
   try {
     parsed = parseArgs({
