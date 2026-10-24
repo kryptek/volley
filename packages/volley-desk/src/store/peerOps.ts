@@ -100,6 +100,16 @@ export type RepoStatusResult =
     }
   | { ok: false; error: string };
 
+/** What is at an adopted clone's path on a machine (`repo_probe`): a reading, nothing changes. */
+export type RepoProbeState = "found" | "missing" | "not_git" | "no_origin";
+
+/** `repo_probe`'s answer: the path's state, its clone's root and origin, and the slug that names. */
+export type RepoProbeResult =
+  | { ok: true; state: RepoProbeState; root?: string; origin?: string; slug?: string }
+  | { ok: false; error: string };
+
+const PROBE_STATES: ReadonlySet<string> = new Set(["found", "missing", "not_git", "no_origin"]);
+
 /** What Add a bare machine sends (`machine_add`): the box, a password or a key file, sudo, a name. */
 export type MachineAddRequest = {
   address: string;
@@ -155,6 +165,8 @@ export interface PeerOps {
   repoRemove(slug: string, machines?: string[]): Promise<RepoRemoveResult>;
   repoList(): Promise<RepoListResult>;
   repoStatus(slug?: string): Promise<RepoStatusResult>;
+  /** What is at `path` on paired machine `machine`: a clone, and of which repository. */
+  repoProbe(machine: string, path: string): Promise<RepoProbeResult>;
   /**
    * Make a bare box a paired machine (`machine_add`): volleyd runs `volley machine add`'s steps
    * over ssh, each row handed to `onRow` as it happens. The passwords go to volleyd only.
@@ -379,6 +391,21 @@ export function createPeerOps(
       if (!a.ok) return { ok: false, error: refusal(a, "the repository status") };
       const r = (a.result ?? {}) as { repos?: unknown };
       return { ok: true, repos: Array.isArray(r.repos) ? r.repos : [] };
+    },
+    async repoProbe(machine, path) {
+      const a = await ask("repo_probe", { machine, path }, timeoutMs);
+      if (!a.ok) return { ok: false, error: refusal(a, `checking ${path} on ${machine}`) };
+      const r = (a.result ?? {}) as Record<string, unknown>;
+      if (typeof r.state !== "string" || !PROBE_STATES.has(r.state))
+        return { ok: false, error: `volleyd answered no state for ${path} on ${machine}` };
+      const str = (k: string) => (typeof r[k] === "string" ? { [k]: r[k] as string } : {});
+      return {
+        ok: true,
+        state: r.state as RepoProbeState,
+        ...str("root"),
+        ...str("origin"),
+        ...str("slug"),
+      };
     },
   };
 }

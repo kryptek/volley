@@ -133,6 +133,13 @@ const DENIED: string[][] = [
   // git: subcommand aliases resolve through config, so only exact allowed names pass
   ["git", "st"],
   ["git", "fetchx", "origin"],
+  // git remote: only `get-url origin` (repo_probe), never a write or another remote
+  ["git", "remote", "add", "x", "https://github.com/example-org/example-repo"],
+  ["git", "-C", "/srv/example-repo", "remote", "set-url", "origin", "https://evil.example/x"],
+  ["git", "remote", "get-url", "upstream"],
+  ["git", "remote", "get-url", "--push", "origin"],
+  ["git", "remote", "-v"],
+  ["git", "remote"],
   // gh: merging, workflow dispatch, writes through the API
   ["gh", "pr", "merge", "12"],
   ["gh", "pr", "create"],
@@ -398,6 +405,8 @@ const ALLOWED: string[][] = [
   ["git", "ls-tree", "-r", "-l", "--full-tree", "origin/release/w1"],
   ["git", "-C", "/tmp/repo", "ls-tree", "-r", "--long", "-z", "HEAD", "--", "packages/"],
   ["git", "show", "HEAD:README.md"],
+  // repo_probe's origin reading
+  ["git", "-C", "/srv/example-repo", "remote", "get-url", "origin"],
   ["git", "-C", "/tmp/repo", "status"],
   ["git", "--no-pager", "log"],
   ["git", "-C", "/tmp/repo", "--no-pager", "log", "-n", "5", "--format=%H %s"],

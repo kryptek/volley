@@ -6,15 +6,21 @@
  * clone is always the managed one). **Add** sends one `repo_add`; volleyd checks the slug with
  * GitHub (its refusal is shown as it said it) and answers with the canonical name, then each
  * machine's progress follows its readiness verdict (`cloning…`, `ready`, `blocked: <why>`) until
- * every one is ready or blocked, when **Done** closes. The form's terminal twin (`volley repo add
- * …`) is shown under it.
+ * every one is ready or blocked, when **Done** closes; a blocked chip's **Why** opens its whole
+ * reason. The form's terminal twin (`volley repo add …`) is shown under it.
+ *
+ * While **Add** is off the sheet says why, next to it (`addBlocker`). An existing clone's path is
+ * checked on its machine as it is typed (`repo_probe`, `useCloneProbes`): no folder there, not a
+ * git clone, or a clone of another repository keeps Add off; a clone of a GitHub repository fills
+ * an empty owner/name the person has not typed in.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { isRepoSlug } from "../lib/github";
-import type { PeerOps } from "../store/peerOps";
+import type { PeerOps, RepoProbeResult } from "../store/peerOps";
 import type { ReadinessPayload } from "../store/types";
 import { MachineSheet } from "./MachineSheet";
-import { addCommand, bySlug, stateText } from "./repos";
+import { RepoChipReason } from "./RepoChipReason";
+import { addCommand, bySlug, sameSlug, stateText } from "./repos";
 
 export interface AddRepoSheetProps {
   ops: PeerOps;
@@ -47,6 +53,126 @@ export function slugProblem(value: string): string | null {
 const pathProblem = (v: string): string | null =>
   v.trim() === "" || v.trim().startsWith("/") ? null : "an absolute path, starting with /";
 
+/** A path's check on one machine: the path it was asked about, and the answer (null: in flight). */
+export interface CloneCheck {
+  path: string;
+  result: RepoProbeResult | null;
+}
+
+/** What `addBlocker` reads: the form as it stands. */
+export interface AddForm {
+  slug: string;
+  /** The machines picked. */
+  machines: readonly string[];
+  localName: string | null | undefined;
+  adopt: Readonly<Record<string, { on: boolean; path: string }>>;
+  checks: Readonly<Record<string, CloneCheck>>;
+}
+
+/** How long after a path last changed it is checked on its machine. */
+export const PROBE_DEBOUNCE_MS = 500;
+
+/** `path` is the clone's own root (`rev-parse --show-toplevel`), not a folder inside one. */
+const isRoot = (path: string, root: string | undefined) =>
+  root === undefined || path.replace(/\/+$/, "") === root.replace(/\/+$/, "");
+
+/** A check's finding that keeps Add off; null when it lets the add go ahead. */
+function probeProblem(m: string, path: string, slug: string, r: RepoProbeResult): string | null {
+  if (!r.ok) return null; // The box may be down: volleyd's run will say.
+  if (r.state === "missing") return `No folder at ${path} on ${m}`;
+  if (r.state === "not_git") return `${path} on ${m} is not a git clone`;
+  if (r.state === "found" && !isRoot(path, r.root))
+    return `${path} on ${m} is inside the clone at ${r.root}`;
+  if (r.state === "found" && r.slug !== undefined && !sameSlug(r.slug, slug))
+    return `This clone is ${r.slug}, not ${slug}`;
+  return null;
+}
+
+/** Why Add is off, the first reason only; null when the form can be sent. */
+export function addBlocker(form: AddForm): string | null {
+  const slug = form.slug.trim();
+  if (slug === "") return "Enter owner/name";
+  const bad = slugProblem(slug);
+  if (bad !== null) return bad;
+  if (form.machines.length === 0) return "Pick at least one machine";
+  for (const m of form.machines) {
+    const a = form.adopt[m];
+    if (m === form.localName || !a?.on) continue;
+    const path = a.path.trim();
+    if (path === "") return `Enter the clone's path on ${m}`;
+    const wrong = pathProblem(path);
+    if (wrong !== null) return wrong;
+    const check = form.checks[m];
+    if (check?.path !== path || check.result === null) return `Checking ${path} on ${m}…`;
+    const found = probeProblem(m, path, slug, check.result);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+/**
+ * Each wanted `machine → path` checked on its machine (`repo_probe`), `PROBE_DEBOUNCE_MS` after
+ * it last changed. An answer for a path since changed (or unticked) is dropped.
+ */
+function useCloneProbes(
+  ops: PeerOps,
+  wanted: Readonly<Record<string, string>>,
+): Record<string, CloneCheck> {
+  const [checks, setChecks] = useState<Record<string, CloneCheck>>({});
+  const latest = useRef(wanted);
+  latest.current = wanted;
+  const held = useRef(checks);
+  held.current = checks;
+  const key = Object.entries(wanted)
+    .map(([m, p]) => `${m}\u0000${p}`)
+    .sort()
+    .join("\n");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `key` is `wanted`, by value
+  useEffect(() => {
+    const now = latest.current;
+    setChecks((c) => {
+      const kept = Object.fromEntries(Object.entries(c).filter(([m, ch]) => now[m] === ch.path));
+      return Object.keys(kept).length === Object.keys(c).length ? c : kept;
+    });
+    const timers = Object.entries(now)
+      .filter(([m, path]) => held.current[m]?.path !== path)
+      .map(([m, path]) =>
+        setTimeout(() => {
+          setChecks((c) => ({ ...c, [m]: { path, result: null } }));
+          void ops.repoProbe(m, path).then((result) => {
+            if (latest.current[m] !== path) return;
+            setChecks((c) => (c[m]?.path === path ? { ...c, [m]: { path, result } } : c));
+          });
+        }, PROBE_DEBOUNCE_MS),
+      );
+    return () => {
+      for (const t of timers) clearTimeout(t);
+    };
+  }, [key, ops]);
+  return checks;
+}
+
+const UNTICK = 'Untick "use an existing clone" to clone it there instead';
+
+/** What a check found, under the path it checked. */
+function CloneFinding({ m, check, slug }: { m: string; check: CloneCheck; slug: string }) {
+  const r = check.result;
+  if (r === null) return null;
+  if (!r.ok) return <span className="s-hint">{`Could not check ${m}: ${r.error}`}</span>;
+  if (r.state === "no_origin")
+    return <span className="s-hint">{`${check.path} on ${m} has no origin remote`}</span>;
+  const problem = probeProblem(m, check.path, slug.trim() || (r.slug ?? ""), r);
+  if (problem !== null) {
+    return (
+      <>
+        <span className="s-error">{problem}</span>
+        {r.state !== "found" && <span className="s-hint">{UNTICK}</span>}
+      </>
+    );
+  }
+  return r.slug ? <span className="s-hint">{`Clone of ${r.slug}`}</span> : null;
+}
+
 type Phase =
   | { k: "form"; error?: string }
   | { k: "sending" }
@@ -61,6 +187,8 @@ export function AddRepoSheet({ ops, machines, localName, readiness, onClose }: A
   /** Per paired machine: adopt an existing clone, and its path. */
   const [adopt, setAdopt] = useState<Record<string, { on: boolean; path: string }>>({});
   const [phase, setPhase] = useState<Phase>({ k: "form" });
+  /** The person typed in owner/name: a clone's slug never fills it after that. */
+  const touched = useRef(false);
 
   const chosen = machines.filter((m) => picked.has(m));
   const all = chosen.length === machines.length;
@@ -71,12 +199,25 @@ export function AddRepoSheet({ ops, machines, localName, readiness, onClose }: A
     }),
   );
   const problem = slugProblem(slug);
+  // Every ticked clone's path that could be one, checked on its machine.
+  const wanted = Object.fromEntries(
+    chosen.flatMap((m) => {
+      const p = adopt[m]?.on && m !== localName ? adopt[m]?.path.trim() : undefined;
+      return p && pathProblem(p) === null ? [[m, p]] : [];
+    }),
+  );
+  const checks = useCloneProbes(ops, wanted);
   // A ticked existing clone needs its path: left empty, the machine would quietly clone instead.
-  const pathBad = chosen.some((m) => {
-    const p = adopt[m]?.on ? adopt[m]?.path.trim() : undefined;
-    return p !== undefined && (p === "" || pathProblem(p) !== null);
-  });
-  const valid = slug.trim() !== "" && problem === null && chosen.length > 0 && !pathBad;
+  const blocker = addBlocker({ slug, machines: chosen, localName, adopt, checks });
+
+  // A clone of a GitHub repository names it: fill an owner/name nobody has typed in.
+  useEffect(() => {
+    if (touched.current || slug !== "") return;
+    const found = Object.values(checks).find(
+      (c) => c.result?.ok && c.result.slug !== undefined && isRoot(c.path, c.result.root),
+    );
+    if (found?.result?.ok && found.result.slug) setSlug(found.result.slug);
+  }, [checks, slug]);
 
   const toggle = (m: string) =>
     setPicked((s) => {
@@ -104,7 +245,12 @@ export function AddRepoSheet({ ops, machines, localName, readiness, onClose }: A
   if (phase.k === "added") {
     const states = phase.machines.map((m) => {
       const v = bySlug(readiness[m]?.repos, phase.slug);
-      return { m, state: v?.state, text: stateText(v ?? { reasons: [] }, "starting…") };
+      return {
+        m,
+        state: v?.state,
+        reasons: v?.reasons ?? [],
+        text: stateText(v ?? { reasons: [] }, "starting…"),
+      };
     });
     const settled = states.every((x) => x.state !== undefined && SETTLED.has(x.state));
     return (
@@ -114,17 +260,19 @@ export function AddRepoSheet({ ops, machines, localName, readiness, onClose }: A
           Claude Code:
         </p>
         <ul className="repo-chips" aria-label={`Progress for ${phase.slug}`}>
-          {states.map(({ m, state, text }) => (
+          {states.map(({ m, state, reasons, text }) => (
             <li
               key={m}
               className={`repo-chip repo-chip--${state ?? "none"}`}
               aria-label={`${m}: ${text}`}
+              title={reasons.join("\n") || undefined}
             >
               <b>{m}</b>
               <span className="ell">{text}</span>
               {(state === undefined || state === "cloning") && (
                 <span className="spinner" aria-hidden="true" />
               )}
+              {state === "blocked" && <RepoChipReason reasons={reasons} />}
             </li>
           ))}
         </ul>
@@ -155,6 +303,7 @@ export function AddRepoSheet({ ops, machines, localName, readiness, onClose }: A
           value={slug}
           aria-invalid={problem !== null}
           onChange={(e) => {
+            touched.current = true;
             setSlug(e.target.value);
             if (phase.k === "form" && phase.error) setPhase({ k: "form" });
           }}
@@ -167,6 +316,8 @@ export function AddRepoSheet({ ops, machines, localName, readiness, onClose }: A
           const a = adopt[m] ?? { on: false, path: "" };
           const paired = m !== localName;
           const bad = a.on ? pathProblem(a.path) : null;
+          const check = checks[m];
+          const checked = check !== undefined && check.path === a.path.trim() ? check : undefined;
           return (
             <div key={m} className="repo-machine">
               <label>
@@ -197,6 +348,7 @@ export function AddRepoSheet({ ops, machines, localName, readiness, onClose }: A
                     }
                   />
                   {bad && <span className="s-error">{bad}</span>}
+                  {checked && <CloneFinding m={m} check={checked} slug={slug} />}
                 </>
               )}
             </div>
@@ -219,12 +371,13 @@ export function AddRepoSheet({ ops, machines, localName, readiness, onClose }: A
         <button
           type="button"
           className="btn btn--hot"
-          disabled={!valid || phase.k === "sending"}
+          disabled={blocker !== null || phase.k === "sending"}
           onClick={() => void add()}
         >
           {phase.k === "sending" ? "Adding…" : "Add"}
         </button>
       </div>
+      {blocker !== null && <output className="s-hint repo-blocker">{blocker}</output>}
     </MachineSheet>
   );
 }

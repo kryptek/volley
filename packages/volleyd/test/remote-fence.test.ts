@@ -49,6 +49,11 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ["git", "reset", "--hard"],
     ["git", "worktree", "remove", "/wt/x"],
     ["git", "-c", "core.sshCommand=sh", "fetch"],
+    ["git", "-C", "/srv/example-repo", "remote", "add", "x", "https://github.com/o/r"],
+    ["git", "-C", "/srv/example-repo", "remote", "set-url", "origin", "https://github.com/o/r"],
+    ["git", "-C", "/srv/example-repo", "remote", "get-url", "upstream"],
+    ["git", "-C", "/srv/example-repo", "remote", "-v"],
+    ["git", "-C", "/srv/example-repo", "remote"],
     ["rm", "-rf", "/path/to/home/src"],
     ["rm", "-fr", "/"],
     ["rm", "/tmp/x"],
@@ -144,6 +149,9 @@ describe("remote allow-list (ssh … bash -s)", () => {
       "origin/release/w1",
     ],
     ["git", "-C", "/wt/x", "rev-parse", "--is-inside-work-tree"],
+    // repo_probe (SPEC §4.6.21): an adopted clone's root and its origin
+    ["git", "-C", "/srv/example-repo", "rev-parse", "--show-toplevel"],
+    ["git", "-C", "/srv/example-repo", "remote", "get-url", "origin"],
     ["gh", "issue", "view", "42", "--json", "number,title,body,url"],
     // Verifying a PR on a paired machine: the same read-only gh policy as locally.
     [

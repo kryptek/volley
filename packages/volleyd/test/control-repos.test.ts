@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { addAccount, markSignedIn } from "../src/claude/profiles";
 import { ControlClient } from "../src/control";
 import { preconditionKey } from "../src/decisions";
+import type { CloneProbe } from "../src/hosts/ssh-tmux";
 import { readJournalFile } from "../src/journal";
 import type { DoctorReport, MachineRepo } from "../src/machines";
 import { eventually } from "./helpers/broker-wait";
@@ -502,6 +503,81 @@ describe("repo_remove (admin)", () => {
       ok: false,
       error: expect.stringContaining("answered only on volley/_system/auth/ops/"),
     });
+  });
+});
+
+describe("repo_probe (admin)", () => {
+  it("answers each state the box's clone is in, journaling nothing and patching no config", async () => {
+    await setup();
+    const box = theBox();
+    const answers: Record<string, CloneProbe> = {
+      "/srv/found": {
+        state: "found",
+        root: "/srv/found",
+        origin: "https://github.com/Example-Org/Example-Repo.git",
+        slug: "example-org/example-repo",
+      },
+      "/srv/missing": { state: "missing" },
+      "/srv/plain": { state: "not_git" },
+      "/srv/bare": { state: "no_origin", root: "/srv/bare" },
+    };
+    box.answers.clone = (path) => answers[path] ?? new Error(`unexpected ${path}`);
+    const before = f.system().length;
+    const changes = systemTypes("config_changed").length;
+    for (const [path, probe] of Object.entries(answers)) {
+      const r = await f.adminOp({ op: "repo_probe", machine: PEER, path });
+      expect(r).toMatchObject({
+        ok: true,
+        op: "repo_probe",
+        result: { machine: PEER, path, ...probe },
+      });
+      expect(r?.result).toEqual({ machine: PEER, path, ...probe });
+    }
+    expect(box.cloneProbes).toEqual(Object.keys(answers));
+    expect(f.system()).toHaveLength(before);
+    expect(systemTypes("config_changed")).toHaveLength(changes);
+    expect((await f.client.request("config_get", { path: "repos" })).result).toEqual({});
+  });
+
+  it("refuses the supervisor's own machine, an unknown host and a path that is not absolute", async () => {
+    await setup();
+    const probe = (machine: string, path: unknown) =>
+      f.adminOp({ op: "repo_probe", machine, path });
+    expect(await probe(LOCAL, "/srv/a")).toMatchObject({
+      ok: false,
+      error: `${LOCAL} is the supervisor's own machine: its clone is the managed one`,
+    });
+    expect(await probe("nope", "/srv/a")).toMatchObject({
+      ok: false,
+      error: 'no configured host named "nope"',
+    });
+    for (const path of ["srv/a", "/srv/../etc", "/srv/a\nb", 7]) {
+      expect(await probe(PEER, path)).toMatchObject({
+        ok: false,
+        error: "path must be an absolute path",
+      });
+    }
+    expect(theBox().cloneProbes).toEqual([]);
+  });
+
+  it("answers ok: false with ssh's reason when the box cannot be reached", async () => {
+    await setup();
+    theBox().answers.clone = () =>
+      new Error("ssh to dev@peer-a failed (clone probe): Connection refused");
+    expect(await f.adminOp({ op: "repo_probe", machine: PEER, path: "/srv/a" })).toMatchObject({
+      ok: false,
+      op: "repo_probe",
+      error: "ssh to dev@peer-a failed (clone probe): Connection refused",
+    });
+  });
+
+  it("is refused on the mailbox (an admin op)", async () => {
+    await setup();
+    expect(await f.client.request("repo_probe", { machine: PEER, path: "/srv/a" })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("answered only on volley/_system/auth/ops/"),
+    });
+    expect(theBox().cloneProbes).toEqual([]);
   });
 });
 

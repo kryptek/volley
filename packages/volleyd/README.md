@@ -3349,7 +3349,7 @@ a Repair the box's PATH is probed again on the next re-compute. Repair runs the 
 the box's non-interactive ssh PATH: on a box whose PATH probe finds no `bun` (and so no
 `volley`), fix the PATH first, or Repair answers only `volley: command not found`.
 
-**Repositories (`repo_add`, `repo_remove`, `repo_list`, `repo_status`, SPEC §4.6.21).** Admin ops
+**Repositories (`repo_add`, `repo_remove`, `repo_list`, `repo_status`, `repo_probe`, SPEC §4.6.21).** Admin ops
 on the account-op topic beside `peer_doctor` (`repo_list` and `repo_status` are also answered on
 the mailbox); `volley repo` sends them.
 
@@ -3384,6 +3384,11 @@ the mailbox); `volley repo` sends them.
 - `repo_list` answers `{ repos: [{ slug, machines, paths? }] }`; `repo_status { slug? }` answers
   `{ repos: [{ slug, machines: { <m>: { state, path?, reasons } }, lines }] }`, the verdict entries
   as readiness judges them now and one `repoStateLine` per machine.
+- `repo_probe { machine, path }` reads what is at an adopted clone's path on a paired machine
+  before an add (`RemoteHost.probeClone`: `git -C <path> rev-parse --show-toplevel`, then `git -C
+  <root> remote get-url origin`, as two scripts) and answers `{ machine, path, state: found |
+  missing | not_git | no_origin, root?, origin?, slug? }`, or `ok: false` with ssh's reason;
+  nothing is journaled and no config changes (the Desk's Add repository sheet checks a path with it).
 - Readiness judges every repository assigned to a machine (not only the running waves'), and a
   `repo_add` run's `cloning` / `blocked` stands in its verdict until the run that settles it.
 
@@ -4458,7 +4463,8 @@ retire for the retired agent's own workspace only):
 
 ALLOW (program by bare name only — never a path):
   git [-C <dir>] [--no-pager] worktree add | fetch | rev-parse | log | diff | status |
-    branch --list | branch --track <b> <remote>/<b> | merge-base | show | ls-tree
+    branch --list | branch --track <b> <remote>/<b> | merge-base | show | ls-tree |
+    remote get-url origin (exactly: repo_probe's reading; every other `git remote` is denied)
     worktree add needs -b <new branch> or --detach (never checks out an existing branch), or
     -B only to re-create an agent branch (`<wave>/<task>-<role>-<n>`, worktree.ts
     AGENT_BRANCH — never a release or any other branch); the new branch is never main/master

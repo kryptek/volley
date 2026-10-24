@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
+import { normalizeOrigin } from "volley-cli/peer/repo";
 import { type ProfileKeys, onboardingEdits } from "../claude/sharing";
 import type { ProbeLogin } from "../claude/usage";
 import { CONFIG_DEFAULTS, DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "../config-defaults";
@@ -19,7 +20,7 @@ import {
 import { fetchFailure, lockedFetch } from "../git-lock";
 import { type DoctorReport, parseDoctorReport, parseProbeReport } from "../machines";
 import { PATH_TOOLS, type PathProbe, parsePathProbe } from "../readiness";
-import { type MachineFacts, cloneSource, managedWorktreeRoot } from "../repos";
+import { type MachineFacts, cloneSource, managedWorktreeRoot, originToSlug } from "../repos";
 import { SpawnError } from "../spawn-error";
 import { withTrust } from "../trust";
 import type { RemoteHostConfig, Tunables } from "../types";
@@ -206,6 +207,12 @@ export interface RemoteHost extends Host {
   /** A file on the box; null when it does not exist; throws when ssh fails. */
   readFile(path: string): Promise<string | null>;
   /**
+   * `repo_probe` (SPEC §4.6.21): what is at `path` on the box, read only — its clone's root and
+   * origin (and the GitHub repository that names). Throws when ssh fails or git says something
+   * else.
+   */
+  probeClone(path: string): Promise<CloneProbe>;
+  /**
    * Readiness's PATH probe: whether `claude` and `bun` resolve on the non-interactive ssh PATH
    * (the same `bash -s` that runs launch.sh). Throws when ssh fails.
    */
@@ -224,6 +231,29 @@ export interface RemoteHost extends Host {
    * <profile>`, a prime): its `claude_logins`. Null when the box's volley has no such flag.
    */
   probeLogin?(profile: string): Promise<ProbeLogin[] | null>;
+}
+
+/** What `probeClone` read at a path on the box. */
+export interface CloneProbe {
+  state: "found" | "missing" | "not_git" | "no_origin";
+  /** The clone's top level (`found`, `no_origin`). */
+  root?: string;
+  /** `origin`'s URL as git prints it (`found`). */
+  origin?: string;
+  /** The GitHub repository the origin names, lower-cased (`found`, a GitHub origin only). */
+  slug?: string;
+}
+
+/**
+ * `git -C <path> rev-parse --show-toplevel`'s answer: the root, no folder, or no clone there.
+ * Null for anything else git said (it is reported, not guessed at).
+ */
+export function classifyRevParse(r: ExecResult): CloneProbe | null {
+  if (r.code === 0) return { state: "found", root: r.stdout.trim() };
+  // `cannot change to '<p>': Permission denied` is no answer: the caller says git's line.
+  if (/No such file or directory|Not a directory/.test(r.stderr)) return { state: "missing" };
+  if (/not a git repository/.test(r.stderr)) return { state: "not_git" };
+  return null;
 }
 
 /** What a doctor run on a box is asked to do (`RemoteHost.runDoctor`). */
@@ -798,6 +828,26 @@ export class SshTmuxHost implements RemoteHost {
     const r = await this.run([{ argv: ["cat", path] }]).catch(this.noResult(`read ${path}`));
     if (r === null || transportFailed(r)) throw this.sshFailed(`read ${path}`, r);
     return r.code === 0 ? r.stdout : null;
+  }
+
+  async probeClone(path: string): Promise<CloneProbe> {
+    // Two scripts: a failing first step is an answer, not an aborted script.
+    const top = await this.run([
+      { argv: ["git", "-C", path, "rev-parse", "--show-toplevel"] },
+    ]).catch(this.noResult("clone probe"));
+    if (top === null || transportFailed(top)) throw this.sshFailed("clone probe", top);
+    const found = classifyRevParse(top);
+    if (found === null) throw new Error(firstLine(top.stderr, `git rev-parse exited ${top.code}`));
+    if (found.state !== "found" || found.root === undefined) return found;
+    const root = found.root;
+    const o = await this.run([{ argv: ["git", "-C", root, "remote", "get-url", "origin"] }]).catch(
+      this.noResult("clone probe"),
+    );
+    if (o === null || transportFailed(o)) throw this.sshFailed("clone probe", o);
+    if (o.code !== 0) return { state: "no_origin", root };
+    const origin = o.stdout.trim();
+    const slug = originToSlug(normalizeOrigin(origin));
+    return { state: "found", root, origin, ...(slug !== undefined ? { slug } : {}) };
   }
 
   async probePath(): Promise<PathProbe> {

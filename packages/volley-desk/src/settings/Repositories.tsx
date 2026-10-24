@@ -3,7 +3,8 @@
  * machines, and whether each is ready there. One row per repository config names
  * (`repos.<owner/name>`, and any only adopted on a host): its slug (a link to GitHub), a chip per
  * machine it is assigned to (`all`: the supervisor's own and every paired one) with volleyd's
- * verdict there (`ready`, `cloning…`, `blocked: <why>`, `no clone yet`), the toolchain the
+ * verdict there (`ready`, `cloning…`, `blocked: <why, short>` with a **Why** that opens it in
+ * full, `no clone yet`), the toolchain the
  * machines' records say it lacks, and **Remove…**, which confirms with the clone paths it leaves
  * on disk (a clone is never deleted) and sends `repo_remove`. A blocked paired machine's chip has
  * **Repair** (the machine's doctor, `RepairSheet`, with a row per repository there): a successful
@@ -22,6 +23,7 @@ import { AddRepoSheet } from "./AddRepoSheet";
 import { MachineSheet } from "./MachineSheet";
 import { useAdmin } from "./Machines";
 import { RepairSheet } from "./RepairSheet";
+import { RepoChipReason } from "./RepoChipReason";
 import { Group } from "./primitives";
 import {
   allMachines,
@@ -210,6 +212,7 @@ export function Repositories(p: RepositoriesProps) {
                       <b>{m}</b>
                       <span className="ell">{text}</span>
                       {r.state === "cloning" && <span className="spinner" aria-hidden="true" />}
+                      {r.state === "blocked" && <RepoChipReason reasons={r.reasons} />}
                       {repair && (
                         <button
                           type="button"
