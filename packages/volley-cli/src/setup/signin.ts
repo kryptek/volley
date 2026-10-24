@@ -2,6 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { dirname, join } from "node:path";
 import { loginIdentity, parseClaudeStatus } from "../peer/checks/claude";
 import { ghUser } from "../peer/checks/github";
+import { simulated } from "./first-wave";
 import type { Change, SetupContext, SetupExec, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
 
@@ -174,7 +175,8 @@ export async function planSignin(ctx: SetupContext): Promise<StepPlan> {
     const user = ghUser((await ctx.deps.exec(GH_USER)).stdout);
     const line = `GitHub: signed in${user !== null ? ` as ${maskLogin(user)}` : ""}`;
     plan.found.push(line);
-    if (gitUsesGh(ctx)) rows.push(`✓ ${line}`);
+    // Simulated, git never pushes to GitHub (the fake `gh auth setup-git` writes no git config).
+    if (simulated(ctx) || gitUsesGh(ctx)) rows.push(`✓ ${line}`);
     else {
       rows.push(`${line}; git does not use that login yet`);
       plan.changes.push({

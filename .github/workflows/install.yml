@@ -1,0 +1,100 @@
+name: Install
+
+# Layer 1 of the one-command install's tests (scripts/install-tests/README.md): on every PR, install
+# Volley from nothing in fresh Ubuntu 24.04 and Debian 13 containers and on a GitHub-hosted Mac,
+# run `volley setup --yes` unattended against volley-sim (a simulated first wave, no GitHub, no
+# Claude), and check what a person would: `volley setup --check` all done, the test wave's PR
+# merged, a rerun changes nothing, no secret in any log, `install.sh --uninstall` stops the
+# services. The metrics table lands in each job's step summary; the logs are uploaded.
+
+on:
+  pull_request:
+    branches: [main, "release/**"]
+  push:
+    branches: [main, "release/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  linux:
+    name: Layer 1 (${{ matrix.distro }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: ubuntu-24.04
+            dockerfile: Dockerfile.ubuntu
+          - distro: debian-13
+            dockerfile: Dockerfile.debian
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # The base image (a non-root user, mosquitto 2.1 built from source, the systemctl stand-in),
+      # cached by its content: rebuilt only when the Dockerfile or the stand-in changes.
+      - uses: docker/build-push-action@v6
+        with:
+          context: scripts/install-tests
+          file: scripts/install-tests/${{ matrix.dockerfile }}
+          tags: volley-layer1:${{ matrix.distro }}
+          load: true
+          cache-from: type=gha,scope=layer1-${{ matrix.distro }}
+          cache-to: type=gha,scope=layer1-${{ matrix.distro }},mode=max
+      - name: Install from nothing, set up, check
+        env:
+          LAYER1_IMAGE: volley-layer1:${{ matrix.distro }}
+          LAYER1_OUT: ${{ runner.temp }}/layer1
+        run: bash scripts/install-tests/run-layer1.sh linux ${{ matrix.distro }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: layer1-${{ matrix.distro }}
+          path: |
+            ${{ runner.temp }}/layer1/setup.log
+            ${{ runner.temp }}/layer1/setup-rerun.log
+            ${{ runner.temp }}/layer1/volleyd.log
+            ${{ runner.temp }}/layer1/desk.log
+            ${{ runner.temp }}/layer1/unknown.jsonl
+            ${{ runner.temp }}/layer1/setup-metrics.json
+            ${{ runner.temp }}/layer1/check.json
+            ${{ runner.temp }}/layer1/summary.md
+            ${{ runner.temp }}/layer1/transcript.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  macos-hosted:
+    # The only macOS CI: the curl path on a hosted runner (Homebrew there, no cmux: tmux), launchd
+    # services and the login keychain.
+    name: Layer 1 (macos-hosted)
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install from nothing, set up, check
+        env:
+          LAYER1_LABEL: macos-hosted
+          LAYER1_OUT: ${{ runner.temp }}/layer1
+        run: bash scripts/install-tests/run-layer1.sh macos
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: layer1-macos-hosted
+          path: |
+            ${{ runner.temp }}/layer1/setup.log
+            ${{ runner.temp }}/layer1/setup-rerun.log
+            ${{ runner.temp }}/layer1/volleyd.log
+            ${{ runner.temp }}/layer1/desk.log
+            ${{ runner.temp }}/layer1/unknown.jsonl
+            ${{ runner.temp }}/layer1/setup-metrics.json
+            ${{ runner.temp }}/layer1/check.json
+            ${{ runner.temp }}/layer1/summary.md
+            ${{ runner.temp }}/layer1/transcript.log
+          if-no-files-found: ignore
+          retention-days: 14

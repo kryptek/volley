@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { SIM_BIN, simHome } from "volley-sim/env";
+import { GIT_IDENTITY } from "volley-sim/world";
 import { DEFAULT_MODEL } from "volleyd/config-defaults";
+import { recordRepoTrust } from "volleyd/trust";
 import { ADMIN_FILE, type AdminCredentials, readCredentials } from "../auth/context";
 import {
   GH_REPO_VIEW,
@@ -154,10 +156,33 @@ export function journalTail(volleydHome: string, wave: string, n: number): strin
     });
 }
 
+/** Setup runs against volley-sim: `--simulated`, or in a shell `eval "$(volley sim env)"` set up. */
+export const simulated = (ctx: SetupContext) =>
+  ctx.firstWave?.simulated === true || ctx.auth.env.VOLLEY_SIMULATED === "1";
+
+/**
+ * The services' environment (`serviceEnv`) with the simulator on, as `volley sim env` turns it on,
+ * when setup itself runs simulated: the test wave's spawns are volleyd's, so its gh and claude must
+ * be the fakes. Only then: a setup run without the simulator writes the units without it.
+ */
+export function withSimulator(
+  ctx: SetupContext,
+  env: Record<string, string>,
+): Record<string, string> {
+  if (!simulated(ctx)) return env;
+  return {
+    ...env,
+    PATH: `${SIM_BIN}:${env.PATH ?? ""}`,
+    VOLLEY_SIM_HOME: simHome(ctx.auth.env),
+    VOLLEY_SIMULATED: "1",
+  };
+}
+
 /**
  * The environment the step's commands run with: the broker, the auth dir and $VOLLEYD_HOME
  * setup uses (so `volleyd run` reads the coordinator's login from coordinator.json); under
- * `--simulated` the fakes first on PATH, as `eval "$(volley sim env)"` would put them.
+ * `--simulated` the fakes first on PATH, as `eval "$(volley sim env)"` would put them, and the
+ * simulated world's git identity (a fresh machine has none for the scaffold's commit).
  */
 export function firstWaveEnv(ctx: SetupContext): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = {
@@ -169,6 +194,7 @@ export function firstWaveEnv(ctx: SetupContext): Record<string, string | undefin
   if (ctx.firstWave?.simulated !== true) return env;
   return {
     ...env,
+    ...GIT_IDENTITY,
     PATH: `${SIM_BIN}:${env.PATH ?? ""}`,
     VOLLEY_SIM_HOME: simHome(env),
     VOLLEY_SIMULATED: "1",
@@ -371,6 +397,11 @@ async function runFirstWave(
     }
     waveRepo = here.path;
     lines.push(`Added ${scratch} to the fleet: ${waveRepo} (ready)`);
+  } else if (scratch !== undefined) {
+    // No `volley repo add` (the add volleyd takes as the owner's consent): setup trusts the
+    // scratch clone it just made, or the wave waits on a repo_untrusted decision.
+    recordRepoTrust(join(ctx.home, ".claude.json"), clone);
+    lines.push(`Trusted ${clone} for Claude Code (the scratch clone setup made)`);
   }
 
   const file = join(waveRepo, ".volley", "waves", `${o.wave}.yaml`);

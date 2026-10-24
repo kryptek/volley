@@ -438,12 +438,19 @@ describe("setup: the test wave (first-wave)", () => {
       expect(env.PATH).toBe(`${SIM_BIN}:/usr/bin`);
       expect(env.VOLLEY_SIMULATED).toBe("1");
       expect(env.VOLLEY_SIM_HOME).toBe("/sim");
+      // A fresh machine has no git identity: the scaffold commits as the simulated world does.
+      expect(env.GIT_AUTHOR_NAME).toBe("Volley Sim");
+      expect(env.GIT_COMMITTER_EMAIL).toBe("sim@volley.invalid");
       await applyAll(await planFirstWave(ctx));
       expect(m.questions).toEqual([]);
       expect(ran(`bun ${volleyCli()} repo`)).toEqual([]);
       expect(m.execEnvs.every((e) => e?.VOLLEY_SIMULATED === "1")).toBe(true);
       const clone = join(m.ctx.volleydHome, "first-wave", "volley-hello-aaaa");
       expect(existsSync(join(clone, ".volley", "waves", "hello-aaaa.yaml"))).toBe(true);
+      // Without `volley repo add` (whose add volleyd takes as consent) setup trusts the clone it
+      // made itself, or the wave would wait on a repo_untrusted decision on a fresh machine.
+      const claudeJson = JSON.parse(readFileSync(join(m.ctx.home, ".claude.json"), "utf-8"));
+      expect(claudeJson.projects[clone].hasTrustDialogAccepted).toBe(true);
     });
   });
 

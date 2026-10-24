@@ -11,6 +11,9 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { SIM_BIN, simHome } from "volley-sim/env";
+import { withSimulator } from "../../src/setup/first-wave";
+import { serviceEnv } from "../../src/setup/service-path";
 import {
   DESK_STAMP,
   commandScript,
@@ -55,6 +58,31 @@ describe("setup: services", () => {
   });
   afterEach(async () => {
     await fake.close();
+  });
+
+  describe("simulated (--simulated or VOLLEY_SIMULATED=1)", () => {
+    it("the services run with the simulator on, as `volley sim env` turns it on in a shell", () => {
+      m = fakeMachine(fake, dir);
+      const plain = withSimulator(m.ctx, serviceEnv(m.ctx));
+      expect(plain.VOLLEY_SIMULATED).toBeUndefined();
+      expect((plain.PATH ?? "").split(":")).not.toContain(SIM_BIN);
+      for (const sim of [
+        { ...m.ctx, firstWave: { simulated: true } },
+        {
+          ...m.ctx,
+          auth: {
+            ...m.ctx.auth,
+            env: { ...m.ctx.auth.env, VOLLEY_SIMULATED: "1", VOLLEY_SIM_HOME: "/path/to/sim" },
+          },
+        },
+      ]) {
+        const env = withSimulator(sim, serviceEnv(sim));
+        // volleyd's gh and claude are the fakes, or the test wave's spawn asks the real gh.
+        expect(env.VOLLEY_SIMULATED).toBe("1");
+        expect(env.PATH).toBe(`${SIM_BIN}:${plain.PATH}`);
+        expect(env.VOLLEY_SIM_HOME).toBe(simHome(sim.auth.env));
+      }
+    });
   });
 
   describe("macOS (launchd)", () => {
