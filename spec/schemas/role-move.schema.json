@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/role-move.schema.json",
+  "title": "Volley Machine Role Move",
+  "description": "A machine role move's live progress, published retained by the supervisor to volley/_system/roles/moves/<move_id> as each step runs, and kept for the retention window. See spec section 4.6.24.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "required": ["channel", "type", "payload"],
+      "properties": {
+        "agent_id": { "const": "volleyd" },
+        "channel": { "const": "_system/roles/moves" },
+        "type": { "const": "role_move" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["move_id", "role", "from", "to", "status", "steps", "since"],
+          "properties": {
+            "move_id": { "$ref": "#/$defs/move_id" },
+            "role": { "enum": ["broker", "supervisor", "desk"] },
+            "from": { "$ref": "roles.schema.json#/$defs/machine" },
+            "to": { "$ref": "roles.schema.json#/$defs/machine" },
+            "status": {
+              "enum": ["planning", "running", "health_check", "done", "failed", "rolled_back"]
+            },
+            "steps": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "title", "where", "status"],
+                "properties": {
+                  "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+                  "title": { "type": "string", "minLength": 1 },
+                  "where": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The machine the step runs on (or `every machine`)."
+                  },
+                  "status": { "enum": ["pending", "running", "ok", "failed", "skipped"] },
+                  "line": {
+                    "type": "string",
+                    "description": "The step's last line of output, or why it failed."
+                  }
+                }
+              }
+            },
+            "since": {
+              "type": "string",
+              "format": "date-time",
+              "description": "When the move entered its status."
+            },
+            "error": {
+              "type": "string",
+              "minLength": 1,
+              "description": "failed / rolled_back: why."
+            },
+            "log_path": {
+              "type": "string",
+              "pattern": "^/[^\\n\\r]*$",
+              "description": "The move's log.jsonl on the supervisor's machine."
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "move_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$" }
+  }
+}

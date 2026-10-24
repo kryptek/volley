@@ -24,7 +24,11 @@ afterEach(async () => {
 });
 
 // readJournalFile, not Journal.open: opening would truncate a torn tail of the live daemon's file.
-const systemEvents = () => readJournalFile(join(t.home, "waves", SYSTEM_WAVE, "journal.jsonl"));
+// The first start's `roles_changed` (the machine roles record, SPEC §4.6.24) aside.
+const systemEvents = () =>
+  readJournalFile(join(t.home, "waves", SYSTEM_WAVE, "journal.jsonl")).filter(
+    (e) => e.type !== "roles_changed",
+  );
 const waveEvents = (wave: string) => readJournalFile(join(t.home, "waves", wave, "journal.jsonl"));
 const admitted = (wave: string) =>
   waveEvents(wave)

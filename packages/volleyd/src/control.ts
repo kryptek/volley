@@ -31,6 +31,10 @@ export const waveEventsTopic = (wave: string) => `volley/_waves/${wave}/events`;
 /** The wave's retained morning digest (SPEC §4.6.16, autopilot/digest.ts). */
 export const waveDigestTopic = (wave: string) => `volley/_waves/${wave}/digest`;
 export const ADMISSION_TOPIC = "volley/_system/admission";
+/** The retained machine roles record (SPEC §4.6.24, roles/record.ts). */
+export const ROLES_TOPIC = "volley/_system/roles";
+/** A role move's retained progress (SPEC §4.6.24). */
+export const roleMoveTopic = (moveId: string) => `volley/_system/roles/moves/${moveId}`;
 export const leasePoolTopic = (pool: string) => `volley/_system/leases/${pool}`;
 export const LEASE_REQUESTS_FILTER = "volley/_system/leases/+/requests";
 
