@@ -23,8 +23,9 @@
  * `HostChips` lists, under the graph, the machine each placed task runs on
  * and why (SPEC §4.6.15 `tasks[].placement`).
  */
-import { useState } from "react";
+import { type RefObject, useRef, useState } from "react";
 import { issueLabel } from "../../lib/github";
+import { Popover } from "../../look/Popover";
 import type { TaskPlacement, WaveTask } from "../../store/types";
 import { hueOf } from "./accent";
 import { type DeskStage, STAGE_LABEL } from "./stages";
@@ -370,6 +371,21 @@ export function placementRule(p: TaskPlacement): string {
  */
 export function HostChips({ tasks }: { tasks: readonly WaveTask[] }) {
   const [open, setOpen] = useState<string | null>(null);
+  const chips = useRef(new Map<string, HTMLButtonElement>());
+  const anchors = useRef(new Map<string, RefObject<HTMLElement | null>>());
+  // One stable anchor per task, so the open card's effects do not rerun on every render.
+  const anchorOf = (id: string) => {
+    let a = anchors.current.get(id);
+    if (!a) {
+      a = {
+        get current() {
+          return chips.current.get(id) ?? null;
+        },
+      };
+      anchors.current.set(id, a);
+    }
+    return a;
+  };
   const placed = tasks.filter((t): t is WaveTask & { placement: TaskPlacement } => !!t.placement);
   if (placed.length === 0) return null;
   return (
@@ -378,16 +394,12 @@ export function HostChips({ tasks }: { tasks: readonly WaveTask[] }) {
         const p = t.placement;
         const shown = open === t.id;
         return (
-          <li
-            key={t.id}
-            // Focus stays on the chip when it opens, so Escape is caught here, around both.
-            onKeyDown={(e) => {
-              if (e.key !== "Escape" || !shown) return;
-              e.stopPropagation();
-              setOpen(null);
-            }}
-          >
+          <li key={t.id}>
             <button
+              ref={(el) => {
+                if (el) chips.current.set(t.id, el);
+                else chips.current.delete(t.id);
+              }}
               type="button"
               className="chip host-chip"
               aria-label={`${t.id} on ${p.host}: why here`}
@@ -396,24 +408,25 @@ export function HostChips({ tasks }: { tasks: readonly WaveTask[] }) {
             >
               <span className="mono">{t.id}</span> · {p.host}
             </button>
-            {shown && (
-              <div
-                className="host-pop"
-                // biome-ignore lint/a11y/useSemanticElements: a non-modal popover, not a <dialog> element
-                role="dialog"
-                aria-label={`Why ${t.id} runs on ${p.host}`}
-              >
-                <p className="host-rule">{placementRule(p)}</p>
-                <ol className="host-lines">
-                  {p.candidates.map((c) => (
-                    <li key={c.host} className={c.score === null ? "dim" : undefined}>
-                      {c.line}
-                    </li>
-                  ))}
-                </ol>
-                {t.base_sha && <p className="mono dim">cut from {t.base_sha.slice(0, 7)}</p>}
-              </div>
-            )}
+            <Popover
+              anchor={anchorOf(t.id)}
+              open={shown}
+              // biome-ignore lint/a11y/useSemanticElements: a non-modal popover, not a <dialog> element
+              role="dialog"
+              aria-label={`Why ${t.id} runs on ${p.host}`}
+              dismiss="outside"
+              onClose={() => setOpen(null)}
+            >
+              <p className="host-rule">{placementRule(p)}</p>
+              <ol className="host-lines">
+                {p.candidates.map((c) => (
+                  <li key={c.host} className={c.score === null ? "dim" : undefined}>
+                    {c.line}
+                  </li>
+                ))}
+              </ol>
+              {t.base_sha && <p className="mono dim">cut from {t.base_sha.slice(0, 7)}</p>}
+            </Popover>
           </li>
         );
       })}

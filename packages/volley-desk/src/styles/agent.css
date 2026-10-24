@@ -290,7 +290,6 @@
 
 /* The machine chip: where the agent runs, its dot, and why here on hover / focus. */
 .m-chip-wrap {
-  position: relative;
   display: inline-flex;
   min-width: 0;
 }
@@ -318,17 +317,10 @@
   background: var(--amber);
 }
 .m-tip {
-  display: none;
   cursor: default;
-  white-space: normal;
-  color: var(--ink);
 }
 .m-tip .host-lines {
   margin: 0;
-}
-.m-chip-wrap:hover .m-tip,
-.m-chip-wrap:focus-within .m-tip {
-  display: block;
 }
 
 /* Claude account picker (title, row 2) and context meter (footer), SPEC §4.6.12. */
@@ -487,9 +479,12 @@ a.a-link:hover {
 .win-sub .acct-pick-wrap .acct-pick {
   margin-left: 0;
 }
+/* Still drawn inside the window, under the picker (not a portalled Popover). */
 .acct-tip {
   display: none;
-  left: auto;
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 4px);
   right: 0;
   white-space: normal;
   color: var(--ink);

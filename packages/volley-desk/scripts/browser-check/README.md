@@ -29,6 +29,7 @@ node $CHECKS/pinning.mjs <out dir>         # anchor the coordinators top-left: a
 node $CHECKS/styles-audit.mjs <out dir>    # every window style: box, hover overflow, paint under the body
 node $CHECKS/sheet.mjs <out dir>           # the comparison sheet from the audit
 node $CHECKS/pan-perf.mjs <out dir> [tag]  # demo, no broker: phone pan frame times (4x CPU) and backdrop filters, desktop window crop
+node $CHECKS/popovers.mjs <out dir>        # demo, no seeding: the why-here cards on screen, outside every window, at desktop, phone, zoomed out
 ```
 
 Re-run `seed-waves.mjs` before `styles-audit.mjs`, because the seeded wave goes stale and grows a banner. Each check prints a JSON report and writes its screenshots to the output directory. Stop the broker and the dev server afterwards.

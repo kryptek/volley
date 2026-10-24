@@ -333,9 +333,6 @@
   flex-wrap: wrap;
   gap: 6px;
 }
-.host-chips > li {
-  position: relative;
-}
 .host-chip {
   cursor: pointer;
   font: inherit;
@@ -344,18 +341,6 @@
 .host-chip[aria-expanded="true"] {
   border-color: var(--acc, #6ee7f9);
 }
-@media (max-width: 480px) {
-  .host-chips > li {
-    position: static;
-  }
-  .host-pop {
-    left: 8px;
-    right: 8px;
-    width: auto;
-    max-width: none;
-  }
-}
-
 /* The morning digest card (SPEC §4.6.16): shipped, autopilot handled, waiting for you. */
 .digest-card {
   margin: 0 0 10px;

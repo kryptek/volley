@@ -89,6 +89,30 @@ describe("task host chip and why here", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("the popover renders above the canvas, outside the wave window", () => {
+    renderWave();
+    const chip = screen.getByRole("button", { name: "T1 on box-a: why here" });
+    fireEvent.click(chip);
+    const pop = screen.getByRole("dialog", { name: "Why T1 runs on box-a" });
+    const win = chip.closest("section.win") as HTMLElement;
+    expect(within(win).queryByRole("dialog")).toBeNull();
+    expect(win).not.toContainElement(pop);
+    // A pointer-down inside the card keeps it; one outside closes it.
+    fireEvent.pointerDown(pop);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(chip).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("opening another chip closes the first", () => {
+    renderWave();
+    fireEvent.click(screen.getByRole("button", { name: "T1 on box-a: why here" }));
+    fireEvent.click(screen.getByRole("button", { name: "T2 on box-b: why here" }));
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(screen.getByRole("dialog", { name: "Why T2 runs on box-b" })).toBeInTheDocument();
+  });
+
   it("a pinned task says the wave file pinned it; a re-placed one says when the owner did", () => {
     renderWave();
     fireEvent.click(screen.getByRole("button", { name: "T2 on box-b: why here" }));

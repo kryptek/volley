@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { LOCAL_MACHINE } from "../src/store/claude";
 import { demoMessages } from "../src/store/fixtures";
@@ -144,6 +144,7 @@ describe("agent window header: the machine chip", () => {
     renderHeader(demo({ host: "box-a", placement: placement() }), { onOpenMachine });
     const chip = screen.getByRole("button", { name: "Runs on box-a: why here" });
     expect(chip.querySelector(".m-dot--up")).toBeTruthy();
+    fireEvent.pointerEnter(chip);
     // The account picker has a tooltip of its own: the chip's is the one it names.
     const tip = document.getElementById(chip.getAttribute("aria-describedby") ?? "");
     expect(tip).toHaveAttribute("role", "tooltip");
@@ -151,6 +152,52 @@ describe("agent window header: the machine chip", () => {
     expect(tip).toHaveTextContent("cores");
     fireEvent.click(chip);
     expect(onOpenMachine).toHaveBeenCalledWith("box-a");
+  });
+
+  it("the tooltip renders above the canvas, outside the window, only while open", () => {
+    vi.useFakeTimers();
+    try {
+      renderHeader(demo({ host: "box-a", placement: placement() }));
+      const chip = screen.getByRole("button", { name: "Runs on box-a: why here" });
+      const bar = chip.closest(".win-bar") as HTMLElement;
+      // Closed: no card and no dangling aria-describedby.
+      expect(document.querySelector(".m-tip")).toBeNull();
+      expect(chip).not.toHaveAttribute("aria-describedby");
+
+      fireEvent.pointerEnter(chip);
+      const tip = document.querySelector(".m-tip") as HTMLElement;
+      expect(tip).toHaveAttribute("role", "tooltip");
+      // The account picker's own tooltip stays in the bar; the machine chip's is not there.
+      expect(bar).not.toContainElement(tip);
+      expect(chip.closest("section.win")).not.toContainElement(tip);
+      expect(chip).toHaveAttribute("aria-describedby", tip.id);
+      expect(tip).toHaveTextContent("box-a: 0.82 (cpu 0.9, slots 0.5, mem 0.71, usage 0.58)");
+      expect(tip).toHaveTextContent("cores");
+
+      // The pointer crossing the gap onto the card keeps it open.
+      fireEvent.pointerLeave(chip);
+      vi.advanceTimersByTime(50);
+      fireEvent.pointerEnter(tip);
+      vi.advanceTimersByTime(300);
+      expect(document.querySelector(".m-tip")).not.toBeNull();
+      fireEvent.pointerLeave(tip);
+      act(() => {
+        vi.advanceTimersByTime(150);
+      });
+      expect(document.querySelector(".m-tip")).toBeNull();
+      expect(chip).not.toHaveAttribute("aria-describedby");
+
+      // Keyboard focus opens it; Escape and blur close it.
+      fireEvent.focus(chip);
+      expect(document.querySelector(".m-tip")).not.toBeNull();
+      fireEvent.keyDown(chip, { key: "Escape" });
+      expect(document.querySelector(".m-tip")).toBeNull();
+      fireEvent.focus(chip);
+      fireEvent.blur(chip);
+      expect(document.querySelector(".m-tip")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("the supervisor's own machine reads `this machine`", () => {
