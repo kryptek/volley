@@ -1,12 +1,17 @@
-// The theme token layer (#365) and the light tone (#368). On the demo (`?demo=1`, no broker),
-// with the look `{ bg: "none", narr: "plain", tethers: false, autoArrange: true, theme, icons }`
-// and reduced motion, at desktop (1440 × 900) and phone (390 × 844, touch): screenshot the first
-// agent window, the first wave window, the dock, the Needs you window, the Settings window on
-// General and on Appearance, and (without `?demo`) the sign-in card; record the computed
-// `--ground`, `--t-acc` and `--ink` on <html>. A light theme (Material Lighter) runs once with
-// the Clawd characters and once with the classic ring. On each view axe-core's `color-contrast`
-// rule runs in the page (jsdom cannot measure colour) and `text-contrast.mjs` measures every
-// text element against the pixels under it; both report offenders by selector with the ratio. Writes
+// The theme token layer (#365), the light tone (#368) and the palettes (#369). On the demo
+// (`?demo=1`, no broker), with the look `{ bg: "none", narr: "plain", tethers: false,
+// autoArrange: true, theme, icons }` and reduced motion, at desktop (1440 × 900) and phone
+// (390 × 844, touch): screenshot the first agent window, the first wave window, the dock, the
+// Needs you window, the Settings window on General and on Appearance, and (without `?demo`) the
+// sign-in card; record the computed `--ground`, `--t-acc` and `--ink` on <html>. A light theme
+// (Material Lighter) runs once with the Clawd characters and once with the classic ring. On each
+// view axe-core's `color-contrast` rule runs in the page (jsdom cannot measure colour) and
+// `text-contrast.mjs` measures every text element against the pixels under it; both report
+// offenders by selector with the ratio. For any theme but Volley, at desktop (the phone draws the
+// lite fills), the centre check: the first agent window's own background at the open point
+// nearest its centre (the commonest colour of a 9 × 9 patch) is the theme's `--panel-solid` at
+// the glass fill's 42 % and `--win2` at the gradient's 32 % over `--ground`, ± 8 per channel, so
+// a dark literal the themed block missed shows up as a miss. Writes
 // <out>/theme-<theme>[-classic]-<device>-<what>-<tag>.png and <out>/themes-<tag>.json (with each
 // crop's sha256). Run with theme `volley` before and after a change to the token layer: every
 // crop is byte-equal. The sign-in card shows only when the dev server has no credentials of its
@@ -48,6 +53,72 @@ async function contrastAudit(page) {
       }),
     );
   });
+}
+
+const hex = (c) => {
+  const h = c.trim().replace("#", "");
+  return [0, 2, 4].map((i) => Number.parseInt(h.slice(i, i + 2), 16));
+};
+const over = (under, top, a) => under.map((u, i) => Math.round(top[i] * a + u * (1 - a)));
+
+/** The window's own background nearest its centre (a point where nothing inside it paints). */
+async function centre(page, win) {
+  const at = await win.evaluate((w) => {
+    const r = w.querySelector(".win-inner").getBoundingClientRect();
+    const own = (el) => el?.matches(".win-inner, .win-depth, .win-body, .win-edge");
+    const cx = r.x + r.width / 2;
+    const cy = r.y + r.height / 2;
+    let best = null;
+    for (let dy = -r.height / 2 + 12; dy < r.height / 2 - 12; dy += 4) {
+      for (let dx = -r.width / 2 + 12; dx < r.width / 2 - 12; dx += 4) {
+        const ok = [-4, 0, 4].every((oy) =>
+          [-4, 0, 4].every((ox) => own(document.elementFromPoint(cx + dx + ox, cy + dy + oy))),
+        );
+        const d = dx * dx + dy * dy;
+        if (ok && (!best || d < best.d)) best = { x: cx + dx, y: cy + dy, d };
+      }
+    }
+    return best;
+  });
+  if (!at) return { pass: false, note: "no open body point" };
+  const clip = { x: at.x - 4, y: at.y - 4, width: 9, height: 9 };
+  const png = await page.screenshot({ clip, animations: "disabled", scale: "css" });
+  const got = await page.evaluate(
+    async (src) => {
+      const img = new Image();
+      img.src = src;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+      const g = c.getContext("2d");
+      g.drawImage(img, 0, 0);
+      const d = g.getImageData(0, 0, c.width, c.height).data;
+      const n = new Map();
+      for (let i = 0; i < d.length; i += 4) {
+        const k = `${d[i]},${d[i + 1]},${d[i + 2]}`;
+        n.set(k, (n.get(k) ?? 0) + 1);
+      }
+      return [...n.entries()]
+        .sort((a, b) => b[1] - a[1])[0][0]
+        .split(",")
+        .map(Number);
+    },
+    `data:image/png;base64,${png.toString("base64")}`,
+  );
+  const v = await page.evaluate(() => {
+    const s = getComputedStyle(document.documentElement);
+    return Object.fromEntries(
+      ["--ground", "--panel-solid", "--win2"].map((p) => [p, s.getPropertyValue(p).trim()]),
+    );
+  });
+  const want = over(
+    over(hex(v["--ground"]), hex(v["--panel-solid"]), 0.42),
+    hex(v["--win2"]),
+    0.32,
+  );
+  const delta = Math.max(...got.map((g, i) => Math.abs(g - want[i])));
+  return { at: [Math.round(at.x), Math.round(at.y)], got, want, delta, pass: delta <= 8 };
 }
 
 const sha = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -118,6 +189,7 @@ for (const [theme, icons] of runs) {
       ".world section.win:has(.win-bar .clawd-sprite, .win-bar .status-mark)",
     );
     await shot("agent", agent.first());
+    if (theme !== "volley" && device === "desktop") r.centre = await centre(page, agent.first());
     await shot(
       "wave",
       page
@@ -190,4 +262,7 @@ const addedCount = Object.values(added).reduce((n, l) => n + l.length, 0);
 console.log(
   `axe color-contrast violations: ${violations}; measured text below AA: ${measured}; beyond Volley's own: ${addedCount}`,
 );
-if (violations > 0 || addedCount > 0) process.exitCode = 1;
+const misses = Object.entries(report).filter(([, r]) => r.centre && !r.centre.pass);
+for (const [key, r] of misses)
+  console.error(`centre check missed: ${key} ${JSON.stringify(r.centre)}`);
+if (violations > 0 || addedCount > 0 || misses.length) process.exitCode = 1;
