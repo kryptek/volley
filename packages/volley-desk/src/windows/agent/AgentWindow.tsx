@@ -21,7 +21,7 @@
  * feed and Terminal tabs (React Bits Gooey Nav, D10); and a footer with progress, heartbeat age and the
  * registry model. Markup and classes follow the prototype; everything is read
  * from the store's `AgentView` and the agent's `WaveView`. An agent with no
- * signal (`attention.ts` `noSignalFor`, kind `mcp`) gets a dozing Clawd (a grey status mark) and
+ * signal (`attention.ts` `noSignalFor`, kind `mcp`) gets a dozing Clawd (with Classic, a grey status mark) and
  * a one-line label above the tabs; a `quiet` one keeps its mark and gets a
  * neutral `quiet for Nm` label; while the Desk is syncing after a (re)connect
  * the label reads `syncing…` instead of any judgement. A narration restored

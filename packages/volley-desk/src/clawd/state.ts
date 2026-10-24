@@ -6,7 +6,9 @@
  *
  * 1. a `blocked` status: `needs_you` when the tier is `you`, else `dozing`
  *    (the classic ring shows `blocked` as failed; the character only asks
- *    for you when it is you it waits on);
+ *    for you when it is you it waits on). Only a live `blocked` status
+ *    counts: once a blocked agent is reaped, `markStatus` reads the earlier
+ *    `blocked` as failed and so does rule 2, like the classic ring;
  * 2. `markStatus` failed (a `failed` status, or reaped while working): `failed`;
  * 3. attention tier `you`: `needs_you`;
  * 4. waiting on a person who is not you (`attention` set, not a background

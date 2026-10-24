@@ -18,6 +18,31 @@ function prefersReducedMotion(on: boolean) {
   })) as typeof window.matchMedia;
 }
 
+/** A matchMedia whose reduced-motion answer flips with `set`, firing its change listeners. */
+function switchableReducedMotion(on: boolean) {
+  let matches = on;
+  const listeners = new Set<() => void>();
+  window.matchMedia = ((query: string) => ({
+    get matches() {
+      return matches && query === REDUCED_MOTION_QUERY;
+    },
+    media: query,
+    onchange: null,
+    addEventListener: (_: string, l: () => void) => listeners.add(l),
+    removeEventListener: (_: string, l: () => void) => listeners.delete(l),
+    addListener: () => {},
+    removeListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia;
+  return {
+    set(next: boolean) {
+      matches = next;
+      for (const l of [...listeners]) l();
+    },
+    listeners,
+  };
+}
+
 function setHidden(hidden: boolean) {
   Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
   document.dispatchEvent(new Event("visibilitychange"));
@@ -94,5 +119,27 @@ describe("the Clawd clock", () => {
     });
     expect(a.result.current).toBe(0);
     a.unmount();
+  });
+
+  it("follows the reduced-motion query while sprites are mounted", () => {
+    const motion = switchableReducedMotion(false);
+    const a = renderHook(() => useClawdTick());
+    expect(vi.getTimerCount()).toBe(1);
+    act(() => {
+      vi.advanceTimersByTime(CLAWD_FRAME_MS * 2);
+    });
+    expect(a.result.current).toBeGreaterThan(0);
+    act(() => motion.set(true));
+    expect(a.result.current).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => motion.set(false));
+    expect(vi.getTimerCount()).toBe(1);
+    const t = a.result.current;
+    act(() => {
+      vi.advanceTimersByTime(CLAWD_FRAME_MS);
+    });
+    expect(a.result.current).toBe(t + 1);
+    a.unmount();
+    expect(motion.listeners.size).toBe(0);
   });
 });

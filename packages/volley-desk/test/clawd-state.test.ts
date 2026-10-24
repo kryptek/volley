@@ -56,6 +56,14 @@ describe("clawdState", () => {
     expect(clawdState(input(a, { stage: "implement" }))).toBe("failed");
   });
 
+  it("2. reaped after blocked → failed (rule 1 reads the live status only)", () => {
+    const a = agent({
+      status: st("reaped"),
+      feed: [fe("status", "blocked"), fe("status", "reaped")],
+    });
+    expect(clawdState(input(a, { stage: "implement", tier: "you" }))).toBe("failed");
+  });
+
   it("3. attention tier you → needs_you", () => {
     expect(clawdState(input(agent(), { stage: "implement", tier: "you" }))).toBe("needs_you");
   });
