@@ -222,9 +222,9 @@ describe("Linux prerequisites", () => {
       "apt-get install -y git tmux ca-certificates unzip",
       "apt-get install -y gh",
     ]);
-    expect(r.calls).toContain(
-      "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg",
-    );
+    expect(
+      has(r, "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o "),
+    ).toHaveLength(1);
     expect(installers(r)).toEqual(["installer bun", "installer claude"]);
     expect(existsSync(join(w.home, ".bun", "bin", "bun"))).toBe(true);
     expect(has(r, "sudo snap install")).toEqual(["sudo snap install mosquitto"]);
@@ -263,6 +263,47 @@ describe("Linux prerequisites", () => {
     expect(existsSync(join(w.home, ".volley", "bin", "volley"))).toBe(true);
   });
 
+  test("a failed gh keyring download stops before the apt list is written", () => {
+    const w = world(
+      "ubuntu",
+      LINUX_ALL.filter((t) => t !== "gh"),
+      { STUB_CURL_FAIL: "githubcli-archive-keyring" },
+    );
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("could not download https://cli.github.com/packages/");
+    expect(r.calls.filter((c) => c.includes("github-cli.list"))).toEqual([]);
+    expect(
+      r.calls.filter((c) => c.includes("githubcli-archive-keyring.gpg") && c.startsWith("sudo")),
+    ).toEqual([]);
+    expect(has(r, "apt-get")).toEqual([]);
+  });
+
+  test("an old mosquitto with snapd: no second broker from snap; remove it first", () => {
+    const w = world("ubuntu", LINUX_ALL, {
+      STUB_MOSQUITTO_VERSION: "2.0.22",
+      STUB_SNAPD: "active",
+    });
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(has(r, "snap")).toEqual([]);
+    expect(has(r, "sudo")).toEqual([]);
+    expect(r.out).toContain("mosquitto 2.0.22");
+    expect(r.out).toContain("remove it first");
+  });
+
+  test("a snap mosquitto that is still too old (or shadowed) is reported", () => {
+    const w = world(
+      "ubuntu",
+      LINUX_ALL.filter((t) => t !== "mosquitto"),
+      { STUB_SNAPD: "active", STUB_MOSQUITTO_VERSION: "2.0.9" },
+    );
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(has(r, "sudo snap install")).toEqual(["sudo snap install mosquitto"]);
+    expect(r.out).toContain("mosquitto 2.0.9 is on PATH");
+  });
+
   test("a mosquitto 2.1 on PATH is accepted", () => {
     const w = world("ubuntu", LINUX_ALL, { STUB_SNAPD: "active" });
     const r = run(w, ["--no-setup"]);
@@ -299,6 +340,15 @@ describe("the source", () => {
       `git -C ${src(w)} fetch --tags`,
     ]);
     expect(has(again, "bun install")).toEqual([]);
+  });
+
+  test("a rerun on the same tag survives a failed fetch (offline)", () => {
+    const w = world("ubuntu", LINUX_ALL);
+    run(w, ["--no-setup"]);
+    const again = run(w, ["--no-setup"], { STUB_GIT_FAIL: "fetch" });
+    expect(again.code).toBe(0);
+    expect(again.out).toContain("could not fetch");
+    expect(existsSync(join(w.home, ".volley", "bin", "volley"))).toBe(true);
   });
 
   test("--version picks the tag; a rerun on another version checks it out", () => {
@@ -384,6 +434,27 @@ describe("the shims and PATH", () => {
     const rc = readFileSync(join(w.home, ".bashrc"), "utf-8");
     expect(rc.startsWith("# mine\n")).toBe(true);
     expect(rc.match(/# volley$/gm)?.length).toBe(1);
+  });
+
+  test("a user's own line ending in '# volley' is not taken for the PATH line", () => {
+    const w = world("ubuntu", LINUX_ALL);
+    const mine = "alias v=vim # volley";
+    writeFileSync(join(w.home, ".zshrc"), `${mine}\n`);
+    run(w, ["--no-setup"]);
+    const rc = readFileSync(join(w.home, ".zshrc"), "utf-8");
+    expect(rc).toBe(`${mine}\nexport PATH="$HOME/.volley/bin:$PATH" # volley\n`);
+    run(w, ["--uninstall"]);
+    expect(readFileSync(join(w.home, ".zshrc"), "utf-8")).toBe(`${mine}\n`);
+  });
+
+  test("an unset SHELL: the line to add is printed", () => {
+    const w = world("ubuntu", LINUX_ALL);
+    const { SHELL: _shell, ...rest } = w.env;
+    w.env = rest;
+    const r = run(w, ["--no-setup"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("Add this line to your shell's startup file");
+    expect(readdirSync(w.home).filter((f) => f !== ".volley")).toEqual([]);
   });
 
   test("fish: the line is printed, no rc file is written", () => {

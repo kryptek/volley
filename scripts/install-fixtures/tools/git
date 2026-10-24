@@ -2,6 +2,7 @@
 printf '%s\n' "git $*" >>"$STUB_LOG"
 dir=.
 if [ "${1:-}" = -C ]; then dir=$2; shift 2; fi
+if [ "${1:-}" = "${STUB_GIT_FAIL:-}" ]; then printf 'fatal: unable to access the remote\n' >&2; exit 128; fi
 case "${1:-}" in
   clone)
     tag='' last=''

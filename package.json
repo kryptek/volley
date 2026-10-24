@@ -7,7 +7,7 @@
   "type": "module",
   "workspaces": ["packages/*"],
   "scripts": {
-    "lint": "biome check . && shellcheck install.sh",
+    "lint": "biome check . && bun scripts/shellcheck.ts",
     "format": "biome format --write .",
     "typecheck": "tsc -p tsconfig.json --noEmit && bun run --filter='*' typecheck",
     "test": "bun scripts/check-tmp-leaks.ts -- bun run test:suites",

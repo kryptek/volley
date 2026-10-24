@@ -11,6 +11,7 @@ while [ $# -gt 0 ]; do
 done
 installer() { printf '#!/bin/sh\nprintf "%%s\\n" "installer %s" >>"$STUB_LOG"\n"$STUB_FIXTURES/provide" %s "%s"\n' "$1" "$1" "$2"; }
 body() {
+  case "$url" in *"${STUB_CURL_FAIL:-//none//}"*) printf 'curl: (22) The requested URL returned error: 404\n' >&2; exit 22 ;; esac
   case "$url" in
     https://api.github.com/repos/kryptek/volley/tags*)
       printf '[\n  {"name": "v0.9.0", "commit": {}},\n  {"name": "v0.10.0", "commit": {}},\n  {"name": "v0.2.1", "commit": {}}\n]\n' ;;

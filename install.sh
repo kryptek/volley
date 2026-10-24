@@ -248,7 +248,12 @@ snapd_active() {
 
 mosquitto_options() {
   v=$(mosquitto_version)
-  if [ -n "$v" ]; then say "mosquitto $v is on PATH; Volley needs 2.1 or newer."; else say "mosquitto is not installed."; fi
+  if [ -n "$v" ]; then
+    say "mosquitto $v is on PATH; Volley needs 2.1 or newer. Stop and remove it first (its broker"
+    say "holds port 1883, and its binary would shadow a newer one), e.g.  sudo apt-get remove mosquitto"
+  else
+    say "mosquitto is not installed."
+  fi
   say "Install mosquitto 2.1 or newer, either way (then rerun, or let \`volley setup\` check):"
   say "  sudo snap install mosquitto               (needs snapd)"
   say "  docker run eclipse-mosquitto:2.1-alpine"
@@ -264,8 +269,9 @@ install_linux() {
   if ! have bun && ! have unzip; then apt_pkgs="$apt_pkgs unzip"; fi
   need_gh=''
   have gh || need_gh=1
+  # Only when no mosquitto is there: a snap broker next to an older one cannot bind 1883.
   need_snap=''
-  if ! mosquitto_ok && snapd_active; then need_snap=1; fi
+  if ! have mosquitto && snapd_active; then need_snap=1; fi
 
   if [ -n "$apt_pkgs$need_gh$need_snap" ] && [ "$(id -u)" != 0 ]; then
     have sudo || die "sudo is needed to install the missing packages, and it is not installed."
@@ -296,8 +302,17 @@ install_linux() {
   if [ -n "$need_gh" ]; then
     say "Installing gh from GitHub's apt repository..."
     keyring=/etc/apt/keyrings/githubcli-archive-keyring.gpg
+    key_url=https://cli.github.com/packages/githubcli-archive-keyring.gpg
+    # Downloaded whole before anything is written: a broken keyring or list would fail every
+    # later `apt-get update`.
+    tmp=$(mktemp "${TMPDIR:-/tmp}/volley-install.XXXXXX")
+    if ! curl -fsSL "$key_url" -o "$tmp" || [ ! -s "$tmp" ]; then
+      rm -f "$tmp"
+      die "could not download $key_url"
+    fi
     as_root mkdir -p -m 755 /etc/apt/keyrings
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | as_root tee "$keyring" >/dev/null
+    as_root tee "$keyring" <"$tmp" >/dev/null
+    rm -f "$tmp"
     as_root chmod go+r "$keyring"
     printf 'deb [arch=%s signed-by=%s] https://cli.github.com/packages stable main\n' \
       "$(dpkg --print-architecture)" "$keyring" |
@@ -312,6 +327,7 @@ install_linux() {
     say "Installing mosquitto with snap..."
     as_root snap install mosquitto
     path_add /snap/bin
+    mosquitto_ok || mosquitto_options
   else
     mosquitto_options
   fi
@@ -342,7 +358,7 @@ install_source() {
     fi
     if [ -d "$SRC_DIR/.git" ]; then
       current=$(git -C "$SRC_DIR" describe --tags --exact-match 2>/dev/null) || current=''
-      git -C "$SRC_DIR" fetch --tags
+      git -C "$SRC_DIR" fetch --tags || warn "install.sh: could not fetch Volley's tags; going on with what is there."
       if [ "$current" != "$VERSION" ]; then
         say "Moving $(tildify "$SRC_DIR") from ${current:-an untagged commit} to $VERSION"
         git -C "$SRC_DIR" checkout --quiet "$VERSION"
@@ -408,14 +424,16 @@ write_commands() {
 }
 
 rc_file() {
-  case "${SHELL##*/}" in
+  shell=${SHELL:-}
+  case "${shell##*/}" in
     zsh) printf '%s' "${ZDOTDIR:-$HOME}/.zshrc" ;;
     bash) if [ "$PLATFORM" = macos ]; then printf '%s' "$HOME/.bash_profile"; else printf '%s' "$HOME/.bashrc"; fi ;;
   esac
 }
 
 add_path_line() {
-  if [ "${SHELL##*/}" = fish ]; then
+  shell=${SHELL:-}
+  if [ "${shell##*/}" = fish ]; then
     say "fish: put Volley's commands on your PATH with:  fish_add_path \$HOME/.volley/bin"
     return 0
   fi
@@ -424,7 +442,7 @@ add_path_line() {
     say "Add this line to your shell's startup file:  $RC_LINE"
     return 0
   fi
-  if [ -f "$rc" ] && grep -q '# volley$' "$rc"; then return 0; fi
+  if [ -f "$rc" ] && grep -qxF "$RC_LINE" "$rc"; then return 0; fi
   if [ -s "$rc" ] && [ -n "$(tail -c 1 "$rc")" ]; then printf '\n' >>"$rc"; fi
   printf '%s\n' "$RC_LINE" >>"$rc"
   say "Added ~/.volley/bin to PATH in $(tildify "$rc") (new terminals pick it up)."
@@ -487,9 +505,9 @@ uninstall() {
   done
   rmdir "$BIN" 2>/dev/null || true
   for rc in "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
-    if [ ! -f "$rc" ] || ! grep -q '# volley$' "$rc"; then continue; fi
+    if [ ! -f "$rc" ] || ! grep -qxF "$RC_LINE" "$rc"; then continue; fi
     tmp="$rc.volley-tmp"
-    grep -v '# volley$' "$rc" >"$tmp" || true
+    grep -vxF "$RC_LINE" "$rc" >"$tmp" || true
     cat "$tmp" >"$rc"
     rm -f "$tmp"
     say "Removed the PATH line from $(tildify "$rc")"
