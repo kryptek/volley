@@ -128,6 +128,11 @@ export async function makeFleet(
      * works on what `repos` / `hosts.box.repos` give it.
      */
     boxRepo?: string | null;
+    /**
+     * Every machine but the box its own fake remote host, running its scripts as its own
+     * `ssh -T <target>` (default: one shared host, the box's, for every machine).
+     */
+    perMachine?: boolean;
   } = {},
 ): Promise<Fleet> {
   const env = await makeDaemonEnv();
@@ -135,6 +140,7 @@ export async function makeFleet(
   const repo = join(dir, "repo");
   mkdirSync(repo);
   let box: FakeRemoteHost | undefined;
+  const others = new Map<string, FakeRemoteHost>();
   const accounts = new Map<string, string>([
     ["admin-1", "admin"],
     [PEER, "peer"],
@@ -269,6 +275,14 @@ export async function makeFleet(
       hooksDir: "/opt/local-hooks",
       claudeJsonPath: claudeJson,
       remoteHost: (s) => {
+        if (o.perMachine === true && s.name !== PEER) {
+          let h = others.get(s.name);
+          if (h === undefined) {
+            h = fakeRemoteHost(s, local);
+            others.set(s.name, h);
+          }
+          return h;
+        }
         if (box === undefined) {
           box = fakeRemoteHost(s, local);
           box.onLaunch = onLaunch;

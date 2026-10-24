@@ -1715,8 +1715,12 @@ refuses them). volleyd moves the **Desk**, the **supervisor** and the **broker**
 - **A failing step** undoes every step done so far, in reverse, and the move ends `failed`.
 - **Retention.** A finished move's directory (its record, log and what it replaced) is kept 7
   days; the first start after that removes it and clears its retained topic. There is no tunable.
-- **`role_rollback { move_id }`** undoes a `done` move within those 7 days, as a new move the
-  other way (`result: { move_id, rolls_back }`); the original is then `rolled_back`.
+- **`role_rollback { move_id }`** undoes a `done` move within those 7 days ([Rolling a move
+  back](#rolling-a-move-back), after the three moves).
+
+The sections below go in the order the owner's smoke moves them (`docs/SMOKE-v0.11.md` part B):
+the Desk, the supervisor, the broker, then each one rolled back. The same sequence runs in CI on
+fakes, through real daemons and two brokers (`test/roles-e2e.test.ts`).
 
 #### Moving the Desk
 
@@ -1738,8 +1742,6 @@ sign-in link for the new address sealed to your `reply_key` (`sealed: { link }`;
 long for one sealed block gives `sealed: { token }` and `result.link_base`). Every device signs in
 again at the new address: a browser keeps its sign-in per address. A failing check uninstalls
 the new Desk and answers `ok: false` with `result.rolled_back: true`; the old one never stopped.
-A rollback starts the kept service here again, checks it, writes the record back and uninstalls
-the Desk on box-a.
 
 #### Moving the supervisor
 
@@ -1785,8 +1787,7 @@ supervisor: `volleyd resume <wave>` continues each.
 and the move ends `failed` here. One that failed after rotating volleyd's login (exit 3) has this
 supervisor rotate it again (`volley auth rotate volleyd --json`, written to `broker.json` 0600);
 the broker connection it lost is fatal then, so the service manager starts it again with the new
-login and the failed move republished. After a `done`, `role_rollback { move_id }` (on the new
-supervisor, within 7 days) moves the supervisor back the same way.
+login and the failed move republished.
 
 #### Moving the broker
 
@@ -1833,9 +1834,7 @@ service manager starts it again through the tunnel: it republishes every retaine
 the move's record included, so `volley role status` and the moves topic show the outcome once you
 reconnect. A failing step undoes the ones done, in reverse: every machine back on the tunnel it
 had, the Desk told the old host, the tunnel down, the old broker started; the move ends `failed`
-with `rolled_back: true`. `role_rollback { move_id }` does the same from the move's record within
-7 days (the old state file was never removed). The broker on box-a keeps running afterwards:
-stop it there.
+with `rolled_back: true`.
 
 **Your sessions afterwards.** Every machine, the Desk and volleyd are re-pointed; your own Claude
 Code sessions on this machine are not (their MCP server and hooks name the broker URL they were
@@ -1845,6 +1844,29 @@ prints:
 ```sh
 volley setup --step claude-code --broker-url mqtt://127.0.0.1:1883
 ```
+
+#### Rolling a move back
+
+`role_rollback { move_id }` undoes a `done` move within 7 days, as a new move the other way under
+a new id (`result: { move_id, rolls_back }`), on the supervisor that holds the move's record.
+Once it is done the original is `rolled_back` (journaled `role_rolled_back { by, move_id, role,
+to }`) and the record names the old machine again; a rollback that fails leaves the original
+`done`. Only a `done` move rolls back: not a failed one (it undid itself), not a rollback (move
+the role again instead), not one whose role has moved since (`the Desk runs on <machine> now, not
+box-a: not rolled back`).
+
+- **The Desk**: the kept service started here again (`systemctl --user start
+  volley-desk.service` or `launchctl bootstrap …`), checked, the record written back, the Desk on
+  box-a uninstalled. Answered once done, as the move was.
+- **The supervisor**: sent to the supervisor on box-a, which moves itself back as a supervisor
+  move does (a fresh bundle of its home, so what changed since travels back; box-a re-paired as
+  the old machine was). It answers `handing_over: true` at once; the original is marked
+  `rolled_back` at the hand-over and journaled by the supervisor back here once it is done.
+- **The broker**: from the move's record (`kept`): this machine's tunnel down (`volley broker
+  tunnel --off`, volleyd's unit back on its old URL), the old broker started (its state file was
+  never removed), its health, every paired machine back on the tunnel it had, the Desk told the
+  old host, the record. Answered as it starts, like the move; volleyd restarts on the old broker
+  once it is done. The broker on box-a keeps running: stop it there.
 
 ## Footprints and the overlap plan
 
