@@ -2,6 +2,8 @@
  * The modal sheet Settings › Machines opens over a card (Repair, Remove): a
  * scrim, a labelled `dialog` that traps focus, closes on Escape and gives
  * focus back to its opener. Full-screen at phone width (machines.css).
+ * `closable: false` (a role move while it plans or runs) keeps it open: Escape,
+ * the scrim and the close button do nothing then.
  */
 import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -11,10 +13,12 @@ import { useFocusTrap } from "../a11y/keys";
 export function MachineSheet({
   label,
   onClose,
+  closable = true,
   children,
 }: {
   label: string;
   onClose: () => void;
+  closable?: boolean;
   children: ReactNode;
 }) {
   const dialog = useRef<HTMLDivElement>(null);
@@ -27,7 +31,10 @@ export function MachineSheet({
     };
   }, []);
   return (
-    <div className="m-sheet-scrim" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div
+      className="m-sheet-scrim"
+      onPointerDown={(e) => closable && e.target === e.currentTarget && onClose()}
+    >
       <div
         ref={dialog}
         className="m-sheet"
@@ -41,12 +48,18 @@ export function MachineSheet({
           // Claimed, so the Settings window behind it does not close too.
           e.preventDefault();
           e.stopPropagation();
-          onClose();
+          if (closable) onClose();
         }}
       >
         <div className="m-sheet-head">
           <b>{label}</b>
-          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close">
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={onClose}
+            disabled={!closable}
+            aria-label="Close"
+          >
             <HugeiconsIcon icon={Cancel01Icon} size={15} strokeWidth={1.8} />
           </button>
         </div>

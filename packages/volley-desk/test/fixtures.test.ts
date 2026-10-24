@@ -230,10 +230,32 @@ describe("fixtures — schema validity", () => {
         return "machine.schema.json";
       case "readiness":
         return "readiness.schema.json";
+      case "roles":
+        return "roles.schema.json";
+      case "roleMove":
+        return "role-move.schema.json";
       default:
         return null; // admission: no schema yet
     }
   }
+
+  it("the demo carries the machine roles record and a finished Desk move, each validating", () => {
+    const msgs = demoMessages(NOW);
+    const roles = msgs.find((m) => m.topic === "volley/_system/roles");
+    const move = msgs.find((m) => m.topic.startsWith("volley/_system/roles/moves/"));
+    for (const [m, schema] of [
+      [roles, "roles.schema.json"],
+      [move, "role-move.schema.json"],
+    ] as const) {
+      expect(m?.envelope).toBeTruthy();
+      const validate = ajv.getSchema(schema);
+      if (!validate) throw new Error(`missing schema ${schema}`);
+      expect(validate(m?.envelope), ajv.errorsText(validate?.errors)).toBe(true);
+    }
+    const s = demoState(NOW);
+    expect(s.roles?.desk.machine).toBe("box-a");
+    expect(Object.values(s.roleMoves ?? {}).map((x) => x.status)).toEqual(["done"]);
+  });
 
   it("every demo envelope validates against its T1 schema", () => {
     const failures: string[] = [];

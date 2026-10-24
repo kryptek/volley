@@ -61,6 +61,8 @@ describe("createMqttClient (desk)", () => {
       "volley/_system/claude/+/signin",
       "volley/_system/claude/registry",
       "volley/_system/machines/#",
+      "volley/_system/roles",
+      "volley/_system/roles/moves/+",
       "volley/_inbox/+",
       "volley/_system/auth/replies/+",
     ]);
@@ -84,6 +86,8 @@ describe("createMqttClient (desk)", () => {
       "volley/demo/a/usage",
       "volley/_system/claude-accounts/work",
       "volley/_system/claude/work/signin",
+      "volley/_system/roles",
+      "volley/_system/roles/moves/mv-1",
     ];
     const pub = await mqtt.connectAsync(broker.url, { reconnectPeriod: 0 });
     for (const t of topics) await pub.publishAsync(t, envelope("a"));
