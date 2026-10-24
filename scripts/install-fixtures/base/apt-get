@@ -1,0 +1,13 @@
+#!/bin/sh
+printf '%s\n' "apt-get $*" >>"$STUB_LOG"
+if [ "${1:-}" = install ]; then
+  shift
+  for p in "$@"; do
+    case "$p" in
+      -*) ;;
+      ca-certificates) mkdir -p "$STUB_STATE/dpkg"; : >"$STUB_STATE/dpkg/$p" ;;
+      *) mkdir -p "$STUB_STATE/dpkg"; : >"$STUB_STATE/dpkg/$p"; "$STUB_FIXTURES/provide" "$p" "$STUB_BIN" ;;
+    esac
+  done
+fi
+exit 0

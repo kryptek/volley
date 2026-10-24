@@ -1,0 +1,19 @@
+#!/bin/sh
+printf '%s\n' "git $*" >>"$STUB_LOG"
+dir=.
+if [ "${1:-}" = -C ]; then dir=$2; shift 2; fi
+case "${1:-}" in
+  clone)
+    tag='' last=''
+    while [ $# -gt 0 ]; do
+      case "$1" in --branch) tag=$2; shift ;; esac
+      last=$1
+      shift
+    done
+    mkdir -p "$last/.git"
+    printf '%s\n' "$tag" >"$last/.git/stub-tag"
+    ;;
+  describe) cat "$dir/.git/stub-tag" 2>/dev/null || exit 128 ;;
+  checkout) for a in "$@"; do tag=$a; done; printf '%s\n' "$tag" >"$dir/.git/stub-tag" ;;
+esac
+exit 0
