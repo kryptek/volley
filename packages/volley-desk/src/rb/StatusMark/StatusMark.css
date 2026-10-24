@@ -1,9 +1,10 @@
+/* Desk edit (#365): --sm-done / --sm-error read the theme tokens (StatusMark.tsx still sets them inline). */
 .status-mark {
   --sm-size: 20px;
   --sm-stroke: 2;
   --sm-color: currentColor;
-  --sm-done: #22c55e;
-  --sm-error: #ef4444;
+  --sm-done: var(--ok);
+  --sm-error: var(--bad);
   --sm-fill: 0.06;
   --sm-font: 14px;
   --sm-draw: 240ms;

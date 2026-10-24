@@ -1,9 +1,11 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useEffect } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { Background, SURFACE_LITE_NOTE, degradeLook } from "../src/look/Background";
+import { applyLookToDocument, applyTheme } from "../src/look/applyLook";
 import {
   BACKGROUNDS,
   type BackgroundDef,
@@ -11,6 +13,7 @@ import {
   REACT_BITS_BACKGROUNDS,
   isLazyBackground,
 } from "../src/look/backgrounds";
+import { THEMES, THEME_LABEL } from "../src/look/themes";
 import { LOOK0, LOOK_STORAGE_KEY, type Look, useLook } from "../src/look/useLook";
 import { Appearance } from "../src/settings/Appearance";
 import { General } from "../src/settings/General";
@@ -31,6 +34,8 @@ let latest: Look;
 function Harness({ onArrange = () => {} }: { onArrange?: () => void }) {
   const [look, setLook] = useLook();
   latest = look;
+  // As App does: the theme applies to <html> on every change.
+  useEffect(() => applyLookToDocument({ theme: look.theme }), [look.theme]);
   return (
     <>
       <Background which={look.bg} dim={look.dim} backgrounds={stub} />
@@ -51,6 +56,7 @@ const grid = () => within(screen.getByRole("group", { name: "Backgrounds" }));
 beforeEach(() => {
   localStorage.clear();
 });
+afterEach(() => applyTheme("volley"));
 
 describe("background registry", () => {
   it("has every free React Bits background, plus None", () => {
@@ -89,6 +95,34 @@ describe("background registry", () => {
 });
 
 describe("Settings › Appearance and General", () => {
+  it("lists the twelve themes above Background, Volley picked; a click stores and applies one", () => {
+    render(<Harness />);
+    const group = screen.getByRole("group", { name: "Theme" });
+    const cards = within(group).getAllByRole("button");
+    expect(cards.map((b) => b.textContent)).toEqual(
+      THEME_LABEL.map(([id, name]) => (id === "lighter" ? `${name} · light` : name)),
+    );
+    expect(
+      cards.filter((b) => b.getAttribute("aria-pressed") === "true").map((b) => b.textContent),
+    ).toEqual(["Volley"]);
+    const headings = screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
+    expect(headings.indexOf("Theme")).toBeLessThan(headings.indexOf("Background"));
+    expect(document.documentElement.style.length).toBe(0);
+    fireEvent.click(within(group).getByRole("button", { name: "Dracula" }));
+    expect(stored().theme).toBe("dracula");
+    expect(latest.theme).toBe("dracula");
+    expect(within(group).getByRole("button", { name: "Dracula" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    // Dracula's palette arrives with #369; until then the id falls back to Volley, which writes nothing.
+    const hasDracula = THEMES.some((t) => t.id === "dracula");
+    expect(document.documentElement.dataset.theme).toBe(hasDracula ? "dracula" : undefined);
+    fireEvent.click(within(group).getByRole("button", { name: "Volley" }));
+    expect(document.documentElement.style.length).toBe(0);
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+  });
+
   it("counts the React Bits backgrounds", () => {
     render(<Harness />);
     expect(screen.getByText(/^63 backgrounds from React Bits\./)).toBeInTheDocument();

@@ -23,6 +23,7 @@ import {
   lazyBackground,
 } from "../src/look/backgrounds";
 import { CHROMES } from "../src/look/options";
+import { resolveTokens } from "./helpers/tokens";
 
 const base: Omit<FrameProps, "children"> = {
   id: "w",
@@ -166,7 +167,7 @@ describe("Frame depth (D10)", () => {
     expect(shadow).toMatch(/0 12px 24px -6px/);
     expect(shadow).toMatch(/0 40px 80px -20px/);
     expect(depth).toMatch(/background-image: var\(--win-body\)/);
-    const edge = rule(".win-edge");
+    const edge = resolveTokens(rule(".win-edge"));
     expect(edge).toMatch(/inset 0 1px 0 rgba\(255, 255, 255, 0\.18\)/);
     expect(edge).toMatch(/inset 0 -1px 0 rgba\(0, 0, 0, 0\.5\)/);
     expect(edge).toMatch(/inset 0 0 0 1px/);

@@ -2,8 +2,10 @@
  * The look's option tables, each defined once: the Appearance segments
  * (key, label, in the prototype's order), the stored-value validators in
  * `useLook` and the `Chrome`, `AttnStyle`, `NarrationFx` and `AgentIcons` types all derive
- * from them.
+ * from them. The theme table lives with the palettes in `themes.ts`.
  */
+export { THEME_LABEL } from "./themes";
+
 export const CHROME_LABEL = [
   ["glass", "Frosted glass"],
   ["liquid", "Liquid glass"],

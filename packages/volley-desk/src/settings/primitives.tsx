@@ -10,8 +10,11 @@
 import type { KeyboardEvent, ReactNode } from "react";
 import GooeyNav from "../rb/GooeyNav/GooeyNav";
 
-/** The Desk's cyan: the Settings window has no wave accent of its own. */
-const SEG_ACCENT = "#6ee7f9";
+/**
+ * The theme accent: the Settings window has no wave accent of its own. A `var()` works because
+ * `Seg` draws Gooey Nav without WebGL (`gl={false}`): the pill colour only reaches CSS (`--gn-pill`).
+ */
+const SEG_ACCENT = "var(--t-acc)";
 
 export function Group({
   title,
