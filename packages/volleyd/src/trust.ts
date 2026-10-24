@@ -22,8 +22,9 @@ import type { WaveId } from "./types";
  * its hooks do not run, so a launch there would look like a silent failure. volleyd checks the
  * repo root before the first spawn and, when untrusted, opens a `repo_untrusted` decision
  * instead of launching. It never accepts the dialog on its own: `recordRepoTrust` is called only
- * on the owner's explicit `trust` answer, or for a clone the owner added with `repo_add` (that add
- * is the consent, SPEC §4.6.21).
+ * on the owner's explicit `trust` answer, for a clone the owner added with `repo_add` (that add
+ * is the consent, SPEC §4.6.21), or by `volley setup --simulated` for the scratch clone it made
+ * itself for the simulated first wave (no `repo_trusted` journaled; SPEC §4.6.21's exception).
  */
 
 /** The repo's top-level directory (`git rev-parse --show-toplevel`), through the fence. */

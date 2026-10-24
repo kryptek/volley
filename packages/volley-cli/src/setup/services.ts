@@ -13,6 +13,7 @@ import { backupPath, writeConfig } from "../auth/config";
 import { installedBrokerUrl, withoutLogin } from "../peer/profile-checks";
 import { DESK_STAMP, deskStamp, writeDeskStamp } from "./desk-build";
 import { deskPortListeners, portConflict } from "./desk-port";
+import { withSimulator } from "./first-wave";
 import { deskBrokerHost } from "./journal";
 import { type LaunchdDeps, reloadLaunchd } from "./launchd";
 import { serviceEnv, servicePath } from "./service-path";
@@ -638,7 +639,7 @@ async function planServicesWith(ctx: SetupContext, withCmux: boolean): Promise<S
     return out;
   }
   const { platform, bun } = ctx.deps;
-  const env = serviceEnv(ctx);
+  const env = withSimulator(ctx, serviceEnv(ctx));
   const push = (c: Change | null) => {
     if (c !== null) out.changes.push(c);
   };
@@ -652,8 +653,16 @@ async function planServicesWith(ctx: SetupContext, withCmux: boolean): Promise<S
   const volleydCli = join(repo, "packages", "volleyd", "src", "cli.ts");
   if (platform === "darwin") {
     const install = [bun, volleydCli, "install", "--broker-url", ctx.auth.url];
-    // `volleyd install` writes the PATH it runs with into the plist.
-    const installEnv = { ...ctx.auth.env, PATH: env.PATH, VOLLEY_AUTH_DIR: ctx.auth.dir };
+    // `volleyd install` writes the PATH it runs with into the plist, and keeps the simulator on
+    // when it runs with it (withSimulator).
+    const installEnv = {
+      ...ctx.auth.env,
+      PATH: env.PATH,
+      VOLLEY_AUTH_DIR: ctx.auth.dir,
+      ...(env.VOLLEY_SIMULATED !== undefined
+        ? { VOLLEY_SIMULATED: env.VOLLEY_SIMULATED, VOLLEY_SIM_HOME: env.VOLLEY_SIM_HOME }
+        : {}),
+    };
     const dry = await ctx.deps.exec([...install, "--dry-run"], { env: installEnv });
     if (dry.code !== 0) {
       out.blocked = `\`volleyd install --dry-run\` failed (exit ${dry.code}): ${dry.stderr.trim()}`;

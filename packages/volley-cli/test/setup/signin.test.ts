@@ -108,6 +108,21 @@ describe("the Sign-ins step", () => {
     expect(maskLogin("octo-volley")).toBe("o•••");
   });
 
+  it("simulated (--simulated or VOLLEY_SIMULATED=1): git's credential helper is not asked for", async () => {
+    // The fake `gh auth setup-git` writes no git config, so a fresh machine never verified.
+    rmSync(join(m.ctx.home, ".gitconfig"));
+    for (const sim of [
+      { ...m.ctx, firstWave: { simulated: true } },
+      { ...m.ctx, auth: { ...m.ctx.auth, env: { ...m.ctx.auth.env, VOLLEY_SIMULATED: "1" } } },
+    ]) {
+      const plan = await planSignin(sim);
+      expect(plan.changes.map((c) => c.summary)).not.toContain(
+        "Let git push with your GitHub login (gh auth setup-git)",
+      );
+      expect(plan.row).toContain("✓ GitHub: signed in as o•••");
+    }
+  });
+
   it("adds the checkout to permissions.additionalDirectories (diff shown, the old file backed up); present: done", async () => {
     const settings = m.settingsFile;
     mkdirSync(dirname(settings), { recursive: true });

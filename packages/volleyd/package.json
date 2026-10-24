@@ -16,6 +16,7 @@
     "./procs": "./src/procs.ts",
     "./repos": "./src/repos.ts",
     "./roles/sheet": "./src/roles/sheet.ts",
+    "./trust": "./src/trust.ts",
     "./wave-file": "./src/wave-file.ts"
   },
   "scripts": {
@@ -29,6 +30,7 @@
     "ajv-formats": "^3.0.1",
     "volley-cli": "workspace:*",
     "volley-mcp": "workspace:*",
+    "volley-sim": "workspace:*",
     "yaml": "^2.6.0"
   },
   "devDependencies": {

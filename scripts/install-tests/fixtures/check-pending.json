@@ -1,0 +1,24 @@
+{
+  "version": "0.11.0",
+  "steps": [
+    {
+      "name": "broker",
+      "title": "Broker",
+      "status": "done",
+      "changes": []
+    },
+    {
+      "name": "services",
+      "title": "Services",
+      "status": "pending",
+      "changes": ["Start volleyd.service"]
+    },
+    {
+      "name": "first-wave",
+      "title": "Test wave",
+      "status": "done",
+      "changes": []
+    }
+  ],
+  "setup_at": "2026-10-24T10:03:05.000Z"
+}
