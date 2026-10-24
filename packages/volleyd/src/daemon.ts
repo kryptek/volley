@@ -339,6 +339,13 @@ import {
   replayLeases,
 } from "./leases";
 import {
+  type MachineAddEnv,
+  type MachineAddOutcome,
+  parseMachineAdd,
+  realMachineAddEnv,
+  runMachineAdd,
+} from "./machine-add";
+import {
   type DoctorReport,
   MACHINES_FILTER,
   MACHINE_CHANNEL,
@@ -697,6 +704,8 @@ export interface DaemonOptions {
    * env and the broker they log in to. Default: the real machine, volleyd's own broker URL.
    */
   setup?: Partial<Omit<SetupOpsOptions, "exec">>;
+  /** `machine_add`'s hub (machine-add.ts; tests): default the real machine. */
+  machineAdd?: Partial<MachineAddEnv>;
   /**
    * How often to prune expired one-time token logins (`volley auth list --json`); 0 disables.
    * Default: `token_prune_ms` when the daemon has broker credentials (`auth`), else 0.
@@ -892,6 +901,8 @@ const PEER_ADMIN_OPS: ReadonlySet<string> = new Set([
   "peer_remove",
   "peer_doctor",
   "peer_retarget",
+  // A bare box made a paired machine (the Desk's Add a bare machine).
+  "machine_add",
   // Repositories (SPEC §4.6.21).
   "repo_add",
   "repo_remove",
@@ -1565,6 +1576,8 @@ export class Daemon {
   private fleetSince: number | null = null;
   /** Hosts a `peer_doctor` runs on now (one at a time per host), and the requests it answers. */
   private readonly doctoring = new Set<string>();
+  /** The names a `machine_add` runs for now: one run per name. */
+  private readonly adding = new Set<string>();
   private readonly authRunning = new Set<string>();
   // --- Repositories (SPEC §4.6.21): repo_add's clone and trust runs ---
   /**
@@ -6206,6 +6219,62 @@ export class Daemon {
           journal: {
             type: "peer_doctor_run",
             data: { by: sender, name: run.name, fix: run.fix, clone: run.clone, ok: r.ok },
+          },
+        };
+      },
+    };
+  }
+
+  /**
+   * `machine_add` (admin, machine-add.ts, SPEC §4.6.14): checked inside the queue, its run (every
+   * step of `volley machine add` over ssh, minutes) awaited outside it, each row published on the
+   * reply topic as it happens. One run per name at a time. `machine_added` is journaled with how
+   * it signed in, never a password.
+   */
+  private machineAddOp(
+    p: Record<string, unknown>,
+    sender: string,
+    progress: (row: Record<string, unknown>) => void,
+  ): AuthOutcome | DeferredAuth {
+    const req = parseMachineAdd(p);
+    if (typeof req === "string")
+      return { reply: authReply("machine_add", { ok: false, error: req }) };
+    if (this.adding.has(req.name)) {
+      return {
+        reply: authReply("machine_add", {
+          ok: false,
+          error: `"${req.name}" is already being added: wait for that run to end`,
+        }),
+      };
+    }
+    this.adding.add(req.name);
+    const env = { ...realMachineAddEnv(this.version), ...this.opts.machineAdd };
+    const hub = {
+      paired: () => Object.keys(this.peers.paired()),
+      hosts: () => Object.keys(this.config.effective().hosts ?? {}),
+      mint: (name: string) => this.peers.mintFor(name, sender),
+    };
+    return {
+      later: async () => {
+        let r: MachineAddOutcome;
+        try {
+          r = await runMachineAdd(req, env, hub, (row) => progress({ op: "machine_add", ...row }));
+        } finally {
+          this.adding.delete(req.name);
+        }
+        return {
+          reply: authReply("machine_add", r.ok ? r : { ok: false, error: r.error }),
+          journal: {
+            type: "machine_added",
+            data: {
+              by: sender,
+              name: req.name,
+              target: req.address,
+              auth: req.key !== undefined ? "key" : "password",
+              sudo: req.sudo !== undefined,
+              ok: r.ok,
+              ...(r.ok ? { ready: r.result.ready } : r.step !== undefined ? { step: r.step } : {}),
+            },
           },
         };
       },
@@ -11308,6 +11377,12 @@ export class Daemon {
     const replyTo = tokenId !== null ? tokenReplyTopic(tokenId) : authReplyTopic(cid);
     const send = (r: AuthReply) =>
       this.publish(replyTo, this.envelope(AUTH_CHANNEL, "ack", r, cid), false);
+    // A long op's rows, before its answer (`machine_add`): progress envelopes on the same topic.
+    const progress = (row: Record<string, unknown>) => {
+      void this.publish(replyTo, this.envelope(AUTH_CHANNEL, "progress", row, cid), false).catch(
+        () => {},
+      );
+    };
     const key = `${topic}/${cid}`;
     const prior = this.authAnswered.get(key);
     if (prior !== undefined) return send(prior);
@@ -11362,7 +11437,7 @@ export class Daemon {
           : ROLE_OPS.has(payload.op as string)
             ? await this.roleOp(exec, sender, payload)
             : PEER_ADMIN_OPS.has(payload.op as string)
-              ? await this.peerAdminOp(exec, sender, payload)
+              ? await this.peerAdminOp(exec, sender, payload, progress)
               : await accountOp(
                   exec,
                   sender,
@@ -11481,11 +11556,13 @@ export class Daemon {
     exec: ExecFn,
     sender: string,
     p: Record<string, unknown>,
+    progress: (row: Record<string, unknown>) => void,
   ): Promise<AuthOutcome | DeferredAuth> {
     const op = p.op as string;
     const accounts = await listAccounts(exec);
     const why = typeof accounts === "string" ? accounts : adminRefusal(accounts, sender);
     if (why !== undefined) return { reply: authReply(op, { ok: false, error: why }) };
+    if (op === "machine_add") return this.machineAddOp(p, sender, progress);
     if (op === "peer_doctor") return this.peerDoctor(p, sender);
     if (op === "peer_retarget") return this.peerRetarget(p, sender);
     if (op === "repo_add") return this.repoAdd(p, sender);

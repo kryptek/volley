@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://volley.systems/schemas/0.1/auth-request.schema.json",
   "title": "Volley Account / Token Request",
-  "description": "A request on volley/_system/auth/ops/<username> (account, setup, pairing, repository, machine-role and archive ops from admin accounts; inbox_answer and resolve from a Desk login, the owner answering a Needs-you item from any screen, spec section 4.6.18) or volley-auth/redeem/<token_id> (token_redeem, published by that token's own login). The supervisor answers on volley/_system/auth/replies/<correlation_id> with an ack whose secret, if any, is sealed to reply_key. See spec section 4.6.10.",
+  "description": "A request on volley/_system/auth/ops/<username> (account, setup, pairing, repository, machine-role and archive ops from admin accounts; inbox_answer and resolve from a Desk login, the owner answering a Needs-you item from any screen, spec section 4.6.18) or volley-auth/redeem/<token_id> (token_redeem, published by that token's own login). The supervisor answers on volley/_system/auth/replies/<correlation_id> with an ack whose secret, if any, is sealed to reply_key; machine_add publishes progress envelopes (one per step and line) on that topic before its ack. See spec section 4.6.10.",
   "allOf": [
     {
       "$ref": "envelope.schema.json"
@@ -41,6 +41,7 @@
                 "peer_remove",
                 "peer_doctor",
                 "peer_retarget",
+                "machine_add",
                 "repo_add",
                 "repo_remove",
                 "repo_list",
@@ -203,7 +204,23 @@
               "minLength": 1,
               "maxLength": 255,
               "pattern": "^[^-\\s][^\\s]*$",
-              "description": "role_plan / role_move (broker): the ssh destination every machine's tunnel reaches the broker at (default: the target's hosts.<name>.target); peer_retarget: the ssh destination the machine's tunnel reaches the broker's machine at from now on (spec section 4.6.14)."
+              "description": "role_plan / role_move (broker): the ssh destination every machine's tunnel reaches the broker at (default: the target's hosts.<name>.target); peer_retarget: the ssh destination the machine's tunnel reaches the broker's machine at from now on; machine_add: the bare box's ssh destination, user@host (spec section 4.6.14)."
+            },
+            "auth": {
+              "type": "object",
+              "description": "machine_add: how the supervisor's first ssh to the box signs in, to install its own key there: key, an absolute path to a key file on the supervisor's machine, or password_ref, the box's password (read only by the supervisor, through an SSH_ASKPASS helper reading a 0600 temp file removed after that step; never journaled, logged or answered).",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "maxProperties": 1,
+              "properties": {
+                "key": { "type": "string", "pattern": "^/[^\\n\\u0000]*$" },
+                "password_ref": { "type": "string", "minLength": 1 }
+              }
+            },
+            "sudo_ref": {
+              "type": "string",
+              "minLength": 1,
+              "description": "machine_add: the box's sudo password, used only when it lacks what only sudo installs (git, tmux, curl, gh on Linux), through a SUDO_ASKPASS helper on the box reading a 0600 file removed when that step ends; never journaled, logged or answered."
             },
             "terminal": {
               "enum": ["cmux", "tmux"],
@@ -305,6 +322,10 @@
                 "required": ["op", "name", "address"],
                 "properties": { "port": { "minimum": 1024 } }
               }
+            },
+            {
+              "if": { "properties": { "op": { "const": "machine_add" } } },
+              "then": { "required": ["op", "address", "auth"] }
             },
             {
               "if": { "properties": { "op": { "const": "role_plan" } } },

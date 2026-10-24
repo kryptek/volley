@@ -4553,6 +4553,25 @@ SETUP (only with a SetupToken, `mintSetupToken`, and with one nothing else): the
   Never volleyd's own service (installing or restarting it would stop the volleyd answering),
   sudo, or the keychain (the logged-in session's): those stay terminal-only.
 
+MACHINE ADD (only with a MachineAddToken, `mintMachineAddToken`, and with one nothing else): the
+  steps `machine_add` (machine-add.ts, SPEC §4.6.14) runs to make a bare box a paired machine,
+  volley-cli's `volley machine add` step list without a terminal (no `ssh -t`):
+    ssh -T -o BatchMode=yes -o ConnectTimeout=<s> -o ServerAliveInterval=<s>
+      -o ServerAliveCountMax=<n> -o StrictHostKeyChecking=accept-new <target> bash -s
+    ssh -T -i <key> -o IdentitiesOnly=yes …the same… <target> bash -s   (the person's key)
+    ssh -T -o ConnectTimeout=<s> -o StrictHostKeyChecking=accept-new -o NumberOfPasswordPrompts=1
+      -o PreferredAuthentications=password,keyboard-interactive <target> bash -s   (a password:
+      env SSH_ASKPASS=<the token's helper>, SSH_ASKPASS_REQUIRE=force)
+  each to the token's target only (and its key only), its stdin exactly a script the run's
+  registry (volley-cli's `Scripts`) rendered; this machine's key creation (`ssh-keygen -t
+  ed25519 -N '' -q -f <home>/.ssh/id_ed25519`); a Mac's Remote Login check (`launchctl print
+  system/com.openssh.sshd`). A host key is trusted on first contact (nobody is at a terminal
+  to answer ssh's question).
+
+ASKPASS (the env rule): a command whose env sets SSH_ASKPASS, SSH_ASKPASS_REQUIRE or
+  SUDO_ASKPASS is refused, except MACHINE ADD's password form with exactly the token's helper
+  and `SSH_ASKPASS_REQUIRE=force` (no SUDO_ASKPASS: sudo runs on the box, from its own helper).
+
 TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal), each only
   with its token, checked by identity like consent tokens:
     LAUNCH_COMMAND   with a LaunchToken (`sealLaunchScript`: volleyd rendered that launch.sh)

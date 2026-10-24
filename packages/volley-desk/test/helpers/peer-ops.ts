@@ -6,6 +6,8 @@ import { vi } from "vitest";
 import type {
   AdminStatus,
   DoctorAnswer,
+  MachineAddAnswer,
+  MachineAddRequest,
   PeerOps,
   PeerRemoveResult,
   RepoAddResult,
@@ -13,7 +15,7 @@ import type {
   RepoRemoveResult,
   RepoStatusResult,
 } from "../../src/store/peerOps";
-import type { RepoMachines } from "../../src/store/types";
+import type { MachineAddRow, RepoMachines } from "../../src/store/types";
 import { NOW } from "./desk-msgs";
 
 type Known = ReturnType<PeerOps["known"]>;
@@ -60,6 +62,19 @@ export function fakePeerOps(over: Partial<PeerOps> = {}) {
     repoList: vi.fn(async (): Promise<RepoListResult> => ({ ok: true, repos: [] })),
     repoStatus: vi.fn(
       async (_slug?: string): Promise<RepoStatusResult> => ({ ok: true, repos: [] }),
+    ),
+    machineAdd: vi.fn(
+      async (
+        req: MachineAddRequest,
+        _onRow: (r: MachineAddRow) => void,
+      ): Promise<MachineAddAnswer> => ({
+        ok: true,
+        name: req.name ?? "box-a",
+        target: req.address,
+        ready: true,
+        signin: { gh: true, claude: true },
+        checks: [],
+      }),
     ),
     ...over,
   };

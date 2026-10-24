@@ -39,6 +39,8 @@ import {
  * through the clone orchestration. No line printed carries the pairing code or a password.
  */
 
+export type { DoctorReport };
+
 export interface ExecResult {
   code: number;
   stdout: string;
@@ -66,6 +68,29 @@ export interface MachineDeps {
   hostKeys: () => string[];
   /** A pairing code bound to `name` (`peer_invite { for }`), or null (its error printed). */
   mintCode: (name: string) => Promise<string | null>;
+  /** No terminal (volleyd's `machine_add`, for the Desk): what replaces each `ssh -t` step. */
+  headless?: Headless;
+  /** Each step as it starts (the Desk's progress rows). */
+  step?: (i: number, title: string) => void;
+  /** The doctor's report, once step 7 has it. */
+  report?: (r: DoctorReport) => void;
+}
+
+/**
+ * The run without a terminal: nobody answers a prompt, so ssh's own (the key install) becomes
+ * `installKey` with the person's key or password, sudo's (install.sh on a box that lacks what
+ * only sudo installs) a `SUDO_ASKPASS` helper on the box that reads `sudo` from a 0600 file
+ * removed when the step ends, and the two sign-ins are left to the Machines window's buttons.
+ */
+export interface Headless {
+  /** Every batch step's argv (volleyd's fenced form; `batchArgv` otherwise). */
+  batchArgv: string[];
+  /** The scripts this run may send (the fence's registry). */
+  scripts: Scripts;
+  /** Installs this machine's key on the box: runs the rendered `bash -s` script with the person's key or password. */
+  installKey: (script: string) => Promise<ExecResult>;
+  /** The box's sudo password, or undefined (then a box that needs sudo stops at step 2). */
+  sudo?: string;
 }
 
 export interface MachineAddOptions {
@@ -192,19 +217,44 @@ export function renderRow(name: string, target: string, r: DoctorReport): string
   return `${lines.join("\n")}\n`;
 }
 
+/**
+ * What a headless install.sh runs first on the box: `sudo` on its PATH is a wrapper running the
+ * real one with `-A`, whose `SUDO_ASKPASS` helper reads the password from a 0600 file in a 0700
+ * directory; the trap removes the directory when the step ends (an `exit` in install.sh too). The
+ * password travels base64 in the script on ssh's stdin: never in an argv, never echoed.
+ */
+export function sudoPrelude(password: string): string {
+  const b64 = Buffer.from(password, "utf-8").toString("base64");
+  return [
+    'volley_sudo=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/volley-sudo.XXXXXX")',
+    `trap 'rm -rf "$volley_sudo"' EXIT`,
+    `( umask 077 && printf '%s' ${sq(b64)} | base64 -d > "$volley_sudo/pw" )`,
+    `printf '#!/bin/sh\\ncat "%s/pw"\\n' "$volley_sudo" > "$volley_sudo/askpass"`,
+    "volley_real_sudo=$(command -v sudo || true)",
+    'if [ -n "$volley_real_sudo" ]; then',
+    `  printf '#!/bin/sh\\nSUDO_ASKPASS="%s/askpass" exec "%s" -A "$@"\\n' "$volley_sudo" "$volley_real_sudo" > "$volley_sudo/sudo"`,
+    '  chmod 700 "$volley_sudo/askpass" "$volley_sudo/sudo"',
+    '  export PATH="$volley_sudo:$PATH"',
+    "fi",
+  ].join("\n");
+}
+
 export async function machineAdd(
   opts: MachineAddOptions,
   deps: MachineDeps,
   io: IO,
 ): Promise<ExitCode> {
   const { target, name, hub } = opts;
-  const scripts = new Scripts();
+  const headless = deps.headless;
+  const scripts = headless?.scripts ?? new Scripts();
+  const batchAt = headless?.batchArgv ?? batchArgv(target);
   const fence = machineFence({
     target,
     name,
     home: deps.home,
     volleyArgv: deps.volleyArgv,
     scripts,
+    batch: batchAt,
   });
   // Once minted, the code never reaches the terminal (a relayed line included).
   let secret: string | null = null;
@@ -215,11 +265,14 @@ export async function machineAdd(
     fence(argv, o);
     return deps.exec(argv, o);
   };
-  const batch = (body: string) => run(batchArgv(target), { input: scripts.script(body) });
+  const batch = (body: string) => run(batchAt, { input: scripts.script(body) });
   const relay = (r: ExecResult) => {
     for (const l of `${r.stdout}${r.stderr}`.split("\n")) if (l.trim() !== "") out(`      ${l}\n`);
   };
-  const header = (i: number, title: string) => out(`\n[${i}/${TOTAL}] ${title}\n`);
+  const header = (i: number, title: string) => {
+    deps.step?.(i, title);
+    out(`\n[${i}/${TOTAL}] ${title}\n`);
+  };
   const fail = (msg: string) => {
     err(`volley machine add: ${msg}\n`);
     return EXIT.ERROR;
@@ -248,20 +301,30 @@ export async function machineAdd(
     }
     const key = readFileSync(pub, "utf-8").trim();
     if (!PUBKEY_RE.test(key)) return fail(`${pub} is not a public key`);
-    out(
-      `  → Install this machine's key (${pub}) in ${target}'s ~/.ssh/authorized_keys: ssh connects once on this terminal, and any prompt is ssh's own\n`,
-    );
-    const install = scripts.command(
-      [
-        "umask 077",
-        'mkdir -p "$HOME/.ssh"',
-        'touch "$HOME/.ssh/authorized_keys"',
-        `grep -qxF ${sq(key)} "$HOME/.ssh/authorized_keys" || printf '%s\\n' ${sq(key)} >> "$HOME/.ssh/authorized_keys"`,
-      ].join("\n"),
-    );
-    const c = await run(connectArgv(target, install), { tty: true });
-    if (c.code !== 0)
-      return fail(`the ssh to ${target} that installs this machine's key failed (exit ${c.code})`);
+    const body = [
+      "umask 077",
+      'mkdir -p "$HOME/.ssh"',
+      'touch "$HOME/.ssh/authorized_keys"',
+      `grep -qxF ${sq(key)} "$HOME/.ssh/authorized_keys" || printf '%s\\n' ${sq(key)} >> "$HOME/.ssh/authorized_keys"`,
+    ].join("\n");
+    if (headless !== undefined) {
+      out(`  → Install this machine's key (${pub}) in ${target}'s ~/.ssh/authorized_keys\n`);
+      const c = await headless.installKey(scripts.script(body));
+      if (c.code !== 0) {
+        return fail(
+          `could not sign in to ${target} to install this machine's key (${why(c)}): check the address and the key or password`,
+        );
+      }
+    } else {
+      out(
+        `  → Install this machine's key (${pub}) in ${target}'s ~/.ssh/authorized_keys: ssh connects once on this terminal, and any prompt is ssh's own\n`,
+      );
+      const c = await run(connectArgv(target, scripts.command(body)), { tty: true });
+      if (c.code !== 0)
+        return fail(
+          `the ssh to ${target} that installs this machine's key failed (exit ${c.code})`,
+        );
+    }
     probe = await batch(PROBE);
   }
   if (probe.code !== 0) {
@@ -295,9 +358,25 @@ export async function machineAdd(
     if (installer.split("\n").includes(INSTALLER_EOF))
       return fail("install.sh cannot be sent as is");
     let r: ExecResult;
-    if (facts.missing.length > 0) {
+    const them = facts.missing.length === 1 ? "it" : "them";
+    if (facts.missing.length > 0 && headless !== undefined) {
+      if (headless.sudo === undefined) {
+        return fail(
+          `${name} lacks ${facts.missing.join(", ")}, and only sudo installs ${them} there: give its sudo password, or install ${them} on ${target} and add it again`,
+        );
+      }
       out(
-        `  ${name} lacks ${facts.missing.join(", ")}: the installer runs sudo there to install ${facts.missing.length === 1 ? "it" : "them"}, on this terminal (the password prompt is sudo's).\n`,
+        `  ${name} lacks ${facts.missing.join(", ")}: the installer runs sudo there to install ${them}, with the sudo password you gave (a 0600 file there, removed when this step ends).\n`,
+      );
+      out(`  → install.sh ${args.join(" ")}\n`);
+      // In a subshell, removed after it too: a trap install.sh set would replace the prelude's.
+      r = await batch(
+        `${sudoPrelude(headless.sudo)}\n(\nset -- ${args.join(" ")}\n${installer}\n)\nvolley_rc=$?\nrm -rf "$volley_sudo"\nexit "$volley_rc"`,
+      );
+      relay(r);
+    } else if (facts.missing.length > 0) {
+      out(
+        `  ${name} lacks ${facts.missing.join(", ")}: the installer runs sudo there to install ${them}, on this terminal (the password prompt is sudo's).\n`,
       );
       const up = await batch(
         `mkdir -p "$HOME/.volley" && cat > "$HOME/.volley/install.sh" <<'${INSTALLER_EOF}'\n${installer.replace(/\n$/, "")}\n${INSTALLER_EOF}`,
@@ -417,6 +496,10 @@ export async function machineAdd(
   const claudeIn = report.auth.claude === "signed_in" || (report.claude_logins ?? []).length > 0;
   if (ghIn && claudeIn) {
     out("  ✓ GitHub and Claude are signed in\n");
+  } else if (headless !== undefined) {
+    out(
+      `  – ${[ghIn ? null : "GitHub", claudeIn ? null : "Claude"].filter(Boolean).join(" and ")}: the sign-in buttons on ${name}'s card\n`,
+    );
   } else if (!opts.signin) {
     out(
       `  – deferred (--no-signin): later, \`ssh -t ${target} ${GH_LOGIN.join(" ")}\` and \`volley claude add ${name} --machine ${name}\`\n`,
@@ -451,6 +534,7 @@ export async function machineAdd(
   }
 
   header(7, "Doctor");
+  deps.report?.(report);
   out(renderRow(name, target, report));
   return isReady(report) ? EXIT.OK : EXIT.ERROR;
 }

@@ -1,0 +1,18 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "admin-0123abcd",
+  "parent_id": null,
+  "wall_time": "2026-10-24T09:00:00.000Z",
+  "channel": "_system/auth",
+  "type": "query",
+  "correlation_id": "7b2e9f10-4c3d-4a8e-9f21-6d5c4b3a2e10",
+  "payload": {
+    "op": "machine_add",
+    "address": "dev@box-c.lan",
+    "auth": {
+      "password_ref": "correct-horse-battery"
+    },
+    "sudo_ref": "correct-horse-battery",
+    "name": "box-c"
+  }
+}

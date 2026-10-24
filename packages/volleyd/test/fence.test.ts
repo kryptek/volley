@@ -11,14 +11,17 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
+import { REMOTE_LOGIN_ARGV, Scripts, keygenArgv } from "volley-cli/machine/ssh";
 import { addAccount, profileDir } from "../src/claude/profiles";
 import { exec } from "../src/exec";
 import {
   FenceError,
   MODEL_ID,
   assertAllowed,
+  machineAddArgv,
   mintConsentToken,
   mintHandoffToken,
+  mintMachineAddToken,
   mintMergeToken,
   mintModelSwitchToken,
   mintPickerToken,
@@ -1939,5 +1942,85 @@ describe("machine roles (#466, #469): the LOCAL commands of a role move", () => 
       ["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-oProxyCommand=x", "true"],
     ])
       expect(ok(...argv), argv.join(" ")).toThrow(FenceError);
+  });
+});
+
+describe("MACHINE ADD (machine_add, with its token and nothing else)", () => {
+  const home = "/path/to/home";
+  const target = "dev@box-a";
+  const scripts = new Scripts();
+  const script = scripts.script("volley setup --peer --yes");
+  const askpass = "/path/to/tmp/volleyd-askpass-x/askpass";
+  const key = "/path/to/home/.ssh/box_key";
+  const t = mintMachineAddToken({ target, home, scripts, key, askpass });
+  const env = { PATH: "/usr/bin", SSH_ASKPASS: askpass, SSH_ASKPASS_REQUIRE: "force" };
+
+  it("allows the batch form, the person's key, the password form and the hub's own steps", () => {
+    const ok = (argv: string[], o: Parameters<typeof assertAllowed>[1] = {}) =>
+      expect(() => assertAllowed(argv, { machineAdd: t, ...o }), argv.join(" ")).not.toThrow();
+    ok(machineAddArgv(target, "batch"), { input: script });
+    ok(machineAddArgv(target, "key", key), { input: script });
+    ok(machineAddArgv(target, "password"), { input: script, env });
+    ok(["ssh-keygen", "-t", "ed25519", "-N", "", "-q", "-f", `${home}/.ssh/id_ed25519`]);
+    ok(["launchctl", "print", "system/com.openssh.sshd"]);
+    // Host keys: trusted on first contact (nobody is at a terminal to answer ssh's question).
+    expect(machineAddArgv(target, "batch")).toContain("StrictHostKeyChecking=accept-new");
+    expect(machineAddArgv(target, "password")).not.toContain("BatchMode=yes");
+  });
+
+  it("refuses a script it did not render, another target or key, and anything else", () => {
+    const no = (argv: string[], o: Parameters<typeof assertAllowed>[1] = {}) =>
+      expect(() => assertAllowed(argv, { machineAdd: t, ...o }), argv.join(" ")).toThrow(
+        FenceError,
+      );
+    no(machineAddArgv(target, "batch"), { input: "rm -rf ~\n" });
+    no(machineAddArgv(target, "batch"));
+    no(machineAddArgv("dev@box-b", "batch"), { input: script });
+    no(machineAddArgv(target, "key", "/path/to/home/.ssh/other"), { input: script });
+    no(["ssh", "-t", target, "sudo true"], { input: script });
+    no(["git", "status"]);
+    no(["volley", "peer", "doctor", "--json"]);
+    // The password form without its askpass env (or with another helper) is refused.
+    no(machineAddArgv(target, "password"), { input: script });
+    no(machineAddArgv(target, "password"), {
+      input: script,
+      env: { ...env, SSH_ASKPASS: "/path/to/evil" },
+    });
+    // A look-alike token is refused.
+    expect(() =>
+      assertAllowed(machineAddArgv(target, "batch"), {
+        machineAdd: { target, home, scripts, key: null, askpass: null },
+        input: script,
+      }),
+    ).toThrow(FenceError);
+  });
+
+  it("an askpass env is refused on every other command (the SSH_ASKPASS env rule)", () => {
+    for (const e of [
+      { SSH_ASKPASS: askpass },
+      { SUDO_ASKPASS: askpass },
+      { SSH_ASKPASS_REQUIRE: "force" },
+    ]) {
+      expect(() => assertAllowed(["git", "status"], { env: e })).toThrow(FenceError);
+      expect(() =>
+        assertAllowed(machineAddArgv(target, "batch"), { machineAdd: t, input: script, env: e }),
+      ).toThrow(FenceError);
+    }
+    // An empty one is no askpass.
+    expect(() => assertAllowed(["git", "status"], { env: { SSH_ASKPASS: "" } })).not.toThrow();
+  });
+});
+
+describe("MACHINE ADD's own argv match volley-cli's", () => {
+  it("key creation and the Remote Login check are the CLI's exact argv", () => {
+    const t = mintMachineAddToken({
+      target: "dev@box-a",
+      home: "/path/to/home",
+      scripts: new Scripts(),
+      key: null,
+      askpass: null,
+    });
+    for (const argv of [keygenArgv("/path/to/home"), [...REMOTE_LOGIN_ARGV]])
+      expect(() => assertAllowed(argv, { machineAdd: t }), argv.join(" ")).not.toThrow();
   });
 });

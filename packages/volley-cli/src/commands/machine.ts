@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import pkg from "../../package.json";
@@ -10,6 +9,7 @@ import { pairedPeers } from "../deploy/peers";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
 import { type ExecResult, type MachineDeps, machineAdd } from "../machine/add";
+import { readHostKeys } from "../machine/ssh";
 import { askVolleyd, defaultName, replyKeyPair, unseal } from "./peer";
 import { lanAddress } from "./setup";
 
@@ -165,17 +165,7 @@ function realDeps(
       const { peers, problems } = pairedPeers(volleydHome(env));
       return [...peers.map((p) => p.name), ...problems.map((p) => p.name)];
     },
-    hostKeys: () =>
-      ["ed25519", "ecdsa", "rsa"].flatMap((t) => {
-        const f = join("/etc", "ssh", `ssh_host_${t}_key.pub`);
-        if (!existsSync(f)) return [];
-        try {
-          const [type, key] = readFileSync(f, "utf-8").trim().split(/\s+/);
-          return type !== undefined && key !== undefined ? [`${type} ${key}`] : [];
-        } catch {
-          return [];
-        }
-      }),
+    hostKeys: () => readHostKeys(),
     mintCode: async (name) => {
       const key = replyKeyPair();
       const a = await askVolleyd(

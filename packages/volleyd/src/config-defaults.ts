@@ -404,6 +404,13 @@ export const DAEMON_DEFAULTS = {
   peer_retarget_timeout_ms: 90_000,
   /** How long `peer_retarget` waits for the box's record to come `up` through the new tunnel. */
   peer_retarget_grace_ms: 120_000,
+  /** ssh's ConnectTimeout for a `machine_add` step (machine-add.ts). */
+  machine_add_connect_timeout_s: 15,
+  /** ssh's ServerAliveInterval / ServerAliveCountMax for a `machine_add` batch step. */
+  machine_add_alive_interval_s: 15,
+  machine_add_alive_count_max: 4,
+  /** Bound on one `machine_add` step on a box (install.sh may apt-get and build for minutes). */
+  machine_add_step_timeout_ms: 1_200_000,
   // --- Machine roles (roles/, SPEC §4.6.24) ---
   /**
    * How long a finished role move (its log, record and what it replaced) is kept for a
