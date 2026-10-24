@@ -95,6 +95,24 @@ describe("evaluate: the targets", () => {
     expect(r.markdown).toContain("| `--check` | 2/3 done | all done | ❌ |");
   });
 
+  test("a skipped row fails unless that step may be skipped here (--no-lan on a Mac: the phone)", () => {
+    const m = fixture("metrics-pass.json");
+    const c = fixture("check-phone-skipped.json");
+    expect(evaluate({ ...base, metrics: m, check: c }).failures).toEqual([
+      "`volley setup --check`: phone is skipped (a phone cannot reach the broker (it is on this machine only))",
+    ]);
+    const r = evaluate({ ...base, metrics: m, check: c, allowSkipped: ["phone"] });
+    expect(r.failures).toEqual([]);
+    expect(r.markdown).toContain(
+      "| `--check` | 3/4 done, 1 skipped (allowed: phone) | all done | ✅ |",
+    );
+    // Allowed to be skipped is not allowed to be pending or blocked.
+    const pending = fixture("check-pending.json");
+    expect(
+      evaluate({ ...base, metrics: m, check: pending, allowSkipped: ["services"] }).failures,
+    ).toHaveLength(1);
+  });
+
   test("a test wave that did not merge, or never ran, fails when one is required", () => {
     const c = fixture("check-pass.json");
     expect(
@@ -135,6 +153,12 @@ describe("the summary command", () => {
       expect(r.stdout).toContain("❌");
     });
   }
+
+  test("--allow-skipped <step> lets that step's row be skipped", () => {
+    const args = summaryArgs("metrics-pass.json", "check-phone-skipped.json");
+    expect(run(args).code).toBe(1);
+    expect(run([...args, "--allow-skipped", "phone"]).code).toBe(0);
+  });
 
   test("a missing file fails and says which", () => {
     const r = run(summaryArgs("nope.json", "check-pass.json"));

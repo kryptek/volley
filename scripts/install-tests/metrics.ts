@@ -3,10 +3,11 @@
  * against the one-command install's targets and rendered for the job's step summary.
  *
  *   bun scripts/install-tests/metrics.ts summary --label <name> --metrics <setup-metrics.json>
- *       --check <check.json> [--yes] [--first-wave] [--total-ms <n>]
+ *       --check <check.json> [--yes] [--first-wave] [--total-ms <n>] [--allow-skipped <step>]...
  *     The table on stdout (and appended to $GITHUB_STEP_SUMMARY); exit 1 when setup's wall time
  *     or the install's end to end is over 15 minutes, setup asked a question under --yes, a
- *     `volley setup --check --json` row is not done, or (--first-wave) the test wave did not merge.
+ *     `volley setup --check --json` row is not done (or skipped, for a step --allow-skipped
+ *     names), or (--first-wave) the test wave did not merge.
  *
  *   bun scripts/install-tests/metrics.ts scan [--secrets <credentials.json>]... <log>...
  *     Exit 1 when a log line holds token- or password-shaped text or one of the secrets in the
@@ -69,6 +70,8 @@ export function evaluate(input: {
   firstWave: boolean;
   /** The install end to end (install.sh through the last setup run), when the job timed it. */
   totalMs?: number;
+  /** Steps whose row may be skipped on this platform (`--no-lan` on a Mac skips the phone). */
+  allowSkipped?: readonly string[];
 }): Evaluation {
   const { metrics: m, check } = input;
   const failures: string[] = [];
@@ -119,13 +122,22 @@ export function evaluate(input: {
     );
   }
 
+  const allowed = input.allowSkipped ?? [];
   const done = check.steps.filter((s) => s.status === "done").length;
+  const skipped = check.steps.filter((s) => s.status === "skipped" && allowed.includes(s.name));
+  let checkOk = true;
   for (const s of check.steps) {
-    if (s.status === "done") continue;
+    if (s.status === "done" || skipped.includes(s)) continue;
+    checkOk = false;
     const why = s.blocked ?? s.skipped ?? s.changes.join("; ");
     failures.push(`\`volley setup --check\`: ${s.name} is ${s.status}${why ? ` (${why})` : ""}`);
   }
-  row("`--check`", `${done}/${check.steps.length} done`, "all done", done === check.steps.length);
+  row(
+    "`--check`",
+    `${done}/${check.steps.length} done${skipped.length > 0 ? `, ${skipped.length} skipped (allowed: ${skipped.map((s) => s.name).join(", ")})` : ""}`,
+    "all done",
+    checkOk,
+  );
 
   const steps = m.steps.map((s) => `| ${s.name} | ${(s.ms / 1000).toFixed(1)} s | ${s.changes} |`);
   const markdown = [
@@ -240,6 +252,7 @@ function main(argv: string[]): number {
       check: { type: "string" },
       yes: { type: "boolean" },
       "first-wave": { type: "boolean" },
+      "allow-skipped": { type: "string", multiple: true },
       "total-ms": { type: "string" },
     });
     const { label, metrics, check } = values as Record<string, string | undefined>;
@@ -255,6 +268,7 @@ function main(argv: string[]): number {
       check: readJson(check) as CheckReport,
       yes: values.yes === true,
       firstWave: values["first-wave"] === true,
+      allowSkipped: (values["allow-skipped"] as string[] | undefined) ?? [],
       ...(total !== undefined ? { totalMs: Number(total) } : {}),
     });
     process.stdout.write(`${r.markdown}\n`);

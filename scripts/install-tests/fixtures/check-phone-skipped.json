@@ -1,0 +1,31 @@
+{
+  "version": "0.11.0",
+  "steps": [
+    {
+      "name": "broker",
+      "title": "Broker",
+      "status": "done",
+      "changes": []
+    },
+    {
+      "name": "services",
+      "title": "Services",
+      "status": "done",
+      "changes": []
+    },
+    {
+      "name": "first-wave",
+      "title": "Test wave",
+      "status": "done",
+      "changes": []
+    },
+    {
+      "name": "phone",
+      "title": "Phone",
+      "status": "skipped",
+      "changes": [],
+      "skipped": "a phone cannot reach the broker (it is on this machine only)"
+    }
+  ],
+  "setup_at": "2026-10-24T10:03:05.000Z"
+}

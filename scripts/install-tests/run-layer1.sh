@@ -99,6 +99,9 @@ broker_restart() {
 
 SETUP_FLAGS=''
 TRANSCRIPT=''
+# A step this platform's setup skips by design (`--no-lan` on a Mac: the phone cannot reach the
+# broker), allowed to be skipped rather than done.
+ALLOW_SKIPPED=''
 
 # `volley setup` with the platform's flags, its output appended to the raw transcript.
 setup_run() {
@@ -149,7 +152,8 @@ common_checks() {
     before=$(wc -l <"$vh/setup.log" 2>/dev/null || echo 0)
     setup_run || fail "the second volley setup --yes exited non-zero"
     tail -n +"$((before + 1))" "$vh/setup.log" >"$OUT/setup-rerun.log" 2>/dev/null
-    others=$(grep -cv '"event":"done"' "$OUT/setup-rerun.log" 2>/dev/null) || true
+    others=$(grep -v '"event":"done"' "$OUT/setup-rerun.log" 2>/dev/null |
+      grep -cv "\"step\":\"${ALLOW_SKIPPED:-none}\",\"event\":\"skipped\"") || true
     [ -s "$OUT/setup-rerun.log" ] || fail "the second run wrote nothing to setup.log"
     [ "${others:-0}" -eq 0 ] || fail "the second run did more than report done ($others events; setup-rerun.log)"
     collect_logs
@@ -165,7 +169,8 @@ common_checks() {
   say "The summary"
   GITHUB_STEP_SUMMARY="$OUT/summary.md" metrics summary --label "$label" \
     --metrics "$OUT/setup-metrics.json" --check "$OUT/check.json" --yes --first-wave \
-    --total-ms "$total_ms" || fail "a target was missed (summary.md)"
+    --total-ms "$total_ms" ${ALLOW_SKIPPED:+--allow-skipped "$ALLOW_SKIPPED"} ||
+    fail "a target was missed (summary.md)"
 }
 
 # The run's metrics, kept before a rerun replaces them, and its logs (a job cut off later still
@@ -277,6 +282,8 @@ macos() {
   # Homebrew links mosquitto into sbin; Setup's Security step starts it (brew services).
   PATH="$PATH:$(brew --prefix)/sbin"
   AUTH_DIR="$(brew --prefix)/etc/mosquitto/volley"
+  # --no-lan keeps the broker's WebSocket listener on loopback here: no phone reaches it.
+  ALLOW_SKIPPED=phone
 
   say "volley setup --yes --no-lan --simulated"
   if setup_run; then SETUP_OK=1; else fail "volley setup exited non-zero"; fi
