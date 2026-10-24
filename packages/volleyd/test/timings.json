@@ -154,6 +154,7 @@
   "test/roles-broker.test.ts": 2.98,
   "test/roles-bundle.test.ts": 0.01,
   "test/roles-desk.test.ts": 0.45,
+  "test/roles-e2e.test.ts": 1.02,
   "test/roles-engine.test.ts": 0.01,
   "test/roles-record.test.ts": 0.01,
   "test/roles-sheet.test.ts": 0.01,

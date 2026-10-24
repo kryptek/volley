@@ -340,9 +340,15 @@ on both, wherever there is room, without deciding by hand.
    re-place the queued tasks elsewhere, or cancel. An overloaded machine takes no new agents
    until it calms down. `volley peer remove box-a --drain` lets its agents finish first. A
    running agent is never moved.
+6. **Move a role.** The broker, the supervisor and the Desk start on the Mac, and you can move
+   the broker, the supervisor or the Desk to the box from the Desk: the box's card › **Move a
+   role here…** shows every step and the machine it runs on before anything changes, and a done
+   move is undone within 7 days (**Undo this move**, or `volley role rollback <move_id>`).
+   `volley role status` says where each runs.
 
-The details: the volleyd README's [Fleet](packages/volleyd/README.md#fleet) section and the
-owner's run on real hardware, [`SMOKE.md`](SMOKE.md) Plan 12.
+The details: the volleyd README's [Fleet](packages/volleyd/README.md#fleet) and
+[Machine roles](packages/volleyd/README.md#machine-roles) sections, and the owner's runs on real
+hardware, [`SMOKE.md`](SMOKE.md) Plan 12 and [`docs/SMOKE-v0.11.md`](docs/SMOKE-v0.11.md) part B.
 
 Agents that volleyd does not supervise join the same view by pointing at the same broker: your
 Claude Code here, a Codex job on the desktop, a nightly script on a VPS. `/volley list

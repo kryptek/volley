@@ -5,9 +5,6 @@ import { FenceError, type FenceOptions, assertAllowed, renderRemoteScript } from
 
 export interface ExecOptions extends FenceOptions {
   cwd?: string;
-  env?: Record<string, string | undefined>;
-  /** Written to the child's stdin, which is then closed. Not with `remote` (that is the stdin). */
-  input?: string;
   /** Kills the child (SIGTERM, then SIGKILL after the grace) when aborted: long-lived children. */
   signal?: AbortSignal;
   /**
@@ -65,6 +62,9 @@ export const exec: ExecFn = async (argv, opts = {}) => {
     ...(opts.signinEntry !== undefined ? { signinEntry: opts.signinEntry } : {}),
     ...(opts.setup !== undefined ? { setup: opts.setup } : {}),
     ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+    ...(opts.machineAdd !== undefined ? { machineAdd: opts.machineAdd } : {}),
+    ...(opts.env !== undefined ? { env: opts.env } : {}),
+    ...(opts.input !== undefined ? { input: opts.input } : {}),
   });
   if (opts.remote !== undefined && opts.input !== undefined) {
     throw new FenceError("ssh bash -s", "a raw input next to a fenced remote script");

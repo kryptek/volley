@@ -685,7 +685,10 @@ With no record (volleyd has never run against this broker) it exits 1 with
 `no roles record: is volleyd running?`. `--timeout <s>` (default 2) bounds the wait for the
 retained record; `--broker-url`, `--username` and `--password` as everywhere.
 
-### `volley role move` and `volley role rollback`
+### `volley role move`
+
+The moves below go in one order, the owner's smoke's (`docs/SMOKE-v0.11.md` part B): the Desk,
+the supervisor, the broker, then rolling each back.
 
 ```sh
 volley role move broker     --to <machine> [--address <ssh destination>] [--lan|--no-lan] [--drain] [--dry-run] [--yes]
@@ -737,10 +740,16 @@ the topic again over a fresh connection every few seconds until the supervisor, 
 new broker, republishes it. A broker move whose new machine is not the supervisor's prints the
 follow-on command (`volley role move supervisor --to <machine>`). `--drain` (broker, supervisor)
 lets a move wait for a quiet fleet instead of being refused; nothing new is admitted meanwhile.
-`volley role rollback <move_id>` undoes a done move within 7 days, as a new move the other way,
-streamed the same way. `--timeout <s>` bounds the wait for volleyd (default 30 s for the plan;
-a whole move 900 s for the Desk, 1200 s for the broker, 1800 s for the supervisor): exit 124
-when it passes.
+`--timeout <s>` bounds the wait for volleyd (default 30 s for the plan; a whole move 900 s for
+the Desk, 1200 s for the broker, 1800 s for the supervisor): exit 124 when it passes.
+
+### Moving the Desk
+
+`volley role move desk --to box-a [--port 5199]` (the example above) installs the Desk on box-a,
+checks it answers at the supervisor's version, records it, mints a sign-in link for the new
+address and stops the old Desk last, kept for a rollback. The move answers once it is done, with
+the link (sealed to this login's key, printed last): every device signs in again at the new
+address. A Desk that fails its check is uninstalled there and the old one never stopped.
 
 ### Moving the supervisor to another machine
 
@@ -778,11 +787,7 @@ received; 1 nothing changed; 3 a step after the rotation failed and was undone, 
 has a password the old machine does not know (the old supervisor rotates it again).
 
 Waves stopped for the move replay as `stopped` on the new machine: continue one with
-`volleyd resume <wave>`. Within 7 days, `volley role rollback <move_id>` (the admin op
-`role_rollback { move_id }`) moves the supervisor back as a new supervisor move: a fresh
-bundle of the current home travels back, so what changed since the move goes with it. The move
-undone is marked `rolled_back` at that hand-over; a rollback that fails leaves it `done`. After
-7 days the move's record is removed.
+`volleyd resume <wave>`.
 
 ### Moving the broker: `volley broker`
 
@@ -829,8 +834,26 @@ they were set up with. Re-register them through that machine's tunnel:
 volley setup --step claude-code --broker-url mqtt://127.0.0.1:1883
 ```
 
-`volley role rollback <move_id>` within 7 days starts the old broker again (its state file was
-never removed) and puts every machine back on the tunnel it had; stop the broker on box-a there.
+### `volley role rollback`
+
+```sh
+volley role rollback <move_id>
+```
+
+Undoes a done move within 7 days (the admin op `role_rollback { move_id }`), as a new move the
+other way, streamed as the move was; the move undone is then `rolled_back`, and a rollback that
+fails leaves it `done`. Only a done move rolls back, and only while its role still runs where the
+move put it; a rollback is not rolled back in turn (move the role again). After 7 days the move's
+record is removed.
+
+- **The Desk**: the old Desk, kept stopped, started and checked again; the record written back;
+  the Desk on box-a uninstalled.
+- **The supervisor**: the supervisor on box-a moves itself back as a supervisor move: a fresh
+  bundle of the current home travels back, so what changed since the move goes with it. The move
+  undone is marked `rolled_back` at that hand-over.
+- **The broker**: the old broker started again (its state file was never removed), this
+  machine's tunnel down, every machine back on the tunnel it had, the Desk told the old host.
+  Stop the broker on box-a there.
 
 ---
 

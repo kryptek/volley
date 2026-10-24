@@ -13,6 +13,7 @@ import {
   renderBrowserHelper,
   renderSigninScript,
 } from "./claude/signin-script";
+import { DAEMON_DEFAULTS } from "./config-defaults";
 import { volleydHome } from "./config-store";
 import {
   LAUNCH_COMMAND,
@@ -182,6 +183,25 @@ import { AGENT_BRANCH } from "./worktree";
  *       plan's probe only) · <bun> run build in <repo>/packages/volley-desk
  *   Never volleyd's own service (installing or restarting it would stop the volleyd answering),
  *   sudo, or the keychain (the logged-in session's): those stay terminal-only.
+ *
+ * MACHINE ADD (only with a MachineAddToken, `mintMachineAddToken`, and with one nothing else): the
+ *   steps `machine_add` (machine-add.ts, SPEC §4.6.14) runs to make a bare box a paired machine,
+ *   volley-cli's `volley machine add` step list without a terminal (no `ssh -t`):
+ *     ssh -T -o BatchMode=yes -o ConnectTimeout=<s> -o ServerAliveInterval=<s>
+ *       -o ServerAliveCountMax=<n> -o StrictHostKeyChecking=accept-new <target> bash -s
+ *     ssh -T -i <key> -o IdentitiesOnly=yes …the same… <target> bash -s   (the person's key)
+ *     ssh -T -o ConnectTimeout=<s> -o StrictHostKeyChecking=accept-new -o NumberOfPasswordPrompts=1
+ *       -o PreferredAuthentications=password,keyboard-interactive <target> bash -s   (a password:
+ *       env SSH_ASKPASS=<the token's helper>, SSH_ASKPASS_REQUIRE=force)
+ *   each to the token's target only (and its key only), its stdin exactly a script the run's
+ *   registry (volley-cli's `Scripts`) rendered; this machine's key creation (`ssh-keygen -t
+ *   ed25519 -N '' -q -f <home>/.ssh/id_ed25519`); a Mac's Remote Login check (`launchctl print
+ *   system/com.openssh.sshd`). A host key is trusted on first contact (nobody is at a terminal
+ *   to answer ssh's question).
+ *
+ * ASKPASS (the env rule): a command whose env sets SSH_ASKPASS, SSH_ASKPASS_REQUIRE or
+ *   SUDO_ASKPASS is refused, except MACHINE ADD's password form with exactly the token's helper
+ *   and `SSH_ASKPASS_REQUIRE=force` (no SUDO_ASKPASS: sudo runs on the box, from its own helper).
  *
  * TYPED_TEXT (cmux send, tmux send-keys -l: what is typed into an agent's terminal), each only
  *   with its token, checked by identity like consent tokens:
@@ -863,6 +883,120 @@ export function mintSetupToken(inputs: SetupFenceInputs): SetupToken {
   return token;
 }
 
+const machineAdds = new WeakSet<object>();
+
+/** Permission to run one `machine_add`'s steps (`mintMachineAddToken`; checked by identity). */
+export interface MachineAddToken {
+  readonly target: string;
+  /** This machine's home: its key creation's path. */
+  readonly home: string;
+  /** The scripts the run rendered (volley-cli's `Scripts`): the only stdin its ssh forms take. */
+  readonly scripts: { has(s: string | undefined): boolean };
+  /** The key the person named (`auth.key`), or null. */
+  readonly key: string | null;
+  /** The askpass helper the password form's env names, or null. */
+  readonly askpass: string | null;
+}
+
+/** Callers: machine-add.ts, once per `machine_add` run. */
+export function mintMachineAddToken(t: MachineAddToken): MachineAddToken {
+  if (!SSH_TARGET.test(t.target)) throw new FenceError(`ssh ${t.target}`, "not an ssh destination");
+  const token = Object.freeze({ ...t });
+  machineAdds.add(token);
+  return token;
+}
+
+/**
+ * The ssh argv of a `machine_add` step: `batch` (this machine's key, every step after the first),
+ * `key` (the person's key file) or `password` (ssh asks the token's askpass helper).
+ */
+export function machineAddArgv(
+  target: string,
+  how: "batch" | "key" | "password",
+  key?: string,
+): string[] {
+  const connect = `ConnectTimeout=${DAEMON_DEFAULTS.machine_add_connect_timeout_s}`;
+  const hostKey = "StrictHostKeyChecking=accept-new";
+  if (how === "password") {
+    return [
+      "ssh",
+      "-T",
+      "-o",
+      connect,
+      "-o",
+      hostKey,
+      "-o",
+      "NumberOfPasswordPrompts=1",
+      "-o",
+      "PreferredAuthentications=password,keyboard-interactive",
+      target,
+      "bash",
+      "-s",
+    ];
+  }
+  return [
+    "ssh",
+    "-T",
+    ...(how === "key" ? ["-i", key ?? "", "-o", "IdentitiesOnly=yes"] : []),
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    connect,
+    "-o",
+    `ServerAliveInterval=${DAEMON_DEFAULTS.machine_add_alive_interval_s}`,
+    "-o",
+    `ServerAliveCountMax=${DAEMON_DEFAULTS.machine_add_alive_count_max}`,
+    "-o",
+    hostKey,
+    target,
+    "bash",
+    "-s",
+  ];
+}
+
+/** This machine's key creation, as volley-cli's `keygenArgv` (no passphrase: BatchMode needs none). */
+const keygenArgv = (home: string): string[] => [
+  "ssh-keygen",
+  "-t",
+  "ed25519",
+  "-N",
+  "",
+  "-q",
+  "-f",
+  join(home, ".ssh", "id_ed25519"),
+];
+/** A Mac's Remote Login as launchd has it, as volley-cli's `REMOTE_LOGIN_ARGV`. */
+const REMOTE_LOGIN_ARGV = ["launchctl", "print", "system/com.openssh.sshd"];
+
+const ASKPASS_ENV = ["SSH_ASKPASS", "SSH_ASKPASS_REQUIRE", "SUDO_ASKPASS"] as const;
+
+/** Whether `env` sets an askpass helper (an empty value sets none). */
+const asksPass = (env: FenceOptions["env"]) =>
+  env !== undefined && ASKPASS_ENV.some((k) => (env[k] ?? "") !== "");
+
+/** The MACHINE ADD rows (see the header): the only commands a machine-add token allows. */
+function machineAddVerdict(
+  argv: readonly string[],
+  t: MachineAddToken,
+  opts: FenceOptions,
+): Verdict {
+  const script = t.scripts.has(opts.input);
+  const env = opts.env;
+  const askpassOk =
+    t.askpass !== null &&
+    env?.SSH_ASKPASS === t.askpass &&
+    env.SSH_ASKPASS_REQUIRE === "force" &&
+    (env.SUDO_ASKPASS ?? "") === "";
+  const ok = asksPass(env)
+    ? script && askpassOk && same(argv, machineAddArgv(t.target, "password"))
+    : (script &&
+        (same(argv, machineAddArgv(t.target, "batch")) ||
+          (t.key !== null && same(argv, machineAddArgv(t.target, "key", t.key))))) ||
+      same(argv, keygenArgv(t.home)) ||
+      same(argv, REMOTE_LOGIN_ARGV);
+  return ok ? ALLOW : deny(`${argv.slice(0, 3).join(" ")} (not a machine_add step)`);
+}
+
 const DESK_SERVICE = "systems.volley.desk";
 const DESK_UNIT = "volley-desk.service";
 const VOLLEYD_UNIT = "volleyd.service";
@@ -998,6 +1132,12 @@ export interface FenceOptions {
   setup?: SetupToken;
   /** The command's working directory; only the SETUP rows read it (the Desk build). */
   cwd?: string;
+  /** A `machine_add` step (machine-add.ts): only the MACHINE ADD rows, and nothing else. */
+  machineAdd?: MachineAddToken;
+  /** The child's environment; the ASKPASS rule reads it. */
+  env?: Record<string, string | undefined>;
+  /** Written to the child's stdin, which is then closed (not with `remote`, which is the stdin); the MACHINE ADD rows read it. */
+  input?: string;
 }
 
 type Verdict =
@@ -1433,6 +1573,13 @@ function exactly(argv: readonly string[], allowed: readonly (readonly string[])[
 
 /** Throw `FenceError` unless the policy above allows `argv`. */
 export function assertAllowed(argv: readonly string[], opts: FenceOptions = {}): void {
+  // Before every other branch: a sealed script or a setup token gets no askpass env either.
+  if (opts.machineAdd === undefined && asksPass(opts.env)) {
+    throw new FenceError(
+      `${argv.slice(0, 2).join(" ")} with an askpass env`,
+      "only a machine_add password step names an askpass helper",
+    );
+  }
   if (
     opts.script !== undefined &&
     scripts.has(opts.script) &&
@@ -1445,6 +1592,13 @@ export function assertAllowed(argv: readonly string[], opts: FenceOptions = {}):
     const v = setups.has(opts.setup)
       ? setupVerdict(argv, opts.setup.inputs, opts.cwd)
       : deny(`${argv.slice(0, 2).join(" ")} (a setup token volleyd did not mint)`);
+    if (v.kind !== "allow") throw new FenceError(v.verb, "not permitted for volleyd");
+    return;
+  }
+  if (opts.machineAdd !== undefined) {
+    const v = machineAdds.has(opts.machineAdd)
+      ? machineAddVerdict(argv, opts.machineAdd, opts)
+      : deny(`${argv.slice(0, 2).join(" ")} (a machine-add token volleyd did not mint)`);
     if (v.kind !== "allow") throw new FenceError(v.verb, "not permitted for volleyd");
     return;
   }
@@ -2137,6 +2291,8 @@ const SSH_OPTIONS = new Set([
   "ExitOnForwardFailure",
 ]);
 const SSH_TARGET = /^[A-Za-z0-9_][A-Za-z0-9_.-]*(@[A-Za-z0-9_][A-Za-z0-9_.-]*)?$/;
+/** An ssh destination the fence takes: `[user@]host`, never an option. */
+export const isSshTarget = (s: string): boolean => SSH_TARGET.test(s);
 /** `-R <remote port>:<host>:<port>`: no bind address, so the remote end stays on its loopback. */
 const SSH_REVERSE = /^[0-9]{1,5}:[A-Za-z0-9_][A-Za-z0-9_.-]*:[0-9]{1,5}$/;
 /** An absolute remote path: quoted when rendered; no newline (a heredoc delimiter could follow). */

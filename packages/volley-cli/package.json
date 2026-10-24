@@ -18,6 +18,8 @@
     "./commands/repo": "./src/commands/repo.ts",
     "./commands/setup": "./src/commands/setup.ts",
     "./io": "./src/io.ts",
+    "./machine/add": "./src/machine/add.ts",
+    "./machine/ssh": "./src/machine/ssh.ts",
     "./peer/machine": "./src/peer/checks/machine.ts",
     "./setup/accounts": "./src/setup/accounts.ts",
     "./setup/first-wave": "./src/setup/first-wave.ts",

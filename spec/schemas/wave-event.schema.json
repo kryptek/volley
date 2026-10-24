@@ -136,7 +136,8 @@
             "role_move_completed",
             "role_move_failed",
             "role_rolled_back",
-            "peer_retargeted"
+            "peer_retargeted",
+            "machine_added"
           ]
         },
         "payload": {

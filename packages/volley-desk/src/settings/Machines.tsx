@@ -16,7 +16,9 @@
  * waiting until a record for a host that was not there before arrives
  * (joined); then step 3 its checks and verdict (with Repair…), step 4 Claude
  * on it (Check again runs a dry doctor), step 5 its readiness and max_agents,
- * then Done. **Remove…** asks first, then sends `peer_remove`,
+ * then Done. **Add a bare machine…** does it all from here for a box with
+ * only ssh (`machine_add`, `AddMachineSheet`): volleyd installs Volley there,
+ * pairs and checks it, its rows streaming into the sheet. **Remove…** asks first, then sends `peer_remove`,
  * which revokes the machine's account and clears its record. Any other
  * session (not signed in, not an admin, demo, a browser that cannot make a
  * reply key at all) is read-only and is shown the terminal commands instead.
@@ -55,6 +57,7 @@ import {
   type RolesPayload,
   type WaveStatePayload,
 } from "../store/types";
+import { AddMachineSheet } from "./AddMachineSheet";
 import { type ControlFn, SignInOnDialog, type SignInPreset, signInPreset } from "./ClaudeAccounts";
 import {
   DEFAULT_MAX_AGENTS,
@@ -600,6 +603,8 @@ function readOnlyReason(secure: boolean, admin: AdminStatus | null): string {
 
 export function Machines(p: MachinesProps) {
   const [adding, setAdding] = useState(false);
+  /** Add a bare machine… (`machine_add`): its sheet is open. */
+  const [addingBare, setAddingBare] = useState(false);
   /** Re-pairing codes counting down on cards. */
   const [counting, setCounting] = useState(0);
   const onCountdown = useCallback((on: boolean) => setCounting((n) => n + (on ? 1 : -1)), []);
@@ -710,6 +715,18 @@ export function Machines(p: MachinesProps) {
             + Add a machine
           </button>
         )}
+        {canPair && !adding && (
+          <button
+            type="button"
+            className="machine machine--add"
+            onClick={() => {
+              setNotice(null);
+              setAddingBare(true);
+            }}
+          >
+            Add a bare machine…
+          </button>
+        )}
       </div>
       {machines.length === 0 && (
         <p className="s-hint">
@@ -728,6 +745,9 @@ export function Machines(p: MachinesProps) {
           hubUp={p.hubUp}
           onClose={() => setAdding(false)}
         />
+      )}
+      {canPair && addingBare && p.ops && (
+        <AddMachineSheet ops={p.ops} signIn={p.signIn} onClose={() => setAddingBare(false)} />
       )}
       {signingIn && p.claude?.control && (
         <SignInOnDialog

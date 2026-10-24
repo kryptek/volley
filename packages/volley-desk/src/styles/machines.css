@@ -469,8 +469,82 @@ button.m-local:focus-visible {
   color: #fff;
 }
 
+/* Add a bare machine… (AddMachineSheet): the form, then a row per step with its lines; the
+   theme's tokens, so the dark and light looks both follow. */
+.m-add-form {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 12px;
+  align-items: center;
+  margin-top: 10px;
+}
+.m-add-form > label {
+  color: var(--mute);
+}
+.m-add-how {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 16px;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  color: var(--ink);
+}
+.m-add-how legend {
+  color: var(--mute);
+  float: left;
+  margin-right: 12px;
+}
+.m-add-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.m-add-steps {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.m-add-step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  color: var(--ink);
+}
+.m-add-step--pending {
+  color: var(--mute);
+}
+.m-add-step--ok .m-glyph {
+  color: var(--ok-text);
+}
+.m-add-step--running .m-glyph {
+  color: var(--t-acc);
+}
+.m-add-step--failed {
+  color: var(--bad-ink);
+}
+.m-add-lines {
+  flex-basis: 100%;
+  list-style: none;
+  margin: 2px 0 0 18px;
+  padding: 0;
+  color: var(--mute);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.m-add-ready {
+  border-top: 1px solid var(--hl);
+  padding-top: 8px;
+}
+
 @media (max-width: 720px) {
   .machines {
+    grid-template-columns: 1fr;
+  }
+  .m-add-form {
     grid-template-columns: 1fr;
   }
   .m-sheet {
