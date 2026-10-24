@@ -76,8 +76,8 @@ describe("volley setup", () => {
     m.answers = [false, false];
     const r = await run([]);
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain("[1/8] Broker");
-    expect(r.stdout).toContain("[2/8] Security");
+    expect(r.stdout).toContain("[1/9] Broker");
+    expect(r.stdout).toContain("[2/9] Security");
     expect(r.stdout).toContain("-allow_anonymous true");
     expect(r.stdout).toContain("+allow_anonymous false");
     expect(r.stdout).toContain("Nothing was changed");
@@ -155,6 +155,7 @@ describe("volley setup", () => {
       "services",
       "services",
       "phone",
+      "first-wave",
     ]);
   });
 
@@ -171,7 +172,7 @@ describe("volley setup", () => {
     expect(r.stdout).toContain("Setup finished, except the step skipped above (Phone)");
     const tokens = JSON.parse(readFileSync(join(m.layout.authDir, "tokens.json"), "utf-8")).tokens;
     expect(tokens.map((t: { kind: string }) => t.kind)).toEqual(["admin"]);
-    expect(journal().slice(-1)[0]).toMatchObject({ step: "phone", event: "skipped" });
+    expect(journal().find((e) => e.step === "phone")).toMatchObject({ event: "skipped" });
   });
 
   it("a later --lan opens the listener and then issues the phone's link", async () => {
@@ -384,7 +385,7 @@ describe("volley setup", () => {
     const clients = fake.clients();
     const r = await run([]);
     expect(r.code).toBe(0);
-    expect(r.stdout.match(/already done/g)).toHaveLength(8);
+    expect(r.stdout.match(/already done/g)).toHaveLength(9);
     expect(m.questions).toEqual([]);
     expect(m.execCalls.slice(calls).every(READ_ONLY)).toBe(true);
     expect(fake.clients()).toEqual(clients);
@@ -416,7 +417,7 @@ describe("volley setup", () => {
     const r = await run(["--repair", "--yes"]);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("Create the missing identity desk");
-    expect(r.stdout.match(/already done/g)).toHaveLength(7);
+    expect(r.stdout.match(/already done/g)).toHaveLength(8);
     const after = fake.clients();
     expect([...after.keys()].sort()).toEqual([...before.keys(), "desk"].sort());
     for (const [u, c] of before) expect(after.get(u)?.password).toBe(c.password);
@@ -432,7 +433,7 @@ describe("volley setup", () => {
   });
 
   it("asks once per step with changes, interactively", async () => {
-    m.answers = [true, true, true, true, true, true, true, true];
+    m.answers = [true, true, true, true, true, true, true, true, true];
     m.typed = ["coord-main"];
     const r = await run([]);
     expect(r.code).toBe(0);
@@ -445,11 +446,14 @@ describe("volley setup", () => {
       "Apply this change (Terminal)?",
       "Apply these 4 changes (Services)?",
       "Apply this change (Phone)?",
+      "Run a 1-issue test wave now?",
     ]);
     // The coordinator name is asked once, typed visibly.
     expect(m.asked).toEqual(["Coordinator name [coord-studio]: "]);
     expect(readSetupInstall(m.ctx.volleydHome)?.coordinator).toBe("coord-main");
-    expect(r.stdout).toMatch(/Setup complete in \d+ m \d+ s \(9 questions, 0 sign-ins, 0 sudo\)\n/);
+    expect(r.stdout).toMatch(
+      /Setup complete in \d+ m \d+ s \(10 questions, 0 sign-ins, 0 sudo\); test wave merged in /,
+    );
   });
 
   it("stops at a blocked step, naming why", async () => {
@@ -457,7 +461,7 @@ describe("volley setup", () => {
     const r = await run(["--yes"]);
     expect(r.code).toBe(1);
     expect(r.stdout).toContain("BROKER_TOO_OLD");
-    expect(r.stdout).not.toContain("[2/8]");
+    expect(r.stdout).not.toContain("[2/9]");
     expect(readFileSync(m.layout.config, "utf-8")).toBe(ANONYMOUS_CONFIG);
   });
 
@@ -471,16 +475,16 @@ describe("volley setup", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("no such service");
     expect(journal().slice(-1)[0]).toMatchObject({ step: "security", event: "failed" });
-    expect(r.stdout).not.toContain("[3/8]");
+    expect(r.stdout).not.toContain("[3/9]");
   });
 
   it("--step runs only the steps it names", async () => {
     const r = await run(["--step", "services", "--yes"]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("[7/8] Services");
-    expect(r.stdout).not.toContain("[1/8]");
-    expect(r.stdout).not.toContain("[6/8]");
-    expect(r.stdout).not.toContain("[8/8]");
+    expect(r.stdout).toContain("[7/9] Services");
+    expect(r.stdout).not.toContain("[1/9]");
+    expect(r.stdout).not.toContain("[6/9]");
+    expect(r.stdout).not.toContain("[8/9]");
     expect(m.loaded.has("systems.volley.desk")).toBe(true);
     expect((await run(["--step", "nope"])).code).toBe(2);
   });
@@ -491,7 +495,7 @@ describe("volley setup", () => {
     writeFileSync(config, "spawn:\n  ceiling: 3\n");
     const r = await run(["--yes", "--lan"]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("[6/8] Terminal");
+    expect(r.stdout).toContain("[6/9] Terminal");
     expect(r.stdout).toContain("cmux is not installed");
     expect(readFileSync(config, "utf-8")).toBe(
       "spawn:\n  ceiling: 3\nfleet:\n  local_terminal: tmux\n",
@@ -509,7 +513,7 @@ describe("volley setup", () => {
     expect(r.stdout).toContain(
       "  ✗ Blocked: neither cmux nor tmux is installed, and volleyd starts local agents in one of them: install tmux (brew install tmux)",
     );
-    expect(r.stdout).not.toContain("[7/8]");
+    expect(r.stdout).not.toContain("[7/9]");
     expect(journal().slice(-1)[0]).toMatchObject({ step: "terminal", event: "blocked" });
     expect(existsSync(join(m.ctx.volleydHome, "config.yaml"))).toBe(false);
   });
@@ -520,7 +524,7 @@ describe("volley setup", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("– skipped: running as root");
     expect(r.stdout).toContain(
-      "Setup finished, except the steps skipped above (Sign-ins, Claude Code, Terminal, Services)",
+      "Setup finished, except the steps skipped above (Sign-ins, Claude Code, Terminal, Services, Test wave)",
     );
     expect(r.stdout).toMatch(/#signin=vly_signin_/);
     expect(m.loaded.size).toBe(0);

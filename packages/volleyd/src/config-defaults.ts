@@ -138,6 +138,13 @@ export const REMOTE_HOST_DEFAULTS = {
   drain: false,
 } as const;
 
+/**
+ * The model a wave Volley writes for you runs (`model:`): `volley setup`'s test wave, and the one
+ * the /volley-issues skill and the READMEs cite. Not a runtime tunable: every wave file names its
+ * own model.
+ */
+export const DEFAULT_MODEL = "claude-opus-5-5";
+
 /** Who `updated_by` names before anyone has changed the config. */
 export const DEFAULTS_AUTHOR = "volleyd-defaults";
 
