@@ -1886,6 +1886,30 @@ describe("every machine through its own tunnel (#460)", () => {
     expect(f.calls.some((c) => c.argv[0] === "ssh")).toBe(false);
   });
 
+  it("retarget from none to ssh without --port takes the tunnel's default port, not the broker's", async () => {
+    writeCfg({ tunnel: "none", remote_port: 1883 });
+    const f = fakeExec(() => ({}));
+    const { d, probed } = retargetDeps(f, 0);
+    const r = await run(["retarget", "--to", "dev@other", "--tunnel", "ssh"], d);
+    expect(r.exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(peerFile(home), "utf-8"))).toMatchObject({
+      tunnel: "ssh",
+      remote_port: PEER_DEFAULTS.remote_port,
+    });
+    expect(probed).toEqual([PEER_DEFAULTS.remote_port]);
+  });
+
+  it("retarget puts peer.json back when the service cannot be restarted", async () => {
+    writeCfg();
+    const before = JSON.parse(readFileSync(peerFile(home), "utf-8"));
+    const f = fakeExec((c) => (c.argv[0] === "systemctl" ? { code: 1, stderr: "no" } : {}));
+    const { d } = retargetDeps(f, 0);
+    const r = await run(["retarget", "--to", "dev@other"], d);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("not restarted");
+    expect(JSON.parse(readFileSync(peerFile(home), "utf-8"))).toEqual(before);
+  });
+
   it("retarget refuses a missing or option-like --to and a bad --tunnel", async () => {
     writeCfg();
     const f = fakeExec(() => ({}));
@@ -1926,7 +1950,7 @@ describe("every machine through its own tunnel (#460)", () => {
     });
   });
 
-  it("join without --tunnel sends none and writes none (an ssh tunnel is the default)", async () => {
+  it("join without --tunnel sends and writes no tunnel key (an ssh tunnel is the default)", async () => {
     const f = fakeExec(hostSsh({ stdout: JSON.stringify(JOINED) }));
     const r = await run(
       ["join", "ABCD-EFGH", "--to", "dev@host", "--repo", box.repoPath, "--no-service"],

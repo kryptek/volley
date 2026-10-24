@@ -6205,17 +6205,31 @@ export class Daemon {
 
   /**
    * `peer_retarget` (admin, peers.ts, SPEC §4.6.14): checked inside the queue, its ssh run and the
-   * wait for the box's record `up` through the new tunnel awaited outside it.
+   * wait for the box's record `up` through the new tunnel awaited outside it. One run per box at
+   * a time, with Repair's (`doctoring`): both rewrite its peer.json.
    */
   private peerRetarget(p: Record<string, unknown>, sender: string): AuthOutcome | DeferredAuth {
     const req = this.peers.retargetRequest(p);
     if (!("host" in req)) return { reply: authReply("peer_retarget", req) };
+    if (this.doctoring.has(req.name)) {
+      return {
+        reply: authReply("peer_retarget", {
+          ok: false,
+          error: `a retarget or doctor run on "${req.name}" is already in progress`,
+        }),
+      };
+    }
+    this.doctoring.add(req.name);
     return {
       later: async () => {
-        const r = await this.peers.runRetarget(req, sender, (name, since) =>
-          this.machineUp(name, since, DAEMON_DEFAULTS.peer_retarget_grace_ms),
-        );
-        return { reply: authReply("peer_retarget", r) };
+        try {
+          const r = await this.peers.runRetarget(req, sender, (name, since) =>
+            this.machineUp(name, since, DAEMON_DEFAULTS.peer_retarget_grace_ms),
+          );
+          return { reply: authReply("peer_retarget", r) };
+        } finally {
+          this.doctorDone(req.name);
+        }
       },
     };
   }
@@ -11664,6 +11678,7 @@ export class Daemon {
           by: h.by,
           steps,
           resume: resumeRecord(h, h.by, dateOf(this.time)),
+          ...(h.record?.rolls_back !== undefined ? { rolls_back: h.record.rolls_back } : {}),
         })
         .catch((e: unknown) =>
           this.log(`roles: hand-over ${h.move_id}: ${e instanceof Error ? e.message : String(e)}`),

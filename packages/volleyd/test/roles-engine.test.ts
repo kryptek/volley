@@ -2,7 +2,9 @@ import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { DAEMON_DEFAULTS } from "../src/config-defaults";
+import type { RoleDeps } from "../src/roles/deps";
 import { type MovePayload, type MoveStep, RoleMoves, moveDir, planId } from "../src/roles/engine";
+import { RoleOps } from "../src/roles/ops";
 import type { NewEvent } from "../src/types";
 import { envelope, schemaErrors } from "./helpers/schema";
 import { tempDir } from "./helpers/tmp";
@@ -202,5 +204,243 @@ describe("the role-move engine (SPEC §4.6.24)", () => {
   it("a step that is the health check publishes health_check while it runs", async () => {
     await start([step("a"), step("check", { health: true }), step("c")]);
     expect(published.some((p) => p.status === "health_check")).toBe(true);
+  });
+
+  it("a move that rolls another back marks it rolled_back once done, journaling role_rolled_back", async () => {
+    await start([step("a")]);
+    events = [];
+    const r = await moves.run({
+      move_id: "m-2",
+      role: "desk",
+      from: "box-a",
+      to: "mac",
+      by: "admin-2",
+      steps: [step("b")],
+      rolls_back: "m-1",
+    });
+    expect(r).toMatchObject({ ok: true, status: "done" });
+    expect(moves.read("m-1")?.status).toBe("rolled_back");
+    expect(published.at(-1)).toMatchObject({ move_id: "m-1", status: "rolled_back" });
+    const ev = events.find((e) => e.type === "role_rolled_back");
+    expect(ev?.data).toEqual({ by: "admin-2", move_id: "m-1", role: "desk", to: "mac" });
+  });
+
+  it("a rollback that fails leaves the move it undoes done", async () => {
+    await start([step("a")]);
+    await moves.run({
+      move_id: "m-2",
+      role: "desk",
+      from: "box-a",
+      to: "mac",
+      by: "admin-1",
+      steps: [step("b", { run: async () => Promise.reject(new Error("no")) })],
+      rolls_back: "m-1",
+    });
+    expect(moves.read("m-1")?.status).toBe("done");
+    expect(events.some((e) => e.type === "role_rolled_back")).toBe(false);
+  });
+
+  it("markRolledBack survives a publish that throws", async () => {
+    await start([step("a")]);
+    const quiet = new RoleMoves({
+      home,
+      now: () => new Date(now),
+      publish: async () => Promise.reject(new Error("broker gone")),
+      clear: async () => {},
+      journal: () => {},
+      log: () => {},
+    });
+    await expect(quiet.markRolledBack("m-1", "admin-1", "mac")).resolves.toBeUndefined();
+    expect(quiet.read("m-1")?.status).toBe("rolled_back");
+  });
+
+  it("releases the lock after a failing step and after a publish that throws", async () => {
+    await start([step("a", { run: async () => Promise.reject(new Error("no")) })]);
+    expect(moves.refusal()).toBeNull();
+    const broken = new RoleMoves({
+      home,
+      now: () => new Date(now),
+      publish: async () => {},
+      clear: async () => {},
+      journal: () => {
+        throw new Error("journal full");
+      },
+      log: () => {},
+    });
+    await expect(
+      broken.run({ move_id: "m-3", role: "desk", from: "a", to: "b", by: "x", steps: [step("a")] }),
+    ).rejects.toThrow("journal full");
+    expect(broken.refusal()).toBeNull();
+  });
+
+  it("an undo that fails answers rolled_back: false", async () => {
+    const r = await start([
+      step("a", { undo: async () => Promise.reject(new Error("stuck")) }),
+      step("b", { run: async () => Promise.reject(new Error("no")) }),
+    ]);
+    expect(r).toMatchObject({ ok: false, step: "b", rolled_back: false });
+  });
+
+  it("a resumed move that fails answers rolled_back: false (the old machine's steps were not undone)", async () => {
+    const first = await moves.run({
+      move_id: "m-1",
+      role: "supervisor",
+      from: "mac",
+      to: "box-a",
+      by: "admin-1",
+      steps: [step("bundle", { handover: true })],
+    });
+    expect(first).toMatchObject({ ok: true, handing_over: true });
+    const resume = moves.read("m-1");
+    if (resume === null) throw new Error("no record");
+    const r = await moves.run({
+      move_id: "m-1",
+      role: "supervisor",
+      from: "mac",
+      to: "box-a",
+      by: "admin-1",
+      steps: [step("bundle"), step("record", { run: async () => Promise.reject(new Error("no")) })],
+      resume,
+    });
+    expect(r).toMatchObject({ ok: false, step: "record", rolled_back: false });
+  });
+
+  it("a handed-over record is never republished and ages out like a finished one", async () => {
+    await moves.run({
+      move_id: "m-1",
+      role: "supervisor",
+      from: "mac",
+      to: "box-a",
+      by: "admin-1",
+      steps: [step("bundle", { handover: true }), step("record")],
+    });
+    expect(moves.read("m-1")).toMatchObject({ status: "running", handed_over: true });
+    published = [];
+    await moves.republish();
+    expect(published).toEqual([]);
+    now = T0 + DAEMON_DEFAULTS.role_move_retention_ms + 1000;
+    expect(await moves.sweep()).toEqual(["m-1"]);
+  });
+
+  it("at start, a move left running by a crash is ended failed, not republished as running", async () => {
+    let hang: () => void = () => {};
+    let entered: () => void = () => {};
+    const inStep = new Promise<void>((r) => {
+      entered = r;
+    });
+    const run = moves.run({
+      move_id: "m-1",
+      role: "desk",
+      from: "mac",
+      to: "box-a",
+      by: "admin-1",
+      steps: [
+        step("a"),
+        step("b", {
+          run: () =>
+            new Promise<string>((done) => {
+              hang = () => done("late");
+              entered();
+            }),
+        }),
+      ],
+    });
+    await inStep;
+    // A new process: the same home, no move in progress.
+    const fresh = new RoleMoves({
+      home,
+      now: () => new Date(now),
+      publish: async (p) => {
+        published.push(structuredClone(p));
+      },
+      clear: async () => {},
+      journal: (ev) => {
+        events.push(ev);
+      },
+      log: () => {},
+    });
+    published = [];
+    events = [];
+    await fresh.republish();
+    expect(fresh.read("m-1")).toMatchObject({ status: "failed" });
+    expect(published.map((p) => p.status)).toEqual(["failed"]);
+    expect(events.find((e) => e.type === "role_move_failed")?.data).toMatchObject({
+      move_id: "m-1",
+      rolled_back: false,
+    });
+    hang();
+    await run;
+  });
+});
+
+describe("role_rollback of a supervisor move (RoleOps)", () => {
+  it("is refused while another move runs, and the move stays done", async () => {
+    const home = tempDir("volleyd-roles-ops-");
+    const now = T0;
+    const moves = new RoleMoves({
+      home,
+      now: () => new Date(now),
+      publish: async () => {},
+      clear: async () => {},
+      journal: () => {},
+      log: () => {},
+    });
+    const ok = (id: string): MoveStep => ({
+      id,
+      title: id,
+      where: "mac",
+      detail: id,
+      run: async () => "ok",
+    });
+    await moves.run({
+      move_id: "supervisor-1",
+      role: "supervisor",
+      from: "mac",
+      to: "box-a",
+      by: "admin-1",
+      steps: [ok("record")],
+    });
+    let release: () => void = () => {};
+    let entered: () => void = () => {};
+    const inStep = new Promise<void>((r) => {
+      entered = r;
+    });
+    const busy = moves.run({
+      move_id: "desk-1",
+      role: "desk",
+      from: "box-a",
+      to: "mac",
+      by: "admin-1",
+      steps: [
+        {
+          ...ok("hold"),
+          run: () =>
+            new Promise((done) => {
+              release = () => done("ok");
+              entered();
+            }),
+        },
+      ],
+    });
+    await inStep;
+    const ops = new RoleOps({
+      deps: () =>
+        ({
+          now: () => new Date(now),
+          localName: "box-a",
+          roles: { supervisor: { machine: "box-a" } },
+        }) as unknown as RoleDeps,
+      supervisor: () => {
+        throw new Error("never planned");
+      },
+      moves,
+      finished: async () => {},
+      log: () => {},
+    });
+    const r = await ops.handle("role_rollback", { move_id: "supervisor-1" }, "admin-1");
+    expect(r).toMatchObject({ ok: false, error: "a role move is in progress: desk-1" });
+    expect(moves.read("supervisor-1")?.status).toBe("done");
+    release();
+    await busy;
   });
 });

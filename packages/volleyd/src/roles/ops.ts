@@ -70,6 +70,7 @@ export function newMoveId(role: string, now: Date): string {
 
 export class RoleOps {
   private waiting: Waiting | null = null;
+  private ticking = false;
 
   constructor(private readonly o: RoleOpsDeps) {}
 
@@ -78,8 +79,23 @@ export class RoleOps {
     return this.waiting !== null;
   }
 
-  /** Start the waiting move once the fleet is quiet (the daemon's tick). */
+  /**
+   * Start the waiting move once the fleet is quiet (the daemon's tick); one tick at a time. A
+   * fresh plan that is blocked, or is not the plan approved (`plan_id`), ends the move `failed`.
+   */
   async tick(): Promise<void> {
+    if (this.ticking) return;
+    this.ticking = true;
+    try {
+      await this.tickOnce();
+    } catch (e) {
+      this.o.log(`roles: the waiting move: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      this.ticking = false;
+    }
+  }
+
+  private async tickOnce(): Promise<void> {
     const w = this.waiting;
     if (w === null || this.o.moves.refusal() !== null) return;
     const d = this.o.deps();
@@ -89,8 +105,15 @@ export class RoleOps {
     const plan = await this.plan(d, req, w.by, { url: "" });
     if (typeof plan === "string" || (plan.waits ?? []).length > 0) return;
     this.waiting = null;
-    if (plan.blocked.length > 0) {
-      this.o.log(`roles: ${w.move_id} not started: ${plan.blocked.map((b) => b.why).join("; ")}`);
+    const why =
+      plan.blocked.length > 0
+        ? `the move is blocked: ${plan.blocked.map((b) => b.why).join("; ")}`
+        : planWire(plan).plan_id !== w.p.plan_id
+          ? `plan changed while the fleet drained: moving the ${plan.role} to ${plan.to} would now run other steps than the plan approved; plan again`
+          : null;
+    if (why !== null) {
+      this.o.log(`roles: ${w.move_id} not started: ${why}`);
+      await this.o.moves.abandon(w.move_id, why);
       return;
     }
     this.background(plan, w.move_id, w.by);
@@ -158,7 +181,7 @@ export class RoleOps {
    * Run a supervisor move in the background: its answer went out already. Once it hands over,
    * this supervisor unloads itself.
    */
-  private background(plan: RolePlan, moveId: string, by: string): void {
+  private background(plan: RolePlan, moveId: string, by: string, rollsBack?: string): void {
     void this.o.moves
       .run({
         move_id: moveId,
@@ -168,6 +191,7 @@ export class RoleOps {
         by,
         steps: plan.steps,
         ...(plan.kept !== undefined ? { kept: plan.kept } : {}),
+        ...(rollsBack !== undefined ? { rolls_back: rollsBack } : {}),
       })
       .then((r) => this.o.finished(moveId, r))
       .catch((e: unknown) =>
@@ -193,11 +217,7 @@ export class RoleOps {
       );
     if (plan.blocked.length > 0)
       return refuse(`the move is blocked: ${plan.blocked.map((b) => b.why).join("; ")}`);
-    const busy =
-      this.o.moves.refusal() ??
-      (this.waiting !== null
-        ? `a role move is waiting for a quiet fleet: ${this.waiting.move_id}`
-        : null);
+    const busy = this.busy();
     if (busy !== null) return refuse(busy);
     const moveId = newMoveId(plan.role, d.now());
     const waits = plan.waits ?? [];
@@ -233,6 +253,16 @@ export class RoleOps {
     return answer(r, issued, key);
   }
 
+  /** Why no move can start now: one in progress, or one waiting for a quiet fleet. */
+  private busy(): string | null {
+    return (
+      this.o.moves.refusal() ??
+      (this.waiting !== null
+        ? `a role move is waiting for a quiet fleet: ${this.waiting.move_id}`
+        : null)
+    );
+  }
+
   /** `role_rollback { move_id }`: a done move, within retention, undone as a new move. */
   private async rollback(p: Fields, by: string): Promise<RoleReply> {
     const id = p.move_id;
@@ -246,11 +276,16 @@ export class RoleOps {
     if (typeof d === "string") return refuse(d);
     if (d.now().getTime() - Date.parse(rec.since) > DAEMON_DEFAULTS.role_move_retention_ms)
       return refuse(`move ${id} is older than ${retentionDays()} days: its kept copy is gone`);
+    if (rec.rolls_back !== undefined)
+      return refuse(
+        `move ${id} is itself a rollback (of ${rec.rolls_back}): move the ${rec.role} again instead`,
+      );
+    const busy = this.busy();
+    if (busy !== null) return refuse(busy);
     if (rec.role === "supervisor") return this.rollbackSupervisor(d, rec, by);
     if (rec.role !== "desk")
       return refuse(`rolling back a ${rec.role} move is not supported by this supervisor yet`);
-    const busy = this.o.moves.refusal();
-    if (busy !== null) return refuse(busy);
+    if (rec.kept === undefined) return refuse(`move ${id} kept nothing to roll back to`);
     const kept = rec.kept as { desk?: { url: string }; port?: number; from_port?: number };
     const issued: DeskIssued = { url: kept.desk?.url ?? "" };
     if (d.roles.desk.machine !== rec.to)
@@ -281,15 +316,17 @@ export class RoleOps {
       steps: back,
       rolls_back: id,
     });
+    // The engine marks the original `rolled_back` once this move is done.
     if (!r.ok) return { ok: false, error: r.error, result: { move_id: moveId, rolls_back: id } };
-    await this.o.moves.markRolledBack(id);
     return { ok: true, result: { move_id: moveId, rolls_back: id } };
   }
 
   /**
    * A supervisor move rolled back: the supervisor moves back to the machine it came from (a
-   * paired machine since the hand-over), as a supervisor move does, under a new id. The original
-   * is marked `rolled_back` once the new move starts handing over.
+   * paired machine since the hand-over), as a supervisor move does, under a new id: a fresh
+   * bundle of this home (what changed since the move travels back), not the move's kept bundle.
+   * The original is marked `rolled_back` here at the hand-over, and journaled by the supervisor
+   * there once the rollback is done; a rollback that fails leaves it `done`.
    */
   private async rollbackSupervisor(
     d: RoleDeps,
@@ -306,8 +343,7 @@ export class RoleOps {
     if (not.length > 0)
       return refuse(`the rollback is blocked: ${not.map((b) => b.why).join("; ")}`);
     const moveId = newMoveId("supervisor", d.now());
-    await this.o.moves.markRolledBack(rec.move_id);
-    this.background(plan, moveId, by);
+    this.background(plan, moveId, by, rec.move_id);
     return { ok: true, result: { move_id: moveId, rolls_back: rec.move_id, handing_over: true } };
   }
 }

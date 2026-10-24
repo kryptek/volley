@@ -1391,7 +1391,13 @@ async function retarget(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> {
     return fail(e instanceof Error ? e.message : String(e));
   }
   const tunnel: PeerTunnel = (v.tunnel as PeerTunnel | undefined) ?? peerTunnel(cfg);
-  let port = tunnel === "none" ? cfg.broker.port : cfg.remote_port;
+  // From no tunnel to ssh, remote_port was the broker's own port: the tunnel's end takes its own.
+  let port =
+    tunnel === "none"
+      ? cfg.broker.port
+      : peerTunnel(cfg) === "none"
+        ? PEER_DEFAULTS.remote_port
+        : cfg.remote_port;
   if (v.port !== undefined) {
     try {
       port = parsePositiveInt(v.port, "--port");
@@ -1403,7 +1409,12 @@ async function retarget(v: Values, io: IO, deps: PeerDeps): Promise<ExitCode> {
   writePeerConfig(deps.home, next);
   io.stdout(`Wrote ${peerFile(deps.home)}: ${tunnelLine(next)}.\n`);
   const installed = await installService(deps);
-  if (!installed.ok) return fail(`the service was not restarted: ${installed.error}`);
+  if (!installed.ok) {
+    writePeerConfig(deps.home, cfg);
+    return fail(
+      `the service was not restarted: ${installed.error}; ${peerFile(deps.home)} is as it was`,
+    );
+  }
   if (installed.warning !== undefined) io.stderr(`volley peer retarget: ${installed.warning}\n`);
   const probe = deps.probePort ?? probeLoopbackPort;
   const start = deps.now().getTime();

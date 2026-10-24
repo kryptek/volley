@@ -655,8 +655,11 @@ received; 1 nothing changed; 3 a step after the rotation failed and was undone, 
 has a password the old machine does not know (the old supervisor rotates it again).
 
 Waves stopped for the move replay as `stopped` on the new machine: continue one with
-`volleyd resume <wave>`. Within 7 days, `volley role rollback <move_id>` moves the supervisor
-back from the kept bundle; after that the kept copy is removed.
+`volleyd resume <wave>`. Within 7 days, the admin op `role_rollback { move_id }` moves the
+supervisor back as a new supervisor move (a `volley role rollback` verb is still to come): a fresh
+bundle of the current home travels back, so what changed since the move goes with it. The move
+undone is marked `rolled_back` at that hand-over; a rollback that fails leaves it `done`. After
+7 days the move's record is removed.
 
 ---
 

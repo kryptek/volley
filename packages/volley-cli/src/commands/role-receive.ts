@@ -177,7 +177,14 @@ export async function runReceive(
   if (typeof self !== "string" || typeof peerRaw.host !== "string") {
     return fail(`${peerFile(deps.home)}: no name or host`);
   }
-  const brokerUrl = v["broker-url"] ?? `mqtt://127.0.0.1:${String(peerRaw.remote_port)}`;
+  const port = peerRaw.remote_port;
+  if (
+    v["broker-url"] === undefined &&
+    !(typeof port === "number" && Number.isInteger(port) && port >= 1 && port <= 65535)
+  ) {
+    return fail(`${peerFile(deps.home)}: no remote_port (pass --broker-url)`);
+  }
+  const brokerUrl = v["broker-url"] ?? `mqtt://127.0.0.1:${String(port)}`;
   const vhome = volleydHome(e);
   const authDir =
     e.VOLLEY_AUTH_DIR ?? (deps.authDir ?? (() => defaultAuthDir(realAuthDeps.layout())))();
@@ -197,7 +204,7 @@ export async function runReceive(
     const m = checkManifest(stage, v.from, self);
     if (typeof m === "string") return fail(m);
 
-    const undo: (() => void)[] = [];
+    const undo: (() => void | Promise<void>)[] = [];
     const written = new Set<string>();
     const replacedDir = join(vhome, "roles", m.move_id, "replaced");
     /** Write `text` (or copy `from`) to `to`, 0600, the old copy kept under replaced/<key>. */
@@ -213,8 +220,8 @@ export async function runReceive(
         } else undo.push(() => rmSync(to, { force: true }));
         written.add(to);
       }
-      if ("from" in data) copyFileSync(data.from, to);
-      else writeFileSync(to, data.text);
+      // Never umask-readable, not even for a moment: the file is created 0600.
+      writeFileSync(to, "from" in data ? readFileSync(data.from) : data.text, { mode: 0o600 });
       chmodSync(to, 0o600);
     };
     let rotated = false;
@@ -240,20 +247,7 @@ export async function runReceive(
       put(configFile, "volleyd/config.yaml", { text: doc.toString() });
       io.stdout(`Restored ${m.files.length} files from ${v.from}; ${configFile} names ${self}.\n`);
 
-      // 4. This machine's own heartbeat stops (the supervisor publishes its record); the tunnel stays.
-      const peerText = readFileSync(peerFile(deps.home), "utf-8");
-      writeSecret(
-        peerFile(deps.home),
-        `${JSON.stringify({ ...peerRaw, heartbeat: false }, null, 2)}\n`,
-      );
-      undo.push(() => writeSecret(peerFile(deps.home), peerText));
-      await restartPeer(deps);
-      undo.push(() => void restartPeer(deps).catch(() => {}));
-      io.stdout(
-        "Stopped this machine's own heartbeat (peer.json heartbeat: false); its tunnel stays.\n",
-      );
-
-      // 5. How the new supervisor reaches the old machine to re-pair it.
+      // 4. How the new supervisor reaches the old machine to re-pair it.
       const handoverFile = join(vhome, "roles", m.move_id, "handover.json");
       const handover = existsSync(handoverFile)
         ? (JSON.parse(readFileSync(handoverFile, "utf-8")) as Record<string, unknown>)
@@ -262,7 +256,8 @@ export async function runReceive(
         text: `${JSON.stringify({ ...handover, old_target: peerRaw.host }, null, 2)}\n`,
       });
 
-      // 6. Rotate volleyd's login: from here on, the old process can never reconnect.
+      // 5. Rotate volleyd's login: from here on, the old process can never reconnect. Before the
+      // peer restart (6), which drops the tunnel the rotation goes through.
       const admin = readLogin(join(authDir, "admin.json"));
       const r = await deps.exec([...deps.volleyArgv, "auth", "rotate", "volleyd", "--json"], {
         env: { ...e, VOLLEY_BROKER_URL: brokerUrl, VOLLEY_AUTH_DIR: authDir },
@@ -283,6 +278,26 @@ export async function runReceive(
       });
       io.stdout("Rotated volleyd's broker login (broker.json, dynsec-admin.json: mode 0600).\n");
 
+      // 6. This machine's own heartbeat stops (the supervisor publishes its record); the tunnel
+      // stays. Undone in one step: peer.json back first, then the service restarted on it.
+      const peerText = readFileSync(peerFile(deps.home), "utf-8");
+      writeSecret(
+        peerFile(deps.home),
+        `${JSON.stringify({ ...peerRaw, heartbeat: false }, null, 2)}\n`,
+      );
+      let restarted = false;
+      undo.push(async () => {
+        writeSecret(peerFile(deps.home), peerText);
+        if (restarted) await restartPeer(deps);
+      });
+      const service = await restartPeer(deps);
+      restarted = service;
+      io.stdout(
+        service
+          ? "Stopped this machine's own heartbeat (peer.json heartbeat: false); its tunnel stays.\n"
+          : "peer.json says heartbeat: false; no peer service here to restart (run `volley peer run` again).\n",
+      );
+
       // 7. volleyd as this machine's service.
       started = true;
       io.stdout(`${await installVolleyd(deps, e, vhome, authDir, brokerUrl, put)}\n`);
@@ -293,13 +308,22 @@ export async function runReceive(
       return EXIT.OK;
     } catch (err) {
       if (started) await stopVolleyd(deps).catch(() => {});
+      const stuck: string[] = [];
       for (const u of undo.reverse()) {
         try {
-          u();
-        } catch {}
+          await u();
+        } catch (e) {
+          stuck.push(e instanceof Error ? e.message : String(e));
+        }
       }
-      rmSync(replacedDir, { recursive: true, force: true });
       const msg = err instanceof Error ? err.message : String(err);
+      // A replaced file that could not be put back is still under replaced/: never removed then.
+      if (stuck.length > 0)
+        return fail(
+          `${msg}; undoing it failed (${stuck.join("; ")}): the replaced files are kept in ${replacedDir}${rotated ? ", and volleyd's login was rotated: the old supervisor must rotate it again (`volley auth rotate volleyd`)" : ""}`,
+          rotated ? ROTATED : EXIT.ERROR,
+        );
+      rmSync(replacedDir, { recursive: true, force: true });
       return rotated
         ? fail(
             `${msg}; undone, but volleyd's login was rotated: the old supervisor must rotate it again (\`volley auth rotate volleyd\`)`,
@@ -392,11 +416,29 @@ async function must(deps: ReceiveDeps, argv: string[], env?: Record<string, stri
   }
 }
 
-/** The peer service picks up peer.json again (it reads it at start). */
-function restartPeer(deps: ReceiveDeps): Promise<void> {
-  return deps.platform === "darwin"
-    ? must(deps, ["launchctl", "kickstart", "-k", `gui/${deps.uid()}/${LAUNCHD_LABEL}`])
-    : must(deps, ["systemctl", "--user", "restart", SYSTEMD_UNIT]);
+/**
+ * The peer service picks up peer.json again (it reads it at start); false when this machine has
+ * none (joined with `--no-service`). On a Mac it is in gui/<uid>, or in user/<uid> when it was
+ * joined over ssh with nobody at the console (peer.ts installService).
+ */
+async function restartPeer(deps: ReceiveDeps): Promise<boolean> {
+  if (deps.platform === "darwin") {
+    if (!existsSync(join(deps.home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`)))
+      return false;
+    const errors: string[] = [];
+    for (const domain of [`gui/${deps.uid()}`, `user/${deps.uid()}`]) {
+      try {
+        await must(deps, ["launchctl", "kickstart", "-k", `${domain}/${LAUNCHD_LABEL}`]);
+        return true;
+      } catch (e) {
+        errors.push(e instanceof Error ? e.message : String(e));
+      }
+    }
+    throw new Failed(errors.join("; "));
+  }
+  if (!existsSync(join(deps.home, ".config", "systemd", "user", SYSTEMD_UNIT))) return false;
+  await must(deps, ["systemctl", "--user", "restart", SYSTEMD_UNIT]);
+  return true;
 }
 
 const volleydCli = (deps: ReceiveDeps) =>

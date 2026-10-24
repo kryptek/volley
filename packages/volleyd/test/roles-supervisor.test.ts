@@ -210,6 +210,16 @@ describe("the supervisor move's hand-over (#469): two daemons on one broker", ()
       return { code: r.status ?? 1, stderr: r.stderr.toString() };
     });
     await f.beat({ versions: WITH_TMUX });
+    // A stopped wave is quiet: it travels in the bundle and replays as stopped there.
+    await f.submit("w1", "", "  T1: { issue: 42, host: box }\n");
+    await f.tick();
+    const agent = f.agentOf("w1", "T1");
+    await f.supervised(agent);
+    const stopped = await f.client.request("stop", { wave: "w1", by: "operator" });
+    expect(stopped.error).toBeUndefined();
+    // The cancelled agent ends: nothing is live once the wave is stopped.
+    await f.finish(agent, "failed");
+    await eventually(async () => (await plan(f)).blocked.length === 0);
     const p = await plan(f);
     const a = await f.adminOp({
       op: "role_move",
@@ -278,6 +288,18 @@ describe("the supervisor move's hand-over (#469): two daemons on one broker", ()
     expect(hosts[LOCAL]?.tunnel).toEqual({
       remote_port: roles.payload.broker.address.mqtt_port,
       supervise: false,
+    });
+    // The stopped wave replayed as stopped on the new supervisor, and `volleyd resume` goes on.
+    const wave = (await f.env.retained("volley/_waves/w1/state")) as {
+      payload: { status: string };
+    };
+    expect(wave.payload.status).toBe("stopped");
+    expect((await client.request("resume", { wave: "w1", by: "operator" })).error).toBeUndefined();
+    await eventually(async () => {
+      const w = (await f.env.retained("volley/_waves/w1/state")) as {
+        payload: { status: string };
+      };
+      return w.payload.status !== "stopped";
     });
     await client.close();
     await second.stop();

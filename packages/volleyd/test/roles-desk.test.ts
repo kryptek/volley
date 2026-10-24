@@ -229,5 +229,16 @@ describe("the Desk move (#466, SPEC §4.6.24)", () => {
     expect((await fleet.adminOp({ op: "role_rollback", move_id: "nope" }))?.error).toMatch(
       /^no kept move/,
     );
+    expect(fleet.system().find((e) => e.type === "role_rolled_back")?.data).toEqual({
+      by: "admin-1",
+      move_id: moved,
+      role: "desk",
+      to: "control",
+    });
+    // A rollback's own record is not rolled back in turn: the Desk is moved again instead.
+    const back = (b?.result as { move_id: string }).move_id;
+    expect((await fleet.adminOp({ op: "role_rollback", move_id: back }))?.error).toMatch(
+      /is itself a rollback/,
+    );
   });
 });

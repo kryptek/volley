@@ -1,6 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { createHash, scryptSync } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
@@ -137,6 +145,14 @@ beforeEach(() => {
   env = { HOME: home, VOLLEYD_HOME: vhome, VOLLEY_AUTH_DIR: authDir, VOLLEY_CLAUDE_DIR: claudeDir };
   mkdirSync(join(home, ".volley"), { recursive: true });
   writeFileSync(join(home, ".volley", "peer.json"), JSON.stringify(PEER), { mode: 0o600 });
+  // The peer service `volley peer join` installed (systemd here, launchd on a Mac).
+  for (const unit of [
+    join(home, ".config", "systemd", "user", "volley-peer.service"),
+    join(home, "Library", "LaunchAgents", "systems.volley.peer.plist"),
+  ]) {
+    mkdirSync(dirname(unit), { recursive: true });
+    writeFileSync(unit, "unit\n");
+  }
 });
 
 async function receive(argv: string[], d: ReceiveDeps) {
@@ -214,6 +230,10 @@ describe("volley role receive supervisor", () => {
     expect(mode(join(home, ".volley", "peer.json"))).toBe(0o600);
     const argvs = f.calls.map((c) => c.argv.join(" "));
     expect(argvs).toContain("systemctl --user restart volley-peer.service");
+    // Rotated through the tunnel before the peer restart drops it.
+    expect(argvs.indexOf("systemctl --user restart volley-peer.service")).toBeGreaterThan(
+      argvs.findIndex((a) => a.includes("rotate")),
+    );
 
     // handover.json learns how this machine reaches the old one.
     const handover = JSON.parse(readFileSync(join(vhome, "roles", MOVE, "handover.json"), "utf-8"));
@@ -341,6 +361,55 @@ describe("volley role receive supervisor", () => {
     expect(existsSync(join(vhome, "waves", "w1", "journal.jsonl"))).toBe(false);
     expect(f.calls.map((c) => c.argv.join(" "))).toContain("systemctl --user stop volleyd.service");
     expect(JSON.parse(readFileSync(join(home, ".volley", "peer.json"), "utf-8"))).toEqual(PEER);
+  });
+
+  it("on a Mac with nobody at the console, restarts the peer agent in user/<uid>", async () => {
+    const f = fakeExec((argv) => argv.join(" ").includes("kickstart -k gui/"));
+    const r = await receive(
+      ["supervisor", bundle(), "--from", "old-box"],
+      deps(f.exec, { platform: "darwin" }),
+    );
+    expect(r.stderr).toBe("");
+    expect(r.code).toBe(EXIT.OK);
+    expect(f.calls.map((c) => c.argv.join(" "))).toContain(
+      "launchctl kickstart -k user/501/systems.volley.peer",
+    );
+  });
+
+  it("a machine joined with --no-service has no peer service to restart", async () => {
+    rmSync(join(home, ".config"), { recursive: true, force: true });
+    const f = fakeExec();
+    const r = await receive(["supervisor", bundle(), "--from", "old-box"], deps(f.exec));
+    expect(r.code).toBe(EXIT.OK);
+    expect(f.calls.map((c) => c.argv.join(" "))).not.toContain(
+      "systemctl --user restart volley-peer.service",
+    );
+    expect(r.stdout).toContain("volley peer run");
+  });
+
+  it("on undo, the peer service restarts only once peer.json is back", async () => {
+    const seen: string[] = [];
+    const base = fakeExec((argv) => argv.join(" ") === "systemctl --user restart volleyd.service");
+    const exec: ReceiveExec = async (argv, opts) => {
+      if (argv.join(" ") === "systemctl --user restart volley-peer.service")
+        seen.push(readFileSync(join(home, ".volley", "peer.json"), "utf-8"));
+      return base.exec(argv, opts);
+    };
+    const r = await receive(["supervisor", bundle(), "--from", "old-box"], deps(exec));
+    expect(r.code).toBe(3);
+    expect(seen).toHaveLength(2);
+    expect(JSON.parse(seen[0] as string)).toEqual({ ...PEER, heartbeat: false });
+    expect(JSON.parse(seen[1] as string)).toEqual(PEER);
+  });
+
+  it("refuses a peer.json without remote_port when no --broker-url is given", async () => {
+    const { remote_port: _p, ...rest } = PEER;
+    writeFileSync(join(home, ".volley", "peer.json"), JSON.stringify(rest), { mode: 0o600 });
+    const f = fakeExec();
+    const r = await receive(["supervisor", bundle(), "--from", "old-box"], deps(f.exec));
+    expect(r.code).toBe(EXIT.ERROR);
+    expect(r.stderr).toContain("remote_port");
+    expect(f.calls).toEqual([]);
   });
 
   it("refuses a role other than supervisor", async () => {

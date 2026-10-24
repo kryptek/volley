@@ -1612,6 +1612,16 @@ describe("machine roles (#460, #466, #469): the REMOTE steps of peer_retarget an
         "--broker-url",
         "mqtt://evil:1883",
       ],
+      ...["0", "99999"].map((port) => [
+        "role",
+        "receive",
+        "supervisor",
+        bundle,
+        "--from",
+        "studio",
+        "--broker-url",
+        `mqtt://127.0.0.1:${port}`,
+      ]),
       ["role", "receive", "supervisor", bundle, "--from", "studio", "--local-agents", "always"],
       [
         "peer",

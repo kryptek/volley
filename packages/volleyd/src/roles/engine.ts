@@ -26,7 +26,13 @@ import type { MachineRole } from "./record";
  *
  * A step marked `handover` (a supervisor move) ends this process's part: once it is done the move
  * stays `running` and is answered `handing_over`, and the supervisor on the target continues it
- * with `run({ resume })` from its own copy of the record.
+ * with `run({ resume })` from its own copy of the record. This process's copy is marked
+ * `handed_over`: never republished (the topic is the new supervisor's), aged out like a finished
+ * one. A move that rolls another back (`rolls_back`) marks that one `rolled_back` once it is done
+ * (journaled `role_rolled_back`); a supervisor rollback also marks it here at the hand-over.
+ *
+ * A move a restart finds `running` or `health_check` (the process ended mid-move) is ended
+ * `failed` at start (`republish`), its steps not undone.
  */
 
 export type MoveStatus =
@@ -68,6 +74,8 @@ export interface MoveRecord extends MovePayload {
   kept?: Record<string, unknown>;
   /** A rollback: the move it undoes. */
   rolls_back?: string;
+  /** This process handed the move to the supervisor on the target, which goes on with it. */
+  handed_over?: true;
 }
 
 /** What a step's runner is told: the move it is part of. */
@@ -187,14 +195,48 @@ export class RoleMoves {
     }
   }
 
-  /** Publish every kept move's record again (a restart: the retained topic may be stale). */
+  /**
+   * Publish every kept move's record again (a restart: the retained topic may be stale), but
+   * never one handed over (the topic is the new supervisor's). A move left `running` or
+   * `health_check` ended with the last process: it is ended `failed` first.
+   */
   async republish(): Promise<void> {
     const root = join(this.deps.home, "roles");
     if (!existsSync(root)) return;
     for (const id of readdirSync(root)) {
-      const rec = this.read(id);
-      if (rec !== null) await this.deps.publish(payloadOf(rec)).catch(() => {});
+      let rec = this.read(id);
+      if (rec === null || rec.handed_over === true) continue;
+      if (rec.status === "running" || rec.status === "health_check") rec = this.interrupted(rec);
+      await this.deps.publish(payloadOf(rec)).catch(() => {});
     }
+  }
+
+  /** A move the last process left mid-way: `failed`, its steps not undone. */
+  private interrupted(rec: MoveRecord): MoveRecord {
+    const at =
+      rec.steps.find((s) => s.status === "running") ?? rec.steps.find((s) => s.status !== "ok");
+    const error = `the supervisor stopped during the move${at !== undefined ? ` (at ${at.id})` : ""}; its steps were not undone`;
+    const next: MoveRecord = {
+      ...rec,
+      status: "failed",
+      error,
+      since: this.iso(),
+      steps: rec.steps.map((s) => (s.status === "running" ? { ...s, status: "failed" } : s)),
+    };
+    this.write(next);
+    this.deps.journal({
+      type: "role_move_failed",
+      data: {
+        by: rec.by,
+        move_id: rec.move_id,
+        role: rec.role,
+        ...(at !== undefined ? { step: at.id } : {}),
+        error,
+        rolled_back: false,
+      },
+    });
+    this.deps.log(`roles: ${rec.move_id}: ${error}`);
+    return next;
   }
 
   /**
@@ -218,13 +260,42 @@ export class RoleMoves {
     await this.deps.publish(payloadOf(rec)).catch(() => {});
   }
 
-  /** Mark a kept, done move `rolled_back` (a `role_rollback` undid it) and publish it. */
-  async markRolledBack(moveId: string): Promise<void> {
+  /**
+   * Mark a kept move `rolled_back` (a `role_rollback` undid it: `by`, the role back on `to`),
+   * journal `role_rolled_back` (unless `journal: false`) and publish it.
+   */
+  async markRolledBack(
+    moveId: string,
+    by: string,
+    to: string,
+    opts: { journal?: boolean } = {},
+  ): Promise<void> {
     const rec = this.read(moveId);
     if (rec === null) return;
-    const next: MoveRecord = { ...rec, status: "rolled_back", since: this.iso() };
+    const { handed_over: _h, ...rest } = rec;
+    const next: MoveRecord = { ...rest, status: "rolled_back", since: this.iso() };
     this.write(next);
-    await this.deps.publish(payloadOf(next));
+    if (opts.journal !== false)
+      this.deps.journal({
+        type: "role_rolled_back",
+        data: { by, move_id: moveId, role: rec.role, to },
+      });
+    await this.deps.publish(payloadOf(next)).catch((e: unknown) => {
+      this.deps.log(`roles: ${moveId} not published: ${errorText(e)}`);
+    });
+  }
+
+  /** A move announced (`planning`) that will not run after all: ended `failed` with `error`. */
+  async abandon(moveId: string, error: string): Promise<void> {
+    const rec = this.read(moveId);
+    if (rec === null || rec.status !== "planning") return;
+    const next: MoveRecord = { ...rec, status: "failed", error, since: this.iso() };
+    this.write(next);
+    this.deps.journal({
+      type: "role_move_failed",
+      data: { by: rec.by, move_id: moveId, role: rec.role, error, rolled_back: true },
+    });
+    await this.deps.publish(payloadOf(next)).catch(() => {});
   }
 
   /** Run a move to its end (or its hand-over). Throws while another move runs. */
@@ -255,8 +326,14 @@ export class RoleMoves {
       try {
         if (!statSync(dir).isDirectory()) continue;
         const rec = this.read(id);
-        // A move still running is kept; one left waiting (`planning`) ages like a finished one.
-        if (rec !== null && (rec.status === "running" || rec.status === "health_check")) continue;
+        // A move still running is kept; one left waiting (`planning`) or handed over ages like a
+        // finished one.
+        if (
+          rec !== null &&
+          rec.handed_over !== true &&
+          (rec.status === "running" || rec.status === "health_check")
+        )
+          continue;
         at = rec !== null ? Date.parse(rec.since) : statSync(dir).mtimeMs;
       } catch {
         continue;
@@ -354,6 +431,11 @@ export class RoleMoves {
       await setStep(i, "ok", line);
       if (step.handover === true) {
         log("handing_over");
+        rec.handed_over = true;
+        this.write(rec);
+        // The new supervisor journals the rollback; this copy must not say `done` if it comes back.
+        if (req.rolls_back !== undefined)
+          await this.markRolledBack(req.rolls_back, req.by, rec.to, { journal: false });
         return { ok: true, move_id: rec.move_id, status: "running", handing_over: true };
       }
     }
@@ -365,6 +447,7 @@ export class RoleMoves {
       data: { by: req.by, move_id: rec.move_id, role: rec.role, from: rec.from, to: rec.to },
     });
     await publish();
+    if (req.rolls_back !== undefined) await this.markRolledBack(req.rolls_back, req.by, rec.to);
     return { ok: true, move_id: rec.move_id, status: "done" };
   }
 
@@ -378,7 +461,8 @@ export class RoleMoves {
     publish: () => Promise<void>,
     log: (event: string, extra?: Record<string, unknown>) => void,
   ): Promise<MoveResult> {
-    let clean = true;
+    // A resumed move's earlier steps ran in another process (the old machine): never undone here.
+    let clean = req.resume === undefined || !req.resume.steps.some((s) => s.status === "ok");
     for (const step of [...undone].reverse()) {
       const i = req.steps.indexOf(step);
       try {
@@ -415,7 +499,7 @@ export class RoleMoves {
 
 /** The record's wire part (role-move.schema.json): no requester, no kept copy. */
 export function payloadOf(rec: MoveRecord): MovePayload {
-  const { by: _by, started_at: _s, kept: _k, rolls_back: _r, ...payload } = rec;
+  const { by: _by, started_at: _s, kept: _k, rolls_back: _r, handed_over: _h, ...payload } = rec;
   return payload;
 }
 

@@ -1305,4 +1305,13 @@ describe("every machine through its own tunnel (#460): peer_join from the roles 
     expect(a?.ok).toBe(false);
     expect(a?.error).toMatch(/did not come up through it/);
   });
+
+  it("peer_retarget refuses a second run on the same box while one is in progress", async () => {
+    const answer = fleet.adminOp({ op: "peer_retarget", name: "box", address: "owner@box-a.lan" });
+    await eventually(async () => sshScripts().some((s) => s.some((l) => l.includes("retarget"))));
+    const second = await fleet.adminOp({ op: "peer_retarget", name: "box", address: "dev@other" });
+    expect(second?.error).toMatch(/already in progress/);
+    await fleet.clock.advance(DAEMON_DEFAULTS.peer_retarget_grace_ms + 1000);
+    expect((await answer)?.ok).toBe(false);
+  });
 });

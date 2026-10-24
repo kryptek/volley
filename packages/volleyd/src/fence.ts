@@ -1969,7 +1969,7 @@ export function isRoleRemoteVolley(a: readonly string[]): boolean {
     if (rest[i] === "--local-terminal" && (rest[i + 1] === "cmux" || rest[i + 1] === "tmux"))
       i += 2;
     if (rest[i] === "--local-agents" && rest[i + 1] === "never") i += 2;
-    if (rest[i] === "--broker-url" && TUNNEL_BROKER_URL.test(rest[i + 1] ?? "")) i += 2;
+    if (rest[i] === "--broker-url" && isTunnelBrokerUrl(rest[i + 1] ?? "")) i += 2;
     return i === rest.length;
   }
   return false;
@@ -2340,7 +2340,10 @@ const MCP_ENTRY_SUFFIX = "/packages/volley-mcp/src/index.ts";
 /** A remote host's launch.sh exports, in order: exactly what SshTmuxHost.launchEnv emits. */
 const LAUNCH_ENV_KEYS = ["VOLLEY_BROKER_URL", "VOLLEY_NAMESPACE", "VOLLEY_AGENT_ID"];
 /** The broker as a remote agent sees it: the reverse tunnel's end on the box's loopback. */
-const TUNNEL_BROKER_URL = /^mqtt:\/\/127\.0\.0\.1:[0-9]{1,5}$/;
+function isTunnelBrokerUrl(url: string): boolean {
+  const m = /^mqtt:\/\/127\.0\.0\.1:([0-9]+)$/.exec(url);
+  return m !== null && isPortArg(m[1]);
+}
 
 /**
  * The env block: none (local), or exactly the three keys for this agent through the tunnel; on a
@@ -2357,7 +2360,7 @@ function launchEnvAllowed(
   return (
     keys.length === LAUNCH_ENV_KEYS.length &&
     keys.every((k, i) => k === LAUNCH_ENV_KEYS[i]) &&
-    TUNNEL_BROKER_URL.test(url) &&
+    isTunnelBrokerUrl(url) &&
     (host?.broker_port === undefined || url === `mqtt://127.0.0.1:${host.broker_port}`) &&
     AGENT_ID.test(env.VOLLEY_NAMESPACE ?? "") &&
     env.VOLLEY_AGENT_ID === agentId
