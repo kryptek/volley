@@ -95,6 +95,9 @@ export const DESK_SUBSCRIPTIONS = [
   "volley/_system/claude/registry",
   // Each machine's record and, under it, volleyd's readiness verdict (SPEC §4.6.15).
   "volley/_system/machines/#",
+  // Where the broker, the supervisor and the Desk run, and each move's progress (SPEC §4.6.24).
+  "volley/_system/roles",
+  "volley/_system/roles/moves/+",
   // The needs-you inbox: one retained record per thing waiting for a person (SPEC §4.6.18).
   "volley/_inbox/+",
   // volleyd's answers to account ops (SPEC §4.6.10); secrets in them are sealed to the requester.

@@ -664,6 +664,56 @@ export interface MachinePayload {
   doctor_at?: string;
 }
 
+/** The three machine roles (SPEC §4.6.24): which machine runs the broker, the supervisor, the Desk. */
+export const MACHINE_ROLES = ["broker", "supervisor", "desk"] as const;
+export type MachineRole = (typeof MACHINE_ROLES)[number];
+
+/**
+ * roles.schema.json payload: the supervisor's record of where each machine role runs, on the
+ * retained `volley/_system/roles` (SPEC §4.6.24), accepted only from `volleyd`.
+ */
+export interface RolesPayload {
+  broker: {
+    machine: string;
+    /** `ssh`: where every machine's tunnel reaches the broker's machine; null while it is local. */
+    address: { ssh: string | null; mqtt_port: number; ws_port: number };
+    lan: boolean;
+  };
+  supervisor: { machine: string };
+  /** `url`: the address browsers and phones open the Desk at. */
+  desk: { machine: string; url: string };
+  version: number;
+  updated_at: string;
+  updated_by: string;
+}
+
+/** One step of a role move as the moves topic has it. */
+export interface RoleMoveStep {
+  id: string;
+  title: string;
+  /** The machine it runs on, or `every machine`. */
+  where: string;
+  status: "pending" | "running" | "ok" | "failed" | "skipped";
+  /** Its last line of output, or why it failed. */
+  line?: string;
+}
+
+/**
+ * role-move.schema.json payload: one move's progress, on the retained
+ * `volley/_system/roles/moves/<move_id>` (SPEC §4.6.24), republished at every change.
+ */
+export interface RoleMovePayload {
+  move_id: string;
+  role: MachineRole;
+  from: string;
+  to: string;
+  status: "planning" | "running" | "health_check" | "done" | "failed" | "rolled_back";
+  steps: RoleMoveStep[];
+  since: string;
+  error?: string;
+  log_path?: string;
+}
+
 /** Where one repository stands on a machine (readiness.schema.json `repos`, SPEC §4.6.21). */
 export type RepoState = "ready" | "cloning" | "blocked" | "absent";
 
@@ -976,6 +1026,10 @@ export interface DeskState {
    * machine name, oldest first; kept across a resync (the replay's copy is deduplicated).
    */
   machineHistory?: Record<string, MachineSample[]>;
+  /** volleyd's machine roles record (SPEC §4.6.24); absent until it is retained. */
+  roles?: RolesPayload;
+  /** Each role move's retained progress, by move id. */
+  roleMoves?: Record<string, RoleMovePayload>;
   /** The needs-you inbox (SPEC §4.6.18): volleyd's retained items, by item id. */
   inbox?: Record<string, InboxItem>;
   /** Each wave's retained morning digest (SPEC §4.6.16), by wave. */

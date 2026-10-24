@@ -93,7 +93,7 @@ import {
   signinsDone,
   useClaudeRegistry,
 } from "./settings/ClaudeAccounts";
-import { agentsOnMachines, sshHost } from "./settings/Machines";
+import { agentsOnMachines, deskMovedTo, sshHost } from "./settings/Machines";
 import { PeerSignin, peerAccount } from "./settings/PeerSigninSheet";
 import { SettingsModal } from "./settings/SettingsModal";
 import { ADMIN_ROLE, SettingsWindow } from "./settings/SettingsWindow";
@@ -136,6 +136,7 @@ import {
   supervisorNamespace,
   unclassifiedAgents,
 } from "./store/reducer";
+import { createRoleOps } from "./store/roleOps";
 import type {
   AgentView,
   DecisionPayload,
@@ -506,6 +507,8 @@ export default function App() {
   );
   // Ask whether this Desk is an admin as soon as it can write, so Machines rarely waits on it;
   // an admin Desk then checks in with volleyd hourly, so Broker accounts never calls it stale.
+  // The machine-role ops (SPEC §4.6.24): Move a role here… on a machine card.
+  const roleOps = useMemo(() => (authOps ? createRoleOps(authOps) : null), [authOps]);
   useEffect(() => {
     if (peerOps === null || authOps === null) return;
     return keepAdminSeen(peerOps, authOps);
@@ -831,6 +834,8 @@ export default function App() {
     demo || !supervisorHealth(state.supervisors[DAEMON_AGENT_ID]).down,
   );
   const machinesShown = machinesOpen;
+  // After a Desk move, this page is the old address until its unit is unloaded (SPEC §4.6.24).
+  const deskMoved = demo ? null : deskMovedTo(state.roles, state.roleMoves, window.location.origin);
   const machinesNow = useNow(machinesShown ? MACHINES_TICK_MS : null);
   // The first fit frames the canvas: every shown window but the anchored ones.
   const rects: Rect[] = shownIds()
@@ -1583,6 +1588,16 @@ export default function App() {
         {sounds.announcement}
       </output>
 
+      {deskMoved && (
+        <output className="desk-moved">
+          The Desk now lives at{" "}
+          <a href={deskMoved} className="mono">
+            {deskMoved}
+          </a>{" "}
+          — open it there.
+        </output>
+      )}
+
       <TopBar
         state={state}
         connection={connection}
@@ -1674,6 +1689,9 @@ export default function App() {
             ops: peerOps,
             host: sshHost(brokerUrl),
             readiness: state.readiness ?? {},
+            roles: state.roles,
+            roleMoves: state.roleMoves ?? {},
+            roleOps,
             localName: state.config?.fleet?.local_name,
             focus: focusMachine?.name,
             focusSeq: focusMachine?.seq,

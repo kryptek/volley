@@ -19,6 +19,11 @@
  * `always`, `never`, `fallback`, or `fallback · active` while no paired machine
  * is eligible), titled with volleyd's why; a click opens the setting.
  *
+ * Its **Roles** row (SPEC §4.6.24) chips the machine roles volleyd's record puts here
+ * (`broker`, `supervisor`, `desk`; `no roles` when none). For an admin, the action row (the own
+ * card's too) carries **Move a role here…**, a menu of the roles it does not hold, while it is up;
+ * a choice opens `RoleMoveSheet`.
+ *
  * Its repositories (SPEC §4.6.21) are listed read-only, each with where it stands there
  * (volleyd's verdict), with **Repositories…** opening Settings › Repositories, where they are
  * added and removed. Repair's sheet has a row per repository.
@@ -28,10 +33,20 @@ import { type ReactNode, useEffect, useState } from "react";
 import { maskEmail } from "../lib/email";
 import { plural } from "../lib/plural";
 import { type PeerInvite, type PeerOps, joinCommand } from "../store/peerOps";
-import type { ConfigPayload, MachinePayload, ReadinessPayload } from "../store/types";
+import type { RoleOps } from "../store/roleOps";
+import {
+  type ConfigPayload,
+  MACHINE_ROLES,
+  type MachinePayload,
+  type MachineRole,
+  type ReadinessPayload,
+  type RoleMovePayload,
+  type RolesPayload,
+} from "../store/types";
 import { CheckRows, CopyCommand } from "./MachineRows";
 import { RemoveMachineSheet } from "./RemoveMachineSheet";
 import { RepairSheet } from "./RepairSheet";
+import { ROLE_NAME, RoleMoveSheet } from "./RoleMoveSheet";
 import type { ConfigAck, ConfigTransport } from "./configTransport";
 import { type RepoOnMachine, reposOnMachine, stateText } from "./repos";
 
@@ -229,6 +244,83 @@ function AccountRows({
         ))}
       </ul>
     </div>
+  );
+}
+
+/** The machine roles `name` holds in volleyd's record, in the record's order. */
+export const rolesOn = (roles: RolesPayload, name: string): MachineRole[] =>
+  MACHINE_ROLES.filter((r) => roles[r].machine === name);
+
+/** The Roles row: a chip per machine role this machine runs. */
+function RoleChips({ name, held }: { name: string; held: readonly MachineRole[] }) {
+  return (
+    <div className="m-roles">
+      <span className="s-hint">Roles</span>
+      {held.length > 0 ? (
+        <ul className="m-role-chips" aria-label={`Roles on ${name}`}>
+          {held.map((r) => (
+            <li key={r} className="chip m-role">
+              {r}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <span className="dim">no roles</span>
+      )}
+    </div>
+  );
+}
+
+/** Move a role here…: a menu of the roles this machine does not hold. */
+function MoveRoleMenu({
+  name,
+  roles,
+  onPick,
+}: {
+  name: string;
+  roles: readonly MachineRole[];
+  onPick: (role: MachineRole) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="m-move">
+      <button
+        type="button"
+        className="btn"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        Move a role here…
+      </button>
+      {open && (
+        <div
+          className="m-move-menu"
+          role="menu"
+          aria-label={`Roles to move to ${name}`}
+          onKeyDown={(e) => {
+            if (e.key !== "Escape") return;
+            e.stopPropagation();
+            setOpen(false);
+          }}
+        >
+          {roles.map((r) => (
+            <button
+              key={r}
+              type="button"
+              role="menuitem"
+              className="m-move-item"
+              onClick={() => {
+                setOpen(false);
+                onPick(r);
+              }}
+            >
+              {ROLE_NAME[r]}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
   );
 }
 
@@ -439,12 +531,27 @@ export interface MachineCardProps {
   onOpenRepos?: (() => void) | undefined;
   /** volleyd's config: a repository it assigns here shows before any verdict or record has it. */
   waveConfig?: ConfigPayload | null | undefined;
+  /** volleyd's machine roles record (SPEC §4.6.24): the Roles row; absent until it arrives. */
+  roles?: RolesPayload | undefined;
+  /** The role moves' records, followed by the move sheet. */
+  roleMoves?: Record<string, RoleMovePayload> | undefined;
+  /** The role ops; `null` or absent: no Move a role here…. */
+  roleOps?: RoleOps | null | undefined;
+  /** A role move finished: what to tell the section. */
+  onMoved?: ((notice: string) => void) | undefined;
 }
 
 export function MachineCard(p: MachineCardProps) {
   const { m, r, now, ops } = p;
   const [open, setOpen] = useState<Open>(null);
+  const [moving, setMoving] = useState<MachineRole | null>(null);
   const down = m.tunnel === "down";
+  const held = p.roles ? rolesOn(p.roles, m.name) : null;
+  const movable =
+    p.admin && p.roleOps && !down && held ? MACHINE_ROLES.filter((r) => !held.includes(r)) : [];
+  const moveMenu = movable.length > 0 && (
+    <MoveRoleMenu name={m.name} roles={movable} onPick={setMoving} />
+  );
   const repos = reposOnMachine(m.name, p.waveConfig ?? null, m, r);
   const ctx = { machine: m.name, repo: m.repo?.path, repos };
   const pairing = p.admin && !p.self && ops !== null;
@@ -470,6 +577,7 @@ export function MachineCard(p: MachineCardProps) {
         <span>{r ? `${m.agents}/${r.max_agents} agents` : plural(m.agents, "agent")}</span>
       </div>
       {!down && <div className="s-hint">seen {ago(m.last_seen, now)} ago</div>}
+      {held && <RoleChips name={m.name} held={held} />}
       <ReadinessLine m={m} r={r} now={now} hubUp={p.hubUp ?? true} />
       {down && (
         <p className="s-hint m-note">
@@ -489,8 +597,10 @@ export function MachineCard(p: MachineCardProps) {
       {p.admin && !p.self && p.config && (
         <CapEditor name={m.name} value={r?.max_agents ?? DEFAULT_MAX_AGENTS} transport={p.config} />
       )}
+      {!pairing && moveMenu && <div className="m-actions">{moveMenu}</div>}
       {pairing && open !== "repair-code" && (
         <div className="m-actions">
+          {moveMenu}
           <button type="button" className="btn" onClick={() => setOpen("repair")}>
             Repair…
           </button>
@@ -519,6 +629,18 @@ export function MachineCard(p: MachineCardProps) {
           repo={m.repo?.path}
           repos={repos}
           onClose={() => setOpen(null)}
+        />
+      )}
+      {moving && p.roleOps && (
+        <RoleMoveSheet
+          role={moving}
+          to={m.name}
+          roles={p.roles}
+          ops={p.roleOps}
+          moves={p.roleMoves ?? {}}
+          hubUp={p.hubUp ?? true}
+          onClose={() => setMoving(null)}
+          onMoved={p.onMoved}
         />
       )}
       {pairing && open === "remove" && (

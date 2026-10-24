@@ -1048,12 +1048,70 @@ function machines(now: number, step = 0): DeskMessage[] {
   ];
 }
 
+/**
+ * The machine roles (SPEC §4.6.24): the broker and the supervisor on this machine, the Desk moved
+ * to box-a an hour ago, and that move's retained record (done, kept for a rollback).
+ */
+function roles(now: number): DeskMessage[] {
+  const at = now - 3_600_000;
+  const record = {
+    broker: {
+      machine: LOCAL_MACHINE,
+      address: { ssh: null, mqtt_port: 1883, ws_port: 9001 },
+      lan: true,
+    },
+    supervisor: { machine: LOCAL_MACHINE },
+    desk: { machine: "box-a", url: "http://box-a.local:5199" },
+    version: 2,
+    updated_at: iso(at),
+    updated_by: "owner",
+  };
+  const moveId = "mv-desk-demo";
+  const step = (id: string, title: string, where: string, line?: string) => ({
+    id,
+    title,
+    where,
+    status: "ok",
+    ...(line ? { line } : {}),
+  });
+  const move = {
+    move_id: moveId,
+    role: "desk",
+    from: LOCAL_MACHINE,
+    to: "box-a",
+    status: "done",
+    steps: [
+      step("install", "Install the Desk on box-a", "box-a", "desk installed on :5199"),
+      step("check", "Check http://127.0.0.1:5199", "box-a", "ok"),
+      step("record", "Record the Desk on box-a", LOCAL_MACHINE),
+      step("signin", "Make a sign-in link for the new address", LOCAL_MACHINE),
+      step("unload", `Unload the old Desk on ${LOCAL_MACHINE}`, LOCAL_MACHINE),
+    ],
+    since: iso(at),
+  };
+  return [
+    {
+      topic: "volley/_system/roles",
+      envelope: env(SUPERVISOR, "_system/roles", "roles", record, at),
+      receivedAt: now,
+      retained: true,
+    },
+    {
+      topic: `volley/_system/roles/moves/${moveId}`,
+      envelope: env(SUPERVISOR, "_system/roles/moves", "role_move", move, at),
+      receivedAt: now,
+      retained: true,
+    },
+  ];
+}
+
 /** Every retained/live message the demo starts from, oldest agent history first per agent. */
 export function demoMessages(now: number, agents = AGENTS.length): DeskMessage[] {
   return [
     ...globals(now),
     ...claudeUsage(now),
     ...machines(now),
+    ...roles(now),
     ...WAVES.flatMap((w) => [waveState(w, now), ...decision(w, now)]),
     ...demoAutopilot(now),
     ...demoPlanned(now),
