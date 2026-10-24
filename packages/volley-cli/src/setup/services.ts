@@ -13,8 +13,9 @@ import { backupPath, writeConfig } from "../auth/config";
 import { installedBrokerUrl, withoutLogin } from "../peer/profile-checks";
 import { DESK_STAMP, deskStamp, writeDeskStamp } from "./desk-build";
 import { deskPortListeners, portConflict } from "./desk-port";
+import { deskBrokerHost } from "./journal";
 import { type LaunchdDeps, reloadLaunchd } from "./launchd";
-import { serviceEnv } from "./service-path";
+import { serviceEnv, servicePath } from "./service-path";
 import type { Change, SetupContext, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
 import { planCmux } from "./terminal";
@@ -465,6 +466,132 @@ async function deskServicePid(
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
+/** The Desk's line under the Services row of `volley setup --check`: which broker the page uses. */
+export const deskRow = (brokerHost: string | null): string =>
+  brokerHost === null
+    ? "Desk: broker on the page's host (port 9001)"
+    : `Desk: broker ${brokerHost.includes(":") ? `[${brokerHost}]` : brokerHost}:9001 (served to the page at /desk-config.json)`;
+
+/**
+ * The Desk's part of the Services step, shared with `volley desk install`: the build (rebuilt
+ * when its sources changed since; never with a `VITE_VOLLEY_BROKER_*` env file, nor the env's),
+ * the stamp, then `volley desk serve` as a service for this platform, with `--broker-host` when
+ * the Desk names a broker on another machine (`deskBrokerHost`). Adds to `out`; sets
+ * `out.blocked` when it cannot go on.
+ */
+async function planDesk(ctx: SetupContext, repo: string, out: StepPlan): Promise<void> {
+  const { platform, bun } = ctx.deps;
+  const brokerHost = deskBrokerHost(ctx);
+  const push = (c: Change | null) => {
+    if (c !== null) out.changes.push(c);
+  };
+  const deskDir = join(repo, "packages", "volley-desk");
+  const dist = join(deskDir, "dist");
+  const stamp = deskStamp(repo);
+  const built = existsSync(join(dist, "index.html"));
+  const builtFrom = read(join(dist, DESK_STAMP)).trim();
+  if (built && builtFrom === stamp) {
+    out.found.push(`The Desk is built from this checkout (${dist})`);
+  } else {
+    const leaks = deskEnvLeaks(deskDir);
+    if (leaks.length > 0) {
+      out.blocked = `${leaks.map((f) => join(deskDir, f)).join(", ")} set${leaks.length === 1 ? "s" : ""} VITE_VOLLEY_BROKER_*: Vite would build that broker URL or login into the page served to your network. Remove those lines (or move the file aside) and rerun`;
+      return;
+    }
+    out.changes.push({
+      summary: !built
+        ? "Build the Desk (vite build in packages/volley-desk)"
+        : builtFrom === ""
+          ? "Rebuild the Desk (the build in packages/volley-desk/dist was not made by setup)"
+          : `Rebuild the Desk (built from ${builtFrom}, the checkout is now ${stamp})`,
+      detail: `cd ${deskDir} && ${bun} run build (no VITE_VOLLEY_BROKER_*: the page finds the broker in /desk-config.json, else on port 9001 of the host it came from)`,
+      apply: async () => {
+        // Vite inlines VITE_* into the bundle: never a broker URL or a dev login.
+        const {
+          VITE_VOLLEY_BROKER_URL: _u,
+          VITE_VOLLEY_BROKER_USERNAME: _n,
+          VITE_VOLLEY_BROKER_PASSWORD: _p,
+          ...buildEnv
+        } = ctx.auth.env;
+        await must(ctx, [bun, "run", "build"], { cwd: deskDir, env: buildEnv });
+        writeDeskStamp(dist, stamp);
+        return [`Built the Desk into ${dist} (${stamp}).`];
+      },
+    });
+  }
+  const desk: ServiceSpec = {
+    name: "volley-desk",
+    label: DESK_LABEL,
+    description: "Volley Desk static server (volley desk serve)",
+    args: [
+      bun,
+      join(repo, "packages", "volley-cli", "src", "cli.ts"),
+      "desk",
+      "serve",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      String(ctx.deskPort),
+      ...(brokerHost !== null ? ["--broker-host", brokerHost] : []),
+    ],
+    env: { PATH: servicePath(ctx) },
+    log: join(ctx.volleydHome, "desk.log"),
+    workdir: ctx.volleydHome,
+  };
+  const on = `0.0.0.0:${ctx.deskPort}`;
+  out.row = deskRow(brokerHost);
+  // The Desk's release evidence route stays off: setup only names the choice (no behaviour change).
+  out.found.push(
+    `Release evidence: off (the Needs you window shows release screenshots and logs once the Desk serves them: add \`volley desk serve --evidence ${ctx.volleydHome}\`; anyone on your LAN who can load the Desk can read them without signing in, the same trust as \`--lan\`)`,
+  );
+  const conflict = await deskPortConflict(ctx, platform, out.found);
+  if (conflict !== null) {
+    out.blocked = conflict;
+    return;
+  }
+  if (platform === "darwin") {
+    push(
+      await launchdChange(
+        ctx,
+        desk,
+        `Install \`volley desk serve\` as a launchd service on ${on}`,
+        out.found,
+      ),
+    );
+  } else if (platform === "linux") {
+    push(
+      await systemdChange(
+        ctx,
+        desk,
+        `Install \`volley desk serve\` as a systemd user service (volley-desk.service) on ${on}`,
+        out.found,
+      ),
+    );
+  }
+}
+
+/**
+ * `volley desk install`: the Desk's part of the Services step alone (`planDesk`), with the
+ * check that planning again finds nothing to do.
+ */
+export async function planDeskInstall(ctx: SetupContext): Promise<StepPlan> {
+  const out: StepPlan = { step: "services", title: "Desk", found: [], changes: [] };
+  const repo = ctx.deps.repoRoot;
+  if (repo === null) {
+    out.blocked = "cannot find this Volley checkout (no bun.lock above the CLI); pass --root";
+    return out;
+  }
+  await planDesk(ctx, repo, out);
+  out.verify = async () => {
+    const again = await planDeskInstall(ctx);
+    return [
+      ...(again.blocked !== undefined ? [again.blocked] : []),
+      ...again.changes.map((c) => `still not in place: ${c.summary}`),
+    ];
+  };
+  return out;
+}
+
 /** The Services step of `volley setup` (the cmux check is the Terminal step's). */
 export const planServices = (ctx: SetupContext): Promise<StepPlan> => planServicesWith(ctx, false);
 
@@ -568,88 +695,8 @@ async function planServicesWith(ctx: SetupContext, withCmux: boolean): Promise<S
   if ("change" in hooks) out.changes.push(hooks.change);
   else out.found.push(hooks.found);
 
-  // The Desk: built, rebuilt when its sources changed since, then served.
-  const deskDir = join(repo, "packages", "volley-desk");
-  const dist = join(deskDir, "dist");
-  const stamp = deskStamp(repo);
-  const built = existsSync(join(dist, "index.html"));
-  const builtFrom = read(join(dist, DESK_STAMP)).trim();
-  if (built && builtFrom === stamp) {
-    out.found.push(`The Desk is built from this checkout (${dist})`);
-  } else {
-    const leaks = deskEnvLeaks(deskDir);
-    if (leaks.length > 0) {
-      out.blocked = `${leaks.map((f) => join(deskDir, f)).join(", ")} set${leaks.length === 1 ? "s" : ""} VITE_VOLLEY_BROKER_*: Vite would build that broker URL or login into the page served to your network. Remove those lines (or move the file aside) and rerun`;
-      return out;
-    }
-    out.changes.push({
-      summary: !built
-        ? "Build the Desk (vite build in packages/volley-desk)"
-        : builtFrom === ""
-          ? "Rebuild the Desk (the build in packages/volley-desk/dist was not made by setup)"
-          : `Rebuild the Desk (built from ${builtFrom}, the checkout is now ${stamp})`,
-      detail: `cd ${deskDir} && ${bun} run build (no VITE_VOLLEY_BROKER_URL: the page uses port 9001 on the host it came from)`,
-      apply: async () => {
-        // Vite inlines VITE_* into the bundle: never a broker URL or a dev login.
-        const {
-          VITE_VOLLEY_BROKER_URL: _u,
-          VITE_VOLLEY_BROKER_USERNAME: _n,
-          VITE_VOLLEY_BROKER_PASSWORD: _p,
-          ...buildEnv
-        } = ctx.auth.env;
-        await must(ctx, [bun, "run", "build"], { cwd: deskDir, env: buildEnv });
-        writeDeskStamp(dist, stamp);
-        return [`Built the Desk into ${dist} (${stamp}).`];
-      },
-    });
-  }
-  const desk: ServiceSpec = {
-    name: "volley-desk",
-    label: DESK_LABEL,
-    description: "Volley Desk static server (volley desk serve)",
-    args: [
-      bun,
-      join(repo, "packages", "volley-cli", "src", "cli.ts"),
-      "desk",
-      "serve",
-      "--host",
-      "0.0.0.0",
-      "--port",
-      String(ctx.deskPort),
-    ],
-    env: { PATH: env.PATH as string },
-    log: join(ctx.volleydHome, "desk.log"),
-    workdir: ctx.volleydHome,
-  };
-  const on = `0.0.0.0:${ctx.deskPort}`;
-  // The Desk's release evidence route stays off: setup only names the choice (no behaviour change).
-  out.found.push(
-    `Release evidence: off (the Needs you window shows release screenshots and logs once the Desk serves them: add \`volley desk serve --evidence ${ctx.volleydHome}\`; anyone on your LAN who can load the Desk can read them without signing in, the same trust as \`--lan\`)`,
-  );
-  const conflict = await deskPortConflict(ctx, platform, out.found);
-  if (conflict !== null) {
-    out.blocked = conflict;
-    return out;
-  }
-  if (platform === "darwin") {
-    push(
-      await launchdChange(
-        ctx,
-        desk,
-        `Install \`volley desk serve\` as a launchd service on ${on}`,
-        out.found,
-      ),
-    );
-  } else if (platform === "linux") {
-    push(
-      await systemdChange(
-        ctx,
-        desk,
-        `Install \`volley desk serve\` as a systemd user service (volley-desk.service) on ${on}`,
-        out.found,
-      ),
-    );
-  }
+  await planDesk(ctx, repo, out);
+  if (out.blocked !== undefined) return out;
   push(cmux);
   // After the changes every service must be in place: planning again must find nothing to do.
   out.verify = async () => {

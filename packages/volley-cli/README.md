@@ -68,7 +68,7 @@ volley --help
 | `volley peer`   | Pair a second machine with `volleyd`'s: `invite` (a one-time code) and `remove` (both admin ops: an admin account's login) and `list` on the supervisor's machine, `join <code> --to <host>` on the new one (doctor, account, tunnel service, trust check, host entry), `doctor` (check this machine, `--fix` the safe things), `run` (the service). See [`volley peer`](#volley-peer) below and the volleyd README's "Paired machines". |
 | `volley repo`   | The repositories volleyd's machines work on: `add <owner/name>` (each paired machine clones it, or adopts `--path`, and trusts it; `--wait` follows them), `remove` (clones kept), `list`, `status`. See [`volley repo`](#volley-repo) below. |
 | `volley setup`  | First-run / repair wizard: broker, accounts, services, phone sign-in QR. See [`volley setup`](#volley-setup) below. |
-| `volley desk serve` | Serve the built Desk from a small static server (the service `volley setup` installs). See [`volley desk serve`](#volley-desk-serve) below. |
+| `volley desk serve` | Serve the built Desk from a small static server (the service `volley setup` installs); `volley desk install`, `uninstall` and `check` install it as a service on its own. See [`volley desk serve`](#volley-desk-serve) below. |
 | `volley deploy` | Take this machine's volleyd and Desk services to a release tag: build the Desk, restart, health-check, roll back on failure; then every paired machine. See [`volley deploy`](#volley-deploy) below. |
 
 Each has its own `--help`:
@@ -146,9 +146,18 @@ volley desk serve                       # http://127.0.0.1:5199, from packages/v
 volley desk serve --host 0.0.0.0        # for a phone on the LAN (what the setup service runs)
 volley desk serve --port 8080 --root /path/to/dist
 volley desk serve --host 0.0.0.0 --evidence ~/.volleyd   # also serve release evidence (below)
+volley desk serve --host 0.0.0.0 --broker-host box-a     # the broker runs on another machine (below)
+
+volley desk install --port 5199 --broker-host box-a      # build it and install it as a service
+volley desk uninstall                                    # stop and remove the service (keeps dist/)
+volley desk check --url http://127.0.0.1:5199 --version 0.11.0
 ```
 
-A small static server for the built Desk (`bun run --cwd packages/volley-desk build`): hashed assets are cached for good, the index never, every unknown path gets the index, and nothing outside the build directory is served. It holds no credentials: the page signs in to the broker itself (port 9001 on the host the page came from).
+A small static server for the built Desk (`bun run --cwd packages/volley-desk build`): hashed assets are cached for good, the index never, every unknown path gets the index, and nothing outside the build directory is served. It holds no credentials: the page signs in to the broker itself (port 9001 on the host the page came from, unless the server names another).
+
+**The broker on another machine.** `--broker-host <host>` (and `--broker-ws-port <n>`, default 9001) serves `GET /desk-config.json` as `{"broker":{"host":"box-a","ws_port":9001}}` with `Cache-Control: no-store`; without the flag that path is a 404. The page fetches it once before the sign-in form and connects to that broker (`wss` on an https page), so the broker can move while the Desk stays and no device signs in again; moving the Desk changes the page's origin, so devices sign in again there. The host is a bare name or IP address (an IPv6 one bare or in brackets): a scheme, a path, a port or a login exits 2. The page's own `VITE_VOLLEY_BROKER_URL` (a dev build) still wins over it.
+
+**`volley desk install | uninstall | check`.** The Desk's own install as commands, for a machine that serves the Desk without the rest of `volley setup` (volleyd runs them over ssh when it moves the Desk). `install [--port <n>] [--broker-host <host>] [--root <checkout>]` is the Services step's Desk part: it builds the Desk in the checkout (`--root`, default this one) without the `VITE_VOLLEY_BROKER_*` variables (an env file in `packages/volley-desk` that sets one refuses the install), writes `dist/.volley-build`, and installs `volley desk serve --host 0.0.0.0 --port <n> [--broker-host <host>]` as this platform's service (launchd on macOS, `systemd --user` on Linux). It records `desk_port` and `broker_host` in `$VOLLEYD_HOME/setup.json`, so a later `volley setup` renders the same unit (its `--check` names the Desk's broker under the Services row); a second run changes nothing. `uninstall` boots the service out and removes its unit file, keeping `dist/`. `check --url <u> --version <v>` exits 0 when `<u>/` answers 200 and `<u>/version.json` is `<v>`, else 1: volleyd makes no http calls itself, so the health check runs on the target.
 
 At start it warns on stderr, and still serves, when the build looks stale. Each line is printed only when it holds:
 

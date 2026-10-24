@@ -210,6 +210,72 @@ describe("DeskStoreProvider auth refusal on a later reconnect", () => {
   });
 });
 
+describe("SignInGate and the served /desk-config.json", () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => localStorage.clear());
+
+  const deferred = <T,>() => {
+    let resolve: (v: T) => void = () => {};
+    const promise = new Promise<T>((ok) => {
+      resolve = ok;
+    });
+    return { promise, resolve };
+  };
+
+  it("renders only after the fetch settles, then names and connects to the served broker", async () => {
+    const f = factory();
+    const config = deferred<{ broker: { host: string; ws_port: number } } | null>();
+    const loadConfig = vi.fn(() => config.promise);
+    localStorage.setItem(
+      CREDENTIALS_STORAGE_KEY,
+      JSON.stringify({ username: "desk", password: "s3cret" }),
+    );
+    render(
+      <SignInGate demo={false} env={{}} clientFactory={f.make} loadConfig={loadConfig}>
+        <Probe />
+      </SignInGate>,
+    );
+    expect(loadConfig).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("desk")).not.toBeInTheDocument();
+    expect(screen.queryByRole("form")).not.toBeInTheDocument();
+    expect(f.calls).toHaveLength(0);
+    await act(async () => config.resolve({ broker: { host: "box-a", ws_port: 9001 } }));
+    await flush();
+    expect(f.calls.at(-1)?.url).toBe("ws://box-a:9001");
+    expect(screen.getByTestId("desk")).toHaveTextContent("connected:desk");
+  });
+
+  it("a failed fetch (null) falls back to the page host", async () => {
+    const f = factory();
+    render(
+      <SignInGate demo={false} env={{}} clientFactory={f.make} loadConfig={async () => null}>
+        <Probe />
+      </SignInGate>,
+    );
+    await flush();
+    // jsdom serves the test page from http://localhost.
+    expect(screen.getByText("ws://localhost:9001")).toBeInTheDocument();
+  });
+
+  it("does not fetch when the prop or VITE_VOLLEY_BROKER_URL names the broker", () => {
+    const f = factory();
+    const loadConfig = vi.fn(async () => null);
+    gate(f);
+    render(
+      <SignInGate
+        demo={false}
+        env={{ VITE_VOLLEY_BROKER_URL: "ws://env.test:9001" }}
+        clientFactory={f.make}
+        loadConfig={loadConfig}
+      >
+        <Probe />
+      </SignInGate>,
+    );
+    expect(loadConfig).not.toHaveBeenCalled();
+    expect(screen.getByText("ws://env.test:9001")).toBeInTheDocument();
+  });
+});
+
 describe("SignInGate look (D9)", () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => localStorage.clear());
