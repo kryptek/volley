@@ -261,6 +261,11 @@ describe("selectAccount: task > wave > config default > primary", () => {
       { ...work, in_flight: 0, projected_pct: 82 },
     ]);
     expect(idle.why).toBe("work: 18% left, resets in 52m (use it or lose it) on local");
+    // in flight but the projection unchanged (a learned rate of 0): no `after`, despite float error
+    const flat = selectAccount(r, reg, { now: T, capPct: 97 }, () => [
+      { ...work, binding_left: 99.9, five_hour_pct: 0.1, in_flight: 2, projected_pct: 0.1 },
+    ]);
+    expect(flat.why).not.toContain("in flight");
   });
 
   it("null (and most_headroom) balances across the signed-in accounts by rank", () => {

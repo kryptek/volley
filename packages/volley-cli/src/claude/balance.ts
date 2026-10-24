@@ -62,7 +62,11 @@ const WINDOW_LABEL = { five_hour: "5h", weekly: "7d", model_weekly: "model" } as
 /** ` (12% after 3 in flight)` when agents in flight move the binding window's projection. */
 function inFlight(c: BalanceCandidate, used: boolean): string {
   const p = c.projected_pct;
-  if (!c.in_flight || p == null || (c.binding_left != null && p === 100 - c.binding_left))
+  if (
+    !c.in_flight ||
+    p == null ||
+    (c.binding_left != null && Math.abs(p - (100 - c.binding_left)) <= 1e-9)
+  )
     return "";
   return ` (${pct(used ? p : 100 - p)} after ${c.in_flight} in flight)`;
 }

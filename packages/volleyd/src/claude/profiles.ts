@@ -409,7 +409,9 @@ function balanceLine(
         : "5h";
   // `(8% after 1 in flight)`: the binding window's projection, when agents in flight move it
   const projected = (r: Ranked) =>
-    r.in_flight > 0 && r.projected_pct !== null && r.projected_pct !== 100 - (r.binding_left ?? 0)
+    r.in_flight > 0 &&
+    r.projected_pct !== null &&
+    Math.abs(r.projected_pct - (100 - (r.binding_left ?? 0))) > 1e-9
       ? r.projected_pct
       : null;
   const after = (r: Ranked, p: number, used: boolean) =>

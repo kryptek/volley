@@ -224,6 +224,7 @@ import {
   parseUsage,
   pinNote,
   pruneBook,
+  publishedRecord,
   rankAccounts,
   restoreBook,
   sampleAccount,
@@ -10796,7 +10797,7 @@ export class Daemon {
   private async usagePass(): Promise<void> {
     const records = accountRecords(this.usage);
     for (const rec of Object.values(records)) {
-      const payload = { ...rec, ...this.claude.describe(rec.account) };
+      const payload = { ...publishedRecord(rec), ...this.claude.describe(rec.account) };
       const text = JSON.stringify(payload);
       if (this.publishedUsage.get(rec.account) === text) continue;
       this.publishedUsage.set(rec.account, text);
