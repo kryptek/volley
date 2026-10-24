@@ -82,7 +82,6 @@ export interface SettingsWindowProps {
     ClaudeAccountsProps,
     | "accounts"
     | "signins"
-    | "waves"
     | "control"
     | "registryControl"
     | "onRegistry"
@@ -335,7 +334,6 @@ export function SettingsWindow(p: SettingsWindowProps) {
               <ClaudeAccounts
                 accounts={p.claude?.accounts ?? {}}
                 signins={p.claude?.signins ?? {}}
-                waves={p.claude?.waves ?? {}}
                 control={p.claude?.control ?? null}
                 {...(p.claude?.registryControl !== undefined
                   ? { registryControl: p.claude.registryControl }

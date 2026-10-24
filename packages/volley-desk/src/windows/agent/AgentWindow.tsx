@@ -31,7 +31,8 @@
  * meter (`ctx 72% · 143K/200K`, hot ≥ 85, warn ≥ 65; pulse ≥ 70, faster when
  * hot, none under reduced motion), and row 2 an
  * account picker listing the Claude accounts of the agent's own machine with
- * their 5-hour usage and machine (`Work · 12% · peer-a`): picking another asks
+ * their 5-hour usage and machine (`Work · 12% · peer-a`), the closed picker
+ * naming the agent's own by its registry label (`Account: Work · …`): picking another asks
  * to confirm (the agent restarts with a resume note) and then calls
  * `agent_move_account`. On hover or focus its tooltip says why the agent runs
  * under its account (`accountWhy`: the latest `account_chosen`, or the move
@@ -58,6 +59,7 @@ import {
   LOCAL_MACHINE,
   NO_USAGE_YET,
   accountEventsFor,
+  accountName,
   accountWhy,
   choicesFor,
   fiveHourLabel,
@@ -234,12 +236,15 @@ function AccountPicker({
   name,
   current,
   accounts,
+  known = accounts,
   why,
   onMove,
 }: {
   name: string;
   current: string | null;
   accounts: readonly AccountChoice[];
+  /** Every account the Desk knows, any machine's: the current one's registry label. */
+  known?: readonly AccountChoice[];
   why: string | null;
   onMove: AgentWindowProps["onMoveAccount"];
 }) {
@@ -257,6 +262,8 @@ function AccountPicker({
     if (r && !r.ok) setError(r.error ?? "volleyd refused the move");
   };
   const own = accounts.find((a) => a.id === current);
+  // The chip (the closed picker) names the account by its registry label, never its id.
+  const currentName = current === null ? null : accountName(known, current);
   return (
     <span className="acct-pick-wrap">
       <select
@@ -269,16 +276,18 @@ function AccountPicker({
       >
         {current === null && <option value="">Account…</option>}
         {current !== null && !accounts.some((a) => a.id === current) && (
-          <option value={current}>{current}</option>
+          <option value={current}>Account: {currentName}</option>
         )}
         {accounts.map((a) => (
           <option key={a.id} value={a.id}>
-            {choiceLabel(a)}
+            {a.id === current ? `Account: ${choiceLabel(a)}` : choiceLabel(a)}
           </option>
         ))}
       </select>
       <div role="tooltip" id={tipId} className="host-pop acct-tip">
-        <p className="host-rule">{own ? choiceLabel(own) : (current ?? "no account known yet")}</p>
+        <p className="host-rule">
+          {own ? choiceLabel(own) : (currentName ?? "no account known yet")}
+        </p>
         <p className="dim">{why ?? "why this account: not seen since the Desk loaded"}</p>
         <p className="dim">Pick another to move it (it restarts with a resume note).</p>
       </div>
@@ -563,6 +572,7 @@ export function AgentWindow({
           name={agent.task ?? headline}
           current={account}
           accounts={choices}
+          known={accounts}
           why={accountWhy(accountEvents, agent.task, agent.role)}
           onMove={onMoveAccount}
         />

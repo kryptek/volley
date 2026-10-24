@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import axe from "axe-core";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -8,15 +8,13 @@ import {
   signInPreset,
   withSignIns,
 } from "../src/settings/ClaudeAccounts";
-import { SettingsModal } from "../src/settings/SettingsModal";
-import { type AccountGroup, accountList } from "../src/store/claude";
+import type { AccountGroup } from "../src/store/claude";
 import { initialState, reduceAll } from "../src/store/reducer";
 import type {
   ClaudeAccountPayload,
   ConfigPayload,
   DecisionPayload,
   DeskMessage,
-  WaveView,
 } from "../src/store/types";
 
 const NOW = Date.parse("2026-10-18T14:06:00.000Z");
@@ -59,6 +57,23 @@ const limit: DecisionPayload = {
   suggested: "personal",
 };
 
+const agentLimit: DecisionPayload = {
+  decision_id: "w1-t1-agent_account_limit-1",
+  wave: "w1",
+  task: "T1",
+  kind: "agent_account_limit",
+  question: "w1-t1-implementer-1 runs under work, at 91% of its 5-hour window.",
+  options: ["move w1-t1-implementer-1 to personal", "not now"],
+  opened_at: "2026-10-18T14:06:01.000Z",
+  agent_id: "w1-t1-implementer-1",
+  role: "implementer",
+  window: "five_hour",
+  acct: "work",
+  pct: 91,
+  resets_at: null,
+  suggested: "personal",
+};
+
 const config = {
   version: 3,
   updated_at: "2026-10-18T12:00:00.000Z",
@@ -95,13 +110,6 @@ const signinMsg = (acct: string, type: string, payload: Record<string, unknown>)
     ...payload,
   });
 
-const wave = (decisions: Record<string, DecisionPayload>): WaveView => ({
-  id: "w1",
-  state: null,
-  decisions,
-  receivedAt: NOW,
-});
-
 function setup(extra: DeskMessage[] = [], props: Partial<ClaudeAccountsProps> = {}) {
   const state = reduceAll(initialState(), [accountMsg(work), accountMsg(personal), ...extra]);
   const control = vi.fn(async () => ({ ok: true }) as { ok: boolean; result?: unknown });
@@ -109,7 +117,6 @@ function setup(extra: DeskMessage[] = [], props: Partial<ClaudeAccountsProps> = 
     <ClaudeAccounts
       accounts={s.claudeAccounts ?? {}}
       signins={s.signins ?? {}}
-      waves={{ w1: wave({}) }}
       config={config}
       control={control}
       configTransport={null}
@@ -122,6 +129,10 @@ function setup(extra: DeskMessage[] = [], props: Partial<ClaudeAccountsProps> = 
   const r = render(view());
   return { ...r, state, control, view };
 }
+
+/** An open decision on wave w1, as volleyd retains it. */
+const decisionMsg = (d: DecisionPayload) =>
+  msg(`volley/_waves/w1/decisions/${d.decision_id}`, "_waves/decisions", "decision", d);
 
 describe("reducer: Claude accounts and sign-in events", () => {
   it("keeps the retained account records and forgets a cleared one", () => {
@@ -165,86 +176,12 @@ describe("ClaudeAccounts", () => {
     expect(p.getByRole("meter", { name: "5-hour" }).closest(".meter")).toHaveTextContent("12%");
   });
 
-  it("shows the open account_limit decision as a banner; Move resolves it", async () => {
-    const { control } = setup([], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
-    const banner = screen.getByRole("status");
-    expect(banner).toHaveTextContent("Needs you: Work is at 91% of its 5-hour window");
-    await act(async () => {
-      fireEvent.click(within(banner).getByRole("button", { name: "Move to Personal" }));
-    });
-    expect(control).toHaveBeenCalledWith(
-      "resolve",
-      { wave: "w1", decision_id: "d-7k2m9q4x", answer: "move wave w1 to personal" },
-      expect.any(String),
-    );
-  });
-
-  it("labels a suggested account with no usage yet (a newly signed-in profile) as such", async () => {
-    const fresh = { ...limit, options: ["move wave w1 to fresh", "not now"], suggested: "fresh" };
-    const control = vi.fn(async (op: string) =>
-      op === "claude_accounts"
-        ? {
-            ok: true,
-            result: {
-              accounts: [{ id: "fresh", label: "fresh", machine: "local", signed_in_at: SIGNED }],
-            },
-          }
-        : { ok: true },
-    );
-    setup([], {
-      waves: { w1: wave({ [fresh.decision_id]: fresh }) },
-      control,
-      onRegistry: () => {},
-    });
-    const banner = screen.getByRole("status");
-    await waitFor(() => expect(banner).toHaveTextContent("Move wave w1 to fresh (no usage yet)?"));
-    await act(async () => {
-      fireEvent.click(within(banner).getByRole("button", { name: "Move to fresh" }));
-    });
-    expect(control).toHaveBeenCalledWith(
-      "resolve",
-      { wave: "w1", decision_id: "d-7k2m9q4x", answer: "move wave w1 to fresh" },
-      expect.any(String),
-    );
-  });
-
-  it("says nothing of the suggestion's usage while the Desk has no record of it", () => {
-    const ghost = { ...limit, options: ["move wave w1 to ghost", "not now"], suggested: "ghost" };
-    setup([], { waves: { w1: wave({ [ghost.decision_id]: ghost }) } });
-    const banner = screen.getByRole("status");
-    expect(banner).toHaveTextContent("Move wave w1 to ghost? New agents");
-    expect(banner).not.toHaveTextContent("no usage yet");
-  });
-
-  it("a suggestion that reported only weekly usage reads no 5-hour usage yet", () => {
-    const weeklyOnly = { ...personal, five_hour: null };
-    setup([accountMsg(weeklyOnly)], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Move wave w1 to Personal (no 5-hour usage yet)?",
-    );
-  });
-
-  it("Not now answers the decision with its not-now option", async () => {
-    const { control } = setup([], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Not now" }));
-    });
-    expect(control).toHaveBeenCalledWith(
-      "resolve",
-      { wave: "w1", decision_id: "d-7k2m9q4x", answer: "not now" },
-      expect.any(String),
-    );
-  });
-
-  it("no open decision, no banner", () => {
-    setup([], {
-      waves: {
-        w1: wave({
-          [limit.decision_id]: { ...limit, resolved: { answer: "not now", by: "desk", at: "x" } },
-        }),
-      },
-    });
-    expect(screen.queryByRole("status")).toBeNull();
+  it("renders no Needs-you banner, even with an open account_limit or agent_account_limit", () => {
+    // The wave's limit is its window's banner, the agent's its window's: none here.
+    const { container } = setup([decisionMsg(limit), decisionMsg(agentLimit)]);
+    expect(container.querySelector(".needs-you")).toBeNull();
+    expect(screen.queryByText(/Needs you/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Move to|not now/i })).toBeNull();
   });
 
   it("Add → the Stepper shows the sign-in link from the event and completes on done", async () => {
@@ -314,10 +251,7 @@ describe("ClaudeAccounts", () => {
   });
 
   it("read-only without credentials: no add, no answers, the default as text", () => {
-    const { rerender, view } = setup([], {
-      control: null,
-      waves: { w1: wave({ [limit.decision_id]: limit }) },
-    });
+    const { rerender, view } = setup([], { control: null });
     expect(screen.getByRole("button", { name: "+ Add Claude account" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Move to Personal" })).toBeNull();
     rerender(view(undefined, { group: "defaults" }));
@@ -362,25 +296,6 @@ describe("ClaudeAccounts review fixes", () => {
     expect(screen.getByText("applied · v4")).toBeInTheDocument();
   });
 
-  it("Move / Not now are disabled while an answer is in flight", async () => {
-    const { control } = setup([], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
-    let release: (v: { ok: boolean }) => void = () => {};
-    control.mockImplementationOnce(
-      () =>
-        new Promise((r) => {
-          release = r;
-        }),
-    );
-    const banner = within(screen.getByRole("status"));
-    fireEvent.click(banner.getByRole("button", { name: "Move to Personal" }));
-    expect(banner.getByRole("button", { name: "Move to Personal" })).toBeDisabled();
-    expect(banner.getByRole("button", { name: "Not now" })).toBeDisabled();
-    fireEvent.click(banner.getByRole("button", { name: "Move to Personal" }));
-    expect(control.mock.calls.filter((c) => (c as unknown[])[0] === "resolve")).toHaveLength(1);
-    await act(async () => release({ ok: true }));
-    expect(banner.getByRole("button", { name: "Not now" })).toBeEnabled();
-  });
-
   it("the resets-in time keeps up with the clock while the section is open", () => {
     vi.useFakeTimers({ now: NOW, toFake: ["Date", "setInterval", "clearInterval"] });
     try {
@@ -390,7 +305,6 @@ describe("ClaudeAccounts review fixes", () => {
           group="accounts"
           accounts={state.claudeAccounts ?? {}}
           signins={{}}
-          waves={{}}
           config={config}
           control={null}
           configTransport={null}
@@ -445,7 +359,6 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
         group="accounts"
         accounts={{}}
         signins={{}}
-        waves={{}}
         config={config}
         control={registry([{ id: "team", label: "Team", machine: "local", signed_in_at: SIGNED }])}
         configTransport={null}
@@ -474,7 +387,6 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
         group="accounts"
         accounts={{}}
         signins={{}}
-        waves={{}}
         config={config}
         control={registry([], { plan: "max" })}
         configTransport={null}
@@ -498,7 +410,6 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
         group="accounts"
         accounts={{}}
         signins={{}}
-        waves={{}}
         config={config}
         control={control}
         configTransport={null}
@@ -516,7 +427,6 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
         group="accounts"
         accounts={{}}
         signins={{}}
-        waves={{}}
         config={config}
         control={null}
         configTransport={null}
@@ -533,7 +443,6 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
         group="accounts"
         accounts={state.claudeAccounts ?? {}}
         signins={{}}
-        waves={{}}
         config={config}
         control={null}
         configTransport={null}
@@ -557,7 +466,6 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
         group="accounts"
         accounts={state.claudeAccounts ?? {}}
         signins={{}}
-        waves={{}}
         config={config}
         control={null}
         configTransport={null}
@@ -575,86 +483,6 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     setup([], { configTransport: { identity: "desk", send }, group: "defaults" });
     const group = screen.getByRole("radiogroup", { name: "Account for new waves" });
     expect(within(group).getByRole("radio", { name: "Primary" })).toBeInTheDocument();
-  });
-});
-
-describe("SettingsModal › the wave's Claude account", () => {
-  const accounts = accountList({
-    work,
-    personal,
-    "team@box": { ...personal, account: "team@box", label: "Team" },
-  });
-  const withFresh = accountList({ work, personal }, [
-    { id: "fresh", label: "Fresh", machine: "local", signed_in_at: "2026-10-18T13:00:00.000Z" },
-  ]);
-  const modal = (decisions: Record<string, DecisionPayload>, control: ControlFn | null) =>
-    render(
-      <SettingsModal
-        wave={wave(decisions)}
-        onClose={() => {}}
-        onOpenGlobal={() => {}}
-        accounts={accounts}
-        control={control}
-      />,
-    );
-
-  it("names the accounts the wave runs on, with no picker while no decision is open", () => {
-    modal({}, vi.fn());
-    expect(screen.getByText("Work")).toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: /Move wave w1/ })).toBeNull();
-    expect(screen.getByText(/offers a move when the account nears its limit/)).toBeInTheDocument();
-  });
-
-  it("with an open account_limit decision, picks a local account and resolves the move", async () => {
-    const control = vi.fn(async () => ({ ok: true }));
-    modal({ [limit.decision_id]: limit }, control);
-    const pick = screen.getByRole("combobox", { name: "Move wave w1 to a Claude account" });
-    const options = within(pick)
-      .getAllByRole("option")
-      .map((o) => o.textContent);
-    expect(options).toEqual(["Move new agents to…", "Personal · 12%"]);
-    await act(async () => {
-      fireEvent.change(pick, { target: { value: "personal" } });
-    });
-    expect(control).toHaveBeenCalledWith("resolve", {
-      wave: "w1",
-      decision_id: "d-7k2m9q4x",
-      answer: "move wave w1 to personal",
-    });
-  });
-
-  it("labels an account with no usage yet in the picker", () => {
-    render(
-      <SettingsModal
-        wave={wave({ [limit.decision_id]: limit })}
-        onClose={() => {}}
-        onOpenGlobal={() => {}}
-        accounts={withFresh}
-        control={vi.fn(async () => ({ ok: true }))}
-      />,
-    );
-    const pick = screen.getByRole("combobox", { name: "Move wave w1 to a Claude account" });
-    expect(
-      within(pick)
-        .getAllByRole("option")
-        .map((o) => o.textContent),
-    ).toEqual(["Move new agents to…", "Personal · 12%", "Fresh · no usage yet"]);
-  });
-
-  it("shows volleyd's refusal", async () => {
-    const control = vi.fn(async () => ({ ok: false, error: "decision already resolved" }));
-    modal({ [limit.decision_id]: limit }, control);
-    await act(async () => {
-      fireEvent.change(screen.getByRole("combobox", { name: "Move wave w1 to a Claude account" }), {
-        target: { value: "personal" },
-      });
-    });
-    expect(screen.getByRole("alert")).toHaveTextContent("decision already resolved");
-  });
-
-  it("read-only: no picker even with a decision open", () => {
-    modal({ [limit.decision_id]: limit }, null);
-    expect(screen.queryByRole("combobox", { name: /Move wave w1/ })).toBeNull();
   });
 });
 
@@ -694,7 +522,6 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
       <ClaudeAccounts
         accounts={records}
         signins={{}}
-        waves={{}}
         config={config}
         control={null}
         configTransport={null}
@@ -1093,7 +920,6 @@ describe("ClaudeAccounts › the per-machine account matrix", () => {
         <ClaudeAccounts
           accounts={s.claudeAccounts ?? {}}
           signins={s.signins ?? {}}
-          waves={{}}
           config={config}
           control={control}
           configTransport={null}
@@ -1314,24 +1140,8 @@ describe("ClaudeAccounts › the balance and the agent-level decision (T8)", () 
       },
     ],
   };
-  const agentLimit: DecisionPayload = {
-    decision_id: "w1-t1-agent_account_limit-1",
-    wave: "w1",
-    task: "T1",
-    kind: "agent_account_limit",
-    question: "w1-t1-implementer-1 runs under work, at 91% of its 5-hour window.",
-    options: ["move w1-t1-implementer-1 to personal", "not now"],
-    opened_at: "2026-10-18T14:06:01.000Z",
-    agent_id: "w1-t1-implementer-1",
-    role: "implementer",
-    window: "five_hour",
-    acct: "work",
-    pct: 91,
-    resets_at: null,
-    suggested: "personal",
-  };
 
-  function view(control: ControlFn | null, waves: Record<string, WaveView> = {}) {
+  function view(control: ControlFn | null) {
     const state = reduceAll(initialState(), [
       accountMsg({ ...work, email: EMAIL }),
       accountMsg(personal),
@@ -1341,7 +1151,6 @@ describe("ClaudeAccounts › the balance and the agent-level decision (T8)", () 
         <ClaudeAccounts
           accounts={state.claudeAccounts ?? {}}
           signins={{}}
-          waves={waves}
           config={config}
           control={control}
           configTransport={null}
@@ -1371,27 +1180,6 @@ describe("ClaudeAccounts › the balance and the agent-level decision (T8)", () 
     );
     expect(screen.queryByText(/picks next/)).toBeNull();
     expect(screen.queryByText("next pick")).toBeNull();
-  });
-
-  it("the needs-you list renders an agent_account_limit: the question, move with figures, not now", async () => {
-    const control = answering();
-    view(control, { w1: wave({ [agentLimit.decision_id]: agentLimit }) });
-    const banner = screen.getByText(agentLimit.question).closest(".needs-you") as HTMLElement;
-    const move = within(banner).getByRole("button", { name: "move to personal (5h 12%, 7d 22%)" });
-    expect(within(banner).getByRole("button", { name: "not now" })).toBeInTheDocument();
-    await act(async () => {
-      fireEvent.click(move);
-    });
-    expect(control).toHaveBeenCalledWith(
-      "resolve",
-      {
-        wave: "w1",
-        decision_id: agentLimit.decision_id,
-        answer: "move w1-t1-implementer-1 to personal",
-      },
-      `volleyd resolve ${agentLimit.decision_id}`,
-    );
-    expect(screen.queryByRole("combobox")).toBeNull();
   });
 });
 
@@ -1425,7 +1213,6 @@ describe("ClaudeAccounts › one clean card per account (#496)", () => {
         <ClaudeAccounts
           accounts={records}
           signins={{}}
-          waves={{}}
           config={config}
           control={control}
           configTransport={null}

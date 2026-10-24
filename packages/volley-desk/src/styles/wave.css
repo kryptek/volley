@@ -380,3 +380,28 @@
   cursor: pointer;
   font-size: inherit;
 }
+
+/* The wave's Claude account (wave-state `account`): the chip, the dropdown, the confirm line. */
+.wave-acct {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 0 0 10px;
+  font-size: 12px;
+  min-width: 0;
+}
+.wave-acct-pick {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.wave-acct-note {
+  flex-basis: 100%;
+  color: var(--mute);
+}

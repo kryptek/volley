@@ -421,11 +421,16 @@ export function DeskStoreProvider({
   // The demo writer answers a coordinator with `resumed` instead of `steering_acked`.
   const coordinatorIds = useRef<ReadonlySet<string>>(new Set());
   coordinatorIds.current = new Set(Object.keys(state.coordinators));
+  // The demo writer re-publishes a wave's state when its account is set.
+  const waveStates = useRef<DeskState["waves"]>({});
+  waveStates.current = state.waves;
   const [demoWriter] = useState<SteerClient | null>(() =>
     demo
       ? createDemoSteerClient(
           (msgs) => dispatch({ type: "apply", msgs }),
           (id) => coordinatorIds.current.has(id),
+          Date.now,
+          (wave) => waveStates.current[wave]?.state ?? null,
         )
       : null,
   );

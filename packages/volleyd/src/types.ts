@@ -653,7 +653,20 @@ export interface WaveState {
   spawns?: { productive: number; churn: number; churn_by?: ChurnBy; budget?: number };
   /** Merge trains, oldest first; absent: none. */
   trains?: MergeTrain[];
+  /** The account the wave's new agents start under (SPEC §4.6.1; the daemon's snapshot). */
+  account?: WaveAccount;
   updated_at: string;
+}
+
+/**
+ * wave-state `account` (SPEC §4.6.1, §4.6.11): the account the wave's new agents start under
+ * (`pinned`, null: balanced), what names it (`wave`: its wave file or a move, `config`:
+ * `claude.default_account`), and the account its last move left.
+ */
+export interface WaveAccount {
+  pinned: string | null;
+  source: "wave" | "config" | "balanced";
+  moved_from?: string;
 }
 
 /** wave-state `spawns.churn_by` and the digest's `auto.churn`: churn spawns per cause (#387). */
@@ -804,7 +817,8 @@ export const WAVE_EVENT_TYPES = [
   "merge_ended",
   "agent_force_retired",
   "alarm_cleared",
-  // Usage metering (claude/usage.ts): an answered account_limit decision moved the wave.
+  // Usage metering (claude/usage.ts): an answered account_limit decision or `wave_account_set`
+  // moved the wave (`from` / `to` null: balanced).
   "wave_account_moved",
   // Broker logins on Dynamic Security (retire.ts, credential-sweep.ts).
   "agent_reaped_by_supervisor",

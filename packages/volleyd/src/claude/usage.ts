@@ -766,3 +766,17 @@ export function waveAccount(acct: string, moves: readonly { from: string; to: st
   for (const m of moves) if (m.from === out) out = m.to;
   return out;
 }
+
+/**
+ * Where a wave's moves left it (SPEC §4.6.11): its last `wave_account_moved`, `to` the account
+ * its new agents start under (null: balanced) and `from` the one it left (null: it balanced).
+ * Undefined when the wave never moved: the wave file and `claude.default_account` decide.
+ */
+export function wavePin(
+  events: readonly JournalEvent[],
+): { to: string | null; from: string | null } | undefined {
+  const last = events.filter((e) => e.type === "wave_account_moved").at(-1);
+  if (last === undefined) return undefined;
+  const { from, to } = last.data as { from?: unknown; to?: unknown };
+  return { to: typeof to === "string" ? to : null, from: typeof from === "string" ? from : null };
+}

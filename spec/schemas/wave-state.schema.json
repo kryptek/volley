@@ -225,6 +225,17 @@
                 }
               }
             },
+            "account": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["pinned", "source"],
+              "description": "The Claude account the wave's new agents start under (spec section 4.6.11). pinned: the account (a registry id or primary), null when its spawns balance; source: what names it (wave: its wave file's account: or a move, wave_account_set or an account_limit answer; config: claude.default_account; balanced: nothing does); moved_from: the account its last move left. Running agents keep the account they started under. Absent from an older supervisor.",
+              "properties": {
+                "pinned": { "type": ["string", "null"], "minLength": 1 },
+                "source": { "enum": ["wave", "config", "balanced"] },
+                "moved_from": { "type": "string", "minLength": 1 }
+              }
+            },
             "updated_at": { "type": "string", "format": "date-time" }
           }
         }

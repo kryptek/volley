@@ -297,8 +297,20 @@ export interface WaveStatePayload {
   spawns?: { productive: number; churn: number };
   /** Merge trains, in the order the queue formed them. */
   trains?: WaveTrain[];
+  /** The account the wave's new agents start under; absent from an older supervisor. */
+  account?: WaveAccount;
   updated_at: string;
   [key: string]: unknown;
+}
+
+/**
+ * wave-state `account` (SPEC §4.6.1): the account the wave's new agents start under (`pinned`,
+ * null: balanced), what names it, and the account its last move left.
+ */
+export interface WaveAccount {
+  pinned: string | null;
+  source: "wave" | "config" | "balanced";
+  moved_from?: string;
 }
 
 /** `decision.schema.json`'s `payload.kind` enum (a test keeps the two in step). */
@@ -878,6 +890,8 @@ export interface WaveView {
   state: WaveStatePayload | null;
   decisions: Record<string, DecisionPayload>;
   receivedAt: number;
+  /** The state's `account`; absent from an older volleyd (no field) or before the state. */
+  account?: WaveAccount;
 }
 
 export interface CoordinatorView {

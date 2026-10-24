@@ -169,6 +169,19 @@ describe("reducer — wave state", () => {
     expect(s.coordinators["coordinator-ab12"]).toBeUndefined();
   });
 
+  it("a wave state's account fills WaveView.account; an older volleyd's (none) leaves it undefined", () => {
+    const pinned = apply(msg("volley/_waves/w1/state", example("wave-state-account-pinned")));
+    expect(pinned.waves.w1?.account).toEqual({
+      pinned: "team",
+      source: "wave",
+      moved_from: "primary",
+    });
+    expect(apply(WAVE).waves.w1?.account).toBeUndefined();
+    // A later state without the field (a downgraded volleyd) drops it.
+    const older = reduce(pinned, WAVE);
+    expect(older.waves.w1?.account).toBeUndefined();
+  });
+
   it("tracks open decisions per wave and drops them when cleared", () => {
     const topic = "volley/_waves/w1/decisions/w1-t2-merge_conflict-1";
     const opened = apply(WAVE, msg(topic, example("decision-merge-conflict")));

@@ -271,6 +271,35 @@
         },
         {
           "if": {
+            "properties": { "type": { "const": "wave_account_moved" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "data": {
+                    "type": "object",
+                    "description": "The wave's account for its agents not yet spawned moved (spec section 4.6.11): from the account it left and to the one its new agents start under, null meaning balanced; by: who moved it.",
+                    "required": ["from", "to", "by"],
+                    "properties": {
+                      "from": { "type": ["string", "null"], "minLength": 1 },
+                      "to": { "type": ["string", "null"], "minLength": 1 },
+                      "by": { "type": "string", "minLength": 1 },
+                      "decision_id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+                        "description": "The account_limit decision the move answered (absent: a wave_account_set request no open decision offered)."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
             "properties": { "type": { "const": "task_admission_returned" } },
             "required": ["type"]
           },

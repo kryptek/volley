@@ -20,10 +20,9 @@
  * "Profiles waiting for sign-in", never a card: **Finish sign-in** resumes it
  * (`claude_signin { acct }`), Cancel lands with remove.
  *
- * An open `account_limit` decision is a Needs-you banner whose Move / Not now
- * answer it (`resolve`); an agent-level `agent_account_limit` is a banner too:
- * its question, then its own options, the move labelled with the suggested
- * account's figures (`move to work (5h 12%, 7d 40%)`). **Add Claude account**
+ * The section manages accounts only: a wave's account is chosen on its window
+ * (its `account_limit` banner there too), an agent's on the agent window
+ * (`agent_account_limit` there). **Add Claude account**
  * is a Stepper: a label and the machine (this one, or any paired host whose
  * tunnel is up), then "Sign in on <machine>" (`claude_account_add { label,
  * machine }`), then the sign-in link from the answer and the
@@ -36,8 +35,8 @@
  * (`claude.default_account`, through config_set) and the warn-at threshold
  * from config.
  *
- * The section drills into two groups (`GroupList`): Accounts (the banners,
- * the cards, the waiting profiles and Add) and Defaults.
+ * The section drills into two groups (`GroupList`): Accounts (the cards, the
+ * waiting profiles and Add) and Defaults.
  */
 import { EyeIcon, ViewOffIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -55,25 +54,17 @@ import {
   NEW_PROFILE,
   PRIMARY_LABEL,
   type RegistryAccount,
-  accountFigures,
   accountList,
   configuredMachines,
   deskAccountGroups,
   fableHint,
   fableShown,
-  fiveHourLabel,
-  isWaveLimit,
   lastUpdated,
   machineName,
   machineRows,
-  moveAnswer,
-  moveOption,
-  notNowAnswer,
-  openLimitDecisions,
   pendingProfiles,
   registryKey,
   resetsIn,
-  resolveFields,
   windowPct,
   withPrimary,
 } from "../store/claude";
@@ -81,10 +72,8 @@ import type {
   ClaudeAccountPayload,
   ClaudeSignin,
   ConfigPayload,
-  DecisionPayload,
   MachinePayload,
   UsageWindow,
-  WaveView,
 } from "../store/types";
 import { AckLine, type RowState } from "./ConfigRows";
 import { GroupList } from "./GroupNav";
@@ -169,8 +158,6 @@ export interface ClaudeAccountsProps {
   accounts: Record<string, ClaudeAccountPayload>;
   /** Sign-in events heard since the page loaded, by account. */
   signins: Record<string, ClaudeSignin>;
-  /** The waves, for their open `account_limit` decisions. */
-  waves: Record<string, WaveView>;
   config: ConfigPayload | null;
   /** `null` = the Desk cannot steer: read-only, with the CLI commands instead. */
   control: ControlFn | null;
@@ -198,19 +185,16 @@ export interface ClaudeAccountsProps {
 /** The group list's one-line summaries. */
 export function claudeSummaries({
   accounts,
-  needsYou,
   defaultLabel,
   warnAt,
 }: {
   accounts: number;
-  /** Open `account_limit` decisions. */
-  needsYou: number;
   /** How the account for new waves reads (`Most headroom`). */
   defaultLabel: string;
   warnAt: number;
 }): Record<string, string> {
   return {
-    accounts: `${plural(accounts, "account")}${needsYou ? ` · ${needsYou} needs you` : ""}`,
+    accounts: plural(accounts, "account"),
     defaults: `${defaultLabel} · warn at ${warnAt}%`,
   };
 }
@@ -914,7 +898,6 @@ export function withSignIns(
 export function ClaudeAccounts({
   accounts: records,
   signins,
-  waves,
   config,
   control,
   registryControl = control,
@@ -935,9 +918,6 @@ export function ClaudeAccounts({
   /** The sign-ins the matrix started, to tell which account each one finished on. */
   const [tries, setTries] = useState<SignInTry[]>([]);
   const [closed, setClosed] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-  /** A resolve in flight: the answers stay disabled so a double click sends one. */
-  const [busy, setBusy] = useState(false);
   const [ack, setAck] = useState<RowState>();
   const now = useNow(fixedNow);
   const { accounts: registry, primaryPlan } = useClaudeRegistry(
@@ -957,20 +937,8 @@ export function ClaudeAccounts({
   const groups = signedIn.groups;
   const configured = configuredMachines(hosts, machines, localName);
   const pending = pendingProfiles(registry, records);
-  const labelOf = (id: string | null | undefined) =>
-    list.find((a) => a.id === id)?.label ?? id ?? "";
-  const decisions = openLimitDecisions(waves);
   const addMachines = (holds: string[]): AddMachine[] =>
     configured.map((m) => ({ ...m, holds: holds.includes(m.op) }));
-
-  const answer = async (d: DecisionPayload, text: string) => {
-    if (!control || busy) return;
-    setError(null);
-    setBusy(true);
-    const r = await control("resolve", resolveFields(d, text), `volleyd resolve ${d.decision_id}`);
-    setBusy(false);
-    if (!r.ok) setError(r.error ?? "volleyd refused the answer");
-  };
 
   const setDefault = (k: string) => {
     if (!configTransport) return;
@@ -1026,7 +994,6 @@ export function ClaudeAccounts({
         section={sectionDef("claude")}
         summaries={claudeSummaries({
           accounts: groups.length,
-          needsYou: decisions.length,
           defaultLabel: currentLabel,
           warnAt,
         })}
@@ -1041,102 +1008,6 @@ export function ClaudeAccounts({
         <p className="s-note">
           Read-only: the Desk has no broker credentials. <code>volley claude add</code> adds an
           account from a terminal.
-        </p>
-      )}
-      {decisions.map((d) => {
-        const target = d.suggested ? list.find((a) => a.id === d.suggested) : undefined;
-        if (!isWaveLimit(d)) {
-          const move = moveOption(d);
-          return (
-            // biome-ignore lint/a11y/useSemanticElements: a banner live region (as in the prototype), not a form <output>
-            <div key={d.decision_id} className="needs-you" role="status">
-              <div className="ny-head">
-                Needs you: {d.agent_id ?? "an agent"} on {labelOf(d.acct)} at{" "}
-                {Math.round(d.pct ?? 0)}%
-              </div>
-              <p className="ny-q">{d.question}</p>
-              {control && (
-                <div className="ny-actions">
-                  {move && d.suggested && (
-                    <button
-                      type="button"
-                      className="btn btn--hot"
-                      disabled={busy}
-                      onClick={() => void answer(d, move)}
-                    >
-                      move to {d.suggested} ({accountFigures(target)})
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="btn"
-                    disabled={busy}
-                    onClick={() => void answer(d, notNowAnswer(d))}
-                  >
-                    not now
-                  </button>
-                </div>
-              )}
-            </div>
-          );
-        }
-        return (
-          // biome-ignore lint/a11y/useSemanticElements: a banner live region (as in the prototype), not a form <output>
-          <div key={d.decision_id} className="needs-you" role="status">
-            <div className="ny-head">
-              Needs you: {labelOf(d.acct)} is at {Math.round(d.pct ?? 0)}% of its 5-hour window
-            </div>
-            <p className="ny-q">
-              {d.suggested ? (
-                <>
-                  Move wave <b>{d.wave}</b> to <b>{labelOf(d.suggested)}</b>
-                  {/* nothing until the Desk has the account (its record may arrive later) */}
-                  {target === undefined
-                    ? ""
-                    : target.fiveHour
-                      ? ` (${Math.round(target.fiveHour.pct)}% used)`
-                      : ` (${fiveHourLabel(null, target.weekly?.pct ?? null)})`}
-                  ? New agents start on {labelOf(d.suggested)}; running agents finish where they
-                  are.
-                </>
-              ) : (
-                <>
-                  No other account has headroom for wave <b>{d.wave}</b>
-                  {resetsIn(d.resets_at, now)
-                    ? `; the window resets in ${resetsIn(d.resets_at, now)}`
-                    : ""}
-                  .
-                </>
-              )}
-            </p>
-            {control && (
-              <div className="ny-actions">
-                {d.suggested && (
-                  <button
-                    type="button"
-                    className="btn btn--hot"
-                    disabled={busy}
-                    onClick={() => void answer(d, moveAnswer(d.wave, d.suggested as string))}
-                  >
-                    Move to {labelOf(d.suggested)}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="btn"
-                  disabled={busy}
-                  onClick={() => void answer(d, notNowAnswer(d))}
-                >
-                  Not now
-                </button>
-              </div>
-            )}
-          </div>
-        );
-      })}
-      {error && (
-        <p className="s-error" role="alert">
-          {error}
         </p>
       )}
       <div className="claude-cards">

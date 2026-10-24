@@ -1,7 +1,7 @@
 /**
  * Pure views over the Desk's Claude account slices (SPEC §4.6.11–12): the
  * account list the Settings section, the agent window's picker and the wave
- * modal share, the open `account_limit` decisions, and the formatting of a
+ * window's account dropdown share, the open `account_limit` decisions, and the formatting of a
  * window's reset. Accounts come from two places: the supervisor's retained
  * usage records (`volley/_system/claude-accounts/+`, only accounts that have
  * reported usage) and, when the Desk can ask, the registry (`claude_accounts`
@@ -18,6 +18,7 @@ import type {
   ProbeState,
   UsageProbe,
   UsageWindow,
+  WaveStatePayload,
   WaveView,
 } from "./types";
 
@@ -626,6 +627,43 @@ export function choicesFor(choices: readonly AccountChoice[], machine: string): 
     .filter((c) => c.machine === machine)
     .map((c) => ({ ...c, id: recordKey(c) }))
     .filter((c) => !seen.has(c.id) && seen.add(c.id) !== undefined);
+}
+
+/** A usage-record key's profile id: `team@box-a` → `team`. */
+const profileId = (key: string) => key.replace(/@.*$/, "");
+
+/** The machines a wave's tasks run on: volleyd's own, then each paired machine a task names. */
+export function waveMachines(s: WaveStatePayload | null): string[] {
+  const hosts = (s?.tasks ?? []).map((t) => t.host).filter((h): h is string => !!h);
+  return [...new Set([LOCAL_MACHINE, ...hosts])];
+}
+
+/**
+ * An account's name, as the wave window and the agent window show it: its registry label
+ * (this machine's row first, then any machine's), else the id itself.
+ */
+export function accountName(
+  accounts: readonly Pick<AccountInfo, "id" | "label" | "machine">[],
+  id: string,
+): string {
+  const same = accounts.filter((a) => a.id === id || profileId(a.id) === profileId(id));
+  const exact = same.find((a) => a.id === id);
+  return (exact ?? same.find((a) => a.machine === LOCAL_MACHINE) ?? same[0])?.label ?? id;
+}
+
+/**
+ * What the wave window's account dropdown lists after `Balanced (default)`: each signed-in
+ * account on the wave's machines once, by the profile id `wave_account_set` takes, named by its
+ * registry label (`accountName`).
+ */
+export function waveAccountChoices(
+  accounts: readonly AccountInfo[],
+  machines: readonly string[],
+): { id: string; label: string }[] {
+  const ids = accounts
+    .filter((a) => a.signedIn && machines.includes(a.machine))
+    .map((a) => profileId(a.id));
+  return [...new Set(ids)].map((id) => ({ id, label: accountName(accounts, id) }));
 }
 
 /** One candidate in a `claude_balance` answer, as volleyd ranked it. */
