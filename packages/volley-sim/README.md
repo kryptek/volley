@@ -65,7 +65,11 @@ Every argv shape volleyd's fence allows (the header of `packages/volleyd/src/fen
   `pr merge <n> --squash|--merge [--match-head-commit <sha>] [--delete-branch]` (a moved head is
   refused with GitHub's own message)
 - `run list --commit <sha> | --branch <b>`, `run view <id> [--json jobs | --log-failed]`,
-  `api repos/{owner}/{repo}/actions/runs?head_sha=…` (CI is computed once per head: green)
+  `run watch <id> [--exit-status]`,
+  `api repos/{owner}/{repo}/actions/runs?head_sha=…` (CI is computed once per head: green), and
+  `…/actions/runs?status=queued` (the CI queue: always empty)
+- the release train's tag check: `api repos/{owner}/{repo}/git/matching-refs/tags/<prefix>
+  [--paginate --slurp]` and `api repos/{owner}/{repo}/git/tags/<sha>`, read from the bare origin
 
 `--json <fields>` and the two `--jq` forms Volley uses (a path such as `.login`, and
 `[.<list>[] | {a, b}]`) are honoured. Anything else — another verb, flag, JSON field or jq

@@ -8,7 +8,7 @@ import { parsePositiveInt, resolveAuth, resolveBrokerUrl } from "../args";
 import { connectAsClient, openClient, reportConnectError } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
-import { type Answer, type AskFlags, askVolleyd, replyKeyPair, unseal } from "./peer";
+import { type Answer, type AskFlags, adminRefusal, askVolleyd, replyKeyPair, unseal } from "./peer";
 
 /**
  * `volley role`: the machine roles (SPEC §4.6.24), which machine runs the broker, the supervisor
@@ -286,6 +286,16 @@ async function moveOrRollback(
       return EXIT.USAGE;
     }
     const longest = Math.max(...Object.values(ROLE_DEFAULTS.move_timeout_s));
+    // The stream connects before role_rollback is asked: refuse a non-admin before it.
+    let auth: BrokerAuth | null;
+    try {
+      auth = resolveAuth({ username: v.username, password: v.password }, env);
+    } catch (e) {
+      io.stderr(`${cmd}: ${e instanceof Error ? e.message : String(e)}\n`);
+      return EXIT.ERROR;
+    }
+    const refused = adminRefusal(cmd, auth, env, io, ADMIN_ONLY);
+    if (refused !== null) return refused;
     return streamed(cmd, io, env, v, timeoutS ?? longest, null, async (stream) => {
       const a = await ask("role_rollback", { move_id: id }, longest);
       if (typeof a === "number") return a;

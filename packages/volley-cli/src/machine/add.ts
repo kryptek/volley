@@ -86,7 +86,11 @@ interface BoxFacts {
   missing: string[];
 }
 
-/** What `install.sh` runs sudo for when the box lacks it (Linux: apt; a Mac: Homebrew's installer). */
+/**
+ * What `install.sh` runs sudo for when the box lacks it (Linux: apt; a Mac: Homebrew's installer).
+ * On Linux it also installs ca-certificates (a package, not a command: asked of dpkg) and, when
+ * bun is absent, unzip for bun's installer: the probe's last two lines, `install_linux`'s rules.
+ */
 const SUDO_TOOLS = { linux: ["git", "tmux", "curl", "gh"], darwin: ["brew"] } as const;
 
 const PROBE = [
@@ -96,6 +100,10 @@ const PROBE = [
   'printf "peer=%s\\n" "$peer"',
   `case "$(uname -s)" in Darwin) tools="${SUDO_TOOLS.darwin.join(" ")}" ;; *) tools="${SUDO_TOOLS.linux.join(" ")}" ;; esac`,
   'missing=; for t in $tools; do command -v "$t" >/dev/null 2>&1 || missing="$missing $t"; done',
+  'if [ "$(uname -s)" != Darwin ]; then',
+  '  if command -v dpkg >/dev/null 2>&1 && ! dpkg -s ca-certificates >/dev/null 2>&1; then missing="$missing ca-certificates"; fi',
+  '  if ! command -v bun >/dev/null 2>&1 && ! command -v unzip >/dev/null 2>&1; then missing="$missing unzip"; fi',
+  "fi",
   'printf "missing=%s\\n" "$missing"',
 ].join("\n");
 

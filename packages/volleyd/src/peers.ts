@@ -268,7 +268,7 @@ export class PeerService {
     const entry = this.match(p.code);
     if (entry === null) return refuse("invalid or expired pairing code");
     if (entry.for !== undefined && entry.for !== name) {
-      return refuse(`this pairing code re-pairs ${entry.for} only (join with --name ${entry.for})`);
+      return refuse(`this pairing code is for ${entry.for} only (join with --name ${entry.for})`);
     }
     const replacing = entry.for === name && p.replace === true;
     if (configured && !replacing) return taken;

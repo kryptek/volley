@@ -250,7 +250,8 @@ async function work(o: AgentOptions, id: Identity): Promise<Outcome> {
 export async function runAgent(o: AgentOptions): Promise<number> {
   const id = JSON.parse(read(join(o.cwd, ".volley", "agent.json"))) as Identity;
   const config = loadConfig(o.env, o.cwd, () => {});
-  const model = o.argv[o.argv.indexOf("--model") + 1] ?? "claude-sim";
+  const at = o.argv.indexOf("--model");
+  const model = (at >= 0 ? o.argv[at + 1] : undefined) ?? "claude-sim";
   const { agentId, namespace, parentId } = config;
   const envelope = (
     channel: string,

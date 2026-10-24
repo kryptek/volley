@@ -222,6 +222,16 @@ describe("volley broker probe (#470)", () => {
 describe("volley broker tunnel (#470)", () => {
   const peerJson = () => join(home, ".volley", "peer.json");
 
+  it("--to over a corrupt peer.json says so (exit 1), and leaves it as it was", async () => {
+    mkdirSync(join(home, ".volley"), { recursive: true });
+    writeFileSync(peerJson(), "{ not json");
+    const r = await run(["tunnel", "--to", "dev@box", "--port", "1883", "--name", "control"]);
+    expect(r.code).toBe(EXIT.ERROR);
+    expect(r.err).toMatch(/peer\.json is not JSON/);
+    expect(readFileSync(peerJson(), "utf-8")).toBe("{ not json");
+    expect(peerCalls).toEqual([]);
+  });
+
   it("--to without a peer.json writes a tunnel-only one and retargets it; --off removes it", async () => {
     const r = await run([
       "tunnel",

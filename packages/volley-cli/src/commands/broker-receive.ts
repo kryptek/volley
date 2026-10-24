@@ -491,9 +491,20 @@ async function tunnelOn(
   if (brokerPort === null) return usage("--broker-port must be a port (1..65535)");
   const file = peerFile(deps.home);
   const previous = existsSync(file) ? readFileSync(file, "utf-8") : null;
+  let kept: Record<string, unknown> | null = null;
+  if (previous !== null) {
+    try {
+      kept = JSON.parse(previous) as Record<string, unknown>;
+    } catch (e) {
+      io.stderr(
+        `volley broker tunnel: ${file} is not JSON (${e instanceof Error ? e.message : String(e)}); fix or remove it, then run this again\n`,
+      );
+      return EXIT.ERROR;
+    }
+  }
   const base: Record<string, unknown> =
-    previous !== null
-      ? (JSON.parse(previous) as Record<string, unknown>)
+    kept !== null
+      ? kept
       : {
           name: v.name,
           target: v.name,

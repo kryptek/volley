@@ -188,6 +188,30 @@ async function must(d: RoleDeps, where: string, argv: string[]): Promise<string>
   return lastLine({ ...r, stderr: "" });
 }
 
+/**
+ * A step with more than one side effect: when it fails partway, its own undo runs before the
+ * failure goes on (the engine undoes only the steps that finished). The undo's own failure is
+ * added to the step's.
+ */
+async function undoingOnFail(
+  run: () => Promise<string>,
+  undo: () => Promise<void>,
+): Promise<string> {
+  try {
+    return await run();
+  } catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    try {
+      await undo();
+    } catch (u) {
+      throw new Error(
+        `${why} (and putting it back failed: ${u instanceof Error ? u.message : String(u)})`,
+      );
+    }
+    throw e;
+  }
+}
+
 const wsUrl = (host: string, port: number) =>
   `ws://${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${port}`;
 
@@ -576,10 +600,19 @@ export function brokerSteps(
       where: from,
       detail: `${tunnelArgv(address, port, d.localName).join(" ")}; VOLLEY_BROKER_URL=${ownUrl}`,
       run: async () => {
-        const line = await must(d, from, tunnelArgv(address, port, d.localName));
-        const unit = await b.unitUrl(ownUrl);
-        unitUndo = unit.undo;
-        return `${line} ${unit.line}`;
+        // A tunnel left up holds 127.0.0.1:<port>, so the old broker could not start again.
+        return undoingOnFail(
+          async () => {
+            const line = await must(d, from, tunnelArgv(address, port, d.localName));
+            const unit = await b.unitUrl(ownUrl);
+            unitUndo = unit.undo;
+            return `${line} ${unit.line}`;
+          },
+          async () => {
+            await unitUndo?.();
+            await must(d, from, TUNNEL_OFF);
+          },
+        );
       },
       undo: async () => {
         await unitUndo?.();
@@ -597,6 +630,17 @@ export function brokerSteps(
   ];
   pairedHosts(d).forEach((name, i) => {
     const self = name === to;
+    const putBack = async () => {
+      const was = kept.peers[name];
+      if (was === undefined) return;
+      // The old broker is not back yet (it starts last): nothing waits for the record.
+      const why = await b.retarget(
+        { name, address: was.host, port: was.remote_port, tunnel: was.tunnel },
+        o.by,
+        async () => true,
+      );
+      if (why !== null) throw new Error(why);
+    };
     steps.push({
       id: `retarget-${i + 1}`,
       title: self
@@ -615,34 +659,29 @@ export function brokerSteps(
           throw new Error(`${name}'s tunnel is not known: ${shown}`);
         }
         kept.peers[name] = was;
-        const link = await b.connect(ownUrl);
-        try {
-          const why = await b.retarget(
-            {
-              name,
-              address,
-              ...(self ? { port: NEW_MQTT, tunnel: "none" as const } : { tunnel: "ssh" as const }),
-            },
-            o.by,
-            (n, since) => upThrough(d, link, n, since),
-          );
-          if (why !== null) throw new Error(why);
-        } finally {
-          await link.close().catch(() => {});
-        }
-        return `${name} is up through the broker on ${to}`;
+        // The machine may be retargeted already when its record does not come up: put it back too.
+        return undoingOnFail(async () => {
+          const link = await b.connect(ownUrl);
+          try {
+            const why = await b.retarget(
+              {
+                name,
+                address,
+                ...(self
+                  ? { port: NEW_MQTT, tunnel: "none" as const }
+                  : { tunnel: "ssh" as const }),
+              },
+              o.by,
+              (n, since) => upThrough(d, link, n, since),
+            );
+            if (why !== null) throw new Error(why);
+          } finally {
+            await link.close().catch(() => {});
+          }
+          return `${name} is up through the broker on ${to}`;
+        }, putBack);
       },
-      undo: async () => {
-        const was = kept.peers[name];
-        if (was === undefined) return;
-        // The old broker is not back yet (it starts last): nothing waits for the record.
-        const why = await b.retarget(
-          { name, address: was.host, port: was.remote_port, tunnel: was.tunnel },
-          o.by,
-          async () => true,
-        );
-        if (why !== null) throw new Error(why);
-      },
+      undo: putBack,
     });
   });
   const deskAt = d.roles.desk.machine;
@@ -709,6 +748,9 @@ export function brokerRollbackSteps(
 ): MoveStep[] {
   const here = rec.from;
   const ownUrl = `mqtt://127.0.0.1:${kept.port}`;
+  // The old broker's own LAN setting and WebSocket port, as the record before the move had them.
+  const old = kept.roles.broker;
+  const oldWs = old.lan ? wsUrl(d.localHost, old.address.ws_port) : null;
   const start = brokerServiceArgv(kept.layout, "start") ?? [];
   const stop = brokerServiceArgv(kept.layout, "stop") ?? [];
   let unitUndo: (() => Promise<void>) | null = null;
@@ -747,9 +789,9 @@ export function brokerRollbackSteps(
       id: "health",
       title: `Check the broker on ${here} answers volleyd`,
       where: here,
-      detail: `connect ${ownUrl} as volleyd; $SYS/broker/version; anonymous refused`,
+      detail: `connect ${ownUrl} as volleyd; $SYS/broker/version; anonymous refused${oldWs !== null ? ` (and ${oldWs})` : ""}`,
       health: true,
-      run: () => brokerHealth(d, b, ownUrl, kept.lan ? wsUrl(d.localHost, NEW_WS) : null),
+      run: () => brokerHealth(d, b, ownUrl, oldWs),
     },
   ];
   Object.keys(kept.peers)

@@ -62,6 +62,13 @@ const fail = (stderr: string): Out => ({
 /** Thrown for a shape no rule answers: becomes `unknown argv`. */
 class Unknown extends Error {}
 
+/** An issue number argument: a positive integer, else not a shape the fake answers. */
+function issueNumber(raw: string | undefined): number {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) throw new Unknown();
+  return n;
+}
+
 // --- argv parsing -------------------------------------------------------------------------------
 
 interface Args {
@@ -360,7 +367,7 @@ const COMMANDS: Record<string, Spec> = {
 
   api: {
     values: ["--jq", "--method"],
-    bools: ["--paginate"],
+    bools: ["--paginate", "--slurp"],
     pos: [1, 1],
     run: (a, c) => {
       const method = one(a, "--method");
@@ -381,6 +388,42 @@ const COMMANDS: Record<string, Spec> = {
       if (runs !== null && head !== null) {
         const list = ciOf(c.w, runs[1] as string, head, "pull_request", "").map(apiRunJson);
         return reply({ total_count: list.length, workflow_runs: list });
+      }
+      // The CI queue (pressure/ci-queue.ts): a simulated run is done when it is first read.
+      if (runs !== null && new URLSearchParams(runs[2]).get("status") === "queued")
+        return reply({ total_count: 0, workflow_runs: [] });
+      const slurp = a.bools.has("--slurp");
+      if (slurp && !a.bools.has("--paginate")) throw new Unknown();
+      // The release train's tag check: refs from the bare origin; --slurp is an array of pages.
+      const refs = /^repos\/([^/]+\/[^/]+)\/git\/matching-refs\/tags\/(.*)$/.exec(endpoint);
+      if (refs !== null) {
+        const origin = c.w.repos[refs[1] as string]?.origin ?? null;
+        const out =
+          origin === null
+            ? ""
+            : bare(origin, [
+                "for-each-ref",
+                "--format=%(refname) %(objectname) %(objecttype)",
+                `refs/tags/${refs[2]}`,
+                `refs/tags/${refs[2]}*`,
+              ]).stdout;
+        const list = [...new Set(out.split("\n").filter((l) => l !== ""))].map((l) => {
+          const [ref, sha, type] = l.split(" ");
+          return { ref, object: { sha, type } };
+        });
+        return reply(slurp ? [list] : list);
+      }
+      const tag = /^repos\/([^/]+\/[^/]+)\/git\/tags\/([0-9a-f]{40})$/.exec(endpoint);
+      if (tag !== null && !slurp) {
+        const origin = c.w.repos[tag[1] as string]?.origin ?? null;
+        const raw = origin !== null ? bare(origin, ["cat-file", "tag", tag[2] as string]) : null;
+        if (raw === null || raw.code !== 0) return fail("gh: Not Found (HTTP 404)");
+        const field = (k: string) => new RegExp(`^${k} (.*)$`, "m").exec(raw.stdout)?.[1];
+        return reply({
+          sha: tag[2],
+          tag: field("tag"),
+          object: { sha: field("object"), type: field("type") },
+        });
       }
       throw new Unknown();
     },
@@ -517,7 +560,7 @@ const COMMANDS: Record<string, Spec> = {
     values: ["--add-label", "--remove-label", ...REPO],
     pos: [1, 1],
     run: (a, c) => {
-      const i = issueOf(c, c.repo(a).slug, Number(a.pos[0]), true);
+      const i = issueOf(c, c.repo(a).slug, issueNumber(a.pos[0]), true);
       const add = many(a, "--add-label");
       const remove = many(a, "--remove-label");
       if (add.length + remove.length === 0) throw new Unknown();
@@ -535,7 +578,7 @@ const COMMANDS: Record<string, Spec> = {
     run: (a, c) => {
       const body = one(a, "--body");
       if (body === undefined) throw new Unknown();
-      const i = issueOf(c, c.repo(a).slug, Number(a.pos[0]), true);
+      const i = issueOf(c, c.repo(a).slug, issueNumber(a.pos[0]), true);
       i.comments.push(body);
       return ok(`${issueUrl(i)}#issuecomment-${i.comments.length}\n`);
     },
@@ -544,7 +587,7 @@ const COMMANDS: Record<string, Spec> = {
     values: ["--comment", ...REPO],
     pos: [1, 1],
     run: (a, c) => {
-      const i = issueOf(c, c.repo(a).slug, Number(a.pos[0]), true);
+      const i = issueOf(c, c.repo(a).slug, issueNumber(a.pos[0]), true);
       const comment = one(a, "--comment");
       if (comment !== undefined) i.comments.push(comment);
       i.state = "CLOSED";
@@ -798,6 +841,19 @@ const COMMANDS: Record<string, Spec> = {
             .map((r) => `completed\t${r.conclusion}\tCI\t${r.branch}\t${r.event}\t${r.id}\n`)
             .join(""),
       );
+    },
+  },
+  "run watch": {
+    values: ["--interval", ...REPO],
+    bools: ["--exit-status", "--compact"],
+    pos: [1, 1],
+    run: (a, c) => {
+      const run = c.w.runs.find((r) => r.id === Number(a.pos[0]));
+      if (run === undefined) return fail(`could not find any workflow run with ID ${a.pos[0]}`);
+      const line = `✓ Run CI (${run.id}) completed with '${run.conclusion}'\n`;
+      return a.bools.has("--exit-status") && run.conclusion !== "success"
+        ? { code: 1, stdout: line, stderr: "" }
+        : ok(line);
     },
   },
   "run view": {

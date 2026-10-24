@@ -63,10 +63,12 @@ let probe: Record<string, unknown>;
 let sshFails: Set<string>;
 let neverUp: Set<string>;
 let wsReach: "refused" | "accepted" | "unreachable";
+let probed: string[];
 let live: { agent_id: string; machine: string }[];
 let retargets: { name: string; address: string; port?: number; tunnel?: string }[];
 let moving: (string | null)[];
 let unitUrls: string[];
+let unitFails: boolean;
 let finished: Promise<{ id: string; r: MoveResult }>;
 let finish: (x: { id: string; r: MoveResult }) => void;
 
@@ -190,11 +192,15 @@ function brokerDeps(): BrokerDeps {
     install: () => ({ layout: "brew-arm64", stateFile, authDir }),
     brokerUrl: "mqtt://127.0.0.1:1883",
     unitUrl: async (url) => {
+      if (unitFails) throw new Error("systemctl --user daemon-reload: exit 1");
       unitUrls.push(url);
       return { line: `VOLLEY_BROKER_URL is ${url} already.`, undo: async () => {} };
     },
     connect: () => link(),
-    probeAnonymous: async (url) => (url.startsWith("ws:") ? wsReach : "refused"),
+    probeAnonymous: async (url) => {
+      probed.push(url);
+      return url.startsWith("ws:") ? wsReach : "refused";
+    },
     retarget: async (r, _by, up) => {
       retargets.push(r);
       const since = now;
@@ -275,10 +281,12 @@ beforeEach(async () => {
   sshFails = new Set();
   neverUp = new Set();
   wsReach = "refused";
+  probed = [];
   live = [];
   retargets = [];
   moving = [];
   unitUrls = [];
+  unitFails = false;
   local = fakeExec().on(["tar"], (argv) => {
     const r = spawnSync("tar", argv.slice(1));
     return { code: r.status ?? 1, stderr: r.stderr.toString() };
@@ -485,13 +493,14 @@ describe("the broker move (#470)", () => {
     const rec = record(id);
     expect(rec.status).toBe("failed");
     expect(rec.error).toMatch(/box2.*did not come up/);
-    // The target was put back on its own tunnel to the old machine.
-    expect(retargets.at(-1)).toEqual({
-      name: TARGET,
-      address: `me@${LOCAL}`,
-      port: 21883,
-      tunnel: "ssh",
-    });
+    // Both put back on their tunnel to the old machine, the one that timed out first.
+    const back = { address: `me@${LOCAL}`, port: 21883, tunnel: "ssh" };
+    expect(retargets).toEqual([
+      { name: TARGET, address: `dev@${TARGET}`, port: 1883, tunnel: "none" },
+      { name: OTHER, address: `dev@${TARGET}`, tunnel: "ssh" },
+      { name: OTHER, ...back },
+      { name: TARGET, ...back },
+    ]);
     const here = localLines();
     expect(here.indexOf("volley broker tunnel --off")).toBeGreaterThan(-1);
     // The own tunnel off before the old broker starts again (its port is the tunnel's until then).
@@ -499,6 +508,19 @@ describe("the broker move (#470)", () => {
       here.indexOf("volley broker tunnel --off"),
     );
     expect(written).toEqual([]);
+    expect(roles.broker.machine).toBe(LOCAL);
+  });
+
+  it("the own tunnel up but its unit not re-pointed: the tunnel taken down before the old broker starts", async () => {
+    unitFails = true;
+    const o = ops();
+    const { r } = await move(o);
+    expect(r).toMatchObject({ ok: false, status: "failed", step: "tunnel", rolled_back: true });
+    const here = localLines();
+    const off = here.indexOf("volley broker tunnel --off");
+    expect(off).toBeGreaterThan(-1);
+    expect(here.indexOf("brew services start mosquitto")).toBeGreaterThan(off);
+    expect(retargets).toEqual([]);
     expect(roles.broker.machine).toBe(LOCAL);
   });
 
@@ -537,6 +559,25 @@ describe("the broker move (#470)", () => {
     expect(roles.broker.machine).toBe(LOCAL);
     expect(roles.broker.address.ssh).toBeNull();
     expect(record(id).status).toBe("rolled_back");
+  });
+});
+
+describe("the broker move's rollback health check (#470)", () => {
+  it("probes the old broker's own WebSocket port when it was on the LAN", async () => {
+    roles = {
+      ...roles,
+      broker: { ...roles.broker, address: { ...roles.broker.address, ws_port: 9443 }, lan: true },
+    };
+    // The move itself keeps the target off the LAN: what the rollback probes is the old broker's.
+    const { id } = await move(ops(), { lan: false });
+    finished = new Promise((r) => {
+      finish = r;
+    });
+    probed = [];
+    const a = await ops().handle("role_rollback", { move_id: id }, "admin-1");
+    expect(a.error).toBeUndefined();
+    expect((await finished).r).toMatchObject({ ok: true, status: "done" });
+    expect(probed.filter((u) => u.startsWith("ws:"))).toEqual(["ws://studio.lan:9443"]);
   });
 });
 

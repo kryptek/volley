@@ -127,7 +127,7 @@ async function fakeBox(o: BoxOptions = {}) {
 printf 'ssh-keygen %s\\n' "$f" >>"$STUB_STATE/calls.log"
 echo private >"$f"; echo '${BOX_KEY}' >"$f.pub"`,
   );
-  for (const t of o.tools ?? ["git", "tmux", "curl", "gh"]) {
+  for (const t of o.tools ?? ["git", "tmux", "curl", "gh", "bun"]) {
     stub(
       t,
       t === "gh"
@@ -188,6 +188,7 @@ exit 0`
     boxHome,
     hubHome,
     state,
+    stubs,
     calls,
     minted,
     /** The box's own commands (installer, volley, gh, ssh-keygen), in order. */
@@ -350,6 +351,20 @@ describe("volley machine add (#462)", () => {
     );
     expect(existsSync(join(box.boxHome, ".volley", "install.sh"))).toBe(true);
     expect(box.boxCalls()).toContain(`installer --peer --version v${pkg.version} --no-setup`);
+  });
+
+  it("counts ca-certificates (dpkg) and unzip (no bun) as sudo installs too, as install.sh does", async () => {
+    box = await fakeBox({ keyed: true, tools: ["git", "tmux", "curl", "gh", "dpkg"] });
+    // dpkg -s ca-certificates: not installed.
+    writeFileSync(join(box.stubs, "dpkg"), "#!/bin/sh\nexit 1\n");
+    const r = await add(box);
+    expect(r.code).toBe(0);
+    // The probe's PATH ends in /opt/homebrew/bin:/usr/local/bin: a bun there is this machine's.
+    const hostBun = ["/opt/homebrew/bin/bun", "/usr/local/bin/bun"].some((p) => existsSync(p));
+    expect(r.stdout).toContain(
+      `box lacks ca-certificates${hostBun ? "" : ", unzip"}: the installer runs sudo there`,
+    );
+    expect(box.calls.filter((c) => c.tty === true)).toHaveLength(1);
   });
 
   it("authorizes the box's key here (shown as a change) and gives the box this machine's host key", async () => {

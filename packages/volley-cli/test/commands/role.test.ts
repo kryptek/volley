@@ -423,6 +423,31 @@ describe("volley role move | rollback", () => {
     expect(r.stderr).toContain("role moves are admin ops");
   });
 
+  it("a non-admin rollback is refused before connecting too", async () => {
+    const dir = tempDir("volley-role-");
+    writeFileSync(
+      join(dir, "accounts.json"),
+      JSON.stringify({
+        accounts: [
+          { name: "steer-1", role: "steer", kind: "device", created: "2026-10-19T00:00:00.000Z" },
+        ],
+      }),
+    );
+    const io = makeBufferIO();
+    // Nothing listens on port 9: a connection attempt would fail there first.
+    const exitCode = await runRole(
+      {
+        argv: ["rollback", "m-1", "--broker-url", "mqtt://127.0.0.1:9"],
+        env: { VOLLEY_AUTH_USERNAME: "steer-1", VOLLEY_AUTH_PASSWORD: "pw", VOLLEY_AUTH_DIR: dir },
+        io,
+      },
+      { confirm: async () => false },
+    );
+    expect(exitCode).toBe(2);
+    expect(io.readStderr()).toContain("steer-1 is a steer account, not an admin one");
+    expect(io.readStderr()).toContain("role moves are admin ops");
+  });
+
   it("no answer within the timeout exits 124", async () => {
     fv = await fakeVolleyd(tb.url, async () => null);
     const r = await run(["move", "desk", "--to", "box-a", "--dry-run", "--timeout", "1"]);

@@ -627,20 +627,9 @@ export async function askVolleyd(
     io.stderr(`${cmd}: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
   }
-  if (admin && auth === null) {
-    io.stderr(
-      `${cmd}: ${adminOnly}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD) or set VOLLEY_AUTH_USERNAME and VOLLEY_AUTH_PASSWORD\n`,
-    );
-    return EXIT.USAGE;
-  }
-  // The broker drops a non-admin's op without a word: refuse at once when this machine's
-  // account registry already says the login is not an admin, instead of waiting out the timeout.
-  const notAdmin = admin && auth !== null ? localNotAdmin(auth.username, env) : null;
-  if (notAdmin !== null) {
-    io.stderr(
-      `${cmd}: ${notAdmin}; ${adminOnly}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD), e.g. the admin account \`volley setup\` created\n`,
-    );
-    return EXIT.USAGE;
+  if (admin) {
+    const refused = adminRefusal(cmd, auth, env, io, adminOnly);
+    if (refused !== null) return refused;
   }
   let broker: VolleyBroker;
   try {
@@ -719,6 +708,34 @@ async function request(
 }
 
 const ADMIN_ONLY = "pairing codes and unpairing are admin ops (an admin account's login)";
+
+/**
+ * An admin op's refusal before any connection (exit 2, said on stderr): no login, or one this
+ * machine's records say is not an admin. The broker drops a non-admin's op without a word, so
+ * this refuses at once instead of waiting out the timeout. Null when the op may go ahead.
+ */
+export function adminRefusal(
+  cmd: string,
+  auth: BrokerAuth | null,
+  env: Record<string, string | undefined>,
+  io: IO,
+  adminOnly = ADMIN_ONLY,
+): ExitCode | null {
+  if (auth === null) {
+    io.stderr(
+      `${cmd}: ${adminOnly}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD) or set VOLLEY_AUTH_USERNAME and VOLLEY_AUTH_PASSWORD\n`,
+    );
+    return EXIT.USAGE;
+  }
+  const notAdmin = localNotAdmin(auth.username, env);
+  if (notAdmin !== null) {
+    io.stderr(
+      `${cmd}: ${notAdmin}; ${adminOnly}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD), e.g. the admin account \`volley setup\` created\n`,
+    );
+    return EXIT.USAGE;
+  }
+  return null;
+}
 
 /**
  * Why `username` is not an admin account by this machine's own records (a fixed identity, or an

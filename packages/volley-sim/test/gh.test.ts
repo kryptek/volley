@@ -48,6 +48,57 @@ describe("gh auth (setup's shapes)", () => {
   });
 });
 
+describe("gh api (volleyd's reads)", () => {
+  it("the CI queue: nothing queued (a simulated run is done when it is read)", () => {
+    const r = gh(["api", "repos/{owner}/{repo}/actions/runs?status=queued&per_page=1"]);
+    expect(r.code).toBe(0);
+    expect(json(r)).toEqual({ total_count: 0, workflow_runs: [] });
+  });
+
+  it("tags: `git/matching-refs/tags/<prefix> --paginate --slurp` pages, `git/tags/<sha>` the tagged commit", () => {
+    const head = git(work, "rev-parse", "HEAD");
+    git(work, "tag", "v1.0.0");
+    git(work, "tag", "-a", "v1.1.0", "-m", "v1.1.0");
+    git(work, "tag", "other");
+    git(work, "push", "-q", "origin", "--tags");
+    const r = gh(["api", "repos/{owner}/{repo}/git/matching-refs/tags/v", "--paginate", "--slurp"]);
+    expect(r.code).toBe(0);
+    const pages = json(r) as { ref: string; object: { sha: string; type: string } }[][];
+    expect(pages).toHaveLength(1);
+    const refs = pages[0] ?? [];
+    expect(refs.map((x) => x.ref)).toEqual(["refs/tags/v1.0.0", "refs/tags/v1.1.0"]);
+    expect(refs[0]?.object).toEqual({ sha: head, type: "commit" });
+    expect(refs[1]?.object.type).toBe("tag");
+    const t = gh(["api", `repos/{owner}/{repo}/git/tags/${refs[1]?.object.sha}`]);
+    expect(t.code).toBe(0);
+    expect(json(t).object).toEqual({ sha: head, type: "commit" });
+    // --slurp without --paginate is refused by the real gh too.
+    expect(gh(["api", "repos/{owner}/{repo}/git/matching-refs/tags/v", "--slurp"]).code).toBe(1);
+  });
+
+  it("`issue edit|comment|close` refuse a number that is not a positive integer", () => {
+    for (const argv of [
+      ["issue", "edit", "https://github.com/volley-sim/origin/issues/1", "--add-label", "x"],
+      ["issue", "comment", "0", "--body", "b"],
+      ["issue", "close", "1.5"],
+    ]) {
+      const r = gh(argv);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/unknown argv/);
+    }
+  });
+
+  it("`run watch <id> --exit-status` exits with the run's conclusion", () => {
+    const { head } = openPr("feat/watch");
+    const list = json(
+      gh(["run", "list", "--commit", head, "--json", "databaseId", "--limit", "1"]),
+    ) as { databaseId: number }[];
+    const id = String(list[0]?.databaseId);
+    expect(gh(["run", "watch", id, "--exit-status"]).code).toBe(0);
+    expect(gh(["run", "watch", "999999"]).code).toBe(1);
+  });
+});
+
 describe("gh repo", () => {
   it("`repo view --json` names the repository the checkout's origin is", () => {
     const r = gh(["repo", "view", "--json", "nameWithOwner,url,visibility"]);
