@@ -155,6 +155,12 @@ import { AGENT_BRANCH } from "./worktree";
  *   --from <name> [--local-terminal cmux|tmux] [--local-agents never] [--broker-url
  *   mqtt://127.0.0.1:<n>]; ssh -n -o BatchMode=yes -o ConnectTimeout=<s> <dest> true (the
  *   ssh-back probe); base64 -d to that bundle path (the copy).
+ *   A broker move's, here: brew services stop|start mosquitto · sudo -n snap|systemctl
+ *   stop|start mosquitto (the old broker, through its layout) · volley broker tunnel --to <dest>
+ *   --port <n> --name <name> --broker-port <n> | --off (the own tunnel) · systemctl --user
+ *   daemon-reload (volleyd's unit rewritten) · the ssh probe above, to the new address; and as
+ *   REMOTE steps: volley broker probe · volley broker receive <abs>/.volley/roles/broker/bundle.tgz
+ *   --lan|--no-lan|--check · volley broker tunnel --show.
  *
  * SCRIPT (allowed only with a ScriptToken naming exactly that path): the brief gate
  *   (`$VOLLEYD_HOME/brief-gate`), the one program volleyd runs by path.
@@ -1490,6 +1496,10 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
       return systemctl(args);
     case "tar":
       return tar(args);
+    case "brew":
+    case "sudo":
+      // A broker move stops (and a rollback starts) the broker here through its layout.
+      return isBrokerService(argv) ? ALLOW : deny(`${prog} ${args[0] ?? ""}`.trim());
     case "ps":
       return exactly(argv, [PS_ARGV]);
     case "sysctl":
@@ -1857,6 +1867,9 @@ function volley(args: string[]): Verdict {
   // A Desk move to (or back to) the supervisor's own machine (SPEC §4.6.24).
   if (group === "desk")
     return isDeskVerb(args.slice(1)) ? ALLOW : deny(`${name} (not a Desk move's)`);
+  // A broker move's own tunnel here (SPEC §4.6.24).
+  if (group === "broker")
+    return isOwnBrokerTunnel(args.slice(1)) ? ALLOW : deny(`${name} (not a broker move's)`);
   return deny(name);
 }
 
@@ -1942,6 +1955,7 @@ function isDeskVerb(a: readonly string[]): boolean {
 export function isRoleRemoteVolley(a: readonly string[]): boolean {
   const [group, verb, ...rest] = a;
   if (group === "desk") return isDeskVerb(a.slice(1));
+  if (group === "broker") return isBrokerRemote(a.slice(1));
   if (group === "peer" && verb === "retarget") {
     if (rest[0] !== "--to" || !SSH_TARGET.test(rest[1] ?? "")) return false;
     let i = 2;
@@ -1973,6 +1987,64 @@ export function isRoleRemoteVolley(a: readonly string[]): boolean {
     return i === rest.length;
   }
   return false;
+}
+
+/**
+ * A broker move's volley steps on a paired machine (args after `broker`): `probe` (the target's
+ * mosquitto), `receive <bundle> --lan | --no-lan | --check` (the bundle at
+ * `<abs>/.volley/roles/broker/bundle.tgz`), `tunnel --show` (the tunnel a peer had).
+ */
+function isBrokerRemote(a: readonly string[]): boolean {
+  const [verb, ...rest] = a;
+  if (verb === "probe") return rest.length === 0;
+  if (verb === "tunnel") return sameArgv(rest, ["--show"]);
+  return (
+    verb === "receive" &&
+    rest.length === 2 &&
+    isBundlePath(rest[0] ?? "") &&
+    (rest[0] ?? "").endsWith("/.volley/roles/broker/bundle.tgz") &&
+    (rest[1] === "--lan" || rest[1] === "--no-lan" || rest[1] === "--check")
+  );
+}
+
+/**
+ * The supervisor's own tunnel to the broker's new machine (args after `broker`): `tunnel --to
+ * <dest> --port <n> --name <name> --broker-port <n>` and `tunnel --off`.
+ */
+function isOwnBrokerTunnel(a: readonly string[]): boolean {
+  if (sameArgv(a, ["tunnel", "--off"])) return true;
+  return (
+    a.length === 9 &&
+    a[0] === "tunnel" &&
+    a[1] === "--to" &&
+    SSH_TARGET.test(a[2] ?? "") &&
+    a[3] === "--port" &&
+    isPortArg(a[4]) &&
+    a[5] === "--name" &&
+    AGENT_ID.test(a[6] ?? "") &&
+    a[7] === "--broker-port" &&
+    isPortArg(a[8])
+  );
+}
+
+/**
+ * The broker here stopped or started through its layout, by a broker move (argv whole):
+ * `brew services stop|start mosquitto`, `sudo -n snap stop|start mosquitto`, `sudo -n systemctl
+ * stop|start mosquitto` (`-n`: never a password prompt; without a sudo rule it fails).
+ */
+function isBrokerService(argv: readonly string[]): boolean {
+  const verbs = ["stop", "start"];
+  return (
+    (argv.length === 4 &&
+      sameArgv(argv.slice(0, 2), ["brew", "services"]) &&
+      verbs.includes(argv[2] ?? "") &&
+      argv[3] === "mosquitto") ||
+    (argv.length === 5 &&
+      sameArgv(argv.slice(0, 2), ["sudo", "-n"]) &&
+      (argv[2] === "snap" || argv[2] === "systemctl") &&
+      verbs.includes(argv[3] ?? "") &&
+      argv[4] === "mosquitto")
+  );
 }
 
 /**
@@ -2013,10 +2085,12 @@ function isDeskLaunchctl(a: readonly string[]): boolean {
  */
 function systemctl(args: string[]): Verdict {
   const ok =
-    args.length === 3 &&
-    args[0] === "--user" &&
-    (args[1] === "stop" || args[1] === "start") &&
-    (args[2] === DESK_UNIT || args[2] === VOLLEYD_UNIT);
+    (args.length === 3 &&
+      args[0] === "--user" &&
+      (args[1] === "stop" || args[1] === "start") &&
+      (args[2] === DESK_UNIT || args[2] === VOLLEYD_UNIT)) ||
+    // A broker move rewrote volleyd's unit (its VOLLEY_BROKER_URL) for its next start.
+    sameArgv(args, ["--user", "daemon-reload"]);
   return ok ? ALLOW : deny(`systemctl ${args.slice(0, 2).join(" ")}`.trim());
 }
 
@@ -2084,6 +2158,8 @@ const AGENT_PANE = /^=[A-Za-z0-9_-]{1,128}:$/;
 /** The verdicts for one `ssh` argv: the ssh form itself, then each remote step's. */
 function sshVerdicts(args: readonly string[], opts: FenceOptions): Verdict[] {
   if (args.includes("-L")) return [forwardVerdict(args, opts)];
+  // A broker move's plan: can this machine reach the broker's new address (the ssh-back shape).
+  if (opts.remote === undefined && isSshBackProbe(args)) return [ALLOW];
   const script = opts.remote;
   let mode: "T" | "N" | undefined;
   let reverse = false;

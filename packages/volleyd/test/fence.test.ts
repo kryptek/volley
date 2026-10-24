@@ -1898,4 +1898,46 @@ describe("machine roles (#466, #469): the LOCAL commands of a role move", () => 
       ok("volley", "role", "receive", "supervisor", "/h/.volley/roles/m/bundle.tgz", "--from", "a"),
     ).toThrow(FenceError);
   });
+
+  it("a broker move (#470): the old broker through its layout, the own tunnel, the ssh probe", () => {
+    for (const argv of [
+      ["brew", "services", "stop", "mosquitto"],
+      ["brew", "services", "start", "mosquitto"],
+      ["sudo", "-n", "snap", "stop", "mosquitto"],
+      ["sudo", "-n", "systemctl", "start", "mosquitto"],
+      [
+        "volley",
+        "broker",
+        "tunnel",
+        "--to",
+        "dev@box",
+        "--port",
+        "1883",
+        "--name",
+        "control",
+        "--broker-port",
+        "1883",
+      ],
+      ["volley", "broker", "tunnel", "--off"],
+      ["systemctl", "--user", "daemon-reload"],
+      ["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "dev@box", "true"],
+    ])
+      expect(ok(...argv), argv.join(" ")).not.toThrow();
+    for (const argv of [
+      ["brew", "services", "restart", "mosquitto"],
+      ["brew", "install", "mosquitto"],
+      ["brew", "services", "stop", "postgresql"],
+      ["sudo", "snap", "stop", "mosquitto"],
+      ["sudo", "-n", "snap", "remove", "mosquitto"],
+      ["sudo", "-n", "rm", "-rf", "/"],
+      ["sudo", "-n", "systemctl", "stop", "sshd"],
+      ["volley", "broker", "tunnel", "--to", "-oProxyCommand=sh", "--port", "1883"],
+      ["volley", "broker", "tunnel", "--show"],
+      ["volley", "broker", "receive", "/h/.volley/roles/broker/bundle.tgz", "--lan"],
+      ["volley", "broker", "probe"],
+      ["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "dev@box", "sh"],
+      ["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-oProxyCommand=x", "true"],
+    ])
+      expect(ok(...argv), argv.join(" ")).toThrow(FenceError);
+  });
 });

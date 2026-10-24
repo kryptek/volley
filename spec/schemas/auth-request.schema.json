@@ -230,7 +230,7 @@
             "for": {
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
-              "description": "peer_invite: the paired machine a re-pairing code joins as (spec section 4.6.14)."
+              "description": "peer_invite: the one machine name the code joins as: a paired machine it re-pairs, or a new one (spec section 4.6.14)."
             },
             "move_id": {
               "$ref": "role-move.schema.json#/$defs/move_id",

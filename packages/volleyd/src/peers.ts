@@ -29,8 +29,9 @@ import type { NewEvent, RemoteHostConfig } from "./types";
  *     the roles record's (SPEC §4.6.24: the broker's port on its machine). `tunnel: "none"`
  *     (the broker runs on the joining machine itself) answers `remote_port` = that port and
  *     writes it to `hosts.<name>.tunnel.remote_port`: agents there reach it on their own loopback.
- *   - `peer_invite {reply_key, ttl_s?, for}` → a code bound to the paired machine `for`: it
- *     re-pairs that machine only. `peer_join {..., name: <for>, replace: true}` with it rotates the
+ *   - `peer_invite {reply_key, ttl_s?, for}` → a code bound to the machine `for`: it joins as
+ *     that name only. For a paired machine it re-pairs it; for a name not configured yet it pairs
+ *     that new machine (`volley machine add`), as an unbound code would. `peer_join {..., name: <for>, replace: true}` with it rotates the
  *     peer account's password and rewrites `hosts.<name>` (the join's fields; a hand-set
  *     `max_agents` or `drain` stays) instead of refusing the configured name, and journals
  *     `peer_joined { replaced: true }`. An unbound code for a configured name is still refused.
@@ -86,7 +87,7 @@ interface StoredCode {
   hash: string;
   expires_at: string;
   by: string;
-  /** `invite --for`: the paired machine this code re-pairs (and the only name it joins as). */
+  /** `invite --for`: the only name this code joins as (a paired machine: it re-pairs it). */
   for?: string;
 }
 
@@ -174,8 +175,12 @@ export class PeerService {
       if (typeof bound !== "string" || !isValidAgentId(bound)) {
         return refuse("for must be a machine name ([a-z0-9][a-z0-9_-]{0,62})");
       }
-      if (!Object.hasOwn(this.paired(), bound)) {
-        return refuse(`no paired machine named "${bound}" to re-pair`);
+      // A paired machine (a re-pairing), or a name not configured yet: the code pairs that new
+      // machine only (`volley machine add`). A host configured by hand is never bound.
+      if (!Object.hasOwn(this.paired(), bound) && Object.hasOwn(this.deps.hosts(), bound)) {
+        return refuse(
+          `"${bound}" is a host configured by hand, not one this supervisor paired: no code re-pairs it`,
+        );
       }
     }
     const code = (this.deps.randomCode ?? newPairingCode)();
@@ -263,7 +268,7 @@ export class PeerService {
     const entry = this.match(p.code);
     if (entry === null) return refuse("invalid or expired pairing code");
     if (entry.for !== undefined && entry.for !== name) {
-      return refuse(`this pairing code re-pairs ${entry.for} only (join with --name ${entry.for})`);
+      return refuse(`this pairing code is for ${entry.for} only (join with --name ${entry.for})`);
     }
     const replacing = entry.for === name && p.replace === true;
     if (configured && !replacing) return taken;

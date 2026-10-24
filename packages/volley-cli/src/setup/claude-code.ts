@@ -134,89 +134,96 @@ export async function planClaudeCode(ctx: SetupContext): Promise<StepPlan> {
   }
   const rows: string[] = [];
 
-  // The coordinator name: chosen once, then kept.
-  const saved = readSetupInstall(ctx.volleydHome)?.coordinator ?? ctx.coordinator;
-  let name: string;
-  if (saved !== undefined) {
-    name = saved;
-    ctx.coordinator = saved;
-    plan.found.push(`Coordinator name: ${name} (from setup.json)`);
-    rows.push(`✓ coordinator: ${name}`);
-  } else {
-    const dflt = defaultCoordinator((ctx.deps.hostname ?? osHostname)());
-    // Asked while planning, before the step's confirmation, on purpose: the name feeds the MCP
-    // registration's diff below. A run that then declines the step was still asked.
-    name = await askName(ctx, dflt);
-    rows.push("coordinator: not chosen yet");
-    plan.changes.push({
-      summary: `Save the coordinator name ${name} (setup.json: VOLLEY_COORDINATOR for this machine's sessions and commands)`,
-      apply: async () => {
-        ctx.coordinator = name;
-        writeSetupInstall(ctx);
-        return [
-          `Coordinator name: ${name}. Waves submitted here are owned by it (\`volleyd run\` without --owner).`,
-        ];
-      },
-    });
-  }
-
-  // The volley MCP server: non-secret env only.
-  const want = mcpRegistration(ctx, repo, name);
-  const add = mcpAddArgv(JSON.stringify(want));
-  const claudeJson = join(ctx.home, ".claude.json");
-  // undefined: the file is there but not a JSON object; null: no volley entry.
-  const entry = existsSync(claudeJson) ? volleyEntryIn(claudeJson) : null;
-  const register = (why: string, replace: boolean) =>
-    plan.changes.push({
-      summary: `${replace ? "Re-register" : "Register"} the volley MCP server with Claude Code (${why}; no password in it)`,
-      detail: `Runs ${replace ? `\`${MCP_REMOVE.join(" ")}\`, then ` : ""}\`claude mcp add-json -s user volley …\` with env ${Object.entries(
-        want.env,
-      )
-        .map(([k, v]) => `${k}=${v}`)
-        .join(" ")}. The login comes from ${join(ctx.auth.dir, "coordinator.json")}.`,
-      apply: async () => {
-        if (replace) await must(ctx, MCP_REMOVE);
-        await must(ctx, add);
-        return [
-          `The volley MCP server runs ${want.args[1]} at ${want.env.VOLLEY_BROKER_URL} (restart Claude Code sessions to pick it up).`,
-        ];
-      },
-    });
-  if (entry === undefined) {
-    plan.found.push(`${claudeJson} cannot be read: the MCP registration is left as is`);
-    rows.push("MCP: ~/.claude.json cannot be read");
-  } else if (entry === null) {
-    rows.push("MCP: volley is not registered");
-    register("new", false);
-  } else {
-    const env = (typeof entry.env === "object" && entry.env !== null ? entry.env : {}) as Record<
-      string,
-      unknown
-    >;
-    const theirs = Object.keys(env).filter((k) => !(MCP_ENV_KEYS as readonly string[]).includes(k));
-    const ownId = typeof env.VOLLEY_AGENT_ID === "string" && env.VOLLEY_AGENT_ID !== "coordinator";
-    if (theirs.length > 0 || ownId) {
-      // The person's own settings (a password, say): never rewritten here; their names only.
-      const own = [...theirs, ...(ownId ? ["VOLLEY_AGENT_ID"] : [])].sort();
-      plan.found.push(
-        `The volley MCP server has settings of its own (${own.join(", ")}): left as is. To register it the way setup does (its login from the auth dir, no password in ~/.claude.json): ${[...MCP_REMOVE].map(sq).join(" ")} && ${add.map(sq).join(" ")}`,
-      );
-      rows.push(`MCP: volley has settings of its own (${own.join(", ")}): left as is`);
+  // `--peer`: this machine's profile only (its agents' skills and hooks): coordinator sessions,
+  // and so the coordinator name and the MCP registration, are the supervisor's machine's.
+  if (ctx.peer !== true) {
+    // The coordinator name: chosen once, then kept.
+    const saved = readSetupInstall(ctx.volleydHome)?.coordinator ?? ctx.coordinator;
+    let name: string;
+    if (saved !== undefined) {
+      name = saved;
+      ctx.coordinator = saved;
+      plan.found.push(`Coordinator name: ${name} (from setup.json)`);
+      rows.push(`✓ coordinator: ${name}`);
     } else {
-      const args = Array.isArray(entry.args) ? entry.args : [];
-      const runs =
-        typeof entry.command === "string" &&
-        /(^|\/)bun$/.test(entry.command) &&
-        args.some((a) => typeof a === "string" && realOf(a) === realOf(want.args[1] as string));
-      const differs = runs
-        ? MCP_ENV_KEYS.filter((k) => env[k] !== want.env[k])
-        : ["the checkout it runs"];
-      if (differs.length === 0) {
-        plan.found.push(`The volley MCP server is registered at ${want.env.VOLLEY_BROKER_URL}`);
-        rows.push(`✓ MCP: volley registered (${want.env.VOLLEY_BROKER_URL}, no secret)`);
+      const dflt = defaultCoordinator((ctx.deps.hostname ?? osHostname)());
+      // Asked while planning, before the step's confirmation, on purpose: the name feeds the MCP
+      // registration's diff below. A run that then declines the step was still asked.
+      name = await askName(ctx, dflt);
+      rows.push("coordinator: not chosen yet");
+      plan.changes.push({
+        summary: `Save the coordinator name ${name} (setup.json: VOLLEY_COORDINATOR for this machine's sessions and commands)`,
+        apply: async () => {
+          ctx.coordinator = name;
+          writeSetupInstall(ctx);
+          return [
+            `Coordinator name: ${name}. Waves submitted here are owned by it (\`volleyd run\` without --owner).`,
+          ];
+        },
+      });
+    }
+
+    // The volley MCP server: non-secret env only.
+    const want = mcpRegistration(ctx, repo, name);
+    const add = mcpAddArgv(JSON.stringify(want));
+    const claudeJson = join(ctx.home, ".claude.json");
+    // undefined: the file is there but not a JSON object; null: no volley entry.
+    const entry = existsSync(claudeJson) ? volleyEntryIn(claudeJson) : null;
+    const register = (why: string, replace: boolean) =>
+      plan.changes.push({
+        summary: `${replace ? "Re-register" : "Register"} the volley MCP server with Claude Code (${why}; no password in it)`,
+        detail: `Runs ${replace ? `\`${MCP_REMOVE.join(" ")}\`, then ` : ""}\`claude mcp add-json -s user volley …\` with env ${Object.entries(
+          want.env,
+        )
+          .map(([k, v]) => `${k}=${v}`)
+          .join(" ")}. The login comes from ${join(ctx.auth.dir, "coordinator.json")}.`,
+        apply: async () => {
+          if (replace) await must(ctx, MCP_REMOVE);
+          await must(ctx, add);
+          return [
+            `The volley MCP server runs ${want.args[1]} at ${want.env.VOLLEY_BROKER_URL} (restart Claude Code sessions to pick it up).`,
+          ];
+        },
+      });
+    if (entry === undefined) {
+      plan.found.push(`${claudeJson} cannot be read: the MCP registration is left as is`);
+      rows.push("MCP: ~/.claude.json cannot be read");
+    } else if (entry === null) {
+      rows.push("MCP: volley is not registered");
+      register("new", false);
+    } else {
+      const env = (typeof entry.env === "object" && entry.env !== null ? entry.env : {}) as Record<
+        string,
+        unknown
+      >;
+      const theirs = Object.keys(env).filter(
+        (k) => !(MCP_ENV_KEYS as readonly string[]).includes(k),
+      );
+      const ownId =
+        typeof env.VOLLEY_AGENT_ID === "string" && env.VOLLEY_AGENT_ID !== "coordinator";
+      if (theirs.length > 0 || ownId) {
+        // The person's own settings (a password, say): never rewritten here; their names only.
+        const own = [...theirs, ...(ownId ? ["VOLLEY_AGENT_ID"] : [])].sort();
+        plan.found.push(
+          `The volley MCP server has settings of its own (${own.join(", ")}): left as is. To register it the way setup does (its login from the auth dir, no password in ~/.claude.json): ${[...MCP_REMOVE].map(sq).join(" ")} && ${add.map(sq).join(" ")}`,
+        );
+        rows.push(`MCP: volley has settings of its own (${own.join(", ")}): left as is`);
       } else {
-        rows.push(`MCP: volley differs (${differs.join(", ")})`);
-        register(`${differs.join(", ")} ${differs.length === 1 ? "differs" : "differ"}`, true);
+        const args = Array.isArray(entry.args) ? entry.args : [];
+        const runs =
+          typeof entry.command === "string" &&
+          /(^|\/)bun$/.test(entry.command) &&
+          args.some((a) => typeof a === "string" && realOf(a) === realOf(want.args[1] as string));
+        const differs = runs
+          ? MCP_ENV_KEYS.filter((k) => env[k] !== want.env[k])
+          : ["the checkout it runs"];
+        if (differs.length === 0) {
+          plan.found.push(`The volley MCP server is registered at ${want.env.VOLLEY_BROKER_URL}`);
+          rows.push(`✓ MCP: volley registered (${want.env.VOLLEY_BROKER_URL}, no secret)`);
+        } else {
+          rows.push(`MCP: volley differs (${differs.join(", ")})`);
+          register(`${differs.join(", ")} ${differs.length === 1 ? "differs" : "differ"}`, true);
+        }
       }
     }
   }

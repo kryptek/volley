@@ -30,7 +30,7 @@ import { realAuthDeps } from "volley-cli/auth/context";
 import { BrokerVersionError } from "volley-cli/auth/version";
 import { defaultAuthDir } from "volley-cli/commands/auth";
 import { DESK_PORT } from "volley-cli/commands/desk-serve";
-import { countLiveAgents } from "volley-cli/setup/broker";
+import { countLiveAgents, probeAnonymous } from "volley-cli/setup/broker";
 import { readSetupInstall } from "volley-cli/setup/journal";
 import { cmuxInstalled } from "volley-cli/setup/terminal";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -425,6 +425,7 @@ import { hostOf } from "./roles/deps";
 import { type MovePayload, type MoveResult, RoleMoves } from "./roles/engine";
 import { markContinued, pendingHandovers, resumeRecord, resumeSteps } from "./roles/handover";
 import { ROLE_OPS, RoleOps } from "./roles/ops";
+import type { BrokerDeps, ProbeLink } from "./roles/plan-broker";
 import type { SupervisorDeps } from "./roles/plan-supervisor";
 import { type RolesRecord, readRoles, sameRoles, writeRoles } from "./roles/record";
 import {
@@ -1488,6 +1489,12 @@ export class Daemon {
   private handingOver: string | null = null;
   /** The broker connection lost during a hand-over: fatal once the hand-over ends. */
   private deferredFail: Error | null = null;
+  /**
+   * A broker move (or its rollback) in progress: its first step stops the broker this connection
+   * runs through, so losing it waits for the move's end, then restarts volleyd (its service
+   * manager) on the broker's new address.
+   */
+  private brokerMoving: string | null = null;
   /** `setup_plan` / `setup_apply` (setup-ops.ts), answered beside the serial queue. */
   private readonly setupOps: SetupOps;
   /** Setup requests being answered (topic/correlation id): a re-delivery waits for the answer. */
@@ -1817,6 +1824,8 @@ export class Daemon {
       moves: this.moves,
       finished: (id, r) => this.moveFinished(id, r),
       log: this.log,
+      broker: () => this.brokerDeps(),
+      sleep: (ms) => clockSleep(this.time, ms),
     });
     this.killSwitch = killSwitchEngaged(this.system.readAll());
     this.screens = new ScreenPublisher({
@@ -2750,9 +2759,9 @@ export class Daemon {
     if (!this.running) return;
     // A hand-over's receive rotates volleyd's login, which drops this connection: the move's
     // remaining steps here (an ssh round-trip) finish first (moveFinished).
-    if (this.handingOver !== null) {
+    if (this.handingOver !== null || this.brokerMoving !== null) {
       this.log(
-        `broker connection lost during the hand-over ${this.handingOver}: ${reason.message}`,
+        `broker connection lost during the ${this.handingOver !== null ? "hand-over" : "broker move"} ${this.handingOver ?? this.brokerMoving}: ${reason.message}`,
       );
       this.deferredFail ??= reason;
       return;
@@ -11555,7 +11564,13 @@ export class Daemon {
         }),
       writeRoles: async (r) => {
         writeRoles(this.opts.home, r);
-        await this.enqueue(() => this.publishRoles());
+        // During a broker move there is no broker to publish to: the next start publishes it.
+        await this.enqueue(() => this.publishRoles()).catch((e: unknown) => {
+          if (this.brokerMoving === null) throw e;
+          this.log(
+            `roles: the record is published at reconnect (${e instanceof Error ? e.message : String(e)})`,
+          );
+        });
       },
       now: () => dateOf(this.time),
       sleep: (ms) => clockSleep(this.time, ms),
@@ -11617,6 +11632,103 @@ export class Daemon {
     };
   }
 
+  /** What only a broker move needs (roles/plan-broker.ts). */
+  private brokerDeps(): BrokerDeps {
+    const s = this.supervisorDeps();
+    return {
+      busyWaves: s.busyWaves,
+      liveAgents: s.liveAgents,
+      install: () => {
+        const i = readSetupInstall(this.opts.home);
+        return i === null
+          ? null
+          : { layout: i.layout, stateFile: i.state_file, authDir: i.auth_dir };
+      },
+      brokerUrl: this.opts.brokerUrl,
+      unitUrl: (url) => this.pointUnitAt(url),
+      connect: (url) => this.probeLink(url),
+      probeAnonymous: (url) => probeAnonymous(url),
+      retarget: async (r, by, up) => {
+        const req = this.peers.retargetRequest(r);
+        if (!("host" in req)) return req.error ?? `peer_retarget ${r.name} refused`;
+        const res = await this.peers.runRetarget(req, by, up);
+        return res.ok ? null : (res.error ?? `peer_retarget ${r.name} failed`);
+      },
+      moving: (id) => {
+        this.brokerMoving = id;
+      },
+    };
+  }
+
+  /**
+   * A login as volleyd at `url` beside the daemon's own connection (a broker move's health check,
+   * and the machine records it waits for there); the version through the dynsec admin login.
+   */
+  private async probeLink(url: string): Promise<ProbeLink> {
+    const b = new VolleyBroker();
+    await b.connect({
+      url,
+      agentId: `${DAEMON_AGENT_ID}-probe`,
+      connectTimeoutMs: DAEMON_DEFAULTS.probe_ms,
+      ...authFields(this.opts.auth),
+    });
+    const admin = this.opts.dynsecAdmin;
+    return {
+      sysVersion: async () => {
+        if (admin === undefined) return null;
+        const link = await brokerControl(url, admin)();
+        try {
+          return await link.sysVersion();
+        } finally {
+          await link.close().catch(() => {});
+        }
+      },
+      machine: async (name) => {
+        const raw = await b.queryRetained(machineTopic(name), DAEMON_DEFAULTS.probe_ms);
+        const p = raw === null ? null : (parseEnvelope(raw)?.payload as MachineRecord | undefined);
+        return p !== undefined && p !== null && typeof p.last_seen === "string"
+          ? { tunnel: p.tunnel, last_seen: p.last_seen }
+          : null;
+      },
+      close: () => b.disconnect(),
+    };
+  }
+
+  /**
+   * Point this volleyd's service at `url` for its next start (a broker move's own tunnel): its
+   * systemd user unit's `VOLLEY_BROKER_URL` rewritten and reloaded. Nothing to change when it
+   * names `url` already, or when there is no such unit (a launchd service is checked by the plan).
+   */
+  private async pointUnitAt(url: string): Promise<{ line: string; undo: () => Promise<void> }> {
+    const nothing = { undo: async () => {} };
+    if (url === this.opts.brokerUrl)
+      return { line: `VOLLEY_BROKER_URL is ${url} already.`, ...nothing };
+    const unit = join(
+      process.env.XDG_CONFIG_HOME ?? join(process.env.HOME ?? homedir(), ".config"),
+      "systemd",
+      "user",
+      "volleyd.service",
+    );
+    if (!existsSync(unit))
+      return { line: `no ${unit}: VOLLEY_BROKER_URL left as it is.`, ...nothing };
+    const before = readFileSync(unit, "utf-8");
+    const line = /^Environment="?VOLLEY_BROKER_URL=[^"\n]*"?$/m;
+    if (!line.test(before))
+      return { line: `${unit} names no VOLLEY_BROKER_URL: left as it is.`, ...nothing };
+    const exec = this.opts.authExec ?? realExec;
+    const write = async (text: string) => {
+      writeFileSync(`${unit}.tmp`, text);
+      renameSync(`${unit}.tmp`, unit);
+      const r = await exec(["systemctl", "--user", "daemon-reload"]);
+      if (r.code !== 0) throw new Error(`systemctl --user daemon-reload: exit ${r.code}`);
+    };
+    await write(before.replace(line, `Environment="VOLLEY_BROKER_URL=${url}"`));
+    return {
+      line: `${unit} names ${url} for volleyd's next start.`,
+      undo: () => write(before),
+    };
+  }
+
   /**
    * A role move run in the background ended here. A supervisor move that handed over unloads
    * this supervisor's own service; one that failed ends the hand-over, and a broker connection
@@ -11624,6 +11736,18 @@ export class Daemon {
    * this supervisor again, with the login `rotateOwn` wrote.
    */
   private async moveFinished(moveId: string, r: MoveResult): Promise<void> {
+    if (this.brokerMoving === moveId) {
+      // The broker moved (or stayed, rolled back): reconnect by restarting, which republishes
+      // every retained topic volleyd owns on whichever broker its service names now.
+      this.brokerMoving = null;
+      const lost = this.deferredFail;
+      this.deferredFail = null;
+      if (lost !== null) {
+        this.log(`roles: ${moveId} ${r.ok ? "done" : "failed"}; restarting to reconnect`);
+        this.fail(lost);
+      }
+      return;
+    }
     if (this.handingOver !== moveId) return;
     if (r.ok && r.status === "running") {
       const exec = this.opts.authExec ?? realExec;

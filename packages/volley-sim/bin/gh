@@ -1,0 +1,5 @@
+#!/usr/bin/env bun
+// volley-sim's fake `gh` (src/gh.ts): answers only under VOLLEY_SIMULATED=1.
+import { main } from "../src/gh";
+
+process.exit(main());

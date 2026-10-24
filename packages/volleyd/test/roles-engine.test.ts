@@ -433,9 +433,13 @@ describe("role_rollback of a supervisor move (RoleOps)", () => {
       supervisor: () => {
         throw new Error("never planned");
       },
+      broker: () => {
+        throw new Error("never planned");
+      },
       moves,
       finished: async () => {},
       log: () => {},
+      sleep: async () => {},
     });
     const r = await ops.handle("role_rollback", { move_id: "supervisor-1" }, "admin-1");
     expect(r).toMatchObject({ ok: false, error: "a role move is in progress: desk-1" });

@@ -550,6 +550,101 @@ describe("volley setup", () => {
     expect(lanAddress({ docker0: v4("172.17.0.1") } as never)).toBe("172.17.0.1");
   });
 
+  describe("--peer: a machine that joins a supervisor's fleet (#462)", () => {
+    const peerJson = () => join(m.ctx.home, ".volley", "peer.json");
+    const paired = (port = 21883) => {
+      mkdirSync(join(m.ctx.home, ".volley"), { recursive: true });
+      writeFileSync(
+        peerJson(),
+        JSON.stringify({ name: "box-a", host: "me@hub", remote_port: port, broker: {} }),
+      );
+    };
+    const plist = () => join(m.ctx.home, "Library", "LaunchAgents", "systems.volley.peer.plist");
+    /**
+     * What a peer's setup must never talk about: it has no broker, Desk or phone of its own (the
+     * hooks' `VOLLEY_BROKER_URL=` is the tunnel's, and no word of its own).
+     */
+    const HUB_ONLY = /\bbroker|\bdesk\b|phone|admin token|mosquitto/i;
+
+    it("runs the sign-ins, Claude Code (its profile only), the Terminal and the peer service", async () => {
+      paired();
+      const r = await run(["--peer", "--yes"]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      for (const s of ["[1/4] Sign-ins", "[2/4] Claude Code", "[3/4] Terminal", "[4/4] Peer"]) {
+        expect(r.stdout).toContain(s);
+      }
+      expect(r.stdout).not.toMatch(HUB_ONLY);
+      // No broker detection: nothing is probed, no account touched.
+      expect(probes).toEqual([]);
+      expect(m.auth.ctrlCalls).toEqual([]);
+      // Profile only: no coordinator name, no MCP registration; the hooks at the tunnel.
+      expect(m.asked).toEqual([]);
+      expect(m.execCalls.filter((a) => a[0] === "claude" && a[1] === "mcp")).toEqual([]);
+      expect(readSetupInstall(m.ctx.volleydHome)?.coordinator).toBeUndefined();
+      expect(readFileSync(m.settingsFile, "utf-8")).toContain(
+        "VOLLEY_BROKER_URL=mqtt://127.0.0.1:21883 ",
+      );
+      // The service is `volley peer run`, not volleyd.
+      expect(m.loaded.has("systems.volley.peer")).toBe(true);
+      expect(m.loaded.has("systems.volley.volleyd")).toBe(false);
+      const text = readFileSync(plist(), "utf-8");
+      expect(text).toContain(
+        `<string>${join(m.deps.repoRoot as string, "packages", "volley-cli", "src", "cli.ts")}</string>`,
+      );
+      expect(text).toContain("<string>peer</string>\n    <string>run</string>");
+      expect(r.stdout).toContain(COMPLETE);
+      // setup.json is the supervisor's install record: a peer writes none.
+      expect(readSetupInstall(m.ctx.volleydHome)).toBeNull();
+    });
+
+    it("before the pairing, the service step is skipped: join installs it", async () => {
+      const r = await run(["--peer", "--yes"]);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain(
+        "– skipped: not paired yet: `volley peer join <code> --to <host>` installs `volley peer run` as the service",
+      );
+      expect(r.stdout).not.toMatch(HUB_ONLY);
+      expect(r.stdout).toContain("Next: pair this machine");
+      expect(m.loaded.size).toBe(0);
+      // The hooks are for the tunnel join sets up (its default port).
+      expect(readFileSync(m.settingsFile, "utf-8")).toContain(
+        "VOLLEY_BROKER_URL=mqtt://127.0.0.1:21883 ",
+      );
+    });
+
+    it("a rerun changes nothing", async () => {
+      paired();
+      expect((await run(["--peer", "--yes"])).code).toBe(0);
+      const calls = m.execCalls.length;
+      const r = await run(["--peer"]);
+      expect(r.code).toBe(0);
+      expect(r.stdout.match(/already done/g)).toHaveLength(4);
+      expect(m.questions).toEqual([]);
+      expect(m.execCalls.slice(calls).every(READ_ONLY)).toBe(true);
+    });
+
+    it("--check reports the peer steps only", async () => {
+      const r = await run(["--peer", "--check"]);
+      expect(r.stdout).not.toMatch(HUB_ONLY);
+      expect(m.loaded.size).toBe(0);
+    });
+
+    it("refuses the hub's flags and steps", async () => {
+      for (const extra of [
+        ["--lan"],
+        ["--layout", "snap"],
+        ["--desk-port", "5200"],
+        ["--step", "security"],
+        ["--broker-url", "mqtt://127.0.0.1:1883"],
+      ]) {
+        const r = await run(["--peer", ...extra]);
+        expect(r.code, extra.join(" ")).toBe(2);
+      }
+      expect((await run(["--peer", "--step", "peer-service", "--yes"])).code).toBe(0);
+    });
+  });
+
   it("prints its help and refuses unknown flags", async () => {
     const r = await run(["--help"]);
     expect(r.code).toBe(0);

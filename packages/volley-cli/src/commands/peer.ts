@@ -86,7 +86,8 @@ const HELP = `Usage:
   On the supervisor's machine:
     volley peer invite [--ttl <seconds>] [--for <name>]
                                                A one-time pairing code (XXXX-XXXX, 10 min);
-                                               --for: re-pair the paired machine <name>
+                                               --for: the code joins as <name> only (a
+                                               paired machine: it re-pairs it)
     volley peer list [--json]                  Paired machines and their health
     volley peer remove <name> [--drain | --now]
                                                Unpair: revoke its account, drop hosts.<name>;
@@ -543,12 +544,12 @@ export interface Answer {
 }
 
 /** A throwaway RSA key the answer's secret is sealed to (volleyd refuses a secret without one). */
-function replyKeyPair(): { jwk: unknown; privateKey: KeyObject } {
+export function replyKeyPair(): { jwk: unknown; privateKey: KeyObject } {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   return { jwk: publicKey.export({ format: "jwk" }), privateKey };
 }
 
-function unseal(key: KeyObject, sealed: string | undefined): Record<string, unknown> | null {
+export function unseal(key: KeyObject, sealed: string | undefined): Record<string, unknown> | null {
   if (sealed === undefined) return null;
   try {
     return JSON.parse(
@@ -604,6 +605,7 @@ export async function askVolleyd(
   env: Record<string, string | undefined>,
   io: IO,
   admin = false,
+  adminOnly = ADMIN_ONLY,
 ): Promise<Answer | ExitCode> {
   let timeoutMs: number;
   let namespace: string;
@@ -625,20 +627,9 @@ export async function askVolleyd(
     io.stderr(`${cmd}: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
   }
-  if (admin && auth === null) {
-    io.stderr(
-      `${cmd}: ${ADMIN_ONLY}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD) or set VOLLEY_AUTH_USERNAME and VOLLEY_AUTH_PASSWORD\n`,
-    );
-    return EXIT.USAGE;
-  }
-  // The broker drops a non-admin's op without a word: refuse at once when this machine's
-  // account registry already says the login is not an admin, instead of waiting out the timeout.
-  const notAdmin = admin && auth !== null ? localNotAdmin(auth.username, env) : null;
-  if (notAdmin !== null) {
-    io.stderr(
-      `${cmd}: ${notAdmin}; ${ADMIN_ONLY}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD), e.g. the admin account \`volley setup\` created\n`,
-    );
-    return EXIT.USAGE;
+  if (admin) {
+    const refused = adminRefusal(cmd, auth, env, io, adminOnly);
+    if (refused !== null) return refused;
   }
   let broker: VolleyBroker;
   try {
@@ -659,7 +650,7 @@ export async function askVolleyd(
         : await request(broker, namespace, op, fields, timeoutMs);
     if (answer === null) {
       // The broker drops an account-op request from any login but an admin's, silently.
-      const why = admin ? ` (${ADMIN_ONLY}; is ${auth?.username} one?)` : "";
+      const why = admin ? ` (${adminOnly}; is ${auth?.username} one?)` : "";
       io.stderr(`${cmd}: volleyd did not answer within ${timeoutMs / 1000} s${why}\n`);
       return EXIT.TIMEOUT;
     }
@@ -717,6 +708,34 @@ async function request(
 }
 
 const ADMIN_ONLY = "pairing codes and unpairing are admin ops (an admin account's login)";
+
+/**
+ * An admin op's refusal before any connection (exit 2, said on stderr): no login, or one this
+ * machine's records say is not an admin. The broker drops a non-admin's op without a word, so
+ * this refuses at once instead of waiting out the timeout. Null when the op may go ahead.
+ */
+export function adminRefusal(
+  cmd: string,
+  auth: BrokerAuth | null,
+  env: Record<string, string | undefined>,
+  io: IO,
+  adminOnly = ADMIN_ONLY,
+): ExitCode | null {
+  if (auth === null) {
+    io.stderr(
+      `${cmd}: ${adminOnly}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD) or set VOLLEY_AUTH_USERNAME and VOLLEY_AUTH_PASSWORD\n`,
+    );
+    return EXIT.USAGE;
+  }
+  const notAdmin = localNotAdmin(auth.username, env);
+  if (notAdmin !== null) {
+    io.stderr(
+      `${cmd}: ${notAdmin}; ${adminOnly}: pass --username <admin> (password in VOLLEY_AUTH_PASSWORD), e.g. the admin account \`volley setup\` created\n`,
+    );
+    return EXIT.USAGE;
+  }
+  return null;
+}
 
 /**
  * Why `username` is not an admin account by this machine's own records (a fixed identity, or an
@@ -1292,9 +1311,22 @@ function printTrust(io: IO, deps: PeerDeps, repo: string | undefined, name: stri
   );
 }
 
+/** What installing the service touches: `PeerDeps`' part (`volley setup --peer` builds one). */
+export type ServiceDeps = Pick<
+  PeerDeps,
+  "exec" | "home" | "platform" | "user" | "uid" | "sleep" | "envPath" | "volleyArgv"
+>;
+
+/** The service's unit file on this platform (null: no service manager volley knows). */
+export function serviceFile(platform: NodeJS.Platform, home: string): string | null {
+  if (platform === "linux") return join(home, ".config", "systemd", "user", SYSTEMD_UNIT);
+  if (platform === "darwin") return join(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+  return null;
+}
+
 /** Install and (re)start the service: what was installed, or why it could not be. */
-async function installService(
-  deps: PeerDeps,
+export async function installService(
+  deps: ServiceDeps,
 ): Promise<{ ok: true; what: string; warning?: string } | { ok: false; error: string }> {
   const argv = [...deps.volleyArgv, "peer", "run"];
   if (deps.platform === "linux") {

@@ -420,6 +420,16 @@ export const DAEMON_DEFAULTS = {
   role_signin_ttl_s: 3_600,
   /** Bound on a supervisor move's ssh-back probe from its target to one other machine. */
   role_ssh_probe_timeout_s: 10,
+  /**
+   * A broker move to a root-owned install: how long its receive step waits for the owner's
+   * `sudo volley broker receive` on the target (polled every `role_health_wait_ms`).
+   */
+  role_broker_receive_wait_ms: 1_800_000,
+  /**
+   * A broker move (and its rollback) is answered before its first step stops the broker the
+   * answer travels through: the move starts this long after the answer.
+   */
+  role_broker_reply_ms: 1_000,
   // --- Fleet: merge nudge (overlap.ts) ---
   /** Touched files a merge nudge names before "and N more" (`merge_nudge_sent` keeps them all). */
   nudge_files_shown: 5,

@@ -23,6 +23,7 @@ import {
   writeSetupInstall,
 } from "../setup/journal";
 import { SetupMeter, completeLine, setupMetricsFile, writeSetupMetrics } from "../setup/metrics";
+import { peerBrokerUrl, planPeerService } from "../setup/peer-service";
 import { planServices } from "../setup/services";
 import { planSignin, simulatedExec } from "../setup/signin";
 import {
@@ -78,6 +79,32 @@ const STEPS: [StepName, Planner][] = [
   ["services", planServices],
   ["phone", planPhone],
 ];
+
+/**
+ * `volley setup --peer`: a machine that joins a supervisor's fleet (`install.sh --peer`, `volley
+ * machine add`). No broker, accounts, Desk or phone of its own: the sign-ins, Claude Code's
+ * profile (the skills, the hooks at the tunnel; no coordinator), the Terminal, and `volley peer
+ * run` as the service in place of volleyd.
+ */
+const PEER_STEPS: [StepName, Planner][] = [
+  ["signin", planSignin],
+  ["claude-code", planClaudeCode],
+  ["terminal", planTerminal],
+  ["peer-service", planPeerService],
+];
+
+/** The flags about this machine's own broker, Desk or phone: not for `--peer`. */
+const HUB_FLAGS = [
+  "lan",
+  "no-lan",
+  "dir",
+  "layout",
+  "config",
+  "state-file",
+  "broker-url",
+  "desk-host",
+  "desk-port",
+] as const;
 
 export interface SetupArgs {
   argv: string[];
@@ -199,6 +226,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
         yes: { type: "boolean", short: "y" },
         repair: { type: "boolean" },
         check: { type: "boolean" },
+        peer: { type: "boolean" },
         json: { type: "boolean" },
         "show-email": { type: "boolean" },
         lan: { type: "boolean" },
@@ -226,6 +254,14 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   }
   const str = (k: string) => values[k] as string | undefined;
   const check = values.check === true;
+  const peer = values.peer === true;
+  const hubFlag = HUB_FLAGS.find((f) => values[f] !== undefined);
+  if (peer && hubFlag !== undefined) {
+    io.stderr(
+      `volley setup: --${hubFlag} is about this machine's own broker or Desk; --peer has neither\n`,
+    );
+    return EXIT.USAGE;
+  }
   if (check && (values.yes === true || values.repair === true)) {
     io.stderr(
       `volley setup: --check changes nothing: it does not take ${values.yes === true ? "--yes" : "--repair"}\n`,
@@ -262,7 +298,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     };
   }
   const only = (values.step as string[] | undefined) ?? [];
-  const names = STEPS.map(([n]) => n as string);
+  const ALL = peer ? PEER_STEPS : STEPS;
+  const names = ALL.map(([n]) => n as string);
   const unknown = only.filter((s) => !names.includes(s));
   if (unknown.length > 0) {
     io.stderr(
@@ -286,12 +323,16 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   }
 
   // The broker: --broker-url, else the env's, else the one the last finished run used.
-  const url = resolveBrokerUrl(
-    str("broker-url"),
-    env.VOLLEY_BROKER_URL === undefined && saved?.broker_url !== undefined
-      ? { ...env, VOLLEY_BROKER_URL: saved.broker_url }
-      : env,
-  );
+  // A peer's: the tunnel `volley peer join` sets up (peer.json's port, else its default).
+  const peerUrl = peer ? peerBrokerUrl(sudoHome ?? env.HOME ?? homedir()) : undefined;
+  const url =
+    peerUrl ??
+    resolveBrokerUrl(
+      str("broker-url"),
+      env.VOLLEY_BROKER_URL === undefined && saved?.broker_url !== undefined
+        ? { ...env, VOLLEY_BROKER_URL: saved.broker_url }
+        : env,
+    );
   const listeners = listenerUrls(url);
   if ("error" in listeners) {
     io.stderr(`volley setup: ${listeners.error}\n`);
@@ -330,10 +371,12 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     deskPort: Number(portText),
     ...(check ? { check: true } : {}),
     ...(str("broker-url") !== undefined ? { brokerFlag: str("broker-url") as string } : {}),
+    // The hooks of a peer's profile name its tunnel.
+    ...(peerUrl !== undefined ? { brokerFlag: peerUrl, peer: true as const } : {}),
     ...(values["show-email"] === true ? { showEmail: true } : {}),
     metrics: { signIn: () => meter.signIn() },
   };
-  const steps = STEPS.filter(([n]) => only.length === 0 || only.includes(n));
+  const steps = ALL.filter(([n]) => only.length === 0 || only.includes(n));
 
   if (check) {
     const rows = await checkSteps(ctx, steps);
@@ -341,9 +384,11 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       io.stdout(`${JSON.stringify(checkReport(rows, ctx.volleydHome), null, 2)}\n`);
     } else {
       io.stdout(
-        `volley setup --check: broker ${url}, ${layout.name} layout, auth dir ${auth.dir}\n`,
+        peer
+          ? `volley setup --peer --check: ${PEER_HEADER}\n`
+          : `volley setup --check: broker ${url}, ${layout.name} layout, auth dir ${auth.dir}\n`,
       );
-      io.stdout(renderCheck(rows));
+      io.stdout(renderCheck(rows, peer ? "volley setup --peer" : "volley setup"));
     }
     return checkExit(rows) === 0 ? EXIT.OK : EXIT.ERROR;
   }
@@ -353,7 +398,9 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     appendSetupLog(ctx, { step, event, ...(summary !== undefined ? { summary } : {}) });
 
   io.stdout(
-    `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout${fromRecord && layoutFlag === undefined ? " (from the last volley setup)" : ""}, auth dir ${auth.dir}\n`,
+    peer
+      ? `volley setup --peer: ${PEER_HEADER}\n`
+      : `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout${fromRecord && layoutFlag === undefined ? " (from the last volley setup)" : ""}, auth dir ${auth.dir}\n`,
   );
   const yes = ctx.yes;
   // A run that stops once the Terminal step has checked cmux (often at the cmux change itself:
@@ -367,9 +414,10 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     endStep(applied);
     writeSetupMetrics(ctx, meter.done());
     if (
-      ctx.cmuxSocketMode !== undefined ||
-      ctx.terminal !== undefined ||
-      ctx.coordinator !== undefined
+      !peer &&
+      (ctx.cmuxSocketMode !== undefined ||
+        ctx.terminal !== undefined ||
+        ctx.coordinator !== undefined)
     ) {
       writeSetupInstall(ctx, metricsFile);
     }
@@ -377,7 +425,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   };
   const skipped: string[] = [];
   for (const [name, planner] of steps) {
-    const i = STEPS.findIndex(([n]) => n === name);
+    const i = ALL.findIndex(([n]) => n === name);
     endStep = meter.begin(name);
     applied = 0;
     let plan: StepPlan;
@@ -388,7 +436,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       io.stderr(`volley setup: ${name}: ${e instanceof Error ? e.message : String(e)}\n`);
       return stopped();
     }
-    io.stdout(`\n[${i + 1}/${STEPS.length}] ${plan.title}\n`);
+    io.stdout(`\n[${i + 1}/${ALL.length}] ${plan.title}\n`);
     for (const f of plan.found) io.stdout(`  · ${f}\n`);
     if (plan.blocked !== undefined) {
       journal(name, "blocked", plan.blocked.split("\n")[0]);
@@ -452,13 +500,34 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   // A finished run's install: what volleyd plans the Desk's setup with, a later run's default.
   const metrics = meter.done();
   writeSetupMetrics(ctx, metrics);
+  const finished =
+    skipped.length === 0
+      ? completeLine(metrics)
+      : `Setup finished, except the step${skipped.length === 1 ? "" : "s"} skipped above (${skipped.join(", ")}): see there for why and what to run.`;
+  if (peer) {
+    // setup.json is the supervisor's install record (volleyd plans the Desk's setup with it).
+    io.stdout(
+      [
+        "",
+        finished,
+        ...(existsSync(join(ctx.home, ".volley", "peer.json"))
+          ? []
+          : [
+              "Next: pair this machine: `volley peer join <code> --to <user@supervisor>` with a code from",
+              "`volley peer invite` there (or run `volley machine add <user@this-machine>` there instead).",
+            ]),
+        `Metrics: ${metricsFile}.`,
+        `Journal: ${logFile}. Rerun \`volley setup --peer\` any time to check and fix.`,
+        "",
+      ].join("\n"),
+    );
+    return EXIT.OK;
+  }
   writeSetupInstall(ctx, metricsFile);
   io.stdout(
     [
       "",
-      skipped.length === 0
-        ? completeLine(metrics)
-        : `Setup finished, except the step${skipped.length === 1 ? "" : "s"} skipped above (${skipped.join(", ")}): see there for why and what to run.`,
+      finished,
       "Coordinator sessions log in with coordinator.json from the auth dir",
       `(${join(auth.dir, "coordinator.json")}): the MCP registration names the dir, never a`,
       "password. The volley and volleyd commands on this machine use that login on their own",
@@ -471,8 +540,11 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   return EXIT.OK;
 }
 
+const PEER_HEADER = "this machine joins a supervisor's fleet (paired with `volley peer join`)";
+
 export const SETUP_HELP = `Usage: volley setup [--yes] [--repair] [options]
        volley setup --check [--json] [--step <name>]...
+       volley setup --peer [--yes] [--check] [--step <name>]...
 
 First-run (and repair) wizard: eight steps, each showing what it found and what it will change
 before changing anything.
@@ -513,6 +585,12 @@ count as in place while they are pending or once redeemed: a rerun after they ex
 issues new ones. Every step is journaled to $VOLLEYD_HOME/setup.log, and every run's cost (wall
 time, questions, sign-ins, sudo prompts, each step's time) to $VOLLEYD_HOME/setup-metrics.json.
 
+--peer sets up a machine that joins a supervisor's fleet (\`install.sh --peer\`, \`volley machine
+add\`): no broker, accounts, Desk or phone of its own. Its steps: Sign-ins, Claude Code (the
+profile only: the skills, and the hooks for the tunnel \`volley peer join\` sets up; no coordinator
+name, no MCP registration), Terminal, and Peer service (\`volley peer run\` as the user service in
+place of volleyd; skipped until the machine is paired, since join installs it).
+
 --check plans every step without changing or asking anything and prints each as done, pending
 (with the changes a run would make), blocked (and why) or skipped (and why); it exits 0 only
 when nothing is pending or blocked. --json prints that as { version, steps, setup_at } for CI.
@@ -521,12 +599,15 @@ Options:
   -y, --yes            Apply every step without asking
   --repair             Check and fix only: no new admin token, no phone link
   --check              Report what is missing; change nothing (not with --yes or --repair)
+  --peer               This machine joins a supervisor's fleet (above): not with the broker's,
+                       accounts' or Desk's flags
   --json               With --check: the report as JSON on stdout
   --show-email         The Sign-ins step names the Claude login's e-mail
   --lan                Open the WebSocket listener (9001) to your network (for the phone)
   --no-lan             Keep it on this machine only (the default under --yes)
   --step <name>        Only this step (repeatable): detect, security, accounts, signin,
-                       claude-code, terminal, services, phone
+                       claude-code, terminal, services, phone (--peer: signin, claude-code,
+                       terminal, peer-service)
   --dir <dir>          The auth dir (env: VOLLEY_AUTH_DIR; default <mosquitto config dir>/volley)
   --layout <name>      brew-arm64 | brew-intel | snap | etc | container (default: detected)
   --config <path>      The mosquitto.conf to manage (default: the layout's)

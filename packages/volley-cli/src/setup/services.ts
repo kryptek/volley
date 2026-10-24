@@ -415,7 +415,7 @@ export async function planHooks(
   if (dry.stdout === current) return { found: `volley-hooks: installed in ${settings}${at}` };
   return {
     change: {
-      summary: `Install the Volley hooks for coordinator sessions into ${settings}${at}`,
+      summary: `Install the Volley hooks for ${ctx.peer === true ? "agent" : "coordinator"} sessions into ${settings}${at}`,
       detail: `${STATUS_LINE_NOTE}\n${unifiedDiff(settings, current, dry.stdout)}`,
       apply: async () => {
         // install.sh backs the settings file up itself (<file>.bak-<timestamp>).
