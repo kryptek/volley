@@ -269,7 +269,7 @@
                 { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }
               ],
               "default": null,
-              "description": "The Claude account an agent runs under when neither its task nor its wave names one. null (the default): balance across the machine's signed-in accounts by headroom in the 5-hour, 7-day and the model family's weekly windows (spec section 4.6.12); a one-login machine uses its login; most_headroom means the same; primary or a registry id pins."
+              "description": "The Claude account an agent runs under when neither its task nor its wave names one. null (the default): balance across the machine's signed-in accounts, spending the room that expires first in the 5-hour, 7-day and the model family's weekly windows (spec section 4.6.12); a one-login machine uses its login; most_headroom (a legacy name) means the same; primary or a registry id pins."
             },
             "warn_at_pct": {
               "type": "integer",
@@ -277,6 +277,48 @@
               "maximum": 100,
               "default": 90,
               "description": "When an account's 5-hour window reaches this used percentage, the supervisor opens an account_limit decision for each wave with agents on it (spec section 4.6.12). It never moves a wave on its own."
+            },
+            "balance": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "The balancing rule (spec section 4.6.12): which signed-in account an automatic pick takes. Read from the supervisor's config; a wave's own override does not apply (the rank has no wave). Optional in the retained payload: a supervisor that predates it omits it.",
+              "properties": {
+                "cap_pct": {
+                  "type": "integer",
+                  "minimum": 50,
+                  "maximum": 100,
+                  "default": 97,
+                  "description": "An account is eligible for the automatic pick only while every window it reported is under this used percentage (spec section 4.6.12). When every candidate is at or over it, the least over is still picked; it never refuses a spawn."
+                },
+                "tie_band_pct": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 50,
+                  "default": 10,
+                  "description": "Accounts whose pace scores are within this percentage of the band's leader count as equal and go to the one with fewer agents (spec section 4.6.12)."
+                },
+                "reserve_h": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 5,
+                  "default": 1,
+                  "description": "How many hours ahead each agent in flight on an account (running, or picked earlier in the same spawn pass) reserves its use against the account's windows, capped at each window's time to reset (spec section 4.6.12). The cap and the pace score apply to that projection; 0 turns the reservation off."
+                },
+                "agent_cost_pct_h": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "default": 10,
+                  "description": "The 5-hour window's percentage one agent is assumed to spend per hour until the account has learned its own rate from its usage samples (spec section 4.6.12). Deliberately conservative: a busy agent on a Max-tier plan."
+                },
+                "agent_cost_weekly_pct_h": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "default": 1.25,
+                  "description": "The same for the 7-day and the model-family weekly windows (spec section 4.6.12). Deliberately conservative; a learned rate replaces it."
+                }
+              }
             }
           }
         },

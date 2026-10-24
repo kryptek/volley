@@ -363,7 +363,7 @@ function WaveAccountRow({
   const current = pinned ?? BALANCED;
   const preselect = suggested !== null && suggested !== pinned ? suggested : null;
   const value = picked ?? preselect ?? current;
-  const doneName = done === null ? "the account with the most headroom" : name(done ?? null);
+  const doneName = done === null ? "the account whose room expires first" : name(done ?? null);
   const choices = waveAccountChoices(accounts, waveMachines(wave.state));
   // The current account (and a suggestion) stays listed even before the Desk knows its record.
   for (const id of [pinned, preselect])
@@ -387,7 +387,7 @@ function WaveAccountRow({
     <div className="wave-acct">
       <span
         className="chip chip--acct"
-        title={`New agents of ${wave.id} start under ${pinned === null ? "the account with the most headroom" : name(pinned)}`}
+        title={`New agents of ${wave.id} start under ${pinned === null ? "the account whose room expires first" : name(pinned)}`}
       >
         Account: {name(pinned)}
       </span>

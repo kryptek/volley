@@ -199,29 +199,191 @@ describe("selectAccount: task > wave > config default > primary", () => {
     });
   });
 
+  const T = Date.parse(NOW);
+  const at = (minutes: number) => new Date(T + minutes * 60_000).toISOString();
+  /** A ranked row with the new fields; `over` makes it ineligible at its 5-hour figure. */
+  const row = (account: string, r: Partial<Ranked>): Ranked => ({
+    account,
+    headroom: null,
+    five_hour_pct: null,
+    weekly_pct: null,
+    agents: 0,
+    score: null,
+    binding: null,
+    eligible: true,
+    binding_left: null,
+    binding_resets_at: null,
+    in_flight: 0,
+    projected_pct: null,
+    ...r,
+  });
+
+  it("the why line shows the projection with agents in flight, and #556's line with none", () => {
+    const work = row("work", {
+      headroom: 18,
+      five_hour_pct: 82,
+      weekly_pct: 40,
+      score: 1.2,
+      binding: "five_hour",
+      binding_left: 18,
+      binding_resets_at: at(52),
+      in_flight: 1,
+      projected_pct: 92,
+    });
+    const primary = row("primary", {
+      headroom: 72,
+      five_hour_pct: 10,
+      weekly_pct: 28,
+      score: 0.9,
+      binding: "weekly",
+      binding_left: 72,
+      binding_resets_at: at(2 * 1440 + 4 * 60),
+      in_flight: 2,
+      projected_pct: 30.5,
+    });
+    const spare = row("spare", {
+      headroom: 5,
+      five_hour_pct: 95,
+      weekly_pct: 30,
+      score: 0,
+      binding: "five_hour",
+      eligible: false,
+      binding_left: 5,
+      binding_resets_at: at(180),
+      in_flight: 1,
+      projected_pct: 100,
+    });
+    const sel = selectAccount(r, reg, { now: T, capPct: 97 }, () => [work, primary, spare]);
+    expect(sel.why).toBe(
+      "work: 18% left (8% after 1 in flight), resets in 52m (use it or lose it) on local; primary 7d 72% left (70% after 2 in flight), resets in 2d 4h; spare over the 97% cap (5h 95%, 100% after 1 in flight)",
+    );
+    const idle = selectAccount(r, reg, { now: T, capPct: 97 }, () => [
+      { ...work, in_flight: 0, projected_pct: 82 },
+    ]);
+    expect(idle.why).toBe("work: 18% left, resets in 52m (use it or lose it) on local");
+    // in flight but the projection unchanged (a learned rate of 0): no `after`, despite float error
+    const flat = selectAccount(r, reg, { now: T, capPct: 97 }, () => [
+      { ...work, binding_left: 99.9, five_hour_pct: 0.1, in_flight: 2, projected_pct: 0.1 },
+    ]);
+    expect(flat.why).not.toContain("in flight");
+  });
+
   it("null (and most_headroom) balances across the signed-in accounts by rank", () => {
-    const rank = (c: readonly string[]): Ranked[] =>
-      [...c].reverse().map((account, i) => ({
-        account,
-        headroom: 60 - i * 30,
-        five_hour_pct: 12 + i * 70,
-        weekly_pct: 40,
-        agents: 0,
-      }));
+    const rank = (c: readonly string[]): Ranked[] => {
+      expect([...c].sort()).toEqual(["primary", "work"]);
+      return [
+        row("work", {
+          headroom: 18,
+          five_hour_pct: 82,
+          weekly_pct: 40,
+          score: 1.7,
+          binding: "five_hour",
+          binding_left: 18,
+          binding_resets_at: at(52),
+        }),
+        row("primary", {
+          headroom: 72,
+          five_hour_pct: 10,
+          weekly_pct: 28,
+          score: 0.9,
+          binding: "weekly",
+          binding_left: 72,
+          binding_resets_at: at(2 * 1440 + 4 * 60),
+        }),
+      ];
+    };
     for (const configDefault of [null, "most_headroom"]) {
-      const sel = selectAccount(r, reg, { configDefault }, rank);
+      const sel = selectAccount(r, reg, { configDefault, now: T }, rank);
       expect(sel).toMatchObject({
         id: "work",
         dir: profileDir(r, "work"),
         source: "balance",
         machine: "local",
-        why: "work: most headroom on local (5h 12%, 7d 40%; primary 5h 82%)",
+        why: "work: 18% left, resets in 52m (use it or lose it) on local; primary 7d 72% left, resets in 2d 4h",
       });
       expect(sel.candidates?.map((x) => x.account)).toEqual(["work", "primary"]);
     }
     // without usage data a signed-in profile is offered before the primary
     expect(selectAccount(r, reg, {}).id).toBe("work");
+    expect(selectAccount(r, reg, {}).why).toBe(
+      "work: no usage yet (balanced) on local; primary no usage yet",
+    );
     expect(selectAccount(r, reg, { wave: "most_headroom" }).source).toBe("balance");
+  });
+
+  it("the why line names an over-cap candidate, an all-over-cap pick, and never an e-mail", () => {
+    const over = row("spare", {
+      headroom: 2,
+      five_hour_pct: 98,
+      weekly_pct: 30,
+      score: 0.1,
+      binding: "five_hour",
+      eligible: false,
+      binding_left: 2,
+      binding_resets_at: at(62),
+    });
+    const pick = row("work", {
+      headroom: 60,
+      five_hour_pct: 12,
+      weekly_pct: 40,
+      score: 1.1,
+      binding: "weekly",
+      binding_left: 60,
+      binding_resets_at: at(3 * 1440),
+    });
+    const one = selectAccount(r, reg, { now: T, capPct: 97 }, () => [pick, over]);
+    expect(one.why).toBe(
+      "work: 7d 60% left, resets in 3d (use it or lose it) on local; spare over the 97% cap (5h 98%)",
+    );
+    const primary = row("primary", {
+      headroom: 1,
+      five_hour_pct: 99,
+      score: 0.05,
+      binding: "five_hour",
+      eligible: false,
+      binding_left: 1,
+      binding_resets_at: at(30),
+    });
+    const all = selectAccount(r, reg, { now: T, capPct: 97 }, () => [
+      { ...over, account: "work" },
+      primary,
+    ]);
+    expect(all.why).toBe(
+      "work: over the 97% cap, least over on local (5h 98%, resets in 1h 2m); primary over the 97% cap (5h 99%)",
+    );
+    // the head names the window over the cap, not the binding one when they differ
+    const weeklyBinds = row("work", {
+      headroom: 2,
+      five_hour_pct: 98,
+      weekly_pct: 50,
+      score: 0.58,
+      binding: "weekly",
+      eligible: false,
+      binding_left: 50,
+      binding_resets_at: at(6 * 1440),
+    });
+    expect(selectAccount(r, reg, { now: T, capPct: 97 }, () => [weeklyBinds, primary]).why).toBe(
+      "work: over the 97% cap, least over on local (5h 98%); primary over the 97% cap (5h 99%)",
+    );
+    // the cap figure is the option's
+    expect(selectAccount(r, reg, { now: T, capPct: 90 }, () => [pick, over]).why).toContain(
+      "spare over the 90% cap (5h 98%)",
+    );
+    for (const why of [one.why, all.why]) expect(why).not.toMatch(/@[a-z0-9-]+\.[a-z]/);
+  });
+
+  it("a pinned pick never ranks and keeps its why", () => {
+    let calls = 0;
+    const rank = (c: readonly string[]) => {
+      calls++;
+      return c.map((account) => row(account, {}));
+    };
+    expect(selectAccount(r, reg, { task: "work" }, rank).why).toBe("task names work");
+    expect(selectAccount(r, reg, { wave: "work" }, rank).why).toBe("wave names work");
+    expect(selectAccount(r, reg, { configDefault: "primary" }, rank).why).toBe(
+      "claude.default_account names primary",
+    );
+    expect(calls).toBe(0);
   });
 
   it("a profile on a paired machine is selectable there, refused here", () => {
@@ -237,23 +399,28 @@ describe("selectAccount: task > wave > config default > primary", () => {
       source: "task",
     });
     expect(() => selectAccount(r2, reg2, { task: "far" })).toThrow(/peer-a/);
-    const sel = selectAccount(r2, reg2, { machine: "peer-a" }, (c) =>
+    const sel = selectAccount(r2, reg2, { machine: "peer-a", now: T }, (c) =>
       c
-        .map((account) => ({
-          account,
-          headroom: account === "far@peer-a" ? 60 : 10,
-          five_hour_pct: account === "far@peer-a" ? 12 : 90,
-          weekly_pct: null,
-          agents: 0,
-        }))
-        .sort((a, b) => (b.headroom ?? 0) - (a.headroom ?? 0)),
+        .map((account) =>
+          row(account, {
+            headroom: account === "far@peer-a" ? 88 : 10,
+            five_hour_pct: account === "far@peer-a" ? 12 : 90,
+            score: account === "far@peer-a" ? 1.2 : 0.2,
+            binding: "five_hour",
+            binding_left: account === "far@peer-a" ? 88 : 10,
+            binding_resets_at: at(250),
+          }),
+        )
+        .sort((a, b) => (b.score ?? 0) - (a.score ?? 0)),
     );
     expect(sel).toMatchObject({
       id: "far",
       dir: "/path/to/home/.volley/claude/far",
       source: "balance",
     });
-    expect(sel.why).toBe("far: most headroom on peer-a (5h 12%; primary@peer-a 5h 90%)");
+    expect(sel.why).toBe(
+      "far: 88% left, resets in 4h 10m (use it or lose it) on peer-a; primary@peer-a 10% left, resets in 4h 10m",
+    );
     // a local profile is not a candidate there, nor pinnable
     addAccount(r2, { label: "home" }, NOW);
     markSignedIn(r2, "home", {}, NOW);
@@ -268,14 +435,14 @@ describe("selectAccount: task > wave > config default > primary", () => {
     // ranked first if it were a candidate: it must not be one
     const rank = (c: readonly string[]) =>
       [...c]
-        .map((account) => ({
-          account,
-          headroom: account === "far@peer-a" ? 90 : 10,
-          five_hour_pct: account === "far@peer-a" ? 10 : 90,
-          weekly_pct: null,
-          agents: 0,
-        }))
-        .sort((a, b) => (b.headroom ?? 0) - (a.headroom ?? 0));
+        .map((account) =>
+          row(account, {
+            headroom: account === "far@peer-a" ? 90 : 10,
+            five_hour_pct: account === "far@peer-a" ? 10 : 90,
+            score: account === "far@peer-a" ? 1.2 : 0.2,
+          }),
+        )
+        .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
     const signedOut = selectAccount(r2, readRegistry(r2), { machine: "peer-a" }, rank);
     expect(signedOut).toMatchObject({ id: PRIMARY_ACCOUNT, dir: null, machine: "peer-a" });
     markSignedIn(r2, "far", {}, NOW);

@@ -123,7 +123,22 @@ export interface Tunables {
   /** Seconds between credential sweeps (credential-sweep.ts). */
   credential_sweep_interval_s: number;
   /** Claude account profiles (src/claude/): the default account, and the 5-hour usage warning. */
-  claude: { default_account: string | null; warn_at_pct: number };
+  claude: {
+    default_account: string | null;
+    warn_at_pct: number;
+    /**
+     * The balancing rule (claude/usage.ts rankAccounts): its cap and its tie band, the look-ahead
+     * each agent in flight reserves, and an agent's assumed cost per hour until the account has
+     * learned its own (5-hour; 7-day and model-family weekly).
+     */
+    balance: {
+      cap_pct: number;
+      tie_band_pct: number;
+      reserve_h: number;
+      agent_cost_pct_h: number;
+      agent_cost_weekly_pct_h: number;
+    };
+  };
   /**
    * How the pipeline's rebase step brings a PR branch up to date with the moved release branch:
    * `rebase` (rebase, then a lease-guarded force-push) or `merge` (merge it in, a normal push).

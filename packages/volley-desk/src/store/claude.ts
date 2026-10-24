@@ -700,6 +700,15 @@ export interface BalanceCandidate {
   weekly_pct: number | null;
   model_weekly_pct?: number;
   agents: number;
+  /** The rank rule's pace, its binding window and the cap (SPEC §4.6.12); absent from an older volleyd. */
+  score?: number | null;
+  binding?: "five_hour" | "weekly" | "model_weekly" | null;
+  eligible?: boolean;
+  binding_left?: number | null;
+  binding_resets_at?: string | null;
+  /** Agents counted against it and its binding window's projection with them; absent from an older volleyd. */
+  in_flight?: number;
+  projected_pct?: number | null;
 }
 
 /** volleyd's `claude_balance` answer (SPEC §4.6.11): per machine, its ranking and the picks. */

@@ -288,6 +288,38 @@ describe("usage metering across a restart and across hosts (daemon)", () => {
     });
   }, 20_000);
 
+  it("an account's learned rates stay in the book, off its retained record (#557)", async () => {
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+    s = await makeSupervisedEnv({
+      waveExtra: "account: primary",
+      daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
+    });
+    await publishUsage("other-agent", {
+      ...usage("spare", 10),
+      account: null,
+      config_dir: join(root, "spare"),
+    });
+    await recordWhen("spare", () => true);
+    await s.daemon.stop();
+    await s.agent.publish(usageAccountTopic("spare"), "", { qos: 1, retain: true });
+    // The book kept a learned rate for spare.
+    const file = join(s.env.home, "claude-usage.json");
+    const book = JSON.parse(readFileSync(file, "utf8"));
+    book.accounts.spare.rates = {
+      five_hour: { pct_per_agent_h: 12, samples: 3, at: new Date(T0).toISOString() },
+    };
+    writeFileSync(file, JSON.stringify(book));
+
+    const second = await s.restart({ reconcile: probes });
+    await second.reconciled();
+    const rec = await recordWhen("spare", () => true);
+    expect(rec).toMatchObject({ five_hour: { pct: 10 } });
+    expect(rec).not.toHaveProperty("rates");
+    expect(JSON.parse(readFileSync(file, "utf8")).accounts.spare.rates).toMatchObject({
+      five_hour: { pct_per_agent_h: 12 },
+    });
+  }, 20_000);
+
   it("a registry account's record carries its login's email and org; it validates", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     s = await makeSupervisedEnv({
@@ -415,13 +447,13 @@ describe("usage probe readings in machine records (daemon)", () => {
     pr: async () => null,
   };
   const READ = new Date(T0).toISOString();
-  const login = (profile: string, fable: number) => ({
+  const login = (profile: string, fable: number, fiveHour = 37) => ({
     profile,
     state: "ok" as const,
     attempted_at: READ,
     reading: {
       read_at: READ,
-      five_hour: { pct: 37, resets_at: RESETS },
+      five_hour: { pct: fiveHour, resets_at: RESETS },
       weekly: { pct: 56, resets_at: RESETS },
       model_weekly: { fable: { pct: fable, resets_at: RESETS } },
     },
@@ -687,7 +719,8 @@ describe("usage probe readings in machine records (daemon)", () => {
           version: "0.5.0",
           localDoctor: async () => ({
             checks: [],
-            claude_logins: [login("default", 95), login("spare", 10)],
+            // spare's fuller 5-hour window puts primary first on pace, so the agent spawns there
+            claude_logins: [login("default", 95), login("spare", 10, 80)],
             doctor_at: READ,
           }),
           localPath: () => ({ claude: true, bun: true }),

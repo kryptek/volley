@@ -54,10 +54,37 @@ describe("spawn under a Claude account", () => {
   it("journals account_chosen right before agent_spawned, whose account_why repeats its why", async () => {
     env = await makeSpawnEnv();
     const dir = profile(true);
-    const why = "work: most headroom on local (5h 12%, 7d 40%; primary 5h 88%)";
+    const why =
+      "work: 18% left, resets in 52m (use it or lose it) on local; primary 7d 72% left, resets in 2d 4h";
     const candidates = [
-      { account: "work", headroom: 60, five_hour_pct: 12, weekly_pct: 40, agents: 0 },
-      { account: "primary", headroom: 12, five_hour_pct: 88, weekly_pct: 20, agents: 1 },
+      {
+        account: "work",
+        headroom: 18,
+        five_hour_pct: 82,
+        weekly_pct: 40,
+        agents: 0,
+        score: 1.73,
+        binding: "five_hour" as const,
+        eligible: true,
+        binding_left: 18,
+        binding_resets_at: "2026-10-21T00:52:00.000Z",
+        in_flight: 0,
+        projected_pct: 82,
+      },
+      {
+        account: "primary",
+        headroom: 72,
+        five_hour_pct: 10,
+        weekly_pct: 28,
+        agents: 1,
+        score: 1.04,
+        binding: "weekly" as const,
+        eligible: true,
+        binding_left: 72,
+        binding_resets_at: "2026-10-23T04:00:00.000Z",
+        in_flight: 1,
+        projected_pct: 29.25,
+      },
     ];
     const out = await spawnAgent(
       env.request({

@@ -240,6 +240,47 @@
                                 { "type": "number", "minimum": 0, "maximum": 100 },
                                 { "type": "null" }
                               ]
+                            },
+                            "score": {
+                              "oneOf": [{ "type": "number", "minimum": 0 }, { "type": "null" }],
+                              "description": "Its pace (spec section 4.6.12): the smallest over its windows of room left, on the projection with its agents in flight, against the time to that window's reset, in units of the window's length (1 is on pace); null with no usage data. Optional: a supervisor that predates it omits it."
+                            },
+                            "binding": {
+                              "oneOf": [
+                                { "enum": ["five_hour", "weekly", "model_weekly"] },
+                                { "type": "null" }
+                              ],
+                              "description": "The window that sets score (the tightest decides); null with no usage data. Optional."
+                            },
+                            "eligible": {
+                              "type": "boolean",
+                              "description": "Every window it reported is under claude.balance.cap_pct on the projection with its agents in flight (spec section 4.6.12). Optional."
+                            },
+                            "binding_left": {
+                              "oneOf": [
+                                { "type": "number", "minimum": 0, "maximum": 100 },
+                                { "type": "null" }
+                              ],
+                              "description": "The binding window's room left, in percent. Optional."
+                            },
+                            "binding_resets_at": {
+                              "oneOf": [
+                                { "type": "string", "format": "date-time" },
+                                { "type": "null" }
+                              ],
+                              "description": "When the binding window resets; null when unknown. Optional."
+                            },
+                            "in_flight": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "description": "The agents counted against it (spec section 4.6.12): running on it, or picked for it and not yet reporting usage. Optional: a supervisor that predates it omits it."
+                            },
+                            "projected_pct": {
+                              "oneOf": [
+                                { "type": "number", "minimum": 0, "maximum": 100 },
+                                { "type": "null" }
+                              ],
+                              "description": "The binding window's used percentage with each agent in flight reserving its look-ahead; null with no usage data. Optional."
                             }
                           }
                         }

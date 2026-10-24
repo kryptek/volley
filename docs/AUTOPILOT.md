@@ -72,7 +72,9 @@ briefs forbid it and the fence enforces it for volleyd itself.
 - **Owner-only decisions** (`autopilot.owner_only`; by default `plan_change`, `repo_untrusted`,
   `model_switch`, `release_go` and `stage_go`). Autopilot never answers these. Production is
   always yours: a deploy-shaped release stage says `gate: owner`, and the train ends on
-  `release_go`.
+  `release_go`. An agent that hits its usage limit asks you for a `model_switch` only when no
+  other signed-in account on its machine has room: otherwise autopilot moves it to that account
+  (`agent_account_limit/move-exhausted`, under `account_move_max`).
 - **Escalations**: a decision no rule answers, one whose budget is spent, or one whose answer
   could not be applied. The question starts `Autopilot could not resolve this (<why>): `.
 - **Questions from sessions**: a Claude picker (`AskUserQuestion`) in any session and a
