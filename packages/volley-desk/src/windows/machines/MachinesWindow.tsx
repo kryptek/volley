@@ -7,7 +7,9 @@
  * per core (teal) and memory used (coral), amber at or above 70 % and red at or above 90 %, the
  * number beside each too. A down machine reads `down · last seen 6m ago` with both lines flat
  * grey. A click opens Settings › Machines at the machine's card (the chip's deep link). Each row
- * is described in words (`summary`), so its state is never colour alone.
+ * is described in words (`summary`), so its state is never colour alone. A machine that runs a
+ * machine role (SPEC §4.6.24) carries its letters after the name, `B S D` for the broker, the
+ * supervisor and the Desk, and its summary says them in words.
  *
  * Phone layout (`narrow`): the name line, then the two sparklines full width
  * (styles/machines-window.css).
@@ -15,11 +17,12 @@
 import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { useId } from "react";
 import { Frame, type FrameProps } from "../../canvas/Frame";
-import { DEFAULT_MAX_AGENTS, ago } from "../../settings/MachineCard";
+import { DEFAULT_MAX_AGENTS, ago, rolesOn } from "../../settings/MachineCard";
+import { ROLE_NAME } from "../../settings/RoleMoveSheet";
 import { usePanelSound } from "../../sounds/usePanelSound";
 import type { MachineSample } from "../../store/machineHistory";
 import { sampleOf } from "../../store/machineHistory";
-import type { DeskState, MachinePayload, ReadinessPayload } from "../../store/types";
+import type { DeskState, MachinePayload, MachineRole, ReadinessPayload } from "../../store/types";
 import { type MachineDot, machineDot } from "../agent/MachineChip";
 import { LOCAL_LABEL } from "../agent/machine";
 import { IconBtn } from "../wave/WaveWindow";
@@ -40,11 +43,13 @@ export interface MachineRow {
   readiness?: ReadinessPayload;
   dot: MachineDot;
   history: MachineSample[];
+  /** The machine roles it runs (volleyd's record), in the record's order. */
+  roles: MachineRole[];
 }
 
 /** The rows: the supervisor's own record first, then the configured hosts with a record, by name. */
 export function machineRows(
-  state: Pick<DeskState, "config" | "machines" | "readiness" | "machineHistory">,
+  state: Pick<DeskState, "config" | "machines" | "readiness" | "machineHistory" | "roles">,
   hubUp: boolean,
 ): MachineRow[] {
   const machines = state.machines ?? {};
@@ -58,6 +63,7 @@ export function machineRows(
       ...(readiness ? { readiness } : {}),
       dot: machineDot(record, readiness, hubUp, local),
       history: state.machineHistory?.[record.name] ?? [],
+      roles: state.roles ? rolesOn(state.roles, record.name) : [],
     };
   };
   const own = localName ? machines[localName] : undefined;
@@ -66,6 +72,16 @@ export function machineRows(
     .sort((a, b) => a.localeCompare(b))
     .map((n) => row(machines[n] as MachinePayload, false));
   return [...(own ? [row(own, true)] : []), ...hosts];
+}
+
+const ROLE_LETTER: Record<MachineRole, string> = { broker: "B", supervisor: "S", desk: "D" };
+
+/** `the broker, the supervisor and the Desk`. */
+function roleWords(roles: readonly MachineRole[]): string {
+  const names = roles.map((r) => ROLE_NAME[r]);
+  return names.length < 2
+    ? (names[0] ?? "")
+    : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
 const LEVEL_WORD: Record<SparkLevel, string> = { ok: "", warn: ", high", bad: ", critical" };
@@ -88,13 +104,16 @@ function figures(r: MachineRow, now: number) {
   const agents = `${m.agents} of ${max} agents`;
   /** `95 %, critical`: a reading and its level in words. */
   const pct = (v: number) => `${Math.round(v)} %${LEVEL_WORD[sparkLevel(v)]}`;
-  const summary = down
-    ? `${r.label}: down, last seen ${seen} ago — ${agents}`
-    : [
-        `${r.label}: load ${loadText} of ${m.cores} cores${loadPct === null ? "" : `, ${pct(loadPct)}`}`,
-        memPct === null ? "memory unknown" : `memory ${pct(memPct)}`,
-        agents,
-      ].join(" — ");
+  const runs = r.roles.length > 0 ? ` — runs ${roleWords(r.roles)}` : "";
+  const summary = `${
+    down
+      ? `${r.label}: down, last seen ${seen} ago — ${agents}`
+      : [
+          `${r.label}: load ${loadText} of ${m.cores} cores${loadPct === null ? "" : `, ${pct(loadPct)}`}`,
+          memPct === null ? "memory unknown" : `memory ${pct(memPct)}`,
+          agents,
+        ].join(" — ")
+  }${runs}`;
   return { down, seen, max, specs: specs.join(" · "), loadPct, memPct, loadText, summary };
 }
 
@@ -114,6 +133,11 @@ function Row({ r, now, onOpen }: { r: MachineRow; now: number; onOpen: (name: st
         <span className="mrow-line">
           {r.dot !== "unknown" && <i className={`m-dot m-dot--${r.dot}`} />}
           <span className="mrow-name">{r.label}</span>
+          {r.roles.length > 0 && (
+            <span className="mrow-roles" aria-hidden="true">
+              {r.roles.map((x) => ROLE_LETTER[x]).join(" ")}
+            </span>
+          )}
           {f.down ? (
             <span className="mrow-down">down · last seen {f.seen} ago</span>
           ) : (
