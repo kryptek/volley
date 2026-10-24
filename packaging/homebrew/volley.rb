@@ -17,7 +17,7 @@ class Volley < Formula
   def install
     # The release tarball is a checkout with its node_modules: nothing is downloaded here.
     libexec.install Dir["*"]
-    bun = Formula["oven-sh/bun/bun"].opt_bin/"bun"
+    bun = formula_opt_bin("oven-sh/bun/bun")/"bun"
     [["volley", "volley-cli"], ["volleyd", "volleyd"]].each do |name, pkg|
       (bin/name).write <<~SH
         #!/bin/sh

@@ -76,10 +76,12 @@ jobs:
           name: formula
           path: rendered
       - name: brew style
+        # Homebrew rejects a formula outside a tap, so it is staged under brew's Taps directory.
         run: |
-          mkdir -p homebrew-volley/Formula
-          cp rendered/volley.rb homebrew-volley/Formula/volley.rb
-          brew style --formula homebrew-volley/Formula/volley.rb
+          dir="$(brew --repository)/Library/Taps/volley-release/homebrew-volley/Formula"
+          mkdir -p "$dir"
+          cp rendered/volley.rb "$dir/volley.rb"
+          brew style --formula "$dir/volley.rb"
       - name: Push the formula to the tap
         if: env.HOMEBREW_TAP_TOKEN != ''
         env:

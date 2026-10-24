@@ -6,6 +6,7 @@ import {
   linkSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -38,7 +39,7 @@ describe("the formula", () => {
   test("bin/volley and bin/volleyd exec bun on the two CLIs in libexec", () => {
     expect(template).toContain('exec "#{bun}" "#{opt_libexec}/packages/#{pkg}/src/cli.ts" "$@"');
     expect(template).toContain('[["volley", "volley-cli"], ["volleyd", "volleyd"]].each');
-    expect(template).toContain('bun = Formula["oven-sh/bun/bun"].opt_bin/"bun"');
+    expect(template).toContain('bun = formula_opt_bin("oven-sh/bun/bun")/"bun"');
     for (const pkg of ["volley-cli", "volleyd"]) {
       expect(existsSync(join(ROOT, "packages", pkg, "src", "cli.ts"))).toBe(true);
     }
@@ -88,16 +89,26 @@ describe("the formula", () => {
       if (process.env.VOLLEY_BREW_STYLE === "1") throw new Error("VOLLEY_BREW_STYLE=1 needs brew");
       return;
     }
-    const dir = join(tempDir("volley-formula-"), "homebrew-volley", "Formula");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "volley.rb"), renderFormula("0.11.0", SHA));
-    const r = Bun.spawnSync([brew, "style", "--formula", join(dir, "volley.rb")], {
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, HOMEBREW_NO_AUTO_UPDATE: "1", HOMEBREW_NO_ENV_HINTS: "1" },
-    });
-    expect(`${r.stdout}${r.stderr}`).not.toMatch(/offenses? detected/);
-    expect(r.exitCode).toBe(0);
+    // Homebrew rejects a formula outside a tap, so the test stages one under its Taps directory
+    // (a name no real tap uses) and removes it afterwards.
+    const env = { ...process.env, HOMEBREW_NO_AUTO_UPDATE: "1", HOMEBREW_NO_ENV_HINTS: "1" };
+    const repo = Bun.spawnSync([brew, "--repository"], { stdout: "pipe", env }).stdout.toString();
+    const user = join(repo.trim(), "Library", "Taps", `volley-style-${process.pid}`);
+    const dir = join(user, "homebrew-volley", "Formula");
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "volley.rb"), renderFormula("0.11.0", SHA));
+      const r = Bun.spawnSync([brew, "style", "--formula", join(dir, "volley.rb")], {
+        stdout: "pipe",
+        stderr: "pipe",
+        env,
+      });
+      const out = `${r.stdout}${r.stderr}`;
+      expect(out).not.toMatch(/\d+ offenses? detected|requires formulae to be in a tap/);
+      expect({ exitCode: r.exitCode, out }).toEqual({ exitCode: 0, out });
+    } finally {
+      rmSync(user, { recursive: true, force: true });
+    }
   }, 300_000);
 });
 
@@ -259,6 +270,8 @@ describe("the release workflow", () => {
     expect(yml).toContain("runs-on: macos-latest");
     expect(yml).toContain("bun scripts/packaging/formula.ts render");
     expect(yml).toMatch(/brew style/);
+    // Homebrew rejects a formula outside a tap: the step stages it under brew's Taps directory.
+    expect(yml).toContain('"$(brew --repository)/Library/Taps/');
   });
 
   test("the tap push is guarded by the token secret's presence, so forks skip it", () => {
