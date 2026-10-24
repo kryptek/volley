@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
 import { stableServicePath } from "volley-cli/setup/service-path";
+import { SIM_BIN } from "volley-sim/env";
 import pkg from "../package.json";
 import type { AdmissionSummary } from "../src/admission";
 import { admissionFor, formatAdmission } from "../src/commands/admission";
@@ -969,6 +970,25 @@ describe("volleyd install / uninstall", () => {
     expect(r.stdout).toContain(
       "<key>VOLLEY_AUTH_DIR</key>\n    <string>/srv/mosquitto/volley</string>",
     );
+  });
+
+  it("--dry-run under the simulator (VOLLEY_SIMULATED=1, `volley setup --simulated`) keeps it on", async () => {
+    const env = { HOME: home, VOLLEYD_HOME: join(home, "state") };
+    const plain = await runCli(["install", "--dry-run"], env);
+    expect(plain.stdout).not.toContain("VOLLEY_SIMULATED");
+    expect(plain.stdout).not.toContain(SIM_BIN);
+    const r = await runCli(["install", "--dry-run"], {
+      ...env,
+      VOLLEY_SIMULATED: "1",
+      VOLLEY_SIM_HOME: "/path/to/sim",
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("<key>VOLLEY_SIMULATED</key>\n    <string>1</string>");
+    expect(r.stdout).toContain("<key>VOLLEY_SIM_HOME</key>\n    <string>/path/to/sim</string>");
+    // The fakes first, then the same fixed PATH as without.
+    const pathOf = (out: string) => /<key>PATH<\/key>\n\s*<string>([^<]*)<\/string>/.exec(out)?.[1];
+    expect(pathOf(r.stdout)).toBe(`${SIM_BIN}:${pathOf(plain.stdout)}`);
+    expect(r.stdout).not.toMatch(/\{\{[A-Z_]+\}\}/);
   });
 
   it("never writes broker credentials into the (world-readable) plist", async () => {

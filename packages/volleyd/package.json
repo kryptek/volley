@@ -30,6 +30,7 @@
     "ajv-formats": "^3.0.1",
     "volley-cli": "workspace:*",
     "volley-mcp": "workspace:*",
+    "volley-sim": "workspace:*",
     "yaml": "^2.6.0"
   },
   "devDependencies": {

@@ -83,6 +83,15 @@ describe("setup: services", () => {
         expect(env.VOLLEY_SIM_HOME).toBe(simHome(sim.auth.env));
       }
     });
+
+    it("on macOS, `volleyd install` runs with the simulator on (it writes the plist's env itself)", async () => {
+      m = fakeMachine(fake, dir, { platform: "darwin" });
+      await planServices({ ...m.ctx, firstWave: { simulated: true } });
+      const i = m.execCalls.findIndex((a) => a.includes("install") && a.includes("--dry-run"));
+      expect(i).toBeGreaterThanOrEqual(0);
+      expect(m.execEnvs[i]?.VOLLEY_SIMULATED).toBe("1");
+      expect(m.execEnvs[i]?.VOLLEY_SIM_HOME).toBe(simHome(m.ctx.auth.env));
+    });
   });
 
   describe("macOS (launchd)", () => {
