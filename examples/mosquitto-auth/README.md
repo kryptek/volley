@@ -28,6 +28,10 @@ needs TLS (`mqtts://`, `wss://`), since passwords over plain MQTT are readable o
 
 ## Install mosquitto 2.1
 
+The one command (the root README's [Quickstart](../../README.md#quickstart)) installs it (Homebrew
+on macOS, the snap on Ubuntu/Debian when snapd runs) and `volley setup` configures it as below;
+`volley setup --check` reports the Broker and Security rows. By hand:
+
 | Platform | Install | Config | Plugin | State file |
 |---|---|---|---|---|
 | macOS (Homebrew) | `brew install mosquitto` | `/opt/homebrew/etc/mosquitto/mosquitto.conf` (Intel: `/usr/local/…`) | `/opt/homebrew/opt/mosquitto/lib/mosquitto_dynamic_security.so` | `/opt/homebrew/var/mosquitto/dynamic-security.json` |

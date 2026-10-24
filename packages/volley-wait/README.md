@@ -10,18 +10,18 @@ The target is either an `agent_id` (expanded to `volley/<ns>/<id>/status` with t
 
 ## Prerequisites
 
-- A running MQTT broker (mosquitto recommended): `brew services start mosquitto`.
+- Volley installed with the one command (the root README's [Quickstart](../../README.md#quickstart)): `volley setup` sets up the broker, puts `volley` in `~/.volley/bin` (on your `PATH` in a new terminal) and links this skill. `volley setup --check` says what is missing.
 - The [`volley-cli`](../volley-cli/) on `$PATH`. The skill shells out to `volley wait` and `volley sub` directly; it does NOT require the `volley-mcp` MCP server to be registered.
 
 ## Install
 
-From the repo root:
+`volley setup` links it (its Claude Code step). By hand, from the repo root:
 
 ```sh
 bash packages/volley-wait/scripts/install.sh
 ```
 
-This symlinks `packages/volley-wait/` into `~/.claude/skills/volley-wait/`. Edits to `SKILL.md` here are picked up immediately by Claude Code on the next slash invocation. After installing, quit Claude Code (Cmd-Q) and reopen — skills are discovered at startup.
+This symlinks `packages/volley-wait/` into `~/.claude/skills/volley-wait/`. Edits to `SKILL.md` here are picked up immediately by Claude Code on the next slash invocation. After installing, restart Claude Code (exit the session and start `claude` again) — skills are discovered at startup.
 
 To uninstall: `rm ~/.claude/skills/volley-wait`. The symlink is the only thing the install touches.
 

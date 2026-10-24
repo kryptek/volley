@@ -6,12 +6,20 @@ the few things only you can answer. This page is the map; each piece links to it
 
 ## Before the first unattended wave
 
-- **A coordinator name.** Set `VOLLEY_COORDINATOR` (e.g. `coord-main`) in the volley MCP
-  registration's `env` and in your shell profile (root README, Quickstart step 4). The wave is
-  owned by the name, not by the session, so the session can end and any later session with the
-  same name answers for it. Nothing needs to run to keep it present: see
+You need the one command (the root README's [Quickstart](../README.md#quickstart)):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh
+```
+
+Its `volley setup` ends with a 1-issue test wave that volleyd merges on its own (`merge: auto`), and leaves you with:
+
+- **A coordinator name**, asked once (`Coordinator name [coord-<this machine>]:`) and saved in
+  `$VOLLEYD_HOME/setup.json`; the volley MCP server registers your sessions with it and
+  `volleyd run` without `--owner` owns a wave by it. The wave is owned by the name, not by the
+  session, so the session can end and any later session with the same name answers for it. Nothing needs to run to keep it present: see
   [Presence](#presence-nothing-to-keep-alive) below.
-- **`/volley-issues`, or `volleyd run <wave.yaml> --owner "$VOLLEY_COORDINATOR"`.** The skill
+- **`/volley-issues`, or `volleyd run <wave.yaml>`.** The skill
   writes `merge: auto` and `branch_update: merge` into the wave file by default and leaves once
   the wave is submitted ([volley-issues README](../packages/volley-issues/README.md)).
 - **Optional: a release playbook**, `.volley/release.yaml` in the repository, for what turns a

@@ -1,0 +1,291 @@
+# Installing Volley
+
+One command installs Volley on a Mac or on Ubuntu/Debian, then runs its guided setup:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh
+```
+
+The command never changes: the script installs the latest release tag unless you name another.
+Rerunning it is safe: whatever is already in place is left alone. This page says what the
+installer and `volley setup` do, every flag, how to check and how to uninstall, the Linux notes,
+the Homebrew path, and how to add a second machine. The README's
+[Quickstart](../README.md#quickstart) is the short version.
+
+- [What the installer does](#what-the-installer-does)
+- [What `volley setup` does](#what-volley-setup-does)
+- [Flags](#flags)
+- [Checking an install: `--check`](#checking-an-install---check)
+- [Uninstalling: `--uninstall`](#uninstalling---uninstall)
+- [Linux notes](#linux-notes)
+- [The Homebrew path](#the-homebrew-path)
+- [Add a bare machine](#add-a-bare-machine)
+- [Updating](#updating)
+- [From a clone (contributors)](#from-a-clone-contributors)
+- [The broker it sets up](#the-broker-it-sets-up)
+
+## What the installer does
+
+It installs only what is missing, side by side:
+
+| | macOS (arm64, x86_64) | Ubuntu / Debian |
+| --- | --- | --- |
+| Package manager | Homebrew, with its own installer when `brew` is missing. That installer asks for your password: the only sudo on a Mac | apt. One `sudo -v` up front, after printing every reason it needs sudo (the apt packages, GitHub's apt repository for gh, the mosquitto snap); nothing else asks |
+| Tools | `brew install` for whichever of bun, mosquitto, gh, git and tmux is missing | `apt-get install -y` for whichever of git, tmux, curl and ca-certificates is missing (unzip too when bun is); bun with its own installer (into `~/.bun`); gh from GitHub's apt repository |
+| Broker | mosquitto from Homebrew (2.1 or newer) | a mosquitto 2.1 or newer already on `PATH`; else the snap when snapd runs; else it prints the two ways to get one ([Linux notes](#linux-notes)) |
+| Claude Code | its native installer, when `claude` is missing | the same |
+| Volley | the Homebrew formula when Homebrew resolves Volley's tap ([below](#the-homebrew-path)), else the clone below | a clone of the release tag into `~/.volley/src`, then `bun install --frozen-lockfile` |
+| Services (by setup) | launchd agents | `systemd --user` units |
+
+Then, for the clone:
+
+1. **The commands.** `~/.volley/bin/volley` and `~/.volley/bin/volleyd`: small `sh` scripts that run
+   the checkout with the full path of your bun, byte for byte what `volley setup` writes, so its
+   Services step finds them in place. A file of your own at either path is moved aside to
+   `<path>.volley-backup-<timestamp>`, never deleted.
+2. **`PATH`.** One line, `export PATH="$HOME/.volley/bin:$PATH" # volley`, added once to your
+   shell's startup file: `~/.zshrc` for zsh (or `$ZDOTDIR/.zshrc`); for bash `~/.bashrc` on Linux
+   and `~/.bash_profile` on a Mac. fish gets the `fish_add_path $HOME/.volley/bin` line printed
+   instead, any other shell the line to add. New terminals pick it up; the setup that follows
+   runs without it.
+3. **Setup.** `volley setup` on your terminal (the piped script reads your answers from
+   `/dev/tty`, not from the pipe). With no terminal (a CI job, an ssh command) it prints the
+   command to run instead.
+
+## What `volley setup` does
+
+Nine steps; each prints what it found and what it would change, diffs included, **before**
+changing anything, and is safe to rerun (a rerun reports each step `already done`). The volley-cli
+README's [`volley setup`](../packages/volley-cli/README.md#volley-setup) has every detail.
+
+1. **Broker**: finds mosquitto, refusing one older than 2.1.
+2. **Security**: the Dynamic Security broker config (the old file backed up), a restart, then a
+   check that both listeners refuse anonymous clients.
+3. **Accounts**: the `volleyd`, `desk` and `coordinator` logins and their credential files, the
+   coordinator's login in the macOS keychain on a Mac, and a one-time admin token for the Desk.
+4. **Sign-ins**: Claude Code and GitHub, each in your browser when signed out.
+5. **Claude Code**: your coordinator name; the volley MCP server registered at user scope with
+   **no password in it** (it logs in with `coordinator.json` from the auth dir it names); the
+   `/volley`, `/volley-issues` and `/wait` skills; the Volley hooks.
+6. **Terminal**: where volleyd starts agents here: cmux on a Mac that has it, else tmux.
+7. **Services**: volleyd and the Desk (`http://localhost:5199`) as services.
+8. **Phone**: a one-time sign-in QR for the Desk on your phone, when you let your network reach
+   the broker's WebSocket listener.
+9. **Test wave**: a 1-issue wave on a scratch private repository, `volley-hello-<4>`, followed
+   until volleyd merged its PR (at most 15 minutes). The end prints the `gh repo delete …` line
+   that removes it.
+
+**What it asks.** Three questions, each with a default, so Enter alone answers it:
+
+| Question | Enter means | Decided up front by |
+| --- | --- | --- |
+| Let devices on your network reach the WebSocket listener (the Desk on a phone)? | yes | `--lan` / `--no-lan` (`--yes` alone: no) |
+| `Coordinator name [coord-<this machine>]:` | the default shown | `--yes` takes the default |
+| `Run a 1-issue test wave now?` | yes | `--yes` runs it, `--no-first-wave` skips it |
+
+and two sign-ins, Claude Code (`claude auth login`) and GitHub (`gh auth login --web`), each
+in your browser and only when signed out. Before applying a step's changes it also asks
+`Apply these changes (<step>)? [y/N]`: type `y`. `volley setup --yes` asks nothing. You copy no
+secret by hand: the services and the MCP server read their logins from files setup writes, and
+the Desk signs you in through a one-time link.
+
+**When it finishes** it prints `Setup complete in <m> m <s> s (<n> questions, <n> sign-ins, <n>
+sudo)`, then the test wave's PR, and the run's numbers go to `~/.volley/volleyd/setup-metrics.json`.
+Two things are yours:
+
+- **The Desk.** Under *One-time admin token* setup printed `Open the Desk with it on this machine:
+  http://localhost:5199/#signin=…`: open that link within 10 minutes (single use;
+  `volley auth token` prints another). Your phone signs in by scanning the QR.
+- **Claude Code.** A session started after setup has `/volley` and the volley MCP server. One that
+  was already open does not: exit it and start `claude` again (MCP servers are read when a
+  session starts). Then `/volley list` shows your session.
+
+**Your coordinator name** is saved in `~/.volley/volleyd/setup.json`: `volleyd run` without
+`--owner` owns a wave by it, and the MCP server registers your session with it
+(`VOLLEY_COORDINATOR`), so your waves stay yours across session restarts. A shell on this machine
+needs nothing exported: `volley wait`, `volley sub` and `volleyd` find the coordinator login
+setup saved. On another machine, or for a remote broker, export `VOLLEY_AUTH_USERNAME` and
+`VOLLEY_AUTH_PASSWORD` in that shell.
+
+## Flags
+
+Pass flags through the pipe with `sh -s --`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh -s -- --check
+```
+
+| Flag | What it does |
+| --- | --- |
+| `--version vX.Y.Z` | Install this release tag (default: `$VOLLEY_VERSION`, else the latest tag). A rerun with another tag moves `~/.volley/src` to it |
+| `--source <dir>` | Use this Volley checkout instead of cloning one (CI tests its own) |
+| `--peer` | This machine joins a supervisor's fleet: no broker (mosquitto is neither installed nor checked), no Homebrew tap; runs `volley setup --peer` ([Add a bare machine](#add-a-bare-machine)) |
+| `--no-setup` | Stop before `volley setup`; it prints the command to run |
+| `--check` | Print each prerequisite as found or missing, and where Volley is; exit 1 if anything is missing. Changes nothing |
+| `--uninstall` | Remove the services, the commands, the `PATH` line and `~/.volley/src` ([below](#uninstalling---uninstall)) |
+| `--purge` | With `--uninstall`: also remove volleyd's state, `~/.volley/volleyd` |
+| `-h`, `--help` | The usage |
+
+Exit status: 0 done, 1 `--check` found something missing (or a step failed), 2 a usage error or
+an unsupported platform (anything but macOS and Ubuntu/Debian, which it says before changing
+anything).
+
+## Checking an install: `--check`
+
+Two checks, neither changes anything:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh -s -- --check
+volley setup --check          # one row per setup step: done, pending, blocked or skipped
+volley setup --check --json   # the same as JSON, for CI
+```
+
+The installer's `--check` lists the platform, each prerequisite (mosquitto with its version;
+one older than 2.1 counts as missing) and where `volley` is. `volley setup --check` plans every
+step without asking anything and exits 0 only when nothing is pending or blocked; a pending row
+lists the changes a run would make. A healthy install is all `done` (the Phone row is `skipped`
+with LAN access off).
+
+## Uninstalling: `--uninstall`
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh -s -- --uninstall
+```
+
+It stops and removes the services (launchd's `systems.volley.volleyd`, `systems.volley.desk` and
+`systems.volley.peer`; or `volleyd.service`, `volley-desk.service` and `volley-peer.service`
+under `systemd --user`), removes `~/.volley/bin/volley` and `volleyd` (only the ones setup or
+the installer wrote), the `PATH` line from `~/.zshrc`, `~/.bashrc` and `~/.bash_profile`, and
+`~/.volley/src`; on the Homebrew path it runs `brew uninstall kryptek/volley/volley`. It keeps
+volleyd's state (`~/.volley/volleyd`: journals, credentials, the setup log; `--purge` removes it
+too), the broker and its configuration, the prerequisites it installed, and the volley entry in
+Claude Code (`claude mcp remove -s user volley` removes it). The test wave's scratch repository
+stays on GitHub: `gh repo delete <you>/volley-hello-… --yes`.
+
+## Linux notes
+
+- **Ubuntu and Debian only for now**, any release with apt (CI runs Ubuntu 24.04 and Debian 13);
+  other distributions exit 2 before changing anything.
+- **sudo once.** The installer prints why it needs sudo, runs `sudo -v` once, and reuses it.
+  It needs none when everything is there or when it runs as root.
+- **mosquitto 2.1 or newer.** Distribution packages may still be 2.0, which Volley refuses
+  (broker auth uses Dynamic Security roles with `%u`, which 2.0 does not substitute). The
+  installer takes a 2.1 already on `PATH`, else installs the snap when snapd runs. Otherwise it
+  prints both ways and goes on, and setup's Broker step stops with the same advice until one
+  runs:
+
+  ```sh
+  sudo snap install mosquitto                 # needs snapd
+  docker run eclipse-mosquitto:2.1-alpine     # the container layout: examples/mosquitto-auth/
+  ```
+
+  A 2.0 broker already installed holds port 1883 and shadows the newer binary: remove it first
+  (`sudo apt-get remove mosquitto`).
+- **The snap's config is root's.** Its files live under `/var/snap/mosquitto/common/`, so the
+  broker steps need root. When setup's Security step cannot write there, run them with sudo,
+  then the rest as yourself (the steps that belong to your user say so and skip under sudo):
+
+  ```sh
+  sudo ~/.volley/bin/volley setup --step detect --step security --step accounts
+  volley setup
+  ```
+- **Services** are `systemd --user` units. To keep volleyd and the Desk running while you are
+  logged out, `loginctl enable-linger` (setup says so when it starts them). A container without
+  systemd needs a stand-in: `scripts/install-tests/systemctl-stand-in.sh` is the one CI uses.
+- **Agents** start in tmux (setup's Terminal step stops with `sudo apt-get install -y tmux` when
+  it is missing).
+- **Wording.** Where a Mac guide says the keychain, Linux has `coordinator.json` in the auth dir
+  alone; where it says Cmd-Q, exit the Claude Code session and start `claude` again.
+
+## The Homebrew path
+
+On a Mac you can install with Homebrew instead, in two commands:
+
+```sh
+brew install kryptek/volley/volley
+volley setup
+```
+
+The formula installs the release tarball (Volley with its `node_modules`, checksummed) and
+brings bun, mosquitto, gh, git and tmux. The one command takes this path itself when Homebrew
+resolves the tap, neither `--version` nor `--source` is given and `~/.volley/bin` has no
+`volley` yet. Updating is `brew upgrade kryptek/volley/volley`, then `volley setup`. How the tap
+is published: [`packaging/README.md`](../packaging/README.md).
+
+## Add a bare machine
+
+A second machine (macOS or Ubuntu/Debian, reachable over ssh) joins the supervisor's fleet with
+one command on the supervisor's machine:
+
+```sh
+volley machine add you@box-a
+```
+
+or from the Desk, Settings › Machines › **Add a bare machine…**. It installs Volley on the box in
+peer mode at the supervisor's release (no broker, no Desk), pairs it, signs it in to GitHub and
+Claude (sign-ins only when signed out) and runs the doctor, ending with one `ready ✓` row. sudo
+on the box is asked only when git, tmux, curl or gh (Linux) or Homebrew (Mac) are missing, and
+announced first. Details: the volley-cli README's
+[`volley machine add`](../packages/volley-cli/README.md#volley-machine-add).
+
+By hand on the box, the same is the one command with `--peer`, then the pairing code from
+Settings › Machines › **+ Add a machine** (`volley peer join <code> --to <you@supervisor>`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh -s -- --peer
+```
+
+## Updating
+
+On the supervisor's machine, `volley deploy v<X.Y.Z>` moves the services' checkout to a release
+tag, rebuilds the Desk, restarts volleyd and the Desk, health-checks them (rolling back on
+failure), then every paired machine. Rerunning the one command with `--version v<X.Y.Z>` moves
+`~/.volley/src` too; follow it with `volley setup --repair`.
+
+## From a clone (contributors)
+
+To work on Volley itself, run setup from your clone instead: the services and the MCP server then
+run your checkout.
+
+```sh
+git clone https://github.com/<your-fork>/volley.git
+cd volley
+bun install
+bun packages/volley-cli/src/cli.ts setup
+```
+
+Volley supports Bun **1.3 and 1.4** (`engines.bun` is `>=1.3 <1.5`). The manual broker path,
+step by step, is [`volley auth init`](../packages/volley-cli/README.md#volley-auth); the
+container layout and the migration from an older `password_file` / `acl_file` setup:
+[`examples/mosquitto-auth/`](../examples/mosquitto-auth/README.md).
+
+## The broker it sets up
+
+Two listeners on `127.0.0.1`, both requiring a login:
+
+- **`1883`** (raw MQTT): `volley-mcp`, `volley-cli`, volleyd and any native MQTT client.
+- **`9001`** (MQTT over WebSocket): the Desk, since browsers cannot speak raw MQTT. With LAN
+  access on (`volley setup --lan`) `9001` also listens on your network; `1883` never does.
+
+> **Why a password on localhost?** Agents run with permission prompts skipped and obey their
+> mailbox. A localhost broker is reachable by every local process, and by **any web page you
+> visit** (browsers let pages open a WebSocket to `127.0.0.1:9001`). Without auth, a malicious
+> page could steer your agents or rewrite the supervisor's config. The ACL also stops one agent
+> from steering another. Identities and ACL rules: [`examples/mosquitto-auth/`](../examples/mosquitto-auth/README.md).
+
+> **LAN traffic is not encrypted.** Logins are required from the LAN too, but until a TLS
+> listener exists (`mqtts://` / `wss://`) passwords cross the network readable: open the
+> listener only on a network you trust, and never copy this config to a public host. Start at
+> the [mosquitto auth methods doc](https://mosquitto.org/documentation/authentication-methods/).
+
+> **Queued mailbox messages.** Mail for an offline agent waits in its persistent session on the
+> broker ([SPEC §4.4](../spec/SPEC.md#44-mailbox-message-types)). mosquitto flushes persistence
+> every `autosave_interval` seconds (1800 by default), so the config setup writes sets
+> `autosave_interval 30` and `autosave_on_changes false`; add both to a config of your own.
+> volleyd's journal stays the source of truth. Sessions expire after 7 days by default (the
+> tunable `mailbox.session_expiry_s`; a change applies to new connections only).
+
+> **Upgrading from an earlier setup?** Do not re-copy `examples/mosquitto-localhost.conf` (it is
+> the Dynamic Security config, and without its state file and admin the broker refuses every
+> client): run `volley setup --repair`, or `volley auth migrate --coordinator-file
+> --volleyd-file` from a `password_file` / `acl_file` setup, then restart mosquitto as it says.

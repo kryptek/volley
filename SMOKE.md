@@ -367,7 +367,7 @@ lease_pools:
   wave: <yyyy-mm-dd>-fleet-smoke
   repo: <abs path of the test repo on the Mac>
   release_branch: release/<yyyy-mm-dd>-fleet-smoke
-  model: claude-opus-5-5
+  model: <model>   # Volley's default: DEFAULT_MODEL in packages/volleyd/src/config-defaults.ts
   pipeline: [implement, merge_ready]
   placement: auto
   placement_avoid: [<the Mac's machine name>]   # the "this one" card's name
@@ -690,7 +690,7 @@ key-based ssh both ways with the Mac. A second Claude account you can sign in wi
 on GitHub with one small open issue and a pushed release branch
 `release/<yyyy-mm-dd>-onboarding-smoke`, cloned on the Mac.
 
-0. **Before the clock: the broker.** `brew install mosquitto && brew services start mosquitto`;
+0. **Before the clock: the broker.** `brew install mosquitto` (setup's Security step starts it);
    `mosquitto -h | head -1` says `mosquitto version 2.1.x`.
 1. **Fresh setup. Start the stopwatch now.**
    ```sh
@@ -804,7 +804,7 @@ on GitHub with one small open issue and a pushed release branch
    wave: <yyyy-mm-dd>-onboarding-smoke
    repo: <abs path of the test repo on the Mac>
    release_branch: release/<yyyy-mm-dd>-onboarding-smoke
-   model: claude-opus-5-5
+   model: <model>   # Volley's default: DEFAULT_MODEL in packages/volleyd/src/config-defaults.ts
    pipeline: [implement, merge_ready]
    tasks:
      T1: { issue: <n> }
@@ -900,7 +900,7 @@ Verifies the CLI subcommand and the dashboard browser-notification feature again
 
 ### Pre-reqs
 
-- [ ] `brew services start mosquitto`. Both `:1883` (TCP) and `:9001` (WebSocket) listeners up:
+- [ ] The broker running (`volley setup --check`: the Broker row `done`). Both `:1883` (TCP) and `:9001` (WebSocket) listeners up:
    ```sh
    lsof -nP -iTCP:1883 -sTCP:LISTEN
    lsof -nP -iTCP:9001 -sTCP:LISTEN

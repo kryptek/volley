@@ -52,7 +52,7 @@ Topics follow this structure:
 
 ### 2.1 Namespace
 
-`namespace` is a logical grouping (e.g. `example-dispatch`, `homelab`, `cursor-team`). Default value is `default`.
+`namespace` is a logical grouping (e.g. `issues`, `homelab`, `cursor-team`). Default value is `default`.
 
 - MUST match `[a-z0-9][a-z0-9_-]{0,62}`
 - Cross-team brokers SHOULD use per-team namespaces to prevent registry collisions
@@ -1024,7 +1024,7 @@ Agents register themselves on a reserved retained topic so observers can enumera
 {
   "schema_version": "0.1",
   "agent_id": "issue-42-fix-7a3f",
-  "namespace": "example-dispatch",
+  "namespace": "default",
   "parent_id": "coordinator-abcd",
   "wall_time": "2026-05-14T02:11:23.000Z",
   "channel": "_system/registry",
@@ -1032,7 +1032,7 @@ Agents register themselves on a reserved retained topic so observers can enumera
   "payload": {
     "capabilities": ["implements-issue", "writes-tests", "runs-mvn-verify"],
     "cwd": "/private/tmp/example-issue-42",
-    "model": "claude-opus-4-7",
+    "model": "<model id>",
     "title": "#42 fix the login redirect loop — implementer",
     "links": { "repo": "example-org/example-repo", "issue": 42 },
     "started_at": "2026-05-14T02:11:23.000Z"

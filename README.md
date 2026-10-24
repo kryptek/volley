@@ -29,14 +29,8 @@
   - [Why would *you* need it?](#why-would-you-need-it)
 - [The 60-second mental model](#the-60-second-mental-model) — three ideas, one diagram
 - [See it running](#see-it-running) — the dashboard, in one screenshot
-- [Quickstart (5 minutes, fresh Mac)](#quickstart-5-minutes-fresh-mac) — copy-paste setup
-  - [1. Install Homebrew](#1-install-homebrew-skip-if-you-already-have-it)
-  - [2. Install the MQTT broker](#2-install-the-mqtt-broker)
-  - [3. Clone and install Volley](#3-clone-and-install-volley)
-  - [4. Register the MCP server with Claude Code](#4-register-the-mcp-server-with-claude-code)
-  - [5. Install the `/volley` skill](#5-install-the-volley-skill)
-  - [6. See your first agent](#6-see-your-first-agent)
-  - [7. See everything in one view](#7-see-everything-in-one-view)
+- [Quickstart](#quickstart) — one command, on macOS or Ubuntu/Debian
+  - [See everything in one view](#see-everything-in-one-view)
 - [Use cases](#use-cases) — five concrete scenarios
   - [1. Dispatch long-running work to autonomous agents](#1-dispatch-long-running-work-to-autonomous-agents)
   - [2. One pane of glass across machines](#2-one-pane-of-glass-across-machines)
@@ -129,143 +123,65 @@ That's it. Everything else in the spec is a refinement.
 
 ![Volley dashboard — agent grid with live status, progress bars, and a live event feed across all topics](docs/images/dashboard-grid.png)
 
-`volley dash` opens a browser view of every registered agent — live status, progress, retained envelopes, full event feed. No Volley-side backend; the browser connects directly to your broker over WebSocket. Launch command and walkthrough in [Quickstart step 7](#7-see-everything-in-one-view).
+`volley dash` opens a browser view of every registered agent — live status, progress, retained envelopes, full event feed. No Volley-side backend; the browser connects directly to your broker over WebSocket. More in [See everything in one view](#see-everything-in-one-view).
 
 ---
 
-## Quickstart (5 minutes, fresh Mac)
+## Quickstart
 
-> **One command (macOS, Ubuntu/Debian):** `curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh` installs the prerequisites and Volley at the latest release tag, then runs `volley setup` (`… | sh -s -- --help` for the options). The steps below are the same by hand.
-
-> **Or with Homebrew (macOS):** `brew install kryptek/volley/volley`, then `volley setup`. The formula installs the release tarball (Volley with its `node_modules`, checksummed) and brings bun, mosquitto, gh, git and tmux; `install.sh` takes this path itself when Homebrew resolves the tap. How the tap is published: [`packaging/README.md`](packaging/README.md).
-
-> All commands assume macOS with [Homebrew](https://brew.sh). Linux works too — substitute your package manager. Windows: WSL recommended.
-
-### 1. Install Homebrew (skip if you already have it)
+One command, on a Mac or on Ubuntu/Debian:
 
 ```sh
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh
 ```
 
-### 2. Install the MQTT broker
+It installs what is missing, Volley at the latest release tag, and then runs `volley setup`,
+which ends with a 1-issue test wave merged on a scratch repository: proof the whole path works.
 
-Volley needs **mosquitto 2.1 or newer**: broker auth runs on its Dynamic Security plugin with shared roles that use `%u`, which 2.0 does not substitute (Volley refuses an older broker with `BROKER_TOO_OLD`).
+| | macOS | Ubuntu / Debian |
+| --- | --- | --- |
+| Prerequisites | Homebrew (its installer asks for your password: the only sudo), then bun, mosquitto, gh, git, tmux and Claude Code | one sudo prompt, reasons printed first: apt packages, bun, gh, mosquitto 2.1 (the snap) and Claude Code |
+| Volley | `~/.volley/src` (or the Homebrew formula), commands in `~/.volley/bin` | `~/.volley/src`, commands in `~/.volley/bin` |
+| `PATH` | one line in your shell's startup file (zsh, bash; fish is told the line) | the same |
+| Services | launchd | `systemd --user` |
 
-```sh
-brew install mosquitto              # macOS (2.1.x)
-sudo snap install mosquitto         # Linux: the snap is 2.1; distribution packages may still be 2.0
-# or a container: docker run eclipse-mosquitto:2.1-alpine (layout in examples/mosquitto-auth/)
-```
+**What setup asks.** Three questions, each answered by Enter:
 
-The broker **requires a username and password on both listeners**. From your clone of this repo (step 3; `bun install` first), let `volley setup` do the rest: it shows what it will change before every step, backs up each file it replaces, and is safe to rerun (`--repair` re-checks and fixes):
+1. *Let devices on your network reach the Desk?* (Enter: yes, so your phone can sign in.)
+2. `Coordinator name [coord-<this machine>]:` (the name your waves belong to.)
+3. `Run a 1-issue test wave now?` (Enter: yes.)
 
-```sh
-bun packages/volley-cli/src/cli.ts setup        # interactive; --yes to apply every step without asking
-```
+and two sign-ins in your browser, **Claude Code** and **GitHub**, each only when you are signed
+out. Before it changes anything, each step shows what it will change and asks
+`Apply these changes …? [y/N]`. You copy no password: setup wires the logins itself.
 
-It finds mosquitto (refusing a version older than 2.1), writes the Dynamic Security broker config for your install (Apple Silicon Homebrew: `/opt/homebrew/etc/mosquitto/mosquitto.conf`, the same as [`examples/mosquitto-localhost.conf`](examples/mosquitto-localhost.conf); the diff is shown and the old file backed up), restarts the broker and checks both listeners refuse anonymous clients; creates the roles and the `volleyd`, `desk` and `coordinator` identities, printing their passwords **once** (keep them: you need `coordinator` in step 4 and `desk` in step 7) and a one-time admin token for the Desk; installs volleyd, the Volley hooks for coordinator sessions and the Desk (`volley desk serve` on port 5199) as services; and, when you let devices on your network reach the broker's WebSocket listener (it asks, recommending yes; `--lan` / `--no-lan` decide up front, and `--yes` alone keeps it on this machine), ends with a QR code that signs your phone in to the Desk (10 minutes, single use). Logins are still required from the LAN, but that traffic is not encrypted until TLS is set up, so open it only on a network you trust. With LAN access off it skips the phone step and says how to add it later. Every step is journaled to `~/.volley/volleyd/setup.log`. On **Linux** with the snap the broker config lives under `/var/snap/mosquitto/common/`, so run it as root (`sudo bun …`), then `volley setup --step services` as yourself for the user services. The manual path, step by step, is [`volley auth init`](packages/volley-cli/README.md#volley-auth); details, the container layout and the migration from an older `password_file` / `acl_file` setup (`volley auth migrate`): [`examples/mosquitto-auth/`](examples/mosquitto-auth/README.md).
+**When it finishes** it prints `Setup complete in <m> m <s> s (…)` with the test wave's PR, and:
 
-When it finishes:
+- **The Desk.** Open the `http://localhost:5199/#signin=…` link it printed under *One-time admin
+  token* (single use, 10 minutes; `volley auth token` prints another). Scan the QR to sign in
+  your phone too.
+- **Claude Code.** Open a new terminal (for `PATH`) and start `claude`; a session that was
+  already open needs a restart once. `/volley list` shows your session; `/volley-issues` runs a
+  wave.
 
-- **Put `volley` on your `PATH`.** Setup installs `volley` and `volleyd` in `~/.volley/bin`: `echo 'export PATH="$HOME/.volley/bin:$PATH"' >> ~/.zshrc`, then open a new terminal. The rest of this guide types `volley`.
-- **Open the Desk as admin.** Setup serves the Desk at `http://localhost:5199`. Under *One-time admin token* it prints `Open the Desk with it on this machine: http://localhost:5199/#signin=…`: open that link (in a new tab; the Desk reads a link only when a page loads). The token is single use and lasts 10 minutes; `volley auth token` prints another link. The Desk opens Settings › Setup & Security, where you can rerun any step, issue sign-in links and manage broker accounts.
-- **Your phone.** Scan the QR code (same Wi-Fi). It signs the phone in once, as a `steer` account; a used or expired code says so and what to do next.
-- **More machines and Claude accounts.** `volley peer invite` / `volley peer join` pair a second machine with one code (the Desk: Settings › Machines), and `volley claude add <label>` (Settings › Claude accounts & usage) runs agents under a second Claude account; `volley claude list` shows each account once, with the machines signed in to it and its freshest usage. See the [volleyd README](packages/volleyd/README.md#claude-accounts).
+`volley setup --check` says what is missing without changing anything; rerunning the one command
+or `volley setup` changes nothing that is in place. **What the installer does**, every flag,
+`--uninstall`, the Linux notes, the Homebrew path (`brew install kryptek/volley/volley`, then
+`volley setup`), adding a second machine (`volley machine add you@box`) and setup from a clone:
+[`docs/INSTALL.md`](docs/INSTALL.md).
 
-You now have a broker with two listeners on `127.0.0.1` (with `volley setup --lan`, `9001` also listens on your network; `1883` never does):
-- **`1883`** (raw MQTT) — used by `volley-mcp`, `volley-cli`, and any native MQTT client
-- **`9001`** (MQTT-over-WebSocket) — used by the [`volley dash`](packages/volley-cli/README.md#volley-dash) browser dashboard, since browsers can't speak raw MQTT-over-TCP
+### See everything in one view
 
-> 🔄 **Upgrading from an earlier Volley setup?** The WebSocket listener (`:9001`) was added with the v0.1.2 dashboard. If your installed `mosquitto.conf` predates that, do not re-copy `examples/mosquitto-localhost.conf` (it is now the Dynamic Security config, and without its state file and admin the broker refuses every client): run `volley auth migrate` (from a `password_file` / `acl_file` setup) or `volley auth init`, which write the config with both listeners, then restart mosquitto as they say. Verify with `lsof -nP -iTCP:9001 -sTCP:LISTEN` — you should see `mosquitto … (LISTEN)`. Without it, the dashboard browser console will hang on `mqtt.connect('ws://localhost:9001')` and you'll see no agents.
+The [Volley Desk](packages/volley-desk/README.md) at `http://localhost:5199` (and at
+`http://<this machine's LAN address>:5199` for your phone, with LAN access on) is an infinite
+canvas of wave and agent windows that works on a phone, without WebGL and from the keyboard. To
+work on the Desk itself, launch it from a checkout with `volley dash` (`http://localhost:5174`).
 
-> 💾 **Queued mailbox messages and persistence.** Mailbox messages for an agent that is offline wait on the broker in that agent's persistent session ([SPEC §4.4](spec/SPEC.md#44-mailbox-message-types)). mosquitto only flushes its persistence DB every `autosave_interval` seconds (1800 by default), so the bundled config sets `autosave_interval 30` and `autosave_on_changes false`. If you run your own config, add both lines. volleyd's journal remains the source of truth; this only narrows how far the broker's copy can lag behind. Persistent sessions expire after 7 days by default. The hooks drain client (`packages/volley-hooks`) reads the expiry from the runtime tunable `mailbox.session_expiry_s` in volleyd's retained config, with `VOLLEY_SESSION_EXPIRY_S` as the env fallback; volleyd's own mailbox session uses the same tunable. A changed value applies to **new connections only**: an existing session keeps the expiry it was created with until its client reconnects.
-
-> 🔐 **Why a password on localhost?** Agents run with permission prompts skipped and obey their mailbox. A localhost broker is reachable by every local process, and by **any web page you visit** (browsers let pages open a WebSocket to `127.0.0.1:9001`). Without auth, a malicious page could steer your agents or rewrite the supervisor's config. The ACL also stops one agent from steering another. Details, identities and ACL rules: [`examples/mosquitto-auth/`](examples/mosquitto-auth/README.md). Upgrading from the anonymous config? Run `volley auth init` as above, then give each client its credentials (steps 4 and 7). From an earlier `password_file` / `acl_file` setup: `volley auth migrate --coordinator-file --volleyd-file`, restart mosquitto, rerun it.
-
-> ⚠️ **Security note.** The bundled config is **localhost-only**. **If you plan to expose your broker on a network**, you additionally need TLS (`mqtts://` / `wss://`); passwords over plain MQTT are readable on the wire. Start at the [mosquitto auth methods doc](https://mosquitto.org/documentation/authentication-methods/) and the [`mosquitto.conf(5)` reference](https://mosquitto.org/man/mosquitto-conf-5.html). Don't copy a "works on my laptop" config to a public host.
-
-### 3. Clone and install Volley
-
-```sh
-git clone https://github.com/<your-fork>/volley.git
-cd volley
-bun install
-```
-
-Need [Bun](https://bun.sh)? `curl -fsSL https://bun.sh/install | bash`. Volley supports Bun **1.3 and 1.4** (`engines.bun` is `>=1.3 <1.5`). CI tests both on a full run (every push to `main`, every release-branch push that does not reuse (below), the nightly, a release PR, or a PR labelled `ci:full`), and the newest on every other PR: it installs with that bun and runs volleyd's suite under `bun test` (bun's own runner, on bun) in eight shards balanced by `packages/volleyd/test/timings.json`; the packages' vitest suites run on Node (volley-desk's in two shards). A release-branch push whose tree its PR's run already passed reuses that run instead of running the suite again (so bun 1.3 and the 32-task soak run for it at the release PR and on `main`).
-
-### 4. Register the MCP server with Claude Code
-
-Substitute `<absolute-path-to-this-repo>` with the actual path you cloned to (e.g. `~/repos/volley`):
-
-```sh
-claude mcp add-json -s user volley '{
-  "command": "bun",
-  "args": ["run", "<absolute-path-to-this-repo>/packages/volley-mcp/src/index.ts"],
-  "env": {
-    "VOLLEY_AGENT_ID": "coordinator",
-    "VOLLEY_COORDINATOR": "coord-main",
-    "VOLLEY_NAMESPACE": "default",
-    "VOLLEY_AUTH_USERNAME": "coordinator",
-    "VOLLEY_AUTH_PASSWORD": "<coordinator password from step 2>"
-  }
-}'
-```
-
-The `env` block reaches only the MCP server, **not** the session's Bash tool, and `/volley-issues` and `/wait` run `volley wait` / `volley sub` from that shell. On the machine `volley setup` ran on, those commands find the coordinator login on their own (the macOS keychain, then `coordinator.json` in the auth dir), for a broker on that machine. Anywhere else, export the same identity in that shell:
-
-```sh
-export VOLLEY_AUTH_USERNAME=coordinator
-export VOLLEY_AUTH_PASSWORD='<coordinator password from step 2>'
-```
-
-`VOLLEY_COORDINATOR` is your **coordinator name**: a stable id you choose once (`[a-z0-9][a-z0-9_-]{0,62}`). Export it in your shell profile too (`export VOLLEY_COORDINATOR=coord-main`) and submit waves with `volleyd run <wave.yaml> --owner "$VOLLEY_COORDINATOR"`: the wave is then owned by the name, not by the session's per-restart agent id, so the session keeps steering, resolving, pausing and stopping its waves after its MCP server restarts (volleyd journals `owner_reconnected`; nothing needs claiming). It is also what lets an autopilot wave run without a session: what needs you reaches the Desk's **Needs-you** window and your phone, owned by the name, and any later session with the same `VOLLEY_COORDINATOR` answers for it. The session may simply go quiet or end: presence is its MCP connection's will, so nothing is published to stay present ([Presence](docs/AUTOPILOT.md#presence-nothing-to-keep-alive)).
-
-`VOLLEY_AGENT_ID` is a **prefix**: the server appends a fresh `-xxxx` at every start, so this session registers as `coordinator-xxxx` (and two sessions sharing the registration still get distinct ids). Leave it set: without it the id is named after the session's working directory (`volley-xxxx` in this checkout), which reads as just another agent, while the `--owner` a wave is submitted with, the Desk's owner chip and `★ yours`, and the [v0.2 owner smoke](docs/SMOKE-v0.2.md) all expect the `coordinator-` id. For a separate registry (a smoke run, say), change `VOLLEY_NAMESPACE` instead.
-
-Then **quit Claude Code completely (Cmd-Q) and reopen it.** MCP registration is read at startup.
-
-Verify:
-
-```sh
-claude mcp list
-```
-
-You should see `volley: ... ✓ Connected`.
-
-### 5. Install the `/volley` skill
-
-```sh
-bash packages/volley-skill/scripts/install.sh
-```
-
-This symlinks the skill into `~/.claude/skills/volley/`. Edits to the skill file take effect immediately.
-
-### 6. See your first agent
-
-Open Claude Code and run:
-
-```
-/volley list
-```
-
-That's it. Your session is already there — the volley-mcp server auto-registers on startup, with an auto-suffixed `agent_id` like `coordinator-7b9c` (the prefix comes from the `VOLLEY_AGENT_ID` env you set in step 4; the suffix is fresh per process). Open a second Claude Code window and run `/volley list` again — both sessions show up, each with its own distinct id. They can now send each other messages (`/volley msg <id> "..."`), watch each other's status (`/volley watch <id>`), and coordinate.
-
-To declare what your session does (capabilities, model, role) so other agents can find you, ask Claude to call `vol_register` with whatever fits — it's idempotent and updates the registry entry. For most casual use, you never have to.
-
-From here, look at the [`/volley`](packages/volley-skill/SKILL.md) and [`/volley-issues`](packages/volley-issues/SKILL.md) skills for what's possible.
-
-### 7. See everything in one view
-
-`volley setup` already serves the [Volley Desk](packages/volley-desk/README.md) at `http://localhost:5199` (and at `http://<this machine's LAN address>:5199` for your phone, when you allowed LAN access). Sign in with a one-time link (step 2) or as the `desk` identity. To work on the Desk itself, or without setup's service, launch it from the checkout:
-
-```sh
-volley dash
-```
-
-> **The Desk replaces the dashboard.** `volley dash` now opens the [Volley Desk](packages/volley-desk/README.md) (`http://localhost:5174`): an infinite canvas of wave and agent windows that works on a phone, without WebGL and from the keyboard. Like the dashboard, it asks you to sign in on first load (the `desk` identity from step 2). The walkthrough below shows the classic dashboard, which stays available as `volley dash --legacy` until its removal in a later release.
-
-With `--legacy`, that spins up a Vite dev server and opens `http://localhost:5173` in your browser. The dashboard subscribes directly to your mosquitto broker over WebSocket (port `9001`, set up in step 2) — there's no Volley-side backend; the page is the client. On first load it asks you to sign in: use the `desk` identity from step 2 (stored in that browser's localStorage; a refused login shows the form again).
+The classic dashboard stays available as `volley dash --legacy` until its removal in a later
+release: a Vite dev server on `http://localhost:5173` that subscribes directly to the broker over
+WebSocket (port `9001`); there is no Volley-side backend, the page is the client. On first load
+it asks you to sign in with the `desk` login setup created (stored in that browser's
+localStorage).
 
 ![Volley dashboard — agent grid](docs/images/dashboard-grid.png)
 
@@ -367,7 +283,7 @@ You push a branch and want your Claude Code session to react the moment CI finis
 
 The same pattern works for anything that can shell out: a deploy script, a webhook receiver, a cron job, a long-running data pipeline. The bridge is a few lines that compute a deterministic `agent_id` from whatever stable identifiers the source system exposes, then publish to `volley/<ns>/<agent_id>/status`. The waiter computes the same id and targets the same topic. Neither side has to know the other exists.
 
-The [`/wait`](packages/volley-wait/SKILL.md) skill and the [bridge pattern](examples/bridges/) are the two pieces. The skill is `bash packages/volley-wait/scripts/install.sh` to install; the bridges are copy-paste shell snippets you adapt to your source system.
+The [`/wait`](packages/volley-wait/SKILL.md) skill and the [bridge pattern](examples/bridges/) are the two pieces. `volley setup` installs the skill; the bridges are copy-paste shell snippets you adapt to your source system.
 
 ### 5. Get notified when agents need attention
 
