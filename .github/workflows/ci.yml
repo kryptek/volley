@@ -334,6 +334,24 @@ jobs:
         continue-on-error: true
         run: bun run --cwd packages/volley-desk sync:react-bits-backgrounds
 
+  homebrew-formula:
+    # The formula rendered for a version passes `brew style` (scripts/packaging/formula.test.ts;
+    # VOLLEY_BREW_STYLE=1 makes a missing brew a failure, not a skip).
+    name: Homebrew formula (brew style, macOS)
+    needs: reuse
+    if: ${{ !cancelled() && needs.reuse.outputs.run == '' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - env:
+          VOLLEY_BREW_STYLE: 1
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: bun test scripts/packaging/formula.test.ts
+
   validate-skill:
     name: Skill validation (SKILL.md frontmatter + dispatch)
     needs: reuse

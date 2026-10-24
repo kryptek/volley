@@ -1,7 +1,35 @@
 #!/bin/sh
 printf '%s\n' "brew $*" >>"$STUB_LOG"
-if [ "${1:-}" = install ]; then
-  shift
-  for f in "$@"; do "$STUB_FIXTURES/provide" "${f##*/}" "$STUB_BIN"; done
-fi
+# Volley's tap formula is known when $STUB_BREW_TAP is set; installed, it lives in $STUB_STATE/brew.
+tap=kryptek/volley/volley
+prefix="$STUB_STATE/brew"
+case "${1:-}" in
+  --prefix) printf '%s\n' "$prefix" ;;
+  info)
+    if [ "${2:-}" = "$tap" ] && [ -z "${STUB_BREW_TAP:-}" ]; then
+      printf 'Error: No available formula with the name "%s".\n' "$tap" >&2
+      exit 1
+    fi
+    ;;
+  list)
+    shift
+    [ "${1:-}" = --versions ] && shift
+    if [ "${1:-}" = "$tap" ]; then
+      [ -x "$prefix/bin/volley" ] || exit 1
+      printf 'volley 0.11.0\n'
+    fi
+    ;;
+  install)
+    shift
+    for f in "$@"; do
+      if [ "$f" = "$tap" ]; then
+        "$STUB_FIXTURES/provide" volley "$prefix/bin"
+        "$STUB_FIXTURES/provide" volleyd "$prefix/bin"
+      else
+        "$STUB_FIXTURES/provide" "${f##*/}" "$STUB_BIN"
+      fi
+    done
+    ;;
+  uninstall) [ "${2:-}" != "$tap" ] || rm -f "$prefix/bin/volley" "$prefix/bin/volleyd" ;;
+esac
 exit 0

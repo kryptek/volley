@@ -1,0 +1,104 @@
+name: Release
+
+# On a release tag: the tarball the Homebrew formula downloads (a checkout with its node_modules,
+# reproducible; scripts/packaging/tarball.sh) and its sha256, uploaded as release assets; then the
+# formula rendered for the tag, checked with `brew style`, and pushed to the tap. The push needs
+# the HOMEBREW_TAP_TOKEN secret (packaging/README.md): without it (a fork) that step is skipped.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  tarball:
+    name: Release tarball
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha256: ${{ steps.tarball.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+      - id: version
+        run: |
+          case "$GITHUB_REF_NAME" in
+            v[0-9]*.[0-9]*.[0-9]*) echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::$GITHUB_REF_NAME is not a release tag (vX.Y.Z)"; exit 1 ;;
+          esac
+      # The formula is for macOS: the natives (esbuild, rollup, biome) of both Mac architectures.
+      - run: bun install --frozen-lockfile --os darwin --cpu '*'
+      - id: tarball
+        run: |
+          sh scripts/packaging/tarball.sh "$GITHUB_REF_NAME" . "$RUNNER_TEMP/dist" > "$RUNNER_TEMP/tarball.out"
+          cat "$RUNNER_TEMP/tarball.out" | tee -a "$GITHUB_STEP_SUMMARY" >> "$GITHUB_OUTPUT"
+      - name: Render the formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.tarball.outputs.sha256 }}
+        run: bun scripts/packaging/formula.ts render --version "$VERSION" --sha256 "$SHA256" --out "$RUNNER_TEMP/volley.rb"
+      - name: Upload the release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+              --notes "See [CHANGELOG.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md)."
+          gh release upload "$GITHUB_REF_NAME" --clobber \
+            "$RUNNER_TEMP/dist/volley-$VERSION.tar.gz" "$RUNNER_TEMP/dist/volley-$VERSION.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: formula
+          path: ${{ runner.temp }}/volley.rb
+
+  tap:
+    name: Homebrew tap
+    needs: tarball
+    runs-on: macos-latest
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      # The tap repository; a repository variable overrides the default.
+      TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || 'kryptek/homebrew-volley' }}
+      VERSION: ${{ needs.tarball.outputs.version }}
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_ENV_HINTS: 1
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: formula
+          path: rendered
+      - name: brew style
+        run: |
+          mkdir -p homebrew-volley/Formula
+          cp rendered/volley.rb homebrew-volley/Formula/volley.rb
+          brew style --formula homebrew-volley/Formula/volley.rb
+      - name: Push the formula to the tap
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          gh auth setup-git
+          git clone "https://github.com/$TAP_REPO.git" tap
+          mkdir -p tap/Formula
+          cp rendered/volley.rb tap/Formula/volley.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/volley.rb
+          if git diff --cached --quiet; then
+            echo "The tap already has volley $VERSION."
+          else
+            git commit -m "volley $VERSION"
+            git push origin HEAD
+          fi
+      - name: No tap token
+        if: env.HOMEBREW_TAP_TOKEN == ''
+        run: echo "::notice::HOMEBREW_TAP_TOKEN is not set; the formula was not pushed to $TAP_REPO."

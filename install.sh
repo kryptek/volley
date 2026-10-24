@@ -17,7 +17,9 @@ Usage: install.sh [options]          (piped: curl -fsSL <url> | sh -s -- [option
 Installs Volley's prerequisites (Homebrew on macOS; git, tmux, curl, bun, gh, mosquitto >= 2.1
 and Claude Code, each only when missing), clones Volley at a release tag into ~/.volley/src,
 writes the `volley` and `volleyd` commands into ~/.volley/bin, adds that directory to PATH in
-your shell's startup file once, then runs `volley setup`. Rerunning it is safe: what is already
+your shell's startup file once, then runs `volley setup`. On macOS, when Homebrew resolves
+Volley's tap (kryptek/volley/volley) and neither --version nor --source is given, it runs
+`brew install kryptek/volley/volley` instead of the clone. Rerunning it is safe: what is already
 there is left alone.
 
 Options:
@@ -38,6 +40,8 @@ EOF
 }
 
 REPO_URL="https://github.com/kryptek/volley.git"
+# The Homebrew formula (packaging/homebrew/volley.rb), in the tap github.com/kryptek/homebrew-volley.
+TAP_FORMULA=kryptek/volley/volley
 TAGS_API="https://api.github.com/repos/kryptek/volley/tags?per_page=100"
 VOLLEY_HOME="$HOME/.volley"
 BIN="$VOLLEY_HOME/bin"
@@ -181,6 +185,8 @@ check() {
   done
   if [ -x "$BIN/volley" ]; then
     say "Volley: $(tildify "$BIN/volley")"
+  elif brew_volley; then
+    say "Volley: $(tildify "$(brew --prefix)/bin/volley") (brew $TAP_FORMULA)"
   else
     say "Volley: not installed"
   fi
@@ -217,14 +223,36 @@ brew_formula() {
   esac
 }
 
+# Whether Volley's formula is installed with brew.
+brew_volley() {
+  [ "$PLATFORM" = macos ] && have brew && brew list --versions "$TAP_FORMULA" >/dev/null 2>&1
+}
+
+# Sets BREW (Volley comes from the tap) when brew resolves the formula and no tag or checkout was
+# asked for (the formula is the newest release); the formula brings bun, mosquitto, gh, git, tmux.
+install_brew_volley() {
+  BREW=''
+  [ -z "$SOURCE$VERSION" ] || return 1
+  brew info "$TAP_FORMULA" >/dev/null 2>&1 || return 1
+  BREW=1
+  if brew_volley; then
+    say "Volley is installed with brew ($TAP_FORMULA); \`brew upgrade $TAP_FORMULA\` updates it."
+  else
+    say "brew install $TAP_FORMULA"
+    brew install "$TAP_FORMULA"
+  fi
+}
+
 install_macos() {
   if ! have brew; then
     say "Installing Homebrew. Its installer asks for your password: the only sudo this install needs."
     run_installer https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh tty
     have brew || die "Homebrew is installed but brew is not on PATH; open a new terminal and rerun."
   fi
-  # The brew path (a Volley formula in a tap) slots in here: when `brew info` resolves it, install
-  # that instead of the source checkout below.
+  if install_brew_volley; then
+    install_claude
+    return 0
+  fi
   formulas=''
   for t in bun mosquitto gh git tmux; do
     have "$t" || formulas="$formulas $(brew_formula "$t")"
@@ -448,16 +476,19 @@ add_path_line() {
   say "Added ~/.volley/bin to PATH in $(tildify "$rc") (new terminals pick it up)."
 }
 
+# Runs (or names) `volley setup` with the command at $1.
 chain_setup() {
+  cmd=$1
+  shown=$(tildify "$cmd")
   set -- setup
   [ -n "$PEER" ] && set -- "$@" --peer
   if [ -z "$SETUP" ]; then
-    say "Volley is installed. Next: ~/.volley/bin/volley $*"
+    say "Volley is installed. Next: $shown $*"
   elif tty_ok; then
-    say "Running ~/.volley/bin/volley $*"
-    exec "$BIN/volley" "$@" <"$TTY"
+    say "Running $shown $*"
+    exec "$cmd" "$@" <"$TTY"
   else
-    say "Volley is installed. No terminal to run setup on; run: ~/.volley/bin/volley $*"
+    say "Volley is installed. No terminal to run setup on; run: $shown $*"
   fi
 }
 
@@ -489,9 +520,15 @@ remove_units() {
 }
 
 uninstall() {
-  if [ -x "$BIN/volley" ] && "$BIN/volley" setup --help 2>/dev/null | grep -q -- '--uninstall'; then
+  cmd="$BIN/volley"
+  brewed=''
+  if brew_volley; then
+    brewed=1
+    [ -x "$cmd" ] || cmd="$(brew --prefix)/bin/volley"
+  fi
+  if [ -x "$cmd" ] && "$cmd" setup --help 2>/dev/null | grep -q -- '--uninstall'; then
     say "Removing the services with volley setup --uninstall"
-    if tty_ok; then "$BIN/volley" setup --uninstall <"$TTY"; else "$BIN/volley" setup --uninstall; fi
+    if tty_ok; then "$cmd" setup --uninstall <"$TTY"; else "$cmd" setup --uninstall; fi
   else
     remove_units
   fi
@@ -515,6 +552,10 @@ uninstall() {
   if [ -e "$SRC_DIR" ]; then
     rm -rf "$SRC_DIR"
     say "Removed $(tildify "$SRC_DIR")"
+  fi
+  if [ -n "$brewed" ]; then
+    say "brew uninstall $TAP_FORMULA"
+    brew uninstall "$TAP_FORMULA"
   fi
   if [ -n "$PURGE" ]; then
     rm -rf "$VOLLEY_HOME/volleyd"
@@ -566,11 +607,16 @@ main() {
     uninstall) uninstall ;;
     install)
       say "Installing Volley on $PLATFORM_NAME"
+      BREW=''
       if [ "$PLATFORM" = macos ]; then install_macos; else install_linux; fi
-      install_source
-      write_commands
-      add_path_line
-      chain_setup
+      if [ -n "$BREW" ]; then
+        chain_setup "$(brew --prefix)/bin/volley"
+      else
+        install_source
+        write_commands
+        add_path_line
+        chain_setup "$BIN/volley"
+      fi
       ;;
   esac
 }

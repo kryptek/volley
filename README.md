@@ -137,6 +137,8 @@ That's it. Everything else in the spec is a refinement.
 
 > **One command (macOS, Ubuntu/Debian):** `curl -fsSL https://raw.githubusercontent.com/kryptek/volley/main/install.sh | sh` installs the prerequisites and Volley at the latest release tag, then runs `volley setup` (`… | sh -s -- --help` for the options). The steps below are the same by hand.
 
+> **Or with Homebrew (macOS):** `brew install kryptek/volley/volley`, then `volley setup`. The formula installs the release tarball (Volley with its `node_modules`, checksummed) and brings bun, mosquitto, gh, git and tmux; `install.sh` takes this path itself when Homebrew resolves the tap. How the tap is published: [`packaging/README.md`](packaging/README.md).
+
 > All commands assume macOS with [Homebrew](https://brew.sh). Linux works too — substitute your package manager. Windows: WSL recommended.
 
 ### 1. Install Homebrew (skip if you already have it)
