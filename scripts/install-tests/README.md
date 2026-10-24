@@ -118,8 +118,9 @@ within 2 minutes of ssh answering (`reboot_check_ms`), `volleyd.service` and
 **Layer 3** (`vm-macos.sh`): clone the base image, boot it headless (`tart run --no-graphics`),
 wait for ssh, then fail at once when the VM did not log in by itself (no `autoLoginUser`: the
 login keychain needs a login session). Install through the curl path (`install.sh` piped into
-`sh`) or `brew tap kryptek/volley` + `brew install kryptek/volley/volley` (with `--version`, the
-version it installed must be that one), set up, and check: launchd has `systems.volley.volleyd`
+`sh`) or Homebrew (its `NONINTERACTIVE=1` installer), then `brew tap kryptek/volley` +
+`brew install kryptek/volley/volley` (with `--version`, the version it installed must be that
+one), set up, and check: launchd has `systems.volley.volleyd`
 and `systems.volley.desk`, the `volley-broker` keychain item exists (exit code only), the Desk
 answers `/version.json`, the hooks are in `~/.claude/settings.json`. Then stop the VM and boot it
 again (a guest reboot ends `tart run`), `--check` green within 2 minutes, the same checks again.
@@ -232,7 +233,9 @@ Layer 3 runs here: an Apple silicon Mac with 16 GB of memory or more and about 1
    4. Turn on automatic login for `admin` (System Settings → Users & Groups → Automatically log
       in as). Without it the VM boots to the login window, the login keychain is locked and
       `vm-macos.sh` stops at once, saying so.
-   5. Shut the VM down. Leave Homebrew off: the curl path installs it, as on a new Mac.
+   5. Shut the VM down. Leave Homebrew off: each path installs it, as on a new Mac (the curl
+      path through `install.sh`, the brew path with Homebrew's own `NONINTERACTIVE=1` installer
+      before `brew tap`).
    `VM_TART_BASE` names another base image.
 3. Register the runner as for the Linux box, the macOS steps, with the label `volley-macos-tart`,
    as the user that owns the Tart images.

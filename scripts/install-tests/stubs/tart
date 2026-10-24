@@ -23,7 +23,7 @@ case "${1:-}" in
     echo 1700000000 >"$S/vms/$name/boot"
     ;;
   get)
-    exists "${2:-}" || missing "${2:-}"
+    exists "${2:-}" || [ -e "$S/images/${2:-}" ] || missing "${2:-}"
     echo '{"CPU":4,"Memory":8192,"Disk":80,"OS":"darwin"}'
     ;;
   run)

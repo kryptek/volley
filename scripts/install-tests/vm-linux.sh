@@ -20,7 +20,9 @@ VERSION=''
 shift || true
 while [ $# -gt 0 ]; do
   case $1 in
-    --version) VERSION=${2:-} && shift 2 ;;
+    --version)
+      if [ $# -ge 2 ] && valid_version "$2"; then VERSION=$2 && shift 2; else DISTRO='' && break; fi
+      ;;
     *) DISTRO='' && break ;;
   esac
 done

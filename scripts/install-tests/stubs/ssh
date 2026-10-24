@@ -6,7 +6,8 @@
 # file on stdout; no match is exit 0 with nothing printed. Built in, as a VM behaves: a VM that is
 # gone or down refuses the connection (255); `sudo reboot` (or `sudo shutdown -r`) moves the boot
 # time on and takes the VM down for the next two connections; `uptime -s` / `kern.boottime` print
-# the boot time (epoch seconds). The last `-i` key is kept in $STUB_STATE/ssh-key.
+# the boot time (epoch seconds), `random/boot_id` an id made of it (exit 1 with $STUB_NO_BOOT_ID).
+# The last `-i` key is kept in $STUB_STATE/ssh-key.
 set -u
 S=${STUB_STATE:?STUB_STATE is not set}
 while [ $# -gt 0 ]; do
@@ -41,6 +42,11 @@ case $cmd in
     echo 2 >"$vm/down"
     echo "Connection to $addr closed by remote host." >&2
     exit 255
+    ;;
+  *random/boot_id*)
+    [ -z "${STUB_NO_BOOT_ID:-}" ] || exit 1
+    echo "boot-$(cat "$vm/boot")"
+    exit 0
     ;;
   *"uptime -s"* | *kern.boottime*)
     cat "$vm/boot"

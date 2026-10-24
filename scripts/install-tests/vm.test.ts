@@ -92,6 +92,8 @@ function run(
       ...opts.env,
     },
     stdin: "ignore",
+    // A script that loops on its arguments must not hang the suite.
+    timeout: 20_000,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -178,9 +180,9 @@ describe("Layer 2: vm-linux.sh", () => {
       new RegExp(`^ssh ${vm}: .*volley sub --pattern volley/default/volleyd/status`),
       new RegExp(`^multipass delete --purge ${vm}$`),
     ]);
-    // The reboot really waited for a new boot: refused connections, then the boot time moved.
+    // The reboot really waited for a new boot: refused connections, then the boot id changed.
     expect(
-      r.calls.filter((c) => c === `ssh ${vm}: date -d "$(uptime -s)" +%s`).length,
+      r.calls.filter((c) => c === `ssh ${vm}: cat /proc/sys/kernel/random/boot_id`).length,
     ).toBeGreaterThan(2);
     expect(vmsLeft(w)).toEqual([]);
     expect(readFileSync(join(w.state, "ssh-key"), "utf8")).toMatch(
@@ -295,6 +297,34 @@ describe("Layer 2: vm-linux.sh", () => {
     expect(r.code).toBe(2);
     expect(r.calls).toEqual([]);
   });
+
+  test("a reboot that cannot read the boot id first fails rather than guessing", () => {
+    const w = world();
+    const r = run(w, "vm-linux.sh", ["ubuntu-24.04"], {
+      env: { STUB_NO_BOOT_ID: "1" },
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("could not read the boot id of");
+    expect(r.calls.some((c) => / sudo reboot$/.test(c))).toBe(false);
+    expect(vmsLeft(w)).toEqual([]);
+  });
+});
+
+describe("the scripts' arguments", () => {
+  for (const [script, pre] of [
+    ["vm-linux.sh", ["ubuntu-24.04"]],
+    ["vm-macos.sh", []],
+    ["vm-pair.sh", []],
+  ] as const) {
+    test(`${script}: --version without a value, or not vX.Y.Z, is a usage error`, () => {
+      for (const args of [["--version"], ["--version", "0.11"], ["--version", "v1.2.3;id"]]) {
+        const w = world();
+        const r = run(w, script, [...pre, ...args]);
+        expect(r.code).toBe(2);
+        expect(r.calls).toEqual([]);
+      }
+    });
+  }
 });
 
 describe("a failing run and the tracking issue", () => {
@@ -401,12 +431,19 @@ describe("Layer 3: vm-macos.sh", () => {
     expect(r.code).toBe(0);
     const vm = "volley-it-42-macos-brew";
     expectInOrder(r.calls, [
+      // The base image has no Homebrew (README.md: the base image): installed first, as on a new Mac.
+      new RegExp(
+        `^ssh ${vm}: .*NONINTERACTIVE=1 /bin/bash -c "\\$\\(curl -fsSL https://raw\\.githubusercontent\\.com/Homebrew/install/HEAD/install\\.sh\\)"$`,
+      ),
       new RegExp(`^ssh ${vm}: .*brew tap kryptek/volley && brew install kryptek/volley/volley$`),
       new RegExp(`^ssh ${vm}: .*volley --version$`),
       new RegExp(`^ssh ${vm}: .*volley setup --yes --no-lan --simulated$`),
       new RegExp(`^tart delete ${vm}$`),
     ]);
-    expect(r.calls.some((c) => c.includes("install.sh"))).toBe(false);
+    // Volley's own install.sh (the curl path) never runs.
+    expect(
+      r.calls.some((c) => /kryptek\/volley\/.*install\.sh|~\/volley\/install\.sh/.test(c)),
+    ).toBe(false);
 
     const w2 = world();
     const old = run(w2, "vm-macos.sh", ["--brew", "--version", "v0.11.0"], {
@@ -414,6 +451,17 @@ describe("Layer 3: vm-macos.sh", () => {
     });
     expect(old.code).toBe(1);
     expect(old.out).toContain("FAIL: the tap installed 'volley 0.10.0', not v0.11.0");
+  });
+
+  test("--brew: a Homebrew install that fails stops the run before brew tap", () => {
+    const w = world();
+    const r = run(w, "vm-macos.sh", ["--brew"], {
+      rules: [["Homebrew/install/HEAD/install\\.sh", 1]],
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("FAIL: Homebrew did not install");
+    expect(r.calls.some((c) => c.includes("brew tap"))).toBe(false);
+    expect(vmsLeft(w)).toEqual([]);
   });
 
   test("a VM without auto-login fails early and clearly; nothing is installed; it is deleted", () => {
@@ -532,6 +580,28 @@ describe("Layer 4: vm-pair.sh", () => {
       "FAIL: volley-peer.service still runs on the peer after volley peer remove",
     );
     expect(vmsLeft(w)).toEqual([]);
+  }, 15_000);
+
+  test("a peer list without a machine named peer fails, whatever else says peer", () => {
+    const w = world();
+    const r = run(w, "vm-pair.sh", [], {
+      rules: [["volley peer list --json", 0, '{ "machines": [{ "name": "hub", "peer": "x" }] }\n']],
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("FAIL: volley peer list does not list peer");
+    expect(vmsLeft(w)).toEqual([]);
+  });
+
+  test("a peer that does not answer is not a stopped service", () => {
+    const w = world();
+    const r = run(w, "vm-pair.sh", [], {
+      env: { VM_MAX_WAIT_S: "1" },
+      rules: [["is-active --quiet volley-peer\\.service", 255]],
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(
+      "FAIL: volley-peer.service still runs on the peer after volley peer remove",
+    );
   }, 15_000);
 
   test("refuses to start when either VM's name exists, launching neither", () => {

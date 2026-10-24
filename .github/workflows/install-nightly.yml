@@ -34,7 +34,6 @@ concurrency:
 env:
   VERSION_INPUT: ${{ inputs.version }}
   VM_TRACK_ISSUE: "1"
-  GH_TOKEN: ${{ github.token }}
 
 jobs:
   linux-vm:
@@ -54,6 +53,8 @@ jobs:
       - name: A fresh VM, install, set up, reboot, check
         env:
           VM_OUT: ${{ runner.temp }}/layer2-${{ matrix.distro }}
+          # The tracking issue (lib.sh's track_failure): this step only, not the actions'.
+          GH_TOKEN: ${{ github.token }}
           DISTRO: ${{ matrix.distro }}
         run: |
           args=()
@@ -90,6 +91,8 @@ jobs:
       - name: A fresh macOS VM, install, set up, restart, check
         env:
           VM_OUT: ${{ runner.temp }}/layer3-${{ matrix.path }}
+          # The tracking issue (lib.sh's track_failure): this step only, not the actions'.
+          GH_TOKEN: ${{ github.token }}
           INSTALL_PATH: ${{ matrix.path }}
         run: |
           args=()
@@ -120,6 +123,8 @@ jobs:
       - name: A hub VM, a peer VM, pair, place a task, remove
         env:
           VM_OUT: ${{ runner.temp }}/layer4
+          # The tracking issue (lib.sh's track_failure): this step only, not the actions'.
+          GH_TOKEN: ${{ github.token }}
         run: |
           args=()
           if [ -n "$VERSION_INPUT" ]; then

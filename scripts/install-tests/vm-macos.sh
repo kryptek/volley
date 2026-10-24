@@ -8,7 +8,8 @@
 #
 # The curl path installs this checkout (copied in, its install.sh piped into sh as `curl … | sh`
 # would) or, with --version, the release's install.sh through curl. --brew runs `brew tap` and
-# `brew install` instead (and, with --version, checks that the tap installed that release).
+# `brew install` instead, after installing Homebrew the way its own page says (and, with --version,
+# checks that the tap installed that release).
 # $VM_TART_BASE names the base image (default volley-macos-base), $VM_TART_KEY the private key it
 # accepts (default ~/.ssh/id_ed25519). Results land in $VM_OUT
 # (default ./vm-results); exit 1 when a check failed. The VM is deleted whatever happens.
@@ -21,14 +22,18 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 
 BREW=''
 VERSION=''
+usage() {
+  echo "usage: vm-macos.sh [--brew] [--version vX.Y.Z]" >&2
+  exit 2
+}
 while [ $# -gt 0 ]; do
   case $1 in
     --brew) BREW=1 && shift ;;
-    --version) VERSION=${2:-} && shift 2 ;;
-    *)
-      echo "usage: vm-macos.sh [--brew] [--version vX.Y.Z]" >&2
-      exit 2
+    --version)
+      if [ $# -lt 2 ] || ! valid_version "$2"; then usage; fi
+      VERSION=$2 && shift 2
       ;;
+    *) usage ;;
   esac
 done
 LAYER=3
@@ -82,6 +87,14 @@ if [ -z "$user" ]; then
 fi
 
 if [ -n "$BREW" ]; then
+  # The base image has no Homebrew (README.md: the base image): install it as a person would.
+  say "Installing Homebrew"
+  # shellcheck disable=SC2016 # expanded on the VM
+  on "$ADDR" 'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' \
+    >>"$TRANSCRIPT" 2>&1 || {
+    fail "Homebrew did not install"
+    finish
+  }
   say "brew tap kryptek/volley; brew install kryptek/volley/volley"
   on "$ADDR" 'brew tap kryptek/volley && brew install kryptek/volley/volley' >>"$TRANSCRIPT" 2>&1 || {
     fail "brew install kryptek/volley/volley failed"

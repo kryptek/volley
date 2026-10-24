@@ -33,6 +33,8 @@ VMS=''
 TIMINGS=''
 
 say() { printf '==> %s\n' "$*"; }
+# A release tag, vX.Y.Z: it goes into a command line on the VM, so nothing else is accepted.
+valid_version() { [[ ${1:-} =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 fail() {
   printf 'FAIL: %s\n' "$*"
   printf -- '- %s\n' "$*" >>"$OUT/failures.md"
@@ -97,7 +99,7 @@ SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/de
 # One command on the VM at <addr>, with the run's key (or $SSH_KEY: a Tart VM's, which has no
 # cloud-init); stdin is the caller's (pass </dev/null when there is none).
 vm_ssh() {
-  addr=$1
+  local addr=$1
   shift
   ssh -i "${SSH_KEY:-$KEYDIR/id_ed25519}" "${SSH_OPTS[@]}" "$VM_USER@$addr" "$*"
 }
@@ -107,12 +109,12 @@ vm_ssh() {
 # shellcheck disable=SC2016 # expanded on the VM
 PRELUDE='export PATH="$HOME/.volley/bin:$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:$PATH";'
 on() {
-  addr=$1
+  local addr=$1
   shift
   vm_ssh "$addr" "$PRELUDE $*" </dev/null
 }
 on_sim() {
-  addr=$1
+  local addr=$1
   shift
   vm_ssh "$addr" "$PRELUDE eval \"\$(volley sim env)\"; $*" </dev/null
 }
@@ -124,7 +126,7 @@ cap() {
 
 # Wait until the VM answers ssh, at most <seconds>.
 wait_ssh() {
-  addr=$1
+  local addr=$1 deadline
   deadline=$(($(date +%s) + $(cap "$2")))
   until vm_ssh "$addr" true </dev/null >/dev/null 2>&1; do
     if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -138,6 +140,7 @@ wait_ssh() {
 # Run <command...> until it succeeds, at most <seconds>, its stderr quiet until the last try (which
 # prints why it still fails).
 poll() {
+  local deadline
   deadline=$(($(date +%s) + $(cap "$1")))
   shift
   until "$@" 2>/dev/null; do
@@ -149,18 +152,26 @@ poll() {
   done
 }
 
-# The boot time of a Linux VM (epoch seconds).
+# The boot time of a Linux VM (epoch seconds). Now minus the uptime, so it can move by a second
+# between two calls: for comparing against a status's time, never to tell one boot from the next.
 # shellcheck disable=SC2016 # expanded on the VM
 boot_epoch() { vm_ssh "$1" 'date -d "$(uptime -s)" +%s' </dev/null 2>/dev/null; }
+# The kernel's id of the current boot: it changes exactly once per boot.
+boot_id() { vm_ssh "$1" 'cat /proc/sys/kernel/random/boot_id' </dev/null 2>/dev/null; }
 
 # `sudo reboot`, then wait until the VM answers ssh from a new boot, at most <seconds>.
 reboot_wait() {
-  addr=$1
-  before=$(boot_epoch "$addr")
+  local addr=$1 before
+  before=$(boot_id "$addr")
+  [ -n "$before" ] || {
+    fail "could not read the boot id of $addr before the reboot"
+    return 1
+  }
   vm_ssh "$addr" 'sudo reboot' </dev/null >/dev/null 2>&1
   # shellcheck disable=SC2317 # called through poll
   booted() {
-    b=$(boot_epoch "$addr") && [ -n "$b" ] && [ "$b" != "$before" ]
+    local b
+    b=$(boot_id "$addr") && [ -n "$b" ] && [ "$b" != "$before" ]
   }
   poll "$2" booted || {
     fail "$addr did not come back from the reboot within $2 s"
@@ -176,7 +187,7 @@ copy_checkout() {
 
 # `install.sh --no-setup [<flags>]` on the VM: this checkout's, or the release's through curl.
 install_volley() {
-  addr=$1
+  local addr=$1
   shift
   if [ -n "${VERSION:-}" ]; then
     on "$addr" "curl -fsSL https://raw.githubusercontent.com/kryptek/volley/$VERSION/install.sh |" \
@@ -190,7 +201,7 @@ install_volley() {
 # `volley setup --yes --no-lan --simulated` on the VM, then its metrics and `--check` copied out.
 SETUP_OK=''
 setup_volley() {
-  addr=$1
+  local addr=$1
   if on_sim "$addr" "volley setup --yes --no-lan --simulated" >>"$TRANSCRIPT" 2>&1; then
     # shellcheck disable=SC2034 # vm-pair.sh reads it
     SETUP_OK=1
@@ -206,7 +217,7 @@ setup_volley() {
 # After a reboot: `volley setup --check` exits 0 within 2 minutes (the `reboot_check_ms` target),
 # its report kept as check.json for the summary.
 check_after_reboot() {
-  addr=$1
+  local addr=$1 t0
   t0=$(now_ms)
   # shellcheck disable=SC2317 # called through poll
   check() { on "$addr" 'volley setup --check --json' >"$OUT/check.json" 2>>"$TRANSCRIPT"; }
@@ -262,6 +273,7 @@ summarize() {
 # A failing nightly: one open issue labelled install-tests, a comment on it per failure.
 track_failure() {
   [ "${VM_TRACK_ISSUE:-}" = 1 ] || return 0
+  local run_url body number url
   run_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-kryptek/volley}/actions/runs/${GITHUB_RUN_ID:-local}"
   body="$OUT/issue-comment.md"
   {

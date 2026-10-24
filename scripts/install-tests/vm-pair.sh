@@ -18,13 +18,17 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/lib.sh"
 
 VERSION=''
+usage() {
+  echo "usage: vm-pair.sh [--version vX.Y.Z]" >&2
+  exit 2
+}
 while [ $# -gt 0 ]; do
   case $1 in
-    --version) VERSION=${2:-} && shift 2 ;;
-    *)
-      echo "usage: vm-pair.sh [--version vX.Y.Z]" >&2
-      exit 2
+    --version)
+      if [ $# -lt 2 ] || ! valid_version "$2"; then usage; fi
+      VERSION=$2 && shift 2
       ;;
+    *) usage ;;
   esac
 done
 LAYER=4
@@ -101,7 +105,8 @@ poll 600 ready || fail "the peer was not ready within 10 min (the line above)"
 timing pair_ready_ms $(($(now_ms) - t1))
 on "$HUB" 'volley peer list --json' >"$OUT/peer-list.json" 2>>"$TRANSCRIPT" ||
   fail "volley peer list --json exited non-zero"
-grep -q "\"$PEER\"" "$OUT/peer-list.json" || fail "volley peer list does not list $PEER (peer-list.json)"
+bun -e 'const j = JSON.parse(await Bun.file(process.argv[1]).text()); process.exit((j.machines ?? []).some((m) => m.name === process.argv[2]) ? 0 : 1)' \
+  "$OUT/peer-list.json" "$PEER" 2>/dev/null || fail "volley peer list does not list $PEER (peer-list.json)"
 
 # A second wave on the first wave's scratch repository, its one task pinned to the peer.
 say "The wave $WAVE, host: $PEER"
@@ -132,7 +137,11 @@ on "$PEER_ADDR" 'for g in $(find ~ -maxdepth 6 -name .git -prune 2>/dev/null); d
 
 say "volley peer remove $PEER stops the peer's service"
 on "$HUB" "volley peer remove $PEER --now" >>"$TRANSCRIPT" 2>&1 || fail "volley peer remove exited non-zero"
-stopped() { ! on "$PEER_ADDR" 'systemctl --user is-active --quiet volley-peer.service'; }
+# Exit 3 is systemd's "inactive"; anything else (ssh's 255 among them) is not a stopped service.
+stopped() {
+  on "$PEER_ADDR" 'systemctl --user is-active --quiet volley-peer.service'
+  [ $? -eq 3 ]
+}
 poll 120 stopped || fail "volley-peer.service still runs on the peer after volley peer remove"
 
 summarize --total-ms $((t1 - t0))
