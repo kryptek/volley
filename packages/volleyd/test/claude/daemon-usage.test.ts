@@ -415,13 +415,13 @@ describe("usage probe readings in machine records (daemon)", () => {
     pr: async () => null,
   };
   const READ = new Date(T0).toISOString();
-  const login = (profile: string, fable: number) => ({
+  const login = (profile: string, fable: number, fiveHour = 37) => ({
     profile,
     state: "ok" as const,
     attempted_at: READ,
     reading: {
       read_at: READ,
-      five_hour: { pct: 37, resets_at: RESETS },
+      five_hour: { pct: fiveHour, resets_at: RESETS },
       weekly: { pct: 56, resets_at: RESETS },
       model_weekly: { fable: { pct: fable, resets_at: RESETS } },
     },
@@ -687,7 +687,8 @@ describe("usage probe readings in machine records (daemon)", () => {
           version: "0.5.0",
           localDoctor: async () => ({
             checks: [],
-            claude_logins: [login("default", 95), login("spare", 10)],
+            // spare's fuller 5-hour window puts primary first on pace, so the agent spawns there
+            claude_logins: [login("default", 95), login("spare", 10, 80)],
             doctor_at: READ,
           }),
           localPath: () => ({ claude: true, bun: true }),

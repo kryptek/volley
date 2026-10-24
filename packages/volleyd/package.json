@@ -8,6 +8,7 @@
   "bin": { "volleyd": "./src/cli.ts" },
   "exports": {
     "./claude/sharing": "./src/claude/sharing.ts",
+    "./claude/usage": "./src/claude/usage.ts",
     "./config-defaults": "./src/config-defaults.ts",
     "./footprint": "./src/footprint.ts",
     "./overlap": "./src/overlap.ts",

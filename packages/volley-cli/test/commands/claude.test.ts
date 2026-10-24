@@ -419,15 +419,48 @@ describe("volley claude", () => {
       {
         name: "local",
         candidates: [
-          { account: "work", headroom: 60, five_hour_pct: 12, weekly_pct: 40, agents: 2 },
-          { account: "primary", headroom: 40, five_hour_pct: 60, weekly_pct: 20, agents: 1 },
+          {
+            account: "work",
+            headroom: 60,
+            five_hour_pct: 12,
+            weekly_pct: 40,
+            agents: 2,
+            score: 1.7,
+            binding: "five_hour",
+            eligible: true,
+            binding_left: 88,
+            binding_resets_at: iso(-52.5 * 60_000),
+          },
+          {
+            account: "primary",
+            headroom: 40,
+            five_hour_pct: 60,
+            weekly_pct: 20,
+            agents: 1,
+            score: 0.9,
+            binding: "weekly",
+            eligible: true,
+            binding_left: 80,
+            binding_resets_at: iso(-(2 * 1440 + 4 * 60 + 0.5) * 60_000),
+          },
         ],
         picks: { fable: "work", opus: "work", sonnet: "primary", haiku: "primary" },
       },
       {
         name: "peer-a",
         candidates: [
-          { account: "primary@peer-a", headroom: 5, five_hour_pct: 88, weekly_pct: 30, agents: 3 },
+          {
+            account: "primary@peer-a",
+            headroom: 2,
+            five_hour_pct: 98,
+            weekly_pct: 30,
+            agents: 3,
+            score: 0.1,
+            binding: "five_hour",
+            eligible: false,
+            binding_left: 2,
+            binding_resets_at: iso(-60 * 60_000),
+          },
           {
             account: "work@peer-a",
             headroom: null,
@@ -475,7 +508,7 @@ describe("volley claude", () => {
     return v;
   }
 
-  it("balance prints each machine's ranked candidates, figures, headroom and picks, e-mails masked", async () => {
+  it("balance prints each machine's ranked candidates, figures, the binding window's expiry and picks, e-mails masked", async () => {
     const v = await balanceVolleyd();
     const r = await run(["balance"]);
     expect(r.stderr).toBe("");
@@ -484,13 +517,13 @@ describe("volley claude", () => {
     const lines = r.stdout.split("\n");
     expect(lines[0]).toBe("this machine");
     expect(lines[1]).toMatch(
-      /^ {2}work +o•••@example\.com +5h 12% +7d 40% +Fable 30% +headroom 60 +2 agents +← fable, opus$/,
+      /^ {2}work +o•••@example\.com +5h 12% +7d 40% +Fable 30% +5h 88% left in 5[23]m +2 agents +← fable, opus$/,
     );
     expect(lines[2]).toMatch(
-      /^ {2}primary +5h 60% +7d 20% +Fable — +headroom 40 +1 agent +← sonnet, haiku$/,
+      /^ {2}primary +5h 60% +7d 20% +Fable — +7d 80% left in 2d 4h +1 agent +← sonnet, haiku$/,
     );
     expect(lines[3]).toBe("peer-a");
-    expect(lines[4]).toMatch(/^ {2}primary@peer-a +5h 88% +7d 30% +Fable — +headroom 5 +3 agents$/);
+    expect(lines[4]).toMatch(/^ {2}primary@peer-a +5h 98% +7d 30% +Fable — +over cap +3 agents$/);
     expect(lines[5]).toMatch(/^ {2}work@peer-a +no usage yet +2 agents +← fable, opus$/);
     expect(r.stdout).not.toContain("owner@example.com");
     await v.b.disconnect();

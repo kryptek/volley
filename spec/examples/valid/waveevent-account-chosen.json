@@ -16,21 +16,43 @@
       "account": "work",
       "machine": "peer-a",
       "source": "balance",
-      "why": "work: most headroom on peer-a (5h 12%, 7d 40%; primary@peer-a 5h 88%)",
+      "why": "work: 18% left, resets in 52m (use it or lose it) on peer-a; primary@peer-a 7d 72% left, resets in 2d 4h; spare@peer-a no usage yet",
       "candidates": [
         {
           "account": "work@peer-a",
-          "five_hour_pct": 12,
+          "five_hour_pct": 82,
           "weekly_pct": 40,
           "agents": 0,
-          "headroom": 60
+          "headroom": 18,
+          "score": 1.73,
+          "binding": "five_hour",
+          "eligible": true,
+          "binding_left": 18,
+          "binding_resets_at": "2026-10-21T14:54:10.000Z"
         },
         {
           "account": "primary@peer-a",
-          "five_hour_pct": 88,
-          "weekly_pct": 20,
+          "five_hour_pct": 10,
+          "weekly_pct": 28,
           "agents": 2,
-          "headroom": 12
+          "headroom": 72,
+          "score": 1.04,
+          "binding": "weekly",
+          "eligible": true,
+          "binding_left": 72,
+          "binding_resets_at": "2026-10-23T18:02:10.000Z"
+        },
+        {
+          "account": "spare@peer-a",
+          "five_hour_pct": null,
+          "weekly_pct": null,
+          "agents": 0,
+          "headroom": null,
+          "score": null,
+          "binding": null,
+          "eligible": true,
+          "binding_left": null,
+          "binding_resets_at": null
         }
       ]
     }

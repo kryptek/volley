@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  type AccountUsage,
   type AgentOnAccount,
   type ProbeLogin,
   type ProbeState,
   type UsageBook,
   type UsagePayload,
+  type UsageWindow,
   accountRecords,
   agentLimitDecisions,
   bookState,
@@ -21,6 +23,7 @@ import {
   rankAccounts,
   restoreBook,
   sampleAccount,
+  untilLabel,
   waveAccount,
   waveAccountMoves,
 } from "../../src/claude/usage";
@@ -123,51 +126,232 @@ describe("rankAccounts", () => {
     b = fold(b, "a2", null, sample("primary", 60, at, 20));
     return accountRecords(b);
   };
+  const o = { now: NOW, cap_pct: 97, tie_band_pct: 10 };
+  const iso = (hours: number) => new Date(NOW + hours * 3.6e6).toISOString();
+  /** A window `pct` used whose reset is `resetsInHours` from NOW (`null`: unknown). */
+  const win = (pct: number, resetsInHours: number | null): UsageWindow => ({
+    pct,
+    resets_at: resetsInHours === null ? null : iso(resetsInHours),
+  });
+  /** Account records with explicit windows and `agents` sampled agents each. */
+  const recs = (
+    spec: Record<
+      string,
+      {
+        five?: UsageWindow | null;
+        weekly?: UsageWindow | null;
+        model_weekly?: AccountUsage["model_weekly"];
+        agents?: number;
+      }
+    >,
+  ): Record<string, AccountUsage> =>
+    Object.fromEntries(
+      Object.entries(spec).map(([account, s]) => [
+        account,
+        {
+          account,
+          five_hour: s.five ?? null,
+          weekly: s.weekly ?? null,
+          ...(s.model_weekly !== undefined ? { model_weekly: s.model_weekly } : {}),
+          agents: Array.from({ length: s.agents ?? 0 }, (_, i) => `${account}-agent-${i}`),
+          waves: [],
+          sampled_at: at,
+        },
+      ]),
+    );
+  const order = (r: readonly { account: string }[]) => r.map((x) => x.account);
 
-  it("ranks by the smallest headroom of the 5-hour and 7-day windows; no data last", () => {
-    const ranked = rankAccounts(three(), ["primary", "work", "fresh"], { now: NOW });
-    expect(ranked.map((r) => r.account)).toEqual(["work", "primary", "fresh"]);
-    expect(ranked[0]).toEqual({
-      account: "work",
-      headroom: 60,
-      five_hour_pct: 12,
-      weekly_pct: 40,
-      agents: 1,
+  it("the owner's three accounts: the two whose weekly room expires in an hour go first, split by agents", () => {
+    const accounts = recs({
+      a: { weekly: win(80, 1), five: win(50, 3), agents: 1 },
+      b: { weekly: win(80, 1), five: win(50, 3) },
+      c: { weekly: win(80, 144), five: win(10, 3) },
     });
-    expect(ranked[2]).toEqual({
+    const ranked = rankAccounts(accounts, ["a", "b", "c"], o);
+    expect(order(ranked)).toEqual(["b", "a", "c"]);
+    const [b, a, c] = ranked;
+    expect(c?.binding).toBe("weekly");
+    expect(c?.score).toBeLessThan(a?.score as number);
+    expect(a?.binding).toBe("five_hour");
+    expect(b?.eligible).toBe(true);
+  });
+
+  it("a nearly full 5-hour window binds an account whose weekly room is expiring", () => {
+    const accounts = recs({
+      x: { weekly: win(10, 2), five: win(95, 4) },
+      y: { weekly: win(50, 72), five: win(30, 3) },
+    });
+    const ranked = rankAccounts(accounts, ["x", "y"], o);
+    expect(order(ranked)).toEqual(["y", "x"]);
+    const x = ranked[1];
+    expect(x?.binding).toBe("five_hour");
+    expect(x?.eligible).toBe(true);
+    expect(x?.score).toBeCloseTo(0.0625, 2);
+    expect(ranked[0]?.score).toBeCloseTo(1.17, 1);
+  });
+
+  it("within one window kind pace orders as raw headroom per hour (20% left in 1 h beats 80% in 144 h)", () => {
+    const weekly = recs({ slow: { weekly: win(20, 144) }, soon: { weekly: win(80, 1) } });
+    expect(order(rankAccounts(weekly, ["slow", "soon"], o))).toEqual(["soon", "slow"]);
+    const five = recs({ slow: { five: win(20, 4.5) }, soon: { five: win(80, 1) } });
+    expect(order(rankAccounts(five, ["slow", "soon"], o))).toEqual(["soon", "slow"]);
+  });
+
+  it("the cap: 96.9% is eligible, 97.0% is not, and cap_pct moves the boundary", () => {
+    const accounts = recs({
+      p: { five: win(96.9, 1) },
+      q: { five: win(97, 1) },
+      r: { five: win(20, 4) },
+    });
+    const ranked = rankAccounts(accounts, ["p", "q", "r"], o);
+    expect(ranked.at(-1)?.account).toBe("q");
+    expect(ranked.find((x) => x.account === "q")?.eligible).toBe(false);
+    expect(ranked.find((x) => x.account === "p")?.eligible).toBe(true);
+    const at90 = rankAccounts(accounts, ["p", "q", "r"], { ...o, cap_pct: 90 });
+    expect(at90[0]?.account).toBe("r");
+    expect(
+      at90
+        .filter((x) => !x.eligible)
+        .map((x) => x.account)
+        .sort(),
+    ).toEqual(["p", "q"]);
+  });
+
+  it("any window at the cap makes an account ineligible", () => {
+    const accounts = recs({
+      hot: { five: win(10, 4), weekly: win(97, 1) },
+      cool: { five: win(60, 4), weekly: win(60, 100) },
+    });
+    const ranked = rankAccounts(accounts, ["hot", "cool"], o);
+    expect(order(ranked)).toEqual(["cool", "hot"]);
+    expect(ranked[1]?.eligible).toBe(false);
+  });
+
+  it("over-cap accounts go by pace too, not by how far over they are", () => {
+    // b is further over, but its window resets in 10 minutes; a's must last 4.5 hours
+    const accounts = recs({ a: { five: win(97.5, 4.5) }, b: { five: win(99, 10 / 60) } });
+    const ranked = rankAccounts(accounts, ["a", "b"], o);
+    expect(order(ranked)).toEqual(["b", "a"]);
+    expect(ranked.every((x) => !x.eligible)).toBe(true);
+  });
+
+  it("every candidate over the cap still ranks by pace, none dropped", () => {
+    const accounts = recs({
+      a: { five: win(98, 1) },
+      b: { five: win(99, 1) },
+      c: { five: win(97.5, 1) },
+    });
+    const ranked = rankAccounts(accounts, ["a", "b", "c"], o);
+    expect(order(ranked)).toEqual(["c", "a", "b"]);
+    expect(ranked.every((x) => !x.eligible)).toBe(true);
+    expect(mostHeadroom(accounts, ["a", "b", "c"], NOW)).toBe("c");
+  });
+
+  it("counts a window whose reset has passed as empty and a full window away from its reset", () => {
+    let b = fold(emptyBook(), "a1", null, sample("work", 99, at, null));
+    b = fold(b, "a2", null, sample("spare", 10, at, null));
+    const after = Date.parse(RESETS) + 1;
+    const passed = rankAccounts(accountRecords(b), ["spare", "work"], { ...o, now: after });
+    expect(passed.find((x) => x.account === "work")).toMatchObject({
+      headroom: 100,
+      five_hour_pct: 0,
+    });
+    const fresh = recs({
+      ref: { five: { pct: 0, resets_at: new Date(after + 5 * 3.6e6).toISOString() } },
+    });
+    const ref = rankAccounts(fresh, ["ref"], { ...o, now: after })[0];
+    expect(passed.find((x) => x.account === "work")?.score).toBe(ref?.score);
+    expect(rankAccounts(accountRecords(b), ["spare", "work"], o)[0]?.account).toBe("spare");
+  });
+
+  it("a null resets_at scores as a reset one full window away", () => {
+    const score = (r: Record<string, AccountUsage>) => rankAccounts(r, ["n"], o)[0]?.score;
+    expect(score(recs({ n: { five: win(40, null) } }))).toBe(
+      score(recs({ n: { five: win(40, 5) } })),
+    );
+    expect(score(recs({ n: { weekly: win(40, null) } }))).toBe(
+      score(recs({ n: { weekly: win(40, 168) } })),
+    );
+  });
+
+  it("a reset in the last seconds has a finite score (the one-minute floor) and ranks first", () => {
+    const accounts = recs({
+      later: { five: { pct: 95, resets_at: iso(1) } },
+      now: { five: { pct: 95, resets_at: new Date(NOW + 10_000).toISOString() } },
+    });
+    const ranked = rankAccounts(accounts, ["later", "now"], o);
+    expect(ranked[0]?.account).toBe("now");
+    expect(Number.isFinite(ranked[0]?.score)).toBe(true);
+  });
+
+  it("scores within the tie band go to fewer agents; the band is anchored on its leader", () => {
+    // 5-hour windows a full window from reset: the score is the room left
+    const band = (s: Record<string, [number, number]>) =>
+      recs(
+        Object.fromEntries(
+          Object.entries(s).map(([k, [pct, agents]]) => [k, { five: win(pct, 5), agents }]),
+        ),
+      );
+    expect(order(rankAccounts(band({ one: [0, 2], near: [5, 0] }), ["one", "near"], o))).toEqual([
+      "near",
+      "one",
+    ]);
+    expect(order(rankAccounts(band({ one: [0, 2], far: [15, 0] }), ["one", "far"], o))).toEqual([
+      "one",
+      "far",
+    ]);
+    const three = band({ s100: [0, 2], s92: [8, 1], s85: [15, 0] });
+    expect(order(rankAccounts(three, ["s100", "s92", "s85"], o))).toEqual(["s92", "s100", "s85"]);
+  });
+
+  it("an account with no usage data is on pace: after one ahead of pace, before one behind", () => {
+    const accounts = recs({ slow: { five: win(50, 5) }, fast: { five: win(60, 1) } });
+    const ranked = rankAccounts(accounts, ["slow", "fresh", "fast"], o);
+    expect(order(ranked)).toEqual(["fast", "fresh", "slow"]);
+    expect(ranked[1]).toMatchObject({ score: null, binding: null, eligible: true, headroom: null });
+    expect(order(rankAccounts(accounts, ["primary", "fresh"], o))).toEqual(["fresh", "primary"]);
+  });
+
+  it("the model family's weekly window binds for that model only", () => {
+    const accounts = three();
+    const work = accounts.work as AccountUsage;
+    work.model_weekly = { fable: { pct: 95, resets_at: iso(100) } };
+    const fable = rankAccounts(accounts, ["primary", "work"], { ...o, model: "claude-fable-1" });
+    expect(order(fable)).toEqual(["primary", "work"]);
+    expect(fable[1]).toMatchObject({ headroom: 5, model_weekly_pct: 95, binding: "model_weekly" });
+    const opus = rankAccounts(accounts, ["primary", "work"], { ...o, model: "claude-opus-5-5" });
+    expect(order(opus)).toEqual(["work", "primary"]);
+    expect(opus[0]?.model_weekly_pct).toBeUndefined();
+    expect(opus[0]?.binding).toBe("five_hour");
+  });
+
+  it("returns the full Ranked row", () => {
+    const accounts = recs({ c: { weekly: win(80, 144), five: win(10, 3), agents: 2 } });
+    expect(rankAccounts(accounts, ["c"], o)[0]).toEqual({
+      account: "c",
+      headroom: 20,
+      five_hour_pct: 10,
+      weekly_pct: 80,
+      agents: 2,
+      score: expect.closeTo((20 * 168) / (100 * 144), 10),
+      binding: "weekly",
+      eligible: true,
+      binding_left: 20,
+      binding_resets_at: iso(144),
+    });
+    expect(rankAccounts(accounts, ["fresh"], o)[0]).toEqual({
       account: "fresh",
       headroom: null,
       five_hour_pct: null,
       weekly_pct: null,
       agents: 0,
+      score: null,
+      binding: null,
+      eligible: true,
+      binding_left: null,
+      binding_resets_at: null,
     });
-    expect(mostHeadroom(three(), ["primary", "work", "fresh"], NOW)).toBe("work");
     expect(mostHeadroom(three(), [], NOW)).toBeNull();
-  });
-
-  it("counts the model family's weekly window for that model only", () => {
-    const recs = three();
-    const work = recs.work as (typeof recs)[string];
-    work.model_weekly = { fable: { pct: 95, resets_at: "2026-10-21T09:00:00.000Z" } };
-    const fable = rankAccounts(recs, ["primary", "work"], { model: "claude-fable-1", now: NOW });
-    expect(fable.map((r) => r.account)).toEqual(["primary", "work"]);
-    expect(fable[1]).toMatchObject({ headroom: 5, model_weekly_pct: 95 });
-    const opus = rankAccounts(recs, ["primary", "work"], { model: "claude-opus-5-5", now: NOW });
-    expect(opus.map((r) => r.account)).toEqual(["work", "primary"]);
-    expect(opus[0]?.model_weekly_pct).toBeUndefined();
-  });
-
-  it("counts a window whose reset has passed as empty", () => {
-    let b = fold(emptyBook(), "a1", null, sample("work", 99, at, null));
-    b = fold(b, "a2", null, sample("spare", 10, at, null));
-    const after = Date.parse(RESETS) + 1;
-    expect(rankAccounts(accountRecords(b), ["spare", "work"], { now: after })[0]).toMatchObject({
-      account: "spare",
-      headroom: 100,
-    });
-    expect(rankAccounts(accountRecords(b), ["spare", "work"], { now: NOW })[0]?.account).toBe(
-      "spare",
-    );
   });
 
   it("breaks a tie on fewer agents, then candidate order; fresh before primary", () => {
@@ -175,14 +359,26 @@ describe("rankAccounts", () => {
     b = fold(b, "a2", null, sample("work", 20, at, 10));
     b = fold(b, "a3", null, sample("spare", 20, at, 10));
     b = fold(b, "a4", null, sample("other", 20, at, 10));
-    const recs = accountRecords(b);
-    expect(
-      rankAccounts(recs, ["work", "spare", "other"], { now: NOW }).map((r) => r.account),
-    ).toEqual(["spare", "other", "work"]);
-    expect(rankAccounts(recs, ["primary", "fresh"], { now: NOW }).map((r) => r.account)).toEqual([
-      "fresh",
-      "primary",
+    const accounts = accountRecords(b);
+    expect(order(rankAccounts(accounts, ["work", "spare", "other"], o))).toEqual([
+      "spare",
+      "other",
+      "work",
     ]);
+    expect(order(rankAccounts(accounts, ["primary", "fresh"], o))).toEqual(["fresh", "primary"]);
+  });
+});
+
+describe("untilLabel", () => {
+  it("prints the two largest units, dropping a zero second one", () => {
+    const at = (min: number) => new Date(NOW + min * 60_000).toISOString();
+    expect(untilLabel(at(52), NOW)).toBe("52m");
+    expect(untilLabel(at(250), NOW)).toBe("4h 10m");
+    expect(untilLabel(at(240), NOW)).toBe("4h");
+    expect(untilLabel(at(52 * 60), NOW)).toBe("2d 4h");
+    expect(untilLabel(at(3 * 1440), NOW)).toBe("3d");
+    expect(untilLabel(at(-1), NOW)).toBe("now");
+    expect(untilLabel(null, NOW)).toBe("unknown");
   });
 });
 
@@ -194,7 +390,8 @@ describe("limitDecisions", () => {
       "w1",
       sample("work", 91, "2026-10-18T14:00:00.000Z"),
     );
-    b = fold(b, "x", null, sample("spare", 12, "2026-10-18T14:00:00.000Z"));
+    // 5% used with 4 h to go: well ahead of pace, so it outranks an account with no usage yet
+    b = fold(b, "x", null, sample("spare", 5, "2026-10-18T14:00:00.000Z"));
     return b;
   };
 
@@ -319,10 +516,19 @@ describe("limitDecisions", () => {
     expect(d?.input.options).toEqual(["not now"]);
   });
 
-  it("prefers an account with known headroom over one with no usage yet", () => {
+  it("prefers an account ahead of pace over one with no usage yet (on pace), not one behind it", () => {
     const at = "2026-10-18T14:00:00.000Z";
     let b = fold(emptyBook(), "a1", "w1", sample("work", 93, at));
-    b = fold(b, "x", null, sample("spare", 30, at));
+    b = fold(b, "x", null, sample("behind", 30, at));
+    const behind = limitDecisions({
+      accounts: accountRecords(b),
+      warnAtPct: 90,
+      candidates: ["primary", "work", "behind"],
+      existing: [],
+      now: NOW,
+    })[0];
+    expect(behind?.extra.suggested).toBe("primary");
+    b = fold(b, "y", null, sample("spare", 5, at));
     const [d] = limitDecisions({
       accounts: accountRecords(b),
       warnAtPct: 90,
@@ -331,7 +537,7 @@ describe("limitDecisions", () => {
       now: NOW,
     });
     expect(d?.extra.suggested).toBe("spare");
-    expect(d?.input.question).toContain("Move wave w1 to spare (30%)?");
+    expect(d?.input.question).toContain("Move wave w1 to spare (5%)?");
   });
 
   it("an account whose sample carried no 5-hour window is offered as no 5-hour usage yet", () => {
@@ -385,7 +591,9 @@ describe("limitDecisions under balancing", () => {
     expect(out[0]?.input.question).toContain(
       "every signed-in account on local is at or over 90% of its 5-hour window",
     );
-    expect(out[0]?.input.question).toContain("new agents start on the one with the most room");
+    expect(out[0]?.input.question).toContain(
+      "new agents start on the one the balance puts first (work, 93%)",
+    );
     // answered for this window: quiet
     expect(
       limitDecisions({
@@ -393,6 +601,24 @@ describe("limitDecisions under balancing", () => {
         existing: [{ wave: "w1", acct: "work", resets_at: RESETS, open: false }],
       }),
     ).toEqual([]);
+  });
+
+  it("names the account the spawns' own claude.balance puts first, not the defaults'", () => {
+    // primary's weekly window is at 97.5%: over the default cap, under a 99% one
+    let b = fold(emptyBook(), "a1", "w1", sample("work", 96, at));
+    b = fold(b, "a2", "w1", sample("primary", 91, at, 97.5));
+    const base = {
+      accounts: accountRecords(b),
+      warnAtPct: 90,
+      candidates: ["primary", "work"],
+      existing: [],
+      now: NOW,
+      balanced: () => true,
+    };
+    expect(limitDecisions(base)[0]?.extra.acct).toBe("work");
+    const out = limitDecisions({ ...base, balance: { cap_pct: 99, tie_band_pct: 10 } });
+    expect(out[0]?.extra.acct).toBe("primary");
+    expect(out[0]?.input.question).toContain("the one the balance puts first (primary, 91%)");
   });
 
   it("keeps today's move-wave decision for a pinned (unbalanced) wave", () => {

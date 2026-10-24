@@ -173,7 +173,8 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
       {
         key: "defaults",
         label: "Defaults",
-        keywords: "default account for new waves most headroom warn me at threshold",
+        keywords:
+          "default account for new waves most headroom balanced expires reset warn me at threshold",
       },
     ],
   },

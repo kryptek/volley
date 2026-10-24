@@ -355,9 +355,9 @@ describe("summaries", () => {
 
   it("claudeSummaries", () => {
     // A wave's account limit is its window's: the section summary carries no needs-you.
-    expect(claudeSummaries({ accounts: 3, defaultLabel: "Most headroom", warnAt: 90 })).toEqual({
+    expect(claudeSummaries({ accounts: 3, defaultLabel: "Balanced", warnAt: 90 })).toEqual({
       accounts: "3 accounts",
-      defaults: "Most headroom · warn at 90%",
+      defaults: "Balanced · warn at 90%",
     });
     expect(claudeSummaries({ accounts: 1, defaultLabel: "Primary", warnAt: 80 }).accounts).toBe(
       "1 account",

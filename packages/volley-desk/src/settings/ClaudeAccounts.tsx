@@ -220,7 +220,7 @@ export function claudeSummaries({
   warnAt,
 }: {
   accounts: number;
-  /** How the account for new waves reads (`Most headroom`). */
+  /** How the account for new waves reads (`Balanced`). */
   defaultLabel: string;
   warnAt: number;
 }): Record<string, string> {
@@ -1049,7 +1049,7 @@ function AddAccount({
             <p className="dim">
               {signin?.plan && !signin.email ? `${signin.plan} · ` : ""}signed in on{" "}
               {machineName(machine)}. Pick it for new waves under Defaults, or let them take the
-              account with the most headroom.
+              account whose room expires first.
             </p>
           )}
           {preset && signin?.email && normalizeEmail(signin.email) !== preset.key && (
@@ -1239,7 +1239,7 @@ export function ClaudeAccounts({
   const warnAt = config?.claude?.warn_at_pct ?? WARN_AT_DEFAULT;
   const current = config?.claude?.default_account ?? PRIMARY;
   const defaults: [string, string][] = [
-    ["most_headroom", "Most headroom"],
+    ["most_headroom", "Balanced"],
     // The Seg's options are short; the card names it in full.
     [PRIMARY, "Primary"],
     ...list

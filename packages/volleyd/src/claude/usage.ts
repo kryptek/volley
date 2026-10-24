@@ -1,3 +1,4 @@
+import { CONFIG_DEFAULTS } from "../config-defaults";
 import { type DecisionInput, ID_RE } from "../decisions";
 import type { JournalEvent } from "../types";
 import { familyOf } from "./context-window";
@@ -385,6 +386,12 @@ function livePct(w: UsageWindow | null, now: number): number | null {
   return w.resets_at !== null && Date.parse(w.resets_at) <= now ? 0 : w.pct;
 }
 
+/** A window kind the rank rule scores (`model_weekly`: the model family's weekly window). */
+export type WindowKind = "five_hour" | "weekly" | "model_weekly";
+
+/** Each window kind's length in hours: pace compares windows in units of their own length. */
+const WINDOW_HOURS: Record<WindowKind, number> = { five_hour: 5, weekly: 168, model_weekly: 168 };
+
 /** One candidate account as `rankAccounts` sees it (the `claude_balance` op, `account_chosen`). */
 export interface Ranked {
   account: string;
@@ -395,61 +402,161 @@ export interface Ranked {
   /** The model family's weekly window, when the model has a family and the account reported it. */
   model_weekly_pct?: number;
   agents: number;
+  /** Its pace: the smallest over its windows (1 is on pace); null: it reported no window. */
+  score: number | null;
+  /** The window that sets `score`; null with no window. */
+  binding: WindowKind | null;
+  /** Every window it reported is under `claude.balance.cap_pct`. */
+  eligible: boolean;
+  /** The binding window's room left (percent) and its reset: what `why` and the CLI print. */
+  binding_left: number | null;
+  binding_resets_at: string | null;
 }
 
-/** A window's live percentage per window that counts for `family`; unreported ones left out. */
-function liveWindows(a: AccountUsage | undefined, family: ModelFamily | null, now: number) {
-  const five = livePct(a?.five_hour ?? null, now);
-  const weekly = livePct(a?.weekly ?? null, now);
+interface LiveWindow {
+  kind: WindowKind;
+  pct: number;
+  resets_at: string | null;
+}
+
+/** The windows that count for `family`, each with its live percentage; unreported ones left out. */
+function liveWindows(
+  a: AccountUsage | undefined,
+  family: ModelFamily | null,
+  now: number,
+): LiveWindow[] {
   const fw = family !== null ? (a?.model_weekly?.[family] ?? null) : null;
-  const model = livePct(fw, now);
-  return { five, weekly, model };
+  const all: [WindowKind, UsageWindow | null][] = [
+    ["five_hour", a?.five_hour ?? null],
+    ["weekly", a?.weekly ?? null],
+    ["model_weekly", fw],
+  ];
+  return all.flatMap(([kind, w]) => {
+    const pct = livePct(w, now);
+    return w === null || pct === null ? [] : [{ kind, pct, resets_at: w.resets_at }];
+  });
 }
 
 /**
- * The balancing rule (SPEC §4.6.12): `candidates` ranked by headroom, the smallest of
- * `100 − five_hour`, `100 − weekly` and, when the model's family has a window on the record,
- * `100 − model_weekly[family]`. A window whose reset passed counts as empty; one not reported is
- * left out (a stale probe reading counts until its `resets_at` passes). An account with no usage
- * at all ranks after every known one, signed-in profiles before the primary (interactive
- * sessions use the owner's own login without reporting usage, so its lack of a sample says least
- * about its headroom). Ties go to fewer agents, then candidate order.
+ * Hours until a window of `lengthHours` resets, floored at one minute. Unknown (`null`) or passed
+ * (the window restarted and its next reset is not known yet): a full window away.
  */
+export function hoursUntil(resetsAt: string | null, now: number, lengthHours: number): number {
+  const at = resetsAt === null ? Number.NaN : Date.parse(resetsAt);
+  if (!Number.isFinite(at) || at <= now) return lengthHours;
+  return Math.max((at - now) / 3.6e6, 1 / 60);
+}
+
+/**
+ * A window's pace: its room left against the time to its reset, in units of the window's own
+ * length. 1 is on pace to use the window exactly as it resets; above 1 its room expires unused
+ * (spend it); below 1 it is on course to hit the limit first (spare it).
+ */
+export function paceOf(
+  pct: number,
+  resetsAt: string | null,
+  now: number,
+  kind: WindowKind,
+): number {
+  const length = WINDOW_HOURS[kind];
+  return ((100 - pct) * length) / (100 * hoursUntil(resetsAt, now, length));
+}
+
+/** `52m`, `4h 10m`, `4h`, `2d 4h`, `3d`; `now` once it has passed; `unknown` for no reset time. */
+export function untilLabel(resetsAt: string | null, now: number): string {
+  if (resetsAt === null) return "unknown";
+  const ms = Date.parse(resetsAt) - now;
+  if (!Number.isFinite(ms)) return "unknown";
+  if (ms <= 0) return "now";
+  const m = Math.ceil(ms / 60_000);
+  const d = Math.floor(m / 1440);
+  const h = Math.floor((m % 1440) / 60);
+  const two = (a: string, b: number, unit: string) => (b > 0 ? `${a} ${b}${unit}` : a);
+  if (d > 0) return two(`${d}d`, h, "h");
+  return h > 0 ? two(`${h}h`, m % 60, "m") : `${m % 60}m`;
+}
+
+/**
+ * The balancing rule (SPEC §4.6.12): spend the room that expires first, without hitting a limit.
+ * Each window that counts (the 5-hour, the 7-day and, when the model's family has one on the
+ * record, `model_weekly[family]`) gets a pace, `(left / 100) / (hours to reset / window length)`;
+ * the account's `score` is the smallest, and the window attaining it is `binding` (the tightest
+ * window decides). A window whose reset passed counts as empty and a full window away from its
+ * next reset, as does one whose `resets_at` is null; one not reported is left out. An account is
+ * `eligible` while every window it reported is under `cap_pct`. Eligible accounts come first,
+ * then the rest (the cap orders, it never refuses); each group by score, highest first (so an
+ * over-cap account goes by pace too, not by how far over it is), an account with no usage data
+ * counting as on pace (1). Scores within `tie_band_pct` percent of a band's leader form a band,
+ * ordered by fewer agents, then signed-in profiles before the primary (interactive sessions use
+ * the owner's own login without reporting usage, so its silence says least), then candidate
+ * order. Every candidate is returned.
+ */
+/** `claude.balance`: the rank rule's cap and tie band (CONFIG_DEFAULTS when absent). */
+export interface RankBalance {
+  cap_pct?: number;
+  tie_band_pct?: number;
+}
+
 export function rankAccounts(
   accounts: Record<string, AccountUsage>,
   candidates: readonly string[],
-  o: { model?: string | null; now: number },
+  o: RankBalance & { model?: string | null; now: number },
 ): Ranked[] {
   const family = familyOf(o.model);
+  const cap = o.cap_pct ?? CONFIG_DEFAULTS.claude.balance.cap_pct;
+  const band = o.tie_band_pct ?? CONFIG_DEFAULTS.claude.balance.tie_band_pct;
   const rows = candidates.map((account, i) => {
     const a = accounts[account];
-    const w = liveWindows(a, family, o.now);
-    const known = [w.five, w.weekly, w.model].filter((x): x is number => x !== null);
+    const ws = liveWindows(a, family, o.now);
+    const pctOf = (k: WindowKind) => ws.find((w) => w.kind === k)?.pct ?? null;
+    let bind: (LiveWindow & { score: number }) | null = null;
+    for (const w of ws) {
+      const score = paceOf(w.pct, w.resets_at, o.now, w.kind);
+      if (bind === null || score < bind.score) bind = { ...w, score };
+    }
+    const model = pctOf("model_weekly");
     const r: Ranked = {
       account,
-      headroom: known.length > 0 ? 100 - Math.max(...known) : null,
-      five_hour_pct: w.five,
-      weekly_pct: w.weekly,
-      ...(w.model !== null ? { model_weekly_pct: w.model } : {}),
+      headroom: ws.length > 0 ? 100 - Math.max(...ws.map((w) => w.pct)) : null,
+      five_hour_pct: pctOf("five_hour"),
+      weekly_pct: pctOf("weekly"),
+      ...(model !== null ? { model_weekly_pct: model } : {}),
       agents: a?.agents.length ?? 0,
+      score: bind?.score ?? null,
+      binding: bind?.kind ?? null,
+      eligible: ws.every((w) => w.pct < cap),
+      binding_left: bind !== null ? 100 - bind.pct : null,
+      binding_resets_at: bind?.resets_at ?? null,
     };
     // `primary@<name>` is a paired machine's own login: last there too
     const primaryLast = account.split("@")[0] === PRIMARY_ACCOUNT ? 1 : 0;
-    return { r, i, primaryLast };
+    return { r, i, primaryLast, s: r.score ?? 1 };
   });
-  rows.sort((x, y) => {
-    const hx = x.r.headroom;
-    const hy = y.r.headroom;
-    if (hx === null || hy === null) {
-      if (hx !== hy) return hx === null ? 1 : -1;
-      if (x.primaryLast !== y.primaryLast) return x.primaryLast - y.primaryLast;
-    } else if (hx !== hy) return hy - hx;
-    return x.r.agents - y.r.agents || x.i - y.i;
-  });
-  return rows.map((x) => x.r);
+  type Row = (typeof rows)[number];
+  const ordered = (group: Row[]): Row[] => {
+    group.sort((x, y) => y.s - x.s || x.i - y.i);
+    const out: Row[] = [];
+    for (let at = 0; at < group.length; ) {
+      const leader = (group[at] as Row).s;
+      let end = at + 1;
+      while (end < group.length && leader - (group[end] as Row).s <= (leader * band) / 100) end++;
+      const members = group.slice(at, end);
+      members.sort((x, y) => x.r.agents - y.r.agents || x.primaryLast - y.primaryLast || x.i - y.i);
+      out.push(...members);
+      at = end;
+    }
+    return out;
+  };
+  return [
+    ...ordered(rows.filter((x) => x.r.eligible)),
+    ...ordered(rows.filter((x) => !x.r.eligible)),
+  ].map((x) => x.r);
 }
 
-/** The account `rankAccounts` puts first, or null for no candidates. */
+/**
+ * The account `rankAccounts` puts first, or null for no candidates. The name is historical: the
+ * rule ranks by pace, not by headroom alone.
+ */
 export function mostHeadroom(
   accounts: Record<string, AccountUsage>,
   candidates: readonly string[],
@@ -502,14 +609,15 @@ export function parseMoveAnswer(answer: string): { wave: string; to: string } | 
  * The `account_limit` decisions to open: for each account whose 5-hour window is at or over
  * `warnAtPct` (and has not reset), each wave with agents on it, unless that wave has one open
  * for the account or already answered one for this window (same `resets_at`). The suggestion is
- * the candidate `rankAccounts` puts first among those with room in both windows (a newly
- * signed-in profile with no usage yet is offered, before `primary`), labelled so. Never a move.
+ * the candidate `rankAccounts` puts first among those with room in both windows (one with no
+ * usage yet ranks as on pace among them, a profile before `primary`), labelled so. Never a move.
  *
  * A balanced wave (`balanced`: its spawns pick per machine, D3) gets no `move wave` decision:
  * its new agents already avoid a hot account, and its running ones get their own
  * `agent_account_limit`. Only when every candidate of a machine it uses (`candidates` here,
  * `peers[<name>]` on a paired machine) is at or over the level in its 5-hour window does it get
- * one, with no suggestion: new agents take the one with the most room until the window resets.
+ * one, with no suggestion: new agents take the one the balance puts first until the window
+ * resets. `balance` is the supervisor's `claude.balance` (the spawns' own rank options).
  */
 export function limitDecisions(o: {
   accounts: Record<string, AccountUsage>;
@@ -520,6 +628,7 @@ export function limitDecisions(o: {
   balanced?: (wave: string) => boolean;
   /** Each paired machine's candidates (`<acct>@<name>`), for the balanced all-hot rule. */
   peers?: Record<string, readonly string[]>;
+  balance?: RankBalance;
 }): LimitDecision[] {
   const out: LimitDecision[] = [];
   const balanced = o.balanced ?? (() => false);
@@ -538,8 +647,9 @@ export function limitDecisions(o: {
         (livePct(r?.weekly ?? null, o.now) ?? 0) < o.warnAtPct
       );
     });
-    // Known headroom first; else an account with no usage yet (offered, never taken).
-    const suggested = rankAccounts(o.accounts, roomy, { now: o.now })[0]?.account ?? null;
+    // The rank rule's first; an account with no usage yet ranks as on pace (offered, never taken).
+    const suggested =
+      rankAccounts(o.accounts, roomy, { ...o.balance, now: o.now })[0]?.account ?? null;
     const target = suggested === null ? undefined : o.accounts[suggested];
     const used = livePct(target?.five_hour ?? null, o.now);
     // "no usage yet" only for an account that reported none; a weekly-only sample is usage
@@ -590,7 +700,7 @@ function allHot(
     return p !== null && p >= o.warnAtPct;
   };
   if (cands.length === 0 || !cands.every(hot)) return [];
-  const best = rankAccounts(o.accounts, cands, { now: o.now })[0];
+  const best = rankAccounts(o.accounts, cands, { ...o.balance, now: o.now })[0];
   const w = best !== undefined ? o.accounts[best.account]?.five_hour : undefined;
   if (best === undefined || w === undefined || w === null) return [];
   const waves = [...new Set(cands.flatMap((c) => o.accounts[c]?.waves ?? []))].sort();
@@ -607,7 +717,7 @@ function allHot(
       input: {
         kind: "account_limit",
         task: null,
-        question: `Needs you: every signed-in account on ${machine} is at or over ${o.warnAtPct}% of its 5-hour window; new agents start on the one with the most room (${best.account}, ${Math.round(best.five_hour_pct ?? w.pct)}%) and${resets}.`,
+        question: `Needs you: every signed-in account on ${machine} is at or over ${o.warnAtPct}% of its 5-hour window; new agents start on the one the balance puts first (${best.account}, ${Math.round(best.five_hour_pct ?? w.pct)}%) and${resets}.`,
         options: [NOT_NOW],
       },
       extra: { acct: best.account, pct: w.pct, resets_at: w.resets_at, suggested: null },
@@ -714,6 +824,7 @@ export function agentLimitDecisions(o: {
   warnAtPct: (wave: string) => number;
   existing: readonly AgentLimitSeen[];
   now: number;
+  balance?: RankBalance;
 }): AgentLimitDecision[] {
   const out: AgentLimitDecision[] = [];
   for (const ag of o.agents) {
@@ -738,7 +849,7 @@ export function agentLimitDecisions(o: {
         (c) =>
           c !== ag.acct && agentWindows(o.accounts[c], family, o.now).every((w) => w.pct < warn),
       );
-    const best = rankAccounts(o.accounts, roomy, { model: ag.model, now: o.now })[0];
+    const best = rankAccounts(o.accounts, roomy, { ...o.balance, model: ag.model, now: o.now })[0];
     const suggested = best?.account ?? null;
     const resets = hit.resets_at !== null ? ` (resets ${hit.resets_at})` : "";
     const at = hit.resets_at !== null ? ` at ${hit.resets_at}` : "";
