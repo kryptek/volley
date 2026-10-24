@@ -16,7 +16,7 @@
     },
     "packages/volley-cli": {
       "name": "volley-cli",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "bin": {
         "volley": "./src/cli.ts",
       },
@@ -33,7 +33,7 @@
     },
     "packages/volley-dash": {
       "name": "volley-dash",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@radix-ui/react-checkbox": "^1.1.4",
         "@radix-ui/react-dialog": "^1.1.15",
@@ -70,7 +70,7 @@
     },
     "packages/volley-desk": {
       "name": "volley-desk",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@hugeicons/core-free-icons": "^4.3.3",
         "@hugeicons/react": "^1.1.10",
@@ -99,7 +99,7 @@
     },
     "packages/volley-hooks": {
       "name": "volley-hooks",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "volley-mcp": "workspace:*",
       },
@@ -110,7 +110,7 @@
     },
     "packages/volley-issues": {
       "name": "volley-issues",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "volley-cli": "workspace:*",
         "volley-mcp": "workspace:*",
@@ -123,7 +123,7 @@
     },
     "packages/volley-mcp": {
       "name": "volley-mcp",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "bin": {
         "volley-mcp": "./src/index.ts",
       },
@@ -139,7 +139,7 @@
     },
     "packages/volley-sim": {
       "name": "volley-sim",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "volley-mcp": "workspace:*",
       },
@@ -150,21 +150,21 @@
     },
     "packages/volley-skill": {
       "name": "volley-skill",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "devDependencies": {
         "vitest": "^2.1.0",
       },
     },
     "packages/volley-wait": {
       "name": "volley-wait",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "devDependencies": {
         "vitest": "^2.1.0",
       },
     },
     "packages/volleyd": {
       "name": "volleyd",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "bin": {
         "volleyd": "./src/cli.ts",
       },

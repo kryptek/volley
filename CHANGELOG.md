@@ -2,6 +2,37 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.12.0 — 2026-10-24
+
+### Changed
+
+- **volleyd: account balancing spends the room that expires first, under a 97% cap.** The
+  automatic pick ranks a machine's signed-in Claude accounts by pace (room left in each window
+  against the time until that window resets; the tightest of the 5-hour, 7-day and model-family
+  windows decides), takes no account with a window at or over `claude.balance.cap_pct` (default
+  97) while another has room, and spreads near-equal accounts (`claude.balance.tie_band_pct`,
+  default 10) over the one with fewer agents. `account_chosen.why`, the Desk's account chip and
+  `volley claude balance` say which window is expiring and when (`work: 18% left, resets in
+  52m (use it or lose it)`). Pinned accounts are unchanged; `most_headroom` stays a synonym for
+  balancing. (#556)
+- **volleyd: the balance counts the agents already on an account.** Each running agent, and
+  each one picked earlier in the same pass, reserves its next hour of use (`claude.balance.reserve_h`)
+  against the account's windows at the rate the account has shown per agent-hour (learned from its
+  usage samples; `claude.balance.agent_cost_pct_h` and `agent_cost_weekly_pct_h` until it has),
+  and the 97% cap and the use-it-or-lose-it score apply to that projection. Twelve spawns in one
+  pass spread across the accounts that fit, and an account at 95% takes none. `why` and
+  `volley claude balance` show the projection (`18% left (8% after 1 in flight)`). (#557)
+
+### Fixed
+
+- **volleyd: an agent that hits its usage limit moves to an account with room, unattended.** On
+  `credit_exhausted`, when another signed-in account on the agent's machine has room, volleyd opens
+  `agent_account_limit` (`class: credit_exhausted`) instead of `model_switch`, and autopilot answers
+  `move <agent> to <acct>` under `account_move_max` (`agent_account_limit/move-exhausted`). The
+  exhausted account is marked at 100% until its window resets, so new spawns avoid it and its other
+  agents get their own move. The owner is asked only when no account has room (`model_switch`, as
+  before) or the budget is spent. (#555)
+
 ## 0.11.1 — 2026-10-24
 
 ### Fixed
