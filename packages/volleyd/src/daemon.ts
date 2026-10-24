@@ -10809,7 +10809,9 @@ export class Daemon {
    * Forget the agents whose latest sample is older than `AGENT_SAMPLE_TTL_MS` and that the daemon
    * neither supervises nor is launching, and clear their retained `usage` topics so a restart does
    * not bring them back (the clearing's own `onUsage` finds them gone). Not before the restart
-   * reconciliation is done (`agentsSettled`). Agents are not persisted: no file write.
+   * reconciliation is done (`agentsSettled`). Agents are not persisted: no file write. A session
+   * that samples again just before its clear lands loses that sample's retained copy and leaves
+   * `agents` until its next one; benign, as the balance no longer counts `agents`.
    */
   private async expireUsageAgents(): Promise<void> {
     if (!this.agentsSettled) return;

@@ -481,9 +481,8 @@ describe("interactive and stale sessions on an account (#562)", () => {
       agents: [COORD, "coordinator-cd34"],
       waves: [],
     });
-    const idle = await primaryCandidate();
-    expect(idle?.agents).toBe(idle?.in_flight);
-    expect(idle?.in_flight).toBeLessThanOrEqual(1);
+    // only the supervised agent counts (through its spawn's account, before it samples)
+    expect(await primaryCandidate()).toMatchObject({ agents: 1, in_flight: 1 });
 
     // the supervised agent samples: it counts, the session does not
     await publishUsage(AGENT, usage("primary", 22));
