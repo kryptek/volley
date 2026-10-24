@@ -797,8 +797,30 @@ with no usage at all counts as on pace (1). Scores within `claude.balance.tie_ba
 profiles before the primary (its interactive use goes unreported), then candidate order. Both
 tunables are the supervisor's (`volleyd config set claude.balance.cap_pct=95`); a wave's own
 `config:` does not change them. `account_chosen` candidates carry `score`, `binding`,
-`eligible`, `binding_left` and `binding_resets_at`; `headroom` keeps its meaning (the smallest
-room left) for the readers that show it.
+`eligible`, `binding_left`, `binding_resets_at`, `in_flight` and `projected_pct`; `headroom`,
+`five_hour_pct`, `weekly_pct` and `binding_left` keep their sampled meaning for the readers that
+show the sample.
+
+**Agents in flight.** A sample can be minutes old, and a spawn pass picks for many agents before
+the next one lands, so the rule ranks and caps each window on its **projection**: the live
+percentage plus, for each of the account's agents in flight, its rate for that window over the
+look-ahead `min(claude.balance.reserve_h, hours to reset)`, at most 100. In flight are the
+supervised agents on the account, the launched ones whose sample is on it, and the daemon's
+reservations (`claude/in-flight.ts`): a pick reserves its account the moment it is made, so the
+next pick of the same pass sees it; the agent's first usage sample, its retirement or a failed
+spawn releases it (a restart drops them: the agents are counted by their spawn records). The
+rate is the account's own once it has two observations: when a newer reading of a window with the
+same `resets_at` arrives at least 5 minutes after the one it is measured from, has not fallen and
+the account has agents, the rise per agent-hour blends in by EMA (α 0.3, capped at 100); a new
+window or a fall moves the comparison point without teaching, a shorter gap keeps it, and the
+rate outlives the window (it is the account's burn). Until then `claude.balance.agent_cost_pct_h`
+(default 10, the 5-hour window) and `agent_cost_weekly_pct_h` (default 1.25, the 7-day and model
+windows) stand in: deliberately a busy agent on a Max-tier plan. The rates live in
+`claude-usage.json` beside the windows (an older file restores without them) and stay off the
+retained record. With the defaults twelve picks over accounts at 95% / 40% / 10% (5-hour, resets
+in 3 h) go 0 / 5 / 7, and a pick's `why` shows the projection:
+`work: 18% left (12% after 3 in flight), resets in 52m (use it or lose it) on local`. Ties in a
+band go to fewer agents counting the ones in flight, so even an all-over-cap pass spreads.
 
 **Running agents** (D2). When an account a supervised agent runs under reaches the wave's
 `claude.warn_at_pct` in a window that counts for it (5-hour, 7-day, or its model family's weekly

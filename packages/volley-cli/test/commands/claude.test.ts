@@ -430,6 +430,8 @@ describe("volley claude", () => {
             eligible: true,
             binding_left: 88,
             binding_resets_at: iso(-52.5 * 60_000),
+            in_flight: 3,
+            projected_pct: 38,
           },
           {
             account: "primary",
@@ -442,6 +444,8 @@ describe("volley claude", () => {
             eligible: true,
             binding_left: 80,
             binding_resets_at: iso(-(2 * 1440 + 4 * 60 + 0.5) * 60_000),
+            in_flight: 0,
+            projected_pct: 20,
           },
         ],
         picks: { fable: "work", opus: "work", sonnet: "primary", haiku: "primary" },
@@ -460,6 +464,8 @@ describe("volley claude", () => {
             eligible: false,
             binding_left: 2,
             binding_resets_at: iso(-60 * 60_000),
+            in_flight: 1,
+            projected_pct: 100,
           },
           {
             account: "work@peer-a",
@@ -517,13 +523,15 @@ describe("volley claude", () => {
     const lines = r.stdout.split("\n");
     expect(lines[0]).toBe("this machine");
     expect(lines[1]).toMatch(
-      /^ {2}work +o•••@example\.com +5h 12% +7d 40% +Fable 30% +5h 88% left in 5[23]m +2 agents +← fable, opus$/,
+      /^ {2}work +o•••@example\.com +5h 12% +7d 40% +Fable 30% +5h 88% left in 5[23]m \(62% after 3 in flight\) +2 agents +← fable, opus$/,
     );
     expect(lines[2]).toMatch(
       /^ {2}primary +5h 60% +7d 20% +Fable — +7d 80% left in 2d 4h +1 agent +← sonnet, haiku$/,
     );
     expect(lines[3]).toBe("peer-a");
-    expect(lines[4]).toMatch(/^ {2}primary@peer-a +5h 98% +7d 30% +Fable — +over cap +3 agents$/);
+    expect(lines[4]).toMatch(
+      /^ {2}primary@peer-a +5h 98% +7d 30% +Fable — +over cap \(100% after 1 in flight\) +3 agents$/,
+    );
     expect(lines[5]).toMatch(/^ {2}work@peer-a +no usage yet +2 agents +← fable, opus$/);
     expect(r.stdout).not.toContain("owner@example.com");
     await v.b.disconnect();

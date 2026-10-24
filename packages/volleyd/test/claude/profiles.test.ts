@@ -213,7 +213,59 @@ describe("selectAccount: task > wave > config default > primary", () => {
     eligible: true,
     binding_left: null,
     binding_resets_at: null,
+    in_flight: 0,
+    projected_pct: null,
     ...r,
+  });
+
+  it("the why line shows the projection with agents in flight, and #556's line with none", () => {
+    const work = row("work", {
+      headroom: 18,
+      five_hour_pct: 82,
+      weekly_pct: 40,
+      score: 1.2,
+      binding: "five_hour",
+      binding_left: 18,
+      binding_resets_at: at(52),
+      in_flight: 1,
+      projected_pct: 92,
+    });
+    const primary = row("primary", {
+      headroom: 72,
+      five_hour_pct: 10,
+      weekly_pct: 28,
+      score: 0.9,
+      binding: "weekly",
+      binding_left: 72,
+      binding_resets_at: at(2 * 1440 + 4 * 60),
+      in_flight: 2,
+      projected_pct: 30.5,
+    });
+    const spare = row("spare", {
+      headroom: 5,
+      five_hour_pct: 95,
+      weekly_pct: 30,
+      score: 0,
+      binding: "five_hour",
+      eligible: false,
+      binding_left: 5,
+      binding_resets_at: at(180),
+      in_flight: 1,
+      projected_pct: 100,
+    });
+    const sel = selectAccount(r, reg, { now: T, capPct: 97 }, () => [work, primary, spare]);
+    expect(sel.why).toBe(
+      "work: 18% left (8% after 1 in flight), resets in 52m (use it or lose it) on local; primary 7d 72% left (70% after 2 in flight), resets in 2d 4h; spare over the 97% cap (5h 95%, 100% after 1 in flight)",
+    );
+    const idle = selectAccount(r, reg, { now: T, capPct: 97 }, () => [
+      { ...work, in_flight: 0, projected_pct: 82 },
+    ]);
+    expect(idle.why).toBe("work: 18% left, resets in 52m (use it or lose it) on local");
+    // in flight but the projection unchanged (a learned rate of 0): no `after`, despite float error
+    const flat = selectAccount(r, reg, { now: T, capPct: 97 }, () => [
+      { ...work, binding_left: 99.9, five_hour_pct: 0.1, in_flight: 2, projected_pct: 0.1 },
+    ]);
+    expect(flat.why).not.toContain("in flight");
   });
 
   it("null (and most_headroom) balances across the signed-in accounts by rank", () => {

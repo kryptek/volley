@@ -740,6 +740,8 @@ export function demoClaudeBalance() {
     eligible: true,
     binding_left: 100 - five,
     binding_resets_at: resets,
+    in_flight: 0,
+    projected_pct: five,
   });
   return {
     machines: [
