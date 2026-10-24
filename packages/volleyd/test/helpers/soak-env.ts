@@ -68,6 +68,11 @@ export interface SoakEnvOptions {
   screenSlowMs?: number;
   /** Wall-clock deadline (epoch ms): `until` throws with the report once it passes. */
   deadline?: number;
+  /**
+   * The whole wave file in place of the one built from the options (`volley setup`'s test wave):
+   * given the soak's repo, release branch and `config:` flow map. Its `wave:` must be WAVE.
+   */
+  yaml?: (base: { repo: string; release: string; config: string }) => string;
 }
 
 export interface SoakEnv {
@@ -269,19 +274,22 @@ export async function makeSoakEnv(o: SoakEnvOptions): Promise<SoakEnv> {
         return `  ${id}: ${JSON.stringify(entry)}`;
       })
       .join("\n");
-    const yaml = [
-      `wave: ${WAVE}`,
-      `repo: ${repo}`,
-      `release_branch: ${RELEASE}`,
-      "model: claude-opus-5-5",
-      `pipeline: ${o.pipeline ?? SOAK_PIPELINE}`,
-      "merge: auto",
-      ...(o.waveExtra !== undefined ? [o.waveExtra] : []),
-      "tasks:",
-      taskLines,
-      `config: { worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }`,
-      "",
-    ].join("\n");
+    const config = `{ worktree_root: ${join(env.home, "wt")}${o.config !== undefined ? `, ${o.config}` : ""} }`;
+    const yaml =
+      o.yaml?.({ repo, release: RELEASE, config }) ??
+      [
+        `wave: ${WAVE}`,
+        `repo: ${repo}`,
+        `release_branch: ${RELEASE}`,
+        "model: claude-opus-5-5",
+        `pipeline: ${o.pipeline ?? SOAK_PIPELINE}`,
+        "merge: auto",
+        ...(o.waveExtra !== undefined ? [o.waveExtra] : []),
+        "tasks:",
+        taskLines,
+        `config: ${config}`,
+        "",
+      ].join("\n");
     o.prepare?.(host, world);
     const run = await control.request("run", { wave_yaml: yaml, owner: OWNER });
     if (!run.ok) throw new Error(`run: ${run.error}`);

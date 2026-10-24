@@ -40,6 +40,7 @@ describe("setup metrics", () => {
     const j = JSON.parse(text) as Record<string, unknown>;
     expect(Object.keys(j).sort()).toEqual([
       "finished_at",
+      "first_wave",
       "questions",
       "sign_ins",
       "started_at",
@@ -62,6 +63,7 @@ describe("setup metrics", () => {
       "terminal",
       "services",
       "phone",
+      "first-wave",
     ]);
     for (const s of steps) expect(Object.keys(s).sort()).toEqual(["changes", "ms", "name"]);
     expect(steps.find((s) => s.name === "security")?.changes).toBe(3);
@@ -75,7 +77,7 @@ describe("setup metrics", () => {
     const saved = JSON.parse(readFileSync(join(m.ctx.volleydHome, "setup.json"), "utf-8"));
     expect(saved.metrics).toBe(file());
     expect(r.stdout).toMatch(
-      /\nSetup complete in \d+ m \d+ s \(0 questions, 0 sign-ins, 0 sudo\)\n/,
+      /\nSetup complete in \d+ m \d+ s \(0 questions, 0 sign-ins, 0 sudo\); test wave merged in \d+ m \d+ s: https:\S+\n/,
     );
   });
 

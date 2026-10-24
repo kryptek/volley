@@ -28,6 +28,7 @@ const STEP_NAMES = [
   "terminal",
   "services",
   "phone",
+  "first-wave",
 ];
 
 describe("volley setup --check", () => {
@@ -86,7 +87,7 @@ describe("volley setup --check", () => {
     const calls = m.execCalls.length;
     const r = await run(["--check"]);
     expect(r.stdout).not.toContain("pending");
-    expect(r.stdout.match(/ done\n/g)).toHaveLength(8);
+    expect(r.stdout.match(/ done\n/g)).toHaveLength(9);
     expect(r.stdout).toContain("Nothing is missing.");
     expect(r.code).toBe(0);
     expect(m.execCalls.slice(calls).every(READ_ONLY)).toBe(true);
