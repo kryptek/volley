@@ -147,6 +147,11 @@ export interface SetupContext {
   showEmail?: boolean;
   /** The coordinator name the Claude Code step chose or found (setup.json keeps it). */
   coordinator?: string;
+  /**
+   * The broker's host the Desk's service names (`volley desk serve --broker-host`): null for none
+   * (the page uses its own host). Unset: setup.json's `broker_host`.
+   */
+  brokerHost?: string | null;
   /** What the run counts (setup-metrics.json): the sign-in step reports each sign-in it ran. */
   metrics?: { signIn: () => void };
 }
@@ -243,6 +248,8 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
         line === lsofArgv(portOf(argv[2], "-iTCP:")).join(" ")) ||
       (a0 === "ss" && argv.length === 9 && line === ssArgv(portOf(argv[8], ":")).join(" ")) ||
       line === "systemctl --user show -p MainPID --value volley-desk.service" ||
+      // `volley desk uninstall`.
+      line === "systemctl --user disable --now volley-desk.service" ||
       // cmux, reached the way volleyd's service reaches it (outside cmux; output to a file).
       (argv.length === 5 &&
         same(argv.slice(0, 4), ["sh", "-c", CMUX_CHECK_SCRIPT, "sh"]) &&

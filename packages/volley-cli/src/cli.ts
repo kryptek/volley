@@ -23,7 +23,7 @@ Subcommands:
   repo     Repositories on volleyd's machines (add, list, remove, status)
   role     Machine roles: which machine runs the broker, the supervisor, the Desk (status)
   setup    First-run / repair wizard: broker, accounts, services, phone sign-in QR
-  desk     Serve the built Volley Desk (desk serve) for phones and the setup service
+  desk     The built Volley Desk: serve it, install it as a service (serve, install, uninstall, check)
   deploy   Deploy a release tag to this machine's volleyd and Desk services
 
 Global flags:

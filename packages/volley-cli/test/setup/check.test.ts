@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import pkg from "../../package.json";
@@ -90,6 +90,27 @@ describe("volley setup --check", () => {
     expect(r.stdout).toContain("Nothing is missing.");
     expect(r.code).toBe(0);
     expect(m.execCalls.slice(calls).every(READ_ONLY)).toBe(true);
+  });
+
+  it("the Services row names the Desk's broker: served once setup.json has broker_host", async () => {
+    expect((await run(["--yes", "--lan"])).code).toBe(0);
+    expect((await run(["--check"])).stdout).toContain(
+      "      Desk: broker on the page's host (port 9001)",
+    );
+    const file = join(m.ctx.volleydHome, "setup.json");
+    const record = JSON.parse(readFileSync(file, "utf-8")) as Record<string, unknown>;
+    writeFileSync(file, JSON.stringify({ ...record, broker_host: "box-a" }));
+    const r = await run(["--check"]);
+    expect(r.stdout).toContain(
+      "      Desk: broker box-a:9001 (served to the page at /desk-config.json)",
+    );
+    // The Desk's unit does not carry the flag yet: a run would rewrite it.
+    expect(r.stdout).toMatch(/→ Services +pending/);
+    expect(r.code).toBe(1);
+    // And the run that applies it keeps broker_host on record.
+    expect((await run(["--yes", "--step", "services"])).code).toBe(0);
+    expect(JSON.parse(readFileSync(file, "utf-8")).broker_host).toBe("box-a");
+    expect((await run(["--check"])).code).toBe(0);
   });
 
   it("a blocked step prints blocked: <why> and exits 1", async () => {

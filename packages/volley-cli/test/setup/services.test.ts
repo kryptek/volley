@@ -371,6 +371,53 @@ describe("setup: services", () => {
     });
   });
 
+  describe("the Desk's broker host (setup.json broker_host)", () => {
+    const deskUnit = () => join(m.ctx.home, ".config", "systemd", "user", "volley-desk.service");
+    const record = (extra: Record<string, unknown>) => {
+      mkdirSync(m.ctx.volleydHome, { recursive: true });
+      writeFileSync(
+        join(m.ctx.volleydHome, "setup.json"),
+        `${JSON.stringify({ layout: "brew-arm64", config: "c", state_file: "s", auth_dir: "a", ...extra })}\n`,
+      );
+    };
+    beforeEach(() => {
+      m = fakeMachine(fake, dir, { platform: "linux" });
+    });
+
+    it("with broker_host the Desk unit's argv carries --broker-host; the row says served", async () => {
+      record({ broker_host: "box-a" });
+      const p = await planServices(m.ctx);
+      expect(p.blocked).toBeUndefined();
+      await applyAll(p);
+      expect(readFileSync(deskUnit(), "utf-8")).toMatch(
+        /^ExecStart=.* desk serve --host 0\.0\.0\.0 --port 5199 --broker-host box-a$/m,
+      );
+      expect(p.row).toBe("Desk: broker box-a:9001 (served to the page at /desk-config.json)");
+      expect((await planServices(m.ctx)).changes).toEqual([]);
+    });
+
+    it("a broker_host in a record of its own (a machine `volley desk install` set up) is kept too", async () => {
+      mkdirSync(m.ctx.volleydHome, { recursive: true });
+      writeFileSync(join(m.ctx.volleydHome, "setup.json"), '{"broker_host":"fd00::2"}\n');
+      await applyAll(await planServices(m.ctx));
+      expect(readFileSync(deskUnit(), "utf-8")).toContain("--broker-host fd00::2");
+    });
+
+    it("without it, nothing: the page uses its own host", async () => {
+      record({});
+      const p = await planServices(m.ctx);
+      await applyAll(p);
+      expect(readFileSync(deskUnit(), "utf-8")).not.toContain("--broker-host");
+      expect(p.row).toBe("Desk: broker on the page's host (port 9001)");
+    });
+
+    it("ignores a broker_host that is not a bare host", async () => {
+      record({ broker_host: "ws://box-a:9001" });
+      await applyAll(await planServices(m.ctx));
+      expect(readFileSync(deskUnit(), "utf-8")).not.toContain("--broker-host");
+    });
+  });
+
   describe("Linux (systemd --user)", () => {
     beforeEach(() => {
       m = fakeMachine(fake, dir, { platform: "linux" });

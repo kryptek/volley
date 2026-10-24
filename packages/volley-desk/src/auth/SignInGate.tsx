@@ -50,8 +50,13 @@ import {
 import SpecularButton from "../rb/SpecularButton/SpecularButton";
 import { MachineSheet } from "../settings/MachineSheet";
 import {
+  BrokerOriginContext,
   CREDENTIALS_STORAGE_KEY,
   DeskStoreProvider,
+  type ServedDeskConfig,
+  brokerSource,
+  loadDeskConfig,
+  needsServedConfig,
   readCredentials,
   resolveBrokerUrl,
   useDesk,
@@ -148,6 +153,11 @@ export interface SignInGateProps {
   settleMs?: number;
   /** Redeems a `#signin=<token>` link (tests inject one); default `redeemToken`. */
   redeem?: (req: RedeemRequest) => Promise<RedeemResult>;
+  /**
+   * The server's `/desk-config.json` (tests inject one); default `loadDeskConfig`, fetched once
+   * per page load. Not fetched when the prop or `VITE_VOLLEY_BROKER_URL` names the broker.
+   */
+  loadConfig?: () => Promise<ServedDeskConfig | null>;
 }
 
 /** Strip the fragment (the single-use token) from the address bar and the history entry. */
@@ -168,9 +178,26 @@ export function SignInGate({
   clientFactory,
   settleMs,
   redeem = redeemToken,
+  loadConfig = loadDeskConfig,
 }: SignInGateProps) {
   const env = envProp ?? viteEnv();
   const demo = demoProp ?? isDemoMode(window.location.search, env);
+  /** The server's broker: undefined while the fetch is in flight (nothing renders until it settles). */
+  const [served, setServed] = useState<ServedDeskConfig | null | undefined>(() =>
+    demo || !needsServedConfig(brokerUrl, env) ? null : undefined,
+  );
+  const waiting = served === undefined;
+  useEffect(() => {
+    if (!waiting) return;
+    let live = true;
+    void loadConfig().then(
+      (c) => live && setServed(c),
+      () => live && setServed(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [waiting, loadConfig]);
   const [storage] = useState(localStorageOrNull);
   /** The one-time token in the address bar, read once (the effect below drops it from there). */
   const [link] = useState(() => (demo ? null : signinTokenFromHash(window.location.hash)));
@@ -193,15 +220,17 @@ export function SignInGate({
   const [switching, setSwitching] = useState<{ token?: string } | null>(null);
   /** Bumped by every switch, so the store reconnects as the new account (it reads `auth` once). */
   const [session, setSession] = useState(0);
+  const url = resolveBrokerUrl(brokerUrl, env, window.location, served);
+  const origin = { url, source: brokerSource(brokerUrl, env, served) };
   const passthrough = {
     ...(brokerUrl !== undefined ? { brokerUrl } : {}),
     ...(clientFactory !== undefined ? { clientFactory } : {}),
     ...(settleMs !== undefined ? { settleMs } : {}),
   };
 
-  const url = resolveBrokerUrl(brokerUrl);
   useEffect(() => {
-    if (link === null || started.current) return;
+    // The link is redeemed through the broker: wait until the server has named it.
+    if (link === null || started.current || waiting) return;
     started.current = true;
     dropFragment();
     void redeem({ url, token: link, label: deviceLabel(navigator.userAgent) }).then((r) => {
@@ -218,7 +247,7 @@ export function SignInGate({
       setPending(true);
       setCreds(next);
     });
-  }, [link, redeem, storage, url]);
+  }, [link, redeem, storage, url, waiting]);
 
   const account: AccountActions = {
     byEnvironment,
@@ -246,8 +275,8 @@ export function SignInGate({
   // The backdrop keeps its slot from the form to the busy card, so Line Waves isn't remounted.
   return (
     <>
-      {(creds === null || pending) && <SignInBackdrop />}
-      {redeeming ? (
+      {(creds === null || pending || waiting) && <SignInBackdrop />}
+      {waiting ? null : redeeming ? (
         <SignInCard
           brokerUrl={url}
           initialUsername=""
@@ -286,6 +315,7 @@ export function SignInGate({
             setCreds(null);
           }}
           {...passthrough}
+          brokerUrl={url}
         >
           {pending ? (
             <Connecting onSettled={() => setPending(false)}>
@@ -301,7 +331,7 @@ export function SignInGate({
             </Connecting>
           ) : (
             <AccountContext.Provider value={account}>
-              {children}
+              <BrokerOriginContext.Provider value={origin}>{children}</BrokerOriginContext.Provider>
               {switching !== null && (
                 <SwitchAccountSheet
                   brokerUrl={url}

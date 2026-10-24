@@ -4,7 +4,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { ARRANGE_ANIM_MS, FIRST_ARRANGE_MS } from "../src/layout/useAutoArrange";
-import { DIGEST_AFTER_MS, DeskStoreProvider } from "../src/store/context";
+import { About } from "../src/settings/About";
+import { BrokerOriginContext, DIGEST_AFTER_MS, DeskStoreProvider } from "../src/store/context";
 import { DIGEST_WAVE } from "../src/store/fixtures";
 import type { DeskMqttClient } from "../src/store/mqtt-client";
 import type { DeskMessage, Envelope, WaveStatePayload } from "../src/store/types";
@@ -651,5 +652,30 @@ describe("App machine chip (demo mode)", () => {
     } finally {
       Reflect.deleteProperty(Element.prototype, "scrollIntoView");
     }
+  });
+});
+
+describe("Settings › About: where the broker came from", () => {
+  it("names the served broker", () => {
+    render(
+      <BrokerOriginContext.Provider value={{ url: "ws://box-a:9001", source: "served" }}>
+        <About />
+      </BrokerOriginContext.Provider>,
+    );
+    expect(screen.getByText("broker ws://box-a:9001 (served)")).toBeInTheDocument();
+  });
+
+  it("names the page host's", () => {
+    render(
+      <BrokerOriginContext.Provider value={{ url: "ws://192.0.2.10:9001", source: "page host" }}>
+        <About />
+      </BrokerOriginContext.Provider>,
+    );
+    expect(screen.getByText("broker ws://192.0.2.10:9001 (page host)")).toBeInTheDocument();
+  });
+
+  it("says nothing about a broker outside a signed-in gate (the demo)", () => {
+    const { container } = render(<About />);
+    expect(container.textContent).not.toMatch(/broker ws/);
   });
 });

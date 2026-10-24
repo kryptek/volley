@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { LAYOUTS, type LayoutName } from "../auth/config";
 import { ensureOwnedDir } from "../auth/context";
 import { withoutLogin } from "../peer/profile-checks";
+import { parseBrokerHost } from "./desk-build";
 import type { SetupContext, StepName } from "./step";
 import {
   type CmuxSocketMode,
@@ -101,6 +102,11 @@ export interface SetupInstall {
   broker_url?: string;
   /** The run's setup-metrics.json. */
   metrics?: string;
+  /**
+   * The broker's host when it is not the Desk's machine: the Desk's service runs
+   * `volley desk serve --broker-host <it>` (set by `volley desk install --broker-host`).
+   */
+  broker_host?: string;
 }
 
 /** The namespace the coordinator's MCP server registers in. */
@@ -121,6 +127,7 @@ export function writeSetupInstall(ctx: SetupContext, metrics?: string): void {
   // And a run that skipped the Terminal step keeps its choice; and the coordinator's name.
   const terminal = ctx.terminal ?? prior?.terminal;
   const coordinator = ctx.coordinator ?? prior?.coordinator;
+  const brokerHost = deskBrokerHost(ctx);
   const install: SetupInstall = {
     layout: ctx.auth.layout.name,
     config: ctx.config,
@@ -141,6 +148,7 @@ export function writeSetupInstall(ctx: SetupContext, metrics?: string): void {
       : prior?.metrics !== undefined
         ? { metrics: prior.metrics }
         : {}),
+    ...(brokerHost !== null ? { broker_host: brokerHost } : {}),
   };
   saveInstall(ctx, install);
 }
@@ -157,7 +165,50 @@ export function recordCmuxSocketMode(ctx: SetupContext): void {
   saveInstall(ctx, { ...prior, cmux_socket_mode: ctx.cmuxSocketMode });
 }
 
-function saveInstall(ctx: SetupContext, install: SetupInstall): void {
+/**
+ * setup.json's `broker_host`, read on its own: `volley desk install` records it on a machine no
+ * `volley setup` has finished on, in a record without the rest. Null when there is none (or it is
+ * not a bare host).
+ */
+export function readBrokerHost(volleydHome: string): string | null {
+  try {
+    const v = JSON.parse(readFileSync(setupInstallFile(volleydHome), "utf-8")) as {
+      broker_host?: unknown;
+    };
+    return typeof v.broker_host === "string" ? parseBrokerHost(v.broker_host) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The Desk's broker host for `ctx`: its own (null: none), else the record's. */
+export const deskBrokerHost = (ctx: SetupContext): string | null =>
+  ctx.brokerHost !== undefined ? ctx.brokerHost : readBrokerHost(ctx.volleydHome);
+
+/**
+ * Record what `volley desk install` installed (its port, and its broker host or none) in
+ * setup.json, keeping every other key; a machine without a record gets one with these alone.
+ */
+export function recordDeskInstall(
+  ctx: SetupContext,
+  desk: { port: number; brokerHost: string | null },
+): void {
+  let prior: Record<string, unknown> = {};
+  try {
+    const v = JSON.parse(readFileSync(setupInstallFile(ctx.volleydHome), "utf-8")) as unknown;
+    if (typeof v === "object" && v !== null && !Array.isArray(v)) prior = v as typeof prior;
+  } catch {
+    // none yet, or unreadable: start a record
+  }
+  const { broker_host: _old, ...rest } = prior;
+  saveInstall(ctx, {
+    ...rest,
+    desk_port: desk.port,
+    ...(desk.brokerHost !== null ? { broker_host: desk.brokerHost } : {}),
+  });
+}
+
+function saveInstall(ctx: SetupContext, install: SetupInstall | Record<string, unknown>): void {
   const file = setupInstallFile(ctx.volleydHome);
   try {
     const invoker = ctx.auth.deps.invokingUser(ctx.auth.env);
@@ -206,6 +257,9 @@ export function readSetupInstall(volleydHome: string): SetupInstall | null {
         : {}),
       ...(str("broker_url") !== null ? { broker_url: str("broker_url") as string } : {}),
       ...(str("metrics") !== null ? { metrics: str("metrics") as string } : {}),
+      ...(str("broker_host") !== null && parseBrokerHost(str("broker_host") as string) !== null
+        ? { broker_host: parseBrokerHost(str("broker_host") as string) as string }
+        : {}),
     };
   } catch {
     return null;

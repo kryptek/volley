@@ -339,3 +339,99 @@ describe("volley desk serve --evidence: the release evidence route", () => {
     expect(help.readStdout()).toMatch(/LAN/);
   });
 });
+
+describe("volley desk serve --broker-host: /desk-config.json", () => {
+  let root: string;
+  let server: DeskServer | null = null;
+  beforeEach(() => {
+    root = tempDir("volley-desk-config-");
+    writeFileSync(join(root, "index.html"), "<!doctype html><title>Desk</title>");
+  });
+  afterEach(async () => {
+    await server?.close();
+    server = null;
+  });
+
+  it("is a 404 without the flag (never the index)", async () => {
+    server = await startDeskServer({ root, host: "127.0.0.1", port: 0 });
+    const r = await fetch(`${server.url}/desk-config.json`);
+    expect(r.status).toBe(404);
+    expect(await r.text()).not.toContain("<title>");
+  });
+
+  it("serves the broker's host and WebSocket port, never cached", async () => {
+    server = await startDeskServer({
+      root,
+      host: "127.0.0.1",
+      port: 0,
+      broker: { host: "box-a", ws_port: 9001 },
+    });
+    const r = await fetch(`${server.url}/desk-config.json`);
+    expect(r.status).toBe(200);
+    expect(r.headers.get("cache-control")).toBe("no-store");
+    expect(r.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    expect(await r.text()).toBe('{"broker":{"host":"box-a","ws_port":9001}}');
+    const q = await fetch(`${server.url}/desk-config.json?x=1`);
+    expect(await q.json()).toEqual({ broker: { host: "box-a", ws_port: 9001 } });
+  });
+
+  const serveOnce = async (argv: string[]) => {
+    const io = makeBufferIO();
+    let stop: () => void = () => {};
+    const until = new Promise<void>((ok) => {
+      stop = ok;
+    });
+    const running = desk({
+      argv: ["serve", "--port", "0", "--root", root, "--quiet", ...argv],
+      env: {},
+      io,
+      until,
+    });
+    let body: unknown = null;
+    for (let i = 0; i < 200 && !io.readStdout().includes("Serving the Desk"); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const url = /on (http:\/\/\S+)/.exec(io.readStdout())?.[1];
+    if (url !== undefined) body = await (await fetch(`${url}/desk-config.json`)).json();
+    stop();
+    return { code: await running, io, body };
+  };
+
+  it("--broker-host and --broker-ws-port reach the route; the start line names them", async () => {
+    const a = await serveOnce(["--broker-host", "box-a"]);
+    expect(a.code).toBe(0);
+    expect(a.body).toEqual({ broker: { host: "box-a", ws_port: 9001 } });
+    expect(a.io.readStdout()).toContain("the broker box-a:9001");
+    const b = await serveOnce(["--broker-host", "fe80::1", "--broker-ws-port", "9443"]);
+    expect(b.body).toEqual({ broker: { host: "fe80::1", ws_port: 9443 } });
+    const c = await serveOnce(["--broker-host", "[fd00::2]"]);
+    expect(c.body).toEqual({ broker: { host: "fd00::2", ws_port: 9001 } });
+  });
+
+  it("a scheme, a path, a port or a login in --broker-host exits 2; so does a bad ws port", async () => {
+    for (const bad of ["ws://box-a", "box-a/x", "box-a:9001", "me@box-a", "", "box a", "[box-a]"]) {
+      const io = makeBufferIO();
+      expect(
+        await desk({ argv: ["serve", "--root", root, "--broker-host", bad], env: {}, io }),
+        bad,
+      ).toBe(2);
+      expect(io.readStderr(), bad).toContain("--broker-host");
+    }
+    for (const bad of ["0", "65536", "ws"]) {
+      const io = makeBufferIO();
+      expect(
+        await desk({
+          argv: ["serve", "--root", root, "--broker-host", "box-a", "--broker-ws-port", bad],
+          env: {},
+          io,
+        }),
+      ).toBe(2);
+      expect(io.readStderr()).toContain("--broker-ws-port");
+    }
+    const io = makeBufferIO();
+    expect(
+      await desk({ argv: ["serve", "--root", root, "--broker-ws-port", "9001"], env: {}, io }),
+    ).toBe(2);
+    expect(io.readStderr()).toContain("--broker-ws-port needs --broker-host");
+  });
+});
