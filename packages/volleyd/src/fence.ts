@@ -56,6 +56,8 @@ import { AGENT_BRANCH } from "./worktree";
  *       gh pr merge <n> --merge --match-head-commit <sha40>
  *     with <n> the train's PR and <sha40> its gated head: a merge commit, so the member PRs, whose
  *     heads it contains, read as merged. Never --squash.
+ *   Either may end in exactly `--repo <owner/name>` (or `<host>/<owner>/<name>`): a wave the
+ *   supervisor holds no clone of (#448).
  *
  * CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
  * retire for the retired agent's own workspace only):
@@ -80,6 +82,7 @@ import { AGENT_BRANCH } from "./worktree";
  *     a `<!-- volleyd:… wave=… -->` marker: only volleyd's own comments) ·
  *     gh label list --search merged-to-release --json name ·
  *     gh label create merged-to-release --description <text> --color <6 hex> (never --force);
+ *     each of these may end in exactly `--repo <owner/name>`;
  *     never on a paired machine
  *   cmux — exact argv shapes only, because cmux types into an agent's shell:
  *     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
@@ -401,14 +404,24 @@ export function mintTrainToken(t: TrainToken): TrainToken {
 }
 
 /**
+ * A `--repo` value naming the repository a supervisor holds no clone of (#448): `owner/name`, or
+ * `host/owner/name` off github.com.
+ */
+const isRepoName = (v: string): boolean =>
+  isSlug(v) || (/^[A-Za-z0-9.-]+\/[^/]+\/[^/]+$/.test(v) && isSlug(v.slice(v.indexOf("/") + 1)));
+
+/**
  * `gh pr merge <n> --squash --match-head-commit <head> [--delete-branch]` for a MergeToken's n and
- * head, or `gh pr merge <n> --merge --match-head-commit <head>` for a TrainToken's, exactly.
+ * head, or `gh pr merge <n> --merge --match-head-commit <head>` for a TrainToken's, exactly; each
+ * may end in exactly `--repo <owner/name>` (a wave the supervisor holds no clone of, #448).
  */
 function mergeVerdict(
-  args: readonly string[],
+  all: readonly string[],
   token: MergeToken | undefined,
   train: TrainToken | undefined,
 ): Verdict {
+  const repo = all.length >= 2 && all.at(-2) === "--repo" && isRepoName(all.at(-1) ?? "");
+  const args = repo ? all.slice(0, -2) : all;
   const squash = token !== undefined && merges.has(token);
   const commit = train !== undefined && trains.has(train);
   if (!squash && !commit) return deny("gh pr merge");
@@ -1578,10 +1591,14 @@ const COMMENT_MARKER = /\n\n<!-- volleyd:[a-z-]+ wave=[a-z0-9][a-z0-9_-]{0,62}( 
 
 /**
  * The issue lifecycle's writes (#416), each an exact argv: the label added or removed, a comment
- * or a closing comment that carries volleyd's marker, the label listed or created. Null: not one
- * of them (the read-only allow-list decides).
+ * or a closing comment that carries volleyd's marker, the label listed or created; each may end
+ * in `--repo <owner/name>`. Null: not one of them (the read-only allow-list decides).
  */
-function issueLifecycle(args: string[]): Verdict | null {
+function issueLifecycle(all: string[]): Verdict | null {
+  // A wave named by its `owner/name` (no clone on the supervisor) ends each form in exactly
+  // `--repo <owner/name>` (#448).
+  const repo = all.length >= 2 && all.at(-2) === "--repo" && isSlug(all.at(-1) ?? "");
+  const args = repo ? all.slice(0, -2) : all;
   const [verb = "", sub = "", n = "", flag = "", value = ""] = args;
   const two = `${verb} ${sub}`;
   if (two === "issue edit" || two === "issue comment" || two === "issue close") {

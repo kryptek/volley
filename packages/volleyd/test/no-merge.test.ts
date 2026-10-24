@@ -109,7 +109,10 @@ describe("volleyd merges only behind the fence", () => {
     const code = merge.replace(/\/\*[\s\S]*?\*\//g, "");
     // "--merge" appears once: in the train's argv, right before its head guard.
     expect(code.split('"--merge"')).toHaveLength(2);
-    expect(code).toContain('"--merge", "--match-head-commit", token.head]');
+    // Only a `--repo <owner/name>` (a slug-only wave, #448; the fence allows exactly that) follows.
+    expect(code).toContain(
+      '"--merge",\n    "--match-head-commit",\n    token.head,\n    ...repo,\n  ];',
+    );
     for (const flag of ["--admin", "--auto", '"--rebase"']) expect(code).not.toContain(flag);
   });
 
