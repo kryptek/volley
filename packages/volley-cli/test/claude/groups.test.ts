@@ -3,6 +3,7 @@ import {
   type ListResult,
   type UsageRecord,
   groupAccounts,
+  pendingProfiles,
   renderGroups,
 } from "../../src/claude/groups";
 
@@ -56,7 +57,7 @@ const result = (over: Partial<ListResult> = {}): ListResult => ({
 });
 
 describe("groupAccounts", () => {
-  it("one e-mail on two machines is one group; the freshest reading wins, the other is stale", () => {
+  it("one e-mail on two machines is one group; the freshest reading wins", () => {
     const [g, ...rest] = groupAccounts(result(), [work, peer]);
     expect(rest).toEqual([]);
     expect(g?.key).toBe(EMAIL);
@@ -73,17 +74,7 @@ describe("groupAccounts", () => {
       sampledAt: work.sampled_at,
     });
     expect(g?.weekly?.machine).toBe("local");
-    // The weekly readings agree (same pct, same reset): only the 5-hour is stale.
-    expect(g?.stale).toEqual([
-      {
-        account: "primary@peer-a",
-        machine: "peer-a",
-        window: "five_hour",
-        pct: 41,
-        resets_at: null,
-        sampledAt: peer.sampled_at,
-      },
-    ]);
+    expect(g).not.toHaveProperty("stale");
     expect(g?.members.map((m) => [m.machine, m.label, m.state, m.waves])).toEqual([
       ["local", "work", "signed_in", ["w1"]],
       ["peer-a", "default login", "signed_in", ["w2"]],
@@ -94,7 +85,6 @@ describe("groupAccounts", () => {
     const newer = { ...peer, sampled_at: "2026-10-18T14:10:00.000Z" };
     const [g] = groupAccounts(result(), [work, newer]);
     expect(g?.fiveHour?.machine).toBe("peer-a");
-    expect(g?.stale.map((s) => [s.machine, s.window])).toEqual([["local", "five_hour"]]);
   });
 
   it("a same-time tie goes to the reading with a known reset", () => {
@@ -107,13 +97,19 @@ describe("groupAccounts", () => {
     const r = result({
       accounts: [
         ...result().accounts,
-        { id: "spare", label: "Spare", machine: "local", signin: { state: "signed_out" } },
+        {
+          id: "spare",
+          label: "Spare",
+          machine: "local",
+          signed_in_at: "2026-10-18T12:00:00.000Z",
+          signin: { state: "signed_out" },
+        },
       ],
     });
     const out = groupAccounts(r, [work, peer]);
-    expect(out.map((g) => [g.key, g.email])).toEqual([
-      [EMAIL, EMAIL],
-      ["spare", null],
+    expect(out.map((g) => [g.key, g.email, g.label])).toEqual([
+      [EMAIL, EMAIL, "Work"],
+      ["spare", null, "Spare"],
     ]);
     expect(out[1]?.members.map((m) => m.state)).toEqual(["signed_out"]);
   });
@@ -122,7 +118,6 @@ describe("groupAccounts", () => {
     const [g, ...rest] = groupAccounts(result(), [work]);
     expect(rest).toEqual([]);
     expect(g?.members.map((m) => m.account)).toEqual(["work", "primary@peer-a"]);
-    expect(g?.stale).toEqual([]);
     expect(g?.fiveHour?.machine).toBe("local");
   });
 
@@ -159,6 +154,46 @@ describe("groupAccounts", () => {
     expect(rest).toEqual([]);
     expect(g?.members.map((m) => [m.account, m.machine])).toEqual([["work@peer-b", "peer-b"]]);
     expect(g?.fiveHour?.machine).toBe("peer-b");
+  });
+});
+
+describe("groupAccounts › the heading's label (#496)", () => {
+  const row = (id: string, label: string, machine: string) => ({
+    id,
+    label,
+    machine,
+    email: EMAIL,
+    signed_in_at: "2026-10-18T12:00:00.000Z",
+    signin: { state: "signed_in" },
+  });
+
+  it("strips a trailing (<machine>); Add's Claude login names nothing: the masked e-mail heads it", () => {
+    const login = result({
+      accounts: [row("claude-login", "Claude login (peer-a)", "peer-a")],
+      primary: { email: EMAIL },
+    });
+    expect(groupAccounts(login, [])[0]?.label).toBe("o•••@example.com");
+    const work = result({ accounts: [row("work", "Work (peer-a)", "peer-a")] });
+    expect(groupAccounts(work, [])[0]?.label).toBe("Work");
+  });
+
+  it("this machine's profile first, else the earliest in registry order", () => {
+    const remote = [row("b", "Team B (peer-a)", "peer-a"), row("a", "Team A (peer-a)", "peer-a")];
+    expect(groupAccounts(result({ accounts: remote }), [])[0]?.label).toBe("Team B");
+    const local = result({ accounts: [...remote, row("t", "Team here", "local")] });
+    expect(groupAccounts(local, [])[0]?.label).toBe("Team here");
+  });
+
+  it("a pending profile is no group and no member", () => {
+    const r = result({
+      accounts: [
+        ...result().accounts,
+        { id: "p", label: "P", machine: "peer-a", signin: { state: "pending", url: "https://x" } },
+      ],
+    });
+    const out = groupAccounts(r, [work, peer]);
+    expect(out.flatMap((g) => g.members.map((m) => m.account))).not.toContain("p@peer-a");
+    expect(pendingProfiles(r, [work, peer]).map((a) => a.id)).toEqual(["p"]);
   });
 });
 
@@ -207,7 +242,7 @@ describe("renderGroups", () => {
     );
   });
 
-  it("masks the e-mail unless asked, and prints machines, usage and stale readings", () => {
+  it("masks the e-mail unless asked, and prints machines, usage and when it was last updated", () => {
     const text = renderGroups(groupAccounts(result(), [work, peer]), {
       now: NOW,
       showEmail: false,
@@ -215,12 +250,11 @@ describe("renderGroups", () => {
     expect(text).toContain("Work · max · Example Org · o•••@example.com");
     expect(text).not.toContain(EMAIL);
     expect(text).toContain(
-      "  5-hour 37% (resets in 4h 2m) · 7-day 56% (resets in 2d 18h) · Fable — (not read yet)\n  freshest: this machine, 2 min ago\n",
+      "  5-hour 37% (resets in 4h 2m) · 7-day 56% (resets in 2d 18h) · Fable — (not read yet)\n  last updated: 2 min ago\n",
     );
     expect(text).toMatch(/this machine +work +signed in +waves: w1\n/);
-    expect(text).toMatch(
-      /peer-a +default login +signed in +waves: w2 +5-hour 41% 8 min old \(stale\)/,
-    );
+    expect(text).toMatch(/peer-a +default login +signed in +waves: w2\n/);
+    expect(text).not.toMatch(/stale|freshest:/);
   });
 
   it("shows the e-mail with showEmail", () => {
@@ -228,7 +262,7 @@ describe("renderGroups", () => {
     expect(text).toContain(`Work · max · Example Org · ${EMAIL}`);
   });
 
-  it("an account with no usage and one with no e-mail", () => {
+  it("an account with no usage and one with no e-mail; one never signed in waits", () => {
     const r = result({
       accounts: [
         {
@@ -237,27 +271,44 @@ describe("renderGroups", () => {
           machine: "local",
           plan: "pro",
           email: "p@example.com",
+          signed_in_at: "2026-10-18T12:00:00.000Z",
           signin: { state: "signed_out" },
         },
         {
-          id: "spare",
-          label: "Spare",
+          id: "nomail",
+          label: "No mail",
           machine: "local",
+          signed_in_at: "2026-10-18T12:00:00.000Z",
+          signin: { state: "signed_in" },
+        },
+        {
+          id: "spare",
+          label: "Spare (peer-a)",
+          machine: "peer-a",
           signin: { state: "pending", url: "https://x" },
         },
       ],
       machines: [],
     });
-    const text = renderGroups(groupAccounts(r, []), { now: NOW, showEmail: false });
+    const pending = pendingProfiles(r, []);
+    expect(pending.map((a) => a.id)).toEqual(["spare"]);
+    const groups = groupAccounts(r, []);
+    expect(groups.map((g) => g.key)).toEqual(["p@example.com", "nomail"]);
+    const text = renderGroups(groups, { now: NOW, showEmail: false, pending });
     expect(text).toContain(
       "Personal · pro · p•••@example.com\n  5-hour — · 7-day — · Fable — (not read yet)\n",
     );
     expect(text).toMatch(/this machine +personal +signed out/);
-    expect(text).toContain("spare (e-mail not reported yet)");
-    expect(text).toContain("    sign in: https://x");
+    expect(text).toContain("No mail (e-mail not reported yet)");
+    expect(text).not.toContain("last updated:");
+    expect(
+      text.endsWith(
+        "waiting for sign-in:\n  spare · Spare (peer-a) · on peer-a\n    sign in: https://x\n",
+      ),
+    ).toBe(true);
   });
 
-  it("a group of default logins only is headed `default login`, its e-mail still masked", () => {
+  it("a group of default logins only is headed by its masked e-mail, once", () => {
     const r = result({
       accounts: [],
       primary: { email: "Owner@Example.com", plan: "max" },
@@ -265,7 +316,7 @@ describe("renderGroups", () => {
     });
     const text = renderGroups(groupAccounts(r, []), { now: NOW, showEmail: false });
     expect(text.toLowerCase()).not.toContain(EMAIL);
-    expect(text).toContain("default login · max · O•••@Example.com\n");
+    expect(text).toContain("O•••@Example.com · max\n");
   });
 
   it("a reading whose sampled_at does not parse prints `? ago`, never NaN", () => {
@@ -275,7 +326,7 @@ describe("renderGroups", () => {
       showEmail: false,
     });
     expect(text).not.toContain("NaN");
-    expect(text).toContain("freshest: this machine, ? ago");
+    expect(text).toContain("last updated: ? ago");
   });
 
   describe("the Fable window", () => {

@@ -20,6 +20,8 @@ import type {
 } from "../src/store/types";
 
 const NOW = Date.parse("2026-10-18T14:06:00.000Z");
+/** When a registry profile finished its sign-in. */
+const SIGNED = "2026-10-18T12:00:00.000Z";
 
 const work: ClaudeAccountPayload = {
   account: "work",
@@ -159,11 +161,8 @@ describe("ClaudeAccounts", () => {
     const week = w.getByRole("meter", { name: "7-day" });
     expect(week.closest(".meter")).toHaveTextContent("43%");
     expect(week.closest(".meter")).toHaveTextContent("resets in 2d 18h");
-    const foot = within(w.getByText("2 agents").closest(".cc-foot") as HTMLElement);
-    expect(foot.getByText("waves: w1")).toBeInTheDocument();
     const p = within(screen.getByRole("article", { name: "Personal" }));
     expect(p.getByRole("meter", { name: "5-hour" }).closest(".meter")).toHaveTextContent("12%");
-    expect(p.getByText("no waves assigned")).toBeInTheDocument();
   });
 
   it("shows the open account_limit decision as a banner; Move resolves it", async () => {
@@ -184,7 +183,12 @@ describe("ClaudeAccounts", () => {
     const fresh = { ...limit, options: ["move wave w1 to fresh", "not now"], suggested: "fresh" };
     const control = vi.fn(async (op: string) =>
       op === "claude_accounts"
-        ? { ok: true, result: { accounts: [{ id: "fresh", label: "fresh", machine: "local" }] } }
+        ? {
+            ok: true,
+            result: {
+              accounts: [{ id: "fresh", label: "fresh", machine: "local", signed_in_at: SIGNED }],
+            },
+          }
         : { ok: true },
     );
     setup([], {
@@ -241,21 +245,6 @@ describe("ClaudeAccounts", () => {
       },
     });
     expect(screen.queryByRole("status")).toBeNull();
-  });
-
-  it("Move a wave here… answers the wave's open decision with this account", async () => {
-    const { control } = setup([], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
-    const card = within(screen.getByRole("article", { name: "Personal" }));
-    await act(async () => {
-      fireEvent.change(card.getByRole("combobox", { name: "Move a wave to Personal" }), {
-        target: { value: "w1" },
-      });
-    });
-    expect(control).toHaveBeenCalledWith(
-      "resolve",
-      { wave: "w1", decision_id: "d-7k2m9q4x", answer: "move wave w1 to personal" },
-      expect.any(String),
-    );
   });
 
   it("Add → the Stepper shows the sign-in link from the event and completes on done", async () => {
@@ -338,13 +327,6 @@ describe("ClaudeAccounts", () => {
 });
 
 describe("ClaudeAccounts review fixes", () => {
-  const remote: ClaudeAccountPayload = {
-    ...personal,
-    account: "team@box",
-    label: "Team",
-    plan: "max",
-  };
-
   it("Defaults shows a rejected config_set the way Supervisor's rows do", async () => {
     const send = vi.fn(async () => ({
       applied: false,
@@ -380,12 +362,6 @@ describe("ClaudeAccounts review fixes", () => {
     expect(screen.getByText("applied · v4")).toBeInTheDocument();
   });
 
-  it("a remote account's card does not offer to move a wave there", () => {
-    setup([accountMsg(remote)], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
-    const card = within(screen.getByRole("article", { name: "Team" }));
-    expect(card.getByRole("combobox", { name: "Move a wave to Team" })).toBeDisabled();
-  });
-
   it("Move / Not now are disabled while an answer is in flight", async () => {
     const { control } = setup([], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
     let release: (v: { ok: boolean }) => void = () => {};
@@ -399,9 +375,6 @@ describe("ClaudeAccounts review fixes", () => {
     fireEvent.click(banner.getByRole("button", { name: "Move to Personal" }));
     expect(banner.getByRole("button", { name: "Move to Personal" })).toBeDisabled();
     expect(banner.getByRole("button", { name: "Not now" })).toBeDisabled();
-    expect(
-      within(screen.getByRole("article", { name: "Personal" })).getByRole("combobox"),
-    ).toBeDisabled();
     fireEvent.click(banner.getByRole("button", { name: "Move to Personal" }));
     expect(control.mock.calls.filter((c) => (c as unknown[])[0] === "resolve")).toHaveLength(1);
     await act(async () => release({ ok: true }));
@@ -474,7 +447,7 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
         signins={{}}
         waves={{}}
         config={config}
-        control={registry([{ id: "team", label: "Team", machine: "local" }])}
+        control={registry([{ id: "team", label: "Team", machine: "local", signed_in_at: SIGNED }])}
         configTransport={null}
         now={NOW}
       />,
@@ -517,7 +490,9 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
   });
 
   it("a primary whose plan volleyd does not know shows none, never a guess", async () => {
-    const control = registry([{ id: "team", label: "Team", machine: "local", plan: "pro" }]);
+    const control = registry([
+      { id: "team", label: "Team", machine: "local", plan: "pro", signed_in_at: SIGNED },
+    ]);
     render(
       <ClaudeAccounts
         group="accounts"
@@ -573,7 +548,6 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     const p = within(cards[0] as HTMLElement);
     expect(p.getByText("max")).toHaveClass("chip");
     expect(p.getByRole("meter", { name: "5-hour" })).toHaveAttribute("aria-valuenow", "34");
-    expect(p.getByText("1 agent")).toBeInTheDocument();
   });
 
   it("another machine's primary is that machine's card, not this one's", () => {
@@ -768,7 +742,7 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
     expect(within(card()).queryByText(EMAIL)).toBeNull();
   });
 
-  it("lists each machine holding the account with its sign-in state and waves", () => {
+  it("lists each machine holding the account with its sign-in state only", () => {
     render(view({ work: own, "primary@peer-a": peer }));
     const rows = within(within(card()).getByRole("list", { name: "Machines" })).getAllByRole(
       "listitem",
@@ -776,26 +750,19 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]).toHaveTextContent("this machine");
     expect(rows[0]).toHaveTextContent("Work");
-    expect(rows[0]).toHaveTextContent("waves: w1");
     expect(rows[0]).toHaveTextContent("signed in");
     expect(rows[1]).toHaveTextContent("peer-a");
     expect(rows[1]).toHaveTextContent("default login");
-    expect(rows[1]).toHaveTextContent("waves: w2");
     expect(rows[1]).toHaveTextContent("signed in");
+    for (const r of rows) expect(r.textContent).not.toMatch(/waves|%/);
   });
 
-  it("the meters show the freshest reading and name the stale one with its age", () => {
+  it("the meters show the freshest reading, and nothing is called stale", () => {
     render(view({ work: own, "primary@peer-a": peer }));
     const c = within(card());
     expect(c.getByRole("meter", { name: "5-hour" })).toHaveAttribute("aria-valuenow", "37");
-    expect(c.getByText("freshest: this machine, just now")).toBeInTheDocument();
-    expect(c.getByText("peer-a's 5-hour reading (41%, 3 h old) is stale")).toBeInTheDocument();
-  });
-
-  it("names a stale weekly reading by its meter's label, 7-day", () => {
-    const week = { pct: 70, resets_at: "2026-10-20T00:00:00.000Z" };
-    render(view({ work: own, "primary@peer-a": { ...peer, weekly: week } }));
-    expect(within(card()).getByText(/^peer-a's 7-day reading \(70%/)).toBeInTheDocument();
+    expect(card()).not.toHaveTextContent(/stale|freshest/);
+    expect(c.getByText("Last updated: just now")).toBeInTheDocument();
   });
 
   describe("three meters: 5-hour, 7-day and Fable", () => {
@@ -857,7 +824,7 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
       expect(fableMeter().closest(".meter")?.querySelector(".meter-pct")).toHaveTextContent("—");
     });
 
-    it("each machine row shows the three figures, and an older row its own age", () => {
+    it("no machine row shows a figure or its own age: the meters appear once", () => {
       render(
         view({
           work: own,
@@ -872,9 +839,8 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
       const rows = within(within(card()).getByRole("list", { name: "Machines" })).getAllByRole(
         "listitem",
       );
-      for (const r of rows) expect(r).toHaveTextContent("5h 37% · 7d 56% · Fable 12%");
-      expect(rows[0]).not.toHaveTextContent("sampled");
-      expect(rows[1]).toHaveTextContent("sampled 3 h ago");
+      for (const r of rows) expect(r.textContent).not.toMatch(/%|5h|7d|Fable|sampled/);
+      expect(within(card()).getAllByRole("meter")).toHaveLength(3);
     });
 
     it("a window whose reset passed shows 0 %", () => {
@@ -884,10 +850,9 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
         "aria-valuenow",
         "0",
       );
-      expect(within(card()).getAllByText(/^5h 0% · 7d 56% · Fable —$/)).toHaveLength(2);
     });
 
-    it("passes axe with the three meters and the row figures", async () => {
+    it("passes axe with the three meters and the machine rows", async () => {
       render(
         view({
           work: own,
@@ -909,34 +874,6 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
     const c = within(screen.getByRole("article", { name: "primary@box" }));
     expect(c.getByText("e-mail not reported yet (run the machine's doctor)")).toBeInTheDocument();
     expect(c.queryByRole("button", { name: /email/ })).toBeNull();
-  });
-
-  it("Use for stays on this machine's account id", async () => {
-    const control = vi.fn(async () => ({ ok: true }));
-    render(
-      <ClaudeAccounts
-        accounts={{ work: own, "primary@peer-a": peer, personal }}
-        signins={{}}
-        waves={{ w1: wave({ [limit.decision_id]: { ...limit, acct: "personal" } }) }}
-        config={config}
-        control={control}
-        configTransport={null}
-        machines={machines}
-        localName="hub"
-        group="accounts"
-        now={NOW}
-      />,
-    );
-    await act(async () => {
-      fireEvent.change(within(card()).getByRole("combobox", { name: "Move a wave to Work" }), {
-        target: { value: "w1" },
-      });
-    });
-    expect(control).toHaveBeenCalledWith(
-      "resolve",
-      { wave: "w1", decision_id: "d-7k2m9q4x", answer: "move wave w1 to work" },
-      expect.any(String),
-    );
   });
 
   it("passes axe with the address hidden and shown", async () => {
@@ -1192,12 +1129,13 @@ describe("ClaudeAccounts › the per-machine account matrix", () => {
     expect(button).toHaveAccessibleName("Sign in on peer-b with Work");
     expect(button).toHaveTextContent("Sign in on peer-b");
     expect(rows()[2]?.querySelector(".cc-dot--in")).toBeNull();
-    expect(card().getByText("on 2 of 3 machines")).toHaveClass("chip--gap");
+    expect(screen.getByRole("article", { name: "Work" })).not.toHaveTextContent(
+      /on \d of \d machines/,
+    );
   });
 
-  it("a complete account's chip is plain", () => {
+  it("an account on every configured machine offers no Sign in", () => {
     matrix({ hosts: ["peer-a"] });
-    expect(card().getByText("on 2 of 2 machines")).not.toHaveClass("chip--gap");
     expect(card().queryByRole("button", { name: /^Sign in on/ })).toBeNull();
   });
 
@@ -1246,7 +1184,7 @@ describe("ClaudeAccounts › the per-machine account matrix", () => {
     expect(rows()[2]).toHaveTextContent("peer-b");
     expect(rows()[2]).toHaveTextContent("Work (peer-b)");
     expect(rows()[2]?.querySelector(".cc-dot--in")).not.toBeNull();
-    expect(card().getByText("on 3 of 3 machines")).not.toHaveClass("chip--gap");
+    expect(rows()[2]).toHaveTextContent("signed in");
   });
 
   it("a sign-in done on another e-mail leaves the row empty and says so", async () => {
@@ -1264,7 +1202,6 @@ describe("ClaudeAccounts › the per-machine account matrix", () => {
       "That was another account (p•••@example.com): it gets a card of its own, and peer-b still misses o•••@example.com.",
     );
     expect(rows()[2]?.querySelector(".cc-dot--in")).toBeNull();
-    expect(card().getByText("on 2 of 3 machines")).toHaveClass("chip--gap");
   });
 
   it("a machine whose tunnel is down: the button is disabled, and says why", () => {
@@ -1317,7 +1254,6 @@ describe("Sign in on <machine>: the preset's label and the finished sign-in", ()
     probe: null,
     freshest: null,
     members: [],
-    stale: [],
     agents: [],
     waves: [],
     ...over,
@@ -1425,24 +1361,14 @@ describe("ClaudeAccounts › the balance and the agent-level decision (T8)", () 
         : ({ ok: true } as { ok: boolean; result?: unknown }),
     );
 
-  it("asks claude_balance; the card's foot says which families pick it next, the row next pick", async () => {
+  it("the card asks no claude_balance and says nothing of next picks", () => {
     const control = answering();
     view(control);
-    expect(control).toHaveBeenCalledWith("claude_balance", {}, "volley claude balance");
-    const card = within(await screen.findByRole("article", { name: "Work" }));
-    expect(await card.findByText("picks next: Fable, others")).toBeInTheDocument();
-    const rows = within(card.getByRole("list", { name: "Machines" })).getAllByRole("listitem");
-    const peer = rows.find((r) => within(r).queryByText("peer-a"));
-    const local = rows.find((r) => within(r).queryByText("this machine"));
-    expect(peer && within(peer).queryByText("next pick")).toBeInTheDocument();
-    expect(local && within(local).queryByText("next pick")).toBeNull();
-    // The account every local family picks.
-    const other = within(screen.getByRole("article", { name: "Personal" }));
-    expect(other.getByText("picks next: Fable, others")).toBeInTheDocument();
-  });
-
-  it("read-only: no claude_balance request and no picks line", () => {
-    view(null);
+    expect(control).not.toHaveBeenCalledWith(
+      "claude_balance",
+      expect.anything(),
+      expect.anything(),
+    );
     expect(screen.queryByText(/picks next/)).toBeNull();
     expect(screen.queryByText("next pick")).toBeNull();
   });
@@ -1465,7 +1391,156 @@ describe("ClaudeAccounts › the balance and the agent-level decision (T8)", () 
       },
       `volleyd resolve ${agentLimit.decision_id}`,
     );
-    // Use for… moves waves only: an agent's decision is not one of its waves.
-    expect(screen.getByRole("combobox", { name: "Move a wave to Personal" })).toBeDisabled();
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
+});
+
+describe("ClaudeAccounts › one clean card per account (#496)", () => {
+  const EMAIL = "owner@example.com";
+  const PENDING_URL = "https://claude.com/cai/oauth/authorize?state=p";
+  const at = (min: number) => new Date(NOW - min * 60_000).toISOString();
+  const own: ClaudeAccountPayload = { ...work, email: EMAIL, sampled_at: at(4) };
+  const machines = {
+    "box-a": {
+      name: "box-a",
+      kind: "peer",
+      tunnel: "up",
+      auth: { claude: "signed_out" },
+    },
+  } as unknown as NonNullable<ClaudeAccountsProps["machines"]>;
+  const answering = (rows: unknown[] = []) =>
+    vi.fn(async (op: string) =>
+      op === "claude_accounts"
+        ? { ok: true, result: { accounts: rows, primary: {} } }
+        : op === "claude_signin"
+          ? { ok: true, result: { acct: "pending-work@box-a", url: PENDING_URL } }
+          : ({ ok: true } as { ok: boolean; result?: unknown }),
+    );
+  const view = (
+    records: Record<string, ClaudeAccountPayload>,
+    control: ControlFn | null = answering() as unknown as ControlFn,
+  ) =>
+    render(
+      <main>
+        <ClaudeAccounts
+          accounts={records}
+          signins={{}}
+          waves={{}}
+          config={config}
+          control={control}
+          configTransport={null}
+          machines={machines}
+          localName="hub"
+          hosts={["box-a"]}
+          group="accounts"
+          now={NOW}
+        />
+      </main>,
+    );
+  const card = () => screen.getByRole("article", { name: "Work" });
+
+  it("renders the name, e-mail, plan, three meters, the machines, the actions and the footer", () => {
+    view({ work: own });
+    const c = within(card());
+    expect(c.getByText("Work", { selector: "b" })).toBeInTheDocument();
+    expect(c.getByText("o•••@example.com")).toBeInTheDocument();
+    expect(c.getByRole("button", { name: "Show email" })).toBeInTheDocument();
+    expect(c.getByText("max")).toHaveClass("chip");
+    expect(c.getAllByRole("meter")).toHaveLength(3);
+    const rows = within(c.getByRole("list", { name: "Machines" })).getAllByRole("listitem");
+    expect(rows.map((r) => r.querySelector("b")?.textContent)).toEqual(["this machine", "box-a"]);
+    expect(rows[0]).toHaveTextContent("signed in");
+    expect(rows[1]).toHaveTextContent("not on box-a");
+    expect(card().querySelector(".cc-machines")?.textContent).not.toContain("%");
+    expect(c.getByRole("button", { name: "Add to another machine…" })).toBeEnabled();
+    const rename = c.getByRole("button", { name: "Rename Work" });
+    expect(rename).toBeDisabled();
+    expect(rename).toHaveAttribute("title", "renaming lands with volley claude rename");
+    expect(c.getByRole("button", { name: "Remove Work" })).toBeInTheDocument();
+    expect(c.getByText("Last updated: 4 min ago")).toHaveClass("cc-updated");
+    for (const gone of [
+      /waves/,
+      /agent/,
+      /Use for/,
+      /next pick/,
+      /picks next/,
+      /stale/,
+      /freshest:/,
+    ])
+      expect(card().textContent).not.toMatch(gone);
+    expect(c.queryByRole("combobox")).toBeNull();
+  });
+
+  it("never counts agents: 29 historical agents on the record show nowhere on the card", () => {
+    const agents = Array.from({ length: 29 }, (_, i) => `w1-t${i}-implementer-1`);
+    view({ work: { ...own, agents } }, null);
+    expect(card().textContent).not.toMatch(/29|agent/);
+  });
+
+  it("a 0% window with no reset reads no usage yet this window; 12% reset time unknown", () => {
+    view({
+      work: {
+        ...own,
+        five_hour: { pct: 0, resets_at: null },
+        weekly: { pct: 12, resets_at: null },
+      },
+    });
+    const meter = (name: string) =>
+      within(card()).getByRole("meter", { name }).closest(".meter") as HTMLElement;
+    expect(meter("5-hour")).toHaveTextContent("no usage yet this window");
+    expect(meter("7-day")).toHaveTextContent("reset time unknown");
+  });
+
+  it("a profile waiting for sign-in is a row with Finish sign-in, never a card", async () => {
+    const pending = {
+      id: "pending-work",
+      label: "Work (box-a)",
+      machine: "box-a",
+      signin: { state: "pending", url: PENDING_URL },
+    };
+    const control = answering([pending]);
+    view({ work: own }, control as unknown as ControlFn);
+    const section = within(
+      await screen.findByRole("region", { name: "Profiles waiting for sign-in" }),
+    );
+    expect(section.getByText("Work (box-a)")).toBeInTheDocument();
+    expect(section.getByRole("button", { name: "Cancel Work (box-a)" })).toBeDisabled();
+    expect(screen.queryByRole("article", { name: "Work (box-a)" })).toBeNull();
+    expect(screen.getAllByRole("article").map((a) => a.getAttribute("aria-label"))).toEqual([
+      "This machine's Claude login",
+      "Work",
+    ]);
+    expect(
+      screen.queryByRole("button", { name: /^Sign in on box-a with Work \(box-a\)/ }),
+    ).toBeNull();
+    await act(async () => {
+      fireEvent.click(section.getByRole("button", { name: "Finish sign-in for Work (box-a)" }));
+    });
+    expect(control).toHaveBeenCalledWith(
+      "claude_signin",
+      { acct: "pending-work@box-a" },
+      expect.any(String),
+      expect.any(Number),
+    );
+    expect(control).not.toHaveBeenCalledWith(
+      "claude_account_add",
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+    const dialog = within(screen.getByRole("region", { name: "Add Claude account" }));
+    expect(dialog.getByRole("heading", { level: 3 })).toHaveTextContent(
+      "Sign in as Work (box-a) on box-a",
+    );
+  });
+
+  it("passes axe with the card and the pending section", async () => {
+    view(
+      { work: own },
+      answering([{ id: "p", label: "P", machine: "box-a", signin: { state: "pending" } }]) as never,
+    );
+    await screen.findByRole("region", { name: "Profiles waiting for sign-in" });
+    const v = await axe.run(document.body, { rules: { "color-contrast": { enabled: false } } });
+    expect(v.violations.map((x) => x.id)).toEqual([]);
   });
 });

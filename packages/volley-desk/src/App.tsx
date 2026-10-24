@@ -97,6 +97,7 @@ import { emitSound } from "./sounds/emit";
 import { useNotifyMirror, useSoundSettings } from "./sounds/settings";
 import { useFlipSound, useSoundManager } from "./sounds/useSoundManager";
 import { ClaimButton } from "./steer/SteerPanel";
+import { demoReadControl } from "./steer/demoClient";
 import { routeDeskControl } from "./steer/deskControl";
 import { type TerminalSize, sendTerminalSize } from "./steer/terminalResize";
 import { deskDevice } from "./steer/transport";
@@ -448,10 +449,16 @@ export default function App() {
       routeDeskControl(mailboxControl, authOps, authOps ? readSessionRole(authOps.identity) : null),
     [mailboxControl, authOps],
   );
+  // What asks volleyd's Claude registry: the control, or in demo mode the demo's own answers.
+  const demoTransport = demo ? steering.transport : null;
+  const registryControl = useMemo(
+    () => (demoTransport ? demoReadControl(demoTransport.control) : control),
+    [demoTransport, control],
+  );
   // Settings › Machines lists every Claude account on each machine: it asks volleyd's registry
   // while it is open (Settings › Claude accounts asks on its own).
   const machinesRegistry = useClaudeRegistry(
-    deskSettings === "machines" ? control : null,
+    deskSettings === "machines" ? registryControl : null,
     signinsDone(state.signins),
   );
   const localName = state.config?.fleet?.local_name ?? undefined;
@@ -1570,6 +1577,7 @@ export default function App() {
             signins: state.signins ?? {},
             waves: state.waves,
             control,
+            registryControl,
             onRegistry: setRegistry,
             machines: state.machines ?? {},
             localName: state.config?.fleet?.local_name ?? undefined,

@@ -189,7 +189,14 @@ describe("volley claude", () => {
         email: "owner@example.com",
         org: "Example Org",
         dir: "/srv/claude/work",
+        signed_in_at: "2026-10-18T12:00:00.000Z",
         signin: { state: "signed_in" },
+      },
+      {
+        id: "pending-work",
+        label: "Work (peer-a)",
+        machine: "peer-a",
+        signin: { state: "pending", url: "https://claude.com/cai/oauth/authorize?state=p" },
       },
     ],
     primary: {},
@@ -244,7 +251,7 @@ describe("volley claude", () => {
     return v;
   }
 
-  it("list groups the accounts by e-mail, masked, with machines, usage and the sharing modes", async () => {
+  it("list groups the accounts by e-mail, masked, with machines, usage, the waiting profiles and the sharing modes", async () => {
     const v = await listVolleyd();
     const r = await run(["list"]);
     expect(r.stderr).toBe("");
@@ -252,12 +259,16 @@ describe("volley claude", () => {
     expect(r.stdout).toContain("Work · max · Example Org · o•••@example.com");
     expect(r.stdout).not.toContain("owner@example.com");
     expect(r.stdout).toMatch(
-      /5-hour 37% \(resets in 1h 59m\) · 7-day 56% · Fable 12% \(resets in 4d 2h, read 4 min ago\)\n {2}freshest: this machine, 2 min ago\n/,
+      /5-hour 37% \(resets in 1h 59m\) · 7-day 56% · Fable 12% \(resets in 4d 2h, read 4 min ago\)\n {2}last updated: 2 min ago\n/,
     );
     expect(r.stdout).toMatch(/this machine +work +signed in +waves: w1/);
-    expect(r.stdout).toMatch(
-      /peer-a +default login +signed in +waves: w2 +5-hour 41% 3 h old \(stale\)/,
+    expect(r.stdout).toMatch(/peer-a +default login +signed in +waves: w2\n/);
+    expect(r.stdout).not.toMatch(/stale|freshest:/);
+    // The profile that never finished its sign-in is no group, only a line.
+    expect(r.stdout).toContain(
+      "waiting for sign-in:\n  pending-work · Work (peer-a) · on peer-a\n    sign in: https://claude.com/cai/oauth/authorize?state=p\n",
     );
+    expect(r.stdout.match(/^Work/gm)).toHaveLength(1);
     expect(r.stdout).toContain("sharing: settings.json=copy mcp=copy");
     await v.b.disconnect();
   });

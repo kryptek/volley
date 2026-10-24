@@ -2,16 +2,26 @@ import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import addFormats from "ajv-formats";
 import Ajv2020 from "ajv/dist/2020.js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { coordinatorFor, waveAttention } from "../src/attention";
+import { createDemoSteerClient, demoReadControl } from "../src/steer/demoClient";
+import {
+  configuredMachines,
+  deskAccountGroups,
+  machineRows,
+  pendingProfiles,
+} from "../src/store/claude";
 import {
   DEMO_AGENTS_MAX,
+  DEMO_CLAUDE_REGISTRY,
   DEMO_ENDED_WAVE,
   DIGEST_WAVE,
   NARRATION_POOL,
   PLANNED_WAVE,
   demoAgentCount,
   demoAutopilot,
+  demoClaudeAccounts,
+  demoClaudeBalance,
   demoDigest,
   demoMessages,
   demoPlanned,
@@ -302,5 +312,90 @@ describe("fixtures — the overlap plan (#388)", () => {
       if (!validate) throw new Error(`missing ${schema}`);
       expect(validate(m.envelope), `${m.topic}: ${ajv.errorsText(validate.errors)}`).toBe(true);
     }
+  });
+});
+
+describe("fixtures — Claude accounts (#496)", () => {
+  const s = demoState(NOW);
+  const registry = demoClaudeAccounts().accounts;
+  const groups = deskAccountGroups(s.claudeAccounts, registry, "max", s.machines, "studio");
+  const configured = configuredMachines(["box-a", "box-b"], s.machines, "studio");
+
+  it("the Team account is one group with one box-a row", () => {
+    const team = groups.filter((g) => g.label === "Team account");
+    expect(team).toHaveLength(1);
+    const rows = machineRows(team[0] as never, configured);
+    expect(rows.filter((r) => r.op === "box-a")).toHaveLength(1);
+    expect(rows.map((r) => [r.op, r.state])).toEqual([
+      ["local", "signed_in"],
+      ["box-a", "signed_in"],
+      ["box-b", "missing"],
+    ]);
+  });
+
+  it("the owner's e-mail group spans this machine and box-a", () => {
+    const owner = groups.find((g) => g.key === "owner@example.com");
+    expect(owner?.members.map((m) => m.machine)).toEqual(["local", "box-a"]);
+  });
+
+  it("exactly one profile waits for sign-in, and it is no card", () => {
+    expect(pendingProfiles(DEMO_CLAUDE_REGISTRY, s.claudeAccounts).map((r) => r.id)).toEqual([
+      "pending-work",
+    ]);
+    expect(groups.some((g) => g.members.some((m) => m.account === "pending-work@box-a"))).toBe(
+      false,
+    );
+  });
+
+  it("claude_balance answers with picks per machine", () => {
+    expect(demoClaudeBalance().machines.map((m) => [m.name, m.picks.fable])).toEqual([
+      ["local", "team"],
+      ["box-a", "team@box-a"],
+    ]);
+  });
+});
+
+describe("demo steering: volleyd's Claude answers", () => {
+  it("claude_accounts and claude_balance answer from the demo registry", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = createDemoSteerClient(
+        () => {},
+        () => false,
+      );
+      const acks: Record<string, unknown> = {};
+      client.onMessage((m) => {
+        if (m.envelope?.type === "ack")
+          acks[m.envelope.correlation_id ?? ""] = (
+            m.envelope.payload as { result?: unknown }
+          ).result;
+      });
+      for (const op of ["claude_accounts", "claude_balance", "claim"])
+        await client.publish(
+          "volley/default/volleyd/mailbox",
+          JSON.stringify({ agent_id: "desk", type: "query", correlation_id: op, payload: { op } }),
+        );
+      await vi.runAllTimersAsync();
+      expect(acks.claude_accounts).toEqual(demoClaudeAccounts());
+      expect(acks.claude_balance).toEqual(demoClaudeBalance());
+      expect(acks.claim).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("demo mode's read-only control", () => {
+  it("passes claude_accounts and claude_balance on, refuses every other op", async () => {
+    const control = vi.fn(async () => ({ ok: true, result: "answered" }));
+    const reads = demoReadControl(control);
+    expect(await reads("claude_accounts", {}, "volley claude list")).toEqual({
+      ok: true,
+      result: "answered",
+    });
+    expect((await reads("claude_balance", {})).ok).toBe(true);
+    for (const op of ["claude_account_add", "claude_signin", "resolve"])
+      expect((await reads(op, {})).ok).toBe(false);
+    expect(control).toHaveBeenCalledTimes(2);
   });
 });

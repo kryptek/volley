@@ -3,13 +3,30 @@
  * envelope it is, then the recipient "answers" through the same reducer the
  * live path uses: the hook's ack to the Desk's mailbox, then the model's
  * `steering_acked` (a coordinator: `resumed`). A daemon control request gets
- * an `ok` ack (an urgent interrupt answers `interrupted: true`). Timings
+ * an `ok` ack (an urgent interrupt answers `interrupted: true`;
+ * `claude_accounts` and `claude_balance` answer from the demo's Claude
+ * registry, so Settings › Claude accounts has profiles to show). Timings
  * follow the prototype (1.1 s delivered, 2.6 s acked).
  */
+import { demoClaudeAccounts, demoClaudeBalance } from "../store/fixtures";
 import type { DeskMessage, Envelope } from "../store/types";
-import { DAEMON_AGENT_ID, type SteerClient } from "./transport";
+import { DAEMON_AGENT_ID, type SteerClient, type SteerTransport } from "./transport";
 
 export const DEMO_IDENTITY = "desk";
+
+/** The control ops the demo answers with data of its own: reads, which change nothing. */
+const DEMO_READS: ReadonlySet<string> = new Set(["claude_accounts", "claude_balance"]);
+
+/**
+ * The demo's control for reads only: `claude_accounts` and `claude_balance` reach the demo
+ * client; any other op is refused here, so nothing in the demo pretends to act.
+ */
+export function demoReadControl(control: SteerTransport["control"]): SteerTransport["control"] {
+  return (op, fields, text, timeoutMs) =>
+    DEMO_READS.has(op)
+      ? control(op, fields, text, timeoutMs)
+      : Promise.resolve({ ok: false, error: "demo mode: nothing to answer it" });
+}
 const DELIVER_MS = 1100;
 const ACT_MS = 2600;
 const CONTROL_MS = 600;
@@ -50,14 +67,17 @@ export function createDemoSteerClient(
       const id = env.correlation_id ?? null;
       const self = `volley/${ns}/${env.agent_id}/mailbox`;
       if (to === DAEMON_AGENT_ID) {
+        const req = env.payload as { op?: unknown; escape_only?: unknown } | undefined;
         // An urgent steer's interrupt (escape_only) "presses Escape" in the demo.
-        const escapeOnly =
-          (env.payload as { escape_only?: unknown } | undefined)?.escape_only === true;
-        const answer = {
-          text: "ACKED",
-          ok: true,
-          ...(escapeOnly ? { result: { interrupted: true } } : {}),
-        };
+        const result =
+          req?.escape_only === true
+            ? { interrupted: true }
+            : req?.op === "claude_accounts"
+              ? demoClaudeAccounts()
+              : req?.op === "claude_balance"
+                ? demoClaudeBalance()
+                : undefined;
+        const answer = { text: "ACKED", ok: true, ...(result ? { result } : {}) };
         setTimeout(() => {
           emit(self, reply(DAEMON_AGENT_ID, ns, "mailbox", "ack", answer, id));
         }, CONTROL_MS);
