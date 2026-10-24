@@ -2,6 +2,21 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.11.1 — 2026-10-24
+
+### Fixed
+
+- **volleyd: commands on a paired machine run its own volley checkout.** The doctor, Repair,
+  repository adds and every role-move step run `bun <volley_dir>/packages/volley-cli/src/cli.ts …`
+  (as `volley deploy` already did), so a machine whose ssh PATH has no `volley` is no longer
+  blocked with `command not found`; when the checkout or bun is missing, the error names the
+  expected path and the fix. (#550)
+- **volley-desk: Add repository says why Add is off, checks the clone's path on the machine, and
+  shows a blocked chip's full reason.** A new read-only `repo_probe` op reports whether the path
+  exists, is a git clone and which GitHub repository its origin names; a matching origin fills
+  owner/name, a mismatch (or a folder inside a clone rather than its root) blocks Add, and a
+  blocked chip's `Why` opens the whole text. (#551)
+
 ## 0.11.0 — 2026-10-24
 
 ### Added
