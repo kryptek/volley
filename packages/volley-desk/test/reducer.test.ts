@@ -169,6 +169,19 @@ describe("reducer — wave state", () => {
     expect(s.coordinators["coordinator-ab12"]).toBeUndefined();
   });
 
+  it("a wave state's account fills WaveView.account; an older volleyd's (none) leaves it undefined", () => {
+    const pinned = apply(msg("volley/_waves/w1/state", example("wave-state-account-pinned")));
+    expect(pinned.waves.w1?.account).toEqual({
+      pinned: "team",
+      source: "wave",
+      moved_from: "primary",
+    });
+    expect(apply(WAVE).waves.w1?.account).toBeUndefined();
+    // A later state without the field (a downgraded volleyd) drops it.
+    const older = reduce(pinned, WAVE);
+    expect(older.waves.w1?.account).toBeUndefined();
+  });
+
   it("tracks open decisions per wave and drops them when cleared", () => {
     const topic = "volley/_waves/w1/decisions/w1-t2-merge_conflict-1";
     const opened = apply(WAVE, msg(topic, example("decision-merge-conflict")));
@@ -330,7 +343,8 @@ describe("reducer — coordinator attention", () => {
       waiting,
       msg("volley/default/coordinator-ab12/status", { ...done, agent_id: "coordinator-ab12" }),
     );
-    expect(ended.coordinators["coord-main"]?.state).toBe("gone");
+    // The supervisor's view decides once the bound agent ended; it is still `working` here.
+    expect(ended.coordinators["coord-main"]?.state).toBe("working");
   });
 
   it("a heartbeat keeps an agent seen without counting as a progress report", () => {
@@ -339,12 +353,36 @@ describe("reducer — coordinator attention", () => {
     expect(s.agents["worker-ab12"]?.reportedAt).toBeUndefined();
   });
 
-  it("marks the coordinator gone after a terminal status", () => {
+  it("follows the supervisor's `away` / `gone` / `reconnecting`", () => {
+    for (const state of ["away", "gone", "reconnecting"] as const) {
+      const next = example("wave-state-running");
+      const payload = next.payload as Record<string, unknown>;
+      payload.coordinator = {
+        agent_id: "coordinator-ab12",
+        presence: "offline",
+        state,
+        last_seen: "2026-10-18T12:00:00.000Z",
+      };
+      // A live attention signal from the owner does not override the supervisor's presence.
+      const s = apply(
+        msg("volley/default/coordinator-ab12/progress", example("progress-awaiting-input")),
+        msg("volley/_waves/w1/state", next),
+      );
+      expect(s.coordinators["coordinator-ab12"]?.state).toBe(state);
+    }
+  });
+
+  it("infers `gone` from a terminal status only when the wave state has no `coordinator`", () => {
     const done = example("status-done");
-    const s = apply(
-      WAVE,
-      msg("volley/default/coordinator-ab12/status", { ...done, agent_id: "coordinator-ab12" }),
-    );
+    const status = msg("volley/default/coordinator-ab12/status", {
+      ...done,
+      agent_id: "coordinator-ab12",
+    });
+    // The supervisor's `working` stands until it republishes (it says `away` or `gone` then).
+    expect(apply(WAVE, status).coordinators["coordinator-ab12"]?.state).toBe("working");
+    const running = example("wave-state-running");
+    const { coordinator: _, ...payload } = running.payload as Record<string, unknown>;
+    const s = apply(msg("volley/_waves/w1/state", { ...running, payload }), status);
     expect(s.coordinators["coordinator-ab12"]?.state).toBe("gone");
   });
 });
@@ -601,5 +639,29 @@ describe("reducer — archived waves (SPEC §4.6.20)", () => {
     expect(apply(archiveMsg(["a"]), archiveMsg(null)).archive).toBeNull();
     expect(resync(s).archive).toBeNull();
     expect(routeTopic("volley/_waves/_archive")).toEqual({ kind: "archive" });
+  });
+});
+
+describe("reducer — the Claude registry-changed signal", () => {
+  const signal = (rev: number, agentId = "volleyd") =>
+    msg("volley/_system/claude/registry", {
+      ...example("clauderegistry-changed"),
+      agent_id: agentId,
+      payload: { rev, at: "2026-10-24T12:00:00.000Z" },
+    });
+
+  it("routes the four-segment topic, apart from the per-account sign-in", () => {
+    expect(routeTopic("volley/_system/claude/registry")).toEqual({ kind: "claudeRegistry" });
+    expect(routeTopic("volley/_system/claude/work/signin")).toEqual({
+      kind: "signin",
+      acct: "work",
+    });
+  });
+
+  it("keeps volleyd's rev; another publisher's is ignored", () => {
+    expect(apply(signal(3)).claudeRegistryRev).toBe(3);
+    expect(apply(signal(3), signal(9, "intruder")).claudeRegistryRev).toBe(3);
+    expect(apply(signal(3), signal(0)).claudeRegistryRev).toBe(0);
+    expect(initialState().claudeRegistryRev).toBeUndefined();
   });
 });

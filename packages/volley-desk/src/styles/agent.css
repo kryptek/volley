@@ -12,37 +12,29 @@
   margin: 0;
   padding: 0;
 }
+/* The step's box; its colours are the depth states of stepfx.css (fx-done / fx-cur / fx-future). */
 .pipe li {
   flex: 1;
   text-align: center;
   font-size: 11px;
   padding: 4px 0;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--dim);
   border: 1px solid transparent;
-}
-.pipe li.done {
-  color: var(--mute);
-  background: color-mix(in srgb, var(--acc) 8%, transparent);
-}
-.pipe li.cur {
-  color: var(--ink);
-  border-color: color-mix(in srgb, var(--acc) 60%, transparent);
-  background: color-mix(in srgb, var(--acc) 16%, transparent);
-  font-weight: 600;
 }
 .narr {
   min-height: 40px;
   font-size: 13.5px;
-  color: #dfe5f2;
+  color: var(--narr);
   line-height: 1.45;
 }
 .narr-txt {
-  color: #dfe5f2;
+  color: var(--narr);
 }
 .narr-enc {
   color: color-mix(in srgb, var(--acc) 80%, white);
+}
+html[data-tone="light"] .narr-enc {
+  color: var(--acc-ink);
 }
 /* Tabs: React Bits Gooey Nav (look/GooeyTabs.tsx, D10) in a recessed track; the goo is the accent. */
 .gooey-tabs {
@@ -50,8 +42,8 @@
   font-size: 12.5px;
 }
 .gooey-tabs.gooey-nav--framed {
-  background: linear-gradient(180deg, rgba(4, 5, 10, 0.85), rgba(16, 18, 30, 0.85));
-  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), 0 1px 0 rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, var(--well-a), var(--well-b));
+  box-shadow: inset 0 2px 5px var(--shade), 0 1px 0 var(--hl);
   --gn-muted: var(--mute);
   --gn-ink: var(--ink);
 }
@@ -92,21 +84,21 @@
 }
 .env-type {
   font: 11px var(--f-mono);
-  color: #8fb4ff;
+  color: var(--syn-key);
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .ch-mailbox .env-type {
-  color: #f0a6ff;
+  color: var(--syn-mail);
 }
 .ch-status .env-type {
-  color: #f0d58a;
+  color: var(--syn-val);
 }
 .ch-result .env-type {
-  color: var(--ok);
+  color: var(--syn-ok);
 }
 .env-msg {
-  color: #d5dbea;
+  color: var(--code-msg);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -114,7 +106,7 @@
 .env-json {
   margin: 0 9px 8px;
   font: 11px / 1.5 var(--f-mono);
-  color: #b9c3da;
+  color: var(--code-json);
   border-radius: 8px;
   padding: 8px;
   overflow-x: auto;
@@ -127,16 +119,16 @@
   word-break: break-word;
 }
 .tl-cmd {
-  color: #e8ecf4;
+  color: var(--ink);
 }
 .tl-ok {
-  color: var(--ok);
+  color: var(--ok-text);
 }
 .tl-bad {
-  color: #ff8f7a;
+  color: var(--bad-ink);
 }
 .caret {
-  color: var(--acc);
+  color: var(--acc-ink);
   animation: blink 1s steps(1) infinite;
 }
 @keyframes blink {
@@ -151,17 +143,18 @@
   font-size: 12px;
   color: var(--mute);
 }
+/* A recessed track; the fill is glossy with a slow glint (stepfx.css; Classic: flat --acc). */
 .bar {
   flex: 1;
   height: 5px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--well);
+  box-shadow: inset 0 1px 3px var(--shade);
   overflow: hidden;
 }
 .bar > span {
   display: block;
   height: 100%;
-  background: var(--acc);
   transition: width 0.8s ease;
 }
 .hb {
@@ -184,12 +177,13 @@
 }
 
 /* ------------------------------------------------------- D2 additions */
+/* Held wins over the current step's effect: amber border and tint (higher specificity than stepfx.css). */
 .pipe li.held {
-  border-color: rgba(251, 191, 36, 0.5);
-  background: rgba(251, 191, 36, 0.1);
+  border-color: color-mix(in srgb, var(--amber) 50%, transparent);
+  background: color-mix(in srgb, var(--amber) 10%, transparent);
 }
 .ch-registry .env-type {
-  color: #c4b5fd;
+  color: var(--syn-reg);
 }
 .feed--empty,
 .term-empty {
@@ -207,9 +201,9 @@
   font: 10.5px var(--f-ui);
   padding: 1px 7px;
   border-radius: 999px;
-  color: var(--amber);
-  border: 1px solid rgba(251, 191, 36, 0.45);
-  background: rgba(15, 17, 27, 0.9);
+  color: var(--amber-text);
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent);
+  background: color-mix(in srgb, var(--panel-solid) 90%, transparent);
 }
 .term--stale .tl {
   opacity: 0.6;
@@ -290,7 +284,6 @@
 
 /* The machine chip: where the agent runs, its dot, and why here on hover / focus. */
 .m-chip-wrap {
-  position: relative;
   display: inline-flex;
   min-width: 0;
 }
@@ -318,17 +311,10 @@
   background: var(--amber);
 }
 .m-tip {
-  display: none;
   cursor: default;
-  white-space: normal;
-  color: var(--ink);
 }
 .m-tip .host-lines {
   margin: 0;
-}
-.m-chip-wrap:hover .m-tip,
-.m-chip-wrap:focus-within .m-tip {
-  display: block;
 }
 
 /* Claude account picker (title, row 2) and context meter (footer), SPEC §4.6.12. */
@@ -344,7 +330,7 @@
 }
 .acct-err {
   font-size: 11px;
-  color: #ff8f86;
+  color: var(--bad-ink);
   max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -382,10 +368,10 @@
   background: #ff453a;
 }
 .ctx--hot .mono {
-  color: #ff8f86;
+  color: var(--bad-ink);
 }
 .ctx--warn .mono {
-  color: #ffd60a;
+  color: var(--amber-ink);
 }
 /* From 70% the bar pulses (the colour stays); faster once red. */
 @keyframes ctx-pulse {
@@ -437,7 +423,7 @@
 .a-link {
   flex: none;
   font-size: 12px;
-  color: var(--acc);
+  color: var(--acc-ink);
   text-decoration: none;
 }
 a.a-link:hover {
@@ -455,7 +441,7 @@ a.a-link:hover {
 }
 /* No progress of its own for 10 minutes: amber, like a coordinator-handling item. */
 .chip--stale {
-  color: var(--amber);
+  color: var(--amber-text);
   border-color: color-mix(in srgb, var(--amber) 55%, transparent);
   background: color-mix(in srgb, var(--amber) 12%, transparent);
 }
@@ -487,9 +473,12 @@ a.a-link:hover {
 .win-sub .acct-pick-wrap .acct-pick {
   margin-left: 0;
 }
+/* Still drawn inside the window, under the picker (not a portalled Popover). */
 .acct-tip {
   display: none;
-  left: auto;
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 4px);
   right: 0;
   white-space: normal;
   color: var(--ink);
@@ -520,4 +509,24 @@ a.a-link:hover {
   display: inline-flex;
   gap: 6px;
   margin-left: auto;
+}
+
+/* ------------------------------------------------- the Clawd character (#350) */
+/* 24 × 21 px in the title: the negative margin keeps the 18 px mark's row height. */
+.clawd-sprite {
+  flex: none;
+  image-rendering: pixelated;
+  margin: -2px 0;
+}
+/* Merge-ready. A filter re-rasterises on every frame change: free on a desktop GPU, a phone's
+   whole frame budget (#295), so touch screens and reduced transparency go without. */
+.clawd-sprite--glow {
+  filter: drop-shadow(0 0 3px rgba(255, 214, 120, 0.55))
+    drop-shadow(0 0 8px rgba(255, 190, 90, 0.35));
+}
+/* biome-ignore lint/correctness/noUnknownMediaFeatureName: prefers-reduced-transparency (Media Queries 5) is newer than Biome's list */
+@media (hover: none) and (pointer: coarse), (prefers-reduced-transparency: reduce) {
+  .clawd-sprite--glow {
+    filter: none;
+  }
 }

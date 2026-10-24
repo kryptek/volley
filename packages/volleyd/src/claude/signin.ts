@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn } from "../exec";
 import { sealSigninScript } from "../fence";
-import { readLoginIdentity } from "./identity";
+import { type LoginIdentity, loginIdentity, readLoginIdentity } from "./identity";
 import { markSignedIn, profileDir } from "./profiles";
 import {
   BROWSER_HELPER,
@@ -21,16 +21,24 @@ import {
  * detached tmux session, with `$BROWSER` set to a helper that writes down the authorize URL.
  *
  *   start   → tmux new-session -d -s volley-signin-<acct> -c <root>/.signin/<acct> 'bash signin.sh'
- *   the URL → `claude_signin_url { acct, url, flow, attach }`, once:
- *             `browser_callback` — the URL Claude Code passed to `$BROWSER` (its redirect is
- *               Claude Code's own localhost listener: open it in a browser on this machine);
- *             `manual_code` — no `$BROWSER` call, so the URL it printed: the page then shows a
- *               code to paste into that terminal (`attach`), never into anything of Volley's.
+ *   the URL → `claude_signin_url { acct, url, flow, attach, manual_url?, callback_url?,
+ *             code_prompt? }`. Claude Code runs both flavours of one PKCE sign-in at once: it
+ *             prints the authorize URL whose redirect is Anthropic's code page (it works from any
+ *             device; the page shows a code) while its prompt waits (`Paste code here`), and
+ *             hands `$BROWSER` the one whose redirect is its own localhost listener. The printed
+ *             one is *the* link (`url` = `manual_url`, `flow: manual_code`); the `$BROWSER` one is
+ *             `callback_url`, a shortcut for a browser on this machine. Without a printed URL yet,
+ *             the `$BROWSER` one alone (`browser_callback`). Published again whenever it changes
+ *             (the printed URL or the prompt showing later), at most a few polls on. The callback URL's port and
+ *             `state` reach the service through `onCallback`, kept in memory: a pasted code is
+ *             typed into the session, a pasted redirect requested on 127.0.0.1 (service.ts).
  *   done    → `claude auth status` (polled) reports `loggedIn` → `claude_signin_done`, the
- *             registry entry gets `signed_in_at` and the plan label; the session is killed.
+ *             registry entry gets `signed_in_at`, the plan label and the login's identity (the
+ *             status's, else `.claude.json`'s); the session is killed.
  *   failed  → the login exited first, the timeout passed, or tmux is missing.
  *
- * volleyd sees an authorize URL and the plan label, never a code, a token or a Keychain item.
+ * volleyd sees authorize URLs and the plan label, never a token or a Keychain item; a code the
+ * owner pastes passes through once, to the session, and is never kept.
  */
 
 /**
@@ -38,6 +46,11 @@ import {
  * touching the shared tmux session or URL file and publishes nothing (both are the new one's).
  */
 export const SUPERSEDED = "superseded";
+/** The abort reason of a sign-in whose profile `claude_account_remove` removed. */
+export const REMOVED = "removed";
+/** Why a sign-in stopped by `signal` (not superseded) failed. */
+export const stoppedReason = (signal: AbortSignal | undefined) =>
+  signal?.reason === REMOVED ? "the profile was removed" : "the supervisor stopped";
 
 export const signinSession = (acct: string) => `volley-signin-${acct}`;
 export const signinDir = (root: string, acct: string) => join(root, ".signin", acct);
@@ -51,8 +64,15 @@ export type SigninEvent =
       url: string;
       flow: SigninFlow;
       attach: string;
-      /** A paired machine's printed (manual-code) URL next to the forwarded one: for a phone. */
+      /** The printed (code-page) URL: it works from any device; the page shows a code. */
       manual_url?: string;
+      /**
+       * The `$BROWSER` (localhost-callback) URL, a shortcut for a browser on the supervisor's
+       * machine; on a paired machine only while the forward is up.
+       */
+      callback_url?: string;
+      /** The session shows Claude Code's `Paste code here` prompt: a code can be entered. */
+      code_prompt?: true;
     }
   | { type: "claude_signin_done"; acct: string; plan?: string; email?: string; org?: string }
   | { type: "claude_signin_failed"; acct: string; reason: string };
@@ -79,6 +99,44 @@ export function parseSigninUrl(text: string): string | null {
   return stripTerminal(text).match(AUTHORIZE_URL)?.at(-1) ?? null;
 }
 
+/** Claude Code's prompt for the code the code page shows. */
+const CODE_PROMPT = /Paste code here/;
+
+/** True when a session screen shows Claude Code waiting for a pasted code. */
+export const showsCodePrompt = (screen: string) => CODE_PROMPT.test(stripTerminal(screen));
+
+/**
+ * The URL event for what a sign-in has found so far: the printed (code-page) URL first, the
+ * callback URL as the shortcut; null when neither is known.
+ */
+export function urlEvent(
+  acct: string,
+  attach: string,
+  found: { printed: string | null; callback: string | null; prompt: boolean },
+): Extract<SigninEvent, { type: "claude_signin_url" }> | null {
+  const { printed, callback } = found;
+  if (printed === null && callback === null) return null;
+  return {
+    type: "claude_signin_url",
+    acct,
+    url: (printed ?? callback) as string,
+    flow: printed !== null ? "manual_code" : "browser_callback",
+    attach,
+    ...(printed !== null ? { manual_url: printed } : {}),
+    ...(callback !== null ? { callback_url: callback } : {}),
+    ...(found.prompt ? { code_prompt: true as const } : {}),
+  };
+}
+
+/** The `state` of an authorize URL, null when it has none. */
+export function authorizeState(url: string): string | null {
+  try {
+    return new URL(url).searchParams.get("state");
+  } catch {
+    return null;
+  }
+}
+
 /** Which flow a URL belongs to, by its `redirect_uri`: Claude Code's localhost listener or not. */
 export function signinFlow(url: string): SigninFlow {
   let redirect = "";
@@ -90,8 +148,13 @@ export function signinFlow(url: string): SigninFlow {
     : "manual_code";
 }
 
-/** `claude auth status` JSON: whether the profile is logged in, and its plan label. */
-export function parseAuthStatus(stdout: string): { loggedIn: boolean; plan?: string } | null {
+/**
+ * `claude auth status` JSON: whether the profile is logged in, its plan label, and the login's
+ * e-mail and org when it says them (`email`, `orgName`; checked as `.claude.json`'s are).
+ */
+export function parseAuthStatus(
+  stdout: string,
+): ({ loggedIn: boolean; plan?: string } & LoginIdentity) | null {
   let raw: unknown;
   try {
     raw = JSON.parse(stdout);
@@ -99,12 +162,33 @@ export function parseAuthStatus(stdout: string): { loggedIn: boolean; plan?: str
     return null;
   }
   if (typeof raw !== "object" || raw === null) return null;
-  const s = raw as { loggedIn?: unknown; subscriptionType?: unknown };
+  const s = raw as {
+    loggedIn?: unknown;
+    subscriptionType?: unknown;
+    email?: unknown;
+    orgName?: unknown;
+  };
+  const loggedIn = s.loggedIn === true;
   return {
-    loggedIn: s.loggedIn === true,
+    loggedIn,
     ...(typeof s.subscriptionType === "string" ? { plan: s.subscriptionType } : {}),
+    ...(loggedIn
+      ? loginIdentity({ oauthAccount: { emailAddress: s.email, organizationName: s.orgName } })
+      : {}),
   };
 }
+
+/**
+ * A signed-in login's identity: what `claude auth status` said, else (no e-mail there) what the
+ * profile's `.claude.json` records.
+ */
+export const statusIdentity = (
+  status: LoginIdentity,
+  file: () => LoginIdentity | Promise<LoginIdentity>,
+): LoginIdentity | Promise<LoginIdentity> =>
+  status.email !== undefined
+    ? { email: status.email, ...(status.org !== undefined ? { org: status.org } : {}) }
+    : file();
 
 /** The profile's env for a `claude` child: the caller's, minus every credential variable. */
 export function profileEnv(
@@ -132,6 +216,8 @@ export interface SigninDeps {
   env?: Record<string, string | undefined>;
   /** Stops the sign-in (the daemon stopping): kills the session, resolves `failed`. */
   signal?: AbortSignal;
+  /** The `$BROWSER` (localhost-callback) URL, once known: its port and `state`, kept in memory. */
+  onCallback?: (url: string) => void;
 }
 
 /** Run one sign-in to its end; resolves with the terminal event (also published). */
@@ -173,33 +259,40 @@ export async function runSignin(d: SigninDeps): Promise<SigninEvent> {
 
   const env = profileEnv(d.env ?? process.env, configDir);
   const deadline = d.now() + d.timeoutMs;
-  let published = false;
+  /** The last URL event published (JSON), and whether there is anything left to learn. */
+  let published: string | null = null;
+  let settled = false;
+  let callback: string | null = null;
   for (let poll = 1; ; poll++) {
     if (d.signal?.aborted === true)
       return d.signal.reason === SUPERSEDED
         ? { type: "claude_signin_failed", acct: d.acct, reason: "superseded by a newer sign-in" }
-        : fail("the supervisor stopped");
-    if (!published) {
-      let file: string | null = null;
-      try {
-        file = readFileSync(urlFile, "utf-8");
-      } catch {}
-      let url = file !== null ? parseSigninUrl(file) : null;
-      // No $BROWSER call after a poll: the printed (manual-code) URL from the session's screen.
-      if (url === null && poll > 1) {
-        const pane = await d.exec(["tmux", "capture-pane", "-p", "-J", "-t", session]);
-        url = pane.code === 0 ? parseSigninUrl(pane.stdout) : null;
+        : fail(stoppedReason(d.signal));
+    if (!settled) {
+      if (callback === null) {
+        let file: string | null = null;
+        try {
+          file = readFileSync(urlFile, "utf-8");
+        } catch {}
+        const url = file !== null ? parseSigninUrl(file) : null;
+        if (url !== null && signinFlow(url) === "browser_callback") {
+          callback = url;
+          d.onCallback?.(url);
+        }
       }
-      if (url !== null) {
-        published = true;
-        await d.publish({
-          type: "claude_signin_url",
-          acct: d.acct,
-          url,
-          flow: signinFlow(url),
-          attach,
-        });
+      const pane = await d.exec(["tmux", "capture-pane", "-p", "-J", "-t", session]);
+      const screen = pane.code === 0 ? pane.stdout : "";
+      const printedUrl = parseSigninUrl(screen);
+      const printed =
+        printedUrl !== null && signinFlow(printedUrl) === "manual_code" ? printedUrl : null;
+      const prompt = showsCodePrompt(screen);
+      const e = urlEvent(d.acct, attach, { printed, callback, prompt });
+      if (e !== null && JSON.stringify(e) !== published) {
+        published = JSON.stringify(e);
+        await d.publish(e);
       }
+      settled =
+        (printed !== null && prompt && callback !== null) || (published !== null && poll > 5);
     }
     const status = await d.exec(["claude", "auth", "status"], {
       env,
@@ -209,7 +302,7 @@ export async function runSignin(d: SigninDeps): Promise<SigninEvent> {
     if (s?.loggedIn === true) {
       const facts = {
         ...(s.plan !== undefined ? { plan: s.plan } : {}),
-        ...readLoginIdentity(join(configDir, ".claude.json")),
+        ...(await statusIdentity(s, () => readLoginIdentity(join(configDir, ".claude.json")))),
       };
       markSignedIn(d.root, d.acct, facts, new Date(d.now()).toISOString());
       return finish({ type: "claude_signin_done", acct: d.acct, ...facts });

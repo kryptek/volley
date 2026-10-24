@@ -34,7 +34,6 @@ const config: ConfigPayload = {
     ci_queue_max: 10,
     hysteresis_samples: 3,
   },
-  claim_after_s: 1800,
   heartbeat_alarm_s: 600,
   fallback_model: "claude-sonnet-5-5",
   mailbox: { session_expiry_s: 604800 },
@@ -312,7 +311,7 @@ describe("Settings › Supervisor (global config rows)", () => {
     retain({ ...config, version: 9, spawn_budget_multiplier: 4, hard_ceiling: 13 });
     await f.ack(ids(f)[0] as string, applied(9));
     expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "13");
-    retain({ ...config, version: 10, claim_after_s: 900, hard_ceiling: 15 });
+    retain({ ...config, version: 10, heartbeat_alarm_s: 900, hard_ceiling: 15 });
     expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "15");
   });
 
@@ -352,7 +351,7 @@ describe("Settings › Supervisor (global config rows)", () => {
     const { show } = setup(null);
     expect(within(rowOf("Spawn budget")).getByText("3×")).toBeInTheDocument();
     show("attention");
-    expect(within(rowOf("Claim after")).getByText("1800 s")).toBeInTheDocument();
+    expect(within(rowOf("Heartbeat alarm")).getByText("600 s")).toBeInTheDocument();
   });
 
   it("sends a text tunable on Enter, empty meaning null when the schema allows it", async () => {
@@ -548,6 +547,14 @@ describe("SettingsModal (a wave's settings)", () => {
     expect(screen.getByRole("textbox", { name: "Fallback model" })).toBeDisabled();
     expect(screen.getByText(/wave file's/)).toHaveTextContent("config:");
     expect(screen.queryByText(/Pick a new value/)).not.toBeInTheDocument();
+  });
+
+  it("has no account row: the wave's account is its window's chip", () => {
+    const w = wave();
+    renderModal({ ...w, account: { pinned: "team", source: "wave" } });
+    expect(screen.queryByText("Claude account")).toBeNull();
+    expect(screen.queryByRole("combobox", { name: /Move wave/ })).toBeNull();
+    expect(document.querySelector(".modal-acct")).toBeNull();
   });
 
   it("shows only a note while the wave has no effective config", () => {

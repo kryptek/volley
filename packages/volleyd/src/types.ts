@@ -89,7 +89,6 @@ export interface Tunables {
   spawn_budget_multiplier: number;
   lease_pools: Record<string, LeasePoolConfig>;
   admission: AdmissionConfig;
-  claim_after_s: number;
   heartbeat_alarm_s: number;
   idle_grace_s: number;
   /** Longest idle (from its start) that any own-work evidence (`background_wait`, lease, shells, worktree writes) holds off the nudge. */
@@ -653,7 +652,20 @@ export interface WaveState {
   spawns?: { productive: number; churn: number; churn_by?: ChurnBy; budget?: number };
   /** Merge trains, oldest first; absent: none. */
   trains?: MergeTrain[];
+  /** The account the wave's new agents start under (SPEC §4.6.1; the daemon's snapshot). */
+  account?: WaveAccount;
   updated_at: string;
+}
+
+/**
+ * wave-state `account` (SPEC §4.6.1, §4.6.11): the account the wave's new agents start under
+ * (`pinned`, null: balanced), what names it (`wave`: its wave file or a move, `config`:
+ * `claude.default_account`), and the account its last move left.
+ */
+export interface WaveAccount {
+  pinned: string | null;
+  source: "wave" | "config" | "balanced";
+  moved_from?: string;
 }
 
 /** wave-state `spawns.churn_by` and the digest's `auto.churn`: churn spawns per cause (#387). */
@@ -697,13 +709,16 @@ export interface AutopilotState {
 }
 
 /**
- * wave-state `coordinator` (SPEC §4.6.1): the owning coordinator's attention state. For an owner
- * that is a coordinator name, `agent_id` is the agent bound to it, and `reconnecting` means that
- * agent went away less than `autopilot.reconnect_grace_s` ago.
+ * wave-state `coordinator` (SPEC §4.6.1): the owning coordinator's presence and attention state
+ * (presence.ts). For an owner that is a coordinator name, `agent_id` is the agent bound to it, and
+ * `reconnecting` means that agent went away less than `autopilot.reconnect_grace_s` ago. An
+ * offline owner is `gone` while something only it can answer waits, else `away`.
  */
 export interface CoordinatorAttention {
   agent_id: string;
-  state: "working" | "awaiting_input" | "reconnecting" | "gone";
+  /** From the owner's retained status: offline once its will fired or it shut down. */
+  presence: "online" | "offline";
+  state: "working" | "awaiting_input" | "reconnecting" | "away" | "gone";
   question?: string;
   session_url?: string;
   workspace?: string;
@@ -779,7 +794,11 @@ export const WAVE_EVENT_TYPES = [
   "claude_signin_started",
   "claude_signin_done",
   "claude_signin_failed",
+  // A pasted code or redirect address was sent to a waiting sign-in: `{ acct, kind, by }` only.
+  "claude_signin_entry",
   "claude_profile_synced",
+  "claude_account_renamed",
+  "claude_account_removed",
   // A profile seeded after its agent stopped on a first-run screen (spawn.ts repairFirstRun).
   "profile_repaired",
   "agent_account_moved",
@@ -804,7 +823,8 @@ export const WAVE_EVENT_TYPES = [
   "merge_ended",
   "agent_force_retired",
   "alarm_cleared",
-  // Usage metering (claude/usage.ts): an answered account_limit decision moved the wave.
+  // Usage metering (claude/usage.ts): an answered account_limit decision or `wave_account_set`
+  // moved the wave (`from` / `to` null: balanced).
   "wave_account_moved",
   // Broker logins on Dynamic Security (retire.ts, credential-sweep.ts).
   "agent_reaped_by_supervisor",

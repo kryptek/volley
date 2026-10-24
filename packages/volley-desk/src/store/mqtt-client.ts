@@ -91,6 +91,8 @@ export const DESK_SUBSCRIPTIONS = [
   "volley/+/+/usage",
   "volley/_system/claude-accounts/+",
   "volley/_system/claude/+/signin",
+  // The registry-changed signal: `+/signin` does not match its four segments.
+  "volley/_system/claude/registry",
   // Each machine's record and, under it, volleyd's readiness verdict (SPEC §4.6.15).
   "volley/_system/machines/#",
   // The needs-you inbox: one retained record per thing waiting for a person (SPEC §4.6.18).

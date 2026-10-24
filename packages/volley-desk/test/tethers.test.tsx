@@ -4,9 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { REDUCED_MOTION_QUERY } from "../src/a11y/motion";
 import {
   SAG_MAX,
-  TETHER_WAVE_DY,
   type Tether,
-  type TetherStub,
   Tethers,
   sagOf,
   tetherControls,
@@ -305,42 +303,5 @@ describe("Tethers", () => {
     expect(container.querySelector(".tether-pulses")).toBeNull();
     expect(container.querySelectorAll("path.tether-pulse")).toHaveLength(0);
     expect(container.querySelectorAll("[data-sway]")).toHaveLength(0);
-  });
-});
-
-describe("Tethers: CI stubs (#451)", () => {
-  const stub = (id: string): TetherStub => ({
-    id: `wa/${id}`,
-    waveId: "wa",
-    wave: { x: 0, y: 0, w: 620 },
-    accent: "#6ee7f9",
-    label: "CI",
-    title: `${id} · waiting for CI · 21/22 jobs`,
-  });
-
-  it("draws a CI pill at the wave window's cable anchor", () => {
-    const { container } = render(<Tethers on tethers={[]} stubs={[stub("T8")]} />);
-    const g = container.querySelectorAll(".tether-stub");
-    expect(g).toHaveLength(1);
-    const s = container.querySelector('.tether-stub[data-task="wa/T8"]');
-    expect(s?.querySelector("text")).toHaveTextContent("CI");
-    expect(s?.querySelector("title")?.textContent).toBe("T8 · waiting for CI · 21/22 jobs");
-    expect(s?.getAttribute("transform")).toBe(`translate(620 ${TETHER_WAVE_DY})`);
-  });
-
-  it("two stubs on one wave sit 18 px apart", () => {
-    const { container } = render(<Tethers on tethers={[]} stubs={[stub("T8"), stub("T9")]} />);
-    const t = [...container.querySelectorAll(".tether-stub")].map((g) =>
-      g.getAttribute("transform"),
-    );
-    expect(t).toEqual([
-      `translate(620 ${TETHER_WAVE_DY})`,
-      `translate(620 ${TETHER_WAVE_DY + 18})`,
-    ]);
-  });
-
-  it("nothing when the tethers are off", () => {
-    const { container } = render(<Tethers on={false} tethers={[]} stubs={[stub("T8")]} />);
-    expect(container.querySelector(".tether-stub")).toBeNull();
   });
 });

@@ -49,6 +49,7 @@ import {
   type ClaudeAccountPayload,
   type ClaudeSignin,
   type ConfigPayload,
+  type CoordinatorState,
   type CoordinatorView,
   type DecisionPayload,
   type DeskMessage,
@@ -68,6 +69,7 @@ import {
   type SteeringReceipts,
   type SupervisorView,
   type UsagePayload,
+  type WaveAccount,
   type WaveStatePayload,
   type WaveView,
   type WorkLog,
@@ -83,6 +85,12 @@ const AGENT_CHANNELS = ["status", "progress", "result", "mailbox", "screen"] as 
 type AgentChannel = (typeof AGENT_CHANNELS)[number];
 
 const TERMINAL_STATUS = new Set(["done", "failed", "reaped"]);
+/** Coordinator states only the supervisor decides, from the owner's presence (SPEC §4.6.1). */
+export const PRESENCE_STATES: ReadonlySet<CoordinatorState> = new Set<CoordinatorState>([
+  "reconnecting",
+  "away",
+  "gone",
+]);
 
 /** volleyd's agent id, and the ids of its control clients (`volleyd-cli-<suffix>`). */
 const SUPERVISOR_ID = /^volleyd(-|$)/;
@@ -114,6 +122,7 @@ export type Route =
   | { kind: "admission" }
   | { kind: "claudeAccount"; acct: string }
   | { kind: "signin"; acct: string }
+  | { kind: "claudeRegistry" }
   | { kind: "usage"; agentId: string }
   | { kind: "machine"; name: string }
   | { kind: "readiness"; name: string }
@@ -131,6 +140,7 @@ export function routeTopic(topic: string): Route | null {
     if (p.length === 3 && b === "admission") return { kind: "admission" };
     if (p.length === 4 && b === "claude-accounts" && c) return { kind: "claudeAccount", acct: c };
     if (p.length === 5 && b === "claude" && c && d === "signin") return { kind: "signin", acct: c };
+    if (p.length === 4 && b === "claude" && c === "registry") return { kind: "claudeRegistry" };
     if (p.length === 4 && b === "machines" && c) return { kind: "machine", name: c };
     if (p.length === 5 && b === "machines" && c && d === "readiness") {
       return { kind: "readiness", name: c };
@@ -235,6 +245,12 @@ export function reduce(state: DeskState, m: DeskMessage): DeskState {
       };
     case "signin":
       return reduceSignin(state, route.acct, m);
+    case "claudeRegistry": {
+      // Only volleyd's; the Settings sections ask claude_accounts again when it changes.
+      const rev = (m.envelope?.payload as { rev?: unknown } | undefined)?.rev;
+      if (m.envelope?.agent_id !== "volleyd" || typeof rev !== "number") return state;
+      return { ...state, claudeRegistryRev: rev };
+    }
     case "machine":
       return reduceMachine(state, route.name, m);
     case "readiness":
@@ -362,6 +378,8 @@ function reduceSignin(state: DeskState, acct: string, m: DeskMessage): DeskState
     ...optional("flow", str(p.flow) ?? prev?.flow),
     ...optional("attach", str(p.attach) ?? prev?.attach),
     ...optional("manual_url", str(p.manual_url) ?? prev?.manual_url),
+    ...optional("callback_url", str(p.callback_url) ?? prev?.callback_url),
+    ...(p.code_prompt === true || prev?.code_prompt === true ? { code_prompt: true } : {}),
     ...optional("plan", str(p.plan)),
     ...optional("email", str(p.email)),
     ...optional("reason", str(p.reason)),
@@ -962,7 +980,14 @@ function reduceWave(state: DeskState, id: string, m: DeskMessage): DeskState {
     };
   }
   const payload = m.envelope.payload as WaveStatePayload;
-  waves[id] = { id, decisions: {}, ...waves[id], state: payload, receivedAt: m.receivedAt };
+  const { account: _was, ...prev } = waves[id] ?? { id, decisions: {} };
+  const account = waveAccountOf(payload.account);
+  waves[id] = {
+    ...prev,
+    state: payload,
+    receivedAt: m.receivedAt,
+    ...(account !== undefined ? { account } : {}),
+  };
   // Sticky: an agent keeps its wave after the task's role slot moves on to a new agent.
   const agents: Record<string, AgentView> = {};
   for (const a of Object.values(state.agents)) {
@@ -970,6 +995,20 @@ function reduceWave(state: DeskState, id: string, m: DeskMessage): DeskState {
     agents[a.id] = where ? { ...a, ...where } : a;
   }
   return { ...state, waves, agents };
+}
+
+/** A wave state's `account`, when it is well formed (an older volleyd sends none). */
+function waveAccountOf(raw: unknown): WaveAccount | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const a = raw as Record<string, unknown>;
+  const pinned = typeof a.pinned === "string" ? a.pinned : a.pinned === null ? null : undefined;
+  if (pinned === undefined) return undefined;
+  if (a.source !== "wave" && a.source !== "config" && a.source !== "balanced") return undefined;
+  return {
+    pinned,
+    source: a.source,
+    ...(typeof a.moved_from === "string" ? { moved_from: a.moved_from } : {}),
+  };
 }
 
 function reduceDecision(state: DeskState, wave: string, id: string, m: DeskMessage): DeskState {
@@ -998,10 +1037,14 @@ export function waitsOnPerson(att: AgentAttention | null): boolean {
 /**
  * Coordinator state per wave owner. A wave the Desk itself owns (it claimed
  * it, so the owner is `state.self`) is coordinated by the person at this Desk:
- * `working`. Otherwise the owner's own topics win when they say
- * something (a terminal status → `gone`, an outstanding `awaiting_input`, or
- * a `resumed`); otherwise the supervisor's `coordinator` view from the wave
- * state is used; otherwise a known agent is `working` and an unseen one `gone`.
+ * `working`. The supervisor's `reconnecting`, `away` and `gone` (its reading
+ * of the owner's presence) are the view as they stand. Otherwise the owner's
+ * own topics win when they say something (an outstanding `awaiting_input`, or
+ * a `resumed`; a terminal status is `gone` only when the wave state carries no
+ * `coordinator`, else the supervisor's state stands until it republishes);
+ * otherwise the supervisor's `coordinator` view is used; otherwise a known
+ * agent is `working` and an unseen one `gone`. The view is per owner (its
+ * first wave's): attention reads each wave's own presence state.
  */
 function withCoordinators(state: DeskState): DeskState {
   const coordinators: Record<string, CoordinatorView> = {};
@@ -1027,11 +1070,20 @@ function withCoordinators(state: DeskState): DeskState {
     if (id === state.self) {
       // The Desk claimed the wave: the person at this Desk coordinates it (it has no agent).
       view = { id, waves: [w.id], state: "working" };
-    } else if (s.coordinator?.state === "reconnecting") {
-      // The supervisor's call (its grace, its flip to gone): the bound agent's terminal status is why.
-      view = { id, waves: [w.id], state: "reconnecting", ...fallbacks };
+    } else if (sup && PRESENCE_STATES.has(sup.state)) {
+      // The supervisor's call from the owner's presence (its grace, away, gone): never the Desk's.
+      view = { id, waves: [w.id], state: sup.state, ...fallbacks };
     } else if (a?.status && TERMINAL_STATUS.has(a.status.type)) {
-      view = { id, waves: [w.id], state: "gone", ...fallbacks };
+      // Ended: only a supervisor that publishes no `coordinator` leaves gone to the Desk.
+      view = sup
+        ? {
+            id,
+            waves: [w.id],
+            state: sup.state,
+            ...fallbacks,
+            ...optional("question", sup.question),
+          }
+        : { id, waves: [w.id], state: "gone", ...fallbacks };
     } else if (a?.attention && !waitsOnPerson(a.attention)) {
       // Idle with a background wait armed: it wakes on the wave's events, nobody has to answer.
       view = { id, waves: [w.id], state: "working", waitingOnEvents: true, ...fallbacks };

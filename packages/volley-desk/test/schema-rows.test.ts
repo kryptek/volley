@@ -171,7 +171,7 @@ describe("schemaRows", () => {
 
   it("labels rows from their keys, with units from the key suffix", () => {
     expect(at.get("hard_ceiling")).toMatchObject({ label: "Hard ceiling", unit: "" });
-    expect(at.get("claim_after_s")).toMatchObject({ label: "Claim after", unit: "s" });
+    expect(at.get("idle_grace_s")).toMatchObject({ label: "Idle grace", unit: "s" });
     expect(at.get("admission.cmux_ping_max_ms")).toMatchObject({
       label: "cmux ping max",
       unit: "ms",

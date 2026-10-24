@@ -185,12 +185,13 @@ import {
   readRegistry,
 } from "./claude/profiles";
 import { remoteAccountHost } from "./claude/remote-signin";
-import { ClaudeService, SIGNIN_CHANNEL } from "./claude/service";
+import { ClaudeService, REGISTRY_TOPIC, SIGNIN_CHANNEL } from "./claude/service";
 import { type Sharing, readSharing } from "./claude/sharing";
 import {
   type AgentLimitSeen,
   type AgentOnAccount,
   type LimitSeen,
+  type ProbeLogin,
   USAGE_FILTER,
   type UsageBook,
   accountRecords,
@@ -200,10 +201,13 @@ import {
   foldProbe,
   foldUsage,
   forgetAgent,
+  isMachineLogin,
   limitDecisions,
+  moveAnswer,
   parseAgentMoveAnswer,
   parseMoveAnswer,
   parseUsage,
+  pruneBook,
   rankAccounts,
   restoreBook,
   sampleAccount,
@@ -336,6 +340,7 @@ import {
   machineTopic,
   parseDoctorReport,
   parseMachineFrom,
+  parseProbeReport,
   withDoctor,
 } from "./machines";
 import { type IssueBodyFn, findOverlaps, formatOverlap, parseFilesSection } from "./overlap";
@@ -364,6 +369,7 @@ import {
 } from "./placement";
 import { PlanChangeError, applyPlan, planAnswer, samePlan, taskActivity } from "./plan-apply";
 import { diffPlans } from "./plan-diff";
+import { OWNER_GONE, ownerState, presenceOf, waitsOnOwner } from "./presence";
 import { countApiSignals, isApiSignal } from "./pressure/api-signals";
 import { sampleCiQueue } from "./pressure/ci-queue";
 import { sampleCmuxPing } from "./pressure/cmux";
@@ -434,6 +440,7 @@ import type {
   Tunables,
   TunablesPatch,
   Wave,
+  WaveAccount,
   WaveId,
   WaveState,
   WaveTask,
@@ -683,6 +690,11 @@ export interface DaemonOptions {
   fleet?: {
     /** Ends its run (its child process) once `signal` aborts: a stop waits for that. */
     localDoctor?: (repo: string | null, signal: AbortSignal) => Promise<DoctorReport | null>;
+    /**
+     * The own machine's usage probe of one Claude login (a prime: `realLocalProbe`); null when
+     * it printed no report. Absent: a prime runs the whole own doctor instead.
+     */
+    localProbe?: (profile: string) => Promise<ProbeLogin[] | null>;
     localPath?: () => PathProbe;
     version?: string;
     /**
@@ -709,6 +721,8 @@ export interface DaemonOptions {
     signinTimeoutMs?: number;
     /** How long a paired machine's sign-in forward must stay up (default: config-defaults). */
     forwardSettleMs?: number;
+    /** How long a pasted code or redirect waits for the sign-in to end (default: config-defaults). */
+    signinEntryWaitMs?: number;
   };
 }
 
@@ -990,6 +1004,18 @@ export function realLocalDoctor(
   };
 }
 
+/** `volley peer doctor --json --probe-login <profile>` here, through the fence: a prime's probe. */
+export function realLocalProbe(
+  exec: ExecFn = realExec,
+): (profile: string) => Promise<ProbeLogin[] | null> {
+  return async (profile) => {
+    const r = await exec(["volley", "peer", "doctor", "--json", "--probe-login", profile], {
+      timeoutMs: DAEMON_DEFAULTS.local_doctor_timeout_ms,
+    }).catch(() => null);
+    return r === null ? null : parseProbeReport(r.stdout);
+  };
+}
+
 /**
  * Whether `claude` and `bun` resolve on `path` (the daemon's own `PATH`, which its agent sessions
  * inherit): what `command -v` answers on a box, without a shell.
@@ -1098,9 +1124,6 @@ const AWAITING_SAMPLE: Admission = { allow: 0, reasons: ["waiting for the first 
 const LIVE_STATUS = new Set(["spawning", "registered", "working"]);
 
 const LOCK_FILE = "volleyd.lock";
-
-/** Owner statuses that make its `coordinator.state` `gone`. */
-const OWNER_GONE = new Set(["reaped", "done", "failed"]);
 
 /** The wave_complete decision's id (one per wave, never shared with another wave). */
 const waveCompleteDecisionId = (wave: WaveId) => waveDecisionId("wave_complete", wave);
@@ -1299,8 +1322,11 @@ export class Daemon {
   >();
   /** Digests of recent progress messages: a copy delivered twice is handled once. */
   private readonly seenProgress = new Set<string>();
-  /** The latest status (type, wall_time) of every agent id, for a wave owner's `coordinator`. */
-  private readonly statusOf = new Map<string, { type: string; at: string }>();
+  /**
+   * The latest status (type, wall_time, a clean shutdown's `reason`) of every agent id, for a
+   * wave owner's `coordinator`.
+   */
+  private readonly statusOf = new Map<string, { type: string; at: string; reason?: "shutdown" }>();
   /**
    * The terminal statuses `statusOf` forgot (agents owning no wave, with no coordinator name known),
    * the newest `dedupe_max`: the status replay can arrive before the registry replay, and a
@@ -1310,13 +1336,8 @@ export class Daemon {
   /** What each agent's progress says about its attention (a wave owner's `coordinator`). */
   private readonly attentionOf = new Map<
     string,
-    Omit<CoordinatorAttention, "agent_id" | "last_seen">
+    Omit<CoordinatorAttention, "agent_id" | "last_seen" | "presence">
   >();
-  /**
-   * When each wave owner's `coordinator` was last re-published for its attention (epoch ms): a
-   * quiet but heard-from owner's `last_seen` is refreshed every `claim_after_s / 4`.
-   */
-  private readonly attentionPublishedAt = new Map<string, number>();
   /** Registry entries that carry a coordinator name (SPEC §6.2), by agent id. */
   private readonly namedEntries = new Map<string, RegistryEntry>();
   /** The workspace each registered session's entry names: whose screen a ref is (`carryInboxAnswer`). */
@@ -1568,6 +1589,7 @@ export class Daemon {
     this.config = ConfigStore.load({
       home: opts.home,
       system: this.system,
+      log: (line) => this.log(line),
       now: () => dateOf(this.time),
       ...(opts.configDefaults !== undefined ? { defaults: opts.configDefaults } : {}),
     });
@@ -1646,6 +1668,9 @@ export class Daemon {
       ...(opts.claude?.signinTimeoutMs !== undefined
         ? { signinTimeoutMs: opts.claude.signinTimeoutMs }
         : {}),
+      ...(opts.claude?.signinEntryWaitMs !== undefined
+        ? { signinEntryWaitMs: opts.claude.signinEntryWaitMs }
+        : {}),
       rank: (candidates, model) =>
         rankAccounts(accountRecords(this.usage), candidates, { model, now: this.now() }),
       // The primary's record carries its plan (describe) once claude_accounts has asked it.
@@ -1670,6 +1695,14 @@ export class Daemon {
         };
       },
       machines: () => this.machines.all(),
+      // A remove is refused while the profile is in use.
+      agentsOn: (key) => this.agentsOnAccount(key),
+      wavesOn: (id) => this.wavesPinning(id),
+      defaultAccount: () => this.config.effective().claude.default_account,
+      // Every change: prune the usage book, raise the retained signal, republish the records.
+      onChanged: () => this.enqueue(() => this.registryChanged()),
+      // A prime's last step: that machine's usage probe of the one login, folded at once.
+      probe: (machine, profile) => this.primeProbe(machine, profile),
     });
     this.machines = new MachineHealth({
       now: this.now,
@@ -1899,8 +1932,17 @@ export class Daemon {
         void this.enqueue(() => this.onUsage(m.topic, m.payload));
       }),
     );
-    // The records restored from disk, also those no agent reports any more.
-    void this.enqueue(() => this.usagePass());
+    // A retained account record the registry and the book do not have (a profile removed while
+    // the daemon was down, by hand) is cleared.
+    this.unsubscribers.push(
+      await this.broker.subscribeStream(usageAccountTopic("+"), (m) => {
+        if (m.payload === "") return;
+        void this.enqueue(() => this.clearStrayRecord(m.topic.split("/")[3] ?? ""));
+      }),
+    );
+    // The book pruned to the registry, the signal at the current rev, then the records restored
+    // from disk, also those no agent reports any more.
+    void this.enqueue(() => this.registryChanged());
     // Paired machines' retained health records (SPEC §4.6.14).
     this.unsubscribers.push(
       await this.broker.subscribeStream(MACHINES_FILTER, (m) => {
@@ -2188,9 +2230,8 @@ export class Daemon {
   /**
    * The attention state an agent's progress implies (SPEC §4.3): `awaiting_input` (with its
    * question, session and workspace) until anything else but `idle` or `heartbeat` says it works
-   * again. An unchanged state is re-published anyway once `claim_after_s / 4` has passed, so the
-   * retained `coordinator.last_seen` of a coordinator that only heartbeats stays fresh for a cold
-   * Desk.
+   * again. Only a change re-publishes: presence comes from the owner's status (its will), so no
+   * timer keeps `last_seen` fresh.
    */
   private noteAttention(agent: string, env: Envelope): void {
     // Only wave owners have a `coordinator`: other agents' attention would just pile up.
@@ -2198,7 +2239,7 @@ export class Daemon {
     const p = (
       typeof env.payload === "object" && env.payload !== null ? env.payload : {}
     ) as Record<string, unknown>;
-    const next: Omit<CoordinatorAttention, "agent_id" | "last_seen"> =
+    const next: Omit<CoordinatorAttention, "agent_id" | "last_seen" | "presence"> =
       env.type === "awaiting_input"
         ? {
             state: "awaiting_input",
@@ -2218,25 +2259,7 @@ export class Daemon {
           : { state: "working" };
     const before = JSON.stringify(this.attentionOf.get(agent) ?? null);
     this.attentionOf.set(agent, next);
-    const now = this.now();
-    const stale =
-      now - (this.attentionPublishedAt.get(agent) ?? Number.NEGATIVE_INFINITY) >=
-      this.lastSeenRefreshMs(agent);
-    if (before !== JSON.stringify(next) || stale) {
-      this.attentionPublishedAt.set(agent, now);
-      this.ownerChanged(agent);
-    }
-  }
-
-  /** `claim_after_s / 4` of the waves `agent` owns (the shortest), in ms. */
-  private lastSeenRefreshMs(agent: string): number {
-    let s = Number.POSITIVE_INFINITY;
-    for (const [wave, log] of this.waves) {
-      const owner = log.record.state?.owner;
-      if (owner != null && this.actsAs(agent, owner))
-        s = Math.min(s, this.config.effective(wave).claim_after_s);
-    }
-    return secondsMs(s) / 4;
+    if (before !== JSON.stringify(next)) this.ownerChanged(agent);
   }
 
   /** Does `agent` own a wave itself, or as the agent bound to the coordinator name owning it? */
@@ -2264,11 +2287,13 @@ export class Daemon {
   }
 
   /**
-   * wave-state `coordinator` for `owner` (through its binding when it is a coordinator name);
-   * undefined until anything of it was seen. A bound agent that went away is `reconnecting` for
-   * `autopilot.reconnect_grace_s`, then `gone`.
+   * wave-state `coordinator` for `owner` of `wave` (through its binding when it is a coordinator
+   * name); undefined until anything of it was seen. Its presence is its retained status
+   * (presence.ts): a bound agent that went away is `reconnecting` for
+   * `autopilot.reconnect_grace_s`; an offline owner is then `gone` while something in the wave
+   * waits on it (`waitsOnOwner`), else `away`.
    */
-  private coordinatorFor(owner: string): CoordinatorAttention | undefined {
+  private coordinatorFor(owner: string, wave: WaveId): CoordinatorAttention | undefined {
     const binding = this.bindings.get(owner);
     const agent = binding?.agent_id ?? owner;
     const status = this.statusOf.get(agent);
@@ -2282,14 +2307,33 @@ export class Daemon {
       .filter((t): t is number => t !== undefined && !Number.isNaN(t))
       .sort((a, b) => b - a)[0];
     const last_seen = new Date(seen ?? this.now()).toISOString();
-    if (status !== undefined && OWNER_GONE.has(status.type)) {
+    const presence = presenceOf(status);
+    if (presence === "online")
+      return { agent_id: agent, presence, ...(attention ?? { state: "working" }), last_seen };
+    const state = ownerState({
+      presence,
+      attention,
       // Not yet stamped: the status was just seen and its rebind is still queued.
-      const away = binding?.gone_at ?? this.wentAwayAt(status.at);
-      const grace = secondsMs(this.config.effective().autopilot.reconnect_grace_s);
-      const state = binding !== undefined && this.now() - away < grace ? "reconnecting" : "gone";
-      return { agent_id: agent, state, last_seen };
-    }
-    return { agent_id: agent, ...(attention ?? { state: "working" }), last_seen };
+      awayAt: binding !== undefined ? (binding.gone_at ?? this.wentAwayAt(status?.at)) : undefined,
+      graceMs: secondsMs(this.config.effective().autopilot.reconnect_grace_s),
+      now: this.now(),
+      waits: this.waitsOnOwner(wave),
+    });
+    return { agent_id: agent, presence, state, last_seen };
+  }
+
+  /** What in `wave` only its owner can answer (`waitsOnOwner`); null when nothing. */
+  private waitsOnOwner(wave: WaveId) {
+    const rec = this.waves.get(wave)?.record;
+    if (rec?.state == null) return null;
+    const eff = this.config.effective(wave);
+    return waitsOnOwner({
+      decisions: rec.state.open_decisions.flatMap((id) => rec.decisions[id] ?? []),
+      inbox: [...this.inbox.values()].filter((i) => i.wave === wave),
+      autopilotEnabled: eff.autopilot.enabled,
+      mergeMode: rec.wave?.merge ?? eff.autopilot.merge,
+      gates: rec.state.gates,
+    });
   }
 
   /**
@@ -2352,7 +2396,13 @@ export class Daemon {
    * `autopilot.reconnect_grace_s` passes. Runs on the queue.
    */
   private async rebind(name: string): Promise<void> {
-    const statuses = new Map([...this.statusOf].map(([id, s]) => [id, s.type]));
+    // A clean shutdown's `blocked` ended the session as a `done` would (SPEC §7.5).
+    const statuses = new Map(
+      [...this.statusOf].map(([id, s]) => [
+        id,
+        s.reason === "shutdown" && presenceOf(s) === "offline" ? "done" : s.type,
+      ]),
+    );
     const prev = this.bindings.get(name);
     let next = bindOwner([...this.namedEntries.values()], statuses, name);
     // An older entry whose status was never seen is most likely a session long gone (its status
@@ -2819,7 +2869,12 @@ export class Daemon {
               this.endedStatusOf.delete(this.endedStatusOf.keys().next().value as string);
           } else {
             this.endedStatusOf.delete(holder);
-            this.statusOf.set(holder, { type: env.type, at: env.wall_time });
+            const reason = (env.payload as { reason?: unknown } | null)?.reason;
+            this.statusOf.set(holder, {
+              type: env.type,
+              at: env.wall_time,
+              ...(reason === "shutdown" ? { reason } : {}),
+            });
           }
           if (prev !== env.type) {
             this.ownerChanged(holder);
@@ -4544,6 +4599,25 @@ export class Daemon {
       const sel = this.claude.select({ task: move.to, machine, model });
       return withCandidates({ ...sel, source: "move", why: move.why });
     }
+    // The wave was moved (`wave_account_set`, an account_limit answer): a task naming no account
+    // of its own starts under the wave's new one, or balances (`to: null`). An account the task's
+    // machine has no profile of leaves that task to the wave file and the config default.
+    const pin = this.waves.get(wave)?.record.account_pin;
+    if (pin !== undefined && (t.account === undefined || t.account === MOST_HEADROOM)) {
+      try {
+        const sel = this.claude.select({
+          ...(pin.to !== null ? { wave: pin.to } : {}),
+          configDefault: null,
+          machine,
+          model,
+        });
+        return withCandidates(
+          pin.to !== null ? { ...sel, why: `wave ${wave} moved to ${pin.to}` } : sel,
+        );
+      } catch (e) {
+        if (!(e instanceof ClaudeAccountError) || pin.to === null) throw e;
+      }
+    }
     const sel = this.claude.select({
       ...(t.account !== undefined ? { task: t.account } : {}),
       ...(w.account !== undefined ? { wave: w.account } : {}),
@@ -4551,8 +4625,9 @@ export class Daemon {
       machine,
       model,
     });
-    // An answered account_limit moved the wave: its new agents start under the other account
-    // (an agent moved on its own keeps its own move).
+    // An answered account_limit moved the wave: a task naming the account it left starts under
+    // the other one (an agent moved on its own keeps its own move; a `wave_account_set` that
+    // answered no decision leaves a task naming its own account on it).
     const to = machine === LOCAL_MACHINE ? waveAccount(sel.id, waveAccountMoves(events)) : sel.id;
     if (to === sel.id) return withCandidates(sel);
     return withCandidates({
@@ -4566,9 +4641,7 @@ export class Daemon {
   private balanced(wave: WaveId): boolean {
     const w = this.waves.get(wave)?.record.wave;
     if (w === undefined || w === null) return false;
-    if (w.account !== undefined && w.account !== MOST_HEADROOM) return false;
-    const def = this.config.effective(wave).claude.default_account;
-    if (def !== null && def !== MOST_HEADROOM) return false;
+    if (this.waveAccountState(wave).pinned !== null) return false;
     return Object.values(w.tasks).every(
       (t) => t.account === undefined || t.account === MOST_HEADROOM,
     );
@@ -4582,11 +4655,29 @@ export class Daemon {
     const w = this.waves.get(wave)?.record.wave;
     const named = (a: string | null | undefined) =>
       a !== undefined && a !== null && a !== MOST_HEADROOM;
-    return (
-      named(w?.tasks[task]?.account) ||
-      named(w?.account) ||
-      named(this.config.effective(wave).claude.default_account)
-    );
+    return named(w?.tasks[task]?.account) || this.waveAccountState(wave).pinned !== null;
+  }
+
+  /**
+   * wave-state `account` (SPEC §4.6.1): the wave's last move (`wave_account_moved`), else its
+   * wave file's `account:`, else `claude.default_account`, else balanced.
+   */
+  private waveAccountState(wave: WaveId): WaveAccount {
+    const rec = this.waves.get(wave)?.record ?? this.archived.get(wave)?.record;
+    const named = (a: string | null | undefined): a is string =>
+      a !== undefined && a !== null && a !== MOST_HEADROOM;
+    const pin = rec?.account_pin;
+    if (pin !== undefined)
+      return {
+        pinned: pin.to,
+        source: pin.to !== null ? "wave" : "balanced",
+        ...(pin.from !== null ? { moved_from: pin.from } : {}),
+      };
+    const own = rec?.wave?.account;
+    if (named(own)) return { pinned: own, source: "wave" };
+    const def = this.config.effective(wave).claude.default_account;
+    if (named(def)) return { pinned: def, source: "config" };
+    return { pinned: null, source: "balanced" };
   }
 
   /** The `local` host agents run on. */
@@ -5480,16 +5571,64 @@ export class Daemon {
    */
   private foldLogins(record: MachineRecord, machine: string): boolean {
     if (record.claude_logins === undefined) return false;
+    return this.foldProbeLogins(record.name, record.claude_logins, machine);
+  }
+
+  private foldProbeLogins(name: string, logins: ProbeLogin[], machine: string): boolean {
     const before = bookState(this.usage);
-    for (const login of record.claude_logins) {
+    for (const login of logins) {
       const account = this.claude.accountForLogin(machine, login.profile);
       if (account === null) continue;
-      this.usage = foldProbe(this.usage, { account, machine: record.name, login });
+      this.usage = foldProbe(this.usage, { account, machine: name, login });
     }
     const after = bookState(this.usage);
     if (after === before) return false;
     writeFileAtomic(this.usageFile, after);
     return true;
+  }
+
+  /**
+   * A prime's probe (claude/service.ts prime): `machine`'s usage probe of one login (`default`
+   * or a profile id), folded into its account and published at once. Here the own machine's
+   * one-login probe; on a paired machine its host's. Where that printed no report (a volley
+   * older than `--probe-login`), the machine's whole doctor runs instead, as Repair runs it.
+   */
+  private async primeProbe(machine: string, profile: string): Promise<void> {
+    if (machine === LOCAL_MACHINE) {
+      const probe = this.opts.fleet?.localProbe;
+      const logins = probe !== undefined ? await probe(profile) : null;
+      if (logins !== null) {
+        await this.enqueue(async () => {
+          if (this.foldProbeLogins(this.config.localName(), logins, LOCAL_MACHINE))
+            await this.usagePass();
+        });
+        return;
+      }
+      if (this.opts.fleet?.localDoctor === undefined) return;
+      // One already running folds this login too: the answer waits for it.
+      if (!this.localDoctorRunning) this.localDoctorRun = this.runLocalDoctor();
+      await this.localDoctorRun;
+      return;
+    }
+    const host = this.remoteFor(machine);
+    if (typeof host === "string") throw new Error(host);
+    const logins = host.probeLogin !== undefined ? await host.probeLogin(profile) : null;
+    if (logins !== null) {
+      await this.enqueue(async () => {
+        if (this.foldProbeLogins(machine, logins, machine)) await this.usagePass();
+      });
+      return;
+    }
+    if (this.doctoring.has(machine)) return;
+    this.doctoring.add(machine);
+    let r: Awaited<ReturnType<PeerService["runDoctor"]>>;
+    try {
+      r = await this.peers.runDoctor({ name: machine, fix: false, clone: false, host });
+    } finally {
+      this.doctorDone(machine);
+    }
+    const report = r.report;
+    if (report !== undefined) await this.enqueue(() => this.foldDoctor(machine, report));
   }
 
   /** Live supervised agents on machine `name` (the `local` token is the own machine). */
@@ -9599,8 +9738,9 @@ export class Daemon {
         (t.stage === "queued" && t.why_waiting?.startsWith("awaiting decision") === true);
       if (unsettled.length > 0 && unsettled.every(stuck)) state.status = "awaiting_decision";
     }
-    const coordinator = state.owner !== null ? this.coordinatorFor(state.owner) : undefined;
+    const coordinator = state.owner !== null ? this.coordinatorFor(state.owner, wave) : undefined;
     if (coordinator !== undefined) state.coordinator = coordinator;
+    state.account = this.waveAccountState(wave);
     return state;
   }
 
@@ -9981,6 +10121,83 @@ export class Daemon {
   }
 
   /**
+   * `wave_account_set { wave, acct | null }` (SPEC §4.6.11): the account the wave's agents not yet
+   * spawned start under (null: balanced); running agents finish where they are. Refused, like a
+   * `move wave` answer, for an account a spawn could not use. Journals `wave_account_moved`; a
+   * pick an open `account_limit` offers (`move wave <wave> to <acct>`) is its answer instead.
+   */
+  private async waveAccountSet(p: Record<string, unknown>, by: string): Promise<Reply> {
+    const wave = typeof p.wave === "string" ? p.wave : "";
+    const log = this.waves.get(wave);
+    if (log === undefined) return { ok: false, error: `unknown wave '${wave}'` };
+    const acct = p.acct;
+    if (acct !== null && (typeof acct !== "string" || acct === ""))
+      return {
+        ok: false,
+        error: "wave_account_set requires payload.acct: a Claude account, or null for balanced",
+      };
+    if (acct !== null) {
+      const why = this.unusableAccount(wave, acct);
+      if (why !== null) return { ok: false, error: why };
+    }
+    const before = this.waveAccountState(wave);
+    const result = () => ({ wave, account: this.waveAccountState(wave) });
+    if (before.pinned === acct) return { ok: true, result: { ...result(), unchanged: true } };
+    const asked =
+      acct === null
+        ? undefined
+        : Object.values(log.record.decisions).find(
+            (d) =>
+              d.kind === "account_limit" &&
+              d.resolved === undefined &&
+              (d.options ?? []).includes(moveAnswer(wave, acct)),
+          );
+    if (asked !== undefined && acct !== null) {
+      try {
+        const r = await this.answerDecision(wave, asked.decision_id, {
+          answer: moveAnswer(wave, acct),
+          by,
+        });
+        if ("refused" in r) return { ok: false, error: r.refused };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+      return { ok: true, result: { ...result(), decision_id: asked.decision_id } };
+    }
+    await this.append(wave, {
+      type: "wave_account_moved",
+      data: { from: before.pinned, to: acct, by },
+    });
+    this.log(
+      `wave ${wave}: new agents start ${acct === null ? "balanced" : `under Claude account ${acct}`} (was ${before.pinned ?? "balanced"})`,
+    );
+    return { ok: true, result: result() };
+  }
+
+  /**
+   * Why a spawn of `wave` could not start under `acct` (null: it could): an unknown or not
+   * signed-in account, or one kept on no machine the wave's tasks run on.
+   */
+  private unusableAccount(wave: WaveId, acct: string): string | null {
+    const tasks = Object.values(this.waves.get(wave)?.record.wave?.tasks ?? {});
+    const machines = new Set([
+      LOCAL_MACHINE,
+      ...tasks.map((t) => t.host).filter((h) => h !== "local" && h !== AUTO_HOST),
+    ]);
+    let first: string | null = null;
+    for (const machine of machines) {
+      try {
+        this.claude.select({ task: acct, machine });
+        return null;
+      } catch (e) {
+        if (!(e instanceof ClaudeAccountError)) throw e;
+        first ??= e.message;
+      }
+    }
+    return first;
+  }
+
+  /**
    * The wave move an `account_limit` answer asks for (`move wave <w> to <acct>`), or null for
    * any other answer. Throws, before anything is journaled, for a move of another wave or to an
    * account a spawn could not use, so the decision stays open.
@@ -10058,6 +10275,78 @@ export class Daemon {
       if (after !== before) writeFileAtomic(this.usageFile, after);
     }
     await this.usagePass();
+  }
+
+  /**
+   * The registry changed (or the daemon started): prune the usage book, publish the retained
+   * `claude_registry_changed { rev, at }` signal, and republish the records (a rename's label).
+   */
+  private async registryChanged(): Promise<void> {
+    await this.pruneUsage();
+    await this.publish(
+      REGISTRY_TOPIC,
+      this.envelope(SIGNIN_CHANNEL, "claude_registry_changed", {
+        rev: this.claude.rev,
+        at: dateOf(this.time).toISOString(),
+      }),
+      true,
+    );
+    await this.usagePass();
+  }
+
+  /**
+   * Drop the book's accounts the registry no longer has (never `primary[@<name>]`) and clear
+   * their retained records. An unreadable registry prunes nothing.
+   */
+  private async pruneUsage(): Promise<void> {
+    const known = this.claude.knownAccounts();
+    if (known === null) return;
+    const next = pruneBook(this.usage, known);
+    if (next === this.usage) return;
+    const gone = Object.keys(this.usage.accounts).filter((a) => next.accounts[a] === undefined);
+    this.usage = next;
+    writeFileAtomic(this.usageFile, bookState(next));
+    for (const a of gone) {
+      this.publishedUsage.delete(a);
+      await this.clearRetained(usageAccountTopic(a));
+    }
+  }
+
+  /** A retained record of an account neither the registry nor the book has: cleared. */
+  private async clearStrayRecord(acct: string): Promise<void> {
+    if (acct === "" || isMachineLogin(acct) || this.usage.accounts[acct] !== undefined) return;
+    const known = this.claude.knownAccounts();
+    if (known === null || known.has(acct)) return;
+    this.publishedUsage.delete(acct);
+    await this.clearRetained(usageAccountTopic(acct));
+  }
+
+  /** The supervised agents running under `key` (a usage-record key), as sampled or spawned. */
+  private agentsOnAccount(key: string): string[] {
+    const out: string[] = [];
+    for (const [id, a] of this.supervised) {
+      const machine = a.host.name === "local" ? LOCAL_MACHINE : a.host.name;
+      const spawned = this.spawnedRecord((e) => e.data.agent_id === id, a.wave);
+      const own =
+        typeof spawned?.claude_account === "string"
+          ? accountKey(spawned.claude_account, machine)
+          : null;
+      if (this.usage.agents[id]?.account === key || own === key) out.push(id);
+    }
+    return out.sort();
+  }
+
+  /** The waves still running whose wave file pins profile `id` (the wave's or a task's account). */
+  private wavesPinning(id: string): string[] {
+    return [...this.waves]
+      .filter(([, log]) => {
+        const status = log.record.state?.status;
+        const w = log.record.wave;
+        if (status === undefined || status === "complete" || status === "stopped") return false;
+        return w?.account === id || Object.values(w?.tasks ?? {}).some((t) => t.account === id);
+      })
+      .map(([wave]) => wave)
+      .sort();
   }
 
   /** Re-publish the account records that changed, then open the `account_limit`s they call for. */
@@ -11076,12 +11365,25 @@ export class Daemon {
         return this.claude.balance(p, Object.keys(this.config.effective().hosts));
       case "claude_account_add":
         return { ok: true, defer: this.claude.add(p, by) };
+      // Answered once the usage book, the records and the signal follow (onChanged).
+      case "claude_account_rename":
+        return { ok: true, defer: this.claude.rename(p, by) };
+      case "claude_account_remove":
+        return { ok: true, defer: this.claude.remove(p, by) };
       case "claude_signin":
         return { ok: true, defer: this.claude.signin(p, by) };
+      // The code or redirect address the owner pasted: never logged, journaled or echoed.
+      case "claude_signin_entry":
+        return { ok: true, defer: this.claude.enterSignin(p, by) };
+      // Identity, plan and a usage reading of one login (as after its sign-in); 5 min apart.
+      case "claude_prime":
+        return { ok: true, defer: this.claude.prime(p, by) };
       case "claude_sync":
         return this.claude.sync(p, by);
       case "agent_move_account":
         return { ok: true, defer: this.moveAccount(p, by) };
+      case "wave_account_set":
+        return this.waveAccountSet(p, by);
       // Machines + pairing (peers.ts): the code is a join's credential; the reply_key's holder
       // gets the secret. Invite and remove are admin ops, answered only on the account-op topic.
       case "peer_join":
@@ -11363,7 +11665,9 @@ export class Daemon {
       return { ok: false, error: `${op} requires payload.wave_yaml` };
     const source = typeof p.source === "string" ? p.source : undefined;
     try {
-      const first = parseWaveFile(p.wave_yaml, source, this.placementDefaults());
+      const dropped: string[] = [];
+      const first = parseWaveFile(p.wave_yaml, source, this.placementDefaults(), dropped);
+      for (const n of dropped) this.log(`wave ${first.wave}: ${n}`);
       // A known wave: parsed again under its own placement (the file's own placement: still wins).
       const wave =
         this.waves.get(first.wave)?.record.wave == null
@@ -12424,25 +12728,36 @@ export class Daemon {
     }
   }
 
-  /** `claim`: take a wave over when its owner is gone (status, registry age, heartbeats). */
+  /**
+   * `claim`: take a wave over when its owner is offline (its retained status, SPEC §7.5); a
+   * coordinator name once its binding has been offline past `autopilot.reconnect_grace_s`.
+   */
   private async claim(p: Record<string, unknown>, by: string): Promise<HandlerResult> {
     const w = this.waveOf(p);
     if ("error" in w) return { ok: false, error: w.error };
     const owner = w.log.record.state?.owner ?? null;
     // A coordinator name is measured by its newest binding, never by an agent id it left.
-    const bound = owner !== null ? this.bindings.get(owner)?.agent_id : undefined;
+    const binding = owner !== null ? this.bindings.get(owner) : undefined;
+    const bound = binding?.agent_id;
     const agent = bound ?? owner;
-    const info = agent !== null && agent !== by ? await this.ownerLiveness(agent) : null;
+    const status =
+      agent !== null && agent !== by
+        ? (this.statusOf.get(agent) ?? (await this.ownerLiveness(agent)))
+        : null;
     const verdict = claimVerdict({
       owner,
       by,
       ...(bound !== undefined ? { bound } : {}),
-      status: info?.status ?? null,
-      registryAt: info?.registryAt ?? null,
-      heartbeatAt: agent !== null ? (this.lastSeen.get(agent) ?? this.startedAt) : null,
-      ownedSince: ownedSince(this.journalEvents(w.wave), this.now()),
+      presence: presenceOf(status),
+      // As `coordinatorFor` reads it, so a wave shown `reconnecting` is never claimable.
+      awayAt:
+        binding !== undefined
+          ? (binding.gone_at ?? this.wentAwayAt(status?.at))
+          : status != null
+            ? this.wentAwayAt(status.at)
+            : null,
+      graceMs: secondsMs(this.config.effective().autopilot.reconnect_grace_s),
       now: this.now(),
-      claimAfterS: this.config.effective(w.wave).claim_after_s,
     });
     if (!verdict.ok) return { ok: false, error: `wave '${w.wave}': ${verdict.reason}` };
     // The agent bound to a coordinator-name owner already acts for it: the name keeps the wave.
@@ -12458,25 +12773,22 @@ export class Daemon {
     return { ok: true, result: { wave: w.wave, owner: by, previous: owner, why: verdict.why } };
   }
 
-  /** The owner's retained status and registry timestamps. */
-  private async ownerLiveness(owner: string) {
-    if (!isValidAgentId(owner)) return { status: null, registryAt: null };
-    const [st, reg] = await Promise.all([
-      this.broker.queryRetained(
-        buildTopic(this.opts.namespace, owner, "status"),
-        DAEMON_DEFAULTS.probe_ms,
-      ),
-      this.broker.queryRetained(registryTopic(owner), DAEMON_DEFAULTS.probe_ms),
-    ]);
-    const status = st !== null && st !== "" ? parseEnvelope(st) : null;
-    const entry = reg !== null && reg !== "" ? parseEnvelope(reg) : null;
-    const started = (entry?.payload as { started_at?: unknown } | undefined)?.started_at;
-    const times = [entry?.wall_time, typeof started === "string" ? started : undefined].filter(
-      (t): t is string => t !== undefined,
+  /** The owner's retained status, for an owner the daemon has not seen; null when none. */
+  private async ownerLiveness(
+    owner: string,
+  ): Promise<{ type: string; at: string; reason?: string } | null> {
+    if (!isValidAgentId(owner)) return null;
+    const st = await this.broker.queryRetained(
+      buildTopic(this.opts.namespace, owner, "status"),
+      DAEMON_DEFAULTS.probe_ms,
     );
+    const status = st !== null && st !== "" ? parseEnvelope(st) : null;
+    if (status === null) return null;
+    const reason = (status.payload as { reason?: unknown } | null)?.reason;
     return {
-      status: status !== null ? { type: status.type, at: status.wall_time } : null,
-      registryAt: times.length > 0 ? (times.sort().at(-1) ?? null) : null,
+      type: status.type,
+      at: status.wall_time,
+      ...(typeof reason === "string" ? { reason } : {}),
     };
   }
 
@@ -13253,15 +13565,6 @@ function clipText(text: string): string {
   const one = text.replace(/\s+/g, " ").trim();
   const max = DAEMON_DEFAULTS.decision_text_max;
   return one.length > max ? `${one.slice(0, max - 1)}…` : one;
-}
-
-/** When the current owner got the wave: the latest `owner_claimed`, else `wave_submitted`. */
-function ownedSince(events: readonly JournalEvent[], now: number): string {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i] as JournalEvent;
-    if (e.type === "owner_claimed" || e.type === "wave_submitted") return e.at;
-  }
-  return new Date(now).toISOString();
 }
 
 /** Open every wave journal under `<home>/waves/`, oldest submission first. */

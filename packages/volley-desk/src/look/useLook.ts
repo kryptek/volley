@@ -1,7 +1,7 @@
 /**
  * The Desk look, ported from the prototype `App.tsx` (`Look`, `LOOK0`, load /
  * save): background, dim, window chrome, Needs-you effect, narration effect,
- * tethers and auto-arrange, persisted per browser in the `volley-desk-look`
+ * tethers, auto-arrange, the theme (`themes.ts`), the agent windows' icons (Clawd characters or the classic ring) and the current pipeline step's effect (`styles/stepfx.css`), persisted per browser in the `volley-desk-look`
  * localStorage entry; D6's saved `autoArrange` lives in the same entry and
  * carries over. The same entry keeps whether finished agents are shown (the
  * coordinators window's toggle) and after how many minutes a finished agent
@@ -13,14 +13,19 @@ import { useCallback, useState } from "react";
 import { isBackground } from "./backgrounds";
 import {
   ATTN_STYLES,
+  type AgentIcons,
   type AttnStyle,
   CHROMES,
   type Chrome,
+  ICONS,
   NARRATION_FX,
   type NarrationFx,
+  STEP_FX,
+  type StepFx,
 } from "./options";
+import { THEME_IDS, type ThemeId } from "./themes";
 
-export type { NarrationFx };
+export type { AgentIcons, NarrationFx, StepFx };
 
 /** The Desk look entry in localStorage. */
 export const LOOK_STORAGE_KEY = "volley-desk-look";
@@ -32,6 +37,12 @@ export interface Look {
   attn: AttnStyle;
   narr: NarrationFx;
   tethers: boolean;
+  /** The colour theme (`themes.ts`); Volley is today's Desk. */
+  theme: ThemeId;
+  /** The agent window's title mark: the Clawd character or the classic status ring. */
+  icons: AgentIcons;
+  /** The current pipeline step's effect; Classic is the flat look. */
+  fx: StepFx;
   autoArrange: boolean;
   /** Show agents that finished (done, failed, reaped) more than `finishedGraceMin` ago. */
   showFinished: boolean;
@@ -46,6 +57,9 @@ export const LOOK0: Look = {
   attn: "pulse",
   narr: "decrypt",
   tethers: true,
+  theme: "volley",
+  icons: "clawd",
+  fx: "glint",
   autoArrange: true,
   showFinished: false,
   finishedGraceMin: 10,
@@ -74,6 +88,9 @@ const VALID: { [K in keyof Look]: (v: unknown) => v is Look[K] } = {
   attn: oneOf(ATTN_STYLES),
   narr: oneOf(NARRATION_FX),
   tethers: isBool,
+  theme: oneOf(THEME_IDS),
+  icons: oneOf(ICONS),
+  fx: oneOf(STEP_FX),
   autoArrange: isBool,
   showFinished: isBool,
   finishedGraceMin: isGraceMin,

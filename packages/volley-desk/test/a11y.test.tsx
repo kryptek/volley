@@ -5,6 +5,7 @@ import axe from "axe-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { REDUCED_MOTION_QUERY, useReducedMotion } from "../src/a11y/motion";
+import { applyTheme } from "../src/look/applyLook";
 import { CHROMES } from "../src/look/options";
 import { LOOK_STORAGE_KEY } from "../src/look/useLook";
 import { BrokerAccounts } from "../src/settings/BrokerAccounts";
@@ -177,6 +178,43 @@ describe("axe (jsdom)", () => {
     },
     30_000,
   );
+});
+
+describe("axe, light tone (Material Lighter, #368)", () => {
+  beforeEach(() => {
+    localStorage.setItem(
+      LOOK_STORAGE_KEY,
+      JSON.stringify({ bg: "none", autoArrange: false, theme: "lighter" }),
+    );
+  });
+  afterEach(() => applyTheme("volley"));
+
+  it("reports no violations on the demo canvas, with the Needs you window open", async () => {
+    renderApp();
+    expect(document.documentElement.dataset.tone).toBe("light");
+    expect(await violations()).toEqual([]);
+    fireEvent.click(
+      within(screen.getByRole("toolbar", { name: "Dock" })).getByRole("button", {
+        name: "Needs you",
+      }),
+    );
+    expect(await violations()).toEqual([]);
+  }, 30_000);
+
+  it("reports no violations in Settings › Appearance", async () => {
+    renderApp();
+    fireEvent.click(
+      within(screen.getByRole("toolbar", { name: "Dock" })).getByRole("button", {
+        name: "Settings",
+      }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", {
+        name: "Appearance",
+      }),
+    );
+    expect(await violations()).toEqual([]);
+  }, 30_000);
 });
 
 describe("axe (jsdom): the admin's onboarding views", () => {
@@ -358,7 +396,9 @@ function chromeBackground(chrome: string): string {
 /** The colour stops of a chrome's depth gradient (`--win-body`, D10). */
 function bodyStops(chrome: string): string[] {
   const m = chromeRule(chrome).match(/--win-body:\s*([^;]+);/);
-  return m ? [...(m[1] as string).matchAll(/rgba?\([^)]+\)|#[0-9a-f]{6}/gi)].map((x) => x[0]) : [];
+  // The stops are tokens (desk.css :root, the Volley theme): resolve them first.
+  const body = (m?.[1] ?? "").replace(/var\(--([a-z0-9-]+)\)/g, (_, n: string) => token(n));
+  return [...body.matchAll(/rgba?\([^)]+\)|#[0-9a-f]{6}/gi)].map((x) => x[0]);
 }
 
 describe("contrast (WCAG AA, 4.5:1 for text)", () => {

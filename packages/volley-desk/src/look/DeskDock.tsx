@@ -6,7 +6,7 @@
  * fit, zoom in / out and the Settings window (appearance and auto-arrange
  * live there), and, in a signed-in session, the account avatar, whose menu
  * signs out or switches account (`AccountMenu`). Its panel is lifted and lit like the Desk's windows (D10,
- * `.dock-wrap .dock` in look.css).
+ * `.dock-wrap .dock` in look.css); on a light theme it takes the Dock's light set (`tone`).
  */
 import {
   ComputerIcon,
@@ -21,6 +21,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { AccountMenu, initials } from "../auth/AccountActions";
 import Dock, { type DockItemData } from "../rb/Dock/Dock";
+import type { Tone } from "./themes";
 import "../styles/look.css";
 
 /** Zoom step for the dock's zoom buttons (prototype). */
@@ -47,6 +48,8 @@ export interface DeskDockProps {
   onZoom: (factor: number) => void;
   settingsOpen: boolean;
   onToggleSettings: () => void;
+  /** The theme's tone (the Dock's token set); dark when absent. */
+  tone?: Tone;
   /** The signed-in account (the avatar and its menu); absent outside a sign-in gate (demo). */
   account?: {
     identity: string | null;
@@ -124,8 +127,9 @@ export function DeskDock(p: DeskDockProps) {
         magnification={62}
         baseItemSize={44}
         panelHeight={60}
-        accentColor="#6ee7f9"
-        badgeColor="#ff7a59"
+        accentColor="var(--t-acc)"
+        badgeColor="var(--hot)"
+        theme={p.tone ?? "dark"}
         showLabels
       />
       {p.account?.open && (

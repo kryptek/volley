@@ -14,7 +14,7 @@
 .bg-dim {
   position: absolute;
   inset: 0;
-  background: #05060b;
+  background: var(--bg-dim);
   pointer-events: none;
 }
 .bg-fallback {
@@ -81,18 +81,6 @@
   stroke-width: 0.9;
   opacity: 0.75;
 }
-/* A held task with no agent (#451): a short cable ending in a static `CI` pill; hover for its title. */
-.tether-stub {
-  pointer-events: auto;
-}
-.tether-stub rect {
-  fill: rgba(251, 191, 36, 0.14);
-  stroke: rgba(251, 191, 36, 0.6);
-}
-.tether-stub text {
-  font: 600 9px var(--f-mono);
-  fill: var(--amber);
-}
 /* An energy pulse: a short bright dash running wave → agent (pathLength = 100). */
 .tether-pulse {
   stroke-width: 3.2;
@@ -120,7 +108,7 @@
 }
 /* Each chrome keeps its identity under the shared depth recipe (desk.css `.win-depth`). */
 .win-inner.chrome-liquid {
-  background-color: rgba(8, 10, 18, 0.5);
+  background-color: var(--liquid-fill);
   /* No backdrop-filter here: GlassSurface's own glass would only see this box. */
   --win-body: linear-gradient(
     160deg,
@@ -143,13 +131,8 @@
   height: 100% !important;
 }
 .win-inner.chrome-spotlight {
-  background-color: rgba(12, 14, 22, 0.62);
-  --win-body: linear-gradient(
-    160deg,
-    rgba(34, 38, 58, 0.45),
-    rgba(14, 16, 28, 0.25) 55%,
-    rgba(10, 11, 20, 0.5)
-  );
+  background-color: var(--spot-fill);
+  --win-body: linear-gradient(160deg, var(--spot-a), var(--spot-b) 55%, var(--spot-c));
   backdrop-filter: blur(20px) saturate(1.35);
   -webkit-backdrop-filter: blur(20px) saturate(1.35);
   /* SpotlightCard clips its content: the wrapper carries the lift. */
@@ -229,14 +212,8 @@
 }
 /* The dock panel is lifted and lit like the Desk's windows (D10, desk.css `.win-depth`, `.win-edge`). */
 .dock-wrap .dock {
-  background: linear-gradient(
-    160deg,
-    rgba(48, 52, 72, 0.72),
-    rgba(22, 24, 36, 0.66) 55%,
-    rgba(12, 13, 22, 0.74)
-  );
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -1px 0 rgba(0, 0, 0, 0.5), inset 0 0
-    0 1px rgba(255, 255, 255, 0.06), var(--win-shadow);
+  background: linear-gradient(160deg, var(--dock-a), var(--dock-b) 55%, var(--dock-c));
+  box-shadow: var(--win-edge-lit), inset 0 0 0 1px rgba(255, 255, 255, 0.06), var(--win-shadow);
 }
 
 /* ------------------------------------------- backgrounds (Settings › Appearance) */
@@ -283,8 +260,99 @@
 }
 .bg-opt.on {
   color: var(--ink);
-  border-color: #6ee7f9;
-  background: rgba(110, 231, 249, 0.12);
+  border-color: var(--t-acc);
+  background: color-mix(in srgb, var(--t-acc) 12%, transparent);
+}
+/* Settings › Appearance › Theme: a card per palette, its swatch strip over its name. */
+.theme-grid {
+  display: grid;
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px;
+}
+.theme-opt {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  padding: 7px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--pill-fill);
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--mute);
+}
+.theme-opt:hover {
+  color: var(--ink);
+}
+.theme-opt.on {
+  color: var(--ink);
+  border-color: var(--t-acc);
+  background: color-mix(in srgb, var(--t-acc) 12%, transparent);
+}
+.theme-swatch {
+  display: flex;
+  height: 18px;
+  border-radius: 5px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+.theme-swatch i {
+  flex: 1;
+}
+.theme-tone {
+  color: var(--dim);
+}
+/* Settings › Appearance › Current step: a card per effect, its live preview on top (#366). */
+.fx-grid {
+  display: grid;
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
+  gap: 6px;
+}
+.fx-opt {
+  all: unset;
+  box-sizing: border-box;
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--pill-fill);
+  cursor: pointer;
+  color: var(--mute);
+}
+.fx-opt:hover {
+  color: var(--ink);
+}
+.fx-opt:focus-visible {
+  outline: 2px solid var(--t-acc);
+  outline-offset: 2px;
+}
+.fx-opt[aria-pressed="true"] {
+  color: var(--ink);
+  border-color: var(--t-acc);
+  background: color-mix(in srgb, var(--t-acc) 12%, transparent);
+}
+.fx-opt .fx-demo {
+  display: block;
+}
+.fx-opt .fx-name {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.fx-opt .fx-desc {
+  font-size: 11.5px;
+  color: var(--dim);
+  line-height: 1.35;
 }
 .bg-none {
   grid-column: 1 / -1;
@@ -329,4 +397,14 @@
 }
 .dock-account-menu:focus {
   outline: none;
+}
+/* The light tone: React Bits' Gooey Nav and Specular Button default to light text (their dark
+   sets, written inline); on a light theme they take the theme's ink. A Specular Button on a
+   colour of its own (`PrimaryAction`, the sign-in button's gradient frame) keeps its text. */
+html[data-tone="light"] .gooey-nav__list {
+  --gn-ink: var(--ink);
+  --gn-muted: var(--mute);
+}
+html[data-tone="light"] :not(.action-spec, .spec-wrap) > .specular-button {
+  color: var(--ink);
 }

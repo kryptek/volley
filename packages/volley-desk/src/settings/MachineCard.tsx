@@ -29,7 +29,6 @@ import { maskEmail } from "../lib/email";
 import { plural } from "../lib/plural";
 import { type PeerInvite, type PeerOps, joinCommand } from "../store/peerOps";
 import type { ConfigPayload, MachinePayload, ReadinessPayload } from "../store/types";
-import { UsageTriple } from "./ClaudeAccounts";
 import { CheckRows, CopyCommand } from "./MachineRows";
 import { RemoveMachineSheet } from "./RemoveMachineSheet";
 import { RepairSheet } from "./RepairSheet";
@@ -172,9 +171,9 @@ export interface MachineAccountRow {
   label: string;
   email: string | null;
   plan: string | null;
-  /** Its profile here (`default login` for the machine's own) and the account's usage as this
-   *  login last read it (`usageTriple`); `null`: not signed in here. */
-  held: { label: string; usage?: { text: string; sampled: string | null } } | null;
+  /** Its profiles here (`default login` for the machine's own) and their sign-in state, never
+   *  usage figures (the account's card has them); `null`: not signed in here. */
+  held: { label: string; state: "signed_in" | "signed_out" } | null;
   /** The machine's tunnel is up: a sign-in can start. */
   up: boolean;
 }
@@ -195,15 +194,20 @@ function AccountRows({
       <ul className="m-accounts" aria-label={`Claude accounts on ${name}`}>
         {rows.map((a) => (
           <li key={a.key} className={a.held ? undefined : "gap"}>
-            <span className={`cc-dot${a.held ? " cc-dot--in" : ""}`} aria-hidden="true" />
-            <span className="sr-only">{a.held ? "signed in here" : "not signed in here"}</span>
+            <span
+              className={`cc-dot${a.held?.state === "signed_in" ? " cc-dot--in" : ""}`}
+              aria-hidden="true"
+            />
+            {!a.held && <span className="sr-only">not signed in here</span>}
             <b className="ell">{a.label}</b>
             {a.email && <span className="mono dim ell">{maskEmail(a.email)}</span>}
             {a.plan && <span className="chip">{a.plan}</span>}
             {a.held ? (
               <>
                 <span className="dim ell">{a.held.label}</span>
-                {a.held.usage && <UsageTriple {...a.held.usage} />}
+                <span className="cc-state">
+                  {a.held.state === "signed_in" ? "signed in" : "signed out"}
+                </span>
               </>
             ) : (
               onSignInOn && (

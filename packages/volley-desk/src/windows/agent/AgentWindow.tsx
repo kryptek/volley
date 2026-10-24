@@ -1,7 +1,9 @@
 /**
  * The agent window, ported from the prototype `AgentWindow`. The title bar is
- * two rows that never bunch: row 1 (the drag bar) has a React Bits `StatusMark`
- * (status + progress), the wave chip in the wave accent, the role chip, the
+ * two rows that never bunch: row 1 (the drag bar) starts with the agent's
+ * Clawd character (`ClawdSprite`: an animated pixel Clawd doing the agent's
+ * pipeline step, or resting, `clawd/state.ts`) or, with the look's Classic
+ * spinner, a React Bits `StatusMark` (status + progress), then the wave chip in the wave accent, the role chip, the
  * stage chip and the machine chip (`MachineChip`: where the agent runs, its
  * dot, why here on hover / focus, a click opens Settings › Machines), then the
  * actions; row 2 (Frame's `subtitle`) has the headline, `task #issue` or the
@@ -19,7 +21,7 @@
  * feed and Terminal tabs (React Bits Gooey Nav, D10); and a footer with progress, heartbeat age and the
  * registry model. Markup and classes follow the prototype; everything is read
  * from the store's `AgentView` and the agent's `WaveView`. An agent with no
- * signal (`attention.ts` `noSignalFor`, kind `mcp`) gets a grey status mark and
+ * signal (`attention.ts` `noSignalFor`, kind `mcp`) gets a dozing Clawd (with Classic, a grey status mark) and
  * a one-line label above the tabs; a `quiet` one keeps its mark and gets a
  * neutral `quiet for Nm` label; while the Desk is syncing after a (re)connect
  * the label reads `syncing…` instead of any judgement. A narration restored
@@ -29,7 +31,8 @@
  * meter (`ctx 72% · 143K/200K`, hot ≥ 85, warn ≥ 65; pulse ≥ 70, faster when
  * hot, none under reduced motion), and row 2 an
  * account picker listing the Claude accounts of the agent's own machine with
- * their 5-hour usage and machine (`Work · 12% · peer-a`): picking another asks
+ * their 5-hour usage and machine (`Work · 12% · peer-a`), the closed picker
+ * naming the agent's own by its registry label (`Account: Work · …`): picking another asks
  * to confirm (the agent restarts with a resume note) and then calls
  * `agent_move_account`. On hover or focus its tooltip says why the agent runs
  * under its account (`accountWhy`: the latest `account_chosen`, or the move
@@ -43,16 +46,20 @@ import { BubbleChatIcon, ListViewIcon, TerminalIcon } from "@hugeicons/core-free
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useId, useState } from "react";
 import { useReducedMotion } from "../../a11y/motion";
-import { type NoSignal, SYNCING_LABEL } from "../../attention";
+import { type NoSignal, SYNCING_LABEL, type Tier } from "../../attention";
 import { BORN_MS, Frame, type FrameProps } from "../../canvas/Frame";
+import { ClawdSprite } from "../../clawd/ClawdSprite";
+import { clawdState } from "../../clawd/state";
 import { plural } from "../../lib/plural";
 import { GooeyTabs, tabPanelProps } from "../../look/GooeyTabs";
-import StatusMark, { type StatusMarkStatus } from "../../rb/StatusMark/StatusMark";
+import type { AgentIcons } from "../../look/options";
+import StatusMark from "../../rb/StatusMark/StatusMark";
 import {
   type AccountChoice,
   LOCAL_MACHINE,
   NO_USAGE_YET,
   accountEventsFor,
+  accountName,
   accountWhy,
   choicesFor,
   fiveHourLabel,
@@ -69,14 +76,17 @@ import type {
   UsagePayload,
   WaveView,
 } from "../../store/types";
-import { Feed, feedChannel } from "./Feed";
+import { Feed } from "./Feed";
 import { MachineChip } from "./MachineChip";
 import { Narration, type NarrationFx } from "./Narration";
 import { Pipeline } from "./Pipeline";
 import { Terminal } from "./Terminal";
 import type { AgentMachine } from "./machine";
+import { markStatus } from "./markStatus";
 import { namesWindow, purposeOf } from "./purpose";
 import "../../styles/agent.css";
+
+export { markStatus };
 
 export const AGENT_WIDTH = 460;
 /** Accent for agents no wave references. */
@@ -111,6 +121,10 @@ export interface AgentWindowProps {
   now?: number;
   /** Narration effect from the look (D7); plain by default. */
   narrationFx?: NarrationFx;
+  /** The title's mark from the look: the Clawd character (default) or the classic status ring. */
+  icons?: AgentIcons;
+  /** The agent's attention tier (`agentAttention`): the Clawd asks for you only on `you`. */
+  attentionTier?: Tier;
   /** Attention line under the narration (D3). */
   attention?: ReactNode;
   /** Chat glyph: opens the steering panel (D4). */
@@ -222,12 +236,15 @@ function AccountPicker({
   name,
   current,
   accounts,
+  known = accounts,
   why,
   onMove,
 }: {
   name: string;
   current: string | null;
   accounts: readonly AccountChoice[];
+  /** Every account the Desk knows, any machine's: the current one's registry label. */
+  known?: readonly AccountChoice[];
   why: string | null;
   onMove: AgentWindowProps["onMoveAccount"];
 }) {
@@ -245,6 +262,8 @@ function AccountPicker({
     if (r && !r.ok) setError(r.error ?? "volleyd refused the move");
   };
   const own = accounts.find((a) => a.id === current);
+  // The chip (the closed picker) names the account by its registry label, never its id.
+  const currentName = current === null ? null : accountName(known, current);
   return (
     <span className="acct-pick-wrap">
       <select
@@ -257,16 +276,18 @@ function AccountPicker({
       >
         {current === null && <option value="">Account…</option>}
         {current !== null && !accounts.some((a) => a.id === current) && (
-          <option value={current}>{current}</option>
+          <option value={current}>Account: {currentName}</option>
         )}
         {accounts.map((a) => (
           <option key={a.id} value={a.id}>
-            {choiceLabel(a)}
+            {a.id === current ? `Account: ${choiceLabel(a)}` : choiceLabel(a)}
           </option>
         ))}
       </select>
       <div role="tooltip" id={tipId} className="host-pop acct-tip">
-        <p className="host-rule">{own ? choiceLabel(own) : (current ?? "no account known yet")}</p>
+        <p className="host-rule">
+          {own ? choiceLabel(own) : (currentName ?? "no account known yet")}
+        </p>
         <p className="dim">{why ?? "why this account: not seen since the Desk loaded"}</p>
         <p className="dim">Pick another to move it (it restarts with a resume note).</p>
       </div>
@@ -348,33 +369,6 @@ function AccountLimitBanner({
   );
 }
 
-/** The mark for an outcome status: `blocked` (SPEC §5.2, terminal) needs the operator, like `failed`. */
-function outcomeMark(type: string): StatusMarkStatus | null {
-  if (type === "done") return "done";
-  if (type === "failed" || type === "blocked") return "failed";
-  return null;
-}
-
-/**
- * The status mark for an agent. `reaped` (SPEC §5.2) only says the connection
- * ended, normally right after `done`, so it shows the outcome before it: the
- * latest other `status` in the feed, else (a retained replay, where only the
- * `reaped` status survives) `done` if the agent left a `result`. Anything else
- * — reaped while working, or with nothing known — is a crash.
- */
-export function markStatus(agent: Pick<AgentView, "status" | "feed">): StatusMarkStatus {
-  const type = agent.status?.type;
-  if (type === "working") return "running";
-  if (type !== "reaped") return (type ? outcomeMark(type) : null) ?? "pending";
-  for (let i = agent.feed.length - 1; i >= 0; i--) {
-    const e = agent.feed[i] as FeedEntry;
-    if (feedChannel(e) === "status" && e.envelope.type !== "reaped") {
-      return outcomeMark(e.envelope.type) ?? "failed";
-    }
-  }
-  return agent.feed.some((e) => feedChannel(e) === "result") ? "done" : "failed";
-}
-
 /** The prototype's `ago`: `42s`, `3m`, `1.5h`. */
 export function age(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -432,6 +426,8 @@ export function AgentWindow({
   frame,
   now: fixedNow,
   narrationFx = "plain",
+  icons = "clawd",
+  attentionTier = "none",
   attention,
   onChat,
   steerOpen = false,
@@ -479,7 +475,19 @@ export function AgentWindow({
 
   const title = (
     <>
-      {mcpMissing ? (
+      {icons !== "classic" ? (
+        <ClawdSprite
+          agentId={agent.id}
+          state={clawdState({
+            agent,
+            stage: task?.stage ?? null,
+            tier: attentionTier,
+            noSignal: mcpMissing,
+            session,
+          })}
+          size={24}
+        />
+      ) : mcpMissing ? (
         <StatusMark status="pending" color={NO_SIGNAL_GREY} size={18} className="sm-nosignal" />
       ) : (
         <StatusMark
@@ -564,6 +572,7 @@ export function AgentWindow({
           name={agent.task ?? headline}
           current={account}
           accounts={choices}
+          known={accounts}
           why={accountWhy(accountEvents, agent.task, agent.role)}
           onMove={onMoveAccount}
         />

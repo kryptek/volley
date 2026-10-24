@@ -1,15 +1,26 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
 import { usageAccountTopic } from "../../src/claude/usage";
+import { ControlClient } from "../../src/control";
 import { Journal } from "../../src/journal";
 import { MACHINE_CHANNEL, machineTopic } from "../../src/machines";
 import type { ReconcileProbes } from "../../src/reconcile";
 import { eventually } from "../helpers/broker-wait";
-import { NS } from "../helpers/daemon-env";
+import { type DaemonEnv, NS, makeDaemonEnv } from "../helpers/daemon-env";
 import { type FakeClock, fakeClock } from "../helpers/fake-clock";
+import { fakeExec } from "../helpers/fake-exec";
+import {
+  type FakeHost,
+  type FakeRemoteHost,
+  GREEN_DOCTOR,
+  adoptSpec,
+  fakeRemoteHost,
+} from "../helpers/fake-host";
+import { journalWait } from "../helpers/journal-wait";
 import { schemaErrors } from "../helpers/schema";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervised-env";
 import { tempDir } from "../helpers/tmp";
@@ -26,7 +37,10 @@ let restoreEnv: (() => void) | undefined;
 afterEach(async () => {
   restoreEnv?.();
   restoreEnv = undefined;
-  await s?.cleanup();
+  // Once: a later test may not start one (the registry tests run a plain daemon).
+  const env = s as SupervisedEnv | undefined;
+  s = undefined as unknown as SupervisedEnv;
+  await env?.cleanup();
 });
 
 const T0 = Date.parse("2026-10-18T12:00:00.000Z");
@@ -518,6 +532,149 @@ describe("usage probe readings in machine records (daemon)", () => {
     );
   }, 20_000);
 
+  it("claude_prime: the login's identity, then the own machine's one-login probe, folded into its record (#498)", async () => {
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+    const probed: string[] = [];
+    const fx = fakeExec().on(["claude", "auth", "status"], {
+      stdout: JSON.stringify({
+        loggedIn: true,
+        email: "spare@example.com",
+        orgName: "Example Org",
+        subscriptionType: "team",
+      }),
+    });
+    s = await makeSupervisedEnv({
+      waveExtra: "account: primary",
+      daemon: {
+        claude: { root, primaryDir: primary, exec: fx.exec },
+        clock: fakeClock(T0),
+        fleet: {
+          version: "0.5.0",
+          localProbe: async (profile) => {
+            probed.push(profile);
+            return [login(profile, 61)];
+          },
+          localPath: () => ({ claude: true, bun: true }),
+        },
+      },
+    });
+    const client = await ControlClient.connect(s.env.broker.url, NS);
+    try {
+      const r = await client.request("claude_prime", { acct: "spare", by: "owner-1" });
+      expect(r).toMatchObject({
+        ok: true,
+        result: { acct: "spare", machine: "local", plan: "team" },
+      });
+      expect(probed).toEqual(["spare"]);
+      expect(await recordWhen("spare", (x) => x.probe !== undefined)).toMatchObject({
+        account: "spare",
+        plan: "team",
+        email: "spare@example.com",
+        model_weekly: { fable: { pct: 61 } },
+        probe: { state: "ok", read_at: READ },
+      });
+      const again = await client.request("claude_prime", { acct: "spare", by: "owner-1" });
+      expect(again).toMatchObject({ ok: false, error: "primed just now; next in 5 min" });
+      // the e-mail never reaches the journal (a prime journals nothing of its own)
+      const sys = join(s.env.home, "waves", "_system", "journal.jsonl");
+      if (existsSync(sys)) expect(readFileSync(sys, "utf-8")).not.toContain("spare@example.com");
+    } finally {
+      await client.close();
+    }
+  }, 20_000);
+
+  it.each([
+    { how: "its one-login probe", probeLogin: true },
+    { how: "its doctor when its volley has no --probe-login", probeLogin: false },
+  ])(
+    "claude_prime of a paired machine's login: $how, folded into its record (#498)",
+    async ({ probeLogin }) => {
+      const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+      const reg = JSON.parse(readFileSync(join(root, "accounts.json"), "utf-8"));
+      reg.accounts.push({
+        id: "work",
+        label: "Work",
+        machine: "peer-a",
+        created: "2026-10-18T12:00:00.000Z",
+        plan: "team",
+        email: "work@example.com",
+        signed_in_at: "2026-10-18T12:00:00.000Z",
+      });
+      writeFileSync(join(root, "accounts.json"), JSON.stringify(reg));
+      s = await makeSupervisedEnv({
+        waveExtra: "account: primary",
+        daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
+      });
+      await s.daemon.stop();
+      writeFileSync(
+        join(s.env.home, "config.yaml"),
+        "hosts:\n  peer-a:\n    target: dev@peer-a\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n",
+      );
+      // peer-a's record, up and with no readings yet (a doctor run folds into it)
+      await s.agent.publish(
+        machineTopic("peer-a"),
+        JSON.stringify(
+          buildEnvelope({
+            agentId: "peer-a",
+            parentId: null,
+            channel: MACHINE_CHANNEL,
+            type: "machine",
+            payload: {
+              name: "peer-a",
+              os: "linux",
+              cores: 8,
+              tunnel: "up",
+              load: [0.1, 0.1, 0.1],
+              agents: 0,
+              last_seen: READ,
+            },
+          }),
+        ),
+        { qos: 1, retain: true },
+      );
+      const asked: string[] = [];
+      let box: FakeRemoteHost | undefined;
+      const spawner = s.daemonOptions.spawner;
+      if (spawner === undefined) throw new Error("no spawner");
+      await s.restart({
+        reconcile: probes,
+        spawner: {
+          ...spawner,
+          remoteHost: (spec) => {
+            if (box === undefined) {
+              box = fakeRemoteHost(spec, spawner.host as FakeHost, {
+                doctor: {
+                  ...GREEN_DOCTOR,
+                  claude_logins: [login("default", 9), login("work", 64)],
+                },
+              });
+              box.probeLogin = async (profile) => {
+                asked.push(profile);
+                return probeLogin ? [login(profile, 64)] : null;
+              };
+            }
+            return adoptSpec(box, spec);
+          },
+        },
+      });
+      const client = await ControlClient.connect(s.env.broker.url, NS);
+      try {
+        const r = await client.request("claude_prime", { acct: "work@peer-a", by: "owner-1" });
+        expect(r).toMatchObject({ ok: true, result: { acct: "work@peer-a", machine: "peer-a" } });
+        expect(asked).toEqual(["work"]);
+        expect(box?.doctorRuns).toEqual(probeLogin ? [] : [{ fix: false }]);
+        expect(await recordWhen("work@peer-a", (x) => x.probe !== undefined)).toMatchObject({
+          account: "work@peer-a",
+          model_weekly: { fable: { pct: 64 } },
+          probe: { machine: "peer-a", state: "ok", read_at: READ },
+        });
+      } finally {
+        await client.close();
+      }
+    },
+    20_000,
+  );
+
   it("a Fable agent's trigger reads the probe's model_weekly.fable: an agent_account_limit on that window", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     restoreEnv = stubEnv({ VOLLEY_CLAUDE_DIR: root });
@@ -550,5 +707,175 @@ describe("usage probe readings in machine records (daemon)", () => {
       pct: 95,
       suggested: "spare",
     });
+  }, 20_000);
+});
+
+describe("the registry-changed signal and usage-book pruning (daemon)", () => {
+  const REGISTRY = "volley/_system/claude/registry";
+  const CALLBACK = readFileSync(
+    new URL("../fixtures/claude/browser-url.txt", import.meta.url),
+    "utf-8",
+  ).trim();
+  let env: DaemonEnv | undefined;
+  afterEach(async () => {
+    await env?.cleanup();
+    env = undefined;
+  });
+
+  const window = { pct: 10, resets_at: null, at: "2026-10-24T12:00:00.000Z" };
+  const seen = { five_hour: window, weekly: null, sampled_at: "2026-10-24T12:00:00.000Z" };
+
+  /**
+   * A daemon whose registry holds `spare` (signed in, here), whose usage book (kept from before)
+   * also holds `old`, which the registry no longer has, and whose broker still holds a retained
+   * record for `stray`, an account nothing knows.
+   */
+  async function world() {
+    env = await makeDaemonEnv();
+    const base = tempDir("volleyd-registry-");
+    const { root, primary } = spareProfile(base);
+    writeFileSync(
+      join(env.home, "claude-usage.json"),
+      JSON.stringify({ version: 1, accounts: { spare: seen, old: seen, primary: seen } }),
+    );
+    const record = (account: string) =>
+      JSON.stringify(
+        buildEnvelope({
+          agentId: "volleyd",
+          parentId: null,
+          channel: "_system/claude-accounts",
+          type: "claude_account",
+          payload: { account, five_hour: null, weekly: null, agents: [], waves: [] },
+        }),
+      );
+    const pub = new VolleyBroker();
+    await pub.connect({ url: env.broker.url, agentId: "old-records" });
+    for (const a of ["old", "stray"])
+      await pub.publish(usageAccountTopic(a), record(a), { qos: 1, retain: true });
+    await pub.disconnect();
+    let polls = 0;
+    let signInAfter = Number.POSITIVE_INFINITY;
+    const fx = fakeExec()
+      .on(["claude", "--version"], { stdout: "2.0.14 (Claude Code)\n" })
+      .on(["tmux", "new-session"], (argv) => {
+        writeFileSync(join(argv[6] as string, "url"), CALLBACK);
+        return {};
+      })
+      .on(["claude", "auth", "status"], (_argv, o) =>
+        o.env?.CLAUDE_CONFIG_DIR === undefined
+          ? { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "pro" }) }
+          : ++polls >= signInAfter
+            ? { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "max" }) }
+            : { code: 1, stdout: JSON.stringify({ loggedIn: false }) },
+      );
+    const clock = fakeClock();
+    const daemon = await env.start({
+      clock,
+      claude: { root, primaryDir: primary, exec: fx.exec, signinPollMs: 20, signinTimeoutMs: 5000 },
+    });
+    const waits = journalWait(env.home, () => daemon);
+    const client = await ControlClient.connect(env.broker.url, NS);
+    const e = env;
+    const signal = async () =>
+      (((await e.retained(REGISTRY)) as { payload?: unknown } | null)?.payload ?? null) as {
+        rev: number;
+        at: string;
+      } | null;
+    const book = () =>
+      Object.keys(
+        (
+          JSON.parse(readFileSync(join(e.home, "claude-usage.json"), "utf-8")) as {
+            accounts: Record<string, unknown>;
+          }
+        ).accounts,
+      ).sort();
+    /** Poll after poll (each one waits on the clock) until a sign-in is journaled done. */
+    const signedIn = async () => {
+      signInAfter = polls + 2;
+      let finished = false;
+      const done = waits.event("_system", "claude_signin_done").then(() => {
+        finished = true;
+      });
+      while (!finished) {
+        await Promise.race([clock.armed(20), done]);
+        if (!finished) await clock.advance(20);
+      }
+    };
+    /** The retained record of `acct` once `pred` holds for it. */
+    const recordWhen = async (acct: string, pred: (r: Record<string, unknown>) => boolean) => {
+      let r: Record<string, unknown> | null = null;
+      await eventually(async () => {
+        const raw = await e.retained(usageAccountTopic(acct));
+        r = raw === null ? null : (raw as { payload: Record<string, unknown> }).payload;
+        return r !== null && pred(r);
+      });
+      return r;
+    };
+    return { env: e, daemon, client, signal, book, signedIn, root, recordWhen };
+  }
+
+  it("at start: the book drops `old` and its record is cleared, a stray record is cleared, the signal carries rev 0", async () => {
+    const w = await world();
+    await eventually(async () => (await w.signal()) !== null);
+    const at = await w.signal();
+    expect(at?.rev).toBe(0);
+    expect(schemaErrors("claude-registry.schema.json", await w.env.retained(REGISTRY))).toEqual([]);
+    await eventually(
+      async () =>
+        (await w.env.stillRetained([usageAccountTopic("old"), usageAccountTopic("stray")]))
+          .length === 0,
+    );
+    expect(await w.recordWhen("spare", () => true)).toMatchObject({ account: "spare" });
+    expect(w.book()).toEqual(["primary", "spare"]);
+    await w.daemon.settled();
+    expect(await w.env.retained(usageAccountTopic("old"))).toBeNull();
+  }, 20_000);
+
+  it("add, sign-in done, rename, sync and remove each raise the rev; remove changes the book, the record and the signal in one call", async () => {
+    const w = await world();
+    await eventually(async () => (await w.signal())?.rev === 0);
+    const revIs = (n: number) => eventually(async () => (await w.signal())?.rev === n);
+
+    const added = await w.client.request("claude_account_add", { label: "Work", by: "owner-1" });
+    expect(added.ok).toBe(true);
+    await revIs(1);
+    await w.signedIn();
+    await revIs(2);
+
+    const renamed = await w.client.request("claude_account_rename", {
+      acct: "spare",
+      label: "Spare account",
+      by: "owner-1",
+    });
+    expect(renamed).toMatchObject({ ok: true, result: { acct: "spare", label: "Spare account" } });
+    expect((await w.signal())?.rev).toBe(3);
+    expect(await w.recordWhen("spare", (r) => r.label === "Spare account")).toMatchObject({
+      label: "Spare account",
+    });
+
+    expect((await w.client.request("claude_sync", { by: "owner-1" })).ok).toBe(true);
+    await revIs(4);
+
+    const removed = await w.client.request("claude_account_remove", {
+      acct: "spare",
+      by: "owner-1",
+    });
+    expect(removed).toMatchObject({ ok: true, result: { acct: "spare", dir_removed: true } });
+    // all three by the time the answer came
+    expect((await w.signal())?.rev).toBe(5);
+    expect(w.book()).toEqual(["primary"]);
+    expect(await w.env.retained(usageAccountTopic("spare"))).toBeNull();
+    expect(existsSync(join(w.root, "spare"))).toBe(false);
+    // and it stays gone
+    await w.daemon.settled();
+    expect(await w.env.retained(usageAccountTopic("spare"))).toBeNull();
+  }, 20_000);
+
+  it("a refused remove changes nothing", async () => {
+    const w = await world();
+    await eventually(async () => (await w.signal())?.rev === 0);
+    const r = await w.client.request("claude_account_remove", { acct: "nope", by: "owner-1" });
+    expect(r).toMatchObject({ ok: false, error: "unknown Claude account 'nope'" });
+    expect((await w.signal())?.rev).toBe(0);
   }, 20_000);
 });

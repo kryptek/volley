@@ -219,13 +219,17 @@ export interface WaveTrain {
 }
 
 /**
- * `reconnecting`: the agent bound to a coordinator-name owner went away less than
- * `autopilot.reconnect_grace_s` ago (SPEC §4.6.1); the supervisor flips it to `gone`.
+ * The supervisor's call for an offline owner (SPEC §4.6.1): `reconnecting` while the agent bound
+ * to a coordinator-name owner went away less than `autopilot.reconnect_grace_s` ago; past that,
+ * `gone` while something only the owner can answer waits in the wave, else `away` (autopilot runs
+ * it). The Desk never derives any of the three from silence.
  */
-export type CoordinatorState = "working" | "awaiting_input" | "reconnecting" | "gone";
+export type CoordinatorState = "working" | "awaiting_input" | "reconnecting" | "away" | "gone";
 
 export interface WaveCoordinator {
   agent_id: string;
+  /** The owner's presence (SPEC §7.5); absent from a supervisor that predates it. */
+  presence?: "online" | "offline";
   state: CoordinatorState;
   question?: string;
   session_url?: string;
@@ -297,8 +301,20 @@ export interface WaveStatePayload {
   spawns?: { productive: number; churn: number };
   /** Merge trains, in the order the queue formed them. */
   trains?: WaveTrain[];
+  /** The account the wave's new agents start under; absent from an older supervisor. */
+  account?: WaveAccount;
   updated_at: string;
   [key: string]: unknown;
+}
+
+/**
+ * wave-state `account` (SPEC §4.6.1): the account the wave's new agents start under (`pinned`,
+ * null: balanced), what names it, and the account its last move left.
+ */
+export interface WaveAccount {
+  pinned: string | null;
+  source: "wave" | "config" | "balanced";
+  moved_from?: string;
 }
 
 /** `decision.schema.json`'s `payload.kind` enum (a test keeps the two in step). */
@@ -411,7 +427,6 @@ export interface Tunables {
     ci_queue_max?: number;
     hysteresis_samples?: number;
   };
-  claim_after_s?: number;
   heartbeat_alarm_s?: number;
   fallback_model?: string | null;
   mailbox?: { session_expiry_s?: number };
@@ -559,12 +574,16 @@ export interface ClaudeSignin {
   acct: string;
   state: "waiting" | "done" | "failed";
   url?: string;
-  /** `browser`, or `manual_code` (the page shows a code for the sign-in terminal). */
+  /** `browser_callback`, or `manual_code` (the page shows a code to paste in the Desk). */
   flow?: string;
   /** The tmux session to attach to for a `manual_code` sign-in. */
   attach?: string;
-  /** A paired machine's printed (manual-code) URL next to the forwarded one: for a phone. */
+  /** The printed (code-page) URL: it works from any device; the page shows a code. */
   manual_url?: string;
+  /** The localhost-callback URL: a shortcut for a browser on the supervisor's machine. */
+  callback_url?: string;
+  /** The sign-in terminal shows Claude Code's `Paste code here` prompt. */
+  code_prompt?: boolean;
   plan?: string;
   /** The login's e-mail, from `claude_signin_done` (SPEC §4.6.11). */
   email?: string;
@@ -878,6 +897,8 @@ export interface WaveView {
   state: WaveStatePayload | null;
   decisions: Record<string, DecisionPayload>;
   receivedAt: number;
+  /** The state's `account`; absent from an older volleyd (no field) or before the state. */
+  account?: WaveAccount;
 }
 
 export interface CoordinatorView {
@@ -939,6 +960,11 @@ export interface DeskState {
   claudeAccounts?: Record<string, ClaudeAccountPayload>;
   /** Retained `usage` samples, by agent id (kept apart: they can arrive before the registry). */
   usage?: Record<string, UsagePayload>;
+  /**
+   * volleyd's Claude registry revision (`volley/_system/claude/registry`, SPEC §4.6.11): the
+   * Settings sections fetch the registry again whenever it changes.
+   */
+  claudeRegistryRev?: number;
   /** Claude account sign-ins heard since the page loaded, by account id; live-only. */
   signins?: Record<string, ClaudeSignin>;
   /** Paired machines' retained health records, by machine name. */

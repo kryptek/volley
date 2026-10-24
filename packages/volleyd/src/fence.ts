@@ -4,6 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { DYNSEC_ADMIN_USER } from "volley-cli/auth/roles";
 import { COMPACT_MAX, COMPACT_MIN } from "./claude/context-window";
 import { canonicalRoot, claudeRoot, profileDir, readRegistry } from "./claude/profiles";
+import { parseSigninEntry } from "./claude/signin-entry";
 import {
   BROWSER_HELPER,
   SIGNIN_COMMAND,
@@ -40,7 +41,8 @@ import { AGENT_BRANCH } from "./worktree";
  *   infrastructure CLIs: terraform, terragrunt, kubectl, helm, aws, gcloud, gsutil, az, pulumi,
  *     ansible, ansible-playbook, eksctl, doctl, flyctl
  *   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
- *   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force)
+ *   rm -rf (any spelling that combines -r/-R/--recursive with -f/--force), except the one REMOTE
+ *     step a ProfileRemoveToken unlocks (below)
  *
  * MERGE (only with a token, checked by identity like consent tokens; either unlocks nothing else:
  *   git merge, push and rebase stay denied). Never --admin, --auto or --rebase.
@@ -97,7 +99,12 @@ import { AGENT_BRANCH } from "./worktree";
  *     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
  *     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
  *     `claude auth login` — never `setup-token`) · capture-pane -p -J -t <it> · has-session -t
- *     <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work)
+ *     <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work) ·
+ *     send-keys -t <it> Enter · send-keys -t <it> -l -- <code> (only with the SigninEntryToken
+ *     naming exactly that session and code, typed once: `mintSigninEntryToken`)
+ *   curl -fsS --max-time 10 http://127.0.0.1:<p>/callback?<query>   (exactly, only with the
+ *     SigninEntryToken naming exactly that URL, once: a sign-in's redirect the owner pasted,
+ *     completed on the machine whose listener waits; also a REMOTE step)
  *   (agent logins are minted and deleted over volleyd's own Dynamic Security control
  *   connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
  *   ps -axo pid=,command=   (exactly: lists processes for procs.ts, which stops a retired
@@ -114,6 +121,8 @@ import { AGENT_BRANCH } from "./worktree";
  *   volley peer doctor --json [--repo ABS]   (the supervisor's own machine's doctor report, SPEC
  *     §4.6.15: never --fix, which runs only on a box through ssh) · ABS the running wave's repo,
  *     an absolute path with no `.`/`..` segment and no control character
+ *   volley peer doctor --json --probe-login PROFILE   (a prime: one login's usage reading;
+ *     PROFILE `default` or a profile id)
  *   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
  *     full path only) | bootout | kickstart [-k] [-p] | print — only for the
  *     systems.volley.volleyd service
@@ -182,6 +191,7 @@ import { AGENT_BRANCH } from "./worktree";
  *     'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
  *     `sealRemoteSigninScript`) | capture-pane | has-session |
  *     send-keys -t <t> Enter|Escape (Up|Down|Space: PICKER) | send-keys -t <t> -l -- <TYPED_TEXT> |
+ *     send-keys -t volley-signin-<acct> -l -- <code> (its SigninEntryToken, once) |
  *     resize-window -t =<session>: -x <n> -y <n> (exactly; n in 20..500: the Desk's Terminal
  *     popout) | show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
  *     PATH, from printenv, then the server's own dirs) —
@@ -189,7 +199,10 @@ import { AGENT_BRANCH } from "./worktree";
  *     work) — any other kill-session = CONSENT; no other tmux global option
  *   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
  *     chmod 700 <home>/.volley/claude/<acct> (a remote profile dir: the only chmod on a
- *     directory) · nc -z 127.0.0.1 <port> · printenv PATH | HOME
+ *     directory) · nc -z 127.0.0.1 <port> · printenv PATH | HOME ·
+ *     curl -fsS --max-time 10 http://127.0.0.1:<p>/callback?<query> (its SigninEntryToken, once)
+ *   rm -rf <home>/.volley/claude/<acct> (exactly, only with the ProfileRemoveToken
+ *     `mintProfileRemoveToken` minted for exactly that dir: a person's `claude_account_remove`)
  *   claude auth status (exactly: the box's login state and plan, never a credential; a login
  *     runs only from a sealed signin.sh) — the one step with an env: `env.CLAUDE_CONFIG_DIR`
  *     only, only `<abs>/.volley/claude/<acct>` (a profile the supervisor created there),
@@ -221,6 +234,7 @@ import { AGENT_BRANCH } from "./worktree";
  *     profile dir `<same abs>/.volley/claude/<same acct>` (`claude auth login`, never
  *     `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
  *   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
+ *   volley peer doctor --json --probe-login PROFILE — a prime's one-login usage reading
  *   volley peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
  *     <https URL>]] — the machine's doctor
  *     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no
@@ -696,6 +710,87 @@ export function mintSigninForwardToken(
   return token;
 }
 
+const profileRemovals = new WeakSet<object>();
+
+/**
+ * Permission to remove one profile the supervisor created on a paired machine:
+ * `rm -rf <home>/.volley/claude/<acct>` as one REMOTE step, exactly that dir. Only
+ * `mintProfileRemoveToken` creates one (checked by identity). Callers: claude/service.ts remove.
+ */
+export interface ProfileRemoveToken {
+  readonly dir: string;
+}
+
+/** Mint the removal token for `dir`; throws `FenceError` unless it is a remote profile dir. */
+export function mintProfileRemoveToken(dir: string): ProfileRemoveToken {
+  if (!isRemoteProfileDir(dir))
+    throw new FenceError("remote rm -rf", "only <home>/.volley/claude/<acct>");
+  const token = Object.freeze({ dir });
+  profileRemovals.add(token);
+  return token;
+}
+
+const entries = new WeakSet<object>();
+/** Entry tokens already used: a pasted code is typed, a pasted redirect requested, once. */
+const spentEntries = new WeakSet<object>();
+
+/**
+ * Permission to finish one waiting sign-in with what the owner pasted (SPEC §4.6.11): type
+ * `code` into the sign-in session (`tmux send-keys -t <session> -l -- <code>`), or request `url`
+ * (`curl -fsS --max-time 10 <url>`, Claude Code's own callback on 127.0.0.1), once, on this
+ * machine or as a REMOTE step. Only `mintSigninEntryToken` creates one. Callers:
+ * claude/service.ts enterSignin.
+ */
+export interface SigninEntryToken {
+  readonly session: string;
+  readonly code?: string;
+  readonly url?: string;
+}
+
+/** The callback a pasted redirect is completed at: Claude Code's listener, nothing to quote. */
+const SIGNIN_CALLBACK_URL = /^http:\/\/127\.0\.0\.1:([0-9]{4,5})\/callback\?[A-Za-z0-9._~%+=&-]+$/;
+
+/**
+ * Mint the entry token: throws `FenceError` unless `session` is a `volley-signin-<acct>` session
+ * and `code` a code `parseSigninEntry` accepts, or `url` a 127.0.0.1 callback on 1024..65535.
+ */
+export function mintSigninEntryToken(
+  e: { session: string; code: string } | { session: string; url: string },
+): SigninEntryToken {
+  if (!SIGNIN_SESSION.test(e.session))
+    throw new FenceError("sign-in entry", "not a volley-signin-* session");
+  if ("code" in e) {
+    const p = parseSigninEntry(e.code);
+    if (p.kind !== "code" || p.code !== e.code)
+      throw new FenceError("sign-in entry", "not a sign-in code");
+  } else {
+    const port = Number(SIGNIN_CALLBACK_URL.exec(e.url)?.[1] ?? 0);
+    if (port < 1024 || port > 65535)
+      throw new FenceError("sign-in entry", "not a sign-in callback on 127.0.0.1");
+  }
+  const token = Object.freeze({ ...e });
+  entries.add(token);
+  return token;
+}
+
+/** True (and the token spent) when `opts` carries an unspent entry token matching `want`. */
+function entryAllows(opts: FenceOptions, want: (t: SigninEntryToken) => boolean): boolean {
+  const t = opts.signinEntry;
+  if (t === undefined || !entries.has(t) || spentEntries.has(t) || !want(t)) return false;
+  spentEntries.add(t);
+  return true;
+}
+
+/** `curl -fsS --max-time 10 <url>` with the entry token naming exactly that url. */
+function entryCurl(args: readonly string[], opts: FenceOptions): Verdict {
+  return entryAllows(
+    opts,
+    (t) => t.url !== undefined && sameArgv(args, ["-fsS", "--max-time", "10", t.url]),
+  )
+    ? ALLOW
+    : deny("curl (only a sign-in's pasted callback, with its token)");
+}
+
 const setups = new WeakSet<object>();
 
 /** What one setup run may execute: `setupFence`'s inputs for the detected layout, Desk-safe. */
@@ -846,6 +941,10 @@ export interface FenceOptions {
   signin?: SigninToken;
   /** For the sign-in forward (`ssh -N -L`): the token a remote sign-in minted. */
   forward?: SigninForwardToken;
+  /** For a remote `rm -rf <home>/.volley/claude/<acct>`: the removal's token for that dir. */
+  profileRemove?: ProfileRemoveToken;
+  /** For typing a pasted sign-in code or requesting a pasted callback: the entry's token. */
+  signinEntry?: SigninEntryToken;
   /** A setup step for the Desk (setup-ops.ts): only the SETUP rows, and nothing else. */
   setup?: SetupToken;
   /** The command's working directory; only the SETUP rows read it (the Desk build). */
@@ -1336,6 +1435,8 @@ function evaluate(argv: readonly string[], opts: FenceOptions): Verdict {
         : deny("claude (only from .volley/launch.sh)");
     case "tmux":
       return localTmux(args, opts);
+    case "curl":
+      return entryCurl(args, opts);
     case "volley":
       return volley(args);
     case "mosquitto":
@@ -1673,6 +1774,14 @@ function isRepoPath(p: string | undefined): boolean {
   );
 }
 
+/**
+ * A prime's probe (`peer doctor --json --probe-login <profile>`, here or on a box): one Claude
+ * login's usage reading, `default` or a profile id.
+ */
+const PROBE_LOGIN = "--probe-login";
+const isLoginName = (p: string | undefined) =>
+  p !== undefined && /^[a-z0-9][a-z0-9_-]{0,62}$/.test(p);
+
 /** `volley auth <account verb>`: the account ops volleyd runs for an admin (accounts.ts). */
 function volley(args: string[]): Verdict {
   const [group, verb] = args;
@@ -1682,8 +1791,14 @@ function volley(args: string[]): Verdict {
     const rest = args.slice(2);
     const ok =
       rest[0] === "--json" &&
-      (rest.length === 1 || (rest.length === 3 && rest[1] === "--repo" && isRepoPath(rest[2])));
-    return ok ? ALLOW : deny(`volley peer doctor ${rest.join(" ")} (only --json [--repo <abs>])`);
+      (rest.length === 1 ||
+        (rest.length === 3 && rest[1] === "--repo" && isRepoPath(rest[2])) ||
+        (rest.length === 3 && rest[1] === PROBE_LOGIN && isLoginName(rest[2])));
+    return ok
+      ? ALLOW
+      : deny(
+          `volley peer doctor ${rest.join(" ")} (only --json [--repo <abs> | --probe-login <profile>])`,
+        );
   }
   if (group === "auth" && verb !== undefined && ACCOUNT_SHAPES[verb] !== undefined) {
     return ACCOUNT_SHAPES[verb](args.slice(2)) ? ALLOW : deny(`${name} ${args.slice(2).join(" ")}`);
@@ -1858,6 +1973,13 @@ export const isRepoAdd = (v: string): boolean => {
  */
 function isRemoteDoctor(rest: readonly string[]): boolean {
   if (REMOTE_DOCTOR.some((shape) => sameArgv(rest, shape))) return true;
+  if (
+    rest.length === 5 &&
+    sameArgv(rest.slice(0, 3), REMOTE_DOCTOR[0] as readonly string[]) &&
+    rest[3] === PROBE_LOGIN &&
+    isLoginName(rest[4])
+  )
+    return true;
   if (
     rest.length === REMOTE_DOCTOR_CLONE.length + 1 &&
     sameArgv(rest.slice(0, -1), REMOTE_DOCTOR_CLONE) &&
@@ -2283,6 +2405,15 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
           )
         ? ALLOW
         : deny("chmod (only <3 octal digits> <a file volleyd writes>…)");
+    case "rm": {
+      const t = opts.profileRemove;
+      return t !== undefined &&
+        profileRemovals.has(t) &&
+        isRemoteProfileDir(t.dir) &&
+        sameArgv(args, ["-rf", t.dir])
+        ? ALLOW
+        : deny("rm -rf (only <home>/.volley/claude/<acct>, with its removal token)");
+    }
     case "printenv":
       // The PATH an ssh session gets on the box, for its tmux server (SshTmuxHost.launch), and
       // its HOME, where a sign-in's dir is (remote-signin.ts).
@@ -2292,6 +2423,8 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
     case "claude":
       // The box's login state and plan (remote-signin.ts); a login runs only from signin.sh.
       return sameArgv(args, ["auth", "status"]) ? ALLOW : deny("claude (only auth status)");
+    case "curl":
+      return entryCurl(args, opts);
     case "nc":
       return args.length === 3 &&
         args[0] === "-z" &&
@@ -2315,7 +2448,7 @@ function remoteCommand(prog: string | undefined, args: string[], opts: FenceOpti
       return (dir === null || isVolleyDir(dir)) && isRemoteDoctor(rest)
         ? ALLOW
         : deny(
-            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--supervisor-volley-dir <abs>] [--fix --yes] [--repo-add <owner/name>[=<abs>] | --repo-remove <owner/name>]... [--clone | --clone --origin <https URL>])`,
+            `volley ${args.slice(0, 2).join(" ")} (only peer doctor --json [--supervisor-volley-dir <abs>] [--fix --yes] [--repo-add <owner/name>[=<abs>] | --repo-remove <owner/name>]... [--clone | --clone --origin <https URL>], or peer doctor --json --probe-login <profile>)`,
           );
     }
     default: {
@@ -2369,6 +2502,7 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
     if (t !== "-t" || target === undefined || target.startsWith("-")) return deny("tmux send-keys");
     if (tail.length === 1 && keyAllowed(tail[0] ?? "", opts)) return ALLOW;
     if (tail.length !== 3 || tail[0] !== "-l" || tail[1] !== "--") return deny("tmux send-keys");
+    if (entryAllows(opts, (e) => e.session === target && e.code === tail[2])) return ALLOW;
     const why = typedTextRefusal(tail[2] ?? "", opts);
     return why === null ? ALLOW : deny(`tmux send-keys (${why})`);
   }
@@ -2433,6 +2567,18 @@ function localTmux(args: string[], opts: FenceOptions): Verdict {
     case "has-session":
     case "kill-session":
       return sameArgv(rest, ["-t", target("-t", rest) ?? ""]) && session("-t") ? ALLOW : deny(verb);
+    case "send-keys": {
+      // A sign-in waiting at `Paste code here`: Enter, and the pasted code with its token.
+      const [t, s, ...tail] = rest;
+      if (t !== "-t" || !SIGNIN_SESSION.test(s ?? "")) return deny(verb);
+      if (sameArgv(tail, ["Enter"])) return ALLOW;
+      return tail.length === 3 &&
+        tail[0] === "-l" &&
+        tail[1] === "--" &&
+        entryAllows(opts, (e) => e.session === s && e.code === tail[2])
+        ? ALLOW
+        : deny("tmux send-keys (only a sign-in's pasted code, with its token)");
+    }
     default:
       return deny(verb);
   }

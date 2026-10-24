@@ -1,6 +1,8 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import axe from "axe-core";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import App from "../src/App";
+import { LOOK_STORAGE_KEY } from "../src/look/useLook";
 import {
   ClaudeAccounts,
   type ClaudeAccountsProps,
@@ -8,18 +10,43 @@ import {
   signInPreset,
   withSignIns,
 } from "../src/settings/ClaudeAccounts";
-import { SettingsModal } from "../src/settings/SettingsModal";
-import { type AccountGroup, accountList } from "../src/store/claude";
+import type { AccountGroup } from "../src/store/claude";
+import { DeskStoreProvider } from "../src/store/context";
 import { initialState, reduceAll } from "../src/store/reducer";
 import type {
   ClaudeAccountPayload,
   ConfigPayload,
   DecisionPayload,
   DeskMessage,
-  WaveView,
 } from "../src/store/types";
 
+// The demo client, passed through: a test can feed the demo store (`demoFeed.apply`) and count
+// what the Desk asks volleyd's registry (`demoFeed.asks`).
+const demoFeed = vi.hoisted(() => ({
+  apply: null as ((msgs: DeskMessage[]) => void) | null,
+  asks: [] as string[],
+}));
+vi.mock("../src/steer/demoClient", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/steer/demoClient")>();
+  return {
+    ...real,
+    createDemoSteerClient: (apply: (msgs: DeskMessage[]) => void, ...rest: unknown[]) => {
+      demoFeed.apply = apply;
+      return (real.createDemoSteerClient as (...a: unknown[]) => unknown)(apply, ...rest);
+    },
+    demoReadControl: (control: Parameters<typeof real.demoReadControl>[0]) => {
+      const read = real.demoReadControl(control);
+      return ((op, ...rest) => {
+        demoFeed.asks.push(op);
+        return read(op, ...rest);
+      }) as typeof read;
+    },
+  };
+});
+
 const NOW = Date.parse("2026-10-18T14:06:00.000Z");
+/** When a registry profile finished its sign-in. */
+const SIGNED = "2026-10-18T12:00:00.000Z";
 
 const work: ClaudeAccountPayload = {
   account: "work",
@@ -54,6 +81,23 @@ const limit: DecisionPayload = {
   acct: "work",
   pct: 91,
   resets_at: "2026-10-18T18:10:00.000Z",
+  suggested: "personal",
+};
+
+const agentLimit: DecisionPayload = {
+  decision_id: "w1-t1-agent_account_limit-1",
+  wave: "w1",
+  task: "T1",
+  kind: "agent_account_limit",
+  question: "w1-t1-implementer-1 runs under work, at 91% of its 5-hour window.",
+  options: ["move w1-t1-implementer-1 to personal", "not now"],
+  opened_at: "2026-10-18T14:06:01.000Z",
+  agent_id: "w1-t1-implementer-1",
+  role: "implementer",
+  window: "five_hour",
+  acct: "work",
+  pct: 91,
+  resets_at: null,
   suggested: "personal",
 };
 
@@ -93,13 +137,6 @@ const signinMsg = (acct: string, type: string, payload: Record<string, unknown>)
     ...payload,
   });
 
-const wave = (decisions: Record<string, DecisionPayload>): WaveView => ({
-  id: "w1",
-  state: null,
-  decisions,
-  receivedAt: NOW,
-});
-
 function setup(extra: DeskMessage[] = [], props: Partial<ClaudeAccountsProps> = {}) {
   const state = reduceAll(initialState(), [accountMsg(work), accountMsg(personal), ...extra]);
   const control = vi.fn(async () => ({ ok: true }) as { ok: boolean; result?: unknown });
@@ -107,7 +144,6 @@ function setup(extra: DeskMessage[] = [], props: Partial<ClaudeAccountsProps> = 
     <ClaudeAccounts
       accounts={s.claudeAccounts ?? {}}
       signins={s.signins ?? {}}
-      waves={{ w1: wave({}) }}
       config={config}
       control={control}
       configTransport={null}
@@ -120,6 +156,10 @@ function setup(extra: DeskMessage[] = [], props: Partial<ClaudeAccountsProps> = 
   const r = render(view());
   return { ...r, state, control, view };
 }
+
+/** An open decision on wave w1, as volleyd retains it. */
+const decisionMsg = (d: DecisionPayload) =>
+  msg(`volley/_waves/w1/decisions/${d.decision_id}`, "_waves/decisions", "decision", d);
 
 describe("reducer: Claude accounts and sign-in events", () => {
   it("keeps the retained account records and forgets a cleared one", () => {
@@ -159,103 +199,63 @@ describe("ClaudeAccounts", () => {
     const week = w.getByRole("meter", { name: "7-day" });
     expect(week.closest(".meter")).toHaveTextContent("43%");
     expect(week.closest(".meter")).toHaveTextContent("resets in 2d 18h");
-    const foot = within(w.getByText("2 agents").closest(".cc-foot") as HTMLElement);
-    expect(foot.getByText("waves: w1")).toBeInTheDocument();
     const p = within(screen.getByRole("article", { name: "Personal" }));
     expect(p.getByRole("meter", { name: "5-hour" }).closest(".meter")).toHaveTextContent("12%");
-    expect(p.getByText("no waves assigned")).toBeInTheDocument();
   });
 
-  it("shows the open account_limit decision as a banner; Move resolves it", async () => {
-    const { control } = setup([], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
-    const banner = screen.getByRole("status");
-    expect(banner).toHaveTextContent("Needs you: Work is at 91% of its 5-hour window");
+  it("renders no Needs-you banner, even with an open account_limit or agent_account_limit", () => {
+    // The wave's limit is its window's banner, the agent's its window's: none here.
+    const { container } = setup([decisionMsg(limit), decisionMsg(agentLimit)]);
+    expect(container.querySelector(".needs-you")).toBeNull();
+    expect(screen.queryByText(/Needs you/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Move to|not now/i })).toBeNull();
+  });
+
+  it("Add: the code-page link with its QR code, the one box, then Signed in as the masked e-mail", async () => {
+    const { control, rerender, view, state } = setup();
+    const CODE_URL =
+      "https://claude.com/cai/oauth/authorize?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=s";
+    control.mockResolvedValueOnce({ ok: true, result: { acct: "team", account: "team" } });
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Account label" }), {
+      target: { value: "Team" },
+    });
     await act(async () => {
-      fireEvent.click(within(banner).getByRole("button", { name: "Move to Personal" }));
+      fireEvent.click(screen.getByRole("button", { name: "Sign in on this machine" }));
+    });
+    const waiting = reduceAll(state, [
+      signinMsg("team", "claude_signin_url", {
+        url: CODE_URL,
+        flow: "manual_code",
+        manual_url: CODE_URL,
+        callback_url: "https://claude.com/cai/oauth/authorize?code=true&state=s",
+      }),
+    ]);
+    rerender(view(waiting));
+    expect(screen.getByRole("link", { name: "Open Anthropic sign-in ↗" })).toHaveAttribute(
+      "href",
+      CODE_URL,
+    );
+    expect(screen.getByRole("img", { name: "QR code of the sign-in link" })).toBeInTheDocument();
+    const box = screen.getByLabelText("Paste the code, or the address your browser ended up on");
+    expect(box).toHaveAttribute("type", "password");
+    control.mockResolvedValueOnce({ ok: true, result: { acct: "team", signed_in: true } });
+    fireEvent.change(box, { target: { value: "abcSECRET42" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Submit" }));
     });
     expect(control).toHaveBeenCalledWith(
-      "resolve",
-      { wave: "w1", decision_id: "d-7k2m9q4x", answer: "move wave w1 to personal" },
+      "claude_signin_entry",
+      { acct: "team", entry: "abcSECRET42" },
       expect.any(String),
+      expect.any(Number),
     );
-  });
-
-  it("labels a suggested account with no usage yet (a newly signed-in profile) as such", async () => {
-    const fresh = { ...limit, options: ["move wave w1 to fresh", "not now"], suggested: "fresh" };
-    const control = vi.fn(async (op: string) =>
-      op === "claude_accounts"
-        ? { ok: true, result: { accounts: [{ id: "fresh", label: "fresh", machine: "local" }] } }
-        : { ok: true },
-    );
-    setup([], {
-      waves: { w1: wave({ [fresh.decision_id]: fresh }) },
-      control,
-      onRegistry: () => {},
-    });
-    const banner = screen.getByRole("status");
-    await waitFor(() => expect(banner).toHaveTextContent("Move wave w1 to fresh (no usage yet)?"));
-    await act(async () => {
-      fireEvent.click(within(banner).getByRole("button", { name: "Move to fresh" }));
-    });
-    expect(control).toHaveBeenCalledWith(
-      "resolve",
-      { wave: "w1", decision_id: "d-7k2m9q4x", answer: "move wave w1 to fresh" },
-      expect.any(String),
-    );
-  });
-
-  it("says nothing of the suggestion's usage while the Desk has no record of it", () => {
-    const ghost = { ...limit, options: ["move wave w1 to ghost", "not now"], suggested: "ghost" };
-    setup([], { waves: { w1: wave({ [ghost.decision_id]: ghost }) } });
-    const banner = screen.getByRole("status");
-    expect(banner).toHaveTextContent("Move wave w1 to ghost? New agents");
-    expect(banner).not.toHaveTextContent("no usage yet");
-  });
-
-  it("a suggestion that reported only weekly usage reads no 5-hour usage yet", () => {
-    const weeklyOnly = { ...personal, five_hour: null };
-    setup([accountMsg(weeklyOnly)], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Move wave w1 to Personal (no 5-hour usage yet)?",
-    );
-  });
-
-  it("Not now answers the decision with its not-now option", async () => {
-    const { control } = setup([], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Not now" }));
-    });
-    expect(control).toHaveBeenCalledWith(
-      "resolve",
-      { wave: "w1", decision_id: "d-7k2m9q4x", answer: "not now" },
-      expect.any(String),
-    );
-  });
-
-  it("no open decision, no banner", () => {
-    setup([], {
-      waves: {
-        w1: wave({
-          [limit.decision_id]: { ...limit, resolved: { answer: "not now", by: "desk", at: "x" } },
-        }),
-      },
-    });
-    expect(screen.queryByRole("status")).toBeNull();
-  });
-
-  it("Move a wave here… answers the wave's open decision with this account", async () => {
-    const { control } = setup([], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
-    const card = within(screen.getByRole("article", { name: "Personal" }));
-    await act(async () => {
-      fireEvent.change(card.getByRole("combobox", { name: "Move a wave to Personal" }), {
-        target: { value: "w1" },
-      });
-    });
-    expect(control).toHaveBeenCalledWith(
-      "resolve",
-      { wave: "w1", decision_id: "d-7k2m9q4x", answer: "move wave w1 to personal" },
-      expect.any(String),
-    );
+    expect(document.body.innerHTML).not.toContain("abcSECRET42");
+    const done = reduceAll(waiting, [
+      signinMsg("team", "claude_signin_done", { plan: "max", email: "team@example.com" }),
+    ]);
+    rerender(view(done));
+    expect(screen.getByText(/Signed in as/)).toHaveTextContent("t•••@example.com");
   });
 
   it("Add → the Stepper shows the sign-in link from the event and completes on done", async () => {
@@ -274,7 +274,7 @@ describe("ClaudeAccounts", () => {
       expect.any(String),
       expect.any(Number),
     );
-    expect(screen.getByText(/Waiting for the sign-in to finish/)).toBeInTheDocument();
+    expect(screen.getByText(/Starting the sign-in/)).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Open Anthropic sign-in/ })).toBeNull();
 
     const waiting = reduceAll(state, [
@@ -325,10 +325,7 @@ describe("ClaudeAccounts", () => {
   });
 
   it("read-only without credentials: no add, no answers, the default as text", () => {
-    const { rerender, view } = setup([], {
-      control: null,
-      waves: { w1: wave({ [limit.decision_id]: limit }) },
-    });
+    const { rerender, view } = setup([], { control: null });
     expect(screen.getByRole("button", { name: "+ Add Claude account" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Move to Personal" })).toBeNull();
     rerender(view(undefined, { group: "defaults" }));
@@ -338,13 +335,6 @@ describe("ClaudeAccounts", () => {
 });
 
 describe("ClaudeAccounts review fixes", () => {
-  const remote: ClaudeAccountPayload = {
-    ...personal,
-    account: "team@box",
-    label: "Team",
-    plan: "max",
-  };
-
   it("Defaults shows a rejected config_set the way Supervisor's rows do", async () => {
     const send = vi.fn(async () => ({
       applied: false,
@@ -380,34 +370,6 @@ describe("ClaudeAccounts review fixes", () => {
     expect(screen.getByText("applied · v4")).toBeInTheDocument();
   });
 
-  it("a remote account's card does not offer to move a wave there", () => {
-    setup([accountMsg(remote)], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
-    const card = within(screen.getByRole("article", { name: "Team" }));
-    expect(card.getByRole("combobox", { name: "Move a wave to Team" })).toBeDisabled();
-  });
-
-  it("Move / Not now are disabled while an answer is in flight", async () => {
-    const { control } = setup([], { waves: { w1: wave({ [limit.decision_id]: limit }) } });
-    let release: (v: { ok: boolean }) => void = () => {};
-    control.mockImplementationOnce(
-      () =>
-        new Promise((r) => {
-          release = r;
-        }),
-    );
-    const banner = within(screen.getByRole("status"));
-    fireEvent.click(banner.getByRole("button", { name: "Move to Personal" }));
-    expect(banner.getByRole("button", { name: "Move to Personal" })).toBeDisabled();
-    expect(banner.getByRole("button", { name: "Not now" })).toBeDisabled();
-    expect(
-      within(screen.getByRole("article", { name: "Personal" })).getByRole("combobox"),
-    ).toBeDisabled();
-    fireEvent.click(banner.getByRole("button", { name: "Move to Personal" }));
-    expect(control.mock.calls.filter((c) => (c as unknown[])[0] === "resolve")).toHaveLength(1);
-    await act(async () => release({ ok: true }));
-    expect(banner.getByRole("button", { name: "Not now" })).toBeEnabled();
-  });
-
   it("the resets-in time keeps up with the clock while the section is open", () => {
     vi.useFakeTimers({ now: NOW, toFake: ["Date", "setInterval", "clearInterval"] });
     try {
@@ -417,7 +379,6 @@ describe("ClaudeAccounts review fixes", () => {
           group="accounts"
           accounts={state.claudeAccounts ?? {}}
           signins={{}}
-          waves={{}}
           config={config}
           control={null}
           configTransport={null}
@@ -472,9 +433,8 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
         group="accounts"
         accounts={{}}
         signins={{}}
-        waves={{}}
         config={config}
-        control={registry([{ id: "team", label: "Team", machine: "local" }])}
+        control={registry([{ id: "team", label: "Team", machine: "local", signed_in_at: SIGNED }])}
         configTransport={null}
         now={NOW}
       />,
@@ -488,10 +448,11 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     const p = within(cards[0] as HTMLElement);
     expect(p.getByText(/^primary · /)).toHaveTextContent("primary · Claude Code's default login");
     expect(p.queryByText((_, el) => el?.classList.contains("chip") === true)).toBeNull();
+    // volleyd is asked to read it (claude_prime): no usage until it answers
     for (const name of ["5-hour", "7-day"]) {
       const m = p.getByRole("meter", { name });
-      expect(m).toHaveAttribute("aria-valuetext", "no usage reported yet");
-      expect(m.closest(".meter")).toHaveTextContent("no usage reported yet");
+      await waitFor(() => expect(m).toHaveAttribute("aria-valuetext", "no reading yet"));
+      expect(m.closest(".meter")).toHaveTextContent("no reading yet");
     }
   });
 
@@ -501,7 +462,6 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
         group="accounts"
         accounts={{}}
         signins={{}}
-        waves={{}}
         config={config}
         control={registry([], { plan: "max" })}
         configTransport={null}
@@ -510,20 +470,23 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     );
     const card = screen.getByRole("article", { name: "This machine's Claude login" });
     expect(await within(card).findByText("max")).toHaveClass("chip");
-    expect(within(card).getByRole("meter", { name: "5-hour" })).toHaveAttribute(
-      "aria-valuetext",
-      "no usage reported yet",
+    await waitFor(() =>
+      expect(within(card).getByRole("meter", { name: "5-hour" })).toHaveAttribute(
+        "aria-valuetext",
+        "no reading yet",
+      ),
     );
   });
 
   it("a primary whose plan volleyd does not know shows none, never a guess", async () => {
-    const control = registry([{ id: "team", label: "Team", machine: "local", plan: "pro" }]);
+    const control = registry([
+      { id: "team", label: "Team", machine: "local", plan: "pro", signed_in_at: SIGNED },
+    ]);
     render(
       <ClaudeAccounts
         group="accounts"
         accounts={{}}
         signins={{}}
-        waves={{}}
         config={config}
         control={control}
         configTransport={null}
@@ -541,7 +504,6 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
         group="accounts"
         accounts={{}}
         signins={{}}
-        waves={{}}
         config={config}
         control={null}
         configTransport={null}
@@ -558,7 +520,6 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
         group="accounts"
         accounts={state.claudeAccounts ?? {}}
         signins={{}}
-        waves={{}}
         config={config}
         control={null}
         configTransport={null}
@@ -573,7 +534,6 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     const p = within(cards[0] as HTMLElement);
     expect(p.getByText("max")).toHaveClass("chip");
     expect(p.getByRole("meter", { name: "5-hour" })).toHaveAttribute("aria-valuenow", "34");
-    expect(p.getByText("1 agent")).toBeInTheDocument();
   });
 
   it("another machine's primary is that machine's card, not this one's", () => {
@@ -583,7 +543,6 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
         group="accounts"
         accounts={state.claudeAccounts ?? {}}
         signins={{}}
-        waves={{}}
         config={config}
         control={null}
         configTransport={null}
@@ -601,86 +560,6 @@ describe("ClaudeAccounts › this machine's own login (the primary)", () => {
     setup([], { configTransport: { identity: "desk", send }, group: "defaults" });
     const group = screen.getByRole("radiogroup", { name: "Account for new waves" });
     expect(within(group).getByRole("radio", { name: "Primary" })).toBeInTheDocument();
-  });
-});
-
-describe("SettingsModal › the wave's Claude account", () => {
-  const accounts = accountList({
-    work,
-    personal,
-    "team@box": { ...personal, account: "team@box", label: "Team" },
-  });
-  const withFresh = accountList({ work, personal }, [
-    { id: "fresh", label: "Fresh", machine: "local", signed_in_at: "2026-10-18T13:00:00.000Z" },
-  ]);
-  const modal = (decisions: Record<string, DecisionPayload>, control: ControlFn | null) =>
-    render(
-      <SettingsModal
-        wave={wave(decisions)}
-        onClose={() => {}}
-        onOpenGlobal={() => {}}
-        accounts={accounts}
-        control={control}
-      />,
-    );
-
-  it("names the accounts the wave runs on, with no picker while no decision is open", () => {
-    modal({}, vi.fn());
-    expect(screen.getByText("Work")).toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: /Move wave w1/ })).toBeNull();
-    expect(screen.getByText(/offers a move when the account nears its limit/)).toBeInTheDocument();
-  });
-
-  it("with an open account_limit decision, picks a local account and resolves the move", async () => {
-    const control = vi.fn(async () => ({ ok: true }));
-    modal({ [limit.decision_id]: limit }, control);
-    const pick = screen.getByRole("combobox", { name: "Move wave w1 to a Claude account" });
-    const options = within(pick)
-      .getAllByRole("option")
-      .map((o) => o.textContent);
-    expect(options).toEqual(["Move new agents to…", "Personal · 12%"]);
-    await act(async () => {
-      fireEvent.change(pick, { target: { value: "personal" } });
-    });
-    expect(control).toHaveBeenCalledWith("resolve", {
-      wave: "w1",
-      decision_id: "d-7k2m9q4x",
-      answer: "move wave w1 to personal",
-    });
-  });
-
-  it("labels an account with no usage yet in the picker", () => {
-    render(
-      <SettingsModal
-        wave={wave({ [limit.decision_id]: limit })}
-        onClose={() => {}}
-        onOpenGlobal={() => {}}
-        accounts={withFresh}
-        control={vi.fn(async () => ({ ok: true }))}
-      />,
-    );
-    const pick = screen.getByRole("combobox", { name: "Move wave w1 to a Claude account" });
-    expect(
-      within(pick)
-        .getAllByRole("option")
-        .map((o) => o.textContent),
-    ).toEqual(["Move new agents to…", "Personal · 12%", "Fresh · no usage yet"]);
-  });
-
-  it("shows volleyd's refusal", async () => {
-    const control = vi.fn(async () => ({ ok: false, error: "decision already resolved" }));
-    modal({ [limit.decision_id]: limit }, control);
-    await act(async () => {
-      fireEvent.change(screen.getByRole("combobox", { name: "Move wave w1 to a Claude account" }), {
-        target: { value: "personal" },
-      });
-    });
-    expect(screen.getByRole("alert")).toHaveTextContent("decision already resolved");
-  });
-
-  it("read-only: no picker even with a decision open", () => {
-    modal({ [limit.decision_id]: limit }, null);
-    expect(screen.queryByRole("combobox", { name: /Move wave w1/ })).toBeNull();
   });
 });
 
@@ -720,7 +599,6 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
       <ClaudeAccounts
         accounts={records}
         signins={{}}
-        waves={{}}
         config={config}
         control={null}
         configTransport={null}
@@ -768,7 +646,7 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
     expect(within(card()).queryByText(EMAIL)).toBeNull();
   });
 
-  it("lists each machine holding the account with its sign-in state and waves", () => {
+  it("lists each machine holding the account with its sign-in state only", () => {
     render(view({ work: own, "primary@peer-a": peer }));
     const rows = within(within(card()).getByRole("list", { name: "Machines" })).getAllByRole(
       "listitem",
@@ -776,26 +654,19 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]).toHaveTextContent("this machine");
     expect(rows[0]).toHaveTextContent("Work");
-    expect(rows[0]).toHaveTextContent("waves: w1");
     expect(rows[0]).toHaveTextContent("signed in");
     expect(rows[1]).toHaveTextContent("peer-a");
     expect(rows[1]).toHaveTextContent("default login");
-    expect(rows[1]).toHaveTextContent("waves: w2");
     expect(rows[1]).toHaveTextContent("signed in");
+    for (const r of rows) expect(r.textContent).not.toMatch(/waves|%/);
   });
 
-  it("the meters show the freshest reading and name the stale one with its age", () => {
+  it("the meters show the freshest reading, and nothing is called stale", () => {
     render(view({ work: own, "primary@peer-a": peer }));
     const c = within(card());
     expect(c.getByRole("meter", { name: "5-hour" })).toHaveAttribute("aria-valuenow", "37");
-    expect(c.getByText("freshest: this machine, just now")).toBeInTheDocument();
-    expect(c.getByText("peer-a's 5-hour reading (41%, 3 h old) is stale")).toBeInTheDocument();
-  });
-
-  it("names a stale weekly reading by its meter's label, 7-day", () => {
-    const week = { pct: 70, resets_at: "2026-10-20T00:00:00.000Z" };
-    render(view({ work: own, "primary@peer-a": { ...peer, weekly: week } }));
-    expect(within(card()).getByText(/^peer-a's 7-day reading \(70%/)).toBeInTheDocument();
+    expect(card()).not.toHaveTextContent(/stale|freshest/);
+    expect(c.getByText("Last updated: just now")).toBeInTheDocument();
   });
 
   describe("three meters: 5-hour, 7-day and Fable", () => {
@@ -857,7 +728,7 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
       expect(fableMeter().closest(".meter")?.querySelector(".meter-pct")).toHaveTextContent("—");
     });
 
-    it("each machine row shows the three figures, and an older row its own age", () => {
+    it("no machine row shows a figure or its own age: the meters appear once", () => {
       render(
         view({
           work: own,
@@ -872,9 +743,8 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
       const rows = within(within(card()).getByRole("list", { name: "Machines" })).getAllByRole(
         "listitem",
       );
-      for (const r of rows) expect(r).toHaveTextContent("5h 37% · 7d 56% · Fable 12%");
-      expect(rows[0]).not.toHaveTextContent("sampled");
-      expect(rows[1]).toHaveTextContent("sampled 3 h ago");
+      for (const r of rows) expect(r.textContent).not.toMatch(/%|5h|7d|Fable|sampled/);
+      expect(within(card()).getAllByRole("meter")).toHaveLength(3);
     });
 
     it("a window whose reset passed shows 0 %", () => {
@@ -884,10 +754,9 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
         "aria-valuenow",
         "0",
       );
-      expect(within(card()).getAllByText(/^5h 0% · 7d 56% · Fable —$/)).toHaveLength(2);
     });
 
-    it("passes axe with the three meters and the row figures", async () => {
+    it("passes axe with the three meters and the machine rows", async () => {
       render(
         view({
           work: own,
@@ -904,39 +773,15 @@ describe("ClaudeAccounts › one card per Anthropic account", () => {
     });
   });
 
-  it("a card with no e-mail says so and has no eye button", () => {
+  it("a card with no e-mail says so, never a command, and has no eye button", () => {
     render(view({ work: own, "primary@box": { ...peer, account: "primary@box" } }));
     const c = within(screen.getByRole("article", { name: "primary@box" }));
-    expect(c.getByText("e-mail not reported yet (run the machine's doctor)")).toBeInTheDocument();
+    // read-only: nothing can ask volleyd for it
+    expect(
+      c.getByText("no reading yet", { selector: ".s-hint:not(.cc-updated)" }),
+    ).toBeInTheDocument();
+    expect(c.queryByText(/doctor/i)).toBeNull();
     expect(c.queryByRole("button", { name: /email/ })).toBeNull();
-  });
-
-  it("Use for stays on this machine's account id", async () => {
-    const control = vi.fn(async () => ({ ok: true }));
-    render(
-      <ClaudeAccounts
-        accounts={{ work: own, "primary@peer-a": peer, personal }}
-        signins={{}}
-        waves={{ w1: wave({ [limit.decision_id]: { ...limit, acct: "personal" } }) }}
-        config={config}
-        control={control}
-        configTransport={null}
-        machines={machines}
-        localName="hub"
-        group="accounts"
-        now={NOW}
-      />,
-    );
-    await act(async () => {
-      fireEvent.change(within(card()).getByRole("combobox", { name: "Move a wave to Work" }), {
-        target: { value: "w1" },
-      });
-    });
-    expect(control).toHaveBeenCalledWith(
-      "resolve",
-      { wave: "w1", decision_id: "d-7k2m9q4x", answer: "move wave w1 to work" },
-      expect.any(String),
-    );
   });
 
   it("passes axe with the address hidden and shown", async () => {
@@ -977,16 +822,17 @@ describe("ClaudeAccounts › Add on any machine", () => {
     expect(screen.queryByText(/volley claude add/)).toBeNull();
   });
 
-  it("a peer's sign-in shows the link and the phone steps, never a field, and completes there", async () => {
+  it("a peer's sign-in shows the code-page link, the one box and the terminal fallback, and completes there", async () => {
     const { control, rerender, view, state } = setup([], fleet);
     control.mockResolvedValueOnce({
       ok: true,
       result: {
         acct: "work@peer-a",
-        url: URL,
-        flow: "browser_callback",
+        url: MANUAL,
+        flow: "manual_code",
         attach: ATTACH,
         manual_url: MANUAL,
+        callback_url: URL,
       },
     });
     fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
@@ -1003,11 +849,16 @@ describe("ClaudeAccounts › Add on any machine", () => {
       expect.any(String),
       expect.any(Number),
     );
-    expect(screen.getByRole("link", { name: /Open sign-in/ })).toHaveAttribute("href", URL);
-    fireEvent.click(screen.getByText("From a phone instead"));
-    expect(screen.getByRole("link", { name: /Open on the phone/ })).toHaveAttribute("href", MANUAL);
+    expect(screen.getByRole("link", { name: "Open Anthropic sign-in ↗" })).toHaveAttribute(
+      "href",
+      MANUAL,
+    );
+    expect(
+      screen.getByLabelText("Paste the code, or the address your browser ended up on"),
+    ).toHaveAttribute("type", "password");
+    expect(screen.getByRole("link", { name: /Open here instead/ })).toHaveAttribute("href", URL);
+    fireEvent.click(screen.getByText("Terminal instead"));
     expect(document.body).toHaveTextContent(ATTACH);
-    expect(screen.queryAllByRole("textbox")).toHaveLength(0);
 
     const done = reduceAll(state, [
       signinMsg("work@peer-a", "claude_signin_url", { url: URL, flow: "browser_callback" }),
@@ -1089,7 +940,7 @@ describe("ClaudeAccounts › Add on any machine", () => {
       fireEvent.click(screen.getByRole("button", { name: "Sign in on peer-a" }));
     });
     expect(screen.getByText(/Starting the sign-in on peer-a…/)).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /Open sign-in/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /Open Anthropic sign-in/ })).toBeNull();
 
     rerender(
       view(
@@ -1100,7 +951,7 @@ describe("ClaudeAccounts › Add on any machine", () => {
       ),
     );
     expect(screen.getByRole("alert")).toHaveTextContent("The sign-in did not finish: timed out");
-    expect(screen.queryByRole("link", { name: /Open sign-in/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /Open Anthropic sign-in/ })).toBeNull();
   });
 
   it("a paired host with no machine record yet is offered, and says so", () => {
@@ -1156,7 +1007,6 @@ describe("ClaudeAccounts › the per-machine account matrix", () => {
         <ClaudeAccounts
           accounts={s.claudeAccounts ?? {}}
           signins={s.signins ?? {}}
-          waves={{}}
           config={config}
           control={control}
           configTransport={null}
@@ -1192,12 +1042,13 @@ describe("ClaudeAccounts › the per-machine account matrix", () => {
     expect(button).toHaveAccessibleName("Sign in on peer-b with Work");
     expect(button).toHaveTextContent("Sign in on peer-b");
     expect(rows()[2]?.querySelector(".cc-dot--in")).toBeNull();
-    expect(card().getByText("on 2 of 3 machines")).toHaveClass("chip--gap");
+    expect(screen.getByRole("article", { name: "Work" })).not.toHaveTextContent(
+      /on \d of \d machines/,
+    );
   });
 
-  it("a complete account's chip is plain", () => {
+  it("an account on every configured machine offers no Sign in", () => {
     matrix({ hosts: ["peer-a"] });
-    expect(card().getByText("on 2 of 2 machines")).not.toHaveClass("chip--gap");
     expect(card().queryByRole("button", { name: /^Sign in on/ })).toBeNull();
   });
 
@@ -1216,7 +1067,13 @@ describe("ClaudeAccounts › the per-machine account matrix", () => {
     expect(dialog.getByRole("heading", { level: 3 })).toHaveTextContent(
       "Sign in with o•••@example.com on peer-b",
     );
-    expect(dialog.getByRole("link", { name: /Open sign-in/ })).toHaveAttribute("href", URL);
+    expect(dialog.getByRole("link", { name: /Open Anthropic sign-in/ })).toHaveAttribute(
+      "href",
+      URL,
+    );
+    expect(
+      dialog.getByLabelText("Paste the code, or the address your browser ended up on"),
+    ).toBeInTheDocument();
     fireEvent.click(dialog.getByRole("button", { name: "Show email" }));
     expect(dialog.getByRole("heading", { level: 3 })).toHaveTextContent(
       `Sign in with ${EMAIL} on peer-b`,
@@ -1246,7 +1103,7 @@ describe("ClaudeAccounts › the per-machine account matrix", () => {
     expect(rows()[2]).toHaveTextContent("peer-b");
     expect(rows()[2]).toHaveTextContent("Work (peer-b)");
     expect(rows()[2]?.querySelector(".cc-dot--in")).not.toBeNull();
-    expect(card().getByText("on 3 of 3 machines")).not.toHaveClass("chip--gap");
+    expect(rows()[2]).toHaveTextContent("signed in");
   });
 
   it("a sign-in done on another e-mail leaves the row empty and says so", async () => {
@@ -1264,7 +1121,6 @@ describe("ClaudeAccounts › the per-machine account matrix", () => {
       "That was another account (p•••@example.com): it gets a card of its own, and peer-b still misses o•••@example.com.",
     );
     expect(rows()[2]?.querySelector(".cc-dot--in")).toBeNull();
-    expect(card().getByText("on 2 of 3 machines")).toHaveClass("chip--gap");
   });
 
   it("a machine whose tunnel is down: the button is disabled, and says why", () => {
@@ -1317,7 +1173,6 @@ describe("Sign in on <machine>: the preset's label and the finished sign-in", ()
     probe: null,
     freshest: null,
     members: [],
-    stale: [],
     agents: [],
     waves: [],
     ...over,
@@ -1378,24 +1233,8 @@ describe("ClaudeAccounts › the balance and the agent-level decision (T8)", () 
       },
     ],
   };
-  const agentLimit: DecisionPayload = {
-    decision_id: "w1-t1-agent_account_limit-1",
-    wave: "w1",
-    task: "T1",
-    kind: "agent_account_limit",
-    question: "w1-t1-implementer-1 runs under work, at 91% of its 5-hour window.",
-    options: ["move w1-t1-implementer-1 to personal", "not now"],
-    opened_at: "2026-10-18T14:06:01.000Z",
-    agent_id: "w1-t1-implementer-1",
-    role: "implementer",
-    window: "five_hour",
-    acct: "work",
-    pct: 91,
-    resets_at: null,
-    suggested: "personal",
-  };
 
-  function view(control: ControlFn | null, waves: Record<string, WaveView> = {}) {
+  function view(control: ControlFn | null) {
     const state = reduceAll(initialState(), [
       accountMsg({ ...work, email: EMAIL }),
       accountMsg(personal),
@@ -1405,7 +1244,6 @@ describe("ClaudeAccounts › the balance and the agent-level decision (T8)", () 
         <ClaudeAccounts
           accounts={state.claudeAccounts ?? {}}
           signins={{}}
-          waves={waves}
           config={config}
           control={control}
           configTransport={null}
@@ -1425,47 +1263,711 @@ describe("ClaudeAccounts › the balance and the agent-level decision (T8)", () 
         : ({ ok: true } as { ok: boolean; result?: unknown }),
     );
 
-  it("asks claude_balance; the card's foot says which families pick it next, the row next pick", async () => {
+  it("the card asks no claude_balance and says nothing of next picks", () => {
     const control = answering();
     view(control);
-    expect(control).toHaveBeenCalledWith("claude_balance", {}, "volley claude balance");
-    const card = within(await screen.findByRole("article", { name: "Work" }));
-    expect(await card.findByText("picks next: Fable, others")).toBeInTheDocument();
-    const rows = within(card.getByRole("list", { name: "Machines" })).getAllByRole("listitem");
-    const peer = rows.find((r) => within(r).queryByText("peer-a"));
-    const local = rows.find((r) => within(r).queryByText("this machine"));
-    expect(peer && within(peer).queryByText("next pick")).toBeInTheDocument();
-    expect(local && within(local).queryByText("next pick")).toBeNull();
-    // The account every local family picks.
-    const other = within(screen.getByRole("article", { name: "Personal" }));
-    expect(other.getByText("picks next: Fable, others")).toBeInTheDocument();
-  });
-
-  it("read-only: no claude_balance request and no picks line", () => {
-    view(null);
+    expect(control).not.toHaveBeenCalledWith(
+      "claude_balance",
+      expect.anything(),
+      expect.anything(),
+    );
     expect(screen.queryByText(/picks next/)).toBeNull();
     expect(screen.queryByText("next pick")).toBeNull();
   });
+});
 
-  it("the needs-you list renders an agent_account_limit: the question, move with figures, not now", async () => {
-    const control = answering();
-    view(control, { w1: wave({ [agentLimit.decision_id]: agentLimit }) });
-    const banner = screen.getByText(agentLimit.question).closest(".needs-you") as HTMLElement;
-    const move = within(banner).getByRole("button", { name: "move to personal (5h 12%, 7d 22%)" });
-    expect(within(banner).getByRole("button", { name: "not now" })).toBeInTheDocument();
+describe("ClaudeAccounts › one clean card per account (#496)", () => {
+  const EMAIL = "owner@example.com";
+  const PENDING_URL = "https://claude.com/cai/oauth/authorize?state=p";
+  const at = (min: number) => new Date(NOW - min * 60_000).toISOString();
+  const own: ClaudeAccountPayload = { ...work, email: EMAIL, sampled_at: at(4) };
+  const machines = {
+    "box-a": {
+      name: "box-a",
+      kind: "peer",
+      tunnel: "up",
+      auth: { claude: "signed_out" },
+    },
+  } as unknown as NonNullable<ClaudeAccountsProps["machines"]>;
+  const answering = (rows: unknown[] = []) =>
+    vi.fn(async (op: string) =>
+      op === "claude_accounts"
+        ? { ok: true, result: { accounts: rows, primary: {} } }
+        : op === "claude_signin"
+          ? { ok: true, result: { acct: "pending-work@box-a", url: PENDING_URL } }
+          : ({ ok: true } as { ok: boolean; result?: unknown }),
+    );
+  const view = (
+    records: Record<string, ClaudeAccountPayload>,
+    control: ControlFn | null = answering() as unknown as ControlFn,
+  ) =>
+    render(
+      <main>
+        <ClaudeAccounts
+          accounts={records}
+          signins={{}}
+          config={config}
+          control={control}
+          configTransport={null}
+          machines={machines}
+          localName="hub"
+          hosts={["box-a"]}
+          group="accounts"
+          now={NOW}
+        />
+      </main>,
+    );
+  const card = () => screen.getByRole("article", { name: "Work" });
+
+  it("renders the name, e-mail, plan, three meters, the machines, the actions and the footer", () => {
+    view({ work: own });
+    const c = within(card());
+    expect(c.getByText("Work", { selector: "b" })).toBeInTheDocument();
+    expect(c.getByText("o•••@example.com")).toBeInTheDocument();
+    expect(c.getByRole("button", { name: "Show email" })).toBeInTheDocument();
+    expect(c.getByText("max")).toHaveClass("chip");
+    expect(c.getAllByRole("meter")).toHaveLength(3);
+    const rows = within(c.getByRole("list", { name: "Machines" })).getAllByRole("listitem");
+    expect(rows.map((r) => r.querySelector("b")?.textContent)).toEqual(["this machine", "box-a"]);
+    expect(rows[0]).toHaveTextContent("signed in");
+    expect(rows[1]).toHaveTextContent("not on box-a");
+    expect(card().querySelector(".cc-machines")?.textContent).not.toContain("%");
+    expect(c.getByRole("button", { name: "Add to another machine…" })).toBeEnabled();
+    expect(c.getByRole("button", { name: "Rename Work" })).toBeEnabled();
+    expect(c.getByRole("button", { name: "Remove Work…" })).toBeEnabled();
+    expect(c.getByText("Last updated: 4 min ago")).toHaveClass("cc-updated");
+    for (const gone of [
+      /waves/,
+      /agent/,
+      /Use for/,
+      /next pick/,
+      /picks next/,
+      /stale/,
+      /freshest:/,
+    ])
+      expect(card().textContent).not.toMatch(gone);
+    expect(c.queryByRole("combobox")).toBeNull();
+  });
+
+  it("never counts agents: 29 historical agents on the record show nowhere on the card", () => {
+    const agents = Array.from({ length: 29 }, (_, i) => `w1-t${i}-implementer-1`);
+    view({ work: { ...own, agents } }, null);
+    expect(card().textContent).not.toMatch(/29|agent/);
+  });
+
+  it("a 0% window with no reset reads no usage yet this window; 12% reset time unknown", () => {
+    view({
+      work: {
+        ...own,
+        five_hour: { pct: 0, resets_at: null },
+        weekly: { pct: 12, resets_at: null },
+      },
+    });
+    const meter = (name: string) =>
+      within(card()).getByRole("meter", { name }).closest(".meter") as HTMLElement;
+    expect(meter("5-hour")).toHaveTextContent("no usage yet this window");
+    expect(meter("7-day")).toHaveTextContent("reset time unknown");
+  });
+
+  it("a profile waiting for sign-in is a row with Finish sign-in, never a card", async () => {
+    const pending = {
+      id: "pending-work",
+      label: "Work (box-a)",
+      machine: "box-a",
+      signin: { state: "pending", url: PENDING_URL },
+    };
+    const control = answering([pending]);
+    view({ work: own }, control as unknown as ControlFn);
+    const section = within(
+      await screen.findByRole("region", { name: "Profiles waiting for sign-in" }),
+    );
+    expect(section.getByText("Work (box-a)")).toBeInTheDocument();
+    expect(section.getByRole("button", { name: "Cancel Work (box-a)" })).toBeEnabled();
+    expect(screen.queryByRole("article", { name: "Work (box-a)" })).toBeNull();
+    expect(screen.getAllByRole("article").map((a) => a.getAttribute("aria-label"))).toEqual([
+      "This machine's Claude login",
+      "Work",
+    ]);
+    expect(
+      screen.queryByRole("button", { name: /^Sign in on box-a with Work \(box-a\)/ }),
+    ).toBeNull();
     await act(async () => {
-      fireEvent.click(move);
+      fireEvent.click(section.getByRole("button", { name: "Finish sign-in for Work (box-a)" }));
     });
     expect(control).toHaveBeenCalledWith(
-      "resolve",
-      {
-        wave: "w1",
-        decision_id: agentLimit.decision_id,
-        answer: "move w1-t1-implementer-1 to personal",
-      },
-      `volleyd resolve ${agentLimit.decision_id}`,
+      "claude_signin",
+      { acct: "pending-work@box-a" },
+      expect.any(String),
+      expect.any(Number),
     );
-    // Use for… moves waves only: an agent's decision is not one of its waves.
-    expect(screen.getByRole("combobox", { name: "Move a wave to Personal" })).toBeDisabled();
+    expect(control).not.toHaveBeenCalledWith(
+      "claude_account_add",
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+    const dialog = within(screen.getByRole("region", { name: "Add Claude account" }));
+    expect(dialog.getByRole("heading", { level: 3 })).toHaveTextContent(
+      "Sign in as Work (box-a) on box-a",
+    );
+  });
+
+  it("passes axe with the card and the pending section", async () => {
+    view(
+      { work: own },
+      answering([{ id: "p", label: "P", machine: "box-a", signin: { state: "pending" } }]) as never,
+    );
+    await screen.findByRole("region", { name: "Profiles waiting for sign-in" });
+    const v = await axe.run(document.body, { rules: { "color-contrast": { enabled: false } } });
+    expect(v.violations.map((x) => x.id)).toEqual([]);
+  });
+});
+
+describe("ClaudeAccounts › rename, remove and the live registry (#497)", () => {
+  const EMAIL = "owner@example.com";
+  const own: ClaudeAccountPayload = { ...work, email: EMAIL };
+  const row = (id: string, machine: string, label = "Work") => ({
+    id,
+    label,
+    machine,
+    email: EMAIL,
+    plan: "max",
+    signed_in_at: SIGNED,
+    signin: { state: "signed_in" },
+  });
+  const machines = {
+    "box-a": { name: "box-a", kind: "peer", tunnel: "up", auth: { claude: "signed_out" } },
+  } as unknown as NonNullable<ClaudeAccountsProps["machines"]>;
+  /** A volleyd whose registry the test edits; rename and remove answer as `answers` says. */
+  function volleyd(
+    rows: ReturnType<typeof row>[],
+    answers: Record<string, { ok: boolean; error?: string; result?: unknown }> = {},
+  ) {
+    const reg = { rows };
+    const control = vi.fn(async (op: string, _f?: Record<string, unknown>) =>
+      op === "claude_accounts"
+        ? { ok: true, result: { accounts: reg.rows, primary: {} } }
+        : (answers[op] ?? ({ ok: true } as { ok: boolean; error?: string; result?: unknown })),
+    );
+    return { reg, control, fn: control as unknown as ControlFn };
+  }
+  const view = (
+    records: Record<string, ClaudeAccountPayload>,
+    control: ControlFn | null,
+    rev: number | undefined = 0,
+  ) => (
+    <main>
+      <ClaudeAccounts
+        accounts={records}
+        signins={{}}
+        config={config}
+        control={control}
+        configTransport={null}
+        machines={machines}
+        localName="hub"
+        hosts={["box-a"]}
+        registryRev={rev}
+        group="accounts"
+        now={NOW}
+      />
+    </main>
+  );
+  const fetches = (control: ReturnType<typeof vi.fn>) =>
+    control.mock.calls.filter(([op]) => op === "claude_accounts").length;
+  /** The registry fetched once and its answer rendered: a click before that sees no registry. */
+  const fetched = async (control: ReturnType<typeof vi.fn>) => {
+    await waitFor(() => expect(fetches(control)).toBe(1));
+    await act(async () => {
+      await Promise.all(control.mock.results.map((r) => r.value));
+    });
+  };
+  const card = (name = "Work") => screen.getByRole("article", { name });
+
+  it("a raised rev fetches the registry again; a row it no longer has leaves, with no remount", async () => {
+    const v = volleyd([row("work", "local")]);
+    const r = render(view({ work: own }, v.fn));
+    await fetched(v.control);
+    expect(card()).toBeInTheDocument();
+    // volleyd removed it: its record cleared, the registry without it, the signal raised.
+    v.reg.rows = [];
+    r.rerender(view({}, v.fn, 0));
+    // the stale registry still shows it until the signal moves
+    expect(card()).toBeInTheDocument();
+    r.rerender(view({}, v.fn, 1));
+    await waitFor(() => expect(screen.queryByRole("article", { name: "Work" })).toBeNull());
+    expect(fetches(v.control)).toBe(2);
+  });
+
+  it("Rename: ✎ opens a field holding the name; Enter sends claude_account_rename; the new name shows after the rev", async () => {
+    const v = volleyd([row("work", "local"), row("work-box-a", "box-a")]);
+    const r = render(view({ work: own }, v.fn));
+    await fetched(v.control);
+    fireEvent.click(within(card()).getByRole("button", { name: "Rename Work" }));
+    const field = within(card()).getByRole("textbox", { name: "New name for Work" });
+    expect(field).toHaveValue("Work");
+    fireEvent.change(field, { target: { value: "Team account" } });
+    await act(async () => {
+      fireEvent.keyDown(field, { key: "Enter" });
+    });
+    expect(v.control).toHaveBeenCalledWith(
+      "claude_account_rename",
+      { acct: "work", label: "Team account" },
+      expect.any(String),
+    );
+    expect(within(card()).queryByRole("textbox")).toBeNull();
+    v.reg.rows = [row("work", "local", "Team account"), row("work-box-a", "box-a", "Team account")];
+    r.rerender(view({ work: { ...own, label: "Team account" } }, v.fn, 1));
+    expect(await screen.findByRole("article", { name: "Team account" })).toBeInTheDocument();
+  });
+
+  it("Rename: Escape restores the name and sends nothing; a refusal shows under the field", async () => {
+    const v = volleyd([row("work", "local")], {
+      claude_account_rename: { ok: false, error: "'primary' is reserved; pick another name" },
+    });
+    render(view({ work: own }, v.fn));
+    await fetched(v.control);
+    fireEvent.click(within(card()).getByRole("button", { name: "Rename Work" }));
+    const field = within(card()).getByRole("textbox", { name: "New name for Work" });
+    fireEvent.change(field, { target: { value: "Something" } });
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(within(card()).queryByRole("textbox")).toBeNull();
+    expect(within(card()).getByText("Work", { selector: "b" })).toBeInTheDocument();
+    expect(v.control).not.toHaveBeenCalledWith(
+      "claude_account_rename",
+      expect.anything(),
+      expect.anything(),
+    );
+    fireEvent.click(within(card()).getByRole("button", { name: "Rename Work" }));
+    const again = within(card()).getByRole("textbox", { name: "New name for Work" });
+    fireEvent.change(again, { target: { value: "Primary" } });
+    await act(async () => {
+      fireEvent.keyDown(again, { key: "Enter" });
+    });
+    expect(within(card()).getByRole("alert")).toHaveTextContent("'primary' is reserved");
+    expect(within(card()).getByRole("textbox")).toHaveValue("Primary");
+  });
+
+  it("Remove…: the sheet names the machine and the masked e-mail; Confirm sends the op", async () => {
+    const v = volleyd([row("work", "local")]);
+    render(view({ work: own }, v.fn));
+    await fetched(v.control);
+    fireEvent.click(within(card()).getByRole("button", { name: "Remove Work…" }));
+    const sheet = within(screen.getByRole("dialog", { name: "Remove Work" }));
+    expect(sheet.queryByRole("radio")).toBeNull();
+    expect(sheet.getByText("this machine", { selector: "b" })).toBeInTheDocument();
+    expect(sheet.getByText("o•••@example.com")).toBeInTheDocument();
+    expect(screen.getByRole("dialog").textContent).not.toContain(EMAIL);
+    await act(async () => {
+      fireEvent.click(sheet.getByRole("button", { name: "Remove from this machine" }));
+    });
+    expect(v.control).toHaveBeenCalledWith(
+      "claude_account_remove",
+      { acct: "work" },
+      expect.any(String),
+      expect.any(Number),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("Work removed from this machine.");
+  });
+
+  it("Remove… on an account on several machines picks the machine; a refusal stays in the sheet", async () => {
+    const v = volleyd([row("work", "local"), row("work-box-a", "box-a")], {
+      claude_account_remove: {
+        ok: false,
+        error: "Claude account 'work-box-a@box-a' is in use by w1-t1-implementer-1",
+      },
+    });
+    render(view({ work: own }, v.fn));
+    await fetched(v.control);
+    fireEvent.click(within(card()).getByRole("button", { name: "Remove Work…" }));
+    const sheet = within(screen.getByRole("dialog", { name: "Remove Work" }));
+    const radios = sheet.getAllByRole("radio");
+    expect(radios.map((r) => r.closest("label")?.querySelector("span")?.textContent)).toEqual([
+      "this machine",
+      "box-a",
+    ]);
+    expect(radios[0]).toBeChecked();
+    fireEvent.click(sheet.getByRole("radio", { name: /box-a/ }));
+    await act(async () => {
+      fireEvent.click(sheet.getByRole("button", { name: "Remove from box-a" }));
+    });
+    expect(v.control).toHaveBeenCalledWith(
+      "claude_account_remove",
+      { acct: "work-box-a@box-a" },
+      expect.any(String),
+      expect.any(Number),
+    );
+    expect(sheet.getByRole("alert")).toHaveTextContent("in use by w1-t1-implementer-1");
+    expect(screen.getByRole("dialog", { name: "Remove Work" })).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("this machine's own login has no Rename and no Remove", async () => {
+    const v = volleyd([row("work", "local")]);
+    render(view({ work: own }, v.fn));
+    await fetched(v.control);
+    const primary = within(screen.getByRole("article", { name: "This machine's Claude login" }));
+    expect(primary.queryByRole("button", { name: /^Rename/ })).toBeNull();
+    expect(primary.queryByRole("button", { name: /^Remove/ })).toBeNull();
+  });
+
+  it("read-only: neither Rename nor Remove", () => {
+    render(view({ work: own }, null));
+    expect(within(card()).queryByRole("button", { name: /^Rename/ })).toBeNull();
+    expect(within(card()).queryByRole("button", { name: /^Remove/ })).toBeNull();
+  });
+
+  it("a waiting profile's Cancel sends claude_account_remove for it", async () => {
+    const pending = {
+      id: "pending-work",
+      label: "Work (box-a)",
+      machine: "box-a",
+      signin: { state: "pending" },
+    };
+    const v = volleyd([row("work", "local"), pending as unknown as ReturnType<typeof row>]);
+    render(view({ work: own }, v.fn));
+    const section = within(
+      await screen.findByRole("region", { name: "Profiles waiting for sign-in" }),
+    );
+    await act(async () => {
+      fireEvent.click(section.getByRole("button", { name: "Cancel Work (box-a)" }));
+    });
+    expect(v.control).toHaveBeenCalledWith(
+      "claude_account_remove",
+      { acct: "pending-work@box-a" },
+      expect.any(String),
+      expect.any(Number),
+    );
+  });
+
+  it("passes axe with the remove sheet open, and with the rename field open", async () => {
+    const v = volleyd([row("work", "local"), row("work-box-a", "box-a")]);
+    render(view({ work: own }, v.fn));
+    await fetched(v.control);
+    fireEvent.click(within(card()).getByRole("button", { name: "Remove Work…" }));
+    const rules = { rules: { "color-contrast": { enabled: false } } };
+    expect((await axe.run(document.body, rules)).violations.map((x) => x.id)).toEqual([]);
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(within(card()).getByRole("button", { name: "Rename Work" }));
+    expect((await axe.run(document.body, rules)).violations.map((x) => x.id)).toEqual([]);
+  });
+});
+
+describe("the demo Desk: remove a profile, and every Settings section follows (#497)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ bg: "none", autoArrange: false }));
+  });
+
+  it("Remove… on Team (box-a) leaves its card's box-a row and Settings › Machines' box-a list", async () => {
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      value: () => {},
+      configurable: true,
+    });
+    try {
+      render(
+        <DeskStoreProvider demo>
+          <App />
+        </DeskStoreProvider>,
+      );
+      const dock = within(screen.getByRole("toolbar", { name: "Dock" }));
+      fireEvent.click(dock.getByRole("button", { name: "Machines" }));
+      fireEvent.click(screen.getByRole("button", { name: "box-a: open in Settings › Machines" }));
+      const onBoxA = () => screen.getByRole("list", { name: "Claude accounts on box-a" });
+      const teamOnBoxA = () =>
+        within(onBoxA())
+          .getAllByRole("listitem")
+          .find((li) => li.textContent?.includes("Team account"));
+      await waitFor(() => expect(teamOnBoxA()).not.toHaveClass("gap"));
+
+      const settings = within(screen.getByRole("dialog", { name: "Settings" }));
+      fireEvent.click(settings.getByRole("button", { name: /Claude accounts & usage/ }));
+      fireEvent.click(await settings.findByRole("button", { name: /^Accounts/ }));
+      const team = await screen.findByRole("article", { name: "Team account" });
+      fireEvent.click(within(team).getByRole("button", { name: "Remove Team account…" }));
+      const sheet = within(screen.getByRole("dialog", { name: "Remove Team account" }));
+      fireEvent.click(sheet.getByRole("radio", { name: /box-a/ }));
+      fireEvent.click(sheet.getByRole("button", { name: "Remove from box-a" }));
+      // the demo answers, clears the record, raises its signal; the card is fetched again
+      await waitFor(
+        () => {
+          const rows = within(screen.getByRole("article", { name: "Team account" })).getByRole(
+            "list",
+            { name: "Machines" },
+          );
+          expect(within(rows).getByText("not on box-a")).toBeInTheDocument();
+        },
+        { timeout: 3000 },
+      );
+
+      fireEvent.click(settings.getByRole("button", { name: /^Machines/ }));
+      await waitFor(() => expect(teamOnBoxA()).toHaveClass("gap"));
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
+  });
+
+  it("Settings › Machines, left open, asks volleyd's registry again when the rev rises", async () => {
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      value: () => {},
+      configurable: true,
+    });
+    try {
+      render(
+        <DeskStoreProvider demo>
+          <App />
+        </DeskStoreProvider>,
+      );
+      const dock = within(screen.getByRole("toolbar", { name: "Dock" }));
+      fireEvent.click(dock.getByRole("button", { name: "Machines" }));
+      fireEvent.click(screen.getByRole("button", { name: "box-a: open in Settings › Machines" }));
+      screen.getByRole("list", { name: "Claude accounts on box-a" });
+      const asked = () => demoFeed.asks.filter((op) => op === "claude_accounts").length;
+      await waitFor(() => expect(asked()).toBeGreaterThan(0));
+      const before = asked();
+      const signal = (rev: number): DeskMessage => ({
+        topic: "volley/_system/claude/registry",
+        envelope: {
+          schema_version: "0.1",
+          agent_id: "volleyd",
+          channel: "_system/claude",
+          type: "claude_registry_changed",
+          wall_time: new Date().toISOString(),
+          namespace: "default",
+          payload: { rev, at: new Date().toISOString() },
+        },
+        receivedAt: Date.now(),
+      });
+      act(() => demoFeed.apply?.([signal(41)]));
+      await waitFor(() => expect(asked()).toBe(before + 1));
+      // Settings › Machines stayed open throughout: no remount asked it
+      expect(screen.getByRole("list", { name: "Claude accounts on box-a" })).toBeInTheDocument();
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    }
+  });
+});
+
+describe("ClaudeAccounts › adding ends primed (#498)", () => {
+  const EMAIL = "team@example.com";
+  /** A control that answers claude_accounts with `rows` and records every op. */
+  const answering = (rows: () => unknown[]) => {
+    const ops: { op: string; fields: Record<string, unknown> }[] = [];
+    const fn = vi.fn(async (op: string, fields: Record<string, unknown>) => {
+      ops.push({ op, fields });
+      if (op === "claude_accounts")
+        return { ok: true, result: { accounts: rows(), primary: {}, sharing: {} } };
+      if (op === "claude_account_add")
+        return { ok: true, result: { acct: "team-2", url: "https://example.com/oauth" } };
+      return { ok: true };
+    }) as unknown as ControlFn;
+    return { fn, ops, primes: () => ops.filter((o) => o.op === "claude_prime") };
+  };
+  const card = (name: string) => within(screen.getByRole("article", { name }));
+  const team = { id: "team", label: "Team", machine: "local", signed_in_at: SIGNED };
+  const view = (
+    control: ControlFn | null,
+    now: number,
+    more: Partial<ClaudeAccountsProps> = {},
+  ) => (
+    <ClaudeAccounts
+      group="accounts"
+      accounts={{}}
+      signins={{}}
+      config={config}
+      control={control}
+      configTransport={null}
+      now={now}
+      {...more}
+    />
+  );
+
+  it("a card with no e-mail asks volleyd once on mount and not again within 5 min", async () => {
+    const c = answering(() => [team]);
+    const r = render(view(c.fn, NOW));
+    await screen.findByRole("article", { name: "Team" });
+    await waitFor(() => expect(c.primes().map((p) => p.fields)).toContainEqual({ acct: "team" }));
+    // answered without an e-mail: `no reading yet` until the next ask
+    await waitFor(() => expect(card("Team").queryAllByText(/^reading…/)).toHaveLength(0));
+    expect(card("Team").queryByText(/doctor/i)).toBeNull();
+    const sent = c.primes().filter((p) => p.fields.acct === "team").length;
+    expect(sent).toBe(1);
+    r.rerender(view(c.fn, NOW + 4 * 60_000));
+    expect(c.primes().filter((p) => p.fields.acct === "team")).toHaveLength(1);
+    r.rerender(view(c.fn, NOW + 5 * 60_000 + 1));
+    await waitFor(() => expect(c.primes().filter((p) => p.fields.acct === "team")).toHaveLength(2));
+  });
+
+  it("after a prior probe the e-mail row says how old the last reading is", async () => {
+    const c = answering(() => [team]);
+    const record: ClaudeAccountPayload = {
+      account: "team",
+      label: "Team",
+      five_hour: null,
+      weekly: null,
+      agents: [],
+      waves: [],
+      sampled_at: "2026-10-18T14:02:00.000Z",
+      probe: { machine: "local", state: "error", attempted_at: "2026-10-18T14:02:00.000Z" },
+    };
+    render(view(c.fn, NOW, { accounts: { team: record } }));
+    expect(await card("Team").findByText("reading… · last read 4 min ago")).toBeInTheDocument();
+  });
+
+  it("without control: `no reading yet`, and nothing is sent", () => {
+    const record: ClaudeAccountPayload = {
+      account: "team",
+      label: "Team",
+      five_hour: null,
+      weekly: null,
+      agents: [],
+      waves: [],
+      sampled_at: "2026-10-18T14:02:00.000Z",
+    };
+    render(view(null, NOW, { accounts: { team: record } }));
+    // the e-mail row, and the two windows' hints
+    expect(card("Team").getAllByText("no reading yet").length).toBeGreaterThanOrEqual(3);
+    expect(card("Team").queryByText(/reading…|doctor/)).toBeNull();
+    for (const name of ["5-hour", "7-day"])
+      expect(card("Team").getByRole("meter", { name })).toHaveAttribute(
+        "aria-valuetext",
+        "no reading yet",
+      );
+  });
+
+  it("the meters and the e-mail row read `reading…` while a prime is in flight, then `no reading yet`", async () => {
+    let answer: (v: { ok: boolean }) => void = () => {};
+    const fn = vi.fn((op: string) =>
+      op === "claude_prime"
+        ? new Promise((r) => {
+            answer = r;
+          })
+        : Promise.resolve({ ok: true, result: { accounts: [team], primary: {}, sharing: {} } }),
+    ) as unknown as ControlFn;
+    render(view(fn, NOW));
+    await screen.findByRole("article", { name: "Team" });
+    await waitFor(() =>
+      expect(card("Team").getByRole("meter", { name: "5-hour" })).toHaveAttribute(
+        "aria-valuetext",
+        "reading…",
+      ),
+    );
+    // the e-mail row and the two windows' hints
+    expect(card("Team").getAllByText("reading…").length).toBeGreaterThanOrEqual(3);
+    await act(async () => answer({ ok: true }));
+    expect(card("Team").getByRole("meter", { name: "5-hour" })).toHaveAttribute(
+      "aria-valuetext",
+      "no reading yet",
+    );
+    // the prime answered without an e-mail: the row stops claiming a read is under way
+    expect(card("Team").queryAllByText(/^reading…/)).toHaveLength(0);
+    expect(card("Team").getAllByText("no reading yet").length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("Add: step 2 waits for sign-in; done says who signed in, with the plan chip; the card follows", async () => {
+    let rows: unknown[] = [];
+    const c = answering(() => rows);
+    const signinUrl = signinMsg("team-2", "claude_signin_url", {
+      url: "https://example.com/oauth",
+    });
+    const r = render(view(c.fn, NOW));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Account label" }), {
+      target: { value: "Team 2" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in on this machine" }));
+    });
+    expect(screen.getByText(/Waiting for the sign-in to finish/)).toBeInTheDocument();
+    const done = reduceAll(initialState(), [
+      signinUrl,
+      signinMsg("team-2", "claude_signin_done", { plan: "max", email: "new@example.com" }),
+    ]);
+    rows = [
+      {
+        id: "team-2",
+        label: "Team 2",
+        machine: "local",
+        signed_in_at: SIGNED,
+        email: "new@example.com",
+      },
+    ];
+    const record: ClaudeAccountPayload = {
+      account: "team-2",
+      label: "Team 2",
+      email: "new@example.com",
+      five_hour: { pct: 3, resets_at: "2026-10-18T18:10:00.000Z" },
+      weekly: { pct: 9, resets_at: "2026-10-21T09:00:00.000Z" },
+      agents: [],
+      waves: [],
+      sampled_at: "2026-10-18T14:05:00.000Z",
+    };
+    r.rerender(view(c.fn, NOW, { signins: done.signins ?? {}, accounts: { "team-2": record } }));
+    const signed = await screen.findByText(/^Signed in as/);
+    expect(signed).toHaveTextContent("Signed in as n•••@example.com");
+    expect(within(signed).getByText("max")).toHaveClass("chip");
+    const teamCard = await screen.findByRole("article", { name: "Team 2" });
+    expect(within(teamCard).getByText("n•••@example.com")).toBeInTheDocument();
+    expect(within(teamCard).getAllByRole("meter")).toHaveLength(3);
+  });
+
+  it("a sign-in matching an account already on that machine says so and offers Keep both / Remove the new profile", async () => {
+    const rows = () => [
+      { ...team, email: EMAIL },
+      { id: "team-2", label: "Team 2", machine: "local", signed_in_at: SIGNED, email: EMAIL },
+    ];
+    const c = answering(rows);
+    const r = render(view(c.fn, NOW));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Account label" }), {
+      target: { value: "Team 2" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in on this machine" }));
+    });
+    const done = reduceAll(initialState(), [
+      signinMsg("team-2", "claude_signin_done", { plan: "team", email: EMAIL }),
+    ]);
+    r.rerender(view(c.fn, NOW, { signins: done.signins ?? {} }));
+    expect(
+      await screen.findByText("This is the same account as Team on this machine."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Keep both" })).toBeInTheDocument();
+    const remove = screen.getByRole("button", { name: "Remove the new profile" });
+    fireEvent.click(remove);
+    // in flight: a second click sends nothing
+    expect(remove).toBeDisabled();
+    fireEvent.click(remove);
+    expect(c.ops.filter((o) => o.op === "claude_account_remove")).toEqual([
+      { op: "claude_account_remove", fields: { acct: "team-2" } },
+    ]);
+    expect(await screen.findByText("Removed the new profile.")).toBeInTheDocument();
+    // nothing left claims it was added
+    expect(screen.queryByText(/^Added:/)).toBeNull();
+    expect(screen.queryByText(/signed in on this machine/)).toBeNull();
+  });
+
+  it("Keep both dismisses the prompt", async () => {
+    const rows = () => [
+      { ...team, email: EMAIL },
+      { id: "team-2", label: "Team 2", machine: "local", signed_in_at: SIGNED, email: EMAIL },
+    ];
+    const c = answering(rows);
+    const r = render(view(c.fn, NOW));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Account label" }), {
+      target: { value: "Team 2" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in on this machine" }));
+    });
+    const done = reduceAll(initialState(), [
+      signinMsg("team-2", "claude_signin_done", { plan: "team", email: EMAIL }),
+    ]);
+    r.rerender(view(c.fn, NOW, { signins: done.signins ?? {} }));
+    fireEvent.click(await screen.findByRole("button", { name: "Keep both" }));
+    expect(screen.queryByText(/same account as/)).toBeNull();
+    expect(c.ops.some((o) => o.op === "claude_account_remove")).toBe(false);
   });
 });

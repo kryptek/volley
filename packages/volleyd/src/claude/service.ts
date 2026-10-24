@@ -1,8 +1,10 @@
+import { existsSync, lstatSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type Clock, dateOf, sleep, systemClock } from "../clock";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn } from "../exec";
+import { type SigninEntryToken, mintProfileRemoveToken, mintSigninEntryToken } from "../fence";
 import type { RemoteHost } from "../hosts/ssh-tmux";
 import type { MachineRecord } from "../machines";
 import { sessionsRunningIn } from "../procs";
@@ -15,14 +17,19 @@ import {
   LOCAL_MACHINE,
   PRIMARY_ACCOUNT,
   type SelectedAccount,
+  accountKey,
   addAccount,
+  canonicalRoot,
   machineCandidates,
   markSignedIn,
   profileDir,
   readRegistry,
+  removeAccount,
+  renameAccount,
   selectAccount,
 } from "./profiles";
 import {
+  callbackPort,
   remoteAccount,
   remoteAccountHost,
   remoteProfileDir,
@@ -39,7 +46,19 @@ import {
   seedProfile,
   syncMcp,
 } from "./sharing";
-import { SUPERSEDED, type SigninEvent, parseAuthStatus, profileEnv, runSignin } from "./signin";
+import {
+  REMOVED,
+  SUPERSEDED,
+  type SigninEvent,
+  authorizeState,
+  parseAuthStatus,
+  profileEnv,
+  runSignin,
+  signinSession,
+  statusIdentity,
+  stripTerminal,
+} from "./signin";
+import { parseSigninEntry, queryState, redact } from "./signin-entry";
 import { MODEL_FAMILIES, type Ranked } from "./usage";
 
 const unranked = (account: string): Ranked => ({
@@ -52,7 +71,8 @@ const unranked = (account: string): Ranked => ({
 
 /**
  * The daemon's Claude account profiles: the control ops (`claude_accounts`,
- * `claude_account_add`, `claude_signin`, `claude_sync`), the background sign-ins, and the
+ * `claude_account_add`, `claude_signin`, `claude_prime`, `claude_sync`), the background
+ * sign-ins and the prime that follows each, and the
  * profile preparation and account selection a spawn uses. The `_system` journal records the
  * registry changes and each sign-in's start and end — never its URL, which is published only on
  * the non-retained `volley/_system/claude/<acct>/signin` topic and kept in memory while the
@@ -63,6 +83,8 @@ const unranked = (account: string): Ranked => ({
 
 export const signinTopic = (acct: string) => `volley/_system/claude/${acct}/signin`;
 export const SIGNIN_CHANNEL = "_system/claude";
+/** The retained registry-changed signal (`claude_registry_changed { rev, at }`, SPEC §4.6.11). */
+export const REGISTRY_TOPIC = "volley/_system/claude/registry";
 
 export interface ClaudeServiceDeps {
   /** The profiles root (`claudeRoot()`). */
@@ -82,6 +104,8 @@ export interface ClaudeServiceDeps {
   sleep?: (ms: number) => Promise<void>;
   signinPollMs?: number;
   signinTimeoutMs?: number;
+  /** How long a pasted code or redirect waits for the sign-in to end (`signin_entry_wait_ms`). */
+  signinEntryWaitMs?: number;
   /**
    * Usage metering's ranking of `candidates` (usage-record keys) for an agent of `model`
    * (claude/usage.ts rankAccounts): the balancing rule a spawn picks by.
@@ -102,6 +126,22 @@ export interface ClaudeServiceDeps {
   machineIdentity?: (name: string) => LoginIdentity;
   /** Every machine record (the supervisor's own and each paired machine's): `claude_accounts`. */
   machines?: () => MachineRecord[];
+  /** The supervised agents running under an account (a usage-record key: `<id>`, `<id>@<name>`). */
+  agentsOn?: (key: string) => string[];
+  /** The running waves whose wave file pins a profile id (the wave's or a task's `account:`). */
+  wavesOn?: (id: string) => string[];
+  /** `claude.default_account` as in force. */
+  defaultAccount?: () => string | null;
+  /**
+   * The registry changed (add, rename, remove, a sign-in done, a sync): `rev` is the new
+   * revision. Rename and remove wait for it, so their answer comes after its effects.
+   */
+  onChanged?: (rev: number) => Promise<unknown> | unknown;
+  /**
+   * Run `machine`'s usage probe for one login (`default`, or a profile's id) and fold what it
+   * read into the login's account: a prime's last step.
+   */
+  probe?: (machine: string, profile: string) => Promise<void>;
 }
 
 /** What a sign-in run gets from the service: its stop signal, timers and publisher. */
@@ -112,13 +152,26 @@ interface SigninRun {
   pollMs: number;
   timeoutMs: number;
   publish: (e: SigninEvent) => Promise<void>;
+  /** The callback URL, once known: its port and `state` stay in memory (`enterSignin`). */
+  onCallback: (url: string) => void;
 }
 
-type Reply = { ok: boolean; error?: string; result?: unknown };
+type Reply = { ok: boolean; error?: string; result?: unknown; fresh?: true };
+
+/** A pasted redirect that is not this sign-in's own (another port or `state`). */
+export const ANOTHER_SIGNIN = "that address belongs to another sign-in; open a fresh link";
+
+/** A line of a sign-in's screen that says Claude Code refused what was pasted. */
+const REJECTION = /invalid|expired|error|fail|denied|wrong|mismatch/i;
 
 interface Pending {
   abort: AbortController;
   url?: UrlEvent;
+  /** The `$BROWSER` URL's port and `state`: never published apart from it, never journaled. */
+  callback?: { port: number; state: string | null };
+  /** Who started it and how: a refused entry restarts it the same way. */
+  by: string;
+  run: (r: SigninRun) => Promise<SigninEvent>;
   /** Resolves with the URL event, or the terminal event if the sign-in ended first. */
   first: Promise<SigninEvent>;
   done: Promise<SigninEvent>;
@@ -135,9 +188,31 @@ export class ClaudeService {
   /** Each paired machine's HOME, once a sign-in there learned it: where its profiles are. */
   private readonly homes = new Map<string, string>();
   private versionAsk: Promise<string | undefined> | undefined;
+  private revision = 0;
+  /** When each login (a sign-in key: `<id>`, `<id>@<name>`, `primary@<name>`) was last primed. */
+  private readonly primed = new Map<string, number>();
   constructor(private readonly d: ClaudeServiceDeps) {
     // real clock: the default when the daemon injects no clock
     this.clock = d.clock ?? systemClock;
+  }
+
+  /** The registry's revision: 0 at start, one more at each change (`onChanged`). */
+  get rev(): number {
+    return this.revision;
+  }
+
+  private changed(): Promise<unknown> {
+    this.revision++;
+    return Promise.resolve(this.d.onChanged?.(this.revision));
+  }
+
+  /** Every profile's usage-record key (`<id>`, `<id>@<name>`); null when the registry is unreadable. */
+  knownAccounts(): Set<string> | null {
+    try {
+      return new Set(readRegistry(this.d.root).accounts.map((a) => accountKey(a.id, a.machine)));
+    } catch {
+      return null;
+    }
   }
 
   private get primaryDir(): string {
@@ -247,9 +322,9 @@ export class ClaudeService {
   }
 
   /**
-   * A registry account's identity: its profile's `.claude.json` when readable (the file wins: it
-   * is what Claude Code says now), else what the registry recorded at sign-in (always, for a
-   * profile on a paired machine). A profile not signed in has none.
+   * A registry account's identity: its profile's `.claude.json` when it records one (the file
+   * wins: it is what Claude Code says now), else what the registry recorded at sign-in or prime
+   * (always, for a profile on a paired machine). A profile not signed in has none.
    */
   private identityOf(a: ClaudeAccount): LoginIdentity {
     if (a.signed_in_at === undefined) return {};
@@ -257,7 +332,9 @@ export class ClaudeService {
       a.machine === LOCAL_MACHINE
         ? readClaudeJson(join(profileDir(this.d.root, a.id), ".claude.json"))
         : null;
-    if (json !== null) return loginIdentity(json);
+    // A fresh profile's file has no `oauthAccount` until a session ran in it.
+    const file = loginIdentity(json);
+    if (file.email !== undefined) return file;
     return {
       ...(a.email !== undefined ? { email: a.email } : {}),
       ...(a.org !== undefined ? { org: a.org } : {}),
@@ -493,6 +570,7 @@ export class ClaudeService {
       type: "claude_account_added",
       data: { acct: acct.id, label: acct.label, machine: acct.machine, by },
     });
+    void this.changed();
     if (host !== null) return this.remoteProfileSignin(acct, host, by, { account: acct });
     return this.answerSignin(acct.id, by, { account: acct }, this.localSignin(acct.id));
   }
@@ -551,6 +629,119 @@ export class ClaudeService {
         error: `Claude account '${acct}' is already signed in; to sign it in as another Claude account, run \`CLAUDE_CONFIG_DIR=${dir} claude auth logout\` first`,
       };
     return this.answerSignin(acct, by, {}, this.localSignin(acct));
+  }
+
+  /**
+   * `claude_signin_entry { acct, entry, by }`: finish a waiting sign-in with what the owner
+   * pasted, from whatever device (SPEC §4.6.11). A code is typed into the sign-in session on the
+   * machine where it waits (`tmux send-keys -l`, then Enter); a localhost callback address,
+   * checked against this sign-in's own callback URL (port and `state`), is requested there
+   * (`curl` on 127.0.0.1), where Claude Code's listener waits. Both through the fence with a token
+   * for exactly that text. Answers once the sign-in ends (`signin_entry_wait_ms` at most); a
+   * refusal restarts it (`fresh`: a new link). The entry is never journaled, logged or echoed:
+   * the journal gets `{ acct, kind, by }`, every message passes `redact`.
+   */
+  async enterSignin(p: Record<string, unknown>, by: string): Promise<Reply> {
+    const acct = typeof p.acct === "string" ? p.acct : "";
+    const entry = parseSigninEntry(typeof p.entry === "string" ? p.entry : "");
+    const pending = this.signins.get(acct);
+    if (pending?.url === undefined) return { ok: false, error: `no sign-in waiting for ${acct}` };
+    if (entry.kind === "invalid")
+      return {
+        ok: false,
+        error:
+          "paste the code the sign-in page shows, or the whole address your browser ended up on",
+      };
+    const remote = remoteAccountHost(acct);
+    const host =
+      remote === null
+        ? null
+        : (this.d.remote?.(remote.name) ?? `no paired machine '${remote.name}'`);
+    if (typeof host === "string") return { ok: false, error: host };
+    const session = signinSession(remote?.acct ?? acct);
+    let token: SigninEntryToken;
+    let steps: string[][];
+    if (entry.kind === "code") {
+      token = mintSigninEntryToken({ session, code: entry.code });
+      steps = [
+        ["tmux", "send-keys", "-t", session, "-l", "--", entry.code],
+        ["tmux", "send-keys", "-t", session, "Enter"],
+      ];
+    } else {
+      const c = pending.callback;
+      if (c?.state == null || c.port !== entry.port || queryState(entry.query) !== c.state)
+        return { ok: false, error: ANOTHER_SIGNIN };
+      const url = `http://127.0.0.1:${entry.port}/callback?${entry.query}`;
+      token = mintSigninEntryToken({ session, url });
+      steps = [["curl", "-fsS", "--max-time", "10", url]];
+    }
+    const secrets = entry.kind === "code" ? [entry.code] : [entry.query];
+    const machine = remote?.name ?? "this machine";
+    this.d.log(`claude_signin_entry ${acct} (${entry.kind})`);
+    await this.d.journal({ type: "claude_signin_entry", data: { acct, kind: entry.kind, by } });
+    try {
+      if (host === null) {
+        for (const argv of steps) {
+          const r = await this.d.exec(argv, {
+            signinEntry: token,
+            timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms,
+          });
+          // A typing that failed never reached the prompt; a curl's own status is Claude Code's.
+          if (r.code !== 0 && argv[0] === "tmux")
+            return { ok: false, error: `could not reach the sign-in on ${machine}` };
+        }
+      } else {
+        const r = await host.run(
+          steps.map((argv) => ({ argv })),
+          { signinEntry: token, timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms },
+        );
+        if (r.code !== 0 && steps[0]?.[0] === "tmux")
+          return { ok: false, error: `could not reach the sign-in on ${machine}` };
+      }
+    } catch {
+      return { ok: false, error: `could not reach the sign-in on ${machine}` };
+    }
+
+    const waitMs = this.d.signinEntryWaitMs ?? DAEMON_DEFAULTS.signin_entry_wait_ms;
+    const ended = await Promise.race([
+      pending.done,
+      sleep(this.clock, waitMs, pending.abort.signal).then(() => null),
+    ]);
+    if (ended?.type === "claude_signin_done")
+      return {
+        ok: true,
+        result: {
+          acct,
+          signed_in: true,
+          ...(ended.email !== undefined ? { email: ended.email } : {}),
+        },
+      };
+    const stopped = pending.abort.signal;
+    if (stopped.aborted)
+      return stopped.reason === SUPERSEDED
+        ? { ok: false, error: "a newer sign-in replaced this one; use its link", fresh: true }
+        : { ok: false, error: "the sign-in stopped" };
+    // Rejected (the login said so and exited, or still waits): the screen's line, then a fresh link.
+    const line =
+      ended?.type === "claude_signin_failed" ? ended.reason : await this.rejection(session, host);
+    await this.startSignin(acct, pending.by, pending.run).first;
+    return {
+      ok: false,
+      error: `code rejected: ${redact(line ?? "Claude Code did not finish the sign-in", secrets)}`,
+      fresh: true,
+    };
+  }
+
+  /** The last line of a sign-in's screen that says Claude Code refused the entry, or null. */
+  private async rejection(session: string, host: RemoteHost | null): Promise<string | null> {
+    const argv = ["tmux", "capture-pane", "-p", "-J", "-t", session];
+    const r = await (host === null ? this.d.exec(argv) : host.run([{ argv }])).catch(() => null);
+    if (r?.code !== 0) return null;
+    const lines = stripTerminal(r.stdout)
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l !== "" && REJECTION.test(l));
+    return lines.at(-1) ?? null;
   }
 
   /**
@@ -656,6 +847,8 @@ export class ClaudeService {
     let first!: (e: SigninEvent) => void;
     const pending: Pending = {
       abort,
+      by,
+      run,
       first: new Promise<SigninEvent>((r) => {
         first = r;
       }),
@@ -679,6 +872,10 @@ export class ClaudeService {
         first(e);
         await this.d.publish(signinTopic(acct), e);
       },
+      onCallback: (url) => {
+        const port = callbackPort(url);
+        if (port !== null) pending.callback = { port, state: authorizeState(url) };
+      },
     })
       .catch(
         (e: unknown): SigninEvent => ({
@@ -693,10 +890,152 @@ export class ClaudeService {
         // The login's identity stays out of the journal: the registry and the records carry it.
         const { type, ...data } = e.type === "claude_signin_done" ? withoutIdentity(e) : e;
         if (type !== "claude_signin_url") await this.d.journal({ type, data });
+        if (type === "claude_signin_done") void this.changed();
         this.d.log(`claude sign-in ${acct}: ${type}`);
+        // Adding ends primed: identity, plan and the login's usage reading at once.
+        if (type === "claude_signin_done")
+          void this.prime({ acct }, "volleyd", { signedIn: true }).catch((err: unknown) =>
+            this.d.log(`prime ${acct}: ${err instanceof Error ? err.message : String(err)}`),
+          );
         return e;
       });
     return pending;
+  }
+
+  /**
+   * `claude_prime { acct, by }` (and every `claude_signin_done`): read the login's identity and
+   * plan (`claude auth status` under the profile's config dir on its machine; its `.claude.json`
+   * when the status has no e-mail) into the registry, then run that machine's usage probe for the
+   * login (`probe`). The machine's own login (`primary`, `primary@<name>`) has only the probe.
+   * At most once per login per `claude_prime_interval_ms`, counted from when a prime starts, so
+   * one that failed waits out the window too; a finished sign-in always is primed. The e-mail
+   * goes to the registry only, never the journal.
+   */
+  async prime(
+    p: Record<string, unknown>,
+    by: string,
+    o: { signedIn?: boolean } = {},
+  ): Promise<Reply> {
+    const acct = typeof p.acct === "string" ? p.acct : "";
+    if (acct === "") return { ok: false, error: "claude_prime needs an acct" };
+    const remote = remoteAccountHost(acct);
+    const own = acct === PRIMARY_ACCOUNT || remote?.acct === PRIMARY_ACCOUNT;
+    let a: ClaudeAccount | undefined;
+    if (!own) {
+      try {
+        a = readRegistry(this.d.root).accounts.find((x) => signinKey(x) === acct);
+      } catch (e) {
+        if (e instanceof ClaudeAccountError) return { ok: false, error: e.message };
+        throw e;
+      }
+      if (a === undefined) return { ok: false, error: `unknown Claude account '${acct}'` };
+    }
+    const now = this.d.now ?? this.clock.now;
+    const at = now();
+    const last = this.primed.get(acct);
+    const every = DAEMON_DEFAULTS.claude_prime_interval_ms;
+    if (o.signedIn !== true && last !== undefined && at - last < every) {
+      const ago = Math.floor((at - last) / 60_000);
+      const next = Math.max(1, Math.ceil((every - (at - last)) / 60_000));
+      return {
+        ok: false,
+        error: `primed ${ago === 0 ? "just now" : `${ago} min ago`}; next in ${next} min`,
+      };
+    }
+    this.primed.set(acct, at);
+    const machine = remote?.name ?? LOCAL_MACHINE;
+    let plan: string | undefined;
+    if (a !== undefined) {
+      const facts = await this.readLogin(a).catch((e: unknown) => {
+        this.d.log(`prime ${acct}: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      });
+      if (facts !== null) {
+        plan = facts.plan;
+        let next: ClaudeAccount;
+        try {
+          next = markSignedIn(
+            this.d.root,
+            a.id,
+            facts,
+            a.signed_in_at ?? new Date(at).toISOString(),
+          );
+        } catch (e) {
+          // Removed while its login was read (the Add dialog's "Remove the new profile").
+          const error = e instanceof Error ? e.message : String(e);
+          this.d.log(`prime ${acct}: ${error}`);
+          return { ok: false, error };
+        }
+        // A sign-in that recorded all of it already: no change to signal.
+        if (JSON.stringify(next) !== JSON.stringify(a)) void this.changed();
+      }
+    } else if (remote === null) {
+      await this.askPrimary();
+    }
+    try {
+      await this.d.probe?.(machine, a?.id ?? "default");
+    } catch (e) {
+      this.d.log(`prime ${acct}: usage probe: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    this.d.log(`claude account ${acct}: primed (by ${by})`);
+    return { ok: true, result: { acct, machine, ...(plan !== undefined ? { plan } : {}) } };
+  }
+
+  /**
+   * A profile's login as its machine reports it now: `{ plan, email, org }`, or null when it is
+   * not signed in. Here through the fenced exec, on a paired machine through its host.
+   */
+  private async readLogin(
+    a: ClaudeAccount,
+  ): Promise<({ plan?: string; dir?: string } & LoginIdentity) | null> {
+    const timeoutMs = DAEMON_DEFAULTS.claude_auth_status_timeout_ms;
+    if (a.machine === LOCAL_MACHINE) {
+      const dir = profileDir(this.d.root, a.id);
+      const r = await this.d.exec(["claude", "auth", "status"], {
+        env: profileEnv(process.env, dir),
+        timeoutMs,
+      });
+      const s = parseAuthStatus(r.stdout);
+      if (s?.loggedIn !== true) return null;
+      return {
+        ...(s.plan !== undefined ? { plan: s.plan } : {}),
+        ...(await statusIdentity(s, () => readLoginIdentity(join(dir, ".claude.json")))),
+      };
+    }
+    const host = this.d.remote?.(a.machine) ?? `no paired machine '${a.machine}'`;
+    if (typeof host === "string") throw new Error(host);
+    const home =
+      this.homes.get(a.machine) ??
+      (await host
+        .run([{ argv: ["printenv", "HOME"] }], { timeoutMs })
+        .then((r) => (r.code === 0 ? r.stdout.trim() : ""))
+        .catch(() => ""));
+    if (!home.startsWith("/") || home.includes("\n"))
+      throw new Error(`the home directory on ${a.machine} is not known`);
+    this.homes.set(a.machine, home);
+    const dir = remoteProfileDir(home, a.id);
+    const r = await host.run(
+      [{ argv: ["claude", "auth", "status"], env: { CLAUDE_CONFIG_DIR: dir } }],
+      { timeoutMs },
+    );
+    const s = parseAuthStatus(r.stdout);
+    if (s?.loggedIn !== true) return null;
+    const file = async (): Promise<LoginIdentity> => {
+      const f = await host
+        .run([{ argv: ["cat", ".claude.json"], cwd: dir }], { timeoutMs })
+        .catch(() => null);
+      if (f === null || f.code !== 0) return {};
+      try {
+        return loginIdentity(JSON.parse(f.stdout) as Record<string, unknown>);
+      } catch {
+        return {};
+      }
+    };
+    return {
+      ...(s.plan !== undefined ? { plan: s.plan } : {}),
+      ...(await statusIdentity(s, file)),
+      dir,
+    };
   }
 
   /** `claude_sync { acct?, by }`: re-apply sharing and re-sync the MCP servers (all accounts). */
@@ -726,7 +1065,173 @@ export class ClaudeService {
         ...(r.mcp_servers !== undefined ? { mcp_servers: r.mcp_servers } : {}),
       });
     }
+    if (out.length > 0) void this.changed();
     return { ok: true, result: { synced: out } };
+  }
+
+  /**
+   * The registry entry `acct` names: `<id>` wherever it lives, or `<id>@<name>` on that machine.
+   * The primary is never one.
+   */
+  private entry(acct: string): ClaudeAccount | undefined {
+    const remote = remoteAccountHost(acct);
+    const id = remote?.acct ?? acct;
+    return readRegistry(this.d.root).accounts.find(
+      (a) => a.id === id && (remote === null || a.machine === remote.name),
+    );
+  }
+
+  /**
+   * `claude_account_rename { acct, label, by }`: every profile of the account's login (one
+   * e-mail) on every machine takes the new name; the usage records follow at the next pass.
+   */
+  async rename(p: Record<string, unknown>, by: string): Promise<Reply> {
+    const acct = typeof p.acct === "string" ? p.acct : "";
+    const label = typeof p.label === "string" ? p.label : "";
+    if (acct === "") return { ok: false, error: "claude_account_rename needs an acct" };
+    if (acct.split("@")[0] === PRIMARY_ACCOUNT)
+      return { ok: false, error: `'${acct}' is the machine's own login; it cannot be renamed` };
+    let renamed: ClaudeAccount[];
+    let a: ClaudeAccount | undefined;
+    try {
+      a = this.entry(acct);
+      if (a === undefined) return { ok: false, error: `unknown Claude account '${acct}'` };
+      renamed = renameAccount(this.d.root, a.id, label);
+    } catch (e) {
+      if (e instanceof ClaudeAccountError) return { ok: false, error: e.message };
+      throw e;
+    }
+    const to = label.trim();
+    await this.d.journal({
+      type: "claude_account_renamed",
+      data: { acct: a.id, from: a.label, to, by },
+    });
+    await this.changed();
+    return { ok: true, result: { acct, label: to, renamed: renamed.map(signinKey) } };
+  }
+
+  /** Why `a` cannot be removed now: an agent runs under it, a running wave pins it, the default. */
+  private inUse(a: ClaudeAccount, acct: string): string | null {
+    const agents = this.d.agentsOn?.(accountKey(a.id, a.machine)) ?? [];
+    if (agents.length > 0)
+      return `Claude account '${acct}' is in use by ${agents.join(", ")}; stop ${agents.length === 1 ? "it" : "them"} or move ${agents.length === 1 ? "it" : "them"} to another account first`;
+    const waves = this.d.wavesOn?.(a.id) ?? [];
+    if (waves.length > 0)
+      return `running wave ${waves.join(", ")} pins Claude account '${a.id}' (account: ${a.id}); stop the wave or change its account first`;
+    if (this.d.defaultAccount?.() === a.id)
+      return `claude.default_account names '${a.id}'; change Defaults first`;
+    return null;
+  }
+
+  /**
+   * `claude_account_remove { acct, by }`: refused while the profile is in use; else its pending
+   * sign-in is aborted, its registry entry dropped, and its profile directory removed on its
+   * machine (here only under the root; on a paired machine only `<home>/.volley/claude/<acct>`,
+   * over the fence). `dir_left` says why a directory was left in place.
+   */
+  async remove(p: Record<string, unknown>, by: string): Promise<Reply> {
+    const acct = typeof p.acct === "string" ? p.acct : "";
+    if (acct === "") return { ok: false, error: "claude_account_remove needs an acct" };
+    if (acct.split("@")[0] === PRIMARY_ACCOUNT)
+      return { ok: false, error: `'${acct}' is the machine's own login; it cannot be removed` };
+    let a: ClaudeAccount | undefined;
+    try {
+      a = this.entry(acct);
+    } catch (e) {
+      if (e instanceof ClaudeAccountError) return { ok: false, error: e.message };
+      throw e;
+    }
+    if (a === undefined) return { ok: false, error: `unknown Claude account '${acct}'` };
+    const busy = this.inUse(a, acct);
+    if (busy !== null) return { ok: false, error: busy };
+    const pending = this.signins.get(signinKey(a));
+    if (pending !== undefined) {
+      pending.abort.abort(REMOVED);
+      await pending.done;
+    }
+    // This answer is deferred (off the serial queue): an agent may have been spawned under the
+    // profile while the sign-in stopped. Check again, then drop the entry before the directory
+    // goes, so nothing can pick the profile while its directory is being removed.
+    const late = this.inUse(a, acct);
+    if (late !== null) return { ok: false, error: late };
+    try {
+      removeAccount(this.d.root, a.id);
+    } catch (e) {
+      if (e instanceof ClaudeAccountError) return { ok: false, error: e.message };
+      throw e;
+    }
+    const left = await (a.machine === LOCAL_MACHINE
+      ? this.removeLocalDir(a)
+      : this.removeRemoteDir(a));
+    if (a.machine !== LOCAL_MACHINE && left !== null) this.d.log(`profile ${acct}: ${left}`);
+    const dirRemoved = left === null;
+    await this.d.journal({
+      type: "claude_account_removed",
+      data: { acct: a.id, machine: a.machine, by, dir_removed: dirRemoved },
+    });
+    await this.changed();
+    return {
+      ok: true,
+      result: {
+        acct: signinKey(a),
+        machine: a.machine,
+        dir_removed: dirRemoved,
+        ...(left !== null ? { dir_left: left } : {}),
+      },
+    };
+  }
+
+  /** Remove a local profile dir, only when it really is under the root; null, or why not. */
+  private removeLocalDir(a: ClaudeAccount): string | null {
+    const root = canonicalRoot(this.d.root);
+    const dir = profileDir(root, a.id);
+    if (isLink(dir)) return `${dir} is a symbolic link; only a directory under ${root} is removed`;
+    if (!existsSync(dir)) return null;
+    try {
+      const real = realpathSync(dir);
+      if (!real.startsWith(`${realpathSync(root)}/`)) return `${dir} leads outside ${root}`;
+      rmSync(dir, { recursive: true, force: true });
+      return null;
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /**
+   * Remove a paired machine's profile dir: the one the registry recorded, only when it is
+   * `<home>/.volley/claude/<id>` on that machine; null, or why it was left in place.
+   */
+  private async removeRemoteDir(a: ClaudeAccount): Promise<string | null> {
+    const dir = a.dir;
+    if (dir === undefined) return `no profile directory is recorded for it on ${a.machine}`;
+    const host = this.d.remote?.(a.machine) ?? `no paired machine '${a.machine}'`;
+    if (typeof host === "string") return host;
+    const home =
+      this.homes.get(a.machine) ??
+      (await host
+        .run([{ argv: ["printenv", "HOME"] }], {
+          timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms,
+        })
+        .then((r) => (r.code === 0 ? r.stdout.trim() : ""))
+        .catch(() => ""));
+    if (!home.startsWith("/") || home.includes("\n"))
+      return `the home directory on ${a.machine} is not known`;
+    this.homes.set(a.machine, home);
+    const under = `${remoteProfileDir(home, "")}/`;
+    if (!dir.startsWith(under)) return `${dir} is not under ${under}`;
+    // Only its own: never another profile's directory a bad record names.
+    if (dir !== remoteProfileDir(home, a.id))
+      return `${dir} is not this profile's directory (${remoteProfileDir(home, a.id)})`;
+    try {
+      const r = await host.run([{ argv: ["rm", "-rf", dir] }], {
+        profileRemove: mintProfileRemoveToken(dir),
+      });
+      return r.code === 0
+        ? null
+        : `rm -rf ${dir} failed on ${a.machine}: ${r.stderr.trim() || `exit ${r.code}`}`;
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
   }
 
   /** Stop every running sign-in (the daemon stopping); waits for them to end. */
@@ -739,6 +1244,14 @@ export class ClaudeService {
 
 type UrlEvent = Extract<SigninEvent, { type: "claude_signin_url" }>;
 
+const isLink = (path: string) => {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+};
+
 /** The account a registry profile's sign-in runs as: its id here, `<id>@<machine>` there. */
 const signinKey = (a: ClaudeAccount) =>
   a.machine === LOCAL_MACHINE ? a.id : remoteAccount(a.id, a.machine);
@@ -749,6 +1262,8 @@ const urlFields = (e: UrlEvent) => ({
   flow: e.flow,
   attach: e.attach,
   ...(e.manual_url !== undefined ? { manual_url: e.manual_url } : {}),
+  ...(e.callback_url !== undefined ? { callback_url: e.callback_url } : {}),
+  ...(e.code_prompt !== undefined ? { code_prompt: e.code_prompt } : {}),
 });
 
 /** A done event without the login's identity: as the journal records it. */

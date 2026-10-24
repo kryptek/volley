@@ -14,7 +14,7 @@ import {
   stripTerminal,
 } from "../../src/claude/signin";
 import { renderSigninScript } from "../../src/claude/signin-script";
-import { FenceError, assertAllowed, sealSigninScript } from "../../src/fence";
+import { FenceError, assertAllowed, mintSigninEntryToken, sealSigninScript } from "../../src/fence";
 import { fakeExec } from "../helpers/fake-exec";
 import { tempDir } from "../helpers/tmp";
 
@@ -47,12 +47,23 @@ describe("parsing claude auth login's output", () => {
     expect(parseSigninUrl("visit: https://evil.example.com/oauth/authorize?x=1")).toBeNull();
   });
 
-  it("claude auth status: loggedIn and the plan label, never anything else", () => {
+  it("claude auth status: loggedIn, the plan label and the login's identity, never anything else", () => {
     expect(
       parseAuthStatus(
-        JSON.stringify({ loggedIn: true, email: "a@example.com", subscriptionType: "max" }),
+        JSON.stringify({
+          loggedIn: true,
+          authMethod: "claude.ai",
+          email: "A@Example.com",
+          orgId: "0000",
+          orgName: "Example Org",
+          subscriptionType: "max",
+        }),
       ),
-    ).toEqual({ loggedIn: true, plan: "max" });
+    ).toEqual({ loggedIn: true, plan: "max", email: "a@example.com", org: "Example Org" });
+    // an e-mail that is not well-formed is left out
+    expect(parseAuthStatus(JSON.stringify({ loggedIn: true, email: "not an address" }))).toEqual({
+      loggedIn: true,
+    });
     expect(parseAuthStatus('{"loggedIn":false,"authMethod":"none"}')).toEqual({ loggedIn: false });
     expect(parseAuthStatus("not json")).toBeNull();
   });
@@ -110,6 +121,47 @@ describe("the sign-in script and its fence seal", () => {
     expect(() => assertAllowed(["tmux", "send-keys", "-t", s, "-l", "--", "code"])).toThrow(
       FenceError,
     );
+  });
+
+  it("a pasted code is typed into a sign-in session once, only with its entry token", () => {
+    const s = signinSession("work");
+    const typed = ["tmux", "send-keys", "-t", s, "-l", "--", "abc123#def"];
+    expect(() => assertAllowed(["tmux", "send-keys", "-t", s, "Enter"])).not.toThrow();
+    expect(() => assertAllowed(["tmux", "send-keys", "-t", "agent-1", "Enter"])).toThrow(
+      FenceError,
+    );
+    expect(() => assertAllowed(typed)).toThrow(FenceError);
+    const token = mintSigninEntryToken({ session: s, code: "abc123#def" });
+    expect(() => assertAllowed([...typed.slice(0, -1), "other"], { signinEntry: token })).toThrow(
+      FenceError,
+    );
+    expect(() => assertAllowed(typed, { signinEntry: token })).not.toThrow();
+    expect(() => assertAllowed(typed, { signinEntry: token })).toThrow(FenceError);
+    expect(() => mintSigninEntryToken({ session: "agent-1", code: "abc" })).toThrow(FenceError);
+    expect(() => mintSigninEntryToken({ session: s, code: "-rf" })).toThrow(FenceError);
+    expect(() => mintSigninEntryToken({ session: s, code: "a b" })).toThrow(FenceError);
+  });
+
+  it("a pasted redirect is requested once, exactly, on 127.0.0.1 only", () => {
+    const s = signinSession("work");
+    const url = "http://127.0.0.1:51051/callback?code=abc&state=xyz";
+    const curl = ["curl", "-fsS", "--max-time", "10", url];
+    expect(() => assertAllowed(curl)).toThrow(FenceError);
+    const token = mintSigninEntryToken({ session: s, url });
+    expect(() =>
+      assertAllowed([...curl.slice(0, -1), `${url}&x=1`], { signinEntry: token }),
+    ).toThrow(FenceError);
+    expect(() => assertAllowed(["curl", "-o", "/tmp/x", url], { signinEntry: token })).toThrow(
+      FenceError,
+    );
+    expect(() => assertAllowed(curl, { signinEntry: token })).not.toThrow();
+    expect(() => assertAllowed(curl, { signinEntry: token })).toThrow(FenceError);
+    for (const bad of [
+      "http://evil.example.com:51051/callback?code=abc",
+      "http://127.0.0.1:80/callback?code=abc",
+      "http://127.0.0.1:51051/callback?code=a'b",
+    ])
+      expect(() => mintSigninEntryToken({ session: s, url: bad })).toThrow(FenceError);
   });
 });
 
@@ -176,14 +228,17 @@ describe("runSignin", () => {
     expect(statSync(signinDir(w.root, "work")).mode & 0o777).toBe(0o700);
   });
 
-  it("publishes claude_signin_url with the $BROWSER (localhost-callback) URL, then done", async () => {
+  it("publishes claude_signin_url with the printed (code-page) URL first, the $BROWSER one as callback_url, then done", async () => {
     const w = world({ signInAfter: 3 });
     const last = await w.run();
     expect(w.events[0]).toEqual({
       type: "claude_signin_url",
       acct: "work",
-      url: CALLBACK,
-      flow: "browser_callback",
+      url: PRINTED,
+      flow: "manual_code",
+      manual_url: PRINTED,
+      callback_url: CALLBACK,
+      code_prompt: true,
       attach: "tmux attach -t volley-signin-work",
     });
     expect(w.events.filter((e) => e.type === "claude_signin_url")).toHaveLength(1);
@@ -234,6 +289,73 @@ describe("runSignin", () => {
     expect(call?.opts.env?.CLAUDE_CONFIG_DIR).toBe(profileDir(w.root, "work"));
     expect(call?.opts.env?.ANTHROPIC_API_KEY).toBeUndefined();
     expect(call?.opts.env?.PATH).toBe("/usr/bin");
+  });
+
+  it("hands the callback URL to onCallback; the event carries no port or state of its own", async () => {
+    const w = world({ signInAfter: 3 });
+    const seen: string[] = [];
+    await runSignin({
+      exec: w.fx.exec,
+      root: w.root,
+      acct: "work",
+      publish: async (e) => {
+        w.events.push(e);
+      },
+      sleep: async () => {},
+      now: () => 0,
+      pollMs: 1,
+      timeoutMs: 10_000,
+      env: {},
+      onCallback: (url) => seen.push(url),
+    });
+    expect(seen).toEqual([CALLBACK]);
+    const url = w.events.find((e) => e.type === "claude_signin_url") as Record<string, unknown>;
+    expect(Object.keys(url).sort()).toEqual(
+      ["acct", "attach", "callback_url", "code_prompt", "flow", "manual_url", "type", "url"].sort(),
+    );
+  });
+
+  it("code_prompt follows the screen: published again once `Paste code here` shows", async () => {
+    const w = world({ signInAfter: 4 });
+    const [urlLine] = fixture("auth-login-tmux.txt").split("\n\n");
+    let captures = 0;
+    w.fx.on(["tmux", "capture-pane"], () => ({
+      stdout: ++captures < 2 ? (urlLine as string) : fixture("auth-login-tmux.txt"),
+    }));
+    await w.run();
+    const urls = w.events.filter((e) => e.type === "claude_signin_url");
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).not.toHaveProperty("code_prompt");
+    expect(urls[1]).toMatchObject({ url: PRINTED, code_prompt: true, callback_url: CALLBACK });
+  });
+
+  it("only the $BROWSER URL (nothing printed yet): browser_callback at once, the code-page link once printed", async () => {
+    const w = world({ signInAfter: 4 });
+    let captures = 0;
+    w.fx.on(["tmux", "capture-pane"], () => ({
+      stdout: ++captures < 3 ? "Opening browser to sign in…\n" : fixture("auth-login-tmux.txt"),
+    }));
+    await w.run();
+    expect(w.events.filter((e) => e.type === "claude_signin_url")).toEqual([
+      {
+        type: "claude_signin_url",
+        acct: "work",
+        url: CALLBACK,
+        flow: "browser_callback",
+        callback_url: CALLBACK,
+        attach: "tmux attach -t volley-signin-work",
+      },
+      {
+        type: "claude_signin_url",
+        acct: "work",
+        url: PRINTED,
+        flow: "manual_code",
+        manual_url: PRINTED,
+        callback_url: CALLBACK,
+        code_prompt: true,
+        attach: "tmux attach -t volley-signin-work",
+      },
+    ]);
   });
 
   it("without a $BROWSER call, falls back to the printed URL and the attach hint", async () => {

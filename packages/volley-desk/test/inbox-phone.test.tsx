@@ -92,3 +92,41 @@ describe("the Needs you window at phone width (390 px)", () => {
     expect(within(win).getAllByRole("tab")).toHaveLength(5);
   });
 });
+
+describe("a grouped row at phone width (#417)", () => {
+  it("is one card whose every button is a 48 px target", () => {
+    const decision = ITEMS.find((i) => i.kind === "decision");
+    if (!decision) throw new Error("no demo decision");
+    const burst = Array.from({ length: 3 }, (_, i) => ({
+      ...decision,
+      id: `d-burst-${i}`,
+      task: `B${i}`,
+      opened_at: new Date(NOW - (10 - i) * 60_000).toISOString(),
+    }));
+    render(
+      <NeedsYouWindow
+        items={burst}
+        tiers={Object.fromEntries(burst.map((i) => [i.id, "you" as const]))}
+        waves={STATE.waves}
+        control={vi.fn(async () => ({ ok: true }))}
+        device="phone"
+        narrow
+        frame={frame}
+        onClose={() => {}}
+        onGoTo={() => {}}
+        loadEvidence={async () => null}
+      />,
+    );
+    const win = screen.getByRole("region", { name: "Needs you" });
+    const rows = within(win).getAllByRole("listitem", { name: /^Inbox item/ });
+    expect(rows).toHaveLength(1);
+    const row = rows[0] as HTMLElement;
+    expect(within(row).getByText("×3")).toBeInTheDocument();
+    fireEvent.click(within(row).getByRole("button", { name: "Other…" }));
+    for (const b of within(row).getAllByRole("button"))
+      expect(
+        b.classList.contains("inbox-target") || b.classList.contains("icon-btn"),
+        b.getAttribute("aria-label") ?? b.textContent ?? "",
+      ).toBe(true);
+  });
+});

@@ -37,7 +37,202 @@
   /* The sign-in card's lift: contact shadow, ambient, a wide soft drop. */
   --win-shadow: 0 2px 4px rgba(0, 0, 0, 0.35), 0 12px 24px -6px rgba(0, 0, 0, 0.55), 0 40px 80px
     -20px rgba(0, 0, 0, 0.85);
+  /* The lit top edge and dark bottom edge of a lifted surface (`.win-edge`, the dock, the card). */
+  --win-edge-lit: inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -1px 0 rgba(0, 0, 0, 0.5);
   color-scheme: dark;
+
+  /* The theme tokens (look/themes.ts `TOKEN_PROPERTY`): this block is the Volley theme, so
+     applying Volley writes nothing; look/applyLook.ts writes any other theme on <html>. */
+  --bg-glow1: rgba(110, 231, 249, 0.07);
+  --bg-glow2: rgba(196, 181, 253, 0.06);
+  --win1: #1a1d2c;
+  --win2: #0b0c15;
+  --narr: #dfe5f2;
+  --t-acc: #6ee7f9;
+  --link: #6ee7f9;
+  --well: #080b15;
+  --pit: #0b0f1c;
+  --on-acc: #ffffff;
+  --on-hi: #04221e;
+  --shade: rgba(0, 0, 0, 0.75);
+  --hl: rgba(255, 255, 255, 0.08);
+  --hl-strong: rgba(255, 255, 255, 0.35);
+  /* Derived; a theme's explicit cur1 / cur2 / accText is written over them. */
+  --t-acc-hi: color-mix(in oklab, var(--t-acc) 55%, white);
+  --t-acc-lo: color-mix(in oklab, var(--t-acc) 45%, black);
+  --cur1: #3a7182;
+  --cur2: #1f3746;
+  --acc-text: var(--t-acc-hi);
+  --info: rgb(110, 190, 249);
+  /* The semantic colours as text on a surface (dark defaults). */
+  --hot-ink: #ffb4a1;
+  --amber-ink: #f6d48a;
+  --ok-ink: #8ee6a8;
+  --bad-ink: #ff9a9a;
+  --info-ink: #9fd9ff;
+  --mine-ink: #f5d97a;
+  /* Dark ink on an amber fill, on both tones. */
+  --on-amber: #1a1204;
+  /* The status colours and the theme accent as text: themselves here, their *-ink tints on a
+     light theme (below). */
+  --amber-text: var(--amber);
+  --ok-text: var(--ok);
+  --bad-text: var(--bad);
+  --t-acc-ink: var(--t-acc);
+  /* Code and envelope text (the wave file, the feed): syntax colours on a dark well. */
+  --code-ink: #cfd6e6;
+  --code-msg: #d5dbea;
+  --code-json: #b9c3da;
+  --syn-key: #8fb4ff;
+  --syn-val: #f0d58a;
+  --syn-mail: #f0a6ff;
+  --syn-reg: #c4b5fd;
+  --syn-ok: var(--ok);
+  /* The background's dim layer and the top bar's fade (another theme: its ground). */
+  --bg-dim: #05060b;
+  --topbar-fade: rgba(5, 6, 11, 0.75);
+  /* Inbox cards (React Bits SpotlightCard's own surface on Volley). */
+  --card-surface: #111111;
+  /* A wave accent as text: the accent itself here, darkened on a light theme (below). */
+  --acc-ink: var(--acc, var(--t-acc));
+  /* The faint ring inside a window's lit edge, under its accent tint. */
+  --win-ring: rgba(255, 255, 255, 0.03);
+
+  /* The surfaces that are alpha tints of a token: Volley's literals here, re-derived from the
+     tokens for every other theme by the themed block below. A gradient stop keeps Volley's
+     literal rather than a color-mix(): gradients interpolate in float, and a mixed alpha that is
+     not a whole 255th (10% is 25.5/255) shifts a band by one level. */
+  --glass-fill: rgba(13, 15, 25, 0.42);
+  --glass-a: rgba(34, 38, 58, 0.5);
+  --glass-b: rgba(14, 16, 28, 0.32);
+  --glass-c: rgba(10, 11, 20, 0.55);
+  --solid-mid: #10121c;
+  --spot-fill: rgba(12, 14, 22, 0.62);
+  --spot-a: rgba(34, 38, 58, 0.45);
+  --spot-b: rgba(14, 16, 28, 0.25);
+  --spot-c: rgba(10, 11, 20, 0.5);
+  --liquid-fill: rgba(8, 10, 18, 0.5);
+  --well-a: rgba(4, 5, 10, 0.85);
+  --well-b: rgba(16, 18, 30, 0.85);
+  --pill-fill: rgba(255, 255, 255, 0.04);
+  --scrim: rgba(3, 4, 8, 0.55);
+  --modal-fill: rgba(12, 14, 23, 0.96);
+  --sheet-fill: #1e1f24;
+  --sheet-a: #262833;
+  --sheet-b: #1b1c22;
+  --sheet-c: #141519;
+  --sheet-side: rgba(38, 39, 46, 0.92);
+  --dock-a: rgba(48, 52, 72, 0.72);
+  --dock-b: rgba(22, 24, 36, 0.66);
+  --dock-c: rgba(12, 13, 22, 0.74);
+  --card-a: rgba(34, 38, 58, 0.78);
+  --card-b: rgba(14, 16, 28, 0.86);
+  --card-c: rgba(10, 11, 20, 0.92);
+  --card-glow: rgba(139, 92, 246, 0.45);
+  --signin-ground: #05060c;
+  --signin-glow1: rgba(110, 231, 249, 0.1);
+  --signin-glow2: rgba(139, 92, 246, 0.12);
+  --signin-vignette-a: rgba(5, 6, 12, 0.35);
+  --signin-vignette-b: rgba(5, 6, 12, 0.85);
+  --signin-pill: rgba(0, 0, 0, 0.35);
+  /* The lite surface's opaque-ish fills (lite.css). */
+  --lite-glass: rgba(13, 15, 25, 0.94);
+  --lite-spot: rgba(12, 14, 22, 0.94);
+  --lite-liquid: rgba(8, 10, 18, 0.94);
+  --lite-dock: rgba(38, 35, 46, 0.94);
+  --lite-dock-a: rgba(48, 52, 72, 0.94);
+  --lite-dock-b: rgba(22, 24, 36, 0.94);
+  --lite-dock-c: rgba(12, 13, 22, 0.95);
+  --lite-side: rgba(38, 39, 46, 0.97);
+  --lite-card-a: rgba(34, 38, 58, 0.96);
+  --lite-card-b: rgba(14, 16, 28, 0.97);
+  --lite-card-c: rgba(10, 11, 20, 0.98);
+}
+/* The themed block: every theme but Volley re-derives the tinted surfaces from its tokens, at
+   Volley's alphas. */
+html[data-theme]:not([data-theme="volley"]) {
+  --cur1: color-mix(in oklab, var(--t-acc) 62%, var(--pit));
+  --cur2: color-mix(in oklab, var(--t-acc) 34%, var(--pit));
+  --glass-fill: color-mix(in srgb, var(--panel-solid) 42%, transparent);
+  --glass-a: color-mix(in srgb, var(--win1) 50%, transparent);
+  --glass-b: color-mix(in srgb, var(--win2) 32%, transparent);
+  --glass-c: color-mix(in srgb, var(--win2) 55%, transparent);
+  --solid-mid: color-mix(in oklab, var(--win1), var(--win2));
+  --spot-fill: color-mix(in srgb, var(--panel-solid) 62%, transparent);
+  --spot-a: color-mix(in srgb, var(--win1) 45%, transparent);
+  --spot-b: color-mix(in srgb, var(--win2) 25%, transparent);
+  --spot-c: color-mix(in srgb, var(--win2) 50%, transparent);
+  --liquid-fill: color-mix(in srgb, var(--win2) 50%, transparent);
+  --well-a: color-mix(in srgb, var(--well) 85%, transparent);
+  --well-b: color-mix(in srgb, var(--pit) 85%, transparent);
+  --pill-fill: color-mix(in srgb, var(--ink) 4%, transparent);
+  --scrim: color-mix(in srgb, var(--ground) 55%, transparent);
+  --modal-fill: color-mix(in srgb, var(--panel-solid) 96%, transparent);
+  --sheet-fill: var(--panel-solid);
+  --sheet-a: var(--win1);
+  --sheet-b: var(--solid-mid);
+  --sheet-c: var(--win2);
+  --sheet-side: color-mix(in srgb, var(--win1) 92%, transparent);
+  --dock-a: color-mix(in srgb, var(--win1) 72%, transparent);
+  --dock-b: color-mix(in srgb, var(--win2) 66%, transparent);
+  --dock-c: color-mix(in srgb, var(--win2) 74%, transparent);
+  --card-a: color-mix(in srgb, var(--win1) 78%, transparent);
+  --card-b: color-mix(in srgb, var(--win2) 86%, transparent);
+  --card-c: color-mix(in srgb, var(--win2) 92%, transparent);
+  --card-glow: color-mix(in srgb, var(--t-acc) 45%, transparent);
+  --signin-ground: var(--ground);
+  --signin-glow1: color-mix(in srgb, var(--t-acc) 10%, transparent);
+  --signin-glow2: var(--bg-glow2);
+  --signin-vignette-a: color-mix(in srgb, var(--ground) 35%, transparent);
+  --signin-vignette-b: color-mix(in srgb, var(--ground) 60%, transparent);
+  --signin-pill: color-mix(in srgb, var(--pit) 85%, transparent);
+  --lite-glass: color-mix(in srgb, var(--panel-solid) 94%, transparent);
+  --lite-spot: color-mix(in srgb, var(--panel-solid) 94%, transparent);
+  --lite-liquid: color-mix(in srgb, var(--win2) 94%, transparent);
+  --lite-dock: color-mix(in srgb, var(--win1) 94%, transparent);
+  --lite-dock-a: color-mix(in srgb, var(--win1) 94%, transparent);
+  --lite-dock-b: color-mix(in srgb, var(--win2) 94%, transparent);
+  --lite-dock-c: color-mix(in srgb, var(--win2) 95%, transparent);
+  --lite-side: color-mix(in srgb, var(--win1) 97%, transparent);
+  --lite-card-a: color-mix(in srgb, var(--win1) 96%, transparent);
+  --lite-card-b: color-mix(in srgb, var(--win2) 97%, transparent);
+  --lite-card-c: color-mix(in srgb, var(--win2) 98%, transparent);
+  --win-ring: color-mix(in srgb, var(--hl) 40%, transparent);
+  --card-surface: var(--panel-solid);
+  --bg-dim: var(--ground);
+  --topbar-fade: color-mix(in srgb, var(--ground) 75%, transparent);
+}
+/* The light tone (Material Lighter): accent-coloured text darkens to AA on white, and the
+   shadows and lit edges are drawn with the theme's shade and highlight instead of black. */
+html[data-tone="light"] {
+  --acc-ink: color-mix(in oklab, var(--acc, var(--t-acc)) 55%, black);
+  --amber-text: var(--amber-ink);
+  --ok-text: var(--ok-ink);
+  --bad-text: var(--bad-ink);
+  --t-acc-ink: var(--acc-text);
+  --code-ink: var(--narr);
+  --code-msg: var(--narr);
+  --code-json: var(--narr);
+  --syn-key: var(--info-ink);
+  --syn-val: var(--amber-ink);
+  --syn-mail: #8e24aa;
+  --syn-reg: #5e35b1;
+  --syn-ok: var(--ok-ink);
+  --win-shadow: 0 2px 4px color-mix(in srgb, var(--shade) 60%, transparent), 0 12px 24px -6px
+    var(--shade), 0 40px 80px -20px var(--shade);
+  --win-edge-lit: inset 0 1px 0 var(--hl-strong), inset 0 -1px 0
+    color-mix(in srgb, var(--shade) 50%, transparent);
+  color-scheme: light;
+}
+/* `--acc` is set inline on a window, a modal or the task graph, and a custom property substitutes where it is
+   declared: --acc-ink is declared again there, so it follows that element's accent. */
+.win,
+.modal,
+.dag {
+  --acc-ink: var(--acc, var(--t-acc));
+}
+html[data-tone="light"] :is(.win, .modal, .dag) {
+  --acc-ink: color-mix(in oklab, var(--acc, var(--t-acc)) 55%, black);
 }
 html,
 body,
@@ -57,7 +252,7 @@ button {
   color: inherit;
 }
 :focus-visible {
-  outline: 2px solid #6ee7f9;
+  outline: 2px solid var(--t-acc);
   outline-offset: 2px;
 }
 .mono {
@@ -101,9 +296,8 @@ code {
   z-index: 0;
 }
 .bg-plain {
-  background: radial-gradient(1200px 700px at 15% 0%, rgba(110, 231, 249, 0.07), transparent 60%),
-    radial-gradient(900px 600px at 90% 100%, rgba(196, 181, 253, 0.06), transparent 60%),
-    var(--ground);
+  background: radial-gradient(1200px 700px at 15% 0%, var(--bg-glow1), transparent 60%),
+    radial-gradient(900px 600px at 90% 100%, var(--bg-glow2), transparent 60%), var(--ground);
 }
 .stage {
   position: absolute;
@@ -175,23 +369,18 @@ code {
   z-index: 3;
   border-radius: inherit;
   pointer-events: none;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -1px 0 rgba(0, 0, 0, 0.5), inset 0 0
-    0 1px color-mix(in srgb, var(--acc) 7%, rgba(255, 255, 255, 0.03));
+  box-shadow: var(--win-edge-lit), inset 0 0 0 1px
+    color-mix(in srgb, var(--acc) 7%, var(--win-ring));
 }
 .win-inner.chrome-glass {
-  background-color: rgba(13, 15, 25, 0.42);
-  --win-body: linear-gradient(
-    160deg,
-    rgba(34, 38, 58, 0.5),
-    rgba(14, 16, 28, 0.32) 55%,
-    rgba(10, 11, 20, 0.55)
-  );
+  background-color: var(--glass-fill);
+  --win-body: linear-gradient(160deg, var(--glass-a), var(--glass-b) 55%, var(--glass-c));
   backdrop-filter: blur(24px) saturate(1.4);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
 }
 .win-inner.chrome-solid {
   background-color: var(--panel-solid);
-  --win-body: linear-gradient(160deg, #1a1d2c, #10121c 55%, #0b0c15);
+  --win-body: linear-gradient(160deg, var(--win1), var(--solid-mid) 55%, var(--win2));
 }
 .win-bar {
   display: flex;
@@ -305,14 +494,20 @@ code {
 .win--compact .acct-pick option {
   color: var(--ink);
 }
-/* "Why here" popovers and tooltips: the wave window's host chips and the agent window's machine chip. */
+/*
+ * "Why here" popovers and tooltips: the wave window's host chips and the agent window's machine
+ * chip. `look/Popover.tsx` portals them into <body> and sets left/top in screen pixels, so no
+ * window clips them and the canvas never scales them. Screen layers: hud 4, top bar 5, dock 6,
+ * popovers 9, pop-outs 10, sheets 20 / machine sheets 60.
+ */
 .host-pop {
-  position: absolute;
-  z-index: 5;
-  top: calc(100% + 4px);
-  left: 0;
+  position: fixed;
+  z-index: 9;
   width: max-content;
-  max-width: min(360px, 80vw);
+  max-width: min(360px, calc(100vw - 16px));
+  white-space: normal;
+  overflow-wrap: anywhere;
+  color: var(--ink);
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -343,7 +538,7 @@ code {
   padding: 10px 14px;
 }
 .win--attn-coordinator .win-inner {
-  border-color: rgba(251, 191, 36, 0.45);
+  border-color: color-mix(in srgb, var(--amber) 45%, transparent);
 }
 .placeholder-tasks {
   margin: 0;
@@ -361,24 +556,24 @@ code {
  */
 .recessed {
   border: 1px solid rgba(0, 0, 0, 0.55);
-  background: linear-gradient(180deg, rgba(4, 5, 10, 0.85), rgba(16, 18, 30, 0.85));
-  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), inset 0 -1px 0 rgba(255, 255, 255, 0.05), 0 1px 0
-    rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, var(--well-a), var(--well-b));
+  box-shadow: inset 0 2px 5px var(--shade), inset 0 -1px 0 rgba(255, 255, 255, 0.05), 0 1px 0
+    var(--hl);
   transition: box-shadow 0.18s ease, border-color 0.18s ease;
 }
 .recessed:focus-visible,
 input.recessed:focus {
   outline: none;
-  border-color: color-mix(in srgb, var(--acc, #6ee7f9) 55%, transparent);
-  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 3px
-    color-mix(in srgb, var(--acc, #6ee7f9) 18%, transparent), 0 0 22px
-    color-mix(in srgb, var(--acc, #6ee7f9) 22%, transparent);
+  border-color: color-mix(in srgb, var(--acc, var(--t-acc)) 55%, transparent);
+  box-shadow: inset 0 2px 5px var(--shade), 0 1px 0 var(--hl), 0 0 0 3px
+    color-mix(in srgb, var(--acc, var(--t-acc)) 18%, transparent), 0 0 22px
+    color-mix(in srgb, var(--acc, var(--t-acc)) 22%, transparent);
 }
 .recessed:focus-within:has(:focus-visible),
 .steer-input.recessed:focus-within {
-  border-color: color-mix(in srgb, var(--acc, #6ee7f9) 45%, transparent);
-  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 3px
-    color-mix(in srgb, var(--acc, #6ee7f9) 14%, transparent);
+  border-color: color-mix(in srgb, var(--acc, var(--t-acc)) 45%, transparent);
+  box-shadow: inset 0 2px 5px var(--shade), 0 1px 0 var(--hl), 0 0 0 3px
+    color-mix(in srgb, var(--acc, var(--t-acc)) 14%, transparent);
 }
 .steer-input {
   border-radius: 14px;
@@ -396,6 +591,13 @@ input.recessed:focus {
   border: 1px solid var(--line);
   color: var(--mute);
   white-space: nowrap;
+  /* The Volley feed / Terminal toggle's bevel: depth, kept under every current-step effect. */
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--ink) 10%, transparent),
+    color-mix(in srgb, var(--ink) 3%, transparent)
+  );
+  box-shadow: inset 0 1px 0 var(--hl), 0 2px 4px -2px var(--shade);
 }
 .chip i {
   width: 7px;
@@ -404,13 +606,17 @@ input.recessed:focus {
   display: inline-block;
 }
 .chip--mine {
-  color: #f5d97a;
+  color: var(--mine-ink);
   border-color: rgba(245, 217, 122, 0.35);
 }
 .chip--wave {
   color: var(--ink);
   border-color: color-mix(in srgb, var(--acc) 45%, transparent);
-  background: color-mix(in srgb, var(--acc) 10%, transparent);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--acc) 24%, transparent),
+    color-mix(in srgb, var(--acc) 7%, transparent)
+  );
 }
 .chip--repo {
   gap: 4px;
@@ -425,9 +631,9 @@ input.recessed:focus {
   flex: none;
 }
 .chip--hot {
-  color: #ffb4a1;
-  border-color: rgba(255, 122, 89, 0.5);
-  background: rgba(255, 122, 89, 0.12);
+  color: var(--hot-ink);
+  border-color: color-mix(in srgb, var(--hot) 50%, transparent);
+  background: color-mix(in srgb, var(--hot) 12%, transparent);
 }
 .icon-btn {
   display: grid;
@@ -445,9 +651,9 @@ input.recessed:focus {
   color: var(--ink);
 }
 .icon-btn--hot {
-  color: var(--acc, #6ee7f9);
-  border-color: color-mix(in srgb, var(--acc, #6ee7f9) 45%, transparent);
-  background: color-mix(in srgb, var(--acc, #6ee7f9) 12%, transparent);
+  color: var(--acc-ink);
+  border-color: color-mix(in srgb, var(--acc, var(--t-acc)) 45%, transparent);
+  background: color-mix(in srgb, var(--acc, var(--t-acc)) 12%, transparent);
 }
 .btn {
   display: inline-flex;
@@ -479,12 +685,13 @@ input.recessed:focus {
   display: inline-flex;
   border-radius: 11px;
   padding: 1px;
-  background: linear-gradient(120deg, #6ee7f9, #7c6cf6 50%, #c264f0);
+  background: linear-gradient(120deg, var(--t-acc), #7c6cf6 50%, #c264f0);
   box-shadow: 0 8px 18px -8px rgba(0, 0, 0, 0.7), 0 0 30px -10px rgba(139, 92, 246, 0.7);
 }
 .action-spec--hot {
-  background: linear-gradient(120deg, #ffb199, #ff7a59 50%, #f472b6);
-  box-shadow: 0 8px 18px -8px rgba(0, 0, 0, 0.7), 0 0 30px -10px rgba(255, 122, 89, 0.75);
+  background: linear-gradient(120deg, #ffb199, var(--hot) 50%, #f472b6);
+  box-shadow: 0 8px 18px -8px rgba(0, 0, 0, 0.7), 0 0 30px -10px
+    color-mix(in srgb, var(--hot) 75%, transparent);
 }
 .action-spec.is-busy {
   filter: saturate(0.7) brightness(0.9);
@@ -498,7 +705,7 @@ input.recessed:focus {
   padding: 5px 10px;
   border-radius: 999px;
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--pill-fill);
   font-size: 12px;
   cursor: pointer;
   color: var(--mute);
@@ -529,7 +736,7 @@ input.recessed:focus {
   align-items: center;
   gap: 16px;
   padding: 12px 18px;
-  background: linear-gradient(180deg, rgba(5, 6, 11, 0.75), rgba(5, 6, 11, 0));
+  background: linear-gradient(180deg, var(--topbar-fade), transparent);
   pointer-events: none;
   flex-wrap: wrap;
 }
@@ -550,7 +757,7 @@ input.recessed:focus {
 .brand-sub {
   font-family: var(--f-mono);
   font-size: 12px;
-  color: #6ee7f9;
+  color: var(--t-acc-ink);
 }
 .proto {
   font-size: 11px;
@@ -628,7 +835,7 @@ input.recessed:focus {
 }
 .win-pin--place,
 .win-pin--screen {
-  color: var(--acc);
+  color: var(--acc-ink);
 }
 .win--collapsed .win-bar {
   border-bottom-color: transparent;

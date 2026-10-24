@@ -41,8 +41,8 @@
 }
 .mrow:hover,
 .mrow:focus-visible {
-  border-color: rgba(110, 231, 249, 0.45);
-  background: rgba(110, 231, 249, 0.06);
+  border-color: color-mix(in srgb, var(--t-acc) 45%, transparent);
+  background: color-mix(in srgb, var(--t-acc) 6%, transparent);
 }
 .mrow-line {
   grid-column: 1 / -1;
@@ -81,10 +81,10 @@
   margin-left: auto;
 }
 .lvl--warn {
-  color: var(--amber);
+  color: var(--amber-text);
 }
 .lvl--bad {
-  color: var(--bad);
+  color: var(--bad-text);
 }
 .mrow-specs {
   font-size: 11.5px;
@@ -113,7 +113,7 @@
   stroke-linecap: round;
 }
 .spark--load {
-  --spark: #6ee7f9;
+  --spark: var(--t-acc);
 }
 .spark--mem {
   --spark: var(--hot);

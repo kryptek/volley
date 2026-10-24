@@ -1,0 +1,8 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "volleyd",
+  "wall_time": "2026-10-24T12:00:00.000Z",
+  "channel": "_system/claude",
+  "type": "claude_registry_changed",
+  "payload": { "rev": -1, "at": "2026-10-24T12:00:00.000Z" }
+}

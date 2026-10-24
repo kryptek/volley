@@ -322,6 +322,26 @@ export function forgetAgent(book: UsageBook, agent: string): UsageBook {
   return { ...book, agents };
 }
 
+/** An account every machine has whatever the registry says: its own login, `primary[@<name>]`. */
+export const isMachineLogin = (acct: string) =>
+  acct === PRIMARY_ACCOUNT || acct.startsWith(`${PRIMARY_ACCOUNT}@`);
+
+/**
+ * The book without the accounts the registry no longer has (`known`: its profiles' record keys,
+ * `<id>` and `<id>@<name>`); `primary` and `primary@<name>` always stay, and so do the agents of
+ * the accounts that stay. The same book when nothing goes.
+ */
+export function pruneBook(book: UsageBook, known: ReadonlySet<string>): UsageBook {
+  const keep = (acct: string) => isMachineLogin(acct) || known.has(acct);
+  const gone = Object.keys(book.accounts).filter((a) => !keep(a));
+  const strays = Object.values(book.agents).some((a) => !keep(a.account));
+  if (gone.length === 0 && !strays) return book;
+  return {
+    agents: Object.fromEntries(Object.entries(book.agents).filter(([, a]) => keep(a.account))),
+    accounts: Object.fromEntries(Object.entries(book.accounts).filter(([a]) => keep(a))),
+  };
+}
+
 /** claude-account.schema.json payload, without the registry's label and plan. */
 export interface AccountUsage {
   account: string;
@@ -751,11 +771,17 @@ export function agentLimitDecisions(o: {
   return out;
 }
 
-/** A wave's account moves (`wave_account_moved`), in journal order. */
+/** A wave's account_limit answers (`wave_account_moved` with a `decision_id`), in journal order. */
 export function waveAccountMoves(events: readonly JournalEvent[]): { from: string; to: string }[] {
   return events.flatMap((e) => {
     if (e.type !== "wave_account_moved") return [];
-    const { from, to } = e.data as { from?: unknown; to?: unknown };
+    const { from, to, decision_id } = e.data as {
+      from?: unknown;
+      to?: unknown;
+      decision_id?: unknown;
+    };
+    // Only an account_limit answer moves a task naming `from`; a `wave_account_set` leaves it.
+    if (typeof decision_id !== "string") return [];
     return typeof from === "string" && typeof to === "string" ? [{ from, to }] : [];
   });
 }

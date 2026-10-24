@@ -20,10 +20,19 @@
  * A handoff volleyd cannot type into its session's screen (the screen is another session's, or
  * volleyd cannot see it) offers **Send to mailbox**: the same answer as a mailbox message to the
  * session, which reads it at its next turn.
+ *
+ * A group of identical decisions (`inboxGroups.ts`, #417) is one row for its `members`: a `×N`
+ * chip, an `N tasks waiting · …` line, and every answer, hold or release fans out to each member
+ * in turn (each its own `inbox_answer` with its own version). A member answered elsewhere is
+ * counted as answered; any other failure shows `answered 8 of 11 · retry the rest` and the
+ * buttons stay, a retry going to the rest only. The first fan-out pins the group (`onFanOut`), so
+ * it stays this one row while volleyd answers or holds its members one by one; the row reads
+ * answered once every member is, and held while every open member is.
  */
 import { CenterFocusIcon, EyeIcon, ViewOffIcon } from "@hugeicons/core-free-icons";
 import { type ReactNode, useState } from "react";
 import { heldReason } from "../../attention";
+import { plural } from "../../lib/plural";
 import ShinyText from "../../rb/ShinyText/ShinyText";
 import SpecularButton from "../../rb/SpecularButton/SpecularButton";
 import SpotlightCard from "../../rb/SpotlightCard/SpotlightCard";
@@ -52,13 +61,18 @@ export function holdCommand(id: string, on: HeldOn): string {
   return `volleyd inbox hold ${shellQuote(id)} --on ${shellQuote(target)}`;
 }
 
-/** What a decision can be held on: the wave's other unsettled tasks, then their PRs. */
+/**
+ * What a decision can be held on: the wave's other unsettled tasks, then their PRs. A group's
+ * `members` are all left out.
+ */
 export function holdChoices(
   item: InboxItem,
   wave: WaveView | undefined,
+  members: readonly InboxItem[] = [item],
 ): { key: string; label: string; on: HeldOn }[] {
+  const own = new Set(members.map((m) => m.task));
   const tasks = (wave?.state?.tasks ?? []).filter(
-    (t) => t.id !== item.task && t.stage !== "done" && t.stage !== "cancelled",
+    (t) => !own.has(t.id) && t.stage !== "done" && t.stage !== "cancelled",
   );
   return [
     ...tasks.map((t) => ({
@@ -74,8 +88,17 @@ export function holdChoices(
   ];
 }
 
+/** A group's line: `11 tasks waiting · i392, i416, i401 +8`. */
+function waiting(members: readonly InboxItem[]): string {
+  const names = members.map((m) => m.task ?? m.agent_id);
+  const more = names.length > 3 ? ` +${names.length - 3}` : "";
+  return `${plural(members.length, "task")} waiting · ${names.slice(0, 3).join(", ")}${more}`;
+}
+
 export interface InboxRowProps {
   item: InboxItem;
+  /** A group's items, oldest first (`item` is the first); absent: the item alone. */
+  members?: readonly InboxItem[];
   /** Only a person answers it (`needsPerson`). */
   needsYou: boolean;
   live?: string | null | undefined;
@@ -91,6 +114,8 @@ export interface InboxRowProps {
   onGoTo?: (() => void) | undefined;
   onShow?: (() => void) | undefined;
   onDismiss: () => void;
+  /** A group's answer, hold or release has started: keep its members one row from now on. */
+  onFanOut?: (() => void) | undefined;
   /** Deliver `text` to the item's session as a mailbox message; null without credentials. */
   mailbox?: ((text: string) => void) | null | undefined;
 }
@@ -110,14 +135,54 @@ export function InboxRow(p: InboxRowProps) {
   const [holdError, setHoldError] = useState<string | null>(null);
   const [holdBusy, setHoldBusy] = useState(false);
   const accent = item.wave !== undefined ? accentFor(item.wave) : NEUTRAL_ACCENT;
+  const members = p.members ?? [item];
+  const n = members.length;
+  /** A group's members answered so far (here or elsewhere): a retry skips them. */
+  const [done, setDone] = useState<ReadonlySet<string>>(() => new Set());
+  /** The members a failed hold or release reached: its retry skips them. */
+  const [opDone, setOpDone] = useState<{ op: "hold" | "release"; ids: ReadonlySet<string> }>(
+    () => ({ op: "hold", ids: new Set() }),
+  );
+  const open = members.filter((m) => m.answered === undefined);
+  /** The hold shown: the first open member's (a group's members are held together). */
+  const held = open.find((m) => m.held)?.held;
+
+  const sendAll = async (control: SteerTransport["control"], answer: string) => {
+    p.onFanOut?.();
+    const answered = new Set(done);
+    let error: string | null = null;
+    for (const m of members) {
+      if (m.answered !== undefined) answered.add(m.id);
+      if (answered.has(m.id)) continue;
+      const r = await control(
+        "inbox_answer",
+        { id: m.id, version: m.version, answer, where: { kind: "desk", device: p.device } },
+        answerCommand(m.id, answer),
+      );
+      if (r.ok || REFUSED_ANSWERED.test(r.error ?? "")) answered.add(m.id);
+      else error ??= r.error ?? "volleyd refused the answer";
+    }
+    setDone(answered);
+    if (error === null) {
+      setSent({ state: "answered", label: `answered ${n} on desk·${p.device} · ${answer}` });
+      setOther(null);
+      return;
+    }
+    setSent({
+      state: "error",
+      error: `answered ${answered.size} of ${n} · retry the rest: ${error}`,
+      answer,
+    });
+  };
 
   const send = async (answer: string) => {
     if (answer.trim() === "") return;
     if (!p.control) {
-      setCommand(answerCommand(item.id, answer));
+      setCommand(members.map((m) => answerCommand(m.id, answer)).join("\n"));
       return;
     }
     setSent({ state: "sending", answer });
+    if (n > 1) return sendAll(p.control, answer);
     const r = await p.control(
       "inbox_answer",
       { id: item.id, version: item.version, answer, where: { kind: "desk", device: p.device } },
@@ -147,29 +212,54 @@ export function InboxRow(p: InboxRowProps) {
   /** `hold { item, on }` or `release { item }` through volleyd; the retained item follows. */
   const holdOp = async (op: "hold" | "release", on?: HeldOn): Promise<boolean> => {
     setHoldError(null);
-    const cli =
+    const cli = (m: InboxItem) =>
       on !== undefined
-        ? holdCommand(item.id, on)
-        : `volleyd release ${shellQuote(String(item.source.decision_id ?? item.id))}`;
+        ? holdCommand(m.id, on)
+        : `volleyd release ${shellQuote(String(m.source.decision_id ?? m.id))}`;
     if (!p.control) {
-      setCommand(cli);
+      setCommand(members.map(cli).join("\n"));
       setPicking(false);
       return true;
     }
     setHoldBusy(true);
-    const r = await p.control(op, { item: item.id, ...(on !== undefined ? { on } : {}) }, cli);
+    if (n > 1) p.onFanOut?.();
+    const reached = new Set(opDone.op === op ? opDone.ids : []);
+    const targets = open.filter((m) => !reached.has(m.id) && (op === "hold") !== Boolean(m.held));
+    let error: string | null = null;
+    let failed = 0;
+    for (const m of targets) {
+      const r = await p.control(op, { item: m.id, ...(on !== undefined ? { on } : {}) }, cli(m));
+      if (r.ok) reached.add(m.id);
+      else {
+        failed++;
+        error ??= r.error ?? `volleyd refused the ${op}`;
+      }
+    }
+    setOpDone({ op, ids: error === null ? new Set() : reached });
     setHoldBusy(false);
-    if (r.ok) setPicking(false);
-    else setHoldError(r.error ?? `volleyd refused the ${op}`);
-    return r.ok;
+    if (error === null) setPicking(false);
+    else
+      setHoldError(
+        n > 1
+          ? `${op === "hold" ? "held" : "released"} ${n - failed} of ${n} · retry the rest: ${error}`
+          : error,
+      );
+    return error === null;
   };
-  const choices = item.kind === "decision" ? holdChoices(item, p.wave) : [];
+  const choices = item.kind === "decision" ? holdChoices(item, p.wave, members) : [];
 
-  const answeredLabel = item.answered
-    ? `answered on ${whereLabel(item.answered.where)} · ${item.answered.answer}`
-    : sent.state === "answered"
-      ? sent.label
-      : null;
+  const answeredLabel =
+    n > 1
+      ? sent.state === "answered"
+        ? sent.label
+        : item.answered && open.length === 0
+          ? `answered ${n} on ${whereLabel(item.answered.where)} · ${item.answered.answer}`
+          : null
+      : item.answered
+        ? `answered on ${whereLabel(item.answered.where)} · ${item.answered.answer}`
+        : sent.state === "answered"
+          ? sent.label
+          : null;
   const busy = sent.state === "sending";
   const btn = `inbox-target${p.narrow ? " inbox-target--phone" : ""}`;
 
@@ -231,7 +321,7 @@ export function InboxRow(p: InboxRowProps) {
           </form>
         )}
         {item.kind === "decision" &&
-          (item.held ? (
+          (open.length > 0 && open.every((m) => m.held) ? (
             <div className="inbox-held-actions">
               <button
                 type="button"
@@ -326,7 +416,9 @@ export function InboxRow(p: InboxRowProps) {
       </>
     );
 
-  const where = [item.wave, item.task].filter(Boolean).join("/") || item.agent_id;
+  // A group's tasks are on its waiting line.
+  const where =
+    [item.wave, n > 1 ? undefined : item.task].filter(Boolean).join("/") || item.agent_id;
   const card = (
     <SpotlightCard className="inbox-card" spotlightColor={`${accent}33`}>
       <span className="inbox-bar" style={{ background: accent }} />
@@ -335,17 +427,17 @@ export function InboxRow(p: InboxRowProps) {
           <span className={`chip inbox-kind inbox-kind--${item.kind}`}>{item.kind}</span>
           {item.owner_only && <span className="chip chip--hot">owner only</span>}
           {p.needsYou && !item.owner_only && <span className="chip chip--hot">needs you</span>}
-          {item.held && item.answered === undefined && (
-            <span className="chip inbox-held-chip">held</span>
-          )}
+          {held && <span className="chip inbox-held-chip">held</span>}
+          {n > 1 && <span className="chip inbox-count">×{n}</span>}
           <span className="inbox-title">{item.title}</span>
         </div>
         <div className="inbox-sub dim">{where}</div>
+        {n > 1 && <div className="inbox-waiting dim">{waiting(members)}</div>}
         <p className="inbox-question">{item.question}</p>
-        {item.held && answeredLabel === null && (
+        {held && answeredLabel === null && (
           <div className="attn-line attn-coordinator inbox-held">
-            {heldReason(item.held, p.wave, p.now ?? Date.now())}
-            {item.held.note ? ` · ${item.held.note}` : ""}
+            {heldReason(held, p.wave, p.now ?? Date.now())}
+            {held.note ? ` · ${held.note}` : ""}
           </div>
         )}
         {p.live && (
@@ -366,7 +458,7 @@ export function InboxRow(p: InboxRowProps) {
   return (
     <li
       aria-label={`Inbox item ${item.id}: ${item.title}`}
-      className={`inbox-row inbox-row--${item.kind}${item.held && answeredLabel === null ? " inbox-row--held" : ""}${answeredLabel !== null ? " inbox-row--answered" : ""}${p.leaving ? " inbox-row--leaving" : ""}`}
+      className={`inbox-row inbox-row--${item.kind}${held && answeredLabel === null ? " inbox-row--held" : ""}${answeredLabel !== null ? " inbox-row--answered" : ""}${p.leaving ? " inbox-row--leaving" : ""}`}
     >
       {item.owner_only && item.kind === "release" ? (
         // A div, not StarBorder's default <button>: the row holds buttons of its own.

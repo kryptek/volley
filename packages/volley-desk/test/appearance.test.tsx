@@ -1,9 +1,11 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useEffect } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { Background, SURFACE_LITE_NOTE, degradeLook } from "../src/look/Background";
+import { applyLookToDocument, applyTheme } from "../src/look/applyLook";
 import {
   BACKGROUNDS,
   type BackgroundDef,
@@ -11,6 +13,8 @@ import {
   REACT_BITS_BACKGROUNDS,
   isLazyBackground,
 } from "../src/look/backgrounds";
+import { STEP_FX_LABEL } from "../src/look/options";
+import { THEMES, THEME_LABEL } from "../src/look/themes";
 import { LOOK0, LOOK_STORAGE_KEY, type Look, useLook } from "../src/look/useLook";
 import { Appearance } from "../src/settings/Appearance";
 import { General } from "../src/settings/General";
@@ -31,6 +35,8 @@ let latest: Look;
 function Harness({ onArrange = () => {} }: { onArrange?: () => void }) {
   const [look, setLook] = useLook();
   latest = look;
+  // As App does: the theme applies to <html> on every change.
+  useEffect(() => applyLookToDocument({ theme: look.theme, fx: look.fx }), [look.theme, look.fx]);
   return (
     <>
       <Background which={look.bg} dim={look.dim} backgrounds={stub} />
@@ -51,6 +57,7 @@ const grid = () => within(screen.getByRole("group", { name: "Backgrounds" }));
 beforeEach(() => {
   localStorage.clear();
 });
+afterEach(() => applyTheme("volley"));
 
 describe("background registry", () => {
   it("has every free React Bits background, plus None", () => {
@@ -89,6 +96,34 @@ describe("background registry", () => {
 });
 
 describe("Settings › Appearance and General", () => {
+  it("lists the twelve themes above Background, Volley picked; a click stores and applies one", () => {
+    render(<Harness />);
+    const group = screen.getByRole("group", { name: "Theme" });
+    const cards = within(group).getAllByRole("button");
+    expect(cards.map((b) => b.textContent)).toEqual(
+      THEME_LABEL.map(([id, name]) => (id === "lighter" ? `${name} · light` : name)),
+    );
+    expect(
+      cards.filter((b) => b.getAttribute("aria-pressed") === "true").map((b) => b.textContent),
+    ).toEqual(["Volley"]);
+    const headings = screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
+    expect(headings.indexOf("Theme")).toBeLessThan(headings.indexOf("Background"));
+    expect(document.documentElement.style.length).toBe(0);
+    fireEvent.click(within(group).getByRole("button", { name: "Dracula" }));
+    expect(stored().theme).toBe("dracula");
+    expect(latest.theme).toBe("dracula");
+    expect(within(group).getByRole("button", { name: "Dracula" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    // Dracula's palette arrives with #369; until then the id falls back to Volley, which writes nothing.
+    const hasDracula = THEMES.some((t) => t.id === "dracula");
+    expect(document.documentElement.dataset.theme).toBe(hasDracula ? "dracula" : undefined);
+    fireEvent.click(within(group).getByRole("button", { name: "Volley" }));
+    expect(document.documentElement.style.length).toBe(0);
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+  });
+
   it("counts the React Bits backgrounds", () => {
     render(<Harness />);
     expect(screen.getByText(/^63 backgrounds from React Bits\./)).toBeInTheDocument();
@@ -170,6 +205,72 @@ describe("Settings › Appearance and General", () => {
     expect(seg("Needs you effect", "Electric border")).toHaveAttribute("aria-checked", "false");
   });
 
+  it("current step: nine effect cards under Theme, Glint pressed; a click stores and applies one", () => {
+    render(<Harness />);
+    const group = screen.getByRole("group", { name: "Current step" });
+    const cards = within(group).getAllByRole("button");
+    expect(cards.map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Glint",
+      "Pulse",
+      "Aurora",
+      "Scanline",
+      "Ember",
+      "Liquid",
+      "Circuit",
+      "Prism",
+      "Classic",
+    ]);
+    expect(STEP_FX_LABEL.map(([id]) => id)).toEqual([
+      "glint",
+      "pulse",
+      "aurora",
+      "scan",
+      "ember",
+      "liquid",
+      "circuit",
+      "prism",
+      "classic",
+    ]);
+    expect(cards.filter((b) => b.getAttribute("aria-pressed") === "true")).toHaveLength(1);
+    expect(within(group).getByRole("button", { name: "Glint" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    const headings = screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
+    expect(headings.indexOf("Current step")).toBe(headings.indexOf("Theme") + 1);
+    STEP_FX_LABEL.forEach(([id, , desc], i) => {
+      const card = cards[i] as HTMLElement;
+      expect(card).toHaveAccessibleDescription(desc);
+      // The preview lives in its own shadow root, out of reach of <html>'s data-fx.
+      const demo = card.querySelector(".fx-demo")?.shadowRoot;
+      expect(demo?.querySelector(`[data-fx="${id}"] > .fx-cur`), id).toHaveTextContent("fixup");
+    });
+    expect(document.documentElement.dataset.fx).toBe("glint");
+    fireEvent.click(within(group).getByRole("button", { name: "Classic" }));
+    expect(stored().fx).toBe("classic");
+    expect(latest.fx).toBe("classic");
+    expect(document.documentElement.dataset.fx).toBe("classic");
+    expect(within(group).getByRole("button", { name: "Classic" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("agent icons: a Windows-group segment, Clawd characters by default", () => {
+    render(<Harness />);
+    const icons = screen.getByRole("radiogroup", { name: "Agent icons" });
+    const windows = icons.closest(".s-group");
+    expect(windows?.querySelector("h3")).toHaveTextContent("Windows");
+    expect(windows).toContainElement(screen.getByRole("radiogroup", { name: "Window style" }));
+    const seg = (name: string) => within(icons).getByRole("radio", { name });
+    expect(seg("Clawd characters")).toHaveAttribute("aria-checked", "true");
+    expect(seg("Classic spinner")).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(seg("Classic spinner"));
+    expect(latest.icons).toBe("classic");
+    expect(stored().icons).toBe("classic");
+    expect(seg("Classic spinner")).toHaveAttribute("aria-checked", "true");
+  });
+
   it("toggles auto-arrange and arranges on demand", () => {
     const onArrange = vi.fn();
     render(<Harness onArrange={onArrange} />);
@@ -238,7 +339,8 @@ describe("App look (demo mode)", () => {
     const badge = (name: string) =>
       Number(dock().getByRole("button", { name }).textContent?.match(/\d+/)?.[0] ?? 0);
     expect(badge("Wave coordinators")).toBeGreaterThan(0);
-    expect(badge("Wave coordinators") + badge("Needs you")).toBe(n);
+    // Less the releasing wave's decision item: its wave (owner gone) already counts for it.
+    expect(badge("Wave coordinators") + badge("Needs you") - 1).toBe(n);
     // Narration uses the default effect (decrypt).
     expect(container.querySelector(".world .narr")).toHaveAttribute("data-fx", "decrypt");
   });

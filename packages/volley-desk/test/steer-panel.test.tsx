@@ -601,3 +601,13 @@ describe("readCredentials", () => {
     warn.mockRestore();
   });
 });
+
+describe("waveChatTarget (an owner away)", () => {
+  it("refuses: autopilot runs the wave until a session is back", async () => {
+    const { waveChatTarget } = await import("../src/steer/useSteering");
+    expect(waveChatTarget("lead", { id: "lead", state: "away" }, "desk")).toEqual({
+      agentId: null,
+      reason: "This wave's owner is away; autopilot runs it. Message it once a session is back.",
+    });
+  });
+});

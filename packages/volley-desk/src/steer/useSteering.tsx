@@ -33,7 +33,8 @@ export interface PanelSpec {
 /**
  * Who a wave's chat messages: its coordinator session, never the Desk itself.
  * Once the Desk owns the wave (it claimed it) there is no coordinator session
- * to message; a coordinator that is gone (or reconnecting) has no session either.
+ * to message; a coordinator that is gone (or reconnecting, or whose owner is away) has no
+ * session either.
  */
 export function waveChatTarget(
   owner: string | null | undefined,
@@ -53,6 +54,11 @@ export function waveChatTarget(
     return {
       agentId: null,
       reason: "This wave's coordinator is reconnecting. Message it once it is back.",
+    };
+  if (coordinator.state === "away")
+    return {
+      agentId: null,
+      reason: "This wave's owner is away; autopilot runs it. Message it once a session is back.",
     };
   return { agentId: coordinator.id };
 }

@@ -69,7 +69,7 @@ describe("agent window account picker", () => {
     expect(pick).toHaveValue("work");
     const names = [...pick.querySelectorAll("option")].map((o) => o.textContent);
     expect(names).toEqual([
-      "Work · 91% · this machine",
+      "Account: Work · 91% · this machine",
       "Personal · 12% · this machine",
       "Fresh · no usage yet · this machine",
       "Spare · no 5-hour usage yet · this machine",
@@ -117,6 +117,31 @@ describe("agent window account picker", () => {
   it("read-only without a way to move: the picker is disabled", () => {
     renderPicker();
     expect(screen.getByRole("combobox", { name: "Claude account for T1" })).toBeDisabled();
+  });
+
+  it("the chip names the account by its registry label, never its id", () => {
+    // The agent's account is a profile the picker does not list (another machine's record key).
+    renderPicker({
+      usage: { ...usage, account: "team" },
+      accounts: [
+        ...accounts,
+        {
+          id: "team@box-a",
+          label: "Team account (box-a)",
+          machine: "box-a",
+          fivePct: 5,
+          weeklyPct: 9,
+        },
+        { id: "team", label: "Team account", machine: "box-z", fivePct: 5, weeklyPct: 9 },
+      ],
+      machine: { name: "hub", local: true, hubUp: true },
+      onMoveAccount: vi.fn(),
+    });
+    const pick = screen.getByRole("combobox", { name: "Claude account for T1" });
+    expect(pick).toHaveValue("team");
+    expect(pick.querySelector("option:checked")).toHaveTextContent(/^Account: Team account$/);
+    expect(tipOf(pick)).toHaveTextContent("Team account");
+    expect(tipOf(pick)).not.toHaveTextContent(/^team$/);
   });
 
   it("no accounts known → no picker", () => {
@@ -176,7 +201,7 @@ describe("agent window account picker: the agent's machine and why (T8)", () => 
     expect(pick).toHaveValue("work@peer-a");
     expect([...pick.querySelectorAll("option")].map((o) => o.textContent)).toEqual([
       "primary@peer-a · 88% · peer-a",
-      "Work · 12% · peer-a",
+      "Account: Work · 12% · peer-a",
     ]);
     expect(pick.querySelector("option:checked")).toHaveTextContent("Work · 12% · peer-a");
   });

@@ -130,7 +130,8 @@ tasks:
 # heavy_pools: [backend-it]  # lease pools this wave's heavy commands draw from
 # config: { hard_ceiling: 4 }  # per-wave overrides of any tunable but lease_pools (see Configuration)
 # brief_preface: .volley/brief-preface.md  # the default; relative to repo, or absolute (see Brief preface)
-# account: work              # the Claude account its agents run under (see Claude accounts)
+# account: work              # the Claude account its agents run under (see Claude accounts);
+#                            # the Desk's wave window switches it (wave_account_set)
 # placement: auto            # place every task without a host: across machines, or local to keep
 #                            # them here; default: placement.default (auto once a machine is paired)
 # placement_prefer: [box-a]  # machines placement ranks first
@@ -405,7 +406,10 @@ clears a stray retained message on its mailbox at startup instead of executing i
 | `claude_accounts` | — | `{ root, accounts: [{ id, label, machine, created, plan?, signed_in_at?, email?, org?, dir?, signin: { state, url?, flow?, attach? } }], primary: { plan?, email?, org? }, machines: [{ name, kind?, claude, plan?, email?, org?, tunnel }], remote_signins, sharing }` |
 | `claude_account_add` | `label`, `machine?` (a paired machine: the profile is created and signed in there, as `<acct>@<machine>`), `by` | answered once the sign-in URL is known: `{ account, acct, topic, url, flow, attach }` |
 | `claude_signin` | `acct` (a registry account, `primary@<name>` or `<acct>@<name>`), `by` | the same, for an existing profile |
+| `claude_prime` | `acct` (a registry account, `<acct>@<name>`, `primary` or `primary@<name>`), `by` | `{ acct, machine, plan? }` once the login's identity and plan are read again into the registry and its machine's usage probe of that one login has folded (`volley peer doctor --json --probe-login <profile>`, the whole doctor on a volley older than the flag); every `claude_signin_done` primes too. Refused inside 5 min of the login's last prime: `primed 2 min ago; next in 3 min` |
 | `claude_sync` | `acct?`, `by` | `{ synced: [{ acct, shared, mcp_servers? }] }` |
+| `claude_account_rename` | `acct` (`<acct>` or `<acct>@<name>`), `label`, `by` | `{ acct, label, renamed: [<acct>…] }`; refused for an empty or reserved label, the primary or an unknown account |
+| `claude_account_remove` | `acct` (`<acct>` or `<acct>@<name>`), `by` | `{ acct, machine, dir_removed, dir_left? }`; refused while an agent, a running wave or `claude.default_account` uses the profile |
 | `agent_move_account` | `agent`, `acct`, `by` | answered after the respawn: `{ agent_id, decision?, from, to }` |
 
 `run` also takes `owner` and answers with `warnings: [...]` (overlap lines). `status` without a
@@ -543,13 +547,18 @@ evidence behind each choice below.
 > sharing one subscription among people.
 
 ```sh
-volley claude add "Work"            # profile + background sign-in; prints the sign-in URL
-volley claude add "Work" --wait     # … and waits until the sign-in finishes
+volley claude add "Work"            # profile + background sign-in; prints the sign-in links
+volley claude add "Work" --wait     # … asks for the code (not echoed) and waits until it finishes
 volley claude add "Work" --machine peer-a  # a profile on a paired machine, signed in there
-volley claude signin work           # sign an existing profile in again
+volley claude signin work           # sign an existing profile in again (--wait as add)
+volley claude code work <code-or-address>  # finish the sign-in waiting for work with the code the page showed
+volley claude signin work --code <code-or-address>  # the same: finishes the waiting sign-in, starts no new one
 volley claude list                  # one block per account (by e-mail): machines, usage, sharing
 volley claude list --show-email     # … with the e-mail unmasked (--json: the raw answer + records)
 volley claude sync [work]           # re-apply sharing.yaml, re-sync the MCP servers
+volley claude rename work "Work account"  # rename the account (every profile of its login)
+volley claude remove work           # remove a profile: its dir, usage record and registry entry
+volley claude remove work@peer-a    # … one kept on a paired machine
 volley claude balance               # per machine: accounts ranked by headroom, each family's next pick
 volley claude balance --model claude-opus-5-5 --machine peer-a  # … for one model on one machine
 volley claude move <agent-id> work  # stop an agent and respawn it under another account
@@ -557,32 +566,84 @@ volley claude move <agent-id> work  # stop an agent and respawn it under another
 
 `volley claude list` groups the logins the way the Desk's Claude accounts cards do: one block per
 Anthropic account, keyed by the login's e-mail (masked as `o•••@example.com` unless
-`--show-email`; an account whose e-mail is not reported yet gets its own block, headed by its id),
+`--show-email`). A block is headed by the registry label of its profiles (this machine's, else
+the earliest in registry order, less a trailing ` (<machine>)`; Add's own `Claude login` names
+nothing), else by the masked e-mail, then the plan and organisation; an account whose e-mail is
+not reported yet gets its own block. Under the heading come the account's three windows (per
+window the freshest reading among its retained usage records,
+`volley/_system/claude-accounts/<acct>`), a `last updated: 4 min ago` line from that reading, and
 one line per machine holding it (this machine's profiles and default login, each paired
-machine's), and per usage window the freshest reading among its retained usage records
-(`volley/_system/claude-accounts/<acct>`), with where it came from and how old it is. A member's
-older reading that disagrees is marked `(stale)`. A block missing a machine (this machine, or a
-paired machine in the answer's `machines[]`) ends with `not on: peer-b`. `--json` prints the `claude_accounts` answer
+machine's) with its sign-in state. A paired machine's profile is matched to its record as
+`<id>@<machine>`, so it is listed once. A block missing a machine (this machine, or a paired
+machine in the answer's `machines[]`) ends with `not on: peer-b`. A profile that never finished its
+sign-in (no `signed_in_at` and no usage record) is no block: it is listed under
+`waiting for sign-in:` with its sign-in link. `--json` prints the `claude_accounts` answer
 with the records it read as `records`.
+
+**Rename and remove.** `claude_account_rename { acct, label }` relabels every profile of the
+account's login (one e-mail) on every machine, or the one profile while it has no e-mail yet;
+the label is checked as `add` checks it, the ids stay, and the usage records carry the new label
+from the next publish. `claude_account_remove { acct }` is refused, with why, while a supervised
+agent runs under the profile, a running wave pins it (`account:` on the wave or a task) or
+`claude.default_account` names it (change Defaults first). Otherwise it stops the profile's
+pending sign-in, removes its directory — here with `rmSync`, only under the profiles root (never
+through a link out of it); on a paired machine `rm -rf <home>/.volley/claude/<acct>` as one REMOTE
+step, which only a `ProfileRemoveToken` minted for exactly that dir admits, and only when that is
+the dir the registry recorded (else the answer's `dir_left` says why it was left in place) —
+then drops the registry entry, the usage-book entry and the retained record. Neither signs the
+login out at Anthropic (Volley never holds the credential). The `_system` journal records
+`claude_account_renamed { acct, from, to, by }` and `claude_account_removed { acct, machine, by,
+dir_removed }`.
+
+**The registry-changed signal.** After every add, rename, remove, finished sign-in and sync, and
+at start, volleyd publishes `claude_registry_changed { rev, at }` retained on
+`volley/_system/claude/registry` (`rev` 0 at start, one more per change): the Desk asks
+`claude_accounts` again whenever it changes. At start (after the book is restored, before the
+first records go out) and on every change volleyd prunes the usage book to the registry
+(`pruneBook`: `primary` and `primary@<name>` always stay) and clears the retained records of the
+accounts it dropped, and of any record on `volley/_system/claude-accounts/+` it has no account
+for.
 
 **Sign-in.** `claude_account_add` creates the directory (`0700`) and registry entry, then runs
 `claude auth login` under that `CLAUDE_CONFIG_DIR` in a detached tmux session
 (`volley-signin-<acct>`, from a script the [fence](#the-authority-fence) seals) with `$BROWSER`
-set to a helper that only writes down the URL Claude Code asks it to open. That URL redirects to
-Claude Code's own listener on this machine, so open it in a browser **here**; the browser hands
-the code straight back to the `claude` process. volleyd answers the op with the URL and publishes
-`claude_signin_url { acct, url, flow, attach }` on `volley/_system/claude/<acct>/signin` (not
-retained: whoever opens it first picks the account; not retained is not private — under the
-example broker ACL every client, agents included, may read `volley/#` and so the URL while the
-sign-in runs: restrict `volley/_system/claude/#` to the owner's clients to keep it from them), then polls `claude auth status` until
-`loggedIn` → `claude_signin_done { acct, plan, email?, org? }`, or `claude_signin_failed { acct, reason }`
-(the login exited, `claude_signin_timeout_ms` passed, or tmux is missing — then it tells you to
-run `CLAUDE_CONFIG_DIR=<dir> claude auth login` yourself). Without a `$BROWSER` call the URL is
-the one Claude Code printed (`flow: manual_code`): its page shows a code to paste into the
-sign-in terminal (`tmux attach -t volley-signin-<acct>`), never into the Desk. `claude setup-token`
-is never used: it prints a bearer token Volley would have to carry. The `_system` journal records
+set to a helper that only writes down the URL Claude Code asks it to open. Claude Code has no
+switch for a sign-in flavour: every `claude auth login` runs both of one PKCE sign-in, handing
+`$BROWSER` the authorize URL that redirects to its own `http://localhost:<port>/callback` listener
+and printing the one that redirects to Anthropic's code page while its prompt waits (`Paste code
+here if prompted >`). volleyd answers the op with, and publishes on
+`volley/_system/claude/<acct>/signin`, `claude_signin_url { acct, url, flow, attach, manual_url?,
+callback_url?, code_prompt? }`: `url` is the printed code-page URL (`flow: manual_code`, the same
+as `manual_url`), which works from any device; `callback_url` is the `$BROWSER` one, a shortcut
+for a browser on this machine; `code_prompt: true` once the session shows the prompt. Before
+anything is printed, `url` is the `$BROWSER` URL (`browser_callback`); the event is published again
+when it changes. The topic is not retained: whoever opens it first picks the account; not retained
+is not private — under the example broker ACL every client, agents included, may read
+`volley/#` and so the URL while the sign-in runs: restrict `volley/_system/claude/#` to the
+owner's clients to keep it from them. volleyd then polls `claude auth status` until `loggedIn` →
+`claude_signin_done { acct, plan, email?, org? }`, or `claude_signin_failed { acct, reason }` (the
+login exited, `claude_signin_timeout_ms` passed, or tmux is missing — then it tells you to run
+`CLAUDE_CONFIG_DIR=<dir> claude auth login` yourself). `claude setup-token` is never used: it
+prints a bearer token Volley would have to carry. The `_system` journal records
 `claude_account_added`, `claude_signin_started` and `claude_signin_done` / `_failed`, never the
 URL; while a sign-in waits, `claude_accounts` returns its URL for a client that attached late.
+
+**Finishing a sign-in from any device.** `claude_signin_entry { acct, entry }` (the Desk's sign-in
+box, `volley claude signin --code`, the `--wait` prompt, `volley claude code`) takes what the
+owner pasted (`src/claude/signin-entry.ts`): the code the code page shows, or the
+`http://localhost:<port>/callback?code=…&state=…` address a browser ended up on when the shortcut
+link could not reach the listener (another device). A code is typed into the waiting session on
+the machine where it runs (`tmux send-keys -t volley-signin-<acct> -l -- <code>`, then `Enter`); an
+address is completed by `curl -fsS --max-time 10 http://127.0.0.1:<port>/callback?<query>` (the
+query byte for byte) on that machine, only when its port and `state` are the sign-in's own
+`$BROWSER` URL's (else `that address belongs to another sign-in; open a fresh link`, nothing run).
+Each runs locally through the fenced exec or on a paired machine as a fenced REMOTE step, with a
+`SigninEntryToken` the fence lets type or request exactly that text, once. volleyd answers when the
+sign-in ends (`{ acct, signed_in, email? }`), at most `signin_entry_wait_ms` (30 s) later; a
+refusal it reads off the session's screen (or the login failing) restarts the sign-in and answers
+`code rejected: <line>` with `fresh: true` and a new `claude_signin_url`. The code and `state` are
+never journaled (`claude_signin_entry { acct, kind, by }` only), logged (`claude_signin_entry
+<acct> (<kind>)`), kept or echoed: every message that could carry them passes `redact` first.
 
 **Signing a paired machine in.** `claude_signin { acct: "primary@<name>" }` (the Desk's **Sign in
 on <machine>**) signs a paired machine's own default profile in, with Claude Code's own flow on
@@ -591,16 +652,16 @@ reads the box's `$HOME`, writes the sealed `signin.sh` (no `CLAUDE_CONFIG_DIR`: 
 profile; the credential env unset) and `browser.sh` to `~/.volley/signin/primary/` there, and
 starts `bash signin.sh` in the box's tmux session `volley-signin-primary`. It polls the url file
 and the session's screen every `claude_signin_poll_ms`. For the localhost-callback URL's port *p*
-it holds a transient forward, `ssh -N -L 127.0.0.1:p:127.0.0.1:p … <target>` (`src/claude/forward.ts`):
-the same port on this machine's loopback as on the box's, because the OAuth redirect must match
-verbatim. Only then does it publish `claude_signin_url { acct, url, flow: "browser_callback",
-manual_url, attach: "ssh <target> -t tmux attach -t volley-signin-primary" }`: `url` opens in a
+it tries to hold a transient forward, `ssh -N -L 127.0.0.1:p:127.0.0.1:p … <target>`
+(`src/claude/forward.ts`): the same port on this machine's loopback as on the box's, because the
+OAuth redirect must match verbatim. It publishes `claude_signin_url { acct, url, flow:
+"manual_code", manual_url, callback_url?, code_prompt?, attach: "ssh <target> -t tmux attach -t
+volley-signin-primary" }`: `url` is the code-page link, for any device (the code goes in the
+Desk's box or `volley claude code`, and volleyd types it on the box); `callback_url` opens in a
 browser on **this** machine and the forward carries the callback to `claude` on the box (an opaque
-encrypted pipe; no byte of it is read or logged). `manual_url`, the URL Claude Code printed, is for
-a phone: its page shows a code, typed into the terminal `attach` reaches, never into Volley. A
-forward that exits within `signin_forward_settle_ms` because the port is taken here (or a port a
-broker tunnel uses, which is never forwarded) restarts the sign-in once (Claude Code picks a fresh
-port), then fails naming the port. The box's `claude auth status` reporting `loggedIn` ends it with
+encrypted pipe; no byte of it is read or logged). The forward is best-effort: one that exits within
+`signin_forward_settle_ms` because the port is taken here (or a port a broker tunnel uses, which is
+never forwarded) only leaves `callback_url` out; the sign-in proceeds. The box's `claude auth status` reporting `loggedIn` ends it with
 `claude_signin_done { acct, plan }`. The timeout, the login exiting, the daemon stopping, ssh
 failing or a box without tmux (the reason gives `ssh <target> -t claude auth login` to run by
 hand) end it with `claude_signin_failed`. Every end kills the session (no consent: it holds no
@@ -608,7 +669,7 @@ agent's work) and the forward. A newer sign-in for the same machine supersedes i
 at once and nothing more of it is published. A machine whose `claude auth status` already reports
 `loggedIn` is refused (log it out with `ssh <target> claude auth logout` first). While it waits,
 `claude_accounts` lists it under `remote_signins: [{ acct, state: "pending", url?, flow?, attach?,
-manual_url? }]` for a late client.
+manual_url?, callback_url?, code_prompt? }]` for a late client.
 
 **A profile on a paired machine.** `claude_account_add { label, machine: "<name>" }` (`volley
 claude add <label> --machine <name>`) for a configured paired machine records `{ id, machine:
@@ -750,6 +811,17 @@ and running agents finish where they are. A balanced wave gets no `move wave` de
 when every candidate on a machine it uses is at or over the level in its 5-hour window does it
 get one `account_limit` with no suggestion (`not now`: new agents take the one with the most
 room until the window resets).
+
+**Switching a wave's account.** `wave_account_set { wave, acct }` (the Desk's wave window: its
+`Account:` chip) sets the account the wave's agents not yet spawned start under, ahead of its
+`account:` and `claude.default_account`; `acct: null` makes it balance. Running agents finish
+where they are, and a task naming its own `account:` keeps it. An unknown or not signed-in
+account is refused, as a `move wave` answer is. It journals `wave_account_moved { from, to, by }`
+(`null`: balanced); when an open `account_limit` offers `move wave <w> to <acct>`, the request
+answers it instead (`decision_id` on the event). Any other pick (`null`, or an account the
+decision does not offer) leaves that `account_limit` open: answer it `not now` from its banner. The wave state's `account: { pinned, source,
+moved_from? }` says where the wave's new agents start (`source`: `wave`, `config` or
+`balanced`).
 
 **The usage probe.** The statusLine reports the 5-hour and weekly windows only, and only while
 an agent runs on the account; the per-model weekly windows (Fable's among them) come only from
@@ -1407,30 +1479,58 @@ agent may do everything the owner may, any other is refused. When a new agent bi
 that owns waves, volleyd journals `owner_reconnected { owner, agent_id, previous_agent_id }` in
 each unfinished one and re-publishes their state — nothing is claimed, ownership does not move, so one
 session keeps all its waves across restarts. The wave state's `coordinator.agent_id` is the bound
-agent; when it goes away (terminal status, or its LWT) with no other agent binding the name,
-`coordinator.state` is `reconnecting` for `autopilot.reconnect_grace_s` (default 900), then
-`gone`. Until another agent binds the name, the binding stays on that departed agent id (that is
+agent. Until another agent binds the name, the binding stays on a departed agent id (that is
 what lets the state read `reconnecting`), but its id is no longer accepted for the name: only the
-name itself, or the next agent to bind it, may act. `volleyd status` prints such an owner as `owner: coord-main (via coordinator-c7d9)`.
+name itself, or the next agent to bind it, may act.
+
+**The owner's presence.** `coordinator.presence` is the owner's retained status read as presence
+(SPEC §7.5): `online` while it is live, `offline` once its connection's will turned it `reaped`,
+it shut down (`done`, `failed`, a `blocked` with `reason: "shutdown"`), or before any status. No
+heartbeat or timer keeps it fresh — a quiet connected owner stays `online` however long it says
+nothing — and the wave state is re-published only when something that can move it changes: a
+status, a decision opened, escalated or resolved, an inbox item, a gate, the end of the grace.
+`coordinator.state` follows (`presence.ts`):
+
+| presence | state | when |
+|---|---|---|
+| online | `working` / `awaiting_input` | its attention (an `awaiting_input` progress until anything else but `idle` or `heartbeat`) |
+| offline | `reconnecting` | a coordinator name whose bound agent went away less than `autopilot.reconnect_grace_s` (default 900) ago; never an agent-id owner, which nothing can rebind |
+| offline | `gone` | past that, while something in the wave only the owner can answer waits: an open, unheld decision autopilot escalated (every open unheld one with autopilot off), an open owner-only inbox item, a merge-ready gate under `merge: manual` |
+| offline | `away` | past that, with nothing waiting: autopilot runs the wave |
+
+A decision autopilot answers is resolved in the tick it opens, never escalated in between, so an
+autopilot wave does not flicker to `gone`. `last_seen` is the newest of the owner's status time,
+its binding time and its last progress; for an offline owner, when it went away. `volleyd status`
+prints the owner with its presence:
+
+```
+owner: coord-main (via coordinator-c7d9) · online
+owner: coord-main (via coordinator-c7d9) · away (autopilot) · last seen 2h ago
+owner: coord-main (via coordinator-c7d9) · away · last seen 5m ago      (autopilot off)
+owner: coord-main (via coordinator-c7d9) · gone · 1 decision waits for you
+owner: coord-main (via coordinator-c7d9) · gone · something waits for you   (a gate or inbox item)
+owner: coord-main (via coordinator-c7d9) · reconnecting
+```
 
 An unowned wave's decisions have nobody to answer them, so `volleyd run` warns when it submits
 one (`warning: wave <id> has no owner: …`) and `volleyd validate` notes that `run` needs an owner.
 Such a wave is still archived automatically once it has ended ([Archiving](#archiving)).
 
-`volleyd claim <wave>` hands the wave to the caller when the owner is gone: its retained status
-is `reaped`, `done` or `failed`, or nothing has been heard from it — registry entry, status,
-any event on its `progress` channel (heartbeats) — for `claim_after_s` (config, read at claim
-time, so a `volleyd config set claim_after_s …` applies to the next claim). Otherwise the claim
-is refused, naming the owner. A claim is journaled as `owner_claimed { owner, previous, why }`.
-For a coordinator-name owner, liveness is the newest binding's — never an agent id the name has
-left — and a bound agent that went away frees the wave only after `claim_after_s`, since it may
-come back under a new id. The two timers are independent: with `claim_after_s` shorter than
-`autopilot.reconnect_grace_s`, a wave still shown `reconnecting` can already be claimed.
+`volleyd claim <wave>` hands the wave to the caller exactly when the owner is offline (its
+presence, above): an agent-id owner at once, a coordinator name once its newest binding has been
+offline past `autopilot.reconnect_grace_s` — never an agent id the name has left. So a wave shown
+`reconnecting` is never claimable; `away` and `gone` are. Silence never frees a wave: a quiet
+connected owner keeps it. Otherwise the claim is refused, naming the owner and why:
 
-Silence is never measured from before the owner got the wave (its `wave_submitted` or latest
-`owner_claimed`) or from before the daemon started, because heartbeats are remembered in memory
-only: an owner the broker has never seen, or one the daemon has not heard from since a restart,
-becomes claimable only after a full `claim_after_s`. A claim must name a stable identity (`--by`,
+```
+wave is owned by coord-main (via coordinator-c7d9), online; claim allowed once its session is gone (the will fired or it shut down)
+wave is owned by coord-main (via coordinator-c7d9), reconnecting (gone 3m ago, grace 15m); claim allowed at 2026-10-18T14:12:00.000Z unless it reconnects
+```
+
+A claim is journaled as `owner_claimed { owner, previous, why }` (`why`: `owner coord-main
+offline since <time>`). `claim_after_s` is retired: a stored `claim_after_s` (in `config.yaml` or a
+wave file's `config:`) is dropped with one log line, and `volleyd config set claim_after_s` is
+refused. A claim must name a stable identity (`--by`,
 `VOLLEY_AGENT_ID`, a registered session or `VOLLEY_COORDINATOR`); the CLI's own per-invocation id is never used.
 
 ## Pause, stop and the kill switch
@@ -1748,7 +1848,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `hard_ceiling`, `spawn_budget_multiplier` | next admission tick (immediately after the change) | never preempted; a limit below current use only stops new admissions |
 | `admission.*` | next admission tick | never preempted |
 | `lease_pools` | next lease grant | a pool shrunk below its holders stops granting until holders release; no holder is preempted |
-| `claim_after_s`, `heartbeat_alarm_s`, `idle_grace_s`, `background_wait_max_s`, `stall_backoff_max_s`, `blocked_undecided_stall_ms`, `tool_in_flight_max_s`, `wake_grace_s` | next monitor tick | — |
+| `heartbeat_alarm_s`, `idle_grace_s`, `background_wait_max_s`, `stall_backoff_max_s`, `blocked_undecided_stall_ms`, `tool_in_flight_max_s`, `wake_grace_s` | next monitor tick | — |
 | `mailbox_wake_after_ms` | mailbox messages sent after the change | a wake already armed keeps its window |
 | `fallback_model` | decisions opened after the change | open decisions keep their offer |
 | `mailbox.session_expiry_s` | new connections only | existing sessions keep their expiry until they reconnect |
@@ -2220,7 +2320,7 @@ restart does not count) resolves it as `it's running`, `by: "volleyd"`, rational
 own`. For `unknown_screen` that is a sign the session got past the screen that held it: any
 signal from its hooks (a hook heartbeat, the hooks' registry re-publish with `model_source`, a
 `working` status), or its MCP server doing work (a narration, a `working` it publishes). The MCP
-server's start-up signals (its heartbeat, its own registration, `spawning` / `registered`) do not
+server's start-up signals (its own registration, `spawning` / `registered`) do not
 count: it starts with the process, whatever screen Claude Code is held at. Waiting at a prompt
 (`awaiting_input`, `idle`) never counts. For `mcp_not_registered` the hooks were already heard from, so
 only the agent's MCP server counts there: a progress message not from the hooks, its own
@@ -4054,7 +4154,8 @@ DENY (never, consent or not):
   infrastructure CLIs: terraform, terragrunt, kubectl, helm, aws, gcloud, gsutil, az, pulumi,
     ansible, ansible-playbook, eksctl, doctl, flyctl
   docker rm | rmi | container rm | image rm | volume rm | network rm | system prune
-  rm -rf (any spelling that combines -r/-R/--recursive with -f/--force)
+  rm -rf (any spelling that combines -r/-R/--recursive with -f/--force), except the one REMOTE
+    step a ProfileRemoveToken unlocks (below)
 
 MERGE (only with a token, checked by identity like consent tokens; either unlocks nothing else:
   git merge, push and rebase stay denied). Never --admin, --auto or --rebase.
@@ -4111,7 +4212,12 @@ ALLOW (program by bare name only — never a path):
     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
     `claude auth login` — never `setup-token`) · capture-pane -p -J -t <it> · has-session -t
-    <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work)
+    <it> · kill-session -t <it> (no consent: a sign-in session holds no agent's work) ·
+    send-keys -t <it> Enter · send-keys -t <it> -l -- <code> (only with the SigninEntryToken
+    naming exactly that session and code, typed once: `mintSigninEntryToken`)
+  curl -fsS --max-time 10 http://127.0.0.1:<p>/callback?<query>   (exactly, only with the
+    SigninEntryToken naming exactly that URL, once: a sign-in's redirect the owner pasted,
+    completed on the machine whose listener waits; also a REMOTE step)
   (agent logins are minted and deleted over volleyd's own Dynamic Security control
   connection, dynsec.ts: no `volley auth` command and no broker signal is involved)
   ps -axo pid=,command=   (exactly: lists processes for procs.ts, which stops a retired
@@ -4128,6 +4234,8 @@ ALLOW (program by bare name only — never a path):
   volley peer doctor --json [--repo ABS]   (the supervisor's own machine's doctor report, SPEC
     §4.6.15: never --fix, which runs only on a box through ssh) · ABS the running wave's repo,
     an absolute path with no `.`/`..` segment and no control character
+  volley peer doctor --json --probe-login PROFILE   (a prime: one login's usage reading;
+    PROFILE `default` or a profile id)
   launchctl bootstrap gui/<uid> $HOME/Library/LaunchAgents/systems.volley.volleyd.plist (that
     full path only) | bootout | kickstart [-k] [-p] | print — only for the
     systems.volley.volleyd service
@@ -4196,6 +4304,7 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     'bash signin.sh' (exactly, with the remote SigninToken sealed for <dir>,
     `sealRemoteSigninScript`) | capture-pane | has-session |
     send-keys -t <t> Enter|Escape (Up|Down|Space: PICKER) | send-keys -t <t> -l -- <TYPED_TEXT> |
+    send-keys -t volley-signin-<acct> -l -- <code> (its SigninEntryToken, once) |
     resize-window -t =<session>: -x <n> -y <n> (exactly; n in 20..500: the Desk's Terminal
     popout) | show-environment -g PATH | set-environment -g PATH <absolute dirs> (the box's own
     PATH, from printenv, then the server's own dirs) —
@@ -4203,7 +4312,10 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     work) — any other kill-session = CONSENT; no other tmux global option
   mkdir -p <path>… · chmod <3 octal digits> <a file base64 -d may write>… ·
     chmod 700 <home>/.volley/claude/<acct> (a remote profile dir: the only chmod on a
-    directory) · nc -z 127.0.0.1 <port> · printenv PATH | HOME
+    directory) · nc -z 127.0.0.1 <port> · printenv PATH | HOME ·
+    curl -fsS --max-time 10 http://127.0.0.1:<p>/callback?<query> (its SigninEntryToken, once)
+  rm -rf <home>/.volley/claude/<acct> (exactly, only with the ProfileRemoveToken
+    `mintProfileRemoveToken` minted for exactly that dir: a person's `claude_account_remove`)
   claude auth status (exactly: the box's login state and plan, never a credential; a login
     runs only from a sealed signin.sh) — the one step with an env: `env.CLAUDE_CONFIG_DIR`
     only, only `<abs>/.volley/claude/<acct>` (a profile the supervisor created there),
@@ -4235,6 +4347,7 @@ REMOTE (one step of a RemoteScript; the same DENY list applies first):
     profile dir `<same abs>/.volley/claude/<same acct>` (`claude auth login`, never
     `setup-token`), `browser.sh` exactly `renderBrowserHelper`, `url` only empty
   command -v <claude|bun>… — the readiness PATH probe (RemoteHost.probePath)
+  volley peer doctor --json --probe-login PROFILE — a prime's one-login usage reading
   volley peer doctor --json [--supervisor-volley-dir ABS] [--fix --yes [--clone --origin
     <https URL>]] — the machine's doctor
     (RemoteHost.runDoctor, the `peer_doctor` op; the URL is `https://<host>/<path>`, no

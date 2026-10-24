@@ -4,12 +4,14 @@
  * that is not a pipeline step (queued, blocked, awaiting a decision,
  * cancelled) falls back to the agent's own role step, marked `held`.
  * Classes follow the prototype: `done` before the current step, `cur` on it.
+ * Beside them the depth classes of `styles/stepfx.css`: `fx-done`, `fx-cur`
+ * (drawn with the chosen current-step effect) and `fx-future`.
  */
 import type { Role, Stage } from "../../store/types";
 
 export const PIPELINE_STEPS = ["implement", "review", "fixup", "merge-ready"] as const;
 
-const STAGE_STEP: Partial<Record<Stage, number>> = {
+export const STAGE_STEP: Partial<Record<Stage, number>> = {
   implement: 0,
   spec_review: 1,
   quality_review: 1,
@@ -18,7 +20,7 @@ const STAGE_STEP: Partial<Record<Stage, number>> = {
   done: PIPELINE_STEPS.length,
 };
 
-const ROLE_STEP: Record<Role, number> = {
+export const ROLE_STEP: Record<Role, number> = {
   implementer: 0,
   spec_reviewer: 1,
   quality_reviewer: 1,
@@ -39,13 +41,18 @@ export function Pipeline({
   return (
     <ol className="pipe" aria-label="Pipeline stage">
       {PIPELINE_STEPS.map((step, i) => {
-        const cls = [i < cur && "done", i === cur && "cur", i === cur && held && "held"]
+        const cls = [
+          i < cur && "done fx-done",
+          i === cur && "cur fx-cur",
+          i === cur && held && "held",
+          i > cur && "fx-future",
+        ]
           .filter(Boolean)
           .join(" ");
         return (
           <li
             key={step}
-            className={cls || undefined}
+            className={cls}
             aria-label={step}
             aria-current={i === cur ? "step" : undefined}
           >

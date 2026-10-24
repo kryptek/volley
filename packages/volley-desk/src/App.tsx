@@ -80,12 +80,19 @@ import { usePins } from "./layout/usePins";
 import { plural } from "./lib/plural";
 import { Background, degradeLook, useWebGL } from "./look/Background";
 import { DeskDock } from "./look/DeskDock";
-import { type Tether, type TetherStub, Tethers } from "./look/Tethers";
+import { type Tether, Tethers } from "./look/Tethers";
+import { applyLookToDocument } from "./look/applyLook";
 import { progressBeat } from "./look/tetherPulses";
+import { themeById } from "./look/themes";
 import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
-import { MOVE_ACCOUNT_TIMEOUT_MS, signinsDone, useClaudeRegistry } from "./settings/ClaudeAccounts";
+import {
+  MOVE_ACCOUNT_TIMEOUT_MS,
+  registryKeyOf,
+  signinsDone,
+  useClaudeRegistry,
+} from "./settings/ClaudeAccounts";
 import { agentsOnMachines, sshHost } from "./settings/Machines";
 import { PeerSignin, peerAccount } from "./settings/PeerSigninSheet";
 import { SettingsModal } from "./settings/SettingsModal";
@@ -97,6 +104,7 @@ import { emitSound } from "./sounds/emit";
 import { useNotifyMirror, useSoundSettings } from "./sounds/settings";
 import { useFlipSound, useSoundManager } from "./sounds/useSoundManager";
 import { ClaimButton } from "./steer/SteerPanel";
+import { demoReadControl } from "./steer/demoClient";
 import { routeDeskControl } from "./steer/deskControl";
 import { type TerminalSize, sendTerminalSize } from "./steer/terminalResize";
 import { deskDevice } from "./steer/transport";
@@ -107,6 +115,7 @@ import {
   accountList,
   agentLimitFor,
   deskAccountGroups,
+  isWaveLimit,
   resolveFields,
 } from "./store/claude";
 import { useDesk } from "./store/context";
@@ -133,6 +142,7 @@ import type {
   DeskState,
   DigestPayload,
   InboxItem,
+  WaveTask,
 } from "./store/types";
 import { TopBar } from "./topbar/TopBar";
 import { AGENT_WIDTH, AgentWindow, ROLE_LABEL } from "./windows/agent/AgentWindow";
@@ -154,8 +164,9 @@ import {
   MachinesWindow,
   machineRows,
 } from "./windows/machines/MachinesWindow";
+import { CiPanel, ciPanelId } from "./windows/wave/CiPanel";
 import { DigestCard, showDigest } from "./windows/wave/DigestCard";
-import { AttentionLine, MachineDown, NeedsYou } from "./windows/wave/NeedsYou";
+import { AccountLimit, AttentionLine, MachineDown, NeedsYou } from "./windows/wave/NeedsYou";
 import { WAVE_W, WaveWindow, meFromSearch } from "./windows/wave/WaveWindow";
 import { NEUTRAL_ACCENT, accentFor } from "./windows/wave/accent";
 import { taskActivity } from "./windows/wave/activity";
@@ -167,6 +178,8 @@ const AGENT_W = AGENT_WIDTH;
 // one set of guesses is kept on purpose.
 const WAVE_H = 440;
 const AGENT_H = 470;
+/** A CI panel's height until measured: title, bar, a few job rows and the link (#488). */
+const CI_PANEL_H = 240;
 /** Re-evaluate time-based attention (staleness, escalation) this often. */
 const ATTN_TICK_MS = 15_000;
 /** The supervisor's age (top-bar pill, coordinators row) ticks this often while one is shown. */
@@ -217,22 +230,23 @@ const machinesH = (rows: number) => 80 + 76 * Math.max(1, rows);
 const MACHINES_TICK_MS = 15_000;
 
 /**
- * Placeholder layout: one row per wave, its agents in two columns to the
- * right; the coordinators window below the waves, as in the prototype.
- * `clampW` gives a window's rendered width (clamped on a phone).
+ * Placeholder layout: one row per wave, its agents (then its CI panels) in two
+ * columns to the right; the coordinators window below the waves, as in the
+ * prototype. `kidsOf` gives a wave's kid window ids; `clampW` a window's
+ * rendered width (clamped on a phone).
  */
 function placeholderLayout(
   waveIds: string[],
-  groups: Record<string, AgentView[]>,
+  kidsOf: (id: string) => string[],
   clampW: (w: number) => number,
 ) {
   const at: Record<string, Pos> = {};
   let y = 0;
   for (const id of waveIds) {
     at[id] = { x: 0, y };
-    const kids = groups[id] ?? [];
-    kids.forEach((a, k) => {
-      at[a.id] = {
+    const kids = kidsOf(id);
+    kids.forEach((kid, k) => {
+      at[kid] = {
         x: clampW(WAVE_W) + GAP + (k % 2) * (clampW(AGENT_W) + GAP),
         y: y + Math.floor(k / 2) * (AGENT_H + GAP),
       };
@@ -417,6 +431,8 @@ export default function App() {
   // What this browser can render; the saved look keeps the owner's picks for one that has WebGL.
   const look = degradeLook(saved, webgl, lite);
   useFlipSound(saved.tethers, "tethers_on", "tethers_off", emitSound);
+  // main.tsx applied the stored theme before the first paint; a change applies live.
+  useEffect(() => applyLookToDocument({ theme: look.theme, fx: look.fx }), [look.theme, look.fx]);
   /** The Settings window's section while it is open; setup once after an admin token sign-in. */
   const [deskSettings, setDeskSettings] = useState<SectionKey | null>(() =>
     takeFirstRun() ? "setup" : null,
@@ -448,11 +464,28 @@ export default function App() {
       routeDeskControl(mailboxControl, authOps, authOps ? readSessionRole(authOps.identity) : null),
     [mailboxControl, authOps],
   );
+  // What asks volleyd's Claude registry: the control, or in demo mode the demo's own answers.
+  const demoTransport = demo ? steering.transport : null;
+  const registryControl = useMemo(
+    () => (demoTransport ? demoReadControl(demoTransport.control) : control),
+    [demoTransport, control],
+  );
+  // The wave window's account dropdown: volleyd's `wave_account_set`, or the demo's answer. It
+  // asks volleyd's registry once it is first focused, so profiles with no usage yet are listed.
+  const waveAccountControl = demoTransport ? registryControl : control;
+  const [waveRegistryWanted, setWaveRegistryWanted] = useState(false);
+  const waveRegistry = useClaudeRegistry(
+    waveRegistryWanted ? registryControl : null,
+    registryKeyOf(state.claudeRegistryRev, signinsDone(state.signins)),
+  );
+  useEffect(() => {
+    if (waveRegistry.accounts.length) setRegistry(waveRegistry.accounts);
+  }, [waveRegistry]);
   // Settings › Machines lists every Claude account on each machine: it asks volleyd's registry
   // while it is open (Settings › Claude accounts asks on its own).
   const machinesRegistry = useClaudeRegistry(
-    deskSettings === "machines" ? control : null,
-    signinsDone(state.signins),
+    deskSettings === "machines" ? registryControl : null,
+    registryKeyOf(state.claudeRegistryRev, signinsDone(state.signins)),
   );
   const localName = state.config?.fleet?.local_name ?? undefined;
   const claudeGroups = useMemo(
@@ -543,13 +576,31 @@ export default function App() {
     ...Object.keys(state.waves).filter((id) => !gone(id)),
     ...[UNASSIGNED, SESSIONS].filter((id) => (groups[id]?.length ?? 0) > 0),
   ];
+  // A task held for CI with no agent running has no agent window: it gets a CI panel, a kid
+  // of its wave window like an agent window, in task order (#488). A live agent on the task
+  // makes its activity `agent` (that agent's window takes the cable); CI done ends the hold.
+  const ciPanels: Record<string, { id: string; wave: string; task: WaveTask }[]> = {};
+  for (const id of waveIds) {
+    const ws = state.waves[id]?.state;
+    if (!ws || ended.has(id)) continue;
+    const ctx = { agent: (x: string) => state.agents[x], queue: ws.merge_queue ?? [] };
+    const held = ws.tasks.filter((t) => taskActivity(t, ctx).kind === "ci");
+    if (held.length > 0)
+      ciPanels[id] = held.map((task) => ({ id: ciPanelId(id, task.id), wave: id, task }));
+  }
+  const panelIds = new Set(Object.values(ciPanels).flatMap((l) => l.map((p) => p.id)));
+  /** A wave's kid windows: its agents, then its CI panels. */
+  const kidsOf = (waveId: string): string[] => [
+    ...(groups[waveId] ?? []).map((a) => a.id),
+    ...(ciPanels[waveId] ?? []).map((p) => p.id),
+  ];
   /** A window's rendered width: the prototype width, clamped on a phone. */
   const clampW = (w: number) => clampWindowWidth(w, vw);
   // Stopped / complete waves fold off the canvas, agents and all, unless "show finished" is
   // on; a folded wave takes no slot in the layout, so it leaves no gap.
   const layout = placeholderLayout(
     waveIds.filter((id) => !ended.has(id) || endedShown(id)),
-    groups,
+    kidsOf,
     clampW,
   );
   // A window the owner or an arrange never placed takes its default slot, pushed down past
@@ -559,6 +610,7 @@ export default function App() {
   let slots: Record<string, Pos> | null = null;
   const parentOf: Record<string, string> = {};
   for (const [g, list] of Object.entries(groups)) for (const a of list) parentOf[a.id] = g;
+  for (const [g, list] of Object.entries(ciPanels)) for (const p of list) parentOf[p.id] = g;
   /**
    * Where a window opened after an arrange looks for free space: an agent right of its
    * wave (or group) window, within that region; a wave in the waves region; the side
@@ -686,10 +738,12 @@ export default function App() {
           ? { w: MACHINES_W, h: machinesH(machines.length) }
           : waveIds.includes(id)
             ? { w: WAVE_W, h: WAVE_H }
-            : { w: AGENT_W, h: AGENT_H };
-  /** Every window shown: the visible waves and their agents, then the coordinators, Needs you and Machines windows. */
+            : panelIds.has(id)
+              ? { w: AGENT_W, h: CI_PANEL_H }
+              : { w: AGENT_W, h: AGENT_H };
+  /** Every window shown: the visible waves and their kids, then the coordinators, Needs you and Machines windows. */
   const shownIds = () => [
-    ...visible.flatMap((w) => [w, ...(groups[w] ?? []).map((a) => a.id)]),
+    ...visible.flatMap((w) => [w, ...kidsOf(w)]),
     ...(coordsShown ? [COORDS_ID] : []),
     ...(inboxShown ? [INBOX_ID] : []),
     ...(machinesShown ? [MACHINES_ID] : []),
@@ -754,9 +808,7 @@ export default function App() {
   };
   // A window anchored to the screen is not on the canvas: no fit frames it.
   const clusterOf = (id: string): Rect[] =>
-    [id, ...(groups[id] ?? []).map((a) => a.id)]
-      .filter((x) => !anchored(x))
-      .map((x) => rectOf(x, dims(x).w, dims(x).h));
+    [id, ...kidsOf(id)].filter((x) => !anchored(x)).map((x) => rectOf(x, dims(x).w, dims(x).h));
   const endedHidden = waveIds.filter((id) => ended.has(id) && !endedShown(id)).length;
   // Only what is shown takes part in a fit or an arrange: a folded or hidden wave is not on the canvas.
   const visible = waveIds.filter((id) => !hidden.has(id) && (!ended.has(id) || endedShown(id)));
@@ -806,7 +858,8 @@ export default function App() {
         id !== INBOX_ID &&
         id !== MACHINES_ID &&
         !state.agents[id] &&
-        !waveIds.includes(id)
+        !waveIds.includes(id) &&
+        !panelIds.has(id)
       )
         delete sizes.current[id];
     }
@@ -815,7 +868,7 @@ export default function App() {
     const clusters: Cluster[] = [
       ...visible.map((id) => ({
         main: sizeOf(id, WAVE_W, WAVE_H),
-        kids: (groups[id] ?? []).map((a) => sizeOf(a.id, AGENT_W, AGENT_H)),
+        kids: kidsOf(id).map((k) => sizeOf(k, dims(k).w, dims(k).h)),
         ...(isLooseGroup(id) ? { side: true } : {}),
       })),
       ...(coordsShown
@@ -857,7 +910,7 @@ export default function App() {
     const fitRects = shown
       ? [
           { id: shown, w: WAVE_W, h: WAVE_H },
-          ...(groups[shown] ?? []).map((a) => ({ id: a.id, w: AGENT_W, h: AGENT_H })),
+          ...kidsOf(shown).map((k) => ({ id: k, ...dims(k) })),
         ].flatMap((b) => {
           const at = r.place[b.id];
           if (!at) return [];
@@ -1014,10 +1067,12 @@ export default function App() {
     Object.values(state.waves).map((w) => [w.id, coordinatorFor(w, ctx)]),
   );
   // The coordinators window's chip, as in the prototype: live waves whose coordinator is not
-  // working (a reconnecting one is coming back by itself: not counted).
+  // working (a reconnecting one is coming back by itself, an away one waits on nobody: not counted).
   const notWorking = waveList.filter((w) => {
     const c = coordinators[w.id]?.state;
-    return !ENDED_LABEL[w.state?.status ?? ""] && c !== "working" && c !== "reconnecting";
+    return (
+      !ENDED_LABEL[w.state?.status ?? ""] && c !== "working" && c !== "reconnecting" && c !== "away"
+    );
   }).length;
 
   const show = (wave: string) =>
@@ -1028,8 +1083,8 @@ export default function App() {
       return next;
     });
   const toggle = (wave: string) => {
-    // Shown again: the wave and its agents are placed afresh and the view pans to it.
-    if (hidden.has(wave)) opened([wave, ...(groups[wave] ?? []).map((a) => a.id)], wave);
+    // Shown again: the wave and its kids are placed afresh and the view pans to it.
+    if (hidden.has(wave)) opened([wave, ...kidsOf(wave)], wave);
     setHidden((h) => {
       const next = new Set(h);
       if (!next.delete(wave)) next.add(wave);
@@ -1121,26 +1176,19 @@ export default function App() {
           beat: progressBeat(a.feed),
         })),
     );
-  // A task held for CI with no agent running has no agent window: a `CI` stub instead (#451).
-  const stubs: TetherStub[] = visible
-    .filter((id) => !ended.has(id) && !anchored(id))
-    .flatMap((id) => {
-      const ws = state.waves[id]?.state;
-      return (ws?.tasks ?? []).flatMap((t) => {
-        const a = taskActivity(t, { agent: (x) => state.agents[x], queue: ws?.merge_queue ?? [] });
-        if (a.kind !== "ci") return [];
-        return [
-          {
-            id: `${id}/${t.id}`,
-            waveId: id,
-            wave: rectOf(id, WAVE_W, WAVE_H),
-            accent: accentOf(id),
-            label: "CI",
-            title: `${t.id} · ${a.label}`,
-          },
-        ];
+  // A CI panel's cable: like an agent window's, without the progress pulses (#488).
+  for (const id of visible.filter((w) => !ended.has(w) && !anchored(w))) {
+    for (const p of ciPanels[id] ?? []) {
+      if (anchored(p.id)) continue;
+      tethers.push({
+        id: p.id,
+        waveId: id,
+        wave: rectOf(id, WAVE_W, WAVE_H),
+        agent: pos(p.id),
+        accent: accentOf(id),
       });
-    });
+    }
+  }
   // Each Needs you row's source window (wave, agent or coordinators) → the Needs you window.
   if (inboxShown && !anchored(INBOX_ID)) {
     const shown = new Set(shownIds());
@@ -1189,7 +1237,7 @@ export default function App() {
         aria-label="Desk canvas: arrow keys pan, + and − zoom, f arranges and fits"
       >
         <World view={view} animating={animating} ref={worldRef}>
-          <Tethers on={look.tethers} tethers={tethers} stubs={stubs} dragging={dragging} />
+          <Tethers on={look.tethers} tethers={tethers} dragging={dragging} />
           {coordsShown && (
             <CoordinatorsWindow
               waves={waveList}
@@ -1334,6 +1382,26 @@ export default function App() {
                       />
                     )}
                     {openDecisions(wave)
+                      .filter(isWaveLimit)
+                      .map((d) => (
+                        <AccountLimit
+                          key={d.decision_id}
+                          decision={d}
+                          accounts={accounts}
+                          now={now}
+                          onAnswer={
+                            control
+                              ? (answer) =>
+                                  control(
+                                    "resolve",
+                                    resolveFields(d, answer),
+                                    `volleyd resolve ${d.decision_id}`,
+                                  )
+                              : undefined
+                          }
+                        />
+                      ))}
+                    {openDecisions(wave)
                       .filter((d) => d.kind === "machine_down")
                       .map((d) => (
                         <MachineDown
@@ -1358,6 +1426,14 @@ export default function App() {
                   </>
                 }
                 onSettings={setSettings}
+                accounts={accounts}
+                {...(waveAccountControl
+                  ? {
+                      onSetAccount: (acct: string | null) =>
+                        waveAccountControl("wave_account_set", { wave: id, acct }),
+                      onAccountsWanted: () => setWaveRegistryWanted(true),
+                    }
+                  : {})}
               >
                 {steerOpen === id &&
                   steering.panel({
@@ -1390,6 +1466,8 @@ export default function App() {
                   accent={accentOf(id)}
                   frame={place(a.id, frameAttn(agentAttn[a.id] ?? { tier: "none" }))}
                   narrationFx={look.narr}
+                  icons={look.icons}
+                  attentionTier={agentAttn[a.id]?.tier ?? "none"}
                   attention={<AttentionLine attn={agentAttn[a.id] ?? { tier: "none" }} />}
                   noSignal={noSignalFor(a, state.waves[a.wave], ctx)}
                   stale={staleProgressFor(a, state.waves[a.wave], ctx)?.label ?? null}
@@ -1453,6 +1531,17 @@ export default function App() {
                 />
               );
             }),
+          )}
+          {visible.flatMap((id) =>
+            (ciPanels[id] ?? []).map((p) => (
+              <CiPanel
+                key={p.id}
+                task={p.task}
+                wave={id}
+                accent={accentOf(id)}
+                frame={place(p.id)}
+              />
+            )),
           )}
         </World>
       </div>
@@ -1528,6 +1617,7 @@ export default function App() {
         onZoom={(f) => zoomAt(f)}
         settingsOpen={deskSettings !== null}
         onToggleSettings={() => setDeskSettings((s) => (s === null ? "general" : null))}
+        tone={themeById(look.theme).tone}
         {...(account !== null
           ? {
               account: {
@@ -1568,8 +1658,9 @@ export default function App() {
           claude={{
             accounts: state.claudeAccounts ?? {},
             signins: state.signins ?? {},
-            waves: state.waves,
             control,
+            registryControl,
+            registryRev: state.claudeRegistryRev,
             onRegistry: setRegistry,
             machines: state.machines ?? {},
             localName: state.config?.fleet?.local_name ?? undefined,
@@ -1654,8 +1745,6 @@ export default function App() {
       {settings !== null && state.waves[settings] && (
         <SettingsModal
           wave={state.waves[settings]}
-          accounts={accounts}
-          control={control}
           onClose={() => setSettings(null)}
           onOpenGlobal={() => {
             setSettings(null);

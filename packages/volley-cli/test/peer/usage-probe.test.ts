@@ -487,6 +487,19 @@ describe("memo and cadence", () => {
     ]);
   });
 
+  it("only: that one login (a prime's --probe-login); one this machine does not hold: none", async () => {
+    const f = fake();
+    storeFile(defaultLogin(f.home));
+    for (const id of ["a", "b"]) {
+      const dir = join(f.home, ".volley", "claude", id);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, ".claude.json"), "{}");
+      storeFile({ profile: id, dir, isDefault: false });
+    }
+    expect((await probeLogins(f.deps, NOW, { only: "b" })).map((l) => l.profile)).toEqual(["b"]);
+    expect(await probeLogins(f.deps, NOW, { only: "c" })).toEqual([]);
+  });
+
   it("memo dir 0700, file 0600, numbers only", async () => {
     const f = fake();
     const login = defaultLogin(f.home);

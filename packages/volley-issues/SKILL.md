@@ -2,7 +2,7 @@
 name: volley-issues
 description: Dispatch GitHub issues to autonomous Claude agents, each in its own git worktree and cmux workspace, coordinated via Volley. By default emits a wave file and submits it to the volleyd supervisor; the hand-launched legacy path remains. Replaces the claude-peers/ScheduleWakeup polling loop with sub-5s volley wait notifications. Use when the user asks to dispatch issues, work on issues, or launch agents for issues.
 user_invocable: true
-version: 0.9
+version: 0.10
 ---
 
 # /volley-issues
@@ -15,7 +15,7 @@ There are two dispatch paths (see **Choosing a dispatch path**): the **volleyd p
 
 Before invoking `/volley-issues`:
 
-**This skill is current.** This file declares `version: 0.9` in its frontmatter. From the volley checkout, `bash packages/volley-issues/scripts/install.sh --check` prints the installed and repo versions and exits 1 when `~/.claude/skills/volley-issues` is missing or older (a v0.1 copy knows only the legacy path). Then run `bash packages/volley-issues/scripts/install.sh` (it re-points the skill at the checkout), and restart Claude Code.
+**This skill is current.** This file declares `version: 0.10` in its frontmatter. From the volley checkout, `bash packages/volley-issues/scripts/install.sh --check` prints the installed and repo versions and exits 1 when `~/.claude/skills/volley-issues` is missing or older (a v0.1 copy knows only the legacy path). Then run `bash packages/volley-issues/scripts/install.sh` (it re-points the skill at the checkout), and restart Claude Code.
 
 1. **Mosquitto running.** `brew services start mosquitto`. If any tool call returns `{ code: "BROKER_DOWN" }`, follow the cross-cutting rule from `/volley`'s SKILL.md: print the install hint, stop, do not retry.
 
@@ -224,7 +224,7 @@ Ask the user's go-ahead for the submit with the go/no-go picker (**Asking the us
 
 ### Step 5: submit and leave (autopilot)
 
-**Under autopilot the coordinator session does not babysit the wave.** Once `volleyd run` has returned, tell the user the wave is submitted and where to watch it (the Desk, `volleyd status "$WAVE"`), then end the session or go on to plan another wave. volleyd acts on every event itself: it spawns, reviews, answers the decisions its policy table covers (within per-wave budgets), merges each gated PR (`merge: auto`) in dependency order, brings branches up to date (`branch_update: merge`), fixes flaky CI, starts dependents once their dependencies are merged and runs the repository's release train, if it has one. The Desk and the morning digest show everything it did. Do **not** start a per-event loop, and do not background `volley wait` per agent.
+**Under autopilot the coordinator session does not babysit the wave.** Once `volleyd run` has returned, tell the user the wave is submitted and where to watch it (the Desk, `volleyd status "$WAVE"`), then end the session or go on to plan another wave. The session need not publish anything to stay present: the Desk shows the owner `away (autopilot)` while its waves run, and `gone` only when a decision waits that only the owner can answer. volleyd acts on every event itself: it spawns, reviews, answers the decisions its policy table covers (within per-wave budgets), merges each gated PR (`merge: auto`) in dependency order, brings branches up to date (`branch_update: merge`), fixes flaky CI, starts dependents once their dependencies are merged and runs the repository's release train, if it has one. The Desk and the morning digest show everything it did. Do **not** start a per-event loop, and do not background `volley wait` per agent.
 
 **What still reaches the owner.** Only what autopilot must not, or could not, answer:
 
@@ -247,7 +247,7 @@ Each decision is a needs-you inbox item and rings the owner's phone once. Answer
 volley sub --pattern "volley/_waves/$WAVE/digest" --max-messages 1 --timeout 14400 &
 ```
 
-On the wake, `volleyd digest "$WAVE"` prints it: `## Shipped` (each merged task and PR), `## Autopilot handled` (decisions answered, flakes fixed, conflicts resolved, retries, merges), `## Waiting for you` (open decisions, the release train) and `## Failed`. Relay it to the user, help them answer what waits (above), and either leave again or re-arm the sub for the next digest. Each digest also sends one push (a `progress` envelope of type `digest` on volleyd's own topic, which `volley notify` rings for), so a user away from the terminal hears it anyway. `volley wait` is not the tool for this: it watches one agent's `status` channel, not volleyd's `progress`. Exit `124` is the fallback heartbeat (re-arm, or check `volleyd status "$WAVE"`); exit `1` is an error (broker down, or `AUTH_FAILED`: the shell lacks `VOLLEY_AUTH_*`), not a wake.
+On the wake, `volleyd digest "$WAVE"` prints it: `## Shipped` (each merged task and PR), `## Autopilot handled` (decisions answered, flakes fixed, conflicts resolved, retries, merges), `## Waiting for you` (open decisions, the release train) and `## Failed`. Relay it to the user, help them answer what waits (above), and either leave again or re-arm the sub for the next digest. Each digest also sends one push (a `progress` envelope of type `digest` on volleyd's own topic, which `volley notify` rings for), so a user away from the terminal hears it anyway. `volley wait` is not the tool for this: it watches one agent's `status` channel, not volleyd's `progress`. Exit `124` is the fallback wake (re-arm, or check `volleyd status "$WAVE"`); exit `1` is an error (broker down, or `AUTH_FAILED`: the shell lacks `VOLLEY_AUTH_*`), not a wake.
 
 When the digest reports the wave complete (or `volleyd status "$WAVE"` shows every task `done` or `cancelled`), go to Step 6; the release branch's merge to main follows **Release branch merge** or the repository's release playbook.
 
@@ -271,7 +271,7 @@ For a wave submitted with `--autopilot off` (or under a supervisor whose `autopi
 `volley/_waves/<wave>/events` is a live, non-retained mirror of the wave's journal, so it is only the **wake signal**. The record is the journal, read with a named cursor that you advance only after acting. Arm the wake first, let it subscribe, then catch up, so nothing published in between is missed:
 
 ```bash
-# 1. Arm the wake: exits on the next wave event (0), or after 5 min (124) as a fallback heartbeat.
+# 1. Arm the wake: exits on the next wave event (0), or after 5 min (124) as a fallback wake.
 volley sub --pattern "volley/_waves/$WAVE/events" --max-messages 1 --timeout 300 &
 # 2. Give it time to connect and subscribe: `volley sub` prints nothing until a message arrives,
 #    and an event published before its SUBSCRIBE lands would wake nobody.
@@ -280,7 +280,7 @@ sleep 2
 volleyd events "$WAVE" --cursor coordinator
 ```
 
-The 5-minute heartbeat bounds the cost of a slow subscribe: an event that slipped between the catch-up and the subscription is picked up by the next catch-up, at most one heartbeat later. Nothing is lost either way; the journal is the record.
+The 5-minute fallback wake bounds the cost of a slow subscribe: an event that slipped between the catch-up and the subscription is picked up by the next catch-up, at most one fallback wake later. Nothing is lost either way; the journal is the record.
 
 For each event printed, by `type`:
 
@@ -303,7 +303,7 @@ After acting on everything printed, advance the cursor to the last `seq` you han
 volleyd ack "$WAVE" --cursor coordinator --seq <last-seq>
 ```
 
-`volley sub` exit `124` is the fallback heartbeat: re-arm and run the catch-up anyway. Exit `1` is an error (broker down, or `AUTH_FAILED`: the shell lacks `VOLLEY_AUTH_*`), not a wake; fix it before re-arming. `volleyd status "$WAVE"` is the human-readable view at any time ("are they done?"); `volleyd pause "$WAVE"` / `volleyd stop "$WAVE"` stop admitting or cancel the wave.
+`volley sub` exit `124` is the fallback wake: re-arm and run the catch-up anyway. Exit `1` is an error (broker down, or `AUTH_FAILED`: the shell lacks `VOLLEY_AUTH_*`), not a wake; fix it before re-arming. `volleyd status "$WAVE"` is the human-readable view at any time ("are they done?"); `volleyd pause "$WAVE"` / `volleyd stop "$WAVE"` stop admitting or cancel the wave.
 
 ## Legacy path
 

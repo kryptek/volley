@@ -1,5 +1,8 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import mqtt from "mqtt";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { VolleyBroker } from "../src/broker";
 import type { VolleyConfig } from "../src/config";
 import { shutdownLifecycle, startLifecycle } from "../src/lifecycle";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
@@ -95,6 +98,16 @@ describe("startLifecycle", () => {
     expect(env.type).toBe("reaped");
     expect(env.payload).toMatchObject({ reason: "disconnect" });
     await observer.endAsync();
+
+    // Offline survives the client that armed it: a fresh connection reads the retained will.
+    const fresh = new VolleyBroker();
+    await fresh.connect({ url: tb.url, agentId: "life-bbbb-reader" });
+    const retained = JSON.parse(
+      (await fresh.queryRetained("volley/test/life-bbbb/status", 1000)) ?? "{}",
+    );
+    expect(retained.type).toBe("reaped");
+    expect(retained.payload.reason).toBe("disconnect");
+    await fresh.disconnect();
   });
 
   it("throws BROKER_DOWN when the broker is unreachable", async () => {
@@ -109,7 +122,7 @@ describe("startLifecycle", () => {
   });
 });
 
-describe("the progress heartbeat", () => {
+describe("presence (SPEC §7.5)", () => {
   let tb: TestBroker;
   beforeEach(async () => {
     tb = await startTestBroker();
@@ -118,48 +131,60 @@ describe("the progress heartbeat", () => {
     await tb.close();
   });
 
-  it("a registered idle server beats on its progress topic every interval until shutdown", async () => {
+  it("an idle connected server publishes nothing after registered", async () => {
     const observer = await mqtt.connectAsync(tb.url, { reconnectPeriod: 0 });
-    const beats: Record<string, unknown>[] = [];
-    observer.on("message", (t, p, packet) => {
-      if (t !== "volley/test/beat-aaaa/progress") return;
-      expect(packet.retain).toBe(false);
-      beats.push(JSON.parse(p.toString()));
+    const seen: string[] = [];
+    let registered: () => void = () => {};
+    const gotRegistered = new Promise<void>((r) => {
+      registered = r;
     });
-    await observer.subscribeAsync("volley/test/beat-aaaa/progress", { qos: 1 });
+    observer.on("message", (t, p) => {
+      const env = JSON.parse(p.toString());
+      seen.push(
+        t.startsWith("volley/test/") ? `${t.split("/").slice(3).join("/")}:${env.type ?? ""}` : t,
+      );
+      if (t === "volley/test/idle-aaaa/status" && env.type === "registered") registered();
+    });
+    await observer.subscribeAsync(
+      ["volley/test/idle-aaaa/+", "volley/_system/registry/idle-aaaa"],
+      { qos: 1 },
+    );
 
-    const state = await startLifecycle({ ...cfg(tb, "beat-aaaa"), heartbeatS: 0.1 });
-    // Wait for the beats rather than counting them in a fixed window: a loaded runner is slow.
-    for (const deadline = Date.now() + 5_000; beats.length < 2 && Date.now() < deadline; ) {
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    expect(beats.length).toBeGreaterThanOrEqual(2);
-    expect(beats[0]).toMatchObject({
-      agent_id: "beat-aaaa",
-      channel: "progress",
-      type: "heartbeat",
-      payload: { source: "volley-mcp" },
-    });
+    const state = await startLifecycle(cfg(tb, "idle-aaaa"));
+    await gotRegistered;
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(seen.filter((s) => s.startsWith("status:"))).toEqual([
+      "status:spawning",
+      "status:registered",
+    ]);
+    expect(seen.filter((s) => !s.startsWith("status:"))).toEqual([
+      "volley/_system/registry/idle-aaaa",
+    ]);
+    expect(seen).toHaveLength(3);
 
     await shutdownLifecycle(state);
-    const after = beats.length;
-    await new Promise((r) => setTimeout(r, 300));
-    expect(beats.length).toBe(after);
     await observer.endAsync();
   });
 
-  it("does not beat with VOLLEY_HEARTBEAT_S=0", async () => {
-    const observer = await mqtt.connectAsync(tb.url, { reconnectPeriod: 0 });
-    let beats = 0;
-    observer.on("message", () => {
-      beats++;
-    });
-    await observer.subscribeAsync("volley/test/beat-bbbb/progress", { qos: 1 });
-    const state = await startLifecycle({ ...cfg(tb, "beat-bbbb"), heartbeatS: 0 });
-    await new Promise((r) => setTimeout(r, 200));
-    expect(beats).toBe(0);
-    await shutdownLifecycle(state);
-    await observer.endAsync();
+  it("lifecycle.ts arms no timer (the will is the only liveness signal)", () => {
+    const src = readFileSync(
+      fileURLToPath(new URL("../src/lifecycle.ts", import.meta.url)),
+      "utf8",
+    );
+    expect(src).not.toMatch(/\bset(Interval|Timeout)\(/);
+  });
+
+  it("a blocked left by a clean shutdown carries reason shutdown, so it reads offline", async () => {
+    const state = await startLifecycle(cfg(tb, "idle-bbbb"));
+    await shutdownLifecycle(state, "blocked");
+    const reader = new VolleyBroker();
+    await reader.connect({ url: tb.url, agentId: "idle-bbbb-reader" });
+    const retained = JSON.parse(
+      (await reader.queryRetained("volley/test/idle-bbbb/status", 1000)) ?? "{}",
+    );
+    expect(retained.type).toBe("blocked");
+    expect(retained.payload.reason).toBe("shutdown");
+    await reader.disconnect();
   });
 });
 

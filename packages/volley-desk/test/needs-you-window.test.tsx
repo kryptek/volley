@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type Tier,
@@ -10,7 +11,7 @@ import {
 import { createSteerTransport } from "../src/steer/transport";
 import { demoAutopilot, demoInbox } from "../src/store/fixtures";
 import { initialState, reduceAll } from "../src/store/reducer";
-import type { AgentView, DeskState, InboxItem } from "../src/store/types";
+import type { AgentView, DeskState, HeldOn, InboxItem } from "../src/store/types";
 import { COORDS_ID } from "../src/windows/coordinators/CoordinatorsWindow";
 import { answerCommand, holdChoices, holdCommand } from "../src/windows/inbox/InboxRow";
 import { NeedsYouWindow, type NeedsYouWindowProps } from "../src/windows/inbox/NeedsYouWindow";
@@ -24,6 +25,18 @@ import { accentFor } from "../src/windows/wave/accent";
 
 const NOW = Date.parse("2026-10-21T12:00:00.000Z");
 const STATE = reduceAll(initialState(), [...demoAutopilot(NOW), ...demoInbox(NOW)]);
+/** The same, with the `autopilot` wave's owner back online: its decision is the coordinator's. */
+const LIVE: DeskState = (() => {
+  const w = STATE.waves.autopilot;
+  if (!w?.state?.coordinator) throw new Error("demo autopilot wave has no coordinator");
+  const coordinator = {
+    ...w.state.coordinator,
+    presence: "online" as const,
+    state: "working" as const,
+  };
+  const live = { ...w, state: { ...w.state, coordinator } };
+  return { ...STATE, waves: { ...STATE.waves, autopilot: live } };
+})();
 const CTX = { now: NOW };
 const ITEMS = Object.values(STATE.inbox ?? {});
 const item = (id: string) => ITEMS.find((i) => i.id === id) as InboxItem;
@@ -32,7 +45,7 @@ const PICKER = "p-coord-a1b2c3-toolu_01AbCdEf";
 const HANDOFF = "h-sess-9f2-12";
 const RELEASE = "r-autopilot-publish";
 
-const tiersOf = (items: readonly InboxItem[], state: DeskState = STATE): Record<string, Tier> =>
+const tiersOf = (items: readonly InboxItem[], state: DeskState = LIVE): Record<string, Tier> =>
   Object.fromEntries(items.map((i) => [i.id, inboxAttention(i, state, ctxFrom(state, CTX)).tier]));
 
 const frame: NeedsYouWindowProps["frame"] = {
@@ -77,10 +90,19 @@ describe("inbox attention (attention.ts)", () => {
     expect(t[DECISION]).toBe("coordinator");
   });
 
+  it("a wave decision needs you while the wave's owner is gone (the demo's releasing wave)", () => {
+    expect(tiersOf(ITEMS, STATE)[DECISION]).toBe("you");
+    expect(
+      inboxNeedsYou(STATE, CTX)
+        .map((i) => i.id)
+        .sort(),
+    ).toEqual([DECISION, HANDOFF, PICKER, RELEASE].sort());
+  });
+
   it("a wave decision needs you once it waited escalate_after_min, or the wave is mine", () => {
-    const late = inboxAttention(item(DECISION), STATE, ctxFrom(STATE, { now: NOW + 20 * 60_000 }));
+    const late = inboxAttention(item(DECISION), LIVE, ctxFrom(LIVE, { now: NOW + 20 * 60_000 }));
     expect(late.tier).toBe("you");
-    const mine = inboxAttention(item(DECISION), STATE, ctxFrom(STATE, { now: NOW, me: "lead" }));
+    const mine = inboxAttention(item(DECISION), LIVE, ctxFrom(LIVE, { now: NOW, me: "lead" }));
     expect(mine.tier).toBe("you");
   });
 
@@ -95,7 +117,7 @@ describe("inbox attention (attention.ts)", () => {
 
   it("inboxNeedsYou lists the open items a person must answer", () => {
     expect(
-      inboxNeedsYou(STATE, CTX)
+      inboxNeedsYou(LIVE, CTX)
         .map((i) => i.id)
         .sort(),
     ).toEqual([HANDOFF, PICKER, RELEASE].sort());
@@ -523,5 +545,235 @@ describe("held decisions (SPEC §4.6.2)", () => {
       target: { value: first.key },
     });
     expect(screen.getByText(holdCommand(DECISION, first.on))).toBeTruthy();
+  });
+});
+
+describe("a burst of identical decisions (#417)", () => {
+  /** Eleven copies of the wave decision: one per task, B1 oldest, each with its own version. */
+  const burst: InboxItem[] = Array.from({ length: 11 }, (_, i) => ({
+    ...item(DECISION),
+    id: `d-burst-${i + 1}`,
+    task: `B${i + 1}`,
+    agent_id: `autopilot-t${i + 1}-implementer-1`,
+    version: 10 + i,
+    opened_at: new Date(NOW - (20 - i) * 60_000).toISOString(),
+    source: { decision_id: `d-burst-${i + 1}`, decision_kind: "reviewers_disagree" },
+  })).reverse();
+  const you = Object.fromEntries(burst.map((i) => [i.id, "you" as Tier]));
+  const rows = () => screen.queryAllByRole("listitem", { name: /^Inbox item/ });
+  const lead = () => row("d-burst-1");
+
+  it("render as one row with a ×11 chip and the waiting line; the title still counts 11", () => {
+    setup({ items: burst, tiers: you });
+    expect(rows()).toHaveLength(1);
+    expect(within(lead()).getByText("×11")).toBeInTheDocument();
+    expect(within(lead()).getByText("11 tasks waiting · B1, B2, B3 +8")).toBeInTheDocument();
+    expect(within(lead()).getByText("needs you")).toBeInTheDocument();
+    expect(screen.getByText("11 need you")).toBeInTheDocument();
+  });
+
+  it("one answer sends one inbox_answer per member, each with its own id and version", async () => {
+    const control = vi.fn(async () => ({ ok: true }));
+    setup({ items: burst, tiers: you, control });
+    fireEvent.click(within(lead()).getByRole("button", { name: "blocker" }));
+    await waitFor(() => expect(control).toHaveBeenCalledTimes(11));
+    const sent = control.mock.calls.map(
+      (c) => (c as unknown[])[1] as { id: string; version: number },
+    );
+    expect(sent.map((s) => s.id)).toEqual(Array.from({ length: 11 }, (_, i) => `d-burst-${i + 1}`));
+    expect(sent.map((s) => s.version)).toEqual(Array.from({ length: 11 }, (_, i) => 10 + i));
+    expect(
+      await within(lead()).findByText(/answered 11 on desk·phone · blocker/),
+    ).toBeInTheDocument();
+  });
+
+  it("a refusal mid-way shows answered 10 of 11 and keeps the buttons; retry sends the rest", async () => {
+    let calls = 0;
+    const control = vi.fn(async () =>
+      ++calls === 4 ? { ok: false, error: "volleyd did not answer within 10s" } : { ok: true },
+    );
+    setup({ items: burst, tiers: you, control });
+    fireEvent.click(within(lead()).getByRole("button", { name: "blocker" }));
+    expect(
+      await within(lead()).findByText(/answered 10 of 11 · retry the rest/),
+    ).toBeInTheDocument();
+    const retry = within(lead()).getByRole("button", { name: "blocker" });
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+    await waitFor(() => expect(control).toHaveBeenCalledTimes(12));
+    expect(((control.mock.calls[11] as unknown[])[1] as { id: string }).id).toBe("d-burst-4");
+  });
+
+  it("a member already answered elsewhere is skipped and counted", async () => {
+    const control = vi.fn(async (_op: string, args: Record<string, unknown>) =>
+      args.id === "d-burst-2"
+        ? { ok: false, error: "already answered on mbp·terminal" }
+        : { ok: true },
+    );
+    setup({
+      items: burst,
+      tiers: you,
+      control: control as unknown as NeedsYouWindowProps["control"],
+    });
+    fireEvent.click(within(lead()).getByRole("button", { name: "fine" }));
+    expect(await within(lead()).findByText(/answered 11 on desk·phone · fine/)).toBeInTheDocument();
+  });
+
+  it("Other… answers every member with the typed text", async () => {
+    const control = vi.fn(async () => ({ ok: true }));
+    setup({ items: burst, tiers: you, control });
+    fireEvent.click(within(lead()).getByRole("button", { name: "Other…" }));
+    fireEvent.change(within(lead()).getByRole("textbox", { name: "Your answer" }), {
+      target: { value: "split it" },
+    });
+    fireEvent.click(within(lead()).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(control).toHaveBeenCalledTimes(11));
+    for (const c of control.mock.calls)
+      expect((c as unknown[])[1]).toMatchObject({ answer: "split it" });
+  });
+
+  it("Hold fans out to every member", async () => {
+    const control = vi.fn(async () => ({ ok: true }));
+    const waves = STATE.waves;
+    setup({ items: burst, tiers: you, control, waves });
+    fireEvent.click(within(lead()).getByRole("button", { name: "Hold · waiting on…" }));
+    const select = within(lead()).getByRole("combobox", { name: "Hold · waiting on" });
+    const first = (select.querySelectorAll("option")[1] as HTMLOptionElement).value;
+    await act(async () => {
+      fireEvent.change(select, { target: { value: first } });
+    });
+    await waitFor(() => expect(control).toHaveBeenCalledTimes(11));
+    expect(control.mock.calls.map((c) => (c as unknown[])[0])).toEqual(Array(11).fill("hold"));
+  });
+
+  /**
+   * The window over a live store: each `inbox_answer`, `hold` or `release` volleyd accepts comes
+   * back as the member's retained update (answered, held or released) before the next one is sent.
+   */
+  function Live(p: {
+    items: InboxItem[];
+    refuse?: (op: string, id: string) => string | null;
+    calls: { op: string; id: string }[];
+  }) {
+    const [items, setItems] = useState(p.items);
+    const control = async (op: string, args: Record<string, unknown>) => {
+      const id = String(args.id ?? args.item);
+      p.calls.push({ op, id });
+      const error = p.refuse?.(op, id) ?? null;
+      if (error !== null) return { ok: false, error };
+      setItems((all) =>
+        all.map((i): InboxItem => {
+          if (i.id !== id) return i;
+          if (op === "inbox_answer")
+            return {
+              ...i,
+              version: i.version + 1,
+              answered: {
+                answer: String(args.answer),
+                by: "owner",
+                where: { kind: "desk", device: "phone" },
+                at: new Date(NOW).toISOString(),
+              },
+            };
+          if (op === "hold")
+            return {
+              ...i,
+              held: { on: args.on as HeldOn, by: "owner", at: "2026-10-21T11:59:00Z" },
+            };
+          const { held: _, ...rest } = i;
+          return rest;
+        }),
+      );
+      return { ok: true };
+    };
+    return (
+      <NeedsYouWindow
+        items={items}
+        tiers={you}
+        waves={STATE.waves}
+        control={control as unknown as NeedsYouWindowProps["control"]}
+        device="phone"
+        frame={frame}
+        onClose={() => {}}
+      />
+    );
+  }
+
+  /** Refuses the first request `hit` matches with `error`, and nothing after. */
+  function refuseOnce(hit: (op: string, id: string) => boolean, error: string) {
+    let refused = false;
+    return (op: string, id: string): string | null => {
+      if (refused || !hit(op, id)) return null;
+      refused = true;
+      return error;
+    };
+  }
+
+  it("with a live store the group stays one row while it is answered, then reads answered", async () => {
+    const calls: { op: string; id: string }[] = [];
+    render(<Live items={burst} calls={calls} />);
+    fireEvent.click(within(lead()).getByRole("button", { name: "blocker" }));
+    await waitFor(() => expect(calls).toHaveLength(11));
+    expect(
+      await within(lead()).findByText(/answered 11 on desk·phone · blocker/),
+    ).toBeInTheDocument();
+    expect(rows()).toHaveLength(1);
+    expect(calls).toHaveLength(11);
+  });
+
+  it("with a live store a partial failure stays on the one row and the retry sends only the rest", async () => {
+    const calls: { op: string; id: string }[] = [];
+    const refuse = refuseOnce((_, id) => id === "d-burst-4", "volleyd did not answer within 10s");
+    render(<Live items={burst} calls={calls} refuse={refuse} />);
+    fireEvent.click(within(lead()).getByRole("button", { name: "blocker" }));
+    expect(
+      await within(lead()).findByText(/answered 10 of 11 · retry the rest/),
+    ).toBeInTheDocument();
+    expect(rows()).toHaveLength(1);
+    fireEvent.click(within(lead()).getByRole("button", { name: "blocker" }));
+    await waitFor(() => expect(calls).toHaveLength(12));
+    expect(calls[11]).toEqual({ op: "inbox_answer", id: "d-burst-4" });
+    expect(
+      await within(lead()).findByText(/answered 11 on desk·phone · blocker/),
+    ).toBeInTheDocument();
+    expect(rows()).toHaveLength(1);
+  });
+
+  it("with a live store a held group stays one row; a failed hold retries only the rest", async () => {
+    const calls: { op: string; id: string }[] = [];
+    const refuse = refuseOnce((op, id) => op === "hold" && id === "d-burst-3", "broker busy");
+    render(<Live items={burst} calls={calls} refuse={refuse} />);
+    const hold = async () => {
+      // A refused hold leaves the picker open for the retry.
+      const open = within(lead()).queryByRole("button", { name: "Hold · waiting on…" });
+      if (open) fireEvent.click(open);
+      const select = within(lead()).getByRole("combobox", { name: "Hold · waiting on" });
+      const first = (select.querySelectorAll("option")[1] as HTMLOptionElement).value;
+      await act(async () => {
+        fireEvent.change(select, { target: { value: first } });
+      });
+    };
+    await hold();
+    expect(
+      await within(lead()).findByText("held 10 of 11 · retry the rest: broker busy"),
+    ).toBeInTheDocument();
+    expect(rows()).toHaveLength(1);
+    expect(calls).toHaveLength(11);
+    await hold();
+    await waitFor(() => expect(calls).toHaveLength(12));
+    expect(calls[11]).toEqual({ op: "hold", id: "d-burst-3" });
+    expect(rows()).toHaveLength(1);
+    fireEvent.click(await within(lead()).findByRole("button", { name: "Release" }));
+    await waitFor(() => expect(calls).toHaveLength(23));
+    expect(calls.slice(12).every((c) => c.op === "release")).toBe(true);
+    expect(rows()).toHaveLength(1);
+  });
+
+  it("Dismiss hides the whole group", () => {
+    setup({ items: [...burst, item(PICKER)], tiers: you });
+    expect(rows()).toHaveLength(2);
+    fireEvent.click(within(lead()).getByRole("button", { name: /^Dismiss/ }));
+    expect(rows()).toHaveLength(1);
+    expect(screen.getByText(/11 dismissed items/)).toBeInTheDocument();
   });
 });

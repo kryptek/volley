@@ -2,6 +2,153 @@
 
 All workspace packages share one version. Dates are release-tag dates.
 
+## 0.10.0 — 2026-10-24
+
+### Added
+
+- **volley-desk: agent windows show an animated pixel Clawd doing what the agent does.** Typing
+  while implementing, glasses or a magnifier while reviewing, a wrench or hammer in fixup,
+  sparkles when merge-ready; dozing, "?", X eyes and a green check for blocked, needs-you,
+  failed and done. Three looks per step, picked per agent at random but stably. Settings ›
+  Appearance › Agent icons keeps the classic spinner. One shared 8 fps clock, no filters on
+  phones, a still frame under reduced motion. (#350)
+- **volley-desk: Settings › Appearance › Theme.** The Desk reads its colours from one token set;
+  Volley (today's look) is the default and twelve palettes are listed (the other eleven arrive
+  with #368 and #369). The theme applies before the first paint, live on change, on every
+  screen. (#365)
+- **volley-desk: Settings › Appearance › Current step, and depth on the agent window.** Nine
+  treatments of the current pipeline step (Glint by default; Pulse, Aurora, Scanline, Ember,
+  Liquid, Circuit, Prism; Classic keeps the flat look), each card a live preview. Done steps are
+  raised success glass with a ✓, future steps are pressed in, chips get the toggle's bevel and the
+  footer bar is glossy with a slow glint. Transforms and opacity only, no blur; a still frame
+  under reduced motion. (#366)
+- **volley-desk: the wave window's graph and progress rail take the current-step effect.** Running
+  nodes and segments show the effect from Appearance › Current step; merged ones are raised with a
+  ✓, queued ones pressed in; an ended wave stays flat. Graph nodes are HTML now (same layout), so
+  their text is real text for screen readers. (#367)
+- **volley-desk: Material Lighter, a light theme.** The first light palette, WCAG AA for text:
+  accent-coloured text darkens on white, the dock and the sign-in card go light, native controls
+  follow. The Desk's status colours, mascot and backgrounds stay as they are. (#368)
+- **volley-desk: ten more themes.** Material Oceanic, Material Darker, Material Palenight,
+  Material Deep Ocean, Dracula, Night Owl, One Dark, GitHub Dark, Monokai Pro and Solarized Dark,
+  each at WCAG AA for text (comment-grey "dim" tints lifted where the editor theme's own value fell
+  short). (#369)
+- **volleyd, volley-cli, volley-desk: rename and remove a Claude account; every open Desk follows
+  live.** `volley claude rename` / `remove` and the card's ✎ / Remove…; remove is refused while
+  an agent, a running wave or the config default uses the profile, and clears the profile
+  directory, the usage record and the registry entry in one step (a paired machine's directory
+  only as `<home>/.volley/claude/<acct>`, through a new fence token); volleyd publishes a
+  registry-changed signal (`volley/_system/claude/registry`) and prunes usage records of
+  profiles that no longer exist. Part of #391. (#497)
+- **volleyd, volley-desk: a wave's Claude account on its window.** The wave window shows the
+  account its new agents start under (`Account: Balanced` by default, else the account's name)
+  and switches it in place (`wave_account_set`, journaled as `wave_account_moved`, `null` meaning
+  balanced; running agents finish where they are, a task naming its own `account:` keeps it; a pick an open `account_limit` offers answers
+  it), and the wave state carries `account: { pinned, source, moved_from? }`. The wave's
+  `account_limit` is a banner on its window; the wave's settings modal and the Settings › Claude
+  accounts section no longer carry the account or its Needs-you banners, and the agent window's
+  account picker names the account by its registry label. Part of #391. (#499)
+- **volleyd, volley-cli, volley-desk: sign a Claude account in from any device.** The sign-in
+  dialog and `volley claude add|signin` show Anthropic's code-page link first (with a QR code in
+  the Desk) and take either the code it shows or the localhost address a browser ended up on, in
+  one box (a no-echo prompt under `--wait`, or `volley claude code <acct> <entry>` /
+  `volley claude signin <acct> --code <entry>` for the sign-in already waiting);
+  volleyd types the code into the sign-in waiting on that machine, or completes the redirect on
+  it, for the supervisor's and every paired machine (`claude_signin_entry`). The localhost
+  redirect stays as a shortcut when the browser is on the supervisor's machine, never a
+  requirement, and a paired machine's forward is best-effort. The code and `state` are never
+  journaled, logged or echoed. (#500)
+- **volleyd: the wave owner's presence comes from its connection's will.** The wave state's
+  `coordinator` carries `presence` (`online` / `offline`, read from the owner's retained status)
+  and a new `state`, `away`: an offline owner reads `away` while autopilot runs the wave and
+  nothing waits on it, and `gone` only while something only the owner can answer waits (an
+  escalated decision, an owner-only inbox item, a gate under `merge: manual`). A coordinator
+  name still reads `reconnecting` within `autopilot.reconnect_grace_s`. `volleyd status` prints
+  the owner as `· online`, `· away (autopilot) · last seen 2h ago`, `· gone · 1 decision waits
+  for you` (`· gone · something waits for you` when a gate or an inbox item waits) or
+  `· reconnecting`. No timer re-publishes the wave state to keep `last_seen` fresh any
+  more; a quiet connected owner simply stays `online`. (#502)
+
+### Changed
+
+- volley-desk: a handful of near-duplicate text tints (onboarding, machines, inbox, the terminal's
+  error lines, Settings' error acks, the context and usage meters) now use the shared semantic
+  text tints, so they shift by a hair on Volley. (#368)
+- **volley-desk: a task waiting on CI gets a CI panel.** A task held for CI with no agent running
+  gets its own window, cabled to the wave window like an agent window: task and PR, a jobs
+  progress bar with the estimate, the running and failed jobs and a link to the PR's checks; it
+  leaves when CI finishes or an agent takes the task over. The tiny CI stub pill is gone. (#488)
+- **volley-desk, volley-cli: Settings › Claude accounts is one clean card per account.** Name,
+  masked e-mail and plan, the account's three meters once, a machine list with sign-in state
+  only, Add / Rename / Remove, and "Last updated"; no per-machine figures, stale warnings, waves,
+  agent counts, Use-for or next-pick. A paired machine is listed once; a profile waiting for
+  sign-in is a row with Finish sign-in, not a card; a 0% window with no reset reads "no usage yet
+  this window". `volley claude list` heads a group with its registry label, prints
+  `last updated:` instead of `freshest:` and per-row `(stale)`, and lists `waiting for sign-in:`.
+  Part of #391. (#496)
+- **volleyd, volley-desk, volley-cli: adding a Claude account ends primed.** On sign-in done
+  volleyd reads the login's identity and plan and probes its usage at once (`claude_prime { acct }`
+  asks again, at most once per 5 min; `volley peer doctor --probe-login <profile>` runs that one
+  login's probe); the Add dialog says who signed in; a card missing data asks volleyd for it and
+  shows "reading…" until volleyd answers ("no reading yet" after), never a command to run; a
+  sign-in matching an account already on that machine says so and offers to remove the new
+  profile. (#498)
+- **volleyd: `volleyd claim` follows the owner's presence; `claim_after_s` is retired.** A wave is
+  claimable exactly when its owner is offline — a coordinator name once its bound session has
+  been offline past `autopilot.reconnect_grace_s`, so a wave shown `reconnecting` never is —
+  and a quiet connected owner is never claimable, however long it says nothing. A refusal says
+  why (`online`, or `reconnecting` with the time a claim becomes possible). A stored
+  `claim_after_s` (in `config.yaml` or a wave file's `config:`) is dropped with a log line, and
+  `volleyd config set claim_after_s` is refused. (#503)
+- **volley-desk: an owner away while autopilot runs its wave reads `away (autopilot)`, never `No
+  coordinator · claim it`.** The Desk keeps no silence timer: a quiet connected coordinator stays
+  `working` however long, and `reconnecting`, `away` and `gone` come from each wave's own
+  `coordinator.state` (volleyd's reading of the owner's presence), never from another wave of the
+  same owner. An `away` wave is Info `Owner away · autopilot runs this wave` (`Owner away` with
+  autopilot off), with a neutral `away` chip and `Owner away · autopilot · last seen 2h ago` in
+  the coordinators window, no Needs-you banner, no `claim it`, and its chat refused until a
+  session is back (its decisions, gates and inbox items escalate as under a live coordinator);
+  `gone`, with its banner and claim, now shows only when volleyd says so. A terminal status reads
+  as `gone` only from a supervisor that publishes no `coordinator`. Settings › Supervisor's
+  Attention summary drops `claim_after_s`; demo mode shows an `away (autopilot)` wave beside the
+  reconnecting one. (#483) (#504)
+
+### Fixed
+
+- **volley-desk: the "why here" cards render above the canvas.** The agent window's machine chip
+  tooltip and the wave window's host-chip popover were clipped inside their window and scaled
+  with the canvas; they now portal to the screen layer, flip and shift to stay in the viewport, follow their chip as the canvas pans and zooms,
+  and wrap at 360 px. (#349)
+- **volley-desk: a burst of Needs-you cards no longer paints its buttons as white boxes.** Each
+  Specular button drew on a WebGL context of its own, and a dozen cards pushed the page past the
+  browser's context cap; at most six are live now, the rest (and any whose context is lost) draw a
+  flat tinted rim. Identical open decisions are one card (`×11`, `11 tasks waiting · …`) whose one
+  answer goes to every task; the card stays whole while its members are answered or held one
+  by one, and a partial failure's retry goes to the rest only. (#417)
+- **volley-desk: a graph node's status never runs into its issue number.** The CI hold reads
+  `CI · 12/17` (`CI pending` without a count) on the node, a status too long for the room left of
+  the number is cut with an ellipsis, and every node's tooltip carries the full line
+  (`T8 · <title> · waiting for CI · 12/17 jobs`). (#489)
+- volleyd: a pipeline test no longer flakes on a busy CI runner: it publishes the implementer's
+  result before `done`, so its wait no longer spends two 1 s result probes. (#524)
+
+### Removed
+
+- **volley-mcp: no heartbeat timer; presence is the connection's will (SPEC §7.5).** The MCP
+  server no longer publishes a `progress` heartbeat every `VOLLEY_HEARTBEAT_S`: an idle connected
+  server publishes nothing after `registered`, and a dropped connection flips its retained status
+  to `reaped` by the will. `VOLLEY_HEARTBEAT_S` is ignored, with one stderr line from the server (the hooks and `volley lease` stay quiet). SPEC §7.5
+  defines presence (online while the retained status is live, offline once it is `reaped`, `done`,
+  `failed`, or a `blocked` with `reason: "shutdown"` left by a clean shutdown, which §7.4 now
+  requires), and §4.3 no longer asks agents for a periodic heartbeat. (#501)
+
+### Docs
+
+- volley-desk: the Desk README describes themes, the current-step effects, the light tone and
+  the token layer, with screenshots, and `themes.mjs --matrix` runs every theme against the
+  current-step effects at desktop and phone width. (#370)
+- docs: presence replaces heartbeats in the owner's guide, the `/volley-issues` skill and the smoke plan. (#483) (#505)
+
 ## 0.9.0 — 2026-10-23
 
 ### Added

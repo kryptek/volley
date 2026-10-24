@@ -225,6 +225,17 @@
                 }
               }
             },
+            "account": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["pinned", "source"],
+              "description": "The Claude account the wave's new agents start under (spec section 4.6.11). pinned: the account (a registry id or primary), null when its spawns balance; source: what names it (wave: its wave file's account: or a move, wave_account_set or an account_limit answer; config: claude.default_account; balanced: nothing does); moved_from: the account its last move left. Running agents keep the account they started under. Absent from an older supervisor.",
+              "properties": {
+                "pinned": { "type": ["string", "null"], "minLength": 1 },
+                "source": { "enum": ["wave", "config", "balanced"] },
+                "moved_from": { "type": "string", "minLength": 1 }
+              }
+            },
             "updated_at": { "type": "string", "format": "date-time" }
           }
         }
@@ -666,11 +677,12 @@
     },
     "coordinator": {
       "type": "object",
-      "description": "Owner coordinator attention state, maintained by the supervisor from the owner's registry and progress topics. For an owner that is a coordinator name (spec section 6.2), agent_id is the agent bound to it and reconnecting means that agent went away less than autopilot.reconnect_grace_s ago.",
-      "required": ["agent_id", "state", "last_seen"],
+      "description": "Owner coordinator presence and attention state, maintained by the supervisor from the owner's registry, status and progress topics. presence is read from the owner's retained status (spec section 7.5): offline once its will fired or it shut down, or before any status. For an owner that is a coordinator name (spec section 6.2), agent_id is the agent bound to it and reconnecting means that agent went away less than autopilot.reconnect_grace_s ago. Past that (at once for an agent-id owner) an offline owner is gone while something only it can answer waits in the wave, else away (autopilot runs the wave).",
+      "required": ["agent_id", "presence", "state", "last_seen"],
       "properties": {
         "agent_id": { "$ref": "#/$defs/agentId" },
-        "state": { "enum": ["working", "awaiting_input", "reconnecting", "gone"] },
+        "presence": { "enum": ["online", "offline"] },
+        "state": { "enum": ["working", "awaiting_input", "reconnecting", "away", "gone"] },
         "question": { "type": "string" },
         "session_url": { "type": "string", "format": "uri" },
         "workspace": { "type": "string" },

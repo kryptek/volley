@@ -113,7 +113,7 @@ const SETTLE_MS = 3000;
 const REPLAY_QUIET_MS = 80;
 /** The longest a connect's replay is held back from the store (a broker that never goes quiet). */
 const REPLAY_HOLD_MAX_MS = 1500;
-/** Offline spans kept (older ones are long past any `claim_after_s`). */
+/** Offline spans kept: they exclude the agents' quiet windows from silence, so only recent ones matter. */
 const OFFLINE_KEEP = 50;
 /**
  * The reconnect / resume grace window. A fixed span, not a tunable: the hooks
@@ -421,11 +421,16 @@ export function DeskStoreProvider({
   // The demo writer answers a coordinator with `resumed` instead of `steering_acked`.
   const coordinatorIds = useRef<ReadonlySet<string>>(new Set());
   coordinatorIds.current = new Set(Object.keys(state.coordinators));
+  // The demo writer re-publishes a wave's state when its account is set.
+  const waveStates = useRef<DeskState["waves"]>({});
+  waveStates.current = state.waves;
   const [demoWriter] = useState<SteerClient | null>(() =>
     demo
       ? createDemoSteerClient(
           (msgs) => dispatch({ type: "apply", msgs }),
           (id) => coordinatorIds.current.has(id),
+          Date.now,
+          (wave) => waveStates.current[wave]?.state ?? null,
         )
       : null,
   );

@@ -7,6 +7,7 @@
  * `&agents=N` (dev only) adds working agents on a `load-test` wave, for the
  * 20-agent fps check.
  */
+import type { RegistryAccount } from "./claude";
 import { initialState, reduceAll } from "./reducer";
 import type {
   DeskMessage,
@@ -17,6 +18,7 @@ import type {
   PlanCluster,
   Role,
   Stage,
+  WaveAccount,
   WaveCoordinator,
   WaveStatePayload,
   WaveTask,
@@ -74,9 +76,13 @@ interface TaskDef {
 interface WaveDef {
   id: string;
   owner: string;
-  coordinator: Omit<WaveCoordinator, "agent_id" | "last_seen"> & { lastSeenMin: number };
+  coordinator: Omit<WaveCoordinator, "agent_id" | "last_seen" | "presence"> & {
+    lastSeenMin: number;
+  };
   status: WaveStatePayload["status"];
   releaseBranch: string;
+  /** The account its new agents start under (wave-state `account`); absent: balanced. */
+  account?: WaveAccount;
   tasks: TaskDef[];
   decision?: {
     task: string;
@@ -100,6 +106,8 @@ const WAVES: WaveDef[] = [
     },
     status: "running",
     releaseBranch: "release/2026-10-20-status-chip",
+    // Pinned to the Team account (the demo registry's): its window's chip names it.
+    account: { pinned: "team", source: "wave" },
     tasks: [
       { id: "T0", issue: 101, title: "Status chip data contract", after: [], stage: "done" },
       {
@@ -279,7 +287,16 @@ function waveState(w: WaveDef, now: number, tasks: TaskDef[] = w.tasks): DeskMes
         tasks.map((t) => [t.id, { issue: t.issue, title: t.title, after: t.after }]),
       ),
     },
-    coordinator: { agent_id: w.owner, ...coordinator, last_seen: iso(now - lastSeenMin * 60_000) },
+    coordinator: {
+      agent_id: w.owner,
+      presence:
+        coordinator.state === "working" || coordinator.state === "awaiting_input"
+          ? "online"
+          : "offline",
+      ...coordinator,
+      last_seen: iso(now - lastSeenMin * 60_000),
+    },
+    account: w.account ?? { pinned: null, source: "balanced" },
     updated_at: iso(now),
   };
   return {
@@ -512,7 +529,6 @@ function globals(now: number): DeskMessage[] {
       ci_queue_max: 10,
       hysteresis_samples: 3,
     },
-    claim_after_s: 1800,
     heartbeat_alarm_s: 600,
     fallback_model: MODEL,
     mailbox: { session_expiry_s: 604800 },
@@ -641,7 +657,99 @@ function loadMessages(extra: number, now: number): DeskMessage[] {
   ];
 }
 
-/** Two Claude accounts' usage records and the agents' context samples (SPEC §4.6.12). */
+/** The owner's own Claude login: this machine's and box-a's default login. */
+const OWNER_EMAIL = "owner@example.com";
+const SIGNED_IN_AT = "2026-10-01T09:00:00.000Z";
+
+/**
+ * volleyd's profile registry as the demo's `claude_accounts` answers it: Work and Personal here,
+ * the Team account on this machine and on box-a (one account, two machines), and a profile on
+ * box-a still waiting for its sign-in.
+ */
+export const DEMO_CLAUDE_REGISTRY: RegistryAccount[] = [
+  {
+    id: "work",
+    label: "Work",
+    machine: "local",
+    plan: "max",
+    email: "work@example.com",
+    signed_in_at: SIGNED_IN_AT,
+  },
+  {
+    id: "team",
+    label: "Team account",
+    machine: "local",
+    plan: "team",
+    email: "team@example.com",
+    org: "Example Org",
+    signed_in_at: SIGNED_IN_AT,
+  },
+  {
+    id: "team",
+    label: "Team account (box-a)",
+    machine: "box-a",
+    plan: "team",
+    email: "team@example.com",
+    org: "Example Org",
+    signed_in_at: SIGNED_IN_AT,
+  },
+  {
+    id: "personal",
+    label: "Personal",
+    machine: "local",
+    plan: "pro",
+    email: "personal@example.com",
+    signed_in_at: SIGNED_IN_AT,
+  },
+  {
+    id: "pending-work",
+    label: "Work (box-a)",
+    machine: "box-a",
+    signin: { state: "pending", url: "https://claude.com/cai/oauth/authorize?state=demo" },
+  },
+];
+
+/** The demo's `claude_accounts` answer: the registry, the primary, the machines it reads. */
+export function demoClaudeAccounts() {
+  return {
+    root: "/path/to/home/.volley/claude",
+    accounts: DEMO_CLAUDE_REGISTRY,
+    primary: { plan: "max", email: OWNER_EMAIL },
+    machines: [
+      { name: LOCAL_MACHINE, kind: "supervisor", claude: "signed_in", email: OWNER_EMAIL },
+      { name: "box-a", kind: "peer", claude: "signed_in", plan: "max", email: OWNER_EMAIL },
+      { name: "box-b", kind: "peer", claude: "unknown" },
+    ],
+    sharing: { mcp: "copy" },
+  };
+}
+
+/** The demo's `claude_balance` answer: per machine, the account each family's next spawn takes. */
+export function demoClaudeBalance() {
+  const candidate = (account: string, five: number, weekly: number) => ({
+    account,
+    headroom: 100 - five,
+    five_hour_pct: five,
+    weekly_pct: weekly,
+    agents: 0,
+  });
+  return {
+    machines: [
+      {
+        name: "local",
+        candidates: [candidate("team", 8, 15), candidate("personal", 12, 22)],
+        picks: { fable: "team", opus: "team", sonnet: "personal", haiku: "personal" },
+      },
+      {
+        name: "box-a",
+        candidates: [candidate("team@box-a", 8, 15)],
+        picks: { fable: "team@box-a", opus: "team@box-a", sonnet: "team@box-a", haiku: null },
+      },
+    ],
+  };
+}
+
+/** The Claude accounts' usage records and the agents' context samples (SPEC §4.6.12). */
 function claudeUsage(now: number): DeskMessage[] {
   const win = (pct: number, inMin: number) => ({ pct, resets_at: iso(now + inMin * 60_000) });
   const accounts = [
@@ -663,6 +771,35 @@ function claudeUsage(now: number): DeskMessage[] {
       agents: ["ci-speed-t3b-implementer-1"],
       waves: ["ci-speed"],
     },
+    {
+      account: "team",
+      label: "Team account",
+      plan: "team",
+      email: "team@example.com",
+      five_hour: win(8, 190),
+      weekly: win(15, 3 * 1440),
+      agents: [],
+      waves: [],
+      sampled_at: iso(now - 120_000),
+    },
+    {
+      // The Team account's login on box-a: the fresher reading, and the usage probe's.
+      account: "team@box-a",
+      label: "Team account (box-a)",
+      plan: "team",
+      email: "team@example.com",
+      five_hour: win(8, 190),
+      weekly: win(15, 3 * 1440),
+      model_weekly: { fable: win(6, 3 * 1440) },
+      probe: {
+        machine: "box-a",
+        state: "ok",
+        attempted_at: iso(now - 30_000),
+        read_at: iso(now - 30_000),
+      },
+      agents: [],
+      waves: [],
+    },
   ];
   const samples: [string, string, number, number][] = [
     ["status-chip-t1-fixup-1", "work", 143_000, 200_000],
@@ -676,7 +813,7 @@ function claudeUsage(now: number): DeskMessage[] {
         "volleyd",
         "_system/claude-accounts",
         "claude_account",
-        { ...a, sampled_at: iso(now - 30_000) },
+        { sampled_at: iso(now - 30_000), ...a },
         now,
       ),
       receivedAt: now,
@@ -783,7 +920,14 @@ function machines(now: number, step = 0): DeskMessage[] {
     memory: { total_mb: 65_536, available_pct },
     disk: { path: "/srv/work", free_gb: 312, free_pct: 64 },
     versions: { peer: "0.3.1", volley: "0.3.1", bun: "1.3.2", git: "2.47.0", claude: "2.1.0" },
-    auth: { gh: "ok", claude: "signed_in", trust: trust ? "ok" : "missing" },
+    auth: {
+      gh: "ok",
+      claude: "signed_in",
+      trust: trust ? "ok" : "missing",
+      // The owner's own login, on this machine and on box-a alike.
+      claude_email: OWNER_EMAIL,
+      claude_plan: "max",
+    },
     repo: { path: repo, exists: true, origin: "github.com/example-org/example-repo" },
     checks: checks(trust),
     doctor_at: iso(now - 60_000),
@@ -1038,10 +1182,15 @@ export function demoReviewer(now = Date.now()): DeskMessage[] {
   ];
 }
 
+/** How long ago the demo's `lead` owner went offline (its away and gone waves). */
+const OWNER_AWAY_MS = 2 * 3_600_000;
+
 /**
  * Autopilot's surfaces (SPEC §4.6.16–19), as two more waves a supervisor would publish: one whose
- * coordinator is reconnecting (its session's MCP restarted), and one autopilot runs that is
- * releasing, with a merge queue, a release train, a synthetic fixer task and both journal events.
+ * coordinator (`relay`) is reconnecting (its session's MCP restarted), and one autopilot runs that
+ * is releasing, with a merge queue, a release train, a synthetic fixer task and both journal
+ * events. Its owner (`lead`) is offline, and the release's owner-only `publish` item waits on it,
+ * so it is `gone` (its other wave, `demoPlanned`'s, waits on nothing: `away`).
  */
 export function demoAutopilot(now = Date.now()): DeskMessage[] {
   const base = (wave: string, over: Partial<WaveStatePayload>): WaveStatePayload => ({
@@ -1064,9 +1213,15 @@ export function demoAutopilot(now = Date.now()): DeskMessage[] {
   });
   const task = (id: string, issue: number, stage: Stage) => ({ id, issue, stage, agents: {} });
   const reconnecting = base("relaunch", {
+    owner: "relay",
     tasks: [task("T1", 201, "implement")],
     spec: { version: 1, tasks: { T1: { issue: 201, title: "Grace window", after: [] } } },
-    coordinator: { agent_id: "lead-a7", state: "reconnecting", last_seen: iso(now - 3 * 60_000) },
+    coordinator: {
+      agent_id: "relay-a7",
+      presence: "offline",
+      state: "reconnecting",
+      last_seen: iso(now - 3 * 60_000),
+    },
     autopilot: { enabled: true, auto_resolved: 0, escalated: 0, budgets: {} },
   });
   const train = base("autopilot", {
@@ -1099,7 +1254,12 @@ export function demoAutopilot(now = Date.now()): DeskMessage[] {
         T9: { issue: 214, title: "Train stages", after: ["T5"] },
       },
     },
-    coordinator: { agent_id: "lead", state: "working", last_seen: iso(now) },
+    coordinator: {
+      agent_id: "lead",
+      presence: "offline",
+      state: "gone",
+      last_seen: iso(now - OWNER_AWAY_MS),
+    },
     autopilot: {
       enabled: true,
       auto_resolved: 4,
@@ -1285,7 +1445,13 @@ export function demoPlanned(now = Date.now()): DeskMessage[] {
         },
       },
     },
-    coordinator: { agent_id: "lead", state: "working", last_seen: iso(now) },
+    // Its owner went offline two hours ago; nothing here waits on it, so autopilot runs it.
+    coordinator: {
+      agent_id: "lead",
+      presence: "offline",
+      state: "away",
+      last_seen: iso(now - OWNER_AWAY_MS),
+    },
     autopilot: { enabled: true, auto_resolved: 2, escalated: 0, budgets: {} },
     merge_queue: [
       { task: "i305", state: "queued", since: iso(now - 2 * 60_000) },

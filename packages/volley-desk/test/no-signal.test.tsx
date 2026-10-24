@@ -415,6 +415,7 @@ describe("AgentWindow no-signal glyph and label", () => {
         frame={frame}
         now={NOW}
         noSignal={ns}
+        icons="classic"
       />,
     );
     const label = screen.getByText(NO_SIGNAL_LABEL);
@@ -424,6 +425,23 @@ describe("AgentWindow no-signal glyph and label", () => {
     );
     const mark = container.querySelector<HTMLElement>(".sm-nosignal");
     expect(mark?.style.getPropertyValue("--sm-color")).toBe(NO_SIGNAL_GREY);
+  });
+
+  it("with the Clawd characters, an agent with no signal dozes", () => {
+    const a = agentFrom("loner", [registry("loner", NOW - 5 * S)]);
+    const ns = noSignalFor(a, undefined, ctx());
+    if (!ns) throw new Error("expected no signal");
+    render(
+      <AgentWindow
+        agent={a}
+        wave={undefined}
+        accent="#fff"
+        frame={frame}
+        now={NOW}
+        noSignal={ns}
+      />,
+    );
+    expect(screen.getByRole("img", { name: "waiting" })).toHaveClass("clawd-sprite");
   });
 
   it("the Terminal's empty state says there is no signal", () => {

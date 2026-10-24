@@ -110,6 +110,37 @@ function cssFiles(dir: string): string[] {
   });
 }
 
+/** The custom properties a desk.css block declares. */
+function props(selector: string): Map<string, string> {
+  const css = read(join(SRC, "styles/desk.css"));
+  const at = css.indexOf(`${selector} {`);
+  const body = css.slice(css.indexOf("{", at) + 1, css.indexOf("\n}", at));
+  return new Map(
+    [...body.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map((m) => [m[1] ?? "", m[2] ?? ""]),
+  );
+}
+const ROOT = props(":root");
+const THEMED = new Map([...ROOT, ...props('html[data-theme]:not([data-theme="volley"])')]);
+
+/**
+ * The alphas of a fill: each `rgba(…, a)` and each `color-mix(in srgb, var(--x) N%, transparent)`
+ * (alpha N/100), after resolving `var(--…)` against `defs`.
+ */
+function fillAlphas(value: string, defs: Map<string, string>): number[] {
+  let v = value;
+  for (let i = 0; i < 5; i++) {
+    v = v.replace(/var\((--[\w-]+)\)(?!\s*\d)/g, (m, p: string, at: number, all: string) =>
+      /color-mix\(in srgb,\s*$/.test(all.slice(0, at)) ? m : (defs.get(p) ?? m),
+    );
+  }
+  return [
+    ...[...v.matchAll(/rgba\([^)]*,\s*([\d.]+)\)/g)].map((m) => Number(m[1])),
+    ...[...v.matchAll(/color-mix\(in srgb,\s*var\(--[\w-]+\)\s+([\d.]+)%,\s*transparent\)/g)].map(
+      (m) => Number(m[1]) / 100,
+    ),
+  ];
+}
+
 describe("lite.css", () => {
   const css = read(LITE);
   const top = blocks(css);
@@ -155,11 +186,29 @@ describe("lite.css", () => {
     );
     expect(drawn).toBe(true);
     const fill = liteRules.find(([sels]) => sels.includes(".dock-wrap .dock"))?.[1] ?? "";
-    const alphas = [
-      ...(decls(fill, "background")[0] ?? "").matchAll(/rgba\([^)]*,\s*([\d.]+)\)/g),
-    ].map((m) => Number(m[1]));
-    expect(alphas.length).toBeGreaterThan(0);
-    for (const a of alphas) expect(a).toBeGreaterThanOrEqual(0.9);
+    const value = decls(fill, "background")[0] ?? "";
+    expect(value).not.toBe("");
+    // Volley's fill (desk.css :root) and every other theme's (the themed block).
+    for (const props of [ROOT, THEMED]) {
+      const alphas = fillAlphas(value, props);
+      expect(alphas.length).toBeGreaterThan(0);
+      for (const a of alphas) expect(a).toBeGreaterThanOrEqual(0.9);
+    }
+  });
+
+  it("keeps every surface's fill opaque-ish under every theme (≥ 0.94)", () => {
+    const fills = liteRules.flatMap(([, body]) => [
+      ...decls(body, "background-color"),
+      ...decls(body, "background"),
+    ]);
+    expect(fills.length).toBeGreaterThanOrEqual(6);
+    for (const props of [ROOT, THEMED]) {
+      for (const value of fills) {
+        const alphas = fillAlphas(value, props);
+        expect(alphas.length, value).toBeGreaterThan(0);
+        for (const a of alphas) expect(a, value).toBeGreaterThanOrEqual(0.94);
+      }
+    }
   });
 
   it("pulses Needs-you with opacity, never box-shadow", () => {
@@ -172,5 +221,13 @@ describe("lite.css", () => {
     expect(frames).toMatch(/opacity\s*:/);
     expect(frames).not.toMatch(/box-shadow/);
     expect(lite).not.toMatch(/box-shadow/);
+  });
+});
+
+describe("lite.css and the Specular buttons (#417)", () => {
+  it("hides every Specular button's light canvas: the buttons are flat", () => {
+    const lite = rules(read(LITE));
+    const rule = lite.find(([sels]) => sels.includes(".specular-button .specular-button__light"));
+    expect(rule && decls(rule[1], "display")).toEqual(["none"]);
   });
 });

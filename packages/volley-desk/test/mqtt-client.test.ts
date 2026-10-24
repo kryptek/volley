@@ -59,6 +59,7 @@ describe("createMqttClient (desk)", () => {
       "volley/+/+/usage",
       "volley/_system/claude-accounts/+",
       "volley/_system/claude/+/signin",
+      "volley/_system/claude/registry",
       "volley/_system/machines/#",
       "volley/_inbox/+",
       "volley/_system/auth/replies/+",

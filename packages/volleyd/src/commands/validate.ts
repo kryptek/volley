@@ -169,14 +169,16 @@ export function placementDefaults(env: CommandArgs["env"]): PlacementDefaults {
 
 /**
  * The wave file `text` parsed under `defaults`, with its placement line
- * (`placement: auto (placement.default; 1 paired machine)`).
+ * (`placement: auto (placement.default; 1 paired machine)`) and a `note:` line per retired key
+ * its `config:` dropped.
  */
 export function parseWithPlacement(
   text: string,
   file: string,
   defaults: PlacementDefaults,
-): { wave: Wave; placementLine: string; fromFile: boolean } {
-  const wave = parseWaveFile(text, file, defaults);
+): { wave: Wave; placementLine: string; fromFile: boolean; notes: string } {
+  const dropped: string[] = [];
+  const wave = parseWaveFile(text, file, defaults, dropped);
   // Valid, so a mapping; `placement:` and `config:` as written.
   const raw = parse(text) as { placement?: "auto" | "local"; config?: Wave["config"] };
   const placed = defaultPlacement(raw, defaults);
@@ -184,6 +186,7 @@ export function parseWithPlacement(
     wave,
     placementLine: `${formatPlacement(placed, defaults.paired)}\n`,
     fromFile: placed.by === "wave file",
+    notes: dropped.map((n) => `note: ${n}\n`).join(""),
   };
 }
 
@@ -265,11 +268,12 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
     return EXIT.USAGE;
   }
   try {
-    const { wave, placementLine } = parseWithPlacement(
+    const { wave, placementLine, notes } = parseWithPlacement(
       readFileSync(file, "utf-8"),
       file,
       placementDefaults(env),
     );
+    if (notes !== "") io.stderr(notes);
     const weights = {
       ...CONFIG_DEFAULTS.placement.weights,
       ...globalWeights(env),

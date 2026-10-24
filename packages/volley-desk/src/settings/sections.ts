@@ -97,7 +97,8 @@ export const SETTINGS_SECTIONS: readonly SectionDef[] = [
     icon: PaintBoardIcon,
     tint: "#5e5ce6",
     group: 0,
-    keywords: "background dim window style needs you effect theme tethers",
+    keywords:
+      "background dim window style needs you effect theme tethers current step glint pulse aurora scanline ember liquid circuit prism classic",
   },
   {
     key: "supervisor",

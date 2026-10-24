@@ -3,7 +3,10 @@
  * dependency depth (a task sits one column right of its deepest `after`),
  * tasks in wave-file order within a column, each column centred vertically,
  * and cubic edges from a task's right edge to its dependents' left edge. The
- * layout is split out as the pure `layoutDag`.
+ * layout is split out as the pure `layoutDag`. The nodes are HTML boxes over
+ * one SVG layer of edges, so they take the depth states and the current-step
+ * effect (`stageState`, `stepfx.css`): merged raised with a ✓, running with the
+ * effect, queued pressed in; an ended wave's graph stays flat.
  *
  * Given a `maxWidth` the graph cannot span (a phone: `columns × 172 px` wider
  * than the window), the columns wrap into bands stacked top to bottom, as many
@@ -23,8 +26,9 @@
  * `HostChips` lists, under the graph, the machine each placed task runs on
  * and why (SPEC §4.6.15 `tasks[].placement`).
  */
-import { useState } from "react";
+import { type CSSProperties, Fragment, type RefObject, useRef, useState } from "react";
 import { issueLabel } from "../../lib/github";
+import { Popover } from "../../look/Popover";
 import type { TaskPlacement, WaveTask } from "../../store/types";
 import { hueOf } from "./accent";
 import { type DeskStage, STAGE_LABEL } from "./stages";
@@ -58,14 +62,31 @@ const bundleList = (t: DagNode) =>
   [t.issue, ...(t.bundle ?? []).map((b) => b.issue)].map((n) => `#${n}`).join(", ");
 
 /**
- * A node's tooltip: its title, or what a fixer fixes, and a bundle's issues; else the id itself
- * when the node elides it.
+ * A node's tooltip: `T8 · <title> · waiting for CI · 12/17 jobs`, its id, its title (or what a
+ * fixer fixes), a bundle's issues and the full status line, which the node may have cut.
  */
-function nodeTip(t: DagNode): string | undefined {
-  if (t.fixerFor) return `${t.id} · ${fixerLabel(t.fixerFor)}`;
-  const parts = [t.title, t.bundle?.length ? bundleList(t) : undefined].filter(Boolean);
-  if (parts.length) return [t.id, ...parts].join(" · ");
-  return fitId(t.id, idFit(t)) === t.id ? undefined : t.id;
+function nodeTip(t: DagNode, full: string): string {
+  const what = t.fixerFor ? fixerLabel(t.fixerFor) : t.title;
+  return [t.id, what, t.bundle?.length ? bundleList(t) : undefined, full]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/**
+ * A node's depth state (`stepfx.css`): merged is `done`, a running stage `cur`, queued `future`.
+ * A decision keeps its amber and a cancelled task its faded look, and an ended wave's nodes are
+ * a record, flat: none of them gets a state.
+ */
+export function stageState(
+  stage: DeskStage,
+  cancelled: boolean,
+  ended: boolean,
+): "done" | "cur" | "future" | null {
+  if (cancelled || ended) return null;
+  if (stage === "merged") return "done";
+  if (stage === "queued") return "future";
+  if (stage === "decision") return null;
+  return "cur";
 }
 
 export interface DagLayout {
@@ -86,6 +107,18 @@ export const DAG_NODE_W = W;
 export const DAG_NODE_H = H;
 /** A `.dag-id` character's advance: 600 13px mono is about 0.6 em. */
 export const DAG_ID_CHAR_PX = 7.8;
+/**
+ * A `.dag-stage` character's advance: 11.5px UI text, `implementing`'s average as measured in
+ * Chrome (the longest label that must fit beside a 4-digit issue). An estimate: the node's CSS
+ * ellipsis is the last guard.
+ */
+export const DAG_STAGE_CHAR_PX = 6.2;
+/** A `.dag-issue` character's advance: 11px mono is 0.6 em. */
+export const DAG_ISSUE_CHAR_PX = 6.6;
+/** The fixer's wrench in the node's corner. */
+export const DAG_FIXER_PX = 14;
+/** The room kept between a node's status and its corner label. */
+const STATUS_GAP = 4;
 /** Characters of id that fit between the node's 10 px insets. */
 const ID_FIT = Math.floor((W - 20) / DAG_ID_CHAR_PX);
 /** A `.dag-cluster` badge character's advance: 9.5px mono. */
@@ -105,6 +138,25 @@ const idFit = (t: DagNode) =>
 export function fitId(id: string, fit = ID_FIT): string {
   if (id.length <= fit) return id;
   return fit >= 12 ? `${id.slice(0, 6)}…${id.slice(-5)}` : `${id.slice(0, fit - 1)}…`;
+}
+
+/**
+ * A status that fits left of the node's corner label (`cornerPx` wide, 0 for none) with a clear
+ * gap: as is when it does, else cut with `…` (counted as two characters). The node's tooltip
+ * keeps the full line.
+ */
+export function fitStatus(text: string, cornerPx: number): string {
+  const room = W - 20 - (cornerPx ? cornerPx + STATUS_GAP : 0);
+  const max = Math.floor(room / DAG_STAGE_CHAR_PX);
+  return text.length <= max ? text : `${text.slice(0, max - 2).trimEnd()}…`;
+}
+
+/** The width of a node's corner label: the wrench, the issue (`#310 +1` for a bundle) or none. */
+function cornerPx(t: DagNode): number {
+  if (t.fixerFor) return DAG_FIXER_PX;
+  if (t.issue <= 0) return 0;
+  const more = t.bundle?.length ? ` +${t.bundle.length}` : "";
+  return `#${t.issue}${more}`.length * DAG_ISSUE_CHAR_PX;
 }
 
 /** The width of `n` columns side by side. */
@@ -216,6 +268,7 @@ export function Dag({
   maxWidth,
   ended = false,
   labels = {},
+  status = {},
 }: {
   tasks: readonly DagNode[];
   accent: string;
@@ -223,101 +276,111 @@ export function Dag({
   maxWidth?: number | undefined;
   /** The wave stopped or completed: stages are shown as they were, struck through. */
   ended?: boolean;
-  /** Stage text overrides by task id (e.g. `waiting for CI`). */
+  /** Stage text overrides by task id (e.g. `CI · 3/13`). */
   labels?: Readonly<Record<string, string>>;
+  /** The full status line by task id (`waiting for CI · 3/13 jobs`), for the tooltip. */
+  status?: Readonly<Record<string, string>>;
 }) {
   const l = layoutDag(tasks, maxWidth);
   return (
     <div className="dag-scroll">
       {/* A group, not an img: an img's children are presentational, and the issue labels are links. */}
-      <svg
+      <div
         className={`dag${ended ? " dag--ended" : ""}`}
-        width={l.width}
-        height={l.height}
-        viewBox={`0 0 ${l.width} ${l.height}`}
-        // biome-ignore lint/a11y/useSemanticElements: an <svg> cannot be a <fieldset>
+        // biome-ignore lint/a11y/useSemanticElements: a graph of nodes, not a form's <fieldset>
         role="group"
         aria-label="Task dependency graph"
+        // The ids are accent text: --acc-ink (desk.css) darkens the accent on a light theme.
+        style={{ "--acc": accent, width: l.width, height: l.height } as CSSProperties}
       >
-        {l.edges.map((e) => (
-          <path
-            key={`${e.from}>${e.to}`}
-            d={e.d}
-            className={`dag-edge${e.chained ? " dag-edge--chain" : ""}`}
-          />
-        ))}
-        {l.nodes.map((t) => (
-          <g
-            key={t.id}
-            transform={`translate(${t.x},${t.y})`}
-            className={`dag-node st-${t.cancelled ? "cancelled" : t.stage}`}
-            data-col={t.col}
-            data-id={t.id}
-            {...(t.cluster ? { "data-cluster": t.cluster.id } : {})}
-          >
-            {nodeTip(t) && <title>{nodeTip(t)}</title>}
-            {t.cluster && <ClusterHull hue={t.cluster.hue} />}
-            <rect width={W} height={H} rx="9" />
-            <text x="10" y="18" className="dag-id" fill={accent}>
-              {fitId(t.id, idFit(t))}
-            </text>
-            {t.cluster && (
-              <text
-                x={W - 8}
-                y="15"
-                textAnchor="end"
-                className="dag-cluster"
-                fill={hueOf(t.cluster.hue)}
+        <svg
+          className="dag-edges"
+          width={l.width}
+          height={l.height}
+          viewBox={`0 0 ${l.width} ${l.height}`}
+          aria-hidden="true"
+        >
+          {l.edges.map((e) => (
+            <path
+              key={`${e.from}>${e.to}`}
+              d={e.d}
+              className={`dag-edge${e.chained ? " dag-edge--chain" : ""}`}
+            />
+          ))}
+        </svg>
+        {l.nodes.map((t) => {
+          const fx = stageState(t.stage, !!t.cancelled, ended);
+          const shown = t.cancelled ? "cancelled" : (labels[t.id] ?? STAGE_LABEL[t.stage]);
+          return (
+            <Fragment key={t.id}>
+              {t.cluster && <ClusterHull t={t} hue={t.cluster.hue} />}
+              <div
+                className={`dag-node st-${t.cancelled ? "cancelled" : t.stage}${fx ? ` fx-${fx}` : ""}`}
+                data-col={t.col}
+                data-id={t.id}
+                {...(t.cluster ? { "data-cluster": t.cluster.id } : {})}
+                title={nodeTip(t, status[t.id] ?? shown)}
+                style={{ left: t.x, top: t.y, width: W, height: H }}
               >
-                {t.cluster.badge}
-              </text>
-            )}
-            <text x="10" y="34" className="dag-stage">
-              {t.cancelled ? "cancelled" : (labels[t.id] ?? STAGE_LABEL[t.stage])}
-            </text>
-            {/* Second line, right: a fixer's wrench, else its issue (none for a synthetic `#0`). */}
-            {t.fixerFor ? (
-              <text x={W - 10} y="34" textAnchor="end" className="dag-fixer">
-                🔧
-              </text>
-            ) : t.issue > 0 && t.bundle?.length ? (
-              <BundleLabel t={t} />
-            ) : t.issue > 0 && t.issueHref ? (
-              <a
-                href={t.issueHref}
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-label={issueLabel(t.issue)}
-                className="dag-issue-link"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <text x={W - 10} y="34" textAnchor="end" className="dag-issue">
-                  #{t.issue}
-                </text>
-              </a>
-            ) : t.issue > 0 ? (
-              <text x={W - 10} y="34" textAnchor="end" className="dag-issue">
-                #{t.issue}
-              </text>
-            ) : null}
-          </g>
-        ))}
-      </svg>
+                <b className="dag-id">{fitId(t.id, idFit(t))}</b>
+                {t.cluster && (
+                  <span
+                    className="dag-cluster"
+                    style={{ "--hue": hueOf(t.cluster.hue) } as CSSProperties}
+                  >
+                    {t.cluster.badge}
+                  </span>
+                )}
+                <span className="dag-stage">{fitStatus(shown, cornerPx(t))}</span>
+                {/* Second line, right: a fixer's wrench, else its issue (none for a synthetic `#0`). */}
+                {t.fixerFor ? (
+                  <span className="dag-fixer" aria-hidden="true">
+                    🔧
+                  </span>
+                ) : t.issue > 0 && t.bundle?.length ? (
+                  <BundleLabel t={t} />
+                ) : t.issue > 0 && t.issueHref ? (
+                  <a
+                    href={t.issueHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={issueLabel(t.issue)}
+                    className="dag-issue dag-issue-link"
+                    onClick={stop}
+                  >
+                    #{t.issue}
+                  </a>
+                ) : t.issue > 0 ? (
+                  <span className="dag-issue">#{t.issue}</span>
+                ) : null}
+              </div>
+            </Fragment>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-/** The tinted hull behind a clustered node: static, so reduced motion keeps it as is. */
-function ClusterHull({ hue }: { hue: number }) {
+/**
+ * The tinted hull behind a clustered node: the node's sibling, as the depth states clip what a
+ * node holds. Static, so reduced motion keeps it as is.
+ */
+function ClusterHull({ t, hue }: { t: DagLayout["nodes"][number]; hue: number }) {
   return (
-    <rect
+    <div
       className={`dag-hull hull-${hue}`}
-      x={-5}
-      y={-5}
-      width={W + 10}
-      height={H + 10}
-      rx="12"
-      fill={hueOf(hue)}
+      data-for={t.id}
+      aria-hidden="true"
+      style={
+        {
+          left: t.x - 5,
+          top: t.y - 5,
+          width: W + 10,
+          height: H + 10,
+          "--hue": hueOf(hue),
+        } as CSSProperties
+      }
     />
   );
 }
@@ -342,17 +405,16 @@ function BundleLabel({ t }: { t: DagNode }) {
         className="dag-issue-link"
         onClick={stop}
       >
-        <tspan>{text}</tspan>
+        {text}
       </a>
     ) : (
-      <tspan key={n}>{text}</tspan>
+      <span key={n}>{text}</span>
     );
   return (
-    <text x={W - 10} y="34" textAnchor="end" className="dag-issue">
-      {link(t.issue, t.issueHref, `#${t.issue}`)}
-      <tspan> </tspan>
+    <span className="dag-issue">
+      {link(t.issue, t.issueHref, `#${t.issue}`)}{" "}
       {extra.map((b, i) => link(b.issue, b.href, i === 0 ? `+${extra.length}` : ""))}
-    </text>
+    </span>
   );
 }
 
@@ -370,6 +432,21 @@ export function placementRule(p: TaskPlacement): string {
  */
 export function HostChips({ tasks }: { tasks: readonly WaveTask[] }) {
   const [open, setOpen] = useState<string | null>(null);
+  const chips = useRef(new Map<string, HTMLButtonElement>());
+  const anchors = useRef(new Map<string, RefObject<HTMLElement | null>>());
+  // One stable anchor per task, so the open card's effects do not rerun on every render.
+  const anchorOf = (id: string) => {
+    let a = anchors.current.get(id);
+    if (!a) {
+      a = {
+        get current() {
+          return chips.current.get(id) ?? null;
+        },
+      };
+      anchors.current.set(id, a);
+    }
+    return a;
+  };
   const placed = tasks.filter((t): t is WaveTask & { placement: TaskPlacement } => !!t.placement);
   if (placed.length === 0) return null;
   return (
@@ -378,16 +455,12 @@ export function HostChips({ tasks }: { tasks: readonly WaveTask[] }) {
         const p = t.placement;
         const shown = open === t.id;
         return (
-          <li
-            key={t.id}
-            // Focus stays on the chip when it opens, so Escape is caught here, around both.
-            onKeyDown={(e) => {
-              if (e.key !== "Escape" || !shown) return;
-              e.stopPropagation();
-              setOpen(null);
-            }}
-          >
+          <li key={t.id}>
             <button
+              ref={(el) => {
+                if (el) chips.current.set(t.id, el);
+                else chips.current.delete(t.id);
+              }}
               type="button"
               className="chip host-chip"
               aria-label={`${t.id} on ${p.host}: why here`}
@@ -396,24 +469,25 @@ export function HostChips({ tasks }: { tasks: readonly WaveTask[] }) {
             >
               <span className="mono">{t.id}</span> · {p.host}
             </button>
-            {shown && (
-              <div
-                className="host-pop"
-                // biome-ignore lint/a11y/useSemanticElements: a non-modal popover, not a <dialog> element
-                role="dialog"
-                aria-label={`Why ${t.id} runs on ${p.host}`}
-              >
-                <p className="host-rule">{placementRule(p)}</p>
-                <ol className="host-lines">
-                  {p.candidates.map((c) => (
-                    <li key={c.host} className={c.score === null ? "dim" : undefined}>
-                      {c.line}
-                    </li>
-                  ))}
-                </ol>
-                {t.base_sha && <p className="mono dim">cut from {t.base_sha.slice(0, 7)}</p>}
-              </div>
-            )}
+            <Popover
+              anchor={anchorOf(t.id)}
+              open={shown}
+              // biome-ignore lint/a11y/useSemanticElements: a non-modal popover, not a <dialog> element
+              role="dialog"
+              aria-label={`Why ${t.id} runs on ${p.host}`}
+              dismiss="outside"
+              onClose={() => setOpen(null)}
+            >
+              <p className="host-rule">{placementRule(p)}</p>
+              <ol className="host-lines">
+                {p.candidates.map((c) => (
+                  <li key={c.host} className={c.score === null ? "dim" : undefined}>
+                    {c.line}
+                  </li>
+                ))}
+              </ol>
+              {t.base_sha && <p className="mono dim">cut from {t.base_sha.slice(0, 7)}</p>}
+            </Popover>
           </li>
         );
       })}

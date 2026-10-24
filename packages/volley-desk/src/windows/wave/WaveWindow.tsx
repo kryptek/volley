@@ -13,11 +13,13 @@
  * state carries no stop time of its own yet. Each graph node and rail segment
  * says what its task is doing now (`taskActivity`, #451): a running agent
  * (`implementing`, `reviewing`, `fixing`), else a CI hold, else a merge turn,
- * else a decision, else the stage. A task volleyd holds for CI with no agent
- * running (its `why_waiting` is one of volleyd's four hold wordings, `ciPending`)
- * shows `waiting for CI` (`· 3/13` when its jobs are counted) in the graph, a
- * `waiting for CI` chip in the title and a row under the graph with the same
- * words, its pipeline (`implement ✓ · CI ⟳ · review`), the reason and, when no
+ * else a decision, else the stage; both take the depth states (`stageState`):
+ * merged raised, running with the current-step effect, an ended wave flat. A
+ * task volleyd holds for CI with no agent running (its `why_waiting` is one of
+ * volleyd's four hold wordings, `ciPending`) shows `CI pending` (`CI · 3/13`
+ * when its jobs are counted) in the graph, with the full line in the node's
+ * tooltip, a `waiting for CI` chip in the title and a row under the graph with
+ * the same words, its pipeline (`implement ✓ · CI ⟳ · review`), the reason and, when no
  * job finished for longer than the slowest job's last duration, `possibly
  * stuck: …` (#415); no agent window is needed for it. On a phone the graph wraps to the window's
  * width (`dagWidthFor`). Under the graph each placed task has a host chip
@@ -35,6 +37,13 @@
  * running trains (`train-1 (T2, T4) integrating · queued T7`), each linking its PR; the title
  * carries a `churn 12` chip while the wave has churn spawns. A merge train's synthetic task
  * (`train-<n>`) stays out of the graph and the rail: the queue line shows it.
+ *
+ * The wave's Claude account (wave-state `account`, SPEC §4.6.1): an `Account: Balanced` /
+ * `Account: <name>` chip (the registry label) above the graph and, when the Desk can steer, a
+ * dropdown `Balanced (default) | <each account on the wave's machines>` beside it. Picking one
+ * sends `wave_account_set`: the wave's agents not yet spawned start there, running ones finish
+ * where they are (the confirm line says so). An open wave-level `account_limit` preselects its
+ * suggestion, and Switch answers it with that pick. An older volleyd (no `account`) shows none.
  */
 import { BubbleChatIcon, Settings02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -52,6 +61,14 @@ import {
   mergeQueueLine,
   trainLine,
 } from "../../store/autopilot";
+import {
+  type AccountInfo,
+  accountName,
+  isWaveLimit,
+  openLimitDecisions,
+  waveAccountChoices,
+  waveMachines,
+} from "../../store/claude";
 import type {
   AgentView,
   CoordinatorState,
@@ -63,7 +80,7 @@ import type {
 import { Feed } from "../agent/Feed";
 import { Clawd } from "./Clawd";
 import { Clusters } from "./Clusters";
-import { Dag, type DagNode, HostChips, fixerLabel } from "./Dag";
+import { Dag, type DagNode, HostChips, fixerLabel, stageState } from "./Dag";
 import { WaveYaml, taskOrder } from "./WaveYaml";
 import { accentFor, clusterHues, hueOf } from "./accent";
 import { taskActivity } from "./activity";
@@ -107,6 +124,12 @@ export interface WaveWindowProps {
   autopilotFeed?: readonly FeedEntry[] | undefined;
   /** The Desk's agent records: a task's agent counts as running only while its record is live. */
   agents?: Readonly<Record<string, AgentView>>;
+  /** The Claude accounts the Desk knows (usage records + registry): the account chip's names. */
+  accounts?: readonly AccountInfo[];
+  /** `wave_account_set` for the wave (`null`: balanced); absent = read-only (the chip only). */
+  onSetAccount?: (acct: string | null) => Promise<{ ok: boolean; error?: string }>;
+  /** The dropdown was focused: the Desk may ask volleyd's registry for the accounts. */
+  onAccountsWanted?: () => void;
   /** Children after the wave file (the steering panel). */
   children?: ReactNode;
   /** Highlights the chat glyph while the steering panel is open. */
@@ -305,6 +328,111 @@ function TrainRows({ release }: { release: WaveRelease }) {
   );
 }
 
+/** The dropdown's value for Balanced (`wave_account_set { acct: null }`). */
+const BALANCED = "";
+
+/**
+ * The wave's account: the chip and, when the Desk can steer, the dropdown, the Switch an open
+ * `account_limit`'s preselected suggestion needs, and the confirm line once volleyd took a pick.
+ */
+function WaveAccountRow({
+  wave,
+  accounts,
+  onSet,
+  onWanted,
+}: {
+  wave: WaveView;
+  accounts: readonly AccountInfo[];
+  onSet: WaveWindowProps["onSetAccount"];
+  onWanted: WaveWindowProps["onAccountsWanted"];
+}) {
+  const account = wave.account;
+  const pinned = account?.pinned ?? null;
+  const limit = openLimitDecisions({ [wave.id]: wave }).find(isWaveLimit);
+  const suggested = limit?.suggested ?? null;
+  const [picked, setPicked] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // The account volleyd took (null: balanced); undefined while there is no pick to confirm.
+  const [done, setDone] = useState<string | null | undefined>(undefined);
+  const [error, setError] = useState<string | null>(null);
+  // A new account from volleyd ends the local pick: the chip and the dropdown follow it.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset on the published account only
+  useEffect(() => setPicked(null), [pinned]);
+  if (account === undefined) return null;
+  const name = (id: string | null) => (id === null ? "Balanced" : accountName(accounts, id));
+  const current = pinned ?? BALANCED;
+  const preselect = suggested !== null && suggested !== pinned ? suggested : null;
+  const value = picked ?? preselect ?? current;
+  const doneName = done === null ? "the account with the most headroom" : name(done ?? null);
+  const choices = waveAccountChoices(accounts, waveMachines(wave.state));
+  // The current account (and a suggestion) stays listed even before the Desk knows its record.
+  for (const id of [pinned, preselect])
+    if (id !== null && !choices.some((c) => c.id === id)) choices.push({ id, label: name(id) });
+  const send = async (v: string) => {
+    if (!onSet) return;
+    const acct = v === BALANCED ? null : v;
+    setPicked(v);
+    setBusy(true);
+    setError(null);
+    setDone(undefined);
+    const r = await onSet(acct);
+    setBusy(false);
+    if (r.ok) setDone(acct);
+    else {
+      setPicked(null);
+      setError(r.error ?? "volleyd refused the account");
+    }
+  };
+  return (
+    <div className="wave-acct">
+      <span
+        className="chip chip--acct"
+        title={`New agents of ${wave.id} start under ${pinned === null ? "the account with the most headroom" : name(pinned)}`}
+      >
+        Account: {name(pinned)}
+      </span>
+      {onSet && (
+        <select
+          className="wave-acct-pick"
+          aria-label={`Claude account for new agents of ${wave.id}`}
+          value={value}
+          disabled={busy}
+          onFocus={onWanted}
+          onChange={(e) => void send(e.target.value)}
+        >
+          <option value={BALANCED}>Balanced (default)</option>
+          {choices.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.label}
+            </option>
+          ))}
+        </select>
+      )}
+      {onSet && preselect !== null && picked === null && (
+        <button
+          type="button"
+          className="btn btn--sm btn--hot"
+          disabled={busy}
+          onClick={() => void send(preselect)}
+        >
+          Switch
+        </button>
+      )}
+      {/* Only while the published account is still the pick: a later move makes it stale. */}
+      {done !== undefined && done === pinned && (
+        <output className="wave-acct-note">
+          New agents start on {doneName}; running ones finish where they are.
+        </output>
+      )}
+      {error !== null && (
+        <span className="s-error" role="alert">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function WaveWindow(p: WaveWindowProps) {
   const now = useNow(p.now);
   const s = p.wave.state;
@@ -335,6 +463,7 @@ export function WaveWindow(p: WaveWindowProps) {
   );
   const ci = s?.tasks.filter((t) => activity.get(t.id)?.kind === "ci") ?? [];
   const labels = Object.fromEntries([...activity].map(([t, a]) => [t, a.node]));
+  const status = Object.fromEntries([...activity].map(([t, a]) => [t, a.label]));
 
   const title = (
     <>
@@ -398,15 +527,22 @@ export function WaveWindow(p: WaveWindowProps) {
         aria-valuemax={100}
         aria-label={`${id} progress`}
       >
-        {live.map((t) => (
-          <span
-            key={t.id}
-            className={`rail-seg st-${t.stage}`}
-            title={`${t.id} · ${activity.get(t.id)?.label ?? STAGE_LABEL[t.stage]}`}
-          >
-            <span style={{ width: `${STAGE_WEIGHT[t.stage] * 100}%` }} />
-          </span>
-        ))}
+        {live.map((t) => {
+          const fx = stageState(t.stage, false, !!ended);
+          return (
+            <span
+              key={t.id}
+              className={`rail-seg st-${t.stage}`}
+              title={`${t.id} · ${activity.get(t.id)?.label ?? STAGE_LABEL[t.stage]}`}
+            >
+              {/* A queued segment is empty: only done and running ones take a state. */}
+              <span
+                className={fx === "done" || fx === "cur" ? `fx-${fx}` : undefined}
+                style={{ width: `${STAGE_WEIGHT[t.stage] * 100}%` }}
+              />
+            </span>
+          );
+        })}
       </div>
       <div className="rail-meta">
         <span className="rail-pct">{pct}%</span>
@@ -441,6 +577,12 @@ export function WaveWindow(p: WaveWindowProps) {
       footer={footer}
     >
       {p.banner}
+      <WaveAccountRow
+        wave={p.wave}
+        accounts={p.accounts ?? []}
+        onSet={p.onSetAccount}
+        onWanted={p.onAccountsWanted}
+      />
       {s ? (
         <div className={`wave-grid${ended ? " wave-ended" : ""}`}>
           <div className="min0">
@@ -450,6 +592,7 @@ export function WaveWindow(p: WaveWindowProps) {
               accent={accent}
               ended={!!ended}
               labels={labels}
+              status={status}
               maxWidth={p.frame.maxWidth === undefined ? undefined : dagWidthFor(p.frame.maxWidth)}
             />
             <Clusters

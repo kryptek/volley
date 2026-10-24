@@ -86,6 +86,7 @@
     },
     "coordinator": {
       "agent_id": "coordinator-ab12",
+      "presence": "offline",
       "state": "reconnecting",
       "last_seen": "2026-10-18T13:58:40.000Z"
     },

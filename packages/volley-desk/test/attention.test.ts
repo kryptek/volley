@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   type AttentionCtx,
-  DEFAULT_CLAIM_AFTER_S,
   DEFAULT_ESCALATE_AFTER_MIN,
   agentAttention,
   connectedSilence,
@@ -142,8 +141,7 @@ describe("a wave the Desk itself owns (claimed; P2-11)", () => {
 });
 
 describe("defaults", () => {
-  it("match volleyd's claim_after_s and the prototype's escalate_after_min", () => {
-    expect(DEFAULT_CLAIM_AFTER_S).toBe(1800);
+  it("match the prototype's escalate_after_min", () => {
     expect(DEFAULT_ESCALATE_AFTER_MIN).toBe(15);
   });
 });
@@ -226,46 +224,35 @@ describe("tierFor(wave)", () => {
     expect(tierFor(w, ctx({ gateSince: { "w1/T2": NOW - 15 * MIN } }))).toBe("you");
   });
 
-  it("does not count time the Desk was offline as coordinator silence", () => {
-    const quiet = { agents: { "coord-1": agent("coord-1", { lastSeen: NOW - 40 * MIN }) } };
-    expect(tierFor(wave(), ctx(quiet))).toBe("you");
-    // Offline for the last 20 min (and still): only 20 min of connected silence.
-    expect(tierFor(wave(), ctx({ ...quiet, offline: [{ from: NOW - 20 * MIN, to: null }] }))).toBe(
-      "none",
-    );
-    // A closed span counts the same; one before lastSeen does not help.
-    expect(
-      tierFor(wave(), ctx({ ...quiet, offline: [{ from: NOW - 30 * MIN, to: NOW - 15 * MIN }] })),
-    ).toBe("none");
-    expect(
-      tierFor(wave(), ctx({ ...quiet, offline: [{ from: NOW - 90 * MIN, to: NOW - 50 * MIN }] })),
-    ).toBe("you");
+  it("measures connected silence without the time the Desk was offline", () => {
     expect(connectedSilence(NOW - 10 * MIN, NOW, [{ from: NOW - 5 * MIN, to: null }])).toBe(
       5 * MIN,
     );
+    expect(
+      connectedSilence(NOW - 40 * MIN, NOW, [{ from: NOW - 30 * MIN, to: NOW - 15 * MIN }]),
+    ).toBe(25 * MIN);
+    expect(
+      connectedSilence(NOW - 40 * MIN, NOW, [{ from: NOW - 90 * MIN, to: NOW - 50 * MIN }]),
+    ).toBe(40 * MIN);
   });
 
-  it("treats a quiet coordinator as gone after claim_after_s", () => {
+  it("a quiet connected coordinator stays working however long", () => {
     const quiet = (ms: number) => ({
       agents: { "coord-1": agent("coord-1", { lastSeen: NOW - ms }) },
     });
-    expect(tierFor(wave(), ctx(quiet(29 * MIN)))).toBe("none");
-    expect(tierFor(wave(), ctx(quiet(31 * MIN)))).toBe("you");
-    expect(coordinatorFor(wave(), ctx(quiet(31 * MIN))).state).toBe("gone");
-    // A heartbeat keeps it alive.
-    const beating = {
-      agents: { "coord-1": agent("coord-1", { lastSeen: NOW - 40 * MIN, heartbeat: NOW - MIN }) },
-    };
-    expect(tierFor(wave(), ctx(beating))).toBe("none");
-    // claim_after_s comes from the retained config.
-    expect(
-      tierFor(wave(), ctx({ ...quiet(31 * MIN), config: config({ claim_after_s: 3600 }) })),
-    ).toBe("none");
-    // Only the supervisor's view: its last_seen counts.
+    expect(coordinatorFor(wave(), ctx(quiet(3 * 60 * MIN))).state).toBe("working");
+    expect(tierFor(wave(), ctx(quiet(3 * 60 * MIN)))).toBe("none");
+    // Only the supervisor's view, its last_seen hours old: still working while volleyd says so.
     const sup = wave({
-      coordinator: { agent_id: "coord-1", state: "working", last_seen: iso(NOW - 45 * MIN) },
+      coordinator: {
+        agent_id: "coord-1",
+        presence: "online",
+        state: "working",
+        last_seen: iso(NOW - 3 * 60 * MIN),
+      },
     });
-    expect(tierFor(sup, ctx({ agents: {} }))).toBe("you");
+    expect(coordinatorFor(sup, ctx({ coordinators: {}, agents: {} })).state).toBe("working");
+    expect(tierFor(sup, ctx({ coordinators: {}, agents: {} }))).toBe("none");
   });
 
   it("finds a named owner's coordinator through the bound agent, and trusts volleyd's fresh state", () => {
@@ -299,8 +286,18 @@ describe("tierFor(wave)", () => {
       coordinators: { "coord-1": coord("awaiting_input", { question: "Merge T2?" }) },
     });
     expect(waveAttention(wave(), asked)).toMatchObject({ tier: "you", reason: "Merge T2?" });
-    const gone = ctx({ agents: { "coord-1": agent("coord-1", { lastSeen: NOW - 34 * MIN }) } });
-    expect(waveAttention(wave(), gone).reason).toMatch(/no coordinator for 34 min/i);
+    const gone = wave({
+      coordinator: {
+        agent_id: "coord-1",
+        presence: "offline",
+        state: "gone",
+        last_seen: iso(NOW - 34 * MIN),
+      },
+    });
+    expect(waveAttention(gone, ctx())).toEqual({
+      tier: "you",
+      reason: "No coordinator for 34 min",
+    });
   });
 });
 
@@ -490,7 +487,7 @@ describe("a coordinator reconnecting (SPEC §4.6.1: the bound agent went away, i
 
   it("the Desk never flips it to gone itself; it follows the supervisor's gone", () => {
     const w = reconnecting();
-    // Long past reconnect_grace_s and claim_after_s: still reconnecting until volleyd says so.
+    // Long past reconnect_grace_s: still reconnecting until volleyd says so.
     const late = ctx({ now: NOW + 60 * MIN, coordinators: viewOf(w).coordinators, agents: {} });
     expect(coordinatorFor(w, late).state).toBe("reconnecting");
     expect(waveAttention(w, late).tier).toBe("info");
@@ -507,6 +504,136 @@ describe("a coordinator reconnecting (SPEC §4.6.1: the bound agent went away, i
     const stuck = agent("impl-1", { status: { type: "blocked", payload: {}, at: NOW - MIN } });
     const c = ctx({ coordinators: viewOf(w).coordinators, agents: { "impl-1": stuck } });
     expect(agentAttention(stuck, w, c).tier).toBe("coordinator");
+  });
+});
+
+describe("away / gone / reconnecting come from the wave's own coordinator, not from silence", () => {
+  const HOUR = 60 * MIN;
+  const presenced = (
+    id: string,
+    state: CoordinatorState,
+    over: Partial<WaveStatePayload> = {},
+    decisions: DecisionPayload[] = [],
+  ) =>
+    wave(
+      {
+        wave: id,
+        owner: "lead",
+        coordinator: {
+          agent_id: "lead",
+          presence: state === "working" || state === "awaiting_input" ? "online" : "offline",
+          state,
+          last_seen: iso(NOW - 2 * HOUR),
+        },
+        ...over,
+      },
+      decisions,
+    );
+  const autopilot = { enabled: true, auto_resolved: 0, escalated: 0, budgets: {} };
+  const live = { coordinators: {}, agents: {} };
+
+  it("away under autopilot is info `Owner away · autopilot runs this wave`, never you", () => {
+    const w = presenced("a", "away", { autopilot });
+    expect(coordinatorFor(w, ctx(live))).toMatchObject({
+      id: "lead",
+      state: "away",
+      lastSeen: NOW - 2 * HOUR,
+    });
+    expect(waveAttention(w, ctx(live))).toEqual({
+      tier: "info",
+      reason: "Owner away · autopilot runs this wave",
+    });
+  });
+
+  it("away with autopilot off reads `Owner away`", () => {
+    const w = presenced("a", "away", { autopilot: { ...autopilot, enabled: false } });
+    expect(waveAttention(w, ctx(live))).toEqual({ tier: "info", reason: "Owner away" });
+    expect(waveAttention(presenced("a", "away"), ctx(live))).toEqual({
+      tier: "info",
+      reason: "Owner away",
+    });
+  });
+
+  it("gone keeps tier you with `No coordinator for N min`", () => {
+    const w = presenced("b", "gone");
+    expect(waveAttention(w, ctx(live))).toEqual({
+      tier: "you",
+      reason: "No coordinator for 120 min",
+    });
+  });
+
+  it("one owner away on wave A and gone on wave B: each wave reads its own", () => {
+    const a = presenced("a", "away", { autopilot });
+    const b = presenced("b", "gone", { autopilot });
+    // The store keeps one view per owner, from whichever wave it met first.
+    for (const first of [
+      [a, b],
+      [b, a],
+    ]) {
+      const s = reduceAll(
+        initialState(),
+        first.map((w) => ({
+          topic: `volley/_waves/${w.id}/state`,
+          envelope: waveEnvelope(w),
+          receivedAt: NOW,
+        })),
+      );
+      const c = ctx({ coordinators: s.coordinators, agents: s.agents });
+      expect(coordinatorFor(a, c).state).toBe("away");
+      expect(waveAttention(a, c).tier).toBe("info");
+      expect(coordinatorFor(b, c).state).toBe("gone");
+      expect(waveAttention(b, c).tier).toBe("you");
+    }
+  });
+
+  it("an owner gone on another wave does not make a wave it works on gone", () => {
+    const a = presenced("a", "working");
+    const c = ctx({
+      coordinators: { lead: { id: "lead", waves: ["b", "a"], state: "gone" } },
+      agents: {},
+    });
+    expect(coordinatorFor(a, c).state).toBe("working");
+  });
+
+  it("an away wave's inbox item and stuck agent are handled like a live coordinator's", () => {
+    const w = presenced("a", "away", { autopilot });
+    const state: DeskState = { ...initialState(), waves: { a: w } };
+    const item: InboxItem = {
+      id: "i-1",
+      kind: "decision",
+      version: 1,
+      owner_only: false,
+      wave: "a",
+      agent_id: "volleyd",
+      title: "Pick one",
+      question: "Pick one?",
+      pointers: {},
+      opened_at: iso(NOW - MIN),
+      source: {},
+    };
+    expect(inboxAttention(item, state, ctx(live)).tier).toBe("coordinator");
+    const late = { ...item, opened_at: iso(NOW - 20 * MIN) };
+    expect(inboxAttention(late, state, ctx(live)).tier).toBe("you");
+    const stuck = agent("impl-1", {
+      wave: "a",
+      status: { type: "blocked", payload: {}, at: NOW - MIN },
+    });
+    expect(agentAttention(stuck, w, ctx(live)).tier).toBe("coordinator");
+  });
+
+  it("an away wave's decision is handled like a live coordinator's and escalates", () => {
+    const fresh = presenced("a", "away", { autopilot }, [decision({ wave: "a" })]);
+    expect(waveAttention(fresh, ctx(live))).toEqual({
+      tier: "coordinator",
+      reason: "Decision: Shared or dense ranking?",
+    });
+    const late = presenced("a", "away", { autopilot }, [
+      decision({ wave: "a", opened_at: iso(NOW - 20 * MIN) }),
+    ]);
+    expect(waveAttention(late, ctx(live))).toEqual({
+      tier: "you",
+      reason: "Decision: Shared or dense ranking? · unresolved for 20 min",
+    });
   });
 });
 

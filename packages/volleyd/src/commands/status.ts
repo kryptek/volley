@@ -1,10 +1,11 @@
 import { parseArgs } from "node:util";
 import { churnCauses } from "../autopilot/digest";
 import { formatBriefPreface } from "../brief";
+import { systemClock } from "../clock";
 import { type ControlTarget, resolveControlTarget, withClient } from "../control";
 import type { DecisionPayload } from "../decisions";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
-import { resolveCaller } from "../ownership";
+import { resolveCaller, span } from "../ownership";
 import { IN_FLIGHT } from "../scheduler";
 import type { TaskState, WaveState } from "../types";
 import { formatDecision } from "./decisions";
@@ -123,6 +124,39 @@ export function formatLocalAgents(l: LocalAgentsView): string {
   return `local agents: fallback (${l.why !== undefined ? `${state}: ${l.why}` : state})`;
 }
 
+/**
+ * The owner line's presence suffix (SPEC §4.6.1 `coordinator`): `· online`, `· reconnecting`,
+ * `· away (autopilot) · last seen 2h ago` (`· away` with autopilot off) or `· gone` with what
+ * waits for the owner: the open escalated decisions of the wave, when `decisions` has them, else
+ * `something waits for you` (a gate under `merge: manual` or an owner-only inbox item).
+ */
+function ownerPresence(s: WaveState, decisions: readonly DecisionPayload[], now: number): string {
+  const c = s.coordinator;
+  if (c === undefined) return "";
+  if (c.presence === "online") return " · online";
+  if (c.state === "reconnecting") return " · reconnecting";
+  if (c.state === "gone") {
+    const autopilotOn = s.autopilot?.enabled ?? true;
+    const waiting = decisions.filter(
+      (d) =>
+        d.wave === s.wave &&
+        s.open_decisions.includes(d.decision_id) &&
+        d.held === undefined &&
+        ((d as { escalated?: unknown }).escalated !== undefined || !autopilotOn),
+    ).length;
+    return waiting > 0
+      ? ` · gone · ${waiting} decision${waiting === 1 ? " waits" : "s wait"} for you`
+      : " · gone · something waits for you";
+  }
+  const autopilot = s.autopilot?.enabled === true ? " (autopilot)" : "";
+  return ` · away${autopilot} · last seen ${agoText(now - Date.parse(c.last_seen))}`;
+}
+
+/** How long ago, as the owner line says it: `40s ago`, `5m ago`, `2h ago`, `3d ago`. */
+function agoText(ms: number): string {
+  return `${span(ms)} ago`;
+}
+
 function parseStatus(argv: string[]) {
   return parseArgs({
     args: argv,
@@ -143,13 +177,15 @@ function parseStatus(argv: string[]) {
  * Human-readable wave summary: a header line, then one line per task, then its open decisions.
  * The header shows `plan vN`, with `(K tasks pending decision)` when open plan_change decisions
  * (in `ctx.decisions`) wait on K tasks, names the agent a coordinator-name owner acts through
- * (`owner: coord-main (via coordinator-c7d9)`), gains `needs you: N` when `caller` owns the wave
+ * (`owner: coord-main (via coordinator-c7d9)`) and the owner's presence (`· online`,
+ * `· away (autopilot) · last seen 2h ago`, `· gone · 1 decision waits for you`, `· reconnecting`;
+ * `ownerPresence`), gains `needs you: N` when `caller` owns the wave
  * (or is that agent) and N decisions are open, and ends with `alarms: N`, the tasks whose spawn
  * failed and is unrecovered or hold an alarm, plus the wave's own alarms (each on a `!` line).
  */
 export function formatWave(
   s: WaveState,
-  ctx: { caller?: string | null; decisions?: DecisionPayload[] } = {},
+  ctx: { caller?: string | null; decisions?: DecisionPayload[]; now?: number } = {},
 ): string {
   const open = s.open_decisions.length;
   // A coordinator-name owner acts through the agent bound to it (SPEC §4.6.1).
@@ -159,8 +195,10 @@ export function formatWave(
       : undefined;
   const mine = ctx.caller != null && (ctx.caller === s.owner || ctx.caller === via);
   const needs = open > 0 && mine ? `  needs you: ${open}` : "";
-  const away = s.coordinator?.state === "reconnecting" ? ", reconnecting" : "";
-  const owner = via !== undefined ? `${s.owner} (via ${via}${away})` : (s.owner ?? "-");
+  const owner =
+    (via !== undefined ? `${s.owner} (via ${via})` : (s.owner ?? "-")) +
+    // real clock: `last seen` in a one-shot command's output, not the daemon
+    ownerPresence(s, ctx.decisions ?? [], ctx.now ?? systemClock.now());
   const pending = new Set(
     (ctx.decisions ?? [])
       .filter(

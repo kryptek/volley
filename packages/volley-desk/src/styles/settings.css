@@ -4,7 +4,7 @@
   position: fixed;
   inset: 0;
   z-index: 20;
-  background: rgba(3, 4, 8, 0.55);
+  background: var(--scrim);
   backdrop-filter: blur(4px);
   display: grid;
   place-items: center;
@@ -17,13 +17,8 @@
   flex-direction: column;
   position: relative;
   /* Built like a Desk window (D10): desk.css `.win-depth` lifts it and paints --win-body. */
-  background-color: rgba(12, 14, 23, 0.96);
-  --win-body: linear-gradient(
-    160deg,
-    rgba(34, 38, 58, 0.5),
-    rgba(14, 16, 28, 0) 55%,
-    rgba(0, 0, 0, 0.3)
-  );
+  background-color: var(--modal-fill);
+  --win-body: linear-gradient(160deg, var(--glass-a), rgba(14, 16, 28, 0) 55%, rgba(0, 0, 0, 0.3));
   border: 1px solid var(--line);
   border-radius: 16px;
 }
@@ -48,7 +43,7 @@
 .modal-body .s-group h3 {
   font-family: var(--f-display);
   font-size: 13px;
-  color: var(--acc);
+  color: var(--acc-ink);
 }
 .modal-global {
   margin-left: auto;
@@ -103,10 +98,10 @@
   font-family: var(--f-mono);
 }
 .cfg-ack--ok {
-  color: var(--ok);
+  color: var(--ok-text);
 }
 .cfg-ack--bad {
-  color: #ff8f7a;
+  color: var(--bad-ink);
 }
 .cfg-copy {
   display: flex;
@@ -147,8 +142,8 @@
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.12);
   /* Built like a Desk window (D10): desk.css `.win-depth` lifts it and paints --win-body. */
-  background-color: #1e1f24;
-  --win-body: linear-gradient(160deg, #262833, #1b1c22 55%, #141519);
+  background-color: var(--sheet-fill);
+  --win-body: linear-gradient(160deg, var(--sheet-a), var(--sheet-b) 55%, var(--sheet-c));
   outline: none;
 }
 .mac-settings fieldset {
@@ -161,8 +156,8 @@
 }
 .gooey-seg.gooey-nav--framed {
   border-radius: 14px;
-  background: linear-gradient(180deg, rgba(4, 5, 10, 0.85), rgba(16, 18, 30, 0.85));
-  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), 0 1px 0 rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, var(--well-a), var(--well-b));
+  box-shadow: inset 0 2px 5px var(--shade), 0 1px 0 var(--hl);
   --gn-muted: var(--mute);
   --gn-ink: var(--ink);
 }
@@ -175,7 +170,7 @@
   );
 }
 .ms-side {
-  background: rgba(38, 39, 46, 0.92);
+  background: var(--sheet-side);
   backdrop-filter: blur(30px);
   -webkit-backdrop-filter: blur(30px);
   border-right: 1px solid rgba(0, 0, 0, 0.35);
@@ -236,7 +231,7 @@
   border-radius: 50%;
   display: grid;
   place-items: center;
-  background: linear-gradient(135deg, #6ee7f9, #8b5cf6);
+  background: linear-gradient(135deg, var(--t-acc), #8b5cf6);
   color: #0b0d16;
   font-weight: 700;
   font-size: 13px;
@@ -304,7 +299,7 @@
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  background: #1e1f24;
+  background: var(--sheet-fill);
 }
 .ms-head {
   display: flex;
@@ -432,6 +427,11 @@
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 10px;
   overflow: hidden;
+}
+/* The light tone: a card is the sheet's off-white with a visible edge (white tints vanish on white). */
+html[data-tone="light"] .s-card {
+  background: var(--win2);
+  border-color: var(--line);
 }
 .s-foot {
   margin: 6px 4px 0;
@@ -655,9 +655,10 @@
   padding: 12px;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.045);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--hl);
   text-align: left;
   min-width: 0;
+  container-type: inline-size;
 }
 .claude-card--add {
   align-items: center;
@@ -700,8 +701,10 @@
 .cc-email .icon-btn[aria-pressed="true"] {
   color: var(--ink);
 }
-.cc-stale {
-  color: #ffd60a;
+/* The address wraps rather than truncating: nothing on the card is cut off at any width. */
+.cc-email .ell {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .cc-machines {
   display: flex;
@@ -714,11 +717,19 @@
 }
 .cc-machines li {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   min-width: 0;
 }
-.cc-machines .cc-waves {
+.cc-machines li > b,
+.cc-machines li > .dim {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/* A machine row's sign-in state, at its end. */
+.cc-machines .cc-state,
+.m-accounts .cc-state {
   margin-left: auto;
   flex: none;
 }
@@ -740,6 +751,7 @@
 }
 .cc-signin {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   margin-left: auto;
@@ -749,32 +761,70 @@
   padding: 2px 8px;
   font-size: 11.5px;
 }
-/* `on 2 of 3 machines`: amber while a configured machine misses the account. */
-.cc-head .chip + .chip {
-  margin-left: 0;
-}
-.chip--gap {
-  color: var(--amber);
-  border-color: color-mix(in srgb, var(--amber) 55%, transparent);
-  background: color-mix(in srgb, var(--amber) 12%, transparent);
-}
-.cc-foot {
+/* Add to another machine…, Rename, Remove, and `Last updated` at the end; they wrap. */
+.cc-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
+  align-items: center;
+  gap: 6px;
 }
-/* From volleyd's claude_balance: the families that pick this account next, and the machine row. */
-.cc-picks {
-  flex-basis: 100%;
-  color: var(--ok);
-}
-.cc-machines .cc-next {
+.cc-actions .btn {
   flex: none;
-  font-size: 10.5px;
-  color: var(--ok);
-  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
+.cc-updated {
+  margin-left: auto;
+  align-self: flex-end;
+}
+/* The card's name and its Rename ✎; renaming, the name is a field of the same width. */
+.cc-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.cc-name > b {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cc-rename-btn {
+  flex: none;
+  width: 22px;
+  height: 22px;
+}
+.cc-rename {
+  flex: 1 1 140px;
+  min-width: 0;
+  font: inherit;
+  font-weight: 600;
+}
+.cc-name .s-error {
+  flex-basis: 100%;
+  margin: 2px 0 0;
+}
+/* Remove…'s machine picker: one radio row per machine holding the account. */
+.ra-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.ra-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ra-option .ell {
+  min-width: 0;
+}
+/* The profiles waiting for sign-in: a row each, under the cards. */
+.cc-pending {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
 }
 /* The three meters: 5-hour, 7-day and Fable (7-day), side by side while the card is wide. */
 .cc-meters {
@@ -782,18 +832,20 @@
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 10px;
 }
-/* A machine row's `5h 37% · 7d 56% · Fable 12%`, and `sampled 3 h ago` when it is older. */
-.cc-usage {
-  flex: none;
-  font-size: 11.5px;
-  white-space: nowrap;
-}
-.cc-machines .cc-usage,
-.m-accounts .cc-usage {
-  margin-left: auto;
-}
-.cc-machines .cc-usage + .cc-waves {
-  margin-left: 0;
+/* A narrow card: the plan chip on its own line, the meters one per row. */
+@container (max-width: 360px) {
+  .cc-head {
+    flex-wrap: wrap;
+  }
+  .cc-head .min0 {
+    flex: 1 1 calc(100% - 40px);
+  }
+  .cc-head .chip {
+    margin-left: 38px;
+  }
+  .cc-meters {
+    grid-template-columns: 1fr;
+  }
 }
 .meter-top {
   display: flex;
@@ -823,36 +875,13 @@
   background: #ff453a;
 }
 .meter-pct.meter-ok {
-  color: #7ee2a0;
+  color: var(--ok-ink);
 }
 .meter-pct.meter-warn {
-  color: #ffd60a;
+  color: var(--amber-ink);
 }
 .meter-pct.meter-hot {
-  color: #ff8f86;
-}
-.cc-move,
-.modal-acct {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.cc-move select,
-.modal-acct select {
-  flex: 1;
-  min-width: 0;
-  font: inherit;
-  font-size: 12.5px;
-  color: var(--ink);
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 5px 8px;
-}
-.modal-acct {
-  flex-wrap: wrap;
-  padding: 0 18px 10px;
-  font-size: 12.5px;
+  color: var(--bad-ink);
 }
 .pair {
   display: flex;
@@ -909,7 +938,7 @@
 .s-error {
   margin: 6px 0;
   font-size: 12.5px;
-  color: #ff8f86;
+  color: var(--bad-ink);
 }
 
 /* Settings › Sound: theme cards with their audition chips, the per-event play buttons. */
@@ -917,7 +946,7 @@
   border: 0;
   padding: 0;
   background: none;
-  color: #6ee7f9;
+  color: var(--t-acc-ink);
   font: inherit;
   cursor: pointer;
   text-decoration: underline;
@@ -1170,13 +1199,6 @@
   cursor: default;
   opacity: 0.55;
 }
-.cc-move {
-  flex-wrap: wrap;
-}
-.cc-move .btn {
-  flex: none;
-}
-
 /* Sign out and Switch account… under the account (Settings' sidebar, the Dock's account menu). */
 .ms-account {
   flex-wrap: wrap;

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/claude-registry.schema.json",
+  "title": "Volley Claude Registry Changed",
+  "description": "A supervisor's retained signal that its Claude account registry changed, published to volley/_system/claude/registry on every add, rename, remove, finished sign-in and sync, and at start. It carries no account: a client that shows the registry asks for it again (claude_accounts) when rev changes. See spec section 4.6.11.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "properties": {
+        "channel": { "const": "_system/claude" },
+        "type": { "const": "claude_registry_changed" },
+        "payload": {
+          "type": "object",
+          "required": ["rev", "at"],
+          "properties": {
+            "rev": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "The registry's revision: 0 when the supervisor starts, one more at each change. A client compares it for equality only: a restart starts it again."
+            },
+            "at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "When the supervisor published this revision."
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

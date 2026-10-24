@@ -45,7 +45,7 @@
 .wiz-stepper .stepper__badge[data-status="attention"] {
   background: var(--amber);
   box-shadow: none;
-  color: #1a1204;
+  color: var(--on-amber);
 }
 .kv {
   display: grid;
@@ -124,7 +124,7 @@
   display: flex;
   align-items: baseline;
   gap: 8px;
-  color: #7ee2a0;
+  color: var(--ok-ink);
 }
 .dim {
   color: var(--dim);
@@ -193,28 +193,28 @@
   white-space: nowrap;
 }
 .role--admin {
-  color: #ffb4a1;
-  border-color: rgba(255, 122, 89, 0.45);
+  color: var(--hot-ink);
+  border-color: color-mix(in srgb, var(--hot) 45%, transparent);
 }
 .role--steer {
-  color: #8be9fd;
-  border-color: rgba(110, 231, 249, 0.45);
+  color: var(--info-ink);
+  border-color: color-mix(in srgb, var(--t-acc) 45%, transparent);
 }
 .role--sup {
   color: #c4b5fd;
   border-color: rgba(196, 181, 253, 0.45);
 }
 .role--peer {
-  color: #f6d48a;
-  border-color: rgba(251, 191, 36, 0.45);
+  color: var(--amber-ink);
+  border-color: color-mix(in srgb, var(--amber) 45%, transparent);
 }
 .role--agent {
   color: var(--mute);
 }
 /* A device admin sign-in not seen for over a day (Broker accounts). */
 .role--stale {
-  color: var(--amber);
-  border-color: rgba(251, 191, 36, 0.45);
+  color: var(--amber-text);
+  border-color: color-mix(in srgb, var(--amber) 45%, transparent);
 }
 .stale-note {
   display: flex;
@@ -222,7 +222,7 @@
   align-items: flex-start;
   gap: 8px;
   padding: 10px 12px;
-  border: 1px solid rgba(251, 191, 36, 0.35);
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
   border-radius: 10px;
   font-size: 12.5px;
 }
@@ -233,8 +233,8 @@
   justify-content: flex-start;
 }
 .btn--danger {
-  background: rgba(255, 90, 90, 0.16);
-  border-color: rgba(255, 90, 90, 0.5);
+  background: color-mix(in srgb, var(--bad) 16%, transparent);
+  border-color: color-mix(in srgb, var(--bad) 50%, transparent);
   color: #ffb3b3;
 }
 .btn:disabled {
@@ -248,8 +248,8 @@
   gap: 12px;
   padding: 12px;
   border-radius: 10px;
-  border: 1px dashed rgba(110, 231, 249, 0.45);
-  background: rgba(110, 231, 249, 0.06);
+  border: 1px dashed color-mix(in srgb, var(--t-acc) 45%, transparent);
+  background: color-mix(in srgb, var(--t-acc) 6%, transparent);
   flex-wrap: wrap;
 }
 .token .lbl {
@@ -328,7 +328,7 @@
 }
 .pill-ok {
   background: rgba(52, 199, 89, 0.18);
-  color: #7ee2a0;
+  color: var(--ok-ink);
 }
 .pill-warn {
   background: rgba(255, 159, 10, 0.18);

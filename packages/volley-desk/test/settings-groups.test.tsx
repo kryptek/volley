@@ -23,7 +23,6 @@ const config: ConfigPayload = {
   hard_ceiling: 12,
   spawn_budget_multiplier: 3,
   lease_pools: { build: { capacity: 2, ttl_s: 1800, match: ["npm run build"] } },
-  claim_after_s: 1800,
   heartbeat_alarm_s: 600,
   fallback_model: "claude-sonnet-5-5",
   spawn_timeout_s: 180,
@@ -142,7 +141,7 @@ describe("Settings sections drill into groups (#286)", () => {
 
     fireEvent.click(row("Attention"));
     const search = screen.getByRole("searchbox", { name: "Search settings" });
-    fireEvent.change(search, { target: { value: "claim" } });
+    fireEvent.change(search, { target: { value: "heartbeat" } });
     fireEvent.keyDown(search, { key: "Escape" });
     expect(search).toHaveValue("");
     expect(heading()).toHaveTextContent("Attention");
@@ -226,7 +225,7 @@ describe("search reaches into groups", () => {
 
   it("sectionOfPath places a deep link's row", () => {
     expect(sectionOfPath("fleet.local_agents")).toBe("Admission");
-    expect(sectionOfPath("claim_after_s")).toBe("Attention");
+    expect(sectionOfPath("heartbeat_alarm_s")).toBe("Attention");
     expect(sectionOfPath("lease_pools.build.capacity")).toBe("Leases");
     expect(sectionOfPath("agent_auto_compact_pct")).toBe("Other");
   });
@@ -249,9 +248,7 @@ describe("the other grouped sections", () => {
     const control = vi.fn(
       async (): Promise<ControlReply> => ({ ok: true, result: { rules: RULES } }),
     );
-    render(
-      <Harness initial="autopilot" claude={{ accounts: {}, signins: {}, waves: {}, control }} />,
-    );
+    render(<Harness initial="autopilot" claude={{ accounts: {}, signins: {}, control }} />);
     expect(rowNames("Autopilot")).toEqual(["Tunables", "Policy table"]);
     expect(row("Tunables")).toHaveAccessibleDescription("on · 5 owner-only · merge auto");
     await act(async () => {});
@@ -310,7 +307,7 @@ describe("summaries", () => {
     const s = supervisorSummaries({ config, leases });
     expect(s.leases).toBe("2 pools · 1/4 held");
     expect(s.admission).toBe("ceiling 12 · budget 3×");
-    expect(s.attention).toBe("claim 30 min · heartbeat 10 min");
+    expect(s.attention).toBe("heartbeat 10 min");
     expect(s.recovery).toBe("claude-sonnet-5-5 · spawn 3 min");
     expect(s.other).toMatch(/^\d+ settings?$/);
     expect(supervisorSummaries({ config: null, leases: {} }).leases).toBe("No pools");
@@ -357,12 +354,14 @@ describe("summaries", () => {
   });
 
   it("claudeSummaries", () => {
-    expect(
-      claudeSummaries({ accounts: 3, needsYou: 1, defaultLabel: "Most headroom", warnAt: 90 }),
-    ).toEqual({ accounts: "3 accounts · 1 needs you", defaults: "Most headroom · warn at 90%" });
-    expect(
-      claudeSummaries({ accounts: 1, needsYou: 0, defaultLabel: "Primary", warnAt: 80 }).accounts,
-    ).toBe("1 account");
+    // A wave's account limit is its window's: the section summary carries no needs-you.
+    expect(claudeSummaries({ accounts: 3, defaultLabel: "Most headroom", warnAt: 90 })).toEqual({
+      accounts: "3 accounts",
+      defaults: "Most headroom · warn at 90%",
+    });
+    expect(claudeSummaries({ accounts: 1, defaultLabel: "Primary", warnAt: 80 }).accounts).toBe(
+      "1 account",
+    );
   });
 });
 

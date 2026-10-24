@@ -1,42 +1,46 @@
 /**
  * Settings › Claude accounts & usage, ported from the prototype
- * `ClaudeAccounts` (SPEC §4.6.11–12). One card per Anthropic account: the
- * supervisor's retained usage records, registry profiles that have not
- * reported yet, signed-in peers and this machine's own login (the primary,
+ * `ClaudeAccounts` (SPEC §4.6.11–12), strictly for managing accounts. One
+ * card per Anthropic account: the supervisor's retained usage records,
+ * registry profiles (each by its usage-record key, `<id>@<machine>` on a
+ * paired machine), signed-in peers and this machine's own login (the primary,
  * first and from the start), merged by the login's e-mail (`accountGroups`).
- * A card shows the label, plan chip and organisation, the e-mail masked until
- * its eye button reveals it (never persisted), three meters: 5-hour and 7-day
- * from the freshest reading (a disagreeing older one named stale) and Fable
- * (7-day) from the freshest usage probe reading, with its age, or why there is
- * none while the probe's last attempt failed (`fableHint`), one row per
- * configured machine (`accountMatrix`: a filled dot where it holds the account,
- * with the account's three figures compactly and that login's own age when
- * older, else **Sign in on <machine>**, which opens Add already at the sign-in step
- * with the label `<label> (<machine>)`) under an `on N of M machines` chip,
- * the agents and waves on it, and "Move a wave
- * here…" (its login on this machine, by account id). An open
- * `account_limit` decision is a Needs-you banner whose Move / Not now answer
- * it (`resolve`); volleyd moves a wave only by such an answer, so "Move a wave
- * here…" lists the waves that have one open. An agent-level
- * `agent_account_limit` is a banner too: its question, then its own options,
- * the move labelled with the suggested account's figures
- * (`move to work (5h 12%, 7d 40%)`). From volleyd's `claude_balance`, fetched
- * with the registry, a card's foot says which model families pick the account
- * next (`picks next: Fable, others`) and a machine row `next pick` when that
- * machine would. **Add Claude account** is a
- * Stepper: a label and the machine (this one, or any paired host whose tunnel
- * is up), then "Sign in on <machine>" (`claude_account_add { label, machine }`),
- * then the sign-in link from the answer and the `claude_signin_url` event (on
- * a peer, the same link and phone steps as Settings › Machines, `SigninLink`),
- * waiting until `claude_signin_done`. A card's **Add to another machine…**
- * opens it with the label suggested as `<label> (<machine>)` (following the
- * picked machine until the owner types) and the machines holding the account
- * greyed out. The Desk shows only the provider's sign-in link, never a
- * credential. Defaults: the account for new waves (`claude.default_account`,
- * through config_set) and the warn-at threshold from config.
+ * A card shows the registry label (else the masked e-mail), the plan chip and
+ * organisation, the e-mail masked until its eye button reveals it (never
+ * persisted), the account's three meters once: 5-hour and 7-day from the
+ * freshest reading (a 0% window with no reset says `no usage yet this window`)
+ * and Fable (7-day) from the freshest usage probe reading, with its age, or
+ * why there is none while the probe's last attempt failed (`fableHint`); one
+ * row per configured machine (`machineRows`) with its sign-in state only, a
+ * machine missing the account offering **Sign in on <machine>**, which opens
+ * Add already at the sign-in step with the label `<label> (<machine>)`;
+ * **Add to another machine…**, **Rename ✎** (the name becomes a field: Enter
+ * sends `claude_account_rename`, Escape restores it, a refusal shows under it)
+ * and **Remove…** (`RemoveAccountSheet`; this machine's own login has neither);
+ * and `Last updated: <age>` from the freshest reading. A profile that never
+ * finished its sign-in is a row under "Profiles waiting for sign-in", never a
+ * card: **Finish sign-in** resumes it (`claude_signin { acct }`), **Cancel**
+ * removes it (`claude_account_remove`). The registry is fetched again whenever
+ * volleyd's registry-changed signal moves (`registryRev`), so every open Desk
+ * shows a rename and drops a removed card without a reload.
  *
- * The section drills into two groups (`GroupList`): Accounts (the banners,
- * the cards and Add) and Defaults.
+ * The section manages accounts only: a wave's account is chosen on its window
+ * (its `account_limit` banner there too), an agent's on the agent window
+ * (`agent_account_limit` there). **Add Claude account**
+ * is a Stepper: a label and the machine (this one, or any paired host whose
+ * tunnel is up), then "Sign in on <machine>" (`claude_account_add { label,
+ * machine }`), then the sign-in link from the answer and the
+ * `claude_signin_url` event (on a peer, the same link and phone steps as
+ * Settings › Machines, `SigninLink`), waiting until `claude_signin_done`. Add
+ * to another machine… opens it with the label suggested as `<label>
+ * (<machine>)` (following the picked machine until the owner types) and the
+ * machines holding the account greyed out. The Desk shows only the provider's
+ * sign-in link, never a credential. Defaults: the account for new waves
+ * (`claude.default_account`, through config_set) and the warn-at threshold
+ * from config.
+ *
+ * The section drills into two groups (`GroupList`): Accounts (the cards, the
+ * waiting profiles and Add) and Defaults.
  */
 import { EyeIcon, ViewOffIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -47,35 +51,26 @@ import Stepper, { Step } from "../rb/Stepper/Stepper";
 import type { ControlReply } from "../steer/transport";
 import {
   type AccountGroup,
-  type AccountMatrixRow,
-  type BalanceAnswer,
   LOCAL_MACHINE,
-  type MatrixCell,
+  type MachineRow,
   type MatrixMachine,
   type Member,
+  NEW_PROFILE,
   PRIMARY_LABEL,
   type RegistryAccount,
-  accountFigures,
   accountList,
-  accountMatrix,
+  agoText,
   configuredMachines,
   deskAccountGroups,
   fableHint,
   fableShown,
-  fiveHourLabel,
-  isWaveLimit,
+  lastUpdated,
   machineName,
-  moveAnswer,
-  moveOption,
-  moveTargetOf,
-  nextPicks,
-  notNowAnswer,
-  openLimitDecisions,
-  picksLine,
-  readingAge,
+  machineRows,
+  pendingProfiles,
+  registryKey,
   resetsIn,
-  resolveFields,
-  usageTriple,
+  sameAccountOnMachine,
   windowPct,
   withPrimary,
 } from "../store/claude";
@@ -83,14 +78,17 @@ import type {
   ClaudeAccountPayload,
   ClaudeSignin,
   ConfigPayload,
-  DecisionPayload,
   MachinePayload,
   UsageWindow,
-  WaveView,
 } from "../store/types";
 import { AckLine, type RowState } from "./ConfigRows";
 import { GroupList } from "./GroupNav";
-import { SigninLink } from "./PeerSigninSheet";
+import { SigninLink, startedFields } from "./PeerSigninSheet";
+import {
+  REMOVE_ACCOUNT_TIMEOUT_MS,
+  type RemovableProfile,
+  RemoveAccountSheet,
+} from "./RemoveAccountSheet";
 import type { ConfigTransport } from "./configTransport";
 import { Group, Row, Seg } from "./primitives";
 import { sectionDef } from "./sections";
@@ -114,6 +112,17 @@ const METER_WARN = 70;
 
 /** volleyd answers `agent_move_account` after the respawn; stopping alone may take a minute. */
 export const MOVE_ACCOUNT_TIMEOUT_MS = 120_000;
+/**
+ * A card missing its e-mail or its meters asks volleyd to read the login again (`claude_prime`):
+ * at most once per account in this long, as volleyd itself allows.
+ */
+export const PRIME_EVERY_MS = 5 * 60_000;
+/** volleyd answers `claude_prime` once the login's usage probe has run. */
+const PRIME_TIMEOUT_MS = 60_000;
+/** What a card says of data volleyd is reading now, and of data nobody can ask for. */
+const READING = "reading…";
+const NO_READING = "no reading yet";
+
 /** How often the "resets in" times re-read the clock. */
 const CLOCK_TICK_MS = 30_000;
 
@@ -137,9 +146,13 @@ export interface ClaudeRegistry {
 
 /**
  * volleyd's profile registry (`claude_accounts`), fetched when the Desk can ask
- * and again whenever `refresh` changes (a sign-in finished, the dialog closed).
+ * and again whenever `refresh` changes (volleyd's registry-changed signal, a
+ * sign-in finished, the dialog closed).
  */
-export function useClaudeRegistry(control: ControlFn | null, refresh = 0): ClaudeRegistry {
+export function useClaudeRegistry(
+  control: ControlFn | null,
+  refresh: number | string = 0,
+): ClaudeRegistry {
   const [registry, setRegistry] = useState<ClaudeRegistry>({ accounts: [] });
   // biome-ignore lint/correctness/useExhaustiveDependencies: refresh is the re-fetch trigger
   useEffect(() => {
@@ -162,41 +175,26 @@ export function useClaudeRegistry(control: ControlFn | null, refresh = 0): Claud
   return registry;
 }
 
-/**
- * volleyd's `claude_balance` answer (each machine's ranking and next picks), fetched when the Desk
- * can ask and again with each registry refresh; `null` until one arrives, or read-only.
- */
-export function useClaudeBalance(control: ControlFn | null, refresh = 0): BalanceAnswer | null {
-  const [answer, setAnswer] = useState<BalanceAnswer | null>(null);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: refresh is the re-fetch trigger
-  useEffect(() => {
-    if (!control) return;
-    let live = true;
-    void control("claude_balance", {}, "volley claude balance").then((r) => {
-      const result = r.result as BalanceAnswer | undefined;
-      if (live && r.ok && Array.isArray(result?.machines)) setAnswer(result);
-    });
-    return () => {
-      live = false;
-    };
-  }, [control, refresh]);
-  return control ? answer : null;
-}
-
 /** How many sign-ins have finished: a registry refresh key. */
 export const signinsDone = (signins: Record<string, ClaudeSignin> | undefined) =>
   Object.values(signins ?? {}).filter((s) => s.state === "done").length;
+
+/** The registry's refresh key: volleyd's signal (`claudeRegistryRev`), and what the Desk saw. */
+export const registryKeyOf = (rev: number | undefined, seen: number) => `${rev ?? "-"}:${seen}`;
 
 export interface ClaudeAccountsProps {
   /** `volley/_system/claude-accounts/+`, by account. */
   accounts: Record<string, ClaudeAccountPayload>;
   /** Sign-in events heard since the page loaded, by account. */
   signins: Record<string, ClaudeSignin>;
-  /** The waves, for their open `account_limit` decisions. */
-  waves: Record<string, WaveView>;
   config: ConfigPayload | null;
   /** `null` = the Desk cannot steer: read-only, with the CLI commands instead. */
   control: ControlFn | null;
+  /** What reads and edits volleyd's registry (`claude_accounts`, rename, remove) when it differs
+   *  from `control` (demo mode's own answers); `control` otherwise. */
+  registryControl?: ControlFn | null;
+  /** volleyd's registry-changed signal (`claudeRegistryRev`): the registry is fetched again. */
+  registryRev?: number | undefined;
   configTransport: ConfigTransport | null;
   /** Clock override (tests). */
   now?: number;
@@ -218,19 +216,16 @@ export interface ClaudeAccountsProps {
 /** The group list's one-line summaries. */
 export function claudeSummaries({
   accounts,
-  needsYou,
   defaultLabel,
   warnAt,
 }: {
   accounts: number;
-  /** Open `account_limit` decisions. */
-  needsYou: number;
   /** How the account for new waves reads (`Most headroom`). */
   defaultLabel: string;
   warnAt: number;
 }): Record<string, string> {
   return {
-    accounts: `${plural(accounts, "account")}${needsYou ? ` · ${needsYou} needs you` : ""}`,
+    accounts: plural(accounts, "account"),
     defaults: `${defaultLabel} · warn at ${warnAt}%`,
   };
 }
@@ -238,6 +233,9 @@ export function claudeSummaries({
 /** volleyd's id for Claude Code's default profile on its own machine. */
 const PRIMARY = "primary";
 export { PRIMARY_LABEL };
+
+/** A 0% window with no reset to come: nothing has used it since it last rolled over. */
+const NO_USAGE_THIS_WINDOW = "no usage yet this window";
 
 /**
  * One rate-limit window: its percentage (a reset that passed counts as 0), a bar, and when it
@@ -247,7 +245,7 @@ function Meter({
   label,
   w,
   now,
-  missingHint = "no usage reported yet",
+  missingHint = NO_READING,
   ageText,
 }: {
   label: string;
@@ -279,42 +277,40 @@ function Meter({
       <div className="s-hint">
         {pct === null
           ? missingHint
-          : `${reset ? `resets in ${reset}` : "reset time unknown"}${ageText ? ` · ${ageText}` : ""}`}
+          : `${reset ? `resets in ${reset}` : pct === 0 ? NO_USAGE_THIS_WINDOW : "reset time unknown"}${ageText ? ` · ${ageText}` : ""}`}
       </div>
     </div>
   );
 }
 
-/** An account's three meters: 5-hour and 7-day (the freshest reading), and its Fable week. */
-function Meters({ g, now }: { g: AccountGroup; now: number }) {
+/**
+ * An account's three meters: 5-hour and 7-day (the freshest reading), and its Fable week.
+ * `reading`: volleyd is reading the login now (a `claude_prime` in flight).
+ */
+function Meters({ g, now, reading }: { g: AccountGroup; now: number; reading: boolean }) {
   const fable = fableShown(g);
   const hint = fableHint(g.probe, now);
+  const missing = reading ? READING : NO_READING;
   return (
     <div className="cc-meters">
-      <Meter label="5-hour" w={g.fiveHour} now={now} />
-      <Meter label="7-day" w={g.weekly} now={now} />
+      <Meter label="5-hour" w={g.fiveHour} now={now} missingHint={missing} />
+      <Meter label="7-day" w={g.weekly} now={now} missingHint={missing} />
       <Meter
         label="Fable (7-day)"
         w={fable}
         now={now}
-        missingHint={g.probe?.state === "ok" ? "no Fable window reported" : hint}
+        missingHint={
+          g.probe?.state === "ok"
+            ? "no Fable window reported"
+            : reading && g.probe === null
+              ? READING
+              : hint
+        }
         {...(fable ? { ageText: hint } : {})}
       />
     </div>
   );
 }
-
-/** A machine row's compact usage: `5h 37% · 7d 56% · Fable 12%`, and `sampled 3 h ago` when older. */
-export function UsageTriple({ text, sampled }: { text: string; sampled: string | null }) {
-  return (
-    <span className="cc-usage">
-      <span className="mono">{text}</span>
-      {sampled && <span className="dim"> · {sampled}</span>}
-    </span>
-  );
-}
-
-const WINDOW_NAME = { five_hour: "5-hour", weekly: "7-day" } as const;
 
 /** An e-mail masked until its eye button shows it (per mount, never persisted). */
 function MaskedEmail({ email }: { email: string }) {
@@ -335,10 +331,26 @@ function MaskedEmail({ email }: { email: string }) {
   );
 }
 
-/** The login's e-mail, masked until its eye button shows it (per card, never persisted). */
-function EmailRow({ email }: { email: string | null }) {
+/**
+ * The login's e-mail, masked until its eye button shows it (per card, never persisted). Not known
+ * yet: `reading…` while the Desk is asking volleyd for it (with the last reading's age), else
+ * `no reading yet` (no control, or the last ask answered without one).
+ */
+function EmailRow({
+  email,
+  asking,
+  lastRead,
+}: {
+  email: string | null;
+  asking: boolean;
+  lastRead: string | null;
+}) {
   if (email === null)
-    return <div className="s-hint">e-mail not reported yet (run the machine's doctor)</div>;
+    return (
+      <div className="s-hint">
+        {asking ? `${READING}${lastRead ? ` · last read ${lastRead}` : ""}` : NO_READING}
+      </div>
+    );
   return (
     <div className="cc-email">
       <MaskedEmail email={email} />
@@ -360,7 +372,7 @@ function MissingRow({
   other,
   onSignIn,
 }: {
-  c: MatrixCell;
+  c: Pick<MachineRow, "name" | "up">;
   /** The card's account, for the button's name (every card may offer the same machine). */
   account: string;
   other: string | null;
@@ -401,36 +413,129 @@ export interface SignInTry {
   acct: string;
 }
 
-/** One Anthropic account's card. */
+const STATE_TEXT = { signed_in: "signed in", signed_out: "signed out" } as const;
+
+/**
+ * The card's name, and Rename ✎: the name becomes a field holding it; Enter sends the new one
+ * (`onRename` answers volleyd's refusal, shown under the field, or null), Escape restores it.
+ * The new name shows once the registry is fetched again (volleyd's signal), not on the answer.
+ */
+function CardName({
+  label,
+  onRename,
+}: {
+  label: string;
+  onRename: ((label: string) => Promise<string | null>) | null;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+  const editing = draft !== null;
+  // Only on opening the field: typing must not re-select.
+  useEffect(() => {
+    if (editing) input.current?.select();
+  }, [editing]);
+  const cancel = () => {
+    setDraft(null);
+    setError(null);
+  };
+  const save = async () => {
+    if (!onRename || draft === null || busy) return;
+    if (draft.trim() === label) return cancel();
+    setBusy(true);
+    const why = await onRename(draft);
+    setBusy(false);
+    if (why !== null) setError(why);
+    else cancel();
+  };
+  return (
+    <div className="min0 cc-name">
+      {draft === null ? (
+        <b>{label}</b>
+      ) : (
+        <input
+          ref={input}
+          className="cc-rename"
+          aria-label={`New name for ${label}`}
+          value={draft}
+          disabled={busy}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void save();
+            } else if (e.key === "Escape") {
+              // Claimed, so the Settings window does not close too.
+              e.preventDefault();
+              e.stopPropagation();
+              cancel();
+            }
+          }}
+        />
+      )}
+      {error && (
+        <p className="s-error" role="alert">
+          {error}
+        </p>
+      )}
+      {onRename && draft === null && (
+        <button
+          type="button"
+          className="icon-btn cc-rename-btn"
+          aria-label={`Rename ${label}`}
+          onClick={() => setDraft(label)}
+        >
+          ✎
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One Anthropic account's card, strictly for managing it: the name, the masked e-mail and plan,
+ * the account's three meters once, one row per configured machine with its sign-in state only,
+ * Add / Rename / Remove, and how old the freshest reading is.
+ */
 function AccountCard({
-  row,
+  g,
+  rows,
   others,
-  movable,
-  onMove,
   onAdd,
   onSignInOn,
-  balance,
+  onRename,
+  onRemove,
+  asking,
+  reading,
   now,
 }: {
-  row: AccountMatrixRow;
-  /** volleyd's `claude_balance` answer; `null`: not known (nothing said). */
-  balance: BalanceAnswer | null;
+  g: AccountGroup;
+  rows: MachineRow[];
   /** A sign-in started here that finished on another e-mail, by machine (`op`). */
   others: Record<string, string>;
-  /** Open `account_limit` decisions on other accounts: the waves that can move here. */
-  movable: DecisionPayload[];
-  onMove: ((d: DecisionPayload) => void) | null;
   /** Add to another machine…; `null`: read-only. */
   onAdd: (() => void) | null;
   /** Sign in on a configured machine missing the account; `null`: read-only. */
-  onSignInOn: ((c: MatrixCell) => void) | null;
+  onSignInOn: ((r: MachineRow) => void) | null;
+  /** Rename; `null`: read-only, or nothing but this machine's own login on the card. */
+  onRename: ((label: string) => Promise<string | null>) | null;
+  /** Remove… (opens the sheet); `null` as for `onRename`. */
+  onRemove: (() => void) | null;
+  /** The Desk is asking volleyd to read the login (`claude_prime`), or about to. */
+  asking: boolean;
+  /** A `claude_prime` for the card is in flight. */
+  reading: boolean;
   now: number;
 }) {
-  const g = row.group;
-  const { held, total } = row.coverage;
   const only = g.members.length === 1 ? g.members[0] : undefined;
-  const ago = g.freshest && readingAge(g.freshest.sampledAt, now);
-  const picks = picksLine(g.members.flatMap((m) => nextPicks(balance, m.account)));
+  const sub =
+    g.org ??
+    (only === undefined
+      ? null
+      : only.account === PRIMARY
+        ? `${PRIMARY} · Claude Code's default login`
+        : `${only.account} · ${machineName(only.machine)}`);
   return (
     <article className="claude-card" aria-label={g.label}>
       <div className="cc-head">
@@ -438,110 +543,173 @@ function AccountCard({
           ✳
         </span>
         <div className="min0">
-          <b>{g.label}</b>
-          <div className="s-hint ell">
-            {g.org ??
-              (only === undefined
-                ? plural(g.members.length, "machine")
-                : only.account === PRIMARY
-                  ? `${PRIMARY} · Claude Code's default login`
-                  : `${only.account} · ${machineName(only.machine)}`)}
-          </div>
+          <CardName label={g.label} onRename={onRename} />
+          {sub && <div className="s-hint ell">{sub}</div>}
         </div>
-        {total > 1 && (
-          <span className={`chip${held < total ? " chip--gap" : ""}`}>
-            on {held} of {total} machines
-          </span>
-        )}
         {g.plan && <span className="chip">{g.plan}</span>}
       </div>
-      <EmailRow email={g.email} />
-      <Meters g={g} now={now} />
-      {g.members.length > 1 && g.freshest && (
-        <div className="cc-fresh">
-          <div className="s-hint">
-            freshest: {machineName(g.freshest.machine)}, {ago ? `${ago} ago` : "just now"}
-          </div>
-          {g.stale.map((s) => (
-            <div key={`${s.machine}-${s.window}`} className="s-hint cc-stale">
-              {machineName(s.machine)}'s {WINDOW_NAME[s.window]} reading ({Math.round(s.pct)}%,{" "}
-              {readingAge(s.sampledAt, now) ?? "<1 min"} old) is stale
-            </div>
-          ))}
-        </div>
-      )}
+      <EmailRow email={g.email} asking={asking} lastRead={lastReadOf(g, now)} />
+      <Meters g={g} now={now} reading={reading} />
       <ul className="cc-machines" aria-label="Machines">
-        {row.rows.map((c) => {
-          const m = c.member;
-          if (m === null)
-            return (
-              <MissingRow
-                key={`gap-${c.op}`}
-                c={c}
-                account={g.label}
-                other={others[c.op] ?? null}
-                onSignIn={onSignInOn && (() => onSignInOn(c))}
+        {rows.map((r) =>
+          r.state === "missing" ? (
+            <MissingRow
+              key={`gap-${r.op}`}
+              c={r}
+              account={g.label}
+              other={others[r.op] ?? null}
+              onSignIn={onSignInOn && (() => onSignInOn(r))}
+            />
+          ) : (
+            <li key={r.op}>
+              <span
+                className={`cc-dot${r.state === "signed_in" ? " cc-dot--in" : ""}`}
+                aria-hidden="true"
               />
-            );
-          return (
-            <li key={m.account}>
-              <span className={`cc-dot${m.signedIn ? " cc-dot--in" : ""}`} aria-hidden="true" />
-              <span className="sr-only">{m.signedIn ? "signed in" : "signed out"}</span>
-              <b>{c.name}</b>
-              <span className="dim ell">{m.label}</span>
-              <UsageTriple {...usageTriple(g, m, now)} />
-              {nextPicks(balance, m.account).length > 0 && (
-                <span className="chip cc-next" title="volleyd's next spawn there runs under it">
-                  next pick
-                </span>
-              )}
-              <span className="dim cc-waves">
-                {m.waves.length ? `waves: ${m.waves.join(", ")}` : "no waves"}
-              </span>
+              <b>{r.name}</b>
+              <span className="dim">{r.labels.join(", ")}</span>
+              <span className="cc-state">{STATE_TEXT[r.state]}</span>
             </li>
-          );
-        })}
+          ),
+        )}
       </ul>
-      <div className="cc-move">
-        <span className="s-hint">Use for</span>
-        <select
-          aria-label={`Move a wave to ${g.label}`}
-          title={
-            movable.length
-              ? "Answers the wave's account-limit decision: new agents start on this account"
-              : "volleyd moves a wave when its account nears the limit (Needs-you)"
-          }
-          value=""
-          disabled={!onMove || movable.length === 0}
-          onChange={(e) => {
-            const d = movable.find((x) => x.wave === e.target.value);
-            if (d) onMove?.(d);
-          }}
-        >
-          <option value="">
-            {movable.length ? "Move a wave here…" : "No wave waiting to move"}
-          </option>
-          {movable.map((d) => (
-            <option key={d.decision_id} value={d.wave}>
-              {d.wave}
-            </option>
-          ))}
-        </select>
+      <div className="cc-actions">
         {onAdd && (
           <button type="button" className="btn" onClick={onAdd}>
             Add to another machine…
           </button>
         )}
-      </div>
-      <div className="cc-foot">
-        <span>{plural(g.agents.length, "agent")}</span>
-        <span className="dim">
-          {g.waves.length ? `waves: ${g.waves.join(", ")}` : "no waves assigned"}
+        {onRemove && (
+          <button
+            type="button"
+            className="btn"
+            aria-label={`Remove ${g.label}…`}
+            onClick={onRemove}
+          >
+            Remove…
+          </button>
+        )}
+        <span className="s-hint cc-updated">
+          Last updated: {lastUpdated(g, now) ?? "no reading yet"}
         </span>
-        {picks && <span className="cc-picks">picks next: {picks}</span>}
       </div>
     </article>
   );
+}
+
+/** How old the login's last reading is (its probe's read, else its freshest sample), if any. */
+const lastReadOf = (g: AccountGroup, now: number): string | null => {
+  const at = g.probe?.readAt ?? g.freshest?.sampledAt ?? null;
+  return at ? agoText(at, now) : null;
+};
+
+/** A card missing its e-mail or both its usage windows: what `claude_prime` reads. */
+const missingData = (g: AccountGroup) =>
+  g.email === null || (g.fiveHour === null && g.weekly === null);
+
+/**
+ * Ask volleyd to read each card missing data (`claude_prime { acct }`, its first login), once per
+ * account per `PRIME_EVERY_MS` while `control` is available. The accounts with one in flight.
+ */
+function usePrime(control: ControlFn | null, groups: AccountGroup[], now: number) {
+  const sent = useRef(new Map<string, number>());
+  const [inFlight, setInFlight] = useState<ReadonlySet<string>>(() => new Set());
+  const due = groups
+    .filter(missingData)
+    .map((g) => g.members[0]?.account)
+    .filter((a): a is string => a !== undefined);
+  const key = due.join("\n");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `key` stands for `due`
+  useEffect(() => {
+    if (!control) return;
+    for (const acct of due) {
+      const last = sent.current.get(acct);
+      if (last !== undefined && now - last < PRIME_EVERY_MS) continue;
+      sent.current.set(acct, now);
+      setInFlight((s) => new Set(s).add(acct));
+      void control("claude_prime", { acct }, `volley claude prime ${acct}`, PRIME_TIMEOUT_MS)
+        .catch(() => undefined)
+        .finally(() =>
+          setInFlight((s) => {
+            const next = new Set(s);
+            next.delete(acct);
+            return next;
+          }),
+        );
+    }
+  }, [control, key, now]);
+  return {
+    reading: inFlight,
+    /** A prime for `acct` was sent and has answered: volleyd is not reading it now. */
+    answered: (acct: string) => sent.current.has(acct) && !inFlight.has(acct),
+  };
+}
+
+/**
+ * The profiles waiting for sign-in: each a row, never a card, with Finish sign-in (volleyd's
+ * `claude_signin` for it) and Cancel (T1's remove).
+ */
+function PendingProfiles({
+  rows,
+  onFinish,
+  onCancel,
+}: {
+  rows: RegistryAccount[];
+  /** Finish sign-in; `null`: read-only. */
+  onFinish: ((r: RegistryAccount) => void) | null;
+  /** Cancel: remove the profile (`claude_account_remove`); `null`: read-only. */
+  onCancel: ((r: RegistryAccount) => void) | null;
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <section className="cc-pending" aria-label="Profiles waiting for sign-in">
+      <div className="s-hint">Profiles waiting for sign-in</div>
+      <ul className="cc-machines">
+        {rows.map((r) => (
+          <li key={registryKey(r)} className="gap">
+            <span className="cc-dot" aria-hidden="true" />
+            <b>{r.label}</b>
+            <span className="dim">on {machineName(r.machine)}</span>
+            {onFinish && (
+              <span className="cc-signin">
+                <button
+                  type="button"
+                  className="btn btn--blue"
+                  aria-label={`Finish sign-in for ${r.label}`}
+                  onClick={() => onFinish(r)}
+                >
+                  Finish sign-in
+                </button>
+                {onCancel && (
+                  <button
+                    type="button"
+                    className="btn"
+                    aria-label={`Cancel ${r.label}`}
+                    onClick={() => onCancel(r)}
+                  >
+                    Cancel
+                  </button>
+                )}
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/** Finish sign-in for a profile waiting for one: the dialog at its sign-in step, resuming it. */
+export function pendingPreset(r: RegistryAccount): SignInPreset {
+  return {
+    key: registryKey(r),
+    account: r.label,
+    email: r.email ?? null,
+    label: r.label,
+    machine: r.machine,
+    name: machineName(r.machine),
+    acct: registryKey(r),
+  };
 }
 
 /** A machine the Add dialog can sign a new profile in on. */
@@ -564,10 +732,9 @@ export interface SignInPreset {
   /** `claude_account_add`'s `machine`, and how the dialog names it. */
   machine: string;
   name: string;
+  /** Finish sign-in: the waiting profile's account id, whose sign-in `claude_signin` resumes. */
+  acct?: string;
 }
-
-/** A profile label for a machine's own login: never the e-mail, never "primary". */
-const NEW_PROFILE = "Claude login";
 
 /** The Sign in on <machine> preset for an account on a configured machine missing it. */
 export function signInPreset(g: AccountGroup, m: MatrixMachine): SignInPreset {
@@ -585,12 +752,7 @@ export function signInPreset(g: AccountGroup, m: MatrixMachine): SignInPreset {
 }
 
 /** What volleyd's `claude_account_add` answer carries for the sign-in (as its URL event). */
-interface Started {
-  url?: string;
-  flow?: string;
-  attach?: string;
-  manual_url?: string;
-}
+type Started = ReturnType<typeof startedFields>;
 
 type Adding =
   | { phase: "pick"; error?: string }
@@ -611,6 +773,8 @@ function AddAccount({
   signins,
   control,
   onStarted,
+  sameAs,
+  removeNew,
   onClose,
 }: {
   /** This machine first, then each paired host. */
@@ -627,8 +791,20 @@ function AddAccount({
   control: ControlFn;
   /** Hears the sign-in's account id once volleyd has started it. */
   onStarted?: (acct: string, label: string, machine: string) => void;
+  /**
+   * The account already on `machine` a sign-in that finished on `email` duplicates (its profile's
+   * name, or the default login), never the new profile `acct` itself; `null`: none.
+   */
+  sameAs?: (machine: string, email: string, acct: string) => string | null;
+  /** Remove the new profile (`claude_account_remove`): volleyd's refusal, or null. */
+  removeNew?: (acct: string) => Promise<string | null>;
   onClose: () => void;
 }) {
+  /** The duplicate prompt's answer: kept both, removing, removed (or why not), or not answered. */
+  const [dupAnswer, setDupAnswer] = useState<
+    { kept: true } | { removing: true } | { removed: true } | { error: string } | null
+  >(null);
+  const removed = dupAnswer !== null && "removed" in dupAnswer;
   const [s, setS] = useState<Adding>(() =>
     preset ? { phase: "waiting", machine: preset.machine, label: preset.label } : { phase: "pick" },
   );
@@ -647,18 +823,29 @@ function AddAccount({
   const url = signin?.url ?? r.url;
   const machine = s.phase === "waiting" ? s.machine : (chosen?.op ?? LOCAL_MACHINE);
   const remote = machine !== LOCAL_MACHINE;
+  const newAcct = s.phase === "waiting" ? s.acct : undefined;
+  const dup =
+    done && signin?.email && newAcct ? (sameAs?.(machine, signin.email, newAcct) ?? null) : null;
 
   const start = async (machine: string, name = label.trim()) => {
     if (!name) return;
     setS({ phase: "waiting", machine, label: name });
-    const r = await control(
-      "claude_account_add",
-      { label: name, machine },
-      `volley claude add "${name}"`,
-      ADD_ACCOUNT_TIMEOUT_MS,
-    );
+    const resume = preset?.acct;
+    const r = await (resume
+      ? control(
+          "claude_signin",
+          { acct: resume },
+          `volley claude signin ${resume}`,
+          ADD_ACCOUNT_TIMEOUT_MS,
+        )
+      : control(
+          "claude_account_add",
+          { label: name, machine },
+          `volley claude add "${name}"`,
+          ADD_ACCOUNT_TIMEOUT_MS,
+        ));
     const res = (r.result ?? {}) as Record<string, unknown>;
-    const acct = typeof res.acct === "string" ? res.acct : res.account;
+    const acct = typeof res.acct === "string" ? res.acct : (res.account ?? resume);
     if (!r.ok || typeof acct !== "string") {
       const error = r.error ?? "volleyd did not start the sign-in";
       // A preset has no step 1 to go back to: the sign-in step says why.
@@ -666,17 +853,7 @@ function AddAccount({
       return;
     }
     onStarted?.(acct, name, machine);
-    const field = (k: keyof Started) =>
-      typeof res[k] === "string" ? { [k]: res[k] as string } : {};
-    setS((cur) =>
-      cur.phase === "waiting"
-        ? {
-            ...cur,
-            acct,
-            r: { ...field("url"), ...field("flow"), ...field("attach"), ...field("manual_url") },
-          }
-        : cur,
-    );
+    setS((cur) => (cur.phase === "waiting" ? { ...cur, acct, r: startedFields(res) } : cur));
   };
 
   // Sign in on <machine> starts the sign-in on open, once (a re-render or a strict-mode remount
@@ -788,40 +965,26 @@ function AddAccount({
             <p className="s-error" role="alert">
               The sign-in did not finish: {signin.reason ?? "unknown reason"}
             </p>
-          ) : remote ? (
-            url ? (
-              <SigninLink
-                machine={machine}
-                url={url}
-                flow={signin?.flow ?? r.flow}
-                attach={signin?.attach ?? r.attach}
-                manualUrl={signin?.manual_url ?? r.manual_url}
-                lead={`Sign in on Anthropic’s own page; the profile lives on ${machine}.`}
-              />
-            ) : (
-              <p className="dim">
-                <span className="spinner" aria-hidden="true" /> Starting the sign-in on {machine}…
-              </p>
-            )
+          ) : url && newAcct ? (
+            <SigninLink
+              acct={newAcct}
+              machine={remote ? machine : "the supervisor’s machine"}
+              url={url}
+              attach={signin?.attach ?? r.attach}
+              manualUrl={signin?.manual_url ?? r.manual_url}
+              callbackUrl={signin ? signin.callback_url : r.callback_url}
+              control={control}
+              lead={
+                remote
+                  ? `Sign in on Anthropic’s own page; the profile lives on ${machine}.`
+                  : "Sign in on Anthropic’s own page."
+              }
+            />
           ) : (
-            <>
-              {url && (
-                <div className="ny-actions">
-                  <a className="btn btn--blue" href={url} target="_blank" rel="noreferrer">
-                    Open Anthropic sign-in ↗
-                  </a>
-                </div>
-              )}
-              <p className="dim">
-                The page hands the sign-in straight back to Claude Code on{" "}
-                {machineName(LOCAL_MACHINE)}: open it in a browser there.
-                {signin?.flow === "manual_code" &&
-                  ` If it shows a code, paste it into the sign-in terminal${signin.attach ? ` (tmux attach -t ${signin.attach})` : ""}, never here.`}
-              </p>
-              <div className="waiting">
-                <span className="spinner" aria-hidden="true" /> Waiting for the sign-in to finish…
-              </div>
-            </>
+            <p className="dim">
+              <span className="spinner" aria-hidden="true" /> Starting the sign-in
+              {remote ? ` on ${machine}` : ""}…
+            </p>
           )}
           <div className="ny-actions">
             <button type="button" className="btn" onClick={onClose}>
@@ -830,11 +993,65 @@ function AddAccount({
           </div>
         </Step>
         <Step title="Done" description="Added">
-          <h3>Added: {label.trim()}</h3>
-          <p className="dim">
-            {signin?.plan ? `${signin.plan} · ` : ""}signed in on {machineName(machine)}. Pick it
-            for new waves under Defaults, or let them take the account with the most headroom.
-          </p>
+          <h3>
+            {removed ? "Not added" : "Added"}: {label.trim()}
+          </h3>
+          {signin?.email && (
+            <p className="cc-signed-in">
+              Signed in as <MaskedEmail email={signin.email} />
+              {signin.plan && <span className="chip">{signin.plan}</span>}
+            </p>
+          )}
+          {dup && newAcct && !(dupAnswer !== null && "kept" in dupAnswer) && (
+            // biome-ignore lint/a11y/useSemanticElements: a status line with its answers, not a form <output>
+            <div className="needs-you" role="status">
+              <p className="ny-q">
+                This is the same account as {dup} on {machineName(machine)}.
+              </p>
+              {removed ? (
+                <p className="s-hint">Removed the new profile.</p>
+              ) : (
+                <>
+                  {dupAnswer !== null && "error" in dupAnswer && (
+                    <p className="s-error" role="alert">
+                      {dupAnswer.error}
+                    </p>
+                  )}
+                  <div className="ny-actions">
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => setDupAnswer({ kept: true })}
+                    >
+                      Keep both
+                    </button>
+                    {removeNew && (
+                      <button
+                        type="button"
+                        className="btn btn--hot"
+                        disabled={dupAnswer !== null && "removing" in dupAnswer}
+                        onClick={() => {
+                          setDupAnswer({ removing: true });
+                          void removeNew(newAcct).then((why) =>
+                            setDupAnswer(why === null ? { removed: true } : { error: why }),
+                          );
+                        }}
+                      >
+                        Remove the new profile
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+          {!removed && (
+            <p className="dim">
+              {signin?.plan && !signin.email ? `${signin.plan} · ` : ""}signed in on{" "}
+              {machineName(machine)}. Pick it for new waves under Defaults, or let them take the
+              account with the most headroom.
+            </p>
+          )}
           {preset && signin?.email && normalizeEmail(signin.email) !== preset.key && (
             <output className="s-hint">
               That was another account ({maskEmail(signin.email)}): it gets a card of its own, and{" "}
@@ -856,6 +1073,8 @@ export function SignInOnDialog(p: {
   signins: Record<string, ClaudeSignin>;
   control: ControlFn;
   onStarted?: (acct: string, label: string, machine: string) => void;
+  sameAs?: (machine: string, email: string, acct: string) => string | null;
+  removeNew?: (acct: string) => Promise<string | null>;
   onClose: () => void;
 }) {
   return <AddAccount machines={[]} {...p} />;
@@ -910,9 +1129,10 @@ export function withSignIns(
 export function ClaudeAccounts({
   accounts: records,
   signins,
-  waves,
   config,
   control,
+  registryControl = control,
+  registryRev,
   configTransport,
   now: fixedNow,
   onRegistry,
@@ -931,15 +1151,19 @@ export function ClaudeAccounts({
   const [tries, setTries] = useState<SignInTry[]>([]);
   const [closed, setClosed] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  /** A resolve in flight: the answers stay disabled so a double click sends one. */
-  const [busy, setBusy] = useState(false);
   const [ack, setAck] = useState<RowState>();
+  /** Remove… on a card: the account's name, e-mail and the profiles it can remove. */
+  const [removing, setRemoving] = useState<{
+    account: string;
+    email: string | null;
+    profiles: RemovableProfile[];
+  } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const now = useNow(fixedNow);
   const { accounts: registry, primaryPlan } = useClaudeRegistry(
-    control,
-    signinsDone(signins) + closed,
+    registryControl,
+    registryKeyOf(registryRev, signinsDone(signins) + closed),
   );
-  const balance = useClaudeBalance(control, signinsDone(signins) + closed);
   useEffect(() => {
     if (registry.length) onRegistry?.(registry);
   }, [registry, onRegistry]);
@@ -952,20 +1176,56 @@ export function ClaudeAccounts({
   );
   const groups = signedIn.groups;
   const configured = configuredMachines(hosts, machines, localName);
-  const matrix = accountMatrix(groups, configured);
-  const labelOf = (id: string | null | undefined) =>
-    list.find((a) => a.id === id)?.label ?? id ?? "";
-  const decisions = openLimitDecisions(waves);
+  const pending = pendingProfiles(registry, records);
+  const prime = usePrime(registryControl, groups, now);
+  /** What starts and finishes a sign-in: volleyd, or in demo mode the demo's own answers. */
+  const signinControl = control ?? registryControl;
+  /** A finished sign-in's e-mail already on its machine: the duplicate prompt (`AddAccount`). */
+  const sameAs = (machine: string, email: string, acct: string) =>
+    sameAccountOnMachine(registry, machine, email, {
+      except: acct,
+      defaultEmail:
+        groups.find((g) => g.members.some((m) => m.isPrimary && m.machine === machine))?.email ??
+        null,
+    });
+  const removeNew = async (acct: string) => {
+    if (!registryControl) return "the Desk cannot steer";
+    const r = await registryControl(
+      "claude_account_remove",
+      { acct },
+      `volley claude remove ${acct}`,
+      REMOVE_ACCOUNT_TIMEOUT_MS,
+    );
+    return r.ok ? null : (r.error ?? "volleyd refused to remove it");
+  };
   const addMachines = (holds: string[]): AddMachine[] =>
     configured.map((m) => ({ ...m, holds: holds.includes(m.op) }));
 
-  const answer = async (d: DecisionPayload, text: string) => {
-    if (!control || busy) return;
+  /** A card's profiles (never a machine's own login): what Rename and Remove act on. */
+  const profilesOf = (g: AccountGroup): RemovableProfile[] =>
+    g.members
+      .filter((m) => !m.isPrimary)
+      .map((m) => ({ acct: m.account, name: machineName(m.machine), label: m.label }));
+  const rename = (acct: string) => async (label: string) => {
+    if (!registryControl) return "the Desk cannot steer";
+    const r = await registryControl(
+      "claude_account_rename",
+      { acct, label },
+      `volley claude rename ${acct}`,
+    );
+    return r.ok ? null : (r.error ?? "volleyd refused the name");
+  };
+  const cancelPending = async (r: RegistryAccount) => {
+    if (!registryControl) return;
     setError(null);
-    setBusy(true);
-    const r = await control("resolve", resolveFields(d, text), `volleyd resolve ${d.decision_id}`);
-    setBusy(false);
-    if (!r.ok) setError(r.error ?? "volleyd refused the answer");
+    const acct = registryKey(r);
+    const a = await registryControl(
+      "claude_account_remove",
+      { acct },
+      `volley claude remove ${acct}`,
+      REMOVE_ACCOUNT_TIMEOUT_MS,
+    );
+    if (!a.ok) setError(a.error ?? "volleyd refused to remove it");
   };
 
   const setDefault = (k: string) => {
@@ -1022,7 +1282,6 @@ export function ClaudeAccounts({
         section={sectionDef("claude")}
         summaries={claudeSummaries({
           accounts: groups.length,
-          needsYou: decisions.length,
           defaultLabel: currentLabel,
           warnAt,
         })}
@@ -1039,172 +1298,115 @@ export function ClaudeAccounts({
           account from a terminal.
         </p>
       )}
-      {decisions.map((d) => {
-        const target = d.suggested ? list.find((a) => a.id === d.suggested) : undefined;
-        if (!isWaveLimit(d)) {
-          const move = moveOption(d);
-          return (
-            // biome-ignore lint/a11y/useSemanticElements: a banner live region (as in the prototype), not a form <output>
-            <div key={d.decision_id} className="needs-you" role="status">
-              <div className="ny-head">
-                Needs you: {d.agent_id ?? "an agent"} on {labelOf(d.acct)} at{" "}
-                {Math.round(d.pct ?? 0)}%
-              </div>
-              <p className="ny-q">{d.question}</p>
-              {control && (
-                <div className="ny-actions">
-                  {move && d.suggested && (
-                    <button
-                      type="button"
-                      className="btn btn--hot"
-                      disabled={busy}
-                      onClick={() => void answer(d, move)}
-                    >
-                      move to {d.suggested} ({accountFigures(target)})
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="btn"
-                    disabled={busy}
-                    onClick={() => void answer(d, notNowAnswer(d))}
-                  >
-                    not now
-                  </button>
-                </div>
-              )}
-            </div>
-          );
-        }
-        return (
-          // biome-ignore lint/a11y/useSemanticElements: a banner live region (as in the prototype), not a form <output>
-          <div key={d.decision_id} className="needs-you" role="status">
-            <div className="ny-head">
-              Needs you: {labelOf(d.acct)} is at {Math.round(d.pct ?? 0)}% of its 5-hour window
-            </div>
-            <p className="ny-q">
-              {d.suggested ? (
-                <>
-                  Move wave <b>{d.wave}</b> to <b>{labelOf(d.suggested)}</b>
-                  {/* nothing until the Desk has the account (its record may arrive later) */}
-                  {target === undefined
-                    ? ""
-                    : target.fiveHour
-                      ? ` (${Math.round(target.fiveHour.pct)}% used)`
-                      : ` (${fiveHourLabel(null, target.weekly?.pct ?? null)})`}
-                  ? New agents start on {labelOf(d.suggested)}; running agents finish where they
-                  are.
-                </>
-              ) : (
-                <>
-                  No other account has headroom for wave <b>{d.wave}</b>
-                  {resetsIn(d.resets_at, now)
-                    ? `; the window resets in ${resetsIn(d.resets_at, now)}`
-                    : ""}
-                  .
-                </>
-              )}
-            </p>
-            {control && (
-              <div className="ny-actions">
-                {d.suggested && (
-                  <button
-                    type="button"
-                    className="btn btn--hot"
-                    disabled={busy}
-                    onClick={() => void answer(d, moveAnswer(d.wave, d.suggested as string))}
-                  >
-                    Move to {labelOf(d.suggested)}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="btn"
-                  disabled={busy}
-                  onClick={() => void answer(d, notNowAnswer(d))}
-                >
-                  Not now
-                </button>
-              </div>
-            )}
-          </div>
-        );
-      })}
       {error && (
         <p className="s-error" role="alert">
           {error}
         </p>
       )}
+      {notice && (
+        // biome-ignore lint/a11y/useSemanticElements: a status line, not a form <output>
+        <p className="s-hint" role="status">
+          {notice}
+        </p>
+      )}
       <div className="claude-cards">
-        {matrix.map((row) => {
-          const g = row.group;
-          const to = moveTargetOf(g);
-          return (
-            <AccountCard
-              key={g.key}
-              row={row}
-              others={signedIn.others[g.key] ?? {}}
-              movable={decisions.filter(
-                (d) => isWaveLimit(d) && !g.members.some((m) => m.account === d.acct),
-              )}
-              onMove={
-                control && !busy && to !== null
-                  ? (d) => void answer(d, moveAnswer(d.wave, to))
-                  : null
-              }
-              onAdd={
-                control
-                  ? () =>
-                      setAdding({
-                        // A real profile label only: never the card's e-mail or the primary's name.
-                        label: g.members.find((m) => !m.isPrimary)?.label ?? "",
-                        holds: g.members.map((m) => m.machine),
-                      })
-                  : null
-              }
-              onSignInOn={
-                control
-                  ? (c) => {
-                      const m = configured.find((x) => x.op === c.op);
-                      if (m) setSigningIn(signInPreset(g, m));
-                    }
-                  : null
-              }
-              balance={balance}
-              now={now}
-            />
-          );
-        })}
+        {groups.map((g) => (
+          <AccountCard
+            key={g.key}
+            g={g}
+            rows={machineRows(g, configured)}
+            others={signedIn.others[g.key] ?? {}}
+            onAdd={
+              signinControl
+                ? () =>
+                    setAdding({
+                      // A real profile label only: never the card's e-mail or the primary's name.
+                      label: g.members.find((m) => !m.isPrimary)?.label ?? "",
+                      holds: g.members.map((m) => m.machine),
+                    })
+                : null
+            }
+            onSignInOn={
+              signinControl
+                ? (r) => {
+                    const m = configured.find((x) => x.op === r.op);
+                    if (m) setSigningIn(signInPreset(g, m));
+                  }
+                : null
+            }
+            onRename={(() => {
+              const own = profilesOf(g)[0];
+              return registryControl && own ? rename(own.acct) : null;
+            })()}
+            onRemove={
+              registryControl && profilesOf(g).length > 0
+                ? () => {
+                    setNotice(null);
+                    setRemoving({ account: g.label, email: g.email, profiles: profilesOf(g) });
+                  }
+                : null
+            }
+            asking={
+              registryControl !== null &&
+              g.members[0] !== undefined &&
+              !prime.answered(g.members[0].account)
+            }
+            reading={g.members[0] !== undefined && prime.reading.has(g.members[0].account)}
+            now={now}
+          />
+        ))}
         <button
           type="button"
           className="claude-card claude-card--add"
-          disabled={!control}
+          disabled={!signinControl}
           onClick={() => setAdding({ label: "", holds: [] })}
         >
           + Add Claude account
         </button>
       </div>
-      {signingIn && control && (
+      <PendingProfiles
+        rows={pending}
+        onFinish={signinControl ? (r) => setSigningIn(pendingPreset(r)) : null}
+        onCancel={registryControl ? (r) => void cancelPending(r) : null}
+      />
+      {removing && registryControl && (
+        <RemoveAccountSheet
+          account={removing.account}
+          email={removing.email}
+          profiles={removing.profiles}
+          control={registryControl}
+          onClose={() => setRemoving(null)}
+          onDone={(n) => {
+            setRemoving(null);
+            setNotice(n);
+          }}
+        />
+      )}
+      {signingIn && signinControl && (
         <SignInOnDialog
           key={`${signingIn.key}@${signingIn.machine}`}
           preset={signingIn}
           signins={signins}
-          control={control}
+          control={signinControl}
           onStarted={(acct, label, op) =>
             setTries((ts) => [...ts, { key: signingIn.key, op, label, acct }])
           }
+          sameAs={sameAs}
+          removeNew={removeNew}
           onClose={() => {
             setSigningIn(null);
             setClosed((n) => n + 1);
           }}
         />
       )}
-      {adding && control && (
+      {adding && signinControl && (
         <AddAccount
           machines={addMachines(adding.holds)}
           baseLabel={adding.label}
           signins={signins}
-          control={control}
+          control={signinControl}
+          sameAs={sameAs}
+          removeNew={removeNew}
           onClose={() => {
             setAdding(null);
             setClosed((n) => n + 1);

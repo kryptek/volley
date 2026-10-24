@@ -22,9 +22,11 @@
  * reply key at all) is read-only and is shown the terminal commands instead.
  * A plain-http LAN page can pair: its reply key comes from `lib/rsa.ts`.
  *
- * Each card lists the Claude accounts (`accountMatrix` over the groups App
- * computes): **Sign in on <machine>** opens Settings › Claude accounts' sign-in
- * for that account there (`SignInOnDialog`). The block shows the registry's view only: a
+ * Each card lists the Claude accounts (`machineRows` over the groups App
+ * computes), each with its sign-in state there and no usage figures (the
+ * account's card in Settings › Claude accounts has them once): **Sign in on
+ * <machine>** opens Settings › Claude accounts' sign-in for that account there
+ * (`SignInOnDialog`). The block shows the registry's view only: a
  * sign-in started here fills its row once the registry is re-fetched, and one that finished
  * on another e-mail is said on the dialog's Done step, not on the card (Settings › Claude
  * accounts tracks both on its own cards).
@@ -35,13 +37,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } fro
 import { SwitchToAdmin } from "../auth/AccountActions";
 import { plural } from "../lib/plural";
 import Stepper, { Step } from "../rb/Stepper/Stepper";
-import {
-  type AccountGroup,
-  LOCAL_MACHINE,
-  accountMatrix,
-  configuredMachines,
-  usageTriple,
-} from "../store/claude";
+import { type AccountGroup, LOCAL_MACHINE, configuredMachines, machineRows } from "../store/claude";
 import { type AdminStatus, type PeerOps, joinCommand, pairingSupported } from "../store/peerOps";
 import type {
   ClaudeSignin,
@@ -599,19 +595,19 @@ export function Machines(p: MachinesProps) {
   const own = p.localName ? p.machines[p.localName] : undefined;
   const [signingIn, setSigningIn] = useState<SignInPreset | null>(null);
   const configured = configuredMachines(p.hosts ?? [], p.machines, p.localName ?? undefined);
-  const matrix = accountMatrix(p.claude?.groups ?? [], configured);
-  /** The account matrix's column for one machine. */
+  /** Each account's row for one machine: its sign-in state there, no figures. */
   const accountRows = (op: string): MachineAccountRow[] =>
-    matrix.map(({ group: g, rows }) => {
-      const here = rows.find((c) => c.op === op);
+    (p.claude?.groups ?? []).map((g) => {
+      const here = machineRows(g, configured).find((r) => r.op === op);
       return {
         key: g.key,
         label: g.label,
         email: g.email,
         plan: g.plan,
-        held: here?.member
-          ? { label: here.member.label, usage: usageTriple(g, here.member, now) }
-          : null,
+        held:
+          here && here.state !== "missing"
+            ? { label: here.labels.join(", "), state: here.state }
+            : null,
         up: here?.up ?? true,
       };
     });

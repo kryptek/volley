@@ -20,7 +20,6 @@ export const CONFIG_DEFAULTS: Tunables = {
     ci_queue_max: 10,
     hysteresis_samples: 3,
   },
-  claim_after_s: 1800,
   heartbeat_alarm_s: 600,
   idle_grace_s: 180,
   background_wait_max_s: 7200,
@@ -362,11 +361,16 @@ export const DAEMON_DEFAULTS = {
   claude_signin_timeout_ms: 900_000,
   /** Bound on one `claude auth status`. */
   claude_auth_status_timeout_ms: 15_000,
+  /** A login is primed (`claude_prime`: identity, plan, usage probe) at most once in this long. */
+  claude_prime_interval_ms: 300_000,
   /**
-   * How long a paired machine's sign-in forward (`ssh -N -L`) must stay up before its URL is
-   * published: an ssh that exits sooner (the local port is taken) restarts the sign-in once.
+   * How long a paired machine's sign-in forward (`ssh -N -L`) must stay up before it counts as
+   * up: an ssh that exits sooner (the local port is taken) leaves the sign-in without one.
    */
   signin_forward_settle_ms: 3_000,
+  /** How long a pasted sign-in code or redirect waits for the sign-in to end before it is read
+   * as rejected (`claude_signin_entry`). */
+  signin_entry_wait_ms: 30_000,
   /** Tries (and the wait between them) for a profile's `.claude.json.lock` during an MCP sync. */
   claude_json_lock_attempts: 50,
   claude_json_lock_wait_ms: 20,

@@ -31,73 +31,128 @@
 .dag-scroll {
   overflow-x: auto;
 }
+/* The graph: HTML nodes over one SVG layer of edges, placed by layoutDag. */
 .dag {
+  position: relative;
+}
+.dag-edges {
+  position: absolute;
+  inset: 0;
   display: block;
+  overflow: visible;
 }
 .dag-edge {
   fill: none;
   stroke: rgba(214, 224, 255, 0.3);
   stroke-width: 1.5;
 }
-.dag-node rect {
-  fill: rgba(255, 255, 255, 0.04);
-  stroke: rgba(214, 224, 255, 0.18);
+/* A node: the id over its status, the issue (or a fixer's wrench) right of the status, a
+   merged node's ✓ (stepfx.css) to the left of both. The status column is all of the node's
+   112 px inside its insets, less the corner label (fitStatus in Dag.tsx). */
+.dag > .dag-node {
+  position: absolute;
+}
+.dag-node {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "chk id id"
+    "chk stage corner";
+  align-content: center;
+  padding: 0 9px;
+  border-radius: 12px;
+  line-height: 1.25;
+}
+/* The flat look: a decision, a cancelled task and an ended wave keep it; :where lets the depth
+   states (stepfx.css) win over it. */
+:where(.dag-node) {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(214, 224, 255, 0.18);
+}
+.dag-node.fx-done::before {
+  grid-area: chk;
+  align-self: center;
+  margin-right: 4px;
+}
+.dag-id,
+.dag-stage {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .dag-id {
+  grid-area: id;
   font: 600 13px var(--f-mono);
+  color: var(--acc-ink);
 }
 .dag-stage {
+  grid-area: stage;
   font: 11.5px var(--f-ui);
-  fill: var(--mute);
+  color: var(--mute);
+}
+.dag-issue,
+.dag-fixer {
+  grid-area: corner;
+  padding-left: 4px;
+  white-space: nowrap;
 }
 .dag-issue {
   font: 11px var(--f-mono);
-  fill: var(--dim);
+  color: var(--dim);
+}
+.dag-issue a,
+a.dag-issue-link {
+  color: inherit;
+  text-decoration: none;
 }
 .dag-issue-link {
   cursor: pointer;
 }
-.dag-issue-link:hover text,
-.dag-issue-link:focus-visible text {
-  fill: var(--ink);
+.dag-issue-link:hover,
+.dag-issue-link:focus-visible {
+  color: var(--ink);
   text-decoration: underline;
 }
+/* Inside the node's box: a running node clips what it holds. */
 .dag-issue-link:focus-visible {
-  outline: none;
-}
-/* Safari draws no outline on SVG <text>: the accent stroke keeps keyboard focus visible there. */
-.dag-issue-link:focus-visible text {
   outline: 2px solid var(--acc, currentColor);
+  outline-offset: 0;
+  border-radius: 2px;
+}
+/* A running node's text is the effect's ink; its id stays the wave accent. This also
+   holds for a hovered or focused issue link (--ink would sit on the accent gradient):
+   its underline and outline are the cue there. */
+.dag-node.fx-cur > :is(.dag-stage, .dag-issue, .dag-fixer) {
+  color: inherit;
+}
+.dag-node.st-merged:not(.fx-done) {
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
+.dag-node.st-merge_ready:not(.fx-cur) {
+  background: color-mix(in srgb, var(--t-acc) 10%, transparent);
+  border-color: color-mix(in srgb, var(--t-acc) 55%, transparent);
+}
+/* Merge-ready and running: the accent ring outside the effect's own border. */
+.dag-node.st-merge_ready.fx-cur {
+  outline: 1px solid color-mix(in srgb, var(--t-acc) 55%, transparent);
   outline-offset: 2px;
-  stroke: var(--acc, currentColor);
-  stroke-width: 0.6px;
-  paint-order: stroke;
 }
-.dag-node.st-merged rect {
-  fill: rgba(74, 222, 128, 0.1);
-  stroke: rgba(74, 222, 128, 0.45);
+.dag-node.st-decision {
+  background: color-mix(in srgb, var(--amber) 10%, transparent);
+  border-color: color-mix(in srgb, var(--amber) 60%, transparent);
 }
-.dag-node.st-merge_ready rect {
-  fill: rgba(110, 231, 249, 0.1);
-  stroke: rgba(110, 231, 249, 0.55);
-}
-.dag-node.st-decision rect {
-  fill: rgba(251, 191, 36, 0.1);
-  stroke: rgba(251, 191, 36, 0.6);
-}
-.dag-node.st-queued rect {
-  stroke-dasharray: 4 4;
+.dag-node.st-queued {
+  border: 1px dashed var(--line);
 }
 .dag-node.st-cancelled {
   opacity: 0.45;
+  border-style: dashed;
 }
-.dag-node.st-cancelled rect {
-  stroke-dasharray: 2 4;
-}
-.dag-node.st-implement rect,
-.dag-node.st-review rect,
-.dag-node.st-fixup rect {
-  stroke: color-mix(in srgb, var(--acc) 60%, transparent);
+.dag-node:is(.st-implement, .st-review, .st-fixup):not(.fx-cur) {
+  border-color: color-mix(in srgb, var(--acc) 60%, transparent);
 }
 .yaml {
   margin: 0;
@@ -107,13 +162,13 @@
   overflow: auto;
   max-height: 170px;
   white-space: pre;
-  color: #cfd6e6;
+  color: var(--code-ink);
 }
 .y-k {
-  color: #8fb4ff;
+  color: var(--syn-key);
 }
 .y-v {
-  color: #f0d58a;
+  color: var(--syn-val);
 }
 .y-c {
   color: var(--dim);
@@ -129,10 +184,12 @@
   gap: 4px;
   height: 8px;
 }
+/* A recessed track; done and running fills are glossy, a running one with the effect (stepfx.css). */
 .rail-seg {
   flex: 1;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--pit);
+  box-shadow: inset 0 1px 3px var(--shade);
   overflow: hidden;
 }
 .rail-seg > span {
@@ -176,9 +233,9 @@
   border-color: rgba(163, 171, 192, 0.4);
 }
 .chip--ci {
-  color: var(--amber);
-  border-color: rgba(251, 191, 36, 0.45);
-  background: rgba(251, 191, 36, 0.08);
+  color: var(--amber-text);
+  border-color: color-mix(in srgb, var(--amber) 45%, transparent);
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
 }
 .wave-ci {
   list-style: none;
@@ -196,20 +253,75 @@
   align-items: baseline;
 }
 .wave-ci-what {
-  color: var(--amber);
+  color: var(--amber-text);
 }
 .wave-ci-pipe {
-  color: var(--amber);
+  color: var(--amber-text);
   font: 11.5px var(--f-mono);
 }
 .wave-ci-stuck {
-  color: var(--amber);
+  color: var(--amber-text);
+}
+/* The CI panel (#488): a task held for CI with no agent running, in its own window. */
+.ci-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--ink);
+  min-width: 0;
+}
+.ci-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--hl);
+  overflow: hidden;
+}
+.ci-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--acc);
+}
+.ci-jobs,
+.ci-why {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.ci-label {
+  margin: 4px 0 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--mute);
+}
+.ci-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font: 12px var(--f-mono);
+}
+.ci-list li {
+  overflow-wrap: anywhere;
+}
+.ci-running {
+  color: var(--amber-text);
+}
+.ci-failed {
+  color: var(--bad-text);
+}
+.ci-link {
+  margin-top: 4px;
+  color: var(--link);
+  overflow-wrap: anywhere;
 }
 
 /* Autopilot (SPEC §4.6.16–19): its chip, the merge queue, the release train and fixer tasks. */
 .chip--autopilot {
-  color: #9fd9ff;
-  border-color: rgba(110, 190, 249, 0.45);
+  color: var(--info-ink);
+  border-color: color-mix(in srgb, var(--info) 45%, transparent);
 }
 .chip--autopilot.chip--off {
   color: var(--mute);
@@ -230,13 +342,13 @@
   font-size: 12px;
 }
 .wave-train [aria-current="step"] {
-  color: var(--amber);
+  color: var(--amber-text);
 }
 .wave-train .train-verified {
-  color: #8ee6a8;
+  color: var(--ok-ink);
 }
 .wave-train .train-failed {
-  color: #ff9a9a;
+  color: var(--bad-ink);
 }
 .dag-fixer {
   font-size: 11px;
@@ -250,13 +362,17 @@
 
 /* The overlap plan: cluster hulls and badges, dashed planner chains, the clusters panel and
    the churn chip. Nothing here animates, so reduced motion keeps every tint. */
-.dag .dag-node rect.dag-hull {
-  fill-opacity: 0.14;
-  stroke: none;
-  stroke-dasharray: none;
+.dag-hull {
+  position: absolute;
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--hue) 14%, transparent);
 }
 .dag-cluster {
+  position: absolute;
+  top: 5px;
+  right: 8px;
   font: 600 9.5px var(--f-mono);
+  color: var(--hue);
 }
 .dag-edge--chain {
   stroke-dasharray: 5 4;
@@ -295,6 +411,9 @@
 .cluster-id {
   font-weight: 600;
 }
+.cluster-id[style] {
+  color: var(--hue);
+}
 .cluster-hot {
   font-size: 11px;
   min-width: 0;
@@ -304,10 +423,10 @@
   max-width: 100%;
 }
 .cluster-hold .cluster-state {
-  color: var(--amber);
+  color: var(--amber-text);
 }
 .cluster-train .cluster-state {
-  color: #9fd9ff;
+  color: var(--info-ink);
 }
 .cluster-why {
   flex-basis: 100%;
@@ -316,8 +435,8 @@
   gap: 0;
 }
 .chip--churn {
-  color: var(--amber);
-  border-color: rgba(251, 191, 36, 0.45);
+  color: var(--amber-text);
+  border-color: color-mix(in srgb, var(--amber) 45%, transparent);
 }
 .wave-queue a {
   color: inherit;
@@ -333,34 +452,19 @@
   flex-wrap: wrap;
   gap: 6px;
 }
-.host-chips > li {
-  position: relative;
-}
 .host-chip {
   cursor: pointer;
   font: inherit;
   font-size: 11.5px;
 }
 .host-chip[aria-expanded="true"] {
-  border-color: var(--acc, #6ee7f9);
+  border-color: var(--acc, var(--t-acc));
 }
-@media (max-width: 480px) {
-  .host-chips > li {
-    position: static;
-  }
-  .host-pop {
-    left: 8px;
-    right: 8px;
-    width: auto;
-    max-width: none;
-  }
-}
-
 /* The morning digest card (SPEC §4.6.16): shipped, autopilot handled, waiting for you. */
 .digest-card {
   margin: 0 0 10px;
   padding: 8px 10px;
-  border: 1px solid rgba(110, 190, 249, 0.35);
+  border: 1px solid color-mix(in srgb, var(--info) 35%, transparent);
   border-radius: 8px;
   font-size: 12px;
 }
@@ -390,8 +494,59 @@
   background: none;
   border: 0;
   padding: 0;
-  color: #9fd9ff;
+  color: var(--info-ink);
   text-decoration: underline;
   cursor: pointer;
   font-size: inherit;
+}
+
+/* The wave's Claude account (wave-state `account`): the chip, the dropdown, the confirm line. */
+.wave-acct {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 0 0 10px;
+  font-size: 12px;
+  min-width: 0;
+}
+.wave-acct-pick {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.wave-acct-note {
+  flex-basis: 100%;
+  color: var(--mute);
+}
+/* A cluster's hue as text: darkened on a light theme, like --acc-ink. */
+html[data-tone="light"] .dag-cluster {
+  color: color-mix(in oklab, var(--hue) 55%, black);
+}
+html[data-tone="light"] .cluster-id[style] {
+  color: color-mix(in oklab, var(--hue) 55%, black);
+}
+/* The light tone: a flat node is the window's white with its state's tint, not a see-through
+   tint over the cluster hull, outlined from --mute so it shows on white (:where keeps the flat
+   look's zero specificity, so the state colours and the depth states still win). */
+:where(html[data-tone="light"] .dag-node) {
+  background: var(--win1);
+  border-color: color-mix(in srgb, var(--mute) 45%, transparent);
+}
+html[data-tone="light"] .dag-edge {
+  stroke: color-mix(in srgb, var(--mute) 60%, transparent);
+}
+html[data-tone="light"] .dag-node.st-merged:not(.fx-done) {
+  background: color-mix(in srgb, var(--ok) 10%, var(--win1));
+}
+html[data-tone="light"] .dag-node.st-merge_ready:not(.fx-cur) {
+  background: color-mix(in srgb, var(--t-acc) 10%, var(--win1));
+}
+html[data-tone="light"] .dag-node.st-decision {
+  background: color-mix(in srgb, var(--amber) 10%, var(--win1));
 }
