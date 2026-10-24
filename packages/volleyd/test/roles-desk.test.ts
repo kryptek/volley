@@ -27,6 +27,8 @@ interface Plan {
 }
 
 describe("the Desk move (#466, SPEC §4.6.24)", () => {
+  /** How the box runs `volley`: its own checkout (#550), never a `volley` on its PATH. */
+  const BOX_VOLLEY = "bun /opt/volley/packages/volley-cli/src/cli.ts";
   let fleet: Fleet;
   /** What the box answers each remote script with (by its steps, joined), else exit 0. */
   let onBox: (lines: string[]) => { code?: number; stdout?: string; stderr?: string } | undefined;
@@ -143,10 +145,12 @@ describe("the Desk move (#466, SPEC §4.6.24)", () => {
     const a = await move(p.plan_id);
     expect(a?.error).toBeUndefined();
     expect(a?.result).toMatchObject({ status: "done" });
-    const scripts = boxScripts().filter((s) => s.includes("volley desk"));
+    const scripts = boxScripts().filter((s) => s.includes(`${BOX_VOLLEY} desk`));
     expect(scripts).toHaveLength(2);
-    expect(scripts[0]).toMatch(/^volley desk install --port 5199 --broker-host \S+$/);
-    expect(scripts[1]).toBe("volley desk check --url http://127.0.0.1:5199 --version 0.4.0");
+    expect(scripts[0]).toMatch(
+      /^bun \/opt\/volley\/packages\/volley-cli\/src\/cli\.ts desk install --port 5199 --broker-host \S+$/,
+    );
+    expect(scripts[1]).toBe(`${BOX_VOLLEY} desk check --url http://127.0.0.1:5199 --version 0.4.0`);
     const r = roles();
     expect(r.desk).toEqual({ machine: PEER, url: `http://${PEER}:5199` });
     expect(r.version).toBe(2);
@@ -187,7 +191,7 @@ describe("the Desk move (#466, SPEC §4.6.24)", () => {
     onBox = (lines) =>
       lines.some((l) => l.startsWith("nc -z"))
         ? { code: 1 }
-        : lines.some((l) => l.startsWith("volley desk check"))
+        : lines.some((l) => l.startsWith(`${BOX_VOLLEY} desk check`))
           ? { code: 1, stderr: "volley desk check: / answered 502" }
           : undefined;
     const p = await plan();
@@ -195,8 +199,8 @@ describe("the Desk move (#466, SPEC §4.6.24)", () => {
     expect(a?.ok).toBe(false);
     expect(a?.result).toMatchObject({ status: "failed", step: "check", rolled_back: true });
     expect(a?.error).toMatch(/answered 502/);
-    expect(boxScripts().filter((s) => s.startsWith("volley desk check"))).toHaveLength(6);
-    expect(boxScripts().at(-1)).toBe("volley desk uninstall");
+    expect(boxScripts().filter((s) => s.startsWith(`${BOX_VOLLEY} desk check`))).toHaveLength(6);
+    expect(boxScripts().at(-1)).toBe(`${BOX_VOLLEY} desk uninstall`);
     // The record and the old Desk are untouched.
     expect(roles().desk.machine).toBe("control");
     expect(
@@ -217,7 +221,7 @@ describe("the Desk move (#466, SPEC §4.6.24)", () => {
     expect(roles().desk).toEqual({ machine: "control", url: "http://localhost:5199" });
     expect(local()).toContain("systemctl --user start volley-desk.service");
     expect(local()).toContain("volley desk check --url http://127.0.0.1:5199 --version 0.4.0");
-    expect(boxScripts().at(-1)).toBe("volley desk uninstall");
+    expect(boxScripts().at(-1)).toBe(`${BOX_VOLLEY} desk uninstall`);
     const topic = (await fleet.env.retained(`volley/_system/roles/moves/${moved}`)) as {
       payload: { status: string };
     };

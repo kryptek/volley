@@ -263,12 +263,18 @@ async function startSupervisor(home: string, b: TestBroker): Promise<Daemon> {
 }
 
 /**
+ * How a paired machine runs `volley`: its own checkout (#550), never a `volley` on its PATH. The
+ * checkout is the machine's `volley_dir`: `/opt/volley` here, the hand-over's for a re-pairing.
+ */
+const BOX_VOLLEY = /^bun \/\S+\/packages\/volley-cli\/src\/cli\.ts /;
+
+/**
  * `volley role receive supervisor <bundle> --from <old>` on `machine`: the bundle restored into
  * its $VOLLEYD_HOME (existing files replaced), its config made this machine's own, and the
  * hand-over told how this machine reaches the old one.
  */
 function receiveSupervisor(machine: string, line: string): void {
-  const [, , , , bundle = "", , from = ""] = line.split(" ");
+  const [, , , bundle = "", , from = ""] = line.split(" ");
   const stage = tempDir("volleyd-e2e-receive-");
   const x = spawnSync("tar", ["-xzf", bundle, "-C", stage]);
   expect(x.status, x.stderr.toString()).toBe(0);
@@ -300,6 +306,8 @@ async function onMachine(
   opts: ExecOptions,
 ): Promise<{ code?: number; stdout?: string; stderr?: string }> {
   const first = lines[0] ?? "";
+  /** A `volley` step's arguments, run by the machine's checkout; null for any other step. */
+  const v = BOX_VOLLEY.test(first) ? first.replace(BOX_VOLLEY, "") : null;
   if (first === "printenv HOME") return { stdout: `${userHome[machine]}\n` };
   const write = opts.remote?.steps.find((s) => s.stdout?.endsWith("/bundle.tgz"));
   if (write !== undefined) {
@@ -309,15 +317,15 @@ async function onMachine(
   }
   // Nothing listens on the Desk's port there.
   if (first.startsWith("nc -z")) return { code: 1 };
-  if (first.startsWith("volley role receive supervisor")) {
-    receiveSupervisor(machine, first);
+  if (v?.startsWith("role receive supervisor")) {
+    receiveSupervisor(machine, v);
     return {};
   }
-  if (first.startsWith("volley peer join")) {
-    const argv = first.split(" ");
+  if (v?.startsWith("peer join")) {
+    const argv = v.split(" ");
     const at = (flag: string) => argv[argv.indexOf(flag) + 1] as string;
     const r = await f.client.request("peer_join", {
-      code: argv[3],
+      code: argv[2],
       name: at("--name"),
       target: at("--target"),
       volley_dir: "/opt/volley",
@@ -326,19 +334,19 @@ async function onMachine(
     });
     return { code: r.ok ? 0 : 1, stderr: r.error ?? "" };
   }
-  if (first === "volley broker probe")
+  if (v === "broker probe")
     return {
       stdout: `${JSON.stringify({ layout: "etc", needs_root: false, mosquitto: "2.1.2" })}\n`,
     };
-  if (first.startsWith("volley broker receive")) return { stdout: "mosquitto 2.1.2: 3 logins\n" };
-  if (first === "volley broker tunnel --show")
+  if (v?.startsWith("broker receive")) return { stdout: "mosquitto 2.1.2: 3 logins\n" };
+  if (v === "broker tunnel --show")
     return {
       stdout: `${JSON.stringify({ host: `dev@${LOCAL}`, remote_port: 21883, tunnel: "ssh" })}\n`,
     };
-  if (first.startsWith("volley peer retarget")) {
+  if (v?.startsWith("peer retarget")) {
     // The machine's tunnel restarts; its record comes up through the broker it leads to.
-    const address = first.split(" ")[4] as string;
-    retargets.push(`${machine} ${first.slice("volley peer retarget ".length)}`);
+    const address = v.split(" ")[3] as string;
+    retargets.push(`${machine} ${v.slice("peer retarget ".length)}`);
     await heartbeat(brokerOf(address), machine);
     return {};
   }

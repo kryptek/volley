@@ -1,5 +1,6 @@
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn, ExecResult } from "../exec";
+import { remoteVolleyArgv } from "../fence";
 import type { RemoteHost } from "../hosts/ssh-tmux";
 import type { MachineRecord } from "../machines";
 import type { RemoteHostConfig } from "../types";
@@ -71,7 +72,11 @@ export async function runOn(d: RoleDeps, where: string, argv: string[]): Promise
     return d.exec(argv, { timeoutMs: DAEMON_DEFAULTS.role_step_timeout_ms });
   const host = d.remote(where);
   if (typeof host === "string") throw new Error(host);
-  return host.run([{ argv, cwd: host.spec.volley_dir }], {
+  // The planners build `volley …`; on a paired machine its own checkout runs it, never a `volley`
+  // on its PATH (#550).
+  const remoteArgv =
+    argv[0] === "volley" ? remoteVolleyArgv(host.spec.volley_dir, argv.slice(1)) : argv;
+  return host.run([{ argv: remoteArgv, cwd: host.spec.volley_dir }], {
     timeoutMs: DAEMON_DEFAULTS.role_step_timeout_ms,
   });
 }

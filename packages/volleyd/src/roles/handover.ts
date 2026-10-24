@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DAEMON_DEFAULTS } from "../config-defaults";
+import { remoteVolleyArgv } from "../fence";
 import type { RemoteHost, RemoteHostSpec } from "../hosts/ssh-tmux";
 import type { RoleDeps } from "./deps";
 import type { MoveRecord, MoveStep } from "./engine";
@@ -106,8 +107,9 @@ export function resumeSteps(d: RoleDeps, x: HandoverDeps, h: Handover): MoveStep
         if (h.old_target === undefined)
           return `warning: ${to} does not know how to reach ${from} over ssh: ${byHand}`;
         const code = x.mintCode(from, by);
-        const argv = [
-          "volley",
+        const host = x.remoteAt(oldMachineSpec(h));
+        // The old machine's own checkout, never a `volley` on its PATH (#550).
+        const argv = remoteVolleyArgv(host.spec.volley_dir, [
           "peer",
           "join",
           code,
@@ -119,10 +121,11 @@ export function resumeSteps(d: RoleDeps, x: HandoverDeps, h: Handover): MoveStep
           h.old_target,
           "--tunnel",
           "none",
-        ];
-        const host = x.remoteAt(oldMachineSpec(h));
+        ]);
         const r = await host
-          .run([{ argv, cwd: h.volley_dir }], { timeoutMs: DAEMON_DEFAULTS.role_step_timeout_ms })
+          .run([{ argv, cwd: host.spec.volley_dir }], {
+            timeoutMs: DAEMON_DEFAULTS.role_step_timeout_ms,
+          })
           .catch((e: unknown) => ({ code: -1, stdout: "", stderr: String(e), timedOut: false }));
         return r.code === 0
           ? `${from} is a paired machine (tmux over ssh)`

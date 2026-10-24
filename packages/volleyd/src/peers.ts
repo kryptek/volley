@@ -7,7 +7,7 @@ import { listAccounts, replyKey, seal, volleyAuth } from "./accounts";
 import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import type { PatchResult } from "./config-store";
 import type { ExecFn } from "./exec";
-import { isCloneUrl, isRepoAdd } from "./fence";
+import { isCloneUrl, isRepoAdd, remoteVolleyArgv } from "./fence";
 import type { RemoteHost } from "./hosts/ssh-tmux";
 import type { DoctorReport, MachineRecord } from "./machines";
 import { isSlug } from "./repos";
@@ -587,7 +587,7 @@ export class PeerService {
     up: (name: string, since: number) => Promise<boolean>,
   ): Promise<PeerReply> {
     const since = this.deps.now();
-    const argv = retargetArgv(run);
+    const argv = retargetArgv(run.host.spec.volley_dir, run);
     let r: Awaited<ReturnType<RemoteHost["run"]>>;
     try {
       r = await run.host.run([{ argv, cwd: run.host.spec.volley_dir }], {
@@ -741,17 +741,22 @@ export interface RetargetRun {
   tunnel?: PeerTunnel;
 }
 
-/** `volley peer retarget --to <address> [--port <n>] [--tunnel ssh|none]`: the box's one step. */
-export function retargetArgv(run: Pick<RetargetRun, "address" | "port" | "tunnel">): string[] {
-  return [
-    "volley",
+/**
+ * `volley peer retarget --to <address> [--port <n>] [--tunnel ssh|none]`: the box's one step, run
+ * by its own checkout in `volleyDir` (remoteVolleyArgv), never a `volley` on its PATH (#550).
+ */
+export function retargetArgv(
+  volleyDir: string,
+  run: Pick<RetargetRun, "address" | "port" | "tunnel">,
+): string[] {
+  return remoteVolleyArgv(volleyDir, [
     "peer",
     "retarget",
     "--to",
     run.address,
     ...(run.port !== undefined ? ["--port", String(run.port)] : []),
     ...(run.tunnel !== undefined ? ["--tunnel", run.tunnel] : []),
-  ];
+  ]);
 }
 
 /** A checked `peer_doctor` request (`doctorRequest`), ready to run. */

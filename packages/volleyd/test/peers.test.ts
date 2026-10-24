@@ -1263,7 +1263,10 @@ describe("every machine through its own tunnel (#460): peer_join from the roles 
     });
     await eventually(async () =>
       sshScripts().some((s) =>
-        s.includes("volley peer retarget --to owner@box-a.lan --port 21884"),
+        // The box's own checkout (#550), never a `volley` on its PATH.
+        s.includes(
+          "bun /opt/volley/packages/volley-cli/src/cli.ts peer retarget --to owner@box-a.lan --port 21884",
+        ),
       ),
     );
     // The box's first heartbeat through its new tunnel.
