@@ -25,7 +25,7 @@ This is the **reference implementation** — meeting every MUST in [`spec/SPEC.m
 
 The MCP server runs as a Bun subprocess that Claude Code spawns on demand. There is no separate install or daemon — you register it with Claude Code and it spawns when needed.
 
-From the repo root, after `bun install`:
+On the supervisor's machine `volley setup` registers it (its Claude Code step; `volley setup --check` shows it), with env `VOLLEY_AGENT_ID`, `VOLLEY_COORDINATOR`, `VOLLEY_NAMESPACE`, `VOLLEY_BROKER_URL` and `VOLLEY_AUTH_DIR` and no password: the server logs in with `coordinator.json` from that auth dir (below). By hand, from the repo root, after `bun install`:
 
 ```sh
 claude mcp add-json -s user volley '{
@@ -91,6 +91,8 @@ All are optional; sensible defaults apply.
 | `VOLLEY_PARENT_ID` | `null` | If this agent was spawned by another Volley agent, the parent's `agent_id`. Used to build dispatch trees in `vol_list_agents` output. Subagents should embed this in their spawn brief; don't try to pass it via env when spawning, since Claude Code doesn't propagate parent-process env to MCP subprocesses (see below). |
 | `VOLLEY_AUTH_USERNAME` | unset (anonymous) | Broker username (SPEC §11.5). The reference broker config requires one: use `coordinator` for a coordinator session (`volley auth init` prints its password). |
 | `VOLLEY_AUTH_PASSWORD` | unset | Broker password for `VOLLEY_AUTH_USERNAME`. Setting it without a username is a startup error. A refused login fails startup with `AUTH_FAILED` and a `volley auth init` hint; the password is never echoed. |
+| `VOLLEY_AUTH_DIR` | unset | The auth dir `volley setup` used: without `VOLLEY_AUTH_*` (and without an identity file), the login comes from its `coordinator.json`, so the registration holds no secret. Set but without that file, startup fails naming the file (never an anonymous connect); the password is never echoed. |
+| `VOLLEY_COORDINATOR` | unset | The stable coordinator name a wave may name as its owner (SPEC §6.2); `volley setup` saves one and registers it. |
 
 > **Assigned identity (`.volley/agent.json`).** If the server's working directory contains `.volley/agent.json` (written by a supervisor before it starts the agent — SPEC §6.5), the server uses its `agent_id` **verbatim, with no random suffix**, and its `namespace`, `parent_id`, `broker_url` and `broker` credentials (`{ "username", "password" }`, minted per agent by `volley auth add-agent`) when present. Values in the file beat the env vars above; keys missing from the file fall back to env, then defaults. A malformed file or an out-of-grammar `agent_id` stops startup with an error naming the file path (`INVALID_AGENT_ID` for a bad id) instead of silently generating an id. Uniqueness of the assigned id is the supervisor's job (recommended form `<wave>-<task>-<role>-<attempt>`). Schema: [`spec/schemas/agent-identity.schema.json`](../../spec/schemas/agent-identity.schema.json).
 

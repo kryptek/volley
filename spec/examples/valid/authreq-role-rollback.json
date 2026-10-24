@@ -1,0 +1,10 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "admin-0123abcd",
+  "parent_id": null,
+  "wall_time": "2026-10-24T09:00:00.000Z",
+  "channel": "_system/auth",
+  "type": "query",
+  "correlation_id": "9c1c2a9e-3b7d-4e21-8a5f-0c9d2e7b4a13",
+  "payload": { "op": "role_rollback", "move_id": "mv-20261024-desk-1a2b" }
+}

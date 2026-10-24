@@ -69,3 +69,22 @@ export function readBundleVersion(dist: string): string | null {
     return null;
   }
 }
+
+/**
+ * A broker host as the Desk's `--broker-host` takes it, or null when it is not a bare host: a
+ * hostname, an IPv4 address, or an IPv6 one (bare or in brackets; returned bare). No scheme,
+ * path, port or login.
+ */
+export function parseBrokerHost(text: string): string | null {
+  const v6 = /^\[([0-9A-Fa-f:.]+)\]$/.exec(text)?.[1] ?? text;
+  if (v6.includes(":")) {
+    if (!/^[0-9A-Fa-f:.]+$/.test(v6)) return null;
+    try {
+      new URL(`http://[${v6}]/`); // the WHATWG parser checks the address itself
+      return v6;
+    } catch {
+      return null;
+    }
+  }
+  return /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/.test(text) ? text : null;
+}

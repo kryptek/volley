@@ -66,28 +66,15 @@ ln -s "$SKILL_DIR" "$TARGET"
 echo "/volley-issues skill installed: $TARGET → $SKILL_DIR (version $REPO_VERSION)"
 echo
 
-REPO_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"
-MCP_ENTRY="$REPO_ROOT/packages/volley-mcp/src/index.ts"
-
 cat <<EOF
-Next: register the volley-mcp server with Claude Code at user scope (the same
-registration the /volley skill needs). Claude Code stores MCP servers separately
-from settings.json — DO NOT edit settings.json by hand (it does not accept an
-mcpServers field). Run:
-
-  claude mcp add-json -s user volley '{"command":"bun","args":["run","$MCP_ENTRY"],"env":{"VOLLEY_AGENT_ID":"coordinator","VOLLEY_COORDINATOR":"coord-main","VOLLEY_NAMESPACE":"example-dispatch","VOLLEY_AUTH_USERNAME":"coordinator","VOLLEY_AUTH_PASSWORD":"<coordinator password from volley auth init>"}}'
+Next: the volley MCP server. \`volley setup\` registers it with Claude Code at user
+scope (its Claude Code step), with no password in it: the login comes from
+coordinator.json in the auth dir the registration names. \`volley setup --check\`
+shows whether it is registered (and the skills, the hooks and the coordinator name).
 
 Then quit Claude Code (Cmd-Q) and reopen. Verify with:
 
   claude mcp list   # expect "volley: ... ✓ Connected"
-
-(VOLLEY_AGENT_ID is a *prefix* — the MCP server appends a fresh -XXXX suffix at
-every startup, so two Claude Code sessions sharing this user-scope MCP registration
-get DIFFERENT agent_ids automatically. To find this session's actual id, call
-vol_register or vol_list_agents in a Claude Code conversation.)
-
-Use namespace "example-dispatch" so dispatched agents don't share the same registry
-as ad-hoc /volley operations in the "default" namespace.
 
 Then in a Claude Code session: /volley-issues #<issue-number> to dispatch.
 EOF

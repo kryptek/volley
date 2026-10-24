@@ -21,8 +21,9 @@ Subcommands:
   claude   Claude account profiles on volleyd (add, signin, list, sync, move)
   peer     Pair machines with volleyd's (invite, join, list, remove)
   repo     Repositories on volleyd's machines (add, list, remove, status)
+  role     Machine roles: which machine runs the broker, the supervisor, the Desk (status)
   setup    First-run / repair wizard: broker, accounts, services, phone sign-in QR
-  desk     Serve the built Volley Desk (desk serve) for phones and the setup service
+  desk     The built Volley Desk: serve it, install it as a service (serve, install, uninstall, check)
   deploy   Deploy a release tag to this machine's volleyd and Desk services
 
 Global flags:
@@ -75,6 +76,8 @@ async function loadSubcommand(name: string): Promise<Subcommand | null> {
       return (await import("./commands/peer")).peer as Subcommand;
     case "repo":
       return (await import("./commands/repo")).repo as Subcommand;
+    case "role":
+      return (await import("./commands/role")).role as Subcommand;
     case "setup":
       return (await import("./commands/setup")).setup as Subcommand;
     case "desk":

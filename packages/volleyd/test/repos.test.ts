@@ -7,6 +7,8 @@ import {
   addPlan,
   assignedSlugs,
   cloneFor,
+  ghRepoContext,
+  holdersOf,
   homeFromClones,
   isSlug,
   legacyOrigin,
@@ -231,6 +233,39 @@ describe("repos: assignedSlugs", () => {
       hosts: { box: { repos: { "O/R": "/a" } } },
     });
     expect(assignedSlugs(c, "box")).toEqual(["o/r"]);
+  });
+});
+
+describe("repos: holdersOf (#448)", () => {
+  const c = cfg({
+    repos: {
+      "o/listed": { machines: ["mini", "box"] },
+      "o/all": { machines: "all" },
+    },
+    hosts: { box: { repos: { "o/adopted": "/a" } }, mini: { repos: { "O/Listed": "/l" } } },
+  });
+
+  it("lists the machines config gives a clone, sorted, each once", () => {
+    expect(holdersOf(c, "control", "o/listed")).toEqual(["box", "mini"]);
+    expect(holdersOf(c, "control", "o/adopted")).toEqual(["box"]);
+  });
+
+  it("all is every configured host and the supervisor's machine", () => {
+    expect(holdersOf(c, "control", "o/all")).toEqual(["box", "control", "mini"]);
+  });
+
+  it("an unknown slug has none; a slug matches in any spelling", () => {
+    expect(holdersOf(c, "control", "o/unknown")).toEqual([]);
+    expect(holdersOf(c, "control", "O/ADOPTED")).toEqual(["box"]);
+    expect(holdersOf(c, "control", "O/LISTED")).toEqual(["box", "mini"]);
+  });
+});
+
+describe("repos: ghRepoContext (#448)", () => {
+  it("a slug runs gh with --repo; a path runs it in the checkout", () => {
+    expect(ghRepoContext("o/r")).toEqual({ args: ["--repo", "o/r"] });
+    expect(ghRepoContext("~/src/r")).toEqual({ args: [], cwd: "~/src/r" });
+    expect(ghRepoContext("/srv/r")).toEqual({ args: [], cwd: "/srv/r" });
   });
 });
 

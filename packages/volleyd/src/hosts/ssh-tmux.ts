@@ -1051,18 +1051,21 @@ export function sessionName(title: string): string {
 }
 
 /** The session's current pane, matched exactly (`=` stops tmux's prefix matching). */
-const pane = (session: string) => `=${session}:`;
+export const pane = (session: string) => `=${session}:`;
 
 /** A session's size when the spawn names none (the tunables' defaults). */
-const DEFAULT_SIZE: TermSize = { cols: CONFIG_DEFAULTS.tmux_cols, rows: CONFIG_DEFAULTS.tmux_rows };
+export const DEFAULT_SIZE: TermSize = {
+  cols: CONFIG_DEFAULTS.tmux_cols,
+  rows: CONFIG_DEFAULTS.tmux_rows,
+};
 
 /** `size` in whole cells, inside the fence's bounds. */
-function tmuxSize(size: TermSize): TermSize {
+export function tmuxSize(size: TermSize): TermSize {
   const fit = (n: number) => Math.max(TMUX_SIZE.min, Math.min(TMUX_SIZE.max, Math.round(n)));
   return { cols: fit(size.cols), rows: fit(size.rows) };
 }
 
-const sizeArgs = (s: TermSize) => ["-x", String(s.cols), "-y", String(s.rows)];
+export const sizeArgs = (s: TermSize) => ["-x", String(s.cols), "-y", String(s.rows)];
 
 /** A full commit id (what a reviewer or fixup starts from), not a branch name. */
 function isCommitSha(ref: string): boolean {

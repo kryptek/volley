@@ -56,6 +56,8 @@ import { AGENT_BRANCH } from "./worktree";
  *       gh pr merge <n> --merge --match-head-commit <sha40>
  *     with <n> the train's PR and <sha40> its gated head: a merge commit, so the member PRs, whose
  *     heads it contains, read as merged. Never --squash.
+ *   Either may end in exactly `--repo <owner/name>` (or `<host>/<owner>/<name>`): a wave the
+ *   supervisor holds no clone of (#448).
  *
  * CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
  * retire for the retired agent's own workspace only):
@@ -80,6 +82,7 @@ import { AGENT_BRANCH } from "./worktree";
  *     a `<!-- volleyd:… wave=… -->` marker: only volleyd's own comments) ·
  *     gh label list --search merged-to-release --json name ·
  *     gh label create merged-to-release --description <text> --color <6 hex> (never --force);
+ *     each of these may end in exactly `--repo <owner/name>`;
  *     never on a paired machine
  *   cmux — exact argv shapes only, because cmux types into an agent's shell:
  *     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
@@ -95,6 +98,14 @@ import { AGENT_BRANCH } from "./worktree";
  *     sealed sign-in script (below). The direct calls: `claude auth status` (exactly; it prints
  *     a profile's login state and plan, never a credential) and `claude --version` (exactly: the
  *     version a seeded profile records as its `lastOnboardingVersion`)
+ *   tmux (local agents, hosts/local-tmux.ts, under `fleet.local_terminal: tmux`) — sessions
+ *     named `volley-<wave>-<task>-<role>[-<n>]` only (AGENT_SESSION; never `volley-signin-*`),
+ *     targeted exactly (`=<it>`, its pane `=<it>:`):
+ *     new-session -d [-x <n> -y <n>] -s <it> -c <dir> 'bash .volley/launch.sh' (that order, with
+ *       the LaunchToken sealed for <dir>; n in 20..500) · capture-pane -p [-J] -t =<it>: -S-<n> ·
+ *       has-session -t =<it> · resize-window -t =<it>: -x <n> -y <n> ·
+ *       send-keys -t =<it>: Enter|Escape (Up|Down|Space: PICKER) ·
+ *       send-keys -t =<it>: -l -- <TYPED_TEXT> · kill-session -t =<it> = CONSENT
  *   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
  *     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
  *     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs
@@ -393,14 +404,24 @@ export function mintTrainToken(t: TrainToken): TrainToken {
 }
 
 /**
+ * A `--repo` value naming the repository a supervisor holds no clone of (#448): `owner/name`, or
+ * `host/owner/name` off github.com.
+ */
+const isRepoName = (v: string): boolean =>
+  isSlug(v) || (/^[A-Za-z0-9.-]+\/[^/]+\/[^/]+$/.test(v) && isSlug(v.slice(v.indexOf("/") + 1)));
+
+/**
  * `gh pr merge <n> --squash --match-head-commit <head> [--delete-branch]` for a MergeToken's n and
- * head, or `gh pr merge <n> --merge --match-head-commit <head>` for a TrainToken's, exactly.
+ * head, or `gh pr merge <n> --merge --match-head-commit <head>` for a TrainToken's, exactly; each
+ * may end in exactly `--repo <owner/name>` (a wave the supervisor holds no clone of, #448).
  */
 function mergeVerdict(
-  args: readonly string[],
+  all: readonly string[],
   token: MergeToken | undefined,
   train: TrainToken | undefined,
 ): Verdict {
+  const repo = all.length >= 2 && all.at(-2) === "--repo" && isRepoName(all.at(-1) ?? "");
+  const args = repo ? all.slice(0, -2) : all;
   const squash = token !== undefined && merges.has(token);
   const commit = train !== undefined && trains.has(train);
   if (!squash && !commit) return deny("gh pr merge");
@@ -1570,10 +1591,14 @@ const COMMENT_MARKER = /\n\n<!-- volleyd:[a-z-]+ wave=[a-z0-9][a-z0-9_-]{0,62}( 
 
 /**
  * The issue lifecycle's writes (#416), each an exact argv: the label added or removed, a comment
- * or a closing comment that carries volleyd's marker, the label listed or created. Null: not one
- * of them (the read-only allow-list decides).
+ * or a closing comment that carries volleyd's marker, the label listed or created; each may end
+ * in `--repo <owner/name>`. Null: not one of them (the read-only allow-list decides).
  */
-function issueLifecycle(args: string[]): Verdict | null {
+function issueLifecycle(all: string[]): Verdict | null {
+  // A wave named by its `owner/name` (no clone on the supervisor) ends each form in exactly
+  // `--repo <owner/name>` (#448).
+  const repo = all.length >= 2 && all.at(-2) === "--repo" && isSlug(all.at(-1) ?? "");
+  const args = repo ? all.slice(0, -2) : all;
   const [verb = "", sub = "", n = "", flag = "", value = ""] = args;
   const two = `${verb} ${sub}`;
   if (two === "issue edit" || two === "issue comment" || two === "issue close") {
@@ -2530,11 +2555,25 @@ function tmux(args: string[], opts: FenceOptions): Verdict {
 }
 
 /**
- * Local tmux: Claude account sign-in sessions only (`volley-signin-<acct>`). Agents run in cmux
- * locally; a remote host's tmux is the REMOTE policy (`tmux` above).
+ * A local agent's tmux session (hosts/local-tmux.ts `localSessionName`):
+ * `volley-<wave>-<task>-<role>[-<n>]`, at least three words after `volley-`. A sign-in's
+ * `volley-signin-*` never is one, so a wave named `signin` cannot run in local tmux.
+ */
+const AGENT_SESSION = /^volley-[a-z0-9][A-Za-z0-9_-]*-[A-Za-z0-9_]+-[A-Za-z0-9_]+$/;
+const isAgentSession = (s: string | undefined): s is string =>
+  s !== undefined && s.length <= 200 && AGENT_SESSION.test(s) && !s.startsWith("volley-signin-");
+/** `capture-pane -S-<n>`: the last n lines (hosts/local-tmux.ts readScreen). */
+const CAPTURE_START = /^-S-[1-9][0-9]{0,4}$/;
+
+/**
+ * Local tmux: agents' sessions under `fleet.local_terminal: tmux` (`localAgentTmux`), and Claude
+ * account sign-in sessions (`volley-signin-<acct>`). A remote host's tmux is the REMOTE policy
+ * (`tmux` above).
  */
 function localTmux(args: string[], opts: FenceOptions): Verdict {
   const [sub, ...rest] = args;
+  const agent = localAgentTmux(sub, rest, opts);
+  if (agent !== null) return agent;
   const target = (flag: string, a: readonly string[]) => {
     const i = a.indexOf(flag);
     return i >= 0 ? a[i + 1] : undefined;
@@ -2581,6 +2620,79 @@ function localTmux(args: string[], opts: FenceOptions): Verdict {
     }
     default:
       return deny(verb);
+  }
+}
+
+/**
+ * Local tmux for an agent session (AGENT_SESSION), each in exactly the shape LocalTmuxHost sends;
+ * null when the command does not target one, for the sign-in rules to judge.
+ */
+function localAgentTmux(
+  sub: string | undefined,
+  rest: string[],
+  opts: FenceOptions,
+): Verdict | null {
+  const session = (t: string | undefined) =>
+    t?.startsWith("=") === true && isAgentSession(t.slice(1));
+  const pane = (t: string | undefined) =>
+    t?.startsWith("=") === true && t.endsWith(":") && isAgentSession(t.slice(1, -1));
+  const verb = `tmux ${sub ?? ""}`.trim();
+  switch (sub) {
+    case "new-session": {
+      if (rest.at(-1) !== TMUX_LAUNCH_COMMAND) return null;
+      const sized = rest[1] === "-x";
+      const [d, x, cols, y, rows] = rest;
+      const [s, name, c, cwd, cmd, ...more] = rest.slice(sized ? 5 : 1);
+      if (!isAgentSession(name)) return null;
+      return d === "-d" &&
+        (!sized ||
+          (x === "-x" && isTmuxSize(cols ?? "") && y === "-y" && isTmuxSize(rows ?? ""))) &&
+        s === "-s" &&
+        c === "-c" &&
+        cwd !== undefined &&
+        cmd === TMUX_LAUNCH_COMMAND &&
+        more.length === 0 &&
+        sealedFor(opts, cwd)
+        ? ALLOW
+        : deny("tmux new-session (only in the worktree of a sealed launch script)");
+    }
+    case "has-session":
+    case "kill-session": {
+      if (!session(rest[1])) return null;
+      if (!sameArgv(rest, ["-t", rest[1] ?? ""])) return deny(verb);
+      return sub === "has-session" ? ALLOW : { kind: "consent", verb };
+    }
+    case "capture-pane": {
+      const j = rest[1] === "-J" ? 1 : 0;
+      const [p, t, target, start, ...more] = [rest[0], ...rest.slice(1 + j)];
+      if (!pane(target)) return null;
+      return p === "-p" && t === "-t" && CAPTURE_START.test(start ?? "") && more.length === 0
+        ? ALLOW
+        : deny(verb);
+    }
+    case "resize-window": {
+      const [t, target, x, cols, y, rows, ...more] = rest;
+      if (!pane(target)) return null;
+      return t === "-t" &&
+        x === "-x" &&
+        isTmuxSize(cols ?? "") &&
+        y === "-y" &&
+        isTmuxSize(rows ?? "") &&
+        more.length === 0
+        ? ALLOW
+        : deny(verb);
+    }
+    case "send-keys": {
+      // As on a paired machine: a named (or picker) key, or TYPED_TEXT with its token.
+      const [t, target, ...tail] = rest;
+      if (t !== "-t" || !pane(target)) return null;
+      if (tail.length === 1 && keyAllowed(tail[0] ?? "", opts)) return ALLOW;
+      if (tail.length !== 3 || tail[0] !== "-l" || tail[1] !== "--") return deny(verb);
+      const why = typedTextRefusal(tail[2] ?? "", opts);
+      return why === null ? ALLOW : deny(`tmux send-keys (${why})`);
+    }
+    default:
+      return null;
   }
 }
 

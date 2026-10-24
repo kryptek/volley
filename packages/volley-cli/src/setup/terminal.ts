@@ -1,6 +1,18 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isMap, parseDocument } from "yaml";
 import { writeSecret } from "../auth/context";
 import {
   type KeychainItem,
@@ -8,11 +20,19 @@ import {
   keychainReadItemArgv,
   storeInKeychain,
 } from "./keychain";
-import { CMUX_APP_BINS } from "./service-path";
-import type { Change, ExecResult, SetupContext } from "./step";
+import { CMUX_APP_BINS, serviceEnv } from "./service-path";
+import type { Change, ExecResult, SetupContext, StepPlan } from "./step";
+import { unifiedDiff } from "./step";
 
 /**
- * volleyd starts local agents in cmux workspaces. Out of the box cmux lets only programs started
+ * The Terminal step of `volley setup`: which terminal volleyd starts local agents in, cmux or
+ * tmux, recorded in `$VOLLEYD_HOME/config.yaml` (`fleet.local_terminal`) and setup.json
+ * (`terminal`). On macOS with cmux installed it is cmux, and the step checks that volleyd's
+ * service can use cmux's socket (below); otherwise (a Mac without cmux, every Linux machine) it
+ * is tmux, and the step blocks while tmux is not on the services' PATH, printing how to install
+ * it. An explicit `fleet.local_terminal` in config.yaml is kept while its terminal is installed.
+ *
+ * On macOS, volleyd starts local agents in cmux workspaces. Out of the box cmux lets only programs started
  * inside cmux use its socket, and volleyd runs as a background service, so every spawn is refused.
  * The fit for a service running as the user is cmux's Automation mode (any process of the user,
  * no password), which `volley setup` recommends. Password mode stays an option: setup then asks
@@ -286,7 +306,7 @@ const HOW_CHECKED =
   "`cmux capabilities` and `cmux list-workspaces`, run the way the service runs them";
 
 /**
- * The cmux part of the Services step (macOS): what it found (the socket's mode included, which
+ * The cmux part of the Terminal step (macOS): what it found (the socket's mode included, which
  * setup.json records), and the change cmux needs, or null. cmux refusing the service is fixed in
  * cmux: Automation mode (recommended; the change checks again when applied, and asks for the
  * password then if cmux was put in Password mode instead), or Password mode (asked for, hidden).
@@ -299,7 +319,7 @@ export async function planCmux(
   if (ctx.deps.platform !== "darwin") return null;
   if (!cmuxInstalled(ctx.home, serviceEnv.PATH ?? "", ctx.deps.exists)) {
     found.push(
-      "cmux: not installed. volleyd starts local agents in cmux workspaces: install cmux, then rerun `volley setup --step services`",
+      "cmux: not installed, so volleyd starts local agents in tmux (`volley setup --step terminal` checks it)",
     );
     return null;
   }
@@ -383,7 +403,7 @@ export async function planCmux(
         throw new Error(
           again === null
             ? "setup could not check cmux again; run `volley setup --repair` in a terminal"
-            : `cmux still does not let volleyd's service in${modeNote(again.mode)}${cmuxSaid(again.output)}. ${CMUX_AUTOMATION_STEPS} Then rerun \`volley setup --step services\`.`,
+            : `cmux still does not let volleyd's service in${modeNote(again.mode)}${cmuxSaid(again.output)}. ${CMUX_AUTOMATION_STEPS} Then rerun \`volley setup --step terminal\`.`,
         );
       },
     };
@@ -394,11 +414,11 @@ export async function planCmux(
   );
   if (askSecret === null) {
     const where =
-      "run `volley setup --step services` in a terminal on this machine to enter the socket password (it is asked for there, hidden), or choose Automation mode in cmux instead";
+      "run `volley setup --step terminal` in a terminal on this machine to enter the socket password (it is asked for there, hidden), or choose Automation mode in cmux instead";
     found.push(`cmux: ${where}`);
     return {
       summary:
-        "Give volleyd the cmux socket password (needs a terminal: `volley setup --step services`)",
+        "Give volleyd the cmux socket password (needs a terminal: `volley setup --step terminal`)",
       detail: `${CMUX_PASSWORD_STEPS}\nThen ${where}.`,
       apply: async () => {
         // Switched to Automation mode meanwhile: nothing to enter.
@@ -421,7 +441,7 @@ export async function planCmux(
 
 /** The Automation change's note on Password mode. */
 const PASSWORD_OPTION = (canAsk: boolean) =>
-  `Password mode works too: ${CMUX_PASSWORD_STEPS} ${canAsk ? "Setup then asks for the same password when this change is applied (hidden)." : "Then run `volley setup --step services` in a terminal on this machine and enter the same password there."}`;
+  `Password mode works too: ${CMUX_PASSWORD_STEPS} ${canAsk ? "Setup then asks for the same password when this change is applied (hidden)." : "Then run `volley setup --step terminal` in a terminal on this machine and enter the same password there."}`;
 
 /** Ask for the socket password (hidden), check it the way the service runs cmux, store it. */
 async function askAndStorePassword(
@@ -434,16 +454,16 @@ async function askAndStorePassword(
     (await askSecret("cmux socket password (hidden): "))?.replace(/\r?\n$/, "") ?? "";
   if (password === "") {
     throw new Error(
-      "no password entered: nothing was stored. Set one in cmux, then rerun `volley setup --step services`",
+      "no password entered: nothing was stored. Set one in cmux, then rerun `volley setup --step terminal`",
     );
   }
   const again = await checkCmuxAsService(ctx, serviceEnv, password);
   if (again?.access !== "ok") {
     throw new Error(
       again === null
-        ? "setup could not check the password with cmux; nothing was stored. Rerun `volley setup --step services`"
+        ? "setup could not check the password with cmux; nothing was stored. Rerun `volley setup --step terminal`"
         : again.access === "refused" || again.access === "unknown"
-          ? `cmux refused that password${cmuxSaid(again.output)}; nothing was stored. ${CMUX_PASSWORD_STEPS} Then rerun \`volley setup --step services\` and enter the same password`
+          ? `cmux refused that password${cmuxSaid(again.output)}; nothing was stored. ${CMUX_PASSWORD_STEPS} Then rerun \`volley setup --step terminal\` and enter the same password`
           : `${cmuxAdvice(again.access, true)}${cmuxSaid(again.output)} Nothing was stored`,
     );
   }
@@ -453,4 +473,187 @@ async function askAndStorePassword(
     `Stored the cmux socket password in the macOS keychain (service ${CMUX_KEYCHAIN_SERVICE}) and ${written} (mode 0600).`,
     `volleyd's service reaches cmux now (${HOW_CHECKED}).`,
   ];
+}
+
+/** The terminals volleyd starts local agents in (`fleet.local_terminal`). */
+export const LOCAL_TERMINALS = ["cmux", "tmux"] as const;
+export type LocalTerminal = (typeof LOCAL_TERMINALS)[number];
+
+export const isLocalTerminal = (v: unknown): v is LocalTerminal =>
+  typeof v === "string" && (LOCAL_TERMINALS as readonly string[]).includes(v);
+
+/** The first line of a YAML parser error (the rest quotes the file). */
+const yamlError = (message: string | undefined) => (message ?? "").split("\n")[0];
+
+/** volleyd's config file in $VOLLEYD_HOME. */
+export const VOLLEYD_CONFIG = "config.yaml";
+
+/**
+ * `text` (config.yaml's contents) with `fleet.local_terminal` set to `terminal`, every other key
+ * and comment kept. Throws when the text is not YAML, or not a mapping (volleyd would refuse it).
+ */
+export function withLocalTerminal(text: string, terminal: LocalTerminal): string {
+  const doc = parseDocument(text);
+  if (doc.errors.length > 0)
+    throw new Error(`not valid YAML: ${yamlError(doc.errors[0]?.message)}`);
+  if (doc.contents !== null && !isMap(doc.contents)) {
+    throw new Error("not a YAML mapping of volleyd's settings");
+  }
+  const fleet = doc.get("fleet");
+  if (fleet !== undefined && fleet !== null && !isMap(fleet)) {
+    throw new Error("its `fleet` is not a mapping");
+  }
+  // No `fleet`, or an empty one (`fleet:`, `fleet: ~`, which `get` reads as undefined): set the
+  // whole mapping (`setIn` cannot step through a null).
+  if (fleet === undefined || fleet === null)
+    doc.set("fleet", doc.createNode({ local_terminal: terminal }));
+  else doc.setIn(["fleet", "local_terminal"], terminal);
+  return doc.toString();
+}
+
+/**
+ * `fleet.local_terminal` in `text` (config.yaml's contents): the terminal, or null when it is not
+ * set (or not one volleyd knows). Throws when `text` is not YAML.
+ */
+export function localTerminalOf(text: string): LocalTerminal | null {
+  const doc = parseDocument(text);
+  if (doc.errors.length > 0)
+    throw new Error(`not valid YAML: ${yamlError(doc.errors[0]?.message)}`);
+  const v = isMap(doc.contents) ? doc.getIn(["fleet", "local_terminal"]) : undefined;
+  return isLocalTerminal(v) ? v : null;
+}
+
+/** Set `fleet.local_terminal` in $VOLLEYD_HOME/config.yaml (by rename); returns its path. */
+export function writeLocalTerminal(volleydHome: string, terminal: LocalTerminal): string {
+  const file = join(volleydHome, VOLLEYD_CONFIG);
+  const before = existsSync(file) ? readFileSync(file, "utf-8") : "";
+  const after = withLocalTerminal(before, terminal);
+  mkdirSync(volleydHome, { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, after);
+    // The owner's file mode carries across the rename (a new file gets the umask's).
+    if (existsSync(file)) chmodSync(tmp, statSync(file).mode & 0o777);
+    renameSync(tmp, file);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+  return file;
+}
+
+/** The `tmux` on `path` (the services' PATH), or null when there is none. */
+export function tmuxOnPath(
+  path: string,
+  exists: (p: string) => boolean = existsSync,
+): string | null {
+  for (const d of path.split(":")) {
+    if (d !== "" && exists(join(d, "tmux"))) return join(d, "tmux");
+  }
+  return null;
+}
+
+/** How to install tmux here: printed, never run. */
+export function tmuxInstallLine(
+  platform: NodeJS.Platform,
+  exists: (p: string) => boolean = existsSync,
+): string {
+  if (platform === "darwin") return "brew install tmux";
+  if (exists("/usr/bin/apt-get")) return "sudo apt-get install -y tmux";
+  if (exists("/usr/bin/dnf")) return "sudo dnf install -y tmux";
+  return "install tmux with this machine's package manager (Debian, Ubuntu: sudo apt-get install -y tmux; Fedora: sudo dnf install -y tmux)";
+}
+
+/**
+ * Step 4 of `volley setup`: the terminal volleyd starts local agents in. macOS with cmux: cmux,
+ * and the service-like cmux check (`planCmux`); otherwise tmux, which must be on the services'
+ * PATH (Linux never hears of cmux). The choice goes in config.yaml (`fleet.local_terminal`, the
+ * change this step makes) and setup.json (`terminal`, recorded when the run ends).
+ */
+export async function planTerminal(ctx: SetupContext): Promise<StepPlan> {
+  const plan: StepPlan = { step: "terminal", title: "Terminal", found: [], changes: [] };
+  if (ctx.auth.deps.invokingUser(ctx.auth.env) !== null) {
+    plan.skipped =
+      "running as root, and volleyd's terminal is your user's: run `volley setup --step terminal` as that user (without sudo)";
+    return plan;
+  }
+  const env = serviceEnv(ctx);
+  const exists = ctx.deps.exists ?? existsSync;
+  const mac = ctx.deps.platform === "darwin";
+  const cmux = mac && cmuxInstalled(ctx.home, env.PATH ?? "", exists);
+  const tmux = tmuxOnPath(env.PATH ?? "", exists);
+  const file = join(ctx.volleydHome, VOLLEYD_CONFIG);
+  const before = existsSync(file) ? readFileSync(file, "utf-8") : "";
+  let current: LocalTerminal | null;
+  try {
+    current = localTerminalOf(before);
+  } catch (e) {
+    plan.blocked = `${file} is ${e instanceof Error ? e.message : String(e)}: fix it (volleyd cannot start with it either), then rerun \`volley setup --step terminal\``;
+    plan.row = `${file} is not valid YAML`;
+    return plan;
+  }
+  const installed = (t: LocalTerminal) => (t === "cmux" ? cmux : tmux !== null);
+  const chosen: LocalTerminal | null =
+    current !== null && installed(current)
+      ? current
+      : cmux
+        ? "cmux"
+        : tmux !== null
+          ? "tmux"
+          : null;
+  if (chosen === null) {
+    const line = tmuxInstallLine(ctx.deps.platform, exists);
+    plan.blocked = mac
+      ? `neither cmux nor tmux is installed, and volleyd starts local agents in one of them: install tmux (${line}), or cmux, then rerun \`volley setup --step terminal\``
+      : `tmux is not installed, and volleyd starts local agents in it: install it (${line}), then rerun \`volley setup --step terminal\``;
+    plan.row = `missing: ${mac ? "cmux or tmux" : "tmux"} (${line})`;
+    return plan;
+  }
+  if (current !== null && current !== chosen) {
+    plan.found.push(
+      mac
+        ? `${file} chose ${current}, which is not installed here: volleyd starts local agents in ${chosen} instead`
+        : `${file} names a terminal volleyd does not run on Linux: volleyd starts local agents in ${chosen} instead`,
+    );
+  }
+  plan.found.push(
+    chosen === "cmux"
+      ? "Terminal: cmux (volleyd starts local agents in cmux workspaces)"
+      : `Terminal: tmux at ${tmux} (volleyd starts local agents in tmux sessions${mac && cmux ? `; ${file} chose it over cmux` : mac ? "; cmux is not installed" : ""})`,
+  );
+  if (current === chosen) {
+    plan.found.push(`fleet.local_terminal: ${chosen} in ${file}`);
+    ctx.terminal = chosen;
+  } else {
+    const after = withLocalTerminal(before, chosen);
+    plan.changes.push({
+      summary: `Record the local terminal in ${file} (fleet.local_terminal: ${chosen})`,
+      detail: unifiedDiff(file, before, after),
+      apply: async () => {
+        writeLocalTerminal(ctx.volleydHome, chosen);
+        ctx.terminal = chosen;
+        return [
+          `Wrote ${file}: volleyd starts local agents in ${chosen} (a running volleyd from its next start).`,
+        ];
+      },
+    });
+  }
+  // cmux (macOS): volleyd's service must reach its socket. Its change is applied last: one only a
+  // terminal can make fails after the choice is on record.
+  if (chosen === "cmux") {
+    const change = await planCmux(ctx, env, plan.found);
+    if (change !== null) plan.changes.push(change);
+  }
+  plan.row =
+    chosen === "cmux"
+      ? `cmux${ctx.cmuxSocketMode !== undefined ? ` (socket control mode: ${CMUX_MODE_LABEL[ctx.cmuxSocketMode]})` : ""}`
+      : `tmux (${tmux})`;
+  plan.verify = async () => {
+    const again = await planTerminal(ctx);
+    return [
+      ...(again.blocked !== undefined ? [again.blocked] : []),
+      ...again.changes.map((c) => `still not in place: ${c.summary}`),
+    ];
+  };
+  return plan;
 }

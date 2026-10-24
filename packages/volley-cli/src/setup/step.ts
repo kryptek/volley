@@ -1,7 +1,14 @@
 import { join } from "node:path";
 import type { AdminCredentials, AuthContext, AuthDeps } from "../auth/context";
-import { CMUX_CHECK_OUT, CMUX_CHECK_SCRIPT, type CmuxSocketMode } from "./cmux";
+import { MCP_GET, MCP_REMOVE } from "./claude-code";
 import { lsofArgv, ssArgv } from "./desk-port";
+import { isSigninCommand } from "./signin";
+import {
+  CMUX_CHECK_OUT,
+  CMUX_CHECK_SCRIPT,
+  type CmuxSocketMode,
+  type LocalTerminal,
+} from "./terminal";
 
 /**
  * What every `volley setup` step shares. A step is a planner: it reads the machine's state and
@@ -23,7 +30,13 @@ export interface ExecResult {
  */
 export type SetupExec = (
   argv: readonly string[],
-  opts?: { cwd?: string; env?: Record<string, string | undefined>; input?: string },
+  opts?: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    input?: string;
+    /** The command gets the terminal itself (a browser sign-in): nothing is captured. */
+    tty?: boolean;
+  },
 ) => Promise<ExecResult>;
 
 /**
@@ -78,6 +91,13 @@ export interface SetupDeps {
    */
   askSecret?: (prompt: string) => Promise<string | null>;
   /**
+   * Ask for a line of text at the terminal (the coordinator name); null when nobody is there to
+   * answer. Unset: setup never asks.
+   */
+  ask?: (prompt: string) => Promise<string | null>;
+  /** This machine's name (the default coordinator name). Unset: the OS's. */
+  hostname?: () => string;
+  /**
    * Whether a path exists, for what setup probes outside its own files (the services' PATH, the
    * cmux app). Unset: the real filesystem. Tests fake the machine with it.
    */
@@ -112,8 +132,28 @@ export interface SetupContext {
    * stdout. volleyd sets it to seal the token to the Desk that asked (`setup_apply`).
    */
   deliverToken?: (t: IssuedToken) => void;
-  /** cmux's socket control mode as the Services step's check last found it (setup.json keeps it). */
+  /**
+   * cmux's socket control mode as the cmux check last found it (the Terminal step's; the Desk's
+   * Services step's): setup.json keeps it.
+   */
   cmuxSocketMode?: CmuxSocketMode;
+  /** The terminal the Terminal step put on record in config.yaml (setup.json keeps it). */
+  terminal?: LocalTerminal;
+  /** `volley setup --check`: plan only, ask nothing (a planner reports what it would ask). */
+  check?: boolean;
+  /** `--broker-url` as given (not from the env or the record): the Claude Code step re-points to it. */
+  brokerFlag?: string;
+  /** `--show-email`: the sign-in step names the Claude login's e-mail. */
+  showEmail?: boolean;
+  /** The coordinator name the Claude Code step chose or found (setup.json keeps it). */
+  coordinator?: string;
+  /**
+   * The broker's host the Desk's service names (`volley desk serve --broker-host`): null for none
+   * (the page uses its own host). Unset: setup.json's `broker_host`.
+   */
+  brokerHost?: string | null;
+  /** What the run counts (setup-metrics.json): the sign-in step reports each sign-in it ran. */
+  metrics?: { signIn: () => void };
 }
 
 /** A one-time admin token as `volley auth token --json` prints it. */
@@ -132,7 +172,15 @@ export interface Change {
   apply: () => Promise<string[]>;
 }
 
-export type StepName = "detect" | "security" | "accounts" | "services" | "phone";
+export type StepName =
+  | "detect"
+  | "security"
+  | "accounts"
+  | "signin"
+  | "claude-code"
+  | "terminal"
+  | "services"
+  | "phone";
 
 export interface StepPlan {
   step: StepName;
@@ -144,6 +192,11 @@ export interface StepPlan {
   blocked?: string;
   /** Why this step is left out of this run (the later ones still run). */
   skipped?: string;
+  /**
+   * The step's status under its row in `volley setup --check`: one line, or one per thing it
+   * checks (the sign-ins, the MCP registration…), `\n`-separated. Default none.
+   */
+  row?: string;
   /** Checks after the changes; returns the problems left. */
   verify?: () => Promise<string[]>;
   /** What `verify` confirmed, one line each (filled by it; printed once it passes). */
@@ -177,6 +230,9 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
   const hooks = repo("packages", "volley-hooks", "scripts", "install.sh");
   const volleyd = repo("packages", "volleyd", "src", "cli.ts");
   const desk = repo("packages", "volley-desk");
+  const skills = ["volley-skill", "volley-issues", "volley-wait"].map((p) =>
+    repo("packages", p, "scripts", "install.sh"),
+  );
   return (argv: readonly string[], opts?: { cwd?: string }): void => {
     const [a0, a1, a2] = argv;
     const line = argv.join(" ");
@@ -192,6 +248,8 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
         line === lsofArgv(portOf(argv[2], "-iTCP:")).join(" ")) ||
       (a0 === "ss" && argv.length === 9 && line === ssArgv(portOf(argv[8], ":")).join(" ")) ||
       line === "systemctl --user show -p MainPID --value volley-desk.service" ||
+      // `volley desk uninstall`.
+      line === "systemctl --user disable --now volley-desk.service" ||
       // cmux, reached the way volleyd's service reaches it (outside cmux; output to a file).
       (argv.length === 5 &&
         same(argv.slice(0, 4), ["sh", "-c", CMUX_CHECK_SCRIPT, "sh"]) &&
@@ -199,10 +257,15 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
         (argv[4] ?? "").endsWith(`/${CMUX_CHECK_OUT}`)) ||
       (a0 === "security" &&
         (a1 === "find-generic-password" || (a1 === "-i" && argv.length === 2))) ||
-      (a0 === "bash" &&
-        hooks !== null &&
-        a1 === hooks &&
-        (argv.length === 2 || (argv.length === 3 && a2 === "--dry-run"))) ||
+      (a0 === "bash" && hooks !== null && a1 === hooks && hooksFlags(argv.slice(2))) ||
+      // The skills' installers, the sign-ins, and `claude mcp` for the volley entry only.
+      (a0 === "bash" && argv.length === 2 && a1 !== undefined && skills.includes(a1)) ||
+      isSigninCommand(argv) ||
+      same(argv, MCP_GET) ||
+      same(argv, MCP_REMOVE) ||
+      (argv.length === 7 &&
+        same(argv.slice(0, 6), ["claude", "mcp", "add-json", "-s", "user", "volley"]) &&
+        secretFree(argv[6] ?? "")) ||
       (a0 === bun && volleyd !== null && a1 === volleyd && a2 === "install") ||
       (a0 === bun &&
         a1 === "run" &&
@@ -212,6 +275,32 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
         opts?.cwd === desk);
     if (!ok) throw new Error(`volley setup does not run \`${line}\``);
   };
+}
+
+/** The hooks installer's flags setup passes: `[--broker-url <url>] [--dry-run]`. */
+function hooksFlags(rest: readonly string[]): boolean {
+  let i = 0;
+  if (rest[i] === "--broker-url" && /^[a-z]+:\/\/[^\s@]+$/i.test(rest[i + 1] ?? "")) i += 2;
+  if (rest[i] === "--dry-run") i++;
+  return i === rest.length;
+}
+
+/**
+ * A registration whose env names no login and carries none in a value (a URL's `user:pw@`): the
+ * fence refuses a password in ~/.claude.json.
+ */
+function secretFree(json: string): boolean {
+  try {
+    const env = (JSON.parse(json) as { env?: unknown }).env;
+    return (
+      typeof env === "object" &&
+      env !== null &&
+      !Object.keys(env).some((k) => /PASSWORD|TOKEN|SECRET/i.test(k)) &&
+      !Object.values(env).some((v) => typeof v !== "string" || /:\/\/[^/\s]*@/.test(v))
+    );
+  } catch {
+    return false;
+  }
 }
 
 const same = (argv: readonly string[], want: readonly string[]) =>

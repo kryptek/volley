@@ -21,7 +21,7 @@
     "./peer/machine": "./src/peer/checks/machine.ts",
     "./setup/accounts": "./src/setup/accounts.ts",
     "./setup/broker": "./src/setup/broker.ts",
-    "./setup/cmux": "./src/setup/cmux.ts",
+    "./setup/terminal": "./src/setup/terminal.ts",
     "./setup/journal": "./src/setup/journal.ts",
     "./setup/launchd": "./src/setup/launchd.ts",
     "./setup/service-path": "./src/setup/service-path.ts",

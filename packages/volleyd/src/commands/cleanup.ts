@@ -6,6 +6,7 @@ import { type ExecFn, exec as fencedExec } from "../exec";
 import { type ConsentToken, mintConsentToken } from "../fence";
 import type { Host } from "../hosts/host";
 import { LocalCmuxHost } from "../hosts/local-cmux";
+import { LocalTmuxHost } from "../hosts/local-tmux";
 import { SshTmuxHost } from "../hosts/ssh-tmux";
 import { type CommandArgs, EXIT, type ExitCode, type IO } from "../io";
 import { readJournalFile } from "../journal";
@@ -16,8 +17,8 @@ import { expandHome } from "../worktree";
 
 const HELP = `Usage: volleyd cleanup <wave> [--yes] [--force] [--all]
 
-Remove what a wave's retired agents left behind: their cmux workspaces (tmux sessions on a
-remote host), git worktrees, and claude processes still running on this machine (any process
+Remove what a wave's retired agents left behind: their cmux workspaces or tmux sessions (the
+terminal each agent ran in), git worktrees, and claude processes still running on this machine (any process
 whose --mcp-config= lies in one of those worktrees: SIGTERM, a grace, then SIGKILL).
 Without --yes, only prints what would be removed. Only worktrees whose every agent is retired
 (journaled agent_retired) are touched; live agents are listed and skipped. Branches are kept.
@@ -36,6 +37,8 @@ interface Target {
   live: string[];
   /** Set for a remote host's worktree (agent_spawned `remote`): where it lives. */
   remote?: { host: string; target: string; repo: string };
+  /** A local worktree's agents ran in tmux (agent_spawned `terminal`), not cmux. */
+  tmux?: boolean;
 }
 
 /** A wave's reduced state and its journal ($VOLLEYD_HOME directly; works while the daemon is down). */
@@ -94,6 +97,7 @@ export function cleanupPlan(
     if (typeof remote?.target === "string" && typeof remote.repo === "string") {
       t.remote = { host: String(e.data.host), target: remote.target, repo: remote.repo };
     }
+    if (e.data.terminal === "tmux") t.tmux = true;
     const ws = e.data.workspace;
     if (typeof ws === "string" && !closed.has(id) && !t.workspaces.includes(ws))
       t.workspaces.push(ws);
@@ -128,7 +132,8 @@ export async function cleanupWave(
   const { repo, targets, held } = cleanupPlan(state, events, { all: opts.all === true });
   for (const h of held) io.stdout(`skip ${h.task}: ${h.stage}\n`);
   const run = opts.exec ?? fencedExec;
-  const local = new LocalCmuxHost(run);
+  const cmux = new LocalCmuxHost(run);
+  const tmux = new LocalTmuxHost(run);
   const consent: ConsentToken | undefined = opts.yes
     ? mintConsentToken(`volleyd cleanup ${wave} --yes`)
     : undefined;
@@ -146,7 +151,8 @@ export async function cleanupWave(
       );
       continue;
     }
-    const host: Host = t.remote !== undefined ? remoteHost(t.remote, run) : local;
+    const host: Host =
+      t.remote !== undefined ? remoteHost(t.remote, run) : t.tmux === true ? tmux : cmux;
     for (const ws of t.workspaces) {
       try {
         await host.close(ws, consent);

@@ -19,7 +19,7 @@ volley dash --host 0.0.0.0          # serve on the LAN: open http://<LAN IP>:517
 
 | Setting | How |
 |---|---|
-| Broker | `VITE_VOLLEY_BROKER_URL=ws://host:9001 bun run dev` (default: port 9001, mosquitto's WebSocket listener, on the host the page was loaded from, so a phone that opens `http://<laptop>:5174` connects to `ws://<laptop>:9001`, or `wss://` for a page served over https; see [LAN use](#lan-use)) |
+| Broker | `VITE_VOLLEY_BROKER_URL=ws://host:9001 bun run dev`. Without it, the broker the server names in `/desk-config.json` (`volley desk serve --broker-host <host>`: `{"broker":{"host","ws_port"}}`, fetched once per page load before the sign-in form, kept in memory only; a 404 or a failed fetch falls back), else port 9001, mosquitto's WebSocket listener, on the host the page was loaded from, so a phone that opens `http://<laptop>:5174` connects to `ws://<laptop>:9001`. `wss://` for a page served over https either way; see [LAN use](#lan-use). Settings › About shows the URL and where it came from: *(served)* or *(page host)*. |
 | Demo mode | `?demo=1` in the URL, or `VITE_VOLLEY_DEMO=1 bun run dev` |
 | Broker credentials | The sign-in form on first load (see [Sign-in](#sign-in)), stored in localStorage under `volley-desk:broker-auth` as `{"username":"desk","password":"…"}`. For local `bun run dev` only, `VITE_VOLLEY_BROKER_USERNAME=desk VITE_VOLLEY_BROKER_PASSWORD=… bun run dev` skips the form. Vite inlines `VITE_*` values into a built bundle, so `volley dash --build` drops both. |
 

@@ -6,7 +6,8 @@ import { parseArgs } from "node:util";
 import pkg from "../../package.json";
 import { EXIT, type ExitCode } from "../exit-codes";
 import type { IO } from "../io";
-import { deskStamp, readBundleVersion, readDeskStamp } from "../setup/desk-build";
+import { deskStamp, parseBrokerHost, readBundleVersion, readDeskStamp } from "../setup/desk-build";
+import type { SetupDeps } from "../setup/step";
 import { findRepoRoot } from "./dash";
 
 /**
@@ -20,6 +21,11 @@ import { findRepoRoot } from "./dash";
  * under `<home>/waves/<wave>/release/` (the Desk's Needs you window shows the screenshots and
  * reads the stage evidence JSON), nothing else: any other `/evidence/` path is a 404. Anyone who
  * can load the Desk can read those files, a LAN-trust choice like `volley setup --lan`.
+ *
+ * `--broker-host <host>` (and `--broker-ws-port`, default 9001) serves `GET /desk-config.json`
+ * `{ broker: { host, ws_port } }`, never cached: the page connects to that broker instead of the
+ * host it came from, so the broker can live on another machine than the Desk. Without the flag
+ * the route is a 404 and the page uses its own host. Only a host, never a URL or a login.
  */
 
 export const DESK_PORT = 5199;
@@ -56,6 +62,14 @@ const EVIDENCE_TYPES: Record<string, string> = {
   ".md": "text/plain; charset=utf-8",
   ".json": "application/json; charset=utf-8",
 };
+
+/** The broker's WebSocket port the page uses when `--broker-ws-port` is not given. */
+export const BROKER_WS_PORT = 9001;
+
+/** What `/desk-config.json` serves. */
+export interface DeskConfig {
+  broker: { host: string; ws_port: number };
+}
 
 /** volleyd's wave id grammar (SPEC §4.6.1). */
 const WAVE_ID = /^[a-z0-9][a-z0-9_-]{0,62}$/;
@@ -153,11 +167,34 @@ export async function startDeskServer(opts: {
   port: number;
   /** volleyd's home: serve its release evidence under `/evidence/` (off when absent). */
   evidence?: string;
+  /** The broker the page connects to: served at `/desk-config.json` (a 404 when absent). */
+  broker?: DeskConfig["broker"];
 }): Promise<DeskServer> {
   const index = join(opts.root, "index.html");
+  const config =
+    opts.broker === undefined
+      ? null
+      : Buffer.from(
+          JSON.stringify({ broker: { host: opts.broker.host, ws_port: opts.broker.ws_port } }),
+        );
   const server: Server = createServer((req, res) => {
     if (req.method !== "GET" && req.method !== "HEAD") {
       res.writeHead(405, { allow: "GET, HEAD" }).end();
+      return;
+    }
+    if ((req.url ?? "").split("?")[0] === "/desk-config.json") {
+      if (config === null) {
+        res.writeHead(404, { "content-type": "text/plain; charset=utf-8" }).end("not found\n");
+        return;
+      }
+      res.writeHead(200, {
+        "content-type": "application/json; charset=utf-8",
+        "content-length": config.length,
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+      });
+      res.end(req.method === "HEAD" ? undefined : config);
       return;
     }
     if (opts.evidence !== undefined && (req.url ?? "").startsWith("/evidence/")) {
@@ -238,10 +275,35 @@ export interface DeskArgs {
   repo?: string | null;
   /** This volley's version (tests); default: package.json's. */
   version?: string;
+  /** `install` / `uninstall`: setup's deps (tests fake the machine); default the real ones. */
+  setupDeps?: SetupDeps;
 }
 
-/** `volley desk serve [--host] [--port] [--root] [--evidence] [--quiet]`. */
-export async function desk({ argv, io, until, ...given }: DeskArgs): Promise<ExitCode> {
+/**
+ * `volley desk serve [--host] [--port] [--root] [--evidence] [--broker-host [--broker-ws-port]]
+ * [--quiet]`, and `volley desk install | uninstall | check` (desk-install.ts).
+ */
+export async function desk(args: DeskArgs): Promise<ExitCode> {
+  const [sub, ...rest] = args.argv;
+  if (sub === "install" || sub === "uninstall" || sub === "check") {
+    const m = await import("./desk-install");
+    const run =
+      sub === "install" ? m.deskInstall : sub === "uninstall" ? m.deskUninstall : m.deskCheck;
+    if (rest.includes("--help") || rest.includes("-h")) {
+      args.io.stdout(DESK_HELP);
+      return EXIT.OK;
+    }
+    return run({
+      argv: rest,
+      env: args.env,
+      io: args.io,
+      ...(args.setupDeps !== undefined ? { setupDeps: args.setupDeps } : {}),
+    });
+  }
+  return serve(args);
+}
+
+async function serve({ argv, io, until, ...given }: DeskArgs): Promise<ExitCode> {
   let parsed: ReturnType<typeof parseArgs>;
   try {
     parsed = parseArgs({
@@ -251,6 +313,8 @@ export async function desk({ argv, io, until, ...given }: DeskArgs): Promise<Exi
         port: { type: "string" },
         root: { type: "string" },
         evidence: { type: "string" },
+        "broker-host": { type: "string" },
+        "broker-ws-port": { type: "string" },
         quiet: { type: "boolean", short: "q" },
         help: { type: "boolean", short: "h" },
       },
@@ -273,6 +337,24 @@ export async function desk({ argv, io, until, ...given }: DeskArgs): Promise<Exi
   const port = Number(portText);
   if (!/^\d+$/.test(portText) || port > 65_535) {
     io.stderr("volley desk serve: --port must be a port number (0..65535)\n");
+    return EXIT.USAGE;
+  }
+  const brokerText = parsed.values["broker-host"] as string | undefined;
+  const wsText = parsed.values["broker-ws-port"] as string | undefined;
+  const brokerHost = brokerText === undefined ? undefined : parseBrokerHost(brokerText);
+  if (brokerHost === null) {
+    io.stderr(
+      `volley desk serve: --broker-host must be a bare host (a name or an IP address; no scheme, path, port or login), got ${JSON.stringify(brokerText)}\n`,
+    );
+    return EXIT.USAGE;
+  }
+  if (wsText !== undefined && brokerHost === undefined) {
+    io.stderr("volley desk serve: --broker-ws-port needs --broker-host\n");
+    return EXIT.USAGE;
+  }
+  const wsPort = Number(wsText ?? BROKER_WS_PORT);
+  if (wsText !== undefined && (!/^\d+$/.test(wsText) || wsPort < 1 || wsPort > 65_535)) {
+    io.stderr("volley desk serve: --broker-ws-port must be a port number (1..65535)\n");
     return EXIT.USAGE;
   }
   const host = (parsed.values.host as string | undefined) ?? "127.0.0.1";
@@ -303,12 +385,17 @@ export async function desk({ argv, io, until, ...given }: DeskArgs): Promise<Exi
       host,
       port,
       ...(evidence !== undefined ? { evidence } : {}),
+      ...(brokerHost !== undefined ? { broker: { host: brokerHost, ws_port: wsPort } } : {}),
     });
   } catch (e) {
     io.stderr(`volley desk serve: ${e instanceof Error ? e.message : String(e)}\n`);
     return EXIT.ERROR;
   }
   io.stdout(`Serving the Desk from ${root} on ${server.url} (sign-in required)\n`);
+  if (brokerHost !== undefined) {
+    const shown = brokerHost.includes(":") ? `[${brokerHost}]` : brokerHost;
+    io.stdout(`The page connects to the broker ${shown}:${wsPort} (/desk-config.json)\n`);
+  }
   if (evidence !== undefined) {
     io.stdout(
       `Serving release evidence from ${join(evidence, "waves")}/<wave>/release/ (read-only, no sign-in)\n`,
@@ -322,12 +409,16 @@ export async function desk({ argv, io, until, ...given }: DeskArgs): Promise<Exi
   return EXIT.OK;
 }
 
-export const DESK_HELP = `Usage: volley desk serve [--host <addr>] [--port <n>] [--root <dir>] [--evidence <dir>] [--quiet]
+export const DESK_HELP = `Usage: volley desk serve [--host <addr>] [--port <n>] [--root <dir>] [--evidence <dir>]
+                         [--broker-host <host> [--broker-ws-port <n>]] [--quiet]
+       volley desk install [--port <n>] [--broker-host <host>] [--root <checkout>]
+       volley desk uninstall
+       volley desk check --url <http://host:port> --version <v>
 
 Serve the built Volley Desk (packages/volley-desk/dist; build it with
 \`bun run --cwd packages/volley-desk build\`) from a small static server. Unknown paths get
 the index. The page signs in to the broker itself (its WebSocket listener, port 9001 on the
-host the page came from); this server holds no credentials. \`volley setup\` installs it as a
+host the page came from, or the one --broker-host names); this server holds no credentials. \`volley setup\` installs it as a
 service on 0.0.0.0:${DESK_PORT}. At start it warns (and still serves) when the build is stale:
 not made from this checkout's Desk sources, or its version.json is not this volley's version.
 
@@ -341,6 +432,21 @@ Options:
                   directly under waves/<wave>/release/, nothing else) for the Needs you
                   window. Off by default: anyone who can load the Desk can read those
                   files without signing in, a LAN-trust choice like \`volley setup --lan\`.
+  --broker-host <host>
+                  The broker's host when it is not this machine: served to the page at
+                  /desk-config.json ({"broker":{"host","ws_port"}}, never cached), which
+                  connects there instead of the page's own host. A bare host only (a name
+                  or an IP address), never a URL or a login. Without it the route is a 404.
+  --broker-ws-port <n>
+                  The broker's WebSocket port for --broker-host (default 9001)
   -q, --quiet     No stale-build warnings
   -h, --help      Show this help and exit
+
+install builds the Desk in the checkout (--root, default this one) without the
+VITE_VOLLEY_BROKER_* variables, stamps the build, and installs \`volley desk serve --host
+0.0.0.0 --port <n> [--broker-host <host>]\` as this platform's service (launchd or systemd
+--user); it records the port and the broker host in $VOLLEYD_HOME/setup.json, so a later
+\`volley setup\` keeps them. A second run changes nothing. uninstall stops and removes the
+service and keeps the build. check exits 0 when <url>/ answers 200 and <url>/version.json
+is <v>, else 1: the health check a machine runs on itself.
 `;

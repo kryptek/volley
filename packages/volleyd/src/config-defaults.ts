@@ -66,9 +66,11 @@ export const CONFIG_DEFAULTS: Tunables = {
   },
   // --- Fleet: the supervisor's own machine (SPEC §4.6.15); null: derived from the host name ---
   // local_agents null: fallback once any hosts.<name> is configured, else always.
+  // local_terminal null: cmux on macOS when cmux is installed, else tmux (read at volleyd start).
   fleet: {
     local_name: null,
     local_agents: null,
+    local_terminal: null,
     fallback: { max_agents: 3, per_machine: {} },
     repo_root: "~/.volley/repos",
   },
@@ -320,6 +322,8 @@ export const DAEMON_DEFAULTS = {
   screen_closed_backoff_s: 3600,
   /** The broker port when the broker URL names none (MQTT's registered port). */
   mqtt_default_port: 1883,
+  /** The broker's WebSocket listener (the Desk page's), as `volley setup` configures it. */
+  ws_default_port: 9001,
   /** ssh `ConnectTimeout` for every remote command and tunnel (seconds). */
   ssh_connect_timeout_s: 10,
   /** ssh `ServerAliveInterval` for the reverse tunnel (seconds). */

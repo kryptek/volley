@@ -1,4 +1,4 @@
-import { cmuxEnv } from "volley-cli/setup/cmux";
+import { cmuxEnv } from "volley-cli/setup/terminal";
 import type { Sample } from "../admission";
 import { systemClock } from "../clock";
 import { volleydHome } from "../config-store";

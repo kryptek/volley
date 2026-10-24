@@ -10,24 +10,27 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { backupPath, writeConfig } from "../auth/config";
-import { planCmux } from "./cmux";
+import { installedBrokerUrl, withoutLogin } from "../peer/profile-checks";
 import { DESK_STAMP, deskStamp, writeDeskStamp } from "./desk-build";
 import { deskPortListeners, portConflict } from "./desk-port";
+import { deskBrokerHost } from "./journal";
 import { type LaunchdDeps, reloadLaunchd } from "./launchd";
-import { stableServicePath } from "./service-path";
+import { serviceEnv, servicePath } from "./service-path";
 import type { Change, SetupContext, StepPlan } from "./step";
 import { unifiedDiff } from "./step";
+import { planCmux } from "./terminal";
 
 export { DESK_STAMP, deskStamp } from "./desk-build";
+export { servicePath } from "./service-path";
 
 /**
- * Step 4 of `volley setup`: the `volley` and `volleyd` commands linked into ~/.volley/bin (on the
+ * Step 5 of `volley setup`: the `volley` and `volleyd` commands linked into ~/.volley/bin (on the
  * services' PATH: volleyd runs `volley auth` to redeem the Desk's sign-in links), volleyd as a
  * service (`volleyd install` on macOS, a systemd user unit on Linux), the Volley hooks for
  * coordinator sessions (volley-hooks' install.sh), and the built Desk served by
- * `volley desk serve` as a service, for the phone. On macOS it also checks that volleyd's
- * service can use cmux (cmux.ts), and it stops when another program has the Desk's port
- * (desk-port.ts).
+ * `volley desk serve` as a service, for the phone. It stops when another program has the Desk's
+ * port (desk-port.ts). The cmux check is the Terminal step's (terminal.ts); the Desk's Services
+ * step still makes it (`planServicesForDesk`), its wizard having no Terminal step.
  */
 
 /** A long-running service setup installs. */
@@ -41,6 +44,11 @@ export interface ServiceSpec {
   env: Record<string, string>;
   log: string;
   workdir: string;
+  /**
+   * systemd's KillMode (Linux). Unset: systemd's default (`control-group`, every process of the
+   * unit stopped with it).
+   */
+  killMode?: "process";
 }
 
 export const DESK_LABEL = "systems.volley.desk";
@@ -89,6 +97,10 @@ ${env}
 const sdQuote = (s: string) =>
   /[\s"'\\]/.test(s) ? `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : s;
 
+/** Why a unit stops only its main process: what it started outlives a restart. */
+const KILL_MODE_NOTE =
+  "# A restart stops this process only: the tmux server volleyd may start (agents run in it) keeps running.";
+
 /** A systemd user unit (restarted on exit, started with the user's session). */
 export function renderSystemd(s: ServiceSpec): string {
   return `# Written by \`volley setup\`. Rerun it rather than editing this file.
@@ -104,7 +116,7 @@ ${Object.entries(s.env)
 WorkingDirectory=${s.workdir}
 Restart=always
 RestartSec=10
-StandardOutput=append:${s.log}
+${s.killMode === undefined ? "" : `${KILL_MODE_NOTE}\nKillMode=${s.killMode}\n`}StandardOutput=append:${s.log}
 StandardError=append:${s.log}
 
 [Install]
@@ -234,34 +246,6 @@ async function systemdChange(
 /** Where setup links the `volley` and `volleyd` commands. */
 export const binDir = (ctx: SetupContext) => join(ctx.home, ".volley", "bin");
 
-/**
- * The services' PATH: the linked commands first, then a fixed list (`stableServicePath`), never
- * the invoking shell's whole PATH, so a rerun from another terminal changes nothing.
- */
-export function servicePath(ctx: SetupContext): string {
-  return stableServicePath({
-    home: ctx.home,
-    bun: ctx.deps.bun,
-    tmpdir: ctx.auth.env.TMPDIR,
-    ...(ctx.deps.exists !== undefined ? { exists: ctx.deps.exists } : {}),
-  });
-}
-
-/**
- * The environment the services run with: where volleyd lives, which broker, the auth dir its
- * `volley auth` calls use (the one setup used, even when `--dir` / `--layout` chose it), a usable
- * PATH.
- */
-function serviceEnv(ctx: SetupContext): Record<string, string> {
-  return {
-    VOLLEYD_HOME: ctx.volleydHome,
-    VOLLEY_BROKER_URL: ctx.auth.url,
-    VOLLEY_AUTH_DIR: ctx.auth.dir,
-    VOLLEY_NAMESPACE: ctx.auth.env.VOLLEY_NAMESPACE ?? "default",
-    PATH: servicePath(ctx),
-  };
-}
-
 /** The first line after the shebang of a command script `volley setup` wrote. */
 const SCRIPT_MARK = "# Written by `volley setup`";
 
@@ -382,6 +366,43 @@ function commandsChange(
   };
 }
 
+/**
+ * The Volley hooks for coordinator sessions: volley-hooks' installer's dry run compared with
+ * settings.json. The broker URL the installed hooks carry is kept (`--broker-url` re-points
+ * it), so the Services and Claude Code steps plan the same install and a rerun changes nothing.
+ */
+export async function planHooks(
+  ctx: SetupContext,
+  repo: string,
+): Promise<{ found: string } | { change: Change } | { blocked: string }> {
+  const settings = ctx.auth.env.CLAUDE_SETTINGS ?? join(ctx.home, ".claude", "settings.json");
+  const installer = join(repo, "packages", "volley-hooks", "scripts", "install.sh");
+  const env = { ...ctx.auth.env, CLAUDE_SETTINGS: settings };
+  const current = read(settings);
+  const url =
+    ctx.brokerFlag !== undefined ? withoutLogin(ctx.brokerFlag).url : installedBrokerUrl(current);
+  const argv = ["bash", installer, ...(url !== null ? ["--broker-url", url] : [])];
+  const dry = await ctx.deps.exec([...argv, "--dry-run"], { env });
+  if (dry.code !== 0) {
+    return {
+      blocked: `\`${installer} --dry-run\` failed (exit ${dry.code}): ${dry.stderr.trim()}`,
+    };
+  }
+  const at = url !== null ? ` (for ${url})` : "";
+  if (dry.stdout === current) return { found: `volley-hooks: installed in ${settings}${at}` };
+  return {
+    change: {
+      summary: `Install the Volley hooks for coordinator sessions into ${settings}${at}`,
+      detail: `${STATUS_LINE_NOTE}\n${unifiedDiff(settings, current, dry.stdout)}`,
+      apply: async () => {
+        // install.sh backs the settings file up itself (<file>.bak-<timestamp>).
+        const r = await must(ctx, argv, { env });
+        return [r.stdout.trim()];
+      },
+    },
+  };
+}
+
 /** What the hooks change says about the user's own status line (install.sh chains it). */
 const STATUS_LINE_NOTE =
   "Your Claude Code status line keeps working: Volley runs it after its own (same input, 2 s timeout).";
@@ -445,130 +466,45 @@ async function deskServicePid(
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
-export async function planServices(ctx: SetupContext): Promise<StepPlan> {
-  const plan: StepPlan = { step: "services", title: "Services", found: [], changes: [] };
-  const repo = ctx.deps.repoRoot;
-  if (ctx.auth.deps.invokingUser(ctx.auth.env) !== null) {
-    plan.skipped =
-      "running as root, and the services and the Claude Code hooks belong to your user: run `volley setup --step services` as that user (without sudo) to install them";
-    return plan;
-  }
-  if (repo === null) {
-    plan.blocked = "cannot find this Volley checkout (no bun.lock above the CLI)";
-    return plan;
-  }
+/** The Desk's line under the Services row of `volley setup --check`: which broker the page uses. */
+export const deskRow = (brokerHost: string | null): string =>
+  brokerHost === null
+    ? "Desk: broker on the page's host (port 9001)"
+    : `Desk: broker ${brokerHost.includes(":") ? `[${brokerHost}]` : brokerHost}:9001 (served to the page at /desk-config.json)`;
+
+/**
+ * The Desk's part of the Services step, shared with `volley desk install`: the build (rebuilt
+ * when its sources changed since; never with a `VITE_VOLLEY_BROKER_*` env file, nor the env's),
+ * the stamp, then `volley desk serve` as a service for this platform, with `--broker-host` when
+ * the Desk names a broker on another machine (`deskBrokerHost`). Adds to `out`; sets
+ * `out.blocked` when it cannot go on.
+ */
+async function planDesk(ctx: SetupContext, repo: string, out: StepPlan): Promise<void> {
   const { platform, bun } = ctx.deps;
-  const env = serviceEnv(ctx);
+  const brokerHost = deskBrokerHost(ctx);
   const push = (c: Change | null) => {
-    if (c !== null) plan.changes.push(c);
+    if (c !== null) out.changes.push(c);
   };
-
-  // volleyd's own service change in this plan (undefined: no service manager here), which the
-  // commands change names when it is applied.
-  let volleydService: Change | null | undefined;
-  push(commandsChange(ctx, repo, plan.found, () => volleydService));
-
-  // volleyd.
-  const volleydCli = join(repo, "packages", "volleyd", "src", "cli.ts");
-  if (platform === "darwin") {
-    const install = [bun, volleydCli, "install", "--broker-url", ctx.auth.url];
-    // `volleyd install` writes the PATH it runs with into the plist.
-    const installEnv = { ...ctx.auth.env, PATH: env.PATH, VOLLEY_AUTH_DIR: ctx.auth.dir };
-    const dry = await ctx.deps.exec([...install, "--dry-run"], { env: installEnv });
-    if (dry.code !== 0) {
-      plan.blocked = `\`volleyd install --dry-run\` failed (exit ${dry.code}): ${dry.stderr.trim()}`;
-      return plan;
-    }
-    const [head, ...rest] = dry.stdout.split("\n");
-    const path = (head ?? "").replace(/^# /, "");
-    const text = rest.join("\n");
-    const current = read(path);
-    const loaded =
-      (await ctx.deps.exec(["launchctl", "print", `gui/${ctx.deps.uid}/systems.volley.volleyd`]))
-        .code === 0;
-    volleydService = null;
-    if (current === text && loaded) plan.found.push(`volleyd: installed and loaded (${path})`);
-    else {
-      volleydService = {
-        summary: "Install volleyd as a launchd service (volleyd install)",
-        detail: current === text ? "installed, not loaded" : unifiedDiff(path, current, text),
-        apply: async () => {
-          const r = await must(ctx, install, { env: installEnv });
-          return [r.stdout.trim()];
-        },
-      };
-      plan.changes.push(volleydService);
-    }
-  } else if (platform === "linux") {
-    volleydService = await systemdChange(
-      ctx,
-      {
-        name: "volleyd",
-        label: "systems.volley.volleyd",
-        description: "Volley wave supervisor (volleyd)",
-        args: [bun, volleydCli, "daemon"],
-        env,
-        log: join(ctx.volleydHome, "volleyd.log"),
-        workdir: ctx.volleydHome,
-      },
-      "Install volleyd as a systemd user service (volleyd.service)",
-      plan.found,
-    );
-    push(volleydService);
-  } else {
-    plan.found.push(
-      `no launchd or systemd here (${platform}): run \`volleyd daemon\` and \`volley desk serve --host 0.0.0.0\` yourself`,
-    );
-  }
-
-  // cmux (macOS): volleyd's service must reach its socket to start local agents. Its change is
-  // applied last: one only a terminal can make fails after every other change is in place.
-  const cmux = await planCmux(ctx, env, plan.found);
-
-  // The hooks, for coordinator sessions.
-  const settings = ctx.auth.env.CLAUDE_SETTINGS ?? join(ctx.home, ".claude", "settings.json");
-  const hooks = join(repo, "packages", "volley-hooks", "scripts", "install.sh");
-  const hooksEnv = { ...ctx.auth.env, CLAUDE_SETTINGS: settings };
-  const dry = await ctx.deps.exec(["bash", hooks, "--dry-run"], { env: hooksEnv });
-  if (dry.code !== 0) {
-    plan.blocked = `\`${hooks} --dry-run\` failed (exit ${dry.code}): ${dry.stderr.trim()}`;
-    return plan;
-  }
-  const currentSettings = read(settings);
-  if (dry.stdout === currentSettings) plan.found.push(`volley-hooks: installed in ${settings}`);
-  else {
-    plan.changes.push({
-      summary: `Install the Volley hooks for coordinator sessions into ${settings}`,
-      detail: `${STATUS_LINE_NOTE}\n${unifiedDiff(settings, currentSettings, dry.stdout)}`,
-      apply: async () => {
-        // install.sh backs the settings file up itself (<file>.bak-<timestamp>).
-        const r = await must(ctx, ["bash", hooks], { env: hooksEnv });
-        return [r.stdout.trim()];
-      },
-    });
-  }
-
-  // The Desk: built, rebuilt when its sources changed since, then served.
   const deskDir = join(repo, "packages", "volley-desk");
   const dist = join(deskDir, "dist");
   const stamp = deskStamp(repo);
   const built = existsSync(join(dist, "index.html"));
   const builtFrom = read(join(dist, DESK_STAMP)).trim();
   if (built && builtFrom === stamp) {
-    plan.found.push(`The Desk is built from this checkout (${dist})`);
+    out.found.push(`The Desk is built from this checkout (${dist})`);
   } else {
     const leaks = deskEnvLeaks(deskDir);
     if (leaks.length > 0) {
-      plan.blocked = `${leaks.map((f) => join(deskDir, f)).join(", ")} set${leaks.length === 1 ? "s" : ""} VITE_VOLLEY_BROKER_*: Vite would build that broker URL or login into the page served to your network. Remove those lines (or move the file aside) and rerun`;
-      return plan;
+      out.blocked = `${leaks.map((f) => join(deskDir, f)).join(", ")} set${leaks.length === 1 ? "s" : ""} VITE_VOLLEY_BROKER_*: Vite would build that broker URL or login into the page served to your network. Remove those lines (or move the file aside) and rerun`;
+      return;
     }
-    plan.changes.push({
+    out.changes.push({
       summary: !built
         ? "Build the Desk (vite build in packages/volley-desk)"
         : builtFrom === ""
           ? "Rebuild the Desk (the build in packages/volley-desk/dist was not made by setup)"
           : `Rebuild the Desk (built from ${builtFrom}, the checkout is now ${stamp})`,
-      detail: `cd ${deskDir} && ${bun} run build (no VITE_VOLLEY_BROKER_URL: the page uses port 9001 on the host it came from)`,
+      detail: `cd ${deskDir} && ${bun} run build (no VITE_VOLLEY_BROKER_*: the page finds the broker in /desk-config.json, else on port 9001 of the host it came from)`,
       apply: async () => {
         // Vite inlines VITE_* into the bundle: never a broker URL or a dev login.
         const {
@@ -596,20 +532,22 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
       "0.0.0.0",
       "--port",
       String(ctx.deskPort),
+      ...(brokerHost !== null ? ["--broker-host", brokerHost] : []),
     ],
-    env: { PATH: env.PATH as string },
+    env: { PATH: servicePath(ctx) },
     log: join(ctx.volleydHome, "desk.log"),
     workdir: ctx.volleydHome,
   };
   const on = `0.0.0.0:${ctx.deskPort}`;
+  out.row = deskRow(brokerHost);
   // The Desk's release evidence route stays off: setup only names the choice (no behaviour change).
-  plan.found.push(
+  out.found.push(
     `Release evidence: off (the Needs you window shows release screenshots and logs once the Desk serves them: add \`volley desk serve --evidence ${ctx.volleydHome}\`; anyone on your LAN who can load the Desk can read them without signing in, the same trust as \`--lan\`)`,
   );
-  const conflict = await deskPortConflict(ctx, platform, plan.found);
+  const conflict = await deskPortConflict(ctx, platform, out.found);
   if (conflict !== null) {
-    plan.blocked = conflict;
-    return plan;
+    out.blocked = conflict;
+    return;
   }
   if (platform === "darwin") {
     push(
@@ -617,7 +555,7 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
         ctx,
         desk,
         `Install \`volley desk serve\` as a launchd service on ${on}`,
-        plan.found,
+        out.found,
       ),
     );
   } else if (platform === "linux") {
@@ -626,18 +564,147 @@ export async function planServices(ctx: SetupContext): Promise<StepPlan> {
         ctx,
         desk,
         `Install \`volley desk serve\` as a systemd user service (volley-desk.service) on ${on}`,
-        plan.found,
+        out.found,
       ),
     );
   }
-  push(cmux);
-  // After the changes every service must be in place: planning again must find nothing to do.
-  plan.verify = async () => {
-    const again = await planServices(ctx);
+}
+
+/**
+ * `volley desk install`: the Desk's part of the Services step alone (`planDesk`), with the
+ * check that planning again finds nothing to do.
+ */
+export async function planDeskInstall(ctx: SetupContext): Promise<StepPlan> {
+  const out: StepPlan = { step: "services", title: "Desk", found: [], changes: [] };
+  const repo = ctx.deps.repoRoot;
+  if (repo === null) {
+    out.blocked = "cannot find this Volley checkout (no bun.lock above the CLI); pass --root";
+    return out;
+  }
+  await planDesk(ctx, repo, out);
+  out.verify = async () => {
+    const again = await planDeskInstall(ctx);
     return [
       ...(again.blocked !== undefined ? [again.blocked] : []),
       ...again.changes.map((c) => `still not in place: ${c.summary}`),
     ];
   };
-  return plan;
+  return out;
+}
+
+/** The Services step of `volley setup` (the cmux check is the Terminal step's). */
+export const planServices = (ctx: SetupContext): Promise<StepPlan> => planServicesWith(ctx, false);
+
+/**
+ * The Desk's Services step: the same, plus the cmux check (macOS), as before the Terminal step:
+ * the Desk's setup wizard has no Terminal step.
+ */
+export const planServicesForDesk = (ctx: SetupContext): Promise<StepPlan> =>
+  planServicesWith(ctx, true);
+
+async function planServicesWith(ctx: SetupContext, withCmux: boolean): Promise<StepPlan> {
+  const out: StepPlan = { step: "services", title: "Services", found: [], changes: [] };
+  const repo = ctx.deps.repoRoot;
+  if (ctx.auth.deps.invokingUser(ctx.auth.env) !== null) {
+    out.skipped =
+      "running as root, and the services and the Claude Code hooks belong to your user: run `volley setup --step services` as that user (without sudo) to install them";
+    return out;
+  }
+  if (repo === null) {
+    out.blocked = "cannot find this Volley checkout (no bun.lock above the CLI)";
+    return out;
+  }
+  const { platform, bun } = ctx.deps;
+  const env = serviceEnv(ctx);
+  const push = (c: Change | null) => {
+    if (c !== null) out.changes.push(c);
+  };
+
+  // volleyd's own service change in this plan (undefined: no service manager here), which the
+  // commands change names when it is applied.
+  let volleydService: Change | null | undefined;
+  push(commandsChange(ctx, repo, out.found, () => volleydService));
+
+  // volleyd.
+  const volleydCli = join(repo, "packages", "volleyd", "src", "cli.ts");
+  if (platform === "darwin") {
+    const install = [bun, volleydCli, "install", "--broker-url", ctx.auth.url];
+    // `volleyd install` writes the PATH it runs with into the plist.
+    const installEnv = { ...ctx.auth.env, PATH: env.PATH, VOLLEY_AUTH_DIR: ctx.auth.dir };
+    const dry = await ctx.deps.exec([...install, "--dry-run"], { env: installEnv });
+    if (dry.code !== 0) {
+      out.blocked = `\`volleyd install --dry-run\` failed (exit ${dry.code}): ${dry.stderr.trim()}`;
+      return out;
+    }
+    const [head, ...rest] = dry.stdout.split("\n");
+    const path = (head ?? "").replace(/^# /, "");
+    const text = rest.join("\n");
+    const current = read(path);
+    const loaded =
+      (await ctx.deps.exec(["launchctl", "print", `gui/${ctx.deps.uid}/systems.volley.volleyd`]))
+        .code === 0;
+    volleydService = null;
+    if (current === text && loaded) out.found.push(`volleyd: installed and loaded (${path})`);
+    else {
+      volleydService = {
+        summary: "Install volleyd as a launchd service (volleyd install)",
+        detail: current === text ? "installed, not loaded" : unifiedDiff(path, current, text),
+        apply: async () => {
+          const r = await must(ctx, install, { env: installEnv });
+          return [r.stdout.trim()];
+        },
+      };
+      out.changes.push(volleydService);
+    }
+  } else if (platform === "linux") {
+    volleydService = await systemdChange(
+      ctx,
+      {
+        name: "volleyd",
+        label: "systems.volley.volleyd",
+        description: "Volley wave supervisor (volleyd)",
+        args: [bun, volleydCli, "daemon"],
+        env,
+        log: join(ctx.volleydHome, "volleyd.log"),
+        workdir: ctx.volleydHome,
+        // volleyd may start the local tmux server: a restart (`volley deploy`) must not kill it.
+        killMode: "process",
+      },
+      "Install volleyd as a systemd user service (volleyd.service)",
+      out.found,
+    );
+    push(volleydService);
+  } else {
+    out.found.push(
+      `no launchd or systemd here (${platform}): run \`volleyd daemon\` and \`volley desk serve --host 0.0.0.0\` yourself`,
+    );
+  }
+
+  // cmux (macOS, the Desk's run only): volleyd's service must reach its socket to start local
+  // agents. Its change is applied last: one only a terminal can make fails after every other
+  // change is in place.
+  const cmux = withCmux ? await planCmux(ctx, env, out.found) : null;
+
+  // The hooks, for coordinator sessions (the Claude Code step plans the same: whichever runs
+  // first installs them).
+  const hooks = await planHooks(ctx, repo);
+  if ("blocked" in hooks) {
+    out.blocked = hooks.blocked;
+    return out;
+  }
+  if ("change" in hooks) out.changes.push(hooks.change);
+  else out.found.push(hooks.found);
+
+  await planDesk(ctx, repo, out);
+  if (out.blocked !== undefined) return out;
+  push(cmux);
+  // After the changes every service must be in place: planning again must find nothing to do.
+  out.verify = async () => {
+    const again = await planServicesWith(ctx, withCmux);
+    return [
+      ...(again.blocked !== undefined ? [again.blocked] : []),
+      ...again.changes.map((c) => `still not in place: ${c.summary}`),
+    ];
+  };
+  return out;
 }

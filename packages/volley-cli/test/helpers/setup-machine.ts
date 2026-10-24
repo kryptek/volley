@@ -1,4 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, join } from "node:path";
 import { LAYOUTS, type Layout } from "../../src/auth/config";
 import type { AuthContext } from "../../src/auth/context";
@@ -18,12 +28,30 @@ export const ANONYMOUS_CONFIG = "listener 1883\nallow_anonymous true\n";
 
 export const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 
-/** The merged settings the fake hooks installer reports and writes. */
-export const HOOKED_SETTINGS = `${JSON.stringify(
-  { hooks: { SessionStart: [{ hooks: [{ type: "command", command: "volley-hooks" }] }] } },
-  null,
-  2,
-)}\n`;
+/** The hooks the fake hooks installer merges into settings.json. */
+const HOOK = "bun /path/to/volley/packages/volley-hooks/src/hooks/session-start.ts";
+const VOLLEY_HOOKS = { SessionStart: [{ hooks: [{ type: "command", command: HOOK }] }] };
+
+/** The merged settings the fake hooks installer reports and writes over no settings. */
+export const HOOKED_SETTINGS = `${JSON.stringify({ hooks: VOLLEY_HOOKS }, null, 2)}\n`;
+
+/** settings.json with the fake hooks merged in (every other key kept, like install.sh). */
+const hooked = (current: string | null, brokerUrl: string | undefined) => {
+  let j: Record<string, unknown> = {};
+  try {
+    j = current !== null ? (JSON.parse(current) as Record<string, unknown>) : {};
+  } catch {}
+  const command = `${brokerUrl !== undefined ? `VOLLEY_BROKER_URL=${brokerUrl} ` : ""}${HOOK}`;
+  return `${JSON.stringify(
+    { ...j, hooks: { SessionStart: [{ hooks: [{ type: "command", command }] }] } },
+    null,
+    2,
+  )}\n`;
+};
+
+/** gh's credential helper in ~/.gitconfig (what `gh auth setup-git` writes). */
+export const GH_GITCONFIG =
+  '[credential "https://github.com"]\n\thelper =\n\thelper = !/usr/bin/gh auth git-credential\n';
 
 const ok = (stdout = ""): ExecResult => ({ code: 0, stdout, stderr: "" });
 
@@ -66,6 +94,15 @@ export interface FakeMachine {
   present: Set<string>;
   /** Replace the context's IO (a fresh buffer per run). */
   freshIO: () => BufferIO;
+  /** Claude Code: installed, signed in (and with what plan); `claude auth login` signs it in. */
+  claude: { installed: boolean; signedIn: boolean; plan: string };
+  /** gh: installed, signed in as `login`; `gh auth login` signs it in. */
+  gh: { installed: boolean; signedIn: boolean; login: string };
+  /** The answers `ask` gives, in order (then null); and the prompts it showed. */
+  typed: (string | null)[];
+  asked: string[];
+  /** The user's ~/.claude.json. */
+  claudeJson: string;
 }
 
 export function fakeMachine(
@@ -99,7 +136,13 @@ export function fakeMachine(
     secrets: [],
     secretPrompts: [],
     keychain: new Map(),
-    present: new Set(),
+    // tmux in /usr/bin: the Terminal step finds a terminal (a test deletes it to see it block).
+    present: new Set(["/usr/bin/tmux"]),
+    claude: { installed: true, signedIn: true, plan: "max" },
+    gh: { installed: true, signedIn: true, login: "octo-volley" },
+    typed: [],
+    asked: [],
+    claudeJson: join(home, ".claude.json"),
     loaded: new Set(),
     active: new Set(),
     settingsFile,
@@ -159,10 +202,69 @@ export function fakeMachine(
       return ok();
     }
     if (a[0] === "bash" && a[1] === hooksInstall) {
-      if (a[2] === "--dry-run") return ok(HOOKED_SETTINGS);
+      const at = a.indexOf("--broker-url");
+      const merged = hooked(readText(settingsFile), at >= 0 ? a[at + 1] : undefined);
+      if (a.includes("--dry-run")) return ok(merged);
       mkdirSync(join(home, ".claude"), { recursive: true });
-      writeFileSync(settingsFile, HOOKED_SETTINGS);
+      writeFileSync(settingsFile, merged);
       return ok(`installed volley-hooks into ${settingsFile}\n`);
+    }
+    const skill = SKILL_PKGS.find(
+      (p) => a[0] === "bash" && a[1] === join(repo, "packages", p, "scripts", "install.sh"),
+    );
+    if (skill !== undefined) {
+      // The skill installers: a link to the package; a folder of its own is backed up first.
+      const target = join(home, ".claude", "skills", skill === "volley-skill" ? "volley" : skill);
+      const pkg = join(repo, "packages", skill);
+      mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+      let st: ReturnType<typeof lstatSync> | null = null;
+      try {
+        st = lstatSync(target);
+      } catch {}
+      if (st?.isSymbolicLink() === true && readlinkSync(target) === pkg) return ok("already\n");
+      if (st?.isSymbolicLink() === true) rmSync(target);
+      else if (st !== null) renameSync(target, `${target}.backup.20261018-120000`);
+      symlinkSync(pkg, target);
+      return ok(`installed ${target}\n`);
+    }
+    if (a[0] === "claude" && a[1] === "auth") {
+      if (!m.claude.installed) return { code: 127, stdout: "", stderr: "not found" };
+      if (a[2] === "status") {
+        return m.claude.signedIn
+          ? ok(`{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"${m.claude.plan}"}\n`)
+          : { code: 1, stdout: '{"loggedIn":false}\n', stderr: "" };
+      }
+      if (a[2] === "login") {
+        m.claude.signedIn = true;
+        return ok();
+      }
+    }
+    if (a[0] === "claude" && a[1] === "mcp") {
+      const j = JSON.parse(readText(m.claudeJson) ?? "{}") as {
+        mcpServers?: Record<string, unknown>;
+      };
+      if (a[2] === "add-json") {
+        j.mcpServers = { ...(j.mcpServers ?? {}), [a[5] as string]: JSON.parse(a[6] as string) };
+      } else if (a[2] === "remove") {
+        delete j.mcpServers?.[a[5] as string];
+      } else return ok();
+      writeFileSync(m.claudeJson, `${JSON.stringify(j, null, 2)}\n`);
+      return ok();
+    }
+    if (a[0] === "gh") {
+      if (!m.gh.installed) return { code: 127, stdout: "", stderr: "not found" };
+      if (a[1] === "auth" && a[2] === "status")
+        return m.gh.signedIn ? ok() : { code: 1, stdout: "", stderr: "" };
+      if (a[1] === "auth" && a[2] === "login") {
+        m.gh.signedIn = true;
+        return ok();
+      }
+      if (a[1] === "auth" && a[2] === "setup-git") {
+        writeFileSync(join(home, ".gitconfig"), GH_GITCONFIG);
+        return ok();
+      }
+      if (a[1] === "api" && a[2] === "user")
+        return m.gh.signedIn ? ok(`${m.gh.login}\n`) : { code: 1, stdout: "", stderr: "" };
     }
     if (a[0] === "bun" && a[1] === "run" && a[2] === "build" && o?.cwd !== undefined) {
       mkdirSync(join(o.cwd, "dist"), { recursive: true });
@@ -210,6 +312,11 @@ export function fakeMachine(
       return m.answers.shift() ?? false;
     },
     interactive: true,
+    ask: async (prompt) => {
+      m.asked.push(prompt);
+      return m.typed.shift() ?? null;
+    },
+    hostname: () => "Studio.local",
     askSecret: async (prompt) => {
       m.secretPrompts.push(prompt);
       return m.secrets.shift() ?? null;
@@ -254,7 +361,12 @@ export function fakeMachine(
     return io;
   };
   writeFileSync(layout.config, ANONYMOUS_CONFIG);
+  // Signed in to GitHub with git using that login: the sign-in step has nothing to sign in.
+  writeFileSync(join(home, ".gitconfig"), GH_GITCONFIG);
+  for (const p of SKILL_PKGS) mkdirSync(join(repo, "packages", p, "scripts"), { recursive: true });
   return m;
 }
+
+const SKILL_PKGS = ["volley-skill", "volley-issues", "volley-wait"];
 
 export const readText = (p: string) => (existsSync(p) ? readFileSync(p, "utf-8") : null);

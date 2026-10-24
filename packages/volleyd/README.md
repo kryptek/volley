@@ -1675,6 +1675,29 @@ journaled, so a client that sends its own mailbox message (the Desk) asks for th
 and then publishes, and the agent gets exactly one message. When there is nothing to interrupt with
 (no hook, no workspace) or it fails, the request still answers `ok` with `interrupted: false`.
 
+## Machine roles
+
+The broker, the supervisor and the Desk are *machine roles* (SPEC §4.6.24): each may run on any
+machine of the pool. volleyd keeps the record of where each runs in `$VOLLEYD_HOME/roles.json`
+and publishes it retained on `volley/_system/roles` at start (`volley role status` prints it).
+
+- **The first start** writes the default: all three on this machine (`fleet.local_name`),
+  `broker.address` `{ ssh: null, mqtt_port: <the broker URL's port>, ws_port: 9001 }`,
+  `broker.lan` and `desk.url` from `setup.json` (what `volley setup` recorded; without it `false`
+  and `http://localhost:5199`), `version: 1`, `updated_by: "volleyd-defaults"`. Every later start
+  reads the file, so a hand edit of `roles.json` takes effect at the next start. A write is a
+  temp file renamed over `roles.json`.
+- **`roles_changed { by, roles }`** is journaled in `_system` when the record differs from the
+  last one journaled (where each role runs, not its `version` or author): once on the first
+  start, then after a change. A restart with the same record republishes it and journals nothing.
+- **A bad file** (not JSON, refused by `roles.schema.json`, or naming a machine that is neither
+  `fleet.local_name` nor a `hosts.<name>`) is logged with its path
+  (`roles: roles.json: supervisor.machine: "box-z" is neither this machine …`) and left as it
+  is; volleyd publishes the last record it journaled instead.
+
+Moving a role (`role_plan`, `role_move`, `role_rollback`) is not implemented yet: volleyd
+answers those ops `unknown op`.
+
 ## Footprints and the overlap plan
 
 Tasks of one wave that touch the same files collide when they merge. A task's footprint (its
@@ -1872,6 +1895,7 @@ journal (mirrored live on `volley/_waves/_system/events`), re-published with `ve
 | `retire_close_session` | retires after the change ([retire and cleanup](#retire-and-cleanup)) | sessions already kept open stay open |
 | `placement.default` | the next submitted wave without `placement:` ([the default](#fleet-placement)) | waves already submitted, and their later plan versions, keep their placement |
 | `placement.nudge_on_merge` | the next merge ([the merge nudge](#the-pipeline-and-the-merge-ready-gate)) | nudges already sent stand |
+| `fleet.local_terminal` | the next volleyd start ([local hosts](#local-hosts-cmux-or-tmux)) | agents already running keep their terminal |
 | `fleet.local_agents`, `fleet.fallback.*` | the next placement ([the supervisor's own machine as a fallback](#the-supervisors-own-machine-as-a-fallback)) | agents already on this machine keep running there; nothing is moved |
 | `autopilot.merge` | the next gate of a wave whose file has no `merge:` ([autopilot merging](#autopilot-merging)) | a gate already entered keeps the mode its evidence names until it is gated again |
 | `autopilot.merge_retry_max` | the next refused merge ([autopilot merging](#autopilot-merging)) | refusals already counted stand |
@@ -1897,8 +1921,8 @@ lists every key with its default and example pools, commented out.
 
 `volleyd daemon` spawns an implementer for every admitted task (`--no-spawn` turns that off;
 `volleyd spawn` starts one by hand). One spawn (`src/spawn.ts`) runs these steps through a
-`Host` (`src/hosts/host.ts`; `local-cmux` is the local one, `ssh-tmux` a
-[remote one](#remote-hosts-ssh--tmux)), every command through the fence:
+`Host` (`src/hosts/host.ts`; `local-cmux` or `local-tmux` is the local one ([below](#local-hosts-cmux-or-tmux)),
+`ssh-tmux` a [remote one](#remote-hosts-ssh--tmux)), every command through the fence:
 
 | # | Step | Module | Refusal (journaled as `alarm_raised { code }`) |
 |---|---|---|---|
@@ -1915,6 +1939,36 @@ A refusal releases the lock, revokes credentials minted for the attempt and neve
 The gate runs before credentials are minted, so a rejected brief costs nothing to undo. A
 refused spawn is never silent ([failures and retries](#spawn-failures-and-retries)); `volleyd
 spawn` retries at once. While the kill switch is engaged nothing is spawned.
+
+### Local hosts: cmux or tmux
+
+`fleet.local_terminal` (`cmux` | `tmux`, SPEC §4.6.4) picks the terminal agents run in on the
+supervisor's own machine. Unset (`null`, the default) it is `cmux` on macOS when cmux is installed
+and `tmux` otherwise: every Linux supervisor, and a Mac without cmux. A `cmux` set anywhere but
+macOS is `tmux` too. `volley setup`'s Terminal step records its choice there (and in
+`setup.json`). volleyd reads it when it starts; a change applies to agents spawned after the
+next start, since a running agent's workspace belongs to the terminal it started in: a volleyd
+restarted under another value keeps reaching each running agent (its screen, keys, retire)
+through the terminal its `agent_spawned` recorded. An explicit `cmux` copied to a Mac without
+cmux stays until the Terminal step runs there (`volley setup --step terminal` replaces it).
+
+| | `cmux` (`src/hosts/local-cmux.ts`) | `tmux` (`src/hosts/local-tmux.ts`) |
+|---|---|---|
+| Launch | `cmux new-workspace --cwd <worktree> --name "<wave> <task> <role>" --command "  bash .volley/launch.sh"` | `tmux new-session -d -x <cols> -y <rows> -s volley-<wave>-<task>-<role> -c <worktree> 'bash .volley/launch.sh'` (a taken name gets `-2`, `-3`, …) |
+| Find | `cmux list-workspaces`, by title | `tmux has-session -t =<session>` |
+| Screen | `cmux read-screen --workspace <ref> --lines <n>` (`source: cmux`) | `tmux capture-pane -p -t =<session>: -S-<n>` (`source: tmux`) |
+| Keys, text | `cmux send-key` / `cmux send` | `tmux send-keys -t =<session>: <key>` / `send-keys … -l -- <text>` |
+| Resize | not possible (`resized: false`) | `tmux resize-window -t =<session>: -x <cols> -y <rows>` |
+| Close | `cmux close-workspace` (consent) | `tmux kill-session -t =<session>` (consent; a session already gone is closed) |
+
+The tmux sessions live on your default tmux server, so `tmux ls` lists them and `tmux attach -t
+volley-w1-T1-implementer` shows an agent. The fence admits local tmux only for those session
+names (`volley-<wave>-<task>-<role>[-<n>]`, never a `volley-signin-*` sign-in session's, so a
+wave named `signin` cannot run in local tmux) and only in the shapes above; the launch needs the
+worktree's sealed `launch.sh` like cmux's. A retire kills the session, then stops whatever still
+runs under the worktree, as with cmux. `agent_spawned` carries `terminal: cmux | tmux`. On Linux
+the volleyd unit `volley setup` writes has `KillMode=process`, so restarting volleyd (`volley
+deploy`) leaves a tmux server it started, and the agents in it, running.
 
 ### Bundles
 
@@ -2628,21 +2682,40 @@ Which clone a box uses for a task comes from `repos` and `hosts.<name>.repos` (b
 `repo:` key of a host is deprecated (one path per host, from before repositories) and migrates by
 itself.
 
-A wave file's `repo:` may be an `owner/name` too: at submit it becomes the supervisor's own clone
-of it (its `hosts.<fleet.local_name>.repos` entry, else the managed path), and a name with none is
-refused. A relative path shaped like `owner/name` is written `./owner/name`.
+A wave file's `repo:` may be an `owner/name` too. At submit it becomes the supervisor's own clone
+of it when its machine holds one (its `hosts.<fleet.local_name>.repos` entry, else the managed
+path); it stays the `owner/name` when only paired machines hold one (below); and a name no machine
+holds is refused at `repo` (`no clone of <owner/name> on any machine: add it to one (…)`). A
+relative path shaped like `owner/name` is written `./owner/name`. `volleyd validate` gives the
+same verdict offline from `config.yaml`, and it and `volleyd run` print a `repo:` line saying
+which it became.
 
-**The supervisor's own machine runs a repository's agents only when it is assigned there.** The
-supervisor always needs its own checkout of a wave's repository (the wave's `repo:`; volleyd
-fetches, merges and cuts its local worktrees there). For a repository config names (`repos`, or
-an adopted clone on a host) without assigning it to the supervisor's machine, that checkout is
-the supervisor's alone: its readiness says `blocked (<owner/name> is not assigned to <machine>:
-add it (Settings → Repositories, or volley repo add <owner/name> --machine <machine>))`, and
-placement keeps the wave's tasks on the machines it is assigned to (a task that names
-`host: local` still runs there). Such a wave names that checkout by path in its `repo:`, since
-an `owner/name` resolves only to a clone the supervisor's machine is assigned. A repository config
-does not name (a single-repository setup from before repositories) runs on the supervisor's
-machine as before.
+**The supervisor's own machine runs a repository's agents only when it is assigned there.** For a
+repository config names (`repos`, or an adopted clone on a host) without assigning it to the
+supervisor's machine, the supervisor's readiness says `blocked (<owner/name> is not assigned to
+<machine>: add it (Settings → Repositories, or volley repo add <owner/name> --machine
+<machine>))`, and placement keeps the wave's tasks on the machines it is assigned to. Such a wave
+names the repository by `owner/name`: the wave keeps it (its state's `repo` is the `owner/name`),
+the supervisor needs no checkout of it, and its tasks are placed on the machines that hold one and
+spawn in worktrees of their clones. A task of it that would spawn on the supervisor's machine
+(`host: local`, or no `host:` under `placement: local`) is refused at submit at
+`tasks.<id>.host`, each such task once: `no clone of <owner/name> on <machine>: drop its host:
+local (or set host: auto) so it runs on <machines>, or add the clone (volley repo add
+<owner/name> --machine <machine>)` under `placement: auto`, `set placement: auto (and drop any
+host: local) so it runs on <machines>, …` under `placement: local`. A release `playbook:` other
+than `none` is refused at `playbook` (the release train runs in the supervisor's clone), and the
+default `.volley/release.yaml` is not looked for. For such a wave the supervisor runs its `gh`
+work (the issue lifecycle, the release PR lookup, held decisions, a red head's PR, the
+repository's visibility, and the pipeline's PR, CI and merge reads and writes, the merge under
+`merge: auto` included) with `--repo <owner/name>` and no working directory, and skips what needs
+a checkout of its own: the fetch and release-branch check, the tree footprints are resolved
+against (Files lists stay as written), its own doctor, the CI-queue admission sample (the wave
+runs without that signal), restart reconciliation's branch probe, a red head's CI re-read, the
+pipeline's git checks once a task's worktree is gone, the merge train (its PRs merge one by one),
+and a repo-relative `brief_preface` (an absolute one is still read; the skip is logged). A wave may instead name a checkout
+of such a repository on the supervisor by path, as before; that checkout is the supervisor's
+alone and a task that names `host: local` runs there. A repository config does not name (a
+single-repository setup from before repositories) runs on the supervisor's machine as before.
 
 **The legacy `hosts.<name>.repo` migrates by itself.** The first time a machine's record reports
 the origin of the clone at that path (a GitHub one), volleyd moves it to
@@ -4169,6 +4242,8 @@ MERGE (only with a token, checked by identity like consent tokens; either unlock
       gh pr merge <n> --merge --match-head-commit <sha40>
     with <n> the train's PR and <sha40> its gated head: a merge commit, so the member PRs, whose
     heads it contains, read as merged. Never --squash.
+  Either may end in exactly `--repo <owner/name>` (or `<host>/<owner>/<name>`): a wave the
+  supervisor holds no clone of (#448).
 
 CONSENT (denied unless a ConsentToken is passed — minted by `volleyd cleanup --yes`, or by a
 retire for the retired agent's own workspace only):
@@ -4193,6 +4268,7 @@ ALLOW (program by bare name only — never a path):
     a `<!-- volleyd:… wave=… -->` marker: only volleyd's own comments) ·
     gh label list --search merged-to-release --json name ·
     gh label create merged-to-release --description <text> --color <6 hex> (never --force);
+    each of these may end in exactly `--repo <owner/name>`;
     never on a paired machine
   cmux — exact argv shapes only, because cmux types into an agent's shell:
     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
@@ -4208,6 +4284,14 @@ ALLOW (program by bare name only — never a path):
     sealed sign-in script (below). The direct calls: `claude auth status` (exactly; it prints
     a profile's login state and plan, never a credential) and `claude --version` (exactly: the
     version a seeded profile records as its `lastOnboardingVersion`)
+  tmux (local agents, hosts/local-tmux.ts, under `fleet.local_terminal: tmux`) — sessions
+    named `volley-<wave>-<task>-<role>[-<n>]` only (AGENT_SESSION; never `volley-signin-*`),
+    targeted exactly (`=<it>`, its pane `=<it>:`):
+    new-session -d [-x <n> -y <n>] -s <it> -c <dir> 'bash .volley/launch.sh' (that order, with
+      the LaunchToken sealed for <dir>; n in 20..500) · capture-pane -p [-J] -t =<it>: -S-<n> ·
+      has-session -t =<it> · resize-window -t =<it>: -x <n> -y <n> ·
+      send-keys -t =<it>: Enter|Escape (Up|Down|Space: PICKER) ·
+      send-keys -t =<it>: -l -- <TYPED_TEXT> · kill-session -t =<it> = CONSENT
   tmux (local: Claude account sign-in, src/claude/signin.ts) — sessions named
     `volley-signin-<acct>` only: new-session -d -s <it> -c <dir> 'bash signin.sh' with the
     SigninToken sealed for <dir> (`sealSigninScript`: exactly `renderSigninScript`, which runs

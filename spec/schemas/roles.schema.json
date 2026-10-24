@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://volley.systems/schemas/0.1/roles.schema.json",
+  "title": "Volley Machine Roles",
+  "description": "The retained record of which machine runs each machine role (the broker, the supervisor, the Desk), published by the supervisor to volley/_system/roles at start and whenever it changes. Accepted only from agent_id volleyd. See spec section 4.6.24.",
+  "allOf": [
+    { "$ref": "envelope.schema.json" },
+    {
+      "type": "object",
+      "required": ["channel", "type", "payload"],
+      "properties": {
+        "agent_id": { "const": "volleyd" },
+        "channel": { "const": "_system/roles" },
+        "type": { "const": "roles" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["broker", "supervisor", "desk", "version", "updated_at", "updated_by"],
+          "properties": {
+            "broker": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["machine", "address", "lan"],
+              "properties": {
+                "machine": { "$ref": "#/$defs/machine" },
+                "address": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["ssh", "mqtt_port", "ws_port"],
+                  "properties": {
+                    "ssh": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 255,
+                          "pattern": "^[^-\\s][^\\s]*$"
+                        },
+                        { "type": "null" }
+                      ],
+                      "description": "The ssh destination every machine's tunnel reaches the broker's machine at; null while the broker runs on the supervisor's own machine and no move has named one."
+                    },
+                    "mqtt_port": {
+                      "$ref": "#/$defs/port",
+                      "description": "The broker's MQTT listener on its machine's loopback."
+                    },
+                    "ws_port": {
+                      "$ref": "#/$defs/port",
+                      "description": "The broker's WebSocket listener (the Desk page's)."
+                    }
+                  }
+                },
+                "lan": {
+                  "type": "boolean",
+                  "description": "Whether the WebSocket listener is open to the LAN (`volley setup --lan`)."
+                }
+              }
+            },
+            "supervisor": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["machine"],
+              "properties": { "machine": { "$ref": "#/$defs/machine" } }
+            },
+            "desk": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["machine", "url"],
+              "properties": {
+                "machine": { "$ref": "#/$defs/machine" },
+                "url": {
+                  "type": "string",
+                  "format": "uri",
+                  "pattern": "^https?://[^#?]*$",
+                  "description": "The address browsers and phones open the Desk at."
+                }
+              }
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Counts the record's changes, from 1."
+            },
+            "updated_at": { "type": "string", "format": "date-time" },
+            "updated_by": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Who changed it last: an account's username, or volleyd-defaults for the record a supervisor wrote on its first start."
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "machine": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+      "not": { "enum": ["local", "auto"] },
+      "description": "A machine name: the supervisor's fleet.local_name or a configured hosts.<name>."
+    },
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+  }
+}
