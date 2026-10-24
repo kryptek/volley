@@ -177,13 +177,13 @@
             "window": {
               "type": "string",
               "pattern": "^(five_hour|weekly|model_weekly:(fable|opus|sonnet|haiku))$",
-              "description": "agent_account_limit: the window at or over claude.warn_at_pct: the 5-hour, the 7-day, or the weekly window of the agent's model family."
+              "description": "agent_account_limit: the window at or over claude.warn_at_pct: the 5-hour, the 7-day, or the weekly window of the agent's model family; five_hour for an agent that hit its usage limit (class credit_exhausted)."
             },
             "pct": {
               "type": "number",
               "minimum": 0,
               "maximum": 100,
-              "description": "account_limit / agent_account_limit: that window's used percentage when the decision opened."
+              "description": "account_limit / agent_account_limit: that window's used percentage when the decision opened; 100 for an agent that hit its usage limit (class credit_exhausted: the account is marked at its limit until resets_at)."
             },
             "resets_at": {
               "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }],
@@ -197,7 +197,7 @@
                 },
                 { "type": "null" }
               ],
-              "description": "agent_account_limit: the account the balancing rule ranks first among the other candidates on the agent's machine under the threshold in every window that counts for it, or null. account_limit: the account with the most 5-hour headroom among those under the threshold in both windows, else a signed-in account with no 5-hour usage data yet (\"no usage yet\"; a signed-in profile before primary), or null when there is none."
+              "description": "agent_account_limit: the account the balancing rule ranks first among the other candidates (for class credit_exhausted, always one: with none, model_switch opens instead) on the agent's machine under the threshold in every window that counts for it, or null. account_limit: the account with the most 5-hour headroom among those under the threshold in both windows, else a signed-in account with no 5-hour usage data yet (\"no usage yet\"; a signed-in profile before primary), or null when there is none."
             },
             "down_since": {
               "type": "string",

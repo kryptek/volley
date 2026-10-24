@@ -198,6 +198,8 @@ import { type Sharing, readSharing } from "./claude/sharing";
 import {
   type AgentLimitSeen,
   type AgentOnAccount,
+  LIMIT_HIT_ALARM,
+  LIMIT_HIT_CLASS,
   type LimitSeen,
   type ProbeLogin,
   USAGE_FILTER,
@@ -211,10 +213,13 @@ import {
   forgetAgent,
   isMachineLogin,
   limitDecisions,
+  limitHitDecision,
+  markLimitHit,
   moveAnswer,
   parseAgentMoveAnswer,
   parseMoveAnswer,
   parseUsage,
+  pinNote,
   pruneBook,
   rankAccounts,
   restoreBook,
@@ -9040,9 +9045,26 @@ export class Daemon {
       }
       case "credit_exhausted": {
         const now = this.now();
-        const allowed = recoveryAllowed(creditOccurrences(this.journalEvents(wave), agentId, now));
         const screen =
           x.screen !== undefined ? this.saveCapture(wave, agentId, x.screen) : undefined;
+        // The account is at its limit: marked so (D3); another login on the machine with room
+        // takes the agent (autopilot answers the move), else the owner's model_switch as before.
+        const ag = this.accountOfAgent(agentId, a);
+        const resetsAt = await this.markLimitHit(wave, task, agentId, ag.acct, x.source);
+        const hit = limitHitDecision({
+          accounts: accountRecords(this.usage),
+          agent: { ...ag, pinned: this.pinned(wave, task), moving: this.moving.has(agentId) },
+          candidates: this.claude.candidates(ag.machine),
+          warnAtPct: this.config.effective(wave).claude.warn_at_pct,
+          resets_at: resetsAt,
+          source: x.source,
+          text: x.text,
+          ...(screen !== undefined ? { screen } : {}),
+          now,
+          balance: this.config.effective().claude.balance,
+        });
+        if (hit !== null) return open("credit", hit.input, hit.extra);
+        const allowed = recoveryAllowed(creditOccurrences(this.journalEvents(wave), agentId, now));
         const m = modelSwitchInput({
           task,
           agent_id: agentId,
@@ -9318,6 +9340,9 @@ export class Daemon {
       case CREDIT_CLASS:
       case UNVERIFIED_CLASS:
       case LIMITED_CLASS: {
+        // A limit-hit agent_account_limit shares the class: its move is agentLimitMove's, and a
+        // free-text `switch to …` answer to it switches nothing.
+        if (d.kind !== "model_switch") return;
         const sw = parseSwitchAnswer(answer, x);
         if (sw.kind === "switch") void this.runModelSwitch(agentId, a, sw.model, d.decision_id);
         return;
@@ -10608,9 +10633,14 @@ export class Daemon {
     if (at !== -1 && m.to.slice(at + 1) !== machine)
       throw new Error(`Claude account '${m.to}' is not one of ${machine}'s`);
     this.claude.select({ task: at === -1 ? m.to : m.to.slice(0, at), machine });
+    const acct = d.acct ?? "its account";
+    if ((d as { class?: unknown }).class === LIMIT_HIT_CLASS) {
+      const pin = this.pinned(wave, a.task) ? `; ${pinNote(acct)}` : "";
+      return { agent: m.agent, to: m.to, why: `hit the usage limit of ${acct} by ${by}${pin}` };
+    }
     const pct =
       typeof d.pct === "number" ? ` (${windowShort(d.window)} ${Math.round(d.pct)}%)` : "";
-    return { agent: m.agent, to: m.to, why: `moved off ${d.acct ?? "its account"}${pct} by ${by}` };
+    return { agent: m.agent, to: m.to, why: `moved off ${acct}${pct} by ${by}` };
   }
 
   /**
@@ -10770,31 +10800,81 @@ export class Daemon {
   }
 
   /**
+   * A supervised agent's account record (its latest sample's, else the account its spawn
+   * journaled), machine and model, as `agentLimitDecisions` and `limitHitDecision` see it.
+   */
+  private accountOfAgent(id: string, a: Supervised): Omit<AgentOnAccount, "pinned" | "moving"> {
+    const machine = a.host.name === "local" ? LOCAL_MACHINE : a.host.name;
+    const seen = this.usage.agents[id];
+    const def = this.waves.get(a.wave)?.record.wave?.tasks[a.task];
+    // Before its first sample: the account its spawn journaled.
+    const own = () => {
+      const spawned = this.spawnedRecord((e) => e.data.agent_id === id, a.wave);
+      return typeof spawned?.claude_account === "string" ? spawned.claude_account : "primary";
+    };
+    return {
+      agent_id: id,
+      wave: a.wave,
+      task: a.task,
+      role: a.role,
+      acct: seen?.account ?? accountKey(own(), machine),
+      model: seen?.model ?? def?.model ?? null,
+      machine,
+    };
+  }
+
+  /**
+   * `agentId` hit `acct`'s usage limit (D3): its 5-hour window is marked at 100% in the book (and
+   * on disk) until its reset, `account_limit_hit` is journaled, and the records are re-published
+   * (new spawns rank it last; its other agents get their own move). Returns the reset.
+   */
+  private async markLimitHit(
+    wave: WaveId,
+    task: TaskId,
+    agentId: string,
+    acct: string,
+    source: "hook" | "screen",
+  ): Promise<string> {
+    const at = dateOf(this.time).toISOString();
+    this.usage = markLimitHit(this.usage, { account: acct, at });
+    writeFileAtomic(this.usageFile, bookState(this.usage));
+    const resetsAt =
+      this.usage.accounts[acct]?.five_hour?.resets_at ??
+      new Date(Date.parse(at) + 5 * 3_600_000).toISOString();
+    await this.append(wave, {
+      type: "alarm_raised",
+      task,
+      data: { alarm: LIMIT_HIT_ALARM, agent_id: agentId, acct, resets_at: resetsAt, source },
+    });
+    await this.usagePass();
+    return resetsAt;
+  }
+
+  /**
    * D2: an `agent_account_limit` decision for each supervised agent whose account is at the warn
    * level in a window that counts for it (claude/usage.ts agentLimitDecisions), once per task
    * role, account, window and reset. It does not park the task; autopilot answers it.
    */
   private async agentLimitPass(records: ReturnType<typeof accountRecords>): Promise<void> {
     const agents: AgentOnAccount[] = [];
+    const now = this.now();
     for (const [id, a] of this.supervised) {
       const status = this.waves.get(a.wave)?.record.state?.status;
       if (status === undefined || status === "complete" || status === "stopped") continue;
-      const machine = a.host.name === "local" ? LOCAL_MACHINE : a.host.name;
-      const seen = this.usage.agents[id];
-      const def = this.waves.get(a.wave)?.record.wave?.tasks[a.task];
-      // Before its first sample: the account its spawn journaled.
-      const own = () => {
-        const spawned = this.spawnedRecord((e) => e.data.agent_id === id, a.wave);
-        return typeof spawned?.claude_account === "string" ? spawned.claude_account : "primary";
-      };
+      const ag = this.accountOfAgent(id, a);
+      // It hit this account's limit itself: its own decision (limit hit or model_switch) is open.
+      const hit = this.journalEvents(a.wave).some(
+        (e) =>
+          e.type === "alarm_raised" &&
+          e.data.alarm === LIMIT_HIT_ALARM &&
+          e.data.agent_id === id &&
+          e.data.acct === ag.acct &&
+          typeof e.data.resets_at === "string" &&
+          Date.parse(e.data.resets_at) > now,
+      );
+      if (hit) continue;
       agents.push({
-        agent_id: id,
-        wave: a.wave,
-        task: a.task,
-        role: a.role,
-        acct: seen?.account ?? accountKey(own(), machine),
-        model: seen?.model ?? def?.model ?? null,
-        machine,
+        ...ag,
         pinned: this.pinned(a.wave, a.task),
         moving: this.moving.has(id),
       });

@@ -259,6 +259,20 @@ export const POLICY_TABLE: readonly PolicyRule[] = [
     rationale: "nothing is lost by re-placing a queued task",
   },
   {
+    policy: "agent_account_limit/move-exhausted",
+    kinds: ["agent_account_limit"],
+    condition: 'class === "credit_exhausted" && suggested !== null',
+    when: (d) =>
+      (d as { class?: unknown }).class === "credit_exhausted" &&
+      typeof d.suggested === "string" &&
+      d.suggested !== "",
+    answer: (d) => `move ${String(d.agent_id)} to ${String(d.suggested)}`,
+    answer_label: "move <agent> to <suggested>",
+    budget: { name: "account_move_max", per: "task_role" },
+    rationale:
+      "the account is at its limit and another login on the machine has room; the move restarts the session with a resume note",
+  },
+  {
     policy: "agent_account_limit/move",
     kinds: ["agent_account_limit"],
     condition: "suggested !== null",

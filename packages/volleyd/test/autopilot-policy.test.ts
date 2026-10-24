@@ -356,6 +356,34 @@ describe("evaluate: the policy table, row by row", () => {
     );
   });
 
+  it("agent_account_limit at the limit (class credit_exhausted): move-exhausted, the same budget", () => {
+    const d = rec("agent_account_limit", ["move w1-t1-implementer-1 to work", "not now"], {
+      agent_id: "w1-t1-implementer-1",
+      role: "implementer",
+      acct: "primary",
+      window: "five_hour",
+      pct: 100,
+      suggested: "work",
+      class: "credit_exhausted",
+    });
+    const v = evaluate(d, ctx());
+    expect(answerOf(v)).toBe("move w1-t1-implementer-1 to work");
+    expect("policy" in v && v.policy).toBe("agent_account_limit/move-exhausted");
+    expect("budget" in v && v.budget).toEqual({
+      key: "account_move_max:T1/implementer",
+      used: 1,
+      max: 2,
+    });
+    // moves of either sort share the task role's budget
+    expect(whyOf(evaluate(d, ctx({}, { "account_move_max:T1/implementer": 2 })))).toBe(
+      "budget_exhausted",
+    );
+    // the warn-level decision (no class) still goes by agent_account_limit/move
+    const { class: _cls, ...warn } = d as typeof d & { class?: unknown };
+    const w = evaluate(warn as typeof d, ctx());
+    expect("policy" in w && w.policy).toBe("agent_account_limit/move");
+  });
+
   it("agent_account_limit with no suggestion: wait (not now)", () => {
     const d = rec("agent_account_limit", ["not now"], {
       agent_id: "w1-t1-implementer-1",
