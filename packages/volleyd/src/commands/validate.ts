@@ -199,9 +199,13 @@ export function parseWithPlacement(
 /**
  * What resolving a wave file's `owner/name` `repo:` reads, offline (#448): config.yaml's `repos`,
  * `hosts` and `fleet.repo_root` / `fleet.local_name` over the defaults the daemon starts from. A
- * file that does not parse is the daemon's to report: nothing configured.
+ * file that does not parse is the daemon's to report: nothing configured, and `unparsed` names it.
  */
-export function offlineRepoConfig(env: CommandArgs["env"]): { cfg: RepoConfig; local: string } {
+export function offlineRepoConfig(env: CommandArgs["env"]): {
+  cfg: RepoConfig;
+  local: string;
+  unparsed?: string;
+} {
   const defaults = defaultsFor(env);
   const file = join(volleydHome(env), "config.yaml");
   type Raw = {
@@ -210,10 +214,11 @@ export function offlineRepoConfig(env: CommandArgs["env"]): { cfg: RepoConfig; l
     fleet?: { repo_root?: unknown; local_name?: unknown };
   } | null;
   let raw: Raw = null;
+  let unparsed: string | undefined;
   try {
     raw = existsSync(file) ? (parse(readFileSync(file, "utf-8")) as Raw) : null;
   } catch {
-    raw = null;
+    unparsed = file;
   }
   const map = (v: unknown) =>
     v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, never>) : {};
@@ -226,6 +231,7 @@ export function offlineRepoConfig(env: CommandArgs["env"]): { cfg: RepoConfig; l
       fleet: { repo_root: typeof root === "string" ? root : defaults.fleet.repo_root },
     },
     local: localMachineName(typeof name === "string" ? name : null),
+    ...(unparsed !== undefined ? { unparsed } : {}),
   };
 }
 
@@ -240,8 +246,16 @@ export function resolveOffline(
   file: string,
 ): { wave: Wave; repoLine: string } {
   if (!isSlug(wave.repo)) return { wave, repoLine: "" };
-  const { cfg, local } = offlineRepoConfig(env);
-  const resolved = resolveWaveRepo(wave, cfg, local, homedir(), file);
+  const { cfg, local, unparsed } = offlineRepoConfig(env);
+  let resolved: Wave;
+  try {
+    resolved = resolveWaveRepo(wave, cfg, local, homedir(), file);
+  } catch (e) {
+    // a malformed config.yaml reads as nothing configured: say so beside the refusal
+    if (unparsed === undefined || !(e instanceof Error)) throw e;
+    e.message += ` (${unparsed} does not parse: read as nothing configured)`;
+    throw e;
+  }
   if (resolved.repo !== wave.repo)
     return {
       wave: resolved,

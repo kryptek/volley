@@ -684,4 +684,14 @@ describe("volleyd validate: an owner/name repo: resolved offline as run resolves
       `repo: no clone of b/b on any machine: add it to one (Settings → Repositories, or volley repo add b/b --machine ${localMachineName()})`,
     );
   });
+
+  it("a config.yaml that does not parse: the refusal says so, not only that no machine holds it", async () => {
+    writeFileSync(join(home, "config.yaml"), "repos: [unclosed\n");
+    const r = await runCli(["validate", waveFile()], env());
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("repo: no clone of b/b on any machine");
+    expect(r.stderr).toContain(
+      `(${join(home, "config.yaml")} does not parse: read as nothing configured)`,
+    );
+  });
 });
