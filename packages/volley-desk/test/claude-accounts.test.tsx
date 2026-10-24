@@ -211,6 +211,53 @@ describe("ClaudeAccounts", () => {
     expect(screen.queryByRole("button", { name: /Move to|not now/i })).toBeNull();
   });
 
+  it("Add: the code-page link with its QR code, the one box, then Signed in as the masked e-mail", async () => {
+    const { control, rerender, view, state } = setup();
+    const CODE_URL =
+      "https://claude.com/cai/oauth/authorize?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=s";
+    control.mockResolvedValueOnce({ ok: true, result: { acct: "team", account: "team" } });
+    fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Account label" }), {
+      target: { value: "Team" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign in on this machine" }));
+    });
+    const waiting = reduceAll(state, [
+      signinMsg("team", "claude_signin_url", {
+        url: CODE_URL,
+        flow: "manual_code",
+        manual_url: CODE_URL,
+        callback_url: "https://claude.com/cai/oauth/authorize?code=true&state=s",
+      }),
+    ]);
+    rerender(view(waiting));
+    expect(screen.getByRole("link", { name: "Open Anthropic sign-in ↗" })).toHaveAttribute(
+      "href",
+      CODE_URL,
+    );
+    expect(screen.getByRole("img", { name: "QR code of the sign-in link" })).toBeInTheDocument();
+    const box = screen.getByLabelText("Paste the code, or the address your browser ended up on");
+    expect(box).toHaveAttribute("type", "password");
+    control.mockResolvedValueOnce({ ok: true, result: { acct: "team", signed_in: true } });
+    fireEvent.change(box, { target: { value: "abcSECRET42" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    });
+    expect(control).toHaveBeenCalledWith(
+      "claude_signin_entry",
+      { acct: "team", entry: "abcSECRET42" },
+      expect.any(String),
+      expect.any(Number),
+    );
+    expect(document.body.innerHTML).not.toContain("abcSECRET42");
+    const done = reduceAll(waiting, [
+      signinMsg("team", "claude_signin_done", { plan: "max", email: "team@example.com" }),
+    ]);
+    rerender(view(done));
+    expect(screen.getByText(/Signed in as/)).toHaveTextContent("t•••@example.com");
+  });
+
   it("Add → the Stepper shows the sign-in link from the event and completes on done", async () => {
     const { control, rerender, view, state } = setup();
     control.mockResolvedValueOnce({ ok: true, result: { acct: "team", account: "team" } });
@@ -227,7 +274,7 @@ describe("ClaudeAccounts", () => {
       expect.any(String),
       expect.any(Number),
     );
-    expect(screen.getByText("Waiting for sign-in…")).toBeInTheDocument();
+    expect(screen.getByText(/Starting the sign-in/)).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Open Anthropic sign-in/ })).toBeNull();
 
     const waiting = reduceAll(state, [
@@ -775,16 +822,17 @@ describe("ClaudeAccounts › Add on any machine", () => {
     expect(screen.queryByText(/volley claude add/)).toBeNull();
   });
 
-  it("a peer's sign-in shows the link and the phone steps, never a field, and completes there", async () => {
+  it("a peer's sign-in shows the code-page link, the one box and the terminal fallback, and completes there", async () => {
     const { control, rerender, view, state } = setup([], fleet);
     control.mockResolvedValueOnce({
       ok: true,
       result: {
         acct: "work@peer-a",
-        url: URL,
-        flow: "browser_callback",
+        url: MANUAL,
+        flow: "manual_code",
         attach: ATTACH,
         manual_url: MANUAL,
+        callback_url: URL,
       },
     });
     fireEvent.click(screen.getByRole("button", { name: "+ Add Claude account" }));
@@ -801,11 +849,16 @@ describe("ClaudeAccounts › Add on any machine", () => {
       expect.any(String),
       expect.any(Number),
     );
-    expect(screen.getByRole("link", { name: /Open sign-in/ })).toHaveAttribute("href", URL);
-    fireEvent.click(screen.getByText("From a phone instead"));
-    expect(screen.getByRole("link", { name: /Open on the phone/ })).toHaveAttribute("href", MANUAL);
+    expect(screen.getByRole("link", { name: "Open Anthropic sign-in ↗" })).toHaveAttribute(
+      "href",
+      MANUAL,
+    );
+    expect(
+      screen.getByLabelText("Paste the code, or the address your browser ended up on"),
+    ).toHaveAttribute("type", "password");
+    expect(screen.getByRole("link", { name: /Open here instead/ })).toHaveAttribute("href", URL);
+    fireEvent.click(screen.getByText("Terminal instead"));
     expect(document.body).toHaveTextContent(ATTACH);
-    expect(screen.queryAllByRole("textbox")).toHaveLength(0);
 
     const done = reduceAll(state, [
       signinMsg("work@peer-a", "claude_signin_url", { url: URL, flow: "browser_callback" }),
@@ -887,7 +940,7 @@ describe("ClaudeAccounts › Add on any machine", () => {
       fireEvent.click(screen.getByRole("button", { name: "Sign in on peer-a" }));
     });
     expect(screen.getByText(/Starting the sign-in on peer-a…/)).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /Open sign-in/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /Open Anthropic sign-in/ })).toBeNull();
 
     rerender(
       view(
@@ -898,7 +951,7 @@ describe("ClaudeAccounts › Add on any machine", () => {
       ),
     );
     expect(screen.getByRole("alert")).toHaveTextContent("The sign-in did not finish: timed out");
-    expect(screen.queryByRole("link", { name: /Open sign-in/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /Open Anthropic sign-in/ })).toBeNull();
   });
 
   it("a paired host with no machine record yet is offered, and says so", () => {
@@ -1014,7 +1067,13 @@ describe("ClaudeAccounts › the per-machine account matrix", () => {
     expect(dialog.getByRole("heading", { level: 3 })).toHaveTextContent(
       "Sign in with o•••@example.com on peer-b",
     );
-    expect(dialog.getByRole("link", { name: /Open sign-in/ })).toHaveAttribute("href", URL);
+    expect(dialog.getByRole("link", { name: /Open Anthropic sign-in/ })).toHaveAttribute(
+      "href",
+      URL,
+    );
+    expect(
+      dialog.getByLabelText("Paste the code, or the address your browser ended up on"),
+    ).toBeInTheDocument();
     fireEvent.click(dialog.getByRole("button", { name: "Show email" }));
     expect(dialog.getByRole("heading", { level: 3 })).toHaveTextContent(
       `Sign in with ${EMAIL} on peer-b`,
@@ -1813,7 +1872,7 @@ describe("ClaudeAccounts › adding ends primed (#498)", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Sign in on this machine" }));
     });
-    expect(screen.getByText("Waiting for sign-in…")).toBeInTheDocument();
+    expect(screen.getByText(/Waiting for the sign-in to finish/)).toBeInTheDocument();
     const done = reduceAll(initialState(), [
       signinUrl,
       signinMsg("team-2", "claude_signin_done", { plan: "max", email: "new@example.com" }),

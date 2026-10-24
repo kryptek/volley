@@ -364,10 +364,13 @@ export const DAEMON_DEFAULTS = {
   /** A login is primed (`claude_prime`: identity, plan, usage probe) at most once in this long. */
   claude_prime_interval_ms: 300_000,
   /**
-   * How long a paired machine's sign-in forward (`ssh -N -L`) must stay up before its URL is
-   * published: an ssh that exits sooner (the local port is taken) restarts the sign-in once.
+   * How long a paired machine's sign-in forward (`ssh -N -L`) must stay up before it counts as
+   * up: an ssh that exits sooner (the local port is taken) leaves the sign-in without one.
    */
   signin_forward_settle_ms: 3_000,
+  /** How long a pasted sign-in code or redirect waits for the sign-in to end before it is read
+   * as rejected (`claude_signin_entry`). */
+  signin_entry_wait_ms: 30_000,
   /** Tries (and the wait between them) for a profile's `.claude.json.lock` during an MCP sync. */
   claude_json_lock_attempts: 50,
   claude_json_lock_wait_ms: 20,

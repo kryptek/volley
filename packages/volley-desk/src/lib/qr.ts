@@ -1,6 +1,6 @@
 /**
- * A QR code encoder for the Desk (sign-in links, one-time passwords): byte mode, error
- * correction level M, versions 1..10 (up to 213 bytes, ample for a Desk sign-in link), mask
+ * A QR code encoder for the Desk (sign-in links, one-time passwords, Anthropic's ~470-byte
+ * authorize URL): byte mode, error correction level M, versions 1..20 (up to 666 bytes), mask
  * chosen by the standard penalty score (ISO/IEC 18004). A port of `volley setup`'s terminal
  * encoder (volley-cli `src/setup/qr.ts`); only the renderer differs (`qrPath` here, `renderQr`
  * there). The Desk's `setup-wizard` test holds this copy to the CLI's own fixture
@@ -38,6 +38,24 @@ const VERSIONS: VersionInfo[] = [
   { ec: 22, blocks: [38, 38, 39, 39], align: [6, 24, 42] },
   { ec: 22, blocks: [36, 36, 36, 37, 37], align: [6, 26, 46] },
   { ec: 26, blocks: [43, 43, 43, 43, 44], align: [6, 28, 50] },
+  { ec: 30, blocks: [50, 51, 51, 51, 51], align: [6, 30, 54] },
+  { ec: 22, blocks: [36, 36, 36, 36, 36, 36, 37, 37], align: [6, 32, 58] },
+  { ec: 22, blocks: [37, 37, 37, 37, 37, 37, 37, 37, 38], align: [6, 34, 62] },
+  { ec: 24, blocks: [40, 40, 40, 40, 41, 41, 41, 41, 41], align: [6, 26, 46, 66] },
+  { ec: 24, blocks: [41, 41, 41, 41, 41, 42, 42, 42, 42, 42], align: [6, 26, 48, 70] },
+  { ec: 28, blocks: [45, 45, 45, 45, 45, 45, 45, 46, 46, 46], align: [6, 26, 50, 74] },
+  { ec: 28, blocks: [46, 46, 46, 46, 46, 46, 46, 46, 46, 46, 47], align: [6, 30, 54, 78] },
+  { ec: 26, blocks: [43, 43, 43, 43, 43, 43, 43, 43, 43, 44, 44, 44, 44], align: [6, 30, 56, 82] },
+  {
+    ec: 26,
+    blocks: [44, 44, 44, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45],
+    align: [6, 30, 58, 86],
+  },
+  {
+    ec: 26,
+    blocks: [41, 41, 41, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42],
+    align: [6, 34, 62, 90],
+  },
 ];
 
 /** The format bits' error-correction level field for M. */

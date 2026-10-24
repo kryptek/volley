@@ -10,8 +10,10 @@
  * `claude_account_rename` and `claude_account_remove` change that registry,
  * clear a removed profile's usage record and raise the demo's registry-changed
  * signal, so the demo shows the new name and the card leaving; `wave_account_set`
- * re-publishes the demo wave's state with its new `account`, as volleyd would). Timings
- * follow the prototype (1.1 s delivered, 2.6 s acked).
+ * re-publishes the demo wave's state with its new `account`, as volleyd would;
+ * `claude_account_add` and `claude_signin` answer with a demo sign-in link and publish it as
+ * `claude_signin_url`, and `claude_signin_entry` is answered `ok`, its `claude_signin_done`
+ * following 1.1 s later). Timings follow the prototype (1.1 s delivered, 2.6 s acked).
  */
 import { registryKey } from "../store/claude";
 import { DEMO_CLAUDE_REGISTRY, demoClaudeAccounts, demoClaudeBalance } from "../store/fixtures";
@@ -32,12 +34,32 @@ const DEMO_OPS: ReadonlySet<string> = new Set([
   "claude_account_remove",
   "claude_prime",
   "wave_account_set",
+  "claude_account_add",
+  "claude_signin",
+  "claude_signin_entry",
 ]);
+
+/** The demo's sign-in links: shaped (and about as long) as Claude Code's own. */
+const DEMO_AUTHORIZE =
+  "https://claude.com/cai/oauth/authorize?code=true&client_id=00000000-0000-4000-8000-000000000000&response_type=code&scope=user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code&code_challenge=demo-code-challenge-0000000000000000000000000&code_challenge_method=S256&state=demo-state-00000000000000000000000000000000";
+const DEMO_SIGNIN = {
+  url: `${DEMO_AUTHORIZE}&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback`,
+  callback: `${DEMO_AUTHORIZE}&redirect_uri=http%3A%2F%2Flocalhost%3A51051%2Fcallback`,
+};
+/** The e-mail a demo sign-in finishes as. */
+const DEMO_SIGNIN_EMAIL = "you@example.com";
+
+/** The account id volleyd would give a label: lower case, `-` for anything else. */
+const demoAcct = (label: string) =>
+  label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "account";
 
 /**
  * The demo's control: `claude_accounts`, `claude_balance`, `claude_account_rename`,
- * `claude_account_remove`, `claude_prime` and `wave_account_set` reach the demo client; any
- * other op is refused here, so nothing else in the demo pretends to act.
+ * `claude_account_remove`, `claude_prime`, `wave_account_set` and the sign-in ops reach the demo
+ * client; any other op is refused here, so nothing else in the demo pretends to act.
  */
 export function demoReadControl(control: SteerTransport["control"]): SteerTransport["control"] {
   return (op, fields, text, timeoutMs) =>
@@ -120,8 +142,34 @@ export function createDemoSteerClient(
       const self = `volley/${ns}/${env.agent_id}/mailbox`;
       if (to === DAEMON_AGENT_ID) {
         const req = env.payload as
-          | { op?: unknown; escape_only?: unknown; wave?: unknown; acct?: unknown }
+          | {
+              op?: unknown;
+              escape_only?: unknown;
+              wave?: unknown;
+              acct?: unknown;
+              label?: unknown;
+              machine?: unknown;
+            }
           | undefined;
+        // A demo sign-in: its link, then (for a pasted code) done 1.1 s after the answer.
+        const signinAcct =
+          req?.op === "claude_account_add"
+            ? `${demoAcct(String(req.label ?? ""))}${typeof req.machine === "string" && req.machine !== "local" ? `@${req.machine}` : ""}`
+            : req?.op === "claude_signin" || req?.op === "claude_signin_entry"
+              ? String(req.acct ?? "")
+              : null;
+        const signinUrl =
+          signinAcct !== null && req?.op !== "claude_signin_entry"
+            ? {
+                acct: signinAcct,
+                url: DEMO_SIGNIN.url,
+                flow: "manual_code",
+                manual_url: DEMO_SIGNIN.url,
+                callback_url: DEMO_SIGNIN.callback,
+                code_prompt: true,
+                attach: `tmux attach -t volley-signin-${signinAcct.split("@")[0]}`,
+              }
+            : null;
         const moved =
           req?.op === "wave_account_set" && typeof req.wave === "string"
             ? waveState(req.wave)
@@ -136,7 +184,11 @@ export function createDemoSteerClient(
               ? { ...demoClaudeAccounts(), accounts: registry }
               : req?.op === "claude_balance"
                 ? demoClaudeBalance()
-                : edited?.result;
+                : signinUrl !== null
+                  ? { ...signinUrl, topic: `volley/_system/claude/${signinAcct}/signin` }
+                  : req?.op === "claude_signin_entry"
+                    ? { acct: signinAcct, signed_in: true, email: DEMO_SIGNIN_EMAIL }
+                    : edited?.result;
         const answer = { text: "ACKED", ok: true, ...(result ? { result } : {}) };
         setTimeout(() => {
           // The new account is in the wave state before the answer, as volleyd journals first.
@@ -151,7 +203,28 @@ export function createDemoSteerClient(
                 withWaveAccount(moved, typeof req?.acct === "string" ? req.acct : null),
               ),
             );
+          if (signinUrl !== null)
+            emit(
+              `volley/_system/claude/${signinAcct}/signin`,
+              reply(DAEMON_AGENT_ID, ns, "_system/claude", "claude_signin_url", {
+                type: "claude_signin_url",
+                ...signinUrl,
+              }),
+            );
           emit(self, reply(DAEMON_AGENT_ID, ns, "mailbox", "ack", answer, id));
+          if (req?.op === "claude_signin_entry")
+            setTimeout(
+              () =>
+                emit(
+                  `volley/_system/claude/${signinAcct}/signin`,
+                  reply(DAEMON_AGENT_ID, ns, "_system/claude", "claude_signin_done", {
+                    type: "claude_signin_done",
+                    acct: signinAcct,
+                    email: DEMO_SIGNIN_EMAIL,
+                  }),
+                ),
+              DELIVER_MS,
+            );
           if (edited?.result === undefined) return;
           // What volleyd does next: the removed profile's record cleared, the signal raised.
           if (edited.cleared !== null)
