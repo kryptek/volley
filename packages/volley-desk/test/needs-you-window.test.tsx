@@ -525,3 +525,110 @@ describe("held decisions (SPEC §4.6.2)", () => {
     expect(screen.getByText(holdCommand(DECISION, first.on))).toBeTruthy();
   });
 });
+
+describe("a burst of identical decisions (#417)", () => {
+  /** Eleven copies of the wave decision: one per task, B1 oldest, each with its own version. */
+  const burst: InboxItem[] = Array.from({ length: 11 }, (_, i) => ({
+    ...item(DECISION),
+    id: `d-burst-${i + 1}`,
+    task: `B${i + 1}`,
+    agent_id: `autopilot-t${i + 1}-implementer-1`,
+    version: 10 + i,
+    opened_at: new Date(NOW - (20 - i) * 60_000).toISOString(),
+    source: { decision_id: `d-burst-${i + 1}`, decision_kind: "reviewers_disagree" },
+  })).reverse();
+  const you = Object.fromEntries(burst.map((i) => [i.id, "you" as Tier]));
+  const rows = () => screen.queryAllByRole("listitem", { name: /^Inbox item/ });
+  const lead = () => row("d-burst-1");
+
+  it("render as one row with a ×11 chip and the waiting line; the title still counts 11", () => {
+    setup({ items: burst, tiers: you });
+    expect(rows()).toHaveLength(1);
+    expect(within(lead()).getByText("×11")).toBeInTheDocument();
+    expect(within(lead()).getByText("11 tasks waiting · B1, B2, B3 +8")).toBeInTheDocument();
+    expect(within(lead()).getByText("needs you")).toBeInTheDocument();
+    expect(screen.getByText("11 need you")).toBeInTheDocument();
+  });
+
+  it("one answer sends one inbox_answer per member, each with its own id and version", async () => {
+    const control = vi.fn(async () => ({ ok: true }));
+    setup({ items: burst, tiers: you, control });
+    fireEvent.click(within(lead()).getByRole("button", { name: "blocker" }));
+    await waitFor(() => expect(control).toHaveBeenCalledTimes(11));
+    const sent = control.mock.calls.map(
+      (c) => (c as unknown[])[1] as { id: string; version: number },
+    );
+    expect(sent.map((s) => s.id)).toEqual(Array.from({ length: 11 }, (_, i) => `d-burst-${i + 1}`));
+    expect(sent.map((s) => s.version)).toEqual(Array.from({ length: 11 }, (_, i) => 10 + i));
+    expect(
+      await within(lead()).findByText(/answered 11 on desk·phone · blocker/),
+    ).toBeInTheDocument();
+  });
+
+  it("a refusal mid-way shows answered 10 of 11 and keeps the buttons; retry sends the rest", async () => {
+    let calls = 0;
+    const control = vi.fn(async () =>
+      ++calls === 4 ? { ok: false, error: "volleyd did not answer within 10s" } : { ok: true },
+    );
+    setup({ items: burst, tiers: you, control });
+    fireEvent.click(within(lead()).getByRole("button", { name: "blocker" }));
+    expect(
+      await within(lead()).findByText(/answered 10 of 11 · retry the rest/),
+    ).toBeInTheDocument();
+    const retry = within(lead()).getByRole("button", { name: "blocker" });
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+    await waitFor(() => expect(control).toHaveBeenCalledTimes(12));
+    expect(((control.mock.calls[11] as unknown[])[1] as { id: string }).id).toBe("d-burst-4");
+  });
+
+  it("a member already answered elsewhere is skipped and counted", async () => {
+    const control = vi.fn(async (_op: string, args: Record<string, unknown>) =>
+      args.id === "d-burst-2"
+        ? { ok: false, error: "already answered on mbp·terminal" }
+        : { ok: true },
+    );
+    setup({
+      items: burst,
+      tiers: you,
+      control: control as unknown as NeedsYouWindowProps["control"],
+    });
+    fireEvent.click(within(lead()).getByRole("button", { name: "fine" }));
+    expect(await within(lead()).findByText(/answered 11 on desk·phone · fine/)).toBeInTheDocument();
+  });
+
+  it("Other… answers every member with the typed text", async () => {
+    const control = vi.fn(async () => ({ ok: true }));
+    setup({ items: burst, tiers: you, control });
+    fireEvent.click(within(lead()).getByRole("button", { name: "Other…" }));
+    fireEvent.change(within(lead()).getByRole("textbox", { name: "Your answer" }), {
+      target: { value: "split it" },
+    });
+    fireEvent.click(within(lead()).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(control).toHaveBeenCalledTimes(11));
+    for (const c of control.mock.calls)
+      expect((c as unknown[])[1]).toMatchObject({ answer: "split it" });
+  });
+
+  it("Hold fans out to every member", async () => {
+    const control = vi.fn(async () => ({ ok: true }));
+    const waves = STATE.waves;
+    setup({ items: burst, tiers: you, control, waves });
+    fireEvent.click(within(lead()).getByRole("button", { name: "Hold · waiting on…" }));
+    const select = within(lead()).getByRole("combobox", { name: "Hold · waiting on" });
+    const first = (select.querySelectorAll("option")[1] as HTMLOptionElement).value;
+    await act(async () => {
+      fireEvent.change(select, { target: { value: first } });
+    });
+    await waitFor(() => expect(control).toHaveBeenCalledTimes(11));
+    expect(control.mock.calls.map((c) => (c as unknown[])[0])).toEqual(Array(11).fill("hold"));
+  });
+
+  it("Dismiss hides the whole group", () => {
+    setup({ items: [...burst, item(PICKER)], tiers: you });
+    expect(rows()).toHaveLength(2);
+    fireEvent.click(within(lead()).getByRole("button", { name: /^Dismiss/ }));
+    expect(rows()).toHaveLength(1);
+    expect(screen.getByText(/11 dismissed items/)).toBeInTheDocument();
+  });
+});

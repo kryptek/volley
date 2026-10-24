@@ -223,3 +223,11 @@ describe("lite.css", () => {
     expect(lite).not.toMatch(/box-shadow/);
   });
 });
+
+describe("lite.css and the Specular buttons (#417)", () => {
+  it("hides every Specular button's light canvas: the buttons are flat", () => {
+    const lite = rules(read(LITE));
+    const rule = lite.find(([sels]) => sels.includes(".specular-button .specular-button__light"));
+    expect(rule && decls(rule[1], "display")).toEqual(["none"]);
+  });
+});

@@ -1,9 +1,21 @@
 // @ts-nocheck: vendored React Bits component from the shadcn registry; unchanged below this line except the
-// marked context release in the effect cleanup.
+// marked Volley Desk edits: the context budget and lost-context fallback (#417), and the context release
+// in the effect cleanup.
 'use client';
 
-import { useEffect, useRef, type ButtonHTMLAttributes, type CSSProperties, type ReactNode } from 'react';
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ButtonHTMLAttributes,
+  type CSSProperties,
+  type ReactNode
+} from 'react';
 
+import { useLiteSurface } from '../../a11y/surface';
+import { acquireGl, glBudgetReleases, releaseGl, subscribeGl } from '../../look/glBudget';
 import './SpecularButton.css';
 
 const PAD = 24;
@@ -259,7 +271,29 @@ const SpecularButton = ({
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
 
+  // Volley Desk (#417): a WebGL context only within the page's budget (look/glBudget.ts), none on
+  // the lite surface; otherwise, or once the context is lost, the button renders flat (no canvas
+  // drawn) and upgrades when a slot frees or the context is restored.
+  const glId = useId();
+  const lite = useLiteSurface();
+  const freed = useSyncExternalStore(subscribeGl, glBudgetReleases, glBudgetReleases);
+  const [granted, setGranted] = useState(false);
+  const [lost, setLost] = useState(false);
+  const [generation, setGeneration] = useState(0);
   useEffect(() => {
+    if (lite || granted) return;
+    if (acquireGl(glId)) setGranted(true);
+  }, [lite, granted, freed, glId]);
+  useEffect(() => {
+    if (!lite) return;
+    releaseGl(glId);
+    setGranted(false);
+  }, [lite, glId]);
+  useEffect(() => () => releaseGl(glId), [glId]);
+
+  useEffect(() => {
+    // Volley Desk (#417): no slot, no context.
+    if (!granted) return undefined;
     const button = buttonRef.current;
     const canvas = canvasRef.current;
     const gl = canvas?.getContext('webgl2', {
@@ -269,9 +303,29 @@ const SpecularButton = ({
       depth: false,
       stencil: false
     });
-    if (!button || !canvas || !gl) return undefined;
+    // Volley Desk (#417): no context (or no program) is flat; a lost one is flat until restored.
+    if (!button || !canvas || !gl) {
+      setLost(true);
+      return undefined;
+    }
+    const onLost = (event: Event) => {
+      event.preventDefault();
+      setLost(true);
+    };
+    const onRestored = () => {
+      setLost(false);
+      setGeneration(g => g + 1);
+    };
+    canvas.addEventListener('webglcontextlost', onLost);
+    canvas.addEventListener('webglcontextrestored', onRestored);
     const program = link(gl);
-    if (!program) return undefined;
+    if (!program) {
+      setLost(true);
+      return () => {
+        canvas.removeEventListener('webglcontextlost', onLost);
+        canvas.removeEventListener('webglcontextrestored', onRestored);
+      };
+    }
     const uniforms: Record<string, WebGLUniformLocation | null> = {};
     for (const name of UNIFORMS) uniforms[name] = gl.getUniformLocation(program, name);
     const buffer = gl.createBuffer();
@@ -463,6 +517,8 @@ const SpecularButton = ({
       window.removeEventListener('pointercancel', onPointerEnd);
       document.documentElement.removeEventListener('pointerleave', onPointerLeave);
       button.removeEventListener('pointerdown', onPointerDown);
+      canvas.removeEventListener('webglcontextlost', onLost);
+      canvas.removeEventListener('webglcontextrestored', onRestored);
       gl.deleteBuffer(buffer);
       gl.deleteVertexArray(vao);
       gl.deleteProgram(program);
@@ -473,7 +529,7 @@ const SpecularButton = ({
         if (!canvas.isConnected) gl.getExtension('WEBGL_lose_context')?.loseContext();
       });
     };
-  }, []);
+  }, [granted, generation]);
 
   useEffect(() => {
     wakeRef.current?.();
@@ -485,7 +541,7 @@ const SpecularButton = ({
       type={type}
       disabled={disabled}
       onClick={onClick}
-      className={`specular-button specular-button--${size}${className ? ` ${className}` : ''}`}
+      className={`specular-button specular-button--${size}${!granted || lost ? ' specular-button--flat' : ''}${className ? ` ${className}` : ''}`}
       style={
         {
           '--sb-radius': `${radius}px`,
@@ -498,7 +554,7 @@ const SpecularButton = ({
       }
       {...rest}
     >
-      <canvas ref={canvasRef} className="specular-button__light" aria-hidden="true" />
+      {granted && <canvas ref={canvasRef} className="specular-button__light" aria-hidden="true" />}
       <span className="specular-button__label">{children}</span>
     </button>
   );

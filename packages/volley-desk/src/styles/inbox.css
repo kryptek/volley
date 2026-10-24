@@ -77,6 +77,14 @@
 .inbox-sub {
   font-size: 12px;
 }
+/* A group of identical decisions (issue 417): the ×N chip and the tasks it answers. */
+.inbox-count {
+  font-variant-numeric: tabular-nums;
+}
+.inbox-waiting {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 .inbox-question {
   margin: 0;
   overflow-wrap: anywhere;

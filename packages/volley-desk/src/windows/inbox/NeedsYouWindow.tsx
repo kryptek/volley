@@ -7,7 +7,8 @@
  * `N need you` chip. Filters are Gooey tabs: All / Only you / Pickers / Decisions /
  * Handoffs. Rows are `InboxRow`s; Dismiss hides a row from this Desk only (the item stays open
  * and still counts), `Bring back` restores them. A row whose record clears (answered and past
- * volleyd's TTL, or closed) fades out over `LEAVE_MS`.
+ * volleyd's TTL, or closed) fades out over `LEAVE_MS`. Identical open decisions are one row
+ * (`groupInboxItems`, #417): the filters and Dismiss apply per item, the title counts items.
  *
  * Phone layout (`narrow`): stacked full-width cards, every button and tab at least 48 px tall,
  * the live line on one line, options as a vertical stack (styles/inbox.css).
@@ -25,6 +26,7 @@ import { IconBtn } from "../wave/WaveWindow";
 import { InboxRow } from "./InboxRow";
 import type { LoadEvidence } from "./ReleaseItem";
 import { INBOX_FILTERS, type InboxFilter, matchesFilter, needsPerson } from "./inboxFilters";
+import { groupInboxItems } from "./inboxGroups";
 import "../../styles/attention.css";
 import "../../styles/inbox.css";
 
@@ -128,6 +130,15 @@ export function NeedsYouWindow(p: NeedsYouWindowProps) {
     (r) => !dismissed.has(r.item.id) && matchesFilter(r.item, filter, tier(r.item)),
   );
   const dismissedCount = p.items.filter((i) => dismissed.has(i.id)).length;
+  const groups = [
+    ...groupInboxItems(shown.filter((r) => !r.leaving).map((r) => r.item)).map((g) => ({
+      ...g,
+      leaving: false,
+    })),
+    ...shown
+      .filter((r) => r.leaving)
+      .map((r) => ({ lead: r.item, members: [r.item], leaving: true })),
+  ].sort((a, b) => a.lead.opened_at.localeCompare(b.lead.opened_at));
 
   const title = (
     <>
@@ -170,11 +181,12 @@ export function NeedsYouWindow(p: NeedsYouWindowProps) {
             </p>
           ) : (
             <ul className="inbox-list">
-              {shown.map(({ item, leaving: gone }) => (
+              {groups.map(({ lead: item, members, leaving: gone }) => (
                 <InboxRow
                   key={item.id}
                   item={item}
-                  needsYou={needsPerson(item, tier(item))}
+                  {...(members.length > 1 ? { members } : {})}
+                  needsYou={members.some((m) => needsPerson(m, tier(m)))}
                   live={p.live?.[item.id]}
                   wave={item.wave !== undefined ? p.waves?.[item.wave] : undefined}
                   control={p.control}
@@ -189,7 +201,9 @@ export function NeedsYouWindow(p: NeedsYouWindowProps) {
                   }}
                   onGoTo={p.onGoTo && (() => p.onGoTo?.(item))}
                   onShow={p.onShow && (() => p.onShow?.(item))}
-                  onDismiss={() => setDismissed((d) => new Set(d).add(item.id))}
+                  onDismiss={() =>
+                    setDismissed((d) => new Set([...d, ...members.map((m) => m.id)]))
+                  }
                 />
               ))}
             </ul>
