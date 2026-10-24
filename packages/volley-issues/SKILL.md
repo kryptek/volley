@@ -130,13 +130,15 @@ bun run <skill-dir>/scripts/wave-from-issues.ts /tmp/wave-issues.json \
   --wave "$WAVE" \
   --repo "$(git rev-parse --show-toplevel)" \
   --release-branch release/$WAVE \
-  --model claude-opus-4-7 \
+  --model <model> \
   --repo-slug "$(gh repo view --json nameWithOwner -q .nameWithOwner)" \
   [--satisfied 5,6] [--namespace example-dispatch] \
   [--pipeline '["implement",["spec_review","quality_review"],"fixup","merge_ready"]'] \
   --merge auto --autopilot on --branch-update merge \
   --out .volley/waves/$WAVE.yaml
 ```
+
+`<model>` is the model the wave's agents run: Volley's default is `DEFAULT_MODEL` in `packages/volleyd/src/config-defaults.ts` (the model `volley setup`'s test wave runs), unless the user names another.
 
 The three autopilot settings, written into the wave file:
 

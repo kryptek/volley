@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir, hostname, networkInterfaces } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
+import { parseEnvelope } from "volley-mcp/envelope";
 import { resolveBrokerUrl } from "../args";
 import { LAYOUTS, type Layout, type LayoutName } from "../auth/config";
-import { type AuthContext, realAuthDeps, volleydHome } from "../auth/context";
+import { type AuthContext, readCredentials, realAuthDeps, volleydHome } from "../auth/context";
 import { openClient } from "../connect";
 import { EXIT, type ExitCode } from "../exit-codes";
 import { askHidden } from "../hidden-input";
@@ -15,6 +16,8 @@ import { planAccounts, planPhone } from "../setup/accounts";
 import { countLiveAgents, planDetect, planSecurity, probeAnonymous } from "../setup/broker";
 import { checkDeps, checkExit, checkReport, checkSteps, renderCheck } from "../setup/check";
 import { planClaudeCode } from "../setup/claude-code";
+import { type FirstWaveOptions, type WaveView, planFirstWave } from "../setup/first-wave";
+import { ghRepoDeleteLine } from "../setup/first-wave-repo";
 import {
   appendSetupLog,
   readDeskPort,
@@ -44,7 +47,7 @@ import { DESK_PORT } from "./desk-serve";
 export { type HiddenInput, hiddenKeys } from "../hidden-input";
 
 /**
- * `volley setup`: the first-run (and repair) wizard. Eight steps, each planned (what it found,
+ * `volley setup`: the first-run (and repair) wizard. Nine steps, each planned (what it found,
  * what it would change), shown, confirmed (or `--yes`), applied, then checked:
  *
  *   1. Broker    find mosquitto (install, version, what the listeners do, running agents)
@@ -63,6 +66,8 @@ export { type HiddenInput, hiddenKeys } from "../hidden-input";
  *   7. Services  `volley` + `volleyd` installed in ~/.volley/bin, volleyd, the hooks for
  *                coordinator sessions, the Desk built and served
  *   8. Phone     a one-time steer sign-in link as a QR code
+ *   9. Test wave  a 1-issue wave on a scratch private repository (or `--repo`), followed until
+ *                volleyd merged its PR (first-wave.ts); `--simulated` against volley-sim's fakes
  *
  * Idempotent: a rerun plans nothing for what is in place. Every step is journaled to
  * $VOLLEYD_HOME/setup.log (summaries only, never a secret); every run's cost to
@@ -78,6 +83,7 @@ const STEPS: [StepName, Planner][] = [
   ["terminal", planTerminal],
   ["services", planServices],
   ["phone", planPhone],
+  ["first-wave", planFirstWave],
 ];
 
 /**
@@ -105,6 +111,9 @@ const HUB_FLAGS = [
   "desk-host",
   "desk-port",
 ] as const;
+
+/** The test wave's flags: not for `--peer` (a peer runs no test wave of its own). */
+const FIRST_WAVE_FLAGS = ["repo", "issue", "simulated", "no-first-wave"] as const;
 
 export interface SetupArgs {
   argv: string[];
@@ -174,6 +183,27 @@ const spawnExec: SetupDeps["exec"] = (argv, opts) =>
     }
   });
 
+/**
+ * The retained wave state, read with the coordinator's login from the auth dir (setup made it);
+ * null while there is none.
+ */
+const readWaveState =
+  (url: string, authDir: string) =>
+  async (wave: string): Promise<WaveView | null> => {
+    let creds: ReturnType<typeof readCredentials> = null;
+    try {
+      creds = readCredentials(join(authDir, "coordinator.json"));
+    } catch {}
+    const b = await openClient(url, creds);
+    try {
+      const raw = await b.queryRetained(`volley/_waves/${wave}/state`, 2_000);
+      const payload = raw === null ? null : parseEnvelope(raw)?.payload;
+      return typeof payload === "object" && payload !== null ? (payload as WaveView) : null;
+    } finally {
+      await b.disconnect().catch(() => {});
+    }
+  };
+
 export const realSetupDeps = (env: Record<string, string | undefined>): SetupDeps => ({
   auth: realAuthDeps,
   // VOLLEY_SIMULATED=1 (the soak, CI): the sign-ins are answered by fakes and nothing opens.
@@ -239,6 +269,10 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
         "broker-url": { type: "string" },
         "desk-host": { type: "string" },
         "desk-port": { type: "string" },
+        repo: { type: "string" },
+        issue: { type: "string" },
+        simulated: { type: "boolean" },
+        "no-first-wave": { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
       strict: true,
@@ -262,6 +296,13 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     );
     return EXIT.USAGE;
   }
+  const waveFlag = FIRST_WAVE_FLAGS.find((f) => values[f] !== undefined);
+  if (peer && waveFlag !== undefined) {
+    io.stderr(
+      `volley setup: --${waveFlag} is the test wave's, which runs on the supervisor's machine; --peer has none\n`,
+    );
+    return EXIT.USAGE;
+  }
   if (check && (values.yes === true || values.repair === true)) {
     io.stderr(
       `volley setup: --check changes nothing: it does not take ${values.yes === true ? "--yes" : "--repair"}\n`,
@@ -272,7 +313,34 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     io.stderr("volley setup: --json is for --check\n");
     return EXIT.USAGE;
   }
-  const given = injected ?? realSetupDeps(env);
+  // The test wave's flags.
+  const firstWave: FirstWaveOptions = {};
+  const issueText = str("issue");
+  if (issueText !== undefined) {
+    if (!/^[1-9]\d*$/.test(issueText)) {
+      io.stderr("volley setup: --issue must be an issue number\n");
+      return EXIT.USAGE;
+    }
+    if (str("repo") === undefined) {
+      io.stderr("volley setup: --issue names an issue of the --repo clone: give --repo too\n");
+      return EXIT.USAGE;
+    }
+    firstWave.issue = Number(issueText);
+  }
+  if (str("repo") !== undefined) firstWave.repo = resolve(str("repo") as string);
+  if (values["no-first-wave"] === true) {
+    if (firstWave.repo !== undefined || values.simulated === true) {
+      io.stderr(
+        `volley setup: --no-first-wave runs no test wave: it does not take ${firstWave.repo !== undefined ? "--repo" : "--simulated"}\n`,
+      );
+      return EXIT.USAGE;
+    }
+    firstWave.skip = true;
+  }
+  if (values.simulated === true) firstWave.simulated = true;
+  // --simulated: the sign-ins are answered by the fakes too, as under VOLLEY_SIMULATED=1.
+  const given =
+    injected ?? realSetupDeps(firstWave.simulated ? { ...env, VOLLEY_SIMULATED: "1" } : env);
   const invoker = given.auth.invokingUser(env);
   const sudoHome = typeof invoker === "object" && invoker !== null ? invoker.home : undefined;
   const home = volleydHome(env, sudoHome);
@@ -356,6 +424,8 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     env,
     deps: deps.auth,
   };
+  // The test wave follows its wave on the broker with the coordinator's login.
+  deps.waveState ??= readWaveState(url, auth.dir);
   const ctx: SetupContext = {
     auth,
     deps,
@@ -374,7 +444,13 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     // The hooks of a peer's profile name its tunnel.
     ...(peerUrl !== undefined ? { brokerFlag: peerUrl, peer: true as const } : {}),
     ...(values["show-email"] === true ? { showEmail: true } : {}),
-    metrics: { signIn: () => meter.signIn() },
+    metrics: {
+      signIn: () => meter.signIn(),
+      firstWave: (m) => {
+        meter.firstWave = m;
+      },
+    },
+    firstWave,
   };
   const steps = ALL.filter(([n]) => only.length === 0 || only.includes(n));
 
@@ -464,7 +540,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     }
     const n = plan.changes.length;
     const question = `Apply ${n === 1 ? "this change" : `these ${n} changes`} (${plan.title})?`;
-    if (!yes && !(await deps.confirm(question))) {
+    if (!yes && plan.confirmed !== true && !(await deps.confirm(question))) {
       journal(name, "declined");
       io.stdout(
         `  Nothing was changed. Rerun \`volley setup\` to continue${deps.interactive ? "" : " (not a terminal: pass --yes to apply)"}.\n`,
@@ -528,6 +604,11 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     [
       "",
       finished,
+      ...(ctx.firstWaveScratch !== undefined
+        ? [
+            `The test wave's scratch repository is ${ctx.firstWaveScratch}: delete it with \`${ghRepoDeleteLine(ctx.firstWaveScratch)}\`.`,
+          ]
+        : []),
       "Coordinator sessions log in with coordinator.json from the auth dir",
       `(${join(auth.dir, "coordinator.json")}): the MCP registration names the dir, never a`,
       "password. The volley and volleyd commands on this machine use that login on their own",
@@ -546,7 +627,7 @@ export const SETUP_HELP = `Usage: volley setup [--yes] [--repair] [options]
        volley setup --check [--json] [--step <name>]...
        volley setup --peer [--yes] [--check] [--step <name>]...
 
-First-run (and repair) wizard: eight steps, each showing what it found and what it will change
+First-run (and repair) wizard: nine steps, each showing what it found and what it will change
 before changing anything.
 
   1. Broker    find mosquitto (>= 2.1), its listeners, the running agents
@@ -572,13 +653,19 @@ before changing anything.
                way volleyd's service reaches it; the socket password it needs is asked for,
                hidden), else tmux (stops, printing the install line, when tmux is missing);
                recorded as fleet.local_terminal in $VOLLEYD_HOME/config.yaml
-  5. Services  the volley and volleyd commands installed in ~/.volley/bin (on the services'
+  7. Services  the volley and volleyd commands installed in ~/.volley/bin (on the services'
                PATH, a fixed list: the same from any terminal), volleyd (launchd / systemd
                --user), the Volley hooks for coordinator sessions (your status line keeps
                working), the Desk built and served by \`volley desk serve\` on 0.0.0.0:${DESK_PORT}
                (stops if another program listens on that port)
   8. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
                when a phone cannot reach the WebSocket listener (LAN access off)
+  9. Test wave a 1-issue test wave, asked once ("Run a 1-issue test wave now?", Enter: yes):
+               a scratch private repository volley-hello-<4> (gh repo create), a README, one
+               issue, a release branch, \`volley repo add … --wait\`, .volley/waves/hello-<4>.yaml
+               (volleyd validate, volleyd run --owner <coordinator>; every run its own wave),
+               followed until volleyd merged its PR (at most 15 minutes from the submit); the
+               end prints \`gh repo delete …\` to remove it
 
 Rerunning changes nothing that is in place. The one-time admin token and the phone's link
 count as in place while they are pending or once redeemed: a rerun after they expired unused
@@ -606,8 +693,13 @@ Options:
   --lan                Open the WebSocket listener (9001) to your network (for the phone)
   --no-lan             Keep it on this machine only (the default under --yes)
   --step <name>        Only this step (repeatable): detect, security, accounts, signin,
-                       claude-code, terminal, services, phone (--peer: signin, claude-code,
-                       terminal, peer-service)
+                       claude-code, terminal, services, phone, first-wave (--peer: signin,
+                       claude-code, terminal, peer-service)
+  --no-first-wave      Skip the test wave (run it later: volley setup --step first-wave)
+  --repo <path>        The test wave on this clone (its origin's repository) instead of a
+                       scratch repository
+  --issue <n>          With --repo: the issue the test wave implements (default: a new one)
+  --simulated          The test wave against volley-sim's fake gh and claude (CI): no GitHub
   --dir <dir>          The auth dir (env: VOLLEY_AUTH_DIR; default <mosquitto config dir>/volley)
   --layout <name>      brew-arm64 | brew-intel | snap | etc | container (default: detected)
   --config <path>      The mosquitto.conf to manage (default: the layout's)

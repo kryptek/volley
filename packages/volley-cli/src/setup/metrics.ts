@@ -2,6 +2,7 @@ import { chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ensureOwnedDir } from "../auth/context";
 import { scrub } from "../peer/doctor";
+import type { FirstWaveMetrics } from "./first-wave";
 import type { SetupContext, SetupDeps, StepName } from "./step";
 
 /**
@@ -20,6 +21,8 @@ export interface SetupMetrics {
   sign_ins: number;
   sudo_prompts: number;
   steps: { name: StepName; ms: number; changes: number }[];
+  /** The test wave (the first-wave step), when one ran: its wall time, PR and whether it merged. */
+  first_wave?: FirstWaveMetrics;
 }
 
 export const setupMetricsFile = (volleydHome: string) => join(volleydHome, "setup-metrics.json");
@@ -32,6 +35,8 @@ export class SetupMeter {
   signIns = 0;
   sudoPrompts = 0;
   readonly steps: SetupMetrics["steps"] = [];
+  /** Set by the first-wave step once its wave ended (or gave up). */
+  firstWave?: FirstWaveMetrics;
 
   constructor(
     private readonly now: () => Date,
@@ -104,6 +109,7 @@ export class SetupMeter {
       sign_ins: this.signIns,
       sudo_prompts: this.sudoPrompts,
       steps: [...this.steps],
+      ...(this.firstWave !== undefined ? { first_wave: { ...this.firstWave } } : {}),
     };
   }
 
@@ -118,10 +124,18 @@ export function formatWall(ms: number): string {
   return `${Math.floor(s / 60)} m ${s % 60} s`;
 }
 
-/** `Setup complete in 2 m 5 s (1 question, 2 sign-ins, 0 sudo)`. */
+/**
+ * `Setup complete in 2 m 5 s (1 question, 2 sign-ins, 0 sudo)`, then the test wave's outcome when
+ * one ran: `; test wave merged in 1 m 40 s: <PR URL>`.
+ */
 export function completeLine(m: SetupMetrics): string {
   const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
-  return `Setup complete in ${formatWall(m.wall_ms)} (${n(m.questions, "question", "questions")}, ${n(m.sign_ins, "sign-in", "sign-ins")}, ${m.sudo_prompts} sudo)`;
+  const w = m.first_wave;
+  const wave =
+    w === undefined
+      ? ""
+      : `; test wave ${w.merged ? "merged" : "not merged"} in ${formatWall(w.wall_ms)}${w.pr !== null ? `: ${w.pr}` : ""}`;
+  return `Setup complete in ${formatWall(m.wall_ms)} (${n(m.questions, "question", "questions")}, ${n(m.sign_ins, "sign-in", "sign-ins")}, ${m.sudo_prompts} sudo)${wave}`;
 }
 
 /** Write the run's metrics (0600, the invoking user's under sudo). A record, not a gate. */

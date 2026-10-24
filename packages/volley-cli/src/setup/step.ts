@@ -2,6 +2,8 @@ import { join } from "node:path";
 import type { AdminCredentials, AuthContext, AuthDeps } from "../auth/context";
 import { MCP_GET, MCP_REMOVE } from "./claude-code";
 import { lsofArgv, ssArgv } from "./desk-port";
+import type { FirstWaveMetrics, FirstWaveOptions, WaveView } from "./first-wave";
+import { isFirstWaveCommand } from "./first-wave-repo";
 import { isSigninCommand } from "./signin";
 import {
   CMUX_CHECK_OUT,
@@ -102,6 +104,15 @@ export interface SetupDeps {
    * cmux app). Unset: the real filesystem. Tests fake the machine with it.
    */
   exists?: (p: string) => boolean;
+  /**
+   * The retained `volley/_waves/<wave>/state` (null: none yet), read with the coordinator's login:
+   * the test wave follows its wave with it. Unset: the first-wave step is blocked.
+   */
+  waveState?: (wave: string) => Promise<WaveView | null>;
+  /** Milliseconds now (the test wave's wall time and cap). Unset: `Date.now`. */
+  now?: () => number;
+  /** [0, 1) (the scratch repository's name). Unset: `Math.random`. */
+  random?: () => number;
 }
 
 export interface SetupContext {
@@ -159,7 +170,11 @@ export interface SetupContext {
    */
   peer?: true;
   /** What the run counts (setup-metrics.json): the sign-in step reports each sign-in it ran. */
-  metrics?: { signIn: () => void };
+  metrics?: { signIn: () => void; firstWave?: (m: FirstWaveMetrics) => void };
+  /** The test wave's flags (`--repo`, `--issue`, `--simulated`, `--no-first-wave`). */
+  firstWave?: FirstWaveOptions;
+  /** The scratch repository the test wave made (`owner/name`): the end says how to delete it. */
+  firstWaveScratch?: string;
 }
 
 /** A one-time admin token as `volley auth token --json` prints it. */
@@ -187,7 +202,8 @@ export type StepName =
   | "terminal"
   | "services"
   | "phone"
-  | "peer-service";
+  | "peer-service"
+  | "first-wave";
 
 export interface StepPlan {
   step: StepName;
@@ -199,6 +215,8 @@ export interface StepPlan {
   blocked?: string;
   /** Why this step is left out of this run (the later ones still run). */
   skipped?: string;
+  /** The planner asked its own question and got a yes: the changes are applied without another. */
+  confirmed?: true;
   /**
    * The step's status under its row in `volley setup --check`: one line, or one per thing it
    * checks (the sign-ins, the MCP registration…), `\n`-separated. Default none.
@@ -236,6 +254,7 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
   const repo = (...p: string[]) => (repoRoot === null ? null : join(repoRoot, ...p));
   const hooks = repo("packages", "volley-hooks", "scripts", "install.sh");
   const volleyd = repo("packages", "volleyd", "src", "cli.ts");
+  const volley = repo("packages", "volley-cli", "src", "cli.ts");
   const desk = repo("packages", "volley-desk");
   const skills = ["volley-skill", "volley-issues", "volley-wait"].map((p) =>
     repo("packages", p, "scripts", "install.sh"),
@@ -279,6 +298,11 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
         same(argv.slice(0, 6), ["claude", "mcp", "add-json", "-s", "user", "volley"]) &&
         secretFree(argv[6] ?? "")) ||
       (a0 === bun && volleyd !== null && a1 === volleyd && a2 === "install") ||
+      // The test wave (first-wave.ts): its gh and git commands, the repository added to the
+      // fleet, the wave file checked and submitted.
+      isFirstWaveCommand(argv) ||
+      (a0 === bun && volley !== null && a1 === volley && firstWaveVolley(argv.slice(2))) ||
+      (a0 === bun && volleyd !== null && a1 === volleyd && firstWaveVolleyd(argv.slice(2))) ||
       (a0 === bun &&
         a1 === "run" &&
         a2 === "build" &&
@@ -287,6 +311,34 @@ export function setupFence({ restart, repoRoot, bun }: FenceInputs) {
         opts?.cwd === desk);
     if (!ok) throw new Error(`volley setup does not run \`${line}\``);
   };
+}
+
+const SLUG = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/volley-hello-[a-z0-9]{4}$/;
+/** A test wave's file: `<abs clone>/.volley/waves/hello-<4>.yaml`. */
+const HELLO_FILE = /^\/[^\n\0]*\/\.volley\/waves\/hello-[a-z0-9]{4}\.yaml$/;
+
+/** `volley repo add <owner/volley-hello-…> --wait` and `volley repo status <it> --json`. */
+function firstWaveVolley(rest: readonly string[]): boolean {
+  const [verb, sub, slug, flag] = rest;
+  return (
+    rest.length === 4 &&
+    verb === "repo" &&
+    SLUG.test(slug ?? "") &&
+    ((sub === "add" && flag === "--wait") || (sub === "status" && flag === "--json"))
+  );
+}
+
+/** `volleyd validate <hello-<4>.yaml>` and `volleyd run <it> --owner <name>`. */
+function firstWaveVolleyd(rest: readonly string[]): boolean {
+  const [verb, file, flag, owner] = rest;
+  if (!HELLO_FILE.test(file ?? "")) return false;
+  if (verb === "validate") return rest.length === 2;
+  return (
+    verb === "run" &&
+    rest.length === 4 &&
+    flag === "--owner" &&
+    /^[a-z0-9][a-z0-9_-]{0,62}$/.test(owner ?? "")
+  );
 }
 
 /** The hooks installer's flags setup passes: `[--broker-url <url>] [--dry-run]`. */
