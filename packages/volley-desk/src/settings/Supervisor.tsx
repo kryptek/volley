@@ -54,9 +54,7 @@ export function supervisorSummaries({
     admission: config
       ? `ceiling ${config.hard_ceiling ?? "—"} · budget ${config.spawn_budget_multiplier ?? "—"}×`
       : "",
-    attention: config
-      ? `claim ${duration(config.claim_after_s)} · heartbeat ${duration(config.heartbeat_alarm_s)}`
-      : "",
+    attention: config ? `heartbeat ${duration(config.heartbeat_alarm_s)}` : "",
     recovery: config
       ? `${config.fallback_model ?? "no fallback model"} · spawn ${duration(config.spawn_timeout_s)}`
       : "",

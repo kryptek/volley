@@ -1182,10 +1182,15 @@ export function demoReviewer(now = Date.now()): DeskMessage[] {
   ];
 }
 
+/** How long ago the demo's `lead` owner went offline (its away and gone waves). */
+const OWNER_AWAY_MS = 2 * 3_600_000;
+
 /**
  * Autopilot's surfaces (SPEC §4.6.16–19), as two more waves a supervisor would publish: one whose
- * coordinator is reconnecting (its session's MCP restarted), and one autopilot runs that is
- * releasing, with a merge queue, a release train, a synthetic fixer task and both journal events.
+ * coordinator (`relay`) is reconnecting (its session's MCP restarted), and one autopilot runs that
+ * is releasing, with a merge queue, a release train, a synthetic fixer task and both journal
+ * events. Its owner (`lead`) is offline, and the release's owner-only `publish` item waits on it,
+ * so it is `gone` (its other wave, `demoPlanned`'s, waits on nothing: `away`).
  */
 export function demoAutopilot(now = Date.now()): DeskMessage[] {
   const base = (wave: string, over: Partial<WaveStatePayload>): WaveStatePayload => ({
@@ -1208,10 +1213,11 @@ export function demoAutopilot(now = Date.now()): DeskMessage[] {
   });
   const task = (id: string, issue: number, stage: Stage) => ({ id, issue, stage, agents: {} });
   const reconnecting = base("relaunch", {
+    owner: "relay",
     tasks: [task("T1", 201, "implement")],
     spec: { version: 1, tasks: { T1: { issue: 201, title: "Grace window", after: [] } } },
     coordinator: {
-      agent_id: "lead-a7",
+      agent_id: "relay-a7",
       presence: "offline",
       state: "reconnecting",
       last_seen: iso(now - 3 * 60_000),
@@ -1248,7 +1254,12 @@ export function demoAutopilot(now = Date.now()): DeskMessage[] {
         T9: { issue: 214, title: "Train stages", after: ["T5"] },
       },
     },
-    coordinator: { agent_id: "lead", presence: "online", state: "working", last_seen: iso(now) },
+    coordinator: {
+      agent_id: "lead",
+      presence: "offline",
+      state: "gone",
+      last_seen: iso(now - OWNER_AWAY_MS),
+    },
     autopilot: {
       enabled: true,
       auto_resolved: 4,
@@ -1434,7 +1445,13 @@ export function demoPlanned(now = Date.now()): DeskMessage[] {
         },
       },
     },
-    coordinator: { agent_id: "lead", presence: "online", state: "working", last_seen: iso(now) },
+    // Its owner went offline two hours ago; nothing here waits on it, so autopilot runs it.
+    coordinator: {
+      agent_id: "lead",
+      presence: "offline",
+      state: "away",
+      last_seen: iso(now - OWNER_AWAY_MS),
+    },
     autopilot: { enabled: true, auto_resolved: 2, escalated: 0, budgets: {} },
     merge_queue: [
       { task: "i305", state: "queued", since: iso(now - 2 * 60_000) },

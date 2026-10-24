@@ -1,9 +1,10 @@
 /**
  * The coordinators window, ported from the prototype `CoordinatorsWindow`: one
  * row per wave with its coordinator's state (`Working` / `Waiting for your
- * answer` / `Coordinator reconnecting · 4m` / `No coordinator · claim it`), the wave's progress, go-to (fit the
+ * answer` / `Coordinator reconnecting · 4m` / `Owner away · autopilot · last seen 2h ago` / `No coordinator ·
+ * claim it`), the wave's progress, go-to (fit the
  * viewport to the wave and its agents) and show/hide. Every row carries a status
- * chip (`working`, `needs you`, a neutral `reconnecting`, `completed`, `stopped`), apart from its left
+ * chip (`working`, `needs you`, a neutral `reconnecting` or `away`, `completed`, `stopped`), apart from its left
  * bar, which is the wave's identity colour (the supervisor row's bar is neutral
  * and its health is a chip too, red when down), so a colour never means two things.
  * Active waves come first; ended ones (their coordinator is gone because the
@@ -52,6 +53,7 @@ export const STATE_LABEL: Record<CoordinatorState, string> = {
   working: "Working",
   awaiting_input: "Waiting for your answer",
   reconnecting: "Coordinator reconnecting",
+  away: "Owner away",
   gone: "No coordinator · claim it",
 };
 
@@ -74,6 +76,7 @@ export type StatusChip =
   | "working"
   | "needs"
   | "reconnecting"
+  | "away"
   | "completed"
   | "stopped"
   | "archived"
@@ -89,6 +92,7 @@ export const CHIP_LABEL: Record<StatusChip, string> = {
   working: "working",
   needs: "needs you",
   reconnecting: "reconnecting",
+  away: "away",
   completed: "completed",
   stopped: "stopped",
   archived: "archived",
@@ -100,7 +104,21 @@ export function waveChip(w: WaveView, c: EffectiveCoordinator): StatusChip {
   const ended = ENDED_CHIP[w.state?.status ?? ""];
   if (ended) return ended;
   if (c.state === "reconnecting") return "reconnecting";
+  if (c.state === "away") return "away";
   return c.state === "working" ? "working" : "needs";
+}
+
+/** `2h`, `14m`: how long ago, for `last seen`. */
+function ago(ms: number): string {
+  const m = Math.max(0, Math.round(ms / 60_000));
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h`;
+}
+
+/** `Owner away · autopilot · last seen 2h ago` (no `autopilot` while it is off). */
+export function awayLabel(w: WaveView, c: EffectiveCoordinator, now: number): string {
+  const autopilot = w.state?.autopilot?.enabled ? " · autopilot" : "";
+  const seen = c.lastSeen === undefined ? "" : ` · last seen ${ago(now - c.lastSeen)} ago`;
+  return `${STATE_LABEL.away}${autopilot}${seen}`;
 }
 
 export function Chip({ kind, label }: { kind: StatusChip; label?: string }) {
@@ -276,7 +294,9 @@ function WaveRow({
                 ? WAITING_ON_EVENTS_LABEL
                 : c.state === "reconnecting"
                   ? reconnectingLabel(c, p.now ?? Date.now())
-                  : STATE_LABEL[c.state])}
+                  : c.state === "away"
+                    ? awayLabel(w, c, p.now ?? Date.now())
+                    : STATE_LABEL[c.state])}
           </span>
           {ended && hidden && <span className="dim"> · hidden</span>}
           {github && (

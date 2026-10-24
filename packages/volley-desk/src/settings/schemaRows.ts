@@ -52,7 +52,6 @@ const SECTION_OF: Record<string, Section> = {
   spawn_budget_multiplier: "Admission",
   admission: "Admission",
   lease_pools: "Leases",
-  claim_after_s: "Attention",
   heartbeat_alarm_s: "Attention",
   mailbox: "Attention",
   fleet: "Admission",
@@ -102,7 +101,7 @@ const UNITS: [suffix: string, unit: string][] = [
 /** Words a label spells as written here, never capitalised. */
 const AS_WRITTEN: Record<string, string> = { api: "API", ci: "CI", cmux: "cmux", mcp: "MCP" };
 
-/** `claim_after_s` → words `claim after`, unit `s`. */
+/** `heartbeat_alarm_s` → words `heartbeat alarm`, unit `s`. */
 function wordsAndUnit(key: string): { words: string; unit: string } {
   const [suffix, unit] = UNITS.find(([s]) => key.endsWith(s)) ?? ["", ""];
   return { words: key.slice(0, key.length - suffix.length).replaceAll("_", " "), unit };

@@ -209,8 +209,10 @@
   border-color: color-mix(in srgb, var(--hot) 50%, transparent);
   background: color-mix(in srgb, var(--hot) 12%, transparent);
 }
-/* Neutral: the coordinator's session is coming back (SPEC §4.6.1); nothing to claim. */
-.st-chip--reconnecting {
+/* Neutral: the coordinator's session is coming back, or its owner is away while nothing waits on
+   it (SPEC §4.6.1); nothing to claim. */
+.st-chip--reconnecting,
+.st-chip--away {
   color: var(--mute);
   border-color: rgba(163, 171, 192, 0.45);
   background: rgba(163, 171, 192, 0.1);

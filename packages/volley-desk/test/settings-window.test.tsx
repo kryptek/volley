@@ -35,7 +35,6 @@ const config: ConfigPayload = {
     ci_queue_max: 10,
     hysteresis_samples: 3,
   },
-  claim_after_s: 1800,
   heartbeat_alarm_s: 600,
   fallback_model: "claude-sonnet-5-5",
   mailbox: { session_expiry_s: 604800 },

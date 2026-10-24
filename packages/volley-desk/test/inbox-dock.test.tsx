@@ -67,8 +67,9 @@ describe("the Desk with inbox items", () => {
 
   it("badges the tile, counts the items in the pill, and the tile toggles the window", () => {
     const { container } = renderLive();
-    // The picker, the handoff and the owner-only release item; the decision is the coordinator's.
-    expect(dock().getByRole("button", { name: "Needs you" })).toHaveTextContent("3");
+    // The picker, the handoff, the owner-only release item and the decision: the releasing wave's
+    // owner is gone, so nobody but a person handles its decision either.
+    expect(dock().getByRole("button", { name: "Needs you" })).toHaveTextContent("4");
     const pill = container.querySelector(".topbar .ny-pill")?.textContent ?? "";
     expect(Number(pill.match(/(\d+) needs? you/)?.[1])).toBeGreaterThanOrEqual(3);
     expect(screen.getByRole("region", { name: "Needs you" })).toBeInTheDocument();
