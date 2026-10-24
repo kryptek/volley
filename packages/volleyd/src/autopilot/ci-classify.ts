@@ -4,10 +4,11 @@ import type { GithubStatus } from "./github-status";
 /**
  * Self-healing CI (SPEC §4.6.16): what a red head is, before anyone is asked. Pure.
  *
- *   - `own_change`: a failing test's file is among the PR's changed files, or the failing tests
- *     cannot be mapped to files and the release branch's latest CI is not red (a CI fixup);
- *   - `flake`: no failing test's file is in the PR, and the test fails on the release branch too
- *     or the head is not infra-shaped (a `fix_flake` remediation: a dedicated fixer, never a re-run);
+ *   - `own_change`: a failing test's file is among the PR's changed files, or a failing test
+ *     cannot be mapped to a file and the release branch's latest CI does not fail that same test
+ *     (a CI fixup; a release branch red on something else never makes it a flake);
+ *   - `flake`: no failing test's file is in the PR, and every unmapped test fails on the release
+ *     branch too (a `fix_flake` remediation: a dedicated fixer, never a re-run);
  *   - `infra_incident`: the run is infra-shaped, or GitHub's status page reports an Actions / API
  *     incident (a hold, re-checked; never a fixer and never a re-run).
  *
@@ -55,7 +56,8 @@ const TEST_FILE = /^(\S+\.[cm]?[jt]sx?)(?:\s|$)/;
 
 /**
  * The file a failing test id names: vitest's `<file> > <suite> > <name>` (or a bare `<file>`)
- * → `<file>`; bun's `(fail) <name>` ids carry no file → null.
+ * → `<file>`; a bun `(fail) <name>` id read outside a `##[group]<file>:` header carries no
+ * file → null.
  */
 export function testFile(id: string): string | null {
   const first = id.split(" > ")[0]?.trim() ?? "";
@@ -99,11 +101,11 @@ export function classify(i: ClassifyInput): ClassifyResult {
   if (files.some((f) => f !== null && touches(prFiles, f))) return own;
   const held = incident();
   if (held !== null) return held;
-  const releaseRed = i.release.state === "red";
   const onRelease = (t: string) => i.release.failing_tests.includes(t);
-  // Unmapped ids (bun's) are the PR's unless the release branch is red (or red on them too).
+  // Unmapped ids (bun's without a group header) are the PR's unless the release branch fails
+  // that same id: a release branch red on something else proves nothing about them.
   const unmapped = i.failing_tests.filter((t, n) => files[n] === null && !onRelease(t));
-  if (i.failing_tests.length === 0 ? !releaseRed : unmapped.length > 0 && !releaseRed) return own;
+  if (i.failing_tests.length === 0 ? i.release.state !== "red" : unmapped.length > 0) return own;
   const tests = i.failing_tests.length > 0 ? i.failing_tests : i.release.failing_tests;
   const test = tests.find(onRelease) ?? tests[0];
   // No test to name anywhere: nothing for a flake's fixer to fix.

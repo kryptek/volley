@@ -62,12 +62,33 @@ describe("classify", () => {
     ],
     ["no failing tests at all, release green", { failing_tests: [] }, "own_change"],
     [
-      "no mappable test ids, release red",
+      "no mappable test ids, release red on something else",
       {
-        failing_tests: ["sleep > resolves on abort"],
+        failing_tests: ["formula > renders the brew formula"],
+        release: { state: "red", failing_tests: ["test/other.test.ts > x > y"] },
+      },
+      "own_change",
+    ],
+    [
+      "no mappable test ids, release red on an unrelated job (no failing tests read)",
+      {
+        failing_tests: ["formula > renders the brew formula"],
         release: { state: "red", failing_tests: [] },
       },
+      "own_change",
+    ],
+    [
+      "no mappable test ids, release red on the same id",
+      {
+        failing_tests: ["sleep > resolves on abort"],
+        release: { state: "red", failing_tests: ["sleep > resolves on abort"] },
+      },
       "flake",
+    ],
+    [
+      "a mix: one unmapped id the release branch fails and one it does not",
+      { failing_tests: ["a > b", "c > d"], release: { state: "red", failing_tests: ["a > b"] } },
+      "own_change",
     ],
     ["PR files unreadable: own_change (the conservative route)", { pr_files: null }, "own_change"],
     [

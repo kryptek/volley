@@ -78,10 +78,32 @@ describe("a red head is classified before anyone is asked", () => {
     expect(facts(d).evidence).toMatchObject({
       release_ci: { state: "red", failing_tests: [FLAKE] },
     });
+    expect(d?.question).toContain("is red on it too");
     // The release branch was read with its own --branch run list.
     expect(
       h.calls.some((c) => c[2] === "list" && c.includes("--branch") && c.includes("release/w1")),
     ).toBe(true);
+  });
+
+  it("flake question: the release branch is named only when it fails the same test", async () => {
+    h = pipelineHarness();
+    h.world.releaseRuns = fx("gh-run-list-release-red.json");
+    h.world.runLogs[812] = fx("gh-run-log-failed-flake.txt");
+    await redHead({ log: "job\tstep\tFAIL  test/a.test.ts > x > y\n" });
+    const d = ciFailed();
+    expect(facts(d).classification).toBe("flake");
+    expect(d?.question).not.toContain("is red on it too");
+  });
+
+  it("a bun id the release branch does not fail, release red elsewhere → own_change, fixup first", async () => {
+    h = pipelineHarness();
+    h.world.releaseRuns = fx("gh-run-list-release-red.json");
+    h.world.runLogs[812] = fx("gh-run-log-failed-flake.txt");
+    await redHead({ log: "job\tstep\t(fail) formula > renders the brew formula [2ms]\n" });
+    const d = ciFailed();
+    expect(facts(d).classification).toBe("own_change");
+    expect(d?.options?.[0]).toBe("fixup");
+    expect(events("remediation_requested")).toEqual([]);
   });
 
   it("flake answered `fix flake`: the request stands, the task stays parked with the reason, nothing re-verifies", async () => {

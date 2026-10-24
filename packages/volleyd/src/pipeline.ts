@@ -2722,8 +2722,9 @@ function flakeQuestion(
   const at = report.head.slice(0, 12);
   const test = r.flake?.test ?? "a test";
   const file = r.flake?.test_file ?? "its file";
-  const release =
-    r.evidence.release_ci.state === "red" ? `; ${v.release_branch} is red on it too` : "";
+  const sameTest =
+    r.flake !== undefined && r.evidence.release_ci.failing_tests.includes(r.flake.test);
+  const release = sameTest ? `; ${v.release_branch} is red on it too` : "";
   return `CI failed on ${at} (PR #${report.pr.number}): ${runUrls(data).join(" ")} — ${test} fails, and the PR does not touch ${file}${release}: a flake. volleyd never re-runs CI. fix flake: a dedicated fixer for the test (requested); fixup: a fixup agent at ${at} with the CI result as its directive; re-verify: you fixed it; or cancel?`;
 }
 
