@@ -3,13 +3,14 @@
 //  - phone: an emulated iPhone (390 × 844, DPR 3, touch) at 4× CPU throttling; frame times from
 //    requestAnimationFrame deltas for 3 s with the pointer still (the effect's idle cost), then
 //    during the 60-step pan of pan-perf.mjs (#295); p50 / p95 / max for both, and a crop of the
-//    first agent window
+//    first agent window and of each wave window on the canvas (its graph and rail, #367)
 //  - desktop: 1440 × 900, the same without throttling, and the crop
 //  - reduced motion (desktop): two screenshots of the current step 400 ms apart, byte-equal
 // Budget: phone idle p95 < 20 ms, phone pan p95 < 33 ms (the #295 bar). An effect over it on the
 // phone gets the coarse-pointer fallback in stepfx.css. Runs on the demo (`?demo=1`, no broker).
-// Writes <out>/step-fx-<tag>.json and <out>/step-fx-<tag>-<fx>-<phone|desktop>.png; effects named
-// after the tag measure only those.
+// Writes <out>/step-fx-<tag>.json, <out>/step-fx-<tag>-<fx>-<phone|desktop>.png and
+// <out>/step-fx-<tag>-<fx>-<phone|desktop>-wave-<n>.png; effects named after the tag measure only
+// those.
 //   node step-fx.mjs <out dir> [tag] [fx...]
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -88,11 +89,10 @@ const emptyPoint = (page) =>
   });
 
 /**
- * The first agent window (the one with a pipeline) at scale 1: the demo fits every window on
- * screen, so the world layer is moved to put that window top-left for the shot, then put back.
+ * A window at scale 1: the demo fits every window on screen, so the world layer is moved to put
+ * that window top-left for the shot, then put back.
  */
-async function agentCrop(page, file) {
-  const win = page.locator(".world section.win:has(.pipe)").first();
+async function crop(page, win, file) {
   const was = await win.evaluate((el) => {
     const world = el.closest(".world");
     const prev = world.style.transform;
@@ -123,7 +123,17 @@ async function measure(fx, where) {
     const cdp = await ctx.newCDPSession(page);
     await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
   }
-  const png = await agentCrop(page, join(out, `step-fx-${tag}-${fx}-${where}.png`));
+  const png = await crop(
+    page,
+    page.locator(".world section.win:has(.pipe)").first(),
+    join(out, `step-fx-${tag}-${fx}-${where}.png`),
+  );
+  const waves = [];
+  const n = await page.locator(".world section.win:has(.dag)").count();
+  for (let i = 0; i < n; i++) {
+    const win = page.locator(".world section.win:has(.dag)").nth(i);
+    waves.push(await crop(page, win, join(out, `step-fx-${tag}-${fx}-${where}-wave-${i}.png`)));
+  }
   const at = await emptyPoint(page);
   if (!at) throw new Error(`${fx} ${where}: no empty canvas to drag`);
   await page.mouse.move(at.x, at.y);
@@ -136,7 +146,7 @@ async function measure(fx, where) {
   await page.mouse.up();
   const pan = stats(await stopFrames(page));
   await ctx.close();
-  return { idle, pan, png };
+  return { idle, pan, png, waves };
 }
 
 /** Under reduced motion the current step is its first keyframe: two shots 400 ms apart match. */

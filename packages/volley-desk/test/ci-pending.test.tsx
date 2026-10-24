@@ -74,7 +74,8 @@ describe("CI pending", () => {
     expect(row).toHaveTextContent("implement ✓ · CI ⟳ · review");
     // The graph node no longer reads as a plain `implementing`.
     const node = win.querySelector('.dag-node[data-id="T1"]');
-    expect(node).toHaveTextContent("waiting for CI");
+    expect(node?.querySelector(".dag-stage")).toHaveTextContent(/^CI pending$/);
+    expect(node?.getAttribute("title")).toContain("waiting for CI");
   });
 
   it("no live agent and no stall tier: the retired implementer is not a no-signal item", () => {
@@ -139,7 +140,8 @@ describe("CI pending", () => {
       render(<WaveWindow wave={waveView(s)} me={null} now={NOW} frame={frame} />);
       const win = screen.getByRole("region", { name: "w1" });
       const node = win.querySelector('.dag-node[data-id="T1"]');
-      expect(node).toHaveTextContent("waiting for CI · 3/13");
+      expect(node?.querySelector(".dag-stage")).toHaveTextContent(/^CI · 3\/13$/);
+      expect(node?.getAttribute("title")).toContain("waiting for CI · 3/13 jobs");
       const row = within(win).getByRole("listitem", { name: "T1 CI pending" });
       expect(row).toHaveTextContent(JOBS);
       expect(row).not.toHaveTextContent("possibly stuck");
@@ -206,7 +208,7 @@ describe("CI pending", () => {
     it("the node and the task line say waiting for CI with the job count, never implementing", () => {
       const win = renderWith(held(HOLD), "done");
       expect(win.querySelector('.dag-node[data-id="T1"] .dag-stage')).toHaveTextContent(
-        /^waiting for CI · 21\/22$/,
+        /^CI · 21\/22$/,
       );
       const row = within(win).getByRole("listitem", { name: "T1 CI pending" });
       expect(row).toHaveTextContent("waiting for CI · 21/22 jobs");
@@ -218,7 +220,7 @@ describe("CI pending", () => {
     it("an unreadable CI poll still reads waiting for CI", () => {
       const win = renderWith(held("CI unreadable (no answer), retrying", false), "done");
       expect(win.querySelector('.dag-node[data-id="T1"] .dag-stage')).toHaveTextContent(
-        /^waiting for CI$/,
+        /^CI pending$/,
       );
     });
 

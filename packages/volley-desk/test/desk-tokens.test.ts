@@ -79,15 +79,15 @@ describe("the light tone (#368)", () => {
     }
   });
 
-  it("the graph's task ids are filled with --acc-ink from CSS, not a presentation attribute", () => {
-    expect(read("wave.css")).toMatch(/\.dag-id\s*\{[^}]*fill:\s*var\(--acc-ink\)/);
+  it("the graph's task ids are coloured with --acc-ink from CSS, not an inline style", () => {
+    expect(read("wave.css")).toMatch(/\.dag-id\s*\{[^}]*color:\s*var\(--acc-ink\)/);
   });
 
   it("on a light theme the graph's node outlines and edges are drawn from --mute", () => {
     const css = read("wave.css");
     expect(css).toMatch(/html\[data-tone="light"\] \.dag-edge\s*\{[^}]*stroke:[^;]*var\(--mute\)/);
     expect(css).toMatch(
-      /:where\(html\[data-tone="light"\]\) \.dag-node rect\s*\{[^}]*stroke:[^;]*var\(--mute\)/,
+      /:where\(html\[data-tone="light"\] \.dag-node\)\s*\{[^}]*border-color:[^;]*var\(--mute\)/,
     );
   });
 

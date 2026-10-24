@@ -194,9 +194,10 @@ describe("synthetic fixer tasks", () => {
       fixerFor: ["T3", "T7"],
     });
     const { container } = renderWave(w);
-    const node = container.querySelector('.dag-node[data-id="T3-fix1"]') as SVGGElement;
-    expect(node.querySelector("title")?.textContent).toBe("T3-fix1 · fixer for T3, T7");
+    const node = container.querySelector('.dag-node[data-id="T3-fix1"]') as HTMLElement;
+    expect(node.getAttribute("title")).toMatch(/^T3-fix1 · fixer for T3, T7 · \S/);
     expect(node.querySelector(".dag-fixer")?.textContent).toBe("🔧");
+    expect(node.querySelector(".dag-fixer")).toHaveAttribute("aria-hidden", "true");
     const list = screen.getByRole("list", { name: "Fixer tasks" });
     expect(within(list).getByText("fixer for T3, T7")).toBeInTheDocument();
     expect(list).toHaveTextContent("🔧 T3-fix1");

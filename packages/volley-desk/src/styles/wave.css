@@ -31,74 +31,128 @@
 .dag-scroll {
   overflow-x: auto;
 }
+/* The graph: HTML nodes over one SVG layer of edges, placed by layoutDag. */
 .dag {
+  position: relative;
+}
+.dag-edges {
+  position: absolute;
+  inset: 0;
   display: block;
+  overflow: visible;
 }
 .dag-edge {
   fill: none;
   stroke: rgba(214, 224, 255, 0.3);
   stroke-width: 1.5;
 }
-.dag-node rect {
-  fill: rgba(255, 255, 255, 0.04);
-  stroke: rgba(214, 224, 255, 0.18);
+/* A node: the id over its status, the issue (or a fixer's wrench) right of the status, a
+   merged node's ✓ (stepfx.css) to the left of both. The status column is all of the node's
+   112 px inside its insets, less the corner label (fitStatus in Dag.tsx). */
+.dag > .dag-node {
+  position: absolute;
+}
+.dag-node {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "chk id id"
+    "chk stage corner";
+  align-content: center;
+  padding: 0 9px;
+  border-radius: 12px;
+  line-height: 1.25;
+}
+/* The flat look: a decision, a cancelled task and an ended wave keep it; :where lets the depth
+   states (stepfx.css) win over it. */
+:where(.dag-node) {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(214, 224, 255, 0.18);
+}
+.dag-node.fx-done::before {
+  grid-area: chk;
+  align-self: center;
+  margin-right: 4px;
+}
+.dag-id,
+.dag-stage {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .dag-id {
+  grid-area: id;
   font: 600 13px var(--f-mono);
-  fill: var(--acc-ink);
+  color: var(--acc-ink);
 }
 .dag-stage {
+  grid-area: stage;
   font: 11.5px var(--f-ui);
-  fill: var(--mute);
+  color: var(--mute);
+}
+.dag-issue,
+.dag-fixer {
+  grid-area: corner;
+  padding-left: 4px;
+  white-space: nowrap;
 }
 .dag-issue {
   font: 11px var(--f-mono);
-  fill: var(--dim);
+  color: var(--dim);
+}
+.dag-issue a,
+a.dag-issue-link {
+  color: inherit;
+  text-decoration: none;
 }
 .dag-issue-link {
   cursor: pointer;
 }
-.dag-issue-link:hover text,
-.dag-issue-link:focus-visible text {
-  fill: var(--ink);
+.dag-issue-link:hover,
+.dag-issue-link:focus-visible {
+  color: var(--ink);
   text-decoration: underline;
 }
+/* Inside the node's box: a running node clips what it holds. */
 .dag-issue-link:focus-visible {
-  outline: none;
-}
-/* Safari draws no outline on SVG <text>: the accent stroke keeps keyboard focus visible there. */
-.dag-issue-link:focus-visible text {
   outline: 2px solid var(--acc, currentColor);
+  outline-offset: 0;
+  border-radius: 2px;
+}
+/* A running node's text is the effect's ink; its id stays the wave accent. This also
+   holds for a hovered or focused issue link (--ink would sit on the accent gradient):
+   its underline and outline are the cue there. */
+.dag-node.fx-cur > :is(.dag-stage, .dag-issue, .dag-fixer) {
+  color: inherit;
+}
+.dag-node.st-merged:not(.fx-done) {
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
+.dag-node.st-merge_ready:not(.fx-cur) {
+  background: color-mix(in srgb, var(--t-acc) 10%, transparent);
+  border-color: color-mix(in srgb, var(--t-acc) 55%, transparent);
+}
+/* Merge-ready and running: the accent ring outside the effect's own border. */
+.dag-node.st-merge_ready.fx-cur {
+  outline: 1px solid color-mix(in srgb, var(--t-acc) 55%, transparent);
   outline-offset: 2px;
-  stroke: var(--acc, currentColor);
-  stroke-width: 0.6px;
-  paint-order: stroke;
 }
-.dag-node.st-merged rect {
-  fill: color-mix(in srgb, var(--ok) 10%, transparent);
-  stroke: color-mix(in srgb, var(--ok) 45%, transparent);
+.dag-node.st-decision {
+  background: color-mix(in srgb, var(--amber) 10%, transparent);
+  border-color: color-mix(in srgb, var(--amber) 60%, transparent);
 }
-.dag-node.st-merge_ready rect {
-  fill: color-mix(in srgb, var(--t-acc) 10%, transparent);
-  stroke: color-mix(in srgb, var(--t-acc) 55%, transparent);
-}
-.dag-node.st-decision rect {
-  fill: color-mix(in srgb, var(--amber) 10%, transparent);
-  stroke: color-mix(in srgb, var(--amber) 60%, transparent);
-}
-.dag-node.st-queued rect {
-  stroke-dasharray: 4 4;
+.dag-node.st-queued {
+  border: 1px dashed var(--line);
 }
 .dag-node.st-cancelled {
   opacity: 0.45;
+  border-style: dashed;
 }
-.dag-node.st-cancelled rect {
-  stroke-dasharray: 2 4;
-}
-.dag-node.st-implement rect,
-.dag-node.st-review rect,
-.dag-node.st-fixup rect {
-  stroke: color-mix(in srgb, var(--acc) 60%, transparent);
+.dag-node:is(.st-implement, .st-review, .st-fixup):not(.fx-cur) {
+  border-color: color-mix(in srgb, var(--acc) 60%, transparent);
 }
 .yaml {
   margin: 0;
@@ -130,10 +184,12 @@
   gap: 4px;
   height: 8px;
 }
+/* A recessed track; done and running fills are glossy, a running one with the effect (stepfx.css). */
 .rail-seg {
   flex: 1;
   border-radius: 4px;
-  background: var(--hl);
+  background: var(--pit);
+  box-shadow: inset 0 1px 3px var(--shade);
   overflow: hidden;
 }
 .rail-seg > span {
@@ -306,13 +362,17 @@
 
 /* The overlap plan: cluster hulls and badges, dashed planner chains, the clusters panel and
    the churn chip. Nothing here animates, so reduced motion keeps every tint. */
-.dag .dag-node rect.dag-hull {
-  fill-opacity: 0.14;
-  stroke: none;
-  stroke-dasharray: none;
+.dag-hull {
+  position: absolute;
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--hue) 14%, transparent);
 }
 .dag-cluster {
+  position: absolute;
+  top: 5px;
+  right: 8px;
   font: 600 9.5px var(--f-mono);
+  color: var(--hue);
 }
 .dag-edge--chain {
   stroke-dasharray: 5 4;
@@ -466,30 +526,27 @@
 }
 /* A cluster's hue as text: darkened on a light theme, like --acc-ink. */
 html[data-tone="light"] .dag-cluster {
-  fill: color-mix(in oklab, var(--hue) 55%, black);
+  color: color-mix(in oklab, var(--hue) 55%, black);
 }
 html[data-tone="light"] .cluster-id[style] {
   color: color-mix(in oklab, var(--hue) 55%, black);
 }
-/* The light tone: a node is the window's white with its state's tint, not a see-through tint
-   over the cluster hull. */
-html[data-tone="light"] .dag-node rect:not(.dag-hull) {
-  fill: var(--win1);
-}
-/* Outlines a node state doesn't colour, drawn from --mute so they show on white (:where keeps
-   the specificity of the base rule, so the state strokes still win). */
-:where(html[data-tone="light"]) .dag-node rect {
-  stroke: color-mix(in srgb, var(--mute) 45%, transparent);
+/* The light tone: a flat node is the window's white with its state's tint, not a see-through
+   tint over the cluster hull, outlined from --mute so it shows on white (:where keeps the flat
+   look's zero specificity, so the state colours and the depth states still win). */
+:where(html[data-tone="light"] .dag-node) {
+  background: var(--win1);
+  border-color: color-mix(in srgb, var(--mute) 45%, transparent);
 }
 html[data-tone="light"] .dag-edge {
   stroke: color-mix(in srgb, var(--mute) 60%, transparent);
 }
-html[data-tone="light"] .dag-node.st-merged rect:not(.dag-hull) {
-  fill: color-mix(in srgb, var(--ok) 10%, var(--win1));
+html[data-tone="light"] .dag-node.st-merged:not(.fx-done) {
+  background: color-mix(in srgb, var(--ok) 10%, var(--win1));
 }
-html[data-tone="light"] .dag-node.st-merge_ready rect:not(.dag-hull) {
-  fill: color-mix(in srgb, var(--t-acc) 10%, var(--win1));
+html[data-tone="light"] .dag-node.st-merge_ready:not(.fx-cur) {
+  background: color-mix(in srgb, var(--t-acc) 10%, var(--win1));
 }
-html[data-tone="light"] .dag-node.st-decision rect:not(.dag-hull) {
-  fill: color-mix(in srgb, var(--amber) 10%, var(--win1));
+html[data-tone="light"] .dag-node.st-decision {
+  background: color-mix(in srgb, var(--amber) 10%, var(--win1));
 }
