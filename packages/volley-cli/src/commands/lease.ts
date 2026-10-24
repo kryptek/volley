@@ -265,7 +265,7 @@ function coordinatorAuth(
 /** The agent id from `<dir>/.volley/agent.json`, or undefined when there is no such file. */
 function identityAgentId(env: Record<string, string | undefined>, dir: string): string | undefined {
   if (!existsSync(join(dir, ".volley", "agent.json"))) return undefined;
-  return loadConfig(env, dir).agentId;
+  return loadConfig(env, dir, () => {}).agentId;
 }
 
 /**

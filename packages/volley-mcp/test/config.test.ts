@@ -281,14 +281,19 @@ describe("broker credentials (VOLLEY_AUTH_* and the identity file broker block)"
 });
 
 describe("VOLLEY_HEARTBEAT_S", () => {
-  it("is absent by default (the lifecycle's 300 s), read as seconds, and 0 is off", () => {
-    expect(loadConfig({}, "/x")).not.toHaveProperty("heartbeatS");
-    expect(loadConfig({ VOLLEY_HEARTBEAT_S: "60" }, "/x").heartbeatS).toBe(60);
-    expect(loadConfig({ VOLLEY_HEARTBEAT_S: "0" }, "/x").heartbeatS).toBe(0);
+  it("is retired: ignored, never an error, with one warning naming #483", () => {
+    const lines: string[] = [];
+    const config = loadConfig({ VOLLEY_HEARTBEAT_S: "60" }, "/x", (l) => lines.push(l));
+    expect(config).not.toHaveProperty("heartbeatS");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("VOLLEY_HEARTBEAT_S");
+    expect(lines[0]).toContain("#483");
+    expect(() => loadConfig({ VOLLEY_HEARTBEAT_S: "soon" }, "/x", () => {})).not.toThrow();
   });
-  it("rejects a value that is not a non-negative number", () => {
-    expect(() => loadConfig({ VOLLEY_HEARTBEAT_S: "soon" }, "/x")).toThrow(/VOLLEY_HEARTBEAT_S/);
-    expect(() => loadConfig({ VOLLEY_HEARTBEAT_S: "-5" }, "/x")).toThrow(/VOLLEY_HEARTBEAT_S/);
+  it("warns about nothing when it is unset", () => {
+    const lines: string[] = [];
+    loadConfig({}, "/x", (l) => lines.push(l));
+    expect(lines).toEqual([]);
   });
 });
 

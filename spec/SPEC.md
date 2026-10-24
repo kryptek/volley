@@ -206,7 +206,6 @@ Conforming agents MUST:
 Conforming agents SHOULD:
 
 - Publish `progress` events at meaningful checkpoints
-- While connected and registered, publish a non-retained `progress` `heartbeat` at a fixed interval (`payload.source` names the publisher; the reference MCP server sends `source: "volley-mcp"` every `VOLLEY_HEARTBEAT_S`, default 300 s), so an agent that is quiet on purpose (blocked waiting on events) still reads as alive. Observers count a heartbeat as a sighting of the agent, never as narration; the LWT (§7) still reports a crash
 - When the agent can estimate a percent-complete, include `payload.progress` as a number in `[0, 100]` on `progress` and/or `status` envelopes — dashboards and coordinators use it to render determinate progress bars instead of indeterminate sweeps. Implementations MUST treat the field as advisory (an estimate from the agent itself) and MUST tolerate `null`, missing, or non-numeric values by falling back to the last seen value or to an indeterminate display.
 - Publish a `result` retained message before terminal `status` so late-attaching tools can see the artifact pointer
 
@@ -1048,7 +1047,11 @@ Agents SHOULD use an MQTT keepalive of 60 seconds (the default). Longer keepaliv
 
 ### 7.4 Clean shutdown
 
-On clean shutdown, agents MUST publish a terminal `status` (`done`, `blocked`, or `failed`) before calling MQTT DISCONNECT. A clean DISCONNECT suppresses the LWT.
+On clean shutdown, agents MUST publish a terminal `status` (`done`, `blocked`, or `failed`) before calling MQTT DISCONNECT. A clean DISCONNECT suppresses the LWT. A `blocked` published as that terminal status MUST carry `payload.reason: "shutdown"`, so observers can tell it from a live agent awaiting guidance (§5.2, §7.5).
+
+### 7.5 Presence
+
+An agent's presence is its retained `status`. It is **online** while that status is `spawning`, `registered`, `working` or `blocked`: a connected client published it and the will has not fired. It is **offline** once the status is `reaped` (§7.2), `done` or `failed` (§7.4), a `blocked` whose `payload.reason` is `"shutdown"` (left by a clean shutdown, §7.4, which suppressed the will), or when no status exists. Observers MUST NOT require any periodic message to keep an agent online: a quiet connection is online, and the MQTT keepalive (§7.3) is the client library's, not a Volley message. A coordinator name's (§6.2) presence is that of the newest agent carrying it whose status is live. A broker stopped cleanly publishes its connected clients' wills before it exits and persists them (measured on mosquitto 2.1.2), so presence survives a broker restart; only a broker killed outright can leave a stale live status, which the name's next session corrects by binding.
 
 ---
 

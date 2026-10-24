@@ -51,7 +51,7 @@ export function readAgentIdentity(dir: string, env: Env): HookIdentity | null {
     );
   }
   try {
-    const config = loadConfig(env, dir);
+    const config = loadConfig(env, dir, () => {});
     return {
       mode: "agent",
       agentId: config.agentId,
