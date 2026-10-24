@@ -20,9 +20,10 @@
   inset: 0;
 }
 .signin-bg--plain {
-  background: radial-gradient(1200px 700px at 15% 0%, rgba(110, 231, 249, 0.1), transparent 60%),
-    radial-gradient(900px 600px at 90% 100%, rgba(139, 92, 246, 0.12), transparent 60%),
-    radial-gradient(700px 500px at 50% 60%, rgba(244, 114, 182, 0.05), transparent 70%), #05060c;
+  background: radial-gradient(1200px 700px at 15% 0%, var(--signin-glow1), transparent 60%),
+    radial-gradient(900px 600px at 90% 100%, var(--signin-glow2), transparent 60%),
+    radial-gradient(700px 500px at 50% 60%, rgba(244, 114, 182, 0.05), transparent 70%),
+    var(--signin-ground);
 }
 .signin-vignette {
   position: absolute;
@@ -51,20 +52,12 @@
   width: min(420px, 100%);
   padding: 28px 28px 24px;
   border-radius: 22px;
-  background: linear-gradient(
-    160deg,
-    rgba(34, 38, 58, 0.78),
-    rgba(14, 16, 28, 0.86) 55%,
-    rgba(10, 11, 20, 0.92)
-  );
+  background: linear-gradient(160deg, var(--card-a), var(--card-b) 55%, var(--card-c));
   backdrop-filter: blur(26px) saturate(1.4);
   -webkit-backdrop-filter: blur(26px) saturate(1.4);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -1px 0 rgba(0, 0, 0, 0.5),
-    inset 0 0 0 1px rgba(110, 231, 249, 0.04), 0 2px 4px rgba(0, 0, 0, 0.35),
-    0 12px 24px -6px rgba(0, 0, 0, 0.55), 0 40px 80px -20px rgba(0, 0, 0, 0.85),
-    0 0 120px -30px rgba(139, 92, 246, 0.45);
+  box-shadow: var(--win-edge-lit), inset 0 0 0 1px color-mix(in srgb, var(--t-acc) 4%, transparent),
+    var(--win-shadow), 0 0 120px -30px var(--card-glow);
   transform: rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) translateZ(0);
   transform-style: preserve-3d;
   transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -102,7 +95,7 @@
   font-family: var(--f-mono);
   font-size: 14px;
   font-weight: 400;
-  color: #6ee7f9;
+  color: var(--t-acc);
   letter-spacing: 0;
 }
 .signin-sub {
@@ -163,24 +156,25 @@
   border-radius: 12px;
   outline: none;
   border: 1px solid rgba(0, 0, 0, 0.55);
-  background: linear-gradient(180deg, rgba(4, 5, 10, 0.85), rgba(16, 18, 30, 0.85));
-  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), inset 0 -1px 0 rgba(255, 255, 255, 0.05), 0 1px 0
-    rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, var(--well-a), var(--well-b));
+  box-shadow: inset 0 2px 5px var(--shade), inset 0 -1px 0 rgba(255, 255, 255, 0.05), 0 1px 0
+    var(--hl);
   transition: box-shadow 0.18s ease, border-color 0.18s ease;
 }
 .f3d input::placeholder {
   color: rgba(163, 171, 192, 0.4);
 }
 .f3d input:focus {
-  border-color: rgba(110, 231, 249, 0.55);
-  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 3px
-    rgba(110, 231, 249, 0.18), 0 0 22px rgba(110, 231, 249, 0.22);
+  border-color: color-mix(in srgb, var(--t-acc) 55%, transparent);
+  box-shadow: inset 0 2px 5px var(--shade), 0 1px 0 var(--hl), 0 0 0 3px
+    color-mix(in srgb, var(--t-acc) 18%, transparent), 0 0 22px
+    color-mix(in srgb, var(--t-acc) 22%, transparent);
 }
 .signin-err {
   font-size: 12.5px;
-  color: #ffb4a1;
-  background: rgba(255, 90, 90, 0.1);
-  border: 1px solid rgba(255, 90, 90, 0.3);
+  color: var(--hot-ink);
+  background: color-mix(in srgb, var(--bad) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bad) 30%, transparent);
   border-radius: 10px;
   padding: 8px 10px;
 }
@@ -189,9 +183,9 @@
   margin-top: 6px;
   border-radius: 16px;
   padding: 1px;
-  background: linear-gradient(120deg, #6ee7f9, #7c6cf6 50%, #c264f0);
+  background: linear-gradient(120deg, var(--t-acc), #7c6cf6 50%, #c264f0);
   box-shadow: 0 10px 24px -8px rgba(0, 0, 0, 0.7), 0 0 44px -10px rgba(139, 92, 246, 0.75), 0 0 30px
-    -12px rgba(110, 231, 249, 0.6);
+    -12px color-mix(in srgb, var(--t-acc) 60%, transparent);
 }
 .spec-wrap > .spec-signin {
   width: 100%;

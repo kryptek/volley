@@ -1,0 +1,120 @@
+// The theme token layer (#365). On the demo (`?demo=1`, no broker), with the look
+// `{ bg: "none", narr: "plain", tethers: false, autoArrange: true, theme }` and reduced motion, at
+// desktop (1440 × 900) and phone (390 × 844, touch): screenshot the first agent window, the first
+// wave window, the Settings window on General and on Appearance, and (without `?demo`) the
+// sign-in card; record the computed `--ground`, `--t-acc` and `--ink` on <html>. Writes
+// <out>/theme-<theme>-<device>-<what>-<tag>.png and <out>/themes-<tag>.json (with each crop's
+// sha256). Run with theme `volley` before and after a change to the token layer: every crop but
+// Appearance (which gained the Theme group) is byte-equal. The sign-in card shows only when the
+// dev server has no credentials of its own (no `VITE_VOLLEY_*` sign-in): otherwise it is skipped.
+//   node themes.mjs <out dir> [tag] [theme...]
+import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { DESKTOP, DESK_URL, PHONE, launch, outDir } from "./lib.mjs";
+
+const out = outDir();
+const tag = process.argv[3] ?? "after";
+const themes = process.argv.length > 4 ? process.argv.slice(4) : ["volley"];
+const b = await launch();
+const report = {};
+
+const sha = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+
+async function open(theme, viewport, device, demo) {
+  const ctx = await b.newContext({
+    viewport,
+    deviceScaleFactor: 2,
+    hasTouch: device === "phone",
+    isMobile: device === "phone",
+    reducedMotion: "reduce",
+  });
+  await ctx.addInitScript(
+    (look) => {
+      localStorage.setItem("volley-desk-look", JSON.stringify(look));
+    },
+    { bg: "none", narr: "plain", tethers: false, autoArrange: true, theme },
+  );
+  const page = await ctx.newPage();
+  // A fixed clock: the demo's feed, timestamps and sprites are the same on every run.
+  await page.clock.install({ time: new Date("2026-10-24T12:00:00Z") });
+  const url = new URL(DESK_URL);
+  if (demo) url.searchParams.set("demo", "1");
+  await page.goto(url.href);
+  return { ctx, page };
+}
+
+const tokens = (page) =>
+  page.evaluate(() => {
+    const s = getComputedStyle(document.documentElement);
+    return Object.fromEntries(
+      ["--ground", "--t-acc", "--ink"].map((p) => [p, s.getPropertyValue(p).trim()]),
+    );
+  });
+
+for (const theme of themes) {
+  for (const [device, viewport] of [
+    ["desktop", DESKTOP],
+    ["phone", PHONE],
+  ]) {
+    const r = { shots: {} };
+    const shot = async (what, locator) => {
+      const path = join(out, `theme-${theme}-${device}-${what}-${tag}.png`);
+      await locator.screenshot({ path, animations: "disabled" });
+      r.shots[what] = sha(path);
+    };
+    const { ctx, page } = await open(theme, viewport, device, true);
+    await page.clock.runFor(1000);
+    await page.locator(".world section.win").first().waitFor({ timeout: 30000 });
+    await page.clock.runFor(2500); // the demo settles and auto-arrange places the windows
+    r.tokens = await tokens(page);
+    r.dataTheme = await page.evaluate(() => document.documentElement.dataset.theme ?? null);
+    const agent = page.locator(
+      ".world section.win:has(.win-bar .clawd-sprite, .win-bar .status-mark)",
+    );
+    await shot("agent", agent.first());
+    await shot(
+      "wave",
+      page
+        .locator(".world section.win:not(:has(.win-bar .clawd-sprite, .win-bar .status-mark))")
+        .first(),
+    );
+    await page.locator(".dock-wrap").getByRole("button", { name: "Settings", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+    await dialog.waitFor();
+    const section = (name) =>
+      dialog
+        .getByRole("navigation", { name: "Settings sections" })
+        .getByRole("button", { name, exact: true });
+    await section("General")
+      .click()
+      .catch(() => {});
+    await page.clock.runFor(400);
+    await shot("settings-general", dialog);
+    await section("Appearance").click();
+    await page.clock.runFor(400);
+    await shot("settings-appearance", dialog);
+    await ctx.close();
+
+    const signin = await open(theme, viewport, device, false);
+    const card = signin.page.locator(".signin-card");
+    await signin.page.clock.runFor(1000);
+    if (
+      await card.waitFor({ timeout: 8000 }).then(
+        () => true,
+        () => false,
+      )
+    ) {
+      await signin.page.clock.runFor(800);
+      await shot("signin", card);
+      r.signinTokens = await tokens(signin.page);
+    } else {
+      r.shots.signin = "skipped: the dev server signed in on its own";
+    }
+    await signin.ctx.close();
+    report[`${theme}-${device}`] = r;
+  }
+}
+await b.close();
+writeFileSync(join(out, `themes-${tag}.json`), `${JSON.stringify(report, null, 2)}\n`);
+console.log(JSON.stringify(report, null, 2));

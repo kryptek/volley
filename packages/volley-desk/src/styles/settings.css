@@ -4,7 +4,7 @@
   position: fixed;
   inset: 0;
   z-index: 20;
-  background: rgba(3, 4, 8, 0.55);
+  background: var(--scrim);
   backdrop-filter: blur(4px);
   display: grid;
   place-items: center;
@@ -17,13 +17,8 @@
   flex-direction: column;
   position: relative;
   /* Built like a Desk window (D10): desk.css `.win-depth` lifts it and paints --win-body. */
-  background-color: rgba(12, 14, 23, 0.96);
-  --win-body: linear-gradient(
-    160deg,
-    rgba(34, 38, 58, 0.5),
-    rgba(14, 16, 28, 0) 55%,
-    rgba(0, 0, 0, 0.3)
-  );
+  background-color: var(--modal-fill);
+  --win-body: linear-gradient(160deg, var(--glass-a), rgba(14, 16, 28, 0) 55%, rgba(0, 0, 0, 0.3));
   border: 1px solid var(--line);
   border-radius: 16px;
 }
@@ -147,8 +142,8 @@
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.12);
   /* Built like a Desk window (D10): desk.css `.win-depth` lifts it and paints --win-body. */
-  background-color: #1e1f24;
-  --win-body: linear-gradient(160deg, #262833, #1b1c22 55%, #141519);
+  background-color: var(--sheet-fill);
+  --win-body: linear-gradient(160deg, var(--sheet-a), var(--sheet-b) 55%, var(--sheet-c));
   outline: none;
 }
 .mac-settings fieldset {
@@ -161,8 +156,8 @@
 }
 .gooey-seg.gooey-nav--framed {
   border-radius: 14px;
-  background: linear-gradient(180deg, rgba(4, 5, 10, 0.85), rgba(16, 18, 30, 0.85));
-  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.75), 0 1px 0 rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, var(--well-a), var(--well-b));
+  box-shadow: inset 0 2px 5px var(--shade), 0 1px 0 var(--hl);
   --gn-muted: var(--mute);
   --gn-ink: var(--ink);
 }
@@ -175,7 +170,7 @@
   );
 }
 .ms-side {
-  background: rgba(38, 39, 46, 0.92);
+  background: var(--sheet-side);
   backdrop-filter: blur(30px);
   -webkit-backdrop-filter: blur(30px);
   border-right: 1px solid rgba(0, 0, 0, 0.35);
@@ -236,7 +231,7 @@
   border-radius: 50%;
   display: grid;
   place-items: center;
-  background: linear-gradient(135deg, #6ee7f9, #8b5cf6);
+  background: linear-gradient(135deg, var(--t-acc), #8b5cf6);
   color: #0b0d16;
   font-weight: 700;
   font-size: 13px;
@@ -655,7 +650,7 @@
   padding: 12px;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.045);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--hl);
   text-align: left;
   min-width: 0;
   container-type: inline-size;
@@ -946,7 +941,7 @@
   border: 0;
   padding: 0;
   background: none;
-  color: #6ee7f9;
+  color: var(--t-acc);
   font: inherit;
   cursor: pointer;
   text-decoration: underline;

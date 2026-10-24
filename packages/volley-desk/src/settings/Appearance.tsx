@@ -1,5 +1,6 @@
 /**
- * Settings › Appearance (formerly the dock's Appearance aside): a search field
+ * Settings › Appearance (formerly the dock's Appearance aside): the theme
+ * (`look/themes.ts`, a card per palette with its swatches), a search field
  * over every background (the current one always stays listed), the dim
  * slider, the window style, the Needs-you effect, the tethers and the agent
  * icons (Clawd characters or the classic spinner). Every
@@ -12,10 +13,20 @@
 import { useState } from "react";
 import { BG_NO_WEBGL_NOTE, SURFACE_LITE_NOTE, needsWebGL } from "../look/Background";
 import { BACKGROUNDS, REACT_BITS_BACKGROUNDS } from "../look/backgrounds";
-import { ATTN_LABEL, CHROME_LABEL, ICON_LABEL } from "../look/options";
+import { ATTN_LABEL, CHROME_LABEL, ICON_LABEL, THEME_LABEL } from "../look/options";
+import { LIGHT_THEME_IDS, type ThemeTokens, themeById } from "../look/themes";
 import { DIM_MAX, type Look } from "../look/useLook";
 import { Group, Row, Seg, Toggle, clearOnEscape } from "./primitives";
 import "../styles/look.css";
+
+/** The five colours a theme card shows. */
+const SWATCHES = [
+  "bg",
+  "win1",
+  "acc",
+  "ok",
+  "link",
+] as const satisfies readonly (keyof ThemeTokens)[];
 
 export function Appearance({
   look,
@@ -44,6 +55,34 @@ export function Appearance({
   const current = BACKGROUNDS.find((b) => b.key === look.bg);
   return (
     <>
+      <Group title="Theme">
+        <div className="s-pad">
+          <fieldset className="theme-grid" aria-label="Theme">
+            {THEME_LABEL.map(([id, name]) => {
+              const { v } = themeById(id);
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  className={`theme-opt${look.theme === id ? " on" : ""}`}
+                  aria-pressed={look.theme === id}
+                  onClick={() => setLook({ theme: id })}
+                >
+                  <span className="theme-swatch" aria-hidden="true">
+                    {SWATCHES.map((k) => (
+                      <i key={k} style={{ background: v[k] }} />
+                    ))}
+                  </span>
+                  <span className="theme-name">
+                    {name}
+                    {LIGHT_THEME_IDS.includes(id) && <span className="theme-tone"> · light</span>}
+                  </span>
+                </button>
+              );
+            })}
+          </fieldset>
+        </div>
+      </Group>
       <Group
         title="Background"
         foot={`${REACT_BITS_BACKGROUNDS.length} backgrounds from React Bits. Each loads only when you pick it.`}

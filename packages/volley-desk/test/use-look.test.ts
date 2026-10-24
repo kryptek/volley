@@ -17,6 +17,7 @@ describe("useLook", () => {
       attn: "pulse",
       narr: "decrypt",
       tethers: true,
+      theme: "volley",
       icons: "clawd",
       autoArrange: true,
       showFinished: false,
@@ -36,7 +37,7 @@ describe("useLook", () => {
     act(() => result.current[1]({ chrome: "spotlight", attn: "electric", narr: "shiny" }));
     act(() => result.current[1]({ tethers: false, autoArrange: false }));
     act(() => result.current[1]({ showFinished: true, finishedGraceMin: 30 }));
-    act(() => result.current[1]({ icons: "classic" }));
+    act(() => result.current[1]({ icons: "classic", theme: "dracula" }));
     const want = {
       bg: "Silk",
       dim: 0.45,
@@ -44,6 +45,7 @@ describe("useLook", () => {
       attn: "electric",
       narr: "shiny",
       tethers: false,
+      theme: "dracula",
       icons: "classic",
       autoArrange: false,
       showFinished: true,
@@ -54,6 +56,13 @@ describe("useLook", () => {
     unmount();
     const again = renderHook(() => useLook());
     expect(again.result.current[0]).toEqual(want);
+  });
+
+  it("loads a stored theme and falls back to Volley for an unknown one", () => {
+    localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ theme: "dracula" }));
+    expect(loadLook().theme).toBe("dracula");
+    localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ theme: "neon" }));
+    expect(loadLook().theme).toBe("volley");
   });
 
   it("keeps a partial entry (D6 writes autoArrange alone) and fills the rest from LOOK0", () => {
@@ -74,6 +83,7 @@ describe("useLook", () => {
         narr: "loud",
         tethers: "yes",
         icons: "ring",
+        theme: "neon",
         autoArrange: null,
         showFinished: 1,
         finishedGraceMin: -5,

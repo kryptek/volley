@@ -20,6 +20,7 @@ import type { ConfigPayload, Envelope, FeedEntry, WaveView } from "../src/store/
 import { Feed } from "../src/windows/agent/Feed";
 import { Terminal } from "../src/windows/agent/Terminal";
 import { WaveYaml } from "../src/windows/wave/WaveYaml";
+import { resolveTokens } from "./helpers/tokens";
 
 const NOW = Date.parse("2026-10-18T12:00:00Z");
 const noop = () => {};
@@ -145,7 +146,8 @@ describe("recessed text boxes", () => {
   it("the recipe: inset shadow, dark gradient fill, lit bottom edge, keyboard focus ring", () => {
     const at = css.indexOf(".recessed {");
     expect(at).toBeGreaterThanOrEqual(0);
-    const rule = css.slice(at, css.indexOf("}", at));
+    // The colours are tokens (desk.css :root): read them as the Volley theme draws them.
+    const rule = resolveTokens(css.slice(at, css.indexOf("}", at)));
     expect(rule).toMatch(/inset 0 2px 5px rgba\(0, 0, 0, 0\.75\)/);
     expect(rule).toMatch(/linear-gradient\(180deg, rgba\(4, 5, 10/);
     expect(rule).toMatch(/0 1px 0 rgba\(255, 255, 255, 0\.08\)/);
