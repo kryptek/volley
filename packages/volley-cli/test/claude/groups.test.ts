@@ -195,6 +195,16 @@ describe("groupAccounts › the heading's label (#496)", () => {
     expect(out.flatMap((g) => g.members.map((m) => m.account))).not.toContain("p@peer-a");
     expect(pendingProfiles(r, [work, peer]).map((a) => a.id)).toEqual(["p"]);
   });
+
+  it("pending is the Desk's rule: no signed_in_at and no record, whatever signin.state says", () => {
+    const r = result({
+      accounts: [
+        ...result().accounts,
+        { id: "q", label: "Q", machine: "peer-a", signin: { state: "signed_in" } },
+      ],
+    });
+    expect(pendingProfiles(r, [work, peer]).map((a) => a.id)).toEqual(["q"]);
+  });
 });
 
 describe("groupAccounts › the machines missing an account", () => {

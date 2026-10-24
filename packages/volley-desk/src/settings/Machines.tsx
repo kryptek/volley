@@ -24,8 +24,9 @@
  *
  * Each card lists the Claude accounts (`machineRows` over the groups App
  * computes), each with its sign-in state there and no usage figures (the
- * account's card in Settings › Claude accounts has them once): **Sign in on <machine>** opens Settings › Claude accounts' sign-in
- * for that account there (`SignInOnDialog`). The block shows the registry's view only: a
+ * account's card in Settings › Claude accounts has them once): **Sign in on
+ * <machine>** opens Settings › Claude accounts' sign-in for that account there
+ * (`SignInOnDialog`). The block shows the registry's view only: a
  * sign-in started here fills its row once the registry is re-fetched, and one that finished
  * on another e-mail is said on the dialog's Done step, not on the card (Settings › Claude
  * accounts tracks both on its own cards).

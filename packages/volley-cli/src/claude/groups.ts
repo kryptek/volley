@@ -155,10 +155,7 @@ const profileKey = (a: Pick<Profile, "id" | "machine">) =>
  */
 export function pendingProfiles(r: ListResult, records: UsageRecord[]): Profile[] {
   const used = new Set(records.map((x) => x.account));
-  return r.accounts.filter(
-    (a) =>
-      a.signed_in_at === undefined && a.signin.state !== "signed_in" && !used.has(profileKey(a)),
-  );
+  return r.accounts.filter((a) => a.signed_in_at === undefined && !used.has(profileKey(a)));
 }
 
 /** Every login volleyd knows of: registry rows, this machine's primary, paired machines' primaries. */
