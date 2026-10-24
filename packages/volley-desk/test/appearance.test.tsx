@@ -339,7 +339,8 @@ describe("App look (demo mode)", () => {
     const badge = (name: string) =>
       Number(dock().getByRole("button", { name }).textContent?.match(/\d+/)?.[0] ?? 0);
     expect(badge("Wave coordinators")).toBeGreaterThan(0);
-    expect(badge("Wave coordinators") + badge("Needs you")).toBe(n);
+    // Less the releasing wave's decision item: its wave (owner gone) already counts for it.
+    expect(badge("Wave coordinators") + badge("Needs you") - 1).toBe(n);
     // Narration uses the default effect (decrypt).
     expect(container.querySelector(".world .narr")).toHaveAttribute("data-fx", "decrypt");
   });

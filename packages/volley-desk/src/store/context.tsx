@@ -113,7 +113,7 @@ const SETTLE_MS = 3000;
 const REPLAY_QUIET_MS = 80;
 /** The longest a connect's replay is held back from the store (a broker that never goes quiet). */
 const REPLAY_HOLD_MAX_MS = 1500;
-/** Offline spans kept (older ones are long past any `claim_after_s`). */
+/** Offline spans kept: they exclude the agents' quiet windows from silence, so only recent ones matter. */
 const OFFLINE_KEEP = 50;
 /**
  * The reconnect / resume grace window. A fixed span, not a tunable: the hooks

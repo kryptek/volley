@@ -34,7 +34,6 @@ const config: ConfigPayload = {
     ci_queue_max: 10,
     hysteresis_samples: 3,
   },
-  claim_after_s: 1800,
   heartbeat_alarm_s: 600,
   fallback_model: "claude-sonnet-5-5",
   mailbox: { session_expiry_s: 604800 },
@@ -312,7 +311,7 @@ describe("Settings › Supervisor (global config rows)", () => {
     retain({ ...config, version: 9, spawn_budget_multiplier: 4, hard_ceiling: 13 });
     await f.ack(ids(f)[0] as string, applied(9));
     expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "13");
-    retain({ ...config, version: 10, claim_after_s: 900, hard_ceiling: 15 });
+    retain({ ...config, version: 10, heartbeat_alarm_s: 900, hard_ceiling: 15 });
     expect(slider("Hard ceiling")).toHaveAttribute("aria-valuenow", "15");
   });
 

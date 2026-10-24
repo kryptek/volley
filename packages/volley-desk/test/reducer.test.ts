@@ -343,7 +343,8 @@ describe("reducer — coordinator attention", () => {
       waiting,
       msg("volley/default/coordinator-ab12/status", { ...done, agent_id: "coordinator-ab12" }),
     );
-    expect(ended.coordinators["coord-main"]?.state).toBe("gone");
+    // The supervisor's view decides once the bound agent ended; it is still `working` here.
+    expect(ended.coordinators["coord-main"]?.state).toBe("working");
   });
 
   it("a heartbeat keeps an agent seen without counting as a progress report", () => {
@@ -352,12 +353,36 @@ describe("reducer — coordinator attention", () => {
     expect(s.agents["worker-ab12"]?.reportedAt).toBeUndefined();
   });
 
-  it("marks the coordinator gone after a terminal status", () => {
+  it("follows the supervisor's `away` / `gone` / `reconnecting`", () => {
+    for (const state of ["away", "gone", "reconnecting"] as const) {
+      const next = example("wave-state-running");
+      const payload = next.payload as Record<string, unknown>;
+      payload.coordinator = {
+        agent_id: "coordinator-ab12",
+        presence: "offline",
+        state,
+        last_seen: "2026-10-18T12:00:00.000Z",
+      };
+      // A live attention signal from the owner does not override the supervisor's presence.
+      const s = apply(
+        msg("volley/default/coordinator-ab12/progress", example("progress-awaiting-input")),
+        msg("volley/_waves/w1/state", next),
+      );
+      expect(s.coordinators["coordinator-ab12"]?.state).toBe(state);
+    }
+  });
+
+  it("infers `gone` from a terminal status only when the wave state has no `coordinator`", () => {
     const done = example("status-done");
-    const s = apply(
-      WAVE,
-      msg("volley/default/coordinator-ab12/status", { ...done, agent_id: "coordinator-ab12" }),
-    );
+    const status = msg("volley/default/coordinator-ab12/status", {
+      ...done,
+      agent_id: "coordinator-ab12",
+    });
+    // The supervisor's `working` stands until it republishes (it says `away` or `gone` then).
+    expect(apply(WAVE, status).coordinators["coordinator-ab12"]?.state).toBe("working");
+    const running = example("wave-state-running");
+    const { coordinator: _, ...payload } = running.payload as Record<string, unknown>;
+    const s = apply(msg("volley/_waves/w1/state", { ...running, payload }), status);
     expect(s.coordinators["coordinator-ab12"]?.state).toBe("gone");
   });
 });

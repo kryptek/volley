@@ -2,17 +2,20 @@
  * The Desk's attention model (pure). Every wave and agent window gets a tier:
  *
  * - **you** — the wave's coordinator is `awaiting_input` (on a person: not idle
- *   with a background wait armed, see below) or `gone` (reaped,
- *   or silent for longer than `claim_after_s`, the same rule `volleyd claim`
- *   uses); an open decision on a wave this browser owns; a stuck agent
+ *   with a background wait armed, see below) or `gone` (volleyd's call: its
+ *   owner is offline and something only the owner can answer waits, the same
+ *   rule `volleyd claim` uses; or, from a supervisor that publishes no
+ *   `coordinator`, the owner's terminal status); an open decision on a wave this browser owns; a stuck agent
  *   (`blocked`, or awaiting input) with no live coordinator. A wave the Desk
  *   claimed (owner = the Desk's `identity`) has no coordinator session: the
  *   person here coordinates it, so its decisions, gates and stuck agents are
  *   theirs.
  * - **coordinator** — an open decision or a merge-ready gate on a wave with a
- *   live coordinator, or a stuck agent with one. Items left unresolved for
+ *   live or `away` coordinator, or a stuck agent with one. Items left unresolved for
  *   `escalate_after_min` are promoted to **you**.
- * - **info** — notable but nobody's job yet: an open PR, a lease wait, an
+ * - **info** — notable but nobody's job yet: an owner `away` (offline, nothing
+ *   waits on it only: `Owner away · autopilot runs this wave`, when no item is open), a coordinator
+ *   `reconnecting`, an open PR, a lease wait, an
  *   agent with no signal (below). A no-signal implementer in stage
  *   `implement` under a live coordinator is that coordinator's: **coordinator**.
  * - **none** — nothing to see.
@@ -45,9 +48,8 @@
  * back to the foreground (`AttentionCtx.syncing`), nothing is judged quiet or
  * without signal: the retained replay alone says nothing about liveness.
  *
- * `claim_after_s` comes from the wave's `effective_config`, else the retained
- * global config, else volleyd's default. `escalate_after_min` is read the same
- * way, but it is not yet a SPEC §4.6.4 tunable (nor in `config.schema.json` or
+ * `escalate_after_min` comes from the wave's `effective_config`, else the
+ * retained global config, else the default below; it is not yet a SPEC §4.6.4 tunable (nor in `config.schema.json` or
  * volleyd's defaults), so in practice it is the fixed 15 min below until it is
  * added there.
  *
@@ -57,11 +59,19 @@
  * pulsing, owner-only or not; volleyd releases it when the blocker lands, and
  * from then it is timed like any other item.
  *
- * Silence (staleness) is measured only over time this browser was connected
- * and settled: while the Desk is offline nothing can refresh `lastSeen`, so
- * offline spans (`AttentionCtx.offline`) do not count towards `claim_after_s`.
+ * **No silence timer for owners**: `reconnecting`, `away` and `gone` come from
+ * the wave's own `coordinator.state` (volleyd reads the owner's presence from
+ * its will); a quiet connected coordinator stays `working` however long.
+ * Agents' silence (quiet, stale progress) is measured only over time this
+ * browser was connected and settled (`AttentionCtx.offline`).
  */
-import { UNASSIGNED, isEndedWave, isSession, waitsOnPerson } from "./store/reducer";
+import {
+  PRESENCE_STATES,
+  UNASSIGNED,
+  isEndedWave,
+  isSession,
+  waitsOnPerson,
+} from "./store/reducer";
 import type {
   AgentView,
   ConfigPayload,
@@ -82,8 +92,6 @@ import { purposeOf } from "./windows/agent/purpose";
 
 export type Tier = "you" | "coordinator" | "info" | "none";
 
-/** volleyd's default `claim_after_s` (30 min). */
-export const DEFAULT_CLAIM_AFTER_S = 1800;
 /** The prototype's default `escalate_after_min`. */
 export const DEFAULT_ESCALATE_AFTER_MIN = 15;
 /** Silence after which a live agent is quiet (`quiet_after_s`, formerly `no_signal_after_s`). */
@@ -173,7 +181,6 @@ function tunables(w: WaveView | undefined, ctx: AttentionCtx) {
   const local: Tunables = w?.state?.effective_config ?? {};
   const global: Partial<Tunables> = ctx.config ?? {};
   return {
-    claimMs: (num(local.claim_after_s, global.claim_after_s) ?? DEFAULT_CLAIM_AFTER_S) * 1000,
     escalateMs:
       (num(local.escalate_after_min, global.escalate_after_min) ?? DEFAULT_ESCALATE_AFTER_MIN) *
       60_000,
@@ -194,29 +201,42 @@ const claimedHere = (w: WaveView | undefined, ctx: AttentionCtx): boolean =>
   !!ctx.identity && w?.state?.owner === ctx.identity;
 
 /**
- * The wave's coordinator: the store's view (owner topics, else the
- * supervisor's), with a `working` coordinator silent for longer than
- * `claim_after_s` counted as `gone`. Silence is measured from the newest of
- * the bound agent's `lastSeen`/`heartbeat` and volleyd's `last_seen` (which it
- * refreshes while it hears the coordinator), so a supervisor that still hears
- * it outvotes this page's own timer. An `awaiting_input` coordinator stays
- * waiting: it is quiet because it is waiting for the owner; one waiting on
- * the wave's events (a live background wait, or the generic idle prompt with
- * nothing pending for the owner) stays `working` for the same reason.
+ * The wave's coordinator. `reconnecting`, `away` and `gone` are the wave's own
+ * `coordinator.state` (volleyd's call, from the owner's presence), never
+ * silence: the Desk keeps no timer. When the wave state carries a
+ * `coordinator`, a presence state in the owner-level view (which another wave
+ * of the same owner may have set) is ignored; a wave state without one (an
+ * older supervisor) has only the owner view to go on, so it reads whatever
+ * that view says. Otherwise the live attention comes
+ * from the store's view (the owner's topics, else the supervisor's). One
+ * waiting on the wave's events (a live background wait, or the generic idle
+ * prompt with nothing pending for the owner) is `working`.
  */
 export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordinator {
   const s = w.state;
   const id = s?.owner ?? s?.coordinator?.agent_id ?? null;
   if (!id) return { id: null, state: "gone" };
   if (claimedHere(w, ctx)) return { id, state: "working" };
-  // The supervisor times the grace and flips it to gone; the Desk never does (SPEC §4.6.1).
-  if (s?.coordinator?.state === "reconnecting") {
-    const since = parseTime(s.coordinator.last_seen);
-    return { id, state: "reconnecting", ...(since !== undefined ? { since } : {}) };
-  }
-  const view = ctx.coordinators?.[id];
   // volleyd's view of this owner (through its binding when the owner is a coordinator name).
   const sup = s?.coordinator;
+  // The supervisor times the grace and decides away / gone; the Desk never does (SPEC §4.6.1).
+  if (sup && PRESENCE_STATES.has(sup.state)) {
+    const at = parseTime(sup.last_seen);
+    const when =
+      at === undefined ? {} : sup.state === "reconnecting" ? { since: at } : { lastSeen: at };
+    return {
+      id,
+      state: sup.state,
+      ...(sup.session_url ? { sessionUrl: sup.session_url } : {}),
+      ...(sup.workspace ? { workspace: sup.workspace } : {}),
+      ...when,
+    };
+  }
+  const owned = ctx.coordinators?.[id];
+  // With a `coordinator` here, a presence state in the owner view came from another wave (or a
+  // terminal status, which only counts while this wave's state carries no `coordinator`). Without
+  // one, the owner view is all there is, whichever wave set it.
+  const view = owned && sup && PRESENCE_STATES.has(owned.state) ? undefined : owned;
   // The bound agent first (a coordinator name has no agent of its own), then the owner id.
   const a = (sup !== undefined ? ctx.agents?.[sup.agent_id] : undefined) ?? ctx.agents?.[id];
   const seen = [a?.lastSeen, a?.heartbeat ?? undefined, Date.parse(sup?.last_seen ?? "")].filter(
@@ -237,15 +257,6 @@ export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordin
     (s?.gates.length ?? 0) === 0;
   if (idleOnly) state = "working";
   const waitingOnEvents = state === "working" && (idleOnly || view?.waitingOnEvents === true);
-  // Waiting on events is quiet on purpose too: only a terminal status (the LWT) ends it.
-  if (
-    state === "working" &&
-    !waitingOnEvents &&
-    lastSeen !== undefined &&
-    connectedSilence(lastSeen, ctx.now, ctx.offline) > tunables(w, ctx).claimMs
-  ) {
-    state = "gone";
-  }
   const sessionUrl = view?.sessionUrl ?? sup?.session_url;
   const workspace = view?.workspace ?? sup?.workspace;
   return {
@@ -258,6 +269,11 @@ export function coordinatorFor(w: WaveView, ctx: AttentionCtx): EffectiveCoordin
     ...(lastSeen !== undefined ? { lastSeen } : {}),
     ...(waitingOnEvents ? { waitingOnEvents: true } : {}),
   };
+}
+
+/** `Owner away · autopilot runs this wave` (`Owner away` while the wave's autopilot is off). */
+export function awayReason(w: WaveView): string {
+  return w.state?.autopilot?.enabled ? "Owner away · autopilot runs this wave" : "Owner away";
 }
 
 /** `Coordinator reconnecting · 3m` (just the label while the time it went away is unknown). */
@@ -384,6 +400,9 @@ export function waveAttention(w: WaveView, ctx: AttentionCtx): Attn {
     if (stale) return { tier: "info", reason: `${a.task ?? a.id}: ${stale.label}` };
   }
   if (c.waitingOnEvents) return { tier: "info", reason: IDLE_WAIT_REASON };
+  // Neutral: nothing in the wave waits on the owner only (else volleyd would say gone); its
+  // decisions and gates above are handled and escalate as under a live coordinator.
+  if (c.state === "away") return { tier: "info", reason: awayReason(w) };
   return infoFor(s.tasks, agentIds, ctx);
 }
 
