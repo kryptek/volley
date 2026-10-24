@@ -525,6 +525,57 @@ describe("usage probe readings in machine records (daemon)", () => {
     );
   }, 20_000);
 
+  it("claude_prime: the login's identity, then the own machine's one-login probe, folded into its record (#498)", async () => {
+    const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+    const probed: string[] = [];
+    const fx = fakeExec().on(["claude", "auth", "status"], {
+      stdout: JSON.stringify({
+        loggedIn: true,
+        email: "spare@example.com",
+        orgName: "Example Org",
+        subscriptionType: "team",
+      }),
+    });
+    s = await makeSupervisedEnv({
+      waveExtra: "account: primary",
+      daemon: {
+        claude: { root, primaryDir: primary, exec: fx.exec },
+        clock: fakeClock(T0),
+        fleet: {
+          version: "0.5.0",
+          localProbe: async (profile) => {
+            probed.push(profile);
+            return [login(profile, 61)];
+          },
+          localPath: () => ({ claude: true, bun: true }),
+        },
+      },
+    });
+    const client = await ControlClient.connect(s.env.broker.url, NS);
+    try {
+      const r = await client.request("claude_prime", { acct: "spare", by: "owner-1" });
+      expect(r).toMatchObject({
+        ok: true,
+        result: { acct: "spare", machine: "local", plan: "team" },
+      });
+      expect(probed).toEqual(["spare"]);
+      expect(await recordWhen("spare", (x) => x.probe !== undefined)).toMatchObject({
+        account: "spare",
+        plan: "team",
+        email: "spare@example.com",
+        model_weekly: { fable: { pct: 61 } },
+        probe: { state: "ok", read_at: READ },
+      });
+      const again = await client.request("claude_prime", { acct: "spare", by: "owner-1" });
+      expect(again).toMatchObject({ ok: false, error: "primed just now; next in 5 min" });
+      // the e-mail never reaches the journal (a prime journals nothing of its own)
+      const sys = join(s.env.home, "waves", "_system", "journal.jsonl");
+      if (existsSync(sys)) expect(readFileSync(sys, "utf-8")).not.toContain("spare@example.com");
+    } finally {
+      await client.close();
+    }
+  }, 20_000);
+
   it("a Fable agent's trigger reads the probe's model_weekly.fable: an agent_account_limit on that window", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
     restoreEnv = stubEnv({ VOLLEY_CLAUDE_DIR: root });

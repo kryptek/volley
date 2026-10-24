@@ -983,18 +983,6 @@ export function systemPressure(exec: ExecFn, now: () => number): PressureSource 
  * the fence. The supervisor is no peer (it has no `peer.json`), so the running wave's repo is the
  * clone it checks; with none, the report's `repo.*` checks only say that no repo was given.
  */
-/** `volley peer doctor --json --probe-login <profile>` here, through the fence: a prime's probe. */
-export function realLocalProbe(
-  exec: ExecFn = realExec,
-): (profile: string) => Promise<ProbeLogin[] | null> {
-  return async (profile) => {
-    const r = await exec(["volley", "peer", "doctor", "--json", "--probe-login", profile], {
-      timeoutMs: DAEMON_DEFAULTS.local_doctor_timeout_ms,
-    }).catch(() => null);
-    return r === null ? null : parseProbeReport(r.stdout);
-  };
-}
-
 export function realLocalDoctor(
   exec: ExecFn = realExec,
 ): (repo: string | null, signal: AbortSignal) => Promise<DoctorReport | null> {
@@ -1008,6 +996,18 @@ export function realLocalDoctor(
     }).catch(() => null);
     // A failing block check exits 1 with the report on stdout.
     return r === null ? null : parseDoctorReport(r.stdout);
+  };
+}
+
+/** `volley peer doctor --json --probe-login <profile>` here, through the fence: a prime's probe. */
+export function realLocalProbe(
+  exec: ExecFn = realExec,
+): (profile: string) => Promise<ProbeLogin[] | null> {
+  return async (profile) => {
+    const r = await exec(["volley", "peer", "doctor", "--json", "--probe-login", profile], {
+      timeoutMs: DAEMON_DEFAULTS.local_doctor_timeout_ms,
+    }).catch(() => null);
+    return r === null ? null : parseProbeReport(r.stdout);
   };
 }
 
