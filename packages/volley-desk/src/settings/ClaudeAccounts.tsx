@@ -333,8 +333,8 @@ function MaskedEmail({ email }: { email: string }) {
 
 /**
  * The login's e-mail, masked until its eye button shows it (per card, never persisted). Not known
- * yet: `reading…` while the Desk can ask volleyd for it (with the last reading's age), else
- * `no reading yet`.
+ * yet: `reading…` while the Desk is asking volleyd for it (with the last reading's age), else
+ * `no reading yet` (no control, or the last ask answered without one).
  */
 function EmailRow({
   email,
@@ -522,7 +522,7 @@ function AccountCard({
   onRename: ((label: string) => Promise<string | null>) | null;
   /** Remove… (opens the sheet); `null` as for `onRename`. */
   onRemove: (() => void) | null;
-  /** The Desk can ask volleyd to read the login (`claude_prime`). */
+  /** The Desk is asking volleyd to read the login (`claude_prime`), or about to. */
   asking: boolean;
   /** A `claude_prime` for the card is in flight. */
   reading: boolean;
@@ -638,7 +638,11 @@ function usePrime(control: ControlFn | null, groups: AccountGroup[], now: number
         );
     }
   }, [control, key, now]);
-  return inFlight;
+  return {
+    reading: inFlight,
+    /** A prime for `acct` was sent and has answered: volleyd is not reading it now. */
+    answered: (acct: string) => sent.current.has(acct) && !inFlight.has(acct),
+  };
 }
 
 /**
@@ -1207,7 +1211,7 @@ export function ClaudeAccounts({
   const groups = signedIn.groups;
   const configured = configuredMachines(hosts, machines, localName);
   const pending = pendingProfiles(registry, records);
-  const reading = usePrime(registryControl, groups, now);
+  const prime = usePrime(registryControl, groups, now);
   /** A finished sign-in's e-mail already on its machine: the duplicate prompt (`AddAccount`). */
   const sameAs = (machine: string, email: string, acct: string) =>
     sameAccountOnMachine(registry, machine, email, {
@@ -1374,8 +1378,12 @@ export function ClaudeAccounts({
                   }
                 : null
             }
-            asking={registryControl !== null}
-            reading={g.members[0] !== undefined && reading.has(g.members[0].account)}
+            asking={
+              registryControl !== null &&
+              g.members[0] !== undefined &&
+              !prime.answered(g.members[0].account)
+            }
+            reading={g.members[0] !== undefined && prime.reading.has(g.members[0].account)}
             now={now}
           />
         ))}

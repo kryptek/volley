@@ -882,8 +882,10 @@ export class ClaudeService {
     const s = parseAuthStatus(r.stdout);
     if (s?.loggedIn !== true) return null;
     const file = async (): Promise<LoginIdentity> => {
-      const f = await host.run([{ argv: ["cat", ".claude.json"], cwd: dir }], { timeoutMs });
-      if (f.code !== 0) return {};
+      const f = await host
+        .run([{ argv: ["cat", ".claude.json"], cwd: dir }], { timeoutMs })
+        .catch(() => null);
+      if (f === null || f.code !== 0) return {};
       try {
         return loginIdentity(JSON.parse(f.stdout) as Record<string, unknown>);
       } catch {

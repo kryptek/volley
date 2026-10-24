@@ -41,6 +41,10 @@ function world(
     claudeJson?: Record<string, unknown>;
     /** Runs at the n-th local `claude auth status`, before it answers. */
     onStatus?: (n: number, root: string) => void;
+    /** Files on box-a, by absolute path. */
+    remoteFiles?: Record<string, string>;
+    /** ssh itself fails on box-a's `cat` (the remote `.claude.json` read). */
+    failRemoteCat?: boolean;
   } = {},
 ) {
   const base = tempDir("volleyd-prime-");
@@ -62,8 +66,18 @@ function world(
     }),
   );
   const status = o.status ?? STATUS;
-  const box = fakeSigninBox({ home: HOME, signInAfter: 2, status });
-  const host = new SshTmuxHost(SPEC, box.exec);
+  const box = fakeSigninBox({
+    home: HOME,
+    signInAfter: 2,
+    status,
+    ...(o.remoteFiles !== undefined ? { files: o.remoteFiles } : {}),
+  });
+  const sshExec: typeof box.exec = (argv, opts) => {
+    if (o.failRemoteCat === true && opts?.remote?.steps.some((s) => s.argv[0] === "cat"))
+      return Promise.reject(new Error("ssh: connect to host box-a: Connection timed out"));
+    return box.exec(argv, opts);
+  };
+  const host = new SshTmuxHost(SPEC, sshExec);
   let polls = 0;
   const fx = fakeExec()
     .on(["tmux", "has-session"], {})
@@ -86,7 +100,7 @@ function world(
   const service = new ClaudeService({
     root,
     primaryJson: join(base, ".claude.json"),
-    exec: (argv, opts) => (argv[0] === "ssh" ? box.exec(argv, opts) : fx.exec(argv, opts)),
+    exec: (argv, opts) => (argv[0] === "ssh" ? sshExec(argv, opts) : fx.exec(argv, opts)),
     publish: async () => {},
     journal: async (ev) => {
       journal.push(ev);
@@ -163,6 +177,39 @@ describe("ClaudeService.prime on claude_signin_done", () => {
     });
     expect(w.entry("far")).toMatchObject({ plan: "team", email: EMAIL, org: "Example Org" });
     expect(w.probes).toEqual(["far@box-a"]);
+  });
+
+  it("a paired machine's profile with no e-mail in its status: its .claude.json through host.run", async () => {
+    const w = world({
+      status: { loggedIn: true, subscriptionType: "max" },
+      remoteFiles: {
+        [`${HOME}/.volley/claude/far/.claude.json`]: JSON.stringify({
+          oauthAccount: { emailAddress: "Far@Example.com", organizationName: "Far Org" },
+        }),
+      },
+    });
+    const probed = w.nextProbe();
+    await w.service.signin({ acct: "far@box-a" }, "owner-1");
+    await probed;
+    expect(
+      w.box
+        .remoteSteps()
+        .filter((s) => s.argv[0] === "cat")
+        .at(-1),
+    ).toMatchObject({
+      argv: ["cat", ".claude.json"],
+      cwd: `${HOME}/.volley/claude/far`,
+    });
+    expect(w.entry("far")).toMatchObject({ plan: "max", email: "far@example.com", org: "Far Org" });
+  });
+
+  it("a paired machine's .claude.json read that fails over ssh keeps the status's plan", async () => {
+    const w = world({ status: { loggedIn: true, subscriptionType: "max" }, failRemoteCat: true });
+    w.box.box.polls = 2; // box-a is signed in already
+    const r = await w.service.prime({ acct: "far@box-a" }, "owner-1");
+    expect(r).toMatchObject({ ok: true, result: { acct: "far@box-a", plan: "max" } });
+    expect(w.entry("far")).toMatchObject({ plan: "max" });
+    expect(w.entry("far")?.email).toBeUndefined();
   });
 
   it("a profile removed while its login is read: the prime gives up, the daemon goes on", async () => {

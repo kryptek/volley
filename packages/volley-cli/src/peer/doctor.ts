@@ -1144,7 +1144,11 @@ async function probeOnly(
   const fetch = deps.fetch;
   const held = findLogins(deps.home, deps.env ?? {}).some((l) => l.profile === profile);
   if (fetch === undefined || !held) {
-    io.stderr(`volley peer doctor: no Claude login '${profile}' on this machine\n`);
+    io.stderr(
+      fetch === undefined
+        ? "volley peer doctor: the usage probe is not available here\n"
+        : `volley peer doctor: no Claude login '${profile}' on this machine\n`,
+    );
     // An empty report, not none: volleyd reads no report as a volley older than the flag.
     if (opts.json === true)
       io.stdout(

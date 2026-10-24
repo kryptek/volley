@@ -1722,7 +1722,8 @@ describe("ClaudeAccounts › adding ends primed (#498)", () => {
     const r = render(view(c.fn, NOW));
     await screen.findByRole("article", { name: "Team" });
     await waitFor(() => expect(c.primes().map((p) => p.fields)).toContainEqual({ acct: "team" }));
-    expect(card("Team").getByText("reading…")).toBeInTheDocument();
+    // answered without an e-mail: `no reading yet` until the next ask
+    await waitFor(() => expect(card("Team").queryAllByText(/^reading…/)).toHaveLength(0));
     expect(card("Team").queryByText(/doctor/i)).toBeNull();
     const sent = c.primes().filter((p) => p.fields.acct === "team").length;
     expect(sent).toBe(1);
@@ -1769,7 +1770,7 @@ describe("ClaudeAccounts › adding ends primed (#498)", () => {
       );
   });
 
-  it("the meters read `reading…` while a prime is in flight", async () => {
+  it("the meters and the e-mail row read `reading…` while a prime is in flight, then `no reading yet`", async () => {
     let answer: (v: { ok: boolean }) => void = () => {};
     const fn = vi.fn((op: string) =>
       op === "claude_prime"
@@ -1786,11 +1787,16 @@ describe("ClaudeAccounts › adding ends primed (#498)", () => {
         "reading…",
       ),
     );
+    // the e-mail row and the two windows' hints
+    expect(card("Team").getAllByText("reading…").length).toBeGreaterThanOrEqual(3);
     await act(async () => answer({ ok: true }));
     expect(card("Team").getByRole("meter", { name: "5-hour" })).toHaveAttribute(
       "aria-valuetext",
       "no reading yet",
     );
+    // the prime answered without an e-mail: the row stops claiming a read is under way
+    expect(card("Team").queryAllByText(/^reading…/)).toHaveLength(0);
+    expect(card("Team").getAllByText("no reading yet").length).toBeGreaterThanOrEqual(3);
   });
 
   it("Add: step 2 waits for sign-in; done says who signed in, with the plan chip; the card follows", async () => {

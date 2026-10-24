@@ -13,6 +13,13 @@ import { eventually } from "../helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "../helpers/daemon-env";
 import { type FakeClock, fakeClock } from "../helpers/fake-clock";
 import { fakeExec } from "../helpers/fake-exec";
+import {
+  type FakeHost,
+  type FakeRemoteHost,
+  GREEN_DOCTOR,
+  adoptSpec,
+  fakeRemoteHost,
+} from "../helpers/fake-host";
 import { journalWait } from "../helpers/journal-wait";
 import { schemaErrors } from "../helpers/schema";
 import { AGENT, type SupervisedEnv, makeSupervisedEnv } from "../helpers/supervised-env";
@@ -575,6 +582,98 @@ describe("usage probe readings in machine records (daemon)", () => {
       await client.close();
     }
   }, 20_000);
+
+  it.each([
+    { how: "its one-login probe", probeLogin: true },
+    { how: "its doctor when its volley has no --probe-login", probeLogin: false },
+  ])(
+    "claude_prime of a paired machine's login: $how, folded into its record (#498)",
+    async ({ probeLogin }) => {
+      const { root, primary } = spareProfile(tempDir("volleyd-usage-"));
+      const reg = JSON.parse(readFileSync(join(root, "accounts.json"), "utf-8"));
+      reg.accounts.push({
+        id: "work",
+        label: "Work",
+        machine: "peer-a",
+        created: "2026-10-18T12:00:00.000Z",
+        plan: "team",
+        email: "work@example.com",
+        signed_in_at: "2026-10-18T12:00:00.000Z",
+      });
+      writeFileSync(join(root, "accounts.json"), JSON.stringify(reg));
+      s = await makeSupervisedEnv({
+        waveExtra: "account: primary",
+        daemon: { claude: { root, primaryDir: primary }, clock: fakeClock(T0) },
+      });
+      await s.daemon.stop();
+      writeFileSync(
+        join(s.env.home, "config.yaml"),
+        "hosts:\n  peer-a:\n    target: dev@peer-a\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n",
+      );
+      // peer-a's record, up and with no readings yet (a doctor run folds into it)
+      await s.agent.publish(
+        machineTopic("peer-a"),
+        JSON.stringify(
+          buildEnvelope({
+            agentId: "peer-a",
+            parentId: null,
+            channel: MACHINE_CHANNEL,
+            type: "machine",
+            payload: {
+              name: "peer-a",
+              os: "linux",
+              cores: 8,
+              tunnel: "up",
+              load: [0.1, 0.1, 0.1],
+              agents: 0,
+              last_seen: READ,
+            },
+          }),
+        ),
+        { qos: 1, retain: true },
+      );
+      const asked: string[] = [];
+      let box: FakeRemoteHost | undefined;
+      const spawner = s.daemonOptions.spawner;
+      if (spawner === undefined) throw new Error("no spawner");
+      await s.restart({
+        reconcile: probes,
+        spawner: {
+          ...spawner,
+          remoteHost: (spec) => {
+            if (box === undefined) {
+              box = fakeRemoteHost(spec, spawner.host as FakeHost, {
+                doctor: {
+                  ...GREEN_DOCTOR,
+                  claude_logins: [login("default", 9), login("work", 64)],
+                },
+              });
+              box.probeLogin = async (profile) => {
+                asked.push(profile);
+                return probeLogin ? [login(profile, 64)] : null;
+              };
+            }
+            return adoptSpec(box, spec);
+          },
+        },
+      });
+      const client = await ControlClient.connect(s.env.broker.url, NS);
+      try {
+        const r = await client.request("claude_prime", { acct: "work@peer-a", by: "owner-1" });
+        expect(r).toMatchObject({ ok: true, result: { acct: "work@peer-a", machine: "peer-a" } });
+        expect(asked).toEqual(["work"]);
+        expect(box?.doctorRuns).toEqual(probeLogin ? [] : [{ fix: false }]);
+        expect(await recordWhen("work@peer-a", (x) => x.probe !== undefined)).toMatchObject({
+          account: "work@peer-a",
+          model_weekly: { fable: { pct: 64 } },
+          probe: { machine: "peer-a", state: "ok", read_at: READ },
+        });
+      } finally {
+        await client.close();
+      }
+    },
+    20_000,
+  );
 
   it("a Fable agent's trigger reads the probe's model_weekly.fable: an agent_account_limit on that window", async () => {
     const { root, primary } = spareProfile(tempDir("volleyd-usage-"));

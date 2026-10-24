@@ -5589,10 +5589,10 @@ export class Daemon {
         });
         return;
       }
-      if (this.opts.fleet?.localDoctor !== undefined && !this.localDoctorRunning) {
-        this.localDoctorRun = this.runLocalDoctor();
-        await this.localDoctorRun;
-      }
+      if (this.opts.fleet?.localDoctor === undefined) return;
+      // One already running folds this login too: the answer waits for it.
+      if (!this.localDoctorRunning) this.localDoctorRun = this.runLocalDoctor();
+      await this.localDoctorRun;
       return;
     }
     const host = this.remoteFor(machine);

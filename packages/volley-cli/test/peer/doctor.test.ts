@@ -830,6 +830,16 @@ describe("volley peer doctor: Claude usage", () => {
     });
   });
 
+  it("--probe-login with no usage probe to call says so, not that the login is missing", async () => {
+    const m = machine({ trusted: true });
+    storeLogins(m.home, { default: NOW + 3_600_000 });
+    const io = makeBufferIO();
+    const exit = await doctor(io, m.deps({ env: { USER: "dev" } }), { probeLogin: "default" });
+    expect(exit).toBe(1);
+    expect(io.readStderr()).toMatch(/the usage probe is not available here/);
+    expect(io.readStderr()).not.toMatch(/no Claude login/);
+  });
+
   it("the human output has one usage line per login: ok with its age, expired with why", async () => {
     const m = machine({ trusted: true });
     storeLogins(m.home, { default: NOW + 3_600_000, work: NOW - 1 });
