@@ -85,6 +85,7 @@ export interface SettingsWindowProps {
     | "waves"
     | "control"
     | "registryControl"
+    | "registryRev"
     | "onRegistry"
     | "machines"
     | "localName"
@@ -343,6 +344,7 @@ export function SettingsWindow(p: SettingsWindowProps) {
                 {...(p.claude?.onRegistry ? { onRegistry: p.claude.onRegistry } : {})}
                 {...(p.claude?.machines ? { machines: p.claude.machines } : {})}
                 localName={p.claude?.localName}
+                registryRev={p.claude?.registryRev}
                 {...(p.claude?.hosts ? { hosts: p.claude.hosts } : {})}
                 config={p.config}
                 configTransport={p.transport}

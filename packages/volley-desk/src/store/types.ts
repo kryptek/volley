@@ -939,6 +939,11 @@ export interface DeskState {
   claudeAccounts?: Record<string, ClaudeAccountPayload>;
   /** Retained `usage` samples, by agent id (kept apart: they can arrive before the registry). */
   usage?: Record<string, UsagePayload>;
+  /**
+   * volleyd's Claude registry revision (`volley/_system/claude/registry`, SPEC §4.6.11): the
+   * Settings sections fetch the registry again whenever it changes.
+   */
+  claudeRegistryRev?: number;
   /** Claude account sign-ins heard since the page loaded, by account id; live-only. */
   signins?: Record<string, ClaudeSignin>;
   /** Paired machines' retained health records, by machine name. */

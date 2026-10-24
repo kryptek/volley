@@ -14,11 +14,15 @@
  * row per configured machine (`machineRows`) with its sign-in state only, a
  * machine missing the account offering **Sign in on <machine>**, which opens
  * Add already at the sign-in step with the label `<label> (<machine>)`;
- * **Add to another machine…**, Rename and Remove (both disabled until
- * `volley claude rename` / `remove` land); and `Last updated: <age>` from the
- * freshest reading. A profile that never finished its sign-in is a row under
- * "Profiles waiting for sign-in", never a card: **Finish sign-in** resumes it
- * (`claude_signin { acct }`), Cancel lands with remove.
+ * **Add to another machine…**, **Rename ✎** (the name becomes a field: Enter
+ * sends `claude_account_rename`, Escape restores it, a refusal shows under it)
+ * and **Remove…** (`RemoveAccountSheet`; this machine's own login has neither);
+ * and `Last updated: <age>` from the freshest reading. A profile that never
+ * finished its sign-in is a row under "Profiles waiting for sign-in", never a
+ * card: **Finish sign-in** resumes it (`claude_signin { acct }`), **Cancel**
+ * removes it (`claude_account_remove`). The registry is fetched again whenever
+ * volleyd's registry-changed signal moves (`registryRev`), so every open Desk
+ * shows a rename and drops a removed card without a reload.
  *
  * An open `account_limit` decision is a Needs-you banner whose Move / Not now
  * answer it (`resolve`); an agent-level `agent_account_limit` is a banner too:
@@ -89,6 +93,11 @@ import type {
 import { AckLine, type RowState } from "./ConfigRows";
 import { GroupList } from "./GroupNav";
 import { SigninLink } from "./PeerSigninSheet";
+import {
+  REMOVE_ACCOUNT_TIMEOUT_MS,
+  type RemovableProfile,
+  RemoveAccountSheet,
+} from "./RemoveAccountSheet";
 import type { ConfigTransport } from "./configTransport";
 import { Group, Row, Seg } from "./primitives";
 import { sectionDef } from "./sections";
@@ -135,9 +144,13 @@ export interface ClaudeRegistry {
 
 /**
  * volleyd's profile registry (`claude_accounts`), fetched when the Desk can ask
- * and again whenever `refresh` changes (a sign-in finished, the dialog closed).
+ * and again whenever `refresh` changes (volleyd's registry-changed signal, a
+ * sign-in finished, the dialog closed).
  */
-export function useClaudeRegistry(control: ControlFn | null, refresh = 0): ClaudeRegistry {
+export function useClaudeRegistry(
+  control: ControlFn | null,
+  refresh: number | string = 0,
+): ClaudeRegistry {
   const [registry, setRegistry] = useState<ClaudeRegistry>({ accounts: [] });
   // biome-ignore lint/correctness/useExhaustiveDependencies: refresh is the re-fetch trigger
   useEffect(() => {
@@ -164,6 +177,9 @@ export function useClaudeRegistry(control: ControlFn | null, refresh = 0): Claud
 export const signinsDone = (signins: Record<string, ClaudeSignin> | undefined) =>
   Object.values(signins ?? {}).filter((s) => s.state === "done").length;
 
+/** The registry's refresh key: volleyd's signal (`claudeRegistryRev`), and what the Desk saw. */
+export const registryKeyOf = (rev: number | undefined, seen: number) => `${rev ?? "-"}:${seen}`;
+
 export interface ClaudeAccountsProps {
   /** `volley/_system/claude-accounts/+`, by account. */
   accounts: Record<string, ClaudeAccountPayload>;
@@ -174,9 +190,11 @@ export interface ClaudeAccountsProps {
   config: ConfigPayload | null;
   /** `null` = the Desk cannot steer: read-only, with the CLI commands instead. */
   control: ControlFn | null;
-  /** What asks volleyd's registry when it differs from `control` (demo mode's reads); `control`
-   *  otherwise. */
+  /** What reads and edits volleyd's registry (`claude_accounts`, rename, remove) when it differs
+   *  from `control` (demo mode's own answers); `control` otherwise. */
   registryControl?: ControlFn | null;
+  /** volleyd's registry-changed signal (`claudeRegistryRev`): the registry is fetched again. */
+  registryRev?: number | undefined;
   configTransport: ConfigTransport | null;
   /** Clock override (tests). */
   now?: number;
@@ -374,9 +392,83 @@ export interface SignInTry {
 
 const STATE_TEXT = { signed_in: "signed in", signed_out: "signed out" } as const;
 
-/** Rename and Remove land with T1's `volley claude rename` / `remove`. */
-const RENAME_LATER = "renaming lands with volley claude rename";
-const REMOVE_LATER = "removing lands with volley claude remove";
+/**
+ * The card's name, and Rename ✎: the name becomes a field holding it; Enter sends the new one
+ * (`onRename` answers volleyd's refusal, shown under the field, or null), Escape restores it.
+ * The new name shows once the registry is fetched again (volleyd's signal), not on the answer.
+ */
+function CardName({
+  label,
+  onRename,
+}: {
+  label: string;
+  onRename: ((label: string) => Promise<string | null>) | null;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+  const editing = draft !== null;
+  // Only on opening the field: typing must not re-select.
+  useEffect(() => {
+    if (editing) input.current?.select();
+  }, [editing]);
+  const cancel = () => {
+    setDraft(null);
+    setError(null);
+  };
+  const save = async () => {
+    if (!onRename || draft === null || busy) return;
+    if (draft.trim() === label) return cancel();
+    setBusy(true);
+    const why = await onRename(draft);
+    setBusy(false);
+    if (why !== null) setError(why);
+    else cancel();
+  };
+  return (
+    <div className="min0 cc-name">
+      {draft === null ? (
+        <b>{label}</b>
+      ) : (
+        <input
+          ref={input}
+          className="cc-rename"
+          aria-label={`New name for ${label}`}
+          value={draft}
+          disabled={busy}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void save();
+            } else if (e.key === "Escape") {
+              // Claimed, so the Settings window does not close too.
+              e.preventDefault();
+              e.stopPropagation();
+              cancel();
+            }
+          }}
+        />
+      )}
+      {error && (
+        <p className="s-error" role="alert">
+          {error}
+        </p>
+      )}
+      {onRename && draft === null && (
+        <button
+          type="button"
+          className="icon-btn cc-rename-btn"
+          aria-label={`Rename ${label}`}
+          onClick={() => setDraft(label)}
+        >
+          ✎
+        </button>
+      )}
+    </div>
+  );
+}
 
 /**
  * One Anthropic account's card, strictly for managing it: the name, the masked e-mail and plan,
@@ -389,6 +481,8 @@ function AccountCard({
   others,
   onAdd,
   onSignInOn,
+  onRename,
+  onRemove,
   now,
 }: {
   g: AccountGroup;
@@ -399,6 +493,10 @@ function AccountCard({
   onAdd: (() => void) | null;
   /** Sign in on a configured machine missing the account; `null`: read-only. */
   onSignInOn: ((r: MachineRow) => void) | null;
+  /** Rename; `null`: read-only, or nothing but this machine's own login on the card. */
+  onRename: ((label: string) => Promise<string | null>) | null;
+  /** Remove… (opens the sheet); `null` as for `onRename`. */
+  onRemove: (() => void) | null;
   now: number;
 }) {
   const only = g.members.length === 1 ? g.members[0] : undefined;
@@ -416,7 +514,7 @@ function AccountCard({
           ✳
         </span>
         <div className="min0">
-          <b>{g.label}</b>
+          <CardName label={g.label} onRename={onRename} />
           {sub && <div className="s-hint ell">{sub}</div>}
         </div>
         {g.plan && <span className="chip">{g.plan}</span>}
@@ -452,24 +550,16 @@ function AccountCard({
             Add to another machine…
           </button>
         )}
-        <button
-          type="button"
-          className="btn"
-          disabled
-          title={RENAME_LATER}
-          aria-label={`Rename ${g.label}`}
-        >
-          Rename ✎
-        </button>
-        <button
-          type="button"
-          className="btn"
-          disabled
-          title={REMOVE_LATER}
-          aria-label={`Remove ${g.label}`}
-        >
-          Remove
-        </button>
+        {onRemove && (
+          <button
+            type="button"
+            className="btn"
+            aria-label={`Remove ${g.label}…`}
+            onClick={onRemove}
+          >
+            Remove…
+          </button>
+        )}
         <span className="s-hint cc-updated">
           Last updated: {lastUpdated(g, now) ?? "no reading yet"}
         </span>
@@ -485,10 +575,13 @@ function AccountCard({
 function PendingProfiles({
   rows,
   onFinish,
+  onCancel,
 }: {
   rows: RegistryAccount[];
   /** Finish sign-in; `null`: read-only. */
   onFinish: ((r: RegistryAccount) => void) | null;
+  /** Cancel: remove the profile (`claude_account_remove`); `null`: read-only. */
+  onCancel: ((r: RegistryAccount) => void) | null;
 }) {
   if (rows.length === 0) return null;
   return (
@@ -510,15 +603,16 @@ function PendingProfiles({
                 >
                   Finish sign-in
                 </button>
-                <button
-                  type="button"
-                  className="btn"
-                  disabled
-                  title={REMOVE_LATER}
-                  aria-label={`Cancel ${r.label}`}
-                >
-                  Cancel
-                </button>
+                {onCancel && (
+                  <button
+                    type="button"
+                    className="btn"
+                    aria-label={`Cancel ${r.label}`}
+                    onClick={() => onCancel(r)}
+                  >
+                    Cancel
+                  </button>
+                )}
               </span>
             )}
           </li>
@@ -918,6 +1012,7 @@ export function ClaudeAccounts({
   config,
   control,
   registryControl = control,
+  registryRev,
   configTransport,
   now: fixedNow,
   onRegistry,
@@ -939,10 +1034,17 @@ export function ClaudeAccounts({
   /** A resolve in flight: the answers stay disabled so a double click sends one. */
   const [busy, setBusy] = useState(false);
   const [ack, setAck] = useState<RowState>();
+  /** Remove… on a card: the account's name, e-mail and the profiles it can remove. */
+  const [removing, setRemoving] = useState<{
+    account: string;
+    email: string | null;
+    profiles: RemovableProfile[];
+  } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const now = useNow(fixedNow);
   const { accounts: registry, primaryPlan } = useClaudeRegistry(
     registryControl,
-    signinsDone(signins) + closed,
+    registryKeyOf(registryRev, signinsDone(signins) + closed),
   );
   useEffect(() => {
     if (registry.length) onRegistry?.(registry);
@@ -962,6 +1064,33 @@ export function ClaudeAccounts({
   const decisions = openLimitDecisions(waves);
   const addMachines = (holds: string[]): AddMachine[] =>
     configured.map((m) => ({ ...m, holds: holds.includes(m.op) }));
+
+  /** A card's profiles (never a machine's own login): what Rename and Remove act on. */
+  const profilesOf = (g: AccountGroup): RemovableProfile[] =>
+    g.members
+      .filter((m) => !m.isPrimary)
+      .map((m) => ({ acct: m.account, name: machineName(m.machine), label: m.label }));
+  const rename = (acct: string) => async (label: string) => {
+    if (!registryControl) return "the Desk cannot steer";
+    const r = await registryControl(
+      "claude_account_rename",
+      { acct, label },
+      `volley claude rename ${acct}`,
+    );
+    return r.ok ? null : (r.error ?? "volleyd refused the name");
+  };
+  const cancelPending = async (r: RegistryAccount) => {
+    if (!registryControl) return;
+    setError(null);
+    const acct = registryKey(r);
+    const a = await registryControl(
+      "claude_account_remove",
+      { acct },
+      `volley claude remove ${acct}`,
+      REMOVE_ACCOUNT_TIMEOUT_MS,
+    );
+    if (!a.ok) setError(a.error ?? "volleyd refused to remove it");
+  };
 
   const answer = async (d: DecisionPayload, text: string) => {
     if (!control || busy) return;
@@ -1139,6 +1268,12 @@ export function ClaudeAccounts({
           {error}
         </p>
       )}
+      {notice && (
+        // biome-ignore lint/a11y/useSemanticElements: a status line, not a form <output>
+        <p className="s-hint" role="status">
+          {notice}
+        </p>
+      )}
       <div className="claude-cards">
         {groups.map((g) => (
           <AccountCard
@@ -1164,6 +1299,18 @@ export function ClaudeAccounts({
                   }
                 : null
             }
+            onRename={(() => {
+              const own = profilesOf(g)[0];
+              return registryControl && own ? rename(own.acct) : null;
+            })()}
+            onRemove={
+              registryControl && profilesOf(g).length > 0
+                ? () => {
+                    setNotice(null);
+                    setRemoving({ account: g.label, email: g.email, profiles: profilesOf(g) });
+                  }
+                : null
+            }
             now={now}
           />
         ))}
@@ -1179,7 +1326,21 @@ export function ClaudeAccounts({
       <PendingProfiles
         rows={pending}
         onFinish={control ? (r) => setSigningIn(pendingPreset(r)) : null}
+        onCancel={registryControl ? (r) => void cancelPending(r) : null}
       />
+      {removing && registryControl && (
+        <RemoveAccountSheet
+          account={removing.account}
+          email={removing.email}
+          profiles={removing.profiles}
+          control={registryControl}
+          onClose={() => setRemoving(null)}
+          onDone={(n) => {
+            setRemoving(null);
+            setNotice(n);
+          }}
+        />
+      )}
       {signingIn && control && (
         <SignInOnDialog
           key={`${signingIn.key}@${signingIn.machine}`}

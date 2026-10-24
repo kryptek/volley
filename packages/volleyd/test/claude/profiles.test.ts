@@ -10,6 +10,8 @@ import {
   profileDir,
   readRegistry,
   registryPath,
+  removeAccount,
+  renameAccount,
   selectAccount,
 } from "../../src/claude/profiles";
 import type { Ranked } from "../../src/claude/usage";
@@ -96,6 +98,62 @@ describe("profiles: the accounts.json registry", () => {
 
   it("an absent registry is empty", () => {
     expect(readRegistry(root())).toEqual({ version: 1, accounts: [] });
+  });
+});
+
+describe("profiles: rename and remove", () => {
+  /** `team` here and `team-box-a` on box-a, one login; `solo` on box-a, not signed in yet. */
+  function three(): string {
+    const r = root();
+    addAccount(r, { label: "team" }, NOW);
+    addAccount(r, { label: "team box-a", machine: "box-a" }, NOW);
+    addAccount(r, { label: "solo", machine: "box-a" }, NOW);
+    markSignedIn(r, "team", { email: "team@example.com" }, NOW);
+    markSignedIn(
+      r,
+      "team-box-a",
+      { email: "team@example.com", dir: "/h/.volley/claude/team-box-a" },
+      NOW,
+    );
+    return r;
+  }
+
+  it("rename relabels every profile of the login on every machine and returns them", () => {
+    const r = three();
+    const renamed = renameAccount(r, "team", "  Team account ");
+    expect(renamed.map((a) => [a.id, a.machine, a.label])).toEqual([
+      ["team", "local", "Team account"],
+      ["team-box-a", "box-a", "Team account"],
+    ]);
+    expect(readRegistry(r).accounts.map((a) => a.label)).toEqual([
+      "Team account",
+      "Team account",
+      "solo",
+    ]);
+  });
+
+  it("rename of a profile with no e-mail yet relabels that profile alone", () => {
+    const r = three();
+    expect(renameAccount(r, "solo", "Solo").map((a) => a.id)).toEqual(["solo"]);
+    expect(readRegistry(r).accounts.map((a) => a.label)).toEqual(["team", "team box-a", "Solo"]);
+  });
+
+  it("rename refuses an empty label, a reserved one, an unknown id and the primary", () => {
+    const r = three();
+    expect(() => renameAccount(r, "team", "  ")).toThrow(ClaudeAccountError);
+    expect(() => renameAccount(r, "team", "Primary")).toThrow(/reserved/);
+    expect(() => renameAccount(r, "team", "most_headroom")).toThrow(/reserved/);
+    expect(() => renameAccount(r, "nope", "x")).toThrow(/unknown Claude account 'nope'/);
+    expect(() => renameAccount(r, PRIMARY_ACCOUNT, "x")).toThrow(ClaudeAccountError);
+    expect(readRegistry(r).accounts.map((a) => a.label)).toEqual(["team", "team box-a", "solo"]);
+  });
+
+  it("remove drops the entry and returns it; unknown and primary are refused", () => {
+    const r = three();
+    expect(removeAccount(r, "team-box-a")).toMatchObject({ id: "team-box-a", machine: "box-a" });
+    expect(readRegistry(r).accounts.map((a) => a.id)).toEqual(["team", "solo"]);
+    expect(() => removeAccount(r, "team-box-a")).toThrow(/unknown Claude account/);
+    expect(() => removeAccount(r, PRIMARY_ACCOUNT)).toThrow(ClaudeAccountError);
   });
 });
 

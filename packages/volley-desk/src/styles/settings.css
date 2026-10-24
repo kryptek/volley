@@ -775,6 +775,50 @@
   margin-left: auto;
   align-self: flex-end;
 }
+/* The card's name and its Rename ✎; renaming, the name is a field of the same width. */
+.cc-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.cc-name > b {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cc-rename-btn {
+  flex: none;
+  width: 22px;
+  height: 22px;
+}
+.cc-rename {
+  flex: 1 1 140px;
+  min-width: 0;
+  font: inherit;
+  font-weight: 600;
+}
+.cc-name .s-error {
+  flex-basis: 100%;
+  margin: 2px 0 0;
+}
+/* Remove…'s machine picker: one radio row per machine holding the account. */
+.ra-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.ra-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ra-option .ell {
+  min-width: 0;
+}
 /* The profiles waiting for sign-in: a row each, under the cards. */
 .cc-pending {
   display: flex;

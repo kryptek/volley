@@ -85,7 +85,12 @@ import { progressBeat } from "./look/tetherPulses";
 import { useLook } from "./look/useLook";
 import { type AttentionItem, useNotifyOnAttention } from "./notify/use-notify-on-attention";
 import { useNotifySettings } from "./notify/use-notify-settings";
-import { MOVE_ACCOUNT_TIMEOUT_MS, signinsDone, useClaudeRegistry } from "./settings/ClaudeAccounts";
+import {
+  MOVE_ACCOUNT_TIMEOUT_MS,
+  registryKeyOf,
+  signinsDone,
+  useClaudeRegistry,
+} from "./settings/ClaudeAccounts";
 import { agentsOnMachines, sshHost } from "./settings/Machines";
 import { PeerSignin, peerAccount } from "./settings/PeerSigninSheet";
 import { SettingsModal } from "./settings/SettingsModal";
@@ -459,7 +464,7 @@ export default function App() {
   // while it is open (Settings › Claude accounts asks on its own).
   const machinesRegistry = useClaudeRegistry(
     deskSettings === "machines" ? registryControl : null,
-    signinsDone(state.signins),
+    registryKeyOf(state.claudeRegistryRev, signinsDone(state.signins)),
   );
   const localName = state.config?.fleet?.local_name ?? undefined;
   const claudeGroups = useMemo(
@@ -1580,6 +1585,7 @@ export default function App() {
             waves: state.waves,
             control,
             registryControl,
+            registryRev: state.claudeRegistryRev,
             onRegistry: setRegistry,
             machines: state.machines ?? {},
             localName: state.config?.fleet?.local_name ?? undefined,
