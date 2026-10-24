@@ -47,6 +47,7 @@
 }
 
 .inbox-card.spotlight-card {
+  background-color: var(--card-surface);
   display: flex;
   gap: 10px;
   padding: 10px 10px 10px 0;
@@ -112,7 +113,7 @@
 }
 .inbox-error {
   margin: 0;
-  color: #ff9d85;
+  color: var(--hot-ink);
   font-size: 12px;
 }
 .inbox-cmd {
@@ -183,4 +184,10 @@
     min-height: 48px;
     min-width: 48px;
   }
+}
+/* Another theme: the release card's star border keeps the theme's surface and ink (React Bits'
+   StarBorder sets its own dark ones inline). */
+html[data-theme]:not([data-theme="volley"]) .inbox-star {
+  background: var(--card-surface);
+  color: var(--ink);
 }

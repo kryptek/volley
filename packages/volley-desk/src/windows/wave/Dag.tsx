@@ -23,7 +23,7 @@
  * `HostChips` lists, under the graph, the machine each placed task runs on
  * and why (SPEC §4.6.15 `tasks[].placement`).
  */
-import { type RefObject, useRef, useState } from "react";
+import { type CSSProperties, type RefObject, useRef, useState } from "react";
 import { issueLabel } from "../../lib/github";
 import { Popover } from "../../look/Popover";
 import type { TaskPlacement, WaveTask } from "../../store/types";
@@ -239,6 +239,8 @@ export function Dag({
         // biome-ignore lint/a11y/useSemanticElements: an <svg> cannot be a <fieldset>
         role="group"
         aria-label="Task dependency graph"
+        // The ids are accent text: --acc-ink (desk.css) darkens the accent on a light theme.
+        style={{ "--acc": accent } as CSSProperties}
       >
         {l.edges.map((e) => (
           <path
@@ -259,7 +261,7 @@ export function Dag({
             {nodeTip(t) && <title>{nodeTip(t)}</title>}
             {t.cluster && <ClusterHull hue={t.cluster.hue} />}
             <rect width={W} height={H} rx="9" />
-            <text x="10" y="18" className="dag-id" fill={accent}>
+            <text x="10" y="18" className="dag-id">
               {fitId(t.id, idFit(t))}
             </text>
             {t.cluster && (
@@ -269,6 +271,7 @@ export function Dag({
                 textAnchor="end"
                 className="dag-cluster"
                 fill={hueOf(t.cluster.hue)}
+                style={{ "--hue": hueOf(t.cluster.hue) } as CSSProperties}
               >
                 {t.cluster.badge}
               </text>

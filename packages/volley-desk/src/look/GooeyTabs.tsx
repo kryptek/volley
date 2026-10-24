@@ -70,6 +70,8 @@ export function GooeyTabs<K extends string>({
       aria-label={label}
       size="sm"
       color={accent}
+      // The theme's ink on a light pill (the wave accents are all pastel).
+      activeTextColor="var(--on-hi)"
       gl={false}
       items={tabs.map((t) => ({ label: t.label, icon: t.icon }))}
       activeIndex={index}

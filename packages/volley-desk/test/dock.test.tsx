@@ -1,9 +1,11 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import App from "../src/App";
 import { SignInGate } from "../src/auth/SignInGate";
+import { DeskDock } from "../src/look/DeskDock";
+import { applyTheme } from "../src/look/applyLook";
 import { LOOK_STORAGE_KEY } from "../src/look/useLook";
 import { CREDENTIALS_STORAGE_KEY, DeskStoreProvider } from "../src/store/context";
 import { connectingFactory } from "./helpers/desk-msgs";
@@ -23,6 +25,8 @@ const renderApp = () =>
 const dock = () => within(screen.getByRole("toolbar", { name: "Dock" }));
 
 describe("the dock", () => {
+  afterEach(() => applyTheme("volley"));
+
   it("has exactly eight items, in order", () => {
     renderApp();
     expect(
@@ -52,6 +56,48 @@ describe("the dock", () => {
     expect(rule).toMatch(/background: linear-gradient\( ?160deg/);
     expect(resolveTokens(rule)).toMatch(/inset 0 1px 0 rgba\(255, 255, 255, 0\.18\)/);
     expect(rule).toMatch(/var\(--win-shadow\)/);
+  });
+
+  it("follows the theme's tone: the Dock's light set on a light theme, dark by default", () => {
+    const props = {
+      coordsOpen: false,
+      onToggleCoords: () => {},
+      needsYou: 0,
+      inboxOpen: false,
+      onToggleInbox: () => {},
+      inboxNeedsYou: 0,
+      machinesOpen: false,
+      onToggleMachines: () => {},
+      machinesDown: 0,
+      tethers: true,
+      onToggleTethers: () => {},
+      onArrange: () => {},
+      onZoom: () => {},
+      settingsOpen: false,
+      onToggleSettings: () => {},
+    };
+    const panel = () =>
+      (
+        screen.getByRole("toolbar", { name: "Dock" }).closest("[style]") as HTMLElement | null
+      )?.getAttribute("style") ?? "";
+    const { unmount } = render(<DeskDock {...props} tone="light" />);
+    expect(panel()).toContain("--dock-panel: rgba(240, 240, 243, 0.8)");
+    unmount();
+    render(<DeskDock {...props} />);
+    expect(panel()).toContain("--dock-panel: rgba(38, 35, 46, 0.66)");
+  });
+
+  it("App passes the theme's tone to the dock", () => {
+    localStorage.setItem(
+      LOOK_STORAGE_KEY,
+      JSON.stringify({ bg: "none", autoArrange: false, theme: "lighter" }),
+    );
+    renderApp();
+    const style =
+      (
+        screen.getByRole("toolbar", { name: "Dock" }).closest("[style]") as HTMLElement | null
+      )?.getAttribute("style") ?? "";
+    expect(style).toContain("--dock-panel: rgba(240, 240, 243, 0.8)");
   });
 
   it("no longer carries Appearance or auto-arrange, and the aside is gone", () => {
