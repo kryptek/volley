@@ -1145,6 +1145,11 @@ async function probeOnly(
   const held = findLogins(deps.home, deps.env ?? {}).some((l) => l.profile === profile);
   if (fetch === undefined || !held) {
     io.stderr(`volley peer doctor: no Claude login '${profile}' on this machine\n`);
+    // An empty report, not none: volleyd reads no report as a volley older than the flag.
+    if (opts.json === true)
+      io.stdout(
+        `${JSON.stringify({ claude_logins: [], doctor_at: deps.now().toISOString() }, null, 2)}\n`,
+      );
     return EXIT.ERROR;
   }
   // The installed Claude Code's version is the probe's User-Agent, as in a full run.

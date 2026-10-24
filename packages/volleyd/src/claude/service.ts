@@ -754,7 +754,10 @@ export class ClaudeService {
         if (type === "claude_signin_done") void this.changed();
         this.d.log(`claude sign-in ${acct}: ${type}`);
         // Adding ends primed: identity, plan and the login's usage reading at once.
-        if (type === "claude_signin_done") void this.prime({ acct }, "volleyd", { signedIn: true });
+        if (type === "claude_signin_done")
+          void this.prime({ acct }, "volleyd", { signedIn: true }).catch((err: unknown) =>
+            this.d.log(`prime ${acct}: ${err instanceof Error ? err.message : String(err)}`),
+          );
         return e;
       });
     return pending;
@@ -765,8 +768,9 @@ export class ClaudeService {
    * plan (`claude auth status` under the profile's config dir on its machine; its `.claude.json`
    * when the status has no e-mail) into the registry, then run that machine's usage probe for the
    * login (`probe`). The machine's own login (`primary`, `primary@<name>`) has only the probe.
-   * At most once per login per `claude_prime_interval_ms`; a finished sign-in always is. The
-   * e-mail goes to the registry only, never the journal.
+   * At most once per login per `claude_prime_interval_ms`, counted from when a prime starts, so
+   * one that failed waits out the window too; a finished sign-in always is primed. The e-mail
+   * goes to the registry only, never the journal.
    */
   async prime(
     p: Record<string, unknown>,
@@ -809,12 +813,20 @@ export class ClaudeService {
       });
       if (facts !== null) {
         plan = facts.plan;
-        const next = markSignedIn(
-          this.d.root,
-          a.id,
-          facts,
-          a.signed_in_at ?? new Date(at).toISOString(),
-        );
+        let next: ClaudeAccount;
+        try {
+          next = markSignedIn(
+            this.d.root,
+            a.id,
+            facts,
+            a.signed_in_at ?? new Date(at).toISOString(),
+          );
+        } catch (e) {
+          // Removed while its login was read (the Add dialog's "Remove the new profile").
+          const error = e instanceof Error ? e.message : String(e);
+          this.d.log(`prime ${acct}: ${error}`);
+          return { ok: false, error };
+        }
         // A sign-in that recorded all of it already: no change to signal.
         if (JSON.stringify(next) !== JSON.stringify(a)) void this.changed();
       }

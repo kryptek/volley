@@ -35,7 +35,14 @@ const STATUS = {
   subscriptionType: "team",
 };
 
-function world(o: { status?: Record<string, unknown>; claudeJson?: Record<string, unknown> } = {}) {
+function world(
+  o: {
+    status?: Record<string, unknown>;
+    claudeJson?: Record<string, unknown>;
+    /** Runs at the n-th local `claude auth status`, before it answers. */
+    onStatus?: (n: number, root: string) => void;
+  } = {},
+) {
   const base = tempDir("volleyd-prime-");
   const root = join(base, "claude");
   mkdirSync(join(root, "team"), { recursive: true });
@@ -62,12 +69,14 @@ function world(o: { status?: Record<string, unknown>; claudeJson?: Record<string
     .on(["tmux", "has-session"], {})
     .on(["claude", "auth", "status"], () => {
       polls++;
+      o.onStatus?.(polls, root);
       return polls >= 2
         ? { stdout: JSON.stringify(status) }
         : { code: 1, stdout: JSON.stringify({ loggedIn: false }) };
     });
   const journal: NewEvent[] = [];
   const probes: string[] = [];
+  const logs: string[] = [];
   let probed: () => void = () => {};
   const nextProbe = () =>
     new Promise<void>((r) => {
@@ -82,7 +91,9 @@ function world(o: { status?: Record<string, unknown>; claudeJson?: Record<string
     journal: async (ev) => {
       journal.push(ev);
     },
-    log: () => {},
+    log: (m) => {
+      logs.push(m);
+    },
     now: () => t,
     sleep: async (ms) => {
       t += ms;
@@ -102,6 +113,7 @@ function world(o: { status?: Record<string, unknown>; claudeJson?: Record<string
     service,
     journal,
     probes,
+    logs,
     nextProbe,
     fx,
     box,
@@ -151,6 +163,26 @@ describe("ClaudeService.prime on claude_signin_done", () => {
     });
     expect(w.entry("far")).toMatchObject({ plan: "team", email: EMAIL, org: "Example Org" });
     expect(w.probes).toEqual(["far@box-a"]);
+  });
+
+  it("a profile removed while its login is read: the prime gives up, the daemon goes on", async () => {
+    // the refusal check, the poll that finds it signed in, then the prime's read (3rd)
+    const w = world({
+      onStatus: (n, root) => {
+        if (n !== 3) return;
+        const reg = readRegistry(root);
+        writeFileSync(
+          join(root, "accounts.json"),
+          JSON.stringify({ ...reg, accounts: reg.accounts.filter((a) => a.id !== "team") }),
+        );
+      },
+    });
+    const r = await w.service.signin({ acct: "team" }, "owner-1");
+    expect(r.ok).toBe(true);
+    await flushMicrotasks(50);
+    expect(w.entry("team")).toBeUndefined();
+    expect(w.probes).toEqual([]);
+    expect(w.logs.some((m) => m.includes("prime team: unknown Claude account 'team'"))).toBe(true);
   });
 
   it("the journal never carries the e-mail", async () => {

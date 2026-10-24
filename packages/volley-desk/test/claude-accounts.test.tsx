@@ -2077,10 +2077,18 @@ describe("ClaudeAccounts › adding ends primed (#498)", () => {
       await screen.findByText("This is the same account as Team on this machine."),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Keep both" })).toBeInTheDocument();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Remove the new profile" }));
-    });
-    expect(c.ops).toContainEqual({ op: "claude_account_remove", fields: { acct: "team-2" } });
+    const remove = screen.getByRole("button", { name: "Remove the new profile" });
+    fireEvent.click(remove);
+    // in flight: a second click sends nothing
+    expect(remove).toBeDisabled();
+    fireEvent.click(remove);
+    expect(c.ops.filter((o) => o.op === "claude_account_remove")).toEqual([
+      { op: "claude_account_remove", fields: { acct: "team-2" } },
+    ]);
+    expect(await screen.findByText("Removed the new profile.")).toBeInTheDocument();
+    // nothing left claims it was added
+    expect(screen.queryByText(/^Added:/)).toBeNull();
+    expect(screen.queryByText(/signed in on this machine/)).toBeNull();
   });
 
   it("Keep both dismisses the prompt", async () => {

@@ -817,10 +817,11 @@ function AddAccount({
   removeNew?: (acct: string) => Promise<string | null>;
   onClose: () => void;
 }) {
-  /** The duplicate prompt's answer: kept both, removed (or why not), or not answered. */
+  /** The duplicate prompt's answer: kept both, removing, removed (or why not), or not answered. */
   const [dupAnswer, setDupAnswer] = useState<
-    { kept: true } | { removed: true } | { error: string } | null
+    { kept: true } | { removing: true } | { removed: true } | { error: string } | null
   >(null);
+  const removed = dupAnswer !== null && "removed" in dupAnswer;
   const [s, setS] = useState<Adding>(() =>
     preset ? { phase: "waiting", machine: preset.machine, label: preset.label } : { phase: "pick" },
   );
@@ -1038,7 +1039,9 @@ function AddAccount({
           </div>
         </Step>
         <Step title="Done" description="Added">
-          <h3>Added: {label.trim()}</h3>
+          <h3>
+            {removed ? "Not added" : "Added"}: {label.trim()}
+          </h3>
           {signin?.email && (
             <p className="cc-signed-in">
               Signed in as <MaskedEmail email={signin.email} />
@@ -1051,7 +1054,7 @@ function AddAccount({
               <p className="ny-q">
                 This is the same account as {dup} on {machineName(machine)}.
               </p>
-              {dupAnswer !== null && "removed" in dupAnswer ? (
+              {removed ? (
                 <p className="s-hint">Removed the new profile.</p>
               ) : (
                 <>
@@ -1072,11 +1075,13 @@ function AddAccount({
                       <button
                         type="button"
                         className="btn btn--hot"
-                        onClick={() =>
+                        disabled={dupAnswer !== null && "removing" in dupAnswer}
+                        onClick={() => {
+                          setDupAnswer({ removing: true });
                           void removeNew(newAcct).then((why) =>
                             setDupAnswer(why === null ? { removed: true } : { error: why }),
-                          )
-                        }
+                          );
+                        }}
                       >
                         Remove the new profile
                       </button>
@@ -1086,10 +1091,13 @@ function AddAccount({
               )}
             </div>
           )}
-          <p className="dim">
-            {signin?.plan ? `${signin.plan} · ` : ""}signed in on {machineName(machine)}. Pick it
-            for new waves under Defaults, or let them take the account with the most headroom.
-          </p>
+          {!removed && (
+            <p className="dim">
+              {signin?.plan && !signin.email ? `${signin.plan} · ` : ""}signed in on{" "}
+              {machineName(machine)}. Pick it for new waves under Defaults, or let them take the
+              account with the most headroom.
+            </p>
+          )}
           {preset && signin?.email && normalizeEmail(signin.email) !== preset.key && (
             <output className="s-hint">
               That was another account ({maskEmail(signin.email)}): it gets a card of its own, and{" "}

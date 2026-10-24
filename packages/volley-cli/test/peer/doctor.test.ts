@@ -811,7 +811,7 @@ describe("volley peer doctor: Claude usage", () => {
     expect(ran.filter((p) => ["git", "gh", "bun"].includes(p))).toEqual([]);
   });
 
-  it("--probe-login of a login this machine does not hold: refused, nothing probed", async () => {
+  it("--probe-login of a login this machine does not hold: refused, nothing probed, an empty report", async () => {
     const m = machine({ trusted: true });
     storeLogins(m.home, { default: NOW + 3_600_000 });
     const api = usageEndpoint();
@@ -823,6 +823,11 @@ describe("volley peer doctor: Claude usage", () => {
     expect(exit).toBe(1);
     expect(io.readStderr()).toMatch(/no Claude login 'nope' on this machine/);
     expect(api.requests).toHaveLength(0);
+    // volleyd reads no report as a volley too old for the flag, and would run the whole doctor
+    expect(JSON.parse(io.readStdout())).toEqual({
+      claude_logins: [],
+      doctor_at: new Date(NOW).toISOString(),
+    });
   });
 
   it("the human output has one usage line per login: ok with its age, expired with why", async () => {
