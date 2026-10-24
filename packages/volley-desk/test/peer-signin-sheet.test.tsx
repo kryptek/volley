@@ -247,7 +247,7 @@ describe("SigninLink: the link, the box, the refusals (shared with Add Claude ac
       />,
     );
 
-  it("Submit sends claude_signin_entry with the text as typed and empties the box; done shows the masked e-mail", async () => {
+  it("Submit sends claude_signin_entry with the text as typed (trimmed) and empties the box; done shows the masked e-mail", async () => {
     const control = vi.fn(async () => ({
       ok: true,
       result: { acct: "work@box-a", signed_in: true, email: "owner@example.com" },
@@ -314,6 +314,25 @@ describe("SigninLink: the link, the box, the refusals (shared with Add Claude ac
     expect(document.body.innerHTML).not.toContain("abcSECRET42");
     expect(document.body.innerHTML).not.toContain("xyzSTATE42");
     expect(box()).toHaveValue("");
+  });
+
+  it("a link too long for a QR code renders the link without a QR instead of crashing", () => {
+    const long = `${MANUAL_URL}&pad=${"x".repeat(4000)}`;
+    render(
+      <SigninLink
+        acct="work@box-a"
+        machine="box-a"
+        url={long}
+        manualUrl={long}
+        attach={ATTACH}
+        control={controlOk()}
+      />,
+    );
+    expect(screen.getByRole("link", { name: /Open Anthropic sign-in/ })).toHaveAttribute(
+      "href",
+      long,
+    );
+    expect(screen.queryByRole("img", { name: "QR code of the sign-in link" })).toBeNull();
   });
 
   it("Open here instead appears only with a callback_url", () => {

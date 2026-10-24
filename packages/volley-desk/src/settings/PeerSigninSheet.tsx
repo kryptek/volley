@@ -10,8 +10,9 @@
  * there). Done shows the plan, refreshes the machine's doctor rows
  * (`peer_doctor { fix: false }`) and turns the card's line green.
  */
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { maskEmail } from "../lib/email";
+import { encodeQr } from "../lib/qr";
 import type { PeerOps } from "../store/peerOps";
 import type { ClaudeSignin } from "../store/types";
 import { ADD_ACCOUNT_TIMEOUT_MS, type ControlFn } from "./ClaudeAccounts";
@@ -308,11 +309,16 @@ const ENTRY_TIMEOUT_MS = 90_000;
 
 /** The link as a QR code for a phone; nothing when it is too long to encode. */
 function LinkQr({ text }: { text: string }) {
-  try {
-    return <Qr text={text} size={132} label="QR code of the sign-in link" />;
-  } catch {
-    return null;
-  }
+  // `<Qr>` encodes during its own render, out of reach of a try here: check first.
+  const fits = useMemo(() => {
+    try {
+      encodeQr(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [text]);
+  return fits ? <Qr text={text} size={132} label="QR code of the sign-in link" /> : null;
 }
 
 /** The sign-in terminal on the machine, for a person who would rather type the code there. */

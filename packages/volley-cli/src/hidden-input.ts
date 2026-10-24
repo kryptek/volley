@@ -40,7 +40,11 @@ export function hiddenKeys(state: HiddenInput, text: string): "enter" | "cancel"
  * Read one line from the terminal without echoing it (raw mode; see `hiddenKeys`). Null when
  * stdin is not a terminal, on Ctrl-D, or once `signal` aborts; Ctrl-C rejects ("cancelled").
  */
-export function askHidden(prompt: string, signal?: AbortSignal): Promise<string | null> {
+export function askHidden(
+  prompt: string,
+  signal?: AbortSignal,
+  cancelled = "cancelled (Ctrl-C): nothing was stored",
+): Promise<string | null> {
   const stdin = process.stdin;
   if (stdin.isTTY !== true || signal?.aborted === true) return Promise.resolve(null);
   process.stdout.write(prompt);
@@ -61,7 +65,7 @@ export function askHidden(prompt: string, signal?: AbortSignal): Promise<string 
       const end = hiddenKeys(state, d.toString("utf-8"));
       if (end === null) return;
       stop();
-      if (end === "cancel") reject(new Error("cancelled (Ctrl-C): nothing was stored"));
+      if (end === "cancel") reject(new Error(cancelled));
       else resolve(end === "enter" ? state.value : null);
     };
     signal?.addEventListener("abort", onAbort, { once: true });

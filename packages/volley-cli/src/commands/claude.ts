@@ -39,10 +39,9 @@ export interface ClaudeArgs {
  */
 
 const HELP = `Usage:
-  volley claude add <label> [--machine <name>] [--wait] [--code <code-or-address>]
-                                                          Add a profile and start its sign-in
-  volley claude signin <acct> [--wait] [--code <code-or-address>]
-                                                          Sign an existing profile in again
+  volley claude add <label> [--machine <name>] [--wait]  Add a profile and start its sign-in
+  volley claude signin <acct> [--wait]                    Sign an existing profile in again
+  volley claude signin <acct> --code <code-or-address>    Finish the sign-in waiting for <acct>
   volley claude code <acct> <code-or-address>             Finish a sign-in started elsewhere
   volley claude list [--json] [--show-email]              Accounts grouped by e-mail, their machines, usage, sharing
   volley claude balance [--model <m>] [--machine <name>] [--json] [--show-email]
@@ -59,7 +58,8 @@ const HELP = `Usage:
 
 Each profile is its own Claude Code CLAUDE_CONFIG_DIR (default ~/.volley/claude/<acct>). add and
 signin print Anthropic's sign-in link: open it on any device, then give volleyd the code the page
-shows (--code, the prompt --wait shows on a terminal, or \`volley claude code\`). If you opened the
+shows (the prompt --wait shows on a terminal, \`volley claude code\` or signin --code, which
+finish the sign-in already waiting rather than start a new one). If you opened the
 second link (the supervisor's machine's shortcut) in a browser elsewhere and it ended on a
 localhost address that did not load, give that whole address instead. volleyd types the code into
 the sign-in waiting on that machine, or completes the address there. --wait blocks until the
@@ -73,8 +73,9 @@ Options:
   --wait                 add / signin: wait for the sign-in to finish (exit 1 if it fails,
                          124 if it has not ended within --timeout, default 960); on a terminal,
                          asks for the code or address (not echoed; Enter alone keeps waiting)
-  --code <text>          add / signin: the code the sign-in page showed, or the address the
-                         browser ended up on; sent to volleyd once, never printed
+  --code <text>          signin: finish the sign-in waiting for <acct> (no new link) with the
+                         code its page showed, or the address the browser ended up on; sent to
+                         volleyd once, never printed
   --timeout <seconds>    How long to wait for volleyd's answer (default 60; move: 180)
   --json                 list: print the raw result, with the usage records as "records";
                          balance: print volleyd's answer
@@ -139,7 +140,8 @@ interface SigninResult {
 /** The no-echo prompt `--wait` shows on a terminal (tests replace it). */
 export const signinPrompt = {
   tty: (): boolean => process.stdin.isTTY === true,
-  ask: (prompt: string, signal?: AbortSignal): Promise<string | null> => askHidden(prompt, signal),
+  ask: (prompt: string, signal?: AbortSignal): Promise<string | null> =>
+    askHidden(prompt, signal, "cancelled (Ctrl-C): nothing was sent"),
 };
 
 const ENTRY_PROMPT = "Paste the code, or the address your browser ended up on: ";
@@ -170,8 +172,14 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
   if (v["show-email"] === true && verb !== "list" && verb !== "balance")
     return usage("--show-email is for list and balance only");
   if (v.model !== undefined && verb !== "balance") return usage("--model is for balance only");
-  if (v.code !== undefined && verb !== "add" && verb !== "signin")
-    return usage("--code is for add and signin only (or: volley claude code <acct> <code>)");
+  // A code belongs to the sign-in whose link the owner opened: starting another (claude_signin)
+  // would supersede it, so --code only finishes the one already waiting.
+  if (v.code !== undefined && verb !== "signin")
+    return usage(
+      "--code is for signin only: it finishes the sign-in already waiting (or: --wait, volley claude code <acct> <code>)",
+    );
+  if (v.code !== undefined && v.wait === true)
+    return usage("--code finishes the waiting sign-in; it takes no --wait");
   let op: string;
   let fields: Record<string, unknown>;
   switch (verb) {
@@ -255,6 +263,8 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
     }
     if (verb === "code")
       return await sendEntry(io, broker, namespace, pos[0] as string, pos[1] as string, timeoutMs);
+    if (v.code !== undefined)
+      return await sendEntry(io, broker, namespace, pos[0] as string, v.code, timeoutMs);
     const ends = v.wait === true ? await watchSigninEnds(broker) : null;
     const answer = await request(broker, namespace, op, fields, timeoutMs);
     if (answer === null) {
@@ -269,8 +279,8 @@ export async function claude({ argv, env, io }: ClaudeArgs): Promise<ExitCode> {
       const r = answer.result as SigninResult;
       printSignin(io, r);
       if (r.signed_in === true) return EXIT.OK;
-      let entry = v.code;
-      if (entry === undefined && ends !== null && signinPrompt.tty()) {
+      let entry: string | undefined;
+      if (ends !== null && signinPrompt.tty()) {
         // The prompt gives way when the sign-in ends on its own (the shortcut link used).
         const stop = new AbortController();
         const ended = ends(r.acct, SIGNIN_WAIT_S * 1000).then((e) => {
@@ -433,7 +443,7 @@ function printLinks(io: IO, r: SigninResult): void {
       `  ${manual !== undefined ? "Or on this machine" : "Open on the supervisor's machine"}: ${callback}\n`,
     );
   io.stdout(
-    `Then give volleyd the code the page shows (or the address your browser ended up on): --code, or \`volley claude code ${r.acct} <code>\`.\n`,
+    `Then give volleyd the code the page shows (or the address your browser ended up on): \`volley claude code ${r.acct} <code>\`.\n`,
   );
 }
 

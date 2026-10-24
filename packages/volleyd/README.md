@@ -549,10 +549,10 @@ evidence behind each choice below.
 ```sh
 volley claude add "Work"            # profile + background sign-in; prints the sign-in links
 volley claude add "Work" --wait     # … asks for the code (not echoed) and waits until it finishes
-volley claude add "Work" --code <code-or-address>  # … finishes it with the code the page showed
 volley claude add "Work" --machine peer-a  # a profile on a paired machine, signed in there
-volley claude signin work           # sign an existing profile in again (--wait, --code as add)
-volley claude code work <code-or-address>  # finish a sign-in started elsewhere (the Desk, another shell)
+volley claude signin work           # sign an existing profile in again (--wait as add)
+volley claude code work <code-or-address>  # finish the sign-in waiting for work with the code the page showed
+volley claude signin work --code <code-or-address>  # the same: finishes the waiting sign-in, starts no new one
 volley claude list                  # one block per account (by e-mail): machines, usage, sharing
 volley claude list --show-email     # … with the e-mail unmasked (--json: the raw answer + records)
 volley claude sync [work]           # re-apply sharing.yaml, re-sync the MCP servers
@@ -629,7 +629,7 @@ prints a bearer token Volley would have to carry. The `_system` journal records
 URL; while a sign-in waits, `claude_accounts` returns its URL for a client that attached late.
 
 **Finishing a sign-in from any device.** `claude_signin_entry { acct, entry }` (the Desk's sign-in
-box, `volley claude add|signin --code`, the `--wait` prompt, `volley claude code`) takes what the
+box, `volley claude signin --code`, the `--wait` prompt, `volley claude code`) takes what the
 owner pasted (`src/claude/signin-entry.ts`): the code the code page shows, or the
 `http://localhost:<port>/callback?code=…&state=…` address a browser ended up on when the shortcut
 link could not reach the listener (another device). A code is typed into the waiting session on

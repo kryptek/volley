@@ -154,13 +154,14 @@ describe("volley claude", () => {
     }
   };
 
-  it("signin --code sends claude_signin_entry with the code and prints the masked e-mail on done", async () => {
+  it("signin --code finishes the waiting sign-in: claude_signin_entry only, masked e-mail on done", async () => {
+    // A fresh claude_signin would supersede the sign-in the code belongs to (new PKCE + state).
     const v = await entryVolleyd();
     const r = await run(["signin", "team", "--code", "abcSECRET42"]);
     expect(r.stderr).toBe("");
     expect(r.exitCode).toBe(0);
-    expect(v.seen.map((q) => q.op)).toEqual(["claude_signin", "claude_signin_entry"]);
-    expect(v.seen[1]).toMatchObject({ acct: "team", entry: "abcSECRET42" });
+    expect(v.seen.map((q) => q.op)).toEqual(["claude_signin_entry"]);
+    expect(v.seen[0]).toMatchObject({ acct: "team", entry: "abcSECRET42" });
     expect(r.stdout).toContain("signed in as o•••@example.com");
     expect(r.stdout).not.toContain("owner@example.com");
     neverPrinted(r);
@@ -172,7 +173,9 @@ describe("volley claude", () => {
     const address = "http://localhost:51051/callback?code=abcSECRET42&state=xyzSTATE42";
     const r = await run(["signin", "team", "--code", address]);
     expect(r.exitCode).toBe(0);
-    expect(v.seen[1]).toMatchObject({ op: "claude_signin_entry", acct: "team", entry: address });
+    expect(v.seen).toEqual([
+      expect.objectContaining({ op: "claude_signin_entry", acct: "team", entry: address }),
+    ]);
     neverPrinted(r);
     await v.b.disconnect();
   });
@@ -206,8 +209,15 @@ describe("volley claude", () => {
   it("--code is refused on a verb that does not sign in", async () => {
     const r = await run(["list", "--code", "abc"]);
     expect(r.exitCode).toBe(EXIT.USAGE);
-    expect(r.stderr).toMatch(/--code is for add and signin only/);
+    expect(r.stderr).toMatch(/--code is for signin only/);
     expect(r.stderr).not.toContain("abc\n");
+  });
+
+  it("add --code is refused: no code exists before add prints its link", async () => {
+    const r = await run(["add", "Work", "--code", "abcSECRET42"]);
+    expect(r.exitCode).toBe(EXIT.USAGE);
+    expect(r.stderr).toMatch(/--code is for signin only/);
+    neverPrinted(r);
   });
 
   it("add --wait on a terminal prints both links, then asks for the code with echo off", async () => {
