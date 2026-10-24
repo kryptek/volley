@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AGENT_SAMPLE_TTL_MS,
   type AccountUsage,
   type AgentOnAccount,
   LIMIT_HIT_ALARM,
@@ -12,6 +13,7 @@ import {
   agentLimitDecisions,
   bookState,
   emptyBook,
+  expireAgents,
   foldProbe,
   foldUsage,
   forgetAgent,
@@ -27,6 +29,7 @@ import {
   publishedRecord,
   rankAccounts,
   restoreBook,
+  roomLeft,
   sampleAccount,
   suggestedMove,
   untilLabel,
@@ -170,6 +173,13 @@ describe("rankAccounts", () => {
       ]),
     );
   const order = (r: readonly { account: string }[]) => r.map((x) => x.account);
+  /** As many agents in flight as each record lists, at no cost (the projection stays the identity). */
+  const flying = (accounts: Record<string, AccountUsage>) => ({
+    ...o,
+    agent_cost_pct_h: 0,
+    agent_cost_weekly_pct_h: 0,
+    in_flight: (a: string) => accounts[a]?.agents.length ?? 0,
+  });
 
   it("the owner's three accounts: the two whose weekly room expires in an hour go first, split by agents", () => {
     const accounts = recs({
@@ -177,7 +187,7 @@ describe("rankAccounts", () => {
       b: { weekly: win(80, 1), five: win(50, 3) },
       c: { weekly: win(80, 144), five: win(10, 3) },
     });
-    const ranked = rankAccounts(accounts, ["a", "b", "c"], o);
+    const ranked = rankAccounts(accounts, ["a", "b", "c"], flying(accounts));
     expect(order(ranked)).toEqual(["b", "a", "c"]);
     const [b, a, c] = ranked;
     expect(c?.binding).toBe("weekly");
@@ -302,16 +312,12 @@ describe("rankAccounts", () => {
           Object.entries(s).map(([k, [pct, agents]]) => [k, { five: win(pct, 5), agents }]),
         ),
       );
-    expect(order(rankAccounts(band({ one: [0, 2], near: [5, 0] }), ["one", "near"], o))).toEqual([
-      "near",
-      "one",
-    ]);
-    expect(order(rankAccounts(band({ one: [0, 2], far: [15, 0] }), ["one", "far"], o))).toEqual([
-      "one",
-      "far",
-    ]);
+    const rank = (accounts: Record<string, AccountUsage>, cands: string[]) =>
+      order(rankAccounts(accounts, cands, flying(accounts)));
+    expect(rank(band({ one: [0, 2], near: [5, 0] }), ["one", "near"])).toEqual(["near", "one"]);
+    expect(rank(band({ one: [0, 2], far: [15, 0] }), ["one", "far"])).toEqual(["one", "far"]);
     const three = band({ s100: [0, 2], s92: [8, 1], s85: [15, 0] });
-    expect(order(rankAccounts(three, ["s100", "s92", "s85"], o))).toEqual(["s92", "s100", "s85"]);
+    expect(rank(three, ["s100", "s92", "s85"])).toEqual(["s92", "s100", "s85"]);
   });
 
   it("an account with no usage data is on pace: after one ahead of pace, before one behind", () => {
@@ -335,14 +341,14 @@ describe("rankAccounts", () => {
     expect(opus[0]?.binding).toBe("five_hour");
   });
 
-  it("returns the full Ranked row", () => {
+  it("returns the full Ranked row; its agents are the ones in flight, not the sampled list", () => {
     const accounts = recs({ c: { weekly: win(80, 144), five: win(10, 3), agents: 2 } });
     expect(rankAccounts(accounts, ["c"], o)[0]).toEqual({
       account: "c",
       headroom: 20,
       five_hour_pct: 10,
       weekly_pct: 80,
-      agents: 2,
+      agents: 0,
       score: expect.closeTo((20 * 168) / (100 * 144), 10),
       binding: "weekly",
       eligible: true,
@@ -374,7 +380,7 @@ describe("rankAccounts", () => {
     b = fold(b, "a3", null, sample("spare", 20, at, 10));
     b = fold(b, "a4", null, sample("other", 20, at, 10));
     const accounts = accountRecords(b);
-    expect(order(rankAccounts(accounts, ["work", "spare", "other"], o))).toEqual([
+    expect(order(rankAccounts(accounts, ["work", "spare", "other"], flying(accounts)))).toEqual([
       "spare",
       "other",
       "work",
@@ -483,9 +489,36 @@ describe("rankAccounts: agents in flight (#557)", () => {
     const accounts = recs({ work: { five: win(60, 2) } });
     (accounts.work as AccountUsage).agents = ["a1", "a2"];
     expect(rankAccounts(accounts, ["work"], o)[0]).toMatchObject({
+      agents: 2,
       in_flight: 2,
       projected_pct: 80,
     });
+  });
+
+  it("a candidate's agents are its agents in flight, not the sessions its record lists (#562)", () => {
+    const accounts = recs({ primary: { five: win(5, 3) } });
+    (accounts.primary as AccountUsage).agents = Array.from({ length: 33 }, (_, i) => `c-${i}`);
+    expect(rankAccounts(accounts, ["primary"], { ...o, in_flight: () => 0 })[0]).toMatchObject({
+      agents: 0,
+      in_flight: 0,
+      projected_pct: 5,
+    });
+  });
+
+  it("the tie-break counts agents in flight: 33 sampled and none in flight goes before 1 in flight (#562)", () => {
+    const accounts = recs({ a: { five: win(10, 5) }, b: { five: win(10, 5) } });
+    (accounts.a as AccountUsage).agents = Array.from({ length: 33 }, (_, i) => `c-${i}`);
+    const flight: Record<string, number> = { a: 0, b: 1 };
+    const ranked = rankAccounts(accounts, ["b", "a"], {
+      ...o,
+      agent_cost_pct_h: 0,
+      agent_cost_weekly_pct_h: 0,
+      in_flight: (x) => flight[x] ?? 0,
+    });
+    expect(ranked.map((r) => [r.account, r.agents])).toEqual([
+      ["a", 0],
+      ["b", 1],
+    ]);
   });
 
   it("a window whose reset has passed projects from 0 on a fresh window", () => {
@@ -655,8 +688,85 @@ describe("untilLabel", () => {
     expect(untilLabel(at(240), NOW)).toBe("4h");
     expect(untilLabel(at(52 * 60), NOW)).toBe("2d 4h");
     expect(untilLabel(at(3 * 1440), NOW)).toBe("3d");
-    expect(untilLabel(at(-1), NOW)).toBe("now");
-    expect(untilLabel(null, NOW)).toBe("unknown");
+  });
+
+  it("is null when no future reset is known: never `now` or `unknown` (#562)", () => {
+    expect(untilLabel(new Date(NOW - 60_000).toISOString(), NOW)).toBeNull();
+    expect(untilLabel(new Date(NOW).toISOString(), NOW)).toBeNull();
+    expect(untilLabel(null, NOW)).toBeNull();
+    expect(untilLabel("garbage", NOW)).toBeNull();
+  });
+});
+
+describe("roomLeft (#562)", () => {
+  const at = (min: number) => new Date(NOW + min * 60_000).toISOString();
+  it("prints the room without a time when no future reset is known", () => {
+    expect(roomLeft("5h", 100, null, NOW)).toBe("5h unused");
+    expect(roomLeft("5h", 100, at(-5), NOW)).toBe("5h unused");
+    expect(roomLeft("7d", 68, null, NOW)).toBe("7d 68% left");
+    expect(roomLeft("5h", 99.8, null, NOW)).toBe("5h unused");
+  });
+
+  it("keeps the countdown for a future reset", () => {
+    expect(roomLeft("5h", 18, at(52), NOW)).toBe("5h 18% left in 52m");
+    expect(roomLeft("5h", 100, at(52), NOW)).toBe("5h 100% left in 52m");
+  });
+});
+
+describe("agent expiry (#562)", () => {
+  const T = (min: number) => new Date(NOW + min * 60_000).toISOString();
+  const book = () => {
+    let b = fold(emptyBook(), "coordinator-ab12", null, sample("primary", 5, T(-61)));
+    b = fold(b, "edge", null, sample("primary", 5, T(-60)));
+    b = fold(b, "young", null, sample("primary", 5, T(-10)));
+    b = fold(b, "w1-t1-implementer-1", "w1", sample("work", 30, T(-120)));
+    return b;
+  };
+
+  it("foldUsage records the sample time on the agent's entry; a later sample replaces it, an older one does not", () => {
+    let b = fold(emptyBook(), "a1", null, sample("work", 5, T(-30)));
+    expect(b.agents.a1?.sampled_at).toBe(T(-30));
+    b = fold(b, "a1", null, sample("work", 6, T(-5)));
+    expect(b.agents.a1?.sampled_at).toBe(T(-5));
+    b = fold(b, "a1", null, sample("work", 4, T(-20)));
+    expect(b.agents.a1?.sampled_at).toBe(T(-5));
+  });
+
+  it("records the topic's namespace when the sample gives one", () => {
+    const p = sample("work", 5, T(-30));
+    const b = foldUsage(emptyBook(), {
+      agent: "a1",
+      wave: null,
+      account: "work",
+      payload: p,
+      ns: "lab",
+    });
+    expect(b.agents.a1?.ns).toBe("lab");
+  });
+
+  it("drops an agent whose sample is older than the bound, unless keep names it; the accounts stay", () => {
+    const b = book();
+    const next = expireAgents(b, NOW, (id) => id === "w1-t1-implementer-1");
+    expect(Object.keys(next.agents).sort()).toEqual(["edge", "w1-t1-implementer-1", "young"]);
+    expect(next.accounts).toBe(b.accounts);
+    expect(accountRecords(next).primary?.agents).toEqual(["edge", "young"]);
+    expect(accountRecords(next).work).toMatchObject({
+      agents: ["w1-t1-implementer-1"],
+      waves: ["w1"],
+    });
+    const all = expireAgents(b, NOW, () => false);
+    expect(Object.keys(all.agents).sort()).toEqual(["edge", "young"]);
+    expect(accountRecords(all).work).toMatchObject({
+      agents: [],
+      waves: [],
+      five_hour: { pct: 30 },
+    });
+  });
+
+  it("is the same book when nothing goes; the bound is an hour", () => {
+    expect(AGENT_SAMPLE_TTL_MS).toBe(60 * 60_000);
+    const b = fold(emptyBook(), "young", null, sample("primary", 5, T(-10)));
+    expect(expireAgents(b, NOW, () => false)).toBe(b);
   });
 });
 
@@ -1420,9 +1530,9 @@ describe("pruneBook", () => {
   });
   const book: UsageBook = {
     agents: {
-      a1: { account: "team", wave: "w" },
-      a2: { account: "old", wave: "w" },
-      a3: { account: "primary@box-a", wave: null },
+      a1: { account: "team", wave: "w", sampled_at: "2026-10-24T12:00:00.000Z" },
+      a2: { account: "old", wave: "w", sampled_at: "2026-10-24T12:00:00.000Z" },
+      a3: { account: "primary@box-a", wave: null, sampled_at: "2026-10-24T12:00:00.000Z" },
     },
     accounts: {
       primary: acct(1),

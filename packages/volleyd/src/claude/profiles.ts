@@ -5,7 +5,7 @@ import { ID_PATTERN } from "volley-mcp/topics";
 import { systemClock } from "../clock";
 import { CONFIG_DEFAULTS } from "../config-defaults";
 import { familyOf } from "./context-window";
-import { type Ranked, untilLabel } from "./usage";
+import { type Ranked, roomLeft, untilLabel } from "./usage";
 
 /**
  * Claude account profiles: one Claude Code profile per account, each its own
@@ -390,7 +390,8 @@ const capitalized = (s: string) => `${s.charAt(0).toUpperCase()}${s.slice(1)}`;
  * `work: 18% left, resets in 52m (use it or lose it) on peer-a; primary@peer-a 7d 72% left,
  * resets in 2d 4h; spare over the 97% cap (5h 98%)`: the pick's binding window (named unless it
  * is the 5-hour one), then each other candidate's; with agents in flight its projection too
- * (`18% left (8% after 1 in flight)`). Ids and record keys only, never an e-mail.
+ * (`18% left (8% after 1 in flight)`). With no future reset known the room has no time and no
+ * tail: `work: 5h unused on local`, `… 7d 68% left`. Ids and record keys only, never an e-mail.
  */
 function balanceLine(
   ranked: readonly Ranked[],
@@ -416,9 +417,18 @@ function balanceLine(
       : null;
   const after = (r: Ranked, p: number, used: boolean) =>
     `${pct(used ? p : 100 - p)} after ${r.in_flight} in flight`;
+  const until = (r: Ranked) => untilLabel(r.binding_resets_at, o.now);
+  const resetsIn = (r: Ranked) => {
+    const t = until(r);
+    return t !== null ? `, resets in ${t}` : "";
+  };
   const left = (r: Ranked) => {
     const p = projected(r);
-    return `${r.binding === "five_hour" ? "" : `${label(r.binding)} `}${pct(r.binding_left ?? 0)} left${p !== null ? ` (${after(r, p, false)})` : ""}, resets in ${untilLabel(r.binding_resets_at, o.now)}`;
+    const flight = p !== null ? ` (${after(r, p, false)})` : "";
+    // no future reset known: the room without a time (`5h unused`, `7d 68% left`)
+    if (until(r) === null)
+      return `${roomLeft(label(r.binding), r.binding_left ?? 0, null, o.now)}${flight}`;
+    return `${r.binding === "five_hour" ? "" : `${label(r.binding)} `}${pct(r.binding_left ?? 0)} left${flight}${resetsIn(r)}`;
   };
   // the first window at or over the cap, with its reset when it is the binding one (the only
   // reset a ranked row carries)
@@ -432,12 +442,9 @@ function balanceLine(
     // under the cap as sampled, over it with the agents in flight: the binding window's figures
     const proj = projected(r);
     if (p == null && proj !== null && r.binding_left !== null)
-      return ` (${label(r.binding)} ${pct(100 - r.binding_left)}, ${after(r, proj, true)}${withReset ? `, resets in ${untilLabel(r.binding_resets_at, o.now)}` : ""})`;
+      return ` (${label(r.binding)} ${pct(100 - r.binding_left)}, ${after(r, proj, true)}${withReset ? resetsIn(r) : ""})`;
     if (p == null) return "";
-    const reset =
-      withReset && kind === r.binding
-        ? `, resets in ${untilLabel(r.binding_resets_at, o.now)}`
-        : "";
+    const reset = withReset && kind === r.binding ? resetsIn(r) : "";
     return ` (${label(kind)} ${pct(p)}${reset})`;
   };
   const overCap = (r: Ranked) => `over the ${o.cap}% cap${overWindow(r, false)}`;
@@ -452,7 +459,7 @@ function balanceLine(
     best.binding === null
       ? `${id}: no usage yet (balanced) on ${machine}`
       : best.eligible
-        ? `${id}: ${left(best)} (use it or lose it) on ${machine}`
+        ? `${id}: ${left(best)}${until(best) !== null ? " (use it or lose it)" : ""} on ${machine}`
         : `${id}: over the ${o.cap}% cap, least over on ${machine}${overWindow(best, true)}`;
   return [head, ...rest.map(other)].join("; ");
 }

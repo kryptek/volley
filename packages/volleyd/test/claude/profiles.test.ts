@@ -311,6 +311,34 @@ describe("selectAccount: task > wave > config default > primary", () => {
     expect(selectAccount(r, reg, { wave: "most_headroom" }).source).toBe("balance");
   });
 
+  it("the why line prints the room without a time when no future reset is known (#562)", () => {
+    const fresh = (left: number, resets: string | null, binding: Ranked["binding"] = "five_hour") =>
+      row("work", {
+        headroom: left,
+        five_hour_pct: 100 - left,
+        score: 1,
+        binding,
+        binding_left: left,
+        binding_resets_at: resets,
+      });
+    const why = (rows: Ranked[]) => selectAccount(r, reg, { now: T, capPct: 97 }, () => rows).why;
+    expect(why([fresh(100, null)])).toBe("work: 5h unused on local");
+    expect(why([fresh(100, at(-5))])).toBe("work: 5h unused on local");
+    expect(why([fresh(68, null, "weekly")])).toBe("work: 7d 68% left on local");
+    expect(why([fresh(18, at(52))])).toBe(
+      "work: 18% left, resets in 52m (use it or lose it) on local",
+    );
+    const other = { ...fresh(100, null), account: "primary" };
+    expect(why([fresh(18, at(52)), other])).toBe(
+      "work: 18% left, resets in 52m (use it or lose it) on local; primary 5h unused",
+    );
+    // over the cap with an unknown reset: the window's figure, no `resets in`
+    const over = { ...fresh(2, null), eligible: false, five_hour_pct: 98 };
+    expect(why([over])).toBe("work: over the 97% cap, least over on local (5h 98%)");
+    for (const w of [why([fresh(100, null)]), why([fresh(100, at(-5))]), why([over])])
+      expect(w).not.toMatch(/unknown|in now/);
+  });
+
   it("the why line names an over-cap candidate, an all-over-cap pick, and never an e-mail", () => {
     const over = row("spare", {
       headroom: 2,

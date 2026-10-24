@@ -1,11 +1,11 @@
 import { maskEmail } from "volley-mcp/mask";
-import { untilLabel } from "volleyd/claude/usage";
+import { roomLeft } from "volleyd/claude/usage";
 import type { UsageRecord } from "./groups";
 
 /**
  * `volley claude balance`: volleyd's `claude_balance` answer (SPEC §4.6.11) as a table, one block
  * per machine, its candidates in volleyd's rank order with their figures, the window that binds
- * each (its room left and when it resets, or `over cap`) and agents, and an arrow on the account each model family (or `--model`) would start on next. The figures
+ * each (its room left and when it resets, or `over cap`) and the agents in flight on each, and an arrow on the account each model family (or `--model`) would start on next. The figures
  * are volleyd's; the e-mail and the Fable window come from the account's retained usage record
  * (a ranking without a model carries no family window). Pure.
  */
@@ -72,8 +72,9 @@ function inFlight(c: BalanceCandidate, used: boolean): string {
 }
 
 /**
- * `5h 18% left in 52m`, with `(12% after 3 in flight)` when agents in flight move it; `over cap`;
- * `headroom N` from a volleyd that predates the rank rule.
+ * `5h 18% left in 52m`, with `(12% after 3 in flight)` when agents in flight move it; with no
+ * future reset known, `5h unused` or `7d 68% left`; `over cap`; `headroom N` from a volleyd that
+ * predates the rank rule.
  */
 function bindingFigure(c: BalanceCandidate, family: string | undefined, now: number): string {
   if (c.eligible === false) return `over cap${inFlight(c, true)}`;
@@ -83,7 +84,7 @@ function bindingFigure(c: BalanceCandidate, family: string | undefined, now: num
     c.binding === "model_weekly" && family !== undefined
       ? `${family.charAt(0).toUpperCase()}${family.slice(1)}`
       : WINDOW_LABEL[c.binding];
-  return `${label} ${pct(c.binding_left)} left in ${untilLabel(c.binding_resets_at ?? null, now)}${inFlight(c, false)}`;
+  return `${roomLeft(label, c.binding_left, c.binding_resets_at ?? null, now)}${inFlight(c, false)}`;
 }
 
 /** Columns padded to the widest cell of each, joined by two spaces. */
