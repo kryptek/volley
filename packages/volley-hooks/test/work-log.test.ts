@@ -307,6 +307,19 @@ describe("recordActivity (work-log.json)", () => {
     expect(await settleWorkLog(stateDir(), A)).toBe(0);
   });
 
+  it("waits out a live holder slower than 2 s (a loaded machine) instead of dropping the count", async () => {
+    const dir = stateDir();
+    const { writeFileSync, unlinkSync } = await import("node:fs");
+    writeFileSync(join(dir, "work-log.lock"), "4242.live-holder");
+    const release = setTimeout(() => unlinkSync(join(dir, "work-log.lock")), 3000);
+    try {
+      const tick = await recordActivity(dir, "x", { toolCall: true, sessionId: A, now: () => 1 });
+      expect(tick.tool_calls).toBe(1);
+    } finally {
+      clearTimeout(release);
+    }
+  });
+
   it("a corrupt work-log.json starts over", async () => {
     const dir = stateDir();
     const { writeFileSync } = await import("node:fs");

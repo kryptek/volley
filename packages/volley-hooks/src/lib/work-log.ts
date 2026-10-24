@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
-import { withLock, writeFileAtomic } from "./seq";
+import { LOCK_STALE_MS, withLock, writeFileAtomic } from "./seq";
 import type { HookSession } from "./session";
 
 /**
@@ -262,6 +262,13 @@ export function workLogSession(input: { session_id?: unknown }, agentId: string)
 
 const workLogPath = (stateDir: string) => join(stateDir, "work-log.json");
 const lockPath = (stateDir: string) => join(stateDir, "work-log.lock");
+/**
+ * Run `fn` under `work-log.lock`, waiting as long as a live holder can keep it: on a loaded
+ * machine parallel hooks queue for seconds, and a shorter wait drops their counts. By then a
+ * dead hook's lock is stale and is broken.
+ */
+const underLock = <T>(stateDir: string, fn: () => T) =>
+  withLock(lockPath(stateDir), fn, LOCK_STALE_MS);
 
 function entryOf(v: unknown): Entry | null {
   if (typeof v !== "object" || v === null) return null;
@@ -374,7 +381,7 @@ export function recordActivity(
   msg: string,
   opts: TickOpts & { toolCall: boolean },
 ): Promise<{ publish: boolean; tool_calls: number }> {
-  return withLock(lockPath(stateDir), () => {
+  return underLock(stateDir, () => {
     const now = (opts.now ?? Date.now)();
     const prev = sessionWorkLog(stateDir, opts.sessionId);
     const tool_calls = prev.tool_calls + (opts.toolCall ? 1 : 0);
@@ -400,7 +407,7 @@ export function flushPending(
   stateDir: string,
   opts: TickOpts,
 ): Promise<{ msg: string; tool_calls: number } | null> {
-  return withLock(lockPath(stateDir), () => {
+  return underLock(stateDir, () => {
     const now = (opts.now ?? Date.now)();
     const log = readWorkLog(stateDir, opts.sessionId);
     if (log.pending === undefined) return null;
@@ -423,7 +430,7 @@ export function settleWorkLog(
   sessionId: string,
   now: () => number = Date.now,
 ): Promise<number> {
-  return withLock(lockPath(stateDir), () => {
+  return underLock(stateDir, () => {
     if (readSessions(stateDir)[sessionId] === undefined) return 0;
     const { pending: _dropped, ...log } = readWorkLog(stateDir, sessionId);
     writeWorkLog(stateDir, { ...log, session_id: sessionId }, now());
