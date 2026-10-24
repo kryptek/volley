@@ -263,6 +263,6 @@ console.log(
   `axe color-contrast violations: ${violations}; measured text below AA: ${measured}; beyond Volley's own: ${addedCount}`,
 );
 const misses = Object.entries(report).filter(([, r]) => r.centre && !r.centre.pass);
-for (const [key, r] of misses)
-  console.error(`centre check missed: ${key} ${JSON.stringify(r.centre)}`);
+for (const [run, r] of misses)
+  console.error(`centre check missed: ${run} ${JSON.stringify(r.centre)}`);
 if (violations > 0 || addedCount > 0 || misses.length) process.exitCode = 1;
