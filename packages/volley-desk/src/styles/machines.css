@@ -645,12 +645,35 @@ button.m-local:focus-visible {
   width: 10px;
   height: 10px;
 }
-.repo-repair {
+.repo-repair,
+.repo-why {
   padding: 1px 8px;
   font-size: 11px;
 }
+/* A blocked chip's Why, open: the chip becomes a card holding every reason in full, wrapped. */
+.repo-chip:has(> .repo-chip__why) {
+  flex-wrap: wrap;
+  border-radius: 10px;
+  padding: 4px 6px 6px 8px;
+}
+.repo-chip__why {
+  flex-basis: 100%;
+  min-width: 0;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.repo-chip__why p {
+  margin: 2px 0 0;
+}
 .repo-empty {
   padding: 12px;
+}
+/* Add repository: why Add is off, under the actions. */
+.repo-blocker {
+  display: block;
+  margin-top: 6px;
+  text-align: right;
 }
 .repo-field {
   display: flex;

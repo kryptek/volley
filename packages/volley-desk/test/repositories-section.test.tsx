@@ -83,7 +83,37 @@ describe("Settings › Repositories", () => {
     expect(ops.doctor).toHaveBeenCalledWith("box-b", { fix: false });
     // The supervisor's own machine is not repaired over ssh: its blocked chip has no Repair.
     const hub = within(chips(APP).getByRole("listitem", { name: /^hub:/ }));
-    expect(hub.queryByRole("button")).toBeNull();
+    expect(hub.queryByRole("button", { name: /^Repair/ })).toBeNull();
+  });
+
+  it("a blocked chip shows a short reason and a Why that opens every reason in full; Repair stays beside it", async () => {
+    const long =
+      "volley peer doctor on you@box-b printed no report: bash: line 2: volley: command not found";
+    const r = readiness();
+    r["box-b"] = verdict("box-b", {
+      [APP]: { state: "blocked", reasons: [long, "gh: not signed in"] },
+    });
+    setup({ readiness: r });
+    await act(flush);
+    const li = chips(APP).getByRole("listitem", {
+      name: "box-b: blocked: volley peer doctor on you@box-b printed no report…",
+    });
+    expect(li).toHaveAttribute("title", `${long}\ngh: not signed in`);
+    const chip = within(li);
+    expect(chip.getByRole("button", { name: "Repair box-b" })).toBeInTheDocument();
+    const why = chip.getByRole("button", { name: "Why" });
+    expect(why).toHaveAttribute("aria-expanded", "false");
+    expect(chip.queryByText(long)).toBeNull();
+    fireEvent.click(why);
+    expect(why).toHaveAttribute("aria-expanded", "true");
+    expect(chip.getByText(long)).toBeInTheDocument();
+    expect(chip.getByText("gh: not signed in")).toBeInTheDocument();
+    fireEvent.click(why);
+    expect(chip.queryByText(long)).toBeNull();
+    // A chip that is not blocked has no Why.
+    expect(
+      within(chips(APP).getByRole("listitem", { name: "box-a: ready" })).queryByRole("button"),
+    ).toBeNull();
   });
 
   it("Remove… confirms with the clone paths left on disk, sends repo_remove, and says what stayed", async () => {
