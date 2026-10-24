@@ -11,6 +11,7 @@ import type {
   WorktreeSpec,
 } from "../../src/hosts/host";
 import type {
+  CloneProbe,
   DoctorRunOptions,
   RemoteHost,
   RemoteHostSpec,
@@ -368,6 +369,8 @@ export interface FakeRemoteAnswers {
    * Default: an all-green report.
    */
   doctor?: DoctorReport | Error | (() => Promise<DoctorReport>);
+  /** probeClone's answer per path (an Error: ssh failed). Default: a clone of `a/a` there. */
+  clone?: (path: string) => CloneProbe | Error;
 }
 
 export type FakeRemoteHost = FakeHost &
@@ -375,6 +378,8 @@ export type FakeRemoteHost = FakeHost &
     answers: FakeRemoteAnswers;
     probes: number;
     doctorRuns: DoctorRunOptions[];
+    /** The paths probeClone was asked about, in order. */
+    cloneProbes: string[];
   };
 
 /** A doctor report with every check passing. */
@@ -423,11 +428,20 @@ export function fakeRemoteHost(
     answers,
     probes: 0,
     doctorRuns: [],
+    cloneProbes: [],
     // The box's steps as the local `ssh -T … bash -s` (the fake exec checks the fence).
     run: (steps: RemoteStep[], opts: RemoteRunOptions = {}) =>
       local.fake.exec(["ssh", "-T", "-o", "BatchMode=yes", spec.target, "bash", "-s"], {
         ...opts,
-        remote: { steps },
+        // The host record SshTmuxHost.run passes: its volley_dir is the checkout that may run.
+        remote: {
+          steps,
+          host: {
+            name: spec.name,
+            worktree_root: spec.worktree_root ?? "",
+            volley_dir: spec.volley_dir,
+          },
+        },
       }),
     probePath: async () => {
       h.probes++;
@@ -440,6 +454,17 @@ export function fakeRemoteHost(
       const a = h.answers.doctor ?? GREEN_DOCTOR;
       if (a instanceof Error) throw a;
       return typeof a === "function" ? a() : a;
+    },
+    probeClone: async (path: string) => {
+      h.cloneProbes.push(path);
+      const a = h.answers.clone?.(path) ?? {
+        state: "found",
+        root: path,
+        origin: "https://github.com/a/a.git",
+        slug: "a/a",
+      };
+      if (a instanceof Error) throw a;
+      return a;
     },
   });
   return h;

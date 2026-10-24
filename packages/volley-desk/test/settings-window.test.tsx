@@ -527,6 +527,7 @@ describe("SettingsWindow", () => {
       repoRemove: vi.fn(),
       repoList: vi.fn(),
       repoStatus: vi.fn(),
+      repoProbe: vi.fn(),
       machineAdd: vi.fn(),
     };
     render(

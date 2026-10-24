@@ -46,6 +46,9 @@ type OnBox = (
   opts: ExecOptions,
 ) => Promise<{ code?: number; stdout?: string; stderr?: string } | null>;
 
+/** How a paired machine runs `volley`: its own checkout (#550), never a `volley` on its PATH. */
+const BOX_VOLLEY = "bun /opt/volley/packages/volley-cli/src/cli.ts";
+
 async function setup(onBox: OnBox = async () => null) {
   const f = await makeFleet({ extraConfig: EXTRA });
   fleet = f;
@@ -172,9 +175,9 @@ function target(newHome: string, userHome: string, join_: (code: string) => Prom
       writeFileSync(write.stdout as string, Buffer.from(write.stdin ?? "", "base64"));
       return null;
     }
-    const receive = lines.find((l) => l.startsWith("volley role receive supervisor"));
+    const receive = lines.find((l) => l.startsWith(`${BOX_VOLLEY} role receive supervisor`));
     if (receive !== undefined) {
-      const [, , , , bundle = "", , from = ""] = receive.split(" ");
+      const [, , , , , bundle = "", , from = ""] = receive.split(" ");
       const stage = tempDir("volleyd-receive-");
       spawnSync("tar", ["-xzf", bundle, "-C", stage]);
       cpSync(join(stage, "volleyd"), newHome, { recursive: true });
@@ -190,8 +193,8 @@ function target(newHome: string, userHome: string, join_: (code: string) => Prom
       );
       return null;
     }
-    const repair = lines.find((l) => l.startsWith("volley peer join"));
-    if (repair !== undefined) return { code: await join_(repair.split(" ")[3] as string) };
+    const repair = lines.find((l) => l.startsWith(`${BOX_VOLLEY} peer join`));
+    if (repair !== undefined) return { code: await join_(repair.split(" ")[4] as string) };
     return null;
   };
   return answer;
@@ -238,9 +241,9 @@ describe("the supervisor move's hand-over (#469): two daemons on one broker", ()
     expect(f.auth.argvs(["tar"])).toHaveLength(1);
     const receive = f.exec.calls
       .flatMap((c) => (c.opts.remote?.steps ?? []).map((s) => s.argv.join(" ")))
-      .find((l) => l.startsWith("volley role receive"));
+      .find((l) => l.startsWith(`${BOX_VOLLEY} role receive`));
     expect(receive).toBe(
-      `volley role receive supervisor ${userHome}/.volley/roles/${moveId}/bundle.tgz --from ${LOCAL} --local-terminal tmux --broker-url mqtt://127.0.0.1:21883`,
+      `${BOX_VOLLEY} role receive supervisor ${userHome}/.volley/roles/${moveId}/bundle.tgz --from ${LOCAL} --local-terminal tmux --broker-url mqtt://127.0.0.1:21883`,
     );
     expect(existsSync(join(newHome, "roles", moveId, "handover.json"))).toBe(true);
 
@@ -338,7 +341,7 @@ describe("the supervisor move's hand-over (#469): two daemons on one broker", ()
     const { f, moveId } = await startMove(async (lines) =>
       lines[0] === "printenv HOME"
         ? { stdout: "/path/to/home\n" }
-        : lines.some((l) => l.startsWith("volley role receive"))
+        : lines.some((l) => l.startsWith(`${BOX_VOLLEY} role receive`))
           ? { code: 1, stderr: "volley role receive: the manifest's to is studio, not box" }
           : null,
     );
@@ -356,7 +359,7 @@ describe("the supervisor move's hand-over (#469): two daemons on one broker", ()
     const { f, moveId } = await startMove(async (lines) =>
       lines[0] === "printenv HOME"
         ? { stdout: "/path/to/home\n" }
-        : lines.some((l) => l.startsWith("volley role receive"))
+        : lines.some((l) => l.startsWith(`${BOX_VOLLEY} role receive`))
           ? {
               code: 3,
               stderr: "volley role receive: systemctl --user restart volleyd.service failed",

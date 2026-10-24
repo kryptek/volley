@@ -1,6 +1,6 @@
 {
   "name": "volley-cli",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "private": true,
   "description": "Volley CLI — `volley pub / sub / wait / list` for shell scripts and CI",
   "license": "Apache-2.0",
@@ -21,6 +21,7 @@
     "./machine/add": "./src/machine/add.ts",
     "./machine/ssh": "./src/machine/ssh.ts",
     "./peer/machine": "./src/peer/checks/machine.ts",
+    "./peer/repo": "./src/peer/checks/repo.ts",
     "./setup/accounts": "./src/setup/accounts.ts",
     "./setup/first-wave": "./src/setup/first-wave.ts",
     "./setup/first-wave-repo": "./src/setup/first-wave-repo.ts",

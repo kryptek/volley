@@ -116,8 +116,25 @@ export function reposOnMachine(
 /** Whether Repair can clone it there: no clone (volleyd says absent, or the record found none). */
 export const cloneable = (r: RepoOnMachine): boolean => r.state === "absent" || r.exists === false;
 
+/** Where a chip's reason is cut: at its first `: ` past this many characters… */
+const SHORT_FROM = 24;
+/** …or at this many, whichever comes first. */
+const SHORT_MAX = 72;
+
 /**
- * Where it stands, in a chip's words: `ready`, `cloning…`, `blocked: <the first reason>`,
+ * The first reason, short enough for a chip on a phone: cut at its first `: ` past 24 characters
+ * (`volley peer doctor on <target> printed no report: bash: …` reads up to `report`) or at 72
+ * characters, whichever comes first, with `…`. The whole text is the chip's `Why`.
+ */
+export function shortReason(reasons: readonly string[]): string {
+  const first = reasons[0] ?? "";
+  const colon = first.indexOf(": ", SHORT_FROM);
+  const cut = Math.min(colon < 0 ? Number.POSITIVE_INFINITY : colon, SHORT_MAX);
+  return cut < first.length ? `${first.slice(0, cut).trimEnd()}…` : first;
+}
+
+/**
+ * Where it stands, in a chip's words: `ready`, `cloning…`, `blocked: <the first reason, short>`,
  * `no clone yet`, or `none` while volleyd has said nothing about it there.
  */
 export function stateText(
@@ -130,7 +147,7 @@ export function stateText(
     case "cloning":
       return "cloning…";
     case "blocked":
-      return r.reasons[0] ? `blocked: ${r.reasons[0]}` : "blocked";
+      return r.reasons[0] ? `blocked: ${shortReason(r.reasons)}` : "blocked";
     case "absent":
       return "no clone yet";
     default:

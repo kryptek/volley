@@ -28,6 +28,10 @@ import { stubEnv } from "./helpers/with-env";
 const SSH = ["ssh", "-T", "-o", "BatchMode=yes", "dev@box", "bash", "-s"];
 const remote = (...steps: RemoteStep[]) => ({ remote: { steps } });
 const step = (...argv: string[]): RemoteStep => ({ argv });
+/** A remote script on a paired machine whose volley checkout is `volley_dir`. */
+const onBox = (volley_dir: string, ...steps: RemoteStep[]) => ({
+  remote: { steps, host: { name: "box", worktree_root: "/wt", volley_dir } },
+});
 /** A paired machine, for the SshTmuxHost cases (its ssh argv is what the fence allows). */
 const SSH_SPEC: RepoHostSpec = {
   name: "box",
@@ -49,6 +53,11 @@ describe("remote allow-list (ssh … bash -s)", () => {
     ["git", "reset", "--hard"],
     ["git", "worktree", "remove", "/wt/x"],
     ["git", "-c", "core.sshCommand=sh", "fetch"],
+    ["git", "-C", "/srv/example-repo", "remote", "add", "x", "https://github.com/o/r"],
+    ["git", "-C", "/srv/example-repo", "remote", "set-url", "origin", "https://github.com/o/r"],
+    ["git", "-C", "/srv/example-repo", "remote", "get-url", "upstream"],
+    ["git", "-C", "/srv/example-repo", "remote", "-v"],
+    ["git", "-C", "/srv/example-repo", "remote"],
     ["rm", "-rf", "/path/to/home/src"],
     ["rm", "-fr", "/"],
     ["rm", "/tmp/x"],
@@ -144,6 +153,9 @@ describe("remote allow-list (ssh … bash -s)", () => {
       "origin/release/w1",
     ],
     ["git", "-C", "/wt/x", "rev-parse", "--is-inside-work-tree"],
+    // repo_probe (SPEC §4.6.21): an adopted clone's root and its origin
+    ["git", "-C", "/srv/example-repo", "rev-parse", "--show-toplevel"],
+    ["git", "-C", "/srv/example-repo", "remote", "get-url", "origin"],
     ["gh", "issue", "view", "42", "--json", "number,title,body,url"],
     // Verifying a PR on a paired machine: the same read-only gh policy as locally.
     [
@@ -919,9 +931,12 @@ describe("exec + the remote fence", () => {
 });
 
 describe("Fleet steps (F2): the PATH probe and the doctor on a paired machine", () => {
-  const allowed = (s: RemoteStep) => () => assertAllowed(SSH, remote(s));
-  const DOCTOR = ["volley", "peer", "doctor"];
   const VOLLEY_DIR = "/opt/volley";
+  const allowed = (s: RemoteStep) => () => assertAllowed(SSH, onBox(VOLLEY_DIR, s));
+  /** The box's own checkout runs the doctor (#550): never a `volley` found on its PATH. */
+  const DOCTOR = ["bun", `${VOLLEY_DIR}/packages/volley-cli/src/cli.ts`, "peer", "doctor"];
+  /** The supervisor's own doctor: a local program. */
+  const LOCAL_DOCTOR = ["volley", "peer", "doctor"];
 
   it("allows `command -v` of the probed tools only", () => {
     expect(allowed(step("command", "-v", "claude", "bun"))).not.toThrow();
@@ -1015,9 +1030,9 @@ describe("Fleet steps (F2): the PATH probe and the doctor on a paired machine", 
       ].map((url) => [...DOCTOR, "--json", "--fix", "--yes", "--clone", "--origin", url]),
       [...DOCTOR, "--json", "--fix", "--yes", "--clone", "--origin", "https://github.com/o/r", "x"],
       [...DOCTOR],
-      ["volley", "peer", "remove", "box-a"],
-      ["volley", "peer", "join", "ABCD-EFGH"],
-      ["volley", "auth", "list", "--json"],
+      [...DOCTOR.slice(0, 2), "peer", "remove", "box-a"],
+      [...DOCTOR.slice(0, 2), "peer", "join", "ABCD-EFGH"],
+      [...DOCTOR.slice(0, 2), "auth", "list", "--json"],
     ]) {
       expect(allowed({ argv, cwd: VOLLEY_DIR }), argv.join(" ")).toThrow(FenceError);
     }
@@ -1088,6 +1103,47 @@ describe("Fleet steps (F2): the PATH probe and the doctor on a paired machine", 
     }
   });
 
+  it("runs the box's own checkout only (#550): the CLI script under its volley_dir, exactly", () => {
+    const args = ["peer", "doctor", "--json"];
+    expect(allowed({ argv: [...DOCTOR, "--json"], cwd: VOLLEY_DIR })).not.toThrow();
+    for (const script of [
+      "/tmp/x/packages/volley-cli/src/cli.ts",
+      "packages/volley-cli/src/cli.ts",
+      "./packages/volley-cli/src/cli.ts",
+      `${VOLLEY_DIR}/../x/packages/volley-cli/src/cli.ts`,
+      `${VOLLEY_DIR}/packages/volley-cli/src/../../volleyd/src/cli.ts`,
+      `${VOLLEY_DIR}/packages/volleyd/src/cli.ts`,
+      `${VOLLEY_DIR}//packages/volley-cli/src/cli.ts`,
+    ]) {
+      const argv = ["bun", script, ...args];
+      expect(allowed({ argv, cwd: VOLLEY_DIR }), script).toThrow(FenceError);
+    }
+    // A host with no volley_dir names no checkout: nothing runs.
+    expect(() =>
+      assertAllowed(SSH, remote({ argv: [...DOCTOR, "--json"], cwd: VOLLEY_DIR })),
+    ).toThrow(FenceError);
+    // A different checkout than the host's own.
+    expect(() =>
+      assertAllowed(SSH, onBox("/srv/volley", { argv: [...DOCTOR, "--json"], cwd: VOLLEY_DIR })),
+    ).toThrow(FenceError);
+  });
+
+  it("refuses the bare `volley` on the box's PATH, and bun running anything but the CLI (#550)", () => {
+    for (const argv of [
+      ["volley", "peer", "doctor", "--json"],
+      ["volley", "peer", "doctor", "--json", "--supervisor-volley-dir", VOLLEY_DIR],
+      ["volley", "peer", "doctor", "--json", "--probe-login", "team"],
+      ["bun", "install"],
+      ["bun", "-e", "require('child_process').execSync('id')"],
+      ["bun", "run", "x"],
+      ["bun", "x", "volley", "peer", "doctor", "--json"],
+      ["bun"],
+      ["bun", "--bun", DOCTOR[1] as string, "peer", "doctor", "--json"],
+    ]) {
+      expect(allowed({ argv, cwd: VOLLEY_DIR }), argv.join(" ")).toThrow(FenceError);
+    }
+  });
+
   it("renders the probe as one quoted line on /dev/null (the same bash -s that runs launch.sh)", () => {
     expect(renderRemoteScript({ steps: [step("command", "-v", "claude", "bun")] })).toBe(
       "set -euo pipefail\n'command' '-v' 'claude' 'bun' </dev/null\n",
@@ -1095,29 +1151,33 @@ describe("Fleet steps (F2): the PATH probe and the doctor on a paired machine", 
   });
 
   it("the supervisor's own doctor: `volley peer doctor --json [--repo <abs>]` locally, nothing more", () => {
-    expect(() => assertAllowed([...DOCTOR, "--json"])).not.toThrow();
-    expect(() => assertAllowed([...DOCTOR, "--json", "--repo", "/srv/repo"])).not.toThrow();
-    expect(() => assertAllowed([...DOCTOR, "--json", "--fix", "--yes"])).toThrow(FenceError);
+    expect(() => assertAllowed([...LOCAL_DOCTOR, "--json"])).not.toThrow();
+    expect(() => assertAllowed([...LOCAL_DOCTOR, "--json", "--repo", "/srv/repo"])).not.toThrow();
+    expect(() => assertAllowed([...LOCAL_DOCTOR, "--json", "--fix", "--yes"])).toThrow(FenceError);
     expect(() =>
-      assertAllowed([...DOCTOR, "--json", "--repo", "/srv/repo", "--fix", "--yes"]),
+      assertAllowed([...LOCAL_DOCTOR, "--json", "--repo", "/srv/repo", "--fix", "--yes"]),
     ).toThrow(FenceError);
-    expect(() => assertAllowed([...DOCTOR, "--json", "--repo", "/srv/repo", "--clone"])).toThrow(
+    expect(() =>
+      assertAllowed([...LOCAL_DOCTOR, "--json", "--repo", "/srv/repo", "--clone"]),
+    ).toThrow(FenceError);
+    for (const bad of ["repo", "-x", "--fix", "/srv/../etc", "/srv/./repo", "/srv/re\npo", ""]) {
+      expect(() => assertAllowed([...LOCAL_DOCTOR, "--json", "--repo", bad]), bad).toThrow(
+        FenceError,
+      );
+    }
+    expect(() => assertAllowed([...LOCAL_DOCTOR, "--repo", "/srv/repo", "--json"])).toThrow(
       FenceError,
     );
-    for (const bad of ["repo", "-x", "--fix", "/srv/../etc", "/srv/./repo", "/srv/re\npo", ""]) {
-      expect(() => assertAllowed([...DOCTOR, "--json", "--repo", bad]), bad).toThrow(FenceError);
-    }
-    expect(() => assertAllowed([...DOCTOR, "--repo", "/srv/repo", "--json"])).toThrow(FenceError);
-    expect(() => assertAllowed([...DOCTOR, "--json", "--repo"])).toThrow(FenceError);
+    expect(() => assertAllowed([...LOCAL_DOCTOR, "--json", "--repo"])).toThrow(FenceError);
     expect(() => assertAllowed(["volley", "peer", "remove", "box-a"])).toThrow(FenceError);
     // a prime's probe: one login's reading
-    expect(() => assertAllowed([...DOCTOR, "--json", "--probe-login", "team"])).not.toThrow();
+    expect(() => assertAllowed([...LOCAL_DOCTOR, "--json", "--probe-login", "team"])).not.toThrow();
     for (const bad of ["", "-x", "Team", "a/b"])
-      expect(() => assertAllowed([...DOCTOR, "--json", "--probe-login", bad]), bad).toThrow(
+      expect(() => assertAllowed([...LOCAL_DOCTOR, "--json", "--probe-login", bad]), bad).toThrow(
         FenceError,
       );
     expect(() =>
-      assertAllowed([...DOCTOR, "--json", "--probe-login", "team", "--repo", "/srv/repo"]),
+      assertAllowed([...LOCAL_DOCTOR, "--json", "--probe-login", "team", "--repo", "/srv/repo"]),
     ).toThrow(FenceError);
   });
 });
@@ -1491,8 +1551,10 @@ describe("a profile on a paired machine in its launch.sh (account balancing)", (
 });
 
 describe("machine roles (#460, #466, #469): the REMOTE steps of peer_retarget and a role move", () => {
-  const allowed = (s: RemoteStep) => () => assertAllowed(SSH, remote(s));
-  const V = (...a: string[]) => step("volley", ...a);
+  const VOLLEY_DIR = "/path/to/home/src/volley";
+  const allowed = (s: RemoteStep) => () => assertAllowed(SSH, onBox(VOLLEY_DIR, s));
+  /** The box's own checkout runs each step (#550), never a `volley` on its PATH. */
+  const V = (...a: string[]) => step("bun", `${VOLLEY_DIR}/packages/volley-cli/src/cli.ts`, ...a);
 
   it("a box's launch.sh names its own broker port: 1883 on a tunnel: none box, never on an ssh one", () => {
     const vars = (port: number) => ({
@@ -1709,5 +1771,24 @@ describe("machine roles (#460, #466, #469): the REMOTE steps of peer_retarget an
       "/path/to/home/.volley/roles/m-1/other.tgz",
     ])
       expect(allowed({ argv: ["base64", "-d"], stdin: b64, stdout: out }), out).toThrow(FenceError);
+  });
+
+  it("a role move's step is never the bare `volley` on the box's PATH (#550)", () => {
+    for (const a of [
+      ["peer", "retarget", "--to", "owner@box-a.lan"],
+      ["desk", "uninstall"],
+      ["broker", "probe"],
+      [
+        "role",
+        "receive",
+        "supervisor",
+        "/path/to/home/.volley/roles/m-1/bundle.tgz",
+        "--from",
+        "x",
+      ],
+    ]) {
+      expect(allowed(V(...a)), a.join(" ")).not.toThrow();
+      expect(allowed(step("volley", ...a)), a.join(" ")).toThrow(FenceError);
+    }
   });
 });

@@ -14,6 +14,7 @@ import {
   type RepoHostSpec,
   type SlugTarget,
   SshTmuxHost,
+  classifyRevParse,
   resolveRemoteHost,
 } from "../src/hosts/ssh-tmux";
 import { LAUNCH_COMMAND, renderLaunchScript } from "../src/launch";
@@ -851,6 +852,69 @@ describe("SshTmuxHost", () => {
     }
   });
 
+  it("probeClone reads the clone's root, then its origin, as two scripts (repo_probe)", async () => {
+    const r = remote((s) =>
+      argvIs("git", "-C", "/srv/example-repo", "rev-parse", "--show-toplevel")(s)
+        ? { stdout: "/srv/example-repo\n" }
+        : argvIs("git", "-C", "/srv/example-repo", "remote", "get-url", "origin")(s)
+          ? { stdout: "https://github.com/Example-Org/Example-Repo.git\n" }
+          : undefined,
+    );
+    expect(await r.host.probeClone("/srv/example-repo")).toEqual({
+      state: "found",
+      root: "/srv/example-repo",
+      origin: "https://github.com/Example-Org/Example-Repo.git",
+      slug: "example-org/example-repo",
+    });
+    expect(r.scripts().map((s) => s?.steps.map((st) => st.argv))).toEqual([
+      [["git", "-C", "/srv/example-repo", "rev-parse", "--show-toplevel"]],
+      [["git", "-C", "/srv/example-repo", "remote", "get-url", "origin"]],
+    ]);
+  });
+
+  it("probeClone: a missing folder, not a git clone, no origin, and a throw when ssh fails", async () => {
+    const answer = (rev: Partial<ExecResult>, origin: Partial<ExecResult> = {}) =>
+      remote((s) => (argvIs("git", "-C", "/srv/nope", "rev-parse")(s) ? rev : origin)).host;
+    const missing = {
+      code: 128,
+      stderr: "fatal: cannot change to '/srv/nope': No such file or directory\n",
+    };
+    expect(await answer(missing).probeClone("/srv/nope")).toEqual({ state: "missing" });
+    const notGit = {
+      code: 128,
+      stderr: "fatal: not a git repository (or any of the parent directories): .git\n",
+    };
+    expect(await answer(notGit).probeClone("/srv/nope")).toEqual({ state: "not_git" });
+    const noOrigin = { code: 2, stderr: "error: No such remote 'origin'\n" };
+    expect(await answer({ stdout: "/srv/nope\n" }, noOrigin).probeClone("/srv/nope")).toEqual({
+      state: "no_origin",
+      root: "/srv/nope",
+    });
+    const down = { code: 255, stderr: "ssh: connect to host box port 22: Connection refused" };
+    await expect(answer(down).probeClone("/srv/nope")).rejects.toThrow(/Connection refused/);
+    await expect(answer({ stdout: "/srv/nope\n" }, down).probeClone("/srv/nope")).rejects.toThrow(
+      /Connection refused/,
+    );
+  });
+
+  it("classifyRevParse names what git's rev-parse said", () => {
+    expect(classifyRevParse({ code: 0, stdout: "/srv/r\n", stderr: "", timedOut: false })).toEqual({
+      state: "found",
+      root: "/srv/r",
+    });
+    const no = (stderr: string) =>
+      classifyRevParse({ code: 128, stdout: "", stderr, timedOut: false });
+    expect(no("fatal: cannot change to '/srv/x': No such file or directory")).toEqual({
+      state: "missing",
+    });
+    expect(no("fatal: not a git repository (or any parent up to mount point /)")).toEqual({
+      state: "not_git",
+    });
+    expect(no("fatal: cannot change to '/srv/x': Not a directory")).toEqual({ state: "missing" });
+    // A folder git may not enter is no answer: probeClone throws git's line (`ok: false`).
+    expect(no("fatal: cannot change to '/srv/x': Permission denied")).toBeNull();
+  });
+
   it("readFile: the file, null when there is none, a throw when ssh fails", async () => {
     const r = remote((s) =>
       argvIs("cat", "/src/r/.volley/brief-extra.md")(s)
@@ -1142,6 +1206,8 @@ describe("resolveRemoteHost", () => {
 });
 
 describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
+  /** The box's own checkout runs the doctor (#550), never a `volley` on its PATH. */
+  const DOCTOR = ["bun", `${SPEC.volley_dir}/packages/volley-cli/src/cli.ts`, "peer", "doctor"];
   const REPORT = {
     checks: [{ id: "repo.clone", ok: true, severity: "block", detail: "clone" }],
     doctor_at: "2026-10-19T09:00:00.000Z",
@@ -1159,18 +1225,16 @@ describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
     await expect(r.host.probePath()).rejects.toThrow(/Connection refused/);
   });
 
-  it("runDoctor runs volley peer doctor --json in the box's volley checkout and parses it", async () => {
+  it("runDoctor runs the box's own checkout's peer doctor --json in it and parses it", async () => {
     const r = remote(() => ({ code: 1, stdout: JSON.stringify(REPORT) }));
     expect(await r.host.runDoctor({ fix: false })).toEqual(REPORT);
     expect(await r.host.runDoctor({ fix: true, clone: "https://github.com/o/r" })).toEqual(REPORT);
     const dir = ["--supervisor-volley-dir", SPEC.volley_dir];
     expect(r.steps()).toEqual([
-      { argv: ["volley", "peer", "doctor", "--json", ...dir], cwd: SPEC.volley_dir },
+      { argv: [...DOCTOR, "--json", ...dir], cwd: SPEC.volley_dir },
       {
         argv: [
-          "volley",
-          "peer",
-          "doctor",
+          ...DOCTOR,
           "--json",
           ...dir,
           "--fix",
@@ -1192,10 +1256,10 @@ describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
     const dir = ["--supervisor-volley-dir", SPEC.volley_dir];
     expect(r.steps().map((s) => s.argv)).toEqual([
       [
-        ...["volley", "peer", "doctor", "--json", ...dir, "--fix", "--yes"],
+        ...[...DOCTOR, "--json", ...dir, "--fix", "--yes"],
         ...["--repo-add", "a/a", "--repo-add", "b/b=/srv/b", "--repo-remove", "c/c", "--clone"],
       ],
-      ["volley", "peer", "doctor", "--json", ...dir, "--repo-add", "a/a"],
+      [...DOCTOR, "--json", ...dir, "--repo-add", "a/a"],
     ]);
   });
 
@@ -1208,8 +1272,8 @@ describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
     );
     expect(await r.host.runDoctor({ fix: false })).toEqual(REPORT);
     expect(r.steps().map((s) => s.argv)).toEqual([
-      ["volley", "peer", "doctor", "--json", "--supervisor-volley-dir", SPEC.volley_dir],
-      ["volley", "peer", "doctor", "--json"],
+      [...DOCTOR, "--json", "--supervisor-volley-dir", SPEC.volley_dir],
+      [...DOCTOR, "--json"],
     ]);
   });
 
@@ -1219,7 +1283,7 @@ describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
     expect(await r.host.probeLogin("work")).toEqual([login]);
     expect(r.steps()).toEqual([
       {
-        argv: ["volley", "peer", "doctor", "--json", "--probe-login", "work"],
+        argv: [...DOCTOR, "--json", "--probe-login", "work"],
         cwd: SPEC.volley_dir,
       },
     ]);
@@ -1237,9 +1301,47 @@ describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
     await expect(down.host.runDoctor({ fix: false })).rejects.toThrow(
       /ssh to dev@box failed.*Permission denied/,
     );
-    const none = remote(() => ({ code: 127, stderr: "bash: volley: command not found" }));
+    const none = remote(() => ({ code: 3, stderr: "volley: something else went wrong" }));
     await expect(none.host.runDoctor({ fix: false })).rejects.toThrow(
-      /printed no report: bash: volley: command not found/,
+      "volley peer doctor on dev@box printed no report: volley: something else went wrong",
     );
+  });
+
+  it("runDoctor's no report names bun missing from the box's ssh PATH, and Repair's path_ok line (#550)", async () => {
+    const r = remote(() => ({ code: 127, stderr: "bash: line 2: bun: command not found" }));
+    const err = await r.host.runDoctor({ fix: false }).catch((e: Error) => e);
+    expect(String(err)).toContain("bun is not on dev@box's PATH for a non-interactive ssh command");
+    expect(String(err)).toContain("path_ok");
+  });
+
+  it("runDoctor's no report names the missing checkout and the fix (#550)", async () => {
+    const cli = `${SPEC.volley_dir}/packages/volley-cli/src/cli.ts`;
+    for (const stderr of [
+      `error: Module not found "${cli}"`,
+      `error: ENOENT: no such file or directory, open '${cli}'`,
+      `bun: ${cli}: No such file or directory`,
+    ]) {
+      const r = remote(() => ({ code: 1, stderr }));
+      const err = String(await r.host.runDoctor({ fix: false }).catch((e: Error) => e));
+      expect(err, stderr).toContain(`${cli} on dev@box`);
+      expect(err, stderr).toContain("volley deploy");
+      expect(err, stderr).toContain("Repair");
+      expect(err, stderr).toContain("--volley-dir");
+    }
+  });
+
+  it("runDoctor's no report blames the checkout only when the CLI script itself is missing (#550)", async () => {
+    const cli = `${SPEC.volley_dir}/packages/volley-cli/src/cli.ts`;
+    const stderr = [
+      "error: ENOENT: no such file or directory, open '/path/to/home/.claude.json'",
+      `    at readConfig (${SPEC.volley_dir}/packages/volley-cli/src/peer/doctor.ts:88:11)`,
+      `    at main (${cli}:42:7)`,
+    ].join("\n");
+    const r = remote(() => ({ code: 1, stderr }));
+    const err = String(await r.host.runDoctor({ fix: false }).catch((e: Error) => e));
+    expect(err).toContain(
+      "volley peer doctor on dev@box printed no report: error: ENOENT: no such file or directory, open '/path/to/home/.claude.json'",
+    );
+    expect(err).not.toContain("volley deploy");
   });
 });

@@ -84,17 +84,22 @@ const machine = (name: string, over: Partial<MachineRecord> = {}): MachineRecord
   ...over,
 });
 
+/** How a paired machine runs `volley`: its own checkout (#550), never a `volley` on its PATH. */
+const BOX_VOLLEY = "bun /opt/volley/packages/volley-cli/src/cli.ts";
+
 /** A paired machine as a remote host: answers each fenced script the way the machine would. */
 function host(name: string): RemoteHost {
   return {
     spec: { name, target: `dev@${name}`, volley_dir: "/opt/volley" },
     run: async (steps: RemoteStep[]) => {
-      assertAllowed(["ssh", "-T", `dev@${name}`, "bash", "-s"], { remote: { steps } });
+      assertAllowed(["ssh", "-T", `dev@${name}`, "bash", "-s"], {
+        remote: { steps, host: { name, worktree_root: "", volley_dir: "/opt/volley" } },
+      });
       const lines = steps.map((s) => s.argv.join(" "));
       remote[name] = [...(remote[name] ?? []), lines.join(" && ")];
       const ok = (stdout = "") => ({ code: 0, stdout, stderr: "", timedOut: false });
       const first = lines[0] ?? "";
-      if (first === "volley broker probe") return ok(`${JSON.stringify(probe)}\n`);
+      if (first === `${BOX_VOLLEY} broker probe`) return ok(`${JSON.stringify(probe)}\n`);
       if (first.startsWith("ssh -n"))
         return sshFails.has(name)
           ? { code: 255, stdout: "", stderr: "Permission denied (publickey).", timedOut: false }
@@ -106,8 +111,8 @@ function host(name: string): RemoteHost {
         writeFileSync(write.stdout as string, Buffer.from(write.stdin ?? "", "base64"));
         return ok();
       }
-      if (first.startsWith("volley broker receive")) {
-        const bundle = steps[0]?.argv[3] as string;
+      if (first.startsWith(`${BOX_VOLLEY} broker receive`)) {
+        const bundle = steps[0]?.argv[4] as string;
         const stage = tempDir("volleyd-broker-stage-");
         spawnSync("tar", ["-xzf", bundle, "-C", stage]);
         const m = JSON.parse(readFileSync(join(stage, "manifest.json"), "utf-8")) as {
@@ -119,7 +124,7 @@ function host(name: string): RemoteHost {
         const s = JSON.parse(readFileSync(join(stage, "broker", "dynamic-security.json"), "utf-8"));
         return ok(`mosquitto 2.1.2: ${(s as typeof STATE).clients.length} logins\n`);
       }
-      if (first === "volley broker tunnel --show")
+      if (first === `${BOX_VOLLEY} broker tunnel --show`)
         return ok(
           `${JSON.stringify({ host: `me@${LOCAL}`, remote_port: 21883, tunnel: "ssh" })}\n`,
         );
@@ -330,7 +335,7 @@ describe("the broker move's plan (#470)", () => {
     );
     expect(p.terminal).toEqual([]);
     // One probe on the target; ssh to the address from here and from the other paired machine.
-    expect(remote[TARGET]).toContain("volley broker probe");
+    expect(remote[TARGET]).toContain(`${BOX_VOLLEY} broker probe`);
     expect(remote[OTHER]).toEqual([
       `ssh -n -o BatchMode=yes -o ConnectTimeout=10 dev@${TARGET} true`,
     ]);
@@ -465,7 +470,7 @@ describe("the broker move (#470)", () => {
     // The target: the bundle at the fixed path, received without root.
     expect(existsSync(join(userHome, ".volley", "roles", "broker", "bundle.tgz"))).toBe(true);
     expect(remote[TARGET]).toContain(
-      `volley broker receive ${userHome}/.volley/roles/broker/bundle.tgz --no-lan`,
+      `${BOX_VOLLEY} broker receive ${userHome}/.volley/roles/broker/bundle.tgz --no-lan`,
     );
     // The target loses its tunnel (the broker is there now); the other one points at the address.
     expect(retargets).toEqual([

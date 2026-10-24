@@ -12,11 +12,13 @@ import type {
   PeerRemoveResult,
   RepoAddResult,
   RepoListResult,
+  RepoProbeResult,
   RepoRemoveResult,
   RepoStatusResult,
 } from "../../src/store/peerOps";
 import type { MachineAddRow, RepoMachines } from "../../src/store/types";
 import { NOW } from "./desk-msgs";
+import { APP } from "./repos";
 
 type Known = ReturnType<PeerOps["known"]>;
 
@@ -62,6 +64,15 @@ export function fakePeerOps(over: Partial<PeerOps> = {}) {
     repoList: vi.fn(async (): Promise<RepoListResult> => ({ ok: true, repos: [] })),
     repoStatus: vi.fn(
       async (_slug?: string): Promise<RepoStatusResult> => ({ ok: true, repos: [] }),
+    ),
+    repoProbe: vi.fn(
+      async (_machine: string, path: string): Promise<RepoProbeResult> => ({
+        ok: true,
+        state: "found",
+        root: path,
+        origin: `https://github.com/${APP}`,
+        slug: APP,
+      }),
     ),
     machineAdd: vi.fn(
       async (
