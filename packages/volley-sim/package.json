@@ -1,6 +1,6 @@
 {
   "name": "volley-sim",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "private": true,
   "description": "Volley simulator — fake `claude` and `gh` for installed-mode runs without an account",
   "license": "Apache-2.0",
