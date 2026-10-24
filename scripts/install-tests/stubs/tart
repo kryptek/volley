@@ -1,0 +1,55 @@
+#!/bin/bash
+# tart in vm.test.ts (scripts/install-tests/README.md): every call appended to
+# $STUB_STATE/calls.log, a VM a directory under $STUB_STATE/vms/<name> as the multipass stand-in
+# keeps them. `run` stays in the foreground until `stop` (or a kill), as tart's does.
+set -u
+S=${STUB_STATE:?STUB_STATE is not set}
+printf 'tart %s\n' "$*" >>"$S/calls.log"
+mkdir -p "$S/vms" "$S/addr" "$S/images"
+
+exists() { [ -d "$S/vms/$1" ]; }
+missing() { echo "the specified VM \"$1\" does not exist" >&2 && exit 1; }
+
+case "${1:-}" in
+  clone)
+    base=${2:-} name=${3:-}
+    [ -e "$S/images/$base" ] || missing "$base"
+    exists "$name" && { echo "VM \"$name\" already exists" >&2 && exit 1; }
+    n=$(($(cat "$S/next-addr" 2>/dev/null || echo 10) + 1))
+    echo "$n" >"$S/next-addr"
+    mkdir -p "$S/vms/$name"
+    echo "10.30.0.$n" >"$S/vms/$name/addr"
+    echo "$name" >"$S/addr/10.30.0.$n"
+    echo 1700000000 >"$S/vms/$name/boot"
+    ;;
+  get)
+    exists "${2:-}" || [ -e "$S/images/${2:-}" ] || missing "${2:-}"
+    echo '{"CPU":4,"Memory":8192,"Disk":80,"OS":"darwin"}'
+    ;;
+  run)
+    name=${!#}
+    exists "$name" || missing "$name"
+    echo $$ >"$S/vms/$name/pid"
+    echo $(($(cat "$S/vms/$name/boot") + 60)) >"$S/vms/$name/boot"
+    exec sleep 300
+    ;;
+  ip)
+    exists "${2:-}" || missing "${2:-}"
+    cat "$S/vms/$2/addr"
+    ;;
+  stop)
+    exists "${2:-}" || missing "${2:-}"
+    pid=$(cat "$S/vms/$2/pid" 2>/dev/null) && kill "$pid" 2>/dev/null
+    rm -f "$S/vms/$2/pid"
+    ;;
+  delete)
+    exists "${2:-}" || missing "${2:-}"
+    pid=$(cat "$S/vms/$2/pid" 2>/dev/null) && kill "$pid" 2>/dev/null
+    rm -f "$S/addr/$(cat "$S/vms/$2/addr")"
+    rm -rf "$S/vms/$2"
+    ;;
+  *)
+    echo "tart (stub): unknown argv: $*" >&2
+    exit 1
+    ;;
+esac

@@ -1,0 +1,67 @@
+#!/bin/bash
+# multipass in vm.test.ts (scripts/install-tests/README.md): every call appended to
+# $STUB_STATE/calls.log, a VM a directory under $STUB_STATE/vms/<name> with its address (which the
+# ssh stand-in answers on) and its boot time; a launch's cloud-init is kept as
+# $STUB_STATE/cloud-init.<name>.yaml. STUB_FAIL=launch makes `launch` fail
+# after making the instance.
+set -u
+S=${STUB_STATE:?STUB_STATE is not set}
+printf 'multipass %s\n' "$*" >>"$S/calls.log"
+mkdir -p "$S/vms" "$S/addr"
+
+info_json() {
+  printf '{"info":{"%s":{"state":"Running","ipv4":["%s"]}}}\n' "$1" "$(cat "$S/vms/$1/addr")"
+}
+
+case "${1:-}" in
+  launch)
+    name='' ci=''
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --name | -n) name=$2 && shift 2 ;;
+        --cloud-init) ci=$2 && shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ -n "$name" ] || { echo "launch: --name is required here" >&2 && exit 2; }
+    if [ -d "$S/vms/$name" ]; then
+      echo "launch failed: instance \"$name\" already exists" >&2
+      exit 1
+    fi
+    n=$(($(cat "$S/next-addr" 2>/dev/null || echo 10) + 1))
+    echo "$n" >"$S/next-addr"
+    mkdir -p "$S/vms/$name"
+    echo "10.20.0.$n" >"$S/vms/$name/addr"
+    echo "$name" >"$S/addr/10.20.0.$n"
+    echo 1700000000 >"$S/vms/$name/boot"
+    [ -n "$ci" ] && cp "$ci" "$S/cloud-init.$name.yaml"
+    # As multipass can, a launch that fails half way leaves the instance behind.
+    [ "${STUB_FAIL:-}" = launch ] && { echo "launch failed: timed out waiting for response" >&2 && exit 1; }
+    echo "Launched: $name"
+    ;;
+  info)
+    name=${2:-}
+    if [ ! -d "$S/vms/$name" ]; then
+      echo "info failed: instance \"$name\" does not exist" >&2
+      exit 2
+    fi
+    info_json "$name"
+    ;;
+  delete)
+    shift
+    for a in "$@"; do
+      case $a in
+        -*) ;;
+        *)
+          [ -d "$S/vms/$a" ] || { echo "delete failed: instance \"$a\" does not exist" >&2 && exit 2; }
+          rm -f "$S/addr/$(cat "$S/vms/$a/addr")"
+          rm -rf "$S/vms/$a"
+          ;;
+      esac
+    done
+    ;;
+  *)
+    echo "multipass (stub): unknown argv: $*" >&2
+    exit 1
+    ;;
+esac

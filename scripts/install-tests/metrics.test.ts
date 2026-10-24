@@ -2,7 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "../helpers/tmp";
-import { WALL_TARGET_MS, evaluate, redact, scanText, secretsFrom } from "./metrics";
+import {
+  TIMING_TARGETS,
+  WALL_TARGET_MS,
+  evaluate,
+  readyVerdict,
+  redact,
+  scanText,
+  secretsFrom,
+  statusVerdict,
+  waveVerdict,
+} from "./metrics";
 
 const SCRIPT = join(import.meta.dir, "metrics.ts");
 const FIXTURES = join(import.meta.dir, "fixtures");
@@ -124,6 +134,99 @@ describe("evaluate: the targets", () => {
   });
 });
 
+describe("evaluate: the VM layers' timings", () => {
+  const base = {
+    label: "ubuntu-24.04",
+    yes: true,
+    firstWave: true,
+    metrics: fixture("metrics-pass.json"),
+    check: fixture("check-pass.json"),
+  };
+
+  test("the heading names the layer; a timing under its target passes, one without is reported", () => {
+    const r = evaluate({
+      ...base,
+      layer: 2,
+      timings: { reboot_check_ms: 45_000, launch_ms: 61_000 },
+    });
+    expect(r.failures).toEqual([]);
+    expect(r.markdown).toContain("### Layer 2: ubuntu-24.04 ✅");
+    expect(r.markdown).toContain("| `reboot_check_ms` | 0 m 45 s | ≤ 2 m | ✅ |");
+    expect(r.markdown).toContain("| `launch_ms` | 1 m 1 s | — | ✅ |");
+  });
+
+  test("--check green more than 2 minutes after the reboot fails; the peer ready after 10 too", () => {
+    expect(TIMING_TARGETS).toEqual({ reboot_check_ms: 120_000, pair_ready_ms: 600_000 });
+    const r = evaluate({
+      ...base,
+      layer: 4,
+      timings: { reboot_check_ms: 121_000, pair_ready_ms: 601_000 },
+    });
+    expect(r.failures).toEqual([
+      "reboot_check_ms was 2 m 1 s, over the 2 m target",
+      "pair_ready_ms was 10 m 1 s, over the 10 m target",
+    ]);
+    expect(r.markdown).toContain("### Layer 4: ubuntu-24.04 ❌");
+  });
+});
+
+describe("the VM layers' verdicts", () => {
+  const sub = (envelope: object) => `${JSON.stringify({ topic: "t", envelope })}\n`;
+  const boot = Date.parse("2026-10-24T03:00:00Z") / 1000;
+
+  test("volleyd's status: working and published after the boot", () => {
+    const working = { type: "working", wall_time: "2026-10-24T03:00:40.000Z", payload: {} };
+    expect(statusVerdict(sub(working), boot)).toBeNull();
+    expect(statusVerdict(sub({ ...working, wall_time: "2026-10-24T02:59:00.000Z" }), boot)).toBe(
+      "volleyd's status (2026-10-24T02:59:00.000Z) is older than the boot (2026-10-24T03:00:00.000Z)",
+    );
+    expect(statusVerdict(sub({ ...working, type: "idle" }), boot)).toBe(
+      "volleyd's status is idle, not working",
+    );
+    expect(statusVerdict("", boot)).toBe("no retained status from volleyd");
+  });
+
+  test("the peer's readiness verdict: ready, or why not", () => {
+    const v = { type: "readiness", payload: { name: "peer", ready: true, reasons: [] } };
+    expect(readyVerdict(sub(v), "peer")).toBeNull();
+    expect(
+      readyVerdict(
+        sub({ ...v, payload: { name: "peer", ready: false, reasons: ["tunnel down"] } }),
+        "peer",
+      ),
+    ).toBe("peer is not ready (tunnel down)");
+    expect(readyVerdict("", "peer")).toBe("no readiness verdict on peer yet");
+  });
+
+  test("the peer's wave: complete, its task done and placed on the peer", () => {
+    const status = JSON.stringify({ status: "complete", tasks: [{ id: "T1", stage: "done" }] });
+    const placed = (host: string) =>
+      `${JSON.stringify({ seq: 4, type: "task_placed", task: "T1", data: { task: "T1", host } })}\n`;
+    const w = { status, events: placed("peer"), task: "T1", host: "peer" };
+    expect(waveVerdict(w)).toBeNull();
+    expect(waveVerdict({ ...w, events: placed("hub") })).toBe("T1 was placed on hub, not peer");
+    expect(waveVerdict({ ...w, events: "" })).toBe("no task_placed for T1");
+    expect(
+      waveVerdict({
+        ...w,
+        status: JSON.stringify({ status: "running", tasks: [{ id: "T1", stage: "implement" }] }),
+      }),
+    ).toBe("the wave is running, T1 is implement");
+  });
+
+  test("the verdict command exits 0 or 1 with the reason; a usage error 2", () => {
+    const working = { type: "working", wall_time: "2026-10-24T03:00:40.000Z" };
+    expect(run(["verdict", "status", "--boot", String(boot)], { stdin: sub(working) }).code).toBe(
+      0,
+    );
+    const old = run(["verdict", "status", "--boot", String(boot + 3600)], { stdin: sub(working) });
+    expect(old.code).toBe(1);
+    expect(old.stderr).toContain("older than the boot");
+    expect(run(["verdict", "status"], { stdin: "" }).code).toBe(2);
+    expect(run(["verdict", "frob"]).code).toBe(2);
+  });
+});
+
 describe("the summary command", () => {
   test("passes, prints the table and appends it to the step summary", () => {
     const dir = tempDir("volley-layer1-");
@@ -164,6 +267,33 @@ describe("the summary command", () => {
     const r = run(summaryArgs("nope.json", "check-pass.json"));
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("nope.json");
+  });
+
+  test("--layer, --timing and --out: the run's metrics as JSON", () => {
+    const dir = tempDir("volley-layer1-");
+    const out = join(dir, "metrics.json");
+    const r = run([
+      ...summaryArgs("metrics-pass.json", "check-pass.json"),
+      "--layer",
+      "4",
+      "--timing",
+      "pair_ready_ms=90000",
+      "--out",
+      out,
+    ]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("### Layer 4: ubuntu-24.04 ✅");
+    const written = JSON.parse(readFileSync(out, "utf8"));
+    expect(written).toMatchObject({
+      label: "ubuntu-24.04",
+      layer: 4,
+      timings: { pair_ready_ms: 90000 },
+      failures: [],
+    });
+    expect(written.setup.wall_ms).toBe(fixture("metrics-pass.json").wall_ms);
+    expect(
+      run([...summaryArgs("metrics-pass.json", "check-pass.json"), "--timing", "x"]).code,
+    ).toBe(2);
   });
 
   test("a usage error exits 2", () => {

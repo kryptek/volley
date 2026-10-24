@@ -1,0 +1,12 @@
+#!/bin/bash
+# gh in vm.test.ts (scripts/install-tests/README.md): every call appended to
+# $STUB_STATE/calls.log. `issue list` prints $STUB_STATE/gh-open-issue (the open tracking issue's
+# number) when it exists; `issue create` prints a new issue's URL (#99).
+set -u
+S=${STUB_STATE:?STUB_STATE is not set}
+printf 'gh %s\n' "$*" >>"$S/calls.log"
+case "${1:-} ${2:-}" in
+  "issue list") cat "$S/gh-open-issue" 2>/dev/null ;;
+  "issue create") echo "https://github.com/kryptek/volley/issues/99" ;;
+esac
+exit 0
