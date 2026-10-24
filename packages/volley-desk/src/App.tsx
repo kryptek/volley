@@ -467,7 +467,7 @@ export default function App() {
   const [waveRegistryWanted, setWaveRegistryWanted] = useState(false);
   const waveRegistry = useClaudeRegistry(
     waveRegistryWanted ? registryControl : null,
-    signinsDone(state.signins),
+    registryKeyOf(state.claudeRegistryRev, signinsDone(state.signins)),
   );
   useEffect(() => {
     if (waveRegistry.accounts.length) setRegistry(waveRegistry.accounts);

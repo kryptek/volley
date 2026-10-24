@@ -771,11 +771,17 @@ export function agentLimitDecisions(o: {
   return out;
 }
 
-/** A wave's account moves (`wave_account_moved`), in journal order. */
+/** A wave's account_limit answers (`wave_account_moved` with a `decision_id`), in journal order. */
 export function waveAccountMoves(events: readonly JournalEvent[]): { from: string; to: string }[] {
   return events.flatMap((e) => {
     if (e.type !== "wave_account_moved") return [];
-    const { from, to } = e.data as { from?: unknown; to?: unknown };
+    const { from, to, decision_id } = e.data as {
+      from?: unknown;
+      to?: unknown;
+      decision_id?: unknown;
+    };
+    // Only an account_limit answer moves a task naming `from`; a `wave_account_set` leaves it.
+    if (typeof decision_id !== "string") return [];
     return typeof from === "string" && typeof to === "string" ? [{ from, to }] : [];
   });
 }
@@ -785,18 +791,4 @@ export function waveAccount(acct: string, moves: readonly { from: string; to: st
   let out = acct;
   for (const m of moves) if (m.from === out) out = m.to;
   return out;
-}
-
-/**
- * Where a wave's moves left it (SPEC §4.6.11): its last `wave_account_moved`, `to` the account
- * its new agents start under (null: balanced) and `from` the one it left (null: it balanced).
- * Undefined when the wave never moved: the wave file and `claude.default_account` decide.
- */
-export function wavePin(
-  events: readonly JournalEvent[],
-): { to: string | null; from: string | null } | undefined {
-  const last = events.filter((e) => e.type === "wave_account_moved").at(-1);
-  if (last === undefined) return undefined;
-  const { from, to } = last.data as { from?: unknown; to?: unknown };
-  return { to: typeof to === "string" ? to : null, from: typeof from === "string" ? from : null };
 }

@@ -178,6 +178,20 @@ describe("wave_account_set (daemon)", () => {
     expect(await nextSpawnAccount()).toBe("primary");
   }, 20_000);
 
+  it("a task naming its own account keeps it when the wave file pinned the wave", async () => {
+    await env("account: primary", "T2: { issue: 42, after: [T1], account: primary }");
+    expect((await op("wave_account_set", { wave: "w1", acct: "team", by: "o" })).ok).toBe(true);
+    expect(moves()).toEqual([{ from: "primary", to: "team", by: "o" }]);
+    expect(await nextSpawnAccount()).toBe("primary");
+  }, 20_000);
+
+  it("a later pick to balanced leaves a task naming its own account on it", async () => {
+    await env("account: primary", "T2: { issue: 42, after: [T1], account: primary }");
+    expect((await op("wave_account_set", { wave: "w1", acct: "team", by: "o" })).ok).toBe(true);
+    expect((await op("wave_account_set", { wave: "w1", acct: null, by: "o" })).ok).toBe(true);
+    expect(await nextSpawnAccount()).toBe("primary");
+  }, 20_000);
+
   it("picking the wave's current account is a no-op; a non-string acct is refused", async () => {
     await env();
     expect((await op("wave_account_set", { wave: "w1", acct: "team", by: "o" })).ok).toBe(true);

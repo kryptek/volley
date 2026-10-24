@@ -213,7 +213,6 @@ import {
   usageAccountTopic,
   waveAccount,
   waveAccountMoves,
-  wavePin,
 } from "./claude/usage";
 import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "./config-defaults";
 import { ConfigStore } from "./config-store";
@@ -4567,7 +4566,7 @@ export class Daemon {
     // The wave was moved (`wave_account_set`, an account_limit answer): a task naming no account
     // of its own starts under the wave's new one, or balances (`to: null`). An account the task's
     // machine has no profile of leaves that task to the wave file and the config default.
-    const pin = wavePin(events);
+    const pin = this.waves.get(wave)?.record.account_pin;
     if (pin !== undefined && (t.account === undefined || t.account === MOST_HEADROOM)) {
       try {
         const sel = this.claude.select({
@@ -4591,7 +4590,8 @@ export class Daemon {
       model,
     });
     // An answered account_limit moved the wave: a task naming the account it left starts under
-    // the other one (an agent moved on its own keeps its own move).
+    // the other one (an agent moved on its own keeps its own move; a `wave_account_set` that
+    // answered no decision leaves a task naming its own account on it).
     const to = machine === LOCAL_MACHINE ? waveAccount(sel.id, waveAccountMoves(events)) : sel.id;
     if (to === sel.id) return withCandidates(sel);
     return withCandidates({
