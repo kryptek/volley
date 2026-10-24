@@ -301,9 +301,11 @@ export function noReportReason(target: string, volleyDir: string, r: ExecResult)
   const cli = volleyCliPath(volleyDir);
   if (/\bbun: command not found\b/.test(r.stderr))
     return `bun is not on ${target}'s PATH for a non-interactive ssh command, so volley peer doctor cannot run there: Repair shows the line to add (its path_ok check)`;
+  // The script itself is what is missing (`"<cli>"`, `'<cli>'`, `<cli>: No such file`), not a
+  // file the doctor opens: a crash's stack frames also name paths under the checkout.
   if (
     /Module not found|No such file or directory|ENOENT/.test(r.stderr) &&
-    (r.stderr.includes(cli) || r.stderr.includes("packages/volley-cli"))
+    [`"${cli}"`, `'${cli}'`, `${cli}: No such file`].some((s) => r.stderr.includes(s))
   )
     return `volley peer doctor on ${target} found no ${cli} on ${target}: run \`volley deploy\` (or Repair) to put the release there, or re-pair it with the right --volley-dir`;
   return `volley peer doctor on ${target} printed no report: ${firstLine(r.stderr, `exit ${r.code}`)}`;

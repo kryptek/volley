@@ -3185,9 +3185,9 @@ tunnel and publishes no record.
 
 `peer_retarget { name, address, port?, tunnel? }` (an admin op, a step of a broker move)
 re-points a paired machine's tunnel: volleyd runs `volley peer retarget --to <address> [--port
-<n>] [--tunnel ssh|none]` there over ssh (as every `volley` step on a paired machine, by its own
-checkout: `bun <volley_dir>/packages/volley-cli/src/cli.ts peer retarget …`) (the machine rewrites `peer.json`, restarts its service
-and exits 0 only once its tunnel answers), writes a new port to `hosts.<name>.tunnel.remote_port`,
+<n>] [--tunnel ssh|none]` there over ssh, by the machine's own checkout as every `volley` step
+on a paired machine is (`bun <volley_dir>/packages/volley-cli/src/cli.ts peer retarget …`; the
+machine rewrites `peer.json`, restarts its service and exits 0 only once its tunnel answers), writes a new port to `hosts.<name>.tunnel.remote_port`,
 and answers `{ name, address, port?, tunnel?, up: true }` once the machine's record comes `up`
 through the new tunnel (120 s grace, `peer_retarget_grace_ms`; else `ok: false`), journaling
 `peer_retargeted`. An unknown host or an address starting with `-` is refused before anything

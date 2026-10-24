@@ -1329,4 +1329,19 @@ describe("SshTmuxHost: readiness's PATH probe and the doctor (F2)", () => {
       expect(err, stderr).toContain("--volley-dir");
     }
   });
+
+  it("runDoctor's no report blames the checkout only when the CLI script itself is missing (#550)", async () => {
+    const cli = `${SPEC.volley_dir}/packages/volley-cli/src/cli.ts`;
+    const stderr = [
+      "error: ENOENT: no such file or directory, open '/path/to/home/.claude.json'",
+      `    at readConfig (${SPEC.volley_dir}/packages/volley-cli/src/peer/doctor.ts:88:11)`,
+      `    at main (${cli}:42:7)`,
+    ].join("\n");
+    const r = remote(() => ({ code: 1, stderr }));
+    const err = String(await r.host.runDoctor({ fix: false }).catch((e: Error) => e));
+    expect(err).toContain(
+      "volley peer doctor on dev@box printed no report: error: ENOENT: no such file or directory, open '/path/to/home/.claude.json'",
+    );
+    expect(err).not.toContain("volley deploy");
+  });
 });
