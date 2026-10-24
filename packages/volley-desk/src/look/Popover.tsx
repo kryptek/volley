@@ -1,11 +1,19 @@
 /**
  * A card drawn on the screen layer, above the canvas: portalled into `document.body` and
  * placed from its anchor's screen rect (`placePopover`), so no window clips it and the
- * canvas's zoom never scales it. Escape closes it; with `dismiss="outside"` (a dialog) so
+ * canvas's zoom never scales it; it re-places every frame while open, so it follows a pan,
+ * a zoom or a window drag. Escape closes it; with `dismiss="outside"` (a dialog) so
  * does a pointer-down anywhere but the anchor and the card. A tooltip's open/close timing
  * stays with its caller (`onPointerEnter` / `onPointerLeave` on the card).
  */
-import { type ReactNode, type RefObject, useLayoutEffect, useRef, useState } from "react";
+import {
+  type ReactNode,
+  type RefObject,
+  type SyntheticEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import { type Placement, placePopover } from "./placePopover";
 
@@ -25,6 +33,8 @@ export interface PopoverProps {
   onPointerLeave?: () => void;
   children: ReactNode;
 }
+
+const stop = (e: SyntheticEvent) => e.stopPropagation();
 
 export function Popover(props: PopoverProps) {
   return props.open ? <Card {...props} /> : null;
@@ -47,27 +57,28 @@ function Card({
   const close = useRef(onClose);
   close.current = onClose;
 
+  // Each frame while open: the canvas pans and zooms with a transform and a window drag moves
+  // its chip, none of which fires a scroll or resize, and live content can change the card's size.
   useLayoutEffect(() => {
+    let frame = 0;
+    let last = "";
     const place = () => {
       const a = anchor.current;
       const c = card.current;
-      if (!a || !c) return;
-      setAt(
-        placePopover(
-          a.getBoundingClientRect(),
-          { w: c.offsetWidth, h: c.offsetHeight },
-          { w: window.innerWidth, h: window.innerHeight },
-          { gap: GAP, margin: MARGIN },
-        ),
-      );
+      if (a && c) {
+        const r = a.getBoundingClientRect();
+        const size = { w: c.offsetWidth, h: c.offsetHeight };
+        const view = { w: window.innerWidth, h: window.innerHeight };
+        const key = `${r.left},${r.top},${r.right},${r.bottom},${size.w},${size.h},${view.w},${view.h}`;
+        if (key !== last) {
+          last = key;
+          setAt(placePopover(r, size, view, { gap: GAP, margin: MARGIN }));
+        }
+      }
+      frame = requestAnimationFrame(place);
     };
     place();
-    window.addEventListener("resize", place);
-    window.addEventListener("scroll", place, true);
-    return () => {
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place, true);
-    };
+    return () => cancelAnimationFrame(frame);
   }, [anchor]);
 
   useLayoutEffect(() => {
@@ -100,6 +111,13 @@ function Card({
       style={at ? { left: at.x, top: at.y } : { left: 0, top: 0, visibility: "hidden" }}
       onPointerEnter={onPointerEnter}
       onPointerLeave={onPointerLeave}
+      // React bubbles a portal's events up its React tree, not the DOM: without this a press on
+      // the card would reach the window's title-bar drag and the stage's canvas pan.
+      onPointerDown={stop}
+      onPointerMove={stop}
+      onPointerUp={stop}
+      onTouchStart={stop}
+      onTouchMove={stop}
     >
       {children}
     </div>,

@@ -372,6 +372,20 @@ export function placementRule(p: TaskPlacement): string {
 export function HostChips({ tasks }: { tasks: readonly WaveTask[] }) {
   const [open, setOpen] = useState<string | null>(null);
   const chips = useRef(new Map<string, HTMLButtonElement>());
+  const anchors = useRef(new Map<string, RefObject<HTMLElement | null>>());
+  // One stable anchor per task, so the open card's effects do not rerun on every render.
+  const anchorOf = (id: string) => {
+    let a = anchors.current.get(id);
+    if (!a) {
+      a = {
+        get current() {
+          return chips.current.get(id) ?? null;
+        },
+      };
+      anchors.current.set(id, a);
+    }
+    return a;
+  };
   const placed = tasks.filter((t): t is WaveTask & { placement: TaskPlacement } => !!t.placement);
   if (placed.length === 0) return null;
   return (
@@ -379,11 +393,6 @@ export function HostChips({ tasks }: { tasks: readonly WaveTask[] }) {
       {placed.map((t) => {
         const p = t.placement;
         const shown = open === t.id;
-        const anchor: RefObject<HTMLElement | null> = {
-          get current() {
-            return chips.current.get(t.id) ?? null;
-          },
-        };
         return (
           <li key={t.id}>
             <button
@@ -400,7 +409,7 @@ export function HostChips({ tasks }: { tasks: readonly WaveTask[] }) {
               <span className="mono">{t.id}</span> · {p.host}
             </button>
             <Popover
-              anchor={anchor}
+              anchor={anchorOf(t.id)}
               open={shown}
               // biome-ignore lint/a11y/useSemanticElements: a non-modal popover, not a <dialog> element
               role="dialog"

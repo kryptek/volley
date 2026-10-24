@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { useRef } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { act } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Popover, type PopoverProps } from "../src/look/Popover";
 
 type Extra = Partial<Omit<PopoverProps, "anchor" | "children">>;
@@ -19,7 +20,22 @@ function Harness(props: Extra) {
   );
 }
 
+function rect(left: number, top: number): DOMRect {
+  return {
+    left,
+    top,
+    right: left + 40,
+    bottom: top + 20,
+    width: 40,
+    height: 20,
+    x: left,
+    y: top,
+  } as DOMRect;
+}
+
 describe("Popover", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   it("renders into document.body, not into the anchor's parent", () => {
     render(<Harness />);
     const card = screen.getByRole("tooltip");
@@ -75,5 +91,45 @@ describe("Popover", () => {
     fireEvent.pointerLeave(card);
     expect(onPointerEnter).toHaveBeenCalledTimes(1);
     expect(onPointerLeave).toHaveBeenCalledTimes(1);
+  });
+
+  it("a pointer on the card does not reach its React ancestors (the window drag, the canvas pan)", () => {
+    const down = vi.fn();
+    const move = vi.fn();
+    render(
+      <div onPointerDown={down} onPointerMove={move}>
+        <Harness />
+      </div>,
+    );
+    const body = screen.getByText("card body");
+    fireEvent.pointerDown(body);
+    fireEvent.pointerMove(body);
+    fireEvent.pointerUp(body);
+    expect(down).not.toHaveBeenCalled();
+    expect(move).not.toHaveBeenCalled();
+    fireEvent.pointerDown(screen.getByRole("button", { name: "anchor" }));
+    expect(down).toHaveBeenCalledTimes(1);
+  });
+
+  it("follows its anchor while open: a pan, zoom or drag moves the card with it", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => frames.push(cb));
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    let at = rect(100, 100);
+    vi.spyOn(HTMLButtonElement.prototype, "getBoundingClientRect").mockImplementation(() => at);
+    try {
+      render(<Harness />);
+      const card = screen.getByRole("tooltip");
+      expect(card.style.left).toBe("100px");
+      expect(card.style.top).toBe("124px");
+      at = rect(300, 50);
+      act(() => {
+        for (const cb of frames.splice(0)) cb(0);
+      });
+      expect(card.style.left).toBe("300px");
+      expect(card.style.top).toBe("74px");
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });
