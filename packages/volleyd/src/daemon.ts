@@ -27,6 +27,7 @@ import { BrokerVersionError } from "volley-cli/auth/version";
 import { DESK_PORT } from "volley-cli/commands/desk-serve";
 import { countLiveAgents } from "volley-cli/setup/broker";
 import { readSetupInstall } from "volley-cli/setup/journal";
+import { cmuxInstalled } from "volley-cli/setup/terminal";
 import { VolleyBroker } from "volley-mcp/broker";
 import type { BrokerAuth } from "volley-mcp/config";
 import { type Envelope, buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
@@ -218,7 +219,7 @@ import {
   waveAccountMoves,
 } from "./claude/usage";
 import { DAEMON_DEFAULTS, REMOTE_HOST_DEFAULTS } from "./config-defaults";
-import { ConfigStore } from "./config-store";
+import { ConfigStore, resolveLocalTerminal } from "./config-store";
 import {
   ADMISSION_TOPIC,
   ARCHIVE_TOPIC,
@@ -301,6 +302,7 @@ import { type Tree, footprintOf, readReleaseTree } from "./footprint";
 import { lockFetches } from "./git-lock";
 import type { Host, TermSize } from "./hosts/host";
 import { LocalCmuxHost } from "./hosts/local-cmux";
+import { LocalTmuxHost } from "./hosts/local-tmux";
 import {
   type RemoteHost,
   type RemoteHostSpec,
@@ -433,6 +435,7 @@ import type {
   Footprint,
   GitHubRepo,
   JournalEvent,
+  LocalTerminal,
   MergeMode,
   NewEvent,
   NudgeOnMerge,
@@ -734,8 +737,15 @@ export interface DaemonOptions {
 
 /** How the daemon spawns agents. Every field has a production default. */
 export interface SpawnerOptions {
-  /** The `local` host (default: cmux on this machine, through the fenced exec). */
+  /**
+   * The `local` host (default: the host for the resolved `fleet.local_terminal`: cmux or tmux
+   * on this machine, through the fenced exec).
+   */
   host?: Host;
+  /** Builds the `local` host for a terminal (tests; default: LocalCmuxHost or LocalTmuxHost). */
+  localHostFor?: (terminal: LocalTerminal) => Host;
+  /** Whether cmux is installed here, for an unset `fleet.local_terminal` (default: `cmuxInstalled`). */
+  cmuxFound?: () => boolean;
   /** Claude Code's folder-trust file (default `~/.claude.json`). */
   claudeJsonPath?: string;
   /** `packages/volley-hooks` (default: the one in this checkout). */
@@ -1833,6 +1843,8 @@ export class Daemon {
     try {
       await assertNotRunning(opts);
       d = new Daemon(opts, release);
+      // fleet.local_terminal is read when the supervisor starts (SPEC §4.6.4), not at first use.
+      void d.host;
       await d.connect();
       return d;
     } catch (e) {
@@ -4733,12 +4745,55 @@ export class Daemon {
     return { pinned: null, source: "balanced" };
   }
 
-  /** The `local` host agents run on. */
+  /**
+   * The `local` host agents run on: cmux or tmux by `fleet.local_terminal`, resolved once (a
+   * change applies at the next start: running agents' workspaces belong to the terminal they
+   * started in).
+   */
   private get host(): Host {
-    this.localHost ??= this.opts.spawner?.host ?? new LocalCmuxHost(realExec);
+    this.localHost ??=
+      this.opts.spawner?.host ??
+      this.localHostFor(
+        resolveLocalTerminal(
+          this.config.effective().fleet.local_terminal,
+          this.opts.fleet?.os?.platform?.() ?? process.platform,
+          this.opts.spawner?.cmuxFound ?? (() => cmuxInstalled(homedir(), process.env.PATH ?? "")),
+        ),
+      );
     return this.localHost;
   }
   private localHost: Host | undefined;
+
+  /** The `local` host for one terminal, built once (an agent restored from another terminal). */
+  private localHostFor(terminal: LocalTerminal): Host {
+    let h = this.localHosts.get(terminal);
+    if (h === undefined) {
+      const build = this.opts.spawner?.localHostFor;
+      h =
+        build !== undefined
+          ? build(terminal)
+          : terminal === "tmux"
+            ? new LocalTmuxHost(realExec)
+            : new LocalCmuxHost(realExec);
+      this.localHosts.set(terminal, h);
+    }
+    return h;
+  }
+  private readonly localHosts = new Map<LocalTerminal, Host>();
+
+  /**
+   * The `local` host a task's agent runs on: the terminal its `agent_spawned` recorded, whatever
+   * `fleet.local_terminal` says now (SPEC §4.6.4: a workspace belongs to the terminal it started
+   * in); this start's local host when nothing was recorded.
+   */
+  private localHostOfTask(wave: WaveId, task: TaskId): Host {
+    if (this.opts.spawner?.host !== undefined) return this.host;
+    const spawned = this.spawnedRecord((e) => e.task === task, wave);
+    const terminal = spawned?.host === "local" ? spawned.terminal : undefined;
+    if ((terminal !== "cmux" && terminal !== "tmux") || terminal === this.host.screenSource)
+      return this.host;
+    return this.localHostFor(terminal);
+  }
 
   private get claudeJsonPath(): string {
     return this.opts.spawner?.claudeJsonPath ?? join(homedir(), ".claude.json");
@@ -9367,12 +9422,12 @@ export class Daemon {
   private hostOfTask(wave: WaveId, task: TaskId): [Host, string?] {
     const def = this.ranDef(this.waves.get(wave)?.record, task);
     if (def === undefined || def.host === "local" || this.autoHostReached(wave, def))
-      return [this.host];
+      return [this.localHostOfTask(wave, task)];
     try {
       const remote = this.remoteHost(wave, def);
       return [remote, forwardOf(remote)];
     } catch {
-      return [this.host];
+      return [this.localHostOfTask(wave, task)];
     }
   }
 

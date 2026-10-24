@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
+import type { SetupContext } from "./step";
 
 /**
  * The PATH `volley setup` (and `volleyd install`) writes into the services' unit files. Never
@@ -91,4 +92,32 @@ export function stableServicePath({
       ...SYSTEM,
     ]),
   ].join(":");
+}
+
+/**
+ * The services' PATH: the linked commands first, then a fixed list (`stableServicePath`), never
+ * the invoking shell's whole PATH, so a rerun from another terminal changes nothing.
+ */
+export function servicePath(ctx: SetupContext): string {
+  return stableServicePath({
+    home: ctx.home,
+    bun: ctx.deps.bun,
+    tmpdir: ctx.auth.env.TMPDIR,
+    ...(ctx.deps.exists !== undefined ? { exists: ctx.deps.exists } : {}),
+  });
+}
+
+/**
+ * The environment the services run with: where volleyd lives, which broker, the auth dir its
+ * `volley auth` calls use (the one setup used, even when `--dir` / `--layout` chose it), a usable
+ * PATH.
+ */
+export function serviceEnv(ctx: SetupContext): Record<string, string> {
+  return {
+    VOLLEYD_HOME: ctx.volleydHome,
+    VOLLEY_BROKER_URL: ctx.auth.url,
+    VOLLEY_AUTH_DIR: ctx.auth.dir,
+    VOLLEY_NAMESPACE: ctx.auth.env.VOLLEY_NAMESPACE ?? "default",
+    PATH: servicePath(ctx),
+  };
 }

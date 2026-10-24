@@ -99,7 +99,8 @@ export function fakeMachine(
     secrets: [],
     secretPrompts: [],
     keychain: new Map(),
-    present: new Set(),
+    // tmux in /usr/bin: the Terminal step finds a terminal (a test deletes it to see it block).
+    present: new Set(["/usr/bin/tmux"]),
     loaded: new Set(),
     active: new Set(),
     settingsFile,

@@ -7,7 +7,7 @@ import {
   cmuxEnv,
   cmuxSaid,
   readCmuxPassword,
-} from "volley-cli/setup/cmux";
+} from "volley-cli/setup/terminal";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import { volleydHome } from "../config-store";
 import type { ExecFn, ExecOptions, ExecResult } from "../exec";
@@ -51,19 +51,8 @@ export class LocalCmuxHost implements Host {
     return addWorktree(this.exec, spec);
   }
 
-  async writeFile(path: string, content: string, mode?: number): Promise<void> {
-    await mkdir(dirname(path), { recursive: true });
-    if (mode === undefined) return writeFile(path, content);
-    // A fresh temp file created with `mode`, renamed over the target: the content is never
-    // readable under an existing file's older, more open mode (agent.json holds a password).
-    const tmp = `${path}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(tmp, content, { mode, flag: "wx" });
-      await rename(tmp, path);
-    } catch (e) {
-      await rm(tmp, { force: true });
-      throw e;
-    }
+  writeFile(path: string, content: string, mode?: number): Promise<void> {
+    return writeLocalFile(path, content, mode);
   }
 
   /** The launch chain: each launch starts after the one before it settles. */
@@ -191,6 +180,22 @@ export class LocalCmuxHost implements Host {
             () => [],
           );
     return { closed, pids, how: closed ? "close-workspace" : pids.length > 0 ? "signal" : "none" };
+  }
+}
+
+/** A local host's `writeFile`: parents created; with a `mode`, never under an older, looser one. */
+export async function writeLocalFile(path: string, content: string, mode?: number): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  if (mode === undefined) return writeFile(path, content);
+  // A fresh temp file created with `mode`, renamed over the target: the content is never
+  // readable under an existing file's older, more open mode (agent.json holds a password).
+  const tmp = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmp, content, { mode, flag: "wx" });
+    await rename(tmp, path);
+  } catch (e) {
+    await rm(tmp, { force: true });
+    throw e;
   }
 }
 

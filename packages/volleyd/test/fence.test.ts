@@ -907,6 +907,117 @@ describe("the launch command needs the token of a launch script volleyd sealed",
   });
 });
 
+describe("local tmux agent sessions (fleet.local_terminal: tmux): wave-shaped names only", () => {
+  const script = renderLaunchScript({
+    hooksDir: "/opt/volley/packages/volley-hooks",
+    model: "claude-opus-5-5",
+    agentId: "w1-t1-implementer-1",
+    worktree: "/tmp/wt",
+  });
+  const S = "volley-w1-T1-implementer";
+  const start = (session: string, cwd = "/tmp/wt", size: string[] = []) => [
+    "tmux",
+    "new-session",
+    "-d",
+    ...size,
+    "-s",
+    session,
+    "-c",
+    cwd,
+    "bash .volley/launch.sh",
+  ];
+
+  it("new-session runs the sealed launch script in its worktree, in a wave-shaped session", () => {
+    const launch = sealLaunchScript("/tmp/wt", script);
+    expect(() => assertAllowed(start(S), { launch })).not.toThrow();
+    expect(() =>
+      assertAllowed(start(S, "/tmp/wt", ["-x", "220", "-y", "50"]), { launch }),
+    ).not.toThrow();
+    expect(() => assertAllowed(start(`${S}-2`), { launch })).not.toThrow();
+    expect(() => assertAllowed(start("volley-w1-release-ship"), { launch })).not.toThrow();
+    // Without the seal, in another worktree, or in a session not shaped like a wave's.
+    expect(() => assertAllowed(start(S))).toThrow(FenceError);
+    expect(() => assertAllowed(start(S, "/tmp/attacker"), { launch })).toThrow(FenceError);
+    for (const bad of [
+      "agent-1",
+      "w1-T1-implementer",
+      "volley-w1",
+      "volley-w1-T1",
+      "volley-w1-T1-x.y",
+    ])
+      expect(() => assertAllowed(start(bad), { launch }), bad).toThrow(FenceError);
+    // A sign-in session's name is the sign-in path's only.
+    expect(() => assertAllowed(start("volley-signin-t1-implementer"), { launch })).toThrow(
+      FenceError,
+    );
+    // A size is a pair, inside the bounds; any other command or extra option is refused.
+    expect(() => assertAllowed(start(S, "/tmp/wt", ["-x", "220"]), { launch })).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(start(S, "/tmp/wt", ["-x", "9999", "-y", "50"]), { launch }),
+    ).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(["tmux", "new-session", "-d", "-s", S, "-c", "/tmp/wt", "bash -c id"], {
+        launch,
+      }),
+    ).toThrow(FenceError);
+    expect(() =>
+      assertAllowed(["tmux", "-L", "x", "new-session", "-d", "-s", S, "-c", "/tmp/wt"], { launch }),
+    ).toThrow(FenceError);
+  });
+
+  it("reads, sizes and finds only a wave-shaped session, matched exactly", () => {
+    const ok = [
+      ["tmux", "capture-pane", "-p", "-t", `=${S}:`, "-S-40"],
+      ["tmux", "capture-pane", "-p", "-J", "-t", `=${S}:`, "-S-40"],
+      ["tmux", "has-session", "-t", `=${S}`],
+      ["tmux", "resize-window", "-t", `=${S}:`, "-x", "120", "-y", "40"],
+      ["tmux", "send-keys", "-t", `=${S}:`, "Enter"],
+      ["tmux", "send-keys", "-t", `=${S}:`, "Escape"],
+    ];
+    for (const argv of ok) expect(() => assertAllowed(argv), argv.join(" ")).not.toThrow();
+    const bad = [
+      ["tmux", "capture-pane", "-p", "-t", "=agent-1:", "-S-40"],
+      ["tmux", "capture-pane", "-p", "-t", `=${S}:`, "-S-40", "-b", "buf"],
+      ["tmux", "has-session", "-t", "=volley-signin-work-x"],
+      ["tmux", "resize-window", "-t", `=${S}:`, "-x", "5", "-y", "40"],
+      ["tmux", "send-keys", "-t", `=${S}:`, "C-c"],
+      ["tmux", "send-keys", "-t", "=agent-1:", "Enter"],
+      ["tmux", "send-keys", "-t", `=${S}:`, "-l", "--", "rm -rf /"],
+      ["tmux", "list-sessions"],
+      ["tmux", "set-option", "-g", "default-command", "evil"],
+    ];
+    for (const argv of bad) expect(() => assertAllowed(argv), argv.join(" ")).toThrow(FenceError);
+  });
+
+  it("typed text and picker keys need their tokens, as in cmux", () => {
+    const launch = sealLaunchScript("/tmp/wt", script);
+    const text = (t: string) => ["tmux", "send-keys", "-t", `=${S}:`, "-l", "--", t];
+    expect(() => assertAllowed(text(LAUNCH_COMMAND))).toThrow(FenceError);
+    expect(() => assertAllowed(text(LAUNCH_COMMAND), { launch })).not.toThrow();
+    const modelSwitch = mintModelSwitchToken("claude-sonnet-5-5", "d-9");
+    expect(() => assertAllowed(text("/model claude-sonnet-5-5"), { modelSwitch })).not.toThrow();
+    expect(() => assertAllowed(text("/model claude-sonnet-5-5"))).toThrow(FenceError);
+    const keys = (k: string) => ["tmux", "send-keys", "-t", `=${S}:`, k];
+    expect(() => assertAllowed(keys("Down"))).toThrow(FenceError);
+    const picker = mintPickerToken({ item_id: "p-x", version: 1, keys: ["Down"] });
+    expect(() => assertAllowed(keys("Down"), { picker })).not.toThrow();
+  });
+
+  it("kill-session of an agent session needs consent; a sign-in session's still does not", () => {
+    const kill = ["tmux", "kill-session", "-t", `=${S}`];
+    expect(() => assertAllowed(kill)).toThrow(/consent/);
+    expect(() =>
+      assertAllowed(kill, { consent: mintConsentToken("retire w1-t1-implementer-1") }),
+    ).not.toThrow();
+    expect(() =>
+      assertAllowed(["tmux", "kill-session", "-t", "=agent-1"], {
+        consent: mintConsentToken("volleyd cleanup --yes"),
+      }),
+    ).toThrow(FenceError);
+    expect(() => assertAllowed(["tmux", "kill-session", "-t", "volley-signin-work"])).not.toThrow();
+  });
+});
+
 describe("exec", () => {
   // A throwaway repo, so these tests do not depend on running inside a git checkout.
   const repoDir = tempDirForAll("volleyd-exec-");

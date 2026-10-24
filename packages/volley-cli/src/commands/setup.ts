@@ -30,6 +30,7 @@ import {
   listenerUrls,
   setupFence,
 } from "../setup/step";
+import { planTerminal } from "../setup/terminal";
 import { defaultAuthDir } from "./auth";
 import { findRepoRoot } from "./dash";
 import { DESK_PORT } from "./desk-serve";
@@ -37,7 +38,7 @@ import { DESK_PORT } from "./desk-serve";
 export { type HiddenInput, hiddenKeys } from "../hidden-input";
 
 /**
- * `volley setup`: the first-run (and repair) wizard. Five steps, each planned (what it found,
+ * `volley setup`: the first-run (and repair) wizard. Six steps, each planned (what it found,
  * what it would change), shown, confirmed (or `--yes`), applied, then checked:
  *
  *   1. Broker    find mosquitto (install, version, what the listeners do, running agents)
@@ -46,9 +47,12 @@ export { type HiddenInput, hiddenKeys } from "../hidden-input";
  *                anonymous clients
  *   3. Accounts  the shared roles and the fixed identities (existing ones kept, drifted roles
  *                offered `migrate --roles`), credential files, the keychain, a one-time admin token
- *   4. Services  `volley` + `volleyd` installed in ~/.volley/bin, volleyd, the hooks for
+ *   4. Terminal  the terminal volleyd starts local agents in: cmux (macOS, when installed; its
+ *                socket checked the way the service reaches it) or tmux, put on record in
+ *                config.yaml (`fleet.local_terminal`) and setup.json
+ *   5. Services  `volley` + `volleyd` installed in ~/.volley/bin, volleyd, the hooks for
  *                coordinator sessions, the Desk built and served
- *   5. Phone     a one-time steer sign-in link as a QR code
+ *   6. Phone     a one-time steer sign-in link as a QR code
  *
  * Idempotent: a rerun plans nothing for what is in place. Every step is journaled to
  * $VOLLEYD_HOME/setup.log (summaries only, never a secret).
@@ -58,6 +62,7 @@ const STEPS: [StepName, Planner][] = [
   ["detect", planDetect],
   ["security", planSecurity],
   ["accounts", planAccounts],
+  ["terminal", planTerminal],
   ["services", planServices],
   ["phone", planPhone],
 ];
@@ -277,11 +282,11 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
     `volley setup${ctx.repair ? " --repair" : ""}: broker ${url}, ${layout.name} layout${fromRecord && layoutFlag === undefined ? " (from the last volley setup)" : ""}, auth dir ${auth.dir}\n`,
   );
   const yes = ctx.yes;
-  // A run that stops once the Services step has checked cmux (often at the cmux change itself:
+  // A run that stops once the Terminal step has checked cmux (often at the cmux change itself:
   // the runs where its mode matters most) still records the mode it found, and replaces an
-  // earlier run's.
+  // earlier run's; and the terminal it put on record.
   const stopped = () => {
-    if (ctx.cmuxSocketMode !== undefined) writeSetupInstall(ctx);
+    if (ctx.cmuxSocketMode !== undefined || ctx.terminal !== undefined) writeSetupInstall(ctx);
     return EXIT.ERROR;
   };
   const skipped: string[] = [];
@@ -372,7 +377,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
 
 export const SETUP_HELP = `Usage: volley setup [--yes] [--repair] [options]
 
-First-run (and repair) wizard: five steps, each showing what it found and what it will change
+First-run (and repair) wizard: six steps, each showing what it found and what it will change
 before changing anything.
 
   1. Broker    find mosquitto (>= 2.1), its listeners, the running agents
@@ -386,13 +391,16 @@ before changing anything.
                (existing logins kept; drifted roles offered \`volley auth migrate --roles\`),
                their credential files, a copy of the coordinator's login in the macOS
                keychain, and a one-time admin token for the Desk (printed here only)
-  4. Services  the volley and volleyd commands installed in ~/.volley/bin (on the services'
+  4. Terminal  where volleyd starts local agents: cmux on a Mac that has it (checked the
+               way volleyd's service reaches it; the socket password it needs is asked for,
+               hidden), else tmux (stops, printing the install line, when tmux is missing);
+               recorded as fleet.local_terminal in $VOLLEYD_HOME/config.yaml
+  5. Services  the volley and volleyd commands installed in ~/.volley/bin (on the services'
                PATH, a fixed list: the same from any terminal), volleyd (launchd / systemd
-               --user), on macOS the cmux socket password volleyd's service needs (asked for,
-               hidden), the Volley hooks for coordinator sessions (your status line keeps
+               --user), the Volley hooks for coordinator sessions (your status line keeps
                working), the Desk built and served by \`volley desk serve\` on 0.0.0.0:${DESK_PORT}
                (stops if another program listens on that port)
-  5. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
+  6. Phone     a one-time steer sign-in link (10 minutes, single use) as a QR code; skipped
                when a phone cannot reach the WebSocket listener (LAN access off)
 
 Rerunning changes nothing that is in place. The one-time admin token and the phone's link
@@ -404,7 +412,8 @@ Options:
   --repair             Check and fix only: no new admin token, no phone link
   --lan                Open the WebSocket listener (9001) to your network (for the phone)
   --no-lan             Keep it on this machine only (the default under --yes)
-  --step <name>        Only this step (repeatable): detect, security, accounts, services, phone
+  --step <name>        Only this step (repeatable): detect, security, accounts, terminal,
+                       services, phone
   --dir <dir>          The auth dir (env: VOLLEY_AUTH_DIR; default <mosquitto config dir>/volley)
   --layout <name>      brew-arm64 | brew-intel | snap | etc | container (default: detected)
   --config <path>      The mosquitto.conf to manage (default: the layout's)

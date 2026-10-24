@@ -1226,6 +1226,10 @@
                   "data": {
                     "type": "object",
                     "properties": {
+                      "terminal": {
+                        "enum": ["cmux", "tmux"],
+                        "description": "The terminal the agent runs in (fleet.local_terminal on the supervisor's own machine; tmux on a paired machine; spec section 4.6.15). Absent from a supervisor that predates it."
+                      },
                       "churn": {
                         "const": true,
                         "description": "The spawn is churn (spec section 4.6.16): it never spends the spawn budget. Absent: productive."
