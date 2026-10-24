@@ -8,6 +8,7 @@ import { buildEnvelope } from "volley-mcp/envelope";
 import { localPinWarnings } from "../src/commands/validate";
 import { CONFIG_DEFAULTS } from "../src/config-defaults";
 import { CONFIG_TOPIC } from "../src/control";
+import { localMachineName } from "../src/fleet-name";
 import { MACHINE_CHANNEL, machineTopic } from "../src/machines";
 import { parseWaveFile } from "../src/wave-file";
 import { type TestBroker, startTestBroker } from "./helpers/aedes-broker";
@@ -594,5 +595,93 @@ describe("volleyd validate: footprints and the overlap plan (SPEC §4.6.22)", ()
       "note: i1 and i2 run as separate tasks; the planner would bundle them as i1 — kept as written\n",
     );
     expect(r.stdout).toContain("footprints: 2 listed\n");
+  });
+});
+
+describe("volleyd validate: an owner/name repo: resolved offline as run resolves it (#448)", () => {
+  let dir: string;
+  let home: string;
+  beforeEach(() => {
+    dir = realpathSync(tempDir("volleyd-validate-slug-"));
+    home = join(dir, "home");
+    mkdirSync(home);
+  });
+  const env = () => ({ VOLLEY_BROKER_URL: "mqtt://127.0.0.1:1", VOLLEYD_HOME: home });
+  const waveFile = (head = "", task = "{ issue: 1 }") => {
+    const file = join(dir, "w.yaml");
+    writeFileSync(
+      file,
+      `wave: w1\nrepo: b/b\nrelease_branch: release/x\nmodel: claude-opus-5-5\npipeline: [implement]\n${head}tasks:\n  T1: ${task}\nconfig: { require_fresh_base: false }\n`,
+    );
+    return file;
+  };
+  const BOX = "hosts:\n  box:\n    target: dev@box\n    volley_dir: /opt/volley\n";
+
+  it("this machine's clone: the line names it, and its release branch is checked", async () => {
+    const clone = join(dir, "managed", "b", "b");
+    mkdirSync(clone, { recursive: true });
+    git(clone, "init", "--quiet", "-b", "main");
+    git(
+      clone,
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@example.com",
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "init",
+    );
+    writeFileSync(
+      join(home, "config.yaml"),
+      `fleet:\n  local_name: control\n  repo_root: ${join(dir, "managed")}\n${BOX}repos:\n  b/b: { machines: [control, box] }\n`,
+    );
+    const missing = await runCli(["validate", waveFile("placement: local\n")], env());
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stderr).toContain(`RELEASE_BRANCH_MISSING: ${clone} has neither release/x`);
+    git(clone, "branch", "release/x");
+    const r = await runCli(["validate", waveFile("placement: local\n")], env());
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(`repo: b/b → ${clone} (this machine's clone)\n`);
+  });
+
+  it("held by paired machines only: accepted, saying where its tasks run", async () => {
+    writeFileSync(
+      join(home, "config.yaml"),
+      `fleet:\n  local_name: control\n${BOX}repos:\n  b/b: { machines: [box] }\n`,
+    );
+    const r = await runCli(["validate", waveFile("placement: auto\n")], env());
+    expect(r.stderr).toBe("");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "repo: b/b (no clone on this machine; held by box: its tasks run there)\n",
+    );
+    expect(r.stdout).not.toContain("is not on this machine");
+    const pinned = await runCli(
+      ["validate", waveFile("placement: auto\n", "{ issue: 1, host: local }")],
+      env(),
+    );
+    expect(pinned.exitCode).toBe(1);
+    expect(pinned.stderr).toContain(
+      "tasks.T1.host: no clone of b/b on control: set placement: auto so it runs on box, or add the clone (volley repo add b/b --machine control)",
+    );
+  });
+
+  it("held by no machine: refused at repo, naming the paired machine, or this one with none", async () => {
+    writeFileSync(join(home, "config.yaml"), `fleet:\n  local_name: control\n${BOX}`);
+    const r = await runCli(["validate", waveFile("placement: auto\n")], env());
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(
+      "repo: no clone of b/b on any machine: add it to one (Settings → Repositories, or volley repo add b/b --machine box)",
+    );
+    const bare = join(dir, "bare-home");
+    mkdirSync(bare);
+    const none = await runCli(["validate", waveFile()], { ...env(), VOLLEYD_HOME: bare });
+    expect(none.exitCode).toBe(1);
+    expect(none.stderr).toContain(
+      `repo: no clone of b/b on any machine: add it to one (Settings → Repositories, or volley repo add b/b --machine ${localMachineName()})`,
+    );
   });
 });

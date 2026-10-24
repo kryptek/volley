@@ -167,6 +167,31 @@ export function assignedSlugs(cfg: RepoConfig, machine: string): string[] {
 }
 
 /**
+ * The machines that hold a clone of `slug` by config (#448): every machine `repos.<slug>.machines`
+ * names (`all`: every `hosts.<name>` and the supervisor's machine `local`) and every host that
+ * adopts one; sorted, each once.
+ */
+export function holdersOf(cfg: RepoConfig, local: string, slug: string): string[] {
+  const key = slugKey(cfg.repos, slug);
+  const machines = key !== undefined ? cfg.repos[key]?.machines : undefined;
+  const out = new Set<string>(
+    machines === "all" ? [...Object.keys(cfg.hosts), local] : (machines ?? []),
+  );
+  for (const [name, host] of Object.entries(cfg.hosts)) {
+    if (slugKey(host?.repos, slug) !== undefined) out.add(name);
+  }
+  return [...out].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * How the supervisor runs `gh` for a wave's repository (#448): an `owner/name` (a wave the
+ * supervisor holds no clone of) with `--repo`, a checkout's path in that directory.
+ */
+export function ghRepoContext(repo: string): { args: string[]; cwd?: string } {
+  return isSlug(repo) ? { args: ["--repo", repo] } : { args: [], cwd: repo };
+}
+
+/**
  * Of `slugs`, those config names (in `repos`, or adopted on a host) without assigning them to
  * `machine` (nor adopting a clone there): repositories other machines work on. A slug config
  * does not name is not one.

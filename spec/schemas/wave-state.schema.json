@@ -35,7 +35,11 @@
               "oneOf": [{ "$ref": "#/$defs/agentId" }, { "type": "null" }],
               "description": "Owning coordinator agent id, or null when the wave is orphaned."
             },
-            "repo": { "type": "string", "minLength": 1 },
+            "repo": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The wave's repository as the supervisor runs it: its clone's path, or the GitHub owner/name when only paired machines hold a clone."
+            },
             "release_branch": { "type": "string", "minLength": 1 },
             "status": {
               "enum": [

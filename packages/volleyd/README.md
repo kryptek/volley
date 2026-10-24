@@ -2628,21 +2628,34 @@ Which clone a box uses for a task comes from `repos` and `hosts.<name>.repos` (b
 `repo:` key of a host is deprecated (one path per host, from before repositories) and migrates by
 itself.
 
-A wave file's `repo:` may be an `owner/name` too: at submit it becomes the supervisor's own clone
-of it (its `hosts.<fleet.local_name>.repos` entry, else the managed path), and a name with none is
-refused. A relative path shaped like `owner/name` is written `./owner/name`.
+A wave file's `repo:` may be an `owner/name` too. At submit it becomes the supervisor's own clone
+of it when its machine holds one (its `hosts.<fleet.local_name>.repos` entry, else the managed
+path); it stays the `owner/name` when only paired machines hold one (below); and a name no machine
+holds is refused at `repo` (`no clone of <owner/name> on any machine: add it to one (…)`). A
+relative path shaped like `owner/name` is written `./owner/name`. `volleyd validate` gives the
+same verdict offline from `config.yaml`, and it and `volleyd run` print a `repo:` line saying
+which it became.
 
-**The supervisor's own machine runs a repository's agents only when it is assigned there.** The
-supervisor always needs its own checkout of a wave's repository (the wave's `repo:`; volleyd
-fetches, merges and cuts its local worktrees there). For a repository config names (`repos`, or
-an adopted clone on a host) without assigning it to the supervisor's machine, that checkout is
-the supervisor's alone: its readiness says `blocked (<owner/name> is not assigned to <machine>:
-add it (Settings → Repositories, or volley repo add <owner/name> --machine <machine>))`, and
-placement keeps the wave's tasks on the machines it is assigned to (a task that names
-`host: local` still runs there). Such a wave names that checkout by path in its `repo:`, since
-an `owner/name` resolves only to a clone the supervisor's machine is assigned. A repository config
-does not name (a single-repository setup from before repositories) runs on the supervisor's
-machine as before.
+**The supervisor's own machine runs a repository's agents only when it is assigned there.** For a
+repository config names (`repos`, or an adopted clone on a host) without assigning it to the
+supervisor's machine, the supervisor's readiness says `blocked (<owner/name> is not assigned to
+<machine>: add it (Settings → Repositories, or volley repo add <owner/name> --machine
+<machine>))`, and placement keeps the wave's tasks on the machines it is assigned to. Such a wave
+names the repository by `owner/name`: the wave keeps it (its state's `repo` is the `owner/name`),
+the supervisor needs no checkout of it, and its tasks are placed on the machines that hold one and
+spawn in worktrees of their clones. A task of it that would spawn on the supervisor's machine
+(`host: local`, or no `host:` under `placement: local`) is refused at submit at
+`tasks.<id>.host`: `no clone of <owner/name> on <machine>: set placement: auto so it runs on
+<machines>, or add the clone (volley repo add <owner/name> --machine <machine>)`. For such a wave
+the supervisor runs its `gh` work (the issue lifecycle, the release PR lookup, held decisions, a
+red head's PR, the repository's visibility) with `--repo <owner/name>`, and skips what needs a
+checkout of its own: the fetch and release-branch check, the tree footprints are resolved against
+(Files lists stay as written), its own doctor, the CI-queue admission sample (the wave runs
+without that signal), restart reconciliation's branch probe, a red head's CI re-read, and a
+repo-relative `brief_preface` (an absolute one is still read). A wave may instead name a checkout
+of such a repository on the supervisor by path, as before; that checkout is the supervisor's
+alone and a task that names `host: local` runs there. A repository config does not name (a
+single-repository setup from before repositories) runs on the supervisor's machine as before.
 
 **The legacy `hosts.<name>.repo` migrates by itself.** The first time a machine's record reports
 the origin of the clone at that path (a GitHub one), volleyd moves it to
@@ -4193,6 +4206,7 @@ ALLOW (program by bare name only — never a path):
     a `<!-- volleyd:… wave=… -->` marker: only volleyd's own comments) ·
     gh label list --search merged-to-release --json name ·
     gh label create merged-to-release --description <text> --color <6 hex> (never --force);
+    each of these may end in exactly `--repo <owner/name>`;
     never on a paired machine
   cmux — exact argv shapes only, because cmux types into an agent's shell:
     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),

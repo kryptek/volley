@@ -80,6 +80,7 @@ import { AGENT_BRANCH } from "./worktree";
  *     a `<!-- volleyd:… wave=… -->` marker: only volleyd's own comments) ·
  *     gh label list --search merged-to-release --json name ·
  *     gh label create merged-to-release --description <text> --color <6 hex> (never --force);
+ *     each of these may end in exactly `--repo <owner/name>`;
  *     never on a paired machine
  *   cmux — exact argv shapes only, because cmux types into an agent's shell:
  *     new-workspace --cwd <dir> --name <name> --command LAUNCH_COMMAND (each once, any order),
@@ -1570,10 +1571,14 @@ const COMMENT_MARKER = /\n\n<!-- volleyd:[a-z-]+ wave=[a-z0-9][a-z0-9_-]{0,62}( 
 
 /**
  * The issue lifecycle's writes (#416), each an exact argv: the label added or removed, a comment
- * or a closing comment that carries volleyd's marker, the label listed or created. Null: not one
- * of them (the read-only allow-list decides).
+ * or a closing comment that carries volleyd's marker, the label listed or created; each may end
+ * in `--repo <owner/name>`. Null: not one of them (the read-only allow-list decides).
  */
-function issueLifecycle(args: string[]): Verdict | null {
+function issueLifecycle(all: string[]): Verdict | null {
+  // A wave named by its `owner/name` (no clone on the supervisor) ends each form in exactly
+  // `--repo <owner/name>` (#448).
+  const repo = all.length >= 2 && all.at(-2) === "--repo" && isSlug(all.at(-1) ?? "");
+  const args = repo ? all.slice(0, -2) : all;
   const [verb = "", sub = "", n = "", flag = "", value = ""] = args;
   const two = `${verb} ${sub}`;
   if (two === "issue edit" || two === "issue comment" || two === "issue close") {

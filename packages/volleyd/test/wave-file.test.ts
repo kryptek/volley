@@ -6,6 +6,7 @@ import {
   defaultPlacement,
   filePlan,
   formatPlacement,
+  isSlugRepo,
   parseWaveFile,
   planNotes,
   resolveWaveRepo,
@@ -462,13 +463,57 @@ describe("resolveWaveRepo: a wave file's repo: may be an owner/name slug (D9)", 
     }
   });
 
-  it("an unknown slug is a submit error naming volley repo add", () => {
+  it("an unknown slug is refused at repo, naming every machine (#448)", () => {
+    const paired = { ...cfg, hosts: { box: {}, mini: {} } };
+    expect(() => resolveWaveRepo(wave("someone/else"), paired, "control", "/path/to/home")).toThrow(
+      "repo: no clone of someone/else on any machine: add it to one (Settings → Repositories, or volley repo add someone/else --machine box)",
+    );
     expect(() => resolveWaveRepo(wave("someone/else"), cfg, "control", "/path/to/home")).toThrow(
-      "repo: no clone of someone/else on control: add it (Settings → Repositories, or volley repo add someone/else --machine control)",
+      "repo: no clone of someone/else on any machine: add it to one (Settings → Repositories, or volley repo add someone/else --machine control)",
     );
     expect(() =>
       resolveWaveRepo(wave("example-org/widgets"), cfg, "other", "/path/to/home"),
-    ).toThrow(WaveFileError);
+    ).toThrow(
+      "tasks.T1.host: no clone of example-org/widgets on other: set placement: auto so it runs on control",
+    );
+  });
+
+  describe("a slug only paired machines hold (#448)", () => {
+    const boxOnly = {
+      repos: { "b/b": { machines: ["box"] as string[] } },
+      fleet: { repo_root: "~/.volley/repos" },
+      hosts: { box: {}, mini: { repos: { "B/B": "/srv/b" } } },
+    };
+    const withTasks = (tasks: string) =>
+      parseWaveFile(`${HEADER.replace("/path/to/example-repo", "b/b")}tasks:\n${tasks}`);
+
+    it("keeps the slug: its tasks run on the machines that hold it", () => {
+      const w = withTasks("  T1: { issue: 1, host: auto }\n");
+      expect(resolveWaveRepo(w, boxOnly, "control", "/path/to/home")).toBe(w);
+      expect(isSlugRepo(w)).toBe(true);
+    });
+
+    it("a task pinned to the supervisor's machine is refused at tasks.<id>.host", () => {
+      const run = () =>
+        resolveWaveRepo(
+          withTasks("  T0: { issue: 2, host: box }\n  T1: { issue: 1, host: local }\n"),
+          boxOnly,
+          "control",
+          "/path/to/home",
+        );
+      expect(run).toThrow(
+        "tasks.T1.host: no clone of b/b on control: set placement: auto so it runs on box, mini, or add the clone (volley repo add b/b --machine control)",
+      );
+      // No host: under placement local is the supervisor's machine too.
+      expect(() =>
+        resolveWaveRepo(withTasks("  T1: { issue: 1 }\n"), boxOnly, "control", "/path/to/home"),
+      ).toThrow("tasks.T1.host: no clone of b/b on control");
+    });
+
+    it("on a machine that holds it, it is that machine's clone", () => {
+      const w = withTasks("  T1: { issue: 1, host: local }\n");
+      expect(resolveWaveRepo(w, boxOnly, "box", "/h").repo).toBe("/h/.volley/repos/b/b");
+    });
   });
 });
 

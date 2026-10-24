@@ -178,6 +178,36 @@ describe("two repositories on a supervisor and one paired box (#439)", () => {
     expect(await spawned("wb")).toBe(PEER);
   });
 
+  it("a wave names b/b by its owner/name: kept as the slug, placed and spawned on the box (#448)", async () => {
+    await setup();
+    await addBoth([clone(A, BOX_A), clone(B, BOX_B)]);
+
+    // No checkout of b/b on the supervisor, none configured for it: only the box holds one.
+    await f.submit("wb2", "placement: auto\n", "  T1: { issue: 42 }\n", undefined, B);
+    const b = await placed("wb2");
+    expect(b.placement).toMatchObject({ host: PEER, by: "auto" });
+    expect(b.placement?.candidates.find((c) => c.host === LOCAL)?.line).toBe(
+      `ineligible: no ready clone of ${B} (blocked: ${B} is not assigned to ${LOCAL}: add it (Settings → Repositories, or volley repo add ${B} --machine ${LOCAL}))`,
+    );
+    expect(await spawned("wb2")).toBe(PEER);
+    const ev = f.journal("wb2").find((e) => e.type === "agent_spawned");
+    expect(JSON.stringify(ev?.data)).toContain(BOX_B);
+    const state = (await f.state("wb2")) as { repo?: string; github?: { slug?: string } };
+    expect(state.repo).toBe(B);
+    expect(state.github?.slug).toBe(B);
+    expect(f.journal("wb2").some((e) => e.data?.alarm === "repo_visibility_unknown")).toBe(false);
+  });
+
+  it("a task of a box-only owner/name wave pinned to host: local is refused at submit (#448)", async () => {
+    await setup();
+    await addBoth([clone(A, BOX_A), clone(B, BOX_B)]);
+    await expect(
+      f.submit("wb3", "placement: auto\n", "  T1: { issue: 42, host: local }\n", undefined, B),
+    ).rejects.toThrow(
+      `tasks.T1.host: no clone of ${B} on ${LOCAL}: set placement: auto so it runs on ${PEER}, or add the clone (volley repo add ${B} --machine ${LOCAL})`,
+    );
+  });
+
   it("the box missing java for a/a is skipped for a/a's wave with the reason; b/b's still places there", async () => {
     await setup();
     await addBoth([clone(A, BOX_A, ["java"]), clone(B, BOX_B)]);

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { VolleyBroker } from "volley-mcp/broker";
@@ -8,11 +9,11 @@ import { parse } from "yaml";
 import { formatPlaybook, wavePlaybook } from "../autopilot/playbook";
 import { briefPrefacePath, formatBriefPreface, readBriefPreface } from "../brief";
 import { authFields } from "../broker-auth";
-import { CONFIG_DEFAULTS, DAEMON_DEFAULTS } from "../config-defaults";
+import { CONFIG_DEFAULTS, DAEMON_DEFAULTS, defaultsFor } from "../config-defaults";
 import { ALL_ZERO_WEIGHTS, volleydHome } from "../config-store";
 import { CONFIG_TOPIC, type ControlTarget, resolveControlTarget } from "../control";
 import { exec } from "../exec";
-import { LOCAL_HOST } from "../fleet-name";
+import { LOCAL_HOST, localMachineName } from "../fleet-name";
 import { type Tree, footprintSummary, readReleaseTree } from "../footprint";
 import { type CommandArgs, EXIT, type ExitCode } from "../io";
 import { MACHINES_FILTER, type MachineRecord, parseMachine } from "../machines";
@@ -25,7 +26,7 @@ import {
   snapshotFrom,
 } from "../placement";
 import { repoVerdictFromRecord } from "../readiness";
-import { slugKey } from "../repos";
+import { type RepoConfig, holdersOf, isSlug, slugKey } from "../repos";
 import { criticalPaths } from "../scheduler";
 import type { PlacementConfig, Tunables, Wave } from "../types";
 import {
@@ -35,6 +36,7 @@ import {
   formatPlacement,
   parseWaveFile,
   planNotes,
+  resolveWaveRepo,
 } from "../wave-file";
 import { checkFreshBase, checkReleaseBranch, expandHome, spawnsLocally } from "../worktree";
 
@@ -46,6 +48,10 @@ exist there, locally or as origin/<branch> (RELEASE_BRANCH_MISSING otherwise); a
 not here is noted, and the daemon checks it at \`run\`. With require_fresh_base on (the
 default), the repo must also have an origin remote (BASE_STALE otherwise: volleyd fetches the
 release branch before every worktree it cuts).
+
+A \`repo:\` that is an owner/name is resolved as \`run\` resolves it, from $VOLLEYD_HOME/config.yaml:
+"repo: <owner/name> → <path> (this machine's clone)", or "repo: <owner/name> (no clone on this
+machine; held by <machines>: its tasks run there)"; one no machine holds is refused.
 
 A wave that places tasks (\`placement: auto\`, or a task's \`host: auto\`) also gets a placement
 preview, "if admitted now: T1 → box-a (0.81), T3 → local (0.63)", from the machine records and
@@ -190,15 +196,76 @@ export function parseWithPlacement(
   };
 }
 
+/**
+ * What resolving a wave file's `owner/name` `repo:` reads, offline (#448): config.yaml's `repos`,
+ * `hosts` and `fleet.repo_root` / `fleet.local_name` over the defaults the daemon starts from. A
+ * file that does not parse is the daemon's to report: nothing configured.
+ */
+export function offlineRepoConfig(env: CommandArgs["env"]): { cfg: RepoConfig; local: string } {
+  const defaults = defaultsFor(env);
+  const file = join(volleydHome(env), "config.yaml");
+  type Raw = {
+    repos?: unknown;
+    hosts?: unknown;
+    fleet?: { repo_root?: unknown; local_name?: unknown };
+  } | null;
+  let raw: Raw = null;
+  try {
+    raw = existsSync(file) ? (parse(readFileSync(file, "utf-8")) as Raw) : null;
+  } catch {
+    raw = null;
+  }
+  const map = (v: unknown) =>
+    v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, never>) : {};
+  const root = raw?.fleet?.repo_root;
+  const name = raw?.fleet?.local_name;
+  return {
+    cfg: {
+      repos: map(raw?.repos),
+      hosts: map(raw?.hosts),
+      fleet: { repo_root: typeof root === "string" ? root : defaults.fleet.repo_root },
+    },
+    local: localMachineName(typeof name === "string" ? name : null),
+  };
+}
+
+/**
+ * The wave file's `owner/name` `repo:` resolved as `run` resolves it (`resolveWaveRepo`), and the
+ * line saying which it became: `repo: <slug> → <path> (this machine's clone)`, or `repo: <slug>
+ * (no clone on this machine; held by <machines>: its tasks run there)`. A path: unchanged, no line.
+ */
+export function resolveOffline(
+  wave: Wave,
+  env: CommandArgs["env"],
+  file: string,
+): { wave: Wave; repoLine: string } {
+  if (!isSlug(wave.repo)) return { wave, repoLine: "" };
+  const { cfg, local } = offlineRepoConfig(env);
+  const resolved = resolveWaveRepo(wave, cfg, local, homedir(), file);
+  if (resolved.repo !== wave.repo)
+    return {
+      wave: resolved,
+      repoLine: `repo: ${wave.repo} → ${resolved.repo} (this machine's clone)\n`,
+    };
+  const holders = holdersOf(cfg, local, wave.repo).filter((m) => m !== local);
+  return {
+    wave: resolved,
+    repoLine: `repo: ${wave.repo} (no clone on this machine; held by ${holders.join(", ")}: its tasks run there)\n`,
+  };
+}
+
 /** Printed for a wave none of whose tasks has `files:` (SPEC §4.6.22). */
 export const NO_FOOTPRINTS =
   "footprints: none (write them with wave-from-issues, or the daemon reads each issue's Files list at run)";
 
 /**
  * The tree the wave's tasks start from, when its repository is a checkout on this machine
- * (`repo` as resolved: a path; null otherwise, or when the release branch does not read).
+ * (`repo` as resolved: a path; null otherwise — an `owner/name` included — or when the release
+ * branch does not read).
  */
 export async function waveTree(repo: string, branch: string): Promise<Tree | null> {
+  // An `owner/name` the supervisor holds no clone of (#448): no tree here.
+  if (isSlug(repo)) return null;
   const dir = expandHome(repo);
   return existsSync(dir) ? readReleaseTree(exec, dir, branch) : null;
 }
@@ -268,11 +335,11 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
     return EXIT.USAGE;
   }
   try {
-    const { wave, placementLine, notes } = parseWithPlacement(
-      readFileSync(file, "utf-8"),
-      file,
-      placementDefaults(env),
-    );
+    const parsed = parseWithPlacement(readFileSync(file, "utf-8"), file, placementDefaults(env));
+    const { placementLine, notes } = parsed;
+    // An `owner/name` repo: as the daemon resolves it at submit (#448).
+    const { wave, repoLine } = resolveOffline(parsed.wave, env, file);
+    const slug = isSlug(parsed.wave.repo) ? parsed.wave.repo : undefined;
     if (notes !== "") io.stderr(notes);
     const weights = {
       ...CONFIG_DEFAULTS.placement.weights,
@@ -288,7 +355,8 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
     const repo = expandHome(wave.repo);
     let note = "";
     if (!spawnsLocally(wave)) {
-      // as `run`: every task runs on a remote host, whose clone is checked on the box
+      // as `run`: every task runs on a remote host, whose clone is checked on the box (an
+      // `owner/name` no clone here holds always: its local-pinned tasks are refused above)
     } else if (!existsSync(repo)) {
       note = `note: ${repo} is not on this machine; release branch not checked\n`;
     } else {
@@ -331,13 +399,13 @@ export async function validate({ argv, env, io }: CommandArgs): Promise<ExitCode
       try {
         target = resolveControlTarget({}, env);
       } catch {}
-      placement = target === null ? "" : await previewPlacement(wave, target);
+      placement = target === null ? "" : await previewPlacement(wave, target, slug);
     }
     io.stdout(
       `ok: wave ${wave.wave} v${wave.version} — ${wave.task_order.length} task(s), ` +
         `critical path ${longest}, release branch ${wave.release_branch}\n` +
         `${env.VOLLEY_AGENT_ID || env.VOLLEY_COORDINATOR ? "" : OWNER_NOTE}` +
-        `${note}${localPinWarnings(wave, env)}${agentMcpLine(wave, env)}${prefaceLine}\n${playbookLine}\n${placementLine}${placement}${planLines(wave, await waveTree(wave.repo, wave.release_branch))}`,
+        `${repoLine}${note}${localPinWarnings(wave, env)}${agentMcpLine(wave, env)}${prefaceLine}\n${playbookLine}\n${placementLine}${placement}${planLines(wave, await waveTree(wave.repo, wave.release_branch))}`,
     );
     return EXIT.OK;
   } catch (e) {

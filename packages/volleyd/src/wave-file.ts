@@ -13,7 +13,7 @@ import {
   planWave,
 } from "./overlap-plan";
 import { AUTO_HOST } from "./placement";
-import { type RepoConfig, cloneFor, isSlug } from "./repos";
+import { type RepoConfig, cloneFor, holdersOf, isSlug } from "./repos";
 import { type PathError, toPathErrors, validator } from "./schemas";
 import type {
   Footprint,
@@ -127,10 +127,13 @@ export function formatPlacement(p: WavePlacement, paired: number): string {
 }
 
 /**
- * The wave's `repo:` as the supervisor's clone: an `owner/name` slug resolves to its clone on the
+ * The wave's `repo:` as the supervisor runs it. An `owner/name` slug resolves to its clone on the
  * supervisor's own machine `local` (`cloneFor`: adopted, else managed under `fleet.repo_root`,
- * `~` being `home`); any other value is a path and is kept. A slug with no clone there is a
- * WaveFileError at `repo`. (A relative path shaped like a slug is written `./owner/name`.)
+ * `~` being `home`); when only paired machines hold it by config (`holdersOf`) the slug is kept
+ * and its tasks are placed on them, a task pinned to `local` being a WaveFileError at
+ * `tasks.<id>.host`; a slug no machine holds is a WaveFileError at `repo` (#448). Any other value
+ * is a path and is kept. (A relative path shaped like a slug is written `./owner/name`.) Pure:
+ * decided from config alone, so `volleyd validate` agrees offline.
  */
 export function resolveWaveRepo(
   wave: Wave,
@@ -140,13 +143,25 @@ export function resolveWaveRepo(
   source?: string,
 ): Wave {
   if (!isSlug(wave.repo)) return wave;
-  const clone = cloneFor(cfg, local, wave.repo, { home });
-  if (clone === undefined) {
-    const reason = `no clone of ${wave.repo} on ${local}: add it (Settings → Repositories, or volley repo add ${wave.repo} --machine ${local})`;
+  const slug = wave.repo;
+  const clone = cloneFor(cfg, local, slug, { home });
+  if (clone !== undefined) return { ...wave, repo: clone };
+  const holders = holdersOf(cfg, local, slug).filter((m) => m !== local);
+  if (holders.length === 0) {
+    const paired = Object.keys(cfg.hosts).filter((n) => n !== local);
+    const reason = `no clone of ${slug} on any machine: add it to one (Settings → Repositories, or volley repo add ${slug} --machine ${paired[0] ?? local})`;
     throw new WaveFileError([{ path: "repo", reason }], source);
   }
-  return { ...wave, repo: clone };
+  const pinned = Object.keys(wave.tasks).find((id) => wave.tasks[id]?.host === "local");
+  if (pinned !== undefined) {
+    const reason = `no clone of ${slug} on ${local}: set placement: auto so it runs on ${holders.join(", ")}, or add the clone (volley repo add ${slug} --machine ${local})`;
+    throw new WaveFileError([{ path: `tasks.${pinned}.host`, reason }], source);
+  }
+  return wave;
 }
+
+/** True when the wave's `repo:` is an `owner/name` the supervisor holds no clone of (#448). */
+export const isSlugRepo = (wave: Pick<Wave, "repo">): boolean => isSlug(wave.repo);
 
 /**
  * Parse wave-file YAML, validate it (schema + structural rules) and normalise it. `defaults`

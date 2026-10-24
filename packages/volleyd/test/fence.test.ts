@@ -1663,6 +1663,19 @@ describe("the issue lifecycle's gh writes (#416): exact forms only", () => {
   it.each(denied.map((a) => [a.join(" "), a]))("denies %s", (_l, argv) => {
     expect(() => assertAllowed(argv as string[])).toThrow(FenceError);
   });
+  it("each form may end in --repo <owner/name>, and nowhere else (#448)", () => {
+    const writes = allowed.filter((a) => a[1] === "label" || (a[1] === "issue" && a[2] !== "view"));
+    expect(writes.length).toBe(6);
+    for (const a of writes) {
+      expect(() => assertAllowed([...a, "--repo", "b/b"])).not.toThrow();
+      expect(() => assertAllowed([...a, "--repo", "/abs/path"])).toThrow(FenceError);
+      expect(() => assertAllowed([...a, "-R", "b/b"])).toThrow(FenceError);
+      expect(() => assertAllowed([...a.slice(0, 3), "--repo", "b/b", ...a.slice(3)])).toThrow(
+        FenceError,
+      );
+      expect(() => assertAllowed([...a, "--repo", "b/b", "--repo", "b/b"])).toThrow(FenceError);
+    }
+  });
   it("never on a paired machine: the writes run on the supervisor's own", () => {
     const step = { argv: ["gh", "issue", "edit", "412", "--add-label", "merged-to-release"] };
     expect(() =>

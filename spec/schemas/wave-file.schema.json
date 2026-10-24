@@ -21,7 +21,7 @@
       "type": "string",
       "minLength": 1,
       "pattern": "^[^-]",
-      "description": "Repository the wave's tasks work in: a path to the supervisor's clone, or a GitHub owner/name, resolved at submit to the supervisor's clone of it (config repos, hosts.<name>.repos, fleet.repo_root; spec section 4.6.4); an owner/name with no clone there is refused. A relative path shaped like owner/name is written ./owner/name. Must not start with '-', so it can never be read as a command-line option."
+      "description": "Repository the wave's tasks work in: a path to the supervisor's clone, or a GitHub owner/name, resolved at submit to the supervisor's clone of it when its machine holds one (config repos, hosts.<name>.repos, fleet.repo_root; spec section 4.6.4); when only paired machines hold it the wave keeps the owner/name and its tasks are placed on those machines (a task pinned to host: local is refused); an owner/name no machine holds is refused. A relative path shaped like owner/name is written ./owner/name. Must not start with '-', so it can never be read as a command-line option."
     },
     "release_branch": {
       "type": "string",
