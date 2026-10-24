@@ -9,7 +9,7 @@ import {
   volleyEntryIn,
   withoutLogin,
 } from "../peer/profile-checks";
-import { COORDINATOR_NAME, readSetupInstall, writeSetupInstall } from "./journal";
+import { COORDINATOR_NAME, SETUP_NAMESPACE, readSetupInstall, writeSetupInstall } from "./journal";
 import { planHooks } from "./services";
 import type { SetupContext, StepPlan } from "./step";
 
@@ -22,9 +22,6 @@ import type { SetupContext, StepPlan } from "./step";
  * that carries settings of the person's own (a password, another agent id) is left alone and the
  * command that replaces it is printed. `--broker-url` re-points the registration and the hooks.
  */
-
-/** The namespace a coordinator set up here works in. */
-export const SETUP_NAMESPACE = "default";
 
 /** The MCP env keys setup's registration sets: any other is the person's own. */
 export const MCP_ENV_KEYS = [
@@ -147,6 +144,8 @@ export async function planClaudeCode(ctx: SetupContext): Promise<StepPlan> {
     rows.push(`✓ coordinator: ${name}`);
   } else {
     const dflt = defaultCoordinator((ctx.deps.hostname ?? osHostname)());
+    // Asked while planning, before the step's confirmation, on purpose: the name feeds the MCP
+    // registration's diff below. A run that then declines the step was still asked.
     name = await askName(ctx, dflt);
     rows.push("coordinator: not chosen yet");
     plan.changes.push({

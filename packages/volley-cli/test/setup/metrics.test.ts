@@ -99,6 +99,18 @@ describe("setup metrics", () => {
     expect(j.steps.map((s: { name: string }) => s.name)).toEqual(["detect", "security"]);
   });
 
+  it("a step that fails part-way records the changes it applied", async () => {
+    const exec = m.deps.exec;
+    m.deps.exec = async (argv, o) =>
+      argv.join(" ") === m.layout.restart
+        ? { code: 1, stdout: "", stderr: "restart failed" }
+        : exec(argv, o);
+    expect((await run(["--yes", "--lan"])).code).toBe(1);
+    const j = JSON.parse(readFileSync(file(), "utf-8"));
+    const security = j.steps.find((s: { name: string }) => s.name === "security");
+    expect(security.changes).toBe(2);
+  });
+
   it("counts a question only when someone saw it, and a sudo prompt per sudo command", async () => {
     const asked: string[] = [];
     let clock = 0;

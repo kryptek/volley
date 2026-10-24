@@ -181,7 +181,7 @@ describe("the Claude Code step", () => {
 
   it("the default name is coord-<this machine, slugged>", () => {
     expect(defaultCoordinator("Studio.local")).toBe("coord-studio");
-    expect(defaultCoordinator("Alfred's MacBook Pro")).toBe("coord-alfred-s-macbook-pro");
+    expect(defaultCoordinator("Dev's MacBook Pro")).toBe("coord-dev-s-macbook-pro");
     expect(defaultCoordinator("---")).toBe("coord-main");
     expect(defaultCoordinator("x".repeat(100))).toMatch(/^[a-z0-9][a-z0-9_-]{0,62}$/);
   });
@@ -215,6 +215,11 @@ describe("the Claude Code step", () => {
     expect(() => fence(["claude", "mcp", "get", "volley"])).not.toThrow();
     expect(() => fence(["claude", "mcp", "remove", "-s", "user", "volley"])).not.toThrow();
     expect(() => fence(add({ VOLLEY_AUTH_PASSWORD: "x" }))).toThrow(/does not run/);
+    // Nor a login in a value: a broker URL with user:pw@.
+    expect(() => fence(add({ VOLLEY_BROKER_URL: "mqtt://coord:pw@broker.example:1883" }))).toThrow(
+      /does not run/,
+    );
+    expect(() => fence(add({ VOLLEY_BROKER_URL: "mqtt://broker.example:1883" }))).not.toThrow();
     expect(() => fence(["claude", "mcp", "remove", "-s", "user", "github"])).toThrow(
       /does not run/,
     );

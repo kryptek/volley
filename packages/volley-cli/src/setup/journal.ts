@@ -91,8 +91,8 @@ export interface SetupInstall {
   /** The terminal volleyd starts local agents in, as the Terminal step chose it (config.yaml's `fleet.local_terminal`). */
   terminal?: LocalTerminal;
   /**
-   * The coordinator name chosen once (the Claude Code step): `VOLLEY_COORDINATOR` for `volley` and
-   * `volleyd` when the env sets none, and `volleyd run`'s default `--owner`.
+   * The coordinator name chosen once (the Claude Code step): `VOLLEY_COORDINATOR` for `volleyd`'s
+   * commands when the env sets none, and `volleyd run`'s default `--owner`.
    */
   coordinator?: string;
   /** The namespace the coordinator's MCP server registers in. */
@@ -102,6 +102,9 @@ export interface SetupInstall {
   /** The run's setup-metrics.json. */
   metrics?: string;
 }
+
+/** The namespace the coordinator's MCP server registers in. */
+export const SETUP_NAMESPACE = "default";
 
 /** The agent-id grammar a coordinator name follows (SPEC §2.2). */
 export const COORDINATOR_NAME = /^[a-z0-9][a-z0-9_-]{0,62}$/;
@@ -128,7 +131,9 @@ export function writeSetupInstall(ctx: SetupContext, metrics?: string): void {
     ...(lan !== undefined ? { lan } : {}),
     ...(cmux !== undefined ? { cmux_socket_mode: cmux } : {}),
     ...(terminal !== undefined ? { terminal } : {}),
-    ...(coordinator !== undefined ? { coordinator, namespace: prior?.namespace ?? "default" } : {}),
+    ...(coordinator !== undefined
+      ? { coordinator, namespace: prior?.namespace ?? SETUP_NAMESPACE }
+      : {}),
     // Never with a login.
     broker_url: withoutLogin(ctx.tcpUrl).url,
     ...(metrics !== undefined

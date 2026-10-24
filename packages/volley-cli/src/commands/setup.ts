@@ -357,8 +357,10 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   // earlier run's; and the terminal it put on record.
   const metricsFile = setupMetricsFile(ctx.volleydHome);
   let endStep: (changes: number) => void = () => {};
+  // The changes the current step applied before it stopped: what its metrics record.
+  let applied = 0;
   const stopped = () => {
-    endStep(0);
+    endStep(applied);
     writeSetupMetrics(ctx, meter.done());
     if (
       ctx.cmuxSocketMode !== undefined ||
@@ -373,6 +375,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
   for (const [name, planner] of steps) {
     const i = STEPS.findIndex(([n]) => n === name);
     endStep = meter.begin(name);
+    applied = 0;
     let plan: StepPlan;
     try {
       plan = await planner(ctx);
@@ -420,6 +423,7 @@ export async function setup({ argv, env, io }: SetupArgs, injected?: SetupDeps):
       try {
         const lines = await c.apply();
         journal(name, "applied", c.summary);
+        applied++;
         io.stdout(`  ✓ ${c.summary}\n`);
         for (const l of lines) if (l !== "") io.stdout(`${indent(l)}\n`);
       } catch (e) {

@@ -278,14 +278,18 @@ function hooksFlags(rest: readonly string[]): boolean {
   return i === rest.length;
 }
 
-/** A registration whose env names no login: the fence refuses a password in ~/.claude.json. */
+/**
+ * A registration whose env names no login and carries none in a value (a URL's `user:pw@`): the
+ * fence refuses a password in ~/.claude.json.
+ */
 function secretFree(json: string): boolean {
   try {
     const env = (JSON.parse(json) as { env?: unknown }).env;
     return (
       typeof env === "object" &&
       env !== null &&
-      !Object.keys(env).some((k) => /PASSWORD|TOKEN|SECRET/i.test(k))
+      !Object.keys(env).some((k) => /PASSWORD|TOKEN|SECRET/i.test(k)) &&
+      !Object.values(env).some((v) => typeof v !== "string" || /:\/\/[^/\s]*@/.test(v))
     );
   } catch {
     return false;
