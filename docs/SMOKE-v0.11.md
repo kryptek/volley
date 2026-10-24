@@ -31,7 +31,8 @@ why the supervisor comes back before the broker leaves.
 ### B0. What you need
 
 - [ ] **The Mac** ("the Mac", `mac` below): volleyd and the Desk running this release head as
-  services, the broker installed by `volley setup` (Homebrew, port 1883), an admin Desk session
+  services, the broker installed by `volley setup` with LAN access on (`volley setup --lan`, or
+  yes to its LAN question: the phone needs it), Homebrew, port 1883, an admin Desk session
   in a desktop browser. `volley role status` prints all three roles `on mac`.
 - [ ] **A paired Linux box** (`box-a` below), paired with `volley peer join`, its card green
   (`ready for agents`): bun, git, tmux, gh (authenticated, write access to the smoke repository),

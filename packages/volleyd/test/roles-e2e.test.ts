@@ -183,6 +183,7 @@ async function adminOp(b: TestBroker, payload: Record<string, unknown>): Promise
 
 async function plan(b: TestBroker, role: string, to: string): Promise<Plan> {
   const a = await adminOp(b, { op: "role_plan", role, to });
+  expect(a, `no answer to role_plan ${role} → ${to}`).not.toBeNull();
   expect(a?.error).toBeUndefined();
   return a?.result as Plan;
 }
@@ -237,7 +238,6 @@ async function startSupervisor(home: string, b: TestBroker): Promise<Daemon> {
       // Through whatever control's 127.0.0.1:1883 leads to now.
       connect: async (url): Promise<ProbeLink> => {
         links.push(url);
-        expect(url).toBe(OWN_URL);
         const to = tunnel !== null ? brokerOf(tunnel) : oldUp ? oldBroker : null;
         if (to === null) throw new Error("connect ECONNREFUSED 127.0.0.1:1883");
         const c = new VolleyBroker();
@@ -270,7 +270,8 @@ async function startSupervisor(home: string, b: TestBroker): Promise<Daemon> {
 function receiveSupervisor(machine: string, line: string): void {
   const [, , , , bundle = "", , from = ""] = line.split(" ");
   const stage = tempDir("volleyd-e2e-receive-");
-  spawnSync("tar", ["-xzf", bundle, "-C", stage]);
+  const x = spawnSync("tar", ["-xzf", bundle, "-C", stage]);
+  expect(x.status, x.stderr.toString()).toBe(0);
   const home = volleydHome[machine] as string;
   cpSync(join(stage, "volleyd"), home, { recursive: true });
   const doc = parseDocument(readFileSync(join(home, "config.yaml"), "utf-8"));
@@ -346,6 +347,12 @@ async function onMachine(
 
 /** The fleet, both brokers and every machine's answers. */
 async function setup(): Promise<void> {
+  oldUp = true;
+  tunnel = null;
+  links.length = 0;
+  unitUrls.length = 0;
+  retargets.length = 0;
+  for (const r of [userHome, volleydHome, moves]) for (const k of Object.keys(r)) delete r[k];
   f = await makeFleet({ extraConfig: BOX_B_HOST, perMachine: true });
   oldBroker = f.env.broker;
   newBroker = await startTestBroker();
@@ -596,7 +603,7 @@ describe("machine roles end to end (#473)", () => {
     await desk();
     await supervisor();
     await broker();
-    // The roles record's history: every move and every rollback, in order, once each.
+    // The roles record's whole history: every move and every rollback, in order, once each.
     const history = f
       .system()
       .filter((e) => e.type === "roles_changed")
@@ -604,7 +611,9 @@ describe("machine roles end to end (#473)", () => {
         const r = e.data.roles as RolesRecord;
         return `${r.broker.machine}/${r.supervisor.machine}/${r.desk.machine}`;
       });
-    expect(history.slice(-7)).toEqual([
+    expect(history).toEqual([
+      // The first start's defaults, then the record setup() writes.
+      `${LOCAL}/${LOCAL}/${LOCAL}`,
       `${LOCAL}/${LOCAL}/${LOCAL}`,
       `${LOCAL}/${LOCAL}/${PEER}`,
       `${LOCAL}/${LOCAL}/${LOCAL}`,
@@ -619,5 +628,8 @@ describe("machine roles end to end (#473)", () => {
         .filter((e) => e.type === "role_rolled_back")
         .map((e) => e.data.move_id),
     ).toEqual([moves.desk, moves.supervisor, moves.broker]);
+    // Every probe link went through control's own 127.0.0.1:1883, whatever it led to.
+    expect(links.length).toBeGreaterThan(0);
+    expect(new Set(links)).toEqual(new Set([OWN_URL]));
   }, 60_000);
 });
