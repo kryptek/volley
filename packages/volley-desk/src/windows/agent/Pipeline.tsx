@@ -9,7 +9,7 @@ import type { Role, Stage } from "../../store/types";
 
 export const PIPELINE_STEPS = ["implement", "review", "fixup", "merge-ready"] as const;
 
-const STAGE_STEP: Partial<Record<Stage, number>> = {
+export const STAGE_STEP: Partial<Record<Stage, number>> = {
   implement: 0,
   spec_review: 1,
   quality_review: 1,
@@ -18,7 +18,7 @@ const STAGE_STEP: Partial<Record<Stage, number>> = {
   done: PIPELINE_STEPS.length,
 };
 
-const ROLE_STEP: Record<Role, number> = {
+export const ROLE_STEP: Record<Role, number> = {
   implementer: 0,
   spec_reviewer: 1,
   quality_reviewer: 1,

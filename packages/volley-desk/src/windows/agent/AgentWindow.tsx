@@ -1,7 +1,9 @@
 /**
  * The agent window, ported from the prototype `AgentWindow`. The title bar is
- * two rows that never bunch: row 1 (the drag bar) has a React Bits `StatusMark`
- * (status + progress), the wave chip in the wave accent, the role chip, the
+ * two rows that never bunch: row 1 (the drag bar) starts with the agent's
+ * Clawd character (`ClawdSprite`: an animated pixel Clawd doing the agent's
+ * pipeline step, or resting, `clawd/state.ts`) or, with the look's Classic
+ * spinner, a React Bits `StatusMark` (status + progress), then the wave chip in the wave accent, the role chip, the
  * stage chip and the machine chip (`MachineChip`: where the agent runs, its
  * dot, why here on hover / focus, a click opens Settings › Machines), then the
  * actions; row 2 (Frame's `subtitle`) has the headline, `task #issue` or the
@@ -19,7 +21,7 @@
  * feed and Terminal tabs (React Bits Gooey Nav, D10); and a footer with progress, heartbeat age and the
  * registry model. Markup and classes follow the prototype; everything is read
  * from the store's `AgentView` and the agent's `WaveView`. An agent with no
- * signal (`attention.ts` `noSignalFor`, kind `mcp`) gets a grey status mark and
+ * signal (`attention.ts` `noSignalFor`, kind `mcp`) gets a dozing Clawd (a grey status mark) and
  * a one-line label above the tabs; a `quiet` one keeps its mark and gets a
  * neutral `quiet for Nm` label; while the Desk is syncing after a (re)connect
  * the label reads `syncing…` instead of any judgement. A narration restored
@@ -43,11 +45,14 @@ import { BubbleChatIcon, ListViewIcon, TerminalIcon } from "@hugeicons/core-free
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactNode, useEffect, useId, useState } from "react";
 import { useReducedMotion } from "../../a11y/motion";
-import { type NoSignal, SYNCING_LABEL } from "../../attention";
+import { type NoSignal, SYNCING_LABEL, type Tier } from "../../attention";
 import { BORN_MS, Frame, type FrameProps } from "../../canvas/Frame";
+import { ClawdSprite } from "../../clawd/ClawdSprite";
+import { clawdState } from "../../clawd/state";
 import { plural } from "../../lib/plural";
 import { GooeyTabs, tabPanelProps } from "../../look/GooeyTabs";
-import StatusMark, { type StatusMarkStatus } from "../../rb/StatusMark/StatusMark";
+import type { AgentIcons } from "../../look/options";
+import StatusMark from "../../rb/StatusMark/StatusMark";
 import {
   type AccountChoice,
   LOCAL_MACHINE,
@@ -69,14 +74,17 @@ import type {
   UsagePayload,
   WaveView,
 } from "../../store/types";
-import { Feed, feedChannel } from "./Feed";
+import { Feed } from "./Feed";
 import { MachineChip } from "./MachineChip";
 import { Narration, type NarrationFx } from "./Narration";
 import { Pipeline } from "./Pipeline";
 import { Terminal } from "./Terminal";
 import type { AgentMachine } from "./machine";
+import { markStatus } from "./markStatus";
 import { namesWindow, purposeOf } from "./purpose";
 import "../../styles/agent.css";
+
+export { markStatus };
 
 export const AGENT_WIDTH = 460;
 /** Accent for agents no wave references. */
@@ -111,6 +119,10 @@ export interface AgentWindowProps {
   now?: number;
   /** Narration effect from the look (D7); plain by default. */
   narrationFx?: NarrationFx;
+  /** The title's mark from the look: the Clawd character (default) or the classic status ring. */
+  icons?: AgentIcons;
+  /** The agent's attention tier (`agentAttention`): the Clawd asks for you only on `you`. */
+  attentionTier?: Tier;
   /** Attention line under the narration (D3). */
   attention?: ReactNode;
   /** Chat glyph: opens the steering panel (D4). */
@@ -348,33 +360,6 @@ function AccountLimitBanner({
   );
 }
 
-/** The mark for an outcome status: `blocked` (SPEC §5.2, terminal) needs the operator, like `failed`. */
-function outcomeMark(type: string): StatusMarkStatus | null {
-  if (type === "done") return "done";
-  if (type === "failed" || type === "blocked") return "failed";
-  return null;
-}
-
-/**
- * The status mark for an agent. `reaped` (SPEC §5.2) only says the connection
- * ended, normally right after `done`, so it shows the outcome before it: the
- * latest other `status` in the feed, else (a retained replay, where only the
- * `reaped` status survives) `done` if the agent left a `result`. Anything else
- * — reaped while working, or with nothing known — is a crash.
- */
-export function markStatus(agent: Pick<AgentView, "status" | "feed">): StatusMarkStatus {
-  const type = agent.status?.type;
-  if (type === "working") return "running";
-  if (type !== "reaped") return (type ? outcomeMark(type) : null) ?? "pending";
-  for (let i = agent.feed.length - 1; i >= 0; i--) {
-    const e = agent.feed[i] as FeedEntry;
-    if (feedChannel(e) === "status" && e.envelope.type !== "reaped") {
-      return outcomeMark(e.envelope.type) ?? "failed";
-    }
-  }
-  return agent.feed.some((e) => feedChannel(e) === "result") ? "done" : "failed";
-}
-
 /** The prototype's `ago`: `42s`, `3m`, `1.5h`. */
 export function age(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -432,6 +417,8 @@ export function AgentWindow({
   frame,
   now: fixedNow,
   narrationFx = "plain",
+  icons = "clawd",
+  attentionTier = "none",
   attention,
   onChat,
   steerOpen = false,
@@ -479,7 +466,19 @@ export function AgentWindow({
 
   const title = (
     <>
-      {mcpMissing ? (
+      {icons !== "classic" ? (
+        <ClawdSprite
+          agentId={agent.id}
+          state={clawdState({
+            agent,
+            stage: task?.stage ?? null,
+            tier: attentionTier,
+            noSignal: mcpMissing,
+            session,
+          })}
+          size={24}
+        />
+      ) : mcpMissing ? (
         <StatusMark status="pending" color={NO_SIGNAL_GREY} size={18} className="sm-nosignal" />
       ) : (
         <StatusMark

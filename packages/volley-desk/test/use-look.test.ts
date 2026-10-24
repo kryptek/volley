@@ -17,6 +17,7 @@ describe("useLook", () => {
       attn: "pulse",
       narr: "decrypt",
       tethers: true,
+      icons: "clawd",
       autoArrange: true,
       showFinished: false,
       finishedGraceMin: 10,
@@ -35,6 +36,7 @@ describe("useLook", () => {
     act(() => result.current[1]({ chrome: "spotlight", attn: "electric", narr: "shiny" }));
     act(() => result.current[1]({ tethers: false, autoArrange: false }));
     act(() => result.current[1]({ showFinished: true, finishedGraceMin: 30 }));
+    act(() => result.current[1]({ icons: "classic" }));
     const want = {
       bg: "Silk",
       dim: 0.45,
@@ -42,6 +44,7 @@ describe("useLook", () => {
       attn: "electric",
       narr: "shiny",
       tethers: false,
+      icons: "classic",
       autoArrange: false,
       showFinished: true,
       finishedGraceMin: 30,
@@ -70,6 +73,7 @@ describe("useLook", () => {
         attn: 3,
         narr: "loud",
         tethers: "yes",
+        icons: "ring",
         autoArrange: null,
         showFinished: 1,
         finishedGraceMin: -5,
@@ -78,5 +82,12 @@ describe("useLook", () => {
     expect(loadLook()).toEqual(LOOK0);
     localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ bg: "none", dim: 0 }));
     expect(loadLook()).toEqual({ ...LOOK0, bg: "none", dim: 0 });
+  });
+
+  it("agent icons: a stored classic loads; anything else falls back to clawd", () => {
+    localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ icons: "classic" }));
+    expect(loadLook().icons).toBe("classic");
+    localStorage.setItem(LOOK_STORAGE_KEY, JSON.stringify({ icons: "ring" }));
+    expect(loadLook().icons).toBe("clawd");
   });
 });

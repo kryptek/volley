@@ -1,7 +1,8 @@
 /**
  * Settings › Appearance (formerly the dock's Appearance aside): a search field
  * over every background (the current one always stays listed), the dim
- * slider, the window style, the Needs-you effect and the tethers. Every
+ * slider, the window style, the Needs-you effect, the tethers and the agent
+ * icons (Clawd characters or the classic spinner). Every
  * control writes the look (`useLook`), which persists per browser. Without
  * WebGL (`webgl={false}`) the WebGL backgrounds and the liquid chrome are not
  * offered, with a note, and `look` is the degraded look the Desk renders. On
@@ -11,7 +12,7 @@
 import { useState } from "react";
 import { BG_NO_WEBGL_NOTE, SURFACE_LITE_NOTE, needsWebGL } from "../look/Background";
 import { BACKGROUNDS, REACT_BITS_BACKGROUNDS } from "../look/backgrounds";
-import { ATTN_LABEL, CHROME_LABEL } from "../look/options";
+import { ATTN_LABEL, CHROME_LABEL, ICON_LABEL } from "../look/options";
 import { DIM_MAX, type Look } from "../look/useLook";
 import { Group, Row, Seg, Toggle, clearOnEscape } from "./primitives";
 import "../styles/look.css";
@@ -117,6 +118,14 @@ export function Appearance({
         </Row>
         <Row label="Tethers" hint="Lines from each agent window to its wave">
           <Toggle label="Tethers" on={look.tethers} onChange={(tethers) => setLook({ tethers })} />
+        </Row>
+        <Row label="Agent icons" hint="What sits at the top left of each agent window">
+          <Seg
+            label="Agent icons"
+            options={ICON_LABEL}
+            value={look.icons}
+            onPick={(icons) => setLook({ icons })}
+          />
         </Row>
       </Group>
     </>
