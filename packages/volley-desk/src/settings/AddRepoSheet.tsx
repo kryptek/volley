@@ -72,11 +72,17 @@ export interface AddForm {
 /** How long after a path last changed it is checked on its machine. */
 export const PROBE_DEBOUNCE_MS = 500;
 
+/** `path` is the clone's own root (`rev-parse --show-toplevel`), not a folder inside one. */
+const isRoot = (path: string, root: string | undefined) =>
+  root === undefined || path.replace(/\/+$/, "") === root.replace(/\/+$/, "");
+
 /** A check's finding that keeps Add off; null when it lets the add go ahead. */
 function probeProblem(m: string, path: string, slug: string, r: RepoProbeResult): string | null {
   if (!r.ok) return null; // The box may be down: volleyd's run will say.
   if (r.state === "missing") return `No folder at ${path} on ${m}`;
   if (r.state === "not_git") return `${path} on ${m} is not a git clone`;
+  if (r.state === "found" && !isRoot(path, r.root))
+    return `${path} on ${m} is inside the clone at ${r.root}`;
   if (r.state === "found" && r.slug !== undefined && !sameSlug(r.slug, slug))
     return `This clone is ${r.slug}, not ${slug}`;
   return null;
@@ -207,7 +213,9 @@ export function AddRepoSheet({ ops, machines, localName, readiness, onClose }: A
   // A clone of a GitHub repository names it: fill an owner/name nobody has typed in.
   useEffect(() => {
     if (touched.current || slug !== "") return;
-    const found = Object.values(checks).find((c) => c.result?.ok && c.result.slug !== undefined);
+    const found = Object.values(checks).find(
+      (c) => c.result?.ok && c.result.slug !== undefined && isRoot(c.path, c.result.root),
+    );
     if (found?.result?.ok && found.result.slug) setSlug(found.result.slug);
   }, [checks, slug]);
 

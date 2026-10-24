@@ -255,6 +255,39 @@ describe("Add repository sheet", () => {
     expect(addButton()).toBeDisabled();
   });
 
+  it("a folder inside a clone (not its root) blocks Add and fills nothing", async () => {
+    vi.useFakeTimers();
+    const repoProbe = probing({
+      ok: true,
+      state: "found",
+      root: REPO,
+      origin: "https://github.com/example-org/example-repo.git",
+      slug: "example-org/example-repo",
+    });
+    setup({ ops: fakePeerOps({ repoProbe }) });
+    tickClone();
+    typePath(`${REPO}/src`);
+    await settle();
+    expect(slug()).toHaveValue("");
+    type(APP);
+    const why = `${REPO}/src on box-a is inside the clone at ${REPO}`;
+    expect(sheet().getByText(why, { selector: ".s-error" })).toBeInTheDocument();
+    expect(reason()).toHaveTextContent(why);
+    expect(addButton()).toBeDisabled();
+  });
+
+  it("a clone's root typed with a trailing slash is the clone itself", async () => {
+    vi.useFakeTimers();
+    setup({
+      ops: fakePeerOps({ repoProbe: probing({ ok: true, state: "found", root: REPO, slug: APP }) }),
+    });
+    tickClone();
+    typePath(`${REPO}/`);
+    await settle();
+    expect(slug()).toHaveValue(APP);
+    expect(addButton()).toBeEnabled();
+  });
+
   it("an owner/name typed and cleared again is not filled in either", async () => {
     vi.useFakeTimers();
     setup();

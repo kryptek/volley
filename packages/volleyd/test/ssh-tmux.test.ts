@@ -910,6 +910,9 @@ describe("SshTmuxHost", () => {
     expect(no("fatal: not a git repository (or any parent up to mount point /)")).toEqual({
       state: "not_git",
     });
+    expect(no("fatal: cannot change to '/srv/x': Not a directory")).toEqual({ state: "missing" });
+    // A folder git may not enter is no answer: probeClone throws git's line (`ok: false`).
+    expect(no("fatal: cannot change to '/srv/x': Permission denied")).toBeNull();
   });
 
   it("readFile: the file, null when there is none, a throw when ssh fails", async () => {

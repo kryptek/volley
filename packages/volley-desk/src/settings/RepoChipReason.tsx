@@ -20,8 +20,8 @@ export function RepoChipReason({ reasons }: { reasons: readonly string[] }) {
       </button>
       {open && (
         <div className="repo-chip__why">
-          {reasons.map((r) => (
-            <p key={r}>{r}</p>
+          {reasons.map((r, i) => (
+            <p key={`${i}:${r}`}>{r}</p>
           ))}
         </div>
       )}

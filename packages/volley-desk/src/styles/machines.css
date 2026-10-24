@@ -656,7 +656,9 @@ button.m-local:focus-visible {
   border-radius: 10px;
   padding: 4px 6px 6px 8px;
 }
+/* `order: 1` keeps Repair beside Why, the open reasons under both. */
 .repo-chip__why {
+  order: 1;
   flex-basis: 100%;
   min-width: 0;
   color: var(--ink);

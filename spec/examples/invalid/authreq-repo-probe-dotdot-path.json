@@ -1,0 +1,9 @@
+{
+  "schema_version": "0.1",
+  "agent_id": "desk-4c2e7a",
+  "wall_time": "2026-10-24T12:05:00.000Z",
+  "channel": "_system/auth",
+  "type": "query",
+  "correlation_id": "5c1d9e72-3a4b-4f6e-8d21-7b9e0c4a2f13",
+  "payload": { "op": "repo_probe", "machine": "box-a", "path": "/srv/../etc" }
+}

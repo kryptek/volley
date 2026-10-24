@@ -250,7 +250,8 @@ export interface CloneProbe {
  */
 export function classifyRevParse(r: ExecResult): CloneProbe | null {
   if (r.code === 0) return { state: "found", root: r.stdout.trim() };
-  if (/cannot change to|No such file or directory/.test(r.stderr)) return { state: "missing" };
+  // `cannot change to '<p>': Permission denied` is no answer: the caller says git's line.
+  if (/No such file or directory|Not a directory/.test(r.stderr)) return { state: "missing" };
   if (/not a git repository/.test(r.stderr)) return { state: "not_git" };
   return null;
 }
