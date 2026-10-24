@@ -80,3 +80,35 @@ describe("groupInboxItems", () => {
     expect(groupInboxItems(items).map((g) => g.lead.id)).toEqual(["d-wave-d-2", "d-wave-d-3"]);
   });
 });
+
+describe("groupInboxItems with pinned groups (a fan-out in flight or done)", () => {
+  const answered = {
+    answered: {
+      answer: "trust",
+      by: "owner",
+      where: { kind: "desk" as const, device: "phone" },
+      at: iso(T0),
+    },
+  };
+  const held = { held: { on: { task: "i99" }, by: "owner", at: iso(T0) } };
+
+  it("keeps a pinned group whole while its members are answered or held one by one", () => {
+    const pin = [1, 2, 3, 4].map((n) => `d-wave-d-${n}`);
+    const items = [trust(1, answered), trust(2, held), trust(3), trust(4)];
+    const groups = groupInboxItems(items, [pin]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.lead.id).toBe("d-wave-d-1");
+    expect(groups[0] && ids(groups[0])).toEqual(pin);
+  });
+
+  it("a pinned group keeps its members only: a newcomer asking the same forms its own group", () => {
+    const items = [trust(1, answered), trust(2), trust(3)];
+    const groups = groupInboxItems(items, [["d-wave-d-1", "d-wave-d-2"]]);
+    expect(groups.map(ids)).toEqual([["d-wave-d-1", "d-wave-d-2"], ["d-wave-d-3"]]);
+  });
+
+  it("a pin whose members have all gone is ignored", () => {
+    const groups = groupInboxItems([trust(3), trust(4)], [["d-wave-d-1", "d-wave-d-2"]]);
+    expect(groups.map(ids)).toEqual([["d-wave-d-3", "d-wave-d-4"]]);
+  });
+});

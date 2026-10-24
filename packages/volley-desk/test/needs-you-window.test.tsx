@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type Tier,
@@ -10,7 +11,7 @@ import {
 import { createSteerTransport } from "../src/steer/transport";
 import { demoAutopilot, demoInbox } from "../src/store/fixtures";
 import { initialState, reduceAll } from "../src/store/reducer";
-import type { AgentView, DeskState, InboxItem } from "../src/store/types";
+import type { AgentView, DeskState, HeldOn, InboxItem } from "../src/store/types";
 import { COORDS_ID } from "../src/windows/coordinators/CoordinatorsWindow";
 import { answerCommand, holdChoices, holdCommand } from "../src/windows/inbox/InboxRow";
 import { NeedsYouWindow, type NeedsYouWindowProps } from "../src/windows/inbox/NeedsYouWindow";
@@ -622,6 +623,129 @@ describe("a burst of identical decisions (#417)", () => {
     });
     await waitFor(() => expect(control).toHaveBeenCalledTimes(11));
     expect(control.mock.calls.map((c) => (c as unknown[])[0])).toEqual(Array(11).fill("hold"));
+  });
+
+  /**
+   * The window over a live store: each `inbox_answer`, `hold` or `release` volleyd accepts comes
+   * back as the member's retained update (answered, held or released) before the next one is sent.
+   */
+  function Live(p: {
+    items: InboxItem[];
+    refuse?: (op: string, id: string) => string | null;
+    calls: { op: string; id: string }[];
+  }) {
+    const [items, setItems] = useState(p.items);
+    const control = async (op: string, args: Record<string, unknown>) => {
+      const id = String(args.id ?? args.item);
+      p.calls.push({ op, id });
+      const error = p.refuse?.(op, id) ?? null;
+      if (error !== null) return { ok: false, error };
+      setItems((all) =>
+        all.map((i): InboxItem => {
+          if (i.id !== id) return i;
+          if (op === "inbox_answer")
+            return {
+              ...i,
+              version: i.version + 1,
+              answered: {
+                answer: String(args.answer),
+                by: "owner",
+                where: { kind: "desk", device: "phone" },
+                at: new Date(NOW).toISOString(),
+              },
+            };
+          if (op === "hold")
+            return {
+              ...i,
+              held: { on: args.on as HeldOn, by: "owner", at: "2026-10-21T11:59:00Z" },
+            };
+          const { held: _, ...rest } = i;
+          return rest;
+        }),
+      );
+      return { ok: true };
+    };
+    return (
+      <NeedsYouWindow
+        items={items}
+        tiers={you}
+        waves={STATE.waves}
+        control={control as unknown as NeedsYouWindowProps["control"]}
+        device="phone"
+        frame={frame}
+        onClose={() => {}}
+      />
+    );
+  }
+
+  /** Refuses the first request `hit` matches with `error`, and nothing after. */
+  function refuseOnce(hit: (op: string, id: string) => boolean, error: string) {
+    let refused = false;
+    return (op: string, id: string): string | null => {
+      if (refused || !hit(op, id)) return null;
+      refused = true;
+      return error;
+    };
+  }
+
+  it("with a live store the group stays one row while it is answered, then reads answered", async () => {
+    const calls: { op: string; id: string }[] = [];
+    render(<Live items={burst} calls={calls} />);
+    fireEvent.click(within(lead()).getByRole("button", { name: "blocker" }));
+    await waitFor(() => expect(calls).toHaveLength(11));
+    expect(
+      await within(lead()).findByText(/answered 11 on desk·phone · blocker/),
+    ).toBeInTheDocument();
+    expect(rows()).toHaveLength(1);
+    expect(calls).toHaveLength(11);
+  });
+
+  it("with a live store a partial failure stays on the one row and the retry sends only the rest", async () => {
+    const calls: { op: string; id: string }[] = [];
+    const refuse = refuseOnce((_, id) => id === "d-burst-4", "volleyd did not answer within 10s");
+    render(<Live items={burst} calls={calls} refuse={refuse} />);
+    fireEvent.click(within(lead()).getByRole("button", { name: "blocker" }));
+    expect(
+      await within(lead()).findByText(/answered 10 of 11 · retry the rest/),
+    ).toBeInTheDocument();
+    expect(rows()).toHaveLength(1);
+    fireEvent.click(within(lead()).getByRole("button", { name: "blocker" }));
+    await waitFor(() => expect(calls).toHaveLength(12));
+    expect(calls[11]).toEqual({ op: "inbox_answer", id: "d-burst-4" });
+    expect(
+      await within(lead()).findByText(/answered 11 on desk·phone · blocker/),
+    ).toBeInTheDocument();
+    expect(rows()).toHaveLength(1);
+  });
+
+  it("with a live store a held group stays one row; a failed hold retries only the rest", async () => {
+    const calls: { op: string; id: string }[] = [];
+    const refuse = refuseOnce((op, id) => op === "hold" && id === "d-burst-3", "broker busy");
+    render(<Live items={burst} calls={calls} refuse={refuse} />);
+    const hold = async () => {
+      // A refused hold leaves the picker open for the retry.
+      const open = within(lead()).queryByRole("button", { name: "Hold · waiting on…" });
+      if (open) fireEvent.click(open);
+      const select = within(lead()).getByRole("combobox", { name: "Hold · waiting on" });
+      const first = (select.querySelectorAll("option")[1] as HTMLOptionElement).value;
+      await act(async () => {
+        fireEvent.change(select, { target: { value: first } });
+      });
+    };
+    await hold();
+    expect(
+      await within(lead()).findByText("held 10 of 11 · retry the rest: broker busy"),
+    ).toBeInTheDocument();
+    expect(rows()).toHaveLength(1);
+    expect(calls).toHaveLength(11);
+    await hold();
+    await waitFor(() => expect(calls).toHaveLength(12));
+    expect(calls[11]).toEqual({ op: "hold", id: "d-burst-3" });
+    expect(rows()).toHaveLength(1);
+    fireEvent.click(await within(lead()).findByRole("button", { name: "Release" }));
+    await waitFor(() => expect(calls).toHaveLength(23));
+    expect(calls.slice(12).every((c) => c.op === "release")).toBe(true);
+    expect(rows()).toHaveLength(1);
   });
 
   it("Dismiss hides the whole group", () => {

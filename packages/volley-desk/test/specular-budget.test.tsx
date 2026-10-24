@@ -2,10 +2,35 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { act, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { LITE_SURFACE_QUERY } from "../src/a11y/surface";
 import { GL_BUTTON_BUDGET, createGlBudget, glBudgetLive } from "../src/look/glBudget";
 import SpecularButton from "../src/rb/SpecularButton/SpecularButton";
 
-afterEach(() => vi.restoreAllMocks());
+const realMatchMedia = window.matchMedia;
+afterEach(() => {
+  vi.restoreAllMocks();
+  window.matchMedia = realMatchMedia;
+});
+
+/** A `matchMedia` whose lite query matches while `state.on`; `set()` flips it and notifies. */
+function liteMedia() {
+  const state = { on: false, listeners: new Set<() => void>() };
+  window.matchMedia = ((query: string) => ({
+    get matches() {
+      return state.on && query === LITE_SURFACE_QUERY;
+    },
+    media: query,
+    addEventListener: (_: string, f: () => void) => state.listeners.add(f),
+    removeEventListener: (_: string, f: () => void) => state.listeners.delete(f),
+    addListener: () => {},
+    removeListener: () => {},
+  })) as unknown as typeof window.matchMedia;
+  return (on: boolean) =>
+    act(() => {
+      state.on = on;
+      for (const f of state.listeners) f();
+    });
+}
 
 /** A WebGL2 context good enough for the button's setup: every call returns an object. */
 function fakeGL() {
@@ -132,6 +157,18 @@ describe("SpecularButton under the context budget", () => {
     act(() => {
       fireEvent(canvas, new Event("webglcontextrestored"));
     });
+    expect(button).not.toHaveClass("specular-button--flat");
+  });
+
+  it("a button flat for want of a context lights up once a later slot gets one", () => {
+    const lite = liteMedia();
+    const { container } = render(<Buttons n={1} />);
+    const button = container.querySelector(".specular-button") as HTMLElement;
+    expect(button).toHaveClass("specular-button--flat");
+    countWebGL();
+    lite(true);
+    lite(false);
+    expect(button.querySelector("canvas")).not.toBeNull();
     expect(button).not.toHaveClass("specular-button--flat");
   });
 

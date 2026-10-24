@@ -326,6 +326,8 @@ const SpecularButton = ({
         canvas.removeEventListener('webglcontextrestored', onRestored);
       };
     }
+    // Volley Desk (#417): a working context clears an earlier failure (one lost or never given).
+    setLost(false);
     const uniforms: Record<string, WebGLUniformLocation | null> = {};
     for (const name of UNIFORMS) uniforms[name] = gl.getUniformLocation(program, name);
     const buffer = gl.createBuffer();

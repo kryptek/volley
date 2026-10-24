@@ -4,6 +4,11 @@
  * unanswered, unheld `decision` items with the same wave, decision kind, question, option labels,
  * `allow_other` and `owner_only` form one group, its members oldest first, led by the oldest.
  * Everything else (pickers, handoffs, release items, answered or held decisions) is a group of one.
+ *
+ * A group the person has answered, held or released from is **pinned**: its members stay one
+ * group, whatever their state, until they have all cleared. volleyd's retained update answers or
+ * holds each member as the fan-out reaches it, and without the pin the group would split under
+ * the running fan-out (its lead answered alone, the rest a new row with no error and live buttons).
  */
 import type { InboxItem } from "../../store/types";
 
@@ -29,11 +34,28 @@ function groupKey(item: InboxItem): string | null {
 
 const byOpened = (a: InboxItem, b: InboxItem) => a.opened_at.localeCompare(b.opened_at);
 
-/** The items as groups, ordered by each lead's `opened_at`. */
-export function groupInboxItems(items: readonly InboxItem[]): InboxGroup[] {
+/**
+ * The items as groups, ordered by each lead's `opened_at`. Each of `pinned` (member ids) is one
+ * group of whichever of its members are among `items`; the other items group by their question.
+ */
+export function groupInboxItems(
+  items: readonly InboxItem[],
+  pinned: readonly (readonly string[])[] = [],
+): InboxGroup[] {
+  const sorted = [...items].sort(byOpened);
   const groups: InboxGroup[] = [];
+  const taken = new Set<string>();
+  for (const pin of pinned) {
+    const ids = new Set(pin);
+    const members = sorted.filter((i) => ids.has(i.id) && !taken.has(i.id));
+    const [lead] = members;
+    if (lead === undefined) continue;
+    for (const m of members) taken.add(m.id);
+    groups.push({ lead, members });
+  }
   const keyed = new Map<string, InboxGroup>();
-  for (const item of [...items].sort(byOpened)) {
+  for (const item of sorted) {
+    if (taken.has(item.id)) continue;
     const key = groupKey(item);
     const into = key === null ? undefined : keyed.get(key);
     if (into) {
@@ -44,5 +66,5 @@ export function groupInboxItems(items: readonly InboxItem[]): InboxGroup[] {
     groups.push(group);
     if (key !== null) keyed.set(key, group);
   }
-  return groups;
+  return groups.sort((a, b) => byOpened(a.lead, b.lead));
 }

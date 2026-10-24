@@ -114,6 +114,25 @@ function useLeaving(items: readonly InboxItem[]): InboxItem[] {
   return leaving;
 }
 
+/**
+ * The groups a fan-out has started on (member ids, lead first): each stays one row until all of
+ * its members have left the window (`present`: the open and the fading items' ids).
+ */
+function usePins(present: readonly string[]) {
+  const [list, setList] = useState<readonly (readonly string[])[]>([]);
+  const key = present.join("\n");
+  useEffect(() => {
+    const here = new Set(key.split("\n"));
+    setList((l) => {
+      const kept = l.filter((pin) => pin.some((id) => here.has(id)));
+      return kept.length === l.length ? l : kept;
+    });
+  }, [key]);
+  const pin = (ids: readonly string[]) =>
+    setList((l) => (l.some((x) => x[0] === ids[0]) ? l : [...l, ids]));
+  return { list, pin };
+}
+
 export function NeedsYouWindow(p: NeedsYouWindowProps) {
   usePanelSound();
   const id = useId();
@@ -130,13 +149,17 @@ export function NeedsYouWindow(p: NeedsYouWindowProps) {
     (r) => !dismissed.has(r.item.id) && matchesFilter(r.item, filter, tier(r.item)),
   );
   const dismissedCount = p.items.filter((i) => dismissed.has(i.id)).length;
+  const pins = usePins(all.map((r) => r.item.id));
+  const pinned = new Set(pins.list.flat());
+  const gone = new Set(leaving.map((i) => i.id));
+  // A leaving item fades alone unless its group is pinned; a pinned group fades once all of it is.
   const groups = [
-    ...groupInboxItems(shown.filter((r) => !r.leaving).map((r) => r.item)).map((g) => ({
-      ...g,
-      leaving: false,
-    })),
+    ...groupInboxItems(
+      shown.filter((r) => !r.leaving || pinned.has(r.item.id)).map((r) => r.item),
+      pins.list,
+    ).map((g) => ({ ...g, leaving: g.members.every((m) => gone.has(m.id)) })),
     ...shown
-      .filter((r) => r.leaving)
+      .filter((r) => r.leaving && !pinned.has(r.item.id))
       .map((r) => ({ lead: r.item, members: [r.item], leaving: true })),
   ].sort((a, b) => a.lead.opened_at.localeCompare(b.lead.opened_at));
 
@@ -201,6 +224,7 @@ export function NeedsYouWindow(p: NeedsYouWindowProps) {
                   }}
                   onGoTo={p.onGoTo && (() => p.onGoTo?.(item))}
                   onShow={p.onShow && (() => p.onShow?.(item))}
+                  onFanOut={() => pins.pin(members.map((m) => m.id))}
                   onDismiss={() =>
                     setDismissed((d) => new Set([...d, ...members.map((m) => m.id)]))
                   }
