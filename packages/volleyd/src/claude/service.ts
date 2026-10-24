@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { type Clock, dateOf, sleep, systemClock } from "../clock";
 import { DAEMON_DEFAULTS } from "../config-defaults";
 import type { ExecFn } from "../exec";
-import { mintProfileRemoveToken } from "../fence";
+import { type SigninEntryToken, mintProfileRemoveToken, mintSigninEntryToken } from "../fence";
 import type { RemoteHost } from "../hosts/ssh-tmux";
 import type { MachineRecord } from "../machines";
 import { sessionsRunningIn } from "../procs";
@@ -29,6 +29,7 @@ import {
   selectAccount,
 } from "./profiles";
 import {
+  callbackPort,
   remoteAccount,
   remoteAccountHost,
   remoteProfileDir,
@@ -49,11 +50,15 @@ import {
   REMOVED,
   SUPERSEDED,
   type SigninEvent,
+  authorizeState,
   parseAuthStatus,
   profileEnv,
   runSignin,
+  signinSession,
   statusIdentity,
+  stripTerminal,
 } from "./signin";
+import { parseSigninEntry, queryState, redact } from "./signin-entry";
 import { MODEL_FAMILIES, type Ranked } from "./usage";
 
 const unranked = (account: string): Ranked => ({
@@ -99,6 +104,8 @@ export interface ClaudeServiceDeps {
   sleep?: (ms: number) => Promise<void>;
   signinPollMs?: number;
   signinTimeoutMs?: number;
+  /** How long a pasted code or redirect waits for the sign-in to end (`signin_entry_wait_ms`). */
+  signinEntryWaitMs?: number;
   /**
    * Usage metering's ranking of `candidates` (usage-record keys) for an agent of `model`
    * (claude/usage.ts rankAccounts): the balancing rule a spawn picks by.
@@ -145,13 +152,26 @@ interface SigninRun {
   pollMs: number;
   timeoutMs: number;
   publish: (e: SigninEvent) => Promise<void>;
+  /** The callback URL, once known: its port and `state` stay in memory (`enterSignin`). */
+  onCallback: (url: string) => void;
 }
 
-type Reply = { ok: boolean; error?: string; result?: unknown };
+type Reply = { ok: boolean; error?: string; result?: unknown; fresh?: true };
+
+/** A pasted redirect that is not this sign-in's own (another port or `state`). */
+export const ANOTHER_SIGNIN = "that address belongs to another sign-in; open a fresh link";
+
+/** A line of a sign-in's screen that says Claude Code refused what was pasted. */
+const REJECTION = /invalid|expired|error|fail|denied|wrong|mismatch/i;
 
 interface Pending {
   abort: AbortController;
   url?: UrlEvent;
+  /** The `$BROWSER` URL's port and `state`: never published apart from it, never journaled. */
+  callback?: { port: number; state: string | null };
+  /** Who started it and how: a refused entry restarts it the same way. */
+  by: string;
+  run: (r: SigninRun) => Promise<SigninEvent>;
   /** Resolves with the URL event, or the terminal event if the sign-in ended first. */
   first: Promise<SigninEvent>;
   done: Promise<SigninEvent>;
@@ -612,6 +632,119 @@ export class ClaudeService {
   }
 
   /**
+   * `claude_signin_entry { acct, entry, by }`: finish a waiting sign-in with what the owner
+   * pasted, from whatever device (SPEC §4.6.11). A code is typed into the sign-in session on the
+   * machine where it waits (`tmux send-keys -l`, then Enter); a localhost callback address,
+   * checked against this sign-in's own callback URL (port and `state`), is requested there
+   * (`curl` on 127.0.0.1), where Claude Code's listener waits. Both through the fence with a token
+   * for exactly that text. Answers once the sign-in ends (`signin_entry_wait_ms` at most); a
+   * refusal restarts it (`fresh`: a new link). The entry is never journaled, logged or echoed:
+   * the journal gets `{ acct, kind, by }`, every message passes `redact`.
+   */
+  async enterSignin(p: Record<string, unknown>, by: string): Promise<Reply> {
+    const acct = typeof p.acct === "string" ? p.acct : "";
+    const entry = parseSigninEntry(typeof p.entry === "string" ? p.entry : "");
+    const pending = this.signins.get(acct);
+    if (pending?.url === undefined) return { ok: false, error: `no sign-in waiting for ${acct}` };
+    if (entry.kind === "invalid")
+      return {
+        ok: false,
+        error:
+          "paste the code the sign-in page shows, or the whole address your browser ended up on",
+      };
+    const remote = remoteAccountHost(acct);
+    const host =
+      remote === null
+        ? null
+        : (this.d.remote?.(remote.name) ?? `no paired machine '${remote.name}'`);
+    if (typeof host === "string") return { ok: false, error: host };
+    const session = signinSession(remote?.acct ?? acct);
+    let token: SigninEntryToken;
+    let steps: string[][];
+    if (entry.kind === "code") {
+      token = mintSigninEntryToken({ session, code: entry.code });
+      steps = [
+        ["tmux", "send-keys", "-t", session, "-l", "--", entry.code],
+        ["tmux", "send-keys", "-t", session, "Enter"],
+      ];
+    } else {
+      const c = pending.callback;
+      if (c?.state == null || c.port !== entry.port || queryState(entry.query) !== c.state)
+        return { ok: false, error: ANOTHER_SIGNIN };
+      const url = `http://127.0.0.1:${entry.port}/callback?${entry.query}`;
+      token = mintSigninEntryToken({ session, url });
+      steps = [["curl", "-fsS", "--max-time", "10", url]];
+    }
+    const secrets = entry.kind === "code" ? [entry.code] : [entry.query];
+    const machine = remote?.name ?? "this machine";
+    this.d.log(`claude_signin_entry ${acct} (${entry.kind})`);
+    await this.d.journal({ type: "claude_signin_entry", data: { acct, kind: entry.kind, by } });
+    try {
+      if (host === null) {
+        for (const argv of steps) {
+          const r = await this.d.exec(argv, {
+            signinEntry: token,
+            timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms,
+          });
+          // A typing that failed never reached the prompt; a curl's own status is Claude Code's.
+          if (r.code !== 0 && argv[0] === "tmux")
+            return { ok: false, error: `could not reach the sign-in on ${machine}` };
+        }
+      } else {
+        const r = await host.run(
+          steps.map((argv) => ({ argv })),
+          { signinEntry: token, timeoutMs: DAEMON_DEFAULTS.claude_auth_status_timeout_ms },
+        );
+        if (r.code !== 0 && steps[0]?.[0] === "tmux")
+          return { ok: false, error: `could not reach the sign-in on ${machine}` };
+      }
+    } catch {
+      return { ok: false, error: `could not reach the sign-in on ${machine}` };
+    }
+
+    const waitMs = this.d.signinEntryWaitMs ?? DAEMON_DEFAULTS.signin_entry_wait_ms;
+    const ended = await Promise.race([
+      pending.done,
+      sleep(this.clock, waitMs, pending.abort.signal).then(() => null),
+    ]);
+    if (ended?.type === "claude_signin_done")
+      return {
+        ok: true,
+        result: {
+          acct,
+          signed_in: true,
+          ...(ended.email !== undefined ? { email: ended.email } : {}),
+        },
+      };
+    const stopped = pending.abort.signal;
+    if (stopped.aborted)
+      return stopped.reason === SUPERSEDED
+        ? { ok: false, error: "a newer sign-in replaced this one; use its link", fresh: true }
+        : { ok: false, error: "the sign-in stopped" };
+    // Rejected (the login said so and exited, or still waits): the screen's line, then a fresh link.
+    const line =
+      ended?.type === "claude_signin_failed" ? ended.reason : await this.rejection(session, host);
+    await this.startSignin(acct, pending.by, pending.run).first;
+    return {
+      ok: false,
+      error: `code rejected: ${redact(line ?? "Claude Code did not finish the sign-in", secrets)}`,
+      fresh: true,
+    };
+  }
+
+  /** The last line of a sign-in's screen that says Claude Code refused the entry, or null. */
+  private async rejection(session: string, host: RemoteHost | null): Promise<string | null> {
+    const argv = ["tmux", "capture-pane", "-p", "-J", "-t", session];
+    const r = await (host === null ? this.d.exec(argv) : host.run([{ argv }])).catch(() => null);
+    if (r?.code !== 0) return null;
+    const lines = stripTerminal(r.stdout)
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l !== "" && REJECTION.test(l));
+    return lines.at(-1) ?? null;
+  }
+
+  /**
    * `claude_signin { acct: "primary@<name>" }`: Claude Code's own login on the paired machine,
    * its callback forwarded to this machine (remote-signin.ts). Refused for a machine that is not
    * configured, or whose Claude Code is already signed in.
@@ -714,6 +847,8 @@ export class ClaudeService {
     let first!: (e: SigninEvent) => void;
     const pending: Pending = {
       abort,
+      by,
+      run,
       first: new Promise<SigninEvent>((r) => {
         first = r;
       }),
@@ -736,6 +871,10 @@ export class ClaudeService {
         if (e.type === "claude_signin_url") pending.url = e;
         first(e);
         await this.d.publish(signinTopic(acct), e);
+      },
+      onCallback: (url) => {
+        const port = callbackPort(url);
+        if (port !== null) pending.callback = { port, state: authorizeState(url) };
       },
     })
       .catch(
@@ -1123,6 +1262,8 @@ const urlFields = (e: UrlEvent) => ({
   flow: e.flow,
   attach: e.attach,
   ...(e.manual_url !== undefined ? { manual_url: e.manual_url } : {}),
+  ...(e.callback_url !== undefined ? { callback_url: e.callback_url } : {}),
+  ...(e.code_prompt !== undefined ? { code_prompt: e.code_prompt } : {}),
 });
 
 /** A done event without the login's identity: as the journal records it. */

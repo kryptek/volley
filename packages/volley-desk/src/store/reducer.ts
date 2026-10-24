@@ -371,6 +371,8 @@ function reduceSignin(state: DeskState, acct: string, m: DeskMessage): DeskState
     ...optional("flow", str(p.flow) ?? prev?.flow),
     ...optional("attach", str(p.attach) ?? prev?.attach),
     ...optional("manual_url", str(p.manual_url) ?? prev?.manual_url),
+    ...optional("callback_url", str(p.callback_url) ?? prev?.callback_url),
+    ...(p.code_prompt === true || prev?.code_prompt === true ? { code_prompt: true } : {}),
     ...optional("plan", str(p.plan)),
     ...optional("email", str(p.email)),
     ...optional("reason", str(p.reason)),

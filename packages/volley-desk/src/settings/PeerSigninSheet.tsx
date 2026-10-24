@@ -2,21 +2,24 @@
  * Signing a paired machine in to Claude from the Desk (SPEC §4.6.11): **Sign
  * in on <machine>** on its card (and in Add a machine's step 4) opens this
  * sheet, which sends `claude_signin { acct: "primary@<name>" }`. volleyd
- * starts Claude Code's own `claude auth login` on that machine and forwards
- * its localhost callback to this computer for the length of the sign-in, so
- * **Open sign-in** works from a browser here. From a phone, the disclosure
- * gives the printed (manual-code) URL to open there and the command that
- * reaches the sign-in terminal on the machine, where the code is typed: never
- * into Volley, which has no field for one anywhere in this sheet. Done shows
- * the plan, refreshes the machine's doctor rows (`peer_doctor { fix: false }`)
- * and turns the card's line green.
+ * starts Claude Code's own `claude auth login` on that machine. `SigninLink`
+ * shows Anthropic's code-page link (with its QR code), which works from any
+ * device, and one box for the code that page shows, or for the address a
+ * browser ended up on: Submit sends `claude_signin_entry`, and volleyd types
+ * the code into the sign-in waiting on that machine (or completes the address
+ * there). Done shows the plan, refreshes the machine's doctor rows
+ * (`peer_doctor { fix: false }`) and turns the card's line green.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { maskEmail } from "../lib/email";
+import { encodeQr } from "../lib/qr";
 import type { PeerOps } from "../store/peerOps";
 import type { ClaudeSignin } from "../store/types";
 import { ADD_ACCOUNT_TIMEOUT_MS, type ControlFn } from "./ClaudeAccounts";
 import { CopyCommand } from "./MachineRows";
 import { MachineSheet } from "./MachineSheet";
+import { Qr } from "./onboardingParts";
+import "../styles/signin.css";
 
 /** A paired machine's own Claude login (volleyd's `primary@<name>`). */
 export const peerAccount = (machine: string) => `primary@${machine}`;
@@ -30,6 +33,16 @@ interface Started {
   flow?: string;
   attach?: string;
   manual_url?: string;
+  callback_url?: string;
+}
+
+/** The URL fields of a `claude_signin` / `claude_account_add` answer (as its URL event). */
+export function startedFields(result: unknown): Started {
+  const res = (result ?? {}) as Record<string, unknown>;
+  const out: Started = {};
+  for (const k of ["url", "flow", "attach", "manual_url", "callback_url"] as const)
+    if (typeof res[k] === "string") out[k] = res[k] as string;
+  return out;
 }
 
 type Start = { k: "starting" } | { k: "started"; r: Started } | { k: "refused"; error: string };
@@ -69,13 +82,7 @@ export function PeerSigninSheet({
         setStart({ k: "refused", error: r.error ?? "volleyd did not start the sign-in" });
         return;
       }
-      const res = (r.result ?? {}) as Record<string, unknown>;
-      const pick = (k: keyof Started) =>
-        typeof res[k] === "string" ? { [k]: res[k] as string } : {};
-      setStart({
-        k: "started",
-        r: { ...pick("url"), ...pick("flow"), ...pick("attach"), ...pick("manual_url") },
-      });
+      setStart({ k: "started", r: startedFields(r.result) });
     });
   }, []);
 
@@ -84,9 +91,9 @@ export function PeerSigninSheet({
   const live = start.k === "started" && signin !== earlier.current ? signin : undefined;
   const r = start.k === "started" ? start.r : {};
   const url = live?.url ?? r.url;
-  const flow = live?.flow ?? r.flow;
   const attach = live?.attach ?? r.attach;
   const manualUrl = live?.manual_url ?? r.manual_url;
+  const callbackUrl = live ? live.callback_url : r.callback_url;
   const done = live?.state === "done";
   const failed =
     start.k === "refused" ? start.error : live?.state === "failed" ? live.reason : null;
@@ -114,7 +121,15 @@ export function PeerSigninSheet({
           <span className="spinner" aria-hidden="true" /> Starting the sign-in on {machine}…
         </p>
       ) : (
-        <SigninLink machine={machine} url={url} flow={flow} attach={attach} manualUrl={manualUrl} />
+        <SigninLink
+          acct={acct}
+          machine={machine}
+          url={url}
+          attach={attach}
+          manualUrl={manualUrl}
+          callbackUrl={callbackUrl}
+          control={control}
+        />
       )}
       <div className="ny-actions">
         <button type="button" className={done ? "btn btn--hot" : "btn"} onClick={onClose}>
@@ -125,91 +140,198 @@ export function PeerSigninSheet({
   );
 }
 
+/** What became of the code or address the owner submitted. */
+type Entry =
+  | { k: "idle" }
+  | { k: "sending" }
+  | { k: "signed_in"; email?: string }
+  | { k: "refused"; error: string };
+
 /**
- * A remote sign-in once volleyd has its URL: **Open sign-in ↗**, the phone
- * disclosure (the manual URL and the command that attaches to the sign-in
- * terminal), and the wait. Shared by this sheet and Add Claude account, so a
- * peer's sign-in reads the same in both; it has no field of any kind.
+ * A sign-in once volleyd has its URL, from whatever device the owner is on:
+ * **Open Anthropic sign-in ↗** (the code-page link, which works anywhere) with
+ * its QR code for a phone, and one box for the code that page shows or the
+ * address a browser ended up on. Submit sends `claude_signin_entry` and empties
+ * the box; volleyd types the code into the sign-in waiting on that machine (or
+ * completes the address there) and answers when it is done. A refusal shows
+ * volleyd's words (never what was pasted) and **Get a fresh link**. **Open here
+ * instead** is the callback shortcut, only while volleyd has one; the terminal
+ * command sits under **Terminal instead**. Shared by this sheet and Add Claude
+ * account (Accounts, and Machines' Sign in on), so every sign-in reads the same.
  */
 export function SigninLink({
+  acct,
   machine,
   url,
-  flow,
   attach,
   manualUrl,
+  callbackUrl,
+  control,
   lead = `Sign in with the Claude account ${machine}’s agents should use, on Anthropic’s own page.`,
 }: {
+  /** volleyd's account id of the sign-in (`primary@<name>`, `<acct>@<name>`, `<acct>`). */
+  acct: string;
   machine: string;
   url: string;
   /** The first sentence: what the sign-in is for (the machine's default login by default). */
   lead?: string;
-  flow?: string | undefined;
   attach?: string | undefined;
   manualUrl?: string | undefined;
+  callbackUrl?: string | undefined;
+  control: ControlFn;
 }) {
+  const id = useId();
+  const [text, setText] = useState("");
+  const [entry, setEntry] = useState<Entry>({ k: "idle" });
+  /** A fresh link volleyd answered with, until the store's event catches up. */
+  const [fresh, setFresh] = useState<Started | null>(null);
+  const link = fresh?.manual_url ?? fresh?.url ?? manualUrl ?? url;
+  const shortcut = fresh ? fresh.callback_url : callbackUrl;
+  // A newer link from volleyd (its event) replaces the one Get a fresh link answered with.
+  const propLink = manualUrl ?? url;
+  const seen = useRef(propLink);
+  useEffect(() => {
+    if (seen.current === propLink) return;
+    seen.current = propLink;
+    setFresh(null);
+  }, [propLink]);
+
+  const submit = async () => {
+    const pasted = text.trim();
+    if (!pasted || entry.k === "sending") return;
+    // The box never keeps what was pasted, whatever volleyd answers.
+    setText("");
+    setEntry({ k: "sending" });
+    const r = await control(
+      "claude_signin_entry",
+      { acct, entry: pasted },
+      `volley claude code ${acct}`,
+      ENTRY_TIMEOUT_MS,
+    );
+    if (r.ok) {
+      const email = (r.result as { email?: unknown } | undefined)?.email;
+      setEntry({ k: "signed_in", ...(typeof email === "string" ? { email } : {}) });
+    } else setEntry({ k: "refused", error: r.error ?? "volleyd did not take it" });
+  };
+  const again = async () => {
+    setEntry({ k: "sending" });
+    const r = await control(
+      "claude_signin",
+      { acct },
+      `volley claude signin ${acct}`,
+      ADD_ACCOUNT_TIMEOUT_MS,
+    );
+    if (!r.ok) {
+      setEntry({ k: "refused", error: r.error ?? "volleyd did not start the sign-in" });
+      return;
+    }
+    setFresh(startedFields(r.result));
+    setEntry({ k: "idle" });
+  };
+
   return (
     <>
       <p className="dim">
-        {lead}
-        {flow === "browser_callback"
-          ? ` It hands the sign-in straight back to Claude Code on ${machine} through this computer, so open it in a browser on this computer.`
-          : " The page then shows a code: type it into the sign-in terminal below."}
+        {lead} Open it on any device, this one or your phone; the page then shows a code to paste
+        below.
       </p>
-      <div className="ny-actions">
-        <a className="btn btn--blue" href={url} target="_blank" rel="noreferrer">
-          Open sign-in ↗
+      <div className="signin-entry-link">
+        <a className="btn btn--blue" href={link} target="_blank" rel="noreferrer">
+          Open Anthropic sign-in ↗
         </a>
+        <LinkQr text={link} />
       </div>
-      {(flow !== "browser_callback" || manualUrl) && attach && (
-        <PhoneSteps
-          machine={machine}
-          manualUrl={flow === "browser_callback" ? manualUrl : undefined}
-          attach={attach}
-          open={flow !== "browser_callback"}
-        />
+      {entry.k === "signed_in" ? (
+        <p className="m-ready m-ready--ok">
+          Signed in{entry.email ? ` as ${maskEmail(entry.email)}` : ""}
+        </p>
+      ) : (
+        <form
+          className="signin-entry"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submit();
+          }}
+        >
+          <label htmlFor={id}>Paste the code, or the address your browser ended up on</label>
+          <div className="signin-entry-row">
+            <input
+              id={id}
+              className="recessed"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+            />
+            <button
+              type="submit"
+              className="btn btn--blue"
+              disabled={!text.trim() || entry.k === "sending"}
+            >
+              Submit
+            </button>
+          </div>
+        </form>
       )}
-      <div className="waiting">
-        <span className="spinner" aria-hidden="true" /> Waiting for the sign-in to finish…
-      </div>
+      {entry.k === "sending" && (
+        <p className="dim">
+          <span className="spinner" aria-hidden="true" /> Checking with {machine}…
+        </p>
+      )}
+      {entry.k === "refused" && (
+        <div className="signin-entry-refused" role="alert">
+          <p className="s-error">{entry.error}</p>
+          <button type="button" className="btn" onClick={() => void again()}>
+            Get a fresh link
+          </button>
+        </div>
+      )}
+      {shortcut && entry.k !== "signed_in" && (
+        <p className="s-hint">
+          <a href={shortcut} target="_blank" rel="noreferrer">
+            Open here instead (browser on the supervisor’s machine)
+          </a>
+        </p>
+      )}
+      {attach && entry.k !== "signed_in" && <TerminalInstead machine={machine} attach={attach} />}
+      {entry.k !== "signed_in" && (
+        <div className="waiting">
+          <span className="spinner" aria-hidden="true" /> Waiting for the sign-in to finish…
+        </div>
+      )}
     </>
   );
 }
 
-/**
- * From a phone (or any device that cannot open the forwarded URL): the
- * printed URL opened there, and the code typed into the machine's sign-in
- * terminal. Open at once for a sign-in that has no forwarded URL.
- */
-function PhoneSteps({
-  machine,
-  manualUrl,
-  attach,
-  open,
-}: {
-  machine: string;
-  manualUrl: string | undefined;
-  attach: string;
-  open: boolean;
-}) {
+/** volleyd answers a pasted code once the sign-in ends: its 30 s wait, a restart, and margin. */
+const ENTRY_TIMEOUT_MS = 90_000;
+
+/** The link as a QR code for a phone; nothing when it is too long to encode. */
+function LinkQr({ text }: { text: string }) {
+  // `<Qr>` encodes during its own render, out of reach of a try here: check first.
+  const fits = useMemo(() => {
+    try {
+      encodeQr(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [text]);
+  return fits ? <Qr text={text} size={132} label="QR code of the sign-in link" /> : null;
+}
+
+/** The sign-in terminal on the machine, for a person who would rather type the code there. */
+function TerminalInstead({ machine, attach }: { machine: string; attach: string }) {
   return (
-    <details className="m-phone" open={open}>
-      <summary>{open ? "Type the code on the machine" : "From a phone instead"}</summary>
+    <details className="m-phone">
+      <summary>Terminal instead</summary>
       <ol className="m-steps">
-        {manualUrl && (
-          <li>
-            <a href={manualUrl} target="_blank" rel="noreferrer">
-              Open on the phone ↗
-            </a>{" "}
-            and sign in there.
-          </li>
-        )}
         <li>
           On any terminal that reaches {machine}, run this to attach to its sign-in:
           <CopyCommand text={attach} ready />
         </li>
-        <li>
-          Type the code the page shows <b>into that terminal, never into Volley</b>.
-        </li>
+        <li>Paste the code the page shows there, at the prompt.</li>
       </ol>
     </details>
   );

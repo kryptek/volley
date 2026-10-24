@@ -252,6 +252,7 @@ export type RemoteRunOptions = Pick<
   | "handoff"
   | "wake"
   | "profileRemove"
+  | "signinEntry"
 >;
 
 /** ssh's own failure (unreachable, auth, host key, timeout), as opposed to the remote command's. */
@@ -338,6 +339,7 @@ export class SshTmuxHost implements RemoteHost {
         ...(opts.wake !== undefined ? { wake: opts.wake } : {}),
         ...(opts.signin !== undefined ? { signin: opts.signin } : {}),
         ...(opts.profileRemove !== undefined ? { profileRemove: opts.profileRemove } : {}),
+        ...(opts.signinEntry !== undefined ? { signinEntry: opts.signinEntry } : {}),
       },
     );
   }

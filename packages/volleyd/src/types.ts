@@ -794,6 +794,8 @@ export const WAVE_EVENT_TYPES = [
   "claude_signin_started",
   "claude_signin_done",
   "claude_signin_failed",
+  // A pasted code or redirect address was sent to a waiting sign-in: `{ acct, kind, by }` only.
+  "claude_signin_entry",
   "claude_profile_synced",
   "claude_account_renamed",
   "claude_account_removed",

@@ -5,7 +5,7 @@ import { VolleyBroker } from "volley-mcp/broker";
 import { buildEnvelope, parseEnvelope } from "volley-mcp/envelope";
 import { buildTopic } from "volley-mcp/topics";
 import { addAccount, readRegistry } from "../../src/claude/profiles";
-import { signinDir } from "../../src/claude/signin";
+import { parseSigninUrl, signinDir } from "../../src/claude/signin";
 import { usageAccountTopic } from "../../src/claude/usage";
 import { ControlClient } from "../../src/control";
 import { readJournalFile } from "../../src/journal";
@@ -14,7 +14,12 @@ import { eventually } from "../helpers/broker-wait";
 import { type DaemonEnv, NS, makeDaemonEnv } from "../helpers/daemon-env";
 import { fakeClock } from "../helpers/fake-clock";
 import { fakeExec } from "../helpers/fake-exec";
-import { SIGNIN_CALLBACK, type SigninBoxOptions, fakeSigninBox } from "../helpers/fake-host";
+import {
+  SIGNIN_CALLBACK,
+  SIGNIN_TRANSCRIPT,
+  type SigninBoxOptions,
+  fakeSigninBox,
+} from "../helpers/fake-host";
 import { journalWait } from "../helpers/journal-wait";
 import { schemaErrors } from "../helpers/schema";
 import { tempDir } from "../helpers/tmp";
@@ -25,6 +30,9 @@ const CALLBACK = readFileSync(
   new URL("../fixtures/claude/browser-url.txt", import.meta.url),
   "utf-8",
 ).trim();
+
+/** The code-page URL a sign-in session prints (the link clients show first). */
+const PRINTED = parseSigninUrl(SIGNIN_TRANSCRIPT) as string;
 
 let env: DaemonEnv;
 afterEach(() => env.cleanup());
@@ -56,7 +64,15 @@ function signedInAs(dir: string) {
   return { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "max" }) };
 }
 
-async function setup(opts: { signInAfter?: number; primary?: Record<string, unknown> } = {}) {
+async function setup(
+  opts: {
+    signInAfter?: number;
+    primary?: Record<string, unknown>;
+    /** Collects the daemon's log lines. */
+    log?: string[];
+    entryWaitMs?: number;
+  } = {},
+) {
   env = await makeDaemonEnv();
   const base = tempDir("volleyd-claude-");
   const root = join(base, "claude");
@@ -89,7 +105,15 @@ async function setup(opts: { signInAfter?: number; primary?: Record<string, unkn
   const clock = fakeClock();
   const daemon = await env.start({
     clock,
-    claude: { root, primaryDir: primary, exec: fx.exec, signinPollMs: 20, signinTimeoutMs: 5000 },
+    ...(opts.log !== undefined ? { log: (line: string) => opts.log?.push(line) } : {}),
+    claude: {
+      root,
+      primaryDir: primary,
+      exec: fx.exec,
+      signinPollMs: 20,
+      signinTimeoutMs: 5000,
+      ...(opts.entryWaitMs !== undefined ? { signinEntryWaitMs: opts.entryWaitMs } : {}),
+    },
     spawner: { claudeJsonPath: primaryJson },
   });
   const waits = journalWait(env.home, () => daemon);
@@ -114,7 +138,23 @@ async function setup(opts: { signInAfter?: number; primary?: Record<string, unkn
     }
   };
   const reader = (acct: string) => env.retained(usageAccountTopic(acct));
-  return { root, primary, fx, client, watcher, seen, system, signedIn, reader };
+  /**
+   * Move the daemon's clock, poll by poll, until `p` settles: from when a timer of `from` ms (an
+   * entry's wait, say) is armed, so time moves only once the daemon has the request.
+   */
+  const drive = async <T>(p: Promise<T>, from?: number): Promise<T> => {
+    let settled = false;
+    const w = p.finally(() => {
+      settled = true;
+    });
+    if (from !== undefined) await Promise.race([clock.armed(from), w]);
+    while (!settled) {
+      await Promise.race([clock.armed(20), w]);
+      if (!settled) await clock.advance(20);
+    }
+    return w;
+  };
+  return { root, primary, fx, client, watcher, seen, system, signedIn, reader, drive };
 }
 
 describe("claude_* control ops", () => {
@@ -197,6 +237,7 @@ describe("claude_* control ops", () => {
         state: "pending",
         url: CALLBACK,
         flow: "browser_callback",
+        callback_url: CALLBACK,
         attach: "tmux attach -t volley-signin-slow",
       });
       expect(signinDir(t.root, "slow")).toContain(t.root);
@@ -388,7 +429,7 @@ describe("claude_signin for a paired machine (primary@<name>)", () => {
     return { b, daemon, waits, client, seen, close };
   }
 
-  it("answers with the forwarded URL, the phone's manual_url and the ssh attach; done carries the box's plan", async () => {
+  it("answers with the code-page link first, the forwarded callback_url and the ssh attach; done carries the box's plan", async () => {
     const t = await remoteSetup({ signInAfter: 4 });
     try {
       const done = t.waits.event("_system", "claude_signin_done");
@@ -397,10 +438,12 @@ describe("claude_signin for a paired machine (primary@<name>)", () => {
       expect(r.result).toMatchObject({
         acct: "primary@box-a",
         topic: "volley/_system/claude/primary@box-a/signin",
-        url: SIGNIN_CALLBACK,
-        flow: "browser_callback",
+        url: PRINTED,
+        flow: "manual_code",
         attach: "ssh dev@box-a -t tmux attach -t volley-signin-primary",
-        manual_url: expect.stringContaining("platform.claude.com"),
+        manual_url: PRINTED,
+        callback_url: SIGNIN_CALLBACK,
+        code_prompt: true,
       });
       expect(t.b.forwards.map((f) => f.argv[3])).toEqual(["127.0.0.1:51051:127.0.0.1:51051"]);
       await done;
@@ -483,10 +526,12 @@ describe("claude_signin for a paired machine (primary@<name>)", () => {
         {
           acct: "primary@box-a",
           state: "pending",
-          url: SIGNIN_CALLBACK,
-          flow: "browser_callback",
+          url: PRINTED,
+          flow: "manual_code",
           attach: "ssh dev@box-a -t tmux attach -t volley-signin-primary",
-          manual_url: expect.stringContaining("platform.claude.com"),
+          manual_url: PRINTED,
+          callback_url: SIGNIN_CALLBACK,
+          code_prompt: true,
         },
       ]);
     } finally {
@@ -580,8 +625,9 @@ describe("claude_account_add on a paired machine (<acct>@<name>)", () => {
       expect(r.result).toMatchObject({
         account: { id: "work", label: "Work", machine: "peer-a" },
         acct: "work@peer-a",
-        url: SIGNIN_CALLBACK,
-        flow: "browser_callback",
+        url: PRINTED,
+        flow: "manual_code",
+        callback_url: SIGNIN_CALLBACK,
         attach: "ssh dev@peer-a -t tmux attach -t volley-signin-work",
         topic: "volley/_system/claude/work@peer-a/signin",
       });
@@ -596,7 +642,7 @@ describe("claude_account_add on a paired machine (<acct>@<name>)", () => {
           id: "work",
           machine: "peer-a",
           dir: PROFILE,
-          signin: expect.objectContaining({ state: "pending", url: SIGNIN_CALLBACK }),
+          signin: expect.objectContaining({ state: "pending", url: PRINTED }),
         }),
       ]);
       expect(remote_signins).toEqual([
@@ -797,6 +843,299 @@ describe("claude_account_add on a paired machine (<acct>@<name>)", () => {
       expect(r).toMatchObject({ ok: false, error: expect.stringContaining("peer-z") });
       expect((await t.accounts()).accounts).toEqual([]);
       expect(t.b.steps()).toEqual([]);
+    } finally {
+      await t.close();
+    }
+  });
+});
+
+describe("claude_signin_entry: finishing a sign-in from any device", () => {
+  /** What the owner pastes: never in the journal, the log, an ack or an error. */
+  const CODE = "abcSECRET42#def";
+  const STATE = "xyzSTATE42";
+  const CALLBACK_X = CALLBACK.replace("state=REDACTED", `state=${STATE}`);
+  const REDIRECT = `http://localhost:51051/callback?code=abcSECRET42&state=${STATE}`;
+  const journalText = () =>
+    readFileSync(join(env.home, "waves", "_system", "journal.jsonl"), "utf-8");
+
+  /** A local sign-in whose session signs in once a code is typed (or the callback requested). */
+  async function localEntry(o: { reject?: string } = {}) {
+    const log: string[] = [];
+    const t = await setup({ signInAfter: Number.POSITIVE_INFINITY, log, entryWaitMs: 200 });
+    const box = { typed: false, entered: false, starts: 0 };
+    t.fx
+      .on(["tmux", "new-session"], (argv) => {
+        box.starts++;
+        box.typed = false;
+        box.entered = false;
+        writeFileSync(join(argv[6] as string, "url"), CALLBACK_X);
+        return {};
+      })
+      .on(["tmux", "capture-pane"], () => ({
+        stdout: `${SIGNIN_TRANSCRIPT}${box.entered && o.reject !== undefined ? `\n${o.reject}\n` : ""}`,
+      }))
+      .on(["tmux", "send-keys"], (argv) => {
+        if (argv.includes("-l")) box.typed = true;
+        else if (box.typed) box.entered = true;
+        return {};
+      })
+      .on(["curl"], () => {
+        box.entered = true;
+        return {};
+      })
+      .on(["claude", "auth", "status"], (_argv, opts) =>
+        opts.env?.CLAUDE_CONFIG_DIR === undefined
+          ? { stdout: JSON.stringify(PRIMARY_STATUS) }
+          : box.entered && o.reject === undefined
+            ? signedInAs(opts.env.CLAUDE_CONFIG_DIR as string)
+            : { code: 1, stdout: JSON.stringify({ loggedIn: false }) },
+      );
+    const close = async () => {
+      await t.client.close();
+      await t.watcher.disconnect();
+    };
+    return { ...t, log, box, close };
+  }
+
+  /** Nothing the owner pasted appears in what volleyd keeps or says. */
+  const neverEchoed = (...texts: string[]) => {
+    for (const text of texts)
+      for (const secret of [CODE, "abcSECRET42", STATE]) expect(text).not.toContain(secret);
+  };
+
+  it("a code is typed into the waiting local sign-in, then Enter; the answer comes on done", async () => {
+    const t = await localEntry();
+    try {
+      await t.client.request("claude_account_add", { label: "Team", by: "owner-1" });
+      const r = await t.drive(
+        t.client.request("claude_signin_entry", { acct: "team", entry: CODE, by: "owner-1" }),
+        200,
+      );
+      expect(r).toMatchObject({
+        ok: true,
+        result: { acct: "team", signed_in: true, email: "owner@example.com" },
+      });
+      expect(t.fx.argvs(["tmux", "send-keys"])).toEqual([
+        ["tmux", "send-keys", "-t", "volley-signin-team", "-l", "--", CODE],
+        ["tmux", "send-keys", "-t", "volley-signin-team", "Enter"],
+      ]);
+      expect(t.fx.argvs(["curl"])).toEqual([]);
+      const entries = t.system().filter((e) => e.type === "claude_signin_entry");
+      expect(entries.map((e) => e.data)).toEqual([{ acct: "team", kind: "code", by: "owner-1" }]);
+      expect(t.log).toContain("claude_signin_entry team (code)");
+      neverEchoed(journalText(), t.log.join("\n"), JSON.stringify(r));
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("a redirect address is requested exactly, byte for byte, on 127.0.0.1 of this machine", async () => {
+    const t = await localEntry();
+    try {
+      await t.client.request("claude_account_add", { label: "Team" });
+      const r = await t.drive(
+        t.client.request("claude_signin_entry", { acct: "team", entry: REDIRECT }),
+        200,
+      );
+      expect(r).toMatchObject({ ok: true, result: { acct: "team", signed_in: true } });
+      expect(t.fx.argvs(["curl"])).toEqual([
+        [
+          "curl",
+          "-fsS",
+          "--max-time",
+          "10",
+          `http://127.0.0.1:51051/callback?code=abcSECRET42&state=${STATE}`,
+        ],
+      ]);
+      expect(t.log).toContain("claude_signin_entry team (redirect)");
+      neverEchoed(journalText(), t.log.join("\n"), JSON.stringify(r));
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("another sign-in's address (port or state) is refused, nothing run, nothing echoed", async () => {
+    const t = await localEntry();
+    try {
+      await t.client.request("claude_account_add", { label: "Team" });
+      for (const entry of [
+        REDIRECT.replace("51051", "51052"),
+        REDIRECT.replace(STATE, "otherSTATE"),
+      ]) {
+        const r = await t.client.request("claude_signin_entry", { acct: "team", entry });
+        expect(r).toMatchObject({
+          ok: false,
+          error: "that address belongs to another sign-in; open a fresh link",
+        });
+        neverEchoed(JSON.stringify(r));
+      }
+      expect(t.fx.argvs(["curl"])).toEqual([]);
+      expect(t.system().filter((e) => e.type === "claude_signin_entry")).toEqual([]);
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("no sign-in waiting, or text that is neither: refused in plain words", async () => {
+    const t = await localEntry();
+    try {
+      expect(
+        await t.client.request("claude_signin_entry", { acct: "team", entry: "abc" }),
+      ).toMatchObject({ ok: false, error: "no sign-in waiting for team" });
+      await t.client.request("claude_account_add", { label: "Team" });
+      const r = await t.client.request("claude_signin_entry", {
+        acct: "team",
+        entry: "two words",
+      });
+      expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/paste the code/) });
+      expect(JSON.stringify(r)).not.toContain("two words");
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("a rejected code: the screen's line, a fresh link (a new sign-in and URL), nothing echoed", async () => {
+    const t = await localEntry({ reject: `Invalid code ${CODE}` });
+    try {
+      await t.client.request("claude_account_add", { label: "Team" });
+      const r = await t.drive(
+        t.client.request("claude_signin_entry", { acct: "team", entry: CODE }),
+        200,
+      );
+      expect(r).toMatchObject({ ok: false, error: "code rejected: Invalid code •••", fresh: true });
+      expect(t.box.starts).toBe(2);
+      await eventually(() => t.seen.filter((e) => e.type === "claude_signin_url").length >= 2);
+      neverEchoed(journalText(), t.log.join("\n"), JSON.stringify(r));
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("the ack carries no entry, and the journal record is { acct, kind, by } alone", async () => {
+    const t = await localEntry();
+    try {
+      await t.client.request("claude_account_add", { label: "Team" });
+      const r = await t.drive(
+        t.client.request("claude_signin_entry", { acct: "team", entry: CODE }),
+        200,
+      );
+      expect(r).not.toHaveProperty("entry");
+      const rec = t.system().find((e) => e.type === "claude_signin_entry");
+      expect(Object.keys(rec?.data ?? {}).sort()).toEqual(["acct", "by", "kind"]);
+    } finally {
+      await t.close();
+    }
+  });
+});
+
+describe("claude_signin_entry on a paired machine (team@box-a)", () => {
+  const HOSTS =
+    "hosts:\n  box-a:\n    target: dev@box-a\n    repo: /srv/repo\n    volley_dir: /opt/volley\n    tunnel: { remote_port: 21883, supervise: false }\n";
+  const CODE = "abcSECRET42#def";
+  const STATE = "xyzSTATE42";
+  const CALLBACK_X = SIGNIN_CALLBACK.replace("state=REDACTED", `state=${STATE}`);
+  const REDIRECT = `http://localhost:51051/callback?code=abcSECRET42&state=${STATE}`;
+
+  async function boxSetup(o: SigninBoxOptions = {}) {
+    env = await makeDaemonEnv();
+    writeFileSync(join(env.home, "config.yaml"), HOSTS);
+    const log: string[] = [];
+    const b = fakeSigninBox({ signInOnEntry: true, callbacks: [CALLBACK_X, CALLBACK_X], ...o });
+    const root = join(tempDir("volleyd-claude-"), "claude");
+    await env.start({
+      log: (line) => log.push(line),
+      claude: {
+        root,
+        exec: b.exec,
+        signinPollMs: 20,
+        signinTimeoutMs: 5000,
+        forwardSettleMs: 20,
+        signinEntryWaitMs: 400,
+      },
+      spawner: { remoteExec: b.exec },
+    });
+    const client = await ControlClient.connect(env.broker.url, NS);
+    const journal = () =>
+      readFileSync(join(env.home, "waves", "_system", "journal.jsonl"), "utf-8");
+    return { b, log, client, journal, close: () => client.close() };
+  }
+  const neverEchoed = (...texts: string[]) => {
+    for (const text of texts)
+      for (const secret of [CODE, "abcSECRET42", STATE]) expect(text).not.toContain(secret);
+  };
+
+  it("a code is typed on the box through host.run; no forward and no localhost callback needed", async () => {
+    // The forward cannot bind here (port taken): the code page still finishes the sign-in.
+    const t = await boxSetup({ busy: 1 });
+    try {
+      const add = await t.client.request("claude_account_add", { label: "Team", machine: "box-a" });
+      expect(add.result).not.toHaveProperty("callback_url");
+      const r = await t.client.request("claude_signin_entry", { acct: "team@box-a", entry: CODE });
+      expect(r).toMatchObject({ ok: true, result: { acct: "team@box-a", signed_in: true } });
+      expect(t.b.ran("tmux", "send-keys")).toEqual([
+        ["tmux", "send-keys", "-t", "volley-signin-team", "-l", "--", CODE],
+        ["tmux", "send-keys", "-t", "volley-signin-team", "Enter"],
+      ]);
+      expect(t.b.ran("curl")).toEqual([]);
+      expect(t.log).toContain("claude_signin_entry team@box-a (code)");
+      neverEchoed(t.journal(), t.log.join("\n"), JSON.stringify(r));
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("a redirect address is requested on the box, the query byte for byte", async () => {
+    const t = await boxSetup();
+    try {
+      await t.client.request("claude_account_add", { label: "Team", machine: "box-a" });
+      const r = await t.client.request("claude_signin_entry", {
+        acct: "team@box-a",
+        entry: REDIRECT,
+      });
+      expect(r).toMatchObject({ ok: true, result: { acct: "team@box-a", signed_in: true } });
+      expect(t.b.ran("curl")).toEqual([
+        [
+          "curl",
+          "-fsS",
+          "--max-time",
+          "10",
+          `http://127.0.0.1:51051/callback?code=abcSECRET42&state=${STATE}`,
+        ],
+      ]);
+      neverEchoed(t.journal(), t.log.join("\n"), JSON.stringify(r));
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("port 51052 or another state is refused with nothing run on the box", async () => {
+    const t = await boxSetup();
+    try {
+      await t.client.request("claude_account_add", { label: "Team", machine: "box-a" });
+      for (const entry of [
+        REDIRECT.replace("51051", "51052"),
+        REDIRECT.replace(STATE, "otherSTATE"),
+      ]) {
+        const r = await t.client.request("claude_signin_entry", { acct: "team@box-a", entry });
+        expect(r).toMatchObject({
+          ok: false,
+          error: "that address belongs to another sign-in; open a fresh link",
+        });
+      }
+      expect(t.b.ran("curl")).toEqual([]);
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("a code Claude Code rejects: the line from the box's screen and a fresh link", async () => {
+    const t = await boxSetup({ signInOnEntry: false, rejectEntry: "Invalid code" });
+    try {
+      await t.client.request("claude_account_add", { label: "Team", machine: "box-a" });
+      const r = await t.client.request("claude_signin_entry", { acct: "team@box-a", entry: CODE });
+      expect(r).toMatchObject({ ok: false, error: "code rejected: Invalid code", fresh: true });
+      expect(t.b.box.starts).toBe(2);
+      neverEchoed(t.journal(), t.log.join("\n"), JSON.stringify(r));
     } finally {
       await t.close();
     }

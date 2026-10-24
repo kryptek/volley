@@ -247,3 +247,53 @@ html[data-tone="light"] .f3d input {
   right: 16px;
   z-index: 62;
 }
+
+/*
+ * A Claude sign-in from any device (SigninLink, settings/PeerSigninSheet.tsx):
+ * the code-page link beside its QR code, then the one box for the code or the
+ * address a browser ended up on. Layout only: the colours are the theme's.
+ */
+.signin-entry-link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  margin: 8px 0;
+}
+.signin-entry-link .qr {
+  flex: none;
+  max-width: 100%;
+  height: auto;
+}
+.signin-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+  min-width: 0;
+}
+.signin-entry-row {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+.signin-entry-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+.signin-entry-row .btn {
+  flex: none;
+}
+.signin-entry-refused {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 6px 0;
+}
+.signin-entry-refused .s-error {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

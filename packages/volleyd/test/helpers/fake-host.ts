@@ -477,6 +477,10 @@ export interface SigninBoxOptions {
   files?: Record<string, string>;
   /** What a signed-in `claude auth status` prints (default `{ loggedIn, subscriptionType: max }`). */
   status?: Record<string, unknown>;
+  /** A pasted code (typed, then Enter) or a requested callback signs the box in. */
+  signInOnEntry?: boolean;
+  /** Instead, the session's screen shows this line after an entry, and nothing signs in. */
+  rejectEntry?: string;
 }
 
 /**
@@ -492,6 +496,9 @@ export function fakeSigninBox(o: SigninBoxOptions = {}) {
     session: false,
     starts: 0,
     polls: 0,
+    /** A pasted code typed (`send-keys -l`), waiting for Enter. */
+    typed: false,
+    entered: false,
   };
   const scripts: string[][][] = [];
   const all: RemoteStep[] = [];
@@ -519,6 +526,8 @@ export function fakeSigninBox(o: SigninBoxOptions = {}) {
         const url = o.callbacks?.[box.starts] ?? SIGNIN_CALLBACK;
         box.starts++;
         if (o.browser !== false) box.files.set(`${a[5]}/url`, `${url}\n`);
+        box.typed = false;
+        box.entered = false;
       } else if (p === "tmux" && a[0] === "kill-session") {
         const had = box.session;
         box.session = false;
@@ -528,6 +537,14 @@ export function fakeSigninBox(o: SigninBoxOptions = {}) {
       } else if (p === "tmux" && a[0] === "capture-pane") {
         if (!box.session) return { code: 1 };
         out += SIGNIN_TRANSCRIPT;
+        if (box.entered && o.rejectEntry !== undefined) out += `\n${o.rejectEntry}\n`;
+      } else if (p === "tmux" && a[0] === "send-keys") {
+        if (!box.session) return { code: 1 };
+        if (a.includes("-l")) box.typed = true;
+        else if (a.at(-1) === "Enter" && box.typed) box.entered = true;
+      } else if (p === "curl") {
+        if (!box.session) return { code: 7 };
+        box.entered = true;
       } else if (p === "cat") {
         const path = a[0] as string;
         const f = box.files.get(s.cwd !== undefined ? `${s.cwd}/${path}` : path);
@@ -536,7 +553,8 @@ export function fakeSigninBox(o: SigninBoxOptions = {}) {
       } else if (p === "claude") {
         box.polls++;
         o.onAuthStatus?.(box);
-        return o.signInAfter !== undefined && box.polls >= o.signInAfter
+        const entered = box.entered && o.signInOnEntry === true;
+        return entered || (o.signInAfter !== undefined && box.polls >= o.signInAfter)
           ? { stdout: JSON.stringify(o.status ?? { loggedIn: true, subscriptionType: "max" }) }
           : { code: 1, stdout: JSON.stringify({ loggedIn: false }) };
       }
